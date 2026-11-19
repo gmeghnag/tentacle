@@ -657,6 +657,64 @@ All three tests are non-vacuous. The executor's own M1–M5 claims match the cod
 
 **How the executor behaved:** it stayed in scope (S3 only). It recorded the four drifts with reasons; the 64 pt floor and the cropped-rounding fix are both sound. Its red → green and mutation evidence reproduces. It slipped on the two artifact-level points above.
 
+### Gate fix 1 (orchestrator's gate on `feat/mobile-thinking-images`)
+
+*— claude-sonnet-5-5, 2026-11-19*
+
+Scope: the ONE failing test the orchestrator's full gate reported —
+`packages/exec/test/confinement.test.ts` → "F2: a hard link to a file outside
+every root never changes the outside file". Nothing else was touched; the
+branch's own subject (mobile thinking/images) is not involved.
+
+**Root cause (reproduced, not inferred).** That test loops over a writable dir
+and the project, and failed intermittently (~1 run in 60; reproduced at
+rerun-each runs #2, #52, #74, #81 with
+`--rerun-each 300`). Both symptom shapes come from ONE cause: Bun's
+`realpathSync` on a file with SEVERAL names answers with the canonical path of
+the INODE, which on macOS is intermittently a DIFFERENT one of its names — not
+the name it was asked about. Measured on this machine: 3 wrong answers in 20 000
+calls for one hard link (`repro-determinism.ts`), and 30/4000 in the
+host-execution loop before the fix. `HostExecution.confineWrite` adopted that
+answer as the write target, so a legitimate in-root name was refused as
+`refusing to write outside the workspace` (35/4000), or the other in-root name
+was the one replaced, leaving the asked-for name holding its old bytes (28/4000
+— the `R2-4` shape, which also failed on the gate-free rerun).
+
+**Fix.** `realEntryPath` (`packages/exec/src/host-execution.ts`) resolves the
+one entry `realTarget` canonicalises: a single-named file and a directory keep
+the kernel's answer (which also canonicalises case); a several-named file is
+resolved from its PARENT — the directory is unambiguous, the last component is
+kept as asked; a symlink at that component is followed by name (`readlinkSync`,
+never ambiguous), so a hard link behind a link is corrected too. A loop-bounded
+(40 hops) walk; any lstat/readlink failure falls back to the kernel answer,
+as before. `writableRootsOf`, the constructor's `root`, `confineWrite` and
+`confineRead` all go through it.
+
+New TEST SEAM (`HostExecutionConfig.realpath`, documented TEST SEAM ONLY like
+its siblings) so the misnaming is reproducible deterministically instead of by
+a 1-in-60 flake: `realEntryPath`'s kernel call is injected.
+
+**Evidence.** Red before green by mutation (the fix's line reverted to
+`resolvePath(existing)`, seam kept): the 3 new/strengthened cases fail —
+"a hard link whose realpath names its OTHER name is still the in-root name",
+"a hard link reached through a symlink keeps the name asked about",
+"R2-4: a hard-linked file INSIDE the root is writable again". Restored:
+48 pass / 0 fail. Real-driver proof that the cause is closed, not just mocked:
+`repro-both.ts` (4000 iterations, no mock) went from
+`{misnamed: 47, refused: 35, wrongName: 28}` to `{misnamed: 30, refused: 0,
+wrongName: 0}` — the OS still misnames, the write no longer cares.
+`--rerun-each 150` on the file: 7200 pass / 0 fail (the pre-fix code failed
+inside 60 runs).
+
+**Checked here:** `packages/exec` → 129 pass / 0 fail; `bunx biome check` on the
+two touched files clean; `bun run typecheck` clean (includes
+`packages/exec`). Full gate: left to the orchestrator's script.
+
+**Drift from Implementation:** none in substance (this is not an S-slice); the
+work is outside the task's planned scope by necessity, since the gate blocked
+the merge. Recorded upstream in `docs/library-bugs.md`
+("Bun — `realpathSync` of a hard link answers with a different name").
+
 ### Round 2 (S3 re-review: round 4's findings, commit `d283ef13`)
 
 *— claude-opus-5-5, 2026-11-19* (fresh context; scope: `git diff HEAD~1`; a different model family from the executor)

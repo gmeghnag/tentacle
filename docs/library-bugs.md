@@ -94,6 +94,70 @@ Siblings in a row measure correctly and render contiguously. Keeps Ink's native
 
 ---
 
+## Bun / macOS — `realpathSync` of a hard link answers with a DIFFERENT name
+
+- **Library:** `bun` (`node:fs.realpathSync` / `fs.promises.realpath`; the
+  kernel behaviour is `realpath(2)` resolving an inode, not a name)
+- **Version in use:** `1.4.3` (`c6da4a4d3`), macOS arm64 (tested)
+- **Affected:** `1.4.3` (only version tested). `realpathSync`, `realpathSync.native`
+  and `fs.promises.realpath` all answered wrongly; the async form more often in
+  one sample (11/3000 vs 3/3000 for the sync forms).
+- **Fixed in:** unknown
+
+### Symptom
+
+For a file with several names (a hard link), `realpathSync(name)` is documented
+to return the canonical path of *that name*'s directory chain with the name
+kept. Intermittently it instead returns **another name of the same inode** — a
+path outside the directory that was asked about. Measured: 3 wrong answers in
+20 000 calls for one hard link, and 47 in 4000 in a loop that creates a fresh
+`/private/var/folders/…` temp tree each iteration (it depends on the tree, not
+the call count alone, so a test that asked once would never see it).
+
+Hit in `packages/exec` (`HostExecution.confineWrite`, gate on
+`feat/mobile-thinking-images`): the confined write adopted that answer as its
+target, so a legitimate in-root name was refused as `refusing to write outside
+the workspace`, or the wrong in-root name was replaced. The test looped a
+writable dir and the project, so the suite failed about once in 60 runs —
+always the same test, never the same iteration.
+
+### Repro (isolated)
+
+```ts
+import { link, mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+let bad = 0;
+for (let i = 0; i < 3000; i++) {
+  const base = await mkdtemp(join(tmpdir(), "rp-"));
+  const root = join(base, "workspace"), outside = join(base, "outside");
+  await mkdir(root); await mkdir(outside);
+  await writeFile(join(outside, "victim.txt"), "orig");
+  const hl = join(root, "hl");
+  await link(join(outside, "victim.txt"), hl);
+  // expected: <realpath(root)>/hl
+  if (realpathSync(hl) !== join(await realpath(root), "hl")) bad++;
+}
+console.log(bad); // 29 (2026-11-19); `fs.promises.realpath` disagrees too
+```
+
+Keeping ONE tree and calling 20 000 times also shows it (3/20 000), so it is not
+the `mkdtemp` churn alone. Calling `realpathSync` on the other name first, or
+opening the file, did not make it deterministic in 600 tries each.
+
+### Our workaround (no upgrade)
+
+Never take the kernel's answer for a several-named file: `realEntryPath`
+(`packages/exec/src/host-execution.ts`) checks `lstat().nlink`, and for
+`nlink > 1` resolves the **parent** (an unambiguous directory) and keeps the
+last component as asked; a symlink at that component is followed by name with
+`readlinkSync` (also unambiguous). A single-named file and a directory keep the
+kernel's answer, which is also what canonicalises case on APFS. Pinned by
+`packages/exec/test/confinement.test.ts` → "a hard link whose realpath names its
+OTHER name is still the in-root name" (via the `realpath` test seam, so the
+misnaming is deterministic instead of a flake).
+
+---
+
 ## Bun test — `expect(p).rejects` spins forever on a promise that never settles
 
 - **Library:** `bun` (test runner, `bun:test`)

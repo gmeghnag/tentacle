@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { link, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { HostExecution, type HostExecutionConfig, WorkspaceWriteError } from "../src/index.ts";
 
 let root: string;
@@ -273,6 +273,51 @@ describe("dangling links, hard links and races (fix round 1)", () => {
     }
   });
 
+  // Gate failure on this branch (`F2: a hard link to a file outside every root`):
+  // the kernel's realpath for a several-named inode can name ANOTHER of its
+  // names (measured ~3/20 000 calls on macOS), so a legitimate in-root write was
+  // refused as "outside the workspace", or the wrong name was replaced. A file
+  // with several names is therefore resolved from its PARENT: the directory is
+  // unambiguous, the last component is kept as asked.
+  test("F2: a hard link whose realpath names its OTHER name is still the in-root name", async () => {
+    await writeFile(join(outside, "victim2.txt"), "orig");
+    for (const { name, dir } of arenas) {
+      const hl = join(dir, "hl2");
+      await link(join(outside, "victim2.txt"), hl);
+      // The OS answering about the INODE, not the name it was asked about (`/var`
+      // vs `/private/var`, so match on the name, not the whole path).
+      const outsideName = realpathSync(join(outside, "victim2.txt"));
+      const e = mk({
+        realpath: (p) => (p.endsWith(`${sep}hl2`) ? outsideName : realpathSync(p)),
+      });
+      await e.writeFile(hl, "pwned");
+      expect(readFileSync(join(outside, "victim2.txt"), "utf8"), name).toBe("orig");
+      expect(readFileSync(hl, "utf8"), name).toBe("pwned");
+      await rm(hl, { force: true });
+    }
+  });
+
+  test("F2: a hard link reached through a symlink keeps the name asked about", async () => {
+    await writeFile(join(outside, "victim3.txt"), "orig");
+    for (const { name, dir } of arenas) {
+      const hl = join(dir, "hl3");
+      const alias = join(dir, "alias3");
+      await link(join(outside, "victim3.txt"), hl);
+      await symlink(hl, alias);
+      // Misname the alias AND the link it points at: only the parent may be consulted.
+      const outsideName = realpathSync(join(outside, "victim3.txt"));
+      const e = mk({
+        realpath: (p) =>
+          p.endsWith(`${sep}hl3`) || p.endsWith(`${sep}alias3`) ? outsideName : realpathSync(p),
+      });
+      await e.writeFile(alias, "pwned");
+      expect(readFileSync(join(outside, "victim3.txt"), "utf8"), name).toBe("orig");
+      expect(readFileSync(hl, "utf8"), name).toBe("pwned");
+      await rm(hl, { force: true });
+      await rm(alias, { force: true });
+    }
+  });
+
   test("F2: ordinary writes still work: create, overwrite (truncated), through an in-root link", async () => {
     for (const { name, dir } of arenas) {
       const e = mk();
@@ -470,7 +515,12 @@ describe("atomic replace and the directory rule (fix round 2)", () => {
     for (const { name, dir } of arenas) {
       await writeFile(join(dir, "a.js"), "old");
       await link(join(dir, "a.js"), join(dir, "b.js"));
-      await mk().writeFile(join(dir, "b.js"), "new");
+      // The same intermittent misnaming must not adopt the other name here.
+      const a = realpathSync(join(dir, "a.js"));
+      const e = mk({
+        realpath: (p) => (p.endsWith(`${sep}b.js`) ? a : realpathSync(p)),
+      });
+      await e.writeFile(join(dir, "b.js"), "new");
       expect(readFileSync(join(dir, "b.js"), "utf8"), name).toBe("new");
       expect(readFileSync(join(dir, "a.js"), "utf8"), name).toBe("old");
     }

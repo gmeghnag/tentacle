@@ -22,6 +22,7 @@ import {
   constants as fsConstants,
   lstatSync,
   mkdirSync,
+  readlinkSync,
   realpathSync,
   statSync,
 } from "node:fs";
@@ -81,6 +82,13 @@ export interface HostExecutionConfig {
   readonly beforeRename?: (realPath: string) => void | Promise<void>;
   /** TEST SEAM ONLY: runs right before the in-place fallback opens the target. */
   readonly beforeInPlaceOpen?: (realPath: string) => void | Promise<void>;
+  /**
+   * TEST SEAM ONLY: stands in for the kernel's `realpath(2)` when a path is
+   * resolved (default `fs.realpathSync` with its failure swallowed). A test uses
+   * it to return the name an OS can give for a hard link that is not the one
+   * asked about (see `realEntryPath`).
+   */
+  readonly realpath?: (path: string) => string;
 }
 
 /** Thrown when a write would escape the workspace root. */
@@ -131,6 +139,50 @@ function safeRealpath(p: string): string {
   }
 }
 
+/** How many links `realEntryPath` follows before it gives up (a loop is refused elsewhere). */
+const MAX_LINK_HOPS = 40;
+
+/**
+ * The canonical path of an EXISTING entry — corrected for the one question the
+ * kernel cannot answer: a file with several names (a hard link). `realpath(2)`
+ * reports the canonical path of the INODE, which on macOS is intermittently a
+ * DIFFERENT one of its names (measured: ~3 in 20 000 calls for one hard link),
+ * and a confined write adopts that answer as its target — so a legitimate
+ * in-root name is refused as "outside the workspace", or the wrong name of the
+ * inode is replaced (R2-4, gate `F2: a hard link to a file outside every root`).
+ * A file with one name, and a directory, are unambiguous: the kernel's answer
+ * stands (it also canonicalises the case on a case-insensitive filesystem). A
+ * several-named file is resolved from its parent instead: the parent is a
+ * directory (canonicalised), the last component is kept as asked. A link at the
+ * last component is followed by name (`readlink`, never ambiguous), so the
+ * correction also reaches a hard link behind a symlink.
+ */
+function realEntryPath(path: string, resolvePath: (path: string) => string): string {
+  let at = path;
+  for (let hop = 0; hop <= MAX_LINK_HOPS; hop += 1) {
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(at);
+    } catch {
+      return resolvePath(at);
+    }
+    if (!st.isSymbolicLink()) {
+      if (st.isDirectory() || st.nlink === 1) {
+        return resolvePath(at);
+      }
+      return join(resolvePath(dirname(at)), basename(at));
+    }
+    let dest: string;
+    try {
+      dest = readlinkSync(at);
+    } catch {
+      return resolvePath(at);
+    }
+    at = resolve(resolvePath(dirname(at)), dest);
+  }
+  return resolvePath(at);
+}
+
 /** Whether `p` exists as a directory entry — a dangling symlink counts (no follow). */
 function entryExists(p: string): boolean {
   try {
@@ -155,7 +207,7 @@ type RealTarget =
  * kernel takes it, which only the kernel can say. It is refused, whatever it
  * points at (review F1: a hand-written `readlink` walk got `..` wrong).
  */
-function realTarget(abs: string): RealTarget {
+function realTarget(abs: string, resolvePath: (path: string) => string = safeRealpath): RealTarget {
   let existing = abs;
   const tail: string[] = [];
   while (!entryExists(existing)) {
@@ -175,7 +227,7 @@ function realTarget(abs: string): RealTarget {
     }
     return { ok: false, dangling: existing, loop };
   }
-  const real = safeRealpath(existing);
+  const real = realEntryPath(existing, resolvePath);
   return { ok: true, path: tail.length > 0 ? resolve(real, ...tail) : real };
 }
 
@@ -217,7 +269,10 @@ function within(root: string, target: string): boolean {
  * absolute, that resolves to the filesystem root (it would make "confined"
  * meaningless), or that is a dangling link or a loop, is dropped and reported.
  */
-function writableRootsOf(dirs: readonly string[]): {
+function writableRootsOf(
+  dirs: readonly string[],
+  resolvePath: (path: string) => string,
+): {
   readonly roots: readonly string[];
   readonly dropped: readonly string[];
 } {
@@ -230,7 +285,7 @@ function writableRootsOf(dirs: readonly string[]): {
     }
     // Canonicalised like a target: a dir that does not exist yet still gets its
     // existing ancestors realpath'd (`/var/…` → `/private/var/…` on macOS).
-    const resolved = realTarget(resolve(dir));
+    const resolved = realTarget(resolve(dir), resolvePath);
     const real = resolved.ok ? resolved.path : undefined;
     if (real === undefined || dirname(real) === real) {
       dropped.push(dir);
@@ -257,6 +312,8 @@ export class HostExecution implements ExecutionEnvironment {
   private readonly beforeRename: ((realPath: string) => void | Promise<void>) | undefined;
   private readonly beforeInPlaceOpen: ((realPath: string) => void | Promise<void>) | undefined;
   private readonly beforeRead: ((realPath: string) => void | Promise<void>) | undefined;
+  /** How a resolved path's canonical form is asked for (the kernel, or a test's stand-in). */
+  private readonly resolvePath: (path: string) => string;
   /** Commands whose leader exited (their group was handed to `releaseGroup`). */
   private readonly released = new WeakSet<Subprocess>();
 
@@ -268,9 +325,10 @@ export class HostExecution implements ExecutionEnvironment {
     this.beforeRename = config?.beforeRename;
     this.beforeInPlaceOpen = config?.beforeInPlaceOpen;
     this.beforeRead = config?.beforeRead;
+    this.resolvePath = config?.realpath ?? safeRealpath;
     this.defaultCwd = resolve(config?.cwd ?? process.cwd());
-    this.root = safeRealpath(resolve(config?.root ?? this.defaultCwd));
-    const writable = writableRootsOf(config?.writableDirs ?? []);
+    this.root = realEntryPath(resolve(config?.root ?? this.defaultCwd), this.resolvePath);
+    const writable = writableRootsOf(config?.writableDirs ?? [], this.resolvePath);
     this.writableRoots = writable.roots.filter((r) => r !== this.root);
     this.droppedWritableDirs = writable.dropped;
   }
@@ -533,7 +591,7 @@ export class HostExecution implements ExecutionEnvironment {
    * inside `root` (only), not secret-looking (judged workspace-relative).
    */
   private confineRead(abs: string, path: string): string {
-    const target = realTarget(abs);
+    const target = realTarget(abs, this.resolvePath);
     if (!target.ok) {
       throw new WorkspaceReadError(
         "unresolvable",
@@ -846,7 +904,7 @@ export class HostExecution implements ExecutionEnvironment {
   /** The checked REAL write path, or throw if it escapes the workspace root and every writable dir. */
   private confineWrite(path: string): string {
     const abs = resolve(this.defaultCwd, path);
-    const target = realTarget(abs);
+    const target = realTarget(abs, this.resolvePath);
     if (!target.ok) {
       throw new WorkspaceWriteError(
         target.loop
