@@ -414,3 +414,46 @@ the first bytes of `packages/tui/test/__snapshots__/chart-lines.test.ts.snap`. I
 with `git checkout`, its two test files passed alone (98/98), and the rerun was all green. That
 looks like a pre-existing flake (a raw terminal write that landed in the snapshot file); it is
 not caused by this change.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-20* (fresh context, but the SAME model as the executor: shared blind spots may survive both passes)
+
+**Verdict: APPROVE-WITH-NITS.** No HIGH or MEDIUM findings.
+
+**Gate (re-run):** touched files (`pod-install-dir`, `engine-runtime`, `engine-docker`,
+`logs-follow-detached`, `session-hop-targets`, `pod-binary`): 263 pass, 0 fail. Full `bun test`:
+15756 pass · 5 skip (opt-in) · 0 fail, 15761 tests across 1118 files. `bun run lint`: 2131 files, clean.
+`bun run typecheck`: clean.
+
+**Mutation (reverted; `git status` clean afterwards):**
+- `choosePlacement` ignores `ok` (always candidate 0) → R1, R2, R5 red.
+- The script's mount skip is disabled → the real-`sh` mount test is red.
+
+**Attacks tried:**
+1. *Shell injection through a pod-printed dir* into the unquoted `mkdir -p ${binDir} && head -c …`
+   (`pod-binary.ts:329`). It holds: `safeDir` (`pod-install-dir.ts:190-192`) allows only
+   `[A-Za-z0-9._/@+-]`, requires a leading `/` and rejects `..`. `|`-prefixed `--version`
+   lines cannot forge a `place`/`bin` line.
+2. *Upload before the probe / a second upload.* It holds: `run` throws `noDir` or
+   `placementFailedError` before `injectAgentBinary`. In `attach`, `cannotInstall` is raised
+   inside the install `try`, before any upload, so the replace fallback still runs the old binary.
+3. *Consumers of an auto-picked path* (relay `relay.ts:369`, the kept index, `logs`). It holds:
+   the relay and `attach` re-probe every candidate. `logs` uses `findPodBinary`. The kept index
+   still records only a user-given `binDir`.
+4. *Writing into the docker workspace* (laptop folder). It holds for `run` and `attach`
+   (the mount is passed in). Nit below for `logs`.
+
+**Nits (not blocking):**
+- `findPodBinary` (`engine-runtime.ts:544-548`) is described as "read-only", but the probe
+  still creates and then removes a probe file and dirs, and no `mount` is passed in. The
+  risk is low: the planner refuses a mount over `/usr/local/bin`, and `$HOME` being inside
+  the mount is unlikely.
+- The tmp candidate's `mkdir -m 700 "${TMPDIR:-/tmp}/tentacle-$u"` (`pod-install-dir.ts:126`)
+  runs before `probe_dir`'s mount check. It only matters if `TMPDIR` points inside the mount.
+- The load-bearing assumption (a directly exec'd script gets `EACCES` on `noexec`) and the
+  live UBI non-root repro are still unverified on a real engine, as Execution states.
+
+**Executor behaviour:** the drifts are documented honestly (most notably: `run` reuses only
+when a version is known, and a thrown exec stays fatal in `attach`), red → green is shown, and
+the mutation table is consistent with what I reproduced.
