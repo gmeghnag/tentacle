@@ -538,6 +538,8 @@ baseline clean (AGENTS §6), `bun run e2e:mobile` (decision 20).
 
 ### Owner questions
 
+**Owner answers (20/11): ALL recommendations accepted** — Q1 one key per project · Q2 identity per computer · Q3 adoption at first connection · Q4 discover self-only for devices · Q5 `/s/<serveId>/e2e` · Q6 `pair` targets its folder, refuses without a serve · Q7 revoke scoping as proposed · Q8 Remove = local only · Q9 refuse old app (`update_app`) · Q10 variant A · Q11 split: (a) `feat/project-pairing` (protocol + daemon + CLI) then (b) `feat/mobile-projects-app` (app + E2E) after (a) merges · Q12 15 s + on foreground · Q13 `devices reset` stays computer-wide. Implementation APPROVED.
+
 1. **Phone device key: one per project** (each `tentacle pair` makes a new key
    and a new registry entry bound to that project), or one key per computer with
    a list of projects on its entry? *Recommendation: one per project* — revoke /
