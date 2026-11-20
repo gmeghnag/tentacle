@@ -381,3 +381,27 @@ Last narrow run: 10 touched/covering files, **157 pass, 0 fail**. `bunx biome ch
 | M7 (extra) | `useTurnDriver` branch disabled | App held-back test (1 fail) |
 
 **Not run here (per the owner's token budget):** the full `bun run check`. The orchestrator's gate runs it. No protocol change, so no `protocol.d/` note and no schema regeneration.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-20* (fresh context; same model family as the planner and the Execution's finisher, so shared blind spots are possible)
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings.
+
+**Gate (narrow, as briefed):** 8 touched/covering test files → 66 pass, 0 fail. `bun run lint` clean (2149 files). `bun run typecheck` clean (root + mobile + relay). The full `bun run test` was not run here (it is the orchestrator's merge gate).
+
+**Mutation (re-run by the reviewer):** M1 (`void this.applyPreOpen`) → 6 red in `caps-before-first-message.test.ts` (T-C1, T-C2, T-C3, T-C5, T-C5b, F5). Reverted from a scratch copy, and `git diff` on the file is empty. M2–M7 are taken from Execution's table and were not re-run.
+
+**Attacks tried:**
+1. **§7 one session path.** `applyPreOpen` runs inside the one memoized `createOrAttach` `.then` (`remote-session.ts:843-858`). `opening` and `creating` are the same promise, so `runTurn`, `enqueue`, `sendNow`, `skills` and `tools` all resume after the sets. No second open path. **Holds.**
+2. **§7 don't serialize the peer.** The awaits are client-side, inside one session's promise. No lock touches `Connection`/`RpcPeer`. **Holds.**
+3. **Echo routing during the sets.** `openSession` registers `this` as the listener, so the snapshot and the `by` echoes reach `noteCapabilities`. There they are stored and not emitted while `opening && preOpen` (`:690`). One emission follows, with no `by`. With no flips, the path is unchanged (F12, T-C6). **Holds.**
+4. **The held refusal and a racing message.** An enqueue reads `turnId` at call time, which is the first send's id, and joins `held`. The resend gets a new turn id, which clears the refusal and goes out. A `sendNow` with no installed turn falls through to `NoTurnRunning`, so nothing is sent. **Holds.**
+5. **D5 / `saveConfirmed`.** The guard `inner.opened()` (`local-runtime.ts:698`) is false for the whole open, including the sets (`id` is set after them). **Holds.**
+6. **Version skew (F9).** `MethodNotFound` clears `capabilityState` and holds the prompt. **Holds.**
+
+**Notes (LOW, not blocking):**
+- A pre-open `/clear`, quit or `/sessions` switch closes the session with `preOpen` promises that never settle. The TUI's `capsPendingRef` (`App.tsx:2029`) is never reset, so those ops stay in it. A later genuine change of the same (kind, name, enabled) by another device can be matched as "own" by `remoteChangeNotices`, and its notice is swallowed once. This affects display only. A fix would be to settle the `preOpen` waits in `close()`.
+- `close()` during the open's sets is still a no-op (`id` is null). This window existed before, but N set round trips now make it longer.
+
+**Executor behaviour:** the plan was followed, and the drift is written down honestly (the `tools-panel.ts` line, T-C5b added once T-C5 was found to be vacuous under M4, the M6 target). The corrections to DeepSeek's partial edits (the echo suppression scope, a stored preview, `heldFor(undefined)`) were real defects, and they were fixed.
