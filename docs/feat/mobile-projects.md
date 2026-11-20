@@ -762,4 +762,58 @@ rewrote it to really publish every record; it is now killed.)
 
 ## Review
 
-*— <model-id>, <date>*
+*— claude-opus-5-5, 2026-11-20* (fresh context; scope: slice (a), `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Findings**
+
+1. **HIGH: Q3 is broken off-LAN. Today's phone loses relay reach and push after the upgrade.**
+   `packages/daemon/src/device-authority.ts:246` counts only `devices`, so an
+   unadopted legacy entry never makes any serve dial the relay (pinned *as intended* by
+   `packages/daemon/test/project-pairing.test.ts:213`). Adoption happens only on a
+   completed handshake (`device-accept.ts:173`). So a phone that reaches its computer
+   through the relay address on its record (cellular, or the serve restarted on a new
+   port so the old direct `/e2e` is dead) gets `4404` forever. It is never adopted, and
+   no push is sent (the push goes through the relay link). That is not "zero steps".
+   The plan's Q3 proof (`project-pairing.test.ts` "first handshake on P adopts") only
+   covers the direct route. **Reproduced through the real `serve` route by
+   pre-existing tests that are now red**: `packages/cli/test/serve-push.test.ts` (4) and
+   `serve-hooks-trust.test.ts` T13e/T13f (2) seed a legacy `addDevice` with no project, and
+   time out on "the link to register". Mutation: count `adoptable` in
+   `wantsReachability` turns those 6 green and only `:213` red. Direction: let
+   unadopted legacy entries count toward reachability until adopted (the cost lasts
+   only until the first connection; the adoption dir is already in the stamp). Then
+   add a Q3 test over the relay leg.
+2. **HIGH: the gate is red; `bun test` on the merge would fail.** Besides the 6
+   above, `apps/mobile/test/pairing-e2e.test.ts` + `e2e-pairing.test.ts`: **13 fail /
+   3 pass** (they DO run in this worktree, contrary to Execution's "cannot run"). The
+   cause is `update_app` and the `pair` refusal with no live serve in the folder. The
+   executor flagged this as STOP with no decision. Owner choice (i)/(ii) is needed
+   before merge. AGENTS §4/§6 do not allow (ii) silently.
+3. **MEDIUM: signature mismatch.** Commit `1f6ce6f8` says "exec (deepseek)", but
+   Execution is signed `claude-opus-5-5`. §10 requires honest model signatures. Fix the
+   signature.
+
+**Gate (re-run by me):** `bun run lint` clean (2159 files) · `bun run typecheck`
+clean · touched daemon/cli/client/protocol tests: **3419 pass / 6 fail / 2 skip**
+(the 6 = finding 1) · mobile pairing e2e: 3 pass / 13 fail (finding 2). Full
+`bun run check` not green.
+
+**Premises spot-checked:** `authorize` is the single verdict, and the direct and relay routes
+share `acceptDevice` (TRUE). The relay link gates on `wantsReachability` (`relay-link.ts:512`,
+TRUE, and that is exactly finding 1). `readRelaySecret` creates the secret when it is missing, so `serveId`
+exists with the relay off (TRUE, `cli/src/relay-secret.ts:89-91`).
+
+**Attacks tried:** (a) legacy phone over the relay → **broken** (F1). (b) Adoption
+race / half-written record → tmp+`link` is exclusive, and EEXIST re-reads the file. Holds. (c)
+Adoption in `authorize` (P1) → only on resolve, before `new Connection`. Holds.
+(d) `/s/<other>/e2e` → 404 before the limiter. Holds. (e) `discover` to a
+device → self only, sync, no lock (§7 peer rule). Holds. (f) A socket live as
+`adoptable` on Q when P adopts → the poll closes it (neither set). Holds.
+
+**Executor behaviour:** thorough, with 17 mutations and an honest STOP on the mobile tests.
+But it ran only the touched files, so it missed 6 red tests in untouched `serve-*` suites that
+expose a plan-level gap. It also mis-stated that the mobile tests cannot run.
+Same model family as the planner (opus), so a shared blind spot (the plan itself
+chose "legacy does not count") survived both passes.
