@@ -440,3 +440,11 @@ export function shown(): Follow {
 export function jumpPill(state: Follow): boolean {
   return !state.following;
 }
+
+/**
+ * The pill's text: none (the ↓ arrow alone) while nothing new arrived off-screen,
+ * "New messages" when something did (owner 20/11: drop "Jump to latest").
+ */
+export function jumpPillText(state: Follow): string | null {
+  return state.unseen ? "New messages" : null;
+}
