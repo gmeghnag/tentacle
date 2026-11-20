@@ -303,3 +303,15 @@ No `protocol.d/` note: no wire change (valid frames are byte-identical; a NUL
 first byte was never valid JSON).
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-20* (fresh context; SAME model as the executor — shared blind spots possible)
+
+**Verdict: APPROVE.** No HIGH/MEDIUM findings.
+
+- **Gate (touched files):** 7 test files, 93 pass / 0 fail (827 expects); `bun run lint` clean (2134 files); `bun run typecheck` clean (root, mobile, relay). Full `bun test` not re-run by this reviewer.
+- **Premises:** the three unbounded readers (`stream-channel.ts`, `exec-frame.ts`, docker `exec-channel.ts`) and the cap-less laptop `RpcPeer` on `main` — TRUE. `0x0A` never inside a UTF-8 multi-byte sequence — TRUE. `RpcPeer.receive` counts UTF-16 units ≤ UTF-8 bytes — TRUE (`peer.ts:281`).
+- **Mutations (each caught, then restored; `git status` clean):** no-newline path skips the cap check → 4 fails (`byte-framer.test.ts`); `reportError` removed from the oversize branch → 1 fail each in `peer.test.ts` and `client/test/frame-cap.test.ts`; k8s `[k8s]` stderr message removed → 1 fail (`k8s/test/exec-channel.test.ts`).
+- **E2E trace** (`.tentacle/tmp/byte-stream-frame-cap/e2e.ts`): 64 × 1 MiB of stdout with no newline into `ExecDemux` at a 16 MiB cap → one violation as the cap is crossed, 0 frames, and a later valid frame is NOT delivered. Before (Context repro): 64 MiB held, channel still open.
+- **Attacks tried:** (1) another laptop-side reader of pod bytes the fix missed — the only `streamChannel` callers (`cli/serve.ts:1363`, `cli/pod-resident.ts:304,552`) run in the pod; `control-socket.ts` is laptop-local and already capped. Nothing found. (2) A NUL as the first byte of a legitimate pod stdout line closing the channel — JSON-RPC frames never start with NUL, and nothing else is written to the daemon's stdout. Nothing found. (3) A throwing `onLine` drops the rest of its chunk — `RpcPeer.receive` catches parse errors, so it does not throw. Nothing found. (4) Daemon-side `streamChannel` now also caps the laptop → pod direction at 256 MiB (previously unbounded): only an `open{messages}` history over 256 MiB is affected. Accepted in Notes.
+- **Low (not blocking):** no production `streamChannel` caller passes `onError`, so a pod-side violation closes the stream without logging why. This is pod-side and diagnostic only.
+- **Executor:** followed the plan, recorded every drift honestly (the literal constant pinned by a test; the `FakeWS.close` fix that made a mutation catchable), and ran red-first with a mutation table.
