@@ -108,14 +108,16 @@ export interface DeviceAuthorityOptions {
 interface Snapshot {
   /**
    * The ids valid HERE: entries of this project, and legacy entries this project
-   * adopted. What `knows`, `wantsReachability` and the revoke poll count.
+   * adopted. What `knows` and the revoke poll count (`wantsReachability`
+   * counts these AND `adoptable`).
    */
   readonly devices: ReadonlySet<string>;
   /**
    * Legacy entries NO project has adopted yet: admitted as `device` with
-   * `adopt: true` (the route binds them on the resolve) but NOT counted by
-   * `wantsReachability` — else every serve would dial the relay for a phone
-   * that will never come (§2).
+   * `adopt: true` (the route binds them on the resolve). Counted by
+   * `wantsReachability` (every serve dials the relay until one adopts it —
+   * else a relay-only phone is never adopted, review round 1 F1), NOT by
+   * `knows`.
    */
   readonly adoptable: ReadonlySet<string>;
   readonly identity: DeviceIdentity | undefined;
@@ -243,7 +245,11 @@ export class DeviceAuthority {
     if (this.snapshot.broken) {
       return false;
     }
-    return this.snapshot.devices.size > 0 || this.hasWindow();
+    // An unadopted legacy entry counts too (review round 1 F1): today's phone
+    // may reach its computer ONLY through the relay (cellular, or the old
+    // direct port is gone), and adoption needs a completed handshake — so every
+    // serve stays reachable for it until one project adopts it (Q3).
+    return this.snapshot.devices.size > 0 || this.snapshot.adoptable.size > 0 || this.hasWindow();
   }
 
   /**

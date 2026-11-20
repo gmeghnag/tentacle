@@ -17,6 +17,8 @@
 /** The `<configDir>`-rooted options this harness uses (a subset of `PairOptions`). */
 export interface PairCommandOptions {
   readonly configDir: string;
+  /** The project to pair: its live `serve`'s cwd (docs/feat/mobile-projects.md Q6). */
+  readonly projectDir?: string;
   readonly extraAddresses?: readonly string[];
   readonly interfaces?: readonly unknown[];
   readonly qr?: boolean;

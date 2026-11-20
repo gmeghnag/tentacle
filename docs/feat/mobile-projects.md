@@ -592,7 +592,7 @@ baseline clean (AGENTS §6), `bun run e2e:mobile` (decision 20).
 
 ### (a) feat/project-pairing
 
-*— claude-opus-5-5, 2026-11-20*
+*— deepseek (the `tentacle --profile deepseek` executor, per commit `1f6ce6f8`), 2026-11-20* — signature corrected in fix round 1 (review F3): it read `claude-opus-5-5`, which did not write this section.
 
 **Load-bearing check, re-run first: HOLDS.** The Context repro, re-pointed at
 this worktree (`.tentacle/tmp/project-pairing/repro.ts`), gave the same four
@@ -759,6 +759,66 @@ rewrote it to really publish every record; it is now killed.)
   file (the per-package configs have unrelated errors in `tui`/`autowake`).
 - Full `bun test` / typecheck / lint: left to the orchestrator.
 - Unverified: the mobile tests (above).
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-20*
+
+**F1 (HIGH, legacy phone off-LAN) — FIXED.** `device-authority.ts`
+`wantsReachability` now counts `adoptable` too: every serve dials the relay
+for an unadopted legacy phone until one project adopts it (then only the
+adopter does; the stamp already covers `adopted/`). `knows` is unchanged
+(push still only to `devices`). Snapshot comments updated.
+- Red first (on the fix-less code): new `relay-link.test.ts` "today's phone
+  over the relay: … first relay handshake adopts it" (v1 registry, real relay,
+  real Noise + `initialize` over the relay, then `adopted/<id>.json` names the
+  project and `knows` is true) → `timed out waiting for the link to register for
+  a legacy phone`; the rewritten `project-pairing.test.ts` pin (was "dials
+  nobody's relay", now "dials EVERY serve's relay until one adopts it", then Q
+  stops after P adopts) → `expect(received).toBe(expected)`. 2 fail / 39 pass.
+- Green: those 2 files + `cli/test/serve-push.test.ts` +
+  `serve-hooks-trust.test.ts` → 56 pass / 0 fail (the 6 review reds included);
+  `device-store`, `relay-link-push`, `relay-link-policy`, `serve-relay`,
+  `device-authority` → 109 pass / 0 fail.
+- Mutation (drop `|| this.snapshot.adoptable.size > 0`): the same 4 files →
+  **48 pass / 8 fail** (the 6 serve tests + the 2 new) — KILLED; reverted.
+
+**F2 (HIGH, mobile pairing e2e red) — PARTIAL; owner decision still needed.**
+- Harness (test infra, no app production code): `e2e/pair-cli.ts` and
+  `e2e/pairing.ts` gain `projectDir` (passed to `pairCommand`), `e2e/run.ts`
+  passes the serve's `runDir`. The two test files write the live serve record
+  `serve` writes (`writeDaemonRecord`, `cwd` = the project) and key the
+  authority by `projectKey(cwd)` (what `pair` derives, Q6);
+  `e2e-pairing.test.ts`'s simulated phone claims with `perProject: true`.
+  `e2e-pairing.test.ts`: **7 pass / 0 fail** (was 3/4). Mutation (drop the
+  `projectDir` pass-through in `pairing.ts`) → 3 pass / 4 fail — KILLED;
+  reverted.
+- `pairing-e2e.test.ts`: **2 pass / 7 fail** (was 0/9 of its own). The 7 drive
+  the APP's `runPairing`, which does not send `perProject`, so the daemon
+  answers `update_app` (Q9, pinned by M8) and `ok` is false. Making them green
+  needs app production code, i.e. the §6 "Pairing" bullet — and doing that
+  bullet as planned (records keyed `projectRecordId`) has an UNPLANNED ripple:
+  the app matches the daemon's computer id against the record id
+  (`notification-action.ts:174`, `notifications-expo.ts:163`,
+  `push-manager.ts:311`), so a per-project id breaks push routing. The plan
+  does not cover that, so I did not write it. Options for the owner:
+  - **(i′) recommended, smallest:** in (a), `runPairing` sends `perProject:
+    true` and keeps storing under `result.computer.id` (one record per
+    computer until (b); pairing another project replaces it on the phone). Gate
+    green; the transitional limit is explicit, and (b) brings per-project ids
+    together with the id-match fix.
+  - **(i)** the full §6 Pairing bullet in (a), after amending the plan for the
+    id ripple (`computerId ?? id` at the three sites).
+  - **(ii)** merge with these 7 red until (b) — AGENTS §4/§6 forbid it without
+    the owner's explicit OK.
+
+**F3 (MEDIUM, signature) — FIXED.** The (a) Execution signature now names
+deepseek (per commit `1f6ce6f8`), with a note on the correction.
+
+**Gate (this round, narrow):** `bunx biome check` on the 8 changed files:
+clean. `tsc -p apps/mobile`: clean; `tsc -p packages/daemon`: no error in a
+touched file. Full `bun run check`: left to the orchestrator's script —
+expected red ONLY on the 7 `pairing-e2e.test.ts` tests above (F2).
 
 ## Review
 

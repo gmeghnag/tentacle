@@ -22,6 +22,7 @@ import {
   DEVICE_STORE_VERSION,
   REGISTRY_FILENAME,
   addDevice,
+  adoptLegacy,
   claimPairing,
   deviceIdOf,
   findPairing,
@@ -210,11 +211,20 @@ describe("the verdict is per project (the repro's (1)+(2), inverted)", () => {
     expect(q.wantsReachability()).toBe(true);
   });
 
-  test("an unadopted legacy entry dials nobody's relay", () => {
+  test("an unadopted legacy entry dials EVERY serve's relay until one adopts it (Q3, review round 1 F1)", () => {
+    // Mutation: count only `devices` -> the first expectation is false, and a
+    // phone that only reaches its computer through the relay is never adopted.
     const configDir = store();
     writeV1Registry(configDir, [publicKeyOf(key(2))]);
-    expect(authority(configDir, P).wantsReachability()).toBe(false);
-    expect(authority(configDir, Q).wantsReachability()).toBe(false);
+    const p = authority(configDir, P);
+    const q = authority(configDir, Q);
+    expect(p.wantsReachability()).toBe(true);
+    expect(q.wantsReachability()).toBe(true);
+    const adopted = adoptLegacy(configDir, deviceIdOf(publicKeyOf(key(2))), P);
+    expect(adopted.ok).toBe(true);
+    // Adopted by P: the cost ends — Q no longer dials for it.
+    expect(p.wantsReachability()).toBe(true);
+    expect(q.wantsReachability()).toBe(false);
   });
 
   test("`knows` (the push-time check) is scoped: Q's notifier never pushes to P's device", () => {

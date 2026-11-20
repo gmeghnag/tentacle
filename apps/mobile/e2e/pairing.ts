@@ -72,6 +72,12 @@ export interface PairingDeps {
   readonly configDir: string;
   /** The daemon's `/e2e` URL in the QR's own form (`ws://127.0.0.1:<port>/e2e`). */
   readonly address: string;
+  /**
+   * The folder `serve` runs in: `pair` pairs THAT project's serve and refuses
+   * when none is live there (docs/feat/mobile-projects.md Q6). Absent = `pair`'s
+   * own cwd.
+   */
+  readonly projectDir?: string;
   /** Where `pair`'s own output goes (the run's log). */
   readonly log?: (line: string) => void;
   /** How long `confirm` waits for a claim (a paste is fast; a stuck one must fail loudly). */
@@ -133,6 +139,7 @@ export function createPairingHooks(deps: PairingDeps): PairingHooks {
     open = window;
     const done = pairCommand({
       configDir: deps.configDir,
+      ...(deps.projectDir === undefined ? {} : { projectDir: deps.projectDir }),
       // `relayOnly` (docs/feat/mobile-relay.md R6, flow 22) hands `pair` NO
       // `--address`: `serve` binds loopback here, which contributes no
       // bind-derived address, so the record's own relay address is the only one

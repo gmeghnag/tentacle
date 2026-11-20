@@ -488,6 +488,8 @@ async function main(): Promise<number> {
     const pairing = createPairingHooks({
       configDir: join(runDir, "config"),
       address: deviceAddress,
+      // `serve` runs in `runDir`: `pair` pairs that project (mobile-projects Q6).
+      projectDir: runDir,
       log: (line) => console.log(line),
     });
 

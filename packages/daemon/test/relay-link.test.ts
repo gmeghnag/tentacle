@@ -9,7 +9,7 @@
  * test, `bunRelayDialer`, and the plan's backoff constants.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RELAY_PROTOCOL_VERSION, encodeBase64Url, relayAddress } from "@tentacle/protocol";
@@ -20,9 +20,13 @@ import { relayIdOf } from "@tentacle/transport/relay-id";
 import { startRelay } from "../../../apps/relay/src/server.ts";
 import { DeviceAuthority } from "../src/device-authority.ts";
 import {
+  REGISTRY_FILENAME,
   addDevice,
+  deviceDir,
+  deviceIdOf,
   loadOrCreateIdentity,
   openPairing,
+  readAdoption,
   readIdentity,
   readSeen,
   removeDevices,
@@ -573,6 +577,52 @@ describe("revoke closes the relay stream within one authority poll (F11)", () =>
     expect(h.audit.some((l) => l.startsWith(`device-revoked ${deviceId.slice(0, 8)}`))).toBe(true);
     await waitFor(() => phoneClosed, "the phone leg to close");
     peer.close();
+  });
+});
+
+describe("today's phone over the relay: zero steps after the upgrade (Q3, review round 1 F1)", () => {
+  test("an unadopted legacy entry dials the relay, and its first relay handshake adopts it", async () => {
+    // Mutation: `wantsReachability` counts only `devices` (not `adoptable`) ->
+    // the link never registers, so the phone (cellular / old direct port dead)
+    // gets 4404 forever and is never adopted.
+    const configDir = store();
+    mkdirSync(deviceDir(configDir), { recursive: true });
+    const phoneKey = publicKeyOf(key(2));
+    const id = deviceIdOf(phoneKey);
+    writeFileSync(
+      join(deviceDir(configDir), REGISTRY_FILENAME),
+      JSON.stringify({
+        v: 1,
+        devices: [{ id, name: "iPhone", publicKey: encodeBase64Url(phoneKey), pairedAt: 1 }],
+      }),
+    );
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    const h = harness({ configDir });
+    await waitFor(() => h.link.isConnected(), "the link to register for a legacy phone");
+    const phone = await dialPhone(h.link.address);
+    cleanups.push(() => phone.ws.close());
+    const secure = await noiseInitiator(phone.channel, {
+      staticKey: key(2),
+      remoteStatic: identity.identity.publicKey,
+      random: systemRandom,
+    });
+    const peer = new RpcPeer(secure, {
+      onRequest: async () => {
+        throw new Error("the daemon does not ask here");
+      },
+      onNotification: () => {},
+    });
+    cleanups.push(() => peer.close());
+    const init = (await peer.request("initialize", {
+      protocolVersion: 24,
+      clientCapabilities: {},
+      clientInfo: { name: "phone", version: "0" },
+    })) as { protocolVersion: number };
+    expect(init.protocolVersion).toBe(24);
+    const adoption = readAdoption(configDir, id);
+    expect(adoption.kind === "bound" ? adoption.project.key : adoption.kind).toBe(TEST_PROJECT.key);
+    expect(h.authority.knows(id)).toBe(true);
   });
 });
 
