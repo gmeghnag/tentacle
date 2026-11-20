@@ -7,71 +7,21 @@
  * the host has its seam) AND not disabled in the session's capability state.
  * `tools.enabled` only acts on the second layer: `true` never registers a tool.
  */
+import {
+  ALWAYS_ON_TOOLS,
+  BUILTIN_TOOL_NAMES,
+  TOOL_GROUPS,
+  expandToolName,
+  groupOfTool,
+  isToolGroup as isGroup,
+} from "@tentacle/core";
 import { applyProfile } from "./profile.ts";
 import type { FileConfig } from "./schema.ts";
 
-/** Tools that can never be switched off (single skills stay switchable via `/skills`). */
-export const ALWAYS_ON_TOOLS: readonly string[] = ["skill"];
-
-/** The switchable groups, by name. A single-member group is named after its tool. */
-export const TOOL_GROUPS: Readonly<Record<string, readonly string[]>> = {
-  subagents: [
-    "agent_task",
-    "agent_status",
-    "agent_control",
-    "agent_message",
-    "agent_kill",
-    "agent_notify",
-  ],
-  shell: ["shell", "shell_output", "shell_kill"],
-  schedule: ["schedule_create", "schedule_control"],
-  visuals: ["chart", "diagram", "present"],
-  context_reset: ["context_reset"],
-  move_session: ["move_session"],
-  workload_shell: ["workload_shell"],
-};
-
-/** Built-ins in no group. */
-const UNGROUPED_TOOLS: readonly string[] = [
-  "fs_read",
-  "fs_write",
-  "fs_edit",
-  "fs_multi_edit",
-  "search",
-  "skill",
-];
-
-/** Every built-in a session may offer (grouped or not), `skill` included. Sorted. */
-export const BUILTIN_TOOL_NAMES: readonly string[] = [
-  ...new Set([...Object.values(TOOL_GROUPS).flat(), ...UNGROUPED_TOOLS]),
-].sort();
-
-const isGroup = (name: string): boolean => Object.hasOwn(TOOL_GROUPS, name);
-
-/**
- * A group → its members, a switchable tool → `[tool]`; an unknown name or an
- * always-on tool → `undefined`. A single-member group's name is its tool's, so
- * both readings agree.
- */
-export function expandToolName(name: string): readonly string[] | undefined {
-  if (ALWAYS_ON_TOOLS.includes(name)) {
-    return undefined;
-  }
-  if (isGroup(name)) {
-    return TOOL_GROUPS[name];
-  }
-  return BUILTIN_TOOL_NAMES.includes(name) ? [name] : undefined;
-}
-
-/** The group a tool belongs to; ungrouped → `undefined`. */
-export function groupOfTool(tool: string): string | undefined {
-  for (const [group, members] of Object.entries(TOOL_GROUPS)) {
-    if (members.includes(tool)) {
-      return group;
-    }
-  }
-  return undefined;
-}
+// The name table itself lives in core (the phone's bundle needs it without
+// config's Node deps — docs/fix/mobile-bundle-node-import.md); re-exported here
+// so every existing `@tentacle/config` import keeps working.
+export { ALWAYS_ON_TOOLS, BUILTIN_TOOL_NAMES, TOOL_GROUPS, expandToolName, groupOfTool };
 
 /**
  * `tools.enabled` → the sorted, de-duplicated disabled tool names. Groups apply
