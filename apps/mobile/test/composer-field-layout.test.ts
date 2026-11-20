@@ -59,8 +59,11 @@ describe("the testIDs the flows depend on are all still there", () => {
     expect(COMPOSER).toMatch(/testID=\{testIdOf\(button\)\}/);
   });
 
-  test("the mic keeps both states", () => {
-    expect(COMPOSER).toContain('listening ? "composer-mic-listening" : "composer-mic"');
+  test("the mic keeps its ids, plus one for transcribing (docs/feat/mobile-composer-buttons.md)", () => {
+    expect(COMPOSER).toMatch(/idle: "composer-mic",/);
+    expect(COMPOSER).toMatch(/listening: "composer-mic-listening",/);
+    expect(COMPOSER).toMatch(/finalizing: "composer-mic-finalizing",/);
+    expect(COMPOSER).toMatch(/testID=\{MIC_ID\[mic\]\}/);
   });
 
   test("Send now lives in the FIELD, and the card above it no longer draws one", () => {
@@ -92,5 +95,84 @@ describe("the send slot's glyph is `sendSlot`'s, never a re-decision here", () =
     expect(COMPOSER).toContain('slot === "clock"');
     expect(COMPOSER).toContain('slot === "up-dim"');
     expect(COMPOSER).toContain('name="arrow.up"');
+  });
+});
+
+/**
+ * docs/feat/mobile-composer-buttons.md (owner B + S2, 20/11): the `+` and the mic
+ * in one soft accent circle, a 44 pt target each, recording/transcribing told by
+ * SHAPE (■ + halo + timer / arc + "…"), the field's border never coloured, and
+ * no solid accent fill left on the send slot.
+ */
+describe("the round buttons (mockup B + S2)", () => {
+  test("the field's border is ALWAYS sep — never the accent, not even while recording", () => {
+    expect(COMPOSER).toMatch(/borderColor: palette\.sep,/);
+    expect(COMPOSER).not.toMatch(/borderColor: [^,\n]*palette\.accent/);
+  });
+
+  test("`+` and the mic: a 32 pt soft circle in a 44×44 pressable (≥ 44 pt target)", () => {
+    expect(COMPOSER).toMatch(/\n {2}hit: \{[^}]*width: 44,[^}]*height: 44,/);
+    expect(COMPOSER).toMatch(
+      /\n {2}circle: \{[^}]*width: 32,[^}]*height: 32,[^}]*borderRadius: 16,/,
+    );
+    const plus = COMPOSER.slice(COMPOSER.indexOf('testID="composer-photo"'));
+    expect(plus.slice(0, plus.indexOf("</Pressable>"))).toMatch(
+      /style=\{styles\.hit\}[\s\S]*palette\.accentSoft\b[\s\S]*name="plus"[\s\S]*weight="light"/,
+    );
+    const mic = COMPOSER.slice(COMPOSER.indexOf("testID={MIC_ID[mic]}"));
+    expect(mic.slice(0, mic.indexOf("</Pressable>"))).toMatch(
+      /style=\{styles\.hit\}[\s\S]*listening \? palette\.accentSoftStrong : palette\.accentSoft/,
+    );
+    // No hitSlop fudge left: the target is the pressable itself.
+    expect(COMPOSER).not.toContain("styles.round");
+  });
+
+  test("no separate photo button: the `+` is the only one before the spacer", () => {
+    expect(COMPOSER).not.toContain('name="photo"');
+  });
+
+  test("recording = filled ■ 11 pt + halo; transcribing = the arc, and its tap is disabled", () => {
+    expect(COMPOSER).toMatch(/<Halo color=\{palette\.accent\} \/>/);
+    expect(COMPOSER).toMatch(/\n {2}recSquare: \{ width: 11, height: 11, borderRadius: 2\.5 \}/);
+    expect(COMPOSER).toMatch(/finalizing \? \(\s*<Spinner color=\{palette\.sec\} \/>/);
+    expect(COMPOSER).toContain("disabled={!editable || finalizing}");
+    // The old waveform face (level as opacity: hue/opacity only) is gone.
+    expect(COMPOSER).not.toContain('name="waveform"');
+  });
+
+  test("the caption (timer / …) is the view-model's, drawn beside the mic", () => {
+    expect(COMPOSER).toContain('testID="composer-mic-caption"');
+    expect(COMPOSER).toMatch(/\{micCaption\}/);
+    expect(read("screens", "SessionScreen.tsx")).toContain("micCaption={voiceView.caption}");
+  });
+
+  test("Reduce Motion stops both animations", () => {
+    // Each animated face reads Reduce Motion and starts no loop when it is on.
+    const reads = [...COMPOSER.matchAll(/const reduce = useReduceMotion\(\) !== false;/g)];
+    expect(reads).toHaveLength(2);
+    expect([...COMPOSER.matchAll(/if \(reduce\) \{\s*return;\s*\}/g)]).toHaveLength(2);
+  });
+
+  test("S2 send: ready = soft strong circle + accent ↑; empty = no circle, sec at 50 %", () => {
+    expect(COMPOSER).not.toContain("palette.accentFill");
+    expect(COMPOSER).not.toContain("palette.onAccent");
+    expect(COMPOSER).toMatch(/slot === "up-dim"\s*\? "transparent"/);
+    expect(COMPOSER).toMatch(/: palette\.accentSoftStrong,/);
+    expect(COMPOSER).toMatch(/color=\{slot === "up-dim" \? palette\.sec : palette\.accent\}/);
+    expect(COMPOSER).toMatch(/\n {2}dim: \{ opacity: 0\.5 \}/);
+    // 36 pt + hitSlop 4 on each side = the 44 pt target.
+    const send = COMPOSER.slice(COMPOSER.indexOf("testID={testIdOf(button)}"));
+    expect(send.slice(0, send.indexOf("style="))).toContain("hitSlop={4}");
+  });
+
+  test("the soft tokens are the accent at 10 / 20 % light and 14 / 26 % dark", () => {
+    const theme = read("theme.ts");
+    expect(theme).toContain('accentSoft: "rgba(14,116,144,0.10)"');
+    expect(theme).toContain('accentSoftStrong: "rgba(14,116,144,0.20)"');
+    expect(theme).toContain('accentSoft: "rgba(34,211,238,0.14)"');
+    expect(theme).toContain('accentSoftStrong: "rgba(34,211,238,0.26)"');
+    // …and they ARE the accent (#0E7490 / #22D3EE), not a near miss.
+    expect(theme).toContain('accent: "#0E7490"');
+    expect(theme).toContain('accent: "#22D3EE"');
   });
 });

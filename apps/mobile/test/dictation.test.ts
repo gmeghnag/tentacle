@@ -688,3 +688,27 @@ describe("mic haptics: one light tap per mic tap, never on a programmatic stop (
     ]);
   });
 });
+
+/**
+ * docs/feat/mobile-composer-buttons.md: the mic shows recording and transcribing
+ * as two different faces, so `finalizing` is its own button state.
+ */
+describe("micButtonOf: finalizing is not listening", () => {
+  test("listening → listening; a tap stop → finalizing; the native end → idle", () => {
+    const { state } = listening();
+    expect(micButtonOf(state, true)).toBe("listening");
+    const f = run([{ type: "tap", draft: "", locale: L, now: 2, attempt: 1 }], state).state;
+    expect(f.kind).toBe("finalizing");
+    expect(micButtonOf(f, true)).toBe("finalizing");
+    const done = run([{ type: "ended", reason: "stopped", attempt: 1 }], f).state;
+    expect(micButtonOf(done, true)).toBe("idle");
+  });
+
+  test("unsupported hides every state, finalizing included", () => {
+    const f = run(
+      [{ type: "tap", draft: "", locale: L, now: 2, attempt: 1 }],
+      listening().state,
+    ).state;
+    expect(micButtonOf(f, false)).toBe("hidden");
+  });
+});

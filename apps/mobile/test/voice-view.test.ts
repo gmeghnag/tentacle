@@ -28,31 +28,70 @@ const listening: VoiceState = {
 
 describe("composer", () => {
   test("no native module → the mic is hidden", () => {
-    expect(voiceComposerView(null, "en-US", BETA).mic).toBe("hidden");
+    expect(voiceComposerView(null, "en-US", BETA, 0).mic).toBe("hidden");
   });
 
   test("idle: mic offered, no placeholder override, level 0", () => {
-    expect(voiceComposerView(idle, "en-US", BETA)).toEqual({
+    expect(voiceComposerView(idle, "en-US", BETA, 0)).toEqual({
       mic: "idle",
       level: 0,
       placeholder: undefined,
       card: undefined,
       notice: undefined,
+      caption: undefined,
     });
   });
 
   test("listening: localized placeholder and the live level", () => {
-    expect(voiceComposerView(listening, "it-IT", BETA)).toMatchObject({
+    expect(voiceComposerView(listening, "it-IT", BETA, 0)).toMatchObject({
       mic: "listening",
       level: 0.7,
       placeholder: "Sto ascoltando…",
     });
-    expect(voiceComposerView(listening, "en-US", BETA).placeholder).toBe("Listening…");
+    expect(voiceComposerView(listening, "en-US", BETA, 0).placeholder).toBe("Listening…");
+  });
+
+  test("recording: the caption is the elapsed time m:ss, tabular, from the start", () => {
+    // docs/feat/mobile-composer-buttons.md: recording = ■ + halo + TIMER (never hue alone).
+    const at = (ms: number) => voiceComposerView(listening, "en-US", BETA, ms).caption;
+    expect(at(0)).toBe("0:00");
+    expect(at(7_400)).toBe("0:07");
+    expect(at(65_000)).toBe("1:05");
+    expect(at(600_000)).toBe("10:00");
+    // A clock that reads before the start (skew) never shows a negative time.
+    expect(at(-5_000)).toBe("0:00");
+  });
+
+  test("transcribing: mic 'finalizing', caption '…', the placeholder stays, level 0", () => {
+    const finalizing: VoiceState = {
+      ...idle,
+      dictation: {
+        kind: "finalizing",
+        attempt: 1,
+        base: "",
+        finals: "",
+        volatile: "",
+        after: "idle",
+        since: 0,
+      },
+    };
+    expect(voiceComposerView(finalizing, "en-US", BETA, 9_000)).toEqual({
+      mic: "finalizing",
+      level: 0,
+      placeholder: "Listening…",
+      card: undefined,
+      notice: undefined,
+      caption: "…",
+    });
+  });
+
+  test("idle and preparing carry no caption", () => {
+    expect(voiceComposerView(idle, "en-US", BETA, 9_000).caption).toBeUndefined();
   });
 
   test("an idle notice is shown", () => {
     const s = { ...idle, dictation: { kind: "idle", notice: "stopped" } as const };
-    expect(voiceComposerView(s, "en-US", BETA).notice).toBe("stopped");
+    expect(voiceComposerView(s, "en-US", BETA, 0).notice).toBe("stopped");
   });
 });
 
@@ -65,12 +104,13 @@ describe("Beta off: no surface at all", () => {
 
   test("the mic is hidden even with a live dictation state", () => {
     // Not just the idle mic: a state that WOULD show listening/level/card/notice.
-    expect(voiceComposerView(listening, "en-US", off)).toEqual({
+    expect(voiceComposerView(listening, "en-US", off, 0)).toEqual({
       mic: "hidden",
       level: 0,
       placeholder: undefined,
       card: undefined,
       notice: undefined,
+      caption: undefined,
     });
     const failed = {
       ...idle,
@@ -79,8 +119,8 @@ describe("Beta off: no surface at all", () => {
         view: { action: "none", card: "denied-mic", settings: true, message: "no mic" },
       } as const,
     };
-    expect(voiceComposerView(failed, "en-US", off).card).toBeUndefined();
-    expect(voiceComposerView(failed, "en-US", off).mic).toBe("hidden");
+    expect(voiceComposerView(failed, "en-US", off, 0).card).toBeUndefined();
+    expect(voiceComposerView(failed, "en-US", off, 0).mic).toBe("hidden");
   });
 
   test("the speaker button is never offered, and a speaking row shows nothing", () => {
@@ -98,9 +138,9 @@ describe("Beta off: no surface at all", () => {
     const answer = { kind: "assistant", key: "a", text: "answer" };
     const dictationOnly: VoiceSettings = { ...off, dictation: true };
     const readAloudOnly: VoiceSettings = { ...off, readAloudButton: true };
-    expect(voiceComposerView(idle, "en-US", dictationOnly).mic).toBe("idle");
+    expect(voiceComposerView(idle, "en-US", dictationOnly, 0).mic).toBe("idle");
     expect(speakButtonOf(idle, answer, [answer], false, dictationOnly)).toBeUndefined();
-    expect(voiceComposerView(idle, "en-US", readAloudOnly).mic).toBe("hidden");
+    expect(voiceComposerView(idle, "en-US", readAloudOnly, 0).mic).toBe("hidden");
     expect(speakButtonOf(idle, answer, [answer], false, readAloudOnly)).toBe("offered");
   });
 });

@@ -11,17 +11,28 @@
  * round button outside it; the mockup puts everything in one field, and the sheet
  * (`+`) is where a photo, a camera shot and a PDF already live (`openAttach`).
  *
- * testIDs (the flows' contract, unchanged): `composer-input`, `composer-photo`
- * (the `+`), `composer-send` / `composer-stop` / `composer-send-later` (the one
- * slot), `composer-mic` / `composer-mic-listening`, `composer-send-now` (now
- * INSIDE the field), `composer-filled`.
+ * The round buttons (docs/feat/mobile-composer-buttons.md, owner B + S2): the
+ * `+` and the mic sit in the same 32 pt circle of the accent at 10 % / 14 %
+ * (`accentSoft`) inside a 44×44 pressable. Recording = a stronger circle
+ * (`accentSoftStrong`), a filled 11 pt ■, a pulsing halo and the timer;
+ * transcribing = a spinning arc and "…" — never told by colour alone (the owner
+ * is colour-blind), and Reduce Motion holds both still. The send slot when ready
+ * is a 36 pt `accentSoftStrong` circle with an accent ↑; empty, a bare ↑ in `sec`
+ * at 50 %. The field's border is ALWAYS `sep`, recording included. The caption
+ * and which face to show are the view-model's (`voiceComposerView`).
+ *
+ * testIDs (the flows' contract): `composer-input`, `composer-photo` (the `+`),
+ * `composer-send` / `composer-stop` / `composer-send-later` (the one slot),
+ * `composer-mic` / `composer-mic-listening` / `composer-mic-finalizing`,
+ * `composer-mic-caption`, `composer-send-now` (INSIDE the field), `composer-filled`.
  */
 import { type ComponentRef, type JSX, useEffect, useRef } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Animated, Easing, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import type { SendSlot } from "../composer.ts";
 import type { MicButton } from "../dictation.ts";
 import { type Palette, radius, shadow, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
+import { useReduceMotion } from "./chart/ChartAppear.tsx";
 
 export type ComposerButton = "send" | "queue" | "send-later" | "stop" | "disabled";
 
@@ -46,8 +57,8 @@ export interface ComposerProps {
   /** The dictation button (`micButtonOf`, docs/feat/mobile-voice.md Design §5). */
   readonly mic: MicButton;
   readonly onMic: () => void;
-  /** The mic level 0..1 while listening (the waveform's opacity). */
-  readonly level: number;
+  /** Beside the mic: "0:07" while recording, "…" while transcribing (`voiceComposerView`). */
+  readonly micCaption?: string | undefined;
   /**
    * The field's `key`: a new value REMOUNTS it, so an emptied multiline field
    * measures its height from scratch instead of keeping the sent text's
@@ -67,6 +78,95 @@ const LABEL: Readonly<Record<ComposerButton, string>> = {
   stop: "Stop",
   disabled: "Send",
 };
+
+const MIC_ID: Readonly<Record<Exclude<MicButton, "hidden">, string>> = {
+  idle: "composer-mic",
+  preparing: "composer-mic",
+  listening: "composer-mic-listening",
+  finalizing: "composer-mic-finalizing",
+};
+
+const MIC_LABEL: Readonly<Record<Exclude<MicButton, "hidden">, string>> = {
+  idle: "Dictate",
+  preparing: "Dictate",
+  listening: "Stop dictation",
+  finalizing: "Transcribing",
+};
+
+/** The halo's one breath (mockup B: 32 → 42 pt, accent 25 % → 0, 1.2 s). */
+const HALO_MS = 1200;
+const HALO_SCALE = 42 / 32;
+/** One turn of the transcribing arc. */
+const SPIN_MS = 900;
+
+/** Recording: an accent ring that grows and fades; Reduce Motion holds it still. */
+function Halo({ color }: { readonly color: string }): JSX.Element {
+  const reduce = useReduceMotion() !== false;
+  const t = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (reduce) {
+      return;
+    }
+    t.setValue(0);
+    const loop = Animated.loop(
+      Animated.timing(t, {
+        toValue: 1,
+        duration: HALO_MS,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [reduce, t]);
+  const motion = reduce
+    ? { opacity: 0.18, transform: [{ scale: 1.2 }] }
+    : {
+        opacity: t.interpolate({ inputRange: [0, 1], outputRange: [0.25, 0] }),
+        transform: [{ scale: t.interpolate({ inputRange: [0, 1], outputRange: [1, HALO_SCALE] }) }],
+      };
+  return (
+    <Animated.View pointerEvents="none" style={[styles.halo, { backgroundColor: color }, motion]} />
+  );
+}
+
+/** Transcribing: a quarter-open arc that turns; Reduce Motion holds it still. */
+function Spinner({ color }: { readonly color: string }): JSX.Element {
+  const reduce = useReduceMotion() !== false;
+  const t = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (reduce) {
+      return;
+    }
+    t.setValue(0);
+    const loop = Animated.loop(
+      Animated.timing(t, {
+        toValue: 1,
+        duration: SPIN_MS,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [reduce, t]);
+  const rotate = reduce
+    ? "0deg"
+    : t.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] });
+  return (
+    <Animated.View
+      style={[
+        styles.arc,
+        {
+          borderTopColor: color,
+          borderRightColor: color,
+          borderBottomColor: color,
+          transform: [{ rotate }],
+        },
+      ]}
+    />
+  );
+}
 
 function testIdOf(button: ComposerButton): string {
   return button === "stop"
@@ -92,7 +192,7 @@ export function Composer({
   bottomPadding,
   mic,
   onMic,
-  level,
+  micCaption,
   fieldKey,
   focus = false,
   focusKey = 0,
@@ -114,6 +214,7 @@ export function Composer({
   }, [focusKey]);
   const disabled = button === "disabled";
   const listening = mic === "listening";
+  const finalizing = mic === "finalizing";
   return (
     <View style={[styles.bar, { paddingBottom: bottomPadding }]}>
       <View
@@ -121,7 +222,8 @@ export function Composer({
           styles.field,
           {
             backgroundColor: palette.fill,
-            borderColor: listening ? palette.accent : palette.sep,
+            // Always `sep`, recording included (owner 20/11).
+            borderColor: palette.sep,
             shadowOpacity: palette.shadowOpacity,
           },
         ]}
@@ -152,10 +254,16 @@ export function Composer({
             accessibilityLabel="Add a photo or a file"
             disabled={!editable}
             onPress={onPhoto}
-            hitSlop={6}
-            style={styles.round}
+            style={styles.hit}
           >
-            <Icon name="plus" color={editable ? palette.label : palette.sec} size={19} />
+            <View style={[styles.circle, { backgroundColor: palette.accentSoft }]}>
+              <Icon
+                name="plus"
+                color={editable ? palette.accent : palette.sec}
+                size={20}
+                weight="light"
+              />
+            </View>
           </Pressable>
           <View style={styles.flex} />
           {sendNow ? (
@@ -175,27 +283,47 @@ export function Composer({
               <Text style={[typography.caption, { color: palette.accent }]}>Send now</Text>
             </Pressable>
           ) : null}
+          {mic === "hidden" || micCaption === undefined ? null : (
+            <Text
+              testID="composer-mic-caption"
+              style={[typography.caption, styles.caption, { color: palette.sec }]}
+            >
+              {micCaption}
+            </Text>
+          )}
           {mic === "hidden" ? null : (
             <Pressable
-              testID={listening ? "composer-mic-listening" : "composer-mic"}
+              testID={MIC_ID[mic]}
               accessibilityRole="button"
-              accessibilityLabel={listening ? "Stop dictation" : "Dictate"}
-              disabled={!editable}
+              accessibilityLabel={MIC_LABEL[mic]}
+              accessibilityState={{ disabled: !editable || finalizing }}
+              // A tap while transcribing does nothing (`dictationReduce`): say so.
+              disabled={!editable || finalizing}
               onPress={onMic}
-              hitSlop={6}
-              style={styles.round}
+              style={styles.hit}
             >
-              {listening ? (
-                <View style={{ opacity: 0.4 + 0.6 * level }}>
-                  <Icon name="waveform" color={palette.accent} size={19} />
-                </View>
-              ) : (
-                <Icon
-                  name="mic"
-                  color={editable && mic === "idle" ? palette.accent : palette.sec}
-                  size={19}
-                />
-              )}
+              <View
+                style={[
+                  styles.circle,
+                  { backgroundColor: listening ? palette.accentSoftStrong : palette.accentSoft },
+                ]}
+              >
+                {listening ? (
+                  <>
+                    <Halo color={palette.accent} />
+                    <View style={[styles.recSquare, { backgroundColor: palette.accent }]} />
+                  </>
+                ) : finalizing ? (
+                  <Spinner color={palette.sec} />
+                ) : (
+                  <Icon
+                    name="mic"
+                    color={editable && mic === "idle" ? palette.accent : palette.sec}
+                    size={22}
+                    weight="light"
+                  />
+                )}
+              </View>
             </Pressable>
           )}
           <Pressable
@@ -205,17 +333,20 @@ export function Composer({
             accessibilityState={{ disabled }}
             disabled={disabled}
             onPress={onPress}
+            // The 36 pt circle + 4 pt each side = a 44 pt target.
+            hitSlop={4}
             style={({ pressed }) => [
               styles.slot,
               {
+                // S2: ready = the soft strong circle; empty = no circle at all.
                 backgroundColor:
                   slot === "stop"
                     ? palette.label
                     : slot === "up-dim"
-                      ? palette.fill
+                      ? "transparent"
                       : slot === "clock"
                         ? palette.fill
-                        : palette.accentFill,
+                        : palette.accentSoftStrong,
               },
               pressed ? { opacity: 0.7 } : undefined,
             ]}
@@ -225,12 +356,14 @@ export function Composer({
             ) : slot === "clock" ? (
               <Icon name="clock" color={palette.label} size={17} />
             ) : (
-              <Icon
-                name="arrow.up"
-                color={slot === "up-dim" ? palette.sec : palette.onAccent}
-                size={18}
-                weight="bold"
-              />
+              <View style={slot === "up-dim" ? styles.dim : undefined}>
+                <Icon
+                  name="arrow.up"
+                  color={slot === "up-dim" ? palette.sec : palette.accent}
+                  size={18}
+                  weight="bold"
+                />
+              </View>
             )}
           </Pressable>
         </View>
@@ -259,7 +392,32 @@ const styles = StyleSheet.create({
   input: { maxHeight: 132, paddingTop: 8, paddingBottom: 4, paddingHorizontal: 10 },
   row: { flexDirection: "row", alignItems: "center", height: 36, gap: 4, paddingHorizontal: 2 },
   flex: { flex: 1 },
-  round: { width: 32, height: 36, alignItems: "center", justifyContent: "center" },
+  // A 44×44 target in the 36 pt row: it overhangs 4 pt above and below.
+  hit: {
+    width: 44,
+    height: 44,
+    marginVertical: -4,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  circle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  halo: { position: "absolute", width: 32, height: 32, borderRadius: 16 },
+  recSquare: { width: 11, height: 11, borderRadius: 2.5 },
+  arc: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1.3,
+    borderLeftColor: "transparent",
+  },
+  caption: { minWidth: 26, textAlign: "right", fontVariant: ["tabular-nums"] },
+  dim: { opacity: 0.5 },
   sendNow: {
     flexDirection: "row",
     alignItems: "center",
