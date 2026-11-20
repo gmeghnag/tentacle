@@ -8,6 +8,10 @@
  *
  * The daemon is the truth: a row shows the state the daemon last REPORTED (its
  * snapshot on open, then every `capabilities` echo), never an optimistic copy.
+ * Before a lazy session is open the client reports a PREVIEW instead (the
+ * switches flipped before the first message, `firstMessage`): those rows flip at
+ * once and the note says they apply from the first message
+ * (docs/feat/caps-before-first-message.md D4).
  * Names and the `by` label are daemon strings (a pod may send them): every one
  * shown passes through `oneLine`.
  */
@@ -40,20 +44,24 @@ export interface CapOp {
 
 /**
  * What the panels can do with the switches now:
- * - `on`: the daemon reported them — one switch per row;
- * - `not-open`: no session daemon-side yet (a fresh or resumed session opens at
- *   its first message), so there is nothing to switch on the daemon yet;
+ * - `on`: there is state to show — one switch per row. `firstMessage`: the
+ *   session is not open daemon-side yet, so it is the PREVIEW of what the first
+ *   message will create (`docs/feat/caps-before-first-message.md`);
+ * - `not-open`: this session's own open has not finished (an eager attach in
+ *   flight), so there is nothing to switch yet; the daemon's real state is on
+ *   its way;
  * - `unsupported`: the daemon (or this runtime) has none — an older daemon, or
  *   one that answered `MethodNotFound` (F7). No switch is shown.
  */
 export type CapsPhase =
-  | { readonly kind: "on"; readonly caps: CapsView }
+  | { readonly kind: "on"; readonly caps: CapsView; readonly firstMessage?: true }
   | { readonly kind: "not-open" }
   | { readonly kind: "unsupported" };
 
 /**
- * `caps`: the daemon's last report (undefined: none). `opened`: the session is
- * open daemon-side. `settable`: the controller can send a switch at all.
+ * `caps`: the daemon's last report, or the client's preview before the open
+ * (undefined: none). `opened`: the session is open daemon-side. `settable`: the
+ * controller can send a switch at all.
  */
 export function capsPhase(
   caps: CapsView | undefined,
@@ -64,7 +72,7 @@ export function capsPhase(
     return { kind: "unsupported" };
   }
   if (caps !== undefined) {
-    return { kind: "on", caps };
+    return opened ? { kind: "on", caps } : { kind: "on", caps, firstMessage: true };
   }
   return opened ? { kind: "unsupported" } : { kind: "not-open" };
 }
@@ -184,7 +192,9 @@ export function groupSwitch(phase: CapsPhase, members: readonly string[]): Switc
 export function capsTitleNote(phase: CapsPhase): string {
   switch (phase.kind) {
     case "on":
-      return "this session · applies to the next model call";
+      return phase.firstMessage === true
+        ? "this session · applies from the first message"
+        : "this session · applies to the next model call";
     case "not-open":
       return "on/off after the first message";
     default:
@@ -225,6 +235,24 @@ export const switchFailedNotice = (op: CapOp, error: unknown): string =>
   `_Could not turn ${oneLine(op.name)} ${op.enabled ? "on" : "off"}: ${oneLine(
     error instanceof Error ? error.message : String(error),
   )}_`;
+
+/**
+ * The client held this first message back because a switch flipped before it
+ * could not be applied (`SwitchesNotAppliedError`, docs/feat/caps-before-first-
+ * message.md D4/F2). Structural, by `name`: `tui` does not depend on `client`.
+ */
+export function switchesNotApplied(error: unknown): boolean {
+  return error instanceof Error && error.name === "SwitchesNotAppliedError";
+}
+
+/**
+ * What a held-back first message says. The session IS open and its switches are
+ * now live and real: a second Enter sends the text as it is, and a switch can be
+ * fixed in the panels first. Each refusal already had its own line
+ * (`switchFailedNotice`), so this one never repeats the reasons.
+ */
+export const switchesNotAppliedNotice = (): string =>
+  "_Message not sent: a switch could not be applied (above). The session has started: the panels now show its real switches. Enter sends it as it is._";
 
 /** The status-line marker while something is off (null when everything is on). */
 export function capsMarker(caps: CapsView | undefined): string | null {

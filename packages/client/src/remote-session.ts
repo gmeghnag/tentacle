@@ -47,6 +47,17 @@ import { type ReturnedRow, handBack, restoredByRefusal, stayingRows } from "./ha
 import type { ImageInput } from "./image-input.ts";
 import { turnRecovery } from "./link-machine.ts";
 import { type SessionEvent, stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
+import {
+  type CapabilityFlip,
+  type SwitchFailure,
+  SwitchesNotAppliedError,
+  flipKey,
+  flipRefusal,
+  noteFlip,
+  previewBase,
+  previewCapabilities,
+  vanishedSkills,
+} from "./pending-capabilities.ts";
 import { AsyncQueue } from "./queue.ts";
 import {
   type ArtifactReadOptions,
@@ -65,6 +76,22 @@ import type { SubagentNotify } from "./subagents.ts";
 
 /** Own turns remembered by `ownsTurn` after they end (the oldest fall off). */
 const MINTED_TURNS_MAX = 256;
+
+/**
+ * The switches pressed before a lazy session's open (docs/feat/caps-before-first-message.md
+ * D2): the flips in order, each with the promise its press is waiting on, so
+ * every press settles with the daemon's own answer (or its refusal).
+ */
+interface PreOpenFlips {
+  flips: readonly CapabilityFlip[];
+  readonly waiting: Map<string, PendingFlipWait>;
+}
+
+interface PendingFlipWait {
+  readonly flip: CapabilityFlip;
+  resolve(): void;
+  reject(error: unknown): void;
+}
 
 /** An own turn's re-delivery needs the bubble when there ARE refs (`""` + refs is a prompt). */
 const hasRefs = (refs: readonly AttachmentRef[] | undefined): refs is readonly AttachmentRef[] =>
@@ -267,6 +294,31 @@ export class RemoteSession implements SessionStreamListener {
    */
   private readonly closeIfLast: boolean;
   /**
+   * The switches flipped BEFORE this session is open daemon-side
+   * (docs/feat/caps-before-first-message.md D2), in press order (last wins per
+   * key). Present only on a session this client would CREATE (`isLazy`); the
+   * one open applies them between `session/open` and the first `session/prompt`.
+   * Each flip's promise settles when that open applies it.
+   */
+  private preOpen: PreOpenFlips | null = null;
+  /**
+   * The host's own tool switches, from the no-session `session/tools` answer
+   * (`tools()`, D2/D3): a pod's `tools.enabled`, which the create will apply —
+   * so the preview must show it, not just what the laptop seeds.
+   */
+  private hostDisabledTools: readonly string[] = [];
+  /**
+   * A switch flipped before the first message could not be applied (F2): the
+   * NEXT send takes this and refuses itself, once, before installing a turn or
+   * writing a prompt. Never a wire error (local only).
+   *
+   * `held`: the turn ids the refusal covers — the first send's, then any message
+   * racing it (an `enqueue`, a `sendNow` bound to the same turn). A turn id that
+   * is NOT one of them is the person deciding again: the refusal is cleared and
+   * the message goes out as the session now is.
+   */
+  private heldFailure: { error: SwitchesNotAppliedError; held: Set<string> } | null = null;
+  /**
    * The turn the daemon's stream says runs (own or foreign): set by a
    * `turn_start` or a reset that names one, cleared by its `turn_end`. What
    * steering, send-now and the activity cancel bind to.
@@ -384,6 +436,12 @@ export class RemoteSession implements SessionStreamListener {
    * hides its toggles ("not supported by this computer").
    */
   capabilities(): SessionCapabilitiesWire | undefined {
+    // Before the open there is no daemon state, but there IS a preview: what
+    // this session WILL be (the create seed ∪ the pending flips), so the panels
+    // show switches from the start (docs/feat/caps-before-first-message.md D2).
+    if (this.id === null && this.capabilityState === undefined && this.isLazy()) {
+      return this.preview();
+    }
     return this.capabilityState;
   }
 
@@ -416,6 +474,14 @@ export class RemoteSession implements SessionStreamListener {
     name: string,
     enabled: boolean,
   ): Promise<SessionCapabilitiesWire> {
+    if (this.isLazy()) {
+      return this.notePreOpenFlip({ kind, name, enabled });
+    }
+    if (this.id === null && this.opening !== null) {
+      // An open is in flight (the eager attach, or this session's own create):
+      // the flip goes after it, live — like `rename`.
+      await this.opening;
+    }
     try {
       const result = await this.client.setSessionCapability(this, kind, name, enabled);
       return result.capabilities;
@@ -428,14 +494,180 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * A session whose open this client still OWES (`createOrAttach`): not an
+   * attach, never opened, nothing opening, not closed. The only shape that has
+   * a pre-open window (`docs/feat/caps-before-first-message.md` Preconditions).
+   */
+  private isLazy(): boolean {
+    return !this.attach && this.id === null && this.opening === null && !this.closed;
+  }
+
+  /**
+   * The switches this lazy session would be created with: the seed the open will
+   * send (`previewBase`, D3) — never consumed, so the open still sends it.
+   */
+  private previewBaseNow(): SessionCapabilitiesWire {
+    const seed = this.client.peekCreateSeed(this.seedCaps);
+    return previewBase(seed, this.hostDisabledTools);
+  }
+
+  /** The preview: the base with the pending flips applied (`previewCapabilities`). */
+  private preview(): SessionCapabilitiesWire {
+    return previewCapabilities(this.previewBaseNow(), this.preOpen?.flips ?? []).caps;
+  }
+
+  /**
+   * Record a flip pressed before the open (D2): the row flips at once (the
+   * preview is emitted with no `by` — nobody else did it), and its promise
+   * settles when the open applies it: resolved on the ack, rejected with the
+   * daemon's refusal. A flip the preview can never apply (F8) is refused here,
+   * with the daemon's own text, and nothing is recorded. A superseded flip of
+   * the same key settles as superseded (resolved), so no promise dangles.
+   */
+  private notePreOpenFlip(flip: CapabilityFlip): Promise<SessionCapabilitiesWire> {
+    const base = this.previewBaseNow();
+    const attempt = previewCapabilities(base, [flip]);
+    const refused = attempt.refused[0];
+    if (refused !== undefined) {
+      return Promise.reject(new RpcError(JsonRpcErrorCode.InvalidParams, flipRefusal(refused)));
+    }
+    const preOpen = this.preOpen ?? { flips: [], waiting: new Map<string, PendingFlipWait>() };
+    this.preOpen = preOpen;
+    const key = flipKey(flip);
+    preOpen.waiting.get(key)?.resolve(); // superseded: its press is not lost, replaced
+    preOpen.waiting.delete(key);
+    preOpen.flips = noteFlip(preOpen.flips, flip);
+    const settled = new Promise<SessionCapabilitiesWire>((resolve, reject) => {
+      preOpen.waiting.set(key, {
+        flip,
+        resolve: () => resolve(attempt.caps),
+        reject,
+      });
+    });
+    this.emitCapabilities(this.preview());
+    return settled;
+  }
+
+  /**
+   * The open landed: apply the switches pressed before it, ONE
+   * `session/set_capability` at a time, each awaited (D2). Each flip is
+   * independent, so a refusal is recorded and the next one still goes. Only when
+   * this resolves do `this.id`, the `opening` and the listeners see the session
+   * open — that is what keeps a racing `enqueue`/`sendNow` (and the prompt) from
+   * beating the sets.
+   */
+  private async applyPreOpen(sessionId: string): Promise<void> {
+    const preOpen = this.preOpen;
+    if (preOpen === null) {
+      return;
+    }
+    const failed: SwitchFailure[] = [];
+    const applied: CapabilityFlip[] = [];
+    /** Skill flips settle AFTER the vanished-skills read: the daemon stores one it does not list. */
+    const deferred: CapabilityFlip[] = [];
+    for (const flip of preOpen.flips) {
+      try {
+        const result = await this.client.setCapabilityOn(
+          sessionId,
+          flip.kind,
+          flip.name,
+          flip.enabled,
+        );
+        this.capabilityState = result.capabilities;
+        applied.push(flip);
+        if (flip.kind === "skill") {
+          deferred.push(flip);
+          continue;
+        }
+        const key = flipKey(flip);
+        const wait = preOpen.waiting.get(key);
+        if (wait !== undefined && wait.flip === flip) {
+          preOpen.waiting.delete(key);
+          wait.resolve();
+        }
+      } catch (error) {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          // An older daemon with no switches (F9): the panels hide them (F7).
+          this.capabilityState = undefined;
+        }
+        const reason = error instanceof Error ? error.message : String(error);
+        failed.push({ kind: flip.kind, name: flip.name, enabled: flip.enabled, reason });
+        const key = flipKey(flip);
+        const wait = preOpen.waiting.get(key);
+        if (wait !== undefined && wait.flip === flip) {
+          preOpen.waiting.delete(key);
+          wait.reject(error);
+        }
+      }
+    }
+    // A flipped skill the opened session no longer lists is STORED by the daemon
+    // (F10), so only a read can tell (Q3): one line, and the prompt is NOT held.
+    // `null`: the read failed (an older daemon, a drop) — nothing is claimed.
+    let listed: ReadonlySet<string> | null = null;
+    if (deferred.length > 0) {
+      try {
+        const available = await this.client.sessionSkills(sessionId);
+        listed = new Set(available.skills.map((s) => s.name));
+      } catch {
+        // Display only: never a reason to hold the person's message.
+      }
+    }
+    for (const flip of deferred) {
+      const key = flipKey(flip);
+      const wait = preOpen.waiting.get(key);
+      if (wait === undefined || wait.flip !== flip) {
+        continue;
+      }
+      preOpen.waiting.delete(key);
+      if (listed !== null && vanishedSkills([flip], [...listed]).length > 0) {
+        wait.reject(
+          new RpcError(
+            JsonRpcErrorCode.InvalidParams,
+            "not in this session any more (kept off; applies if it comes back)",
+          ),
+        );
+      } else {
+        wait.resolve();
+      }
+    }
+    this.preOpen = null;
+    if (failed.length > 0) {
+      this.heldFailure = { error: new SwitchesNotAppliedError(failed), held: new Set() };
+    }
+  }
+
+  /**
+   * A send's held-back refusal (F2), for the turn asking about it: the turn that
+   * was HELD (the first send's), or a message that raced it (`turnId`, which
+   * joins the set). A turn id outside the set is a NEW decision by the person:
+   * the refusal is dropped and the message goes out as the session now is.
+   */
+  private heldFor(turnId: string): SwitchesNotAppliedError | null {
+    const held = this.heldFailure;
+    if (held === null) {
+      return null;
+    }
+    if (held.held.size === 0 || held.held.has(turnId)) {
+      held.held.add(turnId);
+      return held.error;
+    }
+    this.heldFailure = null;
+    return null;
+  }
+
+  /**
    * The NEXT session this client creates starts with this one's switches
    * (`OpenParams.capabilities`, S3b): a `/clear` close-and-replace keeps them
    * (owner Q5). A no-op while the daemon has reported none (unknown or an older
    * daemon): nothing to carry.
    */
   seedCapabilities(): void {
-    if (this.capabilityState !== undefined) {
-      this.client.seedCapabilitiesOnCreate(this.capabilityState);
+    // A session nothing has opened yet (a `/clear` before the first message)
+    // has no daemon state to carry: its PREVIEW is what the person has chosen,
+    // so that is what the next session starts with (Q5, D2).
+    const state = this.capabilityState ?? (this.isLazy() ? this.preview() : undefined);
+    if (state !== undefined) {
+      this.client.seedCapabilitiesOnCreate(state);
     }
   }
 
@@ -451,6 +683,18 @@ export class RemoteSession implements SessionStreamListener {
 
   private noteCapabilities(state: SessionCapabilitiesWire | undefined, by?: string): void {
     this.capabilityState = state;
+    // While the open applies the switches pressed before the first message, the
+    // rows would flicker preview → snapshot (the create's seed) → echo, and an
+    // echo carries `by`, which reads as "another device" (D2). The state is
+    // stored; ONE emission follows the sets. A press of the person's own (no
+    // open in flight) is shown at once.
+    if (this.opening !== null && this.preOpen !== null) {
+      return;
+    }
+    this.emitCapabilities(state, by);
+  }
+
+  private emitCapabilities(state: SessionCapabilitiesWire | undefined, by?: string): void {
     for (const listener of [...this.capabilityListeners]) {
       listener(state, by);
     }
@@ -597,10 +841,21 @@ export class RemoteSession implements SessionStreamListener {
           this.seedCaps,
         )
         .then(
-          (sessionId) => {
+          async (sessionId) => {
+            // The switches pressed before the first message land BEFORE anyone
+            // awaiting this open resumes — the prompt above all (D2, the whole
+            // point of the task): `this.id` and `opening` are set only here.
+            const hadFlips = this.preOpen !== null;
+            await this.applyPreOpen(sessionId);
             this.id = sessionId;
             this.opening = null;
             this.client.setListener(sessionId, this);
+            // ONE emission, after the sets: no preview → snapshot → echo flicker,
+            // and no `by` on a switch this client itself just applied. Nothing
+            // flipped: the snapshot was emitted as it came, as before (F12).
+            if (hadFlips) {
+              this.emitCapabilities(this.capabilityState);
+            }
             return sessionId;
           },
           (error: unknown) => {
@@ -1192,7 +1447,16 @@ export class RemoteSession implements SessionStreamListener {
    */
   async tools(): Promise<SessionToolsResult> {
     const id = this.id ?? (this.opening ? await this.opening : null);
-    return this.client.sessionTools(id ?? undefined);
+    const result = await this.client.sessionTools(id ?? undefined);
+    if (id === null && this.isLazy()) {
+      // What the HOST will apply at the create (a pod's `tools.enabled`): the
+      // preview must show it, or a row says "on" for a tool the create turns
+      // off (tool-toggles review note, D2/D3).
+      const disabled = result.tools.filter((t) => t.disabled === true).map((t) => t.name);
+      this.hostDisabledTools = [...disabled];
+      this.emitCapabilities(this.preview());
+    }
+    return result;
   }
 
   /**
@@ -1345,7 +1609,20 @@ export class RemoteSession implements SessionStreamListener {
       return this.client.enqueue(this.id, key, turnId, text, voice);
     }
     if (this.opening) {
-      return this.opening.then((id) => this.client.enqueue(id, key, turnId, text, voice));
+      // A racing message behind a first send whose switches could not be applied
+      // (F5): it is bound to that held turn, so it is refused with the same
+      // error — never sent as a turn the person did not intend.
+      return this.opening.then(async (id) => {
+        // The first send's turn is installed before this resumes — and, if its
+        // switches failed, it was already refused and no turn exists (F5). A
+        // held turn means the message is bound to it: refused with the same
+        // error, never sent as a turn the person did not intend.
+        const held = this.heldFor(turnId);
+        if (held !== null) {
+          throw held;
+        }
+        return this.client.enqueue(id, key, turnId, text, voice);
+      });
     }
     return Promise.resolve();
   }
@@ -1448,6 +1725,17 @@ export class RemoteSession implements SessionStreamListener {
       throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
     }
     this.refuseIfRemoteClosed();
+    // A racing send-now behind a first send whose switches could not be applied
+    // (F5): nothing runs to interrupt, and its texts must never go out as a turn
+    // the person did not intend — refused with the same error.
+    const heldTurn = this.streaming ?? this.turnId;
+    if (this.opening === null && heldTurn !== null) {
+      const held = this.heldFor(heldTurn);
+      if (held !== null) {
+        for (const key of restoredByRefusal(held, messages)) this.handedBack.add(key);
+        throw held;
+      }
+    }
     // A streaming foreign turn is the current one too: the successor waits
     // for its end; the interrupt names the turn the daemon runs.
     const foreign = this.foreign && !this.foreign.ended ? this.foreign : null;
@@ -1612,6 +1900,14 @@ export class RemoteSession implements SessionStreamListener {
     const id = this.id;
     if (id === null) {
       throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
+    }
+    // A switch flipped before the first message could not be applied (F2): the
+    // session IS open, so nothing is pending, but this prompt would run as if it
+    // had been — refused BEFORE a turn is installed or a frame is written. The
+    // held refusal belongs to THIS turn (and to any message racing it).
+    const held = this.heldFor(turnId);
+    if (held !== null) {
+      throw held;
     }
     // A send never CLOBBERS a turn already in flight: the old turn would lose
     // its owner here, its `turn_end` would find no turn to end (`turnFor` does

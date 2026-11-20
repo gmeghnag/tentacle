@@ -15,6 +15,7 @@
 import {
   type CapOp,
   type CapsPhase,
+  capsTitleNote,
   groupSwitch,
   isOff,
   switchGlyph,
@@ -127,7 +128,7 @@ export function toolsTitle(tools: readonly ToolEntryView[], phase: CapsPhase): s
   const p = toolsPhase(phase);
   const note =
     p.kind === "on"
-      ? "this session · applies to the next model call"
+      ? capsTitleNote(p)
       : p.kind === "not-open"
         ? "on/off after the first message"
         : "on/off needs a newer tentacle on this computer";

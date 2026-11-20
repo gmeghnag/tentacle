@@ -129,6 +129,35 @@ describe("the switches reach the laptop store", () => {
     await runtime.dispose();
   });
 
+  test("C4 a flip before the first message saves nothing, then applies to request #1", async () => {
+    // docs/feat/caps-before-first-message.md D5. Mutation M6: drop the
+    // `inner.opened()` guard in `persistingController` → the preview flushes a
+    // save (the store gets a file, `saveConfirmed` flips) before any message.
+    const d = daemon();
+    const { store, saver, runtime } = await runtimeOn("preopen", d);
+    const ctl = runtime.createSession();
+    const before = ctl.saveConfirmed();
+    const id = ctl.sessionId ?? "";
+    const flipped = ctl.setCapability?.("mcp", "echo", false);
+    // Synchronously: a flush would have cleared it at once (the emission is
+    // synchronous); a read-back of a never-opened session re-confirms soon after.
+    expect(ctl.saveConfirmed()).toBe(before);
+    expect(ctl.capabilities?.()).toEqual(OFF);
+    await tick(20);
+    await saver.drain();
+    expect(ctl.saveConfirmed()).toBe(before);
+    expect((await store.load(id)).status).not.toBe("ok");
+
+    await drain(ctl.send("hello"));
+    await flipped;
+    expect(d.model.tools[0]).toContain("shell");
+    expect(d.model.tools[0]).not.toContain("mcp__echo__echo");
+    await tick(20);
+    await saver.drain();
+    expect((await loaded(store, ctl.sessionId ?? "")).capabilities).toEqual(OFF);
+    await runtime.dispose();
+  });
+
   test("C2 --resume recreates the session with them: its first request lacks the tool", async () => {
     // Mutation: `build` does not pass `record.capabilities` to `newSession` → the tool is offered.
     const first = daemon();
