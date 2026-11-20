@@ -877,3 +877,30 @@ But it ran only the touched files, so it missed 6 red tests in untouched `serve-
 expose a plan-level gap. It also mis-stated that the mobile tests cannot run.
 Same model family as the planner (opus), so a shared blind spot (the plan itself
 chose "legacy does not count") survived both passes.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-20* (fresh context; scope: `git diff HEAD~1`, commit `14b5a979`)
+
+**Verdict: REQUEST-CHANGES.** The only blocker left is F2, and it needs an owner decision.
+
+- **F1 — FIXED, verified.** `device-authority.ts:252` now counts `adoptable` in
+  `wantsReachability`. The new relay-leg Q3 test (`relay-link.test.ts` "today's phone
+  over the relay…") uses a v1 registry, a real relay and real Noise, and checks
+  that the phone is adopted. My mutation (drop the `adoptable` clause): 4 files
+  went from 56/0 to **48 pass / 8 fail**, so it is KILLED. I restored the file and the tree is clean. `knows` is unchanged, so
+  pushes still go only to devices of this project. Q stops dialling once P adopts (pinned).
+- **F2 — STILL OPEN (HIGH, gate).** `apps/mobile/test/pairing-e2e.test.ts`:
+  **7 fail** (the app's `runPairing` sends no `perProject` and gets `update_app`).
+  `e2e-pairing.test.ts` is green with the harness changes (`projectDir`, a live
+  serve record, `perProject: true` on the simulated claim). The executor reports the
+  id-match ripple (`notification-action.ts:174`, `notifications-expo.ts:163`,
+  `push-manager.ts:311`) and proposes (i′): `runPairing` sends `perProject` but keeps
+  `computer.id` storage until (b). That is sound and the smallest change, but it is the owner's call (§4/§6).
+- **F3 — FIXED.** The Execution signature now names deepseek, with a note on the correction.
+- **Regressions:** `bun run lint` is clean (2159 files) and `bun run typecheck` is clean.
+  `packages/daemon/test` + cli `pair`/`devices-projects`/`serve-relay`: 1487 pass / 1
+  skip / 1 fail. The fail is `serve-log-store.test.ts` S11 (the 200-SIGKILL chaos test), which this
+  diff does not touch; it passes 22/0 when run alone, so it is load flakiness.
+- **Accepted cost (not a finding):** a legacy entry that is never used again makes
+  every serve dial the relay until someone runs `devices revoke` or `reset`. This is bounded, but the changelog should say it.
