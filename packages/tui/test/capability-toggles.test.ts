@@ -10,9 +10,12 @@ import {
   type CapsView,
   capsMarker,
   capsPhase,
+  capsTitleNote,
   remoteChangeNotices,
   sessionCapsPhase,
   settled,
+  switchesNotApplied,
+  switchesNotAppliedNotice,
 } from "../src/capability-toggles.ts";
 import type { KeySnapshot } from "../src/keys/snapshot.ts";
 import type { McpServerView } from "../src/mcp-panel.ts";
@@ -69,6 +72,26 @@ describe("the phase: what the panels can do with the switches now", () => {
     expect(capsPhase(undefined, true, true)).toEqual(UNSUPPORTED);
     // A controller that cannot send a switch never shows one.
     expect(capsPhase(caps(), true, false)).toEqual(UNSUPPORTED);
+  });
+
+  test("a preview before the open → on + firstMessage, and the note says so (caps-before-first-message D4)", () => {
+    // Mutation M5: `not-open` whenever `!opened` → red.
+    const phase = capsPhase(caps(["github"]), false, true);
+    expect(phase).toEqual({ kind: "on", caps: caps(["github"]), firstMessage: true });
+    expect(capsTitleNote(phase)).toBe("this session · applies from the first message");
+    expect(capsTitleNote(capsPhase(caps(), true, true))).toBe(
+      "this session · applies to the next model call",
+    );
+  });
+
+  test("a held-back first message is recognised by name, and its line says what to do", () => {
+    const held = new Error("a switch could not be applied: visuals off (unknown)");
+    held.name = "SwitchesNotAppliedError";
+    expect(switchesNotApplied(held)).toBe(true);
+    expect(switchesNotApplied(new Error("boom"))).toBe(false);
+    expect(switchesNotApplied("SwitchesNotAppliedError")).toBe(false);
+    expect(switchesNotAppliedNotice()).toContain("Message not sent");
+    expect(switchesNotAppliedNotice()).toContain("Enter sends it as it is");
   });
 
   test("of a controller: no `setCapability` → unsupported; no `opened` → taken as open", () => {

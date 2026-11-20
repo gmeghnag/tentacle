@@ -3747,10 +3747,30 @@ export class RemoteClient {
     name: string,
     enabled: boolean,
   ): Promise<SetCapabilityResult> {
+    // The id this session WILL open under is not the daemon's yet: a frame sent
+    // under it is refused `UnknownSession` (docs/feat/caps-before-first-message.md
+    // D2b). A session that is not open has nothing to switch: refuse locally.
+    if (!session.opened()) {
+      return Promise.reject(new Error("the session is not open"));
+    }
     const sessionId = session.sessionId;
     if (sessionId === null) {
       return Promise.reject(new Error("the session is not open"));
     }
+    return this.setCapabilityOn(sessionId, kind, name, enabled);
+  }
+
+  /**
+   * `session/set_capability` for an id the caller holds explicitly: the open
+   * that applies a session's pre-open switches has not set its `id` yet
+   * (docs/feat/caps-before-first-message.md D2b).
+   */
+  setCapabilityOn(
+    sessionId: string,
+    kind: "mcp" | "skill" | "tool",
+    name: string,
+    enabled: boolean,
+  ): Promise<SetCapabilityResult> {
     return this.call(this.peer, Method.SetCapability, { sessionId, kind, name, enabled }).then(
       (result) => result as SetCapabilityResult,
     );
@@ -3792,6 +3812,18 @@ export class RemoteClient {
     const state = this.seedCaps;
     this.seedCaps = undefined;
     return state;
+  }
+
+  /**
+   * What the open of a session this client creates NOW would seed, WITHOUT
+   * consuming the one-shot seed (docs/feat/caps-before-first-message.md D3):
+   * `capabilities ?? carried`, unioned with the laptop's own tool switches —
+   * the same expression `openSession` sends. The preview the panels show before
+   * a lazy session opens starts from exactly this, so it cannot disagree with
+   * the create about the base.
+   */
+  peekCreateSeed(capabilities?: SessionCapabilitiesWire): SessionCapabilitiesWire | undefined {
+    return withBaseTools(capabilities ?? this.seedCaps, this.baseDisabledTools);
   }
 
   /**

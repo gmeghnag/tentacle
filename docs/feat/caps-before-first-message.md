@@ -1,6 +1,6 @@
 # feat/caps-before-first-message — `/mcp`, `/skills`, `/tools` switches before the first message
 
-> **Status:** implementation — plan written, awaiting the owner's answers and approval
+> **Status:** execution done — awaiting the fresh-context Review
 > **Branch:** `feat/caps-before-first-message`
 > **Size:** M (S1 client M · S2 TUI S) · **Blast:** cross-module (client + cli + tui; no protocol, no daemon, no persisted format) · **Suited:** Opus plan, DeepSeek exec, Opus fresh-context review (Q5)
 > **Changelog:** `changelog.d/caps-before-first-message.changed.md`: "**Switches work before the first message.** In a new or resumed session, `/mcp`, `/skills` and `/tools` can switch servers, skills and tools on or off before anything is sent. The switches apply from the first message, so the first model call already runs without them."
@@ -335,3 +335,49 @@ Red before green for each new test: show it failing on `main` first (most fail b
 6. **Eager attaches (`connect --resume`, pod `attach`, a detached run's TUIs) during their attach round trip.** **Rec: keep `not-open` there.** The session exists, its real state arrives with the attach (milliseconds to a second), and a preview built before it would be a guess about someone else's live session.
 
 **Owner answers (2026-11-20):** Owner questions 1–6 all as recommended. Implementation APPROVED (DeepSeek executes, Opus fresh-context review).
+
+## Execution
+
+*— claude-opus-5-5, 2026-11-20* (resumed DeepSeek's partial working tree after the watchdog stopped it; its edits were kept where right and corrected below)
+
+**Load-bearing check (re-run first): holds.** `rg "new RemoteSession\("` → one production site, `remote-client.ts:1451` (the others are tests). `rg "createOrAttach\(\)"` → `openSeeded`, `attachImage`, `attachDocument`, `runTurn` only. No new path opens a lazy session.
+
+**Repro.** The Context's `repro.ts` (before: the pre-open set is refused `UnknownSession` and a frame goes out). On the new code the same script blocks at `await session.setCapability(...)`. That is the new contract: a pre-open flip is pending until the first message's open applies it. The client tests below pin it (no frame, a preview, settled at the open).
+
+**As built, in plan order:**
+1. `client/src/pending-capabilities.ts` (new, DeepSeek, kept): `noteFlip`, `previewCapabilities` (via the agent's `applyCapabilityOp`), `previewBase`, `vanishedSkills`, `flipRefusal`, `flipKey`, `SwitchesNotAppliedError`. Exported from `client/src/index.ts`.
+2. `client/src/remote-client.ts` (DeepSeek, kept): `setCapabilityOn(sessionId, …)`. `setSessionCapability` wraps it and refuses locally when `!session.opened()` (the Repro's side finding: no frame under the not-yet-created id). `peekCreateSeed` = `withBaseTools(capabilities ?? seedCaps, baseDisabledTools)`, not consumed.
+3. `client/src/remote-session.ts`: `preOpen`, `hostDisabledTools`, `heldFailure`, `isLazy`, `notePreOpenFlip`, `applyPreOpen` (inside `createOrAttach`'s `.then`, before `this.id`/`opening` are set), `heldFor` in `runTurn`/`enqueue`/`sendNow`, `tools()` host set, `seedCapabilities()` preview. **Corrections made to the partial edits:**
+   - The echo suppression in `noteCapabilities` was `opening !== null`. That also swallowed an eager ATTACH's snapshot, and changed the timing of the no-flip path. Now it is `opening !== null && preOpen !== null` (only while this open carries flips). The one post-sets emission fires only when there were flips (`hadFlips`), so F12 is unchanged.
+   - The preview was written into `capabilityState` (via `noteCapabilities`). After an open against an older daemon (no snapshot), that would have left a stale preview showing switches. The preview is now only emitted (`emitCapabilities`), never stored. `capabilities()` computes it while lazy.
+   - `applyPreOpen` clears `capabilityState` on `MethodNotFound` (the F7/F9 path the plan names).
+   - `heldFor(undefined)` consumed the refusal from a `sendNow` with no bound turn. `sendNow` now checks only when a turn is bound, and `heldFor` takes a required id.
+   - Removed unused `@tentacle/agent` imports.
+4. `cli/src/local-runtime.ts`: D5 guard `if (changed && inner.opened())` (DeepSeek, kept).
+5. `tui/src/capability-toggles.ts`: `firstMessage` on `on`, `capsTitleNote`, `switchesNotApplied`, `switchesNotAppliedNotice`, doc comment (DeepSeek, kept).
+6. `tui/src/useTurnDriver.ts`: the `SwitchesNotAppliedError` branch next to `refusedBeforeStart` (DeepSeek, kept).
+7. `changelog.d/caps-before-first-message.changed.md`: the bullet from the doc header.
+
+**Drift from Implementation:**
+- **`tui/src/tools-panel.ts` changed (1 line + import).** It is not in the Files list. `toolsTitle` hard-coded "applies to the next model call" instead of calling `capsTitleNote`, so `/tools` would not say "applies from the first message". It now calls `capsTitleNote(p)` for `on`. `App.tsx`, `app-types.ts` and the panels needed no change, as the plan said.
+- The `capability-toggles-app.test.tsx` `not-open` test was NOT moved. Its fake is already the attach-in-flight shape (not opened, `capabilities()` undefined), which is exactly Q6's remaining `not-open` case, and it still passes.
+- T-C2 seeds `chart` off through the agent's `capabilities` (the host's own state) rather than a `buildAgent` config. The property is the same: the create holds it off, and the pre-open ON set must turn it on before request #1.
+- T-C5's scripted daemon sends no echoes, so it could not catch M4 (verified: green under M4). Added **T-C5b** on the real daemon (open snapshot + `by` echo). It is the M4 target.
+- **The M6 target is the synchronous `saveConfirmed()` read right after the flip** (cli C4). Under M6 the flush is transient: a read-back of a never-opened session re-confirms at once, so a read after a tick stays green (verified).
+
+**Tests** (all green): `client/test/pending-capabilities.test.ts` (new, 9), `client/test/caps-before-first-message.test.ts` (new: T-C1, T-C2, T-C3, T-C5, T-C5b, T-C6, T-C7, T-C8, T-C9, F5/T-C4 enqueue race), `client/test/session-capabilities.test.ts` (pre-open test rewritten: pending, no frame, client-level local refusal), `cli/test/session-capabilities-resume.test.ts` (C4: pre-open flip saves nothing, then applies to request #1 and lands in the store), `tui/test/capability-toggles.test.ts` (+2), `tui/test/caps-before-first-message-app.test.tsx` (new: `/mcp` live column + Space + `⊘ 1 server off`; `/tools` group; a held-back send withdraws the bubble, restores the text, and shows the line). The `/skills` panel is not separately frame-tested: it uses the same phase and row functions as `/mcp`.
+
+Last narrow run: 10 touched/covering files, **157 pass, 0 fail**. `bunx biome check` on the 14 changed files: clean. `tsc --noEmit -p .` filtered to the changed files: no errors.
+
+**Mutations** (each applied, run, reverted; all red):
+| # | mutation | red tests |
+|---|---|---|
+| M1 | `void this.applyPreOpen(…)` (sets not awaited) | T-C1, T-C2, T-C3, T-C5, F5 (5 fail) |
+| M2 | `runTurn` ignores `heldFailure` | T-C3, F5 (2 fail) |
+| M3 | `noteFlip` keeps the first flip of a key | both `noteFlip` tests (2 fail) |
+| M4 | echoes emitted during `applyPreOpen` | T-C5b (1 fail; `Received +12` lines); T-C5 alone stayed green (see drift) |
+| M5 | `capsPhase` → `not-open` whenever `!opened` | unit firstMessage test, App `/mcp`, App `/tools` (3 fail) |
+| M6 | D5 guard removed | cli C4 (`Expected: true, Received: false`) |
+| M7 (extra) | `useTurnDriver` branch disabled | App held-back test (1 fail) |
+
+**Not run here (per the owner's token budget):** the full `bun run check`. The orchestrator's gate runs it. No protocol change, so no `protocol.d/` note and no schema regeneration.

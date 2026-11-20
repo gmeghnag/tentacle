@@ -691,7 +691,11 @@ export function persistingController(
     const key = state === undefined ? undefined : JSON.stringify(state);
     const changed = capsSeen !== undefined && key !== undefined && key !== capsSeen;
     capsSeen = key ?? capsSeen;
-    if (changed) {
+    // Before the first message the switches are a PREVIEW (docs/feat/
+    // caps-before-first-message.md D5): nothing is open daemon-side to save, and
+    // a save would clear `saveConfirmed` for a session that writes nothing to
+    // `<uid>.jsonl` yet — the detached-run `--rm` net reads that (§7).
+    if (changed && inner.opened()) {
       flush();
     }
   });

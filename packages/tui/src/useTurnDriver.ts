@@ -49,6 +49,7 @@ import type { HopProposalView, SessionController } from "./app-types.ts";
 import type { AttachDraft, AttachMode } from "./attach-draft.ts";
 import { attachErrorText, enterConvertsToChips, imageRowText, submitPlan } from "./attach-draft.ts";
 import type { AttachedDocument, AttachedImage } from "./attach-files.ts";
+import { switchesNotApplied, switchesNotAppliedNotice } from "./capability-toggles.ts";
 import { pushHistory } from "./history.ts";
 import type { LineEditor } from "./hooks.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
@@ -718,6 +719,17 @@ export function useTurnDriver(host: TurnHost): TurnLayer {
           stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
           abortRef.current = null;
           restoreInput(opts.own.text, attachErrorText(error));
+          restoreChips(opts.own.restoreChips);
+          restoreDocuments(opts.own.restoreDocuments);
+        } else if (opts.own && !streamed && switchesNotApplied(error)) {
+          // A switch flipped before the first message could not be applied, so
+          // the client held the prompt back (docs/feat/caps-before-first-
+          // message.md D4/F2): the bubble goes, the text and its chips come
+          // back. The session IS open now, so the panels show its real switches
+          // and a second Enter sends the text as it is — never "as if applied".
+          stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
+          abortRef.current = null;
+          restoreInput(opts.own.text, switchesNotAppliedNotice());
           restoreChips(opts.own.restoreChips);
           restoreDocuments(opts.own.restoreDocuments);
         } else if (failed.kind === "restore") {

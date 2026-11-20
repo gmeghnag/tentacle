@@ -160,12 +160,60 @@ describe("RemoteSession capabilities", () => {
     expect(seen).toEqual([]);
   });
 
-  test("a set before the session is open rejects without a call", async () => {
-    const d = daemon();
-    const rc = await d.client("laptop");
+  // docs/feat/caps-before-first-message.md D2/D2b: a set before a lazy session's
+  // open is PENDING (applied by the first message's open), and sends no frame;
+  // the client-level set on a not-open session refuses locally (it used to send
+  // a frame under the not-yet-created id, refused `UnknownSession`).
+  test("a set before the session is open is pending and sends no frame", async () => {
+    const host = new SessionHost({
+      defaultCwd: "/tmp/session-capabilities-client",
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        const agent = new Agent({
+          model: {
+            id: "quiet",
+            async *stream() {
+              yield { type: "done" as const };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: {} as ExecutionEnvironment,
+          requestPermission: (req, options) => permissions.request(req, options),
+        });
+        return { agent, permissions };
+      },
+    });
+    const [d, c] = createChannelPair();
+    new Connection(d, host);
+    const sent: string[] = [];
+    const send = c.send.bind(c);
+    c.send = (data: string) => {
+      const frame = JSON.parse(data) as { method?: string };
+      if (frame.method !== undefined) sent.push(frame.method);
+      send(data);
+    };
+    const rc = new RemoteClient(c, new PermissionBroker(), undefined, {
+      clientInfo: { name: "laptop", version: "1" },
+    });
+    await rc.initialize();
     const session = rc.newSession(undefined, "S");
-    const err = await session.setCapability("mcp", "echo", false).catch((e: unknown) => e);
-    expect(err instanceof Error && /not open/.test(err.message)).toBe(true);
+    let settled = false;
+    void session.setCapability("mcp", "echo", false).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    const local = await rc
+      .setSessionCapability(session, "mcp", "echo", false)
+      .catch((e: unknown) => e);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(local instanceof Error && /not open/.test(local.message)).toBe(true);
+    expect(settled).toBe(false);
+    expect(session.capabilities()?.disabledMcp).toEqual(["echo"]);
+    expect(sent.filter((m) => m !== Method.Initialize)).toEqual([]);
   });
 });
 
