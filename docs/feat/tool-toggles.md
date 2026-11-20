@@ -547,3 +547,26 @@ Green: `bun test packages/agent packages/config packages/protocol packages/daemo
 
 Green (narrow): `bun test packages/tui` → 2869 pass, 0 fail after the structure pins were updated.
 
+### Gate
+
+`bun run check` (typecheck → lint → test), on the S3 commit + the guard fix below:
+
+```
+$ tsc --noEmit && tsc -p apps/mobile --noEmit && tsc -p apps/relay --noEmit
+$ biome check .
+Checked 2139 files in 617ms. No fixes applied.
+ 15803 pass
+ 5 skip
+ 0 fail
+Ran 15808 tests across 1123 files. [490.43s]
+EXIT=0
+```
+
+The 5 skips are the opt-in ones (live k8s ×2, live docker ×2, the slow keepalive), none from this task. Before that: run 1 failed one more structure guard (`cli/test/subagent-panel-controller.test.ts`, the exact list of forwarded `SessionController` members: `tools` added, uncommitted at hand-off); run 2 failed `engine-runtime.test.ts` "startPodRuntime > creates + readies a pod…" once (a 20 ms wait under full-suite load; green in run 1, run 3 and 5/5 alone) — a pre-existing timing flake, not this change.
+
+### Unverified / for Review
+
+- No live run against a real pod or a real `serve` + phone: the pod path (laptop seed ∪ pod config, off wins) is proven with the in-process `SessionHost` + `Connection` (daemon tests) and the client tests, not end to end over `run`/`attach`.
+- The heuristic `~N` is `ceil(len(JSON.stringify(def))/4)`, not a provider count (Q9); the context meter remains the exact figure.
+- `connect` sends no laptop seed (S2 drift 2); `shell` names both the group and the tool (S1 drift 4).
+
