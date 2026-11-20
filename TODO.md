@@ -1287,6 +1287,14 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
   listing each tool with its definition's token cost, toggling for the
   session. Invariants: a disabled tool never reaches the model (pods too);
   a sub-agent never re-enables a tool its parent has off; phone parity.
+  **Owner-approved names (20/11):** switch by GROUP, single tool names also
+  accepted, tool names themselves unchanged —
+  `"tools": { "enabled": { "subagents": false, "fs_multi_edit": false } }`;
+  groups: `subagents` (agent_task, agent_status, agent_control, agent_message,
+  agent_kill, agent_notify), `shell` (shell, shell_output, shell_kill),
+  `schedule` (schedule_create, schedule_control), `visuals` (chart, diagram,
+  present), `context_reset`, `move_session`, `workload_shell`. `skill` is
+  never switchable.
   Type: feat · Size: M · Blast: load-bearing (the tool list the agent loop
   sends) · Suited: Opus plan + fresh-context review.
 
