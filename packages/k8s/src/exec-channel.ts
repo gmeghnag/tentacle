@@ -53,6 +53,8 @@ export interface ExecChannelOptions {
   readonly onStatus?: (text: string) => void;
   /** Heartbeat tuning (defaults below); `timers` is a test seam. */
   readonly keepalive?: KeepaliveOptions;
+  /** The cap on one stdout line, in bytes. Default `MAX_STREAM_LINE_BYTES`. */
+  readonly maxLineBytes?: number;
 }
 
 export interface KeepaliveOptions {
@@ -178,11 +180,28 @@ export function execChannel(ws: WebSocketLike, options: ExecChannelOptions = {})
     }
   };
 
-  const demux = new ExecDemux({
-    onFrame: (frame) => onMessage?.(frame),
-    ...(options.onStderr ? { onStderr: options.onStderr } : {}),
-    ...(options.onStatus ? { onError: options.onStatus } : {}),
-  });
+  const demux = new ExecDemux(
+    {
+      onFrame: (frame) => {
+        if (!closed) {
+          onMessage?.(frame);
+        }
+      },
+      ...(options.onStderr ? { onStderr: options.onStderr } : {}),
+      ...(options.onStatus ? { onError: options.onStatus } : {}),
+      // The pod broke the framing: say why, then drop the exec.
+      onViolation: (message) => {
+        options.onStderr?.(`[k8s] ${message}\n`);
+        try {
+          ws.close();
+        } catch {
+          // already closing / closed
+        }
+        fireClose();
+      },
+    },
+    options.maxLineBytes,
+  );
 
   try {
     ws.binaryType = "arraybuffer";

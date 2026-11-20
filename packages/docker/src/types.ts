@@ -76,4 +76,6 @@ export interface ExecChannelOptions {
   readonly startTimeoutMs?: number;
   /** Keepalive tuning; `timers` is a test seam. */
   readonly keepalive?: { readonly intervalMs?: number; readonly timers?: IntervalTimers };
+  /** The cap on one stdout line, in bytes. Default `MAX_STREAM_LINE_BYTES` (`@tentacle/transport`). */
+  readonly maxLineBytes?: number;
 }

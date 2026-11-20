@@ -7,8 +7,11 @@
  *   0 = stdin (client→server), 1 = stdout, 2 = stderr, 3 = error/status.
  * We tunnel RPC frames as stdin (channel 0) and read them back off stdout
  * (channel 1). A stream has no message boundaries, so — as with `streamChannel`
- * — frames are newline-delimited and the stdout side re-chunks on `\n`.
+ * — frames are newline-delimited and the stdout side re-chunks on `\n`, through
+ * the shared, capped `ByteFramer` (a pod is not trusted: AGENTS §7).
  */
+import { ByteFramer, describeViolation } from "@tentacle/transport";
+
 export const CHANNEL_STDIN = 0;
 export const CHANNEL_STDOUT = 1;
 export const CHANNEL_STDERR = 2;
@@ -33,38 +36,46 @@ export interface ExecDemuxHandlers {
   onStderr?(text: string): void;
   /** The error/status channel (3) — a terminal status at the end of the exec. */
   onError?(text: string): void;
+  /**
+   * stdout broke the framing (a line over the cap, the reserved NUL tag): the
+   * reason, once. stdout is ignored after it; the owner closes the channel.
+   */
+  onViolation?(message: string): void;
 }
 
 /**
  * Demultiplex incoming exec messages: route by channel byte, and re-chunk the
  * stdout channel into complete newline-delimited frames (a partial trailing
- * line is held until the rest arrives).
+ * line is held until the rest arrives, up to `maxLineBytes`).
  */
 export class ExecDemux {
-  private stdoutBuffer = "";
+  private readonly stdout: ByteFramer;
 
-  constructor(private readonly handlers: ExecDemuxHandlers) {}
+  constructor(
+    private readonly handlers: ExecDemuxHandlers,
+    maxLineBytes?: number,
+  ) {
+    this.stdout = new ByteFramer(
+      {
+        onLine: (line) => this.handlers.onFrame(line),
+        onViolation: (violation) =>
+          this.handlers.onViolation?.(describeViolation(violation, "pod stdout")),
+      },
+      maxLineBytes,
+    );
+  }
 
   push(message: Uint8Array): void {
     if (message.length === 0) {
       return;
     }
     const channel = message[0];
+    if (channel === CHANNEL_STDOUT) {
+      this.stdout.push(message.subarray(1));
+      return;
+    }
     const payload = decoder.decode(message.subarray(1), { stream: true });
     switch (channel) {
-      case CHANNEL_STDOUT: {
-        this.stdoutBuffer += payload;
-        let newline = this.stdoutBuffer.indexOf("\n");
-        while (newline !== -1) {
-          const line = this.stdoutBuffer.slice(0, newline);
-          this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
-          if (line !== "") {
-            this.handlers.onFrame(line);
-          }
-          newline = this.stdoutBuffer.indexOf("\n");
-        }
-        break;
-      }
       case CHANNEL_STDERR:
         if (payload !== "") {
           this.handlers.onStderr?.(payload);

@@ -107,6 +107,7 @@ import {
 } from "@tentacle/protocol";
 import {
   type DuplexChannel,
+  MAX_STREAM_LINE_BYTES,
   type RequestContext,
   RpcError,
   RpcPeer,
@@ -3185,6 +3186,8 @@ export class RemoteClient {
         }
       },
       onClose: () => this.onLinkClosed(gen),
+      // A pod is not trusted (AGENTS §7): bound what one frame may make us parse.
+      maxFrameBytes: MAX_STREAM_LINE_BYTES,
       // Log non-fatal peer errors (a stray/malformed notification, a bad frame)
       // instead of dropping them silently. Routed to the caller's sink, NEVER a
       // raw terminal write (§7): the laptop's stdout is the RPC channel/Ink's.

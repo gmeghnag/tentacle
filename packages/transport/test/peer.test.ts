@@ -165,9 +165,11 @@ describe("RpcPeer", () => {
   test("rejects an inbound frame larger than maxFrameBytes before parsing", async () => {
     const [ca, cb] = createChannelPair();
     let handlerCalls = 0;
+    const errors: string[] = [];
     // Peer on `ca` caps frames; we drive raw frames in from the bare `cb` end.
     new RpcPeer(ca, {
       maxFrameBytes: 100,
+      onError: (e) => errors.push(e.message),
       onRequest: async () => {
         handlerCalls++;
         return {};
@@ -183,6 +185,8 @@ describe("RpcPeer", () => {
     expect(err.id).toBeNull();
     expect(err.error.code).toBe(JsonRpcErrorCode.InvalidRequest);
     expect(err.error.message).toBe("frame too large");
+    // Reported locally too: never a silent drop.
+    expect(errors).toEqual(["inbound frame of 500 units over the 100 cap: dropped"]);
   });
 
   // --- $/cancelRequest + $/progress (generic peer primitives) -------------
