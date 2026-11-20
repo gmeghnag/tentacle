@@ -32,6 +32,8 @@ export interface MockModelOptions {
   readonly childStepMs?: number;
   /** Flow 29's round-3 thinking spacing (ms; `TOOLROWS_THINK_MS` by default). */
   readonly thinkMs?: number;
+  /** How long a `GATED` turn waits for `release()` before it ends anyway (ms). */
+  readonly gateCapMs?: number;
 }
 
 export interface MockModel {
@@ -39,6 +41,10 @@ export interface MockModel {
   readonly baseUrl: string;
   /** True while a `HOLD` request streams (the harness waits on it). */
   readonly held: () => boolean;
+  /** True while a `GATED` turn waits for `release()` (docs/fix/mobile-e2e-reds.md). */
+  readonly gated: () => boolean;
+  /** Ends the waiting `GATED` turn (the `model-release` hook); a no-op when none waits. */
+  release(): void;
   /** Every prompt the model was actually asked (the flows' daemon-side truth). */
   readonly prompts: readonly string[];
   /** Every refusal-with-a-reply that reached the model (flow 08's reply variant). */
@@ -95,6 +101,12 @@ export const SLOW_MS = 900;
 // 4 s (was 2.5 s): on iOS 26 Maestro's type + hide-keyboard + tap took longer
 // than a 12.5 s turn, so the steer landed after it ended (docs/feat/mobile-e2e-gate.md).
 export const STEADY_MS = 4000;
+
+/**
+ * A `GATED` turn nobody releases (or aborts) ends after this (ms): a forgotten
+ * gate never hangs a run. The flow timeout's own length, so no flow outlives it.
+ */
+export const GATE_CAP_MS = 600_000;
 
 /**
  * The user text of an OpenAI chat request's last user message. The content may be
@@ -330,6 +342,10 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
   const childStepMs = options.childStepMs ?? CHILD_STEP_MS;
   const thinkMs = options.thinkMs ?? TOOLROWS_THINK_MS;
   let holding = false;
+  const gateCapMs = options.gateCapMs ?? GATE_CAP_MS;
+  // The waiting `GATED` turn's resolver; null when none waits, so a stray
+  // release never pre-opens the NEXT gate.
+  let gate: (() => void) | null = null;
   const prompts: string[] = [];
   const replies: string[] = [];
   const calls: string[] = [];
@@ -349,6 +365,22 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
           setHeld: (v) => {
             holding = v;
           },
+          // Opens on `release()`, on the request's abort (a cancel or send-now
+          // ended the turn: flow 13) or at the cap — whichever comes first.
+          waitGate: (signal) =>
+            new Promise<void>((resolve) => {
+              const timer = setTimeout(open, gateCapMs);
+              function open(): void {
+                clearTimeout(timer);
+                signal.removeEventListener("abort", open);
+                if (gate === open) {
+                  gate = null;
+                }
+                resolve();
+              }
+              gate = open;
+              signal.addEventListener("abort", open);
+            }),
           prompts,
           replies,
           calls,
@@ -362,6 +394,8 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
   return {
     baseUrl: `http://127.0.0.1:${server.port}/v1`,
     held: () => holding,
+    gated: () => gate !== null,
+    release: () => gate?.(),
     prompts,
     replies,
     calls,
@@ -379,6 +413,7 @@ function stream(
     readonly childStepMs: number;
     readonly thinkMs: number;
     readonly setHeld: (v: boolean) => void;
+    readonly waitGate: (signal: AbortSignal) => Promise<void>;
     readonly prompts: string[];
     readonly replies: string[];
     readonly calls: string[];
@@ -579,6 +614,11 @@ function stream(
       // and queue a steer (13d's flow 12), and short enough that its next round
       // boundary arrives inside the flow's wait.
       const steady = !hold && !slow && prompt.includes("STEADY");
+      // `GATED` (docs/fix/mobile-e2e-reds.md): a turn that streams its first delta
+      // and then waits for the harness's `model-release` (capped, never hung), so a
+      // flow can queue a steer into it however slow Maestro's typing is — then it
+      // ENDS, and the steer is injected at that round boundary.
+      const gated = !hold && !slow && !steady && prompt.includes("GATED");
       if (hold) {
         ctx.setHeld(true);
       }
@@ -604,8 +644,16 @@ function stream(
           : prompt.includes("SHOWCASE")
             ? SHOWCASE_MD
             : DELTAS;
-      for (const delta of deltas) {
+      for (const [i, delta] of deltas.entries()) {
         send(frame({ content: delta }));
+        if (gated && i === 0) {
+          await ctx.waitGate(req.signal);
+          if (req.signal.aborted) {
+            // The client went away (a cancel / send-now): nothing left to stream to.
+            return;
+          }
+          continue;
+        }
         await Bun.sleep(
           hold
             ? Math.max(20, ctx.holdMs / deltas.length)

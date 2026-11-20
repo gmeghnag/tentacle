@@ -15,6 +15,12 @@ appId: so.tentacle.app
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${INFO_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${INFO_ID}"
 - assertVisible:
@@ -49,8 +55,8 @@ appId: so.tentacle.app
     id: "session-info-mcp-demo"
 - assertVisible:
     id: "session-info-mcp-broken"
-- assertVisible:
-    id: "session-info-skills-/e2e-demo"
+# Below the fold since the Scheduled wakes section (cron S6) grew the sheet: the
+# scroll IS the visibility assertion (docs/fix/mobile-e2e-reds.md).
 - scrollUntilVisible:
     element:
       id: "session-info-skills-/e2e-demo"
@@ -95,6 +101,9 @@ appId: so.tentacle.app
     id: "session-rename-input"
 - tapOn:
     id: "session-rename-input"
+# The field opens with the CURRENT title in it (a rename edits it): clear it first,
+# or the name is appended ("composeRenamed…", docs/fix/mobile-e2e-reds.md).
+- eraseText: 60
 - inputText: "Renamed by flow 25"
 - tapOn:
     id: "session-rename-save"

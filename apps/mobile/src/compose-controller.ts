@@ -653,6 +653,13 @@ export function createCompose(deps: ComposeDeps): Compose {
       block: chip.block,
     }));
 
+  /**
+   * The last basis read over the link (fix/mobile-e2e-reds): what an OFFLINE act
+   * is written against. Null until a read lands; an unknown basis is `{0, null}`,
+   * which `decide` reads as "changed" — the person is asked, nothing is lost.
+   */
+  let lastBasis: { historyLength: number; runningTurnId: string | null } | null = null;
+
   /** The session's facts, as 13b's `Basis` compares them. */
   const basis = async (): Promise<{ historyLength: number; runningTurnId: string | null }> => {
     const handle = deps.handle();
@@ -660,7 +667,22 @@ export function createCompose(deps: ComposeDeps): Compose {
       return { historyLength: 0, runningTurnId: null };
     }
     const facts: SessionFacts = await handle.port.facts();
-    return { historyLength: facts.historyLength, runningTurnId: facts.runningTurnId };
+    lastBasis = { historyLength: facts.historyLength, runningTurnId: facts.runningTurnId };
+    return lastBasis;
+  };
+
+  /**
+   * The basis for an act taken while the link is DOWN: never a read. The real
+   * `facts()` waits for the link (`client.snapshot` → `whenLive`), and the field
+   * is already cleared — awaiting it kept the text in no place until a reconnect
+   * (flows 16/17), and a kill in between lost it (F3).
+   */
+  const offlineBasis = (): { historyLength: number; runningTurnId: string | null } =>
+    lastBasis ?? { historyLength: 0, runningTurnId: null };
+
+  /** Keep `lastBasis` fresh while the link is up (at start, at each turn end); never awaited. */
+  const primeBasis = (): void => {
+    basis().catch(() => undefined);
   };
 
   /** Take the field (text + ready chips) for an act, and clear both at ONCE (F4). */
@@ -885,6 +907,7 @@ export function createCompose(deps: ComposeDeps): Compose {
     /** The turn bracket closed: what the composer still shows (diagnostic only). */
     turnClosed() {
       traceRows("after-turn-end");
+      primeBasis();
     },
     async start(handle) {
       if (started) {
@@ -929,6 +952,7 @@ export function createCompose(deps: ComposeDeps): Compose {
       }
       pending = null;
       refresh();
+      primeBasis();
     },
     stop() {
       unsubscribe?.();
@@ -964,7 +988,7 @@ export function createCompose(deps: ComposeDeps): Compose {
           text: taken.text,
           photos: photosOf(taken.taken),
           documents: documentsOf(taken.taken),
-          basis: await basis(),
+          basis: offlineBasis(),
         });
         refresh();
         return;

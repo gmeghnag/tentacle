@@ -144,16 +144,22 @@ export function createPairingHooks(deps: PairingDeps): PairingHooks {
       pollMs: 20,
       ...(options.ttlMs === undefined ? {} : { ttlMs: options.ttlMs }),
       out: (line) => {
-        window.payload = line.trim();
-        lastPayload = line.trim();
+        const text = line.trim();
+        // Only THE payload line is the payload: `pair` prints more after it (its
+        // success line), which used to overwrite it — flow 22 then read
+        // "0 addresses" out of `Paired 'iPhone' …` (docs/fix/mobile-e2e-reds.md).
+        if (text.startsWith("tentacle://")) {
+          window.payload = text;
+          lastPayload = text;
+        }
         // `pair`'s success line carries the DEVICE id it registered
         // (`Paired 'iPhone' (5cb71e…). …`): the flow needs it to revoke exactly
         // this phone, never a previous run's device of the same name.
-        const paired = /^Paired '.+' \(([0-9a-f]{16})\)/.exec(window.payload);
+        const paired = /^Paired '.+' \(([0-9a-f]{16})\)/.exec(text);
         if (paired?.[1] !== undefined) {
           lastPaired = paired[1];
         }
-        log(`[pair] ${window.payload}`);
+        log(`[pair] ${text}`);
       },
       err: (line) => log(`[pair] ${line.trim()}`),
       ask: async (prompt) => {

@@ -189,9 +189,11 @@ export interface LaptopLink {
    * The asks the daemon has pending on a session, by `requestId` — what a
    * notification flow must name so the action it injects answers THAT ask
    * (docs/feat/mobile-notifications.md N8). Read from this peer's own router
-   * after it attached (the replayed `permission_request` is what put them there).
+   * after it attached (the replayed `permission_request` is what put them there)
+   * — so it ATTACHES first: nothing else in the notify flows did, and an
+   * unattached peer's router holds nothing (docs/fix/mobile-e2e-reds.md).
    */
-  pendingAsks(sessionId: string): readonly string[];
+  pendingAsks(sessionId: string): Promise<readonly string[]>;
   /** Steer the RUNNING turn of `sessionId` (13d's flow 15: another device's row). */
   enqueue(sessionId: string, text: string): Promise<{ id: string }>;
   /** Stop the running turn (`session/cancel{turnId}`): 13d's flow 14. */
@@ -258,8 +260,16 @@ export async function laptopLink(deps: {
 
   return {
     client,
-    pendingAsks(sessionId) {
-      return client.pendingPermissionsOf(sessionId);
+    async pendingAsks(sessionId) {
+      await handle(sessionId);
+      // The replay lands after the attach's answer: wait for it, bounded.
+      const deadline = Date.now() + 5000;
+      let held = client.pendingPermissionsOf(sessionId);
+      while (held.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        held = client.pendingPermissionsOf(sessionId);
+      }
+      return held;
     },
     async prompt(sessionId, prompt, answer) {
       const session = await handle(sessionId);
@@ -421,6 +431,29 @@ export async function historyOf(
   } finally {
     // Detach THIS harness attachment: an attached harness client would be
     // re-offered a pending ask, and a session must never be closed by reading it.
+    await session.detach().catch(() => {});
+    await live.drain().catch(() => {});
+    live.close();
+  }
+}
+
+/**
+ * One whole turn on `sessionId`, through a client of its own that attaches, runs
+ * the turn to its end and detaches (fix/mobile-e2e-reds, flow 17): the harness
+ * points it at a SIDE `serve` the phone cannot reach, so the history moves while
+ * the phone is offline — deterministically, with no race against its redial.
+ */
+export async function turnOnce(
+  deps: { readonly url: string; readonly token: string },
+  sessionId: string,
+  prompt: string,
+): Promise<void> {
+  const live = await attach(deps);
+  const session = live.newSession(undefined, sessionId, undefined, { attach: {} });
+  try {
+    await session.open();
+    await finishTurn(session, prompt);
+  } finally {
     await session.detach().catch(() => {});
     await live.drain().catch(() => {});
     live.close();

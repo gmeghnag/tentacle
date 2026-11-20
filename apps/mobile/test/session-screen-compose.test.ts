@@ -542,6 +542,30 @@ describe("the compose half on the screen", () => {
     expect(screen.state().view.notices.map((n) => n.testId)).toContain("waiting-network");
   });
 
+  test("the link coming back RUNS the outbox: an offline item goes out without reopening the session (fix/mobile-e2e-reds, flow 17)", async () => {
+    // 13b's design: a run happens at `up` + the session's re-sync. The screen ran
+    // the outbox only at its attach, so an item written offline on an OPEN screen
+    // waited until the session was reopened — the reconnect never gave it its chance.
+    // Mutation: drop the `runOutbox` from `link(true)` → the item stays waiting.
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    screen.link(false);
+    screen.setDraft("offline words");
+    screen.press();
+    for (let i = 0; i < 20; i += 1) {
+      await settle();
+    }
+    expect(h.store.data.items.map((item) => item.state)).toEqual(["waiting"]);
+    expect(h.session.sent).toEqual([]);
+    screen.link(true);
+    for (let i = 0; i < 20; i += 1) {
+      await settle();
+    }
+    expect(h.session.sent).toEqual(["offline words"]);
+    expect(h.store.data.items).toEqual([]);
+  });
+
   test("a tap on Queue sends the text as a steer, not as a prompt (D1)", async () => {
     const h = harness();
     const screen = h.screen();

@@ -74,12 +74,19 @@ appId: so.tentacle.app
     id: "open-settings"
 - assertVisible:
     id: "lock-delay-immediately"
-- assertVisible:
-    id: "export-logs"
+# Below the fold since the hub's opacity band grew Settings (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "export-logs"
+    direction: DOWN
 - runFlow:
     file: _shot.yaml
     env:
       SHOT: "24-settings"
+- scrollUntilVisible:
+    element:
+      id: "settings-back"
+    direction: UP
 - tapOn:
     id: "settings-back"
 - tapOn:
@@ -102,6 +109,12 @@ appId: so.tentacle.app
       SHOT: "24-sessions-no-match"
 - eraseText: 30
 - hideKeyboard
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${SHOTS_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${SHOTS_ID}"
 - assertVisible:
@@ -144,8 +157,11 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "24-drawer"
+# The scrim by POINT: it sits under the drawer's accessibility-hidden content
+# (VoiceOver closes with Escape), so XCUITest cannot find `drawer-scrim` by id
+# (docs/fix/mobile-e2e-reds.md). 90 % x is right of the drawer, on the scrim.
 - tapOn:
-    id: "drawer-scrim"
+    point: "90%,50%"
 - assertNotVisible:
     id: "drawer"
 # Leave the simulator light for whatever runs next.

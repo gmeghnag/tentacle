@@ -422,21 +422,23 @@ async function main(): Promise<number> {
   // The real `serve`, from source, on a private config dir and the mock model.
   // Spawned through a function because flow 05 stops it and starts it again on
   // the SAME port and config (serve persists, so the sessions come back).
-  const startServe = (): Child => {
+  const startServe = (port: number = daemonPort): Child => {
     const child = Bun.spawn(
       [
         process.execPath,
         join(REPO, "packages", "cli", "src", "main.ts"),
         "serve",
         "--port",
-        `${daemonPort}`,
+        `${port}`,
         "--token",
         "e2e-token",
         // The relay is ON for every flow, pointed at the LOCAL relay above: a
         // harness must never reach relay.tentacle.so (no real infra), and flow
         // 22's whole subject is the relay path.
-        "--relay",
-        relayUrl,
+        // The SIDE `serve` (flow 17's offline turn) is relay-free: on the relay the
+        // phone reached it anyway — its pairing carries the relay address too
+        // (docs/fix/mobile-e2e-reds.md).
+        ...(port === daemonPort ? ["--relay", relayUrl] : ["--no-relay"]),
         // P10: an ask pushes IMMEDIATELY, so the push flow does not sit out the
         // 30 s default. Every other flow is untouched by it: none registers a
         // push key, and with no registration there is nothing to push to.
@@ -454,8 +456,10 @@ async function main(): Promise<number> {
           TENTACLE_MODEL_BASE_URL: mock.baseUrl,
           TENTACLE_MODEL: "mock-model",
         },
-        stdout: Bun.file(join(runDir, "serve.log")),
-        stderr: Bun.file(join(runDir, "serve.err.log")),
+        stdout: Bun.file(join(runDir, port === daemonPort ? "serve.log" : `serve-${port}.log`)),
+        stderr: Bun.file(
+          join(runDir, port === daemonPort ? "serve.err.log" : `serve-${port}.err.log`),
+        ),
       },
     ) as unknown as Child;
     children.add(child);
@@ -498,6 +502,7 @@ async function main(): Promise<number> {
       queueStateOf,
       composeSessionOf,
       fileExists,
+      turnOnce,
     } = await import("./seed.ts");
     const endpoint = { url: `ws://127.0.0.1:${daemonPort}/`, token: "e2e-token" };
     const seeded = await seedSessions({
@@ -517,7 +522,9 @@ async function main(): Promise<number> {
     // make the daemon push one (an ask, `--push-grace 0`), and place the
     // envelope it produced on the simulator.
     const pushSteps = harnessPushSteps({
-      url: `ws://127.0.0.1:${daemonPort}/`,
+      // The SAME endpoint (url + token) as the seed's: without the token `serve`
+      // answers 401 (push-placeholder, docs/fix/mobile-e2e-reds.md).
+      ...endpoint,
       configDir: join(runDir, "config"),
       apns,
       pairDeviceId: () => pairing.lastDeviceId(),
@@ -542,6 +549,34 @@ async function main(): Promise<number> {
           serving = startServe();
           await waitForPort(daemonPort);
         },
+        // Flow 17 (fix/mobile-e2e-reds): the history moves while the PHONE is
+        // offline. `serve` is down (the flow stopped it); a SIDE `serve` on another
+        // port, same store, runs one laptop turn and is stopped again — the phone
+        // only knows the paired port, so it cannot see the change before its own
+        // `up`, whatever its redial jitter.
+        laptopOfflineTurn: async (session, prompt) => {
+          const up = await waitForPort(daemonPort, 300).then(
+            () => true,
+            () => false,
+          );
+          if (up) {
+            throw new Error("serve is up: an offline turn needs it stopped first (stop-serve)");
+          }
+          const port = freePort();
+          const side = startServe(port);
+          try {
+            await waitForPort(port);
+            await turnOnce(
+              { url: `ws://127.0.0.1:${port}/`, token: endpoint.token },
+              session,
+              prompt,
+            );
+          } finally {
+            side.kill();
+            await side.exited;
+            children.delete(side);
+          }
+        },
         laptopPrompt: (session, prompt, answer) => laptop.prompt(session, prompt, answer),
         laptopAnswer: (session, answer) => laptop.answer(session, answer),
         sessionState: (session) => sessionStateOf(endpoint, session),
@@ -553,6 +588,11 @@ async function main(): Promise<number> {
         laptopDetach: (session) => laptop.detach(session),
         fileExists: (file) => fileExists({ cwd: runDir }, file),
         modelPrompts: () => mock.prompts,
+        modelRelease: () => {
+          const waiting = mock.gated();
+          mock.release();
+          return waiting;
+        },
         modelReplies: () => mock.replies,
         editCalls: () => mock.calls,
         pairStart: async (options) => {
@@ -667,7 +707,7 @@ async function main(): Promise<number> {
         },
         // Flow 30's daemon truth (T8.1): what the listener RECEIVED. Nothing on
         // screen can answer this — a viewer's claim is not evidence.
-        escapeHits: () => ({ hits: probes.hits() }),
+        escapeHits: () => ({ hits: probes.hits(), strays: probes.strays() }),
         // Flow 24's light/dark pairs: `simctl ui`, not `simctl spawn` (it is a
         // simulator setting, not a process inside it).
         appearance: async (name) => {
@@ -1054,6 +1094,7 @@ async function startFakeApns(): Promise<{
  */
 function harnessPushSteps(deps: {
   readonly url: string;
+  readonly token: string;
   readonly configDir: string;
   readonly apns: { last(): ApnsPayload | undefined; count(): number };
   readonly pairDeviceId: () => string | undefined;
@@ -1070,7 +1111,7 @@ function harnessPushSteps(deps: {
     register: ({ deviceId, token, env, key }) => {
       writePushRegistration(deps.configDir, deviceId, { token, env, key });
     },
-    promptOnce: () => promptOnce(deps.url),
+    promptOnce: () => promptOnce(deps.url, deps.token),
     apnsCount: () => deps.apns.count(),
     lastApnsPayload: () => deps.apns.last(),
     place: (payload) => placeOnSimulator(deps.udid(), payload, deps.log),
@@ -1261,8 +1302,8 @@ function writePushRegistration(
  * The turn is NOT awaited to completion: it SUSPENDS on the ask by design, and
  * waiting for it would mean answering it, which cancels the push (Design 1).
  */
-async function promptOnce(url: string): Promise<void> {
-  const factory = webSocketChannelFactory(url, {});
+async function promptOnce(url: string, token: string): Promise<void> {
+  const factory = webSocketChannelFactory(url, { token });
   const client = new RemoteClient(
     await factory(),
     new PermissionBroker(undefined, { holdUntilSet: true }),

@@ -1017,7 +1017,7 @@ export function SessionScreen({
     ended: state.transcript.closed,
     editable: state.view.editable,
     dictation: voiceSettings.dictation,
-    activityEmpty: activityVm.groups.length === 0,
+    activityEmpty: activityVm.nothingRunning,
     // My compaction runs: the hub's Stop cancels it (mobile-hub-commands C2 14).
     compacting: state.slot?.kind === "compacting",
     schedules: { rows: state.schedules, now: activityNow },

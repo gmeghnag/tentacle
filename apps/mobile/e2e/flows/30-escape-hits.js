@@ -12,6 +12,8 @@ if (!response.ok) {
   throw new Error(`escape-hits failed: ${response.status} ${response.body}`);
 }
 const hits = json(response.body).hits;
+// Non-browser local clients that hit the port (never the artifact): reported, not counted.
+output.escapeStrays = JSON.stringify(json(response.body).strays || []);
 if (EXPECT === "none" && hits.length !== 0) {
   throw new Error(`the artifact ESCAPED: ${JSON.stringify(hits)}`);
 }

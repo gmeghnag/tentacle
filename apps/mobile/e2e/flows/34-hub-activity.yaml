@@ -10,6 +10,12 @@ appId: so.tentacle.app
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${HUBITEM_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${HUBITEM_ID}"
 - assertVisible:
@@ -24,9 +30,14 @@ appId: so.tentacle.app
 - hideKeyboard
 - tapOn:
     id: "composer-send"
+# The hub is ONE accessible element (VoiceOver reads one button), so XCUITest
+# sees none of its children (`hub-glyph`, `hub-badge-count`): what it shows is
+# asserted through its label, which says the same (`hubA11yLabel`,
+# docs/fix/mobile-e2e-reds.md).
 - extendedWaitUntil:
     visible:
-      id: "hub-badge-count"
+      id: "floating-activity"
+      text: "Tentacle hub, [0-9]+ running.*"
     timeout: 30000
 - runFlow:
     file: _hub-fan.yaml
@@ -38,5 +49,6 @@ appId: so.tentacle.app
     visible:
       id: "activity-sheet"
     timeout: 5000
+# A row's accessible text is its whole label: matched by its prefix.
 - assertVisible:
-    text: "long child"
+    text: "long child,.*"

@@ -132,6 +132,14 @@ describe("groups", () => {
     expect(v.empty).toBe("Nothing running");
   });
 
+  test("`nothingRunning`: only Scheduled's EMPTY state is nothing — the hub's Activity stays dimmed (fix/mobile-e2e-reds, flow 33)", () => {
+    // The wake feed made an empty Scheduled group, so `groups.length === 0` was
+    // never true again and the hub opened a sheet holding only "No scheduled wakes".
+    expect(activityView({ ...NONE, schedules: [] }, 0).nothingRunning).toBe(true);
+    expect(activityView({ ...NONE, schedules: undefined }, 0).nothingRunning).toBe(true);
+    expect(activityView({ ...NONE, subagents: [child("sa-1")] }, 0).nothingRunning).toBe(false);
+  });
+
   test("any group present → no sheet-level empty state (Scheduled draws its own)", () => {
     expect(activityView({ ...NONE, schedules: [] }, 0).empty).toBeNull();
     expect(

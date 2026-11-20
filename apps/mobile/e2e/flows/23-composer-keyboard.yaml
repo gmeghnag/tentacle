@@ -11,6 +11,12 @@ appId: so.tentacle.app
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${KEYBOARD_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${KEYBOARD_ID}"
 - assertVisible:
@@ -29,13 +35,15 @@ appId: so.tentacle.app
     env:
       SHOT: "23-keyboard-open"
 # B1: NO hideKeyboard. With the composer under the keyboard this tap lands on a
-# key, nothing is sent and `turn-running` never shows.
+# key, nothing is sent and the field keeps its text. Not `turn-running`: the
+# SLOW turn (~4.5 s) can end inside Maestro's own tap on iOS 26 (5.7 s seen,
+# docs/fix/mobile-e2e-reds.md); `23-history.js` proves the model was asked.
+- assertVisible:
+    id: "composer-filled"
 - tapOn:
     id: "composer-send"
-- extendedWaitUntil:
-    visible:
-      id: "turn-running"
-    timeout: 10000
+- assertNotVisible:
+    id: "composer-filled"
 - extendedWaitUntil:
     visible:
       id: "turn-idle"

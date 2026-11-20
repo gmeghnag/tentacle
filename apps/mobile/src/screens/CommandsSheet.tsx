@@ -19,7 +19,7 @@
  */
 import type { JSX } from "react";
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Switch, Text, View } from "react-native";
-import { CLEARING, COMPACTING, type CommandRow } from "../session-commands.ts";
+import { CLEARING, COMPACTING, type CommandRow, commandEdge } from "../session-commands.ts";
 import { DENSE_FONT_SCALE, type Palette, space, typography } from "../theme.ts";
 import { BandSection } from "../ui/BandSection.tsx";
 import { Row } from "../ui/Row.tsx";
@@ -262,6 +262,7 @@ function Command({
             />
           </View>
         }
+        trailingKind={commandEdge(state, row.id)}
       />
     );
   }
@@ -278,6 +279,7 @@ function Command({
       testID={`command-${row.id}`}
       {...(tap === undefined ? {} : { onPress: tap })}
       trailing={edgeFor(row, props)}
+      trailingKind={commandEdge(row.state, row.id)}
     />
   );
 }

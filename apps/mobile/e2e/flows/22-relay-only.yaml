@@ -58,6 +58,12 @@ appId: so.tentacle.app
     timeout: 30000
 # A session, a prompt, and the mock model's answer: a full round trip whose bytes
 # only ever went through the relay.
+# In the full suite every earlier flow's session sits ABOVE Alpha (newest
+# first), so it is below the fold: scroll to it (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${ALPHA_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${ALPHA_ID}"
 - assertVisible:
@@ -77,6 +83,9 @@ appId: so.tentacle.app
 # `launchApp` relaunches onto `Computers`, so the flow walks back in.
 - pressKey: home
 - launchApp
+# A relaunch is a cold start, and a cold start is LOCKED (docs/feat/mobile-lock.md
+# Owner Q1): get past it as every relaunching flow does (docs/fix/mobile-e2e-reds.md).
+- runFlow: _unlock.yaml
 - extendedWaitUntil:
     visible:
       id: "computers-list"

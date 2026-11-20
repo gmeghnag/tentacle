@@ -1,4 +1,7 @@
 appId: so.tentacle.app
+tags:
+  - quarantine
+# quarantine: Maestro cannot see a SpringBoard notification banner on the iOS 26 simulator — a plain `simctl push` banner, on screen during a 20 s `extendedWaitUntil`, was never found (docs/fix/mobile-e2e-reds.md); the banner is checked by hand (README D3) until Maestro can read it
 ---
 # `push-placeholder` (docs/feat/mobile-push.md P10, decision 20): the end-to-end
 # half of task 16 that a simulator CAN prove — the app's push entitlement, its
@@ -25,7 +28,9 @@ appId: so.tentacle.app
     visible:
       id: "sessions-list"
     timeout: 30000
-- back
+# Maestro's `back` is Android's key (a no-op on iOS): the screen's own back button.
+- tapOn:
+    id: "sessions-back"
 # The Settings row is where the phone says what it decided, and it is the only
 # screen that reads the registrar's state: `notifications-toggle` exists, and its
 # detail line is drawn from `pushPhaseText`. (Whether iOS GRANTED the permission
@@ -40,7 +45,9 @@ appId: so.tentacle.app
     id: "notifications-toggle"
 - assertVisible:
     id: "notifications-detail"
-- back
+# Maestro's `back` is Android's key (a no-op on iOS): the screen's own back button.
+- tapOn:
+    id: "settings-back"
 - assertVisible:
     id: "computers-list"
 # Register + push + place, in ONE hook: register a push key for the paired

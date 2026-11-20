@@ -109,3 +109,57 @@ export function rowLayout(
   }
   return description ? WITH_DESCRIPTION_AND_VALUE : WITH_VALUE;
 }
+
+/**
+ * What a row's trailing element IS (fix round 1, docs/fix/mobile-e2e-reds.md):
+ *  - `none` — nothing is drawn there (`undefined`, or a caller's `null`);
+ *  - `value` — a READ, not an action: a state word, a plain value, a reason, a
+ *    checkmark. It is part of the row and is read with it;
+ *  - `control` — something the person (or XCUITest) acts on: a switch, a
+ *    Delete, a Stop/Retry, a confirm's two words.
+ *
+ * The distinction is the caller's to state, because a `ReactNode` cannot be
+ * classified from the outside: Session info's `values` and its `delete` are both
+ * a `View`, and Commands' one edge slot is a `<Text>` reason for a dimmed row and
+ * a two-button `View` for a running one.
+ */
+export type RowTrailing = "none" | "value" | "control";
+
+/**
+ * What to tell VoiceOver about the element a caller put at the row's edge. An
+ * absent one is `none` whatever the caller declared (Commands' `edgeFor`
+ * returns `null` for every ready row, Tools' is `null` for a band with no
+ * switch): the absence of an edge is never a control. Otherwise the declaration
+ * stands, and `control` is the floor — for an undeclared element and for a
+ * caller that says `none` while passing one (a contradiction). Swallowing an
+ * actionable control is the worse failure (a disabled "Dictation, Dictation"
+ * element VoiceOver and XCUITest cannot reach), while a value wrongly called a
+ * control only splits a read-only row into two elements.
+ */
+export function rowTrailing(trailing: unknown, declared: RowTrailing | undefined): RowTrailing {
+  if (trailing === undefined || trailing === null) {
+    return "none";
+  }
+  return declared === undefined || declared === "none" ? "control" : declared;
+}
+
+/**
+ * How a row is exposed to VoiceOver (and so to XCUITest), fix/mobile-e2e-reds.
+ * `group`: the row is ONE element — a row with its own action and no control (one
+ * button), or a read-only row (label + value read together). A row with a
+ * trailing CONTROL never groups: grouped, the control was swallowed — a disabled
+ * "Dictation, Dictation" element in Settings, an unreachable server switch in
+ * Session info. `textButton`: such a row that also has its own action keeps it,
+ * on its label column, so neither the action nor the control is lost.
+ *
+ * The trailing element is passed as what it IS (`rowTrailing`), never as "is
+ * something there": treating every defined `trailing` as a control ungrouped
+ * every read-only row that shows a value (fix round 1).
+ */
+export function rowAccessibility(row: {
+  readonly pressable: boolean;
+  readonly trailing: RowTrailing;
+}): { readonly group: boolean; readonly textButton: boolean } {
+  const control = row.trailing === "control";
+  return { group: !control, textButton: control && row.pressable };
+}

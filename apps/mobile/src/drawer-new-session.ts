@@ -101,3 +101,36 @@ export function createDrawerNewSession(deps: DrawerNewSessionDeps): DrawerNewSes
     },
   };
 }
+
+export interface HubNewSessionDeps {
+  /** The computer the drawer lists (where the drawer's pill would create). */
+  readonly computerId: string;
+  /**
+   * Is that computer online NOW? The app re-reads the probed rows
+   * (`loadRows` → `drawerTitle(...).canCreate`). A throw reads as offline.
+   */
+  readonly probe: () => Promise<boolean>;
+  readonly session: DrawerNewSession;
+  /** Open the drawer: it says why (the computer's status, or the create's error). */
+  readonly showDrawer: () => void;
+}
+
+/**
+ * New session from the HUB (fix/mobile-hub-new-session). The drawer's own gate
+ * is the drawer TITLE's probe, which runs only while the drawer is open — so from
+ * the hub, with the drawer never opened, "not probed yet" read as "offline" and
+ * the tap did nothing at all. This probes first; online, it creates and opens the
+ * session like the pill; otherwise — offline, or a create that failed — it opens
+ * the drawer, which draws the reason. Never a silent no-op.
+ */
+export async function newSessionFromHub(deps: HubNewSessionDeps): Promise<void> {
+  const online = await deps.probe().catch(() => false);
+  if (!online) {
+    deps.showDrawer();
+    return;
+  }
+  await deps.session.start(deps.computerId, true);
+  if (deps.session.state().error !== null) {
+    deps.showDrawer();
+  }
+}

@@ -7,7 +7,14 @@
  * are Flow), which is exactly why §7 puts the branching here (F10).
  */
 import { describe, expect, test } from "bun:test";
-import { ROW_WRAP_AT, type RowValueKind, rowLayout, valueEllipsis } from "../src/row-value.ts";
+import {
+  ROW_WRAP_AT,
+  type RowValueKind,
+  rowAccessibility,
+  rowLayout,
+  rowTrailing,
+  valueEllipsis,
+} from "../src/row-value.ts";
 
 const KINDS: readonly RowValueKind[] = ["text", "path", "model"];
 const RN_MODES = ["head", "middle", "tail"] as const;
@@ -123,5 +130,75 @@ describe("S3 · the label column's SIZING (fix round 1: `flexShrink: 0` overflow
       expect(rowLayout(bad).labelSizing).toBe("fill");
       expect(rowLayout(bad, { hasValue: true }).labelSizing).toBe("capped");
     }
+  });
+});
+
+describe("rowAccessibility (fix/mobile-e2e-reds, flows 34-hub-dictate / 25-session-info)", () => {
+  test("a row with its own action and no control is ONE element (one button)", () => {
+    expect(rowAccessibility({ pressable: true, trailing: "none" })).toEqual({
+      group: true,
+      textButton: false,
+    });
+  });
+
+  test("a row whose only control is a trailing switch never swallows it", () => {
+    // Grouped, the row was a DISABLED element ("Dictation, Dictation") and the
+    // switch inside it was unreachable to VoiceOver and to XCUITest alike.
+    expect(rowAccessibility({ pressable: false, trailing: "control" })).toEqual({
+      group: false,
+      textButton: false,
+    });
+  });
+
+  test("a row with BOTH an action and a switch keeps both reachable: the switch its own element, the label the button", () => {
+    // Session info's MCP row (opens its tools AND switches the server): grouped,
+    // its switch could not be reached at all (flow 25).
+    expect(rowAccessibility({ pressable: true, trailing: "control" })).toEqual({
+      group: false,
+      textButton: true,
+    });
+  });
+
+  test("a read-only row (label + value) stays one element, read together", () => {
+    // Fix round 1: the row's trailing element is what it IS, never "something is
+    // there". Session info's `values` (`Model`, `claude-sonnet-4-5`) is a READ.
+    expect(rowAccessibility({ pressable: false, trailing: "value" })).toEqual({
+      group: true,
+      textButton: false,
+    });
+  });
+
+  test("a read-only row is one element whether or not it has a value to read", () => {
+    for (const trailing of ["none", "value"] as const) {
+      expect(rowAccessibility({ pressable: false, trailing }).group).toBe(true);
+    }
+    // Non-vacuity: only a CONTROL ungroups, and it does so for both press states.
+    expect(rowAccessibility({ pressable: true, trailing: "value" }).group).toBe(true);
+    expect(rowAccessibility({ pressable: false, trailing: "control" }).group).toBe(false);
+  });
+});
+
+describe("rowTrailing — the caller says what its edge IS (fix round 1)", () => {
+  test("nothing at the edge is `none`, whatever the caller declared", () => {
+    // Commands' `edgeFor` returns `null` for EVERY ready row, and Tools' is `null`
+    // for a band with no switch: absence is never a control.
+    expect(rowTrailing(undefined, undefined)).toBe("none");
+    expect(rowTrailing(null, "control")).toBe("none");
+    expect(rowTrailing(null, "value")).toBe("none");
+    // `ToolsSheet.tsx:78` — `toggle === undefined ? null : <Switch/>`, undeclared.
+    expect(rowTrailing(null, undefined)).toBe("none");
+  });
+
+  test("a declared element keeps its declaration", () => {
+    // A `ReactNode` cannot be classified from the outside: Session info's `values`
+    // and its `delete` are both a `View`, so the caller's word is the only source.
+    expect(rowTrailing({ type: "Text" }, "value")).toBe("value");
+    expect(rowTrailing({ type: "Switch" }, "control")).toBe("control");
+  });
+
+  test("an undeclared element is a CONTROL — swallowing a control is the worse failure", () => {
+    // A switch wrongly called a value disappears from VoiceOver and XCUITest; a
+    // value wrongly called a control only splits one read in two.
+    expect(rowTrailing({ type: "Switch" }, undefined)).toBe("control");
   });
 });

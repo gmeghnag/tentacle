@@ -138,6 +138,9 @@ describe("the pairing hooks", () => {
       await sleep(50);
       const registry = readRegistry(configDir);
       expect(registry.ok ? registry.registry.devices.length : 0).toBe(1);
+      // fix/mobile-e2e-reds (flow 22): the payload is still THE payload after
+      // `pair` printed its success line (it used to be overwritten by it).
+      expect(pairing.lastPayload()).toBe(started.payload);
     } finally {
       await pairing.stop();
     }

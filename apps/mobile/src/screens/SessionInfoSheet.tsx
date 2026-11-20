@@ -238,6 +238,11 @@ function InfoRowView({
         />
       </View>
     );
+  // What that edge IS, for VoiceOver (fix round 1): a control is its own element,
+  // a plain `values` read is part of the row. Both of this row's controls live in
+  // the first two branches, so the last one is a READ.
+  const trailingKind: "value" | "control" =
+    remove !== undefined || toggle !== undefined ? "control" : "value";
   return (
     <>
       <Row
@@ -254,6 +259,7 @@ function InfoRowView({
         {...(row.expand === undefined ? {} : { onPress: onExpand, chevron: !expanded })}
         {...(row.opens === "artifacts" ? { onPress: onOpenArtifacts, chevron: true as const } : {})}
         trailing={trailing}
+        trailingKind={trailingKind}
         testID={`session-info-${sectionId}-${rowIdentity(row)}`}
       >
         {row.tone === undefined ? null : (

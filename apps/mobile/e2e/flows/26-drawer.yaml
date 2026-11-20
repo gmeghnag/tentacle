@@ -20,6 +20,12 @@ appId: so.tentacle.app
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${DRAWER_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${DRAWER_ID}"
 - assertVisible:
@@ -68,8 +74,11 @@ appId: so.tentacle.app
     id: "session-drawer"
 - assertVisible:
     id: "drawer-current-${ALPHA_ID}"
+# The scrim by POINT: it sits under the drawer's accessibility-hidden content
+# (VoiceOver closes with Escape), so XCUITest cannot find `drawer-scrim` by id
+# (docs/fix/mobile-e2e-reds.md). 90 % x is right of the drawer, on the scrim.
 - tapOn:
-    id: "drawer-scrim"
+    point: "90%,50%"
 - assertNotVisible:
     id: "drawer"
 # S7: New session — created at the tap on the listed computer, opened EMPTY
@@ -103,8 +112,11 @@ appId: so.tentacle.app
     id: "drawer-current-.*"
 - assertVisible:
     id: "drawer-session-${ALPHA_ID}"
+# The scrim by POINT: it sits under the drawer's accessibility-hidden content
+# (VoiceOver closes with Escape), so XCUITest cannot find `drawer-scrim` by id
+# (docs/fix/mobile-e2e-reds.md). 90 % x is right of the drawer, on the scrim.
 - tapOn:
-    id: "drawer-scrim"
+    point: "90%,50%"
 # The daemon truth: the rename landed, the left session is still there, and the
 # new session's first prompt reached the model.
 - runScript:

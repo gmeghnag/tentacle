@@ -69,6 +69,14 @@ export interface ActivityView {
   readonly groups: readonly ActivityGroup[];
   /** The dimmed line drawn when `groups` is empty (no wake feed, nothing running); else `null`. */
   readonly empty: string | null;
+  /**
+   * No group has a row: only Scheduled's own empty state, or nothing at all. The
+   * hub's Activity is DIMMED then (mobile-hub-tap Design 2: an empty Activity says
+   * "Nothing running" inline, the modal never opens). `groups.length === 0` was
+   * never true again once the wake feed added an empty Scheduled group
+   * (fix/mobile-e2e-reds, flow 33).
+   */
+  readonly nothingRunning: boolean;
 }
 
 /** One line of plain text: control characters and line breaks become spaces. */
@@ -237,6 +245,7 @@ export function activityView(input: ActivityInput, now: number): ActivityView {
     accessibilityLabel,
     groups,
     empty: groups.length === 0 ? "Nothing running" : null,
+    nothingRunning: groups.every((group) => group.rows.length === 0),
   };
 }
 

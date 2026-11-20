@@ -37,6 +37,12 @@ appId: so.tentacle.app
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${ACTIVITY_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${ACTIVITY_ID}"
 - assertVisible:
@@ -56,16 +62,21 @@ appId: so.tentacle.app
     id: "session-activity"
 - assertVisible:
     id: "activity-subagents"
+# A row's accessible text is its whole label (`long child, sa-1 · general · …`)
+# and Maestro's text match is a FULL regex, so the row is matched by its prefix
+# (docs/fix/mobile-e2e-reds.md).
 - tapOn:
-    text: "long child"
+    text: "long child,.*"
 - assertVisible:
     id: "activity-detail-sa-.*"
 - assertVisible:
     id: "activity-steps"
-# Its steps advance (one per 2 s round).
+# Its steps are listed (one per 2 s round). Not `step-4` by name: on a slow run
+# the detail opened at step 24, with step 4 folded into "… N earlier"
+# (docs/fix/mobile-e2e-reds.md) — any step row proves the list is live.
 - extendedWaitUntil:
     visible:
-      text: ".*step-4.*"
+      text: ".*step-[0-9]+\\.txt.*"
     timeout: 30000
 - runFlow:
     file: _shot.yaml
@@ -99,7 +110,7 @@ appId: so.tentacle.app
       id: "activity-finished"
     timeout: 30000
 - assertVisible:
-    text: "short child"
+    text: "short child,.*"
 - tapOn:
     id: "activity-scrim"
 # A background shell job: approve the ask, then its output and Stop (F19).
@@ -124,7 +135,7 @@ appId: so.tentacle.app
 - assertVisible:
     id: "activity-jobs"
 - tapOn:
-    text: "sleep 30"
+    text: "sleep 30.*"
 - assertVisible:
     id: "activity-job-bg-.*"
 - assertVisible:

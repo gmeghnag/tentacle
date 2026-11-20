@@ -1,7 +1,4 @@
 appId: so.tentacle.app
-tags:
-  - known-bug
-# known-bug: the fan's Commands disc is a no-op tap — `commandsOpen` (SessionScreen.tsx) is set but no sheet reads it; mobile-hub-commands C3 (the sheet) is not merged
 ---
 # 34-hub-commands (docs/feat/mobile-e2e-gate.md): the fan's Commands opens the
 # session's Commands sheet (`commands-sheet`, docs/feat/mobile-hub-commands.md C3).
@@ -11,6 +8,12 @@ tags:
     id: "computer-${output.computerId}"
 - assertVisible:
     id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${HUBITEM_ID}"
+    direction: DOWN
 - tapOn:
     id: "session-${HUBITEM_ID}"
 - assertVisible:

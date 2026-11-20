@@ -224,6 +224,9 @@ export function SettingsScreen({
         title={row.label}
         accessibilityLabel={row.label}
         onPress={() => pick(row.value)}
+        // A checkmark is a READ of which choice is on, not a control (fix round 1):
+        // read WITH the row, so VoiceOver says "Language: English, checked" as one.
+        trailingKind="value"
         trailing={
           selected === row.value ? (
             <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
@@ -287,6 +290,7 @@ export function SettingsScreen({
                     title={row.label}
                     accessibilityLabel={row.label}
                     onPress={() => onSelectDelay(row.value)}
+                    trailingKind="value"
                     trailing={
                       selected ? (
                         <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
@@ -420,6 +424,7 @@ export function SettingsScreen({
                     accessibilityLabel={row.label}
                     dimmed={!activityWritable}
                     {...(activityWritable ? { onPress: () => onActivityMode(row.value) } : {})}
+                    trailingKind="value"
                     trailing={
                       activityMode === row.value ? (
                         <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
@@ -472,6 +477,7 @@ export function SettingsScreen({
                     accessibilityLabel={row.label}
                     dimmed={!chartWritable}
                     {...(chartWritable ? { onPress: () => onChartLabels(row.value) } : {})}
+                    trailingKind="value"
                     trailing={
                       chartLabels === row.value ? (
                         <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
@@ -513,6 +519,7 @@ export function SettingsScreen({
                     accessibilityLabel={`Diagrams: ${row.label}`}
                     dimmed={!diagramWritable}
                     {...(diagramWritable ? { onPress: () => onDiagramStyle(row.value) } : {})}
+                    trailingKind="value"
                     trailing={
                       diagramStyle === row.value ? (
                         <Icon name="checkmark" color={palette.accent} size={17} weight="bold" />
