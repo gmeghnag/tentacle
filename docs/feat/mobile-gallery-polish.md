@@ -259,4 +259,50 @@ real image thumbnail in the gallery is out of scope).
 
 ## Review
 
-*— pending*
+*— claude-opus-5-5, 2026-11-20* (fresh context; same model as the executor, so
+shared blind spots may survive — blast is `contained`, so acceptable)
+
+**Verdict: APPROVE-WITH-NITS** — no HIGH/MEDIUM finding.
+
+**Gate (narrow, as asked):** the 6 touched test files 74 pass · 0 fail;
+`bun run typecheck` clean (root + mobile + relay); `bun run lint` 2153 files, no
+issues. Full `bun test` not re-run here (Execution reports 15914 pass · 5 opt-in skip).
+
+**Premises:** `chartThumbView` re-validates through `chartRowView`
+(`chart-row.ts:139-149`) TRUE — the §7 "pod not trusted" path is kept
+(`chartThumbGeometry` calls it, never bypasses it); `wantsChartThumbnail` gate
+unchanged TRUE; `main`'s `ChartThumbnail` sized its `Svg` to the layout and the tile
+had no clip TRUE (diff); `donutDisc` now the one source of the ring's centre TRUE.
+
+**Mutations (each reverted; tree byte-identical, `git status` clean):**
+- donut view box 10 units short → `chart-thumb` 20 pass **3 fail** (killed).
+- list `tile` `overflow: hidden` removed → wiring + render tests 15 pass 0 fail
+  (**survived**) — acceptable: the `ChartThumbnail` root clip and the Svg viewport
+  are pinned and sufficient; the tile clip is a third belt.
+
+**Attacks tried:**
+1. View box vs marks beyond the six fixtures (columns, negative bars, stacked,
+   12 bars, negative line) at fontScale 1 / 2 / 3.1 (probe in
+   `.tentacle/tmp/mobile-gallery-polish/probe.ts`): every view box positive, marks
+   inside; 12 bars at fontScale ≥ 2 → symbol at 52 pt (MIN_MARK works). Nothing found.
+2. Large accessibility font: the reference layout's axis chrome shrinks a
+   line/area plot to ~39 of 120 units at 3.1× but never inverts it. Nothing found.
+3. Settings race (`race.ts`): a pick made while the FIRST read is in flight is
+   written over a newer build's `{v:2}` record (`stored now: {"v":1,"layout":"grid"}`)
+   — the store's `preserved` flag is only set when the read resolves. Contradicts
+   the failure mode "unknown/newer record … never written over". **LOW**: needs a
+   downgrade + a tap inside the Keychain-read window, and loses only a view
+   preference; the same shape already exists in `chart-settings-store.ts`. Fix
+   when convenient: `holder.set` awaits `loading` before `store.write`.
+4. Scatter `trend` line: `scatterBox` holds the dots only; a regression end may
+   lie just outside it and is clipped by the viewport. LOW, cosmetic; no fixture
+   with a trend in the fit test.
+
+**Holds:** pure/render split (§7) respected — decisions in `chart-thumb.ts`,
+`gallery-layout.ts`, `gallery-settings-store.ts`; Keychain import only in the
+`-expo.ts` wiring (pairing guard updated); scheme-keyed thumbnails redraw on
+light ↔ dark; no protocol/daemon change.
+
+**Executor behaviour:** evidence-first (repro + before screenshots), honest about
+drift (scatter box, line fill) and about a surviving first donut mutation, which
+it then closed with a dedicated test.
