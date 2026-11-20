@@ -52,6 +52,7 @@ import { failedLine, failureLogPath } from "../src/pod-stderr-log.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import { NOT_A_TERMINAL } from "../src/streams.ts";
 import { formatBuildMarker, formatVersionMarker } from "../src/version.ts";
+import { type PlacementPod, answerPlacement, asksVersion, isPlacement } from "./placement-fake.ts";
 import { simulateSilentTerminal } from "./silent-terminal.ts";
 
 /**
@@ -166,14 +167,36 @@ class FakeCluster implements PodCluster {
   openRawExec(_target: ExecTarget): RawExec {
     throw new Error("openRawExec is not used in this test");
   }
+  /** The fake pod's install-dir facts, as the placement probe sees them (default: every dir ok). */
+  placementPod: PlacementPod = {};
+  /** >0 while the placement is answered (its sub-answers are not separate execs). */
+  private probing = 0;
   // One-shot execs (the binary-injection sequence): record them. `--version`
   // succeeds; the image probe reports glibc x64; the install command is treated as done.
+  // The placement probe (ONE exec) is recorded as `runexec:<pod>:placement` and
+  // answered from the granular answers below, through any override (`this.runExec`).
   runExec(
     target: ExecTarget,
     _input?: Uint8Array,
     _options?: RunExecOptions,
   ): Promise<RunExecResult> {
-    this.calls.push(`runexec:${target.pod}:${target.command.join(" ")}`);
+    if (isPlacement(target.command)) {
+      this.calls.push(`runexec:${target.pod}:placement`);
+      this.probing += 1;
+      return answerPlacement(
+        target.command[2] ?? "",
+        (command) => this.runExec({ ...target, command }),
+        this.placementPod,
+      )
+        .then((run) => ({ ...run, exitCode: run.exitCode ?? 1 }))
+        .finally(() => {
+          this.probing -= 1;
+        });
+    }
+    // A sub-answer of the placement is part of that ONE exec: not recorded.
+    if (this.probing === 0) {
+      this.calls.push(`runexec:${target.pod}:${target.command.join(" ")}`);
+    }
     if (target.command[2]?.startsWith("echo tentacle-probe")) {
       return Promise.resolve({
         exitCode: 0,
@@ -181,7 +204,7 @@ class FakeCluster implements PodCluster {
         stderr: "",
       });
     }
-    if (target.command.join(" ").includes("--version")) {
+    if (asksVersion(target.command)) {
       return Promise.resolve({ exitCode: 0, stdout: "tentacle 1.2.3\n", stderr: "" });
     }
     if (target.command.join(" ").includes("fs_write")) {
@@ -441,14 +464,13 @@ describe("startPodRuntime", () => {
       log: () => {},
     });
 
-    // Lifecycle: created, readied, the F4.e injection ran (probe arch → install
-    // the exact 8 bytes via head -c → verify), then the daemon was exec'd.
+    // Lifecycle: created, readied, the F4.e injection ran (ONE placement probe:
+    // arch + install dir, docs/fix/inject-bin-dir-probe.md → install the exact
+    // 8 bytes via head -c → verify), then the daemon was exec'd.
     expect(kube.calls[0]).toMatch(/^create:tentacle-/);
     expect(kube.calls[1]).toMatch(/^ready:tentacle-/);
     const podName = (kube.calls[0] as string).slice("create:".length);
-    const unameIdx = kube.calls.findIndex((c) =>
-      c.startsWith(`runexec:${podName}:sh -c echo tentacle-probe`),
-    );
+    const unameIdx = kube.calls.indexOf(`runexec:${podName}:placement`);
     const installIdx = kube.calls.findIndex(
       (c) =>
         c ===
@@ -550,7 +572,7 @@ describe("startPodRuntime", () => {
     // Make the version probe fail (as a wrong-arch binary would).
     const original = kube.runExec.bind(kube);
     kube.runExec = (target, input, options) => {
-      if (target.command.join(" ").includes("--version")) {
+      if (asksVersion(target.command)) {
         return Promise.resolve({
           exitCode: 1,
           stdout: "",
@@ -1208,7 +1230,7 @@ describe("startPodRuntime", () => {
     const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
     const original = kube.runExec.bind(kube);
     kube.runExec = (target, input, options) =>
-      target.command.join(" ").includes("--version")
+      asksVersion(target.command)
         ? Promise.resolve({ exitCode: 1, stdout: "", stderr: "Exec format error\n" })
         : original(target, input, options);
     const logs: string[] = [];
@@ -1237,7 +1259,7 @@ describe("startPodRuntime", () => {
       const kube = new FakeCluster(new ScriptedProvider([]));
       const original = kube.runExec.bind(kube);
       kube.runExec = (target, input, options) =>
-        target.command.join(" ").includes("--version")
+        asksVersion(target.command)
           ? Promise.resolve({ exitCode: 1, stdout: "", stderr: "Exec format error\n" })
           : original(target, input, options);
       return kube;
@@ -1297,7 +1319,7 @@ describe("startPodRuntime", () => {
     const broken = new FakeCluster(new ScriptedProvider([]));
     const original = broken.runExec.bind(broken);
     broken.runExec = (target, input, options) =>
-      target.command.join(" ").includes("--version")
+      asksVersion(target.command)
         ? Promise.resolve({ exitCode: 1, stdout: "", stderr: "Exec format error\n" })
         : original(target, input, options);
     const failed: string[] = [];
@@ -1559,13 +1581,13 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
 
     const runtime = await startAttachRuntime(baseConfig("/pod/work"), deps(kube, store));
 
-    // The sequence is: getPod → the --version preflight (it succeeds, so the
-    // whole injection is skipped — no arch probe, no transfer, no re-verify)
+    // The sequence is: getPod → the ONE placement preflight (its `--version`
+    // answers, so the whole injection is skipped — no transfer, no re-verify)
     // → the daemon exec. No container is named, so the exec omits the
     // `container` parameter (recorded as "-") and the API picks the
     // only/default one — a single-container pod needs no `-c`.
     expect(kube.calls[0]).toBe("get:mypod");
-    expect(kube.calls[1]).toBe(`runexec:mypod:${POD_BIN_PATH} --version`);
+    expect(kube.calls[1]).toBe("runexec:mypod:placement");
     expect(kube.calls[2]).toBe(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
     expect(kube.calls.some((c) => c.includes("uname"))).toBe(false);
     expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
@@ -1588,25 +1610,16 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
   test("injects the binary when the preflight probe fails, then attaches", async () => {
     const model = new ScriptedProvider([[{ type: "done" }]]);
     const kube = new FakeCluster(model);
-    // The pod has no tentacle yet: the preflight probe fails (as
+    // The pod has no tentacle yet: every binary the placement asks fails (as
     // "command not found" would), but the post-injection verify succeeds.
-    let versionCalls = 0;
     const original = kube.runExec.bind(kube);
     kube.runExec = (target, input, options) => {
-      if (target.command.join(" ").includes("--version")) {
-        versionCalls += 1;
-        // Record the --version exec so the call sequence is complete (the
-        // preflight probes, and later the post-injection verify).
-        kube.calls.push(`runexec:${target.pod}:${target.command.join(" ")}`);
-        if (versionCalls <= 2) {
-          return Promise.resolve({
-            exitCode: 1,
-            stdout: "",
-            stderr: "sh: tentacle: command not found\n",
-          });
-        }
-        // Post-injection verify: succeeds (the injected binary works).
-        return Promise.resolve({ exitCode: 0, stdout: "tentacle 1.2.3\n", stderr: "" });
+      if (asksVersion(target.command) && !kube.calls.some((c) => c.includes("head -c"))) {
+        return Promise.resolve({
+          exitCode: 1,
+          stdout: "",
+          stderr: "sh: tentacle: command not found\n",
+        });
       }
       return original(target, input, options);
     };
@@ -1616,15 +1629,16 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
       deps(kube, new LogSessionStore(join(dir, "exec-inject"))),
     );
 
-    // Preflight probes (install path, then PATH) → the resident guard (asks the
-    // install path's binary, detached-runs S1) → the full injection (probe arch →
-    // install the 8 bytes via head -c → verify) → the daemon exec.
-    expect(kube.calls[1]).toBe(`runexec:mypod:${POD_BIN_PATH} --version`);
-    expect(kube.calls[2]).toBe("runexec:mypod:tentacle --version");
-    expect(kube.calls[3]).toBe(`runexec:mypod:${POD_BIN_PATH} serve --resident-status`);
-    expect(kube.calls[4]?.startsWith("runexec:mypod:sh -c echo tentacle-probe")).toBe(true);
+    // ONE placement preflight (arch, install dir, every candidate's version) →
+    // the resident guard (asks the install path's binary, detached-runs S1) →
+    // the injection (install the 8 bytes via head -c → verify) → the daemon exec.
+    // No second arch probe: the placement carried it.
+    expect(kube.calls[1]).toBe("runexec:mypod:placement");
+    expect(kube.calls[2]).toBe(`runexec:mypod:${POD_BIN_PATH} serve --resident-status`);
     const installIdx = kube.calls.findIndex((c) => c.includes("head -c 8"));
-    expect(installIdx).toBe(5);
+    expect(installIdx).toBe(3);
+    expect(kube.calls[4]).toBe(`runexec:mypod:${POD_BIN_PATH} --version`);
+    expect(kube.calls.some((c) => c.includes("echo tentacle-probe"))).toBe(false);
     expect(kube.calls.some((c) => c.includes("serve --bridge"))).toBe(true);
     runtime.dispose();
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
@@ -1691,7 +1705,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     // The named container rides on the daemon exec; the one-shot preflight
     // records only the command, so the exec target is the assertion point.
     expect(kube.calls[0]).toBe("get:mypod");
-    expect(kube.calls[1]).toBe(`runexec:mypod:${POD_BIN_PATH} --version`);
+    expect(kube.calls[1]).toBe("runexec:mypod:placement");
     expect(kube.calls[2]).toBe(`exec:mypod:dns:${POD_BIN_PATH} serve --bridge --model-proxy`);
     runtime.dispose();
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
@@ -1710,7 +1724,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     // getPod (Pending) → the bounded wait → the preflight → the daemon exec.
     expect(kube.calls[0]).toBe("get:mypod");
     expect(kube.calls[1]).toBe("ready:mypod");
-    expect(kube.calls[2]).toBe(`runexec:mypod:${POD_BIN_PATH} --version`);
+    expect(kube.calls[2]).toBe("runexec:mypod:placement");
     expect(kube.calls.some((c) => c.includes("serve --bridge"))).toBe(true);
     runtime.dispose();
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
@@ -1724,7 +1738,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     const original = kube.runExec.bind(kube);
     kube.runExec = (target, input, options) => {
       const joined = target.command.join(" ");
-      if (joined.includes("--version")) {
+      if (asksVersion(target.command)) {
         versionCalls += 1;
         if (versionCalls === 1) {
           return Promise.resolve({ exitCode: 1, stdout: "", stderr: "not found\n" });
@@ -1882,6 +1896,39 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
       expect(notices).toEqual([]);
       runtime.dispose();
     });
+  });
+
+  test("R6 run: an image that ships THIS laptop's tentacle is reused — no upload (docs/fix/inject-bin-dir-probe.md Q4)", async () => {
+    // Mutation: `run` ignores the reuse decision (always injects, the old flow) → one `head -c`.
+    await release(
+      "run-reuse",
+      { "bun-linux-x64": "0.3.0", "bun-linux-arm64": "0.3.0" },
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerHas(kube, "tentacle 0.3.0\n");
+        const runtime = await startPodRuntime(config, runDeps(kube, "run-reuse"));
+        const name = (kube.calls[0] as string).slice("create:".length);
+        expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+        expect(kube.calls).toContain(
+          `exec:${name}:agent:${POD_BIN_PATH} serve --bridge --model-proxy`,
+        );
+        runtime.dispose();
+      },
+    );
+  });
+
+  test("R6 run: an image with ANOTHER version is not reused — injected as before", async () => {
+    await release(
+      "run-other",
+      { "bun-linux-x64": "0.3.0", "bun-linux-arm64": "0.3.0" },
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerHas(kube, "tentacle 0.2.0\n");
+        const runtime = await startPodRuntime(config, runDeps(kube, "run-other"));
+        expect(kube.calls.filter((c) => c.includes("head -c"))).toHaveLength(1);
+        runtime.dispose();
+      },
+    );
   });
 
   // docs/feat/session-hop-ux slice 2: `liveLine` selects the ONE-line contract with
@@ -2670,11 +2717,23 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
     });
   });
 
-  /** The container's install (`sh -c … head -c …`) exits 1: a read-only directory. */
+  /**
+   * A read-only filesystem: the placement probe finds no dir it can write
+   * (docs/fix/inject-bin-dir-probe.md), and an install would exit 1 anyway.
+   */
   const readOnly = (kube: FakeCluster) => {
+    kube.placementPod = {
+      dirs: {
+        "/usr/local/bin": "write",
+        "/root/.local/bin": "write",
+        "/tmp/tentacle-0/bin": "write",
+      },
+    };
     const original = kube.runExec.bind(kube);
     kube.runExec = (target, input, options) =>
-      target.command[0] === "sh" && !target.command[2]?.startsWith("echo tentacle-probe")
+      target.command[0] === "sh" &&
+      !isPlacement(target.command) &&
+      !target.command[2]?.startsWith("echo tentacle-probe")
         ? Promise.resolve({
             exitCode: 1,
             stdout: "",
@@ -2702,11 +2761,13 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         notify: (text) => notices.push(text),
       });
       const warning =
-        "⚠ the container has tentacle 0.2.0, this laptop 0.3.0; replacing it failed: [pod mypod] failed to inject tentacle (exit 1): sh: can't create: Read-only file system — continuing with the container's tentacle 0.2.0 (a protocol mismatch is still refused). To replace it: re-run \"tentacle attach\" with --bin-dir <a writable directory, e.g. /tmp>, or install tentacle 0.3.0 in the container image";
+        '⚠ the container has tentacle 0.2.0, this laptop 0.3.0; replacing it failed: [pod mypod] no install dir in the pod is writable and exec-able (/usr/local/bin: write · /root/.local/bin: write · /tmp/tentacle-0/bin: write) — pass --bin-dir <a writable, exec-able dir> — continuing with the container\'s tentacle 0.2.0 (a protocol mismatch is still refused). To replace it: re-run "tentacle attach" with --bin-dir <a writable directory, e.g. /tmp>, or install tentacle 0.3.0 in the container image';
       expect(notices).toEqual([warning]);
       expect(logs).toContain(`${warning}\n`);
-      // The container's own tentacle: the install failed before its rename.
+      // The container's own tentacle: no dir could take ours, so nothing was
+      // uploaded at all (docs/fix/inject-bin-dir-probe.md: never upload, fail).
       expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
+      expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
       expect(kube.calls.some((c) => c.startsWith("delete:") || c.startsWith("besteffort:"))).toBe(
         false,
       );
@@ -2728,7 +2789,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         notify: (text) => notices.push(text),
       });
       expect(notices).toEqual([
-        "⚠ the container has tentacle 0.2.0, this laptop 0.3.0; replacing it failed: [pod mypod] failed to inject tentacle (exit 1): sh: can't create: Read-only file system — continuing with the container's tentacle 0.2.0 (a protocol mismatch is still refused). To replace it: re-run \"tentacle attach\" with --bin-dir <a writable directory, e.g. /tmp>, or install tentacle 0.3.0 in the container image",
+        '⚠ the container has tentacle 0.2.0, this laptop 0.3.0; replacing it failed: [pod mypod] no install dir in the pod is writable and exec-able (/usr/local/bin: write · /root/.local/bin: write · /tmp/tentacle-0/bin: write) — pass --bin-dir <a writable, exec-able dir> — continuing with the container\'s tentacle 0.2.0 (a protocol mismatch is still refused). To replace it: re-run "tentacle attach" with --bin-dir <a writable directory, e.g. /tmp>, or install tentacle 0.3.0 in the container image',
       ]);
       expect(kube.calls).toContain("exec:mypod:-:tentacle serve --bridge --model-proxy");
       runtime.dispose();
@@ -3364,5 +3425,137 @@ describe("named models at the production sites (run, attach/relay)", () => {
       .catch(() => {});
     expect(lines.some((l) => l.includes("[laptop rpc]"))).toBe(false);
     a.dispose();
+  });
+});
+
+// docs/fix/inject-bin-dir-probe.md: ONE probe picks a writable + exec-able
+// install dir BEFORE any upload, and a matching binary in ANY candidate is reused.
+describe("install-dir probe (docs/fix/inject-bin-dir-probe.md)", () => {
+  const runDeps = (kube: PodCluster, label: string, extra: object = {}) => ({
+    kube,
+    namespace: "dev",
+    image: "repo/img:tag",
+    permissions: new PermissionBroker(),
+    saver: new SessionSaver(new LogSessionStore(join(dir, `place-${label}`)), () => {}),
+    resume: null,
+    log: () => {},
+    ...extra,
+  });
+  const attachDeps = (kube: PodCluster, label: string, extra: object = {}) => ({
+    ...runDeps(kube, label),
+    podName: "mypod",
+    ...extra,
+  });
+  const uploads = (kube: FakeCluster): string[] => kube.calls.filter((c) => c.includes("head -c"));
+
+  test("R1 run: /usr/local/bin is not writable → ONE upload, to $HOME/.local/bin, after the probe", async () => {
+    // Mutation: the chooser ignores `ok` (always the first candidate) → the upload goes to /usr/local/bin.
+    const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+    kube.placementPod = { home: "/home/u", dirs: { "/usr/local/bin": "write" } };
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, "r1"));
+    const name = (kube.calls[0] as string).slice("create:".length);
+    expect(uploads(kube)).toEqual([
+      `runexec:${name}:sh -c mkdir -p /home/u/.local/bin && head -c 8 > /home/u/.local/bin/tentacle.new && chmod 755 /home/u/.local/bin/tentacle.new && mv -f /home/u/.local/bin/tentacle.new /home/u/.local/bin/tentacle`,
+    ]);
+    const probeIdx = kube.calls.indexOf(`runexec:${name}:placement`);
+    expect(probeIdx).toBeGreaterThan(-1);
+    expect(probeIdx).toBeLessThan(kube.calls.findIndex((c) => c.includes("head -c")));
+    // The image probe rode in the same exec: no second `uname` exec.
+    expect(
+      kube.calls.filter((c) => c.startsWith(`runexec:${name}:sh -c echo tentacle-probe`)),
+    ).toEqual([]);
+    expect(kube.calls).toContain(
+      `exec:${name}:agent:/home/u/.local/bin/tentacle serve --bridge --model-proxy`,
+    );
+    runtime.dispose();
+  });
+
+  test("R2 run: no candidate is writable + exec-able → ZERO uploads, one error naming every dir", async () => {
+    // Mutation: the chooser ignores `ok` → an upload runs.
+    const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+    kube.placementPod = {
+      home: "/home/u",
+      uid: "1000",
+      dirs: {
+        "/usr/local/bin": "write",
+        "/home/u/.local/bin": "mkdir",
+        "/tmp/tentacle-1000/bin": "exec",
+      },
+    };
+    const error = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, "r2")).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(
+      "no install dir in the pod is writable and exec-able (/usr/local/bin: write · /home/u/.local/bin: mkdir · /tmp/tentacle-1000/bin: exec) — pass --bin-dir <a writable, exec-able dir>",
+    );
+    expect(uploads(kube)).toEqual([]);
+    expect(kube.calls.some((c) => c.includes("serve --bridge"))).toBe(false);
+    expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(true); // --rm path: cleaned up
+  });
+
+  test("R5 run: an explicit --bin-dir that cannot exec → an error, no fallback, no upload", async () => {
+    // Mutation: fall back to the defaults after an explicit dir → an upload to /usr/local/bin.
+    const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+    kube.placementPod = { dirs: { "/x": "exec" } };
+    const error = await startPodRuntime(
+      baseConfig("/pod/work"),
+      runDeps(kube, "r5", { binDir: "/x" }),
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("(/x: exec) — pass --bin-dir");
+    expect(uploads(kube)).toEqual([]);
+  });
+
+  test("R3 attach: a matching binary only in /tmp/tentacle-<uid>/bin → reused by that path, nothing uploaded", async () => {
+    // Mutation: look for a binary only at the first candidate and on PATH (the old preflight) → injected.
+    const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+    kube.placementPod = { uid: "1000", binaries: ["/tmp/tentacle-1000/bin/tentacle"] };
+    const original = kube.runExec.bind(kube);
+    kube.runExec = (target, input, options) => {
+      const line = target.command.join(" ");
+      if (line.endsWith(" --version") || line.endsWith(" --version --build-id")) {
+        kube.calls.push(`version:${line}`);
+        return Promise.resolve(
+          target.command[0] === "/tmp/tentacle-1000/bin/tentacle"
+            ? { exitCode: 0, stdout: "tentacle 1.2.3\n", stderr: "" }
+            : { exitCode: 1, stdout: "", stderr: "not found\n" },
+        );
+      }
+      return original(target, input, options);
+    };
+    const runtime = await startAttachRuntime(
+      baseConfig("/pod/work"),
+      attachDeps(kube, "r3", { appVersion: "dev" }),
+    );
+    expect(uploads(kube)).toEqual([]);
+    expect(kube.calls).toContain(
+      "exec:mypod:-:/tmp/tentacle-1000/bin/tentacle serve --bridge --model-proxy",
+    );
+    runtime.dispose();
+  });
+
+  test("R4 attach: the probe cannot run (no sh) → the direct --version still reuses `tentacle` on PATH", async () => {
+    // Mutation: no fallback when the placement exec fails → the attach fails.
+    const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const original = kube.runExec.bind(kube);
+    kube.runExec = (target, input, options) => {
+      const line = target.command.join(" ");
+      if (target.command[0] === "sh") {
+        kube.calls.push(`sh:${target.command[2]?.slice(0, 20)}`);
+        return Promise.resolve({ exitCode: 1, stdout: "", stderr: "sh: not found\n" });
+      }
+      if (line === `${POD_BIN_PATH} --version`) {
+        return Promise.resolve({ exitCode: 1, stdout: "", stderr: "not found\n" });
+      }
+      return original(target, input, options);
+    };
+    const runtime = await startAttachRuntime(
+      baseConfig("/pod/work"),
+      attachDeps(kube, "r4", { appVersion: "dev" }),
+    );
+    expect(uploads(kube)).toEqual([]);
+    expect(kube.calls).toContain("exec:mypod:-:tentacle serve --bridge --model-proxy");
+    runtime.dispose();
   });
 });

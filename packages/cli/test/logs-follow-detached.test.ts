@@ -21,7 +21,7 @@ import { ErrorCode, RpcError } from "@tentacle/transport";
 import type { DuplexChannel } from "@tentacle/transport";
 import { Connection } from "../../daemon/src/connection.ts";
 import { SessionHost } from "../../daemon/src/session-host.ts";
-import type { EngineExecTarget, EngineHost } from "../src/engine-host.ts";
+import type { EngineExecTarget, EngineHost, EngineRunExecResult } from "../src/engine-host.ts";
 import { main } from "../src/index.ts";
 import { keptDir, recordKept } from "../src/kept-index.ts";
 import { KEPT_SCHEMA_VERSION, type KeptEntry } from "../src/kept.ts";
@@ -34,6 +34,7 @@ import {
   runDirFor,
   writeOwner,
 } from "../src/run-state.ts";
+import { answerPlacement, isPlacement } from "./placement-fake.ts";
 
 const UID = "7f3c1d20-1111-4222-8333-444455556666";
 const CWD = process.cwd();
@@ -157,7 +158,13 @@ interface Pod {
  * The session is opened by a DRIVER connection (the run's TUI), so `attached`
  * is 1 before the follower arrives and must stay 1.
  */
-async function pod(options: { readonly verdict?: string } = {}): Promise<Pod> {
+async function pod(
+  options: {
+    readonly verdict?: string;
+    /** The one-shot execs' answers (default: exit 0, nothing printed). */
+    readonly runExec?: (target: EngineExecTarget) => Promise<EngineRunExecResult>;
+  } = {},
+): Promise<Pod> {
   const calls: string[] = [];
   const host = new SessionHost({
     defaultCwd: "/pod/work",
@@ -218,7 +225,14 @@ async function pod(options: { readonly verdict?: string } = {}): Promise<Pod> {
       new Connection(daemonCh, host);
       return clientCh as DuplexChannel;
     },
-    runExec: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    runExec:
+      options.runExec ??
+      (async (target: EngineExecTarget) => {
+        calls.push(
+          `runexec:${isPlacement(target.command) ? "placement" : target.command.join(" ")}`,
+        );
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }),
     execError: (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
   } as unknown as EngineHost;
   return { host, calls, hostFor: () => engineHost };
@@ -358,6 +372,49 @@ describe("logs -f <run-name>: the pod's watcher", () => {
     expect(
       p.calls.filter((call) => ["create", "remove", "removeBestEffort"].includes(call)),
     ).toEqual([]);
+  }, 15_000);
+
+  test("the bridge runs the binary the placement probe finds, not a guessed path (docs/fix/inject-bin-dir-probe.md Q2)", async () => {
+    // Mutation: `logs` keeps `${binDir ?? "/usr/local/bin"}/tentacle` → it execs a
+    // binary `run` never installed (it picked $HOME/.local/bin itself).
+    const name = "box-home";
+    await kept(entry({ name }), true);
+    const p = await pod({
+      runExec: (target) =>
+        answerPlacement(
+          target.command[2] ?? "",
+          async (command) => {
+            if (command[0] === "sh") {
+              return {
+                exitCode: 0,
+                stdout: "tentacle-probe\nx86_64\nglibc /lib64/ld-linux-x86-64.so.2\n",
+                stderr: "",
+              };
+            }
+            return command[0] === "/home/u/.local/bin/tentacle"
+              ? { exitCode: 0, stdout: "tentacle 1.2.3\n", stderr: "" }
+              : { exitCode: 127, stdout: "", stderr: "not found" };
+          },
+          {
+            home: "/home/u",
+            dirs: { "/usr/local/bin": "write" },
+            binaries: ["/home/u/.local/bin/tentacle"],
+          },
+        ),
+    });
+    const watching = Promise.withResolvers<void>();
+    const run = logs([name, "-f", "--json"], {
+      hostFor: p.hostFor,
+      onErr: (text) => {
+        if (text.includes(`watching ${UID}`)) watching.resolve();
+      },
+    });
+    await watching.promise;
+    expect(p.calls).toContain(
+      `exec:${name}:/home/u/.local/bin/tentacle serve --bridge --model-proxy`,
+    );
+    p.host.close(UID);
+    expect((await run).code).toBe(0);
   }, 15_000);
 
   test("an ended run is NOT dialled: its saved log is followed, and it says so", async () => {

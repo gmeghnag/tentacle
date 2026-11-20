@@ -44,6 +44,7 @@ import { POD_BIN_PATH } from "../src/pod-binary.ts";
 import { failedLine } from "../src/pod-stderr-log.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import type { WorkspaceMount } from "../src/workspace-mount.ts";
+import { answerPlacement, isPlacement } from "./placement-fake.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -121,6 +122,8 @@ class FakeDockerClient implements DockerClientLike {
   /** `Config.Labels` that `inspectContainer` reports. */
   labels: Record<string, string> | undefined;
   private connection: Connection | null = null;
+  /** >0 while the placement is answered (its sub-answers are not separate execs). */
+  private probing = 0;
   constructor(
     private readonly model: ModelProvider,
     private readonly askTool = false,
@@ -200,9 +203,23 @@ class FakeDockerClient implements DockerClientLike {
     _input?: Uint8Array,
     _options?: RunExecOptions,
   ): Promise<RunExecResult> {
+    // The placement probe (ONE exec, docs/fix/inject-bin-dir-probe.md): recorded
+    // as `placement`, answered from the granular answers below (not recorded).
+    if (isPlacement(target.command)) {
+      this.calls.push(`runexec:${target.container}:placement`);
+      this.runTargets.push(target);
+      this.probing += 1;
+      return answerPlacement(target.command[2] ?? "", (command) =>
+        this.runExec({ ...target, command }),
+      ).finally(() => {
+        this.probing -= 1;
+      }) as Promise<RunExecResult>;
+    }
     const cmd = target.command.join(" ");
-    this.calls.push(`runexec:${target.container}:${cmd}`);
-    this.runTargets.push(target);
+    if (this.probing === 0) {
+      this.calls.push(`runexec:${target.container}:${cmd}`);
+      this.runTargets.push(target);
+    }
     const failing = this.execErrors.find((r) => cmd.includes(r.match));
     if (failing) {
       return Promise.reject(failing.error);
@@ -378,7 +395,8 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
       "create:c1:ubuntu:24.04",
       "start:c1",
       "wait:c1:-",
-      expect.stringMatching(/^runexec:c1:sh -c echo tentacle-probe/),
+      // ONE probe: arch + a writable, exec-able install dir, before any upload.
+      "runexec:c1:placement",
       // The install command is VERBATIM the k8s one (head -c N survives a half-close).
       `runexec:c1:sh -c mkdir -p /usr/local/bin && head -c 8 > ${POD_BIN_PATH}.new && chmod 755 ${POD_BIN_PATH}.new && mv -f ${POD_BIN_PATH}.new ${POD_BIN_PATH}`,
       `runexec:c1:${POD_BIN_PATH} --version`,
@@ -601,7 +619,7 @@ describe("attach on a Docker engine (attachEngineRuntime + dockerEngineHost)", (
     }
     expect(client.calls).toEqual([
       "inspect:users-box",
-      `runexec:users-box:${POD_BIN_PATH} --version`,
+      "runexec:users-box:placement",
       `exec:users-box:${POD_BIN_PATH} serve --bridge --model-proxy`,
     ]);
     expect(logs[0]).toBe(

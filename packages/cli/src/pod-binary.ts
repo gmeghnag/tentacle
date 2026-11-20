@@ -61,8 +61,11 @@ const GLIBC_INTERPRETER: Record<PodArch, string> = {
   arm64: "/lib/ld-linux-aarch64.so.1",
 };
 
-/** The one exec that probes the image: a sentinel, the arch, then one line per loader found. */
-const PROBE_SCRIPT =
+/**
+ * The one exec that probes the image: a sentinel, the arch, then one line per loader found.
+ * Also the head of the install-dir probe (`pod-install-dir.ts`), so that one exec does both.
+ */
+export const PROBE_SCRIPT =
   "echo tentacle-probe; uname -m; " +
   'for f in /lib/ld-musl-*; do [ -e "$f" ] && echo "musl $f"; done; ' +
   'for f in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-aarch64.so.1; do [ -e "$f" ] && echo "glibc $f"; done; ' +
@@ -163,6 +166,17 @@ export async function probePod(
   } catch {
     // probe failed (no sh, exec error, timeout) → fall through.
   }
+  return withEngineArch(host, probe);
+}
+
+/**
+ * `probePod`'s arch fallback, for a probe that gave no arch (`probe-failed`,
+ * `unknown`): the ENGINE's own arch, else the probe as is. Never throws.
+ */
+export async function withEngineArch(
+  host: Pick<EngineHost, "engineArch">,
+  probe: PodProbe,
+): Promise<PodProbe> {
   if (probe.status !== "probe-failed" && probe.status !== "unknown") {
     return probe;
   }

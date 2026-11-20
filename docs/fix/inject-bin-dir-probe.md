@@ -242,3 +242,175 @@ There is no protocol change, no change to the kept schema, and no persistence ch
    persistent copy is only reused when its build matches, so it cannot be stale.
 
 **Owner answers (2026-11-20):** 1–5 all as recommended. Implementation approved.
+
+## Execution
+
+*— claude-opus-5-5, 2026-11-20*
+
+**Plan re-verified on today's main first.** Every `file:line` the plan cites still holds
+(`engine-runtime.ts:479`, `:600`, `:901-955`, `:1065`; `pod-binary.ts:148-171`, `:309-358`;
+`pod-resident.ts:64-78`, `:296`, `:503`; `logs-cmd.ts:772`; `main.ts:495`, `:506-507`,
+`:1521`, `:1551`, `:1601`, `:1984`, `:2041`; `workspace-mount.ts:696`; `hop-targets.ts:275`;
+the fakes at `engine-runtime.test.ts:169-190`, `:449-461`). No plan fix was needed.
+
+**Repro: not run (no engine).** `docker info` / `podman info` hung, with no answer in 120 s,
+so there is no container engine in this context. The live repro and the noexec check of the
+load-bearing assumption stay **unverified on a real pod** (see the end of this section).
+The script itself was run with a real `sh`, the laptop's, from `.tentacle/tmp/inject-bin-dir-probe/`.
+`/usr/local/bin` (not writable here) printed `place 0 no write`. A temp `$HOME` printed `ok`,
+and the dirs that the probe created were gone afterwards. With `HOME=/` it printed
+`place 1 no home`, then `place 2 ok …/tentacle-501/bin`, and the parent was kept at `drwx------`.
+This first run found one bug, now fixed: a `case … ;; esac` inside `$(…)` is a syntax error
+in bash's `sh`, so the home candidate uses a `home_bin` function.
+
+**As built, in the plan's order:**
+
+1. `packages/cli/src/pod-install-dir.ts` (new, pure):
+   - `installCandidates` (`:39`) returns `--bin-dir` alone, or `/usr/local/bin` → `home` → `tmp`.
+   - `placementScript` (`:67`) builds the ONE `sh -c`:
+     - It opens with an `echo tentacle-place` sentinel, then reuses `PROBE_SCRIPT` verbatim
+       (not forked).
+     - `probe_dir` runs `mkdir -p`, writes a `#!/bin/sh` file, `chmod 700`s it and execs it
+       directly, then `rm`s it and `rmdir`s every dir it created (deepest first).
+     - It stops at the first dir that passes. The later ones print `skip`.
+     - Only safe characters are allowed in a dir: `[A-Za-z0-9._/@+-]`, absolute, no `..`.
+     - A dir inside the docker workspace mount (`M`) gets `no mount` before anything is created.
+     - The tmp candidate is `${TMPDIR:-/tmp}/tentacle-<uid>/bin` (Q1). Its parent is made
+       with `mkdir -m 700` and must be `-O` and not `-L`, else `owner`.
+     - It runs `probe_bin` on every candidate's `tentacle`, then on PATH's, deduplicated.
+       Each answer is printed as `bin <exit> <path>` plus up to 3 output lines prefixed `|`.
+       A pod line can therefore never forge a `place` line, and a 3-line answer still fails
+       the exact-2-lines build parse, as it does today.
+   - `parsePlacement` (`:198`): no sentinel → `null`. A missing or garbled line → `missing`, never ok.
+   - `choosePlacement` (`:280`): the reuse is the first binary that `containerDecision` would
+     reuse. Otherwise the decision is made on the first binary that answered. The install dir
+     is the first `ok`. When there is none, `noDir` is one line naming each dir and its step
+     (`untrustedText`), plus the `--bin-dir` advice.
+2. `packages/cli/src/pod-binary.ts`: `PROBE_SCRIPT` is exported. `probePod`'s engine-arch
+   fallback was extracted as `withEngineArch` (`:176`). No behaviour change.
+3. `packages/cli/src/engine-runtime.ts`:
+   - Shared helpers: `probePlacement` (`:448`, one exec, 30 s budget), `placementFailedError`
+     (`:482`) and `expectedPodBinary` (`:496`). The last one was lifted out of `attach` so
+     that `run` uses the same version/build rule.
+   - `run` (`:759`) runs the probe right after `waitForReady`:
+     - The probe did not run → an error, before any upload.
+     - It reuses a matching binary (Q4) only when a version is known: see drift 1.
+     - No dir passed → `noDir`, thrown before any upload, inside the existing `try`, so
+       `removeUnlessKept` handles the workload as before.
+     - Otherwise `injectAgentBinary` runs at the chosen dir. It is given
+       `probe: withEngineArch(classifyImage(parsed.image))`, so there is no second `uname` exec.
+     - The kept-line/announce tail was factored into `ready(binPath)` (`:726`), unchanged.
+   - `attach` (`:1120-1213`): the placement exec replaces the two `versionOf` execs, with the
+     same `execError` translation.
+     - The probe did not run (no `sh`) → today's two direct `--version` execs, for reuse only.
+     - Anything that needs an install throws `cannotInstall` at the top of the existing install
+       `try` (`:1204`). So a failed REPLACE still goes on with the old binary and warns, as it
+       did before, but now without having uploaded anything.
+     - `installedAt` is now said when `found !== binPath` (`:1268`), not only for `tentacle`
+       on PATH. This covers the old root-owned `/usr/local/bin` binary when ours went to
+       `$HOME/.local/bin`.
+   - `findPodBinary` (`:528`): the read-only lookup for `logs` (Q2).
+4. `packages/cli/src/logs-cmd.ts:775`: `logs -f <run>` execs the binary that `findPodBinary`
+   finds. It falls back to `entry.binDir ?? /usr/local/bin` when the probe cannot tell.
+5. `packages/cli/src/main.ts`: the help text for `TENTACLE_POD_BIN_DIR` and for `attach` now
+   says the dir is picked automatically and that `--bin-dir` forces one.
+6. Tests:
+   - `test/placement-fake.ts` (new) is one emulator, shared by the three fakes (`FakeCluster`,
+     `FakeDockerClient`, the hop `fakeHost`). It answers the placement exec from the SAME
+     granular answers the fakes already give, through any override (`this.runExec`): the image
+     probe and each `<bin> --version`. So the existing musl, old-version and build-id overrides
+     keep deciding.
+   - The placement is recorded as `runexec:<pod>:placement`. Its sub-answers are not recorded:
+     they are one exec.
+   - The `$HOME`/tmp binaries exist only when `PlacementPod.binaries` lists them, so by
+     default only `/usr/local/bin` (or `--bin-dir`), then PATH, are asked, as before.
+   - The `.includes("--version")` overrides became `asksVersion` (the script mentions
+     `--version` too).
+   - Sequence tests updated. The diffs show the order is now probe → upload: `placement` at
+     the index where `sh -c echo tentacle-probe` (run) or `… --version` (attach) used to be.
+   - `readOnly` now models a read-only fs through the probe. Its two warning tests assert
+     "no install dir …" and **no `head -c` at all**: before, they asserted a failed upload.
+   - New: `test/pod-install-dir.test.ts` (17 tests, including 6 that run the script under a
+     real `sh`), R1–R6 in `engine-runtime.test.ts`, and the `logs` Q2 test in
+     `logs-follow-detached.test.ts`.
+7. `changelog.d/inject-bin-dir-probe.fixed.md` and the `TODO.md` row.
+
+**Red → green** (`bun test packages/cli/test/engine-runtime.test.ts -t "install-dir probe"`,
+with the new tests on the OLD `engine-runtime.ts`):
+
+```
+(fail) … R1 run: /usr/local/bin is not writable → ONE upload, to $HOME/.local/bin, after the probe
+(fail) … R2 run: no candidate is writable + exec-able → ZERO uploads, one error naming every dir
+(fail) … R5 run: an explicit --bin-dir that cannot exec → an error, no fallback, no upload
+error: [pod mypod] tentacle --version failed (exit 1): not found
+(fail) … R3 attach: a matching binary only in /tmp/tentacle-<uid>/bin → reused by that path, nothing uploaded
+ 1 pass
+ 4 fail
+```
+
+R1 failed on `uploads` (`/usr/local/bin/tentacle.new` received). R2 and R5 resolved instead of
+rejecting. R3 injected. After the fix: `5 pass, 0 fail`.
+
+R4 (no `sh` → direct `--version` reuse) is green on the old code too, **by design**. It pins
+the fallback, and its mutation below is red.
+
+R6 and the `logs` Q2 test are red on the old behaviour, shown by restoring that behaviour:
+`run` never reuses (R6: `1 pass, 1 fail`), and `logs` uses `binDir ?? /usr/local/bin`
+(`13 pass, 1 fail`).
+
+**Mutation checks (each reverted, then the file was restored):**
+
+| Mutation | Result |
+|---|---|
+| The chooser ignores `ok` (always the first candidate) | R1, R2, R5 red |
+| An explicit `--bin-dir` falls back to the defaults | R5 red |
+| Only the first candidate + PATH are asked (the old preflight) | R3 red |
+| No fallback when the probe cannot run | R4 red |
+| `run` never reuses | R6 (reuse) red |
+| The script does not `rmdir` the dirs it created | 2 real-`sh` tests red |
+| The script has no mount skip | the mount test red |
+
+**Drift from the Implementation:**
+
+1. **`run` reuses only when this laptop's version is known.** From source with no
+   `TENTACLE_POD_BIN`, `expected` is `undefined`, and `containerDecision` would reuse ANY
+   answering binary. That is fine for `attach` (Q3, as before) but contradicts Q4's
+   "the build-id rule keeps it exact". So from source, `run` always injects, as today.
+2. **A thrown placement exec stays fatal in `attach`**, translated by `execError`, exactly as
+   the first `versionOf` was before (a wrong container, a timeout). Only a non-zero exit or a
+   missing sentinel takes the direct `--version` fallback. The plan's table had "a probe exec
+   timeout → the reuse fallback runs". I kept today's behaviour, because the k8s
+   wrong-container case arrives as a throw and must keep its actionable message.
+3. **The probe stops at the first dir that passes** (later ones `skip`, untouched). It no
+   longer probes every candidate, because the chooser only ever needs the first. The error
+   still names every candidate, because it is raised only when none passed.
+4. **Q3 cleanup**:
+   - The probe `rmdir`s every dir it created itself, including the chosen one. The install's
+     own `mkdir -p` recreates it.
+   - The **tmp candidate's parent `tentacle-<uid>` (0700) is kept on purpose**. It is the
+     resident's state dir: if the probe removed it, the install's `mkdir -p` would recreate it
+     with umask permissions, and the resident's `mkdirSync(…, 0o700)` does not chmod an
+     existing dir.
+5. **The `attach` mount** for the skip is `state.workspace` (the container's label, which is
+   untrusted). It is shell-quoted, and a forged value can only remove candidates.
+6. **`findPodBinary`** (for `logs`) lives in `engine-runtime.ts`, next to the probe helpers it
+   reuses. `logs-cmd.ts` already imported `podDaemonCommand` from there.
+
+**Unverified:** the live repros and the load-bearing assumption (a directly exec'd script gets
+`EACCES` on a `noexec` mount; a non-root UID on UBI). There was no container engine here. To
+verify, from `.tentacle/tmp/inject-bin-dir-probe/`:
+- `docker run --rm --read-only --tmpfs /tmp:noexec --user 12345 registry.access.redhat.com/ubi9/ubi sh -c "$(bun script.ts -)"`.
+  Expect `no write`/`no mkdir` for `/usr/local/bin` and `$HOME/.local/bin`, and `no exec`
+  for `/tmp/tentacle-12345/bin`.
+- Then `tentacle run --engine docker --image …ubi9/ubi --user 12345:0`. Expect `$HOME/.local/bin`
+  or the tmp dir, with no `Permission denied` after the transfer.
+
+**Gate (`bun run check`):** green. The output was `tsc` clean for all three projects,
+`Checked 2131 files … No fixes applied.`, then `15756 pass · 5 skip · 0 fail · Ran 15761 tests
+across 1118 files`. The 5 skips are all opt-in `skipIf`s that this task does not touch: live docker
+×2, live k8s, and slow. The first run had 34 failures in `T3 frames (snapshots)` (`packages/tui`,
+which this task does not touch). They were caused by a stray `ESC[?25h` that some test wrote over
+the first bytes of `packages/tui/test/__snapshots__/chart-lines.test.ts.snap`. I restored the file
+with `git checkout`, its two test files passed alone (98/98), and the rerun was all green. That
+looks like a pre-existing flake (a raw terminal write that landed in the snapshot file); it is
+not caused by this change.

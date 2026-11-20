@@ -43,7 +43,7 @@ import {
 } from "@tentacle/protocol";
 import { type DuplexChannel, RpcPeer } from "@tentacle/transport";
 import type { EngineHost } from "./engine-host.ts";
-import { podDaemonCommand } from "./engine-runtime.ts";
+import { findPodBinary, podDaemonCommand } from "./engine-runtime.ts";
 import { keptDir, readKept } from "./kept-index.ts";
 import type { KeptEntry } from "./kept.ts";
 import {
@@ -768,8 +768,15 @@ async function followRun(deps: LogsDeps, run: RunFound, opts: LogsOptions): Prom
   }
   // The bridge the resident lives behind, exactly as `attach` opens it
   // (`podDaemonCommand`: `serve --bridge --model-proxy` in the pod). The
-  // binary's path inside the pod is the attach's, not a guess of ours.
-  const binPath = `${run.entry.binDir ?? "/usr/local/bin"}/tentacle`;
+  // binary's path inside the pod is found the way `attach` finds it (the ONE
+  // placement probe, read-only: docs/fix/inject-bin-dir-probe.md Q2), since
+  // `run` may have picked the install dir itself; `--bin-dir`'s path when the
+  // probe cannot tell.
+  const binPath = await findPodBinary(host, run.entry.name, {
+    ...(host.defaultContainer !== undefined ? { container: host.defaultContainer } : {}),
+    ...(run.entry.binDir !== undefined ? { binDir: run.entry.binDir } : {}),
+    configDir: deps.configDir,
+  });
   let channel: DuplexChannel;
   try {
     channel = host.openExec({
