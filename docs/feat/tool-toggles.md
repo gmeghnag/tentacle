@@ -409,3 +409,5 @@ Red before green: every test below is first shown failing on `main`'s code, or o
 7. **Space on a partially-off group** (some members off one by one): turn the whole group on, or off? **Rec on.** It is the safe, reversible reading ("show me everything in it"); a second Space turns it all off.
 8. **Phone in v1:** config parity only (a `serve` session gets the serve config's switches; the phone shows nothing new), with a follow-up `feat/mobile-tool-toggles` (P1 switches in Session info, mockups first)? **Rec yes.** The owner's motivation is the qwen context on the Mac. The wire (`session/tools`, `kind:"tool"`) is built here, so the phone task is UI only.
 9. **Token figure:** the heuristic estimate (`~N`, free, instant, identical on every runtime), or an exact provider count per tool (N extra count calls, and over a pod they go through the laptop)? **Rec the heuristic `~N`.** It is for ranking what to switch off. The context meter already shows the exact total after a switch.
+
+**Owner answers (2026-11-20):** Owner questions 1–9 all as recommended. Implementation APPROVED. Follow-up row to add: feat/mobile-tool-toggles (Q8).
