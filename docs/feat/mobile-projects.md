@@ -575,6 +575,7 @@ baseline clean (AGENTS §6), `bun run e2e:mobile` (decision 20).
    the old app overwrite its existing record? *Recommendation: refuse.*
 10. **Variant:** A (computer header + one row per paired project), B (flat
     "Projects"), or C (two levels)? *Recommendation: A.*
+    **Owner (20/11): A.** Mockup: https://claude.ai/artifact/4SieEVXHnqma7mxDjEDXqS
 11. **Split** into (a) `feat/project-pairing` — protocol + daemon + CLI (L,
     load-bearing) — then (b) `feat/mobile-projects-app` — app + E2E (M,
     cross-module), this doc as umbrella (the device-pairing precedent)?
