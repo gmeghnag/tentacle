@@ -314,4 +314,21 @@ Quarantined (not run):
 
 ## Review
 
-*— (pending: fresh-context review by the orchestrator; this executor does not review its own work)*
+*— claude-opus-5-5, 2026-11-20*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM; everything else holds).
+
+Gate (this review): the 10 touched mobile test files → `176 pass · 0 fail`; `bun run lint` → `Checked 2122 files … No fixes applied.`; `bun run typecheck` → 0. Full `bun test` and the simulator gate were NOT re-run (the e2e runs 6/7 are taken from Execution).
+
+Mutation non-vacuity (each reverted, tree clean afterwards): `link(up)` without `runOutbox` → `session-screen-compose` 1 fail; Send later back to `await basis()` → `compose-controller` "never waits" fails; `nothingRunning` back to `groups.length === 0` → `activity.test` 1 fail. Holds.
+
+§7 checks: the side `serve` (flow 17) starts only after the hook has confirmed the main `serve` is down, so there is never a second daemon on the store (one-daemon-per-store holds); it runs `--no-relay`. The product changes stay in pure modules (`newSessionFromHub`, `offlineBasis`, `nothingRunning`, `rowAccessibility`). No protocol or persistence change. `offlineBasis` with no read yet gives `{0,null}` → "changed" → the person is asked, never lost. A `primeBasis` read still pending when the link drops resolves after the reconnect and only replaces `lastBasis`; an item already written keeps its own copy.
+
+**MEDIUM: `apps/mobile/src/ui/Row.tsx:151`, `control: trailing !== undefined`.** The pure rule says a row ungroups only for a trailing CONTROL. The component instead treats ANY defined `trailing` as one, including `null` and plain text. Where it goes wrong:
+- (a) `CommandsSheet.tsx:280`: `edgeFor` returns `null` for every `ready` row, so every ready Commands row stops being one button. The Pressable becomes `accessible={false}` and only the label column is a button.
+- (b) `CommandsSheet.tsx:162` (dimmed): the reason `<Text>` and `ToolsSheet.tsx:79` (`null` when a band has no switch) ungroup the same way.
+- (c) `SessionInfoSheet.tsx:226`: a read-only row's `values` (Text) ungroups too, so VoiceOver reads the label and the value as separate elements. That breaks the "read-only row: label + value read together" contract in `rowAccessibility`'s own doc.
+
+No test covers this mapping. `row-value.test.ts` tests the pure function only, so the bug sits in exactly the untested component logic §7 warns about. Fix: let the caller say what the trailing element is (e.g. a `trailingControl` flag, or `trailingKind: "control" | "value"`) and pass that to `rowAccessibility`. Pin it with a test on a `null`/value trailing.
+
+Behaviour of the executor: the triage was evidence-led and honest about the 7 quarantines and the flaky `serve-mcp` T12. The mutation claims I re-checked hold.
