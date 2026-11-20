@@ -16,40 +16,27 @@ import {
   SKILLS_PROMPT_HEADER,
   type SkillInfo,
   escapeSkillText,
-  expandToolName,
   groupOfTool,
   renderSkillsCatalog,
 } from "@tentacle/config";
-import { HeuristicTokenCounter, type ToolDefinition } from "@tentacle/core";
+import {
+  HeuristicTokenCounter,
+  type SessionCapabilities,
+  type ToolDefinition,
+} from "@tentacle/core";
 import { SKILL_TOOL_NAME } from "@tentacle/tools";
 
-/** A session's capability switches: sorted, de-duplicated names, the three disabled sets. */
-export interface SessionCapabilities {
-  readonly disabledMcp: readonly string[];
-  readonly disabledSkills: readonly string[];
-  /** Built-in tools switched off (docs/feat/tool-toggles.md), groups expanded. */
-  readonly disabledTools: readonly string[];
-}
-
-/** Everything on: a brand-new session's state. */
-export const NO_CAPABILITIES: SessionCapabilities = {
-  disabledMcp: [],
-  disabledSkills: [],
-  disabledTools: [],
-};
-
-/** The kinds a switch can turn off. */
-export type CapabilityKind = "mcp" | "skill" | "tool";
-
-/**
- * One toggle, as the protocol carries it: a DELTA (not the whole state), so two
- * clients toggling different items both land.
- */
-export interface CapabilityOp {
-  readonly kind: CapabilityKind;
-  readonly name: string;
-  readonly enabled: boolean;
-}
+// The state, the op and its rule live in core (the phone bundles the client's
+// preview of them — docs/fix/mobile-bundle-node-import.md); re-exported so the
+// agent's API is unchanged and there is ONE set of rules.
+export {
+  type CapabilityKind,
+  type CapabilityOp,
+  CapabilityRefusal,
+  NO_CAPABILITIES,
+  type SessionCapabilities,
+  applyCapabilityOp,
+} from "@tentacle/core";
 
 /**
  * The MCP server a tool belongs to, by tool name — the `Tool.mcpServer` tag the
@@ -57,60 +44,6 @@ export interface CapabilityOp {
  * `__`). A built-in answers `undefined`.
  */
 export type ServerOf = (toolName: string) => string | undefined;
-
-const KEY_OF = {
-  mcp: "disabledMcp",
-  skill: "disabledSkills",
-  tool: "disabledTools",
-} as const satisfies Record<CapabilityKind, keyof SessionCapabilities>;
-
-/**
- * Why a `tool` op cannot apply: its name is no built-in tool or group, or it
- * names an always-on tool (`skill`). Built-in names are static per build, so
- * an unknown one is a typo or version skew — never stored (unlike MCP/skill
- * names, which may appear later).
- */
-export class CapabilityRefusal extends Error {
-  constructor(readonly op: CapabilityOp) {
-    super(
-      op.name === SKILL_TOOL_NAME
-        ? `${op.name} is always on and cannot be switched`
-        : `unknown built-in tool or group: ${JSON.stringify(op.name)}`,
-    );
-    this.name = "CapabilityRefusal";
-  }
-}
-
-/**
- * The state after `op`. Idempotent: when nothing changes, the SAME object comes
- * back, so a caller can tell "no change" from "changed" by identity (and a
- * no-op set emits no session-log entry and no broadcast). A `tool` op names a
- * tool OR a group: a group is ONE op (atomic, one log entry, one broadcast).
- * An unknown tool name or `skill` throws a `CapabilityRefusal`, state untouched.
- */
-export function applyCapabilityOp(
-  state: SessionCapabilities,
-  op: CapabilityOp,
-): SessionCapabilities {
-  const names = op.kind === "tool" ? expandToolName(op.name) : [op.name];
-  if (names === undefined) {
-    throw new CapabilityRefusal(op);
-  }
-  const key = KEY_OF[op.kind];
-  const current = state[key];
-  if (!names.some((name) => current.includes(name) !== !op.enabled)) {
-    return state;
-  }
-  const next = new Set(current);
-  for (const name of names) {
-    if (op.enabled) {
-      next.delete(name);
-    } else {
-      next.add(name);
-    }
-  }
-  return { ...state, [key]: [...next].sort() };
-}
 
 /**
  * Whether a built-in tool is turned off for this session. `skill` never is,
