@@ -67,7 +67,16 @@ import {
   configBinPath,
   resolvePodBinary,
 } from "./pod-binary-build.ts";
-import { injectAgentBinary, probePod } from "./pod-binary.ts";
+import { classifyImage, injectAgentBinary, withEngineArch } from "./pod-binary.ts";
+import {
+  DEFAULT_INSTALL_DIR,
+  type InstallCandidate,
+  type ParsedPlacement,
+  choosePlacement,
+  installCandidates,
+  parsePlacement,
+  placementScript,
+} from "./pod-install-dir.ts";
 import {
   residentGuard,
   residentSkewWarning,
@@ -236,8 +245,10 @@ export interface EngineRuntimeDeps {
   readonly host: EngineHost;
   readonly image: string;
   /**
-   * Install dir for the injected binary in the pod. Default `/usr/local/bin`;
-   * override (`--bin-dir`) for a read-only rootfs, e.g. `/tmp` on a hardened pod.
+   * Install dir for the injected binary in the pod (`--bin-dir`): the only
+   * candidate, no fallback. Absent: the first of /usr/local/bin,
+   * $HOME/.local/bin, ${TMPDIR:-/tmp}/tentacle-<uid>/bin the ONE placement
+   * probe proves writable + exec-able (docs/fix/inject-bin-dir-probe.md).
    */
   readonly binDir?: string;
   /** Workload name (optional; a random one is generated when omitted). */
@@ -424,10 +435,129 @@ export function armSharedExitNet(
   };
 }
 
+/** The ONE install-dir probe's budget: it also asks each candidate binary's `--version`. */
+const PLACEMENT_TIMEOUT_MS = 30_000;
+
+/**
+ * The install-dir probe (docs/fix/inject-bin-dir-probe.md): ONE `sh -c` exec
+ * that probes the image, proves which candidate dir can take the binary
+ * (written to AND executed from) and asks every candidate's `tentacle` for its
+ * version — all BEFORE any upload. `null`: it did not run (no `sh`: a
+ * distroless image; another non-zero exit). A thrown exec is the caller's.
+ */
+async function probePlacement(
+  host: EngineHost,
+  name: string,
+  container: string | undefined,
+  options: {
+    readonly candidates: readonly InstallCandidate[];
+    readonly buildId: boolean;
+    readonly mount?: string;
+  },
+): Promise<{ readonly parsed: ParsedPlacement | null; readonly run: EngineRunExecResult }> {
+  const run = await host.runExec(
+    {
+      name,
+      container,
+      command: [
+        "sh",
+        "-c",
+        placementScript({
+          candidates: options.candidates,
+          buildId: options.buildId,
+          ...(options.mount !== undefined ? { mount: options.mount } : {}),
+        }),
+      ],
+    },
+    undefined,
+    { timeoutMs: PLACEMENT_TIMEOUT_MS },
+  );
+  return {
+    parsed: run.exitCode === 0 ? parsePlacement(run.stdout, options.candidates.length) : null,
+    run,
+  };
+}
+
+/** The error when the probe did not run and a binary must be installed: nothing is uploaded. */
+function placementFailedError(prefix: string, run: EngineRunExecResult | undefined): Error {
+  const detail = run
+    ? untrustedText(run.stderr.trim() || run.status || `exit ${run.exitCode}`)
+    : "no answer";
+  return new Error(
+    `${prefix} failed to inject tentacle: the install-dir probe did not run (${detail}) — the image may have no shell (sh): distroless/scratch images are unsupported; use an image with sh and head`,
+  );
+}
+
+/**
+ * What this laptop would inject, for the reuse rule (docs/fix/stale-pod-binary.md):
+ * its version and build, read laptop-side from the files. `undefined` version
+ * (from source, no override): nothing to compare.
+ */
+async function expectedPodBinary(
+  config: Pick<TentacleConfig, "configDir">,
+  appVersion: string | undefined,
+): Promise<{ readonly version: string | undefined; readonly build: string | undefined }> {
+  const version = appVersion ?? APP_RELEASE_VERSION;
+  const podBinOverride = process.env.TENTACLE_POD_BIN;
+  const build = await expectedContainerBuild({
+    appVersion: version,
+    ...(podBinOverride ? { podBinOverride } : {}),
+    binaries: config.configDir
+      ? POD_BINARY_TARGETS.map((target) =>
+          configBinPath(config.configDir as string, target),
+        ).filter((path) => existsSync(path)) // a missing one fails at inject (`podBinaryProblem`)
+      : [],
+    readBuild: (path) => readBinaryBuildId(path),
+  });
+  const expected = await expectedContainerVersion({
+    appVersion: version,
+    ...(podBinOverride ? { podBinOverride } : {}),
+    readMarker: (path) => readBinaryVersion(path),
+  });
+  return { version: expected, build };
+}
+
+/**
+ * The binary to exec `serve --bridge` with in a workload `run`/`attach` already
+ * provisioned (`tentacle logs -f <run>`, docs/fix/inject-bin-dir-probe.md Q2):
+ * the same ONE placement probe, read-only here (nothing is ever uploaded) — the
+ * matching binary in any candidate, else the first that answers. When the probe
+ * cannot tell (no shell, an exec error, nothing answers): `--bin-dir`'s path,
+ * as before. Never throws.
+ */
+export async function findPodBinary(
+  host: EngineHost,
+  name: string,
+  options: {
+    readonly container?: string;
+    readonly binDir?: string;
+    readonly configDir?: string;
+    readonly appVersion?: string;
+  },
+): Promise<string> {
+  const fallback = `${options.binDir ?? DEFAULT_INSTALL_DIR}/tentacle`;
+  try {
+    const expected = await expectedPodBinary(
+      { configDir: options.configDir ?? "" },
+      options.appVersion,
+    );
+    const candidates = installCandidates(options.binDir);
+    const { parsed } = await probePlacement(host, name, options.container, {
+      candidates,
+      buildId: expected.build !== undefined,
+    });
+    return parsed === null
+      ? fallback
+      : (choosePlacement(parsed, candidates, expected).found?.path ?? fallback);
+  } catch {
+    return fallback;
+  }
+}
+
 /** A workload `provisionWorkload` made ready: its binary installed, no daemon started. */
 export interface ProvisionedWorkload {
   readonly name: string;
-  /** Where the binary was installed. */
+  /** The binary the daemon runs: where it was installed, or the image's own matching one. */
   readonly binPath: string;
   /** Delete it, or (kept) say how to reach it; `error`: the failed start, if any. */
   readonly removeUnlessKept: (error?: unknown) => void;
@@ -474,9 +604,11 @@ async function provisionNamed(
   name: string,
 ): Promise<ProvisionedWorkload> {
   const { host } = deps;
-  // Install path in the pod: a read-only rootfs (a hardened pod) needs a writable
-  // dir via --bin-dir (e.g. /tmp); the daemon is then exec'd by this absolute path.
-  const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
+  // The install dir is picked in the pod by ONE probe before any upload
+  // (docs/fix/inject-bin-dir-probe.md): /usr/local/bin → $HOME/.local/bin →
+  // ${TMPDIR:-/tmp}/tentacle-<uid>/bin, or only --bin-dir when given; the daemon
+  // is then exec'd by that absolute path.
+  const candidates = installCandidates(deps.binDir);
   const container = host.defaultContainer;
   // Interactive (TTY) startup is ONE line: a spinner repainted per phase
   // (create → ready → inject, with the transfer bar as the bar phase's text),
@@ -590,20 +722,69 @@ async function provisionNamed(
     armExitNet(host, name, () => true);
   }
 
+  // The workload is usable with `binPath`: the line(s) to say, then the handle.
+  const ready = (binPath: string): ProvisionedWorkload => {
+    // Kept: say so BEFORE the TUI mounts — this line stays on the main screen, so
+    // a Ctrl+C exit (no `dispose`) still shows how to resume. A run with a TUI
+    // calls `announce` itself once everything succeeded.
+    const announce = (): void => {
+      if (keptLine && !announced) {
+        announced = true;
+        logKept(keptLine);
+      }
+    };
+    if (!deps.deferAnnounce) {
+      announce();
+    }
+    warnNotRecorded();
+    return { name, binPath, removeUnlessKept, announce };
+  };
+
   try {
     phase(`[${host.noun}] waiting for ${name} to become ready…`);
     await host.waitForReady(name);
+    // Where the binary can go, and whether the image already ships THIS
+    // laptop's: ONE exec, before any upload. Any failure here throws → the
+    // workload is deleted below (or kept, said).
+    const prefix = `[${host.noun} ${name}]`;
+    const expected = await expectedPodBinary(config, deps.appVersion);
+    const { parsed, run: placeRun } = await probePlacement(host, name, container, {
+      candidates,
+      buildId: expected.build !== undefined,
+      ...(workspace ? { mount: workspace.target } : {}),
+    });
+    if (parsed === null) {
+      throw placementFailedError(prefix, placeRun);
+    }
+    const choice = choosePlacement(parsed, candidates, expected);
+    // Reused only when it is exactly what this laptop would inject (Owner Q4): from
+    // source, with no version to compare, `run` always injects (as before).
+    if (choice.decision.kind === "reuse" && choice.found && expected.version !== undefined) {
+      status?.finish();
+      const reused = untrustedText(choice.found.stdout.trim().split("\n")[0] ?? "") || "tentacle";
+      if (!status) {
+        info(
+          `[${host.noun}] ${reused} found in ${name} (the image's); starting the agent daemon\n`,
+        );
+      }
+      return ready(choice.found.path);
+    }
+    if (choice.installDir === undefined) {
+      throw new Error(`${prefix} ${choice.noDir ?? "no install dir"}`);
+    }
+    const binPath = `${choice.installDir}/tentacle`;
     // Inject the tool into the sandbox (F4.e): the image need not contain
     // `tentacle`. Any failure here throws → the workload is deleted below.
-    // In interactive mode the injection phases (probe → resolve → transfer →
-    // verify) drive the SAME status line via `onStatus`.
+    // In interactive mode the injection phases (resolve → transfer → verify)
+    // drive the SAME status line via `onStatus`.
+    const image = parsed.image;
     const version = await injectAgentBinary({
       host,
       name,
       noun: host.noun,
       binPath,
       container,
-      probe: () => probePod(host, name, container),
+      probe: () => withEngineArch(host, classifyImage(image)),
       resolveBinary: (target) =>
         resolvePodBinary(target, {
           configDir: config.configDir,
@@ -623,20 +804,7 @@ async function provisionNamed(
     if (!status) {
       info(`[${host.noun}] ${version} ready in ${name}; starting the agent daemon\n`);
     }
-    // Kept: say so BEFORE the TUI mounts — this line stays on the main screen, so
-    // a Ctrl+C exit (no `dispose`) still shows how to resume. A run with a TUI
-    // calls `announce` itself once everything succeeded.
-    const announce = (): void => {
-      if (keptLine && !announced) {
-        announced = true;
-        logKept(keptLine);
-      }
-    };
-    if (!deps.deferAnnounce) {
-      announce();
-    }
-    warnNotRecorded();
-    return { name, binPath, removeUnlessKept, announce };
+    return ready(binPath);
   } catch (error) {
     // The workload was created but never became usable — delete it before
     // surfacing (a kept run, no `--rm`: left to inspect).
@@ -746,7 +914,7 @@ export interface EngineAttachRuntimeDeps {
   readonly name: string;
   /** Container to exec into; undefined → the API picks the only/default one. */
   readonly container?: string;
-  /** Install dir for the injected binary (default `/usr/local/bin`; `--bin-dir` for a read-only rootfs). */
+  /** Install dir for the injected binary (`--bin-dir`, no fallback); absent: picked by the probe, as in `run`. */
   readonly binDir?: string;
   /**
    * This tentacle's version for the pod-binary check and the container probe
@@ -886,35 +1054,29 @@ export async function attachEngineRuntime(
   // `startEngineRuntime`). Created only now — every refusal above leaves nothing.
   const stderr = openDaemonLog(deps.daemonLogPath?.(name), undefined, `attach ${name}`);
   try {
-    // Preflight: if the pod ALREADY has a working `tentacle` (a re-attach
-    // after a previous attach, or an image that ships it), the whole injection
-    // — 89 MB transfer — is skipped. Any failure (not on PATH, wrong arch,
-    // bad libc) falls through to the injection, which re-verifies anyway.
-    // One-shot execs do not go through the status line (same as in `run`):
-    // `injectAgentBinary` owns its phases via `onStatus`.
-    // Our install path (`/usr/local/bin`, or --bin-dir) is always asked first, so
-    // a re-attach finds what we installed and keeps its resident, even off PATH
-    // or behind another `tentacle` earlier on it; a binary on PATH is the
-    // fallback, because any binary reaches the one resident (its socket does not
-    // depend on the install dir). When we inject, the daemon is exec'd by the
-    // absolute install path.
-    const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
+    // Preflight, ONE exec (docs/fix/inject-bin-dir-probe.md): which candidate
+    // dir can take the binary (written to AND executed from), and what each
+    // candidate's `tentacle` (then the one on PATH) answers. A matching binary in
+    // ANY candidate is reused — a re-attach, or an image that ships it — and the
+    // whole injection (an ~89 MB transfer) is skipped; any binary reaches the one
+    // resident (its socket does not depend on the install dir). When we inject,
+    // it is to the first dir that passed, and the daemon is exec'd by that
+    // absolute path. One-shot execs do not go through the status line (same as
+    // in `run`): `injectAgentBinary` owns its phases via `onStatus`.
     // The BUILD rule (docs/fix/stale-pod-binary.md): a binary built before build
     // ids has none, and may reject `serve --bridge` while reporting this very
     // version. Reused only when its build id is the one of the binary THIS
     // laptop would inject (read from the file, laptop-side); from source with no
     // override there is nothing to compare (Q3: reused as before). Known before
     // the probe, so the probe asks for the build in the same exec.
-    const expectedBuild = await expectedContainerBuild({
-      appVersion: deps.appVersion ?? APP_RELEASE_VERSION,
-      ...(process.env.TENTACLE_POD_BIN ? { podBinOverride: process.env.TENTACLE_POD_BIN } : {}),
-      binaries: config.configDir
-        ? POD_BINARY_TARGETS.map((target) =>
-            configBinPath(config.configDir as string, target),
-          ).filter((path) => existsSync(path)) // a missing one fails at inject (`podBinaryProblem`)
-        : [],
-      readBuild: (path) => readBinaryBuildId(path),
-    });
+    // Reused only when it is exactly what this laptop would inject (a
+    // re-attach); any other version is replaced, so the daemon speaks this
+    // client's protocol. From source with no override: reused as before.
+    const { version: expected, build: expectedBuild } = await expectedPodBinary(
+      config,
+      deps.appVersion,
+    );
+    const candidates = installCandidates(deps.binDir);
     const versionOf = (bin: string): Promise<EngineRunExecResult> =>
       host.runExec(
         {
@@ -926,34 +1088,69 @@ export async function attachEngineRuntime(
         { timeoutMs: 15_000 },
       );
     // The answer is pod stdout, and it reaches the log: its first line only.
-    const versionLabel = (run: EngineRunExecResult): string =>
+    const versionLabel = (run: { readonly stdout: string }): string =>
       untrustedText((run.stdout.trim().split("\n")[0] ?? "").trim()) || "tentacle";
-    let serveBin = binPath;
-    let probe: EngineRunExecResult;
+    const decide = (run: { readonly exitCode: number | null; readonly stdout: string }) =>
+      containerDecision(run, expected, {
+        expected: expectedBuild,
+        found: parseBuildFromVersionProbe(run),
+      });
+    let placement: ParsedPlacement | null;
+    let placeRun: EngineRunExecResult;
     try {
-      probe = await versionOf(serveBin);
-      if (probe.exitCode !== 0) {
-        serveBin = "tentacle";
-        probe = await versionOf(serveBin);
-      }
+      ({ parsed: placement, run: placeRun } = await probePlacement(host, name, container, {
+        candidates,
+        buildId: expectedBuild !== undefined,
+        // The container's workspace mount (docker: the same path as the laptop
+        // folder): never written into. A forged label only narrows the candidates.
+        ...(state.workspace !== undefined ? { mount: state.workspace } : {}),
+      }));
     } catch (error) {
       status?.finish();
       // A wrong container surfaces here (the first exec) — translate it.
       throw host.execError(error, { name, container });
     }
-    // Reused only when it is exactly what this laptop would inject (a
-    // re-attach); any other version is replaced, so the daemon speaks this
-    // client's protocol. From source with no override: reused as before.
-    const expected = await expectedContainerVersion({
-      appVersion: deps.appVersion ?? APP_RELEASE_VERSION,
-      ...(process.env.TENTACLE_POD_BIN ? { podBinOverride: process.env.TENTACLE_POD_BIN } : {}),
-      readMarker: (path) => readBinaryVersion(path),
-    });
-    const decision = containerDecision(probe, expected, {
-      expected: expectedBuild,
-      found: parseBuildFromVersionProbe(probe),
-    });
-    const found = serveBin;
+    const prefix = `[${host.noun} ${name}]`;
+    let binPath: string;
+    let probe: { readonly exitCode: number | null; readonly stdout: string };
+    let found: string;
+    let decision: ReturnType<typeof decide>;
+    // Raised (inside the install's `try`, so a failed REPLACE still goes on with
+    // the old binary) when a binary must be installed: never after an upload.
+    let cannotInstall: Error | undefined;
+    if (placement !== null) {
+      const choice = choosePlacement(placement, candidates, {
+        version: expected,
+        build: expectedBuild,
+      });
+      decision = choice.decision;
+      probe = choice.found ?? { exitCode: 1, stdout: "" };
+      found = choice.found?.path ?? "tentacle";
+      binPath = `${choice.installDir ?? deps.binDir ?? DEFAULT_INSTALL_DIR}/tentacle`;
+      if (choice.installDir === undefined) {
+        cannotInstall = new Error(`${prefix} ${choice.noDir ?? "no install dir"}`);
+      }
+    } else {
+      // No shell (distroless) or the probe failed: today's direct `--version`
+      // execs still find a binary to REUSE; an install cannot be proven, so none
+      // is tried (never an upload that fails after the transfer).
+      binPath = `${deps.binDir ?? DEFAULT_INSTALL_DIR}/tentacle`;
+      cannotInstall = placementFailedError(prefix, placeRun);
+      try {
+        found = binPath;
+        let direct = await versionOf(found);
+        if (direct.exitCode !== 0) {
+          found = "tentacle";
+          direct = await versionOf(found);
+        }
+        probe = direct;
+      } catch (error) {
+        status?.finish();
+        throw host.execError(error, { name, container });
+      }
+      decision = decide(probe);
+    }
+    let serveBin = decision.kind === "reuse" ? found : binPath;
     // A live daemon of an older build is never killed: ONE line, no log.
     const refuseLive = (message: string, busy: boolean | undefined): Error =>
       decision.kind === "replace" && decision.reason === "build" && busy
@@ -1003,13 +1200,17 @@ export async function attachEngineRuntime(
       serveBin = binPath; // injected to our dir → exec by absolute path
       let replaced = decision.kind === "replace";
       try {
+        if (cannotInstall !== undefined || placement === null) {
+          throw cannotInstall ?? placementFailedError(prefix, placeRun);
+        }
+        const image = placement.image;
         version = await injectAgentBinary({
           host,
           name,
           noun: host.noun,
           binPath,
           container,
-          probe: () => probePod(host, name, container),
+          probe: () => withEngineArch(host, classifyImage(image)),
           resolveBinary: (target) =>
             resolvePodBinary(target, {
               configDir: config.configDir,
@@ -1062,7 +1263,9 @@ export async function attachEngineRuntime(
               had: decision.had,
               expected: expected ?? decision.had,
               reason: decision.reason,
-              ...(found === "tentacle" ? { installedAt: binPath } : {}),
+              // The old binary stays where it was (on PATH, or a dir we cannot
+              // write): the two differ from now on — named, never silent.
+              ...(found !== binPath ? { installedAt: binPath } : {}),
             })
           : undefined;
       if (line !== undefined) {

@@ -60,6 +60,7 @@ import { KEPT_LABEL, KEPT_SCHEMA_VERSION } from "../src/kept.ts";
 import { type LocalRuntime, createLocalRuntime } from "../src/local-runtime.ts";
 import { hopSession } from "../src/session-hop.ts";
 import { SessionSaver } from "../src/session-saver.ts";
+import { answerPlacement, isPlacement } from "./placement-fake.ts";
 import { simulateSilentTerminal } from "./silent-terminal.ts";
 
 const env: ExecutionEnvironment = {
@@ -250,6 +251,21 @@ function fakeHost(log: FakeHostLog): EngineHost {
       _input?: Uint8Array,
       _options?: EngineRunExecOptions,
     ): Promise<EngineRunExecResult> {
+      // The placement probe (ONE exec, docs/fix/inject-bin-dir-probe.md),
+      // answered from the granular answers below.
+      if (isPlacement(target.command)) {
+        log.calls.push("runexec:placement");
+        return answerPlacement(target.command[2] ?? "", async (command) => {
+          const line = command.join(" ");
+          return line.includes("tentacle-probe")
+            ? {
+                exitCode: 0,
+                stdout: "tentacle-probe\nx86_64\nglibc /lib64/ld-linux-x86-64.so.2\n",
+                stderr: "",
+              }
+            : { exitCode: 0, stdout: "tentacle 1.2.3\n", stderr: "" };
+        });
+      }
       const command = target.command.join(" ");
       log.calls.push(`runexec:${command}`);
       if (command.includes("tentacle-probe")) {

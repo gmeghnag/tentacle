@@ -492,9 +492,10 @@ Pod execution (tentacle run --image <ref> [-n|--namespace <ns>] [--name <n>] ["<
   TENTACLE_POD_IMAGE        default pod image (overridden by --image)
   TENTACLE_POD_BIN          use this prebuilt tentacle binary for the pod instead of
                            the cached/built one (path to a bun-linux-x64/arm64 binary)
-  TENTACLE_POD_BIN_DIR      install dir inside the pod (overridden by --bin-dir; default
-                           /usr/local/bin). Use a writable+exec dir (e.g. /tmp) for a
-                           pod with a read-only root filesystem.
+  TENTACLE_POD_BIN_DIR      install dir inside the pod (overridden by --bin-dir). Default:
+                           picked in the pod before any upload, the first that can be
+                           written to and executed from: /usr/local/bin, then
+                           $HOME/.local/bin, then $TMPDIR/tentacle-<uid>/bin.
 
 Pod attach (tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>]):
   <pod> must already exist (kubectl get pods -n <ns>); --namespace defaults like
@@ -503,8 +504,9 @@ Pod attach (tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>]):
   pod's only container is used. The agent binary is injected only when the pod
   does not already have a working one (re-attaching to a used pod skips the
   transfer). The pod is left RUNNING on exit — delete it yourself when done.
-  Read-only rootfs (a hardened pod)? --bin-dir <dir> installs to a writable+exec
-  dir instead of /usr/local/bin (e.g. --bin-dir /tmp).
+  The install dir is picked automatically (a non-root or read-only pod works as
+  is); --bin-dir <dir> forces one, and fails before any upload if it cannot be
+  written to and executed from.
 `;
 
 /**
