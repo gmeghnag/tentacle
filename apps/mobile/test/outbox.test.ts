@@ -20,6 +20,7 @@ import {
   decide,
   documentBlocksOf,
   documentsOf,
+  localPhotosOf,
   pendingDocuments,
   pendingUploads,
   pruneOwnIds,
@@ -275,6 +276,21 @@ describe("photos, own ids and the restore", () => {
     const done = withRef(item, 1, ref("b"));
     expect(refsOf(done).map((r) => r.id)).toEqual(["a", "b"]);
     expect(pendingUploads(done)).toEqual([]);
+  });
+
+  test("two byte-identical photos name ONE ref: the daemon refuses a repeated id (fix/mobile-qa-1119 row 11)", () => {
+    // `checkAttachmentRefs` (core) refuses "the same image is attached twice":
+    // the turn was lost in 5 ms and the item looped on the decision sheet.
+    // Content-addressed ids make the copies one image — it is sent once.
+    const item = promptItem({
+      photos: [
+        { file: "/a/0.png", mimeType: "image/png", name: "0.png", ref: ref("a") },
+        { file: "/a/1.png", mimeType: "image/png", name: "1.png", ref: ref("a") },
+        { file: "/a/2.png", mimeType: "image/png", name: "2.png", ref: ref("b") },
+      ],
+    });
+    expect(refsOf(item).map((r) => r.id)).toEqual(["a", "b"]);
+    expect(localPhotosOf(item).map((p) => p.id)).toEqual(["a", "b"]);
   });
 
   test("own ids are added once and pruned only against a live queue", () => {

@@ -172,6 +172,7 @@ import {
   keychainKV,
   pushKeychain,
 } from "./src/secure-kv.ts";
+import { sentPhotoSource } from "./src/sent-photos.ts";
 import { createFreshSession, createSessionController } from "./src/session-controller.ts";
 import type { InfoPort } from "./src/session-info-controller.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
@@ -1473,6 +1474,14 @@ function SessionRoute({
         // screen publishes its list and its own reader, the gallery screen —
         // which holds no handle of its own — reads both.
         artifacts: { feed: ARTIFACT_FEEDS.feed(computerId, sessionId) },
+        // The photos this phone sent keep their pixels after a resync rebuilds
+        // the rows from history (fix/mobile-qa-1119 row 12): the outbox store's
+        // `ref id → copy` index answers the thumbnail port.
+        thumbnails: sentPhotoSource(async (id) => {
+          const { store } = outboxOf(computerId);
+          await store.load();
+          return store.data.sentPhotos?.[id];
+        }),
       });
       // The link's own status: the banner's `reconnecting` (F8/F9).
       unsubscribe = link.onStatus((status) => created?.link(status.state === "up"));

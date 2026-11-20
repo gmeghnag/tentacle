@@ -143,7 +143,8 @@ export interface ChipView {
    * invents the kind it never learned.
    */
   readonly kind?: "image" | "document";
-  readonly state: "uploading" | "ready" | "refused";
+  /** `waiting`: no link at pick — the photo goes with the message's outbox item (row 9). */
+  readonly state: "uploading" | "ready" | "waiting" | "refused";
   /** The file's name, for the chip's own label (13c sanitised it). */
   readonly name?: string;
   /** `refused` only: the person-facing reason (13c's `detail`). */
@@ -440,7 +441,8 @@ export function sessionView(input: SessionViewInput): SessionView {
 
 function composerOf(input: SessionViewInput): ComposerView {
   const photos = input.photos ?? [];
-  const ready = photos.filter((chip) => chip.state === "ready").length;
+  // A waiting photo travels too (row 9): the outbox uploads it with the message.
+  const ready = photos.filter((chip) => chip.state === "ready" || chip.state === "waiting").length;
   const uploading = photos.some((chip) => chip.state === "uploading");
   const action = composerAction({
     link: input.link,

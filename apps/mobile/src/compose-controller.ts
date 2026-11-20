@@ -39,8 +39,10 @@ import {
   chipRefused,
   chipRemoved,
   chipUploaded,
+  chipWaiting,
   counted,
   pickRoom,
+  sendable,
   splitTaken,
   takeChips,
 } from "./compose-chips.ts";
@@ -529,6 +531,13 @@ export function createCompose(deps: ComposeDeps): Compose {
   const uploadPicked = async (bytes: Map<string, Uint8Array>): Promise<void> => {
     const handle = deps.handle();
     if (handle === null) {
+      // No session handle to upload through: the photos wait for the outbox
+      // (row 9) instead of spinning on a retry nothing performs.
+      for (const key of bytes.keys()) {
+        chips = chipWaiting(chips, key);
+      }
+      saveDraft(deps.draft());
+      refresh();
       return;
     }
     for (const [key, picked] of bytes) {
@@ -550,7 +559,13 @@ export function createCompose(deps: ComposeDeps): Compose {
           chips = chipUploaded(chips, key, ref.id, ref.size);
         }
       } catch (error) {
-        chips = chipRefused(chips, key, refusalText(error, chip.kind));
+        // No link is not a refusal (fix/mobile-qa-1119 row 9): the photo waits
+        // for the outbox, which uploads it with the message — what the notice
+        // promises. A PDF's block is decided at attach, so it is refused as before.
+        chips =
+          chip.kind === "image" && refusalOf(error, "prompt").kind === "offline"
+            ? chipWaiting(chips, key)
+            : chipRefused(chips, key, refusalText(error, chip.kind));
         deps.notify(refusalText(error, chip.kind));
       } finally {
         busy = false;
@@ -638,7 +653,10 @@ export function createCompose(deps: ComposeDeps): Compose {
       file: chip.file,
       mimeType: chip.mimeType,
       name: chip.name,
-      ref: { id: chip.id, mimeType: chip.mimeType, size: chip.size, name: chip.name },
+      // A `waiting` chip has no ref yet: the item's own upload records it (row 9).
+      ...(chip.id === undefined || chip.size === undefined
+        ? {}
+        : { ref: { id: chip.id, mimeType: chip.mimeType, size: chip.size, name: chip.name } }),
     }));
 
   /**
@@ -686,13 +704,15 @@ export function createCompose(deps: ComposeDeps): Compose {
   };
 
   /** Take the field (text + ready chips) for an act, and clear both at ONCE (F4). */
-  const takeField = (): {
+  const takeField = (
+    options: { readonly pending?: boolean } = {},
+  ): {
     readonly text: string;
     readonly taken: ReturnType<typeof takeChips>["taken"];
     readonly uploading: number;
   } => {
     const text = deps.draft();
-    const taken = takeChips(chips);
+    const taken = takeChips(chips, options);
     chips = taken.chips;
     deps.setDraft("");
     saveDraft("");
@@ -871,7 +891,7 @@ export function createCompose(deps: ComposeDeps): Compose {
   return {
     view(): ComposeView {
       const rows = queueRows(state);
-      const ready = chips.filter((chip) => chip.state === "ready").length;
+      const ready = chips.filter(sendable).length;
       // Pending = mine and still WAITING: a `sending` row is the send-now's own,
       // already in flight and out of the composer (D3).
       const ownPending = rows.filter((row) => row.mine && row.state === "queued").length;
@@ -972,7 +992,7 @@ export function createCompose(deps: ComposeDeps): Compose {
       // stale second tap (a double tap, a tap after the field cleared) do nothing
       // instead of creating a second item (F4, D1).
       const text = deps.draft();
-      const ready = chips.some((chip) => chip.state === "ready");
+      const ready = chips.some(sendable);
       if (text.trim() === "" && !ready) {
         return;
       }
@@ -980,7 +1000,7 @@ export function createCompose(deps: ComposeDeps): Compose {
       if (action.kind === "send-later" || handle === null) {
         // Offline (or not open): 13b's outbox owns the item — its keys, its
         // `decide` on the next `up` (decision 16).
-        const taken = takeField();
+        const taken = takeField({ pending: true });
         await deps.driver.enqueue(unavailableSessionPort("link"), {
           computerId: deps.computerId,
           sessionId: deps.sessionId,

@@ -290,7 +290,23 @@ export function withRef(item: OutboxItem, index: number, ref: AttachmentRef): Ou
 
 /** Every ref the prompt will name, in the item's order. */
 export const refsOf = (item: OutboxItem): readonly AttachmentRef[] =>
-  item.photos.flatMap((photo) => (photo.ref === undefined ? [] : [photo.ref]));
+  firstById(item.photos.flatMap((photo) => (photo.ref === undefined ? [] : [photo.ref])));
+
+/**
+ * The first of each id, in order (fix/mobile-qa-1119 row 11): two byte-identical
+ * photos are ONE content-addressed ref, and the daemon refuses a prompt naming
+ * an id twice (`checkAttachmentRefs`) — so the image is sent once.
+ */
+function firstById<T extends { readonly id: string }>(list: readonly T[]): readonly T[] {
+  const seen = new Set<string>();
+  return list.filter((entry) => {
+    if (seen.has(entry.id)) {
+      return false;
+    }
+    seen.add(entry.id);
+    return true;
+  });
+}
 
 /**
  * An item's photos as their LOCAL copies, keyed by the ref each became
@@ -300,8 +316,10 @@ export const refsOf = (item: OutboxItem): readonly AttachmentRef[] =>
  * the row falls back to the label — the daemon offers no read-back either way.
  */
 export const localPhotosOf = (item: OutboxItem): readonly LocalPhoto[] =>
-  item.photos.flatMap((photo) =>
-    photo.ref === undefined ? [] : [{ id: photo.ref.id, uri: photo.file }],
+  firstById(
+    item.photos.flatMap((photo) =>
+      photo.ref === undefined ? [] : [{ id: photo.ref.id, uri: photo.file }],
+    ),
   );
 
 /** The photos still to upload, by index (one at a time: ≤ 15 MiB of bytes in JS memory). */

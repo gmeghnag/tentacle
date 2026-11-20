@@ -55,3 +55,23 @@ appId: so.tentacle.app
     id: "composer-send"
 - runScript:
     file: "18-photos.js"
+# fix/mobile-qa-1119 row 8: a tap on the sent photo opens the viewer, which DRAWS
+# the photo (its page had 0 pt of height) and closes on ✕ (it sat under the
+# status bar, where iOS takes the touch).
+- extendedWaitUntil:
+    visible:
+      id: "image-.*-open"
+    timeout: 20000
+- tapOn:
+    id: "image-.*-open"
+    index: 0
+- extendedWaitUntil:
+    visible:
+      id: "media-viewer-photo-0"
+    timeout: 10000
+- tapOn:
+    id: "media-viewer-close"
+- extendedWaitUntil:
+    notVisible:
+      id: "media-viewer"
+    timeout: 10000

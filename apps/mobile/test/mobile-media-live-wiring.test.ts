@@ -119,6 +119,26 @@ describe("item 4: the media bubble is laid out, not hand-placed", () => {
   });
 });
 
+describe("fix/mobile-qa-1119 row 8: the viewer draws its photo and can be closed", () => {
+  const viewer = (): string =>
+    readFileSync(join(APP, "src", "screens", "transcript", "MediaViewer.tsx"), "utf8");
+
+  test('the photo has a MEASURED height, never a percent of a height-less zoom container (mutation: `height: "100%"` → a 0 pt photo)', () => {
+    const source = viewer();
+    expect(source).not.toContain('height: "100%"');
+    expect(source).toContain(
+      "onLayout={(event) => setPageHeight(event.nativeEvent.layout.height)}",
+    );
+    expect(source).toContain("style={{ width, height: pageHeight }}");
+  });
+
+  test("the bars clear the status bar: the ✕ is reachable (mutation: no safe-area top → ✕ under the status bar)", () => {
+    const source = viewer();
+    expect(source).toContain("useSafeAreaInsets()");
+    expect(source).toContain("paddingTop: insets.top");
+  });
+});
+
 describe("Review round 2 R2-1: a photo file that is gone falls back to the label", () => {
   test("the row's Image reports a load failure and the bubble then draws its label (mutation: no `onError` → an empty frame over a deleted file)", () => {
     const row = readFileSync(
@@ -147,5 +167,30 @@ describe("Review round 2 R2-1: a photo file that is gone falls back to the label
     // A newer build's file is unreadable: its items guard their photos, so the
     // sweep is skipped rather than guessing.
     expect(body).toContain('loaded.kind === "refused"');
+  });
+});
+
+describe("fix/mobile-qa-1119 row 12: sent photos keep their pixels after a resync", () => {
+  test("the session screen's thumbnail port is the sent-photo index (mutation: no `thumbnails` → every history ref draws its label)", () => {
+    expect(app).toContain("thumbnails: sentPhotoSource(");
+    expect(app).toContain("store.data.sentPhotos?.[id]");
+  });
+});
+
+describe("fix/mobile-qa-1119 row 12: the thumbnail window reads the LIST's current rows", () => {
+  const screen = readFileSync(join(APP, "src", "screens", "SessionScreen.tsx"), "utf8");
+
+  test("the viewability callback (created once) reads a ref of the rows, never the first render's state (mutation: `state.transcript.rows` → nothing is ever fetched)", () => {
+    expect(screen).not.toContain("state.transcript.rows as readonly { kind: string }[]");
+    expect(screen).toContain(
+      "controller.window(visible.current.first, visible.current.last, listRows.current);",
+    );
+    expect(screen).toContain("listRows.current = rows;");
+  });
+
+  test("a resync's new rows ask the window again (mutation: no effect → a rebuilt history stays labels)", () => {
+    expect(screen).toContain(
+      "controller.window(visible.current.first, visible.current.last, rows);",
+    );
   });
 });
