@@ -1,56 +1,50 @@
 /**
- * The gallery's chart TILE (docs/feat/model-charts.md slice C8): a dumb renderer
- * of `chartThumbView`'s layout — the PLOT only, no caption, no axis text.
+ * The gallery's chart TILE (docs/feat/model-charts.md slice C8,
+ * docs/feat/mobile-gallery-polish.md): a dumb renderer of `chartThumbAt`'s
+ * drawing — the chart's MARKS only (no legend, no caption, no axis text, no
+ * guide), scaled into the tile through the view box `chart-thumb.ts` proved
+ * holds every mark, and clipped to the tile all the same.
  *
- * A 44 pt tile cannot hold a title, a hero or a tick: the row above it already
- * says the title, and the full-screen chart is one tap away. What is here is
- * the shape (so a person recognises the chart at a glance), the series colours
- * (the same palette as everywhere) and one accessibility label (the layout's own
- * summary), never a decision (AGENTS §7).
+ * What is here is the shape (so a person recognises the chart at a glance), the
+ * series colours (the same palette as everywhere) and one accessibility label
+ * (the layout's own summary), never a decision (AGENTS §7).
  */
 import type { JSX } from "react";
 import { StyleSheet, View } from "react-native";
-import Svg, { G, Line, Path } from "react-native-svg";
+import Svg, { G, Path } from "react-native-svg";
 import type { LayoutDot, LayoutPath } from "../../chart-layout.ts";
-import { type ChartRowView, paintColor } from "../../chart-row.ts";
+import { paintColor } from "../../chart-row.ts";
+import { type ChartThumbView, viewBoxAttr } from "../../chart-thumb.ts";
 import { SeriesGlyph } from "./SeriesGlyph.tsx";
 
 export interface ChartThumbnailProps {
-  readonly view: ChartRowView;
+  readonly thumb: ChartThumbView;
   readonly testID: string;
 }
 
-export function ChartThumbnail({ view, testID }: ChartThumbnailProps): JSX.Element {
-  const { layout, scheme, tokens } = view;
+export function ChartThumbnail({ thumb, testID }: ChartThumbnailProps): JSX.Element {
+  const { layout, scheme, tokens } = thumb.view;
   const color = (p: LayoutPath | LayoutDot) => paintColor(p.paint, scheme, tokens);
   const keyOf = (p: LayoutPath) => `${p.role}${p.series}:${p.index ?? ""}:${p.d}`;
   return (
     <View
       testID={testID}
-      style={styles.root}
+      style={[styles.root, { width: thumb.width, height: thumb.height }]}
       accessible
       accessibilityRole="image"
       accessibilityLabel={layout.summary}
     >
-      <Svg width={layout.width} height={layout.height}>
+      <Svg
+        width={thumb.width}
+        height={thumb.height}
+        viewBox={viewBoxAttr(thumb.viewBox)}
+        preserveAspectRatio="xMidYMid meet"
+      >
         <G>
-          {layout.guides.map((g) => (
-            <Line
-              key={`guide-${g.y}`}
-              x1={g.x1}
-              y1={g.y}
-              x2={g.x2}
-              y2={g.y}
-              stroke={g.style === "dotted" ? tokens.guide : tokens.guideStrong}
-              strokeWidth={1}
-              strokeDasharray={g.style === "dotted" ? "1 3" : undefined}
-              strokeLinecap="round"
-            />
-          ))}
-          {layout.paths.map((p) =>
+          {thumb.paths.map((p) =>
             p.strokeWidth === undefined ? (
               // A filled shape (a bar, a sector, an area) is drawn flat, never
-              // with its gradient: at 44 pt a gradient reads as a smudge.
+              // with its gradient: at tile size a gradient reads as a smudge.
               <Path key={keyOf(p)} d={p.d} fill={color(p)} opacity={p.opacity} />
             ) : (
               <Path
@@ -66,7 +60,7 @@ export function ChartThumbnail({ view, testID }: ChartThumbnailProps): JSX.Eleme
               />
             ),
           )}
-          {layout.dots.map((d) => (
+          {thumb.dots.map((d) => (
             <G key={`dot${d.series}:${d.x}:${d.y}`}>
               <SeriesGlyph
                 shape={d.shape ?? "circle"}
@@ -86,5 +80,7 @@ export function ChartThumbnail({ view, testID }: ChartThumbnailProps): JSX.Eleme
 }
 
 const styles = StyleSheet.create({
-  root: { alignItems: "center", justifyContent: "center" },
+  // `overflow: hidden`: the view box already holds every mark; the clip is the
+  // tile's own guarantee that nothing it draws can reach the rows below.
+  root: { alignItems: "center", justifyContent: "center", overflow: "hidden" },
 });

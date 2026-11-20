@@ -1,0 +1,60 @@
+appId: so.tentacle.app
+---
+# 35 (docs/feat/mobile-gallery-polish.md): the Artifacts gallery holding the six
+# chart kinds + an HTML page. Every chart tile is clipped to its box (the owner's
+# 2026-11-20 screenshot: bars and legend chips spilled down the list), shot in
+# light and dark.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${GALLERY_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${GALLERY_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runScript:
+    file: "35-gallery-laptop.js"
+- extendedWaitUntil:
+    visible:
+      id: "artifact-card-report"
+    timeout: 30000
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "artifacts"
+- tapOn:
+    id: "hub-item-artifacts"
+- extendedWaitUntil:
+    visible:
+      id: "artifact-gallery-row-report"
+    timeout: 10000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "35-gallery-list"
+# The header toggle switches to the grid (mockup 7 B), and back.
+- tapOn:
+    id: "artifact-gallery-layout"
+- extendedWaitUntil:
+    visible:
+      id: "artifact-gallery-cell-report"
+    timeout: 5000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "35-gallery-grid"
+- tapOn:
+    id: "artifact-gallery-layout"
+- extendedWaitUntil:
+    visible:
+      id: "artifact-gallery-row-report"
+    timeout: 5000

@@ -1,5 +1,5 @@
 /**
- * The gallery's chart TILE (docs/feat/model-charts.md slice C8): a dumb renderer
+ * The gallery's chart TILE (docs/feat/model-charts.md slice C8, mobile-gallery-polish): a dumb renderer
  * of `chartThumbView`'s layout — `paths` + `dots` only, no axis texts, no
  * caption — at the size the row's tile gives it (T8.1).
  *
@@ -42,8 +42,8 @@ const all = (nodes: readonly Node[], type: string, out: Node[] = []): Node[] => 
   return out;
 };
 
-let thumb: typeof import("../src/ui/chart/ChartThumbnail.tsx");
-let row: typeof import("../src/chart-row.ts");
+let thumbnail: typeof import("../src/ui/chart/ChartThumbnail.tsx");
+let thumbs: typeof import("../src/chart-thumb.ts");
 let theme: typeof import("../src/theme.ts");
 let fixtures: typeof import("./chart-fixtures.ts");
 
@@ -66,8 +66,8 @@ beforeAll(async () => {
     Path: "Path",
     Rect: "Rect",
   }));
-  thumb = await import("../src/ui/chart/ChartThumbnail.tsx");
-  row = await import("../src/chart-row.ts");
+  thumbnail = await import("../src/ui/chart/ChartThumbnail.tsx");
+  thumbs = await import("../src/chart-thumb.ts");
   theme = await import("../src/theme.ts");
   fixtures = await import("./chart-fixtures.ts");
 });
@@ -77,34 +77,68 @@ afterAll(async () => {
   mock.restore();
 });
 
-// Read at CALL time: `theme` is imported in `beforeAll` (after the mocks).
-const tile = () => ({
-  width: 44,
-  height: 32,
-  fontScale: 1,
-  locale: "it",
-  palette: theme.lightPalette,
-});
+// Read at CALL time: the modules are imported in `beforeAll` (after the mocks).
+const LIST = { width: 52, height: 52 } as const;
+const thumbOf = (raw: unknown, box: { width: number; height: number } = LIST) => {
+  const bytes = new TextEncoder().encode(JSON.stringify(raw));
+  const meta = {
+    artifactId: "x",
+    version: 1,
+    sha256: "a".repeat(64),
+    size: bytes.length,
+    mimeType: "application/vnd.tentacle.chart+json",
+    kind: "chart",
+    title: "x",
+    callId: "c1",
+    createdAt: 0,
+  };
+  const g = thumbs.chartThumbGeometry(meta, bytes, {
+    fontScale: 1,
+    locale: "it",
+    palette: theme.lightPalette,
+  });
+  if (g === null) throw new Error("no geometry");
+  const t = thumbs.chartThumbAt(g, box);
+  if (t === null) throw new Error("not legible");
+  return t;
+};
 
-describe("ChartThumbnail — the plot, and only the plot", () => {
-  test("it draws the layout's paths and dots at the tile's size", () => {
-    const view = row.chartRowView(
-      { name: "chart", args: JSON.stringify(fixtures.REVENUE), status: "ok" },
-      tile(),
-    );
-    if (view === null) throw new Error("no view");
-    const tree = walk(thumb.ChartThumbnail({ view, testID: "thumb-1" }));
+describe("ChartThumbnail — the marks, and only the marks, inside the tile", () => {
+  test("the Svg is the tile's size and scales the drawing through the view box", () => {
+    const thumb = thumbOf(fixtures.REVENUE);
+    const tree = walk(thumbnail.ChartThumbnail({ thumb, testID: "thumb-1" }));
     const svg = all(tree, "Svg")[0];
-    expect(svg?.props.width).toBe(44);
-    expect(svg?.props.height).toBe(32);
-    // Every path in the layout is drawn (a tile never drops a series), and NO
-    // axis text is: a 44 pt tile cannot hold a label, and the row above it
-    // already says the title.
-    expect(all(tree, "Path").length).toBeGreaterThanOrEqual(view.layout.paths.length);
+    expect(svg?.props.width).toBe(52);
+    expect(svg?.props.height).toBe(52);
+    expect(svg?.props.viewBox).toBe(thumbs.viewBoxAttr(thumb.viewBox));
+    expect(svg?.props.preserveAspectRatio).toBe("xMidYMid meet");
+    // Every mark is drawn; NO text and NO guide line: a tile cannot hold them.
+    expect(all(tree, "Path").length).toBe(thumb.paths.length);
     expect(all(tree, "SvgText")).toEqual([]);
+    expect(all(tree, "Line")).toEqual([]);
   });
 
-  test("a `chart` with dots (scatter) draws them; a line chart simply has none", () => {
+  test("the root clips: nothing it draws can reach the rows below", () => {
+    const thumb = thumbOf(fixtures.REVENUE);
+    const root = walk(thumbnail.ChartThumbnail({ thumb, testID: "thumb-2" }))[0];
+    const style = [root?.props.style].flat(2) as Record<string, unknown>[];
+    expect(style.some((s) => s?.overflow === "hidden")).toBe(true);
+    expect(style.some((s) => s?.width === 52 && s?.height === 52)).toBe(true);
+  });
+
+  test("a doughnut draws its sectors and NOT its legend chips", () => {
+    const thumb = thumbOf({
+      type: "doughnut",
+      title: "Budget",
+      labels: ["a", "b", "c"],
+      datasets: [{ label: "v", data: [5, 3, 2] }],
+    });
+    const tree = walk(thumbnail.ChartThumbnail({ thumb, testID: "thumb-3" }));
+    expect(all(tree, "Path").length).toBe(3);
+    expect(thumb.paths.every((p) => p.role === "sector")).toBe(true);
+  });
+
+  test("a scatter draws its dots", () => {
     const scatter = fixtures.spec({
       type: "scatter",
       title: "Latenza",
@@ -120,24 +154,16 @@ describe("ChartThumbnail — the plot, and only the plot", () => {
         },
       ],
     });
-    const view = row.chartRowView(
-      { name: "chart", args: JSON.stringify(scatter), status: "ok" },
-      tile(),
-    );
-    if (view === null) throw new Error("no view");
-    const tree = walk(thumb.ChartThumbnail({ view, testID: "thumb-2" }));
-    expect(all(tree, "Circle").length).toBeGreaterThanOrEqual(view.layout.dots.length);
-    expect(view.layout.dots.length).toBeGreaterThan(0);
+    const thumb = thumbOf(scatter);
+    const tree = walk(thumbnail.ChartThumbnail({ thumb, testID: "thumb-4" }));
+    expect(thumb.dots.length).toBe(3);
+    expect(all(tree, "Circle").length).toBeGreaterThanOrEqual(3);
   });
 
   test("it carries the summary as its accessibility label (one element, `image`)", () => {
-    const view = row.chartRowView(
-      { name: "chart", args: JSON.stringify(fixtures.REVENUE), status: "ok" },
-      tile(),
-    );
-    if (view === null) throw new Error("no view");
-    const root = walk(thumb.ChartThumbnail({ view, testID: "thumb-3" }))[0];
-    expect(root?.props.accessibilityLabel).toBe(view.layout.summary);
+    const thumb = thumbOf(fixtures.REVENUE);
+    const root = walk(thumbnail.ChartThumbnail({ thumb, testID: "thumb-5" }))[0];
+    expect(root?.props.accessibilityLabel).toBe(thumb.view.layout.summary);
     expect(root?.props.accessibilityRole).toBe("image");
   });
 });
