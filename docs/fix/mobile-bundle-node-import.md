@@ -185,4 +185,20 @@ mobile-ota build.
 
 ## Review
 
-*Pending.*
+*— claude-opus-5-5, 2026-11-20*
+
+**Verdict: APPROVE-WITH-NITS.** No HIGH/MEDIUM findings. Same model as the executor, fresh context only, so blind spots the two passes share can survive both (blast is cross-module, so that is acceptable).
+
+**Gate (re-run):** `bun run typecheck` ✓; `bun run lint` ✓ (2160 files, 0 issues). Touched tests: `bundle-node-free` + `packages/client` + `packages/config` + agent capabilities → 1374 pass / 0 fail; `packages/core` + `daemon/test/tool-toggles` → 704 pass / 0 fail. I did not re-run the full suite.
+
+**Premises:** all TRUE. On `main`, `pending-capabilities.ts:19` imports values from `@tentacle/agent`; `agent/src/index.ts:8` re-exports `session-store.ts`, and `session-store.ts:8` imports `node:crypto`. Nothing in `core/src` imports `node:`. Core depends only on protocol, so `config → core` adds no cycle. `ALWAYS_ON_TOOLS === ["skill"]`. The daemon's `instanceof CapabilityRefusal` (`hosted-session.ts:3094`) still sees ONE class, because agent re-exports core's.
+
+**Attacks tried:**
+1. *Does the walker drop any import form?* A scratch run of `Bun.Transpiler.scanImports` keeps `export {…} from`, `export * from`, dynamic `import()`, `require()`, side-effect imports and imports bound but never used. It drops only `import type`. It errs on the conservative side, as the doc claims.
+2. *Is test 1 vacuous?* A scratch copy of the walker visits 394 files from `index.ts`, including `pending-capabilities.ts`, `core/src/{capabilities,tool-groups}.ts`, 31 client files and 12 transport files. It reaches 0 files under agent, config or tools, and finds 0 Node built-ins. On `main` the chain index → client → pending-capabilities → agent barrel → session-store → `node:crypto` exists in source, which matches the red run recorded in the doc.
+3. *Did the error message drift?* For `skill`, the text is identical. The one test pinning that text (`config/test/tool-groups.test.ts:81`) passes.
+4. In-tree mutations could not run: this session needs approval for them. Non-vacuity rests on (1) and (2) plus the executor's recorded red.
+
+**Nits (not blocking):** test 2 ("non-vacuity") pins only `scanImports` and `resolveSpecifier`. If a change broke graph traversal (e.g. workspace resolution returning external), test 1 would turn green without testing anything. A cheap guard: assert that the visited set contains `packages/client/src/pending-capabilities.ts`. Third-party packages are treated as leaves, a gap the doc already states.
+
+**Executor behaviour:** the plan was followed, the one drift is declared, and the Metro export was verified both red and green. The unverified Xcode archive is stated honestly.
