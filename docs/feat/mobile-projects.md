@@ -930,3 +930,20 @@ chose "legacy does not count") survived both passes.
   diff does not touch; it passes 22/0 when run alone, so it is load flakiness.
 - **Accepted cost (not a finding):** a legacy entry that is never used again makes
   every serve dial the relay until someone runs `devices revoke` or `reset`. This is bounded, but the changelog should say it.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-20* (fresh context; scope: `git diff HEAD~1`, commit `159bee19`)
+
+**Verdict: REQUEST-CHANGES.** The verdict stands only because of the gate. The executor escalated F2 correctly.
+
+- **Diff:** only `changelog.d/project-pairing.added.md` and this doc changed, with no code. There is
+  nothing to mutate and no regression surface. `bun run lint` is clean (2159 files), and `bun run
+  typecheck` is clean.
+- **Accepted-cost note — DONE.** The changelog now says what the round-2 code does: every `serve`
+  dials the relay until a pre-upgrade phone is adopted, and a stale pairing keeps that up until `revoke`/`reset`. Accurate.
+- **F2 — STILL OPEN (HIGH, gate).** `apps/mobile/test/pairing-e2e.test.ts` re-run: **2 pass / 7 fail**
+  (`update_app`), unchanged. The executor rightly refused app production code outside the approved
+  slice (a) without an owner choice. **The owner must pick (i′) / (i) / (ii).** My recommendation is (i′):
+  `runPairing` sends `perProject: true`, storage stays under `computer.id` until (b), plus one
+  `pairing-flow.test.ts` assertion, red first. Then a Round 4 that verifies that single change by mutation.
