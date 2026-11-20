@@ -418,6 +418,15 @@ export function donutSlices(
 export const DONUT = { ri: 47, ro: 60, corner: 2.5, gap: 2.5 } as const;
 
 /** B donut: a thin ring left, a mono mini-table (name · value · %) right, the total centred. */
+/**
+ * The donut's disc in a layout of `height` (the ring's centre and outer radius):
+ * the ONE place it is placed, read by the layout below and by the gallery's
+ * thumbnail (`chart-thumb.ts`), whose view box is this disc alone.
+ */
+export function donutDisc(height: number): { cx: number; cy: number; r: number } {
+  return { cx: DONUT.ro + 6, cy: height / 2, r: DONUT.ro };
+}
+
 export function donutLayout(spec: ChartSpec, ctx: Ctx): ChartLayout {
   const { width, fs, locale, measure } = ctx;
   const slices = donutSlices(spec, locale);
@@ -426,8 +435,7 @@ export function donutLayout(spec: ChartSpec, ctx: Ctx): ChartLayout {
   const rowH = Math.max(30, size + 14);
   const height = ctx.height ?? Math.max(136, slices.length * rowH + 16);
   const { ri, ro } = DONUT;
-  const cx = ro + 6;
-  const cy = height / 2;
+  const { cx, cy } = donutDisc(height);
   const paths: LayoutPath[] = [];
   let a = 0;
   for (const [k, s] of slices.entries()) {

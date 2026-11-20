@@ -152,9 +152,12 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
     // A `chart` viewer's bytes are TEXT: it must not take the image/PDF uri path.
     expect(viewer).toContain("viewerText(choice.kind, bytes)");
     const gallery = read("src", "screens", "ArtifactGallery.tsx");
-    // The thumbnail is the PURE module's decision (caps, decode, re-validation).
-    expect(gallery).toContain("chartThumbView");
+    // The thumbnail is the PURE modules' decision (caps, decode, re-validation in
+    // `chartThumbView`, the marks + view box + legibility in `chart-thumb.ts`).
+    expect(gallery).toContain("chartThumbGeometry");
+    expect(gallery).toContain("chartThumbAt");
     expect(gallery).toContain("wantsChartThumbnail");
+    expect(read("src", "chart-thumb.ts")).toContain("chartThumbView(meta, bytes");
     // The chip exists and passes `only` to the ONE view, never a second list.
     expect(gallery).toContain("CHART_FILTER_LABEL");
     expect(gallery).toContain("GRAFICI_CHIP");

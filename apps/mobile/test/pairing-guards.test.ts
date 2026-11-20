@@ -78,12 +78,14 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
     // decides and stays pure. The Charts setting (docs/feat/mobile-chart-labels.md
     // D7) a seventh, the same way: `chart-settings-store.ts` decides; and the
     // diagram look (docs/fix/mobile-qa-1117.md) an eighth:
-    // `diagram-settings-store.ts` decides.
+    // `diagram-settings-store.ts` decides; and the gallery look
+    // (docs/feat/mobile-gallery-polish.md) a ninth: `gallery-settings-store.ts` decides.
     expect(importers.map((path) => path.slice(APP.length + 1)).sort()).toEqual([
       "src/activity-settings-expo.ts",
       "src/artifact-seen-expo.ts",
       "src/chart-settings-expo.ts",
       "src/diagram-settings-expo.ts",
+      "src/gallery-settings-expo.ts",
       "src/lock-settings-expo.ts",
       "src/photo-settings-expo.ts",
       "src/secure-kv.ts",

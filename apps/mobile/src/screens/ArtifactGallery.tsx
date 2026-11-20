@@ -9,8 +9,10 @@ import type { ArtifactKind } from "@tentacle/protocol";
  * the session screen's stream, so this screen READS what that screen published on
  * the session's feed (`ARTIFACT_FEEDS`) and asks it for a refresh on mount. Every
  * decision — the rows, the order, the days, the unseen count — is
- * `artifact-gallery.ts`'s; every card's words are `@tentacle/core`'s. What is
- * here is the mapping to elements and the two seen marks.
+ * `artifact-gallery.ts`'s; every card's words are `@tentacle/core`'s; the list ↔
+ * grid look, its sizes and each kind's symbol are `gallery-layout.ts`'s, and a
+ * chart tile's drawing is `chart-thumb.ts`'s (docs/feat/mobile-gallery-polish.md).
+ * What is here is the mapping to elements and the two seen marks.
  */
 import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
@@ -33,7 +35,26 @@ import {
   seenFor,
   sessionKey,
 } from "../artifact-seen-store.ts";
-import { type ChartRowView, chartThumbView, wantsChartThumbnail } from "../chart-row.ts";
+import { chartScheme, wantsChartThumbnail } from "../chart-row.ts";
+import {
+  type ChartThumbGeometry,
+  type TileBox,
+  chartThumbAt,
+  chartThumbGeometry,
+} from "../chart-thumb.ts";
+import {
+  GRID_GAP,
+  type GalleryLayout,
+  LIST_ROW_PADDING,
+  LIST_TILE,
+  gridCell,
+  gridRows,
+  kindSymbol,
+  kindSymbolSize,
+  layoutToggle,
+  otherLayout,
+} from "../gallery-layout.ts";
+import { GALLERY_SETTINGS } from "../gallery-settings-expo.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../theme.ts";
 import { Icon } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
@@ -41,8 +62,11 @@ import { ChartThumbnail } from "../ui/chart/ChartThumbnail.tsx";
 import { useChartLabels } from "../ui/chart/useChartLabels.ts";
 import { ArtifactViewerModal, type ReadBytes } from "./artifacts/ArtifactViewerModal.tsx";
 
-/** The tile's own box: a thumbnail's size, never the row's height (the tile is 40×40). */
-const THUMB_SIZE = { width: 40, height: 32 } as const;
+/** The list tile's box (the tile is a fixed square: a thumbnail never moves the row). */
+const LIST_BOX: TileBox = { width: LIST_TILE, height: LIST_TILE };
+/** A grid cell's chart drawing: the cell less a margin, and room for the title below. */
+const GRID_MARGIN = 14;
+const GRID_LABEL = 18;
 
 /** The `Grafici` chip's test id (the e2e flow and this file's wiring test agree on it). */
 const GRAFICI_CHIP = "artifact-gallery-chip-charts";
@@ -122,29 +146,44 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
   // The tiles' layouts, by sha256: one fetch per version, and only for an
   // artifact `wantsChartThumbnail` says may be drawn (`chart-row.ts`: the kind
   // and the 64 KiB cap — the same cap the validator enforces).
-  const [thumbs, setThumbs] = useState<ReadonlyMap<string, ChartRowView>>(() => new Map());
+  // Keyed by scheme + sha256: a light tile is not redrawn dark by itself.
+  const [thumbs, setThumbs] = useState<ReadonlyMap<string, ChartThumbGeometry>>(() => new Map());
   const inFlight = useRef(new Set<string>());
   const window = useWindowDimensions();
+  const scheme = chartScheme(palette);
+  const thumbKey = (sha256: string) => `${scheme}:${sha256}`;
+  // The list ↔ grid look (mockup 7 A/B), remembered on this device.
+  const [layout, setLayout] = useState<GalleryLayout>(() => GALLERY_SETTINGS.current().layout);
+  useEffect(() => {
+    const off = GALLERY_SETTINGS.subscribe((next) => setLayout(next.layout));
+    void GALLERY_SETTINGS.load();
+    return off;
+  }, []);
+  const toggle = layoutToggle(layout);
+  const cell = gridCell(window.width);
+  const gridBox: TileBox = {
+    width: Math.max(0, cell - 2 * GRID_MARGIN),
+    height: Math.max(0, cell - 2 * GRID_MARGIN - GRID_LABEL),
+  };
 
   useEffect(() => {
     for (const meta of snapshot.list) {
-      if (!wantsChartThumbnail(meta) || inFlight.current.has(meta.sha256)) {
+      const key = `${scheme}:${meta.sha256}`;
+      if (!wantsChartThumbnail(meta) || inFlight.current.has(key)) {
         continue;
       }
-      inFlight.current.add(meta.sha256);
+      inFlight.current.add(key);
       void readBytes(meta).then(
         (bytes) => {
-          const drawn = chartThumbView(meta, bytes, {
-            width: THUMB_SIZE.width,
-            height: THUMB_SIZE.height,
+          const drawn = chartThumbGeometry(meta, bytes, {
             fontScale: window.fontScale,
             locale: deviceLocale(),
             palette,
           });
           // A spec this build cannot draw (a pod's forgery, a newer spec) lays
-          // out nothing: the tile keeps the card's glyph, never a blank box.
+          // out nothing: the tile keeps its kind's symbol, never a blank box.
           if (drawn !== null) {
-            setThumbs((prev) => new Map(prev).set(meta.sha256, drawn));
+            setThumbs((prev) => new Map(prev).set(key, drawn));
           }
         },
         () => {
@@ -153,7 +192,7 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
         },
       );
     }
-  }, [snapshot.list, readBytes, palette, window.fontScale]);
+  }, [snapshot.list, readBytes, palette, scheme, window.fontScale]);
 
   useEffect(() => {
     const off = feed.subscribe(setSnapshot);
@@ -220,6 +259,21 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
             <Icon name="xmark" color={palette.label} size={18} />
           </Pressable>
         }
+        right={
+          // The look toggle (mockup 7): it shows the look a tap switches TO.
+          // A failed save still switches the look for this run (the holder's rule).
+          <Pressable
+            testID="artifact-gallery-layout"
+            accessibilityRole="button"
+            accessibilityLabel={toggle.label}
+            hitSlop={12}
+            onPress={() => {
+              void GALLERY_SETTINGS.set({ layout: otherLayout(layout) }).catch(() => {});
+            }}
+          >
+            <Icon name={toggle.icon} color={palette.label} size={20} weight="light" />
+          </Pressable>
+        }
       />
       <Text
         testID="artifact-gallery-summary"
@@ -259,63 +313,112 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
           data={view.sections}
           keyExtractor={(section) => section.day}
           contentContainerStyle={{ paddingBottom: insets.bottom + space.inset }}
-          renderItem={({ item: section }) => (
-            <View style={styles.section}>
-              <Text
-                maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                style={[typography.caption, styles.day, { color: palette.sec }]}
-              >
-                {section.day}
-              </Text>
-              {section.items.map((item) => (
-                <Pressable
-                  key={item.key}
-                  testID={`artifact-gallery-row-${item.key}`}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${item.card.title}, ${item.card.line2}`}
-                  onPress={() => openArtifact(item)}
-                  style={[styles.row, { borderBottomColor: palette.sep }]}
+          renderItem={({ item: section }) =>
+            layout === "grid" ? (
+              <View>
+                <Text
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.caption, styles.day, styles.gridDay, { color: palette.sec }]}
                 >
-                  <View style={[styles.tile, { backgroundColor: palette.code }]}>
-                    {thumbs.get(item.newest.sha256) === undefined ? (
-                      <Text style={[typography.subhead, { color: palette.sec }]}>
-                        {item.card.glyph}
-                      </Text>
-                    ) : (
-                      // The drawn tile (C8): the plot alone, from the artifact's
-                      // own spec bytes, re-validated by `chartThumbView`.
-                      <ChartThumbnail
-                        view={thumbs.get(item.newest.sha256) as ChartRowView}
-                        testID={`artifact-gallery-thumb-${item.key}`}
+                  {section.day}
+                </Text>
+                {gridRows(section.items).map((row) => (
+                  <View key={row[0]?.key} style={styles.gridRow}>
+                    {row.map((item) => (
+                      <Pressable
+                        key={item.key}
+                        testID={`artifact-gallery-cell-${item.key}`}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${item.card.title}, ${item.card.line2}`}
+                        onPress={() => openArtifact(item)}
+                        style={[
+                          styles.cell,
+                          { width: cell, height: cell, backgroundColor: palette.code },
+                        ]}
+                      >
+                        <View style={[styles.cellArt, { height: cell - GRID_LABEL }]}>
+                          <GalleryTile
+                            item={item}
+                            geometry={thumbs.get(thumbKey(item.newest.sha256))}
+                            box={gridBox}
+                            palette={palette}
+                          />
+                        </View>
+                        <Text
+                          numberOfLines={1}
+                          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                          style={[typography.caption, styles.cellLabel, { color: palette.label }]}
+                        >
+                          {item.card.title}
+                        </Text>
+                        {item.unseen ? (
+                          <View
+                            testID={`artifact-gallery-new-${item.key}`}
+                            style={[styles.newDot, styles.cellDot]}
+                          />
+                        ) : null}
+                      </Pressable>
+                    ))}
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={styles.section}>
+                <Text
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.caption, styles.day, { color: palette.sec }]}
+                >
+                  {section.day}
+                </Text>
+                {section.items.map((item) => (
+                  <Pressable
+                    key={item.key}
+                    testID={`artifact-gallery-row-${item.key}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${item.card.title}, ${item.card.line2}`}
+                    onPress={() => openArtifact(item)}
+                    style={[styles.row, { borderBottomColor: palette.sep }]}
+                  >
+                    <View
+                      style={[
+                        styles.tile,
+                        { backgroundColor: palette.code, borderColor: palette.sep },
+                      ]}
+                    >
+                      <GalleryTile
+                        item={item}
+                        geometry={thumbs.get(thumbKey(item.newest.sha256))}
+                        box={LIST_BOX}
+                        palette={palette}
                       />
-                    )}
-                  </View>
-                  <View style={styles.body}>
-                    <Text
-                      numberOfLines={1}
-                      maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                      style={[typography.subhead, { color: palette.label }]}
-                    >
-                      {item.card.title}
-                    </Text>
-                    <Text
-                      numberOfLines={1}
-                      maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                      style={[typography.footnote, { color: palette.sec }]}
-                    >
-                      {item.versions > 1
-                        ? `${item.card.line2} · ${item.versions} versions`
-                        : item.card.line2}
-                    </Text>
-                  </View>
-                  {item.unseen ? (
-                    <View testID={`artifact-gallery-new-${item.key}`} style={styles.newDot} />
-                  ) : null}
-                  <Text style={[typography.footnote, { color: palette.sec }]}>{item.time}</Text>
-                </Pressable>
-              ))}
-            </View>
-          )}
+                    </View>
+                    <View style={styles.body}>
+                      <Text
+                        numberOfLines={1}
+                        maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                        style={[typography.subhead, { color: palette.label }]}
+                      >
+                        {item.card.title}
+                      </Text>
+                      <Text
+                        numberOfLines={1}
+                        maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                        style={[typography.footnote, { color: palette.sec }]}
+                      >
+                        {item.versions > 1
+                          ? `${item.card.line2} · ${item.versions} versions`
+                          : item.card.line2}
+                      </Text>
+                    </View>
+                    {item.unseen ? (
+                      <View testID={`artifact-gallery-new-${item.key}`} style={styles.newDot} />
+                    ) : null}
+                    <Text style={[typography.footnote, { color: palette.sec }]}>{item.time}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )
+          }
         />
       ) : (
         <View style={styles.center}>
@@ -349,6 +452,33 @@ export function ArtifactGalleryScreen(props: ArtifactGalleryScreenProps): JSX.El
   );
 }
 
+/**
+ * One tile's art: the chart drawn at `box` when `chartThumbAt` says it is legible
+ * there, else the kind's thin symbol (a chart not yet read, not drawable, or too
+ * dense for the box; every other kind). Render only.
+ */
+function GalleryTile(props: {
+  readonly item: GalleryItem;
+  readonly geometry: ChartThumbGeometry | undefined;
+  readonly box: TileBox;
+  readonly palette: Palette;
+}): JSX.Element {
+  const { item, geometry, box, palette } = props;
+  const thumb = geometry === undefined ? null : chartThumbAt(geometry, box);
+  return thumb === null ? (
+    <Icon
+      name={kindSymbol(item.card.kind)}
+      color={palette.sec}
+      size={kindSymbolSize(Math.min(box.width, box.height))}
+      weight="light"
+    />
+  ) : (
+    // The drawn tile (C8): the marks alone, from the artifact's own spec bytes,
+    // re-validated by `chartThumbView` inside `chartThumbGeometry`.
+    <ChartThumbnail thumb={thumb} testID={`artifact-gallery-thumb-${item.key}`} />
+  );
+}
+
 const styles = StyleSheet.create({
   root: { flex: 1 },
   summary: { paddingHorizontal: space.inset, paddingBottom: 8 },
@@ -358,16 +488,27 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    paddingVertical: 10,
+    paddingVertical: LIST_ROW_PADDING,
+    minHeight: LIST_TILE + 2 * LIST_ROW_PADDING,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  // A fixed square, clipped: the symbol and the drawing share the box, so a
+  // thumbnail arriving never moves the row, and nothing drawn leaves the tile.
   tile: {
-    width: 40,
-    height: 40,
-    borderRadius: radius.tile,
+    width: LIST_TILE,
+    height: LIST_TILE,
+    borderRadius: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
     alignItems: "center",
     justifyContent: "center",
   },
+  gridDay: { paddingHorizontal: space.inset },
+  gridRow: { flexDirection: "row", gap: GRID_GAP, marginBottom: GRID_GAP },
+  cell: { overflow: "hidden" },
+  cellArt: { alignItems: "center", justifyContent: "center", paddingTop: GRID_LABEL / 2 },
+  cellLabel: { position: "absolute", left: 6, right: 6, bottom: 5 },
+  cellDot: { position: "absolute", top: 6, right: 6 },
   chip: {
     alignSelf: "flex-start",
     marginHorizontal: space.inset,

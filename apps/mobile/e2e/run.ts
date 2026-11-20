@@ -1447,6 +1447,7 @@ export const FLOWS: readonly string[] = [
   "34-hub-scheduled",
   "34-hub-dictate",
   "34-hub-new",
+  "35-gallery-shots",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -1540,6 +1541,8 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "34-hub-scheduled": "HUBITEM_ID",
   "34-hub-dictate": "HUBITEM_ID",
   "34-hub-new": "HUBITEM_ID",
+  // docs/feat/mobile-gallery-polish.md: the gallery's six chart kinds + a page.
+  "35-gallery-shots": "GALLERY_ID",
 };
 
 /** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */
