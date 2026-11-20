@@ -61,7 +61,7 @@ describe("session/set_capability", () => {
     const ok = { sessionId: "S", kind: "mcp" as const, name: "a__b", enabled: false };
     expect(SetCapabilityParamsSchema.parse(ok)).toEqual(ok);
     for (const bad of [
-      { ...ok, kind: "tool" },
+      { ...ok, kind: "plugin" },
       { ...ok, name: "" },
       { ...ok, name: "x".repeat(129) },
       { ...ok, name: "a\nb" },

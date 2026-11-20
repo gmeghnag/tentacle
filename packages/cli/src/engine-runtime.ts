@@ -689,6 +689,9 @@ export async function startEngineRuntime(
       modelName: config.model,
       modelScope: "laptop",
       sessionSettings: carriedSettings(config),
+      // A SEED, never a setting (docs/feat/tool-toggles.md D5): the pod daemon
+      // unions it with its own config's set — off wins.
+      baseDisabledTools: config.disabledTools,
       channel,
       channelFactory: async () => {
         channel = await redial();
@@ -1111,6 +1114,9 @@ export async function attachEngineRuntime(
       modelScope: "laptop",
       // This config: `attach`'s reload for the run's folder, the relay's profile.
       sessionSettings: carriedSettings(config),
+      // A SEED, never a setting (docs/feat/tool-toggles.md D5): the pod daemon
+      // unions it with its own config's set — off wins.
+      baseDisabledTools: config.disabledTools,
       channel,
       channelFactory: async () => {
         channel = await redial();

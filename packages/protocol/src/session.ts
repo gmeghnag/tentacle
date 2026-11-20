@@ -1260,8 +1260,9 @@ export const SetAutoAcceptResultSchema = z.object({
 export type SetAutoAcceptResult = z.infer<typeof SetAutoAcceptResultSchema>;
 
 // --- session/set_capability ---------------------------------------------
-// Turn one MCP server or one skill on/off for the MODEL in this session
-// (docs/feat/session-capabilities.md): hidden from the tool list and the skills
+// Turn one MCP server, one skill or one built-in tool / tool group on/off for
+// the MODEL in this session (docs/feat/session-capabilities.md,
+// docs/feat/tool-toggles.md): hidden from the tool list and the skills
 // catalog from the next model call, never uninstalled. A DELTA (one name), not
 // the whole state, so two clients toggling different items both land (F4).
 // Held by every daemon (a pod included: it only REMOVES what its own model is
@@ -1271,8 +1272,12 @@ export type SetAutoAcceptResult = z.infer<typeof SetAutoAcceptResultSchema>;
 
 export const SetCapabilityParamsSchema = z.object({
   sessionId: SessionIdSchema,
-  kind: z.enum(["mcp", "skill"]),
-  /** A server name (`mcp`) or a skill name (`skill`); an unknown one is stored (F10). */
+  kind: z.enum(["mcp", "skill", "tool"]),
+  /**
+   * A server name (`mcp`) or a skill name (`skill`): an unknown one is stored
+   * (F10). A built-in tool or group name (`tool`): an unknown one, or the
+   * always-on `skill`, is `InvalidParams` (an older daemon refuses the kind).
+   */
   name: CapabilityNameSchema,
   enabled: z.boolean(),
 });

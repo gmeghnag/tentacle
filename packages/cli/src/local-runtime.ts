@@ -1096,6 +1096,12 @@ export interface LocalRuntimeDeps {
    * Absent → nothing is sent: the local worker gets the config at bootstrap.
    */
   readonly sessionSettings?: SessionSettings;
+  /**
+   * This laptop's `tools.enabled` off set, unioned into every session the
+   * client creates (`RemoteClientOptions.baseDisabledTools`,
+   * docs/feat/tool-toggles.md D5). Absent → nothing added.
+   */
+  readonly baseDisabledTools?: readonly string[];
   /** `container` for `run`/`attach`: picks the advice for a daemon too old to give its own. */
   readonly daemonKind?: DaemonKind;
   /**
@@ -1193,6 +1199,9 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     ...(deps.titleModelProvider ? { titleModelProvider: deps.titleModelProvider } : {}),
     ...(deps.namedModels ? { namedModels: deps.namedModels } : {}),
     ...(deps.sessionSettings ? { sessionSettings: deps.sessionSettings } : {}),
+    ...(deps.baseDisabledTools && deps.baseDisabledTools.length > 0
+      ? { baseDisabledTools: deps.baseDisabledTools }
+      : {}),
     // Only beside a model provider: a client that serves no model cannot hold a
     // pod's image bytes (docs/feat/attachments-prompt.md D5's table).
     ...(deps.modelProvider && deps.localImages ? { localImages: deps.localImages } : {}),
@@ -1767,6 +1776,10 @@ export async function startWorkerRuntime(
           saver: deps.saver,
           cwd: config.cwd,
           model: config.model,
+          // The laptop's tool switches seed every create (docs/feat/tool-toggles.md
+          // D5): the worker's own agent is built from the same config, so this
+          // is the same set — kept so a resume from the laptop's copy unions it.
+          baseDisabledTools: config.disabledTools,
           // The worker runs THIS laptop's model in-process: an images-off reason
           // names our model and points at our config (docs/feat/
           // images-off-reason.md).

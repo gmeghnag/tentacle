@@ -48,6 +48,7 @@ import {
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
+  type SessionToolsResult,
   type SessionTtlParams,
   type SessionTtlResult,
   type UpdateSettingsResult,
@@ -71,7 +72,7 @@ import {
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
-import { fromWireCapabilities, toSessionSkills } from "./mapping.ts";
+import { fromWireCapabilities, toSessionSkills, toSessionTools } from "./mapping.ts";
 import {
   type ClearForkCapture,
   type DaemonSessionRecord,
@@ -605,6 +606,31 @@ export class SessionHost {
    */
   async newSessionSkills(settings?: SessionSettings): Promise<SessionSkillsResult> {
     return toSessionSkills((await this.opts.newSessionSkills?.(settings)) ?? EMPTY_SKILL_LISTING);
+  }
+
+  /**
+   * `session/tools` with no session: the built-ins a session created now would
+   * have (docs/feat/tool-toggles.md D6) — the same `createAgent` factory builds
+   * a throwaway agent, as `newSessionContext` does; nothing is hosted or listed.
+   */
+  async newSessionTools(
+    link: ModelLink | null,
+    settings?: SessionSettings,
+  ): Promise<SessionToolsResult> {
+    const artifacts = new ArtifactStore(this.artifactBudget);
+    const { agent, jobs, agentJobs, workloadShells } = this.opts.createAgent(this.opts.defaultCwd, {
+      modelLink: () => link,
+      ...(settings ? { settings } : {}),
+      artifacts,
+    });
+    try {
+      return toSessionTools(agent.builtinTools());
+    } finally {
+      artifacts.dispose();
+      jobs?.dispose();
+      agentJobs?.dispose();
+      await workloadShells?.dispose();
+    }
   }
 
   /**

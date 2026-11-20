@@ -4837,6 +4837,32 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "SessionToolsParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "settings": {
+          "$ref": "#/$defs/SessionSettings"
+        }
+      },
+      "type": "object"
+    },
+    "SessionToolsResult": {
+      "additionalProperties": true,
+      "properties": {
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/ToolListEntry"
+          },
+          "maxItems": 128,
+          "type": "array"
+        }
+      },
+      "required": ["tools"],
+      "type": "object"
+    },
     "SessionTtlParams": {
       "additionalProperties": true,
       "properties": {
@@ -5075,7 +5101,7 @@
           "type": "boolean"
         },
         "kind": {
-          "enum": ["mcp", "skill"],
+          "enum": ["mcp", "skill", "tool"],
           "type": "string"
         },
         "name": {
@@ -5533,6 +5559,37 @@
       "required": ["status", "toolCallId", "type"],
       "type": "object",
       "x-event-class": "display"
+    },
+    "ToolListEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "disabled": {
+          "const": true,
+          "type": "boolean"
+        },
+        "group": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "locked": {
+          "const": true,
+          "type": "boolean"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["name", "tokens"],
+      "type": "object"
     },
     "ToolProgress": {
       "additionalProperties": true,
@@ -6536,6 +6593,14 @@
       },
       "result": {
         "$ref": "#/$defs/SubagentMessageResult"
+      }
+    },
+    "session/tools": {
+      "params": {
+        "$ref": "#/$defs/SessionToolsParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SessionToolsResult"
       }
     },
     "session/unqueue": {

@@ -1,6 +1,6 @@
 # feat/tool-toggles — switch built-in tools off by group or by name
 
-> **Status:** execution — Implementation approved 2026-11-20; S1 done (S2, S3 in progress)
+> **Status:** execution — Implementation approved 2026-11-20; S1, S2 done (S3 in progress)
 > **Branch:** `feat/tool-toggles`
 > **Size:** L (3 slices on this branch: S1 M · S2 M · S3 M **UI**) · **Blast:** load-bearing (the tool list the agent loop sends every round, the session's capability state on the wire and in the session log) · **Suited:** Opus plan; S1 and S3 a weaker model is fine, S2 a strong model; Review mandatory, in a fresh context, red-teaming §7 (one session path, a pod is not trusted, protocol forward compatibility, persistence)
 > **Changelog:** `changelog.d/tool-toggles.added.md`: "**Switch built-in tools off.** `tools.enabled` in the config (or a profile) turns built-in tools off by group (`subagents`, `shell`, `schedule`, `visuals`, …) or by name, and the new `/tools` panel shows what each definition costs the context and switches them for the session. `skill` is always on."
@@ -317,7 +317,7 @@ In dependency order. One line each; the slices are marked.
 | F3 | `true` on a tool whose feature switch is off (`workload_shell` with `workloadShell.tool:false`) | One notice. The tool stays unregistered: `true` never registers. |
 | F4 | `set_capability{kind:"tool"}` with a name the daemon does not know (a newer client, an older pod daemon) | `InvalidParams`, so the TUI shows `switchFailedNotice`. Never stored, never a silent no-op. A newer laptop's **seed** naming a tool an older pod lacks is stored harmlessly: it hides nothing that exists. |
 | F5 | Switch off mid-turn while a call to that tool is streaming or running | The round's snapshot rule (session-capabilities F1/F2, `agent.ts:1498-1502`). The running call completes and its result goes into history. Later rounds don't offer the tool and refuse it. Nothing is aborted. |
-| F6 | A call of the same round queued behind a permission prompt when the switch flips | Judged against the round's snapshot, where the tool was visible, so it proceeds through the gate (the user can deny). The next round refuses it. Same as MCP today. A suspended turn reloaded on `serve` re-asks with the snapshot passed at `:2176`. The executor pins with a test that the resumed path reads the **current** caps (the reload's state). |
+| F6 | A call of the same round queued behind a permission prompt when the switch flips | Judged against the round's snapshot, where the tool was visible, so it proceeds through the gate (the user can deny). The next round refuses it. Same as MCP today. A suspended turn reloaded on `serve` re-runs its round with **no** capability guard (`agent.ts:1341-1344` passes no `capabilities`; `RoundHooks.capabilities` doc, `:722-727`: "a resumed round: its calls were issued when they were visible"), so the call is re-asked through the gate and the user can deny it; the next round is projected with the reload's state. *(Corrected at Execution, 2026-11-20: the plan said the resumed path passes a snapshot at `:2176`; it passes `hooks.capabilities`, which the resumed round leaves undefined. Behaviour unchanged from MCP/skills; no new test — the existing session-capabilities design pins it.)* |
 | F7 | The model calls a disabled tool (from older history, or hallucinated) | `hiddenCallRefusal`: an error result, `"<name> is turned off for this session"`, before the gate. No prompt, never run. Past `tool_use` blocks stay in history. Both providers accept history calls to a tool absent from `tools` (session-capabilities S2 F3 evidence; live acceptance was not verified there either). |
 | F8 | Older daemon (no `disabledTools` in the snapshot), or `session/tools` → `MethodNotFound` | `/tools` shows the list as "needs a newer tentacle" with no switches. `/mcp` and `/skills` are unaffected. |
 | F9 | Older client against a new daemon | It strips `disabledTools`. The model still gets the reduced list, decided daemon-side. An older TUI just doesn't show it. |
@@ -468,4 +468,44 @@ Red before green: every test below is first shown failing on `main`'s code, or o
 ```
 
 Green: `bun test packages/agent packages/config packages/protocol packages/daemon packages/cli/test/wiring.test.ts packages/cli/test/session-capabilities-resume.test.ts` → 3142 pass, 1 skip (opt-in), 0 fail; `tsc --noEmit` clean; `biome check .` clean.
+
+### S2 — wire, daemon, client
+
+- Protocol: `"tool"` in `SetCapabilityParamsSchema.kind`; new `packages/protocol/src/tools.ts` (`ToolListEntrySchema`, `SessionToolsParams/ResultSchema`, `MAX_TOOL_LIST = 128`), `Method.SessionTools` + `RequestSchemas`, index export; `protocol.json` regenerated (`bun run schema:export`). No `UPDATE_CLASS` change (the `capabilities` update keeps its kind and class; it carries the third array). Additive only → no `protocol.d/` note.
+- Daemon: `hosted-session.ts` — a new session's `caps` start from `normalizeCapabilities(agent.capabilities())` (the host config's set, D4; logged in the first segment by the existing `logSegmentFacts`), a restart keeps the record's (Q4); `seedCapabilities` is a UNION (off wins); `setCapability` maps a `CapabilityRefusal` to `InvalidParams` and caps each set at `MAX_DISABLED_CAPABILITIES` (`disabledTools` included); `tools()` for `session/tools`. `session-host.ts` `newSessionTools` (a throwaway agent from the same `createAgent` factory as `newSessionContext`). `connection.ts` routes `session/tools` (no lock). `mapping.ts` `toSessionTools`. The pure list is `builtinToolList` in `agent/capabilities.ts` (+ `Agent.builtinTools()`): registered, non-MCP defs, group from the config table, `HeuristicTokenCounter.countText(JSON.stringify(def))`, `disabled`, `locked` on `skill`.
+- Client: `RemoteClientOptions.baseDisabledTools`, unioned into every `openSession` create (`withBaseTools`); `seedCapabilitiesOnCreate` keeps `disabledTools`; `setSessionCapability`/`RemoteSession.setCapability` take `"tool"`; `RemoteClient.sessionTools()` + `RemoteSession.tools()`.
+- CLI: `LocalRuntimeDeps.baseDisabledTools` → the client; set from `config.disabledTools` by the in-process worker (`local-runtime.ts`) and by `run`/`attach` (`engine-runtime.ts`, both `createLocalRuntime` sites).
+- Sidecar: untouched (`daemon-state-file.ts` folds `capabilities` from the log via `lastCapabilities`; no field of its own).
+
+**Drift (S2):**
+1. *F6 corrected in the plan* (see the F6 row): a resumed round runs with no capability guard by design (`agent.ts:1341-1344`), so no "resumed path reads the current caps" test was written.
+2. *`connect` does not pass `baseDisabledTools`.* `connect` loads no model/profile config (`connect.ts` reads the file only for palette/voice, and a broken file must never block it); the `serve` daemon's own `tools.enabled` seeds every session it creates (D4), which is also exactly what the phone gets. Adding a laptop seed there would need a profile-aware config load in `connect`. Left for Review/owner.
+3. A `recreate` (a daemon that lost the session) carries the session's last snapshot as before, not unioned with the base: it is a continuation of the session, not a create (Q4).
+
+**Evidence (S2).** New tests: `protocol/test/tools.test.ts` (6), `json-schema.test.ts` fixtures for `session/tools`, `daemon/test/tool-toggles.test.ts` (8, real `Connection` + `SessionHost`, recorded `ChatRequest.tools`), `client/test/session-capabilities.test.ts` (+3). The old protocol test that pinned `kind: "tool"` as INVALID went red on the schema change (`params: a delta of one name; bad kinds …`) and now uses `"plugin"`. Mutations (each red, then restored):
+
+```
+== N1 daemon caps start from NO_CAPABILITIES (host config ignored)
+(fail) the host config seeds the daemon's truth (D4) > a created session snapshots the config's set, logs it in the first segment, and the model never gets it
+(fail) the host config seeds the daemon's truth (D4) > a seed UNIONS with the host's set: it adds, it can never remove (a pod cannot re-enable)
+(fail) session/tools (D6) > lists registered built-ins with group, tokens, locked skill, disabled flags — and no MCP tool
+ 5 pass / 3 fail
+== N2 seed replaces instead of union
+(fail) the host config seeds the daemon's truth (D4) > a seed UNIONS with the host's set: it adds, it can never remove (a pod cannot re-enable)
+ 7 pass / 1 fail
+== N3 CapabilityRefusal not mapped to InvalidParams
+(fail) session/set_capability{kind: tool} > skill or an unknown name is InvalidParams and changes nothing
+ 7 pass / 1 fail
+== N4 client: base not unioned
+(fail) baseDisabledTools rides every create > a new session, a resume from the laptop's copy and a /clear fork all start with it
+ 8 pass / 1 fail
+== N5 session/tools lists MCP tools too
+(fail) session/tools (D6) > lists registered built-ins with group, tokens, locked skill, disabled flags — and no MCP tool
+ 7 pass / 1 fail
+== N6 session/tools never flags disabled
+(fail) session/tools (D6) > lists registered built-ins … ; (fail) … with no session: the built-ins a session created now would have
+ 6 pass / 2 fail
+```
+
+Green: `bun test packages/agent packages/config packages/protocol packages/daemon packages/client packages/cli` → 6639 pass, 3 skip (the opt-in ones), 0 fail; `tsc --noEmit` clean; `biome check .` clean.
 

@@ -63,8 +63,10 @@ import {
   userSkillCall,
 } from "@tentacle/tools";
 import {
+  type BuiltinToolEntry,
   NO_CAPABILITIES,
   type SessionCapabilities,
+  builtinToolList,
   isHidden,
   isSkillHidden,
   isToolDisabled,
@@ -970,6 +972,11 @@ export class Agent {
   /** The installed skill set's listing: what `/name` may activate now, and who else may. */
   skillListing(): SkillListing {
     return this.listing;
+  }
+
+  /** The registered built-ins for `/tools` (docs/feat/tool-toggles.md D6), under the current switches. */
+  builtinTools(): BuiltinToolEntry[] {
+    return builtinToolList(this.config.tools.definitions(), this.serverOf, this.capabilities());
   }
 
   /** The session's capability switches now (what the NEXT model call will be projected with). */

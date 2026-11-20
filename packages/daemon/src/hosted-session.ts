@@ -51,7 +51,13 @@ import type {
   SessionCapabilities,
   SessionGrants,
 } from "@tentacle/agent";
-import { EMPTY_TITLE, NO_CAPABILITIES, applyCapabilityOp, sessionTitle } from "@tentacle/agent";
+import {
+  CapabilityRefusal,
+  EMPTY_TITLE,
+  NO_CAPABILITIES,
+  applyCapabilityOp,
+  sessionTitle,
+} from "@tentacle/agent";
 import {
   AGENT_MESSAGE_MAX_CHARS,
   type AgentJob,
@@ -124,6 +130,7 @@ import {
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
+  type SessionToolsResult,
   type SessionUpdate,
   type SetAutoAcceptResult,
   type SetCapabilityResult,
@@ -152,6 +159,7 @@ import {
   splitPrompt,
   stopReasonToProtocol,
   toSessionSkills,
+  toSessionTools,
   toUpdateParams,
   toWireCapabilities,
   wireLine,
@@ -964,10 +972,16 @@ export class HostedSession {
     this.autoAccept = restored?.autoAccept === true;
     this.pinnedAt = restored?.pinnedAt;
     // The switches a restart reloads (before the log's first segment, which
-    // states them again: `logSegmentFacts`).
+    // states them again: `logSegmentFacts`). A restart CONTINUES the session:
+    // the record wins (docs/feat/tool-toggles.md Q4).
     if (restored?.capabilities !== undefined) {
       this.caps = normalizeCapabilities(restored.capabilities);
       session.currentAgent().setCapabilities(this.caps);
+    } else {
+      // A new session starts from what its agent was built with: the host
+      // config's `tools.enabled` (`buildAgent`, D4), so the daemon's truth —
+      // the snapshot, the log's first segment — includes it.
+      this.caps = normalizeCapabilities(session.currentAgent().capabilities());
     }
     // A fresh epoch per incarnation (decision D1): a `since` from a previous
     // session under the same id never matches. The seed (resume) is covered.
@@ -2542,6 +2556,15 @@ export class HostedSession {
    * untouched — wire-safe. Idle or mid-turn alike; no lock (a concurrent ask
    * shares the scan). Rejects when the scan does: nothing changes.
    */
+  /**
+   * `session/tools` (docs/feat/tool-toggles.md D6): this session's registered
+   * built-ins with group, heuristic cost and switch, wire-safe. Synchronous.
+   */
+  tools(): SessionToolsResult {
+    this.assertKnown();
+    return toSessionTools(this.session.currentAgent().builtinTools());
+  }
+
   async skills(): Promise<SessionSkillsResult> {
     const listing = await this.session.refreshSkills();
     // Read after the scan: a toggle that landed during it is reported.
@@ -3020,11 +3043,19 @@ export class HostedSession {
   /**
    * The switches of a session this open CREATED (`session/open{capabilities}`,
    * exactly like `autoAccept`): applied to the agent before its first turn, no
-   * emit (no client is attached yet that has not read the snapshot).
+   * emit (no client is attached yet that has not read the snapshot). A UNION
+   * with the state the session starts with (the host config's tool switches,
+   * D4/D5): off wins, so a seed can never re-enable what this host turned off
+   * — and the laptop's set can't be undone by a pod's file. For MCP/skills it
+   * equals a replace (their part is empty at creation).
    */
   seedCapabilities(seed: SessionCapabilities): void {
     // Client-supplied: kept sorted and de-duplicated, like every applied op.
-    const state = normalizeCapabilities(seed);
+    const state = normalizeCapabilities({
+      disabledMcp: [...this.caps.disabledMcp, ...seed.disabledMcp],
+      disabledSkills: [...this.caps.disabledSkills, ...seed.disabledSkills],
+      disabledTools: [...this.caps.disabledTools, ...seed.disabledTools],
+    });
     this.caps = state;
     this.session.currentAgent().setCapabilities(state);
     // Recorded (S3b): the first segment was logged before the seed, so the
@@ -3049,9 +3080,24 @@ export class HostedSession {
    */
   setCapability(op: CapabilityOp, by?: string): SetCapabilityResult {
     this.assertKnown();
-    const next = applyCapabilityOp(this.caps, op);
+    let next: SessionCapabilities;
+    try {
+      next = applyCapabilityOp(this.caps, op);
+    } catch (error) {
+      // An unknown built-in tool/group, or `skill` (docs/feat/tool-toggles.md
+      // F2/F4): never stored, never a silent no-op.
+      if (error instanceof CapabilityRefusal) {
+        throw new RpcError(JsonRpcErrorCode.InvalidParams, error.message);
+      }
+      throw error;
+    }
     if (next !== this.caps) {
-      const set = op.kind === "mcp" ? next.disabledMcp : next.disabledSkills;
+      const set =
+        op.kind === "mcp"
+          ? next.disabledMcp
+          : op.kind === "skill"
+            ? next.disabledSkills
+            : next.disabledTools;
       if (set.length > MAX_DISABLED_CAPABILITIES) {
         throw new RpcError(
           JsonRpcErrorCode.InvalidParams,

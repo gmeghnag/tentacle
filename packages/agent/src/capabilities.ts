@@ -17,9 +17,10 @@ import {
   type SkillInfo,
   escapeSkillText,
   expandToolName,
+  groupOfTool,
   renderSkillsCatalog,
 } from "@tentacle/config";
-import type { ToolDefinition } from "@tentacle/core";
+import { HeuristicTokenCounter, type ToolDefinition } from "@tentacle/core";
 import { SKILL_TOOL_NAME } from "@tentacle/tools";
 
 /** A session's capability switches: sorted, de-duplicated names, the three disabled sets. */
@@ -135,6 +136,45 @@ export function isHidden(
 /** Whether a skill is turned off for this session (the execution guard). */
 export function isSkillHidden(name: string, state: SessionCapabilities): boolean {
   return state.disabledSkills.includes(name);
+}
+
+/** One registered built-in as `/tools` lists it (docs/feat/tool-toggles.md D6). */
+export interface BuiltinToolEntry {
+  readonly name: string;
+  readonly group?: string;
+  /** The heuristic token count of its definition (as sent, unprojected). */
+  readonly tokens: number;
+  readonly disabled?: true;
+  /** Never switched off (`skill`). */
+  readonly locked?: true;
+}
+
+const definitionCounter = new HeuristicTokenCounter();
+
+/**
+ * The REGISTERED built-ins (every def no MCP server tags), in registry order,
+ * with their group, the heuristic cost of their definition and their switch.
+ */
+export function builtinToolList(
+  defs: readonly ToolDefinition[],
+  serverOf: ServerOf,
+  state: SessionCapabilities,
+): BuiltinToolEntry[] {
+  const out: BuiltinToolEntry[] = [];
+  for (const def of defs) {
+    if (serverOf(def.name) !== undefined) {
+      continue;
+    }
+    const group = groupOfTool(def.name);
+    out.push({
+      name: def.name,
+      ...(group !== undefined ? { group } : {}),
+      tokens: definitionCounter.countText(JSON.stringify(def)),
+      ...(isToolDisabled(def.name, state) ? { disabled: true as const } : {}),
+      ...(def.name === SKILL_TOOL_NAME ? { locked: true as const } : {}),
+    });
+  }
+  return out;
 }
 
 /**

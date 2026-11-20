@@ -100,6 +100,7 @@ import {
   UpdateSettingsResultSchema,
 } from "./session.ts";
 import { SessionSkillsParamsSchema, SessionSkillsResultSchema } from "./skills.ts";
+import { SessionToolsParamsSchema, SessionToolsResultSchema } from "./tools.ts";
 import { SessionUpdateParamsSchema } from "./updates.ts";
 import {
   UnwatchParamsSchema,
@@ -163,6 +164,8 @@ export const Method = {
   McpStatus: "mcp/status",
   /** A session's skills, read again from disk (docs/feat/skills-hot-reload.md). */
   SessionSkills: "session/skills",
+  /** A session's built-in tools: group, token cost, switched off (docs/feat/tool-toggles.md). */
+  SessionTools: "session/tools",
   SessionTtl: "daemon/session_ttl",
   /**
    * Which other `serve` daemons run on this computer, and their addresses
@@ -307,6 +310,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   },
   [Method.McpStatus]: { params: McpStatusParamsSchema, result: McpStatusResultSchema },
   [Method.SessionSkills]: { params: SessionSkillsParamsSchema, result: SessionSkillsResultSchema },
+  [Method.SessionTools]: { params: SessionToolsParamsSchema, result: SessionToolsResultSchema },
   [Method.SessionTtl]: { params: SessionTtlParamsSchema, result: SessionTtlResultSchema },
   [Method.DaemonDiscover]: {
     params: DaemonDiscoverParamsSchema,

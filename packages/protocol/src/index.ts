@@ -30,6 +30,7 @@ export * from "./permission.ts";
 export * from "./model.ts";
 export * from "./mcp.ts";
 export * from "./skills.ts";
+export * from "./tools.ts";
 export * from "./hooks.ts";
 export * from "./daemon.ts";
 export * from "./relay.ts";
