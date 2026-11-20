@@ -198,20 +198,34 @@ appId: so.tentacle.app
     timeout: 5000
 - assertNotVisible:
     id: "activity-sheet"
-# Back to 100 %: the band's right end, so the last shots show today's look.
+# Back to 80 % (the default), so the last shots show the shipped look.
 - tapOn:
     id: "session-drawer"
 - tapOn:
     id: "drawer-settings"
-- swipe:
-    from:
-      id: "hub-opacity-slider"
-    direction: RIGHT
+# Below the fold again (Settings opens at its top): scroll to the band, and back
+# up to the back button after (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "hub-opacity-preview"
+    direction: DOWN
+# A TAP on the 80 % mark (the fresh-install default, mobile-hub-defaults), not a
+# swipe RIGHT: on iOS 26 a rightward swipe that starts on the track was taken as
+# the stack's content back-swipe and popped Settings. The 100 % mark sits at the
+# track's very end (its centre is past the edge, so a tap there misses the track);
+# the 80 % mark is inside, and `pointerEvents="none"` lets the touch land on the
+# track, whose grant sets the value there (docs/fix/mobile-e2e-reds.md).
+- tapOn:
+    id: "hub-opacity-detent-80"
 - extendedWaitUntil:
     visible:
       id: "hub-opacity-value"
-      text: "100%"
+      text: "80%"
     timeout: 5000
+- scrollUntilVisible:
+    element:
+      id: "settings-back"
+    direction: UP
 - tapOn:
     id: "settings-back"
 - extendedWaitUntil:
@@ -221,7 +235,7 @@ appId: so.tentacle.app
 - runFlow:
     file: _shot.yaml
     env:
-      SHOT: "33-hub-opacity-100"
+      SHOT: "33-hub-opacity-80-again"
 # Header mode: no hub — and no opacity band (Owner Q1: hidden, not zeroed).
 - tapOn:
     id: "session-drawer"

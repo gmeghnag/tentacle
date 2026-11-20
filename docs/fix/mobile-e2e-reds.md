@@ -106,6 +106,13 @@ Each red first on the buggy code, then green (Execution lists them).
 | `33-hub` (run 2) | Activity tapped with nothing running → a sheet with only "Scheduled · No scheduled wakes" instead of "Nothing running" inline. `activityEmpty = groups.length === 0`, and the wake feed (mobile-qa-sweep) always adds an empty Scheduled group | **PRODUCT** (mobile-hub-tap Design 2 regression) | `ActivityView.nothingRunning` (no group has rows) → the hub's `activityEmpty`. `activity.test.ts` (red first); `hub-tap-wiring.test.ts` updated |
 | `19-deep-link` (run 2) | iOS's `Open in "tentacle"?` did not appear on the second run on the same simulator (it kept the answer); the review opened directly | FLOW (simulator state) | the `Open` tap is `optional`; the review is the assertion |
 | `22-relay-only` (run 2) | after `pressKey: home` + `launchApp` (a cold start) the lock is up, `computers-list` under it | FLOW | `_unlock` after the relaunch |
+| `17-outbox-changed` (run 3) | the text went back to the FIELD (no sheet); the side `serve`'s log: `device-open` — the phone reached the side `serve` through the RELAY (its pairing carries the relay address too) | HARNESS | the side `serve` runs `--no-relay` |
+| `25-session-info` (run 3) | the rename field opens with the current title; typing appended: `composeRenamed by flow 25` | FLOW | `eraseText` before typing |
+| `33-hub` (run 3) | Settings reopened from the drawer starts at its top: `hub-opacity-slider` below the fold | FLOW | scroll to the band, then back up to `settings-back` |
+| `22-relay-only` (run 3) | `relay-qr` → "0 addresses": `lastPayload` took EVERY line `pair` printed, so it held the final `Paired 'iPhone' …` line | HARNESS | only a `tentacle://` line is the payload; `e2e-pairing.test.ts` asserts it after a full pairing (red first) |
+| `17-outbox-changed` (run 4) | the outbox now decides "changed" (no relay to the side `serve`); the row reads "Needs your answer" — the decision sheet opens on a TAP on that row (current compose UX), never by itself | FLOW | wait for `outbox-row-.*-needs-decision`, tap it, then `outbox-decision` |
+| `27-activity` (run 4) | the detail opened (8 s tap) when the child was at step 24: `step-4` folded into "… 19 earlier" | FLOW (timing) | any `step-N.txt` row proves the list is live |
+| `33-hub` (run 4) | `swipe RIGHT` from the slider (thumb at 20 %) popped Settings back to the session — iOS 26's content back-swipe | FLOW (+ a device check in TODO.md: a real rightward drag may do the same — unverified) | tap the 100 % mark: the track's grant sets the value at the touch |
 | `push-placeholder`, `22-notify-render` | the banner was never found. Probe: a PLAIN `simctl push` banner, on screen (screenshots `bg.png`/`fg.png`: shown foreground and background) during a 20 s `extendedWaitUntil`, was not found by Maestro either | FLOW cannot work (Maestro does not read SpringBoard banners on iOS 26) | **quarantined** (reason + TODO lines); the banner stays on README's device checklist (D3) |
 | `30-artifact-escape` | suite only: `ESCAPED: ["unnamed"]` with scripts OFF; alone: PASS. With the path recorded, run 2 said `unnamed POST /mcp` — an MCP-over-HTTP client, which a scripts-off WebView cannot be and the harness never configures: another local process probing ports | HARNESS (noise on an ephemeral port) | a nameless request counts only with a WebKit user agent (every WebView request has one); others are `strays`, reported, never counted. `e2e-escape-probes.test.ts` (red first). A NAMED probe counts whatever its agent |
 | `05-daemon-down` | PASSED in the suite in run 1 (reported red in-suite before) | — | covered by the list-scroll fix; see runs 2–3 |
@@ -120,7 +127,21 @@ GATE FAIL — 34 passed, 25 failed, 0 known-bug, 0 quarantined (of 60; 3796 s)
 
 ### Full runs after the fixes
 
-RUNS_PLACEHOLDER
+Each run found the next layer (a fix lets a flow get further); every red was triaged above.
+
+| Run | Result |
+|---|---|
+| 2 | `GATE FAIL — 47 passed, 10 failed, 0 known-bug, 3 quarantined (of 60; 3961 s)` |
+| 3 | `GATE FAIL — 49 passed, 4 failed, 0 known-bug, 7 quarantined (of 60; 3645 s)` |
+| 4 | `GATE FAIL — 50 passed, 3 failed, 0 known-bug, 7 quarantined (of 60; 3582 s)` |
+| 5 | `GATE FAIL — 52 passed, 1 failed, 0 known-bug, 7 quarantined (of 60; 3629 s)` (33-hub; fixed, then `--only 33-hub`: PASS) |
+
+Quarantined (7, each with its reason in the flow header and a `TODO.md` line):
+`19-lock-unlock-button` (Face ID auto-prompt covers the button; nomatch unscriptable),
+`push-placeholder` + `22-notify-render` (Maestro cannot read SpringBoard banners on iOS 26),
+`22-notify-approve/-deny/-reply/-forged` (the response injection is DEV-build only; the gate runs Release).
+
+EXIT_RUNS_PLACEHOLDER
 
 ### Gate
 

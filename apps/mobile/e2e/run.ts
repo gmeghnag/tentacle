@@ -435,8 +435,10 @@ async function main(): Promise<number> {
         // The relay is ON for every flow, pointed at the LOCAL relay above: a
         // harness must never reach relay.tentacle.so (no real infra), and flow
         // 22's whole subject is the relay path.
-        "--relay",
-        relayUrl,
+        // The SIDE `serve` (flow 17's offline turn) is relay-free: on the relay the
+        // phone reached it anyway — its pairing carries the relay address too
+        // (docs/fix/mobile-e2e-reds.md).
+        ...(port === daemonPort ? ["--relay", relayUrl] : ["--no-relay"]),
         // P10: an ask pushes IMMEDIATELY, so the push flow does not sit out the
         // 30 s default. Every other flow is untouched by it: none registers a
         // push key, and with no registration there is nothing to push to.

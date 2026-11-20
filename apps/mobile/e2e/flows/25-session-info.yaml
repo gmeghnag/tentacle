@@ -101,6 +101,9 @@ appId: so.tentacle.app
     id: "session-rename-input"
 - tapOn:
     id: "session-rename-input"
+# The field opens with the CURRENT title in it (a rename edits it): clear it first,
+# or the name is appended ("composeRenamed…", docs/fix/mobile-e2e-reds.md).
+- eraseText: 60
 - inputText: "Renamed by flow 25"
 - tapOn:
     id: "session-rename-save"

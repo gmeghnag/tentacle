@@ -44,10 +44,19 @@ appId: so.tentacle.app
     file: "17-laptop-offline.js"
 - runScript:
     file: "17-start-serve.js"
+# The outbox's `decide` says "changed": the row waits as "Needs your answer"
+# (`outbox-row-<id>-needs-decision`), and a tap on it opens the decision sheet —
+# the sheet never jumps up by itself (docs/fix/mobile-e2e-reds.md).
+- extendedWaitUntil:
+    visible:
+      id: "outbox-row-.*-needs-decision"
+    timeout: 40000
+- tapOn:
+    id: "outbox-row-.*-needs-decision"
 - extendedWaitUntil:
     visible:
       id: "outbox-decision"
-    timeout: 40000
+    timeout: 10000
 - tapOn:
     id: "outbox-send"
 - extendedWaitUntil:

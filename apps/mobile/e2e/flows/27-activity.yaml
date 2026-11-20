@@ -71,10 +71,12 @@ appId: so.tentacle.app
     id: "activity-detail-sa-.*"
 - assertVisible:
     id: "activity-steps"
-# Its steps advance (one per 2 s round).
+# Its steps are listed (one per 2 s round). Not `step-4` by name: on a slow run
+# the detail opened at step 24, with step 4 folded into "… N earlier"
+# (docs/fix/mobile-e2e-reds.md) — any step row proves the list is live.
 - extendedWaitUntil:
     visible:
-      text: ".*step-4.*"
+      text: ".*step-[0-9]+\\.txt.*"
     timeout: 30000
 - runFlow:
     file: _shot.yaml

@@ -150,7 +150,7 @@ describe("flow 30 is wired, not inert", () => {
   test("the flow's own session is passed to Maestro (or `${ESCAPE_ID}` is empty)", () => {
     const run = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
     expect(run).toMatch(/"30-artifact-escape": "ESCAPE_ID"/);
-    expect(run).toContain("escapeHits: () => ({ hits: probes.hits() })");
+    expect(run).toContain("escapeHits: () => ({ hits: probes.hits(), strays: probes.strays() })");
     // `--only` still resolves it (the flag's names are checked against FLOWS).
     expect(parseArgs(["--only", "30-artifact-escape"]).flows).toBe("30-artifact-escape");
   });
