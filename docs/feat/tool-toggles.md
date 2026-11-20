@@ -570,6 +570,76 @@ The 5 skips are the opt-in ones (live k8s ×2, live docker ×2, the slow keepali
 - The heuristic `~N` is `ceil(len(JSON.stringify(def))/4)`, not a provider count (Q9); the context meter remains the exact figure.
 - `connect` sends no laptop seed (S2 drift 2); `shell` names both the group and the tool (S1 drift 4).
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-20* (executor of the review's finding 1)
+
+**Finding 1 (MEDIUM, restart vs. record-wins) — FIXED.** `hosted-session.ts:974-989`.
+Root cause, as the review diagnosed it: the config fallback was keyed on
+`restored.capabilities === undefined`, but "no `capabilities` entry" does not
+mean "this record never had a state" — `logSegmentFacts` logs nothing while the
+state is the default, so a create whose config-off tool the person turned back
+on (`/tools`) leaves no entry once a new segment starts. The reload then re-ran
+a CREATE's seeding for a session that is being CONTINUED.
+
+The fix takes the review's second direction (apply the config only on a real
+create, never in `restore`), because it needs no new log entry and no written
+change to a session that never toggled anything:
+
+- the fallback is now keyed on `restored !== undefined` (a reload) instead of on
+  the entry being present: a reload takes the record's state, and an absent
+  entry is `NO_CAPABILITIES` — "everything on", the fold's own reading;
+- because the agent `buildAgent` made still carries the config's set, a reload
+  now calls `session.currentAgent().setCapabilities(...)` on the absent path
+  too, which the old code did not: the state must be applied EXPLICITLY, or the
+  daemon's truth and its agent disagree;
+- a create (`restored === undefined`) is untouched: it still starts from the
+  agent's config set (D4).
+
+**Red before green** (the review's own repro, run through a NEW segment instead
+of a stripped record — the end-to-end shape the review asked for),
+`packages/daemon/test/tool-toggles.test.ts`:
+`a restart after a NEW segment keeps the person's 'on': no entry means
+everything on, never the config's set (Q4)`. On the pre-fix code:
+
+```
+(fail) … a restart after a NEW segment keeps the person's 'on' …
+- []
++ [ "chart", ]
+ 8 pass / 1 fail
+```
+
+Green after the fix: 9 pass / 0 fail in that file.
+
+**Mutation (non-vacuity, both halves of the fix pinned):**
+
+```
+== A the pre-fix shape back (a record with no entry falls back to the config's set)
+(fail) … a restart after a NEW segment keeps the person's 'on' …
+ 8 pass / 1 fail
+== B a reload reads the state but never hands it to the agent
+(fail) … a restart after a NEW segment keeps the person's 'on' …
+ 8 pass / 1 fail
+```
+
+Both applied one at a time to `hosted-session.ts`, the named file run, the file
+restored from a copy each time (`git status` shows only the two intended
+edits). B is non-vacuous only because the test asserts the next request's tool
+list, so it proves the property the fix hinges on ("the daemon's state and its
+agent agree"), not merely the snapshot.
+
+**Drift:** none from the Implementation. The review's other direction (log the
+switches in every segment whenever the host config's set is non-empty) was not
+taken: it would add an entry to every segment of every session under a
+non-default config, and it fixes the symptom only for states that differ from
+the config — a state that equals the config after a person's toggles-back would
+still be ambiguous under a log written by an older build.
+
+**Not changed, deliberately:** sessions created *before* this branch, whose
+record has no entry at all, now reload with everything on rather than picking up
+the config's set. That is the same choice as the fold's (an absent entry is
+"everything on"), and it is what `/tools` will show them.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-20* (fresh context, but the SAME model as the executor: blind spots the two share can survive both passes)

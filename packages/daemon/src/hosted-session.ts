@@ -972,15 +972,20 @@ export class HostedSession {
     this.autoAccept = restored?.autoAccept === true;
     this.pinnedAt = restored?.pinnedAt;
     // The switches a restart reloads (before the log's first segment, which
-    // states them again: `logSegmentFacts`). A restart CONTINUES the session:
-    // the record wins (docs/feat/tool-toggles.md Q4).
-    if (restored?.capabilities !== undefined) {
-      this.caps = normalizeCapabilities(restored.capabilities);
+    // states them again: `logSegmentFacts`). A reload CONTINUES the session, so
+    // the RECORD wins (docs/feat/tool-toggles.md Q4) — and "no entry" means
+    // everything on, not "take the config's set again": a segment logs nothing
+    // while the state is the default, so a create's config set that the person
+    // turned back on (`/tools`) leaves no entry, and re-seeding it would bring
+    // the switch back on every restart. The agent is built with the config's
+    // set (`buildAgent`, D4), so the record's absence must EXPLICITLY clear it.
+    if (restored !== undefined) {
+      this.caps = normalizeCapabilities(restored.capabilities ?? NO_CAPABILITIES);
       session.currentAgent().setCapabilities(this.caps);
     } else {
-      // A new session starts from what its agent was built with: the host
-      // config's `tools.enabled` (`buildAgent`, D4), so the daemon's truth —
-      // the snapshot, the log's first segment — includes it.
+      // A session this host CREATES starts from what its agent was built with:
+      // the host config's `tools.enabled` (`buildAgent`, D4), so the daemon's
+      // truth — the snapshot, the log's first segment — includes it.
       this.caps = normalizeCapabilities(session.currentAgent().capabilities());
     }
     // A fresh epoch per incarnation (decision D1): a `since` from a previous

@@ -218,6 +218,35 @@ describe("session/set_capability{kind: tool}", () => {
     expect(d.model.tools.at(-1)).not.toContain("diagram");
   });
 
+  test("a restart after a NEW segment keeps the person's 'on': no entry means everything on, never the config's set (Q4)", async () => {
+    // Fix round 1 (Review M1). Mutations: (a) a restore with no record entry
+    // falls back to the host config's set → `chart` comes back off; (b) the
+    // restore path does not hand the state to the agent → the model lacks `chart`.
+    const store = new SpyDaemonStore();
+    const d = daemon(["chart"], store);
+    const { hosted } = d.host.open(
+      { create: true, messages: [{ role: "user", content: "q" }] },
+      { send: () => {} },
+    );
+    // The person turns the config-off tool back on: the state is all-on again.
+    hosted.setCapability({ kind: "tool", name: "chart", enabled: true });
+    // A compaction // /clear starts a NEW segment: `logSegmentFacts` logs nothing
+    // when everything is on, so the record carries no entry for it.
+    hosted.clear();
+    await hosted.persisted();
+    const record = store.durable.get(hosted.id);
+    if (!record) throw new Error("nothing durable");
+    expect(record.capabilities).toBeUndefined();
+    // A restarted daemon whose config still says `chart` is off.
+    const restarted = daemon(["chart"], store);
+    const restored = restarted.host.restore(record);
+    expect(restored.capabilities().disabledTools).toEqual([]);
+    // And its agent really offers the tool (the state reached it, not just the snapshot).
+    restored.prompt("t1", [{ type: "text", text: "go" }]);
+    for (let i = 0; i < 400 && restarted.model.tools.length === 0; i++) await Bun.sleep(1);
+    expect(restarted.model.tools.at(-1)).toContain("chart");
+  });
+
   test("a serve restart keeps the record's set (the record wins, Q4)", async () => {
     const store = new SpyDaemonStore();
     const d = daemon(["chart"], store);
