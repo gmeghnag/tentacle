@@ -570,3 +570,31 @@ The 5 skips are the opt-in ones (live k8s ×2, live docker ×2, the slow keepali
 - The heuristic `~N` is `ceil(len(JSON.stringify(def))/4)`, not a provider count (Q9); the context meter remains the exact figure.
 - `connect` sends no laptop seed (S2 drift 2); `shell` names both the group and the tool (S1 drift 4).
 
+## Review
+
+*— claude-opus-5-5, 2026-11-20* (fresh context, but the SAME model as the executor: blind spots the two share can survive both passes)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+**Findings**
+
+1. **MEDIUM — a `serve` restart can bring back tool switches the person turned on, breaking Q4 "the record wins".** `hosted-session.ts:975-985`: a record with no `capabilities` now falls back to the host config's set (`session.currentAgent().capabilities()`). But "no entry" still means "everything on": `logSegmentFacts` (`hosted-session.ts:2222`) logs the switches only when `hasDisabled`, and the reload folds only the current segment (`session-log-store.ts:1180`) or the entries up to `logHead` (`daemon-state-file.ts:509`). Failure: the config has `visuals:false`. In `/tools` the person turns `visuals` back on, so the state is all-on. Then a compaction or `context_reset` starts a new segment, and that segment has no `capabilities` entry. After a `serve` restart, `chart`/`diagram`/`present` are silently hidden again. Sessions created before this branch, which have no entry at all, also pick up the config's set on restart. That is a create's behaviour, not a continuation's. **Repro** (a temporary test in `daemon/test/tool-toggles.test.ts`, then removed): `daemon(["chart"])`, open, `setCapability(chart, on)`, restore the record with `capabilities` stripped (what `lastCapabilities` returns for a segment without the entry). Expected `[]`, received `["chart"]`. **Fix direction:** make absent unambiguous. Either log the switches in every segment once the host config's set is non-empty or the state differs from it, or apply the config fallback only on a real create, never in `restore`. Add a test that runs through a new segment.
+
+**Gate (this review):** touched test files (22): 319 pass, 0 fail. `bun run lint`: clean (2139 files). `bun run typecheck`: clean. The full `bun test` was not re-run here. The executor's full-suite run is in the Gate section above.
+
+**Mutation (non-vacuity):** dropping `this.caps.disabledTools` from the `seedCapabilities` union makes "a seed UNIONS with the host's set…" fail (7 pass / 1 fail). Reverted; `git status` clean. The executor's M1–M7, N1–N6 and T1–T5 were not re-run, apart from this one N2-equivalent.
+
+**Attacks tried**
+- *MCP name collision:* could a disabled built-in name hide an MCP tool? No. MCP tools are `mcp__<server>__<tool>` (`mcp/src/tool-adapter.ts:41`).
+- *Pod re-enable through the seed:* not possible. The union holds (mutation above). The laptop seed travels on `run`/`attach` (`engine-runtime.ts:692,1117`) and the worker (`local-runtime.ts:1783`).
+- *`skill` via a hostile seed:* guarded by `isToolDisabled` (`capabilities.ts:164`). Mutation M3 is pinned.
+- *Peer serialization:* `session/tools` takes no lock (`connection.ts:654`). Holds.
+- *Restart / record-wins:* **found finding 1.**
+- *Laptop-copy resume:* by design it is a create, so the set is unioned with the base (Q4). Holds.
+
+**Holds:** one projection point (`projectTools`) plus one guard (`hiddenCallRefusal`). Sub-agents read the parent's state live. The wire change is additive (optional field, new method, strip schemas). The log entry stays non-critical. The sidecar is untouched.
+
+**Notes (not blocking):** before the first message, the no-session `session/tools` on a pod ignores the laptop's seed, so the list can show tools as on that the create will turn off. This is display only, and `caps-before-first-message` is the place to fix it. `connect` sends no seed (owner call, S2 drift 2).
+
+**Executor behaviour:** the drifts were documented honestly (F6 correction, no component, parity-pin location), and the mutation evidence is thorough. The missed case is an interaction with an older invariant: "absent ⇒ everything on" in the log fold.
+
