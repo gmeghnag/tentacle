@@ -382,3 +382,26 @@ Note on process: the `test/fixtures/` deletion during a mock probe was my own
 checkout" rule — reported here rather than left silent. The tree is verified
 whole afterwards (`git status` shows only the three new test files).
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-20* (same model as Round 1 and the executor's
+plan; the fix round was by a different model)
+
+**Verdict: APPROVE**
+
+- **Finding 1 — fixed.** `NOTICE` + `bun.lock` are committed (`d9294614`);
+  `git diff main...HEAD` now carries the Lato attribution and the `expo-font`
+  importer line; the tree is clean. Mutation: `NOTICE` loses the `OFL.txt`
+  path → `theme-fonts.test.ts` 6 pass / 1 fail; reverted.
+- **Finding 2 — fixed.** `text-seam-render.test.ts` (child-process harness)
+  pins the seam's glue. Round 1's surviving mutation (`Text.tsx:31`
+  `inherited` → `{}`) now fails 2 tests (bold-parent span, mono-run span);
+  reverted, `git status` clean.
+- **Regressions on `HEAD~1`:** test/doc-only (no production file); the harness
+  is not a `*.test.ts`, so not double-discovered. `apps/mobile/test/fixtures/`
+  (restored by the executor with a `checkout`) has no diff vs `main`.
+- **Gate:** mobile suite 4112 pass / 0 fail; `bun run lint` clean (2168
+  files); `bun run typecheck` clean. Full `bun run check` left to the merge step.
+- Still open, not blocking: simulator shots (blocked by the `main` Metro bug,
+  Execution §7) — the owner's on-device look is unverified until that fix lands.
+
