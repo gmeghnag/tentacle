@@ -48,7 +48,6 @@ import {
   Platform,
   Pressable,
   StyleSheet,
-  Text,
   View,
   useColorScheme,
 } from "react-native";
@@ -116,6 +115,7 @@ import {
 import { createDrawerRename } from "./src/drawer-rename.ts";
 import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
 import type { ActivityButtonMode } from "./src/floating-button.ts";
+import { loadLato } from "./src/fonts-expo.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -185,9 +185,13 @@ import {
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
-import { type Palette, paletteFor } from "./src/theme.ts";
+import { type Theme, themeFor } from "./src/theme-beta.ts";
+import { THEME_SETTINGS } from "./src/theme-settings-expo.ts";
+import type { ThemeSettings } from "./src/theme-settings-store.ts";
+import type { Palette } from "./src/theme.ts";
 import { HeaderIcon } from "./src/ui/HeaderIcon.tsx";
 import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
+import { AppFontContext, Text } from "./src/ui/Text.tsx";
 import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
 import type { VoiceSettings } from "./src/voice-settings-store.ts";
 
@@ -1566,15 +1570,61 @@ function openConfirmedLink(href: string): void {
  * composer sat inside the home-indicator area), around the shell.
  */
 export default function App(): JSX.Element {
+  const theme = useAppTheme();
   return (
     <SafeAreaProvider>
-      <AppShell />
+      <AppFontContext.Provider value={theme.font}>
+        <AppShell theme={theme} />
+      </AppFontContext.Provider>
     </SafeAreaProvider>
   );
 }
 
-function AppShell(): JSX.Element {
-  const palette = paletteFor(useColorScheme());
+/** The app's theme: `themeFor`'s palette + font, and the Beta switch that picks them. */
+interface AppTheme extends Theme {
+  readonly settings: ThemeSettings;
+  readonly error: string | undefined;
+  readonly select: (next: ThemeSettings) => void;
+}
+
+function useAppTheme(): AppTheme {
+  // The Lato try-out (docs/feat/mobile-theme-beta.md): Settings → Beta, OFF by
+  // default, remembered per device, applied live. Which palette and font that
+  // means is `themeFor` (pure); the faces load only once the switch is on.
+  const [themeSettings, setThemeSettings] = useState<ThemeSettings>(() => THEME_SETTINGS.current());
+  const [themeError, setThemeError] = useState<string | undefined>(undefined);
+  const [latoReady, setLatoReady] = useState(false);
+  useEffect(() => {
+    const unsubscribe = THEME_SETTINGS.subscribe(setThemeSettings);
+    void THEME_SETTINGS.load();
+    return unsubscribe;
+  }, []);
+  useEffect(() => {
+    if (!themeSettings.lato || latoReady) return;
+    let live = true;
+    loadLato().then(
+      () => {
+        if (live) setLatoReady(true);
+      },
+      () => {
+        // The palette still switches; the text stays on the system font.
+        if (live) setThemeError("The Lato font didn't load");
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [themeSettings.lato, latoReady]);
+  const selectTheme = useCallback((next: ThemeSettings) => {
+    setThemeError(undefined);
+    THEME_SETTINGS.set(next).catch(() => setThemeError("That theme setting didn't save"));
+  }, []);
+  const theme = themeFor(useColorScheme(), themeSettings, latoReady);
+  return { ...theme, settings: themeSettings, error: themeError, select: selectTheme };
+}
+
+function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
+  const palette = theme.palette;
   const [computers, setComputers] = useState<readonly ComputerEntry[] | null>(null);
   const [storeError, setStoreError] = useState<string | undefined>(undefined);
   // The navigation ref exists only to route an incoming link: a `Linking` event
@@ -2237,6 +2287,9 @@ function AppShell(): JSX.Element {
                 voice={voiceSettings}
                 {...(voiceError === undefined ? {} : { voiceError })}
                 onVoice={selectVoice}
+                themeBeta={theme.settings}
+                {...(theme.error === undefined ? {} : { themeError: theme.error })}
+                onThemeBeta={theme.select}
                 activityMode={activitySettings.mode}
                 activityWritable={activityWritable}
                 {...(activityError === undefined ? {} : { activityError })}

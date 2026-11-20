@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   type Palette,
   darkPalette,
+  graphitePalette,
   lightPalette,
   radius,
   shadow,
@@ -74,6 +75,9 @@ const TEXT_PAIRS: readonly (readonly [Key, Key])[] = [
 for (const [mode, palette] of [
   ["light", lightPalette],
   ["dark", darkPalette],
+  // docs/feat/mobile-theme-beta.md: the Lato try-out's dark palette meets the
+  // same WCAG AA floor on every surface (owner rule: colour-blind safe).
+  ["dark · graphite (Lato beta)", graphitePalette],
 ] as const) {
   describe(`theme contrast (${mode})`, () => {
     for (const [text, surface] of TEXT_PAIRS) {
@@ -309,5 +313,47 @@ describe("the glass shadow (visual review N10)", () => {
       expect(src).toContain("shadow.glass");
       expect(src).not.toMatch(/shadowRadius:\s*20/);
     }
+  });
+});
+
+/**
+ * docs/feat/mobile-theme-beta.md: the try-out's graphite ramp keeps B3's layer
+ * order and never touches pure black (owner rule), on the owner's #1A1D21.
+ */
+describe("the Lato beta's graphite ramp", () => {
+  const surfaces = [
+    "bg",
+    "page",
+    "card",
+    "sheet",
+    "drawer",
+    "band",
+    "bandOnSheet",
+    "fill",
+    "code",
+    "codeOnSheet",
+  ] as const;
+
+  test("no surface is pure black, and each is opaque #RRGGBB", () => {
+    for (const key of surfaces) {
+      expect(graphitePalette[key]).toMatch(/^#[0-9a-fA-F]{6}$/);
+      expect(graphitePalette[key].toUpperCase()).not.toBe("#000000");
+    }
+  });
+
+  test("drawer < page < band < card = sheet < fill (in luminance)", () => {
+    const l = (key: (typeof surfaces)[number]) => luminance(hexToRgb(graphitePalette[key]));
+    expect(l("drawer")).toBeLessThan(l("page"));
+    expect(l("band")).toBeGreaterThan(l("page"));
+    expect(l("card")).toBeGreaterThan(l("band"));
+    expect(l("sheet")).toBe(l("card"));
+    expect(l("fill")).toBeGreaterThan(l("card"));
+    expect(graphitePalette.code).not.toBe(graphitePalette.fill);
+  });
+
+  test("the separators read on their ground (≥ 1.2:1) without shouting", () => {
+    expect(contrast(graphitePalette.sepChat, graphitePalette.page)).toBeGreaterThanOrEqual(1.2);
+    expect(contrast(graphitePalette.sep, graphitePalette.band)).toBeGreaterThanOrEqual(1.2);
+    expect(contrast(graphitePalette.sepSheet, graphitePalette.sheet)).toBeGreaterThanOrEqual(1.2);
   });
 });

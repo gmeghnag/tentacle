@@ -9,9 +9,10 @@
  * already an in-app card). Every button here carries a testID. Render only.
  */
 import type { JSX } from "react";
-import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { Modal, Pressable, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
+import { Text } from "./Text.tsx";
 
 export interface SheetAction {
   readonly label: string;

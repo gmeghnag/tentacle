@@ -13,7 +13,7 @@
  */
 import type { JSX } from "react";
 import { useRef, useState } from "react";
-import { type AccessibilityActionEvent, PanResponder, StyleSheet, Text, View } from "react-native";
+import { type AccessibilityActionEvent, PanResponder, StyleSheet, View } from "react-native";
 import { opacityStepHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import {
@@ -30,6 +30,7 @@ import {
 } from "../hub-opacity.ts";
 import { DENSE_FONT_SCALE, type Palette, shadow, space, typography } from "../theme.ts";
 import { BandSection } from "./BandSection.tsx";
+import { Text } from "./Text.tsx";
 
 /** The preview's circle: the real button's 54 pt (`FLOAT_SIZE`). */
 const PREVIEW_SIZE = 54;

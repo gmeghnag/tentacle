@@ -20,7 +20,6 @@ import {
   Easing,
   PanResponder,
   StyleSheet,
-  Text,
   View,
 } from "react-native";
 import {
@@ -50,6 +49,7 @@ import {
 import { PERF } from "../perf-probe.ts";
 import { DENSE_FONT_SCALE, type Palette, shadow, typography } from "../theme.ts";
 import { HubFan } from "./HubFan.tsx";
+import { Text } from "./Text.tsx";
 
 /**
  * VoiceOver, Reduce Motion and Reduce Transparency, read live (F23;

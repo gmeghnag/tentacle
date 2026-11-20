@@ -8,18 +8,10 @@
  * or unchanged is a no-op, a long title is refused) and what a failure says.
  */
 import type { JSX } from "react";
-import {
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import { KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, View } from "react-native";
 import type { RenameState } from "../session-rename.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../theme.ts";
+import { Text, TextInput } from "../ui/Text.tsx";
 
 export interface RenameSheetProps {
   readonly palette: Palette;

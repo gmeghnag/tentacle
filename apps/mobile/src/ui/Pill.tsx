@@ -4,8 +4,9 @@
  * "Idle" variant. Replaces the filled accent badges. Render only.
  */
 import type { JSX } from "react";
-import { Text, View } from "react-native";
+import { View } from "react-native";
 import { DENSE_FONT_SCALE, type Palette, radius, typography } from "../theme.ts";
+import { Text } from "./Text.tsx";
 
 export function Pill({
   palette,

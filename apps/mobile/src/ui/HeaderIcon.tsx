@@ -10,9 +10,10 @@
  * Render only (AGENTS §7).
  */
 import type { JSX } from "react";
-import { Pressable, StyleSheet, Text } from "react-native";
+import { Pressable, StyleSheet } from "react-native";
 import { DENSE_FONT_SCALE, type Palette, size as SIZE, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
+import { Text } from "./Text.tsx";
 
 export interface HeaderIconProps {
   readonly palette: Palette;

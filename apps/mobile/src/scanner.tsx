@@ -15,7 +15,7 @@
  */
 import { CameraView, type PermissionResponse, useCameraPermissions } from "expo-camera";
 import { type JSX, useCallback, useEffect, useReducer, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { StyleSheet, View } from "react-native";
 import {
   type CameraView as CameraModel,
   type CameraState,
@@ -25,6 +25,7 @@ import {
 import type { PairingStage } from "./scan-session.ts";
 import { INITIAL_SCAN_SESSION, scanReduce, scannerLive } from "./scan-session.ts";
 import { MONO, type Palette, size as SIZE, typography } from "./theme.ts";
+import { Text } from "./ui/Text.tsx";
 
 /** What the `Pair` screen needs from the camera (no native type escapes this file). */
 export interface PairingCamera {

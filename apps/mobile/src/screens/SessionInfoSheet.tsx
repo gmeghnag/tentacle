@@ -11,7 +11,7 @@
  * tokens (`bandOnSheet`, `sepSheet`).
  */
 import type { ComponentRef, JSX, ReactNode } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { Modal, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { sectionNotes } from "../band-notes.ts";
 import {
@@ -28,6 +28,7 @@ import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { Sheet } from "../ui/Sheet.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
+import { Text } from "../ui/Text.tsx";
 
 export interface SessionInfoSheetProps {
   readonly palette: Palette;

@@ -17,11 +17,12 @@
  * INSIDE the field), `composer-filled`.
  */
 import { type ComponentRef, type JSX, useEffect, useRef } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import type { SendSlot } from "../composer.ts";
 import type { MicButton } from "../dictation.ts";
 import { type Palette, radius, shadow, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
+import { Text, TextInput } from "./Text.tsx";
 
 export type ComposerButton = "send" | "queue" | "send-later" | "stop" | "disabled";
 

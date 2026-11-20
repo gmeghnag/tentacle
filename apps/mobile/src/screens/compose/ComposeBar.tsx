@@ -17,21 +17,14 @@
  * and the pending bubbles' are `PendingBubble.tsx`'s.
  */
 import type { JSX } from "react";
-import {
-  ActivityIndicator,
-  Image,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { photoBlock, photoTileStyle } from "../../media-layout.ts";
 import { outboxCaption, outboxRowLook } from "../../outbox-look.ts";
 import type { ChipView, ComposeNotice, OutboxRowView } from "../../session-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, size, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { RingArc } from "../../ui/RingArc.tsx";
+import { Text } from "../../ui/Text.tsx";
 
 /** A tile as the style it is drawn in: pinned to the place `photoBlock` decided. */
 function boxStyle(tile: ReturnType<typeof photoBlock>["tiles"][number]) {

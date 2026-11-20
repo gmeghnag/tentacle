@@ -169,6 +169,35 @@ const dark: Palette = {
   switchOff: "#434448",
 };
 
+/**
+ * The Lato try-out's dark palette (docs/feat/mobile-theme-beta.md, Settings →
+ * Beta, OFF by default): the background family moves to the owner's graphite
+ * reference (#1A1D21) and the text to its #D1D2D3 / #ABABAD; every surface keeps
+ * B3's step order (drawer < page < band < card = sheet < fill). Accents and the
+ * semantic colours are B3's, untouched. Picked by `themeFor` (`theme-beta.ts`),
+ * never by a screen.
+ */
+const graphite: Palette = {
+  ...dark,
+  bg: "#1A1D21",
+  page: "#1A1D21",
+  card: "#222529",
+  sheet: "#222529",
+  drawer: "#15171A",
+  band: "#1F2226",
+  bandOnSheet: "#222529",
+  fill: "#2B2E33",
+  code: "#222529",
+  codeOnSheet: "#2B2E33",
+  label: "#D1D2D3",
+  sec: "#ABABAD",
+  sep: "#34363A",
+  sepChat: "#2C2D30",
+  sepSheet: "#3A3C40",
+  glass: "rgba(34,37,41,0.86)",
+  switchOff: "#3F4247",
+};
+
 /** The palette for a scheme; an unknown/null scheme is the light one. */
 export function paletteFor(scheme: "light" | "dark" | null | undefined): Palette {
   return scheme === "dark" ? dark : light;
@@ -180,10 +209,11 @@ export function paletteFor(scheme: "light" | "dark" | null | undefined): Palette
  * vanish on black). One comparison, in one place, so a component never re-derives
  * it (`chart-row.ts` does the same for its own chrome).
  */
-export const isDark = (palette: Palette): boolean => palette === dark;
+export const isDark = (palette: Palette): boolean => palette === dark || palette === graphite;
 
 export const lightPalette: Palette = light;
 export const darkPalette: Palette = dark;
+export const graphitePalette: Palette = graphite;
 
 /**
  * The chart's own tokens (docs/feat/model-charts.md, *iPhone visual language
@@ -227,7 +257,7 @@ const chartDark = {
 
 /** The chart tokens for the palette's mode. */
 export function chartTokensFor(palette: Palette): ChartTokens {
-  const chrome = palette === dark ? chartDark : chartLight;
+  const chrome = isDark(palette) ? chartDark : chartLight;
   return {
     ...chrome,
     label: palette.label,

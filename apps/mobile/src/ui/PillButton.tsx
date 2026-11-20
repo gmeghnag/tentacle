@@ -4,9 +4,10 @@
  * `destructive` = `fill` + `red`, `neutral` = `fill` + `label`. Render only.
  */
 import type { JSX, ReactNode } from "react";
-import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, View } from "react-native";
 import { DENSE_FONT_SCALE, type Palette, size as SIZE, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
+import { Text } from "./Text.tsx";
 
 export type PillKind = "primary" | "secondary" | "destructive" | "neutral";
 

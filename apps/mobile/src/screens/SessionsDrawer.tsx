@@ -32,7 +32,6 @@ import {
   PanResponder,
   Pressable,
   StyleSheet,
-  Text,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -49,6 +48,7 @@ import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { PillButton } from "../ui/PillButton.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
+import { Text } from "../ui/Text.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
 
 export interface SessionsDrawerProps {

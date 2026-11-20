@@ -5,8 +5,9 @@
  * `activity.ts`; this file owns only the look.
  */
 import type { JSX } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet } from "react-native";
 import { DENSE_FONT_SCALE, type Palette, typography } from "../theme.ts";
+import { Text } from "./Text.tsx";
 
 export interface ActivityBadgeProps {
   readonly palette: Palette;

@@ -4,9 +4,10 @@
  * Optional trailing action (Retry). Render only.
  */
 import type { JSX } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, View } from "react-native";
 import { type Palette, radius, space, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
+import { Text } from "./Text.tsx";
 
 export interface BannerProps {
   readonly palette: Palette;

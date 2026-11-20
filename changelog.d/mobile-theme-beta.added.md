@@ -1,0 +1,1 @@
+- **Try a Lato theme on the iPhone.** Settings → Beta → "Tema Lato (prova)" (off by default, remembered on the phone, applied at once): the whole app switches to the Lato typeface (code stays monospace) and, in dark mode, to a graphite background (#1A1D21) with softer text; light mode changes only the font. Off is exactly today's look.

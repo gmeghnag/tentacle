@@ -79,3 +79,35 @@ describe("App hands Settings the stored record and its writer", () => {
     expect(app).toContain("onVoice={selectVoice}");
   });
 });
+
+/** docs/feat/mobile-theme-beta.md: the Lato try-out switch, wired end to end. */
+describe("Beta → Tema Lato (prova)", () => {
+  test("a third switch, named as the owner asked, rendering the stored value", () => {
+    expect(settings).toContain('title="Tema Lato (prova)"');
+    expect(settings).toContain('testID="beta-theme-lato"');
+    expect(settings).toContain("value={themeBeta.lato}");
+    expect(settings).toContain("onValueChange={(lato) => onThemeBeta({ ...themeBeta, lato })}");
+  });
+
+  test("App feeds it the remembered switch and writes through the holder", () => {
+    expect(app).toContain("themeBeta={theme.settings}");
+    expect(app).toContain("onThemeBeta={theme.select}");
+    expect(app).toContain("THEME_SETTINGS.set(next)");
+    expect(app).toContain("THEME_SETTINGS.subscribe(setThemeSettings)");
+  });
+
+  test("the app's ONE palette and font come from themeFor, live (no restart)", () => {
+    // Mutation: a `paletteFor(useColorScheme())` left in place would ignore the switch.
+    expect(app).not.toContain("paletteFor(");
+    expect(app).toContain("themeFor(useColorScheme(), themeSettings, latoReady)");
+    expect(app).toContain("const palette = theme.palette;");
+    // ONE provider, at the root: every screen (and the lock) is inside it.
+    expect(app).toContain(
+      "<SafeAreaProvider>\n      <AppFontContext.Provider value={theme.font}>\n        <AppShell theme={theme} />",
+    );
+  });
+
+  test("the faces load only when the switch is on", () => {
+    expect(app).toContain("if (!themeSettings.lato || latoReady) return;");
+  });
+});

@@ -6,13 +6,14 @@
  */
 import * as Clipboard from "expo-clipboard";
 import type { JSX } from "react";
-import { Modal, Pressable, ScrollView, Share, StyleSheet, Text, View } from "react-native";
+import { Modal, Pressable, ScrollView, Share, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { DiagramRender } from "../../diagram-cache.ts";
 import { type DiagramUiWords, diagramCaption, diagramShare } from "../../diagram-display.ts";
 import type { DiagramRowView } from "../../diagram-row.ts";
 import { MONO, type Palette, typography } from "../../theme.ts";
 import { CodeBlock } from "../CodeBlock.tsx";
+import { Text } from "../Text.tsx";
 import { FULL_SCREEN_ORIENTATIONS, FULL_SCREEN_PRESENTATION } from "../chart/ChartFullScreen.tsx";
 import { DiagramView } from "./DiagramView.tsx";
 

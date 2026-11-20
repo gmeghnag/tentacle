@@ -24,7 +24,7 @@
  * presents one modal while dismissing another.
  */
 import type { JSX } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ComputerRow } from "../computer-rows.ts";
 import { computerStatus, menuActions } from "../computer-status.ts";
@@ -39,6 +39,7 @@ import { InlineMono } from "../ui/InlineMono.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
+import { Text } from "../ui/Text.tsx";
 
 export type { ComputerRow };
 

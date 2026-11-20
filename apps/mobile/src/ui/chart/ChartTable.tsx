@@ -6,10 +6,11 @@
  * summary and each row is its own VoiceOver stop.
  */
 import type { JSX } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, View } from "react-native";
 import type { ChartTable as Table } from "../../chart-layout.ts";
 import type { ChartTokens } from "../../theme.ts";
 import { DENSE_FONT_SCALE, MONO } from "../../theme.ts";
+import { Text } from "../Text.tsx";
 
 export interface ChartTableProps {
   readonly table: Table;

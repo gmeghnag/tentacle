@@ -27,7 +27,7 @@
  * Render only (AGENTS §7): the two decisions above come from `row-value.ts`.
  */
 import type { JSX, ReactNode } from "react";
-import { Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
 import {
   type RowTrailing,
   type RowValueKind,
@@ -47,6 +47,7 @@ import {
 } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
 import { StatusDot, type StatusTone } from "./StatusDot.tsx";
+import { Text } from "./Text.tsx";
 
 export interface RowProps {
   readonly palette: Palette;

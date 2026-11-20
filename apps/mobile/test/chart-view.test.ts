@@ -110,6 +110,10 @@ beforeAll(async () => {
     Easing: { bezier: () => (t: number) => t },
     Share: { share: async () => ({}) },
   }));
+  // The text seam (docs/feat/mobile-theme-beta.md) reads the app font from a
+  // context; this walker calls components without React, so it is stubbed
+  // to the same host strings `react-native`'s Text/TextInput are.
+  mock.module("../src/ui/Text.tsx", () => ({ Text: "Text", TextInput: "TextInput" }));
   mock.module("react-native-safe-area-context", () => ({
     useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
   }));
