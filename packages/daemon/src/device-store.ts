@@ -55,8 +55,36 @@ import {
   systemRandom,
 } from "@tentacle/transport/noise";
 
-/** The store's own version (separate from `PROTOCOL_VERSION` and the log's header). */
+/**
+ * The store's own version (separate from `PROTOCOL_VERSION` and the log's
+ * header) for the files whose shape never changed: `identity.json`, a claim, a
+ * decision, an adoption record. Bumping it would make an older build refuse the
+ * identity for no reason (docs/feat/mobile-projects.md §1).
+ */
 export const DEVICE_STORE_VERSION = 1;
+/**
+ * `registry.json`'s version. v2 (docs/feat/mobile-projects.md §1) adds an
+ * optional `project` per entry: an entry WITH it opens only that project's
+ * `serve`; one WITHOUT it is a LEGACY entry (adopted by the first project it
+ * connects to, §3). This build reads v1 (every entry legacy) and v2, and writes
+ * v2; an older build refuses v2 — it then denies every device (fail closed, F9).
+ */
+export const REGISTRY_VERSION = 2;
+/** The registry versions this build reads (v1 = all entries legacy). */
+const READABLE_REGISTRY_VERSIONS: ReadonlySet<unknown> = new Set([1, REGISTRY_VERSION]);
+/**
+ * A pairing window's version. v2 carries the `project` it was opened for: only
+ * that project's `serve` admits a stranger on it. A v1 window (an older `pair`)
+ * is not one this build reads — it can only deny.
+ */
+export const PAIRING_SESSION_VERSION = 2;
+/**
+ * `<configDir>/devices/adopted` — one file per LEGACY device that a project has
+ * adopted (docs/feat/mobile-projects.md §3): created exclusively (`wx`) by the
+ * first `serve` that completes a device handshake with it, so a legacy key opens
+ * exactly ONE project. The only file a daemon writes about a device's access.
+ */
+export const ADOPTED_DIR = "adopted";
 /** `<configDir>/devices` */
 export const DEVICE_DIR = "devices";
 export const IDENTITY_FILENAME = "identity.json";
@@ -135,12 +163,29 @@ export type IdentityResult =
   | { readonly ok: true; readonly identity: DeviceIdentity; readonly path: string }
   | DeviceStoreFailure;
 
+/**
+ * A project — one `serve` = one `cwd` (docs/feat/mobile-projects.md §1): `key`
+ * is `projectKey(cwd)` (the daemon store's directory name, the comparison that
+ * decides), `cwd` is what a human is shown.
+ */
+export interface DeviceProjectRef {
+  readonly key: string;
+  readonly cwd: string;
+}
+
 /** One device allowed to connect (decision 2: a key created at pairing, revocable here). */
 export interface PairedDevice {
   readonly id: string;
   readonly name: string;
   readonly publicKey: Uint8Array;
   readonly pairedAt: number;
+  /**
+   * The ONE project this key opens (registry v2). Absent = a LEGACY entry (read
+   * from a v1 file, or kept so by a v2 rewrite): it opens the project that
+   * adopted it (`adopted/<id>.json`), or — until one has — the first that
+   * completes a handshake with it (§3).
+   */
+  readonly project?: DeviceProjectRef;
 }
 
 export interface DeviceRegistry {
@@ -388,7 +433,35 @@ function readDevice(value: unknown): PairedDevice | undefined {
   if (!isStamp(value.pairedAt)) {
     return undefined;
   }
-  return { id: value.id, name: value.name, publicKey, pairedAt: value.pairedAt };
+  const base = { id: value.id, name: value.name, publicKey, pairedAt: value.pairedAt };
+  if (value.project === undefined) {
+    return base;
+  }
+  // A malformed project is a malformed ENTRY (the whole registry is refused):
+  // reading it as legacy would widen it to "any project that adopts it".
+  const project = readProjectRef(value.project);
+  return project === undefined ? undefined : { ...base, project };
+}
+
+/** A project key as stored: `projectKey`'s `<basename>-<12 hex>` shape, bounded, one line. */
+const PROJECT_KEY_RE = /^[A-Za-z0-9._-]{1,128}$/;
+/** A cwd as stored: non-empty, bounded, no control character (it is printed). */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point
+const PROJECT_CWD_RE = /^[^\u0000-\u001f\u007f-\u009f]{1,4096}$/;
+
+/** Parse a `{ key, cwd }`; `undefined` if it is not one. */
+export function readProjectRef(value: unknown): DeviceProjectRef | undefined {
+  if (!isObject(value)) {
+    return undefined;
+  }
+  const { key, cwd } = value;
+  if (typeof key !== "string" || !PROJECT_KEY_RE.test(key)) {
+    return undefined;
+  }
+  if (typeof cwd !== "string" || !PROJECT_CWD_RE.test(cwd)) {
+    return undefined;
+  }
+  return { key, cwd };
 }
 
 /**
@@ -409,7 +482,7 @@ export function readRegistry(configDir: string): RegistryResult {
   if (!isObject(value)) {
     return failure(path, "not an object");
   }
-  if (value.v !== DEVICE_STORE_VERSION) {
+  if (!READABLE_REGISTRY_VERSIONS.has(value.v)) {
     return failure(path, `unknown version ${String(value.v)}`);
   }
   if (!Array.isArray(value.devices)) {
@@ -418,7 +491,8 @@ export function readRegistry(configDir: string): RegistryResult {
   const devices: PairedDevice[] = [];
   for (const [index, entry] of value.devices.entries()) {
     const device = readDevice(entry);
-    if (device === undefined) {
+    // A v1 file never had projects: a `project` there is not ours to trust.
+    if (device === undefined || (value.v === 1 && device.project !== undefined)) {
       return failure(path, `device ${index} is malformed`);
     }
     devices.push(device);
@@ -429,12 +503,14 @@ export function readRegistry(configDir: string): RegistryResult {
 /** The record form of a registry (what `registry.json` holds). */
 function serializeRegistry(registry: DeviceRegistry): string {
   return JSON.stringify({
-    v: DEVICE_STORE_VERSION,
+    v: REGISTRY_VERSION,
     devices: registry.devices.map((d) => ({
       id: d.id,
       name: d.name,
       publicKey: encodeBase64Url(d.publicKey),
       pairedAt: d.pairedAt,
+      // A legacy entry STAYS legacy across a rewrite (no member at all).
+      ...(d.project !== undefined ? { project: { key: d.project.key, cwd: d.project.cwd } } : {}),
     })),
   });
 }
@@ -541,9 +617,20 @@ export function writeRegistry(configDir: string, registry: DeviceRegistry): Regi
   return { ok: true, registry };
 }
 
-/** `iPhone` → `iPhone (2)`, `iPhone (3)`…: re-pairing a name ADDS an entry (owner Q4). */
-export function dedupeName(registry: DeviceRegistry, name: string): string {
-  const taken = new Set(registry.devices.map((d) => d.name));
+/**
+ * `iPhone` → `iPhone (2)`, `iPhone (3)`…: re-pairing a name ADDS an entry (owner
+ * Q4). WITHIN a project (docs/feat/mobile-projects.md §1): the same phone is
+ * "iPhone" in every project it pairs, never "(2)" — the legacy entries (no
+ * project) are their own group.
+ */
+export function dedupeName(
+  registry: DeviceRegistry,
+  name: string,
+  project?: DeviceProjectRef,
+): string {
+  const taken = new Set(
+    registry.devices.filter((d) => d.project?.key === project?.key).map((d) => d.name),
+  );
   if (!taken.has(name)) {
     return name;
   }
@@ -560,14 +647,26 @@ export type AddDeviceResult =
   | DeviceStoreFailure;
 
 /**
- * Authorise `publicKey` (the CLI's `pair` accept, after the human said yes).
- * Idempotent for a key already present (the same phone pairing twice does not
- * duplicate itself), additive for a new key under an existing name.
+ * Authorise `publicKey` (the CLI's `pair` accept, after the human said yes) for
+ * `project` (docs/feat/mobile-projects.md §1: the key then opens that project's
+ * `serve` only). Idempotent for a key already present FOR THE SAME project (the
+ * same phone pairing twice does not duplicate itself), additive for a new key
+ * under an existing name. The same key already held for ANOTHER project (or as
+ * a legacy entry) is refused, never re-bound: one entry = one key = one serve.
+ * `project` absent writes a legacy entry (tests of the pre-project store only).
  */
 export function addDevice(
   configDir: string,
-  device: { readonly publicKey: Uint8Array; readonly name: string; readonly now?: number },
+  device: {
+    readonly publicKey: Uint8Array;
+    readonly name: string;
+    readonly now?: number;
+    readonly project?: DeviceProjectRef;
+  },
 ): AddDeviceResult {
+  if (device.project !== undefined && readProjectRef(device.project) === undefined) {
+    return failure(join(deviceDir(configDir), REGISTRY_FILENAME), "the project is malformed");
+  }
   if (device.publicKey.length !== KEY_BYTES) {
     return failure(join(deviceDir(configDir), REGISTRY_FILENAME), "the device key is not 32 bytes");
   }
@@ -593,13 +692,19 @@ export function addDevice(
     const id = deviceIdOf(device.publicKey);
     const existing = current.registry.devices.find((d) => d.id === id);
     if (existing !== undefined) {
+      if (existing.project?.key !== device.project?.key) {
+        return failure(path, `this device key is already paired (${id}) for another project`);
+      }
       return { ok: true, device: existing, registry: current.registry };
     }
     const entry: PairedDevice = {
       id,
-      name: dedupeName(current.registry, device.name),
+      name: dedupeName(current.registry, device.name, device.project),
       publicKey: device.publicKey,
       pairedAt: device.now ?? Date.now(),
+      ...(device.project !== undefined
+        ? { project: { key: device.project.key, cwd: device.project.cwd } }
+        : {}),
     };
     const registry: DeviceRegistry = { devices: [...current.registry.devices, entry] };
     ensureDir(dir);
@@ -655,6 +760,9 @@ export function removeDevices(configDir: string, ids: readonly string[]): Remove
       rmSync(join(dir, SEEN_DIR, device.id), { force: true });
       rmSync(join(dir, PUSH_DIR, `${device.id}.json`), { force: true });
       rmSync(join(dir, LIVE_DIR, `${device.id}.json`), { force: true });
+      // Its adoption goes too (docs/feat/mobile-projects.md §3): a re-pair is a
+      // new key and a new entry, never the old binding coming back.
+      rmSync(join(dir, ADOPTED_DIR, `${device.id}.json`), { force: true });
     }
     return { ok: true, removed, registry };
   } catch (error) {
@@ -714,6 +822,126 @@ export function readSeen(configDir: string): ReadonlyMap<string, number> {
 }
 
 // ---------------------------------------------------------------------------
+// legacy adoption (docs/feat/mobile-projects.md §3)
+// ---------------------------------------------------------------------------
+
+/** Which project adopted a legacy device, as far as this build can tell. */
+export type Adoption =
+  /** No project has adopted it yet: the first one to complete a handshake will. */
+  | { readonly kind: "none" }
+  | { readonly kind: "bound"; readonly project: DeviceProjectRef; readonly at: number }
+  /** A file is there and this build cannot read it: "bound elsewhere" (deny, F16), never rewritten. */
+  | { readonly kind: "unreadable" };
+
+const adoptionPath = (configDir: string, id: string) =>
+  join(deviceDir(configDir), ADOPTED_DIR, `${id}.json`);
+
+function parseAdoption(read: JsonRead): Adoption {
+  if (read.kind === "absent") {
+    return { kind: "none" };
+  }
+  if (read.kind !== "value" || !isObject(read.value)) {
+    return { kind: "unreadable" };
+  }
+  const project = readProjectRef(read.value.project);
+  if (read.value.v !== DEVICE_STORE_VERSION || project === undefined || !isStamp(read.value.at)) {
+    return { kind: "unreadable" };
+  }
+  return { kind: "bound", project, at: read.value.at };
+}
+
+/** `adopted/<id>.json`, read. A pure read (it backs `authorize`, which must stay side-effect free). */
+export function readAdoption(configDir: string, id: string): Adoption {
+  if (!ID_RE.test(id)) {
+    return { kind: "unreadable" };
+  }
+  return parseAdoption(readJson(adoptionPath(configDir, id)));
+}
+
+/** Every adoption file present, by device id (a pure read; `none` is never listed). */
+export function readAdoptions(configDir: string): ReadonlyMap<string, Adoption> {
+  const dir = join(deviceDir(configDir), ADOPTED_DIR);
+  const out = new Map<string, Adoption>();
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    const match = /^([0-9a-f]{16})\.json$/.exec(name);
+    if (match?.[1] === undefined) {
+      continue;
+    }
+    const adoption = parseAdoption(readJson(join(dir, name)));
+    if (adoption.kind !== "none") {
+      out.set(match[1], adoption);
+    }
+  }
+  return out;
+}
+
+export type AdoptResult =
+  | { readonly ok: true; readonly created: boolean }
+  /** Another project holds it (or its file is unreadable, F16): this serve must not admit it. */
+  | { readonly ok: false; readonly reason: "elsewhere"; readonly project?: DeviceProjectRef }
+  /** The record could not be written: fail closed (the device is not admitted here). */
+  | { readonly ok: false; readonly reason: "store_failed" };
+
+/**
+ * Bind legacy device `id` to `project` — ONCE for the whole computer. The file is
+ * written to a temp name and `link`ed into place, so it is created exclusively
+ * (`EEXIST` = another project, or this one on a second socket, got there first)
+ * AND never visible half-written: a concurrent reader sees no file or the whole
+ * record. Called on the RESOLVE of a handshake, never from `authorize` (P1).
+ */
+export function adoptLegacy(
+  configDir: string,
+  id: string,
+  project: DeviceProjectRef,
+  now: number = Date.now(),
+): AdoptResult {
+  if (!ID_RE.test(id) || readProjectRef(project) === undefined) {
+    return { ok: false, reason: "store_failed" };
+  }
+  const dir = join(deviceDir(configDir), ADOPTED_DIR);
+  const path = adoptionPath(configDir, id);
+  const tmp = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      tmp,
+      JSON.stringify({
+        v: DEVICE_STORE_VERSION,
+        project: { key: project.key, cwd: project.cwd },
+        at: now,
+      }),
+      { mode: 0o600 },
+    );
+    linkSync(tmp, path);
+    return { ok: true, created: true };
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== "EEXIST") {
+      return { ok: false, reason: "store_failed" };
+    }
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+  const held = readAdoption(configDir, id);
+  if (held.kind === "bound" && held.project.key === project.key) {
+    return { ok: true, created: false };
+  }
+  return held.kind === "bound"
+    ? { ok: false, reason: "elsewhere", project: held.project }
+    : { ok: false, reason: "elsewhere" };
+}
+
+/** Remove every adoption record (`devices reset`, F15: the registry they bound is gone). */
+export function clearAdoptions(configDir: string): void {
+  rmSync(join(deviceDir(configDir), ADOPTED_DIR), { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
 // pairing windows
 // ---------------------------------------------------------------------------
 
@@ -723,6 +951,12 @@ export interface PairingSession {
   readonly codeHash: string;
   readonly expiresAt: number;
   readonly pid: number;
+  /**
+   * The project this window pairs with (v2, docs/feat/mobile-projects.md §1):
+   * only THAT project's `serve` admits a stranger on it, claims it, or answers
+   * it — every lookup below takes the reader's project key and ignores others.
+   */
+  readonly project: DeviceProjectRef;
 }
 
 /** What a phone claimed for a window (written exclusively: one claim per window). */
@@ -764,6 +998,8 @@ export function openPairing(
   configDir: string,
   options: {
     readonly code: string;
+    /** The project the window pairs with (the folder `pair` targets). */
+    readonly project: DeviceProjectRef;
     readonly now?: number;
     readonly ttlMs?: number;
     readonly pid?: number;
@@ -771,6 +1007,9 @@ export function openPairing(
   },
 ): OpenPairingResult {
   const dir = pairingDirOf(configDir);
+  if (readProjectRef(options.project) === undefined) {
+    return failure(dir, "the project is malformed");
+  }
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch (error) {
@@ -783,10 +1022,11 @@ export function openPairing(
     codeHash: pairingCodeHash(options.code),
     expiresAt: now + (options.ttlMs ?? PAIRING_TTL_MS),
     pid: options.pid ?? process.pid,
+    project: { key: options.project.key, cwd: options.project.cwd },
   };
   const path = sessionPath(configDir, session.sid);
   try {
-    writeAtomic(path, JSON.stringify({ v: DEVICE_STORE_VERSION, ...session }));
+    writeAtomic(path, JSON.stringify({ v: PAIRING_SESSION_VERSION, ...session }));
   } catch (error) {
     return failure(path, (error as Error).message);
   }
@@ -795,7 +1035,11 @@ export function openPairing(
 
 /** Parse one `pairing/<sid>.json`; `undefined` if it is not one (an unknown version included). */
 function readSession(value: unknown): PairingSession | undefined {
-  if (!isObject(value) || value.v !== DEVICE_STORE_VERSION) {
+  if (!isObject(value) || value.v !== PAIRING_SESSION_VERSION) {
+    return undefined;
+  }
+  const project = readProjectRef(value.project);
+  if (project === undefined) {
     return undefined;
   }
   if (typeof value.sid !== "string" || !SID_RE.test(value.sid)) {
@@ -807,7 +1051,13 @@ function readSession(value: unknown): PairingSession | undefined {
   if (!isStamp(value.expiresAt) || !isStamp(value.pid)) {
     return undefined;
   }
-  return { sid: value.sid, codeHash: value.codeHash, expiresAt: value.expiresAt, pid: value.pid };
+  return {
+    sid: value.sid,
+    codeHash: value.codeHash,
+    expiresAt: value.expiresAt,
+    pid: value.pid,
+    project,
+  };
 }
 
 /** Every well-formed window on disk (a malformed one is ignored: it can only deny). */
@@ -866,13 +1116,15 @@ export interface LiveClock {
  */
 export function findPairing(
   configDir: string,
-  options: { readonly code: string } & LiveClock,
+  options: { readonly code: string; readonly project: string } & LiveClock,
 ): PairingSession | undefined {
   const wanted = pairingCodeHash(options.code);
   const now = options.now ?? Date.now();
   const alive = options.alive ?? processAlive;
   for (const session of listSessions(configDir)) {
-    if (!sameHash(session.codeHash, wanted)) {
+    // Another project's window is not one this serve can see (F12): a code
+    // shown for `~/tentacle` is `invalid_code` on `~/assistant`, no oracle.
+    if (session.project.key !== options.project || !sameHash(session.codeHash, wanted)) {
       continue;
     }
     if (session.expiresAt <= now || !alive(session.pid)) {
@@ -894,12 +1146,15 @@ export function findPairing(
  */
 export function hasLivePairing(
   configDir: string,
-  options: LiveClock = {},
+  options: LiveClock & {
+    /** The reader's project key: only a window OF THIS PROJECT counts (§2). */
+    readonly project: string;
+  },
 ): PairingSession | undefined {
   const now = options.now ?? Date.now();
   const alive = options.alive ?? processAlive;
   for (const session of listSessions(configDir)) {
-    if (session.expiresAt > now && alive(session.pid)) {
+    if (session.project.key === options.project && session.expiresAt > now && alive(session.pid)) {
       return session;
     }
   }
@@ -924,6 +1179,8 @@ export function claimPairing(
     readonly sid: string;
     readonly deviceKey: Uint8Array;
     readonly name: string;
+    /** The claimer's project key: a window of another project is `gone` (F12). */
+    readonly project: string;
   } & LiveClock,
 ): ClaimResult {
   if (
@@ -936,7 +1193,12 @@ export function claimPairing(
   const session = listSessions(configDir).find((s) => s.sid === options.sid);
   const alive = options.alive ?? processAlive;
   const now = options.now ?? Date.now();
-  if (session === undefined || session.expiresAt <= now || !alive(session.pid)) {
+  if (
+    session === undefined ||
+    session.project.key !== options.project ||
+    session.expiresAt <= now ||
+    !alive(session.pid)
+  ) {
     return { ok: false, reason: "gone" };
   }
   const identity = readIdentity(configDir);
@@ -1072,9 +1334,18 @@ export interface DaemonRecord {
    * value is a `ws(s)://…/e2e` URL (`isPairingAddress`), bounded and deduped.
    */
   readonly addresses?: readonly string[];
+  /**
+   * This serve's public id (= its project's relay id, docs/feat/mobile-projects.md
+   * §5): its direct addresses are `ws(s)://host:port/s/<serveId>/e2e`, so a port
+   * another project's serve now holds answers 404, never a Noise deny. Optional
+   * (additive): an older record has none and keeps the bare `/e2e`.
+   */
+  readonly serveId?: string;
 }
 
 export const DAEMON_RECORD_VERSION = 1;
+/** A serve id: the relay id's base64url shape (bounded; it goes into a URL path). */
+export const SERVE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 function daemonsDir(configDir: string): string {
   return join(configDir, DAEMONS_DIR);
@@ -1098,6 +1369,10 @@ export function writeDaemonRecord(
         v: DAEMON_RECORD_VERSION,
         ...record,
         addresses: addresses.length > 0 ? addresses : undefined,
+        serveId:
+          record.serveId !== undefined && SERVE_ID_RE.test(record.serveId)
+            ? record.serveId
+            : undefined,
       }),
     );
   } catch (error) {
@@ -1196,6 +1471,10 @@ export function readDaemonRecords(
       cwd: value.cwd,
       startedAt: value.startedAt,
       ...(addresses.length > 0 ? { addresses } : {}),
+      // A planted junk id is dropped (bare `/e2e`), never refused with the record.
+      ...(typeof value.serveId === "string" && SERVE_ID_RE.test(value.serveId)
+        ? { serveId: value.serveId }
+        : {}),
     });
   }
   return records.sort((a, b) => a.startedAt - b.startedAt || a.pid - b.pid);

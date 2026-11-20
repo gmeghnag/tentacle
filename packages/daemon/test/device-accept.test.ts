@@ -30,6 +30,9 @@ import {
 } from "../src/device-store.ts";
 import { SessionHost } from "../src/session-host.ts";
 
+/** This serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const dirs: string[] = [];
 const authorities: DeviceAuthority[] = [];
 afterEach(() => {
@@ -60,6 +63,7 @@ function store(): string {
 
 function authorityFor(configDir: string, audit: string[]): DeviceAuthority {
   const authority = new DeviceAuthority({
+    project: TEST_PROJECT,
     configDir,
     pollIntervalMs: 10,
     onAudit: (line) => audit.push(line),
@@ -177,6 +181,7 @@ describe("acceptDevice builds a real Connection on a plain channel", () => {
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
     const added = addDevice(configDir, {
+      project: TEST_PROJECT,
       publicKey: publicKeyOf(key(2)),
       name: "iPhone",
       now: 2_000,
@@ -224,6 +229,7 @@ describe("acceptDevice builds a real Connection on a plain channel", () => {
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
     const added = addDevice(configDir, {
+      project: TEST_PROJECT,
       publicKey: publicKeyOf(key(2)),
       name: "iPhone",
       now: 2_000,
@@ -270,7 +276,12 @@ describe("every outcome settles exactly once (the caller's slot)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: publicKeyOf(key(2)),
+      name: "iPhone",
+      now: 2_000,
+    });
     const h = acceptOn(configDir);
     // The handshake starts and is abandoned before the confirm (the phone walks
     // away right after its message 1): without the settle on the responder's
@@ -315,7 +326,12 @@ describe("every outcome settles exactly once (the caller's slot)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: publicKeyOf(key(2)),
+      name: "iPhone",
+      now: 2_000,
+    });
     const h = acceptOn(configDir);
     const peer = await connect(h.phone, key(2), identity.identity.publicKey);
     await peer.request("initialize", {
@@ -341,7 +357,12 @@ describe("every outcome settles exactly once (the caller's slot)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: publicKeyOf(key(2)),
+      name: "iPhone",
+      now: 2_000,
+    });
     const h = acceptOn(configDir, { closeAfterConfirm: true });
     const peer = await connect(h.phone, key(2), identity.identity.publicKey);
     peer.close();
@@ -358,7 +379,12 @@ describe("every outcome settles exactly once (the caller's slot)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: publicKeyOf(key(2)),
+      name: "iPhone",
+      now: 2_000,
+    });
     const h = acceptOn(configDir, { releaseInGap: true, closeAfterConfirm: true });
     const peer = await connect(h.phone, key(2), identity.identity.publicKey);
     peer.close();
@@ -375,6 +401,7 @@ describe("every outcome settles exactly once (the caller's slot)", () => {
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
     const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
       code: "K7M2QX9AB3",
       now: Date.now(),
       pid: process.pid,

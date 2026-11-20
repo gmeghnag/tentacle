@@ -25,10 +25,13 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import {
+  ADOPTED_DIR,
   type DeviceIdentity,
+  type DeviceProjectRef,
   type LiveClock,
   deviceIdOf,
   hasLivePairing,
+  readAdoptions,
   readIdentity,
   readRegistry,
 } from "./device-store.ts";
@@ -47,6 +50,12 @@ export type DeviceAllow =
       readonly id: string;
       readonly allow: true;
       readonly maxMessageBytes: number;
+      /**
+       * A LEGACY entry no project has adopted yet (docs/feat/mobile-projects.md
+       * §3): the route must `adoptLegacy` on the RESOLVE — and close the socket,
+       * before any `Connection` exists, if another project won it.
+       */
+      readonly adopt?: true;
     }
   | { readonly kind: "pairing"; readonly allow: true; readonly maxMessageBytes: number };
 
@@ -78,6 +87,13 @@ const systemTimer: DeviceAuthorityTimer = {
 export interface DeviceAuthorityOptions {
   /** The computer's config dir (`<configDir>/devices/` is the store). */
   readonly configDir: string;
+  /**
+   * The project THIS serve is (docs/feat/mobile-projects.md §2): `key` =
+   * `projectKey(cwd)`. Required — there is no computer-wide mode: a device opens
+   * a serve only if its entry is of this project (or a legacy entry this project
+   * adopted, §3), and a stranger pairs only on a window of this project.
+   */
+  readonly project: DeviceProjectRef;
   /** Injectable for tests; default the process timers. */
   readonly timers?: DeviceAuthorityTimer;
   readonly pollIntervalMs?: number;
@@ -90,7 +106,18 @@ export interface DeviceAuthorityOptions {
 }
 
 interface Snapshot {
+  /**
+   * The ids valid HERE: entries of this project, and legacy entries this project
+   * adopted. What `knows`, `wantsReachability` and the revoke poll count.
+   */
   readonly devices: ReadonlySet<string>;
+  /**
+   * Legacy entries NO project has adopted yet: admitted as `device` with
+   * `adopt: true` (the route binds them on the resolve) but NOT counted by
+   * `wantsReachability` — else every serve would dial the relay for a phone
+   * that will never come (§2).
+   */
+  readonly adoptable: ReadonlySet<string>;
   readonly identity: DeviceIdentity | undefined;
   /** The computer key's id: a change means every phone's pin is now wrong (F11). */
   readonly identityId: string | undefined;
@@ -105,6 +132,7 @@ function idOf(identity: DeviceIdentity | undefined): string | undefined {
 
 const EMPTY: Snapshot = {
   devices: new Set(),
+  adoptable: new Set(),
   identity: undefined,
   identityId: undefined,
   broken: false,
@@ -112,6 +140,8 @@ const EMPTY: Snapshot = {
 
 export class DeviceAuthority {
   private readonly store: string;
+  /** This serve's project (§2): the scope of every verdict. */
+  readonly project: DeviceProjectRef;
   private readonly timer: DeviceAuthorityTimer;
   private readonly now: () => number;
   /** `hasLivePairing`'s injected half: pid liveness (the clock is read per call). */
@@ -128,6 +158,7 @@ export class DeviceAuthority {
 
   constructor(options: DeviceAuthorityOptions) {
     this.store = options.configDir;
+    this.project = { key: options.project.key, cwd: options.project.cwd };
     this.timer = options.timers ?? systemTimer;
     this.now = options.now ?? Date.now;
     this.clock = options.alive ? { alive: options.alive } : {};
@@ -171,6 +202,19 @@ export class DeviceAuthority {
     if (snapshot.devices.has(id)) {
       return { kind: "device", id, allow: true, maxMessageBytes: DEVICE_MAX_MESSAGE_BYTES };
     }
+    if (snapshot.adoptable.has(id)) {
+      // A legacy key no project holds yet (§3). Nothing is WRITTEN here (P1):
+      // the route adopts on the resolve, where a handshake really completed.
+      return {
+        kind: "device",
+        id,
+        allow: true,
+        maxMessageBytes: DEVICE_MAX_MESSAGE_BYTES,
+        adopt: true,
+      };
+    }
+    // An entry of ANOTHER project falls through: to this serve it is an
+    // unknown key (pairing-only while a window of this project is open).
     // Registering a device is a SINGLE-use code plus the human's `y` (9c); until
     // then an unknown key may do exactly one thing: pair.
     if (this.hasWindow()) {
@@ -295,10 +339,36 @@ export class DeviceAuthority {
       this.reportOnce("registry", registry.path, registry.reason);
       // An unreadable or unknown-version registry is NEVER rewritten here: the
       // human fixes it or runs `devices reset` (F14).
-      return { devices: new Set(), identity, identityId: idOf(identity), broken: true };
+      return {
+        devices: new Set(),
+        adoptable: new Set(),
+        identity,
+        identityId: idOf(identity),
+        broken: true,
+      };
+    }
+    // The scope (§2): mine, legacy adopted by me, legacy adoptable — and
+    // nothing else. An unreadable adoption record counts as "bound elsewhere"
+    // (F16): it can only deny.
+    const mine = this.project.key;
+    const adoptions = readAdoptions(this.store);
+    const devices = new Set<string>();
+    const adoptable = new Set<string>();
+    for (const device of registry.registry.devices) {
+      if (device.project !== undefined) {
+        if (device.project.key === mine) devices.add(device.id);
+        continue;
+      }
+      const adoption = adoptions.get(device.id);
+      if (adoption === undefined) {
+        adoptable.add(device.id);
+      } else if (adoption.kind === "bound" && adoption.project.key === mine) {
+        devices.add(device.id);
+      }
     }
     return {
-      devices: new Set(registry.registry.devices.map((d) => d.id)),
+      devices,
+      adoptable,
       identity,
       identityId: idOf(identity),
       broken: false,
@@ -318,7 +388,9 @@ export class DeviceAuthority {
     // before the next handshake, and reading+parsing the registry on every
     // authorize would be work a replayed message 1 could multiply.
     const parts: string[] = [];
-    for (const name of ["registry.json", "identity.json"]) {
+    // The adoption DIRECTORY too (§3): its mtime moves when a record is created
+    // or removed, so an adoption by another serve is seen on the next handshake.
+    for (const name of ["registry.json", "identity.json", ADOPTED_DIR]) {
       try {
         const s = statSync(join(this.store, "devices", name));
         parts.push(`${s.mtimeMs}:${s.size}`);
@@ -342,7 +414,13 @@ export class DeviceAuthority {
     return (
       // The time is read HERE, never captured: a window's expiry is judged
       // against the clock at this call (F24), and `alive` must reach the read.
-      hasLivePairing(this.store, { ...this.clock, now: this.now() }) !== undefined
+      // Only a window OF THIS PROJECT (§2, F12): another folder's `pair` admits
+      // nobody here.
+      hasLivePairing(this.store, {
+        ...this.clock,
+        now: this.now(),
+        project: this.project.key,
+      }) !== undefined
     );
   }
 
@@ -358,7 +436,7 @@ export class DeviceAuthority {
     }
     const previousIdentity = this.snapshot.identityId;
     this.refreshIfChanged();
-    const { devices, broken, identityId } = this.snapshot;
+    const { devices, adoptable, broken, identityId } = this.snapshot;
     // `devices reset`: the computer's key changed, so every phone's pinned key
     // is now wrong and every live connection is worthless — all of them go
     // (F11), whatever the registry still lists (this does not depend on the
@@ -369,7 +447,9 @@ export class DeviceAuthority {
       // A broken store keeps today's connections (F14 says deny, not kill):
       // the sockets already authenticated, and dropping them would end turns
       // over a file the human is about to fix.
-      if (!reset && (broken || devices.has(id))) {
+      // `adoptable`: a legacy socket mid-adoption (its record is being written).
+      // Once ANOTHER project adopts it, it is in neither set and closes here (F11).
+      if (!reset && (broken || devices.has(id) || adoptable.has(id))) {
         continue;
       }
       const entries = [...set];

@@ -56,6 +56,9 @@ import { type PairingState, pairingView, reduce, runPairing } from "../src/pairi
 import type { RNWebSocketCtor } from "../src/rn-websocket.ts";
 import { rnWebSocketCtor } from "../src/rn-websocket.ts";
 
+/** The serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const IOS_ORIGIN = "http://192.168.1.8:4001";
 const dirs: string[] = [];
 const servers: { stop(): void }[] = [];
@@ -135,7 +138,11 @@ function computerConfigDir(): string {
 
 /** A real daemon with the `/e2e` device route, as `serve` mounts it (P7). */
 function serve(dir: string): { url: string } {
-  const authority = new DeviceAuthority({ configDir: dir, pollIntervalMs: 10 });
+  const authority = new DeviceAuthority({
+    project: TEST_PROJECT,
+    configDir: dir,
+    pollIntervalMs: 10,
+  });
   authorities.push(authority);
   const server = startWsServer({
     host: "127.0.0.1",

@@ -105,12 +105,21 @@ export function isCarrierGradeNat(address: string): boolean {
   return parts.length === 4 && a === 100 && b !== undefined && b >= 64 && b <= 127;
 }
 
-/** The `ws(s)://host:port/e2e` URL one daemon record means for one host. */
+/**
+ * The `ws(s)://host:port/s/<serveId>/e2e` URL one daemon record means for one
+ * host (docs/feat/mobile-projects.md §5, Owner Q5): the path names the serve, so
+ * a port another project's serve holds later answers 404 ("not here"), never a
+ * Noise deny. A record with no `serveId` (an older `serve`) keeps the bare `/e2e`.
+ */
 function urlFor(record: DaemonRecord, host: string): string {
   const scheme = record.tls ? "wss" : "ws";
   // An IPv6 literal needs brackets in a URL; nothing else does.
   const authority = host.includes(":") ? `[${host}]` : host;
-  return `${scheme}://${authority}:${record.port}${PAIRING_ADDRESS_SUFFIX}`;
+  const path =
+    record.serveId !== undefined
+      ? `/s/${record.serveId}${PAIRING_ADDRESS_SUFFIX}`
+      : PAIRING_ADDRESS_SUFFIX;
+  return `${scheme}://${authority}:${record.port}${path}`;
 }
 
 /** Keep the first occurrence of each address (the phone's dial order is ours). */

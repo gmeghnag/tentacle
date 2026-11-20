@@ -47,6 +47,9 @@ import { createLinkDiagnoser } from "../src/link-diagnosis.ts";
 import type { RNWebSocketCtor } from "../src/rn-websocket.ts";
 import { rnWebSocketCtor } from "../src/rn-websocket.ts";
 
+/** The serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const TOKEN = "e2e-token";
 /** Canaries for the export test (F16): daemon-shaped prose a socket can really deliver. */
@@ -147,6 +150,7 @@ function daemon(
   // The registry holds the device's PUBLIC key (what pairing's claim carries):
   // the handshake authenticates us by the public half of our stored private key.
   const added = addDevice(configDir, {
+    project: TEST_PROJECT,
     publicKey: publicKeyOf(PHONE_KEY),
     name: "iPhone",
     now: 2_000,
@@ -154,7 +158,7 @@ function daemon(
   if (!added.ok) {
     throw new Error(added.reason);
   }
-  const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+  const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
   const sessionHost = host(options.policy, options.schedules === true);
   const server = startWsServer({
     host: "127.0.0.1",

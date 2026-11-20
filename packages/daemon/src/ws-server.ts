@@ -87,10 +87,38 @@ export interface DeviceRouteOptions {
    * up (F16/F2).
    */
   readonly pairingCheckMs?: number;
+  /**
+   * This serve's public id (docs/feat/mobile-projects.md §5, Owner Q5): the
+   * device route also answers `/s/<serveId>/e2e`, and a `/s/<other>/e2e` is a
+   * 404 BEFORE any upgrade — a stale direct address that now lands on another
+   * project's serve reads "not here", never a Noise deny the phone would show
+   * as "access removed". Absent = only the bare `/e2e`.
+   */
+  readonly serveId?: string;
 }
 
 /** The device route's path: a phone dials `<address>/e2e`. */
 export const DEVICE_ROUTE = "/e2e";
+
+/**
+ * Which way the device route takes `pathname` (pure, so the 404 rule is tested
+ * without a socket): `device` = this serve's route (`/e2e`, or `/s/<mine>/e2e`),
+ * `elsewhere` = a serve-scoped path naming ANOTHER serve (404, no upgrade),
+ * `none` = not a device path at all (the plain route decides).
+ */
+export function deviceRouteOf(
+  pathname: string,
+  serveId: string | undefined,
+): "device" | "elsewhere" | "none" {
+  if (pathname === DEVICE_ROUTE) {
+    return "device";
+  }
+  const scoped = /^\/s\/([^/]+)\/e2e$/.exec(pathname);
+  if (scoped === null) {
+    return "none";
+  }
+  return serveId !== undefined && scoped[1] === serveId ? "device" : "elsewhere";
+}
 /** The bits of Bun's server socket the route touches (its `data` is our `SocketData`). */
 interface WsSocket {
   readonly data: SocketData;
@@ -320,8 +348,15 @@ export function startWsServer(options: WsServerOptions): RunningServer {
     port: options.port,
     ...(options.tls ? { tls: { cert: options.tls.cert, key: options.tls.key } } : {}),
     fetch(req, srv) {
-      if (devices && new URL(req.url).pathname === DEVICE_ROUTE) {
-        return deviceUpgrade(req, srv);
+      if (devices) {
+        const route = deviceRouteOf(new URL(req.url).pathname, devices.serveId);
+        if (route === "device") {
+          return deviceUpgrade(req, srv);
+        }
+        if (route === "elsewhere") {
+          // Before the limiter and before any crypto (P8): "not this serve".
+          return new Response("no such serve here", { status: 404 });
+        }
       }
       if (!authorize(req)) {
         options.onAudit?.(`auth-failure ${new URL(req.url).pathname}`);

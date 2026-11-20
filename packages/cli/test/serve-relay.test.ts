@@ -26,6 +26,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { projectKey } from "@tentacle/agent";
 import { pairDevice } from "@tentacle/client/pairing";
 import { loadConfig } from "@tentacle/config";
 import {
@@ -204,12 +205,19 @@ async function waitFor(check: () => boolean, what: string, timeoutMs = 3_000): P
   if (!check()) throw new Error(`timed out waiting for ${what}`);
 }
 
-/** A paired phone in the store — what makes the daemon actually dial (Owner Q1). */
-function pairPhone(configDir: string): void {
-  const added = addDevice(configDir, {
+/** The rig's project as its `serve` knows it (docs/feat/mobile-projects.md §2). */
+const projectOf = (where: Rig) => ({ key: projectKey(where.cwd), cwd: where.cwd });
+
+/**
+ * A phone paired to THIS rig's project — what makes its daemon actually dial
+ * (Owner Q1; per project since docs/feat/mobile-projects.md §2).
+ */
+function pairPhone(where: Rig): void {
+  const added = addDevice(where.configDir, {
     publicKey: publicKeyOf(new Uint8Array(32).fill(2)),
     name: "iPhone",
     now: 2_000,
+    project: projectOf(where),
   });
   if (!added.ok) throw new Error(added.reason);
 }
@@ -344,16 +352,21 @@ describe("serve: the record carries the relay address, LAST (Design §5)", () =>
 });
 
 describe("serve: the relay is off when it is not wanted", () => {
-  test("--no-relay: no relay.json, no link, no relay address, no dial", async () => {
+  test("--no-relay: no link, no relay address, no dial — but the serve id exists (§5)", async () => {
+    // docs/feat/mobile-projects.md §5 (Owner Q5): `relay.json` is this serve's
+    // id whether or not the relay is on — a local file, no relay contact — so
+    // its direct address can be `/s/<serveId>/e2e`.
     const where = rig();
     const relay = localRelay();
-    pairPhone(where.configDir);
+    pairPhone(where);
     const started = await serve(where, { relay: { flagUrl: relay.url, noRelay: true } });
     await Bun.sleep(30);
-    expect(existsSync(relaySecretPath(started.store))).toBe(false);
     expect(started.handle.relay).toBeUndefined();
     expect(recordOf(where.configDir)?.addresses ?? []).toEqual([]);
     expect(relay.registeredCount()).toBe(0);
+    const file = JSON.parse(readFileSync(relaySecretPath(started.store), "utf8"));
+    const id = relayIdOf(new Uint8Array(Buffer.from(file.secret, "base64url")));
+    expect(recordOf(where.configDir)?.serveId).toBe(id);
   });
 
   test("relay.enabled: false in the config file is the same off", async () => {
@@ -364,9 +377,25 @@ describe("serve: the relay is off when it is not wanted", () => {
       `{ "relay": { "enabled": false, "url": "${relay.url}" } }\n`,
     );
     const started = await serve(where);
-    expect(existsSync(relaySecretPath(started.store))).toBe(false);
     expect(started.handle.relay).toBeUndefined();
     expect(relay.registeredCount()).toBe(0);
+    expect(recordOf(where.configDir)?.serveId).toBeString();
+  });
+
+  test("a phone paired to ANOTHER project does not make this serve dial (§2, the repro's (3))", async () => {
+    // Mutation: a computer-wide `wantsReachability` → this serve registers.
+    const where = rig();
+    const relay = localRelay();
+    const added = addDevice(where.configDir, {
+      publicKey: publicKeyOf(new Uint8Array(32).fill(3)),
+      name: "iPhone",
+      project: { key: projectKey("/u/assistant"), cwd: "/u/assistant" },
+    });
+    if (!added.ok) throw new Error(added.reason);
+    const started = await serve(where, { relay: { flagUrl: relay.url } });
+    await Bun.sleep(80);
+    expect(relay.registeredCount()).toBe(0);
+    expect(started.handle.relay?.isConnected()).toBe(false);
   });
 
   test("the config file's relay.url is used when no flag says otherwise", async () => {
@@ -390,7 +419,7 @@ describe("serve: the relay is off when it is not wanted", () => {
     expect(empty.handle.relay?.isConnected()).toBe(false);
     await handles.pop()?.stop();
 
-    pairPhone(where.configDir);
+    pairPhone(where);
     const paired = await serve(where, { relay: { flagUrl: relay.url } });
     await waitFor(() => paired.handle.relay?.isConnected() === true, "the registration");
     expect(relay.registeredCount()).toBe(1);
@@ -405,7 +434,7 @@ describe('serve: stop() takes the registration down with it (Design §4 "Stop")'
     // `registeredCount` stays 1, and a live socket outlives the record naming it.
     const where = rig();
     const relay = localRelay();
-    pairPhone(where.configDir);
+    pairPhone(where);
     const started = await serve(where, { relay: { flagUrl: relay.url } });
     await waitFor(() => started.handle.relay?.isConnected() === true, "the registration");
     expect(relay.registeredCount()).toBe(1);
@@ -468,6 +497,7 @@ describe("serve: pairing from off the LAN reaches the relay (docs/fix/relay-pair
     const code = "K7M2QX9AB3";
     const opened = openPairing(where.configDir, {
       code,
+      project: projectOf(where),
       now: Date.now(),
       ttlMs: 600_000,
       pid: process.pid,
@@ -494,11 +524,13 @@ describe("serve: pairing from off the LAN reaches the relay (docs/fix/relay-pair
         publicKey: claim.publicKey,
         name: claim.name,
         now: Date.now(),
+        project: projectOf(where),
       });
       if (!added.ok) throw new Error(added.reason);
       writePairingDecision(where.configDir, opened.session.sid, true);
     })();
     const result = await pairDevice({
+      perProject: true,
       payload: {
         v: 1,
         key: identity.identity.publicKey,

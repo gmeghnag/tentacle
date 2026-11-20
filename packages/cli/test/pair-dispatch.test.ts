@@ -18,6 +18,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { projectKey } from "@tentacle/agent";
 import { claimPairing, findPairing, writeDaemonRecord } from "@tentacle/daemon";
 import { ARGS, USAGE, cliMode, modeUsesModel, parseArgs } from "../src/flags.ts";
 import { main } from "../src/index.ts";
@@ -109,21 +110,22 @@ describe("devices' words", () => {
 });
 
 describe("main dispatches them before any config load", () => {
-  test("`tentacle pair` with no address refuses with the hint, not a prompt", async () => {
+  test("`tentacle pair` with no serve in the folder refuses with the hint, not a prompt", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pair-dispatch-"));
     const saved = process.env[ENV_KEY];
     process.env[ENV_KEY] = dir;
     try {
       const out: string[] = [];
       const err: string[] = [];
-      // A config dir with no daemon record: nothing a phone can reach.
-      const code = await main(["bun", "cli", "pair"], {
+      // A config dir with no daemon record: no serve runs in the folder
+      // (docs/feat/mobile-projects.md §5, Owner Q6).
+      const code = await main(["bun", "cli", "pair", "--project", dir], {
         out: (text) => out.push(text),
         err: (text) => err.push(text),
         terminal: NO_TERMINAL,
       });
       expect(code).toBe(1);
-      expect(err.join("")).toContain("serve --host 0.0.0.0");
+      expect(err.join("")).toContain("No `tentacle serve` is running in");
       // A prompt would have tried to answer; nothing reached STDOUT.
       expect(out).toEqual([]);
     } finally {
@@ -212,14 +214,15 @@ describe("pair through main with no injected interfaces (review round 1, finding
       // must not wait out the 5-minute window (there is no `sleep` seam here —
       // this is `main`). The claim is written where a real daemon writes it.
       let claimed = false;
-      const code = await main(["bun", "cli", "pair"], {
+      const code = await main(["bun", "cli", "pair", "--project", dir], {
         out: (text) => {
           out.push(text);
           const pairingCode = /[?&]c=([A-Z0-9]{10})/.exec(text)?.[1];
           if (pairingCode === undefined || claimed) return;
-          const session = findPairing(dir, { code: pairingCode });
+          const session = findPairing(dir, { project: projectKey(dir), code: pairingCode });
           if (session === undefined) return;
           claimed = claimPairing(dir, {
+            project: projectKey(dir),
             sid: session.sid,
             deviceKey: new Uint8Array(32).fill(4),
             name: "phone",
@@ -262,15 +265,25 @@ describe("pair cleans up the process it ran in", () => {
     process.env[ENV_KEY] = dir;
     try {
       let claimed = false;
+      // The folder's live serve (loopback, so it adds no address of its own).
+      writeDaemonRecord(dir, {
+        pid: process.pid,
+        host: "127.0.0.1",
+        port: 7778,
+        tls: false,
+        cwd: dir,
+        startedAt: 1,
+      });
       // An --address gives it something to publish, so the window really opens.
-      await main(["bun", "cli", "pair", "--address", "ws://10.0.0.1:1/e2e"], {
+      await main(["bun", "cli", "pair", "--project", dir, "--address", "ws://10.0.0.1:1/e2e"], {
         out: (text) => {
           if (claimed) return;
           const pairingCode = /[?&]c=([A-Z0-9]{10})/.exec(text)?.[1];
           if (pairingCode === undefined) return;
-          const session = findPairing(dir, { code: pairingCode });
+          const session = findPairing(dir, { project: projectKey(dir), code: pairingCode });
           if (session === undefined) return;
           claimed = claimPairing(dir, {
+            project: projectKey(dir),
             sid: session.sid,
             deviceKey: new Uint8Array(32).fill(5),
             name: "phone",

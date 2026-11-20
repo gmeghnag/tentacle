@@ -1,5 +1,10 @@
 # feat/sibling-discovery — a paired phone learns the computer's other daemons and their current addresses (mobile task 10)
 
+> **Superseded in part by owner 2026-11-20** (`docs/feat/mobile-projects.md`
+> §4, Owner Q4): to a `device` principal `daemon/discover` returns **self only**
+> (its own current addresses); siblings are projects the phone was never paired
+> to. A token client (`connect`) still gets the whole list.
+
 > **Status:** implementation (plan written, **not approved**)
 > **Branch:** `feat/sibling-discovery`
 > **Size:** M · **Blast:** load-bearing (protocol: a new method + notification; `serve` lifecycle: a heartbeat + a poller; touches the `Connection` dispatch that §7 forbids serializing) · **Suited:** a strong executor + mandatory fresh-context Review that red-teams "a pod is not trusted", "don't serialize the RPC peer" and "one shared truth" (§7)

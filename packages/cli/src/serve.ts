@@ -639,6 +639,9 @@ export async function startDaemon(
       () => mcpHub.start(),
       // Project hooks for every connection this daemon opens (S4).
       serveHooksTrustPrecheck(config.configDir),
+      // The store whose `relay.json` is this serve's id — read whether or not the
+      // relay is on (docs/feat/mobile-projects.md §5): it names the direct route.
+      dir,
     );
   } catch (error) {
     mcpHub.dispose();
@@ -687,6 +690,10 @@ function deviceAuthority(
   }
   return new DeviceAuthority({
     configDir,
+    // THIS serve's project (docs/feat/mobile-projects.md §2): a device opens it
+    // only if it was paired to it (or is a legacy key it adopts, §3), and only a
+    // `pair` run in this folder admits a stranger here.
+    project: { key: projectKey(config.cwd), cwd: config.cwd },
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
   });
 }
@@ -950,7 +957,21 @@ function listen(
    * on BOTH remote paths, the direct route and the relay.
    */
   hooksTrustPrecheck?: HooksTrustPrecheck,
+  /**
+   * This project's daemon store (`<configDir>/daemon/<projectKey>`): its
+   * `relay.json` is the serve id (= relay id), read even with the relay OFF —
+   * a local file under the store lock, no relay contact — because the direct
+   * address is `/s/<serveId>/e2e` (docs/feat/mobile-projects.md §5, Owner Q5).
+   */
+  serveStoreDir?: string,
 ): ServeHandle {
+  // This serve's identity, BEFORE the server so the route can match
+  // `/s/<serveId>/e2e` from its first request. A store that cannot give a secret
+  // leaves the file alone (AGENTS §7 on-disk rule): the relay goes off, and the
+  // direct route answers only the bare `/e2e`.
+  const storeForId = relay?.storeDir ?? serveStoreDir;
+  const relaySecret = devices && storeForId !== undefined ? readRelaySecret(storeForId) : undefined;
+  const serveId = relaySecret?.ok === true ? relayIdOf(relaySecret.secret) : undefined;
   const server = startWsServer({
     host: options.host,
     port: options.port,
@@ -960,7 +981,9 @@ function listen(
     ...(options.wsIdleTimeoutSec !== undefined ? { idleTimeoutSec: options.wsIdleTimeoutSec } : {}),
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
-    ...(devices ? { devices: { authority: devices } } : {}),
+    ...(devices
+      ? { devices: { authority: devices, ...(serveId !== undefined ? { serveId } : {}) } }
+      : {}),
     ...(hooksTrustPrecheck ? { hooksTrustPrecheck } : {}),
   });
   // The host exists now, and it must exist before the relay link does (the link
@@ -973,11 +996,12 @@ function listen(
   // announcement know it before any connection (Design §1). A store that cannot
   // give a secret turns the relay OFF with a notice and leaves the file alone
   // (AGENTS §7 on-disk rule) — the daemon itself keeps serving.
-  const relaySecret = devices && relay ? readRelaySecret(relay.storeDir) : undefined;
   const relayLinkUrl = relaySecret?.ok === true ? relay?.url : undefined;
   if (relaySecret !== undefined && !relaySecret.ok) {
     options.onNotice?.(
-      `mobile relay off: ${relaySecret.detail} (delete it, or run "tentacle devices reset", for a new id)`,
+      relay !== undefined
+        ? `mobile relay off: ${relaySecret.detail} (delete it, or run "tentacle devices reset", for a new id)`
+        : `serve id unavailable (direct device address stays /e2e): ${relaySecret.detail} (delete it, or run "tentacle devices reset", for a new id)`,
     );
   }
   // The relay's own address joins the record's, LAST: the phone tries direct
@@ -1004,6 +1028,9 @@ function listen(
       cwd,
       startedAt: Date.now(),
       ...(own.length > 0 ? { addresses: own } : {}),
+      // `pair` and the discovery announcement build this serve's direct
+      // addresses as `/s/<serveId>/e2e` from it (`pair-addresses.ts` `urlFor`).
+      ...(serveId !== undefined ? { serveId } : {}),
     };
     const written = writeDaemonRecord(devices.configDir, record);
     if (!written.ok) {

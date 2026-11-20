@@ -27,6 +27,9 @@ import {
 } from "../src/device-store.ts";
 import { PAIRING_MAX_ATTEMPTS, PairHandler, pairingRefusedError } from "../src/pairing-handler.ts";
 
+/** This serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -51,6 +54,7 @@ function store(): { configDir: string; identity: DeviceIdentity } {
 /** A window as `pair` would leave it (its own pid: alive for the whole test). */
 function window(configDir: string, over: { code?: string; ttlMs?: number } = {}): string {
   const opened = openPairing(configDir, {
+    project: TEST_PROJECT,
     code: over.code ?? CODE,
     now: Date.now(),
     pid: process.pid,
@@ -71,6 +75,7 @@ function handler(
   } = {},
 ): PairHandler {
   return new PairHandler({
+    project: TEST_PROJECT,
     configDir,
     identity,
     remoteStatic,
@@ -82,12 +87,18 @@ function handler(
 const params = (over: Partial<DevicePairParams> = {}): DevicePairParams => ({
   code: CODE,
   name: "iPhone di Gabriel",
+  perProject: true,
   ...over,
 });
 
 /** The human saying yes, the way `pair` does it: registry FIRST, then decision (F3). */
 function accept(configDir: string, sid: string, deviceKey: Uint8Array, name: string): void {
-  const added = addDevice(configDir, { publicKey: deviceKey, name, now: 3_000 });
+  const added = addDevice(configDir, {
+    project: TEST_PROJECT,
+    publicKey: deviceKey,
+    name,
+    now: 3_000,
+  });
   if (!added.ok) throw new Error(added.reason);
   writePairingDecision(configDir, sid, true);
 }
@@ -152,6 +163,8 @@ describe("the happy path", () => {
     expect(outcome.result).toEqual({
       deviceId: deviceIdOf(channelKey),
       computer: { id: deviceIdOf(identity.publicKey), name: "gabriel-mac" },
+      // The ONE project this key opens (docs/feat/mobile-projects.md §4).
+      project: { key: TEST_PROJECT.key, cwd: TEST_PROJECT.cwd, label: "proj" },
     });
   });
 
@@ -163,7 +176,12 @@ describe("the happy path", () => {
     window(configDir);
     const channelKey = key(7);
     const attempt = handler(configDir, identity, channelKey).pair(params());
-    const added = addDevice(configDir, { publicKey: channelKey, name: "iPhone", now: 3_000 });
+    const added = addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: channelKey,
+      name: "iPhone",
+      now: 3_000,
+    });
     if (!added.ok) throw new Error(added.reason);
     const outcome = await attempt;
     expect(outcome.ok).toBe(true);
@@ -215,6 +233,7 @@ describe("refusals", () => {
     // guess, so ask the OS for a dead one — `alive` is the injected seam and
     // the store's default is `kill(pid, 0)`. Use a pid the store cannot see.
     const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
       code: CODE,
       now: Date.now(),
       pid: 2 ** 22 + 12345,
@@ -453,18 +472,24 @@ describe("the window's own store is not mutated by a refusal", () => {
     const { configDir, identity } = store();
     const sid = window(configDir);
     await handler(configDir, identity, key(9)).pair(params({ code: OTHER_CODE }));
-    expect(findPairing(configDir, { code: CODE })).toBeDefined();
+    expect(findPairing(configDir, { project: TEST_PROJECT.key, code: CODE })).toBeDefined();
     const channelKey = key(7);
     const attempt = handler(configDir, identity, channelKey).pair(params());
     accept(configDir, sid, channelKey, "iPhone di Gabriel");
     expect((await attempt).ok).toBe(true);
     // And the claim is the only one, made by the winner.
     expect(readClaim(configDir, sid)?.publicKey).toEqual(channelKey);
-    expect(claimPairing(configDir, { sid, deviceKey: key(8), name: "x", now: Date.now() })).toEqual(
-      {
-        ok: false,
-        reason: "used",
-      },
-    );
+    expect(
+      claimPairing(configDir, {
+        project: TEST_PROJECT.key,
+        sid,
+        deviceKey: key(8),
+        name: "x",
+        now: Date.now(),
+      }),
+    ).toEqual({
+      ok: false,
+      reason: "used",
+    });
   });
 });

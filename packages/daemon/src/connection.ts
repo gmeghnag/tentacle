@@ -611,13 +611,25 @@ export class Connection {
   private discover(): DaemonDiscovery {
     const source = this.host.discoverySource();
     this.discoveryUnsubscribe?.();
+    // A paired PHONE learns only this daemon's own entry (its current
+    // addresses): a pairing is per project (docs/feat/mobile-projects.md §4,
+    // Owner Q4), so the siblings are projects it was never paired to and must
+    // not be told about. A token client (`connect`) keeps the whole list.
+    // Local and synchronous — no await, no lock (§7 "don't serialize the peer").
+    const scope =
+      this.principal.kind === "device"
+        ? (discovery: DaemonDiscovery): DaemonDiscovery => ({
+            ...discovery,
+            daemons: discovery.daemons.filter((daemon) => daemon.self === true),
+          })
+        : (discovery: DaemonDiscovery): DaemonDiscovery => discovery;
     const unsubscribe = source.subscribe((discovery) => {
       // Fire-and-forget: `notify` on a closed peer is a no-op (P4), so a change
       // racing a disconnect cannot throw here.
-      this.peer.notify(Notification.DaemonDiscovery, discovery);
+      this.peer.notify(Notification.DaemonDiscovery, scope(discovery));
     });
     this.discoveryUnsubscribe = unsubscribe;
-    return source.current();
+    return scope(source.current());
   }
 
   // The count may take up to its cap (a couple of seconds); like every request

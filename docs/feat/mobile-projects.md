@@ -590,7 +590,175 @@ baseline clean (AGENTS §6), `bun run e2e:mobile` (decision 20).
 
 ## Execution
 
-*— <model-id>, <date>*
+### (a) feat/project-pairing
+
+*— claude-opus-5-5, 2026-11-20*
+
+**Load-bearing check, re-run first: HOLDS.** The Context repro, re-pointed at
+this worktree (`.tentacle/tmp/project-pairing/repro.ts`), gave the same four
+lines on the base commit (P-key `device` on both serves, `assistant`
+`wantsReachability: true`, one QR with both serves' addresses). That is the
+red baseline. `authorize` is the only verdict, it runs per socket in the serve
+that socket reached, and the direct route and the relay route both call the
+same `acceptDevice` (`ws-server.ts`, `relay-link.ts:769`), so scoping that one
+function scopes both.
+
+**As built, in dependency order:**
+
+1. **protocol.** `device.ts`: `DevicePairParams.perProject?: true`,
+   `DevicePairResult.project?: {key ≤128, cwd line(4096), label line(64)}`
+   (strip schemas), and the `update_app` reason. `pairing.ts`: optional `p=`
+   (parse + format; an invalid one is refused as `name`, so no new refusal
+   kind). `schema/protocol.json` regenerated (`bun run schema:export`; the
+   drift test is green). No `protocol.d/` note: the changes are additive.
+2. **daemon store** (`device-store.ts`). `REGISTRY_VERSION = 2` (reads v1+v2,
+   writes v2; a legacy entry stays without `project` across a rewrite; a v1
+   file that carries a `project` is malformed). `PAIRING_SESSION_VERSION = 2`
+   (the window carries `project`). `findPairing` / `hasLivePairing` /
+   `claimPairing` take a **required** project key. Adoption API:
+   `adoptLegacy` / `readAdoption` / `readAdoptions` / `clearAdoptions` under
+   `devices/adopted/<id>.json`. `removeDevices` drops the adoption,
+   `dedupeName` dedupes within a project, `addDevice` writes `project`, and
+   `DaemonRecord.serveId?` is added.
+3. **daemon authority** (`device-authority.ts`). A `project` option is
+   required. The snapshot holds `devices` (mine, plus legacy entries adopted by
+   me) and `adoptable` (legacy, no adoption yet → `device` with `adopt: true`).
+   `wantsReachability` and `knows` count only `devices`. The stamp includes the
+   `adopted/` dir. The poll keeps `adoptable` sockets alive.
+4. **daemon route.** `device-accept.ts` adopts on the RESOLVE, before
+   `new Connection`; if another project won, the audit line is
+   `legacy-device-bound-elsewhere <id8> <key>` and the channel closes.
+   `pairing-handler.ts`: the `perProject` gate (`update_app`, spends no
+   attempt), project-scoped find/claim/`registryHas`, `project` in the result,
+   and a shared `projectLabel()`. `ws-server.ts`: a pure `deviceRouteOf()`;
+   `/s/<other>/e2e` → 404 before the limiter. `connection.ts`:
+   `daemon/discover` returns self only to a `device` principal (snapshot and
+   notifications).
+5. **client** (`client/src/pairing.ts`). `perProject` is an option, and
+   `onCompare` gets `info.project` (the `p=` label). The `update_app` copy is
+   added.
+6. **cli.** `serve.ts`: the authority gets `{projectKey(cwd), cwd}`; the
+   `relay.json` serve id is read even with the relay off (from the project
+   store); `serveId` goes into the route and the record. `pair-addresses.ts`
+   `urlFor` → `/s/<serveId>/e2e` (used by `pair` and the discovery
+   announcement). `pair.ts`: `pairTargetOf` (`--project` or cwd, live+fresh
+   record by `projectKey`) or a refusal with the start hint; the QR carries
+   ONE record plus `--address` and `p=<label>`; the window and the registry
+   entry carry the project; the prompt names it. `devices-cmd.ts`: grouped
+   list (legacy groups, "running with no paired device" lines) and scoped
+   `revoke` (`--project`, then the cwd's project, then a unique computer-wide
+   match, else refuse with `project · name · id8`; `--all-projects`); `reset`
+   also clears the adoptions. `flags.ts` / `main.ts`: `--project` and
+   `--all-projects`.
+7. **docs (§7):** dated "superseded" notes in `docs/eval/mobile-app.md`
+   decision 7, the `device-pairing.md` on-disk layout, and
+   `sibling-discovery.md` (self-only for devices). `README` / `ARCHITECTURE`
+   have no "per computer" line. Changelog: `changelog.d/project-pairing.added.md`.
+
+**Drift from Implementation (and why):**
+
+- **`perProject` is OPT-IN in `pairDevice`, not always sent** (Files 3 said
+  "`perProject: true`"). Today's app stores a pairing under the computer id. If
+  the shared client sent the flag, the new daemon would pair it and the app
+  would overwrite the record it already has, which is exactly what F10/Q9
+  prevent. The app opts in in (b), together with per-project storage. A test
+  pins it (M15).
+- **Outside daemon/CLI, two minimal touches:** `apps/mobile/src/pairing-flow.ts`
+  gains one `update_app` entry (its exhaustive `Record<PairingRefusedReason…>`
+  would not compile otherwise). In the mobile tests, the `DeviceAuthority` /
+  `openPairing` / `addDevice` call sites got the now-required `project`
+  argument. Nothing else in the app changed.
+- **Adoption is tmp + `link`, not `writeFileSync(wx)`.** It is still exclusive
+  (EEXIST), and a concurrent reader never sees a half-written record. A
+  half-written one would read as "unreadable" and be denied.
+- **Several live records for one folder → the newest `startedAt`** among the
+  records the heartbeat says are fresh (`DEFAULT_STALE_AFTER_MS`). The plan said
+  "freshest by heartbeat"; the freshness filter does that, and the tie-break is
+  by start time.
+- **`addDevice` refuses the same key for another project** (or a legacy key),
+  instead of returning the existing entry. One entry = one key = one serve
+  (Q1).
+- **Required types:** `project` is required on the authority, the handler,
+  `openPairing` and the three window lookups. That way no call site can fall
+  back to computer-wide.
+- With the relay OFF and an unusable `relay.json`, the notice reads
+  `serve id unavailable (direct device address stays /e2e)`, and the route
+  answers only `/e2e`.
+
+**STOP — plan gap the split did not cover (decision needed).** Two mobile test
+files drive the real daemon through the app's own code:
+
+- `apps/mobile/test/pairing-e2e.test.ts` calls `runPairing`, which does not
+  send `perProject`, so it now gets `update_app`.
+- `apps/mobile/e2e/pairing.ts` (used by `e2e-pairing.test.ts` and
+  `pairing-e2e.test.ts`) calls `pairCommand` with no `--project` and no live
+  serve record in a project, so it now gets the "No `tentacle serve` is
+  running" refusal.
+
+Both outcomes are this slice's intended behaviour (F10, Q6), and the
+files to change are (b)'s (§6 "Pairing", `e2e/pair-cli.ts` "cwd/project
+option"). I could not run them here: this worktree has no `apps/mobile`
+workspace links (`Cannot find module '@tentacle/agent'`, the same on the base
+commit), so their exact gate result is unverified. I expect them to be red. The
+choice:
+
+- **(i)** move the §6 "Pairing" bullet (`perProject` + `projectRecordId`
+  storage + the `p` check) and the e2e harness's project option into (a);
+- **(ii)** accept those tests red until (b) merges;
+- **(iii)** something else.
+
+I did not pick one.
+
+**Tests** (all green, the touched files only, 405 pass / 0 fail):
+
+- new `packages/daemon/test/project-pairing.test.ts` (21);
+- new `packages/cli/test/devices-projects.test.ts` (8);
+- new cases in `protocol/test/{device-pair,pairing-payload}.test.ts`,
+  `client/test/pairing.test.ts`, `cli/test/{pair,serve-relay}.test.ts`;
+- the existing device/relay/pair suites, adapted (the `project` argument;
+  `v: 3` as the "unknown" registry version; `/s/<id>` addresses; grouped
+  `devices` output).
+
+**Q3 proof (zero steps for today's phone), through the real route:**
+`project-pairing.test.ts` "the first handshake on P adopts the key…". The
+setup is a v1 registry with one legacy key and no re-pairing. A real Noise
+handshake goes through `acceptDevice` on P's authority, then `initialize` is
+served. Then `adopted/<id>.json` names P, Q's authority denies the key, and P
+`wantsReachability`.
+
+**Mutations** (`.tentacle/tmp/project-pairing/mutate.ts`: apply, run the named
+test, restore):
+
+```
+M1 skip project comparison: KILLED (red) pass=0 fail=1
+M2 unfiltered hasLivePairing: KILLED (red) pass=0 fail=1
+M3a reachability counts all entries: KILLED (red) pass=0 fail=1
+M3b reachability counts legacy: KILLED (red) pass=0 fail=1
+M4 adopt in authorize: KILLED (red) pass=0 fail=1
+M5 overwrite instead of exclusive create: KILLED (red) pass=0 fail=1
+M6 route accepts any /s/*: KILLED (red) pass=0 fail=2
+M7 discover: no principal filter: KILLED (red) pass=0 fail=1
+M8 perProject gate dropped: KILLED (red) pass=0 fail=1
+M9 window project not checked by claim: KILLED (red) pass=0 fail=1
+M10 revoke scope: Q's socket closed too: KILLED (red) pass=0 fail=1
+M11 pair publishes every live record: KILLED (red) pass=0 fail=1
+M12 pair picks any live record: KILLED (red) pass=0 fail=1
+M13 revoke: computer-wide first: KILLED (red) pass=0 fail=1
+M14 reset keeps adoptions: KILLED (red) pass=0 fail=1
+M15 client always sends perProject: KILLED (red) pass=0 fail=1
+M16 serve: computer-wide reachability: KILLED (red) pass=0 fail=1
+```
+
+(A first M11 was a no-op mutation, so it survived and proved nothing. I
+rewrote it to really publish every record; it is now killed.)
+
+**Gate:**
+
+- `bunx biome check` on every changed file: clean (19 auto-formatted).
+- `tsc -p packages/{daemon,client,protocol,cli}`: no error in a touched
+  file (the per-package configs have unrelated errors in `tui`/`autowake`).
+- Full `bun test` / typecheck / lint: left to the orchestrator.
+- Unverified: the mobile tests (above).
 
 ## Review
 

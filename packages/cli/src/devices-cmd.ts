@@ -17,14 +17,21 @@
  * its own (§7 "one session path").
  */
 import { existsSync, readdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { projectKey } from "@tentacle/agent";
 import {
+  type Adoption,
+  type DaemonRecord,
   type LiveRegistration,
   type PairedDevice,
   type PushRegistration,
+  clearAdoptions,
   clearLiveRegistrations,
   clearPushRegistrations,
   deviceIdOf,
+  projectLabel,
+  readAdoptions,
+  readDaemonRecords,
   readLiveRegistrations,
   readPushRegistrations,
   readRegistry,
@@ -32,6 +39,7 @@ import {
   removeDevices,
   replaceIdentity,
 } from "@tentacle/daemon";
+import { DEFAULT_STALE_AFTER_MS } from "./discovery.ts";
 import { RELAY_SECRET_FILE } from "./relay-secret.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { isYes } from "./workspace-mount.ts";
@@ -51,6 +59,94 @@ export interface DevicesDeps {
   readonly random?: Parameters<typeof replaceIdentity>[1]["random"];
   /** A new identity's display name; `hostname` when omitted. */
   readonly name?: string;
+  /** `revoke --project <dir>`: the ONE project whose entry goes (Owner Q7). */
+  readonly projectDir?: string;
+  /** `revoke --all-projects`: every entry that matches, in every project. */
+  readonly allProjects?: boolean;
+  /** The folder the command runs in (default `process.cwd()`): `revoke`'s default scope. */
+  readonly cwd?: string;
+  /** Injectable pid liveness for the "running with no paired device" lines. */
+  readonly alive?: (pid: number) => boolean;
+}
+
+/** The project an entry opens: its own, the one that adopted it (legacy), or none yet. */
+export type EntryProject =
+  | { readonly kind: "project"; readonly key: string; readonly cwd: string }
+  /** A legacy entry no project has adopted: it binds to the first it connects to (§3). */
+  | { readonly kind: "unbound" }
+  /** A legacy entry whose adoption record is unreadable: denied everywhere (F16). */
+  | { readonly kind: "unreadable" };
+
+/** Where an entry belongs (docs/feat/mobile-projects.md §3/§5). Pure. */
+export function entryProject(
+  device: PairedDevice,
+  adoptions: ReadonlyMap<string, Adoption>,
+): EntryProject {
+  if (device.project !== undefined) {
+    return { kind: "project", key: device.project.key, cwd: device.project.cwd };
+  }
+  const adoption = adoptions.get(device.id);
+  if (adoption === undefined || adoption.kind === "none") {
+    return { kind: "unbound" };
+  }
+  return adoption.kind === "bound"
+    ? { kind: "project", key: adoption.project.key, cwd: adoption.project.cwd }
+    : { kind: "unreadable" };
+}
+
+/** One group `tentacle devices` prints: a header line, then its devices' table. */
+export interface DeviceGroup {
+  readonly title: string;
+  readonly devices: readonly PairedDevice[];
+}
+
+/** The legacy group's header (§3): what an entry paired before per-project pairing does. */
+export const UNBOUND_TITLE =
+  "Not yet used (paired before per-project pairing — binds to the first project it connects to)";
+export const UNREADABLE_TITLE =
+  "Adoption record unreadable (denied everywhere — revoke it, or fix the file under devices/adopted/)";
+
+/**
+ * `tentacle devices`, grouped by project (Owner Q7): one group per project in
+ * order of first appearance (a legacy entry under the project that adopted it),
+ * then the legacy groups; and the running serves that have NO device — the ones
+ * that do not dial the relay — as one line each. Pure, so the grouping is
+ * testable without a store.
+ */
+export function groupDevices(
+  devices: readonly PairedDevice[],
+  adoptions: ReadonlyMap<string, Adoption>,
+  running: readonly DaemonRecord[],
+): { readonly groups: readonly DeviceGroup[]; readonly idle: readonly string[] } {
+  const byKey = new Map<string, { cwd: string; devices: PairedDevice[] }>();
+  const unbound: PairedDevice[] = [];
+  const unreadable: PairedDevice[] = [];
+  for (const device of devices) {
+    const where = entryProject(device, adoptions);
+    if (where.kind === "unbound") {
+      unbound.push(device);
+    } else if (where.kind === "unreadable") {
+      unreadable.push(device);
+    } else {
+      const group = byKey.get(where.key) ?? { cwd: where.cwd, devices: [] };
+      group.devices.push(device);
+      byKey.set(where.key, group);
+    }
+  }
+  const groups: DeviceGroup[] = [...byKey.values()].map((group) => ({
+    title: `${projectLabel(group)} · ${group.cwd}`,
+    devices: group.devices,
+  }));
+  if (unbound.length > 0) groups.push({ title: UNBOUND_TITLE, devices: unbound });
+  if (unreadable.length > 0) groups.push({ title: UNREADABLE_TITLE, devices: unreadable });
+  const idle: string[] = [];
+  for (const record of running) {
+    const key = projectKey(record.cwd);
+    if (!byKey.has(key) && !idle.includes(record.cwd)) {
+      idle.push(record.cwd);
+    }
+  }
+  return { groups, idle };
 }
 
 const HEADER = ["NAME", "ID", "PAIRED", "LAST SEEN", "PUSH", "LIVE"] as const;
@@ -207,49 +303,130 @@ export function devicesCommand(deps: DevicesDeps): number {
     );
     return 1;
   }
-  if (registry.registry.devices.length === 0) {
-    deps.err("No device is paired with this computer yet. Run `tentacle pair`.\n");
-    return 0;
+  let running: DaemonRecord[] = [];
+  try {
+    running = readDaemonRecords(deps.configDir, {
+      freshWithinMs: DEFAULT_STALE_AFTER_MS,
+      ...(deps.alive !== undefined ? { alive: deps.alive } : {}),
+    });
+  } catch {
+    // No record readable: the "running with no device" lines are a hint only.
   }
-  for (const line of renderDevices(
+  const { groups, idle } = groupDevices(
     registry.registry.devices,
-    readSeen(deps.configDir),
-    deps.now(),
-    readPushRegistrations(deps.configDir).registrations,
-    readLiveRegistrations(deps.configDir).registrations,
-  )) {
-    deps.out(`${line}\n`);
+    readAdoptions(deps.configDir),
+    running,
+  );
+  if (groups.length === 0) {
+    deps.err(
+      "No device is paired with this computer yet. Run `tentacle pair` in a project's folder.\n",
+    );
+  }
+  const seen = readSeen(deps.configDir);
+  const push = readPushRegistrations(deps.configDir).registrations;
+  const live = readLiveRegistrations(deps.configDir).registrations;
+  groups.forEach((group, index) => {
+    if (index > 0) deps.out("\n");
+    deps.out(`${untrustedText(group.title)}\n`);
+    for (const line of renderDevices(group.devices, seen, deps.now(), push, live)) {
+      deps.out(`  ${line}\n`);
+    }
+  });
+  for (const cwd of idle) {
+    deps.out(`${untrustedText(cwd)} — running with no paired device (relay not dialled)\n`);
   }
   return 0;
 }
 
-/** `tentacle devices revoke <name|id-prefix>`. */
+/** `project · name · id8` — how an ambiguous match is listed (Owner Q7). */
+function describeEntry(device: PairedDevice, adoptions: ReadonlyMap<string, Adoption>): string {
+  const where = entryProject(device, adoptions);
+  const project =
+    where.kind === "project"
+      ? projectLabel(where)
+      : where.kind === "unbound"
+        ? "not yet used"
+        : "unreadable";
+  return `${untrustedText(project)} · ${untrustedText(device.name)} · ${device.id.slice(0, 8)}`;
+}
+
+/** Every entry a word names: exact names first, else id prefixes (`--all-projects`). */
+function allMatches(devices: readonly PairedDevice[], word: string): PairedDevice[] {
+  const byName = devices.filter((device) => device.name === word);
+  if (byName.length > 0) {
+    return byName;
+  }
+  const wanted = word.toLowerCase();
+  return /^[0-9a-f]{1,16}$/.test(wanted) ? devices.filter((d) => d.id.startsWith(wanted)) : [];
+}
+
+/**
+ * `tentacle devices revoke <name|id-prefix>` — ONE project's entry (Owner Q7):
+ * the scope is `--project <dir>`, else the current folder's project when the
+ * word matches there, else a computer-wide match only if it is UNIQUE; an
+ * ambiguity is refused with `project · name · id8` per match, never guessed.
+ * `--all-projects` revokes every entry the word names (the phone everywhere).
+ */
 export function revokeCommand(word: string, deps: DevicesDeps): number {
   const registry = readRegistry(deps.configDir);
   if (!registry.ok) {
     deps.err(`[error] the device registry is unreadable: ${registry.path}: ${registry.reason}\n`);
     return 1;
   }
-  const resolved = resolveDevice(registry.registry.devices, word);
-  if (!resolved.ok) {
-    if (resolved.reason === "ambiguous") {
-      const names = resolved.matches.map((d) => `${untrustedText(d.name)} (${d.id})`).join(", ");
-      deps.err(`[error] '${untrustedText(word)}' matches more than one device: ${names}\n`);
-    } else {
+  const devices = registry.registry.devices;
+  const adoptions = readAdoptions(deps.configDir);
+  const inProject = (dir: string): PairedDevice[] => {
+    const key = projectKey(resolve(dir));
+    return devices.filter((device) => {
+      const where = entryProject(device, adoptions);
+      return where.kind === "project" && where.key === key;
+    });
+  };
+  let chosen: PairedDevice[];
+  if (deps.allProjects === true) {
+    chosen = allMatches(devices, word);
+    if (chosen.length === 0) {
       deps.err(`[error] no paired device matches '${untrustedText(word)}'\n`);
+      return 1;
     }
-    return 1;
+  } else {
+    let resolved: ResolvedDevice;
+    if (deps.projectDir !== undefined) {
+      resolved = resolveDevice(inProject(deps.projectDir), word);
+    } else {
+      const here = resolveDevice(inProject(deps.cwd ?? process.cwd()), word);
+      // The current folder decides when it has a match (even an ambiguous one:
+      // a second guess elsewhere would revoke a phone the person did not mean).
+      resolved = here.ok || here.reason === "ambiguous" ? here : resolveDevice(devices, word);
+    }
+    if (!resolved.ok) {
+      if (resolved.reason === "ambiguous") {
+        const list = resolved.matches.map((d) => `  ${describeEntry(d, adoptions)}`).join("\n");
+        deps.err(
+          `[error] '${untrustedText(word)}' matches more than one device:\n${list}\nName the project with --project <dir> (or run it in that folder), use an id prefix, or --all-projects.\n`,
+        );
+      } else {
+        deps.err(`[error] no paired device matches '${untrustedText(word)}'\n`);
+      }
+      return 1;
+    }
+    chosen = [resolved.device];
   }
-  const removed = removeDevices(deps.configDir, [resolved.device.id]);
+  const removed = removeDevices(
+    deps.configDir,
+    chosen.map((device) => device.id),
+  );
   if (!removed.ok) {
     deps.err(`[error] cannot write the device registry: ${removed.path}: ${removed.reason}\n`);
     return 1;
   }
-  // The name is STDOUT: it is what the user asked for and what was done, the
-  // same shape as `rm <name>` printing the workload it removed.
-  deps.out(`${untrustedText(resolved.device.name)}\n`);
+  // The names are STDOUT: what the user asked for and what was done, the same
+  // shape as `rm <name>` printing the workload it removed.
+  for (const device of chosen) {
+    deps.out(`${describeEntry(device, adoptions)}\n`);
+  }
   deps.err(
-    "Revoked. Every tentacle on this computer drops it within a second; its sessions stay open for your other devices.\n",
+    "Revoked. That project's tentacle drops it within a second; its sessions stay open for your other devices, and other projects keep their own pairing.\n",
   );
   return 0;
 }
@@ -308,6 +485,9 @@ export async function resetCommand(
     // The LIVE registrations go for the same reason (mobile-live-activity F11):
     // a surviving start token could only ever light up a placeholder activity.
     clearLiveRegistrations(deps.configDir);
+    // And the legacy adoptions (docs/feat/mobile-projects.md F15): the entries
+    // they bound are gone, and an orphan record must never bind a future key.
+    clearAdoptions(deps.configDir);
     deps.out("Reset. Every phone must pair again.\n");
     if (rotated > 0) {
       deps.err(

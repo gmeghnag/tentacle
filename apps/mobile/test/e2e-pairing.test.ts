@@ -29,6 +29,9 @@ import type { DuplexChannel } from "@tentacle/transport";
 import { generateStaticKeypair, systemRandom } from "@tentacle/transport/noise";
 import { createPairingHooks, sasOfPrompt } from "../e2e/pairing.ts";
 
+/** The serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const dirs: string[] = [];
 const closers: (() => void)[] = [];
 afterEach(() => {
@@ -54,7 +57,7 @@ function daemon(): { readonly configDir: string; readonly address: string } {
   if (!identity.ok) {
     throw new Error(identity.reason);
   }
-  const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+  const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
   const server = startWsServer({
     host: "127.0.0.1",
     port: 0,
@@ -206,6 +209,7 @@ describe("the pairing hooks", () => {
     try {
       // Register a device directly (the pairing path is covered above).
       const added = addDevice(configDir, {
+        project: TEST_PROJECT,
         publicKey: new Uint8Array(32).fill(7),
         name: "iPhone",
         now: 2_000,

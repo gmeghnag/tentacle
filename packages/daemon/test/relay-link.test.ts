@@ -38,6 +38,9 @@ import {
 } from "../src/relay-link.ts";
 import { SessionHost } from "../src/session-host.ts";
 
+/** This serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const dirs: string[] = [];
 const cleanups: (() => void)[] = [];
 
@@ -73,6 +76,7 @@ function store(): string {
 /** A paired device in the store: what makes `wantsReachability()` true. */
 function pairPhone(configDir: string): string {
   const added = addDevice(configDir, {
+    project: TEST_PROJECT,
     publicKey: publicKeyOf(key(2)),
     name: "iPhone",
     now: 2_000,
@@ -291,6 +295,7 @@ function harness(
   cleanups.push(() => relay.stop());
   const audit: string[] = [];
   const authority = new DeviceAuthority({
+    project: TEST_PROJECT,
     configDir,
     pollIntervalMs: 10,
     onAudit: (line) => audit.push(line),
@@ -378,7 +383,7 @@ function recordingTimers(): RelayLinkTimers & { pending: { fn: () => void; ms: n
 function fakeHarness(over: { random?: () => number; limiter?: HandshakeLimiter } = {}) {
   const configDir = store();
   pairPhone(configDir);
-  const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+  const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
   cleanups.push(() => authority.stop());
   const relay = fakeRelay();
   const timers = recordingTimers();
@@ -423,7 +428,7 @@ describe("hostile relay: a flipped byte in a spliced frame (F5)", () => {
     pairPhone(configDir);
     const server = startFlakyRelay({ flipNth: 1 });
     const audit: string[] = [];
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: server.url,
@@ -588,6 +593,7 @@ describe("the reachability gate (Owner Q1)", () => {
     // A window with a live `pid` and a future expiry: `hasLivePairing` says yes.
     // No `now`: the authority judges expiry against the REAL clock (F24).
     openPairing(configDir, {
+      project: TEST_PROJECT,
       code: "7Q4ZM9XK2B",
       ttlMs: 600_000,
       pid: process.pid,
@@ -621,7 +627,7 @@ describe("a lying relay: `ready.id` must match our own secret (F7)", () => {
     pairPhone(configDir);
     const timers = frozenTimers();
     const audit: string[] = [];
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: `ws://127.0.0.1:${server.port}`,
@@ -805,7 +811,7 @@ describe("a dead-but-open control path reconnects (F2, R0(c))", () => {
     const configDir = store();
     pairPhone(configDir);
     const audit: string[] = [];
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: `ws://127.0.0.1:${server.port}`,
@@ -855,7 +861,7 @@ describe("an unusable relay URL never dials", () => {
     const configDir = store();
     pairPhone(configDir);
     const audit: string[] = [];
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: "ws://relay.example.com",
@@ -914,7 +920,7 @@ describe("version skew (F13)", () => {
       clearInterval: () => {},
     };
     const audit: string[] = [];
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: `ws://127.0.0.1:${server.port}`,

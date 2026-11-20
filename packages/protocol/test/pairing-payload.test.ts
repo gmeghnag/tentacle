@@ -208,3 +208,39 @@ describe("helpers", () => {
     expect(isPairingAddress("ws://relay.example/e2e?x=1")).toBe(true);
   });
 });
+
+describe("the project label `p=` (docs/feat/mobile-projects.md §4)", () => {
+  test("round-trips, with spaces and an accent", () => {
+    const text = formatPairingPayload(payload({ project: "progetto è mio" }));
+    expect(text).toContain("&p=");
+    const result = parse(text);
+    if (!result.ok) throw new Error(`refused: ${result.reason}`);
+    expect(result.payload.project).toBe("progetto è mio");
+  });
+
+  test("absent `p` is fine (an older `pair`): no project on the payload", () => {
+    const result = parse(formatPairingPayload(payload()));
+    if (!result.ok) throw new Error(`refused: ${result.reason}`);
+    expect(result.payload.project).toBeUndefined();
+  });
+
+  test("a control character, an empty or an over-long label is refused", () => {
+    const base = formatPairingPayload(payload());
+    for (const p of ["a%1B%5B2J", "", "x".repeat(65)]) {
+      const result = parse(`${base}&p=${p}`);
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  test("the serve-scoped direct address `/s/<serveId>/e2e` is a pairing address", () => {
+    const scoped = "ws://192.168.1.20:4001/s/AAAAAAAAAAAAAAAAAAAAAA/e2e";
+    expect(isPairingAddress(scoped)).toBe(true);
+    const many = Array.from(
+      { length: MAX_PAIRING_ADDRESSES },
+      (_, i) => `ws://10.0.0.${i + 1}:4001/s/AAAAAAAAAAAAAAAAAAAAAA/e2e`,
+    );
+    const result = parse(formatPairingPayload(payload({ addresses: many })));
+    if (!result.ok) throw new Error(`refused: ${result.reason}`);
+    expect(result.payload.addresses).toEqual(many);
+  });
+});

@@ -177,6 +177,7 @@ const MESSAGES: Record<
   timeout: { message: PAIRING_REFUSED_MESSAGES.timeout, retry: "edit" },
   too_many_attempts: { message: PAIRING_REFUSED_MESSAGES.too_many_attempts, retry: "edit" },
   already_paired: { message: PAIRING_REFUSED_MESSAGES.already_paired, retry: "no" },
+  update_app: { message: PAIRING_REFUSED_MESSAGES.update_app, retry: "no" },
 };
 
 /** The copy of one reason (the screen's only way to get a sentence). */
