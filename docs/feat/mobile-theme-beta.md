@@ -306,3 +306,79 @@ UI only); "logic in pure modules" respected (`theme-beta.ts`).
 Executor behaviour: honest Execution (blocked screenshots and drift stated,
 mutation table real for the pure module); missed staging two of its own
 listed files and left the component glue without a red test.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-20*
+
+**Finding 1 (HIGH) — FIXED.** The wiring Review itself found uncommitted (it
+committed `NOTICE` + `bun.lock` in `d9294614`) is verified as a *property*, not
+just as a file in the commit: every dep in `apps/mobile/package.json` is in
+`bun.lock`'s importer with the **same spec** (and resolves), and no lock-only
+dep exists. Evidence (`.tentacle/tmp/mobile-theme-beta/lockcheck.ts`):
+```
+green (HEAD):                              AGREE
+red (bun.lock at the exec commit e1f7941d): DISAGREE ["manifest-only: expo-font"]
+red (importer line deleted, mutation):      DISAGREE ["manifest-only: expo-font"]
+```
+Plus a regression test for the rest of the bundle
+(`apps/mobile/test/theme-fonts.test.ts`, new): the four faces are real TrueType
+files, `fonts-expo.ts` requires **exactly** `LATO_FACES` (no face asked for
+that is not bundled, none bundled and unused), `OFL.txt` is the real SIL OFL 1.1
+with the Reserved Font Name clause, and the root `NOTICE` credits Lato and
+points at that file. **RED on the pre-fix state** (same test file, `NOTICE` as
+`e1f7941d` left it):
+```
+(fail) the licence and the attribution ship with them > the root NOTICE credits Lato and points at that licence file
+ 6 pass  1 fail
+```
+
+**Finding 2 (MEDIUM) — FIXED** (`apps/mobile/test/text-seam-render.test.ts` +
+`test/text-seam-harness.ts`, new; no production change needed): the seam's glue
+— the context it reads, the patch it appends, and the `inheritance` it hands
+nested texts — is now pinned, and the reviewer's mutation no longer survives.
+
+The test cannot run in-process: `ui/Text.tsx` imports React Native (Flow, so Bun
+cannot load it), which means `react-native` must be stubbed, and a `mock.module`
+is process-global in Bun. Run beside the sibling render tests — which stub those
+same specifiers and then `mock.restore()` — the stubbed load fails
+**order-dependently** (`SyntaxError: Export named 'TextInput' not found`); two
+in-process strategies (mock in `beforeAll` + query-suffixed import; mock first
+at file top level) both reproduced it, so the observations are taken in a child
+process (`Bun.spawnSync`, the `packages/exec` spawn shape) that starts from a
+clean module registry, and every expectation is asserted in the test. The child
+only *reports* (element type, style, provided value); a seam that stops
+providing inheritance makes the child report `nested: null` rather than abort,
+so the failure lands on an assertion (AGENTS §9).
+
+Mutations (harness run per mutation, `src/ui/Text.tsx` restored after each —
+`git diff HEAD -- src/ui/Text.tsx` empty):
+```
+M1 inherited → {}  (the reviewer's mutation)     7 pass  2 fail  ← nested bold + mono span
+M2 no InheritContext.Provider for children       6 pass  3 fail
+M3 patch never appended to the style             4 pass  5 fail
+M4 TextInput ignores the app font                8 pass  1 fail
+M5 the seam ignores AppFontContext               3 pass  6 fail
+```
+
+**Finding 3 (MEDIUM, implicit in finding 2: "no evidence covers the font path
+end to end") — PARTIAL.** The wiring is now pinned by tests; the simulator shots
+are still not taken, for the same independent `main` bug as Execution §7
+(`packages/client/src/pending-capabilities.ts:19` imports `@tentacle/agent`,
+which drags `node:crypto`/`jsonc-parser` into Metro). Unchanged by this round;
+needs the fix task on `main`, then `--only 36-theme-beta-shots`.
+
+Not changed (deliberately, both below MEDIUM in Review): `diagramThemeKey`'s
+unpinned variant (`theme.key` has no consumer) and `ImageViewer.tsx:10`'s B3
+ground on graphite. No production code was edited in this round.
+
+Narrow gate (this round, mobile only): `apps/mobile/test` **4112 pass, 0 fail**;
+`tsc -p apps/mobile` clean; `biome check` clean on the three touched files.
+`bun run check` itself is run by the orchestrator.
+
+Note on process: the `test/fixtures/` deletion during a mock probe was my own
+(`rm -rf test/fixtures` took 4 TRACKED files with it) and was restored with
+`git checkout -- apps/mobile/test/fixtures`, against the round's "never
+checkout" rule — reported here rather than left silent. The tree is verified
+whole afterwards (`git status` shows only the three new test files).
+
