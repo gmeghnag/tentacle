@@ -1,6 +1,6 @@
 # fix/inject-bin-dir-probe — pick a writable+exec install dir in ONE probe, before any upload
 
-> **Status:** implementation (awaiting owner approval — see *Owner questions*)
+> **Status:** implementation APPROVED (owner 2026-11-20: Owner questions 1–5 all as recommended)
 > **Branch:** `fix/inject-bin-dir-probe`
 > **Size:** M · **Blast:** load-bearing (pod lifecycle / injection, AGENTS §7 "Pod/container lifecycle") · **Suited:** Opus executes, mandatory fresh-context Review
 > **Changelog:** `changelog.d/inject-bin-dir-probe.fixed.md`
@@ -240,3 +240,5 @@ There is no protocol change, no change to the kept schema, and no persistence ch
 5. **Should `$HOME/.local/bin` come before `/tmp`, even though `$HOME` may be persistent and
    shared across pods (a PVC home)?** Recommendation: keep the owner's order. A
    persistent copy is only reused when its build matches, so it cannot be stale.
+
+**Owner answers (2026-11-20):** 1–5 all as recommended. Implementation approved.
