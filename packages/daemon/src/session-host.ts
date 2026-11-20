@@ -71,7 +71,7 @@ import {
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
-import { toSessionSkills } from "./mapping.ts";
+import { fromWireCapabilities, toSessionSkills } from "./mapping.ts";
 import {
   type ClearForkCapture,
   type DaemonSessionRecord,
@@ -1025,7 +1025,7 @@ export class SessionHost {
     // The switches too (docs/feat/session-capabilities.md): a resume from the
     // laptop's copy, a `/clear` fork and a hop target carry them this way.
     if (params.capabilities !== undefined) {
-      host.seedCapabilities(params.capabilities);
+      host.seedCapabilities(fromWireCapabilities(params.capabilities));
     }
     const { epoch } = host.attach(attachment);
     return { hosted: host, created: true, resync: false, epoch };

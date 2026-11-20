@@ -584,3 +584,63 @@ describe("loadConfig skills discovery", () => {
     expect(cfg.skills.map((s) => s.name)).toEqual(["linked"]);
   });
 });
+
+describe("tools.enabled (docs/feat/tool-toggles.md F1/F2)", () => {
+  const write = (body: unknown) =>
+    mkdir(configDir, { recursive: true }).then(() =>
+      writeFile(join(configDir, CONFIG_FILENAME), JSON.stringify(body), "utf8"),
+    );
+  const load = () => loadConfig({ env: baseEnv(), configDir, cwd: dir, scaffold: false });
+
+  test("resolves to the sorted disabled names", async () => {
+    await write({ tools: { enabled: { visuals: false, fs_multi_edit: false } } });
+    expect((await load()).disabledTools).toEqual(["chart", "diagram", "fs_multi_edit", "present"]);
+  });
+
+  test("unset → nothing disabled", async () => {
+    await write({});
+    expect((await load()).disabledTools).toEqual([]);
+  });
+
+  test("an unknown name is a ConfigError naming it", async () => {
+    await write({ tools: { enabled: { fs_mult_edit: false } } });
+    await expect(load()).rejects.toBeInstanceOf(ConfigError);
+    await expect(load()).rejects.toThrow("tools.enabled.fs_mult_edit: unknown tool or group");
+  });
+
+  test("skill is a ConfigError: always on", async () => {
+    await write({ tools: { enabled: { skill: false } } });
+    await expect(load()).rejects.toThrow("skill is always on");
+  });
+
+  test("a bad name inside a profile is refused too, even when the profile is not selected", async () => {
+    await write({ profiles: { lean: { tools: { enabled: { visual: false } } } } });
+    await expect(load()).rejects.toThrow(
+      "profiles.lean: tools.enabled.visual: unknown tool or group",
+    );
+  });
+
+  test("a selected profile's switches merge over the base's", async () => {
+    await write({
+      tools: { enabled: { visuals: false } },
+      profiles: { lean: { tools: { enabled: { subagents: false, chart: true } } } },
+    });
+    const cfg = await loadConfig({
+      env: baseEnv(),
+      configDir,
+      cwd: dir,
+      scaffold: false,
+      profile: "lean",
+    });
+    expect(cfg.disabledTools).toEqual([
+      "agent_control",
+      "agent_kill",
+      "agent_message",
+      "agent_notify",
+      "agent_status",
+      "agent_task",
+      "diagram",
+      "present",
+    ]);
+  });
+});

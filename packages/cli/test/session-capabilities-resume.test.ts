@@ -43,7 +43,7 @@ const drain = async (gen: AsyncIterable<unknown>): Promise<void> => {
 
 /** An MCP server's tool, tagged as the adapter tags it. */
 const echoTool = { ...shellTool, name: "mcp__echo__echo", mcpServer: "echo" };
-const OFF = { disabledMcp: ["echo"], disabledSkills: [] };
+const OFF = { disabledMcp: ["echo"], disabledSkills: [], disabledTools: [] };
 
 /** Records each request's tool names; answers "ok". */
 class Recorder implements ModelProvider {
@@ -169,7 +169,11 @@ describe("the switches reach the laptop store", () => {
     };
     const { runtime } = await runtimeOn("plain", d, record);
     await drain(runtime.createSession().send("next"));
-    expect(d.host.get("plain")?.capabilities()).toEqual({ disabledMcp: [], disabledSkills: [] });
+    expect(d.host.get("plain")?.capabilities()).toEqual({
+      disabledMcp: [],
+      disabledSkills: [],
+      disabledTools: [],
+    });
     expect(d.model.tools[0]).toContain("mcp__echo__echo");
     await runtime.dispose();
   });
@@ -200,6 +204,7 @@ describe("a session this client creates next carries them (/clear close-and-repl
     expect(d.host.get(third.sessionId ?? "")?.capabilities()).toEqual({
       disabledMcp: [],
       disabledSkills: [],
+      disabledTools: [],
     });
     await runtime.dispose();
   });

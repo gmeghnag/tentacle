@@ -4438,6 +4438,13 @@
           },
           "maxItems": 256,
           "type": "array"
+        },
+        "disabledTools": {
+          "items": {
+            "$ref": "#/$defs/CapabilityName"
+          },
+          "maxItems": 256,
+          "type": "array"
         }
       },
       "required": ["disabledMcp", "disabledSkills"],

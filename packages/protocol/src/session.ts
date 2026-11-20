@@ -1114,13 +1114,17 @@ export const MAX_DISABLED_CAPABILITIES = 256;
 export const CapabilityNameSchema = line(128);
 
 /**
- * A session's MCP/skill switches (`session/set_capability`,
- * docs/feat/session-capabilities.md): sorted, de-duplicated DISABLED names, so
- * anything new (a server added, a skill created) is on.
+ * A session's MCP/skill/built-in-tool switches (`session/set_capability`,
+ * docs/feat/session-capabilities.md, docs/feat/tool-toggles.md): sorted,
+ * de-duplicated DISABLED names, so anything new (a server added, a skill
+ * created) is on. `disabledTools` is optional on the wire: a daemon that has
+ * tool switches always sends it (even `[]`); ABSENT means a daemon with none
+ * (an older one), and an older log entry reads as `[]`.
  */
 export const SessionCapabilitiesSchema = z.object({
   disabledMcp: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
   disabledSkills: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
+  disabledTools: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES).optional(),
 });
 export type SessionCapabilitiesWire = z.infer<typeof SessionCapabilitiesSchema>;
 

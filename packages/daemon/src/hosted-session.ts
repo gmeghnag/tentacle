@@ -544,12 +544,20 @@ export const TURN_ERROR_MAX = 400;
 /** A state from outside (a client's seed, a reloaded log entry): sorted and de-duplicated, like every applied op. */
 function normalizeCapabilities(state: SessionCapabilities): SessionCapabilities {
   const norm = (names: readonly string[]) => [...new Set(names)].sort();
-  return { disabledMcp: norm(state.disabledMcp), disabledSkills: norm(state.disabledSkills) };
+  return {
+    disabledMcp: norm(state.disabledMcp),
+    disabledSkills: norm(state.disabledSkills),
+    disabledTools: norm(state.disabledTools),
+  };
 }
 
 /** Something is turned off (else the state is the default, and the log says nothing). */
 function hasDisabled(state: SessionCapabilities): boolean {
-  return state.disabledMcp.length > 0 || state.disabledSkills.length > 0;
+  return (
+    state.disabledMcp.length > 0 ||
+    state.disabledSkills.length > 0 ||
+    state.disabledTools.length > 0
+  );
 }
 
 /** One line: every whitespace run and control character becomes a single space, and

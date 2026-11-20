@@ -16,22 +16,29 @@ import {
   SKILLS_PROMPT_HEADER,
   type SkillInfo,
   escapeSkillText,
+  expandToolName,
   renderSkillsCatalog,
 } from "@tentacle/config";
 import type { ToolDefinition } from "@tentacle/core";
 import { SKILL_TOOL_NAME } from "@tentacle/tools";
 
-/** A session's capability switches: sorted, de-duplicated names, both disabled sets. */
+/** A session's capability switches: sorted, de-duplicated names, the three disabled sets. */
 export interface SessionCapabilities {
   readonly disabledMcp: readonly string[];
   readonly disabledSkills: readonly string[];
+  /** Built-in tools switched off (docs/feat/tool-toggles.md), groups expanded. */
+  readonly disabledTools: readonly string[];
 }
 
 /** Everything on: a brand-new session's state. */
-export const NO_CAPABILITIES: SessionCapabilities = { disabledMcp: [], disabledSkills: [] };
+export const NO_CAPABILITIES: SessionCapabilities = {
+  disabledMcp: [],
+  disabledSkills: [],
+  disabledTools: [],
+};
 
-/** The two kinds a switch can turn off. */
-export type CapabilityKind = "mcp" | "skill";
+/** The kinds a switch can turn off. */
+export type CapabilityKind = "mcp" | "skill" | "tool";
 
 /**
  * One toggle, as the protocol carries it: a DELTA (not the whole state), so two
@@ -50,39 +57,66 @@ export interface CapabilityOp {
  */
 export type ServerOf = (toolName: string) => string | undefined;
 
-const disabledOf = (state: SessionCapabilities, kind: CapabilityKind): readonly string[] =>
-  kind === "mcp" ? state.disabledMcp : state.disabledSkills;
+const KEY_OF = {
+  mcp: "disabledMcp",
+  skill: "disabledSkills",
+  tool: "disabledTools",
+} as const satisfies Record<CapabilityKind, keyof SessionCapabilities>;
 
-const withDisabled = (
-  state: SessionCapabilities,
-  kind: CapabilityKind,
-  names: readonly string[],
-): SessionCapabilities =>
-  kind === "mcp"
-    ? { ...state, disabledMcp: names, disabledSkills: [...state.disabledSkills] }
-    : { ...state, disabledMcp: [...state.disabledMcp], disabledSkills: names };
+/**
+ * Why a `tool` op cannot apply: its name is no built-in tool or group, or it
+ * names an always-on tool (`skill`). Built-in names are static per build, so
+ * an unknown one is a typo or version skew — never stored (unlike MCP/skill
+ * names, which may appear later).
+ */
+export class CapabilityRefusal extends Error {
+  constructor(readonly op: CapabilityOp) {
+    super(
+      op.name === SKILL_TOOL_NAME
+        ? `${op.name} is always on and cannot be switched`
+        : `unknown built-in tool or group: ${JSON.stringify(op.name)}`,
+    );
+    this.name = "CapabilityRefusal";
+  }
+}
 
 /**
  * The state after `op`. Idempotent: when nothing changes, the SAME object comes
  * back, so a caller can tell "no change" from "changed" by identity (and a
- * no-op set emits no session-log entry and no broadcast).
+ * no-op set emits no session-log entry and no broadcast). A `tool` op names a
+ * tool OR a group: a group is ONE op (atomic, one log entry, one broadcast).
+ * An unknown tool name or `skill` throws a `CapabilityRefusal`, state untouched.
  */
 export function applyCapabilityOp(
   state: SessionCapabilities,
   op: CapabilityOp,
 ): SessionCapabilities {
-  const current = disabledOf(state, op.kind);
-  const has = current.includes(op.name);
-  if (has === !op.enabled) {
+  const names = op.kind === "tool" ? expandToolName(op.name) : [op.name];
+  if (names === undefined) {
+    throw new CapabilityRefusal(op);
+  }
+  const key = KEY_OF[op.kind];
+  const current = state[key];
+  if (!names.some((name) => current.includes(name) !== !op.enabled)) {
     return state;
   }
   const next = new Set(current);
-  if (op.enabled) {
-    next.delete(op.name);
-  } else {
-    next.add(op.name);
+  for (const name of names) {
+    if (op.enabled) {
+      next.delete(name);
+    } else {
+      next.add(name);
+    }
   }
-  return withDisabled(state, op.kind, [...next].sort());
+  return { ...state, [key]: [...next].sort() };
+}
+
+/**
+ * Whether a built-in tool is turned off for this session. `skill` never is,
+ * even when a hostile seed or an edited log put it in the set (defence in depth).
+ */
+export function isToolDisabled(name: string, state: SessionCapabilities): boolean {
+  return name !== SKILL_TOOL_NAME && state.disabledTools.includes(name);
 }
 
 /** Whether a tool call names a tool of a disabled MCP server (the execution guard). */
@@ -138,7 +172,7 @@ function skillEnum(def: ToolDefinition): readonly string[] {
 
 /**
  * The tool definitions to advertise to the model: every def whose MCP server is
- * not disabled, and the `skill` def's enum minus the disabled skills — the
+ * not disabled and that is not a disabled built-in (never `skill`), and the `skill` def's enum minus the disabled skills — the
  * `skill` def dropped entirely when that leaves nothing (a `z.enum` cannot be
  * empty, so an empty enum would be an invalid tool). The same array comes back
  * when nothing is hidden.
@@ -148,7 +182,8 @@ export function projectTools(
   serverOf: ServerOf,
   state: SessionCapabilities,
 ): readonly ToolDefinition[] {
-  const hidden = (d: ToolDefinition): boolean => isHidden(d.name, serverOf, state);
+  const hidden = (d: ToolDefinition): boolean =>
+    isHidden(d.name, serverOf, state) || isToolDisabled(d.name, state);
   const skillsOff = state.disabledSkills.length > 0;
   if (!skillsOff && !defs.some(hidden)) {
     return defs;

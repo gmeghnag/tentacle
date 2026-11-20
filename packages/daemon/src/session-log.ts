@@ -183,6 +183,7 @@ export class SessionLog {
       capabilities: {
         disabledMcp: [...state.disabledMcp],
         disabledSkills: [...state.disabledSkills],
+        disabledTools: [...state.disabledTools],
       },
     });
   }

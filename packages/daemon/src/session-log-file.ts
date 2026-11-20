@@ -21,17 +21,18 @@
  * inside a segment, and an exact duplicate `id` (a lock lost to a stale
  * takeover) is skipped.
  */
+import type { SessionCapabilities } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
 import {
   type KnownLogEntry,
   KnownLogEntrySchema,
   LOG_ENTRY_CRITICAL,
-  type SessionCapabilitiesWire,
   type SessionTitle,
   appendEntryBody,
   isAppendEntry,
   projectEntry,
 } from "@tentacle/protocol";
+import { fromWireCapabilities } from "./mapping.ts";
 import {
   ENDED_INTERRUPTED_NOTE,
   ENDED_NOT_RUN_NOTE,
@@ -501,11 +502,12 @@ export function entryLines(entries: readonly KnownLogEntry[]): string {
  */
 export function lastCapabilities(
   entries: readonly KnownLogEntry[],
-): SessionCapabilitiesWire | undefined {
+): SessionCapabilities | undefined {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
     if (entry?.type === "capabilities") {
-      return entry.capabilities;
+      // An older entry has no `disabledTools`: none off (docs/feat/tool-toggles.md).
+      return fromWireCapabilities(entry.capabilities);
     }
   }
   return undefined;

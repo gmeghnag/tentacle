@@ -214,6 +214,13 @@ export interface TentacleConfig {
    * (docs/feat/write-tmpdir.md). Daemon-side; NOT carried to a pod.
    */
   readonly writableDirs: readonly string[];
+  /**
+   * Built-in tools `tools.enabled` switches off (docs/feat/tool-toggles.md):
+   * sorted names, groups expanded. Seeds every session this config creates.
+   */
+  readonly disabledTools: readonly string[];
+  /** `tools.enabled` as written (merged profile), for the `true`-has-no-effect notices. */
+  readonly toolsEnabled?: Readonly<Record<string, boolean>>;
   /** The configured default engine of `run`/`attach` (file/profile); absent = unset. */
   readonly engine?: ResolvedConfig["engine"];
   /** The configured `run --rm` default (file/profile); absent = the CLI default (false: kept). */
@@ -907,6 +914,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     autoWake: resolved.autoWake,
     toolExecution: resolved.toolExecution,
     writableDirs: resolved.writableDirs.map((d) => expandTilde(d, home)),
+    disabledTools: resolved.disabledTools,
+    ...(resolved.toolsEnabled !== undefined ? { toolsEnabled: resolved.toolsEnabled } : {}),
     ...(resolved.engine !== undefined ? { engine: resolved.engine } : {}),
     ...(resolved.rm !== undefined ? { rm: resolved.rm } : {}),
     ...(resolved.detach !== undefined ? { detach: resolved.detach } : {}),

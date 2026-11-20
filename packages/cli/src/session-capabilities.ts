@@ -19,5 +19,9 @@ export function seedCapabilitiesOf(controller: unknown): void {
 
 /** A record's switches as the wire carries them (fresh mutable arrays). */
 export function wireCapabilities(state: SessionCapabilities): SessionCapabilitiesWire {
-  return { disabledMcp: [...state.disabledMcp], disabledSkills: [...state.disabledSkills] };
+  return {
+    disabledMcp: [...state.disabledMcp],
+    disabledSkills: [...state.disabledSkills],
+    disabledTools: [...state.disabledTools],
+  };
 }

@@ -335,6 +335,11 @@ export const DEFAULT_CONFIG_JSONC = `{
   //    TENTACLE_WRITABLE_DIRS (":"-separated, empty = []). Not carried to a pod
   //    (run/attach): there the pod's own temp dirs apply. The shell is not confined.
   //    e.g. "tools": { "writableDirs": ["/tmp", "~/scratch"] }
+  //  - enabled: switch built-in tools off by group or by name — groups: subagents,
+  //    shell, schedule, visuals (chart, diagram, present), context_reset,
+  //    move_session, workload_shell. A single tool's entry beats its group's.
+  //    "skill" is always on; true never turns on a feature that is off.
+  //    e.g. "tools": { "enabled": { "visuals": false, "fs_multi_edit": false } }
   // "tools": { "maxInlineOutputChars": ${DEFAULT_MAX_INLINE_OUTPUT_CHARS}, "outputRetentionDays": ${DEFAULT_TOOL_OUTPUT_RETENTION_DAYS}, "redactSecrets": ${DEFAULT_REDACT_SECRETS}, "summarizeLargeOutput": ${DEFAULT_SUMMARIZE_LARGE_OUTPUT}, "dedupOutput": ${DEFAULT_DEDUP_OUTPUT}, "tabulateJson": ${DEFAULT_TABULATE_JSON}, "execution": "${DEFAULT_TOOL_EXECUTION}", "maxParallel": ${DEFAULT_TOOL_MAX_PARALLEL} },
 
   // Named profiles, applied with \`--profile <name>\` on the command that starts the

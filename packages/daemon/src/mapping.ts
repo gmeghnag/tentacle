@@ -130,7 +130,23 @@ export function toSessionSkills(
 
 /** A session's switches as the wire carries them (fresh arrays: the state stays immutable). */
 export function toWireCapabilities(state: SessionCapabilities): SessionCapabilitiesWire {
-  return { disabledMcp: [...state.disabledMcp], disabledSkills: [...state.disabledSkills] };
+  return {
+    disabledMcp: [...state.disabledMcp],
+    disabledSkills: [...state.disabledSkills],
+    disabledTools: [...state.disabledTools],
+  };
+}
+
+/**
+ * Wire switches (a client's seed, a log entry) as the agent's state: an absent
+ * `disabledTools` (an older peer or log) reads as none off.
+ */
+export function fromWireCapabilities(wire: SessionCapabilitiesWire): SessionCapabilities {
+  return {
+    disabledMcp: wire.disabledMcp,
+    disabledSkills: wire.disabledSkills,
+    disabledTools: wire.disabledTools ?? [],
+  };
 }
 
 /** Flatten a prompt's content blocks to the plain-text the agent loop consumes. */

@@ -1,6 +1,6 @@
 # feat/tool-toggles — switch built-in tools off by group or by name
 
-> **Status:** implementation — plan written, **awaiting the owner's approval** (Owner questions at the end)
+> **Status:** execution — Implementation approved 2026-11-20; S1 done (S2, S3 in progress)
 > **Branch:** `feat/tool-toggles`
 > **Size:** L (3 slices on this branch: S1 M · S2 M · S3 M **UI**) · **Blast:** load-bearing (the tool list the agent loop sends every round, the session's capability state on the wire and in the session log) · **Suited:** Opus plan; S1 and S3 a weaker model is fine, S2 a strong model; Review mandatory, in a fresh context, red-teaming §7 (one session path, a pod is not trusted, protocol forward compatibility, persistence)
 > **Changelog:** `changelog.d/tool-toggles.added.md`: "**Switch built-in tools off.** `tools.enabled` in the config (or a profile) turns built-in tools off by group (`subagents`, `shell`, `schedule`, `visuals`, …) or by name, and the new `/tools` panel shows what each definition costs the context and switches them for the session. `skill` is always on."
@@ -411,3 +411,61 @@ Red before green: every test below is first shown failing on `main`'s code, or o
 9. **Token figure:** the heuristic estimate (`~N`, free, instant, identical on every runtime), or an exact provider count per tool (N extra count calls, and over a pod they go through the laptop)? **Rec the heuristic `~N`.** It is for ranking what to switch off. The context meter already shows the exact total after a switch.
 
 **Owner answers (2026-11-20):** Owner questions 1–9 all as recommended. Implementation APPROVED. Follow-up row to add: feat/mobile-tool-toggles (Q8).
+
+## Execution
+
+*— claude-opus-5-5, 2026-11-20*
+
+**Load-bearing assumption re-verified first.** `rg` for `ChatRequest`s built outside `agent.ts`: compaction (`compact.ts:126/165`) and the title (`session-title.ts:96`) send `tools: []`; `proxy-model.ts:87` only forwards `request.tools`. So `projectTools` is the one tool list of every model request.
+
+### S1 — names, config, agent projection
+
+- `packages/config/src/tool-groups.ts` (new, exported): `ALWAYS_ON_TOOLS`, `TOOL_GROUPS`, `BUILTIN_TOOL_NAMES`, `expandToolName`, `groupOfTool`, `disabledToolsOf` (groups first, then single names: the single name wins both ways), `toolToggleIssues`, `toolEnabledIssues` (base + each merged profile, like `modelRefIssues`), `toolToggleNotices`.
+- `schema.ts`: `tools.enabled: z.record(z.boolean())` + `toolEnabledIssues` in `FileConfigSchema.superRefine`. `profile.ts`: `tools.enabled` merges per key. `resolve.ts` + `load.ts`: `disabledTools` (and the raw `toolsEnabled`, for the notices) on `ResolvedConfig` and `TentacleConfig`. `key-docs.ts` (`tools.enabled`, `tools.enabled.*`), the `DEFAULT_CONFIG_JSONC` template, README config table regenerated (`bun run docs:config`).
+- `packages/agent/src/capabilities.ts`: `disabledTools` in the state, `kind: "tool"`, a group = one op, `CapabilityRefusal` (thrown) for an unknown name or `skill`, `isToolDisabled` (never `skill`), `projectTools` drops disabled built-ins; `agent.ts` `hiddenCallRefusal` refuses them.
+- `packages/cli/src/wiring.ts`: `new Agent({ capabilities: { ...NO_CAPABILITIES, disabledTools: config.disabledTools } })` and the `toolToggleNotices` through `options.notice ?? options.log`.
+
+**Drift (S1):**
+1. *Type ripple pulled forward from S2.* Making `disabledTools` required on the agent's `SessionCapabilities` does not compile without the wire field, so S1 also carries: `disabledTools?` on `SessionCapabilitiesSchema` (protocol), `toWireCapabilities` + a new `fromWireCapabilities` (`daemon/mapping.ts`, `?? []`), the third set in `normalizeCapabilities`/`hasDisabled` (`hosted-session.ts`), in the log entry (`session-log.ts`), in `lastCapabilities` (`session-log-file.ts`, now returns the agent state via `fromWireCapabilities`), `DaemonSessionRecord.capabilities` typed as the agent state, the seed in `session-host.ts` via `fromWireCapabilities`, `cli/session-capabilities.ts` `wireCapabilities`. Existing capability tests that pinned the exact two-set shape now expect `disabledTools: []` (the new daemon always sends it). `protocol.json` regenerated with `bun run schema:export` (the drift test runs in `bun run check`; the merge's `protocol:bump` regenerates it again, no note: additive).
+2. *Parity pin location.* `packages/agent/test/tool-names-parity.test.ts`, not `packages/tools/test/`: `@tentacle/tools` does not depend on `@tentacle/config` (no hoisted workspace link), and `@tentacle/agent` depends on both.
+3. *Refusal is a thrown `CapabilityRefusal`*, not a returned value: `applyCapabilityOp` keeps its return type (the state) and its identity contract; the daemon maps the throw to `InvalidParams` (S2).
+4. *`shell` is both a group and a tool name.* With the owner's names, `"shell": false` means the group (shell, shell_output, shell_kill); the `shell` tool alone cannot be switched separately. Accepted as the owner's naming; noted for Review.
+
+**Evidence (S1).** New tests: `config/test/tool-groups.test.ts`, `config/test/profile.test.ts` (+3), `config/test/load.test.ts` (+6), `agent/test/capabilities.test.ts` (+7), `agent/test/agent-capabilities.test.ts` (+6, recorded `ChatRequest.tools`, spy `execute` + permission spy), `agent/test/tool-names-parity.test.ts`, `cli/test/wiring.test.ts` (+3). Red: on `main` none of these compile (symbols absent); the property-level red is the mutation run (`.tentacle/tmp/tool-toggles/mutate.sh`: apply one mutation, run the named files, restore):
+
+```
+== M1 projectTools without isToolDisabled
+(fail) built-in tool switches (disabledTools) > a config-seeded set keeps those tools out of EVERY model request; skill stays
+(fail) built-in tool switches (disabledTools) > set mid-session: the next request drops the tool, and switching it back restores it
+(fail) tools.enabled seeds the agent (docs/feat/tool-toggles.md D4) > buildAgent seeds disabledTools; a plain/one-shot request carries none of them
+ 61 pass / 3 fail
+== M2 hiddenCallRefusal without isToolDisabled
+(fail) built-in tool switches (disabledTools) > a call to a disabled tool is refused, never executed, and asks no permission
+(fail) built-in tool switches (disabledTools) > a child (explore) never gets a tool the parent disabled — its own `search` included — and its call is refused
+ 17 pass / 2 fail
+== M3 isToolDisabled without the skill guard
+(fail) … projectTools drops a disabled built-in; never skill, even with skill in the set
+(fail) … isToolDisabled reads the set; skill never
+(fail) … skill in the set (a hostile seed) never hides the skill tool nor refuses its call
+ 43 pass / 3 fail
+== M4 wiring seed removed
+(fail) tools.enabled seeds the agent … buildAgent seeds disabledTools; a plain/one-shot request carries none of them
+ 44 pass / 1 fail
+== M5 profile merge whole-replace
+(fail) tools.enabled in a profile … merges per key over the base's; a profile true undoes a base false
+(fail) tools.enabled in a profile … a profile without enabled keeps the base's map; other tools keys merge as before
+(fail) tools.enabled … a selected profile's switches merge over the base's
+ 50 pass / 3 fail
+== M6 schema superRefine dropped
+(fail) tools.enabled … an unknown name is a ConfigError naming it
+(fail) tools.enabled … skill is a ConfigError: always on
+(fail) tools.enabled … a bad name inside a profile is refused too, even when the profile is not selected
+ 35 pass / 3 fail
+== M7 single name does not beat group (one pass)
+(fail) disabledToolsOf > groups expand; the result is sorted and de-duplicated
+(fail) disabledToolsOf > a single tool beats its group, in both directions (Q2), whatever the key order
+ 9 pass / 2 fail
+```
+
+Green: `bun test packages/agent packages/config packages/protocol packages/daemon packages/cli/test/wiring.test.ts packages/cli/test/session-capabilities-resume.test.ts` → 3142 pass, 1 skip (opt-in), 0 fail; `tsc --noEmit` clean; `biome check .` clean.
+

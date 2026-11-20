@@ -1163,3 +1163,37 @@ describe("Fix round 1 (HIGH 4): `voice.*` reaches EVERY TUI the CLI starts", () 
     expect(connect).toMatch(/voiceConfigDir: voice\.configDir/);
   });
 });
+
+describe("tools.enabled seeds the agent (docs/feat/tool-toggles.md D4)", () => {
+  test("buildAgent seeds disabledTools; a plain/one-shot request carries none of them", async () => {
+    const model = new ScriptedModel([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const { agent } = buildAgent(
+      { ...config, disabledTools: ["chart", "diagram", "present"] },
+      { modelOverride: model },
+    );
+    expect(agent.capabilities().disabledTools).toEqual(["chart", "diagram", "present"]);
+    for await (const _ of new Session(agent).send("hi")) {
+      // drain
+    }
+    const sent = (model.requests[0]?.tools ?? []).map((t) => t.name);
+    expect(sent).toContain("fs_read");
+    for (const n of ["chart", "diagram", "present"]) expect(sent).not.toContain(n);
+  });
+
+  test("nothing off → the default state (no seed)", () => {
+    const { agent } = buildAgent(config);
+    expect(agent.capabilities().disabledTools).toEqual([]);
+  });
+
+  test("`true` on a tool whose feature is off is a notice, never a registration (F3)", () => {
+    const notices: string[] = [];
+    const { tools } = buildAgent(
+      { ...config, toolsEnabled: { workload_shell: true }, disabledTools: [] },
+      { notice: (line) => notices.push(line) },
+    );
+    expect(notices).toContain(
+      "tools.enabled: workload_shell has no effect — workloadShell.tool is off",
+    );
+    expect(tools.get("workload_shell")).toBeUndefined();
+  });
+});

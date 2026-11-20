@@ -449,6 +449,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `subagents.types.*.model` | — | — | The `models` entry this type runs on (beats the type's `agents/*.md` `model`). |
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline, not a path) | `PROMPT.md` in the config dir | The system prompt file: relative to the config dir, or absolute. |
 | `tools.dedupOutput` | `TENTACLE_DEDUP_OUTPUT` | true | Collapse runs of identical consecutive output lines. |
+| `tools.enabled.*` | — | — | Whether this built-in tool or group is offered to the model. |
 | `tools.execution` | `TENTACLE_TOOL_EXECUTION` | "read-only" | Tool calls in a round: `read-only` (default; reads together, writes and `shell` alone), `sequential`, `parallel`. |
 | `tools.maxInlineOutputChars` | `TENTACLE_MAX_OUTPUT_CHARS` | 16000 | Max characters of a tool result kept inline before it is spilled. |
 | `tools.maxParallel` | `TENTACLE_TOOL_MAX_PARALLEL` | 8 | At most this many calls of a round at once (`1` = sequential). |

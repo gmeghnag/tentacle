@@ -114,7 +114,7 @@ function daemon() {
   return { host, model, built, connect };
 }
 
-const NONE = { disabledMcp: [], disabledSkills: [] };
+const NONE = { disabledMcp: [], disabledSkills: [], disabledTools: [] };
 
 describe("session/set_capability is the session's", () => {
   test("A turns `echo` off: both attachments get it with `by`, and the next request lacks the tool", async () => {
@@ -129,7 +129,7 @@ describe("session/set_capability is the session's", () => {
     expect(d.model.tools.at(-1)).toContain("mcp__echo__echo");
 
     const result = SetCapabilityResultSchema.parse(await a.set("S", "mcp", "echo", false));
-    const off = { disabledMcp: ["echo"], disabledSkills: [] };
+    const off = { disabledMcp: ["echo"], disabledSkills: [], disabledTools: [] };
     expect(result).toEqual({ capabilities: off });
     expect(a.of("capabilities")).toEqual([
       { type: "capabilities", capabilities: off, by: "tentacle" },
@@ -162,7 +162,7 @@ describe("session/set_capability is the session's", () => {
     await b.open({ sessionId: "S" });
 
     await Promise.all([a.set("S", "mcp", "echo", false), b.set("S", "skill", "k8s", false)]);
-    const both = { disabledMcp: ["echo"], disabledSkills: ["k8s"] };
+    const both = { disabledMcp: ["echo"], disabledSkills: ["k8s"], disabledTools: [] };
     expect(a.of("capabilities").at(-1)?.capabilities).toEqual(both);
     expect(b.of("capabilities").at(-1)?.capabilities).toEqual(both);
     // One total order: both see the same sequence.
@@ -193,6 +193,7 @@ describe("session/set_capability is the session's", () => {
     expect((await c.open({ sessionId: "S" })).capabilities).toEqual({
       disabledMcp: ["echo"],
       disabledSkills: [],
+      disabledTools: [],
     });
   });
 
@@ -202,7 +203,11 @@ describe("session/set_capability is the session's", () => {
     const a = await d.connect();
     const seed = { disabledMcp: ["zz", "echo", "echo"], disabledSkills: ["k8s"] };
     const opened = await a.open({ sessionId: "S", create: true, capabilities: seed });
-    expect(opened.capabilities).toEqual({ disabledMcp: ["echo", "zz"], disabledSkills: ["k8s"] });
+    expect(opened.capabilities).toEqual({
+      disabledMcp: ["echo", "zz"],
+      disabledSkills: ["k8s"],
+      disabledTools: [],
+    });
     await a.prompt("S");
     expect(d.model.tools.at(-1)).not.toContain("mcp__echo__echo");
     // No update for a seed: nobody had a different snapshot.
@@ -210,7 +215,11 @@ describe("session/set_capability is the session's", () => {
 
     const b = await d.connect();
     const attached = await b.open({ sessionId: "S", capabilities: NONE });
-    expect(attached.capabilities).toEqual({ disabledMcp: ["echo", "zz"], disabledSkills: ["k8s"] });
+    expect(attached.capabilities).toEqual({
+      disabledMcp: ["echo", "zz"],
+      disabledSkills: ["k8s"],
+      disabledTools: [],
+    });
   });
 
   test("a settings sync's fresh agent keeps the session's switches", async () => {

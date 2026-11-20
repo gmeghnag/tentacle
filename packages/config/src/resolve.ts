@@ -52,6 +52,7 @@ import {
 import { type ResolvedModel, resolveModelEntry } from "./models.ts";
 import type { FileConfig, HookSpecConfig, McpServerConfig, MountConfig } from "./schema.ts";
 import { type SkillInfo, renderSkillsCatalog } from "./skills.ts";
+import { disabledToolsOf } from "./tool-groups.ts";
 
 export type Env = Record<string, string | undefined>;
 
@@ -207,6 +208,13 @@ export interface ResolvedConfig {
    * env > file > the system temp dirs. Entries as given (`~` expanded by load.ts).
    */
   readonly writableDirs: readonly string[];
+  /**
+   * Built-in tools switched off by `tools.enabled` (docs/feat/tool-toggles.md):
+   * sorted names, groups expanded. Seeds every session this config creates.
+   */
+  readonly disabledTools: readonly string[];
+  /** `tools.enabled` as written (merged profile), for the `true`-has-no-effect notices. */
+  readonly toolsEnabled?: Readonly<Record<string, boolean>>;
   /**
    * The configured default engine of `run`/`attach` (file or profile); absent
    * when unset. Its env form (`TENTACLE_ENGINE`) and the flag are layered by
@@ -821,6 +829,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     autoWake: autoWake.value,
     toolExecution: { mode: toolExecution.value, maxParallel: toolMaxParallel.value },
     writableDirs: writableDirs.value,
+    disabledTools: disabledToolsOf(fileConfig.tools?.enabled ?? {}),
+    ...(fileConfig.tools?.enabled !== undefined ? { toolsEnabled: fileConfig.tools.enabled } : {}),
     ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
     ...(fileConfig.rm !== undefined ? { rm: fileConfig.rm } : {}),
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),

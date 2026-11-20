@@ -67,6 +67,7 @@ import {
   type SessionCapabilities,
   isHidden,
   isSkillHidden,
+  isToolDisabled,
   projectSystem,
   projectTools,
 } from "./capabilities.ts";
@@ -1089,9 +1090,9 @@ export class Agent {
     this.pruneState.delete(messages);
   }
 
-  /** Why a call is refused under the round's `caps`: a hidden server's tool or skill; else undefined. */
+  /** Why a call is refused under the round's `caps`: a hidden server's tool, a disabled built-in or skill; else undefined. */
   private hiddenCallRefusal(call: ToolCall, caps: SessionCapabilities): ToolResult | undefined {
-    if (isHidden(call.name, this.serverOf, caps)) {
+    if (isHidden(call.name, this.serverOf, caps) || isToolDisabled(call.name, caps)) {
       return { content: `${call.name} is turned off for this session`, isError: true };
     }
     if (call.name === SKILL_TOOL_NAME) {
