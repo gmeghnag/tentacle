@@ -14,6 +14,7 @@ import {
   endOffset,
   initialFollow,
   jumpPill,
+  jumpPillText,
   jumped,
   landingAwaiting,
   landingDone,
@@ -90,6 +91,11 @@ describe("follow (B5)", () => {
     const state = jumped();
     expect(state).toEqual({ following: true, unseen: false });
     expect(jumpPill(state)).toBe(false);
+  });
+
+  test("jump pill text: arrow only while nothing unseen, 'New messages' when something arrived (owner 20/11)", () => {
+    expect(jumpPillText({ following: false, unseen: false })).toBeNull();
+    expect(jumpPillText({ following: false, unseen: true })).toBe("New messages");
   });
 
   test("Show in chat (mobile-chrome S9): held where it scrolled, so new content does not pull it back", () => {
