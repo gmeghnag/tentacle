@@ -282,6 +282,9 @@ export class RpcPeer {
     if (max !== undefined && data.length > max) {
       // Don't echo the id (we won't parse the frame): reply with a null-id error.
       this.sendErrorResponse(null, JsonRpcErrorCode.InvalidRequest, "frame too large");
+      this.reportError(
+        new Error(`inbound frame of ${data.length} units over the ${max} cap: dropped`),
+      );
       return;
     }
     let raw: unknown;

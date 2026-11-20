@@ -407,3 +407,29 @@ describe("KubeClient.openExec", () => {
     expect(ws.pings).toBe(1);
   });
 });
+
+describe("execChannel stdout cap", () => {
+  test("a line over the cap closes the socket and the channel, naming the cause on onStderr", () => {
+    const ws = new FakeWS();
+    // A real socket's `close` event comes later: the channel must close itself.
+    ws.close = () => {
+      ws.closes++;
+    };
+    const stderr: string[] = [];
+    const channel = execChannel(ws, { onStderr: (t) => stderr.push(t), maxLineBytes: 16 });
+    ws.open();
+    const frames: string[] = [];
+    let closes = 0;
+    channel.setOnMessage((m) => frames.push(m));
+    channel.setOnClose(() => closes++);
+    ws.receive(msg(1, '{"ok":"1234567"}\n')); // exactly at the cap
+    ws.receive(msg(1, "x".repeat(17)));
+    ws.receive(msg(1, '\n{"a":1}\n'));
+    expect(frames).toEqual(['{"ok":"1234567"}']);
+    expect(closes).toBe(1);
+    expect(ws.closes).toBe(1);
+    expect(stderr).toEqual([
+      "[k8s] pod stdout line exceeds 16 bytes with no newline (frame cap); channel closed\n",
+    ]);
+  });
+});

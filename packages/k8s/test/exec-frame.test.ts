@@ -51,4 +51,39 @@ describe("ExecDemux", () => {
     expect(errors).toEqual(['{"status":"Success"}']);
     expect(frames).toEqual([]);
   });
+
+  test("an stdout line over the cap is a violation; the demux then ignores stdout", () => {
+    const frames: string[] = [];
+    const violations: string[] = [];
+    const demux = new ExecDemux(
+      { onFrame: (f) => frames.push(f), onViolation: (m) => violations.push(m) },
+      16,
+    );
+    demux.push(msg(1, "x".repeat(10)));
+    demux.push(msg(1, "x".repeat(7))); // 17 bytes held: over the cap
+    demux.push(msg(1, '\n{"a":1}\n'));
+    expect(frames).toEqual([]);
+    expect(violations).toEqual([
+      "pod stdout line exceeds 16 bytes with no newline (frame cap); channel closed",
+    ]);
+  });
+
+  test("stderr is not counted against the stdout cap", () => {
+    const frames: string[] = [];
+    const stderrs: string[] = [];
+    const violations: string[] = [];
+    const demux = new ExecDemux(
+      {
+        onFrame: (f) => frames.push(f),
+        onStderr: (s) => stderrs.push(s),
+        onViolation: (m) => violations.push(m),
+      },
+      16,
+    );
+    demux.push(msg(2, "e".repeat(100)));
+    demux.push(msg(1, '{"a":1}\n'));
+    expect(stderrs).toEqual(["e".repeat(100)]);
+    expect(frames).toEqual(['{"a":1}']);
+    expect(violations).toEqual([]);
+  });
 });

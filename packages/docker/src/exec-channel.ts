@@ -19,7 +19,7 @@
  * are detected by TCP keepalive (tcp), process exit (ssh, slice A2) or socket
  * close (unix).
  */
-import type { DuplexChannel } from "@tentacle/transport";
+import { ByteFramer, type DuplexChannel, describeViolation } from "@tentacle/transport";
 import type { ByteDuplex, Dialer } from "./byte-duplex.ts";
 import { type DockerApiError, apiError, hijack, request } from "./http-conn.ts";
 import { StdDemux } from "./stdcopy.ts";
@@ -189,22 +189,28 @@ export function execChannel(
     onClose?.();
   };
 
-  // Inbound: demux → stdout bytes → UTF-8 (streaming) → newline-delimited frames.
-  const stdoutDecoder = new TextDecoder();
+  // Inbound: demux → stdout bytes → the shared capped framer → frames.
   const stderrDecoder = new TextDecoder();
   const sysDecoder = new TextDecoder();
-  let line = "";
-  const demux = new StdDemux({
-    onStdout: (bytes) => {
-      line += stdoutDecoder.decode(bytes, { stream: true });
-      let nl = line.indexOf("\n");
-      while (nl !== -1 && !closed) {
-        const frame = line.slice(0, nl);
-        line = line.slice(nl + 1);
-        if (frame !== "") {
+  const stdout = new ByteFramer(
+    {
+      onLine: (frame) => {
+        if (!closed) {
           onMessage?.(frame);
         }
-        nl = line.indexOf("\n");
+      },
+      // The pod broke the framing: say why, then drop the exec.
+      onViolation: (violation) => {
+        stderr(`[docker] ${describeViolation(violation, "pod stdout")}\n`);
+        fireClose();
+      },
+    },
+    options.maxLineBytes,
+  );
+  const demux = new StdDemux({
+    onStdout: (bytes) => {
+      if (!closed) {
+        stdout.push(bytes);
       }
     },
     onStderr: (bytes) => {

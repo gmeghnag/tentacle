@@ -88,4 +88,46 @@ describe("streamChannel", () => {
     });
     expect(result).toMatchObject({ protocolVersion: PROTOCOL_VERSION });
   });
+
+  test("a line over the cap closes the channel with an error; a later valid frame is not delivered", async () => {
+    const input = new PassThrough();
+    const errors: Error[] = [];
+    const channel = streamChannel(
+      input as unknown as NodeReadableLike,
+      new PassThrough() as unknown as NodeWritableLike,
+      { maxLineBytes: 16, onError: (e) => errors.push(e) },
+    );
+    const frames: string[] = [];
+    let closes = 0;
+    channel.setOnMessage((m) => frames.push(m));
+    channel.setOnClose(() => closes++);
+
+    input.write('{"ok":"1234567"}\n'); // exactly 16 bytes: delivered
+    input.write("x".repeat(17)); // 17 bytes, no newline yet: over the cap
+    await tick();
+    input.write('\n{"a":1}\n');
+    await tick();
+
+    expect(frames).toEqual(['{"ok":"1234567"}']);
+    expect(closes).toBe(1);
+    expect(errors.map((e) => e.message)).toEqual([
+      "stream line exceeds 16 bytes with no newline (frame cap); channel closed",
+    ]);
+  });
+
+  test("a string chunk is counted in UTF-8 bytes, not characters", async () => {
+    const input = new PassThrough({ encoding: "utf8" });
+    const errors: Error[] = [];
+    const channel = streamChannel(
+      input as unknown as NodeReadableLike,
+      new PassThrough() as unknown as NodeWritableLike,
+      { maxLineBytes: 16, onError: (e) => errors.push(e) },
+    );
+    let closes = 0;
+    channel.setOnClose(() => closes++);
+    input.write("é".repeat(9)); // 9 chars, 18 bytes
+    await tick();
+    expect(closes).toBe(1);
+    expect(errors).toHaveLength(1);
+  });
 });

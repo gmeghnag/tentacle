@@ -7,9 +7,11 @@
  * Unlike the WebSocket / MessagePort channels, a byte stream has no message
  * boundaries, so frames are **newline-delimited**. That is safe because every
  * `RpcPeer` frame is single-line JSON (`JSON.stringify` escapes any embedded
- * newline as `\n`). Inbound bytes are accumulated and split on `\n`; a partial
- * trailing line is held until the rest arrives.
+ * newline as `\n`). Inbound bytes go through the shared `ByteFramer`: split on
+ * `\n`, a partial trailing line held until the rest arrives, and a line over
+ * `maxLineBytes` (or starting with the reserved NUL tag) closes the channel.
  */
+import { ByteFramer, describeViolation } from "./byte-framer.ts";
 import type { DuplexChannel } from "./channel.ts";
 
 /** The slice of a Node `Readable` this channel needs. */
@@ -24,13 +26,23 @@ export interface NodeWritableLike {
   write(chunk: string): unknown;
 }
 
+export interface StreamChannelOptions {
+  /** The cap on one inbound line, in bytes. Default `MAX_STREAM_LINE_BYTES`. */
+  readonly maxLineBytes?: number;
+  /** Why the channel closed itself (a framing violation), before it closes. */
+  readonly onError?: (error: Error) => void;
+}
+
 /** Wrap a readable/writable byte-stream pair as a newline-delimited channel. */
-export function streamChannel(input: NodeReadableLike, output: NodeWritableLike): DuplexChannel {
+export function streamChannel(
+  input: NodeReadableLike,
+  output: NodeWritableLike,
+  options: StreamChannelOptions = {},
+): DuplexChannel {
   let onMessage: ((data: string) => void) | undefined;
   let onClose: (() => void) | undefined;
   let closed = false;
-  let buffer = "";
-  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
 
   const fireClose = (): void => {
     if (closed) {
@@ -40,17 +52,24 @@ export function streamChannel(input: NodeReadableLike, output: NodeWritableLike)
     onClose?.();
   };
 
+  const framer = new ByteFramer(
+    {
+      onLine: (line) => {
+        if (!closed) {
+          onMessage?.(line);
+        }
+      },
+      onViolation: (violation) => {
+        options.onError?.(new Error(describeViolation(violation, "stream")));
+        fireClose();
+      },
+    },
+    options.maxLineBytes,
+  );
+
   input.on("data", (chunk) => {
-    buffer += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
-    // Emit each complete line; keep the trailing partial (if any) buffered.
-    let newline = buffer.indexOf("\n");
-    while (newline !== -1) {
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      if (line !== "") {
-        onMessage?.(line);
-      }
-      newline = buffer.indexOf("\n");
+    if (!closed) {
+      framer.push(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
     }
   });
   input.on("end", fireClose);
