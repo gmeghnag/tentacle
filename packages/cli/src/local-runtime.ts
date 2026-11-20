@@ -880,6 +880,10 @@ export function persistingController(
     skills() {
       return inner.skills();
     },
+    // `/tools` (docs/feat/tool-toggles.md D7): the daemon's list, as it answers.
+    tools() {
+      return inner.tools();
+    },
     context() {
       return inner.context();
     },

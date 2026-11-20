@@ -30,6 +30,7 @@ import { command as sessions } from "./sessions.ts";
 import { command as settings } from "./settings.ts";
 import { command as skills } from "./skills.ts";
 import { command as tokens } from "./tokens.ts";
+import { command as tools } from "./tools.ts";
 
 /** One built-in: the words the palette shows, and the executor that runs it. */
 export interface Command {
@@ -63,6 +64,7 @@ export const BUILT_INS: readonly Command[] = [
   tokens,
   mcp,
   skills,
+  tools,
   artifacts,
   schedule,
   agents,

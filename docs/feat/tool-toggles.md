@@ -1,6 +1,6 @@
 # feat/tool-toggles — switch built-in tools off by group or by name
 
-> **Status:** execution — Implementation approved 2026-11-20; S1, S2 done (S3 in progress)
+> **Status:** execution — Implementation approved 2026-11-20; S1, S2, S3 done — awaiting fresh-context Review
 > **Branch:** `feat/tool-toggles`
 > **Size:** L (3 slices on this branch: S1 M · S2 M · S3 M **UI**) · **Blast:** load-bearing (the tool list the agent loop sends every round, the session's capability state on the wire and in the session log) · **Suited:** Opus plan; S1 and S3 a weaker model is fine, S2 a strong model; Review mandatory, in a fresh context, red-teaming §7 (one session path, a pod is not trusted, protocol forward compatibility, persistence)
 > **Changelog:** `changelog.d/tool-toggles.added.md`: "**Switch built-in tools off.** `tools.enabled` in the config (or a profile) turns built-in tools off by group (`subagents`, `shell`, `schedule`, `visuals`, …) or by name, and the new `/tools` panel shows what each definition costs the context and switches them for the session. `skill` is always on."
@@ -508,4 +508,42 @@ Green: `bun test packages/agent packages/config packages/protocol packages/daemo
 ```
 
 Green: `bun test packages/agent packages/config packages/protocol packages/daemon packages/client packages/cli` → 6639 pass, 3 skip (the opt-in ones), 0 fail; `tsc --noEmit` clean; `biome check .` clean.
+
+### S3 — TUI `/tools`
+
+- `packages/tui/src/capability-toggles.ts`: `CapsView.disabledTools?` (absent = the daemon has no tool switches), `CapKind` `"tool"`, `SwitchState` `"partial"` (`[~]`), `toolsPhase` (an `on` report without `disabledTools` ⇒ `unsupported`, F8), `toolSwitch`, `groupSwitch`, `switchOp` turns a partial group ON (Q7), `capsMarker` adds `N tools off`, `capsDiff` covers the third kind, `remoteChangeNotices` matches a group op's per-member echo through `CapOp.members` (so the person's own group switch is not reported as another device's change).
+- `packages/tui/src/tools-panel.ts` (new, pure): items (a group where its first member is; ungrouped tools alone), `TreeGroup` rows with switch + `~tokens` (+ `N tools`, `always on` for `skill`), the title `Tools · ~<offered> tokens · <n> off · <phase note>`, `toolsSwitchOp` (group head → group op with its members; member / single tool → that tool; `skill` → none), `toolsNoSwitchNotice`.
+- Panel: `panels/tools.ts` descriptor + ONE line in `PANEL_KINDS`; `TreePanel` gains `kind: "tools"` + `toolsPanel()`; the `PanelKind` descriptor gains an optional `noSwitchNotice`, reached by a new facade `panelNoSwitchNotice` that `App.switchCapability` now calls (the only `App.tsx` change; the set path itself is unchanged and the row still flips only on the echo).
+- Command `commands/tools.ts` (+ registry line, `toolsListError`: an older daemon's `MethodNotFound` says "This daemon doesn't support /tools (it predates it)"); `SessionController.tools?()` in `app-types.ts`, wired in `cli/local-runtime.ts` to `RemoteSession.tools()`.
+- `changelog.d/tool-toggles.added.md`; `TODO.md` row `feat/mobile-tool-toggles` (Q8).
+
+**Drift (S3):**
+1. *No `panels/ToolsPanel.tsx`.* `/mcp` and `/skills` have no component of their own either: every tree panel renders through the generic `components/ListPanel.tsx` from a `PanelView`. `/tools` follows that pattern (a descriptor + a pure projection), so there is no new component and no `usePanels.ts` edit.
+2. *Group-echo matching via `CapOp.members`* instead of a table in the TUI: the TUI has no `@tentacle/config` dependency (the plan assumed it had), and the panel's own list already knows a group's registered members.
+3. Existing structure pins updated: `app-panels-structure.test.tsx` (six kinds, five `kindOf(panel)` facade calls), `app-commands.test.tsx` (`/tools` in `SLASH_COMMANDS`, its "not available" line).
+
+**Evidence (S3).** New tests: `tui/test/tools-panel.test.ts` (12, pure: `toolsPhase`, `toolSwitch`, `groupSwitch`, Q7, marker, diff/notices, items, rows, title, Space ops, the facade), `tui/test/tools-panel-app.test.tsx` (5, ink-testing-library frames: `~N` rows, ONE `setCapability("tool", "visuals", false)` and the flip only on the echo, partial → on, locked `skill` sends nothing, an older daemon shows no switch + an honest line, `not-open` before the first message with `/mcp`'s words). Red: the four structure pins (`app-commands`, `commands-registry`, `panels-registry`, `app-panels-structure`) went red when `/tools` was registered and were updated deliberately. Mutations (`bash .tentacle/tmp/tool-toggles/mutate.sh …`, each red, then restored):
+
+```
+== T1 partial group turns OFF
+(fail) tool switches … Space on partial turns the group ON (Q7) …
+(fail) /tools in the App … a partially-off group shows [~] and Space turns it ON (Q7)
+ 15 pass / 2 fail
+== T2 no toolsPhase (old daemon treated as having tool switches)
+(fail) … toolsPhase …; (fail) … toolSwitch …; (fail) … groupSwitch …; (fail) … the title …; (fail) … through the panel facade …
+(fail) /tools in the App … an older daemon (no disabledTools) shows no switch and an honest line; Space says so
+ 11 pass / 6 fail
+== T3 group echo not matched by members
+(fail) … a group op's own echo is no news
+(fail) /tools in the App … rows carry ~N; Space on a group sends ONE group set; the row flips only on the echo
+ 15 pass / 2 fail
+== T4 panel facade ignores the kind's notice
+(fail) … through the panel facade …; (fail) /tools in the App … an older daemon …
+ 15 pass / 2 fail
+== T5 group head sends nothing
+(fail) … Space: a group head → the group …; (fail) /tools in the App … ONE group set …; (fail) … partially-off group …
+ 14 pass / 3 fail
+```
+
+Green (narrow): `bun test packages/tui` → 2869 pass, 0 fail after the structure pins were updated.
 

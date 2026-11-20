@@ -48,7 +48,6 @@ import {
 import {
   type CapOp,
   type CapsView,
-  noSwitchNotice,
   remoteChangeNotices,
   sessionCapsPhase,
   settled,
@@ -70,7 +69,7 @@ import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { localSession } from "./local-session.ts";
-import { type OpenPanel, panelClick, panelSwitchOp } from "./panel.ts";
+import { type OpenPanel, panelClick, panelNoSwitchNotice, panelSwitchOp } from "./panel.ts";
 import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
 import {
@@ -2023,7 +2022,7 @@ export function App({
       const phase = sessionCapsPhase(session, capsRef.current);
       const op = panelSwitchOp(open, columns, phase);
       if (op === null || !session?.setCapability) {
-        const why = noSwitchNotice(phase);
+        const why = panelNoSwitchNotice(open, phase);
         if (why !== null) pushNotice(why);
         return;
       }

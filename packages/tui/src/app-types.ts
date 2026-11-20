@@ -33,6 +33,7 @@ import type { DisplayItem, SessionEvent } from "./state.ts";
 import type { ContextOpen } from "./status-view.ts";
 import type { SubagentNotifyView } from "./subagent-notify.ts";
 import type { TargetBadge } from "./target-view.ts";
+import type { ToolEntryView } from "./tools-panel.ts";
 import type { SessionActivity } from "./turn-feed.ts";
 import type { RunQuit } from "./useQuitClear.ts";
 import type { VoiceConfig } from "./voice-session.ts";
@@ -186,6 +187,12 @@ export interface SessionController {
    */
   skills?(): Promise<SessionSkillsView>;
   /**
+   * The session's registered built-in tools (`session/tools`,
+   * docs/feat/tool-toggles.md D6): group, `~tokens`, switch, `locked`. Absent
+   * (a bare test session) → `/tools` says the list isn't available.
+   */
+  tools?(): Promise<{ readonly tools: readonly ToolEntryView[] }>;
+  /**
    * The session's MCP/skill switches as the daemon last reported them
    * (docs/feat/session-capabilities.md S4): undefined until an open says it
    * has them, and when the daemon has none (an older one). Optional with the
@@ -199,7 +206,8 @@ export interface SessionController {
    */
   onCapabilities?(listener: (caps: CapsView | undefined, by?: string) => void): () => void;
   /**
-   * `session/set_capability`: turn one MCP server or skill on/off for the
+   * `session/set_capability`: turn one MCP server, skill or built-in tool/group
+   * (`tool`, docs/feat/tool-toggles.md) on/off for the
    * model. The rows follow the daemon's echo (`onCapabilities`), never this
    * answer. Rejects on a refusal.
    */

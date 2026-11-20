@@ -15,16 +15,22 @@ import { SCHEDULES_START, type ScheduleDockRow, type SchedulesState } from "../s
 import type { SessionsState, SessionsView } from "../sessions-panel.ts";
 import { SESSIONS_START } from "../sessions-panel.ts";
 import type { SkillsListView } from "../skills-panel.ts";
+import type { ToolEntryView } from "../tools-panel.ts";
 import { TREE_START, type TreeState } from "../tree-panel.ts";
 
-/** A tree panel (`/mcp`, `/skills`): groups and an expandable cursor. */
+/** A tree panel (`/mcp`, `/skills`, `/tools`): groups and an expandable cursor. */
 export type TreePanel =
   | {
       readonly kind: "mcp";
       readonly data: readonly McpServerView[] | null;
       readonly tree: TreeState;
     }
-  | { readonly kind: "skills"; readonly data: SkillsListView | null; readonly tree: TreeState };
+  | { readonly kind: "skills"; readonly data: SkillsListView | null; readonly tree: TreeState }
+  | {
+      readonly kind: "tools";
+      readonly data: readonly ToolEntryView[] | null;
+      readonly tree: TreeState;
+    };
 
 /** `/sessions` (docs/feat/connect-sessions.md): a flat list with its own cursor. */
 export interface SessionsPanel {
@@ -91,6 +97,13 @@ export const mcpPanel = (data: readonly McpServerView[] | null = null): TreePane
 
 export const skillsPanel = (data: SkillsListView | null = null): TreePanel => ({
   kind: "skills",
+  data,
+  tree: TREE_START,
+});
+
+/** The `/tools` panel (docs/feat/tool-toggles.md D7), loading or showing `data`. */
+export const toolsPanel = (data: readonly ToolEntryView[] | null = null): TreePanel => ({
+  kind: "tools",
   data,
   tree: TREE_START,
 });
