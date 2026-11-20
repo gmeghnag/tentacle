@@ -146,3 +146,28 @@ describe("the Beta switches reach this screen without a remount", () => {
     expect(screen).toContain("voice?.settingsChanged(previous, voiceSettings)");
   });
 });
+
+/**
+ * fix/mobile-mic-send: the mic tap's haptic is played by TS at the tap, but the
+ * STOP tap lands while the session records — and iOS mutes haptics during a
+ * recording unless the session allows them. Both mic haptics are light (owner).
+ * Static (Swift only builds in a dev client); the feel itself is device-only.
+ */
+describe("mic haptics: the Swift side", () => {
+  const core = code(read(MOD, "ios", "SpeechCore.swift"));
+
+  test("the recording session allows haptics, set before it goes active", () => {
+    expect(core).toMatch(
+      /setCategory\(\s*\.playAndRecord[\s\S]*?setAllowHapticsAndSystemSoundsDuringRecording\(true\)\s*try session\.setActive\(true\)/,
+    );
+  });
+
+  test("start and stop are both a LIGHT impact", () => {
+    expect(core).toContain(
+      'case "start": UIImpactFeedbackGenerator(style: .light).impactOccurred()',
+    );
+    expect(core).toContain(
+      'case "stop": UIImpactFeedbackGenerator(style: .light).impactOccurred()',
+    );
+  });
+});

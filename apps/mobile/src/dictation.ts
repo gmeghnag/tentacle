@@ -329,10 +329,9 @@ function settle(
   notice: string | undefined,
 ): DictationStep {
   const final = draftOf(text);
-  const effects: DictationEffect[] = [
-    { type: "setDraft", text: final },
-    { type: "haptic", kind: "stop" },
-  ];
+  // No haptic here: a stop the person tapped played it at the tap; a
+  // programmatic one (silence, cap, Send, interruption) plays none.
+  const effects: DictationEffect[] = [{ type: "setDraft", text: final }];
   if (after === "send") {
     effects.push({ type: "send", via: via ?? "press" });
   }
@@ -414,7 +413,12 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
             locale: event.locale,
             asked: false,
           },
-          effects: [{ type: "probe", locale: event.locale }],
+          // The tap's own haptic, BEFORE the mic opens (iOS mutes haptics while
+          // recording by default) — fix/mobile-mic-send.
+          effects: [
+            { type: "haptic", kind: "start" },
+            { type: "probe", locale: event.locale },
+          ],
         };
       }
       if (event.type === "appState" && event.state === "active" && state.kind === "failed") {
@@ -442,6 +446,7 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
           // The capabilities read or the permission request itself threw.
           return failed(START_FAILED);
         case "tap":
+          return { state: DICTATION_IDLE, effects: [TAP_STOP] };
         case "dispose":
         case "ttsStarting":
         case "stopRequested":
@@ -489,7 +494,8 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
               startedAt: event.now,
               lastTextAt: event.now,
             },
-            effects: [{ type: "haptic", kind: "start" }],
+            // The haptic played at the tap (the mic is live now: iOS would mute it).
+            effects: [],
           };
         case "startFailed":
         case "ended":
@@ -506,6 +512,10 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
               : START_FAILED,
           );
         case "tap":
+          return {
+            state: DICTATION_IDLE,
+            effects: [TAP_STOP, { type: "cancel", attempt: state.attempt }],
+          };
         case "dispose":
         case "ttsStarting":
         case "stopRequested":
@@ -565,6 +575,10 @@ function active(state: Active, event: DictationEvent): DictationStep {
       }
       return finalize(state, event.now, "send", event.via);
     case "tap":
+      if (finalizing !== undefined) {
+        return none;
+      }
+      return withFirst(TAP_STOP, finalize(state, event.now, "idle"));
     case "ttsStarting":
     case "stopRequested":
       return finalizing !== undefined ? none : finalize(state, event.now, "idle");
@@ -585,6 +599,14 @@ function active(state: Active, event: DictationEvent): DictationStep {
       }
       return none;
     case "ended":
+      if (finalizing !== undefined && (event.reason === "error" || event.reason === "cancelled")) {
+        // The person already asked to stop (a tap) or to send: this ending IS
+        // the end of that stop. Keep everything shown and honour the pending
+        // Send — the iOS 26 analyzer's short utterance is still all volatile
+        // here, so `finalsOnly` emptied the field and Send then did nothing
+        // (fix/mobile-mic-send).
+        return settle(finalizing, finalizing.after, finalizing.via, finalizing.notice);
+      }
       switch (event.reason) {
         case "cancelled":
           return { state: DICTATION_IDLE, effects: [] };
@@ -614,6 +636,13 @@ function active(state: Active, event: DictationEvent): DictationStep {
     default:
       return none;
   }
+}
+
+/** The haptic of a mic tap that stops (or cancels) a dictation. */
+const TAP_STOP: DictationEffect = { type: "haptic", kind: "stop" };
+
+function withFirst(effect: DictationEffect, step: DictationStep): DictationStep {
+  return { state: step.state, effects: [effect, ...step.effects] };
 }
 
 function withCancel(step: DictationStep, attempt: number): DictationStep {

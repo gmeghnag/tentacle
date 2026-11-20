@@ -24,6 +24,9 @@ import {
   type SessionScreenState,
   createSessionScreen,
 } from "../src/session-screen-controller.ts";
+import type { SpeechPort, SpeechPortEvent } from "../src/speech-native.ts";
+import { createVoiceController } from "../src/voice-controller.ts";
+import { DEFAULT_VOICE_SETTINGS } from "../src/voice-settings-store.ts";
 
 function memoryFs(): OutboxFs {
   const files = new Map<string, string>();
@@ -930,5 +933,100 @@ describe("`sends`: a press that CLEARED the field (items 5/6: keyboard down, fie
     }
     expect(screen.state().draft).toBe("my words");
     expect(screen.state().sends).toBe(1);
+  });
+});
+
+/**
+ * fix/mobile-mic-send (owner 2026-11-20: "I stop and send, nothing happens"):
+ * the REAL voice controller over the REAL screen, wired as `SessionScreen.tsx`
+ * wires them (draft / setDraft / send → press, and the Send button asking voice
+ * first). The port is a fake; the engine's ending is what the test chooses.
+ */
+describe("dictation → the composer's Send (fix/mobile-mic-send)", () => {
+  async function wired() {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    const listeners = new Set<(e: SpeechPortEvent) => void>();
+    const port: SpeechPort = {
+      capabilities: async () => ({
+        os: 18,
+        recognizer: { "en-US": { supported: true, onDevice: true } },
+        permissions: { mic: "granted", speech: "authorized" },
+      }),
+      requestPermissions: async () => ({ mic: "granted", speech: "authorized" }),
+      installAsset: async () => {},
+      reserveLocale: async () => true,
+      startDictation: async () => {},
+      stopDictation: () => {},
+      cancelDictation: () => {},
+      voices: async () => [],
+      speak: () => {},
+      stopSpeaking: () => {},
+      haptic: () => {},
+      addListener: (l) => {
+        listeners.add(l);
+        return () => {
+          listeners.delete(l);
+        };
+      },
+    };
+    const voice = createVoiceController({
+      port,
+      now: () => 0,
+      draft: () => screen.state().draft,
+      setDraft: (t) => screen.setDraft(t),
+      send: (via) => (via === "return" ? screen.pressReturn() : screen.press()),
+      settings: () => ({ ...DEFAULT_VOICE_SETTINGS, dictation: true }),
+      deviceLocales: () => ["en-US"],
+      every: () => ({ cancel: () => {} }),
+      nextAttempt: () => 7,
+    });
+    const fire = (e: SpeechPortEvent) => {
+      for (const l of [...listeners]) {
+        l(e);
+      }
+    };
+    // The Send button's handler (SessionScreen `onPress`).
+    const pressSend = () => {
+      if (voice.send("press") !== true) {
+        screen.press();
+      }
+    };
+    voice.tapMic();
+    await settle();
+    expect(voice.state().dictation.kind).toBe("listening");
+    // A short utterance: still all volatile when the person stops.
+    fire({ type: "dictation", finalDelta: "", volatile: "hello world" });
+    expect(screen.state().draft).toBe("hello world");
+    return { h, screen, voice, fire, pressSend };
+  }
+
+  test("tap stop, the engine ends with an ERROR, then Send: the dictated words are sent", async () => {
+    const w = await wired();
+    w.voice.tapMic();
+    w.fire({ type: "ended", reason: "error", attempt: 7 });
+    expect(w.screen.state().draft).toBe("hello world");
+    w.pressSend();
+    await settle();
+    expect(w.h.session.sent).toEqual(["hello world"]);
+  });
+
+  test("Send while listening, the engine ends with an ERROR: the dictated words are still sent", async () => {
+    const w = await wired();
+    w.pressSend();
+    w.fire({ type: "ended", reason: "error", attempt: 7 });
+    await settle();
+    expect(w.h.session.sent).toEqual(["hello world"]);
+  });
+
+  test("the happy path stays: tap stop, final arrives, ended stopped, Send", async () => {
+    const w = await wired();
+    w.voice.tapMic();
+    w.fire({ type: "dictation", finalDelta: "Hello world.", volatile: "" });
+    w.fire({ type: "ended", reason: "stopped", attempt: 7 });
+    w.pressSend();
+    await settle();
+    expect(w.h.session.sent).toEqual(["Hello world."]);
   });
 });
