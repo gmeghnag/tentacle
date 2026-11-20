@@ -413,3 +413,22 @@ Mutation non-vacuity (each reverted, tree clean afterwards): `link(up)` without 
 No test covers this mapping. `row-value.test.ts` tests the pure function only, so the bug sits in exactly the untested component logic §7 warns about. Fix: let the caller say what the trailing element is (e.g. a `trailingControl` flag, or `trailingKind: "control" | "value"`) and pass that to `rowAccessibility`. Pin it with a test on a `null`/value trailing.
 
 Behaviour of the executor: the triage was evidence-led and honest about the 7 quarantines and the flaky `serve-mcp` T12. The mutation claims I re-checked hold.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-20*
+
+**Verdict: PASS.** The round-1 MEDIUM is fixed (commit `3138a86b`).
+
+- **The fix:** callers now say what the trailing element is (`trailingKind` → `rowTrailing`, `row-value.ts`). A `null` or `undefined` trailing is always `none`. An element with no declared kind falls back to `control`, the safe default: the worst it can do is split a row into two elements, never hide a control. `commandEdge` (`session-commands.ts`) gives each Commands state its kind. Session info's `values` and Settings' checkmarks are `value`. Tools' `null` is now `none`.
+- **Mutations** (each reverted; `git status` clean afterwards):
+  - Row back to `trailing !== undefined` → `row-a11y.test` 5 fail.
+  - Session info `values` forced to `control` → 1 fail.
+  - Commands value edges forced to `control` → 3 fail.
+  - `rowTrailing` with `null` read as present → 3 fail.
+  - `row-a11y.test.ts` renders the real `Row`, `CommandsSheet` and `SessionInfoSheet`, so the component mapping is now pinned, not only the pure function.
+- **Gate:** `bun test apps/mobile/test` → 3937 pass, 0 fail. `bun run lint` → `Checked 2123 files … No fixes applied.` `bun run typecheck` → 0.
+- **Regressions:** none found.
+  - Rows that set no kind keep round 1's behaviour (`control`).
+  - The Commands rows now grouped again (dimmed, done, Clear running) were grouped on `main` too, so `main`'s XCUITest visibility is unchanged.
+- **Nit (not blocking):** `commandEdge`'s doc lists `confirming` under `none`, but the code returns `control`. `control` is correct, because the confirming row's Cancel and Clear are its trailing.
