@@ -1003,3 +1003,25 @@ chose "legacy does not count") survived both passes.
 ### Owner decision on F2 (2026-11-20 22:10)
 
 **(i′) chosen.** `runPairing` (app, `pairing-flow.ts`) sends `perProject: true`; the app keeps storing the record under `computer.id` until slice (b). Add the `pairing-flow.test.ts` assertion (red before green) and make `apps/mobile/test/pairing-e2e.test.ts` green. Nothing else of (b) in this slice.
+
+### Round 2 (after the owner's pick (i′) for F2; the fourth pass overall)
+
+*— claude-opus-5-5, 2026-11-20* (fresh context; scope: `git diff HEAD~1`, commit `a7899b67`)
+
+**Verdict: PASS.**
+
+- **F2 — FIXED, verified.** `apps/mobile/src/pairing-flow.ts:495` `perProject: true`;
+  storage stays under `result.computer.id`, as (i′) specifies. Re-run: `pairing-e2e` +
+  `pairing-flow-per-project` + `e2e-pairing` + `pairing-flow` = **38 pass / 0 fail**.
+  My mutation (drop the line): **3 pass / 8 fail** (the 7 real-daemon `pairing-e2e` tests go back to
+  `update_app`, and the source guard goes red too), so it is KILLED. I restored the file, and the tree is clean.
+- **Gate:** full `bun test` = **15988 pass / 5 skip / 0 fail** (15993 tests, 1135 files). The
+  branch adds no `skip`/`skipIf`, so the extra skips come from main. `bun run lint` is clean (2160 files), and
+  `bun run typecheck` is clean.
+- **Test quality:** `pairing-flow-per-project.test.ts` is a source-text guard (it gives its
+  reason: `mock.module` is process-wide in Bun). It is weak on its own, but the behavioural proof is
+  the real-daemon `pairing-e2e`, which the mutation shows dies with the line. Acceptable.
+- **Note (accepted by the owner, not a finding):** under (i′), pairing a SECOND project replaces the
+  phone's single record per computer, today's legacy record and key included. This lasts until (b)
+  keys records per project. The changelog's "The app pairs per project now" claims more than
+  that until (b) ships. Fine if (b) lands before the next `release`; otherwise state the limit there.
