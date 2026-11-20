@@ -1,6 +1,6 @@
 # fix/mobile-e2e-reds — Triage the mobile e2e gate's reds (+ fix/mobile-hub-new-session)
 
-> **Status:** execution
+> **Status:** review
 > **Branch:** `fix/mobile-e2e-reds` (also covers `fix/mobile-hub-new-session`, owner 2026-11-19: one branch)
 > Type: fix · Size: M · Blast: contained · Suited: Opus
 > **Changelog:** `changelog.d/mobile-hub-new-session.fixed.md` (hub New session) · `changelog.d/mobile-e2e-reds.fixed.md` (offline outbox + VoiceOver switches)
@@ -141,12 +141,177 @@ Quarantined (7, each with its reason in the flow header and a `TODO.md` line):
 `push-placeholder` + `22-notify-render` (Maestro cannot read SpringBoard banners on iOS 26),
 `22-notify-approve/-deny/-reply/-forged` (the response injection is DEV-build only; the gate runs Release).
 
-EXIT_RUNS_PLACEHOLDER
+**Exit criterion — two consecutive full runs, exit 0** (`scripts/e2e-gate.sh 0B43D716-9670-421A-BE51-9162004F2963`, each building its own Release; run 7 started right after run 6, no change in between):
+
+Run 6 (`1795134162559`, EXIT 0):
+
+```
+flow                    result       seconds  tries
+----------------------  -----------  -------  -----
+01-shell                PASS         42       1
+02-session-list         PASS         59       1
+03-refresh              PASS         58       1
+05-daemon-down          PASS         74       1
+12-pair-declined        PASS         38       1
+13-pair-expired         PASS         34       1
+14-pair-bad-text        PASS         39       1
+15-revoked              PASS         74       1
+16-remove-computer      PASS         77       1
+17-persisted            PASS         57       1
+18-camera-denied        PASS         55       1
+19-deep-link            PASS         42       1
+20-camera-close         PASS         71       1
+06-session-open         PASS         69       1
+07-prompt               PASS         95       1
+08-permission           PASS         77       1
+08b-permission-deny     PASS         57       1
+08c-permission-reply    PASS         69       1
+09-foreign-turn         PASS         53       1
+10-background-ask       PASS         73       1
+11-disconnect-mid-turn  PASS         76       1
+12-steer                PASS         152      1
+13-send-now             PASS         172      1
+14-returned-mine        PASS         141      1
+15-returned-other       PASS         47       1
+16-offline-outbox       PASS         77       1
+17-outbox-changed       PASS         56       1
+18-photos               PASS         61       1
+23-composer-keyboard    PASS         68       1
+24-ui-shots             PASS         126      1
+25-session-info         PASS         78       1
+26-drawer               PASS         80       1
+27-activity             PASS         175      1
+28-floating-activity    PASS         95       1
+29-tool-rows            PASS         101      1
+30-artifact-escape      PASS         53       1
+31-chart-inline         PASS         73       1
+32-chart-interact       PASS         62       1
+33-hub                  PASS         239      1
+34-hub-attach           PASS         48       1
+34-hub-activity         PASS         57       1
+34-hub-artifacts        PASS         46       1
+34-hub-tools            PASS         45       1
+34-hub-commands         PASS         45       1
+34-hub-sessions         PASS         46       1
+34-hub-info             PASS         46       1
+34-hub-scheduled        PASS         58       1
+34-hub-dictate          PASS         64       1
+34-hub-new              PASS         56       1
+18-lock-cold-start      PASS         45       1
+19-lock-unlock-button   QUARANTINED  -        -
+20-lock-immediately     PASS         48       1
+21-export-logs          PASS         52       1
+22-relay-only           PASS         72       1
+push-placeholder        QUARANTINED  -        -
+22-notify-render        QUARANTINED  -        -
+22-notify-approve       QUARANTINED  -        -
+22-notify-deny          QUARANTINED  -        -
+22-notify-reply         QUARANTINED  -        -
+22-notify-forged        QUARANTINED  -        -
+
+GATE PASS — 53 passed, 0 failed, 0 known-bug, 7 quarantined (of 60; 3872 s)
+
+Quarantined (not run):
+  19-lock-unlock-button — a resume with the lock up auto-prompts Face ID by design (app-lock.ts `resumed`), so the system sheet always covers `lock-unlock`, and a nomatch cannot be scripted on the simulator (it never resolves, Step 0) — the button cannot be reached here; its logic is app-lock.test.ts's (docs/fix/mobile-e2e-reds.md)
+  push-placeholder — Maestro cannot see a SpringBoard notification banner on the iOS 26 simulator — a plain `simctl push` banner, on screen during a 20 s `extendedWaitUntil`, was never found (docs/fix/mobile-e2e-reds.md); the banner is checked by hand (README D3) until Maestro can read it
+  22-notify-render — Maestro cannot see a SpringBoard notification banner on the iOS 26 simulator — a plain `simctl push` banner, on screen during a 20 s `extendedWaitUntil`, was never found (docs/fix/mobile-e2e-reds.md); the banner is checked by hand (README D3) until Maestro can read it
+  22-notify-approve — `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
+  22-notify-deny — `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
+  22-notify-reply — `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
+  22-notify-forged — `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
+```
+
+Run 7 (`1795138361914`, EXIT 0):
+
+```
+flow                    result       seconds  tries
+----------------------  -----------  -------  -----
+01-shell                PASS         40       1
+02-session-list         PASS         41       1
+03-refresh              PASS         42       1
+05-daemon-down          PASS         74       1
+12-pair-declined        PASS         38       1
+13-pair-expired         PASS         34       1
+14-pair-bad-text        PASS         33       1
+15-revoked              PASS         51       1
+16-remove-computer      PASS         55       1
+17-persisted            PASS         53       1
+18-camera-denied        PASS         54       1
+19-deep-link            PASS         30       1
+20-camera-close         PASS         52       1
+06-session-open         PASS         45       1
+07-prompt               PASS         71       1
+08-permission           PASS         61       1
+08b-permission-deny     PASS         52       1
+08c-permission-reply    PASS         61       1
+09-foreign-turn         PASS         51       1
+10-background-ask       PASS         60       1
+11-disconnect-mid-turn  PASS         51       1
+12-steer                PASS         149      1
+13-send-now             PASS         169      1
+14-returned-mine        PASS         116      1
+15-returned-other       PASS         44       1
+16-offline-outbox       PASS         77       1
+17-outbox-changed       PASS         56       1
+18-photos               PASS         61       1
+23-composer-keyboard    PASS         68       1
+24-ui-shots             PASS         134      1
+25-session-info         PASS         78       1
+26-drawer               PASS         80       1
+27-activity             PASS         160      1
+28-floating-activity    PASS         93       1
+29-tool-rows            PASS         100      1
+30-artifact-escape      PASS         53       1
+31-chart-inline         PASS         74       1
+32-chart-interact       PASS         62       1
+33-hub                  PASS         241      1
+34-hub-attach           PASS         48       1
+34-hub-activity         PASS         57       1
+34-hub-artifacts        PASS         46       1
+34-hub-tools            PASS         45       1
+34-hub-commands         PASS         45       1
+34-hub-sessions         PASS         46       1
+34-hub-info             PASS         47       1
+34-hub-scheduled        PASS         59       1
+34-hub-dictate          PASS         64       1
+34-hub-new              PASS         56       1
+18-lock-cold-start      PASS         46       1
+19-lock-unlock-button   QUARANTINED  -        -
+20-lock-immediately     PASS         48       1
+21-export-logs          PASS         53       1
+22-relay-only           PASS         72       1
+push-placeholder        QUARANTINED  -        -
+22-notify-render        QUARANTINED  -        -
+22-notify-approve       QUARANTINED  -        -
+22-notify-deny          QUARANTINED  -        -
+22-notify-reply         QUARANTINED  -        -
+22-notify-forged        QUARANTINED  -        -
+
+GATE PASS — 53 passed, 0 failed, 0 known-bug, 7 quarantined (of 60; 3598 s)
+
+Quarantined (not run):
+  19-lock-unlock-button — a resume with the lock up auto-prompts Face ID by design (app-lock.ts `resumed`), so the system sheet always covers `lock-unlock`, and a nomatch cannot be scripted on the simulator (it never resolves, Step 0) — the button cannot be reached here; its logic is app-lock.test.ts's (docs/fix/mobile-e2e-reds.md)
+  push-placeholder — Maestro cannot see a SpringBoard notification banner on the iOS 26 simulator — a plain `simctl push` banner, on screen during a 20 s `extendedWaitUntil`, was never found (docs/fix/mobile-e2e-reds.md); the banner is checked by hand (README D3) until Maestro can read it
+  22-notify-render — Maestro cannot see a SpringBoard notification banner on the iOS 26 simulator — a plain `simctl push` banner, on screen during a 20 s `extendedWaitUntil`, was never found (docs/fix/mobile-e2e-reds.md); the banner is checked by hand (README D3) until Maestro can read it
+  22-notify-approve — `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
+  22-notify-deny — `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
+  22-notify-reply — `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
+  22-notify-forged — `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
+```
 
 ### Gate
 
-GATE_PLACEHOLDER
+- `bunx tsc --noEmit` → 0 · `bunx tsc -p apps/mobile --noEmit` → 0 · `bun run lint` → `Checked 2122 files … No fixes applied.`
+- `bun test` (one full run, tail): `15668 pass · 5 skip · 0 fail · Ran 15673 tests across 1113 files` — the 5 skips are pre-existing (this diff adds none). An earlier full run had two fails in `packages/cli/test/serve-mcp.test.ts` T12 (outside this diff); the rerun was clean (timing-flaky, not this task's).
+- Red-before-green tests (each shown failing on the buggy code): `drawer-new-session.test.ts` (newSessionFromHub ×4), `compose-controller.test.ts` (Send later never waits), `session-screen-compose.test.ts` (outbox runs at `up`), `row-value.test.ts` (rowAccessibility), `activity.test.ts` (nothingRunning), `e2e-mock-gated.test.ts` (GATED; abort case mutation-checked), `e2e-hooks-query.test.ts` (queryOf; completeness check mutation-checked with tsc), `e2e-escape-probes.test.ts` (strays), `e2e-pairing.test.ts` (lastPayload).
+
+### Drift from the brief
+
+- Seven flows are quarantined, not fixed — each because the flow cannot work against the gate as designed (Face ID auto-prompt over the button; Maestro cannot read SpringBoard banners on iOS 26; the response injection is DEV-only and the gate runs Release). Each has its reason in the flow header and a `TODO.md` line.
+- Product fixes beyond New session (found by the triage, all `contained`, pure module + test): Send later offline, outbox at `up`, Row accessibility (Settings + Session info switches), Activity "Nothing running".
+- One unverified product suspicion recorded, not fixed: a rightward drag on the hub-opacity track may trigger iOS 26's content back-swipe (TODO.md device check).
+- Not wired into any publish script (the orchestrator's, after merge).
 
 ## Review
 
-*— (pending: fresh-context review)*
+*— (pending: fresh-context review by the orchestrator; this executor does not review its own work)*
