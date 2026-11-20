@@ -250,3 +250,59 @@ changelog fragment.
    (5 skips, the same count as the first run on this branch before the fixes;
    AGENTS §6 names three opt-in skips — the other two were not identified in
    this run and are not added by this branch: it adds no `skip`.)
+
+## Review
+
+*— claude-opus-5-5, 2026-11-20* (fresh context; SAME model as the executor —
+shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES**
+
+Findings:
+
+1. **HIGH — the commit is incomplete.** `git diff main...HEAD` adds
+   `expo-font` to `apps/mobile/package.json:23`, but the matching `bun.lock`
+   entry and the `NOTICE` Lato attribution (both listed in *Files*) are only in
+   the working tree, uncommitted. Merged as is, `main`'s lockfile disagrees
+   with its manifest (a `--frozen-lockfile` install fails / a plain install
+   rewrites it), and the bundled OFL font ships without the NOTICE line the
+   plan promised. Fix: commit `NOTICE` + `bun.lock` on this branch.
+2. **MEDIUM — the seam's wiring is untested (mutation survives).**
+   `apps/mobile/src/ui/Text.tsx:31`: replacing `inherited` with `{}` (nested
+   spans no longer inherit the parent's weight/style/mono family) leaves all
+   4096 mobile tests green. `textFont` itself is pinned, but the component that
+   feeds it (context read + `InheritContext.Provider` value + patched style)
+   has no test, and the simulator shots (§7 of Execution) were not taken, so
+   no evidence covers the font path end to end. Scenario: a regression makes a
+   plain span inside a bold title render Lato-Regular (or a span inside a mono
+   run render Lato) and nothing fails. Fix: a hook-stubbed render test of
+   `Text` (the repo's render tests already call components directly; stub
+   `useContext`) asserting patch + provided `inherit`, red by this mutation.
+
+Not raised (below MEDIUM): `diagramThemeKey`'s variant is unpinned
+(`diagram-theme.ts:143`, mutation survives) but `theme.key` has no consumer —
+the cache uses `renderKey`, whose variant IS pinned; `ImageViewer.tsx:10`
+keeps the B3 `#1E1F21` ground on graphite; the holder's write-before-load race
+is identical to `gallery-settings-store.ts` (prior art).
+
+Gate (reviewer): touched tests 313 pass / 0 fail (14 files); mobile suite
+4096 pass; `bun run lint` clean (2165 files); `bun run typecheck` clean.
+Full `bun run check` not re-run (Execution's: 16019 pass, 5 skip, 0 fail).
+
+Mutations (reverted; `git diff HEAD -- apps/mobile/src` empty after):
+`chartTokensFor` back to identity → caught (theme-beta 1 fail); seam drops
+`inherited` → **survives**; `diagramThemeKey` drops variant → survives.
+
+Attacks tried: (a) other dark-identity checks (`=== dark`, `darkPalette`,
+scheme reads) — only the three cited, all switched to `isDark`: holds;
+(b) text paths bypassing the seam (`Animated.Text`, RN `Button`, native
+headers) — none; `text-seam.test.ts` holds; (c) TextInput refs through the
+function seam (`Composer.tsx:103,133`) — React 19 passes `ref` as a prop,
+typecheck clean: holds; (d) OFF ⇒ same palette object, no wrapper element
+(`Text.tsx:29`): holds; (e) font-load failure retry (`fonts-expo.ts` resets
+the memo): holds. §7: no wire/persistence/session invariant touched (mobile
+UI only); "logic in pure modules" respected (`theme-beta.ts`).
+
+Executor behaviour: honest Execution (blocked screenshots and drift stated,
+mutation table real for the pure module); missed staging two of its own
+listed files and left the component glue without a red test.
