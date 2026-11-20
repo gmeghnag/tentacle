@@ -321,4 +321,50 @@ The two reds, classified (no NEW red vs main):
 
 ## Review
 
-*— pending (fresh context)*
+*— claude-opus-5-5, 2026-11-20*
+
+**Verdict: APPROVE** (no HIGH/MEDIUM finding). Scope: `git diff main...HEAD` only.
+Same model as the executor, fresh context: shared blind spots are possible (the
+blast is cross-module, not load-bearing, so this is within §10 routing).
+
+**Gate (re-run here):** touched tests (`compose-controller`, `floating-button`,
+`mobile-media-live-wiring`, `outbox`, `sent-photos`) 129 pass · 0 fail;
+`bun run lint` clean (2128 files); `bun run typecheck` clean. The full `bun test`
+was not re-run here (Execution reports 15731 pass · 0 fail · 5 opt-in skips).
+
+**Mutations (each reverted; `git status` clean afterwards):**
+- offline upload → `chipRefused` again (`compose-controller.ts` catch) → 2 fail
+  (offline photo into outbox; waiting chip on live link).
+- `takeChips` ignores `pending` → 1 fail (Send later with upload in flight).
+- `refsOf` without `firstById` → 1 fail (two byte-identical photos, one ref).
+
+**Attacks tried:**
+1. *Render loop from the new `useEffect([rows])` → `controller.window` →
+   `driver.view` → `commit` → `emit`*: none. `view().rows` is `transcript.rows`
+   passed through (`session-screen-controller.ts:1053`, `session-view.ts:355`),
+   so a thumbnail-only emit keeps the same identity; emits are coalesced
+   (`createRenderCoalescer`, :1400).
+2. *Duplicate ids on another prompt path*: every ref list goes through
+   `outbox.ts` `refsOf` (`outbox-driver.ts:376`, `compose-controller.ts:741`);
+   the steer/queue and Send-now paths take no chips. Holds.
+3. *Ref-less photo reaching a prompt*: `photosOf` omits `ref` for a waiting
+   chip, and only the outbox run (whose upload records the ref first) sends it.
+   An in-flight upload that finishes after a send-later is a no-op
+   (`chipUploaded` finds no chip); the outbox uploads it again (content-addressed).
+4. *Persistence (§7, on-disk format)*: `sentPhotos` is optional, schemaVersion
+   unchanged, malformed index dropped without setting the outbox aside
+   (`outbox-store.ts` `parseFile`); display-only, keyed by content id per
+   computer, so a daemon (pod) cannot make the phone show a file it did not send.
+   Holds.
+5. *Document chip with no handle*: `chipWaiting` skips documents, so it keeps
+   spinning; that is the same as on main (early `return`), not a regression.
+
+**Nits (not blocking):** `sentPhotos?.[id]` is a plain object lookup, so an id
+like `toString` would return a prototype member. Ref ids are sha256, so this
+can't happen in practice; `Object.hasOwn` would close it. Rows 13/14 are still
+NOT VERIFIED, as Execution states.
+
+**Executor behaviour:** honest. Two drifts found on the device were documented
+with their root cause and guard tests. The e2e reds were classified against
+main's build. The unfixed secondary symptom (a refused prompt reads as `lost`)
+is stated openly.
