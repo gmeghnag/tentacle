@@ -77,6 +77,7 @@ import {
   visible as floatVisible,
   footClearance,
   headerPill,
+  listEndPadding,
 } from "../floating-button.ts";
 import {
   type Follow,
@@ -377,17 +378,20 @@ export function SessionScreen({
   // The visible window: which images may fetch bytes (12b's driver, its own
   // bound: never the whole history).
   const visible = useRef({ first: 0, last: 0 });
+  /**
+   * The rows the LIST shows, current (fix/mobile-qa-1119 row 12): the viewable
+   * indexes are the FlatList's own (`state.view.rows`), and this callback is
+   * created once — reading `state` here read the FIRST render's (empty) rows,
+   * so no thumbnail was ever asked for and every history photo drew its label.
+   */
+  const listRows = useRef<readonly { kind: string }[]>([]);
   const onViewable = useRef(
     ({ viewableItems }: { viewableItems: readonly { index?: number | null }[] }) => {
       visible.current = {
         first: viewableItems[0]?.index ?? 0,
         last: viewableItems[viewableItems.length - 1]?.index ?? 0,
       };
-      controller.window(
-        visible.current.first,
-        visible.current.last,
-        state.transcript.rows as readonly { kind: string }[],
-      );
+      controller.window(visible.current.first, visible.current.last, listRows.current);
     },
   ).current;
 
@@ -624,6 +628,12 @@ export function SessionScreen({
 
   const banner = state.view.banner;
   const rows = state.view.rows;
+  listRows.current = rows;
+  // A resync REPLACES the rows without a viewability change: the window is
+  // asked again for the rows now on screen (row 12).
+  useEffect(() => {
+    controller.window(visible.current.first, visible.current.last, rows);
+  }, [controller, rows]);
   const running = state.view.composer.running;
   // The perf trace's loop runs only while a turn streams on this screen.
   useEffect(() => {
@@ -1405,7 +1415,21 @@ export function SessionScreen({
               }
               onViewableItemsChanged={onViewable}
               viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
-              contentContainerStyle={rows.length === 0 ? styles.emptyList : styles.list}
+              contentContainerStyle={
+                rows.length === 0
+                  ? styles.emptyList
+                  : [
+                      styles.list,
+                      // Row 17: the list's end clears a hub resting at the bottom.
+                      {
+                        paddingBottom: listEndPadding({
+                          mode: activitySettings.mode,
+                          position: activitySettings.position,
+                          bounds: band,
+                        }),
+                      },
+                    ]
+              }
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
               onScroll={onScroll}

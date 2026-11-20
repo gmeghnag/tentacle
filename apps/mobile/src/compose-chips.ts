@@ -46,6 +46,19 @@ export type Chip =
       readonly ref: { readonly id: string; readonly size: number };
     }
   | {
+      /**
+       * The upload could not reach the daemon (no link): the photo is NOT
+       * refused — it rides the message's outbox item ref-less, and the outbox's
+       * own upload sends it when the link is back (fix/mobile-qa-1119 row 9).
+       */
+      readonly key: string;
+      readonly kind: "image";
+      readonly state: "waiting";
+      readonly file: string;
+      readonly mimeType: string;
+      readonly name: string;
+    }
+  | {
       readonly key: string;
       readonly kind: "document";
       readonly state: "uploading";
@@ -209,6 +222,29 @@ export function chipDocumentReady(chips: Chips, key: string, block: DocumentCont
   );
 }
 
+/**
+ * The upload of IMAGE chip `key` found no link: it waits for the outbox (row 9).
+ * A document chip has no such path (its block is decided at attach) and is
+ * refused as before by the caller.
+ */
+export function chipWaiting(chips: Chips, key: string): Chips {
+  return chips.map((chip) =>
+    chip.key === key && chip.state === "uploading" && chip.kind === "image"
+      ? {
+          key: chip.key,
+          kind: "image",
+          state: "waiting",
+          file: chip.file,
+          mimeType: chip.mimeType,
+          name: chip.name,
+        }
+      : chip,
+  );
+}
+
+/** Whether a chip goes with the next send: uploaded, or waiting for the outbox's upload. */
+export const sendable = (chip: Chip): boolean => chip.state === "ready" || chip.state === "waiting";
+
 /** The upload of `key` was refused (`too_large`, `images_off`, `not_uploaded`, …). */
 export function chipRefused(chips: Chips, key: string, detail: string): Chips {
   return chips.map((chip) =>
@@ -229,8 +265,9 @@ export interface TakenChip {
   readonly file: string;
   readonly mimeType: string;
   readonly name: string;
-  readonly id: string;
-  readonly size: number;
+  /** Absent for a `waiting` chip: the outbox uploads it and records the ref (row 9). */
+  readonly id?: string;
+  readonly size?: number;
 }
 
 /** A sendable DOCUMENT chip: what the outbox item keeps, block included. */
@@ -251,13 +288,34 @@ export type TakenAttachment = TakenChip | ({ readonly kind: "document" } & Taken
  * `taken: []`: nothing sendable — the call must then send text only, never a
  * message naming a ref the daemon does not hold.
  */
-export function takeChips(chips: Chips): {
+export function takeChips(
+  chips: Chips,
+  options: {
+    /**
+     * OFFLINE (a send-later): an image still UPLOADING goes with this message
+     * too, ref-less — its upload cannot finish on a dead link, and leaving it
+     * for the next message moved the photo to the wrong one (row 9's device
+     * re-check). The outbox uploads it with the item.
+     */
+    readonly pending?: boolean;
+  } = {},
+): {
   readonly taken: readonly TakenAttachment[];
   readonly chips: Chips;
   /** Chips still uploading: their item goes out when they settle (D1's last row). */
   readonly uploading: number;
 } {
+  const takenNow = (chip: Chip): boolean =>
+    options.pending === true && chip.state === "uploading" && chip.kind === "image";
   const taken = chips.flatMap((chip): readonly TakenAttachment[] => {
+    if (
+      chip.state === "waiting" ||
+      (options.pending === true && chip.state === "uploading" && chip.kind === "image")
+    ) {
+      return [
+        { kind: "image", key: chip.key, file: chip.file, mimeType: chip.mimeType, name: chip.name },
+      ];
+    }
     if (chip.state !== "ready") {
       return [];
     }
@@ -287,11 +345,11 @@ export function takeChips(chips: Chips): {
   });
   return {
     taken,
-    // Ready ones left with the message; a refused one was never going out (its
+    // Ready (and waiting) ones left with the message; a refused one was never going out (its
     // reason was on screen, and the send clears the bar). Only a chip still
     // UPLOADING survives, to join the NEXT message (F5/F6).
-    chips: chips.filter((chip) => chip.state === "uploading"),
-    uploading: chips.filter((chip) => chip.state === "uploading").length,
+    chips: chips.filter((chip) => chip.state === "uploading" && !takenNow(chip)),
+    uploading: chips.filter((chip) => chip.state === "uploading" && !takenNow(chip)).length,
   };
 }
 

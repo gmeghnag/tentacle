@@ -23,6 +23,7 @@ import {
   View,
   useWindowDimensions,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { type ViewerItem, viewerPageAt } from "../../media-layout.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
@@ -46,6 +47,14 @@ export function MediaViewer({
   onClose,
 }: MediaViewerProps): JSX.Element {
   const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  /**
+   * The pager's own height, measured (fix/mobile-qa-1119 row 8): a page is a
+   * zooming ScrollView whose content container has NO height of its own, so a
+   * percent-height photo resolved to 0 pt and the viewer drew nothing. The
+   * photo takes this number instead; 0 until the first layout (one frame).
+   */
+  const [pageHeight, setPageHeight] = useState(0);
   /** The page the person swiped to (the tap's page is `index` until they do). */
   const [page, setPage] = useState(index);
   // A new tap (or the close) restarts the pager on the tapped page.
@@ -61,7 +70,18 @@ export function MediaViewer({
       onRequestClose={onClose}
       supportedOrientations={["portrait", "landscape"]}
     >
-      <View style={styles.scrim} testID="media-viewer">
+      <View
+        style={[
+          styles.scrim,
+          // The bars clear the status bar / Dynamic Island and the home
+          // indicator (row 8: the ✕ sat at y 14–46 pt, under the status bar,
+          // where iOS takes the touch — the only way out did nothing).
+          // Top/bottom only: the pager pages by the WINDOW's width, so a side
+          // inset would misalign every page after the first.
+          { paddingTop: insets.top, paddingBottom: insets.bottom },
+        ]}
+        testID="media-viewer"
+      >
         <View style={styles.bar}>
           {/* "2 of 5" — the message's own count, not the page's position in the
               pager alone: a photo with no pixels is not a page (viewerPages). */}
@@ -69,7 +89,9 @@ export function MediaViewer({
             testID="media-viewer-count"
             numberOfLines={1}
             maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            style={[typography.caption, styles.header, { color: palette.label }]}
+            // The scrim is black in both themes: the light theme's label colour
+            // (black) was unreadable on it (row 8's re-check).
+            style={[typography.caption, styles.header, styles.onScrim]}
           >
             {index < 0 ? "" : `${Math.max(0, page) + 1} of ${items.length}`}
           </Text>
@@ -94,21 +116,23 @@ export function MediaViewer({
           onMomentumScrollEnd={(event) =>
             setPage(viewerPageAt(event.nativeEvent.contentOffset.x, width, items.length))
           }
+          onLayout={(event) => setPageHeight(event.nativeEvent.layout.height)}
           style={styles.pager}
         >
-          {items.map((item) => (
+          {items.map((item, position) => (
             <ScrollView
               // iOS's own pinch: a page twice the screen's size is reachable.
               key={item.uri}
               maximumZoomScale={4}
               minimumZoomScale={1}
               centerContent
-              style={{ width }}
+              style={{ width, height: pageHeight }}
               contentContainerStyle={styles.page}
             >
               <Image
+                testID={`media-viewer-photo-${position}`}
                 source={{ uri: item.uri }}
-                style={{ width, height: "100%" }}
+                style={{ width, height: pageHeight }}
                 resizeMode="contain"
                 accessibilityIgnoresInvertColors
                 accessibilityLabel={item.label}
@@ -120,7 +144,7 @@ export function MediaViewer({
           <Text
             numberOfLines={2}
             maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            style={[typography.caption, styles.caption, { color: palette.sec }]}
+            style={[typography.caption, styles.caption, styles.onScrimSec]}
           >
             {caption}
           </Text>
@@ -156,6 +180,8 @@ const styles = StyleSheet.create({
     paddingVertical: space.transcript,
   },
   header: { flex: 1 },
+  onScrim: { color: "#ffffff" },
+  onScrimSec: { color: "rgba(255,255,255,0.7)" },
   caption: { flex: 1 },
   close: {
     width: 32,

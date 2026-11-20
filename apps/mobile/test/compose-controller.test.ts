@@ -61,6 +61,8 @@ function fakeHandle(
     readonly refuseEnqueue?: unknown;
     readonly refuseSendNow?: unknown | ((messages: readonly { id: string }[]) => unknown);
     readonly refuseUpload?: unknown;
+    /** The upload never answers (a dead link the client has not noticed yet). */
+    readonly hangUpload?: boolean;
     /** The send-now's ACK lands only when this resolves (the request still in flight). */
     readonly holdSendNow?: Promise<void>;
     readonly facts?: { historyLength: number; runningTurnId: string | null };
@@ -96,6 +98,9 @@ function fakeHandle(
     quoted,
     async attachImage(bytes, meta) {
       acts.push(`upload:${bytes.length}:${meta.name ?? ""}`);
+      if (options.hangUpload === true) {
+        return new Promise<never>(() => undefined);
+      }
       if (options.refuseUpload !== undefined) {
         throw options.refuseUpload;
       }
@@ -707,6 +712,60 @@ describe("the photo chips (D5, F13–F17)", () => {
     await h.compose.pickLibrary();
     expect(h.compose.view().chips[0]?.state).toBe("refused");
     expect(h.notices.at(-1)).toContain("refused");
+  });
+
+  test("a photo picked OFFLINE goes into the outbox item and up on reconnect (fix/mobile-qa-1119 row 9)", async () => {
+    // QA row 9: the upload failed on the dead link, the chip became `refused`
+    // (while its notice promised "goes up when the phone is back online"), and
+    // Send took ready chips only — the item went out with 0 images. The photo
+    // must ride the item, ref-less, so the outbox's own upload sends it.
+    const dropped = Object.assign(new Error("the socket died"), { name: "ChannelError" });
+    const h = await harness({
+      draft: "PHOTO offline",
+      handle: fakeHandle({ refuseUpload: dropped }),
+    });
+    h.picks.push(PICK);
+    await h.compose.pickLibrary();
+    expect(h.compose.view().chips[0]?.state).toBe("waiting");
+    await h.compose.press({ kind: "send-later", text: "PHOTO offline" });
+    expect(h.items().map((item) => [item.text, item.photos.length])).toEqual([
+      ["PHOTO offline", 1],
+    ]);
+    expect(h.items()[0]?.photos[0]?.ref).toBeUndefined();
+    expect(h.items()[0]?.photos[0]?.file).toBe(PICK.file);
+    expect(h.compose.view().chips).toEqual([]);
+    // Reconnect: the outbox's run uploads the photo, then sends the prompt.
+    await h.compose.runOutbox();
+    expect(h.handle.acts).toContain("port-upload:3");
+    expect(h.handle.acts.some((act) => act.startsWith("port-prompt:PHOTO offline"))).toBe(true);
+    expect(h.items()).toEqual([]);
+  });
+
+  test("Send later while the photo's upload is still IN FLIGHT takes that photo with THIS message (row 9, device re-check)", async () => {
+    // On the simulator the dead link's upload had not failed yet at the tap: the
+    // chip was `uploading`, stayed behind, and rode the NEXT message ("TEXT
+    // offline" got the photo, "PHOTO offline" went with 0 images).
+    const h = await harness({ draft: "PHOTO offline", handle: fakeHandle({ hangUpload: true }) });
+    h.picks.push(PICK);
+    void h.compose.pickLibrary();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.compose.view().chips[0]?.state).toBe("uploading");
+    await h.compose.press({ kind: "send-later", text: "PHOTO offline" });
+    expect(h.items().map((item) => [item.text, item.photos.length])).toEqual([
+      ["PHOTO offline", 1],
+    ]);
+    expect(h.compose.view().chips).toEqual([]);
+  });
+
+  test("a waiting chip on a LIVE link sends through the outbox, which uploads it (row 9)", async () => {
+    const dropped = Object.assign(new Error("the socket died"), { name: "ChannelError" });
+    const handle = fakeHandle({ refuseUpload: dropped });
+    const h = await harness({ draft: "back online", handle });
+    h.picks.push(PICK);
+    await h.compose.pickLibrary();
+    await h.compose.press({ kind: "send", text: "back online" });
+    expect(h.handle.acts).toContain("port-upload:3");
+    expect(h.handle.acts.some((act) => act.startsWith("port-prompt:back online"))).toBe(true);
   });
 
   test("a refused PICK (13c's pipeline) is a chip too, and nothing is uploaded", async () => {

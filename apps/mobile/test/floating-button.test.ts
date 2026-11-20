@@ -9,10 +9,12 @@ import {
   EDGE_INSET,
   FLOAT_SIZE,
   HUB_COLUMN,
+  LIST_END_PADDING,
   a11y,
   footClearance,
   headerPill,
   isTap,
+  listEndPadding,
   motion,
   place,
   snap,
@@ -199,5 +201,25 @@ describe("footClearance: the transcript's foot never sits under the hub (QA bug 
     // action flush to x 0 would sit under it there — the same bug, other side.
     const clearance = footClearance(true);
     expect(clearance).toBeGreaterThanOrEqual(EDGE_INSET + FLOAT_SIZE);
+  });
+});
+
+describe("listEndPadding (fix/mobile-qa-1119 row 17: the hub must not cover the last row at rest)", () => {
+  const bounds = { width: 402, height: 600 };
+
+  test("a hub resting at the bottom: the list's end clears its top edge", () => {
+    // Mutation: return LIST_END_PADDING always → the last row's end runs 46 pt under the hub.
+    const padding = listEndPadding({ mode: "floating", position: undefined, bounds });
+    const hubTop = place(undefined, bounds)?.y ?? 0;
+    expect(bounds.height - padding).toBeLessThanOrEqual(hubTop);
+  });
+
+  test("a hub in the upper half, the header mode, or no band: the plain padding", () => {
+    const top = { edge: "right", yFraction: 0 } as const;
+    expect(listEndPadding({ mode: "floating", position: top, bounds })).toBe(LIST_END_PADDING);
+    expect(listEndPadding({ mode: "header", position: undefined, bounds })).toBe(LIST_END_PADDING);
+    expect(listEndPadding({ mode: "floating", position: undefined, bounds: null })).toBe(
+      LIST_END_PADDING,
+    );
   });
 });

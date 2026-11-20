@@ -158,3 +158,32 @@ export function headerPill(input: {
 export function footClearance(drawn: boolean): number {
   return drawn ? HUB_COLUMN : 0;
 }
+
+/** The transcript's own bottom padding when nothing floats over its end. */
+export const LIST_END_PADDING = 16;
+
+/**
+ * The transcript's bottom padding (fix/mobile-qa-1119 row 17): with the hub
+ * resting in the band's LOWER half, the list's end clears the hub's top edge, so
+ * the last row is readable at rest instead of running under the button. A hub in
+ * the upper half (or none, or a band too short to place one) leaves the plain
+ * padding: a scrolled-to-end list never ends there.
+ */
+export function listEndPadding(input: {
+  readonly mode: ActivityButtonMode;
+  readonly position: FloatPosition | undefined;
+  readonly bounds: FloatBounds | null;
+}): number {
+  if (input.mode !== "floating" || input.bounds === null) {
+    return LIST_END_PADDING;
+  }
+  const at = place(input.position, input.bounds);
+  if (at === null) {
+    return LIST_END_PADDING;
+  }
+  const covered = input.bounds.height - at.y;
+  if (covered > input.bounds.height / 2) {
+    return LIST_END_PADDING;
+  }
+  return Math.max(LIST_END_PADDING, covered + BAND_MARGIN);
+}

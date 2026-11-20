@@ -29,6 +29,7 @@ import {
 } from "@tentacle/protocol";
 import type { Draft } from "./drafts.ts";
 import type { Basis, OutboxDocument, OutboxItem, OutboxPhoto, OutboxState } from "./outbox.ts";
+import { localPhotosOfItems, withSentPhotos } from "./sent-photos.ts";
 
 /** The on-disk schema this build writes for an ordinary file (no item carries a document). */
 export const OUTBOX_SCHEMA_VERSION = 1;
@@ -83,6 +84,13 @@ export interface OutboxData {
   readonly ownIds: readonly string[];
   /** `id → my text`, for the ids above that still have one (absent in a v1 file). */
   readonly ownTexts?: Readonly<Record<string, string>>;
+  /**
+   * `AttachmentRef.id → the copy it was uploaded from`, for the photos this
+   * phone SENT (fix/mobile-qa-1119 row 12): the transcript's only pixels for
+   * them once a resync rebuilds the rows from history (no read-back exists).
+   * Display-only and bounded (`withSentPhotos`); absent in an older file.
+   */
+  readonly sentPhotos?: Readonly<Record<string, string>>;
 }
 
 /** An empty store's content (a computer with nothing written yet). */
@@ -137,6 +145,8 @@ interface OutboxFile {
   readonly ownIds: readonly string[];
   /** `id → my text` (added by 13d; a v1 file has none, which is not corrupt). */
   readonly ownTexts?: Readonly<Record<string, string>>;
+  /** `ref id → copy` of sent photos (row 12; display-only, so never a reason to refuse). */
+  readonly sentPhotos?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -290,12 +300,20 @@ function parseFile(text: string): OutboxFile | "corrupt" | { readonly version: u
       return "corrupt";
     }
   }
+  // Display-only (row 12): a malformed index is dropped, never a reason to set a
+  // person's pending messages aside.
+  const sentPhotos =
+    isObject(raw.sentPhotos) &&
+    Object.values(raw.sentPhotos).every((file) => typeof file === "string")
+      ? (raw.sentPhotos as Record<string, string>)
+      : undefined;
   return {
     schemaVersion,
     items,
     drafts,
     ownIds,
     ...(ownTexts === undefined ? {} : { ownTexts: ownTexts as Record<string, string> }),
+    ...(sentPhotos === undefined ? {} : { sentPhotos }),
   };
 }
 
@@ -316,6 +334,7 @@ export const serializeOutbox = (data: OutboxData): string =>
     drafts: data.drafts,
     ownIds: data.ownIds,
     ...(data.ownTexts === undefined ? {} : { ownTexts: data.ownTexts }),
+    ...(data.sentPhotos === undefined ? {} : { sentPhotos: data.sentPhotos }),
   } satisfies OutboxFile);
 
 /**
@@ -418,6 +437,7 @@ export function createOutboxStore(
         drafts: parsed.drafts,
         ownIds: parsed.ownIds,
         ...(parsed.ownTexts === undefined ? {} : { ownTexts: parsed.ownTexts }),
+        ...(parsed.sentPhotos === undefined ? {} : { sentPhotos: parsed.sentPhotos }),
       };
       loaded = { kind: "loaded", data };
       return loaded;
@@ -426,7 +446,15 @@ export function createOutboxStore(
       return data;
     },
     setItems(items) {
-      return write({ ...data, items: [...items] });
+      // Every photo an item holds a ref for is indexed here, the one write every
+      // path (enqueue with refs, the driver's per-photo upload) goes through, so
+      // a sent photo keeps its pixels after a resync (row 12).
+      const sentPhotos = withSentPhotos(data.sentPhotos, localPhotosOfItems(items));
+      return write({
+        ...data,
+        items: [...items],
+        ...(sentPhotos === undefined ? {} : { sentPhotos }),
+      });
     },
     setDrafts(drafts) {
       return write({ ...data, drafts: [...drafts] });
