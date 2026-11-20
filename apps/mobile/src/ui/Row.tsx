@@ -28,7 +28,14 @@
  */
 import type { JSX, ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
-import { type RowValueKind, rowAccessibility, rowLayout, valueEllipsis } from "../row-value.ts";
+import {
+  type RowTrailing,
+  type RowValueKind,
+  rowAccessibility,
+  rowLayout,
+  rowTrailing,
+  valueEllipsis,
+} from "../row-value.ts";
 import {
   DENSE_FONT_SCALE,
   MONO,
@@ -62,6 +69,15 @@ export interface RowProps {
   /** A tile drawn dashed (an unreachable/cached entry). */
   readonly iconDashed?: boolean;
   readonly trailing?: ReactNode;
+  /**
+   * What the trailing element is (fix round 1): a `control` (a switch, Delete, a
+   * Stop) is its own VoiceOver element, a `value` (a state word, a reason, a
+   * read-only value) is read WITH the row. Defaults to `control` — swallowing an
+   * actionable control is the worse failure. An absent trailing is `none`
+   * whatever this says, so a caller may pass its own edge kind unconditionally
+   * (`session-commands.ts`'s `commandEdge`).
+   */
+  readonly trailingKind?: RowTrailing;
   readonly chevron?: boolean;
   /** Cached/offline: label and tile in `sec`. */
   readonly dimmed?: boolean;
@@ -95,6 +111,7 @@ export function Row({
   icon,
   iconDashed = false,
   trailing,
+  trailingKind,
   chevron = false,
   dimmed = false,
   tone = "default",
@@ -145,10 +162,11 @@ export function Row({
       </Text>
     );
   // A trailing control is always its OWN element; the row's action, if any, then
-  // rides on the label column (`rowAccessibility`).
+  // rides on the label column (`rowAccessibility`). What the trailing element IS
+  // comes from the caller: a `ReactNode` cannot be classified from here.
   const a11y = rowAccessibility({
     pressable: onPress !== undefined || onLongPress !== undefined,
-    control: trailing !== undefined,
+    trailing: rowTrailing(trailing, trailingKind),
   });
   return (
     <Pressable

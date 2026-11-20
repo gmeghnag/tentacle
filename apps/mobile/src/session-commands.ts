@@ -163,6 +163,36 @@ export function commandRows(input: CommandsInput): readonly CommandRow[] {
   return rows;
 }
 
+/**
+ * What a row's trailing edge IS, for VoiceOver (fix round 1,
+ * docs/fix/mobile-e2e-reds.md). The sheet draws one edge slot for every state and
+ * a `ReactNode` cannot be classified from the outside, so the decision is here:
+ *  - `none` — nothing is drawn (a ready row, or the confirming row, whose two
+ *    words ARE its edge rather than a trailing one);
+ *  - `value` — a READ: a dimmed row's reason, `Compacted ✓`, Clear's own
+ *    `Clearing…` readout. It belongs to the row and is read with it;
+ *  - `control` — something to act on: Compact's Stop or Retry, Auto-accept's
+ *    switch. Grouped, it was swallowed (unreachable to VoiceOver and XCUITest).
+ */
+export function commandEdge(state: CommandState, id: CommandId): "none" | "value" | "control" {
+  switch (state.kind) {
+    case "ready":
+      return "none";
+    case "dimmed":
+      return "value";
+    case "done":
+      return "value";
+    case "running":
+      // Only Compact's running edge carries a Stop; Clear's is a readout.
+      return id === "compact" ? "control" : "value";
+    case "failed":
+      return "control";
+    case "confirming":
+    case "toggle":
+      return "control";
+  }
+}
+
 export type ClearConfirmEvent = "arm" | "cancel" | "confirm" | "turn_started" | "link_down";
 
 /**

@@ -299,6 +299,87 @@ Quarantined (not run):
   22-notify-forged — `notify-respond` injects the response through a file the app reads in DEV builds only (App.tsx `if (__DEV__)`, Owner Q7: never in the shipped build), and the gate installs the shippable Release, so the injected action never reaches the app (docs/fix/mobile-e2e-reds.md); run it against a dev build, or on a device (README D3)
 ```
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-20*
+
+**MEDIUM fixed: `Row.tsx` treated ANY defined `trailing` as a control.** Root cause:
+`rowAccessibility({ control: trailing !== undefined })` — "is something there"
+answers a different question from "is it something the person ACTS on". A `ReactNode`
+cannot be classified from the component (Session info's `values` and its `delete` are
+both a `View`; Commands' one edge slot is a `<Text>` reason for a dimmed row and a
+two-button `View` for a running one), so the distinction moved to a declared
+`trailingKind`, and to the pure module that knows each caller's states:
+
+- `row-value.ts:126` `RowTrailing = "none" | "value" | "control"` and `:139`
+  `rowTrailing(trailing, declared)`: an ABSENT edge (`undefined` **or `null`**) is
+  `none` whatever the caller said; otherwise the declaration stands, with `control`
+  as the floor — for an undeclared element and for a caller that says `none` while
+  passing one. Swallowing an actionable control is the worse failure (the original
+  bug: a disabled "Dictation, Dictation" VoiceOver and XCUITest cannot reach), while
+  a value wrongly called a control only splits one read in two.
+- `row-value.ts:159` `rowAccessibility` now takes `trailing: RowTrailing`, not
+  `control: boolean` — it can no longer be asked the wrong question.
+- `ui/Row.tsx:80` the new `trailingKind` prop, `:169` the pure decision.
+- `session-commands.ts:177` `commandEdge(state, id)` — the Commands sheet's own
+  classification (its one edge slot has seven shapes): `ready`/`confirming` → `none`,
+  a dimmed reason and `Compacted ✓` → `value`, a running CLEAR's `Clearing…` →
+  `value`, a running COMPACT (it carries Stop), a failure (Retry), Clear's confirm
+  and Auto-accept's switch → `control`.
+- Callers that now say what their edge is: `CommandsSheet.tsx:265,282` (its own
+  `commandEdge`), `SessionInfoSheet.tsx:244` (`control` when the row has a switch or
+  a Delete, `value` for the plain `values` read), `SettingsScreen.tsx:229,293,427,480,522`
+  (a checkmark is a READ of the stored choice, so the choice rows stay one element —
+  the fix for Review (a)(b)(c) beyond the sheets). `ToolsSheet.tsx` needed nothing:
+  its `null` is now `none` by the pure rule, and its only real edge is a switch.
+
+**Red before green** — `apps/mobile/test/row-a11y.test.ts` (new; renders the real
+element tree with `react-native`/`expo-symbols`/`react-native-safe-area-context` as
+host stubs, the `session-info-schedules-render.test.ts` pattern) + new cases in
+`row-value.test.ts` and `session-commands.test.ts`. On the pre-fix code (the old
+`control: trailing !== undefined`), the new file: `5 pass · 4 fail`, every fail on an
+assertion, none on an import:
+`trailing VALUE … read together` (`Expected: true / Received: false`), `a null
+trailing is no trailing at all`, `a ready Commands row is ONE element`, `a dimmed
+row's reason is read WITH the row`. After the fix all are green.
+
+The Tools band's `null` edge is the one case whose component test cannot be rendered
+in the same file (`ToolsSheet.tsx` imports `RefreshControl`/`TextInput` while
+`CommandsSheet.tsx` needs `ActivityIndicator`, and Bun's `mock.module` is
+process-wide — the same pre-existing trap as `commands-sheet` +
+`session-info-schedules-render`). It is pinned in `row-value.test.ts` instead, on the
+sheet's exact call (`rowTrailing(null, undefined) === "none"`);
+`ToolsSheet.tsx:78` itself is unchanged by this branch (`git diff main --` empty),
+which is the point: the pure rule had to fix it, not the sheet.
+
+**Mutation non-vacuity** (each mutated, run, reverted; tree re-checked with
+`git diff --stat` after every one):
+
+| Mutation | Witness |
+|---|---|
+| `rowTrailing`: drop the declaration (`return "control"`) | `4 fail` — row-a11y ×4 (the value/null/ready/dimmed cases) |
+| `rowTrailing`: drop the `null` guard (`if (trailing === undefined)`) | `3 fail` — `a null trailing is no trailing at all` + the ready Commands row + (on `row-value.test.ts`) the Tools call `rowTrailing(null, undefined)` |
+| `Row.tsx`: back to `trailing !== undefined ? "control" : "none"` | `5 fail` — row-a11y, incl. the Session info `Model` row |
+| `SessionInfoSheet`: `trailingKind` hard-wired to `"value"` | `1 fail` — `a row that shows a value AND switches is split` (its MCP switch swallowed) |
+| `commandEdge`: a running row always `"value"` | `3 fail` — `commandEdge` ×2 + `a running row's Stop is its own element` |
+
+**One drift from the Review's suggested shape**, deliberate: the Review offered
+`trailingControl` (a boolean) or `trailingKind`. A boolean still cannot express
+`none` vs `value` distinctly at the boundary the bug was about, and the absent case
+must be `none` even when the caller passes the prop unconditionally (Commands'
+`edgeFor` is `null` on every ready row, so `trailingControl` would have had to be
+computed per state anyway) — so the pure rule owns the whole three-way
+classification and `Row` only forwards it.
+
+**Tests run:** `apps/mobile/test` whole (267 files) → `3937 pass · 0 fail · 15722
+expect() calls`; `bunx tsc -p apps/mobile --noEmit` → 0; `bunx biome check` on the 9
+touched source/test files → `No fixes applied`. The full repo gate is the orchestrator's.
+Known harness artifact, NOT this diff: running `commands-sheet.test.ts` together with
+`session-info-schedules-render.test.ts` fails the former on `Export named
+'ActivityIndicator' not found` — `mock.module` is process-wide and the latter's
+stub omits it; both files are untouched by this branch (`git diff main --` empty) and
+either runs green with its own sibling set.
+
 ### Gate
 
 - `bunx tsc --noEmit` → 0 · `bunx tsc -p apps/mobile --noEmit` → 0 · `bun run lint` → `Checked 2122 files … No fixes applied.`

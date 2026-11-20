@@ -17,6 +17,7 @@ import {
   SESSION_ENDED,
   WAITS_FOR_TURN,
   clearConfirm,
+  commandEdge,
   commandRows,
 } from "../src/session-commands.ts";
 
@@ -113,6 +114,54 @@ describe("commandRows — availability", () => {
   test("a handle without compact/clear has no such rows (P6), never a dead one", () => {
     const ids = commandRows({ ...base, canCompact: false, canClear: false }).map((r) => r.id);
     expect(ids).toEqual(["rename", "retry", "autoAccept"]);
+  });
+});
+
+describe("commandEdge — what the row's edge IS, for VoiceOver (fix round 1)", () => {
+  test("a ready row has NO edge: the absence is never a control", () => {
+    // `edgeFor` returns `null` here. Counted as a control, the row became
+    // `accessible={false}` and a ready command stopped being one button.
+    expect(commandEdge({ kind: "ready" }, "compact")).toBe("none");
+    expect(commandEdge({ kind: "ready" }, "rename")).toBe("none");
+  });
+
+  test("a dimmed row's reason and `Compacted ✓` are READ WITH the row", () => {
+    expect(commandEdge({ kind: "dimmed", reason: WAITS_FOR_TURN }, "compact")).toBe("value");
+    expect(commandEdge({ kind: "done", text: COMPACTED_DONE }, "compact")).toBe("value");
+  });
+
+  test("a running COMPACT has Stop: its own element, never swallowed", () => {
+    // Grouped, Stop was unreachable — the same class of bug as a swallowed switch.
+    expect(commandEdge({ kind: "running" }, "compact")).toBe("control");
+  });
+
+  test("a running CLEAR is only a readout (`Clearing…`, no Stop)", () => {
+    // The one place the edge depends on the ID, not the state: only Compact's
+    // running row carries the Stop action.
+    expect(commandEdge({ kind: "running" }, "clear")).toBe("value");
+  });
+
+  test("a failure's Retry, Clear's confirm and Auto-accept's switch are controls", () => {
+    expect(commandEdge({ kind: "failed", text: "nope" }, "compact")).toBe("control");
+    expect(commandEdge({ kind: "confirming" }, "clear")).toBe("control");
+    expect(commandEdge({ kind: "toggle", on: false }, "autoAccept")).toBe("control");
+  });
+
+  test("every state is classified (no state left to a default)", () => {
+    const states: readonly CommandState[] = [
+      { kind: "ready" },
+      { kind: "dimmed", reason: WAITS_FOR_TURN },
+      { kind: "confirming" },
+      { kind: "running" },
+      { kind: "done", text: COMPACTED_DONE },
+      { kind: "failed", text: "nope" },
+      { kind: "toggle", on: true },
+    ];
+    const edges = states.map((state) => commandEdge(state, "compact"));
+    // Non-vacuity: the mapping really varies, and a ready row is the only `none`.
+    expect(edges.filter((edge) => edge === "none")).toHaveLength(1);
+    expect(edges.filter((edge) => edge === "value")).toHaveLength(2);
+    expect(edges.filter((edge) => edge === "control")).toHaveLength(4);
   });
 });
 
