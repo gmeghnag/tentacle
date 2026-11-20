@@ -820,6 +820,32 @@ clean. `tsc -p apps/mobile`: clean; `tsc -p packages/daemon`: no error in a
 touched file. Full `bun run check`: left to the orchestrator's script —
 expected red ONLY on the 7 `pairing-e2e.test.ts` tests above (F2).
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-20*
+
+Review round 2: F1 and F3 FIXED (verified by the reviewer); one open HIGH (F2),
+no MEDIUM; one note on accepted cost.
+
+**F2 (HIGH, `pairing-e2e.test.ts` 7 red) — NOT FIXED: ESCALATED.** Fixing it needs app
+production code (`pairing-flow.ts` `runPairing`), which is outside the approved
+Implementation of slice (a) (Q11: the app belongs to (b)). Neither this doc nor
+`TODO.md` records an owner choice among (i′) / (i) / (ii) (Fix round 1). The
+executor rules forbid production code outside the approved plan, and §4/§6
+forbid (ii) without explicit OK. So no code changed, and there is no red→green
+or mutation to show. Decision needed from the owner: **(i′)** (recommended:
+`runPairing` sends `perProject: true`, storage stays under `computer.id` until
+(b); about 1 line + one `pairing-flow.test.ts` assertion), **(i)**, or **(ii)**.
+
+**Accepted-cost note (review round 2) — DONE (doc only).**
+`changelog.d/project-pairing.added.md` no longer says that a `serve` with no paired
+device "never" dials the relay. It now says that every `serve` dials it until
+a pre-upgrade phone first connects to one project, and that a stale old pairing
+keeps that up until `devices revoke` / `reset`.
+
+**Gate:** no code changed this round. Full `bun run check` is left to the orchestrator's
+script, which is expected red ONLY on the 7 `pairing-e2e.test.ts` tests (F2).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-20* (fresh context; scope: slice (a), `git diff main...HEAD`)
