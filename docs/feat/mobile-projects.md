@@ -846,6 +846,58 @@ keeps that up until `devices revoke` / `reset`.
 **Gate:** no code changed this round. Full `bun run check` is left to the orchestrator's
 script, which is expected red ONLY on the 7 `pairing-e2e.test.ts` tests (F2).
 
+### Fix round 1 (review round 3 → owner decision on F2, 22:10 · option (i′))
+
+*— claude-opus-5-5, 2026-11-20*
+
+One open finding, one change. F1/F3 were verified FIXED by review round 2/3.
+
+**F2 (HIGH, `pairing-e2e.test.ts` 7 red) — FIXED, per the owner's (i′).**
+`apps/mobile/src/pairing-flow.ts:495` — `runPairing`'s `pairDevice({…})` call now
+sends `perProject: true` (with the comment naming why the daemon refuses without
+it, and that storage stays under `result.computer.id` until (b)). **Nothing else of
+(b):** the record id, `onPaired`, the link registry and the three id-match sites
+(`notification-action.ts:174`, `notifications-expo.ts:163`, `push-manager.ts:311`)
+are untouched, so push routing is exactly as before.
+
+- **Red before green, on the property.** New
+  `apps/mobile/test/pairing-flow-per-project.test.ts` (source guard over the
+  `pairDevice` argument block: positive control `deviceKey`/`name`, then
+  `perProject: true,`; plus the (i′) pin `id: result.computer.id,` and
+  `not.toContain("id: result.project")`) → `expect(received).toContain("perProject: true,")`.
+  The socket-level reds are the pre-existing ones: `pairing-e2e.test.ts` **2 pass /
+  7 fail** (all `update_app`), measured at the start of this round.
+- **Green:** `pairing-e2e.test.ts` + `e2e-pairing.test.ts` → **16 pass / 0 fail**
+  (was 2/7 in the first file). With the guards/flow files:
+  `pairing-flow{,per-project}`, `pairing-e2e`, `e2e-pairing`, `pairing-guards`,
+  `pairing-wiring-guards`, `deep-link` → **68 pass / 0 fail**.
+  `packages/client/test/pairing.test.ts` (the client's opt-in pin) →
+  **17 pass / 0 fail**, unchanged.
+- **Mutation (drop `perProject: true,` from the call):** the same 5-file set →
+  **42 pass / 8 fail** = the 7 `pairing-e2e` reds + the new guard, i.e. KILLED;
+  reverted, back to 68/0.
+- **Drift from (i′)'s letter, and why:** the review asked for "one
+  `pairing-flow.test.ts` assertion". I first wrote it there as a
+  `mock.module("@tentacle/client/pairing")` spy on `pairDevice`; it passed alone,
+  but Bun's `mock.module` is process-wide and `afterAll(mock.restore())` does not
+  unload `pairing-flow.ts`'s already-bound `pairDevice`, so in a shared run it
+  turned **6 real-daemon tests red** (`pairing-e2e`'s success/P9/Keychain/`n`/
+  revoke/reset — measured 43 pass / 6 fail). A test file that poisons its
+  neighbours is a gate bug, so the seam moved to a source guard in its own file
+  (`pairing-flow-per-project.test.ts`) and the socket-level proof stays where it
+  already was, in `pairing-e2e.test.ts`. Same property, same mutation, no
+  process-wide fake.
+
+**Changelog (doc only):** `changelog.d/project-pairing.added.md` no longer says
+"the app needs an update to pair a new project" — this release's app does; an
+older installed app is the one told to update.
+
+**Gate (this round, narrow, as instructed — the orchestrator's script runs the
+full one):** `bunx biome check` on the 2 changed files: clean.
+`tsc -p apps/mobile --noEmit`: clean. Tests as listed above (the 4 app files I
+touched/cover the change + the client's pairing pin). Full `bun test` /
+repo typecheck / repo lint: **not run here**, by the round's token budget.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-20* (fresh context; scope: slice (a), `git diff main...HEAD`)

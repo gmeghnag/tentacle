@@ -485,6 +485,14 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
       payload,
       deviceKey: keypair.privateKey,
       name: deviceName,
+      // A pairing is PER PROJECT (docs/feat/mobile-projects.md Owner Q9): the
+      // daemon refuses one that does not say so (`update_app`) because an app
+      // filing per computer would overwrite the record — and the key — of the
+      // project it already used. (i′) stores under `result.computer.id` until
+      // slice (b) keys records per project, which is why this is the ONLY half
+      // of that bullet here: the daemon's per-project id reaches push routing
+      // later, with the record id it is matched against.
+      perProject: true,
       dial,
       random,
       // Report the code and return: the human compares it with the computer's
