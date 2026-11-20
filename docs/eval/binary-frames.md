@@ -1,6 +1,6 @@
 # eval/binary-frames — bytes as bytes on every `DuplexChannel` (and whether live media needs a non-TCP path)
 
-> **Status:** context · implementation proposal (pending the owner's verdict on §Owner questions)
+> **Status:** owner verdict 2026-11-20 (all recs, Q2 = clean break) — slices BF2…BF5 queued
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Each slice below opens its own `feat/`/`fix/` branch when promoted.
 > **Type:** eval · **Size:** — (umbrella; slices sized in §Slices) · **Blast:** load-bearing (transport seam, protocol, relay) · **Suited:** Opus (plan); per-slice in §Slices
 > **Changelog:** none (an eval ships no code; each slice names its own fragment)
@@ -667,6 +667,8 @@ Recommended order: **BF1 → BF2 → (BF0-E2 result) → BF3 → BF4 → BF5.**
    any daemon advertises it. *Recommendation: deploy the relay half of BF2
    first* (it is inert until a daemon sees `binary: true`), and keep
    `RELAY_PROTOCOL_VERSION` at 1 (the change is an optional field + forwarding).
+
+**Owner verdict (2026-11-20): ALL recommendations accepted, except Q2 → CLEAN BREAK.** Owner: the mobile app is not published yet, so breaking backward compatibility is fine whenever it makes the design cleaner. Q1 go, order BF2 → BF3 → BF4 → BF5 (BF1 already merged `00b967dc`) · **Q2 binary-only carrier, `E2E_CHANNEL_VERSION` 2, no dual-carrier switch** (the plan must still make a version mismatch read as "update the app/daemon", not as a revoked key, if that is cheap) · Q3 `sendBytes`/`setOnBytes` mandatory · Q4 replace `attachment/put` / `artifact/read` base64 (`protocol.d/` notes) · Q5 BF3 lands alone, right before BF4 · Q6 stay on TCP + binary frames; `eval/media-channel` only on a §C6 trigger · Q7 relay half of BF2 deployed first (now required, not just safe: a binary-only daemon needs a relay that forwards binary).
 
 ## Execution
 
