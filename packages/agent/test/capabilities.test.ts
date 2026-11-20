@@ -5,15 +5,19 @@ import { ToolRegistry } from "@tentacle/tools";
 import { z } from "zod";
 import {
   type CapabilityOp,
+  CapabilityRefusal,
   NO_CAPABILITIES,
   type ServerOf,
   type SessionCapabilities,
   applyCapabilityOp,
   isHidden,
   isSkillHidden,
+  isToolDisabled,
   projectSystem,
   projectTools,
 } from "../src/capabilities.ts";
+
+const SKILL_NAME = "skill";
 
 const caps = (over: Partial<SessionCapabilities> = {}): SessionCapabilities => ({
   ...NO_CAPABILITIES,
@@ -91,6 +95,7 @@ describe("applyCapabilityOp", () => {
     expect(applyCapabilityOp(caps(), op("skill", "k8s", false))).toEqual({
       disabledMcp: [],
       disabledSkills: ["k8s"],
+      disabledTools: [],
     });
   });
 
@@ -103,7 +108,7 @@ describe("applyCapabilityOp", () => {
   });
 
   test("an unsorted, duplicated set collapses; the input is never mutated", () => {
-    const messy = { disabledMcp: ["b", "a", "b"], disabledSkills: [] };
+    const messy = { disabledMcp: ["b", "a", "b"], disabledSkills: [], disabledTools: [] };
     expect(applyCapabilityOp(messy, op("mcp", "c", false)).disabledMcp).toEqual(["a", "b", "c"]);
     expect(messy.disabledMcp).toEqual(["b", "a", "b"]);
   });
@@ -312,5 +317,62 @@ describe("isHidden / isSkillHidden (the execution guard's predicates)", () => {
     const state = caps({ disabledSkills: ["k8s"] });
     expect(isSkillHidden("k8s", state)).toBe(true);
     expect(isSkillHidden("damajs", state)).toBe(false);
+  });
+});
+
+describe("built-in tool switches (docs/feat/tool-toggles.md D2)", () => {
+  const def = (name: string): ToolDefinition => ({
+    name,
+    description: name,
+    parameters: { type: "object", properties: {} },
+  });
+  const none: ServerOf = () => undefined;
+
+  test("a group is ONE op: every member off at once, and back on at once", () => {
+    const a = applyCapabilityOp(caps(), op("tool", "visuals", false));
+    expect(a.disabledTools).toEqual(["chart", "diagram", "present"]);
+    expect(a.disabledMcp).toEqual([]);
+    const b = applyCapabilityOp(a, op("tool", "visuals", true));
+    expect(b.disabledTools).toEqual([]);
+  });
+
+  test("idempotent by identity for a group and for a single tool", () => {
+    const a = applyCapabilityOp(caps(), op("tool", "shell", false));
+    expect(applyCapabilityOp(a, op("tool", "shell", false))).toBe(a);
+    expect(applyCapabilityOp(a, op("tool", "shell_kill", false))).toBe(a);
+    const on = caps();
+    expect(applyCapabilityOp(on, op("tool", "chart", true))).toBe(on);
+  });
+
+  test("a partially-off group switched on clears every member", () => {
+    const a = applyCapabilityOp(caps(), op("tool", "chart", false));
+    expect(applyCapabilityOp(a, op("tool", "visuals", true)).disabledTools).toEqual([]);
+  });
+
+  test("an unknown name or skill is refused, state unchanged", () => {
+    const s = caps({ disabledTools: ["chart"] });
+    expect(() => applyCapabilityOp(s, op("tool", "fs_mult_edit", false))).toThrow(
+      CapabilityRefusal,
+    );
+    expect(() => applyCapabilityOp(s, op("tool", "skill", false))).toThrow("always on");
+    expect(s.disabledTools).toEqual(["chart"]);
+  });
+
+  test("projectTools drops a disabled built-in; never skill, even with skill in the set", () => {
+    const defs = [def("fs_read"), def("chart"), def(SKILL_NAME)];
+    const out = projectTools(defs, none, caps({ disabledTools: ["chart", SKILL_NAME] }));
+    expect(out.map((d) => d.name)).toEqual(["fs_read", SKILL_NAME]);
+  });
+
+  test("the SAME array comes back when nothing is hidden (prompt cache holds)", () => {
+    const defs = [def("fs_read"), def("chart")];
+    expect(projectTools(defs, none, caps())).toBe(defs);
+    expect(projectTools(defs, none, caps({ disabledTools: ["diagram"] }))).toBe(defs);
+  });
+
+  test("isToolDisabled reads the set; skill never", () => {
+    expect(isToolDisabled("chart", caps({ disabledTools: ["chart"] }))).toBe(true);
+    expect(isToolDisabled("diagram", caps({ disabledTools: ["chart"] }))).toBe(false);
+    expect(isToolDisabled(SKILL_NAME, caps({ disabledTools: [SKILL_NAME] }))).toBe(false);
   });
 });

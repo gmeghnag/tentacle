@@ -63,10 +63,13 @@ import {
   userSkillCall,
 } from "@tentacle/tools";
 import {
+  type BuiltinToolEntry,
   NO_CAPABILITIES,
   type SessionCapabilities,
+  builtinToolList,
   isHidden,
   isSkillHidden,
+  isToolDisabled,
   projectSystem,
   projectTools,
 } from "./capabilities.ts";
@@ -971,6 +974,11 @@ export class Agent {
     return this.listing;
   }
 
+  /** The registered built-ins for `/tools` (docs/feat/tool-toggles.md D6), under the current switches. */
+  builtinTools(): BuiltinToolEntry[] {
+    return builtinToolList(this.config.tools.definitions(), this.serverOf, this.capabilities());
+  }
+
   /** The session's capability switches now (what the NEXT model call will be projected with). */
   capabilities(): SessionCapabilities {
     return this.readCapabilities();
@@ -1089,9 +1097,9 @@ export class Agent {
     this.pruneState.delete(messages);
   }
 
-  /** Why a call is refused under the round's `caps`: a hidden server's tool or skill; else undefined. */
+  /** Why a call is refused under the round's `caps`: a hidden server's tool, a disabled built-in or skill; else undefined. */
   private hiddenCallRefusal(call: ToolCall, caps: SessionCapabilities): ToolResult | undefined {
-    if (isHidden(call.name, this.serverOf, caps)) {
+    if (isHidden(call.name, this.serverOf, caps) || isToolDisabled(call.name, caps)) {
       return { content: `${call.name} is turned off for this session`, isError: true };
     }
     if (call.name === SKILL_TOOL_NAME) {

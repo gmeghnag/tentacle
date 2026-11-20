@@ -533,6 +533,10 @@ function requestError(command: string, what: string, error: unknown): string {
 /** The `/mcp` notice when the status request itself failed. */
 export const mcpStatusError = (error: unknown): string => requestError("/mcp", "MCP status", error);
 
+/** The `/tools` notice when the list request failed (an older daemon: it predates it, F8). */
+export const toolsListError = (error: unknown): string =>
+  requestError("/tools", "Tool list", error);
+
 /** The `/skills` notice when the list request failed. */
 export const skillsListError = (error: unknown): string =>
   requestError("/skills", "Skill list", error);

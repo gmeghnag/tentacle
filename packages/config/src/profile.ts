@@ -4,7 +4,8 @@
  * failure into a `ConfigError`.
  *
  * Rules: a top-level setting in the profile wins; `subagents`/`tools`/
- * `contextAwareness`/`contextReset`/`contextPrune`/`schedules`/`mount`/`detach`/`tui` merge per key; `model` merges per key EXCEPT the connection group (provider, baseURL,
+ * `contextAwareness`/`contextReset`/`contextPrune`/`schedules`/`mount`/`detach`/`tui` merge per key
+ * (and `tools.enabled` per key inside, docs/feat/tool-toggles.md); `model` merges per key EXCEPT the connection group (provider, baseURL,
  * apiKey, apiKeyCommand), which moves as a unit, so a key is never sent to an
  * endpoint it was not configured for; `mcpServers` merge by name (a definition
  * is replaced whole, `null` removes it); `models` and `subagents.types` merge by
@@ -134,7 +135,15 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
     config.schedules = { ...base.schedules, ...schedules };
   }
   if (tools) {
-    config.tools = { ...base.tools, ...tools };
+    // `tools.enabled` merges per key too (docs/feat/tool-toggles.md Q3): a lean
+    // profile adds its switches to the base's, and `true` undoes a base `false`.
+    config.tools = {
+      ...base.tools,
+      ...tools,
+      ...(base.tools?.enabled !== undefined || tools.enabled !== undefined
+        ? { enabled: { ...base.tools?.enabled, ...tools.enabled } }
+        : {}),
+    };
   }
   if (mcpServers) {
     config.mcpServers = mergeServers(base.mcpServers, mcpServers);

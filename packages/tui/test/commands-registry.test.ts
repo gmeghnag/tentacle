@@ -122,7 +122,8 @@ describe("S2 registry: the ONE list, and the vocabulary derived from it", () => 
   test("the registry is the 19 built-ins the docs and the palette promise", () => {
     // Deliberately literal: this is the list a user reads in /help. A new
     // command is a decision, so it must be added here too. `/artifacts`
-    // (docs/feat/model-artifacts.md S6a) is the 19th.
+    // (docs/feat/model-artifacts.md S6a) is the 19th; `/tools`
+    // (docs/feat/tool-toggles.md D7) follows `/skills`.
     expect(BUILT_INS.map((c) => c.name)).toEqual([
       "/help",
       "/clear",
@@ -139,6 +140,7 @@ describe("S2 registry: the ONE list, and the vocabulary derived from it", () => 
       "/tokens",
       "/mcp",
       "/skills",
+      "/tools",
       "/artifacts",
       "/schedule",
       "/agents",

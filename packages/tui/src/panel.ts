@@ -14,7 +14,7 @@
  *
  * Pure; a tree panel's `data` is null while the request is in flight.
  */
-import type { CapOp, CapsPhase } from "./capability-toggles.ts";
+import { type CapOp, type CapsPhase, noSwitchNotice } from "./capability-toggles.ts";
 import { type PanelAt, kindOf } from "./panels/registry.ts";
 import type { OpenPanel, TreePanel } from "./panels/types.ts";
 import type { PanelView, TreeAction } from "./tree-panel.ts";
@@ -33,6 +33,7 @@ export {
   schedulesPanel,
   sessionsPanel,
   skillsPanel,
+  toolsPanel,
 } from "./panels/types.ts";
 
 /**
@@ -63,6 +64,12 @@ export function panelView(
  */
 export function panelSwitchOp(panel: OpenPanel, width: number, caps: CapsPhase): CapOp | null {
   return kindOf(panel).switchOp?.(panel, width, caps) ?? null;
+}
+
+/** What Space on the open panel says when it shows no switch (null: nothing to say). */
+export function panelNoSwitchNotice(panel: OpenPanel, caps: CapsPhase): string | null {
+  const kind = kindOf(panel);
+  return kind.noSwitchNotice ? kind.noSwitchNotice(caps) : noSwitchNotice(caps);
 }
 
 /**

@@ -144,8 +144,16 @@ describe("S7: a panel kind is described by its OWN descriptor, found by lookup",
   test("every real kind has exactly one descriptor, claiming its own `kind`", () => {
     const kinds = PANEL_KINDS.map((k) => k.kind);
     // `/artifacts` (docs/feat/model-artifacts.md S6a) and `/schedule`
-    // (docs/feat/cron-tool.md S5) joined the original three.
-    expect(kinds.slice().sort()).toEqual(["artifacts", "mcp", "schedule", "sessions", "skills"]);
+    // (docs/feat/cron-tool.md S5) joined the original three, then `/tools`
+    // (docs/feat/tool-toggles.md D7).
+    expect(kinds.slice().sort()).toEqual([
+      "artifacts",
+      "mcp",
+      "schedule",
+      "sessions",
+      "skills",
+      "tools",
+    ]);
     for (const desc of PANEL_KINDS) {
       // A descriptor whose `kind` field disagreed with its body would hand a
       // panel to another kind's projection.

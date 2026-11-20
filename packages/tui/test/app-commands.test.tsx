@@ -98,6 +98,7 @@ describe("S0 command smoke: every built-in command answers", () => {
       "/tokens",
       "/mcp",
       "/skills",
+      "/tools",
       "/artifacts",
       "/schedule",
       "/agents",
@@ -206,6 +207,8 @@ describe("S0 command smoke: every built-in command answers", () => {
     expect(t.frame()).toContain("Renaming isn't available on this runtime.");
     await t.line("/mcp");
     expect(t.frame()).toContain("MCP status isn't available on this runtime.");
+    await t.line("/tools");
+    expect(t.frame()).toContain("The tool list isn't available on this runtime.");
     t.app.unmount();
   });
 

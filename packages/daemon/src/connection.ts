@@ -74,6 +74,8 @@ import {
   type SessionListParams,
   type SessionSkillsParams,
   type SessionSkillsResult,
+  type SessionToolsParams,
+  type SessionToolsResult,
   type SessionTtlParams,
   type SetAutoAcceptParams,
   type SetCapabilityParams,
@@ -456,6 +458,8 @@ export class Connection {
         return this.mcpStatus();
       case Method.SessionSkills:
         return this.sessionSkills(params as SessionSkillsParams);
+      case Method.SessionTools:
+        return this.sessionTools(params as SessionToolsParams);
       case Method.SessionContext:
         return this.sessionContext(params as SessionContextParams, context?.signal);
       // Synchronous from the offset check to the append, holding no lock
@@ -645,6 +649,15 @@ export class Connection {
       return this.host.newSessionSkills(params.settings);
     }
     return this.lookup(params.sessionId).skills();
+  }
+
+  // No lock (AGENTS §7). A session id must be one this connection opened; none
+  // → the built-ins a session created now would have (docs/feat/tool-toggles.md).
+  private async sessionTools(params: SessionToolsParams): Promise<SessionToolsResult> {
+    if (params.sessionId === undefined) {
+      return this.host.newSessionTools(this.servesModel ? this : null, params.settings);
+    }
+    return this.lookup(params.sessionId).tools();
   }
 
   private snapshot(params: SnapshotParams): SnapshotResult {

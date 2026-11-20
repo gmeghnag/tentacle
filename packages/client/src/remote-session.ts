@@ -28,6 +28,7 @@ import {
   type SessionCapabilitiesWire,
   type SessionSettingsReport,
   type SessionSkillsResult,
+  type SessionToolsResult,
   type SessionUpdate,
   type SubagentRow,
   type TurnEnd,
@@ -402,7 +403,8 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
-   * `session/set_capability`: turn one MCP server or skill on/off for the model.
+   * `session/set_capability`: turn one MCP server, skill or built-in tool/group
+   * on/off for the model (docs/feat/tool-toggles.md: `tool`).
    * The state is NOT taken from the answer but from the daemon's echo (the
    * `capabilities` update, emitted before it answers): with two clients racing,
    * a late answer must not undo the other's later change (F4). Resolves with the
@@ -410,7 +412,7 @@ export class RemoteSession implements SessionStreamListener {
    * older daemon) also clears the state, so the toggles hide (F7).
    */
   async setCapability(
-    kind: "mcp" | "skill",
+    kind: "mcp" | "skill" | "tool",
     name: string,
     enabled: boolean,
   ): Promise<SessionCapabilitiesWire> {
@@ -1180,6 +1182,17 @@ export class RemoteSession implements SessionStreamListener {
   async skills(): Promise<SessionSkillsResult> {
     const id = this.id ?? (this.opening ? await this.opening : null);
     return this.client.sessionSkills(id ?? undefined);
+  }
+
+  /**
+   * This session's built-in tools (`session/tools`, docs/feat/tool-toggles.md
+   * D6): group, heuristic token cost, switch. Before the first send there is no
+   * daemon-side session: the tools a session created now would have. While the
+   * eager attach is still opening it, waits for the id.
+   */
+  async tools(): Promise<SessionToolsResult> {
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    return this.client.sessionTools(id ?? undefined);
   }
 
   /**

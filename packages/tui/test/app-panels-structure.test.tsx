@@ -74,23 +74,24 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
   test("the façade delegates by KIND LOOKUP, over a registry of descriptors", () => {
     const facade = readSrc("panel.ts");
     // One lookup per facade call, and nothing that switches on a kind itself.
-    // view, apply, click, switchOp (docs/feat/session-capabilities.md S4).
-    expect(countOf(facade, "kindOf(panel)")).toBe(4);
+    // view, apply, click, switchOp (docs/feat/session-capabilities.md S4),
+    // noSwitchNotice (docs/feat/tool-toggles.md D7: `/tools` words it itself).
+    expect(countOf(facade, "kindOf(panel)")).toBe(5);
     expect(facade).not.toContain('=== "mcp"');
     expect(facade).not.toContain('=== "skills"');
     const registry = readSrc(join("panels", "registry.ts"));
     // ONE line per kind: the measurable "new panel = file + registry line".
     // `/artifacts` (docs/feat/model-artifacts.md S6a) and `/schedule`
     // (docs/feat/cron-tool.md S5) each arrived exactly that way: their own file
-    // plus one entry in this list.
+    // plus one entry in this list — and `/tools` (docs/feat/tool-toggles.md D7).
     const list = /PANEL_KINDS: readonly PanelKind<OpenPanel>\[\] = \[([\s\S]*?)\];/.exec(
       registry,
     )?.[1];
     expect(list).toBeDefined();
-    for (const kind of ["sessions", "mcp", "skills", "artifacts", "schedule"]) {
+    for (const kind of ["sessions", "mcp", "skills", "tools", "artifacts", "schedule"]) {
       expect((list ?? "").match(new RegExp(`${kind}Kind`, "g"))).toHaveLength(1);
     }
-    expect((list ?? "").split(",").filter((s) => s.trim() !== "")).toHaveLength(5);
+    expect((list ?? "").split(",").filter((s) => s.trim() !== "")).toHaveLength(6);
     // The two panel key layers are the registry's decision too, not their own.
     const layers = readSrc(join("keys", "layer-panels.ts"));
     expect(layers).not.toContain("sessionsKey");

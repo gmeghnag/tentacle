@@ -48,6 +48,7 @@ import {
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
+  type SessionToolsResult,
   type SessionTtlParams,
   type SessionTtlResult,
   type UpdateSettingsResult,
@@ -71,7 +72,7 @@ import {
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
-import { toSessionSkills } from "./mapping.ts";
+import { fromWireCapabilities, toSessionSkills, toSessionTools } from "./mapping.ts";
 import {
   type ClearForkCapture,
   type DaemonSessionRecord,
@@ -608,6 +609,31 @@ export class SessionHost {
   }
 
   /**
+   * `session/tools` with no session: the built-ins a session created now would
+   * have (docs/feat/tool-toggles.md D6) — the same `createAgent` factory builds
+   * a throwaway agent, as `newSessionContext` does; nothing is hosted or listed.
+   */
+  async newSessionTools(
+    link: ModelLink | null,
+    settings?: SessionSettings,
+  ): Promise<SessionToolsResult> {
+    const artifacts = new ArtifactStore(this.artifactBudget);
+    const { agent, jobs, agentJobs, workloadShells } = this.opts.createAgent(this.opts.defaultCwd, {
+      modelLink: () => link,
+      ...(settings ? { settings } : {}),
+      artifacts,
+    });
+    try {
+      return toSessionTools(agent.builtinTools());
+    } finally {
+      artifacts.dispose();
+      jobs?.dispose();
+      agentJobs?.dispose();
+      await workloadShells?.dispose();
+    }
+  }
+
+  /**
    * `session/context` with no session: the context a session created now would
    * send (system prompt + tools), counted like a live one's. The same
    * `createAgent` factory builds a throwaway agent (its jobs are disposed at
@@ -1025,7 +1051,7 @@ export class SessionHost {
     // The switches too (docs/feat/session-capabilities.md): a resume from the
     // laptop's copy, a `/clear` fork and a hop target carry them this way.
     if (params.capabilities !== undefined) {
-      host.seedCapabilities(params.capabilities);
+      host.seedCapabilities(fromWireCapabilities(params.capabilities));
     }
     const { epoch } = host.attach(attachment);
     return { hosted: host, created: true, resync: false, epoch };

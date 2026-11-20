@@ -1528,6 +1528,24 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Absolute or `~/…` dirs, matched by real path (a symlink out of one stays refused; a dangling or looping symlink, or a FIFO, is refused everywhere). Files are replaced atomically (a `0600` temp file, then the target's permission bits, then rename), so a planted hard link is never written through; like an editor's atomic save this breaks hard links and does not keep owner, group, ACLs or extended attributes. A file you could not write in place (read-only, or another user's) is still refused with `EACCES`. In a directory you cannot create files in, an existing writable file is written in place (no symlink followed, refused if hard-linked); a new file there is refused. Limit, on hosts shared with other users only: another user who controls a directory on the path (e.g. one they made in `/tmp`) can race a swap and make the content land in a new hidden file elsewhere; an existing file there is never written in place. The default is the system temp dir (`$TMPDIR`) and `/tmp`; a list REPLACES it, `[]` means the project only, and `/` and relative entries are ignored (and logged). Matched on the daemon's host, so NOT carried to a pod: there the pod's own temp dirs apply. Each write still asks unless auto-accept is on. The `shell` tool is not confined.",
     example: '["/tmp", "~/scratch"]',
   },
+  "tools.enabled": {
+    summary: 'Built-in tools to switch off, by group or by name: `{ "visuals": false }`.',
+    kind: "section",
+    type: "map",
+    scope: "both",
+    carried: "no",
+    details:
+      "Groups: `subagents` (agent_task, agent_control, agent_notify, …), `shell` (shell, shell_output, shell_kill), `schedule` (schedule_create, schedule_control), `visuals` (chart, diagram, present), `context_reset`, `move_session`, `workload_shell`; or a single tool name (`fs_multi_edit`, `search`, …). A single tool's entry beats its group's. `skill` is always on (switch single skills with `/skills`). `true` only un-hides: it never turns on a feature that is off (`subagents.enabled`, `contextReset.enabled`, `sessionHop.tool`, `workloadShell.tool`). An unknown name is an error. A profile's map merges per key over the base's. Seeds every session created under this config (in a pod, unioned with the pod's own: off wins); `/tools` switches them for the session.",
+    example: '{ "visuals": false, "subagents": false }',
+  },
+  "tools.enabled.*": {
+    summary: "Whether this built-in tool or group is offered to the model.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    example: "false",
+  },
 };
 
 /** The two nodes that exist only in the top-level file. */

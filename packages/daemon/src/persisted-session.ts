@@ -7,14 +7,18 @@
  * Only `serve` persists (its host is the user's own machine). A pod daemon
  * never does: a record it wrote would be pod-supplied history (AGENTS §7).
  */
-import { type SessionRecord, type TitleState, suspendedInGroup } from "@tentacle/agent";
+import {
+  type SessionCapabilities,
+  type SessionRecord,
+  type TitleState,
+  suspendedInGroup,
+} from "@tentacle/agent";
 import type { ChatMessage, ScheduledJob, ToolCall } from "@tentacle/core";
 import {
   DomainErrorCode,
   type KnownLogEntry,
   type LogCursor,
   type ReturnedEntry,
-  type SessionCapabilitiesWire,
   type TurnEnd,
 } from "@tentacle/protocol";
 
@@ -160,7 +164,7 @@ export interface DaemonSessionRecord extends SessionRecord {
    * last segment's). No sidecar field — the log is the record. Absent → none
    * logged, everything on.
    */
-  readonly capabilities?: SessionCapabilitiesWire;
+  readonly capabilities?: SessionCapabilities;
   /** The log's projection at `logHead` (`messages` = its first `k` messages + the overlay). */
   readonly logged: readonly ChatMessage[];
   /** The log entry this record pairs with: a reload continues the session's log lineage from it. */

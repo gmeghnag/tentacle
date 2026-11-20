@@ -7,6 +7,7 @@
  */
 import { z } from "zod";
 import { modelRefIssues } from "./models.ts";
+import { toolEnabledIssues } from "./tool-groups.ts";
 
 /**
  * The largest `liveActivity.startAfterSeconds` (one hour) and its default (20 s,
@@ -651,6 +652,15 @@ const settingsShape = {
        * realpath, on the daemon's host; NOT carried to a pod (its own default).
        */
       writableDirs: z.array(WritableDirSchema).optional(),
+      /**
+       * Built-in tools to switch off, by group (`subagents`, `shell`,
+       * `schedule`, `visuals`, `context_reset`, `move_session`,
+       * `workload_shell`) or by tool name: `{ "visuals": false }`
+       * (docs/feat/tool-toggles.md). A single tool's entry beats its group's.
+       * `skill` is always on; `true` never turns on a feature that is off.
+       * A profile's map merges per key over the base's.
+       */
+      enabled: z.record(z.boolean()).optional(),
     })
     .strict()
     .optional(),
@@ -685,6 +695,11 @@ export const FileConfigSchema = z
   // and `config set`'s whole-file validation both refuse it.
   .superRefine((file, ctx) => {
     for (const message of modelRefIssues(file)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    }
+    // Built-in tool switches name a known group or tool, never `skill`
+    // (docs/feat/tool-toggles.md F1/F2), in the base and each merged profile.
+    for (const message of toolEnabledIssues(file)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message });
     }
   });

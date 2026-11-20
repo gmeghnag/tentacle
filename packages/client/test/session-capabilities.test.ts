@@ -73,14 +73,14 @@ describe("RemoteSession capabilities", () => {
     const a = ca.newSession(undefined, "S");
     const seenA = follow(a);
     await a.openSeeded();
-    expect(a.capabilities()).toEqual({ disabledMcp: [], disabledSkills: [] });
+    expect(a.capabilities()).toEqual({ disabledMcp: [], disabledSkills: [], disabledTools: [] });
     const b = cb.newSession(undefined, "S", undefined, { attach: {} });
     const seenB = follow(b);
     await b.open();
-    expect(b.capabilities()).toEqual({ disabledMcp: [], disabledSkills: [] });
+    expect(b.capabilities()).toEqual({ disabledMcp: [], disabledSkills: [], disabledTools: [] });
 
     const after = await a.setCapability("mcp", "echo", false);
-    const off = { disabledMcp: ["echo"], disabledSkills: [] };
+    const off = { disabledMcp: ["echo"], disabledSkills: [], disabledTools: [] };
     expect(after).toEqual(off);
     expect(await waitFor(() => seenB.length === 2)).toBe(true);
     expect(seenB.at(-1)).toEqual({ state: off, by: "laptop" });
@@ -171,7 +171,7 @@ describe("RemoteSession capabilities", () => {
 
 // Slice S3b: the switches a client carries into a session it (re)creates.
 describe("the client carries the switches into a session it creates", () => {
-  const OFF = { disabledMcp: ["echo"], disabledSkills: [] };
+  const OFF = { disabledMcp: ["echo"], disabledSkills: [], disabledTools: [] };
   const quietHost = () =>
     new SessionHost({
       defaultCwd: "/tmp/session-capabilities-client",
@@ -238,6 +238,103 @@ describe("the client carries the switches into a session it creates", () => {
     expect(next.capabilities()).toEqual(OFF);
     const after = rc.newSession(undefined, "N2");
     await after.openSeeded();
-    expect(after.capabilities()).toEqual({ disabledMcp: [], disabledSkills: [] });
+    expect(after.capabilities()).toEqual({
+      disabledMcp: [],
+      disabledSkills: [],
+      disabledTools: [],
+    });
+  });
+});
+
+// docs/feat/tool-toggles.md D5: the laptop's `tools.enabled` set is a SEED
+// unioned into every session the client creates.
+describe("baseDisabledTools rides every create", () => {
+  const BASE = ["chart", "diagram", "present"];
+  function rig() {
+    const host = new SessionHost({
+      defaultCwd: "/tmp/tool-toggles-client",
+      createAgent: () => ({
+        agent: new Agent({
+          model: {
+            id: "quiet",
+            async *stream() {
+              yield { type: "done" as const };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: {} as ExecutionEnvironment,
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const client = async (base?: readonly string[]) => {
+      const [d, c] = createChannelPair();
+      new Connection(d, host);
+      const rc = new RemoteClient(c, new PermissionBroker(), undefined, {
+        clientInfo: { name: "laptop", version: "1" },
+        ...(base ? { baseDisabledTools: base } : {}),
+      });
+      await rc.initialize();
+      return rc;
+    };
+    return { host, client };
+  }
+
+  test("a new session, a resume from the laptop's copy and a /clear fork all start with it", async () => {
+    // Mutation: drop `withBaseTools` in `openSession` → each starts with [].
+    const r = rig();
+    const rc = await r.client(BASE);
+    const fresh = rc.newSession(undefined, "N");
+    await fresh.openSeeded();
+    expect(fresh.capabilities()?.disabledTools).toEqual(BASE);
+
+    // A resumed record carries its own switches: the base is UNIONED in (Q4).
+    const resumed = rc.newSession([{ role: "user", content: "q" }], "R", undefined, {
+      capabilities: { disabledMcp: ["echo"], disabledSkills: [], disabledTools: ["shell"] },
+    });
+    await resumed.openSeeded();
+    expect(resumed.capabilities()).toEqual({
+      disabledMcp: ["echo"],
+      disabledSkills: [],
+      disabledTools: ["chart", "diagram", "present", "shell"],
+    });
+
+    // A `/clear` fork (the one-shot seed) too — and the user's re-enable of a
+    // base tool in the OLD session does not survive into the NEW one.
+    await resumed.setCapability("tool", "visuals", true);
+    resumed.seedCapabilities();
+    const fork = rc.newSession(undefined, "F");
+    await fork.openSeeded();
+    expect(fork.capabilities()?.disabledTools).toEqual([...BASE, "shell"]);
+  });
+
+  test("no base → nothing added (the seed path is unchanged)", async () => {
+    const r = rig();
+    const rc = await r.client();
+    const fresh = rc.newSession(undefined, "N");
+    await fresh.openSeeded();
+    expect(fresh.capabilities()?.disabledTools).toEqual([]);
+  });
+
+  test("sessionTools: with no session asks for the would-be session; an older daemon is MethodNotFound", async () => {
+    const r = rig();
+    const rc = await r.client();
+    expect((await rc.sessionTools()).tools).toEqual([]);
+    const [daemonCh, clientCh] = createChannelPair();
+    new RpcPeer(daemonCh, {
+      onRequest: async (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, `no ${method}`);
+      },
+    });
+    const old = new RemoteClient(clientCh, new PermissionBroker());
+    await old.initialize();
+    const err = await old.sessionTools().catch((e: unknown) => e);
+    expect(err instanceof RpcError && err.code === JsonRpcErrorCode.MethodNotFound).toBe(true);
   });
 });

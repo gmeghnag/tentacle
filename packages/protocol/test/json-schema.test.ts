@@ -540,6 +540,17 @@ const FIXTURES: Record<string, Json[]> = {
     { request: { messages: [{ role: "user", content: "hi" }] } },
   ],
   "methods/model~1countTokens/result": [{}, { tokens: 0 }, { tokens: 1234 }],
+  "methods/session~1tools/params": [{}, { sessionId: "s" }, { settings: { maxIterations: 3 } }],
+  "methods/session~1tools/result": [
+    { tools: [] },
+    {
+      tools: [
+        { name: "chart", group: "visuals", tokens: 1299, disabled: true },
+        { name: "skill", tokens: 40, locked: true },
+        { name: "fs_read", tokens: 264 },
+      ],
+    },
+  ],
   "methods/session~1skills/params": [{}, { sessionId: "s" }],
   "methods/session~1skills/result": [
     { slash: [], skills: [], problems: [], moreProblems: 0 },

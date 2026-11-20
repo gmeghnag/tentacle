@@ -473,3 +473,138 @@ describe("F12: a context reset keeps the projection and carries no disabled skil
     });
   });
 });
+
+// docs/feat/tool-toggles.md: built-in tools switched off (`disabledTools`) go
+// through the SAME projection and the SAME execution guard.
+describe("built-in tool switches (disabledTools)", () => {
+  /** A built-in that asks permission; `ran` counts executions. */
+  function spyBuiltin(name: string, ran: string[]): Tool<{ x?: string | undefined }> {
+    return {
+      name,
+      description: `the ${name} tool`,
+      inputSchema: z.object({ x: z.string().optional() }),
+      permission: "ask",
+      async execute() {
+        ran.push(name);
+        return { content: `${name} ran` };
+      },
+    };
+  }
+  const VISUALS = ["chart", "diagram", "present"];
+
+  test("a config-seeded set keeps those tools out of EVERY model request; skill stays", async () => {
+    const ran: string[] = [];
+    const h = harness({
+      capabilities: off({ disabledTools: VISUALS }),
+      script: [calls(call("c1", "fs_read")), [{ type: "text", delta: "done" }]],
+    });
+    for (const n of [...VISUALS, "fs_read"]) h.tools.register(spyBuiltin(n, ran));
+    await collect(h.session.send("go"));
+    expect(h.model.requests).toHaveLength(2);
+    for (const r of h.model.requests) {
+      const names = toolNames(r);
+      for (const n of VISUALS) expect(names).not.toContain(n);
+      expect(names).toContain("fs_read");
+      expect(names).toContain(SKILL_TOOL_NAME);
+    }
+  });
+
+  test("set mid-session: the next request drops the tool, and switching it back restores it", async () => {
+    const h = harness({
+      script: [
+        [{ type: "text", delta: "one" }],
+        [{ type: "text", delta: "two" }],
+        [{ type: "text", delta: "three" }],
+      ],
+    });
+    h.tools.register(spyBuiltin("chart", []));
+    await collect(h.session.send("a"));
+    h.agent.setCapabilities(off({ disabledTools: ["chart"] }));
+    await collect(h.session.send("b"));
+    h.agent.setCapabilities(NO_CAPABILITIES);
+    await collect(h.session.send("c"));
+    expect(toolNames(h.model.requests[0])).toContain("chart");
+    expect(toolNames(h.model.requests[1])).not.toContain("chart");
+    expect(toolNames(h.model.requests[2])).toContain("chart");
+  });
+
+  test("a call to a disabled tool is refused, never executed, and asks no permission", async () => {
+    const ran: string[] = [];
+    const asked: string[] = [];
+    const h = harness({
+      capabilities: off({ disabledTools: ["chart"] }),
+      extra: {
+        requestPermission: async (req) => {
+          asked.push(req.tool);
+          return { allowed: true };
+        },
+      },
+      script: [calls(call("c1", "chart", { x: "y" })), [{ type: "text", delta: "ok" }]],
+    });
+    h.tools.register(spyBuiltin("chart", ran));
+    const events = await collect(h.session.send("go"));
+    expect(resultOf(events, "c1")).toBe("chart is turned off for this session");
+    expect(ran).toEqual([]);
+    expect(asked).toEqual([]);
+  });
+
+  test("the same call runs (through the gate) when the tool is on — the refusal is the switch", async () => {
+    const ran: string[] = [];
+    const asked: string[] = [];
+    const h = harness({
+      extra: {
+        requestPermission: async (req) => {
+          asked.push(req.tool);
+          return { allowed: true };
+        },
+      },
+      script: [calls(call("c1", "chart", { x: "y" })), [{ type: "text", delta: "ok" }]],
+    });
+    h.tools.register(spyBuiltin("chart", ran));
+    const events = await collect(h.session.send("go"));
+    expect(resultOf(events, "c1")).toBe("chart ran");
+    expect(ran).toEqual(["chart"]);
+    expect(asked).toEqual(["chart"]);
+  });
+
+  test("skill in the set (a hostile seed) never hides the skill tool nor refuses its call", async () => {
+    const h = harness({
+      capabilities: off({ disabledTools: [SKILL_TOOL_NAME] }),
+      script: [
+        calls(call("s1", SKILL_TOOL_NAME, { name: "k8s" })),
+        [{ type: "text", delta: "ok" }],
+      ],
+    });
+    const events = await collect(h.session.send("go"));
+    expect(toolNames(h.model.requests[0])).toContain(SKILL_TOOL_NAME);
+    expect(resultOf(events, "s1")).not.toContain("turned off");
+    expect(h.reads).toEqual(["k8s"]);
+  });
+
+  test("a child (explore) never gets a tool the parent disabled — its own `search` included — and its call is refused", async () => {
+    const ran: string[] = [];
+    const state = off({ disabledTools: ["search"] });
+    const child = new ScriptedProvider([
+      calls(call("s1", "search", { pattern: "x" })),
+      [{ type: "text", delta: "report" }],
+    ]);
+    const { run } = createSubagentRunner({
+      model: child,
+      env: noopEnv,
+      tools: new ToolRegistry().register(spyBuiltin("fs_read", ran)),
+      capabilities: () => state,
+    });
+    await run({ description: "d", prompt: "p", type: "explore" });
+    expect(child.requests.length).toBeGreaterThan(0);
+    for (const r of child.requests) {
+      expect(toolNames(r)).toContain("fs_read");
+      expect(toolNames(r)).not.toContain("search");
+    }
+    const answered = child.requests[1]?.messages.find(
+      (m) => m.role === "tool" && m.toolCallId === "s1",
+    );
+    expect(JSON.stringify(answered?.content)).toContain("search is turned off for this session");
+    // The child holds no setter: the parent's state is what it was.
+    expect(state.disabledTools).toEqual(["search"]);
+  });
+});

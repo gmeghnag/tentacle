@@ -28,6 +28,7 @@ import { mcpKind } from "./mcp.ts";
 import { scheduleKind } from "./schedule.ts";
 import { sessionsKind } from "./sessions.ts";
 import { skillsKind } from "./skills.ts";
+import { toolsKind } from "./tools.ts";
 
 /** The precedence layer a panel kind is offered keys on (two of the 14, unchanged). */
 export type PanelLayerName = "sessions" | "tree";
@@ -72,6 +73,11 @@ export interface PanelKind<P extends { readonly kind: string }> {
    * when the row has none. Absent: this kind carries no switches.
    */
   switchOp?(panel: P, width: number, caps: CapsPhase): CapOp | null;
+  /**
+   * What Space says when this kind shows no switch (null: nothing to say).
+   * Absent: the shared MCP/skill wording (`noSwitchNotice`).
+   */
+  noSwitchNotice?(caps: CapsPhase): string | null;
 }
 
 /**
@@ -84,6 +90,7 @@ export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [
   sessionsKind,
   mcpKind,
   skillsKind,
+  toolsKind,
   artifactsKind,
   scheduleKind,
 ];

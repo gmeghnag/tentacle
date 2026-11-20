@@ -1,6 +1,7 @@
 /**
- * The session's MCP/skill switches in the TUI (docs/feat/session-capabilities.md
- * S4): what each `/mcp` and `/skills` row's switch says, what Space asks the
+ * The session's MCP/skill/built-in-tool switches in the TUI
+ * (docs/feat/session-capabilities.md S4, docs/feat/tool-toggles.md D7): what
+ * each `/mcp`, `/skills` and `/tools` row's switch says, what Space asks the
  * daemon, the status-line marker, and which reported change earns a transcript
  * notice. React-free and pure (AGENTS §7): `App` holds the state and executes,
  * the panels render the glyphs, every decision is tested here.
@@ -16,15 +17,25 @@ import { oneLine } from "./commands.ts";
 export interface CapsView {
   readonly disabledMcp: readonly string[];
   readonly disabledSkills: readonly string[];
+  /**
+   * Built-in tools switched off (docs/feat/tool-toggles.md). ABSENT: the daemon
+   * has no tool switches (an older one) — `/tools` shows no switch.
+   */
+  readonly disabledTools?: readonly string[];
 }
 
-export type CapKind = "mcp" | "skill";
+export type CapKind = "mcp" | "skill" | "tool";
 
 /** One request: turn `name` on (`enabled`) or off for the model. */
 export interface CapOp {
   readonly kind: CapKind;
   readonly name: string;
   readonly enabled: boolean;
+  /**
+   * A `/tools` GROUP op: its registered members (from the panel's list). The
+   * daemon echoes one change per member; this matches that echo to the op.
+   */
+  readonly members?: readonly string[];
 }
 
 /**
@@ -73,13 +84,29 @@ export function sessionCapsPhase(
   return capsPhase(caps, session?.opened?.() ?? true, typeof session?.setCapability === "function");
 }
 
+const setOf = (caps: CapsView, kind: CapKind): readonly string[] =>
+  kind === "mcp"
+    ? caps.disabledMcp
+    : kind === "skill"
+      ? caps.disabledSkills
+      : (caps.disabledTools ?? []);
+
 export const isOff = (caps: CapsView, kind: CapKind, name: string): boolean =>
-  (kind === "mcp" ? caps.disabledMcp : caps.disabledSkills).includes(name);
+  setOf(caps, kind).includes(name);
 
-/** A row's switch: visible to the model, off for this session, or never the model's. */
-export type SwitchState = "on" | "off" | "locked";
+/**
+ * A row's switch: visible to the model, off for this session, never the
+ * model's choice (`locked`), or — a `/tools` group only — some members off
+ * (`partial`).
+ */
+export type SwitchState = "on" | "off" | "locked" | "partial";
 
-const GLYPHS: Readonly<Record<SwitchState, string>> = { on: "[✓]", off: "[ ]", locked: "[–]" };
+const GLYPHS: Readonly<Record<SwitchState, string>> = {
+  on: "[✓]",
+  off: "[ ]",
+  locked: "[–]",
+  partial: "[~]",
+};
 
 export const switchGlyph = (state: SwitchState): string => GLYPHS[state];
 
@@ -115,6 +142,44 @@ export function skillSwitch(
   return isOff(phase.caps, "skill", s.name) ? "off" : "on";
 }
 
+/**
+ * The phase `/tools` shows: the session's, except a daemon that reported
+ * switches WITHOUT `disabledTools` has no tool switches (an older one, F8).
+ */
+export function toolsPhase(phase: CapsPhase): CapsPhase {
+  return phase.kind === "on" && phase.caps.disabledTools === undefined
+    ? { kind: "unsupported" }
+    : phase;
+}
+
+/** A built-in tool row's switch (`skill` is `locked`), or null when the phase shows none. */
+export function toolSwitch(
+  phase: CapsPhase,
+  t: { readonly name: string; readonly locked?: boolean },
+): SwitchState | null {
+  const p = toolsPhase(phase);
+  if (p.kind !== "on") {
+    return null;
+  }
+  if (t.locked === true) {
+    return "locked";
+  }
+  return isOff(p.caps, "tool", t.name) ? "off" : "on";
+}
+
+/**
+ * A `/tools` group row's switch from its REGISTERED members: all on, all off,
+ * or `partial`; null when the phase shows none (or the group has no member).
+ */
+export function groupSwitch(phase: CapsPhase, members: readonly string[]): SwitchState | null {
+  const p = toolsPhase(phase);
+  if (p.kind !== "on" || members.length === 0) {
+    return null;
+  }
+  const off = members.filter((m) => isOff(p.caps, "tool", m)).length;
+  return off === 0 ? "on" : off === members.length ? "off" : "partial";
+}
+
 /** What the title rule adds after the panel's own title. */
 export function capsTitleNote(phase: CapsPhase): string {
   switch (phase.kind) {
@@ -138,7 +203,9 @@ export function switchOp(kind: CapKind, name: string, state: SwitchState | null)
   if (state === null || state === "locked") {
     return null;
   }
-  return { kind, name, enabled: state === "off" };
+  // A partially-off group turns ON (docs/feat/tool-toggles.md Q7): the safe,
+  // reversible reading; a second Space turns it all off.
+  return { kind, name, enabled: state === "off" || state === "partial" };
 }
 
 /** What Space says when the phase shows no switch (null: nothing to say). */
@@ -167,11 +234,15 @@ export function capsMarker(caps: CapsView | undefined): string | null {
   const parts: string[] = [];
   const servers = caps.disabledMcp.length;
   const skills = caps.disabledSkills.length;
+  const tools = caps.disabledTools?.length ?? 0;
   if (servers > 0) {
     parts.push(`${servers} server${servers === 1 ? "" : "s"}`);
   }
   if (skills > 0) {
     parts.push(`${skills} skill${skills === 1 ? "" : "s"}`);
+  }
+  if (tools > 0) {
+    parts.push(`${tools} tool${tools === 1 ? "" : "s"}`);
   }
   return parts.length === 0 ? null : `⊘ ${parts.join(" · ")} off`;
 }
@@ -190,6 +261,7 @@ export function capsDiff(prev: CapsView | undefined, next: CapsView): CapOp[] {
   };
   diff("mcp", before.disabledMcp, next.disabledMcp);
   diff("skill", before.disabledSkills, next.disabledSkills);
+  diff("tool", before.disabledTools ?? [], next.disabledTools ?? []);
   return ops;
 }
 
@@ -212,7 +284,13 @@ export function remoteChangeNotices(
   if (next === undefined || by === undefined) {
     return [];
   }
-  const own = [...pending];
+  // A `/tools` group set is ONE op that echoes as one change per member: its
+  // own echo is matched member by member.
+  const own: CapOp[] = pending.flatMap((p) =>
+    p.members === undefined
+      ? [p]
+      : p.members.map((name) => ({ kind: p.kind, name, enabled: p.enabled })),
+  );
   const notices: string[] = [];
   for (const op of capsDiff(prev, next)) {
     const i = own.findIndex((p) => sameOp(p, op));
@@ -220,7 +298,7 @@ export function remoteChangeNotices(
       own.splice(i, 1);
       continue;
     }
-    const what = op.kind === "mcp" ? "MCP server" : "skill";
+    const what = op.kind === "mcp" ? "MCP server" : op.kind === "skill" ? "skill" : "tool";
     notices.push(
       `${what} ${oneLine(op.name)} turned ${op.enabled ? "on" : "off"} on ${oneLine(by) || "another device"} · applies to the next model call`,
     );

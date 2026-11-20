@@ -6,6 +6,7 @@
 import type {
   AgentEvent,
   AgentStopReason,
+  BuiltinToolEntry,
   SessionCapabilities,
   SkillListing,
 } from "@tentacle/agent";
@@ -20,9 +21,11 @@ import {
   MAX_SKILL_DESCRIPTION,
   MAX_SKILL_LIST,
   MAX_SKILL_PROBLEMS,
+  MAX_TOOL_LIST,
   type PromptContentBlock,
   type SessionCapabilitiesWire,
   type SessionSkillsResult,
+  type SessionToolsResult,
   type SessionUpdate,
   type SkillListEntry,
   SkillNameSchema,
@@ -128,9 +131,33 @@ export function toSessionSkills(
   };
 }
 
+/**
+ * `session/tools` (docs/feat/tool-toggles.md D6): the registered built-ins as
+ * the wire carries them, at most `MAX_TOOL_LIST` (the schema's bound).
+ */
+export function toSessionTools(entries: readonly BuiltinToolEntry[]): SessionToolsResult {
+  return { tools: entries.slice(0, MAX_TOOL_LIST).map((e) => ({ ...e })) };
+}
+
 /** A session's switches as the wire carries them (fresh arrays: the state stays immutable). */
 export function toWireCapabilities(state: SessionCapabilities): SessionCapabilitiesWire {
-  return { disabledMcp: [...state.disabledMcp], disabledSkills: [...state.disabledSkills] };
+  return {
+    disabledMcp: [...state.disabledMcp],
+    disabledSkills: [...state.disabledSkills],
+    disabledTools: [...state.disabledTools],
+  };
+}
+
+/**
+ * Wire switches (a client's seed, a log entry) as the agent's state: an absent
+ * `disabledTools` (an older peer or log) reads as none off.
+ */
+export function fromWireCapabilities(wire: SessionCapabilitiesWire): SessionCapabilities {
+  return {
+    disabledMcp: wire.disabledMcp,
+    disabledSkills: wire.disabledSkills,
+    disabledTools: wire.disabledTools ?? [],
+  };
 }
 
 /** Flatten a prompt's content blocks to the plain-text the agent loop consumes. */

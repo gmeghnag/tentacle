@@ -14,6 +14,7 @@ import {
   BUILTIN_AGENT_TYPES,
   EMPTY_SKILL_LISTING,
   HookRunner,
+  NO_CAPABILITIES,
   type ResultTransform,
   SessionGrants,
   type SessionSkills,
@@ -44,6 +45,7 @@ import {
   refreshSessionContext,
   slashSkills,
   splitFrontmatter,
+  toolToggleNotices,
   unknownTypeModelWarnings,
 } from "@tentacle/config";
 import {
@@ -492,6 +494,15 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       `tools.writableDirs: ignored ${JSON.stringify(dropped)} (not an absolute dir, or the filesystem root)`,
     );
   }
+  // `true` only un-hides: a switch on a feature that is off says so (F3).
+  for (const line of toolToggleNotices(config.toolsEnabled ?? {}, {
+    subagents: config.subagentsEnabled,
+    contextReset: config.contextReset.enabled,
+    sessionHop: config.sessionHop.tool,
+    workloadShell: config.workloadShell.tool,
+  })) {
+    (options.notice ?? options.log)?.(line);
+  }
   const tools = new ToolRegistry().registerAll(builtinTools);
   const permissions = options.permissions ?? new PermissionBroker();
   // Background jobs let the shell tools launch long-running processes (servers,
@@ -796,6 +807,9 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // The user's ceiling, exactly: no server is asked for slots (owner 2026-11-08).
       maxParallel: config.subagentMaxParallel,
     },
+    // `tools.enabled` seeds the state in ONE place, for every runtime (plain and
+    // one-shot included): a hosted session starts from it (docs/feat/tool-toggles.md D4).
+    capabilities: { ...NO_CAPABILITIES, disabledTools: config.disabledTools ?? [] },
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):

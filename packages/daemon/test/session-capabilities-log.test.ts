@@ -28,7 +28,7 @@ const CWD = "/tmp/session-capabilities-log";
 const env = {} as ExecutionEnvironment;
 /** An MCP server's tool, tagged as the adapter tags it. */
 const echoTool = { ...shellTool, name: "mcp__echo__echo", mcpServer: "echo" };
-const OFF_ECHO = { disabledMcp: ["echo"], disabledSkills: [] };
+const OFF_ECHO = { disabledMcp: ["echo"], disabledSkills: [], disabledTools: [] };
 
 /** Records each request's tool names; answers with a bare "done". */
 class Recorder implements ModelProvider {
@@ -92,8 +92,8 @@ describe("the switches are recorded in the session log", () => {
     hosted.setCapability({ kind: "skill", name: "k8s", enabled: false });
     const logged = capsEntries(cold(hosted));
     expect(logged.map((e) => e.capabilities)).toEqual([
-      { disabledMcp: ["echo"], disabledSkills: [] },
-      { disabledMcp: ["echo"], disabledSkills: ["k8s"] },
+      { disabledMcp: ["echo"], disabledSkills: [], disabledTools: [] },
+      { disabledMcp: ["echo"], disabledSkills: ["k8s"], disabledTools: [] },
     ]);
     // Non-critical (owner Q2): an older build SKIPS it, never refuses the log.
     expect(LOG_ENTRY_CRITICAL.capabilities).toBe(false);
@@ -105,6 +105,7 @@ describe("the switches are recorded in the session log", () => {
     expect(capsEntries(cold(hosted)).at(-1)?.capabilities).toEqual({
       disabledMcp: [],
       disabledSkills: [],
+      disabledTools: [],
     });
   });
 
@@ -116,7 +117,7 @@ describe("the switches are recorded in the session log", () => {
       { send: () => {} },
     );
     expect(capsEntries(cold(hosted)).map((e) => e.capabilities)).toEqual([
-      { disabledMcp: ["echo"], disabledSkills: [] },
+      { disabledMcp: ["echo"], disabledSkills: [], disabledTools: [] },
     ]);
     // An empty seed is "everything on": nothing to log.
     const empty = r.host.open(
@@ -145,7 +146,7 @@ describe("the switches are recorded in the session log", () => {
     const segment = cold(hosted);
     expect(segment[0]?.type).toBe("base");
     expect(capsEntries(segment).map((e) => e.capabilities)).toEqual([
-      { disabledMcp: ["echo"], disabledSkills: [] },
+      { disabledMcp: ["echo"], disabledSkills: [], disabledTools: [] },
     ]);
   });
 });
@@ -185,7 +186,11 @@ describe("the laptop store folds the CURRENT segment's switches", () => {
   test("S1 the last entry of the current segment wins", async () => {
     // Mutation: take the FIRST entry → `a` instead of `b`.
     const record = await load(file([base("create"), msg, caps(["a"]), caps(["b"])]));
-    expect(record.capabilities).toEqual({ disabledMcp: ["b"], disabledSkills: [] });
+    expect(record.capabilities).toEqual({
+      disabledMcp: ["b"],
+      disabledSkills: [],
+      disabledTools: [],
+    });
   });
 
   test("S2 a superseded segment's switches never apply (keepSuperseded)", async () => {
@@ -203,11 +208,19 @@ describe("a serve restart reloads the switches from the log (F6)", () => {
     hosted.setCapability({ kind: "mcp", name: "echo", enabled: false });
     await hosted.persisted();
     const record = durable(r.store, hosted.id);
-    expect(record.capabilities).toEqual({ disabledMcp: ["echo"], disabledSkills: [] });
+    expect(record.capabilities).toEqual({
+      disabledMcp: ["echo"],
+      disabledSkills: [],
+      disabledTools: [],
+    });
 
     const restarted = rig(r.store);
     const restored = restarted.host.restore(record);
-    expect(restored.capabilities()).toEqual({ disabledMcp: ["echo"], disabledSkills: [] });
+    expect(restored.capabilities()).toEqual({
+      disabledMcp: ["echo"],
+      disabledSkills: [],
+      disabledTools: [],
+    });
     // The model is told: the first request after the restart lacks the tool.
     restored.prompt("t1", [{ type: "text", text: "go" }]);
     await until(() => restarted.model.tools.length > 0);
@@ -217,6 +230,7 @@ describe("a serve restart reloads the switches from the log (F6)", () => {
     expect(capsEntries(cold(restored)).at(-1)?.capabilities).toEqual({
       disabledMcp: ["echo"],
       disabledSkills: [],
+      disabledTools: [],
     });
   });
 
@@ -250,9 +264,11 @@ describe("a serve restart reloads the switches from the log (F6)", () => {
       ts: 1,
       capabilities: { disabledMcp: ["echo"], disabledSkills: ["k8s"] },
     })}\n`;
+    // An older entry (no `disabledTools`) reads as none off (docs/feat/tool-toggles.md).
     expect(durable(r.store, hosted.id).capabilities).toEqual({
       disabledMcp: ["echo"],
       disabledSkills: [],
+      disabledTools: [],
     });
   });
 });

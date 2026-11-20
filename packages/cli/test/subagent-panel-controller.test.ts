@@ -378,6 +378,8 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "sendNow",
       "close",
       "skills",
+      // The `/tools` list (docs/feat/tool-toggles.md D7).
+      "tools",
       // The `/mcp` / `/skills` switches (docs/feat/session-capabilities.md S4).
       "capabilities",
       "onCapabilities",

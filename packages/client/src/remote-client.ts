@@ -92,6 +92,7 @@ import {
   type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
+  type SessionToolsResult,
   type SessionTtlResult,
   type SessionUpdateParams,
   type SetAutoAcceptResult,
@@ -595,6 +596,14 @@ export interface RemoteClientOptions {
    */
   readonly sessionSettings?: SessionSettings;
   /**
+   * This laptop's `tools.enabled` off set (docs/feat/tool-toggles.md D5),
+   * unioned into every session this client CREATES (`OpenParams.capabilities`):
+   * a new session, a resume from the laptop's copy, a `/clear` fork, a hop. A
+   * SEED, never a setting: the daemon unions it with its own config's set (off
+   * wins), so a pod's file cannot re-enable it. Absent/empty → nothing added.
+   */
+  readonly baseDisabledTools?: readonly string[];
+  /**
    * This client can put a session's `move_session` PROPOSAL to its owner, so the
    * daemon should offer the tool (docs/feat/session-hop.md D8/D9). Declared in
    * `initialize` as `clientCapabilities.hop`, PER CLIENT: a pod daemon serves
@@ -997,6 +1006,8 @@ export class RemoteClient {
   private readonly refusalsLogged = new Set<string>();
   /** `{ settings }`, or nothing: spread into each frame that may create a session. */
   private readonly carried: { readonly settings?: SessionSettings };
+  /** `RemoteClientOptions.baseDisabledTools`, unioned into every create (D5). */
+  private readonly baseDisabledTools: readonly string[];
   /**
    * The value a session this client CREATES should start with
    * (`OpenParams.autoAccept`, docs/feat/session-auto-accept.md D2): the TUI's
@@ -1109,6 +1120,7 @@ export class RemoteClient {
       this.namedModels = options.namedModels;
     }
     this.carried = options.sessionSettings ? { settings: options.sessionSettings } : {};
+    this.baseDisabledTools = options.baseDisabledTools ?? [];
     this.sha256 = options.sha256 ?? bunSha256();
     this.sha256Bytes = options.sha256Bytes ?? bunSha256Bytes();
     if (options.localImages) {
@@ -1209,6 +1221,24 @@ export class RemoteClient {
       Method.SessionSkills,
       sessionId !== undefined ? { sessionId } : this.carried,
     ).then((result) => result as SessionSkillsResult);
+  }
+
+  /**
+   * A session's built-in tools (`session/tools`, docs/feat/tool-toggles.md D6):
+   * each registered built-in with its group, heuristic token cost and switch.
+   * `sessionId` absent → the tools a session the daemon creates now would have.
+   * An older daemon rejects with `MethodNotFound`. Schema-validated by the peer
+   * (a hostile pod's list is rejected whole).
+   */
+  sessionTools(sessionId?: string): Promise<SessionToolsResult> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(
+      this.peer,
+      Method.SessionTools,
+      sessionId !== undefined ? { sessionId } : this.carried,
+    ).then((result) => result as SessionToolsResult);
   }
 
   /**
@@ -1833,7 +1863,7 @@ export class RemoteClient {
     // resumed record's, else the ones the person has now (a `/clear`
     // close-and-replace); the one-shot seed is consumed either way.
     const carried = this.takeSeedCapabilities();
-    const caps = capabilities ?? carried;
+    const caps = withBaseTools(capabilities ?? carried, this.baseDisabledTools);
     const params = {
       create: true,
       ...(cwd ? { cwd } : {}),
@@ -3713,7 +3743,7 @@ export class RemoteClient {
    */
   setSessionCapability(
     session: RemoteSession,
-    kind: "mcp" | "skill",
+    kind: "mcp" | "skill" | "tool",
     name: string,
     enabled: boolean,
   ): Promise<SetCapabilityResult> {
@@ -3753,6 +3783,7 @@ export class RemoteClient {
     this.seedCaps = {
       disabledMcp: [...state.disabledMcp],
       disabledSkills: [...state.disabledSkills],
+      ...(state.disabledTools !== undefined ? { disabledTools: [...state.disabledTools] } : {}),
     };
   }
 
@@ -4695,4 +4726,22 @@ export class RemoteClient {
       }
     }
   }
+}
+
+/**
+ * `caps` with the laptop's tool switches added (docs/feat/tool-toggles.md D5):
+ * a union, sorted — never a removal. No base → `caps` as it is.
+ */
+function withBaseTools(
+  caps: SessionCapabilitiesWire | undefined,
+  base: readonly string[],
+): SessionCapabilitiesWire | undefined {
+  if (base.length === 0) {
+    return caps;
+  }
+  return {
+    disabledMcp: [...(caps?.disabledMcp ?? [])],
+    disabledSkills: [...(caps?.disabledSkills ?? [])],
+    disabledTools: [...new Set([...(caps?.disabledTools ?? []), ...base])].sort(),
+  };
 }

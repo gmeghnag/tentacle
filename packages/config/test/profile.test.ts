@@ -151,3 +151,40 @@ describe("profile schema", () => {
     expect(FileConfigSchema.safeParse({ profiles: { p: { $schema: "x" } } }).success).toBe(false);
   });
 });
+
+describe("tools.enabled in a profile (docs/feat/tool-toggles.md Q3, F14)", () => {
+  const file = FileConfigSchema.parse({
+    tools: { redactSecrets: true, enabled: { visuals: false, shell: false } },
+    profiles: {
+      lean: { tools: { enabled: { subagents: false, shell: true } } },
+      other: { tools: { dedupOutput: false } },
+      fresh: { tools: { enabled: { chart: false } } },
+    },
+  });
+  const run = (name: string) => {
+    const result = applyProfile(file, name);
+    if (!result.ok) throw new Error(result.reason);
+    return result.config;
+  };
+
+  test("a profile's map merges per key over the base's; a profile true undoes a base false", () => {
+    expect(run("lean").tools?.enabled).toEqual({ visuals: false, shell: true, subagents: false });
+    expect(run("lean").tools?.redactSecrets).toBe(true);
+  });
+
+  test("a profile without enabled keeps the base's map; other tools keys merge as before", () => {
+    expect(run("other").tools).toEqual({
+      redactSecrets: true,
+      dedupOutput: false,
+      enabled: { visuals: false, shell: false },
+    });
+  });
+
+  test("a base without enabled takes the profile's", () => {
+    const bare = FileConfigSchema.parse({
+      profiles: { p: { tools: { enabled: { chart: false } } } },
+    });
+    const result = applyProfile(bare, "p");
+    expect(result.ok && result.config.tools?.enabled).toEqual({ chart: false });
+  });
+});

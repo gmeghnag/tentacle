@@ -1114,13 +1114,17 @@ export const MAX_DISABLED_CAPABILITIES = 256;
 export const CapabilityNameSchema = line(128);
 
 /**
- * A session's MCP/skill switches (`session/set_capability`,
- * docs/feat/session-capabilities.md): sorted, de-duplicated DISABLED names, so
- * anything new (a server added, a skill created) is on.
+ * A session's MCP/skill/built-in-tool switches (`session/set_capability`,
+ * docs/feat/session-capabilities.md, docs/feat/tool-toggles.md): sorted,
+ * de-duplicated DISABLED names, so anything new (a server added, a skill
+ * created) is on. `disabledTools` is optional on the wire: a daemon that has
+ * tool switches always sends it (even `[]`); ABSENT means a daemon with none
+ * (an older one), and an older log entry reads as `[]`.
  */
 export const SessionCapabilitiesSchema = z.object({
   disabledMcp: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
   disabledSkills: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
+  disabledTools: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES).optional(),
 });
 export type SessionCapabilitiesWire = z.infer<typeof SessionCapabilitiesSchema>;
 
@@ -1256,8 +1260,9 @@ export const SetAutoAcceptResultSchema = z.object({
 export type SetAutoAcceptResult = z.infer<typeof SetAutoAcceptResultSchema>;
 
 // --- session/set_capability ---------------------------------------------
-// Turn one MCP server or one skill on/off for the MODEL in this session
-// (docs/feat/session-capabilities.md): hidden from the tool list and the skills
+// Turn one MCP server, one skill or one built-in tool / tool group on/off for
+// the MODEL in this session (docs/feat/session-capabilities.md,
+// docs/feat/tool-toggles.md): hidden from the tool list and the skills
 // catalog from the next model call, never uninstalled. A DELTA (one name), not
 // the whole state, so two clients toggling different items both land (F4).
 // Held by every daemon (a pod included: it only REMOVES what its own model is
@@ -1267,8 +1272,12 @@ export type SetAutoAcceptResult = z.infer<typeof SetAutoAcceptResultSchema>;
 
 export const SetCapabilityParamsSchema = z.object({
   sessionId: SessionIdSchema,
-  kind: z.enum(["mcp", "skill"]),
-  /** A server name (`mcp`) or a skill name (`skill`); an unknown one is stored (F10). */
+  kind: z.enum(["mcp", "skill", "tool"]),
+  /**
+   * A server name (`mcp`) or a skill name (`skill`): an unknown one is stored
+   * (F10). A built-in tool or group name (`tool`): an unknown one, or the
+   * always-on `skill`, is `InvalidParams` (an older daemon refuses the kind).
+   */
   name: CapabilityNameSchema,
   enabled: z.boolean(),
 });
