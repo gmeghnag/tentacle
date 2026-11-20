@@ -947,3 +947,7 @@ chose "legacy does not count") survived both passes.
   slice (a) without an owner choice. **The owner must pick (i′) / (i) / (ii).** My recommendation is (i′):
   `runPairing` sends `perProject: true`, storage stays under `computer.id` until (b), plus one
   `pairing-flow.test.ts` assertion, red first. Then a Round 4 that verifies that single change by mutation.
+
+### Owner decision on F2 (2026-11-20 22:10)
+
+**(i′) chosen.** `runPairing` (app, `pairing-flow.ts`) sends `perProject: true`; the app keeps storing the record under `computer.id` until slice (b). Add the `pairing-flow.test.ts` assertion (red before green) and make `apps/mobile/test/pairing-e2e.test.ts` green. Nothing else of (b) in this slice.
