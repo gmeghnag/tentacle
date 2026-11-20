@@ -446,7 +446,7 @@ export function dictationReduce(state: DictationState, event: DictationEvent): D
           // The capabilities read or the permission request itself threw.
           return failed(START_FAILED);
         case "tap":
-          return { state: DICTATION_IDLE, effects: [TAP_STOP] };
+          return { state: DICTATION_IDLE, effects: [] };
         case "dispose":
         case "ttsStarting":
         case "stopRequested":

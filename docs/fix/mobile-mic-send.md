@@ -207,7 +207,46 @@ diff adds no skip (`git diff | grep -c skip` = 0).
 
 ## Review
 
-*— pending*
+*— claude-opus-5-5, 2026-11-20* (fresh context; SAME model as the executor — shared blind spots possible; blast `contained`, so acceptable per §10)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM in `git diff main...HEAD`).
+
+**Gate (run by the reviewer):** touched tests `dictation + voice-controller +
+session-screen-compose + voice-wiring` → `120 pass, 0 fail`; `bun run typecheck` green;
+`bun run lint` → `Checked 2131 files … No fixes applied`. Full `bun test` not re-run
+(the Execution's count stands unverified by me).
+
+**Premise table:** `compose-controller.ts:996` blank → return — TRUE.
+`AnalyzerEngine.swift:135-136` any throw → `finish("error")` — TRUE.
+`RecognizerEngine.swift:125-140` error while `stopping` is not finished as error — TRUE.
+`SessionScreen.tsx:1672/1679` `pressHaptic` on Return/Send — TRUE.
+Reducer premises (`settle` writes `draftOf` then `send`; `stale()` drops other attempts'
+endings; our own cancels leave `finalizing` before the native `cancelled`) — TRUE (read).
+
+**Mutations** (on a scratch copy of HEAD's reducer in `.tentacle/tmp/mobile-mic-send/rv/`,
+never the worktree; restored, `cmp` identical): drop the `cancelled` settle → 1 fail
+(caught). Drop the `asking`-state tap haptic → **0 fail (survives)** — nit N1.
+
+**Attacks tried:** (1) a native `cancelled` while `finalizing{send}` that the person did
+not mean (TTS start, another screen's start): every such path is after an explicit Send,
+so sending is the right outcome; our own cancels go idle first → no hole. (2) `error`
+while `finalizing` with a silence/cap notice: settles with the notice, no card — fine.
+(3) double haptic on Send-initiated stop: `settle` emits none, `pressHaptic` plays once —
+holds. (4) `setAllowHapticsAndSystemSoundsDuringRecording` throws → same path as
+`setCategory` throwing (start fails loudly) — fine. (5) F4 (interruption never sends)
+unchanged — holds.
+
+**Nits (LOW):**
+- N1: no test pins the stop haptic of a tap while `asking` (`dictation.ts:449`); a
+  regression there stays green.
+- N2: the worktree is DIRTY at review time with an uncommitted, un-owned edit to
+  `apps/mobile/src/dictation.ts:449` (`effects: [TAP_STOP]` → `[]`, mtime 12:00, not made
+  by this reviewer — looks like a mutation left behind, cf. the scratch `mut.sh` M4). It
+  is not in the branch, and because of N1 the gate stays green with it: discard it before
+  any further commit on this branch.
+
+**Executor behaviour:** repro-first (reducer sweep on `main`), red shown before green,
+three mutations reported, drift (legacy `mobile-voice.md:164`) declared honestly.
 
 Owner's phone (device-only, cannot be proven in Bun):
 1. Settings → Beta → Dictation on; tap the mic → a light tap is felt at once; speak a
