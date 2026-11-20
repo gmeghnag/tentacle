@@ -182,6 +182,10 @@ final class SpeechCore: NSObject, AVSpeechSynthesizerDelegate {
     try session.setCategory(
       .playAndRecord, mode: .default,
       options: [.duckOthers, .allowBluetoothHFP, .defaultToSpeaker])
+    // iOS mutes haptics while the session records unless this is set: the mic
+    // tap that STOPS dictation plays its haptic with the mic still live
+    // (fix/mobile-mic-send).
+    try session.setAllowHapticsAndSystemSoundsDuringRecording(true)
     try session.setActive(true)
     engine = next
     do {
@@ -318,7 +322,8 @@ final class SpeechCore: NSObject, AVSpeechSynthesizerDelegate {
   func haptic(_ kind: String) {
     switch kind {
     case "start": UIImpactFeedbackGenerator(style: .light).impactOccurred()
-    case "stop": UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+    // Light both ways: the owner's rule for a mic tap (fix/mobile-mic-send).
+    case "stop": UIImpactFeedbackGenerator(style: .light).impactOccurred()
     default: UINotificationFeedbackGenerator().notificationOccurred(.error)
     }
   }

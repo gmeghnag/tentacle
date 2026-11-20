@@ -73,13 +73,13 @@ describe("draftOf separator rules", () => {
 });
 
 describe("start path", () => {
-  test("tap probes; granted + on-device recognizer → stopSpeaking, start, then listening + haptic", () => {
+  test("tap: haptic AT the tap, probes; granted + on-device recognizer → stopSpeaking, start, listening (no second haptic)", () => {
     const { state, effects } = listening();
     expect(effects).toEqual([
+      { type: "haptic", kind: "start" },
       { type: "probe", locale: L },
       { type: "stopSpeaking" },
       { type: "start", engine: "recognizer", locale: L, attempt: 1 },
-      { type: "haptic", kind: "start" },
     ]);
     expect(state.kind).toBe("listening");
     expect(micButtonOf(state, true)).toBe("listening");
@@ -99,7 +99,13 @@ describe("start path", () => {
       },
       { type: "permissions", permissions: GRANTED },
     ]);
-    expect(types(effects)).toEqual(["probe", "requestPermissions", "stopSpeaking", "start"]);
+    expect(types(effects)).toEqual([
+      "haptic",
+      "probe",
+      "requestPermissions",
+      "stopSpeaking",
+      "start",
+    ]);
     expect(state.kind).toBe("preparing");
   });
 
@@ -172,7 +178,7 @@ describe("iOS 26: reserve and download (F5)", () => {
       { type: "probed", caps: ios26("installed") },
       { type: "reserved", ok: true },
     ]);
-    expect(effects.slice(1)).toEqual([
+    expect(effects.slice(2)).toEqual([
       { type: "reserve", locale: L },
       { type: "stopSpeaking" },
       { type: "start", engine: "transcriber", locale: L, attempt: 1 },
@@ -202,7 +208,7 @@ describe("iOS 26: reserve and download (F5)", () => {
     expect(state.kind).toBe("failed");
     expect(
       types(run([{ type: "tap", draft: "", locale: L, now: 1, attempt: 1 }], state).effects),
-    ).toEqual(["probe"]);
+    ).toEqual(["haptic", "probe"]);
   });
 
   test("reserve refused → falls back to the on-device recognizer", () => {
@@ -280,7 +286,7 @@ describe("stop and send", () => {
     run([{ type: "dictation", finalDelta: "send", volatile: "this", now: 1 }], listening("x").state)
       .state;
 
-  test("tap while listening → stop; ended promotes volatile to final, soft haptic", () => {
+  test("tap while listening → haptic at the tap, stop; ended promotes volatile to final (no second haptic)", () => {
     const { state, effects } = run(
       [
         { type: "tap", draft: "", locale: L, now: 2, attempt: 1 },
@@ -289,9 +295,9 @@ describe("stop and send", () => {
       withText(),
     );
     expect(effects).toEqual([
+      { type: "haptic", kind: "stop" },
       { type: "stop" },
       { type: "setDraft", text: "x send this" },
-      { type: "haptic", kind: "stop" },
     ]);
     expect(state).toEqual(DICTATION_IDLE);
   });
@@ -306,7 +312,8 @@ describe("stop and send", () => {
       ],
       s,
     );
-    expect(types(effects)).toEqual(["stop", "setDraft", "haptic", "send"]);
+    // The Send press plays its own haptic (`pressHaptic`): dictation adds none.
+    expect(types(effects)).toEqual(["stop", "setDraft", "send"]);
     expect(effects.at(-1)).toEqual({ type: "send", via: "return" });
     expect(state.kind).toBe("idle");
     expect(capturesSend(state)).toBe(false);
@@ -316,8 +323,48 @@ describe("stop and send", () => {
     const f = run([{ type: "send", via: "press", now: 10 }], withText()).state;
     expect(run([{ type: "tick", now: 10 + FINALIZE_TIMEOUT_MS - 1 }], f).effects).toEqual([]);
     const { effects } = run([{ type: "tick", now: 10 + FINALIZE_TIMEOUT_MS }], f);
-    expect(types(effects)).toEqual(["cancel", "setDraft", "haptic", "send"]);
+    expect(types(effects)).toEqual(["cancel", "setDraft", "send"]);
     expect(drafts(effects)).toEqual(["x send this"]);
+  });
+
+  // fix/mobile-mic-send (owner 2026-11-20): "I stop and send, nothing happens".
+  // Once the person asked to stop (a mic tap or Send), the engine's ending is the
+  // END of that stop: an `error` / `cancelled` there must keep everything shown
+  // and honour the pending Send — on the iOS 26 analyzer path the whole short
+  // utterance is still volatile at the stop, so `finalsOnly` emptied the field.
+  test("tap stop, then an engine ERROR while finalizing keeps everything shown (no card)", () => {
+    const { state, effects } = run(
+      [
+        { type: "tap", draft: "", locale: L, now: 2, attempt: 1 },
+        { type: "ended", reason: "error", attempt: 1 },
+      ],
+      withText(),
+    );
+    expect(drafts(effects)).toEqual(["x send this"]);
+    expect(state).toEqual(DICTATION_IDLE);
+  });
+
+  test("Send pressed, then an engine ERROR or CANCELLED while finalizing: it still sends what was shown", () => {
+    for (const reason of ["error", "cancelled"] as const) {
+      const f = run([{ type: "send", via: "press", now: 2 }], withText()).state;
+      const { state, effects } = run([{ type: "ended", reason, attempt: 1 }], f);
+      expect(drafts(effects)).toEqual(["x send this"]);
+      expect(effects.at(-1)).toEqual({ type: "send", via: "press" });
+      expect(state).toEqual(DICTATION_IDLE);
+    }
+  });
+
+  test("tap stop, Send while finalizing, then an ERROR: the Send is not dropped", () => {
+    const { effects } = run(
+      [
+        { type: "tap", draft: "", locale: L, now: 2, attempt: 1 },
+        { type: "send", via: "press", now: 3 },
+        { type: "ended", reason: "error", attempt: 1 },
+      ],
+      withText(),
+    );
+    expect(drafts(effects)).toEqual(["x send this"]);
+    expect(effects.at(-1)).toEqual({ type: "send", via: "press" });
   });
 
   test("F9: stop with no speech → draft stays the base, no send, no notice", () => {
@@ -452,7 +499,10 @@ describe("start/cancel race (attempt ids)", () => {
       locale: L,
       attempt: 1,
     });
-    expect(tapAgain(first.state, 2).effects).toEqual([{ type: "cancel", attempt: 1 }]);
+    expect(tapAgain(first.state, 2).effects).toEqual([
+      { type: "haptic", kind: "stop" },
+      { type: "cancel", attempt: 1 },
+    ]);
   });
 
   test("a late started after a cancel (idle) → cancel that attempt", () => {
@@ -567,5 +617,74 @@ describe("stopRequested in every pending state (switch turned OFF)", () => {
     const late = dictationReduce(after, { type: "started", now: 2, attempt: 1 });
     expect(late.state.kind).toBe("idle");
     expect(late.effects).toEqual([{ type: "cancel", attempt: 1 }]);
+  });
+});
+
+describe("mic haptics: one light tap per mic tap, never on a programmatic stop (fix/mobile-mic-send)", () => {
+  const withText = () =>
+    run([{ type: "dictation", finalDelta: "a", volatile: "b", now: 1 }], listening().state).state;
+  const haptics = (effects: readonly DictationEffect[]) =>
+    effects.flatMap((e) => (e.type === "haptic" ? [e.kind] : []));
+
+  test("the start haptic is the tap's FIRST effect (before the mic opens: iOS mutes haptics while recording)", () => {
+    const { effects } = run([{ type: "tap", draft: "", locale: L, now: 0, attempt: 1 }]);
+    expect(effects[0]).toEqual({ type: "haptic", kind: "start" });
+    // The native start resolving plays nothing more.
+    expect(haptics(listening().effects)).toEqual(["start"]);
+  });
+
+  test("a tap that stops plays exactly one haptic, whatever the engine's ending", () => {
+    for (const reason of ["stopped", "error", "cancelled"] as const) {
+      const { effects } = run(
+        [
+          { type: "tap", draft: "", locale: L, now: 2, attempt: 1 },
+          { type: "ended", reason, attempt: 1 },
+        ],
+        withText(),
+      );
+      expect(haptics(effects)).toEqual(["stop"]);
+    }
+  });
+
+  test("a tap while preparing (it cancels) plays the stop haptic", () => {
+    const preparing = run([
+      { type: "tap", draft: "", locale: L, now: 0, attempt: 1 },
+      { type: "probed", caps: iOS18 },
+    ]).state;
+    expect(preparing.kind).toBe("preparing");
+    const { effects } = run([{ type: "tap", draft: "", locale: L, now: 1, attempt: 2 }], preparing);
+    expect(haptics(effects)).toEqual(["stop"]);
+  });
+
+  test("a second tap while finalizing does nothing, so it plays nothing", () => {
+    const f = run([{ type: "tap", draft: "", locale: L, now: 2, attempt: 1 }], withText()).state;
+    expect(run([{ type: "tap", draft: "", locale: L, now: 3, attempt: 2 }], f).effects).toEqual([]);
+  });
+
+  test("programmatic stops are silent: silence, cap, Beta switch off, read-aloud, Send, interruption", () => {
+    const cases: DictationEvent[][] = [
+      [{ type: "tick", now: SILENCE_STOP_MS + 1 }],
+      [{ type: "tick", now: HARD_CAP_MS }],
+      [{ type: "stopRequested", now: 2 }],
+      [{ type: "ttsStarting", now: 2 }],
+      [{ type: "send", via: "press", now: 2 }],
+      [{ type: "appState", state: "background" }],
+    ];
+    for (const events of cases) {
+      const { effects } = run(
+        [...events, { type: "ended", reason: "stopped", attempt: 1 }],
+        withText(),
+      );
+      expect(haptics(effects)).toEqual([]);
+    }
+    expect(haptics(run([{ type: "ended", reason: "interrupted" }], withText()).effects)).toEqual(
+      [],
+    );
+  });
+
+  test("an error that is not the end of a stop still plays the error haptic", () => {
+    expect(haptics(run([{ type: "ended", reason: "error" }], withText()).effects)).toEqual([
+      "error",
+    ]);
   });
 });

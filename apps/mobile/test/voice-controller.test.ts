@@ -131,13 +131,13 @@ async function listening(s: ReturnType<typeof setup>) {
 }
 
 describe("dictation through the port", () => {
-  test("tap → capabilities → stopSpeaking? no (idle) → start, haptic; text reaches setDraft", async () => {
+  test("tap → haptic (before the mic opens) → capabilities → start; text reaches setDraft", async () => {
     const s = setup();
     await listening(s);
     expect(s.port.calls).toEqual([
+      "haptic:start",
       "capabilities:en-US,it-IT",
       "start:recognizer:en-US",
-      "haptic:start",
     ]);
     s.port.fire({ type: "dictation", finalDelta: "", volatile: "hello" });
     s.port.fire({ type: "dictation", finalDelta: "hello world", volatile: "" });
@@ -198,7 +198,11 @@ describe("dictation through the port", () => {
     await flush();
     expect(s.voice.state().dictation.kind).toBe("idle");
     expect(s.port.calls.filter((c) => c === "cancel:1").length).toBe(2);
-    expect(s.port.calls).not.toContain("haptic:start");
+    // One haptic per tap (start, then the cancelling tap's stop) — none from the late start.
+    expect(s.port.calls.filter((c) => c.startsWith("haptic:"))).toEqual([
+      "haptic:start",
+      "haptic:stop",
+    ]);
     expect(s.timers.length).toBe(0);
   });
 
