@@ -213,4 +213,42 @@ transcribing.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-20* (fresh context; same model as the executor, so shared blind spots are possible)
+
+**Verdict: APPROVE-WITH-NITS** — no HIGH/MEDIUM findings.
+
+**Gate (narrow, as briefed):** touched tests `voice-view`, `dictation`,
+`composer-field-layout`, `voice-wiring`: 104 pass · 0 fail. `bun run lint`:
+2160 files, clean. `bun run typecheck`: clean (root + mobile + relay). Full
+`bun test` not re-run here; Execution reports 15955 pass · 5 skip · 0 fail.
+
+**Premises:** `micButtonOf` folded `finalizing` into `listening` on main — TRUE
+(diff). `finalizing` taps return `none` and finalizing has a timeout
+(`dictation.ts:583-584`, `:591-595`) — TRUE, so the disabled mic can't stick.
+The only consumers of `MicButton`/`voiceComposerView` are `voice-view.ts`,
+`Composer.tsx`, `SessionScreen.tsx` — TRUE (rg). No e2e flow reads
+`composer-mic*` — TRUE.
+
+**Mutations on `Composer.tsx` (script in `.tentacle/tmp/…/mut.ts`; file restored,
+`git status` clean):** border→accent while listening: 1 fail ✓ · Reduce Motion
+ignored in `Halo`: 1 fail ✓ · finalizing tap enabled: 1 fail ✓ · send
+`hitSlop` 0: 1 fail ✓ · explicit `accessibilityState` dropped: 0 fail · caption
+`mic === "hidden"` gate dropped: 0 fail · halo scale 1: 0 fail.
+
+**Nits (LOW):**
+1. `Composer.tsx:286` — the caption's `mic === "hidden"` gate is unpinned
+   (Failure modes lists it). Scenario: view turns non-editable mid-recording →
+   `mic="hidden"` but `micCaption="0:07"`; without the gate an orphan timer would
+   show and no test catches it. Add a structure assertion.
+2. `Composer.tsx:299` — the explicit `accessibilityState` is redundant with
+   `disabled` (RN Pressable derives it) and unpinned; harmless.
+
+**Attacks tried:** other readers of `mic === "listening"` that would change
+meaning now that finalizing is separate (none); stuck disabled mic if `ended`
+never arrives (`FINALIZE_TIMEOUT_MS` settles it); caption when Beta off /
+unsupported (HIDDEN has `caption: undefined`; Composer also gates on hidden);
+non-vacuity by mutation (above). §7 invariants: render-only changes; the
+decisions (face, caption, clock) live in the pure modules — holds.
+
+**Executor behaviour:** honest Execution, drift (send `hitSlop`) declared and
+tested; red-before-green recorded; device-only items listed as unverified.
