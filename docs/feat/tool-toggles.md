@@ -668,3 +668,14 @@ the config's set. That is the same choice as the fold's (an absent entry is
 
 **Executor behaviour:** the drifts were documented honestly (F6 correction, no component, parity-pin location), and the mutation evidence is thorough. The missed case is an interaction with an older invariant: "absent ⇒ everything on" in the log fold.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-20* (the same model as in round 1; the fix was written by a different model, deepseek)
+
+**Verdict: APPROVE.** Finding 1 is fixed by `346ac788` (`hosted-session.ts:982-990`). A restored session now always takes the record's switches, and an absent record means `NO_CAPABILITIES`. The host config's set applies only on a real create.
+
+- **Mutation (a):** I put back the old guard, `restored?.capabilities !== undefined`. The new test "a restart after a NEW segment keeps the person's 'on'…" fails (8 pass / 1 fail). Reverted.
+- **Mutation (b):** I removed `setCapabilities(this.caps)` on the restore path. The same test fails on its model-request assertion (8 pass / 1 fail). Reverted. `git status` is clean.
+- **Regression check:** `HostedSession` gets `restored` only from `SessionHost.restore` (`session-host.ts:1384`). The create path passes `undefined` (`:1032-1035`). So a new session, a resume from the laptop copy, a `/clear` fork and a hop still start from the host config's set and union the seed with it (D4/D5 unchanged). One consequence is intended: a session created before this branch keeps "everything on" across a restart (Q4: a continuation).
+- **Gate:** `bun test packages/daemon/test`: 1403 pass, 1 skip (opt-in), 0 fail. `bun run lint`: clean (2139 files). `bun run typecheck`: clean. I did not re-run the full `bun test`.
+
