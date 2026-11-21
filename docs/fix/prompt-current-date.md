@@ -413,6 +413,24 @@ left to the orchestrator per the brief.
 trust that — the red output, the four mutations and the boundary measurement are
 all in the commands above and reproduce on their own.
 
+### Fix round 2 — the gate's typecheck failure
+
+*— deepseek-v4, 2026-11-21*
+
+The orchestrator's gate failed on one line of round 1's new test:
+`current-date-bounds.test.ts(31,24): TS2353 … 'role' does not exist in type
+'{ readonly dateStamp?: DateStamp }'`. Not a code defect — an excess-property
+check on a direct object literal passed to the structural parameter.
+
+Fixed exactly that, in the test only (`packages/core/test/current-date-bounds.test.ts`):
+the literal is hoisted into a local `Entry` type (the same
+`{ role; dateStamp? }` shape `current-date.test.ts:22` uses for the same
+reason) instead of being written inline in the call. No production code touched.
+
+**Ran:** `bunx tsc --noEmit` (whole repo) → clean; `core/current-date`,
+`core/current-date-bounds`, `agent/date-stamp`, `daemon/date-stamp` → 36 pass,
+0 fail; `bunx biome check` on the file → clean.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-21* (fresh context; same model as the Execution-resume pass, different model from the DeepSeek executor)

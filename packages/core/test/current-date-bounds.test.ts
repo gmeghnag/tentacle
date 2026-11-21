@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   DATE_STAMP_MAX_AT_MS,
+  type DateStamp,
   dateStampPrefix,
   dateStampText,
   nextDateStamp,
@@ -13,6 +14,9 @@ import {
 
 const ROME = "Europe/Rome";
 const BAD = DATE_STAMP_MAX_AT_MS + 1;
+
+/** One history entry, as in `current-date.test.ts`: the role is irrelevant here. */
+type Entry = { readonly role: string; readonly dateStamp?: DateStamp };
 
 describe("an unrenderable `at` degrades, never throws", () => {
   test("dateStampText / dateStampPrefix yield NOTHING for it", () => {
@@ -27,9 +31,8 @@ describe("an unrenderable `at` degrades, never throws", () => {
   test("a history whose last stamp is unrenderable is stamped AGAIN, from `now`", () => {
     // Mutation: compare days with the raw `partsOf` → RangeError instead.
     const now = Date.UTC(2026, 10, 20, 12, 0);
-    expect(
-      nextDateStamp([{ role: "user", dateStamp: { at: BAD, zone: ROME } }], now, ROME),
-    ).toEqual({ at: now, zone: ROME });
+    const history: Entry[] = [{ role: "user", dateStamp: { at: BAD, zone: ROME } }];
+    expect(nextDateStamp(history, now, ROME)).toEqual({ at: now, zone: ROME });
   });
 
   test("a `now` outside the range stamps nothing (never a nonsense line)", () => {
