@@ -1,6 +1,6 @@
 # fix/mobile-stream-lost-repeat — the "stream was lost" notice stacks and survives completed turns
 
-> **Status:** implementation (awaiting owner OK on Q1)
+> **Status:** implementation approved (owner 21/11: Q1 = ship both slices now)
 > **Branch:** `fix/mobile-stream-lost-repeat`
 > **Size:** S · **Blast:** contained · **Suited:** DeepSeek executes; standard in-context Review
 > **Changelog:** `changelog.d/mobile-stream-lost-repeat.fixed.md`
@@ -272,6 +272,8 @@ when the turn later completes — the cause would then live only in the app log
 capture), fix after. **Recommendation: ship both now** — the stacked notices
 are the owner-visible defect, and slice 2 makes the next occurrence
 self-explaining; the trigger hunt continues as a follow-up from the capture.
+
+**Owner decision 2026-11-21:** ship both slices now (fold rule + app log of the drop error).
 
 ## Execution
 
