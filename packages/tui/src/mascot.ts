@@ -12,6 +12,7 @@
  */
 import { cellWidth } from "./cells.ts";
 import { shortPath } from "./status-line.ts";
+import { type MascotPaletteName, type MascotTone, tokens } from "./theme.ts";
 
 /** The owner's drawing, verbatim: `.` empty, `K` outline, `E` eyes, `F` body, `S` body shade, `B` blush. */
 export const MASCOT_BITMAP: readonly string[] = [
@@ -27,41 +28,20 @@ export const MASCOT_BITMAP: readonly string[] = [
   ".........",
 ];
 
-/** A palette's five tones, as `#RRGGBB` (the task doc's table, verbatim). */
-export interface Palette {
-  readonly K: string;
-  readonly E: string;
-  readonly F: string;
-  readonly S: string;
-  readonly B: string;
-}
+/** A palette's five tones, as `#RRGGBB` (the `tokens.mascot` table, verbatim). */
+export type Palette = MascotTone;
 
-/** The nine palettes, in the order `pickPalette` draws them. */
-export const PALETTE_NAMES = [
-  "soft",
-  "logo",
-  "glow",
-  "cyan",
-  "teal",
-  "coral",
-  "mint",
-  "amber",
-  "sky",
-] as const;
+/**
+ * The nine palettes and their order — read from the ONE token table
+ * (`theme.ts` `Tokens.mascot`), the only file allowed to name a colour. Read at
+ * CALL time like any other token, never frozen into a module constant.
+ */
+export const PALETTE_NAMES: readonly MascotPaletteName[] = tokens.dark.mascot.names;
 
-export type PaletteName = (typeof PALETTE_NAMES)[number];
+export type PaletteName = MascotPaletteName;
 
-export const MASCOT_PALETTES: Readonly<Record<PaletteName, Palette>> = {
-  soft: { K: "#7B3FC0", E: "#3E1A5E", F: "#B387EA", S: "#A274DE", B: "#DDBFF8" },
-  logo: { K: "#6E36AE", E: "#3E1A5E", F: "#A267DB", S: "#9258CF", B: "#CFA8F3" },
-  glow: { K: "#C9A6F2", E: "#3E1A5E", F: "#8E4BC4", S: "#8143B8", B: "#B583E0" },
-  cyan: { K: "#0E8AA8", E: "#083A47", F: "#5FE0F2", S: "#3FCFE6", B: "#B7F3FB" },
-  teal: { K: "#14857A", E: "#0A3B36", F: "#5CD6C4", S: "#40C2AF", B: "#B5EEE4" },
-  coral: { K: "#C2475A", E: "#5A1622", F: "#F58C93", S: "#EC7480", B: "#FFC6C2" },
-  mint: { K: "#3C9A5C", E: "#163D24", F: "#8FE0A6", S: "#73D28E", B: "#CFF5D9" },
-  amber: { K: "#B7791F", E: "#4A2E07", F: "#F7C35C", S: "#EEB043", B: "#FFE3A8" },
-  sky: { K: "#3A6FD0", E: "#13285A", F: "#8DB4F7", S: "#73A0F0", B: "#CFE0FF" },
-};
+/** The nine palettes by name (a copy of the table's set; the hexes are its own). */
+export const MASCOT_PALETTES: Readonly<Record<PaletteName, Palette>> = tokens.dark.mascot.tones;
 
 /**
  * A palette drawn at random, ONCE per start (the palette lives on the item, so

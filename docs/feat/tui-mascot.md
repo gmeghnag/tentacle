@@ -466,6 +466,80 @@ Gate status in this worktree after the fix: `tsc --noEmit` (root),
 changed files → clean; narrow tests: 39 (mobile) + 157 (tui) + 14 + 18 → 0 fail.
 The full suite stays the orchestrator's.
 
+### Main-merge fix
+
+*— claude-opus-5-5, 2026-11-22*
+
+Merging this branch into `main` (after `feat/shell-intent-line`) failed the gate
+in exactly 5 tests, in two test files
+(`.tentacle/tmp/tui-mascot-gate-main.log`). Both were ours to fix, in different
+ways: one was a real violation, one was an expectation written before the
+header existed.
+
+**1. `theme-no-stray.test.ts` › no hex literal — a REAL violation, fixed in the
+source.** The nine palettes sat as hex literals in `mascot.ts:55-63`. The rule
+(`test/theme-no-stray.test.ts:1-18,49-55`) is that `theme.ts` is the ONE file
+allowed to name a colour, because a hex written anywhere else escapes the light
+palette and no test notices. The plan's `Files` list had this wrong when it put
+the palettes in `mascot.ts`.
+
+Fixed by moving the table, not by relaxing the rule:
+`theme.ts:115-137` now declares `MascotTone` / `MascotPalettes` and
+`MASCOT_PALETTE_NAMES` (the `const` tuple, so the union type survives), and
+`MASCOT` (`theme.ts:186-206`) holds the nine palettes **verbatim**; it hangs off
+`Tokens.mascot` and both `DARK`/`LIGHT` point at the same object
+(`theme.ts:260,327`) — one set for both themes, exactly owner Q4
+("keep all 9 in both themes"), which is why it is keyed off `tokens` and not off
+a `ThemeMode`. `mascot.ts` keeps its pure half unchanged (bitmap, `pairCell`,
+`mascotCells`, `headerView`, `pickPalette`) and now reads
+`PALETTE_NAMES`/`MASCOT_PALETTES`/`Palette` from `tokens.dark.mascot`
+(`mascot.ts:32-44`) — the tokens are read at call time like every other token,
+never frozen into a module constant (`theme-contrast.test.ts`'s rule). No hex
+value changed and no public name changed, so `mascot.test.ts`'s verbatim table
+and its 256-downgrade distinctness check still pass untouched.
+
+**2. `subagent-panel-frames.test.tsx` F15, 4 cases — a STALE expectation, not a
+fit break; expectations updated under Q1.** The four failures were only the two
+`nothing in the frame says the model` lines, at 190 and at 80 columns
+(`:756`, `:770` before this change — `:776`, `:790` after). Key point: **the fit
+contract itself was never broken** — every length/height assertion in `at()`
+(`:727-733`, ≤ `columns` wide, ≤ 24 rows) passed at both widths, including with
+the 3-line header present. What changed is that the frame now legitimately
+contains the model name on the header's second line (`qwen3-27b · /tmp/work`,
+line 2), which is Q1's **owner-accepted** decision: create the 3-line header and
+**replace** `WELCOME` with it, on a fresh start (`docs/feat/tui-mascot.md`
+Questions Q1/Q2, "Owner 2026-11-21, Q1–Q4: accepted as recommended"). So the
+assertion, written when the input rule was the frame's only model mention, had
+to be re-aimed rather than the header removed — the rule it encodes ("the dock
+never repeats the model") is still real and still worth pinning.
+
+The two `expect(lines.some(l => l.includes("qwen3-27b"))).toBe(false)` lines
+became one helper, `expectNoModelOnTheDock` (`:747-758`): exactly ONE line names
+the model, it is the header's own `<model> · <cwd>` shape (not a rule carrying
+the name), and it sits ABOVE the dock's rule. That is strictly stronger than the
+old line in the way that matters — the old form would also have passed with a
+model-bearing rule two lines above the dock, and the new one cannot — and it is
+unchanged in the way the test cares about: no rule of the dock names the model.
+The dropdown case's separate `inputRule` plainness assertion
+(`:773-774`, `/^─+$/`) was already there and is untouched.
+
+**Verified.** `bun test packages/tui/test/subagent-panel-frames.test.tsx
+packages/tui/test/theme-no-stray.test.ts` → 38 pass, 0 fail. Related files (so
+the palette move is pinned beyond the scan): `mascot`, `theme`, `theme-contrast`,
+`render-lines`, `app-frames` → 169 pass, 0 fail. `tsc --noEmit -p packages/tui`
+→ 0 errors (with `@tentacle/protocol` linked into this worktree for the check
+only; the link was removed afterwards). `biome check` on `packages/tui/src` +
+`packages/tui/test` → clean.
+
+**Test non-vacuity (both mutations run, then reverted).** (a) Making the PLAIN
+rule carry the model (`status-line.ts` `case "plain": modelBorder(model, w)`) →
+2 F15 failures, caught by the pre-existing `inputRule` plainness assertion, so
+that property was already pinned. (b) Making only the TARGET rule carry the
+model (``─ → ${rule.id}${keys} qwen3-27b ···``) → 2 F15 failures at 190 and 80,
+caught by `expectNoModelOnTheDock` alone — i.e. the new helper is what holds the
+"no model on the dock's rules" line where it was previously unproven. Both edits
+restored; `git diff` shows only the three intended files.
+
 ### Adversarial review (fresh context)
 
 *— claude-opus-5-5, 2026-11-21*
