@@ -358,7 +358,15 @@ describe("the flows the task replaced are gone, and its ids exist", () => {
       // flows, and `_pair` itself) has no id to name — the rest must.
       const pairsFirst = (PAIRING_FLOWS as readonly string[]).includes(name);
       if (!pairsFirst) {
-        expect(body).toContain("${output.computerId}");
+        // Directly, or through a script of the flow that reads it (flow 37
+        // keeps the paired id as `rowA` before a second pairing overwrites it).
+        const scripts = [...body.matchAll(/file: "([\w-]+\.js)"/g)].map((m) =>
+          readFileSync(join(FLOWS_DIR, m[1] ?? ""), "utf8"),
+        );
+        const names =
+          body.includes("${output.computerId}") ||
+          scripts.some((s) => s.includes("output.computerId"));
+        expect({ name, names }).toEqual({ name, names: true });
       }
     }
   });
@@ -474,7 +482,10 @@ describe("R6's relay-only flow (docs/feat/mobile-relay.md)", () => {
     const pairing = readFileSync(join(import.meta.dir, "..", "e2e", "pairing.ts"), "utf8");
     // The design of `relayOnly` is the ABSENCE of the harness's own address: a
     // future edit that always injects one again would quietly un-prove the flow.
-    expect(pairing).toContain("relayOnly === true ? {} : { extraAddresses: [deps.address] }");
+    // (`address` is the window's: `deps.address` unless a flow names another
+    // project's `serve`, flow 37.)
+    expect(pairing).toContain("const address = options.address ?? deps.address;");
+    expect(pairing).toContain("relayOnly === true ? {} : { extraAddresses: [address] }");
   });
 });
 
