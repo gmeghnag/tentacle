@@ -12,8 +12,8 @@
  * `perm-reply-input`, `perm-reply-send`, `perm-arming`, `perm-returned`,
  * `perm-returned-dismiss`.
  */
-import type { JSX } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
+import { type ComponentRef, type JSX, useEffect, useRef } from "react";
+import { Keyboard, Modal, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
 import {
   type OptionPill,
   type PermissionSheet,
@@ -114,6 +114,19 @@ export function PermissionSheetView({
   // VALUE is read here and now: the controller re-emits on the link's own change
   // (a flip from the laptop arrives that way), so no timer lives in the screen.
   const link = sheet.autoAccept;
+  // The reply field sits ABOVE "Send reply", and a pageSheet is not resized by
+  // the keyboard: with the field focused, the keyboard covered the button, so
+  // the reply could not be sent without first finding a way to dismiss a
+  // multiline field's keyboard (docs/fix/mobile-e2e-1121.md, flow 08c). The
+  // ScrollView insets itself by the keyboard (`automaticallyAdjustKeyboardInsets`)
+  // and, once the keyboard is up, scrolls its END — the button — into view.
+  const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardDidShow", () => {
+      scroll.current?.scrollToEnd({ animated: true });
+    });
+    return () => shown.remove();
+  }, []);
   return (
     <Modal
       visible={asking !== null || returned !== null}
@@ -123,7 +136,9 @@ export function PermissionSheetView({
       onRequestClose={() => sheet.dismiss()}
     >
       <ScrollView
+        ref={scroll}
         testID="perm-sheet"
+        automaticallyAdjustKeyboardInsets
         style={{ backgroundColor: palette.sheet }}
         contentContainerStyle={styles.sheet}
         keyboardShouldPersistTaps="handled"
