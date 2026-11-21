@@ -1,8 +1,8 @@
 # feat/shell-intent-line — a sentence of what a shell command does
 
-> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Status:** implementation — plan APPROVED 2026-11-21 (Owner questions), ready for Execution
 > **Branch:** `feat/shell-intent-line`
-> **Type:** feat · **Size:** L · **Blast:** cross-module · **Suited:** Opus (or equivalent) executes in three slices on this one branch; Review fresh-context, red-teaming the permission slice (AGENTS §7 "a pod is not trusted")
+> **Type:** feat · **Size:** L · **Blast:** load-bearing · **Suited:** Opus executes in four slices on this one branch (~30 files, 7 packages + the app); Review MANDATORY fresh-context, red-teaming the permission slice S3 (AGENTS §7 "a pod is not trusted": pod-supplied text now sits in the ask a human decides on)
 > **Changelog:** `changelog.d/shell-intent-line.added.md`
 
 ## Context
@@ -15,7 +15,7 @@ command). The person reads *how*, not *why*. The owner agreed (TODO.md row,
 2026-11-20) to show a short sentence of WHAT the command does, written by the
 model in the same call, in the user's language, with today's row as the fallback.
 
-**Owner decisions in the brief (binding):**
+**Owner decisions in the brief** (as first briefed; the slot and reasoning points are SUPERSEDED by «Owner decisions 2026-11-21» under Owner questions):
 - Source: an optional `description` input on the `shell` tool — no extra model call.
 - While running, the sentence replaces «Thinking…» (the slot label); done, the
   row title = sentence + outcome (✓ / ✗ exit N, the outcome WRITTEN, never by
@@ -66,203 +66,398 @@ model being asked for it and (b) the two clients drawing it.
 
 ## Implementation
 
-*— claude-opus-5-5, 2026-11-21*
+*— claude-opus-5-5, 2026-11-21 (rewritten after the Owner decisions 2026-11-21: variant B, slot unchanged, no reasoning in the detail, shell only, beta `compactShell`)*
+
+**Scope in one line.** A `shell` call whose model gave a `description` draws as
+TWO rows — the sentence + a WRITTEN outcome, then `$ <command>` subtle and cut —
+on the Mac TUI and the iPhone; the permission ask shows the verbatim command
+first (full colour, wrapped) and the sentence under it, attributed; a beta
+`compactShell` (default OFF) hides the `$` row while running and on success.
+OUT of this task: the spinner slot (unchanged), the reasoning (stays where it
+is), MCP / `workload_shell` / sub-agent tree rows, the ∴ spinner and the
+blinking phone dot (Follow-ups).
 
 ### Load-bearing assumption
 
 **The `shell` call's raw input — including a new optional `description` — reaches
 BOTH clients at the moment the call starts, before its permission ask, with no
-protocol change.** Proven:
+protocol change.** Proven (repro in Context shows all four hops on a real value):
 
-- The agent yields `tool_start` with the model's raw `call.arguments` string
-  (not the zod-parsed input) — sequential path `packages/agent/src/agent.ts:2170`,
-  parallel group `:2309`, context-reset `:2575` — and only THEN authorizes the
-  call (`authorizeCall` at `agent.ts:2182` / `:2318`). So the row with its
+- The agent yields `tool_start` with the model's RAW `call.arguments` string
+  (not the zod-parsed input), `packages/agent/src/agent.ts:2170`, and only THEN
+  authorizes the call (`authorizeCall`, `agent.ts:2182`). So the row with its
   arguments exists before any ask.
 - The daemon maps it to `tool_call` with `rawInput: safeParseArgs(event.arguments)`
-  (`packages/daemon/src/mapping.ts:293-300`, `safeParseArgs` `:239-248` = plain
-  `JSON.parse`, no filtering). `ToolCallSchema.rawInput` is `z.unknown()`
-  (`packages/protocol/src/updates.ts:49-56`), so nothing strips the field.
+  (`packages/daemon/src/mapping.ts:293-300`); `ToolCallSchema.rawInput` is
+  `z.unknown()` (`packages/protocol/src/updates.ts:49-56`), so nothing strips it.
 - The client maps it back to `tool_start` with `arguments: JSON.stringify(rawInput)`
-  (`packages/client/src/mapping.ts:279-290`). TUI keeps it as `ToolItem.args`
-  (`packages/tui/src/state.ts:550-558`); the phone as `ToolRow.args`
-  (`apps/mobile/src/transcript.ts:546-556`).
-- Resume/offline: the arguments are persisted inside the assistant message's
-  `toolCalls` and the TUI rebuilds `args: call.arguments` from them
-  (`packages/tui/src/resume.ts:133`) — a description survives `--resume` for free.
+  (`packages/client/src/mapping.ts:279-290`); the TUI keeps it as `ToolItem.args`
+  (`packages/tui/src/state.ts:137`), the phone as `ToolRow.args`
+  (`apps/mobile/src/transcript-rows.ts:122`).
+- `--resume` rebuilds `args: call.arguments` from the persisted `toolCalls`
+  (`packages/tui/src/resume.ts:133`) — the sentence survives a resume for free.
 
-Repro above shows all four hops on a real value. ⇒ **No protocol change, no
-`protocol.d/` note.**
+⇒ **No protocol change, no `protocol.d/` note, no persisted-format change.**
 
-### Preconditions
+### Preconditions (verified)
 
-- **Where «Thinking…» is decided — TUI:** the pure `slotView`
-  (`packages/tui/src/spinner-slot.ts:49-65`): `running && reasoning` → `thinking`,
-  `running && !reasoning` → `working`. `reasoning` turns false at every
-  `tool_start` (`state.ts:558`), so **while a command runs the slot today says
-  «Working…»**. Called ONCE from `app-layout.ts:261` (row budget) and painted by
-  `AppView.tsx:166-174` from that same view (the S3 single-decision rule —
-  the new label MUST ride this view, never be re-decided in `AppView`).
-- **Where «Thinking…» is decided — app:** the pure `isThinking` in
-  `apps/mobile/src/tool-steps.ts:88-109`: false while a tool row runs. So on the
-  phone a running command is already its own step (spinner node, `Bash` + mono
-  command, live seconds: `StepNode`, `apps/mobile/src/ui/StepNode.tsx:341`),
-  and the Thinking footer (`ThinkingNode`, `StepNode.tsx:524`) is gone during it.
-  "The sentence replaces Thinking…" on the phone therefore = the running step's
-  NAME becomes the sentence (with the shimmer the Thinking word has).
-- **Row titles:** TUI `toolTitle`/`toolSubtitle` (`packages/tui/src/render-lines.ts:617-652`,
-  shell = `str("command")`), header assembly `:885-895`. Phone `subtitleOf`
-  (`apps/mobile/src/tool-summary.ts:71-91`, the same parity rule), trailing
-  `toolMeta` (`:158-169`, which today says "Never an exit code").
-- **Exit code is in the result text:** `shell` returns `exit=${code}\n…`
-  (`packages/tools/src/builtins.ts:458`). A parser of that prefix is the only
-  source of `N` in `✗ exit N` (display only).
-- **Validation strips unknown keys:** `tool.inputSchema.safeParse` (`packages/tools/src/registry.ts:96`)
-  on a plain `z.object` — adding an optional key is additive; the model sees it
-  via `zodToJsonSchema` (`registry.ts:64`), `.describe()` included.
-- **Permission request content:** `describeToolCall` builds `detail: command`
-  from `command` ONLY (`packages/agent/src/permission-gate.ts:40-48`), the prefix
-  suggestion from the command only; the wire carries it as `explanation`
-  (`packages/daemon/src/permission-map.ts:36-50`); the client rebuilds the
-  request with `input: {}` (`packages/client/src/permission-router.ts:102-112`) —
-  so the permission UI has NO access to `description` today, and the core
-  `PermissionRequestOptions.toolCallId` (`packages/core/src/permission.ts:158`,
-  with `origin` `:160`) is the join key to the client's own tool row.
-- **Reasoning text:** the phone keeps the live thought folded into the step
-  (`tool-steps.ts:35-42`, "live only"; `StepBody` at `StepNode.tsx:469`). The TUI
-  keeps NO reasoning text at all — only a flag (`state.ts:543-548`).
-- TUI row-count invariants: the slot is exactly one row (`app-layout.ts:270-273`);
-  the permission dialog's height is `permissionPromptRows` (`components/PermissionPrompt.tsx:15`,
-  consumed at `app-layout.ts:371`).
+- **Tool schema strips unknown keys / advertises described ones.** `shellInput`
+  is a plain `z.object` (`packages/tools/src/builtins.ts:406-421`); validation is
+  `tool.inputSchema.safeParse` (`packages/tools/src/registry.ts:96`), the model
+  sees `zodToJsonSchema(tool.inputSchema)` with `.describe()` text
+  (`registry.ts:64`). Adding an optional key is additive; `execute`
+  (`builtins.ts:428-459`) never reads it.
+- **Exit code source.** `shell` returns `exit=${code}\n…` with
+  `isError = code !== 0` (`builtins.ts:458`); a killed process is 124
+  (`builtins.ts:404`); a background start has no `exit=` (`builtins.ts:438-441`).
+  A SPILLED result's `content` starts with the banner, but `spill.head` is the
+  original content's head (`packages/agent/src/result-pipeline.ts:98-105`), so
+  `exit=` is still readable there. The TUI keeps `resultText` + `spill`
+  (`state.ts:572-582`); the phone keeps `output` + `spill`
+  (`transcript-rows.ts:125,137`). A denial is `Permission denied by the user: …`
+  (`agent.ts:3142`, no `exit=`); the phone has its own `denied` status
+  (`apps/mobile/src/tool-summary.ts:165-167`).
+- **TUI row = `toolLines`** (`packages/tui/src/render-lines.ts:858-913`): queued
+  one dim row (`:876-882`), header assembly `:885-895`
+  (`● <bold label> <subtle fitted subtitle><elapsed>`), expanded command rows
+  `commandRows` (`:710-722`, `  │ ` prefix), body with `⎿` connector (`:913`).
+  `toolTitle` (`:617-631`) has two callers only (`:877`, `:885`).
+- **TUI row count follows the lines.** `itemRows` caches the rows `toolLines`
+  returns per item identity + width/threshold/preview (`render-lines.ts:1241-1268`)
+  and `layoutTranscript` (`:1335`) sums them — a second row is counted with no
+  change to `app-layout.ts`'s transcript maths. `chartGlyphs` is the precedent of
+  an App-lifetime display option deliberately NOT in that key (`:84-89`).
+- **Blink touches row 0 only.** `withPhase` → `offPhaseRows` swaps only the
+  first `BULLET` of row 0 (`render-lines.ts:1197-1208, 1288-1297`): a `$` row
+  under it is unaffected.
+- **Click hit = header row only.** `toolCallAt` returns the id only for
+  `absRow === item.start` (`packages/tui/src/tool-hit.ts:60-62`): the `$` row is
+  text, like today's continuation rows.
+- **TUI permission dialog.** Detail = ONE row for a tool
+  (`packages/tui/src/permission-ui.ts:128-131`), painted DIM and TRUNCATED to
+  `columns − 3` (`components/PermissionPrompt.tsx:65-70`); non-tool asks already
+  get up to `MAX_DETAIL_ROWS = 10` with a `… N more lines` row
+  (`permission-ui.ts:120, 132-137`). Height = `permissionPromptRows`
+  (`PermissionPrompt.tsx:15-25`), fed by `permissionDetailLines(...).length` in
+  `app-layout.ts:368-376` and painted in `AppView.tsx:136-148` — two consumers,
+  so the row decision must be ONE pure function both call.
+- **Permission request content.** `describeToolCall` builds `detail: command` and
+  the prefix suggestion from `command` ONLY
+  (`packages/agent/src/permission-gate.ts:39-48`). The client rebuilds the request
+  with `input: {}` (`packages/client/src/permission-router.ts:102-112`); its
+  `prompt` action carries `agent` but not `toolCallId` (`:356-382`), and
+  `RemoteClient` forwards `turnId` + `agent` to the broker
+  (`packages/client/src/remote-client.ts:4717-4721`). The wire already has
+  `toolCallId` (`packages/protocol/src/permission.ts:65`); it has NO `origin` —
+  a sub-agent's ask is the one carrying `agent` (`permission.ts:74-79`); the core
+  `PermissionRequestOptions` already has `toolCallId` + `origin`
+  (`packages/core/src/permission.ts:153-160`). The TUI stores `options.agent` at
+  `permission-ui.ts:478`; the phone sheet at
+  `apps/mobile/src/permission-sheet.ts:81, 286-291` and paints `request.detail`
+  full, mono, unclipped (`screens/PermissionSheet.tsx:145-150`).
+- **Phone step.** The view-model is the pure `stepRowView`
+  (`apps/mobile/src/tool-steps.ts:282-343`: `name`, `subtitle` = one mono line
+  AFTER the name, `trailing` from `toolMeta` `tool-summary.ts:158-169`, body
+  `command` = `bodyCommand` `:414-420`). `StepNode` draws name + subtitle +
+  trailing on ONE horizontal line (`ui/StepNode.tsx:627`, name `maxWidth: "45%"`
+  `:629`), the `ThinkingWord` shimmer only for `node === "thinking"`
+  (`:391-397`). Rendered by `ToolRowView`
+  (`screens/transcript/TranscriptRow.tsx:575-668`), whose screen-owned half is
+  `StepProps` (`:116-124`).
+- **Config plumbing precedent (`tui.chartGlyphs`).** Schema `tui` (strict,
+  `packages/config/src/schema.ts:471-482`), docs `key-docs.ts:975-1011` (tested by
+  `packages/config/test/key-docs.test.ts`, `packages/cli/test/key-docs-carried.test.ts`),
+  template comment `defaults.ts:261-264`; read at `packages/cli/src/main.ts:1429`
+  and `:2286`, and for `connect` by `connectChartGlyphs` (`connect.ts:88-91,
+  178-195`, used `:263`, `:394`); into the TUI via `run.tsx:112, 211` →
+  `App.tsx:250` → `RenderOptions` (`render-lines.ts:89`, `App.tsx:879/1054`).
+- **Phone Beta precedent.** Settings → Beta section with one `Switch` row per
+  feature (`apps/mobile/src/screens/SettingsScreen.tsx:558-603`); the Figtree
+  switch has its OWN versioned `SecureKV` record with fail-safe parse
+  (`theme-settings-store.ts`, key `tentacle.theme`), holder wired in
+  `theme-settings-expo.ts:11`, passed at `apps/mobile/App.tsx:2453`.
+- **Sanitizer precedent.** Pod-supplied strings: control chars → space, capped
+  (`progressText`, `packages/client/src/mapping.ts:126-130`); format/bidi classes
+  stripped, not spaced (`gateExitText`, `:132-…`).
 
 ### Design
 
-One pure, shared source of truth in `@tentacle/core`, both clients project it.
+**1. Tool schema** (`builtins.ts:406-427`): add
+`description: z.string().optional().describe(…)` — NO `.max()` (an over-long
+sentence must never fail the call and cost a round). Wording: *"A short sentence
+(≤ 8 words) saying WHAT this command does and why, in the language the user
+writes in — e.g. 'Run the mobile package tests'. Shown to the user above the
+command."* One more sentence in the tool `description`: "Always give
+`description`." `execute` unchanged.
 
-1. **Tool schema** (`builtins.ts:407`): add
-   `description: z.string().optional().describe(…)` — NO `.max()` (an over-long
-   sentence must never fail the call and cost a round). Wording (in English,
-   the schema's language): *"A short sentence (≤ 8 words) of WHAT this command
-   does and why, in the language the user writes in — e.g. 'Run the mobile
-   package tests'. Shown to the user instead of the command; the command itself
-   is always shown when they are asked for permission."* Also one sentence in
-   the tool `description`: "Always give `description`." `execute` ignores it.
-2. **`packages/core/src/shell-intent.ts`** (new, pure, exported from the index):
-   - `shellIntent(args: string): string | null` — parse JSON; take
-     `description` if a string; strip C0/C1 control chars and ANSI escapes (a
-     pod-supplied string reaching a terminal), collapse whitespace/newlines to
-     one space, trim; `""` → `null`; cut to `INTENT_MAX_GRAPHEMES = 72` with `…`.
-     Non-JSON / non-object / wrong type → `null`.
-   - `shellOutcome(status, resultText): { ok: boolean; code: number | null }` —
-     parse `^exit=(-?\d+)` of the result; `code` null when absent (a denied,
-     cancelled or spilled call).
-   - `INTENT_MAX_GRAPHEMES`, exported for both clients' tests.
-3. **TUI** (variant A, pending Q1):
-   - `toolTitle` for `shell`: when `shellIntent(args)` is non-null, the title is
-     `{ label: <sentence>, subtitle: "" , command: <command> }` (label in bold as
-     today); else today's `Bash <command>`. The header adds the written outcome
-     after a settled shell row: `✓` (success) / `✗ exit N` (error), before the
-     elapsed — glyph + word, not hue.
-   - Expanded (click / Ctrl+O): today's `commandRows` already prints the full
-     command under the header (`render-lines.ts:893-895`); with a sentence it
-     prints `$ <command>` there, then the captured reasoning (below), then the
-     body.
-   - Reasoning before the call: a NEW pure reducer step in `state.ts` keeps
-     the reasoning text of the current round (`reasoningText`, appended on
-     `reasoning`, reset at `tool_start`/`text`) and copies it onto the
-     `ToolItem` it precedes (`thought?: string`, capped at 2 000 chars). Live only
-     (a resumed session has none — same as the phone).
-   - Slot: `SlotFacts` gains `intent: string | null`; `slotView` returns
-     `{ kind: "intent", text, since }` when `running && !reasoning && intent`.
-     `intent` is computed by a new pure `liveIntent(items)` (latest RUNNING
-     `shell` row with a sentence; with >1 running shell rows: the first one +
-     ` +N`). `app-layout.ts` passes it; `AppView` paints `<Thinking label={text + "…"}>`
-     with the label pre-truncated to `columns − width(spinner + " ") − width(suffix)`
-     cells by `fitIntentLabel` (pure, `cells.ts`), so the slot stays ONE row.
-4. **App:**
-   - `tool-summary.ts`: `stepTitle(row)` → `{ name, mono }`: sentence ⇒
-     `name = sentence`, `mono = ""` (sans, weight 500); else today's
-     `Bash` + command. `toolMeta` trailing for a settled shell with a sentence:
-     `✓ 1.2 s` / `✗ exit 2 · 3.4 s` (still `trailingRed` on error — colour is
-     the extra cue, the text is the meaning). The "Never an exit code" comment
-     is updated: shell's text carries one.
-   - `StepNode`: a running step whose name is a sentence draws it with the
-     existing `ThinkingWord` shimmer (base `label`, not `sec`) — no new
-     animation code. Its body (`StepBody`) already shows thought, command,
-     output; the command block is now shown even when the row's title is a
-     sentence (it already is: `bodyCommand`, `tool-summary.ts:414`).
-5. **Permission view (security rule):**
-   - Client: `PermissionRouter` passes the wire's `toolCallId` and `origin` in
-     the requester's options (client-internal; `PermissionRequestOptions`
-     already has both fields). No protocol change.
-   - TUI `PermissionPrompt` / phone sheet: the subject row stays the verbatim
-     `detail` (the command) — FIRST, full colour, never truncated (today it is
-     dim in the TUI: raise it to the default fg). Under it, ONLY when
-     `origin === "call"` and the joined row is a `shell` with `shellIntent`
-     non-null: one dim row `il modello dice: «<sentence>»` — wording in English
-     in code (`the model says: “…”`), Italian only in the mockup. The
-     prefix suggestion keeps coming from the command only. `permissionPromptRows`
-     gains `+1` exactly when that row is drawn (one pure helper decides it for
-     both the row count and the paint).
+**2. `packages/core/src/shell-intent.ts` (new, pure, exported from
+`core/src/index.ts`)** — the ONE decision both clients project:
 
-**Mockups → plan mapping:** variant A = items 3–4 as written; B adds the
-`$ command` second row; C keeps rows as today and only changes the slot / live node.
+- `shellIntent(args: string): string | null` — `JSON.parse`; `description` if
+  a string; strip C0/C1 controls and ANSI (→ space), strip bidi/format and
+  zero-width chars (the `gateExitText` classes), collapse whitespace, trim;
+  `""` → `null`; cut to `INTENT_MAX = 72` code points (`Array.from`, never
+  splitting a surrogate pair) + `…`. Non-JSON / non-object / non-string → `null`.
+- `shellCommand(args: string): string` — the `command` string, `""` if absent.
+- `shellExitCode(text: string | undefined): number | null` — `^exit=(-?\d+)(\n|$)`
+  on the given text; else `null`.
+- `shellOutcome(o: { status: "running" | "queued" | "ok" | "error" | "denied"; text?: string; spillHead?: string }): string | null`
+  — `null` while running/queued; `ok` → `"✓"`; `error`/`denied` with a code
+  from `shellExitCode(spillHead ?? text)` → `` `✗ exit ${N}` ``, without one →
+  `"✗"` (the body already says denied / why — never an invented `exit N`).
+  Glyph + word, never hue alone (owner is colour-blind).
+- `shellRowParts(args, status, compact: boolean): { sentence: string; command: string; commandRow: boolean } | null`
+  — `null` when `shellIntent` is `null` (⇒ today's row, byte-identical).
+  `commandRow = !compact || status === "error" || status === "denied"` — the
+  beta rule: hidden while running/queued and on exit 0, shown on exit ≠ 0 /
+  error / denial. (The tap detail and the permission ask ignore `compact`.)
+- `INTENT_MAX` exported for tests.
+
+**3. TUI rows (variant B)** — `render-lines.ts` `toolLines`, a `shell` branch
+before today's header (`:883`), using `shellRowParts(tool.args, tool.status,
+opts.compactShell === true)`:
+
+- `null` ⇒ today's code path untouched.
+- Header (row 0): `● <bold sentence> <outcome><elapsed>` — outcome from
+  `shellOutcome({status, text: tool.resultText, spillHead: tool.spill?.head})`,
+  coloured `success` / `error` AND written (`✓`, `✗ exit 2`); the sentence is
+  cut by `fitSubtitle` to `cols − bullet − outcome − elapsed`. Running: no
+  outcome, no elapsed (as today), the bullet blinks via `withPhase` (unchanged).
+  **No result / "running…" line is added** while it runs.
+- Row 1 when `commandRow` and NOT expanded: `  ` + `theme.subtle("$ " +
+  firstLine(command))`, cut with `…` to `cols` (a multi-line command → first line
+  + `…`); always exactly one row.
+- Expanded (click / Ctrl+O): header unchanged; `commandRows("$ " + command,
+  cols)` (`  │ $ …`, full, wrapped) — ALWAYS, even under `compactShell` — then
+  the body as today. No reasoning (owner).
+- Queued (`◌`): `queuedRow({ label: sentence, subtitle: "" })` + the `$` row
+  when `commandRow` (subtle, same rule).
+- `RenderOptions` gains `compactShell?: boolean` (`render-lines.ts:89` next to
+  `chartGlyphs`). Unlike `chartGlyphs` it IS added to the `itemRows` cache-entry
+  check (`:1263-1268`, one boolean): a module-level cache keyed only by item
+  identity would serve a compact row to a non-compact render of the same item
+  (a test-order flake today, a correctness bug if it ever becomes toggleable).
+
+**4. TUI config `beta.compactShell`** (laptop-only display setting, default
+false): new top-level strict section `beta: z.object({ compactShell:
+z.boolean().optional() }).strict().optional()` in `schema.ts` (beside `tui`,
+`:471`); `key-docs.ts` entries `beta` (section, `carried: "no"`) and
+`beta.compactShell` (leaf, boolean, default false, details: "with a sentence,
+the `$ command` row shows only on failure; the command stays in the permission
+ask and in the expanded row; a lying sentence is caught only by expanding"),
+a template comment in `defaults.ts`. Plumbing exactly like `chartGlyphs`:
+`main.ts:1429`, `:2286` (`compactShell: config.beta?.compactShell ?? false`),
+`connect.ts` (`ConnectOptions.compactShell`, `connectCompactShell` reading the
+file, silent `false` on a broken file), `run.tsx` option → `App` prop →
+`RenderOptions` at both `App.tsx` call sites (`:879`, `:1054`, their deps
+lists `:892`, `:1061`). Never carried to a pod (display only; a pod daemon
+never renders).
+
+**5. Permission ask (security rule)** — the command is the subject; the
+sentence is an attributed footnote.
+
+- Client (`permission-router.ts:356-382`): the `prompt` action adds
+  `toolCallId: entry.update.toolCallId` and `origin: entry.update.agent ? "subagent" : "call"`
+  (derived from the wire's existing `agent`, no new field);
+  `remote-client.ts:4717-4721` forwards both in the requester options (core type
+  already has the fields). Client-internal, no protocol change.
+- Join (pure, core `shell-intent.ts`):
+  `permissionIntent(req: PermissionRequest, call: { toolCallId?: string; origin?: "call" | "subagent" }, argsOf: (id: string) => string | undefined): string | null`
+  — non-null ONLY when `req.tool === "shell"`, `origin === "call"` (or absent
+  with a `toolCallId`: a local ask is the call's own), and `shellIntent` of the
+  joined row's args is non-null. `origin: "subagent"` → `null` (the id names the
+  parent `agent_task`, the join would show the wrong sentence).
+- TUI: `permission-ui.ts` stores `{ toolCallId, origin }` beside `pendingAgent`
+  (`:478`); a NEW pure `permissionView(req, intent, columns)` in
+  `permission-ui.ts` returns `{ detailRows: string[]; intentRow: string | null }`:
+  for a `shell` ask the command is WRAPPED to `columns − 3` over up to
+  `MAX_DETAIL_ROWS` rows (the existing cap, last row `… N more lines` — never a
+  silent cut; a multi-line command keeps its lines), and `intentRow =
+  `the model says: “${intent}”`` cut to one row. Other asks: today's
+  `permissionDetailLines`, `intentRow: null`. BOTH `app-layout.ts:368-376`
+  (row count: `detailRows.length + (intentRow ? 1 : 0)`) and `AppView.tsx`
+  → `PermissionPrompt` (paint) consume that one view — the S3 single-decision
+  rule. `PermissionPrompt` paints detail rows in the DEFAULT foreground (Q3:
+  no longer dim), the intent row dim, right under the command, above `in <cwd>`.
+  The `App` passes `argsOf` = lookup in `st.items` by id.
+- Phone: `permission-sheet.ts` stores `call: { toolCallId, origin }` from the
+  options (`:286-291` pattern); `SessionScreen` computes `permissionIntent`
+  against its rows and passes `intent` to `PermissionSheetView`, which draws
+  `the model says: “…”` (`typography.footnote`, `sec`, `numberOfLines={1}`)
+  directly UNDER the mono command box (`PermissionSheet.tsx:145-150`, already
+  full and unclipped), before `Asked by …`.
+- The "don't ask again" prefix keeps coming from the command only
+  (`permission-gate.ts:42`) — pinned by a test, not changed.
+- Under `compactShell` the ask is unchanged (the command is always there).
+
+**6. Phone rows (variant B)** — pure first, components dumb:
+
+- `tool-steps.ts` `stepRowView(row, thought, full, thoughtFirst, compact = false)`:
+  when `shellRowParts(row.args, row.status, compact)` is non-null →
+  `name = { tool: sentence }`, `subtitle = ""`, NEW `subline: "$ " +
+  firstLine(command)` or `null` (when `!commandRow`), `shimmer: dot ===
+  "running"`, and `trailing` = `toolMeta`'s with the outcome prefixed:
+  `✓ 1.2 s` / `✗ exit 2 · 3.4 s` / `✗ · 3.4 s` (error, no code); a denial keeps
+  today's `denied`; `live` unchanged (the ticking `4 s`). `command` (body) unchanged —
+  the open body is Command → Output as today; the thought stays where it is
+  today (owner). `a11yLabel` reads the sentence then the outcome words
+  ("exit code 2"). No sentence ⇒ today's view, byte-identical.
+- `StepRowView` gains `subline: string | null` and `shimmer: boolean`.
+- `StepNode`: when `subline !== null`, a second line under the name line
+  (mono `typography.stepMono` 12.5 pt, `sec`, `numberOfLines={1}`,
+  `ellipsizeMode="tail"`) inside the same `Pressable`; when the name is a
+  sentence it may take the full width (lift the `45%` cap only when `subtitle
+  === ""`); `shimmer` draws the name with the existing `ThinkingWord`
+  (static under Reduce Motion, as it already is). No new animation.
+- `toolMeta`'s "Never an exit code" comment → "shell's outcome adds one
+  (`shellOutcome`)".
+- `compact` flows `App.tsx` → `SessionScreen` → `StepProps.compactShell`
+  (`TranscriptRow.tsx:116-124`) → `stepRowView`.
+
+**7. Phone Beta switch `Compact shell rows`** (default OFF): its OWN record
+`tentacle.shell-rows` `{v:1, compactShell}` in a new
+`apps/mobile/src/shell-rows-store.ts` copying `theme-settings-store.ts`'s
+fail-safe rules (missing/unreadable/unknown `v` → OFF; unknown `v` never
+written over; a write failure keeps the pick for this run) + a
+`shell-rows-expo.ts` Keychain adapter; a new `Row` + `Switch`
+(`testID="beta-compact-shell"`) in the Beta section of `SettingsScreen.tsx`,
+wired in `App.tsx` beside `onThemeBeta` (`:2453`). Not carried to the daemon.
 
 ### Files
 
-In dependency order (no protocol change):
+In dependency order:
 
-1. `packages/tools/src/builtins.ts` — schema field + description wording.
-2. `packages/core/src/shell-intent.ts` (new) + `packages/core/src/index.ts` export.
-3. `packages/client/src/permission-router.ts` — pass `toolCallId`/`origin` to the requester.
-4. `packages/tui/src/render-lines.ts` — `toolTitle`/header/expanded rows.
-5. `packages/tui/src/state.ts` — `thought` on `ToolItem` (reasoning capture).
-6. `packages/tui/src/spinner-slot.ts` — `intent` fact, `intent` kind, `liveIntent`, `fitIntentLabel`.
-7. `packages/tui/src/app-layout.ts`, `packages/tui/src/AppView.tsx` — wire the fact / paint the label.
-8. `packages/tui/src/components/PermissionPrompt.tsx` (+ `permission-ui.ts` for the join) — subtitle row, row count.
-9. `apps/mobile/src/tool-summary.ts`, `apps/mobile/src/ui/StepNode.tsx`, `apps/mobile/src/screens/transcript/TranscriptRow.tsx` (passes the step title to `StepNode`, `:443`) — step title/trailing.
-10. `apps/mobile/src/permission-sheet.ts` + its screen — the subtitle row.
-11. `changelog.d/shell-intent-line.added.md`.
+1. `packages/tools/src/builtins.ts` — `description` field + wording.
+2. `packages/core/src/shell-intent.ts` (new), `packages/core/src/index.ts`.
+3. `packages/config/src/schema.ts`, `key-docs.ts`, `defaults.ts` — `beta.compactShell`.
+4. `packages/client/src/permission-router.ts`, `remote-client.ts` — `toolCallId`/`origin` to the requester.
+5. `packages/cli/src/main.ts`, `connect.ts` — read and pass `compactShell`.
+6. `packages/tui/src/render-lines.ts` — B rows, `compactShell` option + cache key.
+7. `packages/tui/src/run.tsx`, `app-types.ts`, `App.tsx` — prop plumbing; `argsOf` for the ask.
+8. `packages/tui/src/permission-ui.ts`, `components/PermissionPrompt.tsx`, `app-layout.ts`, `AppView.tsx` — `permissionView`, full-colour wrapped command, intent row.
+9. `apps/mobile/src/tool-steps.ts`, `tool-summary.ts`, `ui/StepNode.tsx`, `screens/transcript/TranscriptRow.tsx` — B step.
+10. `apps/mobile/src/permission-sheet.ts`, `screens/PermissionSheet.tsx`, `screens/SessionScreen.tsx` — intent under the command.
+11. `apps/mobile/src/shell-rows-store.ts` (new), `shell-rows-expo.ts` (new), `screens/SettingsScreen.tsx`, `App.tsx` — Beta switch.
+12. `changelog.d/shell-intent-line.added.md`.
 
-Slices: **S1** = 1–2 (+ tests); **S2** = 3–8 (TUI); **S3** = 9–10 (app). Each
-slice green on its narrow tests before the next.
+NOT touched (owner): `spinner-slot.ts`, `app-layout.ts`'s slot/transcript maths,
+`state.ts` (no reasoning capture), `subagent-view.ts`, MCP rows, `protocol/*`.
+
+**Slices** (one branch, each green on its narrow tests before the next):
+**S1** = 1–3 (core + schema + config). **S2** = 5–7 (TUI rows + beta key).
+**S3** = 4, 8, 10 (the permission ask, both clients — the security slice).
+**S4** = 9, 11, 12 (phone rows + Beta switch).
 
 ### Failure modes
 
 | Case | Behaviour / convergence |
 |---|---|
-| `description` missing, `null`, non-string, `""`, whitespace | `shellIntent` → `null` ⇒ today's row exactly (`Bash <command>`), slot «Working…». |
-| Too long (a paragraph) | Never rejected by the schema; cut to 72 graphemes + `…`; the TUI slot further cut to its one row (`fitIntentLabel`). |
-| Newlines / ANSI / control chars (a pod or a confused model) | Stripped/collapsed in `shellIntent` before any client draws it — a description can never move the cursor or add a row. |
-| Wrong language | Shown as written (no detection, Q8). The schema wording asks for the user's language. |
-| Sentence lies about the command | Rows: possible and accepted (display only; the command is one tap away). Permission: the command is first, full-colour, untruncated; the sentence is dim and attributed ("the model says"); the "don't ask again" prefix never reads it (test). |
-| Parallel `shell` calls | Each row has its own sentence; the slot shows the FIRST running one + ` +N`. Queued rows (`◌`) use the sentence as their title too. |
-| Sub-agents | A child's `shell` gets the same schema, so it may fill it; the sub-agent tree rows (`subagent-view.ts`) keep the command in this task (debt). A sub-agent's permission ask (`origin: "subagent"`, `toolCallId` = parent `agent_task`) shows NO sentence — the join would name the wrong call. |
-| Pods (`run`/`attach`) | The description is pod-supplied, like the command already is: display only, sanitized, never feeds a decision. Nothing new crosses to the laptop. |
-| Old sessions / old daemon | No `description` in their args ⇒ fallback row. No version skew: the field is free in `rawInput`. |
-| `--resume` | Sentence survives (in args); the TUI/phone reasoning in the detail does not (live only) — the detail shows command + output. |
-| Model never fills it | Fallback; measured (Tests §measurement). If fill-rate < 80 % on a provider, add one line to the system prompt (Q9) — no code path depends on it. |
-| `shell` with `run_in_background` | Sentence titles the row; outcome is the job start (no `exit=` ⇒ `code: null` ⇒ `✓` only, no `exit` word). |
-| Denied / cancelled / spilled | `shellOutcome` code `null`: denied keeps today's `denied`/`✗ Denied` wording; spilled keeps its spill body; never an invented `exit N`. |
-| Narrow terminal / large Dynamic Type | TUI: one row, truncated; phone: `numberOfLines={1}` as today. |
+| `description` missing, `null`, non-string, `""`, whitespace | `shellIntent` → `null` ⇒ today's one-row `Bash <command>` exactly (TUI and phone), no `$` row, no outcome word; ask unchanged except the command's colour/wrap. |
+| Too long (a paragraph) | Never rejected by the schema; 72 code points + `…` in core; TUI further fits row 0 to its width; phone `numberOfLines={1}`. Row count stays 2 (or 1 compact). |
+| Newlines / ANSI / control / bidi / zero-width chars (a pod or a confused model) | Stripped in `shellIntent` before any client draws it — it can never move the cursor, add a row or reorder the visible text. |
+| Wrong language | Shown as written (Q8). |
+| Sentence lies about the command | Rows (beta off): the `$ command` row sits under it, visible at a glance. Ask: the command is first, full colour, wrapped (≤ 10 rows + `… N more lines`), the sentence dim and attributed; the "don't ask again" prefix never reads it (test). Beta on: caught only by expanding — the accepted, documented cost; why it is beta. |
+| Very long / multi-line command in the ask (TUI) | Wrapped, multi-line kept; beyond `MAX_DETAIL_ROWS` the last row says `… N more lines` (never a silent cut). Row count from the same view ⇒ the viewport maths cannot drift from the paint. |
+| Ask join misses (row not yet in `st.items`, a replayed ask, a resync) | `argsOf` → `undefined` ⇒ `intentRow: null`: the ask shows the command only (safe direction). |
+| Sub-agent ask (`origin: "subagent"`) | No sentence: the id names the parent call. A child's own `shell` rows in the sub-agent tree keep the command (debt, out of scope). |
+| Parallel `shell` calls | Each row has its own sentence and `$` row; nothing shared. |
+| Pods (`run`/`attach`) | The description is pod-supplied like the command already is: display only, sanitized, never feeds a decision or an approval. Nothing new crosses to the laptop; `beta.compactShell` is `carried: "no"`. |
+| Old sessions / old daemon | No `description` ⇒ fallback row. No version skew: the field is free in `rawInput`. |
+| Older tentacle binary reading a config with `beta` | The file schema is strict ⇒ that binary rejects the config (true of every new key; pre-public). Documented in the key's `details`. |
+| `--resume` | Sentence survives (in args), outcome recomputed from the persisted result text. |
+| Model never fills it | Fallback; measured once (Tests). Below 80 % fill on a provider: one system-prompt line (Q9) — no code path depends on it. |
+| `run_in_background` | Sentence titles the row; result has no `exit=` ⇒ `✓` only. |
+| Killed (exit 124) | `✗ exit 124` + today's `[killed …]` note in the body. |
+| Spilled result | Code read from `spill.head` (the original head); body = today's spill note. |
+| Denied | TUI: no `exit=` ⇒ `✗` + today's `✗ Denied …` body. Phone: today's `denied` trailing. `commandRow` shown under beta (error-like). |
+| Beta toggled on the phone mid-session | `compact` is a render input: rows re-project on the next render, nothing stored per row. TUI: launch-time only (like `chartGlyphs`), in the cache key. |
+| Phone Beta record unreadable / newer `v` | Reads OFF, never written over (theme-store rules); the switch still works for this run. |
+| Narrow terminal (≤ 20 cols) / large Dynamic Type | TUI: each of the two rows is cut to `cols`, never wraps; phone: both lines `numberOfLines={1}`. |
 
 ### Tests
 
-Red first on each (shown failing on `main`), with the mutation that must turn it red again.
+Red first on each (shown failing before the change), with the mutation that
+must turn it red again (AGENTS §9).
 
-- `packages/core/test/shell-intent.test.ts` (new): missing/empty/whitespace/non-JSON/non-string → `null`; ANSI `\x1b[2J` and `\n` removed; 200-char input → exactly 72 graphemes ending in `…`, emoji/combining never split; `shellOutcome` for `exit=0`, `exit=2`, `exit=124`, no prefix. *Mutation:* drop the control-char strip → the ANSI case fails.
-- `packages/tools/test/…` (builtins): the JSON schema sent to the model contains `description` with the wording; a 5 000-char description still **executes** (no `.max`). *Mutation:* add `.max(80)` → red.
-- `packages/tui/test/render-lines.test.ts`: shell row with a sentence → header is the sentence; settled ok → contains `✓`; error with `exit=2` → contains `✗ exit 2` **with colour stripped** (proves the written outcome, not hue); no sentence → byte-identical to today's row. *Mutation:* render the outcome as colour only → red.
-- `packages/tui/test/spinner-slot.test.ts`: `running && !reasoning && intent` → `kind: "intent"`; `reasoning` wins over intent (Thinking… while the model thinks again); two running rows → `+1`; label fits `columns` for 40/80/200 (row count unchanged — the exact property: one row). *Mutation:* return the untruncated label → the width test fails.
-- `packages/tui/test/app.test.tsx` (ink-testing-library, the existing pattern): frame sequence Thinking… → sentence in slot → done row `✓` → Working…; frame height constant AND the input row's y-position stable across the sequence (the exact property, §2).
-- `packages/tui/test/permission-detail.test.ts`: a shell ask whose sentence lies → the command row precedes the sentence row; the command is rendered in full; `permissionPromptRows` = rendered rows (with and without the sentence); `origin: "subagent"` → no sentence; the suggestion prefix equals the command's (description `"git push --force"` does not change it). *Mutation:* derive the prefix from `description` → red.
-- `packages/client/test/permission-router…`: requester options carry `toolCallId`/`origin`.
-- `apps/mobile/test/tool-summary.test.ts` / `tool-steps.test.ts`: step title = sentence; trailing `✓ 1.2 s` / `✗ exit 2 · 3.4 s`; fallback identical to today. `permission-sheet.test.ts`: command before sentence, sentence only on `origin: "call"`.
-- **Measurement (not a gate test; cheap, run once by the executor):** a script in `.tentacle/tmp/shell-intent-line/` sends 20 fixed prompts that need a shell command (10 Italian, 10 English) to DeepSeek and to an Anthropic model with the new schema, and reports: fill rate, median length, language match. Pasted into Execution. Acceptance (Q9): ≥ 80 % fill on both.
+- `packages/core/test/shell-intent.test.ts` (new): `shellIntent` missing / empty /
+  whitespace / non-JSON / number → `null`; `\x1b[2J`, `\n`, `‮`, `​`
+  removed; 200-char input → 72 code points + `…`, an emoji at the cut not split;
+  `shellExitCode` `exit=0`/`exit=2`/`exit=124`/`exit=-1`/none/`exit=2x`;
+  `shellOutcome` ok → `✓`, error+`exit=2` → `✗ exit 2`, error+spill head
+  `exit=3` (content = banner) → `✗ exit 3`, denied text → `✗`, background ok →
+  `✓`, running → `null`; `shellRowParts` compact running/ok → `commandRow:false`,
+  compact error/denied → `true`, non-compact → always `true`;
+  `permissionIntent` `origin:"subagent"` → `null`, non-shell → `null`, unknown id
+  → `null`. *Mutations:* drop the control strip → ANSI case red; read `text`
+  before `spillHead` → spill case red; drop the `status==="error"` clause →
+  compact-error case red.
+- `packages/tools/test/…builtins`: JSON schema to the model contains
+  `description` + wording; a 5 000-char description still executes (no `.max`);
+  `execute` output identical with/without it. *Mutation:* `.max(80)` → red.
+- `packages/config/test/…`: `beta.compactShell: true` parses; `beta.x` rejected
+  (strict); key-docs completeness tests cover the two new keys
+  (`key-docs.test.ts`, `key-docs-carried.test.ts` = `carried: "no"`).
+- `packages/tui/test/render-lines.test.ts`: shell + sentence, running → exactly
+  2 rows: row 0 has the sentence and NO outcome, row 1 = `  $ <cmd>`; settled
+  ok → row 0 contains `✓`; error `exit=2` → contains `✗ exit 2` **with SGR
+  stripped** (written, not hue); multi-line command → row 1 is its first line +
+  `…`; width 30/80/200 → every row's cell width ≤ cols; expanded → `  │ $ <cmd>`
+  wrapped, full; `compactShell` running/ok → 1 row, error → 2 rows, expanded →
+  command present; same item rendered compact then non-compact → different rows
+  (cache key); no sentence → byte-identical to `main`'s output (snapshot of the
+  old call); running row has no body / no "running" line. *Mutations:* outcome
+  as colour only → SGR-stripped test red; drop `compactShell` from the cache key
+  → the cache test red.
+- `packages/tui/test/app.test.tsx` (ink-testing-library): a shell call with a
+  sentence: the transcript frame shows sentence + `$ cmd` while running, the
+  slot row still says `Working…` (unchanged — proves no slot change), then `✓`;
+  the input row's y-position is stable from the call's start to its end (the
+  exact property, §2: the 2-row block appears once, at `tool_start`, and does
+  not grow at the result).
+- `packages/tui/test/permission-detail.test.ts`: lying sentence → the command
+  rows precede the `the model says:` row; a 300-char command at 80 cols → wrapped
+  over ⌈300/77⌉ rows, all characters present; 15-line command → 10 rows, last
+  `… 6 more lines`; `permissionPromptRows` from `permissionView` = rows actually
+  painted (with / without intent; ink frame height asserted); `origin:"subagent"`
+  → no intent row; the suggestion prefix for `{command:"ls", description:"git
+  push --force"}` is `ls`'s. Detail rows not dim (assert on the element props,
+  the harness strips SGR). *Mutation:* derive the prefix from `description` →
+  red; count rows from `permissionDetailLines` instead of the view → height test red.
+- `packages/client/test/permission-router…`: the prompt action carries
+  `toolCallId`/`origin`; `remote-client` passes them to the requester (spy).
+- `apps/mobile/test/tool-steps.test.ts` / `tool-summary.test.ts`: sentence →
+  `name.tool = sentence`, `subtitle = ""`, `subline = "$ cmd"`; trailing
+  `✓ 1.2 s` / `✗ exit 2 · 3.4 s`; compact running/ok → `subline: null`, error →
+  shown; denied → `denied` kept; `shimmer` only while running; fallback
+  byte-identical to `main`'s view.
+- `apps/mobile/test/permission-sheet.test.ts`: `call` stored from options;
+  intent only for `origin:"call"`.
+- `apps/mobile/test/shell-rows-store.test.ts` (new, the theme-store test's
+  cases): missing → OFF; `{v:9}` → OFF + write refused; write failure keeps the
+  pick in memory.
+- **Measurement (not a gate; run once by the executor, pasted into Execution):**
+  `.tentacle/tmp/shell-intent-line/measure.ts` sends 20 fixed prompts that need
+  a shell command (10 Italian, 10 English) to DeepSeek and to an Anthropic model
+  with the new schema; reports fill rate, median length, language match.
+  Acceptance (Q9): ≥ 80 % fill on both.
 
-### Owner questions
+### Follow-ups (separate tasks — owner to add to `TODO.md`; not this branch)
 
-*Not approved. One recommendation each.*
+1. **`feat/thinking-ergo-and-blink`** — the «∴ che ruota» thinking spinner
+   (TUI ∴↔∵ every 640 ms = 8 × 80 ms shimmer ticks; `cells.ts` measures U+2234/
+   U+2235 as 1 cell, mockup section B) and, on the iPhone, a running tool =
+   the TUI's blinking ● (500/500 ms, shared phase) replacing the rotating ring
+   (mockup section C).
+2. **`feat/tui-mcp-row-names`** — TUI MCP rows readable like the phone
+   (`playwright · browser_navigate  url` instead of the raw name + JSON), the
+   naming rule moved to `@tentacle/core` so both clients share it (mockup
+   section D). No intent sentence on MCP (Q6: shell only; a registry-level
+   `_intent` is the shape if it ever comes back).
+3. (debt, from Q6) `workload_shell` and the sub-agent tree rows keep the command.
+
+### Owner questions — Approved 2026-11-21
+
+*Decision record. The Owner decisions below override the numbered recommendations where they differ (Q1 → B, Q4 moot, Q11 → separate task); the Implementation above is written to them.*
 
 **Owner decisions 2026-11-21** (mockup v3: `.tentacle/mockups/shell-intent-line/index.html`, https://claude.ai/artifact/RbAs3vkmizt8K1TdTAVd4A):
 - **Q1 → B «frase sopra il comando»** (not A). Row = sentence; second row `$ {command}` in subtle, 1 line, truncated. Design §3–4 must be re-written for B (+1 transcript row only when a sentence exists).
