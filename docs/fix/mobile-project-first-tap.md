@@ -35,4 +35,121 @@ Root cause (to confirm with a red test first): "no probe result yet" is projecte
 
 ## Execution
 
+### Load-bearing check (as the plan asked: `file:line` + a unit-test-shaped repro)
+
+`apps/mobile/src/project-rows.ts:projectSections` built each row's observation as
+`observations[index] ?? missing`, where `missing` was a **failed** probe
+(`probe: {ok: false, …}`) — so a record with no probe result at all fell into
+`failedState()` and read `unreachable` / "Not reachable" / section "Offline ·
+None of its projects answers".
+
+Repro `.tentacle/tmp/mobile-project-first-tap/load-bearing.ts` (before the fix):
+
+```
+no probe result yet  → {"state":"unreachable","word":"Not reachable","ok":false,
+                        "section":"offline","status":"Offline",
+                        "note":"None of its projects answers. Check the computer is awake…"}
+ok:true              → new / New
+ok:false             → unreachable / Not reachable
+```
+
+CONFIRMED. The plan's premise holds at the module level, and it is the assertion
+the new unit test goes red on (`apps/mobile/test/project-rows.test.ts`, first run:
+`Expected: "checking" / Received: "unreachable"`).
+
+### Drift from the plan's stated root cause (found while reproducing — recorded, not smoothed over)
+
+The plan says the row shows Offline "because the first status probe has not landed
+yet". Two facts from the QA artefacts say the *literal* claim is not what the gate
+hit:
+
+1. The Computers screen has no row at all until `loadSections()` (now
+   `readSectionInputs`) resolves — sections start as `[]` (`App.tsx:1050`). A
+   rendered row therefore always HAS an observation; the "no probe result yet"
+   branch is only reachable through a shorter `observations` array.
+2. The gate's own failed-assert hierarchy
+   (`…/ios26/02-session-list/2026-11-21_092028/02-session-list/screen-hierarchy/`)
+   shows the tapped row as `computer-state-…-idle` **after** the dropped tap, i.e.
+   a probe had settled and the re-probe read `idle`.
+
+So the window the gate hits is "a probe settled and **failed** (dial/handshake
+still settling right after `pairing-done`)", which projects to `unreachable`
+through the *same* line. The Design still fits both cases — a distinct not-yet-known
+state plus a tap that waits — so I implemented it for both, rather than narrowing
+it to one. This is the one place the plan's wording was corrected, not its Design.
+
+### As built, in order
+
+1. `apps/mobile/src/project-rows.ts`
+   - `ProjectState` gains `checking`; `PROJECT_WORDS.checking = "Checking…"`;
+     `ProjectTone` gains `wait`; `SectionState` gains `checking`.
+   - `ProjectRow.muted` (new): the dashed folder / dimming is now a row's OWN
+     verdict, false while `checking` (a row nobody asked about is not dimmed).
+   - `projectSections`: a record whose observation is **absent** is `checking`
+     (not `failedState`); `options.checking` names records whose probe is in
+     flight, so a tap repaints that row as `checking` over its stale verdict. A
+     section is `checking` ("Checking…") when nothing answered and something is
+     still being checked; the "None of its projects answers" note is only claimed
+     when every row really is `unreachable`.
+   - `reprobeDelay` treats `checking` like `stopped`/`unreachable`, so a wait that
+     lapses still converges via the 15 s reconsideration.
+   - NEW pure decision functions: `TAP_WAIT_MS` (4 s), `ProjectTap`,
+     `projectTap(row)` (open / reprobe / menu) and `tapSettled(row|undefined)`
+     (open only if it answers NOW), so the tap logic is testable (AGENTS §7).
+2. `apps/mobile/src/ui/StatusDot.tsx`: a `wait` tone — a neutral ring, no hue-only
+   signal (the state is also written).
+3. `apps/mobile/src/screens/ComputersScreen.tsx`: `iconDashed`/`dimmed` follow
+   `row.muted` (not `!row.ok`); the row's dot and the section's dot map `wait`.
+4. `apps/mobile/App.tsx`
+   - `probeAll` reports the records as soon as the store is listed
+     (`recordsOf`), so the route can paint rows **before** the probes land.
+   - `loadSections` split into `readSectionInputs` (records + observations) and
+     `sectionsOf` (projection, with `checking`).
+   - `ComputersRoute`: the FIRST read paints records-only (`checking`) so the
+     screen is never empty and never claims an unasked computer is down; later
+     15 s re-reads do not repaint known rows as `checking` (no flashing).
+   - `onOpen` is now `projectTap`: `open` navigates, `menu` opens the sheet, and
+     `reprobe` goes through `awaitProbe(id)` — bounded by `TAP_WAIT_MS`, one wait
+     at a time (`settling` ref), paints the tapped row as `Checking…`, then
+     `tapSettled`: opens the project if the fresh probe answers, else falls back
+     to today's behaviour (tick → next reconsideration). `tapGeneration` makes a
+     superseded wait unable to navigate.
+
+### Tests (red first, then green)
+
+`apps/mobile/test/project-rows.test.ts` — 3 new tests + 1 new case in an existing
+one; 12 pass / 0 fail. Red evidence, in order:
+- the checked-in property test failed on `Expected: "checking" / Received:
+  "unreachable"` (the load-bearing assertion, not an import/compile error);
+- the tap tests then failed on `SyntaxError: Export named 'TAP_WAIT_MS' not found`
+  before the exports existed (missing capability, as a feat's repro should show).
+
+Failure modes covered: no probe result at all; partly probed (one answered, one
+checking); a `broken` record never becomes `checking`; a lapsed wait still
+re-probes; tap on ok/checking/stopped/unreachable/revoked/maybe-reset; the settle
+decision with the row gone (undefined), still down, and needs-a-pairing; the
+bounded wait's range test.
+
+### Mutations (each pasted result is a real run of the narrow file)
+
+1. "no probe result → unreachable again" (`probed[i] !== true` → `false`):
+   **2 failed**, `Expected: "checking" / Received: "stopped"` (and the first
+   property test).
+2. "one arm for every non-ok row" (`projectTap` returns `"reprobe"` always):
+   **1 failed** (the tap-decision test).
+3. "trust the asked row" (`tapSettled` ignores freshness):
+   **1 failed** (the settle test).
+
+### Not done here (orchestrator's)
+
+- `scripts/e2e-gate.sh` was not run: the plan explicitly leaves it to the
+  orchestrator (simulator). The gate's own recovered state is what flow
+  `02-session-list` proves.
+- No `protocol.d/` note and no schema regeneration: nothing on the wire changed
+  (this is a UI view-model + route change only).
+- `apps/mobile/App.tsx` still owns the tap wiring (known debt per AGENTS §7); the
+  DECISIONS it makes are in the pure module.
+
+*— claude-opus-5-5 (executor), 2026-11-21*
+
 ## Review

@@ -10,6 +10,10 @@
  * - `stopped` (the Mac answers, this project's `serve` does not) iff another
  *   project of the same computer answered, or the relay said `4404`; else
  *   `unreachable`.
+ * - `checking` is its own state: NO probe result yet (docs/fix/mobile-project-first-tap.md).
+ *   A row that has not been looked at has not been found wanting, so it must
+ *   never read as "the computer does not answer" — that was the first tap after
+ *   a pairing being dropped as a silent "Try again".
  */
 import type { SessionListEntry } from "@tentacle/protocol";
 import type { ComputerProbe } from "./computer-rows.ts";
@@ -20,6 +24,7 @@ export type ProjectState =
   | "working"
   | "idle"
   | "new"
+  | "checking"
   | "stopped"
   | "unreachable"
   | "revoked"
@@ -31,6 +36,7 @@ export const PROJECT_WORDS: Record<ProjectState, string> = {
   working: "Working",
   idle: "Idle",
   new: "New",
+  checking: "Checking…",
   stopped: "Stopped",
   unreachable: "Not reachable",
   revoked: "Access removed",
@@ -56,8 +62,12 @@ export interface ProjectObservation {
   readonly absent: boolean;
 }
 
-/** The dot's tone (the screen picks the colour). */
-export type ProjectTone = "on" | "off" | "attention";
+/**
+ * The dot's tone (the screen picks the colour). `wait` is neither on nor off: no
+ * answer yet, so the row is drawn normally with a neutral word
+ * (docs/fix/mobile-project-first-tap.md — a colour-blind-safe state is WRITTEN).
+ */
+export type ProjectTone = "on" | "off" | "attention" | "wait";
 
 export interface ProjectRow {
   readonly id: string;
@@ -68,15 +78,20 @@ export interface ProjectRow {
   /** The sub-line after the word ("3 sessions", "no sessions yet", a hint), or "". */
   readonly detail: string;
   readonly tone: ProjectTone;
-  /** It answered (drawn normally); otherwise dimmed with a dashed folder. */
+  /** It answered (drawn normally). */
   readonly ok: boolean;
+  /**
+   * Dimmed with the dashed folder of a row that does not work — false for a row
+   * still being checked, which is not a verdict about the computer.
+   */
+  readonly muted: boolean;
   /** "Paired just now" (§6 Live behaviour), for 4 s after its pairing. */
   readonly justPaired: boolean;
   /** The computer's name (the session list's subtitle, the sheet's text). */
   readonly computerName: string;
 }
 
-export type SectionState = "online" | "offline" | "attention";
+export type SectionState = "online" | "offline" | "attention" | "checking";
 
 export interface ProjectSection {
   readonly computerId: string;
@@ -120,7 +135,11 @@ export function reprobeDelay(
 ): number | undefined {
   const rows = sections.flatMap((section) => section.rows);
   const waits: number[] = [];
-  if (rows.some((row) => row.state === "stopped" || row.state === "unreachable")) {
+  if (
+    rows.some(
+      (row) => row.state === "stopped" || row.state === "unreachable" || row.state === "checking",
+    )
+  ) {
     waits.push(REPROBE_MS);
   }
   if (last !== undefined && rows.some((row) => justPaired(row.id, last, now))) {
@@ -160,6 +179,8 @@ function detailOf(state: ProjectState, record: ProjectRecordLike, probe: Compute
     case "idle":
     case "new":
       return probe.ok ? sessionsOf(probe.entries, probe.more === true) : "";
+    case "checking":
+      return "";
     case "stopped":
       return record.project === undefined
         ? "run `tentacle serve` in its folder"
@@ -176,11 +197,21 @@ function detailOf(state: ProjectState, record: ProjectRecordLike, probe: Compute
 /**
  * The sections, from the records (Keychain index order) and what each one's
  * probe and link diagnosis observed (`observations[i]` for `records[i]`).
+ *
+ * `options.checking` names the records whose probe is IN FLIGHT right now (a tap
+ * that waits, docs/fix/mobile-project-first-tap.md): they read `checking` even
+ * though their last observation failed, so the person sees the question being
+ * asked instead of a stale verdict. An observation that is missing altogether is
+ * `checking` too — a row nobody has asked about yet has not been found wanting.
  */
 export function projectSections(
   records: readonly ProjectRecordLike[],
   observations: readonly ProjectObservation[],
-  options: { readonly now?: number; readonly justPaired?: { id: string; at: number } } = {},
+  options: {
+    readonly now?: number;
+    readonly justPaired?: { id: string; at: number };
+    readonly checking?: readonly string[];
+  } = {},
 ): readonly ProjectSection[] {
   const groups = new Map<string, { name: string; indices: number[] }>();
   records.forEach((record, index) => {
@@ -198,8 +229,12 @@ export function projectSections(
     absent: false,
   };
   const now = options.now ?? 0;
+  const inFlight = new Set(options.checking ?? []);
   return [...groups].map(([computerId, group]) => {
     const observed = group.indices.map((index) => observations[index] ?? missing);
+    const probed = group.indices.map(
+      (index) => observations[index] !== undefined && !inFlight.has(records[index]?.id ?? ""),
+    );
     const answered = group.indices.filter(
       (index, i) => records[index]?.broken !== true && observed[i]?.probe.ok === true,
     ).length;
@@ -210,6 +245,10 @@ export function projectSections(
       let state: ProjectState;
       if (record.broken === true) {
         state = "broken";
+      } else if (probed[i] !== true) {
+        // No probe result yet: not a verdict about the computer (see the file
+        // header). A tap on it waits for the probe instead of being dropped.
+        state = "checking";
       } else if (probe.ok) {
         state =
           probe.entries.length === 0
@@ -228,8 +267,15 @@ export function projectSections(
         state,
         word: PROJECT_WORDS[state],
         detail: detailOf(state, record, probe),
-        tone: ok ? "on" : NEEDS_PAIRING.has(state) ? "attention" : "off",
+        tone: ok
+          ? "on"
+          : state === "checking"
+            ? "wait"
+            : NEEDS_PAIRING.has(state)
+              ? "attention"
+              : "off",
         ok,
+        muted: !ok && state !== "checking",
         justPaired: justPaired(record.id, options.justPaired, now),
         computerName: record.name,
       };
@@ -240,13 +286,19 @@ export function projectSections(
         ? "online"
         : rows.every((row) => NEEDS_PAIRING.has(row.state))
           ? "attention"
-          : "offline";
+          : rows.some((row) => row.state === "checking")
+            ? // Nothing has answered YET, but something has not been asked yet
+              // either: the honest band is "Checking…", not "Offline".
+              "checking"
+            : "offline";
     const word =
       sectionState === "online"
         ? "Online"
         : sectionState === "offline"
           ? "Offline"
-          : "Needs attention";
+          : sectionState === "checking"
+            ? "Checking…"
+            : "Needs attention";
     const allUnreachable = rows.every((row) => row.state === "unreachable");
     return {
       computerId,
@@ -265,8 +317,49 @@ export function projectSections(
   });
 }
 
-/** One entry of a project's sheet (long-press / "…", mockup A3). */
-export interface ProjectMenuAction {
+/**
+ * How long a tap on a row that is not answering waits for a fresh probe before
+ * giving up and doing what it always did (docs/fix/mobile-project-first-tap.md).
+ * Bounded on purpose: a probe that never answers must not hang the tap.
+ */
+export const TAP_WAIT_MS = 4_000;
+
+/** What a tap on a project row does. */
+export type ProjectTap =
+  /** It answers: open its sessions. */
+  | "open"
+  /** Not answered yet / not answering: ask again, and open if it answers. */
+  | "reprobe"
+  /** Its pairing is the problem (revoked, needs pairing, damaged key): show the menu. */
+  | "menu";
+
+/**
+ * A tap's decision, from the row's own state (mockup A3's "Try again" used to be
+ * SILENT — no feedback, nothing opened — and it was the whole first-tap bug).
+ * `checking` waits like a failed row does: the probe it is waiting for is the
+ * answer, so the tap must join it rather than do nothing.
+ */
+export function projectTap(row: ProjectRow): ProjectTap {
+  if (row.ok) {
+    return "open";
+  }
+  // A pairing problem is the only reason a tap opens the menu instead of asking
+  // again: re-probing a revoked key can never work, and the person needs the
+  // sheet's "Pair again" / "Remove".
+  return NEEDS_PAIRING.has(row.state) ? "menu" : "reprobe";
+}
+
+/**
+ * What the tap that waited for a probe does once it has settled: open the row if
+ * it answers NOW, else today's behaviour. `row === undefined` means the record
+ * was removed while the person waited — there is nothing to open and nothing to
+ * retry, so it falls back (the screen's own list has already lost the row).
+ */
+export function tapSettled(row: ProjectRow | undefined): "open" | "fallback" {
+  return row?.ok === true ? "open" : "fallback";
+}
+
+/** One entry of a project's sheet (long-press / "…", mockup A3). */ export interface ProjectMenuAction {
   readonly kind: "retry" | "pair-again" | "remove";
   readonly label: string;
   readonly destructive: boolean;

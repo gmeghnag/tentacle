@@ -149,10 +149,16 @@ import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
 import type { PhotoSettings } from "./src/photo-settings-store.ts";
 import { photosRoot, pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import {
+  type ProjectObservation,
+  type ProjectRecordLike,
   type ProjectRow,
   type ProjectSection,
+  type ProjectTap,
+  TAP_WAIT_MS,
   projectSections,
+  projectTap,
   reprobeDelay,
+  tapSettled,
 } from "./src/project-rows.ts";
 import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
@@ -664,7 +670,7 @@ function errorText(error: unknown): string {
 const PROBE_PAGE = 20;
 
 /** Every listed record, probed once (a `broken` one is never dialled, F-K2). */
-async function probeAll(): Promise<{
+async function probeAll(onRecords?: (records: readonly ProjectRecordLike[]) => void): Promise<{
   readonly entries: readonly ComputerEntry[];
   readonly probes: readonly ComputerProbe[];
 }> {
@@ -675,6 +681,10 @@ async function probeAll(): Promise<{
       RECORDS.set(entry.id, entry.computer);
     }
   }
+  // The records are known BEFORE any dial (docs/fix/mobile-project-first-tap.md):
+  // the screen can draw every row as `checking` instead of showing nothing, and
+  // a row that has not been asked yet never claims the computer is unreachable.
+  onRecords?.(recordsOf(entries));
   const probes = await Promise.all(
     entries.map(
       async (entry: ComputerEntry): Promise<ComputerProbe> =>
@@ -698,32 +708,58 @@ async function probeAll(): Promise<{
 /** The last pairing's record id and when (the 4 s "Paired just now", §6). */
 const JUST_PAIRED: { current: { id: string; at: number } | undefined } = { current: undefined };
 
-/** The Computers screen's sections (variant A, docs/feat/mobile-projects.md §6). */
-async function loadSections(): Promise<readonly ProjectSection[]> {
-  const { entries, probes } = await probeAll();
-  return projectSections(
-    entries.map((entry) =>
-      entry.state === "broken"
-        ? { id: entry.id, name: entry.name, broken: true }
-        : {
-            id: entry.id,
-            name: entry.computer.name,
-            ...(entry.computer.computerId === undefined
-              ? {}
-              : { computerId: entry.computer.computerId }),
-            ...(entry.computer.project === undefined ? {} : { project: entry.computer.project }),
-          },
-    ),
-    entries.map((entry, index) => ({
+/** The Keychain's entries as the view-model's records (a `broken` one keeps its own name). */
+function recordsOf(entries: readonly ComputerEntry[]): readonly ProjectRecordLike[] {
+  return entries.map((entry) =>
+    entry.state === "broken"
+      ? { id: entry.id, name: entry.name, broken: true }
+      : {
+          id: entry.id,
+          name: entry.computer.name,
+          ...(entry.computer.computerId === undefined
+            ? {}
+            : { computerId: entry.computer.computerId }),
+          ...(entry.computer.project === undefined ? {} : { project: entry.computer.project }),
+        },
+  );
+}
+
+/** The Computers screen's inputs, before they are projected (docs/fix/mobile-project-first-tap.md). */
+interface SectionInputs {
+  readonly records: readonly ProjectRecordLike[];
+  readonly observations: readonly ProjectObservation[];
+}
+
+/**
+ * Every listed record and what its probe observed. The projection is a separate
+ * step (`projectSections`) so the screen can show the SAME records as `checking`
+ * while a tap's probe is in flight — a row that has not answered yet is not a
+ * verdict about the computer.
+ */
+async function readSectionInputs(
+  onRecords?: (records: readonly ProjectRecordLike[]) => void,
+): Promise<SectionInputs> {
+  const { entries, probes } = await probeAll(onRecords);
+  return {
+    records: recordsOf(entries),
+    observations: entries.map((entry, index) => ({
       probe: probes[index] ?? { ok: false, error: new Error("no answer") },
       diagnosis: entry.state === "broken" ? "ok" : diagnoserFor(entry.id).current(),
       absent: entry.state === "broken" ? false : diagnoserFor(entry.id).absent(),
     })),
-    {
-      now: Date.now(),
-      ...(JUST_PAIRED.current === undefined ? {} : { justPaired: JUST_PAIRED.current }),
-    },
-  );
+  };
+}
+
+/** The sections for these inputs, with the records whose probe is in flight as `checking`. */
+function sectionsOf(
+  inputs: SectionInputs,
+  checking: readonly string[] = [],
+): readonly ProjectSection[] {
+  return projectSections(inputs.records, inputs.observations, {
+    now: Date.now(),
+    ...(JUST_PAIRED.current === undefined ? {} : { justPaired: JUST_PAIRED.current }),
+    ...(checking.length === 0 ? {} : { checking }),
+  });
 }
 
 /**
@@ -1010,17 +1046,41 @@ function ComputersRoute({
   const [pairHint, setPairHint] = useState<string | undefined>(undefined);
   /** Bumped to re-probe now (a tap on a stopped row, the 15 s timer, the app's return). */
   const [tick, setTick] = useState(0);
+  /** The last read's inputs: what a tap repaints from while its probe runs. */
+  const inputsRef = useRef<SectionInputs | undefined>(undefined);
+  /** A tap's wait is running: a second tap joins nothing and is ignored. */
+  const settling = useRef(false);
+  /** Bumped by every tap's settle so a late one cannot open a screen twice. */
+  const tapGeneration = useRef(0);
+  /** Has a completed read painted real states? (records-first is a FIRST paint only) */
+  const painted = useRef(false);
 
   useFocusEffect(
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tick` IS the re-probe trigger
     useCallback(() => {
       let live = true;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      void loadSections().then(
-        (built) => {
+      // The records are drawn BEFORE the probes land, as `checking`: the screen
+      // never sits empty and, once a row exists, it never claims a computer it
+      // has not asked yet does not answer (docs/fix/mobile-project-first-tap.md).
+      // FIRST paint only: repainting known rows as `checking` on every 15 s
+      // reconsideration would flash away the states the person already sees.
+      const showRecords = (records: readonly ProjectRecordLike[]): void => {
+        if (live && inputsRef.current === undefined) {
+          inputsRef.current = { records, observations: [] };
+          if (!painted.current) {
+            setSections(sectionsOf({ records, observations: [] }));
+          }
+        }
+      };
+      void readSectionInputs(showRecords).then(
+        (inputs) => {
           if (!live) {
             return;
           }
+          inputsRef.current = inputs;
+          painted.current = true;
+          const built = sectionsOf(inputs);
           setSections(built);
           setError(undefined);
           // §6 Live behaviour (Owner Q12): a stopped / unreachable project is
@@ -1055,20 +1115,83 @@ function ComputersRoute({
     }, [tick]),
   );
 
+  /**
+   * A tap on a row that is not answering (docs/fix/mobile-project-first-tap.md):
+   * re-read, then open the row if that probe says it answers. Bounded by
+   * `TAP_WAIT_MS` — a probe that never settles falls back to the old behaviour
+   * (the next 15 s reconsideration picks it up), and the tap is never a no-op.
+   * One wait at a time: a second tap while this one runs is ignored.
+   */
+  const awaitProbe = useCallback(
+    async (id: string): Promise<void> => {
+      if (settling.current) {
+        return;
+      }
+      settling.current = true;
+      const mine = ++tapGeneration.current;
+      // The row turns into `Checking…` while its probe runs (from the inputs of
+      // the last read), so the tap is visibly AN ANSWER, not a no-op.
+      const before = inputsRef.current;
+      if (before !== undefined) {
+        setSections(sectionsOf(before, [id]));
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const inputs = await Promise.race([
+          readSectionInputs(),
+          new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => resolve(undefined), TAP_WAIT_MS);
+          }),
+        ]);
+        if (mine !== tapGeneration.current) {
+          return;
+        }
+        if (inputs !== undefined) {
+          inputsRef.current = inputs;
+          const built = sectionsOf(inputs);
+          setSections(built);
+          setError(undefined);
+          // The row this tap was about, from the fresh read: it may be gone
+          // (removed on another screen), so `tapSettled` takes undefined.
+          const settled = built.flatMap((section) => section.rows).find((r) => r.id === id);
+          if (tapSettled(settled) === "open" && settled !== undefined) {
+            onOpen(settled);
+            return;
+          }
+        }
+        // It still does not answer (or the wait ran out): ask again shortly, so
+        // the row is not frozen by a probe that failed once.
+        setTick((n) => n + 1);
+      } finally {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+        settling.current = false;
+      }
+    },
+    [onOpen],
+  );
+
   return (
     <ComputersScreen
       palette={palette}
       sections={sections}
       error={error}
       onOpen={(row) => {
-        // A row that does not answer: the tap is a new attempt (mockup A3).
-        if (row.ok) {
+        // A row that does not answer: the tap asks again — and, unlike mockup
+        // A3's silent "Try again", it then OPENS the row if that probe answers
+        // (docs/fix/mobile-project-first-tap.md: the first tap after a pairing
+        // used to be swallowed right here).
+        const tap = projectTap(row);
+        if (tap === "open") {
           onOpen(row);
-        } else if (row.state === "stopped" || row.state === "unreachable") {
-          setTick((n) => n + 1);
-        } else {
-          setMenu(row);
+          return;
         }
+        if (tap === "menu") {
+          setMenu(row);
+          return;
+        }
+        void awaitProbe(row.id);
       }}
       onAdd={onAdd}
       {...(pairHint === undefined ? {} : { pairHint })}

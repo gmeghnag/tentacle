@@ -177,7 +177,19 @@ function ComputerSection({
             {section.name}
           </Text>
           <View style={styles.statusLine}>
-            <StatusDot palette={palette} tone={tone} size={7} />
+            <StatusDot
+              palette={palette}
+              tone={
+                tone === "online"
+                  ? "online"
+                  : tone === "attention"
+                    ? "attention"
+                    : tone === "checking"
+                      ? "wait"
+                      : "offline"
+              }
+              size={7}
+            />
             <Text
               testID={`computer-status-${section.computerId}`}
               maxFontSizeMultiplier={DENSE_FONT_SCALE}
@@ -199,8 +211,8 @@ function ComputerSection({
             palette={palette}
             first={index === 0}
             icon="folder"
-            iconDashed={!row.ok}
-            dimmed={!row.ok}
+            iconDashed={row.muted}
+            dimmed={row.muted}
             title={row.label}
             trailing={
               <Pressable
@@ -256,7 +268,15 @@ function ProjectStatus({
       ) : (
         <StatusDot
           palette={palette}
-          tone={row.tone === "on" ? "online" : row.tone === "attention" ? "attention" : "offline"}
+          tone={
+            row.tone === "on"
+              ? "online"
+              : row.tone === "attention"
+                ? "attention"
+                : row.tone === "wait"
+                  ? "wait"
+                  : "offline"
+          }
           size={7}
         />
       )}
