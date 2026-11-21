@@ -261,4 +261,41 @@ green) plus the new `gone` cases.
 
 ## Review
 
-*— pending*
+*— claude-opus-5-5, 2026-11-21* (fresh context; **same model as the executor** — shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, docs/debt-level; no correctness defect found).
+
+1. **MEDIUM — previews are an uncapped, never-evicted store, and the doc says the opposite.**
+   `artifact-preview-expo.ts:39-44` writes `previews/<sha>-w<W>.{json,jpg}` outside
+   `put`; `artifact-cache-store.ts:153` lists files only, so the cap never sees them.
+   Precondition 2 ("Every byte the phone keeps goes through … `put`") is FALSE for
+   this feature, and the code comment's "(Notes/debt)" (`artifact-preview-expo.ts:9`)
+   points at a section that does not exist. Scenario: every page card scrolled past
+   leaves a ~1k×1.6k px JPEG (another set per rotation width) that survives the
+   cache evicting its source and stays until unpair — monotonic growth. Fix: bound
+   it (evict with the version / an LRU) or record the debt honestly (doc Notes + `TODO.md`).
+
+**Gate:** touched tests 91 pass / 0 fail (6 files); `artifact-cache-wiring` +
+`bundle-node-free` 10 pass; `bun run lint` clean (2170 files); `bun run typecheck`
+exit 0. Full `bun test` not re-run (Execution's 15985/5 skip taken as reported).
+
+**Mutations (applied, run, reverted; `git status` clean after):** `store_failed`
+treated as gone → source suite 12 pass 1 fail; both post-await `signal.aborted`
+checks disabled → 12 pass 1 fail. Both caught.
+
+**Premises:** cache `put` sole writer — FALSE for previews (finding 1); typed
+`ArtifactUnavailable` reasons mapped as planned — TRUE (`isGoneError`); `previews/`
+dir not mistaken for a version — TRUE (`list` returns files only, expo `:39-40`);
+band width = screen − 2·inset matches `Shell`'s `styles.row` padding — TRUE.
+
+**Attacks tried:** (a) §7 pure-logic split — decisions are in `artifact-preview.ts`,
+the component only maps; holds. (b) protocol/persistence invariants — untouched
+(core option display-only); holds. (c) abort/gone/store_failed mapping — holds,
+pinned by tests. (d) stale absolute `file:` uri in kept JSON after an app update —
+the existence check remakes it; holds. (e) image picture uri is the cache's file,
+which a later eviction may delete while the thumb stays loaded (blank band for the
+screen's life) — pre-existing D9 shape, rare; noted, not graded.
+
+**Executor behaviour:** honest about what was not shown red
+(`artifact-preview-source.test.ts`) and what was not captured on the simulator;
+mutation table credible (two extra mutations reproduced the same pattern).
