@@ -5,6 +5,8 @@ the rest are "value-add" improvements layered on the harness.
 
 ## Owner review queue
 
+- [ ] **feat/live-camera-look** (owner 2026-11-21: "tentacle con accesso alla fotocamera, che può vedere in diretta da una ripresa video realtime del cellulare (e non solo)"; parked in TODO by the owner, "lasciamo solo in todo") — design already in `docs/eval/realtime-media.md` §7.4 "live vision: pull by default". Proposed phases: (A) a `look` tool takes the newest frame from the phone camera on demand (camera on only by hand, always-visible indicator, first `look` of a session through the permission broker, frames not stored by default; reuses BF2 binary frames + pdf-images S1 tool-result images + the phone's attachment upload); (B) "keep an eye" mode — the phone refreshes one frame every N s, the model sees the latest per turn; (C) continuous realtime video + voice to a realtime front (Gemini Live / OpenAI Realtime, ~1 fps), with the voice roadmap V3/V4. Other sources later: Mac screen/webcam, phone screen, IP cams. Open owner question: main use — show-and-ask (A+B) or continuous conversation while it watches (C)? Type: feat · Size: — · Blast: load-bearing · Suited: Opus plan after pdf-images S1.
+
 - [ ] **eval/anthropic-untested** — inventory of what has never been tested
   against an Anthropic model (owner 2026-11-21: "sarebbe bene segnare tutto ciò
   che non è mai stato testato con Anthropic"). No Anthropic API-key profile is
