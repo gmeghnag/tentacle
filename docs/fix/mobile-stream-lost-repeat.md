@@ -456,6 +456,18 @@ forcing it; strengthened T1 and added T7 after a mutation exposed a vacuous coun
 the merged-notice partial-retraction case. The Execution signature says `claude-sonnet-4-5-20250929` while
 the commit subject says `exec (deepseek)` — reconcile which model executed.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Verdict: PASS.** Finding 1 is closed. The diff is test-only (`transcript.test.ts` T8 + doc), so production code is unchanged.
+- Mutation `rest = []` (drop the whole row) → T8 red (48/1). Mutation "also retract a notice with no
+  `lostTurns`" → T8 red (48/1). Both reverted; `git status` clean afterwards.
+- Gate: transcript + session-feed + queue-trace 89 pass / 0 fail; `bun run lint` clean (2202 files);
+  `bun run typecheck` clean (root + mobile + relay). No regressions, because no source changed.
+- Nit (not blocking): the "Fix round 1" section is signed `claude-opus-5-5`, but its commit `05eb991f` is
+  titled `review round 1 (deepseek)`. The same kind of mismatch as round 1, now the other way round.
+
 ### Notes / debt
 
 - **Trigger follow-up:** after one device capture with `cause` (slice 2), open
