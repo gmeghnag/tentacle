@@ -724,4 +724,58 @@ mobile files (import-only edits).
 
 ## Review
 
-_(empty — filled by a fresh-context reviewer)_
+**Verdict: APPROVE-WITH-NITS** (no HIGH; one MEDIUM, process-only).
+
+**Gate (re-run by the reviewer).** The 9 touched or covering test files
+(`scripts/test/mockup-kit{,-png}`, `packages/tui/test/mockup-kit-calibration`,
+`apps/mobile/test/{motion-literals,notice-row,pairing-guards,tool-rows-wiring,drawer-nav,hub-button-motion}`):
+**101 pass / 0 fail**. `bun run lint`: clean (2240 files). `bun run typecheck`
+(root + `apps/mobile` + `apps/relay`): clean, so the gap Execution left open
+(`tsc -p apps/mobile` on the 8 edited mobile files) is now closed. I did not run
+the full `bun test`.
+
+**Mutations** (each one failed, was reverted, and `git status` was clean afterwards):
+| Mutation | Result |
+|---|---|
+| `StepNode.tsx` `duration: STEP_SPINNER_TURN_MS` → `900` | guard fails at `ui/StepNode.tsx:74 duration: 900` |
+| `theme.ts:342` `radius.bubble` 20 → 21, no regen | drift fails: `tokens.css:254 … «--r-bubble: 20px;» ≠ «21px» — run: bun run mockup-kit` |
+| TUI `blink.ts:34` `BULLET` `●` → `◉` | 6 fail across the generator and TUI calibration tests |
+
+**Attacks tried.**
+1. *App behaviour of the 1a hoist:* every edited site is import-only, and each value
+   is pinned by the value table in `motion-literals.test.ts`. The tree no longer
+   has a literal `duration:`/`setTimeout`/`Animated.delay` in `ui/` or `screens/` (`rg`). Holds.
+2. *The kit reaching the app bundle:* `rg "mockup-kit|tools/" apps/mobile/src apps/mobile/App.tsx`
+   only matches comments. Holds.
+3. *Silent defaults vs. fail-loud* (the load-bearing assumption): I grepped every `?? 0 / ""`
+   in `scripts/mockup-kit/`. They are PNG byte reads and string guards. A missing
+   `StyleSheet.create` throws (`extract-styles.ts:278`), and a non-foldable `FRAMES`
+   throws (`sources.ts:113`). Holds.
+4. *Dynamic refs the reference test can't see:* `kit.js:436-439` builds `var(--tui-ansi-${…})`.
+   Every `BASIC` name is defined. Holds. Nit: bright SGR 90–97 map to the basic names.
+5. *§7 invariants:* none touched. No protocol, persistence, terminal or session path.
+   Blast `cross-module` is right.
+
+**Findings.**
+1. **MEDIUM — the Execution signature does not match the commit.** The Execution section
+   (`docs/feat/mobile-mockup-kit.md`, "## Execution" signature) is signed
+   `claude-opus-5-5`, but it was added in `31487bff feat(mobile-mockup-kit): exec (deepseek)`.
+   The follow-up `b12e3a51 … (deepseek)` also says DeepSeek. Size L calls for a strong
+   model per AGENTS §10, and the header says "opus executes". If DeepSeek executed, the
+   signature hides that from the drift tracking the signature exists for. The owner
+   should confirm which model executed and fix the signature.
+2. **Not verified — merge with current `main`.** `main` has moved since the merge base
+   (`9b134307` → `8addff1b`). `b12e3a51` edits three tests outside this task's scope to
+   catch up with shell-intent-line, and `main` already carries its own edits to at least
+   `pairing-guards.test.ts`. The merge may conflict on these three files. The orchestrator
+   should resolve that toward `main`'s version at merge. I could not run `git merge-tree`
+   here.
+
+**What holds:** the generator, the drift check and the motion guard all fail loudly,
+and the mutations above prove they are not vacuous. Execution's deferrals are disclosed
+honestly: the e2e calibration mode was not built, and `calibrate` was not run end to end.
+
+**Reviewer.** Fresh context, same model family as the signed executor (Opus), so blind
+spots we share may survive both passes.
+
+*— claude-opus-5-5, 2026-11-21*
