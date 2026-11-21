@@ -19,6 +19,7 @@ import { compactionSeparatorRow, historyRows, restartPromptOf } from "./transcri
 import {
   type ImageRef,
   type LocalPhoto,
+  type NoticeRow,
   type Row,
   type SubProgress,
   type ToolRow,
@@ -333,16 +334,90 @@ export function startTurn(state: State, turnId: string, own: boolean): State {
   };
 }
 
-/** End a turn: the bracket goes; an outcome nobody stated becomes a notice. */
+/**
+ * End a turn: the bracket goes; an outcome nobody stated becomes a notice.
+ *
+ * The LOST notice gets one extra rule (docs/fix/mobile-stream-lost-repeat.md):
+ * it knows WHICH turns it is about (`NoticeRow.lostTurns`), so a re-subscribed
+ * turn that throws again cannot stack a second row, and a turn later seen
+ * COMPLETING retracts its own loss. The bracket is the only turn this fold can
+ * name (`state.turn`, read before it is cleared), so nothing else is guessed.
+ */
 export function endTurn(
   state: State,
   input: Extract<TranscriptInput, { type: "turn_ended" }>,
 ): State {
+  const turnId = state.turn === null ? null : state.turn.turnId;
   const base: State = { ...state, turn: null };
+  if (input.outcome === "lost") {
+    return foldLostNotice(base, turnId);
+  }
+  if (input.outcome === "ended" || input.outcome === "cancelled") {
+    // The daemon's end arrived through a live stream, so the phone has the
+    // reply: nothing is lost for THAT turn any more. `failed`/`interrupted` do
+    // not retract — the turn did not complete for the phone.
+    return retractLostNotice(base, turnId);
+  }
   const notice = outcomeNotice(input);
   return notice === null
     ? base
     : push(base, (key) => ({ kind: "notice", key, text: notice.text, ...levelOf(notice) }));
+}
+
+/** The one LOST notice a turn's loss adds, deduped and never stacked. */
+function foldLostNotice(state: State, turnId: string | null): State {
+  if (turnId === null) {
+    // No open bracket: today's plain notice, never merged nor retracted — a
+    // guess must not delete a real loss.
+    return push(state, (key) => ({ kind: "notice", key, text: TURN_LOST_NOTICE, level: "warn" }));
+  }
+  // Rule 2a: this turn's loss is ALREADY said — anywhere, not only on the last
+  // row (a later loss of another turn may have followed it).
+  if (state.rows.some((row) => isLostNotice(row) && row.lostTurns?.includes(turnId) === true)) {
+    return state; // re-subscription of the same turn's stream: one row
+  }
+  const at = state.rows.findLastIndex((row) => isLostNotice(row));
+  const notice = at < 0 ? undefined : (state.rows[at] as NoticeRow);
+  if (notice !== undefined && at === state.rows.length - 1 && notice.lostTurns !== undefined) {
+    // Rule 2b: the LAST row is a LOST notice, so two turns lost back-to-back
+    // read as one line (a row in between keeps them apart).
+    const rows = [...state.rows];
+    rows[at] = { ...notice, lostTurns: [...notice.lostTurns, turnId] };
+    return { ...state, rows };
+  }
+  return push(state, (key) => ({
+    kind: "notice",
+    key,
+    text: TURN_LOST_NOTICE,
+    level: "warn",
+    lostTurns: [turnId],
+  }));
+}
+
+/**
+ * Drop `turnId` from every LOST notice (a notice left with none goes). A notice
+ * that names no turns (an older shape, or one folded with no bracket) is left
+ * alone: it is not known to be about this turn.
+ */
+function retractLostNotice(state: State, turnId: string | null): State {
+  if (turnId === null) {
+    return state;
+  }
+  let changed = false;
+  const rows = state.rows.flatMap((row): readonly Row[] => {
+    if (!isLostNotice(row) || row.lostTurns === undefined || !row.lostTurns.includes(turnId)) {
+      return [row];
+    }
+    changed = true;
+    const rest = row.lostTurns.filter((id) => id !== turnId);
+    return rest.length === 0 ? [] : [{ ...row, lostTurns: rest }];
+  });
+  return changed ? { ...state, rows } : state;
+}
+
+/** A LOST notice: its text is the one constant, so nothing else can be mistaken for it. */
+function isLostNotice(row: Row): row is NoticeRow {
+  return row.kind === "notice" && row.text === TURN_LOST_NOTICE;
 }
 
 /**
@@ -359,8 +434,6 @@ function outcomeNotice(
   switch (input.outcome) {
     case "interrupted":
       return { text: TURN_INTERRUPTED_NOTICE };
-    case "lost":
-      return { text: TURN_LOST_NOTICE, warn: true };
     case "failed":
       return {
         text:
@@ -368,7 +441,9 @@ function outcomeNotice(
         warn: true,
       };
     default:
-      return null; // ended / cancelled: the transcript says what happened
+      // ended / cancelled: the transcript says what happened. `lost` is decided
+      // by `foldLostNotice` alone (it needs the turn's id, not just its text).
+      return null;
   }
 }
 

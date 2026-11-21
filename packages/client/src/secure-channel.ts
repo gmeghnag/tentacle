@@ -1,12 +1,12 @@
 /**
- * A channel factory decorator: dials with any factory (`webSocketChannelFactory`,
+ * A channel factory decorator: dials a raw byte carrier (`webSocketCarrierFactory`,
  * the app's `rn-websocket`), then runs the Noise initiator over the result
  * (docs/feat/e2e-channel.md). `RemoteClient` takes it as its `channelFactory`
  * unchanged: a redial is a fresh dial and a fresh handshake. Reached only
  * through the subpath `@tentacle/client/secure-channel`, so existing importers
  * load no crypto.
  */
-import type { DuplexChannel } from "@tentacle/transport";
+import type { ByteCarrier } from "@tentacle/transport";
 import {
   type InitiatorOptions,
   NoiseError,
@@ -27,14 +27,22 @@ const KIND: Record<NoiseErrorKind, ChannelErrorKind> = {
   closed: "unreachable",
   "handshake-failed": "rejected",
   "bad-frame": "rejected",
+  // A skew names a version the path could have forged: transient (P5), with the
+  // remote version carried so the frontend can say which side to update.
+  "version-mismatch": "rejected",
 };
 
 export function channelErrorFromNoise(error: NoiseError): ChannelError {
-  return new ChannelError(KIND[error.kind], `secure channel: ${error.message}`);
+  return new ChannelError(
+    KIND[error.kind],
+    `secure channel: ${error.message}`,
+    undefined,
+    error.kind === "version-mismatch" ? error.remoteVersion : undefined,
+  );
 }
 
 export function secureChannelFactory(
-  dial: () => Promise<DuplexChannel>,
+  dial: () => Promise<ByteCarrier>,
   options: InitiatorOptions,
 ): () => Promise<SecureChannel> {
   return async () => {

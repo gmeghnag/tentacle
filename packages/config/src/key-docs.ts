@@ -1004,6 +1004,24 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "A terminal cannot report that its font lacks the braille patterns, so a chart would draw as boxes; `blocks` uses the quadrant blocks instead (2×2 dots per cell, less detail but present in most fonts). A display setting of this laptop — never carried to a pod.",
     example: '"blocks"',
   },
+  beta: {
+    summary: "Opt-in display features still being tried; off unless set.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "beta.compactShell": {
+    summary:
+      "With the model's sentence on a `shell` row, show the `$ command` row only on failure.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => false,
+    details:
+      "With a sentence, the `$ command` row shows only on failure; the command stays in the permission ask and in the expanded row; a lying sentence is caught only by expanding. A display setting of this laptop — never carried to a pod. An older tentacle rejects a config file that has a `beta` section.",
+    example: "true",
+  },
   sessions: {
     summary: "The laptop's session logs: what they keep of a history that was replaced.",
     kind: "section",

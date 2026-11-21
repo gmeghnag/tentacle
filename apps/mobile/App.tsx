@@ -20,7 +20,7 @@ import {
   useNavigationContainerRef,
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { type RemoteClient, type RemoteSession, webSocketChannelFactory } from "@tentacle/client";
+import { type RemoteClient, type RemoteSession, webSocketCarrierFactory } from "@tentacle/client";
 import {
   type AttachmentRef,
   type DaemonDiscovery,
@@ -28,7 +28,7 @@ import {
   encodeBase64Url,
   parsePairingPayload,
 } from "@tentacle/protocol";
-import type { DuplexChannel } from "@tentacle/transport";
+import type { ByteCarrier } from "@tentacle/transport";
 import { getRandomBytes } from "expo-crypto";
 import { File } from "expo-file-system";
 import {
@@ -149,10 +149,17 @@ import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
 import type { PhotoSettings } from "./src/photo-settings-store.ts";
 import { photosRoot, pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import {
+  type ProjectObservation,
+  type ProjectRecordLike,
   type ProjectRow,
   type ProjectSection,
+  type ProjectTap,
+  TAP_WAIT_MS,
   projectSections,
+  projectTap,
   reprobeDelay,
+  tapSettled,
+  wasBackgrounded,
 } from "./src/project-rows.ts";
 import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
@@ -195,6 +202,8 @@ import {
   type SessionScreenController,
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
+import { SHELL_ROWS } from "./src/shell-rows-expo.ts";
+import type { ShellRowsSettings } from "./src/shell-rows-store.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
 import { type Theme, themeFor } from "./src/theme-beta.ts";
 import { THEME_SETTINGS } from "./src/theme-settings-expo.ts";
@@ -664,7 +673,7 @@ function errorText(error: unknown): string {
 const PROBE_PAGE = 20;
 
 /** Every listed record, probed once (a `broken` one is never dialled, F-K2). */
-async function probeAll(): Promise<{
+async function probeAll(onRecords?: (records: readonly ProjectRecordLike[]) => void): Promise<{
   readonly entries: readonly ComputerEntry[];
   readonly probes: readonly ComputerProbe[];
 }> {
@@ -675,6 +684,10 @@ async function probeAll(): Promise<{
       RECORDS.set(entry.id, entry.computer);
     }
   }
+  // The records are known BEFORE any dial (docs/fix/mobile-project-first-tap.md):
+  // the screen can draw every row as `checking` instead of showing nothing, and
+  // a row that has not been asked yet never claims the computer is unreachable.
+  onRecords?.(recordsOf(entries));
   const probes = await Promise.all(
     entries.map(
       async (entry: ComputerEntry): Promise<ComputerProbe> =>
@@ -698,32 +711,58 @@ async function probeAll(): Promise<{
 /** The last pairing's record id and when (the 4 s "Paired just now", §6). */
 const JUST_PAIRED: { current: { id: string; at: number } | undefined } = { current: undefined };
 
-/** The Computers screen's sections (variant A, docs/feat/mobile-projects.md §6). */
-async function loadSections(): Promise<readonly ProjectSection[]> {
-  const { entries, probes } = await probeAll();
-  return projectSections(
-    entries.map((entry) =>
-      entry.state === "broken"
-        ? { id: entry.id, name: entry.name, broken: true }
-        : {
-            id: entry.id,
-            name: entry.computer.name,
-            ...(entry.computer.computerId === undefined
-              ? {}
-              : { computerId: entry.computer.computerId }),
-            ...(entry.computer.project === undefined ? {} : { project: entry.computer.project }),
-          },
-    ),
-    entries.map((entry, index) => ({
+/** The Keychain's entries as the view-model's records (a `broken` one keeps its own name). */
+function recordsOf(entries: readonly ComputerEntry[]): readonly ProjectRecordLike[] {
+  return entries.map((entry) =>
+    entry.state === "broken"
+      ? { id: entry.id, name: entry.name, broken: true }
+      : {
+          id: entry.id,
+          name: entry.computer.name,
+          ...(entry.computer.computerId === undefined
+            ? {}
+            : { computerId: entry.computer.computerId }),
+          ...(entry.computer.project === undefined ? {} : { project: entry.computer.project }),
+        },
+  );
+}
+
+/** The Computers screen's inputs, before they are projected (docs/fix/mobile-project-first-tap.md). */
+interface SectionInputs {
+  readonly records: readonly ProjectRecordLike[];
+  readonly observations: readonly ProjectObservation[];
+}
+
+/**
+ * Every listed record and what its probe observed. The projection is a separate
+ * step (`projectSections`) so the screen can show the SAME records as `checking`
+ * while a tap's probe is in flight — a row that has not answered yet is not a
+ * verdict about the computer.
+ */
+async function readSectionInputs(
+  onRecords?: (records: readonly ProjectRecordLike[]) => void,
+): Promise<SectionInputs> {
+  const { entries, probes } = await probeAll(onRecords);
+  return {
+    records: recordsOf(entries),
+    observations: entries.map((entry, index) => ({
       probe: probes[index] ?? { ok: false, error: new Error("no answer") },
       diagnosis: entry.state === "broken" ? "ok" : diagnoserFor(entry.id).current(),
       absent: entry.state === "broken" ? false : diagnoserFor(entry.id).absent(),
     })),
-    {
-      now: Date.now(),
-      ...(JUST_PAIRED.current === undefined ? {} : { justPaired: JUST_PAIRED.current }),
-    },
-  );
+  };
+}
+
+/** The sections for these inputs, with the records whose probe is in flight as `checking`. */
+function sectionsOf(
+  inputs: SectionInputs,
+  checking: readonly string[] = [],
+): readonly ProjectSection[] {
+  return projectSections(inputs.records, inputs.observations, {
+    now: Date.now(),
+    ...(JUST_PAIRED.current === undefined ? {} : { justPaired: JUST_PAIRED.current }),
+    ...(checking.length === 0 ? {} : { checking }),
+  });
 }
 
 /**
@@ -979,9 +1018,10 @@ async function findExisting(
   }
 }
 
-/** The phone's dial to one address: the client's own factory, over RN's WebSocket, no token. */
-function phoneDial(address: string): () => Promise<DuplexChannel> {
-  return webSocketChannelFactory(address, {}, { WebSocket: WebSocket as never });
+/** The phone's dial to one address: the client's own carrier factory, over RN's WebSocket, no token. */
+function phoneDial(address: string): () => Promise<ByteCarrier> {
+  // The Noise channel's raw byte carrier (E2E v2: binary frames).
+  return webSocketCarrierFactory(address, {}, { WebSocket: WebSocket as never });
 }
 
 /** The app's ONE row of a computer's project label (a `broken` entry has no sessions to read). */
@@ -1010,17 +1050,57 @@ function ComputersRoute({
   const [pairHint, setPairHint] = useState<string | undefined>(undefined);
   /** Bumped to re-probe now (a tap on a stopped row, the 15 s timer, the app's return). */
   const [tick, setTick] = useState(0);
+  /** The last read's inputs: what a tap repaints from while its probe runs. */
+  const inputsRef = useRef<SectionInputs | undefined>(undefined);
+  /**
+   * Bumped by EVERY thing the person can ask for (a tap's open, its menu, the
+   * Add/Pair screens, a Remove, and the screen leaving), so a tap's wait that
+   * lands after they moved on does nothing instead of yanking them elsewhere
+   * (docs/fix/mobile-project-first-tap.md Review round 1).
+   */
+  const tapGeneration = useRef(0);
+  /**
+   * No wait may act while the person has left the Computers screen — the app
+   * backgrounded counts, the screen blurred counts.
+   */
+  const sentOffscreen = useRef(true);
+  /** Has a completed read painted real states? (records-first is a FIRST paint only) */
+  const painted = useRef(false);
+  /**
+   * The person asked for something else: every wait already running is now stale
+   * and must NOT act when its probe lands (Review round 1's MEDIUM — a tap on a
+   * working row, the menu, Add, a Remove, or closing the screen).
+   */
+  const supersede = useCallback((): void => {
+    tapGeneration.current += 1;
+  }, []);
 
   useFocusEffect(
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tick` IS the re-probe trigger
     useCallback(() => {
       let live = true;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      void loadSections().then(
-        (built) => {
+      // The records are drawn BEFORE the probes land, as `checking`: the screen
+      // never sits empty and, once a row exists, it never claims a computer it
+      // has not asked yet does not answer (docs/fix/mobile-project-first-tap.md).
+      // FIRST paint only: repainting known rows as `checking` on every 15 s
+      // reconsideration would flash away the states the person already sees.
+      const showRecords = (records: readonly ProjectRecordLike[]): void => {
+        if (live && inputsRef.current === undefined) {
+          inputsRef.current = { records, observations: [] };
+          if (!painted.current) {
+            setSections(sectionsOf({ records, observations: [] }));
+          }
+        }
+      };
+      void readSectionInputs(showRecords).then(
+        (inputs) => {
           if (!live) {
             return;
           }
+          inputsRef.current = inputs;
+          painted.current = true;
+          const built = sectionsOf(inputs);
           setSections(built);
           setError(undefined);
           // §6 Live behaviour (Owner Q12): a stopped / unreachable project is
@@ -1041,10 +1121,19 @@ function ComputersRoute({
       );
       // …and on every return of the app to the foreground.
       const subscription = AppState.addEventListener("change", (state) => {
-        if (state === "active") {
+        const away = wasBackgrounded(state);
+        sentOffscreen.current = away;
+        if (away) {
+          // Leaving the app is the person moving on: a wait still running must
+          // not open anything when it comes back (Review round 1).
+          supersede();
+        } else {
           setTick((n) => n + 1);
         }
       });
+      // From the TRUTH, not from `false`: this effect re-runs on every 15 s
+      // reconsideration, and that must not claim a backgrounded app is in front.
+      sentOffscreen.current = wasBackgrounded(AppState.currentState);
       return () => {
         live = false;
         if (timer !== undefined) {
@@ -1052,7 +1141,85 @@ function ComputersRoute({
         }
         subscription.remove();
       };
-    }, [tick]),
+    }, [tick, supersede]),
+  );
+
+  useFocusEffect(
+    // Its own effect, with NO dependency on `tick`: the 15 s reconsideration must
+    // not count as the person moving on. Leaving the screen is the one thing that
+    // must stop a tap's wait from acting after they are somewhere else
+    // (docs/fix/mobile-project-first-tap.md Review round 1).
+    useCallback(() => {
+      sentOffscreen.current = wasBackgrounded(AppState.currentState);
+      return () => {
+        sentOffscreen.current = true;
+        supersede();
+      };
+    }, [supersede]),
+  );
+
+  /**
+   * A tap on a row that is not answering (docs/fix/mobile-project-first-tap.md):
+   * re-read, then open the row if that probe says it answers. Bounded by
+   * `TAP_WAIT_MS` — a probe that never settles falls back to the old behaviour
+   * (the next 15 s reconsideration picks it up), and the tap is never a no-op.
+   * One wait at a time: a tap that lands while the earlier one still runs
+   * SUPERSEDES it (the earlier wait's probe is stale from then on), so a second
+   * tap is never silently swallowed.
+   */
+  const awaitProbe = useCallback(
+    async (id: string): Promise<void> => {
+      const mine = ++tapGeneration.current;
+      // The row turns into `Checking…` while its probe runs (from the inputs of
+      // the last read), so the tap is visibly AN ANSWER, not a no-op.
+      const before = inputsRef.current;
+      if (before !== undefined) {
+        setSections(sectionsOf(before, [id]));
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const inputs = await Promise.race([
+          readSectionInputs(),
+          new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => resolve(undefined), TAP_WAIT_MS);
+          }),
+        ]);
+        // The person asked for something else while this ran: no repaint and no
+        // navigation of theirs (Review round 1's MEDIUM — the generation used to
+        // be only this wait's own, so it could never be stale).
+        const superseded = mine !== tapGeneration.current;
+        const offscreen = sentOffscreen.current;
+        const settledRow =
+          inputs === undefined
+            ? undefined
+            : sectionsOf(inputs)
+                .flatMap((section) => section.rows)
+                .find((row) => row.id === id);
+        const outcome = tapSettled(settledRow, { superseded, backgrounded: offscreen });
+        if (outcome === "drop") {
+          return;
+        }
+        if (inputs !== undefined) {
+          inputsRef.current = inputs;
+          setSections(sectionsOf(inputs));
+          setError(undefined);
+        }
+        if (outcome === "open" && settledRow !== undefined) {
+          // Opening is itself the person's last ask, and nothing may follow it.
+          supersede();
+          onOpen(settledRow);
+          return;
+        }
+        // It still does not answer (or the wait ran out): ask again shortly, so
+        // the row is not frozen by a probe that failed once.
+        setTick((n) => n + 1);
+      } finally {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      }
+    },
+    [onOpen, supersede],
   );
 
   return (
@@ -1061,42 +1228,64 @@ function ComputersRoute({
       sections={sections}
       error={error}
       onOpen={(row) => {
-        // A row that does not answer: the tap is a new attempt (mockup A3).
-        if (row.ok) {
+        // Every ask bumps the generation: a wait from an earlier tap is stale from
+        // here on, so it cannot navigate under this one (Review round 1).
+        supersede();
+        // A row that does not answer: the tap asks again — and, unlike mockup
+        // A3's silent "Try again", it then OPENS the row if that probe answers
+        // (docs/fix/mobile-project-first-tap.md: the first tap after a pairing
+        // used to be swallowed right here).
+        const tap = projectTap(row);
+        if (tap === "open") {
           onOpen(row);
-        } else if (row.state === "stopped" || row.state === "unreachable") {
-          setTick((n) => n + 1);
-        } else {
-          setMenu(row);
+          return;
         }
+        if (tap === "menu") {
+          setMenu(row);
+          return;
+        }
+        void awaitProbe(row.id);
       }}
-      onAdd={onAdd}
+      onAdd={() => {
+        supersede();
+        onAdd();
+      }}
       {...(pairHint === undefined ? {} : { pairHint })}
       onPairProject={setPairHint}
       onPairHintClosed={() => setPairHint(undefined)}
       onScan={() => {
+        supersede();
         setPairHint(undefined);
         onAdd();
       }}
       onRetry={() => {
+        supersede();
         setMenu(undefined);
         setTick((n) => n + 1);
       }}
       onPairAgain={(row) => {
+        supersede();
         setMenu(undefined);
         onPairAgain(row);
       }}
-      onMenu={setMenu}
+      onMenu={(row) => {
+        supersede();
+        setMenu(row);
+      }}
       onMenuClosed={() => setMenu(undefined)}
       {...(menu === undefined ? {} : { menu })}
       onRemove={(row) => {
+        supersede();
         // The menu turns into the confirmation (one sheet: `ComputersScreen`).
         setMenu(undefined);
         setRemoving(row);
       }}
       onRemoveCancelled={() => setRemoving(undefined)}
       {...(removing === undefined ? {} : { removing })}
-      onOpenSettings={onOpenSettings}
+      onOpenSettings={() => {
+        supersede();
+        onOpenSettings();
+      }}
       onRemoveConfirmed={(row) => {
         setRemoving(undefined);
         void onRemove(row);
@@ -1570,6 +1759,7 @@ function SessionRoute({
   /** The drawer's New session, reached from the hub too (docs/feat/mobile-hub.md H3). */
   readonly onNewSession: () => void;
 }): JSX.Element {
+  const shellRows = useShellRows();
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
 
@@ -1698,6 +1888,7 @@ function SessionRoute({
       onNewSession={onNewSession}
       artifactsSeenKey={sessionKey(computerId, sessionId)}
       onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
+      compactShell={shellRows.settings.compactShell}
     />
   );
 }
@@ -1776,8 +1967,33 @@ function useAppTheme(): AppTheme {
   return { ...theme, settings: themeSettings, error: themeError, select: selectTheme };
 }
 
+/**
+ * The `Compact shell rows` Beta switch (docs/feat/shell-intent-line.md §7): OFF
+ * by default, remembered per device, applied live (a render input of the
+ * transcript; nothing is stored per row). `SHELL_ROWS.load` reads once per run.
+ */
+function useShellRows(): {
+  readonly settings: ShellRowsSettings;
+  readonly error: string | undefined;
+  readonly select: (next: ShellRowsSettings) => void;
+} {
+  const [settings, setSettings] = useState<ShellRowsSettings>(() => SHELL_ROWS.current());
+  const [error, setError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = SHELL_ROWS.subscribe(setSettings);
+    void SHELL_ROWS.load();
+    return unsubscribe;
+  }, []);
+  const select = useCallback((next: ShellRowsSettings) => {
+    setError(undefined);
+    SHELL_ROWS.set(next).catch(() => setError("That shell-rows setting didn't save"));
+  }, []);
+  return { settings, error, select };
+}
+
 function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   const palette = theme.palette;
+  const shellRows = useShellRows();
   const [computers, setComputers] = useState<readonly ComputerEntry[] | null>(null);
   const [storeError, setStoreError] = useState<string | undefined>(undefined);
   // The navigation ref exists only to route an incoming link: a `Linking` event
@@ -2451,6 +2667,9 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                 themeBeta={theme.settings}
                 {...(theme.error === undefined ? {} : { themeError: theme.error })}
                 onThemeBeta={theme.select}
+                shellRows={shellRows.settings}
+                {...(shellRows.error === undefined ? {} : { shellRowsError: shellRows.error })}
+                onShellRows={shellRows.select}
                 activityMode={activitySettings.mode}
                 activityWritable={activityWritable}
                 {...(activityError === undefined ? {} : { activityError })}

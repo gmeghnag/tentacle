@@ -27,7 +27,7 @@ import {
   startWsServer,
   writeDaemonRecord,
 } from "@tentacle/daemon";
-import type { DuplexChannel } from "@tentacle/transport";
+import type { ByteCarrier } from "@tentacle/transport";
 import { generateStaticKeypair, systemRandom } from "@tentacle/transport/noise";
 import { createPairingHooks as createHooks, sasOfPrompt } from "../e2e/pairing.ts";
 import { projectRecordId } from "../src/computer-store.ts";
@@ -113,9 +113,9 @@ async function claim(
   }
   const key = generateStaticKeypair(systemRandom);
   let sas = "";
-  const dial = (address: string) => async (): Promise<DuplexChannel> => {
-    const { webSocketChannelFactory } = await import("@tentacle/client");
-    return webSocketChannelFactory(address, {}, {})();
+  const dial = (address: string) => async (): Promise<ByteCarrier> => {
+    const { webSocketCarrierFactory } = await import("@tentacle/client");
+    return webSocketCarrierFactory(address, {}, {})();
   };
   const result = await pairDevice({
     payload: parsed.payload,

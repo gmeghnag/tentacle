@@ -173,6 +173,13 @@ export interface NoticeRow {
    */
   readonly level?: "warn";
   /**
+   * The turns a LOST notice is ABOUT (`docs/fix/mobile-stream-lost-repeat.md`):
+   * the `turnId`s whose stream threw, set by the fold only on that notice. It is
+   * why the notice is not stacked (one row per run of losses) and how it is
+   * RETRACTED once the same turn is seen completing. Fold-only: never rendered.
+   */
+  readonly lostTurns?: readonly string[];
+  /**
    * The tentacle note it was drawn from (`ChatMessage.note`): the Activity
    * sheet joins a sub-agent's report by its `id` (`activity-memory.ts`).
    */

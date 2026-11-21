@@ -39,7 +39,7 @@ import {
   writePairingDecision,
 } from "@tentacle/daemon";
 import { DEFAULT_RELAY_URL } from "@tentacle/protocol";
-import type { DuplexChannel } from "@tentacle/transport";
+import { type ByteCarrier, type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { publicKeyOf, systemRandom } from "@tentacle/transport/noise";
 import { relayIdOf } from "@tentacle/transport/relay-id";
 import { startRelay } from "../../../apps/relay/src/server.ts";
@@ -239,14 +239,18 @@ function hang(): string {
 }
 
 /** A real WebSocket dial, like the app's (iOS sends an `Origin`). */
-function dial(url: string): () => Promise<DuplexChannel> {
+function dial(url: string): () => Promise<ByteCarrier> {
   return () =>
     new Promise((resolve, reject) => {
       const ws = new WebSocket(url, { headers: { Origin: "http://192.168.1.8:4001" } } as never);
-      let onMessage: ((d: string) => void) | undefined;
+      let onMessage: ((d: CarrierFrame) => void) | undefined;
+      ws.binaryType = "arraybuffer";
       let onClose: (() => void) | undefined;
       let opened = false;
-      ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+      ws.addEventListener("message", (e) => {
+        const frame = carrierFrameOf(e.data);
+        if (frame !== null) onMessage?.(frame);
+      });
       ws.addEventListener("close", (e) => {
         onClose?.();
         if (!opened) reject(new Error(`closed ${e.code}`));

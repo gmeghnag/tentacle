@@ -7,9 +7,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChannelError } from "@tentacle/client";
 import { PairingRefused } from "@tentacle/client/pairing";
-import { DomainErrorCode, PAIRING_REFUSED_REASONS, formatPairingPayload } from "@tentacle/protocol";
+import {
+  DomainErrorCode,
+  PAIRING_PAYLOAD_VERSION,
+  PAIRING_REFUSED_REASONS,
+  formatPairingPayload,
+} from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
-import type { DuplexChannel } from "@tentacle/transport";
+import type { ByteCarrier } from "@tentacle/transport";
 import type { ComputerStore, PairedComputer } from "../src/computer-store.ts";
 import {
   CANCELLED_MESSAGE,
@@ -31,7 +36,7 @@ const ADDRESS = "ws://127.0.0.1:4001/e2e";
 
 const payloadText = (over: { v?: number; address?: string } = {}): string => {
   const line = formatPairingPayload({
-    v: 1,
+    v: PAIRING_PAYLOAD_VERSION,
     key: KEY,
     computer: "MacBook",
     code: CODE,
@@ -39,7 +44,7 @@ const payloadText = (over: { v?: number; address?: string } = {}): string => {
   });
   // `formatPairingPayload` always writes THIS build's version, so a future one
   // is made by rewriting the `v` param (what a newer tentacle would print).
-  return over.v === undefined ? line : line.replace("v=1", `v=${over.v}`);
+  return over.v === undefined ? line : line.replace(`v=${PAIRING_PAYLOAD_VERSION}`, `v=${over.v}`);
 };
 
 /** Drive the reducer from `intake` to `review` with a valid payload. */
@@ -70,7 +75,7 @@ function watchStore(fail = false): {
 }
 
 /** A dial that never opens: the runner must not invent a channel. */
-const noDial = async (): Promise<DuplexChannel> => {
+const noDial = async (): Promise<ByteCarrier> => {
   throw new ChannelError("unreachable", "no route");
 };
 
@@ -117,7 +122,7 @@ describe("the pairing reducer", () => {
   });
 
   test("a payload from another version is payload-version, not invalid-payload", () => {
-    const state = reduce(reduce(initialState(), { type: "text", text: payloadText({ v: 2 }) }), {
+    const state = reduce(reduce(initialState(), { type: "text", text: payloadText({ v: 3 }) }), {
       type: "submit",
     });
     expect(state.name).toBe("intake");
@@ -220,6 +225,15 @@ describe("describePairingError", () => {
     expect(failure.retry).toBe("no");
   });
 
+  test("T-M2: an e2e version-mismatch ChannelError → the `version` failure (docs/feat/noise-binary-carrier.md)", () => {
+    for (const remote of [1, 3]) {
+      const failure = describePairingError(
+        new ChannelError("rejected", "secure channel: version mismatch", undefined, remote),
+      );
+      expect(failure.reason).toBe("version");
+    }
+  });
+
   test("any other ChannelError / dial error → unreachable, retryable", () => {
     for (const error of [
       new ChannelError("unreachable", "closed"),
@@ -263,7 +277,7 @@ describe("runPairing", () => {
     // the runner CLOSES the channel it holds when the signal aborts.
     let closed = false;
     let onClose: (() => void) | undefined;
-    const channel: DuplexChannel = {
+    const channel: ByteCarrier = {
       send: () => {},
       close: () => {
         closed = true;
@@ -312,10 +326,10 @@ describe("runPairing: Cancel closes every channel the race opened", () => {
     // the exchange's channel stays open: the phone keeps a pairing socket on the
     // computer after Cancel. The property: abort closes ALL of them.
     const closed: string[] = [];
-    const make = (name: string): DuplexChannel => {
+    const make = (name: string): ByteCarrier => {
       let onClose: (() => void) | undefined;
       let isClosed = false;
-      const channel: DuplexChannel = {
+      const channel: ByteCarrier = {
         send: () => {},
         close: () => {
           isClosed = true;
@@ -381,7 +395,7 @@ describe("runPairing: Cancel closes every channel the race opened", () => {
   test("a channel that opens AFTER the abort is closed at once (kept)", async () => {
     const closed: string[] = [];
     let onClose: (() => void) | undefined;
-    const channel: DuplexChannel = {
+    const channel: ByteCarrier = {
       send: () => {},
       close: () => {
         closed.push("late");

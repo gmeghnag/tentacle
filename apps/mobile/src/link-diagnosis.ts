@@ -18,9 +18,18 @@
  * Pure and React-free: a reducer, so every rule is testable without a socket.
  */
 import { ChannelError } from "@tentacle/client";
+import { E2E_CHANNEL_VERSION } from "@tentacle/transport/noise";
 
 /** What the row says (and, for the first two, what the app offers). */
-export type LinkDiagnosis = "ok" | "unreachable" | "revoked" | "maybe-reset";
+export type LinkDiagnosis =
+  | "ok"
+  | "unreachable"
+  | "revoked"
+  | "maybe-reset"
+  /** The computer speaks a NEWER e2e channel version: this app is older (docs/feat/noise-binary-carrier.md). */
+  | "update-app"
+  /** The computer speaks an OLDER e2e channel version: tentacle on it is older. */
+  | "update-computer";
 
 /** One dial attempt's observable: did the raw socket open, and what did the handshake do? */
 export interface DialObservation {
@@ -60,6 +69,14 @@ function isUnauthorized(error: unknown): boolean {
   return error instanceof ChannelError && error.kind === "unauthorized";
 }
 
+/**
+ * The e2e channel version the computer named on a skew (unauthenticated: it
+ * only picks the sentence; the link keeps retrying — the error is transient).
+ */
+function remoteE2eVersionOf(error: unknown): number | undefined {
+  return error instanceof ChannelError ? error.remoteE2eVersion : undefined;
+}
+
 export function createLinkDiagnoser(): LinkDiagnoser {
   /** Consecutive attempts that OPENED and then failed to confirm the handshake. */
   let streak = 0;
@@ -72,6 +89,12 @@ export function createLinkDiagnoser(): LinkDiagnoser {
         // Terminal and authenticated: the count is irrelevant.
         streak = 0;
         state = "revoked";
+        return state;
+      }
+      const remote = remoteE2eVersionOf(observation.error);
+      if (remote !== undefined && remote !== E2E_CHANNEL_VERSION) {
+        // A version skew says nothing about our key: the reset streak is left alone.
+        state = remote > E2E_CHANNEL_VERSION ? "update-app" : "update-computer";
         return state;
       }
       if (observation.absent === true) {
@@ -114,7 +137,13 @@ export function diagnosisMessage(diagnosis: LinkDiagnosis, computerName: string)
     case "revoked":
       return `This phone was removed from '${computerName}' — pair again, or remove it here`;
     case "maybe-reset":
-      return `'${computerName}' may have been reset (\`tentacle devices reset\`) — pair again`;
+      // An OLDER tentacle (e2e v1) cannot answer a v2 phone at all: it just
+      // closes, which reads exactly like a reset (docs/feat/noise-binary-carrier.md §3).
+      return `'${computerName}' may have been reset (\`tentacle devices reset\`) — pair again — or tentacle on it is older than this app (update it)`;
+    case "update-app":
+      return `'${computerName}' runs a newer tentacle than this app — update the app`;
+    case "update-computer":
+      return `tentacle on '${computerName}' is older than this app — update it and restart \`tentacle serve\``;
     case "unreachable":
       // Covers F23 (an older tentacle has no `/e2e`): its 401/refused upgrade is
       // a dial that never opened, and "update it" is the fix. The relay is named

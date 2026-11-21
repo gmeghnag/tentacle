@@ -9,6 +9,7 @@ import type {
 } from "@tentacle/core";
 import { toolLabel } from "@tentacle/core";
 import {
+  ToolRegistry,
   builtinTools,
   fsEditTool,
   fsMultiEditTool,
@@ -276,6 +277,31 @@ describe("built-in tools", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContain("exit=2");
     expect(result.content).toContain("nope");
+  });
+
+  test("shell advertises an optional `description` (the intent sentence) to the model", () => {
+    const [def] = new ToolRegistry().register(shellTool).definitions();
+    const params = def?.parameters as {
+      properties?: Record<string, { description?: string }>;
+      required?: string[];
+    };
+    expect(params.properties?.description?.description).toContain("WHAT this command does");
+    expect(params.properties?.description?.description).toContain("language the user");
+    expect(params.required ?? []).not.toContain("description");
+    expect(def?.description).toContain("Always give `description`");
+  });
+
+  test("shell never rejects an over-long description, and its output ignores it", async () => {
+    const env = fakeEnv();
+    const reg = new ToolRegistry().register(shellTool);
+    const withIt = await reg.execute(
+      "shell",
+      JSON.stringify({ command: "ls", description: "x".repeat(5000) }),
+      ctx(env),
+    );
+    const without = await reg.execute("shell", JSON.stringify({ command: "ls" }), ctx(env));
+    expect(withIt).toEqual({ content: "exit=0\nran: ls", isError: false });
+    expect(withIt).toEqual(without);
   });
 
   test("shell passes a default timeout and flags a killed command", async () => {

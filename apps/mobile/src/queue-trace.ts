@@ -21,7 +21,7 @@
  * Every entry's `kind` is `qtrace` and its `ev` field names the event, so one
  * grep finds the whole story: `grep qtrace tentacle-logs-*.txt`.
  */
-import type { AppLog, AppLogField } from "./app-log.ts";
+import type { AppLog, AppLogField, ErrorShape } from "./app-log.ts";
 import { shortId } from "./app-log.ts";
 
 /** The app-log kind every trace line carries (the owner's grep). */
@@ -64,7 +64,17 @@ export type QueueTraceEvent =
   /** A turn opened (`own`: this phone's send, not another device's). */
   | { readonly kind: "turn-start"; readonly turnId: string; readonly own: boolean }
   /** A turn closed, with the outcome the fold decided. */
-  | { readonly kind: "turn-end"; readonly turnId: string | null; readonly outcome: string }
+  | {
+      readonly kind: "turn-end";
+      readonly turnId: string | null;
+      readonly outcome: string;
+      /**
+       * What made a LOST stream throw (`session-feed.ts` `ErrorShape`): the error
+       * CLASS and its numeric code, never its message — the export is a file a
+       * person shares (`app-log.ts` F16). Present on `lost` only.
+       */
+      readonly cause?: ErrorShape;
+    }
   /** The link's own up/down (`RemoteClient.onLinkStatus`). */
   | { readonly kind: "link"; readonly state: "up" | "down" }
   /** An attach: started, answered, or failed (a Retry/Reopen is `reopen: true`). */
@@ -148,6 +158,12 @@ export function traceLine(sessionId: string, event: QueueTraceEvent): TraceLine 
       return line({
         turn: event.turnId === null ? "-" : row(event.turnId),
         outcome: event.outcome,
+        ...(event.cause === undefined
+          ? {}
+          : {
+              why: event.cause.error,
+              ...(event.cause.code === undefined ? {} : { code: event.cause.code }),
+            }),
       });
     case "link":
       return line({ state: event.state });

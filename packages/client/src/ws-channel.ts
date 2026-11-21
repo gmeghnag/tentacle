@@ -3,13 +3,77 @@
  * `DuplexChannel`. `connectWebSocket` resolves once the socket is open, so the
  * caller can immediately `initialize`.
  */
-import type { DuplexChannel } from "@tentacle/transport";
+import {
+  type ByteCarrier,
+  type CarrierFrame,
+  type DuplexChannel,
+  carrierFrameOf,
+} from "@tentacle/transport";
 import { ChannelError } from "./link-machine.ts";
 
 interface WebSocketLike {
-  send(data: string): void;
+  send(data: string | Uint8Array): void;
   close(): void;
   addEventListener(type: string, listener: (event: { data?: unknown }) => void): void;
+  binaryType?: string;
+}
+
+/**
+ * Adapts a WebSocket (Bun's, the browser's, React Native's) to the Noise
+ * channel's raw `ByteCarrier` (E2E v2: binary frames,
+ * docs/feat/noise-binary-carrier.md). Dumb on purpose: it hands up exactly
+ * what the socket gave (`carrierFrameOf`) — bytes, or a text frame for the
+ * Noise layer to diagnose — and closes on anything else (a `Blob`), never
+ * `String(x)`.
+ */
+export class WebSocketCarrier implements ByteCarrier {
+  private onMessage?: (frame: CarrierFrame) => void;
+  private onClose?: () => void;
+  private closed = false;
+
+  constructor(private readonly ws: WebSocketLike) {
+    // Bun's client defaults to "nodebuffer", a browser to "blob": pinned, so
+    // binary arrives as an ArrayBuffer everywhere (RN's default already is).
+    ws.binaryType = "arraybuffer";
+    ws.addEventListener("message", (event) => {
+      if (this.closed) return;
+      const frame = carrierFrameOf(event.data);
+      if (frame === null) {
+        // Not a frame this channel can carry: the carrier ends here, at once.
+        this.ws.close();
+        this.fireClose();
+        return;
+      }
+      this.onMessage?.(frame);
+    });
+    ws.addEventListener("close", () => this.fireClose());
+    ws.addEventListener("error", () => this.fireClose());
+  }
+
+  send(data: Uint8Array): void {
+    if (!this.closed) {
+      this.ws.send(data);
+    }
+  }
+  close(): void {
+    if (this.closed) {
+      return;
+    }
+    this.ws.close();
+  }
+  setOnMessage(handler: (frame: CarrierFrame) => void): void {
+    this.onMessage = handler;
+  }
+  setOnClose(handler: () => void): void {
+    this.onClose = handler;
+  }
+  private fireClose(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.onClose?.();
+  }
 }
 
 export class WebSocketChannel implements DuplexChannel {
@@ -195,6 +259,29 @@ export function webSocketChannelFactory(
   options: ConnectOptions = {},
   deps: ChannelFactoryDeps = {},
 ): () => Promise<WebSocketChannel> {
+  return dialWith(url, options, deps, (ws) => new WebSocketChannel(ws));
+}
+
+/**
+ * `webSocketChannelFactory` for the Noise channel's raw carrier: the same dial,
+ * upgrade classification and TLS trust, resolving a `WebSocketCarrier` (E2E v2,
+ * docs/feat/noise-binary-carrier.md). What `secureChannelFactory` dials.
+ */
+export function webSocketCarrierFactory(
+  url: string,
+  options: ConnectOptions = {},
+  deps: ChannelFactoryDeps = {},
+): () => Promise<WebSocketCarrier> {
+  return dialWith(url, options, deps, (ws) => new WebSocketCarrier(ws));
+}
+
+/** One dial per call; `wrap` adapts the open socket (text channel or byte carrier). */
+function dialWith<T>(
+  url: string,
+  options: ConnectOptions,
+  deps: ChannelFactoryDeps,
+  wrap: (ws: OpenableSocket) => T,
+): () => Promise<T> {
   const Ctor = deps.WebSocket ?? (WebSocket as unknown as WebSocketCtor);
   const probe = async (): Promise<number | null> => {
     const { target } = socketTarget(url, options.token);
@@ -218,7 +305,7 @@ export function webSocketChannelFactory(
       const ws = openSocket(url, options.token, options.tls, Ctor);
       ws.addEventListener("open", () => {
         opened = true;
-        resolve(new WebSocketChannel(ws));
+        resolve(wrap(ws));
       });
       ws.addEventListener("close", (event) => {
         if (opened) {
