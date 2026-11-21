@@ -321,6 +321,10 @@ export interface StepNodeProps {
   readonly subtitle: string;
   /** Sans italic (a thought's first line) instead of mono (a command). */
   readonly subtitleItalic?: boolean;
+  /** A second mono line under the name line (a described shell step's `$ cmd`). */
+  readonly subline?: string | null;
+  /** The name shimmers like the thinking word (a described shell step, running). */
+  readonly shimmer?: boolean;
   readonly trailing: string;
   readonly trailingRed: boolean;
   /** A running step's start (`row.at`): the trailing text is its live clock. */
@@ -346,6 +350,8 @@ export function StepNode({
   nameItalic,
   subtitle,
   subtitleItalic,
+  subline,
+  shimmer,
   trailing,
   trailingRed,
   liveFrom,
@@ -386,56 +392,75 @@ export function StepNode({
             : {})}
           disabled={!tappable}
           onPress={onToggle}
-          style={({ pressed }) => [styles.line, pressed ? styles.pressed : undefined]}
+          style={({ pressed }) => [
+            styles.line,
+            subline != null ? styles.stacked : undefined,
+            pressed ? styles.pressed : undefined,
+          ]}
         >
-          {node === "thinking" ? (
-            <ThinkingWord
-              palette={palette}
-              word={name.tool}
-              reduceMotion={reduceMotion}
-              {...(labelTestID === undefined ? {} : { testID: labelTestID })}
-            />
-          ) : (
+          <View style={subline != null ? styles.lineRow : styles.rowFill}>
+            {node === "thinking" || shimmer === true ? (
+              <ThinkingWord
+                palette={palette}
+                word={name.tool}
+                reduceMotion={reduceMotion}
+                {...(labelTestID === undefined ? {} : { testID: labelTestID })}
+              />
+            ) : (
+              <Text
+                testID={labelTestID}
+                numberOfLines={1}
+                maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                style={[
+                  typography.step,
+                  styles.name,
+                  subtitle === "" ? styles.nameWide : undefined,
+                  { color: palette.label },
+                  nameItalic === true ? styles.italic : undefined,
+                ]}
+              >
+                {name.server === undefined ? null : (
+                  <Text style={[styles.server, { color: palette.sec }]}>{`${name.server} · `}</Text>
+                )}
+                {name.tool}
+              </Text>
+            )}
             <Text
-              testID={labelTestID}
               numberOfLines={1}
               maxFontSizeMultiplier={DENSE_FONT_SCALE}
               style={[
-                typography.step,
-                styles.name,
-                { color: palette.label },
-                nameItalic === true ? styles.italic : undefined,
+                subtitleItalic === true
+                  ? [typography.step, styles.thoughtLine]
+                  : typography.stepMono,
+                styles.subtitle,
+                { color: palette.sec },
               ]}
             >
-              {name.server === undefined ? null : (
-                <Text style={[styles.server, { color: palette.sec }]}>{`${name.server} · `}</Text>
-              )}
-              {name.tool}
+              {subtitle}
             </Text>
-          )}
-          <Text
-            numberOfLines={1}
-            maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            style={[
-              subtitleItalic === true ? [typography.step, styles.thoughtLine] : typography.stepMono,
-              styles.subtitle,
-              { color: palette.sec },
-            ]}
-          >
-            {subtitle}
-          </Text>
-          {shown === "" ? null : (
+            {shown === "" ? null : (
+              <Text
+                numberOfLines={1}
+                maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                style={[
+                  typography.caption,
+                  { color: trailingRed ? palette.red : palette.sec },
+                  // The live clock's figures hold one width as they count (S2).
+                  node === "thinking" ? styles.tabular : undefined,
+                ]}
+              >
+                {shown}
+              </Text>
+            )}
+          </View>
+          {subline == null ? null : (
             <Text
               numberOfLines={1}
+              ellipsizeMode="tail"
               maxFontSizeMultiplier={DENSE_FONT_SCALE}
-              style={[
-                typography.caption,
-                { color: trailingRed ? palette.red : palette.sec },
-                // The live clock's figures hold one width as they count (S2).
-                node === "thinking" ? styles.tabular : undefined,
-              ]}
+              style={[typography.stepMono, { color: palette.sec }]}
             >
-              {shown}
+              {subline}
             </Text>
           )}
         </Pressable>
@@ -625,8 +650,15 @@ const styles = StyleSheet.create({
   glyphs: { position: "absolute", top: 0, left: 0 },
   column: { flex: 1, marginLeft: GUTTER },
   line: { minHeight: size.touch, flexDirection: "row", alignItems: "center", gap: 6 },
+  // The name line inside `line`: fills it exactly as its children did directly.
+  rowFill: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6 },
+  // A described shell step: the name line, then the `$` line under it.
+  stacked: { flexDirection: "column", alignItems: "stretch", justifyContent: "center", gap: 0 },
+  lineRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   pressed: { opacity: 0.6 },
   name: { flexShrink: 0, maxWidth: "45%" },
+  // No subtitle beside it (a sentence): the name may take the whole line.
+  nameWide: { flexShrink: 1, maxWidth: "100%" },
   server: { fontWeight: "400" },
   italic: { fontStyle: "italic" },
   tabular: { fontVariant: ["tabular-nums"] },
