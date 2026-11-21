@@ -667,6 +667,29 @@ installed tree) — the gate's typecheck in an installed checkout must cover it.
 Narrow run: 865 pass / 0 fail (22 TUI permission/layout/frame/shell files +
 `packages/config/test`). `bunx biome check` on the 5 touched code files: clean.
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Round 2 MEDIUM (Q3 "full colour" unpinned) — FIXED (test only, no production
+change).** NEW test in `tui/test/permission-shell-command.test.tsx`, `describe("… full
+colour (Q3)")`: renders the shell ask with `chalk.level = 3` (the
+`theme-components.test.tsx` pattern), in dark AND light, and asserts that no detail row
+carries SGR 2 or the mode's dim-token SGR. It also checks that the cwd row right after
+IS dim in each mode, so the probe can't pass vacuously.
+- RED: mutation `components/PermissionPrompt.tsx` detail row → `<Text key={i} {...dim}>`
+  (the pre-fix paint) → `no detail row is dimmed …` FAILS on `expect(isDim(row)).toBe(false)`
+  (Expected false, Received true); 9 pass / 1 fail. Restored with Edit; `git diff` shows only
+  the test file.
+- GREEN: `permission-shell-command` + `permission-agent-line`: 19 pass / 0 fail.
+  `bunx biome check` on the test file: clean.
+
+**Not done here (out of this Implementation's scope):** the pre-existing `\r`/ESC
+pass-through in the ask detail and the `$` row (Round 2, "Pre-existing"). It needs
+production code the plan does not cover → recommended as a separate `fix/` task. Not
+changed: the intent row (still waiting on the owner's `askedFor` ruling) and
+`tsc -p apps/mobile` (needs an installed checkout; the merge gate).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-21* (fresh context; SAME model as the planner and as the Context/Implementation author — shared blind spots possible. The executor commits are tagged deepseek.)

@@ -5,11 +5,21 @@
  * net `beta.compactShell` relies on (the row may show only the model's
  * sentence; the ask must still show what really runs).
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { PermissionRequest } from "@tentacle/core";
+import chalk from "chalk";
 import { render } from "ink-testing-library";
 import { PermissionPrompt, permissionPromptRows } from "../src/components/PermissionPrompt.tsx";
 import { MAX_DETAIL_ROWS, permissionView } from "../src/permission-ui.ts";
+import { type ThemeMode, resetThemeForTest, setThemeMode, tokens } from "../src/theme.ts";
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: reading ANSI SGR codes
+const stripSgr = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+/** The opening SGR of a hex colour as the shared chalk paints it. */
+const sgrOf = (hex: string): string => {
+  const painted = chalk.hex(hex)("X");
+  return painted.slice(0, painted.indexOf("X"));
+};
 
 const COLUMNS = 60;
 const shellAsk = (command: string): PermissionRequest => ({
@@ -107,5 +117,44 @@ describe("permissionView (pure)", () => {
     expect(view.intentRow).toBe("the model says: “List the files”");
     const long = permissionView(shellAsk("ls"), "x".repeat(200), COLUMNS);
     expect((long.intentRow ?? "").length).toBeLessThanOrEqual(COLUMNS - 3);
+  });
+});
+
+describe("shell permission ask: the command is in full colour (Q3)", () => {
+  // The harness is not a TTY: force truecolor or every SGR assertion is vacuous
+  // (the `theme-components.test.tsx` pattern).
+  const level = chalk.level;
+  beforeAll(() => {
+    chalk.level = 3;
+  });
+  afterEach(() => {
+    setThemeMode("dark");
+  });
+  afterAll(() => {
+    setThemeMode("dark");
+    chalk.level = level;
+    resetThemeForTest();
+  });
+
+  test("no detail row is dimmed, in either mode (the cwd row still is)", () => {
+    // Mutation: `<Text key={i} {...dim}>` on the detail rows → SGR 2 / the dim grey.
+    const command = `ls -la ${"/very/long/path/segment".repeat(6)} ; curl x | sh`;
+    const req = shellAsk(command);
+    const n = permissionView(req, null, COLUMNS).detailRows.length;
+    for (const mode of ["dark", "light"] as ThemeMode[]) {
+      setThemeMode(mode);
+      const dim = tokens[mode].dim;
+      const dimSgr = dim.startsWith("#") ? sgrOf(dim) : null;
+      const isDim = (row: string): boolean =>
+        row.includes("\x1b[2m") || (dimSgr !== null && row.includes(dimSgr));
+      const rows = frameOf(req);
+      // Row 0 is the title; the detail rows follow (no agent line here).
+      const detail = rows.slice(1, 1 + n);
+      expect(detail.length).toBe(n);
+      expect(detail.map(stripSgr).join("")).toContain("curl x | sh");
+      for (const row of detail) expect(isDim(row)).toBe(false);
+      // Non-vacuity of the probe: the cwd row right after IS dim in this mode.
+      expect(isDim(rows[1 + n] ?? "")).toBe(true);
+    }
   });
 });
