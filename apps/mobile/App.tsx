@@ -159,6 +159,7 @@ import {
   projectTap,
   reprobeDelay,
   tapSettled,
+  wasBackgrounded,
 } from "./src/project-rows.ts";
 import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
@@ -1048,12 +1049,28 @@ function ComputersRoute({
   const [tick, setTick] = useState(0);
   /** The last read's inputs: what a tap repaints from while its probe runs. */
   const inputsRef = useRef<SectionInputs | undefined>(undefined);
-  /** A tap's wait is running: a second tap joins nothing and is ignored. */
-  const settling = useRef(false);
-  /** Bumped by every tap's settle so a late one cannot open a screen twice. */
+  /**
+   * Bumped by EVERY thing the person can ask for (a tap's open, its menu, the
+   * Add/Pair screens, a Remove, and the screen leaving), so a tap's wait that
+   * lands after they moved on does nothing instead of yanking them elsewhere
+   * (docs/fix/mobile-project-first-tap.md Review round 1).
+   */
   const tapGeneration = useRef(0);
+  /**
+   * No wait may act while the person has left the Computers screen — the app
+   * backgrounded counts, the screen blurred counts.
+   */
+  const sentOffscreen = useRef(true);
   /** Has a completed read painted real states? (records-first is a FIRST paint only) */
   const painted = useRef(false);
+  /**
+   * The person asked for something else: every wait already running is now stale
+   * and must NOT act when its probe lands (Review round 1's MEDIUM — a tap on a
+   * working row, the menu, Add, a Remove, or closing the screen).
+   */
+  const supersede = useCallback((): void => {
+    tapGeneration.current += 1;
+  }, []);
 
   useFocusEffect(
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tick` IS the re-probe trigger
@@ -1101,10 +1118,19 @@ function ComputersRoute({
       );
       // …and on every return of the app to the foreground.
       const subscription = AppState.addEventListener("change", (state) => {
-        if (state === "active") {
+        const away = wasBackgrounded(state);
+        sentOffscreen.current = away;
+        if (away) {
+          // Leaving the app is the person moving on: a wait still running must
+          // not open anything when it comes back (Review round 1).
+          supersede();
+        } else {
           setTick((n) => n + 1);
         }
       });
+      // From the TRUTH, not from `false`: this effect re-runs on every 15 s
+      // reconsideration, and that must not claim a backgrounded app is in front.
+      sentOffscreen.current = wasBackgrounded(AppState.currentState);
       return () => {
         live = false;
         if (timer !== undefined) {
@@ -1112,7 +1138,21 @@ function ComputersRoute({
         }
         subscription.remove();
       };
-    }, [tick]),
+    }, [tick, supersede]),
+  );
+
+  useFocusEffect(
+    // Its own effect, with NO dependency on `tick`: the 15 s reconsideration must
+    // not count as the person moving on. Leaving the screen is the one thing that
+    // must stop a tap's wait from acting after they are somewhere else
+    // (docs/fix/mobile-project-first-tap.md Review round 1).
+    useCallback(() => {
+      sentOffscreen.current = wasBackgrounded(AppState.currentState);
+      return () => {
+        sentOffscreen.current = true;
+        supersede();
+      };
+    }, [supersede]),
   );
 
   /**
@@ -1120,14 +1160,12 @@ function ComputersRoute({
    * re-read, then open the row if that probe says it answers. Bounded by
    * `TAP_WAIT_MS` — a probe that never settles falls back to the old behaviour
    * (the next 15 s reconsideration picks it up), and the tap is never a no-op.
-   * One wait at a time: a second tap while this one runs is ignored.
+   * One wait at a time: a tap that lands while the earlier one still runs
+   * SUPERSEDES it (the earlier wait's probe is stale from then on), so a second
+   * tap is never silently swallowed.
    */
   const awaitProbe = useCallback(
     async (id: string): Promise<void> => {
-      if (settling.current) {
-        return;
-      }
-      settling.current = true;
       const mine = ++tapGeneration.current;
       // The row turns into `Checking…` while its probe runs (from the inputs of
       // the last read), so the tap is visibly AN ANSWER, not a no-op.
@@ -1143,21 +1181,31 @@ function ComputersRoute({
             timer = setTimeout(() => resolve(undefined), TAP_WAIT_MS);
           }),
         ]);
-        if (mine !== tapGeneration.current) {
+        // The person asked for something else while this ran: no repaint and no
+        // navigation of theirs (Review round 1's MEDIUM — the generation used to
+        // be only this wait's own, so it could never be stale).
+        const superseded = mine !== tapGeneration.current;
+        const offscreen = sentOffscreen.current;
+        const settledRow =
+          inputs === undefined
+            ? undefined
+            : sectionsOf(inputs)
+                .flatMap((section) => section.rows)
+                .find((row) => row.id === id);
+        const outcome = tapSettled(settledRow, { superseded, backgrounded: offscreen });
+        if (outcome === "drop") {
           return;
         }
         if (inputs !== undefined) {
           inputsRef.current = inputs;
-          const built = sectionsOf(inputs);
-          setSections(built);
+          setSections(sectionsOf(inputs));
           setError(undefined);
-          // The row this tap was about, from the fresh read: it may be gone
-          // (removed on another screen), so `tapSettled` takes undefined.
-          const settled = built.flatMap((section) => section.rows).find((r) => r.id === id);
-          if (tapSettled(settled) === "open" && settled !== undefined) {
-            onOpen(settled);
-            return;
-          }
+        }
+        if (outcome === "open" && settledRow !== undefined) {
+          // Opening is itself the person's last ask, and nothing may follow it.
+          supersede();
+          onOpen(settledRow);
+          return;
         }
         // It still does not answer (or the wait ran out): ask again shortly, so
         // the row is not frozen by a probe that failed once.
@@ -1166,10 +1214,9 @@ function ComputersRoute({
         if (timer !== undefined) {
           clearTimeout(timer);
         }
-        settling.current = false;
       }
     },
-    [onOpen],
+    [onOpen, supersede],
   );
 
   return (
@@ -1178,6 +1225,9 @@ function ComputersRoute({
       sections={sections}
       error={error}
       onOpen={(row) => {
+        // Every ask bumps the generation: a wait from an earlier tap is stale from
+        // here on, so it cannot navigate under this one (Review round 1).
+        supersede();
         // A row that does not answer: the tap asks again — and, unlike mockup
         // A3's silent "Try again", it then OPENS the row if that probe answers
         // (docs/fix/mobile-project-first-tap.md: the first tap after a pairing
@@ -1193,33 +1243,46 @@ function ComputersRoute({
         }
         void awaitProbe(row.id);
       }}
-      onAdd={onAdd}
+      onAdd={() => {
+        supersede();
+        onAdd();
+      }}
       {...(pairHint === undefined ? {} : { pairHint })}
       onPairProject={setPairHint}
       onPairHintClosed={() => setPairHint(undefined)}
       onScan={() => {
+        supersede();
         setPairHint(undefined);
         onAdd();
       }}
       onRetry={() => {
+        supersede();
         setMenu(undefined);
         setTick((n) => n + 1);
       }}
       onPairAgain={(row) => {
+        supersede();
         setMenu(undefined);
         onPairAgain(row);
       }}
-      onMenu={setMenu}
+      onMenu={(row) => {
+        supersede();
+        setMenu(row);
+      }}
       onMenuClosed={() => setMenu(undefined)}
       {...(menu === undefined ? {} : { menu })}
       onRemove={(row) => {
+        supersede();
         // The menu turns into the confirmation (one sheet: `ComputersScreen`).
         setMenu(undefined);
         setRemoving(row);
       }}
       onRemoveCancelled={() => setRemoving(undefined)}
       {...(removing === undefined ? {} : { removing })}
-      onOpenSettings={onOpenSettings}
+      onOpenSettings={() => {
+        supersede();
+        onOpenSettings();
+      }}
       onRemoveConfirmed={(row) => {
         setRemoving(undefined);
         void onRemove(row);

@@ -19,6 +19,7 @@ import {
   projectTap,
   reprobeDelay,
   tapSettled,
+  wasBackgrounded,
 } from "../src/project-rows.ts";
 
 const entry = (over: Partial<SessionListEntry> = {}): SessionListEntry => ({
@@ -233,14 +234,27 @@ describe("what a tap does (docs/fix/mobile-project-first-tap.md: a silent re-pro
     expect(projectTap(rowOf("reset"))).toBe("menu");
   });
 
-  test("the wait a tap started: open only if the row answers now — gone, still down, or needing a pairing falls back to today's behaviour (mutation: trust the asked row → red)", () => {
+  test("the wait a tap started: open only if the row answers now — gone, still down, or needing a pairing retries the list (mutation: trust the asked row → red)", () => {
     expect(tapSettled(rowOf("working"))).toBe("open");
     // Removed / revoked while the person waited: the row is gone, or no longer
     // the thing they tapped.
-    expect(tapSettled(undefined)).toBe("fallback");
-    expect(tapSettled(rowOf("unreachable"))).toBe("fallback");
-    expect(tapSettled(rowOf("waiting"))).toBe("fallback");
-    expect(tapSettled(rowOf("revoked"))).toBe("fallback");
+    expect(tapSettled(undefined)).toBe("retry");
+    expect(tapSettled(rowOf("unreachable"))).toBe("retry");
+    expect(tapSettled(rowOf("waiting"))).toBe("retry");
+    expect(tapSettled(rowOf("revoked"))).toBe("retry");
+  });
+
+  test("a wait the person has moved on from does NOTHING — not even if the row answers (mutation: ignore `superseded`/`backgrounded` → red)", () => {
+    // Review round 1's MEDIUM: tap unreachable A, then tap working B (B opens);
+    // A's probe answers and A's screen yanked the person off B's. The screen
+    // bumps a generation on every tap/menu/Add/Pair and on blur, and the wait
+    // compares it — so an answering row that arrived after that is `drop`.
+    expect(tapSettled(rowOf("working"), { superseded: true })).toBe("drop");
+    // …and coming back to the app is not the same tap: still`drop`.
+    expect(tapSettled(rowOf("working"), { backgrounded: true })).toBe("drop");
+    expect(tapSettled(undefined, { superseded: true })).toBe("drop");
+    // A still-down row is left to the 15 s reconsideration, never re-navigated.
+    expect(tapSettled(rowOf("unreachable"), { superseded: true })).toBe("drop");
   });
 
   test("a tap that waits is bounded: `TAP_WAIT_MS` is what the screen arms, and it is short enough to feel like a response", () => {
@@ -268,6 +282,17 @@ describe("reprobeDelay (Owner Q12: 15 s while something is down)", () => {
     expect(
       reprobeDelay(projectSections(pair, [answered(), answered()]), 9_000, last),
     ).toBeUndefined();
+  });
+});
+
+describe("wasBackgrounded (a wait must not act on a screen the person left)", () => {
+  test("only `active` is in front; an unknown state is not a reason to drop (mutation: treat `undefined` as backgrounded → red)", () => {
+    expect(wasBackgrounded("active")).toBe(false);
+    expect(wasBackgrounded("background")).toBe(true);
+    expect(wasBackgrounded("inactive")).toBe(true);
+    expect(wasBackgrounded(undefined)).toBe(false);
+    // RN types `AppState.currentState` as `string | null` before it is known.
+    expect(wasBackgrounded(null)).toBe(false);
   });
 });
 

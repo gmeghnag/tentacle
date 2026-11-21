@@ -349,14 +349,50 @@ export function projectTap(row: ProjectRow): ProjectTap {
   return NEEDS_PAIRING.has(row.state) ? "menu" : "reprobe";
 }
 
+/** What the wait a tap started does once its probe has settled. */
+export type TapSettle =
+  /** It answers now, and the person still wants it: open its sessions. */
+  | "open"
+  /** It does not answer (or its record is gone): today's behaviour — re-probe shortly. */
+  | "retry"
+  /** The person asked for something else meanwhile: do nothing at all. */
+  | "drop";
+
+/** What happened while the wait ran — the facts only the screen knows. */
+export interface TapSettleInput {
+  /**
+   * Something was asked for AFTER this wait started: another tap (on a row that
+   * answered, so it opened), the menu, "Add", a Pair, or the screen leaving.
+   */
+  readonly superseded?: boolean;
+  /** The screen is not in front any more (navigated away, app backgrounded). */
+  readonly backgrounded?: boolean;
+}
+
 /**
  * What the tap that waited for a probe does once it has settled: open the row if
- * it answers NOW, else today's behaviour. `row === undefined` means the record
- * was removed while the person waited — there is nothing to open and nothing to
- * retry, so it falls back (the screen's own list has already lost the row).
+ * it answers NOW, else today's behaviour — and NOTHING at all when the person has
+ * moved on. Without that last arm a stale wait yanks them to a project they are
+ * no longer looking at (a tap on B while A was re-probing → B's sessions open →
+ * A answers → A's screen replaces it), which is docs/fix/mobile-project-first-tap.md
+ * Review round 1's MEDIUM.
+ * `row === undefined` means the record was removed while the person waited —
+ * there is nothing to open and nothing to retry, so it retries the list.
  */
-export function tapSettled(row: ProjectRow | undefined): "open" | "fallback" {
-  return row?.ok === true ? "open" : "fallback";
+export function tapSettled(row: ProjectRow | undefined, input: TapSettleInput = {}): TapSettle {
+  if (input.superseded === true || input.backgrounded === true) {
+    return "drop";
+  }
+  return row?.ok === true ? "open" : "retry";
+}
+
+/**
+ * Whether the app is in the foreground right now, as the screen sees it
+ * (`AppState.currentState`, which RN types as `string | null`). Not known (no
+ * state at all) is not a reason to drop a wait.
+ */
+export function wasBackgrounded(state: string | null | undefined): boolean {
+  return state === "background" || state === "inactive";
 }
 
 /** One entry of a project's sheet (long-press / "…", mockup A3). */ export interface ProjectMenuAction {

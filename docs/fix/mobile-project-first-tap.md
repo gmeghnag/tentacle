@@ -187,3 +187,85 @@ honest drift note, red-first evidence, real mutations; missed the cross-path rac
 Same model family as the executor (fresh context only).
 
 *— claude-opus-5-5, 2026-11-21*
+
+### Fix round 1
+
+Scope: the Review's one finding (MEDIUM — a stale tap-wait navigates after the
+person chose something else). One extra arm found while fixing it is listed too.
+
+**Finding 1 (MEDIUM) — FIXED.** Root cause, as the Review said: the generation
+guard compared a wait against itself. `settling` blocked a second *wait*, but
+nothing bumped `tapGeneration` when the person chose something else, so
+`mine !== tapGeneration.current` could never be true and the settle navigated
+unconditionally when its probe answered.
+
+1. `apps/mobile/src/project-rows.ts:352–390` — `tapSettled` now returns a
+   three-arm `TapSettle` (`open` / `retry` / `drop`) and takes the facts only the
+   screen knows (`TapSettleInput { superseded?, backgrounded? }`): `drop` when the
+   person asked for anything after the tap, else `open` if the row answers NOW,
+   else `retry` (today's re-probe; the old `"fallback"` arm, renamed).
+   `project-rows.ts:392–396` — NEW pure `wasBackgrounded(state)` over RN's
+   `string | null`: `background`/`inactive` are "not in front"; `active`, unknown
+   and `null` are not a reason to drop. One rule, used by the route, pinned by
+   its own test.
+2. `apps/mobile/App.tsx:1063–1073` — `supersede()` (`useCallback([])`, increments
+   `tapGeneration`) and `sentOffscreen`; the `settling` ref is GONE (it was the
+   thing silently swallowing a second tap).
+3. `App.tsx:1120–1134` (the `tick` re-probe effect) — the AppState listener sets
+   `sentOffscreen` from `wasBackgrounded` and supersedes on going away, else
+   `setTick`; deps gain `supersede`. `App.tsx:1142–1155` — a SECOND
+   `useFocusEffect` with **no** `tick` dependency owns leaving the screen:
+   cleanup sets `sentOffscreen = true` and supersedes. Both effects seed
+   `sentOffscreen` from `wasBackgrounded(AppState.currentState)`, NOT from a
+   literal `false`: they re-run every 15 s, and that must not mark a backgrounded
+   app as being in front.
+4. `App.tsx:1160–1219` (`awaitProbe`) — one wait at a time, and a tap during a
+   wait SUPERSEDES it (the newer wins) instead of being dropped on the floor. The
+   settle computes `superseded`/`offscreen`, calls `tapSettled(row, …)`, and on
+   `drop` **returns before any repaint or navigation**; on `open` it supersedes
+   then navigates.
+5. Every ask the person can make bumps the generation: `onOpen` (open / menu /
+   wait), `onAdd`, `onScan`, `onRetry`, `onPairAgain`, `onMenu`, `onRemove`,
+   `onOpenSettings` (`App.tsx:1224–1286`).
+
+**Tests — red first.**
+`apps/mobile/test/project-rows.test.ts`: the settle test gains the `drop` arms
+(`superseded`, `backgrounded`); NEW `wasBackgrounded` test (active / inactive /
+background / unknown / null).
+`apps/mobile/test/project-tap-wiring.test.ts` (NEW — the `hub-tap-wiring.test.ts`
+pattern, since `App.tsx` is not importable from Bun): the settle is handed
+`superseded`+`backgrounded` and `drop` returns before `setSections`/`onOpen`; all
+eight ask-handlers call `supersede()`; leaving the screen supersedes from the
+`tick`-free effect; the AppState listener goes through `wasBackgrounded` and
+supersedes, and neither effect seeds `sentOffscreen` from a literal; `settling`
+is gone.
+
+**Mutations (each a real run of the narrow file).**
+- A. `tapSettled`'s drop arm removed (`if (false)`) → `project-rows.test.ts`
+  **1 fail**, `Expected: "drop" / Received: "open"`.
+- D. `wasBackgrounded` reduced to `state === "background"` → **1 fail**,
+  `Expected: true / Received: false` (the `inactive` case).
+- B+C. `onMenu` no longer supersedes, and `tapSettled(settledRow)` without the
+  input → `project-tap-wiring.test.ts` **2 fail**.
+- E. the AppState listener reverted to round-0's (`state === "active"` → tick) →
+  **1 fail**, `Expected to contain: "wasBackgrounded(state)"`.
+All reverted by re-copying the file; the tree matches the intended diff and the
+files are green again (19 pass / 0 fail over the two files).
+
+**Failure modes now covered.** a tap during checking (one wait at a time, the
+newer wins) · a wait outliving a tap on an answering row (drop) · the menu / Add
+/ scan / Retry / Pair again / Remove / Settings during a wait (drop) · leaving
+the screen mid-wait (drop) · app `background` or `inactive` mid-wait (drop) · a
+bounded wait that times out (retry, no hang) · a row removed mid-wait
+(`tapSettled(undefined)` → retry) · the 15 s reconsideration (NOT a supersede —
+its own effect, `tick`-free).
+
+**Not done here.** `scripts/e2e-gate.sh` (orchestrator's, simulator). No
+`protocol.d/` note (nothing on the wire) and no `SectionState`/`ProjectTone`
+changes. The full `bun run check` gate is the orchestrator's script, not run here
+per the token budget; the narrow evidence is: `project-rows.test.ts` 15 pass,
+`project-tap-wiring.test.ts` 5 pass (19 together), the 29 mobile test files that
+source-pin `App.tsx` 390 pass / 0 fail, `tsc -p apps/mobile` clean,
+`biome check` clean on the four changed files.
+
+*— claude-opus-5-5 (executor, fix round 1), 2026-11-21*
