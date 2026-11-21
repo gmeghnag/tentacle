@@ -339,6 +339,8 @@ theme, `NO_COLOR=1`, and a narrow window.
 
 ### Questions (each with a recommendation)
 
+**Owner 2026-11-21, Q5:** static in v1. Blink and wave stay in the backlog until they are properly designed (not in this task).
+
 1. **The header does not exist** — today there is only the one-line
    `WELCOME` reply (`App.tsx:154,411`). Create the 3-line header (tentacle +
    version / model · cwd / `/help for commands`) and **replace** `WELCOME` with
