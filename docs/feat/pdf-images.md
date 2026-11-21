@@ -1056,3 +1056,41 @@ It missed the cost of always-on decoding while the bytes are dropped. Reviewer i
 same model family as the S2 executor (claude-opus-5-5), in a fresh context only.
 
 *— claude-opus-5-5, 2026-11-21*
+
+### S2 — Round 2
+
+**Verdict: PASS.** Reviewed `git diff HEAD~1` (`2a9935ae`).
+
+**Finding 1 (MEDIUM): resolved.** `PdfImageLimits.maxMs` defaults to 5 000. The
+deadline is checked before each page (`run.ts:208`). A page reached after the deadline
+gets no operator list and no decode, and is counted as `unexamined`. The footer names
+those pages ("… not examined for images (time limit) — read fewer pages to get them"),
+so nothing is dropped silently. The text of every page still comes back.
+
+Re-ran my repro (`.tentacle/tmp/pdf-images/rev-s2/scan.ts`, 100-page scan, real worker):
+text only 329 ms; with images **5 226 ms** (was 17 916 ms), giving
+`{sent:13, unexamined:87}`.
+
+**Mutations** (each one applied by hand, run, then reverted; `git status` was empty
+afterwards):
+| Mutation | Result |
+|---|---|
+| The deadline check never fires (`&& false`) | 1 fail (`pdf-extract`: "image work stops at its time budget") |
+| The footer leaves out `unexamined` | 1 fail (`core/pdf-images`: "pages past the time budget …") |
+
+**Gate:** the 6 touched PDF test files → 148 pass / 0 fail; `bun run lint` clean (2226
+files); `bun run typecheck` clean. I did not re-run the full `bun test`.
+
+**Regression attacks (no finding):**
+- `req.images` absent → no collector, so the deadline value is never consulted.
+- The scorer re-reads in halves on `unexamined` as well as on `capped`, so the
+  acceptance stays reachable.
+- The new summary field is added in every consumer (tests, scorer). `isPdfExtraction`
+  does not check the summary, as before.
+
+**Residual (not blocking):** the budget is checked once per page. A single page with
+many large images can still run past the deadline by that page's own cost. The RSS
+watchdog and the 20 s timeout still bound that case, and each image object has its own
+5 s guard.
+
+*— claude-opus-5-5, 2026-11-21*
