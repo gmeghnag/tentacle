@@ -201,6 +201,20 @@ describe("S4 · Computers · a computer's own heading, then its band", () => {
     expect(computers).toContain('accessibilityRole="header"');
   });
 
+  test("every project row has its OWN … (not only the first project's)", () => {
+    // Review (b) F3: the section header's … opened `rows[0]`'s sheet only, so
+    // project 2+'s Try again / Pair again / Remove was long-press-only.
+    expect(computers).not.toContain("computer-menu-${first.id}");
+    const map = computers.indexOf("section.rows.map(");
+    expect(map).toBeGreaterThan(-1);
+    const end = computers.indexOf("computer-pair-project-", map);
+    expect(end).toBeGreaterThan(map);
+    const rows = computers.slice(map, end);
+    expect(rows).toContain("testID={`computer-menu-${row.id}`}");
+    expect(rows).toContain("accessibilityLabel={`More for ${row.label}`}");
+    expect(rows).toContain("onPress={() => onMenu(row)}");
+  });
+
   test("the pair card is a band with the hint as its footnote", () => {
     const bands = tags(computers, "BandSection");
     expect(bands.some((tag) => tag.includes("footnote="))).toBe(true);

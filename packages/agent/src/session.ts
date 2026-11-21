@@ -8,6 +8,7 @@
 import {
   type AttachmentRef,
   type ChatMessage,
+  type DateStamp,
   type MessageMedia,
   NOTE_KIND,
   type ScheduledFire,
@@ -72,6 +73,13 @@ export interface SendOptions {
    * Display only. Ignored when nothing is pushed.
    */
   readonly scheduled?: ScheduledFire;
+  /**
+   * The model's "now" this turn must carry (docs/fix/prompt-current-date.md),
+   * decided by the caller that owns the clock and the history
+   * (`nextDateStamp`). Stored on the user message and rendered into the model's
+   * copy only, never into `content`. Ignored when nothing is pushed.
+   */
+  readonly stamp?: DateStamp;
   /**
    * This turn came from voice mode (docs/feat/voice-conversation.md §4, C3);
    * see `RunOptions.voice`. A voice `enqueue` (`enqueueVoice`) marks the rest of
@@ -211,6 +219,7 @@ export class Session {
         ...(refs.length > 0 ? { attachments: [...refs] } : {}),
         ...(opts.media !== undefined && opts.media.length > 0 ? { media: [...opts.media] } : {}),
         ...(opts.scheduled !== undefined ? { scheduled: opts.scheduled } : {}),
+        ...(opts.stamp !== undefined ? { dateStamp: opts.stamp } : {}),
       });
     }
     try {

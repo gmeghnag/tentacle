@@ -8,15 +8,16 @@
  * `session/prompt`), so the first model call already runs with them.
  *
  * Pure: no React, no I/O, no client — the state and the execution live in
- * `RemoteSession`. The preview reuses the agent's own `applyCapabilityOp`, so
- * what the person sees and what the daemon will do come from ONE set of rules.
+ * `RemoteSession`. The preview reuses the daemon's own `applyCapabilityOp` (in
+ * `@tentacle/core`, so the phone can bundle it — docs/fix/mobile-bundle-node-import.md),
+ * so what the person sees and what the daemon will do come from ONE set of rules.
  */
 import {
   type CapabilityOp,
   CapabilityRefusal,
   type SessionCapabilities,
   applyCapabilityOp,
-} from "@tentacle/agent";
+} from "@tentacle/core";
 import type { SessionCapabilitiesWire } from "@tentacle/protocol";
 
 /** One switch pressed before the open: a delta, like the wire's `set_capability`. */

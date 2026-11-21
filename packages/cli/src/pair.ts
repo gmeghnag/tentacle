@@ -20,14 +20,18 @@
  * Ink owns — there is no Ink here).
  */
 import { hostname as osHostname } from "node:os";
+import { resolve } from "node:path";
+import { projectKey } from "@tentacle/agent";
 import {
   type AddDeviceResult,
   type DaemonRecord,
+  type DeviceProjectRef,
   type DeviceStoreFailure,
   addDevice,
   closePairing,
   loadOrCreateIdentity,
   openPairing,
+  projectLabel,
   readClaim,
   readDaemonRecords,
   writePairingDecision,
@@ -40,6 +44,7 @@ import {
 } from "@tentacle/protocol";
 import { type Random, formatPairingSas, systemRandom } from "@tentacle/transport/noise";
 import { renderUnicodeCompact } from "uqr";
+import { DEFAULT_STALE_AFTER_MS } from "./discovery.ts";
 import {
   type InterfaceEntry,
   REACHABLE_HINT,
@@ -55,6 +60,12 @@ export const PAIR_POLL_MS = 250;
 export interface PairOptions {
   /** `<configDir>` — the store lives in `<configDir>/devices`. */
   readonly configDir: string;
+  /**
+   * The project to pair (docs/feat/mobile-projects.md §5, Owner Q6): `--project
+   * <dir>`, else the folder `pair` runs in. The phone gets THAT folder's live
+   * `serve` only; with none running there, `pair` refuses.
+   */
+  readonly projectDir?: string;
   /** `--address`, in the order given: appended after the daemon records' own. */
   readonly extraAddresses?: readonly string[];
   /** `--name`: this computer's display name, used when the identity is created. */
@@ -119,6 +130,8 @@ export interface PairWrites {
   readonly add: (device: {
     readonly publicKey: Uint8Array;
     readonly name: string;
+    /** The project the key opens (the window's): one entry = one key = one serve. */
+    readonly project: DeviceProjectRef;
   }) => AddDeviceResult;
   readonly decide: (accepted: boolean) => DeviceStoreFailure | { readonly ok: true };
 }
@@ -162,21 +175,66 @@ export function newPairingCode(random: Random): string {
   return canonical;
 }
 
-/** What `pair` found to say. Pure, so the wording is testable without a terminal. */
-export function pairAddressesOf(
+/**
+ * The ONE live `serve` of the project at `dir` (docs/feat/mobile-projects.md §5,
+ * F6): records are matched by `projectKey(cwd)` — the same key the serve's store
+ * and authority use, so a symlinked path or a trailing slash still matches — and
+ * only among fresh ones (the heartbeat, `DEFAULT_STALE_AFTER_MS`: a crashed
+ * serve whose pid a stranger holds is not offered). Several (one serve per
+ * project is the store lock's rule, so only a stale twin): the newest start.
+ */
+export function projectRecordOf(
+  records: readonly DaemonRecord[],
+  dir: string,
+): DaemonRecord | undefined {
+  const key = projectKey(dir);
+  const matches = records.filter((record) => projectKey(record.cwd) === key);
+  return matches.reduce<DaemonRecord | undefined>(
+    (best, record) => (best === undefined || record.startedAt >= best.startedAt ? record : best),
+    undefined,
+  );
+}
+
+/** Why `pair` cannot target a project: no live `serve` runs there. */
+export type PairTarget =
+  | { readonly ok: true; readonly record: DaemonRecord; readonly project: DeviceProjectRef }
+  | { readonly ok: false; readonly reason: "no_serve"; readonly dir: string };
+
+/** The project `pair` targets: `--project <dir>` or the cwd, and its live serve. */
+export function pairTargetOf(
   configDir: string,
-  options: Pick<PairOptions, "extraAddresses" | "interfaces" | "alive">,
-): ReturnType<typeof pairAddresses> {
+  options: Pick<PairOptions, "projectDir" | "alive" | "now">,
+): PairTarget {
+  const dir = resolve(options.projectDir ?? process.cwd());
   let records: DaemonRecord[];
   try {
     records = readDaemonRecords(configDir, {
+      freshWithinMs: DEFAULT_STALE_AFTER_MS,
       ...(options.alive !== undefined ? { alive: options.alive } : {}),
     });
   } catch {
     records = [];
   }
+  const record = projectRecordOf(records, dir);
+  if (record === undefined) {
+    return { ok: false, reason: "no_serve", dir };
+  }
+  // The project as the SERVE knows it (its own `cwd`): the window's key and the
+  // label are then exactly what its authority and its `device/pair` result say.
+  return { ok: true, record, project: { key: projectKey(record.cwd), cwd: record.cwd } };
+}
+
+/**
+ * What `pair` found to say: the addresses of ONE serve (the target project's)
+ * plus `--address` — never a sibling's (the repro's (4), inverted). Pure, so the
+ * wording is testable without a terminal.
+ */
+export function pairAddressesOf(
+  record: DaemonRecord,
+  options: Pick<PairOptions, "extraAddresses" | "interfaces">,
+): ReturnType<typeof pairAddresses> {
   return pairAddresses({
-    records,
+    records: [record],
     // NOT `[]`: a `0.0.0.0` bind expands to these, and a default of none would
     // make `pair` refuse the very `serve` REACHABLE_HINT tells the user to run
     // (review round 1, finding 1).
@@ -185,9 +243,18 @@ export function pairAddressesOf(
   });
 }
 
-/** The question the human answers. The name is PEER-CHOSEN, so it is untrusted text (F17). */
-export function pairPrompt(name: string, sas: string): string {
-  return `Add '${untrustedText(name)}'? It must show ${formatPairingSas(sas)}. [y/N] `;
+/**
+ * The question the human answers, naming the project the device would open.
+ * The name is PEER-CHOSEN, so it is untrusted text (F17); the label is a folder
+ * name, printed the same way.
+ */
+export function pairPrompt(name: string, sas: string, project: string): string {
+  return `Add '${untrustedText(name)}' to project ${untrustedText(project)}? It must show ${formatPairingSas(sas)}. [y/N] `;
+}
+
+/** The refusal when the target folder has no live `serve` (Owner Q6). */
+export function noServeHint(dir: string): string {
+  return `No \`tentacle serve\` is running in ${untrustedText(dir)} — start it there first, then run \`tentacle pair\` again.`;
 }
 
 /**
@@ -218,10 +285,22 @@ export async function pairCommand(options: PairOptions): Promise<number> {
     );
   }
 
-  const found = pairAddressesOf(configDir, {
+  // The target project FIRST (Owner Q6): with no live serve in that folder there
+  // is nothing a phone could pair with, and opening a window anyway would hand
+  // out a code no serve will ever honour.
+  const target = pairTargetOf(configDir, {
+    ...(options.projectDir !== undefined ? { projectDir: options.projectDir } : {}),
+    ...(alive !== undefined ? { alive } : {}),
+  });
+  if (!target.ok) {
+    err(`[error] ${noServeHint(target.dir)}\n`);
+    return 1;
+  }
+  const project = target.project;
+  const label = projectLabel(project);
+  const found = pairAddressesOf(target.record, {
     ...(options.extraAddresses !== undefined ? { extraAddresses: options.extraAddresses } : {}),
     ...(options.interfaces !== undefined ? { interfaces: options.interfaces } : {}),
-    ...(alive !== undefined ? { alive } : {}),
   });
   if (!found.ok) {
     if (found.reason === "invalid") {
@@ -243,6 +322,8 @@ export async function pairCommand(options: PairOptions): Promise<number> {
   const code = newPairingCode(random);
   const opened = openPairing(configDir, {
     code,
+    // Only this project's serve admits a stranger on this window (F12).
+    project,
     now,
     random,
     ...(ttlMs !== undefined ? { ttlMs } : {}),
@@ -268,6 +349,9 @@ export async function pairCommand(options: PairOptions): Promise<number> {
       computer: identity.identity.name,
       code,
       addresses: found.addresses,
+      // `p=`: the phone shows it before the human answers, and refuses a
+      // pairing whose result names another project (F17).
+      project: label,
     });
     // The QR is the phone's path in; the line below it is the paste form (an
     // app that cannot scan, a terminal that cannot draw).
@@ -276,7 +360,7 @@ export async function pairCommand(options: PairOptions): Promise<number> {
     }
     out(`${payload}\n`);
     err(
-      `[pair] scan the code, or paste the line above into the app. It expires in ${Math.round(
+      `[pair] project ${untrustedText(label)} (${untrustedText(project.cwd)}): scan the code, or paste the line above into the app. It expires in ${Math.round(
         (session.expiresAt - now) / 60_000,
       )} minute(s).\n`,
     );
@@ -284,6 +368,8 @@ export async function pairCommand(options: PairOptions): Promise<number> {
     const verdict = await waitForClaim(session.sid, session.expiresAt, {
       configDir,
       computerName: identity.identity.name,
+      project,
+      label,
       ...(options.pollMs !== undefined ? { pollMs: options.pollMs } : {}),
       sleep,
       timer: options.timer ?? defaultTimer,
@@ -319,6 +405,8 @@ async function waitForClaim(
   io: {
     readonly configDir: string;
     readonly computerName: string;
+    readonly project: DeviceProjectRef;
+    readonly label: string;
     readonly pollMs?: number;
     readonly sleep: (ms: number) => Promise<void>;
     readonly timer: (ms: number) => PairTimer;
@@ -351,6 +439,8 @@ async function answerClaim(
   io: {
     readonly configDir: string;
     readonly computerName: string;
+    readonly project: DeviceProjectRef;
+    readonly label: string;
     readonly timer: (ms: number) => PairTimer;
     readonly writes?: PairWrites;
     readonly now: () => number;
@@ -374,7 +464,10 @@ async function answerClaim(
   // hold `pair` past the expiry (the F-table's "N / timeout / Ctrl+C →
   // declined"), while the daemon has already told the phone `timeout`.
   const deadline = io.timer(Math.max(0, expiresAt - io.now()));
-  const answer = await Promise.race([io.ask(pairPrompt(claim.name, claim.sas)), deadline.elapsed]);
+  const answer = await Promise.race([
+    io.ask(pairPrompt(claim.name, claim.sas, io.label)),
+    deadline.elapsed,
+  ]);
   deadline.cancel();
   // Checked AFTER the human's answer, not only before it: a `y` typed after the
   // window closed must not pair the phone the daemon already told `timeout`
@@ -388,7 +481,7 @@ async function answerClaim(
     refuse(writes, false);
     return 1;
   }
-  const added = writes.add({ publicKey: claim.publicKey, name: claim.name });
+  const added = writes.add({ publicKey: claim.publicKey, name: claim.name, project: io.project });
   if (!added.ok) {
     io.err(`[error] cannot write the device registry: ${added.path}: ${added.reason}\n`);
     refuse(writes, false);
@@ -401,7 +494,7 @@ async function answerClaim(
     io.err(`[pair] paired, but the daemon was not told: ${decided.path}: ${decided.reason}\n`);
   }
   io.out(
-    `Paired '${untrustedText(added.device.name)}' (${added.device.id}). It can now connect to every tentacle on this computer "${untrustedText(io.computerName)}".\n`,
+    `Paired '${untrustedText(added.device.name)}' (${added.device.id}). It can now connect to project ${untrustedText(io.label)} (${untrustedText(io.project.cwd)}) on "${untrustedText(io.computerName)}" — run \`tentacle pair\` in another project's folder to add that one.\n`,
   );
   return 0;
 }

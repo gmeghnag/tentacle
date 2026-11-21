@@ -37,6 +37,13 @@ export const DEVICE_ID_RE = /^[0-9a-f]{16}$/;
 export const DevicePairParamsSchema = z.object({
   code: z.string().length(PAIRING_CODE_LENGTH),
   name: line(PAIRING_COMPUTER_NAME_MAX),
+  /**
+   * "I store this pairing per PROJECT" (docs/feat/mobile-projects.md §4). A new
+   * daemon refuses a pair without it (`update_app`): an older app would store
+   * the new pairing under the computer id and overwrite the record it already
+   * had. An older daemon drops it (strip) and pairs computer-wide.
+   */
+  perProject: z.literal(true).optional(),
 });
 export type DevicePairParams = z.infer<typeof DevicePairParamsSchema>;
 
@@ -51,10 +58,30 @@ export const DeviceComputerSchema = z.object({
 });
 export type DeviceComputer = z.infer<typeof DeviceComputerSchema>;
 
+/** A project key (`projectKey(cwd)` = `<basename>-<sha256[:12]>`): opaque on the wire, bounded. */
+export const PROJECT_KEY_MAX = 128;
+/** A project's cwd as shown (a path, one line). */
+export const PROJECT_CWD_MAX = 4096;
+
+/**
+ * The project (one `serve` = one `cwd`) a pairing is valid for
+ * (docs/feat/mobile-projects.md §1): the device key just registered opens THIS
+ * serve only. `label` is what the QR's `p=` carried, so the phone can refuse a
+ * pairing that landed on another folder than the one it was shown.
+ */
+export const DeviceProjectSchema = z.object({
+  key: line(PROJECT_KEY_MAX),
+  cwd: line(PROJECT_CWD_MAX),
+  label: line(PAIRING_COMPUTER_NAME_MAX),
+});
+export type DeviceProject = z.infer<typeof DeviceProjectSchema>;
+
 /** `device/pair`'s result: the new device's id, and the computer that took it. */
 export const DevicePairResultSchema = z.object({
   deviceId: z.string().regex(DEVICE_ID_RE),
   computer: DeviceComputerSchema,
+  /** Always sent by a per-project daemon; absent from an older one (computer-wide pairing). */
+  project: DeviceProjectSchema.optional(),
 });
 export type DevicePairResult = z.infer<typeof DevicePairResultSchema>;
 
@@ -76,7 +103,12 @@ export type PairingRefusedReason =
   /** Five wrong codes on one connection: it is closed (F6/F16). */
   | "too_many_attempts"
   /** This connection is already a device (or a token client): nothing to pair. */
-  | "already_paired";
+  | "already_paired"
+  /**
+   * The app did not say `perProject` (docs/feat/mobile-projects.md F10): an
+   * older app would overwrite the record it already has. Update the app.
+   */
+  | "update_app";
 
 /** Every reason this build knows (a membership test, for forward compatibility). */
 export const PAIRING_REFUSED_REASONS: readonly PairingRefusedReason[] = [
@@ -86,6 +118,7 @@ export const PAIRING_REFUSED_REASONS: readonly PairingRefusedReason[] = [
   "timeout",
   "too_many_attempts",
   "already_paired",
+  "update_app",
 ];
 
 /** Narrow a `data.reason` off the wire (an unknown one is NOT a known reason). */

@@ -89,6 +89,7 @@ import {
   endTarget,
   initialFollow,
   jumpPill,
+  jumpPillText,
   jumped,
   landingDone,
   landingOwns,
@@ -401,6 +402,7 @@ export function SessionScreen({
   const list = useRef<FlatList<Row>>(null);
   const followRef = useRef<Follow>(initialFollow);
   const [follow, setFollow] = useState<Follow>(initialFollow);
+  const jumpText = jumpPillText(follow);
   const dragging = useRef(false);
   /** "Show in chat" (S9) may retry its `scrollToIndex` ONCE after an unmeasured row. */
   const showRetry = useRef(false);
@@ -677,10 +679,13 @@ export function SessionScreen({
   // own state would die with it.
   const [openSteps, setOpenSteps] = useState<readonly string[]>([]);
   const [fullSteps, setFullSteps] = useState<readonly string[]>([]);
+  // `Date.now()` is the voice controller's own clock (`now` above); while it
+  // records, its 250 ms tick emits a new state, so the timer re-renders.
   const voiceView = voiceComposerView(
     voiceState,
     dictationLocale(voiceSettings.language, deviceLocales()),
     voiceSettings,
+    Date.now(),
   );
   // What `renderItem` reads besides the row itself. A fresh array on every render
   // would re-render every row on any state change; the Beta switches change
@@ -1503,8 +1508,10 @@ export function SessionScreen({
               accessibilityRole="button"
               accessibilityLabel="Jump to latest"
               onPress={onJump}
+              hitSlop={4}
               style={[
                 styles.jump,
+                jumpText === null && styles.jumpIcon,
                 {
                   backgroundColor: palette.glass,
                   borderColor: palette.glassBorder,
@@ -1513,9 +1520,11 @@ export function SessionScreen({
               ]}
             >
               <Icon name="arrow.down" color={palette.accent} size={14} weight="bold" />
-              <Text style={[typography.footnote, { color: palette.accent, fontWeight: "600" }]}>
-                {follow.unseen ? "New messages" : "Jump to latest"}
-              </Text>
+              {jumpText !== null ? (
+                <Text style={[typography.footnote, { color: palette.accent, fontWeight: "600" }]}>
+                  {jumpText}
+                </Text>
+              ) : null}
             </Pressable>
           ) : null}
           {activitySettings.mode === "floating" ? (
@@ -1683,7 +1692,7 @@ export function SessionScreen({
           }}
           mic={state.view.editable ? voiceView.mic : "hidden"}
           onMic={() => voice?.tapMic()}
-          level={voiceView.level}
+          micCaption={voiceView.caption}
           onPhoto={openAttach}
           focusKey={steerFocus}
           bottomPadding={bottomPadding}
@@ -1900,6 +1909,8 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
     shadowRadius: 12,
   },
+  // arrow only: a 36 pt circle (hitSlop 4 → 44 pt target)
+  jumpIcon: { width: 36, paddingHorizontal: 0, justifyContent: "center" },
   notice: { paddingHorizontal: 16, paddingBottom: 6 },
   // The editing banner above the field (D6): the label takes the row, the × keeps
   // its own width (it was `styles.flex`, i.e. undefined).

@@ -13,22 +13,38 @@
  * `ask` with `n`, so a flow that dies cannot leave a window (and the phone's
  * prompt standing) open for the next one.
  */
+import { projectKey } from "@tentacle/agent";
 import { deviceIdOf, readIdentity, sweepPairings } from "@tentacle/daemon";
+import { projectRecordId } from "../src/computer-store.ts";
 import { loadDeviceCommands, loadPairCommand } from "./pair-cli.ts";
 
 /** What `start` answers. */
 export interface PairStarted {
   /** The line `tentacle pair` printed — what the flow pastes into the app. */
   readonly payload: string;
-  /** The computer's id (the row the phone will show: `computer-<id>`). */
+  /**
+   * The ROW id the phone will show (`computer-<id>`): the computer's id plus the
+   * project's key when a project is paired (mobile-projects §6).
+   */
   readonly computerId: string;
   /** The compare code the terminal is showing, once the claim has arrived. */
   readonly sas: () => string | undefined;
 }
 
+/**
+ * One window's options. `projectDir` + `address` pair ANOTHER project's `serve`
+ * (docs/feat/mobile-projects.md, flow 37: a second serve on the same config dir)
+ * instead of the harness's own; both default to the hooks' deps.
+ */
+export interface PairWindowOptions {
+  readonly ttlMs?: number;
+  readonly projectDir?: string;
+  readonly address?: string;
+}
+
 export interface PairingHooks {
   /** Open a pairing window; resolves as soon as `pair` printed its line. */
-  start(options?: { readonly ttlMs?: number }): Promise<PairStarted>;
+  start(options?: PairWindowOptions): Promise<PairStarted>;
   /**
    * Open a window with NO injected `--address` (docs/feat/mobile-relay.md R6,
    * flow 22). With `serve` bound to loopback and the relay on, the pairing record
@@ -72,6 +88,12 @@ export interface PairingDeps {
   readonly configDir: string;
   /** The daemon's `/e2e` URL in the QR's own form (`ws://127.0.0.1:<port>/e2e`). */
   readonly address: string;
+  /**
+   * The folder `serve` runs in: `pair` pairs THAT project's serve and refuses
+   * when none is live there (docs/feat/mobile-projects.md Q6). Absent = `pair`'s
+   * own cwd.
+   */
+  readonly projectDir?: string;
   /** Where `pair`'s own output goes (the run's log). */
   readonly log?: (line: string) => void;
   /** How long `confirm` waits for a claim (a paste is fast; a stuck one must fail loudly). */
@@ -119,8 +141,10 @@ export function createPairingHooks(deps: PairingDeps): PairingHooks {
   let generation = 0;
 
   async function start(
-    options: { readonly ttlMs?: number; readonly relayOnly?: boolean } = {},
+    options: PairWindowOptions & { readonly relayOnly?: boolean } = {},
   ): Promise<PairStarted> {
+    const projectDir = options.projectDir ?? deps.projectDir;
+    const address = options.address ?? deps.address;
     if (open !== undefined) {
       // One window at a time (F-H3): a second would let a flow's paste land in
       // the PREVIOUS flow's window.
@@ -133,12 +157,13 @@ export function createPairingHooks(deps: PairingDeps): PairingHooks {
     open = window;
     const done = pairCommand({
       configDir: deps.configDir,
+      ...(projectDir === undefined ? {} : { projectDir }),
       // `relayOnly` (docs/feat/mobile-relay.md R6, flow 22) hands `pair` NO
       // `--address`: `serve` binds loopback here, which contributes no
       // bind-derived address, so the record's own relay address is the only one
       // the QR carries. Every other flow keeps the loopback address, so the
       // simulator can drive the daemon directly (and never through the relay).
-      ...(options.relayOnly === true ? {} : { extraAddresses: [deps.address] }),
+      ...(options.relayOnly === true ? {} : { extraAddresses: [address] }),
       interfaces: [],
       qr: false,
       pollMs: 20,
@@ -190,9 +215,14 @@ export function createPairingHooks(deps: PairingDeps): PairingHooks {
     if (!identity.ok) {
       throw new Error(`the harness config has no identity: ${identity.reason}`);
     }
+    const computerId = deviceIdOf(identity.identity.publicKey);
     return {
       payload: window.payload,
-      computerId: deviceIdOf(identity.identity.publicKey),
+      // The ROW id (mobile-projects §6): the app files a project's pairing under
+      // `projectRecordId(computer, projectKey(cwd))`, so every flow's
+      // `computer-<id>` testID must name that, not the bare computer id.
+      computerId:
+        projectDir === undefined ? computerId : projectRecordId(computerId, projectKey(projectDir)),
       sas: () => (window.prompt === undefined ? undefined : sasOfPrompt(window.prompt)),
     };
   }

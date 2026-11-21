@@ -441,6 +441,18 @@ describe("openNotification (the seam itself)", () => {
     ).toBeUndefined();
   });
 
+  test("a PROJECT record of the claimed computer opens it (docs/feat/mobile-projects.md §6 id ripple; mutation: compare the record id whole → red)", () => {
+    const projectRecord: PinnedComputer = {
+      id: "computer-1.0123456789abcdef",
+      computerKey: computer.computerKey,
+    };
+    const opened = openNotification(envelopeOf(message()), [projectRecord], pushKeys);
+    expect(opened?.computer.id).toBe("computer-1.0123456789abcdef");
+    // …and a record whose id merely STARTS with the claim (no dot) is another computer.
+    const lookalike: PinnedComputer = { id: "computer-10", computerKey: computer.computerKey };
+    expect(openNotification(envelopeOf(message()), [lookalike], pushKeys)).toBeUndefined();
+  });
+
   test("an unparsable plaintext (a future version) is refused, never half-read (F11)", () => {
     const future = envelopeOf({ ...message(), v: 9 } as unknown as PushMessage);
     expect(openNotification(future, computers, pushKeys)).toBeUndefined();

@@ -29,6 +29,7 @@ import { SessionHost } from "../src/session-host.ts";
 import { parseLogFile } from "../src/session-log-file.ts";
 import { SessionPersister } from "../src/session-persister.ts";
 import { type Fixture, SpyDaemonStore, filesOf } from "./support/daemon-store-spy.ts";
+import { stripped } from "./support/model-prompt.ts";
 
 // `session/send_now` (docs/feat/send-now-a.md): cancel what runs and start the
 // queued texts as a new turn in ONE daemon step. Each test names the plan's
@@ -698,7 +699,7 @@ describe("session/send_now — persistence", () => {
 describe("session/send_now — delivered but unanswered (review F1)", () => {
   /** The model's last request ends with `text` (the continuation answered it). */
   const answered = (model: Scripted, text: string): void =>
-    expect(model.calls.at(-1)?.messages.at(-1)?.content).toBe(text);
+    expect(stripped(model.calls.at(-1)?.messages.at(-1)?.content ?? "")).toBe(text);
 
   /** The last record before a crash: T1 running, its steer "A" (id `a`) queued. */
   const crashedWithSteer = async () => {
@@ -854,7 +855,7 @@ describe("session/send_now — the structural unanswered rule", () => {
     expect(hosted.sendNow("T3", turn("T1"), [msg("a", "A")])).toEqual({ turnId: "T3" });
     await until(() => c.ended("T3"));
     expect(c.start("T3")).toMatchObject({ prompt: "" });
-    expect(r.model.calls.at(-1)?.messages.at(-1)?.content).toBe("X");
+    expect(stripped(r.model.calls.at(-1)?.messages.at(-1)?.content ?? "")).toBe("X");
   });
 
   test("S2 the same text: answered earlier, then delivered again unanswered → continuation; once answered → NoTurnRunning", async () => {
@@ -862,7 +863,7 @@ describe("session/send_now — the structural unanswered rule", () => {
     const { r, c, hosted } = await answeredThenForeignTail("A");
     expect(hosted.sendNow("T3", turn("T1"), [msg("a", "A")])).toEqual({ turnId: "T3" });
     await until(() => c.ended("T3"));
-    expect(r.model.calls.at(-1)?.messages.at(-1)?.content).toBe("A");
+    expect(stripped(r.model.calls.at(-1)?.messages.at(-1)?.content ?? "")).toBe("A");
     expect(hosted.snapshotPage().messages.at(-1)?.role).toBe("assistant");
     expectRpc(
       () => hosted.sendNow("T4", turn("T3"), [msg("a", "A")]),
@@ -946,11 +947,17 @@ describe("session/send_now — the structural unanswered rule", () => {
     hosted.cancel();
     r.model.release();
     await until(() => c.ended("T1"));
-    expect(hosted.snapshotPage().messages).toEqual([{ role: "user", content: "A" }]);
+    expect(hosted.snapshotPage().messages).toEqual([
+      {
+        role: "user",
+        content: "A",
+        dateStamp: { at: expect.any(Number), zone: expect.any(String) },
+      },
+    ]);
     expect(hosted.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({ turnId: "T2" });
     await until(() => c.ended("T2"));
     expect(c.start("T2")).toMatchObject({ prompt: "" });
-    expect(r.model.calls.at(-1)?.messages.at(-1)?.content).toBe("A");
+    expect(stripped(r.model.calls.at(-1)?.messages.at(-1)?.content ?? "")).toBe("A");
   });
 
   test("U3 a crash before the first reply, then a reload ([system, user]) → continuation", async () => {
@@ -976,7 +983,7 @@ describe("session/send_now — the structural unanswered rule", () => {
     expect(restored.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({ turnId: "T2" });
     await until(() => c2.ended("T2"));
     expect(c2.start("T2")).toMatchObject({ prompt: "" });
-    expect(r2.model.calls.at(-1)?.messages.at(-1)?.content).toBe("A");
+    expect(stripped(r2.model.calls.at(-1)?.messages.at(-1)?.content ?? "")).toBe("A");
   });
 
   test("U4 after a compaction, a later unanswered user tail → continuation (the marker is the summary only)", async () => {
@@ -1003,7 +1010,7 @@ describe("session/send_now — the structural unanswered rule", () => {
     expect(hosted.sendNow("T3", turn("T2"), [msg("a", "A")])).toEqual({ turnId: "T3" });
     await until(() => c.ended("T3"));
     expect(c.start("T3")).toMatchObject({ prompt: "" });
-    expect(r.model.calls.at(-1)?.messages.at(-1)?.content).toBe("X");
+    expect(stripped(r.model.calls.at(-1)?.messages.at(-1)?.content ?? "")).toBe("X");
   });
 
   test("U5 a reload of a just-compacted record → NoTurnRunning (decided: no spurious turn)", async () => {

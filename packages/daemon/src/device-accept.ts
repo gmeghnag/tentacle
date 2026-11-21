@@ -24,7 +24,7 @@ import type { DuplexChannel } from "@tentacle/transport";
 import { type AuthorizeVerdict, noiseResponder, systemRandom } from "@tentacle/transport/noise";
 import { Connection, type ConnectionPrincipal, type HooksTrustPrecheck } from "./connection.ts";
 import type { DeviceAllow, DeviceAuthority, DeviceClose } from "./device-authority.ts";
-import { hasLivePairing, touchSeen } from "./device-store.ts";
+import { adoptLegacy, hasLivePairing, touchSeen } from "./device-store.ts";
 import { PairHandler } from "./pairing-handler.ts";
 import type { SessionHost } from "./session-host.ts";
 
@@ -163,6 +163,30 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
         channel.close();
         return;
       }
+      // A LEGACY key no project held when `authorize` ran (docs/feat/
+      // mobile-projects.md §3): bind it to THIS project now that a handshake
+      // really completed (P1: never in `authorize`). One winner computer-wide
+      // (exclusive create); a loser — or a store that cannot record it — is
+      // closed HERE, before a `Connection` exists, so not one frame of it is
+      // ever dispatched. Its later dials are denied by `authorize` (the
+      // snapshot now sees the record).
+      if (verdict.kind === "device" && verdict.adopt === true) {
+        const adopted = adoptLegacy(authority.configDir, verdict.id, authority.project);
+        if (!adopted.ok) {
+          deps.onAudit?.(
+            adopted.reason === "elsewhere"
+              ? `legacy-device-bound-elsewhere ${verdict.id.slice(0, 8)} ${adopted.project?.key ?? "unreadable"}`
+              : `legacy-device-adopt-failed ${verdict.id.slice(0, 8)}`,
+          );
+          channel.close();
+          return;
+        }
+        if (adopted.created) {
+          deps.onAudit?.(
+            `legacy-device-adopted ${verdict.id.slice(0, 8)} ${authority.project.key}`,
+          );
+        }
+      }
       const principal: ConnectionPrincipal =
         verdict.kind === "device"
           ? { kind: "device", id: verdict.id }
@@ -174,6 +198,9 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
               // key at all).
               pair: new PairHandler({
                 configDir: authority.configDir,
+                // The window, the claim and the result are THIS serve's
+                // project's (docs/feat/mobile-projects.md §2/§4).
+                project: authority.project,
                 identity: computer,
                 remoteStatic: secure.remoteStatic,
                 ...(deps.onAudit ? { onAudit: deps.onAudit } : {}),
@@ -215,6 +242,7 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
         // side-effect-free read (9a Review N3), never `findPairing`.
         stopWatcher = watchPairingWindow(
           authority.configDir,
+          authority.project.key,
           deps,
           handle,
           // A connection answering a claim it holds is never closed by the
@@ -263,12 +291,13 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
  */
 function watchPairingWindow(
   configDir: string,
+  project: string,
   deps: Pick<AcceptDeviceDeps, "onAudit" | "pairingCheckMs">,
   handle: DeviceClose,
   holdingClaim: () => boolean,
 ): () => void {
   const watcher = setInterval(() => {
-    if (hasLivePairing(configDir) !== undefined) {
+    if (hasLivePairing(configDir, { project }) !== undefined) {
       return;
     }
     if (holdingClaim()) {

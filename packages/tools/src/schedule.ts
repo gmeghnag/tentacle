@@ -81,7 +81,9 @@ const createInput = z.object({
     .string()
     .min(1)
     .optional()
-    .describe("One-shot: an ISO time (2026-11-16T17:00, host's zone) or relative (in 20m)."),
+    .describe(
+      'One-shot: an ISO time (2026-11-16T17:00, host\'s zone) or relative (in 20m). Prefer the relative form for "in N minutes/hours" — an ISO time you computed yourself is the wrong day more often than not.',
+    ),
 });
 
 export type ScheduleCreateInput = z.infer<typeof createInput>;

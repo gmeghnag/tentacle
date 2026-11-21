@@ -482,7 +482,12 @@ describe("S2 — the overlay: what the log has not committed yet survives a cras
     await hosted.persisted();
     // The "crash": the files as they are now (the turn still running).
     const record = await loaded(dir);
-    expect(record.messages.at(-1)).toEqual({ role: "user", content: "go" });
+    // The first prompt carries its date stamp (docs/fix/prompt-current-date.md).
+    expect(record.messages.at(-1)).toEqual({
+      role: "user",
+      content: "go",
+      dateStamp: { at: expect.any(Number), zone: expect.any(String) },
+    });
     expect(record.turn?.turnId).toBe("T1");
     const state = await stateFile(dir);
     expect((state.tail as unknown[]).length).toBeGreaterThan(0);

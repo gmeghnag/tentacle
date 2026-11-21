@@ -10,24 +10,24 @@
  * a fake is the honest test of the decisions.
  */
 import { describe, expect, test } from "bun:test";
+import { PREVIEW_MAX_BYTES } from "../src/artifact-preview.ts";
 import {
   MAX_CACHED,
   MAX_IN_FLIGHT,
   PREFETCH_ROWS,
-  THUMBNAIL_MAX_BYTES,
   type ThumbnailDriver,
   type ThumbnailSource,
   type ThumbnailState,
   aborted,
-  artifactImageRef,
+  artifactPreviewRef,
   createThumbnailDriver,
   failed,
+  gone,
   initialThumbnails,
   loaded,
   plan,
   thumbnailFor,
   visibleRefs,
-  wantsThumbnail,
 } from "../src/thumbnails.ts";
 import type { ImageRef, ToolRow, UserRow } from "../src/transcript.ts";
 
@@ -90,20 +90,20 @@ describe("only the visible rows' images are wanted", () => {
       },
     });
     expect(visibleRefs([card({})], 0, 0).map((ref) => ref.id)).toEqual(["b".repeat(64)]);
-    // An image over the 1 MiB line draws its glyph: it is opened, not fetched.
-    expect(visibleRefs([card({ size: 2 * 1024 * 1024 })], 0, 0)).toHaveLength(0);
-    // Another kind is never a thumbnail, however small.
-    expect(visibleRefs([card({ kind: "html", size: 10 })], 0, 0)).toHaveLength(0);
+    // Over the preview cap (docs/feat/mobile-file-preview-cards.md: 5 MiB) it
+    // draws its symbol: it is opened, not fetched.
+    expect(visibleRefs([card({ size: PREVIEW_MAX_BYTES + 1 })], 0, 0)).toHaveLength(0);
+    // A PDF / HTML / markdown is previewed too now; a zip never is.
+    expect(
+      visibleRefs([card({ kind: "html", mimeType: "text/html", size: 10 })], 0, 0),
+    ).toHaveLength(1);
+    expect(
+      visibleRefs([card({ kind: "other", mimeType: "application/zip", size: 10 })], 0, 0),
+    ).toHaveLength(0);
   });
 
-  test("Owner Q6's 1 MiB line: an image at or under it is fetched, a bigger one is opened", () => {
-    expect(wantsThumbnail({ kind: "image", size: THUMBNAIL_MAX_BYTES })).toBe(true);
-    expect(wantsThumbnail({ kind: "image", size: THUMBNAIL_MAX_BYTES + 1 })).toBe(false);
-    expect(wantsThumbnail({ kind: "html", size: 10 })).toBe(false);
-  });
-
-  test("a presented image's ref is keyed by its sha, the title only a label", () => {
-    const ref = artifactImageRef({
+  test("a presented artifact's ref is keyed by its sha, the title only a label", () => {
+    const ref = artifactPreviewRef({
       artifactId: "a",
       version: 1,
       sha256: "b".repeat(64),
@@ -291,6 +291,32 @@ function mount(
   );
   return { driver, state: () => state };
 }
+
+describe("the driver: a source that says the bytes are GONE", () => {
+  test("`gone` is a failure (never retried) AND marks the id gone", async () => {
+    let calls = 0;
+    const { driver, state } = mount({
+      fetch: async () => {
+        calls += 1;
+        return "gone";
+      },
+    });
+    const rows = [userRow([ref("1")])];
+    driver.view(rows, 0, 0);
+    await settle();
+    expect(state().failed).toEqual([ref("1").id]);
+    expect(state().gone).toEqual([ref("1").id]);
+    driver.view(rows, 0, 0);
+    await settle();
+    expect(calls).toBe(1);
+  });
+
+  test("`gone` is idempotent and a plain failure is not gone", () => {
+    const once = gone(initialThumbnails, "x");
+    expect(gone(once, "x").gone).toEqual(["x"]);
+    expect(failed(initialThumbnails, "y").gone).toBeUndefined();
+  });
+});
 
 describe("the driver: one state and one controller table per screen", () => {
   /** A source that never settles on its own: the test decides when and how. */

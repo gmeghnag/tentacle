@@ -28,6 +28,12 @@ export type ImageRef = Pick<AttachmentRef, "id" | "mimeType" | "size"> & {
   readonly localUri?: string;
   /** The local copy's aspect ratio (w/h), when it is known: the bubble's shape. */
   readonly aspectRatio?: number;
+  /**
+   * A presented artifact's meta, when this ref is a card's preview
+   * (docs/feat/mobile-file-preview-cards.md): what the preview source reads and
+   * renders from, so it never has to look the sha up in a list that may lag.
+   */
+  readonly artifact?: ArtifactMeta;
 };
 
 export interface UserRow {

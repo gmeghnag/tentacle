@@ -51,6 +51,13 @@ export interface Palette {
   readonly onAccent: string;
   /** Accent-tinted background (badges, running row, icon tiles). */
   readonly tint: string;
+  /**
+   * The composer's round buttons (`+`, the mic) at rest: the accent at 10 %
+   * light / 14 % dark (docs/feat/mobile-composer-buttons.md, mockup B).
+   */
+  readonly accentSoft: string;
+  /** The same circle, stronger — recording, and the send slot when ready: 20 % / 26 %. */
+  readonly accentSoftStrong: string;
   readonly green: string;
   readonly orange: string;
   readonly red: string;
@@ -100,6 +107,8 @@ const light: Palette = {
   accentFill: "#0E7490",
   onAccent: "#FFFFFF",
   tint: "#E0F4F8",
+  accentSoft: "rgba(14,116,144,0.10)",
+  accentSoftStrong: "rgba(14,116,144,0.20)",
   green: "#1E7B34",
   orange: "#B33000",
   red: "#C4001A",
@@ -143,6 +152,8 @@ const dark: Palette = {
   accentFill: "#06B6D4",
   onAccent: "#00191F",
   tint: "#0B2E36",
+  accentSoft: "rgba(34,211,238,0.14)",
+  accentSoftStrong: "rgba(34,211,238,0.26)",
   green: "#30D158",
   orange: "#FF9F0A",
   // `#FF6961` measures 4.4977:1 on B1's `fill` (#33332F) — under the 4.5 floor

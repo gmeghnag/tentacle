@@ -30,6 +30,9 @@ import { PAIRING_POLL_MS } from "../src/pairing-handler.ts";
 import { SessionHost } from "../src/session-host.ts";
 import { startWsServer } from "../src/ws-server.ts";
 
+/** This serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const dirs: string[] = [];
 const servers: { stop(): void }[] = [];
 afterEach(() => {
@@ -163,6 +166,7 @@ function serve(
   // lines: `device-revoked` is the authority's, `device-open` the route's).
   const audit: string[] = [];
   const authority = new DeviceAuthority({
+    project: TEST_PROJECT,
     configDir,
     pollIntervalMs: 10,
     onAudit: (line) => audit.push(line),
@@ -188,7 +192,12 @@ describe("the device route authenticates by key, not by Origin", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: publicKeyOf(key(2)),
+      name: "iPhone",
+      now: 2_000,
+    });
     const { url } = serve(configDir);
     const client = await connect(url, key(2), identity.identity.publicKey);
     try {
@@ -278,7 +287,12 @@ describe("a pairing connection is pairing-only (F16)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    openPairing(configDir, { code: "K7M2QX9AB3", now: Date.now(), pid: process.pid });
+    openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: "K7M2QX9AB3",
+      now: Date.now(),
+      pid: process.pid,
+    });
     const { url } = serve(configDir);
     const client = await connect(url, key(9), identity.identity.publicKey);
     try {
@@ -295,7 +309,12 @@ describe("a pairing connection is pairing-only (F16)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    openPairing(configDir, { code: "K7M2QX9AB3", now: Date.now(), pid: process.pid });
+    openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: "K7M2QX9AB3",
+      now: Date.now(),
+      pid: process.pid,
+    });
     const { url, audit } = serve(configDir);
     const raw = await dial(url)();
     const secure = await noiseInitiator(raw, {
@@ -323,6 +342,7 @@ describe("revoke over a real socket", () => {
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
     const added = addDevice(configDir, {
+      project: TEST_PROJECT,
       publicKey: publicKeyOf(key(2)),
       name: "iPhone",
       now: 2_000,
@@ -356,6 +376,7 @@ describe("revoke over a real socket", () => {
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
     const added = addDevice(configDir, {
+      project: TEST_PROJECT,
       publicKey: publicKeyOf(key(2)),
       name: "iPhone",
       now: 2_000,
@@ -404,6 +425,7 @@ describe("revoke over a real socket", () => {
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
     const added = addDevice(configDir, {
+      project: TEST_PROJECT,
       publicKey: publicKeyOf(key(2)),
       name: "iPhone",
       now: 2_000,
@@ -465,7 +487,12 @@ describe("the upgrade is rate limited before any crypto (F6)", () => {
     // restart and no leftover 429.
     const created = loadOrCreateIdentity(configDir, { name: "gabriel-mac", now: 1_000 });
     if (!created.ok) throw new Error(created.reason);
-    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: publicKeyOf(key(2)),
+      name: "iPhone",
+      now: 2_000,
+    });
     await until(() => authority.staticKey() !== undefined);
     const client = await connect(url, key(2), created.identity.publicKey);
     try {
@@ -507,6 +534,7 @@ describe("a pairing connection ends with its window (9c)", () => {
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
     const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
       code: "K7M2QX9AB3",
       now: Date.now(),
       pid: process.pid,
@@ -514,6 +542,7 @@ describe("a pairing connection ends with its window (9c)", () => {
     if (!opened.ok) throw new Error(opened.reason);
     const audit: string[] = [];
     const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
       configDir,
       pollIntervalMs: 10,
       onAudit: (l) => audit.push(l),
@@ -555,6 +584,7 @@ describe("a pairing connection ends with its window (9c)", () => {
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
     const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
       code: "K7M2QX9AB3",
       now: Date.now(),
       pid: process.pid,
@@ -568,11 +598,16 @@ describe("a pairing connection ends with its window (9c)", () => {
     try {
       await client.init();
       const request = client
-        .call("device/pair", { code: "K7M2QX9AB3", name: "iPhone di Gabriel" })
+        .call("device/pair", { perProject: true, code: "K7M2QX9AB3", name: "iPhone di Gabriel" })
         .catch((e: unknown) => e as Error);
       // The human's `y`, exactly as `pair` orders it: registry FIRST…
       await until(() => readClaim(configDir, opened.session.sid) !== undefined, 3_000);
-      addDevice(configDir, { publicKey: deviceKeyPublic, name: "iPhone di Gabriel", now: 2_000 });
+      addDevice(configDir, {
+        project: TEST_PROJECT,
+        publicKey: deviceKeyPublic,
+        name: "iPhone di Gabriel",
+        now: 2_000,
+      });
       writePairingDecision(configDir, opened.session.sid, true);
       // …and then `pair` exits, cleaning the window up (its exit handler).
       closePairing(configDir, opened.session.sid);
@@ -590,7 +625,12 @@ describe("a pairing connection ends with its window (9c)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+    addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: publicKeyOf(key(2)),
+      name: "iPhone",
+      now: 2_000,
+    });
     const { url } = serve(configDir);
     const client = await connect(url, key(2), identity.identity.publicKey);
     try {
@@ -600,10 +640,7 @@ describe("a pairing connection ends with its window (9c)", () => {
       // out explicitly keeps the assertion on the DATA (Bun's `rejects` on a
       // long-lived peer can observe the later "connection closed" instead).
       const failure = (await client
-        .call("device/pair", {
-          code: "K7M2QX9AB3",
-          name: "iPhone",
-        })
+        .call("device/pair", { perProject: true, code: "K7M2QX9AB3", name: "iPhone" })
         .catch((e) => e)) as { code: number; data?: unknown };
       expect(failure.code).toBe(-32017);
       expect(failure.data).toEqual({ reason: "already_paired" });
@@ -618,7 +655,12 @@ describe("a pairing connection ends with its window (9c)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    openPairing(configDir, { code: "K7M2QX9AB3", now: Date.now(), pid: process.pid });
+    openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: "K7M2QX9AB3",
+      now: Date.now(),
+      pid: process.pid,
+    });
     const { url } = serve(configDir);
     const client = await connect(url, key(9), identity.identity.publicKey);
     try {
@@ -642,8 +684,18 @@ describe("a pairing held open does not serialise the daemon (§7)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
-    openPairing(configDir, { code: "K7M2QX9AB3", now: Date.now(), pid: process.pid });
+    addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: publicKeyOf(key(2)),
+      name: "iPhone",
+      now: 2_000,
+    });
+    openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: "K7M2QX9AB3",
+      now: Date.now(),
+      pid: process.pid,
+    });
     const { server } = serve(configDir);
     const pairing = await connect(`${server.url}/e2e`, key(9), identity.identity.publicKey);
     const device = await connect(`${server.url}/e2e`, key(2), identity.identity.publicKey);
@@ -655,7 +707,7 @@ describe("a pairing held open does not serialise the daemon (§7)", () => {
       // its wait for the whole test.
       let pairingSettled = false;
       const pending = pairing
-        .call("device/pair", { code: "K7M2QX9AB3", name: "iPhone" })
+        .call("device/pair", { perProject: true, code: "K7M2QX9AB3", name: "iPhone" })
         .finally(() => {
           pairingSettled = true;
         });
@@ -683,7 +735,12 @@ describe("the attempt cap over a real socket (F6/F16)", () => {
     const configDir = store();
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
-    openPairing(configDir, { code: "K7M2QX9AB3", now: Date.now(), pid: process.pid });
+    openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: "K7M2QX9AB3",
+      now: Date.now(),
+      pid: process.pid,
+    });
     const { url } = serve(configDir);
     let socketClosed = false;
     const client = await connect(url, key(9), identity.identity.publicKey, () => {
@@ -691,7 +748,7 @@ describe("the attempt cap over a real socket (F6/F16)", () => {
     });
     async function refusal(): Promise<{ code: number; data?: unknown }> {
       const raw = await client
-        .call("device/pair", { code: "ZZZZZZZZZZ", name: "attacker" })
+        .call("device/pair", { perProject: true, code: "ZZZZZZZZZZ", name: "attacker" })
         .catch((e: unknown) => e);
       return raw as { code: number; data?: unknown };
     }
@@ -724,6 +781,7 @@ describe("the attempt cap over a real socket (F6/F16)", () => {
     const identity = readIdentity(configDir);
     if (!identity.ok) throw new Error(identity.reason);
     const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
       code: "K7M2QX9AB3",
       now: Date.now(),
       pid: process.pid,
@@ -736,13 +794,15 @@ describe("the attempt cap over a real socket (F6/F16)", () => {
       await client.init();
       for (let i = 0; i < 8; i++) {
         calls.push(
-          client.call("device/pair", { code: "ZZZZZZZZZZ", name: "attacker" }).catch((e) => e),
+          client
+            .call("device/pair", { perProject: true, code: "ZZZZZZZZZZ", name: "attacker" })
+            .catch((e) => e),
         );
       }
       // The RIGHT code last, in the same burst.
       calls.push(
         client
-          .call("device/pair", { code: "K7M2QX9AB3", name: "attacker" })
+          .call("device/pair", { perProject: true, code: "K7M2QX9AB3", name: "attacker" })
           .catch((e: unknown) => e),
       );
       const answered = (await Promise.all(calls)) as { code: number; data?: { reason?: string } }[];

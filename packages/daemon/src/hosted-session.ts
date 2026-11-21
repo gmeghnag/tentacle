@@ -65,6 +65,7 @@ import {
   type AgentJobs,
   type ChatMessage,
   DISMISSED,
+  type DateStamp,
   type JobController,
   type MessageMedia,
   type ModelProvider,
@@ -88,6 +89,7 @@ import {
   checkAttachmentRefs,
   daemonWakeGate,
   formatBytes,
+  nextDateStamp,
   ownRequest,
   scheduleCheckDelayMs,
   scheduleCreate,
@@ -96,6 +98,7 @@ import {
   scheduleSettled,
   scheduleStep,
   wakeDue,
+  zoneOrDefault,
 } from "@tentacle/core";
 import {
   type AttachmentRef,
@@ -267,6 +270,14 @@ export interface Attachment {
    * the sheet, so it is not pushed to (docs/feat/mobile-push.md Design 1).
    */
   readonly deviceId?: string;
+  /**
+   * Its client's IANA time zone (`initialize` `clientCapabilities.timeZone`,
+   * docs/fix/prompt-current-date.md): the clock the model's `[Fri … CET]` stamp
+   * is rendered in. Read by `attach` into the session's sticky zone, so a wake
+   * that fires with nobody attached still reads the LAPTOP's time, never a
+   * pod's UTC. Absent → this daemon host's own zone.
+   */
+  readonly timeZone?: string;
 }
 
 /** A permission request waiting for its first answer (keyed by its nonce). */
@@ -568,7 +579,17 @@ function hasDisabled(state: SessionCapabilities): boolean {
   );
 }
 
-/** One line: every whitespace run and control character becomes a single space, and
+/**
+ * The `Session.send` option a due date stamp becomes (docs/fix/prompt-current-date.md):
+ * `{}` when the model's sense of the time is still fresh, so a send site stays
+ * one spread (`...stampOption(nextDateStamp(...))`).
+ */
+function stampOption(stamp: DateStamp | null): { readonly stamp?: DateStamp } {
+  return stamp !== null ? { stamp } : {};
+}
+
+/**
+ * One line: every whitespace run and control character becomes a single space, and
  * the bidi/zero-width controls that could reorder or hide what follows are dropped. */
 function oneLineText(text: string): string {
   let out = "";
@@ -841,6 +862,33 @@ export class HostedSession {
   /** Background child id → the turn that spawned it (its ask names it on the wire). */
   private readonly spawnTurns = new Map<string, string>();
   private readonly now: () => number;
+  /**
+   * The IANA zone this session renders the model's date stamp in
+   * (docs/fix/prompt-current-date.md): the one its most recent client that
+   * DECLARED one gave, else the daemon host's own. Sticky, so a wake firing with
+   * nobody attached still reads the user's clock, never a pod's UTC.
+   */
+  private clientZone: string | undefined;
+
+  /** The zone a message sent NOW is stamped in: the client's, else this host's. */
+  private zone(): string | undefined {
+    return this.clientZone;
+  }
+
+  /**
+   * The date stamp a message sent now must carry, or `null`
+   * (docs/fix/prompt-current-date.md). A FIRED wake is always stamped, with its
+   * own fire instant: the model must know when it woke up, and a recurrence 10
+   * min after the last stamp would otherwise leave it reading an older clock.
+   * `job.prompt` is never touched — only the message this turn pushes.
+   */
+  private stampFor(schedule?: ScheduledFire): DateStamp | null {
+    if (schedule !== undefined) {
+      return { at: schedule.at, zone: zoneOrDefault(this.zone()) };
+    }
+    return nextDateStamp(this.session.messages, this.now(), this.zone());
+  }
+
   /** Liveness stamps for the reaper (meaning: `SessionLiveness`). */
   private lastActiveAt: number;
   private lastDetachAt: number;
@@ -2053,6 +2101,11 @@ export class HostedSession {
     if (this.closed) {
       throw new Error(`session ${this.id} is closed`);
     }
+    // The clock the model reads (docs/fix/prompt-current-date.md): remembered
+    // for the wakes that fire when this client is gone.
+    if (attachment.timeZone !== undefined) {
+      this.clientZone = attachment.timeZone;
+    }
     // A pending background ask goes out again BEFORE the replay is computed, so
     // its frame is in it (the cut may have moved past the first one).
     this.reofferBackgroundAsks();
@@ -2727,6 +2780,9 @@ export class HostedSession {
         ...(refs.length > 0 ? { attachments: refs } : {}),
         ...(media !== undefined && media.length > 0 ? { media } : {}),
         ...(schedule !== undefined ? { scheduled: schedule } : {}),
+        // The model's "now", decided HERE (the clock and the history are this
+        // session's); a fired wake from its FIRE instant — docs/fix/prompt-current-date.md.
+        ...stampOption(this.stampFor(schedule)),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
         ...(voice !== undefined ? { voice } : {}),
         beforeRun: this.beforeRunFn,
@@ -2916,6 +2972,7 @@ export class HostedSession {
       this.session.send(prompt, controller.signal, {
         steering: seed,
         steeringIds: seedRows.map((r) => r.id),
+        ...stampOption(this.stampFor()),
         ...(next.askHooksTrust !== undefined ? { askHooksTrust: next.askHooksTrust } : {}),
         beforeRun: this.beforeRunFn,
       }),

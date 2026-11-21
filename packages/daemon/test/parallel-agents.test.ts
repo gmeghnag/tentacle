@@ -28,6 +28,7 @@ import { SessionHost } from "../src/session-host.ts";
 import type { LogWrite } from "../src/session-log-store.ts";
 import { SessionPersister } from "../src/session-persister.ts";
 import { SpyDaemonStore, decodeFiles, filesOf } from "./support/daemon-store-spy.ts";
+import { stripped } from "./support/model-prompt.ts";
 
 const CWD = "/tmp/parallel-agents-work";
 const env = {} as ExecutionEnvironment;
@@ -65,7 +66,7 @@ class TreeModel implements ModelProvider {
   private readonly childCalls = new Map<string, number>();
   constructor(private readonly round: readonly StreamEvent[]) {}
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
-    const first = request.messages.find((m) => m.role === "user")?.content ?? "";
+    const first = stripped(request.messages.find((m) => m.role === "user")?.content ?? "");
     if (first === "go") {
       const events = this.parentCalls++ === 0 ? this.round : [{ type: "done" } as StreamEvent];
       for (const event of events) {

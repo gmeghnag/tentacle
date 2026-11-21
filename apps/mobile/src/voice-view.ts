@@ -26,6 +26,12 @@ export interface VoiceComposerView {
   readonly card: MicView | undefined;
   /** A one-line notice under the composer ("dictation stopped after 20 s…"). */
   readonly notice: string | undefined;
+  /**
+   * The caption beside the mic (docs/feat/mobile-composer-buttons.md): the
+   * elapsed time "0:07" while recording, "…" while transcribing, else none —
+   * so neither state is told by colour alone.
+   */
+  readonly caption: string | undefined;
 }
 
 const HIDDEN: VoiceComposerView = {
@@ -34,12 +40,22 @@ const HIDDEN: VoiceComposerView = {
   placeholder: undefined,
   card: undefined,
   notice: undefined,
+  caption: undefined,
 };
+
+/** Elapsed recording time as m:ss ("0:07", "10:00"); a negative span reads 0:00. */
+export function recordingClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const seconds = total % 60;
+  return `${Math.floor(total / 60)}:${seconds < 10 ? "0" : ""}${seconds}`;
+}
 
 export function voiceComposerView(
   state: VoiceState | null,
   locale: DictationLocale,
   settings: VoiceSettings,
+  /** The render's clock (ms, the dictation's own clock): the recording timer. */
+  now: number,
 ): VoiceComposerView {
   // The Beta switch is the first gate (docs/feat/mobile-voice-hidden.md): with
   // Dictation off nothing of it renders, whatever the controller state says.
@@ -50,13 +66,23 @@ export function voiceComposerView(
   const download = downloadLine(state.dictation);
   const placeholder =
     download ??
-    (mic === "listening" ? (locale === "it-IT" ? "Sto ascoltando…" : "Listening…") : undefined);
+    (mic === "listening" || mic === "finalizing"
+      ? locale === "it-IT"
+        ? "Sto ascoltando…"
+        : "Listening…"
+      : undefined);
   return {
     mic,
     level: mic === "listening" ? state.level : 0,
     placeholder,
     card: dictationCard(state.dictation),
     notice: dictationNotice(state.dictation),
+    caption:
+      state.dictation.kind === "listening"
+        ? recordingClock(now - state.dictation.startedAt)
+        : mic === "finalizing"
+          ? "…"
+          : undefined,
   };
 }
 

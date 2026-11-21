@@ -42,6 +42,9 @@ import {
 } from "../src/relay-link.ts";
 import { SessionHost } from "../src/session-host.ts";
 
+/** This serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const dirs: string[] = [];
 const cleanups: (() => void)[] = [];
 
@@ -75,6 +78,7 @@ function store(): string {
 
 function pairPhone(configDir: string): void {
   const added = addDevice(configDir, {
+    project: TEST_PROJECT,
     publicKey: publicKeyOf(key(2)),
     name: "iPhone",
     now: 2_000,
@@ -172,7 +176,7 @@ function harness(over: {
   const configDir = store();
   pairPhone(configDir);
   const audit: string[] = [];
-  const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+  const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
   cleanups.push(() => authority.stop());
   const link = startRelayLink({
     url: over.url,
@@ -393,7 +397,7 @@ describe("a push decided during a reconnect is held, then dropped (F2)", () => {
     const configDir = store();
     pairPhone(configDir);
     const audit: string[] = [];
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: "ws://127.0.0.1:1",
@@ -447,7 +451,7 @@ describe("stop() settles everything still waiting", () => {
     cleanups.push(() => server.stop(true));
     const configDir = store();
     pairPhone(configDir);
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: `ws://127.0.0.1:${server.port}`,
@@ -470,7 +474,7 @@ describe("stop() settles everything still waiting", () => {
   test("a held push resolves `unavailable`; no promise is left dangling", async () => {
     const configDir = store();
     pairPhone(configDir);
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: "ws://127.0.0.1:1",
@@ -532,7 +536,7 @@ describe("a phone that goes away DETACHES its session (the relay path, F17)", ()
     });
     const relay = startRelay({ host: "127.0.0.1", port: 0, sweepMs: 10, onLog: () => {} });
     cleanups.push(() => relay.stop());
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: relay.url,
@@ -639,7 +643,7 @@ describe("the relay's own `push-result` vocabulary is not trusted blindly", () =
     cleanups.push(() => server.stop(true));
     const configDir = store();
     pairPhone(configDir);
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     cleanups.push(() => authority.stop());
     const link = startRelayLink({
       url: `ws://127.0.0.1:${server.port}`,

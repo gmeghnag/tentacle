@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 /**
  * `PairHandler` — the daemon side of pairing (docs/feat/device-pairing.md 9c,
  * Design "Pairing exchange").
@@ -34,6 +35,7 @@ import type { DevicePairParams, DevicePairResult, PairingRefusedReason } from "@
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
   type DeviceIdentity,
+  type DeviceProjectRef,
   claimPairing,
   deviceIdOf,
   findPairing,
@@ -50,6 +52,12 @@ export const PAIRING_POLL_MS = 100;
 export interface PairHandlerOptions {
   /** The computer's config dir: `<configDir>/devices/` holds the windows. */
   readonly configDir: string;
+  /**
+   * This serve's project (docs/feat/mobile-projects.md §2/§4): only a window of
+   * it is found or claimed (F12), only an entry of it counts as "paired", and
+   * the result names it.
+   */
+  readonly project: DeviceProjectRef;
   /** The computer's identity — the result's `computer`, and the SAS's own key. */
   readonly identity: DeviceIdentity;
   /** This connection's authenticated peer key (`SecureChannel.remoteStatic`). */
@@ -135,6 +143,15 @@ export class PairHandler {
     if (this.attempts >= PAIRING_MAX_ATTEMPTS) {
       return { ok: false, reason: "too_many_attempts" };
     }
+    // An app that does not store pairings per project would file this one under
+    // the computer id and OVERWRITE the record it already has, losing the key of
+    // the project it already used (docs/feat/mobile-projects.md F10, Owner Q9).
+    // Refused before any lookup — it spends no attempt and claims nothing, so the
+    // human's code stays usable once the app is updated.
+    if (params.perProject !== true) {
+      this.options.onAudit?.(`pairing-refused ${deviceIdOf(remoteKey).slice(0, 8)} update_app`);
+      return { ok: false, reason: "update_app" };
+    }
     // `findPairing` hashes the code and THROWS on a bad alphabet (9a Review N3:
     // it was written for our own `pair`, never for peer input). A peer's code
     // is therefore caught here and answered as a refusal, never as an internal
@@ -142,6 +159,7 @@ export class PairHandler {
     const session = this.safely(() =>
       findPairing(this.options.configDir, {
         code: params.code,
+        project: this.options.project.key,
         now,
         ...(this.options.alive ? { alive: this.options.alive } : {}),
       }),
@@ -154,6 +172,7 @@ export class PairHandler {
         sid: session.sid,
         deviceKey: remoteKey,
         name: params.name,
+        project: this.options.project.key,
         now,
         ...(this.options.alive ? { alive: this.options.alive } : {}),
       });
@@ -201,6 +220,13 @@ export class PairHandler {
           // device connections, and this one holds no session to lose.
           id: deviceIdOf(this.options.identity.publicKey),
           name: this.options.identity.name,
+        },
+        // The ONE project this key opens (§4): the phone files the pairing
+        // under it, and refuses one whose label is not the QR's `p=`.
+        project: {
+          key: this.options.project.key,
+          cwd: this.options.project.cwd,
+          label: projectLabel(this.options.project),
         },
       },
     };
@@ -256,7 +282,12 @@ export class PairHandler {
   private registryHas(id: string): boolean {
     const registry = readRegistry(this.options.configDir);
     // An unreadable registry lists nobody: it can only refuse, never admit (F14).
-    return registry.ok && registry.registry.devices.some((d) => d.id === id);
+    // And only an entry OF THIS PROJECT is this pairing's success: the result
+    // says "this key opens project P", which must be true when it is sent.
+    const mine = this.options.project.key;
+    return (
+      registry.ok && registry.registry.devices.some((d) => d.id === id && d.project?.key === mine)
+    );
   }
 
   /**
@@ -299,6 +330,22 @@ export class PairHandler {
   }
 }
 
+/** How long a project label may be on the wire (`DeviceProjectSchema.label`, the QR's `p=`). */
+export const PROJECT_LABEL_MAX = 64;
+
+/**
+ * A project's display label: its folder's name, bounded to the wire's 64 and
+ * stripped of control characters. `pair` prints the SAME function's output as
+ * the QR's `p=`, so the phone's "does the label match" check compares like with
+ * like.
+ */
+export function projectLabel(project: { readonly cwd: string }): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+  const clean = basename(project.cwd).replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  const label = [...clean].slice(0, PROJECT_LABEL_MAX).join("");
+  return label.length > 0 ? label : "/";
+}
+
 /** The `PairingRefused` `RpcError` — the ONE place an outcome becomes an error. */
 export function pairingRefusedError(reason: PairingRefusedReason): RpcError {
   const message =
@@ -312,6 +359,8 @@ export function pairingRefusedError(reason: PairingRefusedReason): RpcError {
             ? "the pairing window closed before the computer answered"
             : reason === "too_many_attempts"
               ? "too many wrong pairing codes on this connection"
-              : "this connection is already paired";
+              : reason === "update_app"
+                ? "this computer pairs per project — update the app, then scan again"
+                : "this connection is already paired";
   return new RpcError(DomainErrorCode.PairingRefused, message, { reason });
 }

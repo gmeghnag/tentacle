@@ -130,6 +130,7 @@
       "name": "@tentacle/config",
       "version": "0.7.1",
       "dependencies": {
+        "@tentacle/core": "workspace:*",
         "jsonc-parser": "3.3.1",
         "zod": "3.23.8",
       },

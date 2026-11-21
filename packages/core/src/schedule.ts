@@ -263,7 +263,7 @@ export function parseScheduleSpec(
   if (parsed <= now) {
     return {
       ok: false,
-      reason: `at: ${at.trim()} is in the past — give a future time, or use \`every <interval>\``,
+      reason: `at: ${at.trim()} is in the past — it is now ${localMinuteText(now)} here; give a future time, or use \`every <interval>\``,
     };
   }
   if (parsed - now > limits.maxAheadMs) {

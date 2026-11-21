@@ -27,9 +27,18 @@
  * - nothing reachable → exit 1 with the hint, and NO window opened.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { hostname, networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
+import { projectKey } from "@tentacle/agent";
 import {
   addDevice,
   claimPairing,
@@ -50,6 +59,10 @@ import {
   pairCommand,
   pairPrompt,
 } from "../src/pair.ts";
+
+/** The folder `pair` targets (`--project`), whose live `serve` record it pairs with. */
+const PROJECT_DIR = "/elsewhere";
+const PROJECT_KEY = projectKey(PROJECT_DIR);
 
 const LAN: readonly InterfaceEntry[] = [
   { address: "192.168.1.8", family: "IPv4", internal: false },
@@ -72,7 +85,7 @@ const recordServing = (configDir: string, port = 4000): void => {
     host: "0.0.0.0",
     port,
     tls: false,
-    cwd: "/elsewhere",
+    cwd: PROJECT_DIR,
     startedAt: 1,
   });
   if (!written.ok) throw new Error(written.reason);
@@ -111,6 +124,7 @@ async function runPair(input: {
   const err: string[] = [];
   let claimed = false;
   const code = await pairCommand({
+    projectDir: PROJECT_DIR,
     configDir: input.configDir,
     interfaces: LAN,
     ...(input.extraAddresses !== undefined ? { extraAddresses: input.extraAddresses } : {}),
@@ -175,12 +189,14 @@ describe("the code", () => {
 });
 
 describe("the prompt", () => {
-  test("carries the name and the grouped compare code", () => {
-    expect(pairPrompt("iPhone", "123456")).toBe("Add 'iPhone'? It must show 123 456. [y/N] ");
+  test("carries the name, the PROJECT and the grouped compare code", () => {
+    expect(pairPrompt("iPhone", "123456", "assistant")).toBe(
+      "Add 'iPhone' to project assistant? It must show 123 456. [y/N] ",
+    );
   });
 
   test("a control character in the name cannot reach the terminal (mutation: raw print)", () => {
-    const prompt = pairPrompt("evil\x1b[2Jname\x07", "123456");
+    const prompt = pairPrompt("evil\x1b[2Jname\x07", "123456", "pro\x1bject");
     expect(prompt).not.toContain("\x1b");
     expect(prompt).not.toContain("\x07");
     expect(prompt).toContain("evil");
@@ -188,14 +204,112 @@ describe("the prompt", () => {
 });
 
 describe("nothing reachable", () => {
-  test("exit 1 with the hint, and NO window is opened", async () => {
+  test("no live serve in the target folder: exit 1 with the start hint, NO window (Owner Q6)", async () => {
     const configDir = newDir();
     const run = await runPair({ configDir });
     expect(run.code).toBe(1);
-    expect(run.err.join("")).toContain("serve --host 0.0.0.0");
+    expect(run.err.join("")).toContain(
+      `No \`tentacle serve\` is running in ${PROJECT_DIR} — start it there first`,
+    );
     // A window left behind would be one a daemon could still find.
     expect(pairingFiles(configDir)).toEqual([]);
     expect(run.out).toEqual([]);
+  });
+
+  test("a serve of ANOTHER folder does not count (mutation: pick any live record)", async () => {
+    const configDir = newDir();
+    writeDaemonRecord(configDir, {
+      pid: process.pid,
+      host: "0.0.0.0",
+      port: 4001,
+      tls: false,
+      cwd: "/u/assistant",
+      startedAt: 1,
+    });
+    const run = await runPair({ configDir });
+    expect(run.code).toBe(1);
+    expect(run.err.join("")).toContain("No `tentacle serve` is running");
+    expect(pairingFiles(configDir)).toEqual([]);
+  });
+
+  test("a STALE record of the folder (no heartbeat) is not offered (F6)", async () => {
+    const configDir = newDir();
+    recordServing(configDir);
+    const old = new Date(Date.now() - 10 * 60_000);
+    utimesSync(join(configDir, "daemons", `${process.pid}.json`), old, old);
+    const run = await runPair({ configDir });
+    expect(run.code).toBe(1);
+    expect(run.err.join("")).toContain("No `tentacle serve` is running");
+  });
+
+  test("the folder's serve binds loopback with no address: exit 1 with the reachability hint", async () => {
+    const configDir = newDir();
+    writeDaemonRecord(configDir, {
+      pid: process.pid,
+      host: "127.0.0.1",
+      port: 4000,
+      tls: false,
+      cwd: PROJECT_DIR,
+      startedAt: 1,
+    });
+    const run = await runPair({ configDir });
+    expect(run.code).toBe(1);
+    expect(run.err.join("")).toContain("serve --host 0.0.0.0");
+    expect(pairingFiles(configDir)).toEqual([]);
+  });
+});
+
+describe("one project per QR (docs/feat/mobile-projects.md §5 — the repro's (4), inverted)", () => {
+  test("pair in P prints ONLY P's addresses, its `/s/<serveId>/e2e` form, and `p=<label>`", async () => {
+    // Mutation: publish every live record → Q's addresses join the QR.
+    const configDir = newDir();
+    writeDaemonRecord(configDir, {
+      pid: process.pid,
+      host: "0.0.0.0",
+      port: 4000,
+      tls: false,
+      cwd: PROJECT_DIR,
+      startedAt: 1,
+      serveId: "AAAAAAAAAAAAAAAAAAAAAA",
+      addresses: ["wss://relay.example/d/AAAAAAAAAAAAAAAAAAAAAA/e2e"],
+    });
+    // A sibling serve of another project, same computer, same config dir.
+    writeDaemonRecord(configDir, {
+      pid: process.ppid,
+      host: "0.0.0.0",
+      port: 4001,
+      tls: false,
+      cwd: "/u/assistant",
+      startedAt: 2,
+      serveId: "BBBBBBBBBBBBBBBBBBBBBB",
+      addresses: ["wss://relay.example/d/BBBBBBBBBBBBBBBBBBBBBB/e2e"],
+    });
+    const run = await runPair({ configDir, ttlMs: 0 });
+    expect(run.addresses).toEqual([
+      "ws://192.168.1.8:4000/s/AAAAAAAAAAAAAAAAAAAAAA/e2e",
+      "wss://relay.example/d/AAAAAAAAAAAAAAAAAAAAAA/e2e",
+    ]);
+    expect(run.payload).toContain("&p=elsewhere");
+  });
+
+  test("the window is opened for THAT project: another project's serve cannot find it", async () => {
+    const configDir = newDir();
+    recordServing(configDir);
+    let mine: string | undefined;
+    let theirs: string | undefined;
+    await runPair({
+      configDir,
+      ttlMs: 300,
+      phone: (payload) => {
+        mine = findPairing(configDir, { project: PROJECT_KEY, code: payloadCode(payload) })?.sid;
+        theirs = findPairing(configDir, {
+          project: projectKey("/u/assistant"),
+          code: payloadCode(payload),
+        })?.sid;
+      },
+    });
+    expect(mine).toBeDefined();
+    expect(theirs).toBeUndefined();
   });
 });
 
@@ -258,6 +372,7 @@ describe("the human's answer", () => {
     const prompts: string[] = [];
     const out: string[] = [];
     const code = await pairCommand({
+      projectDir: PROJECT_DIR,
       configDir,
       interfaces: LAN,
       out: (text) => out.push(text),
@@ -269,9 +384,14 @@ describe("the human's answer", () => {
       sleep: async () => {
         const pairingCode = /[?&]c=([A-Z0-9]{10})/.exec(out[0] ?? "")?.[1];
         if (pairingCode === undefined) return;
-        const sid = findPairing(configDir, { code: pairingCode })?.sid;
+        const sid = findPairing(configDir, { project: PROJECT_KEY, code: pairingCode })?.sid;
         if (sid === undefined) return;
-        claimPairing(configDir, { sid, deviceKey, name: "iPhone di Gabriel" });
+        claimPairing(configDir, {
+          project: PROJECT_KEY,
+          sid,
+          deviceKey,
+          name: "iPhone di Gabriel",
+        });
       },
     });
     expect(code).toBe(0);
@@ -289,9 +409,17 @@ describe("the human's answer", () => {
       configDir,
       answer: "y",
       phone: (payload) => {
-        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        const sid = findPairing(configDir, {
+          project: PROJECT_KEY,
+          code: payloadCode(payload),
+        })?.sid;
         if (sid === undefined) throw new Error("no window to claim");
-        const claimed = claimPairing(configDir, { sid, deviceKey, name: "iPhone di Gabriel" });
+        const claimed = claimPairing(configDir, {
+          project: PROJECT_KEY,
+          sid,
+          deviceKey,
+          name: "iPhone di Gabriel",
+        });
         if (!claimed.ok) throw new Error(claimed.reason);
       },
     });
@@ -302,7 +430,13 @@ describe("the human's answer", () => {
       "iPhone di Gabriel",
     ]);
     expect(registry.ok ? registry.registry.devices[0]?.id : "").toBe(deviceIdOf(deviceKey));
+    // The entry opens THIS project only (docs/feat/mobile-projects.md §1).
+    expect(registry.ok ? registry.registry.devices[0]?.project : undefined).toEqual({
+      key: PROJECT_KEY,
+      cwd: PROJECT_DIR,
+    });
     expect(run.out.join("")).toContain(deviceIdOf(deviceKey));
+    expect(run.out.join("")).toContain("project elsewhere");
   });
 
   test("N writes NO entry (mutation: always accept)", async () => {
@@ -312,9 +446,17 @@ describe("the human's answer", () => {
       configDir,
       answer: "n",
       phone: (payload) => {
-        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        const sid = findPairing(configDir, {
+          project: PROJECT_KEY,
+          code: payloadCode(payload),
+        })?.sid;
         if (sid === undefined) throw new Error("no window to claim");
-        claimPairing(configDir, { sid, deviceKey: key32(9), name: "stranger" });
+        claimPairing(configDir, {
+          project: PROJECT_KEY,
+          sid,
+          deviceKey: key32(9),
+          name: "stranger",
+        });
       },
     });
     expect(run.code).toBe(1);
@@ -330,9 +472,12 @@ describe("the human's answer", () => {
     const run = await runPair({
       configDir,
       phone: (payload) => {
-        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        const sid = findPairing(configDir, {
+          project: PROJECT_KEY,
+          code: payloadCode(payload),
+        })?.sid;
         if (sid === undefined) throw new Error("no window to claim");
-        claimPairing(configDir, { sid, deviceKey: key32(3), name: "phone" });
+        claimPairing(configDir, { project: PROJECT_KEY, sid, deviceKey: key32(3), name: "phone" });
       },
     });
     expect(run.code).toBe(1);
@@ -351,9 +496,17 @@ describe("the window's files", () => {
         configDir,
         answer,
         phone: (payload) => {
-          const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+          const sid = findPairing(configDir, {
+            project: PROJECT_KEY,
+            code: payloadCode(payload),
+          })?.sid;
           if (sid === undefined) throw new Error("no window to claim");
-          claimPairing(configDir, { sid, deviceKey: key32(4), name: "phone" });
+          claimPairing(configDir, {
+            project: PROJECT_KEY,
+            sid,
+            deviceKey: key32(4),
+            name: "phone",
+          });
         },
       });
       expect(run.code).toBe(answer === "y" ? 0 : 1);
@@ -404,9 +557,12 @@ describe("a 'yes' that cannot be recorded", () => {
       configDir,
       answer: "y",
       phone: (payload) => {
-        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        const sid = findPairing(configDir, {
+          project: PROJECT_KEY,
+          code: payloadCode(payload),
+        })?.sid;
         if (sid === undefined) throw new Error("no window to claim");
-        claimPairing(configDir, { sid, deviceKey: key32(8), name: "phone" });
+        claimPairing(configDir, { project: PROJECT_KEY, sid, deviceKey: key32(8), name: "phone" });
       },
     });
     expect(run.code).toBe(1);
@@ -430,7 +586,7 @@ describe("the addresses of THIS machine (review round 1, finding 1)", () => {
       host: "127.0.0.1",
       port: 4000,
       tls: false,
-      cwd: "/elsewhere",
+      cwd: PROJECT_DIR,
       startedAt: 1,
       addresses: [relay],
     });
@@ -449,7 +605,7 @@ describe("the addresses of THIS machine (review round 1, finding 1)", () => {
       host: "0.0.0.0",
       port: 4000,
       tls: false,
-      cwd: "/elsewhere",
+      cwd: PROJECT_DIR,
       startedAt: 1,
       addresses: [relay],
     });
@@ -479,6 +635,7 @@ describe("the addresses of THIS machine (review round 1, finding 1)", () => {
     recordServing(configDir, 4321);
     const out: string[] = [];
     const code = await pairCommand({
+      projectDir: PROJECT_DIR,
       configDir,
       ttlMs: 0,
       out: (text) => out.push(text),
@@ -518,9 +675,12 @@ describe("a 'y' that arrives after the window closed (review round 1, finding 2)
       answer: "y",
       lateAnswerMs: 450,
       phone: (payload) => {
-        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        const sid = findPairing(configDir, {
+          project: PROJECT_KEY,
+          code: payloadCode(payload),
+        })?.sid;
         if (sid === undefined) throw new Error("no window to claim");
-        claimPairing(configDir, { sid, deviceKey: key32(9), name: "late" });
+        claimPairing(configDir, { project: PROJECT_KEY, sid, deviceKey: key32(9), name: "late" });
       },
     });
     expect(run.code).toBe(1);
@@ -558,9 +718,12 @@ describe("a 'y' that arrives after the window closed (review round 1, finding 2)
         },
       },
       phone: (payload) => {
-        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        const sid = findPairing(configDir, {
+          project: PROJECT_KEY,
+          code: payloadCode(payload),
+        })?.sid;
         if (sid === undefined) throw new Error("no window to claim");
-        claimPairing(configDir, { sid, deviceKey: key32(17), name: "late" });
+        claimPairing(configDir, { project: PROJECT_KEY, sid, deviceKey: key32(17), name: "late" });
       },
     });
     expect(run.code).toBe(1);
@@ -580,6 +743,7 @@ describe("a 'y' that arrives after the window closed (review round 1, finding 2)
     let claimed = false;
     const code = await Promise.race([
       pairCommand({
+        projectDir: PROJECT_DIR,
         configDir,
         interfaces: LAN,
         ttlMs: 300,
@@ -588,9 +752,17 @@ describe("a 'y' that arrives after the window closed (review round 1, finding 2)
         ask: () => new Promise<string>(() => {}),
         sleep: async () => {
           if (claimed) return;
-          const sid = findPairing(configDir, { code: payloadCode(out[0] ?? "") })?.sid;
+          const sid = findPairing(configDir, {
+            project: PROJECT_KEY,
+            code: payloadCode(out[0] ?? ""),
+          })?.sid;
           if (sid === undefined) return;
-          claimed = claimPairing(configDir, { sid, deviceKey: key32(6), name: "away" }).ok;
+          claimed = claimPairing(configDir, {
+            project: PROJECT_KEY,
+            sid,
+            deviceKey: key32(6),
+            name: "away",
+          }).ok;
         },
       }),
       Bun.sleep(5_000).then(() => "hung" as const),
@@ -633,10 +805,13 @@ describe("the write ORDER (F3; review round 1, finding 3)", () => {
         },
       },
       phone: (payload) => {
-        const sid = findPairing(configDir, { code: payloadCode(payload) })?.sid;
+        const sid = findPairing(configDir, {
+          project: PROJECT_KEY,
+          code: payloadCode(payload),
+        })?.sid;
         if (sid === undefined) throw new Error("no window to claim");
         claimSid = sid;
-        claimPairing(configDir, { sid, deviceKey, name: "iPhone" });
+        claimPairing(configDir, { project: PROJECT_KEY, sid, deviceKey, name: "iPhone" });
       },
     });
     expect(run.code).toBe(0);

@@ -220,6 +220,20 @@ describe("the state is read back from the disk", () => {
   });
 });
 
+describe("uriOf: the kept copy, for a preview made offline", () => {
+  test("a cached version answers its uri; one never kept (or evicted) answers null", () => {
+    const disk = files();
+    const cache = createArtifactCache({ files: disk.port, now: () => disk.tick() });
+    expect(cache.uriOf("c1", meta())).toBeNull();
+    const put = cache.put("c1", meta(), new Uint8Array(10));
+    expect(cache.uriOf("c1", meta())).toBe(put.uri);
+    // Another computer's cache is another directory.
+    expect(cache.uriOf("c2", meta())).toBeNull();
+    disk.port.remove(cachePath("c1", sha("a"), "png"));
+    expect(cache.uriOf("c1", meta())).toBeNull();
+  });
+});
+
 describe("shareCopy: a named copy for the share sheet", () => {
   test("the copy is `<sanitized title>.<ext>`, beside (never instead of) the cached file", () => {
     const disk = files();

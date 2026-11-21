@@ -133,6 +133,9 @@ the "a new target adds only a transport" shape, AGENTS §7).
    (one project per host today), and `session/list` entries carry the `cwd`.
 7. **Pairing is per computer; projects appear by themselves** (owner,
    2026-10-23). Refines 3 under 6.
+   > **Superseded by owner 2026-11-20** — pairing is per `serve` (project), and
+   > a phone sees only the projects it paired; no automatic discovery. See
+   > `docs/feat/mobile-projects.md`. Original text kept below.
    - Paired device keys and the computer's identity live in a registry shared
      by every daemon of that computer (tentacle's config dir), not inside one
      daemon: one `tentacle pair` authorises the phone on every daemon of that

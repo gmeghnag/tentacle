@@ -32,6 +32,12 @@ export interface ArtifactCardOptions {
   readonly state?: ArtifactCardState;
   /** `pod`: presented by an untrusted pod daemon (TUI pod runtimes). Default `local`. */
   readonly origin?: "local" | "pod";
+  /**
+   * A PDF's page count, when the frontend has counted it (the phone, from its
+   * own copy: docs/feat/mobile-file-preview-cards.md). Display only; ignored
+   * for any other kind and for anything but a positive whole number.
+   */
+  readonly pages?: number;
 }
 
 const GLYPH: Readonly<Record<ArtifactKind, string>> = {
@@ -102,6 +108,10 @@ export function artifactCard(
   const kind = artifactKindOf(meta);
   const state = options.state ?? "ready";
   const parts = [typeLabel(kind, meta)];
+  const pages = options.pages;
+  if (kind === "pdf" && pages !== undefined && Number.isInteger(pages) && pages > 0) {
+    parts.push(pages === 1 ? "1 page" : `${pages} pages`);
+  }
   if (kind === "image" && meta.width !== undefined && meta.height !== undefined) {
     parts.push(`${meta.width}×${meta.height}`);
   }

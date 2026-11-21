@@ -16,6 +16,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { projectKey } from "@tentacle/agent";
 import {
   DeviceAuthority,
   SessionHost,
@@ -24,10 +25,24 @@ import {
   loadOrCreateIdentity,
   readRegistry,
   startWsServer,
+  writeDaemonRecord,
 } from "@tentacle/daemon";
 import type { DuplexChannel } from "@tentacle/transport";
 import { generateStaticKeypair, systemRandom } from "@tentacle/transport/noise";
-import { createPairingHooks, sasOfPrompt } from "../e2e/pairing.ts";
+import { createPairingHooks as createHooks, sasOfPrompt } from "../e2e/pairing.ts";
+import { projectRecordId } from "../src/computer-store.ts";
+
+/**
+ * The serve's project (docs/feat/mobile-projects.md §2): the key is what `pair`
+ * derives from the live serve record's `cwd`, so the window it opens is the one
+ * this authority serves (Q6).
+ */
+const PROJECT_DIR = "/u/proj";
+const TEST_PROJECT = { key: projectKey(PROJECT_DIR), cwd: PROJECT_DIR };
+
+/** `pair` run in the serve's folder (Q6: it pairs THAT project's live serve). */
+const createPairingHooks = (deps: Parameters<typeof createHooks>[0]) =>
+  createHooks({ projectDir: PROJECT_DIR, ...deps });
 
 const dirs: string[] = [];
 const closers: (() => void)[] = [];
@@ -54,7 +69,7 @@ function daemon(): { readonly configDir: string; readonly address: string } {
   if (!identity.ok) {
     throw new Error(identity.reason);
   }
-  const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+  const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
   const server = startWsServer({
     host: "127.0.0.1",
     port: 0,
@@ -70,6 +85,18 @@ function daemon(): { readonly configDir: string; readonly address: string } {
     server.stop();
     authority.stop();
   });
+  // The live serve record `serve` writes: what `pair` targets (Q6).
+  const written = writeDaemonRecord(configDir, {
+    pid: process.pid,
+    host: "127.0.0.1",
+    port: server.port,
+    tls: false,
+    cwd: PROJECT_DIR,
+    startedAt: Date.now(),
+  });
+  if (!written.ok) {
+    throw new Error(written.reason);
+  }
   return { configDir, address: `${server.url}/e2e` };
 }
 
@@ -94,6 +121,9 @@ async function claim(
     payload: parsed.payload,
     deviceKey: key.privateKey,
     name: "iPhone",
+    // A per-project phone (mobile-projects §4, Q9): this test drives the
+    // harness's `pair`, not the app's flow, so it claims as the updated app will.
+    perProject: true,
     dial,
     random: systemRandom,
     onCompare: (code) => {
@@ -118,11 +148,15 @@ describe("the pairing hooks", () => {
     try {
       const started = await pairing.start();
       expect(started.payload.startsWith("tentacle://pair?")).toBe(true);
-      // The id names the computer the phone will pin (P3): the daemon's identity.
+      // The id is the ROW the app draws for this pairing (mobile-projects §6: one
+      // record per project), so every flow's `computer-${computerId}` names it:
+      // the pinned computer's id plus the project's key, not the bare computer id.
       const identity = loadOrCreateIdentity(configDir, { name: "", now: 0 });
       expect(identity.ok).toBe(true);
       if (identity.ok) {
-        expect(started.computerId).toBe(deviceIdOf(identity.identity.publicKey));
+        expect(started.computerId).toBe(
+          projectRecordId(deviceIdOf(identity.identity.publicKey), projectKey(PROJECT_DIR)),
+        );
       }
       // The phone claims the code in the background; `confirm` waits for it.
       const claiming = claim(started.payload, { outcome: "y" });
@@ -206,6 +240,7 @@ describe("the pairing hooks", () => {
     try {
       // Register a device directly (the pairing path is covered above).
       const added = addDevice(configDir, {
+        project: TEST_PROJECT,
         publicKey: new Uint8Array(32).fill(7),
         name: "iPhone",
         now: 2_000,

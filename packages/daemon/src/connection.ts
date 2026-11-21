@@ -231,6 +231,13 @@ export class Connection {
    * every ask's `askedOn` (docs/feat/session-auto-accept.md D7). Display only.
    */
   private clientHost: string | undefined;
+  /**
+   * This client's IANA time zone (`initialize` `clientCapabilities.timeZone`,
+   * docs/fix/prompt-current-date.md): the clock the model's date stamp is
+   * rendered in. Per connection, like `hop` — a pod daemon serves several
+   * clients and each session keeps the zone of the one that attached last.
+   */
+  private timeZone: string | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -611,13 +618,25 @@ export class Connection {
   private discover(): DaemonDiscovery {
     const source = this.host.discoverySource();
     this.discoveryUnsubscribe?.();
+    // A paired PHONE learns only this daemon's own entry (its current
+    // addresses): a pairing is per project (docs/feat/mobile-projects.md §4,
+    // Owner Q4), so the siblings are projects it was never paired to and must
+    // not be told about. A token client (`connect`) keeps the whole list.
+    // Local and synchronous — no await, no lock (§7 "don't serialize the peer").
+    const scope =
+      this.principal.kind === "device"
+        ? (discovery: DaemonDiscovery): DaemonDiscovery => ({
+            ...discovery,
+            daemons: discovery.daemons.filter((daemon) => daemon.self === true),
+          })
+        : (discovery: DaemonDiscovery): DaemonDiscovery => discovery;
     const unsubscribe = source.subscribe((discovery) => {
       // Fire-and-forget: `notify` on a closed peer is a no-op (P4), so a change
       // racing a disconnect cannot throw here.
-      this.peer.notify(Notification.DaemonDiscovery, discovery);
+      this.peer.notify(Notification.DaemonDiscovery, scope(discovery));
     });
     this.discoveryUnsubscribe = unsubscribe;
-    return source.current();
+    return scope(source.current());
   }
 
   // The count may take up to its cap (a couple of seconds); like every request
@@ -797,6 +816,9 @@ export class Connection {
     // cannot claim another device's name.
     this.autoAcceptBy = params.clientInfo?.host ?? params.clientInfo?.name;
     this.clientHost = params.clientInfo?.host;
+    // The laptop's clock for the model's date stamp (prompt-current-date):
+    // absent from an older client, which then gets this daemon host's zone.
+    this.timeZone = params.clientCapabilities.timeZone;
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
@@ -967,6 +989,7 @@ export class Connection {
       ...(this.hop ? { hop: true } : {}),
       ...(this.servesModel ? { model: this } : {}),
       ...(this.clientHost !== undefined ? { host: this.clientHost } : {}),
+      ...(this.timeZone !== undefined ? { timeZone: this.timeZone } : {}),
       // The socket's own principal names the device (never a frame's claim): the
       // push rules exclude a device attached to this session — it is showing the
       // sheet already (docs/feat/mobile-push.md Design 1).

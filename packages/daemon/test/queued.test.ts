@@ -24,6 +24,7 @@ import { z } from "zod";
 import { Connection } from "../src/connection.ts";
 import type { Attachment } from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
+import { userLines } from "./support/model-prompt.ts";
 
 // Every attached client sees the session's queue, and every row left at a
 // turn's end goes back to its writer (docs/feat/queued-broadcast.md). Each test
@@ -116,8 +117,7 @@ function client() {
 
 const msg = (id: string, text: string): SendNowMessage => ({ id, text });
 const turn = (turnId: string): SendNowTarget => ({ kind: "turn", turnId });
-const userTexts = (messages: readonly ChatMessage[]): string[] =>
-  messages.filter((m) => m.role === "user").map((m) => m.content);
+const userTexts = (messages: readonly ChatMessage[]): string[] => userLines(messages);
 /** The update after the first one matching `pred`. */
 const nextAfter = (stream: SessionUpdate[], pred: (u: SessionUpdate) => boolean) =>
   stream[stream.findIndex(pred) + 1];

@@ -143,7 +143,10 @@ describe("flow 30 is wired, not inert", () => {
     const run = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
     const mock = readFileSync(join(import.meta.dir, "..", "e2e", "mock-model.ts"), "utf8");
     expect(run).toContain('join(runDir, "project", "escape.html")');
-    expect(run).toMatch(/\n\s+cwd: runDir,\n\s+env: \{/);
+    // `startServe`'s cwd defaults to the run dir (flow 37 passes project B's
+    // folder for its second serve only), and the spawn uses that parameter.
+    expect(run).toContain("const startServe = (port: number = daemonPort, cwd: string = runDir)");
+    expect(run).toMatch(/\n\s+cwd,\n\s+env: \{/);
     expect(mock).toContain("path: `project/${ESCAPE_ARTIFACT_ID}.html`");
   });
 

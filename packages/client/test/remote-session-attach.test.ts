@@ -23,6 +23,7 @@ import { Connection, type ImagePolicy, SessionHost } from "@tentacle/daemon";
 import { Notification } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { type DuplexChannel, RpcPeer, createChannelPair } from "@tentacle/transport";
+import { stampLine, stripped } from "../../daemon/test/support/model-prompt.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import { RemoteClient } from "../src/remote-client.ts";
 import type { RemoteSession } from "../src/remote-session.ts";
@@ -174,7 +175,10 @@ describe("RemoteSession.attachImage opens the session itself", () => {
     const events: SessionEvent[] = [];
     expect(await drain(session.send("", undefined, { attachments: [ref] }), events)).toBe("ended");
     expect(a.model.requests).toHaveLength(1);
-    expect(a.model.requests[0]?.messages.at(-1)).toEqual({
+    // The first prompt's date stamp leads the model's copy (docs/fix/prompt-current-date.md).
+    const sent = a.model.requests[0]?.messages.at(-1);
+    expect(stampLine(sent?.content ?? "")).toBeDefined();
+    expect(sent && { ...sent, content: stripped(sent.content) }).toEqual({
       role: "user",
       content: "",
       attachments: [ref],
