@@ -30,6 +30,7 @@ import { type ComponentRef, type JSX, useEffect, useRef } from "react";
 import { Animated, Easing, Pressable, StyleSheet, View } from "react-native";
 import type { SendSlot } from "../composer.ts";
 import type { MicButton } from "../dictation.ts";
+import { COMPOSER_HALO_MS, COMPOSER_TRANSCRIBE_TURN_MS } from "../motion.ts";
 import { type Palette, radius, shadow, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
 import { Text, TextInput } from "./Text.tsx";
@@ -94,11 +95,8 @@ const MIC_LABEL: Readonly<Record<Exclude<MicButton, "hidden">, string>> = {
   finalizing: "Transcribing",
 };
 
-/** The halo's one breath (mockup B: 32 → 42 pt, accent 25 % → 0, 1.2 s). */
-const HALO_MS = 1200;
+/** The halo grows 32 → 42 pt (mockup B), over `COMPOSER_HALO_MS`. */
 const HALO_SCALE = 42 / 32;
-/** One turn of the transcribing arc. */
-const SPIN_MS = 900;
 
 /** Recording: an accent ring that grows and fades; Reduce Motion holds it still. */
 function Halo({ color }: { readonly color: string }): JSX.Element {
@@ -112,7 +110,7 @@ function Halo({ color }: { readonly color: string }): JSX.Element {
     const loop = Animated.loop(
       Animated.timing(t, {
         toValue: 1,
-        duration: HALO_MS,
+        duration: COMPOSER_HALO_MS,
         easing: Easing.out(Easing.ease),
         useNativeDriver: true,
       }),
@@ -143,7 +141,7 @@ function Spinner({ color }: { readonly color: string }): JSX.Element {
     const loop = Animated.loop(
       Animated.timing(t, {
         toValue: 1,
-        duration: SPIN_MS,
+        duration: COMPOSER_TRANSCRIBE_TURN_MS,
         easing: Easing.linear,
         useNativeDriver: true,
       }),

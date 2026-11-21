@@ -20,6 +20,7 @@ import Svg, {
   Text as SvgText,
 } from "react-native-svg";
 import type { SlotView } from "../compact-slot.ts";
+import { STEP_ELAPSED_TICK_MS, STEP_SPINNER_TURN_MS } from "../motion.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, size, space, typography } from "../theme.ts";
 import {
   BREATHE_MS,
@@ -54,7 +55,7 @@ function useElapsed(from: number | undefined): number | null {
       return;
     }
     setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(Date.now()), STEP_ELAPSED_TICK_MS);
     return () => clearInterval(id);
   }, [from]);
   return from === undefined ? null : Math.max(0, now - from);
@@ -70,7 +71,7 @@ function Spinner({ color, page, still }: { color: string; page: string; still: b
     const loop = Animated.loop(
       Animated.timing(turn, {
         toValue: 1,
-        duration: 900,
+        duration: STEP_SPINNER_TURN_MS,
         easing: Easing.linear,
         useNativeDriver: true,
       }),

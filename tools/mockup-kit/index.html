@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tentacle mockup kit — catalogue</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="generated/tokens.css">
+<link rel="stylesheet" href="generated/tui-tokens.css">
+<link rel="stylesheet" href="frame.css">
+<link rel="stylesheet" href="kit.css">
+<link rel="stylesheet" href="tui.css">
+<style>
+  /* The catalogue page's own chrome (not part of the kit). */
+  body { margin: 0; padding: 24px; background: #ececec; color: #222; font: 14px/1.4 -apple-system, system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 32px 0 8px; border-top: 1px solid #ccc; padding-top: 16px; }
+  .bar { display: flex; gap: 16px; align-items: center; margin-bottom: 8px; }
+  .row { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  figure { margin: 0; }
+  figcaption { font-size: 12px; color: #555; margin-top: 6px; max-width: 422px; }
+  code { font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Tentacle mockup kit</h1>
+<p>Every value below is generated from <code>apps/mobile/src</code> and <code>packages/tui/src</code>
+(<code>bun run mockup-kit</code>). Read <code>docs/MOCKUP-BRIEF.md</code> before drawing a mockup.</p>
+<div class="bar">
+  <label><input type="checkbox" id="rm"> Reduce Motion</label>
+  <label><input type="checkbox" id="figtree"> Figtree (petrol beta)</label>
+  <span id="src"></span>
+</div>
+<div id="cat"></div>
+<script type="module">
+import { K } from "./kit.js";
+
+const THEMES = ["light", "dark", "petrol"];
+const STEPS = [
+  { node: "ok", name: "Read", subtitle: "src/app.ts" },
+  { node: "running", name: "Shell", subtitle: "bun test" },
+  { node: "error", name: "Shell", subtitle: "exit 1", body: K.stepBody({ lines: ["error: lockfile is out of date"], error: true }) },
+  { node: "pending", name: "Edit", subtitle: "src/app.ts" },
+  { node: "thought", subtitle: "· 12 s" },
+  { node: "wake", name: "Wake", subtitle: "15:54" },
+  { node: "thinking" },
+];
+
+const SCREENS = {
+  "conversation — header (running dot), bubble, markdown, step rail, composer": () => [
+    K.sessionHeader({ title: "Fix CI", subtitle: "claude-sonnet", dot: "running" }),
+    `<div class="k-scroll">${[
+      K.userBubble({ text: "Why does the build fail on **CI**?" }),
+      K.assistantText({ markdown: "The lockfile is stale. Run:\n```sh\nbun install\n```\n- commit `bun.lock`\n- push again" }),
+      K.stepRail(STEPS),
+    ].map((p) => p.html).join("")}</div>`,
+    K.composer({ state: "empty", placeholder: "Message" }),
+  ],
+  "step body open (diff) + thought row": () => [
+    K.sessionHeader({ title: "Refactor", dot: "idle" }),
+    `<div class="k-scroll">${K.stepRail([
+      { node: "ok", name: "Edit", subtitle: "theme.ts", body: K.stepBody({ lines: ["  radius: {", "-   sheet: 38,", "+   sheet: 14,"] }) },
+      { node: "thought", subtitle: K.data.viewModels.thoughtRow["95000"].subtitle },
+    ]).html}</div>`,
+    K.composer({ state: "draft", text: "now the drawer" }),
+  ],
+  "composer states: dictating, transcribing, queued": () => [
+    K.sessionHeader({ title: "Voice", dot: "connecting" }),
+    `<div class="k-scroll"></div>`,
+    K.composer({ state: "dictating", queued: ["and then run the tests"] }),
+    K.composer({ state: "transcribing", home: false }),
+  ],
+  "permission sheet": () => [
+    K.sessionHeader({ title: "Deploy", dot: "ask" }),
+    `<div class="k-scroll">${K.stepRail([{ node: "pending", name: "Shell", subtitle: "rm -rf dist" }]).html}</div>`,
+    K.permissionSheet({ title: "Run a command?", tool: "shell", detail: "rm -rf dist && bun run build" }),
+  ],
+  "computers list (bands, square) + toast + banner": () => [
+    `<div class="k-header"><span class="k-t-large-title">Computers</span></div>`,
+    K.banner({ text: "Offline — showing the last saved sessions" }),
+    K.computersList({ computers: [
+      { name: "studio", online: true, sessions: [{ title: "Fix CI", subtitle: "2 min ago" }, { title: "Refactor", subtitle: "yesterday" }] },
+      { name: "laptop", online: false, sessions: [{ title: "Notes", subtitle: "3 days ago" }] },
+    ] }),
+    K.toast({ text: "Copied" }),
+  ],
+  "sessions drawer + hub button (running) + fan": () => [
+    K.sessionHeader({ title: "Fix CI", dot: "running" }),
+    `<div class="k-scroll"></div>`,
+    K.sessionsDrawer({ title: "studio", sections: [{ label: "Today", rows: [{ title: "Fix CI", meta: "now", current: true }, { title: "Refactor", meta: "2h" }] }] }),
+    K.hubFan({}),
+  ],
+  "empty action + settings band": () => [
+    `<div class="k-header"><span class="k-t-headline">Activity</span></div>`,
+    K.emptyAction({ text: "Nothing running", action: "Start a session" }),
+    K.band({ label: "Appearance", rows: [{ title: "Theme", value: "System" }, { title: "Text size", value: "Default" }] }),
+    K.hubButton({ running: true }),
+  ],
+};
+
+const cat = document.getElementById("cat");
+document.getElementById("src").textContent = `${Object.keys(K.data.source).length} source files hashed`;
+
+function draw() {
+  const reduceMotion = document.getElementById("rm").checked;
+  const font = document.getElementById("figtree").checked ? "figtree" : "system";
+  cat.innerHTML = "";
+  for (const [title, parts] of Object.entries(SCREENS)) {
+    const h = document.createElement("h2");
+    h.textContent = title;
+    const row = document.createElement("div");
+    row.className = "row";
+    for (const theme of THEMES) {
+      const fig = document.createElement("figure");
+      const host = document.createElement("div");
+      K.screen(host, { theme, font, reduceMotion }, parts());
+      const cap = document.createElement("figcaption");
+      cap.textContent = theme;
+      fig.append(host, cap);
+      row.append(fig);
+    }
+    cat.append(h, row);
+  }
+  const h = document.createElement("h2");
+  h.textContent = "TUI — rows rendered by the TUI's own itemLines; slot; input box";
+  const row = document.createElement("div");
+  row.className = "row";
+  for (const theme of ["dark", "light"]) {
+    const rows = ["user", "assistant", "toolRunning", "toolOk", "toolError"]
+      .map((n) => K.tui.transcriptRow(n, { theme, bare: true }).html)
+      .join('<span class="k-tui-row"> </span>');
+    const fig = document.createElement("figure");
+    fig.innerHTML = `${K.tui.grid(theme, rows, reduceMotion)}<br><br>${K.tui.slot({ seconds: 3, theme }).html}<br><br>${K.tui.inputBox({ state: "empty", placeholder: "Ask anything", theme }).html}<figcaption>${theme}</figcaption>`;
+    row.append(fig);
+  }
+  cat.append(h, row);
+}
+document.getElementById("rm").addEventListener("change", draw);
+document.getElementById("figtree").addEventListener("change", draw);
+draw();
+</script>
+</body>
+</html>

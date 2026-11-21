@@ -1,0 +1,109 @@
+/*
+ * The device frame — the ONLY file of the kit allowed literal sizes, because
+ * these values are the DEVICE's, not the app's (none is in apps/mobile/src).
+ * Device: iPhone 17 Pro, the e2e simulator (apps/mobile/e2e/README.md):
+ * 402 × 874 pt viewport, @3x (1206 × 2622 px screenshots). 1 pt = 1 CSS px.
+ * Safe area: 62 pt top (Dynamic Island status bar), 34 pt home indicator.
+ * The outer corner radius is the frame's look only (approximate).
+ */
+:root {
+  --frame-w: 402px;
+  --frame-h: 874px;
+  --frame-safe-top: 62px;
+  --frame-safe-bottom: 34px;
+  --frame-radius: 62px;
+  --frame-bezel: 10px;
+  --frame-island-w: 126px;
+  --frame-island-h: 37px;
+  --frame-island-top: 11px;
+  --frame-indicator-w: 140px;
+  --frame-indicator-h: 5px;
+  --frame-status-size: 17px;
+}
+
+/* The terminal's own ground and default text: the terminal profile's, not the
+   TUI's (the TUI never paints its background). A typical dark / light profile. */
+[data-tui="dark"] {
+  --tui-bg: #1e1f21;
+  --tui-fg: #e5e5e5;
+}
+[data-tui="light"] {
+  --tui-bg: #fbfbfa;
+  --tui-fg: #1a1a1a;
+}
+
+.k-phone {
+  position: relative;
+  box-sizing: content-box;
+  width: var(--frame-w);
+  height: var(--frame-h);
+  border: var(--frame-bezel) solid #1b1c1e;
+  border-radius: calc(var(--frame-radius) + var(--frame-bezel));
+  overflow: hidden;
+  background: var(--c-page);
+  color: var(--c-label);
+  font-family: var(--font-ui);
+  flex: none;
+}
+
+/* A bare screen (calibration): no bezel, no rounding. */
+.k-phone[data-bare] {
+  border: 0;
+  border-radius: 0;
+}
+
+.k-phone-status {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: var(--frame-safe-top);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 34px 0 52px;
+  box-sizing: border-box;
+  font-size: var(--frame-status-size);
+  font-weight: 600;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.k-phone-island {
+  position: absolute;
+  top: var(--frame-island-top);
+  left: 50%;
+  width: var(--frame-island-w);
+  height: var(--frame-island-h);
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: #0b0b0c;
+  z-index: 6;
+}
+
+.k-phone-batt {
+  display: inline-block;
+  width: 25px;
+  height: 12px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  opacity: 0.9;
+}
+
+.k-phone-screen {
+  position: absolute;
+  inset: var(--frame-safe-top) 0 0 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.k-phone-indicator {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  width: var(--frame-indicator-w);
+  height: var(--frame-indicator-h);
+  transform: translateX(-50%);
+  border-radius: 3px;
+  background: var(--c-label);
+  z-index: 6;
+}

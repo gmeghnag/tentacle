@@ -524,3 +524,6 @@ lifecycle. It is mandatory.
   choreography (read AGENTS.md + the task doc, then do / adversarially attack).
   They operationalise this section; they do not restate its rules. A fresh agent
   starts with only its `PROMPT.md`, so the brief is the channel that primes it.
+  An agent that draws an HTML mockup (iPhone or TUI) is given
+  `docs/MOCKUP-BRIEF.md`: it composes `tools/mockup-kit/` (generated from source),
+  marks anything new «nuovo», and hands over an inlined snapshot.

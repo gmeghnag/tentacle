@@ -120,6 +120,7 @@ import {
 } from "../hub-actions.ts";
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
+import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
 import { noticeLooks } from "../notice-group.ts";
 import { PERF } from "../perf-probe.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
@@ -708,7 +709,7 @@ export function SessionScreen({
       return;
     }
     setActivityNow(Date.now());
-    const timer = setInterval(() => setActivityNow(Date.now()), 1000);
+    const timer = setInterval(() => setActivityNow(Date.now()), ACTIVITY_CLOCK_TICK_MS);
     return () => clearInterval(timer);
   }, [activityOpen]);
   const reports = useMemo(() => reportsOf(state.transcript.rows), [state.transcript.rows]);
