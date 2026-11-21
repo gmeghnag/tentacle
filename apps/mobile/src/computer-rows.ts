@@ -23,7 +23,15 @@ import { describeError, projectLabel } from "./session-list.ts";
  * What a row can be: a working (or merely unreachable) computer, or one of the
  * three states that need the person to pair again.
  */
-export type ComputerRowState = "ok" | "unreachable" | "revoked" | "maybe-reset" | "broken";
+export type ComputerRowState =
+  | "ok"
+  | "unreachable"
+  | "revoked"
+  | "maybe-reset"
+  | "broken"
+  // An e2e version skew (docs/feat/noise-binary-carrier.md): no row action, the fix is an update.
+  | "update-app"
+  | "update-computer";
 
 export interface ComputerRow {
   readonly id: string;

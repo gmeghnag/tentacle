@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RELAY_PROTOCOL_VERSION, encodeBase64Url, relayAddress } from "@tentacle/protocol";
-import type { DuplexChannel } from "@tentacle/transport";
+import { type ByteCarrier, type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { RpcPeer } from "@tentacle/transport";
 import { NoiseError, noiseInitiator, publicKeyOf, systemRandom } from "@tentacle/transport/noise";
 import { relayIdOf } from "@tentacle/transport/relay-id";
@@ -145,7 +145,8 @@ function startFlakyRelay(options: { flipNth: number }): { url: string; stop(): v
     forwarded?: number;
   }
   let control: { send(d: string): void } | undefined;
-  const streams = new Map<string, { phone?: unknown; accept?: unknown; early?: string[] }>();
+  type Frame = string | Uint8Array;
+  const streams = new Map<string, { phone?: unknown; accept?: unknown; early?: Frame[] }>();
   let count = 0;
   const server = Bun.serve<Leg>({
     hostname: "127.0.0.1",
@@ -157,7 +158,9 @@ function startFlakyRelay(options: { flipNth: number }): { url: string; stop(): v
     },
     websocket: {
       message(ws, raw) {
-        const text = String(raw);
+        // E2E v2: the phone's Noise frames are binary; only control/accept frames are JSON text.
+        const frame0: Frame = typeof raw === "string" ? raw : new Uint8Array(raw);
+        const text = typeof raw === "string" ? raw : "";
         const data = ws.data;
         if (data.role === undefined) {
           let frame: { t?: string; stream?: string } = {};
@@ -194,9 +197,9 @@ function startFlakyRelay(options: { flipNth: number }): { url: string; stop(): v
           // A REAL token shape: `RelayStreamTokenSchema` is 22 base64url chars,
           // so a made-up "stream-0" would (correctly) be a malformed frame.
           const stream = mintStreamToken(count++);
-          const record: { phone?: unknown; accept?: unknown; early?: string[] } = {
+          const record: { phone?: unknown; accept?: unknown; early?: Frame[] } = {
             phone: ws,
-            early: [text],
+            early: [frame0],
           };
           streams.set(stream, record);
           data.stream = stream;
@@ -209,21 +212,21 @@ function startFlakyRelay(options: { flipNth: number }): { url: string; stop(): v
           // Nth one: the hostile act a real relay can always perform.
           if (data.role === "accept") {
             const pair = [...streams.entries()].find(([, p]) => p.accept === ws);
-            const phone = pair?.[1].phone as { send(d: string): void } | undefined;
+            const phone = pair?.[1].phone as { send(d: Frame): void } | undefined;
             if (!phone) return;
             data.forwarded = (data.forwarded ?? 0) + 1;
-            phone.send(data.forwarded === options.flipNth ? flipOneChar(text) : text);
+            phone.send(data.forwarded === options.flipNth ? flipOneByte(frame0) : frame0);
           }
           return;
         }
         const pair = streams.get(data.stream ?? "");
-        const accept = pair?.accept as { send(d: string): void } | undefined;
+        const accept = pair?.accept as { send(d: Frame): void } | undefined;
         if (!accept) {
           // Held for the daemon's accept leg, exactly like the real relay.
-          pair?.early?.push(text);
+          pair?.early?.push(frame0);
           return;
         }
-        accept.send(text);
+        accept.send(frame0);
       },
     },
   });
@@ -236,25 +239,29 @@ function mintStreamToken(n: number): string {
 }
 
 /**
- * Flip one character in the middle of a `t1:<base64>` Noise frame: a changed
- * CIPHERTEXT byte, which the AEAD must reject (touching the `t1:` prefix instead
- * would only test the frame-shape guard, a different property).
+ * Flip one byte in the middle of a binary Noise frame: a changed CIPHERTEXT
+ * byte, which the AEAD must reject (a text frame or a truncation would only
+ * test the frame-shape guard, a different property).
  */
-function flipOneChar(text: string): string {
-  const chars = [...text];
-  const at = Math.floor(chars.length / 2);
-  const original = chars[at] ?? "A";
-  chars[at] = original === "A" ? "B" : "A";
-  return chars.join("");
+function flipOneByte(frame: string | Uint8Array): string | Uint8Array {
+  if (typeof frame === "string") return frame;
+  const out = Uint8Array.from(frame);
+  const at = Math.floor(out.length / 2);
+  out[at] = (out[at] ?? 0) ^ 0x01;
+  return out;
 }
 
-/** A phone's `DuplexChannel` over a real WebSocket at the relay address. */
-function dialPhone(url: string): Promise<{ channel: DuplexChannel; ws: WebSocket }> {
+/** A phone's `ByteCarrier` over a real WebSocket at the relay address (E2E v2: binary). */
+function dialPhone(url: string): Promise<{ channel: ByteCarrier; ws: WebSocket }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
-    let onMessage: ((d: string) => void) | undefined;
+    ws.binaryType = "arraybuffer";
+    let onMessage: ((d: CarrierFrame) => void) | undefined;
     let onClose: (() => void) | undefined;
-    ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+    ws.addEventListener("message", (e) => {
+      const frame = carrierFrameOf(e.data);
+      if (frame !== null) onMessage?.(frame);
+    });
     ws.addEventListener("close", () => onClose?.());
     ws.addEventListener("error", () => reject(new Error(`phone socket error ${url}`)));
     ws.addEventListener("open", () =>
@@ -332,10 +339,10 @@ function bunDialerForTest() {
  */
 interface FakeHost {
   readonly url: string;
-  readonly sent: string[];
+  readonly sent: (string | Uint8Array)[];
   closed: boolean;
   onOpen?: () => void;
-  onMessage?: (data: string) => void;
+  onMessage?: (data: CarrierFrame) => void;
   onClose?: (info: { readonly code?: number; readonly reason?: string }) => void;
 }
 
@@ -1115,5 +1122,71 @@ describe("a control-socket close leaves live streams alone (F2, R4 review 1)", (
     h.link.stop();
     expect(leg.closed).toBe(true);
     expect(h.link.openStreams()).toBe(0);
+  });
+});
+
+describe("E2E v2 over the relay leg (docs/feat/noise-binary-carrier.md)", () => {
+  test("T-D2: the `accept` frame is JSON text; a leg delivering bytes completes the handshake", async () => {
+    const h = fakeHarness();
+    const identity = readIdentity(h.configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    const host = h.control();
+    host.onOpen?.();
+    host.onMessage?.(readyFrame());
+    host.onMessage?.(
+      JSON.stringify({
+        t: "open",
+        stream: encodeBase64Url(new Uint8Array(16).fill(6)),
+        ip: "1.2.3.4",
+      }),
+    );
+    const leg = h.relay.hosts.find((s) => s.url.endsWith("/v1/accept"));
+    if (leg === undefined) throw new Error("the accept leg was not dialled");
+    leg.onOpen?.();
+    const [acceptFrame] = leg.sent;
+    expect(typeof acceptFrame).toBe("string");
+    expect(JSON.parse(acceptFrame as string)).toMatchObject({ t: "accept" });
+    // The phone end: its bytes reach the leg's handler; the leg's sends come back.
+    let toPhone: ((f: CarrierFrame) => void) | undefined;
+    let pumped = 1;
+    const pump = setInterval(() => {
+      while (pumped < leg.sent.length) {
+        const f = leg.sent[pumped++];
+        if (f !== undefined) toPhone?.(f);
+      }
+    }, 1);
+    try {
+      const phone: ByteCarrier = {
+        send: (d) => queueMicrotask(() => leg.onMessage?.(d)),
+        close: () => leg.onClose?.({}),
+        setOnMessage: (fn) => {
+          toPhone = fn;
+        },
+        setOnClose: () => {},
+      };
+      const secure = await noiseInitiator(phone, {
+        staticKey: key(2),
+        remoteStatic: identity.identity.publicKey,
+        random: systemRandom,
+      });
+      expect(secure.remoteStatic).toEqual(identity.identity.publicKey);
+      // Everything the daemon sent after `accept` was binary.
+      expect(leg.sent.slice(1).every((f) => f instanceof Uint8Array)).toBe(true);
+      expect(leg.sent.length).toBeGreaterThan(1);
+      secure.close();
+    } finally {
+      clearInterval(pump);
+    }
+  });
+
+  test("T-D2: a binary frame on the control socket is a close, never a parse", () => {
+    // The bytes of a VALID `ready`: decoded and parsed, they would register the link.
+    const h = fakeHarness();
+    const host = h.control();
+    host.onOpen?.();
+    host.onMessage?.(new TextEncoder().encode(readyFrame()));
+    expect(h.link.isConnected()).toBe(false);
+    expect(host.closed).toBe(true);
+    expect(h.audit).toContain("relay-down closed");
   });
 });

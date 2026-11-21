@@ -13,11 +13,11 @@ import { Connection, SessionHost } from "@tentacle/daemon";
 import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import {
+  type ByteCarrier,
   DomainErrorCode,
-  type DuplexChannel,
   RpcError,
   RpcPeer,
-  createChannelPair,
+  createByteCarrierPair,
 } from "@tentacle/transport";
 import {
   NoiseError,
@@ -60,11 +60,11 @@ function daemon(model: ModelProvider) {
       return { agent, permissions };
     },
   });
-  const raws: DuplexChannel[] = [];
+  const raws: ByteCarrier[] = [];
   const ctl = { allow: true, wrongKey: 0, dials: 0, authorized: 0, maxInbound: 0 };
-  const dial = async (): Promise<DuplexChannel> => {
+  const dial = async (): Promise<ByteCarrier> => {
     ctl.dials += 1;
-    const [d, c] = createChannelPair();
+    const [d, c] = createByteCarrierPair();
     raws.push(d);
     let staticKey = DAEMON;
     if (ctl.wrongKey > 0) {
@@ -82,14 +82,14 @@ function daemon(model: ModelProvider) {
       (secure) => new Connection(secure, host),
       () => {},
     );
-    // What the client receives: measure the raw text frames.
+    // What the client receives: measure the raw frames (bytes, E2E v2).
     return {
       send: (data) => c.send(data),
       close: () => c.close(),
       setOnMessage: (h) =>
-        c.setOnMessage((text) => {
-          ctl.maxInbound = Math.max(ctl.maxInbound, text.length);
-          h(text);
+        c.setOnMessage((frame) => {
+          ctl.maxInbound = Math.max(ctl.maxInbound, frame.length);
+          h(frame);
         }),
       setOnClose: (h) => c.setOnClose(h),
     };
@@ -134,8 +134,8 @@ describe("RemoteClient ↔ Connection over Noise", () => {
     const r = await turn(session, "hi");
     expect(r.chars).toBe(big.length);
     expect(r.kinds.has("turn_end")).toBe(true);
-    // A maximum-size chunk crossed the raw channel (base64 of 65 535 bytes + tag).
-    expect(d.ctl.maxInbound).toBe(3 + 87_380);
+    // A maximum-size chunk crossed the raw channel: the raw 65 535-byte Noise message (E2E v2).
+    expect(d.ctl.maxInbound).toBe(65_535);
     expect(d.ctl.authorized).toBe(1);
     c.close();
   });
@@ -227,6 +227,7 @@ describe("the error mapping", () => {
     ["closed", "unreachable"],
     ["handshake-failed", "rejected"],
     ["bad-frame", "rejected"],
+    ["version-mismatch", "rejected"],
   ];
   for (const [noise, channel] of table) {
     test(`${noise} → ${channel}`, () => {
@@ -239,9 +240,34 @@ describe("the error mapping", () => {
     });
   }
 
+  test("T-C2: a version skew is transient `rejected` and carries the remote e2e version", () => {
+    const mapped = channelErrorFromNoise(new NoiseError("version-mismatch", "skew", 3));
+    expect(mapped.kind).toBe("rejected");
+    expect(terminalReason(mapped)).toBeNull();
+    expect(mapped.remoteE2eVersion).toBe(3);
+    // Any other kind carries none, even with a stray remote version.
+    expect(
+      channelErrorFromNoise(new NoiseError("bad-frame", "x", 3)).remoteE2eVersion,
+    ).toBeUndefined();
+  });
+
+  test("T-C2: a v1 daemon answering text: the factory rejects with remoteE2eVersion 1", async () => {
+    const e = await secureChannelFactory(async () => {
+      const [a, b] = createByteCarrierPair();
+      b.setOnMessage(() => (b.send as unknown as (s: string) => void)("t1:AAAA"));
+      return a;
+    }, options)().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(e).toBeInstanceOf(ChannelError);
+    expect((e as ChannelError).kind).toBe("rejected");
+    expect((e as ChannelError).remoteE2eVersion).toBe(1);
+  });
+
   test("the factory maps a handshake failure and passes a dial failure through untouched", async () => {
     const denied = secureChannelFactory(async () => {
-      const [a, b] = createChannelPair();
+      const [a, b] = createByteCarrierPair();
       noiseResponder(b, { staticKey: DAEMON, random: systemRandom, authorize: () => false }).catch(
         () => {},
       );

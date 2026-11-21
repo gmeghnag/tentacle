@@ -2,7 +2,7 @@
  * The pairing payload `tentacle pair` prints as a QR code and as pasteable
  * text (docs/feat/device-pairing.md, Design "Pairing payload"):
  *
- *   tentacle://pair?v=1&k=<b64url computer key>&n=<computer name>&c=<code>&a=<url>[&a=<url>…]
+ *   tentacle://pair?v=2&k=<b64url computer key>&n=<computer name>&c=<code>&a=<url>[&a=<url>…]
  *
  * It is a LINK, never a credential (mobile decision 2): the `c` code is
  * one-time and only half of what pairing needs (the host still confirms), and
@@ -25,8 +25,13 @@
 import { z } from "zod";
 import { line } from "./text-line.ts";
 
-/** The payload's own version (independent of `PROTOCOL_VERSION`). */
-export const PAIRING_PAYLOAD_VERSION = 1;
+/**
+ * The payload's own version (independent of `PROTOCOL_VERSION`). 2 since E2E v2
+ * (docs/feat/noise-binary-carrier.md): the QR says how to USE the payload, and
+ * the e2e channel version is part of that, so a skewed app refuses the QR at scan
+ * time ("update the app, or tentacle on the computer") instead of failing a dial.
+ */
+export const PAIRING_PAYLOAD_VERSION = 2;
 /** `tentacle://pair?…` */
 export const PAIRING_PAYLOAD_PREFIX = "tentacle://pair?";
 /** A pairing code: 10 Crockford base32 characters = 50 bits. */

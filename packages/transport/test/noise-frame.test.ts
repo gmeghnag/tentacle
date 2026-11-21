@@ -1,21 +1,22 @@
 /**
  * The secure channel's pure framing (docs/feat/e2e-channel.md, Framing): the
- * `t1:` + canonical base64 text codec, chunking of UTF-8 bytes into Noise-sized
- * plaintexts, and reassembly with its cap.
+ * canonical base64 codec (still used by attachments and artifact reads), the
+ * v2 binary frame checks and version byte, chunking of UTF-8 bytes into
+ * Noise-sized plaintexts, and reassembly with its cap.
  */
 import { describe, expect, test } from "bun:test";
 import {
   MAX_CHUNK,
-  MAX_FRAME_TEXT,
   Reassembler,
   TYPE_CONFIRM,
   TYPE_CONTINUATION,
   TYPE_FINAL,
+  binaryFrame,
   chunk,
   decodeBase64,
-  decodeFrame,
   encodeBase64,
-  encodeFrame,
+  readVersioned,
+  withVersion,
 } from "../src/noise-frame.ts";
 import { MAX_NOISE_MESSAGE, NoiseError, TAGLEN } from "../src/noise.ts";
 
@@ -79,28 +80,51 @@ describe("base64", () => {
   });
 });
 
-describe("frame codec", () => {
-  test("t1: + base64, round trip", () => {
+describe("binary frames (E2E v2)", () => {
+  test("a binary frame is the Noise message itself", () => {
     const m = Uint8Array.of(0, 1, 2, 250, 255);
-    const text = encodeFrame(m);
-    expect(text).toBe(`t1:${Buffer.from(m).toString("base64")}`);
-    expect(Array.from(decodeFrame(text))).toEqual(Array.from(m));
+    expect(binaryFrame(m)).toBe(m);
   });
 
-  test("a peer not speaking this channel fails before any decrypt", () => {
-    expect(badFrame(() => decodeFrame('{"jsonrpc":"2.0"}')).message).toContain("t1:");
-    badFrame(() => decodeFrame("t2:AAAA"));
-    badFrame(() => decodeFrame(""));
+  test("a text frame, an empty frame: bad-frame before any decrypt", () => {
+    expect(badFrame(() => binaryFrame('{"jsonrpc":"2.0"}')).message).toContain("text frame");
+    expect(badFrame(() => binaryFrame("t1:AAAA")).message).toContain("text frame");
+    expect(badFrame(() => binaryFrame(new Uint8Array(0))).message).toContain("empty");
   });
 
-  test("the largest Noise message fits; one character more is refused before decoding", () => {
-    const biggest = new Uint8Array(MAX_NOISE_MESSAGE).fill(7);
-    const text = encodeFrame(biggest);
-    expect(text.length).toBe(MAX_FRAME_TEXT);
-    expect(decodeFrame(text).length).toBe(MAX_NOISE_MESSAGE);
-    expect(badFrame(() => decodeFrame(`${text}A`)).message).toContain("too long");
-    // Too long even though the extra text is not base64: the length check comes first.
-    expect(badFrame(() => decodeFrame(`${text}!`)).message).toContain("too long");
+  test("the largest Noise message fits; one byte more is refused", () => {
+    expect(binaryFrame(new Uint8Array(MAX_NOISE_MESSAGE)).length).toBe(MAX_NOISE_MESSAGE);
+    expect(badFrame(() => binaryFrame(new Uint8Array(MAX_NOISE_MESSAGE + 1))).message).toContain(
+      "too long",
+    );
+  });
+
+  test("a versioned flight round-trips; the version byte allows one byte over the Noise maximum", () => {
+    const m = new Uint8Array(MAX_NOISE_MESSAGE).fill(9);
+    const flight = withVersion(2, m);
+    expect(flight[0]).toBe(2);
+    expect(flight.length).toBe(MAX_NOISE_MESSAGE + 1);
+    expect(readVersioned(flight, 2).length).toBe(MAX_NOISE_MESSAGE);
+    badFrame(() => readVersioned(new Uint8Array(MAX_NOISE_MESSAGE + 2).fill(2), 2));
+  });
+
+  test("version skew is named before any crypto, with the remote version", () => {
+    const mismatch = (fn: () => unknown): NoiseError => {
+      try {
+        fn();
+      } catch (error) {
+        expect((error as NoiseError).kind).toBe("version-mismatch");
+        return error as NoiseError;
+      }
+      throw new Error("expected version-mismatch");
+    };
+    expect(mismatch(() => readVersioned("t1:AAAA", 2)).remoteVersion).toBe(1);
+    expect(mismatch(() => readVersioned(Uint8Array.of(3), 2)).remoteVersion).toBe(3);
+    expect(mismatch(() => readVersioned(Uint8Array.of(1, 9, 9), 2)).remoteVersion).toBe(1);
+    // A lone byte of our own version is not a refusal; other text is garbage, not a version.
+    badFrame(() => readVersioned(Uint8Array.of(2), 2));
+    badFrame(() => readVersioned('{"jsonrpc":"2.0"}', 2));
+    badFrame(() => readVersioned(new Uint8Array(0), 2));
   });
 });
 

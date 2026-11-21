@@ -23,7 +23,7 @@ import { Agent } from "@tentacle/agent";
 import { PermissionBroker, type PermissionRequest, type PermissionResponse } from "@tentacle/core";
 import { type PushPayload, RELAY_PROTOCOL_VERSION, encodeBase64Url } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
-import { type DuplexChannel, RpcPeer } from "@tentacle/transport";
+import { type ByteCarrier, type CarrierFrame, RpcPeer, carrierFrameOf } from "@tentacle/transport";
 import { noiseInitiator, systemRandom } from "@tentacle/transport/noise";
 import { publicKeyOf } from "@tentacle/transport/noise";
 import { sealPush } from "@tentacle/transport/push";
@@ -582,13 +582,17 @@ describe("a phone that goes away DETACHES its session (the relay path, F17)", ()
   });
 });
 
-/** A phone's `DuplexChannel` over a real WebSocket at the relay address. */
-function dialPhone(url: string): Promise<{ channel: DuplexChannel; ws: WebSocket }> {
+/** A phone's `ByteCarrier` over a real WebSocket at the relay address. */
+function dialPhone(url: string): Promise<{ channel: ByteCarrier; ws: WebSocket }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
-    let onMessage: ((d: string) => void) | undefined;
+    let onMessage: ((d: CarrierFrame) => void) | undefined;
+    ws.binaryType = "arraybuffer";
     let onClose: (() => void) | undefined;
-    ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+    ws.addEventListener("message", (e) => {
+      const frame = carrierFrameOf(e.data);
+      if (frame !== null) onMessage?.(frame);
+    });
     ws.addEventListener("close", () => onClose?.());
     ws.addEventListener("error", () => reject(new Error(`phone socket error ${url}`)));
     ws.addEventListener("open", () =>

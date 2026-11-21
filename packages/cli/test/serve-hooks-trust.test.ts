@@ -22,7 +22,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { addDevice, readIdentity } from "@tentacle/daemon";
 import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import type { HooksTrustParams, HooksTrustResult } from "@tentacle/protocol";
-import { RpcPeer } from "@tentacle/transport";
+import { type CarrierFrame, RpcPeer, carrierFrameOf } from "@tentacle/transport";
 import { noiseInitiator, publicKeyOf, systemRandom } from "@tentacle/transport/noise";
 import { startRelay } from "../../../apps/relay/src/server.ts";
 import { loadConfig } from "../src/config.ts";
@@ -116,9 +116,13 @@ async function phoneOverRelay(address: string, configDir: string, answer: boolea
   const identity = readIdentity(configDir);
   if (!identity.ok) throw new Error(identity.reason);
   const ws = new WebSocket(address);
-  let onMessage: ((data: string) => void) | undefined;
+  let onMessage: ((data: CarrierFrame) => void) | undefined;
+  ws.binaryType = "arraybuffer";
   let onClose: (() => void) | undefined;
-  ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+  ws.addEventListener("message", (e) => {
+    const frame = carrierFrameOf(e.data);
+    if (frame !== null) onMessage?.(frame);
+  });
   ws.addEventListener("close", () => onClose?.());
   await new Promise<void>((resolve, reject) => {
     ws.addEventListener("open", () => resolve());
@@ -126,9 +130,9 @@ async function phoneOverRelay(address: string, configDir: string, answer: boolea
   });
   stops.push(() => ws.close());
   const channel = {
-    send: (data: string) => ws.send(data),
+    send: (data: Uint8Array) => ws.send(data),
     close: () => ws.close(),
-    setOnMessage: (h: (data: string) => void) => {
+    setOnMessage: (h: (data: CarrierFrame) => void) => {
       onMessage = h;
     },
     setOnClose: (h: () => void) => {
