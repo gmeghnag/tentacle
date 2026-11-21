@@ -28,27 +28,23 @@
  * Recorded in the task doc's Execution (§ Drift) rather than guessed at here.
  */
 import type { ArtifactMeta } from "@tentacle/protocol";
+import { wantsPreview } from "./artifact-preview.ts";
 import type { ImageRef } from "./transcript-rows.ts";
 
-/** The largest presented image whose thumbnail is fetched unopened (Owner Q6). */
-export const THUMBNAIL_MAX_BYTES = 1024 * 1024;
-
 /**
- * Whether a presented artifact's image earns a thumbnail (`visibleRefs`' rule):
- * an image at or under 1 MiB. A bigger one, and every other kind, draws its kind
- * glyph until the person opens it — a 20 MiB photo is not quietly downloaded onto
- * a phone (Owner Q6).
+ * The `ImageRef` a presented artifact contributes to this driver: the sha256 is
+ * its id (the cache key and the daemon's handle), the title only a label. Which
+ * artifacts contribute one is `artifact-preview.ts`'s `wantsPreview`
+ * (docs/feat/mobile-file-preview-cards.md: every previewable kind up to 5 MiB).
  */
-export function wantsThumbnail(meta: { readonly kind: string; readonly size: number }): boolean {
-  return meta.kind === "image" && meta.size <= THUMBNAIL_MAX_BYTES;
-}
-
-/**
- * The `ImageRef` a presented image contributes to this driver: the sha256 is its
- * id (the cache key and the daemon's handle), the title only a label.
- */
-export function artifactImageRef(meta: ArtifactMeta): ImageRef {
-  return { id: meta.sha256, mimeType: meta.mimeType, size: meta.size, name: meta.title };
+export function artifactPreviewRef(meta: ArtifactMeta): ImageRef {
+  return {
+    id: meta.sha256,
+    mimeType: meta.mimeType,
+    size: meta.size,
+    name: meta.title,
+    artifact: meta,
+  };
 }
 
 /** Thumbnails held at once: an id is dropped in LRU order past this. */
@@ -60,16 +56,40 @@ export const MAX_IN_FLIGHT = 4;
 /** Rows either side of the visible window that are pre-fetched (a flick is instant). */
 export const PREFETCH_ROWS = 8;
 
-/** Bytes a thumbnail request may carry (`MAX_IMAGE_BYTES`-bounded above by the wire). */
-export type Thumbnail = { readonly id: string; readonly uri: string };
+/**
+ * What a card's preview shows, once the phone has made it
+ * (docs/feat/mobile-file-preview-cards.md): a PICTURE (an image's own file, or a
+ * QuickLook page of a PDF / HTML / SVG, with its pixel size and a PDF's page
+ * count) or the first bytes of a markdown / text file, which the app draws.
+ */
+export type ArtifactPreview =
+  | {
+      readonly kind: "picture";
+      readonly uri: string;
+      readonly width?: number;
+      readonly height?: number;
+      readonly pages?: number;
+    }
+  | { readonly kind: "lines"; readonly text: string };
+
+/** A loaded thumbnail: the uri to draw, and a card's preview when it has one. */
+export type Thumbnail = {
+  readonly id: string;
+  readonly uri: string;
+  readonly preview?: ArtifactPreview;
+};
 
 /**
  * How the bytes arrive. Injected, so the pure decisions are testable now and the
  * transport can be wired when it exists (AGENTS §7: the seam, not the guess).
  */
 export interface ThumbnailSource {
-  /** Resolve an image's displayable URI, or null when it cannot be shown. */
-  fetch(ref: ImageRef, signal: AbortSignal): Promise<Thumbnail | null>;
+  /**
+   * Resolve an image's displayable URI, or null when it cannot be shown —
+   * `"gone"` when the daemon said the bytes no longer exist
+   * (`ArtifactUnavailable`): the card then reads "no longer available".
+   */
+  fetch(ref: ImageRef, signal: AbortSignal): Promise<Thumbnail | null | "gone">;
 }
 
 export interface ThumbnailState {
@@ -79,6 +99,8 @@ export interface ThumbnailState {
   readonly inFlight: readonly string[];
   /** Ids that failed (never retried this session: the bytes are not coming). */
   readonly failed: readonly string[];
+  /** Of those, the ids the daemon said are GONE (a card that cannot be opened). */
+  readonly gone?: readonly string[];
 }
 
 export const initialThumbnails: ThumbnailState = { loaded: [], inFlight: [], failed: [] };
@@ -122,14 +144,14 @@ export function visibleRefs(
     if (row === undefined) {
       continue;
     }
-    // A presented IMAGE brings a thumbnail too (model-artifacts D9, Owner Q6):
-    // only up to 1 MiB (`artifact-thumbnail.ts` `THUMBNAIL_MAX_BYTES`), so a big
-    // image is opened rather than quietly downloaded onto the phone.
+    // A presented artifact brings its preview (docs/feat/mobile-file-preview-cards.md):
+    // a previewable kind up to `PREVIEW_MAX_BYTES`, so a big file is opened
+    // rather than quietly downloaded onto the phone.
     if (row.kind === "tool") {
       const meta = (row as { readonly artifact?: ArtifactMeta }).artifact;
-      if (meta !== undefined && wantsThumbnail(meta) && !seen.has(meta.sha256)) {
+      if (meta !== undefined && wantsPreview(meta) && !seen.has(meta.sha256)) {
         seen.add(meta.sha256);
-        out.push(artifactImageRef(meta));
+        out.push(artifactPreviewRef(meta));
       }
       continue;
     }
@@ -215,6 +237,13 @@ export function failed(state: ThumbnailState, id: string): ThumbnailState {
   };
 }
 
+/** The daemon said the bytes are gone: a failure that also marks the card unavailable. */
+export function gone(state: ThumbnailState, id: string): ThumbnailState {
+  const next = failed(state, id);
+  const was = state.gone ?? [];
+  return { ...next, gone: was.includes(id) ? was : [...was, id] };
+}
+
 /** A request was abandoned (scrolled away / unmounted): not a failure. */
 export function aborted(state: ThumbnailState, id: string): ThumbnailState {
   return { ...state, inFlight: state.inFlight.filter((entry) => entry !== id) };
@@ -294,7 +323,13 @@ export function createThumbnailDriver(
         };
         void source.fetch(request.ref, request.controller.signal).then(
           (thumb) => {
-            settle(thumb === null ? failed(state, id) : loaded(state, thumb));
+            settle(
+              thumb === null
+                ? failed(state, id)
+                : thumb === "gone"
+                  ? gone(state, id)
+                  : loaded(state, thumb),
+            );
           },
           () => {
             settle(failed(state, id));

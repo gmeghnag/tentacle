@@ -44,6 +44,7 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
+  Dimensions,
   Linking,
   Platform,
   Pressable,
@@ -69,6 +70,7 @@ import { exportFileName, exportText } from "./src/app-log.ts";
 import { ARTIFACT_CACHE, shareCachedCopy } from "./src/artifact-cache-expo.ts";
 import { ARTIFACT_FEEDS } from "./src/artifact-feed.ts";
 import { sessionKey } from "./src/artifact-seen-store.ts";
+import { artifactPreviewSource } from "./src/artifact-thumbnail.ts";
 import { CHART_SETTINGS } from "./src/chart-settings-expo.ts";
 import type { ChartSettings } from "./src/chart-settings-store.ts";
 import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
@@ -185,7 +187,7 @@ import {
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
-import { type Palette, paletteFor } from "./src/theme.ts";
+import { type Palette, paletteFor, space } from "./src/theme.ts";
 import { HeaderIcon } from "./src/ui/HeaderIcon.tsx";
 import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
 import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
@@ -1476,12 +1478,22 @@ function SessionRoute({
         artifacts: { feed: ARTIFACT_FEEDS.feed(computerId, sessionId) },
         // The photos this phone sent keep their pixels after a resync rebuilds
         // the rows from history (fix/mobile-qa-1119 row 12): the outbox store's
-        // `ref id → copy` index answers the thumbnail port.
-        thumbnails: sentPhotoSource(async (id) => {
-          const { store } = outboxOf(computerId);
-          await store.load();
-          return store.data.sentPhotos?.[id];
-        }),
+        // `ref id → copy` index answers the thumbnail port. Anything else — a
+        // presented file's card — gets its preview made on this phone
+        // (docs/feat/mobile-file-preview-cards.md), read through the screen's
+        // own published reader.
+        thumbnails: sentPhotoSource(
+          async (id) => {
+            const { store } = outboxOf(computerId);
+            await store.load();
+            return store.data.sentPhotos?.[id];
+          },
+          artifactPreviewSource({
+            computerId,
+            reader: () => ARTIFACT_FEEDS.feed(computerId, sessionId).read(),
+            width: Dimensions.get("window").width - 2 * space.inset,
+          }),
+        ),
       });
       // The link's own status: the banner's `reconnecting` (F8/F9).
       unsubscribe = link.onStatus((status) => created?.link(status.state === "up"));
