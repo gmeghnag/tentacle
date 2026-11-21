@@ -299,6 +299,9 @@ changelog fragment.
   creates a merge commit and resolves conflicts in `App.tsx`/`Composer.tsx`, and this
   round forbids commits. Left to the orchestrator. Simulator/phone look of
   variant B unverified (Execution §7 blocker still applies).
+- **Merge of `main` (e12a8ce3, claude-opus-5-5, 2026-11-21):** conflicts in `App.tsx`, `e2e/run.ts`, `TranscriptRow.tsx`, `Composer.tsx` (main: composer-buttons, file-preview-cards, projects-app, jump-arrow).
+  Resolved keeping both: theme-beta/settings imports + main's `space` (dropped unused `paletteFor`); flows `36-theme-beta-shots` + `36-preview-cards` + `37-projects` and both session vars; main's `Animated`/`Easing`/`useReduceMotion`/preview-card imports, with `Text`/`TextInput` still from the `ui/Text.tsx` seam (no new raw RN `Text` in main's code).
+  Gate after merge: `bun run typecheck` clean, `bun run lint` clean (0/0), `bun test apps/mobile` 4218 pass / 0 fail.
 
 ## Review
 
