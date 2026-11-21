@@ -690,6 +690,51 @@ production code the plan does not cover → recommended as a separate `fix/` tas
 changed: the intent row (still waiting on the owner's `askedFor` ruling) and
 `tsc -p apps/mobile` (needs an installed checkout; the merge gate).
 
+### Fill-rate measurement (owner go-ahead 21/11)
+
+#### Measurement — shell `description` fill rate (run 2026-11-21)
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Setup.** `.tentacle/tmp/shell-intent-line/measure.ts` (bun, gitignored): 20 fixed prompts that each need one
+shell command (10 Italian, 10 English: tests, git status/log/diff/branch, grep/rg, ls, du, typecheck/lint/build,
+logs, `bun --version`, port 8080). Each sent ONCE per model, single turn, with:
+- the branch's REAL tools: `new ToolRegistry().registerAll(builtinTools).definitions()` from `@tentacle/tools`
+  (all 7 built-ins, so the model can also pick a non-shell tool; the script asserts `shell` has `description`);
+- the REAL system prompt: `loadConfig({ cwd: <worktree>, scaffold: false, profile })` → `config.systemPrompt`
+  (40 266 chars, includes this repo's AGENTS.md);
+- the provider from `createModelProvider` (`@tentacle/providers`) on the owner's config; no key printed.
+
+Only the model's FIRST tool call is taken (stream aborted at it). Fill = shell calls with a non-empty string
+`description` / shell calls. Words = whitespace split; graphemes = `Intl.Segmenter`. Language match =
+stopword/verb-list heuristic (Italian vs English word lists, ties → unknown), every row then checked by hand —
+the hand count is the one reported.
+
+| Model | Shell calls | Fill % | Median words | Median graphemes | > 8 words | > 72 graphemes | Language match |
+|---|---|---|---|---|---|---|---|
+| DeepSeek V4.1 Flash (`--profile deepseek`) | 20/20 | **100 %** (20/20) | 6 | 35 | 0 | 0 | 18/20 (IT prompts #2, #6 answered in English) |
+| Qwen3.8 27B local (default profile) | 19/20 (#15 → `fs_read`) | **100 %** (19/19) | 5 | 32 | 0 | 0 | 16/19 (IT prompts #1, #7, #8 answered in English) |
+| Anthropic | — | — | — | — | — | — | skipped: no Anthropic provider/profile in the owner's config, no `ANTHROPIC_API_KEY` |
+
+Samples:
+- DeepSeek: «Mostra gli ultimi 5 commit su una riga» (`git log --oneline -5`) · «Run Biome lint on the whole repo»
+  (`bun run lint`) · «Find process listening on port 8080» (`ss`/`lsof`/`netstat` chain).
+- Qwen: «Cerca PermissionBroker nel sorgente» (`grep -rn …`) · «Esegue il typecheck di tutto il progetto»
+  (`bun run typecheck`) · «List docs/feat files, newest first» (`ls -lt docs/feat`).
+
+Observations:
+- Every language miss is an Italian prompt answered in English (never the reverse) — Q8 already accepts it
+  (shown as written). Both models otherwise follow the user's language.
+- The sentence tracks the command actually sent, not the request: DeepSeek opened 4 English prompts with an
+  exploratory command (#11 «Check repo layout and git state», #13 «Check working directory and contents»,
+  #15 «List repo root and read package.json») and its sentence said so honestly.
+- No sentence came near the 72-grapheme cap (longest: DeepSeek 50, Qwen 40); the ≤ 8-word ask was respected 39/39.
+
+**Verdict (Q9, ≥ 80 %):** DeepSeek 100 % ✅ · Qwen 100 % ✅ · Anthropic not measured (not configured) —
+no system-prompt line needed for the measured providers. Raw per-row data: `.tentacle/tmp/shell-intent-line/raw.json`.
+
+**Anthropic: still to test** — no Anthropic API-key profile in the owner's config (tracked in TODO `eval/anthropic-untested`).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-21* (fresh context; SAME model as the planner and as the Context/Implementation author — shared blind spots possible. The executor commits are tagged deepseek.)
