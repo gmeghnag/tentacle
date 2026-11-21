@@ -153,3 +153,37 @@ bounded wait's range test.
 *— claude-opus-5-5 (executor), 2026-11-21*
 
 ## Review
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM; the view-model half holds).
+
+1. **MEDIUM — a stale tap-wait navigates after the person chose something else**
+   (`apps/mobile/App.tsx:1154–1157`, `awaitProbe` → `onOpen(settled)`; open branch
+   `App.tsx:1189–1191`). `settling` only blocks a second *wait*; a tap on an
+   answering row B (`projectTap` → `"open"`), "Add" (Pair), Settings, or backgrounding
+   is not blocked and does not bump `tapGeneration`. Scenario: tap unreachable A →
+   within 4 s tap working B (B's sessions open) → A's re-probe answers →
+   `navigation.navigate("Sessions", {computerId: A})` yanks the person to A (or off
+   the Pair screen). The `tapGeneration` guard is vacuous (no second `awaitProbe` can
+   run while `settling` is true), so the plan's "two taps → one open only" failure
+   mode is NOT covered. Fix: bump `tapGeneration` on every tap/open/menu/onAdd and on
+   blur (`useFocusEffect` cleanup), and drop the settle if not focused; keep that
+   decision testable (pure `tapSettled(row, {stale})`-style input).
+
+Gate: `project-rows.test.ts` 12 pass / 0 fail; `bun run lint` clean; `bun run
+typecheck` clean. Full `bun test` not re-run (narrow scope asked).
+Mutation: `probed[i] !== true` → `false` ⇒ 2 fail (checking tests); reverted,
+tree byte-identical (`git status` clean), 12 pass again.
+Premise: TRUE at module level — absent observation fell into `failedState` (`missing`
+is `ok:false`). Executor's drift note (gate hit a settled-but-failed probe) is
+plausible and the re-probe-then-open path addresses it; not verified on simulator.
+Attacks tried: (a) other `SectionState`/`ProjectTone` consumers missing `checking`/`wait`
+— none, typecheck clean; (b) 15 s re-reads flashing `Checking…` — guarded by
+`inputsRef`/`painted`, holds; (c) wait timeout — race resolves, `settling` released,
+tick re-probes, holds (the orphaned probe's result is dropped, acceptable);
+(d) row removed mid-wait — `tapSettled(undefined)` → fallback, holds; (e) concurrent
+tap-probe + focus-probe double-dials the same daemon — harmless, not a finding.
+No §7 invariant touched (UI only, no wire/persistence). Executor behaved well:
+honest drift note, red-first evidence, real mutations; missed the cross-path race.
+Same model family as the executor (fresh context only).
+
+*— claude-opus-5-5, 2026-11-21*
