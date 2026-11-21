@@ -709,3 +709,13 @@ session over the relay after the relay deploy (§Deploy step 4) and BF0-E2.
 - *§7 one session path / single broker*: only the carrier under `SecureChannel` changed; `RpcPeer`/`Connection`/`RemoteClient`/`foreground-gate` untouched. Holds.
 
 **Executor behaviour:** plan followed; drifts D1–D5 declared honestly; mutation table reproducible where sampled. Overstated one property in T-M1 ("neither count nor reset") that its test does not prove.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Verdict: APPROVE.** Diff `HEAD~1` (`e9b8f2a0`): test-only, plus the doc's "Fix round 1".
+
+- **Finding 1 — FIXED, verified.** New case `apps/mobile/test/link-diagnosis.test.ts:126-133` (1× unreachable, `skew(3)`, `skew(1)`, 1× unreachable → `unreachable`). Mutation `streak += 1` in the skew branch (`link-diagnosis.ts:96`) → **11 pass, 1 fail** (the new case); reverted → 12 pass, 0 fail; `git status` clean.
+- **Regressions:** no production file changed; `bun run lint` clean (2192 files); `bun run typecheck` clean (root + mobile + relay).
+- **Note (not a blocker):** the commit `e9b8f2a0` says `(deepseek)` while "Fix round 1" is signed `claude-opus-5-5`. AGENTS §10 wants the signature to name the model that actually wrote it; the orchestrator should correct whichever one is wrong.
