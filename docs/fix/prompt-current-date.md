@@ -431,6 +431,47 @@ reason) instead of being written inline in the call. No production code touched.
 `core/current-date-bounds`, `agent/date-stamp`, `daemon/date-stamp` → 36 pass,
 0 fail; `bunx biome check` on the file → clean.
 
+### Fix round 3 — the gate's one red test (a prompt echo that read the stamped copy)
+
+*— claude-opus-5-5, 2026-11-21*
+
+The full suite on this branch had exactly **one** failure, the report's:
+`apps/mobile/test/new-session-link.test.ts:117` expected `"ok:first words"`,
+got `"ok:[Sat 2026-11-21 03:34 UTC]\nfirst words"`. Not a feature defect: the
+test's fake model echoes the prompt it was *given* (the MODEL's copy, which
+`renderForModel` stamps on a session's first message) and the assertion
+compared that echo byte for byte. Its property is *which session received the
+text*, not the prompt's bytes.
+
+Fixed in the test only: the fake model now reads the prompt through the
+feature's own helper (`stripped`, `packages/daemon/test/support/model-prompt.ts`
+— the seam every other stamped-prompt test already uses), so the echo is the
+clean text and the assertion is unchanged. No production code touched.
+
+**Non-vacuity (§9):** with the echo mutated to `ok:OTHER` the test fails
+(`Expected: "ok:first words" / Received: "ok:OTHER"`) — the assertion still
+proves the send landed in the freshly created session, and would catch a
+create/attach mix-up. Reverted.
+
+**Swept for the same class** (an exact echo of a user prompt through a real
+daemon): `rg` for every fake model echoing prompt content —
+`apps/mobile/test/{session-link,outbox-link}.ts`, `packages/client/test/
+{foreign-turns,clear-race}.ts`, `packages/daemon/test/integration.test.ts` and
+the TUI fakes. All are already safe, and for a stated reason:
+`foreign-turns`/`send-now`/`queued-broadcast`/`cli` dispatches already use
+`stripped`; `outbox-link`'s and `session-link`'s assertions go through the
+STORED history (`userTexts`, which sees the clean `content`) and their model
+dispatches on `startsWith("hold…")`/`"ask"`, which a prefix does not change;
+`integration.test.ts`'s providers read `GatedProvider`'s already-`stripped`
+messages; the TUI fakes are scripted handles (no daemon, hence no stamp).
+
+**Ran (affected files only, per the brief):** `apps/mobile/test/
+new-session-link.test.ts` → 2 pass, 0 fail; `+ session-link + outbox-link` →
+24 pass, 0 fail; `bunx tsc -p apps/mobile --noEmit` → clean; `bunx biome check`
+on the file → clean. The branch-wide suite was run once as evidence: **12021
+pass, 3 opt-in skips, 1 fail — this one, now green.** Not committed (per the
+brief).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-21* (fresh context; same model as the Execution-resume pass, different model from the DeepSeek executor)

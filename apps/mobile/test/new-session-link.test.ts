@@ -25,6 +25,7 @@ import { Connection, SessionHost, SessionPersister } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import { SpyDaemonStore } from "../../../packages/daemon/test/support/daemon-store-spy.ts";
+import { stripped } from "../../../packages/daemon/test/support/model-prompt.ts";
 import { createFreshSession, createSessionController } from "../src/session-controller.ts";
 
 const CWD = "/tmp/mobile-new-session-link";
@@ -32,7 +33,12 @@ const CWD = "/tmp/mobile-new-session-link";
 class Model implements ModelProvider {
   readonly id = "echo";
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
-    const prompt = [...request.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+    // The MODEL's copy of the prompt carries the date stamp this feature
+    // prepends (docs/fix/prompt-current-date.md); the echo is about WHICH
+    // session got the text, so it is read through that one line.
+    const prompt = stripped(
+      [...request.messages].reverse().find((m) => m.role === "user")?.content ?? "",
+    );
     yield { type: "text", delta: `ok:${prompt}` };
     yield { type: "done" };
   }
