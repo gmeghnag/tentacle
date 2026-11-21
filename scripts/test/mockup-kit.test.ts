@@ -174,6 +174,52 @@ describe("emission", () => {
     expect(root.get("--m-step-body-border-top-width")).toBe("0.3333px");
   });
 
+  test("the mascot's nine palettes are TUI tokens, its `names` list is metadata", () => {
+    const dark = rule(fresh["tui-tokens.css"], '[data-tui="dark"]');
+    const light = rule(fresh["tui-tokens.css"], '[data-tui="light"]');
+    // Every palette × tone is a colour the kit can paint the mascot with.
+    for (const p of ["soft", "logo", "glow", "cyan", "teal", "coral", "mint", "amber", "sky"]) {
+      for (const tone of ["k", "e", "f", "s", "b"]) {
+        expect(dark.get(`--tui-mascot-tones-${p}-${tone}`)).toMatch(/^#[0-9a-f]{6}$/i);
+        expect(light.get(`--tui-mascot-tones-${p}-${tone}`)).toBe(
+          dark.get(`--tui-mascot-tones-${p}-${tone}`) ?? "",
+        );
+      }
+    }
+    expect(dark.get("--tui-mascot-tones-soft-k")?.toLowerCase()).toBe("#7b3fc0");
+    // The order list is read by JS, painted by nothing: no token, no colour parse.
+    expect([...dark.keys()].filter((k) => k.startsWith("--tui-mascot-names"))).toEqual([]);
+  });
+
+  test("non-vacuity: an unknown colour name still throws, in a palette and in an array", () => {
+    const inTone = {
+      ...input,
+      tui: {
+        ...input.tui,
+        dark: {
+          ...input.tui.dark,
+          mascot: {
+            ...(input.tui.dark.mascot as Record<string, unknown>),
+            tones: {
+              ...((input.tui.dark.mascot as { tones: Record<string, unknown> }).tones ?? {}),
+              soft: { K: "chartreuse" },
+            },
+          },
+        },
+      },
+    };
+    expect(() => generate(inTone)).toThrow(
+      'tui.dark.mascot.tones.soft.K: unknown colour name "chartreuse"',
+    );
+    const inArray = {
+      ...input,
+      tui: { ...input.tui, dark: { ...input.tui.dark, chart: { series: ["chartreuse"] } } },
+    };
+    expect(() => generate(inArray)).toThrow(
+      'tui.dark.chart.series[0]: unknown colour name "chartreuse"',
+    );
+  });
+
   test("an unknown chalk colour name or easing throws (explicit tables, no fallback)", () => {
     const badTui = {
       ...input,

@@ -3,7 +3,7 @@
     "apps/mobile/src/chat-header.ts": "9e509a71b3801a4486a838b353c31c96270fedcb",
     "apps/mobile/src/motion.ts": "5ba1e612ac297c4c408d4c3201b32ac8bfab7745",
     "apps/mobile/src/screens/ComputersScreen.tsx": "ac1fe5dee031bc713182ae3cee279af4ebed1daf",
-    "apps/mobile/src/screens/PermissionSheet.tsx": "5ae742cbb7d2eab9a8d7eb1ed66d87bfddde882f",
+    "apps/mobile/src/screens/PermissionSheet.tsx": "7ad6485e5d63f6bc963fdcf2a84e809fa621cc08",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "5cb64e4a707fb3ade80d489dc643e6bfac5cb60e",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "530772143b4f87280e31d996de1c9d8d2c6577ab",
     "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "42e5e0df45435214dd7578ad46eb0e09884a3a56",
@@ -26,7 +26,7 @@
     "packages/tui/src/components/Thinking.tsx": "c9f80123d32ad706b7c96d858b822d9336d15d2d",
     "packages/tui/src/shimmer.ts": "96515bf4852e36f0cf9ca27a3f665d00e37f076c",
     "packages/tui/src/spinner.ts": "abdf05f86853566e55794918c7b51a4778308c7b",
-    "packages/tui/src/theme.ts": "465a4a1fcf6b1bfb6ab637772458d945397b414f"
+    "packages/tui/src/theme.ts": "340d6e6415d112c5857283728fb77c36c188ad03"
   },
   "timings": {
     "ACTIVITY_CLOCK_TICK": 1000,
@@ -401,6 +401,74 @@
           "#3987e5",
           "#e66767"
         ]
+      },
+      "mascot": {
+        "names": ["soft", "logo", "glow", "cyan", "teal", "coral", "mint", "amber", "sky"],
+        "tones": {
+          "soft": {
+            "K": "#7B3FC0",
+            "E": "#3E1A5E",
+            "F": "#B387EA",
+            "S": "#A274DE",
+            "B": "#DDBFF8"
+          },
+          "logo": {
+            "K": "#6E36AE",
+            "E": "#3E1A5E",
+            "F": "#A267DB",
+            "S": "#9258CF",
+            "B": "#CFA8F3"
+          },
+          "glow": {
+            "K": "#C9A6F2",
+            "E": "#3E1A5E",
+            "F": "#8E4BC4",
+            "S": "#8143B8",
+            "B": "#B583E0"
+          },
+          "cyan": {
+            "K": "#0E8AA8",
+            "E": "#083A47",
+            "F": "#5FE0F2",
+            "S": "#3FCFE6",
+            "B": "#B7F3FB"
+          },
+          "teal": {
+            "K": "#14857A",
+            "E": "#0A3B36",
+            "F": "#5CD6C4",
+            "S": "#40C2AF",
+            "B": "#B5EEE4"
+          },
+          "coral": {
+            "K": "#C2475A",
+            "E": "#5A1622",
+            "F": "#F58C93",
+            "S": "#EC7480",
+            "B": "#FFC6C2"
+          },
+          "mint": {
+            "K": "#3C9A5C",
+            "E": "#163D24",
+            "F": "#8FE0A6",
+            "S": "#73D28E",
+            "B": "#CFF5D9"
+          },
+          "amber": {
+            "K": "#B7791F",
+            "E": "#4A2E07",
+            "F": "#F7C35C",
+            "S": "#EEB043",
+            "B": "#FFE3A8"
+          },
+          "sky": {
+            "K": "#3A6FD0",
+            "E": "#13285A",
+            "F": "#8DB4F7",
+            "S": "#73A0F0",
+            "B": "#CFE0FF"
+          }
+        }
       }
     },
     "light": {
@@ -478,6 +546,74 @@
           "#2a78d6",
           "#e34948"
         ]
+      },
+      "mascot": {
+        "names": ["soft", "logo", "glow", "cyan", "teal", "coral", "mint", "amber", "sky"],
+        "tones": {
+          "soft": {
+            "K": "#7B3FC0",
+            "E": "#3E1A5E",
+            "F": "#B387EA",
+            "S": "#A274DE",
+            "B": "#DDBFF8"
+          },
+          "logo": {
+            "K": "#6E36AE",
+            "E": "#3E1A5E",
+            "F": "#A267DB",
+            "S": "#9258CF",
+            "B": "#CFA8F3"
+          },
+          "glow": {
+            "K": "#C9A6F2",
+            "E": "#3E1A5E",
+            "F": "#8E4BC4",
+            "S": "#8143B8",
+            "B": "#B583E0"
+          },
+          "cyan": {
+            "K": "#0E8AA8",
+            "E": "#083A47",
+            "F": "#5FE0F2",
+            "S": "#3FCFE6",
+            "B": "#B7F3FB"
+          },
+          "teal": {
+            "K": "#14857A",
+            "E": "#0A3B36",
+            "F": "#5CD6C4",
+            "S": "#40C2AF",
+            "B": "#B5EEE4"
+          },
+          "coral": {
+            "K": "#C2475A",
+            "E": "#5A1622",
+            "F": "#F58C93",
+            "S": "#EC7480",
+            "B": "#FFC6C2"
+          },
+          "mint": {
+            "K": "#3C9A5C",
+            "E": "#163D24",
+            "F": "#8FE0A6",
+            "S": "#73D28E",
+            "B": "#CFF5D9"
+          },
+          "amber": {
+            "K": "#B7791F",
+            "E": "#4A2E07",
+            "F": "#F7C35C",
+            "S": "#EEB043",
+            "B": "#FFE3A8"
+          },
+          "sky": {
+            "K": "#3A6FD0",
+            "E": "#13285A",
+            "F": "#8DB4F7",
+            "S": "#73A0F0",
+            "B": "#CFE0FF"
+          }
+        }
       }
     }
   },

@@ -722,6 +722,43 @@ drawer-nav,hub-button-motion}`); `tsc` on a scratch tsconfig over the new script
 full `bun run check` (orchestrator) and `tsc -p apps/mobile` for the 8 edited
 mobile files (import-only edits).
 
+### Main-merge fix
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Symptom.** After merging `main` (which brought `feat/tui-mascot`), every run of
+the kit test aborted at import time:
+`mockup-kit: tui.dark.mascot.names[0]: unknown colour name "soft"` —
+`emit.ts:135` (`cssColor`) reached from `flatten` (`:316-324`) via `tuiCss`, so the
+whole file failed (0 pass) and `kit-data.json` / `tui-tokens.css` were stale.
+
+**Cause (one sentence).** `mascot.ts`'s `MascotPalettes` hangs a non-colour
+metadata list (`names`, the nine palette names in draw order) beside real colours
+(`tones`), and `flatten` treated every non-boolean leaf as a colour.
+
+**Fix (`scripts/mockup-kit/emit.ts`).** `flatten` now carries the key path under
+`tui.<mode>` and skips the leaves named in one explicit table,
+`TUI_METADATA = new Set(["mascot.names"])`, so the nine palettes × five tones emit
+as real tokens (`mascot.tones.soft.K` → `--tui-mascot-tones-soft-k: #7b3fc0`)
+in both modes, and the order list is left to `kit-data.json` (which already
+carries `tui` whole, so JS can read `names`). Deliberately NOT a by-type rule
+("skip arrays"): that would also swallow a genuinely unknown colour name in any
+array (`tui.chart.series`), i.e. it would silence the loud failure the emitter
+exists for. An unknown name anywhere still throws with its path.
+
+**Tests (`scripts/test/mockup-kit.test.ts`).** Two added: the nine palettes emit
+all 45 tone tokens in both modes with `soft.K = #7b3fc0` and *no* `--tui-mascot-names-*`
+token; and the non-vacuity pair — an unknown name inside a tone
+(`tui.dark.mascot.tones.soft.K`) and inside an array (`tui.dark.chart.series[0]`)
+each throw naming the path. Non-vacuity of the second was shown by mutation:
+replacing the explicit table with a by-type `return` on `Array.isArray` turned it
+red (25 pass / 2 fail) and the code was reverted.
+
+**Regenerated.** `bun run mockup-kit` → 3 files; the only change is +90 lines in
+`tools/mockup-kit/generated/tui-tokens.css` (`--tui-mascot-tones-*`, 45 per mode)
+plus the same subtree in `kit-data.json`. Gate: `bun test
+scripts/test/mockup-kit.test.ts` → 27 pass / 0 fail (25 before the two additions).
+
 ## Review
 
 **Verdict: APPROVE-WITH-NITS** (no HIGH; one MEDIUM, process-only).

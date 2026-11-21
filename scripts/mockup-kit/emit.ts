@@ -310,15 +310,29 @@ function tokensCss(input: GenInput, m: Metrics): string {
   return [head, ...themes, block(":root", root), figtree, figtreeFaces(input)].join("\n");
 }
 
-function flatten(prefix: string, v: unknown, out: string[], where: string): void {
+/**
+ * TUI token leaves that are NOT colours, named one by one (a by-type rule —
+ * "skip the arrays" — would swallow a genuinely unknown colour name too, which
+ * must keep throwing): `tokens.mascot.names` is the palettes' ORDER
+ * (`mascot.ts` `PALETTE_NAMES`), a list the JS reads and nothing paints. The
+ * palettes themselves ARE colours and emit normally
+ * (`mascot.tones.soft.K` → `--tui-mascot-tones-soft-k`).
+ */
+const TUI_METADATA: ReadonlySet<string> = new Set(["mascot.names"]);
+
+/** Flatten one token subtree into `--tui-*` lines; `path` is the key path *under* `tui.<mode>`. */
+function flatten(prefix: string, v: unknown, out: string[], where: string, path = ""): void {
   if (typeof v === "boolean") return;
   if (Array.isArray(v)) {
-    v.forEach((x, i) => flatten(`${prefix}-${i}`, x, out, `${where}[${i}]`));
+    v.forEach((x, i) => flatten(`${prefix}-${i}`, x, out, `${where}[${i}]`, `${path}[${i}]`));
     return;
   }
   if (typeof v === "object" && v !== null) {
-    for (const [k, x] of Object.entries(v))
-      flatten(`${prefix}-${kebab(k)}`, x, out, `${where}.${k}`);
+    for (const [k, x] of Object.entries(v)) {
+      const sub = path === "" ? k : `${path}.${k}`;
+      if (TUI_METADATA.has(sub)) continue;
+      flatten(`${prefix}-${kebab(k)}`, x, out, `${where}.${k}`, sub);
+    }
     return;
   }
   out.push(`${prefix}: ${cssColor(v, where)};`);
@@ -330,7 +344,7 @@ function tuiCss(input: GenInput): string {
   for (const mode of ["dark", "light"] as const) {
     const lines: string[] = [];
     for (const [k, v] of Object.entries(input.tui[mode]))
-      flatten(`--tui-${kebab(k)}`, v, lines, `tui.${mode}.${k}`);
+      flatten(`--tui-${kebab(k)}`, v, lines, `tui.${mode}.${k}`, k);
     out.push(block(`[data-tui="${mode}"]`, lines));
   }
   // The 16-colour SGR codes a real frame may carry (`K.tui.fromAnsi`): CHALK_CSS's names.
