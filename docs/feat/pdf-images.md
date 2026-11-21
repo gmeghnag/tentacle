@@ -1170,3 +1170,45 @@ watchdog and the 20 s timeout still bound that case, and each image object has i
 5 s guard.
 
 *— claude-opus-5-5, 2026-11-21*
+
+### S3 — fresh-context adversarial review
+
+**Verdict: PASS** (the STOP is correct; no HIGH/MEDIUM). Scope: S3 = `cf81f1f5`, which
+changes only this doc. No production code, test, protocol or persistence file changed
+(`git diff main...HEAD --name-only` has no `core/src/tool.ts`, `daemon/`, `agent/`,
+`protocol/`, `client/` or `tui/` path). So there is nothing to mutate, and no §7
+invariant is touched yet.
+
+**Premise table**
+| Claim | Check | Result |
+|---|---|---|
+| `MAX_ATTACHMENTS_PER_MESSAGE = 5`, `AttachmentsSchema.max(…)` | `protocol/src/attachment.ts:29,78` | TRUE |
+| The same schema backs `ChatMessage.attachments` and `media_message` | `protocol/src/session.ts:205,218` | TRUE |
+| A `role:"tool"` message with 6 refs is rejected | `.tentacle/tmp/pdf-images/rev-s3/cap.ts` → `6 … "Array must contain at most 5 element(s)"` | TRUE |
+| `maxSent = 32` per read | `core/src/pdf-images.ts:303` | TRUE |
+| The store reaches the agent only when `images.source === "store"` | `daemon/src/session-host.ts:125-129,1565,1653`; `cli/src/wiring.ts:403,788` | TRUE |
+| `ToolContext` is built from `this.config` in `agent.ts` | `agent/src/agent.ts:1308-1315` | TRUE |
+
+**Gate (narrow):** the 7 test files this branch touches → 109 pass / 0 fail. `bun run lint`
+is clean (2226 files). `bun run typecheck` is clean (root + mobile + relay). I did not
+re-run the full `bun test`, because S3 adds no code.
+
+**Attacks tried**
+- *Could S3 have been executed without breaking the protocol?* No. Every read with more
+  than 5 images would produce a tool message that the client refuses to validate or
+  persist (§7 persistence). Stopping was the right call; forcing the code would not have been.
+- *Pod / "not trusted":* the proposed seam builds the sink from `config.attachments`, which
+  is absent for `"client"` sources. So a pod gets no sink by construction. Holds.
+- *Option (b) and the S1 budget:* even 20 refs per tool message stay within what S1's
+  request budget can choose from, and any excess gets a reason line, so nothing is
+  dropped silently. Holds.
+
+**For the amendment (not blocking):** putting `putComplete` on `AttachmentSource`
+(`core/src/model.ts:262`) adds a write method to an interface that is read-only today.
+Make it optional, and type it so the provider side cannot call it.
+
+**Executor behaviour:** it stopped honestly at the load-bearing check, backed the stop with
+a repro, and wrote no speculative code. Reviewer is the same model family as the S3
+executor (claude-opus-5-5), in a fresh context only.
+
+*— claude-opus-5-5, 2026-11-21*
