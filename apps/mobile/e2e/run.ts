@@ -381,6 +381,13 @@ async function main(): Promise<number> {
       probes.url,
     ),
   );
+  // Flow 36's workspace files (docs/feat/mobile-file-preview-cards.md): a real
+  // 7-page PDF and a real PNG, generated per run, presented by `path`.
+  {
+    const { pngFixture, reportPdf } = await import("./preview-fixtures.ts");
+    await writeFile(join(runDir, "project", "q3-report.pdf"), reportPdf());
+    await writeFile(join(runDir, "project", "hero.png"), pngFixture(1280, 720));
+  }
   // The mock model runs in THIS process: no extra children to reap.
   const { startMockModel } = await import("./mock-model.ts");
   const mock = startMockModel({ holdMs: 120_000 });
@@ -1450,6 +1457,9 @@ export const FLOWS: readonly string[] = [
   "34-hub-dictate",
   "34-hub-new",
   "35-gallery-shots",
+  // docs/feat/mobile-file-preview-cards.md: the transcript's preview cards (a
+  // PDF page, an image, markdown lines, an HTML page), light and dark.
+  "36-preview-cards",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).
@@ -1545,6 +1555,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "34-hub-new": "HUBITEM_ID",
   // docs/feat/mobile-gallery-polish.md: the gallery's six chart kinds + a page.
   "35-gallery-shots": "GALLERY_ID",
+  "36-preview-cards": "PREVIEW_ID",
 };
 
 /** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */

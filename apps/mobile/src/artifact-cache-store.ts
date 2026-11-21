@@ -79,6 +79,11 @@ export interface ArtifactCache {
   put(computerId: string, meta: ArtifactMeta, bytes: Uint8Array): PutResult;
   /** The version a viewer is showing (`null` once it closes): never evicted. */
   hold(computerId: string, sha256: string | null): void;
+  /**
+   * The `file:` uri of a version already kept here, or `null` (never cached,
+   * evicted, too big): a card's preview is made from it with no dial.
+   */
+  uriOf(computerId: string, meta: ArtifactMeta): string | null;
   /** A `<sanitized title>.<ext>` copy for Share, or `null` when nothing is cached. */
   shareCopy(computerId: string, meta: ArtifactMeta): CachedCopy | null;
   /** The pairing is gone: the whole directory, share copies included. */
@@ -210,6 +215,12 @@ export function createArtifactCache(deps: {
         return;
       }
       holding.set(computerId, sha256);
+    },
+    uriOf(computerId, meta) {
+      const existing = fileFor(computerId, meta.sha256);
+      return existing === undefined
+        ? null
+        : deps.files.uriFor(`${cacheDir(computerId)}/${existing.name}`);
     },
     shareCopy(computerId, meta) {
       const existing = fileFor(computerId, meta.sha256);

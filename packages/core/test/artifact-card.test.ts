@@ -115,3 +115,20 @@ describe("artifactCard — the one view-model both frontends render (D7)", () =>
     expect(chart.glyph).not.toBe(artifactCard(meta({ kind: "markdown" })).glyph);
   });
 });
+
+describe("artifactCard — a PDF's page count (docs/feat/mobile-file-preview-cards.md)", () => {
+  test("pages sit between the type and the size; one page is singular", () => {
+    const pdf = meta({ kind: "pdf", mimeType: "application/pdf", size: 214_000 });
+    expect(artifactCard(pdf, { pages: 7 }).line2).toBe("PDF · 7 pages · 214 KB");
+    expect(artifactCard(pdf, { pages: 1 }).line2).toBe("PDF · 1 page · 214 KB");
+    // Unknown until the phone counted them: the line simply has no pages.
+    expect(artifactCard(pdf).line2).toBe("PDF · 214 KB");
+  });
+
+  test("pages are a PDF's only: another kind ignores the option, a bad count is dropped", () => {
+    expect(artifactCard(meta({ size: 3000 }), { pages: 4 }).line2).toBe("Text · 3 KB");
+    const pdf = meta({ kind: "pdf", mimeType: "application/pdf", size: 1000 });
+    expect(artifactCard(pdf, { pages: 0 }).line2).toBe("PDF · 1 KB");
+    expect(artifactCard(pdf, { pages: 2.5 }).line2).toBe("PDF · 1 KB");
+  });
+});
