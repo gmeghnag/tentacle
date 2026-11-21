@@ -40,7 +40,11 @@ describe("the four Figtree faces ship as real TrueType files", () => {
 
   test("the fonts folder bundles those faces and no other font", () => {
     const fonts = readdirSync(FONTS).filter((f) => /\.(ttf|otf)$/i.test(f));
-    expect(fonts.sort()).toEqual(Object.values(FIGTREE_FACES).map((f) => `${f}.ttf`).sort());
+    expect(fonts.sort()).toEqual(
+      Object.values(FIGTREE_FACES)
+        .map((f) => `${f}.ttf`)
+        .sort(),
+    );
   });
 });
 
