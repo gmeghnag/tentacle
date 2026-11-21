@@ -42,6 +42,9 @@ import {
 import { ChannelError } from "../src/link-machine.ts";
 import { PairingRefused, pairDevice } from "../src/pairing.ts";
 
+/** The serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const CODE = "K7M2QX9AB3";
 const IOS_ORIGIN = "http://192.168.1.8:4001";
 const dirs: string[] = [];
@@ -99,7 +102,7 @@ function store(fill = 1): { configDir: string; identity: DeviceIdentity } {
 
 /** The daemon on loopback with the device route, as `serve` wires it. */
 function serve(configDir: string): { url: string; audit: string[]; host: SessionHost } {
-  const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+  const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
   authorities.push(authority);
   const audit: string[] = [];
   const server = startWsServer({
@@ -167,6 +170,7 @@ async function human(
   if (claim === undefined) throw new Error("no claim");
   if (decision.accept) {
     const added = addDevice(configDir, {
+      project: TEST_PROJECT,
       publicKey: claim.publicKey,
       name: decision.name ?? claim.name,
       now: 5_000,
@@ -188,16 +192,76 @@ async function humanAfter(
   await human(configDir, sid, decision);
 }
 
+describe("pairDevice, per project (docs/feat/mobile-projects.md §4)", () => {
+  test("`perProject` is OPT-IN: a caller that does not ask gets `update_app`, nothing claimed (F10)", async () => {
+    // Mutation: always send `perProject: true` → this older-style caller pairs,
+    // and an app storing per computer would overwrite its existing record.
+    const { configDir, identity } = store();
+    const { url } = serve(configDir);
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
+    if (!opened.ok) throw new Error(opened.reason);
+    const failure = await pairDevice({
+      payload: payloadFor(identity, url),
+      deviceKey: key(7),
+      name: "iPhone",
+      dial,
+      random: systemRandom,
+    }).catch((e) => e);
+    expect(failure).toBeInstanceOf(PairingRefused);
+    expect((failure as PairingRefused).reason).toBe("update_app");
+    expect(readClaim(configDir, opened.session.sid)).toBeUndefined();
+  });
+
+  test("the QR's `p=` reaches `onCompare`, and the result names the project", async () => {
+    const { configDir, identity } = store();
+    const { url } = serve(configDir);
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
+    if (!opened.ok) throw new Error(opened.reason);
+    const seen: (string | undefined)[] = [];
+    const answering = human(configDir, opened.session.sid, { accept: true });
+    const result = await pairDevice({
+      perProject: true,
+      payload: { ...payloadFor(identity, url), project: "proj" },
+      deviceKey: key(7),
+      name: "iPhone",
+      dial,
+      random: systemRandom,
+      onCompare: (_sas, info) => {
+        seen.push(info.project);
+      },
+    });
+    await answering;
+    expect(seen).toEqual(["proj"]);
+    expect(result.project).toEqual({ key: TEST_PROJECT.key, cwd: TEST_PROJECT.cwd, label: "proj" });
+  });
+});
+
 describe("pairDevice, the happy path", () => {
   test("a code, the human's `y` and the SAS → a device id; then a device dial works", async () => {
     const { configDir, identity } = store();
     const { url } = serve(configDir);
-    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     const deviceKey = key(7);
     const compares: string[] = [];
     const answering = human(configDir, opened.session.sid, { accept: true });
     const result = await pairDevice({
+      perProject: true,
       payload: payloadFor(identity, url),
       deviceKey,
       name: "iPhone di Gabriel",
@@ -251,11 +315,17 @@ describe("pairDevice, the happy path", () => {
     // human could only ever say yes to an attack that already happened.
     const { configDir, identity } = store();
     const { url } = serve(configDir);
-    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     let claimAtCompare: boolean | undefined;
     const answering = human(configDir, opened.session.sid, { accept: true });
     await pairDevice({
+      perProject: true,
       payload: payloadFor(identity, url),
       deviceKey: key(7),
       name: "iPhone di Gabriel",
@@ -281,13 +351,19 @@ describe("pairDevice, the refusals", () => {
     {
       const { configDir, identity } = store();
       const { url } = serve(configDir);
-      const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+      const opened = openPairing(configDir, {
+        project: TEST_PROJECT,
+        code: CODE,
+        now: Date.now(),
+        pid: process.pid,
+      });
       if (!opened.ok) throw new Error(opened.reason);
       const answering = humanAfter(configDir, opened.session.sid, 400, {
         accept: true,
         name: "iPhone di Gabriel",
       });
       const result = await pairDevice({
+        perProject: true,
         payload: payloadFor(identity, url),
         deviceKey: key(7),
         name: "iPhone di Gabriel",
@@ -319,6 +395,7 @@ describe("pairDevice, the refusals", () => {
       });
     });
     const failure = await pairDevice({
+      perProject: true,
       payload: payloadFor(identity, "ws://127.0.0.1:1/e2e"),
       deviceKey: key(7),
       name: "iPhone",
@@ -336,10 +413,16 @@ describe("pairDevice, the refusals", () => {
     // the reason (it is `RpcPeer`'s own reject, never a timeout).
     const { configDir, identity } = store();
     const { url } = serve(configDir);
-    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     const answering = humanAfter(configDir, opened.session.sid, 300, { accept: false });
     const failure = await pairDevice({
+      perProject: true,
       payload: payloadFor(identity, url),
       deviceKey: key(7),
       name: "iPhone",
@@ -356,8 +439,14 @@ describe("pairDevice, the refusals", () => {
     const { configDir, identity } = store();
     const { url } = serve(configDir);
     // A window for a DIFFERENT code: the phone's payload is stale.
-    openPairing(configDir, { code: "ABCDEFGH23", now: Date.now(), pid: process.pid });
+    openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: "ABCDEFGH23",
+      now: Date.now(),
+      pid: process.pid,
+    });
     const failure = await pairDevice({
+      perProject: true,
       payload: payloadFor(identity, url),
       deviceKey: key(7),
       name: "iPhone",
@@ -371,10 +460,16 @@ describe("pairDevice, the refusals", () => {
   test("the human's `N` is `PairingRefused{declined}`, and nothing is registered", async () => {
     const { configDir, identity } = store();
     const { url } = serve(configDir);
-    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     const answering = human(configDir, opened.session.sid, { accept: false });
     const failure = await pairDevice({
+      perProject: true,
       payload: payloadFor(identity, url),
       deviceKey: key(7),
       name: "iPhone",
@@ -391,16 +486,23 @@ describe("pairDevice, the refusals", () => {
   test("a second phone on the same code is `used` (F1/F5)", async () => {
     const { configDir, identity } = store();
     const { url } = serve(configDir);
-    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     // Someone else claimed this window first.
     claimPairing(configDir, {
+      project: TEST_PROJECT.key,
       sid: opened.session.sid,
       deviceKey: key(9),
       name: "someone",
       now: Date.now(),
     });
     const failure = await pairDevice({
+      perProject: true,
       payload: payloadFor(identity, url),
       deviceKey: key(7),
       name: "iPhone",
@@ -414,6 +516,7 @@ describe("pairDevice, the refusals", () => {
     const { identity } = store();
     // A port nothing listens on: the payload's address is unreachable.
     const failure = await pairDevice({
+      perProject: true,
       payload: payloadFor(identity, "ws://127.0.0.1:1/e2e"),
       deviceKey: key(7),
       name: "iPhone",
@@ -434,9 +537,15 @@ describe("pairDevice, the refusals", () => {
     const { configDir } = store(1);
     const other = store(5);
     const { url } = serve(configDir);
-    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     const failure = await pairDevice({
+      perProject: true,
       // The pin is the OTHER computer's key.
       payload: payloadFor(other.identity, url),
       deviceKey: key(7),
@@ -458,12 +567,18 @@ describe("pairDevice races the payload's addresses (docs/fix/relay-pairing.md)",
     // property: the relay address answers the race, and keeping it.
     const { configDir, identity } = store();
     const { url } = serve(configDir);
-    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     const dead = hang();
     const compares: string[] = [];
     const answering = human(configDir, opened.session.sid, { accept: true });
     const result = await pairDevice({
+      perProject: true,
       payload: { ...payloadFor(identity, url), addresses: [dead, url] },
       deviceKey: key(7),
       name: "iPhone di Gabriel",
@@ -485,6 +600,7 @@ describe("pairDevice races the payload's addresses (docs/fix/relay-pairing.md)",
     // human for minutes, F3).
     const { identity } = store();
     const failure = await pairDevice({
+      perProject: true,
       payload: {
         ...payloadFor(identity, "ws://127.0.0.1:1/e2e"),
         addresses: [hang(), hang()],
@@ -507,8 +623,14 @@ describe("pairDevice races the payload's addresses (docs/fix/relay-pairing.md)",
     // second claim, and this test sees two `pairing-refused` lines.
     const { configDir, identity } = store();
     const { url, audit } = serve(configDir);
-    openPairing(configDir, { code: "ABCDEFGH23", now: Date.now(), pid: process.pid });
+    openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: "ABCDEFGH23",
+      now: Date.now(),
+      pid: process.pid,
+    });
     const failure = await pairDevice({
+      perProject: true,
       payload: {
         ...payloadFor(identity, url),
         // A dead direct address FIRST, then the same daemon twice: the winner
@@ -536,7 +658,12 @@ describe("pairDevice races the payload's addresses (docs/fix/relay-pairing.md)",
     const { configDir, identity } = store();
     const winner = serve(configDir);
     const loser = serve(configDir);
-    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     const answering = human(configDir, opened.session.sid, { accept: true });
     // The loser's socket is held back 200 ms, so it can only open AFTER the
@@ -548,6 +675,7 @@ describe("pairDevice races the payload's addresses (docs/fix/relay-pairing.md)",
         }, 200);
       });
     const result = await pairDevice({
+      perProject: true,
       payload: {
         ...payloadFor(identity, winner.url),
         addresses: [hang(), winner.url, loser.url],
@@ -582,10 +710,16 @@ describe("pairDevice is a one-shot RPC, not a session (§7)", () => {
     // and the socket was closed by us.
     const { configDir, identity } = store();
     const { url, audit, host } = serve(configDir);
-    const opened = openPairing(configDir, { code: CODE, now: Date.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: Date.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     const answering = human(configDir, opened.session.sid, { accept: true });
     const result = await pairDevice({
+      perProject: true,
       payload: payloadFor(identity, url),
       deviceKey: key(7),
       name: "iPhone",

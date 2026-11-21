@@ -6,6 +6,7 @@
  * on without knowing this build's list.
  */
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import {
   DevicePairParamsSchema,
   DevicePairResultSchema,
@@ -116,6 +117,55 @@ describe("result", () => {
   });
 });
 
+describe("per-project pairing (docs/feat/mobile-projects.md §4, additive)", () => {
+  const RESULT = {
+    deviceId: "0123456789abcdef",
+    computer: { id: "fedcba9876543210", name: "gabriel-mac" },
+  };
+  const PROJECT = { key: "assistant-0123456789ab", cwd: "/u/assistant", label: "assistant" };
+
+  test("params carry `perProject: true`; an absent flag still parses (an older app)", () => {
+    const parsed = Params.safeParse({ code: CODE, name: "iPhone", perProject: true });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.perProject).toBe(true);
+    const old = Params.safeParse({ code: CODE, name: "iPhone" });
+    expect(old.success).toBe(true);
+    if (!old.success) return;
+    expect(old.data.perProject).toBeUndefined();
+  });
+
+  test("the result carries the project; without it, it still parses (an older daemon)", () => {
+    const parsed = DevicePairResultSchema.safeParse({ ...RESULT, project: PROJECT });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.project).toEqual(PROJECT);
+    expect(DevicePairResultSchema.safeParse(RESULT).success).toBe(true);
+  });
+
+  test("an older result schema (a copy without `project`) STRIPS it, never refuses", () => {
+    const older = z.object({ deviceId: z.string(), computer: z.object({ id: z.string() }) });
+    const parsed = older.safeParse({ ...RESULT, project: PROJECT });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(Object.hasOwn(parsed.data, "project")).toBe(false);
+  });
+
+  test("a project label or cwd with a control character is refused; bounds hold", () => {
+    const bad = (project: object) =>
+      DevicePairResultSchema.safeParse({ ...RESULT, project }).success;
+    expect(bad({ ...PROJECT, label: "a\u001b[2J" })).toBe(false);
+    expect(bad({ ...PROJECT, cwd: "/u/\u0007" })).toBe(false);
+    expect(bad({ ...PROJECT, label: "x".repeat(65) })).toBe(false);
+    expect(bad({ ...PROJECT, key: "k".repeat(129) })).toBe(false);
+    expect(bad({ ...PROJECT, key: "" })).toBe(false);
+  });
+
+  test("`update_app` is a known reason (an older app reads it as a generic refusal)", () => {
+    expect(isPairingRefusedReason("update_app")).toBe(true);
+  });
+});
+
 describe("the refusal reasons", () => {
   test("every reason the plan names is known", () => {
     expect([...PAIRING_REFUSED_REASONS].sort()).toEqual([
@@ -124,6 +174,7 @@ describe("the refusal reasons", () => {
       "invalid_code",
       "timeout",
       "too_many_attempts",
+      "update_app",
       "used",
     ]);
     for (const reason of PAIRING_REFUSED_REASONS) {

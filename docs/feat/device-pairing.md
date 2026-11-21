@@ -249,6 +249,13 @@ handlers"); `Connection` needs a channel only at construction
 **On-disk layout — `<configDir>/devices/`** (dir 0700, files 0600; one truth
 shared by every daemon of the computer, decision 7):
 
+> **Superseded in part by owner 2026-11-20** (`docs/feat/mobile-projects.md`):
+> the identity stays per computer, but a registry entry (v2) and a pairing
+> window (v2) carry a `project`, and each `serve`'s `DeviceAuthority` admits
+> only its own project's devices and windows; a v1 entry is legacy, adopted by
+> the first project it connects to (`devices/adopted/<id>.json`). Original text
+> kept below.
+
 | File | Writer | Readers | Content |
 |---|---|---|---|
 | `identity.json` | first of `serve` / `pair` (exclusive create), `devices reset` | every `serve`, `pair` | `{ v: 1, publicKey, privateKey, name, createdAt }` — the computer's X25519 static key (b64url) and display name (default `os.hostname()`) |

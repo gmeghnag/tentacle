@@ -219,15 +219,22 @@ export const ARGS = {
   // `tentacle pair [--address URL]… [--name NAME]` (docs/feat/device-pairing.md
   // 9d): --address is a LIST (a laptop has several, and a relay one day), so it
   // is `repeated` — one value per name in `flags` would silently keep the last.
+  // `--project <dir>` (docs/feat/mobile-projects.md §5, Owner Q6): pair the serve
+  // of another folder than the current one.
   pair: {
-    values: { name: {} },
+    values: { name: {}, project: {} },
     repeated: ["address"],
     positional: { min: 0, max: 0 },
   },
   // `tentacle devices [revoke <name|id-prefix> | reset]`. The words are the
   // sub-command and its subject, so a permissions-shifted value is refused here
-  // rather than guessed at in `devices-cmd.ts`.
-  devices: { bools: { yes: { short: "y" } }, positional: { min: 0, max: 2 } },
+  // rather than guessed at in `devices-cmd.ts`. `revoke` is scoped to ONE
+  // project: `--project <dir>`, or `--all-projects` (Owner Q7).
+  devices: {
+    values: { project: {} },
+    bools: { yes: { short: "y" }, "all-projects": {} },
+    positional: { min: 0, max: 2 },
+  },
   // `tentacle voice setup [--yes] | status` (docs/feat/voice-dictation.md §6).
   // The verb is the only word (plus `--yes` for setup), so a stray one is refused
   // here rather than guessed at.
@@ -867,8 +874,9 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   config:
     "tentacle config set <key> <value> | <key>=<value> | unset <key> | get <key> | list [--set] | path [--profile <name>] [--json] [--yes]",
   update: "tentacle update [--check] [--version vX.Y.Z]",
-  pair: "tentacle pair [--address ws(s)://host:port/e2e]... [--name <name>]",
-  devices: "tentacle devices | revoke <name|id-prefix> | reset [--yes]",
+  pair: "tentacle pair [--project <dir>] [--address ws(s)://host:port/e2e]... [--name <name>]",
+  devices:
+    "tentacle devices | revoke <name|id-prefix> [--project <dir> | --all-projects] | reset [--yes]",
   voice: "tentacle voice setup [--yes] | status",
   logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [--usage] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",

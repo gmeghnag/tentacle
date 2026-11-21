@@ -1063,6 +1063,10 @@
           "minLength": 1,
           "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
           "type": "string"
+        },
+        "perProject": {
+          "const": true,
+          "type": "boolean"
         }
       },
       "required": ["code", "name"],
@@ -1077,9 +1081,37 @@
         "deviceId": {
           "pattern": "^[0-9a-f]{16}$",
           "type": "string"
+        },
+        "project": {
+          "$ref": "#/$defs/DeviceProject"
         }
       },
       "required": ["computer", "deviceId"],
+      "type": "object"
+    },
+    "DeviceProject": {
+      "additionalProperties": true,
+      "properties": {
+        "cwd": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["cwd", "key", "label"],
       "type": "object"
     },
     "DevicePushRegisterParams": {

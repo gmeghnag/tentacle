@@ -240,7 +240,7 @@ describe("the push column", () => {
     expect(result.out.join("")).toContain("PUSH");
     expect(result.out.join("")).toContain("LIVE");
     // `on` for the registered device's PUSH, then `off` for LIVE (no record).
-    const row = result.out.join("").trimEnd().split("\n")[1] ?? "";
+    const row = result.out.join("").trimEnd().split("\n")[2] ?? "";
     expect(columnsOf(row).slice(-2)).toEqual(["on", "off"]);
   });
 });
@@ -317,7 +317,7 @@ describe("revoke", () => {
     pairDevices(configDir, ["iPhone", "iPad"]);
     const result = await run(configDir, (deps) => revokeCommand("iPhone", deps));
     expect(result.code).toBe(0);
-    expect(result.out.join("")).toBe("iPhone\n");
+    expect(result.out.join("")).toContain("· iPhone ·");
     expect(result.err.join("")).toContain("within a second");
     const registry = readRegistry(configDir);
     expect(registry.ok ? registry.registry.devices.map((d) => d.name) : []).toEqual(["iPad"]);

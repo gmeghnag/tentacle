@@ -27,6 +27,9 @@ import { addDevice, loadOrCreateIdentity } from "../src/device-store.ts";
 import { SessionHost } from "../src/session-host.ts";
 import { startWsServer } from "../src/ws-server.ts";
 
+/** This serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const dirs: string[] = [];
 const servers: { stop(): void }[] = [];
 const authorities: DeviceAuthority[] = [];
@@ -55,7 +58,12 @@ function store(): string {
     random: () => key(1),
   });
   if (!created.ok) throw new Error(created.reason);
-  addDevice(configDir, { publicKey: publicKeyOf(key(2)), name: "iPhone", now: 2_000 });
+  addDevice(configDir, {
+    project: TEST_PROJECT,
+    publicKey: publicKeyOf(key(2)),
+    name: "iPhone",
+    now: 2_000,
+  });
   return configDir;
 }
 
@@ -83,7 +91,7 @@ function dialAdmitted(url: string): Promise<boolean> {
 describe("a mid-handshake close ends the limiter slot once, not twice (R3)", () => {
   test("an abandoned dial's extra `end()` cannot steal a live handshake's slot", async () => {
     const configDir = store();
-    const authority = new DeviceAuthority({ configDir, pollIntervalMs: 10 });
+    const authority = new DeviceAuthority({ project: TEST_PROJECT, configDir, pollIntervalMs: 10 });
     authorities.push(authority);
     const server = startWsServer({
       host: "127.0.0.1",

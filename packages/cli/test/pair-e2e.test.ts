@@ -23,6 +23,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { projectKey } from "@tentacle/agent";
 import {
   claimPairing,
   deviceIdOf,
@@ -74,15 +75,19 @@ async function pairWithPhone(
   const out: string[] = [];
   const err: string[] = [];
   let deviceId = "";
-  const code = await main(["bun", "cli", "pair", ...extraArgs], {
+  const code = await main(["bun", "cli", "pair", "--project", "/elsewhere", ...extraArgs], {
     out: (text) => {
       out.push(text);
       // The payload line is the phone's cue (see above).
       const pairingCode = /[?&]c=([A-Z0-9]{10})/.exec(text)?.[1];
       if (pairingCode === undefined || deviceId !== "") return;
-      const session = findPairing(configDir, { code: pairingCode });
+      const session = findPairing(configDir, {
+        project: projectKey("/elsewhere"),
+        code: pairingCode,
+      });
       if (session === undefined) return;
       const claimed = claimPairing(configDir, {
+        project: projectKey("/elsewhere"),
         sid: session.sid,
         deviceKey,
         name: deviceName,
@@ -165,7 +170,7 @@ describe("pair → devices → revoke, through main", () => {
       terminal: NO_TERMINAL,
     });
     expect(code).toBe(0);
-    expect(out.join("")).toBe("iPhone\n");
+    expect(out.join("")).toContain("· iPhone ·");
     const registry = readRegistry(configDir);
     expect(registry.ok ? registry.registry.devices : []).toEqual([]);
     // The stale "last seen" must not outlive the entry (it would list a device

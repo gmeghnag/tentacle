@@ -77,8 +77,20 @@ export interface PairDeviceOptions {
    */
   readonly onCompare?: (
     sas: string,
-    info: { readonly protocolVersion: number },
+    info: {
+      readonly protocolVersion: number;
+      /** The QR's project label (`p=`), so the UI can name the folder before the human answers. */
+      readonly project?: string;
+    },
   ) => void | Promise<void>;
+  /**
+   * Ask for a per-project pairing (docs/feat/mobile-projects.md §4). OPT-IN:
+   * only a caller that stores the result per project (`result.project`) may
+   * set it — a caller that stores per computer would overwrite the record it
+   * already has, which is exactly what the daemon's `update_app` refusal
+   * prevents for a caller that does not say it.
+   */
+  readonly perProject?: boolean;
   /**
    * Per-request timeout for `initialize` (default 30 s).
    *
@@ -109,6 +121,7 @@ export const PAIRING_REFUSED_MESSAGES: Record<PairingRefusedReason | "unknown", 
   timeout: "the computer did not answer in time — try again",
   too_many_attempts: "too many wrong codes — try again with a new QR",
   already_paired: "this device is already paired",
+  update_app: "this computer pairs per project — update the app, then scan again",
   unknown: "the computer refused the pairing",
 };
 
@@ -218,9 +231,16 @@ async function pairOn(
       // The SAS both screens must agree on: the payload's computer key and OUR
       // key (the one this handshake authenticated as).
       const sas = pairingSas(options.payload.key, publicKeyOf(options.deviceKey));
-      await options.onCompare(sas, { protocolVersion: init.protocolVersion });
+      await options.onCompare(sas, {
+        protocolVersion: init.protocolVersion,
+        ...(options.payload.project !== undefined ? { project: options.payload.project } : {}),
+      });
     }
-    const params: DevicePairParams = { code: options.payload.code, name: options.name };
+    const params: DevicePairParams = {
+      code: options.payload.code,
+      name: options.name,
+      ...(options.perProject === true ? { perProject: true as const } : {}),
+    };
     const result = await peer.request(Method.DevicePair, params);
     return result as PairDeviceResult;
   } catch (error) {

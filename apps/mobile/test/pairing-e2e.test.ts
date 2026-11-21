@@ -25,7 +25,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@tentacle/agent";
+import { Agent, projectKey } from "@tentacle/agent";
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
 import { ChannelError } from "@tentacle/client";
 import { type ModelProvider, PermissionBroker } from "@tentacle/core";
@@ -36,6 +36,7 @@ import {
   loadOrCreateIdentity,
   readIdentity,
   startWsServer,
+  writeDaemonRecord,
 } from "@tentacle/daemon";
 import type { PairingPayload } from "@tentacle/protocol";
 import { parsePairingPayload } from "@tentacle/protocol";
@@ -55,6 +56,13 @@ import { createLinkRegistry } from "../src/link-registry.ts";
 import { type PairingState, pairingView, reduce, runPairing } from "../src/pairing-flow.ts";
 import type { RNWebSocketCtor } from "../src/rn-websocket.ts";
 import { rnWebSocketCtor } from "../src/rn-websocket.ts";
+
+/**
+ * The serve's project (docs/feat/mobile-projects.md §2): the key `pair` derives
+ * from the live serve record's `cwd` (Q6), so its window is this authority's.
+ */
+const PROJECT_DIR = "/u/proj";
+const TEST_PROJECT = { key: projectKey(PROJECT_DIR), cwd: PROJECT_DIR };
 
 const IOS_ORIGIN = "http://192.168.1.8:4001";
 const dirs: string[] = [];
@@ -135,7 +143,11 @@ function computerConfigDir(): string {
 
 /** A real daemon with the `/e2e` device route, as `serve` mounts it (P7). */
 function serve(dir: string): { url: string } {
-  const authority = new DeviceAuthority({ configDir: dir, pollIntervalMs: 10 });
+  const authority = new DeviceAuthority({
+    project: TEST_PROJECT,
+    configDir: dir,
+    pollIntervalMs: 10,
+  });
   authorities.push(authority);
   const server = startWsServer({
     host: "127.0.0.1",
@@ -145,6 +157,18 @@ function serve(dir: string): { url: string } {
     token: "e2e-token",
   });
   servers.push(server);
+  // The live serve record `serve` writes: what `pair` targets (Q6).
+  const written = writeDaemonRecord(dir, {
+    pid: process.pid,
+    host: "127.0.0.1",
+    port: server.port,
+    tls: false,
+    cwd: PROJECT_DIR,
+    startedAt: Date.now(),
+  });
+  if (!written.ok) {
+    throw new Error(written.reason);
+  }
   return { url: `${server.url}/e2e` };
 }
 
@@ -228,6 +252,7 @@ async function startPair(options: {
   const pairCommand = await loadPairCommand();
   const done = pairCommand({
     configDir: options.dir,
+    projectDir: PROJECT_DIR,
     extraAddresses: [options.address],
     interfaces: [],
     qr: false,

@@ -146,6 +146,11 @@ export interface PairingPayload {
   readonly code: string;
   /** Full `ws(s)` URLs ending in `/e2e`, in the order printed, duplicates removed. */
   readonly addresses: readonly string[];
+  /**
+   * The project's label (`p=`, docs/feat/mobile-projects.md §4): the folder the
+   * `serve` this QR pairs with runs in. Absent from an older `pair`.
+   */
+  readonly project?: string;
 }
 
 /** Why a payload was refused. A client shows a sentence per reason; never parses text. */
@@ -169,6 +174,7 @@ const ParamsSchema = z.object({
   n: line(PAIRING_COMPUTER_NAME_MAX),
   c: z.string().regex(CODE_RE),
   a: z.array(z.string().max(ADDRESS_MAX)).min(1).max(MAX_PAIRING_ADDRESSES),
+  p: line(PAIRING_COMPUTER_NAME_MAX).optional(),
 });
 
 /**
@@ -185,7 +191,9 @@ export function isPairingName(value: string): boolean {
 function reasonOf(field: string): PairingRefusal {
   if (field === "v") return "version";
   if (field === "k") return "key";
-  if (field === "n") return "name";
+  // A bad project label is a bad display name (no new refusal an older app's
+  // copy would not know).
+  if (field === "n" || field === "p") return "name";
   if (field === "a") return "address";
   return "code";
 }
@@ -207,6 +215,7 @@ export function parsePairingPayload(text: string): PairingPayloadResult {
     n: params.get("n") ?? "",
     c: (params.get("c") ?? "").toUpperCase(),
     a: params.getAll("a"),
+    ...(params.has("p") ? { p: params.get("p") ?? "" } : {}),
   };
   if (raw.a.length === 0) {
     // Its own reason: "no daemon is listening that a phone can reach" is a
@@ -240,6 +249,7 @@ export function parsePairingPayload(text: string): PairingPayloadResult {
       computer: parsed.data.n,
       code: parsed.data.c,
       addresses,
+      ...(parsed.data.p !== undefined ? { project: parsed.data.p } : {}),
     },
   };
 }
@@ -278,6 +288,12 @@ export function formatPairingPayload(payload: PairingPayload): string {
       );
     }
     parts.push(`a=${encodeURIComponent(address)}`);
+  }
+  if (payload.project !== undefined) {
+    if (!line(PAIRING_COMPUTER_NAME_MAX).safeParse(payload.project).success) {
+      throw new Error("pairing payload: invalid project label");
+    }
+    parts.push(`p=${encodeURIComponent(payload.project)}`);
   }
   return `${PAIRING_PAYLOAD_PREFIX}${parts.join("&")}`;
 }

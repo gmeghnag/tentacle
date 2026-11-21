@@ -199,8 +199,12 @@ async function runDeviceCommands(
   if (mode === "pair") {
     const addresses = parsed.repeats?.get("address");
     const name = parsed.flags.get("name");
+    const projectDir = parsed.flags.get("project");
     return pairCommand({
       configDir: io.configDir,
+      // The folder whose `serve` the phone pairs with (Owner Q6): `--project`,
+      // else where `pair` runs (`pairTargetOf` defaults to the cwd).
+      ...(projectDir !== undefined ? { projectDir } : {}),
       ...(addresses !== undefined ? { extraAddresses: addresses } : {}),
       ...(name !== undefined ? { name } : {}),
       // A QR needs a terminal to be read at all; a pipe gets the pasteable
@@ -249,11 +253,16 @@ async function runDeviceCommands(
       io.err(`[error] missing argument\nusage: ${USAGE.devices}\n`);
       return 1;
     }
+    const projectDir = parsed.flags.get("project");
     return revokeCommand(subject, {
       configDir: io.configDir,
       out: io.out,
       err: io.err,
       now: io.now,
+      // ONE project's entries (Owner Q7): `--project`, else the cwd's project if
+      // the word matches there, else a unique computer-wide match.
+      ...(projectDir !== undefined ? { projectDir } : {}),
+      allProjects: parsed.bools.has("all-projects"),
     });
   }
   if (verb === "reset") {

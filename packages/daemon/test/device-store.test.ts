@@ -60,6 +60,9 @@ import {
   writeRegistry,
 } from "../src/device-store.ts";
 
+/** The project every window here is opened for (docs/feat/mobile-projects.md §1). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const CODE = "K7M2QX9AB3";
 const OTHER_CODE = "Z7M2QX9AB3";
 
@@ -265,7 +268,7 @@ describe("registry", () => {
   test("an unknown version is refused", () => {
     const configDir = scratch();
     mkdirSync(deviceDir(configDir), { recursive: true, mode: 0o700 });
-    const future = JSON.stringify({ v: 2, devices: [] });
+    const future = JSON.stringify({ v: 3, devices: [] });
     writeFileSync(registryFile(configDir), future);
     const read = readRegistry(configDir);
     expect(read.ok).toBe(false);
@@ -325,6 +328,7 @@ describe("registry", () => {
 describe("pairing windows", () => {
   const open = (configDir: string, over: { now?: number; pid?: number; code?: string } = {}) => {
     const result = openPairing(configDir, {
+      project: TEST_PROJECT,
       code: over.code ?? CODE,
       now: over.now ?? 1_000,
       pid: over.pid ?? process.pid,
@@ -347,10 +351,17 @@ describe("pairing windows", () => {
     const configDir = scratch();
     createIdentity(configDir);
     const session = open(configDir, { now: 1_000 });
-    expect(findPairing(configDir, { code: CODE, now: 1_500 })?.sid).toBe(session.sid);
-    expect(findPairing(configDir, { code: OTHER_CODE, now: 1_500 })).toBeUndefined();
+    expect(findPairing(configDir, { project: TEST_PROJECT.key, code: CODE, now: 1_500 })?.sid).toBe(
+      session.sid,
+    );
+    expect(
+      findPairing(configDir, { project: TEST_PROJECT.key, code: OTHER_CODE, now: 1_500 }),
+    ).toBeUndefined();
     // A lower-case paste still finds it (codes normalize).
-    expect(findPairing(configDir, { code: CODE.toLowerCase(), now: 1_500 })?.sid).toBe(session.sid);
+    expect(
+      findPairing(configDir, { project: TEST_PROJECT.key, code: CODE.toLowerCase(), now: 1_500 })
+        ?.sid,
+    ).toBe(session.sid);
   });
 
   test("an expired window is not found, and is swept", () => {
@@ -358,7 +369,9 @@ describe("pairing windows", () => {
     createIdentity(configDir);
     open(configDir, { now: 1_000 });
     const later = 1_000 + PAIRING_TTL_MS + 1;
-    expect(findPairing(configDir, { code: CODE, now: later })).toBeUndefined();
+    expect(
+      findPairing(configDir, { project: TEST_PROJECT.key, code: CODE, now: later }),
+    ).toBeUndefined();
     expect(sweepPairings(configDir, { now: later })).toBe(0);
   });
 
@@ -368,8 +381,17 @@ describe("pairing windows", () => {
     const configDir = scratch();
     createIdentity(configDir);
     open(configDir, { now: 1_000, pid: 999_999 });
-    expect(findPairing(configDir, { code: CODE, now: 1_500, alive: () => false })).toBeUndefined();
-    expect(findPairing(configDir, { code: CODE, now: 1_500 })).toBeUndefined();
+    expect(
+      findPairing(configDir, {
+        project: TEST_PROJECT.key,
+        code: CODE,
+        now: 1_500,
+        alive: () => false,
+      }),
+    ).toBeUndefined();
+    expect(
+      findPairing(configDir, { project: TEST_PROJECT.key, code: CODE, now: 1_500 }),
+    ).toBeUndefined();
   });
 
   test("a claim is exclusive: the second one sees `used`", () => {
@@ -379,6 +401,7 @@ describe("pairing windows", () => {
     const identity = createIdentity(configDir, 1);
     const session = open(configDir, { now: 1_000 });
     const first = claimPairing(configDir, {
+      project: TEST_PROJECT.key,
       sid: session.sid,
       deviceKey: key(2),
       name: "iPhone",
@@ -388,6 +411,7 @@ describe("pairing windows", () => {
     expect(first.claim.name).toBe("iPhone");
     expect(first.claim.sas).toMatch(/^\d{6}$/);
     const again = claimPairing(configDir, {
+      project: TEST_PROJECT.key,
       sid: session.sid,
       deviceKey: key(3),
       name: "Pixel",
@@ -406,11 +430,18 @@ describe("pairing windows", () => {
     const expired = open(configDir, { now: 1_000 });
     const later = 1_000 + PAIRING_TTL_MS + 1;
     expect(
-      claimPairing(configDir, { sid: expired.sid, deviceKey: key(2), name: "iPhone", now: later }),
+      claimPairing(configDir, {
+        project: TEST_PROJECT.key,
+        sid: expired.sid,
+        deviceKey: key(2),
+        name: "iPhone",
+        now: later,
+      }),
     ).toEqual({ ok: false, reason: "gone" });
     const dead = open(configDir, { now: later, pid: 999_999 });
     expect(
       claimPairing(configDir, {
+        project: TEST_PROJECT.key,
         sid: dead.sid,
         deviceKey: key(2),
         name: "iPhone",
@@ -435,10 +466,15 @@ describe("pairing windows", () => {
     const configDir = scratch();
     createIdentity(configDir);
     const session = open(configDir);
-    claimPairing(configDir, { sid: session.sid, deviceKey: key(2), name: "iPhone" });
+    claimPairing(configDir, {
+      project: TEST_PROJECT.key,
+      sid: session.sid,
+      deviceKey: key(2),
+      name: "iPhone",
+    });
     writePairingDecision(configDir, session.sid, true);
     closePairing(configDir, session.sid);
-    expect(findPairing(configDir, { code: CODE })).toBeUndefined();
+    expect(findPairing(configDir, { project: TEST_PROJECT.key, code: CODE })).toBeUndefined();
     expect(readClaim(configDir, session.sid)).toBeUndefined();
     expect(readPairingDecision(configDir, session.sid)).toBeUndefined();
   });
@@ -459,14 +495,25 @@ describe("hasLivePairing (what backs `authorize`: a pure read)", () => {
   test("finds a live window without the code, and nothing when none is usable", () => {
     const configDir = scratch();
     createIdentity(configDir);
-    expect(hasLivePairing(configDir, { now: 1_000 })).toBeUndefined();
-    const session = openPairing(configDir, { code: CODE, now: 1_000, pid: process.pid });
+    expect(hasLivePairing(configDir, { project: TEST_PROJECT.key, now: 1_000 })).toBeUndefined();
+    const session = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: 1_000,
+      pid: process.pid,
+    });
     if (!session.ok) throw new Error(session.reason);
-    expect(hasLivePairing(configDir, { now: 1_100 })?.sid).toBe(session.session.sid);
+    expect(hasLivePairing(configDir, { project: TEST_PROJECT.key, now: 1_100 })?.sid).toBe(
+      session.session.sid,
+    );
     // Expired: not live (an expired window never admits an unknown key).
-    expect(hasLivePairing(configDir, { now: 1_000 + 6 * 60 * 1000 })).toBeUndefined();
+    expect(
+      hasLivePairing(configDir, { project: TEST_PROJECT.key, now: 1_000 + 6 * 60 * 1000 }),
+    ).toBeUndefined();
     // Its owner died (F2): not live either.
-    expect(hasLivePairing(configDir, { now: 1_100, alive: () => false })).toBeUndefined();
+    expect(
+      hasLivePairing(configDir, { project: TEST_PROJECT.key, now: 1_100, alive: () => false }),
+    ).toBeUndefined();
   });
 
   test("is SIDE-EFFECT FREE: it never sweeps, closes or throws (P2)", () => {
@@ -508,8 +555,10 @@ describe("hasLivePairing (what backs `authorize`: a pure read)", () => {
     );
     const before = readFileSync(deadPath, "utf8");
 
-    expect(hasLivePairing(configDir, { now: 1_100, alive: () => false })).toBeUndefined();
-    expect(hasLivePairing(configDir, { now: 1_100 })).toBeUndefined();
+    expect(
+      hasLivePairing(configDir, { project: TEST_PROJECT.key, now: 1_100, alive: () => false }),
+    ).toBeUndefined();
+    expect(hasLivePairing(configDir, { project: TEST_PROJECT.key, now: 1_100 })).toBeUndefined();
     // Nothing was swept, closed or rewritten.
     expect(readFileSync(deadPath, "utf8")).toBe(before);
     expect(existsSync(badPath)).toBe(true);

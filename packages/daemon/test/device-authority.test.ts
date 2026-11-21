@@ -24,6 +24,9 @@ import {
   writeRegistry,
 } from "../src/device-store.ts";
 
+/** This serve's project (docs/feat/mobile-projects.md §2). */
+const TEST_PROJECT = { key: "proj-0123456789ab", cwd: "/u/proj" };
+
 const dirs: string[] = [];
 function scratch(): string {
   const dir = mkdtempSync(join(tmpdir(), "device-authority-"));
@@ -51,6 +54,7 @@ function store(fill = 1) {
 
 function pair(configDir: string, fill: number, name = "iPhone") {
   const added = addDevice(configDir, {
+    project: TEST_PROJECT,
     publicKey: key(fill),
     name,
     now: 5_000,
@@ -103,7 +107,11 @@ describe("authorize: a paired device", () => {
   test("a registered key is a device, with the full responder cap", () => {
     const { configDir } = store();
     const device = pair(configDir, 2);
-    const authority = new DeviceAuthority({ configDir, timers: fakeTime().timer });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: fakeTime().timer,
+    });
     try {
       const verdict = authority.authorize(key(2));
       expect(verdict).toEqual({
@@ -120,7 +128,11 @@ describe("authorize: a paired device", () => {
   test("an unknown key with no pairing window is DENIED (F15)", () => {
     const { configDir } = store();
     pair(configDir, 2);
-    const authority = new DeviceAuthority({ configDir, timers: fakeTime().timer });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: fakeTime().timer,
+    });
     try {
       expect(authority.authorize(key(9))).toBe(false);
     } finally {
@@ -130,7 +142,11 @@ describe("authorize: a paired device", () => {
 
   test("an unpaired, empty registry denies everyone (a fresh computer)", () => {
     const { configDir } = store();
-    const authority = new DeviceAuthority({ configDir, timers: fakeTime().timer });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: fakeTime().timer,
+    });
     try {
       expect(authority.authorize(key(2))).toBe(false);
     } finally {
@@ -143,9 +159,19 @@ describe("authorize: a pairing window (F16, P1)", () => {
   test("an unknown key during a live window is admitted as `pairing`, capped small", () => {
     const { configDir } = store();
     const time = fakeTime();
-    const opened = openPairing(configDir, { code: CODE, now: time.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: time.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     try {
       const verdict = authority.authorize(key(9));
       // Smaller than the 32 MiB device cap BY FAR: an admitted stranger's
@@ -165,13 +191,19 @@ describe("authorize: a pairing window (F16, P1)", () => {
     const { configDir } = store();
     const time = fakeTime();
     const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
       code: CODE,
       now: time.now(),
       pid: process.pid,
       ttlMs: 1_000,
     });
     if (!opened.ok) throw new Error(opened.reason);
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     try {
       expect(authority.authorize(key(9))).not.toBe(false);
       time.advance(1_001);
@@ -186,9 +218,15 @@ describe("authorize: a pairing window (F16, P1)", () => {
     const time = fakeTime();
     // OUR OWN pid, which IS alive: a dead number here would deny through the
     // real `processAlive` and hide whether the injected one reaches the read.
-    const opened = openPairing(configDir, { code: CODE, now: time.now(), pid: process.pid });
+    const opened = openPairing(configDir, {
+      project: TEST_PROJECT,
+      code: CODE,
+      now: time.now(),
+      pid: process.pid,
+    });
     if (!opened.ok) throw new Error(opened.reason);
     const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
       configDir,
       timers: time.timer,
       now: time.now,
@@ -209,7 +247,12 @@ describe("a revoke closes the live socket", () => {
     const device = pair(configDir, 2);
     pair(configDir, 3, "Pixel");
     const time = fakeTime();
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     const revoked = socket();
     const other = socket();
     try {
@@ -242,7 +285,12 @@ describe("a revoke closes the live socket", () => {
     const { configDir } = store();
     const device = pair(configDir, 2);
     const time = fakeTime();
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     try {
       expect(authority.authorize(key(2))).not.toBe(false);
       removeDevices(configDir, [device.id]);
@@ -258,7 +306,12 @@ describe("a revoke closes the live socket", () => {
     const a = pair(configDir, 2);
     const b = pair(configDir, 3, "Pixel");
     const time = fakeTime();
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     const sa = socket();
     const sb = socket();
     try {
@@ -299,7 +352,12 @@ describe("a revoke closes the live socket", () => {
     const { configDir } = store();
     const device = pair(configDir, 2);
     const time = fakeTime();
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     const s = socket();
     try {
       authority.register(device.id, s);
@@ -320,7 +378,12 @@ describe("an unreadable store fails CLOSED (F14)", () => {
     const { configDir } = store();
     const device = pair(configDir, 2);
     const time = fakeTime();
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     try {
       expect(authority.authorize(key(2))).not.toBe(false);
       const path = join(deviceDir(configDir), "registry.json");
@@ -342,7 +405,11 @@ describe("an unreadable store fails CLOSED (F14)", () => {
       join(deviceDir(configDir), "registry.json"),
       JSON.stringify({ v: 99, devices: [] }),
     );
-    const authority = new DeviceAuthority({ configDir, timers: fakeTime().timer });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: fakeTime().timer,
+    });
     try {
       expect(authority.authorize(key(2))).toBe(false);
     } finally {
@@ -354,6 +421,7 @@ describe("an unreadable store fails CLOSED (F14)", () => {
     const configDir = scratch();
     const lines: string[] = [];
     const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
       configDir,
       timers: fakeTime().timer,
       onAudit: (line) => lines.push(line),
@@ -375,7 +443,12 @@ describe("the poll is a signal, not the only one", () => {
     const { configDir } = store();
     const device = pair(configDir, 2);
     const time = fakeTime();
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     const s = socket();
     authority.register(device.id, s);
     expect(time.armed).toBe(1);
@@ -390,7 +463,12 @@ describe("the poll is a signal, not the only one", () => {
     const { configDir } = store();
     const device = pair(configDir, 2);
     const time = fakeTime();
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     const first = socket();
     try {
       authority.register(device.id, first);
@@ -413,7 +491,12 @@ describe("the poll is a signal, not the only one", () => {
     const { configDir } = store();
     const device = pair(configDir, 2);
     const time = fakeTime();
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     const one = socket();
     const two = socket();
     try {
@@ -436,6 +519,7 @@ describe("the authority's own report", () => {
     const lines: string[] = [];
     const time = fakeTime();
     const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
       configDir,
       timers: time.timer,
       now: time.now,
@@ -459,7 +543,12 @@ describe("the authority's own report", () => {
     const { configDir } = store();
     const device = pair(configDir, 2);
     const time = fakeTime();
-    const authority = new DeviceAuthority({ configDir, timers: time.timer, now: time.now });
+    const authority = new DeviceAuthority({
+      project: TEST_PROJECT,
+      configDir,
+      timers: time.timer,
+      now: time.now,
+    });
     const path = join(deviceDir(configDir), "registry.json");
     try {
       const original = readFileSync(path, "utf8");
@@ -468,9 +557,14 @@ describe("the authority's own report", () => {
       // (9a: never write over an unreadable registry) — so nothing repairs it
       // behind the human's back.
       expect(authority.authorize(key(2))).toBe(false);
-      expect(addDevice(configDir, { publicKey: key(2), name: "iPhone", now: 6_000 })).toEqual(
-        expect.objectContaining({ ok: false }),
-      );
+      expect(
+        addDevice(configDir, {
+          project: TEST_PROJECT,
+          publicKey: key(2),
+          name: "iPhone",
+          now: 6_000,
+        }),
+      ).toEqual(expect.objectContaining({ ok: false }));
       // The human fixes the file: the very next authorize sees it (no sticky
       // denial — the snapshot is refreshed by the stat, not by a restart).
       expect(readFileSync(path, "utf8")).toBe("{ broken");
