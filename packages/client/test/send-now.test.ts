@@ -11,6 +11,7 @@ import { Connection, SessionHost } from "@tentacle/daemon";
 import { JsonRpcErrorCode, Method, Notification, PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
+import { stripped } from "../../daemon/test/support/model-prompt.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import { RemoteClient } from "../src/remote-client.ts";
 
@@ -20,7 +21,7 @@ import { RemoteClient } from "../src/remote-client.ts";
 const echoModel = (seen: string[][]): ModelProvider => ({
   id: "echo",
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
-    const messages = request.messages.map((m) => m.content);
+    const messages = request.messages.map((m) => stripped(m.content));
     seen.push(messages);
     if (messages.at(-1) === "go") {
       yield {

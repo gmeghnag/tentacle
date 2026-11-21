@@ -14,6 +14,7 @@ import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import type { HopSpec, SessionController } from "@tentacle/tui";
+import { stripped } from "../../daemon/test/support/model-prompt.ts";
 import { createHopFeed } from "../src/hop-feed.ts";
 import { type HopRuntime, createHopRuntime } from "../src/hop-runtime.ts";
 import { type LocalRuntime, createLocalRuntime } from "../src/local-runtime.ts";
@@ -48,7 +49,8 @@ class Reply implements ModelProvider {
   readonly seen: string[][] = [];
   constructor(private readonly reply: string) {}
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
-    this.seen.push(request.messages.map((m) => `${m.role}:${String(m.content)}`));
+    // Without a leading date stamp: these tests pin the history, not the stamp.
+    this.seen.push(request.messages.map((m) => `${m.role}:${stripped(String(m.content))}`));
     yield { type: "text", delta: this.reply };
     yield { type: "done" };
   }

@@ -21,6 +21,7 @@ import {
   SessionHost,
   resolvePromptDocuments,
 } from "../src/index.ts";
+import { stampLine, stripped } from "./support/model-prompt.ts";
 
 const CHUNK = 256 * 1024;
 const env = {
@@ -162,7 +163,9 @@ describe("store daemon: extracts at prompt time, the text is persisted", () => {
     await settle();
 
     const sent = h.model.requests[0]?.messages.at(-1);
-    expect(sent?.content.startsWith("summarise\n")).toBe(true);
+    // The first prompt's date stamp leads the model's copy (docs/fix/prompt-current-date.md).
+    expect(stampLine(sent?.content ?? "")).toBeDefined();
+    expect(stripped(sent?.content ?? "").startsWith("summarise\n")).toBe(true);
     expect(sent?.content).toContain('<file name="report.pdf" kind="pdf" pages="2">');
     expect(sent?.content).toContain("Hello PDF world");
     expect(sent?.content).toContain("Second page");

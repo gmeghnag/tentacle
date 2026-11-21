@@ -17,6 +17,7 @@ import { Agent } from "@tentacle/agent";
 import {
   type AttachmentRef,
   type AttachmentSource,
+  type ChatMessage,
   type ChatRequest,
   type ModelProvider,
   PermissionBroker,
@@ -25,6 +26,7 @@ import { DomainErrorCode, Method, Notification, PROTOCOL_VERSION } from "@tentac
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { Connection, type ImagePolicy, SessionHost } from "../src/index.ts";
+import { stampLine, stripped } from "./support/model-prompt.ts";
 
 const CHUNK = 256 * 1024;
 
@@ -166,6 +168,15 @@ async function refusalOf(
 }
 
 /** Let a turn run out: its update frames arrive asynchronously. */
+/**
+ * The model's copy of a first user message, its date stamp asserted present and
+ * then peeled off (docs/fix/prompt-current-date.md), so the rest compares exactly.
+ */
+const unstampedSent = (m: ChatMessage | undefined): ChatMessage | undefined => {
+  expect(stampLine(m?.content ?? "")).toBeDefined();
+  return m && { ...m, content: stripped(m.content) };
+};
+
 const settle = (ms = 30): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const storePolicy = (maxBytes = 4 * 1024 * 1024): ImagePolicy => ({ source: "store", maxBytes });
@@ -194,7 +205,7 @@ describe("store policy: the daemon holds the bytes", () => {
     expect(seen.attachments).toBe(hosted.uploads);
     expect(await seen.attachments?.read(ref)).toEqual(bytes);
     // The message itself carries the ref (the provider resolves it, not the wire).
-    expect(seen.messages.at(-1)).toEqual({
+    expect(unstampedSent(seen.messages.at(-1))).toEqual({
       role: "user",
       content: "what is this?",
       attachments: [ref],
@@ -209,7 +220,7 @@ describe("store policy: the daemon holds the bytes", () => {
     await prompt(h, "t1", [{ type: "attachment", ref: refFor("only") }]);
     await settle();
     expect(h.model.requests).toHaveLength(1);
-    expect(h.model.requests[0]?.messages.at(-1)).toEqual({
+    expect(unstampedSent(h.model.requests[0]?.messages.at(-1))).toEqual({
       role: "user",
       content: "",
       attachments: [refFor("only")],
@@ -403,7 +414,7 @@ describe("client policy: the laptop holds the bytes", () => {
     // The daemon has no bytes, and says so by not giving the provider a source.
     expect(h.sources).toEqual([undefined]);
     expect(h.model.requests[0]?.attachments).toBeUndefined();
-    expect(h.model.requests[0]?.messages.at(-1)).toEqual({
+    expect(unstampedSent(h.model.requests[0]?.messages.at(-1))).toEqual({
       role: "user",
       content: "look",
       attachments: [ref],

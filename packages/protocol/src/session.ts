@@ -119,6 +119,22 @@ const chatMessageShape = () => ({
     .object({ used: z.number().int().nonnegative(), window: z.number().int().positive() })
     .optional(),
   /**
+   * On a user message: the model's "now" for that turn (NOT display-only —
+   * rendered as a `[Fri 2026-11-20 13:42 CET]` prefix on the model's copy;
+   * docs/fix/prompt-current-date.md). FAIL-SOFT like `scheduled`: a value
+   * outside these bounds is DROPPED (the message still loads, its content
+   * unchanged, the next message simply stamps again), never a refusal of the
+   * CRITICAL entry. `zone` is a bounded free string, never an enum: an unknown
+   * zone is the renderer's to fall back from, not a schema error.
+   */
+  dateStamp: z
+    .object({
+      at: z.number().int().nonnegative(),
+      zone: z.string().min(1).max(64),
+    })
+    .optional()
+    .catch(undefined),
+  /**
    * On a tentacle-written user message: what kind of note it is (display only,
    * docs/feat/subagent-ledger-log.md). `kind` is a bounded FREE string, never an
    * enum: the message entry is CRITICAL, so an unknown enum value would make it
@@ -245,6 +261,15 @@ export const ClientCapabilitiesSchema = z.object({
    * and an older daemon simply drops it.
    */
   hop: z.boolean().optional(),
+  /**
+   * This client's IANA time zone (docs/fix/prompt-current-date.md): the one the
+   * daemon renders the model's `[Fri 2026-11-20 13:42 CET]` stamp in, so the
+   * model reads the LAPTOP's clock, never a pod's UTC. A bounded free string,
+   * never an enum: a zone the daemon cannot render is dropped by
+   * `zoneOrDefault` (the daemon host's own zone), never an `InvalidParams` that
+   * would hide the version check. Absent → the daemon host's zone.
+   */
+  timeZone: z.string().min(1).max(64).optional(),
 });
 export type ClientCapabilities = z.infer<typeof ClientCapabilitiesSchema>;
 

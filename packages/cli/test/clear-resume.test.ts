@@ -14,6 +14,7 @@ import {
 import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
+import { stripped } from "../../daemon/test/support/model-prompt.ts";
 import type { SessionActivity } from "../../tui/src/turn-feed.ts";
 import { createLocalRuntime } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
@@ -133,7 +134,7 @@ test("REPRO /clear on a resumed session nothing has opened resets it (no hollow 
   // the model's context too, not just off the screen.
   await drain(controller.send("next"));
   await new Promise((res) => setTimeout(res, 20));
-  const sent = model.requests[0]?.messages.map((m) => m.content) ?? [];
+  const sent = model.requests[0]?.messages.map((m) => stripped(m.content)) ?? [];
   expect(sent).not.toContain("map the repo");
   expect(sent).not.toContain("done mapping");
   expect(sent.at(-1)).toBe("next");

@@ -16,6 +16,7 @@ import { render } from "ink-testing-library";
 import { createLocalRuntime } from "../../cli/src/local-runtime.ts";
 import { SessionSaver } from "../../cli/src/session-saver.ts";
 import { Connection, LogSessionStore, SessionHost } from "../../daemon/src/index.ts";
+import { stripped } from "../../daemon/test/support/model-prompt.ts";
 import { createChannelPair } from "../../transport/src/index.ts";
 import { App } from "../src/App.tsx";
 import type { DisplayItem } from "../src/state.ts";
@@ -148,7 +149,7 @@ test("REPRO (App): /clear on a resumed session nothing has opened replaces the c
   // next prompt goes to the model with the old chat GONE.
   await type(app.stdin, "next");
   await delay(300);
-  const sent = model.requests[0]?.messages.map((m) => m.content) ?? [];
+  const sent = model.requests[0]?.messages.map((m) => stripped(m.content)) ?? [];
   expect(sent).not.toContain("map the repo");
   expect(sent.at(-1)).toBe("next");
   app.unmount();
@@ -281,7 +282,7 @@ test("M2 (App): /compact on a resumed session nothing has opened really compacts
   // The model's next request carries the compacted history, not the old chat.
   await type(app.stdin, "next");
   await delay(300);
-  const sent = model.requests.at(-1)?.messages.map((m) => m.content) ?? [];
+  const sent = model.requests.at(-1)?.messages.map((m) => stripped(m.content)) ?? [];
   expect(sent).not.toContain("map the repo");
   expect(sent.at(-1)).toBe("next");
 

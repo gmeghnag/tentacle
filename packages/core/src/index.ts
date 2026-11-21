@@ -21,6 +21,7 @@ export * from "./jobs.ts";
 export * from "./auto-wake.ts";
 export * from "./schedule.ts";
 export * from "./scheduled-fire.ts";
+export * from "./current-date.ts";
 export * from "./path-locks.ts";
 export * from "./tool.ts";
 export * from "./permission.ts";

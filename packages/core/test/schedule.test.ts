@@ -125,6 +125,23 @@ describe("parseScheduleSpec", () => {
     expect(parse({ at: "in 90s" }).ok).toBe(false);
   });
 
+  test("at: a refused past time shows the daemon's CURRENT time (docs/fix/prompt-current-date.md)", () => {
+    // A model that writes an absolute time it computed itself is often a day
+    // off; the refusal must hand it the truth (the host's wall-clock minute).
+    // Mutation: drop `${localMinuteText(now)}` from the reason → this is empty.
+    const now = new Date(NOW);
+    const pad = (value: number): string => String(value).padStart(2, "0");
+    const current =
+      `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+      `T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const past = parse({ at: iso(NOW - MINUTE) });
+    const reason = past.ok ? "" : past.reason;
+    expect(reason).toContain("is in the past");
+    expect(reason).toContain(`it is now ${current} here`);
+    // Still actionable: the relative form is offered.
+    expect(reason).toContain("every <interval>");
+  });
+
   test("exactly one of every/at", () => {
     const both = parse({ every: "10m", at: iso(NOW + MINUTE) });
     expect(both.ok).toBe(false);

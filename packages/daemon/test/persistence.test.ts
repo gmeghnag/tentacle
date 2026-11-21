@@ -263,7 +263,12 @@ describe("daemon persistence: what is written, when", () => {
     const atStart = r.store.saves[before];
     expect(atStart?.turn?.turnId).toBe("T1");
     expect(atStart?.turns).toEqual([{ turnId: "T1" }]);
-    expect(atStart?.messages.at(-1)).toEqual({ role: "user", content: "go" });
+    // The first prompt carries its date stamp (docs/fix/prompt-current-date.md).
+    expect(atStart?.messages.at(-1)).toEqual({
+      role: "user",
+      content: "go",
+      dateStamp: { at: expect.any(Number), zone: expect.any(String) },
+    });
     r.store.release();
   });
 

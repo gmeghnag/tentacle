@@ -20,6 +20,7 @@ import {
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { z } from "zod";
+import { stripped } from "../../daemon/test/support/model-prompt.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import {
   MODEL_STREAM_BATCH_MAX_CHARS,
@@ -1079,7 +1080,7 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
     const model: ModelProvider = {
       id: "slow",
       async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
-        seen.push(...request.messages.map((m) => m.content));
+        seen.push(...request.messages.map((m) => stripped(m.content)));
         await new Promise((r) => setTimeout(r, 100));
         yield { type: "text", delta: "ok" };
         yield { type: "done" };
@@ -1639,7 +1640,7 @@ describe("RemoteSession steering bound to its turn (review fixes)", () => {
   const echoModel = (seen: string[][]): ModelProvider => ({
     id: "echo",
     async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
-      const messages = request.messages.map((m) => m.content);
+      const messages = request.messages.map((m) => stripped(m.content));
       seen.push(messages);
       if (messages.at(-1) === "go") {
         yield {

@@ -3240,6 +3240,10 @@ export class RemoteClient {
       clientCapabilities: {
         streaming: true,
         updates: [...KNOWN_UPDATE_TYPES],
+        // The LAPTOP's clock: the daemon renders the model's date stamp in it
+        // (docs/fix/prompt-current-date.md), so a pod reads the user's time,
+        // never its own UTC.
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         // This client can put a `move_session` proposal to its owner (a `/move`
         // feed + the one broker prompt): the daemon offers the tool only then
         // (docs/feat/session-hop.md D8/D9, H5 review finding 1). Absent → never
