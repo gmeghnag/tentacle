@@ -486,3 +486,13 @@ Tests: update theme-beta / theme-fonts / settings tests to the new names and val
 - The reviewer brief asked for merge + commit + implement, but also said "do not edit code" and "never commit". A reviewer must not do executor work (§10: no self-approval), so I did neither. Next step: an executor does the merge and the slice, then this review runs again against that diff.
 - The gate (tests/lint/typecheck) was not run: there is no slice diff to check.
 *— claude-opus-5-5, 2026-11-21*
+
+### Round 2
+
+**Verdict: PASS** (diff `966841ae..f2c5b5e8`; `HEAD~1` alone is a Biome reformat of `theme-fonts.test.ts`).
+- Finding 1 (slice not implemented): **fixed.** The Figtree faces replace Lato (files, OFL, README, NOTICE, loader, label, testID), and `petrolPalette` carries the owner's hexes. I checked each derived token against graphite's own steps: drawer −(5,6,7), band +5, fill card+(9,9,10), sep/sepSheet sepChat+(8,9,10)/(14,15,16), switchOff +(37,37,38), and tint = rgba(34,211,238,.12) on #151B1D → #173136. All are exact. Accent #22D3EE is inherited from `dark`. A v1 Lato record is read as OFF and stays writable.
+- Mutations (all reverted, tree clean): `themeFor` dark→`paletteFor("dark")`, petrol `sec`→#7E8B8D, and the v1 branch disabled. Together they make 10 tests fail across theme-beta / theme / theme-settings-store, and each mutation trips its own test.
+- Gate: the 8 touched mobile test files give 227 pass / 0 fail; `bun run typecheck` and `bun run lint` are clean.
+- Finding 2 (`main` not merged): **still open, accepted as orchestrator work.** The merge step is the orchestrator's (§10), and the executor documented it as deferred. The `App.tsx`/`Composer.tsx` conflicts and the full `bun run check` after the merge are therefore not covered by this review.
+- Not verified: the look on the simulator or the phone (Execution §7 blocker).
+*— claude-opus-5-5, 2026-11-21*
