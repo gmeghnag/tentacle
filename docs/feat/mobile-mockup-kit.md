@@ -580,6 +580,8 @@ Red first for every generator unit (§9). Each test pins the exact property:
 
 ### Questions
 
+**Owner decisions 2026-11-21:** Q1–Q5 accepted as recommended. **Q6: no** — keep the step-node colours as they are; no `fix/` task opened.
+
 1. **Gate-enforce the generated tokens** (drift test, like `protocol.json`)?
    Then any `theme.ts` / timing change also needs `bun run mockup-kit` on its
    branch. **Rec: yes.** This is the only thing that makes "faithful" hold over
