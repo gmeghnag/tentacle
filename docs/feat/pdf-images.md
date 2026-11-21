@@ -186,7 +186,10 @@ inline leaves a visible trace.** That property is pinned by the S1 tests.
   `hasAttachments` only (`protocol/src/session-log.ts:391-399`) → a tool message
   with refs rides the existing critical `media_message` entry. **No log-format
   change, no `PROTOCOL_VERSION` bump** (S3 adds a round-trip test to prove it for
-  `role:"tool"`).
+  `role:"tool"`). *(Found false at S3 execution for > 5 refs:
+  `AttachmentsSchema.max(MAX_ATTACHMENTS_PER_MESSAGE = 5)`, while a read sends
+  up to 32. The owner must choose between a cap of 5 and a widened tool cap with
+  a version bump. See Execution S3.)*
 - `ChatMessageSchema` already carries `attachments` on any role
   (`protocol/src/session.ts:200-205`); `toolMessage` builds the tool
   `ChatMessage` field by field (`agent/src/agent.ts:280-292`) — one place to add refs.
@@ -899,6 +902,79 @@ The text is unchanged, so `fs_read` still returns the scanned-PDF refusal.
 - Not done: the review's suggested test of the OCR refusal on a large real scan
   inside the gate. It costs about 5 s or more per run. The injected-clock test pins
   the mechanism, and the repro above measures the real cost.
+
+### S3 — wire the bytes: STOPPED at the load-bearing check
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Status: not started (no production code or test changed).** A precondition
+S3 relies on does not hold, and the fix is an owner decision.
+
+**What I checked first**
+1. Provider seam (S1). I re-ran `bun .tentacle/tmp/pdf-images/payload.ts` on
+   `f9700280`. The OpenAI-compatible wire carries the image in the follow-up
+   `user` message (`image_url` `data:image/png;base64,…`). Anthropic, with the
+   repro's hand-built options (no tool selection), now gives a reason line
+   instead of the silent drop. **Holds.**
+2. Precondition "the log already stores refs on ANY role → no log-format
+   change, no `PROTOCOL_VERSION` bump" (Implementation, Preconditions).
+   **Fails above 5 refs.** `AttachmentsSchema` is `.max(MAX_ATTACHMENTS_PER_MESSAGE)`,
+   and `MAX_ATTACHMENTS_PER_MESSAGE = 5` (`protocol/src/attachment.ts:29,75-78`,
+   owner Q4 of attachments-core). That same schema backs
+   `ChatMessageSchema.attachments` (`session.ts:205`) and the critical
+   `media_message` entry (`session.ts:218`). Repro
+   (`.tentacle/tmp/pdf-images/s3/cap.ts`, a `role:"tool"` message with N refs):
+   ```
+   5 ChatMessageSchema true
+   6 ChatMessageSchema false
+   32 ChatMessageSchema false
+   ```
+   One `fs_read` sends up to `maxSent = 32` images (D3), and farmaquiz gives
+   about 27 per 100 pages. So D6's "one tool `ChatMessage` carries the read's
+   refs" produces a message that the wire and the log schema reject whenever a
+   read has more than 5 images. Per AGENTS §7, the client writes only entries
+   it validated, so such a message cannot be persisted. The plan's "no
+   log-format change" is true only for reads of ≤ 5 images.
+
+**Decision needed (owner).** How many image refs may a tool message carry?
+- **(a) Keep 5, no protocol change.** With a sink, `fs_read` sends at most 5
+  images per read. The rest get the marker `not sent: per-result limit — read
+  fewer pages`, and the footer counts them. This is contained and needs no
+  bump. The cost: farmaquiz needs ~6× more reads to see every picture.
+- **(b) Raise the cap for tool messages only.** For example, a
+  `role:"tool"` message may carry up to `MAX_TOOL_IMAGES` (20). That is the
+  most a request inlines anyway (S1: Anthropic ≤ 20 per request), so a larger
+  per-message cap would only add refs that are never sent. User messages stay
+  at 5. This widens a CRITICAL log entry and a wire schema: an older peer or
+  build rejects it. So it needs a `protocol.d/pdf-images.md` note (a bump at
+  merge) and a decision on the log header `schemaVersion`. With (b),
+  `fs_read`'s `maxSent` with a sink is also lowered to 20, so a read never
+  produces refs it cannot carry.
+- **Recommendation: (b)**, with a cap of 20 for tool messages. The feature
+  exists to read picture-heavy PDFs, and 20 matches what the provider sends.
+  (a) is the fallback if no log or protocol change is wanted in this slice.
+
+Once the owner answers, the Implementation's Preconditions bullet and D6 need
+an amendment (the cap and, for (b), the version note), and then S3 can be
+executed as planned.
+
+**Other findings while reading the S3 sites (for the amendment, not yet acted on):**
+- D6's sink binding. The plan names `hosted-session.ts` / `session-host.ts`, but
+  the store reaches the agent through the factory chain
+  `AgentContext.attachments` (`session-host.ts:129,1565,1653`) → `serve.ts:210,229,1335`
+  / `worker.ts:78,95` → `wiring.ts:403,788` → `AgentConfig.attachments`
+  (`agent.ts:592`). Adding a second sink field to every hop means more files
+  than the plan lists, and a hop can forget it silently (the T10 class of bug).
+  Proposed instead: an optional `putComplete` on the store's `AttachmentSource`
+  (`core/src/model.ts:262`), with the agent building `ToolContext.attachments`
+  from `config.attachments` (`agent.ts:1308-1315`). Tool images then go to
+  exactly the store the provider reads from, with no new hop. A pod
+  (`images.source === "client"`) gets no `attachments`, so it gets no sink by
+  construction.
+- D3's "each PNG ≤ the model's per-image cap (S3 checks against
+  `imageLimits`)": the tool cannot see the model. The provider already gives an
+  over-cap ref a reason line (S1), and a PNG is ≤ 8 MiB < `MAX_IMAGE_BYTES`
+  15 MiB. Proposed: no tool-side check.
 
 ## Review
 
