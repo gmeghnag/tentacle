@@ -674,6 +674,18 @@ check` is the orchestrator's gate (not run here, by instruction).
 `type:'binary'` as an `ArrayBuffer` — is read from RN 0.88 source, not run. Verify with one real-phone
 session over the relay after the relay deploy (§Deploy step 4) and BF0-E2.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-21*
+
+- **Review finding 1 (MEDIUM, T-M1 did not pin "a skew does not COUNT") — FIXED.** Test only, no
+  production change: new case in `apps/mobile/test/link-diagnosis.test.ts:124-132` — 1× unreachable,
+  `skew(3)`, `skew(1)`, 1× unreachable → `unreachable` (streak 2, below the threshold of 3).
+- **Red by mutation:** `streak += 1;` added to the skew branch of `apps/mobile/src/link-diagnosis.ts:96`
+  → `11 pass, 1 fail` — `Expected: "unreachable" Received: "maybe-reset"` at the new assertion
+  (`link-diagnosis.test.ts:132`). Reverted (`git diff` shows only the test file) → `12 pass, 0 fail`.
+- `bunx biome check` on the test file: clean. Full gate: the orchestrator's script.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-21* (fresh context; **same model as the executor** — shared blind spots possible on this load-bearing task)

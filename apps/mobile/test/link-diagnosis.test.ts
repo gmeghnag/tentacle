@@ -123,6 +123,15 @@ describe("an e2e version skew names the side to update (docs/feat/noise-binary-c
     expect(diagnoser.observe({ opened: true, error: unreachable() })).toBe("maybe-reset");
   });
 
+  test("T-M1: skews do not COUNT toward the streak (a forged byte cannot hasten maybe-reset)", () => {
+    const diagnoser = createLinkDiagnoser();
+    expect(diagnoser.observe({ opened: true, error: unreachable() })).toBe("unreachable");
+    expect(diagnoser.observe({ opened: true, error: skew(3) })).toBe("update-app");
+    expect(diagnoser.observe({ opened: true, error: skew(1) })).toBe("update-computer");
+    // One real failure after one before it: 2 — still below the reset threshold.
+    expect(diagnoser.observe({ opened: true, error: unreachable() })).toBe("unreachable");
+  });
+
   test("T-M1: the sentences — and maybe-reset now names an older tentacle (a v1 daemon just closes)", () => {
     expect(diagnosisMessage("update-app", "MacBook")).toContain("update the app");
     expect(diagnosisMessage("update-computer", "MacBook")).toContain("older than this app");
