@@ -141,8 +141,11 @@ describe("StepNode replaces ToolRow", () => {
     // B: the "thinking" node is the breathing ∴, no longer the queued ring.
     expect(node).toMatch(/case "thinking":\s*return <BreathingTherefore /);
     expect(node).toContain("clock.interpolate(breatheCurve(i))");
-    // D: the footer's word is the shimmer, fed by the pure sweep.
-    expect(node).toMatch(/node === "thinking" \? \(\s*<ThinkingWord/);
+    // D: the footer's word is the shimmer, fed by the pure sweep. The same word
+    // is also opt-in for a described shell step's running name (`shimmer`,
+    // docs/feat/shell-intent-line.md §7) — the condition grew, the thinking node
+    // still goes through it.
+    expect(node).toMatch(/node === "thinking" \|\| shimmer === true \? \(\s*<ThinkingWord/);
     expect(node).toContain("shimmerSweep(width)");
     // Reduce Motion stops both clocks (useLoop returns null when still).
     expect(node).toContain("useLoop(BREATHE_MS, !look.animate)");

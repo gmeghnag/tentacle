@@ -81,7 +81,9 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
     // `diagram-settings-store.ts` decides; and the gallery look
     // (docs/feat/mobile-gallery-polish.md) a ninth: `gallery-settings-store.ts` decides;
     // and the Figtree try-out switch (docs/feat/mobile-theme-beta.md) a tenth:
-    // `theme-settings-store.ts` decides.
+    // `theme-settings-store.ts` decides; and the Beta `Compact shell rows` switch
+    // (docs/feat/shell-intent-line.md §7) an eleventh, the same way:
+    // `shell-rows-store.ts` decides and stays pure.
     expect(importers.map((path) => path.slice(APP.length + 1)).sort()).toEqual([
       "src/activity-settings-expo.ts",
       "src/artifact-seen-expo.ts",
@@ -91,6 +93,7 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
       "src/lock-settings-expo.ts",
       "src/photo-settings-expo.ts",
       "src/secure-kv.ts",
+      "src/shell-rows-expo.ts",
       "src/theme-settings-expo.ts",
       "src/voice-settings-expo.ts",
     ]);
