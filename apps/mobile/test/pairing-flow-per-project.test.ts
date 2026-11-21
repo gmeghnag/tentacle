@@ -19,6 +19,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { PairDeviceResult } from "@tentacle/client/pairing";
+import type { PairingPayload } from "@tentacle/protocol";
+import { projectRecordId } from "../src/computer-store.ts";
+import { projectMismatch, recordFor } from "../src/pairing-flow.ts";
 
 const APP = join(import.meta.dir, "..");
 const flow = readFileSync(join(APP, "src", "pairing-flow.ts"), "utf8");
@@ -39,12 +43,53 @@ describe("runPairing pairs PER PROJECT (owner decision (i′))", () => {
     // The property: an app that does not say this is refused outright.
     expect(args).toContain("perProject: true,");
   });
+});
 
-  test("(i′) keeps the transitional record id: stored under `result.computer.id` until slice (b)", () => {
-    // Pairing another project REPLACES the phone's one record per computer, and
-    // push routing already matches that id (`push-manager.ts`), so (b) — which
-    // keys records per project — is what moves both together.
-    expect(flow).toContain("id: result.computer.id,");
-    expect(flow).not.toContain("id: result.project");
+// Slice (b): the record is filed PER PROJECT (§6), which retires (i′)'s
+// transitional "stored under `result.computer.id`" pin above.
+const result = (project?: { key: string; cwd: string; label: string }): PairDeviceResult => ({
+  deviceId: "phone-id",
+  computer: { id: "mac-id", name: "MacBook" },
+  ...(project === undefined ? {} : { project }),
+});
+const payload = (project?: string): PairingPayload => ({
+  v: 1,
+  computer: "MacBook",
+  key: new Uint8Array(32).fill(7),
+  addresses: ["ws://192.168.1.20:4000/s/AAAAAAAAAAAAAAAAAAAAAA/e2e"],
+  code: "c",
+  ...(project === undefined ? {} : { project }),
+});
+const P = { key: "tentacle-aaaaaaaaaaaa", cwd: "/u/tentacle", label: "tentacle" };
+
+describe("recordFor: where a pairing is filed (§6)", () => {
+  test("a per-project result → projectRecordId, with computerId + project (mutation: id = computer id → red)", () => {
+    const record = recordFor(result(P), payload("tentacle"), "iPhone", 5);
+    expect(record.id).toBe(projectRecordId("mac-id", P.key));
+    expect(record.computerId).toBe("mac-id");
+    expect(record.project).toEqual(P);
+    expect(record.thisDeviceName).toBe("iPhone");
+  });
+
+  test("an older daemon's result (no project, F8) → the computer id, as before", () => {
+    const record = recordFor(result(), payload(), "iPhone", 5);
+    expect(record.id).toBe("mac-id");
+    expect(record.computerId).toBeUndefined();
+    expect(record.project).toBeUndefined();
+  });
+});
+
+describe("projectMismatch (F17)", () => {
+  test("p= names another project than the daemon's → a failure naming both", () => {
+    const failure = projectMismatch(result(P), payload("assistant"));
+    expect(failure?.reason).toBe("project-mismatch");
+    expect(failure?.message).toContain("'assistant'");
+    expect(failure?.message).toContain("'tentacle'");
+  });
+
+  test("same label, no p=, or no project in the result → no failure", () => {
+    expect(projectMismatch(result(P), payload("tentacle"))).toBeUndefined();
+    expect(projectMismatch(result(P), payload())).toBeUndefined();
+    expect(projectMismatch(result(), payload("tentacle"))).toBeUndefined();
   });
 });

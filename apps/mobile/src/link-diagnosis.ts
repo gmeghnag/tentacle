@@ -28,6 +28,13 @@ export interface DialObservation {
   readonly opened: boolean;
   /** What the attempt threw, if anything (a success is `ok()`). */
   readonly error?: unknown;
+  /**
+   * The relay said "no daemon registered for that id" (close `4404`, after the
+   * stream opened and before the handshake — docs/feat/mobile-projects.md §6):
+   * the project's `serve` is not running. NOT a hint of a reset, so it never
+   * feeds `MAYBE_RESET_STREAK`.
+   */
+  readonly absent?: boolean;
 }
 
 /** How many opened-but-unconfirmed handshakes in a row hint at a reset (F11/Task 9). */
@@ -40,6 +47,8 @@ export interface LinkDiagnoser {
   ok(): LinkDiagnosis;
   /** What to show right now, without observing (a re-render keeps the last verdict). */
   current(): LinkDiagnosis;
+  /** The last failed attempt was the relay's `4404` (the project's `serve` is not running). */
+  absent(): boolean;
 }
 
 /**
@@ -55,12 +64,21 @@ export function createLinkDiagnoser(): LinkDiagnoser {
   /** Consecutive attempts that OPENED and then failed to confirm the handshake. */
   let streak = 0;
   let state: LinkDiagnosis = "ok";
+  let absent = false;
   return {
     observe(observation: DialObservation): LinkDiagnosis {
+      absent = false;
       if (isUnauthorized(observation.error)) {
         // Terminal and authenticated: the count is irrelevant.
         streak = 0;
         state = "revoked";
+        return state;
+      }
+      if (observation.absent === true) {
+        // A stopped project's relay address: the relay itself said nobody is
+        // registered. Says nothing about our key — the streak is left alone.
+        absent = true;
+        state = "unreachable";
         return state;
       }
       if (!observation.opened) {
@@ -75,11 +93,15 @@ export function createLinkDiagnoser(): LinkDiagnoser {
     },
     ok(): LinkDiagnosis {
       streak = 0;
+      absent = false;
       state = "ok";
       return state;
     },
     current(): LinkDiagnosis {
       return state;
+    },
+    absent(): boolean {
+      return absent;
     },
   };
 }

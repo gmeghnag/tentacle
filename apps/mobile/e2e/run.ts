@@ -429,7 +429,8 @@ async function main(): Promise<number> {
   // The real `serve`, from source, on a private config dir and the mock model.
   // Spawned through a function because flow 05 stops it and starts it again on
   // the SAME port and config (serve persists, so the sessions come back).
-  const startServe = (port: number = daemonPort): Child => {
+  // `cwd` (flow 37): a SECOND project's serve runs in its own folder, same config.
+  const startServe = (port: number = daemonPort, cwd: string = runDir): Child => {
     const child = Bun.spawn(
       [
         process.execPath,
@@ -456,7 +457,7 @@ async function main(): Promise<number> {
         // The daemon's cwd IS its session cwd (each session's tools are confined
         // to it), so it is the run's scratch dir — `project/<file>` (the mock
         // model's `EDIT` prompts) lands there and never in the repo.
-        cwd: runDir,
+        cwd,
         env: {
           ...process.env,
           TENTACLE_CONFIG_DIR: join(runDir, "config"),
@@ -478,6 +479,11 @@ async function main(): Promise<number> {
   // Session info's skill row (flow 25): a user-scope skill in the harness config dir.
   await writeHarnessSkill(join(runDir, "config"));
   let serving = startServe();
+  // Flow 37 (docs/feat/mobile-projects.md): project B, a second `serve` in its own
+  // folder on the SAME config dir (one computer, two projects). Started on demand;
+  // a restart keeps its port, since the phone paired that address.
+  const projectBDir = join(runDir, "project-b");
+  let projectB: { child: Child | undefined; readonly port: number } | undefined;
 
   try {
     await waitForPort(daemonPort);
@@ -558,6 +564,25 @@ async function main(): Promise<number> {
           serving = startServe();
           await waitForPort(daemonPort);
         },
+        projectBStart: async () => {
+          if (projectB?.child !== undefined) {
+            return;
+          }
+          await mkdir(projectBDir, { recursive: true });
+          const port = projectB?.port ?? freePort();
+          projectB = { child: startServe(port, projectBDir), port };
+          await waitForPort(port);
+        },
+        projectBStop: async () => {
+          const child = projectB?.child;
+          if (projectB === undefined || child === undefined) {
+            return;
+          }
+          child.kill();
+          await child.exited;
+          children.delete(child);
+          projectB = { child: undefined, port: projectB.port };
+        },
         // Flow 17 (fix/mobile-e2e-reds): the history moves while the PHONE is
         // offline. `serve` is down (the flow stopped it); a SIDE `serve` on another
         // port, same store, runs one laptop turn and is stopped again — the phone
@@ -613,6 +638,16 @@ async function main(): Promise<number> {
           // and the one R5b made pairable at all. Every other flow keeps the
           // loopback address so it can be driven from the simulator directly.
           const relayOnly = options.ttlMs === -1;
+          if (options.project === "b") {
+            if (projectB?.child === undefined) {
+              throw new Error("project B's serve is not running (project-b-start first)");
+            }
+            const started = await pairing.start({
+              projectDir: projectBDir,
+              address: `ws://127.0.0.1:${projectB.port}/e2e`,
+            });
+            return { payload: started.payload, computerId: started.computerId, relayOnly: false };
+          }
           const started = relayOnly
             ? await pairing.startRelayOnly()
             : await pairing.start(options.ttlMs === undefined ? {} : { ttlMs: options.ttlMs });
@@ -1460,6 +1495,9 @@ export const FLOWS: readonly string[] = [
   // docs/feat/mobile-file-preview-cards.md: the transcript's preview cards (a
   // PDF page, an image, markdown lines, an HTML page), light and dark.
   "36-preview-cards",
+  // docs/feat/mobile-projects.md: two projects of one computer (a second `serve`
+  // on the same config dir) — stop, re-probe, revoke one, the other stays.
+  "37-projects",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`
   // behind in the Keychain, which `clearKeychain` in `_pair` resets anyway).

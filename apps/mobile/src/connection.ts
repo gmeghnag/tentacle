@@ -29,7 +29,11 @@ import {
 import type { LinkStatus } from "@tentacle/client";
 import { secureChannelFactory } from "@tentacle/client/secure-channel";
 import { PermissionBroker } from "@tentacle/core";
-import { type InitializeResult, decodeBase64Url } from "@tentacle/protocol";
+import {
+  type InitializeResult,
+  RELAY_CLOSE_UNREGISTERED,
+  decodeBase64Url,
+} from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { Random } from "@tentacle/transport/noise";
 import { type AppLog, type AppLogField, createAppLog, errorShape } from "./app-log.ts";
@@ -157,7 +161,16 @@ interface DiagnosticSocket {
  * Exported for its own test, which drives a socket that really does hand it
  * canary text: the app has ONE such wrapper and it must stay text-free.
  */
-export function withDiagnostics(Ctor: WebSocketCtor, log: AppLog): WebSocketCtor {
+export function withDiagnostics(
+  Ctor: WebSocketCtor,
+  log: AppLog,
+  /**
+   * Each socket's close CODE, by the URL it dialled (docs/feat/mobile-projects.md
+   * §6): the client's channel drops the code (`ws-channel.ts` `onClose()` takes
+   * none), so a relay `4404` is read HERE, the one place that sees the event.
+   */
+  onCloseCode?: (url: string, code: number) => void,
+): WebSocketCtor {
   return class {
     constructor(url: string, init?: unknown) {
       const ws = new Ctor(url, init) as DiagnosticSocket;
@@ -179,6 +192,9 @@ export function withDiagnostics(Ctor: WebSocketCtor, log: AppLog): WebSocketCtor
         // No `reason`: a close reason is the peer's prose (P4), and it is exactly
         // where a title or a prompt fragment would arrive from a daemon.
         log.log("warn", "ws-close", typeof code === "number" ? { code } : {});
+        if (typeof code === "number") {
+          onCloseCode?.(url, code);
+        }
       });
       // biome-ignore lint/correctness/noConstructorReturn: an adapter returns the socket itself
       return ws as object;
@@ -262,7 +278,12 @@ export async function openComputer(
   if (computer.addresses.length === 0) {
     throw new ComputerRecordError(`'${computer.name}' has no address — pair again`);
   }
-  const Ctor = withDiagnostics(rnWebSocketCtor(deps.WebSocket), log);
+  /** The last close code per dialled URL, and the address each opened channel came from (§6 `absent`). */
+  const closeCodes = new Map<string, number>();
+  const addressOf = new WeakMap<DuplexChannel, string>();
+  const Ctor = withDiagnostics(rnWebSocketCtor(deps.WebSocket), log, (url, code) => {
+    closeCodes.set(url, code);
+  });
   const factoryDeps: ChannelFactoryDeps = { WebSocket: Ctor };
   const memory: DialMemory = { lastGood: undefined };
   const diagnosis = deps.diagnosis ?? createLinkDiagnoser();
@@ -281,10 +302,13 @@ export async function openComputer(
   const steps = {
     open: async (address: string): Promise<DuplexChannel> => {
       current = address;
+      closeCodes.delete(address);
       // No `observe` here: whether this failure may be reported at all is the
       // race's call (`failed` below), because only the race knows if it had
       // already been decided when the rejection arrived.
-      return await webSocketChannelFactory(address, {}, factoryDeps)();
+      const channel = await webSocketChannelFactory(address, {}, factoryDeps)();
+      addressOf.set(channel, address);
+      return channel;
     },
     /**
      * An `open` that failed while its race was still undecided: a path that is
@@ -311,7 +335,12 @@ export async function openComputer(
           random: deps.random,
         })();
       } catch (error) {
-        diagnosis.observe({ opened: true, error });
+        // The relay's `4404` (no daemon registered for that id): the socket's
+        // close listener ran before the channel's, so the code is already here.
+        const address = addressOf.get(channel);
+        const absent =
+          address !== undefined && closeCodes.get(address) === RELAY_CLOSE_UNREGISTERED;
+        diagnosis.observe({ opened: true, error, ...(absent ? { absent: true } : {}) });
         throw error;
       }
     },

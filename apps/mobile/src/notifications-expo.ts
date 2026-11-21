@@ -7,6 +7,7 @@ import {
 import type { PushMessage } from "@tentacle/protocol";
 import { openPush } from "@tentacle/transport/push";
 import * as Notifications from "expo-notifications";
+import { isRecordOfComputer } from "./computer-store.ts";
 import { type CurrentScreen, presentFromHints } from "./foreground-presentation.ts";
 import type { PinnedComputer, PushKeyMaterial } from "./notification-action.ts";
 import { NOTIFICATION_CATEGORIES } from "./notification-categories.ts";
@@ -160,7 +161,7 @@ export function openInApp(
       try {
         const plaintext = openPush({ keyId: k, enc, ciphertext }, recipient, senderPub);
         const parsed = PushMessageSchema.safeParse(JSON.parse(new TextDecoder().decode(plaintext)));
-        if (parsed.success && parsed.data.computer === computer.id) {
+        if (parsed.success && isRecordOfComputer(computer.id, parsed.data.computer)) {
           return { message: parsed.data, computer };
         }
       } catch {
