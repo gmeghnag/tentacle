@@ -7,7 +7,7 @@ import type { JSX } from "react";
 import { View } from "react-native";
 import type { Palette } from "../theme.ts";
 
-export type StatusTone = "online" | "offline" | "attention" | "running";
+export type StatusTone = "online" | "offline" | "attention" | "running" | "wait";
 
 export function toneColor(palette: Palette, tone: StatusTone): string {
   switch (tone) {
@@ -18,6 +18,7 @@ export function toneColor(palette: Palette, tone: StatusTone): string {
     case "attention":
       return palette.orange;
     case "offline":
+    case "wait":
       return palette.sec;
   }
 }
@@ -38,7 +39,7 @@ export function StatusDot({
         width: size,
         height: size,
         borderRadius: size / 2,
-        ...(tone === "offline"
+        ...(tone === "offline" || tone === "wait"
           ? { borderWidth: 1.5, borderColor: color }
           : { backgroundColor: color }),
       }}
