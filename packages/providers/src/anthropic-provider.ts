@@ -29,12 +29,13 @@ import type {
 import { tokenCount, wireArguments } from "@tentacle/core";
 import {
   type ImageBuildOptions,
-  MAX_INLINE_IMAGES,
   NO_IMAGES,
+  buildImageOptions,
   imageLimits,
-  resolveImages,
-  selectInlineIds,
   strayRefsText,
+  toolImageBudget,
+  toolResultImages,
+  toolResultText,
   userParts,
 } from "./images.ts";
 import { ModelRequestError, parseRetryAfter } from "./openai-provider.ts";
@@ -78,6 +79,11 @@ export interface AnthropicProviderConfig {
    * its place, so it can never become a 400 on every later turn of the session.
    */
   readonly maxImageBytes?: number;
+  /**
+   * How many tool-result images one request inlines (newest first). Defaults
+   * to `MAX_TOOL_IMAGES` (docs/feat/pdf-images.md, owner Q2).
+   */
+  readonly maxToolImages?: number;
 }
 
 /** A content block while streaming: text/thinking accumulate, tool_use buffers JSON. */
@@ -141,17 +147,12 @@ export class AnthropicProvider implements ModelProvider {
    * no vision must not cost a byte read); the refs still reach the model as
    * text placeholders.
    */
-  private async imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
-    const { vision, maxBytes: maxImageBytes } = imageLimits("anthropic", this.config);
-    const inlined = selectInlineIds(request.messages);
-    return vision
-      ? {
-          images: await resolveImages(request, MAX_INLINE_IMAGES, maxImageBytes),
-          vision,
-          inlined,
-          maxImageBytes,
-        }
-      : { images: new Map(), vision, inlined, maxImageBytes };
+  private imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
+    return buildImageOptions(
+      request,
+      imageLimits("anthropic", this.config),
+      toolImageBudget(this.config.maxToolImages),
+    );
   }
 
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
@@ -422,6 +423,39 @@ function parseEvent(data: string): AnthropicEvent | null {
  * image-only prompt). `options` is the resolved bytes (default: none, so every
  * existing caller compiles and behaves exactly as before).
  */
+/**
+ * One `tool_result` block (docs/feat/pdf-images.md D7). A result without refs
+ * keeps its plain string content (unchanged bytes, cache-stable). With refs, the
+ * content becomes `[text, …image blocks, …a reason line per ref not inlined]`
+ * — the documented shape for a tool returning images — or, when nothing is
+ * inlined, the string plus its reason lines. Never a silent drop. An empty text
+ * block is a 400, so empty text is left out.
+ */
+function toolResultBlock(
+  message: ChatMessage,
+  options: ImageBuildOptions,
+): Record<string, unknown> {
+  const { images, lines } = toolResultImages(message, options);
+  const block = { type: "tool_result", tool_use_id: message.toolCallId ?? "" };
+  if (images.length === 0) {
+    return { ...block, content: toolResultText(message.content, lines) };
+  }
+  const content: Record<string, unknown>[] = [];
+  if (message.content !== "") {
+    content.push({ type: "text", text: message.content });
+  }
+  for (const image of images) {
+    content.push({
+      type: "image",
+      source: { type: "base64", media_type: image.mimeType, data: image.base64 },
+    });
+  }
+  if (lines.length > 0) {
+    content.push({ type: "text", text: lines.join("\n") });
+  }
+  return { ...block, content };
+}
+
 export function buildPayload(
   model: string,
   req: ChatRequest,
@@ -445,6 +479,7 @@ export function buildPayload(
       // Collapse consecutive tool results into one user turn: parallel results
       // belong in a single message (the harness emits one tool message per
       // call, in order).
+      const block = toolResultBlock(message, options);
       const prev = messages.at(-1);
       if (
         prev !== undefined &&
@@ -452,22 +487,9 @@ export function buildPayload(
         Array.isArray(prev.content) &&
         toolTurns.has(prev)
       ) {
-        (prev.content as Record<string, unknown>[]).push({
-          type: "tool_result",
-          tool_use_id: message.toolCallId ?? "",
-          content: message.content,
-        });
+        (prev.content as Record<string, unknown>[]).push(block);
       } else {
-        const turn: Record<string, unknown> = {
-          role: "user",
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: message.toolCallId ?? "",
-              content: message.content,
-            },
-          ],
-        };
+        const turn: Record<string, unknown> = { role: "user", content: [block] };
         toolTurns.add(turn);
         messages.push(turn);
       }

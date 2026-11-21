@@ -489,7 +489,96 @@ S3 (`daemon/test`, `agent/test`, `client/test`, `tui/test`):
 
 ## Execution
 
-*— (pending)*
+### S1 — providers carry tool-result images
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Load-bearing check re-run first** (`bun .tentacle/tmp/pdf-images/payload.ts` on
+`645db3df`, before any edit): output identical to the Context's Repro
+(`selected … []`, `resolved: 0`, Anthropic `tool_result.content` a bare string = the
+ref silently dropped, OpenAI `[image unavailable — …]`). Held → proceeded.
+
+**As built** (all in `packages/providers`):
+- `src/images.ts` — `MAX_TOOL_IMAGES = 20`; `selectToolImageIds(messages, keep)`
+  (newest-first, distinct, tool messages only; returns id → the NEWEST tool
+  message carrying it, its one inline slot); `resolveImages(req, keep, max,
+  toolKeep = 0)` reads the user ∪ tool selections, each id once, same
+  sha256+size verification; `ImageBuildOptions` gains optional `toolInlined` /
+  `toolKeep`; `buildImageOptions(request, limits, toolKeep)` (the one place both
+  providers build options; no vision ⇒ zero reads, as before);
+  `toolImageBudget(maxToolImages)`; `toolResultImages(m, options)` → inlined
+  images (with labels) + one reason line per ref not inlined (older than the
+  budget, same image in a newer result, over cap, unsupported type,
+  unavailable), or ONE line `[N images in this result not sent: this model does
+  not take images]` without vision; `toolResultText(content, lines)`.
+  `userParts` now inlines only ids in the USER selection (`inlined.has`), so the
+  tool selection's bytes can never widen the user's K. `placeholder` takes the
+  "older" wording as a parameter. `imageLimits` unchanged (its shape is pinned
+  and consumed by the daemon).
+- `src/anthropic-provider.ts` — `toolResultBlock`: no refs → unchanged string
+  content (byte-identical, cache-stable); refs with ≥1 inlined image →
+  `content: [text (if non-empty), …image blocks, text of reason lines]`; refs
+  with none inlined → string + reason lines. Consecutive results still collapse
+  into one user turn. `maxToolImages?` config. `imageOptions` → `buildImageOptions`.
+- `src/openai-provider.ts` — `wireMessages`: a tool message stays a string
+  (+ reason lines); with vision, after the LAST tool message of a run, ONE
+  wire-only `user` message `[images from the tool results above — call c1:
+  <label>, …; call c2: …]` + `image_url` parts in order. Never in history; rebuilt
+  identically per request. `maxToolImages?` config. `imageOptions` → `buildImageOptions`.
+- Tests: `test/tool-images.test.ts` (new, 10 tests: both providers end-to-end on
+  the captured body via injected `fetch`) and `test/tool-image-select.test.ts`
+  (new, 4 pure tests: selection, single read per id, user K isolation).
+- `changelog.d/pdf-images.added.md` (one bullet, owner's instruction; S3 should
+  extend it rather than add a second fragment).
+
+**Red before green** — the new e2e file run against HEAD's three source files
+(mine set aside in `.tentacle/tmp/pdf-images/s1-new/`, then restored):
+`1 pass, 9 fail` — every Anthropic test and the two OpenAI vision tests fail on
+the assertion; the 1 pass is "OpenAI wrong bytes → unavailable line", which is
+already today's behaviour. After: `10 pass`. (The pure file imports new exports,
+so it cannot be red on HEAD by assertion; its property is covered by M5.)
+
+**Mutations** (each applied, run, reverted from the scratch copy; `rg MUTATION`
+empty afterwards):
+| # | Mutation | Result |
+|---|---|---|
+| M1 | Anthropic tool branch back to `content: message.content` | 7 fail |
+| M2 | `toolResultImages` drops every reason line | 5 fail (both providers) |
+| M3 | tool budget shares the user's K (`5 − user selected`) | 2 fail (25→20 budget, maxToolImages) |
+| M4 | OpenAI puts image parts on the tool message, no follow-up | 1 fail (vision-on order test) |
+| M5 | `userParts` drops the `inlined.has` guard | 1 fail (user K isolation) |
+
+**Verification (narrow, per the token budget):** `bun test packages/providers`
+→ 185 pass, 0 fail; `bunx tsc --noEmit -p packages/providers` clean; `bunx biome
+check` on the 5 changed files clean. Repro after: OpenAI wire carries the image
+in the follow-up user message; Anthropic's hand-built options in the repro carry
+no tool selection, so it now shows a reason line instead of the silent drop.
+No protocol schema touched → `protocol.json` not regenerated; no `protocol.d/` note.
+
+**Drift from Implementation (and why):**
+- Tests are two NEW files instead of extending `images.test.ts` /
+  `anthropic-provider.test.ts` / `openai-provider.test.ts`: the e2e file must use
+  only `AnthropicProvider`/`OpenAIProvider` so it can run on HEAD for the red
+  proof; the pure file holds what imports new exports.
+- "Configurable" (Q2) is done at the PROVIDER config level (`maxToolImages`);
+  the user-facing config key (`model.maxToolImages` in `packages/config` +
+  `select-provider.ts` + `cli/config-effective.ts`) is NOT wired — outside S1's
+  file list. Follow-up: wire it in S3 or a small task.
+- Added dedup across results (same id in two tool results → inlined once, in the
+  newer; the older gets a reason line). Not in D7, but needed for the plan's own
+  property "within a bounded per-request budget": without it, re-reading the same
+  page N times would send N copies past the budget.
+- The reason line for an older tool image reads `only the newest 20 tool-result
+  images are sent (read it again to see it)`, not Q2's `older tool image — p.N`
+  (the ref label is the file name; the page lives in the S2 marker).
+- **Not verified:** Anthropic's per-request image maximum (Preconditions "TO
+  VERIFY"): the docs lookup was not available in this session. Our max per
+  request is 5 + 20 = 25 (dedup makes it a hard bound); verify against the live
+  Messages API docs (vision page, "images per request") before S3 ships.
+- Pod note for Review: a pod can put on a tool message a ref whose id the laptop
+  itself attached (`LaptopImages` serves only those); the laptop would now inline
+  that user image again inside a tool_result. Same "the pod chooses only the id"
+  scope as user refs from a pod today; no new bytes leave the laptop.
 
 ## Review
 
