@@ -269,3 +269,33 @@ source-pin `App.tsx` 390 pass / 0 fail, `tsc -p apps/mobile` clean,
 `biome check` clean on the four changed files.
 
 *— claude-opus-5-5 (executor, fix round 1), 2026-11-21*
+
+### Round 2
+
+**Verdict: PASS** — round 1's MEDIUM is fixed; no new HIGH/MEDIUM in `git diff HEAD~1`.
+
+- **R1 MEDIUM (stale wait navigates) — FIXED.** `supersede()` now bumps
+  `tapGeneration` on every ask (`onOpen`, `onAdd`, `onScan`, `onRetry`, `onPairAgain`,
+  `onMenu`, `onRemove`, `onOpenSettings`), on blur (its own `useFocusEffect`, deps
+  `[supersede]` only, so the 15 s `tick` re-run does not count as leaving), and on
+  AppState background/inactive. The `settling` lock is gone, so a second tap
+  supersedes instead of being swallowed. `tapSettled(row, {superseded, backgrounded})`
+  → `drop` returns before any repaint or navigation.
+- **Mutations (each reverted, `git status` clean, 19/19 pass again):** (1)
+  `tapSettled` ignores `superseded`/`backgrounded` ⇒ 1 fail ("a wait the person has
+  moved on from does NOTHING"); (2) remove `supersede()` from `onMenu` ⇒ 1 fail
+  ("every ask … supersedes", `project-tap-wiring.test.ts`).
+- **Gate:** `project-rows.test.ts` + `project-tap-wiring.test.ts` 19 pass / 0 fail;
+  `bun run lint` clean (2203 files); `bun run typecheck` clean (root, mobile, relay).
+- **Attacks that found nothing blocking:** the 15 s re-run resetting `sentOffscreen`
+  (it re-reads `AppState.currentState`, never a literal `false`, so it holds); a re-tap
+  on the same row (the earlier wait is dropped, the new one decides, holds); `supersede`
+  identity churn re-running the blur effect (stable `useCallback([])`, holds).
+- **LOW (not blocking):** `onPairProject` (opens the pair-hint sheet) does not
+  supersede, so a wait that is still running can still navigate under that sheet. A
+  dropped wait also leaves its row reading `Checking…` until the next read (≤ 15 s, or
+  sooner on return or Retry). The wiring test pins source text (the
+  `hub-tap-wiring.test.ts` pattern), not runtime behaviour. Simulator behaviour is still
+  unverified: the orchestrator's `scripts/e2e-gate.sh` covers it.
+
+*— claude-opus-5-5, 2026-11-21*
