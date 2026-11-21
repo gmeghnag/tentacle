@@ -293,6 +293,18 @@ describe("SessionScreen hands each notice its look", () => {
 
   test("`looks` is in extraData, so a block's head re-renders when a neighbour arrives", () => {
     expect(src).toMatch(/rowExtraData = useMemo\([\s\S]{0,600}looks,[\s\S]{0,200}\[/);
-    expect(src).toMatch(/layout,\n\s+looks,\n\s+\],/);
+    // `looks` is a DEPENDENCY of the memo, not merely a member of the object it
+    // builds — a mutation that drops it from `[...]` leaves the row un-re-rendered.
+    // Asserted as membership: a later switch appends its own entry
+    // (`compactShell`, docs/feat/shell-intent-line.md §7), so its position is not
+    // this test's business.
+    const deps = /rowExtraData = useMemo\(\s*\(\) => \(\{[\s\S]*?\}\s*\),\s*\[([\s\S]*?)\]/.exec(
+      src,
+    );
+    const names = (deps?.[1] ?? "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name !== "");
+    expect(names).toContain("looks");
   });
 });

@@ -433,3 +433,35 @@ does not). Full `bun run check`: left to the orchestrator's gate.
 `TERM=xterm-256color` without `COLORTERM`, light theme, `NO_COLOR=1`, narrow).
 
 ## Review
+
+### Gate fix after exec — the mobile leg was environmental, plus one stale merge
+
+*— claude-opus-5-5, 2026-11-21*
+
+The orchestrator's gate failed on `apps/mobile/App.tsx` (`TS2307` on
+`@react-navigation/*`, `react-native`, `expo-*`; `TS1286`/`TS1287` following from
+the same cause). Two separate facts, both verified:
+
+1. **Environmental, not a code regression.** This worktree had no
+   `apps/mobile/node_modules` — CI installs with
+   `bun install --frozen-lockfile --filter '!@tentacle/mobile'`
+   (`.github/workflows/build.yml:52`), and the worktree inherited that state.
+   Without the deps, `apps/mobile/tsconfig.json:2` `extends "expo/tsconfig.base"`
+   fails (`TS6053`) and every downstream import resolves to nothing: 10 311
+   errors, all cascading. `bun install --frozen-lockfile` (lockfile unchanged,
+   `git status` clean) → `tsc -p apps/mobile --noEmit` → **0 errors**. No source
+   file was touched for this.
+2. **Three stale mobile test files, from a merge base two commits early.** The
+   branch last merged main at `a82c085e`; main then landed `91c76dbe`
+   (`fix(shell-intent-line): main-merge gate fails`), which updated exactly
+   `apps/mobile/test/{notice-row,pairing-guards,tool-rows-wiring}.test.ts` to the
+   source's current shape. Our copies still asserted the pre-shell-intent-line
+   form, so 3 tests failed against correct source (`session/notice` `looks` dep
+   as regex-membership; `shell-rows-expo.ts` in the Keychain-importer list;
+   `node === "thinking" || shimmer === true`). Applied that upstream patch
+   verbatim (`git apply`, files only — no checkout/merge/commit): 39 pass, 0 fail.
+
+Gate status in this worktree after the fix: `tsc --noEmit` (root),
+`tsc -p apps/mobile`, `tsc -p apps/relay` → all exit 0; `biome check` on the 3
+changed files → clean; narrow tests: 39 (mobile) + 157 (tui) + 14 + 18 → 0 fail.
+The full suite stays the orchestrator's.
