@@ -69,6 +69,7 @@ import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { localSession } from "./local-session.ts";
+import { pickPalette } from "./mascot.ts";
 import { type OpenPanel, panelClick, panelNoSwitchNotice, panelSwitchOp } from "./panel.ts";
 import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
@@ -151,8 +152,6 @@ const FRAME_MS = 33; // ~30fps streaming throttle
 // far faster than this, so a legitimate paste never trips it.
 const PASTE_TIMEOUT_MS = 250;
 
-const WELCOME = "Tentacle ready. Type a task, or `/help` for commands.";
-
 // Clipboard reads are trimmed: copied terminal output often has a trailing
 // newline that would otherwise land as a stray blank line.
 const flattenPasted = (text: string): string => sanitizePasted(text).trim();
@@ -218,6 +217,7 @@ export function App({
   model,
   modelLabel,
   cwd,
+  version,
   contextWindow = 128000,
   target,
   permissions,
@@ -405,11 +405,24 @@ export function App({
 
   const stateRef = useRef<DisplayState>({
     ...initialState,
-    // A resumed session seeds its prior transcript; otherwise the welcome line.
+    // A resumed session seeds its prior transcript; a fresh one opens on the
+    // startup header — tentacle + version, the model and folder, the /help hint,
+    // and (when the terminal can paint it) the mascot, whose palette is drawn
+    // ONCE here so every re-render and resize keeps the same sprite
+    // (docs/feat/tui-mascot.md D2/D3).
     items:
       initialItems && initialItems.length > 0
         ? [...initialItems]
-        : [{ kind: "assistant", text: WELCOME }],
+        : [
+            {
+              kind: "header",
+              ...(version !== undefined ? { version } : {}),
+              model: shownModel,
+              cwd,
+              ...(home !== undefined ? { home } : {}),
+              palette: pickPalette(),
+            },
+          ],
   });
   const sessionRef = useRef<SessionController | null>(null);
   // What Esc/Ctrl+C aborts: the streamed turn's controller — or, while a

@@ -100,6 +100,46 @@ interface ChartTokens {
   readonly series: readonly Color[];
 }
 
+/**
+ * The startup header's mascot, Polpetto (docs/feat/tui-mascot.md)
+ * (`mascot.ts` is the pure half: bitmap, projection, show/hide).
+ *
+ * Five tones per palette, keyed by the owner's drawing letters — `K` outline,
+ * `E` eyes, `F` body, `S` body shade, `B` blush. NINE palettes in ONE set, the
+ * same in both themes (owner Q4: one plain outline, decoration only) — which is
+ * why they hang off `tokens` and not off a `ThemeMode`. Here and not in
+ * `mascot.ts` because this file is the one place allowed to name a colour
+ * (`test/theme-no-stray.test.ts`): a hex written elsewhere escapes the light
+ * palette and nothing would notice.
+ */
+export interface MascotTone {
+  readonly K: Color;
+  readonly E: Color;
+  readonly F: Color;
+  readonly S: Color;
+  readonly B: Color;
+}
+
+export interface MascotPalettes {
+  readonly names: readonly MascotPaletteName[];
+  readonly tones: Readonly<Record<MascotPaletteName, MascotTone>>;
+}
+
+/** The nine pellete names, in the order the mascot draws them (a `const` tuple: the union below). */
+export const MASCOT_PALETTE_NAMES = [
+  "soft",
+  "logo",
+  "glow",
+  "cyan",
+  "teal",
+  "coral",
+  "mint",
+  "amber",
+  "sky",
+] as const;
+
+export type MascotPaletteName = (typeof MASCOT_PALETTE_NAMES)[number];
+
 /** Every colour the TUI paints. Both modes hold exactly these keys. */
 export interface Tokens {
   readonly accent: Color;
@@ -135,7 +175,28 @@ export interface Tokens {
   readonly syntax: SyntaxTokens;
   readonly md: MarkdownTokens;
   readonly chart: ChartTokens;
+  readonly mascot: MascotPalettes;
 }
+
+/**
+ * Polpetto's nine palettes, in the order `mascot.ts` draws them — the task doc's
+ * table, verbatim (a typo in a hex is the likeliest bug, so `test/mascot.test.ts`
+ * pins every value). Mode-independent: see `Tokens.mascot`.
+ */
+const MASCOT: MascotPalettes = {
+  names: MASCOT_PALETTE_NAMES,
+  tones: {
+    soft: { K: "#7B3FC0", E: "#3E1A5E", F: "#B387EA", S: "#A274DE", B: "#DDBFF8" },
+    logo: { K: "#6E36AE", E: "#3E1A5E", F: "#A267DB", S: "#9258CF", B: "#CFA8F3" },
+    glow: { K: "#C9A6F2", E: "#3E1A5E", F: "#8E4BC4", S: "#8143B8", B: "#B583E0" },
+    cyan: { K: "#0E8AA8", E: "#083A47", F: "#5FE0F2", S: "#3FCFE6", B: "#B7F3FB" },
+    teal: { K: "#14857A", E: "#0A3B36", F: "#5CD6C4", S: "#40C2AF", B: "#B5EEE4" },
+    coral: { K: "#C2475A", E: "#5A1622", F: "#F58C93", S: "#EC7480", B: "#FFC6C2" },
+    mint: { K: "#3C9A5C", E: "#163D24", F: "#8FE0A6", S: "#73D28E", B: "#CFF5D9" },
+    amber: { K: "#B7791F", E: "#4A2E07", F: "#F7C35C", S: "#EEB043", B: "#FFE3A8" },
+    sky: { K: "#3A6FD0", E: "#13285A", F: "#8DB4F7", S: "#73A0F0", B: "#CFE0FF" },
+  },
+};
 
 /**
  * The dark palette: EXACTLY the values the module painted before the table
@@ -196,6 +257,7 @@ const DARK: Tokens = {
     link: "blue",
   },
   chart: { series: CHART_PALETTE.dark },
+  mascot: MASCOT,
 };
 
 /**
@@ -262,6 +324,7 @@ const LIGHT: Tokens = {
     link: "#1446c8",
   },
   chart: { series: CHART_PALETTE.light },
+  mascot: MASCOT,
 };
 
 export const tokens: Readonly<Record<ThemeMode, Tokens>> = { dark: DARK, light: LIGHT };

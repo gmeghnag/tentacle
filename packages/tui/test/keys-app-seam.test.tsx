@@ -98,7 +98,7 @@ describe("the snapshot reads the live refs (freshness through the router)", () =
     await t.keysInOneTick(CTRL_C, CTRL_C);
     expect(t.frame()).not.toContain("(y/N)");
     // Dismissed as "No": nothing closed, so the TUI is still there.
-    expect(t.frame()).toContain("Tentacle ready");
+    expect(t.frame()).toContain("/help for commands");
     // And it still asks once a render has happened — never a trap, and proof the
     // first dialog really was up.
     await t.keys(CTRL_C);
@@ -113,7 +113,7 @@ describe("the snapshot reads the live refs (freshness through the router)", () =
     expect(t.frame()).toContain("(y/N)");
     await t.keys(CTRL_C);
     expect(t.frame()).not.toContain("(y/N)");
-    expect(t.frame()).toContain("Tentacle ready");
+    expect(t.frame()).toContain("/help for commands");
     t.app.unmount();
   });
 });

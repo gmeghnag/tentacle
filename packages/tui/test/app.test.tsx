@@ -1044,18 +1044,17 @@ describe("App", () => {
       />,
     );
     await delay(40);
-    // Row 1 is the welcome line, now "● Tentacle ready. …" — the bullet
-    // occupies columns 1–2, so "Tentacle" starts at column 3. Select 10 chars.
-    stdin.write(press(3, 1));
+    // Row 1 is the startup header's first line, "tentacle" (docs/feat/tui-mascot.md
+    // — the app version is not passed here, so the name stands alone). Select it.
+    stdin.write(press(1, 1));
     await delay(15);
-    stdin.write(drag(13, 1));
+    stdin.write(drag(9, 1));
     await delay(15);
-    stdin.write(release(13, 1));
+    stdin.write(release(9, 1));
     await delay(60);
 
     expect(copied).toHaveLength(1);
-    expect(copied[0]).toHaveLength(10);
-    expect(copied[0]?.startsWith("Tentacle")).toBe(true);
+    expect(copied[0]).toBe("tentacle");
     unmount();
   });
 
@@ -1369,7 +1368,7 @@ describe("App robustness", () => {
     const frame = lastFrame() ?? "";
     expect(frame).toContain("prior question");
     expect(frame).toContain("prior answer");
-    expect(frame).not.toContain("Tentacle ready");
+    expect(frame).not.toContain("/help for commands");
     unmount();
   });
 

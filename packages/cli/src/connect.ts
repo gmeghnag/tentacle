@@ -44,7 +44,7 @@ import {
 import { createHooksTrustResolver } from "./hooks-trust.ts";
 import { remoteJobsView } from "./local-runtime.ts";
 import { routingAutoAccept } from "./session-auto-accept.ts";
-import { CLIENT_INFO } from "./version.ts";
+import { APP_RELEASE_VERSION, CLIENT_INFO } from "./version.ts";
 
 /**
  * One `session/list` result as the `/sessions` view
@@ -387,6 +387,9 @@ export async function connectTui(
       ...(served.label !== undefined ? { modelLabel: served.label } : {}),
       ...(served.contextWindow !== undefined ? { contextWindow: served.contextWindow } : {}),
       cwd: options.url,
+      // The startup header's first line (docs/feat/tui-mascot.md D5): the client's
+      // own version — this process is the thing the person started.
+      version: APP_RELEASE_VERSION,
       // The laptop's own `voice.*` (Review round 1, HIGH 4): without this the
       // `connect` TUI got `VOICE_DEFAULTS`, so `voice.enabled: false` and the
       // key/language/engine settings were ignored on this path.
