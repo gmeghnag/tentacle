@@ -28,6 +28,7 @@ import type { DaemonSessionState } from "../src/persisted-session.ts";
 import { type AgentContext, SessionHost } from "../src/session-host.ts";
 import { SessionPersister, type StateBuild } from "../src/session-persister.ts";
 import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
+import { stripped } from "./support/model-prompt.ts";
 
 // The agent's own scheduled wakes, daemon side (docs/feat/cron-tool.md S3):
 // the table + ONE timer on `HostedSession`, a fire = an ordinary `prompt()`
@@ -84,7 +85,7 @@ class Model implements ModelProvider {
   /** The fired prompts the model was given, in order (a request's last user message). */
   fired(): string[] {
     return this.seen
-      .map((r) => r.messages.filter((m) => m.role === "user").at(-1)?.content ?? "")
+      .map((r) => stripped(r.messages.filter((m) => m.role === "user").at(-1)?.content ?? ""))
       .filter((c) => c.startsWith("[scheduled "));
   }
 }

@@ -7,6 +7,7 @@
  * native Anthropic Messages API (`/v1/messages`). See ADR-003.
  */
 import type { AttachmentRef } from "@tentacle/protocol";
+import type { DateStamp } from "./current-date.ts";
 import type { ScheduledFire } from "./scheduled-fire.ts";
 import type { ToolResultSpill } from "./tool.ts";
 
@@ -69,6 +70,15 @@ export interface ChatMessage {
    * it while the stored `content` stays clean. The TUI ignores it.
    */
   readonly contextUsage?: ContextUsage;
+  /**
+   * On a user message whose turn needed one (docs/fix/prompt-current-date.md):
+   * when it was sent, and the LAPTOP's zone to render it in. NOT display-only,
+   * like `contextUsage`: the agent loop prepends its `[Fri 2026-11-20 13:42 CET]`
+   * line to the model's copy of `content` (`renderForModel`) on every request,
+   * so a stamp the model once saw stays byte-identical (the prompt cache) while
+   * `content` itself stays clean for every other reader.
+   */
+  readonly dateStamp?: DateStamp;
   /**
    * On a tentacle-written `user` message: what kind of note it is and what it is
    * about (docs/feat/subagent-ledger-log.md). Display only, like `spill`: the

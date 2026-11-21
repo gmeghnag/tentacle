@@ -22,6 +22,7 @@ import {
 } from "@tentacle/transport";
 import { z } from "zod";
 import { SpyDaemonStore } from "../../daemon/test/support/daemon-store-spy.ts";
+import { stripped } from "../../daemon/test/support/model-prompt.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import { RemoteClient } from "../src/remote-client.ts";
 import type { RemoteSession, SessionActivity } from "../src/remote-session.ts";
@@ -65,7 +66,9 @@ class PromptModel implements ModelProvider {
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     const signal = request.signal;
     const last = request.messages.at(-1);
-    const prompt = [...request.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+    const prompt = stripped(
+      [...request.messages].reverse().find((m) => m.role === "user")?.content ?? "",
+    );
     const afterTool = last?.role === "tool";
     if (prompt === "slow") {
       for (let i = 0; i < 20; i++) {

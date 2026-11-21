@@ -23,6 +23,7 @@ import {
   sanitizeTurnError,
 } from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
+import { stripped } from "./support/model-prompt.ts";
 
 /** A test client attached to a hosted session: receives updates. */
 const sinkTo = (send: UpdateSink): Attachment => ({
@@ -803,7 +804,8 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
     }
     async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
       const call = this.calls.length;
-      const messages = request.messages.map((m) => m.content);
+      // The texts without a leading date stamp: these tests dispatch on what was sent.
+      const messages = request.messages.map((m) => stripped(m.content));
       this.calls.push(messages);
       if (this.gated(call)) await new Promise<void>((r) => this.gates.push(r));
       for (const event of this.reply(call, messages)) yield event;
@@ -1321,7 +1323,7 @@ describe("compaction is exclusive with a turn", () => {
         yield { type: "done" };
         return;
       }
-      if (request.messages.at(-1)?.content === "go") {
+      if (stripped(request.messages.at(-1)?.content ?? "") === "go") {
         yield {
           type: "tool_call",
           toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls" }) },

@@ -10,6 +10,7 @@ import { Connection, SessionHost, versionMismatch } from "@tentacle/daemon";
 import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
+import { stripped } from "../../daemon/test/support/model-prompt.ts";
 import { bufferedErrorSink, connectTui, servedModel, tlsTrustHint } from "../src/connect.ts";
 import { resolveTls } from "../src/flags.ts";
 import { APP_VERSION } from "../src/version.ts";
@@ -285,7 +286,7 @@ describe("connect: quit detaches, resume attaches", () => {
             async *stream(request) {
               yield { type: "text", delta: "x" };
               const last = request.messages.at(-1);
-              if (last?.role === "user" && String(last.content).startsWith("gate")) {
+              if (last?.role === "user" && stripped(String(last.content)).startsWith("gate")) {
                 waiting += 1;
                 await new Promise<void>((r) => {
                   gates.push(r);

@@ -17,6 +17,7 @@ import {
 } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { type DuplexChannel, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
+import { stripped } from "../../daemon/test/support/model-prompt.ts";
 import type { ReturnedRow } from "../src/hand-back.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import { RemoteClient } from "../src/remote-client.ts";
@@ -28,7 +29,7 @@ import { RemoteClient } from "../src/remote-client.ts";
 const model: ModelProvider = {
   id: "m",
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
-    if (request.messages.at(-1)?.content === "go") {
+    if (stripped(request.messages.at(-1)?.content ?? "") === "go") {
       yield {
         type: "tool_call",
         toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls" }) },

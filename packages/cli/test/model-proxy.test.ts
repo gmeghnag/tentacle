@@ -10,6 +10,7 @@ import { type AgentFactory, Connection, ProxyModelProvider, SessionHost } from "
 import type { SessionSettings } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
+import { stampLine, stripped } from "../../daemon/test/support/model-prompt.ts";
 import { createSettingsNotifier, settingsNotices } from "../src/carried-settings.ts";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import * as serve from "../src/serve.ts";
@@ -80,7 +81,13 @@ describe("model reverse-tunnel (F4.d)", () => {
     // The model actually ran on the client side (its request was recorded there),
     // and it saw the pod's user message.
     expect(localModel.seen).toHaveLength(1);
-    expect(localModel.seen[0]?.messages.at(-1)).toEqual({ role: "user", content: "ping" });
+    const sent = localModel.seen[0]?.messages.at(-1);
+    // The first prompt's date stamp leads the model's copy (docs/fix/prompt-current-date.md).
+    expect(stampLine(sent?.content ?? "")).toBeDefined();
+    expect(sent && { ...sent, content: stripped(sent.content) }).toEqual({
+      role: "user",
+      content: "ping",
+    });
 
     connection.close();
     client.close();
@@ -310,7 +317,11 @@ describe("the pod daemon's agent: context lines on the laptop's window", () => {
     }
     connection.close();
     client.close();
-    return laptop.seen[0]?.messages.at(-1)?.content ?? "";
+    // The first prompt's date stamp is asserted present, then peeled off
+    // (docs/fix/prompt-current-date.md): these tests pin the context line.
+    const content = laptop.seen[0]?.messages.at(-1)?.content ?? "";
+    expect(stampLine(content)).toBeDefined();
+    return stripped(content);
   }
 
   test("the laptop's window (carried) wins over the pod's own", async () => {

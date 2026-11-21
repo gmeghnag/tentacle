@@ -32,6 +32,7 @@ import {
 import { DomainErrorCode } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
+import { stripped } from "../../daemon/test/support/model-prompt.ts";
 import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import { recordWrite, saveFixture } from "./session-fixture.ts";
@@ -491,7 +492,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     await new Promise((r) => setTimeout(r, 20));
 
     // The model saw the resumed history before the new turn.
-    expect(model2.requests[0]?.messages.map((m) => m.content)).toEqual([
+    expect(model2.requests[0]?.messages.map((m) => stripped(m.content))).toEqual([
       "first question",
       "one",
       "second question",

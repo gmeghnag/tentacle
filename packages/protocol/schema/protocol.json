@@ -685,6 +685,23 @@
           "required": ["used", "window"],
           "type": "object"
         },
+        "dateStamp": {
+          "additionalProperties": true,
+          "properties": {
+            "at": {
+              "maximum": 8640000000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "zone": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": ["at", "zone"],
+          "type": "object"
+        },
         "denialReply": {
           "$ref": "#/$defs/PermissionReplyText"
         },
@@ -776,6 +793,11 @@
         "streaming": {
           "default": true,
           "type": "boolean"
+        },
+        "timeZone": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
         },
         "updates": {
           "items": {
@@ -2710,6 +2732,23 @@
           "required": ["used", "window"],
           "type": "object"
         },
+        "dateStamp": {
+          "additionalProperties": true,
+          "properties": {
+            "at": {
+              "maximum": 8640000000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "zone": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": ["at", "zone"],
+          "type": "object"
+        },
         "denialReply": {
           "$ref": "#/$defs/PermissionReplyText"
         },
@@ -2808,6 +2847,23 @@
             }
           },
           "required": ["used", "window"],
+          "type": "object"
+        },
+        "dateStamp": {
+          "additionalProperties": true,
+          "properties": {
+            "at": {
+              "maximum": 8640000000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "zone": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": ["at", "zone"],
           "type": "object"
         },
         "denialReply": {
