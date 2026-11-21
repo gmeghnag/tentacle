@@ -260,3 +260,40 @@ describe("ChatMessage.note (docs/feat/subagent-ledger-log.md)", () => {
     );
   });
 });
+
+describe("ChatMessage.dateStamp (docs/fix/prompt-current-date.md)", () => {
+  const DATE_MAX = 8_640_000_000_000_000; // the JS Date range, ±
+
+  test("an at outside the JS Date range is DROPPED, never kept: one bad stamp must not poison the session", () => {
+    // RED before the fix: `at` was bounded only `.nonnegative()`, so `at =
+    // DATE_MAX + 1` passed and EVERY later `prompt()`/model request threw
+    // `RangeError: date value is not finite` from `partsOf` (a render-time
+    // throw, which no `.catch` on the schema can reach because the value parsed).
+    // Mutation: drop `.max(DATE_MAX)` from `dateStamp.at` → this refuses… no:
+    // it KEEPS the stamp, and the render assertions below throw.
+    const stamp = (at: number) =>
+      ChatMessageSchema.parse({ role: "user", content: "x", dateStamp: { at, zone: "UTC" } })
+        .dateStamp;
+    expect(stamp(DATE_MAX + 1)).toBeUndefined();
+    expect(stamp(Number.NaN)).toBeUndefined();
+    expect(stamp(Number.POSITIVE_INFINITY)).toBeUndefined();
+    expect(stamp(-1)).toBeUndefined();
+    // Only the stamp is lost: the message still loads, content intact.
+    expect(
+      ChatMessageSchema.parse({
+        role: "user",
+        content: "hello",
+        dateStamp: { at: DATE_MAX + 1, zone: "UTC" },
+      }),
+    ).toEqual({ role: "user", content: "hello" });
+  });
+
+  test("the boundaries themselves are kept (an inclusive range, never a shifted one)", () => {
+    const stamp = (at: number) =>
+      ChatMessageSchema.parse({ role: "user", content: "x", dateStamp: { at, zone: "UTC" } })
+        .dateStamp;
+    // Mutation: use `.lt(DATE_MAX)` / an off-by-one → these become undefined.
+    expect(stamp(DATE_MAX)).toEqual({ at: DATE_MAX, zone: "UTC" });
+    expect(stamp(0)).toEqual({ at: 0, zone: "UTC" });
+  });
+});

@@ -689,6 +689,7 @@
           "additionalProperties": true,
           "properties": {
             "at": {
+              "maximum": 8640000000000000,
               "minimum": 0,
               "type": "integer"
             },
@@ -2735,6 +2736,7 @@
           "additionalProperties": true,
           "properties": {
             "at": {
+              "maximum": 8640000000000000,
               "minimum": 0,
               "type": "integer"
             },
@@ -2851,6 +2853,7 @@
           "additionalProperties": true,
           "properties": {
             "at": {
+              "maximum": 8640000000000000,
               "minimum": 0,
               "type": "integer"
             },

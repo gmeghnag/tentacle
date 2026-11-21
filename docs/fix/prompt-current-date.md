@@ -334,6 +334,85 @@ pass, 2 opt-in skips), `packages/tui/test` (2877 pass), core/agent new tests,
 `protocol/test/json-schema` (no drift). `biome check` on the 38 changed files:
 clean. Full gate (typecheck, full suite, lint) left to the orchestrator.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-21* (executor of round 1; same model as the reviewer — see the honesty note at the end)
+
+Review finding 1 (MEDIUM) fixed. Two independent layers, because the bad value
+has two independent ways in:
+
+**Reproduced first** (`.tentacle/tmp/prompt-current-date/big.ts`, current code
+before any edit): `ChatMessageSchema.safeParse({… dateStamp: {at:
+8_640_000_000_000_001}})` → `true`; then `dateStampText`, `nextDateStamp` and
+`renderForModel` each `RangeError: date value is not finite in
+DateTimeFormat formatToParts()`. Also measured the boundary in the runtime:
+`formatToParts` accepts `±8_640_000_000_000_000` and throws one past it, so the
+bound is the JS Date range exactly (inclusive).
+
+**1. Schema bound — `packages/protocol/src/session.ts:130-144.** `dateStamp.at`
+gained `.max(8_640_000_000_000_000)`, which is what makes the field's existing
+`.catch(undefined)` actually fire for this class of value: the stamp is dropped,
+the message still loads unchanged, the next message simply stamps again. The
+doc comment now says why the upper bound is load-bearing. `bun run
+schema:export` regenerated `packages/protocol/schema/protocol.json` (+3 lines,
+`"maximum": 8640000000000000` in the three places the message shape appears);
+`protocol/test/json-schema.test.ts` passes, no drift.
+
+**2. Render-time guard — `packages/core/src/current-date.ts:32, 60-124, 138-171.**
+A `ChatMessage` can also be built in memory or arrive from a path that never
+parsed, so the renderer no longer trusts the bound either: new
+`DATE_STAMP_MAX_AT_MS` + a private `renderable(at)` (finite **and** `|at| <=
+MAX`), `partsOf` returns `null` for an unrenderable instant, `dateStampText`
+returns `""`, `dateStampPrefix` returns `""` (no prefix **and no stray
+newline**), `nextDateStamp` treats a `now` it cannot render as "stamp nothing"
+(`null`) and an unrenderable last stamp as "no stamp at all" (so the session
+re-stamps from `now` instead of throwing). `renderForModel`
+(`packages/agent/src/context-awareness.ts:77`) is unchanged: it now gets `""`
+and the message renders exactly as if it had no stamp. Negative beyond the range
+is guarded too, though the schema's `.nonnegative()` already refuses it.
+
+**Tests (red shown first, on the buggy code).**
+- `packages/protocol/test/session.test.ts` — new describe
+  `ChatMessage.dateStamp`: an out-of-range / `NaN` / `Infinity` / negative `at`
+  is DROPPED and the message loads as `{role, content}`; the two inclusive
+  boundaries (`8_640_000_000_000_000`, `0`) are KEPT. **RED before:**
+  `expect(stamp(DATE_MAX + 1)).toBeUndefined()` → `Received: {at:
+  8640000000000001, zone: "UTC"}` (1 fail, 22 pass).
+- `packages/core/test/current-date-bounds.test.ts` (new) — `dateStampText` /
+  `dateStampPrefix` yield `""` for an unrenderable `at`; a history whose last
+  stamp is unrenderable is stamped again from `now`; an unrenderable `now`
+  stamps nothing. **RED before:** all 3 fail — `RangeError` from `partsOf` on the
+  first two, `Received: {at: 8640000000000001…}` (should be `null`) on the third.
+  (The module import had to exist first — `DATE_STAMP_MAX_AT_MS` was added as a
+  constant in the same commit as the guard — so the red is on the assertion, not
+  an import error; §9.)
+- `packages/agent/test/date-stamp.test.ts` — a stamped message with an
+  unrenderable `at` renders as plain `"ciao"` with the field dropped. **RED
+  before:** `RangeError` from `formatToParts` through `renderForModel`.
+
+**Mutation checks (each reverted; `diff` against the saved copy confirmed clean).**
+- Drop `if (!renderable(at)) return null;` from `partsOf` → 4 fail
+  (`current-date-bounds` 3 + `agent/date-stamp` 1, all on `RangeError`).
+- Drop `.max(8_640_000_000_000_000)` from `session.ts` → `session.test.ts` 1
+  fail: `Received: {at: 8640000000000001, zone: "UTC"}`.
+- Off-by-one `.max(8_639_999_999_999_999)` → 1 fail: the inclusive-boundary test.
+- `nextDateStamp`: `if (last === undefined)` only (no `lastParts === null`
+  clause) → 1 fail, `TypeError: null is not an object (evaluating
+  'lastParts.date')`.
+- `nextDateStamp`: substitute empty parts for a null `now` → 1 fail, the
+  "`now` outside the range stamps nothing" test.
+
+**Ran:** `packages/core/test` (716 pass), `packages/agent/test` (723 pass),
+`packages/protocol/test` (569 pass with `daemon/date-stamp` +
+`core/schedule`), `daemon/date-stamp.test.ts`. `bunx biome check` on the 5
+changed files after `--write`: clean. Full gate (typecheck, full suite, lint)
+left to the orchestrator per the brief.
+
+**Honesty note:** the reviewer of round 0 and this executor are the same model
+(`claude-opus-5-5`); the fix is deliberately built so review does not have to
+trust that — the red output, the four mutations and the boundary measurement are
+all in the commands above and reproduce on their own.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-21* (fresh context; same model as the Execution-resume pass, different model from the DeepSeek executor)

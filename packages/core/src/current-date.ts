@@ -21,6 +21,16 @@
  */
 export const DATE_STAMP_MAX_AGE_MS = 30 * 60_000;
 
+/**
+ * The largest `at` a stamp may carry, and the smallest (−this): the JS Date
+ * range. Outside it `new Date(at)` is an Invalid Date and `formatToParts`
+ * THROWS `RangeError` — at request time, on every later turn of the session
+ * (fix round 1, review finding 1). So it is both the schema's `.max` and the
+ * renderer's guard: a stamp is DATA from a log that may be pod-supplied or
+ * corrupted, and unrenderable data must degrade to "no line", never throw.
+ */
+export const DATE_STAMP_MAX_AT_MS = 8_640_000_000_000_000;
+
 /** An instant, and the IANA zone it must be rendered in (the LAPTOP's, never the pod's UTC). */
 export interface DateStamp {
   readonly at: number;
@@ -47,8 +57,18 @@ export function zoneOrDefault(zone: string | undefined): string {
 }
 
 /**
+ * What `at` must satisfy to be rendered: a finite instant inside the JS Date
+ * range. Outside it `new Date(at)` is an Invalid Date, and `formatToParts`
+ * THROWS `RangeError` (fix round 1, review finding 1).
+ */
+function renderable(at: number): boolean {
+  return Number.isFinite(at) && Math.abs(at) <= DATE_STAMP_MAX_AT_MS;
+}
+
+/**
  * The parts of `at` in `zone`, from ONE formatter with explicit fields:
  * never `toLocaleString`, whose comma/order shape varies by locale and runtime.
+ * `null` when `at` cannot be rendered at all (see `renderable`).
  */
 function partsOf(
   at: number,
@@ -58,7 +78,10 @@ function partsOf(
   date: string;
   time: string;
   zoneName: string;
-} {
+} | null {
+  if (!renderable(at)) {
+    return null;
+  }
   const parts = new Intl.DateTimeFormat("en-GB", {
     weekday: "short",
     year: "numeric",
@@ -80,15 +103,25 @@ function partsOf(
   };
 }
 
-/** The line the model sees, e.g. `[Fri 2026-11-20 13:42 CET]`. */
+/**
+ * The line the model sees, e.g. `[Fri 2026-11-20 13:42 CET]` — or `""` for a
+ * stamp this runtime cannot render, which is then simply not shown.
+ */
 export function dateStampText(stamp: DateStamp): string {
-  const { weekday, date, time, zoneName } = partsOf(stamp.at, zoneOrDefault(stamp.zone));
-  return `[${weekday} ${date} ${time} ${zoneName}]`;
+  const parts = partsOf(stamp.at, zoneOrDefault(stamp.zone));
+  if (parts === null) {
+    return "";
+  }
+  return `[${parts.weekday} ${parts.date} ${parts.time} ${parts.zoneName}]`;
 }
 
-/** What `renderForModel` prepends to the model's copy of a stamped message. */
+/**
+ * What `renderForModel` prepends to the model's copy of a stamped message —
+ * `""` (no prefix, no stray newline) when the stamp is unrenderable.
+ */
 export function dateStampPrefix(stamp: DateStamp): string {
-  return `${dateStampText(stamp)}\n`;
+  const text = dateStampText(stamp);
+  return text === "" ? "" : `${text}\n`;
 }
 
 /** The latest stamp in `history`, if any — the counting state, never stored apart. */
@@ -110,6 +143,11 @@ export function lastDateStamp(
  * from a log with none), the local DAY in `zone` changed since the last stamp,
  * or more than `DATE_STAMP_MAX_AGE_MS` since it. A clock that went backwards
  * (`now <= last.at`) re-stamps only on a day change — never a negative age.
+ *
+ * A `now` outside the renderable range stamps NOTHING (a line the model cannot
+ * read is worse than no line), and a last stamp that is unrenderable — a
+ * corrupted or pod-supplied log entry — counts as no stamp at all, so the
+ * session re-stamps from `now` instead of throwing (fix round 1, finding 1).
  */
 export function nextDateStamp(
   history: readonly { readonly dateStamp?: DateStamp }[],
@@ -117,13 +155,16 @@ export function nextDateStamp(
   zone: string | undefined,
 ): DateStamp | null {
   const resolved = zoneOrDefault(zone);
+  const nowParts = partsOf(now, resolved);
+  if (nowParts === null) {
+    return null;
+  }
   const last = lastDateStamp(history);
-  if (last === undefined) {
+  const lastParts = last === undefined ? null : partsOf(last.at, resolved);
+  if (last === undefined || lastParts === null) {
     return { at: now, zone: resolved };
   }
-  const today = partsOf(now, resolved).date;
-  const lastDay = partsOf(last.at, resolved).date;
-  if (today !== lastDay || now - last.at > DATE_STAMP_MAX_AGE_MS) {
+  if (nowParts.date !== lastParts.date || now - last.at > DATE_STAMP_MAX_AGE_MS) {
     return { at: now, zone: resolved };
   }
   return null;

@@ -126,10 +126,17 @@ const chatMessageShape = () => ({
    * unchanged, the next message simply stamps again), never a refusal of the
    * CRITICAL entry. `zone` is a bounded free string, never an enum: an unknown
    * zone is the renderer's to fall back from, not a schema error.
+   *
+   * `at`'s upper bound is the JS Date range: outside it the instant is an
+   * Invalid Date and rendering THROWS `RangeError`, at request time, on every
+   * later turn of the session (fix round 1, review finding 1). Bounding it here
+   * is what makes the `.catch(undefined)` above actually fire; the renderer
+   * guards it too (`DATE_STAMP_MAX_AT_MS`, `packages/core/src/current-date.ts`)
+   * because a `ChatMessage` can also be built in memory, never parsed.
    */
   dateStamp: z
     .object({
-      at: z.number().int().nonnegative(),
+      at: z.number().int().nonnegative().max(8_640_000_000_000_000),
       zone: z.string().min(1).max(64),
     })
     .optional()

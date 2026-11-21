@@ -93,6 +93,20 @@ describe("renderForModel: the stamp is the model's, not the history's", () => {
     const m: ChatMessage = { role: "user", content: "ciao", dateStamp: STAMP };
     expect(renderForModel(m).content).toBe(renderForModel(m).content);
   });
+
+  test("a stamp the runtime cannot render is dropped, never thrown (one bad entry must not kill the turn)", () => {
+    // RED before the fix: an `at` past the JS Date range reached here from a
+    // pod-supplied or corrupted log and threw RangeError out of the render —
+    // i.e. every later request of that session failed. Mutation: render
+    // `dateStampPrefix` without the bounds guard → RangeError.
+    const m: ChatMessage = {
+      role: "user",
+      content: "ciao",
+      dateStamp: { at: 8_640_000_000_000_001, zone: "Europe/Rome" },
+    };
+    expect(renderForModel(m).content).toBe("ciao");
+    expect(renderForModel(m).dateStamp).toBeUndefined();
+  });
 });
 
 describe("Session.send: the stamp reaches the model and not the transcript", () => {
