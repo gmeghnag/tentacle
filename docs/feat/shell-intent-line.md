@@ -264,6 +264,14 @@ Red first on each (shown failing on `main`), with the mutation that must turn it
 
 *Not approved. One recommendation each.*
 
+**Owner decisions 2026-11-21** (mockup v3: `.tentacle/mockups/shell-intent-line/index.html`, https://claude.ai/artifact/RbAs3vkmizt8K1TdTAVd4A):
+- **Q1 → B «frase sopra il comando»** (not A). Row = sentence; second row `$ {command}` in subtle, 1 line, truncated. Design §3–4 must be re-written for B (+1 transcript row only when a sentence exists).
+- **TUI spinner slot unchanged**: it keeps Thinking…/Working… as today; the sentence NEVER goes in the slot. Drop `intent` in `SlotFacts`, `liveIntent`, `fitIntentLabel`; no change to `spinner-slot.ts` / `app-layout.ts` for the sentence.
+- **Tap detail: no reasoning** — command verbatim + output only. Q4 is moot (reasoning stays where it is today, the Thought row).
+- **Q6 → shell only.** No intent on MCP tools for now (owner: "restiamo su shell per ora"); a unified `_intent` at the tool-registry level is the shape if it ever comes back.
+- **Q11 → «2 · ∴ che ruota»**, `cells.ts` width verified (∴/∵ = 1 cell, mockup section B); TUI swap every 640 ms (8 × 80 ms shimmer tick). Separate task, not this branch — together with: **iPhone running tool = the TUI blinking ● (500/500 ms, shared phase), replacing the rotating ring** (mockup section C).
+- Follow-up (separate, small): TUI MCP rows readable like the phone (`playwright · browser_navigate  url` instead of raw name + JSON), rule moved to `@tentacle/core` (mockup section D).
+
 1. **Which variant** (mockup Section A)? A «la frase prende il posto» / B «frase sopra il comando» / C «solo nello slot». — **Recommend A**: one row per command as today, the command one tap away and always in the permission ask.
 2. **Sentence in the permission ask at all?** — **Recommend yes**, as one dim row under the verbatim command, attributed («il modello dice: …»), only for the asking call itself (not sub-agent asks).
 3. **Raise the TUI permission command from dim to full colour?** (today `detail` rows are dim) — **Recommend yes**: with a sentence beside it, the verbatim command must be the most visible thing.
