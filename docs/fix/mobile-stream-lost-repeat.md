@@ -195,11 +195,14 @@ Pure, in `transcript.ts` (React-free, AGENTS §7):
    today, but the type allows `turn: null`) keeps the plain notice, never
    merged nor retracted — a guess must not delete a real loss.
 
-Trace (slice 2): `TurnEndFacts.threw` gains the error's **class** — `error.name`
-plus `RpcError.code` when present, plus the message truncated + `redact`ed
-(`app-log.ts:119`, `DETAIL_MAX`) — carried to the `turn-end` trace event as
-`cause`, written by `queue-trace.ts` on `outcome=lost` only. No secrets: the
-message goes through the existing `redact`.
+Trace (slice 2): `TurnEndFacts` gains the error's **class** and numeric code — `ErrorShape`
+(`errorShape`, `app-log.ts:181`: `error.name` + `RpcError.code`), the same mapping
+`connection.ts` already logs — carried to the `turn-end` trace event as `cause`, rendered as
+`why`/`code`. **NOT the message** (corrected during Execution: the plan's first draft said
+"message truncated + `redact`ed (`DETAIL_MAX`)", but `app-log.ts` has no free-text field at all —
+every `fields` string is capped at `FIELD_MAX` (24) by `fieldValue`, and the module's own reason
+is that daemon prose cannot be told from prose (F16). The class+code pair still separates the
+plan's candidate triggers, and no message reaches the ring.)
 
 ### Files
 
@@ -277,7 +280,83 @@ self-explaining; the trigger hunt continues as a follow-up from the capture.
 
 ## Execution
 
-*(empty — to be filled by the executor)*
+*— claude-sonnet-4-5-20250929, 2026-11-21*
+
+**Load-bearing check (re-run first, as briefed).** `.tentacle/tmp/mobile-stream-lost-repeat/fold.test.ts`
+on the task branch before any edit: **RED exactly as the Context documents** — `Expected: 0
+Received: 3` and `Expected: 1 Received: 2`, 0 pass / 2 fail. The assumption holds: `endTurn`
+reads `state.turn` BEFORE clearing it, and every `turn_ended` from `foldStream` follows its own
+`turn_started`, so the fold can name the turn that ended.
+
+**Slice 1 — the fold rule (`apps/mobile/src/transcript.ts`, `transcript-rows.ts`).**
+- `NoticeRow` gains the optional `lostTurns?: readonly string[]` (`transcript-rows.ts:174-180`),
+  fold-only, never rendered — `sameSlot`/`rowEqual` already compare structurally, so the
+  keep-keys path on a history replace is unaffected.
+- `endTurn` (`transcript.ts:346-366`) now reads `turnId` from the open bracket and dispatches:
+  `lost` → `foldLostNotice`, `ended`/`cancelled` → `retractLostNotice`, everything else → the
+  old notice path. `foldLostNotice` implements rules 2a (a loss already said **anywhere** is not
+  said again), 2b (the last row being a LOST notice absorbs the new turn) and 4 (no bracket ⇒ the
+  plain notice); `retractLostNotice` implements rule 3 and never touches a notice whose
+  `lostTurns` is absent (a loss we cannot attribute).
+- `outcomeNotice` no longer has a `lost` arm (it became unreachable): the LOST notice has ONE
+  producer, `foldLostNotice`, which is what needs the turn's id rather than just its text.
+- Tests: `apps/mobile/test/transcript.test.ts` — T1…T6 as the plan lists them, plus **T7**
+  (added during Execution, see the mutation table), in
+  `describe("the LOST notice is per LOSS, not per throw …")`.
+
+**Drift from the Implementation (one, corrected in the doc).** The plan's slice 2 says
+`TurnEndFacts.threw` gains the error's class **plus the message truncated + `redact`ed
+(`app-log.ts:119`, `DETAIL_MAX`)**. That contradicts the code it names: `app-log.ts` has **no
+free-text field at all** — every `fields` value goes through `fieldValue`, which caps a string at
+`FIELD_MAX` (24) and its module doc calls a long value "a mistake at the call site"
+(`app-log.ts:17-18`, `133-152`). `DETAIL_MAX` (160) is a `redact()` cap, never a `fields` cap, and
+its stated reason is that daemon prose cannot be told from prose (F16). Per the brief I stopped
+that step and kept the plan's INTENT — the capture names the trigger — with the safe half:
+`ErrorShape` (`error` class + numeric `code`), the same mapping `connection.ts` already logs for a
+client error. So `TurnEndFacts.cause?: ErrorShape`, built by `errorShape(error)` in
+`foldStream`'s catch (`session-feed.ts:292`), carried on the `turn-end` trace event
+(`queue-trace.ts:76` `cause?: ErrorShape`) and rendered as `why=<class> code=<n>` (code omitted when
+there is none). No message ever reaches the ring; the class still separates the plan's own
+candidate triggers (`RpcError` + code = a rejected frame; `TypeError`/`Error` = a local throw).
+
+**Slice 2 — the trace (`apps/mobile/src/session-feed.ts`, `queue-trace.ts`).** As above plus:`turn-end` gains `cause` on the trace event only (a clean end carries none). Tests:
+`apps/mobile/test/session-feed.test.ts` (`describe("the LOST cause reaches the app log …")` —
+`RpcError`+code, plain `TypeError`, and a clean end with no cause) and
+`apps/mobile/test/queue-trace.test.ts` (`why`/`code` present on `lost`, absent otherwise, no `-`
+placeholder).
+
+**Mutations (each shown red on the assertion, then reverted — all six):**
+
+| # | mutation | result |
+|---|---|---|
+| 2a | drop rule 2a's dedupe | T1 red (`lostTurns` becomes `["T","T"]`), T7 red — **needed T1 strengthened and T7 added** first: a row COUNT alone passed on the old code (the duplicate entry was invisible), and the first draft of 2a only checked the LAST lost row, so a turn re-lost after another turn's notice stacked a row the plan forbids. Both are now pinned |
+| 2b | drop the "last row is a LOST notice" merge | T2 red (2 rows), T3 red |
+| 3 | retract on ANY `turn_ended` regardless of id | T5 red |
+| 4 | retract on `interrupted` too | T4 red + the pre-existing "turn bracket" test red |
+| 5 | `finish` without `cause` | both slice-2 cause tests red |
+| 6 | `traceLine` drops `cause` | the `queue-trace` `why`/`code` test red |
+
+**Gate.** `bunx tsc -p apps/mobile --noEmit` clean; `bunx biome check` clean on the 7 edited files
+(the whole-repo gate is the orchestrator's). Narrow suites green: transcript, session-feed,
+queue-trace, transcript-parity, app-log, notice-row, notice-group, row-times, transcript-reload,
+compose-controller, session-screen-compose. No schema change, so
+`packages/protocol/schema/protocol.json` needs no regeneration. Changelog:
+`changelog.d/mobile-stream-lost-repeat.fixed.md`. `TODO.md` untouched and no
+`protocol.d/` note (a client-side display/telemetry change only: no schema, no wire).
+
+**Unverified.** The trigger itself is still unproven (as the Context says): slice 2 only makes the
+next device occurrence name it. Verify by one app-log export showing `qtrace … ev=turn-end
+outcome=lost why=… code=…`; that value is what the follow-up fix keys on.
+
+**The plan's Repro, green on the fixed code** (`.tentacle/tmp/mobile-stream-lost-repeat/fold-green.test.ts`,
+same two assertions, importing the worktree's `transcript.ts`): `2 pass / 0 fail`, and its own
+printout shows the retraction — `assistant:partial` / `assistant:partial` / `assistant:full reply`,
+no notice line left.
+
+**Commands (this checkout only).** Tests here need `bun install` first (a fresh worktree has no
+`node_modules`; my first two runs resolved nothing and were discarded — every result quoted above
+is from the worktree at `/Users/gmeghnag/tentacle/.tentacle/worktrees/mobile-stream-lost-repeat`).
+
 
 ## Review
 
