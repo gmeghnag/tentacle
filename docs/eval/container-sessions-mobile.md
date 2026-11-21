@@ -261,6 +261,9 @@ code**.
 | **Container cleanup on archive / delete** | Delete → `onSessionDeleted` → verified delete. If the engine is unreachable at that moment, the kept entry is left with `delete pending` and `serve` retries at start and on `ps`. It is never silent. Archive → owner Q4. A `serve` that is never restarted keeps its entries visible in `tentacle ps` with the session title. |
 | **Old `serve` + new phone / new sidecar + old `serve`** | Wire: the preset is offered only by a publishing daemon, and the open echo is checked. Disk: an old build refuses sidecar v4 and leaves the files untouched. |
 | **Mount gate** | docker/podman mount = the container edits the Mac folder directly (isolation of *execution*, not of *files*). The existing `mountGate` (session-hop doc P7) asks on the Mac's terms when creating the preset session, through the broker, once per session. |
+| **Mount write-back into what `serve` trusts** | With the mount, any process in the container (one approved command is enough) can rewrite files the **Mac** `serve` later reads as its own inputs. (a) Project hooks: the hooks-trust answer is keyed on the content hash (`hooks-trust.ts:28-40`; `serve` uses its own precheck, `serve.ts:955-959`), so a changed hooks file is re-asked through the broker, never run on an old approval. (b) `AGENTS.md`, skills and agent defs that `serve` reads from `config.cwd` into the prompt: this is prompt-injection input, the same class as tool output, and it gains no laptop effect without the broker. (c) `.git/hooks` and similar files that the *user's own* Mac tools run later: this risk already exists for `/move` and `run` with a mount. A2 does not widen it, but the preset doc must say so plainly (Q8). The rule for S2: `serve` must never treat a file under the mounted folder as a lasting approval. |
+
+Under **A1** the same cases are worse in three places. If the pod dies, the loop dies with it, and the session must be re-seeded from the Mac copy (the `/move` / re-attach path). On a `serve` restart, `serve` must re-dial a pod daemon and reconcile two copies of the log (the pod's and its own), where A2 has only one. And with two clients, the pod's `modelLink` is whichever connection attached last (`hosted-session.ts:251-255`). That connection is now `serve` itself, so the pod daemon has exactly one peer, and every phone/TUI fan-out is new forwarding code in `serve`.
 
 ### 4. B and C, briefly
 
@@ -383,6 +386,11 @@ Conditions to promote to `feat/container-sessions-mobile`:
    session whose binding is lost or refused **never** runs a tool on the Mac.
 
 How I behaved on this task: static evaluation only, no repro run (the absence is
-structural). Line citations come from `grep`/`sed` on `main` at `c8554a4a`. The
-A1 cost estimate is a judgement from the surface it would have to forward
-(`HostedSession`, 4,198 lines), not a prototype.
+structural). Line citations come from `grep`/`sed` on `main` at `c8554a4a`. They
+were re-checked on `63dceb54`: since then only `packages/tui` changed, and the
+cited lines in `serve.ts`, `session-host.ts`, `execution.ts`,
+`daemon-state-file.ts`, `engine-runtime.ts`, `engine-k8s.ts`, `kept-cmd.ts` and
+`apps/relay/src/server.ts` still say what this doc claims. The second pass added
+the mount write-back row and the A1 contrast to §3. The A1 cost estimate is a
+judgement from the surface it would have to forward (`HostedSession`, 4,198
+lines), not a prototype.
