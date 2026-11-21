@@ -19,9 +19,16 @@ if (typeof history.assistant !== "string" || !history.assistant.includes("mock m
   throw new Error(`the daemon has no mock answer: ${JSON.stringify(history.assistant)}`);
 }
 const prompts = http.get(`http://${MAESTRO_HOOKS}/model-prompts`);
-// Matched on what was typed: context awareness appends "\n\n[context: …]".
-const asked = (p) => p === "relay only" || p.startsWith("relay only\n");
-if (!json(prompts.body).prompts.some(asked)) {
-  throw new Error("the mock model was never asked the relay-only prompt");
+// Matched on a LINE of what was typed (mock-model.ts `promptLine`): context
+// awareness APPENDS "\n\n[context: …]", and the model's date stamp PREFIXES
+// "[Sat 2026-11-21 18:56 CET]\n" (docs/fix/prompt-current-date.md) once Alpha's
+// last stamp — its seeding — is over 30 min old, which it is when this flow runs
+// late in the full suite (docs/fix/mobile-e2e-1121.md).
+const asked = (p) => p.split("\n").some((line) => line.trim() === "relay only");
+const seen = json(prompts.body).prompts;
+if (!seen.some(asked)) {
+  throw new Error(
+    `the mock model was never asked the relay-only prompt (asked: ${JSON.stringify(seen)})`,
+  );
 }
 output.relayHistory = JSON.stringify(history);

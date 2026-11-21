@@ -52,27 +52,59 @@ appId: so.tentacle.app
 - tapOn:
     id: "drawer-search"
 - hideKeyboard
-# The computer, offline, on Computers (visual review V5) — then back in.
-- tapOn:
-    id: "sessions-back"
-- assertVisible:
-    id: "computers-list"
-- runFlow:
-    file: _shot.yaml
-    env:
-      SHOT: "05-computers-offline"
-- tapOn:
-    id: "computer-${output.computerId}"
-- assertVisible:
-    id: "sessions-list"
+# The Sessions screen the magnifier reset to, still offline: the stale notice is
+# drawn here too. This is where the recovery is proved (finding 1): the notice is
+# ON before the daemon comes back, so its absence after the refresh is earned.
+- swipe:
+    start: "50%, 30%"
+    end: "50%, 80%"
+- extendedWaitUntil:
+    visible:
+      id: "sessions-stale"
+    timeout: 20000
 - runScript:
     file: "05-start-serve.js"
 - swipe:
     start: "50%, 30%"
     end: "50%, 80%"
 # A row proves the list was actually re-read from the restarted daemon…
-- assertVisible:
-    id: "session-${ALPHA_ID}"
+- extendedWaitUntil:
+    visible:
+      id: "session-${ALPHA_ID}"
+    timeout: 20000
 # …and no stale notice proves the successful page cleared it (finding 1).
 - assertNotVisible:
     id: "sessions-stale"
+# The computer on Computers (visual review V5), then back in by its row. A
+# STOPPED project's tap re-probes instead of opening (feat/mobile-projects-app,
+# docs/feat/mobile-projects.md §6 / mockup A3; 0b65e100), so the "offline" shot
+# and the tap-in can no longer share one offline moment: the offline Computers
+# screen is shot by flow 37 (`37-a3-stopped`), and this tap proves a row that
+# answers again opens (fix/mobile-project-first-tap: a tap on a row still marked
+# stopped waits for its probe, then opens).
+- tapOn:
+    id: "sessions-back"
+# The first tap can be spent on the search field `drawer-search` focused (its
+# keyboard going down counts as "something changed"; run 1795286260264 stayed
+# on Sessions): one more tap only while Computers is not up yet.
+- runFlow:
+    when:
+      notVisible:
+        id: "computers-list"
+    commands:
+      - tapOn:
+          id: "sessions-back"
+- extendedWaitUntil:
+    visible:
+      id: "computers-list"
+    timeout: 10000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "05-computers-back"
+- tapOn:
+    id: "computer-${output.computerId}"
+- extendedWaitUntil:
+    visible:
+      id: "sessions-list"
+    timeout: 20000
