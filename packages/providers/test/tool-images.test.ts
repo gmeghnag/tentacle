@@ -83,7 +83,7 @@ const OPENAI_SSE = `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reaso
 
 async function anthropicBody(
   request: ChatRequest,
-  config: { images?: boolean; maxToolImages?: number } = {},
+  config: { images?: boolean; maxToolImages?: number; maxImageBytes?: number } = {},
 ): Promise<Body> {
   const cap = capture(ANTHROPIC_SSE);
   const provider = new AnthropicProvider({
@@ -98,7 +98,10 @@ async function anthropicBody(
   return cap.body();
 }
 
-async function openaiBody(request: ChatRequest, config: { images?: boolean } = {}): Promise<Body> {
+async function openaiBody(
+  request: ChatRequest,
+  config: { images?: boolean; maxImageBytes?: number } = {},
+): Promise<Body> {
   const cap = capture(OPENAI_SSE);
   const provider = new OpenAIProvider({
     baseURL: "http://x/v1",
@@ -170,6 +173,47 @@ describe("Anthropic: a tool result carries its images", () => {
   test("25 tool images → the newest 20 inlined, 5 reason lines; the user's K=5 is untouched", async () => {
     const userTexts = Array.from({ length: 6 }, (_, i) => `user-${i}`);
     const toolTexts = Array.from({ length: 25 }, (_, i) => `tool-${i}`);
+    // OpenAI-compatible: no request-wide image COUNT cap, so the two budgets show alone.
+    const body = await openaiBody(
+      {
+        messages: [
+          { role: "user", content: "look", attachments: userTexts.map((t) => refFor(t)) },
+          call("c1"),
+          tool(
+            "c1",
+            "pages 1-100",
+            toolTexts.slice(0, 10).map((t) => refFor(t)),
+          ),
+          call("c2"),
+          tool(
+            "c2",
+            "pages 101-200",
+            toolTexts.slice(10).map((t) => refFor(t)),
+          ),
+        ],
+        attachments: sourceOf([...userTexts, ...toolTexts]),
+      },
+      { images: true },
+    );
+    const urls = (m: Record<string, unknown> | undefined): string[] =>
+      (Array.isArray(m?.content) ? (m.content as Record<string, unknown>[]) : [])
+        .filter((p) => p.type === "image_url")
+        .map((p) => String((p.image_url as Record<string, unknown>).url).split(",")[1] ?? "");
+    expect(urls(body.messages[0])).toEqual(userTexts.slice(1).map(b64));
+    // One wire-only follow-up per run of tool messages (here: after c1, after c2).
+    const followUps = body.messages.slice(1).filter((m) => m.role === "user");
+    expect(followUps.flatMap(urls)).toEqual(toolTexts.slice(5).map(b64));
+    const older = String(body.messages[2]?.content);
+    const lines = older
+      .split("\n")
+      .filter((l) => l.includes("only the newest 20 tool-result images are sent"));
+    expect(lines).toHaveLength(5);
+    expect(lines[0]).toContain("tool-0.png");
+  });
+
+  test("Anthropic: 5 user + 25 tool images → at most 20 images in the request, the rest named", async () => {
+    const userTexts = Array.from({ length: 6 }, (_, i) => `user-${i}`);
+    const toolTexts = Array.from({ length: 25 }, (_, i) => `tool-${i}`);
     const body = await anthropicBody({
       messages: [
         { role: "user", content: "look", attachments: userTexts.map((t) => refFor(t)) },
@@ -188,16 +232,21 @@ describe("Anthropic: a tool result carries its images", () => {
       ],
       attachments: sourceOf([...userTexts, ...toolTexts]),
     });
+    // Over 20 images in one request lowers Anthropic's per-image dimension
+    // limit (user images are not downscaled): the whole request holds ≤ 20.
+    expect((JSON.stringify(body).match(/"type":"image"/g) ?? []).length).toBe(20);
     const userBlocks = body.messages[0]?.content as Record<string, unknown>[];
     expect(imageData(userBlocks)).toEqual(userTexts.slice(1).map(b64));
     const [older, newer] = toolResults(body);
     expect(imageData(blocksOf(newer))).toEqual(toolTexts.slice(10).map(b64));
-    expect(imageData(blocksOf(older))).toEqual(toolTexts.slice(5, 10).map(b64));
-    const lines = textOf(older)
-      .split("\n")
-      .filter((l) => l.includes("only the newest 20 tool-result images are sent"));
-    expect(lines).toHaveLength(5);
-    expect(lines[0]).toContain("tool-0.png");
+    expect(imageData(blocksOf(older))).toEqual([]);
+    const lines = textOf(older).split("\n");
+    expect(lines.filter((l) => l.includes("only the newest 20 tool-result images"))).toHaveLength(
+      5,
+    );
+    const over = lines.filter((l) => l.includes("over this request's image budget"));
+    expect(over).toHaveLength(5);
+    expect(over[0]).toContain("tool-5.png");
   });
 
   test("maxToolImages bounds the tool budget", async () => {
@@ -358,5 +407,65 @@ describe("OpenAI-compatible: tool images ride a wire-only user message", () => {
     );
     expect(JSON.stringify(body)).not.toContain("image_url");
     expect(String(body.messages[2]?.content)).toContain("[image unavailable — o-a.png");
+  });
+});
+
+describe("one request's image BYTES stay bounded (5 × the per-image cap)", () => {
+  // 10-byte images, a 10-byte per-image cap → a 50-byte request budget: 5 images.
+  const texts = Array.from({ length: 8 }, (_, i) => `img-bytes${i}`);
+  const messages = (): ChatMessage[] => [
+    call("c1"),
+    tool(
+      "c1",
+      "r",
+      texts.slice(0, 4).map((t) => refFor(t)),
+    ),
+    call("c2"),
+    tool(
+      "c2",
+      "s",
+      texts.slice(4).map((t) => refFor(t)),
+    ),
+  ];
+
+  test("Anthropic: the newest images fill the byte budget, older ones get a reason line", async () => {
+    const body = await anthropicBody(
+      { messages: messages(), attachments: sourceOf(texts) },
+      { maxImageBytes: 10 },
+    );
+    const [older, newer] = toolResults(body);
+    expect(imageData(blocksOf(newer))).toEqual(texts.slice(4).map(b64));
+    expect(imageData(blocksOf(older))).toEqual([b64(texts[3] ?? "")]);
+    const over = textOf(older)
+      .split("\n")
+      .filter((l) => l.includes("over this request's image budget"));
+    expect(over).toHaveLength(3);
+  });
+
+  test("OpenAI-compatible (vision on): the same byte budget on the follow-up message", async () => {
+    const body = await openaiBody(
+      { messages: messages(), attachments: sourceOf(texts) },
+      { images: true, maxImageBytes: 10 },
+    );
+    expect((JSON.stringify(body).match(/"type":"image_url"/g) ?? []).length).toBe(5);
+    expect(String(body.messages[1]?.content)).toContain("over this request's image budget");
+  });
+
+  test("the user's own images come first: tool images never push them out", async () => {
+    const user = Array.from({ length: 5 }, (_, i) => `usr-bytes${i}`);
+    const body = await anthropicBody(
+      {
+        messages: [
+          { role: "user", content: "see", attachments: user.map((t) => refFor(t)) },
+          ...messages(),
+        ],
+        attachments: sourceOf([...user, ...texts]),
+      },
+      { maxImageBytes: 10 },
+    );
+    expect(imageData(body.messages[0]?.content as Record<string, unknown>[])).toEqual(
+      user.map(b64),
+    );
+    expect(toolResults(body).flatMap((r) => imageData(blocksOf(r)))).toEqual([]);
   });
 });

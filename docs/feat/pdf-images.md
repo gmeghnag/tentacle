@@ -580,6 +580,67 @@ No protocol schema touched → `protocol.json` not regenerated; no `protocol.d/`
   that user image again inside a tool_result. Same "the pod chooses only the id"
   scope as user refs from a pod today; no new bytes leave the laptop.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Finding 1 (MEDIUM, per-request byte/count budget) — FIXED.**
+Root cause: the user selection (K=5) and the tool selection (N=20) were each
+bounded on their own, so nothing bounded the request as a whole. That allowed
+25 images (Anthropic's per-image dimension limit drops above 20) and up to
+25 × the per-image cap in bytes (≈ 131 MB, over the 32 MB request limit).
+
+As built (all `packages/providers`):
+- `src/images.ts:61` `ANTHROPIC_MAX_REQUEST_IMAGES = 20`. `:77` `requestImageBudget(provider, limits)`
+  returns a count (Anthropic 20, OpenAI-compatible unbounded) and raw bytes =
+  `MAX_INLINE_IMAGES × per-image cap`. That is exactly what a request could carry
+  before S1 (Anthropic 5 × 3.75 MiB ≈ 26 MB base64 < 32 MB), so user behaviour is unchanged.
+- `:208` `selectRequestImages` — the ONE selection both the options and the reads
+  use (`buildImageOptions :308` and `resolveImages`, through the new private
+  `readSelected :361`). It takes the user selection, then the tool selection. It
+  then applies the budget, user images first, then tool images, each newest-first.
+  It decides from `ref.size` before any read, so it is deterministic and every turn
+  builds the same request. An image that does not fit leaves its selection and goes
+  into `overBudget`. An unsendable ref costs nothing.
+- `:432` `placeholder`: an `overBudget` id gets its own line
+  `[image omitted: over this request's image budget (newer images go first) — <label>]`.
+  It is never a silent drop.
+- `anthropic-provider.ts:157`, `openai-provider.ts:201` pass their budget.
+
+Why "cap at 20" rather than "≤ 2000 px": user images are not downscaled, and the
+provider cannot know their dimensions without decoding them. Capping the count
+means the >20 rule never applies. User images keep priority, so Q2's intent
+holds ("a PDF read never pushes the user's own pictures out"). With user images
+present, Anthropic's tool share is 20 − user.
+
+**Red before green.** These tests are in `test/tool-images.test.ts`. On the unfixed
+`images.ts` they gave `10 pass, 4 fail`, every fail on an assertion. The Anthropic
+5 user + 25 tool test counted 25 images, not 20. The three byte tests also failed:
+Anthropic, OpenAI vision, and "user images come first". After the fix:
+`14 pass, 0 fail`.
+The S1 test "25 tool images → newest 20" now runs on the OpenAI-compatible
+provider, which has no count cap, so it still pins the two separate budgets.
+
+**Mutations.** Each was applied with Edit, run, and reverted with Edit. Afterwards
+`grep -c MUTATION images.ts` = 0.
+| # | Mutation | Result |
+|---|---|---|
+| B1 | Anthropic count cap → ∞ | 1 fail (5+25 → ≤ 20) |
+| B2 | byte budget → ∞ | 3 fail (all byte tests) |
+| B3 | tool images walked before user images | 2 fail (5+25, user-first) |
+| B4 | over-budget reason line removed (falls back to the "older" text) | 3 fail |
+
+**Verification (narrow).** `bun test packages/providers` → 189 pass, 0 fail.
+`bunx tsc --noEmit -p packages/providers` is clean. `bunx biome check` on the 4
+changed files is clean. The full gate is left to the orchestrator's script.
+
+**Still not verified:** Anthropic's documented numbers (32 MB per request; more than
+20 images → 2000 px max; per-request image maximum). They come from the reviewer's
+finding and the API docs as recalled. No live docs lookup was done in this session.
+If the live limits are lower, `ANTHROPIC_MAX_REQUEST_IMAGES` and the byte factor in
+`requestImageBudget` are the one place to change. Request text size counts toward
+32 MB too. It is not budgeted here; that is pre-existing and outside this finding.
+
 ## Review
 
 ### S1 — fresh-context adversarial review

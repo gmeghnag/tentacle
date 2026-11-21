@@ -32,6 +32,7 @@ import {
   NO_IMAGES,
   buildImageOptions,
   imageLimits,
+  requestImageBudget,
   strayRefsText,
   toolImageBudget,
   toolResultImages,
@@ -148,10 +149,12 @@ export class AnthropicProvider implements ModelProvider {
    * text placeholders.
    */
   private imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
+    const limits = imageLimits("anthropic", this.config);
     return buildImageOptions(
       request,
-      imageLimits("anthropic", this.config),
+      limits,
       toolImageBudget(this.config.maxToolImages),
+      requestImageBudget("anthropic", limits),
     );
   }
 

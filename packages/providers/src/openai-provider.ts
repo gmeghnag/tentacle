@@ -31,6 +31,7 @@ import {
   NO_IMAGES,
   buildImageOptions,
   imageLimits,
+  requestImageBudget,
   strayRefsText,
   toolImageBudget,
   toolResultImages,
@@ -192,10 +193,12 @@ export class OpenAIProvider implements ModelProvider {
    * why no image was sent.
    */
   private imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
+    const limits = imageLimits("openai", this.config);
     return buildImageOptions(
       request,
-      imageLimits("openai", this.config),
+      limits,
       toolImageBudget(this.config.maxToolImages),
+      requestImageBudget("openai", limits),
     );
   }
 
