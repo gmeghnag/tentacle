@@ -442,6 +442,8 @@ S3 (`daemon/test`, `agent/test`, `client/test`, `tui/test`):
 
 ### Owner questions
 
+**Owner decisions 2026-11-21** (one at a time): Q1 yes (wire-only `user` message, vision only with `model.images: true`) · Q2 yes, 20 newest tool images, **configurable** · Q3 yes, `MAX_PDF_BYTES` 100 MiB, **configurable** · Q4 yes, filters/caps as stated, **numbers configurable** · Q5 yes, pods markers only (byte path = later task) · Q6 yes, text + markers only (thumbnails = later task, mockups first) · Q7 yes · Q8 yes, ≥ 401/405 · Q9 S1 → S2 → S3.
+
 1. **OpenAI-compatible endpoint with a vision model (`model.images: true`):**
    tool messages cannot carry images there. **Recommendation:** a wire-only
    `user` message right after the run of tool messages with the images (rebuilt
