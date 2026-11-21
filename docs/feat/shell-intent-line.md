@@ -106,7 +106,7 @@ Repro above shows all four hops on a real value. ⇒ **No protocol change, no
 - **Where «Thinking…» is decided — app:** the pure `isThinking` in
   `apps/mobile/src/tool-steps.ts:88-109`: false while a tool row runs. So on the
   phone a running command is already its own step (spinner node, `Bash` + mono
-  command, live seconds: `StepNode`, `apps/mobile/src/ui/StepNode.tsx:328+`),
+  command, live seconds: `StepNode`, `apps/mobile/src/ui/StepNode.tsx:341`),
   and the Thinking footer (`ThinkingNode`, `StepNode.tsx:524`) is gone during it.
   "The sentence replaces Thinking…" on the phone therefore = the running step's
   NAME becomes the sentence (with the shimmer the Thinking word has).
