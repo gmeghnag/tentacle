@@ -563,6 +563,8 @@ when `shimmer`, the 45 % cap lifted when `subtitle === ""`. `compactShell` flows
    `config/src/profile.ts` (`beta` merged per key) — not in the plan's file list,
    but `main.ts` reads the RESOLVED config, so without them `beta.compactShell`
    was silently dropped (proven by `beta-compact-shell.test.ts` resolve/profile cases).
+   Gate fix: `config/src/load.ts` too — `TentacleConfig.beta` + its pass-through from
+   the resolved config (`main.ts` reads `TentacleConfig`; tsc TS2339 without it).
 2. A described running shell row drops today's `⎿ running…` body (see ⚠ in
    Preconditions) — the plan's "none today" was wrong; built to its tests.
 3. New test files instead of appending to `render-lines.test.ts`/`tool-steps.test.ts`
