@@ -40,10 +40,13 @@ describe("a computer's link coming UP is what registers for push", () => {
 
 describe("the notification prompt comes from a successful pairing", () => {
   test("Pair's `onDone` asks through the push manager (mutation: drop it → red)", () => {
-    const done = app.slice(app.indexOf("onDone={(computerId) => {"));
-    expect(done.slice(0, 700)).toContain("PUSH.paired(computerId, true)");
+    const start = app.indexOf("onDone={(computerId, superseded) => {");
+    expect(start).toBeGreaterThan(-1);
+    // The `onDone` block: up to the first `}` at its indent.
+    const done = app.slice(start, app.indexOf("\n              }", start));
+    expect(done).toContain("PUSH.paired(computerId, true)");
     // And it is not awaited: the OS sheet is the person's, not the screen's.
-    expect(done.slice(0, 700)).not.toContain("await PUSH.paired");
+    expect(done).not.toContain("await PUSH.paired");
   });
 });
 
