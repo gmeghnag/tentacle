@@ -1,0 +1,47 @@
+appId: so.tentacle.app
+---
+# 36 (docs/feat/mobile-file-preview-cards.md): a presented file shows an inline
+# PREVIEW band — the PDF's first page, the image, the markdown's first lines, the
+# HTML page — made on the phone (QuickLook), shot in light and dark.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${PREVIEW_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${PREVIEW_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runScript:
+    file: "36-preview-laptop.js"
+- extendedWaitUntil:
+    visible:
+      id: "artifact-card-dash"
+    timeout: 30000
+# The PDF's line 2 gains its page count only once the phone has counted them
+# (QuickLook + PDFKit ran): the proof the preview was made, not just the row.
+- scrollUntilVisible:
+    element:
+      text: ".*7 pages.*"
+    direction: UP
+    timeout: 30000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-preview-top"
+- scrollUntilVisible:
+    element:
+      id: "artifact-card-dash"
+    direction: DOWN
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-preview-bottom"

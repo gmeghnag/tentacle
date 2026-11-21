@@ -898,6 +898,297 @@ full one):** `bunx biome check` on the 2 changed files: clean.
 touched/cover the change + the client's pairing pin). Full `bun test` /
 repo typecheck / repo lint: **not run here**, by the round's token budget.
 
+### (b) feat/mobile-projects-app
+
+*— deepseek, 2026-11-21* (corrected in fix round 1, review (b) F4: this line read
+`claude-opus-5-5`, but the orchestrator labels both commits that carry this work
+`(deepseek)` — `0b65e100`, `f1df3dde`. The exact model id was not recorded.)
+
+**Status: PARTIAL.** The app half is built and tested: the pure modules, the
+store, the pairing, the screen and the wiring, with 12 mutations, all killed.
+**Not done:** the Maestro flow `NN-projects.yaml`, the legacy-migration flow,
+and the simulator screenshots A1–A7 (light + dark). The context budget ran out
+before the simulator build, so `.tentacle/tmp/mobile-projects-app/screens/` is
+empty.
+
+**Load-bearing check, re-run first: HOLDS.** The repro was adapted to (a)'s API
+(`.tentacle/tmp/mobile-projects-app/repro.ts`): one identity, two
+`DeviceAuthority`s for projects P and Q.
+
+```
+add P: true
+1. P authorize keyP: true
+2. Q authorize keyP: undefined        (deny)
+3. Q wantsReachability: false
+add Q: true
+4. Q authorize keyQ (second per-project key, same identity): true
+5. P authorize keyQ: undefined        (deny)
+```
+
+There is one pinned identity and one device key per project, and each key is
+valid only on its own serve. `openComputer(record)` dials one record with its
+key, so a project record goes through the same function. There is no second
+session path.
+
+**As built, in dependency order:**
+
+1. **Record** (`src/computer-store.ts`). `PairedComputer` gets optional
+   `computerId` and `project {key?, cwd, label}`. Parse, `publicOf` and `add`
+   carry both. A malformed value is dropped, and the record still reads as
+   legacy.
+   - New pure helpers: `projectRecordId` (`<cid>.<hex16(sha256(key))>`),
+     `computerIdOf`, `isRecordOfComputer`.
+   - New store methods `setProject` and `setAddresses`. Both refuse an
+     unlisted id, never repair an unreadable item, and do not write when the
+     value is unchanged.
+   - `STORE_VERSION` stays 1. `computers.ts` exposes both methods.
+2. **Pairing** (`src/pairing-flow.ts`).
+   - New pure `recordFor`: a per-project result → `projectRecordId` +
+     `computerId` + `project`; an older daemon's result → the computer id (F8).
+   - New pure `projectMismatch` (F17), checked BEFORE `store.add`. Its reason is
+     `project-mismatch`, and the message names both folders.
+   - The review view shows `p=`. `done`, `onPaired` and the outcome carry the
+     RECORD id.
+   - `retireLegacy`: after the new record is stored, it removes the same
+     computer's legacy record if its `project.cwd` matches (no duplicate row),
+     and returns it as `superseded`.
+   - `App.tsx`: `findExisting` matches key + project label, and `onDone`
+     forgets the superseded record's memory and push state.
+3. **Id ripple**. In `notification-action.ts:174` and `notifications-expo.ts:163`,
+   the push match is now `isRecordOfComputer(record.id, claimed)`: the record's
+   own id or `<claimed>.<hash>`. `push-manager.ts:311` is keyed by record id
+   already, and each project record registers with its own serve, so it is
+   unchanged.
+4. **Link diagnosis** (`src/link-diagnosis.ts`, `src/connection.ts`).
+   `DialObservation.absent` → `unreachable`, and the streak is left alone. The
+   new `absent()` is reset by `ok()` and by any other observation.
+5. **View-model** (new `src/project-rows.ts`).
+   - `projectSections`: grouped by computer, in Keychain order, with a written
+     word for every state.
+   - A failing row is `stopped` iff a sibling answered or the relay closed
+     `4404`; otherwise it is `unreachable`.
+   - Section status reads "Online · N of M projects running" (only when
+     M ≥ 2). An all-unreachable section gets the A4 note.
+   - Also new: `justPaired` (4 s), `reprobeDelay` (15 s, or sooner when a
+     "Paired just now" mark expires), `projectMenuActions` (Try again · Pair
+     again · Remove "<label>" from this iPhone), `projectSheetMessage`,
+     `removeProjectMessage`.
+   - `ComputerProbe` gains `more` (the page had a cursor).
+6. **Address refresh** (new `src/discover-fold.ts`). `discoveryPatch` uses
+   `@tentacle/client`'s `mergeAddresses`: announced addresses first, then the
+   known ones. It names a legacy record's project from `self.cwd`
+   (label = basename), refuses a `self` with another cwd, and returns
+   `undefined` when nothing changed. `App.tsx` runs `foldDiscovery(id, link)`
+   after every `LINKS.open` and on later `daemon/discovery` frames.
+7. **Screen + controller.**
+   - `ComputersScreen.tsx` is variant A. Each computer gets a heading (dot +
+     word + count) and a band with one row per project: dashed and dimmed when
+     down; sub-line = dot + word + detail; "Paired just now" with a check. The
+     band ends with "Pair a project on this Mac" (an instructions sheet, then
+     Scan).
+   - The new footnote: "Run `tentacle pair` in a project's folder. Only the
+     projects you pair show up here."
+   - `ComputersRoute` renders `loadSections()`. Tapping a row that is down
+     retries it (stopped / unreachable) or opens the sheet.
+   - The route re-probes every 15 s while focused, if something is down, and
+     when the app returns to the foreground.
+   - The probe reads 20 sessions (pinned included) for the count. Navigation
+     passes the project label as the session list title.
+
+**Drift from Implementation (and why):**
+
+- **The `4404` does NOT reach `confirm`'s error** (the check §6 asked for):
+  `WebSocketChannel.onClose()` carries no code
+  (`packages/client/src/ws-channel.ts:51`). Instead of changing
+  `@tentacle/client`, `openComputer` reads the code from its own
+  `withDiagnostics` wrapper, through a new `onCloseCode` parameter. The
+  socket's close listener runs before the channel's. The code is kept per
+  address and read only for the channel that address opened. A test against a
+  real relay pins this.
+- **`RecordProject.key` is optional, and retiring the legacy record matches on
+  `cwd`.** `daemon/discover` announces only `cwd` (`protocol/src/daemon.ts:91`),
+  and the app cannot compute `projectKey`, which needs `realpath`.
+- **No 30-day address expiry.** The record keeps no per-address stamps, so
+  `discoveryPatch` treats every known address as seen now. Announced addresses
+  come first, known ones are kept, and `mergeAddresses` caps the list.
+  Follow-up: an `addressSeenAt` field on the record.
+- **Pre-existing, out of scope:** `PushMessage.computer` is `identity.name`
+  (`daemon/src/push-notifier.ts:337`, `cli/src/serve.ts:322-326`), but the app
+  compares it to a record id. Not chased (§0); it needs its own fix task.
+  **Not done:** when two projects of one Mac both decrypt a push, the right
+  record is not chosen. The push directory carries no `cwd`, so the first
+  record wins; fixing it is a directory-format change.
+- **testIDs:** the existing `computer-<recordId>`,
+  `computer-state-<recordId>-<state>`, `computer-menu-…` and
+  `computer-remove-…` stay on the project row, instead of the mockup's
+  `project-…`. Existing flows (15-revoked, 16-remove-computer) still match,
+  and `band-screens.test.ts` pins `computer-${row.id}`. New testIDs:
+  `computer-section-<cid>`, `computer-status-<cid>`,
+  `computer-pair-project-<cid>`, `computer-pair-hint-<cid>`,
+  `computer-pair-hint-scan`, `computer-retry-<id>`.
+- **Not built:**
+  - the 9 % accent fill and the 200 ms fade on a new row (`Row` has no
+    background prop; only the text and the check are shown);
+  - the session list subtitle "computer · cwd" (A5; only the title is set).
+
+**Tests** (touched or covering files only). After the mutation run:
+**140 pass / 0 fail** across 11 files. The screen guards (`band-screens`,
+`header-wiring`, `icon-glass-wiring`, `computer-rows`, `computer-status`,
+`computers`, `e2e-flows`) are green too.
+
+- `computer-store`: +7.
+- `pairing-flow-per-project`: the (i′) pin is replaced by `recordFor` /
+  `projectMismatch` tests, +4.
+- `pairing-e2e`: ids → `projectRecordId`, plus two real-daemon tests: "F17 …
+  NOTHING stored" and "retires the legacy record".
+- `notification-action`: +1. `link-diagnosis`: +2.
+- New `link-absent-relay`: real relay, injected clock; three `4404`s never give
+  `maybe-reset`.
+- New `project-rows` (8) and new `discover-fold` (5).
+- The `connection.test.ts` fakes gain `absent`.
+
+**Mutations** (`.tentacle/tmp/mobile-projects-app/mutate.ts`). Each one is
+applied, its test is run, and the file is restored from memory. `git status`
+afterwards lists no mutated file.
+
+```
+M1 store add drops project fields: KILLED (red) pass=25 fail=1
+M2 setProject writes every time: KILLED (red) pass=25 fail=1
+M3 recordFor files under the computer id: KILLED (red) pass=10 fail=6
+M4 save before the p= check: KILLED (red) pass=9 fail=2
+M5 legacy record never retired: KILLED (red) pass=10 fail=1
+M6 push: compare record id whole: KILLED (red) pass=25 fail=1
+M7 diagnosis counts absent: KILLED (red) pass=8 fail=1
+M8 connection ignores the 4404: KILLED (red) pass=0 fail=1
+M9 rows sorted by state: KILLED (red) pass=4 fail=4
+M10 siblings ignored (stopped only on 4404): KILLED (red) pass=6 fail=2
+M11 never re-probe: KILLED (red) pass=7 fail=1
+M12 discover: keep stored addresses: KILLED (red) pass=4 fail=1
+```
+
+For the new APIs the code was written before the tests, so these mutations are
+the red evidence, not a pre-change run. The one exception is the (i′) source
+pin: the per-project id turned it red, as intended, before it was replaced.
+
+**Gate (narrow, per budget):**
+
+- `bunx tsc -p apps/mobile --noEmit`: clean.
+- `bunx biome check --write` on the 21 changed files: 0 issues (6
+  reformatted).
+- Full `bun test`, repo typecheck and repo lint: not run (the orchestrator
+  runs them).
+- No schema changed, so `protocol.json` was not regenerated.
+
+**Remaining (next executor):**
+
+1. The Maestro flow `apps/mobile/e2e/flows/NN-projects.yaml`. It needs two
+   serves in two temp cwds sharing one config dir. Today `e2e/run.ts` /
+   `05-start-serve.js` start one serve; `pair-cli.ts` already takes
+   `projectDir`.
+2. The legacy-migration flow: a v1 registry plus a legacy phone record.
+3. The simulator screenshots A1–A7, light and dark, into
+   `.tentacle/tmp/mobile-projects-app/screens/`.
+4. `bun run e2e:mobile`.
+
+### Fix round 1 (review (b))
+
+*— claude-opus-5-5, 2026-11-21*
+
+**F2 (MEDIUM) — FIXED (test only).** New real-daemon test in
+`apps/mobile/test/pairing-e2e.test.ts`: "pairing project P KEEPS a legacy record
+of the same computer that discover named project Q". The legacy record has the
+computer's id and `project.cwd = <P>-q`. After pairing P, both ids are listed.
+The guard was already right, so the red is the mutation (below).
+
+**F3 (MEDIUM) — FIXED.** `apps/mobile/src/screens/ComputersScreen.tsx`: the
+section header's single "…" (`rows[0]` only) is gone. Each project row now has
+its own "…" as a `trailing` control (`trailingKind="control"`, so it is its own
+VoiceOver element), with `computer-menu-<row.id>`, "More for <row.label>", and
+`onMenu(row)`. Long-press is kept. Pin: `band-screens.test.ts` "every project row
+has its OWN …". It was red on the old screen (`not.toContain("computer-menu-${first.id}")`)
+and is green now. Flow 37 also taps project B's "…" on the simulator.
+
+**F1 (HIGH) — PARTIAL.** Delivered: flow 37 (below), green on the iOS 26
+simulator, and the flows this round touched:
+
+```
+run 1 (--only 37-projects,15-revoked,16-remove-computer):
+37-projects FAIL 141 s · 15-revoked PASS 53 s · 16-remove-computer PASS 55 s
+  37 failed at "computer-state-<B>-stopped is visible" (B still `new` after 60 s)
+run 2 (--only 37-projects, after the flow change below): 37-projects PASS 144 s
+GATE PASS — 1 passed, 0 failed
+```
+
+Shots `37-a1-two-projects`, `37-a2-pair-hint`, `37-a3-stopped`,
+`37-a4-project-sheet` and `37-a5-revoked-one`, each light and dark, are in
+`.tentacle/tmp/e2e-mobile/1795228927069/ios26/37-projects/2026-11-21_034747/37-projects/takeScreenshot/`.
+The sandbox refused a copy into `.tentacle/tmp/mobile-projects-app/screens/`.
+`37-a3-stopped-light` was checked by eye: one section, "1 of 2 projects
+running", B "Stopped" with a dashed folder, A "Idle", and a "…" on each row.
+
+**Open, for the owner (behaviour, not changed here):** run 1 showed that the
+route probes only on focus, on a tap, on foreground, and on the 15 s timer, and
+the timer runs only while a row is ALREADY stopped or unreachable
+(`reprobeDelay`, `App.tsx` ~1025). A `serve` that stops while the screen sits idle
+with every row ok is therefore seen only on the next foreground or navigation.
+The plan's failure-mode F1 says "its socket drops → Stopped", but the screen holds
+no socket per row. Flow 37 uses Q12's other trigger, a foreground (`pressKey:
+home` + `launchApp: stopApp: false`). If the row should flip on its own, that is
+a design change (poll while ok too, or hold a link per row), and it was not made
+outside the approved Implementation.
+
+**Not done:** the legacy-migration E2E flow. It needs a phone Keychain that
+holds a pre-project record, which the harness can only produce by installing an
+older build first. Its behaviour stays covered by the real-daemon unit tests:
+"retires the legacy record", "first relay handshake adopts it", and F2's new
+test. The full `bun run e2e:mobile` (all flows) was not run, only the three flows
+this round touched.
+
+Found while wiring it: the branch
+broke the WHOLE existing E2E suite. `e2e/pairing.ts` `start()` returned the bare
+computer id as `computerId`, but rows are now filed under
+`projectRecordId(computer, projectKey(cwd))`. So every flow's
+`computer-${output.computerId}` (about 60 uses, starting with `_pair.yaml`'s last
+assert) named no row. Fixed:
+
+- `start()` returns the row id when a project is paired. The hook test
+  `e2e-pairing.test.ts` now expects `projectRecordId(…)`: red (`Expected
+  "321284bf5f0c1019.4d850836811828bc"`, `Received "321284bf5f0c1019"`), then
+  green.
+- Flow 15 asserted the removed inline `computer-pair-again-<id>` (the only
+  testID the new screen dropped, by a main-vs-branch diff). In §6 a revoked row's
+  tap opens its sheet, so the flow now taps the row and asserts
+  `computer-menu-pair-again-<id>`.
+- Harness for two projects: `startServe(port, cwd = runDir)`; the
+  `project-b-start` / `project-b-stop` hooks (B runs in `<run>/project-b`, same
+  config dir, and keeps its port across restarts); `pair-start?project=b`
+  (`PairWindowOptions.projectDir/address`). The flow-30 source pin in
+  `e2e-escape-probes.test.ts` was updated to the `cwd` parameter (the default is
+  still the run dir).
+- New flow `37-projects.yaml` plus 4 scripts (`37-*.js`), registered in `FLOWS`
+  after 36. Pair A, then pair B from the section's "Pair a project on this Mac".
+  Both rows show `new|idle`. B's own "…" opens B's sheet. Stop B → B is `stopped`
+  and A is untouched. Start B → B comes back with no tap (the 15 s re-probe).
+  Revoke A's device, then relaunch → A is `revoked` and B is still `new|idle`.
+  Shots `37-a1…a5`, light and dark.
+
+**F4 (MEDIUM, process) — FIXED.** The `(b)` signature now reads `deepseek`,
+from the orchestrator's commit labels, with a note. The exact id was not
+recorded. This round is signed with my real id.
+
+**Mutations** (`.tentacle/tmp/mobile-projects-app/mutate-fix1.ts`: apply, run the
+test, restore from memory; `git status` afterwards lists no extra file):
+
+```
+F2 retireLegacy ignores cwd: KILLED (red) pass=11 fail=1
+F3 row … opens the first row's sheet: KILLED (red) pass=35 fail=1
+```
+
+**Narrow gate:** `bunx tsc -p apps/mobile --noEmit` is clean. `bunx biome check`
+on the 13 changed TS/JS files: 0 issues. Tests: `band-screens`, `computers`,
+`pairing-e2e` (12/0), `e2e-pairing` (7/0), `e2e-gate`, `e2e-hooks-query`,
+`e2e-escape-probes`, `e2e-session-capabilities`, `e2e-appearance`: all green.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-20* (fresh context; scope: slice (a), `git diff main...HEAD`)
@@ -1025,3 +1316,100 @@ chose "legacy does not count") survived both passes.
   phone's single record per computer, today's legacy record and key included. This lasts until (b)
   keys records per project. The changelog's "The app pairs per project now" claims more than
   that until (b) ships. Fine if (b) lands before the next `release`; otherwise state the limit there.
+
+### Review — (b) feat/mobile-projects-app
+
+*— claude-opus-5-5, 2026-11-21* (fresh context; scope `git diff main...HEAD`, slice (b); same model family as the
+Execution's signature, though the commits say `deepseek` — see finding 4)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate (re-run):** `bun test apps/mobile/test` 4115 pass / 0 fail (280 files); `bun run typecheck` clean;
+`bun run lint` clean (2181 files). Full `bun test` not re-run.
+
+**Findings**
+
+1. **HIGH: the E2E half of the scope is not delivered.** There is no `apps/mobile/e2e/flows/NN-projects.yaml`, no
+   legacy-migration flow, `bun run e2e:mobile` was not run, and `.tentacle/tmp/mobile-projects-app/screens/` does not
+   exist (no A1–A7 light/dark). The Execution itself says PARTIAL. The plan's gate (§Tests "Gate before done",
+   decision 20) is unmet, and so are the live behaviours that only the E2E pins: stop B → "Stopped", revoke A → B still
+   online, the 15 s re-probe.
+2. **MEDIUM: the guard on a destructive branch is not pinned.** `apps/mobile/src/pairing-flow.ts:519`
+   (`entry.computer.project?.cwd === record.project.cwd` in `retireLegacy`). Mutation R2 replaced it with `true`, and
+   `pairing-e2e.test.ts` stays green (11/0). Scenario: the phone holds a legacy record of Mac M whose discover named
+   it Q (its key is adopted on Q). Pairing P with the guard regressed silently deletes the record of Q and its key. Q
+   then has to be re-paired, with no error. Needed: a test where a same-computer legacy record with another `cwd`
+   survives.
+3. **MEDIUM: the section's "…" opens only the FIRST project's sheet.** `apps/mobile/src/screens/ComputersScreen.tsx:190-199`
+   (`computer-menu-${first.id}`, "More for <first label>"). With two or more projects, the only visible control for
+   project 2+'s Try again / Pair again / Remove is a long-press (an ok row's tap opens it). §6 says
+   "long-press / … = project sheet" per row. Scenario: a VoiceOver user, or anyone who doesn't know about long-press,
+   cannot remove the second project.
+4. **MEDIUM (process, §10):** `### (b)` Execution is signed `claude-opus-5-5`, but both branch commits are labelled
+   `(deepseek)` (`0b65e100`, `f1df3dde`). The signature must name the model that did the work: §10's routing and
+   review strength depend on it.
+
+**Mutations (reviewer, in memory, restored; `git status` clean afterwards):** R1 `observe` does not reset `absent` →
+KILLED (link-diagnosis 8/1). R2 `retireLegacy` ignores `cwd` → **SURVIVED** (F2). R3 discover folds another `cwd` →
+KILLED. R4 `justPaired` never expires → KILLED. R5 drop `closeCodes.delete(address)` → survived (low: a stale code
+matters only on a re-dial of the same address inside one `openComputer`; not raised).
+
+**Attacks tried**
+- **§7 one session path:** a project record dials through the same `openComputer`/`LINKS`; the `4404` is read from
+  the app's own `withDiagnostics` wrapper, with no second channel. Holds.
+- **§7 pure modules:** the states, words, grouping, re-probe delay and menu actions are in `project-rows.ts`. The
+  App's `onOpen` branch (ok → open, stopped/unreachable → retry, else sheet) is small and inline: known App.tsx debt,
+  not raised.
+- **Push id ripple:** `openRoute` (`notification-action.ts:113`) still routes on `msg.computer`, and no project
+  record has that id. It is moot today only because `PushMessage.computer` is `identity.name`, not the id: the
+  pre-existing defect the Execution names. The fix task for it must also map claimed → record id here.
+- **`stopped` vs `unreachable` with LAN + relay addresses:** `observe` resets `absent` on every observation, so the
+  last failure wins. A lone project may flip between the two words from one poll to the next. This is cosmetic, and
+  it never feeds `maybe-reset`. Not raised.
+- **Same-basename projects (`~/a/app`, `~/b/app`):** `projectMismatch` and `findExisting` compare labels only. This
+  follows the plan (`p=` is the label), and record ids are keyed by `project.key`, so nothing is overwritten. Not
+  raised.
+
+**What holds:** record ids per project with `STORE_VERSION` 1; F17 saves nothing (its real-daemon test passes);
+the legacy record parses; `setProject`/`setAddresses` refuse an unlisted id and skip a no-op write; the
+diagnosis's `absent` does not feed the streak (real relay test).
+
+**Executor behaviour:** honest about the PARTIAL status and the drift (4404 path, no 30-day expiry, testIDs). The
+gap is scope, not quality, plus one unpinned destructive guard and the signature mismatch.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-21* (fresh-context reviewer; scope `git diff HEAD~2` = the fix round `b9c70b77` and the
+gate fix `3d50cba7`)
+
+**Verdict: APPROVE-WITH-NITS (PASS).**
+
+**Gate:** `bun test apps/mobile/test` 4117 pass / 0 fail (280 files); `bun run typecheck` clean; `bun run lint` clean
+(2185 files).
+
+**Previous findings**
+- **F2 — FIXED.** The new real-daemon test "KEEPS a legacy record … named project Q" is in place. Mutation R2 (the
+  `cwd` guard → `true`) is now KILLED: `pairing-e2e` 11/1.
+- **F3 — FIXED.** `ComputersScreen.tsx` gives each row its own "…" (`computer-menu-${row.id}`, `trailingKind="control"`),
+  and the header "…" is gone. Mutation R6 (the row "…" opens `section.rows[0]`) is KILLED: `band-screens` 35/1. Screenshot
+  `37-a5-revoked-one-dark` checked by eye: two rows with a "…" each, A "Access removed" with a dashed folder, B "New",
+  "1 of 2 projects running".
+- **F4 — FIXED.** The `(b)` signature now reads `deepseek`, with a note explaining the correction.
+- **F1 — mostly delivered.** Flow `37-projects.yaml` exists, and the Execution logs it green on the iOS 26 simulator.
+  Ten shots (a1–a5, light and dark) exist under the worktree's
+  `.tentacle/tmp/e2e-mobile/1795228927069/…/takeScreenshot/` (verified on disk).
+  The Execution also caught and fixed a regression this branch had introduced in the harness: `pairing.ts` `start()`
+  returned the computer id, not the row id, which broke every flow's `computer-${output.computerId}`.
+
+**Regressions on the diff:** none found. The harness changes are additive (`project-b-*` hooks, `pair-start?project=b`,
+`startServe(port, cwd = runDir)`), and the two source pins in `e2e-flows.test.ts` were updated to match.
+
+**Residual (not blocking; for the owner/orchestrator):**
+1. The full `bun run e2e:mobile` was not run, only flows 37, 15 and 16. Run it before merge: the record-id change in
+   `pairing.ts` reaches every flow.
+2. There is no legacy-migration E2E flow. The reason given is that the harness can't seed a pre-project Keychain
+   record. Unit and real-daemon tests cover the behaviour.
+3. Only shots a1–a5 exist, not A1–A7, and they are not in `.tentacle/tmp/mobile-projects-app/screens/`.
+4. The Execution's open question is a real gap against failure mode F1. A `serve` that stops while every row is ok is
+   noticed only on foreground or navigation, because the 15 s timer runs only once a row is already down. This needs
+   an owner decision.

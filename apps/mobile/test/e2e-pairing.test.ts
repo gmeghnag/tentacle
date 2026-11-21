@@ -30,6 +30,7 @@ import {
 import type { DuplexChannel } from "@tentacle/transport";
 import { generateStaticKeypair, systemRandom } from "@tentacle/transport/noise";
 import { createPairingHooks as createHooks, sasOfPrompt } from "../e2e/pairing.ts";
+import { projectRecordId } from "../src/computer-store.ts";
 
 /**
  * The serve's project (docs/feat/mobile-projects.md §2): the key is what `pair`
@@ -147,11 +148,15 @@ describe("the pairing hooks", () => {
     try {
       const started = await pairing.start();
       expect(started.payload.startsWith("tentacle://pair?")).toBe(true);
-      // The id names the computer the phone will pin (P3): the daemon's identity.
+      // The id is the ROW the app draws for this pairing (mobile-projects §6: one
+      // record per project), so every flow's `computer-${computerId}` names it:
+      // the pinned computer's id plus the project's key, not the bare computer id.
       const identity = loadOrCreateIdentity(configDir, { name: "", now: 0 });
       expect(identity.ok).toBe(true);
       if (identity.ok) {
-        expect(started.computerId).toBe(deviceIdOf(identity.identity.publicKey));
+        expect(started.computerId).toBe(
+          projectRecordId(deviceIdOf(identity.identity.publicKey), projectKey(PROJECT_DIR)),
+        );
       }
       // The phone claims the code in the background; `confirm` waits for it.
       const claiming = claim(started.payload, { outcome: "y" });

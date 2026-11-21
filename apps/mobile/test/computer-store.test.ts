@@ -15,8 +15,10 @@ import {
   type SecureKV,
   type SecureSetOptions,
   StoreUnreadable,
+  computerIdOf,
   computerKeyOf,
   createComputerStore,
+  projectRecordId,
 } from "../src/computer-store.ts";
 
 /** The class every write must carry (Owner Q3). A distinct number: a default cannot fake it. */
@@ -350,5 +352,85 @@ describe("the push registration fingerprint (docs/feat/mobile-push.md P9)", () =
     await s.setPush("a", { hash: "h", registeredAt: 4 });
     await s.add(computer("a"), "priv-new");
     expect((await s.get("a"))?.push).toBeUndefined();
+  });
+});
+
+describe("per-project records (docs/feat/mobile-projects.md §6)", () => {
+  const P = { key: "tentacle-aaaaaaaaaaaa", cwd: "/u/tentacle", label: "tentacle" };
+  const Q = { key: "assistant-bbbbbbbbbbbb", cwd: "/u/assistant", label: "assistant" };
+  const projectRecord = (project: typeof P): PairedComputer =>
+    computer(projectRecordId("mac", project.key), { computerId: "mac", project });
+
+  test("projectRecordId is stable, Keychain-safe and per project", () => {
+    const p = projectRecordId("mac", P.key);
+    expect(p).toBe(projectRecordId("mac", P.key));
+    expect(p).not.toBe(projectRecordId("mac", Q.key));
+    expect(p).not.toBe(projectRecordId("other", P.key));
+    expect(p).toMatch(/^mac\.[0-9a-f]{16}$/);
+    expect(projectRecordId("mac", "we/ird key")).toMatch(/^mac\.[0-9a-f]{16}$/);
+  });
+
+  test("two projects of ONE computer coexist, each with its own key, both carrying computerId + project (mutation: drop projectFieldsOf in add → red)", async () => {
+    const s = store(fakeKV());
+    await s.add(projectRecord(P), "priv-p");
+    await s.add(projectRecord(Q), "priv-q");
+    const listed = paired(await s.list());
+    expect(listed).toEqual([projectRecord(P), projectRecord(Q)]);
+    expect((await s.get(projectRecordId("mac", P.key)))?.deviceKey).toBe("priv-p");
+    expect((await s.get(projectRecordId("mac", Q.key)))?.deviceKey).toBe("priv-q");
+    expect(listed.map(computerIdOf)).toEqual(["mac", "mac"]);
+  });
+
+  test("a re-pair of the SAME project replaces its record (one index entry, new key)", async () => {
+    const s = store(fakeKV());
+    await s.add(projectRecord(P), "priv-1");
+    await s.add(projectRecord(Q), "priv-q");
+    await s.add(projectRecord(P), "priv-2");
+    expect((await s.list()).map((entry) => entry.id)).toEqual([
+      projectRecordId("mac", P.key),
+      projectRecordId("mac", Q.key),
+    ]);
+    expect((await s.get(projectRecordId("mac", P.key)))?.deviceKey).toBe("priv-2");
+  });
+
+  test("a legacy record (no computerId / project) still reads; computerIdOf falls back to its id", async () => {
+    const s = store(fakeKV());
+    await s.add(computer("mac"), "priv");
+    const [legacy] = paired(await s.list());
+    expect(legacy).toEqual(computer("mac"));
+    expect(legacy === undefined ? "" : computerIdOf(legacy)).toBe("mac");
+  });
+
+  test("a malformed project is dropped and the record still loads (read as legacy)", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("mac"), "priv");
+    const raw = JSON.parse(kv.items.get(computerKeyOf("mac")) ?? "{}");
+    kv.items.set(computerKeyOf("mac"), JSON.stringify({ ...raw, project: { key: 1 } }));
+    const got = await s.get("mac");
+    expect(got?.deviceKey).toBe("priv");
+    expect(got?.project).toBeUndefined();
+  });
+
+  test("setProject names a legacy record's project, keeps every other field, and writes once per change (mutation: drop the same-value guard → red)", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("mac"), "priv");
+    await s.setPush("mac", { hash: "h", registeredAt: 1 });
+    await s.setProject("mac", P);
+    const got = await s.get("mac");
+    expect(got?.project).toEqual(P);
+    expect(got?.deviceKey).toBe("priv");
+    expect(got?.push).toEqual({ hash: "h", registeredAt: 1 });
+    const writes = kv.writes().length;
+    await s.setProject("mac", P);
+    expect(kv.writes().length).toBe(writes);
+  });
+
+  test("setProject for an id the index does not list writes NOTHING", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.setProject("ghost", P);
+    expect(kv.writes()).toEqual([]);
   });
 });

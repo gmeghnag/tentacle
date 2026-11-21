@@ -54,7 +54,10 @@ const EXPORTS: CacheFiles = {
   write(path, bytes) {
     const file = fileAt(path);
     file.create({ intermediates: true, overwrite: true });
-    file.write(bytes);
+    // SYNC: expo-file-system 58 made `write` async, and the port is sync — the
+    // returned uri must name a file that is already there (a preview hands it to
+    // QuickLook at once; docs/feat/mobile-file-preview-cards.md).
+    file.writeSync(bytes);
   },
   copy(from, to) {
     const source = fileAt(from);

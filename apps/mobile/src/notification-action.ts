@@ -30,6 +30,7 @@ import type { PushMessage } from "@tentacle/protocol";
 import { PushEnvelopeSchema, PushMessageSchema, decodeBase64Url } from "@tentacle/protocol";
 import { PUSH_TOOL_MAX, clipPushText } from "@tentacle/protocol";
 import { type SealedPush, openPush } from "@tentacle/transport/push";
+import { isRecordOfComputer } from "./computer-store.ts";
 import type { SessionRoute } from "./routes.ts";
 
 /** The team's wallet of ids the app has already answered, kept by the app (Design 3 step 3). */
@@ -171,7 +172,7 @@ export function openNotification(
       if (!message.success) {
         return undefined; // it opened: a newer/unknown plaintext. Never half-read (F11).
       }
-      if (message.data.computer !== computer.id) {
+      if (!isRecordOfComputer(computer.id, message.data.computer)) {
         // The envelope authenticated as this computer but CLAIMS another: a
         // pinned key is the identity, so this is a broken/hostile sender.
         return undefined;

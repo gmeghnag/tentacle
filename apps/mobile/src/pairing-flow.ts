@@ -41,7 +41,7 @@ import {
 } from "@tentacle/protocol";
 import { type DuplexChannel, RpcError } from "@tentacle/transport";
 import { type Random, generateStaticKeypair } from "@tentacle/transport/noise";
-import type { ComputerStore, PairedComputer } from "./computer-store.ts";
+import { type ComputerStore, type PairedComputer, projectRecordId } from "./computer-store.ts";
 
 /**
  * Every reason the app can show, one testID each (`pair-error-<reason>`): the
@@ -57,6 +57,8 @@ export type PairingFailureReason =
   | "unreachable"
   | "store"
   | "unknown"
+  /** The code named one project (`p=`) and the daemon that answered is another (F17). */
+  | "project-mismatch"
   | PairingRefusedReason;
 
 /** F-P9's sentence: a cancel after the claim leaves the computer's prompt up. */
@@ -111,7 +113,8 @@ export type PairingAction =
   | { readonly type: "device-name"; readonly name: string }
   | { readonly type: "confirm" }
   | { readonly type: "compare"; readonly sas: string }
-  | { readonly type: "done"; readonly result: PairDeviceResult }
+  /** `recordId`: the id the record was stored under (a project record's, §6); absent = the computer id. */
+  | { readonly type: "done"; readonly result: PairDeviceResult; readonly recordId?: string }
   | { readonly type: "failed"; readonly failure: PairingFailure }
   /** Cancel: stop the attempt and go back to the review (the payload is still good). */
   | { readonly type: "cancel" }
@@ -171,6 +174,12 @@ const MESSAGES: Record<
     retry: "retry",
   },
   unknown: { message: "The computer refused the pairing", retry: "retry" },
+  // The generic copy; `runPairing` names both folders when it has them.
+  "project-mismatch": {
+    message:
+      "This code is for another project — run `tentacle pair` in the project's folder and scan again. Nothing was saved",
+    retry: "edit",
+  },
   invalid_code: { message: PAIRING_REFUSED_MESSAGES.invalid_code, retry: "edit" },
   used: { message: PAIRING_REFUSED_MESSAGES.used, retry: "edit" },
   declined: { message: PAIRING_REFUSED_MESSAGES.declined, retry: "edit" },
@@ -283,7 +292,7 @@ export function reduce(state: PairingState, action: PairingAction): PairingState
     case "done":
       return {
         name: "done",
-        computerId: action.result.computer.id,
+        computerId: action.recordId ?? action.result.computer.id,
         computerName: action.result.computer.name,
       };
     case "failed":
@@ -320,6 +329,8 @@ export interface PairingView {
   /** `pair-review` shows the computer's name and how many addresses will be tried. */
   readonly review?: {
     readonly computerName: string;
+    /** The project the code names (`p=`), shown before the human answers (§4). */
+    readonly project?: string;
     readonly addressCount: number;
     readonly deviceName: string;
     readonly deviceNameValid: boolean;
@@ -369,6 +380,7 @@ function stageView(state: PairingState): Omit<PairingView, "submit"> {
         text: state.text,
         review: {
           computerName: state.payload.computer,
+          ...(state.payload.project === undefined ? {} : { project: state.payload.project }),
           addressCount: state.payload.addresses.length,
           deviceName: state.deviceName,
           deviceNameValid: isValidDeviceName(state.deviceName),
@@ -395,7 +407,12 @@ function stageView(state: PairingState): Omit<PairingView, "submit"> {
 export interface RunPairingOptions {
   readonly payload: PairingPayload;
   readonly deviceName: string;
-  readonly store: Pick<ComputerStore, "add">;
+  /**
+   * `list` + `remove` (optional): a pairing of project P retires this phone's
+   * LEGACY record of the same computer once that record is known to be P
+   * (docs/feat/mobile-projects.md §3/§6) — else P would show twice.
+   */
+  readonly store: Pick<ComputerStore, "add"> & Partial<Pick<ComputerStore, "list" | "remove">>;
   /** One address's raw channel (the app passes its RN WebSocket dial). */
   readonly dial: (address: string) => () => Promise<DuplexChannel>;
   readonly random: Random;
@@ -419,8 +436,98 @@ export interface RunPairingOptions {
 }
 
 export type PairingOutcome =
-  | { readonly ok: true; readonly computerId: string }
+  /** `computerId`: the RECORD id written (a project record's id, §6). `superseded`: a legacy record removed. */
+  | { readonly ok: true; readonly computerId: string; readonly superseded?: string }
   | { readonly ok: false };
+
+/**
+ * Where a successful pairing is filed (docs/feat/mobile-projects.md §6): a
+ * per-project daemon's result → `projectRecordId(computer, project)` with
+ * `computerId` + `project`; an older daemon's (no `project`, F8) → the computer
+ * id, as before. Pure, so the id rule is tested without a socket.
+ */
+export function recordFor(
+  result: PairDeviceResult,
+  payload: PairingPayload,
+  deviceName: string,
+  pairedAt: number,
+): PairedComputer {
+  const base = {
+    name: result.computer.name,
+    computerKey: encodeBase64Url(payload.key),
+    addresses: payload.addresses,
+    deviceName,
+    // This phone's OWN label, as the computer will list it (`device/pair`'s
+    // `name`): the one string that matches on both ends, for an ask's "also
+    // asked on" and a flip's `by` (docs/feat/session-auto-accept.md D7).
+    thisDeviceName: deviceName,
+    pairedAt,
+  };
+  const project = result.project;
+  if (project === undefined) {
+    return { id: result.computer.id, ...base };
+  }
+  return {
+    id: projectRecordId(result.computer.id, project.key),
+    ...base,
+    computerId: result.computer.id,
+    project: { key: project.key, cwd: project.cwd, label: project.label },
+  };
+}
+
+/**
+ * F17: the code named a project (`p=`) and the daemon that answered is another
+ * one → the failure to show, else `undefined`. Checked BEFORE anything is saved.
+ */
+export function projectMismatch(
+  result: PairDeviceResult,
+  payload: PairingPayload,
+): PairingFailure | undefined {
+  const named = payload.project;
+  const answered = result.project?.label;
+  if (named === undefined || answered === undefined || named === answered) {
+    return undefined;
+  }
+  return {
+    ...failureFor("project-mismatch"),
+    message: `This code is for '${named}', but it reached '${answered}' — run \`tentacle pair\` in '${named}' and scan again. Nothing was saved`,
+  };
+}
+
+/**
+ * A project record was just stored: remove this phone's LEGACY record of the same
+ * computer when it is known to open that same project (its `project.cwd`, filled
+ * from `daemon/discover`, §3) — else the project would be listed twice. Best
+ * effort AFTER the new record is safe: a failure leaves a duplicate row, never a
+ * lost key. Returns the removed id.
+ */
+async function retireLegacy(
+  store: RunPairingOptions["store"],
+  record: PairedComputer,
+): Promise<string | undefined> {
+  if (record.computerId === undefined || record.project === undefined) {
+    return undefined;
+  }
+  if (store.list === undefined || store.remove === undefined) {
+    return undefined;
+  }
+  try {
+    for (const entry of await store.list()) {
+      if (
+        entry.state === "paired" &&
+        entry.id === record.computerId &&
+        entry.computer.computerId === undefined &&
+        entry.computer.project?.cwd === record.project.cwd
+      ) {
+        await store.remove(entry.id);
+        return entry.id;
+      }
+    }
+  } catch {
+    // A duplicate row is the worst case; the pairing itself succeeded.
+  }
+  return undefined;
+}
 
 /**
  * Run the pairing the person confirmed: a FRESH device key (Owner Q2), the
@@ -488,10 +595,7 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
       // A pairing is PER PROJECT (docs/feat/mobile-projects.md Owner Q9): the
       // daemon refuses one that does not say so (`update_app`) because an app
       // filing per computer would overwrite the record — and the key — of the
-      // project it already used. (i′) stores under `result.computer.id` until
-      // slice (b) keys records per project, which is why this is the ONLY half
-      // of that bullet here: the daemon's per-project id reaches push routing
-      // later, with the record id it is matched against.
+      // project it already used. This app files it per project (`recordFor`).
       perProject: true,
       dial,
       random,
@@ -501,26 +605,22 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
         dispatch({ type: "compare", sas });
       },
     });
+    // F17: a code for another folder (or a tampered paste) saves NOTHING.
+    const mismatch = projectMismatch(result, payload);
+    if (mismatch !== undefined) {
+      dispatch({ type: "failed", failure: mismatch });
+      return { ok: false };
+    }
     // The computer accepted: write the record, THEN say so (F-P12).
-    const record: PairedComputer = {
-      id: result.computer.id,
-      name: result.computer.name,
-      computerKey: encodeBase64Url(payload.key),
-      addresses: payload.addresses,
-      deviceName,
-      // This phone's OWN label, as the computer will list it (`device/pair`'s
-      // `name`): the one string that matches on both ends, for an ask's "also
-      // asked on" and a flip's `by` (docs/feat/session-auto-accept.md D7).
-      thisDeviceName: deviceName,
-      pairedAt: now(),
-    };
+    const record = recordFor(result, payload, deviceName, now());
     try {
       await store.add(record, encodeBase64Url(keypair.privateKey));
     } catch {
       dispatch({ type: "failed", failure: failureFor("store") });
       return { ok: false };
     }
-    dispatch({ type: "done", result });
+    const superseded = await retireLegacy(store, record);
+    dispatch({ type: "done", result, recordId: record.id });
     // The first successful pairing's one extra step (P9): notifications are
     // asked about HERE and nowhere else (decision 10). After `done`, so the
     // screen is already moving on, and never awaited — a prompt is not part of
@@ -528,11 +628,15 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
     // must not turn a stored computer into a `failed` card (the catch below is
     // the PAIRING's, and this is no longer the pairing).
     try {
-      options.onPaired?.(result.computer.id);
+      options.onPaired?.(record.id);
     } catch {
       // A notification prompt is never a reason to lose a paired computer.
     }
-    return { ok: true, computerId: result.computer.id };
+    return {
+      ok: true,
+      computerId: record.id,
+      ...(superseded === undefined ? {} : { superseded }),
+    };
   } catch (error) {
     if (options.signal?.aborted === true) {
       // F-P9: the phone hung up. If the claim went out, the computer's prompt

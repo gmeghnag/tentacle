@@ -21,6 +21,7 @@
  *   (a downgraded app must not erase a newer app's computers); a read error is
  *   a rejection too. Only a missing index means "no computers".
  */
+import { sha256Hex } from "./hash.ts";
 
 /** The Keychain surface, injected (`expo-secure-store` in the app). */
 export interface SecureKV {
@@ -57,6 +58,52 @@ export interface PairedComputer {
    */
   readonly thisDeviceName?: string;
   readonly pairedAt: number;
+  /**
+   * The computer's own id (`result.computer.id`) when this record is ONE PROJECT
+   * of it (docs/feat/mobile-projects.md §6): `id` is then
+   * `projectRecordId(computerId, project.key)`. Absent = a record filed per
+   * computer (an older app, an older daemon), whose `id` IS the computer id.
+   * Optional, so `STORE_VERSION` stays 1 (the `thisDeviceName` precedent).
+   */
+  readonly computerId?: string;
+  /** The project (one `serve` = one `cwd`) this record opens; absent until known (legacy). */
+  readonly project?: RecordProject;
+}
+
+/** The project a record opens, as the daemon named it (`DevicePairResult.project`). */
+export interface RecordProject {
+  /**
+   * `projectKey(cwd)` as the daemon named it at pairing. Absent on a legacy
+   * record named later from `daemon/discover`, which announces only the `cwd`.
+   */
+  readonly key?: string;
+  /** The daemon's `cwd`: the project's identity on this phone (pairing and discover agree on it). */
+  readonly cwd: string;
+  readonly label: string;
+}
+
+/** The id of the computer a record belongs to: `computerId`, else (legacy) its own id. */
+export function computerIdOf(record: Pick<PairedComputer, "id" | "computerId">): string {
+  return record.computerId ?? record.id;
+}
+
+/**
+ * A project record's Keychain-safe id: `<computerId>.<hex16(sha256(projectKey))>`.
+ * The project key is a folder name (any characters), so it is hashed rather than
+ * spliced into a Keychain key.
+ */
+export function projectRecordId(computerId: string, projectKey: string): string {
+  return `${computerId}.${sha256Hex(new TextEncoder().encode(projectKey)).slice(0, 16)}`;
+}
+
+/**
+ * Does record id `recordId` belong to the computer a push CLAIMS (`claimed`)? Its
+ * own id (a legacy record), or one of its project records (`<claimed>.<hash>`).
+ * The push directory carries only record ids, so this is the one place the
+ * "computer → its project records" rule is applied to a push (§6 id ripple).
+ */
+export function isRecordOfComputer(recordId: string, claimed: string): boolean {
+  return recordId === claimed || recordId.startsWith(`${claimed}.`);
 }
 
 /** A stored computer plus its private key: what `openComputer` needs, and nothing else reads. */
@@ -132,6 +179,14 @@ export interface ComputerStore {
    * not list is refused — never an orphan item nothing will ever read.
    */
   setPush(id: string, value: PushRegistrationRecord | undefined): Promise<void>;
+  /**
+   * Name the project a legacy record opens (docs/feat/mobile-projects.md §3: the
+   * daemon's `self.cwd`, after a dial). Refused for an unlisted id, like `setPush`;
+   * a no-op when the record already says exactly that.
+   */
+  setProject(id: string, project: RecordProject): Promise<void>;
+  /** Replace a record's addresses (the `daemon/discover` refresh, §6 F2); same rules as `setProject`. */
+  setAddresses(id: string, addresses: readonly string[]): Promise<void>;
   /** Forget it on this phone (Owner Q5: local only). */
   remove(id: string): Promise<void>;
 }
@@ -193,11 +248,42 @@ function storedComputerOf(id: string, item: unknown): StoredComputer | undefined
     deviceName: record.deviceName,
     ...(typeof thisDeviceName === "string" ? { thisDeviceName } : {}),
     pairedAt: record.pairedAt,
+    ...projectFieldsOf(record),
     deviceKey: record.deviceKey,
     ...(pushRegistrationOf(record.push) === undefined
       ? {}
       : { push: pushRegistrationOf(record.push) }),
   };
+}
+
+/**
+ * The per-project fields (docs/feat/mobile-projects.md §6), each kept only when it
+ * is what this build writes: a malformed one is dropped (the record then reads as
+ * legacy, still dialable), never a reason to lose the key.
+ */
+function projectFieldsOf(record: {
+  readonly computerId?: unknown;
+  readonly project?: unknown;
+}): Pick<PairedComputer, "computerId" | "project"> {
+  const project = recordProjectOf(record.project);
+  return {
+    ...(typeof record.computerId === "string" ? { computerId: record.computerId } : {}),
+    ...(project === undefined ? {} : { project }),
+  };
+}
+
+function recordProjectOf(value: unknown): RecordProject | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const { key, cwd, label } = value as { key?: unknown; cwd?: unknown; label?: unknown };
+  if (typeof cwd !== "string" || typeof label !== "string") {
+    return undefined;
+  }
+  if (key !== undefined && typeof key !== "string") {
+    return undefined;
+  }
+  return { ...(key === undefined ? {} : { key }), cwd, label };
 }
 
 /**
@@ -234,6 +320,7 @@ function publicOf(computer: StoredComputer): PairedComputer {
     deviceName: computer.deviceName,
     ...(computer.thisDeviceName === undefined ? {} : { thisDeviceName: computer.thisDeviceName }),
     pairedAt: computer.pairedAt,
+    ...projectFieldsOf(computer),
   };
 }
 
@@ -331,6 +418,7 @@ export function createComputerStore(deps: ComputerStoreDeps): ComputerStore {
             ? {}
             : { thisDeviceName: computer.thisDeviceName }),
           pairedAt: computer.pairedAt,
+          ...projectFieldsOf(computer),
           deviceKey,
         };
         // ITEM first: a crash between the two leaves an unlisted orphan (F-P13),
@@ -381,6 +469,60 @@ export function createComputerStore(deps: ComputerStoreDeps): ComputerStore {
         }
         const { push: _previous, ...rest } = stored;
         const next = value === undefined ? rest : { ...rest, push: value };
+        await write(computerKeyOf(id), JSON.stringify({ v: STORE_VERSION, ...next }));
+      });
+    },
+
+    setAddresses(id: string, addresses: readonly string[]): Promise<void> {
+      return serialise(async () => {
+        const ids = await readIndex();
+        if (!ids.includes(id) || addresses.length === 0) {
+          return; // never an orphan item, never a record with nothing to dial
+        }
+        const stored = await read(id);
+        if (stored === undefined) {
+          return;
+        }
+        if (
+          stored.addresses.length === addresses.length &&
+          stored.addresses.every((address, i) => address === addresses[i])
+        ) {
+          return;
+        }
+        const next = { ...stored, addresses: [...addresses] };
+        await write(computerKeyOf(id), JSON.stringify({ v: STORE_VERSION, ...next }));
+      });
+    },
+
+    setProject(id: string, project: RecordProject): Promise<void> {
+      return serialise(async () => {
+        const ids = await readIndex();
+        // Same rule as `setPush`: the item is rewritten whole, so only for a
+        // listed id, and an unreadable item is never "repaired" by this write.
+        if (!ids.includes(id)) {
+          return;
+        }
+        const stored = await read(id);
+        if (stored === undefined) {
+          return;
+        }
+        const known = stored.project;
+        if (
+          known !== undefined &&
+          known.key === project.key &&
+          known.cwd === project.cwd &&
+          known.label === project.label
+        ) {
+          return; // one write per CHANGE, not per dial (§6 "Address refresh")
+        }
+        const next = {
+          ...stored,
+          project: {
+            ...(project.key === undefined ? {} : { key: project.key }),
+            cwd: project.cwd,
+            label: project.label,
+          },
+        };
         await write(computerKeyOf(id), JSON.stringify({ v: STORE_VERSION, ...next }));
       });
     },

@@ -1,0 +1,400 @@
+# feat/mobile-file-preview-cards — File preview cards in the phone's transcript
+
+> **Status:** review
+> **Branch:** `feat/mobile-file-preview-cards`
+> **Type:** feat · **Size:** M · **Blast:** contained · **Suited:** Opus exec + simulator screenshots; standard Review
+> **Changelog:** `changelog.d/mobile-file-preview-cards.added.md`
+
+## Context
+
+*— claude-opus-5-5, 2026-11-21*
+
+Owner, 2026-11-20 ("WhatsApp-like"): a file the model presents (`present` →
+artifact card) should show an inline PREVIEW in the phone's transcript — a PDF's
+first page, the image, a markdown / text file's first lines, an HTML snapshot —
+plus name, kind · pages · size; a tap opens the existing viewer. Thumbnails are
+made ON THE PHONE (iOS QuickLook), cached, offline; loading and unavailable are
+honest states (never an empty box). Owner chose mockup **variant A "band on
+top"** on 20/11 (`.tentacle/tmp/mobile-file-preview/mockups/index.html`, section
+A + the shared spec; https://claude.ai/artifact/W3d7bGq7kd5xTUR2fVv6M4). Owner
+rules: minimal, no rounded inset cards, no pure black, never meaning by hue alone.
+
+**What `main` does (verified 2026-11-21, `3a48d4d5`):**
+
+- The card is a 40 pt tile + title + line 2 + chevron
+  (`apps/mobile/src/screens/transcript/TranscriptRow.tsx:685-746` on `main`);
+  the tile is the kind's text glyph, or an image thumbnail when one is loaded.
+- Only images ≤ 1 MiB are ever wanted (`apps/mobile/src/thumbnails.ts:42-44`,
+  `wantsThumbnail`) — PDF / HTML / markdown never get a preview.
+- **Even that image thumbnail is never fetched**: the port that reads a card's
+  bytes, `createArtifactThumbnailSource` (`apps/mobile/src/artifact-thumbnail.ts`),
+  is called by nothing —
+  ```
+  $ rg -n "createArtifactThumbnailSource" apps/mobile --glob '!**/node_modules/**'
+  apps/mobile/src/artifact-thumbnail.ts:23:export function createArtifactThumbnailSource(deps: {
+  ```
+  The screen's only source is `sentPhotoSource` (`App.tsx:1478-1482` on `main`),
+  which knows sent photos only, so every card on `main` draws its glyph.
+- "Unavailable" is never shown on the phone: the card is built with no state
+  (`TranscriptRow.tsx:583`, `artifactCard(tool.artifact)`), so a version the
+  daemon no longer has keeps a live chevron and fails only inside the viewer.
+- Found on the path (pre-existing bug): expo-file-system 58 made `File.write()`
+  async ("`File.write()` is now asynchronous and returns a Promise. Use
+  `File.writeSync()` …", `node_modules/expo-file-system/CHANGELOG.md:70`), and
+  the artifact cache's port drops that promise
+  (`apps/mobile/src/artifact-cache-expo.ts:57` on `main`): `put` returns the uri
+  of a file that may still be being written. A preview hands that uri to
+  QuickLook at once, so this must be fixed here.
+
+**Repro (the capability is missing):** the four-card session of flow 36
+(Execution) on `main`'s build draws four 40 pt glyph tiles — no preview of any
+kind, and no page count. The rg output above is the root cause for the image case.
+
+## Implementation
+
+*— claude-opus-5-5, 2026-11-21*
+
+### Load-bearing assumption
+
+**The existing thumbnail driver can carry every kind's preview unchanged in its
+rules**: it already fetches only for rows in the visible window ± `PREFETCH_ROWS`,
+bounds in-flight requests (`MAX_IN_FLIGHT`), cancels off-window requests on their
+own controller and records a failure as final (`thumbnails.ts:120-196` on
+`main`); its port (`ThumbnailSource.fetch`, `:70-73`) is the only thing that
+knows how bytes are made. So a preview is "a thumbnail whose port also runs
+QuickLook", and the driver gains only one outcome (`gone`). Proven by the
+driver's own suite (`apps/mobile/test/thumbnails.test.ts`, unchanged rules,
+green) plus the new `gone` cases.
+
+### Preconditions
+
+- The session screen's verified read is published once per attach on the feed
+  (`session-screen-controller.ts:1328-1337`, called at `:1508`), and reads through
+  the CURRENT handle — so a port in `App.tsx` can use it without a second
+  `RemoteSession` (which would steal the stream).
+- Every byte the phone keeps goes through the cache's one writer, `put`
+  (`artifact-cache-store.ts:178-211`), which enforces the 200 MB cap;
+  `forgetComputer` removes the computer's whole directory on unpair (`:228-233`).
+  **Except a made preview**, which is written beside the cache by
+  `artifact-preview-expo.ts` — deliberately outside the 200 MB plan (those bytes
+  are the SOURCE a preview is made from) and bounded on its own by
+  `planPreviewPrune` (`artifact-preview-store.ts`, `PREVIEW_STORE_BYTES` = a
+  quarter of the artifact cap), applied on every `save`.
+- `artifact/read`'s refusal is typed: `DomainErrorCode.ArtifactUnavailable`
+  (`packages/protocol/src/jsonrpc.ts:85`) with `data.reason` `unknown` |
+  `evicted` | `store_failed` (`packages/protocol/src/artifact.ts:169`), raised by
+  `ArtifactStore.read` (`packages/daemon/src/artifact-store.ts:209-222`) and
+  passed to the caller as is by `RemoteClient.readArtifact`
+  (`packages/client/src/remote-client.ts:2609`).
+- The artifact meta carries an image's `width` / `height` before any byte
+  (`artifact-store.ts:190-191`), so an image band's height is known at render.
+- Local Expo modules are autolinked from `apps/mobile/modules/`
+  (`tentacle-speech` is the precedent: podspec + `expo-module.config.json`).
+- No §7 invariant is touched: no protocol, no persistence format of the daemon
+  or the laptop, no terminal I/O; one additive core option (display only).
+
+### Design
+
+1. **Pure view-model** `apps/mobile/src/artifact-preview.ts` (React-free):
+   - `previewSource(meta)`: image → its file; pdf / html / svg → a QuickLook
+     page; markdown / text → lines the app draws; chart / other → none.
+   - `wantsPreview(meta)` (the driver's rule): previewable and ≤ `PREVIEW_MAX_BYTES`
+     = 5 MiB (the approved spec; it extends Owner Q6's 1 MiB image line).
+   - `bandHeight(meta, W)`: 150 pt fixed; an image `clamp(W·h/w, 120, 240)` from
+     the meta — known before the bytes, so nothing jumps.
+   - `previewStatus(thumbState, meta)`: `loading` | `ready{preview}` | `failed` |
+     `gone`; too big is `failed` up front (never a forever-loading band).
+   - `previewLines(kind, text)`: ≤ 8 lines via the transcript's own markdown
+     parser (headings, paragraphs, bullets, code as mono); `(empty)` for none.
+   - `previewCardView(meta, status, W)` → `{card, symbol, band, dim, trailing,
+     disabled, a11yLabel}`: loading = band + dimmed symbol; failed = band + full
+     symbol (never a collapse); ready = top-aligned page (`drawnHeight = W·h/w`) /
+     cover image / lines; gone = no band, dimmed, no chevron, disabled, line 2
+     "… · no longer available"; `other` = no band + Share glyph.
+2. **Core** `artifactCard(meta, {pages})`: "PDF · 7 pages · 214 KB" (display
+   only; ignored for other kinds / non-positive-integers). The Mac ignores it.
+3. **Driver** (`thumbnails.ts`): `Thumbnail.preview?`, `ThumbnailState.gone?`,
+   the port may answer `"gone"` → `gone(state, id)` (= failed + gone);
+   `visibleRefs` uses `wantsPreview`; the ref carries the meta
+   (`ImageRef.artifact`), so the port never looks a sha up in a list that lags.
+4. **Port** `artifact-preview-source.ts` (every effect injected, unit-tested):
+   kept preview → shown with no dial (offline); else the cache's copy
+   (`ARTIFACT_CACHE.uriOf`, new) or the verified read through `put`; then image =
+   the file, lines = first 4 KB, page = QuickLook at `W × 1.5W` pt + PDFKit page
+   count; results kept. `ArtifactUnavailable` `unknown|evicted` → `"gone"`;
+   anything else → `null` (symbol). Never throws.
+5. **Native** `modules/tentacle-preview` (Swift): `thumbnail(fileUri, outUri,
+   wPt, hPt)` — `QLThumbnailGenerator`, `representationTypes: .thumbnail` only
+   (an icon is a refusal, not a preview), JPEG 0.85 — and `pdfPageCount`
+   (PDFKit). Bound by `preview-native-expo.ts` (`requireOptionalNativeModule`:
+   absent → pages keep their symbol).
+6. **Disk** `artifact-preview-expo.ts`: previews under
+   `artifacts/<computer>/previews/<sha>-w<W>.{json,jpg}` — inside the computer's
+   cache directory, so an unpair drops them; a JSON whose page image is gone is
+   remade. Bounded on its own: `save` applies `planPreviewPrune`
+   (`artifact-preview-store.ts`) — whole previews, least recently made first,
+   `PREVIEW_STORE_BYTES` = a quarter of the artifact cap, the preview just saved
+   never the one dropped. `readTextHead` reads a bounded head (FileHandle).
+7. **Wiring**: `artifact-thumbnail.ts` plugs the real pieces; `App.tsx` chains it
+   after `sentPhotoSource` (its existing `next` fallback); the component
+   `ArtifactCardRow` → `ArtifactCardBody` only maps the view-model (band with
+   `radius.tile` + hairline `sep` edge, meta row: 20 pt light symbol, title
+   `ellipsizeMode="middle"`, line 2, 13 pt semibold chevron).
+8. **Fix on the path**: `artifact-cache-expo.ts` writes with `writeSync`.
+
+### Files
+
+`packages/core/src/artifact-card.ts` (+ test) · `apps/mobile/src/artifact-preview.ts` (new)
+· `apps/mobile/src/thumbnails.ts` · `apps/mobile/src/transcript-rows.ts`
+(`ImageRef.artifact`) · `apps/mobile/src/artifact-preview-source.ts` (new) ·
+`apps/mobile/src/artifact-cache-store.ts` (`uriOf`) ·
+`apps/mobile/src/artifact-cache-expo.ts` (`writeSync`) ·
+`apps/mobile/modules/tentacle-preview/` (new) · `apps/mobile/src/preview-native-expo.ts`
+(new) · `apps/mobile/src/artifact-preview-expo.ts` (new) ·
+`apps/mobile/src/artifact-preview-store.ts` (new, `planPreviewPrune`) ·
+`apps/mobile/src/artifact-thumbnail.ts` (rewired) · `apps/mobile/App.tsx` ·
+`apps/mobile/src/screens/transcript/TranscriptRow.tsx` · e2e:
+`apps/mobile/e2e/preview-fixtures.ts`, `run.ts`, `flows/36-preview-*` · tests below.
+
+### Failure modes
+
+| Case | What converges |
+|---|---|
+| File > 5 MiB | `failed` before render: band + symbol, no download; tap opens the viewer as before. |
+| QuickLook refuses (icon only, broken file, an HTML it cannot draw) | port → `null` → `failed`: band + symbol at full strength. |
+| Daemon says `unknown` / `evicted` | `"gone"` → no band, dimmed, no chevron, disabled, "no longer available". |
+| Daemon disk failed (`store_failed`) | plain failure (symbol); may read on the next screen. |
+| Link down / no reader yet | `null` → symbol for this screen's life (the driver never retries a failure — its existing rule); a preview made before is served from disk with no dial. |
+| Scrolled away mid-read | the driver aborts the request's own controller; the port returns `null` on an aborted signal; the driver drops a settle from an abandoned request. |
+| Cache cannot keep it (over the cap) | `put` → no uri → `null` → symbol. |
+| Unpair | `forgetComputer` removes `artifacts/<computer>/`, previews included. |
+| Previews over their own bound | `save`'s `planPreviewPrune` drops the least recently made whole previews (JSON + image together), keeping the one just saved. |
+| Build without the native module | `PREVIEW_NATIVE = null`: pages keep their symbol; images and lines still preview. |
+| Rotated / other screen width | the key is the band width (`w358`): another width makes a new preview. |
+| Kept JSON corrupt / foreign | `parseStoredPreview` → `null` → remade; a page JSON whose image is gone → remade. |
+
+### Tests
+
+- `apps/mobile/test/artifact-preview.test.ts` (new, written first, RED: module
+  missing): source per kind, cap, symbols = the gallery's, band height (image
+  clamp, no dims), status (loading / in flight / loaded / sent-photo thumb /
+  failed / gone / aborted = loading / too big = failed), view per state, lines.
+- `apps/mobile/test/artifact-preview-source.test.ts` (new): PDF pipeline order,
+  offline (kept preview, no dial), cached version not re-read, image, markdown
+  head, gone vs `store_failed`, QuickLook refusal, no native, too big, abort,
+  ref without meta / mismatched sha.
+- `apps/mobile/test/artifact-preview-store.test.ts` (new): which previews
+  `planPreviewPrune` deletes (whole pairs, oldest first, stops when the rest
+  fits, never the one just saved, a cap nothing fits still bounds), and the expo
+  store applies it on `save` with its own cap (source pins).
+- `apps/mobile/test/artifact-card-render.test.ts` (new): the component maps it
+  (band testIDs, top-aligned page style, gone disabled + no chevron).
+- `apps/mobile/test/thumbnails.test.ts`: `gone` outcome (failed + gone, never
+  retried); the cap moved to `wantsPreview`.
+- `apps/mobile/test/artifact-cache-store.test.ts`: `uriOf`.
+- `packages/core/test/artifact-card.test.ts`: pages (singular, ignored for other
+  kinds / bad counts).
+- e2e flow `36-preview-cards` (simulator): four cards, waits for "7 pages"
+  (QuickLook + PDFKit really ran), light + dark shots.
+
+## Execution
+
+*— claude-opus-5-5, 2026-11-21*
+
+1. **Evidence first.** `rg` above: the image thumbnail port was never wired, so
+   on `main` every card draws its glyph; `artifactCard` is never given a state.
+2. **RED** — `bun test apps/mobile/test/artifact-preview.test.ts` before the module:
+   `error: Cannot find module '../src/artifact-preview.ts'` (0 pass, 1 fail, 1 error);
+   core pages test on the old `artifactCard`: `8 pass 1 fail`;
+   `uriOf` test on the old store: `TypeError: cache.uriOf is not a function` (18 pass 1 fail).
+3. **GREEN** in plan order: core `pages` → `artifact-preview.ts` → driver `gone` +
+   `wantsPreview` + `ImageRef.artifact` → `artifact-preview-source.ts` → `uriOf` →
+   native module → expo bindings → `artifact-thumbnail.ts` rewired → `App.tsx` →
+   `ArtifactCardRow`/`ArtifactCardBody` → render test → flow 36.
+   `artifact-preview-source.test.ts` was written AFTER its module (not shown red);
+   its non-vacuity is the mutation table below instead.
+4. **Mutations** (each applied, the named file run, reverted):
+   ```
+   previewStatus: too big not decided up front      artifact-preview        20 pass 1 fail
+   previewCardView: gone still tappable             artifact-preview        20 pass 1 fail
+   page squashed into the band (drawnHeight=150)    artifact-preview        20 pass 1 fail
+   driver ignores "gone"                            thumbnails              23 pass 1 fail
+   source never answers "gone"                      artifact-preview-source 12 pass 1 fail
+   source skips the kept-preview lookup (offline)   artifact-preview-source 12 pass 1 fail
+   component draws a page with `cover`              artifact-card-render     4 pass 1 fail
+   core: no singular "1 page"                       core artifact-card       8 pass 1 fail
+   (control) band hidden when dim — equivalent      artifact-card-render     5 pass 0 fail
+   ```
+5. **Drift from Implementation / the mockup:**
+   - **Symbols**: the gallery's existing per-kind table (`gallery-layout.ts`
+     `kindSymbol`) instead of the mockup's second table (pdf `doc.richtext`,
+     markdown `doc.text`, svg `scribble`, chart `chart.bar.xaxis`), so a file
+     looks the same in the transcript and in Artifacts. Pinned by a test.
+   - **No 150 ms fade** on arrival (the spec's "dissolvenza"): the picture
+     simply replaces the symbol in a band of the same size. Left out to keep the
+     component a plain renderer (no Reduce-Motion plumbing); a follow-up if wanted.
+   - **The cap is 5 MiB for every previewable kind** (the approved spec's
+     "proposta"), up from Owner Q6's 1 MiB for images. One constant
+     (`PREVIEW_MAX_BYTES`) if the owner wants 1 MiB back.
+   - **`artifact-cache-expo.ts` → `writeSync`** (the pre-existing async-write bug
+     in Context). Two other ports drop `File.write()`'s promise the same way and
+     are NOT touched here (not on this path): `outbox-fs-expo.ts:51`,
+     `pdf-source.ts:59` — a follow-up `fix`.
+   - The never-wired `createArtifactThumbnailSource` is replaced (same file,
+     `artifact-thumbnail.ts`, so the cache-wiring source pin still holds).
+6. **Simulator** (own device `tentacle-preview-cards`, iPhone 17 Pro iOS 26.5,
+   created for this task, **shut down and deleted** at the end): native build
+   (`expo prebuild` + `run:ios` Release; `TentaclePreview` compiled), then
+   `bun apps/mobile/e2e/run.ts --udid … --only 36-preview-cards --hold`:
+   `✓ 36-preview-cards (iOS 26) pass` / `GATE PASS — 1 passed (70 s)`. The flow
+   waits for "7 pages" on the PDF card, i.e. QuickLook + PDFKit really ran.
+   **QuickLook draws HTML on iOS** (the mockup's open question): the dashboard
+   page renders as its top. Screens (gitignored):
+   `.tentacle/tmp/mobile-file-preview-cards/screens/36-preview-{top,bottom}-{light,dark}.png`
+   (top: PDF + image; bottom: image tail, markdown, HTML).
+   - **Not captured: loading and unavailable.** Loading lasts less than one
+     capturable frame on the harness's loopback link (a `simctl` screenshot loop
+     while opening a session with a 4.6 MB PDF showed the preview already made);
+     unavailable needs a daemon that LOST the bytes (`evicted` / `unknown`), and
+     the e2e `serve` keeps artifacts in memory only (no `<uid>.artifacts/` on
+     disk), so a restart drops the cards with the bytes. Both states are pinned
+     by `artifact-preview.test.ts` (view-model) and `artifact-card-render.test.ts`
+     (drawn: band + dimmed symbol at height 150; gone = no band, no chevron,
+     disabled, "no longer available"). To see them on a device: a memory-budget
+     eviction (`SessionHost` `artifactBytes`) or a throttled link.
+7. **Gate** — `bun run check` (typecheck → lint → test), exit 0:
+   ```
+   Checked 2170 files in 631ms. No fixes applied.
+    15985 pass
+    5 skip
+    0 fail
+   Ran 15990 tests across 1136 files. [516.24s]
+   ```
+   5 skips (AGENTS §6 names three opt-in groups; a group may hold several tests).
+   None of this task's test files contains a skip; not re-counted on `main`.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-22*
+
+Review round 1's single finding (MEDIUM): previews were an uncapped, never-evicted
+store, and the doc's Precondition 2 claimed the opposite.
+
+1. **RED** — `bun test apps/mobile/test/artifact-preview-store.test.ts` before the
+   module: `error: Cannot find module '../src/artifact-preview-store.ts'`
+   (0 pass, 1 fail, 1 error). After the module (and the one rule a first pass got
+   wrong — a non-preview file counted toward the cap, caught by its own test and
+   fixed): 11 pass / 0 fail.
+2. **Bound, as a pure plan** (the §7 split, and the `artifact-cache.ts` pattern):
+   `apps/mobile/src/artifact-preview-store.ts` (new) —
+   `planPreviewPrune(files, cap = PREVIEW_STORE_BYTES, keep?)` deletes WHOLE
+   previews (`<sha>-w<W>.json` + its `.jpg`), least recently made first, stops as
+   soon as the rest fits, never `keep`, and still bounds a cap nothing fits.
+   `PREVIEW_STORE_BYTES` = a quarter of `ARTIFACT_CACHE_BYTES` (50 MB).
+   Why not "evict with the version": the preview's source is the artifact CACHE's
+   entry, and the plan may evict that at any time — a preview that went with it
+   would be remade by the next scroll, i.e. the expensive read again. So previews
+   keep their own budget, larger than one version and smaller than the cache.
+3. **Applied at the one writer** (`artifact-preview-expo.ts`): `save` prunes right
+   after its `writeSync`, over the directory's own listing, excluding the
+   `<sha>-<key>` it just saved (two files can share a modification time). The
+   prune is best-effort: a listing or a `delete` that throws does not fail the
+   card — the preview IS saved, the bound is retried on the next write.
+   The misleading "(Notes/debt)" in its header is replaced by the real rule.
+4. **Doc corrected**: Precondition 2 no longer claims `put` is the sole writer
+   (it names the exception and its bound), Design §6, the Failure-modes row, the
+   Files list and the Tests list say so, and the debt section below exists.
+5. **Mutations** (each applied, the file run, reverted; `git status` clean after):
+   ```
+   planPreviewPrune: prune one file of the pair   artifact-preview-store   6 pass 5 fail
+   planPreviewPrune: ignore `keep`                artifact-preview-store  10 pass 1 fail
+   planPreviewPrune: never prune (early return)   artifact-preview-store   4 pass 7 fail
+   planPreviewPrune: default cap = ∞              artifact-preview-store  10 pass 1 fail
+   planPreviewPrune: count a non-preview file     artifact-preview-store  10 pass 1 fail
+   expo save: prune never called                  artifact-preview-store  10 pass 1 fail
+   expo save: drop the just-saved exclusion       artifact-preview-store  10 pass 1 fail
+   ```
+6. **Touched tests** — `bun test artifact-preview-store artifact-preview-source
+   artifact-preview artifact-cache-wiring artifact-card-render thumbnails
+   artifact-cache-store` (7 files) plus `bundle-node-free`, `node-builtins-guard`,
+   `band-screens`, `transcript-parity`, `pairing-guards`: 166 pass / 0 fail
+   (12 files). `bunx biome check` on the three changed files: clean;
+   `tsc -p apps/mobile` exit 0.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-21* (fresh context; **same model as the executor** — shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, docs/debt-level; no correctness defect found).
+
+1. **MEDIUM — previews are an uncapped, never-evicted store, and the doc says the opposite.**
+   `artifact-preview-expo.ts:39-44` writes `previews/<sha>-w<W>.{json,jpg}` outside
+   `put`; `artifact-cache-store.ts:153` lists files only, so the cap never sees them.
+   Precondition 2 ("Every byte the phone keeps goes through … `put`") is FALSE for
+   this feature, and the code comment's "(Notes/debt)" (`artifact-preview-expo.ts:9`)
+   points at a section that does not exist. Scenario: every page card scrolled past
+   leaves a ~1k×1.6k px JPEG (another set per rotation width) that survives the
+   cache evicting its source and stays until unpair — monotonic growth. Fix: bound
+   it (evict with the version / an LRU) or record the debt honestly (doc Notes + `TODO.md`).
+
+**Gate:** touched tests 91 pass / 0 fail (6 files); `artifact-cache-wiring` +
+`bundle-node-free` 10 pass; `bun run lint` clean (2170 files); `bun run typecheck`
+exit 0. Full `bun test` not re-run (Execution's 15985/5 skip taken as reported).
+
+**Mutations (applied, run, reverted; `git status` clean after):** `store_failed`
+treated as gone → source suite 12 pass 1 fail; both post-await `signal.aborted`
+checks disabled → 12 pass 1 fail. Both caught.
+
+**Premises:** cache `put` sole writer — FALSE for previews (finding 1); typed
+`ArtifactUnavailable` reasons mapped as planned — TRUE (`isGoneError`); `previews/`
+dir not mistaken for a version — TRUE (`list` returns files only, expo `:39-40`);
+band width = screen − 2·inset matches `Shell`'s `styles.row` padding — TRUE.
+
+**Attacks tried:** (a) §7 pure-logic split — decisions are in `artifact-preview.ts`,
+the component only maps; holds. (b) protocol/persistence invariants — untouched
+(core option display-only); holds. (c) abort/gone/store_failed mapping — holds,
+pinned by tests. (d) stale absolute `file:` uri in kept JSON after an app update —
+the existence check remakes it; holds. (e) image picture uri is the cache's file,
+which a later eviction may delete while the thumb stays loaded (blank band for the
+screen's life) — pre-existing D9 shape, rare; noted, not graded.
+
+**Executor behaviour:** honest about what was not shown red
+(`artifact-preview-source.test.ts`) and what was not captured on the simulator;
+mutation table credible (two extra mutations reproduced the same pattern).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-21* (fresh-context reviewer, same model family as round 1's executor; this fix by deepseek)
+
+**Verdict: PASS.** Finding 1 is resolved: `planPreviewPrune` (`artifact-preview-store.ts`)
+bounds `previews/` to `PREVIEW_STORE_BYTES` (50 MB), deleting whole json+jpg pairs oldest
+first, never the one just saved; `save` applies it after the write (`artifact-preview-expo.ts:46-68`,
+best-effort, a failed prune doesn't fail the card). Precondition 2 now states the exception and
+a `## Notes / debt` section exists.
+
+- **Mutations (applied, run, reverted; `git status` clean):** ignore `keep` → 10 pass 1 fail;
+  never prune (loop over an empty slice) → 4 pass 7 fail. Both caught.
+- **Gate:** `artifact-preview-store` + `-source` + `bundle-node-free` + `artifact-cache-wiring`:
+  34 pass / 0 fail; `bun run lint` clean (2172 files); `bun run typecheck` exit 0.
+- **Regression attacks (nothing at MEDIUM+):** the order is by mtime, so a page you keep viewing
+  is still pruned by its age and then remade (cost only); a prune can delete the JPEG of a card
+  that's still on screen (RN keeps its decoded copy; worst case the preview is remade); the wiring
+  test only checks the source text, not behaviour (acceptable for an expo binding).
+
+## Notes / debt
+
+*— claude-opus-5-5, 2026-11-22*
+
+- **A preview is bounded on its own budget, not by the artifact cache's plan.**
+  `PREVIEW_STORE_BYTES` (50 MB) can hold far more cards than a screen shows; the
+  prune is LRU by the file's modification time, so a page scrolled past a month
+  ago goes first. Not linked to the version's eviction, on purpose (see Fix round
+  1, point 2): a preview outliving its source is a saved read, not a leak.
+- **The prune runs only from `save`.** A directory that is already over its bound
+  with no further save (an upgrade from a build without the bound) shrinks on the
+  next preview made, not at launch. Cheap to add at startup if it matters.
+- **No 150 ms fade** on a preview's arrival (Execution's drift item): a follow-up
+  if the owner wants it; it needs Reduce-Motion plumbing.
+- **Two other ports drop an async `write()` promise** the same way
+  `artifact-cache-expo.ts` did before this task: `outbox-fs-expo.ts:51` and
+  `pdf-source.ts:59`. Not on this path; a separate `fix`.

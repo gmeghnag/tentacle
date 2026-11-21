@@ -22,5 +22,10 @@ appId: so.tentacle.app
     visible:
       id: "computer-state-${output.computerId}-revoked"
     timeout: 30000
+# docs/feat/mobile-projects.md §6: a revoked project row has no inline button;
+# its tap (it is not ok, and not merely stopped) opens its sheet, whose
+# "Pair again" is the recovery.
+- tapOn:
+    id: "computer-${output.computerId}"
 - assertVisible:
-    id: "computer-pair-again-${output.computerId}"
+    id: "computer-menu-pair-again-${output.computerId}"

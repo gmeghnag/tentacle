@@ -13,6 +13,12 @@ export type HookName =
   | "add-delta"
   | "stop-serve"
   | "start-serve"
+  /**
+   * Flow 37 (docs/feat/mobile-projects.md): a SECOND project's `serve` (another
+   * cwd, the same config dir), started and stopped on its own.
+   */
+  | "project-b-start"
+  | "project-b-stop"
   | "laptop-prompt"
   /** Flow 17: one laptop turn on a SIDE `serve` while the phone's is down. */
   | "laptop-offline-turn"
@@ -108,6 +114,8 @@ export interface HookQuery {
   readonly text?: string;
   /** `pair-start`'s window length (flow 07 needs a short one). */
   readonly ttlMs?: string;
+  /** `pair-start`: `b` pairs flow 37's second project (its own `serve`). */
+  readonly project?: string;
   /** `pair-revoke`'s device name (what `tentacle devices revoke` matches). */
   readonly name?: string;
   /** `seal-push`: which plaintext to seal (`ask` by default). */
@@ -145,6 +153,10 @@ export interface HookActions {
   readonly addDelta: () => Promise<string>;
   readonly stopServe: () => Promise<void>;
   readonly startServe: () => Promise<void>;
+  /** Flow 37: start (or restart) project B's `serve`; resolves once it listens. */
+  readonly projectBStart: () => Promise<void>;
+  /** Flow 37: stop project B's `serve` (A's keeps running). */
+  readonly projectBStop: () => Promise<void>;
   readonly laptopOfflineTurn: (sessionId: string, prompt: string) => Promise<void>;
   readonly laptopPrompt: (
     sessionId: string,
@@ -195,7 +207,11 @@ export interface HookActions {
   /** The LAPTOP detaches (flow 15: the writer goes away, its row stays returned). */
   readonly laptopDetach: (sessionId: string) => Promise<void>;
   /** Open a pairing window (11b.1's `_pair` subflow): the payload the flow pastes. */
-  readonly pairStart: (options: { readonly ttlMs?: number }) => Promise<{
+  readonly pairStart: (options: {
+    readonly ttlMs?: number;
+    /** Flow 37: pair project B's `serve` instead of the harness's own. */
+    readonly project?: "b";
+  }) => Promise<{
     readonly payload: string;
     readonly computerId: string;
     /**
@@ -309,6 +325,8 @@ export function hookFor(path: string): HookName | undefined {
     case "add-delta":
     case "stop-serve":
     case "start-serve":
+    case "project-b-start":
+    case "project-b-stop":
     case "laptop-prompt":
     case "laptop-offline-turn":
     case "laptop-answer":
@@ -372,6 +390,7 @@ const HOOK_QUERY_KEYS = [
   "file",
   "text",
   "ttlMs",
+  "project",
   "name",
   "kind",
   "forged",
@@ -444,6 +463,12 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
             return Response.json({ ok: true, hook });
           case "start-serve":
             await deps.actions.startServe();
+            return Response.json({ ok: true, hook });
+          case "project-b-start":
+            await deps.actions.projectBStart();
+            return Response.json({ ok: true, hook });
+          case "project-b-stop":
+            await deps.actions.projectBStop();
             return Response.json({ ok: true, hook });
           case "laptop-prompt": {
             const session = required(query.session, "session");
@@ -520,7 +545,10 @@ export function startHooks(deps: { readonly actions: HookActions }): Hooks {
           }
           case "pair-start": {
             const ttlMs = query.ttlMs === undefined ? undefined : Number(query.ttlMs);
-            const started = await deps.actions.pairStart(ttlMs === undefined ? {} : { ttlMs });
+            const started = await deps.actions.pairStart({
+              ...(ttlMs === undefined ? {} : { ttlMs }),
+              ...(query.project === "b" ? { project: "b" as const } : {}),
+            });
             return Response.json({ ok: true, hook, ...started });
           }
           case "pair-confirm": {

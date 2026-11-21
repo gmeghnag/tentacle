@@ -24,7 +24,7 @@ function body(from: string): string {
 
 describe("a successful pairing forgets what the app remembered about that computer", () => {
   test("`onDone` forgets the link and the diagnosis BEFORE reloading (mutation: drop the call → red)", () => {
-    const onDone = body("onDone={(computerId) => {");
+    const onDone = body("onDone={(computerId, superseded) => {");
     // The id comes from the OUTCOME, not from the `again` route param: a fresh
     // pairing has no route param, and it needs forgetting all the same.
     expect(onDone).toContain("withForgottenRecord(MEMORY, computerId");

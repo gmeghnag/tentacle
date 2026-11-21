@@ -33,6 +33,10 @@ export interface ComputerSource {
   add(computer: PairedComputer, deviceKey: string): Promise<void>;
   /** Forget it on THIS phone (Owner Q5: local only; the computer keeps its entry). */
   remove(id: string): Promise<void>;
+  /** Name a legacy record's project (docs/feat/mobile-projects.md §3, after a dial). */
+  setProject: ComputerStore["setProject"];
+  /** Refresh a record's addresses (docs/feat/mobile-projects.md §6, F2). */
+  setAddresses: ComputerStore["setAddresses"];
 }
 
 /** The source over the Keychain store: the app has no other kind. */
@@ -42,5 +46,7 @@ export function computerSource(store: ComputerStore): ComputerSource {
     get: (id) => store.get(id),
     add: (computer, deviceKey) => store.add(computer, deviceKey),
     remove: (id) => store.remove(id),
+    setProject: (id, project) => store.setProject(id, project),
+    setAddresses: (id, addresses) => store.setAddresses(id, addresses),
   };
 }

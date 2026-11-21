@@ -1,0 +1,129 @@
+appId: so.tentacle.app
+---
+# 37 (docs/feat/mobile-projects.md §6, decision 20): two projects of ONE computer,
+# each its own row (`computer-<computer>.<projectHash>`), under one section.
+#
+#   A = the harness's own `serve` (the run dir), paired by `_pair`;
+#   B = a second `serve` in `<run>/project-b`, same config dir, paired from the
+#       section's "Pair a project on this Mac".
+#
+# Then, on daemon truth: stop B → B says "Stopped" while A stays online; start B
+# → B comes back with NO tap (the 15 s re-probe); revoke A's device → A says
+# "revoked", B is still online. Each step is shot light + dark (A1–A7).
+- runFlow: _pair.yaml
+- runScript:
+    file: "37-remember-a.js"
+- runScript:
+    file: "37-project-b.js"
+    env:
+      ACTION: "start"
+- runScript:
+    file: "37-pair-start-b.js"
+# The section's own "Pair a project on this Mac" → its instructions → Scan code.
+- tapOn:
+    id: "computer-pair-project-${output.machine}"
+- assertVisible:
+    id: "computer-pair-hint-${output.machine}"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "37-a2-pair-hint"
+- tapOn:
+    id: "computer-pair-hint-scan"
+- extendedWaitUntil:
+    visible:
+      id: "pair-paste-input"
+    timeout: 20000
+- tapOn:
+    id: "pair-paste-input"
+- inputText: ${output.payload}
+- tapOn:
+    id: "pair-paste-submit"
+- assertVisible:
+    id: "pair-review"
+- tapOn:
+    id: "pair-confirm"
+- runScript:
+    file: "pair-confirm.js"
+- assertVisible:
+    id: "pair-sas-${output.sas}"
+- runScript:
+    file: "pair-answer.js"
+- extendedWaitUntil:
+    visible:
+      id: "computer-${output.rowB}"
+    timeout: 30000
+# Both rows answer: one section, two projects, each with its own state word.
+- extendedWaitUntil:
+    visible:
+      id: "computer-state-${output.rowB}-(new|idle)"
+    timeout: 30000
+- assertVisible:
+    id: "computer-state-${output.rowA}-(new|idle)"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "37-a1-two-projects"
+# Review (b) F3: the second project has its OWN "…", and it opens ITS sheet.
+- tapOn:
+    id: "computer-menu-${output.rowB}"
+- assertVisible:
+    id: "computer-menu-sheet-${output.rowB}"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "37-a4-project-sheet"
+- tapOn:
+    id: "computer-menu-cancel-${output.rowB}"
+# Stop B: its row says Stopped (a sibling answered), A is untouched.
+- runScript:
+    file: "37-project-b.js"
+    env:
+      ACTION: "stop"
+# With every row ok the screen schedules no re-probe (only a stopped/unreachable
+# row does, Owner Q12), so the stop is seen on the next look: the app's return to
+# the foreground (Q12's other trigger). `stopApp: false` = a resume, not a cold
+# start, so the lock (cold start only) stays out of it.
+- pressKey: home
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: "computer-state-${output.rowB}-stopped"
+    timeout: 60000
+- assertVisible:
+    id: "computer-state-${output.rowA}-(new|idle)"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "37-a3-stopped"
+# Start B again: NO tap — the 15 s re-probe brings it back on its own.
+- runScript:
+    file: "37-project-b.js"
+    env:
+      ACTION: "start"
+- extendedWaitUntil:
+    visible:
+      id: "computer-state-${output.rowB}-(new|idle)"
+    timeout: 45000
+# Revoke A's device only. The relaunch dials both; A is refused, B is not.
+- runScript:
+    file: "37-revoke-a.js"
+- launchApp
+- runFlow: _unlock.yaml
+- extendedWaitUntil:
+    visible:
+      id: "computer-state-${output.rowA}-revoked"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "computer-state-${output.rowB}-(new|idle)"
+    timeout: 30000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "37-a5-revoked-one"
+- runScript:
+    file: "37-project-b.js"
+    env:
+      ACTION: "stop"
