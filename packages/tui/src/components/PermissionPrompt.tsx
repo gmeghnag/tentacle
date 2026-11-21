@@ -1,9 +1,8 @@
 import type { PermissionRequest } from "@tentacle/core";
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import { truncateCells as truncate } from "../cells.ts";
 import { MENU_FOOTER, MENU_FOOTER_REPLY, type ReplyView } from "../permission-reply.ts";
-import { permissionCwdLine, permissionDetailLines, permissionShowsCwd } from "../permission-ui.ts";
+import { permissionCwdLine, permissionShowsCwd, permissionView } from "../permission-ui.ts";
 import { dimProps, palette } from "../theme.ts";
 
 /**
@@ -54,6 +53,9 @@ export function PermissionPrompt({
   const dim = dimProps();
   const titlePrefix = `╭─ ${req.title} `;
   const dashes = Math.max(0, columns - titlePrefix.length - 1);
+  // The same view the layout counts rows from (`app-layout.ts`). No sentence
+  // yet: the ask's own call id is not on the request (Design §5 ⚠, `askedFor`).
+  const view = permissionView(req, null, columns);
 
   return (
     <Box flexDirection="column">
@@ -62,12 +64,10 @@ export function PermissionPrompt({
         {"─".repeat(dashes)}
       </Text>
       {agentLine !== undefined ? <Text {...dim}> {agentLine}</Text> : null}
-      {permissionDetailLines(req).map((line, i) => (
-        <Text key={i} {...dim}>
-          {" "}
-          {truncate(line, Math.max(10, columns - 3))}
-        </Text>
+      {view.detailRows.map((line, i) => (
+        <Text key={i}> {line}</Text>
       ))}
+      {view.intentRow !== null ? <Text {...dim}> {view.intentRow}</Text> : null}
       {permissionShowsCwd(req) ? <Text {...dim}> {permissionCwdLine(cwd, columns)}</Text> : null}
       {reply ? (
         <>

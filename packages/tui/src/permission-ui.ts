@@ -29,7 +29,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { truncateCells } from "./cells.ts";
+import { cellWidth, graphemes, truncateCells } from "./cells.ts";
 import { MENU, type OrphanCause, type ReplyMode, draftOf } from "./permission-reply.ts";
 
 /** The sub-agent a request comes from. */
@@ -133,8 +133,68 @@ export function permissionDetailLines(req: PermissionRequest): string[] {
   if (lines.length <= MAX_DETAIL_ROWS) {
     return lines;
   }
+  return capRows(lines);
+}
+
+/** At most `MAX_DETAIL_ROWS`; when cut, the last row says how many were left out. */
+function capRows(lines: readonly string[]): string[] {
+  if (lines.length <= MAX_DETAIL_ROWS) {
+    return [...lines];
+  }
   const kept = lines.slice(0, MAX_DETAIL_ROWS - 1);
   return [...kept, `… ${lines.length - kept.length} more lines`];
+}
+
+/** `line` cut into consecutive pieces of at most `width` cells (`""` stays one row). */
+function wrapCells(line: string, width: number): string[] {
+  const rows: string[] = [];
+  let row = "";
+  let used = 0;
+  for (const g of graphemes(line)) {
+    const w = cellWidth(g);
+    if (used + w > width && row !== "") {
+      rows.push(row);
+      row = "";
+      used = 0;
+    }
+    row += g;
+    used += w;
+  }
+  rows.push(row);
+  return rows;
+}
+
+/** What the dialog draws under its title: the subject rows and the model's sentence. */
+export interface PermissionView {
+  /** Each row already fits `columns − 3` cells (the component draws them as they are). */
+  readonly detailRows: string[];
+  /** `the model says: “…”`, one row; `null` when there is no sentence to show. */
+  readonly intentRow: string | null;
+}
+
+/**
+ * The ONE decision both the layout (row count) and `PermissionPrompt` (paint)
+ * read (docs/feat/shell-intent-line.md Design §5, Q3). A `shell` ask shows the
+ * WHOLE command: each of its lines wrapped to the width, capped at
+ * `MAX_DETAIL_ROWS` with a `… N more lines` row — never a silent cut (the row
+ * may show only the model's sentence under `beta.compactShell`; the ask must
+ * show what really runs). Other asks: today's rows, each cut to one row.
+ * `intent`: the asking call's own sentence (display only, never decided on).
+ */
+export function permissionView(
+  req: PermissionRequest,
+  intent: string | null,
+  columns: number,
+): PermissionView {
+  const width = Math.max(10, columns - 3);
+  const detailRows =
+    req.tool === "shell" && (req.kind === undefined || req.kind === "tool")
+      ? capRows(
+          req.detail ? req.detail.split("\n").flatMap((line) => wrapCells(line, width)) : ["—"],
+        )
+      : permissionDetailLines(req).map((line) => truncateCells(line, width));
+  const intentRow = intent === null ? null : truncateCells(`the model says: “${intent}”`, width);
+  return { detailRows, intentRow };
 }
 
 /** The trust menu: 4 choices when the laptop stores decisions, else this session only. */

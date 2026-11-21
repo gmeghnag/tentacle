@@ -121,6 +121,8 @@ export interface StepProps {
   readonly reduceMotion: boolean;
   readonly onToggle: () => void;
   readonly onShowAll: () => void;
+  /** Beta `Compact shell rows` (docs/feat/shell-intent-line.md §7): absent → off. */
+  readonly compactShell?: boolean;
 }
 
 /** A step with no neighbour on its thread: just the node. */
@@ -581,6 +583,7 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
     cell?.kind === "step" ? cell.thought : null,
     step?.full ?? false,
     cell?.kind === "step" && cell.thoughtFirst,
+    step?.compactShell === true,
   );
   const diff = tool.diff === undefined ? null : diffView(tool.diff);
   const progress = subAgentLine(tool.sub);
@@ -644,6 +647,8 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
         reduceMotion={step?.reduceMotion ?? false}
         name={view.name}
         subtitle={view.subtitle}
+        subline={view.subline}
+        shimmer={view.shimmer}
         trailing={view.trailing}
         trailingRed={view.trailingRed}
         {...(view.live && tool.at !== undefined ? { liveFrom: tool.at } : {})}
