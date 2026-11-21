@@ -333,3 +333,30 @@ assertions above go red (`attachment-prompt` 3, `prompt-documents` 1,
 pass, 2 opt-in skips), `packages/tui/test` (2877 pass), core/agent new tests,
 `protocol/test/json-schema` (no drift). `biome check` on the 38 changed files:
 clean. Full gate (typecheck, full suite, lint) left to the orchestrator.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-21* (fresh context; same model as the Execution-resume pass, different model from the DeepSeek executor)
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM).
+
+**Gate (touched scope):** 12 touched test files + `packages/protocol/test`: 873 pass / 0 fail. `bun run lint`: clean (2169 files). `bun run typecheck`: clean. Full `bun test` not re-run here (orchestrator's merge gate).
+
+**Findings**
+
+1. **MEDIUM — an unrenderable `dateStamp.at` passes the schema and poisons the session.**
+   `packages/protocol/src/session.ts:132` bounds `at` only as `int().nonnegative()`; any value > 8.64e15 (JS Date max) is kept, and `partsOf` (`packages/core/src/current-date.ts:72`) throws `RangeError: date value is not finite`. Thrown from BOTH `nextDateStamp` (`current-date.ts:125`, every `prompt()`) and `renderForModel` (`packages/agent/src/context-awareness.ts:77`, every model request) — so one such entry makes every later turn of that session fail, permanently. The fail-soft `.catch(undefined)` the doc relies on never fires because the value is schema-valid. Source: pod-supplied history (AGENTS §7 "a pod is not trusted": a pod's `session/log` entries are validated and persisted on the laptop, then fed back via `--resume`/`open{messages}`), or a corrupted log line. Repro (`.tentacle/tmp/prompt-current-date/big.ts`): `at = 8.64e15+1` → schema keeps it; `dateStampText` and `nextDateStamp` both throw. Fix: `.max(8_640_000_000_000_000)` on `at` (so `.catch` drops it) and/or make `partsOf` fail-soft; add the boundary test.
+
+**Premises:** the load-bearing one holds — the stamp is data on the message, rendered only into the model's copy (`context-awareness.ts:61-80`), `content` stays clean, bytes stable across requests (agent test pins it). Both send sites (`prompt`, `startSuccessor`) stamp; a fired wake uses its fire instant and `job.prompt` is untouched (daemon test). Zone travels `initialize` → `Connection.timeZone` → `Attachment.timeZone` → sticky `clientZone`.
+
+**Attacks tried**
+- Out-of-range `at` (above): FOUND finding 1.
+- Mutation: drop the day-change clause in `nextDateStamp` → `current-date.test.ts` 2 fail (midnight in zone, clock-backwards); reverted, `git status` clean.
+- Prompt cache: stamp prepended only to the new user message; earlier messages re-render byte-identical — holds.
+- Cron replay: stored recurring prompt never stamped; second fire carries a new time — holds (daemon test).
+- Garbage / absent client zone → `zoneOrDefault` host fallback, no `InvalidParams` — holds.
+- Protocol: both wire fields additive optional; no `protocol.d/` note needed (AGENTS §7 forward-compat) — holds.
+
+**Notes (not blocking):** `daemon/date-stamp.test.ts:187` ("client zone beats host zone") is vacuous on a host whose zone is `America/New_York`; steer-drained messages in a long turn are never stamped (out of the owner's scope).
+
+**Executor behaviour:** DeepSeek's production edits were coherent and well-commented; it under-estimated the test blast radius (recorded honestly in Execution) and was stopped mid-adaptation; the resume adapted tests only. The missed upper bound is the classic "fail-soft on paper, not in fact" gap.
