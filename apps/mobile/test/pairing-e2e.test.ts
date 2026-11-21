@@ -532,6 +532,40 @@ describe("pairing over /e2e, as the phone does it", () => {
     expect(await pairing.done).toBe(0);
   }, 30_000);
 
+  test("pairing project P KEEPS a legacy record of the same computer that discover named project Q (review (b) F2; mutation: drop the cwd guard → red)", async () => {
+    const dir = computerConfigDir();
+    const { url } = serve(dir);
+    const identity = readIdentity(dir);
+    if (!identity.ok) {
+      throw new Error(identity.reason);
+    }
+    const computerId = deviceIdOf(identity.identity.publicKey);
+    const memory = memoryKV();
+    const store = createComputerStore({ kv: memory.kv, keychainAccessible: 1 });
+    // Same computer, but its key is adopted on ANOTHER project (Q): removing it
+    // would silently destroy Q's only record and key.
+    const otherCwd = `${PROJECT_DIR}-q`;
+    await store.add(
+      {
+        id: computerId,
+        name: "Old",
+        computerKey: "k",
+        addresses: [url],
+        deviceName: "MacBook",
+        pairedAt: 1,
+        project: { key: projectKey(otherCwd), cwd: otherCwd, label: "q" },
+      },
+      "a",
+    );
+    const pairing = await startPair({ dir, address: url });
+    const { ok } = await pairThroughFlow({ state: reviewed(pairing.text), store });
+    expect(ok).toBe(true);
+    const ids = (await store.list()).map((entry) => entry.id);
+    expect(ids).toContain(computerId);
+    expect(ids).toContain(recordIdOf(identity.identity.publicKey));
+    expect(await pairing.done).toBe(0);
+  }, 30_000);
+
   test("F17: a code whose p= names ANOTHER project → `project-mismatch`, NOTHING stored (mutation: save before the check → red)", async () => {
     const dir = computerConfigDir();
     const { url } = serve(dir);

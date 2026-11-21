@@ -55,7 +55,7 @@ export interface ComputersScreenProps {
   readonly onPairHintClosed: () => void;
   /** The instructions' "Scan code". */
   readonly onScan: () => void;
-  /** Open a project's sheet (long-press, or the heading's "…" for its first row). */
+  /** Open a project's sheet (its row's "…", or a long-press on the row). */
   readonly onMenu: (row: ProjectRow) => void;
   readonly menu?: ProjectRow;
   readonly onMenuClosed: () => void;
@@ -162,7 +162,6 @@ function ComputerSection({
   const tone = section.state;
   const statusColor =
     tone === "online" ? palette.green : tone === "attention" ? palette.orange : palette.sec;
-  const first = section.rows[0];
   return (
     <View style={styles.section} testID={`computer-section-${section.computerId}`}>
       <View style={styles.computerHeader}>
@@ -187,18 +186,6 @@ function ComputerSection({
             </Text>
           </View>
         </View>
-        {first === undefined ? null : (
-          <Pressable
-            testID={`computer-menu-${first.id}`}
-            accessibilityRole="button"
-            accessibilityLabel={`More for ${first.label}`}
-            onPress={() => onMenu(first)}
-            hitSlop={6}
-            style={styles.more}
-          >
-            <Icon name="ellipsis" color={palette.accent} size={22} />
-          </Pressable>
-        )}
       </View>
       <BandSection
         palette={palette}
@@ -214,6 +201,19 @@ function ComputerSection({
             iconDashed={!row.ok}
             dimmed={!row.ok}
             title={row.label}
+            trailing={
+              <Pressable
+                testID={`computer-menu-${row.id}`}
+                accessibilityRole="button"
+                accessibilityLabel={`More for ${row.label}`}
+                onPress={() => onMenu(row)}
+                hitSlop={6}
+                style={styles.more}
+              >
+                <Icon name="ellipsis" color={palette.accent} size={20} />
+              </Pressable>
+            }
+            trailingKind="control"
             chevron
             onPress={() => onOpen(row)}
             onLongPress={() => onMenu(row)}

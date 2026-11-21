@@ -900,7 +900,9 @@ repo typecheck / repo lint: **not run here**, by the round's token budget.
 
 ### (b) feat/mobile-projects-app
 
-*— claude-opus-5-5, 2026-11-21*
+*— deepseek, 2026-11-21* (corrected in fix round 1, review (b) F4: this line read
+`claude-opus-5-5`, but the orchestrator labels both commits that carry this work
+`(deepseek)` — `0b65e100`, `f1df3dde`. The exact model id was not recorded.)
 
 **Status: PARTIAL.** The app half is built and tested: the pure modules, the
 store, the pairing, the screen and the wiring, with 12 mutations, all killed.
@@ -1087,6 +1089,105 @@ pin: the per-project id turned it red, as intended, before it was replaced.
 3. The simulator screenshots A1–A7, light and dark, into
    `.tentacle/tmp/mobile-projects-app/screens/`.
 4. `bun run e2e:mobile`.
+
+### Fix round 1 (review (b))
+
+*— claude-opus-5-5, 2026-11-21*
+
+**F2 (MEDIUM) — FIXED (test only).** New real-daemon test in
+`apps/mobile/test/pairing-e2e.test.ts`: "pairing project P KEEPS a legacy record
+of the same computer that discover named project Q". The legacy record has the
+computer's id and `project.cwd = <P>-q`. After pairing P, both ids are listed.
+The guard was already right, so the red is the mutation (below).
+
+**F3 (MEDIUM) — FIXED.** `apps/mobile/src/screens/ComputersScreen.tsx`: the
+section header's single "…" (`rows[0]` only) is gone. Each project row now has
+its own "…" as a `trailing` control (`trailingKind="control"`, so it is its own
+VoiceOver element), with `computer-menu-<row.id>`, "More for <row.label>", and
+`onMenu(row)`. Long-press is kept. Pin: `band-screens.test.ts` "every project row
+has its OWN …". It was red on the old screen (`not.toContain("computer-menu-${first.id}")`)
+and is green now. Flow 37 also taps project B's "…" on the simulator.
+
+**F1 (HIGH) — PARTIAL.** Delivered: flow 37 (below), green on the iOS 26
+simulator, and the flows this round touched:
+
+```
+run 1 (--only 37-projects,15-revoked,16-remove-computer):
+37-projects FAIL 141 s · 15-revoked PASS 53 s · 16-remove-computer PASS 55 s
+  37 failed at "computer-state-<B>-stopped is visible" (B still `new` after 60 s)
+run 2 (--only 37-projects, after the flow change below): 37-projects PASS 144 s
+GATE PASS — 1 passed, 0 failed
+```
+
+Shots `37-a1-two-projects`, `37-a2-pair-hint`, `37-a3-stopped`,
+`37-a4-project-sheet` and `37-a5-revoked-one`, each light and dark, are in
+`.tentacle/tmp/e2e-mobile/1795228927069/ios26/37-projects/2026-11-21_034747/37-projects/takeScreenshot/`.
+The sandbox refused a copy into `.tentacle/tmp/mobile-projects-app/screens/`.
+`37-a3-stopped-light` was checked by eye: one section, "1 of 2 projects
+running", B "Stopped" with a dashed folder, A "Idle", and a "…" on each row.
+
+**Open, for the owner (behaviour, not changed here):** run 1 showed that the
+route probes only on focus, on a tap, on foreground, and on the 15 s timer, and
+the timer runs only while a row is ALREADY stopped or unreachable
+(`reprobeDelay`, `App.tsx` ~1025). A `serve` that stops while the screen sits idle
+with every row ok is therefore seen only on the next foreground or navigation.
+The plan's failure-mode F1 says "its socket drops → Stopped", but the screen holds
+no socket per row. Flow 37 uses Q12's other trigger, a foreground (`pressKey:
+home` + `launchApp: stopApp: false`). If the row should flip on its own, that is
+a design change (poll while ok too, or hold a link per row), and it was not made
+outside the approved Implementation.
+
+**Not done:** the legacy-migration E2E flow. It needs a phone Keychain that
+holds a pre-project record, which the harness can only produce by installing an
+older build first. Its behaviour stays covered by the real-daemon unit tests:
+"retires the legacy record", "first relay handshake adopts it", and F2's new
+test. The full `bun run e2e:mobile` (all flows) was not run, only the three flows
+this round touched.
+
+Found while wiring it: the branch
+broke the WHOLE existing E2E suite. `e2e/pairing.ts` `start()` returned the bare
+computer id as `computerId`, but rows are now filed under
+`projectRecordId(computer, projectKey(cwd))`. So every flow's
+`computer-${output.computerId}` (about 60 uses, starting with `_pair.yaml`'s last
+assert) named no row. Fixed:
+
+- `start()` returns the row id when a project is paired. The hook test
+  `e2e-pairing.test.ts` now expects `projectRecordId(…)`: red (`Expected
+  "321284bf5f0c1019.4d850836811828bc"`, `Received "321284bf5f0c1019"`), then
+  green.
+- Flow 15 asserted the removed inline `computer-pair-again-<id>` (the only
+  testID the new screen dropped, by a main-vs-branch diff). In §6 a revoked row's
+  tap opens its sheet, so the flow now taps the row and asserts
+  `computer-menu-pair-again-<id>`.
+- Harness for two projects: `startServe(port, cwd = runDir)`; the
+  `project-b-start` / `project-b-stop` hooks (B runs in `<run>/project-b`, same
+  config dir, and keeps its port across restarts); `pair-start?project=b`
+  (`PairWindowOptions.projectDir/address`). The flow-30 source pin in
+  `e2e-escape-probes.test.ts` was updated to the `cwd` parameter (the default is
+  still the run dir).
+- New flow `37-projects.yaml` plus 4 scripts (`37-*.js`), registered in `FLOWS`
+  after 36. Pair A, then pair B from the section's "Pair a project on this Mac".
+  Both rows show `new|idle`. B's own "…" opens B's sheet. Stop B → B is `stopped`
+  and A is untouched. Start B → B comes back with no tap (the 15 s re-probe).
+  Revoke A's device, then relaunch → A is `revoked` and B is still `new|idle`.
+  Shots `37-a1…a5`, light and dark.
+
+**F4 (MEDIUM, process) — FIXED.** The `(b)` signature now reads `deepseek`,
+from the orchestrator's commit labels, with a note. The exact id was not
+recorded. This round is signed with my real id.
+
+**Mutations** (`.tentacle/tmp/mobile-projects-app/mutate-fix1.ts`: apply, run the
+test, restore from memory; `git status` afterwards lists no extra file):
+
+```
+F2 retireLegacy ignores cwd: KILLED (red) pass=11 fail=1
+F3 row … opens the first row's sheet: KILLED (red) pass=35 fail=1
+```
+
+**Narrow gate:** `bunx tsc -p apps/mobile --noEmit` is clean. `bunx biome check`
+on the 13 changed TS/JS files: 0 issues. Tests: `band-screens`, `computers`,
+`pairing-e2e` (12/0), `e2e-pairing` (7/0), `e2e-gate`, `e2e-hooks-query`,
+`e2e-escape-probes`, `e2e-session-capabilities`, `e2e-appearance`: all green.
 
 ## Review
 
