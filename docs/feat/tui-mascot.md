@@ -465,3 +465,42 @@ Gate status in this worktree after the fix: `tsc --noEmit` (root),
 `tsc -p apps/mobile`, `tsc -p apps/relay` → all exit 0; `biome check` on the 3
 changed files → clean; narrow tests: 39 (mobile) + 157 (tui) + 14 + 18 → 0 fail.
 The full suite stays the orchestrator's.
+
+### Adversarial review (fresh context)
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings. The scope reviewed is the
+task's own diff, `312c634d..HEAD`. The rest of `main...HEAD` is merged main work.
+
+- **Gate:** the 8 touched test files give 293 pass, 0 fail. `bun run lint` is
+  clean (2218 files). `bun run typecheck` (root, mobile and relay) exits 0. I did
+  not run the full `bun test` here; the orchestrator's merge gate runs it.
+- **Mutations (each one reverted; `git status` clean afterwards):** changing the
+  width rule from `>=` to `>` in `mascot.ts` fails 1 test (the width boundary).
+  Disabling the `header` skip in `commands.ts` fails `/save never exports the
+  header`. The executor's three mutations are recorded above and I did not
+  repeat them.
+- **§7 invariants:** persistence is unaffected, because `HeaderItem` is
+  display-only and is never written or exported. No protocol schema or terminal
+  I/O path changes. All three `startTui` call sites pass `version`, and the
+  local site is pinned by a test that drives the real `main`. Logic sits in the
+  pure `mascot.ts`, and `headerLines` only maps the result to strings.
+- **Attacks that found nothing:**
+  1. Code that depends on the old welcome being an assistant item. The `chat`
+     merge at `state.ts:555`, the answer counts at `state.ts:319,345` and
+     copy-last at `commands.ts:548` all now skip the header, which is better
+     than before.
+  2. `items[0]` or `items.length <= 1` checks: none exist.
+  3. Splitting a sprite row on wrap. With the mascot shown, every row is at most
+     `width` cells, so `fitsUnchanged` (`render-lines.ts:1238`) holds.
+  4. Palette stability. `useRef`'s initializer calls `pickPalette` again on each
+     render, but only the first value is ever stored.
+- **Low notes:**
+  - The header's model is captured at mount, so it is not updated after
+    `/model`. This is acceptable because the header is history.
+  - The red-before-green run was not captured; mutation evidence stands in
+    for it.
+- **Model:** the same family as the plan's author (Opus) and the executor's
+  finishing pass, so shared blind spots are possible. The blast radius is
+  `cross-module`, so this level of review is acceptable.
