@@ -4,9 +4,10 @@
  * `ActivityIndicator`. Render only.
  */
 import type { JSX, ReactNode } from "react";
-import { ActivityIndicator, Text, View } from "react-native";
+import { ActivityIndicator, View } from "react-native";
 import { type Palette, space, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
+import { Text } from "./Text.tsx";
 
 export function EmptyState({
   palette,

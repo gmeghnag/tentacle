@@ -15,7 +15,7 @@ import type { ArtifactMeta } from "@tentacle/protocol";
  * `tool-<callId>-reply`, `diff-<callId>`, `image-<imageId>`.
  */
 import { type JSX, type ReactNode, useState } from "react";
-import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Image, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
 import {
   type BandFill,
   type PreviewCardView,
@@ -48,6 +48,7 @@ import { subAgentLine } from "../../tool-summary.ts";
 import { type ImageRef, type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { StepBody, StepNode } from "../../ui/StepNode.tsx";
+import { Text } from "../../ui/Text.tsx";
 import { ChartBlock } from "../../ui/chart/ChartBlock.tsx";
 import { DiagramBlock } from "../../ui/diagram/DiagramBlock.tsx";
 import { DiffView } from "./DiffView.tsx";
@@ -120,6 +121,8 @@ export interface StepProps {
   readonly reduceMotion: boolean;
   readonly onToggle: () => void;
   readonly onShowAll: () => void;
+  /** Beta `Compact shell rows` (docs/feat/shell-intent-line.md §7): absent → off. */
+  readonly compactShell?: boolean;
 }
 
 /** A step with no neighbour on its thread: just the node. */
@@ -580,6 +583,7 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
     cell?.kind === "step" ? cell.thought : null,
     step?.full ?? false,
     cell?.kind === "step" && cell.thoughtFirst,
+    step?.compactShell === true,
   );
   const diff = tool.diff === undefined ? null : diffView(tool.diff);
   const progress = subAgentLine(tool.sub);
@@ -643,6 +647,8 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
         reduceMotion={step?.reduceMotion ?? false}
         name={view.name}
         subtitle={view.subtitle}
+        subline={view.subline}
+        shimmer={view.shimmer}
         trailing={view.trailing}
         trailingRed={view.trailingRed}
         {...(view.live && tool.at !== undefined ? { liveFrom: tool.at } : {})}

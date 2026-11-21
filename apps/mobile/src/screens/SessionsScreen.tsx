@@ -15,7 +15,7 @@
  * `sessions-more`, `sessions-search`, `sessions-back`.
  */
 import { type JSX, useState } from "react";
-import { RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { RefreshControl, ScrollView, StyleSheet, View } from "react-native";
 import { groupSessions, sessionLine, sessionMeta } from "../session-groups.ts";
 import type { viewModel } from "../session-list-controller.ts";
 import type { SessionRow } from "../session-list.ts";
@@ -29,6 +29,7 @@ import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
+import { Text, TextInput } from "../ui/Text.tsx";
 
 export interface SessionsScreenProps {
   readonly palette: Palette;

@@ -11,12 +11,13 @@
  *   parse, and raw HTML is shown as its own text — never executed.
  */
 import type { JSX } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, View } from "react-native";
 import { inlineCodeLook } from "../../code-block.ts";
 import { type MdBlock, type MdInline, type Parsed, flatten } from "../../markdown.ts";
 import { columnAlign } from "../../table-layout.ts";
 import { MONO, type Palette, radius, typography } from "../../theme.ts";
 import { CodeBlock } from "../../ui/CodeBlock.tsx";
+import { Text } from "../../ui/Text.tsx";
 
 /** Sizes a heading's depth renders at (a phone has no `h1`–`h6`). */
 const HEADING_SIZE: Readonly<Record<number, number>> = { 1: 22, 2: 20, 3: 18, 4: 17 };

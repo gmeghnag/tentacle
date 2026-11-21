@@ -15,7 +15,7 @@ import type { ArtifactKind } from "@tentacle/protocol";
  * What is here is the mapping to elements and the two seen marks.
  */
 import { type JSX, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FlatList, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { FlatList, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { AppLogField } from "../app-log.ts";
 import { ARTIFACT_FEEDS, type ArtifactSnapshot } from "../artifact-feed.ts";
@@ -58,6 +58,7 @@ import { GALLERY_SETTINGS } from "../gallery-settings-expo.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../theme.ts";
 import { Icon } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
+import { Text } from "../ui/Text.tsx";
 import { ChartThumbnail } from "../ui/chart/ChartThumbnail.tsx";
 import { useChartLabels } from "../ui/chart/useChartLabels.ts";
 import { ArtifactViewerModal, type ReadBytes } from "./artifacts/ArtifactViewerModal.tsx";

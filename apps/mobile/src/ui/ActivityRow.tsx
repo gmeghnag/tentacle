@@ -9,10 +9,11 @@
  * glyph choice is presentation and lives here — the view-model gains nothing.
  */
 import type { JSX } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
 import type { ActivityRowView } from "../activity.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, size as SIZE, space, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
+import { Text } from "./Text.tsx";
 
 /** The leading glyph of a kind: the spinning arc is drawn, the others are symbols. */
 function glyphName(row: ActivityRowView): IconName {

@@ -7,9 +7,10 @@
  */
 import { BlurView } from "expo-blur";
 import type { JSX } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import { type Palette, size as SIZE, shadow, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
+import { Text } from "./Text.tsx";
 
 export interface GlassButtonProps {
   readonly palette: Palette;

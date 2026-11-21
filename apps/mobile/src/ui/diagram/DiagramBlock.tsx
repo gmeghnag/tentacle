@@ -10,7 +10,7 @@
  * and the tap's tab, `diagram-render-service.ts` renders; this only maps them.
  */
 import { type JSX, useEffect, useState, useSyncExternalStore } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import {
   type DiagramBlockBody,
@@ -25,6 +25,7 @@ import type { DiagramRowView } from "../../diagram-row.ts";
 import { diagramTheme } from "../../diagram-theme.ts";
 import { MONO, type Palette } from "../../theme.ts";
 import { CodeBlock } from "../CodeBlock.tsx";
+import { Text } from "../Text.tsx";
 import { useReduceMotion } from "../chart/ChartAppear.tsx";
 import { DiagramFullScreen } from "./DiagramFullScreen.tsx";
 import { DiagramView } from "./DiagramView.tsx";

@@ -13,16 +13,7 @@
  * `perm-returned-dismiss`.
  */
 import type { JSX } from "react";
-import {
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import { Modal, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
 import {
   type OptionPill,
   type PermissionSheet,
@@ -33,6 +24,7 @@ import {
 } from "../permission-sheet.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, size, typography } from "../theme.ts";
 import { Icon, type IconName } from "../ui/Icon.tsx";
+import { Text, TextInput } from "../ui/Text.tsx";
 
 export interface PermissionSheetViewProps {
   readonly sheet: PermissionSheet;

@@ -4,7 +4,7 @@
  * Shape (Owner Q3, "reverse accept"): ONE control socket to `<relay>/v1/daemon`
  * carries `hello`, the relay's `open`, and liveness; each phone stream is its OWN
  * socket to `<relay>/v1/accept`, which after the `accept` frame is a raw splice
- * leg. That leg is a plain `DuplexChannel`, so the phone lands in
+ * leg. That leg is a plain `ByteCarrier`, so the phone lands in
  * `acceptDevice` — the DIRECT route's own code (R3) — and therefore in the same
  * Noise handshake, the same device registry, the same `Connection`, the same
  * revoke handle and the same single broker. **This file adds a transport and
@@ -31,7 +31,7 @@ import {
   isRelayUrl,
   knownRelayFeatures,
 } from "@tentacle/protocol";
-import type { DuplexChannel } from "@tentacle/transport";
+import { type ByteCarrier, type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { relayIdOf } from "@tentacle/transport/relay-id";
 import type { HooksTrustPrecheck } from "./connection.ts";
 import { acceptDevice } from "./device-accept.ts";
@@ -55,7 +55,8 @@ import type { SessionHost } from "./session-host.ts";
 
 /** The bits of a Bun client WebSocket this file touches (never Bun's own types). */
 export interface RelaySocket {
-  send(data: string): void;
+  /** Text for the control socket and the `accept` frame; binary for the data leg's Noise frames. */
+  send(data: string | Uint8Array): void;
   close(): void;
 }
 
@@ -71,7 +72,8 @@ export type RelayDialer = (url: string) => RelaySocketHost;
 export interface RelaySocketHost {
   readonly socket: RelaySocket;
   setOnOpen(handler: () => void): void;
-  setOnMessage(handler: (data: string) => void): void;
+  /** A text frame as its string, a binary one as its bytes (`carrierFrameOf`). */
+  setOnMessage(handler: (data: CarrierFrame) => void): void;
   /** `code`/`reason` are Bun's close event; absent when the transport gave none. */
   setOnClose(handler: (info: { readonly code?: number; readonly reason?: string }) => void): void;
 }
@@ -551,7 +553,9 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
         schedule("oversize");
         return;
       }
-      const frame = parseFrame(data);
+      // The control socket carries JSON text only: a binary frame is malformed
+      // (a close, never a parse — F19).
+      const frame = typeof data === "string" ? parseFrame(data) : undefined;
       if (frame === undefined) {
         // A malformed control frame is a close, never a guess (F19).
         dropControl();
@@ -730,7 +734,7 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
     }
     let closed = false;
     let release: () => void = () => {};
-    let onMessage: ((data: string) => void) | undefined;
+    let onMessage: ((data: CarrierFrame) => void) | undefined;
     let onClose: (() => void) | undefined;
     let released = false;
     /** The device path's teardown, idempotent (it stops the watcher and drops the handle). */
@@ -739,7 +743,9 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
       released = true;
       release();
     };
-    const channel: DuplexChannel = {
+    // After the `accept` frame the leg is the Noise responder's raw byte carrier
+    // (E2E v2: binary frames, docs/feat/noise-binary-carrier.md).
+    const channel: ByteCarrier = {
       send: (data) => leg.socket.send(data),
       close: () => leg.socket.close(),
       setOnMessage: (handler) => {
@@ -917,8 +923,10 @@ export function startRelayLink(options: RelayLinkOptions): RunningRelayLink {
 export function bunRelayDialer(): RelayDialer {
   return (url) => {
     const ws = new WebSocket(url);
+    // Bun's client defaults to "nodebuffer": pinned, so binary arrives as an ArrayBuffer.
+    ws.binaryType = "arraybuffer";
     let onOpen: (() => void) | undefined;
-    let onMessage: ((data: string) => void) | undefined;
+    let onMessage: ((data: CarrierFrame) => void) | undefined;
     let onClose: ((info: { code?: number; reason?: string }) => void) | undefined;
     let opened = false;
     let closed = false;
@@ -952,7 +960,10 @@ export function bunRelayDialer(): RelayDialer {
       onOpen?.();
     });
     ws.addEventListener("message", (event) => {
-      onMessage?.(String(event.data));
+      // As received (never `String(x)`): text stays text, binary becomes its bytes.
+      const frame = carrierFrameOf(event.data);
+      if (frame === null) ws.close();
+      else onMessage?.(frame);
     });
     ws.addEventListener("close", (event) => {
       if (closed) {

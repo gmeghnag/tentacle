@@ -28,6 +28,7 @@ export * from "./permission.ts";
 export * from "./context.ts";
 export * from "./token-counter.ts";
 export * from "./tool-labels.ts";
+export * from "./shell-intent.ts";
 export * from "./chart/index.ts";
 export * from "./diagram/index.ts";
 export * from "./hooks.ts";

@@ -44,7 +44,6 @@ import {
   type ScrollView as RNScrollView,
   RefreshControl,
   StyleSheet,
-  Text,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -149,6 +148,7 @@ import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
+import { Text } from "../ui/Text.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import { DiagramRenderer } from "../ui/diagram/DiagramRenderer.tsx";
 import {
@@ -204,6 +204,11 @@ export interface SessionScreenProps {
    * docs/fix/mobile-crash-ibm-chart.md): the app log's fields for it.
    */
   readonly onRowError?: (fields: Readonly<Record<string, AppLogField>>) => void;
+  /**
+   * Beta `Compact shell rows` (docs/feat/shell-intent-line.md §7): a described
+   * `shell` step shows its `$ cmd` line only on failure. Absent → off.
+   */
+  readonly compactShell?: boolean;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -239,6 +244,7 @@ export function SessionScreen({
   onNewSession,
   artifactsSeenKey,
   onRowError,
+  compactShell = false,
 }: SessionScreenProps): JSX.Element {
   // The perf trace (docs/fix/mobile-fan-jank-device.md): render start → commit.
   const renderStart = PERF.now();
@@ -850,6 +856,8 @@ export function SessionScreen({
       // A notice's glyph/join (docs/feat/mobile-harness-notices.md S1): a block's
       // head changes when a neighbour arrives, with the row itself unchanged.
       looks,
+      // Beta `Compact shell rows`: a step re-projects with no row change.
+      compactShell,
     }),
     [
       diagramStyle,
@@ -860,6 +868,7 @@ export function SessionScreen({
       fullSteps,
       layout,
       looks,
+      compactShell,
     ],
   );
   const compose = state.compose;
@@ -1348,6 +1357,7 @@ export function SessionScreen({
                     open={isOpen(openSteps, item.key)}
                     full={isOpen(fullSteps, item.key)}
                     reduceMotion={a11yFlags.reduceMotion}
+                    compactShell={compactShell}
                     speak={speak}
                     child={child}
                     voice={voice !== null}

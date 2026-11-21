@@ -69,6 +69,7 @@ import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
 import { localSession } from "./local-session.ts";
+import { pickPalette } from "./mascot.ts";
 import { type OpenPanel, panelClick, panelNoSwitchNotice, panelSwitchOp } from "./panel.ts";
 import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
@@ -151,8 +152,6 @@ const FRAME_MS = 33; // ~30fps streaming throttle
 // far faster than this, so a legitimate paste never trips it.
 const PASTE_TIMEOUT_MS = 250;
 
-const WELCOME = "Tentacle ready. Type a task, or `/help` for commands.";
-
 // Clipboard reads are trimmed: copied terminal output often has a trailing
 // newline that would otherwise land as a stray blank line.
 const flattenPasted = (text: string): string => sanitizePasted(text).trim();
@@ -218,6 +217,7 @@ export function App({
   model,
   modelLabel,
   cwd,
+  version,
   contextWindow = 128000,
   target,
   permissions,
@@ -248,6 +248,7 @@ export function App({
   targetFeed,
   columns: fixedColumns,
   chartGlyphs = "braille",
+  compactShell = false,
   jobRefreshMs,
   voice: voiceConfig = VOICE_DEFAULTS,
   voiceConfigDir,
@@ -404,11 +405,24 @@ export function App({
 
   const stateRef = useRef<DisplayState>({
     ...initialState,
-    // A resumed session seeds its prior transcript; otherwise the welcome line.
+    // A resumed session seeds its prior transcript; a fresh one opens on the
+    // startup header — tentacle + version, the model and folder, the /help hint,
+    // and (when the terminal can paint it) the mascot, whose palette is drawn
+    // ONCE here so every re-render and resize keeps the same sprite
+    // (docs/feat/tui-mascot.md D2/D3).
     items:
       initialItems && initialItems.length > 0
         ? [...initialItems]
-        : [{ kind: "assistant", text: WELCOME }],
+        : [
+            {
+              kind: "header",
+              ...(version !== undefined ? { version } : {}),
+              model: shownModel,
+              cwd,
+              ...(home !== undefined ? { home } : {}),
+              palette: pickPalette(),
+            },
+          ],
   });
   const sessionRef = useRef<SessionController | null>(null);
   // What Esc/Ctrl+C aborts: the streamed turn's controller — or, while a
@@ -594,6 +608,7 @@ export function App({
     width: 80,
     spillInPod: shownInPod,
     chartGlyphs,
+    compactShell,
   });
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
@@ -877,6 +892,7 @@ export function App({
         spillInPod: shownInPod,
         expandedIds,
         chartGlyphs,
+        compactShell,
       };
       runChunked(items.length, (from, budgetMs) => warmRowsChunk(items, opts, from, budgetMs), {
         isStale: () => warmGenRef.current !== gen,
@@ -889,7 +905,7 @@ export function App({
       stdout.off?.("resize", onResize);
       warmGenRef.current += 1; // cancel any in-flight warm on unmount/resubscribe
     };
-  }, [stdout, size.columns, expandAll, shownInPod, expandedIds, chartGlyphs]);
+  }, [stdout, size.columns, expandAll, shownInPod, expandedIds, chartGlyphs, compactShell]);
 
   // Reset the palette selection whenever the typed text changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
@@ -1012,6 +1028,7 @@ export function App({
     blinkPhase: blinkPhase(blinkClock, blink),
     expandedIds,
     chartGlyphs,
+    compactShell,
   });
   // ARM the ONE blink clock: `blink.running` is the whole gate (the turn runs AND
   // a call is unanswered), so an idle transcript has no timer at all and a dead
@@ -1039,6 +1056,7 @@ export function App({
     spillInPod: shownInPod,
     expandedIds,
     chartGlyphs,
+    compactShell,
   };
   // Once the transcript is quiet, fill the cache for the OTHER Ctrl+O view in
   // small chunks (idle-warm.ts) so the first toggle is a hit. Any change to the
@@ -1051,14 +1069,31 @@ export function App({
     idleWarmCancelRef.current = startIdleWarm(
       {
         items: idleItems,
-        opts: { expandAll, width: columns, spillInPod: shownInPod, expandedIds, chartGlyphs },
+        opts: {
+          expandAll,
+          width: columns,
+          spillInPod: shownInPod,
+          expandedIds,
+          chartGlyphs,
+          compactShell,
+        },
         running: idleRunning,
         busy: idleBusy,
       },
       { onError: (error) => warmErrorRef.current(error) },
     );
     return idleWarmCancelRef.current;
-  }, [idleItems, idleRunning, idleBusy, expandAll, columns, shownInPod, expandedIds, chartGlyphs]);
+  }, [
+    idleItems,
+    idleRunning,
+    idleBusy,
+    expandAll,
+    columns,
+    shownInPod,
+    expandedIds,
+    chartGlyphs,
+    compactShell,
+  ]);
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);

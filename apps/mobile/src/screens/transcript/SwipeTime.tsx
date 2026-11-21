@@ -28,10 +28,11 @@
  * the caller (which already reads the row), so this component stays a renderer.
  */
 import { type JSX, useMemo, useRef } from "react";
-import { Animated, PanResponder, StyleSheet, Text, View } from "react-native";
+import { Animated, PanResponder, StyleSheet, View } from "react-native";
 import { REVEAL, claimsPan, revealOffset } from "../../row-swipe.ts";
 import { type Palette, typography } from "../../theme.ts";
 import type { Row } from "../../transcript-rows.ts";
+import { Text } from "../../ui/Text.tsx";
 
 export interface SwipeTimeProps {
   readonly row: Row;

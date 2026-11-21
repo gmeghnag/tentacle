@@ -27,11 +27,12 @@
  * `composer-mic-caption`, `composer-send-now` (INSIDE the field), `composer-filled`.
  */
 import { type ComponentRef, type JSX, useEffect, useRef } from "react";
-import { Animated, Easing, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Animated, Easing, Pressable, StyleSheet, View } from "react-native";
 import type { SendSlot } from "../composer.ts";
 import type { MicButton } from "../dictation.ts";
 import { type Palette, radius, shadow, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
+import { Text, TextInput } from "./Text.tsx";
 import { useReduceMotion } from "./chart/ChartAppear.tsx";
 
 export type ComposerButton = "send" | "queue" | "send-later" | "stop" | "disabled";

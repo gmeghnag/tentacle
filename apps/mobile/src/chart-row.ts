@@ -18,7 +18,7 @@ import {
   chartLayout,
   chartSpecOf,
 } from "./chart-layout.ts";
-import { type ChartTokens, type Palette, chartTokensFor, darkPalette } from "./theme.ts";
+import { type ChartTokens, type Palette, chartTokensFor, isDark } from "./theme.ts";
 
 /** The tool's name (`packages/tools/src/chart.ts`). */
 export const CHART_TOOL = "chart";
@@ -43,7 +43,7 @@ function drawsAsChart(tool: ChartToolRow): boolean {
 }
 
 export function chartScheme(palette: Palette): ChartScheme {
-  return palette === darkPalette ? "dark" : "light";
+  return isDark(palette) ? "dark" : "light";
 }
 
 export interface ChartRowView {

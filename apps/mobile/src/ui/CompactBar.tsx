@@ -8,16 +8,11 @@
  */
 import { BlurView } from "expo-blur";
 import { type JSX, useCallback, useState } from "react";
-import {
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { type NativeScrollEvent, type NativeSyntheticEvent, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { COMPACT_BAR_HEIGHT, compactTitleShown } from "../header-collapse.ts";
 import { DENSE_FONT_SCALE, type Palette, space, typography } from "../theme.ts";
+import { Text } from "./Text.tsx";
 
 export interface CompactBarProps {
   readonly palette: Palette;

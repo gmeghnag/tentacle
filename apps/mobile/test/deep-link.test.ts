@@ -17,7 +17,7 @@ import { pairingTextFromUrl } from "../src/deep-link.ts";
 
 /** The line `tentacle pair` prints, i.e. what its QR encodes. */
 const PAYLOAD =
-  "tentacle://pair?v=1&k=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&n=MacBook&c=ABCDEFGHJK&a=ws%3A%2F%2F127.0.0.1%3A4001%2Fe2e";
+  "tentacle://pair?v=2&k=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&n=MacBook&c=ABCDEFGHJK&a=ws%3A%2F%2F127.0.0.1%3A4001%2Fe2e";
 
 describe("pairingTextFromUrl: only OUR pairing link is accepted", () => {
   test("the payload line itself is accepted, unchanged (mutation: rebuild from parts → red)", () => {

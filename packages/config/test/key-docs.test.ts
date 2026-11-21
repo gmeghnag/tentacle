@@ -336,8 +336,10 @@ describe("T2b: the defaults `resolveConfig` does not apply are exactly the CLI's
     // The `voice.*` leaves default in `tui/src/voice-config.ts` (`VOICE_DEFAULTS`),
     // which the TUI reads once at mount: a local input device, not a runtime knob.
     // `tui.chartGlyphs` is the same shape as `tui.theme`: a display setting of
-    // this laptop, defaulted where the TUI is launched (`braille`).
+    // this laptop, defaulted where the TUI is launched (`braille`); so is
+    // `beta.compactShell` (false).
     expect(cliDefaults).toEqual([
+      "beta.compactShell",
       "detach.keepAwake",
       "engine",
       "rm",

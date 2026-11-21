@@ -10,10 +10,11 @@
  * it without opening it); opening is presentation state, like a tool's output.
  */
 import { type JSX, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import type { DiffLine, DiffView as DiffModel } from "../../diff-view.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
+import { Text } from "../../ui/Text.tsx";
 import { animateNextLayout } from "../../ui/animate.ts";
 
 /** `+n −m` for a diff (the same numbers `countDiff` gave the row). */

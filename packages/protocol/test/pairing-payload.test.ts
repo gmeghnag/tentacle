@@ -69,7 +69,9 @@ describe("base64url", () => {
 describe("payload round trip", () => {
   test("keeps the key, the name, the code and the addresses", () => {
     const text = formatPairingPayload(payload());
-    expect(text.startsWith("tentacle://pair?v=1&")).toBe(true);
+    expect(text.startsWith("tentacle://pair?v=2&")).toBe(true);
+    // T-P1: 2 since E2E v2 (docs/feat/noise-binary-carrier.md).
+    expect(PAIRING_PAYLOAD_VERSION).toBe(2);
     const result = parse(text);
     if (!result.ok) throw new Error(`refused: ${result.reason}`);
     expect(result.payload.v).toBe(PAIRING_PAYLOAD_VERSION);
@@ -131,7 +133,9 @@ describe("refusals carry a reason", () => {
   });
 
   test("an unknown or missing version", () => {
-    expect(parse(withParam("v", "2"))).toEqual({ ok: false, reason: "version" });
+    // A v1 QR (from a tentacle on E2E v1) and a future v3 are both refused, never guessed at.
+    expect(parse(withParam("v", "1"))).toEqual({ ok: false, reason: "version" });
+    expect(parse(withParam("v", "3"))).toEqual({ ok: false, reason: "version" });
     expect(parse(withParam("v", ""))).toEqual({ ok: false, reason: "version" });
   });
 

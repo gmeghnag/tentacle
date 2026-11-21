@@ -1,16 +1,17 @@
 /**
- * The secure channel's framing, pure (docs/feat/e2e-channel.md, Framing). A
- * wire frame is the text `t1:` + canonical base64 of ONE Noise message, so it
- * rides today's text-only `DuplexChannel`. A message's plaintext is one type
- * byte + up to `MAX_CHUNK` bytes of the UTF-8 encoded RPC frame: bytes are
- * split, never characters, and the type byte is inside the AEAD.
+ * The secure channel's framing, pure (docs/feat/e2e-channel.md, Framing;
+ * docs/feat/noise-binary-carrier.md). E2E v2: a wire frame is ONE binary
+ * WebSocket message — handshake flights 1 and 2 are `[version] ‖ noise
+ * message`, the confirm and every transport message the raw Noise message, a
+ * version refusal exactly `[version]`. A message's plaintext is one type byte
+ * + up to `MAX_CHUNK` bytes of the UTF-8 encoded RPC frame: bytes are split,
+ * never characters, and the type byte is inside the AEAD.
  */
+import type { CarrierFrame } from "./channel.ts";
 import { MAX_NOISE_MESSAGE, NoiseError, TAGLEN } from "./noise.ts";
 
-/** Names this channel's framing; covered by the prologue's version. */
-export const FRAME_TAG = "t1:";
-/** Base64 of the largest Noise message, plus the tag. */
-export const MAX_FRAME_TEXT = FRAME_TAG.length + Math.ceil(MAX_NOISE_MESSAGE / 3) * 4;
+/** E2E v1's text-frame tag: a text frame that starts with it is a v1 peer. */
+export const LEGACY_TEXT_TAG = "t1:";
 /** Content bytes per transport message: the Noise maximum less the tag and the type byte. */
 export const MAX_CHUNK = MAX_NOISE_MESSAGE - TAGLEN - 1;
 
@@ -27,7 +28,7 @@ const encoder = new TextEncoder();
 /** `ignoreBOM`: a leading U+FEFF is content, not a marker; the channel is transparent. */
 const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 
-/** RFC 4648 base64 with padding (no `Buffer`/`btoa`: the app's Hermes has neither for certain). */
+/** RFC 4648 base64 with padding, dependency-free (no `Buffer`: the app's Hermes has none). */
 export function encodeBase64(bytes: Uint8Array): string {
   const parts: string[] = [];
   let line = "";
@@ -97,19 +98,57 @@ export function decodeBase64(text: string): Uint8Array {
   return out;
 }
 
-export function encodeFrame(message: Uint8Array): string {
-  return FRAME_TAG + encodeBase64(message);
+/**
+ * One carrier frame → one Noise message, once the handshake's versioned flights
+ * are past (the confirm, every transport message). Checked before any decrypt:
+ * a text frame, an empty one, or one over `MAX_NOISE_MESSAGE` is `bad-frame`.
+ */
+export function binaryFrame(frame: CarrierFrame, max = MAX_NOISE_MESSAGE): Uint8Array {
+  if (typeof frame === "string") {
+    throw new NoiseError("bad-frame", "text frame on the e2e channel");
+  }
+  if (frame.length === 0) throw new NoiseError("bad-frame", "empty frame");
+  if (frame.length > max) {
+    throw new NoiseError("bad-frame", `frame too long (${frame.length} bytes)`);
+  }
+  return frame;
 }
 
-/** One wire frame → one Noise message. The length is checked before any decoding. */
-export function decodeFrame(text: string): Uint8Array {
-  if (text.length > MAX_FRAME_TEXT) {
-    throw new NoiseError("bad-frame", `frame too long (${text.length} characters)`);
+/** `[version] ‖ message`: handshake flights 1 and 2 (the byte is cleartext; the prologue binds it). */
+export function withVersion(version: number, message: Uint8Array): Uint8Array {
+  const out = new Uint8Array(message.length + 1);
+  out[0] = version;
+  out.set(message, 1);
+  return out;
+}
+
+/** Why the peer's version is not ours, with the side that is older. */
+function mismatch(remote: number, local: number): NoiseError {
+  const older = remote > local ? "this side is older" : "the other side is older";
+  return new NoiseError(
+    "version-mismatch",
+    `e2e channel version mismatch: the other side speaks v${remote}, this side v${local} (${older})`,
+    remote,
+  );
+}
+
+/**
+ * A handshake flight (1 or 2) → its Noise message, checking the version byte
+ * BEFORE any crypto. A v1 peer's `t1:` text frame is `version-mismatch` v1; a
+ * lone byte `[v]` is a refusal (`version-mismatch` v, or `bad-frame` when it
+ * names our own version); a foreign leading byte is `version-mismatch`.
+ */
+export function readVersioned(frame: CarrierFrame, local: number): Uint8Array {
+  if (typeof frame === "string") {
+    if (frame.startsWith(LEGACY_TEXT_TAG)) throw mismatch(1, local);
+    throw new NoiseError("bad-frame", "text frame on the e2e channel");
   }
-  if (!text.startsWith(FRAME_TAG)) {
-    throw new NoiseError("bad-frame", `not a secure-channel frame (no ${FRAME_TAG} tag)`);
-  }
-  return decodeBase64(text.slice(FRAME_TAG.length));
+  const bytes = binaryFrame(frame, MAX_NOISE_MESSAGE + 1);
+  const version = bytes[0] ?? 0;
+  if (version !== local) throw mismatch(version, local);
+  if (bytes.length === 1)
+    throw new NoiseError("bad-frame", "a lone version byte of our own version");
+  return bytes.subarray(1);
 }
 
 /** One RPC frame → the plaintexts of its transport messages (type byte + content). */

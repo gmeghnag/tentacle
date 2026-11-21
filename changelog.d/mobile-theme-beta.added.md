@@ -1,0 +1,1 @@
+- **Try a Figtree theme on the iPhone.** Settings → Beta → "Tema Figtree (prova)" (off by default, remembered on the phone, applied at once): the whole app switches to the Figtree typeface (code stays monospace) and, in dark mode, to a deep petrol background (#151B1D) with softer text and a cyan accent; light mode changes only the font. Off is exactly today's look.

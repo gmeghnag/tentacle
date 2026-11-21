@@ -6,11 +6,12 @@
  */
 import * as Clipboard from "expo-clipboard";
 import { type JSX, useEffect, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { codeBlockView, trailingFade } from "../code-block.ts";
 import { playHaptic } from "../haptics.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
+import { Text } from "./Text.tsx";
 
 export interface CodeBlockProps {
   readonly text: string;

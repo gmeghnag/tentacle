@@ -7,6 +7,8 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import type { ChatMessage } from "@tentacle/core";
+import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import type { QueueTraceEvent } from "../src/queue-trace.ts";
 import { type ForeignTurn, createSessionFeed, turnOutcome } from "../src/session-feed.ts";
 import { type State, initialState } from "../src/transcript.ts";
 
@@ -186,6 +188,86 @@ describe("createSessionFeed", () => {
     expect(h.states().link).toBe("down");
     h.feed.link(true);
     expect(h.states().link).toBe("up");
+  });
+});
+
+describe("the LOST cause reaches the app log (docs/fix/mobile-stream-lost-repeat.md, slice 2)", () => {
+  /** A feed whose trace lines are collected, so the `turn-end` line can be read. */
+  function traced() {
+    let state: State = initialState;
+    const lines: QueueTraceEvent[] = [];
+    const feed = createSessionFeed({
+      state: () => state,
+      put: (next) => {
+        state = next;
+      },
+      setForeign: () => {},
+      trace: (event) => lines.push(event),
+    });
+    return { feed, lines, end: () => lines.filter((line) => line.kind === "turn-end") };
+  }
+
+  /** A stream that yields `events`, then throws `error`. */
+  async function* throwing(
+    events: readonly SessionEvent[],
+    error: unknown,
+  ): AsyncIterable<SessionEvent> {
+    for (const event of events) {
+      yield event;
+    }
+    throw error;
+  }
+
+  test("a stream that throws an RpcError → the turn-end line names its CLASS and CODE, never its message", async () => {
+    // The app log is a file a person shares (app-log F16): the class and the
+    // numeric code are ours and safe, the message is daemon text and must not
+    // reach the ring. This line is the whole point of slice 2 — the next
+    // occurrence on a device names the trigger that made the stream throw.
+    // Mutation: pass the raw `error` through, or log `error.message` → red.
+    const t = traced();
+    const failure = new RpcError(DomainErrorCode.UnknownSession, "the daemon lost the session");
+    t.feed.activity({
+      kind: "turn",
+      turnId: "t1",
+      events: throwing([{ type: "text", delta: "half" }], failure),
+      cancel: () => {},
+    });
+    await settle();
+    const [end] = t.end();
+    expect(end?.kind === "turn-end" ? end.outcome : undefined).toBe("lost");
+    expect(end?.kind === "turn-end" ? end.cause : undefined).toEqual({
+      error: "RpcError",
+      code: DomainErrorCode.UnknownSession,
+    });
+    // Non-vacuity: the message really was available to the call site.
+    expect(failure.message).toContain("lost the session");
+  });
+
+  test("a plain Error carries its class and no code (there is none to name)", async () => {
+    const t = traced();
+    t.feed.activity({
+      kind: "turn",
+      turnId: "t1",
+      events: throwing([], new TypeError("malformed text update from the daemon")),
+      cancel: () => {},
+    });
+    await settle();
+    const [end] = t.end();
+    expect(end?.kind === "turn-end" ? end.cause : undefined).toEqual({ error: "TypeError" });
+  });
+
+  test("a clean end carries NO cause (nothing threw)", async () => {
+    const t = traced();
+    t.feed.activity(
+      turnActivity("t1", [
+        { type: "text", delta: "done" },
+        { type: "turn_end", reason: "end_turn" },
+      ]),
+    );
+    await settle();
+    const [end] = t.end();
+    expect(end?.kind === "turn-end" ? end.outcome : undefined).toBe("ended");
+    expect(end?.kind === "turn-end" ? end.cause : undefined).toBeUndefined();
   });
 });
 

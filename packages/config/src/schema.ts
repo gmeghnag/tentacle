@@ -482,6 +482,13 @@ const settingsShape = {
     .strict()
     .optional(),
   /**
+   * Opt-in display features (docs/feat/shell-intent-line.md): `compactShell`
+   * hides a described `shell` row's `$ command` row while it runs and on exit 0
+   * (shown on failure; always in the ask and the expanded row). Unset: false.
+   * LAPTOP-ONLY display: never carried to a pod.
+   */
+  beta: z.object({ compactShell: z.boolean().optional() }).strict().optional(),
+  /**
    * The laptop's session logs (docs/feat/session-log-laptop-store.md):
    * `keepSuperseded` keeps the history a compaction or a `context_reset`
    * replaced in the session file (resume still shows the current one). Unset:

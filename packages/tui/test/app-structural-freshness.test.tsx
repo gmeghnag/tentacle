@@ -156,7 +156,7 @@ describe("S0b freshness: inside one macrotask the handler sees the ref, not the 
     await delay(150);
     expect(frame()).not.toContain("(y/N)");
     // The TUI is still there (the dialog said No, nothing closed).
-    expect(frame()).toContain("Tentacle ready");
+    expect(frame()).toContain("/help for commands");
     // And the pair still works once a render has happened: the next Ctrl+C asks
     // again ("never a trap"). This also proves the first dialog was really up.
     app.stdin.write(CTRL_C);

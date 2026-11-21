@@ -44,7 +44,7 @@ import {
 import { createHooksTrustResolver } from "./hooks-trust.ts";
 import { remoteJobsView } from "./local-runtime.ts";
 import { routingAutoAccept } from "./session-auto-accept.ts";
-import { CLIENT_INFO } from "./version.ts";
+import { APP_RELEASE_VERSION, CLIENT_INFO } from "./version.ts";
 
 /**
  * One `session/list` result as the `/sessions` view
@@ -89,6 +89,11 @@ export interface ConnectOptions {
    * `braille` (docs/feat/model-charts.md D5).
    */
   readonly chartGlyphs?: ChartGlyphs;
+  /**
+   * An explicit `beta.compactShell` (beats the file); absent → the file's, else
+   * off (docs/feat/shell-intent-line.md §4).
+   */
+  readonly compactShell?: boolean;
 }
 
 /**
@@ -196,6 +201,30 @@ export async function connectChartGlyphs(options: ConnectOptions): Promise<Chart
 }
 
 /**
+ * Beta `beta.compactShell` for a `connect` session (docs/feat/shell-intent-line.md
+ * §4): the same local config FILE as the palette; a broken file is already
+ * warned about by `connectTheme`, so it reads OFF silently.
+ */
+export async function connectCompactShell(options: ConnectOptions): Promise<boolean> {
+  if (options.compactShell !== undefined) {
+    return options.compactShell;
+  }
+  try {
+    const file = await readFileConfig({
+      ...(options.configDir !== undefined
+        ? {
+            configDir: options.configDir,
+            env: { ...process.env, TENTACLE_CONFIG_DIR: options.configDir },
+          }
+        : {}),
+    });
+    return file.beta?.compactShell ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * `connect`'s voice settings (docs/feat/voice-dictation.md, Review round 1 HIGH
  * 4). `connect` reads no model config, so — exactly like the palette — the voice
  * settings come from the config FILE, and a broken file must never block a
@@ -261,6 +290,8 @@ export async function connectTui(
   const voice = await connectVoice(options, write);
   // A chart's glyphs: the same local file, same rule (docs/feat/model-charts.md D5).
   const chartGlyphs = await connectChartGlyphs(options);
+  // Beta `beta.compactShell`: the same local file, same rule.
+  const compactShell = await connectCompactShell(options);
   // RPC path: hold a daemon's request until the TUI's prompt is mounted.
   const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
   const dial = deps.dial(options.url, {
@@ -356,6 +387,9 @@ export async function connectTui(
       ...(served.label !== undefined ? { modelLabel: served.label } : {}),
       ...(served.contextWindow !== undefined ? { contextWindow: served.contextWindow } : {}),
       cwd: options.url,
+      // The startup header's first line (docs/feat/tui-mascot.md D5): the client's
+      // own version — this process is the thing the person started.
+      version: APP_RELEASE_VERSION,
       // The laptop's own `voice.*` (Review round 1, HIGH 4): without this the
       // `connect` TUI got `VOICE_DEFAULTS`, so `voice.enabled: false` and the
       // key/language/engine settings were ignored on this path.
@@ -392,6 +426,7 @@ export async function connectTui(
       detachOnQuit: true,
       theme,
       chartGlyphs,
+      compactShell,
       autoAccept,
       autoAcceptShared: autoAccept,
       sessions: {

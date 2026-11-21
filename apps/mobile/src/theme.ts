@@ -180,6 +180,40 @@ const dark: Palette = {
   switchOff: "#434448",
 };
 
+/**
+ * The Figtree try-out's dark palette, "abisso petrolio" (docs/feat/mobile-theme-beta.md,
+ * Owner decision 2026-11-21; Settings → Beta, OFF by default). The owner's hexes:
+ * page #151B1D, text #D5DDDE / #98A6A8, separator #253033, raised fill (composer,
+ * sheets, code/tool rows) #1D2528, accent #22D3EE, tint = rgba(34,211,238,.12)
+ * on the page. The other surfaces keep the step the retired graphite ramp had
+ * from its own page/card/separator (drawer = page − (5,6,7), band = page + 5,
+ * fill = card + (9,9,10), sep / sepSheet = sepChat + (8,9,10) / (14,15,16),
+ * switchOff = page + (37,37,38)), so B3's order holds (drawer < page < band <
+ * card = sheet < fill). Semantic colours are B3's, untouched. Picked by
+ * `themeFor` (`theme-beta.ts`), never by a screen.
+ */
+const petrol: Palette = {
+  ...dark,
+  bg: "#151B1D",
+  page: "#151B1D",
+  card: "#1D2528",
+  sheet: "#1D2528",
+  drawer: "#101516",
+  band: "#1A2022",
+  bandOnSheet: "#1D2528",
+  fill: "#262E32",
+  code: "#1D2528",
+  codeOnSheet: "#262E32",
+  label: "#D5DDDE",
+  sec: "#98A6A8",
+  sep: "#2D393D",
+  sepChat: "#253033",
+  sepSheet: "#333F43",
+  tint: "#173136",
+  glass: "rgba(29,37,40,0.86)",
+  switchOff: "#3A4043",
+};
+
 /** The palette for a scheme; an unknown/null scheme is the light one. */
 export function paletteFor(scheme: "light" | "dark" | null | undefined): Palette {
   return scheme === "dark" ? dark : light;
@@ -191,10 +225,11 @@ export function paletteFor(scheme: "light" | "dark" | null | undefined): Palette
  * vanish on black). One comparison, in one place, so a component never re-derives
  * it (`chart-row.ts` does the same for its own chrome).
  */
-export const isDark = (palette: Palette): boolean => palette === dark;
+export const isDark = (palette: Palette): boolean => palette === dark || palette === petrol;
 
 export const lightPalette: Palette = light;
 export const darkPalette: Palette = dark;
+export const petrolPalette: Palette = petrol;
 
 /**
  * The chart's own tokens (docs/feat/model-charts.md, *iPhone visual language
@@ -238,7 +273,7 @@ const chartDark = {
 
 /** The chart tokens for the palette's mode. */
 export function chartTokensFor(palette: Palette): ChartTokens {
-  const chrome = palette === dark ? chartDark : chartLight;
+  const chrome = isDark(palette) ? chartDark : chartLight;
   return {
     ...chrome,
     label: palette.label,

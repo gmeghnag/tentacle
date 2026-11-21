@@ -233,6 +233,8 @@ export interface ResolvedConfig {
     /** A chart's plot glyphs (docs/feat/model-charts.md D5); absent = `braille`. */
     readonly chartGlyphs?: "braille" | "blocks" | undefined;
   };
+  /** Opt-in display features (docs/feat/shell-intent-line.md); absent = all off. */
+  readonly beta?: { readonly compactShell?: boolean | undefined };
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: { readonly keepSuperseded?: boolean | undefined };
   /** Voice dictation (file or profile); absent = OFF, Ctrl+R, `auto`, no auto-stop. */
@@ -835,6 +837,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(fileConfig.rm !== undefined ? { rm: fileConfig.rm } : {}),
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
     ...(fileConfig.tui !== undefined ? { tui: fileConfig.tui } : {}),
+    ...(fileConfig.beta !== undefined ? { beta: fileConfig.beta } : {}),
     ...(fileConfig.sessions !== undefined ? { sessions: fileConfig.sessions } : {}),
     ...(fileConfig.voice !== undefined ? { voice: fileConfig.voice } : {}),
     ...(fileConfig.relay !== undefined ? { relay: fileConfig.relay } : {}),

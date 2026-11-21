@@ -30,7 +30,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Text,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -53,6 +52,7 @@ import { DENSE_FONT_SCALE, type Palette, size as SIZE, radius, typography } from
 import { ActivityRow } from "../ui/ActivityRow.tsx";
 import { BandSection } from "../ui/BandSection.tsx";
 import { Row } from "../ui/Row.tsx";
+import { Text } from "../ui/Text.tsx";
 import { JobDetail } from "./JobDetail.tsx";
 import { SubagentDetail } from "./SubagentDetail.tsx";
 

@@ -9,9 +9,12 @@
  * Pure and framework-free: no React, no Ink — just strings in, strings out.
  */
 import {
+  type ShellRowParts,
   type ToolResultDetail,
   type ToolResultSpill,
   artifactCard,
+  shellOutcome,
+  shellRowParts,
   toolLabel,
 } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
@@ -26,12 +29,13 @@ import { formatDurationMs } from "./format.ts";
 import { harnessLevel, isHarness, joinsPrevious, showsGlyph } from "./harness-group.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
+import { GUTTER, type MascotCell, headerView } from "./mascot.ts";
 import { messageRows } from "./message-row.ts";
 import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import { firedRowLines, isFiredWake } from "./schedule-view.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
-import type { DisplayItem, ToolItem } from "./state.ts";
+import type { DisplayItem, HeaderItem, ToolItem } from "./state.ts";
 import {
   subAgentEarlierRow,
   subAgentHeadRow,
@@ -87,6 +91,14 @@ export interface RenderOptions {
    * the row-cache key.
    */
   readonly chartGlyphs?: ChartGlyphs;
+  /**
+   * Beta `beta.compactShell` (docs/feat/shell-intent-line.md §4): a described
+   * `shell` row hides its `$ command` row while running and on success. Decided
+   * at launch like `chartGlyphs`, but it IS in the row-cache key: the cache is
+   * module-level, so an item drawn compact must not be served to a render that
+   * is not.
+   */
+  readonly compactShell?: boolean;
 }
 
 const DEFAULT_THRESHOLD = 8;
@@ -136,6 +148,58 @@ function assistantLines(text: string): string[] {
   const [first = "", ...rest] = rendered.split("\n");
   // A brand-accent bullet marks the reply; continuation lines hang under it.
   return [`${theme.accent(BULLET)} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
+}
+
+/**
+ * The startup header's rows (docs/feat/tui-mascot.md D4): the mascot's cells,
+ * then the three text lines beside it — or the text lines alone when the sprite
+ * yields. Everything the decision needs is decided in `mascot.ts`; this is only
+ * the mapping to strings.
+ *
+ * The mascot is shown only when the row fits by construction, so `wrapLines`
+ * takes its `fitsUnchanged` path and never splits a sprite row (the scroll
+ * buffer carries only `38;2` across a wrap). Each cell is closed by chalk, so no
+ * SGR leaks into the text or the next row.
+ */
+function headerLines(item: HeaderItem, opts: RenderOptions): string[] {
+  const width = Math.floor(opts.width ?? DEFAULT_WIDTH);
+  const view = headerView({
+    ...(item.version !== undefined ? { version: item.version } : {}),
+    model: item.model,
+    cwd: item.cwd,
+    ...(item.home !== undefined ? { home: item.home } : {}),
+    width,
+    // Read at CALL time, never at import (`blink.ts`'s trap).
+    colorLevel: chalk.level,
+    palette: item.palette,
+  });
+  const text = view.lines.map((line) =>
+    line.strong === undefined
+      ? theme.subtle(line.text)
+      : `${chalk.bold(line.strong)}${theme.subtle(line.text)}`,
+  );
+  if (view.mascot === null) {
+    return text;
+  }
+  // Vertically centred: sprite rows 0–4, text on rows 1–3, rows 0 and 4 alone.
+  const PAD_TOP = 1;
+  const rows: string[] = [];
+  for (let i = 0; i < view.mascot.length; i += 1) {
+    const sprite = view.mascot[i] ?? [];
+    const cells = sprite.map(paintCell).join("");
+    const line = text[i - PAD_TOP];
+    rows.push(line === undefined ? cells : `${cells}${" ".repeat(GUTTER - sprite.length)}${line}`);
+  }
+  return rows;
+}
+
+/** One sprite cell as chalk text: a bare space when empty (the terminal's own background). */
+function paintCell(cell: MascotCell): string {
+  if (cell.fg === undefined) {
+    return cell.glyph;
+  }
+  const fg = chalk.hex(cell.fg);
+  return cell.bg === undefined ? fg(cell.glyph) : fg.bgHex(cell.bg)(cell.glyph);
 }
 
 const HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
@@ -872,6 +936,16 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   if (diagram !== undefined) {
     return [...diagram];
   }
+  // A `shell` call the model described: the sentence titles the row, the
+  // command follows as a subtle `$` row (docs/feat/shell-intent-line.md §3).
+  // No sentence ⇒ `null` ⇒ the row below, unchanged.
+  const shell =
+    tool.name === "shell"
+      ? shellRowParts(tool.args, tool.status, opts.compactShell === true)
+      : null;
+  if (shell !== null) {
+    return shellIntentLines(tool, shell, cols, opts);
+  }
   if (tool.status === "queued") {
     // Approved, not started: one dim row, no body, no spinner.
     const row = queuedRow(toolTitle(tool));
@@ -880,7 +954,6 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
     const fitted = row.subtitle === "" ? "" : fitSubtitle(row.subtitle, budget);
     return [theme.subtle(`${head}${fitted === "" ? "" : ` ${fitted}`} ${row.suffix}`)];
   }
-  const width = Math.max(20, cols - INDENT.length - 1);
   const elapsed = tool.durationMs !== undefined ? ` ${formatDurationMs(tool.durationMs)}` : "";
   const { label, subtitle } = toolTitle(tool);
   // Collapsed: the subtitle is cut to whatever the header has ROOM for on one
@@ -893,7 +966,12 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const fitted = expanded || subtitle === "" ? "" : fitSubtitle(subtitle, budget);
   const header = `${head}${fitted === "" ? "" : ` ${theme.subtle(fitted)}`}${theme.subtle(elapsed)}`;
   const command = expanded && subtitle !== "" ? commandRows(subtitle, cols) : [];
+  return [header, ...command, ...toolBodyRows(tool, cols, opts)];
+}
 
+/** A tool's body under its header: cut, the first line on the `⎿` connector. */
+function toolBodyRows(tool: ToolItem, cols: number, opts: RenderOptions): string[] {
+  const width = Math.max(20, cols - INDENT.length - 1);
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
   const body = toolBody(tool, width, opts.spillInPod === true, {
@@ -910,7 +988,52 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
     ? body
     : collapsedBody(body, { expanded: opts.expandAll === true, threshold, preview });
   // The first body line carries the corner connector; the rest align under it.
-  return [header, ...command, ...shown.map((l, i) => (i === 0 ? connector() : INDENT) + l)];
+  return shown.map((l, i) => (i === 0 ? connector() : INDENT) + l);
+}
+
+/**
+ * A described `shell` call (variant B, docs/feat/shell-intent-line.md §3):
+ * row 0 = `● <bold sentence> <written outcome><elapsed>` (the outcome a glyph +
+ * word, never hue alone), row 1 = `  $ <first command line>` subtle and cut,
+ * unless the beta hides it. Expanded: the whole command on `  │ $ …` rows,
+ * whatever the beta says. While it runs: no body (no `running…` line) — the
+ * blinking bullet says it.
+ */
+function shellIntentLines(
+  tool: ToolItem,
+  parts: ShellRowParts,
+  cols: number,
+  opts: RenderOptions,
+): string[] {
+  const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  const dollar = `$ ${parts.command}`;
+  const lines = parts.command.split(/\r?\n/);
+  const firstLine = `$ ${lines[0] ?? ""}${lines.length > 1 ? "…" : ""}`;
+  const commandRow =
+    parts.commandRow && !expanded ? [INDENT + theme.subtle(fitSubtitle(firstLine, cols - 2))] : [];
+  if (tool.status === "queued") {
+    const row = queuedRow({ label: parts.sentence, subtitle: "" });
+    const budget = cols - stringWidth(row.glyph) - stringWidth(row.suffix) - 2;
+    return [
+      theme.subtle(`${row.glyph} ${fitSubtitle(row.label, budget)} ${row.suffix}`),
+      ...(expanded ? commandRows(dollar, cols) : commandRow),
+    ];
+  }
+  const outcome = shellOutcome({
+    status: tool.status,
+    ...(tool.resultText !== undefined ? { text: tool.resultText } : {}),
+    ...(tool.spill !== undefined ? { spillHead: tool.spill.head } : {}),
+  });
+  const elapsed = tool.durationMs !== undefined ? ` ${formatDurationMs(tool.durationMs)}` : "";
+  const outcomeCells = outcome === null ? 0 : stringWidth(outcome) + 1;
+  const budget = cols - (stringWidth(BULLET) + 1) - outcomeCells - stringWidth(elapsed);
+  const painted =
+    outcome === null
+      ? ""
+      : ` ${tool.status === "ok" ? theme.success(outcome) : theme.error(outcome)}`;
+  const header = `${bullet(tool)} ${chalk.bold(fitSubtitle(parts.sentence, budget))}${painted}${theme.subtle(elapsed)}`;
+  const body = tool.status === "running" ? [] : toolBodyRows(tool, cols, opts);
+  return [header, ...(expanded ? commandRows(dollar, cols) : commandRow), ...body];
 }
 
 /** A full-width grey rule with `text` in it: `── text ─────…`. */
@@ -1033,6 +1156,8 @@ export function itemLinesAt(item: DisplayItem, opts: RenderOptions, glyph: boole
     }
     case "assistant":
       return assistantLines(item.text);
+    case "header":
+      return headerLines(item, opts);
     case "tool":
       return toolLines(item, opts);
     case "notice":
@@ -1181,6 +1306,7 @@ interface RowCacheEntry {
   readonly width: number;
   readonly threshold: number;
   readonly preview: number;
+  readonly compactShell: boolean;
   collapsed?: readonly string[];
   expanded?: readonly string[];
   command?: readonly string[];
@@ -1243,6 +1369,7 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   const expand = opts.expandAll;
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
+  const compact = opts.compactShell === true;
   // Only `tool` items collapse, so only their layout depends on
   // expand/threshold/preview/expandedIds; every other kind is a function of
   // width alone (always the `collapsed` slot) — except a notice with a BODY
@@ -1264,6 +1391,7 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   if (
     entry &&
     entry.width === width &&
+    entry.compactShell === compact &&
     (!expandMatters || (entry.threshold === threshold && entry.preview === preview))
   ) {
     const hit = entry[slot];
@@ -1271,7 +1399,7 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
       return withPhase(item, hit, opts);
     }
   } else {
-    entry = { width, threshold, preview };
+    entry = { width, threshold, preview, compactShell: compact };
     rowCache.set(item, entry);
   }
   const rows = wrapLines(itemLines(item, opts), width);

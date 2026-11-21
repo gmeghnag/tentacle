@@ -19,7 +19,6 @@ import {
   ScrollView,
   Share,
   StyleSheet,
-  Text,
   View,
   useWindowDimensions,
 } from "react-native";
@@ -27,6 +26,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { type ViewerItem, viewerPageAt } from "../../media-layout.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
+import { Text } from "../../ui/Text.tsx";
 
 export interface MediaViewerProps {
   /** The photos to page through, in the message's order. */

@@ -8,6 +8,7 @@
  * layout only says how a row draws — a reasoning row folded into a step draws
  * nothing (`hidden`); the live "Thinking…" node is the list's footer (`tail`).
  */
+import { shellExitCode, shellOutcome, shellRowParts } from "@tentacle/core";
 import { chartRowSpec } from "./chart-row.ts";
 import {
   type ToolNameParts,
@@ -283,6 +284,14 @@ export interface StepRowView {
   readonly name: ToolNameParts;
   /** The one mono line after the name. */
   readonly subtitle: string;
+  /**
+   * A described `shell` call's `$ <first command line>`, drawn as a second
+   * line UNDER the name (docs/feat/shell-intent-line.md §6); null: none (no
+   * sentence, or the beta hides it).
+   */
+  readonly subline: string | null;
+  /** The name shimmers (`ThinkingWord`): a described `shell` call while it runs. */
+  readonly shimmer: boolean;
   readonly dot: StepDot;
   /** `toolMeta`'s right-hand text: `+n −m`, `denied` or the duration. */
   readonly trailing: string;
@@ -309,9 +318,14 @@ export function stepRowView(
   thought: string | null,
   full: boolean,
   thoughtFirst: boolean = thought !== null,
+  compact = false,
 ): StepRowView {
   const meta = toolMeta(row);
   const dot = DOT[meta.tone];
+  // A `shell` call the model described: the sentence is the name, the command
+  // a `$` line under it, the outcome WRITTEN in the trailing text. No sentence
+  // ⇒ `null` ⇒ the view below, unchanged.
+  const shell = row.name === "shell" ? shellRowParts(row.args, row.status, compact) : null;
   const command = bodyCommand(row.name, row.args);
   const cut = outputView(row.output ?? "", { full, error: row.status === "error" });
   const output =
@@ -322,13 +336,16 @@ export function stepRowView(
           hidden: cut.hidden,
           error: cut.error,
         };
+  const trailing = shell === null ? meta.trailing : shellTrailing(row, meta.trailing);
   return {
-    name: toolName(row.name, row.label),
-    subtitle: rowSubtitle(row.name, row.args),
+    name: shell === null ? toolName(row.name, row.label) : { tool: shell.sentence },
+    subtitle: shell === null ? rowSubtitle(row.name, row.args) : "",
+    subline: shell?.commandRow ? `$ ${firstLine(shell.command)}` : null,
+    shimmer: shell !== null && dot === "running",
     dot,
-    trailing: meta.trailing,
+    trailing,
     trailingRed: row.status === "error" || row.status === "denied",
-    live: dot === "running" && row.at !== undefined && meta.trailing === "",
+    live: dot === "running" && row.at !== undefined && trailing === "",
     thought,
     command,
     output,
@@ -338,8 +355,58 @@ export function stepRowView(
       output !== null ||
       row.diff !== undefined ||
       row.denialReply !== undefined,
-    a11yLabel: stepA11yLabel(row, thoughtFirst),
+    a11yLabel:
+      shell === null
+        ? stepA11yLabel(row, thoughtFirst)
+        : shellA11yLabel(row, shell.sentence, thoughtFirst),
   };
+}
+
+/** A command's first line, `…` when it has more. */
+function firstLine(command: string): string {
+  const lines = command.split(/\r?\n/);
+  return `${lines[0] ?? ""}${lines.length > 1 ? "…" : ""}`;
+}
+
+/**
+ * A described shell row's trailing text: `toolMeta`'s with the WRITTEN outcome
+ * first — `✓ 1.2 s`, `✗ exit 2 · 3.4 s`, `✗ · 3.4 s` (no code) — glyph and word,
+ * never hue alone. A denial keeps `denied`; running keeps "" (the live clock).
+ */
+function shellTrailing(row: ToolRow, base: string): string {
+  if (row.status === "denied" || row.diff !== undefined) {
+    return base;
+  }
+  const outcome = shellOutcome({
+    status: row.status,
+    ...(row.output !== undefined ? { text: row.output } : {}),
+    ...(row.spill !== undefined ? { spillHead: row.spill.head } : {}),
+  });
+  if (outcome === null) {
+    return base;
+  }
+  if (base === "") {
+    return outcome;
+  }
+  return outcome === "✓" ? `${outcome} ${base}` : `${outcome} · ${base}`;
+}
+
+/** VoiceOver for a described shell row: the sentence, then the outcome in words. */
+function shellA11yLabel(row: ToolRow, sentence: string, thought: boolean): string {
+  const parts = [sentence, STATUS_WORD[row.status]];
+  if (row.status === "error") {
+    const code = shellExitCode(row.spill?.head ?? row.output);
+    if (code !== null) {
+      parts.push(`exit code ${code}`);
+    }
+  }
+  if (row.durationMs !== undefined) {
+    parts.push(spokenDuration(row.durationMs));
+  }
+  if (thought) {
+    parts.push("thought first");
+  }
+  return parts.join(", ");
 }
 
 /**

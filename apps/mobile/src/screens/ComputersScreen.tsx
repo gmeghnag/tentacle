@@ -17,7 +17,7 @@
  * a record the same way.
  */
 import type { JSX } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   type ProjectRow,
@@ -37,6 +37,7 @@ import { InlineMono } from "../ui/InlineMono.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
+import { Text } from "../ui/Text.tsx";
 
 export type { ProjectRow };
 
@@ -176,7 +177,19 @@ function ComputerSection({
             {section.name}
           </Text>
           <View style={styles.statusLine}>
-            <StatusDot palette={palette} tone={tone} size={7} />
+            <StatusDot
+              palette={palette}
+              tone={
+                tone === "online"
+                  ? "online"
+                  : tone === "attention"
+                    ? "attention"
+                    : tone === "checking"
+                      ? "wait"
+                      : "offline"
+              }
+              size={7}
+            />
             <Text
               testID={`computer-status-${section.computerId}`}
               maxFontSizeMultiplier={DENSE_FONT_SCALE}
@@ -198,8 +211,8 @@ function ComputerSection({
             palette={palette}
             first={index === 0}
             icon="folder"
-            iconDashed={!row.ok}
-            dimmed={!row.ok}
+            iconDashed={row.muted}
+            dimmed={row.muted}
             title={row.label}
             trailing={
               <Pressable
@@ -255,7 +268,15 @@ function ProjectStatus({
       ) : (
         <StatusDot
           palette={palette}
-          tone={row.tone === "on" ? "online" : row.tone === "attention" ? "attention" : "offline"}
+          tone={
+            row.tone === "on"
+              ? "online"
+              : row.tone === "attention"
+                ? "attention"
+                : row.tone === "wait"
+                  ? "wait"
+                  : "offline"
+          }
           size={7}
         />
       )}

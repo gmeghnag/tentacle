@@ -10,6 +10,7 @@
  * never came" have to be told apart in a capture.
  */
 import { describe, expect, test } from "bun:test";
+import { DomainErrorCode } from "@tentacle/transport";
 import { type AppLogEntry, createAppLog, entriesToText } from "../src/app-log.ts";
 import { QTRACE, TRACE_IDS_MAX, queueTrace, traceLine } from "../src/queue-trace.ts";
 
@@ -104,6 +105,37 @@ describe("the rest of the timeline", () => {
     expect(traceLine(SID, { kind: "turn-end", turnId: null, outcome: "ended" }).fields.turn).toBe(
       "-",
     );
+  });
+
+  test("a LOST turn's line carries the throwing error's class and code, never its message", () => {
+    // Slice 2 of docs/fix/mobile-stream-lost-repeat.md: the capture must name
+    // the trigger, and the export is shareable — so the CLASS (`why`) and the
+    // numeric code only, exactly as `connection.ts` logs a client error.
+    const fields = traceLine(SID, {
+      kind: "turn-end",
+      turnId: LONG_ID,
+      outcome: "lost",
+      cause: { error: "RpcError", code: DomainErrorCode.UnknownSession },
+    }).fields;
+    expect(fields).toMatchObject({
+      ev: "turn-end",
+      outcome: "lost",
+      why: "RpcError",
+      code: DomainErrorCode.UnknownSession,
+    });
+    // No cause → no `why`/`code` at all (a clean or interrupted end says nothing).
+    const clean = traceLine(SID, { kind: "turn-end", turnId: LONG_ID, outcome: "ended" }).fields;
+    expect(clean.why).toBeUndefined();
+    expect(clean.code).toBeUndefined();
+    // A class with no code omits `code` rather than writing a `-` placeholder.
+    const plain = traceLine(SID, {
+      kind: "turn-end",
+      turnId: LONG_ID,
+      outcome: "lost",
+      cause: { error: "TypeError" },
+    }).fields;
+    expect(plain.why).toBe("TypeError");
+    expect(plain.code).toBeUndefined();
   });
 
   test("attach, resync, link and history are distinguished by `ev` and `state`", () => {

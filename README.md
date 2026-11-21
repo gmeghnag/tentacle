@@ -374,6 +374,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | --- | --- | --- | --- |
 | `$schema` | — | — | A JSON-schema pointer for editor completion; accepted and ignored. |
 | `autoWake` | `TENTACLE_AUTO_WAKE` | true | Start a continuation turn when a background job exits while idle. |
+| `beta.compactShell` | — | false | With the model's sentence on a `shell` row, show the `$ command` row only on failure. |
 | `contextAwareness.enabled` | — | true | Whether the model is told how full its context is. |
 | `contextAwareness.stepPercent` | — | 1 | A line per this many percent of the window (1–100). |
 | `contextPrune.enabled` | — | false | Whether the model's copy of the history is pruned in batches. |

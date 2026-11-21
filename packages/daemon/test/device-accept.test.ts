@@ -2,7 +2,7 @@
  * `acceptDevice` — the device path with no Bun socket under it
  * (docs/feat/mobile-relay.md R3). The direct `/e2e` route and the mobile
  * relay's accept leg both call this, so what it promises is proved here on an
- * in-memory `createChannelPair` channel: the same authenticating decisions, the
+ * in-memory `createByteCarrierPair` channel: the same authenticating decisions, the
  * same "nothing is built until the responder RESOLVES" (F4/P2), and the same
  * exactly-once settle that frees the caller's handshake slot (F14).
  */
@@ -10,8 +10,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DuplexChannel } from "@tentacle/transport";
-import { RpcPeer, createChannelPair } from "@tentacle/transport";
+import type { ByteCarrier } from "@tentacle/transport";
+import { RpcPeer, createByteCarrierPair } from "@tentacle/transport";
 import {
   type NoiseError,
   noiseInitiator,
@@ -79,7 +79,7 @@ async function tick(ms = 20): Promise<void> {
 
 interface Harness {
   /** The paired/unknown phone's end of the channel. */
-  readonly phone: DuplexChannel;
+  readonly phone: ByteCarrier;
   /** `onSettled` calls — the caller's limiter slot. */
   readonly settled: () => number;
   /** Connections `acceptDevice` built. */
@@ -95,7 +95,7 @@ function acceptOn(
 ): Harness {
   const audit: string[] = [];
   const authority = authorityFor(configDir, audit);
-  const [daemon, phone] = createChannelPair();
+  const [daemon, phone] = createByteCarrierPair();
   let settled = 0;
   let built = 0;
   let closed = false;
@@ -106,7 +106,7 @@ function acceptOn(
   const pair = phone;
   // The daemon end's close must be observable to the F22 check, exactly as the
   // socket wrapper's `isClosed()` is.
-  const wrapped: DuplexChannel = {
+  const wrapped: ByteCarrier = {
     send: (d) => daemon.send(d),
     close: () => {
       closed = true;
@@ -158,7 +158,7 @@ function acceptOn(
 
 /** Complete a real handshake from the phone's end and drive `initialize` over it. */
 async function connect(
-  phone: DuplexChannel,
+  phone: ByteCarrier,
   privateKey: Uint8Array,
   remoteStatic: Uint8Array,
 ): Promise<RpcPeer> {
@@ -236,10 +236,10 @@ describe("acceptDevice builds a real Connection on a plain channel", () => {
     });
     if (!added.ok) throw new Error(added.reason);
     // Capture a legitimate message 1.
-    const captured: string[] = [];
+    const captured: Uint8Array[] = [];
     const first = acceptOn(configDir);
     const innerSend = first.phone.send.bind(first.phone);
-    const tapped: DuplexChannel = {
+    const tapped: ByteCarrier = {
       send: (d) => {
         captured.push(d);
         innerSend(d);
@@ -257,7 +257,7 @@ describe("acceptDevice builds a real Connection on a plain channel", () => {
     if (seenAfterReal === undefined) throw new Error("the real handshake must be seen");
     // Replay it on a FRESH channel and never send the confirm.
     const replay = acceptOn(configDir);
-    replay.phone.send(captured[0] as string);
+    replay.phone.send(captured[0] as Uint8Array);
     await tick(60);
     expect(replay.built()).toBe(0);
     expect(replay.audit.some((l) => l.startsWith("device-open"))).toBe(false);
@@ -290,7 +290,7 @@ describe("every outcome settles exactly once (the caller's slot)", () => {
     const phone = h.phone;
     const innerSend = phone.send.bind(phone);
     let sent = 0;
-    const hangsUp: DuplexChannel = {
+    const hangsUp: ByteCarrier = {
       send: (d) => {
         innerSend(d);
         sent += 1;

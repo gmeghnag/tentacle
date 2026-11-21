@@ -27,8 +27,6 @@ import {
   KeyboardAvoidingView,
   ScrollView,
   StyleSheet,
-  Text,
-  TextInput,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -48,6 +46,7 @@ import { InlineMono } from "../ui/InlineMono.tsx";
 import { PillButton } from "../ui/PillButton.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { Sheet } from "../ui/Sheet.tsx";
+import { Text, TextInput } from "../ui/Text.tsx";
 
 export interface PairScreenProps {
   readonly palette: Palette;

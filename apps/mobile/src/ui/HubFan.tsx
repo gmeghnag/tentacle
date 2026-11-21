@@ -12,7 +12,7 @@
  * reach commits, anywhere else closes.
  */
 import { type JSX, memo, useEffect, useRef, useState } from "react";
-import { Animated, StyleSheet, Text, View } from "react-native";
+import { Animated, StyleSheet, View } from "react-native";
 import { Path, Svg } from "react-native-svg";
 import { type HubActionId, type HubItem, itemA11yLabel } from "../hub-actions.ts";
 import {
@@ -28,6 +28,7 @@ import { PERF } from "../perf-probe.ts";
 import { type Palette, shadow, typography } from "../theme.ts";
 import { Icon, type IconName } from "./Icon.tsx";
 import { RingArc } from "./RingArc.tsx";
+import { Text } from "./Text.tsx";
 
 const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   stop: "stop.fill",

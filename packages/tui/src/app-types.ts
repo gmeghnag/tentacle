@@ -551,6 +551,12 @@ export interface AppProps {
    */
   readonly modelLabel?: string;
   readonly cwd: string;
+  /**
+   * This tentacle's release version, painted in the startup header's first line
+   * (docs/feat/tui-mascot.md D5). The TUI package cannot import it (cli → tui),
+   * so the CLI passes it; absent → the line is `tentacle` alone.
+   */
+  readonly version?: string;
   readonly contextWindow?: number;
   /** In a container/pod: the status bar's accent badge (laptop-side facts). Absent: local. */
   readonly target?: TargetBadge;
@@ -697,4 +703,10 @@ export interface AppProps {
    * constant for the App's lifetime, never carried to a pod.
    */
   readonly chartGlyphs?: ChartGlyphs;
+  /**
+   * Beta `beta.compactShell` (docs/feat/shell-intent-line.md §4): a described
+   * `shell` row shows its `$ command` row only on failure. Absent → off.
+   * LAPTOP-ONLY display, constant for the App's lifetime.
+   */
+  readonly compactShell?: boolean;
 }

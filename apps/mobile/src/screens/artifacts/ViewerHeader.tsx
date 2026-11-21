@@ -5,10 +5,11 @@
  * what Share sends are the caller's (S9 wires them).
  */
 import type { JSX } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { type Palette, space, typography } from "../../theme.ts";
 import { HeaderIcon } from "../../ui/HeaderIcon.tsx";
+import { Text } from "../../ui/Text.tsx";
 
 export interface ViewerHeaderProps {
   readonly palette: Palette;

@@ -14,6 +14,7 @@
 import { seriesColor } from "@tentacle/core";
 import { type ChartScheme, chartScheme } from "./chart-row.ts";
 import type { DiagramStyle } from "./diagram-settings-store.ts";
+import { paletteVariant } from "./theme-beta.ts";
 import { type ChartTokens, MONO, type Palette, chartTokensFor } from "./theme.ts";
 
 /** Mermaid's `themeVariables` as the driver receives them: a flat string map. */
@@ -138,5 +139,7 @@ export function diagramTheme(palette: Palette, style: DiagramStyle = "outline"):
 
 /** The scheme (and look) half of a render's cache key (`diagramCacheKey` adds hash + scale). */
 export function diagramThemeKey(palette: Palette, style: DiagramStyle = "outline"): string {
-  return `${style === "filled" ? "base+filled" : "base"}|${chartScheme(palette)}`;
+  const look = style === "filled" ? "base+filled" : "base";
+  const variant = paletteVariant(palette);
+  return `${variant === undefined ? look : `${look}+${variant}`}|${chartScheme(palette)}`;
 }

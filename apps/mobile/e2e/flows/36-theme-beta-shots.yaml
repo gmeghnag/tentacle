@@ -1,0 +1,200 @@
+appId: so.tentacle.app
+---
+# 36 (docs/feat/mobile-theme-beta.md): the Figtree try-out theme, Settings → Beta →
+# "Tema Figtree (prova)". The owner's evidence set, each screen in light AND dark
+# (`_shot`): Computers, Settings → Beta, a chat with markdown + tool rows, the
+# Artifacts gallery — first with the switch ON (turned on live, no restart),
+# then after a RELAUNCH (the switch must still be on: remembered) turned OFF
+# (today's look). Its own session (`THEMEBETA_ID`).
+- runFlow: _pair.yaml
+- assertVisible:
+    id: "computers-list"
+# --- ON, applied live -------------------------------------------------------
+- tapOn:
+    id: "open-settings"
+- scrollUntilVisible:
+    element:
+      id: "beta-theme-figtree"
+    direction: DOWN
+- assertVisible:
+    id: "beta-theme-figtree"
+    checked: false
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-off-settings-beta"
+- tapOn:
+    id: "beta-theme-figtree"
+- assertVisible:
+    id: "beta-theme-figtree"
+    checked: true
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-on-settings-beta"
+- scrollUntilVisible:
+    element:
+      id: "settings-back"
+    direction: UP
+- tapOn:
+    id: "settings-back"
+- assertVisible:
+    id: "computers-list"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-on-computers"
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${THEMEBETA_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${THEMEBETA_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+# The laptop's turn: six charts + one HTML page (flow 35's world), for the gallery.
+- runScript:
+    file: "35-gallery-laptop.js"
+    env:
+      GALLERY_ID: ${THEMEBETA_ID}
+- extendedWaitUntil:
+    visible:
+      id: "artifact-card-report"
+    timeout: 30000
+# Markdown: the mock's SHOWCASE answer (inline code, a code block, a table, a list).
+- tapOn:
+    id: "composer-input"
+- inputText: "SHOWCASE"
+- pressKey: Enter
+- extendedWaitUntil:
+    visible:
+      id: "code-2-copy"
+    timeout: 20000
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+# Tool rows: flow 29's three-round turn (two approved shell calls, an error step).
+- tapOn:
+    id: "composer-input"
+- inputText: "TOOLROWS29"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 30000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-on-chat-tools"
+- scrollUntilVisible:
+    element:
+      id: "code-2-copy"
+    direction: UP
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-on-chat-markdown"
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "artifacts"
+- tapOn:
+    id: "hub-item-artifacts"
+- extendedWaitUntil:
+    visible:
+      id: "artifact-gallery-row-report"
+    timeout: 10000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-on-gallery"
+# --- relaunch: remembered; then OFF -----------------------------------------
+- launchApp
+- runFlow: _unlock.yaml
+- assertVisible:
+    id: "computers-list"
+- tapOn:
+    id: "open-settings"
+- scrollUntilVisible:
+    element:
+      id: "beta-theme-figtree"
+    direction: DOWN
+- assertVisible:
+    id: "beta-theme-figtree"
+    checked: true
+- tapOn:
+    id: "beta-theme-figtree"
+- assertVisible:
+    id: "beta-theme-figtree"
+    checked: false
+- scrollUntilVisible:
+    element:
+      id: "settings-back"
+    direction: UP
+- tapOn:
+    id: "settings-back"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-off-computers"
+- tapOn:
+    id: "computer-${output.computerId}"
+- scrollUntilVisible:
+    element:
+      id: "session-${THEMEBETA_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${THEMEBETA_ID}"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-off-chat-tools"
+- scrollUntilVisible:
+    element:
+      id: "code-2-copy"
+    direction: UP
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-off-chat-markdown"
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "artifacts"
+- tapOn:
+    id: "hub-item-artifacts"
+- extendedWaitUntil:
+    visible:
+      id: "artifact-gallery-row-report"
+    timeout: 10000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "36-off-gallery"
