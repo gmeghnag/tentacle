@@ -53,11 +53,7 @@ import type { LinkIndicator } from "./link-status.ts";
 import type { OpenPanel } from "./panel.ts";
 import { panelView } from "./panel.ts";
 import { replyView } from "./permission-reply.ts";
-import {
-  type PermissionController,
-  permissionDetailLines,
-  permissionShowsCwd,
-} from "./permission-ui.ts";
+import { type PermissionController, permissionShowsCwd, permissionView } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedRows } from "./queued.ts";
 import { shownRows } from "./queued.ts";
 import type { ScheduleDockRow } from "./schedule-view.ts";
@@ -365,12 +361,17 @@ export function frameLayout(input: FrameInput) {
     permission.pending && permission.mode.mode === "reply"
       ? replyView(permission.mode, columns, replyMax)
       : undefined;
+  // The dialog's subject rows: the SAME view `PermissionPrompt` paints (a
+  // wrapped shell command takes several rows, the sentence one more).
+  const permView = permission.pending ? permissionView(permission.pending, null, columns) : null;
   const activeRows = confirmShown
     ? QUIT_CONFIRM_ROWS
     : permission.pending
       ? permissionPromptRows(
           permission.choices.length,
-          permission.pending === null ? 0 : permissionDetailLines(permission.pending).length,
+          permView === null
+            ? 0
+            : permView.detailRows.length + (permView.intentRow !== null ? 1 : 0),
           permission.pending !== null && permissionShowsCwd(permission.pending),
           replyShown?.rows.length,
           permission.pendingAgent !== null,

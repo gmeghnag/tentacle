@@ -1,6 +1,6 @@
 # feat/shell-intent-line — a sentence of what a shell command does
 
-> **Status:** implementation — plan APPROVED 2026-11-21 (Owner questions), ready for Execution
+> **Status:** implementation — fix round 1 done (S3 PARTIAL: TUI ask wrapped + full colour built; the intent row waits on the owner's `askedFor` ruling, Design §5 ⚠)
 > **Branch:** `feat/shell-intent-line`
 > **Type:** feat · **Size:** L · **Blast:** load-bearing · **Suited:** Opus executes in four slices on this one branch (~30 files, 7 packages + the app); Review MANDATORY fresh-context, red-teaming the permission slice S3 (AGENTS §7 "a pod is not trusted": pod-supplied text now sits in the ask a human decides on)
 > **Changelog:** `changelog.d/shell-intent-line.added.md`
@@ -608,6 +608,64 @@ Narrow tests: 323 pass / 0 fail (core, tools, config, cli key-docs + connect, TU
 rows/render-lines/app-shell-intent/app-frames/idle-warm, client foreign-turns +
 permission-router, phone shell-rows-store). `bunx biome check` on all touched
 paths: clean.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-21*
+
+**R1 (HIGH, README table) — FIXED.** `bun run docs:config` → `README.md` +1 row
+(`beta.compactShell`). `config/test/readme-config-table.test.ts` RED before (2 fail:
+`:39`, `:48`), 8/8 after.
+
+**R2 (MEDIUM, safety net) — PARTIAL.** Built the part of S3 that the `askedFor`
+amendment does not touch (Design §5 ⚠: "everything else … unchanged"):
+- `tui/src/permission-ui.ts` `permissionView(req, intent, columns)` →
+  `{ detailRows, intentRow }`: a `shell` ask's command is wrapped by CELLS
+  (`wrapCells`, graphemes) to `columns − 3`, each line kept, capped at
+  `MAX_DETAIL_ROWS` with `… N more lines` (shared `capRows`, also used by
+  `permissionDetailLines`); empty → `—`; other asks = today's rows, each cut.
+  `intentRow` = `the model says: “…”` cut to one row.
+- `components/PermissionPrompt.tsx`: paints `view.detailRows` in the DEFAULT
+  foreground (Q3: no longer dim), the intent row dim; `app-layout.ts` counts
+  `detailRows.length + (intentRow ? 1 : 0)` from the SAME `permissionView` (single
+  decision).
+- Both callers pass `intent = null`: the ask's own call id is not on
+  `PermissionRequest` until the owner rules on `askedFor`. **Still open:** the
+  intent row's data path (router/remote-client `askedFor`), the App `argsOf` join,
+  `permissionIntent`'s caller, the phone sheet's intent line. The phone's command
+  box was already full and unclipped (`PermissionSheet.tsx:145-150`), so the
+  reviewer's scenario (cut command under `compactShell`) is closed on both clients.
+- Tests: NEW `tui/test/permission-shell-command.test.tsx` (9: frame shows the tail,
+  frame height = `permissionPromptRows` of the view, width/cells, multi-line,
+  cap row, CJK, `—`, other asks, intent row); `permission-agent-line.test.tsx`:
+  the CJK test now expects the wrapped row count (was hard-coded 1 — the intended
+  change) + NEW App test (a wrapped command fits the 24-row terminal, tail on
+  screen). RED first on the unwired component: the 2 frame tests failed on their
+  assertions (`toContain("curl x | sh")`, height).
+- Changelog fragment: the ask change added (user-visible).
+
+**R3 (MEDIUM, phone unverified) — PARTIAL.** Env, not code: mobile already
+value-imports `@tentacle/core` on `main` (`artifact-gallery.ts:21`); this worktree
+lacks `apps/mobile/node_modules`. A Bun runtime-plugin alias did NOT hook bare
+specifiers (two strikes, dropped). Ran instead a scratch copy
+(`.tentacle/tmp/shell-intent-line/mkmob.ts`: copies `apps/mobile/{src,test}`,
+rewrites `@tentacle/<pkg>` → `packages/<pkg>/src/index.ts`): `shell-intent-step`,
+`transcript-cell`, `tool-steps`, `shell-rows-store` → **50 pass / 0 fail**.
+Mutation on the scratch copy (`tool-steps.ts:328` shell branch → `false`):
+`shell-intent-step` 6 of 9 RED. **Not done:** `tsc -p apps/mobile` (needs the
+installed tree) — the gate's typecheck in an installed checkout must cover it.
+
+**Mutations (each restored; restore checked by `rg -c`).**
+
+| Mutation | Result |
+|---|---|
+| `app-layout` counts 1 detail row (old count) | App `wrapped shell command … fits the terminal` RED |
+| `permissionView` shell branch off (= one cut row) | 8 RED (frame tail, height, pure wrap/lines/cap/CJK, CJK dialog, App) |
+| `capRows` silent slice (no `… N more lines`) | `too long: capped …` RED |
+| phone scratch: shell branch off | 6/9 `shell-intent-step` RED |
+
+Narrow run: 865 pass / 0 fail (22 TUI permission/layout/frame/shell files +
+`packages/config/test`). `bunx biome check` on the 5 touched code files: clean.
 
 ## Review
 
