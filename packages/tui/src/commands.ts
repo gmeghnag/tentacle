@@ -577,6 +577,9 @@ export function transcriptToMarkdown(items: readonly DisplayItem[]): string {
       }
     } else if (item.kind === "notice") {
       parts.push(`> ${item.text}`);
+    } else if (item.kind === "header") {
+      // Display-only: the startup header is never part of the saved document
+      // (docs/feat/tui-mascot.md D2).
     } else {
       const status =
         item.status === "ok"

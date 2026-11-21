@@ -4,12 +4,14 @@
  * that moves the derived rows / JSX (S10) must reproduce every frame exactly.
  * Only the volatile parts are normalised: the spinner glyph and elapsed times.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { PermissionBroker, type PermissionRequest } from "@tentacle/core";
+import chalk from "chalk";
 import { render } from "ink-testing-library";
 import { App, type AppProps, type SessionController, type SessionDirectory } from "../src/App.tsx";
 import type { FileProbe } from "../src/attach-files.ts";
 import type { DockJobRow } from "../src/background-list.ts";
+import { stripAnsi } from "../src/render-lines.ts";
 import { inertSession } from "./session-stub.ts";
 import { BACKGROUND_ROW, type DockTestRow } from "./subagent-row.ts";
 
@@ -124,9 +126,9 @@ describe("S0 frame set", () => {
   test("idle", async () => {
     const t = await mount(fake());
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -155,13 +157,13 @@ describe("S0 frame set", () => {
     const t = await mount(fake());
     await t.keys("hang", ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
       › hang
 
       ● reply to hang
-
-
 
 
 
@@ -194,9 +196,9 @@ describe("S0 frame set", () => {
     void t.permissions.request(req, { turnId: "own-1" });
     await delay(60);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -225,9 +227,9 @@ describe("S0 frame set", () => {
     const t = await mount(fake());
     await t.keys("/");
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -263,9 +265,9 @@ describe("S0 frame set", () => {
     const t = await mount(fake(), { sessions });
     await t.keys("/sessions", ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -294,9 +296,9 @@ describe("S0 frame set", () => {
     const t = await mount(fake(), { mcpStatus: () => Promise.resolve([]) });
     await t.keys("/mcp", ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -325,9 +327,9 @@ describe("S0 frame set", () => {
     const t = await mount(fake());
     await t.keys("/skills", ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -356,9 +358,9 @@ describe("S0 frame set", () => {
     const t = await mount(fake({ agents: [BACKGROUND_ROW.sa1, BACKGROUND_ROW.sa2], jobs: [JOB] }));
     await t.keys(CTRL_T);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -382,9 +384,9 @@ describe("S0 frame set", () => {
     `);
     await t.keys(ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -408,9 +410,9 @@ describe("S0 frame set", () => {
     `);
     await t.keys(ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -439,9 +441,9 @@ describe("S0 frame set", () => {
     const t = await mount(fake({ jobs: [JOB] }));
     await t.keys(DOWN, ENTER, ENTER);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -470,9 +472,9 @@ describe("S0 frame set", () => {
     const t = await mount(fake({ agents: [BACKGROUND_ROW.sa1] }));
     await t.keys(CTRL_C);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -502,9 +504,9 @@ describe("S0 frame set", () => {
     await t.keys("\x1b[200~/tmp/a.png\x1b[201~");
     await delay(80);
     pin(t.frame()).toMatchInlineSnapshot(`
-      "● Tentacle ready. Type a task, or /help for commands.
-
-
+      "tentacle
+      m · /tmp/work
+      /help for commands
 
 
 
@@ -527,5 +529,50 @@ describe("S0 frame set", () => {
       /tmp/work · ctx –/128k                                               ⏵⏵ auto-accept off (shift+tab)"
     `);
     t.app.unmount();
+  });
+});
+
+describe("the startup header (docs/feat/tui-mascot.md)", () => {
+  // The harness has no TTY, so chalk is off and every frame above shows the
+  // three text lines alone. Turning colour on is how the owner sees it on a real
+  // terminal, and it proves the whole path: the trim reads `chalk.level` at CALL
+  // time, not at import (`blink.ts`'s trap). The narrow case (sprite yields, text
+  // kept) is `render-lines.test.ts`, which can set the width.
+  const level = chalk.level;
+  afterEach(() => {
+    chalk.level = level;
+  });
+
+  test("truecolor: the sprite sits beside the three text lines", async () => {
+    chalk.level = 3;
+    const t = await mount(fake(), { version: "0.7.1" });
+    const rows = (t.app.lastFrame() ?? "").split("\n").map(stripAnsi);
+    expect(rows[1]).toContain("tentacle 0.7.1");
+    expect(rows[2]).toContain("m · /tmp/work");
+    expect(rows[3]).toContain("/help for commands");
+    // 9 sprite cells + a 2-cell gutter before the text; rows 0 and 4 are alone.
+    expect(rows[1]?.indexOf("tentacle")).toBe(11);
+    expect(rows[1]).toMatch(/[\u2580\u2584\u2588]/);
+    expect(rows[0]).not.toContain("tentacle");
+    t.app.unmount();
+  });
+
+  test("no version passed: line 1 is the name alone", async () => {
+    chalk.level = 3;
+    const rows = stripAnsi((await mount(fake())).app.lastFrame() ?? "").split("\n");
+    expect(rows[1]?.trimEnd()).toBe(
+      "\u2588\u2580\u2580\u2588\u2588\u2588\u2580\u2580\u2588  tentacle",
+    );
+  });
+
+  test("colours off: the three text lines, no sprite glyph", async () => {
+    chalk.level = 0;
+    const rows = stripAnsi((await mount(fake(), { version: "0.7.1" })).app.lastFrame() ?? "").split(
+      "\n",
+    );
+    expect(rows.slice(0, 4).join("\n")).not.toMatch(/[\u2580\u2584\u2588]/);
+    expect(rows[0]?.trimEnd()).toBe("tentacle 0.7.1");
+    expect(rows[1]?.trimEnd()).toBe("m · /tmp/work");
+    expect(rows[2]?.trimEnd()).toBe("/help for commands");
   });
 });
