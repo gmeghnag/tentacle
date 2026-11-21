@@ -362,6 +362,25 @@ screen's life) — pre-existing D9 shape, rare; noted, not graded.
 (`artifact-preview-source.test.ts`) and what was not captured on the simulator;
 mutation table credible (two extra mutations reproduced the same pattern).
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-21* (fresh-context reviewer, same model family as round 1's executor; this fix by deepseek)
+
+**Verdict: PASS.** Finding 1 is resolved: `planPreviewPrune` (`artifact-preview-store.ts`)
+bounds `previews/` to `PREVIEW_STORE_BYTES` (50 MB), deleting whole json+jpg pairs oldest
+first, never the one just saved; `save` applies it after the write (`artifact-preview-expo.ts:46-68`,
+best-effort, a failed prune doesn't fail the card). Precondition 2 now states the exception and
+a `## Notes / debt` section exists.
+
+- **Mutations (applied, run, reverted; `git status` clean):** ignore `keep` → 10 pass 1 fail;
+  never prune (loop over an empty slice) → 4 pass 7 fail. Both caught.
+- **Gate:** `artifact-preview-store` + `-source` + `bundle-node-free` + `artifact-cache-wiring`:
+  34 pass / 0 fail; `bun run lint` clean (2172 files); `bun run typecheck` exit 0.
+- **Regression attacks (nothing at MEDIUM+):** the order is by mtime, so a page you keep viewing
+  is still pruned by its age and then remade (cost only); a prune can delete the JPEG of a card
+  that's still on screen (RN keeps its decoded copy; worst case the preview is remade); the wiring
+  test only checks the source text, not behaviour (acceptable for an expo binding).
+
 ## Notes / debt
 
 *— claude-opus-5-5, 2026-11-22*
