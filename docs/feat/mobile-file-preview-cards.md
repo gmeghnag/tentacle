@@ -75,6 +75,11 @@ green) plus the new `gone` cases.
 - Every byte the phone keeps goes through the cache's one writer, `put`
   (`artifact-cache-store.ts:178-211`), which enforces the 200 MB cap;
   `forgetComputer` removes the computer's whole directory on unpair (`:228-233`).
+  **Except a made preview**, which is written beside the cache by
+  `artifact-preview-expo.ts` — deliberately outside the 200 MB plan (those bytes
+  are the SOURCE a preview is made from) and bounded on its own by
+  `planPreviewPrune` (`artifact-preview-store.ts`, `PREVIEW_STORE_BYTES` = a
+  quarter of the artifact cap), applied on every `save`.
 - `artifact/read`'s refusal is typed: `DomainErrorCode.ArtifactUnavailable`
   (`packages/protocol/src/jsonrpc.ts:85`) with `data.reason` `unknown` |
   `evicted` | `store_failed` (`packages/protocol/src/artifact.ts:169`), raised by
@@ -126,7 +131,10 @@ green) plus the new `gone` cases.
 6. **Disk** `artifact-preview-expo.ts`: previews under
    `artifacts/<computer>/previews/<sha>-w<W>.{json,jpg}` — inside the computer's
    cache directory, so an unpair drops them; a JSON whose page image is gone is
-   remade. `readTextHead` reads a bounded head (FileHandle).
+   remade. Bounded on its own: `save` applies `planPreviewPrune`
+   (`artifact-preview-store.ts`) — whole previews, least recently made first,
+   `PREVIEW_STORE_BYTES` = a quarter of the artifact cap, the preview just saved
+   never the one dropped. `readTextHead` reads a bounded head (FileHandle).
 7. **Wiring**: `artifact-thumbnail.ts` plugs the real pieces; `App.tsx` chains it
    after `sentPhotoSource` (its existing `next` fallback); the component
    `ArtifactCardRow` → `ArtifactCardBody` only maps the view-model (band with
@@ -143,6 +151,7 @@ green) plus the new `gone` cases.
 `apps/mobile/src/artifact-cache-expo.ts` (`writeSync`) ·
 `apps/mobile/modules/tentacle-preview/` (new) · `apps/mobile/src/preview-native-expo.ts`
 (new) · `apps/mobile/src/artifact-preview-expo.ts` (new) ·
+`apps/mobile/src/artifact-preview-store.ts` (new, `planPreviewPrune`) ·
 `apps/mobile/src/artifact-thumbnail.ts` (rewired) · `apps/mobile/App.tsx` ·
 `apps/mobile/src/screens/transcript/TranscriptRow.tsx` · e2e:
 `apps/mobile/e2e/preview-fixtures.ts`, `run.ts`, `flows/36-preview-*` · tests below.
@@ -159,6 +168,7 @@ green) plus the new `gone` cases.
 | Scrolled away mid-read | the driver aborts the request's own controller; the port returns `null` on an aborted signal; the driver drops a settle from an abandoned request. |
 | Cache cannot keep it (over the cap) | `put` → no uri → `null` → symbol. |
 | Unpair | `forgetComputer` removes `artifacts/<computer>/`, previews included. |
+| Previews over their own bound | `save`'s `planPreviewPrune` drops the least recently made whole previews (JSON + image together), keeping the one just saved. |
 | Build without the native module | `PREVIEW_NATIVE = null`: pages keep their symbol; images and lines still preview. |
 | Rotated / other screen width | the key is the band width (`w358`): another width makes a new preview. |
 | Kept JSON corrupt / foreign | `parseStoredPreview` → `null` → remade; a page JSON whose image is gone → remade. |
@@ -173,6 +183,10 @@ green) plus the new `gone` cases.
   offline (kept preview, no dial), cached version not re-read, image, markdown
   head, gone vs `store_failed`, QuickLook refusal, no native, too big, abort,
   ref without meta / mismatched sha.
+- `apps/mobile/test/artifact-preview-store.test.ts` (new): which previews
+  `planPreviewPrune` deletes (whole pairs, oldest first, stops when the rest
+  fits, never the one just saved, a cap nothing fits still bounds), and the expo
+  store applies it on `save` with its own cap (source pins).
 - `apps/mobile/test/artifact-card-render.test.ts` (new): the component maps it
   (band testIDs, top-aligned page style, gone disabled + no chevron).
 - `apps/mobile/test/thumbnails.test.ts`: `gone` outcome (failed + gone, never
@@ -259,6 +273,54 @@ green) plus the new `gone` cases.
    5 skips (AGENTS §6 names three opt-in groups; a group may hold several tests).
    None of this task's test files contains a skip; not re-counted on `main`.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-22*
+
+Review round 1's single finding (MEDIUM): previews were an uncapped, never-evicted
+store, and the doc's Precondition 2 claimed the opposite.
+
+1. **RED** — `bun test apps/mobile/test/artifact-preview-store.test.ts` before the
+   module: `error: Cannot find module '../src/artifact-preview-store.ts'`
+   (0 pass, 1 fail, 1 error). After the module (and the one rule a first pass got
+   wrong — a non-preview file counted toward the cap, caught by its own test and
+   fixed): 11 pass / 0 fail.
+2. **Bound, as a pure plan** (the §7 split, and the `artifact-cache.ts` pattern):
+   `apps/mobile/src/artifact-preview-store.ts` (new) —
+   `planPreviewPrune(files, cap = PREVIEW_STORE_BYTES, keep?)` deletes WHOLE
+   previews (`<sha>-w<W>.json` + its `.jpg`), least recently made first, stops as
+   soon as the rest fits, never `keep`, and still bounds a cap nothing fits.
+   `PREVIEW_STORE_BYTES` = a quarter of `ARTIFACT_CACHE_BYTES` (50 MB).
+   Why not "evict with the version": the preview's source is the artifact CACHE's
+   entry, and the plan may evict that at any time — a preview that went with it
+   would be remade by the next scroll, i.e. the expensive read again. So previews
+   keep their own budget, larger than one version and smaller than the cache.
+3. **Applied at the one writer** (`artifact-preview-expo.ts`): `save` prunes right
+   after its `writeSync`, over the directory's own listing, excluding the
+   `<sha>-<key>` it just saved (two files can share a modification time). The
+   prune is best-effort: a listing or a `delete` that throws does not fail the
+   card — the preview IS saved, the bound is retried on the next write.
+   The misleading "(Notes/debt)" in its header is replaced by the real rule.
+4. **Doc corrected**: Precondition 2 no longer claims `put` is the sole writer
+   (it names the exception and its bound), Design §6, the Failure-modes row, the
+   Files list and the Tests list say so, and the debt section below exists.
+5. **Mutations** (each applied, the file run, reverted; `git status` clean after):
+   ```
+   planPreviewPrune: prune one file of the pair   artifact-preview-store   6 pass 5 fail
+   planPreviewPrune: ignore `keep`                artifact-preview-store  10 pass 1 fail
+   planPreviewPrune: never prune (early return)   artifact-preview-store   4 pass 7 fail
+   planPreviewPrune: default cap = ∞              artifact-preview-store  10 pass 1 fail
+   planPreviewPrune: count a non-preview file     artifact-preview-store  10 pass 1 fail
+   expo save: prune never called                  artifact-preview-store  10 pass 1 fail
+   expo save: drop the just-saved exclusion       artifact-preview-store  10 pass 1 fail
+   ```
+6. **Touched tests** — `bun test artifact-preview-store artifact-preview-source
+   artifact-preview artifact-cache-wiring artifact-card-render thumbnails
+   artifact-cache-store` (7 files) plus `bundle-node-free`, `node-builtins-guard`,
+   `band-screens`, `transcript-parity`, `pairing-guards`: 166 pass / 0 fail
+   (12 files). `bunx biome check` on the three changed files: clean;
+   `tsc -p apps/mobile` exit 0.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-21* (fresh context; **same model as the executor** — shared blind spots possible)
@@ -299,3 +361,21 @@ screen's life) — pre-existing D9 shape, rare; noted, not graded.
 **Executor behaviour:** honest about what was not shown red
 (`artifact-preview-source.test.ts`) and what was not captured on the simulator;
 mutation table credible (two extra mutations reproduced the same pattern).
+
+## Notes / debt
+
+*— claude-opus-5-5, 2026-11-22*
+
+- **A preview is bounded on its own budget, not by the artifact cache's plan.**
+  `PREVIEW_STORE_BYTES` (50 MB) can hold far more cards than a screen shows; the
+  prune is LRU by the file's modification time, so a page scrolled past a month
+  ago goes first. Not linked to the version's eviction, on purpose (see Fix round
+  1, point 2): a preview outliving its source is a saved read, not a leak.
+- **The prune runs only from `save`.** A directory that is already over its bound
+  with no further save (an upgrade from a build without the bound) shrinks on the
+  next preview made, not at launch. Cheap to add at startup if it matters.
+- **No 150 ms fade** on a preview's arrival (Execution's drift item): a follow-up
+  if the owner wants it; it needs Reduce-Motion plumbing.
+- **Two other ports drop an async `write()` promise** the same way
+  `artifact-cache-expo.ts` did before this task: `outbox-fs-expo.ts:51` and
+  `pdf-source.ts:59`. Not on this path; a separate `fix`.
