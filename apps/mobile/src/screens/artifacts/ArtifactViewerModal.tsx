@@ -15,7 +15,7 @@ import type { ArtifactMeta } from "@tentacle/protocol";
  * (`<sanitized title>.<ext>`), never the 64-hex content hash.
  */
 import { type JSX, useEffect, useState } from "react";
-import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, StyleSheet, View } from "react-native";
 import type { AppLogField } from "../../app-log.ts";
 import { ARTIFACT_CACHE } from "../../artifact-cache-expo.ts";
 import { openTarget, viewerBody, viewerText } from "../../artifact-open.ts";
@@ -23,6 +23,7 @@ import { viewerFor, viewerSubtitle } from "../../artifact-viewer.ts";
 import type { LabelMode } from "../../chart-layout-kit.ts";
 import { ROW_FALLBACK_TEXT, rowErrorFields } from "../../row-guard.ts";
 import { type Palette, typography } from "../../theme.ts";
+import { Text } from "../../ui/Text.tsx";
 import { useReduceMotion } from "../../ui/chart/ChartAppear.tsx";
 import { ChartFullScreen } from "../../ui/chart/ChartFullScreen.tsx";
 import { RowGuard } from "../transcript/RowGuard.tsx";

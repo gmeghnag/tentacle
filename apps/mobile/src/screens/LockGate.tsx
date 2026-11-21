@@ -16,13 +16,14 @@
  */
 import type { JSX } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AppState, Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { AppState, Modal, Pressable, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { AppLock, AppLockEvent, LockDelay, LockView } from "../app-lock.ts";
 import { type Biometry, type LockScreenView, lockScreenView } from "../lock-screen.ts";
 import { type Palette, size, typography } from "../theme.ts";
 import { Banner } from "../ui/Banner.tsx";
 import { Icon } from "../ui/Icon.tsx";
+import { Text } from "../ui/Text.tsx";
 
 /** The heartbeat period: 1 s, as D1's `tick` expects. */
 export const HEARTBEAT_MS = 1000;

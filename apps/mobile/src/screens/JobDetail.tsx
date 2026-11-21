@@ -8,11 +8,12 @@
  * `jobDetailView`; the notice and the in-flight flag are the controller's.
  */
 import type { JSX } from "react";
-import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
 import type { JobAction } from "../session-screen-controller.ts";
 import type { JobDetailView } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, type Palette, space, typography } from "../theme.ts";
 import { Icon } from "../ui/Icon.tsx";
+import { Text } from "../ui/Text.tsx";
 
 export interface JobDetailProps {
   readonly palette: Palette;

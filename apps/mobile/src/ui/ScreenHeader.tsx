@@ -8,9 +8,10 @@
  * Render only.
  */
 import type { JSX, ReactNode } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DENSE_FONT_SCALE, type Palette, size as SIZE, space, typography } from "../theme.ts";
+import { Text } from "./Text.tsx";
 
 export interface ScreenHeaderProps {
   readonly palette: Palette;

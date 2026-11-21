@@ -26,6 +26,7 @@ import {
 import { type ChartScheme, chartScheme } from "./chart-row.ts";
 import { diagramCacheKey } from "./diagram-cache.ts";
 import type { DiagramStyle } from "./diagram-settings-store.ts";
+import { paletteVariant } from "./theme-beta.ts";
 import { type ChartTokens, type Palette, chartTokensFor } from "./theme.ts";
 
 /** The tool's name (`packages/tools/src/diagram.ts`). The app never imports `tools`. */
@@ -148,11 +149,12 @@ function renderKeyFor(
   scheme: ChartScheme,
   fontScale: number,
   style: DiagramStyle,
+  variant: "petrol" | undefined,
 ): string {
-  const key = `${style}|${scheme}|${fontScale}|${spec.source.canonical}`;
+  const key = `${style}|${scheme}|${variant ?? ""}|${fontScale}|${spec.source.canonical}`;
   const hit = keyCache.get(key);
   if (hit !== undefined) return hit;
-  const computed = diagramCacheKey(spec.source.canonical, scheme, fontScale, style);
+  const computed = diagramCacheKey(spec.source.canonical, scheme, fontScale, style, variant);
   keyCache.set(key, computed);
   if (keyCache.size > KEY_CACHE_MAX) {
     const oldest = keyCache.keys().next().value;
@@ -176,7 +178,13 @@ export function diagramRowView(
     type: spec.type,
     scheme,
     tokens: chartTokensFor(options.palette),
-    renderKey: renderKeyFor(spec, scheme, options.fontScale, style),
+    renderKey: renderKeyFor(
+      spec,
+      scheme,
+      options.fontScale,
+      style,
+      paletteVariant(options.palette),
+    ),
     style,
     accessibilityLabel: diagramSummary(spec),
   };

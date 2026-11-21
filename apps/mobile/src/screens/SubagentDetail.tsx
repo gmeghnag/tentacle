@@ -11,21 +11,14 @@
  */
 import * as Clipboard from "expo-clipboard";
 import type { JSX } from "react";
-import {
-  ActivityIndicator,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import type { ChildReport } from "../activity-memory.ts";
 import { parse } from "../markdown.ts";
 import type { ChildAction } from "../session-screen-controller.ts";
 import type { SubagentDetailView } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, type Palette, space, typography } from "../theme.ts";
 import { Icon } from "../ui/Icon.tsx";
+import { Text, TextInput } from "../ui/Text.tsx";
 import { Markdown } from "./transcript/Markdown.tsx";
 
 export interface SubagentDetailProps {

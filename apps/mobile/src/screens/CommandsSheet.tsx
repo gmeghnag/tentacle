@@ -18,12 +18,13 @@
  *    closes the footer slot is the only state (C2 item 10).
  */
 import type { JSX } from "react";
-import { ActivityIndicator, Modal, Pressable, StyleSheet, Switch, Text, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, StyleSheet, Switch, View } from "react-native";
 import { CLEARING, COMPACTING, type CommandRow, commandEdge } from "../session-commands.ts";
 import { DENSE_FONT_SCALE, type Palette, space, typography } from "../theme.ts";
 import { BandSection } from "../ui/BandSection.tsx";
 import { Row } from "../ui/Row.tsx";
 import { Sheet } from "../ui/Sheet.tsx";
+import { Text } from "../ui/Text.tsx";
 
 export interface CommandsSheetProps {
   readonly palette: Palette;

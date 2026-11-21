@@ -44,7 +44,6 @@ import {
   type ScrollView as RNScrollView,
   RefreshControl,
   StyleSheet,
-  Text,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -149,6 +148,7 @@ import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
+import { Text } from "../ui/Text.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import { DiagramRenderer } from "../ui/diagram/DiagramRenderer.tsx";
 import {

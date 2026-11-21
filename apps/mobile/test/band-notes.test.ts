@@ -96,6 +96,10 @@ describe("`SessionInfoSheet` renders one block per note (S4 review finding 1)", 
       StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 0.5 },
       useWindowDimensions: () => ({ fontScale: 1, width: 390, height: 844 }),
     }));
+    // The text seam (docs/feat/mobile-theme-beta.md) reads the app font from a
+    // context; this walker calls components without React, so it is stubbed
+    // to the same host strings `react-native`'s Text/TextInput are.
+    mock.module("../src/ui/Text.tsx", () => ({ Text: "Text", TextInput: "TextInput" }));
     mock.module("expo-symbols", () => ({ SymbolView: "SymbolView" }));
     mock.module("react-native-safe-area-context", () => ({
       useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),

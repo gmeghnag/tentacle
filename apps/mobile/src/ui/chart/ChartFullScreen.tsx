@@ -12,7 +12,6 @@ import {
   Pressable,
   Share,
   StyleSheet,
-  Text,
   View,
   useWindowDimensions,
 } from "react-native";
@@ -43,6 +42,7 @@ import {
   paintColor,
 } from "../../chart-row.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, typography } from "../../theme.ts";
+import { Text } from "../Text.tsx";
 import { ChartTable } from "./ChartTable.tsx";
 import { ChartHero, ChartLegend, ChartPlot } from "./ChartView.tsx";
 import { useChartScrub } from "./useChartScrub.ts";

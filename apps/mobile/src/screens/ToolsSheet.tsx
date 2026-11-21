@@ -15,8 +15,6 @@ import {
   ScrollView,
   StyleSheet,
   Switch,
-  Text,
-  TextInput,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -27,6 +25,7 @@ import { EmptyState } from "../ui/EmptyState.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { Sheet } from "../ui/Sheet.tsx";
+import { Text, TextInput } from "../ui/Text.tsx";
 
 export interface ToolsSheetProps {
   readonly palette: Palette;

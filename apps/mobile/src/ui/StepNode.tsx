@@ -9,15 +9,7 @@
  * `tool-summary.ts`; this file owns only the look, the 1 s clock and the spin.
  */
 import { type JSX, type ReactNode, useEffect, useRef, useState } from "react";
-import {
-  Animated,
-  Easing,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-  useWindowDimensions,
-} from "react-native";
+import { Animated, Easing, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
 import Svg, {
   ClipPath,
   Defs,
@@ -41,6 +33,7 @@ import {
 } from "../thinking-motion.ts";
 import { type StepDot, type ThreadPos, thinkingA11yLabel } from "../tool-steps.ts";
 import { type ToolNameParts, liveElapsed } from "../tool-summary.ts";
+import { Text } from "./Text.tsx";
 import { animateNextLayout } from "./animate.ts";
 
 /** The node's look: a tool's status, an orphan thought (∴), the live footer (breathing ∴). */

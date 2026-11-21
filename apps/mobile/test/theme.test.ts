@@ -5,6 +5,7 @@ import {
   type Palette,
   darkPalette,
   lightPalette,
+  petrolPalette,
   radius,
   shadow,
   size,
@@ -74,6 +75,9 @@ const TEXT_PAIRS: readonly (readonly [Key, Key])[] = [
 for (const [mode, palette] of [
   ["light", lightPalette],
   ["dark", darkPalette],
+  // docs/feat/mobile-theme-beta.md: the Figtree try-out's dark palette meets the
+  // same WCAG AA floor on every surface (owner rule: colour-blind safe).
+  ["dark · petrol (Figtree beta)", petrolPalette],
 ] as const) {
   describe(`theme contrast (${mode})`, () => {
     for (const [text, surface] of TEXT_PAIRS) {
@@ -309,5 +313,55 @@ describe("the glass shadow (visual review N10)", () => {
       expect(src).toContain("shadow.glass");
       expect(src).not.toMatch(/shadowRadius:\s*20/);
     }
+  });
+});
+
+/**
+ * docs/feat/mobile-theme-beta.md: the try-out's petrol ramp keeps B3's layer
+ * order and never touches pure black (owner rule), on the owner's #151B1D.
+ */
+describe("the Figtree beta's petrol ramp", () => {
+  test("the owner's text contrast on the page: primary ≈ 12:1, secondary ≥ 6.6:1", () => {
+    const primary = contrast(petrolPalette.label, petrolPalette.page);
+    expect(primary).toBeGreaterThanOrEqual(11.5);
+    // #D5DDDE on #151B1D measures 12.62:1.
+    expect(primary).toBeLessThan(13);
+    expect(contrast(petrolPalette.sec, petrolPalette.page)).toBeGreaterThanOrEqual(6.6);
+  });
+
+  const surfaces = [
+    "bg",
+    "page",
+    "card",
+    "sheet",
+    "drawer",
+    "band",
+    "bandOnSheet",
+    "fill",
+    "code",
+    "codeOnSheet",
+  ] as const;
+
+  test("no surface is pure black, and each is opaque #RRGGBB", () => {
+    for (const key of surfaces) {
+      expect(petrolPalette[key]).toMatch(/^#[0-9a-fA-F]{6}$/);
+      expect(petrolPalette[key].toUpperCase()).not.toBe("#000000");
+    }
+  });
+
+  test("drawer < page < band < card = sheet < fill (in luminance)", () => {
+    const l = (key: (typeof surfaces)[number]) => luminance(hexToRgb(petrolPalette[key]));
+    expect(l("drawer")).toBeLessThan(l("page"));
+    expect(l("band")).toBeGreaterThan(l("page"));
+    expect(l("card")).toBeGreaterThan(l("band"));
+    expect(l("sheet")).toBe(l("card"));
+    expect(l("fill")).toBeGreaterThan(l("card"));
+    expect(petrolPalette.code).not.toBe(petrolPalette.fill);
+  });
+
+  test("the separators read on their ground (≥ 1.2:1) without shouting", () => {
+    expect(contrast(petrolPalette.sepChat, petrolPalette.page)).toBeGreaterThanOrEqual(1.2);
+    expect(contrast(petrolPalette.sep, petrolPalette.band)).toBeGreaterThanOrEqual(1.2);
+    expect(contrast(petrolPalette.sepSheet, petrolPalette.sheet)).toBeGreaterThanOrEqual(1.2);
   });
 });

@@ -14,10 +14,11 @@
  * `outbox-edit`, `outbox-close`.
  */
 import type { JSX } from "react";
-import { Modal, StyleSheet, Text, View } from "react-native";
+import { Modal, StyleSheet, View } from "react-native";
 import { type Palette, radius, typography } from "../../theme.ts";
 import { PillButton } from "../../ui/PillButton.tsx";
 import { Sheet } from "../../ui/Sheet.tsx";
+import { Text } from "../../ui/Text.tsx";
 
 export interface OutboxDecisionProps {
   /** The item whose text the sheet shows (null: the sheet is closed). */

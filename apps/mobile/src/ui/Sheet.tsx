@@ -17,10 +17,11 @@
  * Render only.
  */
 import type { JSX, ReactNode } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
+import { Text } from "./Text.tsx";
 
 export interface SheetProps {
   readonly palette: Palette;

@@ -5,9 +5,10 @@
  * caller hands Share a sanitized-name copy (`shareName`) to RN core `Share`.
  */
 import type { JSX } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import { type Palette, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
+import { Text } from "../../ui/Text.tsx";
 
 export interface OtherSheetProps {
   readonly palette: Palette;

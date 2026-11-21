@@ -15,7 +15,7 @@
  * the same shape: one tap, this open only.
  */
 import { type JSX, useState } from "react";
-import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, StyleSheet, View } from "react-native";
 import { WebView } from "react-native-webview";
 import {
   htmlViewerProps,
@@ -25,6 +25,7 @@ import {
   webViewParts,
 } from "../../artifact-viewer.ts";
 import { type Palette, typography } from "../../theme.ts";
+import { Text } from "../../ui/Text.tsx";
 
 export interface HtmlViewerProps {
   readonly palette: Palette;

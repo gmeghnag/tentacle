@@ -17,7 +17,7 @@
  * a record the same way.
  */
 import type { JSX } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   type ProjectRow,
@@ -37,6 +37,7 @@ import { InlineMono } from "../ui/InlineMono.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
+import { Text } from "../ui/Text.tsx";
 
 export type { ProjectRow };
 

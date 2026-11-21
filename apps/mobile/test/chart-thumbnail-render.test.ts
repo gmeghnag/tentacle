@@ -56,6 +56,10 @@ beforeAll(async () => {
     View: "View",
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 0.5 },
   }));
+  // The text seam (docs/feat/mobile-theme-beta.md) reads the app font from a
+  // context; this walker calls components without React, so it is stubbed
+  // to the same host strings `react-native`'s Text/TextInput are.
+  mock.module("../src/ui/Text.tsx", () => ({ Text: "Text", TextInput: "TextInput" }));
   mock.module("react-native-svg", () => ({
     default: "Svg",
     Svg: "Svg",

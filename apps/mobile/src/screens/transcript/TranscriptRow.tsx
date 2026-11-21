@@ -15,7 +15,7 @@ import type { ArtifactMeta } from "@tentacle/protocol";
  * `tool-<callId>-reply`, `diff-<callId>`, `image-<imageId>`.
  */
 import { type JSX, type ReactNode, useState } from "react";
-import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { Image, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
 import {
   type BandFill,
   type PreviewCardView,
@@ -48,6 +48,7 @@ import { subAgentLine } from "../../tool-summary.ts";
 import { type ImageRef, type Row, imageRowText } from "../../transcript-rows.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { StepBody, StepNode } from "../../ui/StepNode.tsx";
+import { Text } from "../../ui/Text.tsx";
 import { ChartBlock } from "../../ui/chart/ChartBlock.tsx";
 import { DiagramBlock } from "../../ui/diagram/DiagramBlock.tsx";
 import { DiffView } from "./DiffView.tsx";

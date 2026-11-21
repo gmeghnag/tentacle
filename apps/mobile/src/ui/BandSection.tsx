@@ -23,8 +23,9 @@
  * Render only (AGENTS §7): no branching beyond choosing the two surfaces.
  */
 import type { JSX, ReactNode } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { StyleSheet, View } from "react-native";
 import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../theme.ts";
+import { Text } from "./Text.tsx";
 
 export interface BandSectionProps {
   readonly palette: Palette;

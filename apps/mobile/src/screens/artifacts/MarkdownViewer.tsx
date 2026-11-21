@@ -5,9 +5,10 @@
  * the caller confirms it, nothing is opened here.
  */
 import { type JSX, useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text } from "react-native";
+import { Pressable, ScrollView, StyleSheet } from "react-native";
 import { parse } from "../../markdown.ts";
 import { type Palette, typography } from "../../theme.ts";
+import { Text } from "../../ui/Text.tsx";
 import { Markdown } from "../transcript/Markdown.tsx";
 
 export interface MarkdownViewerProps {

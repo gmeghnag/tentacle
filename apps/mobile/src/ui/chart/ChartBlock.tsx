@@ -5,7 +5,7 @@
  * state only; `ChartView` draws, `chart-interact.ts` decides.
  */
 import { type JSX, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import {
   type ChartA11yAction,
   chartUiWords,
@@ -16,6 +16,7 @@ import {
 import type { LabelMode } from "../../chart-layout-kit.ts";
 import type { ChartRowView, ChartToolRow } from "../../chart-row.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius } from "../../theme.ts";
+import { Text } from "../Text.tsx";
 import { ChartAppear, useReduceMotion } from "./ChartAppear.tsx";
 import { ChartFullScreen } from "./ChartFullScreen.tsx";
 import { ChartView } from "./ChartView.tsx";

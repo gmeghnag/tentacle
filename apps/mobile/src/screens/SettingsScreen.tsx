@@ -11,7 +11,7 @@
  * architecture shows XCUITest no text).
  */
 import type { JSX } from "react";
-import { ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Switch, View } from "react-native";
 import type { LockDelay, LockNotice } from "../app-lock.ts";
 import type { LabelMode } from "../chart-layout-kit.ts";
 import type { DiagramStyle } from "../diagram-settings-store.ts";
@@ -19,6 +19,7 @@ import type { ActivityButtonMode } from "../floating-button.ts";
 import type { PhotoSettings } from "../photo-settings-store.ts";
 import type { SpeechRate } from "../read-aloud.ts";
 import type { LanguageSetting } from "../speech-locale.ts";
+import type { ThemeBeta } from "../theme-beta.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
 import { BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
@@ -28,6 +29,7 @@ import { HubOpacityBand } from "../ui/HubOpacityBand.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
+import { Text } from "../ui/Text.tsx";
 import { voiceRows } from "../voice-beta.ts";
 import { DEFAULT_VOICE_SETTINGS, type VoiceSettings } from "../voice-settings-store.ts";
 
@@ -74,6 +76,14 @@ export interface SettingsScreenProps {
   /** A voice write that did not stick. */
   readonly voiceError?: string;
   readonly onVoice?: (next: VoiceSettings) => void;
+  /**
+   * Beta → "Tema Figtree (prova)" (docs/feat/mobile-theme-beta.md): the try-out
+   * theme, OFF by default. Absent = no row.
+   */
+  readonly themeBeta?: ThemeBeta;
+  /** A theme write that did not stick (the switch still holds for this run). */
+  readonly themeError?: string;
+  readonly onThemeBeta?: (next: ThemeBeta) => void;
   /** Present only when the stack can go back. */
   readonly onBack?: () => void;
   /**
@@ -181,6 +191,9 @@ export function SettingsScreen({
   voice,
   voiceError,
   onVoice,
+  themeBeta,
+  themeError,
+  onThemeBeta,
   onBack,
   notifications,
   onToggleNotifications,
@@ -578,7 +591,32 @@ export function SettingsScreen({
                     />
                   }
                 />
+                {themeBeta === undefined || onThemeBeta === undefined ? null : (
+                  <Row
+                    palette={palette}
+                    minHeight={size.rowSetting}
+                    title="Tema Figtree (prova)"
+                    trailing={
+                      <Switch
+                        testID="beta-theme-figtree"
+                        accessibilityLabel="Tema Figtree (prova)"
+                        value={themeBeta.figtree}
+                        trackColor={{ false: palette.fill, true: palette.green }}
+                        onValueChange={(figtree) => onThemeBeta({ ...themeBeta, figtree })}
+                      />
+                    }
+                  />
+                )}
               </BandSection>
+              {themeError === undefined ? null : (
+                <Banner
+                  palette={palette}
+                  tone="error"
+                  icon="exclamationmark.triangle"
+                  testID="theme-error"
+                  body={themeError}
+                />
+              )}
               {rows.autoRead ? (
                 <BandSection palette={palette} title="Read aloud">
                   <Row

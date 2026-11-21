@@ -6,8 +6,8 @@
  * Render only; must be nested in a `<Text>`.
  */
 import type { JSX } from "react";
-import { Text } from "react-native";
 import { MONO, type Palette } from "../theme.ts";
+import { Text } from "./Text.tsx";
 
 export function InlineMono({
   palette,

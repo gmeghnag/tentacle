@@ -10,7 +10,7 @@
  * this file draws whatever it is handed (C7).
  */
 import type { JSX, ReactNode } from "react";
-import { type GestureResponderHandlers, Pressable, StyleSheet, Text, View } from "react-native";
+import { type GestureResponderHandlers, Pressable, StyleSheet, View } from "react-native";
 import Svg, {
   Circle,
   Defs,
@@ -40,6 +40,7 @@ import type {
 } from "../../chart-layout.ts";
 import { type ChartRowView, type ChartScheme, paintColor, textColor } from "../../chart-row.ts";
 import { type ChartTokens, DENSE_FONT_SCALE, MONO, radius, typography } from "../../theme.ts";
+import { Text } from "../Text.tsx";
 import { ChartTable } from "./ChartTable.tsx";
 import { SeriesGlyph } from "./SeriesGlyph.tsx";
 

@@ -15,7 +15,7 @@
  * and `pending-<id>-edit|send-now|cancel` on the menu's items.
  */
 import { type JSX, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import {
   type PendingBubble as Bubble,
   type BubbleAction,
@@ -24,6 +24,7 @@ import {
 } from "../../compose-queue.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
+import { Text } from "../../ui/Text.tsx";
 
 /** What each menu item says, in the order `bubbleActions` returns them. */
 const LABEL: Readonly<Record<BubbleAction, string>> = {
