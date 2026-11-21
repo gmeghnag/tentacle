@@ -908,3 +908,72 @@ empty afterwards):
 - A `model.maxImageBytes` set above the default scales the byte budget with it, which is the user's choice.
 
 *— claude-opus-5-5, 2026-11-21*
+
+### S2 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, no HIGH). Scope: S2 (`279b0bc4`) only.
+
+**Gate (narrow):** the 6 touched PDF test files → 146 pass / 0 fail; `bun run lint`
+clean (2226 files); `bun run typecheck` clean (root + mobile + relay). I did not
+re-run the full `bun test`.
+
+**Findings**
+1. **MEDIUM: `fs_read` now decodes and encodes every image, then throws the bytes
+   away. On a scanned PDF this brings the read close to the 20 s timeout.**
+   - Where: `packages/tools/src/builtins.ts:181` passes `images: DEFAULT_PDF_IMAGE_LIMITS`
+     on every PDF read. `packages/tools/src/pdf/run.ts:206-214` then calls
+     `getOperatorList` and resolves every image object on every page, including after
+     the 32-image / 8 MiB caps are hit, because the caps limit only encoding, not
+     pdf.js decoding.
+   - Repro (`.tentacle/tmp/pdf-images/rev-s2/scan.ts`): a 100-page scan, one distinct
+     2480×3508 RGB Flate image per page, 24 MB file, real worker:
+     - text only (today's path): **185 ms**, giving the scanned-PDF/OCR refusal;
+     - with images (this branch's `fs_read` path): **17 916 ms**, with
+       `{sent:32, capped:68}`.
+     The same images repeated on every page take 16.4 s.
+   - Failure scenario: on a slower host, with DCT/JBIG2 scans, or with two reads at once,
+     the read exceeds `PDF_PARSE_TIMEOUT_MS` (20 s). `fs_read` then fails with a timeout
+     where it used to return the scanned-PDF message in about 0.2 s. On a scan the
+     verdict is `no-text` anyway, so all of that work is discarded.
+   - Not tested: no test covers the cost, and the failure-mode table's "Huge image" row
+     names only the RSS watchdog and the timeout as backstops. They catch the problem
+     but do not prevent the regression.
+   - Fix direction (the executor's call): stop resolving or decoding once
+     `sent + capped` makes further work pointless. Or give image collection its own
+     time budget, so the text and the verdict always come back. Or keep images opt-out
+     until S3 can use the bytes. Add a test that a large multi-page scan still returns
+     the OCR refusal within budget.
+
+**Mutation non-vacuity:** I made the inline-image args resolve to `null` (`run.ts`
+`resolveImage`). Result: 1 fail (the RGB/Indexed/inline/DCT worker test). I reverted it
+by hand and `git status` was empty afterwards. I did not re-run the executor's M1–M10.
+
+**Attacks tried (no finding):**
+- 0-image byte equality: `buildPageText` → `assemblePageText` with an empty map takes
+  the same loop, and the existing `pdf-text` tests pass unchanged.
+- Scan verdict: markers are stripped before `pdfVerdict` (`builtins.ts:203`), so an
+  image-only PDF is still refused.
+- A worker reply with malformed `images` → `isPdfExtraction` → `corrupt`, never indexed
+  blindly.
+- §7 invariants:
+  - "don't serialize": decoding stays in the worker, and nothing is added on the main
+    thread.
+  - "Model stays on the laptop" / pod: no bytes leave the tool in S2.
+  - Protocol and persistence: untouched, so no `protocol.d` note is needed.
+  - `@tentacle/core` stays free of `node:` imports (`deflate` is injected), which keeps
+    mobile safe.
+- An operator list that fails: the page keeps its text.
+
+**Residual (not blocking):**
+- The text cap counts `chars` on the text without markers (`run.ts:205`), so the
+  markers can push past `MAX_PDF_TEXT_CHARS` by about 25 characters per image.
+- If `getOperatorList` succeeds but a later step throws after `collector.add`, the
+  footer counts images whose markers are never placed (`itemsOf` unset). I could not
+  reach this, because `resolveImage` catches.
+
+**Executor behaviour:** honest and thorough. The drifts are documented, the mutation
+table is real (one survivor was caught and fixed), and JPX was flagged as unverified.
+It missed the cost of always-on decoding while the bytes are dropped. Reviewer is the
+same model family as the S2 executor (claude-opus-5-5), in a fresh context only.
+
+*— claude-opus-5-5, 2026-11-21*
