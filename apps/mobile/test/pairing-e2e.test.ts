@@ -26,7 +26,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, projectKey } from "@tentacle/agent";
-import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
+import { RemoteClient, webSocketCarrierFactory, webSocketChannelFactory } from "@tentacle/client";
 import { ChannelError } from "@tentacle/client";
 import { type ModelProvider, PermissionBroker } from "@tentacle/core";
 import {
@@ -219,7 +219,7 @@ const factoryDeps = { WebSocket: Ctor };
  * factory, no token, over RN's WebSocket — through `rnWebSocketCtor`, so the
  * iOS-style `Origin` on `PhoneWebSocket` is what the daemon sees.
  */
-const phoneDial = (address: string) => () => webSocketChannelFactory(address, {}, factoryDeps)();
+const phoneDial = (address: string) => () => webSocketCarrierFactory(address, {}, factoryDeps)();
 
 function memoryKV(): { kv: SecureKV; items: Map<string, string> } {
   const items = new Map<string, string>();

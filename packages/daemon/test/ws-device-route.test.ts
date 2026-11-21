@@ -9,7 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DuplexChannel } from "@tentacle/transport";
+import { type ByteCarrier, type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { RpcPeer } from "@tentacle/transport";
 import { NoiseError, noiseInitiator, publicKeyOf, systemRandom } from "@tentacle/transport/noise";
 import { DeviceAuthority, PAIRING_MAX_MESSAGE_BYTES } from "../src/device-authority.ts";
@@ -77,19 +77,23 @@ async function until(check: () => boolean, ms = 2_000): Promise<void> {
   }
 }
 
-/** Dial a real WebSocket and adapt it to a `DuplexChannel` (the Repro's shape). */
+/** Dial a real WebSocket and adapt it to a `ByteCarrier` (the Repro's shape). */
 function dial(
   url: string,
   headers: Record<string, string> = { Origin: IOS_ORIGIN },
   onSocketClose?: () => void,
-): () => Promise<DuplexChannel> {
+): () => Promise<ByteCarrier> {
   return () =>
     new Promise((resolve, reject) => {
       const ws = new WebSocket(url, { headers } as never);
-      let onMessage: ((d: string) => void) | undefined;
+      let onMessage: ((d: CarrierFrame) => void) | undefined;
+      ws.binaryType = "arraybuffer";
       let onClose: (() => void) | undefined;
       let opened = false;
-      ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+      ws.addEventListener("message", (e) => {
+        const frame = carrierFrameOf(e.data);
+        if (frame !== null) onMessage?.(frame);
+      });
       ws.addEventListener("close", (e) => {
         // The SOCKET's own close, before any protocol layer can swallow it:
         // `RpcPeer` owns the channel's close handler once it is built.
@@ -385,10 +389,10 @@ describe("revoke over a real socket", () => {
     const { url, audit } = serve(configDir);
     // Capture message 1 off a real handshake, then replay it on a second socket
     // and never send the confirm.
-    const captured: string[] = [];
+    const captured: Uint8Array[] = [];
     const tap = await dial(url, { Origin: IOS_ORIGIN })();
     const innerSend = tap.send.bind(tap);
-    const tapped: DuplexChannel = {
+    const tapped: ByteCarrier = {
       send: (d) => {
         captured.push(d);
         innerSend(d);
@@ -412,7 +416,7 @@ describe("revoke over a real socket", () => {
     secure.close();
     // Now REPLAY message 1 on a fresh socket and stop there.
     const replay = await dial(url, { Origin: IOS_ORIGIN })();
-    replay.send(captured[0] as string);
+    replay.send(captured[0] as Uint8Array);
     await new Promise((r) => setTimeout(r, 200));
     // The responder answered message 2 but built nothing: the "last seen"
     // timestamp is exactly what the real handshake set.
@@ -812,6 +816,46 @@ describe("the attempt cap over a real socket (F6/F16)", () => {
       expect(reasons.slice(0, 4)).toEqual(Array(4).fill("invalid_code"));
       expect(reasons.slice(4)).toEqual(Array(5).fill("too_many_attempts"));
       expect(readClaim(configDir, opened.session.sid)).toBeUndefined();
+    } finally {
+      client.close();
+    }
+  });
+});
+
+describe("E2E v2 on the route (docs/feat/noise-binary-carrier.md)", () => {
+  test("T-D1: a v1 app's `t1:` text message 1 is closed with an `update the app` audit; no Connection, slot released", async () => {
+    const configDir = store();
+    const identity = readIdentity(configDir);
+    if (!identity.ok) throw new Error(identity.reason);
+    addDevice(configDir, {
+      project: TEST_PROJECT,
+      publicKey: publicKeyOf(key(2)),
+      name: "iPhone",
+      now: 2_000,
+    });
+    // ONE concurrent handshake: a v1 dial that held its slot would 429 the next one.
+    const { url, audit } = serve(configDir, {
+      handshakeLimit: { burst: 100, refillMs: 60_000, maxConcurrent: 1 },
+    });
+    const replies: unknown[] = [];
+    const closed = await new Promise<boolean>((resolve) => {
+      const ws = new WebSocket(url, { headers: { Origin: IOS_ORIGIN } } as never);
+      ws.addEventListener("open", () => ws.send("t1:AAAA"));
+      ws.addEventListener("message", (e) => replies.push(e.data));
+      ws.addEventListener("close", () => resolve(true));
+      ws.addEventListener("error", () => resolve(false));
+    });
+    expect(closed).toBe(true);
+    // A v1 peer cannot read a v2 refusal: nothing is answered.
+    expect(replies).toEqual([]);
+    await until(() => audit.some((l) => l.startsWith("e2e-version-mismatch")));
+    expect(audit).toContain("e2e-version-mismatch remote=1 local=2 (update the app)");
+    expect(audit.some((l) => l.startsWith("device-open"))).toBe(false);
+    // The slot came back: a real v2 handshake + initialize right after.
+    const client = await connect(url, key(2), identity.identity.publicKey);
+    try {
+      const result = (await client.init()) as { protocolVersion: number };
+      expect(result.protocolVersion).toBeGreaterThanOrEqual(24);
     } finally {
       client.close();
     }

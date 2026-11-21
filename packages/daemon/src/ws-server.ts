@@ -8,7 +8,7 @@
  * bridges Bun's socket callbacks to the channel interface and enforces exposure.
  */
 import { timingSafeEqual } from "node:crypto";
-import type { DuplexChannel } from "@tentacle/transport";
+import { type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { Connection, type HooksTrustPrecheck } from "./connection.ts";
 import { DEFAULT_MAX_FRAME_BYTES, acceptDevice } from "./device-accept.ts";
 import type { DeviceAuthority } from "./device-authority.ts";
@@ -172,8 +172,14 @@ export interface RunningServer {
   stop(): void;
 }
 
+type WsChannel = WsEnd<string, string>;
+type WsByteCarrier = WsEnd<CarrierFrame, Uint8Array>;
+
 interface SocketData {
+  /** The plain route's text channel. */
   channel: WsChannel | null;
+  /** The device route's byte carrier (the Noise responder's input). */
+  carrier?: WsByteCarrier;
   /**
    * Which route upgraded this socket. Set at the upgrade, never inferred in
    * `open`: both routes reach the same Bun server, and a plain client must
@@ -228,14 +234,18 @@ function extractToken(req: Request): string | null {
   }
 }
 
-/** A `DuplexChannel` backed by one Bun server WebSocket. */
-class WsChannel implements DuplexChannel {
-  private onMessage?: (data: string) => void;
+/**
+ * One Bun server WebSocket as a channel: `WsEnd<string, string>` is the plain
+ * route's text `DuplexChannel`; `WsEnd<CarrierFrame, Uint8Array>` the device
+ * route's `ByteCarrier` (E2E v2: binary frames, docs/feat/noise-binary-carrier.md).
+ */
+class WsEnd<In, Out extends string | Uint8Array> {
+  private onMessage?: (data: In) => void;
   private onClose?: () => void;
   private closed = false;
-  constructor(private readonly ws: { send(data: string): number; close(): void }) {}
+  constructor(private readonly ws: { send(data: Out): number; close(): void }) {}
 
-  send(data: string): void {
+  send(data: Out): void {
     if (!this.closed) {
       this.ws.send(data);
     }
@@ -246,14 +256,14 @@ class WsChannel implements DuplexChannel {
     }
     this.ws.close();
   }
-  setOnMessage(handler: (data: string) => void): void {
+  setOnMessage(handler: (data: In) => void): void {
     this.onMessage = handler;
   }
   setOnClose(handler: () => void): void {
     this.onClose = handler;
   }
   /** Feed an inbound frame (called by the server's `message` handler). */
-  deliver(data: string): void {
+  deliver(data: In): void {
     this.onMessage?.(data);
   }
   /** Was this socket closed by either side (a `Connection` built after it is an orphan)? */
@@ -370,12 +380,14 @@ export function startWsServer(options: WsServerOptions): RunningServer {
     websocket: {
       ...socketOptions(options),
       open(ws) {
-        const channel = new WsChannel(ws);
-        ws.data.channel = channel;
         if (devices && ws.data.route === "device") {
-          openDevice(ws, channel, devices);
+          const carrier: WsByteCarrier = new WsEnd(ws);
+          ws.data.carrier = carrier;
+          openDevice(ws, carrier, devices);
           return;
         }
+        const channel: WsChannel = new WsEnd(ws);
+        ws.data.channel = channel;
         connections.set(
           ws,
           new Connection(channel, options.sessionHost, options.onError, {
@@ -388,6 +400,15 @@ export function startWsServer(options: WsServerOptions): RunningServer {
         options.onAudit?.("connection-open");
       },
       message(ws, message) {
+        const carrier = ws.data.carrier;
+        if (carrier) {
+          // As received: bytes (a view over Bun's buffer) or a text frame, which
+          // the Noise layer diagnoses (a v1 app) — never stringified here.
+          const frame = carrierFrameOf(message);
+          if (frame === null) carrier.close();
+          else carrier.deliver(frame);
+          return;
+        }
         ws.data.channel?.deliver(typeof message === "string" ? message : message.toString());
       },
       close(ws) {
@@ -397,6 +418,7 @@ export function startWsServer(options: WsServerOptions): RunningServer {
         pending.delete(ws);
         ws.data.release?.();
         ws.data.channel?.fireClose();
+        ws.data.carrier?.fireClose();
         connections.get(ws)?.close();
         options.onAudit?.("connection-close");
       },
@@ -411,7 +433,7 @@ export function startWsServer(options: WsServerOptions): RunningServer {
    * however the handshake ends) and the `connections` map this file's `close`
    * handler closes.
    */
-  function openDevice(ws: WsSocket, channel: WsChannel, route: DeviceRouteOptions): void {
+  function openDevice(ws: WsSocket, channel: WsByteCarrier, route: DeviceRouteOptions): void {
     // ONE once-guard for the slot: a socket that closes mid-handshake ends it at
     // the close, and the responder's own reject (the close reaching it) must not
     // end it a second time — `HandshakeLimiter.end` would then count a handshake

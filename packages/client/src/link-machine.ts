@@ -35,12 +35,26 @@ export class ChannelError extends Error {
   readonly kind: ChannelErrorKind;
   /** The WebSocket close code that ended the upgrade, when there was one. */
   readonly closeCode?: number;
-  constructor(kind: ChannelErrorKind, message: string, closeCode?: number) {
+  /**
+   * The e2e channel version the other side named, on a version skew
+   * (docs/feat/noise-binary-carrier.md). Unauthenticated, so the kind stays
+   * transient: it only picks which "update …" sentence a frontend shows.
+   */
+  readonly remoteE2eVersion?: number;
+  constructor(
+    kind: ChannelErrorKind,
+    message: string,
+    closeCode?: number,
+    remoteE2eVersion?: number,
+  ) {
     super(message);
     this.name = "ChannelError";
     this.kind = kind;
     if (closeCode !== undefined) {
       this.closeCode = closeCode;
+    }
+    if (remoteE2eVersion !== undefined) {
+      this.remoteE2eVersion = remoteE2eVersion;
     }
   }
 }

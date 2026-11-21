@@ -20,7 +20,7 @@ import {
   useNavigationContainerRef,
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { type RemoteClient, type RemoteSession, webSocketChannelFactory } from "@tentacle/client";
+import { type RemoteClient, type RemoteSession, webSocketCarrierFactory } from "@tentacle/client";
 import {
   type AttachmentRef,
   type DaemonDiscovery,
@@ -28,7 +28,7 @@ import {
   encodeBase64Url,
   parsePairingPayload,
 } from "@tentacle/protocol";
-import type { DuplexChannel } from "@tentacle/transport";
+import type { ByteCarrier } from "@tentacle/transport";
 import { getRandomBytes } from "expo-crypto";
 import { File } from "expo-file-system";
 import {
@@ -975,9 +975,10 @@ async function findExisting(
   }
 }
 
-/** The phone's dial to one address: the client's own factory, over RN's WebSocket, no token. */
-function phoneDial(address: string): () => Promise<DuplexChannel> {
-  return webSocketChannelFactory(address, {}, { WebSocket: WebSocket as never });
+/** The phone's dial to one address: the client's own carrier factory, over RN's WebSocket, no token. */
+function phoneDial(address: string): () => Promise<ByteCarrier> {
+  // The Noise channel's raw byte carrier (E2E v2: binary frames).
+  return webSocketCarrierFactory(address, {}, { WebSocket: WebSocket as never });
 }
 
 /** The app's ONE row of a computer's project label (a `broken` entry has no sessions to read). */

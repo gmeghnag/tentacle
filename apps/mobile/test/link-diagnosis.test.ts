@@ -107,3 +107,25 @@ describe("the relay's 4404 = `absent` (docs/feat/mobile-projects.md §6)", () =>
     expect(diagnoser.observe({ opened: true, error: denied(), absent: true })).toBe("revoked");
   });
 });
+
+describe("an e2e version skew names the side to update (docs/feat/noise-binary-carrier.md)", () => {
+  const skew = (remote: number) =>
+    new ChannelError("rejected", "secure channel: version mismatch", undefined, remote);
+
+  test("T-M1: remote 3 → update-app; remote 1 → update-computer; the reset streak is untouched", () => {
+    const diagnoser = createLinkDiagnoser();
+    expect(diagnoser.observe({ opened: true, error: unreachable() })).toBe("unreachable");
+    expect(diagnoser.observe({ opened: true, error: unreachable() })).toBe("unreachable");
+    // Skews in between say nothing about our key: they neither count nor reset the streak.
+    expect(diagnoser.observe({ opened: true, error: skew(3) })).toBe("update-app");
+    expect(diagnoser.observe({ opened: true, error: skew(1) })).toBe("update-computer");
+    expect(diagnoser.current()).toBe("update-computer");
+    expect(diagnoser.observe({ opened: true, error: unreachable() })).toBe("maybe-reset");
+  });
+
+  test("T-M1: the sentences — and maybe-reset now names an older tentacle (a v1 daemon just closes)", () => {
+    expect(diagnosisMessage("update-app", "MacBook")).toContain("update the app");
+    expect(diagnosisMessage("update-computer", "MacBook")).toContain("older than this app");
+    expect(diagnosisMessage("maybe-reset", "MacBook")).toContain("older than this app");
+  });
+});

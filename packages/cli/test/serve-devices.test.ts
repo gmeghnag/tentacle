@@ -15,6 +15,7 @@ import {
   DEVICE_DIR,
   readDaemonRecords,
 } from "@tentacle/daemon";
+import { type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { startDaemon } from "../src/serve.ts";
 
 const dirs: string[] = [];
@@ -176,17 +177,21 @@ describe("the device route is on for a serve daemon", () => {
       const ws = new WebSocket(`${handle.url}/e2e`, {
         headers: { Origin: "http://192.168.1.8:4001" },
       } as never);
-      let onMessage: ((d: string) => void) | undefined;
+      let onMessage: ((d: CarrierFrame) => void) | undefined;
+      ws.binaryType = "arraybuffer";
       let onClose: (() => void) | undefined;
-      ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+      ws.addEventListener("message", (e) => {
+        const frame = carrierFrameOf(e.data);
+        if (frame !== null) onMessage?.(frame);
+      });
       ws.addEventListener("close", () => {
         onClose?.();
       });
       ws.addEventListener("open", () =>
         resolve({
-          send: (d: string) => ws.send(d),
+          send: (d: Uint8Array) => ws.send(d),
           close: () => ws.close(),
-          setOnMessage: (h: (d: string) => void) => {
+          setOnMessage: (h: (d: CarrierFrame) => void) => {
             onMessage = h;
           },
           setOnClose: (h: () => void) => {

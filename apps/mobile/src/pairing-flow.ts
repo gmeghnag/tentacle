@@ -39,7 +39,7 @@ import {
   encodeBase64Url,
   parsePairingPayload,
 } from "@tentacle/protocol";
-import { type DuplexChannel, RpcError } from "@tentacle/transport";
+import { type ByteCarrier, RpcError } from "@tentacle/transport";
 import { type Random, generateStaticKeypair } from "@tentacle/transport/noise";
 import { type ComputerStore, type PairedComputer, projectRecordId } from "./computer-store.ts";
 
@@ -220,6 +220,11 @@ export function describePairingError(error: unknown): PairingFailure {
     return failureFor("expired");
   }
   if (error instanceof RpcError && error.code === DomainErrorCode.VersionMismatch) {
+    return failureFor("version");
+  }
+  if (error instanceof ChannelError && error.remoteE2eVersion !== undefined) {
+    // An e2e channel version skew (docs/feat/noise-binary-carrier.md): the
+    // existing "different tentacle version — update" sentence, not "unreachable".
     return failureFor("version");
   }
   if (error instanceof ChannelError) {
@@ -414,7 +419,7 @@ export interface RunPairingOptions {
    */
   readonly store: Pick<ComputerStore, "add"> & Partial<Pick<ComputerStore, "list" | "remove">>;
   /** One address's raw channel (the app passes its RN WebSocket dial). */
-  readonly dial: (address: string) => () => Promise<DuplexChannel>;
+  readonly dial: (address: string) => () => Promise<ByteCarrier>;
   readonly random: Random;
   /** Every state change goes through here (the screen re-renders). */
   readonly dispatch: (action: PairingAction) => void;
@@ -551,7 +556,7 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
    * socket and leaves the exchange's own open: the computer keeps a pairing
    * connection after Cancel. A `Set` makes the cancel independent of order.
    */
-  const opened = new Set<DuplexChannel>();
+  const opened = new Set<ByteCarrier>();
   const onAbort = (): void => {
     for (const channel of opened) {
       try {
@@ -564,14 +569,14 @@ export async function runPairing(options: RunPairingOptions): Promise<PairingOut
   options.signal?.addEventListener("abort", onAbort, { once: true });
   const dial = (address: string) => {
     const one = options.dial(address);
-    return async (): Promise<DuplexChannel> => {
+    return async (): Promise<ByteCarrier> => {
       const channel = await one();
       opened.add(channel);
       // A closed channel leaves the set, so a long dial cannot grow it and a
       // later cancel cannot close a socket the exchange already hung up. The
       // handshake REPLACES a channel's single `onClose`, so the removal is
       // attached to a thin wrapper that forwards every call unchanged.
-      const tracked: DuplexChannel = {
+      const tracked: ByteCarrier = {
         send: (data) => channel.send(data),
         close: () => channel.close(),
         setOnMessage: (handler) => channel.setOnMessage(handler),

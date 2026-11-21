@@ -32,7 +32,13 @@ import {
   writePairingDecision,
 } from "@tentacle/daemon";
 import type { PairingPayload } from "@tentacle/protocol";
-import { type DuplexChannel, RpcPeer, createChannelPair } from "@tentacle/transport";
+import {
+  type ByteCarrier,
+  type CarrierFrame,
+  RpcPeer,
+  carrierFrameOf,
+  createByteCarrierPair,
+} from "@tentacle/transport";
 import {
   noiseInitiator,
   noiseResponder,
@@ -117,14 +123,18 @@ function serve(configDir: string): { url: string; audit: string[]; host: Session
 }
 
 /** A real WebSocket the way a phone dials: iOS always sends an `Origin`. */
-function dial(url: string): () => Promise<DuplexChannel> {
+function dial(url: string): () => Promise<ByteCarrier> {
   return () =>
     new Promise((resolve, reject) => {
       const ws = new WebSocket(url, { headers: { Origin: IOS_ORIGIN } } as never);
-      let onMessage: ((d: string) => void) | undefined;
+      let onMessage: ((d: CarrierFrame) => void) | undefined;
+      ws.binaryType = "arraybuffer";
       let onClose: (() => void) | undefined;
       let opened = false;
-      ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+      ws.addEventListener("message", (e) => {
+        const frame = carrierFrameOf(e.data);
+        if (frame !== null) onMessage?.(frame);
+      });
       ws.addEventListener("close", (e) => {
         onClose?.();
         if (!opened) reject(new Error(`closed ${e.code}`));
@@ -382,7 +392,7 @@ describe("pairDevice, the refusals", () => {
     // screen — the timeout removed from `device/pair` still guards the
     // handshake.
     const { identity } = store();
-    const [clientEnd, serverEnd] = createChannelPair();
+    const [clientEnd, serverEnd] = createByteCarrierPair();
     void noiseResponder(serverEnd, {
       staticKey: identity.privateKey,
       random: systemRandom,
@@ -669,7 +679,7 @@ describe("pairDevice races the payload's addresses (docs/fix/relay-pairing.md)",
     // The loser's socket is held back 200 ms, so it can only open AFTER the
     // winner (whose daemon answers in a couple of ms).
     const slow = (address: string) => () =>
-      new Promise<DuplexChannel>((resolve, reject) => {
+      new Promise<ByteCarrier>((resolve, reject) => {
         setTimeout(() => {
           dial(address)().then(resolve, reject);
         }, 200);

@@ -52,6 +52,8 @@ interface TestSocket {
   readonly ws: WebSocket;
   /** Every frame received, in order (for a "was one ever sent" assertion). */
   readonly received: string[];
+  /** Every frame as it came: text as a string, binary as its bytes (order shared with `received`). */
+  readonly raw: (string | Uint8Array)[];
   send(frame: unknown): void;
   /** Wait for the next frame (or a frame already received). */
   next(timeoutMs?: number): Promise<string>;
@@ -64,14 +66,19 @@ function open(url: string, headers?: Record<string, string>): Promise<TestSocket
   return new Promise((resolve, reject) => {
     const ws =
       headers === undefined ? new WebSocket(url) : new WebSocket(url, { headers } as never);
+    ws.binaryType = "arraybuffer";
     const received: string[] = [];
+    const raw: (string | Uint8Array)[] = [];
     /** Frames nobody has awaited yet — the queue `next()` drains. */
     const pending: string[] = [];
     const waiters: ((frame: string) => void)[] = [];
     const closes: { code: number; reason: string }[] = [];
     const closeWaiters: ((close: { code: number; reason: string }) => void)[] = [];
     ws.onmessage = (event) => {
-      const text = String(event.data);
+      const data = event.data as string | ArrayBuffer;
+      const bytes = typeof data === "string" ? undefined : new Uint8Array(data);
+      raw.push(bytes ?? (data as string));
+      const text = bytes === undefined ? (data as string) : `<binary ${bytes.byteLength}>`;
       received.push(text);
       const waiter = waiters.shift();
       if (waiter) {
@@ -97,6 +104,7 @@ function open(url: string, headers?: Record<string, string>): Promise<TestSocket
       resolve({
         ws,
         received,
+        raw,
         send(frame) {
           ws.send(typeof frame === "string" ? frame : JSON.stringify(frame));
         },
@@ -393,16 +401,80 @@ describe("startRelay — splice (R0(a) made a claim about the real service)", ()
     control.close();
   });
 
-  test("a binary frame is not guessed at: both legs close 1003", async () => {
+  test("T-R1: data legs forward binary byte-exact both ways, in order with text (E2E v2)", async () => {
     const { server } = relay();
     const control = await register(server.url);
     const phone = await open(`${server.url}/d/${ID}/e2e`);
     const openFrame = JSON.parse(await control.next()) as { stream: string };
     const daemon = await open(`${server.url}/v1/accept`);
     daemon.send({ t: "accept", v: 1, stream: openFrame.stream });
-    phone.ws.send(new Uint8Array([1, 2, 3]));
-    expect((await phone.closed()).code).toBe(1003);
+    // The largest raw Noise message, a pattern so a shifted/truncated copy fails.
+    const max = new Uint8Array(65_535).map((_, i) => (i * 131) & 255);
+    phone.send("t1:AAAA");
+    phone.ws.send(max);
+    phone.ws.send(Uint8Array.of(2));
+    phone.send("tail");
+    expect(await daemon.next()).toBe("t1:AAAA");
+    expect(await daemon.next()).toBe("<binary 65535>");
+    expect(await daemon.next()).toBe("<binary 1>");
+    expect(await daemon.next()).toBe("tail");
+    const up = daemon.raw[1];
+    expect(up instanceof Uint8Array && up.every((v, i) => v === max[i])).toBe(true);
+    daemon.ws.send(max);
+    daemon.send("back");
+    expect(await phone.next()).toBe("<binary 65535>");
+    expect(await phone.next()).toBe("back");
+    const down = phone.raw[0];
+    expect(down instanceof Uint8Array && down.every((v, i) => v === max[i])).toBe(true);
+    control.close();
+  });
+
+  test("T-R1: a binary frame on the control socket closes it 1003 (JSON control frames only)", async () => {
+    const { server, lines } = relay();
+    const control = await register(server.url);
+    control.ws.send(Uint8Array.of(1, 2, 3));
+    expect((await control.closed()).code).toBe(1003);
+    expect(lines.some((line) => line.startsWith("binary-frame"))).toBe(true);
+  });
+
+  test("T-R1: a binary frame on an accept leg before its token closes it 1003", async () => {
+    const { server } = relay();
+    const control = await register(server.url);
+    await open(`${server.url}/d/${ID}/e2e`);
+    await control.next();
+    const daemon = await open(`${server.url}/v1/accept`);
+    daemon.ws.send(Uint8Array.of(1, 2, 3));
     expect((await daemon.closed()).code).toBe(1003);
+    control.close();
+  });
+
+  test("T-R2: a 96 KiB + 1 binary message on a phone leg is never delivered; the leg closes (H1)", async () => {
+    const { server } = relay();
+    const control = await register(server.url);
+    const phone = await open(`${server.url}/d/${ID}/e2e`);
+    const openFrame = JSON.parse(await control.next()) as { stream: string };
+    const daemon = await open(`${server.url}/v1/accept`);
+    daemon.send({ t: "accept", v: 1, stream: openFrame.stream });
+    phone.send("first");
+    expect(await daemon.next()).toBe("first");
+    phone.ws.send(new Uint8Array(RELAY_CONTROL_LIMITS.maxFrameChars + 1));
+    const close = await phone.closed();
+    expect([1006, 1009]).toContain(close.code);
+    await daemon.closed();
+    expect(daemon.received).toEqual(["first"]);
+    control.close();
+  });
+
+  test("T-R3: binary frames before accept count by bytes: over 64 KiB → phone closed 4404", async () => {
+    const { server, lines } = relay();
+    const control = await register(server.url);
+    const phone = await open(`${server.url}/d/${ID}/e2e`);
+    await control.next(); // the open; the daemon never accepts
+    const part = new Uint8Array(RELAY_CONTROL_LIMITS.preAcceptBytes / 2 + 1);
+    phone.ws.send(part);
+    phone.ws.send(part);
+    expect((await phone.closed()).code).toBe(RELAY_CLOSE_UNREGISTERED);
+    expect(lines.some((line) => line.startsWith("phone-oversize-drop"))).toBe(true);
     control.close();
   });
 });

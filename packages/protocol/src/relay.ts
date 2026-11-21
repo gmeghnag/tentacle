@@ -74,9 +74,11 @@ export const RELAY_CLOSE_UNREGISTERED = 4404;
  * The numbers BOTH ends enforce, in one place so they cannot drift: the relay
  * closes on them and the daemon's accept leg is bounded by them.
  *
- * `maxFrameChars` is 96 Ki CHARACTERS, above the Noise channel's own inbound cap
- * (~87.4 Ki chars) so a legitimate frame is never cut (R0(a) proved an 87 KiB
- * frame splices intact).
+ * `maxFrameChars` is 96 Ki — characters for a text frame, BYTES for a binary one
+ * (Bun's `maxPayloadLength` counts the payload either way) — above both the raw
+ * Noise message of E2E v2 (≤ 65 535 B, +1 version byte in the handshake) and a
+ * legacy v1 `t1:` text frame (≤ ~87.4 Ki chars), so a legitimate frame is never
+ * cut (R0(a) proved an 87 KiB frame splices intact; docs/feat/noise-binary-carrier.md).
  *
  * `maxInboundChars` is the receiver-side DECODE guard: a Bun WebSocket CLIENT has
  * NO inbound frame limit of its own (R0(b) measured it accepting a 64 MiB frame,
@@ -95,11 +97,11 @@ export const RELAY_CLOSE_UNREGISTERED = 4404;
  * a hostile relay cannot make us reconnect-loop into the same allocation.
  */
 export const RELAY_CONTROL_LIMITS = {
-  /** A spliced/text frame larger than this (in characters) closes both legs. */
+  /** A spliced frame larger than this (characters of text, bytes of binary) closes both legs. */
   maxFrameChars: 96 * 1024,
   /** The daemon's own inbound guard per leg (see the doc comment above). */
   maxInboundChars: 176 * 1024,
-  /** Phone frames buffered before `accept`, so a Noise message 1 (~100 B) never waits. */
+  /** Phone frames buffered before `accept` (text by characters, binary by bytes), so a Noise message 1 (97 B) never waits. */
   preAcceptBytes: 64 * 1024,
   /** Per-leg backpressure ceiling, the `serve` policy (`closeOnBackpressureLimit`). */
   backpressureBytes: 16 * 1024 * 1024,

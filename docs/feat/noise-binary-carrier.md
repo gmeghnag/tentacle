@@ -1,6 +1,6 @@
 # feat/noise-binary-carrier — the Noise E2E channel rides binary WebSocket frames only (E2E v2)
 
-> **Status:** implementation (plan written, awaiting approval)
+> **Status:** execution done (claude-opus-5-5, 2026-11-21) — awaiting fresh-context Review
 > **Branch:** `feat/noise-binary-carrier`
 > **Type:** feat · **Size:** L · **Blast:** load-bearing · **Suited:** Opus executes; **mandatory fresh-context Review** (red-team the E2E handshake, the relay H1 caps, version skew)
 > **Changelog:** `changelog.d/noise-binary-carrier.changed.md` — `- **Phone ↔ computer traffic is ~25 % smaller.** The end-to-end channel now sends raw binary frames instead of base64 text; the app and tentacle must be updated together (a mismatch says which one to update).`
@@ -572,5 +572,106 @@ version bump, two diagnosis sentences), as the verdict allowed.
   exactly (F3).
 
 ## Execution
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Load-bearing check, re-run first** (both repros from `.tentacle/tmp/noise-binary-carrier/`,
+Bun 1.4.3 arm64, before any edit): `order through splice: text(7) , ab(65535) , ab(1) , text(4)`,
+`65535-B message byte-exact: true`, `binary frame of 98305 B → closes: a:1006 b:1009 ; extra frames
+delivered: 0`, `Bun client default binaryType: nodebuffer`; `fragment.ts`: `40000+40000 = 80000 B →
+delivered=80000`, `60000+60000 = 120000 B → delivered=-1 … eof=true`. Identical to Context. **Holds.**
+
+**As built, in the plan's order.**
+
+1. *Protocol.* `PAIRING_PAYLOAD_VERSION = 2` with its reason (`packages/protocol/src/pairing.ts:28-34`);
+   `maxFrameChars`/`preAcceptBytes` comments say chars-or-bytes (`relay.ts:77-81, 99-104`). No wire
+   schema changed: `json-schema.test.ts` green with no regeneration, no `protocol.d/` note.
+2. *Transport.* `channel.ts`: `CarrierFrame`, `ByteCarrier`, `carrierFrameOf` (the one normalizer every
+   adapter uses: `ArrayBuffer`/view → `Uint8Array` over exactly `byteOffset`/`byteLength`, string →
+   string, else `null`), `createByteCarrierPair`; `createChannelPair` and it share one private
+   `linkedPair`. `noise.ts`: kind `version-mismatch`, optional `remoteVersion`. `noise-frame.ts`: text
+   codec removed (`FRAME_TAG`, `MAX_FRAME_TEXT`, `encodeFrame`, `decodeFrame`), base64 kept (P8), Hermes
+   comment fixed; new pure `binaryFrame` (text/empty/over-cap → `bad-frame`), `withVersion`,
+   `readVersioned` (the receiver checks of Design §2, in that order), `LEGACY_TEXT_TAG`.
+   `noise-channel.ts`: `E2E_CHANNEL_VERSION = 2`, `ByteCarrier` in, flights 1–2 versioned, raw
+   confirm/transport; responder phase `refused` (refusal `[2]` sent, violation reported at once,
+   rejection on the close or the timer — the deny pattern); a `t1:` text message 1 fails at once with
+   nothing sent.
+3. *Relay.* `apps/relay/src/server.ts`: `DataFrame = string | Uint8Array`, `sizeOf`; data legs forward
+   both kinds (binary as a view, no copy); the `1003` branch moved to the control socket and to an
+   accept leg before its token; pre-accept and oversize counts by `sizeOf`.
+4. *Daemon.* `ws-server.ts`: one generic `WsEnd<In, Out>` (plain route = `WsEnd<string,string>`, device
+   route = `WsEnd<CarrierFrame,Uint8Array>` in `ws.data.carrier`); `message` dispatches on which one
+   exists. `relay-link.ts`: `RelaySocket.send(string | Uint8Array)`, host delivers `CarrierFrame`,
+   `bunRelayDialer` pins `binaryType = "arraybuffer"` and uses `carrierFrameOf`; a binary control frame
+   is malformed (never parsed); the data leg is a `ByteCarrier`, its `accept` frame stays JSON text.
+   `device-accept.ts`: takes a `ByteCarrier`; pure `violationAudit` → `e2e-version-mismatch remote=<n>
+   local=2 (update the app|update tentacle)`.
+5. *Client.* `link-machine.ts`: `ChannelError.remoteE2eVersion`. `secure-channel.ts`: dials a
+   `ByteCarrier`, `version-mismatch → rejected` (transient) carrying the version. `ws-channel.ts`:
+   `WebSocketCarrier` + `webSocketCarrierFactory`, sharing the dial/classification with the text
+   factory through one private `dialWith(wrap)`. `pairing.ts`: `dial`/`pairOn` take `ByteCarrier`.
+6. *Mobile.* `connection.ts` dials `webSocketCarrierFactory`, `abandon`/`confirm`/`addressOf` on
+   `ByteCarrier`; `foreground-gate.ts` untouched. `pairing-flow.ts`: `ByteCarrier` dial/tracked/opened;
+   `describePairingError` maps a `ChannelError` with `remoteE2eVersion` to `version`.
+   `link-diagnosis.ts`: `update-app` / `update-computer` (streak untouched), extended `maybe-reset`
+   sentence.
+7. *Docs/changelog.* `e2e-channel.md` Framing + plaintext-peer row, `mobile-relay.md:33`;
+   `changelog.d/noise-binary-carrier.changed.md` (the plan's bullet). Test ports as listed, plus the new
+   `packages/client/test/ws-carrier.test.ts` (T-C1).
+
+**Drift from Implementation (and why).**
+
+- **D1 — `apps/mobile/App.tsx` changed** (not in Files): `phoneDial` (the pairing screen's dial) built
+  the text factory; it now uses `webSocketCarrierFactory` (`App.tsx:978-981`). `tsc -p apps/mobile`
+  found it; without it pairing would hand Noise a text channel.
+- **D2 — the two new diagnoses reach three more pure modules** (not in Files): `computer-rows.ts`
+  (`ComputerRowState` + the two states, no row action), `computer-status.ts` (`SHORT` words; tone
+  `attention` but `pairAgain` false — the fix is an update, not a pairing), `project-rows.ts`
+  (`ProjectState` + words + detail; `failedState` passes them through instead of folding them into
+  `unreachable`/`stopped`). Forced by the exhaustive `Record`s; kept presentation-minimal.
+- **D3 — F13/T-C1 "a `Blob` → `bad-frame` close"** is built as: the adapter closes the carrier at once
+  (socket closed + `onClose` fired, nothing delivered, never `String(x)`); the Noise layer then sees a
+  `closed`, not a `bad-frame`. A carrier has no error channel, and inventing a fake frame to trigger
+  `bad-frame` would be a hack. Same observable for the person (a failed dial).
+- **D4 — tests first, red by mutation.** The source was edited before the new tests were written, so
+  "red on `main`" is shown by mutating each target back (below) rather than by running the new tests
+  on `main`'s code. Each mutation reverts exactly the property the test names.
+- **D5 — extra tests beyond the list:** F11 empty frame after open, F12 view-at-offset + F13 non-frame
+  (`channel.test.ts`), a refusing responder closed by its own timer, T-M2 for both skew directions,
+  pure `readVersioned`/`binaryFrame` vectors in `noise-frame.test.ts`.
+- Fixture updates forced by the QR bump: `cli/test/pair.test.ts:322`, `mobile/test/deep-link.test.ts:20`,
+  `mobile/test/pairing-flow.test.ts` (built from `PAIRING_PAYLOAD_VERSION`; the "future version" case
+  is now `v=3`).
+
+**Mutation checks (each run on the narrow file, then reverted; reverted file re-run green).**
+
+| Mutation | Result |
+|---|---|
+| `readVersioned` ignores the version byte | 5 fail: T-V1 ×3 (0x01, 0x03, timer), T-V2 refusal [3], T-V2 header 0x01 |
+| `Secured.emit` sends `encodeBase64(message)` (text) | T-N1, T-N3, T-N4, F11 + the round-trip tests fail (8+ fail) |
+| `E2E_CHANNEL_VERSION = 1` | T-N2 (round-trip test), T-N1, T-V1 ×2, T-V2 lone [2] fail |
+| `binaryFrame` drops the length check | T-N4 (decrypt was called) + "oversized handshake frame" fail |
+| relay: `1003` back on data legs | T-R1 byte-exact + T-R3 fail |
+| relay: `sizeOf` counts binary as 0 | T-R3 fails (no `4404`) |
+| `ws-server` stringifies device frames | 16/22 `ws-device-route` fail |
+| `violationAudit` always `e2e-violation <kind>` | T-D1 fails |
+| `relay-link` decodes + parses a binary control frame | T-D2 control fails |
+| `WebSocketCarrier` uses `String(event.data)` | T-C1 ×2 fail |
+| `version-mismatch → unauthorized` | T-C2 ×2 + table row fail |
+| diagnoser skew branch disabled | T-M1 fails |
+| `describePairingError` skew branch disabled | T-M2 fails |
+| `PAIRING_PAYLOAD_VERSION = 1` | T-P1 (round trip + version refusals) fails |
+
+**Verification (narrow, per the token budget).** All 30 touched test files in one run: `508 pass,
+0 fail`. Per-package `tsc --noEmit` clean for `transport`, `daemon`, `apps/relay`, `apps/mobile`;
+`client`/`cli` show only pre-existing errors unrelated to this change (`tui` jsx config under `-p
+packages/client`; `RoutingAutoAccept`/`attach-run` under `-p packages/cli`) and none in a touched file.
+`bunx biome check` on every changed file: clean after `--write` (formatting only). The full `bun run
+check` is the orchestrator's gate (not run here, by instruction).
+
+**Unverified:** the RN device path — Hermes `base64-js` cost and that iOS's native module delivers
+`type:'binary'` as an `ArrayBuffer` — is read from RN 0.88 source, not run. Verify with one real-phone
+session over the relay after the relay deploy (§Deploy step 4) and BF0-E2.
 
 ## Review
