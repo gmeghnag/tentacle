@@ -287,6 +287,13 @@ export interface PdfImageLimits {
   readonly maxBytes: number;
   /** A sent image's long edge, in px, at most (box-downscaled past it). */
   readonly maxEdge: number;
+  /**
+   * Image work per read, in ms, at most. A page reached after it is not
+   * examined for images (no operator list, no decode) and is counted, so the
+   * text and the read's verdict always come back well inside the parse
+   * timeout: a 100-page scan otherwise spends ~18 s on images.
+   */
+  readonly maxMs: number;
 }
 
 export const DEFAULT_PDF_IMAGE_LIMITS: PdfImageLimits = {
@@ -296,6 +303,7 @@ export const DEFAULT_PDF_IMAGE_LIMITS: PdfImageLimits = {
   maxSent: 32,
   maxBytes: 8 * 1024 * 1024,
   maxEdge: 1568,
+  maxMs: 5_000,
 };
 
 /** One kept image of a read, as the page carries it (D5). */
@@ -315,6 +323,8 @@ export interface PdfImageSummary {
   readonly tiny: number;
   readonly capped: number;
   readonly undecodable: number;
+  /** Pages not examined for images: reached after `maxMs`. */
+  readonly unexamined: number;
 }
 
 /** One image after the read: its page, its box and what it became. */
@@ -350,7 +360,8 @@ export function stripImageMarkers(text: string): string {
  * to explain). Counts are listed, never averaged away.
  */
 export function imageFooter(summary: PdfImageSummary): string {
-  if (summary.repeats + summary.tiny + summary.capped + summary.undecodable === 0) {
+  const { repeats, tiny, capped, undecodable, unexamined } = summary;
+  if (repeats + tiny + capped + undecodable + unexamined === 0) {
     return "";
   }
   const parts = [`${summary.sent} sent`];
@@ -365,6 +376,11 @@ export function imageFooter(summary: PdfImageSummary): string {
   }
   if (summary.capped > 0) {
     parts.push(`${summary.capped} over the per-read cap — read fewer pages to get the rest`);
+  }
+  if (unexamined > 0) {
+    parts.push(
+      `${unexamined} ${unexamined === 1 ? "page" : "pages"} not examined for images (time limit) — read fewer pages to get them`,
+    );
   }
   return `[images: ${parts.join(", ")}]`;
 }
@@ -391,6 +407,8 @@ export interface PdfImageCollector {
    * `cacheId` (the XObject id) skips re-hashing an object painted again.
    */
   add(page: number, paint: PdfImagePaint, image: PdfDecodedImage | null, cacheId?: string): void;
+  /** One page not examined for images (the read's `maxMs` ran out first). */
+  skipPage(): void;
   /** Decide every image of the read: outcomes in paint order, and the summary. */
   finish(): { readonly images: readonly PdfImageOutcome[]; readonly summary: PdfImageSummary };
 }
@@ -411,6 +429,7 @@ export function createImageCollector(
   const counts = new Map<string, number>();
   const keyCache = new Map<string, { key: string; color: PngColor; pixels: Uint8Array } | null>();
   let tiny = 0;
+  let unexamined = 0;
   let encodedBytes = 0;
   let encodedCount = 0;
   let full = false;
@@ -479,6 +498,10 @@ export function createImageCollector(
       occurrences.push({ page, paint, key, width: size.width, height: size.height });
     },
 
+    skipPage() {
+      unexamined += 1;
+    },
+
     finish() {
       const images: PdfImageOutcome[] = [];
       let sent = 0;
@@ -520,7 +543,7 @@ export function createImageCollector(
           marker: imageMarker(occ.page, occ.width, occ.height, "not sent: per-read cap"),
         });
       });
-      return { images, summary: { sent, repeats, tiny, capped, undecodable } };
+      return { images, summary: { sent, repeats, tiny, capped, undecodable, unexamined } };
     },
   };
 }

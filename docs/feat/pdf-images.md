@@ -821,6 +821,85 @@ No protocol schema touched → no `protocol.json` regeneration, no `protocol.d/`
 - Memory: a page keeps its text items until the read ends, only if it painted
   images. Decoded pixels are dropped after `add`. PNG bytes are held up to the 8 MiB cap.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-21*
+
+Fixes S2 review finding 1 (MEDIUM: always-on image work on a scan nears the 20 s timeout).
+
+**Where the time goes, measured first** (`.tentacle/tmp/pdf-images/fix1/phases.ts`,
+`runExtraction` + pdf.js wrapped, 40 pages of 2480×3508 RGB): `total 8101 ms`,
+`getOperatorList 114 ms`, `objs.get 177 ms`. So pdf.js is cheap for Flate. About
+200 ms per image goes to our collector (`imagePixels` + `pixelKey` + downscale +
+PNG). It still runs after the caps, because a later image still has to be hashed
+to spot repeats. Making the per-image work cheaper would not bound the total, so
+the fix is a time budget.
+
+**As built**
+- `packages/core/src/pdf-images.ts`:
+  - `PdfImageLimits.maxMs` (default `5_000`).
+  - `PdfImageSummary.unexamined` (a count of pages).
+  - `PdfImageCollector.skipPage()`.
+  - `imageFooter` adds `N pages not examined for images (time limit) — read fewer
+    pages to get them`, and a non-zero `unexamined` alone produces a footer.
+- `packages/tools/src/pdf/run.ts`:
+  - `runExtraction(getDocument, req, ops?, now = performance.now)`. It sets a
+    deadline `now() + maxMs` at the start of the read.
+  - Before each page's image collection, a page reached past the deadline calls
+    `skipPage()`. That page gets no `getOperatorList` and no decode, so its text and
+    the read's verdict are unchanged.
+  - The check is per page: one page that is already being collected finishes.
+- `scripts/pdf-images-score.ts`: a read with `unexamined > 0` is also read again in
+  halves, as the footer says.
+- Tests:
+  - `tools/test/pdf-extract.test.ts`, "image work stops at its time budget". It uses
+    a fake doc and an injected clock. Pages 1–2 are listed and 3–4 are not, all 4
+    texts are returned, and `unexamined: 2`.
+  - `core/test/pdf-images.test.ts`, "pages past the time budget are counted". It
+    checks the summary and the exact footer.
+  - `tools/test/pdf-images.test.ts:147`: the summary `toEqual` now includes
+    `unexamined: 0`.
+
+**Red before green.** The new tools test fails on HEAD on its assertion:
+`listed` is `[1, 2, 3, 4]`, expected `[1, 2]`. The core test fails on HEAD because
+`skipPage` does not exist yet, so it is a new API. MC–ME below kill it on its
+assertions.
+
+**Mutations** (each one applied, its test files run, then reverted;
+`rg` for the mutants is empty afterwards):
+| # | Mutation | Result |
+|---|---|---|
+| MA | the budget is never checked (`&& false`) | 1 fail (the time-budget test) |
+| MB | the deadline ignores `req.images.maxMs` (hardcoded 5 s) | 1 fail |
+| MC | `skipPage` counts nothing | 2 fail |
+| MD | the footer drops the `unexamined` part | 1 fail |
+| ME | the footer gate ignores `unexamined` | 1 fail |
+
+**Evidence: the reviewer's repro** (`rev-s2/scan.ts 100`, real worker, 24 MB):
+- text only: `178 ms`;
+- with images: **`5164 ms`** (it was 17 916 ms), giving
+  `{sent:24, …, unexamined:76}`.
+
+The text is unchanged, so `fs_read` still returns the scanned-PDF refusal.
+
+**Verification (narrow).**
+- The 7 PDF test files: 155 pass, 0 fail.
+- `tsc --noEmit` on `packages/core`, `packages/tools` and the scorer tsconfig: clean.
+- `biome check` on the 6 changed files: clean.
+
+**Drift / notes:**
+- The budget is per page, not per paint. Pages examined before the deadline keep
+  their full markers and repeat detection. A page past it has no markers, and the
+  footer says so.
+- One very heavy page can still overrun by its own cost. The RSS watchdog and the
+  20 s timeout remain the backstops.
+- 5 s of the 20 s parse timeout is a parameter (Q4), like the other limits.
+- The farmaquiz acceptance (≈0.5 s per 100-page read) sits far under 5 s. It was
+  not re-run.
+- Not done: the review's suggested test of the OCR refusal on a large real scan
+  inside the gate. It costs about 5 s or more per run. The injected-clock test pins
+  the mechanism, and the repro above measures the real cost.
+
 ## Review
 
 ### S1 — fresh-context adversarial review

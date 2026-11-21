@@ -144,7 +144,14 @@ describe("extractPdf with images (real pdf.js in a worker)", () => {
     expect((left[0] ?? 0) > 200 && (left[2] ?? 255) < 60).toBe(true);
     expect((right[2] ?? 0) > 200 && (right[0] ?? 255) < 60).toBe(true);
 
-    expect(r.images).toEqual({ sent: 4, repeats: 0, tiny: 0, capped: 0, undecodable: 0 });
+    expect(r.images).toEqual({
+      sent: 4,
+      repeats: 0,
+      tiny: 0,
+      capped: 0,
+      undecodable: 0,
+      unexamined: 0,
+    });
   });
 
   test("an undecodable JPX stream → `not sent: undecodable`, the text survives", async () => {

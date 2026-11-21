@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { MAX_PAGES_PER_READ, MAX_PDF_BYTES, MAX_PDF_TEXT_CHARS } from "@tentacle/core";
+import {
+  DEFAULT_PDF_IMAGE_LIMITS,
+  MAX_PAGES_PER_READ,
+  MAX_PDF_BYTES,
+  MAX_PDF_TEXT_CHARS,
+} from "@tentacle/core";
 import { type PdfWorkerLike, createPdfExtractor, extractPdf } from "../src/pdf/extract.ts";
 import { pdfDocumentOptions } from "../src/pdf/options.ts";
 import { type GetDocument, runExtraction } from "../src/pdf/run.ts";
@@ -380,6 +385,48 @@ describe("runExtraction (inside the worker, pdf.js faked)", () => {
       { n: 1, text: "" },
       { n: 2, text: "ok" },
     ]);
+  });
+
+  test("image work stops at its time budget: later pages keep their text, the footer counts them", async () => {
+    const listed: number[] = [];
+    const getDocument: GetDocument = () => ({
+      promise: Promise.resolve({
+        numPages: 4,
+        getPage: async (n: number) => ({
+          getTextContent: async () => ({ items: [item(`page ${n}`)] }),
+          getOperatorList: async () => {
+            listed.push(n);
+            return { fnArray: [], argsArray: [] };
+          },
+          cleanup: () => {},
+        }),
+      }),
+    });
+    // A clock that moves 400 ms per read: the start reads 0, then the checks
+    // before pages 1–4 read 400, 800, 1200, 1600 against a 1000 ms budget.
+    let t = -400;
+    const now = () => {
+      t += 400;
+      return t;
+    };
+    const r = await runExtraction(
+      getDocument,
+      { bytes: new Uint8Array(1), images: { ...DEFAULT_PDF_IMAGE_LIMITS, maxMs: 1_000 } },
+      {
+        save: 10,
+        restore: 11,
+        transform: 12,
+        paintFormXObjectBegin: 74,
+        paintFormXObjectEnd: 75,
+        paintImageXObject: 85,
+        paintInlineImageXObject: 86,
+        paintImageXObjectRepeat: 88,
+      },
+      now,
+    );
+    expect(listed).toEqual([1, 2]); // pages 3 and 4: no operator list, no decode
+    expect(r.ok && r.pages.map((p) => p.text)).toEqual(["page 1", "page 2", "page 3", "page 4"]);
+    expect(r.ok && r.images?.unexamined).toBe(2);
   });
 
   test("the hardened options are what pdf.js is actually called with", async () => {

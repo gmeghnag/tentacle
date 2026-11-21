@@ -155,6 +155,7 @@ export async function runExtraction(
   getDocument: GetDocument,
   req: PdfWorkerRequest,
   ops?: PdfImageOps,
+  now: () => number = () => performance.now(),
 ): Promise<PdfExtraction> {
   let doc: PdfDocLike;
   try {
@@ -193,6 +194,7 @@ export async function runExtraction(
     const itemsOf = new Map<number, readonly unknown[]>();
     let chars = 0;
     let truncated = false;
+    const imageDeadline = req.images === undefined ? 0 : now() + req.images.maxMs;
     for (const n of wanted) {
       if (chars >= MAX_PDF_TEXT_CHARS) {
         truncated = true;
@@ -203,7 +205,10 @@ export async function runExtraction(
         const page = await doc.getPage(n);
         const content = await page.getTextContent();
         text = buildPageText(content.items);
-        if (collector !== undefined && ops !== undefined) {
+        if (collector !== undefined && ops !== undefined && now() >= imageDeadline) {
+          // Out of image time: the page keeps its text, the footer counts it.
+          collector.skipPage();
+        } else if (collector !== undefined && ops !== undefined) {
           try {
             if (await collectPageImages(page, n, ops, collector)) {
               itemsOf.set(n, content.items);

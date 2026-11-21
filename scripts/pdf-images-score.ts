@@ -137,7 +137,15 @@ async function main(): Promise<void> {
   const started = performance.now();
   let text = "";
   const pngsByMarker = new Map<string, Uint8Array[]>(); // per page: marker → PNGs in order
-  const totals = { sent: 0, repeats: 0, tiny: 0, capped: 0, undecodable: 0, reReads: 0 };
+  const totals = {
+    sent: 0,
+    repeats: 0,
+    tiny: 0,
+    capped: 0,
+    undecodable: 0,
+    unexamined: 0,
+    reReads: 0,
+  };
   const read = async (pages: string) => {
     const r = await runExtraction(
       getDocument,
@@ -155,13 +163,13 @@ async function main(): Promise<void> {
   for (let range = queue.shift(); range !== undefined; range = queue.shift()) {
     const [from, to] = range;
     const r = await read(`${from}-${to}`);
-    if ((r.images?.capped ?? 0) > 0 && to > from) {
+    if ((r.images?.capped ?? 0) + (r.images?.unexamined ?? 0) > 0 && to > from) {
       const mid = Math.floor((from + to) / 2);
       queue.unshift([from, mid], [mid + 1, to]);
       totals.reReads += 1;
       continue;
     }
-    for (const key of ["sent", "repeats", "tiny", "capped", "undecodable"] as const) {
+    for (const key of ["sent", "repeats", "tiny", "capped", "undecodable", "unexamined"] as const) {
       totals[key] += r.images?.[key] ?? 0;
     }
     for (const page of r.pages) {

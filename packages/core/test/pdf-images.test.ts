@@ -305,7 +305,21 @@ describe("createImageCollector (filters, repeats, caps)", () => {
   });
 
   test("everything sent → no footer", () => {
-    expect(imageFooter({ sent: 3, repeats: 0, tiny: 0, capped: 0, undecodable: 0 })).toBe("");
+    expect(
+      imageFooter({ sent: 3, repeats: 0, tiny: 0, capped: 0, undecodable: 0, unexamined: 0 }),
+    ).toBe("");
+  });
+
+  test("pages past the time budget are counted in the footer, and in the summary", () => {
+    const c = createImageCollector(deflate);
+    c.add(1, paint(500), rgb(40, 40, 1));
+    c.skipPage();
+    c.skipPage();
+    const { summary } = c.finish();
+    expect(summary).toMatchObject({ sent: 1, unexamined: 2 });
+    expect(imageFooter(summary)).toBe(
+      "[images: 1 sent, 2 pages not examined for images (time limit) — read fewer pages to get them]",
+    );
   });
 });
 
