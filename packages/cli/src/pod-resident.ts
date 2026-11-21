@@ -762,6 +762,21 @@ export const POD_DAEMON_MODES = [
 ] as const;
 
 /**
+ * Where a resident mode's DATA line goes (the one-shot commands' JSON answer).
+ * The seam exists so `main` hands over its own `out` sink: writing
+ * `process.stdout` direct escaped it, and a test's bytes then landed on the
+ * runner's real fd 1 (docs/fix/test-stray-snapshot-write.md).
+ */
+export interface ResidentIO {
+  readonly out: (text: string) => void;
+}
+
+/** The process's own stdout: what a real `tentacle serve --resident-status` needs. */
+export const processResidentIO: ResidentIO = {
+  out: (text) => void process.stdout.write(text),
+};
+
+/**
  * `serve --bridge | --resident | --resident-status | --resident-stop`, in the
  * pod. Returns the exit code. The bridge's stdout IS the RPC channel and the
  * resident's stdio is its log file: every diagnostic goes to stderr.
@@ -769,6 +784,7 @@ export const POD_DAEMON_MODES = [
 export async function runResidentMode(
   config: TentacleConfig,
   parsed: Pick<ParsedFlags, "flags" | "bools">,
+  io: ResidentIO = processResidentIO,
 ): Promise<number> {
   const { flags, bools } = parsed;
   const log = (line: string): void => {
@@ -780,11 +796,11 @@ export async function runResidentMode(
     const socketPath = socket ?? residentSocketPath(stateDir);
     if (bools.has("resident-status")) {
       const report = await residentStatusReport(socketPath);
-      process.stdout.write(`${report.line}\n`);
+      io.out(`${report.line}\n`);
       return report.exitCode;
     }
     if (bools.has("resident-stop")) {
-      process.stdout.write(`${JSON.stringify({ stopped: await residentStop(stateDir) })}\n`);
+      io.out(`${JSON.stringify({ stopped: await residentStop(stateDir) })}\n`);
       return 0;
     }
     const options: PodDaemonOptions = { modelProxy: bools.has("model-proxy") };

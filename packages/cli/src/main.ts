@@ -1141,7 +1141,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     // inside a pod, driven over the k8s exec channel — F4). stdout IS the RPC
     // channel here, so every log line must go to stderr.
     if (POD_DAEMON_MODES.some((flag) => flag !== "stdio" && bools.has(flag))) {
-      return runResidentMode(config, parsed);
+      // Its data line (the one-shot commands' JSON answer) is DATA: the same
+      // sink as every other non-TUI command, so an injected `out` is honoured
+      // (a direct `process.stdout.write` escaped it and reached fd 1).
+      return runResidentMode(config, parsed, { out });
     }
     if (bools.has("stdio")) {
       try {

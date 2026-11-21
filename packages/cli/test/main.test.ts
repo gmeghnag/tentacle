@@ -250,6 +250,41 @@ describe("cli main: what config-carry moved (docs/feat/config-carry.md)", () => 
       await rm(configDir, { recursive: true, force: true });
     }
   });
+
+  test("a resident mode's data line goes to the `out` sink, never to fd 1 (fix/test-stray-snapshot-write)", async () => {
+    // The bug: `runResidentMode` wrote `process.stdout` directly, so a test that
+    // passed an `out` sink still leaked `{"resident":false}` onto the runner's
+    // real stdout — which, with fd 1 free, Bun delivered into the snapshot file
+    // it was writing (07729c2b, docs/fix/test-stray-snapshot-write.md §Context).
+    // Mutation: `runResidentMode(config, parsed)` at main.ts:1144 → red.
+    const configDir = await mkdtemp(join(tmpdir(), "resident-out-"));
+    const saved = process.env.TENTACLE_CONFIG_DIR;
+    process.env.TENTACLE_CONFIG_DIR = configDir;
+    const real = process.stdout.write.bind(process.stdout);
+    const leaked: string[] = [];
+    process.stdout.write = ((chunk: unknown) => {
+      leaked.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    const out: string[] = [];
+    const err: string[] = [];
+    try {
+      const code = await main(
+        ["bun", "cli", "serve", "--resident-status", "--socket", join(configDir, "none.sock")],
+        { out: (t) => out.push(t), err: (t) => err.push(t) },
+      );
+      // Nobody listening: the honest JSON answer, on the sink.
+      expect(out.join("")).toMatch(/^\{"resident":false\}\n$/);
+      expect(err.join("")).toBe("");
+      expect(code).toBe(0);
+    } finally {
+      process.stdout.write = real as typeof process.stdout.write;
+      if (saved === undefined) Reflect.deleteProperty(process.env, "TENTACLE_CONFIG_DIR");
+      else process.env.TENTACLE_CONFIG_DIR = saved;
+      await rm(configDir, { recursive: true, force: true });
+    }
+    expect(leaked).toEqual([]);
+  });
 });
 
 describe("cli main: skill diagnostics", () => {
