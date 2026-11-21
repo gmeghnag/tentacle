@@ -675,3 +675,25 @@ check` is the orchestrator's gate (not run here, by instruction).
 session over the relay after the relay deploy (§Deploy step 4) and BF0-E2.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-21* (fresh context; **same model as the executor** — shared blind spots possible on this load-bearing task)
+
+**Verdict: REQUEST-CHANGES** (one test-only MEDIUM; production code holds).
+
+**Findings**
+
+1. **MEDIUM — T-M1 does not pin "a skew does not COUNT toward the reset streak"** (`apps/mobile/test/link-diagnosis.test.ts:115-123`). The test runs 2× unreachable, 2× skew, 1× unreachable and expects `maybe-reset`; that proves "skews don't RESET the streak" only. Mutation `streak += 1` in the skew branch (`apps/mobile/src/link-diagnosis.ts:96`) → **11 pass, 0 fail** (survived). Failure scenario if that regresses: an on-path party forging two version bytes, then one plain close, flips the row to "pair again" (`maybe-reset`) after a single real failure — the exact key-reset misdiagnosis P5/F10 says a forged byte must not cause. Fix: add a case such as 1× unreachable, 2× skew, 1× unreachable → `unreachable`; show it red under the mutation.
+
+**Gate (this review):** touched test files/dirs (`apps/mobile/test`, `apps/relay/test`, `packages/{client,protocol,transport}/test`, the touched `cli`/`daemon` files) → **6127 pass, 0 fail**; `bun run lint` clean (2192 files); `bun run typecheck` clean (root + mobile + relay). Full `bun run check` not run here (orchestrator's merge gate).
+
+**Mutations (each reverted; `git status` clean after):** responder refusal send removed → T-V1 ×2 fail ✔; `WebSocketCarrier` `binaryType` pin removed → T-C1 ×2 fail ✔; skew branch counts the streak → **survived** (finding 1).
+
+**Attacks tried**
+- *Relay holds a view over Bun's `message` buffer for pre-accept frames* (`apps/relay/src/server.ts:441-444`, buffered at `:340`): scratch `review-hold.ts` stored views of 50 messages then sent 50 more → 0 corrupted, each message its own buffer (offset 0). Holds.
+- *A forged version is terminal*: `version-mismatch → rejected` (`secure-channel.ts:30-32`), `isTerminalDialError` is `unauthorized` only (`address-dial.ts:119-121`). Holds (P5).
+- *Diagnoser never sees `remoteE2eVersion`*: `connection.ts:338-345` passes the raw `ChannelError` into `observe`. Holds.
+- *Refusal double-audits or leaks the limiter slot*: `refuse` reports once, later `fail(refusal, false)` does not re-report; reject on close/timer like `denied`. Holds.
+- *Binary on the control socket / accept leg before token*: relay closes `1003` (`server.ts:446-451, 675-680`); daemon never parses a binary control frame (`relay-link.ts:556-558`). Holds.
+- *§7 one session path / single broker*: only the carrier under `SecureChannel` changed; `RpcPeer`/`Connection`/`RemoteClient`/`foreground-gate` untouched. Holds.
+
+**Executor behaviour:** plan followed; drifts D1–D5 declared honestly; mutation table reproducible where sampled. Overstated one property in T-M1 ("neither count nor reset") that its test does not prove.
