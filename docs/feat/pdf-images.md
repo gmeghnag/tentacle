@@ -582,4 +582,51 @@ No protocol schema touched → `protocol.json` not regenerated; no `protocol.d/`
 
 ## Review
 
-*— (pending)*
+### S1 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, no HIGH).
+
+**Gate (narrow, as the brief scoped it):** `bun test packages/providers` → 185 pass,
+0 fail; `bun run lint` clean (2220 files); `bun run typecheck` clean (root + mobile +
+relay). Full `bun test` was not re-run in this pass.
+
+**Findings**
+1. **MEDIUM — the per-request image budget counts images but not the provider's
+   per-request limits** (`packages/providers/src/images.ts:34` `MAX_TOOL_IMAGES = 20`,
+   `:211-221` `buildImageOptions`). A request may now carry 5 user + 20 tool images.
+   Before S1 the most it could carry was 5 × `ANTHROPIC_MAX_IMAGE_BYTES` (3.93 MB raw ≈
+   5.2 MB base64 ≈ 26 MB), which is under the Messages API's 32 MB request limit. After
+   S1 the bound is ≈ 131 MB. On top of that, more than 20 images in one request lowers
+   Anthropic's per-image dimension limit to 2000×2000 px, and user images are not
+   downscaled. Failure scenario (once S3 adds a producer): three PDF reads at the S2
+   8 MiB per-read cap put about 20 tool images worth ≈ 24 MiB raw in the window, and
+   the user attached one 3000 px screenshot earlier. Every later request then gets a
+   413/400. The same refs are selected again on every turn, so the session is poisoned.
+   That is the outcome `maxImageBytes`' own doc comment says must never happen. This
+   is the plan's own "TO VERIFY" (Execution, "Not verified"): it was left open, and the
+   load-bearing property "within a bounded per-request budget" only bounds the count.
+   Fix before S3 ships: add an aggregate raw/base64 byte budget across user ∪ tool
+   inlining (older images fall back to reason lines). Also either cap the total at 20
+   for Anthropic or guarantee every image inlined alongside them is ≤ 2000 px. Add
+   tests for both.
+
+**Mutation non-vacuity:** the cross-result dedup was mutated so the owner check was
+always false and every result inlined its own copy → 1 fail ("the same picture in two
+results is sent ONCE"). Reverted from the scratch copy; `git status` was empty
+afterwards. The executor's M1–M5 were not re-run.
+
+**Attacks tried (no finding):**
+- Anthropic consecutive-result collapse: still one user turn (`anthropic-provider.ts:482-495`).
+- No-refs `tool_result`: still the byte-identical string (cache-stable).
+- Empty-content text block left out (400 avoided).
+- User K isolation: `userParts` checks `inlined.has` (`images.ts:323`).
+- Same id twice in one result: sent once.
+- Pod-supplied tool refs: the laptop still serves only ids it attached itself (§7 "pod not trusted"). The pod chooses only the id, same scope as before; no new bytes leave the laptop.
+- No protocol or persistence surface touched.
+- OpenAI wire-only `user` message may sit next to a real `user` turn (user, user). The OpenAI-compatible endpoints accept that; noted, not a finding.
+
+**Executor behaviour:** honest. It flagged the unverified Anthropic limit itself and
+documented its drifts (new test files, dedup, config not wired). Reviewer is the same
+model family as the planner (claude-opus-5-5), in a fresh context only.
+
+*— claude-opus-5-5, 2026-11-21*
