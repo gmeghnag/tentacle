@@ -31,7 +31,7 @@ import {
   type PairingPayload,
   type PairingRefusedReason,
 } from "@tentacle/protocol";
-import { type DuplexChannel, RpcError, RpcPeer } from "@tentacle/transport";
+import { type ByteCarrier, RpcError, RpcPeer } from "@tentacle/transport";
 import { type Random, pairingSas, publicKeyOf } from "@tentacle/transport/noise";
 import { type FirstAnsweringOptions, firstAnswering, isTerminalDialError } from "./address-dial.ts";
 import { channelErrorFromNoise, secureChannelFactory } from "./secure-channel.ts";
@@ -63,7 +63,7 @@ export interface PairDeviceOptions {
    * Opens a raw channel to one address. The app passes its own WebSocket dial
    * (`rn-websocket`); nothing here assumes Bun's.
    */
-  readonly dial: (address: string) => () => Promise<DuplexChannel>;
+  readonly dial: (address: string) => () => Promise<ByteCarrier>;
   /**
    * Randomness for the Noise handshake. REQUIRED, like every other
    * `InitiatorOptions`: the transport has no silent fallback, and the app
@@ -184,10 +184,7 @@ export async function pairDevice(options: PairDeviceOptions): Promise<PairDevice
  * The exchange, on ONE already-open channel: the Noise initiator over it, a
  * peer, `initialize`, `onCompare`, `device/pair`, close.
  */
-async function pairOn(
-  channel: DuplexChannel,
-  options: PairDeviceOptions,
-): Promise<PairDeviceResult> {
+async function pairOn(channel: ByteCarrier, options: PairDeviceOptions): Promise<PairDeviceResult> {
   const factory = secureChannelFactory(async () => channel, {
     staticKey: options.deviceKey,
     remoteStatic: options.payload.key,

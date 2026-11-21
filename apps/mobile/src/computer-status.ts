@@ -33,7 +33,12 @@ const SHORT: Record<ComputerRow["state"], string> = {
   revoked: "Access revoked",
   "maybe-reset": "Needs pairing again",
   broken: "Saved key damaged",
+  "update-app": "Update the app",
+  "update-computer": "Update tentacle",
 };
+
+/** An e2e version skew: it needs the person (attention), but an update — never a new pairing. */
+const NEEDS_UPDATE: ReadonlySet<ComputerRow["state"]> = new Set(["update-app", "update-computer"]);
 
 export function computerStatus(row: ComputerRow): ComputerStatus {
   const tone: ComputerTone =
@@ -45,7 +50,7 @@ export function computerStatus(row: ComputerRow): ComputerStatus {
     // Every state that needs a new pairing offers it where the person looks —
     // a `revoked` row too (its `action` is "remove" for the record, but the
     // only way back to a WORKING computer is pairing again: computer-rows.ts:12-16).
-    pairAgain: tone === "attention",
+    pairAgain: tone === "attention" && !NEEDS_UPDATE.has(row.state),
   };
 }
 

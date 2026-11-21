@@ -163,7 +163,9 @@ export function relaySocketOptions(options: Pick<RelayServerOptions, "idleTimeou
     // the memory — ~32 parallel 16 MiB frames reach `MemoryMax=512M`
     // (`relay.service`) and the OOM kill drops every daemon and stream, with no
     // authentication needed. 96 KiB is above the largest legitimate frame (a
-    // Noise frame of ~87.4 Ki ASCII chars), so nothing real is cut.
+    // raw Noise message ≤ 65 535 B, +1 version byte in the handshake; a legacy
+    // v1 `t1:` text frame ≤ ~87.4 Ki chars), so nothing real is cut. It bounds
+    // binary messages too, whole or fragmented (docs/feat/noise-binary-carrier.md).
     maxPayloadLength: RELAY_CONTROL_LIMITS.maxFrameChars,
     // Pinned, not left to the default: a compression bomb is the one way a
     // bounded payload can still expand, and nothing here compresses.
@@ -208,17 +210,29 @@ interface SocketData {
 /** The bits of Bun's server socket this file touches. */
 interface RelaySocket {
   readonly data: SocketData;
-  send(data: string): number;
+  send(data: DataFrame): number;
   close(code?: number, reason?: string): void;
 }
+
+/**
+ * A data-leg frame, forwarded opaquely as it came: binary (E2E v2's raw Noise
+ * messages) AND text (a v1 `t1:` pair until it updates) — permanently, so the
+ * relay never interprets a data frame nor needs a redeploy for a channel change
+ * (docs/feat/noise-binary-carrier.md §4).
+ */
+type DataFrame = string | Uint8Array;
+
+/** A frame's size: characters of text, bytes of binary (what Bun's `maxPayloadLength` counts). */
+const sizeOf = (frame: DataFrame): number =>
+  typeof frame === "string" ? frame.length : frame.byteLength;
 
 interface PeerAddressable {
   requestIP(req: Request): { readonly address: string } | null;
 }
 
-/** A buffered pre-accept phone frame and its size in characters. */
+/** A phone's buffered pre-accept frames and their total size (`sizeOf`). */
 interface Buffered {
-  readonly frames: string[];
+  readonly frames: DataFrame[];
   chars: number;
 }
 
@@ -300,12 +314,12 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
   };
 
   /** Forward one frame to the other leg, or buffer it (a phone whose daemon has not accepted yet). */
-  const forward = (from: string, text: string): void => {
+  const forward = (from: string, frame: DataFrame): void => {
     const peer = peers.get(from);
     if (peer !== undefined) {
       const socket = sockets.get(peer);
       if (socket !== undefined && !socket.data.done) {
-        socket.send(text);
+        socket.send(frame);
       }
       return;
     }
@@ -313,7 +327,7 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     if (held === undefined) {
       return;
     }
-    held.chars += text.length;
+    held.chars += sizeOf(frame);
     if (held.chars > RELAY_CONTROL_LIMITS.preAcceptBytes) {
       // More than a Noise message 1 before the daemon even accepted: not a peer
       // worth holding a socket for. Closing is the only honest answer.
@@ -323,7 +337,7 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
       core.phoneClosed(from);
       return;
     }
-    held.frames.push(text);
+    held.frames.push(frame);
   };
 
   /** Give a waiting phone its accept leg: splice, then flush what it sent early. */
@@ -423,30 +437,34 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
       },
       message(ws, message) {
         const key = ws.data.key;
-        const text = typeof message === "string" ? message : undefined;
-        if (text === undefined) {
-          // Text only: the Noise channel's frames are `t1:` + base64 text, so a
-          // binary frame is not ours and is not guessed at.
-          log(`binary-frame ${logPrefix(key)}`);
-          closeBoth(key, 1003);
-          return;
-        }
+        // Binary is forwarded as the same bytes (a view, no copy, no decode).
+        const frame: DataFrame =
+          typeof message === "string"
+            ? message
+            : new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
         if (ws.data.role === "control") {
-          onControl(ws as unknown as RelaySocket, text);
+          if (typeof frame !== "string") {
+            // The control socket carries JSON text frames only: binary is not guessed at.
+            log(`binary-frame ${logPrefix(key)}`);
+            closeBoth(key, 1003);
+            return;
+          }
+          onControl(ws as unknown as RelaySocket, frame);
           return;
         }
         if (ws.data.role === "accept") {
-          onAcceptLeg(key, text);
+          onAcceptLeg(key, frame);
           return;
         }
-        if (text.length > RELAY_CONTROL_LIMITS.maxFrameChars) {
-          // A legit frame never reaches this (the Noise cap is ~87.4 Ki chars):
-          // past it, both legs go, and the phone resyncs on its next dial.
+        if (sizeOf(frame) > RELAY_CONTROL_LIMITS.maxFrameChars) {
+          // A legit frame never reaches this (Bun's `maxPayloadLength` refuses it
+          // first; a Noise frame is ≤ 65 536 B, a v1 one ~87.4 Ki chars): past
+          // it, both legs go, and the phone resyncs on its next dial.
           log(`frame-oversize ${logPrefix(key)}`);
           closeBoth(key, RELAY_CLOSE_UNREGISTERED);
           return;
         }
-        forward(key, text);
+        forward(key, frame);
       },
       close(ws) {
         const key = ws.data.key;
@@ -644,16 +662,23 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
   }
 
   /** The accept leg's first frame is the token; after that the socket is raw. */
-  function onAcceptLeg(key: string, text: string): void {
+  function onAcceptLeg(key: string, frame: DataFrame): void {
     if (peers.has(key)) {
-      if (text.length > RELAY_CONTROL_LIMITS.maxFrameChars) {
+      if (sizeOf(frame) > RELAY_CONTROL_LIMITS.maxFrameChars) {
         log(`frame-oversize ${logPrefix(key)}`);
         closeBoth(key, RELAY_CLOSE_UNREGISTERED);
         return;
       }
-      forward(key, text);
+      forward(key, frame);
       return;
     }
+    if (typeof frame !== "string") {
+      // Before its token the accept leg carries the JSON `accept` frame only.
+      log(`binary-frame ${logPrefix(key)}`);
+      closeBoth(key, 1003);
+      return;
+    }
+    const text = frame;
     if (isInboundFrameTooLarge(text)) {
       log(`accept-oversize ${logPrefix(key)}`);
       closeSocket(key, 1009);

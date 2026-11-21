@@ -29,7 +29,10 @@ export type ProjectState =
   | "unreachable"
   | "revoked"
   | "maybe-reset"
-  | "broken";
+  | "broken"
+  // An e2e version skew (docs/feat/noise-binary-carrier.md): the fix is an update, not a pairing.
+  | "update-app"
+  | "update-computer";
 
 /** The written word of each state (what the row says next to its dot). */
 export const PROJECT_WORDS: Record<ProjectState, string> = {
@@ -42,6 +45,8 @@ export const PROJECT_WORDS: Record<ProjectState, string> = {
   revoked: "Access removed",
   "maybe-reset": "Needs pairing again",
   broken: "Saved key damaged",
+  "update-app": "Update the app",
+  "update-computer": "Update tentacle",
 };
 
 /** What one record contributes (the public half of a stored record, or a broken entry). */
@@ -167,8 +172,9 @@ function labelOf(record: ProjectRecordLike, probe: ComputerProbe): string {
 }
 
 function failedState(observation: ProjectObservation, siblingAnswered: boolean): ProjectState {
-  if (observation.diagnosis === "revoked" || observation.diagnosis === "maybe-reset") {
-    return observation.diagnosis;
+  const d = observation.diagnosis;
+  if (d === "revoked" || d === "maybe-reset" || d === "update-app" || d === "update-computer") {
+    return d;
   }
   return observation.absent || siblingAnswered ? "stopped" : "unreachable";
 }
@@ -189,6 +195,10 @@ function detailOf(state: ProjectState, record: ProjectRecordLike, probe: Compute
     case "maybe-reset":
     case "broken":
       return "pair again or remove";
+    case "update-app":
+      return "it runs a newer tentacle than this app";
+    case "update-computer":
+      return "tentacle on it is older than this app";
     case "unreachable":
       return "";
   }

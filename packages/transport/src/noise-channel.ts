@@ -16,8 +16,15 @@
  * unknown type, the size cap — closes the raw channel, discards partial
  * reassembly, reports through `onViolation` and delivers nothing. Never drops.
  */
-import type { DuplexChannel } from "./channel.ts";
-import { Reassembler, TYPE_CONFIRM, chunk, decodeFrame, encodeFrame } from "./noise-frame.ts";
+import type { ByteCarrier, CarrierFrame, DuplexChannel } from "./channel.ts";
+import {
+  Reassembler,
+  TYPE_CONFIRM,
+  binaryFrame,
+  chunk,
+  readVersioned,
+  withVersion,
+} from "./noise-frame.ts";
 import { type CipherState, IkInitiator, IkResponder, NoiseError, publicKeyOf } from "./noise.ts";
 
 export { NoiseError, type NoiseErrorKind, publicKeyOf } from "./noise.ts";
@@ -30,7 +37,7 @@ export {
 } from "./pairing-sas.ts";
 
 /** This channel's own version, bound in the prologue (not `PROTOCOL_VERSION`: a skew stays a clean `VersionMismatch`). */
-export const E2E_CHANNEL_VERSION = 1;
+export const E2E_CHANNEL_VERSION = 2;
 export const PROLOGUE: Uint8Array = new TextEncoder().encode(`tentacle-e2e/${E2E_CHANNEL_VERSION}`);
 
 /** Below the client's 15 s dial deadline, so the error stays specific. */
@@ -166,7 +173,7 @@ class Secured implements SecureChannel {
   private reassembler: Reassembler;
 
   constructor(
-    private readonly raw: DuplexChannel,
+    private readonly raw: ByteCarrier,
     private readonly tx: CipherState,
     private readonly rx: CipherState,
     readonly remoteStatic: Uint8Array,
@@ -188,7 +195,7 @@ class Secured implements SecureChannel {
     if (this.closed) return false;
     try {
       const message = this.tx.encryptWithAd(EMPTY, plaintext);
-      this.raw.send(encodeFrame(message));
+      this.raw.send(message);
       return true;
     } catch (error) {
       this.violate(asNoise(error, "closed"));
@@ -218,8 +225,8 @@ class Secured implements SecureChannel {
   }
 
   /** The responder's third flight: exactly one confirm, nothing else. Throws on anything else. */
-  readConfirm(text: string): void {
-    const message = decodeFrame(text); // a malformed frame stays `bad-frame`
+  readConfirm(frame: CarrierFrame): void {
+    const message = binaryFrame(frame); // a malformed frame stays `bad-frame`
     let plaintext: Uint8Array;
     try {
       plaintext = this.rx.decryptWithAd(EMPTY, message);
@@ -231,11 +238,11 @@ class Secured implements SecureChannel {
     }
   }
 
-  receive(text: string): void {
+  receive(frame: CarrierFrame): void {
     if (this.closed) return;
     let whole: string | null;
     try {
-      whole = this.reassembler.push(this.rx.decryptWithAd(EMPTY, decodeFrame(text)));
+      whole = this.reassembler.push(this.rx.decryptWithAd(EMPTY, binaryFrame(frame)));
     } catch (error) {
       this.violate(asNoise(error, "bad-frame"));
       return;
@@ -301,6 +308,7 @@ type Phase =
   | "await-msg1"
   | "authorizing"
   | "denied"
+  | "refused"
   | "await-confirm"
   | "await-msg2"
   | "open"
@@ -308,15 +316,17 @@ type Phase =
 
 /** The raw channel's handlers and the handshake timer, shared by both roles. */
 function handshake(
-  raw: DuplexChannel,
+  raw: ByteCarrier,
   options: NoiseChannelOptions,
   role: "initiator" | "responder",
   start: (ctx: {
     readonly fail: (error: NoiseError, report: boolean) => void;
     readonly open: (secured: Secured) => void;
+    /** A version refusal was sent: reported now, rejected on the close (or the timer), as a deny. */
+    readonly refuse: (error: NoiseError) => void;
     phase(): Phase;
     setPhase(phase: Phase): void;
-    setStep(step: (text: string) => void): void;
+    setStep(step: (frame: CarrierFrame) => void): void;
   }) => void,
 ): Promise<SecureChannel> {
   return new Promise((resolve, reject) => {
@@ -324,7 +334,8 @@ function handshake(
     const timeoutMs = options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
     let phase: Phase = role === "initiator" ? "await-msg2" : "await-msg1";
     let secured: Secured | null = null;
-    let step: (text: string) => void = () => {};
+    let refusal: NoiseError | null = null;
+    let step: (frame: CarrierFrame) => void = () => {};
     let handle: unknown;
     const stopTimer = (): void => {
       if (handle !== undefined) timer.clearTimeout(handle);
@@ -346,14 +357,25 @@ function handshake(
       resolve(s);
     };
 
-    raw.setOnMessage((text) => {
+    const refuse = (error: NoiseError): void => {
+      if (phase === "failed" || phase === "open") return;
+      phase = "refused";
+      refusal = error;
+      options.onViolation?.(error);
+    };
+
+    raw.setOnMessage((frame) => {
       if (phase === "open") {
-        secured?.receive(text);
+        secured?.receive(frame);
         return;
       }
       if (phase === "failed") return;
+      if (phase === "refused" && refusal) {
+        fail(refusal, false);
+        return;
+      }
       try {
-        step(text);
+        step(frame);
       } catch (error) {
         fail(asNoise(error), true);
       }
@@ -361,6 +383,10 @@ function handshake(
     raw.setOnClose(() => {
       if (phase === "open") {
         secured?.rawClosed();
+        return;
+      }
+      if (phase === "refused" && refusal) {
+        fail(refusal, false);
         return;
       }
       if (phase === "denied") {
@@ -380,6 +406,7 @@ function handshake(
     handle = timer.setTimeout(() => {
       handle = undefined;
       if (phase === "denied") fail(new NoiseError("denied", "the device was refused"), false);
+      else if (phase === "refused" && refusal) fail(refusal, false);
       else fail(new NoiseError("timeout", `no secure handshake after ${timeoutMs} ms`), true);
     }, timeoutMs);
 
@@ -387,6 +414,7 @@ function handshake(
       start({
         fail,
         open,
+        refuse,
         phase: () => phase,
         setPhase: (p) => {
           if (phase !== "failed" && phase !== "open") phase = p;
@@ -404,7 +432,7 @@ function handshake(
 
 /** The client side: pins the responder's key, resolves once the responder allowed it. */
 export function noiseInitiator(
-  raw: DuplexChannel,
+  raw: ByteCarrier,
   options: InitiatorOptions,
 ): Promise<SecureChannel> {
   const max = options.maxMessageBytes ?? INITIATOR_MAX_MESSAGE_BYTES;
@@ -416,8 +444,9 @@ export function noiseInitiator(
       prologue: PROLOGUE,
     });
     const message1 = hs.writeMessage1(EMPTY);
-    setStep((text) => {
-      const status = hs.readMessage2(decodeFrame(text));
+    setStep((frame) => {
+      // The version byte (or a lone refusal byte) is read before any crypto.
+      const status = hs.readMessage2(readVersioned(frame, E2E_CHANNEL_VERSION));
       if (status.length === 1 && status[0] === STATUS_DENY) {
         // Authenticated: only the responder's static key could have said it.
         fail(new NoiseError("denied", "the daemon refused this device"), false);
@@ -438,26 +467,44 @@ export function noiseInitiator(
       open(secured);
       secured.emit(Uint8Array.of(TYPE_CONFIRM));
     });
-    raw.send(encodeFrame(message1));
+    raw.send(withVersion(E2E_CHANNEL_VERSION, message1));
   });
 }
 
 /** The daemon side: learns the initiator's key, asks `authorize`, resolves on the confirm. */
 export function noiseResponder(
-  raw: DuplexChannel,
+  raw: ByteCarrier,
   options: ResponderOptions,
 ): Promise<SecureChannel> {
   const max = options.maxMessageBytes ?? RESPONDER_MAX_MESSAGE_BYTES;
-  return handshake(raw, options, "responder", ({ fail, open, phase, setPhase, setStep }) => {
+  return handshake(raw, options, "responder", (ctx) => {
+    const { fail, open, phase, setPhase, setStep } = ctx;
     const hs = new IkResponder({
       staticKey: options.staticKey,
       ephemeralKey: draw(options.random, 32),
       prologue: PROLOGUE,
     });
     let secured: Secured | null = null;
-    setStep((text) => {
+    setStep((frame) => {
       if (phase() === "await-msg1") {
-        if (hs.readMessage1(decodeFrame(text)).length !== 0) {
+        let message1: Uint8Array;
+        try {
+          message1 = readVersioned(frame, E2E_CHANNEL_VERSION);
+        } catch (error) {
+          // A binary flight of another version gets our version back (a v1 text peer cannot
+          // read one): it closes on reading it, the timer covers one that never does.
+          if (
+            error instanceof NoiseError &&
+            error.kind === "version-mismatch" &&
+            typeof frame !== "string"
+          ) {
+            ctx.refuse(error);
+            raw.send(Uint8Array.of(E2E_CHANNEL_VERSION));
+            return;
+          }
+          throw error;
+        }
+        if (hs.readMessage1(message1).length !== 0) {
           throw new NoiseError("handshake-failed", "message 1 must carry no payload");
         }
         const remoteStatic = hs.remoteStatic;
@@ -481,7 +528,7 @@ export function noiseResponder(
                 const message2 = hs.writeMessage2(Uint8Array.of(STATUS_DENY));
                 // Not closed here: the initiator closes on reading it (no send-then-close loss); the timer covers one that never does.
                 setPhase("denied");
-                raw.send(encodeFrame(message2));
+                raw.send(withVersion(E2E_CHANNEL_VERSION, message2));
                 return;
               }
               const message2 = hs.writeMessage2(Uint8Array.of(STATUS_ALLOW));
@@ -497,7 +544,7 @@ export function noiseResponder(
                 options.onViolation,
               );
               setPhase("await-confirm");
-              raw.send(encodeFrame(message2));
+              raw.send(withVersion(E2E_CHANNEL_VERSION, message2));
             } catch (error) {
               fail(asNoise(error), true);
             }
@@ -513,7 +560,7 @@ export function noiseResponder(
         return;
       }
       if (phase() === "await-confirm" && secured) {
-        secured.readConfirm(text);
+        secured.readConfirm(frame);
         open(secured);
         return;
       }

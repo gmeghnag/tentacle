@@ -31,7 +31,10 @@ Binding decisions (linked, not copied):
   a local relay is mandatory before merge.
 - Task 8 (`docs/feat/e2e-channel.md`): Noise IK, `rs` pinned, confirm flight
   (a replayed message 1 builds nothing), strict counters, frames `t1:` + base64,
-  inbound text > `3 + 87 380` chars refused.
+  inbound text > `3 + 87 380` chars refused. Since E2E v2
+  (`docs/feat/noise-binary-carrier.md`): binary frames; flights 1–2 carry a
+  version byte; inbound binary > 65 535 B (+1 in the handshake) refused; the relay
+  forwards binary and text data frames opaquely.
 - Task 9 (`docs/feat/device-pairing.md`): `/e2e` device route, per-device key,
   revoke closes live sockets, `pair` QR addresses "a relay URL fits later,
   task 15" (`:357`), owner Q5 "laptop `connect` over device keys — revisit with
