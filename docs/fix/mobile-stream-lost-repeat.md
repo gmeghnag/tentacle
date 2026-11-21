@@ -280,7 +280,8 @@ self-explaining; the trigger hunt continues as a follow-up from the capture.
 
 ## Execution
 
-*— claude-sonnet-4-5-20250929, 2026-11-21*
+*— round 1's executor (commit `a7e73eef`, subject `exec (deepseek)`); the signature here
+originally read `claude-sonnet-4-5-20250929`, corrected in Fix round 1 — 2026-11-21*
 
 **Load-bearing check (re-run first, as briefed).** `.tentacle/tmp/mobile-stream-lost-repeat/fold.test.ts`
 on the task branch before any edit: **RED exactly as the Context documents** — `Expected: 0
@@ -356,6 +357,60 @@ no notice line left.
 **Commands (this checkout only).** Tests here need `bun install` first (a fresh worktree has no
 `node_modules`; my first two runs resolved nothing and were discarded — every result quoted above
 is from the worktree at `/Users/gmeghnag/tentacle/.tentacle/worktrees/mobile-stream-lost-repeat`).
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-21* (executor of the review round 1 findings)
+
+**Round 1 had ONE finding: MEDIUM, a test gap (no code defect).** `retractLostNotice`
+(`apps/mobile/src/transcript.ts:402-417`) already retracted PARTIALLY — it removes only `turnId`
+from `lostTurns` and drops the row when that leaves none — but nothing pinned it, so the
+reviewer's mutation (drop the whole row when it lists `turnId`) survived all 48 transcript tests.
+Failure scenario the mutation would hide: A and B lost back-to-back merge into one notice `[A,B]`
+(rule 2b); A re-subscribes and completes `ended`; the notice vanishes and B's real loss becomes
+silent — the exact wrong-state rule 4 forbids.
+
+**FIXED — `apps/mobile/test/transcript.test.ts`, new `T8`** (in the same describe, 26 lines, no
+production edit at all): a merged `[A,B]` notice, bracket A ending `ended` → one notice left,
+`lostTurns` `["B"]`; plus the control that a notice folded with NO bracket (`lostTurns` absent,
+unattributable) is not retracted by a later same-id completion → still one notice, `lostTurns` `[[]]`.
+
+**Red before green.** The task's premise is inverted here — the production code was already
+correct, so the test is green on it and RED comes from the mutation, which is the property the
+reviewer names. Both mutations applied to `transcript.ts`, run, then reverted (`git diff
+apps/mobile/src/` empty afterwards):
+
+1. reviewer's mutation, `const rest: string[] = [];` in place of the per-id filter →
+   `T8` red on the FIRST assertion: `expect(lost(state)).toHaveLength(1)` — `Expected length: 1,
+   Received length: 0`; 48 pass / 1 fail.
+2. the control's mutation, `row.lostTurns === undefined ||` → `row.lostTurns !== undefined &&`
+   (i.e. also retract a notice that names no turns; with mutation 1 reverted, so this is
+   independent) →
+   `T8` red on the SECOND assertion: `expect(lost(unattributed)).toHaveLength(1)` — `Expected
+   length: 1, Received length: 0`; 48 pass / 1 fail.
+3. reverted → 49 pass / 0 fail (128 `expect()`s).
+
+**Also reconciled (the Review's "Executor behaviour" note):** the Execution header's
+`claude-sonnet-4-5-20250929` signature was wrong — the commit subject `exec (deepseek)` is the
+truth for the model that did round 1's edits, and its signature should read as DeepSeek, not a
+Sonnet id. Corrected here rather than silently left: round 1's as-built text stands, its signature
+line did not. This round is `claude-opus-5-5` (the same family as the reviewer — noted as a
+self-review weakness for the orchestrator, not hidden).
+
+**No production code change.** Nothing else from the Review needed one: the verdict's other
+observations (retraction requires a same-`turnId` bracket ending `ended`/`cancelled`; keys are
+monotonic and never reused, so mid-list removal is safe; `lostTurns` is fold-only, no wire/schema
+change, no `protocol.d/` note) were all confirmed as holding by the reviewer, not findings.
+
+**Gate (narrow, per the orchestrator's split).** `bun test apps/mobile/test/transcript.test.ts`:
+49 pass / 0 fail. Sibling suites that size the same fold — `transcript-parity`, `notice-row`,
+`notice-group`: 29 pass / 0 fail. `bunx biome check apps/mobile/test/transcript.test.ts`: clean.
+The whole-repo `bun run check` is the orchestrator's after this hand-off. No changelog/protocol
+delta (test-only).
+
+**Unverified.** Unchanged from round 1: the TRIGGER that makes a mobile stream throw is still
+unreproduced in-process; T8 pins the fold's behaviour for it, and slice 2's `why=`/`code=` capture
+is what will name it on the next device occurrence.
 
 
 ## Review

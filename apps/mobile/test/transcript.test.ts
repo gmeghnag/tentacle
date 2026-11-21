@@ -384,6 +384,32 @@ describe("the LOST notice is per LOSS, not per throw (docs/fix/mobile-stream-los
     expect(lostTurnsOf(state)).toEqual([["A"], ["B"]]);
   });
 
+  test("T8: a merged notice is retracted PARTIALLY — only the turn that completed leaves it", () => {
+    // A and B merged into one line (T2); A is re-subscribed and completes, so
+    // only A's loss is recoverable — B's is still real and must stay said.
+    // Mutation: drop the WHOLE row when it lists `turnId` (`const rest: string[] = []`)
+    // → red (no notice left, B's loss silently hidden).
+    const state = fold([
+      ...lostIn("A"),
+      ...lostIn("B"),
+      { type: "turn_started", turnId: "A", own: false },
+      { type: "turn_ended", outcome: "ended" },
+    ]);
+    expect(lost(state)).toHaveLength(1);
+    expect(lostTurnsOf(state)).toEqual([["B"]]);
+    // …and a notice that cannot be attributed (no bracket when it was folded)
+    // is not this turn's to retract: mutation "retract a notice with no
+    // `lostTurns` too" → red.
+    const unattributed = fold([
+      ...lostIn("A"),
+      { type: "turn_ended", outcome: "lost" }, // no open bracket: plain notice
+      { type: "turn_started", turnId: "A", own: false },
+      { type: "turn_ended", outcome: "ended" },
+    ]);
+    expect(lost(unattributed)).toHaveLength(1);
+    expect(lostTurnsOf(unattributed)).toEqual([[]]);
+  });
+
   test("T6: a history REPLACE drops every notice (the existing rule, unchanged)", () => {
     const lostFirst = fold(lostIn("T"));
     const replaced = apply(lostFirst, {
