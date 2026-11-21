@@ -175,8 +175,12 @@ export function capturesSend(state: DictationState): boolean {
   return state.kind === "listening" || state.kind === "finalizing" || state.kind === "preparing";
 }
 
-/** What the composer's mic button shows. */
-export type MicButton = "idle" | "listening" | "preparing" | "hidden";
+/**
+ * What the composer's mic button shows. `finalizing` (tapped stop, the last
+ * words still being transcribed) is its own face — a spinning arc, not the
+ * recording ■ (docs/feat/mobile-composer-buttons.md).
+ */
+export type MicButton = "idle" | "listening" | "finalizing" | "preparing" | "hidden";
 
 export function micButtonOf(state: DictationState, supported: boolean): MicButton {
   if (!supported) {
@@ -184,8 +188,9 @@ export function micButtonOf(state: DictationState, supported: boolean): MicButto
   }
   switch (state.kind) {
     case "listening":
-    case "finalizing":
       return "listening";
+    case "finalizing":
+      return "finalizing";
     case "asking":
     case "preparing":
       return "preparing";

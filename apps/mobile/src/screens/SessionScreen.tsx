@@ -679,10 +679,13 @@ export function SessionScreen({
   // own state would die with it.
   const [openSteps, setOpenSteps] = useState<readonly string[]>([]);
   const [fullSteps, setFullSteps] = useState<readonly string[]>([]);
+  // `Date.now()` is the voice controller's own clock (`now` above); while it
+  // records, its 250 ms tick emits a new state, so the timer re-renders.
   const voiceView = voiceComposerView(
     voiceState,
     dictationLocale(voiceSettings.language, deviceLocales()),
     voiceSettings,
+    Date.now(),
   );
   // What `renderItem` reads besides the row itself. A fresh array on every render
   // would re-render every row on any state change; the Beta switches change
@@ -1689,7 +1692,7 @@ export function SessionScreen({
           }}
           mic={state.view.editable ? voiceView.mic : "hidden"}
           onMic={() => voice?.tapMic()}
-          level={voiceView.level}
+          micCaption={voiceView.caption}
           onPhoto={openAttach}
           focusKey={steerFocus}
           bottomPadding={bottomPadding}
