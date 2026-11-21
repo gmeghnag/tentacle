@@ -457,3 +457,16 @@ reason) instead of being written inline in the call. No production code touched.
 **Notes (not blocking):** `daemon/date-stamp.test.ts:187` ("client zone beats host zone") is vacuous on a host whose zone is `America/New_York`; steer-drained messages in a long turn are never stamped (out of the owner's scope).
 
 **Executor behaviour:** DeepSeek's production edits were coherent and well-commented; it under-estimated the test blast radius (recorded honestly in Execution) and was stopped mid-adaptation; the resume adapted tests only. The missed upper bound is the classic "fail-soft on paper, not in fact" gap.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Verdict: APPROVE.** Finding 1 is fixed. Reviewed `2eb150cf` (the fix) and `68c80050` (test typing only).
+
+- **Schema:** `packages/protocol/src/session.ts:139` now caps `at` at `.max(8_640_000_000_000_000)`, so `.catch(undefined)` drops an out-of-range stamp and the message still loads. `protocol.json` was regenerated with the same cap.
+- **Renderer:** `renderable()` guards `partsOf` (`packages/core/src/current-date.ts`). An unrenderable stamp renders as no prefix. When the last stamp is unrenderable, `nextDateStamp` stamps again from `now`. When `now` itself is out of range, it stamps nothing.
+- **Mutations:** (M1) dropping the schema `.max` → `protocol/session.test.ts` 1 fail. (M2) disabling the `renderable` guard → 5 fail across core bounds, agent and protocol. Both reverted; `git status` clean.
+- **Round-1 repro** (`big.ts`): `at = 1e17` is dropped by the schema, and `dateStampText` / `nextDateStamp` no longer throw.
+- **Gate:** protocol + core + agent + daemon date-stamp tests: 558 pass / 0 fail. `bun run lint`: clean. `bun run typecheck`: clean.
+- **Regressions:** none found. The boundary value `8.64e15` is still accepted and renders (tested inclusive). Negative `at` is still refused by the schema; the renderer accepts down to −max, which is harmless.
