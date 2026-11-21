@@ -307,6 +307,8 @@ broker, and the kept/delete rules.
 
 **Owner questions (each with a recommendation):**
 
+**Owner verdict 2026-11-21 (one question at a time): Q1–Q8 all accepted as recommended** — A2 (loop on the Mac, workspace via `ExecutionEnvironment`), presets in the Mac config only, docker/podman with same-path mount first (k8s later), keep the container on archive (delete on `session/delete` / `tentacle rm`; `rm: onArchive` opt-in), hooks on the Mac, Mac MCP set kept (container-side MCP later), background jobs only if S0 proves kill + honest "lost", mount (isolated execution) for v1.
+
 1. **Shape: A2 (loop on the Mac, workspace via `ExecutionEnvironment`) instead
    of A1 (pod daemon + reverse model tunnel)?** *Recommend A2.* It reuses the
    whole `serve`/phone path unchanged, the pod gets no RPC voice, and there is
