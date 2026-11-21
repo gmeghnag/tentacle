@@ -21,6 +21,7 @@ import { describeEmptyTurn, describeRepairs, describeTruncation } from "@tentacl
 import { imageRowText } from "./attach-draft.ts";
 import { stripInlineMarkdown } from "./harness-text.ts";
 import { HOP_WAKE_ROW } from "./hop-wake.ts";
+import type { PaletteName } from "./mascot.ts";
 import { type ArtifactCardMap, messagesToItems } from "./resume.ts";
 import { nextToolStatus } from "./tool-phase-view.ts";
 
@@ -150,7 +151,30 @@ export interface ToolItem {
   readonly sub?: SubAgentProgress;
 }
 
-export type DisplayItem = UserItem | AssistantItem | ToolItem | NoticeItem;
+/**
+ * The startup header (docs/feat/tui-mascot.md D2): tentacle and its version,
+ * the model and folder, the `/help` hint, and beside them the mascot.
+ *
+ * A display-only kind of its OWN, never a flag on the assistant item, so it can
+ * never merge with streamed model text (`chat` extends a trailing assistant
+ * item), be counted as an answer, or be exported by `/save` as `## Assistant`.
+ * It is not persisted: a resume rebuilds items from messages, and a fresh
+ * session's header is seeded at mount (AGENTS §7 persistence).
+ */
+export interface HeaderItem {
+  readonly kind: "header";
+  /** The CLI's release version; absent → line 1 is `tentacle` alone. */
+  readonly version?: string;
+  /** What is PAINTED as the model's name (`modelLabel ?? model`). */
+  readonly model: string;
+  readonly cwd: string;
+  /** `os.homedir()`, so the cwd reads `~/…`. */
+  readonly home?: string;
+  /** Picked once at mount: random per start, stable across every re-render. */
+  readonly palette: PaletteName;
+}
+
+export type DisplayItem = UserItem | AssistantItem | ToolItem | NoticeItem | HeaderItem;
 
 export interface TokenTotals {
   readonly prompt: number;

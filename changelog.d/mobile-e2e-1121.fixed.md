@@ -1,0 +1,1 @@
+- **Mobile: "Send reply" is no longer hidden behind the keyboard.** In a permission ask, typing a "No, let's talk about it" reply used to leave the keyboard covering the Send reply button. The sheet now makes room for the keyboard and scrolls the button into view.

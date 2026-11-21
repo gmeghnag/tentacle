@@ -4,6 +4,8 @@ import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import * as wrapAnsiModule from "wrap-ansi";
 import * as blink from "../src/blink.ts";
+import { cellWidth } from "../src/cells.ts";
+import { transcriptToMarkdown } from "../src/commands.ts";
 import * as format from "../src/format.ts";
 import { expandTabs } from "../src/input-view.ts";
 import * as markdown from "../src/markdown.ts";
@@ -2184,5 +2186,81 @@ describe("fired scheduled wake row — Ctrl+O through the row cache (docs/feat/s
   test("a typed prompt is unaffected by Ctrl+O", () => {
     const items: DisplayItem[] = [{ kind: "user", text: "hello" }];
     expect(rows(items, true)).toEqual(rows(items, false));
+  });
+});
+
+describe("the startup header (docs/feat/tui-mascot.md D4)", () => {
+  const header = (over: Partial<Extract<DisplayItem, { kind: "header" }>> = {}): DisplayItem => ({
+    kind: "header",
+    version: "0.7.1",
+    model: "deepseek-v4",
+    cwd: "/home/me/tentacle",
+    home: "/home/me",
+    palette: "soft",
+    ...over,
+  });
+
+  test("truecolor, wide: five rows, the sprite beside the text", () => {
+    const lines = itemLines(header(), { expandAll: false, width: 80 });
+    expect(lines.length).toBe(5);
+    const plain = lines.map(strip);
+    // Rows 1–3 carry the text, rows 0 and 4 the sprite alone.
+    expect(plain[1]).toContain("tentacle 0.7.1");
+    expect(plain[2]).toContain("deepseek-v4 · ~/tentacle");
+    expect(plain[3]).toContain("/help for commands");
+    expect(plain[0]).not.toContain("tentacle");
+    expect(plain[4]).not.toContain("/help");
+    // Every row is a sprite row: a half/full block, or blank cells at the edges.
+    for (const row of plain) {
+      expect(cellWidth(row.trimEnd())).toBeLessThanOrEqual(80);
+    }
+    // Row 1 = pixel rows 2/3 (`KSFFFFFSK` over `KFEFFFEFK`): K/K solid, then
+    // S over F, F over E, three solids. The gutter is two spaces.
+    expect(plain[1]).toBe("█▀▀███▀▀█  tentacle 0.7.1");
+    // SGR-free measurement: the sprite is 9 cells + a 2-cell gutter.
+    expect(cellWidth((plain[1] ?? "").slice(0, (plain[1] ?? "").indexOf("tentacle")))).toBe(11);
+  });
+
+  test("narrow: three text rows, no sprite glyph", () => {
+    const lines = itemLines(header(), { expandAll: false, width: 30 });
+    expect(lines.length).toBe(3);
+    expect(lines.map(strip).join("\n")).not.toMatch(/[▀▄█]/);
+    expect(strip(lines[0] ?? "")).toContain("tentacle");
+  });
+
+  test("colour off: three text rows, no sprite glyph", () => {
+    chalk.level = 0;
+    try {
+      const lines = itemLines(header(), { expandAll: false, width: 80 });
+      expect(lines.length).toBe(3);
+      expect(lines.map(strip).join("\n")).not.toMatch(/[▀▄█]/);
+    } finally {
+      chalk.level = 3;
+    }
+  });
+
+  test("the sprite's colours are the palette's hexes, fg and bg", () => {
+    const row = itemLines(header(), { expandAll: false, width: 80 })[1] ?? "";
+    // Painted at level 3: the outline and the body shade appear as truecolor.
+    expect(row).toContain("38;2;123;63;192"); // #7B3FC0, the soft outline
+    expect(row).toContain("48;2;");
+  });
+
+  test("no version: the first line is `tentacle` alone", () => {
+    const lines = itemLines(header({ version: undefined }), { expandAll: false, width: 80 });
+    expect(
+      strip(lines[1] ?? "")
+        .trimEnd()
+        .endsWith("tentacle"),
+    ).toBe(true);
+  });
+
+  test("/save never exports the header", () => {
+    // A header adds nothing to the document: same as an empty transcript, and a
+    // following reply is exported on its own (D2 — never `## Assistant`).
+    expect(transcriptToMarkdown([header()])).toBe(transcriptToMarkdown([]));
+    expect(transcriptToMarkdown([header(), { kind: "assistant", text: "hello" }])).toBe(
+      "## Assistant\n\nhello\n",
+    );
   });
 });

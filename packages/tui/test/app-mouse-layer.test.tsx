@@ -121,12 +121,13 @@ describe("S4 mouse layer: a coalesced chunk threads its own state", () => {
     // The whole gesture in a single chunk: nothing between the three reports
     // forces a render, so the release can only see the selection if the layer
     // threaded it through the reports itself.
-    app.stdin.write(`${press(3, 1)}${drag(13, 1)}${release(13, 1)}`);
+    // Row 1 is the startup header's first line, `tentacle` (docs/feat/tui-mascot.md):
+    // no bullet, so the name starts at column 1.
+    app.stdin.write(`${press(1, 1)}${drag(9, 1)}${release(9, 1)}`);
     await delay(120);
 
     expect(copied).toHaveLength(1);
-    expect(copied[0]).toHaveLength(10);
-    expect(copied[0]?.startsWith("Tentacle")).toBe(true);
+    expect(copied[0]).toBe("tentacle");
     // The title of the inverted run goes with the release, not with a repaint.
     app.unmount();
   });
@@ -138,15 +139,15 @@ describe("S4 mouse layer: a coalesced chunk threads its own state", () => {
         copied.push(t);
       },
     });
-    app.stdin.write(press(3, 1));
+    app.stdin.write(press(1, 1));
     await delay(60);
-    app.stdin.write(drag(13, 1));
+    app.stdin.write(drag(9, 1));
     await delay(60);
-    app.stdin.write(release(13, 1));
+    app.stdin.write(release(9, 1));
     await delay(120);
 
     expect(copied).toHaveLength(1);
-    expect(copied[0]?.startsWith("Tentacle")).toBe(true);
+    expect(copied[0]).toBe("tentacle");
     app.unmount();
   });
 });

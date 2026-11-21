@@ -734,6 +734,26 @@ describe("F15 (design B): every state fits 190 and 80 columns at a REAL terminal
     return lines;
   };
 
+  /**
+   * `no model name` on the DOCK, at frame level.
+   *
+   * The input's rule loses the model when the dock opens (one rule, three
+   * meanings, never two labelled rules stacked — `status-line.ts:20-30`). Since
+   * docs/feat/tui-mascot.md Q1 (owner, accepted) the fresh-start header also
+   * names the model — `qwen3-27b · /tmp/work` is HISTORY, one transcript line
+   * above the dock — so the frame as a whole no longer proves the point. This
+   * does: exactly ONE line names the model, and it sits above the dock.
+   */
+  const expectNoModelOnTheDock = (lines: readonly string[]): void => {
+    const modelLines = lines.filter((l) => l.includes("qwen3-27b"));
+    expect(modelLines.length).toBe(1);
+    const headerLine = modelLines[0] ?? "";
+    // The header's own line: `<model> · <cwd>`, not a rule carrying the name.
+    expect(headerLine).toContain(" · ");
+    const dockAt = lines.findIndex((l) => l.includes("background · 2") || l.includes("→ sa-1"));
+    expect(lines.indexOf(headerLine)).toBeLessThan(dockAt);
+  };
+
   for (const columns of [190, 80]) {
     test(`${columns} columns: at rest, the pill only`, async () => {
       const lines = await at(columns, async () => {});
@@ -752,8 +772,8 @@ describe("F15 (design B): every state fits 190 and 80 columns at a REAL terminal
       // The input's own top rule (the dropdown's bottom edge) is PLAIN: no model.
       const inputRule = lines[ruleAt + 3] ?? "";
       expect(inputRule).toMatch(/^─+$/);
-      // …and nothing in the frame says the model while the dock is open.
-      expect(lines.some((l) => l.includes("qwen3-27b"))).toBe(false);
+      // …and no rule of the dock says the model (the header does; see above).
+      expectNoModelOnTheDock(lines);
       // The dropdown's rule carries the title AND every key.
       expect(lines[ruleAt]).toContain("background · 2");
       expect(lines[ruleAt]).toContain("enter open · ctrl+x stop · esc");
@@ -767,7 +787,7 @@ describe("F15 (design B): every state fits 190 and 80 columns at a REAL terminal
       });
       const target = lines.find((l) => l.includes("→ sa-1")) ?? "";
       expect(target).toContain("enter sends");
-      expect(lines.some((l) => l.includes("qwen3-27b"))).toBe(false);
+      expectNoModelOnTheDock(lines);
       // The drawer's head names the child and its figures.
       expect(lines.some((l) => l.includes("sa-1 · explore · find callers of parseConfig"))).toBe(
         true,
