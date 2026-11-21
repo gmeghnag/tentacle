@@ -18,6 +18,7 @@ import type { DiagramStyle } from "../diagram-settings-store.ts";
 import type { ActivityButtonMode } from "../floating-button.ts";
 import type { PhotoSettings } from "../photo-settings-store.ts";
 import type { SpeechRate } from "../read-aloud.ts";
+import type { ShellRowsSettings } from "../shell-rows-store.ts";
 import type { LanguageSetting } from "../speech-locale.ts";
 import type { ThemeBeta } from "../theme-beta.ts";
 import { DENSE_FONT_SCALE, type Palette, size, space, typography } from "../theme.ts";
@@ -84,6 +85,14 @@ export interface SettingsScreenProps {
   /** A theme write that did not stick (the switch still holds for this run). */
   readonly themeError?: string;
   readonly onThemeBeta?: (next: ThemeBeta) => void;
+  /**
+   * Beta → "Compact shell rows" (docs/feat/shell-intent-line.md §7): a described
+   * shell step shows its `$ cmd` line only on failure. OFF by default; absent = no row.
+   */
+  readonly shellRows?: ShellRowsSettings;
+  /** A shell-rows write that did not stick (the switch still holds for this run). */
+  readonly shellRowsError?: string;
+  readonly onShellRows?: (next: ShellRowsSettings) => void;
   /** Present only when the stack can go back. */
   readonly onBack?: () => void;
   /**
@@ -194,6 +203,9 @@ export function SettingsScreen({
   themeBeta,
   themeError,
   onThemeBeta,
+  shellRows,
+  shellRowsError,
+  onShellRows,
   onBack,
   notifications,
   onToggleNotifications,
@@ -607,6 +619,22 @@ export function SettingsScreen({
                     }
                   />
                 )}
+                {shellRows === undefined || onShellRows === undefined ? null : (
+                  <Row
+                    palette={palette}
+                    minHeight={size.rowSetting}
+                    title="Compact shell rows"
+                    trailing={
+                      <Switch
+                        testID="beta-compact-shell"
+                        accessibilityLabel="Compact shell rows"
+                        value={shellRows.compactShell}
+                        trackColor={{ false: palette.fill, true: palette.green }}
+                        onValueChange={(compactShell) => onShellRows({ compactShell })}
+                      />
+                    }
+                  />
+                )}
               </BandSection>
               {themeError === undefined ? null : (
                 <Banner
@@ -615,6 +643,15 @@ export function SettingsScreen({
                   icon="exclamationmark.triangle"
                   testID="theme-error"
                   body={themeError}
+                />
+              )}
+              {shellRowsError === undefined ? null : (
+                <Banner
+                  palette={palette}
+                  tone="error"
+                  icon="exclamationmark.triangle"
+                  testID="shell-rows-error"
+                  body={shellRowsError}
                 />
               )}
               {rows.autoRead ? (

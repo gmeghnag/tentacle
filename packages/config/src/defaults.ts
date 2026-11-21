@@ -263,6 +263,11 @@ export const DEFAULT_CONFIG_JSONC = `{
   // braille patterns (a terminal cannot report a missing glyph, so it is a setting).
   // "tui": { "chartGlyphs": "braille" },
 
+  // Beta: with the model's sentence on a shell row, show the "$ command" row only on
+  // failure (the command stays in the permission ask and in the expanded row; a
+  // sentence that lies is then caught only by expanding). Default false.
+  // "beta": { "compactShell": false },
+
   // Session files (one log per conversation under <configDir>/sessions/): keep the
   // history a compaction or a context reset replaced in the file too (resume still
   // shows the current context). Default false: superseded history is not kept.

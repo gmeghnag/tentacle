@@ -129,8 +129,9 @@ export interface ToolMeta {
   readonly tone: ToolTone;
   /**
    * The row's right-hand text: a diff's `+n −m`, else `denied`, else the
-   * duration; "" when the row knows none of them. Never an exit code: a
-   * `ToolResult` carries none, so the row does not invent one.
+   * duration; "" when the row knows none of them. Never an exit code here: a
+   * `ToolResult` carries none — shell's outcome adds one (`shellOutcome`, in
+   * `stepRowView`), read from its own `exit=N` line, never invented.
    */
   readonly trailing: string;
 }

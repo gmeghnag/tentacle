@@ -202,6 +202,8 @@ import {
   type SessionScreenController,
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
+import { SHELL_ROWS } from "./src/shell-rows-expo.ts";
+import type { ShellRowsSettings } from "./src/shell-rows-store.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
 import { type Theme, themeFor } from "./src/theme-beta.ts";
 import { THEME_SETTINGS } from "./src/theme-settings-expo.ts";
@@ -1757,6 +1759,7 @@ function SessionRoute({
   /** The drawer's New session, reached from the hub too (docs/feat/mobile-hub.md H3). */
   readonly onNewSession: () => void;
 }): JSX.Element {
+  const shellRows = useShellRows();
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
 
@@ -1885,6 +1888,7 @@ function SessionRoute({
       onNewSession={onNewSession}
       artifactsSeenKey={sessionKey(computerId, sessionId)}
       onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
+      compactShell={shellRows.settings.compactShell}
     />
   );
 }
@@ -1963,8 +1967,33 @@ function useAppTheme(): AppTheme {
   return { ...theme, settings: themeSettings, error: themeError, select: selectTheme };
 }
 
+/**
+ * The `Compact shell rows` Beta switch (docs/feat/shell-intent-line.md §7): OFF
+ * by default, remembered per device, applied live (a render input of the
+ * transcript; nothing is stored per row). `SHELL_ROWS.load` reads once per run.
+ */
+function useShellRows(): {
+  readonly settings: ShellRowsSettings;
+  readonly error: string | undefined;
+  readonly select: (next: ShellRowsSettings) => void;
+} {
+  const [settings, setSettings] = useState<ShellRowsSettings>(() => SHELL_ROWS.current());
+  const [error, setError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = SHELL_ROWS.subscribe(setSettings);
+    void SHELL_ROWS.load();
+    return unsubscribe;
+  }, []);
+  const select = useCallback((next: ShellRowsSettings) => {
+    setError(undefined);
+    SHELL_ROWS.set(next).catch(() => setError("That shell-rows setting didn't save"));
+  }, []);
+  return { settings, error, select };
+}
+
 function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   const palette = theme.palette;
+  const shellRows = useShellRows();
   const [computers, setComputers] = useState<readonly ComputerEntry[] | null>(null);
   const [storeError, setStoreError] = useState<string | undefined>(undefined);
   // The navigation ref exists only to route an incoming link: a `Linking` event
@@ -2638,6 +2667,9 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                 themeBeta={theme.settings}
                 {...(theme.error === undefined ? {} : { themeError: theme.error })}
                 onThemeBeta={theme.select}
+                shellRows={shellRows.settings}
+                {...(shellRows.error === undefined ? {} : { shellRowsError: shellRows.error })}
+                onShellRows={shellRows.select}
                 activityMode={activitySettings.mode}
                 activityWritable={activityWritable}
                 {...(activityError === undefined ? {} : { activityError })}

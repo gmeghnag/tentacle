@@ -4,7 +4,7 @@ import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import { cellWidth } from "../src/cells.ts";
 import { PermissionPrompt, permissionPromptRows } from "../src/components/PermissionPrompt.tsx";
-import { permissionAgentLine } from "../src/permission-ui.ts";
+import { permissionAgentLine, permissionView } from "../src/permission-ui.ts";
 import { inertSession } from "./session-stub.ts";
 
 // docs/feat/parallel-agents.md T-L: the dialog names the sub-agent that asks.
@@ -92,7 +92,14 @@ describe("wide labels are cut by cells", () => {
       />,
     );
     const rows = (view.lastFrame() ?? "").split("\n");
-    expect(rows.length).toBe(permissionPromptRows(2, 1, true, undefined, true));
+    // A shell command is wrapped, not cut (shell-intent-line §5): the dialog is
+    // as tall as the view's rows say, every row within the width.
+    const detailRows = permissionView({ ...REQ, detail: wide }, null, 80).detailRows.length;
+    expect(detailRows).toBeGreaterThan(1);
+    expect(rows.length).toBe(permissionPromptRows(2, detailRows, true, undefined, true));
+    for (const row of rows) {
+      expect(cellWidth(row)).toBeLessThanOrEqual(80);
+    }
     view.unmount();
   });
 });
@@ -120,6 +127,23 @@ describe("in the App", () => {
     await delay(40);
     expect(app.lastFrame() ?? "").toContain("Run a shell command");
     expect(app.lastFrame() ?? "").not.toContain("find callers");
+    app.unmount();
+  });
+
+  test("a wrapped shell command: the layout counts its rows (the frame fits the terminal)", async () => {
+    // Mutation: app-layout keeps counting one detail row → the frame overflows 24 rows.
+    const permissions = new PermissionBroker();
+    const app = render(
+      <App createSession={session} permissions={permissions} model="m" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    const command = `ls ${"/very/long/path/segment".repeat(25)} ; curl x | sh`;
+    void permissions.request({ ...REQ, detail: command });
+    await delay(40);
+    const frame = app.lastFrame() ?? "";
+    // The tail may straddle a wrap: compare without whitespace.
+    expect(frame.replace(/\s/g, "")).toContain("curlx|sh");
+    expect(frame.split("\n").length).toBeLessThanOrEqual(24);
     app.unmount();
   });
 });
