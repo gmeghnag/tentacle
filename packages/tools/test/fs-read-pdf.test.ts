@@ -12,7 +12,7 @@ import { MAX_PDF_BYTES } from "@tentacle/core";
 import type { ExecutionEnvironment, ToolContext } from "@tentacle/core";
 import { HostExecution } from "../../exec/src/index.ts";
 import { fsReadTool } from "../src/builtins.ts";
-import { makeEncryptedPdf, makePdf } from "./pdf-fixture.ts";
+import { imageOp, makeEncryptedPdf, makeImagePdf, makePdf, textOp } from "./pdf-fixture.ts";
 
 let dir: string;
 let env: HostExecution;
@@ -326,5 +326,48 @@ describe("fs_read on prose that a loose prefix lets through the sniff", () => {
     expect((await read({ path, offset: 2, limit: 1 })).content).toBe(
       `[${path} lines 2-2 of 4]\n%PDF-1.7`,
     );
+  });
+});
+
+// docs/feat/pdf-images.md S2: the model reads where each picture sits; no bytes
+// leave the tool yet (S3 adds the sink).
+describe("fs_read on a PDF with images", () => {
+  const gray = (n: number, seed: number) =>
+    Uint8Array.from({ length: n }, (_, i) => (i * seed) & 0xff);
+
+  test("a marker sits where the picture is, and the footer explains what was left out", async () => {
+    const pdf = makeImagePdf([
+      {
+        content: [
+          textOp(72, 700, "Question 1"),
+          imageOp("Fig", 100, 500, 120, 90),
+          imageOp("Dot", 300, 500, 8, 8),
+          textOp(72, 400, "Answer A"),
+        ].join("\n"),
+        images: {
+          Fig: { width: 40, height: 30, colorSpace: "/DeviceGray", data: gray(1200, 3) },
+          Dot: { width: 8, height: 8, colorSpace: "/DeviceGray", data: gray(64, 5) },
+        },
+      },
+    ]);
+    const path = await writePdf("quiz.pdf", pdf);
+    const result = await read({ path });
+    expect(result.content).toBe(
+      [
+        "[pdf quiz.pdf: 1 page, pages 1 shown]",
+        "--- page 1 / 1 ---",
+        "Question 1",
+        "[image p.1 · 40×30]",
+        "Answer A",
+        "[images: 1 sent, 1 tiny skipped]",
+      ].join("\n"),
+    );
+  });
+
+  test("an image-only (scanned) PDF is still refused as scanned: a marker is not text", async () => {
+    const scan = { width: 60, height: 80, colorSpace: "/DeviceGray", data: gray(4800, 7) };
+    const page = { content: imageOp("Scan", 0, 0, 612, 792), images: { Scan: scan } };
+    const path = await writePdf("scan-images.pdf", makeImagePdf([page, page, page]));
+    await expect(read({ path })).rejects.toThrow(/looks scanned/);
   });
 });

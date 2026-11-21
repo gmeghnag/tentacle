@@ -5,7 +5,12 @@
  * a content stream, a decompression bomb) costs one worker thread until its
  * timeout and never blocks another session (AGENTS §7 "don't serialize").
  */
-import { MAX_PDF_BYTES, PDF_PARSE_TIMEOUT_MS } from "@tentacle/core";
+import {
+  MAX_PDF_BYTES,
+  PDF_PARSE_TIMEOUT_MS,
+  type PdfImageLimits,
+  type PdfPageImage,
+} from "@tentacle/core";
 import type { PdfExtraction, PdfWorkerRequest } from "./options.ts";
 
 export type { PdfExtraction, PdfFailureReason, PdfExtractedPage } from "./options.ts";
@@ -43,6 +48,40 @@ export interface ExtractPdfOptions {
   signal?: AbortSignal;
   /** Total budget, waiting for a slot included. Default 20 s. */
   timeoutMs?: number;
+  /** Extract each page's images with these limits (docs/feat/pdf-images.md); absent = text only. */
+  images?: PdfImageLimits;
+}
+
+function isPageImage(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const image = value as Partial<PdfPageImage>;
+  return (
+    typeof image.marker === "string" &&
+    typeof image.width === "number" &&
+    typeof image.height === "number" &&
+    (image.png === undefined || image.png instanceof Uint8Array)
+  );
+}
+
+/**
+ * A worker reply that is a well-formed extraction. The page list (and each
+ * page's images, when present) is checked: a reply the tool would then index
+ * blindly is `corrupt`, never passed through.
+ */
+export function isPdfExtraction(data: unknown): data is PdfExtraction {
+  if (typeof data !== "object" || data === null) return false;
+  const reply = data as { ok?: unknown; pages?: unknown };
+  if (reply.ok === false) return true;
+  if (reply.ok !== true || !Array.isArray(reply.pages)) return false;
+  return reply.pages.every((page: unknown) => {
+    if (typeof page !== "object" || page === null) return false;
+    const p = page as { n?: unknown; text?: unknown; images?: unknown };
+    return (
+      typeof p.n === "number" &&
+      typeof p.text === "string" &&
+      (p.images === undefined || (Array.isArray(p.images) && p.images.every(isPageImage)))
+    );
+  });
 }
 
 export interface PdfExtractorOptions {
@@ -200,13 +239,13 @@ export function createPdfExtractor(options: PdfExtractorOptions = {}): ExtractPd
             const own = bytes.slice();
             const request: PdfWorkerRequest = { bytes: own };
             if (opts.pages !== undefined) request.pages = opts.pages;
+            if (opts.images !== undefined) request.images = opts.images;
             worker?.postMessage(request, [own.buffer]);
             return;
           }
-          const data = event.data as { ok?: unknown } | null;
           finish(
-            typeof data === "object" && data !== null && typeof data.ok === "boolean"
-              ? (data as PdfExtraction)
+            isPdfExtraction(event.data)
+              ? event.data
               : {
                   ok: false,
                   reason: "corrupt",

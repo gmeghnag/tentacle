@@ -10,13 +10,16 @@
  */
 import type { ExecOptions, Tool, ToolContext, ToolDiffDetail } from "@tentacle/core";
 import {
+  DEFAULT_PDF_IMAGE_LIMITS,
   MAX_PDF_BYTES,
   PDF_HEAD_BYTES,
   formatPdfText,
+  imageFooter,
   isPdf,
   looksLikeTextBytes,
   pathLocksFor,
   pdfVerdict,
+  stripImageMarkers,
 } from "@tentacle/core";
 import { createTwoFilesPatch } from "diff";
 import { z } from "zod";
@@ -98,7 +101,7 @@ function parsePathRange(path: string): { path: string; offset?: number; limit?: 
 export const fsReadTool: Tool<z.infer<typeof fsReadInput>> = {
   name: "fs_read",
   description:
-    "Read a UTF-8 text file. By default returns the whole file; pass `offset`/`limit` (or a `path:start:end` range) to read only a slice — preferred for large files, then edit precisely. A ranged read is prefixed with a `[path lines A-B of N]` header. A PDF is detected by content and returned as extracted text with `--- page N / M ---` markers; use `pages` for large documents; scanned PDFs have no text.",
+    "Read a UTF-8 text file. By default returns the whole file; pass `offset`/`limit` (or a `path:start:end` range) to read only a slice — preferred for large files, then edit precisely. A ranged read is prefixed with a `[path lines A-B of N]` header. A PDF is detected by content and returned as extracted text with `--- page N / M ---` markers and an `[image p.N · W×H]` line where each picture sits; use `pages` for large documents; scanned PDFs have no text.",
   inputSchema: fsReadInput,
   permission: "none",
   concurrency: pathConcurrency("read", (path) => parsePathRange(path).path),
@@ -175,6 +178,7 @@ async function readPdf(
   const bytes = await readBytes(path, { maxBytes: MAX_PDF_BYTES });
   const extraction = await extractPdf(bytes, {
     ...(pages !== undefined ? { pages } : {}),
+    images: DEFAULT_PDF_IMAGE_LIMITS,
     signal: ctx.signal,
   });
   if (!extraction.ok) {
@@ -195,15 +199,20 @@ async function readPdf(
   const verdict = pdfVerdict({
     name,
     numPages: extraction.numPages,
-    pages: extraction.pages,
+    // Judged on the document's own text: an image marker is not text.
+    pages: extraction.pages.map((page) => ({ n: page.n, text: stripImageMarkers(page.text) })),
   });
   if (verdict.kind === "no-text") {
     throw new Error(verdict.message);
   }
+  // The pages' text already carries the image markers. Their PNGs stop here
+  // (docs/feat/pdf-images.md S2): the model gets the markers only, until the
+  // tool has a sink for the bytes (S3).
   const text = formatPdfText({
-    pages: extraction.pages,
+    pages: extraction.pages.map((page) => ({ n: page.n, text: page.text })),
     numPages: extraction.numPages,
     name,
+    ...(extraction.images !== undefined ? { imageFooter: imageFooter(extraction.images) } : {}),
   });
   return { content: verdict.kind === "partial" ? `${text}\n${verdict.message}` : text };
 }

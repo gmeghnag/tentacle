@@ -27,12 +27,15 @@ import {
 } from "@tentacle/core";
 import {
   type ImageBuildOptions,
-  MAX_INLINE_IMAGES,
+  type ImagePart,
   NO_IMAGES,
+  buildImageOptions,
   imageLimits,
-  resolveImages,
-  selectInlineIds,
+  requestImageBudget,
   strayRefsText,
+  toolImageBudget,
+  toolResultImages,
+  toolResultText,
   userParts,
 } from "./images.ts";
 import { parseSSE } from "./sse.ts";
@@ -63,6 +66,11 @@ export interface OpenAIProviderConfig {
    * documented cloud cap). An image over it is never read or sent.
    */
   readonly maxImageBytes?: number;
+  /**
+   * How many tool-result images one request inlines (newest first), with
+   * `images: true` only. Defaults to `MAX_TOOL_IMAGES` (docs/feat/pdf-images.md Q2).
+   */
+  readonly maxToolImages?: number;
 }
 
 /** Thrown when the endpoint returns a non-2xx response. */
@@ -184,17 +192,14 @@ export class OpenAIProvider implements ModelProvider {
    * a model with no vision must not cost a byte read, and its placeholders say
    * why no image was sent.
    */
-  private async imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
-    const { vision, maxBytes: maxImageBytes } = imageLimits("openai", this.config);
-    const inlined = selectInlineIds(request.messages);
-    return vision
-      ? {
-          images: await resolveImages(request, MAX_INLINE_IMAGES, maxImageBytes),
-          vision,
-          inlined,
-          maxImageBytes,
-        }
-      : { images: new Map(), vision, inlined, maxImageBytes };
+  private imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
+    const limits = imageLimits("openai", this.config);
+    return buildImageOptions(
+      request,
+      limits,
+      toolImageBudget(this.config.maxToolImages),
+      requestImageBudget("openai", limits),
+    );
   }
 
   /**
@@ -370,7 +375,7 @@ function buildPayload(
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model,
-    messages: req.messages.map((m) => toWireMessage(m, options)),
+    messages: wireMessages(req.messages, options),
     stream: true,
     stream_options: { include_usage: true },
   };
@@ -392,6 +397,67 @@ function buildPayload(
     payload.max_tokens = maxTokens;
   }
   return payload;
+}
+
+/**
+ * The history on the wire (docs/feat/pdf-images.md D7, owner Q1). A `role:"tool"`
+ * message is text only here, so the images of a RUN of tool messages travel in
+ * ONE wire-only `user` message right after the run's last tool message: a line
+ * naming whose images they are, then the `image_url` parts in order. It is never
+ * written to history and is rebuilt identically each request (cache-stable).
+ * Without vision nothing is added (the tool message carries the one reason line).
+ */
+function wireMessages(
+  messages: readonly ChatMessage[],
+  options: ImageBuildOptions,
+): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  let pending: { readonly labels: string[]; readonly images: ImagePart[] } = {
+    labels: [],
+    images: [],
+  };
+  const flush = (): void => {
+    if (pending.images.length > 0) {
+      out.push({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `[images from the tool results above — ${pending.labels.join("; ")}]`,
+          },
+          ...pending.images.map((part) => ({
+            type: "image_url",
+            image_url: { url: `data:${part.mimeType};base64,${part.base64}` },
+          })),
+        ],
+      });
+    }
+    pending = { labels: [], images: [] };
+  };
+  for (const message of messages) {
+    if (message.role !== "tool") {
+      flush();
+      out.push(toWireMessage(message, options));
+      continue;
+    }
+    const { images, lines } = toolResultImages(message, options);
+    if (images.length > 0) {
+      pending.labels.push(
+        `call ${message.toolCallId ?? "?"}: ${images.map((image) => image.label).join(", ")}`,
+      );
+      pending.images.push(...images);
+    }
+    const wire: Record<string, unknown> = {
+      role: "tool",
+      content: toolResultText(message.content, lines),
+    };
+    if (message.toolCallId) {
+      wire.tool_call_id = message.toolCallId;
+    }
+    out.push(wire);
+  }
+  flush();
+  return out;
 }
 
 function toWireMessage(

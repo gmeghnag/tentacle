@@ -1,0 +1,1214 @@
+# feat/pdf-images — PDF images in the model's context, next to the text
+
+> **Status:** implementation (plan written, NOT approved — see Owner questions)
+> **Branch:** `feat/pdf-images`
+> **Size:** L → split into S1 · S2 · S3 (each M, each mergeable alone) · **Blast:** load-bearing (provider payloads for tool results, the tool-result shape, the session's image store) · **Suited:** Opus executes S1 and S3 (load-bearing) with mandatory fresh-context Review; S2 (contained: tools + core pure) may go to a weaker model with standard Review
+> **Changelog:** `changelog.d/pdf-images.added.md` (written by S3, the slice that makes images reach the model; S2 adds `changelog.d/pdf-image-markers.added.md` for the markers + the size cap)
+
+Metadata (TODO.md row): `Type: feat · Size: L (S1 M · S2 M · S3 M) · Blast: load-bearing · Suited: Opus plan + exec S1/S3, fresh-context Review`
+
+## Context
+
+*— claude-opus-5-5, 2026-11-21*
+
+`fs_read` on a PDF returns text only: the worker (`packages/tools/src/pdf/run.ts:51-106`)
+calls `getTextContent()` per page and `buildPageText` (`core/src/pdf-text.ts:118`);
+nothing looks at the page's images. A quiz, a datasheet, a scanned page: the
+picture that carries the meaning never reaches the model. The owner wants each
+page's images extracted with their position, a `[image p.N · W×H]` marker at
+their place in the reading order, the PNGs given to vision models and only the
+markers to text-only models. Tiny/repeated images (logos, headers) skipped,
+caps per read. A scanned PDF (a page = one image) falls out of the same path:
+it overlaps **feat/mobile-pdf-ocr** (TODO.md:56), which OCRs on the phone; with
+this task a vision model can read the scan itself through `fs_read`, but an
+*attached* scan from the phone still goes through `attachedPdfText`
+(`core/src/pdf-text.ts:552`) and is still refused — that path is mobile-pdf-ocr's,
+not this task's (see Notes).
+
+Acceptance (owner, 20/11): a BLIND test on the owner's
+`~/github/gmeghnag/farmaquiz/solo_domande.pdf` against the ground truth of the
+owner's PyMuPDF script (`estrai_immagini.py`, nearest-by-y image ↔ "Domanda N"),
+`immagini/<N>.png`, 405 files. Owner data: never copied into the repo.
+
+### Facts measured for this plan (2026-11-21)
+
+- `solo_domande.pdf` is **64,902,081 B (61.9 MiB) and 1479 pages**. Today
+  `fs_read` refuses it outright: `MAX_PDF_BYTES = 50 MiB` (`core/src/pdf-text.ts:21`,
+  enforced `tools/src/pdf/extract.ts:136`). → Owner Q3.
+- pdf.js 6.5.438 (the pinned one) sees **406 image paints** over the 1479
+  pages, all `paintImageXObject`, decoded kinds RGB_24BPP (379) and
+  RGBA_32BPP (27); none smaller than 64 px; full-document walk incl. decoding
+  every image: 12.0 s (≈ 0.8 s per 100-page read).
+- **Every one of the 406 decoded images is pixel-identical** (same W×H, same
+  RGB bytes, alpha dropped) to a ground-truth PNG. 405 GT files hold 403
+  distinct pixel contents: two images are reused for two different questions
+  (e.g. one picture on p.30 and p.31). → "repeated" must NOT mean "seen twice".
+- Rule "the image belongs to the last `Domanda N` above it in reading order"
+  agrees with the GT for 404/406 paints; the 2 disagreements are exactly the
+  two reused pictures (my lookup was pixel → one file name; with (question,
+  pixels) pairs they agree). So a reading-order marker placement can score
+  405/405 on this file.
+- The GT PNGs are `doc.extract_image(xref)` output (PyMuPDF re-encodes Flate
+  streams to PNG); our encoder will not produce the same bytes → the match is
+  on **decoded pixels**, not bytes (D7).
+
+**Repro** (run 2026-11-21 in `.tentacle/tmp/pdf-images/`, on `feat/pdf-images` = `main` 63d76f3e):
+
+`payload.ts` — the load-bearing check (does a TOOL message carrying image refs reach the model as an image today?):
+
+```ts
+const W = "/Users/gmeghnag/tentacle/.tentacle/worktrees/pdf-images/packages";
+const { buildPayload: anthropicPayload, OpenAIProvider, resolveImages, selectInlineIds } = await import(`${W}/providers/src/index.ts`);
+const { createHash } = await import("node:crypto");
+const png = new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,1,2,3,4]);
+const id = createHash("sha256").update(png).digest("hex");
+const ref = { id, mimeType: "image/png", size: png.length, name: "p1-img1.png" };
+const messages = [
+  { role: "user", content: "read doc.pdf" },
+  { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "fs_read", arguments: '{"path":"doc.pdf"}' }] },
+  { role: "tool", content: "Q1 ... [image p.1 · 10×10]", toolCallId: "c1", attachments: [ref] },
+];
+const source = { read: async () => png };
+const req = { messages, attachments: source };
+console.log("selected for inline (user-only walk):", [...selectInlineIds(messages)]);
+const images = await resolveImages(req);
+console.log("resolved:", images.size);
+const a = anthropicPayload("m", req, 1000, { images, vision: true, inlined: selectInlineIds(messages), maxImageBytes: 1e7 });
+console.log("ANTHROPIC tool turn:", JSON.stringify((a.messages as any[]).at(-1)));
+let body: any;
+const p = new OpenAIProvider({ baseUrl: "http://x/v1", model: "m", images: true, fetch: (async (_u: string, init: any) => { body = JSON.parse(init.body); return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } }); }) as any });
+try { for await (const _ of p.stream(req as any)) {} } catch (e) { console.log("stream err", String(e)); }
+console.log("OPENAI tool msg:", JSON.stringify(body?.messages.at(-1)));
+```
+
+```
+selected for inline (user-only walk): []
+resolved: 0
+ANTHROPIC tool turn: {"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"Q1 ... [image p.1 · 10×10]"}]}
+OPENAI tool msg: {"role":"tool","content":"Q1 ... [image p.1 · 10×10]\n[image unavailable — p1-img1.png sha256:4353a1de7e0d]","tool_call_id":"c1"}
+```
+
+Two findings: (1) the seam exists but stops at USER messages; (2) the Anthropic
+mapper **silently drops** refs on a tool message (no placeholder — the OpenAI
+mapper at least says "unavailable"). (2) is a latent silent drop today (only a
+pod could put refs on a tool message); S1 fixes it.
+
+`ops.ts` — feasibility on the owner's PDF (read in place, never copied): walks
+each page's operator list with the CTM, fetches the decoded image object,
+hashes its pixels and looks the hash up in the GT set; also prints the page's
+`Domanda N` positions. (`bun ops.ts <from> <to>`)
+
+```ts
+const W = "/Users/gmeghnag/tentacle/.tentacle/worktrees/pdf-images/packages/tools/node_modules/pdfjs-dist/legacy/build";
+(globalThis as any).pdfjsWorker = await import(`${W}/pdf.worker.mjs`);
+const pdfjs = await import(`${W}/pdf.mjs`);
+const { inflateSync } = await import("node:zlib");
+const { createHash } = await import("node:crypto");
+const { readdirSync, readFileSync } = await import("node:fs");
+const GT = `${process.env.HOME}/github/gmeghnag/farmaquiz/immagini`;
+// minimal PNG decoder → RGB bytes (8-bit, color types 2/6/0, no interlace)
+function decodePng(b: Uint8Array) { const dv = new DataView(b.buffer, b.byteOffset); let p = 8, w=0,h=0,ct=0; const idat: Uint8Array[] = [];
+  while (p < b.length) { const len = dv.getUint32(p); const t = String.fromCharCode(...b.subarray(p+4,p+8)); const d = b.subarray(p+8,p+8+len);
+    if (t==="IHDR"){w=dv.getUint32(p+8);h=dv.getUint32(p+12);ct=b[p+17];} if(t==="IDAT")idat.push(d); p+=12+len; }
+  const raw = inflateSync(Buffer.concat(idat)); const bpp = ct===6?4:ct===2?3:ct===0?1:ct===4?2:3; const stride=w*bpp; const out=new Uint8Array(h*stride);
+  for(let y=0;y<h;y++){const f=raw[y*(stride+1)];const row=raw.subarray(y*(stride+1)+1,(y+1)*(stride+1));for(let x=0;x<stride;x++){const a=x>=bpp?out[y*stride+x-bpp]:0,up=y?out[(y-1)*stride+x]:0,c=x>=bpp&&y?out[(y-1)*stride+x-bpp]:0;let v=row[x];
+   if(f===1)v+=a;else if(f===2)v+=up;else if(f===3)v+=(a+up)>>1;else if(f===4){const pp=a+up-c,pa=Math.abs(pp-a),pb=Math.abs(pp-up),pc=Math.abs(pp-c);v+=pa<=pb&&pa<=pc?a:pb<=pc?up:c;}out[y*stride+x]=v&255;}}
+  return { w, h, ct, rgb: toRgb(out, w*h, bpp) }; }
+function toRgb(px: Uint8Array, n: number, bpp: number) { if (bpp===3) return px; const o=new Uint8Array(n*3); for(let i=0;i<n;i++){ if(bpp===1||bpp===2){o[i*3]=o[i*3+1]=o[i*3+2]=px[i*bpp];} else {o[i*3]=px[i*4];o[i*3+1]=px[i*4+1];o[i*3+2]=px[i*4+2];}} return o; }
+const key = (w: number, h: number, rgb: Uint8Array) => `${w}x${h}:${createHash("sha256").update(rgb).digest("hex").slice(0,16)}`;
+const gt = new Map<string,string>(); for (const f of readdirSync(GT)) { const d = decodePng(readFileSync(`${GT}/${f}`)); gt.set(key(d.w,d.h,d.rgb), f.replace(".png","")); }
+const data = new Uint8Array(readFileSync(`${process.env.HOME}/github/gmeghnag/farmaquiz/solo_domande.pdf`));
+const doc = await pdfjs.getDocument({ data, isEvalSupported:false, disableFontFace:true, useSystemFonts:false, useWorkerFetch:false, stopAtErrors:false, verbosity:0 }).promise;
+const from = Number(process.argv[2] ?? 1), to = Math.min(doc.numPages, Number(process.argv[3] ?? 5));
+console.log("pages", doc.numPages, "gt images", readdirSync(GT).length, "gt distinct pixel keys", gt.size);
+const OPS = pdfjs.OPS; let total=0, matched=0; const t0 = performance.now();
+for (let n = from; n <= to; n++) {
+  const page = await doc.getPage(n); const ol = await page.getOperatorList(); const vp = page.getViewport({ scale: 1 });
+  let ctm = [1,0,0,1,0,0]; const stack: number[][] = []; const imgs: string[] = [];
+  const mul = (m: number[], n2: number[]) => [m[0]*n2[0]+m[1]*n2[2], m[0]*n2[1]+m[1]*n2[3], m[2]*n2[0]+m[3]*n2[2], m[2]*n2[1]+m[3]*n2[3], m[4]*n2[0]+m[5]*n2[2]+n2[4], m[4]*n2[1]+m[5]*n2[3]+n2[5]];
+  for (let i = 0; i < ol.fnArray.length; i++) { const fn = ol.fnArray[i], a = ol.argsArray[i];
+    if (fn===OPS.save) stack.push(ctm); else if (fn===OPS.restore) ctm = stack.pop() ?? ctm; else if (fn===OPS.transform) ctm = mul(a, ctm);
+    else if (fn===OPS.paintImageXObject || fn===OPS.paintInlineImageXObject) { total++;
+      const obj: any = fn===OPS.paintInlineImageXObject ? a[0] : await new Promise(r => (a[0].startsWith("g_")?page.commonObjs:page.objs).get(a[0], r));
+      const y = vp.height - (ctm[5] + ctm[3]/2); // top-origin centre y
+      let k = "?"; if (obj?.data) { const kind = obj.kind; const bpp = kind===3?4:kind===2?3:1; k = key(obj.width,obj.height,toRgb(obj.data,obj.width*obj.height,bpp)); }
+      else if (obj?.bitmap) k = `bitmap ${obj.width}x${obj.height}`;
+      const q = gt.get(k); if (q) matched++; imgs.push(`${obj?.width}x${obj?.height} kind=${obj?.kind} y=${y.toFixed(0)} gt=${q ?? "-"}`); } }
+  const tc = await page.getTextContent(); const qs = tc.items.filter((it: any) => /Domanda/.test(it.str)).map((it: any) => `${it.str.trim()}@${(vp.height-it.transform[5]).toFixed(0)}`);
+  if (imgs.length) console.log(`p${n}`, imgs.join(" | "), "\n   ", qs.join(" "));
+  page.cleanup();
+}
+console.log({ total, matched, ms: Math.round(performance.now()-t0) });
+```
+
+```
+$ bun ops.ts 1 100000 > full.txt; head -1 full.txt; tail -5 full.txt
+pages 1479 gt images 405 gt distinct pixel keys 403
+{ total: 406, matched: 406, ms: 12041 }
+(excerpt)
+p30 154x73 kind=2 y=108 gt=69      Domanda 68@308 Domanda 67@77
+p31 154x73 kind=2 y=74 gt=69       Domanda 70@221 Domanda 69@43 Domanda 71@390
+p32 138x69 kind=2 y=97 gt=72 | 173x100 kind=2 y=302 gt=73    Domanda 73@260 Domanda 72@73
+p38 161x97 kind=3 y=301 gt=85      Domanda 84@78 Domanda 85@269
+```
+
+`rule.ts` over `full.txt` (last question above the image vs nearest):
+`{ n: 406, prevOk: 404, nearOk: 404 }`, misses `p30 y=108 gt=69 above=67` and
+`p88 y=103 gt=196 above=194` — both the reused pictures (pixel→name lookup
+collision), not placement errors.
+
+## Implementation
+
+*— claude-opus-5-5, 2026-11-21*
+
+### Load-bearing assumption
+
+**A tool result can carry images to the model through the existing image-ref
+seam (`ChatMessage.attachments` + `AttachmentSource` + `providers/src/images.ts`),
+per provider, without a second image path.** Verdict, per provider:
+
+| Provider | Can a tool result carry an image? | Evidence | What we do |
+|---|---|---|---|
+| **Anthropic** (`anthropic-provider.ts`) | **Yes, natively**: a `tool_result` block's `content` may be an array of `text` + `image` (base64) blocks — the documented computer-use pattern returns screenshots exactly this way (Anthropic tool-use docs, `tool_result` content). Today the mapper sends `content: message.content` (a string) and drops refs | `anthropic-provider.ts:444-474` (tool branch never looks at `attachments`); repro above | S1: tool message with refs → `tool_result.content = [text, image…]` |
+| **OpenAI-compatible** (DeepSeek, local qwen/llama.cpp, vLLM; `openai-provider.ts`) | **No**: a `role:"tool"` message's content is text (string or text parts); image parts are only valid on `user` messages. DeepSeek's chat models take no images at all; the local Qwen3 27B is text-only | `openai-provider.ts:399-439` (image parts built only for `role === "user"`); `imageLimits` defaults `vision=false` for openai (`images.ts:141-147`) | S1: `vision=false` (the default) → markers only + one honest line; `model.images: true` (a VL model) → a **wire-only** `user` message right after the run of tool messages, carrying the images (Owner Q1) |
+| **Pod `--model-proxy`** (laptop provider, pod tool) | Refs reach the laptop (`model/stream` carries them), but the laptop's `LaptopImages` serves only ids the laptop added itself (`client/src/laptop-images.ts:1-22`) → `[image unavailable]` | AGENTS §7 "model stays on the laptop" / "a pod is not trusted" | v1: markers only in pod runs, honestly labelled; a pod→laptop byte path is a separate task (Owner Q5) |
+
+The ONE property that must hold for S1 to be right: **the provider inlines a
+tool message's refs into the request the model sees, only from bytes it verified
+(sha256 + size), within a bounded per-request budget, and every ref it does not
+inline leaves a visible trace.** That property is pinned by the S1 tests.
+
+### Preconditions (verified)
+
+- History holds refs, never bytes; a ref's id is the sha256 of its bytes and the
+  provider re-verifies (`providers/src/images.ts:1-18`, `resolveImages` `:162-200`).
+- The log already stores refs on ANY role: `appendEntryType` keys on
+  `hasAttachments` only (`protocol/src/session-log.ts:391-399`) → a tool message
+  with refs rides the existing critical `media_message` entry. **No log-format
+  change, no `PROTOCOL_VERSION` bump** (S3 adds a round-trip test to prove it for
+  `role:"tool"`). *(Found false at S3 execution for > 5 refs:
+  `AttachmentsSchema.max(MAX_ATTACHMENTS_PER_MESSAGE = 5)`, while a read sends
+  up to 32. The owner must choose between a cap of 5 and a widened tool cap with
+  a version bump. See Execution S3.)*
+- `ChatMessageSchema` already carries `attachments` on any role
+  (`protocol/src/session.ts:200-205`); `toolMessage` builds the tool
+  `ChatMessage` field by field (`agent/src/agent.ts:280-292`) — one place to add refs.
+- The session's image store: `AttachmentStore implements AttachmentSource`
+  (`daemon/src/attachment-store.ts:146`), per session, bounded by
+  `SESSION_UPLOAD_BYTES` 100 MiB / `DAEMON_UPLOAD_BYTES` 256 MiB (`:33-37`), passed to the
+  agent as `attachments` only when the image policy is `store`
+  (`daemon/src/session-host.ts:1565,1653`); the policy is `store` only when the
+  model has vision (`cli/src/image-policy.ts:43`). → reuse it as the tool's
+  sink: no vision ⇒ no sink ⇒ the tool extracts no bytes at all.
+- Compaction drops images by design (owner Q6 of attachments-core): the summary
+  sees `[image: label]` (`agent/src/compact.ts:41-44`). Smart-compaction prune
+  replaces a tool message with a fresh object without `attachments`
+  (`agent/src/prune.ts:146-185`) → a pruned read loses its images, as it should.
+- The PDF worker is killable, memory-watched and concurrency-capped
+  (`tools/src/pdf/extract.ts:65-107,118-232`); no network (`quiet.ts`). Image
+  decoding happens inside it, so a hostile image costs the same worker.
+- Anthropic's per-image cap is already enforced before any read
+  (`ANTHROPIC_MAX_IMAGE_BYTES`, `images.ts:42`); per-request image count: the
+  API documents a per-request maximum (100 images on the Messages API, and a
+  smaller max dimension when many images are sent) — **TO VERIFY against the live
+  docs at S1 execution**; our budget (Q2: 20) stays well below it.
+
+### Design
+
+**D1 — Extraction in the worker (S2).** `runExtraction` (`run.ts:51`) gains, per
+wanted page, `page.getOperatorList()` and a walk of `fnArray/argsArray` that
+tracks the CTM (`save`/`restore`/`transform`) and, on `paintImageXObject` /
+`paintInlineImageXObject` (and `paintImageXObjectRepeat`, one paint per
+position), records `{page, bbox in page space (top-origin), objId}`; the object
+comes from `page.objs` / `page.commonObjs` (`g_…` ids) — inline images carry it in
+the args. The walk itself is a **pure function** over `(fnArray, argsArray, OPS)`
+in `core/src/pdf-images.ts` (testable without pdf.js); the worker only resolves
+objects. `pdfDocumentOptions` adds `isOffscreenCanvasSupported: false` (and
+`isImageDecoderSupported: false` if present in 6.5.438 — verify) so pdf.js hands
+back raw `data` (kinds 1/2/3), never an `ImageBitmap`; a pinned test as for every
+other flag (`options.ts:8`). `paintImageMaskXObject` (stencil masks: a fill
+colour through a 1-bit mask, mostly glyph-like) is **not** extracted in v1.
+
+**D2 — Placement in the reading order (S2, pure, core).** `buildPageText`
+(`pdf-text.ts:118`) orders text items; a new `buildPageTextWithImages(items,
+images)` inserts each kept image's marker as a pseudo-item at its bbox
+(top-y, x) so it lands where the reading order puts it: after the text line whose
+baseline is above the image's top, before the next. *(Amended at S2 execution:
+the anchor is the nearest baseline at or above the image's vertical CENTRE, then
+the end of that visual line. "Above the top" scored 261/405 on the acceptance
+file, because a figure set beside a heading starts above the heading's baseline.
+Items, not `hasEOL` lines: that PDF has no EOLs. See Execution S2.)* No layout hint, nothing
+quiz-specific. Marker grammar (one line of its own):
+`[image p.N · W×H]` (pixel size of the PNG sent), variants
+`[image p.N · W×H · same as p.M]` (repeat, no bytes), `[image p.N · W×H ·
+not sent: <reason>]` (cap reached, undecodable, too small to matter is NOT
+marked — skipped silently by rule, counted in the footer). A footer line per read
+when anything was skipped/capped: `[images: 27 sent, 2 repeats, 3 tiny skipped,
+1 over the per-read cap — read fewer pages to get the rest]`.
+
+**D3 — Filters and caps (S2, pure; numbers = Owner Q4).** Skip an image whose
+smaller side < 24 px or area < 32×32 px (rules, bullets). "Repeated" = the same
+decoded pixel hash ≥ 3 times in this read (headers, logos): first occurrence
+sent, the rest marked `same as p.M` with no bytes. Two occurrences are NOT
+repeats (the farmaquiz reused pictures prove the need). Caps per read: ≤ 32
+images sent, ≤ 8 MiB of PNG in total; beyond, markers say `not sent: per-read
+cap`. A sent image's long edge is ≤ 1568 px (box downscale, pure JS); each PNG
+also ≤ the model's per-image cap (S3 checks against `imageLimits` before the
+put).
+
+**D4 — PNG without native deps (S2, pure).** `core/src/png.ts`: encoder for
+gray / RGB / RGBA 8-bit, filter 0 per row (or None/Sub adaptive — measure),
+CRC32 table, `zlib.deflateSync` (Bun's `node:zlib`, works in a Worker; JS, no
+native addon of ours). *(Amended at S2 execution: `@tentacle/core` is imported
+by the phone app and has no `node:` import, so `encodePng` takes `deflate` as a
+parameter; the worker passes `deflateSync`.)* Kind 1 (`GRAYSCALE_1BPP`, packed bits) is unpacked to
+8-bit gray first. Alpha (kind 3, an applied SMask) is kept (RGBA PNG); the scorer
+compares RGB only (D7).
+
+**D5 — The worker's answer (S2).** `PdfExtractedPage` gains
+`images: PdfPageImage[]` (`{marker, png?: Uint8Array, width, height}`) and the
+response transfers the PNG buffers (`postMessage(answer, transfer)`).
+`formatPdfText` (`pdf-text.ts:312`) emits the markers in place. The 400k-char
+text cap is unchanged; images have their own caps (D3). In S2 the bytes are
+dropped at `readPdf` (`builtins.ts:150`): the model gets markers only (= exactly
+what a text-only model gets after S3), and the acceptance runs.
+
+**D6 — The tool's sink (S3).** `ToolContext` gains
+`attachments?: AttachmentSink` (`core/src/tool.ts:164-201`) —
+`put(bytes, mimeType, name): AttachmentRef | {refused: reason}` — bound by the
+daemon to the session's `AttachmentStore` through a new SYNCHRONOUS
+`putComplete(id, bytes)` that verifies the sha256, reserves from the same
+`UploadBudget`, and (serve) hands the blob to the same `AttachmentDisk`
+(`attachment-store.ts:20-26`). Absent when the image policy is off (no vision) or in a pod
+(Q5). `ToolResult` gains `attachments?: readonly AttachmentRef[]`, `toolMessage`
+(`agent.ts:280`) copies it onto the tool `ChatMessage`. A refused put (store
+full) turns that marker into `not sent: the session's image store is full` —
+never a silent drop.
+
+**D7 — Providers (S1).** `selectInlineIds` (`images.ts:88`) stays the USER
+selection (K=5). A second, separate selection `selectToolImageIds(messages,
+keep=20)` walks tool messages newest-first (Owner Q2). `resolveImages` resolves
+the union (each id read once, verified). Mapping:
+- Anthropic: a tool message with refs → `tool_result.content = [{type:"text",
+  text: content}, …image blocks for inlined refs, …a text line per ref not
+  inlined (reason)]`; consecutive tool results still collapse into one user turn
+  (`anthropic-provider.ts:447-473`). No vision → the single line
+  `[N images in this result not sent: this model does not take images]`.
+- OpenAI-compatible: tool message keeps its string content (+ one reason line
+  per ref not inlined). With vision on, after the LAST tool message of a run, a
+  wire-only `user` message `[{type:"text", text:"Images from the tool results
+  above (call c1: p.1 #1, …)"}, …image_url parts]`. Never written to history,
+  rebuilt identically each request (cache-stable).
+- `strayRefsText` stays for assistant/system refs. The Anthropic silent drop of
+  refs on a tool message is gone in both directions (inlined or reason line).
+
+**D8 — Clients (S3).** No protocol change: the live tool row shows the result
+text, which carries the markers; a reload projects `media_message` with
+`role:"tool"` — S3 proves the TUI's and the phone's projections render it as a
+normal tool row (text), not as a user image chip. Thumbnails of tool images on
+the phone/TUI are out of scope (Owner Q6).
+
+**D9 — The blind acceptance (S2, outside the gate).** `scripts/pdf-images-score.ts`
+(Owner Q7) — takes `<pdf> <gt-dir>` as arguments, holds no owner data:
+1. Runs the REAL extraction (`runExtraction` with real pdf.js, in-process, the
+   same code the worker runs) over the whole PDF in 100-page reads (`pages:
+   "1-100"`, …), exactly as a model would page through it, with the default
+   caps. No layout hint: the extractor knows nothing about "Domanda".
+2. Concatenates the formatted text; for each marker that carries a PNG, the
+   question = the last `Domanda (\d+)` occurring BEFORE the marker in that text
+   (the scorer's only knowledge of the GT naming). Pair = (question,
+   pixelKey(PNG)).
+3. GT pairs: each `<gt-dir>/<N>.png` → (N, pixelKey). pixelKey = `W×H` +
+   sha256 of the decoded 8-bit RGB bytes (alpha dropped, gray expanded) — exact
+   decoded-pixel equality, honest across encoders (both sides lossless; the
+   repro shows 406/406 equal). Not perceptual: a perceptual match would hide a
+   wrong decode.
+4. Score = |GT pairs ∩ extracted pairs| / |GT pairs| (405). Prints every miss
+   (question, GT size, what was found near it instead) and every extra pair
+   (extracted, not in GT) — listed, never averaged away.
+5. Pass bar: **≥ 401/405 (99 %) with every miss explained** (Owner Q8). The
+   measured ceiling is 405/405 (reading-order rule 404/406 paints, 2 diffs = GT
+   reuse artifacts).
+The scorer must bypass `MAX_PDF_BYTES` only if Owner Q3 is refused; with Q3
+accepted, it is also run once through `fs_read` itself (a `bun` script calling
+`fsReadTool.execute` with a local env) to prove the real path.
+
+### Slices (each mergeable alone, in this order)
+
+- **S1 — providers carry tool-result images** (M · load-bearing · Opus +
+  fresh Review). D7 only. No producer yet: tests build histories with tool refs
+  by hand. Fixes the Anthropic silent drop. Mergeable alone: no behaviour change
+  until something puts refs on a tool message (today only a hostile pod could —
+  and then it now gets a reason line instead of a silent drop).
+- **S2 — extraction, markers, PNG, acceptance** (M · contained · any model +
+  standard Review). D1–D5, D9; Q3 cap raise. `fs_read` text gains markers; no
+  bytes leave the tool. Mergeable alone: a better text read.
+- **S3 — wire the bytes** (M · load-bearing · Opus + fresh Review). D6, D8:
+  tool sink, store `putComplete`, `ToolResult.attachments`, `toolMessage`, the
+  persistence round-trip, client projections. After S3 a vision model sees the
+  pictures.
+
+### Files (dependency order)
+
+S1: `packages/providers/src/images.ts` (tool selection, reason lines) ·
+`anthropic-provider.ts` (tool_result content array) · `openai-provider.ts`
+(wire-only follow-up user message) · tests `providers/test/images.test.ts`,
+`anthropic-provider.test.ts`, `openai-provider.test.ts` (extend; names to match
+the existing files).
+
+S2: `packages/core/src/png.ts` (new) · `core/src/pdf-images.ts` (new: CTM walk,
+filters, caps, markers — pure) · `core/src/pdf-text.ts` (`MAX_PDF_BYTES` per Q3,
+`buildPageTextWithImages`, `formatPdfText` markers/footer) · `core/src/index.ts`
+· `tools/src/pdf/options.ts` (types, flags) · `tools/src/pdf/run.ts`
+(operator list + objs) · `tools/src/pdf/pdf-worker.ts` (transfer list) ·
+`tools/src/pdf/extract.ts` (reply validation incl. images) ·
+`tools/src/builtins.ts` (`fs_read` description; drop bytes) ·
+`scripts/pdf-images-score.ts` (new, not in the gate) · tests
+`core/test/png.test.ts`, `core/test/pdf-images.test.ts`, `tools/test/pdf-*.test.ts`.
+
+S3: `packages/core/src/tool.ts` (`AttachmentSink`, `ToolResult.attachments`) ·
+`daemon/src/attachment-store.ts` (`putComplete`) · `daemon/src/hosted-session.ts`
+/ `session-host.ts` (bind the sink when policy = store) · `agent/src/agent.ts`
+(`toolMessage` copies refs) · `tools/src/builtins.ts` (put PNGs, markers on
+refusal) · client/TUI/mobile projections only if the S3 test shows a wrong
+render · tests in `daemon/test`, `agent/test`, `client/test`, `tui/test`.
+
+### Failure modes
+
+| Case | What happens | Converges how / test |
+|---|---|---|
+| Encrypted PDF | unchanged: `PasswordException` → `encrypted` refusal (`run.ts:40-46`) | existing test |
+| JBIG2 / CCITT / DCT (JPEG) | decoded by pdf.js in JS → raw pixels → our PNG | S2 synthetic PDF with a DCT image (JPEG bytes built in-test) |
+| JPX (JPEG 2000) | pdf.js 6 decodes JPX through a wasm module it may try to load — with no fetch it can fail → that image's marker says `not sent: undecodable (JPX)`; text unaffected | S2 test with a JPX stream: marker present, read succeeds; verify behaviour first |
+| CMYK / Indexed / ICC / Decode arrays | pdf.js converts to RGB in the worker | S2 synthetic Indexed + DeviceGray images; pixel assertions |
+| SMask / Mask | applied by pdf.js → kind 3 RGBA → RGBA PNG | S2 test, alpha preserved |
+| Inline images (`BI…ID…EI`) | `paintInlineImageXObject`, object in args | S2 synthetic inline image |
+| Stencil masks (`paintImageMaskXObject`) | not extracted (v1) — documented, counted nowhere (they are glyph-like) | S2 test pins "no marker" |
+| Huge image (scan 2480×3508, or a bomb 30000×30000) | decoding happens in the worker under the RSS watchdog (`too-much-memory`) and timeout; a kept image is box-downscaled to 1568 px | S2 downscale unit test; watchdog tests exist |
+| 0 images | text identical to today (byte-for-byte) | S2 regression test on the existing text fixtures |
+| 500-page PDF | unchanged page caps (100/read, `MAX_PAGES_PER_READ`); image caps per read; footer tells the model to read fewer pages for the rest | S2 cap tests |
+| 1479-page / 62 MiB (farmaquiz) | refused today (50 MiB); Q3 raises to 100 MiB, the RSS watchdog stays the real bound | acceptance run |
+| Text-only model | no sink ⇒ no bytes extracted to the store; markers in text; provider adds no image | S1 (vision false line), S3 (no sink ⇒ no put) |
+| OpenAI-compatible VL model | wire-only follow-up user message | S1 |
+| Pod run | markers only + `[image unavailable — …]` per ref if any reached the laptop; nothing read from the pod | S3 test (no sink in pod) + existing pod ref tests |
+| Store full / budget refused | marker `not sent: the session's image store is full`; read succeeds | S3 |
+| Compaction | images dropped, summary names them (`compact.ts:41-44`) | S3 test: a tool message with refs renders `[image: …]` in the summary input |
+| Prune (smart compaction) | replacement has no refs → images gone with the result | S3 test |
+| Mid-read cancel | `signal` → `worker.terminate()` (`extract.ts:160-174`); nothing was put (puts happen after the reply) | S3: abort before reply ⇒ store untouched |
+| Resume / reload | refs in `media_message`; bytes from the store (serve: disk-durable; worker: as user images do) or `[image unavailable]` — never a poisoned session | S3 round-trip test |
+| Session log size | refs only (~150 B each) in the log; bytes in the store / blob dir, bounded by the session cap | S3 asserts the log line holds no base64 |
+| Version skew (older client/peer) | no new wire shape; `media_message` already known to every peer since v23 | none needed (no bump) |
+| Phone/TUI render | tool row shows text + markers; a reload of a tool `media_message` renders as a tool row | S3 projection tests |
+
+### Tests (red before green; mutation targets)
+
+S1 (`providers/test`):
+- Anthropic: tool message with a verified ref → `tool_result.content` holds an
+  `image` block with that base64 (RED today: the repro output). Mutation: map
+  the tool branch back to `content: message.content` → fails.
+- Anthropic: ref with wrong bytes/sha → text reason line, no image (RED today:
+  silent drop). Mutation: drop the reason line → fails.
+- Tool budget: 25 tool refs → newest 20 inlined, 5 reason lines; user K=5
+  unaffected by tool refs (mutation: share one budget → fails).
+- OpenAI vision on: follow-up user message after the last tool message of a run,
+  images in order; vision off: no image part anywhere, one line (mutation:
+  attach parts to the tool message → fails).
+- Parallel tool results still collapse into one Anthropic user turn.
+
+S2 (`core/test`, `tools/test`; synthetic PDFs built in-test, like the existing
+pdf tests do):
+- PNG: encode → decode with a tiny test decoder → identical pixels, for gray,
+  RGB, RGBA, 1×1, odd widths; CRC of IHDR known value.
+- CTM walk: nested `save/transform/restore` → expected bbox; inline + XObject.
+- Placement: two text blocks with an image between them → marker between
+  (mutation: append markers at page end → fails).
+- Filters: 10×10 skipped; same image ×2 both sent; ×3 → 1 sent + 2 `same as`
+  (mutation: threshold 2 → the ×2 test fails).
+- Caps: 40 images → 32 sent, footer; 8 MiB cap.
+- Real worker on a synthetic 3-page PDF with RGB, Indexed+SMask, inline images:
+  markers and decoded pixels.
+- `isOffscreenCanvasSupported:false` pinned in `options.ts` test.
+- 0-image PDF: text unchanged (byte-equal to today's output — RED-proof by
+  running the test on main first).
+- Acceptance (outside the gate): `bun scripts/pdf-images-score.ts
+  ~/github/gmeghnag/farmaquiz/solo_domande.pdf ~/github/gmeghnag/farmaquiz/immagini`
+  → score, misses, extras pasted into Execution. Non-vacuity: run it with
+  placement mutated to "page end" → the score must drop sharply.
+
+S3 (`daemon/test`, `agent/test`, `client/test`, `tui/test`):
+- fs_read with a sink → `ToolResult.attachments` refs whose ids = sha256 of the
+  PNGs in the store; the tool `ChatMessage` carries them (mutation: drop the
+  copy in `toolMessage` → fails).
+- End-to-end in-process: fake Anthropic provider captures the request → image
+  block inside the tool_result for a synthetic PDF.
+- No sink (no vision / pod) → no put, markers only.
+- Store full → `not sent: … full`, read OK.
+- Persistence: tool message with refs → `media_message` line, reload equal, no
+  base64 in the log.
+- Compaction/prune drop the refs; summary input names them.
+- TUI/phone projection of a tool `media_message`: a tool row (ink-testing-library
+  frame; the mobile projection's pure module).
+
+### Owner questions
+
+**Owner decisions 2026-11-21** (one at a time): Q1 yes (wire-only `user` message, vision only with `model.images: true`) · Q2 yes, 20 newest tool images, **configurable** · Q3 yes, `MAX_PDF_BYTES` 100 MiB, **configurable** · Q4 yes, filters/caps as stated, **numbers configurable** · Q5 yes, pods markers only (byte path = later task) · Q6 yes, text + markers only (thumbnails = later task, mockups first) · Q7 yes · Q8 yes, ≥ 401/405 · Q9 S1 → S2 → S3.
+
+1. **OpenAI-compatible endpoint with a vision model (`model.images: true`):**
+   tool messages cannot carry images there. **Recommendation:** a wire-only
+   `user` message right after the run of tool messages with the images (rebuilt
+   identically every request, never in history); with `images` off (the
+   default, DeepSeek, local Qwen3 27B) → markers only.
+2. **How many tool images per request reach the model?** **Recommendation:**
+   the newest 20 tool-result images, a budget separate from the 5 user images
+   (`MAX_INLINE_IMAGES`); older ones become `[image omitted: older tool image
+   — p.N]` (re-reading the pages brings them back).
+3. **`MAX_PDF_BYTES` 50 MiB refuses your 62 MiB farmaquiz PDF.**
+   **Recommendation:** raise to 100 MiB in S2; the per-worker RSS watchdog
+   (512 MiB) remains the real memory bound.
+4. **Filters and caps per read.** **Recommendation:** skip side < 24 px or
+   area < 32×32; "repeated" = same pixels ≥ 3 times in the read (sent once);
+   ≤ 32 images and ≤ 8 MiB PNG per read; long edge downscaled to ≤ 1568 px.
+5. **Pod runs (`run`/`attach`, model on the laptop):** pod-extracted images
+   cannot reach the laptop's provider without a new pod→laptop byte path (a
+   §7 trust decision). **Recommendation:** v1 = markers only in pods; the
+   byte path is its own later task.
+6. **What the phone/TUI show for a tool result with images.**
+   **Recommendation:** v1 = the text with markers, plus nothing else; thumbnails
+   on the tool row are a separate follow-up task.
+7. **Where the acceptance scorer lives.** **Recommendation:**
+   `scripts/pdf-images-score.ts`, generic (paths as arguments, no owner data),
+   committed so it can be re-run; not part of `bun test`.
+8. **Pass bar of the blind test.** **Recommendation:** ≥ 401/405 (99 %) correct
+   (question, pixels) pairs, every miss and every extra listed and explained;
+   the measured ceiling is 405/405.
+9. **Slice order.** **Recommendation:** S1 → S2 → S3 (prove the load-bearing
+   provider seam first); S2 may run before S1 if you want the markers and the
+   acceptance score sooner — they do not touch the same files.
+
+### Notes / debt
+
+- feat/mobile-pdf-ocr overlap: after S3 a vision model reads a scanned PDF via
+  `fs_read` (one page = one image). A scan ATTACHED from the phone still goes
+  through `attachedPdfText` and is refused; making attachments carry page
+  images would reuse S2+S3 on the prompt path — decide in mobile-pdf-ocr
+  whether to OCR on the phone or send page images.
+- A pod→laptop image byte path (Q5) and tool-image thumbnails (Q6) are follow-ups.
+- `paintImageMaskXObject` (stencil masks) is not extracted; vector drawings are
+  not images and are not rendered (no canvas without native deps).
+
+## Execution
+
+### S1 — providers carry tool-result images
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Load-bearing check re-run first** (`bun .tentacle/tmp/pdf-images/payload.ts` on
+`645db3df`, before any edit): output identical to the Context's Repro
+(`selected … []`, `resolved: 0`, Anthropic `tool_result.content` a bare string = the
+ref silently dropped, OpenAI `[image unavailable — …]`). Held → proceeded.
+
+**As built** (all in `packages/providers`):
+- `src/images.ts` — `MAX_TOOL_IMAGES = 20`; `selectToolImageIds(messages, keep)`
+  (newest-first, distinct, tool messages only; returns id → the NEWEST tool
+  message carrying it, its one inline slot); `resolveImages(req, keep, max,
+  toolKeep = 0)` reads the user ∪ tool selections, each id once, same
+  sha256+size verification; `ImageBuildOptions` gains optional `toolInlined` /
+  `toolKeep`; `buildImageOptions(request, limits, toolKeep)` (the one place both
+  providers build options; no vision ⇒ zero reads, as before);
+  `toolImageBudget(maxToolImages)`; `toolResultImages(m, options)` → inlined
+  images (with labels) + one reason line per ref not inlined (older than the
+  budget, same image in a newer result, over cap, unsupported type,
+  unavailable), or ONE line `[N images in this result not sent: this model does
+  not take images]` without vision; `toolResultText(content, lines)`.
+  `userParts` now inlines only ids in the USER selection (`inlined.has`), so the
+  tool selection's bytes can never widen the user's K. `placeholder` takes the
+  "older" wording as a parameter. `imageLimits` unchanged (its shape is pinned
+  and consumed by the daemon).
+- `src/anthropic-provider.ts` — `toolResultBlock`: no refs → unchanged string
+  content (byte-identical, cache-stable); refs with ≥1 inlined image →
+  `content: [text (if non-empty), …image blocks, text of reason lines]`; refs
+  with none inlined → string + reason lines. Consecutive results still collapse
+  into one user turn. `maxToolImages?` config. `imageOptions` → `buildImageOptions`.
+- `src/openai-provider.ts` — `wireMessages`: a tool message stays a string
+  (+ reason lines); with vision, after the LAST tool message of a run, ONE
+  wire-only `user` message `[images from the tool results above — call c1:
+  <label>, …; call c2: …]` + `image_url` parts in order. Never in history; rebuilt
+  identically per request. `maxToolImages?` config. `imageOptions` → `buildImageOptions`.
+- Tests: `test/tool-images.test.ts` (new, 10 tests: both providers end-to-end on
+  the captured body via injected `fetch`) and `test/tool-image-select.test.ts`
+  (new, 4 pure tests: selection, single read per id, user K isolation).
+- `changelog.d/pdf-images.added.md` (one bullet, owner's instruction; S3 should
+  extend it rather than add a second fragment).
+
+**Red before green** — the new e2e file run against HEAD's three source files
+(mine set aside in `.tentacle/tmp/pdf-images/s1-new/`, then restored):
+`1 pass, 9 fail` — every Anthropic test and the two OpenAI vision tests fail on
+the assertion; the 1 pass is "OpenAI wrong bytes → unavailable line", which is
+already today's behaviour. After: `10 pass`. (The pure file imports new exports,
+so it cannot be red on HEAD by assertion; its property is covered by M5.)
+
+**Mutations** (each applied, run, reverted from the scratch copy; `rg MUTATION`
+empty afterwards):
+| # | Mutation | Result |
+|---|---|---|
+| M1 | Anthropic tool branch back to `content: message.content` | 7 fail |
+| M2 | `toolResultImages` drops every reason line | 5 fail (both providers) |
+| M3 | tool budget shares the user's K (`5 − user selected`) | 2 fail (25→20 budget, maxToolImages) |
+| M4 | OpenAI puts image parts on the tool message, no follow-up | 1 fail (vision-on order test) |
+| M5 | `userParts` drops the `inlined.has` guard | 1 fail (user K isolation) |
+
+**Verification (narrow, per the token budget):** `bun test packages/providers`
+→ 185 pass, 0 fail; `bunx tsc --noEmit -p packages/providers` clean; `bunx biome
+check` on the 5 changed files clean. Repro after: OpenAI wire carries the image
+in the follow-up user message; Anthropic's hand-built options in the repro carry
+no tool selection, so it now shows a reason line instead of the silent drop.
+No protocol schema touched → `protocol.json` not regenerated; no `protocol.d/` note.
+
+**Drift from Implementation (and why):**
+- Tests are two NEW files instead of extending `images.test.ts` /
+  `anthropic-provider.test.ts` / `openai-provider.test.ts`: the e2e file must use
+  only `AnthropicProvider`/`OpenAIProvider` so it can run on HEAD for the red
+  proof; the pure file holds what imports new exports.
+- "Configurable" (Q2) is done at the PROVIDER config level (`maxToolImages`);
+  the user-facing config key (`model.maxToolImages` in `packages/config` +
+  `select-provider.ts` + `cli/config-effective.ts`) is NOT wired — outside S1's
+  file list. Follow-up: wire it in S3 or a small task.
+- Added dedup across results (same id in two tool results → inlined once, in the
+  newer; the older gets a reason line). Not in D7, but needed for the plan's own
+  property "within a bounded per-request budget": without it, re-reading the same
+  page N times would send N copies past the budget.
+- The reason line for an older tool image reads `only the newest 20 tool-result
+  images are sent (read it again to see it)`, not Q2's `older tool image — p.N`
+  (the ref label is the file name; the page lives in the S2 marker).
+- **Not verified:** Anthropic's per-request image maximum (Preconditions "TO
+  VERIFY"): the docs lookup was not available in this session. Our max per
+  request is 5 + 20 = 25 (dedup makes it a hard bound); verify against the live
+  Messages API docs (vision page, "images per request") before S3 ships.
+- Pod note for Review: a pod can put on a tool message a ref whose id the laptop
+  itself attached (`LaptopImages` serves only those); the laptop would now inline
+  that user image again inside a tool_result. Same "the pod chooses only the id"
+  scope as user refs from a pod today; no new bytes leave the laptop.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Finding 1 (MEDIUM, per-request byte/count budget) — FIXED.**
+Root cause: the user selection (K=5) and the tool selection (N=20) were each
+bounded on their own, so nothing bounded the request as a whole. That allowed
+25 images (Anthropic's per-image dimension limit drops above 20) and up to
+25 × the per-image cap in bytes (≈ 131 MB, over the 32 MB request limit).
+
+As built (all `packages/providers`):
+- `src/images.ts:61` `ANTHROPIC_MAX_REQUEST_IMAGES = 20`. `:77` `requestImageBudget(provider, limits)`
+  returns a count (Anthropic 20, OpenAI-compatible unbounded) and raw bytes =
+  `MAX_INLINE_IMAGES × per-image cap`. That is exactly what a request could carry
+  before S1 (Anthropic 5 × 3.75 MiB ≈ 26 MB base64 < 32 MB), so user behaviour is unchanged.
+- `:208` `selectRequestImages` — the ONE selection both the options and the reads
+  use (`buildImageOptions :308` and `resolveImages`, through the new private
+  `readSelected :361`). It takes the user selection, then the tool selection. It
+  then applies the budget, user images first, then tool images, each newest-first.
+  It decides from `ref.size` before any read, so it is deterministic and every turn
+  builds the same request. An image that does not fit leaves its selection and goes
+  into `overBudget`. An unsendable ref costs nothing.
+- `:432` `placeholder`: an `overBudget` id gets its own line
+  `[image omitted: over this request's image budget (newer images go first) — <label>]`.
+  It is never a silent drop.
+- `anthropic-provider.ts:157`, `openai-provider.ts:201` pass their budget.
+
+Why "cap at 20" rather than "≤ 2000 px": user images are not downscaled, and the
+provider cannot know their dimensions without decoding them. Capping the count
+means the >20 rule never applies. User images keep priority, so Q2's intent
+holds ("a PDF read never pushes the user's own pictures out"). With user images
+present, Anthropic's tool share is 20 − user.
+
+**Red before green.** These tests are in `test/tool-images.test.ts`. On the unfixed
+`images.ts` they gave `10 pass, 4 fail`, every fail on an assertion. The Anthropic
+5 user + 25 tool test counted 25 images, not 20. The three byte tests also failed:
+Anthropic, OpenAI vision, and "user images come first". After the fix:
+`14 pass, 0 fail`.
+The S1 test "25 tool images → newest 20" now runs on the OpenAI-compatible
+provider, which has no count cap, so it still pins the two separate budgets.
+
+**Mutations.** Each was applied with Edit, run, and reverted with Edit. Afterwards
+`grep -c MUTATION images.ts` = 0.
+| # | Mutation | Result |
+|---|---|---|
+| B1 | Anthropic count cap → ∞ | 1 fail (5+25 → ≤ 20) |
+| B2 | byte budget → ∞ | 3 fail (all byte tests) |
+| B3 | tool images walked before user images | 2 fail (5+25, user-first) |
+| B4 | over-budget reason line removed (falls back to the "older" text) | 3 fail |
+
+**Verification (narrow).** `bun test packages/providers` → 189 pass, 0 fail.
+`bunx tsc --noEmit -p packages/providers` is clean. `bunx biome check` on the 4
+changed files is clean. The full gate is left to the orchestrator's script.
+
+**Still not verified:** Anthropic's documented numbers (32 MB per request; more than
+20 images → 2000 px max; per-request image maximum). They come from the reviewer's
+finding and the API docs as recalled. No live docs lookup was done in this session.
+If the live limits are lower, `ANTHROPIC_MAX_REQUEST_IMAGES` and the byte factor in
+`requestImageBudget` are the one place to change. Request text size counts toward
+32 MB too. It is not budgeted here; that is pre-existing and outside this finding.
+
+### S2 — extraction, markers, PNG, acceptance
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Load-bearing check re-run first** (before any edit, on `2cc92a5e`). S2 depends on
+pdf.js giving raw pixels plus a position for each paint. I ran
+`bun .tentacle/tmp/pdf-images/ops.ts 30 32` on the owner's PDF: `p30 154x73 kind=2
+gt=69`, `p31 … gt=69`, `p32 … gt=72 | … gt=73`, `{ total: 4, matched: 4 }`. It held,
+so I went ahead. The capability is missing on HEAD: see the red proof below.
+
+**As built**
+- `packages/core/src/png.ts` (new). `encodePng(w, h, pixels, gray|rgb|rgba, deflate)`
+  uses filter 0 per row, a single IDAT, and `crc32`. `deflate` is injected (drift 1).
+- `packages/core/src/pdf-images.ts` (new, pure):
+  - `walkImagePaints` `:92`: the CTM walk over `save`/`restore`/`transform`/form
+    begin+end. It records `paintImageXObject`, `paintInlineImageXObject`, and
+    `paintImageXObjectRepeat` (one paint per position). Malformed args are skipped.
+  - `imagePixels` `:169`: kinds 1/2/3. 1-bit is unpacked with set bit = white, as
+    pdf.js paints it. A length mismatch returns `null`.
+  - `scaledSize` / `downscalePixels`: box average down to a long edge of 1568.
+  - `pixelKey`: a 53-bit hash of the pixels plus the shape.
+  - `DEFAULT_PDF_IMAGE_LIMITS` `:292`: 24 px / 32² / repeat at 3 / 32 sent / 8 MiB / 1568.
+    These numbers are parameters (Q4).
+  - `createImageCollector` `:405`: tiny images are skipped and counted. Only the
+    first occurrence of each picture is encoded, and encoding stops once the byte
+    cap is hit. `finish` then decides repeats (≥ 3 → `same as p.M`, no bytes) and
+    the count cap. Pairs count toward the cap.
+  - `imageMarker`, `imageFooter` `:352`, `stripImageMarkers` `:338`.
+- `packages/core/src/pdf-text.ts`:
+  - `MAX_PDF_BYTES` is now 100 MiB `:25` (Q3).
+  - `buildPageText` now delegates to `assemblePageText`. With no markers the loop is
+    the same, so the output is byte-identical (the existing `pdf-text` tests pass
+    unchanged).
+  - `buildPageTextWithImages` `:193` + `anchorItem` `:147` (drift 2).
+  - `formatPdfText` takes `imageFooter?` and places it after the pages, before the
+    gap footers.
+- `packages/tools/src/pdf/options.ts`:
+  - `isOffscreenCanvasSupported: false` and `isImageDecoderSupported: false`. Both
+    exist in 6.5.438 (`pdf.mjs:22618-22619`).
+  - `PdfWorkerRequest.images?: PdfImageLimits`.
+  - `PdfExtractedPage.images?` and `PdfExtraction.images?` (the summary). Both are
+    optional and present only when images were asked for.
+- `packages/tools/src/pdf/run.ts`:
+  - `runExtraction(getDocument, req, ops?)`. Per page it calls `getOperatorList` →
+    walk → `resolveImage` `:76` (`objs`/`commonObjs.get(id, cb, errCb)`, a
+    `PDF_IMAGE_OBJECT_TIMEOUT_MS` 5 s guard; inline images come from the args).
+  - If an image fails, that page loses only its images, never its text.
+  - Text items are kept only for the pages that painted images. Markers are placed
+    after `finish`.
+- `packages/tools/src/pdf/pdf-worker.ts`: passes `OPS`. `transferList` `:37` collects
+  the PNG buffers, deduplicated.
+- `packages/tools/src/pdf/extract.ts`:
+  - `ExtractPdfOptions.images` is forwarded.
+  - `isPdfExtraction` `:71` validates the reply, including each page's images. A
+    malformed reply → `corrupt`.
+  - Image extraction is **opt-in**: the attachment paths (`prompt-documents.ts`,
+    `remote-client.ts`) still read text only, unchanged.
+- `packages/tools/src/builtins.ts`:
+  - `fs_read` asks for images with the default limits `:181`. It passes the footer
+    `:215` and drops the PNGs (S2).
+  - The scan verdict is judged on the text with the marker lines stripped `:203`, so
+    an image-only PDF is still refused as scanned (drift 3).
+  - The description mentions the marker.
+- `scripts/pdf-images-score.ts` (new, not in the gate): D9. It does as the footer
+  says: a read that hit the cap is read again in halves (drift 4).
+  `--mutate-page-end` is the non-vacuity switch.
+- Tests:
+  - `core/test/png.test.ts` (7): round trip for gray/RGB/RGBA, 1×1 and odd widths;
+    IEND CRC; wrong size throws.
+  - `core/test/pdf-images.test.ts` (24): walk, placement (including the measured
+    "figure beside a heading" case), filters, repeats, caps, undecodable, downscale,
+    1-bit, `stripImageMarkers`.
+  - `tools/test/pdf-images.test.ts` (5): the real worker on synthetic PDFs. It covers
+    RGB, Indexed+SMask (alpha kept), inline, a real DCT JPEG (made once with `sips`,
+    inlined as base64), a stencil mask (no marker), JPX junk → `not sent:
+    undecodable` (fast, no hang), 0-image byte equality with vs without images, no
+    option → no image work, and reply validation.
+  - `fs-read-pdf.test.ts` (+2): the exact output with marker + footer; scan still
+    refused.
+  - `pdf-extract.test.ts`: the two new flags are pinned.
+  - `pdf-fixture.ts`: `makeImagePdf` (ASCIIHex streams, so the file stays text),
+    `textOp`/`imageOp`/`inlineImageOp`, `RED_BLUE_JPEG`.
+- `changelog.d/pdf-images.added.md`: I extended the S1 bullet. The owner's
+  instruction was one `pdf-images.*` fragment, so the header's
+  `pdf-image-markers.added.md` was not created.
+
+**Red before green.** I swapped the seven S2 source files for HEAD's
+(`.tentacle/tmp/pdf-images/red.ts`), ran the tests, then restored mine:
+`fs-read-pdf` + `pdf-extract` → `51 pass, 2 fail`. Both fails are on the assertion:
+the marker/footer output and the pinned pdf.js flags. The scan-refusal test passes on
+HEAD by design: it guards a regression, and M5 proves it is not vacuous. The new
+core/tool test files import new exports, so they cannot be red by assertion on HEAD.
+The mutations below cover them.
+
+**Mutations** (`.tentacle/tmp/pdf-images/mutate-s2.ts`; each one applied, run against
+the 3 image test files, then reverted; `rg MUTATION` on the S2 sources is empty
+afterwards):
+| # | Mutation | Result |
+|---|---|---|
+| M1 | every marker at page end | 7 fail |
+| M2 | repeat threshold 3 → 2 | 2 fail |
+| M3 | count cap off in `finish` | 1 fail (20 pairs → 32 sent) |
+| M4 | byte cap off | 1 fail |
+| M5 | scan verdict on text WITH markers | 1 fail |
+| M6 | CTM walk ignores `restore` | 1 fail |
+| M7 | no downscale | 1 fail |
+| M8 | tiny filter off | 2 fail |
+| M9 | marker line not ended | 6 fail |
+| M10 | anchor on image top instead of centre | 1 fail |
+
+In the first run M3 survived, because pass-1 encoding already stops at 32. I added
+the "pairs" test, which kills it. M5's first run was a broken mutation (a `//`
+comment ate the line). I fixed the runner to print totals and re-ran it.
+
+**Acceptance (blind, owner data read in place, never copied):**
+`bun scripts/pdf-images-score.ts …/solo_domande.pdf …/immagini`
+```
+pages 1479 · 7773 ms · images { sent: 406, repeats: 0, tiny: 0, capped: 0, undecodable: 0, reReads: 2 }
+score 405/405
+```
+No miss and no extra. Pass bar ≥ 401/405: **passed**. Non-vacuity:
+- `--mutate-page-end` → `score 201/405`.
+- The plan's original "above the top" rule → `score 261/405`: every miss was assigned
+  to the previous question, with the pixels found.
+
+Real path, through `fs_read` itself (worker, 62 MiB under the new cap;
+`.tentacle/tmp/pdf-images/fsread.ts`):
+- `pages: "29-32"` gives `[image p.30 · 154×73]` after `Domanda 69`'s block, and
+  p.31/p.32 the same, in 255 ms.
+- `pages: "1-100"` gives 36 markers, footer
+  `[images: 32 sent, 4 over the per-read cap — read fewer pages to get the rest]`.
+
+**Verification (narrow).** The 7 PDF test files (core `pdf-images`, `png`,
+`pdf-text`, `pdf-attach`; tools `pdf-images`, `fs-read-pdf`, `pdf-extract`) →
+153 pass, 0 fail. `tsc -p packages/core`, `-p packages/tools` and a scratch tsconfig
+over the new tests + scorer: clean. `biome check` on the 16 changed files: clean.
+No protocol schema touched → no `protocol.json` regeneration, no `protocol.d/` note.
+
+**Drift from Implementation (and why):**
+1. `png.ts` takes `deflate` as a parameter. `@tentacle/core` has no `node:` import and
+   `apps/mobile` imports it, so D4's `zlib.deflateSync` inside core would break the
+   phone bundle. D4 is amended.
+2. Placement anchors on the image's vertical centre, not its top, and on items, not
+   lines. The measurement is above (261 → 405); D2 is amended. The farmaquiz PDF has
+   no `hasEOL` at all, so a "line" is the run of stream-adjacent items on one
+   baseline. A marker also closes the line it follows, so it never glues text across.
+3. `stripImageMarkers` for the scan verdict (not in the plan). Without it, a marker's
+   ~20 characters pass the 16-chars/page density test, and a scanned PDF would read
+   as "text" with no OCR message. This keeps today's refusal until S3 decides what a
+   vision model gets for a scan.
+4. The scorer re-reads a capped range in halves. With 100-page reads and the 32 cap,
+   6 images were capped (the ceiling was 400). The footer tells the model to do
+   exactly this, so the scorer follows it. The plan's "ceiling 405" had not counted
+   the cap.
+5. Image extraction is opt-in per request (`images?`). The attachment paths are
+   unchanged, with no extra cost: the plan did not say, and "contained" argues for it.
+6. `paintInlineImageXObjectGroup` (pdf.js's merge of many tiny inline images) is not
+   extracted, like stencil masks. Those are tiny by construction.
+7. "Configurable" (Q3/Q4) is done at the seam: `PdfImageLimits` travels in the
+   request, and `MAX_PDF_BYTES` is one constant. No user config key is wired, as in
+   S1 (outside S2's file list). Follow-up together with S1's `model.maxToolImages`.
+
+**Not verified / notes for Review:**
+- A real JPX image was not tested. Only junk JPX was: it fails fast as undecodable.
+  Whether pdf.js 6.5.438 decodes a valid JPX without its wasm (no fetch) is
+  unmeasured; verify with a real JPX file.
+- Two images with the same marker string on one page: the scorer maps them to PNGs
+  in paint order, but placement may order them differently in the text. This did
+  not occur on farmaquiz.
+- Pre-existing, not S2: on PDFs without EOLs (farmaquiz) `buildPageText` glues lines
+  (`rispostaDomanda 68`). Markers break the glue only where they sit.
+- Memory: a page keeps its text items until the read ends, only if it painted
+  images. Decoded pixels are dropped after `add`. PNG bytes are held up to the 8 MiB cap.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-21*
+
+Fixes S2 review finding 1 (MEDIUM: always-on image work on a scan nears the 20 s timeout).
+
+**Where the time goes, measured first** (`.tentacle/tmp/pdf-images/fix1/phases.ts`,
+`runExtraction` + pdf.js wrapped, 40 pages of 2480×3508 RGB): `total 8101 ms`,
+`getOperatorList 114 ms`, `objs.get 177 ms`. So pdf.js is cheap for Flate. About
+200 ms per image goes to our collector (`imagePixels` + `pixelKey` + downscale +
+PNG). It still runs after the caps, because a later image still has to be hashed
+to spot repeats. Making the per-image work cheaper would not bound the total, so
+the fix is a time budget.
+
+**As built**
+- `packages/core/src/pdf-images.ts`:
+  - `PdfImageLimits.maxMs` (default `5_000`).
+  - `PdfImageSummary.unexamined` (a count of pages).
+  - `PdfImageCollector.skipPage()`.
+  - `imageFooter` adds `N pages not examined for images (time limit) — read fewer
+    pages to get them`, and a non-zero `unexamined` alone produces a footer.
+- `packages/tools/src/pdf/run.ts`:
+  - `runExtraction(getDocument, req, ops?, now = performance.now)`. It sets a
+    deadline `now() + maxMs` at the start of the read.
+  - Before each page's image collection, a page reached past the deadline calls
+    `skipPage()`. That page gets no `getOperatorList` and no decode, so its text and
+    the read's verdict are unchanged.
+  - The check is per page: one page that is already being collected finishes.
+- `scripts/pdf-images-score.ts`: a read with `unexamined > 0` is also read again in
+  halves, as the footer says.
+- Tests:
+  - `tools/test/pdf-extract.test.ts`, "image work stops at its time budget". It uses
+    a fake doc and an injected clock. Pages 1–2 are listed and 3–4 are not, all 4
+    texts are returned, and `unexamined: 2`.
+  - `core/test/pdf-images.test.ts`, "pages past the time budget are counted". It
+    checks the summary and the exact footer.
+  - `tools/test/pdf-images.test.ts:147`: the summary `toEqual` now includes
+    `unexamined: 0`.
+
+**Red before green.** The new tools test fails on HEAD on its assertion:
+`listed` is `[1, 2, 3, 4]`, expected `[1, 2]`. The core test fails on HEAD because
+`skipPage` does not exist yet, so it is a new API. MC–ME below kill it on its
+assertions.
+
+**Mutations** (each one applied, its test files run, then reverted;
+`rg` for the mutants is empty afterwards):
+| # | Mutation | Result |
+|---|---|---|
+| MA | the budget is never checked (`&& false`) | 1 fail (the time-budget test) |
+| MB | the deadline ignores `req.images.maxMs` (hardcoded 5 s) | 1 fail |
+| MC | `skipPage` counts nothing | 2 fail |
+| MD | the footer drops the `unexamined` part | 1 fail |
+| ME | the footer gate ignores `unexamined` | 1 fail |
+
+**Evidence: the reviewer's repro** (`rev-s2/scan.ts 100`, real worker, 24 MB):
+- text only: `178 ms`;
+- with images: **`5164 ms`** (it was 17 916 ms), giving
+  `{sent:24, …, unexamined:76}`.
+
+The text is unchanged, so `fs_read` still returns the scanned-PDF refusal.
+
+**Verification (narrow).**
+- The 7 PDF test files: 155 pass, 0 fail.
+- `tsc --noEmit` on `packages/core`, `packages/tools` and the scorer tsconfig: clean.
+- `biome check` on the 6 changed files: clean.
+
+**Drift / notes:**
+- The budget is per page, not per paint. Pages examined before the deadline keep
+  their full markers and repeat detection. A page past it has no markers, and the
+  footer says so.
+- One very heavy page can still overrun by its own cost. The RSS watchdog and the
+  20 s timeout remain the backstops.
+- 5 s of the 20 s parse timeout is a parameter (Q4), like the other limits.
+- The farmaquiz acceptance (≈0.5 s per 100-page read) sits far under 5 s. It was
+  not re-run.
+- Not done: the review's suggested test of the OCR refusal on a large real scan
+  inside the gate. It costs about 5 s or more per run. The injected-clock test pins
+  the mechanism, and the repro above measures the real cost.
+
+### S3 — wire the bytes: STOPPED at the load-bearing check
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Status: not started (no production code or test changed).** A precondition
+S3 relies on does not hold, and the fix is an owner decision.
+
+**What I checked first**
+1. Provider seam (S1). I re-ran `bun .tentacle/tmp/pdf-images/payload.ts` on
+   `f9700280`. The OpenAI-compatible wire carries the image in the follow-up
+   `user` message (`image_url` `data:image/png;base64,…`). Anthropic, with the
+   repro's hand-built options (no tool selection), now gives a reason line
+   instead of the silent drop. **Holds.**
+2. Precondition "the log already stores refs on ANY role → no log-format
+   change, no `PROTOCOL_VERSION` bump" (Implementation, Preconditions).
+   **Fails above 5 refs.** `AttachmentsSchema` is `.max(MAX_ATTACHMENTS_PER_MESSAGE)`,
+   and `MAX_ATTACHMENTS_PER_MESSAGE = 5` (`protocol/src/attachment.ts:29,75-78`,
+   owner Q4 of attachments-core). That same schema backs
+   `ChatMessageSchema.attachments` (`session.ts:205`) and the critical
+   `media_message` entry (`session.ts:218`). Repro
+   (`.tentacle/tmp/pdf-images/s3/cap.ts`, a `role:"tool"` message with N refs):
+   ```
+   5 ChatMessageSchema true
+   6 ChatMessageSchema false
+   32 ChatMessageSchema false
+   ```
+   One `fs_read` sends up to `maxSent = 32` images (D3), and farmaquiz gives
+   about 27 per 100 pages. So D6's "one tool `ChatMessage` carries the read's
+   refs" produces a message that the wire and the log schema reject whenever a
+   read has more than 5 images. Per AGENTS §7, the client writes only entries
+   it validated, so such a message cannot be persisted. The plan's "no
+   log-format change" is true only for reads of ≤ 5 images.
+
+**Decision needed (owner).** How many image refs may a tool message carry?
+- **(a) Keep 5, no protocol change.** With a sink, `fs_read` sends at most 5
+  images per read. The rest get the marker `not sent: per-result limit — read
+  fewer pages`, and the footer counts them. This is contained and needs no
+  bump. The cost: farmaquiz needs ~6× more reads to see every picture.
+- **(b) Raise the cap for tool messages only.** For example, a
+  `role:"tool"` message may carry up to `MAX_TOOL_IMAGES` (20). That is the
+  most a request inlines anyway (S1: Anthropic ≤ 20 per request), so a larger
+  per-message cap would only add refs that are never sent. User messages stay
+  at 5. This widens a CRITICAL log entry and a wire schema: an older peer or
+  build rejects it. So it needs a `protocol.d/pdf-images.md` note (a bump at
+  merge) and a decision on the log header `schemaVersion`. With (b),
+  `fs_read`'s `maxSent` with a sink is also lowered to 20, so a read never
+  produces refs it cannot carry.
+- **Recommendation: (b)**, with a cap of 20 for tool messages. The feature
+  exists to read picture-heavy PDFs, and 20 matches what the provider sends.
+  (a) is the fallback if no log or protocol change is wanted in this slice.
+
+Once the owner answers, the Implementation's Preconditions bullet and D6 need
+an amendment (the cap and, for (b), the version note), and then S3 can be
+executed as planned.
+
+**Other findings while reading the S3 sites (for the amendment, not yet acted on):**
+- D6's sink binding. The plan names `hosted-session.ts` / `session-host.ts`, but
+  the store reaches the agent through the factory chain
+  `AgentContext.attachments` (`session-host.ts:129,1565,1653`) → `serve.ts:210,229,1335`
+  / `worker.ts:78,95` → `wiring.ts:403,788` → `AgentConfig.attachments`
+  (`agent.ts:592`). Adding a second sink field to every hop means more files
+  than the plan lists, and a hop can forget it silently (the T10 class of bug).
+  Proposed instead: an optional `putComplete` on the store's `AttachmentSource`
+  (`core/src/model.ts:262`), with the agent building `ToolContext.attachments`
+  from `config.attachments` (`agent.ts:1308-1315`). Tool images then go to
+  exactly the store the provider reads from, with no new hop. A pod
+  (`images.source === "client"`) gets no `attachments`, so it gets no sink by
+  construction.
+- D3's "each PNG ≤ the model's per-image cap (S3 checks against
+  `imageLimits`)": the tool cannot see the model. The provider already gives an
+  over-cap ref a reason line (S1), and a PNG is ≤ 8 MiB < `MAX_IMAGE_BYTES`
+  15 MiB. Proposed: no tool-side check.
+
+## Review
+
+### S1 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, no HIGH).
+
+**Gate (narrow, as the brief scoped it):** `bun test packages/providers` → 185 pass,
+0 fail; `bun run lint` clean (2220 files); `bun run typecheck` clean (root + mobile +
+relay). Full `bun test` was not re-run in this pass.
+
+**Findings**
+1. **MEDIUM — the per-request image budget counts images but not the provider's
+   per-request limits** (`packages/providers/src/images.ts:34` `MAX_TOOL_IMAGES = 20`,
+   `:211-221` `buildImageOptions`). A request may now carry 5 user + 20 tool images.
+   Before S1 the most it could carry was 5 × `ANTHROPIC_MAX_IMAGE_BYTES` (3.93 MB raw ≈
+   5.2 MB base64 ≈ 26 MB), which is under the Messages API's 32 MB request limit. After
+   S1 the bound is ≈ 131 MB. On top of that, more than 20 images in one request lowers
+   Anthropic's per-image dimension limit to 2000×2000 px, and user images are not
+   downscaled. Failure scenario (once S3 adds a producer): three PDF reads at the S2
+   8 MiB per-read cap put about 20 tool images worth ≈ 24 MiB raw in the window, and
+   the user attached one 3000 px screenshot earlier. Every later request then gets a
+   413/400. The same refs are selected again on every turn, so the session is poisoned.
+   That is the outcome `maxImageBytes`' own doc comment says must never happen. This
+   is the plan's own "TO VERIFY" (Execution, "Not verified"): it was left open, and the
+   load-bearing property "within a bounded per-request budget" only bounds the count.
+   Fix before S3 ships: add an aggregate raw/base64 byte budget across user ∪ tool
+   inlining (older images fall back to reason lines). Also either cap the total at 20
+   for Anthropic or guarantee every image inlined alongside them is ≤ 2000 px. Add
+   tests for both.
+
+**Mutation non-vacuity:** the cross-result dedup was mutated so the owner check was
+always false and every result inlined its own copy → 1 fail ("the same picture in two
+results is sent ONCE"). Reverted from the scratch copy; `git status` was empty
+afterwards. The executor's M1–M5 were not re-run.
+
+**Attacks tried (no finding):**
+- Anthropic consecutive-result collapse: still one user turn (`anthropic-provider.ts:482-495`).
+- No-refs `tool_result`: still the byte-identical string (cache-stable).
+- Empty-content text block left out (400 avoided).
+- User K isolation: `userParts` checks `inlined.has` (`images.ts:323`).
+- Same id twice in one result: sent once.
+- Pod-supplied tool refs: the laptop still serves only ids it attached itself (§7 "pod not trusted"). The pod chooses only the id, same scope as before; no new bytes leave the laptop.
+- No protocol or persistence surface touched.
+- OpenAI wire-only `user` message may sit next to a real `user` turn (user, user). The OpenAI-compatible endpoints accept that; noted, not a finding.
+
+**Executor behaviour:** honest. It flagged the unverified Anthropic limit itself and
+documented its drifts (new test files, dedup, config not wired). Reviewer is the same
+model family as the planner (claude-opus-5-5), in a fresh context only.
+
+*— claude-opus-5-5, 2026-11-21*
+
+### Round 2
+
+**Verdict: PASS.** Reviewed `git diff HEAD~1` (`de6d825e`).
+
+**Finding 1 (MEDIUM) — resolved.** `selectRequestImages` (`images.ts`) applies a
+request-wide budget before any read, from `ref.size`, so the same history always
+builds the same request. User images are counted first, then tool images, newest
+first. Anthropic gets ≤ `ANTHROPIC_MAX_REQUEST_IMAGES = 20` images, so the
+"> 20 images ⇒ 2000 px" rule never applies. Raw bytes are capped at ≤ 5 × the
+per-image cap (≈ 26 MB of base64 for Anthropic, under the 32 MB request limit).
+OpenAI-compatible gets the byte cap and no count cap. An image left out gets its
+own reason line ("over this request's image budget"), never a silent drop. With
+user images alone (≤ 5, each ≤ the cap) the behaviour is the same as before.
+
+**Mutations** (each applied, run, then reverted from the scratch copy; `git status`
+empty afterwards):
+| Mutation | Result |
+|---|---|
+| Anthropic count cap → ∞ | 1 fail (5 user + 25 tool → ≤ 20) |
+| Byte budget → ∞ | 3 fail (Anthropic, OpenAI, user-first) |
+| Over-budget reason line → `""` (silent drop) | 3 fail |
+
+**Gate:** `bun test packages/providers` 189 pass / 0 fail; `bun run lint` clean;
+`bun run typecheck` clean. Full `bun test` was not re-run.
+
+**Regression attacks (no finding):**
+- A non-sendable ref costs nothing in the budget, and its specific reason line is checked first in `placeholder`.
+- An id selected on both sides is counted twice; that matches what goes on the wire.
+- The per-provider budget is built in both providers' `imageOptions`.
+- The reason line only appears when the ref is not inlined.
+
+**Residual (not blocking):**
+- The budget sizes an id from the first ref seen in ANY message, while the read verifies against the user/tool ref. A hostile pod could under-declare the size on an assistant ref, but that only breaks its own session and the count cap still holds.
+- A `model.maxImageBytes` set above the default scales the byte budget with it, which is the user's choice.
+
+*— claude-opus-5-5, 2026-11-21*
+
+### S2 — fresh-context adversarial review
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, no HIGH). Scope: S2 (`279b0bc4`) only.
+
+**Gate (narrow):** the 6 touched PDF test files → 146 pass / 0 fail; `bun run lint`
+clean (2226 files); `bun run typecheck` clean (root + mobile + relay). I did not
+re-run the full `bun test`.
+
+**Findings**
+1. **MEDIUM: `fs_read` now decodes and encodes every image, then throws the bytes
+   away. On a scanned PDF this brings the read close to the 20 s timeout.**
+   - Where: `packages/tools/src/builtins.ts:181` passes `images: DEFAULT_PDF_IMAGE_LIMITS`
+     on every PDF read. `packages/tools/src/pdf/run.ts:206-214` then calls
+     `getOperatorList` and resolves every image object on every page, including after
+     the 32-image / 8 MiB caps are hit, because the caps limit only encoding, not
+     pdf.js decoding.
+   - Repro (`.tentacle/tmp/pdf-images/rev-s2/scan.ts`): a 100-page scan, one distinct
+     2480×3508 RGB Flate image per page, 24 MB file, real worker:
+     - text only (today's path): **185 ms**, giving the scanned-PDF/OCR refusal;
+     - with images (this branch's `fs_read` path): **17 916 ms**, with
+       `{sent:32, capped:68}`.
+     The same images repeated on every page take 16.4 s.
+   - Failure scenario: on a slower host, with DCT/JBIG2 scans, or with two reads at once,
+     the read exceeds `PDF_PARSE_TIMEOUT_MS` (20 s). `fs_read` then fails with a timeout
+     where it used to return the scanned-PDF message in about 0.2 s. On a scan the
+     verdict is `no-text` anyway, so all of that work is discarded.
+   - Not tested: no test covers the cost, and the failure-mode table's "Huge image" row
+     names only the RSS watchdog and the timeout as backstops. They catch the problem
+     but do not prevent the regression.
+   - Fix direction (the executor's call): stop resolving or decoding once
+     `sent + capped` makes further work pointless. Or give image collection its own
+     time budget, so the text and the verdict always come back. Or keep images opt-out
+     until S3 can use the bytes. Add a test that a large multi-page scan still returns
+     the OCR refusal within budget.
+
+**Mutation non-vacuity:** I made the inline-image args resolve to `null` (`run.ts`
+`resolveImage`). Result: 1 fail (the RGB/Indexed/inline/DCT worker test). I reverted it
+by hand and `git status` was empty afterwards. I did not re-run the executor's M1–M10.
+
+**Attacks tried (no finding):**
+- 0-image byte equality: `buildPageText` → `assemblePageText` with an empty map takes
+  the same loop, and the existing `pdf-text` tests pass unchanged.
+- Scan verdict: markers are stripped before `pdfVerdict` (`builtins.ts:203`), so an
+  image-only PDF is still refused.
+- A worker reply with malformed `images` → `isPdfExtraction` → `corrupt`, never indexed
+  blindly.
+- §7 invariants:
+  - "don't serialize": decoding stays in the worker, and nothing is added on the main
+    thread.
+  - "Model stays on the laptop" / pod: no bytes leave the tool in S2.
+  - Protocol and persistence: untouched, so no `protocol.d` note is needed.
+  - `@tentacle/core` stays free of `node:` imports (`deflate` is injected), which keeps
+    mobile safe.
+- An operator list that fails: the page keeps its text.
+
+**Residual (not blocking):**
+- The text cap counts `chars` on the text without markers (`run.ts:205`), so the
+  markers can push past `MAX_PDF_TEXT_CHARS` by about 25 characters per image.
+- If `getOperatorList` succeeds but a later step throws after `collector.add`, the
+  footer counts images whose markers are never placed (`itemsOf` unset). I could not
+  reach this, because `resolveImage` catches.
+
+**Executor behaviour:** honest and thorough. The drifts are documented, the mutation
+table is real (one survivor was caught and fixed), and JPX was flagged as unverified.
+It missed the cost of always-on decoding while the bytes are dropped. Reviewer is the
+same model family as the S2 executor (claude-opus-5-5), in a fresh context only.
+
+*— claude-opus-5-5, 2026-11-21*
+
+### S2 — Round 2
+
+**Verdict: PASS.** Reviewed `git diff HEAD~1` (`2a9935ae`).
+
+**Finding 1 (MEDIUM): resolved.** `PdfImageLimits.maxMs` defaults to 5 000. The
+deadline is checked before each page (`run.ts:208`). A page reached after the deadline
+gets no operator list and no decode, and is counted as `unexamined`. The footer names
+those pages ("… not examined for images (time limit) — read fewer pages to get them"),
+so nothing is dropped silently. The text of every page still comes back.
+
+Re-ran my repro (`.tentacle/tmp/pdf-images/rev-s2/scan.ts`, 100-page scan, real worker):
+text only 329 ms; with images **5 226 ms** (was 17 916 ms), giving
+`{sent:13, unexamined:87}`.
+
+**Mutations** (each one applied by hand, run, then reverted; `git status` was empty
+afterwards):
+| Mutation | Result |
+|---|---|
+| The deadline check never fires (`&& false`) | 1 fail (`pdf-extract`: "image work stops at its time budget") |
+| The footer leaves out `unexamined` | 1 fail (`core/pdf-images`: "pages past the time budget …") |
+
+**Gate:** the 6 touched PDF test files → 148 pass / 0 fail; `bun run lint` clean (2226
+files); `bun run typecheck` clean. I did not re-run the full `bun test`.
+
+**Regression attacks (no finding):**
+- `req.images` absent → no collector, so the deadline value is never consulted.
+- The scorer re-reads in halves on `unexamined` as well as on `capped`, so the
+  acceptance stays reachable.
+- The new summary field is added in every consumer (tests, scorer). `isPdfExtraction`
+  does not check the summary, as before.
+
+**Residual (not blocking):** the budget is checked once per page. A single page with
+many large images can still run past the deadline by that page's own cost. The RSS
+watchdog and the 20 s timeout still bound that case, and each image object has its own
+5 s guard.
+
+*— claude-opus-5-5, 2026-11-21*
+
+### S3 — fresh-context adversarial review
+
+**Verdict: PASS** (the STOP is correct; no HIGH/MEDIUM). Scope: S3 = `cf81f1f5`, which
+changes only this doc. No production code, test, protocol or persistence file changed
+(`git diff main...HEAD --name-only` has no `core/src/tool.ts`, `daemon/`, `agent/`,
+`protocol/`, `client/` or `tui/` path). So there is nothing to mutate, and no §7
+invariant is touched yet.
+
+**Premise table**
+| Claim | Check | Result |
+|---|---|---|
+| `MAX_ATTACHMENTS_PER_MESSAGE = 5`, `AttachmentsSchema.max(…)` | `protocol/src/attachment.ts:29,78` | TRUE |
+| The same schema backs `ChatMessage.attachments` and `media_message` | `protocol/src/session.ts:205,218` | TRUE |
+| A `role:"tool"` message with 6 refs is rejected | `.tentacle/tmp/pdf-images/rev-s3/cap.ts` → `6 … "Array must contain at most 5 element(s)"` | TRUE |
+| `maxSent = 32` per read | `core/src/pdf-images.ts:303` | TRUE |
+| The store reaches the agent only when `images.source === "store"` | `daemon/src/session-host.ts:125-129,1565,1653`; `cli/src/wiring.ts:403,788` | TRUE |
+| `ToolContext` is built from `this.config` in `agent.ts` | `agent/src/agent.ts:1308-1315` | TRUE |
+
+**Gate (narrow):** the 7 test files this branch touches → 109 pass / 0 fail. `bun run lint`
+is clean (2226 files). `bun run typecheck` is clean (root + mobile + relay). I did not
+re-run the full `bun test`, because S3 adds no code.
+
+**Attacks tried**
+- *Could S3 have been executed without breaking the protocol?* No. Every read with more
+  than 5 images would produce a tool message that the client refuses to validate or
+  persist (§7 persistence). Stopping was the right call; forcing the code would not have been.
+- *Pod / "not trusted":* the proposed seam builds the sink from `config.attachments`, which
+  is absent for `"client"` sources. So a pod gets no sink by construction. Holds.
+- *Option (b) and the S1 budget:* even 20 refs per tool message stay within what S1's
+  request budget can choose from, and any excess gets a reason line, so nothing is
+  dropped silently. Holds.
+
+**For the amendment (not blocking):** putting `putComplete` on `AttachmentSource`
+(`core/src/model.ts:262`) adds a write method to an interface that is read-only today.
+Make it optional, and type it so the provider side cannot call it.
+
+**Executor behaviour:** it stopped honestly at the load-bearing check, backed the stop with
+a repro, and wrote no speculative code. Reviewer is the same model family as the S3
+executor (claude-opus-5-5), in a fresh context only.
+
+*— claude-opus-5-5, 2026-11-21*

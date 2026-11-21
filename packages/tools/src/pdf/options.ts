@@ -5,6 +5,8 @@
  * parsing a hostile file; a test pins each one.
  */
 
+import type { PdfImageLimits, PdfImageSummary, PdfPageImage } from "@tentacle/core";
+
 /** The pdf.js options for text extraction of untrusted bytes. */
 export function pdfDocumentOptions(data: Uint8Array) {
   return {
@@ -19,6 +21,11 @@ export function pdfDocumentOptions(data: Uint8Array) {
     // Salvage what parses rather than fail the whole file on one bad object.
     stopAtErrors: false,
     enableXfa: false,
+    // Image objects come back as raw pixels (`{kind, data}`), never as an
+    // `ImageBitmap` or through a native image decoder: the worker encodes the
+    // PNG itself (docs/feat/pdf-images.md D1).
+    isOffscreenCanvasSupported: false,
+    isImageDecoderSupported: false,
     verbosity: 0,
   };
 }
@@ -31,6 +38,8 @@ export interface PdfWorkerRequest {
   bytes: Uint8Array;
   /** A `parsePageRange` spec ("1-5", "7-", "2,4"); absent = from page 1. */
   pages?: string;
+  /** Extract each page's images with these limits (D1–D3); absent = text only. */
+  images?: PdfImageLimits;
 }
 
 export type PdfFailureReason =
@@ -44,14 +53,25 @@ export type PdfFailureReason =
   | "aborted"
   | "unavailable";
 
-/** One extracted page: its 1-based number and its cleaned text. */
+/**
+ * One extracted page: its 1-based number, its cleaned text (with the image
+ * markers in place when images were asked for) and those images.
+ */
 export interface PdfExtractedPage {
   n: number;
   text: string;
+  images?: PdfPageImage[];
 }
 
 export type PdfExtraction =
-  | { ok: true; numPages: number; pages: PdfExtractedPage[]; truncated: boolean }
+  | {
+      ok: true;
+      numPages: number;
+      pages: PdfExtractedPage[];
+      truncated: boolean;
+      /** What the read did with its images; present only when they were asked for. */
+      images?: PdfImageSummary;
+    }
   | { ok: false; reason: PdfFailureReason; message: string };
 
 /** The worker's answer: the extraction itself. */
