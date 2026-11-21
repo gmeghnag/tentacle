@@ -149,7 +149,7 @@ function renderKeyFor(
   scheme: ChartScheme,
   fontScale: number,
   style: DiagramStyle,
-  variant: "graphite" | undefined,
+  variant: "petrol" | undefined,
 ): string {
   const key = `${style}|${scheme}|${variant ?? ""}|${fontScale}|${spec.source.canonical}`;
   const hit = keyCache.get(key);

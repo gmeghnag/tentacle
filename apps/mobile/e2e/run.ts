@@ -1448,7 +1448,7 @@ export const FLOWS: readonly string[] = [
   "34-hub-dictate",
   "34-hub-new",
   "35-gallery-shots",
-  // docs/feat/mobile-theme-beta.md: the Lato try-out, OFF vs ON, light + dark.
+  // docs/feat/mobile-theme-beta.md: the Figtree try-out, OFF vs ON, light + dark.
   "36-theme-beta-shots",
   // docs/feat/mobile-lock.md: the lock and the log export. LAST, because these
   // are the only flows that CHANGE the lock setting (they leave `immediately`

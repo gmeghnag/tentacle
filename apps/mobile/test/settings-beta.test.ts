@@ -80,13 +80,17 @@ describe("App hands Settings the stored record and its writer", () => {
   });
 });
 
-/** docs/feat/mobile-theme-beta.md: the Lato try-out switch, wired end to end. */
-describe("Beta → Tema Lato (prova)", () => {
+/** docs/feat/mobile-theme-beta.md: the Figtree try-out switch, wired end to end. */
+describe("Beta → Tema Figtree (prova)", () => {
   test("a third switch, named as the owner asked, rendering the stored value", () => {
-    expect(settings).toContain('title="Tema Lato (prova)"');
-    expect(settings).toContain('testID="beta-theme-lato"');
-    expect(settings).toContain("value={themeBeta.lato}");
-    expect(settings).toContain("onValueChange={(lato) => onThemeBeta({ ...themeBeta, lato })}");
+    expect(settings).toContain('title="Tema Figtree (prova)"');
+    expect(settings).toContain('accessibilityLabel="Tema Figtree (prova)"');
+    expect(settings).not.toContain("Lato");
+    expect(settings).toContain('testID="beta-theme-figtree"');
+    expect(settings).toContain("value={themeBeta.figtree}");
+    expect(settings).toContain(
+      "onValueChange={(figtree) => onThemeBeta({ ...themeBeta, figtree })}",
+    );
   });
 
   test("App feeds it the remembered switch and writes through the holder", () => {
@@ -99,7 +103,7 @@ describe("Beta → Tema Lato (prova)", () => {
   test("the app's ONE palette and font come from themeFor, live (no restart)", () => {
     // Mutation: a `paletteFor(useColorScheme())` left in place would ignore the switch.
     expect(app).not.toContain("paletteFor(");
-    expect(app).toContain("themeFor(useColorScheme(), themeSettings, latoReady)");
+    expect(app).toContain("themeFor(useColorScheme(), themeSettings, figtreeReady)");
     expect(app).toContain("const palette = theme.palette;");
     // ONE provider, at the root: every screen (and the lock) is inside it.
     expect(app).toContain(
@@ -108,6 +112,7 @@ describe("Beta → Tema Lato (prova)", () => {
   });
 
   test("the faces load only when the switch is on", () => {
-    expect(app).toContain("if (!themeSettings.lato || latoReady) return;");
+    expect(app).toContain("if (!themeSettings.figtree || figtreeReady) return;");
+    expect(app).toContain("loadFigtree().then(");
   });
 });

@@ -133,7 +133,7 @@ const offInputOwn = { fontSize: 16 };
 cases.offInput = { rendered: draw("TextInput", { style: offInputOwn }), own: offInputOwn };
 
 // Font ON: the face, from the text's own style.
-font("lato");
+font("figtree");
 const onOwn = { fontSize: 16 };
 cases.on = { rendered: draw("Text", { style: onOwn, children: "hello" }), own: onOwn };
 cases.onWeight500 = draw("Text", { style: { fontWeight: "500" }, children: "b" });

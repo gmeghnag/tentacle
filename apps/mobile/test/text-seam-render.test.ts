@@ -4,7 +4,7 @@
  * `ui/Text.tsx` DOES with it — the context it reads, the patch it appends, and
  * the inheritance it hands to nested texts. By the reviewer's mutation
  * (`inherited` → `{}`), a plain span inside a bold title drops to
- * Lato-Regular, or a span inside a mono run gets Lato at all, and every other
+ * Figtree-Regular, or a span inside a mono run gets Figtree at all, and every other
  * test stayed green.
  *
  * React Native's sources are Flow, so the seam can only run with `react-native`
@@ -55,8 +55,8 @@ function observe(): Cases {
 
 const cases = observe();
 
-const REGULAR = { fontFamily: "Lato-Regular", fontWeight: "400", fontStyle: "normal" };
-const BOLD = { fontFamily: "Lato-Bold", fontWeight: "700", fontStyle: "normal" };
+const REGULAR = { fontFamily: "Figtree-Regular", fontWeight: "400", fontStyle: "normal" };
+const BOLD = { fontFamily: "Figtree-Bold", fontWeight: "700", fontStyle: "normal" };
 
 /** The style the seam appended on top of the caller's own, if it appended one. */
 function patch(rendered: Observed): unknown {
@@ -99,8 +99,8 @@ describe("with the font off the seam adds nothing", () => {
   });
 });
 
-describe("with Lato on the seam patches the face on top of the own style", () => {
-  test("a plain text gets Lato-Regular and keeps its own style first", () => {
+describe("with Figtree on the seam patches the face on top of the own style", () => {
+  test("a plain text gets Figtree-Regular and keeps its own style first", () => {
     const { rendered, own } = cases.on ?? {};
     if (rendered === undefined) throw new Error("no on case");
     expect(rendered.type).toBe("Text");
@@ -108,7 +108,7 @@ describe("with Lato on the seam patches the face on top of the own style", () =>
     expect(rendered.ownStyleFirst).toBe(true);
   });
 
-  test("a bold text gets Lato-Bold; a 500 is Regular, never a rounded Bold", () => {
+  test("a bold text gets Figtree-Bold; a 500 is Regular, never a rounded Bold", () => {
     expect(patch(cases.onBold ?? { type: null, style: null })).toEqual(BOLD);
     expect(patch(cases.onWeight500 ?? { type: null, style: null })).toEqual(REGULAR);
   });

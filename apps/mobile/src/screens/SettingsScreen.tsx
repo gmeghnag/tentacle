@@ -77,7 +77,7 @@ export interface SettingsScreenProps {
   readonly voiceError?: string;
   readonly onVoice?: (next: VoiceSettings) => void;
   /**
-   * Beta → "Tema Lato (prova)" (docs/feat/mobile-theme-beta.md): the try-out
+   * Beta → "Tema Figtree (prova)" (docs/feat/mobile-theme-beta.md): the try-out
    * theme, OFF by default. Absent = no row.
    */
   readonly themeBeta?: ThemeBeta;
@@ -595,14 +595,14 @@ export function SettingsScreen({
                   <Row
                     palette={palette}
                     minHeight={size.rowSetting}
-                    title="Tema Lato (prova)"
+                    title="Tema Figtree (prova)"
                     trailing={
                       <Switch
-                        testID="beta-theme-lato"
-                        accessibilityLabel="Tema Lato (prova)"
-                        value={themeBeta.lato}
+                        testID="beta-theme-figtree"
+                        accessibilityLabel="Tema Figtree (prova)"
+                        value={themeBeta.figtree}
                         trackColor={{ false: palette.fill, true: palette.green }}
-                        onValueChange={(lato) => onThemeBeta({ ...themeBeta, lato })}
+                        onValueChange={(figtree) => onThemeBeta({ ...themeBeta, figtree })}
                       />
                     }
                   />

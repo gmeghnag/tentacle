@@ -42,11 +42,11 @@ export function diagramCacheKey(
   scheme: "light" | "dark",
   fontScale: number,
   style: DiagramStyle = "outline",
-  variant?: "graphite",
+  variant?: "petrol",
 ): string {
   // The look is part of a render's identity (docs/fix/mobile-qa-1117.md, bug 3);
   // `outline` keeps the key it always had, so no render is redone for it. The
-  // palette variant too (docs/feat/mobile-theme-beta.md): graphite's page is not
+  // palette variant too (docs/feat/mobile-theme-beta.md): petrol's page is not
   // today's dark page; today's palettes add nothing.
   const look = style === "filled" ? "base+filled" : "base";
   const theme = variant === undefined ? look : `${look}+${variant}`;

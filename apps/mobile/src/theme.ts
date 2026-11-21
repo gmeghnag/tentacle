@@ -170,32 +170,37 @@ const dark: Palette = {
 };
 
 /**
- * The Lato try-out's dark palette (docs/feat/mobile-theme-beta.md, Settings →
- * Beta, OFF by default): the background family moves to the owner's graphite
- * reference (#1A1D21) and the text to its #D1D2D3 / #ABABAD; every surface keeps
- * B3's step order (drawer < page < band < card = sheet < fill). Accents and the
- * semantic colours are B3's, untouched. Picked by `themeFor` (`theme-beta.ts`),
- * never by a screen.
+ * The Figtree try-out's dark palette, "abisso petrolio" (docs/feat/mobile-theme-beta.md,
+ * Owner decision 2026-11-21; Settings → Beta, OFF by default). The owner's hexes:
+ * page #151B1D, text #D5DDDE / #98A6A8, separator #253033, raised fill (composer,
+ * sheets, code/tool rows) #1D2528, accent #22D3EE, tint = rgba(34,211,238,.12)
+ * on the page. The other surfaces keep the step the retired graphite ramp had
+ * from its own page/card/separator (drawer = page − (5,6,7), band = page + 5,
+ * fill = card + (9,9,10), sep / sepSheet = sepChat + (8,9,10) / (14,15,16),
+ * switchOff = page + (37,37,38)), so B3's order holds (drawer < page < band <
+ * card = sheet < fill). Semantic colours are B3's, untouched. Picked by
+ * `themeFor` (`theme-beta.ts`), never by a screen.
  */
-const graphite: Palette = {
+const petrol: Palette = {
   ...dark,
-  bg: "#1A1D21",
-  page: "#1A1D21",
-  card: "#222529",
-  sheet: "#222529",
-  drawer: "#15171A",
-  band: "#1F2226",
-  bandOnSheet: "#222529",
-  fill: "#2B2E33",
-  code: "#222529",
-  codeOnSheet: "#2B2E33",
-  label: "#D1D2D3",
-  sec: "#ABABAD",
-  sep: "#34363A",
-  sepChat: "#2C2D30",
-  sepSheet: "#3A3C40",
-  glass: "rgba(34,37,41,0.86)",
-  switchOff: "#3F4247",
+  bg: "#151B1D",
+  page: "#151B1D",
+  card: "#1D2528",
+  sheet: "#1D2528",
+  drawer: "#101516",
+  band: "#1A2022",
+  bandOnSheet: "#1D2528",
+  fill: "#262E32",
+  code: "#1D2528",
+  codeOnSheet: "#262E32",
+  label: "#D5DDDE",
+  sec: "#98A6A8",
+  sep: "#2D393D",
+  sepChat: "#253033",
+  sepSheet: "#333F43",
+  tint: "#173136",
+  glass: "rgba(29,37,40,0.86)",
+  switchOff: "#3A4043",
 };
 
 /** The palette for a scheme; an unknown/null scheme is the light one. */
@@ -209,11 +214,11 @@ export function paletteFor(scheme: "light" | "dark" | null | undefined): Palette
  * vanish on black). One comparison, in one place, so a component never re-derives
  * it (`chart-row.ts` does the same for its own chrome).
  */
-export const isDark = (palette: Palette): boolean => palette === dark || palette === graphite;
+export const isDark = (palette: Palette): boolean => palette === dark || palette === petrol;
 
 export const lightPalette: Palette = light;
 export const darkPalette: Palette = dark;
-export const graphitePalette: Palette = graphite;
+export const petrolPalette: Palette = petrol;
 
 /**
  * The chart's own tokens (docs/feat/model-charts.md, *iPhone visual language

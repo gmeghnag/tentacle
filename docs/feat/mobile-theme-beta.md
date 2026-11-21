@@ -251,6 +251,55 @@ changelog fragment.
    AGENTS §6 names three opt-in skips — the other two were not identified in
    this run and are not added by this branch: it adds no `skip`.)
 
+### Fix round 1 — slice "Owner decision 2026-11-21 — variant B"
+
+*— claude-opus-5-5, 2026-11-21* (answers "Review — slice … variant B": not implemented)
+
+- **Font Lato → Figtree.** The four static faces copied from
+  `.tentacle/tmp/theme-figtree/` into `apps/mobile/assets/fonts/`; the four Lato
+  `.ttf` deleted; `OFL.txt` replaced by Figtree's; `NOTICE` and `assets/fonts/README.md`
+  rewritten (sha256 + PostScript names). PostScript names read from each file's
+  `name` table (nameID 6, scratch script — `fc-scan` was not permitted here):
+  `Figtree-Regular/-Bold/-Italic/-BoldItalic`, all `00010000` TrueType.
+  Renames: `LATO_FACES`→`FIGTREE_FACES`, `LatoFace`/`latoFace`/`LatoPatch`→`Figtree*`,
+  `loadLato`→`loadFigtree`, `AppFont "lato"`→`"figtree"`, `ThemeBeta.lato`→`figtree`,
+  `latoReady`→`figtreeReady`, label/a11y "Tema Figtree (prova)", testID
+  `beta-theme-figtree` (e2e flow 36 updated), font-error text, changelog fragment.
+- **Stored switch (drift, decided here — the plan allowed a reset):** record is now
+  `{v:2, figtree}` (`THEME_SETTINGS_VERSION = 2`). The Lato build's `{v:1, lato}` reads
+  OFF **and writable** (`theme-settings-store.ts` `SUPERSEDED_THEME_SETTINGS_VERSION`):
+  left "preserved" like an unknown version it would refuse every later write forever.
+  v≥3 is still a newer build's → OFF, never written over.
+- **Dark palette graphite → petrol** (`theme.ts` `petrol`, `petrolPalette`,
+  `paletteVariant` → `"petrol"`, diagram cache key variant `"petrol"`). Owner's hexes:
+  bg/page `#151B1D`, label `#D5DDDE`, sec `#98A6A8`, sepChat `#253033`,
+  card/sheet/bandOnSheet/code `#1D2528`, accent `#22D3EE` (unchanged from dark), tint
+  `#173136` = rgba(34,211,238,.12) composited on `#151B1D` (a palette token must be
+  `#RRGGBB`: the contrast gate parses it). Derived by graphite's own relation to
+  `#1A1D21`/its card/its sepChat: drawer = page−(5,6,7) `#101516`, band = page+5
+  `#1A2022`, fill/codeOnSheet = card+(9,9,10) `#262E32`, sep = sepChat+(8,9,10)
+  `#2D393D`, sepSheet = sepChat+(14,15,16) `#333F43`, switchOff = page+(37,37,38)
+  `#3A4043`, glass = card at .86. Measured: label/page **12.62:1**, sec/page **6.93:1**,
+  sec/fill 5.50:1 (lowest sec pair), separators 1.28 / 1.39 / 1.43 on their grounds.
+  Light unchanged.
+- **Tests:** `theme-beta` (variant B hexes, faces = PostScript names, `"figtree"`,
+  `"petrol"` key), `theme` (petrol in the 4.5:1 gate; primary in [11.5, 13), sec ≥ 6.6;
+  ramp order; separators), `theme-fonts` (Figtree faces, folder bundles no other font,
+  OFL is Figtree's, NOTICE has Figtree and no Lato), `theme-settings-store` (v2;
+  v1 Lato record → OFF + replaced; v3 preserved), `settings-beta`, `text-seam-render`.
+- **Red** (identifiers renamed, values still Lato/graphite): ≥ 20 fails (output capped at 40 lines), all shown
+  `expect(...)` assertions (variant B hexes, PostScript names, folder/OFL/NOTICE,
+  label, v2 record, seam faces), none an import/compile error. **Green:** 9 files,
+  234 pass / 0 fail. `tsc -p apps/mobile` clean; `biome check` on the 22 changed files clean.
+- **Mutations** (each reverted): (1) `SUPERSEDED…` branch disabled → 2 fail (the v1
+  Lato record tests); (2) petrol `sec` → `#7A8789` + (3) loader requires
+  `Lato-Italic.ttf` → 10 fail (variant-B hexes, 7 × "sec on … ≥ 4.5:1", owner text
+  contrast, "loader requires exactly those faces").
+- **Not done — merge of `main` into the branch** (second point of the Review): it
+  creates a merge commit and resolves conflicts in `App.tsx`/`Composer.tsx`, and this
+  round forbids commits. Left to the orchestrator. Simulator/phone look of
+  variant B unverified (Execution §7 blocker still applies).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-20* (fresh context; SAME model as the executor —

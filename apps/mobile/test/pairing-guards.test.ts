@@ -80,7 +80,7 @@ describe("no build-time computer, no build-time token (F-H4)", () => {
     // diagram look (docs/fix/mobile-qa-1117.md) an eighth:
     // `diagram-settings-store.ts` decides; and the gallery look
     // (docs/feat/mobile-gallery-polish.md) a ninth: `gallery-settings-store.ts` decides;
-    // and the Lato try-out switch (docs/feat/mobile-theme-beta.md) a tenth:
+    // and the Figtree try-out switch (docs/feat/mobile-theme-beta.md) a tenth:
     // `theme-settings-store.ts` decides.
     expect(importers.map((path) => path.slice(APP.length + 1)).sort()).toEqual([
       "src/activity-settings-expo.ts",

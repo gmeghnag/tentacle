@@ -15,7 +15,7 @@ import { type AppFont, type FontInherit, textFont } from "../theme-beta.ts";
 /** The app font in force (`null`: the system font). */
 export const AppFontContext = createContext<AppFont>(null);
 
-/** What a Lato text passes to the texts nested in it (RN inherits font props). */
+/** What a Figtree text passes to the texts nested in it (RN inherits font props). */
 const InheritContext = createContext<FontInherit>({});
 
 function ownFont(style: ComponentProps<typeof RNText>["style"]) {

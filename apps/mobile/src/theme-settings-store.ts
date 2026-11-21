@@ -1,6 +1,6 @@
 /**
- * The Lato try-out switch, remembered on this device (docs/feat/mobile-theme-beta.md):
- * a versioned record `{v:1, lato}` behind the `SecureKV` port — the
+ * The Figtree try-out switch, remembered on this device (docs/feat/mobile-theme-beta.md):
+ * a versioned record `{v:2, figtree}` behind the `SecureKV` port — the
  * `gallery-settings-store.ts` shape and fail-safe rules, so this module has no
  * native import (`theme-settings-expo.ts` is the wiring).
  *
@@ -18,7 +18,9 @@ import type { SecureKV } from "./computer-store.ts";
 import { DEFAULT_THEME_BETA, type ThemeBeta } from "./theme-beta.ts";
 
 export const THEME_SETTINGS_KEY = "tentacle.theme";
-export const THEME_SETTINGS_VERSION = 1;
+export const THEME_SETTINGS_VERSION = 2;
+/** The Lato try-out's `{v:1, lato}` — an older build's, not a newer one's. */
+const SUPERSEDED_THEME_SETTINGS_VERSION = 1;
 
 export type ThemeSettings = ThemeBeta;
 
@@ -47,11 +49,16 @@ function parse(raw: string | null): ThemeSettingsRead {
     return unreadable;
   }
   if (typeof parsed !== "object" || parsed === null) return unreadable;
-  const r = parsed as { v?: unknown; lato?: unknown };
-  if (r.v !== THEME_SETTINGS_VERSION || typeof r.lato !== "boolean") {
+  const r = parsed as { v?: unknown; figtree?: unknown };
+  // The Lato build's v1 record is superseded (Owner decision 2026-11-21): the
+  // switch resets to OFF and the next pick replaces it.
+  if (r.v === SUPERSEDED_THEME_SETTINGS_VERSION) {
+    return { settings: DEFAULT_THEME_SETTINGS, writable: true };
+  }
+  if (r.v !== THEME_SETTINGS_VERSION || typeof r.figtree !== "boolean") {
     return unreadable;
   }
-  return { settings: { lato: r.lato }, writable: true };
+  return { settings: { figtree: r.figtree }, writable: true };
 }
 
 export interface ThemeSettingsStore {

@@ -1,23 +1,23 @@
 /**
- * The Lato try-out theme (docs/feat/mobile-theme-beta.md): Settings → Beta →
- * "Tema Lato (prova)", OFF by default.
+ * The Figtree try-out theme (docs/feat/mobile-theme-beta.md): Settings → Beta →
+ * "Tema Figtree (prova)", OFF by default.
  *
  * Pure and React-free (AGENTS §7): which palette and which font a switch + a
- * colour scheme give, and how one text's own style becomes a Lato face. `App.tsx`
+ * colour scheme give, and how one text's own style becomes a Figtree face. `App.tsx`
  * asks `themeFor` once per render; `ui/Text.tsx` asks `textFont` per text. OFF is
  * today's look by construction: the same palette objects, and no font patch.
  */
-import { type Palette, graphitePalette, lightPalette, paletteFor } from "./theme.ts";
+import { type Palette, lightPalette, paletteFor, petrolPalette } from "./theme.ts";
 
 /** The theme's Beta switch, remembered per device (`theme-settings-store.ts`). */
 export interface ThemeBeta {
-  readonly lato: boolean;
+  readonly figtree: boolean;
 }
 
-export const DEFAULT_THEME_BETA: ThemeBeta = { lato: false };
+export const DEFAULT_THEME_BETA: ThemeBeta = { figtree: false };
 
 /** The app font: `null` is the system font (today). */
-export type AppFont = "lato" | null;
+export type AppFont = "figtree" | null;
 
 export interface Theme {
   readonly palette: Palette;
@@ -25,7 +25,7 @@ export interface Theme {
 }
 
 /**
- * The theme for a scheme + the switch. ON: dark moves to graphite, light keeps
+ * The theme for a scheme + the switch. ON: dark moves to petrol, light keeps
  * its palette (only the font changes). The font waits for `fontReady` — the
  * faces registered — so a text never asks iOS for a family it does not have.
  */
@@ -34,34 +34,34 @@ export function themeFor(
   beta: ThemeBeta,
   fontReady: boolean,
 ): Theme {
-  if (!beta.lato) return { palette: paletteFor(scheme), font: null };
+  if (!beta.figtree) return { palette: paletteFor(scheme), font: null };
   return {
-    palette: scheme === "dark" ? graphitePalette : lightPalette,
-    font: fontReady ? "lato" : null,
+    palette: scheme === "dark" ? petrolPalette : lightPalette,
+    font: fontReady ? "figtree" : null,
   };
 }
 
 /**
  * What a render cached per palette must add to its key: today's palettes add
- * nothing (every stored key stays valid), graphite adds its name — a diagram
- * drawn on #1E1F21 must not be shown on #1A1D21.
+ * nothing (every stored key stays valid), petrol adds its name — a diagram
+ * drawn on today's dark page must not be shown on petrol's.
  */
-export function paletteVariant(palette: Palette): "graphite" | undefined {
-  return palette === graphitePalette ? "graphite" : undefined;
+export function paletteVariant(palette: Palette): "petrol" | undefined {
+  return palette === petrolPalette ? "petrol" : undefined;
 }
 
 /**
  * The four bundled faces (`assets/fonts`, SIL OFL 1.1). Each key is the face's
  * PostScript name, which is also the name `fonts-expo.ts` registers it under.
  */
-export const LATO_FACES = {
-  regular: "Lato-Regular",
-  bold: "Lato-Bold",
-  italic: "Lato-Italic",
-  boldItalic: "Lato-BoldItalic",
+export const FIGTREE_FACES = {
+  regular: "Figtree-Regular",
+  bold: "Figtree-Bold",
+  italic: "Figtree-Italic",
+  boldItalic: "Figtree-BoldItalic",
 } as const;
 
-export type LatoFace = (typeof LATO_FACES)[keyof typeof LATO_FACES];
+export type FigtreeFace = (typeof FIGTREE_FACES)[keyof typeof FIGTREE_FACES];
 
 type Weight = string | number | undefined;
 type FontStyleValue = string | undefined;
@@ -77,11 +77,11 @@ function isBold(weight: Weight): boolean {
   return Number.isFinite(n) && n >= 600;
 }
 
-export function latoFace(weight: Weight, style: FontStyleValue): LatoFace {
+export function figtreeFace(weight: Weight, style: FontStyleValue): FigtreeFace {
   const bold = isBold(weight);
   const italic = style === "italic";
-  if (bold) return italic ? LATO_FACES.boldItalic : LATO_FACES.bold;
-  return italic ? LATO_FACES.italic : LATO_FACES.regular;
+  if (bold) return italic ? FIGTREE_FACES.boldItalic : FIGTREE_FACES.bold;
+  return italic ? FIGTREE_FACES.italic : FIGTREE_FACES.regular;
 }
 
 /** The font-relevant part of a text's own (flattened) style. */
@@ -99,18 +99,18 @@ export interface FontInherit {
 }
 
 /**
- * The style a Lato text gets on top of its own. The weight and the style are the
+ * The style a Figtree text gets on top of its own. The weight and the style are the
  * FACE's (400/700, normal/italic) so iOS's own family matching lands on the same
  * face it was named (a 500 left as 500 would round to Bold).
  */
-export interface LatoPatch {
-  readonly fontFamily: LatoFace;
+export interface FigtreePatch {
+  readonly fontFamily: FigtreeFace;
   readonly fontWeight: "400" | "700";
   readonly fontStyle: "normal" | "italic";
 }
 
 /**
- * One text's Lato patch, from its own style and what its parent text gave it.
+ * One text's Figtree patch, from its own style and what its parent text gave it.
  * `null` patch: the font is off, or the text (or a parent) names its own family
  * (monospace code stays monospace).
  */
@@ -118,16 +118,16 @@ export function textFont(
   own: OwnFont,
   inherited: FontInherit,
   font: AppFont,
-): { readonly patch: LatoPatch | null; readonly inherit: FontInherit } {
+): { readonly patch: FigtreePatch | null; readonly inherit: FontInherit } {
   const inherit: FontInherit = {
     family: own.fontFamily ?? inherited.family,
     weight: own.fontWeight ?? inherited.weight,
     style: own.fontStyle ?? inherited.style,
   };
   if (font === null || inherit.family !== undefined) return { patch: null, inherit };
-  const face = latoFace(inherit.weight, inherit.style);
-  const bold = face === LATO_FACES.bold || face === LATO_FACES.boldItalic;
-  const italic = face === LATO_FACES.italic || face === LATO_FACES.boldItalic;
+  const face = figtreeFace(inherit.weight, inherit.style);
+  const bold = face === FIGTREE_FACES.bold || face === FIGTREE_FACES.boldItalic;
+  const italic = face === FIGTREE_FACES.italic || face === FIGTREE_FACES.boldItalic;
   return {
     patch: {
       fontFamily: face,

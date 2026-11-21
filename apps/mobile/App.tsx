@@ -115,7 +115,7 @@ import {
 import { createDrawerRename } from "./src/drawer-rename.ts";
 import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
 import type { ActivityButtonMode } from "./src/floating-button.ts";
-import { loadLato } from "./src/fonts-expo.ts";
+import { loadFigtree } from "./src/fonts-expo.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -1588,38 +1588,38 @@ interface AppTheme extends Theme {
 }
 
 function useAppTheme(): AppTheme {
-  // The Lato try-out (docs/feat/mobile-theme-beta.md): Settings → Beta, OFF by
+  // The Figtree try-out (docs/feat/mobile-theme-beta.md): Settings → Beta, OFF by
   // default, remembered per device, applied live. Which palette and font that
   // means is `themeFor` (pure); the faces load only once the switch is on.
   const [themeSettings, setThemeSettings] = useState<ThemeSettings>(() => THEME_SETTINGS.current());
   const [themeError, setThemeError] = useState<string | undefined>(undefined);
-  const [latoReady, setLatoReady] = useState(false);
+  const [figtreeReady, setFigtreeReady] = useState(false);
   useEffect(() => {
     const unsubscribe = THEME_SETTINGS.subscribe(setThemeSettings);
     void THEME_SETTINGS.load();
     return unsubscribe;
   }, []);
   useEffect(() => {
-    if (!themeSettings.lato || latoReady) return;
+    if (!themeSettings.figtree || figtreeReady) return;
     let live = true;
-    loadLato().then(
+    loadFigtree().then(
       () => {
-        if (live) setLatoReady(true);
+        if (live) setFigtreeReady(true);
       },
       () => {
         // The palette still switches; the text stays on the system font.
-        if (live) setThemeError("The Lato font didn't load");
+        if (live) setThemeError("The Figtree font didn't load");
       },
     );
     return () => {
       live = false;
     };
-  }, [themeSettings.lato, latoReady]);
+  }, [themeSettings.figtree, figtreeReady]);
   const selectTheme = useCallback((next: ThemeSettings) => {
     setThemeError(undefined);
     THEME_SETTINGS.set(next).catch(() => setThemeError("That theme setting didn't save"));
   }, []);
-  const theme = themeFor(useColorScheme(), themeSettings, latoReady);
+  const theme = themeFor(useColorScheme(), themeSettings, figtreeReady);
   return { ...theme, settings: themeSettings, error: themeError, select: selectTheme };
 }
 

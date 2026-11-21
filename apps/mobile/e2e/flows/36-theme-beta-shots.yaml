@@ -1,7 +1,7 @@
 appId: so.tentacle.app
 ---
-# 36 (docs/feat/mobile-theme-beta.md): the Lato try-out theme, Settings → Beta →
-# "Tema Lato (prova)". The owner's evidence set, each screen in light AND dark
+# 36 (docs/feat/mobile-theme-beta.md): the Figtree try-out theme, Settings → Beta →
+# "Tema Figtree (prova)". The owner's evidence set, each screen in light AND dark
 # (`_shot`): Computers, Settings → Beta, a chat with markdown + tool rows, the
 # Artifacts gallery — first with the switch ON (turned on live, no restart),
 # then after a RELAUNCH (the switch must still be on: remembered) turned OFF
@@ -14,19 +14,19 @@ appId: so.tentacle.app
     id: "open-settings"
 - scrollUntilVisible:
     element:
-      id: "beta-theme-lato"
+      id: "beta-theme-figtree"
     direction: DOWN
 - assertVisible:
-    id: "beta-theme-lato"
+    id: "beta-theme-figtree"
     checked: false
 - runFlow:
     file: _shot.yaml
     env:
       SHOT: "36-off-settings-beta"
 - tapOn:
-    id: "beta-theme-lato"
+    id: "beta-theme-figtree"
 - assertVisible:
-    id: "beta-theme-lato"
+    id: "beta-theme-figtree"
     checked: true
 - runFlow:
     file: _shot.yaml
@@ -140,15 +140,15 @@ appId: so.tentacle.app
     id: "open-settings"
 - scrollUntilVisible:
     element:
-      id: "beta-theme-lato"
+      id: "beta-theme-figtree"
     direction: DOWN
 - assertVisible:
-    id: "beta-theme-lato"
+    id: "beta-theme-figtree"
     checked: true
 - tapOn:
-    id: "beta-theme-lato"
+    id: "beta-theme-figtree"
 - assertVisible:
-    id: "beta-theme-lato"
+    id: "beta-theme-figtree"
     checked: false
 - scrollUntilVisible:
     element:

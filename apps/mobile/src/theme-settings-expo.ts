@@ -1,5 +1,5 @@
 /**
- * The Lato try-out switch's Keychain adapter (docs/feat/mobile-theme-beta.md).
+ * The Figtree try-out switch's Keychain adapter (docs/feat/mobile-theme-beta.md).
  * Wiring only, like `chart-settings-expo.ts`: the rules live in
  * `theme-settings-store.ts`.
  */

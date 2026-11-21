@@ -2,7 +2,7 @@
  * The text seam (docs/feat/mobile-theme-beta.md): the app font reaches EVERY
  * text only if every text is `ui/Text.tsx`'s. A screen that imports `Text` or
  * `TextInput` straight from `react-native` would silently keep the system font
- * with the Lato beta on — so no file may, except the seam itself.
+ * with the Figtree beta on — so no file may, except the seam itself.
  *
  * React Native's sources are Flow, so Bun cannot render a screen; the import is
  * the boundary (the `push-wiring-guards.test.ts` shape).
