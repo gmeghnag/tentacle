@@ -263,3 +263,14 @@ The snapshot was restored byte-identically after that last mutation (`git status
 shows no `.snap` change).
 
 
+## Review
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Verdict: PASS** (fresh-context, adversarial; scope `git diff main...HEAD`). This doc was already on the branch, so it was reviewed as written, not rewritten.
+
+- **Gate (narrow + static):** `bun test` over main/serve-resident/snapshot-integrity/diagram-lines → 211 pass · 0 fail; `bun run lint` clean (2164 files); `bun run typecheck` clean (root + mobile + relay). This settles the typecheck that Execution left open.
+- **Non-vacuity, re-run by the reviewer:** `main.ts:1147` reverted to `runResidentMode(config, parsed)` → T1 red (`main.test.ts:277`). Reverted afterwards; `git status` clean.
+- **§7 invariants:** "never write raw to the terminal" / bridge-stdout-is-RPC holds: `runBridge` keeps `stdout: process.stdout`, and T3 pins it. Production bytes are the same through `processResidentIO`. No protocol, persistence or broker change.
+- **Other writers:** no other test reaches `--resident-status/stop` through `main` (`serve-limits.test.ts:605` only tests `isPodDaemonLoad`; the engine-* tests fake the exec). The only direct `process.stdout.write` calls left in `cli/src` are the default sinks (`main.ts:657`, `terminal.ts:47`, `pod-resident.ts:776`).
+- **Not HIGH/MEDIUM, noted:** (1) the "fd 1 free → bytes land in the `.snap`" mechanism was only shown in an isolated repro that closes fd 1. The full suite never reproduced it, so the fix closes a real, proven leak, but nothing here proves this was the only route. (2) The `ESC[?25h` sibling is detected by the guard but not homed. (3) The non-vacuity test writes `packages/tui/test/.tmp-snapshot-guard` inside the source tree; `mkdtemp(tmpdir())` would be cleaner. (4) The guard checks only the first line, at its own run time. That is weaker than the owner's "untouched after the suite" and is documented under Failure modes / Race.
