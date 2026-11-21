@@ -63,6 +63,7 @@ function TranscriptCellView(props: TranscriptCellProps): JSX.Element {
             open: props.open,
             full: props.full,
             reduceMotion: props.reduceMotion,
+            compactShell: props.compactShell,
             onToggle: () => actions.current.onToggle(row.key),
             onShowAll: () => actions.current.onShowAll(row.key),
           }}

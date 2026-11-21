@@ -1427,6 +1427,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             // A chart's glyphs (`tui.chartGlyphs`): LAPTOP-ONLY too — the font is
             // this terminal's.
             chartGlyphs: config.tui?.chartGlyphs ?? "braille",
+            // Beta `beta.compactShell`: LAPTOP-ONLY display, never carried to a pod.
+            compactShell: config.beta?.compactShell ?? false,
             // Voice dictation (`voice.*`): a LAPTOP-ONLY input setting. The TUI
             // itself decides whether this terminal can use it at all (F11).
             voice: { ...VOICE_DEFAULTS, ...(config.voice ?? {}) },
@@ -2284,6 +2286,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           model: config.model,
           theme: config.tui?.theme ?? "auto",
           chartGlyphs: config.tui?.chartGlyphs ?? "braille",
+          compactShell: config.beta?.compactShell ?? false,
           cwd: config.cwd,
           contextWindow: config.contextWindow,
           permissions,

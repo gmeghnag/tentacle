@@ -127,6 +127,12 @@ protocol change.** Proven (repro in Context shows all four hops on a real value)
   and `layoutTranscript` (`:1335`) sums them — a second row is counted with no
   change to `app-layout.ts`'s transcript maths. `chartGlyphs` is the precedent of
   an App-lifetime display option deliberately NOT in that key (`:84-89`).
+- **⚠ Executor correction: a running tool HAS a body today.** `toolBody` returns
+  `⎿ running…` for every running call (`render-lines.ts:564`, captured on `main`:
+  `● Bash bun test apps/mobile` / `⎿ running…`), so the owner's «none today» was
+  inaccurate. Implemented to the owner's stated end state and this plan's tests
+  («running → exactly 2 rows», «no running line»): a DESCRIBED shell row drops
+  that body while running; the no-sentence row keeps it (byte-identical).
 - **Blink touches row 0 only.** `withPhase` → `offPhaseRows` swaps only the
   first `BULLET` of row 0 (`render-lines.ts:1197-1208, 1288-1297`): a `$` row
   under it is unaffected.
@@ -288,6 +294,24 @@ sentence is an attributed footnote.
   full and unclipped), before `Asked by …`.
 - The "don't ask again" prefix keeps coming from the command only
   (`permission-gate.ts:42`) — pinned by a test, not changed.
+- **⚠ Executor correction (claude-opus-5-5, 2026-11-21) — S3 STOPPED, needs
+  re-approval.** The Client bullet above contradicts a pinned invariant:
+  `PermissionRequestOptions.toolCallId` / `origin` are *process-internal, never
+  from the wire* (`docs/feat/permission-call-attribution.md:142-145`, its Review
+  `:636-639`), asserted by `packages/client/test/foreign-turns.test.ts:775-777`
+  ("Laptop-internal attribution never comes from the wire"). Daemon-side those
+  two fields drive `classifyPending` (resume semantics, `daemon/src/hosted-session.ts:1266-1282`),
+  so filling them from a pod's frame on the laptop breaks the guard the
+  attribution Review relied on. **Proposed amendment** (not implemented): leave
+  `toolCallId`/`origin` untouched; add a separate, display-only, wire-derived
+  options field beside `agent` — e.g. `PermissionRequestOptions.askedFor?: {
+  readonly callId: string; readonly subagent: boolean }` (documented "forgeable
+  by a pod, display only, never read by a decision", like `agent`), set by the
+  router's `prompt` action from `update.toolCallId` / `update.agent !== undefined`
+  and forwarded by `remote-client.ts`; `permissionIntent` reads it instead. The
+  foreign-turns assertion stays as it is (and gains `askedFor` = the wire's id).
+  Everything else in §5 (the TUI `permissionView`, full-colour wrapped command,
+  the phone sheet) is unchanged by the amendment.
 - Under `compactShell` the ask is unchanged (the command is always there).
 
 **6. Phone rows (variant B)** — pure first, components dumb:
@@ -484,7 +508,104 @@ must turn it red again (AGENTS §9).
 
 ## Execution
 
-*— (empty until the plan is approved)*
+*— claude-opus-5-5, 2026-11-21*
+
+**Load-bearing check** re-run first (Context repro, absolute imports from
+`.tentacle/tmp/shell-intent-line/repro.ts`): output identical to the Context's —
+the `description` reaches wire + client untouched, the schema strips it, no client
+draws it. Holds.
+
+**S1 — DONE.** `tools/src/builtins.ts:411-418` optional `description` (no `.max`)
++ "Always give `description`." in the tool text. `core/src/shell-intent.ts` (new,
+exported `core/src/index.ts:31`): `shellIntent`, `shellCommand`, `shellExitCode`,
+`shellOutcome`, `shellRowParts`, `permissionIntent`, `INTENT_MAX`. Config:
+`schema.ts` `beta` section, `key-docs.ts` `beta` + `beta.compactShell`
+(`carried: "no"`, default false), `defaults.ts` template comment.
+Tests: `core/test/shell-intent.test.ts` (18), `tools/test/builtins.test.ts` (+2),
+`config/test/beta-compact-shell.test.ts` (4), `key-docs.test.ts` CLI-default list.
+
+**S2 — DONE.** `tui/src/render-lines.ts`: `shellIntentLines` (variant B) called
+from `toolLines` before the queued/header path; today's body code moved into
+`toolBodyRows` (behaviour-identical, proven by the byte-identical test);
+`RenderOptions.compactShell` + `RowCacheEntry.compactShell` in the cache check.
+Plumbing: `run.tsx` (`TuiOptions.compactShell`), `app-types.ts`, `App.tsx` (all
+four RenderOptions sites + both deps lists — the warm/idle/layout sites must agree
+or the cache thrashes), `cli/src/main.ts:1431, 2289`, `cli/src/connect.ts`
+(`ConnectOptions.compactShell`, `connectCompactShell`). Tests:
+`tui/test/shell-intent-rows.test.ts` (12), `tui/test/app-shell-intent.test.tsx`
+(ink frame: sentence + `  $ cmd` while running, slot still `Working…`, no
+`running…`, `✓` settled, `❯` input row at the same y before/after the result),
+`cli/test/connect-compact-shell.test.ts` (2).
+
+**S3 — STOPPED (plan contradicts the code).** See the ⚠ correction in Design §5:
+the plan's client step fills `PermissionRequestOptions.toolCallId/origin` from the
+wire, which `foreign-turns.test.ts:775-777` and the attribution Review pin as
+never-from-the-wire. My router/remote-client edits were reverted (`git diff
+packages/client` empty). Not built: `permissionView`, full-colour wrapped command,
+the intent row (TUI and phone sheet). `permissionIntent` exists in core (pure,
+tested) but has no caller yet. **Decision needed:** approve the `askedFor`
+amendment (or another shape), then S3 runs as one slice.
+
+**S4 — DONE except the phone permission sheet (S3).** `apps/mobile/src/tool-steps.ts`
+`stepRowView(…, compact = false)`: `subline`, `shimmer`, sentence name, outcome in
+`trailing` (`shellTrailing`), `shellA11yLabel` (sentence, status word, "exit code
+N"). `ui/StepNode.tsx`: second mono line inside the same `Pressable`, `ThinkingWord`
+when `shimmer`, the 45 % cap lifted when `subtitle === ""`. `compactShell` flows
+`App.tsx` (`useShellRows`) → `SessionRoute` → `SessionScreen` → `CellData`
+(`transcript-cell.ts`, in `sameCellData`) → `TranscriptCell` → `StepProps` →
+`stepRowView`. Beta: `shell-rows-store.ts` + `shell-rows-expo.ts` (new),
+`SettingsScreen.tsx` row `beta-compact-shell` + `shell-rows-error` banner.
+`tool-summary.ts` comment updated. Changelog `changelog.d/shell-intent-line.added.md`
+(describes rows + beta only — no ask claim, since S3 is not built).
+
+**Drift from Implementation (and why).**
+1. `config/src/resolve.ts` (`ResolvedConfig.beta` + pass-through) and
+   `config/src/profile.ts` (`beta` merged per key) — not in the plan's file list,
+   but `main.ts` reads the RESOLVED config, so without them `beta.compactShell`
+   was silently dropped (proven by `beta-compact-shell.test.ts` resolve/profile cases).
+2. A described running shell row drops today's `⎿ running…` body (see ⚠ in
+   Preconditions) — the plan's "none today" was wrong; built to its tests.
+3. New test files instead of appending to `render-lines.test.ts`/`tool-steps.test.ts`
+   (`shell-intent-rows.test.ts`, `apps/mobile/test/shell-intent-step.test.ts`).
+4. The byte-identical test builds `main`'s expected rows through `theme.*`
+   (the harness palette differs from a standalone run), captured first from `main`
+   in `.tentacle/tmp/shell-intent-line/snap.ts` — output identical after the change.
+5. `CellData.compactShell` + `rowExtraData` (the phone's memoised cell would
+   otherwise not re-project when the switch flips).
+
+**Red before green / mutations** (each restored; restore verified by grep/diff):
+
+| Target | Mutation | Result |
+|---|---|---|
+| tool schema | before the change | `shell advertises an optional description` RED |
+| tool schema | `.string().max(80)` | `never rejects an over-long description` RED |
+| core | drop ANSI + control strip | `ANSI escapes and controls never survive` RED |
+| core | `o.text ?? o.spillHead` | `a spilled result reads the code from the spill head` RED |
+| core | drop `status === "error"` | `compact: hidden … shown on failure/denial` RED |
+| config | drop `beta` from schema | 3 of 4 `beta.compactShell` tests RED |
+| TUI rows | shell branch disabled (= `main`) | 10 of 12 RED (the 2 byte-identical tests green, as intended) |
+| TUI app | shell branch disabled | `a described shell call in the App` RED |
+| TUI rows | `entry.compactShell === compact` → `true` | `same item compact then not compact` RED |
+| TUI rows | outcome painted as `theme.success("")` (hue only) | ✓ / ✗ exit 2 / ✗ tests RED (SGR stripped) |
+| phone store | drop the `v` check | `a newer version → OFF, write refused` RED |
+
+**Unverified (one line each).**
+- `apps/mobile/test/shell-intent-step.test.ts` + `transcript-cell.test.ts` not run
+  here: this worktree has no `apps/mobile/node_modules`, so every mobile test that
+  imports `@tentacle/core` fails to resolve (pre-existing — `tool-steps.test.ts`
+  fails the same way); a temp symlink / preload needed approval. Verify: the gate's
+  `bun test` (or `bun test apps/mobile/test/shell-intent-step.test.ts` after install).
+- Typecheck not run (budget: gate only). Seams spot-checked (`TuiOptions`,
+  `ToolResultSpill.head`, `ShellStatus` ⊇ both clients' statuses).
+- StepNode layout on a device (two-line Pressable, the lifted 45 % cap) — the
+  harness cannot see it; verify on the simulator.
+- Measurement (fill rate on DeepSeek + Anthropic) NOT run: it sends prompts to
+  external APIs with the owner's keys — needs the owner's go-ahead.
+
+Narrow tests: 323 pass / 0 fail (core, tools, config, cli key-docs + connect, TUI
+rows/render-lines/app-shell-intent/app-frames/idle-warm, client foreign-turns +
+permission-router, phone shell-rows-store). `bunx biome check` on all touched
+paths: clean.
 
 ## Review
 

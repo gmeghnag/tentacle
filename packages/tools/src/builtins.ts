@@ -406,6 +406,14 @@ const KILLED_EXIT_CODE = 124;
 
 const shellInput = z.object({
   command: z.string().min(1).describe("Shell command to run via /bin/sh -c."),
+  // No `.max()`: an over-long sentence must never fail the call and cost a
+  // round — the clients cut it for display (`shellIntent`, @tentacle/core).
+  description: z
+    .string()
+    .optional()
+    .describe(
+      "A short sentence (≤ 8 words) saying WHAT this command does and why, in the language the user writes in — e.g. 'Run the mobile package tests'. Shown to the user above the command.",
+    ),
   cwd: z.string().optional().describe("Working directory; defaults to the environment's cwd."),
   timeout: z
     .number()
@@ -424,7 +432,7 @@ const shellInput = z.object({
 export const shellTool: Tool<z.infer<typeof shellInput>> = {
   name: "shell",
   description:
-    "Run a shell command and capture stdout, stderr and the exit code. By default the command runs in the FOREGROUND and BLOCKS until it exits, so a long-running process (a server, a watcher, `tail -f`) would hang the turn and be killed at the timeout. For those, set `run_in_background: true` — it returns a job id at once and keeps running; read its output with `shell_output` and stop it with `shell_kill`.",
+    "Run a shell command and capture stdout, stderr and the exit code. By default the command runs in the FOREGROUND and BLOCKS until it exits, so a long-running process (a server, a watcher, `tail -f`) would hang the turn and be killed at the timeout. For those, set `run_in_background: true` — it returns a job id at once and keeps running; read its output with `shell_output` and stop it with `shell_kill`. Always give `description`.",
   inputSchema: shellInput,
   permission: "ask",
   async execute(input, ctx) {
