@@ -735,6 +735,43 @@ no system-prompt line needed for the measured providers. Raw per-row data: `.ten
 
 **Anthropic: still to test** — no Anthropic API-key profile in the owner's config (tracked in TODO `eval/anthropic-untested`).
 
+### Main-merge fix
+
+*— claude-opus-5-5, 2026-11-21* (main was merged into this branch; the orchestrator's gate then failed 3 tests, all
+in `apps/mobile/test/`, none of them touched by this branch — so each one pins behaviour the branch changed. Read
+each test against the code it pins and decided code-fix vs test-update; no production code was changed in this
+round. Evidence: `bun test` on the three files was 36 pass / 3 fail before, 39 pass / 0 fail after.)
+
+1. **`pairing-guards.test.ts:85` — TEST UPDATE (allowlist, with its one-line reason).** The guard pins which files
+   may import `expo-secure-store`. `src/shell-rows-expo.ts` (`:1-16`) legitimately belongs in it: it is the
+   `theme-settings-expo.ts` shape exactly — `createShellRowsStore({kv: keychainKV, keychainAccessible:
+   SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY})` and nothing else — while the module that DECIDES,
+   `shell-rows-store.ts`, imports no native module (verified: no `expo-`/`react-native` reference), which is the
+   property the guard protects. Added to the list plus an eleventh sentence of the comment naming the Beta switch
+   and `shell-rows-store.ts` as the decider. **The guard was not weakened**: mutation (append `import * as
+   SecureStore from "expo-secure-store"` to `shell-rows-store.ts`) → RED, restored.
+2. **`notice-row.test.ts` ("`looks` is in extraData") — TEST UPDATE (over-pinned position).** The pin had two
+   halves. Its first assertion (`/rowExtraData = useMemo\([\s\S]{0,600}looks,[\s\S]{0,200}\[/`, `looks` still
+   *inside* the object) passes untouched — the contract the test is named for. The second,
+   `/layout,\n\s+looks,\n\s+\],/`, pinned `looks` as the LAST entry of the dependency array; §7's
+   `compactShell` is appended after it (`SessionScreen.tsx:862-873`), so a switch that merely appends to the array
+   read as a regression. Rewritten to assert what the name means — `looks` is a MEMBER of the `useMemo`'s
+   dependency list, whatever a later switch appends after it: parse the array, `expect(names).toContain("looks")`.
+   **Proved non-vacuous by mutation, and this is the strengthening that matters:** drop `looks` from the
+   dependencies while keeping it in the object (the real bug — the row then never re-renders) → RED. The old
+   positional regex was only incidentally catching that.
+3. **`tool-rows-wiring.test.ts:145` ("the live Thinking node is mockup B + D") — TEST UPDATE (the condition grew,
+   by design).** The pin expected `/node === "thinking" \? \(\s*<ThinkingWord/`. `StepNode.tsx:402` is now
+   `node === "thinking" || shimmer === true`, because a described shell step's running name reuses the same
+   shimmering word (`shimmer` prop, plumbed from `TranscriptRow.tsx:651` — §7's intent line). The thinking node is
+   unchanged; only a second, opt-in caller joined it. Pin updated to the real condition, and the test's neighbouring
+   assertions (`case "thinking": return <BreathingTherefore`, `shimmerSweep(width)`, both `useLoop` calls) still
+   pass unmodified. **Mutation** (`|| shimmer === true` removed → back to the old shape) → RED, restored.
+
+**Nothing else drifted.** `git status` after the round shows only the three test files; the tree carries no
+production-code change from this fix. The full suite was NOT re-run here (operator instruction): this round ran
+only the three named files.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-21* (fresh context; SAME model as the planner and as the Context/Implementation author — shared blind spots possible. The executor commits are tagged deepseek.)
