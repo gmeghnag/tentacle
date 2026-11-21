@@ -898,6 +898,196 @@ full one):** `bunx biome check` on the 2 changed files: clean.
 touched/cover the change + the client's pairing pin). Full `bun test` /
 repo typecheck / repo lint: **not run here**, by the round's token budget.
 
+### (b) feat/mobile-projects-app
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Status: PARTIAL.** The app half is built and tested: the pure modules, the
+store, the pairing, the screen and the wiring, with 12 mutations, all killed.
+**Not done:** the Maestro flow `NN-projects.yaml`, the legacy-migration flow,
+and the simulator screenshots A1–A7 (light + dark). The context budget ran out
+before the simulator build, so `.tentacle/tmp/mobile-projects-app/screens/` is
+empty.
+
+**Load-bearing check, re-run first: HOLDS.** The repro was adapted to (a)'s API
+(`.tentacle/tmp/mobile-projects-app/repro.ts`): one identity, two
+`DeviceAuthority`s for projects P and Q.
+
+```
+add P: true
+1. P authorize keyP: true
+2. Q authorize keyP: undefined        (deny)
+3. Q wantsReachability: false
+add Q: true
+4. Q authorize keyQ (second per-project key, same identity): true
+5. P authorize keyQ: undefined        (deny)
+```
+
+There is one pinned identity and one device key per project, and each key is
+valid only on its own serve. `openComputer(record)` dials one record with its
+key, so a project record goes through the same function. There is no second
+session path.
+
+**As built, in dependency order:**
+
+1. **Record** (`src/computer-store.ts`). `PairedComputer` gets optional
+   `computerId` and `project {key?, cwd, label}`. Parse, `publicOf` and `add`
+   carry both. A malformed value is dropped, and the record still reads as
+   legacy.
+   - New pure helpers: `projectRecordId` (`<cid>.<hex16(sha256(key))>`),
+     `computerIdOf`, `isRecordOfComputer`.
+   - New store methods `setProject` and `setAddresses`. Both refuse an
+     unlisted id, never repair an unreadable item, and do not write when the
+     value is unchanged.
+   - `STORE_VERSION` stays 1. `computers.ts` exposes both methods.
+2. **Pairing** (`src/pairing-flow.ts`).
+   - New pure `recordFor`: a per-project result → `projectRecordId` +
+     `computerId` + `project`; an older daemon's result → the computer id (F8).
+   - New pure `projectMismatch` (F17), checked BEFORE `store.add`. Its reason is
+     `project-mismatch`, and the message names both folders.
+   - The review view shows `p=`. `done`, `onPaired` and the outcome carry the
+     RECORD id.
+   - `retireLegacy`: after the new record is stored, it removes the same
+     computer's legacy record if its `project.cwd` matches (no duplicate row),
+     and returns it as `superseded`.
+   - `App.tsx`: `findExisting` matches key + project label, and `onDone`
+     forgets the superseded record's memory and push state.
+3. **Id ripple**. In `notification-action.ts:174` and `notifications-expo.ts:163`,
+   the push match is now `isRecordOfComputer(record.id, claimed)`: the record's
+   own id or `<claimed>.<hash>`. `push-manager.ts:311` is keyed by record id
+   already, and each project record registers with its own serve, so it is
+   unchanged.
+4. **Link diagnosis** (`src/link-diagnosis.ts`, `src/connection.ts`).
+   `DialObservation.absent` → `unreachable`, and the streak is left alone. The
+   new `absent()` is reset by `ok()` and by any other observation.
+5. **View-model** (new `src/project-rows.ts`).
+   - `projectSections`: grouped by computer, in Keychain order, with a written
+     word for every state.
+   - A failing row is `stopped` iff a sibling answered or the relay closed
+     `4404`; otherwise it is `unreachable`.
+   - Section status reads "Online · N of M projects running" (only when
+     M ≥ 2). An all-unreachable section gets the A4 note.
+   - Also new: `justPaired` (4 s), `reprobeDelay` (15 s, or sooner when a
+     "Paired just now" mark expires), `projectMenuActions` (Try again · Pair
+     again · Remove "<label>" from this iPhone), `projectSheetMessage`,
+     `removeProjectMessage`.
+   - `ComputerProbe` gains `more` (the page had a cursor).
+6. **Address refresh** (new `src/discover-fold.ts`). `discoveryPatch` uses
+   `@tentacle/client`'s `mergeAddresses`: announced addresses first, then the
+   known ones. It names a legacy record's project from `self.cwd`
+   (label = basename), refuses a `self` with another cwd, and returns
+   `undefined` when nothing changed. `App.tsx` runs `foldDiscovery(id, link)`
+   after every `LINKS.open` and on later `daemon/discovery` frames.
+7. **Screen + controller.**
+   - `ComputersScreen.tsx` is variant A. Each computer gets a heading (dot +
+     word + count) and a band with one row per project: dashed and dimmed when
+     down; sub-line = dot + word + detail; "Paired just now" with a check. The
+     band ends with "Pair a project on this Mac" (an instructions sheet, then
+     Scan).
+   - The new footnote: "Run `tentacle pair` in a project's folder. Only the
+     projects you pair show up here."
+   - `ComputersRoute` renders `loadSections()`. Tapping a row that is down
+     retries it (stopped / unreachable) or opens the sheet.
+   - The route re-probes every 15 s while focused, if something is down, and
+     when the app returns to the foreground.
+   - The probe reads 20 sessions (pinned included) for the count. Navigation
+     passes the project label as the session list title.
+
+**Drift from Implementation (and why):**
+
+- **The `4404` does NOT reach `confirm`'s error** (the check §6 asked for):
+  `WebSocketChannel.onClose()` carries no code
+  (`packages/client/src/ws-channel.ts:51`). Instead of changing
+  `@tentacle/client`, `openComputer` reads the code from its own
+  `withDiagnostics` wrapper, through a new `onCloseCode` parameter. The
+  socket's close listener runs before the channel's. The code is kept per
+  address and read only for the channel that address opened. A test against a
+  real relay pins this.
+- **`RecordProject.key` is optional, and retiring the legacy record matches on
+  `cwd`.** `daemon/discover` announces only `cwd` (`protocol/src/daemon.ts:91`),
+  and the app cannot compute `projectKey`, which needs `realpath`.
+- **No 30-day address expiry.** The record keeps no per-address stamps, so
+  `discoveryPatch` treats every known address as seen now. Announced addresses
+  come first, known ones are kept, and `mergeAddresses` caps the list.
+  Follow-up: an `addressSeenAt` field on the record.
+- **Pre-existing, out of scope:** `PushMessage.computer` is `identity.name`
+  (`daemon/src/push-notifier.ts:337`, `cli/src/serve.ts:322-326`), but the app
+  compares it to a record id. Not chased (§0); it needs its own fix task.
+  **Not done:** when two projects of one Mac both decrypt a push, the right
+  record is not chosen. The push directory carries no `cwd`, so the first
+  record wins; fixing it is a directory-format change.
+- **testIDs:** the existing `computer-<recordId>`,
+  `computer-state-<recordId>-<state>`, `computer-menu-…` and
+  `computer-remove-…` stay on the project row, instead of the mockup's
+  `project-…`. Existing flows (15-revoked, 16-remove-computer) still match,
+  and `band-screens.test.ts` pins `computer-${row.id}`. New testIDs:
+  `computer-section-<cid>`, `computer-status-<cid>`,
+  `computer-pair-project-<cid>`, `computer-pair-hint-<cid>`,
+  `computer-pair-hint-scan`, `computer-retry-<id>`.
+- **Not built:**
+  - the 9 % accent fill and the 200 ms fade on a new row (`Row` has no
+    background prop; only the text and the check are shown);
+  - the session list subtitle "computer · cwd" (A5; only the title is set).
+
+**Tests** (touched or covering files only). After the mutation run:
+**140 pass / 0 fail** across 11 files. The screen guards (`band-screens`,
+`header-wiring`, `icon-glass-wiring`, `computer-rows`, `computer-status`,
+`computers`, `e2e-flows`) are green too.
+
+- `computer-store`: +7.
+- `pairing-flow-per-project`: the (i′) pin is replaced by `recordFor` /
+  `projectMismatch` tests, +4.
+- `pairing-e2e`: ids → `projectRecordId`, plus two real-daemon tests: "F17 …
+  NOTHING stored" and "retires the legacy record".
+- `notification-action`: +1. `link-diagnosis`: +2.
+- New `link-absent-relay`: real relay, injected clock; three `4404`s never give
+  `maybe-reset`.
+- New `project-rows` (8) and new `discover-fold` (5).
+- The `connection.test.ts` fakes gain `absent`.
+
+**Mutations** (`.tentacle/tmp/mobile-projects-app/mutate.ts`). Each one is
+applied, its test is run, and the file is restored from memory. `git status`
+afterwards lists no mutated file.
+
+```
+M1 store add drops project fields: KILLED (red) pass=25 fail=1
+M2 setProject writes every time: KILLED (red) pass=25 fail=1
+M3 recordFor files under the computer id: KILLED (red) pass=10 fail=6
+M4 save before the p= check: KILLED (red) pass=9 fail=2
+M5 legacy record never retired: KILLED (red) pass=10 fail=1
+M6 push: compare record id whole: KILLED (red) pass=25 fail=1
+M7 diagnosis counts absent: KILLED (red) pass=8 fail=1
+M8 connection ignores the 4404: KILLED (red) pass=0 fail=1
+M9 rows sorted by state: KILLED (red) pass=4 fail=4
+M10 siblings ignored (stopped only on 4404): KILLED (red) pass=6 fail=2
+M11 never re-probe: KILLED (red) pass=7 fail=1
+M12 discover: keep stored addresses: KILLED (red) pass=4 fail=1
+```
+
+For the new APIs the code was written before the tests, so these mutations are
+the red evidence, not a pre-change run. The one exception is the (i′) source
+pin: the per-project id turned it red, as intended, before it was replaced.
+
+**Gate (narrow, per budget):**
+
+- `bunx tsc -p apps/mobile --noEmit`: clean.
+- `bunx biome check --write` on the 21 changed files: 0 issues (6
+  reformatted).
+- Full `bun test`, repo typecheck and repo lint: not run (the orchestrator
+  runs them).
+- No schema changed, so `protocol.json` was not regenerated.
+
+**Remaining (next executor):**
+
+1. The Maestro flow `apps/mobile/e2e/flows/NN-projects.yaml`. It needs two
+   serves in two temp cwds sharing one config dir. Today `e2e/run.ts` /
+   `05-start-serve.js` start one serve; `pair-cli.ts` already takes
+   `projectDir`.
+2. The legacy-migration flow: a v1 registry plus a legacy phone record.
+3. The simulator screenshots A1–A7, light and dark, into
+   `.tentacle/tmp/mobile-projects-app/screens/`.
+4. `bun run e2e:mobile`.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-20* (fresh context; scope: slice (a), `git diff main...HEAD`)

@@ -485,6 +485,7 @@ describe("openComputer over /e2e", () => {
         },
         ok: () => real.ok(),
         current: () => real.current(),
+        absent: () => real.absent(),
       };
       // A first address on a black hole: the TCP connection is accepted and the
       // upgrade never happens, which is what a LAN address looks like off-LAN.
@@ -558,6 +559,7 @@ describe("openComputer over /e2e", () => {
         },
         ok: () => real.ok(),
         current: () => real.current(),
+        absent: () => real.absent(),
       };
       const slow = Bun.serve({
         hostname: "127.0.0.1",

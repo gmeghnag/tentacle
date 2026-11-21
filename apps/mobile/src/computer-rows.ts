@@ -39,7 +39,8 @@ export interface ComputerRow {
 
 /** What reading one computer's first page produced: entries, or the failure. */
 export type ComputerProbe =
-  | { readonly ok: true; readonly entries: readonly SessionListEntry[] }
+  /** `more`: the page had a cursor (the project has more sessions than `entries`). */
+  | { readonly ok: true; readonly entries: readonly SessionListEntry[]; readonly more?: boolean }
   | { readonly ok: false; readonly error: unknown };
 
 export interface ComputerRecordLike {

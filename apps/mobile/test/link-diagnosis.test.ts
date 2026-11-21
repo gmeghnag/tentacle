@@ -84,3 +84,26 @@ describe("createLinkDiagnoser", () => {
     expect(diagnosisMessage("maybe-reset", "MacBook")).not.toContain("relay");
   });
 });
+
+describe("the relay's 4404 = `absent` (docs/feat/mobile-projects.md §6)", () => {
+  test("three 4404s → still unreachable + absent, never maybe-reset (mutation: count `absent` → red)", () => {
+    const diagnoser = createLinkDiagnoser();
+    for (let i = 0; i < MAYBE_RESET_STREAK + 1; i += 1) {
+      expect(diagnoser.observe({ opened: true, error: unreachable(), absent: true })).toBe(
+        "unreachable",
+      );
+      expect(diagnoser.absent()).toBe(true);
+    }
+  });
+
+  test("a non-4404 failure or a success clears `absent`; an authenticated deny still wins", () => {
+    const diagnoser = createLinkDiagnoser();
+    diagnoser.observe({ opened: true, error: unreachable(), absent: true });
+    diagnoser.observe({ opened: false, error: neverOpened() });
+    expect(diagnoser.absent()).toBe(false);
+    diagnoser.observe({ opened: true, error: unreachable(), absent: true });
+    diagnoser.ok();
+    expect(diagnoser.absent()).toBe(false);
+    expect(diagnoser.observe({ opened: true, error: denied(), absent: true })).toBe("revoked");
+  });
+});

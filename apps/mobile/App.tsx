@@ -23,6 +23,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { type RemoteClient, type RemoteSession, webSocketChannelFactory } from "@tentacle/client";
 import {
   type AttachmentRef,
+  type DaemonDiscovery,
   type ScheduleRow,
   encodeBase64Url,
   parsePairingPayload,
@@ -75,8 +76,9 @@ import { CHART_SETTINGS } from "./src/chart-settings-expo.ts";
 import type { ChartSettings } from "./src/chart-settings-store.ts";
 import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
 import { composeHandleOf, foldingOutboxSession } from "./src/compose-handle.ts";
-import { type ComputerMemory, withForgottenRecord } from "./src/computer-memory.ts";
+import { type ComputerMemory, forgetComputer, withForgottenRecord } from "./src/computer-memory.ts";
 import {
+  type ComputerProbe,
   type ComputerRecordLike,
   type ComputerRow,
   computerRows,
@@ -92,6 +94,7 @@ import { type ComputerLink, openComputer } from "./src/connection.ts";
 import { pairingTextFromUrl } from "./src/deep-link.ts";
 import { DIAGRAM_SETTINGS } from "./src/diagram-settings-expo.ts";
 import type { DiagramSettings, DiagramStyle } from "./src/diagram-settings-store.ts";
+import { discoveryPatch } from "./src/discover-fold.ts";
 import { createDraftScheduler } from "./src/drafts.ts";
 import {
   type DrawerRow,
@@ -145,6 +148,12 @@ import { inUseCopies, prunePhotoCopies } from "./src/photo-copies.ts";
 import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
 import type { PhotoSettings } from "./src/photo-settings-store.ts";
 import { photosRoot, pickFromLibrary, takePhoto } from "./src/photo-source.ts";
+import {
+  type ProjectRow,
+  type ProjectSection,
+  projectSections,
+  reprobeDelay,
+} from "./src/project-rows.ts";
 import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
 import { createPushManager } from "./src/push-manager.ts";
@@ -595,6 +604,7 @@ const LINKS = createLinkRegistry<ComputerLink>({
     }
     LIVE_LINKS.add(link);
     CLIENTS.set(id, link.client);
+    void foldDiscovery(id, link);
     return link;
   },
   close: (link) => {
@@ -646,8 +656,14 @@ function errorText(error: unknown): string {
   return error instanceof Error && error.message !== "" ? error.message : String(error);
 }
 
-/** The rows for the source's entries: a `broken` one never dialled (F-K2). */
-async function loadRows(): Promise<readonly ComputerRow[]> {
+/** How many sessions a project row's probe reads (its count says "N+" past this). */
+const PROBE_PAGE = 20;
+
+/** Every listed record, probed once (a `broken` one is never dialled, F-K2). */
+async function probeAll(): Promise<{
+  readonly entries: readonly ComputerEntry[];
+  readonly probes: readonly ComputerProbe[];
+}> {
   const entries = await SOURCE.list();
   RECORDS.clear();
   for (const entry of entries) {
@@ -656,16 +672,89 @@ async function loadRows(): Promise<readonly ComputerRow[]> {
     }
   }
   const probes = await Promise.all(
-    entries.map((entry: ComputerEntry) =>
-      entry.state === "broken"
-        ? Promise.resolve({ ok: true as const, entries: [] })
-        : probeComputer(async () => {
-            const link = await LINKS.get(entry.id);
-            const page = await link.client.sessionList({ limit: 1 });
-            return page.sessions;
-          }),
+    entries.map(
+      async (entry: ComputerEntry): Promise<ComputerProbe> =>
+        entry.state === "broken"
+          ? { ok: true as const, entries: [] }
+          : await (async () => {
+              let more = false;
+              const probe = await probeComputer(async () => {
+                const link = await LINKS.get(entry.id);
+                const page = await link.client.sessionList({ limit: PROBE_PAGE });
+                more = page.cursor !== undefined;
+                return [...(page.pinned ?? []), ...page.sessions];
+              });
+              return probe.ok && more ? { ...probe, more: true } : probe;
+            })(),
     ),
   );
+  return { entries, probes };
+}
+
+/** The last pairing's record id and when (the 4 s "Paired just now", §6). */
+const JUST_PAIRED: { current: { id: string; at: number } | undefined } = { current: undefined };
+
+/** The Computers screen's sections (variant A, docs/feat/mobile-projects.md §6). */
+async function loadSections(): Promise<readonly ProjectSection[]> {
+  const { entries, probes } = await probeAll();
+  return projectSections(
+    entries.map((entry) =>
+      entry.state === "broken"
+        ? { id: entry.id, name: entry.name, broken: true }
+        : {
+            id: entry.id,
+            name: entry.computer.name,
+            ...(entry.computer.computerId === undefined
+              ? {}
+              : { computerId: entry.computer.computerId }),
+            ...(entry.computer.project === undefined ? {} : { project: entry.computer.project }),
+          },
+    ),
+    entries.map((entry, index) => ({
+      probe: probes[index] ?? { ok: false, error: new Error("no answer") },
+      diagnosis: entry.state === "broken" ? "ok" : diagnoserFor(entry.id).current(),
+      absent: entry.state === "broken" ? false : diagnoserFor(entry.id).absent(),
+    })),
+    {
+      now: Date.now(),
+      ...(JUST_PAIRED.current === undefined ? {} : { justPaired: JUST_PAIRED.current }),
+    },
+  );
+}
+
+/**
+ * After a dial: what the daemon says about ITSELF refreshes the record (§6
+ * "Address refresh", §3) — new addresses after a restart, a legacy record's
+ * project. Best effort: a failure keeps what pairing gave.
+ */
+async function foldDiscovery(id: string, link: ComputerLink): Promise<void> {
+  const apply = async (discovery: DaemonDiscovery | undefined): Promise<void> => {
+    const record = RECORDS.get(id) ?? (await SOURCE.get(id));
+    if (record === undefined) {
+      return;
+    }
+    const patch = discoveryPatch(record, discovery, Date.now());
+    if (patch?.addresses !== undefined) {
+      await SOURCE.setAddresses(id, patch.addresses);
+    }
+    if (patch?.project !== undefined) {
+      await SOURCE.setProject(id, patch.project);
+    }
+  };
+  try {
+    await apply(
+      await link.client.discover((discovery) => {
+        void apply(discovery).catch(() => {});
+      }),
+    );
+  } catch {
+    // An older daemon, a dropped link: the stored addresses stand (F8).
+  }
+}
+
+/** The rows for the source's entries: a `broken` one never dialled (F-K2). */
+async function loadRows(): Promise<readonly ComputerRow[]> {
+  const { entries, probes } = await probeAll();
   // The wording is decided in `computer-rows.ts`, never here: a ChannelError's
   // own text names a cause iOS could not tell apart (review round 1 finding 5),
   // and on `/e2e` the diagnosis is the authenticated truth.
@@ -699,7 +788,8 @@ function PairRoute({
   readonly againName?: string;
   /** The text an incoming `tentacle://pair?…` link carried (11b.2, F-P17). */
   readonly linkText?: string;
-  readonly onDone: (computerId: string) => void;
+  /** `superseded`: a legacy record the pairing retired (§3/§6), whose memory goes too. */
+  readonly onDone: (computerId: string, superseded?: string) => void;
   readonly onCancel: () => void;
   /** Leave the screen (the header's Cancel) — absent when Pair is the root. */
   readonly onBack?: () => void;
@@ -742,7 +832,7 @@ function PairRoute({
         const parsed = parsePairingPayload(candidate);
         const existing =
           parsed.ok && parsed.payload !== undefined
-            ? await findExisting(encodeBase64Url(parsed.payload.key))
+            ? await findExisting(encodeBase64Url(parsed.payload.key), parsed.payload.project)
             : undefined;
         dispatch({ type: "submit", ...(existing === undefined ? {} : { existing }) });
       })();
@@ -795,7 +885,7 @@ function PairRoute({
         // The id the record was just written under: a re-pair keeps it (Q7), so
         // anything the app remembered about it is now about the OLD device key
         // (fix round 1 finding 1).
-        onDone(outcome.computerId);
+        onDone(outcome.computerId, outcome.superseded);
       }
     });
   }, [state, dispatch, onDone]);
@@ -865,10 +955,17 @@ function PairRoute({
  */
 async function findExisting(
   computerKey: string,
+  project: string | undefined,
 ): Promise<{ readonly id: string; readonly name: string } | undefined> {
   try {
     for (const entry of await SOURCE.list()) {
-      if (entry.state === "paired" && entry.computer.computerKey === computerKey) {
+      // Per project (docs/feat/mobile-projects.md §6): a code for project P is a
+      // re-pair only of P's record — another project of the same Mac is a NEW one.
+      if (
+        entry.state === "paired" &&
+        entry.computer.computerKey === computerKey &&
+        (project === undefined || entry.computer.project?.label === project)
+      ) {
         return { id: entry.id, name: entry.computer.name };
       }
     }
@@ -893,27 +990,41 @@ function ComputersRoute({
   onOpenSettings,
 }: {
   readonly palette: Palette;
-  readonly onOpen: (row: ComputerRow) => void;
+  readonly onOpen: (row: ProjectRow) => void;
   readonly onAdd: () => void;
-  readonly onPairAgain: (row: ComputerRow) => void;
-  readonly onRemove: (row: ComputerRow) => Promise<void>;
+  readonly onPairAgain: (row: ProjectRow) => void;
+  readonly onRemove: (row: ProjectRow) => Promise<void>;
   readonly onOpenSettings: () => void;
 }): JSX.Element {
-  const [rows, setRows] = useState<readonly ComputerRow[]>([]);
+  const [sections, setSections] = useState<readonly ProjectSection[]>([]);
   const [error, setError] = useState<string | undefined>(undefined);
-  /** The computer whose Remove confirmation is showing (an in-app sheet, never `Alert`). */
-  const [removing, setRemoving] = useState<ComputerRow | undefined>(undefined);
-  /** The computer whose menu (long-press / "…", Owner Q5) is showing. */
-  const [menu, setMenu] = useState<ComputerRow | undefined>(undefined);
+  /** The project whose Remove confirmation is showing (an in-app sheet, never `Alert`). */
+  const [removing, setRemoving] = useState<ProjectRow | undefined>(undefined);
+  /** The project whose menu (long-press / "…", Owner Q8) is showing. */
+  const [menu, setMenu] = useState<ProjectRow | undefined>(undefined);
+  /** The computer whose "Pair a project on this Mac" instructions are showing. */
+  const [pairHint, setPairHint] = useState<string | undefined>(undefined);
+  /** Bumped to re-probe now (a tap on a stopped row, the 15 s timer, the app's return). */
+  const [tick, setTick] = useState(0);
 
   useFocusEffect(
+    // biome-ignore lint/correctness/useExhaustiveDependencies: `tick` IS the re-probe trigger
     useCallback(() => {
       let live = true;
-      void loadRows().then(
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      void loadSections().then(
         (built) => {
-          if (live) {
-            setRows(built);
-            setError(undefined);
+          if (!live) {
+            return;
+          }
+          setSections(built);
+          setError(undefined);
+          // §6 Live behaviour (Owner Q12): a stopped / unreachable project is
+          // re-dialled every 15 s while this screen is in front; "Paired just
+          // now" fades after its 4 s.
+          const wait = reprobeDelay(built, Date.now(), JUST_PAIRED.current);
+          if (wait !== undefined) {
+            timer = setTimeout(() => setTick((n) => n + 1), wait);
           }
         },
         (caught: unknown) => {
@@ -924,19 +1035,49 @@ function ComputersRoute({
           }
         },
       );
+      // …and on every return of the app to the foreground.
+      const subscription = AppState.addEventListener("change", (state) => {
+        if (state === "active") {
+          setTick((n) => n + 1);
+        }
+      });
       return () => {
         live = false;
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+        subscription.remove();
       };
-    }, []),
+    }, [tick]),
   );
 
   return (
     <ComputersScreen
       palette={palette}
-      rows={rows}
+      sections={sections}
       error={error}
-      onOpen={onOpen}
+      onOpen={(row) => {
+        // A row that does not answer: the tap is a new attempt (mockup A3).
+        if (row.ok) {
+          onOpen(row);
+        } else if (row.state === "stopped" || row.state === "unreachable") {
+          setTick((n) => n + 1);
+        } else {
+          setMenu(row);
+        }
+      }}
       onAdd={onAdd}
+      {...(pairHint === undefined ? {} : { pairHint })}
+      onPairProject={setPairHint}
+      onPairHintClosed={() => setPairHint(undefined)}
+      onScan={() => {
+        setPairHint(undefined);
+        onAdd();
+      }}
+      onRetry={() => {
+        setMenu(undefined);
+        setTick((n) => n + 1);
+      }}
       onPairAgain={(row) => {
         setMenu(undefined);
         onPairAgain(row);
@@ -2173,7 +2314,15 @@ function AppShell(): JSX.Element {
                     navigation.goBack();
                   }
                 }}
-                onDone={(computerId) => {
+                onDone={(computerId, superseded) => {
+                  // "Paired just now" on its new row (§6 Live behaviour).
+                  JUST_PAIRED.current = { id: computerId, at: Date.now() };
+                  if (superseded !== undefined) {
+                    // The legacy record this pairing retired: its link, diagnosis
+                    // and push state described a record that is gone.
+                    PUSH.forget(superseded);
+                    void forgetComputer(MEMORY, superseded);
+                  }
                   // The FIRST successful pairing's one extra step (P9, decision
                   // 10): the notification prompt, with its explainer, once. It is
                   // fired here rather than in `runPairing` so it cannot delay the
@@ -2205,13 +2354,13 @@ function AppShell(): JSX.Element {
                 palette={palette}
                 onOpenSettings={() => navigation.navigate("Settings")}
                 onOpen={(row) =>
-                  navigation.navigate("Sessions", { computerId: row.id, name: row.name })
+                  navigation.navigate("Sessions", { computerId: row.id, name: row.label })
                 }
                 onAdd={() => {
                   navigation.navigate("Pair", undefined);
                 }}
                 onPairAgain={(row) => {
-                  navigation.navigate("Pair", { again: row.id, againName: row.name });
+                  navigation.navigate("Pair", { again: row.id, againName: row.label });
                 }}
                 onRemove={async (row) => {
                   // Every in-memory fact goes first: a socket to a computer being

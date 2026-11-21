@@ -49,7 +49,12 @@ import {
   loadPairCommand,
 } from "../e2e/pair-cli.ts";
 import { withForgottenRecord } from "../src/computer-memory.ts";
-import { type ComputerStore, type SecureKV, createComputerStore } from "../src/computer-store.ts";
+import {
+  type ComputerStore,
+  type SecureKV,
+  createComputerStore,
+  projectRecordId,
+} from "../src/computer-store.ts";
 import { openComputer } from "../src/connection.ts";
 import { createLinkDiagnoser, diagnosisMessage } from "../src/link-diagnosis.ts";
 import { createLinkRegistry } from "../src/link-registry.ts";
@@ -63,6 +68,11 @@ import { rnWebSocketCtor } from "../src/rn-websocket.ts";
  */
 const PROJECT_DIR = "/u/proj";
 const TEST_PROJECT = { key: projectKey(PROJECT_DIR), cwd: PROJECT_DIR };
+
+/** The id the app files this serve's pairing under (§6: one record per project). */
+function recordIdOf(computerPublicKey: Uint8Array): string {
+  return projectRecordId(deviceIdOf(computerPublicKey), TEST_PROJECT.key);
+}
 
 const IOS_ORIGIN = "http://192.168.1.8:4001";
 const dirs: string[] = [];
@@ -361,19 +371,24 @@ describe("pairing over /e2e, as the phone does it", () => {
     const entries = memory.items.get("tentacle.computers");
     expect(entries).toBeDefined();
     const stored = JSON.parse(
-      memory.items.get(`tentacle.computer.${deviceIdOf(identity.identity.publicKey)}`) ?? "null",
+      memory.items.get(`tentacle.computer.${recordIdOf(identity.identity.publicKey)}`) ?? "null",
     ) as {
       readonly id?: string;
       readonly computerKey?: string;
       readonly deviceKey?: string;
+      readonly computerId?: string;
+      readonly project?: { readonly key?: string; readonly cwd?: string };
     } | null;
-    expect(stored?.id).toBe(deviceIdOf(identity.identity.publicKey));
+    expect(stored?.id).toBe(recordIdOf(identity.identity.publicKey));
+    // §6: filed per PROJECT — the computer's id and the daemon's project ride along.
+    expect(stored?.computerId).toBe(deviceIdOf(identity.identity.publicKey));
+    expect(stored?.project?.key).toBe(TEST_PROJECT.key);
     expect(stored?.deviceKey).toBeDefined();
     // The record lists in the app's source, and it is NOT broken.
     expect((await store.list()).map((entry) => entry.state)).toEqual(["paired"]);
 
     // The phone's link over `/e2e`, as a DEVICE: `session/list` answers.
-    const computer = await store.get(deviceIdOf(identity.identity.publicKey));
+    const computer = await store.get(recordIdOf(identity.identity.publicKey));
     if (computer === undefined) {
       throw new Error("stored computer missing");
     }
@@ -483,6 +498,64 @@ describe("pairing over /e2e, as the phone does it", () => {
     expect(await pairing.done).toBe(0);
   }, 30_000);
 
+  test("pairing project P retires this phone's LEGACY record of the same computer once it is known to be P (no duplicate row)", async () => {
+    const dir = computerConfigDir();
+    const { url } = serve(dir);
+    const identity = readIdentity(dir);
+    if (!identity.ok) {
+      throw new Error(identity.reason);
+    }
+    const computerId = deviceIdOf(identity.identity.publicKey);
+    const memory = memoryKV();
+    const store = createComputerStore({ kv: memory.kv, keychainAccessible: 1 });
+    const legacy = {
+      name: "Old",
+      computerKey: "k",
+      addresses: [url],
+      deviceName: "MacBook",
+      pairedAt: 1,
+    };
+    // The legacy record of THIS project (its `project` filled by discover), and
+    // another computer's legacy record that must survive.
+    await store.add(
+      { id: computerId, ...legacy, project: { ...TEST_PROJECT, label: "proj" } },
+      "a",
+    );
+    await store.add({ id: "other-computer", ...legacy }, "b");
+    const pairing = await startPair({ dir, address: url });
+    const { ok } = await pairThroughFlow({ state: reviewed(pairing.text), store });
+    expect(ok).toBe(true);
+    expect((await store.list()).map((entry) => entry.id)).toEqual([
+      "other-computer",
+      recordIdOf(identity.identity.publicKey),
+    ]);
+    expect(await pairing.done).toBe(0);
+  }, 30_000);
+
+  test("F17: a code whose p= names ANOTHER project → `project-mismatch`, NOTHING stored (mutation: save before the check → red)", async () => {
+    const dir = computerConfigDir();
+    const { url } = serve(dir);
+    const pairing = await startPair({ dir, address: url });
+    // `pair` really printed this serve's label; the paste is tampered (or the QR
+    // of another folder): the daemon that answers is still PROJECT_DIR's.
+    expect(pairing.payload.project).toBe("proj");
+    const state = reviewed(pairing.text);
+    if (state.name !== "review") {
+      throw new Error("not at review");
+    }
+    const memory = memoryKV();
+    const store = createComputerStore({ kv: memory.kv, keychainAccessible: 1 });
+    const tampered: PairingState = {
+      ...state,
+      payload: { ...state.payload, project: "assistant" },
+    };
+    const { ok, state: after } = await pairThroughFlow({ state: tampered, store });
+    expect(ok).toBe(false);
+    expect(pairingView(after).failure?.reason).toBe("project-mismatch");
+    expect(memory.items.size).toBe(0);
+    expect(await pairing.done).toBe(0);
+  }, 30_000);
+
   test("the human answers n: the phone is told the code is gone, and NOTHING is stored", async () => {
     const dir = computerConfigDir();
     const { url } = serve(dir);
@@ -573,7 +646,7 @@ describe("pairing over /e2e, as the phone does it", () => {
     if (!identity.ok) {
       throw new Error(identity.reason);
     }
-    const computer = await store.get(deviceIdOf(identity.identity.publicKey));
+    const computer = await store.get(recordIdOf(identity.identity.publicKey));
     if (computer === undefined) {
       throw new Error("stored computer missing");
     }
@@ -617,7 +690,7 @@ describe("pairing over /e2e, as the phone does it", () => {
     if (!identity.ok) {
       throw new Error(identity.reason);
     }
-    const computer = await store.get(deviceIdOf(identity.identity.publicKey));
+    const computer = await store.get(recordIdOf(identity.identity.publicKey));
     if (computer === undefined) {
       throw new Error("stored computer missing");
     }
@@ -675,7 +748,7 @@ describe("pairing over /e2e, as the phone does it", () => {
     if (!identity.ok) {
       throw new Error(identity.reason);
     }
-    const id = deviceIdOf(identity.identity.publicKey);
+    const id = recordIdOf(identity.identity.publicKey);
     const computer = await store.get(id);
     if (computer === undefined) {
       throw new Error("stored computer missing");
