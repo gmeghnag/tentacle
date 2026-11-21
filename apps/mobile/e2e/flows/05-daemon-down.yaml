@@ -104,7 +104,22 @@ appId: so.tentacle.app
       SHOT: "05-computers-back"
 - tapOn:
     id: "computer-${output.computerId}"
+# The container only proves the tap opened something: `sessions-list` is on
+# screen in every state, so it is never the flow's last assertion (the guard in
+# `apps/mobile/test/e2e-flows.test.ts`: "no flow ENDS on the container it starts
+# on"). The wait stays — it is what gives the answering row time to open.
 - extendedWaitUntil:
     visible:
       id: "sessions-list"
     timeout: 20000
+# …and the flow ends on the daemon's OWN content: a seeded row of this project
+# can only be drawn from the list the restarted `serve` served. Scrolled to first,
+# since earlier flows' sessions sit above it (newest first) and in the full suite
+# it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${ALPHA_ID}"
+    direction: DOWN
+    timeout: 20000
+- assertVisible:
+    id: "session-${ALPHA_ID}"

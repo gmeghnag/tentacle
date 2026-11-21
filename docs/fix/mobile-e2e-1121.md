@@ -117,6 +117,45 @@ Files: `apps/mobile/src/screens/PermissionSheet.tsx`,
     is unverified (most likely a keyboard dismissal on the search field). To
     check it: look for the `when` tap firing in future full-gate logs.
 
+### Main-merge fix
+
+*— Claude via Claude Code (the harness does not expose the exact model id), 2026-11-21*
+
+After the `main` merge, `bun test` went red on two of the flow meta-tests in
+`apps/mobile/test/e2e-flows.test.ts`: *"flow 05: the daemon-down recovery is
+actually asserted > its last assertion is not the always-visible container"* and
+*"every flow asserts something narrower than its container > no flow ENDS on the
+container it starts on"*. Both read the same fact: the Computers wait added above
+(`extendedWaitUntil sessions-list`, 20 s) became the flow's LAST assertion, and
+`sessions-list` is the ScrollView — on screen in every state, which is exactly
+review round 1 finding 2 (the guard at the top of that test file). The 10 s wait
+and the guarded second `sessions-back` tap are untouched; what changed is the
+flow's tail:
+
+- kept the `extendedWaitUntil sessions-list` after the `computer-<id>` tap (it is
+  what gives a re-probed row time to answer and open);
+- then `scrollUntilVisible session-${ALPHA_ID}` (DOWN, 20 s) + `assertVisible`
+  on the same id. A seeded row of THIS project can only be drawn from the list
+  the restarted `serve` served, so the flow now ends on daemon content, not on
+  the container. Scrolled to first because in the full suite earlier flows'
+  sessions sit above it (`docs/fix/mobile-e2e-reds.md`).
+
+Why the scroll rather than a bare assert: the row is the thing the recovery
+proves, but it can be below the fold in a full-gate run — the same reason the
+flow's first Alpha step scrolls. The recovery itself was already asserted
+earlier (row back + `sessions-stale` gone, both after `05-start-serve.js`), so
+this tail is a non-vacuous closer, not the only proof.
+
+- Red → green: `bun test apps/mobile/test/e2e-flows.test.ts` before → `36 pass,
+  2 fail` (the two above); after → `38 pass, 0 fail`. Then the full
+  `bun test` → `16391 pass, 5 skip, 0 fail` (the 5 skips are the opt-in
+  k8s/docker/slow/root ones, unchanged).
+- **Not verified:** a device run of 05 with the new tail (`scripts/e2e-gate.sh
+  … --only 05-daemon-down`). The tail's risk is the scroll not finding the row in
+  20 s while the list is re-drawn by the pull-to-refresh; the earlier `session-`
+  wait after `05-start-serve.js` already proves that row is on the list page it
+  lands on, so the risk is small — but it is unrun.
+
 **Not done / debt:** `07-history.js` and `23-history.js` use the same
 `startsWith` prompt match. They pass today because they run within 30 min of
 their session's last stamp, but a slower suite would turn them red the way 22
