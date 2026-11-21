@@ -18,10 +18,11 @@ import {
 const ROME = "Europe/Rome";
 const NY = "America/New_York";
 
+/** One history entry: a role (irrelevant here) and, when stamped, its stamp. */
+type Entry = { readonly role: string; readonly dateStamp?: DateStamp };
+
 /** A stamped history of one user message. */
-const stamped = (stamp: DateStamp): { readonly dateStamp?: DateStamp }[] => [
-  { role: "user", dateStamp: stamp },
-];
+const stamped = (stamp: DateStamp): Entry[] => [{ role: "user", dateStamp: stamp }];
 
 describe("dateStampText: the line the model reads", () => {
   test("the owner's example, in the laptop's zone (CET in November)", () => {
@@ -88,10 +89,8 @@ describe("nextDateStamp: when the model's now must be refreshed", () => {
   });
 
   test("a resume whose history has no stamp is stamped (an old log, an older build)", () => {
-    expect(nextDateStamp([{ role: "user" }, { role: "assistant" }], t0, ROME)).toEqual({
-      at: t0,
-      zone: ROME,
-    });
+    const history: Entry[] = [{ role: "user" }, { role: "assistant" }];
+    expect(nextDateStamp(history, t0, ROME)).toEqual({ at: t0, zone: ROME });
   });
 
   test("a resume whose history already carries a fresh stamp is NOT re-stamped", () => {
