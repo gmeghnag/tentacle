@@ -1215,3 +1215,63 @@ chose "legacy does not count") survived both passes.
   phone's single record per computer, today's legacy record and key included. This lasts until (b)
   keys records per project. The changelog's "The app pairs per project now" claims more than
   that until (b) ships. Fine if (b) lands before the next `release`; otherwise state the limit there.
+
+### Review — (b) feat/mobile-projects-app
+
+*— claude-opus-5-5, 2026-11-21* (fresh context; scope `git diff main...HEAD`, slice (b); same model family as the
+Execution's signature, though the commits say `deepseek` — see finding 4)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate (re-run):** `bun test apps/mobile/test` 4115 pass / 0 fail (280 files); `bun run typecheck` clean;
+`bun run lint` clean (2181 files). Full `bun test` not re-run.
+
+**Findings**
+
+1. **HIGH: the E2E half of the scope is not delivered.** There is no `apps/mobile/e2e/flows/NN-projects.yaml`, no
+   legacy-migration flow, `bun run e2e:mobile` was not run, and `.tentacle/tmp/mobile-projects-app/screens/` does not
+   exist (no A1–A7 light/dark). The Execution itself says PARTIAL. The plan's gate (§Tests "Gate before done",
+   decision 20) is unmet, and so are the live behaviours that only the E2E pins: stop B → "Stopped", revoke A → B still
+   online, the 15 s re-probe.
+2. **MEDIUM: the guard on a destructive branch is not pinned.** `apps/mobile/src/pairing-flow.ts:519`
+   (`entry.computer.project?.cwd === record.project.cwd` in `retireLegacy`). Mutation R2 replaced it with `true`, and
+   `pairing-e2e.test.ts` stays green (11/0). Scenario: the phone holds a legacy record of Mac M whose discover named
+   it Q (its key is adopted on Q). Pairing P with the guard regressed silently deletes the record of Q and its key. Q
+   then has to be re-paired, with no error. Needed: a test where a same-computer legacy record with another `cwd`
+   survives.
+3. **MEDIUM: the section's "…" opens only the FIRST project's sheet.** `apps/mobile/src/screens/ComputersScreen.tsx:190-199`
+   (`computer-menu-${first.id}`, "More for <first label>"). With two or more projects, the only visible control for
+   project 2+'s Try again / Pair again / Remove is a long-press (an ok row's tap opens it). §6 says
+   "long-press / … = project sheet" per row. Scenario: a VoiceOver user, or anyone who doesn't know about long-press,
+   cannot remove the second project.
+4. **MEDIUM (process, §10):** `### (b)` Execution is signed `claude-opus-5-5`, but both branch commits are labelled
+   `(deepseek)` (`0b65e100`, `f1df3dde`). The signature must name the model that did the work: §10's routing and
+   review strength depend on it.
+
+**Mutations (reviewer, in memory, restored; `git status` clean afterwards):** R1 `observe` does not reset `absent` →
+KILLED (link-diagnosis 8/1). R2 `retireLegacy` ignores `cwd` → **SURVIVED** (F2). R3 discover folds another `cwd` →
+KILLED. R4 `justPaired` never expires → KILLED. R5 drop `closeCodes.delete(address)` → survived (low: a stale code
+matters only on a re-dial of the same address inside one `openComputer`; not raised).
+
+**Attacks tried**
+- **§7 one session path:** a project record dials through the same `openComputer`/`LINKS`; the `4404` is read from
+  the app's own `withDiagnostics` wrapper, with no second channel. Holds.
+- **§7 pure modules:** the states, words, grouping, re-probe delay and menu actions are in `project-rows.ts`. The
+  App's `onOpen` branch (ok → open, stopped/unreachable → retry, else sheet) is small and inline: known App.tsx debt,
+  not raised.
+- **Push id ripple:** `openRoute` (`notification-action.ts:113`) still routes on `msg.computer`, and no project
+  record has that id. It is moot today only because `PushMessage.computer` is `identity.name`, not the id: the
+  pre-existing defect the Execution names. The fix task for it must also map claimed → record id here.
+- **`stopped` vs `unreachable` with LAN + relay addresses:** `observe` resets `absent` on every observation, so the
+  last failure wins. A lone project may flip between the two words from one poll to the next. This is cosmetic, and
+  it never feeds `maybe-reset`. Not raised.
+- **Same-basename projects (`~/a/app`, `~/b/app`):** `projectMismatch` and `findExisting` compare labels only. This
+  follows the plan (`p=` is the label), and record ids are keyed by `project.key`, so nothing is overwritten. Not
+  raised.
+
+**What holds:** record ids per project with `STORE_VERSION` 1; F17 saves nothing (its real-daemon test passes);
+the legacy record parses; `setProject`/`setAddresses` refuse an unlisted id and skip a no-op write; the
+diagnosis's `absent` does not feed the streak (real relay test).
+
+**Executor behaviour:** honest about the PARTIAL status and the drift (4404 path, no 30-day expiry, testIDs). The
+gap is scope, not quality, plus one unpinned destructive guard and the signature mismatch.
