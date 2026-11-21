@@ -1376,3 +1376,40 @@ diagnosis's `absent` does not feed the streak (real relay test).
 
 **Executor behaviour:** honest about the PARTIAL status and the drift (4404 path, no 30-day expiry, testIDs). The
 gap is scope, not quality, plus one unpinned destructive guard and the signature mismatch.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-21* (fresh-context reviewer; scope `git diff HEAD~2` = the fix round `b9c70b77` and the
+gate fix `3d50cba7`)
+
+**Verdict: APPROVE-WITH-NITS (PASS).**
+
+**Gate:** `bun test apps/mobile/test` 4117 pass / 0 fail (280 files); `bun run typecheck` clean; `bun run lint` clean
+(2185 files).
+
+**Previous findings**
+- **F2 — FIXED.** The new real-daemon test "KEEPS a legacy record … named project Q" is in place. Mutation R2 (the
+  `cwd` guard → `true`) is now KILLED: `pairing-e2e` 11/1.
+- **F3 — FIXED.** `ComputersScreen.tsx` gives each row its own "…" (`computer-menu-${row.id}`, `trailingKind="control"`),
+  and the header "…" is gone. Mutation R6 (the row "…" opens `section.rows[0]`) is KILLED: `band-screens` 35/1. Screenshot
+  `37-a5-revoked-one-dark` checked by eye: two rows with a "…" each, A "Access removed" with a dashed folder, B "New",
+  "1 of 2 projects running".
+- **F4 — FIXED.** The `(b)` signature now reads `deepseek`, with a note explaining the correction.
+- **F1 — mostly delivered.** Flow `37-projects.yaml` exists, and the Execution logs it green on the iOS 26 simulator.
+  Ten shots (a1–a5, light and dark) exist under the worktree's
+  `.tentacle/tmp/e2e-mobile/1795228927069/…/takeScreenshot/` (verified on disk).
+  The Execution also caught and fixed a regression this branch had introduced in the harness: `pairing.ts` `start()`
+  returned the computer id, not the row id, which broke every flow's `computer-${output.computerId}`.
+
+**Regressions on the diff:** none found. The harness changes are additive (`project-b-*` hooks, `pair-start?project=b`,
+`startServe(port, cwd = runDir)`), and the two source pins in `e2e-flows.test.ts` were updated to match.
+
+**Residual (not blocking; for the owner/orchestrator):**
+1. The full `bun run e2e:mobile` was not run, only flows 37, 15 and 16. Run it before merge: the record-id change in
+   `pairing.ts` reaches every flow.
+2. There is no legacy-migration E2E flow. The reason given is that the harness can't seed a pre-project Keychain
+   record. Unit and real-daemon tests cover the behaviour.
+3. Only shots a1–a5 exist, not A1–A7, and they are not in `.tentacle/tmp/mobile-projects-app/screens/`.
+4. The Execution's open question is a real gap against failure mode F1. A `serve` that stops while every row is ok is
+   noticed only on foreground or navigation, because the 15 s timer runs only once a row is already down. This needs
+   an owner decision.
