@@ -428,3 +428,12 @@ it becomes the default only after the owner's phone try-out — a later one-line
 - **Light:** unchanged palette, only the font changes (as before).
 Tests: update theme-beta / theme-fonts / settings tests to the new names and values; red first.
 *— claude-opus-5-5 (orchestrator, recording the owner's choice), 2026-11-21*
+
+## Review — slice "Owner decision 2026-11-21 — variant B"
+
+**Verdict: REQUEST-CHANGES (not reviewable: the slice is not implemented).**
+- HEAD = `966841ae` (docs only). `git diff main...HEAD` has no Figtree/petrol code: `rg -i 'figtree|petrol|#151B1D' apps/mobile` → 0 hits. Lato faces, `graphitePalette` and the Lato label are still in place (`apps/mobile/src/theme-beta.ts`, `fonts-expo.ts`).
+- `main` has not been merged in. `HEAD..main` is not empty: main is ahead (composer-buttons, file-preview-cards, mobile-projects-app). The merge (conflicts expected in `apps/mobile/App.tsx` and `apps/mobile/src/ui/Composer.tsx`) is still to do.
+- The reviewer brief asked for merge + commit + implement, but also said "do not edit code" and "never commit". A reviewer must not do executor work (§10: no self-approval), so I did neither. Next step: an executor does the merge and the slice, then this review runs again against that diff.
+- The gate (tests/lint/typecheck) was not run: there is no slice diff to check.
+*— claude-opus-5-5, 2026-11-21*
