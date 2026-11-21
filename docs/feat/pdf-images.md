@@ -691,3 +691,40 @@ documented its drifts (new test files, dedup, config not wired). Reviewer is the
 model family as the planner (claude-opus-5-5), in a fresh context only.
 
 *— claude-opus-5-5, 2026-11-21*
+
+### Round 2
+
+**Verdict: PASS.** Reviewed `git diff HEAD~1` (`de6d825e`).
+
+**Finding 1 (MEDIUM) — resolved.** `selectRequestImages` (`images.ts`) applies a
+request-wide budget before any read, from `ref.size`, so the same history always
+builds the same request. User images are counted first, then tool images, newest
+first. Anthropic gets ≤ `ANTHROPIC_MAX_REQUEST_IMAGES = 20` images, so the
+"> 20 images ⇒ 2000 px" rule never applies. Raw bytes are capped at ≤ 5 × the
+per-image cap (≈ 26 MB of base64 for Anthropic, under the 32 MB request limit).
+OpenAI-compatible gets the byte cap and no count cap. An image left out gets its
+own reason line ("over this request's image budget"), never a silent drop. With
+user images alone (≤ 5, each ≤ the cap) the behaviour is the same as before.
+
+**Mutations** (each applied, run, then reverted from the scratch copy; `git status`
+empty afterwards):
+| Mutation | Result |
+|---|---|
+| Anthropic count cap → ∞ | 1 fail (5 user + 25 tool → ≤ 20) |
+| Byte budget → ∞ | 3 fail (Anthropic, OpenAI, user-first) |
+| Over-budget reason line → `""` (silent drop) | 3 fail |
+
+**Gate:** `bun test packages/providers` 189 pass / 0 fail; `bun run lint` clean;
+`bun run typecheck` clean. Full `bun test` was not re-run.
+
+**Regression attacks (no finding):**
+- A non-sendable ref costs nothing in the budget, and its specific reason line is checked first in `placeholder`.
+- An id selected on both sides is counted twice; that matches what goes on the wire.
+- The per-provider budget is built in both providers' `imageOptions`.
+- The reason line only appears when the ref is not inlined.
+
+**Residual (not blocking):**
+- The budget sizes an id from the first ref seen in ANY message, while the read verifies against the user/tool ref. A hostile pod could under-declare the size on an assistant ref, but that only breaks its own session and the count cap still holds.
+- A `model.maxImageBytes` set above the default scales the byte budget with it, which is the user's choice.
+
+*— claude-opus-5-5, 2026-11-21*
