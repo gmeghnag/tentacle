@@ -46,6 +46,7 @@ import {
   hubA11yRoute,
   mustCancel,
 } from "../hub-session.ts";
+import { FLOATING_ARC_TURN_MS } from "../motion.ts";
 import { PERF } from "../perf-probe.ts";
 import { DENSE_FONT_SCALE, type Palette, shadow, typography } from "../theme.ts";
 import { HubFan } from "./HubFan.tsx";
@@ -454,7 +455,7 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
     const loop = Animated.loop(
       Animated.timing(spin, {
         toValue: 1,
-        duration: 1200,
+        duration: FLOATING_ARC_TURN_MS,
         easing: Easing.linear,
         useNativeDriver: true,
       }),

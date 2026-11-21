@@ -1,0 +1,1904 @@
+{
+  "source": {
+    "apps/mobile/src/chat-header.ts": "9e509a71b3801a4486a838b353c31c96270fedcb",
+    "apps/mobile/src/motion.ts": "5ba1e612ac297c4c408d4c3201b32ac8bfab7745",
+    "apps/mobile/src/screens/ComputersScreen.tsx": "ac1fe5dee031bc713182ae3cee279af4ebed1daf",
+    "apps/mobile/src/screens/PermissionSheet.tsx": "5ae742cbb7d2eab9a8d7eb1ed66d87bfddde882f",
+    "apps/mobile/src/screens/SessionsDrawer.tsx": "5cb64e4a707fb3ade80d489dc643e6bfac5cb60e",
+    "apps/mobile/src/screens/transcript/Markdown.tsx": "530772143b4f87280e31d996de1c9d8d2c6577ab",
+    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "42e5e0df45435214dd7578ad46eb0e09884a3a56",
+    "apps/mobile/src/theme-beta.ts": "c1edfc8542fc4d77a28510a47ea39408be1877bb",
+    "apps/mobile/src/theme.ts": "9ee7540c0231912af0f39ef77e18dab906030393",
+    "apps/mobile/src/thinking-motion.ts": "d2c8ff8d5c27d7113c523696cf2cbb357cced8ce",
+    "apps/mobile/src/tool-steps.ts": "3426958f5eb3c90aab1fe980a6627352639ccf68",
+    "apps/mobile/src/ui/BandSection.tsx": "7b65870db2faa7a51663560d2641476973ed7b2a",
+    "apps/mobile/src/ui/CodeBlock.tsx": "567f9d97869b4e60f00d77a95185e75dd54d4e26",
+    "apps/mobile/src/ui/Composer.tsx": "e767b7545c52d0e63f729dce7f957f25ad79492b",
+    "apps/mobile/src/ui/FloatingActivity.tsx": "cc8ae250d2303f88efe4261ad4e66168425d31b0",
+    "apps/mobile/src/ui/GlassButton.tsx": "a595e5654c4b6167edfd83387e3322c5b1dc611c",
+    "apps/mobile/src/ui/HeaderDot.tsx": "1d49445123ec6a8eabd55ef377e30c8ff4bee94d",
+    "apps/mobile/src/ui/HubFan.tsx": "4826433ccc23d36237be9f6029cc80e6a827ee13",
+    "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
+    "apps/mobile/src/ui/ScreenHeader.tsx": "5056826ce4b0caed05dfa83cb777dc1e26ea1ba0",
+    "apps/mobile/src/ui/Sheet.tsx": "3c6c0d8b0f8f8b450821ccc12f737b8e893258d7",
+    "apps/mobile/src/ui/StepNode.tsx": "1ac733e9a999d230c126f29a5b2b0162fea4864a",
+    "packages/tui/src/blink.ts": "29c9f101f7942a0942e48c977a13e3759820c8e3",
+    "packages/tui/src/components/Thinking.tsx": "c9f80123d32ad706b7c96d858b822d9336d15d2d",
+    "packages/tui/src/shimmer.ts": "96515bf4852e36f0cf9ca27a3f665d00e37f076c",
+    "packages/tui/src/spinner.ts": "abdf05f86853566e55794918c7b51a4778308c7b",
+    "packages/tui/src/theme.ts": "465a4a1fcf6b1bfb6ab637772458d945397b414f"
+  },
+  "timings": {
+    "ACTIVITY_CLOCK_TICK": 1000,
+    "ACTIVITY_SHEET_RESIZE": 150,
+    "COMPOSER_HALO": 1200,
+    "COMPOSER_TRANSCRIBE_TURN": 900,
+    "DRAWER": 220,
+    "FLOATING_ARC_TURN": 1200,
+    "HEADER_DOT_HALF": 700,
+    "HUB_GLOW_IN": 220,
+    "HUB_GLOW_OUT": 480,
+    "STEP_ELAPSED_TICK": 1000,
+    "STEP_SPINNER_TURN": 900,
+    "BREATHE": 1500,
+    "THINKING_SHIMMER": 2200,
+    "HUB_FLASH": 1600,
+    "FLOAT_FADE": 150,
+    "FOLLOW_SETTLE": 450,
+    "LANDING_REVEAL": 120,
+    "CHART_DRAW": 900,
+    "CHART_FADE_DELAY": 550,
+    "CHART_FADE": 450,
+    "CHART_REDUCED": 280,
+    "COMPACTED_SHOWN": 3000,
+    "PERMISSION_ARM": 400,
+    "TUI_BLINK_HALF": 500,
+    "TUI_SHIMMER_TICK": 80,
+    "TUI_SPINNER_FRAME": 100
+  },
+  "numbers": {
+    "HEADER_DOT_LOW_OPACITY": 0.3
+  },
+  "easing": {
+    "HEADER_DOT": {
+      "source": "inOut(ease)",
+      "css": "cubic-bezier(0.42, 0, 0.58, 1)"
+    }
+  },
+  "glyphs": {
+    "bullet": "●",
+    "blinkHalfMs": 500,
+    "spinner": {
+      "frames": ["◜", "◠", "◝", "◞", "◡", "◟"],
+      "intervalMs": 100
+    },
+    "shimmer": {
+      "window": 3,
+      "pauseTicks": 14,
+      "tickMs": 80
+    },
+    "harness": {
+      "info": "◇",
+      "warn": "▲"
+    },
+    "notice": {
+      "info": "◇",
+      "warn": "▲"
+    },
+    "wake": "◷",
+    "therefore": "∴"
+  },
+  "typography": {
+    "largeTitle": {
+      "fontSize": 34,
+      "lineHeight": 41,
+      "fontWeight": "700",
+      "letterSpacing": 0.37
+    },
+    "title2": {
+      "fontSize": 22,
+      "lineHeight": 28,
+      "fontWeight": "700"
+    },
+    "title3": {
+      "fontSize": 20,
+      "lineHeight": 25,
+      "fontWeight": "700"
+    },
+    "lockTitle": {
+      "fontSize": 28,
+      "lineHeight": 34,
+      "fontWeight": "700"
+    },
+    "headline": {
+      "fontSize": 17,
+      "lineHeight": 22,
+      "fontWeight": "600"
+    },
+    "body": {
+      "fontSize": 17,
+      "lineHeight": 22
+    },
+    "transcript": {
+      "fontSize": 16,
+      "lineHeight": 23
+    },
+    "bubble": {
+      "fontSize": 16,
+      "lineHeight": 22
+    },
+    "callout": {
+      "fontSize": 16,
+      "lineHeight": 21
+    },
+    "subhead": {
+      "fontSize": 15,
+      "lineHeight": 20
+    },
+    "subheadStrong": {
+      "fontSize": 15,
+      "lineHeight": 20,
+      "fontWeight": "600"
+    },
+    "footnote": {
+      "fontSize": 13,
+      "lineHeight": 18
+    },
+    "caption": {
+      "fontSize": 12,
+      "lineHeight": 16
+    },
+    "section": {
+      "fontSize": 13,
+      "lineHeight": 18,
+      "letterSpacing": -0.08
+    },
+    "mono": {
+      "fontSize": 13,
+      "lineHeight": 18,
+      "fontFamily": "ui-monospace"
+    },
+    "monoCode": {
+      "fontSize": 12.5,
+      "lineHeight": 19,
+      "fontFamily": "ui-monospace"
+    },
+    "monoDiff": {
+      "fontSize": 12,
+      "lineHeight": 21,
+      "fontFamily": "ui-monospace"
+    },
+    "monoInline": {
+      "fontSize": 14,
+      "lineHeight": 20,
+      "fontFamily": "ui-monospace"
+    },
+    "step": {
+      "fontSize": 14,
+      "lineHeight": 20,
+      "fontWeight": "500"
+    },
+    "stepMono": {
+      "fontSize": 12.5,
+      "lineHeight": 18,
+      "fontFamily": "ui-monospace"
+    },
+    "sas": {
+      "fontSize": 40,
+      "lineHeight": 48,
+      "fontWeight": "600",
+      "letterSpacing": 6,
+      "fontFamily": "ui-monospace"
+    }
+  },
+  "palettes": {
+    "light": {
+      "bg": "#F2F2F7",
+      "page": "#FFFFFF",
+      "card": "#FFFFFF",
+      "sheet": "#FFFFFF",
+      "drawer": "#F7F7F8",
+      "band": "#FFFFFF",
+      "bandOnSheet": "#FFFFFF",
+      "fill": "#EFEFF4",
+      "code": "#F2F2F7",
+      "codeOnSheet": "#F2F2F7",
+      "label": "#000000",
+      "sec": "#636366",
+      "sep": "#C6C6C8",
+      "sepChat": "#D1D1D6",
+      "sepSheet": "#C6C6C8",
+      "accent": "#0E7490",
+      "accentFill": "#0E7490",
+      "onAccent": "#FFFFFF",
+      "tint": "#E0F4F8",
+      "accentSoft": "rgba(14,116,144,0.10)",
+      "accentSoftStrong": "rgba(14,116,144,0.20)",
+      "green": "#1E7B34",
+      "orange": "#B33000",
+      "red": "#C4001A",
+      "warnBg": "#FFF1DC",
+      "warnText": "#7A3300",
+      "glass": "rgba(255,255,255,0.82)",
+      "glassBorder": "rgba(0,0,0,0.08)",
+      "shadowOpacity": 0.12,
+      "scrim": "rgba(0,0,0,0.35)",
+      "camera": "#000000",
+      "cameraAccent": "#22D3EE",
+      "kw": "#9B2393",
+      "com": "#55606B",
+      "addBg": "#E3F5E8",
+      "addStrong": "#BFE8CB",
+      "addText": "#14612A",
+      "delBg": "#FCE8EA",
+      "delStrong": "#F6C4CA",
+      "delText": "#9F1020",
+      "dash": "#8E8E93",
+      "switchOff": "#C7C7CC"
+    },
+    "dark": {
+      "bg": "#1E1F21",
+      "page": "#1E1F21",
+      "card": "#28292C",
+      "sheet": "#28292C",
+      "drawer": "#19191B",
+      "band": "#242528",
+      "bandOnSheet": "#28292C",
+      "fill": "#313236",
+      "code": "#28292C",
+      "codeOnSheet": "#313236",
+      "label": "#EDEEF0",
+      "sec": "#A0A3A8",
+      "sep": "#37383C",
+      "sepChat": "#313236",
+      "sepSheet": "#3D3E42",
+      "accent": "#22D3EE",
+      "accentFill": "#06B6D4",
+      "onAccent": "#00191F",
+      "tint": "#0B2E36",
+      "accentSoft": "rgba(34,211,238,0.14)",
+      "accentSoftStrong": "rgba(34,211,238,0.26)",
+      "green": "#30D158",
+      "orange": "#FF9F0A",
+      "red": "#FF6D65",
+      "warnBg": "#3A2A0C",
+      "warnText": "#FFD08A",
+      "glass": "rgba(40,41,44,0.86)",
+      "glassBorder": "rgba(255,255,255,0.07)",
+      "shadowOpacity": 0.35,
+      "scrim": "rgba(0,0,0,0.45)",
+      "camera": "#000000",
+      "cameraAccent": "#22D3EE",
+      "kw": "#FF7AB2",
+      "com": "#8E9AA6",
+      "addBg": "#0F2A19",
+      "addStrong": "#1F5232",
+      "addText": "#7EE2A0",
+      "delBg": "#34141A",
+      "delStrong": "#64222B",
+      "delText": "#FFA3A8",
+      "dash": "#636366",
+      "switchOff": "#434448"
+    },
+    "petrol": {
+      "bg": "#151B1D",
+      "page": "#151B1D",
+      "card": "#1D2528",
+      "sheet": "#1D2528",
+      "drawer": "#101516",
+      "band": "#1A2022",
+      "bandOnSheet": "#1D2528",
+      "fill": "#262E32",
+      "code": "#1D2528",
+      "codeOnSheet": "#262E32",
+      "label": "#D5DDDE",
+      "sec": "#98A6A8",
+      "sep": "#2D393D",
+      "sepChat": "#253033",
+      "sepSheet": "#333F43",
+      "accent": "#22D3EE",
+      "accentFill": "#06B6D4",
+      "onAccent": "#00191F",
+      "tint": "#173136",
+      "accentSoft": "rgba(34,211,238,0.14)",
+      "accentSoftStrong": "rgba(34,211,238,0.26)",
+      "green": "#30D158",
+      "orange": "#FF9F0A",
+      "red": "#FF6D65",
+      "warnBg": "#3A2A0C",
+      "warnText": "#FFD08A",
+      "glass": "rgba(29,37,40,0.86)",
+      "glassBorder": "rgba(255,255,255,0.07)",
+      "shadowOpacity": 0.35,
+      "scrim": "rgba(0,0,0,0.45)",
+      "camera": "#000000",
+      "cameraAccent": "#22D3EE",
+      "kw": "#FF7AB2",
+      "com": "#8E9AA6",
+      "addBg": "#0F2A19",
+      "addStrong": "#1F5232",
+      "addText": "#7EE2A0",
+      "delBg": "#34141A",
+      "delStrong": "#64222B",
+      "delText": "#FFA3A8",
+      "dash": "#636366",
+      "switchOff": "#3A4043"
+    }
+  },
+  "tui": {
+    "dark": {
+      "accent": "#06b6d4",
+      "autoAccept": "#fec20a",
+      "subtle": "#8c8c8c",
+      "dim": "dim",
+      "dimIsAttribute": true,
+      "gutter": "gray",
+      "harness": "#b2b2b2",
+      "notice": "#8caaee",
+      "hidden": "hidden",
+      "success": "#4ec974",
+      "error": "#ed5454",
+      "warn": "#e0af4a",
+      "quit": "yellow",
+      "border": "gray",
+      "status": {
+        "linkError": "red",
+        "linkWarn": "yellow",
+        "scrolled": "yellow"
+      },
+      "meter": {
+        "low": "green",
+        "mid": "yellow",
+        "high": "red"
+      },
+      "shimmer": {
+        "mid": "#22d3ee",
+        "peak": "#67e8f9"
+      },
+      "diff": {
+        "addBg": "#022800",
+        "addFg": "#f8f8f2",
+        "addGutter": "#6ec860",
+        "addWordBg": "#044700",
+        "addWordFg": "#f8f8f2",
+        "delBg": "#3d0100",
+        "delFg": "#f8f8f2",
+        "delGutter": "#e66464",
+        "delWordBg": "#5c0200",
+        "delWordFg": "#f8f8f2",
+        "border": "#585860"
+      },
+      "message": {
+        "bg": "#373737",
+        "queuedFg": "#8c8c8c"
+      },
+      "syntax": {
+        "keyword": "#c678dd",
+        "string": "#98c379",
+        "number": "#d19a66",
+        "comment": "#6e7681",
+        "title": "#61afef",
+        "type": "#e5c07b",
+        "meta": "#56b6c2",
+        "tag": "#e06c75"
+      },
+      "md": {
+        "code": "yellow",
+        "firstHeading": "magenta",
+        "heading": "green",
+        "quote": "gray",
+        "del": "gray",
+        "link": "blue"
+      },
+      "chart": {
+        "series": [
+          "#0fa0bd",
+          "#d95926",
+          "#9085e9",
+          "#c98500",
+          "#d55181",
+          "#0ca30c",
+          "#3987e5",
+          "#e66767"
+        ]
+      }
+    },
+    "light": {
+      "accent": "#0e7490",
+      "autoAccept": "#a84a00",
+      "subtle": "#6b6b6b",
+      "dim": "#6b6b6b",
+      "dimIsAttribute": false,
+      "gutter": "#6b6b6b",
+      "harness": "#4e4e4e",
+      "notice": "#2f4ba8",
+      "hidden": "hidden",
+      "success": "#084718",
+      "error": "#b21428",
+      "warn": "#8f4c00",
+      "quit": "#8f4c00",
+      "border": "#8c8c8c",
+      "status": {
+        "linkError": "#b21428",
+        "linkWarn": "#8f4c00",
+        "scrolled": "#8f4c00"
+      },
+      "meter": {
+        "low": "#084718",
+        "mid": "#8f4c00",
+        "high": "#b21428"
+      },
+      "shimmer": {
+        "mid": "#0b4a57",
+        "peak": "#083344"
+      },
+      "diff": {
+        "addBg": "#dafbe1",
+        "addFg": "#1a1a1a",
+        "addGutter": "#0f4c0f",
+        "addWordBg": "#aceebb",
+        "addWordFg": "#1a1a1a",
+        "delBg": "#ffe1e1",
+        "delFg": "#1a1a1a",
+        "delGutter": "#b21428",
+        "delWordBg": "#ffb2b2",
+        "delWordFg": "#1a1a1a",
+        "border": "#8c8c8c"
+      },
+      "message": {
+        "bg": "#eeeeee",
+        "queuedFg": "#5c5c5c"
+      },
+      "syntax": {
+        "keyword": "#5f1cb2",
+        "string": "#146e14",
+        "number": "#9c4600",
+        "comment": "#646464",
+        "title": "#1446c8",
+        "type": "#784600",
+        "meta": "#0e4c5f",
+        "tag": "#b21428"
+      },
+      "md": {
+        "code": "#953800",
+        "firstHeading": "#5f1cb2",
+        "heading": "#084718",
+        "quote": "#6b6b6b",
+        "del": "#6b6b6b",
+        "link": "#1446c8"
+      },
+      "chart": {
+        "series": [
+          "#0786a6",
+          "#eb6834",
+          "#6250d6",
+          "#eda100",
+          "#e87ba4",
+          "#008300",
+          "#2a78d6",
+          "#e34948"
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "step": {
+      "file": "apps/mobile/src/ui/StepNode.tsx",
+      "styles": {
+        "node": {
+          "flexDirection": "row"
+        },
+        "gutter": {
+          "width": 10
+        },
+        "up": {
+          "position": "absolute",
+          "left": 4.5,
+          "width": 1,
+          "top": 0,
+          "height": 22
+        },
+        "down": {
+          "position": "absolute",
+          "left": 4.5,
+          "width": 1,
+          "top": 22,
+          "bottom": 0
+        },
+        "nodeBox": {
+          "position": "absolute",
+          "top": 15,
+          "left": -2,
+          "width": 14,
+          "height": 14,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "dot": {
+          "width": 13,
+          "height": 13,
+          "borderRadius": 6.5,
+          "borderWidth": 3
+        },
+        "ring": {
+          "width": 9,
+          "height": 9,
+          "borderRadius": 4.5,
+          "borderWidth": 1.2
+        },
+        "spinner": {
+          "width": 10,
+          "height": 10,
+          "borderRadius": 5,
+          "borderWidth": 1.5
+        },
+        "wake": {
+          "fontSize": 13,
+          "lineHeight": 15,
+          "textAlign": "center"
+        },
+        "dotBox": {
+          "width": 13,
+          "height": 13
+        },
+        "breathDot": {
+          "position": "absolute",
+          "width": 3,
+          "height": 3,
+          "borderRadius": 1.5
+        },
+        "glyphs": {
+          "position": "absolute",
+          "top": 0,
+          "left": 0
+        },
+        "column": {
+          "flex": 1,
+          "marginLeft": 10
+        },
+        "line": {
+          "minHeight": 44,
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 6
+        },
+        "rowFill": {
+          "flex": 1,
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 6
+        },
+        "stacked": {
+          "flexDirection": "column",
+          "alignItems": "stretch",
+          "justifyContent": "center",
+          "gap": 0
+        },
+        "lineRow": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 6
+        },
+        "pressed": {
+          "opacity": 0.6
+        },
+        "name": {
+          "flexShrink": 0,
+          "maxWidth": "45%"
+        },
+        "nameWide": {
+          "flexShrink": 1,
+          "maxWidth": "100%"
+        },
+        "server": {
+          "fontWeight": "400"
+        },
+        "italic": {
+          "fontStyle": "italic"
+        },
+        "tabular": {
+          "fontVariant": ["tabular-nums"]
+        },
+        "subtitle": {
+          "flex": 1
+        },
+        "thoughtLine": {
+          "fontStyle": "italic",
+          "fontWeight": "400"
+        },
+        "body": {
+          "borderTopWidth": 0.3333333333333333,
+          "paddingTop": 8,
+          "paddingBottom": 10,
+          "gap": 8
+        },
+        "thought": {
+          "flexDirection": "row",
+          "gap": 6
+        },
+        "thoughtMark": {
+          "marginTop": 3
+        },
+        "thoughtText": {
+          "flex": 1,
+          "fontSize": 13.5,
+          "lineHeight": 19,
+          "fontStyle": "italic"
+        },
+        "code": {
+          "fontSize": 12,
+          "lineHeight": 17,
+          "fontFamily": "ui-monospace"
+        },
+        "footer": {
+          "paddingHorizontal": 16,
+          "marginBottom": 6
+        },
+        "runStart": {
+          "marginTop": 6
+        }
+      },
+      "consts": {
+        "GUTTER": 10,
+        "NODE_Y": 22,
+        "THEREFORE_SIZE": 13,
+        "DOT_AT": {
+          "top": {
+            "left": 5,
+            "top": 1.5
+          },
+          "right": {
+            "left": 8.5,
+            "top": 8
+          },
+          "left": {
+            "left": 1.5,
+            "top": 8
+          }
+        },
+        "GLYPH_BASELINE": 0.35
+      }
+    },
+    "composer": {
+      "file": "apps/mobile/src/ui/Composer.tsx",
+      "styles": {
+        "bar": {
+          "paddingHorizontal": 12,
+          "paddingTop": 8
+        },
+        "field": {
+          "borderWidth": 1,
+          "borderRadius": 22,
+          "paddingTop": 4,
+          "paddingBottom": 6,
+          "paddingHorizontal": 6,
+          "shadowColor": "#000000",
+          "shadowOffset": {
+            "width": 0,
+            "height": 6
+          },
+          "shadowRadius": 10
+        },
+        "input": {
+          "maxHeight": 132,
+          "paddingTop": 8,
+          "paddingBottom": 4,
+          "paddingHorizontal": 10
+        },
+        "row": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "height": 36,
+          "gap": 4,
+          "paddingHorizontal": 2
+        },
+        "flex": {
+          "flex": 1
+        },
+        "hit": {
+          "width": 44,
+          "height": 44,
+          "marginVertical": -4,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "circle": {
+          "width": 32,
+          "height": 32,
+          "borderRadius": 16,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "halo": {
+          "position": "absolute",
+          "width": 32,
+          "height": 32,
+          "borderRadius": 16
+        },
+        "recSquare": {
+          "width": 11,
+          "height": 11,
+          "borderRadius": 2.5
+        },
+        "arc": {
+          "width": 20,
+          "height": 20,
+          "borderRadius": 10,
+          "borderWidth": 1.3,
+          "borderLeftColor": "transparent"
+        },
+        "caption": {
+          "minWidth": 26,
+          "textAlign": "right",
+          "fontVariant": ["tabular-nums"]
+        },
+        "dim": {
+          "opacity": 0.5
+        },
+        "sendNow": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 4,
+          "height": 26,
+          "paddingHorizontal": 10,
+          "borderRadius": 13
+        },
+        "slot": {
+          "width": 36,
+          "height": 36,
+          "borderRadius": 18,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "stopSquare": {
+          "width": 14,
+          "height": 14,
+          "borderRadius": 3
+        },
+        "hidden": {
+          "position": "absolute",
+          "left": 0,
+          "bottom": 0,
+          "width": 1,
+          "height": 1,
+          "fontSize": 1,
+          "color": "transparent"
+        }
+      },
+      "consts": {
+        "LABEL": {
+          "send": "Send",
+          "queue": "Add to queue",
+          "send-later": "Send when back online",
+          "stop": "Stop",
+          "disabled": "Send"
+        },
+        "MIC_ID": {
+          "idle": "composer-mic",
+          "preparing": "composer-mic",
+          "listening": "composer-mic-listening",
+          "finalizing": "composer-mic-finalizing"
+        },
+        "MIC_LABEL": {
+          "idle": "Dictate",
+          "preparing": "Dictate",
+          "listening": "Stop dictation",
+          "finalizing": "Transcribing"
+        },
+        "HALO_SCALE": 1.3125
+      }
+    },
+    "sheet": {
+      "file": "apps/mobile/src/ui/Sheet.tsx",
+      "styles": {
+        "sheet": {
+          "borderTopLeftRadius": 14,
+          "borderTopRightRadius": 14,
+          "paddingHorizontal": 20,
+          "paddingTop": 8,
+          "gap": 12
+        },
+        "scrollBody": {
+          "flex": 1
+        },
+        "floating": {
+          "marginHorizontal": 8,
+          "marginBottom": 8,
+          "borderRadius": 14
+        },
+        "centred": {
+          "textAlign": "center"
+        },
+        "close": {
+          "position": "absolute",
+          "top": 8,
+          "right": 20,
+          "padding": 4
+        },
+        "grabber": {
+          "alignSelf": "center",
+          "width": 36,
+          "height": 5,
+          "borderRadius": 2.5,
+          "marginBottom": 10
+        }
+      },
+      "consts": {}
+    },
+    "hub-fan": {
+      "file": "apps/mobile/src/ui/HubFan.tsx",
+      "styles": {
+        "item": {
+          "position": "absolute",
+          "width": 48,
+          "height": 48,
+          "borderRadius": 24,
+          "borderWidth": 1,
+          "alignItems": "center",
+          "justifyContent": "center",
+          "shadowColor": "#000000",
+          "shadowOffset": {
+            "width": 0,
+            "height": 6
+          },
+          "shadowRadius": 10
+        },
+        "rim": {
+          "position": "absolute",
+          "top": 0,
+          "left": 0
+        },
+        "label": {
+          "position": "absolute",
+          "paddingHorizontal": 10,
+          "paddingVertical": 5,
+          "borderRadius": 10,
+          "borderWidth": 1
+        }
+      },
+      "consts": {
+        "GLYPH": {
+          "stop": "stop.fill",
+          "steer": "bubble.left",
+          "attach": "photo",
+          "activity": "bolt.fill",
+          "artifacts": "doc.on.doc",
+          "sessions": "folder",
+          "info": "laptopcomputer",
+          "tools": "powerplug",
+          "commands": "terminal",
+          "scheduled": "clock",
+          "dictate": "mic",
+          "new": "square.and.pencil",
+          "more": "ellipsis"
+        }
+      }
+    },
+    "hub-button": {
+      "file": "apps/mobile/src/ui/FloatingActivity.tsx",
+      "styles": {
+        "circle": {
+          "position": "absolute",
+          "left": 0,
+          "top": 0,
+          "width": 54,
+          "height": 54,
+          "borderRadius": 27
+        },
+        "clip": {
+          "borderRadius": 27,
+          "overflow": "hidden"
+        },
+        "body": {
+          "position": "absolute",
+          "left": 0,
+          "top": 0,
+          "width": 54,
+          "height": 54,
+          "borderRadius": 27,
+          "alignItems": "center",
+          "justifyContent": "center",
+          "borderWidth": 1,
+          "shadowColor": "#000000",
+          "shadowOffset": {
+            "width": 0,
+            "height": 6
+          },
+          "shadowRadius": 10
+        },
+        "count": {
+          "fontWeight": "600",
+          "fontVariant": ["tabular-nums"]
+        },
+        "arcBox": {
+          "position": "absolute",
+          "top": 0,
+          "left": 0,
+          "width": 54,
+          "height": 54,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "arc": {
+          "position": "absolute",
+          "top": 2,
+          "left": 2,
+          "width": 48,
+          "height": 48,
+          "borderRadius": 24,
+          "borderWidth": 2,
+          "borderColor": "transparent"
+        },
+        "grid": {
+          "width": 14,
+          "height": 14,
+          "flexDirection": "row",
+          "flexWrap": "wrap",
+          "gap": 4
+        },
+        "dot": {
+          "width": 5,
+          "height": 5,
+          "borderRadius": 2.5
+        },
+        "glow": {
+          "position": "absolute",
+          "top": -4,
+          "left": -4,
+          "width": 62,
+          "height": 62,
+          "borderRadius": 31,
+          "borderWidth": 2
+        }
+      },
+      "consts": {}
+    },
+    "row": {
+      "file": "apps/mobile/src/ui/Row.tsx",
+      "styles": {
+        "row": {
+          "flexDirection": "row",
+          "gap": 12,
+          "paddingHorizontal": 20,
+          "paddingVertical": 12
+        },
+        "separator": {
+          "position": "absolute",
+          "top": 0,
+          "right": 0,
+          "height": 0.3333333333333333
+        },
+        "tile": {
+          "width": 32,
+          "height": 32,
+          "borderRadius": 8,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "text": {
+          "flexShrink": 1,
+          "minWidth": 0,
+          "gap": 2
+        },
+        "textFill": {
+          "flex": 1
+        },
+        "textCapped": {
+          "flexShrink": 1,
+          "maxWidth": "70%"
+        },
+        "textStacked": {
+          "flex": 1,
+          "maxWidth": "100%"
+        },
+        "valueBeside": {
+          "flex": 1,
+          "minWidth": 0
+        },
+        "valueBelow": {
+          "alignSelf": "stretch",
+          "paddingTop": 2
+        }
+      },
+      "consts": {}
+    },
+    "band": {
+      "file": "apps/mobile/src/ui/BandSection.tsx",
+      "styles": {
+        "section": {
+          "marginTop": 22
+        },
+        "label": {
+          "fontSize": 12,
+          "lineHeight": 16,
+          "fontWeight": "600",
+          "letterSpacing": 0.24,
+          "textTransform": "uppercase",
+          "paddingHorizontal": 20,
+          "paddingBottom": 6
+        },
+        "band": {
+          "borderRadius": 0,
+          "borderTopWidth": 0.3333333333333333,
+          "borderBottomWidth": 0.3333333333333333,
+          "overflow": "hidden"
+        },
+        "footnotes": {
+          "paddingTop": 8,
+          "gap": 8
+        },
+        "note": {
+          "fontSize": 13,
+          "lineHeight": 18
+        }
+      },
+      "consts": {}
+    },
+    "screen-header": {
+      "file": "apps/mobile/src/ui/ScreenHeader.tsx",
+      "styles": {
+        "buttons": {
+          "minHeight": 52,
+          "flexDirection": "row",
+          "alignItems": "center",
+          "justifyContent": "space-between",
+          "paddingHorizontal": 16
+        },
+        "cluster": {
+          "flexDirection": "row",
+          "gap": 10,
+          "alignItems": "center"
+        },
+        "largeTitle": {
+          "paddingHorizontal": 16,
+          "paddingTop": 2
+        },
+        "largeSubtitle": {
+          "paddingHorizontal": 16,
+          "paddingTop": 2
+        },
+        "compactRow": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "paddingHorizontal": 16
+        },
+        "side": {
+          "minWidth": 96,
+          "flexDirection": "row",
+          "gap": 10,
+          "alignItems": "center"
+        },
+        "sideRight": {
+          "justifyContent": "flex-end"
+        },
+        "compactTitle": {
+          "flex": 1,
+          "alignItems": "center"
+        },
+        "titleLine": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 6,
+          "maxWidth": "100%"
+        },
+        "compactHeading": {
+          "flexShrink": 1
+        }
+      },
+      "consts": {}
+    },
+    "glass-button": {
+      "file": "apps/mobile/src/ui/GlassButton.tsx",
+      "styles": {
+        "base": {
+          "alignItems": "center",
+          "justifyContent": "center",
+          "borderWidth": 1,
+          "shadowColor": "#000000",
+          "shadowOffset": {
+            "width": 0,
+            "height": 6
+          },
+          "shadowRadius": 10
+        }
+      },
+      "consts": {}
+    },
+    "code-block": {
+      "file": "apps/mobile/src/ui/CodeBlock.tsx",
+      "styles": {
+        "block": {
+          "borderRadius": 14,
+          "overflow": "hidden"
+        },
+        "header": {
+          "height": 34,
+          "flexDirection": "row",
+          "alignItems": "center",
+          "paddingLeft": 12,
+          "paddingRight": 4
+        },
+        "label": {
+          "flex": 1,
+          "fontFamily": "ui-monospace"
+        },
+        "copy": {
+          "width": 44,
+          "height": 34,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "scroller": {
+          "marginHorizontal": 12,
+          "marginBottom": 12
+        },
+        "lines": {
+          "paddingBottom": 6
+        },
+        "fade": {
+          "position": "absolute",
+          "top": 0,
+          "right": 0,
+          "bottom": 6,
+          "width": 16,
+          "flexDirection": "row"
+        }
+      },
+      "consts": {
+        "FADE_STEPS": 8
+      }
+    },
+    "header-dot": {
+      "file": "apps/mobile/src/ui/HeaderDot.tsx",
+      "styles": {},
+      "consts": {
+        "SIZE": 6
+      }
+    },
+    "transcript-row": {
+      "file": "apps/mobile/src/screens/transcript/TranscriptRow.tsx",
+      "styles": {
+        "row": {
+          "paddingHorizontal": 16,
+          "paddingVertical": 7
+        },
+        "firedBody": {
+          "paddingTop": 2,
+          "paddingBottom": 7
+        },
+        "card": {
+          "flexDirection": "column",
+          "gap": 8,
+          "paddingVertical": 8
+        },
+        "band": {
+          "width": "100%",
+          "borderRadius": 14,
+          "borderWidth": 0.3333333333333333,
+          "overflow": "hidden"
+        },
+        "bandCenter": {
+          "flex": 1,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "loadingSymbol": {
+          "opacity": 0.5
+        },
+        "bandCover": {
+          "width": "100%",
+          "height": "100%"
+        },
+        "bandLines": {
+          "paddingVertical": 12,
+          "paddingHorizontal": 14,
+          "gap": 2
+        },
+        "lineHeading": {
+          "fontSize": 13,
+          "lineHeight": 18,
+          "fontWeight": "600"
+        },
+        "cardMeta": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 10,
+          "minHeight": 40
+        },
+        "cardBody": {
+          "flex": 1,
+          "gap": 2
+        },
+        "dimmed": {
+          "opacity": 0.6
+        },
+        "speak": {
+          "alignSelf": "flex-start",
+          "paddingTop": 4,
+          "paddingRight": 8
+        },
+        "bubble": {
+          "alignSelf": "flex-end",
+          "maxWidth": "77%",
+          "borderRadius": 20,
+          "paddingHorizontal": 14,
+          "paddingVertical": 9,
+          "gap": 6
+        },
+        "photos": {
+          "alignSelf": "flex-end",
+          "marginBottom": 4
+        },
+        "tile": {
+          "borderRadius": 16,
+          "overflow": "hidden"
+        },
+        "tileFill": {
+          "width": "100%",
+          "height": "100%"
+        },
+        "tileLabel": {
+          "flex": 1,
+          "alignItems": "center",
+          "justifyContent": "center",
+          "gap": 4,
+          "padding": 6
+        },
+        "tileLabelText": {
+          "textAlign": "center"
+        },
+        "more": {
+          "position": "absolute",
+          "top": 0,
+          "left": 0,
+          "right": 0,
+          "bottom": 0,
+          "alignItems": "center",
+          "justifyContent": "center",
+          "backgroundColor": "rgba(0,0,0,0.45)"
+        },
+        "moreText": {
+          "color": "#FFFFFF"
+        },
+        "documents": {
+          "gap": 2
+        },
+        "document": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 6
+        },
+        "step": {
+          "paddingHorizontal": 16
+        },
+        "runStart": {
+          "marginTop": 6
+        },
+        "runEnd": {
+          "marginBottom": 6
+        },
+        "below": {
+          "gap": 4,
+          "paddingBottom": 6
+        },
+        "tool": {
+          "gap": 8
+        },
+        "notice": {
+          "textAlign": "center"
+        },
+        "joined": {
+          "paddingTop": 0
+        },
+        "harness": {
+          "flexDirection": "row",
+          "gap": 6
+        },
+        "harnessGlyph": {
+          "width": 12,
+          "textAlign": "center"
+        },
+        "harnessBody": {
+          "flex": 1,
+          "gap": 2
+        },
+        "fallback": {
+          "fontStyle": "italic"
+        },
+        "rule": {
+          "height": 0.3333333333333333,
+          "marginVertical": 6
+        }
+      },
+      "consts": {
+        "LONE": {
+          "up": false,
+          "down": false
+        }
+      }
+    },
+    "markdown": {
+      "file": "apps/mobile/src/screens/transcript/Markdown.tsx",
+      "styles": {
+        "paragraph": {
+          "fontSize": 16,
+          "lineHeight": 23
+        },
+        "bold": {
+          "fontWeight": "600"
+        },
+        "italic": {
+          "fontStyle": "italic"
+        },
+        "strike": {
+          "textDecorationLine": "line-through"
+        },
+        "chip": {
+          "paddingHorizontal": 5,
+          "paddingVertical": 1,
+          "borderRadius": 5,
+          "transform": [
+            {
+              "translateY": 4
+            }
+          ]
+        },
+        "chipText": {
+          "fontFamily": "ui-monospace",
+          "fontSize": 14,
+          "lineHeight": 18
+        },
+        "inlineRun": {
+          "fontFamily": "ui-monospace",
+          "fontSize": 14
+        },
+        "blocks": {
+          "gap": 10
+        },
+        "code": {
+          "fontSize": 12.5,
+          "lineHeight": 19,
+          "fontFamily": "ui-monospace"
+        },
+        "rule": {
+          "height": 0.3333333333333333,
+          "marginVertical": 8
+        },
+        "quote": {
+          "borderLeftWidth": 3,
+          "paddingLeft": 12,
+          "gap": 8
+        },
+        "list": {
+          "gap": 6
+        },
+        "listItem": {
+          "flexDirection": "row",
+          "gap": 8
+        },
+        "bullet": {
+          "fontSize": 16,
+          "lineHeight": 23,
+          "minWidth": 18,
+          "textAlign": "right"
+        },
+        "listBody": {
+          "flex": 1,
+          "gap": 6
+        },
+        "table": {
+          "borderWidth": 0.3333333333333333,
+          "borderRadius": 14
+        },
+        "tableContent": {
+          "flexGrow": 1
+        },
+        "column": {
+          "minWidth": 72,
+          "flexGrow": 1
+        },
+        "cell": {
+          "fontSize": 15,
+          "lineHeight": 20,
+          "paddingHorizontal": 12,
+          "paddingVertical": 8
+        },
+        "headerCell": {
+          "fontWeight": "600"
+        },
+        "bodyCell": {
+          "borderTopWidth": 0.3333333333333333
+        }
+      },
+      "consts": {
+        "HEADING_SIZE": {
+          "1": 22,
+          "2": 20,
+          "3": 18,
+          "4": 17
+        }
+      }
+    },
+    "permission-sheet": {
+      "file": "apps/mobile/src/screens/PermissionSheet.tsx",
+      "styles": {
+        "autoRow": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 12,
+          "borderTopWidth": 0.3333333333333333,
+          "paddingTop": 12,
+          "marginTop": 4
+        },
+        "flex": {
+          "flex": 1
+        },
+        "center": {
+          "textAlign": "center"
+        },
+        "sheet": {
+          "paddingHorizontal": 20,
+          "paddingTop": 8,
+          "paddingBottom": 40,
+          "gap": 16
+        },
+        "grabber": {
+          "alignSelf": "center",
+          "width": 36,
+          "height": 5,
+          "borderRadius": 2.5,
+          "marginBottom": 4
+        },
+        "head": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 12
+        },
+        "tile": {
+          "width": 44,
+          "height": 44,
+          "borderRadius": 12,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "detailBox": {
+          "borderRadius": 14,
+          "padding": 14
+        },
+        "options": {
+          "gap": 10
+        },
+        "pill": {
+          "minHeight": 50,
+          "borderRadius": 25,
+          "paddingHorizontal": 20,
+          "paddingVertical": 12,
+          "flexDirection": "row",
+          "alignItems": "center",
+          "justifyContent": "center",
+          "gap": 8
+        },
+        "pillLabel": {
+          "textAlign": "center",
+          "flexShrink": 1
+        },
+        "code": {
+          "fontFamily": "ui-monospace"
+        },
+        "dimmed": {
+          "opacity": 0.4
+        },
+        "reply": {
+          "borderRadius": 14,
+          "padding": 14,
+          "minHeight": 96
+        }
+      },
+      "consts": {
+        "SHEET_OPTION_IDS": ["allow_once", "allow_always", "reject_once", "reply"]
+      }
+    },
+    "computers": {
+      "file": "apps/mobile/src/screens/ComputersScreen.tsx",
+      "styles": {
+        "root": {
+          "flex": 1
+        },
+        "section": {
+          "marginTop": 0
+        },
+        "computerHeader": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 10,
+          "paddingTop": 22,
+          "paddingLeft": 20,
+          "paddingRight": 12,
+          "paddingBottom": 6
+        },
+        "computerText": {
+          "flex": 1,
+          "gap": 2
+        },
+        "statusLine": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 6
+        },
+        "more": {
+          "width": 44,
+          "height": 44,
+          "alignItems": "center",
+          "justifyContent": "center"
+        }
+      },
+      "consts": {}
+    },
+    "sessions-drawer": {
+      "file": "apps/mobile/src/screens/SessionsDrawer.tsx",
+      "styles": {
+        "root": {
+          "flex": 1
+        },
+        "panel": {
+          "position": "absolute",
+          "top": 0,
+          "bottom": 0,
+          "left": 0,
+          "width": 300,
+          "borderRightWidth": 0.3333333333333333
+        },
+        "titleRow": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "paddingLeft": 20,
+          "paddingRight": 10
+        },
+        "titleButton": {
+          "flex": 1,
+          "minWidth": 0,
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 8
+        },
+        "titleText": {
+          "flexShrink": 1,
+          "fontSize": 17,
+          "fontWeight": "600"
+        },
+        "statusLine": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 6,
+          "paddingHorizontal": 20,
+          "paddingBottom": 2
+        },
+        "statusText": {
+          "flexShrink": 1,
+          "fontSize": 12
+        },
+        "menu": {
+          "marginTop": 8,
+          "borderTopWidth": 0.3333333333333333,
+          "borderBottomWidth": 0.3333333333333333
+        },
+        "menuRow": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 10,
+          "minHeight": 46,
+          "paddingHorizontal": 20
+        },
+        "menuName": {
+          "flex": 1,
+          "minWidth": 0,
+          "fontSize": 15
+        },
+        "check": {
+          "width": 16,
+          "alignItems": "center"
+        },
+        "list": {
+          "flex": 1
+        },
+        "section": {
+          "fontSize": 13,
+          "lineHeight": 18,
+          "fontWeight": "500",
+          "paddingTop": 18,
+          "paddingBottom": 6,
+          "paddingHorizontal": 20
+        },
+        "row": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 12,
+          "minHeight": 44,
+          "marginHorizontal": 10,
+          "paddingHorizontal": 10,
+          "borderRadius": 10
+        },
+        "lead": {
+          "width": 19,
+          "alignItems": "center"
+        },
+        "rowTitle": {
+          "flex": 1,
+          "minWidth": 0,
+          "fontSize": 16,
+          "lineHeight": 21
+        },
+        "rowText": {
+          "flex": 1,
+          "minWidth": 0
+        },
+        "rowTitleText": {
+          "fontSize": 16,
+          "lineHeight": 21
+        },
+        "rowFolder": {
+          "fontFamily": "ui-monospace",
+          "fontSize": 11,
+          "lineHeight": 14
+        },
+        "current": {
+          "fontWeight": "600"
+        },
+        "meta": {
+          "fontSize": 12
+        },
+        "rowMeta": {
+          "flexShrink": 0,
+          "maxWidth": 110
+        },
+        "loading": {
+          "paddingVertical": 24
+        },
+        "banner": {
+          "paddingHorizontal": 10,
+          "paddingTop": 12
+        },
+        "empty": {
+          "fontSize": 15,
+          "paddingHorizontal": 20,
+          "paddingTop": 18
+        },
+        "footer": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "paddingTop": 6,
+          "paddingHorizontal": 10,
+          "borderTopWidth": 0.3333333333333333
+        },
+        "footerGap": {
+          "flex": 1
+        },
+        "newError": {
+          "paddingHorizontal": 20,
+          "paddingVertical": 8
+        },
+        "newErrorText": {
+          "fontSize": 13,
+          "lineHeight": 18
+        }
+      },
+      "consts": {}
+    }
+  },
+  "viewModels": {
+    "headerDot": {
+      "running": {
+        "tone": "running",
+        "hollow": false,
+        "pulse": true
+      },
+      "ask": {
+        "tone": "attention",
+        "hollow": false,
+        "pulse": false
+      },
+      "connecting": {
+        "tone": "offline",
+        "hollow": true,
+        "pulse": true
+      },
+      "offline": {
+        "tone": "offline",
+        "hollow": true,
+        "pulse": false
+      },
+      "attention": {
+        "tone": "attention",
+        "hollow": true,
+        "pulse": false
+      }
+    },
+    "thinkingLabel": {
+      "0": {
+        "word": "Thinking",
+        "seconds": "0 s"
+      },
+      "3000": {
+        "word": "Thinking",
+        "seconds": "3 s"
+      },
+      "65000": {
+        "word": "Thinking",
+        "seconds": "1 min 05 s"
+      }
+    },
+    "thinkingA11y": {
+      "0": "Thinking",
+      "3000": "Thinking, 3 seconds",
+      "65000": "Thinking, 1 minute 5 seconds"
+    },
+    "thinkingLook": {
+      "animate": {
+        "animate": true,
+        "glyph": "accent",
+        "word": "sec"
+      },
+      "still": {
+        "animate": false,
+        "glyph": "accent",
+        "word": "sec"
+      }
+    },
+    "thoughtRow": {
+      "400": {
+        "subtitle": "· <1 s",
+        "expandable": false,
+        "a11yLabel": "Thought for under a second. The thinking itself is not kept."
+      },
+      "12000": {
+        "subtitle": "· 12 s",
+        "expandable": false,
+        "a11yLabel": "Thought for 12 seconds. The thinking itself is not kept."
+      },
+      "95000": {
+        "subtitle": "· 1 min 35 s",
+        "expandable": false,
+        "a11yLabel": "Thought for 1 minute 35 seconds. The thinking itself is not kept."
+      },
+      "none": {
+        "subtitle": "",
+        "expandable": false,
+        "a11yLabel": "Thought. The thinking itself is not kept."
+      }
+    },
+    "breathe": {
+      "dotOrder": ["top", "right", "left"],
+      "curves": [
+        {
+          "inputRange": [0, 0.3, 0.6, 1],
+          "outputRange": [0.28, 1, 0.28, 0.28]
+        },
+        {
+          "inputRange": [0, 0.166667, 0.466667, 0.766667, 1],
+          "outputRange": [0.28, 0.28, 1, 0.28, 0.28]
+        },
+        {
+          "inputRange": [0, 0.333333, 0.633333, 0.933333, 1],
+          "outputRange": [0.28, 0.28, 1, 0.28, 0.28]
+        }
+      ]
+    },
+    "shimmerSweep": {
+      "width": 64,
+      "band": 26,
+      "from": -26,
+      "to": 64,
+      "stops": [
+        {
+          "offset": 0,
+          "opacity": 0
+        },
+        {
+          "offset": 0.5,
+          "opacity": 1
+        },
+        {
+          "offset": 1,
+          "opacity": 0
+        }
+      ]
+    },
+    "hubButton": {
+      "size": 54
+    },
+    "tui": {
+      "width": 60,
+      "rows": {
+        "dark": {
+          "user": [
+            "\u001b[48;2;55;55;55m\u001b[38;2;6;182;212m\u001b[1m› \u001b[22m\u001b[39mWhy does the build fail on CI?                            \u001b[49m"
+          ],
+          "assistant": [
+            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[0mThe lockfile is stale: run \u001b[33mbun install\u001b[39m and commit it.\u001b[0m"
+          ],
+          "toolRunning": [
+            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m",
+            "\u001b[38;2;140;140;140m⎿\u001b[39m \u001b[38;2;140;140;140mrunning…\u001b[39m"
+          ],
+          "toolRunningOff": [
+            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m",
+            "\u001b[38;2;140;140;140m⎿\u001b[39m \u001b[38;2;140;140;140mrunning…\u001b[39m"
+          ],
+          "toolOk": [
+            "\u001b[38;2;78;201;116m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mls\u001b[39m\u001b[38;2;140;140;140m 1.2s\u001b[39m",
+            "\u001b[38;2;140;140;140m⎿\u001b[39m \u001b[38;2;140;140;140mREADME.md\u001b[39m",
+            "  \u001b[38;2;140;140;140mpackage.json\u001b[39m"
+          ],
+          "toolError": [
+            "\u001b[38;2;237;84;84m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun run build\u001b[39m",
+            "\u001b[38;2;140;140;140m⎿\u001b[39m \u001b[38;2;237;84;84merror: lockfile is out of date\u001b[39m"
+          ]
+        },
+        "light": {
+          "user": [
+            "\u001b[48;2;238;238;238m\u001b[38;2;14;116;144m\u001b[1m› \u001b[22m\u001b[39mWhy does the build fail on CI?                            \u001b[49m"
+          ],
+          "assistant": [
+            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[0mThe lockfile is stale: run \u001b[38;2;149;56;0mbun install\u001b[39m and commit it.\u001b[0m"
+          ],
+          "toolRunning": [
+            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m",
+            "\u001b[38;2;107;107;107m⎿\u001b[39m \u001b[38;2;107;107;107mrunning…\u001b[39m"
+          ],
+          "toolRunningOff": [
+            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m",
+            "\u001b[38;2;107;107;107m⎿\u001b[39m \u001b[38;2;107;107;107mrunning…\u001b[39m"
+          ],
+          "toolOk": [
+            "\u001b[38;2;8;71;24m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mls\u001b[39m\u001b[38;2;107;107;107m 1.2s\u001b[39m",
+            "\u001b[38;2;107;107;107m⎿\u001b[39m \u001b[38;2;107;107;107mREADME.md\u001b[39m",
+            "  \u001b[38;2;107;107;107mpackage.json\u001b[39m"
+          ],
+          "toolError": [
+            "\u001b[38;2;178;20;40m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun run build\u001b[39m",
+            "\u001b[38;2;107;107;107m⎿\u001b[39m \u001b[38;2;178;20;40merror: lockfile is out of date\u001b[39m"
+          ]
+        }
+      },
+      "input": {
+        "empty": [
+          {
+            "prefix": "❯ ",
+            "gutter": false,
+            "segments": [
+              {
+                "text": " ",
+                "inverse": true
+              }
+            ]
+          }
+        ],
+        "draft": [
+          {
+            "prefix": "❯ ",
+            "gutter": false,
+            "segments": [
+              {
+                "text": "fix the flaky test",
+                "inverse": false
+              },
+              {
+                "text": " ",
+                "inverse": true
+              }
+            ]
+          }
+        ]
+      },
+      "slot": {
+        "frames": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+        "duration": {
+          "0": "0s",
+          "3": "3s",
+          "65": "1m 5s"
+        }
+      }
+    }
+  },
+  "unresolved": []
+}

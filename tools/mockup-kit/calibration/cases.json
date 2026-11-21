@@ -1,0 +1,39 @@
+{
+  "$comment": "One case per (component, state, theme). shot = the e2e _shot name (file <shot>-<theme>.png in the run's flow dir); crop/masks in screenshot pixels (@3x, 1206×2622); screen = the K builder calls reproducing the state, in order. Masks hide the status-bar clock/battery when the run had no status-bar override.",
+  "cases": [
+    {
+      "id": "header-conversation",
+      "flow": "24-conversation",
+      "shot": "24-conversation",
+      "themes": ["light", "dark"],
+      "crop": { "x": 0, "y": 186, "w": 1206, "h": 150 },
+      "masks": [],
+      "screen": [["sessionHeader", { "title": "Conversation", "dot": "idle" }]]
+    },
+    {
+      "id": "composer-closed",
+      "flow": "23-keyboard",
+      "shot": "23-keyboard-closed",
+      "themes": ["light", "dark"],
+      "crop": { "x": 0, "y": 2280, "w": 1206, "h": 342 },
+      "masks": [],
+      "screen": [
+        ["sessionHeader", { "title": "" }],
+        "<div class=\"k-scroll\"></div>",
+        ["composer", { "state": "empty", "placeholder": "Message" }]
+      ]
+    },
+    {
+      "id": "status-bar",
+      "flow": "24-conversation",
+      "shot": "24-conversation",
+      "themes": ["light", "dark"],
+      "crop": { "x": 0, "y": 0, "w": 1206, "h": 186 },
+      "masks": [
+        { "x": 120, "y": 40, "w": 260, "h": 110 },
+        { "x": 900, "y": 40, "w": 260, "h": 110 }
+      ],
+      "screen": []
+    }
+  ]
+}

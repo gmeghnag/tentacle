@@ -3,7 +3,7 @@
 > **Status:** implementation
 > **Branch:** `feat/mobile-mockup-kit`
 > **Size:** L · **Blast:** cross-module · **Suited:** strong model (opus) executes; mandatory fresh-context Review (L)
-> **Changelog:** `none` (internal/dev tooling: no user-visible change in the app or the TUI)
+> **Changelog:** `changelog.d/mobile-mockup-kit.added.md` (owner's executor instruction; the plan said `none` — see Execution drift)
 
 
 ## Context
@@ -609,7 +609,118 @@ Red first for every generator unit (§9). Each test pins the exact property:
 
 ## Execution
 
-_(empty — filled by the executor)_
+*— claude-opus-5-5, 2026-11-21*
+
+**Load-bearing check (re-run first, holds).** `.tentacle/tmp/mobile-mockup-kit/lb.ts`
+imports `apps/mobile/src/theme.ts`, TUI `theme.ts` `tokens`, `blink.ts`, `spinner.ts`,
+`shimmer.ts`, `theme-beta.ts` `FIGTREE_FACES` from `.tentacle/tmp` and prints them
+(`22 500 ● {"frames":["◜",…],"intervalMs":100} 3 14 80 {"regular":"Figtree-Regular",…}`).
+Capability check: `ls tools/mockup-kit scripts/mockup-kit.ts docs/MOCKUP-BRIEF.md` →
+all three missing before this work. Full `bun install` (not `--filter`) is needed:
+`tool-steps.ts` imports `@tentacle/core`, which resolves only with the mobile workspace
+linked (the gate's environment).
+
+**Slice 1 — tokens + generator: DONE.**
+- 1a hoist: `apps/mobile/src/motion.ts` (13 constants). Pre-hoist sites, from the
+  new guard run RED on the untouched tree:
+  ```
+  + "ui/HeaderDot.tsx:40 duration: 700",
+  + "ui/FloatingActivity.tsx:457 duration: 1200",
+  + "ui/StepNode.tsx:57 setInterval(…, 1000)",
+  + "ui/StepNode.tsx:73 duration: 900",
+  + "screens/SessionScreen.tsx:711 setInterval(…, 1000)",
+  + "screens/ActivitySheet.tsx:224 duration: 150",
+  ```
+  plus the module-private `Composer.tsx:98,101` `HALO_MS`/`SPIN_MS`,
+  `hub-button-motion.ts:72-73` (220/480), `drawer-nav.ts:132` `DRAWER_MS`. Each
+  site now imports its constant (only those lines + one import each). Guard +
+  value table: `apps/mobile/test/motion-literals.test.ts` (green after the hoist).
+- 1b `scripts/mockup-kit/extract-styles.ts` (TS compiler API folder) +
+  `manifest.ts`; 1c `emit.ts` (pure) + `sources.ts` (named imports) + `format.ts`
+  (in-memory `biome format --stdin-file-path`, so `gen` and the drift test share
+  bytes) + CLI `scripts/mockup-kit.ts`, `package.json` `mockup-kit`. Generated:
+  `tools/mockup-kit/generated/{tokens.css,tui-tokens.css,kit-data.json}`, **0
+  unresolved** for the real manifest.
+- Tests `scripts/test/mockup-kit.test.ts`: folding, emission (kebab, palette key
+  count ×3 themes, petrol `--c-red` = dark), unknown chalk/easing throw, moved
+  manifest entry throws, drift + its non-vacuity (one hex changed through the
+  injectable input → names `--c-red: #123456` and `run: bun run mockup-kit`).
+
+**Slice 2 — kit: DONE (statusLine deferred).** `tools/mockup-kit/{frame.css,kit.css,
+tui.css,kit.js,kit.d.ts,index.html,README.md}`; `scripts/mockup-kit/{kit-rules,inline,
+tui-cases}.ts`. Reference test (every `var(--…)` defined; every `KIT.data` path
+exists), no-literal test, inline test, pure-builder smoke test. iPhone builders:
+phone, sessionHeader (+headerDot from `dotLook`), userBubble, assistantText
+(markdown subset), stepNode/stepRail (ok/error/running/pending/thought/thinking/wake,
+threads), stepBody (diff), thoughtRow (`thoughtRowView`), composer
+(empty/draft/ready/dictating/transcribing/queued), sheet, permissionSheet,
+pill/toast/banner, hubButton/hubFan, emptyAction, row/band, computersList,
+projectsList, sessionsDrawer, `K.extend` («nuovo», `?nuovo=1`). TUI:
+`K.tui.fromAnsi`, `transcriptRow` (rows rendered by the TUI's OWN `itemLines`
+at generation, blink ON/OFF frames), `slot` (`Thinking` FRAMES folded from the
+`.tsx`, `formatDuration` table), `inputBox` (`inputRender` rows).
+
+**Slice 3 — calibration: PARTIAL.** `scripts/mockup-kit/png.ts` (decoder + diff +
+crop + band glyphs), `calibrate.ts`, `calibration/cases.json` (3 cases on existing
+shots). TUI text calibration gate: `packages/tui/test/mockup-kit-calibration.test.tsx`
+(slot, inputBox ×2, transcriptRow ×6 vs real Ink frames). NOT done: the
+`run.ts` `E2E_CALIBRATION` mode (status-bar override, Reduce Motion) and the new
+`_shot`s in flows 29/33 — no simulator here to verify them, and an unverified
+e2e edit is worse than none. `calibrate` itself was not run end to end (no Chrome
+path / no e2e run in this worktree); its exit-2 paths are tested.
+
+**Slice 4 — brief: DONE.** `docs/MOCKUP-BRIEF.md`; AGENTS.md §10 "Agent briefs"
++3 lines; changelog fragment `changelog.d/mobile-mockup-kit.added.md`.
+
+**Mutations (each red, then reverted; green after):**
+| Mutation | Result |
+|---|---|
+| `motion.ts` `STEP_SPINNER_TURN_MS` 900→901, no regen | 3 fail: drift (`tokens.css:293: committed «--ms-step-spinner-turn: 900ms;» ≠ source «…901ms;» — run: bun run mockup-kit`), emission, value table |
+| `STYLESHEET_CONSTANTS.hairlineWidth` 1/3→1/2 | 3 fail: folding, emission, drift |
+| kit.js `fromAnsi` paints `●` as `○` (≈ BULLET changed in the kit) | 5 transcriptRow cases fail in the TUI gate |
+| kit.js slot hint `esc/ctrl+c` → `esc` | slot case fails |
+| `inline.ts` `isLocal` → always false | 3 inline tests fail |
+| `png.ts` AA neighbourhood 3×3 → 1×1 | "edge shifted 1 px ≥ 0.98" fails |
+| Reference/no-literal rules | non-vacuity is in-test: a renamed token → names `--m-step-dot-border-radius`; a renamed view-model → names `viewModels.thoughtRow`; inserted `color:#000`, `13px`, `900ms` each caught |
+
+**Drift from the Implementation (and why).**
+- Red-first: only the motion guard was shown red on unmodified code; the
+  generator units were written with their modules, so non-vacuity is shown by
+  the mutations above instead.
+- Manifest: `Pill`, `PillButton`, `Banner`, `EmptyState`, `HeaderDot` have no
+  `StyleSheet.create` (inline JSX styles). Dropped from the styles manifest;
+  `HeaderDot` kept as consts-only (`SIZE`); added `FloatingActivity` (hub button)
+  and `CodeBlock`. Module consts (`GUTTER`, `DOT_AT`, `HALO_SCALE`…) are also
+  extracted, emitted unitless (`--m-<id>-k-<name>`).
+- The folder resolves imports from pure modules handed in by path: `theme.ts`,
+  `motion.ts`, `hub-fan.ts`, `floating-button.ts`, `drawer-nav.ts` (else
+  `ITEM_SIZE`, `FLOAT_SIZE`, `DRAWER_WIDTH` were unresolved).
+- `chat-header.ts` is loaded by a non-literal dynamic import: it imports a TYPE
+  from `ui/StatusDot.tsx`, which drags react-native's global types into the root
+  `tsc` and breaks `packages/config` (`BodyInit`). Its shape is checked at
+  generation instead.
+- No `biome format --write` post-step on files: formatting is in memory
+  (`format.ts`), same bytes for `gen` and the drift test.
+- Frame: the e2e simulator is **iPhone 17 Pro** (`apps/mobile/e2e/README.md:180`),
+  402 × 874 pt, not 393 × 852. `frame.css` uses it.
+- `--n-*` added for non-timing motion numbers (`HEADER_DOT_LOW_OPACITY`);
+  `--tui-ansi-*` (from the documented `CHALK_CSS` table) for 16-colour SGR in
+  `fromAnsi`; `--tui-bg/--tui-fg` are the terminal profile's, in `frame.css`.
+- `diff.ts` merged into `png.ts`; `calibration/page.html` replaced by the report
+  page `calibrate` writes. No `stepRowView` table (needs a `ToolRow`; the step
+  states are hand-mapped in kit.js, calibration is their net).
+- Hand-mapped (not extractable, inline JSX): `StatusDot.toneColor`, the halo's
+  opacity 0.25→0 / still 0.18·1.2, node colours per kind. Commented in kit.css/js.
+- Changelog: the plan said `none`; the owner's executor instruction asked for one
+  fragment, so `mobile-mockup-kit.added.md` was written.
+
+**Gate (narrow, as instructed):** 83 pass / 0 fail across the 8 touched or
+covering files (`scripts/test/{mockup-kit,mockup-kit-png,changelog,changelog-guard}`,
+`packages/tui/test/mockup-kit-calibration`, `apps/mobile/test/{motion-literals,
+drawer-nav,hub-button-motion}`); `tsc` on a scratch tsconfig over the new scripts
++ tui test: clean; `biome check` on every changed path: clean. Not run here:
+full `bun run check` (orchestrator) and `tsc -p apps/mobile` for the 8 edited
+mobile files (import-only edits).
 
 ## Review
 
