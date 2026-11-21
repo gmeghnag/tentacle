@@ -365,4 +365,71 @@ theme, `NO_COLOR=1`, and a narrow window.
 
 ## Execution
 
+*— deepseek (partial, stopped by the watchdog) then claude-opus-5-5, 2026-11-21*
+
+**Load-bearing check (re-run): holds.** `itemLinesAt` returns `string[]` per
+item and the header is one more `case` in it; the colour-off and truecolor
+frames below are the lines `headerLines` returns, unwrapped.
+
+**Repro.** Before (HEAD `312c634d`, `git show HEAD:packages/tui/src/App.tsx | rg WELCOME`):
+`154: const WELCOME = "Tentacle ready. Type a task, or \`/help\` for commands.";`,
+`412: : [{ kind: "assistant", text: WELCOME }]` — no version, no model · cwd
+line, no mascot. After (`.tentacle/tmp/tui-mascot/repro.ts`: the plan's script,
+with absolute imports into this worktree, `version: "0.7.1"` and `chalk.level`
+from argv):
+
+```
+$ bun repro.ts 0
+tentacle 0.7.1
+qwen3 · /tmp/work
+/help for commands
+$ bun repro.ts 3          # SGR kept: 5 rows, sprite + 2 spaces + text on rows 1–3
+ ▄▀▀▀▀▀▄
+█▀▀███▀▀█  tentacle 0.7.1
+█▀▀█▀█▀▀█  qwen3 · /tmp/work
+▄▀▀▀▀▀▀▀▄  /help for commands
+ ▀▀ ▀ ▀▀
+```
+(the level-3 row text above is shown with SGR stripped; the raw run carried
+`38;2`/`48;2` per cell, closed by `39`/`49` before the gutter.)
+
+**As built — files 1–10 exactly as Implementation lists them, no drift in design:**
+`mascot.ts` (new: bitmap, palettes, `pickPalette`, `pairCell`/`mascotCells`,
+`headerView` with `GUTTER = 11`, `MIN_PATH = 12`); `state.ts` `HeaderItem` +
+union; `render-lines.ts` `headerLines` + `paintCell` + `case "header"`;
+`commands.ts` `transcriptToMarkdown` skips `header`; `app-types.ts` /
+`run.tsx` `version?` + pass-through; `App.tsx` seeds the header (palette drawn
+once at mount), `WELCOME` deleted; `cli/main.ts` (engine + local call sites)
+and `cli/connect.ts` pass `APP_RELEASE_VERSION`. Pinned welcome-row frames
+updated in `app-frames`, `app`, `app-mouse-layer`, `keys-app-seam`,
+`app-structural-freshness` (colour-off harness → 3 text lines, no sprite).
+
+**Additions beyond the plan's test list:** `packages/cli/test/tui-version-option.test.ts`
+(drives the real `main` on the local path and asserts `startTui` receives
+`version === APP_RELEASE_VERSION`); a "feet row" test (row 4 = `▀` fg K at
+exactly cols 1,2,4,6,7, space elsewhere — derived by hand from the bitmap, as
+the plan asks; DeepSeek's version only checked cols 0–1).
+
+**Red before green.** The red run (module/kind missing) predates this
+resume and was not captured by the stopped executor — not re-creatable without
+deleting the work. Non-vacuity is shown instead by mutation:
+
+| mutation | result |
+|---|---|
+| `▀` case `fg: below, bg: above` (swap) | 2 fail: `the five pixel-pair cases`, `the eye row` |
+| `colorLevel >= 1` | 1 fail: `16 colours (level 1): hidden too` |
+| drop `version` at the local `startTui` call (`main.ts`) | 1 fail: `startTui gets version` |
+
+All three reverted (verified by `rg`).
+
+**Checks run (narrow, per budget):** the 8 touched test files → 292 pass, 0
+fail; `mascot.test.ts` after the added test → 18 pass. `biome check` on the 17
+touched files → clean. `tsc -p packages/tui` / `-p packages/cli`: no error on
+any touched line (the per-package configs report pre-existing module-resolution
+noise — `@tentacle/protocol`, `--jsx` — which the root `bun run typecheck`
+does not). Full `bun run check`: left to the orchestrator's gate.
+
+**Unverified:** the owner's real-terminal pass (truecolor dark,
+`TERM=xterm-256color` without `COLORTERM`, light theme, `NO_COLOR=1`, narrow).
+
 ## Review

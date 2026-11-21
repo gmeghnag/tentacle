@@ -29,12 +29,13 @@ import { formatDurationMs } from "./format.ts";
 import { harnessLevel, isHarness, joinsPrevious, showsGlyph } from "./harness-group.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
+import { GUTTER, type MascotCell, headerView } from "./mascot.ts";
 import { messageRows } from "./message-row.ts";
 import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import { firedRowLines, isFiredWake } from "./schedule-view.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
-import type { DisplayItem, ToolItem } from "./state.ts";
+import type { DisplayItem, HeaderItem, ToolItem } from "./state.ts";
 import {
   subAgentEarlierRow,
   subAgentHeadRow,
@@ -147,6 +148,58 @@ function assistantLines(text: string): string[] {
   const [first = "", ...rest] = rendered.split("\n");
   // A brand-accent bullet marks the reply; continuation lines hang under it.
   return [`${theme.accent(BULLET)} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
+}
+
+/**
+ * The startup header's rows (docs/feat/tui-mascot.md D4): the mascot's cells,
+ * then the three text lines beside it — or the text lines alone when the sprite
+ * yields. Everything the decision needs is decided in `mascot.ts`; this is only
+ * the mapping to strings.
+ *
+ * The mascot is shown only when the row fits by construction, so `wrapLines`
+ * takes its `fitsUnchanged` path and never splits a sprite row (the scroll
+ * buffer carries only `38;2` across a wrap). Each cell is closed by chalk, so no
+ * SGR leaks into the text or the next row.
+ */
+function headerLines(item: HeaderItem, opts: RenderOptions): string[] {
+  const width = Math.floor(opts.width ?? DEFAULT_WIDTH);
+  const view = headerView({
+    ...(item.version !== undefined ? { version: item.version } : {}),
+    model: item.model,
+    cwd: item.cwd,
+    ...(item.home !== undefined ? { home: item.home } : {}),
+    width,
+    // Read at CALL time, never at import (`blink.ts`'s trap).
+    colorLevel: chalk.level,
+    palette: item.palette,
+  });
+  const text = view.lines.map((line) =>
+    line.strong === undefined
+      ? theme.subtle(line.text)
+      : `${chalk.bold(line.strong)}${theme.subtle(line.text)}`,
+  );
+  if (view.mascot === null) {
+    return text;
+  }
+  // Vertically centred: sprite rows 0–4, text on rows 1–3, rows 0 and 4 alone.
+  const PAD_TOP = 1;
+  const rows: string[] = [];
+  for (let i = 0; i < view.mascot.length; i += 1) {
+    const sprite = view.mascot[i] ?? [];
+    const cells = sprite.map(paintCell).join("");
+    const line = text[i - PAD_TOP];
+    rows.push(line === undefined ? cells : `${cells}${" ".repeat(GUTTER - sprite.length)}${line}`);
+  }
+  return rows;
+}
+
+/** One sprite cell as chalk text: a bare space when empty (the terminal's own background). */
+function paintCell(cell: MascotCell): string {
+  if (cell.fg === undefined) {
+    return cell.glyph;
+  }
+  const fg = chalk.hex(cell.fg);
+  return cell.bg === undefined ? fg(cell.glyph) : fg.bgHex(cell.bg)(cell.glyph);
 }
 
 const HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
@@ -1103,6 +1156,8 @@ export function itemLinesAt(item: DisplayItem, opts: RenderOptions, glyph: boole
     }
     case "assistant":
       return assistantLines(item.text);
+    case "header":
+      return headerLines(item, opts);
     case "tool":
       return toolLines(item, opts);
     case "notice":

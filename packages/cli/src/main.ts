@@ -1422,6 +1422,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           runtime.announce?.();
           await (io.startTui ?? startTui)(null, {
             model: config.model,
+            // The startup header's first line (docs/feat/tui-mascot.md D5): the
+            // release version, not `APP_VERSION` (`+<build id>` is noise here).
+            version: APP_RELEASE_VERSION,
             // The palette (`tui.theme`): a LAPTOP-ONLY display setting.
             theme: config.tui?.theme ?? "auto",
             // A chart's glyphs (`tui.chartGlyphs`): LAPTOP-ONLY too — the font is
@@ -2284,6 +2287,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       start: (sessionOptions) =>
         (io.startTui ?? startTui)(null, {
           model: config.model,
+          // The startup header's first line (docs/feat/tui-mascot.md D5).
+          version: APP_RELEASE_VERSION,
           theme: config.tui?.theme ?? "auto",
           chartGlyphs: config.tui?.chartGlyphs ?? "braille",
           compactShell: config.beta?.compactShell ?? false,
