@@ -5,6 +5,13 @@ the rest are "value-add" improvements layered on the harness.
 
 ## Owner review queue
 
+- [ ] **eval/anthropic-untested** — inventory of what has never been tested
+  against an Anthropic model (owner 2026-11-21: "sarebbe bene segnare tutto ciò
+  che non è mai stato testato con Anthropic"). No Anthropic API-key profile is
+  configured in the owner's tentacle config today, so model-facing measurements
+  ran only on DeepSeek + local Qwen. Known item: `feat/shell-intent-line`
+  fill-rate (DeepSeek 100 %, Qwen 100 %, Anthropic NOT measured).
+
 - [ ] **review/mobile-decisions** — the owner wants to re-read every mobile
   decision taken on 13–14/11 (owner 2026-11-14). Each doc has the questions with
   the recommendation and the chosen answer:
