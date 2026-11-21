@@ -57,6 +57,113 @@ export function makePdf(pages: string[][], options: FixtureOptions = {}): Uint8A
   return new TextEncoder().encode(out);
 }
 
+/** One image XObject of `makeImagePdf` (docs/feat/pdf-images.md §Tests). */
+export interface FixtureImage {
+  width: number;
+  height: number;
+  /** `/DeviceRGB`, `/DeviceGray`, or e.g. `[/Indexed /DeviceRGB 1 <FF000000FF00>]`. */
+  colorSpace?: string;
+  /** The stream's bytes before decoding (written as ASCIIHex, so the file stays text). */
+  data: Uint8Array;
+  /** Filters after `/ASCIIHexDecode`, e.g. `/DCTDecode` or `/JPXDecode`. */
+  filter?: string;
+  bpc?: number;
+  /** A soft mask (a `/DeviceGray` image), applied by pdf.js → RGBA. */
+  smask?: FixtureImage;
+  /** A stencil mask (`/ImageMask true`, 1 bit): painted with the fill colour. */
+  imageMask?: boolean;
+}
+
+/** Bytes as an ASCIIHex stream body (`…>`). */
+export function hexBytes(bytes: Uint8Array): string {
+  return `${[...bytes].map((b) => b.toString(16).padStart(2, "0")).join("")}>`;
+}
+
+/** `BT … Tj ET` at (x, y), Helvetica 12. */
+export function textOp(x: number, y: number, text: string): string {
+  return `BT /F1 12 Tf ${x} ${y} Td (${escapePdfString(text)}) Tj ET`;
+}
+
+/** Paint XObject `/name` into the box (x, y, w, h). */
+export function imageOp(name: string, x: number, y: number, w: number, h: number): string {
+  return `q ${w} 0 0 ${h} ${x} ${y} cm /${name} Do Q`;
+}
+
+/** An inline RGB image (`BI … ID … EI`) painted into the box (x, y, w, h). */
+export function inlineImageOp(
+  pixels: { width: number; height: number; rgb: Uint8Array },
+  box: [number, number, number, number],
+): string {
+  const [x, y, w, h] = box;
+  return `q ${w} 0 0 ${h} ${x} ${y} cm BI /W ${pixels.width} /H ${pixels.height} /CS /RGB /BPC 8 /F /AHx ID ${hexBytes(pixels.rgb)} EI Q`;
+}
+
+/**
+ * A PDF whose pages carry image XObjects: each page is its raw content plus
+ * the images its content names (`/Im1 Do`). All streams are ASCIIHex, so the
+ * whole file is text and goes through the same writer as `makePdf`.
+ */
+export function makeImagePdf(
+  pages: { content: string; images?: Record<string, FixtureImage> }[],
+): Uint8Array {
+  const objs: string[] = [];
+  const add = (s: string) => {
+    objs.push(s);
+    return objs.length;
+  };
+  const catalog = add("<< /Type /Catalog /Pages 2 0 R >>");
+  add("PAGES");
+  const font = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const addImage = (image: FixtureImage): number => {
+    const smask = image.smask === undefined ? "" : `/SMask ${addImage(image.smask)} 0 R `;
+    const body = hexBytes(image.data);
+    const space = image.imageMask
+      ? "/ImageMask true "
+      : image.colorSpace === undefined
+        ? ""
+        : `/ColorSpace ${image.colorSpace} `;
+    return add(
+      `<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} ${space}/BitsPerComponent ${image.bpc ?? (image.imageMask ? 1 : 8)} /Filter [/ASCIIHexDecode ${image.filter ?? ""}] ${smask}/Length ${body.length} >>\nstream\n${body}\nendstream`,
+    );
+  };
+  const kids: number[] = [];
+  for (const page of pages) {
+    const xobjects = Object.entries(page.images ?? {})
+      .map(([name, image]) => `/${name} ${addImage(image)} 0 R`)
+      .join(" ");
+    const content = add(`<< /Length ${page.content.length} >>\nstream\n${page.content}\nendstream`);
+    kids.push(
+      add(
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${font} 0 R >> /XObject << ${xobjects} >> >> /Contents ${content} 0 R >>`,
+      ),
+    );
+  }
+  objs[1] = `<< /Type /Pages /Kids [${kids.map((k) => `${k} 0 R`).join(" ")}] /Count ${kids.length} >>`;
+  let out = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  objs.forEach((o, i) => {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) out += `${String(off).padStart(10, "0")} 00000 n \n`;
+  out += `trailer\n<< /Size ${objs.length + 1} /Root ${catalog} 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return new TextEncoder().encode(out);
+}
+
+/**
+ * A 48×32 baseline JPEG, left half red and right half blue (made once with
+ * `sips` from a PNG this repo's encoder wrote; lossy, so tests compare colours
+ * approximately).
+ */
+export const RED_BLUE_JPEG = Uint8Array.from(
+  atob(
+    "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAMKADAAQAAAABAAAAIAAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAIAAwAwERAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAf/bAEMBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAf/dAAQABv/aAAwDAQACEQMRAD8A/F+v8pz/AL+AoAKAPyHr/wBVA/8ANfCgAoA//9D8X6/ynP8Av4CgAoA/Iev/AFUD/wA18KACgD//0fxfr/Kc/wC/gKACgD8h6/8AVQP/ADXwoAKAP//S/F+v8pz/AL+AoAKAPyHr/wBVA/8ANfCgAoA//9k=",
+  ),
+  (c) => c.charCodeAt(0),
+);
+
 /**
  * A PDF with a standard-security `/Encrypt` whose user password is NOT empty
  * (`/U` matches no empty-password key), so pdf.js asks for a password.

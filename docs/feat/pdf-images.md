@@ -230,7 +230,11 @@ colour through a 1-bit mask, mostly glyph-like) is **not** extracted in v1.
 (`pdf-text.ts:118`) orders text items; a new `buildPageTextWithImages(items,
 images)` inserts each kept image's marker as a pseudo-item at its bbox
 (top-y, x) so it lands where the reading order puts it: after the text line whose
-baseline is above the image's top, before the next. No layout hint, nothing
+baseline is above the image's top, before the next. *(Amended at S2 execution:
+the anchor is the nearest baseline at or above the image's vertical CENTRE, then
+the end of that visual line. "Above the top" scored 261/405 on the acceptance
+file, because a figure set beside a heading starts above the heading's baseline.
+Items, not `hasEOL` lines: that PDF has no EOLs. See Execution S2.)* No layout hint, nothing
 quiz-specific. Marker grammar (one line of its own):
 `[image p.N · W×H]` (pixel size of the PNG sent), variants
 `[image p.N · W×H · same as p.M]` (repeat, no bytes), `[image p.N · W×H ·
@@ -252,7 +256,9 @@ put).
 **D4 — PNG without native deps (S2, pure).** `core/src/png.ts`: encoder for
 gray / RGB / RGBA 8-bit, filter 0 per row (or None/Sub adaptive — measure),
 CRC32 table, `zlib.deflateSync` (Bun's `node:zlib`, works in a Worker; JS, no
-native addon of ours). Kind 1 (`GRAYSCALE_1BPP`, packed bits) is unpacked to
+native addon of ours). *(Amended at S2 execution: `@tentacle/core` is imported
+by the phone app and has no `node:` import, so `encodePng` takes `deflate` as a
+parameter; the worker passes `deflateSync`.)* Kind 1 (`GRAYSCALE_1BPP`, packed bits) is unpacked to
 8-bit gray first. Alpha (kind 3, an applied SMask) is kept (RGBA PNG); the scorer
 compares RGB only (D7).
 
@@ -640,6 +646,180 @@ finding and the API docs as recalled. No live docs lookup was done in this sessi
 If the live limits are lower, `ANTHROPIC_MAX_REQUEST_IMAGES` and the byte factor in
 `requestImageBudget` are the one place to change. Request text size counts toward
 32 MB too. It is not budgeted here; that is pre-existing and outside this finding.
+
+### S2 — extraction, markers, PNG, acceptance
+
+*— claude-opus-5-5, 2026-11-21*
+
+**Load-bearing check re-run first** (before any edit, on `2cc92a5e`). S2 depends on
+pdf.js giving raw pixels plus a position for each paint. I ran
+`bun .tentacle/tmp/pdf-images/ops.ts 30 32` on the owner's PDF: `p30 154x73 kind=2
+gt=69`, `p31 … gt=69`, `p32 … gt=72 | … gt=73`, `{ total: 4, matched: 4 }`. It held,
+so I went ahead. The capability is missing on HEAD: see the red proof below.
+
+**As built**
+- `packages/core/src/png.ts` (new). `encodePng(w, h, pixels, gray|rgb|rgba, deflate)`
+  uses filter 0 per row, a single IDAT, and `crc32`. `deflate` is injected (drift 1).
+- `packages/core/src/pdf-images.ts` (new, pure):
+  - `walkImagePaints` `:92`: the CTM walk over `save`/`restore`/`transform`/form
+    begin+end. It records `paintImageXObject`, `paintInlineImageXObject`, and
+    `paintImageXObjectRepeat` (one paint per position). Malformed args are skipped.
+  - `imagePixels` `:169`: kinds 1/2/3. 1-bit is unpacked with set bit = white, as
+    pdf.js paints it. A length mismatch returns `null`.
+  - `scaledSize` / `downscalePixels`: box average down to a long edge of 1568.
+  - `pixelKey`: a 53-bit hash of the pixels plus the shape.
+  - `DEFAULT_PDF_IMAGE_LIMITS` `:292`: 24 px / 32² / repeat at 3 / 32 sent / 8 MiB / 1568.
+    These numbers are parameters (Q4).
+  - `createImageCollector` `:405`: tiny images are skipped and counted. Only the
+    first occurrence of each picture is encoded, and encoding stops once the byte
+    cap is hit. `finish` then decides repeats (≥ 3 → `same as p.M`, no bytes) and
+    the count cap. Pairs count toward the cap.
+  - `imageMarker`, `imageFooter` `:352`, `stripImageMarkers` `:338`.
+- `packages/core/src/pdf-text.ts`:
+  - `MAX_PDF_BYTES` is now 100 MiB `:25` (Q3).
+  - `buildPageText` now delegates to `assemblePageText`. With no markers the loop is
+    the same, so the output is byte-identical (the existing `pdf-text` tests pass
+    unchanged).
+  - `buildPageTextWithImages` `:193` + `anchorItem` `:147` (drift 2).
+  - `formatPdfText` takes `imageFooter?` and places it after the pages, before the
+    gap footers.
+- `packages/tools/src/pdf/options.ts`:
+  - `isOffscreenCanvasSupported: false` and `isImageDecoderSupported: false`. Both
+    exist in 6.5.438 (`pdf.mjs:22618-22619`).
+  - `PdfWorkerRequest.images?: PdfImageLimits`.
+  - `PdfExtractedPage.images?` and `PdfExtraction.images?` (the summary). Both are
+    optional and present only when images were asked for.
+- `packages/tools/src/pdf/run.ts`:
+  - `runExtraction(getDocument, req, ops?)`. Per page it calls `getOperatorList` →
+    walk → `resolveImage` `:76` (`objs`/`commonObjs.get(id, cb, errCb)`, a
+    `PDF_IMAGE_OBJECT_TIMEOUT_MS` 5 s guard; inline images come from the args).
+  - If an image fails, that page loses only its images, never its text.
+  - Text items are kept only for the pages that painted images. Markers are placed
+    after `finish`.
+- `packages/tools/src/pdf/pdf-worker.ts`: passes `OPS`. `transferList` `:37` collects
+  the PNG buffers, deduplicated.
+- `packages/tools/src/pdf/extract.ts`:
+  - `ExtractPdfOptions.images` is forwarded.
+  - `isPdfExtraction` `:71` validates the reply, including each page's images. A
+    malformed reply → `corrupt`.
+  - Image extraction is **opt-in**: the attachment paths (`prompt-documents.ts`,
+    `remote-client.ts`) still read text only, unchanged.
+- `packages/tools/src/builtins.ts`:
+  - `fs_read` asks for images with the default limits `:181`. It passes the footer
+    `:215` and drops the PNGs (S2).
+  - The scan verdict is judged on the text with the marker lines stripped `:203`, so
+    an image-only PDF is still refused as scanned (drift 3).
+  - The description mentions the marker.
+- `scripts/pdf-images-score.ts` (new, not in the gate): D9. It does as the footer
+  says: a read that hit the cap is read again in halves (drift 4).
+  `--mutate-page-end` is the non-vacuity switch.
+- Tests:
+  - `core/test/png.test.ts` (7): round trip for gray/RGB/RGBA, 1×1 and odd widths;
+    IEND CRC; wrong size throws.
+  - `core/test/pdf-images.test.ts` (24): walk, placement (including the measured
+    "figure beside a heading" case), filters, repeats, caps, undecodable, downscale,
+    1-bit, `stripImageMarkers`.
+  - `tools/test/pdf-images.test.ts` (5): the real worker on synthetic PDFs. It covers
+    RGB, Indexed+SMask (alpha kept), inline, a real DCT JPEG (made once with `sips`,
+    inlined as base64), a stencil mask (no marker), JPX junk → `not sent:
+    undecodable` (fast, no hang), 0-image byte equality with vs without images, no
+    option → no image work, and reply validation.
+  - `fs-read-pdf.test.ts` (+2): the exact output with marker + footer; scan still
+    refused.
+  - `pdf-extract.test.ts`: the two new flags are pinned.
+  - `pdf-fixture.ts`: `makeImagePdf` (ASCIIHex streams, so the file stays text),
+    `textOp`/`imageOp`/`inlineImageOp`, `RED_BLUE_JPEG`.
+- `changelog.d/pdf-images.added.md`: I extended the S1 bullet. The owner's
+  instruction was one `pdf-images.*` fragment, so the header's
+  `pdf-image-markers.added.md` was not created.
+
+**Red before green.** I swapped the seven S2 source files for HEAD's
+(`.tentacle/tmp/pdf-images/red.ts`), ran the tests, then restored mine:
+`fs-read-pdf` + `pdf-extract` → `51 pass, 2 fail`. Both fails are on the assertion:
+the marker/footer output and the pinned pdf.js flags. The scan-refusal test passes on
+HEAD by design: it guards a regression, and M5 proves it is not vacuous. The new
+core/tool test files import new exports, so they cannot be red by assertion on HEAD.
+The mutations below cover them.
+
+**Mutations** (`.tentacle/tmp/pdf-images/mutate-s2.ts`; each one applied, run against
+the 3 image test files, then reverted; `rg MUTATION` on the S2 sources is empty
+afterwards):
+| # | Mutation | Result |
+|---|---|---|
+| M1 | every marker at page end | 7 fail |
+| M2 | repeat threshold 3 → 2 | 2 fail |
+| M3 | count cap off in `finish` | 1 fail (20 pairs → 32 sent) |
+| M4 | byte cap off | 1 fail |
+| M5 | scan verdict on text WITH markers | 1 fail |
+| M6 | CTM walk ignores `restore` | 1 fail |
+| M7 | no downscale | 1 fail |
+| M8 | tiny filter off | 2 fail |
+| M9 | marker line not ended | 6 fail |
+| M10 | anchor on image top instead of centre | 1 fail |
+
+In the first run M3 survived, because pass-1 encoding already stops at 32. I added
+the "pairs" test, which kills it. M5's first run was a broken mutation (a `//`
+comment ate the line). I fixed the runner to print totals and re-ran it.
+
+**Acceptance (blind, owner data read in place, never copied):**
+`bun scripts/pdf-images-score.ts …/solo_domande.pdf …/immagini`
+```
+pages 1479 · 7773 ms · images { sent: 406, repeats: 0, tiny: 0, capped: 0, undecodable: 0, reReads: 2 }
+score 405/405
+```
+No miss and no extra. Pass bar ≥ 401/405: **passed**. Non-vacuity:
+- `--mutate-page-end` → `score 201/405`.
+- The plan's original "above the top" rule → `score 261/405`: every miss was assigned
+  to the previous question, with the pixels found.
+
+Real path, through `fs_read` itself (worker, 62 MiB under the new cap;
+`.tentacle/tmp/pdf-images/fsread.ts`):
+- `pages: "29-32"` gives `[image p.30 · 154×73]` after `Domanda 69`'s block, and
+  p.31/p.32 the same, in 255 ms.
+- `pages: "1-100"` gives 36 markers, footer
+  `[images: 32 sent, 4 over the per-read cap — read fewer pages to get the rest]`.
+
+**Verification (narrow).** The 7 PDF test files (core `pdf-images`, `png`,
+`pdf-text`, `pdf-attach`; tools `pdf-images`, `fs-read-pdf`, `pdf-extract`) →
+153 pass, 0 fail. `tsc -p packages/core`, `-p packages/tools` and a scratch tsconfig
+over the new tests + scorer: clean. `biome check` on the 16 changed files: clean.
+No protocol schema touched → no `protocol.json` regeneration, no `protocol.d/` note.
+
+**Drift from Implementation (and why):**
+1. `png.ts` takes `deflate` as a parameter. `@tentacle/core` has no `node:` import and
+   `apps/mobile` imports it, so D4's `zlib.deflateSync` inside core would break the
+   phone bundle. D4 is amended.
+2. Placement anchors on the image's vertical centre, not its top, and on items, not
+   lines. The measurement is above (261 → 405); D2 is amended. The farmaquiz PDF has
+   no `hasEOL` at all, so a "line" is the run of stream-adjacent items on one
+   baseline. A marker also closes the line it follows, so it never glues text across.
+3. `stripImageMarkers` for the scan verdict (not in the plan). Without it, a marker's
+   ~20 characters pass the 16-chars/page density test, and a scanned PDF would read
+   as "text" with no OCR message. This keeps today's refusal until S3 decides what a
+   vision model gets for a scan.
+4. The scorer re-reads a capped range in halves. With 100-page reads and the 32 cap,
+   6 images were capped (the ceiling was 400). The footer tells the model to do
+   exactly this, so the scorer follows it. The plan's "ceiling 405" had not counted
+   the cap.
+5. Image extraction is opt-in per request (`images?`). The attachment paths are
+   unchanged, with no extra cost: the plan did not say, and "contained" argues for it.
+6. `paintInlineImageXObjectGroup` (pdf.js's merge of many tiny inline images) is not
+   extracted, like stencil masks. Those are tiny by construction.
+7. "Configurable" (Q3/Q4) is done at the seam: `PdfImageLimits` travels in the
+   request, and `MAX_PDF_BYTES` is one constant. No user config key is wired, as in
+   S1 (outside S2's file list). Follow-up together with S1's `model.maxToolImages`.
+
+**Not verified / notes for Review:**
+- A real JPX image was not tested. Only junk JPX was: it fails fast as undecodable.
+  Whether pdf.js 6.5.438 decodes a valid JPX without its wasm (no fetch) is
+  unmeasured; verify with a real JPX file.
+- Two images with the same marker string on one page: the scorer maps them to PNGs
+  in paint order, but placement may order them differently in the text. This did
+  not occur on farmaquiz.
+- Pre-existing, not S2: on PDFs without EOLs (farmaquiz) `buildPageText` glues lines
+  (`rispostaDomanda 68`). Markers break the glue only where they sit.
+- Memory: a page keeps its text items until the read ends, only if it painted
+  images. Decoded pixels are dropped after `add`. PNG bytes are held up to the 8 MiB cap.
 
 ## Review
 

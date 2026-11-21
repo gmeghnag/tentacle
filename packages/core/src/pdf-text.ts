@@ -17,8 +17,12 @@
 import { MAX_DOCUMENT_TEXT_CHARS } from "@tentacle/protocol";
 import type { MessageMedia } from "./model.ts";
 
-/** A file over this is refused before any byte is parsed (`fs_read`). */
-export const MAX_PDF_BYTES = 50 * 1024 * 1024;
+/**
+ * A file over this is refused before any byte is parsed (`fs_read`). 100 MiB
+ * (owner Q3, docs/feat/pdf-images.md): the per-worker RSS watchdog stays the
+ * real memory bound.
+ */
+export const MAX_PDF_BYTES = 100 * 1024 * 1024;
 
 /** Pages one `fs_read` call returns at most (the footer names the next call). */
 export const MAX_PAGES_PER_READ = 100;
@@ -116,9 +120,111 @@ function needsSpace(prev: PdfTextItem, curr: PdfTextItem): boolean {
  * because a blank line is where a paragraph break lives.
  */
 export function buildPageText(items: readonly unknown[]): string {
+  return assemblePageText(items, new Map());
+}
+
+/** An image marker to place in a page's text, with its box in PDF user space (y up). */
+export interface PdfImagePlacement {
+  readonly marker: string;
+  readonly left: number;
+  readonly top: number;
+  readonly bottom: number;
+}
+
+/**
+ * The text item a marker goes after (docs/feat/pdf-images.md D2): the item whose
+ * baseline is the nearest one at or above the image's vertical CENTRE, extended
+ * to the end of its visual line (the items that follow it in the stream on the
+ * same baseline). `-1` = nothing is above it: the marker opens the page.
+ *
+ * The centre, not the top: a figure set beside a heading starts above the
+ * heading's baseline (its top is level with the cap height), so "above the
+ * top" picks the previous block — measured on a real quiz PDF, a third of the
+ * figures. For a figure between paragraphs both give the same line.
+ * Geometry, not stream order, picks the item: producers emit a page's blocks
+ * out of order, and the stream neighbour of an image is often another block.
+ */
+function anchorItem(items: readonly unknown[], centre: number): number {
+  let best = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  items.forEach((item, index) => {
+    if (!isTextItem(item) || item.str === "") {
+      return;
+    }
+    const y = item.transform[5] ?? 0;
+    if (y >= centre && y - centre < bestDistance) {
+      best = index;
+      bestDistance = y - centre;
+    }
+  });
+  if (best < 0) {
+    return best;
+  }
+  const anchor = items[best] as PdfTextItem;
+  const baseline = anchor.transform[5] ?? 0;
+  for (let index = best + 1; index < items.length; index += 1) {
+    const item = items[index];
+    if (!isTextItem(item)) {
+      continue;
+    }
+    if (item.str === "") {
+      if (item.hasEOL) {
+        best = index; // the line's own end: the marker goes after it
+        break;
+      }
+      continue;
+    }
+    const fontSize = Math.max(anchor.height, item.height) || 1;
+    if (Math.abs((item.transform[5] ?? 0) - baseline) > fontSize * 0.5) {
+      break;
+    }
+    best = index;
+    if (item.hasEOL) {
+      break;
+    }
+  }
+  return best;
+}
+
+/**
+ * A page's text with each image's marker on its own line where the reading
+ * order puts the image (D2). No images → exactly `buildPageText`.
+ */
+export function buildPageTextWithImages(
+  items: readonly unknown[],
+  images: readonly PdfImagePlacement[],
+): string {
+  const after = new Map<number, PdfImagePlacement[]>();
+  for (const image of images) {
+    const at = anchorItem(items, (image.top + image.bottom) / 2);
+    after.set(at, [...(after.get(at) ?? []), image]);
+  }
+  for (const list of after.values()) {
+    // Higher on the page first, then left to right.
+    list.sort((a, b) => b.top - a.top || a.left - b.left);
+  }
+  return assemblePageText(
+    items,
+    new Map([...after].map(([at, list]) => [at, list.map((image) => image.marker)])),
+  );
+}
+
+function assemblePageText(
+  items: readonly unknown[],
+  markersAfter: ReadonlyMap<number, readonly string[]>,
+): string {
   let raw = "";
+  const placeMarkers = (at: number): boolean => {
+    const markers = markersAfter.get(at);
+    if (markers === undefined) {
+      return false;
+    }
+    raw += `${raw === "" || raw.endsWith("\n") ? "" : "\n"}${markers.join("\n")}\n`;
+    return true;
+  };
+  placeMarkers(-1);
   let prev: PdfTextItem | null = null;
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
     if (!isTextItem(item)) {
       continue;
     }
@@ -130,6 +236,7 @@ export function buildPageText(items: readonly unknown[]): string {
       if (item.hasEOL) {
         raw += "\n";
         prev = null;
+        placeMarkers(index);
       }
       continue;
     }
@@ -141,6 +248,9 @@ export function buildPageText(items: readonly unknown[]): string {
       raw += "\n";
     }
     prev = item;
+    if (placeMarkers(index)) {
+      prev = null; // a marker line ends the text line: no space across it
+    }
   }
   return cleanText(raw);
 }
@@ -297,6 +407,8 @@ export interface FormatPdfTextInput {
    * was left out.
    */
   readonly readHint?: boolean;
+  /** The read's image footer (`imageFooter`), placed after the pages; `""`/absent = none. */
+  readonly imageFooter?: string;
 }
 
 function pluralPages(count: number): string {
@@ -328,7 +440,8 @@ export function formatPdfText(input: FormatPdfTextInput): string {
       : `[pdf ${input.name}: ${pluralPages(input.numPages)}, pages ${compressRanges(read)} shown]`;
   const body = kept.map((page) => `${pageMarker(page.n, input.numPages)}\n${page.text}`);
   const footer = missingFooters(readNumbers, input.numPages, input.readHint ?? true);
-  return [header, ...body, ...footer].join("\n");
+  const images = input.imageFooter ? [input.imageFooter] : [];
+  return [header, ...body, ...images, ...footer].join("\n");
 }
 
 function pageMarker(page: number, numPages: number): string {

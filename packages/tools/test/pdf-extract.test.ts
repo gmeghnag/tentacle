@@ -399,6 +399,9 @@ describe("pdf.js options and the worker prelude (security)", () => {
       useWorkerFetch: false,
       stopAtErrors: false,
       enableXfa: false,
+      // Raw pixels back, never an ImageBitmap or a native decoder (pdf-images D1).
+      isOffscreenCanvasSupported: false,
+      isImageDecoderSupported: false,
       verbosity: 0,
     });
     expect("cMapUrl" in opts).toBe(false);
