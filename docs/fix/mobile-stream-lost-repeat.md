@@ -360,7 +360,46 @@ is from the worktree at `/Users/gmeghnag/tentacle/.tentacle/worktrees/mobile-str
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-21* (fresh context; different model from the executor)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM test gap; the code itself holds).
+
+**Findings**
+1. **MEDIUM — partial retraction of a merged notice is unpinned** (`apps/mobile/src/transcript.ts:411-412`,
+   tests `apps/mobile/test/transcript.test.ts:330-384`). Mutation: in `retractLostNotice`, drop the
+   WHOLE row when it lists `turnId` (`const rest: string[] = []`) → all 48 transcript tests still pass.
+   Failure scenario: turns A and B lost back-to-back merge into one notice `[A,B]` (rule 2b); A is
+   re-subscribed and ends `ended` → the notice vanishes, hiding B's real, unrecovered loss — exactly
+   the "silent wrong state" the plan's rule 4 says must never happen. Add a test: lost A, lost B,
+   bracket A ends `ended` → one notice with `lostTurns` `["B"]`; show it red under this mutation.
+
+**Gate (reviewer-run):** transcript + session-feed + queue-trace: 88 pass / 0 fail; `bun run lint`
+clean (2202 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not re-run here.
+
+**Mutations (reviewer, via temporary edits, tree verified identical after — `git status` clean):**
+- retract every LOST notice regardless of id (`rest = []`, no `includes`) → T5 red ✔
+- drop whole row when it lists the turn → **survives** (finding 1)
+- note: the executor's "retract regardless of id" is only meaningful as the first form above —
+  merely deleting the `includes(turnId)` guard is an equivalent mutant (the filter still keeps other ids).
+- A scripted run of the 2a/2b/4/cause mutations was blocked by a permission prompt; those rely on the
+  executor's table (not independently reproduced).
+
+**Attacks tried**
+- §7 "logic in pure modules": all branching is in `transcript.ts` / `session-feed.ts`; no component touched. Holds.
+- §7 persistence / protocol: `lostTurns` is fold-only, notices are never persisted, no wire/schema change,
+  no `protocol.d` note needed. Holds. F16 privacy: only `error.name` + numeric code reach the log
+  (`errorShape`), capped by `fieldValue`. Holds.
+- Retraction hiding a real gap: realistic `lost` paths are an `error` frame (`remote-session.ts:2041-2055`:
+  `failAll`, later updates of that turn dropped, no re-attach ⇒ no foreign bracket ⇒ notice stays — honest)
+  and `linkClosed` (link gone ⇒ resync/replace). A retraction requires a later bracket of the SAME `turnId`
+  ending `ended`/`cancelled`. Not traced end-to-end through the relay (the trigger is unreproduced); the
+  precondition "same-id completion ⇒ phone has the reply" stays a reasoned, not executed, claim.
+- Row removal mid-list: keys come from the monotonic `seq` and are never reused; removal is safe.
+
+**Executor behaviour:** stopped and corrected a false plan premise (no free-text log field) instead of
+forcing it; strengthened T1 and added T7 after a mutation exposed a vacuous count — good discipline. Missed
+the merged-notice partial-retraction case. The Execution signature says `claude-sonnet-4-5-20250929` while
+the commit subject says `exec (deepseek)` — reconcile which model executed.
 
 ### Notes / debt
 
