@@ -270,6 +270,7 @@ Red first on each (shown failing on `main`), with the mutation that must turn it
 - **Tap detail: no reasoning** — command verbatim + output only. Q4 is moot (reasoning stays where it is today, the Thought row).
 - **Q6 → shell only.** No intent on MCP tools for now (owner: "restiamo su shell per ora"); a unified `_intent` at the tool-registry level is the shape if it ever comes back.
 - **Q11 → «2 · ∴ che ruota»**, `cells.ts` width verified (∴/∵ = 1 cell, mockup section B); TUI swap every 640 ms (8 × 80 ms shimmer tick). Separate task, not this branch — together with: **iPhone running tool = the TUI blinking ● (500/500 ms, shared phase), replacing the rotating ring** (mockup section C).
+- **No "running…" result line in the TUI** while a command runs (none today, none added): the blinking ● and the Working… slot already say it.
 - Follow-up (separate, small): TUI MCP rows readable like the phone (`playwright · browser_navigate  url` instead of raw name + JSON), rule moved to `@tentacle/core` (mockup section D).
 
 1. **Which variant** (mockup Section A)? A «la frase prende il posto» / B «frase sopra il comando» / C «solo nello slot». — **Recommend A**: one row per command as today, the command one tap away and always in the permission ask.
