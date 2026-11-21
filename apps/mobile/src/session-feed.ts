@@ -24,6 +24,7 @@
  */
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef } from "@tentacle/protocol";
+import { type ErrorShape, errorShape } from "./app-log.ts";
 import type { QueueTrace } from "./queue-trace.ts";
 import {
   type LocalPhoto,
@@ -49,6 +50,14 @@ export interface TurnEndFacts {
   readonly reason?: StopReason;
   /** The stream threw instead of closing (a cut link, a failed send). */
   readonly threw?: true;
+  /**
+   * What a throwing stream threw, as the log may carry it: the error CLASS and
+   * its numeric code, never its message (`app-log.ts` `errorShape`; F16). Carried
+   * to the `turn-end` trace line so a device capture names the next LOST
+   * stream's trigger — the notice alone cannot, and the notification path's
+   * words are not ours (docs/fix/mobile-stream-lost-repeat.md, slice 2).
+   */
+  readonly cause?: ErrorShape;
 }
 
 /** The outcome to fold for a stream that closed: one of the five, never guessed. */
@@ -242,7 +251,12 @@ function foldStream(
     closed = true;
     const outcome = turnOutcome(facts);
     deps.put(apply(deps.state(), { type: "turn_ended", outcome }));
-    deps.trace?.({ kind: "turn-end", turnId, outcome });
+    deps.trace?.({
+      kind: "turn-end",
+      turnId,
+      outcome,
+      ...(facts.cause === undefined ? {} : { cause: facts.cause }),
+    });
     deps.onTurnClosed?.();
     if (!own) {
       deps.setForeign(null);
@@ -275,7 +289,7 @@ function foldStream(
       // `fail`). Said as LOST, never as a silent stop (F8/F19) — and the error
       // still reaches whoever awaited this, which is how a refusal gets its
       // text back.
-      finish({ ended: false, threw: true });
+      finish({ ended: false, threw: true, cause: errorShape(error) });
       throw error;
     }
     finish(ended ? { ended, ...(reason === undefined ? {} : { reason }) } : { ended: false });
