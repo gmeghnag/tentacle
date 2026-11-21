@@ -405,3 +405,26 @@ plan; the fix round was by a different model)
 - Still open, not blocking: simulator shots (blocked by the `main` Metro bug,
   Execution §7) — the owner's on-device look is unverified until that fix lands.
 
+
+## Owner decision 2026-11-21 — variant B: Figtree + abisso petrolio (binding, amends Implementation)
+
+The owner tried Lato + graphite on the phone (build 20/11 19:36) and, from the five variants
+in `.tentacle/mockups/mobile-theme-variants/index.html` (https://claude.ai/artifact/BGs9nUeHX1XMUitsaxawjD),
+chose **B · Figtree + abisso petrolio**. Same mechanism, same Beta switch (still OFF by default;
+it becomes the default only after the owner's phone try-out — a later one-line change):
+- **Font:** Lato → **Figtree** (SIL OFL 1.1). Static faces already downloaded to
+  `/Users/gmeghnag/tentacle/.tentacle/tmp/theme-figtree/` (Figtree-Regular/Bold/Italic/BoldItalic.ttf + OFL.txt):
+  copy them into `apps/mobile/assets/fonts/`, DELETE the Lato files, replace the licence/NOTICE
+  entries, rename `LATO_FACES`/`loadLato`/`latoFace`/`AppFont "lato"`/`beta.lato` and the setting's
+  label ("Tema Figtree (prova)") everywhere — keep the stored-setting key migration-free only if
+  cheap; the app is unpublished, a reset of the switch is acceptable. Check the PostScript names
+  with `fc-scan`/`otfinfo` or fontTools before writing `FIGTREE_FACES`.
+- **Dark palette** ("petrol", replaces graphite #1A1D21 — rename `graphitePalette` →
+  `petrolPalette`, `paletteVariant` → "petrol"): background **#151B1D**, primary text **#D5DDDE**,
+  secondary text **#98A6A8**, separators **#253033**, raised fill (composer, sheets, code/tool
+  rows) **#1D2528**, accent **#22D3EE** (chip/selection tint rgba(34,211,238,.12)). Derive any other
+  graphite token by the same relation it had to #1A1D21 (state it in Execution) and keep every
+  contrast ≥ 4.5:1 for text (primary ≈ 12:1, secondary ≥ 6.6:1 — assert both in the test).
+- **Light:** unchanged palette, only the font changes (as before).
+Tests: update theme-beta / theme-fonts / settings tests to the new names and values; red first.
+*— claude-opus-5-5 (orchestrator, recording the owner's choice), 2026-11-21*
