@@ -651,14 +651,122 @@ describe("run steps (local)", () => {
     expect(last(rows)?.state).toBe("ok");
   });
 
-  test("a docker `where` is refused honestly in this build (Slice 5)", async () => {
-    const { driver, host } = setup({
+  test("a docker step with no workload seam is refused, never run on the laptop", async () => {
+    // The laptop must never stand in for a container: without `execOn` the step
+    // fails saying what is missing (`commands.exec` is present and would succeed).
+    const t = setup({
       approved: true,
       text: YAML("  - id: gate\n    run: make\n    where: { docker: ci }\n"),
     });
+    const driver = new WorkflowDriver({
+      ...t.deps,
+      commands: {
+        authorize: async () => ({ allowed: true }),
+        exec: async () => ({ stdout: "laptop", stderr: "", exitCode: 0 }),
+      },
+    });
+    const rows: WorkflowRow[][] = [];
+    driver.bind({ ...noopHost(), publish: (r) => rows.push([...r]) });
     void driver.start({ name: "task", by: "user" });
     await flush();
-    expect(last(host.rows)?.steps[0]?.reason).toContain("not available yet");
+    expect(last(rows)?.steps[0]?.reason).toContain("no workload seam");
+  });
+});
+
+describe("run steps in a container (Slice 5)", () => {
+  /** A driver whose `execOn` records the target and answers with `outcome`. */
+  function containerRun(text: string) {
+    const calls: {
+      target: { engine: string; name: string; container?: string };
+      command: string;
+      timeoutMs: number;
+    }[] = [];
+    const asks: string[] = [];
+    const setupKey = setup({ approved: true, text });
+    const driver = new WorkflowDriver({
+      ...setupKey.deps,
+      commands: {
+        authorize: async (command, _requester, call) => {
+          // The ask names WHERE as well as WHAT: the driver hands the seam the
+          // step's own target, so the gate can key a rule per workload.
+          asks.push(`${String(call.target?.engine)} ${String(call.target?.name)}: ${command}`);
+          return { allowed: true };
+        },
+        exec: async () => ({ stdout: "laptop", stderr: "", exitCode: 0 }),
+        execOn: async (target, command, options) => {
+          calls.push({ target, command, timeoutMs: options.timeoutMs });
+          return outcome();
+        },
+      },
+    });
+    let outcome = (): { exitCode: number; output: string; notes?: readonly string[] } => ({
+      exitCode: 0,
+      output: "built",
+    });
+    const rows: WorkflowRow[][] = [];
+    driver.bind({ ...noopHost(), publish: (r) => rows.push([...r]) });
+    const set = (next: typeof outcome): void => {
+      outcome = next;
+    };
+    return { driver, calls, asks, rows, set };
+  }
+
+  test("exit 0 passes; exit 2 fails with the tail; the ask names the container", async () => {
+    const t = containerRun(
+      YAML("  - id: gate\n    run: make test\n    where: { docker: devbox, container: app }\n"),
+    );
+    t.set(() => ({ exitCode: 0, output: "ok\n" }));
+    void t.driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(t.asks).toEqual(["docker devbox: make test"]);
+    expect(t.calls[0]?.target).toEqual({ engine: "docker", name: "devbox", container: "app" });
+    // The step's own timeout is the one the seam gets (never a default).
+    expect(t.calls[0]?.timeoutMs).toBeGreaterThan(0);
+    expect(last(t.rows)?.steps[0]?.state).toBe("ok");
+    expect(last(t.rows)?.steps[0]?.reason).toBe("exit 0");
+
+    t.set(() => ({ exitCode: 2, output: "noise\ncompile error: x\n" }));
+    const row = last(t.rows);
+    expect(row?.runId).toBeDefined();
+    await t.driver.rerun(String(row?.runId), "gate");
+    await flush();
+    expect(last(t.rows)?.steps[0]?.state).toBe("error");
+    // The FAILING tail is what the person reads — not the exit code alone.
+    expect(last(t.rows)?.steps[0]?.reason).toContain("exit 2");
+    expect(last(t.rows)?.steps[0]?.reason).toContain("compile error: x");
+    // ...and never the laptop's own answer for the same command.
+    expect(last(t.rows)?.steps[0]?.reason).not.toContain("laptop");
+  });
+
+  test("a killed command (the seam's note) fails the step even on exit 0", async () => {
+    // `WorkloadShells` reports a kill as a NOTE with the ladder's own exit code;
+    // a notice means the command did not simply run, so a note can never pass.
+    const t = containerRun(
+      YAML("  - id: gate\n    run: sleep 900\n    where: { docker: devbox }\n    timeout: 1s\n"),
+    );
+    t.set(() => ({
+      exitCode: 0,
+      output: "partial",
+      notes: [
+        "[killed after 1s: the command's processes were stopped; the shell (cwd/env) survived]",
+      ],
+    }));
+    void t.driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(t.calls[0]?.timeoutMs).toBe(1_000);
+    expect(last(t.rows)?.steps[0]?.state).toBe("error");
+    expect(last(t.rows)?.steps[0]?.reason).toContain("killed after 1s");
+  });
+
+  test("a seam that throws fails the step with its own sentence", async () => {
+    const t = containerRun(YAML("  - id: gate\n    run: make\n    where: { docker: gone }\n"));
+    t.set(() => {
+      throw new Error("docker daemon unreachable");
+    });
+    void t.driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(last(t.rows)?.steps[0]?.state).toBe("error");
+    expect(last(t.rows)?.steps[0]?.reason).toContain("docker daemon unreachable");
   });
 });
 

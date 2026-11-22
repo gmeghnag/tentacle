@@ -987,6 +987,119 @@ filter N times in separate processes.
 
 *— claude-opus-5-5, 2026-11-22*
 
+### Slice 5 — `run` steps in docker
+
+*Resumed from a DeepSeek run stopped by the watchdog; its partial edits were kept where right
+and corrected where not (below).*
+
+**Load-bearing check re-run.** The seam the plan names exists as described:
+`WorkloadShells.run(target, command, {timeoutMs, signal}) → RunOutcome`
+(`packages/tools/src/workload-shell.ts:332-385`), dial failures go through
+`backend.explain(error, target)` (`:137`, `:314`), and the grant key is per workload
+(`session-grants.ts` `workloadTargetKey`). Holds.
+
+**As built.**
+- `packages/agent/src/workflow-driver.ts`: `WorkflowContainerTarget` / `WorkflowContainerOutcome`
+  (structural, since the agent package may not import `@tentacle/tools`), `WorkflowCommands`
+  gains `call.target` on `authorize` and an optional `execOn`. A `docker` step with no `execOn`
+  fails `"…not available in this session (no workload seam)"` BEFORE any ask; it never falls back
+  to the laptop shell. With `execOn`: pass ⇔ exit 0 and no failing note; else
+  `fail: "exit N · <notes>"` + the last 20 lines; a thrown seam error → `fail: "error: <msg>"`.
+- `packages/cli/src/wiring.ts`: the container registry (`containers`, the SAME `WorkloadShells`
+  `workload_shell` uses) is built before the driver. A docker step is authorized AS a
+  `workload_shell` call `{action: "run", target, command}`, so its ask names the container and its
+  "always" rule is keyed per workload. `execOn` is passed only when the registry exists. It maps
+  `RunOutcome` through the new pure `workflowContainerOutcome`. Errors become the seam's own
+  sentence: a refusal as is, the abort with its notices, anything else via
+  `containers.explain(error, target)` (container missing or stopped, no `/bin/sh`).
+
+**Drift from DeepSeek's partial edits (fixed).**
+1. Every seam notice failed the step. But `newShell` / `cwdRestored` only mean "the shell was
+   reopened", and an idle close between two steps of one run is normal, so a later docker step
+   would have failed falsely. Now only `lost`, `shellExited` and `killed*` fail the step. The
+   ladder reports a timeout kill with exit code **0** (`workload-shell.ts:490`), so that notice IS
+   the failure. Info notices go into the output.
+2. A never-dialled `noDialBackend` built a second tool just for its identity. Removed: the
+   identity is the session's own `createWorkloadShellTool(containers)`.
+3. A dial error reached the step raw. Now it goes through `explain`, per the failure-mode row.
+
+**Tests** (red by mutation, then restored; green after).
+- `packages/agent/test/workflow-driver.test.ts`, "run steps in a container":
+  - exit 0 → `ok "exit 0"`; exit 2 → `error` with the tail and never the laptop's output;
+  - a kill note on exit 0 → `error`, with the step's own `timeoutMs` (1 s → 1000) passed to the seam;
+  - a throwing seam → its sentence;
+  - no `execOn` → refused, even though `exec` would succeed.
+- `packages/cli/test/workflow-wiring.test.ts` (real gate, real `WorkloadShells`, a backend that
+  cannot dial):
+  - the tool ask is `workload_shell` with `target {docker, devbox, app}`, and the step's reason is
+    the backend's `explain` sentence;
+  - with no backend, no tool ask happens and the step fails;
+  - the pure mapper: kill / lost → notes, while `newShell` + stderr → output only.
+
+| # | Mutation | Result |
+|---|---|---|
+| M2 | driver passes on exit 0 ignoring notes | 1 fail (kill note test) |
+| M3 | docker step authorized as `shell` | 1 fail (wiring ask test) |
+| M4 | mapper: every notice fails | 1 fail (mapper test) |
+| M5 | dial error rethrown raw, not explained | 1 fail (wiring ask test) |
+| M6 | no-seam guard removed (docker → laptop `exec`) | 2 fail (driver + wiring "no backend") |
+
+All were restored, and then 38 pass / 0 fail across `workflow-wiring`, `workflow-driver` and
+`workload-shell-wiring`. Biome is clean on the 4 files. `tsc -p packages/cli|agent`: 0 errors
+in the touched files.
+
+**Note.** A docker step needs the container registry, and that registry exists only where
+`workload_shell` is offered: a laptop or `serve` host with `workloadShell.tool` on (off by
+default, docs/fix/workload-shell-live.md). Anywhere else the step fails with "no workload seam".
+The changelog fragment `changelog.d/agent-workflows.added.md` is extended by one sentence.
+
+*— claude-opus-5-5, 2026-11-23*
+
+### Slice 6 — STOPPED before any edit: the plan omits the client → TUI data path
+
+**What the plan says.** Slice 6 lists `tui/src/workflow-view.ts`, `WorkflowBlock.tsx`,
+`panels/workflow.ts`, `panels/registry.ts` and the slash registry. It assumes the TUI can
+already read a session's runs and can already send `session/workflow`.
+
+**What the code has.**
+- **The client drops `workflows`.** `packages/client/src/mapping.ts:391` returns `null` for it.
+  The comment says "by its own listeners", but no such listener exists: `RemoteClient` has no
+  `entry.workflows`, no listener set and no snapshot hydrate. `subagents` has all three
+  (`remote-client.ts:965`, `:1549-1556`, `:3560`, `:3986`).
+- **Nothing reaches the TUI.** `RemoteSession` has no `onWorkflows`/`workflows()`, while the
+  sub-agents equivalent is `remote-session.ts:1059`, `:1104`. `local-runtime.ts` has no
+  pass-through (sub-agents: `:369-370`, `:947`), and neither does the TUI session type
+  (`app-types.ts:283`, `useSessionLink.ts:469`).
+- **No client sends `session/workflow`.** `rg 'session/workflow|SessionWorkflow'` finds no hit in
+  `packages/client`, `tui` or `cli` src. The method exists only in `protocol/src/methods.ts:166`
+  and on the daemon. A `/workflow` slash, or the panel's `[r]` rerun, has nothing to call.
+
+**Why stop.** Building slice 6 as written would leave the rail and the panel with no data. The
+alternative is code in `client/` (`remote-client.ts`, `remote-session.ts`), `cli/`
+(`local-runtime.ts`) and `tui/` (`app-types.ts`, `useSessionLink.ts`), all outside the approved
+file list. The owner's binding rule forbids production code outside the approved
+Implementation. That plumbing is also cross-module, while slice 6 is rated `contained`.
+
+**Plan fix (proposed, needs owner OK).** Split slice 6 in the Slices table:
+
+| # | Slice | Size · Blast · Suited | Files |
+|---|---|---|---|
+| 6a | Client plumbing for runs | M · cross-module · standard review | `client/src/remote-client.ts`, `client/src/remote-session.ts`, `cli/src/local-runtime.ts`, `tui/src/app-types.ts`, `tui/src/useSessionLink.ts` (or `hooks.ts`) |
+| 6b | TUI rail + panel + `/workflow` slash (as slice 6 today) | M · contained · standard review | the original slice-6 files, plus `tui/src/panel.ts` (the `OpenPanel` kind union, which the registry's `PanelKindName` derives from, `registry.ts:37`) |
+
+What 6a adds:
+- `workflows` listeners, entry state and snapshot hydrate, mirroring `subagents`;
+- `RemoteSession.onWorkflows` / `workflows()` / `workflow(action, …)` sending
+  `session/workflow`;
+- the TUI session type's optional `onWorkflows` and `workflow`.
+
+Tests for 6a:
+- a `workflows` update reaches `onWorkflows` in seq order;
+- a resync snapshot repaints it (failure row "6–8 update lost / reconnect");
+- `workflow{start}` mints the `turnId` as `session/prompt` does, and a `wake-` id is refused.
+
+*— claude-opus-5-5, 2026-11-23*
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22*

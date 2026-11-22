@@ -96,17 +96,60 @@ export interface WorkflowApprovals {
   add(path: string, hash: string): Promise<void>;
 }
 
+/**
+ * A `where: {docker: …}` target of a `run` step, structurally the
+ * `workload_shell` tool's `target` (this package may not depend on `@tentacle/tools`).
+ */
+export interface WorkflowContainerTarget {
+  readonly engine: "docker";
+  readonly name: string;
+  readonly container?: string;
+}
+
+/** What running one command in a container gave back (structurally `RunOutcome`). */
+export interface WorkflowContainerOutcome {
+  readonly exitCode: number;
+  readonly output: string;
+  /**
+   * The seam's sentences that say the command did NOT simply run to its end (a
+   * kill after the timeout, whose exit code is 0; a lost stream; a shell the
+   * command ended). Any of them fails the step. Informational notices (a
+   * reopened shell) belong in `output`, not here.
+   */
+  readonly notes?: readonly string[];
+}
+
 /** A run step's command: authorised by the session's gate, then executed. */
 export interface WorkflowCommands {
+  /**
+   * `call.target` names the workload the approval is SCOPED to (a `docker` run
+   * step): the gate then asks the `workload_shell` tool, whose "always" rule is
+   * keyed per workload (`session-grants.ts` `workloadTargetKey`), so an approval
+   * given for one container can never cover another.
+   */
   authorize(
     command: string,
     requester: PermissionRequester,
-    call: { readonly toolCallId: string; readonly signal: AbortSignal },
+    call: {
+      readonly toolCallId: string;
+      readonly signal: AbortSignal;
+      readonly target?: WorkflowContainerTarget;
+    },
   ): Promise<{ readonly allowed: true } | { readonly allowed: false; readonly reason: string }>;
   exec(
     command: string,
     options: { readonly signal: AbortSignal; readonly timeoutMs: number },
   ): Promise<ExecResult>;
+  /**
+   * Run one bounded command IN a container, through the workload exec seam
+   * (`workload_shell`, docs/feat/workload-shell.md). Absent → a `docker` step
+   * fails honestly (this build offers no way to reach a container).
+   */
+  execOn?(
+    target: WorkflowContainerTarget,
+    command: string,
+    options: { readonly signal: AbortSignal; readonly timeoutMs: number },
+  ): Promise<WorkflowContainerOutcome>;
 }
 
 /** One slot of the session's ONE sub-agent cap (`AgentJobs.acquire`). */
@@ -904,19 +947,56 @@ export class WorkflowDriver {
       ...(report !== undefined ? { report } : {}),
     });
     const commands = this.deps.commands;
-    if (commands === undefined || step.where.engine !== "local") {
-      return fail(
-        step.where.engine !== "local"
-          ? `where: ${whereLabel(step)} is not available yet in this build (local only)`
-          : "run steps are not available in this session",
-      );
+    if (commands === undefined) {
+      return fail("run steps are not available in this session");
     }
+    // A container step needs the seam that reaches one; without it the step fails
+    // saying what is missing rather than running the command on the LAPTOP.
+    if (step.where.engine !== "local" && commands.execOn === undefined) {
+      return fail(`where: ${whereLabel(step)} is not available in this session (no workload seam)`);
+    }
+    const target =
+      step.where.engine === "local"
+        ? undefined
+        : {
+            engine: "docker" as const,
+            name: step.where.name,
+            ...(step.where.container !== undefined ? { container: step.where.container } : {}),
+          };
     const authorized = await commands.authorize(action.text, this.stepRequester(run, step.id), {
       toolCallId: run.runId,
       signal,
+      ...(target !== undefined ? { target } : {}),
     });
     if (!authorized.allowed) {
       return fail(authorized.reason);
+    }
+    // The container's own run: exit code + output, and the seam's notes, which
+    // say a killed/lost/reopened shell did not simply run the command.
+    if (target !== undefined) {
+      let ran: WorkflowContainerOutcome;
+      try {
+        ran = await (commands.execOn as NonNullable<WorkflowCommands["execOn"]>)(
+          target,
+          action.text,
+          { signal, timeoutMs: step.timeoutMs },
+        );
+      } catch (error) {
+        return fail(`error: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const output = ran.output.trimEnd();
+      const notes = ran.notes?.filter((n) => n !== "") ?? [];
+      if (ran.exitCode === 0 && notes.length === 0) {
+        return {
+          event: { kind: "step_result", verdict: "pass", reason: "exit 0", report: output },
+          reason: "exit 0",
+          tokens: 0,
+          report: output,
+        };
+      }
+      const why = `exit ${ran.exitCode}${notes.length > 0 ? ` · ${notes.join(" ")}` : ""}`;
+      const tail = output.split("\n").slice(-20).join("\n");
+      return fail(`${why}${tail !== "" ? `\n${tail}` : ""}`, output);
     }
     let result: ExecResult;
     try {
