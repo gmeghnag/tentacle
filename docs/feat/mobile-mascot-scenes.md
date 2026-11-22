@@ -456,3 +456,20 @@ sweep through the shipped `rectKey`): **0 frames with duplicate keys** (was 135)
 **Not fixed (deliberately):** the mandatory simulator screenshots, unchanged from both prior
 rounds — no `node_modules`/iOS project in this worktree. It is a build/run artefact, not a code
 property.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-22 (fresh context; reviewed 42f879b8)*
+
+**Verdict: PASS** (code). No HIGH/MEDIUM left.
+
+- **R2 (duplicate React keys) — FIXED.** The key is now the pure `rectKey(rect, index)`
+  (`mascot-scenes.ts`), with the index first, and the layer uses `rects.map((rect, index) => … key={rectKey(rect, index)})`.
+  Mutation: drop `${index}:` from `rectKey` → 2 fails (`› every rect in a frame has its own key`,
+  `› the rocket's three stacked puffs get three keys`). Reverted, tree clean.
+- **Regressions:** none. The diff changes only the key (an index-prefixed key changes no pixels).
+  `order.ts` still gives 0 paint-order errors in all 9 scenes.
+- **Gate:** the 4 mascot/guard files: 86 pass / 0 fail; `bun run lint` clean; `bun run typecheck` OK.
+  The full `bun test` was not re-run by me (the orchestrator's merge gate).
+- **Still open (not a code finding):** the mandatory simulator screenshots (Validation) are
+  absent, so the task stays NOT READY until they are produced.
