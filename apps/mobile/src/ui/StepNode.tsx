@@ -513,7 +513,10 @@ export function StepNode({
                   typography.step,
                   styles.name,
                   subtitle === "" ? styles.nameWide : undefined,
-                  { color: palette.label },
+                  // `sec`, not `label` (docs/fix/mobile-transcript-type.md owner
+                  // decision 3): a step row steps back behind the prose by size and
+                  // lightness, never by hue alone (the owner is colour-blind).
+                  { color: palette.sec },
                   nameItalic === true ? styles.italic : undefined,
                 ]}
               >
@@ -541,7 +544,9 @@ export function StepNode({
                 numberOfLines={1}
                 maxFontSizeMultiplier={DENSE_FONT_SCALE}
                 style={[
-                  typography.caption,
+                  // One size down from the name (13 vs 14), `sec` below: the duration
+                  // is the quietest thing on the line (owner decision 3).
+                  typography.stepMeta,
                   { color: trailingRed ? palette.red : palette.sec },
                   // The live clock's figures hold one width as they count (S2).
                   node === "thinking" ? styles.tabular : undefined,
