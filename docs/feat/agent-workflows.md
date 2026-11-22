@@ -1202,3 +1202,64 @@ problem and the resume-without-rehydration gap.
 spots, so a different-model pass on the load-bearing parts is advisable.
 
 *— claude-opus-5-5, 2026-11-22*
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES.** Scope: `f4ecc672..HEAD` — the fix commit `d9019883` plus the
+gate commit `10807cf9`. (`git diff HEAD~1` alone is only the gate commit.)
+
+**Gate.**
+- `bun run lint`: clean (2289 files).
+- `bun run typecheck`: clean.
+- Touched test files: **110 pass, 0 fail**.
+- **Full `bun test`: 16791 pass, 5 skip, 2 fail**. Both failures are this branch's (findings
+  R2-1 and R2-2). The baseline has 3 opt-in skips; the 2 extra skips are outside the touched
+  packages and were not investigated.
+
+**Mutations** (`.tentacle/tmp/agent-workflows/rv-mut2.ts`). Each was applied, its pinning file
+run, then the file restored; restoration was checked byte for byte, and `git status` is clean.
+
+| # | Mutation | Result |
+|---|---|---|
+| R1 | `reserveRunIds` does nothing | red, 1 fail |
+| R1b | id seed ignores note ids and text | red, 2 fail |
+| R1c | rerun reuses the old id | red, 2 fail |
+| R3 | `budget.wait` upper bound removed | red |
+| R3b | `budget.wait` of 0 accepted | red |
+| R4 | TUI offers "always" | red |
+| R4b | phone offers "always" | red |
+| R5 | stop does not withdraw an open ask | red, 2 fail |
+| R1d | the live `workflow_start` is not re-logged at a new segment (`hosted-session.ts`, `logSegmentFacts`) | **VACUOUS**: 9/9 pass |
+
+**Round 1 findings.**
+- #1 (run-id collision): fixed and pinned.
+- #3 (`budget.wait` bounds): fixed and pinned.
+- #4 ("allow always" on the TUI and the phone): fixed and pinned.
+- #5 (stop withdraws an open ask): fixed and pinned.
+- #2 (Slice 4 not done): the wiring has landed. That covers the driver in the worker and in
+  `serve`, never when tunnelled. It also covers `session/workflow` and `workflow/list`, the
+  `workflow` tool, the approvals store (atomic write) and the loader (no symlinks). The
+  crash-resume failure mode was **narrowed** to "not resumable, start a new run". Owner
+  decision 4 said an explicit `resume` after a crash. Dropping it is a scope cut, and the owner
+  should OK it explicitly. It should not ride in on a fix commit.
+
+**New findings.**
+
+1. **HIGH: R2-1, `packages/agent/test/tool-names-parity.test.ts` fails.** The new `workflow`
+   tool's exported name is missing from `BUILTIN_TOOL_NAMES`. The test output is
+   `- "workflow"` (expected 1, received 0). So the gate is red.
+2. **HIGH: R2-2, serve's new workflow driver makes an existing test flaky.** The test is
+   `(R5) a restarted daemon: the client re-opens the same session and sends`, in
+   `packages/cli/test/connect-model-error.test.ts:313`. It fails intermittently: received `""`,
+   expected `"first"`. I bisected it with `rv-r5.ts`, `--rerun-each 5`:
+   - with `workflows: true` in `cli/src/serve.ts:241`: **3 of 35 runs fail**;
+   - with that line removed: **0 of 35 fail**.
+   Prime suspect: `attachWorkflows` → `publishWorkflows` → `recordCut(null)` at attach
+   (`hosted-session.ts`, `publishWorkflows`). It cuts while a reopened session is being set up,
+   which can race the restored history. Not proven; it is the executor's to pin down.
+3. **MEDIUM: R2-3, no test covers the Slice 3 re-log obligation.** The code that re-logs the
+   live run's `workflow_start` at every new segment (`hosted-session.ts`, `logSegmentFacts`,
+   `this.workflows?.liveStart()`) can be removed and every test still passes (mutation R1d).
+   Without it, a crash after a compaction mid-run leaves the run with no `interrupted` note.
+
+*— claude-opus-5-5, 2026-11-22*
