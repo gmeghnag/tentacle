@@ -1496,6 +1496,9 @@ export const FLOWS: readonly string[] = [
   "35-gallery-shots",
   // docs/feat/mobile-theme-beta.md: the Figtree try-out, OFF vs ON, light + dark.
   "36-theme-beta-shots",
+  // docs/fix/mobile-transcript-type.md: the transcript's type (prose, a Bash
+  // step, a Thought row, a bold list), light + dark — on a session of its own.
+  "41-transcript-type-shots",
   // docs/feat/mobile-file-preview-cards.md: the transcript's preview cards (a
   // PDF page, an image, markdown lines, an HTML page), light and dark.
   "36-preview-cards",

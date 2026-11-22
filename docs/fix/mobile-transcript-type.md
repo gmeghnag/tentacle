@@ -306,6 +306,44 @@ script.
 `NOT READY: simulator shots + the main-branch before-shot need a Release build, not available in
 this worktree`
 
+### Validation shots
+
+*— claude-opus-5-5, 2026-11-22*
+
+Run: `scripts/e2e-gate.sh 0FA4B51F-A0E3-421B-BE66-CE29EF45213D --only 41-transcript-type-shots`
+(iOS 26, Release build of this branch, mock model).
+
+**Flow fixes, no production code.** (1) `41-transcript-type-shots` was missing from `FLOWS` in
+`apps/mobile/e2e/run.ts`, so `--only` rejected it as an unknown flow. Only its session var had
+been added. It is now registered after `36-theme-beta-shots`, and `e2e-flows` + `e2e-gate`
+pass: 75/0. (2) The last step's `scrollUntilVisible text: "Quitting now only"` never matched,
+because Maestro matches the whole string and the node reads `Quitting now only detaches`. It
+is now `"Quitting now only.*"`. Run 1 failed on that step only, after the steps and prose
+shots had landed. **This fix has not been re-run:** permission to re-run was refused. It only
+affects the third, redundant shot: the bold list is already fully in the prose shots.
+
+Files (`docs/fix/mobile-transcript-type/`):
+- `after-steps-prose-bash-thought-dark.png` / `-light.png`: prose, the two `Thought` rows,
+  the Bash steps (ok + failed), `Read`, an MCP step, and a closing paragraph with a bold run.
+- `after-prose-table-bold-list-dark.png` / `-light.png`: prose with inline code, a code block,
+  a table, and the bullet list with a bold **detaches**.
+- **No before-shot from `main`.** None was in this folder, and per instructions `main` was not
+  checked out. The executor's repro output (500 drawn as Regular) stands in for it.
+
+What I saw, compared with the mockup's variant A:
+- **Dark prose is Medium, light prose is Regular, as chosen.** The same paragraph ("…no
+  browser tool is set up.") is visibly heavier and wider in dark than in light. That shows on
+  the device that iOS resolves `Figtree-Medium` at 500, which was the Review's open runtime
+  question.
+- **Step rows match the mockup's "new" treatment.** They are smaller than prose, drawn in the
+  secondary grey, at regular weight. Durations are right-aligned and smaller, and failures are
+  red (`75 ms`, `0 ms`). Thought rows use the hollow node, grey label, italic duration. The
+  rail and dots are unchanged.
+- **Bold reads 700** (`notes.txt`, `detaches`) and is clearly distinct from the 500 prose in
+  dark.
+- Nothing clearly wrong. Minor: the header spinner was still turning at the shot. It is the
+  connection indicator, not part of this change.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22* (fresh context; a different model family from the executor, deepseek-v4-pro)
