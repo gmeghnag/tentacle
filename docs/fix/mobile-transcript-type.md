@@ -307,3 +307,40 @@ script.
 this worktree`
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-22* (fresh context; a different model family from the executor, deepseek-v4-pro)
+
+**Verdict: APPROVE (PASS).** No HIGH or MEDIUM code findings. One open gate item, outside the code (below).
+
+- **Gate (this reviewer).** I ran the narrow set: `transcript-type`, `theme-fonts`, `theme-beta`,
+  `text-seam-render`, `thinking-motion`, `step-rail`, `e2e-flows` and `e2e-gate`. Result:
+  160 pass / 0 fail. `bun run lint`: clean, 2265 files. `bun run typecheck` (root + mobile +
+  relay): clean. I did not run the full `bun test`. The diff is mobile-only.
+- **Mutations (§9).** I added two of my own beyond the executor's M1–M8:
+  (a) the StepNode duration goes back to `typography.caption`;
+  (b) the Markdown bullet drops `ctx.prose`, so it loses its 16/23 size, now that `styles.bullet`
+  carries no size.
+  Each one turns `transcript-type.test.ts` red. I reverted both, and `git status` came back clean.
+- **Attacks tried.**
+  (1) **Palette identity.** `isDark` compares by reference. I grepped for derived palettes
+  (`...palette`, `as Palette`) and found none: every `Markdown` caller passes one of the three
+  palette constants. Holds.
+  (2) **Heading weight.** `[ctx.prose, styles.bold, …]` puts the 700 last, so it wins. Holds.
+  (3) **Italic at 500/600.** `figtreeFace` → MediumItalic/SemiBoldItalic, and `FACE_WEIGHT`
+  gives the patch the face's own weight class. Holds.
+  (4) **Odd weights.** `"light"`, 900, NaN and `"  Medium "` each resolve to a face, never
+  `undefined`. Holds.
+  (5) **§7.** The logic sits in the pure `transcript-type.ts`, and the components only apply it.
+  No change to protocol, persistence or terminal paths. Holds.
+- **Open item (not a code defect; must be closed before merge).** The doc's mandatory Validation
+  is `NOT READY`, so nothing has shown on a device that iOS really draws `Figtree-Medium` at
+  500. The upstream Medium and SemiBold files declare their own nameID-1 family
+  (`Figtree Medium`, `Figtree SemiBold`), so how RN's `RCTFont` resolves the family and weight
+  is only proven at runtime. The orchestrator must run
+  `bun run e2e:mobile --ios 26 --only 41-transcript-type-shots`, on this branch and on `main`.
+- **Nit (owner call).** `proseStyle` also applies in the user bubble, `SubagentDetail` and the
+  artifact `MarkdownViewer`, because they share `Markdown`. That reach goes beyond "assistant
+  text, lists", but it is consistent.
+- **Executor behaviour.** Honest work. Red-first was shown. The executor found and reported a
+  blind spot in its own test (M1 was not caught by the token-only walk) and fixed it. It
+  reported `NOT READY` rather than faking screenshots.
