@@ -175,6 +175,10 @@ export const NOTE_KIND = {
    * docs/feat/subagent-panel.md): the parent agent is told, and asked for nothing.
    */
   userToSubagent: "user_to_subagent",
+  /** A workflow run ended (`wf-N`): the live end note (docs/feat/agent-workflows.md D3). */
+  workflowEnd: "workflow_end",
+  /** A workflow run a restart found unfinished, closed `stopped: interrupted` at load (D4). */
+  workflowInterrupted: "workflow_interrupted",
 } as const;
 
 /** How full the model's context was: `used` tokens of a `window` (both tokens). */

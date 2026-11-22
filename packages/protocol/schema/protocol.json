@@ -1828,7 +1828,10 @@
           "truncate": "#/$defs/LogTruncateEntry",
           "turn_end": "#/$defs/LogTurnEndEntry",
           "turn_start": "#/$defs/LogTurnStartEntry",
-          "usage": "#/$defs/LogUsageEntry"
+          "usage": "#/$defs/LogUsageEntry",
+          "workflow_end": "#/$defs/LogWorkflowEndEntry",
+          "workflow_start": "#/$defs/LogWorkflowStartEntry",
+          "workflow_step": "#/$defs/LogWorkflowStepEntry"
         },
         "propertyName": "type"
       },
@@ -1877,6 +1880,15 @@
         },
         {
           "$ref": "#/$defs/LogUsageEntry"
+        },
+        {
+          "$ref": "#/$defs/LogWorkflowStartEntry"
+        },
+        {
+          "$ref": "#/$defs/LogWorkflowStepEntry"
+        },
+        {
+          "$ref": "#/$defs/LogWorkflowEndEntry"
         }
       ]
     },
@@ -2580,6 +2592,220 @@
         }
       },
       "required": ["completionTokens", "id", "promptTokens", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogWorkflowEndEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunId"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "stopReason": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "workflow_end",
+          "type": "string"
+        }
+      },
+      "required": ["id", "reason", "runId", "seq", "state", "ts", "type"],
+      "type": "object"
+    },
+    "LogWorkflowStartEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "by": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "hash": {
+          "$ref": "#/$defs/WorkflowHash"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowInputValue"
+          },
+          "type": "array"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunId"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "const": "workflow_start",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "by",
+        "hash",
+        "id",
+        "inputs",
+        "name",
+        "path",
+        "runId",
+        "seq",
+        "ts",
+        "type",
+        "version"
+      ],
+      "type": "object"
+    },
+    "LogWorkflowStepEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "model": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prompt": {
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "report": {
+          "maxLength": 65536,
+          "type": "string"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunId"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "stepId": {
+          "$ref": "#/$defs/WorkflowStepId"
+        },
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "workflow_step",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "where": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "durationMs",
+        "id",
+        "reason",
+        "round",
+        "runId",
+        "seq",
+        "state",
+        "stepId",
+        "tokens",
+        "ts",
+        "type",
+        "where"
+      ],
       "type": "object"
     },
     "McpServerState": {
@@ -5027,7 +5253,8 @@
           "tool_progress": "#/$defs/ToolProgress",
           "truncated_reply": "#/$defs/TruncatedReply",
           "turn_end": "#/$defs/TurnEndUpdate",
-          "turn_start": "#/$defs/TurnStart"
+          "turn_start": "#/$defs/TurnStart",
+          "workflows": "#/$defs/WorkflowsUpdate"
         },
         "propertyName": "type"
       },
@@ -5124,6 +5351,9 @@
         },
         {
           "$ref": "#/$defs/CapabilitiesUpdate"
+        },
+        {
+          "$ref": "#/$defs/WorkflowsUpdate"
         }
       ]
     },
@@ -5343,6 +5573,12 @@
         },
         "turn": {
           "$ref": "#/$defs/SnapshotTurn"
+        },
+        "workflows": {
+          "items": {
+            "$ref": "#/$defs/WorkflowRow"
+          },
+          "type": "array"
         }
       },
       "required": ["messages"],
@@ -6316,6 +6552,416 @@
       },
       "required": ["completionTokens", "promptTokens"],
       "type": "object"
+    },
+    "WorkflowHash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WorkflowInputValue": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": ["name", "value"],
+      "type": "object"
+    },
+    "WorkflowListParams": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
+    "WorkflowListResult": {
+      "additionalProperties": true,
+      "properties": {
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowListRow"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["runs"],
+      "type": "object"
+    },
+    "WorkflowListRow": {
+      "additionalProperties": true,
+      "properties": {
+        "done": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "endedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "needsUser": {
+          "type": "boolean"
+        },
+        "runId": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "step": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 256,
+          "type": "string"
+        },
+        "total": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "done",
+        "name",
+        "needsUser",
+        "runId",
+        "sessionId",
+        "startedAt",
+        "state",
+        "total"
+      ],
+      "type": "object"
+    },
+    "WorkflowName": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "WorkflowParams": {
+      "discriminator": {
+        "mapping": {
+          "rerun_step": "#/$defs/WorkflowParamsRerunStep",
+          "resume": "#/$defs/WorkflowParamsResume",
+          "start": "#/$defs/WorkflowParamsStart",
+          "stop": "#/$defs/WorkflowParamsStop"
+        },
+        "propertyName": "action"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WorkflowParamsStart"
+        },
+        {
+          "$ref": "#/$defs/WorkflowParamsStop"
+        },
+        {
+          "$ref": "#/$defs/WorkflowParamsResume"
+        },
+        {
+          "$ref": "#/$defs/WorkflowParamsRerunStep"
+        }
+      ]
+    },
+    "WorkflowParamsRerunStep": {
+      "additionalProperties": true,
+      "properties": {
+        "action": {
+          "const": "rerun_step",
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "stepId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["action", "runId", "sessionId", "stepId", "turnId"],
+      "type": "object"
+    },
+    "WorkflowParamsResume": {
+      "additionalProperties": true,
+      "properties": {
+        "action": {
+          "const": "resume",
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["action", "runId", "sessionId", "turnId"],
+      "type": "object"
+    },
+    "WorkflowParamsStart": {
+      "additionalProperties": true,
+      "properties": {
+        "action": {
+          "const": "start",
+          "type": "string"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowInputValue"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "name": {
+          "$ref": "#/$defs/WorkflowName"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["action", "name", "sessionId", "turnId"],
+      "type": "object"
+    },
+    "WorkflowParamsStop": {
+      "additionalProperties": true,
+      "properties": {
+        "action": {
+          "const": "stop",
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["action", "runId", "sessionId"],
+      "type": "object"
+    },
+    "WorkflowResult": {
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "runId": {
+          "maxLength": 32,
+          "type": "string"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
+    "WorkflowRow": {
+      "additionalProperties": true,
+      "properties": {
+        "budget": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "endedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "runId": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/WorkflowStepRow"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "stopReason": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["hash", "name", "runId", "startedAt", "state", "steps", "tokens", "version"],
+      "type": "object"
+    },
+    "WorkflowRunId": {
+      "maxLength": 32,
+      "pattern": "^wf-[1-9][0-9]*$",
+      "type": "string"
+    },
+    "WorkflowRunRef": {
+      "maxLength": 32,
+      "pattern": "^wf-[1-9][0-9]*$",
+      "type": "string"
+    },
+    "WorkflowStepId": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "WorkflowStepRow": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 16,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "live": {
+          "maxLength": 200,
+          "type": "string"
+        },
+        "maxRound": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "where": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["attempt", "id", "kind", "round", "state", "where"],
+      "type": "object"
+    },
+    "WorkflowWord": {
+      "maxLength": 32,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "type": "string"
+    },
+    "WorkflowsUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowRow"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "workflows",
+          "type": "string"
+        }
+      },
+      "required": ["runs", "type"],
+      "type": "object",
+      "x-event-class": "display"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6729,6 +7375,22 @@
       },
       "result": {
         "$ref": "#/$defs/WatchNextResult"
+      }
+    },
+    "session/workflow": {
+      "params": {
+        "$ref": "#/$defs/WorkflowParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowResult"
+      }
+    },
+    "workflow/list": {
+      "params": {
+        "$ref": "#/$defs/WorkflowListParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowListResult"
       }
     }
   },

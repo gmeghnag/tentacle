@@ -98,6 +98,10 @@ import {
   UnqueueResultSchema,
   UpdateSettingsParamsSchema,
   UpdateSettingsResultSchema,
+  WorkflowListParamsSchema,
+  WorkflowListResultSchema,
+  WorkflowParamsSchema,
+  WorkflowResultSchema,
 } from "./session.ts";
 import { SessionSkillsParamsSchema, SessionSkillsResultSchema } from "./skills.ts";
 import { SessionToolsParamsSchema, SessionToolsResultSchema } from "./tools.ts";
@@ -155,6 +159,13 @@ export const Method = {
    * daemon-side (it is state, never a turn), so it never awaits the peer.
    */
   ScheduleDelete: "session/schedule_delete",
+  /**
+   * The user starts / stops / resumes a workflow run, or re-runs one step
+   * (docs/feat/agent-workflows.md D3). An older daemon answers `MethodNotFound`.
+   */
+  Workflow: "session/workflow",
+  /** Every live session's workflow runs (serve only; the phone's run list, D5). */
+  WorkflowList: "workflow/list",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
@@ -295,6 +306,8 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: ScheduleDeleteParamsSchema,
     result: ScheduleDeleteResultSchema,
   },
+  [Method.Workflow]: { params: WorkflowParamsSchema, result: WorkflowResultSchema },
+  [Method.WorkflowList]: { params: WorkflowListParamsSchema, result: WorkflowListResultSchema },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {
     params: ModelStreamChunkedParamsSchema,

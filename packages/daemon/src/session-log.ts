@@ -23,7 +23,14 @@
  * `rebased` to the last `base`.
  */
 import type { SessionCapabilities } from "@tentacle/agent";
-import type { ChatMessage, SubagentBackgroundBody, SubagentEndBody } from "@tentacle/core";
+import type {
+  ChatMessage,
+  SubagentBackgroundBody,
+  SubagentEndBody,
+  WorkflowEndBody,
+  WorkflowStartBody,
+  WorkflowStepBody,
+} from "@tentacle/core";
 import {
   type KnownLogEntry,
   LOG_PAGE_MAX_CHARS,
@@ -208,6 +215,24 @@ export class SessionLog {
   /** A background sub-agent ended (`report`: its capped work product). */
   subagentEnd(body: SubagentEndBody): void {
     this.push({ type: "subagent_end", critical: false, ...body });
+  }
+
+  /**
+   * A workflow run started / one step execution ended / the run ended
+   * (docs/feat/agent-workflows.md D4): NON-critical terminal facts. The body
+   * comes from core's builders (`workflowStartBody`, …), which cap it and judge
+   * it by the entry's schema, so the log never holds an entry a reader refuses.
+   */
+  workflowStart(body: WorkflowStartBody): void {
+    this.push({ type: "workflow_start", critical: false, ...body });
+  }
+
+  workflowStep(body: WorkflowStepBody): void {
+    this.push({ type: "workflow_step", critical: false, ...body });
+  }
+
+  workflowEnd(body: WorkflowEndBody): void {
+    this.push({ type: "workflow_end", critical: false, ...body });
   }
 
   /**

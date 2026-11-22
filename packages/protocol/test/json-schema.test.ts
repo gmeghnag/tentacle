@@ -297,6 +297,43 @@ const FIXTURES: Record<string, Json[]> = {
     { deleted: false },
     { deleted: false, reason: "no schedule sc-9 in this session" },
   ],
+  // feat/agent-workflows S3: the user drives a workflow run; the phone lists them.
+  "methods/session~1workflow/params": [
+    {
+      sessionId: "s",
+      action: "start",
+      name: "task",
+      inputs: [{ name: "slug", value: "x" }],
+      turnId: "t1",
+    },
+    { sessionId: "s", action: "stop", runId: "wf-1" },
+    { sessionId: "s", action: "resume", runId: "wf-1", turnId: "t2" },
+    { sessionId: "s", action: "rerun_step", runId: "wf-1", stepId: "gate", turnId: "t3" },
+  ],
+  "methods/session~1workflow/result": [
+    { ok: true, runId: "wf-1" },
+    { ok: false, reason: "workflows run only on a laptop or serve session" },
+  ],
+  "methods/workflow~1list/params": [{}],
+  "methods/workflow~1list/result": [
+    { runs: [] },
+    {
+      runs: [
+        {
+          sessionId: "s",
+          title: "t",
+          runId: "wf-1",
+          name: "task",
+          state: "needs-approval",
+          step: "merge",
+          done: 6,
+          total: 7,
+          needsUser: true,
+          startedAt: 1,
+        },
+      ],
+    },
+  ],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
   "methods/session~1send_now/params": [
@@ -815,7 +852,8 @@ describe("tagged-union shape (what codegen needs)", () => {
     //     R1). Not RPC (they have their own `RELAY_PROTOCOL_VERSION`), but the
     //     same `*Schema`/tagged-union shape, so codegen sees them too.
     // +1: `DocumentSource` (an attached document's ref | text, docs/feat/pdf-read.md D4).
-    expect(unions).toBe(11);
+    // +1: `WorkflowParams` (session/workflow by `action`, docs/feat/agent-workflows.md D3).
+    expect(unions).toBe(12);
   });
 
   test("every $ref names a $def", () => {

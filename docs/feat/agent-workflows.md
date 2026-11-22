@@ -563,6 +563,147 @@ packages/core/test/agent-job-ledger.test.ts packages/config/test` → 545 pass,
   `prompt:` file's bytes reach the spec via `spec.prompts` and are joined by the
   driver, deliberately (the validator never holds two copies).
 
+### Slice 3 — log types + load notes + wire
+
+*— claude-opus-5-5 (executor), 2026-11-22 — slice 3 only*
+
+**Load-bearing check re-run (A3), before any edit.** `subagent_background` /
+`subagent_end` are non-critical (`protocol/src/session-log.ts:252-271`, table
+`:368-384`), emitted by `daemon/src/session-log.ts:204-210`, and the ONE derivation
+`subagentLoadNotes` (`core/src/agent-job-ledger.ts:382-407`) is called by both loads
+(`daemon/src/session-log-store.ts:1177`, `daemon/src/daemon-state-file.ts:505`). The
+readers' known set is derived from `LOG_ENTRY_CRITICAL`
+(`client/src/session-log-reader.ts:77`, `daemon/src/session-log-file.ts:101`), so a
+new type needs no reader edit. `MessageNote.kind` is a bounded free string
+(`protocol/src/session.ts:46-53`), so a new note kind is not a wire change. **Holds.**
+
+**As built, in dependency order**
+
+1. `protocol/src/session-log.ts`: `LogWorkflowStartEntrySchema`, `…StepEntrySchema`,
+   `…EndEntrySchema` in `KnownLogEntrySchema`; all three `false` in
+   `LOG_ENTRY_CRITICAL`. Every state / verdict / `by` / `stopReason` is
+   `WorkflowWordSchema`, a bounded free word, **never an enum**: a malformed KNOWN
+   entry makes a reader refuse the whole file, so a newer build's new state must not
+   poison an older one (the review-M4 lesson of `subagent_end.stopReason`). Bounds
+   exported as constants (`WORKFLOW_*_MAX_CHARS`).
+2. `protocol/src/session.ts`: `WorkflowStepRowSchema`, `WorkflowRowSchema`
+   (labels `line()`), the snapshot field `workflows`, `WorkflowParamsSchema` (a
+   discriminated union on `action`: `start{name, inputs?, turnId}` · `stop{runId}` ·
+   `resume{runId, turnId}` · `rerun_step{runId, stepId, turnId}`),
+   `WorkflowResultSchema {ok, runId?, reason?}`, `WorkflowList{Params,Row,Result}`.
+3. `protocol/src/updates.ts`: `WorkflowsUpdateSchema {type:"workflows", runs}`,
+   class `display`. `protocol/src/methods.ts`: `session/workflow`, `workflow/list`.
+4. `core/src/workflow-ledger.ts` (new; exported from `core/src/index.ts`): the
+   body builders `workflowStartBody` / `workflowStepBody` / `workflowEndBody` — the
+   ONE place an entry is built: every text capped (head + tail), counts made
+   non-negative integers, the result judged by the entry's own schema, and a body
+   that still fails (a bad run id / hash / step id: a caller bug) **throws** before it
+   can reach a log. `capWorkflowInputs` keeps the inputs ≤ 4 KiB of JSON and says
+   how many it dropped. `workflowLoadNotes(entries, messages)`: replays the current
+   segment, drops ended runs and runs a `workflow_end` / `workflow_interrupted` note
+   already names, returns one `[workflow wf-N …: stopped · interrupted]` user note per
+   open run (note `{kind:"workflow_interrupted", id: runId}`) — idempotent.
+   `core/src/model.ts`: `NOTE_KIND.workflowEnd`, `NOTE_KIND.workflowInterrupted`.
+5. `daemon/src/session-log.ts`: `workflowStart` / `workflowStep` / `workflowEnd`
+   emitters (`critical: false`). `session-log-store.ts` and `daemon-state-file.ts`:
+   `workflowLoadNotes` beside `subagentLoadNotes`, same entries, same messages.
+6. `client/src/mapping.ts`: `workflows` → `null` (session-level, consumed by its own
+   listeners like `subagents`; those listeners are Slice 6).
+7. `protocol.d/agent-workflows.md` (the `workflow_approve` meaning change + the
+   additive list); `packages/protocol/schema/protocol.json` regenerated
+   (`bun run schema:export`).
+
+**Drift from the Implementation (each reconciled here; no Design rule changed)**
+
+1. **`inputs` is a list `[{name, value}]`, not a record**, in the log entry and in
+   `session/workflow{start}`: the JSON-schema export refuses `z.record`
+   (`protocol/src/json-schema.ts:198`, "unrepresentable zod type ZodRecord"). Shape
+   only; D4's "≤ 4 KiB" holds (`capWorkflowInputs`).
+2. **`workflow_end` carries an optional `stopReason`** (free word) beside `state` +
+   `reason`, so a view does not parse the sentence; additive.
+3. **Row `reason` / `live` are bounded plain strings, not `line()`**: a failed `run`
+   step's reason carries its last output lines (newlines), which `line()` refuses —
+   a refusal would turn the whole display update into an error. Labels (ids, name,
+   state, where, model) are `line()`. The client flattens for display (Slice 6).
+4. **`core/src/model.ts`** (not in the slice's file list): two `NOTE_KIND` constants
+   — the one registry of note kinds this build writes.
+5. **Methods registered without a daemon handler yet.** Until Slice 4 wires
+   `connection.ts`, a call to `session/workflow` / `workflow/list` on this branch
+   answers `unexpected method` (`daemon/src/connection.ts:599-600`), not a result.
+   No client calls them yet. The branch must not merge before Slice 4.
+6. **The `protocol.d` note describes Slice 4's change** (the auto-accept exclusion
+   of `workflow_approve`, `core/src/permission.ts:294`), placed here because the
+   slice table puts it here. It is only true once Slice 4 lands — same merge gate.
+7. **Changelog**: the plan put the fragment with Slice 6; the executor instruction
+   asked for one now, so `changelog.d/agent-workflows.added.md` exists (groundwork
+   wording). Slice 6 should REWRITE that file, not add a second one.
+
+**Tests (all new code; red shown by mutation, §9)**
+
+- `core/test/workflow-ledger.test.ts` (12): round trip of the three types through the
+  strip schemas; an unknown field stripped; a newer state word still loads; all three
+  non-critical; huge reason/prompt/report capped and still valid; inputs ≤ 4 KiB with
+  the drop row; bad run id / hash / step id throw; load notes: open → one note naming
+  the last ended step, second load `[]`; ended → `[]`; a live `workflow_end` note
+  closes; another note kind with the same id does not; orphan step/end ignored; start
+  order; empty.
+- `daemon/test/workflow-load.test.ts` (5): laptop store — open run → note at load,
+  twice the same, file bytes unchanged; ended run and a run only in a superseded
+  segment → no note; `serve` reload (`rebuild` + `reconcileOnReload`) → the note;
+  **older-reader simulation**: the DAEMON emitter's entries with the three types
+  renamed to unknown ones → `parseLogFile` skips them, the conversation is intact;
+  the emitter writes `critical: false`.
+- `protocol/test/workflow-wire.test.ts` (4): `workflows` known + `display`; snapshot
+  field present/absent; both methods registered; params accept/refuse.
+- `client/test/workflow-mapping.test.ts` (2): a valid `workflows` is a known update
+  mapping to no turn event; a malformed one (bad hash, control char in a label) is an
+  `error`, never `unsupported`.
+- Updated pins: `protocol/test/session-log.test.ts` (critical table),
+  `protocol/test/json-schema.test.ts` (fixtures for the 2 methods; union count 11 →
+  12 for `WorkflowParams`). `version.test.ts` untouched (number moves at merge).
+- Fixture: `daemon/test/support/log-fixture.ts` gains `workflowStart/Step/End`.
+
+```
+bun test packages/protocol/test packages/core/test/workflow-ledger.test.ts \
+  packages/daemon/test/workflow-load.test.ts packages/daemon/test/serve-subagent-reload.test.ts \
+  packages/daemon/test/session-log-store.test.ts packages/client/test/workflow-mapping.test.ts \
+  packages/client/test/mapping.test.ts packages/client/test/session-log-reader.test.ts
+ 635 pass, 0 fail
+```
+
+**Mutation check** (each applied to the real source, only the pinning file run, then
+restored; all red, none vacuous):
+
+```
+red OK  M1  load ignores closing notes              ledger    10 pass 2 fail
+red OK  M2  workflow_end does not close a run        ledger    11 pass 1 fail
+red OK  M3  step reason not capped                   ledger    11 pass 1 fail
+red OK  M4  inputs total not capped                  ledger    11 pass 1 fail
+red OK  M5  laptop load drops workflowLoadNotes      load       4 pass 1 fail
+red OK  M6  serve reload drops workflowLoadNotes     load       4 pass 1 fail
+red OK  M7  daemon emitter writes critical: true     load       3 pass 2 fail
+red OK  M8  critical table: start critical           s-log+led 37 pass 2 fail
+red OK  M9  state word is an enum                    ledger    11 pass 1 fail
+red OK  M10 workflows update `mandatory`             wire       3 pass 1 fail
+red OK  M11 row label not line()-bounded             mapping    1 pass 1 fail
+```
+
+**Gate (executor's part):** `bunx biome check` on the 19 changed files — clean.
+`bunx tsc --noEmit -p packages/daemon` and `-p packages/client` — clean;
+`-p packages/core` — clean; `-p packages/protocol` reports only `packages/tui/*`
+errors that its own tsconfig pulls in (they are there without this change, none in a
+file I touched). Full `bun run check` is the orchestrator's.
+
+**Left to Slice 4 (obligations this slice creates)**
+
+- The driver must build every entry with the core builders (never a hand-made body),
+  write the live end note with `NOTE_KIND.workflowEnd` + `id: runId`, and **re-log
+  `workflow_start` after every `base`** (compaction / `context_reset`) for a run still
+  running — the entries never travel past a segment start, so without it a crash after
+  a compaction leaves the run un-noted (same rule as the sub-agent `segmentFacts`).
+- Wire `session/workflow` / `workflow/list` in `daemon/src/connection.ts`, the
+  `workflows` update + snapshot field in `HostedSession`, and the client listeners.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22*

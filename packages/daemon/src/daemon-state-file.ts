@@ -21,7 +21,12 @@
  */
 import type { RecordTitle } from "@tentacle/agent";
 import { RECORD_TITLE_MAX } from "@tentacle/agent";
-import { type ChatMessage, type ScheduledJob, subagentLoadNotes } from "@tentacle/core";
+import {
+  type ChatMessage,
+  type ScheduledJob,
+  subagentLoadNotes,
+  workflowLoadNotes,
+} from "@tentacle/core";
 import {
   ChatMessageSchema,
   type LogCursor,
@@ -502,7 +507,11 @@ export function rebuild(
   // The notes a load appends (docs/feat/subagent-ledger-log.md), over the FINAL
   // messages: a note delivered after the last log write is in the sidecar's
   // tail, and closes its id. `reconcileOnReload` appends them.
-  const loadNotes = subagentLoadNotes(derivedFrom, messages);
+  // A workflow run a crash left open (docs/feat/agent-workflows.md D4), same entries.
+  const loadNotes = [
+    ...subagentLoadNotes(derivedFrom, messages),
+    ...workflowLoadNotes(derivedFrom, messages),
+  ];
   // The switches (docs/feat/session-capabilities.md S3b): from the SAME
   // entries, so a change logged after `logHead` (its write never paired) is
   // ignored like the rest of that tail (F6).

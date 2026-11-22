@@ -26,6 +26,7 @@ import {
   SubagentRowSchema,
   TurnErrorSchema,
   TurnIdSchema,
+  WorkflowRowSchema,
 } from "./session.ts";
 import { ToolResultSpillSchema } from "./spill.ts";
 import { line } from "./text-line.ts";
@@ -479,6 +480,20 @@ export const SubagentMessageUpdateSchema = z.object({
   n: z.number().int().positive().optional(),
 });
 
+/**
+ * The session's workflow runs changed (a run started, a step moved, an ask
+ * opened, a run ended): the FULL list — the current run + the last few ended —
+ * replacing any earlier one (docs/feat/agent-workflows.md D5). Sent to every
+ * attached client while idle too: a run lives between turns. Display only:
+ * nothing waits on it (an ask a step raises is its own `permission_request`),
+ * and the snapshot's first page carries the same list, so an older client
+ * shows `unsupported` once per session and nothing hangs.
+ */
+export const WorkflowsUpdateSchema = z.object({
+  type: z.literal("workflows"),
+  runs: z.array(WorkflowRowSchema),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -511,6 +526,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SessionSettingsUpdateSchema,
   AutoAcceptUpdateSchema,
   CapabilitiesUpdateSchema,
+  WorkflowsUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -579,6 +595,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   auto_accept: "display",
   // The switches' new state; the snapshot also rides every OpenResult (nothing hangs).
   capabilities: "display",
+  // Full state, also in the snapshot's first page; a step's ask is its own permission_request.
+  workflows: "display",
 };
 
 /** Every update type this build knows — what a client declares at `initialize`. */

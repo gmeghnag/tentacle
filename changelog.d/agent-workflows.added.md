@@ -1,0 +1,1 @@
+- **Agent workflows (groundwork).** A workflow run's facts (start, each step's outcome, end) are now kept in the session history, and a run a restart cut short is closed honestly as "stopped · interrupted" when the session is loaded — never resumed by itself; the wire now carries the session's runs (`workflows`) for the TUI and phone views that follow.
