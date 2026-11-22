@@ -103,3 +103,32 @@ the orchestrator's gate (not run here, per the brief).
 header rows are the text-only ones, not how a real terminal draws them.
 
 ## Review
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, changelog only; the code is sound).
+
+**Findings**
+
+1. MEDIUM — `changelog.d/tui-mascot-hidden.changed.md:1` vs `changelog.d/tui-mascot.added.md:1`. Both fragments are unreleased (`tui-mascot.added.md` is on `main` since `e503f794`, not in `CHANGELOG.md`), so `bun run release` puts them in the SAME version: *Added* advertises "beside it sits a small pixel mascot in one of nine colours", and *Changed* then says that the header "no longer draws the mascot". Users read about a feature that was never shipped visible, and a "change" from a state no release had. It also overrides the Implementation's "no changelog fragment". Fix: delete the `.changed` fragment and edit `tui-mascot.added.md` so it describes what ships (the text header that replaces `Tentacle ready.`, no mascot sentence); the mascot sentence returns with the task that turns the sprite back on.
+
+**Gate (reviewer, re-run):** `mascot` + `render-lines` + `app-frames` tests: 159 pass / 0 fail; `bun run lint` clean (2252 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not re-run (the change is local to `packages/tui`; the executor reports 2939/0 for `packages/tui/test`).
+
+**Premise table**
+| Premise | Result |
+|---|---|
+| Sprite painted only through `headerView` → `render-lines.ts` `headerLines` | TRUE — `rg mascotCells\|headerView\|GUTTER` outside tests: only `mascot.ts:106,177,191` and `render-lines.ts:32,172,198` |
+| Off ⇒ exactly the existing text-only path (no gutter) | TRUE — `mascot.ts:187-189`: `shown` false ⇒ path budget uses full width, `mascot: null` |
+| `App.tsx` never sets `RenderOptions.mascot` | TRUE — no `mascot:` in `packages/tui/src` outside `render-lines.ts`/`theme.ts` |
+
+**Mutation (§9):** removed `(input.mascot ?? MASCOT_ENABLED) &&` from `mascot.ts:188` → 4 fail (the four new shipped-default tests in all three files), 155 pass; restored from a `.tentacle/tmp` copy, `git status` clean.
+
+**Attacks tried**
+- Another path to the sprite (theme, App, mobile)? None — `theme.ts` only holds palettes; mobile `GUTTER` is unrelated.
+- Override leaking into production (`mascot: true` default somewhere)? No — the spread at `render-lines.ts:181` only forwards an explicit value; `App.tsx` passes none.
+- Width/path regression when hidden: with `shown` false the path budget is `width`, same as the old narrow path; pinned by `render-lines` "shipped default" (`~/tentacle`, column 1).
+- §7 invariants: none touched (no protocol, persistence, terminal-IO or broker change). Blast `contained` confirmed.
+
+**What holds:** single switch, all sprite code and tests kept alive through the override, red-before-green documented, tests non-vacuous.
+
+**Executor behaviour:** careful and honest — load-bearing check run first, both drifts declared with reasons; the second (the changelog) was the wrong call, see finding 1.
+
+*— claude-opus-5-5, 2026-11-22* (fresh context; a different model family from the executor, deepseek-v4-pro)
