@@ -1,471 +1,457 @@
 [
- {
-  "name": "01-shell",
-  "status": "pass",
-  "seconds": 43,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "02-session-list",
-  "status": "pass",
-  "seconds": 40,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "03-refresh",
-  "status": "pass",
-  "seconds": 41,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "05-daemon-down",
-  "status": "pass",
-  "seconds": 76,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "12-pair-declined",
-  "status": "pass",
-  "seconds": 37,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "13-pair-expired",
-  "status": "pass",
-  "seconds": 33,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "14-pair-bad-text",
-  "status": "pass",
-  "seconds": 30,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "15-revoked",
-  "status": "pass",
-  "seconds": 52,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "16-remove-computer",
-  "status": "pass",
-  "seconds": 54,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "17-persisted",
-  "status": "pass",
-  "seconds": 52,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "18-camera-denied",
-  "status": "pass",
-  "seconds": 53,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "19-deep-link",
-  "status": "pass",
-  "seconds": 29,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "20-camera-close",
-  "status": "pass",
-  "seconds": 51,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "06-session-open",
-  "status": "pass",
-  "seconds": 45,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "07-prompt",
-  "status": "pass",
-  "seconds": 70,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "08-permission",
-  "status": "pass",
-  "seconds": 60,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "08b-permission-deny",
-  "status": "pass",
-  "seconds": 51,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "08c-permission-reply",
-  "status": "pass",
-  "seconds": 61,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "09-foreign-turn",
-  "status": "pass",
-  "seconds": 50,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "10-background-ask",
-  "status": "pass",
-  "seconds": 59,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "11-disconnect-mid-turn",
-  "status": "pass",
-  "seconds": 50,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "12-steer",
-  "status": "pass",
-  "seconds": 147,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "13-send-now",
-  "status": "pass",
-  "seconds": 169,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "14-returned-mine",
-  "status": "pass",
-  "seconds": 117,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "15-returned-other",
-  "status": "pass",
-  "seconds": 43,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "16-offline-outbox",
-  "status": "pass",
-  "seconds": 76,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "17-outbox-changed",
-  "status": "pass",
-  "seconds": 55,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "18-photos",
-  "status": "pass",
-  "seconds": 64,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "23-composer-keyboard",
-  "status": "pass",
-  "seconds": 68,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "24-ui-shots",
-  "status": "pass",
-  "seconds": 127,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "25-session-info",
-  "status": "pass",
-  "seconds": 77,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "26-drawer",
-  "status": "pass",
-  "seconds": 78,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "27-activity",
-  "status": "pass",
-  "seconds": 167,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "28-floating-activity",
-  "status": "pass",
-  "seconds": 93,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "29-tool-rows",
-  "status": "pass",
-  "seconds": 98,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "30-artifact-escape",
-  "status": "pass",
-  "seconds": 53,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "31-chart-inline",
-  "status": "pass",
-  "seconds": 74,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "32-chart-interact",
-  "status": "pass",
-  "seconds": 63,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "33-hub",
-  "status": "pass",
-  "seconds": 237,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-attach",
-  "status": "pass",
-  "seconds": 47,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-activity",
-  "status": "pass",
-  "seconds": 55,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-artifacts",
-  "status": "pass",
-  "seconds": 46,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-tools",
-  "status": "pass",
-  "seconds": 44,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-commands",
-  "status": "pass",
-  "seconds": 44,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-sessions",
-  "status": "pass",
-  "seconds": 46,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-info",
-  "status": "pass",
-  "seconds": 47,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-scheduled",
-  "status": "pass",
-  "seconds": 58,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-dictate",
-  "status": "pass",
-  "seconds": 64,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "34-hub-new",
-  "status": "pass",
-  "seconds": 55,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "35-gallery-shots",
-  "status": "pass",
-  "seconds": 65,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "36-theme-beta-shots",
-  "status": "pass",
-  "seconds": 185,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "36-preview-cards",
-  "status": "pass",
-  "seconds": 66,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "38-running-row",
-  "status": "pass",
-  "seconds": 213,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "37-projects",
-  "status": "pass",
-  "seconds": 124,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "18-lock-cold-start",
-  "status": "pass",
-  "seconds": 45,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "19-lock-unlock-button",
-  "status": "quarantined",
-  "seconds": 0,
-  "attempts": 0,
-  "tags": [
-   "quarantine"
-  ]
- },
- {
-  "name": "20-lock-immediately",
-  "status": "pass",
-  "seconds": 48,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "21-export-logs",
-  "status": "pass",
-  "seconds": 51,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "22-relay-only",
-  "status": "pass",
-  "seconds": 71,
-  "attempts": 1,
-  "tags": []
- },
- {
-  "name": "push-placeholder",
-  "status": "quarantined",
-  "seconds": 0,
-  "attempts": 0,
-  "tags": [
-   "quarantine"
-  ]
- },
- {
-  "name": "22-notify-render",
-  "status": "quarantined",
-  "seconds": 0,
-  "attempts": 0,
-  "tags": [
-   "quarantine"
-  ]
- },
- {
-  "name": "22-notify-approve",
-  "status": "quarantined",
-  "seconds": 0,
-  "attempts": 0,
-  "tags": [
-   "quarantine"
-  ]
- },
- {
-  "name": "22-notify-deny",
-  "status": "quarantined",
-  "seconds": 0,
-  "attempts": 0,
-  "tags": [
-   "quarantine"
-  ]
- },
- {
-  "name": "22-notify-reply",
-  "status": "quarantined",
-  "seconds": 0,
-  "attempts": 0,
-  "tags": [
-   "quarantine"
-  ]
- },
- {
-  "name": "22-notify-forged",
-  "status": "quarantined",
-  "seconds": 0,
-  "attempts": 0,
-  "tags": [
-   "quarantine"
-  ]
- }
+  {
+    "name": "01-shell",
+    "status": "pass",
+    "seconds": 43,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "02-session-list",
+    "status": "pass",
+    "seconds": 40,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "03-refresh",
+    "status": "pass",
+    "seconds": 41,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "05-daemon-down",
+    "status": "pass",
+    "seconds": 76,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "12-pair-declined",
+    "status": "pass",
+    "seconds": 37,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "13-pair-expired",
+    "status": "pass",
+    "seconds": 33,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "14-pair-bad-text",
+    "status": "pass",
+    "seconds": 30,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "15-revoked",
+    "status": "pass",
+    "seconds": 52,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "16-remove-computer",
+    "status": "pass",
+    "seconds": 54,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "17-persisted",
+    "status": "pass",
+    "seconds": 52,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "18-camera-denied",
+    "status": "pass",
+    "seconds": 53,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "19-deep-link",
+    "status": "pass",
+    "seconds": 29,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "20-camera-close",
+    "status": "pass",
+    "seconds": 51,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "06-session-open",
+    "status": "pass",
+    "seconds": 45,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "07-prompt",
+    "status": "pass",
+    "seconds": 70,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "08-permission",
+    "status": "pass",
+    "seconds": 60,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "08b-permission-deny",
+    "status": "pass",
+    "seconds": 51,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "08c-permission-reply",
+    "status": "pass",
+    "seconds": 61,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "09-foreign-turn",
+    "status": "pass",
+    "seconds": 50,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "10-background-ask",
+    "status": "pass",
+    "seconds": 59,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "11-disconnect-mid-turn",
+    "status": "pass",
+    "seconds": 50,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "12-steer",
+    "status": "pass",
+    "seconds": 147,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "13-send-now",
+    "status": "pass",
+    "seconds": 169,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "14-returned-mine",
+    "status": "pass",
+    "seconds": 117,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "15-returned-other",
+    "status": "pass",
+    "seconds": 43,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "16-offline-outbox",
+    "status": "pass",
+    "seconds": 76,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "17-outbox-changed",
+    "status": "pass",
+    "seconds": 55,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "18-photos",
+    "status": "pass",
+    "seconds": 64,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "23-composer-keyboard",
+    "status": "pass",
+    "seconds": 68,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "24-ui-shots",
+    "status": "pass",
+    "seconds": 127,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "25-session-info",
+    "status": "pass",
+    "seconds": 77,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "26-drawer",
+    "status": "pass",
+    "seconds": 78,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "27-activity",
+    "status": "pass",
+    "seconds": 167,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "28-floating-activity",
+    "status": "pass",
+    "seconds": 93,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "29-tool-rows",
+    "status": "pass",
+    "seconds": 98,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "30-artifact-escape",
+    "status": "pass",
+    "seconds": 53,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "31-chart-inline",
+    "status": "pass",
+    "seconds": 74,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "32-chart-interact",
+    "status": "pass",
+    "seconds": 63,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "33-hub",
+    "status": "pass",
+    "seconds": 237,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-attach",
+    "status": "pass",
+    "seconds": 47,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-activity",
+    "status": "pass",
+    "seconds": 55,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-artifacts",
+    "status": "pass",
+    "seconds": 46,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-tools",
+    "status": "pass",
+    "seconds": 44,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-commands",
+    "status": "pass",
+    "seconds": 44,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-sessions",
+    "status": "pass",
+    "seconds": 46,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-info",
+    "status": "pass",
+    "seconds": 47,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-scheduled",
+    "status": "pass",
+    "seconds": 58,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-dictate",
+    "status": "pass",
+    "seconds": 64,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "34-hub-new",
+    "status": "pass",
+    "seconds": 55,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "35-gallery-shots",
+    "status": "pass",
+    "seconds": 65,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "36-theme-beta-shots",
+    "status": "pass",
+    "seconds": 185,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "36-preview-cards",
+    "status": "pass",
+    "seconds": 66,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "38-running-row",
+    "status": "pass",
+    "seconds": 213,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "37-projects",
+    "status": "pass",
+    "seconds": 124,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "18-lock-cold-start",
+    "status": "pass",
+    "seconds": 45,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "19-lock-unlock-button",
+    "status": "quarantined",
+    "seconds": 0,
+    "attempts": 0,
+    "tags": ["quarantine"]
+  },
+  {
+    "name": "20-lock-immediately",
+    "status": "pass",
+    "seconds": 48,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "21-export-logs",
+    "status": "pass",
+    "seconds": 51,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "22-relay-only",
+    "status": "pass",
+    "seconds": 71,
+    "attempts": 1,
+    "tags": []
+  },
+  {
+    "name": "push-placeholder",
+    "status": "quarantined",
+    "seconds": 0,
+    "attempts": 0,
+    "tags": ["quarantine"]
+  },
+  {
+    "name": "22-notify-render",
+    "status": "quarantined",
+    "seconds": 0,
+    "attempts": 0,
+    "tags": ["quarantine"]
+  },
+  {
+    "name": "22-notify-approve",
+    "status": "quarantined",
+    "seconds": 0,
+    "attempts": 0,
+    "tags": ["quarantine"]
+  },
+  {
+    "name": "22-notify-deny",
+    "status": "quarantined",
+    "seconds": 0,
+    "attempts": 0,
+    "tags": ["quarantine"]
+  },
+  {
+    "name": "22-notify-reply",
+    "status": "quarantined",
+    "seconds": 0,
+    "attempts": 0,
+    "tags": ["quarantine"]
+  },
+  {
+    "name": "22-notify-forged",
+    "status": "quarantined",
+    "seconds": 0,
+    "attempts": 0,
+    "tags": ["quarantine"]
+  }
 ]
