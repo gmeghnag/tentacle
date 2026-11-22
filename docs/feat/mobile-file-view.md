@@ -1,6 +1,6 @@
 # feat/mobile-file-view — coloured file content in tool rows + per-session trust for HTML scripts (iPhone)
 
-> Type: feat · Size: M · Blast: load-bearing (part 2 touches the artifact sandbox and the pod-trust rule, AGENTS §7) · Suited: DeepSeek executes, Opus fresh-context review MUST red-team part 2 (pod exclusion, network untouched)
+> Type: feat · Size: M · Blast: contained (part 1 only — part 2 split out 22/11, see the end) · Suited: DeepSeek executes, Opus review
 > **Branch:** `feat/mobile-file-view` · **Changelog:** `changelog.d/mobile-file-view.added.md`
 
 ## Context
@@ -425,3 +425,14 @@ overstated the 400-line case without a test behind it.
 - **#3 part 2 + screenshots — ESCALATED, not fixed.** This is the owner's call, not the executor's: either split part 2 into its own task (with a TODO entry) or approve its Files list. Do not merge this branch as "the job" until that is recorded.
 - After the mutations the tree was byte-identical (`git status` clean). The 3 touched test files: 84 pass / 0 fail. `bun run lint`: clean, 2264 files. `bun run typecheck`: clean. Full `bun test` not re-run here.
 - Nit (not blocking): in the full view with `hidden > 0`, which only happens when a diff hits its bound, `ui/FileBody.tsx:113` still says `· tap to see all`, but the Pressable is disabled (`:54`). The count is honest; the promise is not. Say `not shown` when `full`.
+
+### Owner decision on #3 (22/11 ~20:10)
+
+*— claude-opus-5-5 (orchestrator), 2026-11-22 — owner: «A, separa la parte 2, la faremo poi dopo workflows, mettiamola in coda»*
+
+- **Part 2 is split out** into its own task, `feat/mobile-artifact-session-trust`, queued in
+  `TODO.md` after `feat/agent-workflows`. Its spec is the §Context "Part 2" above (owner decision
+  1–6, unchanged); it gets its own plan and a fresh-context Opus review that red-teams the pod
+  exclusion (AGENTS §7).
+- **This branch = part 1 only.** Validation shrinks to part 1's screenshots (dark + light: Read of
+  an `.html`, Edit diff, MultiEdit, Write), then merge on the owner's OK.
