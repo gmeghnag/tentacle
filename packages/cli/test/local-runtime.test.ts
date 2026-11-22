@@ -117,6 +117,21 @@ const drain = async (gen: AsyncIterable<unknown>): Promise<void> => {
   }
 };
 
+/**
+ * Poll until `check` holds. A save reaches `<uid>.jsonl` in the background
+ * (fire-and-forget `SessionSaver.write`), so a fixed sleep races a loaded
+ * machine — wait for the fact itself, with a bound.
+ */
+const eventually = async (check: () => Promise<boolean>, what: string): Promise<void> => {
+  for (let i = 0; i < 400; i++) {
+    if (await check()) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out waiting for: ${what}`);
+};
+
 let dir: string;
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "harness-local-rt-"));
@@ -471,7 +486,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       resume: null,
     });
     await drain(rt1.createSession().send("first question"));
-    await new Promise((r) => setTimeout(r, 20));
+    await eventually(async () => (await store.loadAll()).records.length > 0, "the first save");
     const record = (await store.loadAll()).records[0] ?? null;
     expect(record).not.toBeNull();
     rt1.dispose();
@@ -489,7 +504,6 @@ describe("createLocalRuntime (local over RPC)", () => {
       resume: record,
     });
     await drain(rt2.createSession().send("second question"));
-    await new Promise((r) => setTimeout(r, 20));
 
     // The model saw the resumed history before the new turn.
     expect(model2.requests[0]?.messages.map((m) => stripped(m.content))).toEqual([
@@ -497,7 +511,13 @@ describe("createLocalRuntime (local over RPC)", () => {
       "one",
       "second question",
     ]);
-    // And it was saved back under the SAME uid (one file, not two).
+    // And it was saved back under the SAME uid (one file, not two), the new
+    // exchange on the SAME file's end (a wait for the save, never a sleep: the
+    // assertion below would pass vacuously while only the first one had landed).
+    await eventually(
+      async () => ((await store.loadAll()).records[0]?.messages.length ?? 0) > 2,
+      "the second save",
+    );
     const all = (await store.loadAll()).records;
     expect(all).toHaveLength(1);
     expect(all[0]?.id).toBe(record?.id ?? "");
