@@ -117,12 +117,16 @@ describe("switch ON", () => {
   });
 });
 
-describe("figtreeFace: a weight + style → one of the four bundled faces", () => {
+describe("figtreeFace: a weight + style → one of the eight bundled faces", () => {
   test("the faces are the files' own PostScript names (read from their name tables)", () => {
     expect(FIGTREE_FACES).toEqual({
       regular: "Figtree-Regular",
+      medium: "Figtree-Medium",
+      semiBold: "Figtree-SemiBold",
       bold: "Figtree-Bold",
       italic: "Figtree-Italic",
+      mediumItalic: "Figtree-MediumItalic",
+      semiBoldItalic: "Figtree-SemiBoldItalic",
       boldItalic: "Figtree-BoldItalic",
     });
   });
@@ -134,11 +138,34 @@ describe("figtreeFace: a weight + style → one of the four bundled faces", () =
     expect(figtreeFace("bold", "italic")).toBe(FIGTREE_FACES.boldItalic);
   });
 
-  test("600 and up is Bold; 500 and below is Regular (no Medium/Semibold bundled)", () => {
-    for (const w of ["600", "700", "800", "900", 600, 700, "bold", "semibold", "heavy", "black"]) {
+  test("400/500/600/700 each get their OWN face, in normal and italic alike", () => {
+    const asked = [
+      ["400", "regular", "italic"],
+      ["500", "medium", "mediumItalic"],
+      ["600", "semiBold", "semiBoldItalic"],
+      ["700", "bold", "boldItalic"],
+    ] as const;
+    for (const [weight, key, italicKey] of asked) {
+      expect(figtreeFace(weight, "normal")).toBe(FIGTREE_FACES[key]);
+      expect(figtreeFace(Number(weight), undefined)).toBe(FIGTREE_FACES[key]);
+      expect(figtreeFace(weight, "italic")).toBe(FIGTREE_FACES[italicKey]);
+    }
+    // The CSS names the tokens and RN also use.
+    expect(figtreeFace("medium", "normal")).toBe("Figtree-Medium");
+    expect(figtreeFace("semibold", "normal")).toBe("Figtree-SemiBold");
+    expect(figtreeFace("bold", undefined)).toBe("Figtree-Bold");
+    expect(figtreeFace(undefined, undefined)).toBe("Figtree-Regular");
+  });
+
+  test("a weight outside the bundle is bounded to the nearest face, never dropped", () => {
+    for (const w of ["800", "900", 900, "heavy", "black"] as const) {
       expect(figtreeFace(w, "normal")).toBe("Figtree-Bold");
     }
-    for (const w of ["100", "300", "400", "500", 400, 500, "normal", "medium", "light"]) {
+    for (const w of ["100", "300", 300, "light", "normal"] as const) {
+      expect(figtreeFace(w, "normal")).toBe("Figtree-Regular");
+    }
+    // Nothing usable: RN's own default (400), not a missing family.
+    for (const w of ["", "weird", Number.NaN] as const) {
       expect(figtreeFace(w, "normal")).toBe("Figtree-Regular");
     }
   });
@@ -156,7 +183,19 @@ describe("textFont: a text's own style + what it inherits → its Figtree patch"
       fontWeight: "400",
       fontStyle: "normal",
     });
+    // 600 is SemiBold now that the face ships (docs/fix/mobile-transcript-type.md):
+    // the patch's weight is that face's own class.
     expect(textFont({ fontWeight: "600" }, {}, "figtree").patch).toEqual({
+      fontFamily: "Figtree-SemiBold",
+      fontWeight: "600",
+      fontStyle: "normal",
+    });
+    expect(textFont({ fontWeight: "500" }, {}, "figtree").patch).toEqual({
+      fontFamily: "Figtree-Medium",
+      fontWeight: "500",
+      fontStyle: "normal",
+    });
+    expect(textFont({ fontWeight: "700" }, {}, "figtree").patch).toEqual({
       fontFamily: "Figtree-Bold",
       fontWeight: "700",
       fontStyle: "normal",
