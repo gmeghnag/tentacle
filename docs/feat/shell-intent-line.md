@@ -223,6 +223,13 @@ command."* One more sentence in the tool `description`: "Always give
 before today's header (`:883`), using `shellRowParts(tool.args, tool.status,
 opts.compactShell === true)`:
 
+> **Superseded in part by `docs/fix/tui-shell-row-uniform.md`:** the header no
+> longer carries an outcome (`✓` / `✗ exit N` is gone from every tool title), and
+> the `$ <command>` row is the `⎿` block's FIRST line (`⎿ $ …`) rather than a
+> `  $ …` row above it. `exit=N` is written only when N ≠ 0, and a success
+> writes no `exit=` line at all. The rest of this section (the beta gate, the
+> expanded view, the sanitizing) stands.
+
 - `null` ⇒ today's code path untouched.
 - Header (row 0): `● <bold sentence> <outcome><elapsed>` — outcome from
   `shellOutcome({status, text: tool.resultText, spillHead: tool.spill?.head})`,

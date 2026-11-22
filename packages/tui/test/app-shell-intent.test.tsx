@@ -1,8 +1,10 @@
 /**
- * docs/feat/shell-intent-line.md §3 at the App seam (ink frames): a described
- * `shell` call draws its sentence + `$ cmd` while it runs, the spinner slot is
- * UNCHANGED (still `Working…`), the settled row writes `✓`, and the input row
- * does not move when the call settles (the 2-row block appears once).
+ * docs/feat/shell-intent-line.md §3 + docs/fix/tui-shell-row-uniform.md at the
+ * App seam (ink frames): a described `shell` call draws its sentence and a block
+ * whose first line is `⎿ $ cmd` while it runs, the spinner slot is UNCHANGED
+ * (still `Working…`), and when the call settles the title gains NO `✓` (its
+ * absence is the success) while the input row does not move — the block's
+ * command line was already there, so only the output appears under it.
  */
 import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
@@ -52,7 +54,7 @@ function gated(): { session: SessionController; settle: () => void; end: () => v
 }
 
 describe("a described shell call in the App", () => {
-  test("sentence + $ row while running, slot unchanged, ✓ when settled, input row stable", async () => {
+  test("a `⎿ $ cmd` block while running, slot unchanged, no ✓ when settled, input row stable", async () => {
     const g = gated();
     const app = render(
       <App
@@ -72,7 +74,7 @@ describe("a described shell call in the App", () => {
     const running = rows();
     const head = running.findIndex((r) => r.includes("Run the mobile package tests"));
     expect(head).toBeGreaterThanOrEqual(0);
-    expect(running[head + 1]).toBe("  $ bun test apps/mobile");
+    expect(running[head + 1]).toBe("⎿ $ bun test apps/mobile");
     expect(running.some((r) => r.includes("Working…"))).toBe(true);
     expect(running.some((r) => r.includes("running…"))).toBe(false);
     expect(running[head]).not.toContain("✓");
@@ -83,8 +85,10 @@ describe("a described shell call in the App", () => {
     await delay(120);
     const done = rows();
     const doneHead = done.findIndex((r) => r.includes("Run the mobile package tests"));
-    expect(done[doneHead]).toContain("✓");
-    expect(done[doneHead + 1]).toBe("  $ bun test apps/mobile");
+    expect(done[doneHead]).not.toContain("✓");
+    expect(done[doneHead]).toBe("● Run the mobile package tests 1.2s");
+    expect(done[doneHead + 1]).toBe("⎿ $ bun test apps/mobile");
+    expect(done.join("\n")).not.toContain("exit=0");
     expect(done.findIndex((r) => r.includes("❯"))).toBe(inputY);
     g.end();
     await delay(60);
