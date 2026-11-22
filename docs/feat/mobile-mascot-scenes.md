@@ -292,8 +292,66 @@ flow that asserts `testID="mascot"`, once with Reduce Motion on and once with it
 **Unplanned but noticed, left alone:** the mockup's `o.front` split is dead code (no scene
 sets it), so one layer covers both z-orders — noted in Implementation rather than emulated.
 
-## Review
+### Fix round 1
 
+*— claude-opus-5-5 (executor of the fix round), 2026-11-22*
+
+**Finding 1 (MEDIUM, run plumbing) — FIXED.** `pixels` is not involved; the defect was that
+`MascotScene.tsx:108` hard-coded `run = 0`, so `frameAt` never saw a handedness. The decision
+moved into the pure module, where it is testable (AGENTS §7): `MascotDraw` +
+`drawOnce(memory, rand)` (`mascot-scenes.ts:1164-1176`) return `{scene, palette, run}`, `run`
+being `memory.plays` BEFORE the play is recorded — so consecutive mounts are 0, 1, 2. The
+component now keeps one `MascotDraw` in state (was `MascotPick`, without a run) and passes
+`drawn.run` to `frameAt` (`MascotScene.tsx:58,99`).
+
+**Finding 2 (MEDIUM, paint order) — FIXED.** `mergeDown`'s cross-op grouping was the bug: it
+keyed rects by `x|w|color|alpha` across the WHOLE frame and emitted by first-seen key, so a
+later op stopped painting over an earlier one. Now `pixels` merges **per op** only
+(`mergeDown` on one op's rects) and appends, extending the immediately-preceding rect when it
+is the same shape/colour/alpha and STRICTLY contiguous below it (`appendBlock`,
+`mascot-scenes.ts:1027-1058`). Nothing is emitted between those two, so the merge cannot cross
+a paint. Strict (`rect.y === last.y + last.h`) rather than an overlap test, because the rocket's
+smoke is THREE identical `alpha: 0.7` puffs on one cell: folding them kept a third of the blend
+(my first attempt used `>=`/`<=` and the reviewer's `order.ts` caught it at rocket 4.8 s). The
+per-op pass alone lost the UFO beam's collapse (60 one-row `rect` ops → 121 rects at 2950 ms,
+over the 120 bound); the tail merge brings the measured worst frame back to the helicopter at
+**82** (the doc's own number), verified by the existing ≤120 test. Both reviewer repros,
+re-run: `order.ts` and `detail.ts` in `.tentacle/tmp/mobile-mascot-scenes/` → every scene 0
+wrong frames (was heli 3 from 3.0 s, rocket 2 from 4.8 s).
+
+**Tests added (red before green, AGENTS §9).** `mascot-scenes.test.ts`: *a later op still
+paints OVER an earlier one* (all nine scenes, every 100 ms, cell-by-cell `paint()` of the
+merged output vs. one op at a time; `paint()` STACKS translucent rects, so a dropped blend is
+visible), *the op that overlaps an earlier one keeps its own row* (heli 3.0 s, named cells),
+*a translucent op stacked on itself stays stacked* (rocket 4.8 s: the three `<#8d969e@0.7`
+puffs), and the `drawOnce` block (runs 0/1/2, Paracadute exits right then left, no repeat +
+palette in range). `mascot-wiring.test.ts`: *the drawn run reaches the frame*
+(`drawOnce(memory)`, `frameAt(scene, elapsedMs, drawn.run,`, and no `frameAt(…, 0, …)`).
+
+**Mutations (§9 non-vacuity), each reverted with the tree clean.**
+
+| Mutation (temporary) | Red on |
+|---|---|
+| `pixels`: `out.push(...flat)` per op + `mergeDown(out)` at the end = the OLD cross-op merge | scenes › *a later op still paints OVER an earlier one* (19.48 ms), › *the op that overlaps an earlier one keeps its own row* (`#A274DE` expected, `#B387EA` got — the reviewer's exact cell) AND › *a translucent op stacked on itself stays stacked* (57 pass / 3 fail) |
+| `appendBlock`: overlap test (`rect.y >= last.y && rect.y <= last.y + last.h`) instead of strict contiguity | scenes › *a later op still paints OVER an earlier one* (20.54 ms) AND › *…stays stacked* (58 pass / 2 fail) |
+| `MascotScene.tsx`: `frameAt(scene, elapsedMs, 0, …)` = the OLD literal run | wiring › *the drawn run reaches the frame* (10 pass / 1 fail) |
+| `drawOnce`: `const run = 0` | scenes › *consecutive mounts are run 0, 1, 2* AND › *two plays walk off opposite sides* (57 pass / 2 fail) |
+
+**Files:** `apps/mobile/src/mascot-scenes.ts` (+77/−9), `apps/mobile/src/ui/MascotScene.tsx`
+(+7/−17), `apps/mobile/test/mascot-scenes.test.ts` (+114/−0), `apps/mobile/test/mascot-wiring.test.ts`
+(+9/−1). No production code touched outside the two findings; `pixels`' public shape and the
+`Op`/`Pixel` types are unchanged.
+
+**Not fixed (deliberately, out of scope of the round):** the mandatory simulator screenshots —
+same environment limit the first Execution recorded (no `node_modules`/iOS project in the
+worktree). Unchanged by this round: it is a build/run artefact, not a code property.
+
+**Gate (run by the orchestrator's script, not here).** Local, narrow only: the three mascot
+files → 78 pass / 0 fail; the guards (`motion-literals`, `node-builtins-guard`,
+`bundle-node-free`) → 13 pass / 0 fail; `bunx biome check` clean on the four changed files; the
+pure module under `tsc --strict --noUncheckedIndexedAccess` → clean.
+
+## Review
 *— claude-opus-5-5, 2026-11-22 (fresh context; different model family from the executor)*
 
 **Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH).

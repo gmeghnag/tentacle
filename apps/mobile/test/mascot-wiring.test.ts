@@ -72,7 +72,15 @@ describe("the layer is in the empty session, and clipped between header and comp
     expect(code(layer)).toMatch(/requestAnimationFrame/);
     expect(code(layer)).toMatch(/cancelAnimationFrame/);
     // The scene is drawn ONCE per mount, not per render (owner decision 4).
-    expect(code(layer)).toMatch(/useState<MascotPick>\(\(\) =>/);
+    expect(code(layer)).toMatch(/useState<MascotDraw>\(\(\) =>/);
+  });
+
+  test("the drawn run reaches the frame, so a scene can alternate (owner decision 2)", () => {
+    // The Review's finding: the layer passed a literal `run = 0`, so Paracadute
+    // always walked off the same side and Mimetismo's switches never moved.
+    expect(code(layer)).toMatch(/drawOnce\(memory\)/);
+    expect(code(layer)).toMatch(/frameAt\(scene, elapsedMs, drawn\.run,/);
+    expect(code(layer)).not.toMatch(/frameAt\([^)]*,\s*0\s*,/);
   });
 });
 

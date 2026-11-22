@@ -936,9 +936,11 @@ export function colorsFor(palette: MascotPaletteName): Readonly<Record<string, s
 /**
  * The rects a frame draws, in points: the pixel grid at `PIXEL_PT`, anchored on
  * `homeAt(geometry)`, with each row's equal-coloured neighbours merged into one
- * run and vertically contiguous rects of the same colour merged into one block
- * (a 9×9 sprite is ≤ 81 pixels; a frame here stays under ~120 rects, and the
- * UFO's 60-row beam collapses to a dozen).
+ * run and, WITHIN ONE OP, vertically contiguous rects of the same colour merged
+ * into one block (a 9×9 sprite is ≤ 81 pixels; a frame here stays under ~120
+ * rects, and the UFO's 60-row beam collapses to a dozen). Ops are emitted in
+ * order and never merged with each other: that order is the painter's order, so
+ * a later op keeps painting over an earlier one.
  */
 export function pixels(
   ops: readonly Op[],
@@ -950,12 +952,18 @@ export function pixels(
     x: home.x + (gx - HOME_GRID.x) * PIXEL_PT,
     y: home.y + (gy - HOME_GRID.y) * PIXEL_PT,
   });
-  const flat: Pixel[] = [];
+  const out: Pixel[] = [];
   for (const op of ops) {
     const alpha = op.alpha ?? 1;
     if (alpha <= 0) {
       continue;
     }
+    // One op's rects, merged among THEMSELVES only (see `mergeDown`): a sprite's
+    // own rects never overlap each other, so merging them cannot disturb the
+    // painter's order — and that order is the mockup's z-order (the helicopter's
+    // body over its windscreen, the smoke over the rocket). Merging ACROSS ops
+    // would: a later op must paint over an earlier one.
+    const flat: Pixel[] = [];
     if (op.kind === "rect") {
       const [gx, gy, gw, gh] = op.rect;
       const color = colors[op.color];
@@ -963,7 +971,7 @@ export function pixels(
         continue;
       }
       const { x, y } = at(gx, gy);
-      flat.push({ x, y, w: gw * PIXEL_PT, h: gh * PIXEL_PT, color, alpha });
+      appendBlock(out, [{ x, y, w: gw * PIXEL_PT, h: gh * PIXEL_PT, color, alpha }]);
       continue;
     }
     const map = op.map === undefined ? colors : { ...colors, ...op.map };
@@ -999,14 +1007,54 @@ export function pixels(
       });
       flush(row.length);
     });
+    appendBlock(out, mergeDown(flat));
   }
-  return mergeDown(flat);
+  return out;
+}
+
+/**
+ * Append one op's merged rects, extending the LAST rect already emitted when the
+ * two are the same shape, colour and alpha and STRICTLY contiguous below it
+ * (`rect.y === last.y + last.h`). Safe for the painter's order: nothing was
+ * emitted between them, so the two are consecutive strokes of one colour — the
+ * UFO's beam is 60 one-row `rect` ops and still collapses to a dozen blocks,
+ * while an op drawn OVER another (the helicopter's body over its windscreen)
+ * can never merge into it. Contiguity is strict, not an overlap test, because two
+ * identical translucent ops at the same place must stay two: the rocket's smoke
+ * is three `alpha: 0.7` puffs stacked on one cell, and folding them into one
+ * would drop two-thirds of the blend.
+ */
+function appendBlock(out: Pixel[], group: readonly Pixel[]): void {
+  for (const rect of group) {
+    const last = out[out.length - 1];
+    if (
+      last !== undefined &&
+      last.x === rect.x &&
+      last.w === rect.w &&
+      last.color === rect.color &&
+      last.alpha === rect.alpha &&
+      rect.y === last.y + last.h
+    ) {
+      out[out.length - 1] = {
+        x: last.x,
+        y: last.y,
+        w: last.w,
+        h: last.h + rect.h,
+        color: last.color,
+        alpha: last.alpha,
+      };
+      continue;
+    }
+    out.push(rect);
+  }
 }
 
 /**
  * Merge vertically contiguous, identically shaped and coloured rects into one
- * block. Kept in insertion order, so a frame's output is deterministic and a
- * test can name the rect it means.
+ * block, unioning the columns PRESENT IN THIS GROUP (one op's rects). Kept in
+ * insertion order, so a group's output is deterministic and a test can name the
+ * rect it means. Called per op (`pixels`) — never across ops: the caller's order
+ * is the painter's order, so two ops must stay two (see `appendBlock`).
  */
 function mergeDown(rects: readonly Pixel[]): readonly Pixel[] {
   const columns = new Map<
@@ -1103,8 +1151,28 @@ export interface SceneMemory {
   plays: number;
 }
 
-/** The app's one instance (`ui/MascotScene.tsx` passes it to `nextScene`). */
+/** The app's one instance (`ui/MascotScene.tsx` passes it to `drawOnce`). */
 export const sceneMemory: SceneMemory = { last: null, plays: 0 };
+
+/**
+ * What ONE mount of the layer draws, decided once and then held: the scene, its
+ * palette, and which run this is — app-wide, 0-based. `run` is why Paracadute
+ * walks off a different side on every play (owner decision 2) and why
+ * Mimetismo's palette switches start somewhere else: it is `memory.plays`
+ * BEFORE this play is counted, so consecutive mounts are 0, 1, 2, …
+ */
+export interface MascotDraw {
+  readonly scene: MascotSceneKey;
+  readonly palette: MascotPaletteName;
+  readonly run: number;
+}
+
+/** Pick this session's scene, palette and run, and record the play (owner decisions 1–4). */
+export function drawOnce(memory: SceneMemory, rand: () => number = Math.random): MascotDraw {
+  const run = memory.plays;
+  const picked = nextScene(memory, rand);
+  return { scene: picked.key, palette: pickMascotPalette(rand), run };
+}
 
 /** Pick this session's scene and record it (the store half of the rule). */
 export function nextScene(memory: SceneMemory, rand: () => number = Math.random): MascotScene {

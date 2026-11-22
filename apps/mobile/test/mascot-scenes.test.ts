@@ -13,6 +13,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  HOME_GRID,
   MASCOT_SCENES,
   type MascotScene,
   type MascotSceneKey,
@@ -23,12 +24,14 @@ import {
   type SceneMemory,
   body,
   colorsFor,
+  drawOnce,
   frameAt,
   homeAt,
   nextScene,
   pickMascotPalette,
   pickScene,
   pixels,
+  sceneByKey,
   sceneMemory,
   showsScene,
   stillFrame,
@@ -80,6 +83,28 @@ const BAND = { width: 390, height: 610 };
 /** Grid units visible on the reference screen: 390 / 6 = 65 across, 610 / 6 ≈ 102 down. */
 const GRID_W = 65;
 
+/**
+ * A frame rasterized cell by cell, IN ORDER: what each cell ends up showing.
+ * A translucent rect is STACKED onto what is already there (`-` for nothing), so
+ * two puffs of smoke on one cell differ from one — a plain last-wins map would
+ * hide that the merge dropped a blend.
+ */
+function paint(rects: readonly Pixel[]): Map<string, string> {
+  const cells = new Map<string, string>();
+  for (const r of rects) {
+    for (let y = r.y; y < r.y + r.h; y += PIXEL_PT) {
+      for (let x = r.x; x < r.x + r.w; x += PIXEL_PT) {
+        const cell = `${x},${y}`;
+        cells.set(
+          cell,
+          r.alpha < 1 ? `${cells.get(cell) ?? "-"}<${r.color}@${r.alpha}` : `${r.color}@${r.alpha}`,
+        );
+      }
+    }
+  }
+  return cells;
+}
+
 describe("pickScene: never the same scene twice in a row (owner decision 3)", () => {
   test("over 10k seeds, no draw ever repeats the previous one", () => {
     const rand = seeded(7);
@@ -129,6 +154,45 @@ describe("nextScene: the in-memory record, app-wide", () => {
 
   test("the app's own instance starts empty", () => {
     expect({ last: sceneMemory.last, plays: sceneMemory.plays }).toEqual({ last: null, plays: 0 });
+  });
+});
+
+describe("drawOnce: the scene, its palette and the run (owner decisions 1–4)", () => {
+  test("consecutive mounts are run 0, 1, 2 — and each is recorded exactly once", () => {
+    // `run` is what alternates Paracadute's two handednesses (owner decision 2)
+    // and where Mimetismo's palette switches begin: a frozen 0 would replay the
+    // same direction on every play.
+    const memory: SceneMemory = { last: null, plays: 0 };
+    expect([0, 1, 2].map(() => drawOnce(memory, seeded(7)).run)).toEqual([0, 1, 2]);
+    expect(memory.plays).toBe(3);
+  });
+
+  test("the run it hands out is what a scene reads: two plays walk off opposite sides", () => {
+    // The integration point the Review caught: `frameAt(…, 0, …)` froze `run`,
+    // so Paracadute always walked off the same side (owner decision 2).
+    const memory: SceneMemory = { last: null, plays: 0 };
+    const runs = [drawOnce(memory, seeded(7)).run, drawOnce(memory, seeded(8)).run];
+    const para = sceneByKey("para");
+    const exit = runs.map((run) => {
+      const at = frameAt(para, 10_599, run).find(
+        (op) => op.kind === "sprite" && op.rows.length === 9,
+      );
+      return at === undefined ? null : Math.sign(at.x - HOME_GRID.x);
+    });
+    expect(exit).toEqual([1, -1]); // out to the right, then out to the left
+  });
+
+  test("never the same scene twice in a row, and the palette is one of the nine", () => {
+    const memory: SceneMemory = { last: null, plays: 0 };
+    const rand = seeded(23);
+    const draws = Array.from({ length: 40 }, () => drawOnce(memory, rand));
+    for (let i = 1; i < draws.length; i++) {
+      expect(draws[i]?.scene).not.toBe(draws[i - 1]?.scene);
+    }
+    for (const draw of draws) {
+      expect(PALETTE_NAMES).toContain(draw.palette);
+    }
+    expect(memory.plays).toBe(40);
   });
 });
 
@@ -563,6 +627,56 @@ describe("pixels: the one grid → points projection", () => {
     expect(top).toEqual([
       { x: 168 + 2 * PIXEL_PT, y: 480, w: 5 * PIXEL_PT, h: PIXEL_PT, color: "#7B3FC0", alpha: 1 },
     ]);
+  });
+
+  test("a later op still paints OVER an earlier one (the merge keeps the painter's order)", () => {
+    // The merge must be per op: grouping across ops reorders them by first-seen
+    // key, so the helicopter's face stopped covering its windscreen and the smoke
+    // stopped stacking on the rocket. Painted cell by cell, in op order, the
+    // frame must look the same as the ops drawn one op at a time.
+    for (const s of MASCOT_SCENES) {
+      for (let ms = 0; ms < s.durationMs; ms += 100) {
+        const ops = frameAt(s, ms, 0, { eyeFade: "#000000" });
+        const merged = paint(pixels(ops, BAND, colorsFor("soft")));
+        const oneByOne = paint(ops.flatMap((op) => pixels([op], BAND, colorsFor("soft"))));
+        expect({ scene: s.key, ms, cells: [...merged.keys()] }).toEqual({
+          scene: s.key,
+          ms,
+          cells: [...oneByOne.keys()],
+        });
+        for (const [cell, color] of oneByOne) {
+          if (merged.get(cell) !== color) {
+            throw new Error(
+              `${s.key} at ${ms} ms: ${cell} paints ${color}, got ${merged.get(cell)}`,
+            );
+          }
+        }
+      }
+    }
+  });
+
+  test("the op that overlaps an earlier one keeps its own row", () => {
+    // A named case of the above, so a regression says which scene broke: the
+    // helicopter at 3.0 s draws Polpetto's face over the windscreen.
+    const floor = (gx: number, gy: number): string =>
+      `${168 + (gx - 28) * PIXEL_PT},${480 + (gy - 80) * PIXEL_PT}`;
+    const cells = paint(pixels(frameAt(scene("heli"), 3000), BAND, colorsFor("soft")));
+    expect(cells.get(floor(39, 82))).toBe("#A274DE@1"); // Polpetto's body
+    expect(cells.get(floor(39, 80))).toBe("#7B3FC0@1"); // Polpetto's crown
+  });
+
+  test("a translucent op stacked on itself stays stacked (the rocket's smoke)", () => {
+    // Strict contiguity, not an overlap test: three identical `alpha: 0.7` puffs
+    // on one cell are three blends, and folding them into one keeps a third.
+    const smoke = frameAt(scene("rocket"), 4800).filter(
+      (op) => op.kind === "sprite" && op.rows.length === 2 && op.alpha === 0.7,
+    );
+    expect(smoke.length).toBe(3);
+    const stacked = paint(pixels(frameAt(scene("rocket"), 4800), BAND, colorsFor("soft"))).get(
+      `${168 + (45 - 28) * PIXEL_PT},${480 + (88 - 80) * PIXEL_PT}`,
+    );
+    // The rocket's own tone underneath, then one `<…` per puff: three blends.
+    expect(stacked).toBe("#7B3FC0@1<#8d969e@0.7<#8d969e@0.7<#8d969e@0.7");
   });
 
   test("no frame anywhere in any scene exceeds 120 rects", () => {

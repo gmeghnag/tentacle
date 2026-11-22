@@ -21,25 +21,17 @@ import { type JSX, useEffect, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import Svg, { Rect } from "react-native-svg";
 import {
+  type MascotDraw,
   type MascotGeometry,
-  type MascotPaletteName,
-  type MascotSceneKey,
   type Pixel,
   colorsFor,
+  drawOnce,
   frameAt,
-  nextScene,
-  pickMascotPalette,
   pixels,
   sceneByKey,
   sceneMemory,
   stillFrame,
 } from "../mascot-scenes.ts";
-
-/** What this mount draws — drawn once, then held for the scene's whole life. */
-export interface MascotPick {
-  readonly scene: MascotSceneKey;
-  readonly palette: MascotPaletteName;
-}
 
 export interface MascotSceneLayerProps {
   /** The band's measured size: the region between the screen header and the composer. */
@@ -50,8 +42,8 @@ export interface MascotSceneLayerProps {
   readonly eyeFade: string;
   /** The last scene played, app-wide (owner decision 3: never the same twice in a row). */
   readonly memory?: typeof sceneMemory;
-  /** Injectable for tests: the scene and palette this mount draws. */
-  readonly pick?: () => MascotPick;
+  /** Injectable for tests: the scene, palette and run this mount draws. */
+  readonly pick?: () => MascotDraw;
 }
 
 export function MascotSceneLayer({
@@ -62,10 +54,8 @@ export function MascotSceneLayer({
   pick,
 }: MascotSceneLayerProps): JSX.Element | null {
   // Drawn ONCE per mount (owner decision 4): a re-render, a resize or a theme
-  // flip reuses these two, so a scene is never restarted mid-way.
-  const [drawn] = useState<MascotPick>(() =>
-    pick === undefined ? { scene: nextScene(memory).key, palette: pickMascotPalette() } : pick(),
-  );
+  // flip reuses all three, so a scene is never restarted mid-way.
+  const [drawn] = useState<MascotDraw>(() => (pick === undefined ? drawOnce(memory) : pick()));
   const scene = sceneByKey(drawn.scene);
   const [elapsedMs, setElapsedMs] = useState(0);
   // The clock's origin, set by the first tick and never reset (a re-render must
@@ -106,7 +96,7 @@ export function MascotSceneLayer({
   if (geometry.width <= 0 || geometry.height <= 0) {
     return null;
   }
-  const ops = reduceMotion ? stillFrame() : frameAt(scene, elapsedMs, 0, { eyeFade });
+  const ops = reduceMotion ? stillFrame() : frameAt(scene, elapsedMs, drawn.run, { eyeFade });
   const rects: readonly Pixel[] = pixels(ops, geometry, colorsFor(drawn.palette));
   if (rects.length === 0) {
     return null;
