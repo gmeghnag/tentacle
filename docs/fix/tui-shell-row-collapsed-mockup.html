@@ -1,0 +1,87 @@
+<title>Posizione di exit</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: two terminal panes side by side (stack on phone), each 80 columns, dark terminal only — colours from packages/tui/src/theme.ts */
+:root{
+  --page:#1a1d24; --ink:#d9dce3; --muted:#9097a3;
+  --term:#232731; --t-fg:#e4e6ea; --t-subtle:#8c8c8c; --t-ok:#4ec974; --t-err:#ed5454; --t-input:#373737; --t-accent:#06b6d4;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,monospace; --sans:Inter,system-ui,sans-serif;
+  color-scheme:dark;
+}
+body{background:var(--page);color:var(--ink);font-family:var(--sans);padding-block:28px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+h1{font-size:20px;margin:0 0 6px;text-wrap:balance}
+p.lead{color:var(--muted);margin:0 0 22px;max-width:70ch;line-height:1.5}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,640px),1fr));gap:24px}
+.col{min-width:0;display:flex;flex-direction:column;gap:10px}
+.col h2{font-size:15px;margin:0;display:flex;gap:10px;align-items:baseline}
+.col h2 .tag{font:600 11px var(--mono);letter-spacing:.06em;color:var(--muted);text-transform:uppercase}
+.label{font:600 11px var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-top:6px}
+.term{background:var(--term);border-radius:6px;overflow-x:auto}
+pre{margin:0;padding:14px 16px;font:13px/1.55 var(--mono);color:var(--t-fg);width:max-content;min-width:100%;box-sizing:border-box}
+.b{font-weight:700}.s{color:var(--t-subtle)}.ok{color:var(--t-ok)}.e{color:var(--t-err)}.u{background:var(--t-input);display:inline-block;width:100%}.a{color:var(--t-accent)}
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=JetBrains+Mono:wght@400;700&display=swap">
+
+<h1>Dove mettere <code>exit=1</code> nella riga del comando</h1>
+<p class="lead">TUI a 80 colonne, colori del tema attuale. Senza ctrl+o ogni comando, riuscito o fallito, mostra solo <code>⎿ $ comando</code>, con <code>exit=N</code> in fondo alla riga quando N≠0. L'output compare solo con ctrl+o. Le ultime tre righe sono comandi senza frase (<code>● Bash &lt;comando&gt;</code>): senza ctrl+o il codice va subito dopo il comando nel titolo, prima della durata; con ctrl+o il titolo resta <code>● Bash 0.4s</code> e sotto vengono <code>⎿ $ comando completo  exit=N</code> e l'output, come per le righe con frase. Il rosso rafforza soltanto: il segnale è il testo <code>exit=N</code>.</p>
+
+<div class="grid">
+  <section class="col"><h2><span class="tag">B · scelta</span>Con ctrl+o, codice in fondo alla riga del comando</h2>
+    <div class="label">Senza ctrl+o: solo comando e codice, nessun output</div><div class="term"><pre id="b1"></pre></div>
+    <div class="label">Dopo aver premuto ctrl+o: comando completo e output</div><div class="term"><pre id="b2"></pre></div>
+  </section>
+  <section class="col"><h2><span class="tag">C</span>Con ctrl+o, codice a sinistra del dollaro</h2>
+    <div class="label">Senza ctrl+o: identico a B</div><div class="term"><pre id="c1"></pre></div>
+    <div class="label">Dopo aver premuto ctrl+o: <code>⎿ exit=N $ comando</code>, poi l'output</div><div class="term"><pre id="c2"></pre></div>
+  </section>
+
+</div>
+
+<script>
+const W=80, esc=s=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+const sp=(c,t)=>`<span class="${c}">${esc(t)}</span>`;
+const cut=(s,n)=>s.length<=n?s:s.slice(0,n-1)+"…";
+const rows=[
+  {t:"Job in background di 8s da leggere dopo",d:"0.0s",c:'echo "partito in background"; sleep 8; echo "lavoro lungo terminato"',ok:true,
+   out:['started background job bg-1 (pid 95654): `echo "partito in background"; sleep 8; …`','Read output with shell_output({ job_id: "bg-1" }).']},
+  {t:"Container in esecuzione",d:"0.2s",c:"podman ps 2>&1; echo ---; docker ps 2>&1",ok:false,code:1,
+   out:["Cannot connect to Podman. Please verify your connection to the Linux system","---","Cannot connect to the Docker daemon at unix:///var/run/docker.sock."]},
+  {t:"Test dei componenti file",d:"3.4s",c:"cd apps/mobile && bun test src/ui/FileBody.test.tsx src/ui/CodeBlock.test.tsx --bail 2>&1 | tail -20",ok:false,code:1,
+   out:["(fail) FileBody > header shows 'righe 1–40 di 212 · TS'","1 fail · 23 pass"]},
+  {t:"Sleep 5 secondi per testare lo stato \"in attesa\"",d:"5.0s",c:"sleep 5; echo 'dormito 5s, sveglio'",ok:true,out:["dormito 5s, sveglio"]},
+  {plain:true,d:"0.1s",c:"git status --short",ok:true,out:[" M apps/mobile/src/ui/FileBody.tsx","?? lab/prova-ui.sh"]},
+  {plain:true,d:"0.0s",c:"ls lab/vecchia-cartella",ok:false,code:1,out:["ls: lab/vecchia-cartella: No such file or directory"]},
+  {plain:true,d:"0.4s",c:"podman ps --format '{{.Names}} {{.Status}}' 2>&1; echo ---; docker ps --format '{{.Names}}' 2>&1",ok:false,code:125,out:["Cannot connect to Podman. Please verify your connection to the Linux system"]},
+];
+function render(side,expanded){
+  // side "B": exit at the END of the $ line; side "C": with ctrl+o, exit BEFORE the $ (collapsed same as B)
+  const L=[`<span class="u">${sp("a","› ")}${esc("fai comandi in attesa di qualche secondo ecc".padEnd(W-2," "))}</span>`,""];
+  const cmdBlock=(r,ex)=>{
+    // expanded: full command, wraps at W; exit placed per side
+    if(side==="C"&&ex){
+      const head=sp("s","⎿ ")+sp("e",ex)+sp("s"," $ "), hw=2+ex.length+3, ind=" ".repeat(hw);
+      const first=r.c.slice(0,W-hw); L.push(head+sp("s",first));
+      for(let rest=r.c.slice(W-hw);rest;rest=rest.slice(W-hw)) L.push(sp("s",ind+rest.slice(0,W-hw)));
+      return;
+    }
+    const tail=ex?"  "+sp("e",ex):"";
+    if(r.c.length>W-4){L.push(sp("s","⎿ $ "+r.c.slice(0,W-4)));L.push(sp("s","    "+r.c.slice(W-4))+tail);}
+    else L.push(sp("s","⎿ $ "+r.c)+tail);
+  };
+  for(const r of rows){
+    const ex=r.ok?"":`exit=${r.code}`, oc=r.ok?"s":"e";
+    const dot=sp(r.ok?"ok":"e","●")+" ";
+    if(r.plain){
+      if(expanded){ L.push(dot+sp("b","Bash")+" "+sp("s",r.d)); cmdBlock(r,ex); for(const o of r.out) L.push("  "+sp(oc,cut(o,W-2))); }
+      else { const room=W-7-(ex?ex.length+2:0)-1-r.d.length; L.push(dot+sp("b","Bash")+" "+sp("s",cut(r.c,room))+(ex?"  "+sp("e",ex):"")+" "+sp("s",r.d)); }
+      L.push(""); continue;
+    }
+    L.push(dot+sp("b",r.t)+" "+sp("s",r.d));
+    if(expanded){ cmdBlock(r,ex); for(const o of r.out) L.push("  "+sp(oc,cut(o,W-2))); }
+    else L.push(sp("s","⎿ $ "+cut(r.c,W-4-(ex?ex.length+2:0)))+(ex?"  "+sp("e",ex):""));
+    L.push("");
+  }
+  return L.join("\n");
+}
+for(const [id,s,x] of [["b1","B",false],["b2","B",true],["c1","C",false],["c2","C",true]]) document.getElementById(id).innerHTML=render(s,x);
+</script>

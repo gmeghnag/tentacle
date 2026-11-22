@@ -1464,13 +1464,19 @@ describe("a spilled tool result", () => {
     ...over,
   });
   const NOTE = "40.8k chars · too large, the model reads it in parts";
-  // The body's rows: the header (row 0) and any `  │ ` command row of an
-  // expanded call (docs/feat/tui-tool-expand.md) are not body rows, so skip
-  // them both — with `expandAll` the command is shown, and these tests are
-  // about the spelling of the body itself.
+  // The body's rows: the header (row 0) and any command row of an expanded
+  // call — `  │ ` (docs/feat/tui-tool-expand.md) or, for a `shell` call, the
+  // `⎿ $ <command>` block opener (docs/fix/tui-shell-row-collapsed) — are not
+  // body rows, so skip them all: these tests are about the spelling of the body
+  // itself.
   const body = (tool: ToolItem, o: Parameters<typeof itemLines>[1]) =>
     itemLines(tool, o)
-      .filter((l) => !strip(l).startsWith("  │ ") && strip(l) !== "  │")
+      .filter((l) => {
+        const text = strip(l);
+        return (
+          !text.startsWith("  │ ") && text !== "  │" && !text.startsWith("⎿ $ ") && text !== "⎿ $"
+        );
+      })
       .slice(1)
       .map((l) => strip(l).replace(/^(⎿ | {2})/, ""));
 
@@ -1711,20 +1717,22 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
   });
 
   test("expanding ONE call shows its command wrapped under the header (mockup)", () => {
+    // docs/fix/tui-shell-row-collapsed: a `shell` call expands into the SAME
+    // `⎿ $ …` block a described one draws — continuation rows hung 4 cells, no
+    // `  │ ` rows any more — and the body stays as it was under the toggle.
     const rows = transcriptRows([longTool], {
       expandAll: false,
       width: 40,
       expandedIds: ["t1"],
     }).map(strip);
-    // The header keeps the bullet, the label and the elapsed time — no comment.
-    expect(rows[0]).toContain("Bash");
-    expect(rows[0]).toContain("1.7s");
-    expect(rows[0]).not.toContain("TestZZ");
-    // Then the full command as `  │ ` continuation rows, wrapped to the width.
-    const cont = rows.slice(1).filter((r) => r.startsWith(CONT));
-    expect(cont.length).toBeGreaterThan(1);
-    const joined = cont
-      .map((r) => r.slice(CONT.length))
+    // The header keeps the bullet, the label and the elapsed time — no command.
+    expect(rows[0]).toBe("● Bash 1.7s");
+    // Then the whole command: `⎿ $ ` first, the rest hung under it.
+    expect(rows[1]?.startsWith("⎿ $ cd . && go test")).toBe(true);
+    const joined = rows
+      .slice(1)
+      .filter((r) => r !== "⎿ ok" && !r.startsWith("  ok"))
+      .map((r) => r.replace(/^⎿ \$ /, "").replace(/^ {4}/, ""))
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
@@ -1732,8 +1740,27 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
     for (const row of rows) {
       expect(stringWidth(row)).toBeLessThanOrEqual(40);
     }
-    // The body is untouched by the toggle (still the collapsed preview).
-    expect(rows.at(-1)).toBe("⎿ ok");
+    // The body is untouched by the toggle (still the collapsed preview), hung
+    // under the command block it now follows.
+    expect(rows.at(-1)).toBe("  ok");
+  });
+
+  test("a NON-shell call still expands to `  │ ` rows (the generic path is unchanged)", () => {
+    const path = `src/${"deep/".repeat(12)}file.ts`;
+    const edit: ToolItem = {
+      kind: "tool",
+      id: "e1",
+      name: "fs_edit",
+      args: JSON.stringify({ path }),
+      status: "ok",
+      durationMs: 1,
+      resultText: "edited",
+    };
+    const rows = transcriptRows([edit], { expandAll: false, width: 40, expandedIds: ["e1"] }).map(
+      strip,
+    );
+    expect(rows[0]).toBe("● Edit 0.0s");
+    expect(rows.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(1);
   });
 
   test("expanding one call does not touch its BODY, Ctrl+O does both", () => {
@@ -1757,10 +1784,11 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
       args: JSON.stringify({ command: `${COMMAND} | tail-second` }),
     };
     const rows = transcriptRows([longTool, second], { expandAll: true, width: 40 }).map(strip);
-    // Both calls contribute continuation rows: two bullet headers, each
-    // followed by at least one `  │ ` row, and both tails are visible.
+    // Both calls contribute command rows: two `● Bash <elapsed>` headers, each
+    // opening a `⎿ $ …` block hung 4 cells under it, both tails visible.
     expect(rows.filter((r) => r.includes("Bash"))).toHaveLength(2);
-    expect(rows.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(3);
+    expect(rows.filter((r) => r.startsWith("⎿ $ ")).length).toBe(2);
+    expect(rows.filter((r) => r.startsWith("    ")).length).toBeGreaterThan(3);
     expect(rows.join("\n")).toContain("tail -50");
     expect(rows.join("\n")).toContain("tail-second");
   });
@@ -1775,7 +1803,9 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
       width: 60,
       expandedIds: ["t1"],
     }).map(strip);
-    const cont = rows.filter((r) => r.startsWith(CONT)).map((r) => r.slice(CONT.length));
+    const cont = rows
+      .filter((r) => r.startsWith("⎿ $ ") || r.startsWith("    "))
+      .map((r) => r.replace(/^⎿ \$ /, "").replace(/^ {4}/, ""));
     expect(cont).toEqual(["make build", "make test", "make deploy"]);
   });
 
@@ -1784,7 +1814,10 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
     const rows = transcriptRows([empty], { expandAll: false, width: 60, expandedIds: ["t1"] }).map(
       strip,
     );
-    expect(rows.some((r) => r.startsWith(CONT))).toBe(false);
+    // No command to open a block with: the header alone, no `⎿ $ ` row and no
+    // continuation rows (the body keeps its own connector).
+    expect(rows.some((r) => r.startsWith("⎿ $ "))).toBe(false);
+    expect(rows.some((r) => r.startsWith("    "))).toBe(false);
     expect(rows[0]).toContain("Bash");
   });
 
@@ -1907,17 +1940,16 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
       width: 80,
       expandedIds: ["t1"],
     }).map(strip);
-    expect(at40.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(
-      at80.filter((r) => r.startsWith(CONT)).length,
-    );
+    const hung = (rows: string[]): number => rows.filter((r) => r.startsWith("    ")).length;
+    expect(hung(at40)).toBeGreaterThan(hung(at80));
     for (const row of at80) {
       expect(stringWidth(row)).toBeLessThanOrEqual(80);
     }
     // Both still show the whole command.
     const text = (rows: string[]): string =>
       rows
-        .filter((r) => r.startsWith(CONT))
-        .map((r) => r.slice(CONT.length))
+        .filter((r) => r.startsWith("⎿ $ ") || r.startsWith("    "))
+        .map((r) => r.replace(/^⎿ \$ /, "").replace(/^ {4}/, ""))
         .join(" ")
         .replace(/\s+/g, " ")
         .trim();

@@ -1979,12 +1979,10 @@
             "\u001b[38;2;6;182;212m●\u001b[39m \u001b[0mThe lockfile is stale: run \u001b[33mbun install\u001b[39m and commit it.\u001b[0m"
           ],
           "toolRunning": [
-            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m",
-            "\u001b[38;2;140;140;140m⎿\u001b[39m \u001b[38;2;140;140;140mrunning…\u001b[39m"
+            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m"
           ],
           "toolRunningOff": [
-            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m",
-            "\u001b[38;2;140;140;140m⎿\u001b[39m \u001b[38;2;140;140;140mrunning…\u001b[39m"
+            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m"
           ],
           "toolOk": [
             "\u001b[38;2;78;201;116m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mls\u001b[39m\u001b[38;2;140;140;140m 1.2s\u001b[39m",
@@ -2004,12 +2002,10 @@
             "\u001b[38;2;14;116;144m●\u001b[39m \u001b[0mThe lockfile is stale: run \u001b[38;2;149;56;0mbun install\u001b[39m and commit it.\u001b[0m"
           ],
           "toolRunning": [
-            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m",
-            "\u001b[38;2;107;107;107m⎿\u001b[39m \u001b[38;2;107;107;107mrunning…\u001b[39m"
+            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m"
           ],
           "toolRunningOff": [
-            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m",
-            "\u001b[38;2;107;107;107m⎿\u001b[39m \u001b[38;2;107;107;107mrunning…\u001b[39m"
+            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m"
           ],
           "toolOk": [
             "\u001b[38;2;8;71;24m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mls\u001b[39m\u001b[38;2;107;107;107m 1.2s\u001b[39m",

@@ -6,7 +6,9 @@ import { resolveConfig } from "../src/resolve.ts";
 import { FileConfigSchema } from "../src/schema.ts";
 
 // `beta.compactShell` (docs/feat/shell-intent-line.md §4): a LAPTOP-ONLY
-// display setting, default off, defaulted where the TUI is launched.
+// display setting, default off. The TUI no longer reads it
+// (docs/fix/tui-shell-row-collapsed retired it there), but the KEY must keep
+// parsing: a config file that sets it would otherwise fail `.strict()`.
 describe("beta.compactShell", () => {
   test("a boolean parses in the file and a profile; anything else is refused (strict)", () => {
     for (const compactShell of [true, false]) {
