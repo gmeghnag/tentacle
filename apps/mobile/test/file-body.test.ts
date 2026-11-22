@@ -222,6 +222,118 @@ describe("a MultiEdit says its path ONCE (never four times)", () => {
   });
 });
 
+/**
+ * Review round 3's HIGH (docs/feat/mobile-file-view.md): an `.html` DIFF body
+ * drew its `<script>`/`<style>` lines plain. A diff line is a FRAGMENT, so the
+ * line alone cannot know it is inside a `<script>`; the state comes from the
+ * HUNK's own drawn lines — an opener the hunk contains (forward), or a closer
+ * with no opener before it (the hunk began inside). Each case below is one of
+ * those two, plus the bound: evidence the hunk does not carry stays plain.
+ */
+describe("an .html diff colours the script and style its hunk proves it is inside", () => {
+  const scopesOf = (view: ReturnType<typeof fileBodyView>) =>
+    (view?.lines ?? []).flatMap((line) => line.spans.map((s) => s.scope));
+  const textOf = (view: ReturnType<typeof fileBodyView>) =>
+    (view?.lines ?? []).map((line) => line.spans.map((s) => s.text).join("")).join("\n");
+  const editRow = (patch: string, name = "fs_edit") => ({
+    name,
+    args: JSON.stringify({ path: "page.html" }),
+    status: "ok",
+    output: "edited page.html",
+    diff: detail("page.html", patch),
+  });
+
+  test("a hunk that OPENS <script> colours the lines after it as JavaScript", () => {
+    // `</main>` at 26, `<script>` at 27: the hunk carries the opener, so every
+    // line under it is JavaScript by the hunk's own text.
+    const patch = [
+      "--- a/page.html",
+      "+++ b/page.html",
+      "@@ -26,3 +26,4 @@",
+      " </main>",
+      " <script>",
+      " export const SCENES = [",
+      '+  { k: "camo", dur: 5.4 },',
+      " ];",
+    ].join("\n");
+    const view = fileBodyView(editRow(patch), false);
+    const scopes = scopesOf(view);
+    // `export`/`const` are JavaScript keywords: the sub-language ran.
+    expect(scopes).toContain("keyword");
+    // …and the wrapper markup never reached the text.
+    expect(textOf(view)).toContain("export const SCENES = [");
+    expect(textOf(view)).not.toContain("language-");
+  });
+
+  test("a hunk that OPENS <style> colours CSS", () => {
+    const patch = [
+      "--- a/page.html",
+      "+++ b/page.html",
+      "@@ -6,3 +6,3 @@",
+      " <style>",
+      "-  --bg: #eceef0;",
+      "+  --bg: #eeeeee;",
+      " }",
+    ].join("\n");
+    // A CSS custom property is `attr` and `#eeeeee` a `number` — neither is what
+    // the `xml` grammar emits for this text outside a `<style>`.
+    const scopes = scopesOf(fileBodyView(editRow(patch), false));
+    expect(scopes).toContain("attr");
+    expect(scopes).toContain("number");
+  });
+
+  test("a MultiEdit hunk that only CLOSES </script> still colours its body", () => {
+    // The hunk begins inside the script and closes it: the unmatched closer is
+    // the evidence, so the lines above it are JavaScript.
+    const patch = [
+      "--- a/page.html",
+      "+++ b/page.html",
+      "@@ -62,3 +66,3 @@",
+      "   requestAnimationFrame(() => play(scene, at + 16));",
+      '-draw("heli", BANNER, 4);',
+      '+draw("heli", NOTIF_A, 4);',
+      " </script>",
+    ].join("\n");
+    const view = fileBodyView(editRow(patch, "fs_multi_edit"), false);
+    expect(scopesOf(view)).toContain("title function_");
+    expect(textOf(view)).toContain('draw("heli", NOTIF_A, 4);');
+  });
+
+  test("the bound: a hunk starting inside <script> with no tag in it stays plain", () => {
+    // A hunk whose own lines carry no `<script>`/`</script>` has NO evidence of
+    // its state (a patch is fragments: the untouched lines above it are not on
+    // the row) — so it is honest plain text, never a guess.
+    const patch = [
+      "--- a/page.html",
+      "+++ b/page.html",
+      "@@ -29,3 +29,4 @@",
+      " export const SCENES = [",
+      '-  { k: "heli", dur: 9.6, tag: "proposta" },',
+      '+  { k: "heli", dur: 9.6 },',
+      " ];",
+    ].join("\n");
+    const view = fileBodyView(editRow(patch), false);
+    expect(scopesOf(view).every((scope) => scope === "plain")).toBe(true);
+    // …and the text is exactly the file's: no wrapper markup leaks.
+    expect(textOf(view)).toContain("export const SCENES = [");
+  });
+
+  test("a hunk at the file's top level stays XML (no sub-language is entered)", () => {
+    const patch = [
+      "--- a/page.html",
+      "+++ b/page.html",
+      "@@ -19,2 +19,2 @@",
+      " <body>",
+      '-<main class="wrap">',
+      '+<main class="page">',
+    ].join("\n");
+    const scopes = scopesOf(fileBodyView(editRow(patch), false));
+    expect(scopes).toContain("tag");
+    expect(scopes).toContain("attr");
+    expect(scopes).not.toContain("keyword");
+  });
+});
+
 describe("a write", () => {
   const createdPatch = [
     "--- a/note/palloncino.json",

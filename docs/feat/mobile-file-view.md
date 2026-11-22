@@ -485,3 +485,105 @@ overstated the 400-line case without a test behind it.
 - **HIGH — html diffs are not coloured.** In a Write / Edit / MultiEdit of an `.html` file, the `<script>` and `<style>` lines are drawn plain: spec #2/#6 (JS/CSS colour inside .html) and the variant-B mockup fail for diff bodies (the Read body is coloured). Fix: diff bodies of an `.html` file colour embedded script/style lines like the Read body does, with a red-first unit test on the pure colouring module (an Edit and a MultiEdit hunk that START inside a `<script>` block, so the language state must come from context, not from the hunk's first line — say how the hunk's starting state is known, or document the limit). The owner chose: fix this before merge (22/11 21:25).
 
 Verdict for this round: REQUEST-CHANGES (one HIGH).
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-23 — Review round 3's HIGH: an `.html` diff body drew its `<script>`/`<style>` lines plain*
+
+**Root cause (one sentence).** `diffLines` coloured each diff line as a standalone
+fragment, and the `xml` grammar only enters a subLanguage after the `<script>`/`<style>`
+opener — so a script/style line out of its context had no grammar to colour it.
+
+**Repro, before (`.tentacle/tmp/mobile-file-view/fix1-html-diff.ts`, the real flow-41
+`fs_edit` patch through `createTwoFilesPatch`):**
+
+```
+language: xml | header: lines 26–37 · HTML
+  27   [tag,name,tag] <script>
+  28   [plain] // The scenes, in the order the gallery plays them.
+  29   [plain] export const SCENES = [
+  36   [plain] const UFO1 = UFO0.map((r, i) => (i === 4 ? "LCCYCCYCCYCCYCL" : r));
+has keyword (JS): false   has attribute (CSS/HTML): false
+```
+
+**Where the hunk's starting state comes from (the reviewer's question).** From the hunk's
+OWN drawn lines only, and each fact is the patch's own text:
+
+- **forward** — the hunk contains the opener (`<script>`/`<style>`): the lines after it are
+  walked by `nextState`, so the state is the hunk's own text, not a guess;
+- **backward** — a closer (`</script>`) appears with no opener before it *inside* the hunk:
+  the hunk began inside that block.
+
+**The documented limit.** A hunk that starts inside a `<script>` and closes nothing within it
+carries no evidence either way, so it stays plain (never a guess). It cannot be recovered from
+the rest of the file either: `fs_edit`'s patch is hunks only, never the untouched lines between
+them. Measured on the real flow-41 patches: `fs_edit` one hunk, opener inside (`BACKWARD_KNOWN=no`);
+`fs_multi_edit` hunk 1 has NO tag at all (the limit), hunk 2 carries `</script>` (`BACKWARD_KNOWN=script`);
+the created `fs_write` is one hunk with both. So this fix colours the whole `fs_edit` body, the
+created-Write body, and MultiEdit's second hunk; MultiEdit's first hunk is the limit.
+
+**How a line inside a block is coloured.** `subLanguageSpans` feeds the `xml` grammar the opener
+plus the line and drops the opener's own row, so the subLanguage is entered and the line's real
+tokens come out (`export` → `keyword`, `--bg` → `attr`). Probed: the grammar does not close the
+block at input's end, so no closer is needed, and every case was checked to keep the text
+byte-identical (`line 33–36 of the whole-page probe`, `probe-edge.ts`: `</script>`, `}`,
+`const s = '</script>';`).
+
+**After (same repro):**
+
+```
+  27   [tag,name,tag] <script>
+  28   [comment] // The scenes, in the order the gallery plays them.
+  29   [keyword,plain,keyword,plain,variable constant_,plain] export const SCENES = [
+  36   [keyword,plain,title class_,…,function,params,function,plain,number,plain,string,plain] const UFO1 = UFO0.map(…)
+has keyword (JS): true
+```
+
+The created-Write body of the same page: `keyword` (JS), `attr`+`selector-pseudo` (CSS),
+`comment`, `tag` all present, and all 70 source lines drawn identical (`fix1-write.ts`:
+`differing lines: 0`).
+
+**Files.** `apps/mobile/src/file-body.ts` — `SubLanguage`, `SUB_LANGUAGES`, `subTagAt`/
+`subTagOf`, `hunkStartState`, `nextState`, `subLanguageSpans`, the per-line state walk in
+`diffLines`; `splitSpans`/`plainSpans` extracted so `colourLines` and `subLanguageSpans` share
+one splitter (no duplicated loop). `apps/mobile/test/file-body.test.ts` — one `describe` with 5
+tests. **Drift:** none from the plan — this fix is what Review round 3 asked for; no other file
+changed (no `highlight.ts` edit was needed: the `spansOf` sub-language wrapper fix from round 1
+already made the wrapper transparent). Two design notes not in the plan: the cap is applied to
+the line as the file wrote it (the wrapper is this module's, so it is added to the allowance),
+and an empty own-row returns `null` so the caller draws the blank-row space.
+
+**Red first, then green.** The 2 failing test names before the fix, on the assertion of the
+property (received `plain` scopes, not an import error):
+
+```
+(fail) … an edit whose hunk opens INSIDE <script> colours its lines as JavaScript
+       Expected to contain: "keyword"  Received: [ "plain", "plain", "plain", "plain", "plain" ]
+(fail) … a MultiEdit hunk that starts inside <style> colours CSS
+       Expected to contain: "attr"     Received: [ "plain", "plain", "plain" ]
+```
+
+(That first shape asserted the *unknowable* state, so it was corrected rather than kept: the
+shipped tests prove forward, backward, the limit, and top-level — see the next paragraph.)
+
+**Mutation checks** (`.tentacle/tmp/mobile-file-view/mutate-fix1.sh`, file restored from a copy,
+`git status` showed only the two intended files afterwards; `diff -q` byte-identical):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | the sub-language path never runs (`subLanguageSpans(...) ??` → `null ??`) | **3 fail** — the 3 colouring tests |
+| M2 | forward-only: an unmatched closer yields no start state | **1 fail** — "only CLOSES `</script>`" |
+| M3 | guess instead of prove: every xml hunk starts in `<script>` | **2 fail** — the limit test + top-level test |
+| M4 | no forward walk (state reset after line 1) | **2 fail** — the opener tests |
+
+M1 is the HIGH itself; M3 is the test that keeps the fix honest (a guess fails the limit test).
+
+**Tests.** 5 touched files, 113 pass / 0 fail: `file-body` 43, `file-body-render`, `diff-view`,
+`highlight`, `tool-step-view`. `bunx biome check` on both changed files: clean.
+`bunx tsc -p apps/mobile --noEmit`: clean. Full suite/typecheck/lint NOT run here (the
+orchestrator's gate runs it).
+
+**Still not done, and outside this fix:** the Validation screenshots must be retaken for the
+diff bodies (the previous set shows the plain script/style lines this fix colours); MultiEdit's
+first hunk remains plain by the limit documented above.
+
