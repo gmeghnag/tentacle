@@ -242,8 +242,9 @@ function subTagOf(
  */
 function hunkStartState(texts: readonly string[]): SubLanguage | null {
   const tags = subTagAt();
+  const body = texts.join("\n");
   let pending: SubLanguage | null = null;
-  for (let match = tags.exec(texts.join("\n")); match !== null; match = tags.exec()) {
+  for (let match = tags.exec(body); match !== null; match = tags.exec(body)) {
     const tag = subTagOf(match);
     if (tag === null) {
       continue;
@@ -262,7 +263,7 @@ function hunkStartState(texts: readonly string[]): SubLanguage | null {
 function nextState(text: string, from: SubLanguage | null): SubLanguage | null {
   const tags = subTagAt();
   let state = from;
-  for (let match = tags.exec(text); match !== null; match = tags.exec()) {
+  for (let match = tags.exec(text); match !== null; match = tags.exec(text)) {
     const tag = subTagOf(match);
     if (tag !== null) {
       state = tag.close ? null : tag.language;
