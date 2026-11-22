@@ -2,7 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FRAGMENT_DIR, parseFragments, readFragmentDir } from "../changelog.ts";
+import { FRAGMENT_DIR, type Fragment, parseFragments, readFragmentDir } from "../changelog.ts";
+
+/**
+ * A fragment that retracts what a SIBLING of the same release only just added: a
+ * non-`added` entry whose slug extends another entry's slug (`tui-mascot` vs
+ * `tui-mascot-hidden`). Both land in one version, so the notes advertise a
+ * feature and then say it is hidden — a change away from a state no release ever
+ * had. The fix belongs in the `.added` bullet, which must describe what ships.
+ */
+function retractions(fragments: readonly Fragment[]): string[] {
+  const slugs = new Set(fragments.map((f) => f.slug));
+  const sibling = (f: Fragment): boolean =>
+    [...slugs].some((s) => s !== f.slug && f.slug.startsWith(`${s}-`));
+  return fragments.filter((f) => f.category !== "added" && sibling(f)).map((f) => f.path);
+}
 
 const ROOT = join(import.meta.dir, "..", "..");
 const CHANGELOG = join(ROOT, "CHANGELOG.md");
@@ -75,5 +89,41 @@ describe("I2: every entry in changelog.d/ is a well-formed fragment", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("I3: an unreleased fragment does not retract a sibling's addition", () => {
+  // R1 (fix round 1): `tui-mascot-hidden.changed` said the header "no longer
+  // draws the mascot" while `tui-mascot.added` — unreleased too — advertised it.
+  // One release, both bullets: a feature nobody could have seen, then its removal.
+  test("the tree has no such pair (a changed entry shadowing a sibling's added one)", () => {
+    expect(retractions(parseFragments(readFragmentDir(ROOT)))).toEqual([]);
+  });
+
+  test("the same check over the offending pair is red (non-vacuity)", () => {
+    const pair = parseFragments([
+      {
+        path: `${FRAGMENT_DIR}/tui-mascot.added.md`,
+        text: "- **Polpetto in the startup header.** Beside it sits a pixel mascot.\n",
+      },
+      {
+        path: `${FRAGMENT_DIR}/tui-mascot-hidden.changed.md`,
+        text: "- **The startup header no longer draws the mascot.**\n",
+      },
+    ]);
+    expect(retractions(pair)).toEqual([`${FRAGMENT_DIR}/tui-mascot-hidden.changed.md`]);
+    // An unrelated slug is never a sibling, and an `added` bullet is never a retraction.
+    expect(
+      retractions(
+        parseFragments([
+          {
+            path: `${FRAGMENT_DIR}/tui-mascot.added.md`,
+            text: "- **Polpetto in the startup header.**\n",
+          },
+          { path: `${FRAGMENT_DIR}/other-task.added.md`, text: "- **Something else.**\n" },
+          { path: `${FRAGMENT_DIR}/other-task.fixed.md`, text: "- **A regular fix.**\n" },
+        ]),
+      ),
+    ).toEqual([]);
   });
 });

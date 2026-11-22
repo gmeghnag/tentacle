@@ -132,3 +132,54 @@ header rows are the text-only ones, not how a real terminal draws them.
 **Executor behaviour:** careful and honest — load-bearing check run first, both drifts declared with reasons; the second (the changelog) was the wrong call, see finding 1.
 
 *— claude-opus-5-5, 2026-11-22* (fresh context; a different model family from the executor, deepseek-v4-pro)
+
+### Fix round 1
+
+*— deepseek-v4-pro (executor), 2026-11-22*
+
+**Scope:** the one Review finding (MEDIUM, changelog). No production code touched
+— the round is two Markdown fragments plus one guard test; the `packages/tui`
+change of round 0 is untouched and its tests were not re-run.
+
+**R1 — FIXED (changelog pair retracted a feature in the same release).**
+
+- `changelog.d/tui-mascot-hidden.changed.md` — deleted (the Implementation's
+  "no changelog fragment" now holds, so the `feat/tui-mascot` fragment is again
+  the task's only changelog line).
+- `changelog.d/tui-mascot.added.md:1` — rewritten to what ships: the text header
+  that replaces `Tentacle ready.` (three lines, the folder shortened to fit). The
+  mascot sentence is gone; it returns with the task that turns the sprite on.
+  The `feat/tui-mascot.md` Status block already says the sprite is hidden, so
+  the pair reads correctly with no `.changed` at all.
+- **Red first** (`scripts/test/changelog-guard.test.ts`, new `describe` I3), on
+  the buggy tree:
+
+  ```
+  (fail) I3: an unreleased fragment does not retract a sibling's addition
+         > the tree has no such pair (a changed entry shadowing a sibling's added one)
+  - []
+  + ["changelog.d/tui-mascot-hidden.changed.md"]
+   6 pass · 1 fail
+  ```
+
+  The guard is a rule, not a one-off: a non-`added` fragment whose slug extends
+  another fragment's slug (`tui-mascot` ← `tui-mascot-hidden`) is a retraction of
+  an addition landing in the same release. Its second test is the non-vacuity
+  case (the offending pair red, an unrelated slug and an `added` bullet green).
+  Green after the fix: 7 pass / 0 fail (`changelog-guard` + `changelog` 23/0;
+  `release.test.ts` 36/0).
+
+**Mutation checks (§9, each reverted).**
+
+1. Re-create the deleted fragment (`.changed`, one bullet) → I3 red again
+   (1 fail); remove it → 7 pass.
+2. Restore the old `.added` bullet ("beside it sits a small pixel mascot") with
+   no `.changed` present → I3 **green** (7 pass). This is honest, not a gap: the
+   rule can only see a *pair* — the wording of a lone bullet is the Review's
+   judgement, which is why finding R1 named the text. The mascot sentence's
+   absence is therefore verified by reading the bullet, not by the test; the
+   test pins the structural half (no same-release retraction).
+
+**Lint:** `bunx biome check scripts/test/changelog-guard.test.ts` — clean (one
+`organizeImports` fix applied to the `type Fragment` position). Full gate is the
+orchestrator's (not run here, per the brief).
