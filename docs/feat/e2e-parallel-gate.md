@@ -455,3 +455,14 @@ Mutation: I made `parallelExitCode`'s child-red step dead → 2 tests failed (49
 Attacks tried: binary key collision (found #1); relay framing against the P6 grep contract (found #2); exit-code/prerequisite path vs D2.1 (found #3); child `runId` reuse (the parent dir name only labels `endpoint.json`/`meta.json`, harmless); `shardLabel` collision (needs two UDIDs with the same first 8 hex chars, negligible); merge synthesis and duplicate throw (both hold, tests pin them); single-sim path (unchanged apart from `resolveApp`/`waitForServe`, as D8 says).
 Holds: the D4 merge never turns a missing flow into a silent pass; the seed-var map is one source shared by `spawnFlow` and the splitter; `--shard-of` validation; `waitForServe`. No §7 runtime invariant is touched (test infrastructure only).
 Executor behaviour: honest Execution, with its drifts named (apart from #3) and the Step 0 interference disclosed. Live spawn/relay/signal behaviour is still unverified (Validation's job).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-23* (fresh context, reviewing `git diff HEAD~1` = `850b8b41`)
+
+**Verdict: APPROVE** (all three round-1 findings are fixed, and I found no regression)
+
+- **#1 (HIGH) fixed.** `appCacheInputs` reads raw bytes, `appCacheKey` hashes them with a byte-length frame, and `KEY_SCHEMA` is bumped to `e2e-app-v2`. Mutation: I hashed a lossy UTF-8 decode again → 2 tests failed (the synthetic invalid-UTF-8 test and the real-repo binary test). Reverted.
+- **#2 (MEDIUM) fixed.** `frameLines`/`flushLines` keep the open line as bytes, separately for stdout and stderr, and flush it after `close` (all `data` events have arrived by then). Mutation: I made the carry emit eagerly → 5 `frameLines` tests failed. Reverted.
+- **#3 (MEDIUM) fixed.** `missingPrerequisites` is shared by both paths. The parent runs it on the devices' deduped majors, before the Swift suite, the boot and the build. Deduping by `tool` loses nothing, because each runtime's name includes its major. The single path is equivalent (`[]` gives the old no-`only` rule). Nit: the three tests that pin this in `e2e-preflight.test.ts` grep the source text, not behaviour. That is acceptable only because `parallel.ts` is effectful by design.
+- Gate: `e2e-shard` + `e2e-gate` + `e2e-preflight` → 127 pass / 0 fail. `bun run lint` clean (2278 files). `bun run typecheck` clean. After the reverts, `git status` is clean. Still unverified: the live spawn/relay/signal path (Validation's job).
