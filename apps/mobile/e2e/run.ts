@@ -43,6 +43,7 @@ import { payloadFor, sealPushMessage } from "./notify-steps.ts";
 import { createPairingHooks } from "./pairing.ts";
 import {
   type IosMajor,
+  type Missing,
   REQUIRED_IOS_MAJORS,
   missingText,
   parseRuntimes,
@@ -203,6 +204,48 @@ export async function simctlRuntimes(): Promise<string> {
 export async function simctlDevices(): Promise<string> {
   const result = await $`xcrun simctl list -j devices`.quiet().nothrow();
   return result.exitCode === 0 ? result.stdout.toString() : "";
+}
+
+/**
+ * Every prerequisite this machine is missing, most fundamental first (empty =
+ * run), with the SAME probes and the same per-major runtime rule on both paths:
+ * the single-simulator one and the parallel parent's. One function, so a
+ * prerequisite can never be checked by one path and not the other
+ * (docs/feat/e2e-parallel-gate.md D2.1, review round 1 M3: the parent used to
+ * skip it and paid for it with a 10–15 min build before the exit 2).
+ *
+ * `onlys` are the majors the run will actually drive (each parallel device's
+ * own); empty keeps `preflight`'s default rule — every required major. The
+ * probes run ONCE for all of them, and a tool missing for both is reported once.
+ */
+export async function missingPrerequisites(
+  onlys: readonly IosMajor[] = [],
+): Promise<readonly Missing[]> {
+  const [xcode, cocoapods, maestro, runtimesJson] = await Promise.all([
+    versionOf("xcodebuild", "-version"),
+    versionOf("pod", "--version"),
+    // Maestro's launcher needs a JDK BEFORE it can print its version, so the
+    // probe carries the same JAVA_HOME/PATH the flows run with.
+    versionOf("maestro", "--version", maestroEnv()),
+    simctlRuntimes(),
+  ]);
+  const input = {
+    platform: process.platform,
+    runtimes: parseRuntimes(runtimesJson),
+    ...(xcode === undefined ? {} : { xcode }),
+    ...(cocoapods === undefined ? {} : { cocoapods }),
+    ...(maestro === undefined ? {} : { maestro }),
+  };
+  const groups: readonly (IosMajor | undefined)[] =
+    onlys.length === 0 ? [undefined] : [...new Set(onlys)];
+  const missing = new Map<string, Missing>();
+  for (const only of groups) {
+    for (const item of preflight(input, ...(only === undefined ? [] : [only]))) {
+      // A tool missing for both devices is one missing tool, named once.
+      missing.set(item.tool, item);
+    }
+  }
+  return [...missing.values()];
 }
 
 /**
@@ -399,17 +442,7 @@ async function main(): Promise<number> {
       noAppCache: args.noAppCache === true,
     });
   }
-  const [xcode, cocoapods, maestro, runtimesJson, devicesJson] = await Promise.all([
-    versionOf("xcodebuild", "-version"),
-    versionOf("pod", "--version"),
-    // Maestro's launcher needs a JDK BEFORE it can print its version, so the
-    // probe carries the same JAVA_HOME/PATH the flows run with.
-    versionOf("maestro", "--version", maestroEnv()),
-    // Two DIFFERENT listings: runtimes carry the iOS versions, devices carry the
-    // simulators to boot (a `devices` key is absent from `-j runtimes`).
-    simctlRuntimes(),
-    simctlDevices(),
-  ]);
+  const devicesJson = await simctlDevices();
   // A UDID names ONE simulator, so it names the major too: the gate runs that
   // simulator only (the other required runtime need not be installed), and
   // never falls back to another device — a run must not drive one it was not
@@ -421,16 +454,7 @@ async function main(): Promise<number> {
     return 2;
   }
   const only: IosMajor | undefined = choice.kind === "device" ? choice.major : choice.only;
-  const missing = preflight(
-    {
-      platform: process.platform,
-      runtimes: parseRuntimes(runtimesJson),
-      ...(xcode === undefined ? {} : { xcode }),
-      ...(cocoapods === undefined ? {} : { cocoapods }),
-      ...(maestro === undefined ? {} : { maestro }),
-    },
-    ...(only === undefined ? [] : [only]),
-  );
+  const missing = await missingPrerequisites(only === undefined ? [] : [only]);
   if (missing.length > 0) {
     console.error(missingText(missing));
     return 2;
@@ -1139,7 +1163,9 @@ export async function appCacheInputs(repo: string): Promise<readonly AppInput[]>
       continue;
     }
     try {
-      files.push({ path, content: await readFile(join(repo, path), "utf8") });
+      // RAW bytes, never `readFile(…, "utf8")`: fonts and PNGs are not UTF-8,
+      // and a lossy decode made two different binaries hash the same.
+      files.push({ path, content: await readFile(join(repo, path)) });
     } catch {
       // A tracked file deleted from the worktree: a DIFFERENT key from one that
       // never existed, so the deletion is part of what a build would see.

@@ -19,12 +19,13 @@ import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { $ } from "bun";
 import { type FlowResult, type Verdict, deviceChoice, summaryText, verdictOf } from "./gate.ts";
-import type { IosMajor } from "./preflight.ts";
+import { type IosMajor, missingText } from "./preflight.ts";
 import {
   FLOWS,
   REPO,
   RUNS_DIR,
   flowMetas,
+  missingPrerequisites,
   resolveApp,
   runSwiftTests,
   selectedFlows,
@@ -34,6 +35,8 @@ import {
 import {
   type PastRun,
   flowGroups,
+  flushLines,
+  frameLines,
   latestDurations,
   mergeShardResults,
   parallelExitCode,
@@ -81,12 +84,28 @@ export async function runParallel(
   // Every simulator must be usable BEFORE anything is built or spawned: an
   // unknown UDID then costs a second, not a Release build (D2.1).
   const devicesJson = await simctlDevices();
+  const majors: IosMajor[] = [];
   for (const udid of udids) {
     const choice = deviceChoice(devicesJson, udid, options.only);
-    if (choice.kind === "unknown") {
-      console.error(choice.message);
+    if (choice.kind !== "device") {
+      // A UDID was given, so `majors` (no UDID) cannot happen; `unknown` is the
+      // real case, and its message is the report.
+      console.error(
+        choice.kind === "unknown" ? choice.message : `e2e:mobile: ${udid} is not a device`,
+      );
       return 2;
     }
+    majors.push(choice.major);
+  }
+  // Every prerequisite ONCE here, before the build: the same probes and the same
+  // per-major runtime rule as the single path (`missingPrerequisites`), so a
+  // missing Maestro or runtime costs a second, not a 10–15 min Release build
+  // ending in two children's exit 2 (D2.1, review round 1 M3). The devices'
+  // majors, deduped: one runtime check per major, one probe for all of them.
+  const missing = await missingPrerequisites(majors);
+  if (missing.length > 0) {
+    console.error(missingText(missing));
+    return 2;
   }
   // The Swift suite ONCE, here: two children running `swift test` would fight
   // over SwiftPM's `.build` lock, and it tests native sources, not a simulator.
@@ -278,18 +297,45 @@ async function runChildren(
         env: process.env,
       });
       const lines: string[] = [];
-      const relay = (chunk: Buffer): void => {
-        for (const line of chunk.toString().split("\n")) {
-          if (line !== "") {
-            lines.push(line);
-            // A suffix, never a prefix: `✗ 07-prompt (iOS 26) fail` keeps `✗` in
-            // column 0 and the flow name as the second field.
-            console.log(relayLine(shard.label, line));
+      // Per STREAM, because a pipe read ends wherever it ends (never at a line
+      // boundary) and the two streams are independent: the open line's bytes are
+      // carried to the next chunk, so a cut line or a cut `✗` stays one line.
+      const emit = (line: string): void => {
+        lines.push(line);
+        // A suffix, never a prefix: `✗ 07-prompt (iOS 26) fail` keeps `✗` in
+        // column 0 and the flow name as the second field.
+        console.log(relayLine(shard.label, line));
+      };
+      const relay =
+        (carry: { bytes: Uint8Array; done: boolean }) =>
+        (chunk: Buffer): void => {
+          if (carry.done) {
+            return;
+          }
+          const framed = frameLines(carry.bytes, chunk);
+          carry.bytes = framed.carry;
+          for (const line of framed.lines) {
+            emit(line);
+          }
+        };
+      // A last line with no `\n` is a line too: flush the tail at end of stream,
+      // stdout first (its order relative to stderr is the only one we know).
+      const flush = (carry: { bytes: Uint8Array; done: boolean }): void => {
+        if (!carry.done) {
+          for (const line of flushLines(carry.bytes)) {
+            emit(line);
           }
         }
+        carry.done = true;
+        carry.bytes = new Uint8Array(0);
       };
-      child.stdout?.on("data", relay);
-      child.stderr?.on("data", relay);
+      const streams = [
+        { carry: { bytes: new Uint8Array(0), done: false }, source: child.stdout },
+        { carry: { bytes: new Uint8Array(0), done: false }, source: child.stderr },
+      ];
+      for (const stream of streams) {
+        stream.source?.on("data", relay(stream.carry));
+      }
       // Ctrl+C on the parent must not orphan a driver: each child reaps its own
       // Maestro group on SIGTERM (`installSignalReap`), so forward and wait.
       const forward = (): void => {
@@ -304,6 +350,9 @@ async function runChildren(
       } finally {
         process.off("SIGINT", forward);
         process.off("SIGTERM", forward);
+        for (const stream of streams) {
+          flush(stream.carry);
+        }
         await writeFile(join(parentDir, `${shard.label}.log`), `${lines.join("\n")}\n`);
       }
     }),

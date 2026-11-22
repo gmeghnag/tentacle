@@ -349,6 +349,97 @@ Gate status: `tsc --noEmit -p apps/mobile` clean; `biome check` clean on all 6 c
 `bun test apps/mobile/test/e2e-shard.test.ts apps/mobile/test/e2e-gate.test.ts` → 90 pass, 0 fail. The
 whole-repo gate is the orchestrator's.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-22* (executor of the Review round 1 findings)
+
+All three findings are fixed, each with a regression test shown RED first and a
+mutation check proving it bites. Repro scripts and mutation runs live in
+`.tentacle/tmp/e2e-parallel-gate/`.
+
+**#1 (HIGH) — the app cache key ignored binary bytes. FIXED.**
+- `shard.ts:61` `AppInput.content` is now `Bytes = Uint8Array` (was a string, `DELETED`
+  the one sentinel), and `appCacheKey` (`shard.ts:383`) hashes the BYTES and frames
+  them by byte length (`path\0len\0bytes`), so no content can be read as part of
+  the next path. A `DELETED` input hashes `Buffer.from(DELETED, "utf8")`, so a
+  deletion still differs from a file that never existed.
+- `run.ts:1168` `appCacheInputs` reads raw bytes (`readFile(join(repo, path))`), no
+  `"utf8"`.
+- `hash.update` wants `BinaryLike`, and this TS 5.7 / @types/node 20 pair rejects
+  `Buffer -> Uint8Array<ArrayBufferLike>`; a local `plainView()` (`shard.ts:432`)
+  is the one conversion point (a plain view, no copy).
+- Evidence, the reviewer's own repro `.tentacle/tmp/e2e-parallel-gate/review-utf8.ts`:
+  before `bytes differ, keys equal: true`; after `keys equal: false` (`after-fix.ts`).
+  The real premise is checked on real data: `Figtree-Bold.ttf` is 57 672 bytes and
+  does not survive a UTF-8 round trip (`invalid-utf8: true`), so the old key really
+  did collapse the fonts.
+
+**#2 (MEDIUM) — the relay split lines on chunk boundaries. FIXED.**
+- The decision moved to the pure layer (AGENTS §7): `frameLines(carry, chunk)`
+  (`shard.ts:457`) buffers bytes across reads, splits only on `\n`, and returns the
+  open tail as the next carry; `flushLines(carry)` (`shard.ts:474`) emits a last line
+  with no `\n` at EOF and emits nothing for an empty carry (a trailing newline must
+  not invent a blank line).
+- `parallel.ts` `runChildren` keeps one carry per stream (stdout, stderr), relays
+  only whole lines, and flushes each stream once in its `finally`, before the log
+  file is written. Stdout before stderr, as the reviewer's ordering runs require.
+- Evidence (`fix-round-1-relay.ts` before, `after-fix.ts` after): a line cut at
+  byte 40 printed `✗ 07-prompt` / ` (iOS 26) fail` as two lines, and a cut `✗`
+  printed `�` / `�� 07-prompt`; now one line and one `✗ 07-prompt (iOS 26) fail`.
+
+**#3 (MEDIUM) — the parent skipped `preflight`. FIXED (drift closed, not recorded).**
+- The single path's probe + preflight block is extracted ONCE, as
+  `missingPrerequisites(majors: readonly IosMajor[])` (`run.ts:221`), taking the
+  majors rather than one `only`. One probe for all of them (so `maestro --version`,
+  a JVM start, does not run twice on a two-major parent), one report through
+  `preflight(…, only)` per major.
+- `run.ts` `main` calls it with `only === undefined ? [] : [only]` (unchanged
+  behaviour); `parallel.ts` `runParallel` calls it with the devices' deduped majors
+  at `parallel.ts:105`, BEFORE `runSwiftTests()` and `resolveApp` — exit 2 with the
+  named report in a second, not after a 10–15 min build.
+- Two paths, one helper: a copy cannot drift.
+
+**Tests (red on the buggy code, then green; `bun test apps/mobile/test/e2e-shard.test.ts apps/mobile/test/e2e-preflight.test.ts apps/mobile/test/e2e-gate.test.ts apps/mobile/test/e2e-flows.test.ts` → 165 pass, 0 fail).**
+- `appCacheKey > two binaries differing only in INVALID-UTF-8 bytes are different keys`
+- `appCacheInputs over the REAL repo > a real binary input is keyed by its BYTES:
+  flipping a lossy byte moves the key` — real `Figtree-Bold.ttf`, asserts the file is
+  NOT valid UTF-8 (so the old read was lossy) and then that flipping its first
+  invalid byte moves the key.
+- `frameLines (a pipe read is not a line) > a line cut across two chunks is ONE
+  line` / `a multi-byte ✗ cut in half is not two replacement characters` / `many
+  chunks, one byte each: still the same two lines` / `at EOF the open line is
+  flushed, and a trailing newline is not a blank line`.
+- `preflight on BOTH paths (D2.1) > the parent runs missingPrerequisites BEFORE it
+  builds anything` (source-order guard: the call precedes `runSwiftTests` and
+  `resolveApp`), `the parent's check exits 2 with the named report, like the single
+  path`, `both paths ask the ONE helper — a copy would drift`.
+
+**Mutation checks (each fix's test is shown to bite; all restored afterwards).**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1a | `appCacheInputs` back to `readFile(…, "utf8")` | 1 fail (the REAL-repo canary) |
+| M1b | the key hashes the lossy text instead of the bytes | 2 fail (both key tests) |
+| M2 | `frameLines` ignores the carry (`bytes = chunk`) | 3 fail (all framing tests) |
+| M3 | the parent's `missingPrerequisites` removed | 3 fail (all three D2.1 tests) |
+| M4 | the parent's check moved AFTER the build | 1 fail (the order guard) |
+| M6a | `flushLines` never flushes | 1 fail (the EOF test) |
+| M6b | `flushLines` always flushes | 1 fail (the trailing-newline test) |
+
+**Drift from the Implementation, recorded.** Two, both in the safe direction:
+1. `AppInput.content` is `Bytes | DELETED` rather than the plan's plain string; the
+   plan's "content keys make that honest" now holds for binaries too. The key VALUE
+   changes for every input (bytes, length framing), so the first run after this
+   rebuilds once — `cacheEvictions` already trims the old entries.
+2. `missingPrerequisites` takes `readonly IosMajor[]` (the plan's D2.1 named
+   `preflight(…, majors)`), so one probe serves a multi-major parent.
+
+**Gate.** Run by the orchestrator after this round (not by me, per the round's rules):
+`bun run check`. Locally green: `bunx tsc -p apps/mobile --noEmit` (no errors),
+`bunx biome check` on the five touched files (no fixes needed), and the four narrow
+test files above (165 pass). The live simulator behaviour (D2.1's second-level
+promise, the relay under real Maestro output) remains Validation's, as before.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22* (fresh context; same model family as the planner, different from the executor)

@@ -34,7 +34,11 @@ export const SEED_VAR_SOURCES = {
 /** The seeded session ids every flow is given, in flag order. */
 export const SHARED_SEED_VARS: readonly string[] = Object.keys(SEED_VAR_SOURCES);
 
-/** The content marker of a tracked file deleted from the worktree. */
+/**
+ * The content marker of a tracked file deleted from the worktree. A STRING, so
+ * `AppInput.content` discriminates on `typeof`: file content is bytes, and no
+ * byte array can be mistaken for this marker.
+ */
 export const DELETED = "\u0000deleted";
 
 /** A flow with no recorded duration costs this (the last gate's median, rounded). */
@@ -43,8 +47,9 @@ export const DEFAULT_FLOW_SECONDS = 60;
 /**
  * The app cache key's schema tag: bump it when the BUILD's inputs change shape
  * (a new plugin, a new native dir) so every old entry is retired at once.
+ * v2: inputs are hashed as BYTES (v1 hashed a lossy UTF-8 decode).
  */
-export const KEY_SCHEMA = "e2e-app-v1";
+export const KEY_SCHEMA = "e2e-app-v2";
 
 /** One past run's results (`<runDir>/summary.json`), for the duration history. */
 export interface PastRun {
@@ -55,8 +60,12 @@ export interface PastRun {
 /** One file's contribution to the app cache key. */
 export interface AppInput {
   readonly path: string;
-  /** The file's bytes as text; `DELETED` for a tracked file gone from the worktree. */
-  readonly content: string;
+  /**
+   * The file's RAW bytes, or `DELETED` for a tracked file gone from the
+   * worktree. Bytes, never text: a `.ttf` or `.png` is not UTF-8, and decoding
+   * it lossily made two different binaries hash the same.
+   */
+  readonly content: Bytes | typeof DELETED;
 }
 
 /** The non-file halves of the key: what a rebuild would also change. */
@@ -381,7 +390,11 @@ export function appCacheKey(files: readonly AppInput[], extras: AppKeyExtras): s
     .filter((file) => !isHarnessOrTest(file.path))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   for (const file of kept) {
-    hash.update(`${file.path}\u0000${file.content}\u0000`);
+    // Framed by BYTE LENGTH, so no content can be read as part of the next
+    // path, and hashed as bytes (see `AppInput.content`).
+    const bytes = typeof file.content === "string" ? Buffer.from(DELETED, "utf8") : file.content;
+    hash.update(`${file.path}\u0000${bytes.length}\u0000`);
+    hash.update(plainView(bytes));
   }
   return hash.digest("hex");
 }
@@ -406,6 +419,60 @@ export function cacheEvictions(entries: readonly CacheEntry[], keep: number): re
     .slice(Math.max(keep, 0))
     .sort((a, b) => a.mtimeMs - b.mtimeMs)
     .map((entry) => entry.key);
+}
+
+/** Bytes to hash: a file's content (either a `Buffer` or a plain byte array). */
+export type Bytes = Uint8Array | Buffer;
+
+/**
+ * A plain `Uint8Array` view of `bytes`, no copy. `Buffer` IS one at runtime, but
+ * its `slice().buffer` typing does not satisfy `Uint8Array<ArrayBufferLike>` in
+ * this repo's TS/@types/node pair, so the boundary is made explicit once here.
+ */
+function plainView(bytes: Bytes): Uint8Array {
+  return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+/** A stream's complete lines, plus the bytes of the line still open. */
+export interface LineFraming {
+  readonly lines: readonly string[];
+  /** The bytes of a line the chunk ended in the middle of (empty = none). */
+  readonly carry: Uint8Array;
+}
+
+/** One decoder for every line: a complete line decodes the same way every time. */
+const UTF8 = new TextDecoder("utf-8");
+
+/**
+ * Frame a child's output into LINES across `data` chunk boundaries
+ * (docs/feat/e2e-parallel-gate.md P6, review round 1 M2). A pipe read may end
+ * anywhere — mid-line, or inside a multi-byte `✗` — so a chunk is not a line:
+ * the bytes are joined with the open line's carry, cut on `0x0a`, and only
+ * COMPLETE lines are decoded (an incomplete one stays as bytes, so a cut `✗`
+ * cannot decode to two replacement characters). Bytes, not text, on purpose.
+ *
+ * Call the caller's flush with the final `carry` at end of stream: a last line
+ * without its `\n` is a line too.
+ */
+export function frameLines(carry: Bytes, chunk: Bytes): LineFraming {
+  const bytes = new Uint8Array(carry.length + chunk.length);
+  bytes.set(carry, 0);
+  bytes.set(chunk, carry.length);
+  const lines: string[] = [];
+  let start = 0;
+  for (let at = bytes.indexOf(0x0a); at !== -1; at = bytes.indexOf(0x0a, start)) {
+    lines.push(UTF8.decode(bytes.subarray(start, at)));
+    start = at + 1;
+  }
+  return { lines, carry: bytes.subarray(start) };
+}
+
+/**
+ * The lines left in a stream at EOF: the carry of a last line with no `\n` is a
+ * line too (an empty carry is none — a trailing `\n` must not add a blank one).
+ */
+export function flushLines(carry: Uint8Array): readonly string[] {
+  return carry.length === 0 ? [] : [UTF8.decode(carry)];
 }
 
 /**

@@ -23,6 +23,8 @@ import {
   builtAppPath,
   cacheEvictions,
   flowGroups,
+  flushLines,
+  frameLines,
   latestDurations,
   mergeShardResults,
   parallelExitCode,
@@ -532,8 +534,11 @@ describe("builtAppPath", () => {
 });
 
 describe("appCacheKey", () => {
-  const files = (entries: Record<string, string>): AppInput[] =>
-    Object.entries(entries).map(([path, content]) => ({ path, content }));
+  const files = (entries: Record<string, Uint8Array | string>): AppInput[] =>
+    Object.entries(entries).map(([path, content]) => ({
+      path,
+      content: typeof content === "string" ? new TextEncoder().encode(content) : content,
+    }));
   const extras = { xcode: "Xcode 26.0\nBuild version 17A1", bun: "1.4.3" };
 
   test("order does not matter", () => {
@@ -591,6 +596,29 @@ describe("appCacheKey", () => {
     const b = appCacheKey(files({ "apps/mobile/src/b.ts": "same" }), extras);
     expect(a).not.toBe(b);
   });
+
+  // Review round 1 HIGH: the inputs used to be read as UTF-8 TEXT, so two
+  // different binaries whose invalid bytes decode to the same U+FFFD hashed the
+  // same — and an asset change silently reused a stale `.app`.
+  test("two binaries differing only in INVALID-UTF-8 bytes are different keys", () => {
+    const one = Uint8Array.from([0x89, 0x50, 0xff, 0x00]);
+    const two = Uint8Array.from([0x89, 0x50, 0xfe, 0x00]);
+    // The bug's own premise: as text these are the same string.
+    expect(new TextDecoder().decode(one)).toBe(new TextDecoder().decode(two));
+    const a = appCacheKey(files({ "apps/mobile/assets/i.png": one }), extras);
+    const b = appCacheKey(files({ "apps/mobile/assets/i.png": two }), extras);
+    expect(a).not.toBe(b);
+  });
+
+  test("content cannot be shifted across the path boundary (length-framed)", () => {
+    // `path\0content\0` framing lets "a\0b" + "c" collide with "a" + "b\0c".
+    const a = appCacheKey(
+      files({ "apps/mobile/x.ts": "b\u0000c", "apps/mobile/y.ts": "z" }),
+      extras,
+    );
+    const b = appCacheKey(files({ "apps/mobile/x.ts": "b", "apps/mobile/y.ts": "z" }), extras);
+    expect(a).not.toBe(b);
+  });
 });
 
 describe("appCacheInputs over the REAL repo", () => {
@@ -607,7 +635,59 @@ describe("appCacheInputs over the REAL repo", () => {
     expect(paths.some((p) => p.startsWith("apps/mobile/test/"))).toBe(false);
     expect(paths.some((p) => /^packages\/[^/]+\/test\//.test(p))).toBe(false);
   });
+
+  // The canary for the HIGH above, over the REAL tree: an app input IS a binary
+  // (a `.ttf` under `apps/mobile/assets/fonts/`) and its BYTES are keyed, not a
+  // lossy text decode of them.
+  test("a real binary input is keyed by its BYTES: flipping a lossy byte moves the key", async () => {
+    const repo = join(import.meta.dir, "..", "..", "..");
+    const inputs = await appCacheInputs(repo);
+    const font = inputs.find((file) => file.path === "apps/mobile/assets/fonts/Figtree-Bold.ttf");
+    expect(font).toBeDefined();
+    if (font === undefined || typeof font.content === "string") {
+      throw new Error("the font input is missing or is not bytes");
+    }
+    const bytes = new Uint8Array(font.content.buffer, font.content.byteOffset, font.content.length);
+    // The bug's premise on real data: this font is not valid UTF-8, so the old
+    // text read (`readFile(…, "utf8")`) loses bytes.
+    const decode = new TextDecoder("utf-8");
+    const text = decode.decode(bytes);
+    expect(text).toContain("\uFFFD");
+    const at = firstInvalidByte(bytes);
+    expect(at).toBeGreaterThan(-1);
+    const flipped = Uint8Array.from(font.content);
+    const before = flipped[at] ?? 0;
+    flipped[at] = before === 0xff ? 0xfe : 0xff;
+    // The two files differ only in bytes the TEXT decode discards…
+    expect(decode.decode(flipped)).toBe(text);
+    // …and that is exactly the collision the byte key must not have.
+    const extras = { xcode: "x", bun: "b" };
+    const changed = inputs.map((file) =>
+      file.path === font.path ? { ...file, content: flipped } : file,
+    );
+    expect(appCacheKey(changed, extras)).not.toBe(appCacheKey(inputs, extras));
+  });
 });
+
+/** The offset of the first byte that starts an invalid UTF-8 sequence, or -1. */
+function firstInvalidByte(bytes: Uint8Array): number {
+  let at = 0;
+  while (at < bytes.length) {
+    const lead = bytes[at] ?? 0;
+    const length = lead < 0x80 ? 1 : lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 0;
+    if (length === 0) {
+      return at;
+    }
+    for (let next = 1; next < length; next += 1) {
+      const continuation = bytes[at + next] ?? 0;
+      if (continuation < 0x80 || continuation >= 0xc0) {
+        return at;
+      }
+    }
+    at += length;
+  }
+  return -1;
+}
 
 describe("cacheEvictions", () => {
   const entry = (key: string, mtimeMs: number) => ({ key, mtimeMs });
@@ -632,5 +712,64 @@ describe("relayLine", () => {
   test("a ✓ line and a plain line keep their shape too", () => {
     expect(relayLine("sim-a", "✓ 01-shell (iOS 26) pass").split(" ")[1]).toBe("01-shell");
     expect(relayLine("sim-a", "").trim()).toBe("[sim-a]");
+  });
+});
+
+// Review round 1 MEDIUM: the relay split each `data` chunk on `\n`, so a line
+// cut across two pipe reads printed as two lines — and `awk '$2'` (P6) then read
+// a flow name that was not there.
+describe("frameLines (a pipe read is not a line)", () => {
+  const feed = (chunks: readonly Uint8Array[]): string[] => {
+    let carry: Uint8Array = new Uint8Array(0);
+    const lines: string[] = [];
+    for (const chunk of chunks) {
+      const framed = frameLines(carry, chunk);
+      lines.push(...framed.lines);
+      carry = framed.carry;
+    }
+    if (carry.length > 0) {
+      lines.push(...flushLines(carry));
+    }
+    return lines;
+  };
+  const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+
+  test("a line cut across two chunks is ONE line", () => {
+    const all = bytes("✓ 01-shell (iOS 26) pass\n✗ 07-prompt (iOS 26) fail\n");
+    const cut = all.indexOf(0x30); // inside "07-prompt"
+    const lines = feed([all.subarray(0, cut), all.subarray(cut)]);
+    expect(lines).toEqual(["✓ 01-shell (iOS 26) pass", "✗ 07-prompt (iOS 26) fail"]);
+    expect(lines[1]?.split(" ")[1]).toBe("07-prompt");
+  });
+
+  test("a multi-byte ✗ cut in half is not two replacement characters", () => {
+    const all = bytes("✗ 07-prompt fail\n");
+    const inside = all.indexOf(0xe2) + 1; // inside the 3-byte ✗
+    const lines = feed([all.subarray(0, inside), all.subarray(inside)]);
+    expect(lines).toEqual(["✗ 07-prompt fail"]);
+    expect(lines[0]?.startsWith("✗")).toBe(true);
+  });
+
+  test("many chunks, one byte each: still the same two lines", () => {
+    const all = bytes("a\n✗ b\n");
+    const chunks = [...all].map((byte) => Uint8Array.from([byte]));
+    expect(feed(chunks)).toEqual(["a", "✗ b"]);
+  });
+
+  test("the carry holds only the OPEN line (an empty line is a line)", () => {
+    const framed = frameLines(new Uint8Array(0), bytes("a\n\nb"));
+    expect(framed.lines).toEqual(["a", ""]);
+    expect(Buffer.from(framed.carry).toString("utf8")).toBe("b");
+  });
+
+  // A last line with no `\n` is a line (a child killed mid-write), and a
+  // trailing `\n` must not invent a blank one.
+  test("at EOF the open line is flushed, and a trailing newline is not a blank line", () => {
+    const open = frameLines(new Uint8Array(0), bytes("a\nb"));
+    expect(open.lines).toEqual(["a"]);
+    expect(flushLines(open.carry)).toEqual(["b"]);
+    const closed = frameLines(new Uint8Array(0), bytes("a\nb\n"));
+    expect(flushLines(closed.carry)).toEqual([]);
+    expect(flushLines(new Uint8Array(0))).toEqual([]);
   });
 });
