@@ -166,7 +166,7 @@ describe("emission", () => {
 
   test("timings and style metrics come from source", () => {
     const root = rule(fresh["tokens.css"], ":root {");
-    expect(root.get("--ms-step-spinner-turn")).toBe("900ms");
+    expect(root.get("--ms-step-blink-half")).toBe("500ms");
     expect(root.get("--ms-header-dot-half")).toBe("700ms");
     expect(root.get("--ms-tui-blink-half")).toBe("500ms");
     expect(root.get("--m-step-dot-border-radius")).toBe("6.5px");

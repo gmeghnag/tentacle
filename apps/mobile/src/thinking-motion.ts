@@ -8,6 +8,7 @@
  * Pure, React-free (AGENTS §7): the curves are numbers `ui/StepNode.tsx` hands
  * to `Animated.Value.interpolate` on the native driver (no JS timer per frame).
  */
+import { type AppFont, textFont } from "./theme-beta.ts";
 
 /** One breath of the ∴, all three dots. */
 export const BREATHE_MS = 1500;
@@ -130,4 +131,64 @@ export function thinkingLook(reduceMotion: boolean): {
   readonly word: "sec";
 } {
   return { animate: !reduceMotion, glyph: "accent", word: "sec" };
+}
+
+/**
+ * The text the shimmer's svg layer writes (docs/fix/mobile-running-row.md). The
+ * svg cannot ellipsize, so it is told what fits: the label's own RN lines
+ * (`onTextLayout` of the same text, wrapped at the label's REAL width). One
+ * line: all of it. More (the row is too narrow): the first line, cut at a word —
+ * at least its last word goes, so the `…` takes room that word had — or, one
+ * word wider than the row, two characters. Before it was the WHOLE text drawn
+ * into a box the RN text had ellipsized: «Test DNS 50 query con l», cut mid-word.
+ */
+export function shimmerLine(lines: readonly { readonly text: string }[]): string {
+  const first = (lines[0]?.text ?? "").trimEnd();
+  if (lines.length <= 1) {
+    return first;
+  }
+  const space = first.lastIndexOf(" ");
+  const kept = space > 0 ? first.slice(0, space).trimEnd() : first.slice(0, -2);
+  return `${kept}…`;
+}
+
+/**
+ * The svg glyphs' face: the RN label's own, from the same seam (`textFont`) — a
+ * Figtree face under the beta theme, the system font (no family) otherwise.
+ * Before, the svg had no family, so under the beta it drew the system font into
+ * a box measured in Figtree.
+ */
+export function shimmerFont(
+  font: AppFont,
+  weight: string,
+): {
+  readonly fontFamily?: string;
+  readonly fontWeight: string;
+  readonly fontStyle: "normal" | "italic";
+} {
+  const { patch } = textFont({ fontWeight: weight, fontStyle: "italic" }, {}, font);
+  return patch === null
+    ? { fontWeight: weight, fontStyle: "italic" }
+    : { fontFamily: patch.fontFamily, fontWeight: patch.fontWeight, fontStyle: patch.fontStyle };
+}
+
+/** The canvas's margin past the text, in font sizes: an italic tail, a descender. */
+const OVERHANG = 0.3;
+
+/**
+ * The svg canvas over a label laid out `width` × `height`: whole points, with a
+ * margin to the right and below, so an italic glyph leaning past its advance
+ * width (the g of «Thinking») is not cut by the canvas edge. Before, the canvas
+ * was the advance width, rounded — «Thinkinɡ». 0 × 0 until measured.
+ */
+export function shimmerCanvas(
+  width: number,
+  height: number,
+  fontSize: number,
+): { readonly width: number; readonly height: number } {
+  if (width <= 0 || height <= 0) {
+    return { width: 0, height: 0 };
+  }
+  const pad = Math.ceil(fontSize * OVERHANG);
+  return { width: Math.ceil(width) + pad, height: Math.ceil(height) + pad };
 }

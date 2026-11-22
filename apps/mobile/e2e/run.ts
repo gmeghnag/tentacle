@@ -1497,6 +1497,10 @@ export const FLOWS: readonly string[] = [
   // docs/feat/mobile-file-preview-cards.md: the transcript's preview cards (a
   // PDF page, an image, markdown lines, an HTML page), light and dark.
   "36-preview-cards",
+  // docs/fix/mobile-running-row.md: the live running row (a described shell's
+  // sentence, the blinking node, the Thinking footer) and its tap detail, with
+  // the beta theme and compactShell off and on — on a session of its own.
+  "38-running-row",
   // docs/feat/mobile-projects.md: two projects of one computer (a second `serve`
   // on the same config dir) — stop, re-probe, revoke one, the other stays.
   "37-projects",
@@ -1598,6 +1602,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   // docs/feat/mobile-theme-beta.md: the try-out's chat + gallery.
   "36-theme-beta-shots": "THEMEBETA_ID",
   "36-preview-cards": "PREVIEW_ID",
+  "38-running-row": "RUNROW_ID",
 };
 
 /** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */

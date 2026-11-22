@@ -570,7 +570,8 @@ function DiagramRowView(props: RowProps): JSX.Element {
 
 /**
  * A tool call: one `StepNode` on the thread (its cell from the screen's
- * `stepLayout`), the thought, command, result, diff and reply in its open body;
+ * `stepLayout`), the command, result, diff and reply in its open body — never
+ * the folded reasoning (owner 21/11, docs/fix/mobile-running-row.md);
  * the sub-agent progress and Activity link always under the line. A presented
  * artifact is its card instead (a block: `isBlockRow`, no thread).
  */
@@ -661,7 +662,7 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
         body={
           <StepBody
             palette={palette}
-            thought={view.thought}
+            thought={null}
             command={view.command}
             output={view.output}
             outputTestID={`tool-${tool.id}-output`}

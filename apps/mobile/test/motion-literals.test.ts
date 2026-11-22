@@ -65,7 +65,7 @@ describe("motion.ts keeps the values it hoisted", () => {
   // Written from the pre-hoist `rg` output (task doc, Execution): same values.
   test("each constant equals the literal it replaced", () => {
     expect({ ...M }).toEqual({
-      STEP_SPINNER_TURN_MS: 900, // ui/StepNode.tsx:73
+      STEP_BLINK_HALF_MS: 500, // docs/fix/mobile-running-row.md: the TUI blink (was STEP_SPINNER_TURN_MS 900)
       STEP_ELAPSED_TICK_MS: 1000, // ui/StepNode.tsx:57
       HEADER_DOT_HALF_MS: 700, // ui/HeaderDot.tsx:40
       HEADER_DOT_EASING: "inOut(ease)", // ui/HeaderDot.tsx:40 Easing.inOut(Easing.ease)

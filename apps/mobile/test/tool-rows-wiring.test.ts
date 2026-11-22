@@ -163,9 +163,9 @@ describe("StepNode replaces ToolRow", () => {
     // The bright layer is the gradient, inside a clip made of the word itself,
     // and the grey word is the SAME svg text (they cannot drift apart).
     expect(word).toMatch(
-      /<ClipPath id="thinking-glyphs">\s*<SvgText \{\.\.\.glyph\}>\{word\}<\/SvgText>/,
+      /<ClipPath id="thinking-glyphs">\s*<SvgText \{\.\.\.glyph\}>\{line\}<\/SvgText>/,
     );
-    expect(word).toMatch(/<SvgText \{\.\.\.glyph\} fill=\{palette\[look\.word\]\}>/);
+    expect(word).toMatch(/<SvgText \{\.\.\.glyph\} fill=\{palette\[look\.word\]\}>\s*\{line\}/);
     expect(word).toMatch(
       /<G clipPath="url\(#thinking-glyphs\)">\s*<AnimatedRect\s+x=\{x\}[\s\S]{0,120}fill="url\(#thinking-shine\)"/,
     );
@@ -195,5 +195,44 @@ describe("StepNode replaces ToolRow", () => {
     // are animated — all on the native driver.
     expect(motion).not.toMatch(/(left|top|width|color): (clock|x)\b/);
     expect(motion).not.toMatch(/(width|height|offset|stopOpacity)=\{(clock|x)\}/);
+  });
+});
+
+/**
+ * docs/fix/mobile-running-row.md: the svg layer draws what the RN label has room
+ * for (its own wrapped lines at the label's real width), in the label's face,
+ * in a canvas with room for an italic overhang; a running step is the blinking
+ * dot; a tool's tap detail never gets the folded reasoning.
+ */
+describe("running row wiring (docs/fix/mobile-running-row.md)", () => {
+  test("the shimmer svg is told the text that fits, the face, and a canvas past the advance width", () => {
+    const node = read("ui", "StepNode.tsx");
+    const word = fnBody(node, "ThinkingWord");
+    expect(word).toContain("setLine(shimmerLine(e.nativeEvent.lines))");
+    expect(word).toContain("shimmerFont(font, ");
+    expect(word).toContain("shimmerCanvas(width, height, fontSize)");
+    expect(word).toMatch(/<Svg[^>]*width=\{canvas\.width\} height=\{canvas\.height\}/);
+    // The label is not capped at 45 % when nothing sits beside it (a sentence).
+    expect(word).toContain("wide ? styles.nameWide : styles.name");
+    // The measuring copy is never seen, never read by VoiceOver.
+    expect(word).toMatch(/accessibilityElementsHidden[\s\S]{0,300}onTextLayout/);
+  });
+
+  test("a running step is the blinking dot on the shared clock — no turning ring", () => {
+    const node = read("ui", "StepNode.tsx");
+    expect(node).toMatch(/case "running":\s*return <BlinkingDot /);
+    expect(node).not.toContain("function Spinner(");
+    expect(node).not.toContain("STEP_SPINNER_TURN_MS");
+    const dot = fnBody(node, "BlinkingDot");
+    expect(dot).toContain("runningDotLook(still)");
+    expect(dot).toContain("STEP_BLINK_CURVE");
+    expect(dot).toContain("styles.dot");
+  });
+
+  test("a tool row's open body is given no thought", () => {
+    const row = read("screens", "transcript", "TranscriptRow.tsx");
+    const tool = fnBody(row, "ToolRowView");
+    expect(tool).toContain("thought={null}");
+    expect(tool).not.toContain("view.thought");
   });
 });

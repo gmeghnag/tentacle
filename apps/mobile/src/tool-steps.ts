@@ -298,8 +298,11 @@ export interface StepRowView {
   readonly trailingRed: boolean;
   /** A running step with a known start and no trailing yet: the node ticks its own clock. */
   readonly live: boolean;
-  /** The body, in order: the folded thought, the full command, the result. */
-  readonly thought: string | null;
+  /**
+   * The body, in order: the full command, the result. NEVER the reasoning folded
+   * into the step (owner 21/11, docs/fix/mobile-running-row.md): the tap detail
+   * is what ran and what came back, for every tool.
+   */
   readonly command: readonly string[];
   /** `⎿` on the first line; `hidden` lines wait for "show all". Null: no result. */
   readonly output: {
@@ -307,12 +310,16 @@ export interface StepRowView {
     readonly hidden: number;
     readonly error: boolean;
   } | null;
-  /** False when the body would be empty (no thought, command, result, diff or reply). */
+  /** False when the body would be empty (no command, result, diff or reply). */
   readonly tappable: boolean;
   readonly a11yLabel: string;
 }
 
-/** A tool row as its step node draws it; `full` = every output line (the screen's show-all set). */
+/**
+ * A tool row as its step node draws it; `full` = every output line (the screen's
+ * show-all set). `thought` (the reasoning folded into it) only sets the default of
+ * `thoughtFirst` — VoiceOver's "thought first" — and is never drawn in the body.
+ */
 export function stepRowView(
   row: ToolRow,
   thought: string | null,
@@ -346,11 +353,9 @@ export function stepRowView(
     trailing,
     trailingRed: row.status === "error" || row.status === "denied",
     live: dot === "running" && row.at !== undefined && trailing === "",
-    thought,
     command,
     output,
     tappable:
-      thought !== null ||
       command.length > 0 ||
       output !== null ||
       row.diff !== undefined ||

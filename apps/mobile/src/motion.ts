@@ -12,8 +12,12 @@
  * component.
  */
 
-/** One turn of a running step's spinner ring (`ui/StepNode.tsx` `Spinner`). */
-export const STEP_SPINNER_TURN_MS = 900;
+/**
+ * Half of a running step's blink (`ui/StepNode.tsx` `BlinkingDot`): ON this long,
+ * then OFF as long — the TUI's `BLINK_HALF_MS` (`packages/tui/src/blink.ts`),
+ * pinned equal by `test/step-blink.test.ts` (docs/fix/mobile-running-row.md).
+ */
+export const STEP_BLINK_HALF_MS = 500;
 /** The tick of a running step's elapsed clock (`ui/StepNode.tsx` `useElapsed`). */
 export const STEP_ELAPSED_TICK_MS = 1000;
 /** Half of the header dot's pulse, 1 → 0.3 or back (`ui/HeaderDot.tsx`): 1.4 s a cycle. */

@@ -1,14 +1,14 @@
 /**
  * One node on the thread of steps (docs/feat/mobile-tool-rows.md Design 3,
  * mockup C): a 1 px `sep` thread in a 10 pt gutter, the node on the first line's
- * centre (a dot, a spinner, a hollow ring, or ∴), then ONE line — name, mono
+ * centre (a dot — blinking while it runs —, a hollow ring, or ∴), then ONE line — name, mono
  * subtitle, the duration — and, when open, the body under it. The line carries
  * NO ∴: owner 17/11 sent it away from a command's duration, so the ∴ on this
  * thread is a thought's node and the folded thought's in the open body. A dumb
  * renderer: every string and decision comes from `tool-steps.ts` /
  * `tool-summary.ts`; this file owns only the look, the 1 s clock and the spin.
  */
-import { type JSX, type ReactNode, useEffect, useRef, useState } from "react";
+import { type JSX, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
 import Svg, {
   ClipPath,
@@ -20,7 +20,8 @@ import Svg, {
   Text as SvgText,
 } from "react-native-svg";
 import type { SlotView } from "../compact-slot.ts";
-import { STEP_ELAPSED_TICK_MS, STEP_SPINNER_TURN_MS } from "../motion.ts";
+import { STEP_ELAPSED_TICK_MS } from "../motion.ts";
+import { STEP_BLINK_CURVE, STEP_BLINK_LOOP_MS, runningDotLook } from "../step-blink.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, size, space, typography } from "../theme.ts";
 import {
   BREATHE_MS,
@@ -28,6 +29,9 @@ import {
   type DotPos,
   SHIMMER_MS,
   breatheCurve,
+  shimmerCanvas,
+  shimmerFont,
+  shimmerLine,
   shimmerSweep,
   thinkingLabel,
   thinkingLook,
@@ -36,6 +40,7 @@ import { type StepDot, type ThreadPos, thinkingA11yLabel } from "../tool-steps.t
 import { type ToolNameParts, liveElapsed } from "../tool-summary.ts";
 import { Text } from "./Text.tsx";
 import { animateNextLayout } from "./animate.ts";
+import { AppFontContext } from "./app-font.ts";
 
 /** The node's look: a tool's status, an orphan thought (∴), the live footer (breathing ∴). */
 /** `wake`: a fired scheduled wake's `◷` (docs/feat/scheduled-fire-row.md). */
@@ -61,34 +66,62 @@ function useElapsed(from: number | undefined): number | null {
   return from === undefined ? null : Math.max(0, now - from);
 }
 
-/** A 10 pt ring that turns (native driver); still under Reduce Motion. */
-function Spinner({ color, page, still }: { color: string; page: string; still: boolean }) {
-  const turn = useRef(new Animated.Value(0)).current;
+/**
+ * The ONE blink clock every running step shares (like the TUI's one phase): a
+ * 0→1 loop on the native driver, started by the first blinking dot and stopped
+ * with the last, so every running dot is ON and OFF at the same moment.
+ */
+const blink: { value: Animated.Value; users: number; loop: Animated.CompositeAnimation | null } = {
+  value: new Animated.Value(0),
+  users: 0,
+  loop: null,
+};
+
+/** The shared blink clock while `on`; null (a steady dot) otherwise. */
+function useSharedBlink(on: boolean): Animated.Value | null {
   useEffect(() => {
-    if (still) {
+    if (!on) {
       return;
     }
-    const loop = Animated.loop(
-      Animated.timing(turn, {
-        toValue: 1,
-        duration: STEP_SPINNER_TURN_MS,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      }),
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [still, turn]);
-  if (still) {
-    return <View style={[styles.dot, { backgroundColor: color, borderColor: page }]} />;
-  }
-  const rotate = turn.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] });
+    blink.users += 1;
+    if (blink.users === 1) {
+      blink.value.setValue(0);
+      blink.loop = Animated.loop(
+        Animated.timing(blink.value, {
+          toValue: 1,
+          duration: STEP_BLINK_LOOP_MS,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        }),
+      );
+      blink.loop.start();
+    }
+    return () => {
+      blink.users -= 1;
+      if (blink.users === 0) {
+        blink.loop?.stop();
+        blink.loop = null;
+      }
+    };
+  }, [on]);
+  return on ? blink.value : null;
+}
+
+/**
+ * A running step's node (docs/fix/mobile-running-row.md): the done dot — same
+ * place, same size, the `page` ring stopping the thread — in accent, blinking ON
+ * and OFF on the TUI's rhythm (`step-blink.ts`); steady under Reduce Motion.
+ */
+function BlinkingDot({ palette, still }: { palette: Palette; still: boolean }) {
+  const look = runningDotLook(still);
+  const clock = useSharedBlink(look.blink);
   return (
     <Animated.View
+      testID="step-running-dot"
       style={[
-        styles.spinner,
-        { borderColor: color, borderTopColor: page, backgroundColor: page },
-        { transform: [{ rotate }] },
+        styles.dot,
+        { backgroundColor: palette[look.fill], borderColor: palette.page },
+        clock === null ? undefined : { opacity: clock.interpolate(STEP_BLINK_CURVE) },
       ]}
     />
   );
@@ -179,46 +212,58 @@ const AnimatedRect = Animated.createAnimatedComponent(Rect);
 const GLYPH_BASELINE = 0.35;
 
 /**
- * The word "Thinking" (Owner Q1 = "B", docs/feat/mobile-thinking-images.md): grey,
- * with a soft bright gradient sweeping across it that is CLIPPED to the glyphs —
- * an svg `ClipPath` made of the word itself, so no box can ever show. The grey
- * word and the clip are the same svg text, so the two cannot drift apart; the RN
- * `Text` under them is transparent and only lays out (width, testID, Dynamic
- * Type). The gradient's `x` is one native-driver clock (S0's verdict). Plain grey
- * RN text under Reduce Motion or before it is measured.
+ * The word "Thinking" (Owner Q1 = "B", docs/feat/mobile-thinking-images.md) — and
+ * a described shell step's running sentence: grey, with a soft bright gradient
+ * sweeping across it that is CLIPPED to the glyphs — an svg `ClipPath` made of
+ * the text itself, so no box can ever show. The grey text and the clip are the
+ * same svg text, so the two cannot drift apart; the RN `Text` under them is
+ * transparent and only lays out (width, testID, Dynamic Type, the ellipsis). The
+ * gradient's `x` is one native-driver clock (S0's verdict). Plain grey RN text
+ * under Reduce Motion or before it is measured.
+ *
+ * docs/fix/mobile-running-row.md — the svg cannot ellipsize and draws in its own
+ * canvas, so it is told (a) the text that FITS: `shimmerLine` of the same text's
+ * lines, laid out at the label's real width by a never-seen copy; (b) the
+ * label's face (`shimmerFont`, the beta's Figtree); (c) a canvas with room past
+ * the advance width for an italic tail (`shimmerCanvas`). `wide`: nothing sits
+ * beside it, so it may take the line (as the plain label does), not 45 %.
  */
 function ThinkingWord({
   palette,
   word,
   reduceMotion,
+  wide,
   testID,
 }: {
   palette: Palette;
   word: string;
   reduceMotion: boolean;
+  wide: boolean;
   testID?: string;
 }) {
   const look = thinkingLook(reduceMotion);
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(0);
+  const [line, setLine] = useState("");
   const clock = useLoop(SHIMMER_MS, !look.animate);
   const sweep = shimmerSweep(width);
+  const font = useContext(AppFontContext);
   const { fontScale } = useWindowDimensions();
-  const glyphs = clock !== null && sweep.band > 0 && height > 0;
   const fontSize = typography.step.fontSize * Math.min(fontScale, DENSE_FONT_SCALE);
+  const canvas = shimmerCanvas(width, height, fontSize);
+  const glyphs = clock !== null && sweep.band > 0 && height > 0 && line !== "";
   const glyph = {
     x: 0,
     y: height / 2 + fontSize * GLYPH_BASELINE,
     fontSize,
-    fontWeight: typography.step.fontWeight,
-    fontStyle: "italic" as const,
+    ...shimmerFont(font, typography.step.fontWeight),
   };
   const x =
     clock === null
       ? null
       : clock.interpolate({ inputRange: [0, 1], outputRange: [sweep.from, sweep.to] });
   return (
-    <View style={styles.name}>
+    <View style={wide ? styles.nameWide : styles.name}>
       <Text
         testID={testID}
         numberOfLines={1}
@@ -229,14 +274,26 @@ function ThinkingWord({
           { color: glyphs ? "transparent" : palette[look.word] },
         ]}
         onLayout={(e) => {
-          setWidth(Math.round(e.nativeEvent.layout.width));
-          setHeight(Math.round(e.nativeEvent.layout.height));
+          setWidth(e.nativeEvent.layout.width);
+          setHeight(e.nativeEvent.layout.height);
         }}
       >
         {word}
       </Text>
+      {clock === null || width === 0 ? null : (
+        <Text
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          pointerEvents="none"
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          style={[typography.step, styles.italic, styles.measure, { width }]}
+          onTextLayout={(e) => setLine(shimmerLine(e.nativeEvent.lines))}
+        >
+          {word}
+        </Text>
+      )}
       {!glyphs || x === null ? null : (
-        <Svg pointerEvents="none" width={width} height={height} style={styles.glyphs}>
+        <Svg pointerEvents="none" width={canvas.width} height={canvas.height} style={styles.glyphs}>
           <Defs>
             <LinearGradient id="thinking-shine" x1="0" y1="0" x2="1" y2="0">
               {sweep.stops.map((s) => (
@@ -249,18 +306,18 @@ function ThinkingWord({
               ))}
             </LinearGradient>
             <ClipPath id="thinking-glyphs">
-              <SvgText {...glyph}>{word}</SvgText>
+              <SvgText {...glyph}>{line}</SvgText>
             </ClipPath>
           </Defs>
           <SvgText {...glyph} fill={palette[look.word]}>
-            {word}
+            {line}
           </SvgText>
           <G clipPath="url(#thinking-glyphs)">
             <AnimatedRect
               x={x}
               y={0}
               width={sweep.band}
-              height={height}
+              height={canvas.height}
               fill="url(#thinking-shine)"
             />
           </G>
@@ -290,7 +347,7 @@ function Node({
         />
       );
     case "running":
-      return <Spinner color={palette.accent} page={palette.page} still={reduceMotion} />;
+      return <BlinkingDot palette={palette} still={reduceMotion} />;
     case "thought":
       return <ThereforeDots color={palette.sec} background={palette.page} />;
     case "thinking":
@@ -387,7 +444,7 @@ export function StepNode({
           accessibilityLabel={a11yLabel}
           {...(tappable
             ? {
-                accessibilityHint: "Shows the thought, command and result",
+                accessibilityHint: "Shows the details",
                 accessibilityState: { expanded: open },
               }
             : {})}
@@ -405,6 +462,7 @@ export function StepNode({
                 palette={palette}
                 word={name.tool}
                 reduceMotion={reduceMotion}
+                wide={subtitle === ""}
                 {...(labelTestID === undefined ? {} : { testID: labelTestID })}
               />
             ) : (
@@ -643,12 +701,13 @@ const styles = StyleSheet.create({
   // A 7 pt dot ringed 3 pt in `page`, so the thread stops short of it.
   dot: { width: 13, height: 13, borderRadius: 6.5, borderWidth: 3 },
   ring: { width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.2 },
-  spinner: { width: 10, height: 10, borderRadius: 5, borderWidth: 1.5 },
   wake: { fontSize: 13, lineHeight: 15, textAlign: "center" },
   // The live ∴ (B): the glyph's size (`THEREFORE_SIZE`), drawn as three thin dots.
   dotBox: { width: THEREFORE_SIZE, height: THEREFORE_SIZE },
   breathDot: { position: "absolute", width: 3, height: 3, borderRadius: 1.5 },
   glyphs: { position: "absolute", top: 0, left: 0 },
+  // The shimmer's measuring copy: laid out at the label's width, never seen.
+  measure: { position: "absolute", top: 0, left: 0, opacity: 0 },
   column: { flex: 1, marginLeft: GUTTER },
   line: { minHeight: size.touch, flexDirection: "row", alignItems: "center", gap: 6 },
   // The name line inside `line`: fills it exactly as its children did directly.

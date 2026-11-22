@@ -42,7 +42,9 @@ describe("stepRowView: one step's line and body", () => {
     expect(v.trailing).toBe("14 ms");
     expect(v.trailingRed).toBe(false);
     expect(v.live).toBe(false);
-    expect(v.thought).toBe("why");
+    // docs/fix/mobile-running-row.md (owner 21/11): the body is the command and
+    // the result — never the reasoning folded into the step.
+    expect("thought" in v).toBe(false);
     expect(v.command).toEqual(["ls -la polpo-page.png"]);
     expect(v.output).toEqual({
       text: ["⎿ line 1", "  line 2", "  line 3", "  line 4", "  line 5", "  line 6"].join("\n"),
@@ -138,6 +140,59 @@ describe("stepRowView: one step's line and body", () => {
     expect(v.name).toEqual({ server: "playwright", tool: "browser_resize" });
     expect(v.subtitle).toBe("430 × 932");
     expect(v.command).toEqual(["width  430", "height  932"]);
+  });
+});
+
+describe("the tap detail carries NO reasoning, for every tool (owner 21/11, docs/fix/mobile-running-row.md)", () => {
+  const REASONING = "I should check the resolver latency first";
+  const rows: readonly [string, ToolRow][] = [
+    ["a shell call", tool("t", "ok", { output: "a\nb", durationMs: 5 })],
+    [
+      "a described shell call",
+      tool("t", "ok", {
+        args: JSON.stringify({ command: "dig +short a.example", description: "Test DNS" }),
+        output: "exit=0\n1.2.3.4",
+      }),
+    ],
+    [
+      "a running described shell call",
+      tool("t", "running", {
+        args: JSON.stringify({ command: "sleep 9", description: "Test DNS" }),
+        at: 5,
+      }),
+    ],
+    [
+      "a file read",
+      tool("t", "ok", { name: "fs_read", label: "Read", args: '{"path":"a.txt"}', output: "x" }),
+    ],
+    [
+      "an MCP tool",
+      tool("t", "error", { name: "mcp__demo__browser_resize", label: "", args: '{"width":4}' }),
+    ],
+  ];
+  for (const [what, row] of rows) {
+    for (const compact of [false, true]) {
+      test(`${what} (compactShell ${compact ? "on" : "off"}): the view says nothing of the thought`, () => {
+        const v = stepRowView(row, REASONING, false, true, compact);
+        expect(JSON.stringify(v)).not.toContain(REASONING);
+        expect("thought" in v).toBe(false);
+      });
+    }
+  }
+
+  test("a thought alone does not make a step tappable (its body would be empty)", () => {
+    const v = stepRowView(
+      tool("t", "ok", { name: "shell_output", args: '{"id":"j1"}' }),
+      REASONING,
+      false,
+    );
+    expect(v.tappable).toBe(false);
+  });
+
+  test("VoiceOver still says a thought came first (a fact, not the reasoning)", () => {
+    const v = stepRowView(tool("t", "ok", { durationMs: 14 }), REASONING, false);
+    expect(v.a11yLabel).toContain("thought first");
+    expect(v.a11yLabel).not.toContain(REASONING);
   });
 });
 
