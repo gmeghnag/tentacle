@@ -380,3 +380,25 @@ unmount / Reduce Motion / finished scene in the rAF effect (holds; `origin` surv
 toggling back resumes in wall time and never replays).
 **Executor:** honest about the missing screenshots and the environment; its own mutation table
 checks out. Screenshots (mandatory Validation) are still absent → not READY anyway.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-22 (fresh context; reviewed 98ba09f3 + f9fe17fe)*
+
+**Verdict: REQUEST-CHANGES** (both round-1 findings fixed; one MEDIUM regression introduced by the fix).
+
+- **R1-1 (run) — FIXED.** `drawOnce` hands out `run = memory.plays` and the layer passes `drawn.run`
+  to `frameAt`. Mutation `run = 0` in `drawOnce` → 2 fails (`drawOnce › consecutive mounts…`,
+  `› two plays walk off opposite sides`); a wiring pin forbids a literal `0`. Reverted.
+- **R1-2 (paint order) — FIXED.** Merging is per op, plus a strict-contiguity `appendBlock`. The
+  round-1 repro (`order.ts`) now gives 0 wrong frames in all 9 scenes. Mutation `===` → `<=` in
+  `appendBlock` → 2 fails (`› a later op still paints OVER…`, `› translucent op stacked…`). Reverted,
+  tree clean.
+- **NEW MEDIUM — duplicate React keys.** `apps/mobile/src/ui/MascotScene.tsx` (`<Rect key=…>`) keys
+  by `x:y:w:h:color`. Stacked identical translucent ops are now (on purpose) kept as separate rects,
+  so they share a key. Repro `.tentacle/tmp/mobile-mascot-scenes/keys.ts`: rocket 10 sampled
+  frames from t=3.65 s, heli 2 from t=3.3 s. React warns on every such frame (LogBox in dev), and
+  a duplicate-keyed child may be dropped or reused, losing the blend this round set out to keep.
+  Fix: key by index (the list is rebuilt every frame) or add the index to the key, plus a pin.
+- **Gate:** the 4 mascot/guard files: 83 pass / 0 fail; `bun run lint` clean; `bun run typecheck` OK.
+  Worst frame is now 82 rects (heli), so the ≤120 budget holds.
