@@ -146,11 +146,45 @@ describe("a described shell step", () => {
     // Only the leading line goes: a later `exit=…` is output, not the code.
     const later = stepRowView(row("ok", { output: "exit=0\nran\nexit=0 fine" }), null, false);
     expect(later.output?.text).toBe("ran\nexit=0 fine");
-    // With NO `$` line (beta hides it on a success) nothing is stripped: the code
-    // then has nowhere else to be read, exactly as for a failure without one.
+    // With NO `$` line (beta hides it on a success) the code is still stripped:
+    // decision 5 has no ok exception, and a hidden line's `exit=0` says nothing
+    // either. A failure never takes this path — `shellRowParts` always draws the
+    // line for an error, so its code is never lost.
     const hidden = stepRowView(row("ok", { output: "exit=0\nresolved" }), null, false, false, true);
     expect(hidden.subline).toBeNull();
-    expect(hidden.output?.text).toBe("exit=0\nresolved");
+    expect(hidden.output?.text).toBe("resolved");
+  });
+
+  test("compact × ok: the body shows the command ONCE and still carries no `exit=0`", () => {
+    // The orchestrator's finding (shot `38-beta-detail-dark.png`): with beta's
+    // compactShell on, an ok step hides the `$` line, so the body must keep the
+    // command — but it began with the result's own `exit=0`, which decision 5
+    // forbids in ANY ok step's body. Both rules hold at once, exactly once each.
+    const v = stepRowView(
+      row(
+        "ok",
+        { output: "exit=0\nresolved 50/50", durationMs: 20_800 },
+        { command: "sleep 20 && echo resolved 50/50", description: "Test DNS con 50 query" },
+      ),
+      null,
+      false,
+      false,
+      true,
+    );
+    expect(v.subline).toBeNull();
+    expect(v.command).toEqual(["sleep 20 && echo resolved 50/50"]);
+    expect(v.output?.text).toBe("resolved 50/50");
+    expect(JSON.stringify(v)).not.toContain("exit=0");
+    const body = [v.command.join("\n"), v.output?.text ?? ""].join("\n");
+    expect(body.split("sleep 20 && echo resolved 50/50").length - 1).toBe(1);
+    // The default theme shows the `$` line instead: the body keeps only the result.
+    const shown = stepRowView(
+      row("ok", { output: "exit=0\nresolved 50/50", durationMs: 20_800 }),
+      null,
+      false,
+    );
+    expect(shown.command).toEqual([]);
+    expect(shown.output?.text).toBe("resolved 50/50");
   });
 });
 

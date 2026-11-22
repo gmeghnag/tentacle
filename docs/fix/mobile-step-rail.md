@@ -264,3 +264,58 @@ the ok step "Test DNS con 50 query…" shows `sleep 20 && echo resolved 50/50`, 
 The round-2 fix (`tool-steps.ts:366-367`) does not cover the compact path (when `commandRow` is
 false, `packages/core` `shellRowParts`, the body seems to start with the command and keep the
 exit line). Fix it in the pure module, with a unit test for compact × ok (red first).
+
+### Fix round 3
+
+*— deepseek-v4-flash (executor), 2026-11-22*
+
+**Finding (MEDIUM, compactShell × ok keeps `exit=0` in the open body) — FIXED.**
+
+Root cause, verified: the strip was gated on `sublineShown`, i.e. on the `$` line
+being drawn — but with beta's `compactShell` an ok step hides that line
+(`packages/core/src/shell-intent.ts:114`: `commandRow: !compact || error || denied`),
+so the success fell through to the raw output and the body opened with `exit=0`.
+The two rules are independent: the command-once rule already handled the hidden
+line (`bodyCommandLines` keeps the command, `tool-steps.ts:364`), the exit-line rule
+did not.
+
+Fix, one line + comments, `apps/mobile/src/tool-steps.ts:365-370`: for ANY described
+shell call (`shell !== null`) the body's leading `exit=N` line is stripped, whether
+or not the `$` line is drawn; a call with no sentence (`shell === null`) is
+unchanged, byte-identical. No code is ever lost: `shellRowParts` always draws the
+`$` line for an error or a denial, so a failure's `exit N` is still on that line;
+only a SUCCESS can take the hidden-line path, and its `exit=0` is no information.
+
+**Red before green** (`apps/mobile/test/shell-intent-step.test.ts`, «compact × ok: the
+body shows the command ONCE and still carries no `exit=0`» — beta, ok, compact, the
+orchestrator's own `sleep 20 && echo resolved 50/50` fixture): on the buggy code
+`v.output?.text` was `"exit=0\nresolved 50/50"` vs expected `"resolved 50/50"`
+(1 fail, the assertion). After the fix: 12 pass / 0 fail. The test also pins the
+other half — `v.command` is `["sleep 20 && echo resolved 50/50"]` exactly once, the
+whole view JSON contains no `exit=0`, and the default theme's `$` line keeps the
+body command-free.
+
+**Drift from round 2, stated:** the round-2 test's third case asserted the opposite
+for exactly this path («With NO `$` line … nothing is stripped» → `"exit=0\nresolved"`).
+That expectation encoded the bug the orchestrator found; it now expects
+`"resolved"`, with the reasoning for why no code can be lost in its comment. This is
+the review's own decision 5 read consistently, not a loosened assertion.
+
+**Mutation check (paste, run from the worktree):**
+- Old condition restored (`sublineShown ? withoutExitLine(row.output) : (row.output ?? "")`)
+  → `expect(v.output?.text).toBe("resolved 50/50")` FAILS: received
+  `"exit=0\nresolved 50/50"` (1 fail). Restored.
+- Command-once rule broken (`oneLine !== null ? [] : command`) → the same test FAILS
+  on `expect(v.command).toEqual([...])`: received `[]` (1 fail). Restored.
+- Final state: 12 pass / 0 fail, `git diff` shows the fixed condition back at
+  `tool-steps.ts:369`.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx tsc -p apps/mobile --noEmit` clean ·
+`bun run lint` clean (2258 files) · `bun test apps/mobile` 4312 pass / 0 fail
+(293 files). `tools/mockup-kit/generated/kit-data.json` was regenerated
+(`bun run mockup-kit`): the only change is this module's source hash — no token
+moved, so no component or mockup change rides along.
+
+**Not verified here:** the simulator shots (dark beta × default) that showed the bug
+were not re-taken in this round — the pure-module evidence is the unit test above;
+a re-run of `38-beta-detail-dark` is the orchestrator's/e2e gate's step.

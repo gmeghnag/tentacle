@@ -362,9 +362,11 @@ export function stepRowView(
   const lineShows = shell !== null && sublineShown ? firstLine(shell.command) : subtitle;
   const oneLine = command.length === 1 ? command[0] : null;
   const bodyCommandLines = oneLine !== null && oneLine === lineShows ? [] : command;
-  // Decision 5 applies to an ok step too: once the `$` line is drawn, the exit
-  // code is said ONCE, and a success's `exit=0` is no information in the body.
-  const cut = outputView(sublineShown ? withoutExitLine(row.output) : (row.output ?? ""), {
+  // Decision 5 applies to an ok step too, and to the beta's compact path: a
+  // described shell call's body never opens with `exit=N`. A failure's code is
+  // on the `$` line (always drawn for an error or a denial), and a success's
+  // `exit=0` is no information — even when the line itself is hidden.
+  const cut = outputView(shell === null ? (row.output ?? "") : withoutExitLine(row.output), {
     full,
     error: row.status === "error",
   });
@@ -420,8 +422,10 @@ function shellExitSuffix(row: ToolRow): string | null {
 }
 
 /**
- * A result without its leading `exit=N` line: that code is on the `$` line now
- * (drawn for a success too — decision 5 has no ok exception).
+ * A described shell call's result without its leading `exit=N` line: that code
+ * is on the `$` line now (drawn for a success too — decision 5 has no ok
+ * exception, and it does not depend on that line being drawn: with the beta's
+ * compactShell the line is hidden and `exit=0` still says nothing).
  */
 function withoutExitLine(output: string | undefined): string {
   return (output ?? "").replace(/^exit=-?\d+(?:\r?\n|$)/, "");
