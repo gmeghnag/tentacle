@@ -1,12 +1,16 @@
 /**
  * One node on the thread of steps (docs/feat/mobile-tool-rows.md Design 3,
- * mockup C): a 1 px `sep` thread in a 10 pt gutter, the node on the first line's
- * centre (a dot — blinking while it runs —, a hollow ring, or ∴), then ONE line — name, mono
- * subtitle, the duration — and, when open, the body under it. The line carries
- * NO ∴: owner 17/11 sent it away from a command's duration, so the ∴ on this
- * thread is a thought's node and the folded thought's in the open body. A dumb
- * renderer: every string and decision comes from `tool-steps.ts` /
- * `tool-summary.ts`; this file owns only the look, the 1 s clock and the spin.
+ * mockup C): a 1 px `sep` rail in a 10 pt gutter, the node on the first line's
+ * centre (a dot — blinking while it runs —, or a ring), then ONE line — name, mono
+ * subtitle, the duration — and, when open, the body under it. A dumb renderer:
+ * every string and decision comes from `tool-steps.ts` / `tool-summary.ts` /
+ * `step-blink.ts`; this file owns only the look, the 1 s clock and the spin.
+ *
+ * docs/fix/mobile-step-rail.md (owner 22/11): ONE node shape for every step, so
+ * the rail reads as one continuous line — a tool's dot, the live thought's dot
+ * (the same accent, the same blink clock) and a finished thought's dim ring;
+ * a step with a `$ command` line grows a small curved branch off the rail to it
+ * (decision 3), and the line shows a failure's `exit N` at its end (decision 2).
  */
 import { type JSX, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
@@ -21,14 +25,17 @@ import Svg, {
 } from "react-native-svg";
 import type { SlotView } from "../compact-slot.ts";
 import { STEP_ELAPSED_TICK_MS } from "../motion.ts";
-import { STEP_BLINK_CURVE, STEP_BLINK_LOOP_MS, runningDotLook } from "../step-blink.ts";
+import {
+  STEP_BLINK_CURVE,
+  STEP_BLINK_LOOP_MS,
+  runningDotLook,
+  thoughtLook,
+} from "../step-blink.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, size, space, typography } from "../theme.ts";
 import {
-  BREATHE_MS,
   DOT_ORDER,
   type DotPos,
   SHIMMER_MS,
-  breatheCurve,
   shimmerCanvas,
   shimmerFont,
   shimmerLine,
@@ -42,15 +49,27 @@ import { Text } from "./Text.tsx";
 import { animateNextLayout } from "./animate.ts";
 import { AppFontContext } from "./app-font.ts";
 
-/** The node's look: a tool's status, an orphan thought (∴), the live footer (breathing ∴). */
+/** The node's look: a tool's status, an orphan thought (a dim ring), the live footer (an accent dot). */
 /** `wake`: a fired scheduled wake's `◷` (docs/feat/scheduled-fire-row.md). */
 export type NodeKind = StepDot | "thought" | "thinking" | "wake";
 
 const GUTTER = 10;
 /** The node sits on the first line's centre; the line is one touch target tall. */
 const NODE_Y = size.touch / 2;
-/** Every ∴ (a thought's node, a folded thought): owner asked a bit larger than 10. */
+/** Every ∴ (a folded thought in the open body): owner asked a bit larger than 10. */
 const THEREFORE_SIZE = 13;
+/**
+ * Where the `$` line's middle sits in a stacked line (docs/fix/mobile-step-rail.md
+ * decision 3): the title row, ONE touch target tall with its two lines centred,
+ * then half the mono line — so the branch off the rail lands ON the sub-line
+ * instead of ending beside it. Derived from the tokens, never a magic number.
+ */
+const SUBLINE_MID =
+  typography.step.lineHeight +
+  (size.touch - typography.step.lineHeight - typography.stepMono.lineHeight) / 2 +
+  typography.stepMono.lineHeight / 2;
+/** How far the branch leaves the rail before turning down: into the text column. */
+const BRANCH_REACH = GUTTER / 2 + 4;
 
 /** Milliseconds since `from`, re-read once a second; null when there is no `from`. */
 function useElapsed(from: number | undefined): number | null {
@@ -157,9 +176,10 @@ const DOT_AT: Readonly<Record<DotPos, { left: number; top: number }>> = {
 };
 
 /**
- * A static ∴ (a thought's node, a folded thought), DRAWN as the
- * live node's three dots: the font's glyph stays tiny even at 13 pt (simulator
- * sweep, docs/fix/mobile-qa-sweep.md), and drawn, every ∴ is the same size.
+ * A static ∴, drawn as three dots — the OPEN BODY's folded thought, which keeps
+ * its marker (owner 17/11: the reasoning in the body is what the ∴ belongs to).
+ * Drawn, not the font's glyph, which stays tiny even at 13 pt (simulator sweep,
+ * docs/fix/mobile-qa-sweep.md).
  */
 function ThereforeDots({
   color,
@@ -185,25 +205,34 @@ function ThereforeDots({
   );
 }
 
-/** The live node (mockup B): ∴ in accent, its dots breathing top → right → left. */
-function BreathingTherefore({ palette, still }: { palette: Palette; still: boolean }) {
-  const look = thinkingLook(still);
-  const clock = useLoop(BREATHE_MS, !look.animate);
-  return (
-    <View testID="thinking-therefore" style={[styles.dotBox, { backgroundColor: palette.page }]}>
-      {DOT_ORDER.map((pos, i) => (
-        <Animated.View
-          key={pos}
-          style={[
-            styles.breathDot,
-            DOT_AT[pos],
-            { backgroundColor: palette[look.glyph] },
-            clock === null ? undefined : { opacity: clock.interpolate(breatheCurve(i)) },
-          ]}
-        />
-      ))}
-    </View>
-  );
+/**
+ * The REASONING node (docs/fix/mobile-step-rail.md, owner decision 4): the tool
+ * dot's size and place, so the thread has ONE shape. Still thinking ⇒ a filled
+ * accent dot on the running step's OWN blink clock; done ⇒ an outline-only ring
+ * in the dim `thought` token (a steady ring either way).
+ *
+ * Exported for its own render test (`step-rail-render.test.ts`): it holds no
+ * state, so it can be called directly the way `StepBody` is.
+ */
+export function ThoughtDot({
+  palette,
+  live,
+  still,
+}: { palette: Palette; live: boolean; still: boolean }): JSX.Element {
+  const look = thoughtLook(live);
+  if (look.node === "thought-done") {
+    return (
+      <View
+        testID="step-thought-ring"
+        style={[
+          styles.dot,
+          styles.thoughtRing,
+          { borderColor: palette.thought, backgroundColor: palette.page },
+        ]}
+      />
+    );
+  }
+  return <BlinkingDot palette={palette} still={still} />;
 }
 
 /** An svg `Rect` the native driver can move (S0 of docs/feat/mobile-thinking-images.md). */
@@ -349,9 +378,9 @@ function Node({
     case "running":
       return <BlinkingDot palette={palette} still={reduceMotion} />;
     case "thought":
-      return <ThereforeDots color={palette.sec} background={palette.page} />;
+      return <ThoughtDot palette={palette} live={false} still={reduceMotion} />;
     case "thinking":
-      return <BreathingTherefore palette={palette} still={reduceMotion} />;
+      return <ThoughtDot palette={palette} live still={reduceMotion} />;
     case "wake":
       // The clock glyph, harness-grey on the page (it masks the rail like a dot).
       return (
@@ -381,6 +410,12 @@ export interface StepNodeProps {
   readonly subtitleItalic?: boolean;
   /** A second mono line under the name line (a described shell step's `$ cmd`). */
   readonly subline?: string | null;
+  /**
+   * At the END of that second line: a failed shell call's `exit N`, never cut
+   * (docs/fix/mobile-step-rail.md owner decision 2 — written in TEXT, the owner
+   * is colour-blind; the red is only a second cue).
+   */
+  readonly exitSuffix?: string | null;
   /** The name shimmers like the thinking word (a described shell step, running). */
   readonly shimmer?: boolean;
   readonly trailing: string;
@@ -409,6 +444,7 @@ export function StepNode({
   subtitle,
   subtitleItalic,
   subline,
+  exitSuffix,
   shimmer,
   trailing,
   trailingRed,
@@ -434,6 +470,14 @@ export function StepNode({
       >
         {thread.up ? <View style={[styles.up, { backgroundColor: palette.sep }]} /> : null}
         {thread.down ? <View style={[styles.down, { backgroundColor: palette.sep }]} /> : null}
+        {subline == null ? null : (
+          // The rail grows a branch to the `$` line (owner decision 3): the line
+          // stays continuous, and the sub-line is visibly THIS step's.
+          <View
+            testID="step-subline-branch"
+            style={[styles.branch, { borderColor: palette.sep }]}
+          />
+        )}
         <View style={styles.nodeBox}>
           <Node kind={node} palette={palette} reduceMotion={reduceMotion} />
         </View>
@@ -513,14 +557,25 @@ export function StepNode({
             )}
           </View>
           {subline == null ? null : (
-            <Text
-              numberOfLines={1}
-              ellipsizeMode="tail"
-              maxFontSizeMultiplier={DENSE_FONT_SCALE}
-              style={[typography.stepMono, { color: palette.sec }]}
-            >
-              {subline}
-            </Text>
+            <View style={styles.sublineRow}>
+              <Text
+                numberOfLines={1}
+                ellipsizeMode="tail"
+                maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                style={[typography.stepMono, styles.sublineText, { color: palette.sec }]}
+              >
+                {subline}
+              </Text>
+              {exitSuffix == null ? null : (
+                <Text
+                  numberOfLines={1}
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.stepMono, styles.exitSuffix, { color: palette.red }]}
+                >
+                  {exitSuffix}
+                </Text>
+              )}
+            </View>
           )}
         </Pressable>
         {below}
@@ -549,7 +604,7 @@ export interface StepBodyProps {
   readonly replyTestID?: string;
 }
 
-/** The open body: the thought, the full command, the result (`⎿`), the diff, the reply. */
+/** The open body: the thought, the command (or its result), the diff, the reply. */
 export function StepBody({
   palette,
   thought,
@@ -600,7 +655,8 @@ export function StepBody({
 }
 
 /**
- * The live "Thinking…" node, the list's footer (Owner Q2): a breathing ∴ and a
+ * The live "Thinking…" node, the list's footer (Owner Q2): the accent dot a
+ * running step draws (blinking, docs/fix/mobile-step-rail.md decision 4) and a
  * shimmering word (mockup B + D, `thinking-motion.ts`; static under Reduce Motion), the
  * seconds since it appeared (its mount is the tail's identity: a tool or text in
  * between unmounts it), and a tap that opens the live thought.
@@ -650,9 +706,9 @@ export function ThinkingNode({
 
 /**
  * The compaction slot in the Thinking node's place (docs/feat/mobile-hub-commands.md
- * C2 item 15): `Compacting…` with the same breathing ∴ (static under Reduce
- * Motion) and its live seconds, or a static `Compacted ✓`. `compact-slot.ts`
- * decides which; this only draws it.
+ * C2 item 15): `Compacting…` with the same live thought node (an accent dot,
+ * static under Reduce Motion) and its live seconds, or a static `Compacted ✓`.
+ * `compact-slot.ts` decides which; this only draws it.
  */
 export function CompactSlotNode({
   palette,
@@ -700,9 +756,11 @@ const styles = StyleSheet.create({
   },
   // A 7 pt dot ringed 3 pt in `page`, so the thread stops short of it.
   dot: { width: 13, height: 13, borderRadius: 6.5, borderWidth: 3 },
+  // A finished thought: the dot's own box, outline only (owner decision 4).
+  thoughtRing: { borderWidth: 2 },
   ring: { width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.2 },
   wake: { fontSize: 13, lineHeight: 15, textAlign: "center" },
-  // The live ∴ (B): the glyph's size (`THEREFORE_SIZE`), drawn as three thin dots.
+  // The folded thought's ∴ in the open body: the glyph's size, three thin dots.
   dotBox: { width: THEREFORE_SIZE, height: THEREFORE_SIZE },
   breathDot: { position: "absolute", width: 3, height: 3, borderRadius: 1.5 },
   glyphs: { position: "absolute", top: 0, left: 0 },
@@ -716,6 +774,27 @@ const styles = StyleSheet.create({
   stacked: { flexDirection: "column", alignItems: "stretch", justifyContent: "center", gap: 0 },
   lineRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   pressed: { opacity: 0.6 },
+  // The `$` line with the failure's code pinned at its end: the command shrinks
+  // (and ellipsises) so `exit N` is never cut (owner decision 2).
+  sublineRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  sublineText: { flexShrink: 1 },
+  exitSuffix: { flexShrink: 0 },
+  /**
+   * The branch off the rail to a step's `$` line (decision 3): it leaves the rail
+   * level with the title and curves onto the sub-line — the `⎿` idea, hung on the
+   * rail instead of stamped in front of the text. Left + bottom border only, one
+   * radius rounding the turn.
+   */
+  branch: {
+    position: "absolute",
+    left: GUTTER / 2 - 0.5,
+    top: NODE_Y + 7,
+    height: SUBLINE_MID - (NODE_Y + 7),
+    width: BRANCH_REACH,
+    borderLeftWidth: 1,
+    borderBottomWidth: 1,
+    borderBottomLeftRadius: 6,
+  },
   name: { flexShrink: 0, maxWidth: "45%" },
   // No subtitle beside it (a sentence): the name may take the whole line.
   nameWide: { flexShrink: 1, maxWidth: "100%" },

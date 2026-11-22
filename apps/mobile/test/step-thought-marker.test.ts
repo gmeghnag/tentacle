@@ -210,8 +210,10 @@ describe("StepNode: the trailing marker is gone from the renderer", () => {
     expect(node).not.toMatch(/readonly marker:/);
     expect(node).not.toContain("styles.marker");
     expect(node).not.toMatch(/marker=\{(?:true|false|[^}]*)\}/);
-    // The remaining ∴ are the reasoning node and the folded thought in the body.
-    expect(node.match(/<ThereforeDots\b/g)?.length).toBe(2);
+    // ONE ∴ left: the folded thought in the open body. The reasoning NODE is no
+    // longer a glyph at all (docs/fix/mobile-step-rail.md owner decision 4: a dot
+    // while thinking, a dim ring once thought — the same shape as a tool's).
+    expect(node.match(/<ThereforeDots\b/g)?.length).toBe(1);
   });
 
   test("no caller passes a marker", () => {

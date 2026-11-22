@@ -121,34 +121,33 @@ describe("StepNode replaces ToolRow", () => {
     expect(node).toContain("maxFontSizeMultiplier={DENSE_FONT_SCALE}");
   });
 
-  test("every ∴ (a thought's node, a folded thought) is one size, 12–13 pt (owner 09:33)", () => {
+  test("the open body's folded ∴ is one size, 12–13 pt (owner 09:33)", () => {
     const node = read("ui", "StepNode.tsx");
     const size = /const THEREFORE_SIZE = ([\d.]+);/.exec(node);
     expect(size === null ? 0 : Number(size[1])).toBeGreaterThanOrEqual(12);
     expect(size === null ? 99 : Number(size[1])).toBeLessThanOrEqual(13);
     // The font's ∴ glyph stays tiny even at 13 pt (simulator, 29-tool-rows-running
-    // shots): every ∴ is DRAWN as three dots in a THEREFORE_SIZE box, like the live node.
-    expect(node).not.toMatch(/>\s*∴\s*</);
-    // Two, since 17/11: a thought's node and the folded thought in the open body.
-    // A tool step's line carries NONE — it sat next to the command's duration
+    // shots): the ∴ of an open body's folded thought is DRAWN as three dots in a
+    // THEREFORE_SIZE box. It is the ONLY ∴ left (owner decision 4, 22/11): the
+    // reasoning node is a dot/ring now, and a tool step's line carries none
     // (docs/fix/mobile-step-thought-marker.md, `step-thought-marker.test.ts`).
-    expect(node.match(/<ThereforeDots\b/g)?.length ?? 0).toBe(2);
+    expect(node).not.toMatch(/>\s*∴\s*</);
+    expect(node.match(/<ThereforeDots\b/g)?.length ?? 0).toBe(1);
     expect(node).toMatch(/dotBox: \{ width: THEREFORE_SIZE, height: THEREFORE_SIZE/);
   });
 
-  test("the live Thinking node is mockup B + D: a breathing ∴ and a shimmering word (09:36)", () => {
+  test("the live Thinking node is the running tool's own dot; a Thought is a dim ring (22/11)", () => {
     const node = read("ui", "StepNode.tsx");
-    // B: the "thinking" node is the breathing ∴, no longer the queued ring.
-    expect(node).toMatch(/case "thinking":\s*return <BreathingTherefore /);
-    expect(node).toContain("clock.interpolate(breatheCurve(i))");
-    // D: the footer's word is the shimmer, fed by the pure sweep. The same word
-    // is also opt-in for a described shell step's running name (`shimmer`,
-    // docs/feat/shell-intent-line.md §7) — the condition grew, the thinking node
-    // still goes through it.
+    // docs/fix/mobile-step-rail.md owner decision 4: ONE node shape for every
+    // step. The breathing ∴ is gone; the live thought is the running tool's
+    // own dot — literally the same component, so the blink clock is shared.
+    expect(node).not.toContain("BreathingTherefore");
+    expect(node).toMatch(/case "thinking":\s*return <ThoughtDot [^>]*live /);
+    expect(node).toMatch(/case "thought":\s*return <ThoughtDot [^>]*live=\{false\}/);
+    expect(node).toMatch(/return <BlinkingDot palette=\{palette\} still=\{still\} \/>;/);
+    // The shimmered word survives (it is what says "still thinking" in text).
     expect(node).toMatch(/node === "thinking" \|\| shimmer === true \? \(\s*<ThinkingWord/);
     expect(node).toContain("shimmerSweep(width)");
-    // Reduce Motion stops both clocks (useLoop returns null when still).
-    expect(node).toContain("useLoop(BREATHE_MS, !look.animate)");
     expect(node).toContain("useLoop(SHIMMER_MS, !look.animate)");
   });
 

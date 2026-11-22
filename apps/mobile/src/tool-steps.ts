@@ -8,7 +8,7 @@
  * layout only says how a row draws — a reasoning row folded into a step draws
  * nothing (`hidden`); the live "Thinking…" node is the list's footer (`tail`).
  */
-import { shellExitCode, shellOutcome, shellRowParts } from "@tentacle/core";
+import { shellExitCode, shellRowParts } from "@tentacle/core";
 import { chartRowSpec } from "./chart-row.ts";
 import {
   type ToolNameParts,
@@ -293,18 +293,33 @@ export interface StepRowView {
   /** The name shimmers (`ThinkingWord`): a described `shell` call while it runs. */
   readonly shimmer: boolean;
   readonly dot: StepDot;
-  /** `toolMeta`'s right-hand text: `+n −m`, `denied` or the duration. */
+  /**
+   * `toolMeta`'s right-hand text: `+n −m`, `denied` or the duration — and NEVER
+   * an outcome glyph: a done step's trailing is the duration alone, for a
+   * success and a failure alike (owner 22/11, decision 1). A failure is told in
+   * TEXT at the end of the `$` line (`exitSuffix`).
+   */
   readonly trailing: string;
   readonly trailingRed: boolean;
+  /**
+   * The failure, written at the END of the `$ command` line: `exit 125` (owner
+   * 22/11, decision 2 — the owner is colour-blind, so a red title is not enough).
+   * `null`: nothing to write there — the trailing keeps today's red instead.
+   */
+  readonly exitSuffix: string | null;
   /** A running step with a known start and no trailing yet: the node ticks its own clock. */
   readonly live: boolean;
   /**
-   * The body, in order: the full command, the result. NEVER the reasoning folded
-   * into the step (owner 21/11, docs/fix/mobile-running-row.md): the tap detail
-   * is what ran and what came back, for every tool.
+   * The body, in order: the command, the result. NEVER the reasoning folded
+   * into the step (owner 21/11, docs/fix/mobile-running-row.md). A described
+   * `shell` step whose `$` line is drawn leaves the command OUT (owner 22/11,
+   * decision 5): it is already on that line, once.
    */
   readonly command: readonly string[];
-  /** `⎿` on the first line; `hidden` lines wait for "show all". Null: no result. */
+  /**
+   * The result, one line per row, at the text column (no `⎿`, no indent —
+   * decision 5). `hidden` lines wait for "show all". Null: no result.
+   */
   readonly output: {
     readonly text: string;
     readonly hidden: number;
@@ -330,33 +345,49 @@ export function stepRowView(
   const meta = toolMeta(row);
   const dot = DOT[meta.tone];
   // A `shell` call the model described: the sentence is the name, the command
-  // a `$` line under it, the outcome WRITTEN in the trailing text. No sentence
+  // a `$` line under it, the failure WRITTEN at that line's end. No sentence
   // ⇒ `null` ⇒ the view below, unchanged.
   const shell = row.name === "shell" ? shellRowParts(row.args, row.status, compact) : null;
+  const sublineShown = shell?.commandRow === true;
+  // The exit code lives on the `$` line (decision 2): only when that line is
+  // drawn, and only when the result states a code (never invented).
+  const exitSuffix = sublineShown ? shellExitSuffix(row) : null;
+  // The command appears ONCE (decision 5): the body drops it exactly when the
+  // step's own line already shows that same text — the `$` sub-line of a
+  // described shell call, or a plain row whose subtitle IS its one command. A
+  // multi-line command (only its first line fits the line) is never dropped: the
+  // body is then the only place it reads in full.
   const command = bodyCommand(row.name, row.args);
-  const cut = outputView(row.output ?? "", { full, error: row.status === "error" });
+  const subtitle = shell === null ? rowSubtitle(row.name, row.args) : "";
+  const lineShows = shell !== null && sublineShown ? firstLine(shell.command) : subtitle;
+  const oneLine = command.length === 1 ? command[0] : null;
+  const bodyCommandLines = oneLine !== null && oneLine === lineShows ? [] : command;
+  const cut = outputView(exitSuffix === null ? (row.output ?? "") : withoutExitLine(row.output), {
+    full,
+    error: row.status === "error",
+  });
   const output =
     cut.lines.length === 0
       ? null
       : {
-          text: cut.lines.map((line, i) => `${i === 0 ? "⎿ " : "  "}${line}`).join("\n"),
+          text: cut.lines.join("\n"),
           hidden: cut.hidden,
           error: cut.error,
         };
-  const trailing = shell === null ? meta.trailing : shellTrailing(row, meta.trailing);
   return {
     name: shell === null ? toolName(row.name, row.label) : { tool: shell.sentence },
-    subtitle: shell === null ? rowSubtitle(row.name, row.args) : "",
-    subline: shell?.commandRow ? `$ ${firstLine(shell.command)}` : null,
+    subtitle,
+    subline: sublineShown ? `$ ${firstLine(shell.command)}` : null,
     shimmer: shell !== null && dot === "running",
     dot,
-    trailing,
-    trailingRed: row.status === "error" || row.status === "denied",
-    live: dot === "running" && row.at !== undefined && trailing === "",
-    command,
+    trailing: meta.trailing,
+    trailingRed: exitSuffix === null && (row.status === "error" || row.status === "denied"),
+    exitSuffix,
+    live: dot === "running" && row.at !== undefined && meta.trailing === "",
+    command: bodyCommandLines,
     output,
     tappable:
-      command.length > 0 ||
+      bodyCommandLines.length > 0 ||
       output !== null ||
       row.diff !== undefined ||
       row.denialReply !== undefined,
@@ -374,26 +405,21 @@ function firstLine(command: string): string {
 }
 
 /**
- * A described shell row's trailing text: `toolMeta`'s with the WRITTEN outcome
- * first — `✓ 1.2 s`, `✗ exit 2 · 3.4 s`, `✗ · 3.4 s` (no code) — glyph and word,
- * never hue alone. A denial keeps `denied`; running keeps "" (the live clock).
+ * A failed `shell` row's `exit N`, read from its own result (the spill head
+ * first), or `null` when the result states no code — never invented, and never
+ * for a denial or a tool error that carries none.
  */
-function shellTrailing(row: ToolRow, base: string): string {
-  if (row.status === "denied" || row.diff !== undefined) {
-    return base;
+function shellExitSuffix(row: ToolRow): string | null {
+  if (row.status !== "error") {
+    return null;
   }
-  const outcome = shellOutcome({
-    status: row.status,
-    ...(row.output !== undefined ? { text: row.output } : {}),
-    ...(row.spill !== undefined ? { spillHead: row.spill.head } : {}),
-  });
-  if (outcome === null) {
-    return base;
-  }
-  if (base === "") {
-    return outcome;
-  }
-  return outcome === "✓" ? `${outcome} ${base}` : `${outcome} · ${base}`;
+  const code = shellExitCode(row.spill?.head ?? row.output);
+  return code === null ? null : `exit ${code}`;
+}
+
+/** A result without its leading `exit=N` line: that code is on the `$` line now. */
+function withoutExitLine(output: string | undefined): string {
+  return (output ?? "").replace(/^exit=-?\d+(?:\r?\n|$)/, "");
 }
 
 /** VoiceOver for a described shell row: the sentence, then the outcome in words. */

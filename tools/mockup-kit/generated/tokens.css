@@ -17,6 +17,7 @@
   --c-sep: #c6c6c8;
   --c-sep-chat: #d1d1d6;
   --c-sep-sheet: #c6c6c8;
+  --c-thought: #a9a9b0;
   --c-accent: #0e7490;
   --c-accent-fill: #0e7490;
   --c-on-accent: #ffffff;
@@ -74,6 +75,7 @@
   --c-sep: #37383c;
   --c-sep-chat: #313236;
   --c-sep-sheet: #3d3e42;
+  --c-thought: #5d6166;
   --c-accent: #22d3ee;
   --c-accent-fill: #06b6d4;
   --c-on-accent: #00191f;
@@ -131,6 +133,7 @@
   --c-sep: #2d393d;
   --c-sep-chat: #253033;
   --c-sep-sheet: #333f43;
+  --c-thought: #55636a;
   --c-accent: #22d3ee;
   --c-accent-fill: #06b6d4;
   --c-on-accent: #00191f;
@@ -325,6 +328,7 @@
   --m-step-dot-height: 13px;
   --m-step-dot-border-radius: 6.5px;
   --m-step-dot-border-width: 3px;
+  --m-step-thought-ring-border-width: 2px;
   --m-step-ring-width: 9px;
   --m-step-ring-height: 9px;
   --m-step-ring-border-radius: 4.5px;
@@ -350,6 +354,16 @@
   --m-step-stacked-gap: 0;
   --m-step-line-row-gap: 6px;
   --m-step-pressed-opacity: 0.6;
+  --m-step-subline-row-gap: 8px;
+  --m-step-subline-text-flex-shrink: 1;
+  --m-step-exit-suffix-flex-shrink: 0;
+  --m-step-branch-left: 4.5px;
+  --m-step-branch-top: 29px;
+  --m-step-branch-height: 3px;
+  --m-step-branch-width: 9px;
+  --m-step-branch-border-left-width: 1px;
+  --m-step-branch-border-bottom-width: 1px;
+  --m-step-branch-border-bottom-left-radius: 6px;
   --m-step-name-flex-shrink: 0;
   --m-step-name-max-width: 45%;
   --m-step-name-wide-flex-shrink: 1;
@@ -375,6 +389,8 @@
   --m-step-k-gutter: 10;
   --m-step-k-node-y: 22;
   --m-step-k-therefore-size: 13;
+  --m-step-k-subline-mid: 32;
+  --m-step-k-branch-reach: 9;
   --m-step-k-glyph-baseline: 0.35;
   --m-composer-bar-padding-horizontal: 12px;
   --m-composer-bar-padding-top: 8px;

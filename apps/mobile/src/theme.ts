@@ -43,6 +43,13 @@ export interface Palette {
   readonly sepChat: string;
   /** Separator on a sheet. */
   readonly sepSheet: string;
+  /**
+   * A FINISHED thought's node (the `Thought` ring, docs/fix/mobile-step-rail.md
+   * owner decision 4): a dim, "disabled" grey near the rail, so a thought steps
+   * back behind the actions it sits between. Its own token because it is quiet by
+   * DESIGN, not because it happens to equal a hairline.
+   */
+  readonly thought: string;
   /** Accent for text and icons. */
   readonly accent: string;
   /** Accent for a filled button. */
@@ -103,6 +110,7 @@ const light: Palette = {
   sep: "#C6C6C8",
   sepChat: "#D1D1D6",
   sepSheet: "#C6C6C8",
+  thought: "#A9A9B0",
   accent: "#0E7490",
   accentFill: "#0E7490",
   onAccent: "#FFFFFF",
@@ -148,6 +156,7 @@ const dark: Palette = {
   sep: "#37383C",
   sepChat: "#313236",
   sepSheet: "#3D3E42",
+  thought: "#5D6166",
   accent: "#22D3EE",
   accentFill: "#06B6D4",
   onAccent: "#00191F",
@@ -209,6 +218,7 @@ const petrol: Palette = {
   sep: "#2D393D",
   sepChat: "#253033",
   sepSheet: "#333F43",
+  thought: "#55636A",
   tint: "#173136",
   glass: "rgba(29,37,40,0.86)",
   switchOff: "#3A4043",

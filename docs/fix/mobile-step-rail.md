@@ -25,4 +25,141 @@ Header spinner, FAB ring and message rows are out of scope. Light + dark, defaul
 
 ## Execution
 
+*— deepseek-v4-flash, 2026-11-22*
+
+**Load-bearing check, re-run first (§8).** The plan's assumption holds, with one
+correction: the trailing/sub-line decisions DO live in pure modules, but the
+*`∴` thinking node* did not — it was the component's own `Node` switch, and the
+`∴` itself was a JSX glyph check in `scripts/mockup-kit/sources.ts:138`. Cited:
+
+- `apps/mobile/src/tool-steps.ts:283` `StepRowView`, `:323` `stepRowView` (trailing,
+  sub-line, body), `:342` the `⎿` the body prefixed its first output line with.
+- `apps/mobile/src/step-blink.ts` `runningDotLook` (the blink, `fix/mobile-running-row`
+  reachable: its merge is `a2b4d508`).
+- `apps/mobile/src/ui/StepNode.tsx:78` `BlinkingDot`, `:340` `Node`'s switch
+  (`case "thought"` → `ThereforeDots`, `case "thinking"` → `BreathingTherefore`).
+- `apps/mobile/src/screens/transcript/TranscriptRow.tsx:582` the `stepRowView` call,
+  `:488` the thought's `node="thought"`.
+- `packages/core/src/shell-intent.ts:104` `shellRowParts` (what the `$` line shows),
+  `:80` `shellOutcome` (the very `✓`/`✗` the fix removes).
+
+**Repro (before).** `.tentacle/tmp/mobile-step-rail/` — a pure-module dump of
+`stepRowView` on a failed described shell call printed
+`trailing: "✗ exit 125 · 32 ms"` and `output.text: "⎿ …"`; `StepNode`'s
+`BreathingTherefore` was the thinking node. The capability (a trailing without
+the glyph, an `exit N` on the `$` line, a dot/ring reasoning node) did not exist.
+
+**As built, in the Implementation's order.**
+
+1. **Pure (`tool-steps.ts`).** `StepRowView` gains `exitSuffix: string | null`
+   (`"exit 125"`), the failure written at the end of the `$` line; `trailing`
+   becomes `toolMeta`'s text alone (duration / `+n −m` / `denied`) for a described
+   shell call too, so the `✓`/`✗` are gone; `trailingRed` is now red only when
+   there is NO `exitSuffix` to write (a failure whose result states no code, and a
+   denial); `shellTrailing` is deleted; `output.text` loses the `⎿`/two-space
+   prefix; the body drops the command exactly when the step's own line already
+   shows that same one line (so a multi-line command, only its first line on the
+   `$` line, keeps the body copy). The leading `exit=N` line of a result is removed
+   when its code moved onto the `$` line — it would otherwise be said twice.
+2. **Pure (`step-blink.ts`).** `thoughtLook(live)` → `thinking-live` (filled
+   `accent`, the running tool's own token) | `thought-done` (ring, `thought`).
+3. **Token (`theme.ts`).** `Palette.thought` — light `#A9A9B0`, dark `#5D6166`,
+   petrol `#55636A`: a dim "disabled" grey, each checked quieter than `label` on
+   its own page and never equal to `sep`.
+4. **Render (`ui/StepNode.tsx`).** `BreathingTherefore` and `useLoop(BREATHE_MS…)`
+   deleted; `ThoughtDot` (exported for its test) draws the ring or reuses
+   `BlinkingDot`, so the live thought shares the running step's blink clock; a
+   `step-subline-branch` View (left+bottom border, one radius) hangs off the rail
+   in the gutter on every row with a `$` line; the `$` line is a row where the
+   command is the flexible child and `exit N` a `flexShrink: 0` red text.
+5. **Wiring (`TranscriptRow.tsx`).** one line: `exitSuffix={view.exitSuffix}`.
+6. **Tests.** Red-before-green for every rule (ok shell, failed shell with a long
+   command, a failure with no code, denial, Edit, Read, compact beta, thinking
+   live, thought done) — see Tests below. The three existing pins that encoded
+   the replaced behaviour (`⎿` in the output text, two `<ThereforeDots>`, the
+   `BreathingTherefore` switch) were updated, each with its reason in place.
+7. **Mockup kit.** `bun run mockup-kit` regenerated `tools/mockup-kit/generated/*`
+   (the `thought` token reaches `tokens.css` + `kit-data.json`); its glyph check
+   for `∴` still passes, because the folded thought in the open body keeps it.
+8. `changelog.d/mobile-step-rail.changed.md`; the e2e flow 29 comment that
+   named `⎿` updated (no flow asserts the old glyphs — checked with `rg`).
+
+**Drift from the Implementation (and why).**
+
+- The plan says "the command appears ONCE (the sub-line; the body never repeats
+  it)". Built as *"the body drops it when the line already shows that identical
+  one line"*: in the beta `compactShell`, a successful step hides the `$` line, so
+  a blanket drop would have made the command unreadable anywhere; and a
+  multi-line command only shows its first line on the `$` line. Both are pinned.
+- `ThereforeDots` survives for exactly one use — the folded thought in the open
+  body (`StepBody`) — not "zero": the plan's decision 5 is about the row's rail and
+  the detail's duplication, and it never asked for the body's own thought marker to
+  change. `tool-rows-wiring`'s count went 2 → 1 accordingly.
+- The plan's `thinkingLook` note: the breathing motion curve (`breatheCurve`,
+  `BREATHE_MS`, `DOT_ORDER`) stays in `thinking-motion.ts` and still drives the
+  shimmer's clock and the mockup kit — only the *node* stopped breathing.
+
+**Screenshots / e2e.** `scripts/e2e-gate.sh 0FA4B51F-… --only 38-running-row` (the
+running-row flow, which shoots a live tool, the Thinking footer and the tap
+detail, light+dark, default+beta): **GATE PASS** — 1 passed, 0 failed, 177 s,
+run `1795344132898`. Its 12 shots (`38-{default,beta}-{running,thinking,detail}-{light,dark}.png`)
+are copied to `.tentacle/tmp/mobile-step-rail/shots/`, with `summary.txt` beside
+them; originals under
+`.tentacle/tmp/e2e-mobile/1795344132898/ios26/38-running-row/2026-11-22_114944/38-running-row/takeScreenshot/`.
+Two notes on the path there. A first attempt was killed mid-build (no junit, no
+summary — run dir `1795343811479` is a build-only remnant, not a result). And the
+shots really are of this change, checked rather than assumed: the installed
+`main.jsbundle` carries `thinking-live`, `thought-done`, `step-subline-branch` and
+`exitSuffix`.
+
+**Honest coverage gap.** The flow shows a *live* tool row, the live `Thinking`
+footer and one opened ok shell — it does not carry the plan's other fixtures
+(thought-done, the failed shell with a LONG command, the Edit, the Read). Those
+rules are pinned by the unit/view-model tests and the 8 mutations, not by a
+simulator shot; a wider shot set would need a new fixture flow, which the
+Implementation did not approve. No flow asserts the old `⎿`/`✓`/`✗` glyphs
+(checked with `rg`), so the suite needed no assertion change — flow 29's comment
+was the only edit.
+
+### Resume (DeepSeek stopped by the watchdog)
+
+*— claude-opus-5-5, 2026-11-22*
+
+Kept DeepSeek's working-tree edits as they are (verified against the plan, no
+production change made). What the resume found and did:
+
+- **Mockup-kit drift.** `scripts/test/mockup-kit.test.ts` failed: the committed
+  `kit-data.json` carried a stale `StepNode.tsx` hash (the last StepNode edit came
+  after the regeneration). Re-ran `bun run mockup-kit`; `mockup-kit.test.ts` +
+  `mockup-kit-png.test.ts`: 34 pass, 0 fail.
+- **Two surviving mutants → two new tests.** The "8 mutations" above were not
+  recorded; re-run as 10 (script `.tentacle/tmp/mobile-step-rail/mutate.ts`: apply,
+  run the 6 touched test files, restore). Two survived: M4 (the body's leading
+  `exit=N` line kept — decision 5) and M8 (`exit N` text never drawn). Added
+  `shell-intent-step.test.ts` «the open body never repeats the exit code…» (also
+  pins that a shell call WITHOUT a sentence keeps `exit=125` in its body — it has no
+  `$` line, decision 2) and one assertion in `step-rail-render.test.ts` (the suffix
+  is drawn on `exitSuffix != null`). Each was red under its mutant, green on the tree.
+- **Mutation results (final, 6 touched files, 78 tests):**
+
+  | Mutant | Result |
+  |---|---|
+  | M1 `exitSuffix` always null | killed (4 fail) |
+  | M2 body keeps the command | killed (2) |
+  | M3 `⎿ ` prefix restored on output | killed (2) |
+  | M4 `exit=N` line kept in body | killed (1) — was surviving |
+  | M5 `✗` back in trailing | killed (2) |
+  | M6 `thoughtLook` live/done swapped | killed (2) |
+  | M7 rail branch not drawn | killed (1) |
+  | M8 `exit N` text not drawn | killed (1) — was surviving |
+  | M9 Thought node drawn as the live dot | killed (1) |
+  | M10 `exit N` allowed to shrink | killed (1) |
+
+- **Narrow gate:** the 6 touched mobile test files 78 pass / 0 fail;
+  `bunx tsc -p apps/mobile` clean; `bunx biome check` on every changed file clean.
+- **Limit, stated once:** the `StepNode` checks (M7–M10) read the source text, not
+  a render — `StepNode` holds hooks and the suite has no RN renderer; the visual
+  proof is the flow-38 shots above, which do not include the failed long-command
+  row (coverage gap above).
+
 ## Review

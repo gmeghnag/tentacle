@@ -33,7 +33,7 @@ const tool = (key: string, status: ToolStatus = "ok", extra: Partial<ToolRow> = 
 });
 
 describe("stepRowView: one step's line and body", () => {
-  test("a finished shell step: green dot, its command, the duration, the cut output with ⎿", () => {
+  test("a finished shell step: green dot, its command, the duration, the cut output, no ⎿", () => {
     const out = Array.from({ length: 9 }, (_, i) => `line ${i + 1}`).join("\n");
     const v = stepRowView(tool("t", "ok", { durationMs: 14, output: out }), "why", false);
     expect(v.name).toEqual({ tool: "Bash" });
@@ -45,9 +45,25 @@ describe("stepRowView: one step's line and body", () => {
     // docs/fix/mobile-running-row.md (owner 21/11): the body is the command and
     // the result — never the reasoning folded into the step.
     expect("thought" in v).toBe(false);
-    expect(v.command).toEqual(["ls -la polpo-page.png"]);
+    // The command appears ONCE (decision 5): on the `$` line when it is drawn,
+    // else in the body — where it is the only place the command can be read.
+    const multi = stepRowView(
+      tool("m", "ok", {
+        args: JSON.stringify({ command: "cd x\nbun test", description: "Go" }),
+      }),
+      null,
+      false,
+    );
+    expect(multi.subline).toBe("$ cd x…");
+    // The line shows the FIRST line only: the body keeps the whole command, so a
+    // multi-line call still reads in full in one place.
+    expect(multi.command).toEqual(["cd x", "bun test"]);
+    // A plain shell row (no sentence): its subtitle IS the command, so the body
+    // does not say it a second time.
+    expect(v.subtitle).toBe("ls -la polpo-page.png");
+    expect(v.command).toEqual([]);
     expect(v.output).toEqual({
-      text: ["⎿ line 1", "  line 2", "  line 3", "  line 4", "  line 5", "  line 6"].join("\n"),
+      text: ["line 1", "line 2", "line 3", "line 4", "line 5", "line 6"].join("\n"),
       hidden: 3,
       error: false,
     });
