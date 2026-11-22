@@ -947,6 +947,46 @@ on the 27 touched files: clean (6 reformatted). Full gate: the orchestrator's sc
   unattributed; the child filter's `workflow` entry has no dedicated test.
 - A settings rebuild in `serve` reuses the driver with the FIRST build's deps (models, hooks).
 
+### Fix round 2
+
+Scope: the Review's Round 2 findings R2-1..R2-3. Each was shown red before the fix,
+then mutation-checked. Scratch: `.tentacle/tmp/agent-workflows/r5loop.ts`, which runs one test
+filter N times in separate processes.
+
+- **R2-1 (HIGH), FIXED.** `packages/core/src/tool-groups.ts`: `"workflow"` joins
+  `UNGROUPED_TOOLS`, so it is a built-in name that can be switched off on its own. Red before:
+  `tool-names-parity.test.ts` reported `- "workflow"`, 1 fail. Green after. Mutation: removing
+  the entry brings the same fail back.
+- **R2-2 (HIGH), FIXED.** Root cause: `attachWorkflows` called `publishWorkflows`, and with no
+  turn running that ran `recordCut(null)`. This happened inside session creation, before the
+  session's open had finished, and the first turn's text never reached the client.
+  - Evidence, the R5 test run alone (`-t R5`, separate processes):
+    - before the fix: 20 of 20 fail, at `connect-model-error.test.ts:356`
+      (`""` ≠ `"first"`);
+    - with `workflows: false` in `serve.ts`: 0 of 5 fail;
+    - attach-time publish removed: 0 of 5 fail;
+    - emit kept but cut skipped: 0 of 5 fail. So the cut is the culprit.
+  - Fix, `hosted-session.ts` `attachWorkflows`: the starting rows are STATE. They set
+    `lastWorkflows` and `cut.workflows`, with no emit and no cut.
+  - After the fix: 0 of 10 fail with `-t R5`, and 0 of 10 for the whole file.
+  - Mutation: putting the attach-time `publishWorkflows` back gives 5 of 5 fail. The pin is the
+    existing R5 test, which is red every time when run alone on the buggy code.
+- **R2-3 (MEDIUM), FIXED.** New test in `packages/daemon/test/workflow-hosted.test.ts`:
+  "a new log segment mid-run re-logs the live run's workflow_start". The runner blocks, so the
+  run stays live. Then `historyReplaced("compact")` runs, and the test reads the current
+  segment with `logRead`. That segment must open at the compaction's base and contain
+  `workflow_start`. Mutation R1d, `logSegmentFacts` with `live` forced to `undefined`: 1 fail,
+  where the review saw 9 of 9 pass. Restored.
+- **Not addressed (owner decision, not a fix):** the narrowed crash-resume scope (Round 2, #2).
+  The owner has to OK it explicitly.
+- **Checks run:** 8 covering test files, 102 pass and 0 fail. `biome check` on the 3 changed
+  files is clean, and so is `tsc -p packages/daemon`. The full gate is left to the
+  orchestrator's script.
+- **Unverified:** why an early cut drops the first turn's text on the client side. Only the
+  trigger is proven: the cut at creation. Other emits that happen before open were not audited.
+
+*— claude-opus-5-5, 2026-11-22*
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22*

@@ -2406,7 +2406,15 @@ export class HostedSession {
         this.kickWake();
       },
     });
-    this.publishWorkflows(driver.rows());
+    // The starting list is STATE, not an event: nobody is attached yet (this runs
+    // inside session creation), so it is set for the snapshot without an emit or a
+    // cut. A cut here committed before the session's open had finished and lost
+    // the first turn's text (review R2-2, connect-model-error (R5)).
+    const initial = WorkflowRowSchema.array().safeParse(driver.rows());
+    if (initial.success) {
+      this.lastWorkflows = initial.data;
+      this.cut = { ...this.cut, workflows: initial.data };
+    }
   }
 
   /** The full `workflows` list, judged by its schema on the way out; the cut follows when idle. */

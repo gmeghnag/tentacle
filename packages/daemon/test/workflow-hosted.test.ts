@@ -13,6 +13,7 @@ import {
   PermissionBroker,
   type ToolContext,
 } from "@tentacle/core";
+import type { KnownLogEntry, LogCursor } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { HostedSession } from "../src/hosted-session.ts";
 
@@ -110,6 +111,54 @@ describe("session/workflow on a hosted session", () => {
       turnId: "t-1",
     });
     expect(result).toEqual({ ok: true, runId: "wf-5" });
+  });
+
+  // Review R2-3 (Slice 3 obligation): a compaction while a run is live starts a
+  // new log segment; that segment must carry the run's `workflow_start` again,
+  // or a crash after it leaves the run with nothing to close at the next load.
+  test("a new log segment mid-run re-logs the live run's workflow_start", async () => {
+    const session = hosted();
+    let release = (): void => {};
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const d = new WorkflowDriver({
+      load: async () => ({ path: "workflows/task.yaml", text: YAML, prompts: {} }),
+      context: () => ({ models: [], agentTypes: ["general"] }),
+      approvals: { has: async () => true, add: async () => {} },
+      request: async () => ({ allowed: false }),
+      runnerFor: () => async () => {
+        await blocked;
+        return { report: "ok", toolUses: 0, stopReason: "end_turn" };
+      },
+    });
+    session.attachWorkflows(d);
+    const started = await session.workflow({
+      sessionId: "s1",
+      action: "start",
+      name: "task",
+      turnId: "t-1",
+    });
+    expect(started).toEqual({ ok: true, runId: "wf-1" });
+    await settle();
+    (session as unknown as { historyReplaced(r: "compact"): void }).historyReplaced("compact");
+    const all: KnownLogEntry[] = [];
+    let after: LogCursor | undefined;
+    for (;;) {
+      const page = session.logRead(after);
+      all.push(...(page.entries as KnownLogEntry[]));
+      const last = page.entries.at(-1);
+      if (!page.more || !last) break;
+      after = { seq: last.seq, id: last.id };
+    }
+    // The read is the CURRENT segment: it opens at the compaction's base.
+    const lastBase = all.map((e) => e.type).lastIndexOf("base");
+    expect(lastBase).toBeGreaterThanOrEqual(0);
+    expect(JSON.stringify(all[lastBase])).toContain('"compact"');
+    const segment = all.slice(lastBase).map((e) => e.type);
+    expect(segment).toContain("workflow_start");
+    release();
+    await settle();
   });
 
   test("a wake turn id cannot start a run", async () => {
