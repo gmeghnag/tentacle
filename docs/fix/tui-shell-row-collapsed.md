@@ -253,3 +253,20 @@ interaction): the executor already reproduced it on a pristine `git archive HEAD
 copy, and each file alone is green (127 pass / 0 fail alone). Pre-existing on
 `main`, unrelated to this branch, and out of the approved Implementation — it is
 not touched here.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-22* (fresh context; NOT the executor's model family — the executor was Sonnet/DeepSeek)
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM, no HIGH).
+
+1. **MEDIUM — a background start shows its start note collapsed, against the approved spec.** `packages/tui/src/render-lines.ts` `shellBlock` (`outcomeOnly = row.exitCode === null && status ∉ {running, queued}`) treats any settled call with no `exit=` as "outcome", so a `run_in_background` start (`tools/src/builtins.ts:456`, no `exit=` line) draws its 2-line note under the `$` row collapsed (3–5 rows at w=40/80; for a plain row it replaces the title-only shape with a `⎿ started background job …` block). The owner's variant B (Context example "Job in background di 8s…" = header + `⎿ $ …` only; mockup `render()` puts that note in `out`, shown only when `expanded`) says NO output collapsed. `shell-row-collapsed.test.ts:120` pins the wrong shape. Fix: exclude the background start from `outcomeOnly` (keep denial/hook reasons), and flip that test.
+   Repro (`.tentacle/tmp/tui-shell-row-collapsed/review.ts`, w=80, SGR stripped): `● Job in background 0.0s` / `⎿ $ echo "partito"; sleep 8; echo fine` / `  started background job bg-1 (pid 95): …` / `  Read output with shell_output({ job_id: "bg-1" }); …`.
+
+**Gate (touched files):** 11 files, 351 pass / 1 fail — the fail is `render-lines.test.ts` "shipped default is the text-only header", order-dependent with `permission-shell-command.test.tsx` (whose diff is comment-only); accepted as pre-existing per Execution, not re-verified on `main`. `bun run lint`: clean. `bun run typecheck`: clean. Full `bun test` not run here.
+
+**Mutation:** `dollarRows` exit-fits check forced to "never fits" → 4 fail in `shell-row-collapsed.test.ts`; reverted, `git status` clean.
+
+**Attacks tried:** (a) background start collapsed → finding 1. (b) settled error with no `exit=` (spawn failure) → shows `$ x` + reason collapsed; reasonable as an outcome, not output. (c) wide CJK command + `exit=1` at w=40 → cut with `…`, `exit=1` intact, width ≤ cols. (d) `compactShell` removed from row-cache key → safe, no renderer reads it; config key kept in `.strict()` schema. (e) §7 "logic in pure modules": room math is in pure `shell-row.ts`; the assembly (`shellBlock`/`dollarRows`) still branches in `render-lines.ts`, consistent with the existing file — no finding. Permission ask untouched (comment only); `apps/mobile`/`core` untouched.
+
+**Executor behaviour:** honest Execution (red mutations pasted, drift recorded, pre-existing fail reproduced); the one miss is reading Design step 5's "denied → keep text" as covering background starts.
