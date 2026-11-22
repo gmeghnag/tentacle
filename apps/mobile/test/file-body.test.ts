@@ -12,6 +12,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ToolDiffDetail } from "@tentacle/core";
+import { DIFF_MAX_LINES, diffView } from "../src/diff-view.ts";
 import {
   FILE_BODY_PREVIEW,
   FILE_HIGHLIGHT_CAP,
@@ -245,6 +246,33 @@ describe("a write", () => {
     expect(view?.lines.every((line) => line.kind === "add")).toBe(true);
   });
 
+  // An overwrite that only APPENDS to the file: every line of the patch is an
+  // addition and none is removed, exactly like a creation — only the hunk's
+  // `-0,0` start tells the two apart (a diff over an existing file starts at
+  // its own old range).
+  const appendPatch = [
+    "--- a/src/app.ts",
+    "+++ b/src/app.ts",
+    "@@ -41,0 +42,2 @@",
+    "+const d = 5;",
+    "+const e = 6;",
+  ].join("\n");
+
+  test("a write that only ADDS lines to an existing file is NOT a new file", () => {
+    const view = fileBodyView(
+      {
+        name: "fs_write",
+        args: JSON.stringify({ path: "src/app.ts" }),
+        status: "ok",
+        output: "wrote 42 bytes to src/app.ts (+2 -0)",
+        diff: detail("src/app.ts", appendPatch),
+      },
+      false,
+    );
+    expect(view?.header).toBe("lines 42–43 · TypeScript");
+    expect(view?.header).not.toContain("new file");
+  });
+
   test("a write OVER an existing file is a real diff: it says its range", () => {
     const view = fileBodyView(
       {
@@ -277,6 +305,92 @@ describe("the preview, and the show-all seam", () => {
 
   test("a short body hides nothing", () => {
     expect(fileBodyView(readRow("a\nb", "a.txt"), false)?.hidden).toBe(0);
+  });
+});
+
+describe("a patch longer than the diff bound keeps its tail counted", () => {
+  /** 600 added lines in one hunk: past `DIFF_MAX_LINES`, so `diffView` cuts it. */
+  const longPatch = [
+    "--- a/x.ts",
+    "+++ b/x.ts",
+    "@@ -0,0 +1,600 @@",
+    ...Array.from({ length: 600 }, (_, at) => `+line ${at}`),
+  ].join("\n");
+
+  test("full: the bound's lines are drawn and the rest is REPORTED, not lost", () => {
+    const row = {
+      name: "fs_write",
+      args: JSON.stringify({ path: "x.ts" }),
+      status: "ok" as const,
+      diff: detail("x.ts", longPatch),
+    };
+    const view = fileBodyView(row, true);
+    expect(view?.lines.length).toBe(DIFF_MAX_LINES);
+    // `diffView`'s own figure — the number the old card drew as
+    // `N more lines not shown` — carried into the body instead of dropped.
+    const held = diffView(detail("x.ts", longPatch)).hidden;
+    expect(held).toBeGreaterThanOrEqual(200);
+    expect(view?.hidden).toBe(held);
+  });
+
+  test("collapsed: the preview's count already includes the bound's tail", () => {
+    const view = fileBodyView(
+      {
+        name: "fs_edit",
+        args: JSON.stringify({ path: "x.ts" }),
+        status: "ok",
+        diff: detail("x.ts", longPatch),
+      },
+      false,
+    );
+    expect(view?.lines.length).toBe(FILE_BODY_PREVIEW);
+    // The preview's count is the whole body's: the bound's tail included.
+    expect(view?.hidden).toBe(
+      DIFF_MAX_LINES + diffView(detail("x.ts", longPatch)).hidden - FILE_BODY_PREVIEW,
+    );
+  });
+});
+
+describe("a spilled read is not file content", () => {
+  /** A 90 000-char read, as `spillLargeOutput` (result-pipeline.ts:96-104) leaves it. */
+  const output = [
+    "[large fs_read output: full output (90000 chars) saved to /x/spill.txt — read it selectively]",
+    "const a = 1;",
+    "…[88800 characters omitted]…",
+    "export {};",
+  ].join("\n");
+  const spill = {
+    chars: 90_000,
+    path: "spill.txt",
+    head: "const a = 1;",
+    tail: "export {};",
+    omitted: 88_800,
+  };
+
+  test("no numbered body and no line-count header: the content is a PREVIEW", () => {
+    // Numbering the banner, the omission marker and the tail as lines 1–4 would
+    // claim the file has 4 lines: synthesised data from truncated input.
+    expect(fileBodyView({ ...readRow(output, "src/a.ts"), spill }, false)).toBe(null);
+  });
+
+  test("a spill that omitted NOTHING is still a banner + content, so still no body", () => {
+    // `spill` is attached only when the pipeline rewrote `content` (a banner is
+    // prepended), so its presence — not its `omitted` — disqualifies the body.
+    const banner = "[large fs_read output: full output (9000 chars) saved to /x/s.txt — …]";
+    const out = `${banner}\nconst a = 1;`;
+    expect(
+      fileBodyView(
+        {
+          ...readRow(out, "src/a.ts"),
+          spill: { chars: 9000, path: "s.txt", head: "const a = 1;", tail: "", omitted: 0 },
+        },
+        false,
+      ),
+    ).toBe(null);
+  });
+
+  test("the same text with no spill data keeps its body (the control)", () => {
+    expect(fileBodyView(readRow(output, "src/a.ts"), false)?.header).toBe("4 lines · TypeScript");
   });
 });
 

@@ -178,7 +178,8 @@ colour) · `apps/mobile/src/tool-steps.ts` (`file`, empty command/output) ·
 | Read with no `[path lines …]` header (whole-file read, a PDF's text) | lines shown, header `N lines` |
 | Empty content / empty patch | `null` → not tappable, today's row |
 | `.html` with `<script>` | coloured, no marker text (the `spansOf` fix) |
-| 400-line patch | `diffView`'s own bound; the remainder is the preview's `hidden` |
+| 400-line patch | `diffView`'s own bound; the remainder is counted in the body's `hidden` (`… N more lines · tap to see all`) — fixed in Review round 1, item #2 |
+| A spilled read (the row carries a `spill`) | no file body: today's plain output (its text is a banner + head + marker + tail, not a file) |
 
 ## Tests (minimum, red first — AGENTS §9)
 
@@ -264,6 +265,95 @@ orchestrator's script.
 unapproved for code — the owner bundled it into this job, so either approve its Files list for
 a follow-up executor or split it into its own task. Validation screenshots need a simulator run.
 NOT READY: part 2 not built; no screenshots.
+
+### Fix round 1
+
+*— deepseek-v4-pro, 2026-11-22 — the three code findings of Review round 1. Red first, then
+green, each fix mutation-checked.*
+
+Repro re-run on the branch (`.tentacle/tmp/mobile-file-view/review.ts`, the reviewer's own):
+
+```
+SPILL header: 4 lines · TypeScript
+1 [large fs_read output: full output (90000 chars) saved to /x/spill.txt — …]
+2 const a = 1;
+3 …[88800 characters omitted]…
+4 export {};
+DIFF full: lines 400 hidden 0 header TypeScript · new file
+```
+
+After (`fix-repro.ts` of the same directory — the three findings' observables, on the fixed code):
+
+```
+#1 SPILL body: null -> plain output, no numbered lines
+#2 full: lines 400 hidden 202 | diffView.hidden 202
+#4 overwrite header: lines 42–43 · TypeScript
+```
+
+1. **#1 (spilled read) — FIXED.** `file-body.ts` `readBody` now takes the row and returns
+   `null` when the row HAS a `spill`: `result-pipeline.ts:80-104` attaches `spill` only when it
+   rewrote `content` (a banner prepended), so its presence — not its `omitted` — is the fact that
+   disqualifies the body. A spilled read keeps today's plain output; no body ever numbers a
+   banner/marker/tail as file lines. The guard sits on the pure body view, so `tool-steps.ts`
+   needs no change: `file` stays `undefined`, `command` and `output` come back as they were. The
+   row's own type is narrowed to `ToolResultSpill` (core's), not a hand-rolled `{ omitted }` —
+   `ToolRow` passes its `spill` straight through.
+2. **#2 (diff over `DIFF_MAX_LINES`) — FIXED.** `diffLines` returns the `diffView` bound as
+   `held = view.hidden`; `preview(rows, full, bound)` adds it to the preview's own `hidden`
+   (`full` included, where the preview cuts nothing). The body's one `hidden` is therefore the
+   TRUE remainder, and `ui/FileBody.tsx` needed no change — it already draws
+   `… N more lines · tap to see all` from `view.hidden`. At `full=true` a 600-line patch says
+   `200 more lines · tap to see all`; the old card said `182 more lines not shown`, the body now
+   counts the patch too. Also fixed the Failure-modes row that claimed this worked.
+3. **#4 (append-only overwrite labelled new file) — FIXED.** "created" now comes from the first
+   hunk's `@@ -0,0` (`CREATED_HUNK`), not from `removed === 0`: an overwrite whose every line is
+   an addition says its range. The reviewer's premise that `ToolDiffDetail` carries no created
+   flag is correct — the hunk start is the wire's only statement of it, which is why the flag was
+   not added.
+4. **#3 — PARTIAL, escalated, not code.** Part 2 (per-session script trust) is unbuilt because
+   the APPROVED Implementation scoped it out (`Design — part 2: not implemented in this pass`,
+   and its files are absent from *Files to change*). An executor may not write production code
+   outside the approved Implementation, and adding its Files list myself would be approving a
+   `load-bearing` §7 design (pod exclusion) on my own signature. The decision needed — approve
+   Part 2's files for a follow-up executor, or split it into its own task — is stated below,
+   unchanged from the last Execution. The screenshots are also still missing (`xcrun simctl`
+   booted devices exist, but the sim must run THIS worktree's JS bundle; this branch's flows and
+   seeds are untouched by the fixes above). Both stay **NOT READY** items.
+
+**Tests (red → green).** `apps/mobile/test/file-body.test.ts`: 5 new tests — a spilled read has
+no body, a spill that omitted NOTHING is still banner + content (the same trap one step finer),
+an append-only write says `lines 42–43 · TypeScript`, and the bound's tail is counted both at
+`full` and collapsed; plus its control (the same text with no `spill` keeps
+`4 lines · TypeScript`). Red on the old code:
+
+```
+(fail) a write > a write that only ADDS lines to an existing file is NOT a new file
+(fail) a patch longer than the diff bound keeps its tail counted > full: … REPORTED, not lost
+(fail) a patch longer than the diff bound keeps its tail counted > collapsed: … includes the bound's tail
+(fail) a spilled read is not file content > no numbered body and no line-count header: …
+ 33 pass
+ 4 fail
+```
+
+Green after: `99 pass / 0 fail` (with `file-body-render.test.ts`, `tool-step-view.test.ts`,
+`highlight.test.ts`).
+
+**Mutations** (each reverted; `file-body.ts` sha1 `8550b95051ec` before and after):
+
+```
+M-A  spill guard → `if (false) {`:                     2 fail — no numbered body and no line-count header | a spill that omitted NOTHING …
+M-A2 spill guard → `spill.omitted > 0` only:           1 fail — a spill that omitted NOTHING is still a banner + content
+M-B  held tail dropped (preview(rows, full)):          2 fail — full: … REPORTED, not lost | collapsed: …
+M-B2 held dropped on the `full` path only:              1 fail — full: … REPORTED, not lost
+M-C  created back to `removed === 0`:                  1 fail — a write that only ADDS lines … NOT a new file
+```
+
+M-A2 is why the guard is presence-based: `omitted > 0` would have looked right and still
+numbered a banner. M-B2 pins that the `full` branch carries the bound too (that is the reviewer's
+exact repro).
+
+**Local checks:** 4 narrow files `99 pass / 0 fail`; `tsc -p apps/mobile` clean; `biome check`
+clean on the 2 touched code/test files. Full gate: the orchestrator's script.
 
 ## Review
 

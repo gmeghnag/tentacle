@@ -19,7 +19,7 @@
  *    `… N more lines · tap to see all`; `full` (the screen's existing show-all
  *    seam) draws everything.
  */
-import type { ToolDiffDetail } from "@tentacle/core";
+import type { ToolDiffDetail, ToolResultSpill } from "@tentacle/core";
 import { diffView } from "./diff-view.ts";
 import { type Span, highlight, languageOf } from "./highlight.ts";
 
@@ -167,15 +167,19 @@ function colourLines(
   };
 }
 
-/** Apply the preview cut (rule 4) to a body's rows. */
+/** Apply the preview cut (rule 4) to a body's rows, plus whatever a diff's own bound held back. */
 function preview(
   rows: readonly FileLine[],
   full: boolean,
+  bound = 0,
 ): { readonly lines: readonly FileLine[]; readonly hidden: number } {
   if (full || rows.length <= FILE_BODY_PREVIEW) {
-    return { lines: rows, hidden: 0 };
+    return { lines: rows, hidden: bound };
   }
-  return { lines: rows.slice(0, FILE_BODY_PREVIEW), hidden: rows.length - FILE_BODY_PREVIEW };
+  return {
+    lines: rows.slice(0, FILE_BODY_PREVIEW),
+    hidden: rows.length - FILE_BODY_PREVIEW + bound,
+  };
 }
 
 /**
@@ -190,6 +194,7 @@ function diffLines(
   readonly language: string | null;
   readonly rows: readonly FileLine[];
   readonly range: string;
+  readonly held: number;
 } {
   const view = diffView(detail);
   const rows: FileLine[] = [];
@@ -215,7 +220,7 @@ function diffLines(
       });
     }
   }
-  return { language, rows, range: hunkRange(view) };
+  return { language, rows, range: hunkRange(view), held: view.hidden };
 }
 
 /** The `A–B` a diff's hunks cover: the first hunk's start to the last one's end. */
@@ -229,6 +234,14 @@ function hunkRange(view: ReturnType<typeof diffView>): string {
   }
   return first === end ? `${first}` : `${first}–${end}`;
 }
+
+/**
+ * `@@ -0,0 +1,2 @@` — a patch that CREATED the file. The first hunk starts at
+ * old line 0 (a unified diff's way of saying "no old side"), which is the only
+ * thing that distinguishes a creation from an overwrite whose lines happened to
+ * be additions only (both have `removed === 0`).
+ */
+const CREATED_HUNK = /^@@ -0,0 \+\d+(?:,\d+)? @@/m;
 
 /** `lines A–B of N` — the header `fs_read` writes for a RANGED read (`builtins.ts:137`). */
 const RANGE_HEADER = /^\[(?:.+?) lines (\d+)-(\d+) of (\d+)\]\r?\n?/;
@@ -259,6 +272,7 @@ export function fileBodyView(
     readonly status: string;
     readonly output?: string;
     readonly diff?: ToolDiffDetail;
+    readonly spill?: ToolResultSpill;
   },
   full: boolean,
 ): FileBodyView | null {
@@ -267,7 +281,7 @@ export function fileBodyView(
   }
   const path = targetPath(argsOf(row.args));
   if (row.name === "fs_read") {
-    return readBody(row.output ?? "", path, full);
+    return readBody(row, path, full);
   }
   if (row.diff === undefined) {
     return null; // no patch on the row: nothing to colour (the plain output stays)
@@ -276,16 +290,33 @@ export function fileBodyView(
   if (diff.rows.length === 0) {
     return null;
   }
-  // A Write that CREATED the file: every line is an addition and none was
-  // removed, so there is no range to name — `LANG · new file` says it instead.
-  const created = row.name === "fs_write" && row.diff.removed === 0;
+  // A Write that CREATED the file (`@@ -0,0`): there is no old range to name,
+  // so `LANG · new file` says it instead. An overwrite is a real diff even when
+  // every one of its lines is an addition, so it says its range.
+  const created = row.name === "fs_write" && CREATED_HUNK.test(row.diff.patch);
   const header = created ? newFileHeader(path) : withLanguage([`lines ${diff.range}`], path);
-  const cut = preview(diff.rows, full);
+  const cut = preview(diff.rows, full, diff.held);
   return { language: diff.language, header, lines: cut.lines, hidden: cut.hidden };
 }
 
-/** A `fs_read` body: its `[path lines A-B of N]` header becomes the one light line. */
-function readBody(output: string, path: string, full: boolean): FileBodyView | null {
+/**
+ * A `fs_read` body: its `[path lines A-B of N]` header becomes the one light line.
+ *
+ * A SPILLED read has no body. `result-pipeline.ts:80-104` attaches `spill` only
+ * when it REWROTE the content, and then `output` is the model's banner, a head,
+ * the `…[N characters omitted]…` marker and a tail — never the file. Numbering
+ * those as lines 1–4 would state a line count the file does not have, so it
+ * keeps today's plain output (the row stays tappable, with the banner visible).
+ */
+function readBody(
+  row: { readonly output?: string; readonly spill?: ToolResultSpill },
+  path: string,
+  full: boolean,
+): FileBodyView | null {
+  if (row.spill !== undefined) {
+    return null;
+  }
+  const output = row.output ?? "";
   const match = RANGE_HEADER.exec(output);
   const body = match === null ? output : output.slice(match[0].length);
   const coloured = colourLines(body, path);
