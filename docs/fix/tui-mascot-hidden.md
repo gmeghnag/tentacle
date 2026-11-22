@@ -193,3 +193,57 @@ orchestrator's (not run here, per the brief).
 - Gate: `changelog-guard` + `mascot` + `render-lines` + `app-frames` tests: 166 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean. The round-2 diff touches no `packages/` source.
 
 *— claude-opus-5-5, 2026-11-22* (fresh context; different family from the executor)
+
+### Fix round 2
+
+*— deepseek-v4-pro (executor), 2026-11-22*
+
+**Scope:** the one Review round-2 finding (**R2-1**, MEDIUM — the new guard
+rejected valid fragments). No production code touched; the `packages/tui` change
+of round 0 and the fragments of round 1 are untouched.
+
+**R2-1 — FIXED (the I3 guard was removed, with its `retractions` helper).**
+
+- **Repro first**, on the round-1 tree (two unrelated real task slugs, both real
+  `docs/fix/` docs — `detach-live`, `detach-live-followups` — each with its own
+  `.fixed` fragment):
+
+  ```
+  (fail) I3: an unreleased fragment does not retract a sibling's addition
+         > the tree has no such pair (a changed entry shadowing a sibling's added one)
+  - []
+  + [ "changelog.d/detach-live-followups.fixed.md" ]
+   6 pass · 1 fail
+  ```
+
+  So the guard fired on a legitimate pair, exactly as the Review said.
+- `scripts/test/changelog-guard.test.ts:1-79` — `describe("I3 …")` and the
+  `retractions()` helper deleted (1 insertion, 51 deletions); the `type
+  Fragment` import went with them. I1 (`[Unreleased]` empty) and I2 (fragments
+  well-formed) stay exactly as they were.
+- The *behavioural* half of R1 — the `.changed` fragment deleted and
+  `tui-mascot.added.md` rewritten to what ships — was round 1's fix and does not
+  depend on the guard; it remains in the tree.
+- Why not keep a narrower rule: any prefix test is a slug-convention guess (two
+  unrelated fixes legitimately share a prefix), and a real rule is a repo-wide
+  changelog convention, which AGENTS §10(c) makes its own `feat` task rather
+  than a rider on this S/`contained` fix.
+
+**Mutation checks (§9, each reverted; `git status` clean after each).**
+
+1. Put the round-1 offending pair back (`.changed` = "no longer draws the
+   mascot", `.added` unchanged) **with I3 removed** → 5 pass / 0 fail. Honest
+   reading: nothing in the suite now pins that pair — the fix is a *removal* of a
+   wrong rule, and the wording is the Review's judgement, not a testable
+   property (the same conclusion round 1 reached for the bullet text).
+2. `[Unreleased]` given a `### Fixed` bullet → **1 fail** (I1), so the truncation
+   left the remaining guards alive rather than emptying the file.
+3. Legit pair (`detach-live.fixed` + `detach-live-followups.fixed`) on the fixed
+   tree → 5 pass / 0 fail (was 1 fail before the change): the repro is green.
+
+**Tests run** (narrow): `changelog-guard` + `changelog` + `release` →
+**57 pass / 0 fail**. `bunx biome check scripts/test/changelog-guard.test.ts` —
+clean. Full gate (`bun run check`) is the orchestrator's, per the brief.
+
+**Unverified:** nothing in this round beyond the gate; the round-0 item (the
+owner's eye on macOS Terminal.app) still stands.
