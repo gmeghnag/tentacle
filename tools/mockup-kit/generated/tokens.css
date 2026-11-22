@@ -241,8 +241,12 @@
   --t-mono-inline-family: ui-monospace, "SF Mono", Menlo, monospace;
   --t-step-size: 14px;
   --t-step-lh: 20px;
-  --t-step-weight: 500;
+  --t-step-weight: 400;
   --t-step-family: var(--font-ui);
+  --t-step-meta-size: 13px;
+  --t-step-meta-lh: 18px;
+  --t-step-meta-weight: 400;
+  --t-step-meta-family: var(--font-ui);
   --t-step-mono-size: 12.5px;
   --t-step-mono-lh: 18px;
   --t-step-mono-family: ui-monospace, "SF Mono", Menlo, monospace;
@@ -633,7 +637,7 @@
   --m-transcript-row-rule-margin-vertical: 6px;
   --m-markdown-paragraph-font-size: 16px;
   --m-markdown-paragraph-line-height: 23px;
-  --m-markdown-bold-font-weight: 600;
+  --m-markdown-bold-font-weight: 700;
   --m-markdown-chip-padding-horizontal: 5px;
   --m-markdown-chip-padding-vertical: 1px;
   --m-markdown-chip-border-radius: 5px;
@@ -653,8 +657,6 @@
   --m-markdown-quote-gap: 8px;
   --m-markdown-list-gap: 6px;
   --m-markdown-list-item-gap: 8px;
-  --m-markdown-bullet-font-size: 16px;
-  --m-markdown-bullet-line-height: 23px;
   --m-markdown-bullet-min-width: 18px;
   --m-markdown-list-body-flex: 1;
   --m-markdown-list-body-gap: 6px;
@@ -792,15 +794,31 @@
 @font-face {
   font-family: "Figtree";
   src: url("../../../apps/mobile/assets/fonts/Figtree-Regular.ttf") format("truetype");
-  font-weight: 100 500;
+  font-weight: 100 400;
   font-style: normal;
   /* regular */
 }
 
 @font-face {
   font-family: "Figtree";
+  src: url("../../../apps/mobile/assets/fonts/Figtree-Medium.ttf") format("truetype");
+  font-weight: 500 500;
+  font-style: normal;
+  /* medium */
+}
+
+@font-face {
+  font-family: "Figtree";
+  src: url("../../../apps/mobile/assets/fonts/Figtree-SemiBold.ttf") format("truetype");
+  font-weight: 600 600;
+  font-style: normal;
+  /* semiBold */
+}
+
+@font-face {
+  font-family: "Figtree";
   src: url("../../../apps/mobile/assets/fonts/Figtree-Bold.ttf") format("truetype");
-  font-weight: 600 900;
+  font-weight: 700 900;
   font-style: normal;
   /* bold */
 }
@@ -808,15 +826,31 @@
 @font-face {
   font-family: "Figtree";
   src: url("../../../apps/mobile/assets/fonts/Figtree-Italic.ttf") format("truetype");
-  font-weight: 100 500;
+  font-weight: 100 400;
   font-style: italic;
   /* italic */
 }
 
 @font-face {
   font-family: "Figtree";
+  src: url("../../../apps/mobile/assets/fonts/Figtree-MediumItalic.ttf") format("truetype");
+  font-weight: 500 500;
+  font-style: italic;
+  /* mediumItalic */
+}
+
+@font-face {
+  font-family: "Figtree";
+  src: url("../../../apps/mobile/assets/fonts/Figtree-SemiBoldItalic.ttf") format("truetype");
+  font-weight: 600 600;
+  font-style: italic;
+  /* semiBoldItalic */
+}
+
+@font-face {
+  font-family: "Figtree";
   src: url("../../../apps/mobile/assets/fonts/Figtree-BoldItalic.ttf") format("truetype");
-  font-weight: 600 900;
+  font-weight: 700 900;
   font-style: italic;
   /* boldItalic */
 }
