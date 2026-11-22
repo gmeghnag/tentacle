@@ -595,11 +595,16 @@ export interface StepBodyProps {
   readonly onShowAll?: () => void;
   /** The diff (`DiffView`), moved here from always-visible (Owner Q7). */
   readonly diff?: ReactNode;
+  /**
+   * A file tool's coloured content (docs/feat/mobile-file-view.md): it takes
+   * the body's place instead of `command`/`output`/`diff`.
+   */
+  readonly file?: ReactNode;
   readonly reply?: string;
   readonly replyTestID?: string;
 }
 
-/** The open body: the thought, the command (or its result), the diff, the reply. */
+/** The open body: the thought, the command (or its result), the file, the diff, the reply. */
 export function StepBody({
   palette,
   thought,
@@ -607,6 +612,7 @@ export function StepBody({
   output,
   outputTestID,
   onShowAll,
+  file,
   diff,
   reply,
   replyTestID,
@@ -619,6 +625,7 @@ export function StepBody({
           <Text style={[styles.thoughtText, { color: palette.sec }]}>{thought}</Text>
         </View>
       )}
+      {file}
       {command.length === 0 ? null : (
         <Text style={[styles.code, { color: palette.label }]}>{command.join("\n")}</Text>
       )}

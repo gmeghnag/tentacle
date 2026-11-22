@@ -64,10 +64,121 @@ can leak its own content; "per open, never remembered".
 
 ## Implementation
 
-*(executor: write it before coding, source-verified per AGENTS §8 with `file:line`; name the
-one assumption each part stands on and prove it first. Part 2's failure modes: session switch,
-reconnect, a session moved between hosts, an artifact opened from the gallery outside its
-session, revoke while a page is open.)*
+*— deepseek-v3.2, 2026-11-22 — written before coding, each claim re-verified against the source.*
+
+### Load-bearing assumptions (proved first)
+
+**Part 1 — `spansOf` can see html's sub-language wrappers.** `packages/tui/src/read-highlight.ts`
+is irrelevant here: the phone's path is `highlight.ts` → `spansOf` (`apps/mobile/src/highlight.ts:158`),
+which only recognises `<span class="hljs-`. Probed on the worktree (`bun` over the real modules,
+`.tentacle/tmp/mobile-file-view/probe-leak.ts`) with a `.html` body:
+
+```
+label: html lines: 6
+"<style><span class=\"language-css\">"     <- the wrapper leaks as TEXT
+":root { --bg: #eee; }"                    <- coloured, but the marker is drawn too
+"<script><span class=\"language-javascript\">"
+```
+
+So `.html` is *not* merely uncoloured — going through `spansOf` it is **corrupted** (raw
+`<span class="language-css">` printed into the code). The `xml` grammar does emit the
+sub-languages (`node_modules/highlight.js/lib/languages/xml.js:164,177` `subLanguage: 'css'` /
+`'javascript'`), and the inner tokens are ordinary `hljs-*`. **The fix is in `spansOf`: treat a
+`class="language-<x>"` wrapper as a TRANSPARENT scope** (push `""`, which `pushText` already
+renders as the parent's scope) instead of text. This also fixes chat code blocks, which today
+would print the same markers for a ```` ```html ```` fence — a bug the spec did not name.
+
+**Part 2 — the wire carries no host kind.** The phone never learns whether its daemon is a pod:
+`initialize`'s `agentInfo` (`packages/daemon/src/connection.ts:850-860`) carries `version`,
+`model`, `contextWindow` only, though the daemon KNOWS (`DaemonIdentity.kind`,
+`packages/daemon/src/version-mismatch.ts:10-14`). The one structural signal on the wire is the
+attachment policy: `daemonDocumentPolicy("pod")` (`packages/cli/src/image-policy.ts:53-57`) is
+wired unconditionally for a pod host (`packages/cli/src/serve.ts:1322`) and `"host"` for
+`serve`/worker (`serve.ts:800`, `worker.ts:170`), advertised as
+`agentCapabilities.documents.input` (`connection.ts:840-848`) — `"client"` ⇔ pod, `"upload"` ⇔
+host. `images.input === "client"` is the same fact for the `--model-proxy` pod
+(`image-policy.ts:35-44`). Rule, **fail closed**: a daemon that proves neither ⇒ treated as
+pod-backed ⇒ the option is not offered.
+
+Two supporting facts: a device route exists only on a host `serve` — `startWsServer` with a
+`devices` authority is started in one place (`serve.ts:975`), a pod daemon is hosted over stdio
+(`serve.ts:1375-1380`) — and the phone already relies on exactly this (`connection.ts:60-66`,
+"the phone reaches a `serve` on the user's own host and nothing else"). The phone declares no
+`hop` (`connection.ts:63-82`), so a phone session is never moved into a workload
+(`protocol/src/session.ts:263-270`), which is what makes a once-pod session unreachable.
+
+### Design — part 1
+
+Pure first (AGENTS §7). New `apps/mobile/src/file-body.ts`:
+
+- `FILE_TOOLS` = `fs_read | fs_write | fs_edit | fs_multi_edit`.
+- `fileBodyView(row, full)` → `null` for anything else, for a non-`ok` row (an error/denial
+  keeps today's plain output — never a coloured body hiding the failure), and for a row with no
+  content yet. Otherwise `{ language, header, lines, hidden, sign }`:
+  - **language** from the EXTENSION only (`pathExtension` + the existing `languageOf` alias table,
+    `highlight.ts:96`), never auto-detection; above `FILE_HIGHLIGHT_CAP` (2000 lines / 200 KB,
+    the TUI's) → `language: null` = plain.
+  - **Read** (`fs_read`): parse the `[path lines A-B of N]` header (`packages/tools/src/builtins.ts:137`),
+    strip it, one line per source line; `header` = `lines A–B of N · LANG` (from the header), or
+    `N lines · LANG` for a whole-file read.
+  - **Edit/MultiEdit** (`fs_edit`, `fs_multi_edit`): `diffView(row.diff)` (`diff-view.ts:99`),
+    hunks flattened, `header` = `lines A–B · LANG` where A/B are the first hunk's start and the
+    last hunk's end — replacing `@@ … @@`, which is dropped.
+  - **Write** (`fs_write`): its diff with no removal line ⇒ `header` = `LANG · new file`, else the
+    Edit header. (A Write over an existing file is a real diff and says so.)
+  - **ONE number column** (variant B): the new number, else the old one for a removed line.
+  - **Preview**: more than `FILE_BODY_PREVIEW` (12) lines → the first `full ? all : 12`, `hidden`
+    = the rest, drawn as `… N more lines · tap to see all`; `full` is the screen's existing
+    show-all seam (`step.onShowAll`, `tool-steps.ts:341`).
+- `stepRowView` (`tool-steps.ts:338`): for a file tool — `command: []` (the step line already
+  says the path), `output: null` (drops `⎿ edited … with N edits` / `wrote N bytes` and the
+  duplicated counts), and a new optional `file: FileBodyView`; `tappable` stays true.
+- `DiffView` keeps its `diff-<callId>` testID role by moving it onto the new body's wrapper (an
+  e2e flow asserts it, `apps/mobile/e2e/flows/08-call-id.js`) — the component itself stays for
+  no other caller today, so `TranscriptRow` stops rendering it for file rows.
+
+Render: `apps/mobile/src/ui/FileBody.tsx` (dumb): the light header line, a horizontal
+`ScrollView`, one row per line = number gutter (`sec`) · `+`/`−` sign · coloured spans, the
+row tinted `addBg`/`delBg`. `scopeColor` moves from `CodeBlock.tsx:28` to a pure
+`apps/mobile/src/syntax-color.ts` so chat blocks and tool bodies cannot drift, extended for the
+scopes html needs (`tag`, `name`, `attr`).
+
+**Copy language:** the spec quotes the mockup's Italian; the app has no i18n layer and every
+string is English (`… +N more lines`, `more lines not shown`). Shipped copy is English —
+`docs/fix/mobile-step-rail.md` made the same call for `«Thinking»` → `Thinking`.
+
+### Design — part 2
+
+Not implemented in this pass (see Execution): the design is `sessionTrust` (pure,
+`apps/mobile/src/session-trust.ts`): `podBacked(init)` = the fail-closed rule above;
+`scriptsAllowed(init)` = trust offered only when `!podBacked`; a per-`sessionKey(computerId,
+sessionId)` record (`artifact-seen-store.ts` is the pattern: versioned `SecureKV`, unknown `v`
+refuses writes), `grant` / `revoke` / `isTrusted`, and `scriptsBarLabel(trusted)` =
+`scripts on · trusted session` while a trusted page runs. Wire it: `init` already rides
+`ComputerLink` (`connection.ts:114`) → gallery → `ArtifactViewerModal` → `HtmlViewer`; the
+confirm gains «Run always in this session»; Session info's sheet row revokes.
+
+### Files to change
+
+`apps/mobile/src/highlight.ts` (transparent sub-language wrapper + a `maxChars` argument) ·
+`apps/mobile/src/syntax-color.ts` (new) · `apps/mobile/src/file-body.ts` (new) ·
+`apps/mobile/src/ui/FileBody.tsx` (new) · `apps/mobile/src/ui/CodeBlock.tsx` (use the shared
+colour) · `apps/mobile/src/tool-steps.ts` (`file`, empty command/output) ·
+`apps/mobile/src/screens/transcript/TranscriptRow.tsx` (draw `FileBody`) · tests ·
+`changelog.d/mobile-file-view.added.md`.
+
+### Failure modes
+
+| Case | Behaviour |
+|---|---|
+| Unknown / no extension | plain, exactly today (`language: null`) |
+| Over the cap | plain, one build's worth of work only |
+| A failed/denied file tool | no file body at all: today's plain output (the failure must stay legible) |
+| Non-JSON args / no path | plain body, header without a language |
+| Read with no `[path lines …]` header (whole-file read, a PDF's text) | lines shown, header `N lines` |
+| Empty content / empty patch | `null` → not tappable, today's row |
+| `.html` with `<script>` | coloured, no marker text (the `spansOf` fix) |
+| 400-line patch | `diffView`'s own bound; the remainder is the preview's `hidden` |
 
 ## Tests (minimum, red first — AGENTS §9)
 
@@ -86,5 +197,72 @@ in a trusted session. Save under `docs/feat/mobile-file-view/`. End with
 `SCREENSHOTS: <paths>` and `READY` or `NOT READY: <why>`.
 
 ## Execution
+
+*— deepseek-v3.2 (slices 1–3, stopped by the watchdog at 251 tool calls) + claude-opus-5-5 (resume: verification, mutations, this section), 2026-11-22*
+
+**Part 1 — DONE (code + tests). Part 2 — NOT STARTED** (the approved Implementation scoped
+it out: "Design — part 2: not implemented in this pass"; its files are not in *Files to
+change*, so the resume did not touch them). **Validation (simulator screenshots) — NOT DONE.**
+
+As built, in the plan's order:
+
+1. `apps/mobile/src/highlight.ts` — `spansOf` treats `<span class="language-…">` as a
+   transparent scope (pushes `""`; `pushText` maps `""` → parent/plain); `highlight()` gains
+   `maxChars` (default `HIGHLIGHT_MAX_CHARS`, so chat blocks are unchanged).
+2. `apps/mobile/src/syntax-color.ts` (new) — `scopeColor` moved out of `ui/CodeBlock.tsx`
+   verbatim, plus `doctag`, `regexp`, `symbol`, `section`, `function`, and the html scopes
+   (`tag`/`selector-*` → `sec`, `name`/`attr`/`attribute` → `kw`). `CodeBlock.tsx` imports it.
+3. `apps/mobile/src/file-body.ts` (new) — `fileBodyView(row, full)` per the Design (ext-only
+   language, `FILE_HIGHLIGHT_CAP` 2000 lines / 200 000 chars, Read/Edit/MultiEdit/Write
+   headers, one number column `newNo ?? oldNo`, preview 12 + `hidden`).
+4. `apps/mobile/src/tool-steps.ts` — `StepRowView.file?`; when present `command: []`,
+   `output: null`, `tappable: true`.
+5. `apps/mobile/src/ui/FileBody.tsx` (new, dumb) + `ui/StepNode.tsx` (`StepBody` `file` slot) +
+   `screens/transcript/TranscriptRow.tsx` (FileBody for a file row, `DiffView` otherwise; the
+   `diff-<callId>` testID moves onto `FileBody`).
+6. Tests: `test/file-body.test.ts`, `test/file-body-render.test.ts`, `test/syntax-color.test.ts`
+   (new); `test/highlight.test.ts`, `test/tool-step-view.test.ts` (extended).
+7. `changelog.d/mobile-file-view.added.md`.
+
+**Drift from Implementation:** none in part 1. `scopeColor` got a few non-html scopes too
+(`doctag`, `regexp`, `symbol`, `section`, `function`) — mapped to the colours their siblings
+already use; chat blocks change only for those scopes. Diff lines are highlighted **per line**
+(a hunk is fragments; a multi-line construct split across lines may colour imperfectly —
+documented in `file-body.ts`). A permission-pending Edit row is not `ok`, so it keeps the old
+`DiffView` (and `diff-<callId>`) until it completes — the `08-permission` flow is unaffected.
+
+**Load-bearing re-check (resume, on the fixed code)** — `.tentacle/tmp/mobile-file-view/probe2.ts`
+highlights an html body with a `<style>` and a `<script>`:
+
+```
+label: xml leak: false roundtrip: true
+scopes: tag,name,plain,selector-pseudo,attr,number,keyword
+```
+
+(The pre-fix leak is the Implementation's probe above: `<span class="language-css">` as text.)
+Red-first: DeepSeek's run did not record red output; the resume substitutes the mutation table
+below (each target reverted after its run, tree verified unchanged).
+
+**Mutations** (`.tentacle/tmp/mobile-file-view/mutate.ts`, the 5 narrow test files):
+
+```
+M1 sub-language wrapper read as text: 4 fail — .html IS coloured, script and style included | an html <style> body is coloured, and no marker text is emitted
+M2 number column old-first: 1 fail — ONE number column: the new number; a removed line keeps its old one
+M3 failed row gets a body: 2 fail — a FAILED file tool keeps today's plain output | a denied file tool
+M4 cap ignored: 1 fail — over the line cap
+M5 raw output kept: 1 fail — a file step carries its coloured body and NO raw result line
+M6 language auto-detected for unknown ext: 4 fail — an unknown extension is plain… | no extension at all is plain
+M7 preview never cuts: 2 fail — collapsed: the first lines, and the rest counted | `full` reaches the file body's preview
+M8 write-new header lost: 1 fail — a created file says `LANG · new file`
+```
+
+**Local checks:** narrow files 99 pass / 0 fail; `apps/mobile/test/` 4371 pass / 0 fail;
+`tsc -p apps/mobile` clean; `biome check` on the 13 touched files clean. Full gate: left to the
+orchestrator's script.
+
+**Open (decision needed):** part 2 (session script trust) is designed above but unbuilt and
+unapproved for code — the owner bundled it into this job, so either approve its Files list for
+a follow-up executor or split it into its own task. Validation screenshots need a simulator run.
+NOT READY: part 2 not built; no screenshots.
 
 ## Review

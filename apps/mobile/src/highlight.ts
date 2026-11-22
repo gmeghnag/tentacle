@@ -130,10 +130,17 @@ export function languageOf(lang: string | null | undefined): keyof typeof LANGUA
  * Highlight `text` as `lang`. Unknown/absent/over-long → one plain span (no
  * error: `highlight()` would throw on an unknown language, so the gate is
  * `languageOf` + `getLanguage` — never a `try`/`catch` around a parse).
+ *
+ * `maxChars` overrides the size gate: a file body's cap is the TUI's
+ * (`READ_HIGHLIGHT_CAP`, 200 KB — `file-body.ts`), not a chat block's 20 000.
  */
-export function highlight(text: string, lang: string | null | undefined): Highlighted {
+export function highlight(
+  text: string,
+  lang: string | null | undefined,
+  maxChars: number = HIGHLIGHT_MAX_CHARS,
+): Highlighted {
   const name = languageOf(lang);
-  if (name === null || text === "" || text.length > HIGHLIGHT_MAX_CHARS) {
+  if (name === null || text === "" || text.length > maxChars) {
     return { language: null, spans: [{ text, scope: "plain" }] };
   }
   ensureRegistered();
@@ -146,47 +153,68 @@ export function highlight(text: string, lang: string | null | undefined): Highli
 
 /**
  * `highlight()`'s HTML output → spans. Its own emitter is not used (it escapes
- * and nests `<span class="hljs-x">`), so this walks the tags it actually emits:
- * every node is opened by `<span class="hljs-…">` and closed by `</span>`, and
- * text between them is HTML-escaped by highlight.js itself.
+ * and nests `<span class="hljs-x">`), so this walks the tags it actually emits.
+ * Two wrappers exist, and only one carries a scope:
+ *
+ * - `<span class="hljs-…">` — a token scope (closed by `</span>`);
+ * - `<span class="language-…">` — a SUB-LANGUAGE body, which the `xml` grammar
+ *   emits around a `<script>`/`<style>`'s contents (highlight.js 11.12,
+ *   `lib/languages/xml.js:164,177`). It is TRANSPARENT: it pushes an empty
+ *   scope, so its inner `hljs-*` tokens colour normally and the wrapper itself
+ *   never reaches the text. (Reading it as text printed
+ *   `<span class="language-css">` into the page — the `.html` bug,
+ *   docs/feat/mobile-file-view.md.)
+ *
+ * Text between tags is HTML-escaped by highlight.js itself.
  */
 export function spansOf(html: string): readonly Span[] {
+  const scopes: string[] = [];
   const spans: Span[] = [];
-  const stack: string[] = [];
+  const HLJS_OPEN = '<span class="hljs-';
+  const SUB_OPEN = '<span class="language-';
   let at = 0;
   while (at < html.length) {
-    const open = html.indexOf('<span class="hljs-', at);
+    const hljs = html.indexOf(HLJS_OPEN, at);
+    const sub = html.indexOf(SUB_OPEN, at);
+    const open = hljs === -1 ? sub : sub === -1 ? hljs : Math.min(hljs, sub);
     const close = html.indexOf("</span>", at);
     if (open === -1 && close === -1) {
-      pushText(spans, unescapeHtml(html.slice(at)), stack);
+      pushText(spans, unescapeHtml(html.slice(at)), scopes);
       break;
     }
     if (open !== -1 && (close === -1 || open < close)) {
-      pushText(spans, unescapeHtml(html.slice(at, open)), stack);
-      const end = html.indexOf('"', open + '<span class="hljs-'.length);
-      if (end === -1) {
+      pushText(spans, unescapeHtml(html.slice(at, open)), scopes);
+      const isHljs = open === hljs;
+      const prefix = isHljs ? HLJS_OPEN : SUB_OPEN;
+      const after = isHljs ? html.indexOf(">", open + prefix.length) : html.indexOf(">", open);
+      if (after === -1) {
         break; // malformed output: keep what was read
       }
-      stack.push(html.slice(open + '<span class="hljs-'.length, end));
-      const after = html.indexOf(">", end);
-      if (after === -1) {
-        break;
+      if (isHljs) {
+        const end = html.indexOf('"', open + prefix.length);
+        if (end === -1 || end > after) {
+          break;
+        }
+        scopes.push(html.slice(open + prefix.length, end));
+      } else {
+        scopes.push(""); // a sub-language body: transparent (its own tokens colour)
       }
       at = after + 1;
       continue;
     }
-    pushText(spans, unescapeHtml(html.slice(at, close)), stack);
-    stack.pop();
+    pushText(spans, unescapeHtml(html.slice(at, close)), scopes);
+    scopes.pop();
     at = close + "</span>".length;
   }
   return spans;
 }
 
-function pushText(into: Span[], text: string, stack: readonly string[]): void {
+function pushText(into: Span[], text: string, scopes: readonly string[]): void {
   if (text === "") {
     return;
   }
-  const scope = stack.length === 0 ? "plain" : (stack[stack.length - 1] as string);
+  const innermost = scopes[scopes.length - 1];
+  const scope = innermost === undefined || innermost === "" ? "plain" : innermost;
   const last = into[into.length - 1];
   if (last !== undefined && last.scope === scope) {
     into[into.length - 1] = { text: last.text + text, scope };

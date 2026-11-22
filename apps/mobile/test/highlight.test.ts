@@ -100,3 +100,40 @@ describe("the HTML → spans walker", () => {
     expect(unescapeHtml("&lt;a&gt; &quot;b&quot; &amp;")).toBe('<a> "b" &');
   });
 });
+
+/**
+ * `subLanguage` (the `xml` grammar's `<script>`/`<style>`) does not wrap its
+ * inner tokens in `hljs-*`: highlight.js emits a bare
+ * `<span class="language-css">` / `<span class="language-javascript">` and puts
+ * ordinary `hljs-*` spans INSIDE it (highlight.js 11.12,
+ * `lib/languages/xml.js:164,177`). The walker only knew `class="hljs-`, so that
+ * wrapper used to be printed as literal TEXT — the page showed
+ * `<span class="language-css">` where the colour should start.
+ */
+describe("a sub-language wrapper is transparent, never text", () => {
+  test("an html <style> body is coloured, and no marker text is emitted", () => {
+    const html = "<style>\n:root { color: red; }\n</style>";
+    const spans = highlight(html, "html").spans;
+    // The property that kills the bug: no wrapper markup survives into the text.
+    expect(spans.map((span) => span.text).join("")).toBe(html);
+    // …and the CSS inside really was tokenized by the sub-language (a rule's
+    // selector and property are css's scopes, which the xml grammar has none of).
+    expect(spans.map((span) => span.scope)).toContain("attribute");
+    expect(spans.map((span) => span.scope)).toContain("selector-pseudo");
+  });
+
+  test("a direct walk: the wrapper's own class is not a scope and not text", () => {
+    expect(
+      spansOf('<span class="language-css"><span class="hljs-number">1</span>px</span>'),
+    ).toEqual([
+      { text: "1", scope: "number" },
+      { text: "px", scope: "plain" },
+    ]);
+  });
+
+  test("a <script> body keeps javascript's own scopes", () => {
+    const spans = highlight("<script>\nconst a = 1;\n</script>", "html").spans;
+    expect(spans.map((span) => span.text).join("")).toBe("<script>\nconst a = 1;\n</script>");
+    expect(spans.map((span) => span.scope)).toContain("keyword");
+  });
+});
