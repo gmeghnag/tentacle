@@ -410,6 +410,39 @@ taken light then dark (`_shot.yaml`). Run: `scripts/e2e-gate.sh 0FA4B51F-A0E3-42
 - Minor: the body's header says `HTML`, the mockup's MultiEdit said `JavaScript in HTML` — the
   spec (#4) only asks for `LANG`, so this is consistent with it.
 
+### Validation (part 1)
+
+*— claude-opus-5-5, 2026-11-22 — RETAKE after Fix round 1 (html diffs), simulator `0FA4B51F-…`, iOS 26, Release build*
+
+**How:** the same flow `41-file-view-shots.yaml` and fixture, unchanged (they already shoot
+Read / Edit / MultiEdit / Write, collapsed + tapped open, light + dark via `_shot.yaml`).
+`scripts/e2e-gate.sh 0FA4B51F-A0E3-421B-BE66-CE29EF45213D --only 41-file-view-shots` →
+`GATE PASS — 1 passed, 0 failed (97 s)`. The 14 PNGs in `docs/feat/mobile-file-view/` were
+overwritten with this run's (same names): `41-collapsed`, `41-write-open`, `41-read-open`,
+`41-read-full`, `41-edit-open`, `41-multiedit-open`, `41-multiedit-full`, each `-light`/`-dark`.
+
+**What I saw (vs the mockup, variant B):**
+- **Round 3's HIGH is fixed on device.** `41-edit-open`: the `// The scenes…` comment, `export const SCENES`,
+  the keys/strings/numbers of the `+`/`−` rows and `const UFO0/UFO1 … =>` are coloured as JS,
+  both themes, same colours as the Read. `41-write-open`: the `<style>` lines are coloured CSS
+  (comment, `--bg`/`--fg` custom properties, hex values). Diff bodies now match the mockup's look.
+- Holds (as in the first pass): header said once on the step line; one light body line
+  (`HTML · new file`, `lines 1–40 of 71 · HTML`, `lines 26–37 · HTML`, `lines 34–78 · HTML`);
+  one number column; `+`/`−` sign column + add/del tints in both themes; preview 12 lines +
+  `… N more lines · tap to see all`; tap → full view. Read fully coloured (`41-read-full`).
+- **Differs from the mockup's MultiEdit (known, documented limit):** the MultiEdit's FIRST hunk
+  (`41-multiedit-open`, lines 34–50: `const UFO0`, `const BANNER`/`NOTIF_A`, `function draw`) is
+  plain, while variant B shows those very JS lines coloured. It is Fix round 1's documented
+  limit (that hunk has no `<script>`/`</script>` tag, the patch carries no context). The
+  second hunk (68–78, with `</script>`) is coloured (`41-multiedit-full`). So the MultiEdit shot
+  — the one the owner compares with variant B — looks half-done in its preview; the owner
+  should know this before approving.
+- Minor (still open from the first pass): no separator between hunks in `41-multiedit-full`
+  (`50 → 68`, then a removed `68` right after context `71`).
+- Minor, spec #4: the Read step line shows a duration (`2 ms`); #4 says no duration for
+  Read/Edit/Write (Edit/Write indeed show none).
+- Not code: the session title/first bubble `compose` is the harness's shared session, not this feature.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22 (fresh context; same model as the Execution resume, different from the DeepSeek executor)*
