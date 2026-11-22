@@ -412,3 +412,16 @@ part-2 pod exclusion (no code — #3).
 Executor behaviour: DeepSeek stopped at the watchdog without red-first evidence; the resume
 substituted a mutation table and was honest about part 2 / screenshots. The Failure-modes table
 overstated the 400-line case without a test behind it.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-22 (same reviewer context; diff reviewed `50ceb0ef..HEAD`: bc9a56b6 code + 00f43294 kit-data/doc)*
+
+**Verdict: PASS for part 1's code.** Merge still depends on the owner deciding #3 (below).
+
+- **#1 spill — FIXED.** `file-body.ts` `readBody` returns `null` when `row.spill` is set (the row keeps today's plain output, banner visible). Mutation (`!== undefined` → `=== null`) → 2 fail (`a spilled read is not file content …`). Reverted.
+- **#2 400-line bound — FIXED.** `diffView().hidden` is passed through `preview(…, bound)` into `hidden`, both collapsed and full. Repro: a 600-line Write, `full` → 400 lines, `hidden 202`. Mutation (`bound` → `0`) → 2 fail. Reverted. (202, not 200: `diffView`'s count includes the `---`/`+++` lines, `diff-view.ts:137`. That predates this task.)
+- **#4 new-file label — FIXED.** `CREATED_HUNK` `/^@@ -0,0 …/m`. Confirmed against the real `createTwoFilesPatch`: creation → `@@ -0,0 +1,2 @@`, append → `@@ -1,1 +1,2 @@`. Mutation (back to `removed === 0`) → 1 fail. Reverted.
+- **#3 part 2 + screenshots — ESCALATED, not fixed.** This is the owner's call, not the executor's: either split part 2 into its own task (with a TODO entry) or approve its Files list. Do not merge this branch as "the job" until that is recorded.
+- After the mutations the tree was byte-identical (`git status` clean). The 3 touched test files: 84 pass / 0 fail. `bun run lint`: clean, 2264 files. `bun run typecheck`: clean. Full `bun test` not re-run here.
+- Nit (not blocking): in the full view with `hidden > 0`, which only happens when a diff hits its bound, `ui/FileBody.tsx:113` still says `· tap to see all`, but the Pressable is disabled (`:54`). The count is honest; the promise is not. Say `not shown` when `full`.
