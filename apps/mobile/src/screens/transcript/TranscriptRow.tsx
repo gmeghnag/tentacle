@@ -649,6 +649,7 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
         name={view.name}
         subtitle={view.subtitle}
         subline={view.subline}
+        exitSuffix={view.exitSuffix}
         shimmer={view.shimmer}
         trailing={view.trailing}
         trailingRed={view.trailingRed}

@@ -65,7 +65,7 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "29-tool-rows-collapsed"
-# One step open: the body (thought, command, `⎿` result) on tap.
+# One step open: the body (the command, the result) on tap.
 - tapOn:
     id: "tool-mocked-.*-ok"
     index: 0

@@ -34,3 +34,25 @@ export function runningDotLook(reduceMotion: boolean): {
 } {
   return { shape: "dot", fill: "accent", blink: !reduceMotion };
 }
+
+/**
+ * The REASONING node (docs/fix/mobile-step-rail.md, owner decision 4): the same
+ * dot in the same place as a tool's, so the thread has ONE shape and reasoning
+ * reads by SHAPE, not by a glyph.
+ *
+ * - `thinking-live` (still thinking): a FILLED dot in the app accent — the
+ *   running tool's own token and its own blink clock (never a second timer).
+ *   Reduce Motion ⇒ the same dot, steady.
+ * - `thought-done` (`Thought · 2 s`): a RING, outline only, in `thought` — a dim
+ *   "disabled" grey (a theme token, light and dark), so a finished thought steps
+ *   back behind the actions.
+ */
+export function thoughtLook(live: boolean): {
+  readonly node: "thinking-live" | "thought-done";
+  readonly fill: "accent" | null;
+  readonly ring: "thought" | null;
+} {
+  return live
+    ? { node: "thinking-live", fill: "accent", ring: null }
+    : { node: "thought-done", fill: null, ring: "thought" };
+}

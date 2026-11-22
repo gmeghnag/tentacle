@@ -20,6 +20,7 @@ import { FLASH_MS } from "../../apps/mobile/src/hub-flash.ts";
 import * as motion from "../../apps/mobile/src/motion.ts";
 import { NOTICE_GLYPHS } from "../../apps/mobile/src/notice-group.ts";
 import { ARM_MS } from "../../apps/mobile/src/permission-sheet.ts";
+import * as stepRail from "../../apps/mobile/src/step-rail.ts";
 import { FIGTREE_FACES, figtreeFace } from "../../apps/mobile/src/theme-beta.ts";
 import * as theme from "../../apps/mobile/src/theme.ts";
 import {
@@ -57,6 +58,7 @@ const THINKING_TSX = "packages/tui/src/components/Thinking.tsx";
 /** Files whose blob sha the kit records (the modules above, plus the manifest's). */
 const HASHED = [
   "apps/mobile/src/theme.ts",
+  "apps/mobile/src/step-rail.ts",
   "apps/mobile/src/theme-beta.ts",
   "apps/mobile/src/motion.ts",
   "apps/mobile/src/thinking-motion.ts",
@@ -289,6 +291,7 @@ export async function loadInput(root: string = ROOT): Promise<GenInput> {
       "apps/mobile/src/hub-fan.ts": hubFan as unknown as Record<string, unknown>,
       "apps/mobile/src/floating-button.ts": floatingButton as unknown as Record<string, unknown>,
       "apps/mobile/src/drawer-nav.ts": drawerNav as unknown as Record<string, unknown>,
+      "apps/mobile/src/step-rail.ts": stepRail as unknown as Record<string, unknown>,
     },
     files,
   };
