@@ -1,0 +1,358 @@
+<title>Entrate di Polpetto</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;600&display=swap">
+<style>
+/* Layout: a wrap of phone cards; each card = title, one-line story, live canvas of the empty session, replay button. */
+:root {
+  --bg: #eceef0; --fg: #1c2125; --muted: #5c646c; --line: #d2d7db; --new: #13809a;
+  --sans: "Figtree", -apple-system, system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0f1214; --fg: #e5e8ea; --muted: #98a0a7; --line: #283036; --new: #3cc0db; color-scheme: dark } }
+:root[data-theme="dark"] { --bg: #0f1214; --fg: #e5e8ea; --muted: #98a0a7; --line: #283036; --new: #3cc0db; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.45 var(--sans); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 22px 48px; }
+main { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+h1 { font-size: 22px; margin: 0; }
+.lead { margin: 4px 0 0; color: var(--muted); max-width: 75ch; }
+.bar { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); background: transparent; color: var(--fg); border-radius: 8px; cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--new); outline-offset: 2px; }
+.grid { display: flex; flex-wrap: wrap; gap: 22px; }
+.card { width: 260px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.card h2 { font-size: 15.5px; margin: 0; display: flex; gap: 8px; align-items: baseline; }
+.card h2 .n { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--new); font-weight: 600; }
+.card p { margin: 0; color: var(--muted); font-size: 13.5px; min-height: 6em; }
+canvas { width: 260px; height: 467px; border-radius: 28px; display: block; background: #161a1e; }
+.notes { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; max-width: 75ch; }
+.notes h2 { font-size: 16px; margin: 0; }
+.notes ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
+</style>
+<main>
+  <div>
+    <h1>Entrate e uscite di Polpetto (iPhone, sessione vuota)</h1>
+    <p class="lead">Variante A (scelta): Polpetto sopra il campo di scrittura. Qui al posto del solo saltello ci sono le nove scenette scelte, tutte «nuovo». Ogni scenetta gira in loop solo nel mockup; nell'app partirebbe una volta. A ogni giro cambia tavolozza.</p>
+  </div>
+  <div class="bar">
+    <button id="all">Rigioca tutte</button>
+    <label><input type="checkbox" id="rm"> Riduci movimento</label>
+  </div>
+  <div class="grid" id="grid"></div>
+  <div class="notes">
+    <h2>Deciso (22/11)</h2>
+    <ul>
+      <li>Otto scenette: razzo e UFO approvati il 22/11, poi mimetismo, palloncino (più grande) ed elicottero (stile B, da lavoro). Scartati: volo dell'angelo, teletrasporto, inchiostro, amo, tuffo, bolla.</li>
+      <li>Dopo l'uscita lo schermo resta vuoto fino alla prossima sessione vuota.</li>
+      <li>A ogni sessione vuota parte una scenetta a caso, mai la stessa due volte di fila.</li>
+      <li>Con «Riduci movimento» resta fermo al centro, senza entrata né uscita.</li>
+      <li>Il primo messaggio interrompe la scenetta: Polpetto sparisce subito, come oggi.</li>
+    </ul>
+  </div>
+</main>
+<script>
+// Scene in iPhone points (390 wide); Polpetto pixel = 6 pt (grid unit).
+const W = 390, H = 700, U = 6, COMPOSER_Y = 610, HOME = { x: 28, y: 80 };
+const TONES = {
+  soft: { K: "#7B3FC0", E: "#3E1A5E", F: "#B387EA", S: "#A274DE", B: "#DDBFF8" },
+  logo: { K: "#6E36AE", E: "#3E1A5E", F: "#A267DB", S: "#9258CF", B: "#CFA8F3" },
+  glow: { K: "#C9A6F2", E: "#3E1A5E", F: "#8E4BC4", S: "#8143B8", B: "#B583E0" },
+  cyan: { K: "#0E8AA8", E: "#083A47", F: "#5FE0F2", S: "#3FCFE6", B: "#B7F3FB" },
+  teal: { K: "#14857A", E: "#0A3B36", F: "#5CD6C4", S: "#40C2AF", B: "#B5EEE4" },
+  coral: { K: "#C2475A", E: "#5A1622", F: "#F58C93", S: "#EC7480", B: "#FFC6C2" },
+  mint: { K: "#3C9A5C", E: "#163D24", F: "#8FE0A6", S: "#73D28E", B: "#CFF5D9" },
+  amber: { K: "#B7791F", E: "#4A2E07", F: "#F7C35C", S: "#EEB043", B: "#FFE3A8" },
+  sky: { K: "#3A6FD0", E: "#13285A", F: "#8DB4F7", S: "#73A0F0", B: "#CFE0FF" },
+};
+const NAMES = Object.keys(TONES);
+const EXTRA = { C: "#E6E9EC", L: "#8d969e", T: "#B98B5B", W: "#E8EAED", Q: "#9fdcea", H: "#cfe3ea", G: "#ffffff", A: "#F7B23C", Y: "#FFF1C9", N: "#3d3550", M: "#544a6b", R: "#E5677A" };
+
+// The owner's 9×9 drawing and its frames.
+const BMP = ["..KKKKK..", ".KSFFFSK.", "KSFFFFFSK", "KFEFFFEFK", "KFEFFFEFK", "KBBFSFBBK", ".KFFFFFK.", "KSSKSKSSK", ".KK.K.KK."];
+function body({ eyes = "open", legs = 0, squash = false } = {}) {
+  const r = BMP.slice();
+  if (eyes === "closed") r[3] = "KFFFFFFFK";
+  if (eyes === "left") { r[3] = r[4] = "KEFFFEFFK"; }
+  if (eyes === "right") { r[3] = r[4] = "KFFEFFFEK"; }
+  if (eyes === "up") r[4] = "KFFFFFFFK";
+  if (legs === 1) r[8] = "KK..K..KK";
+  if (legs === 2) { r[7] = ".KSKSKSK."; r[8] = ".K.K.K.K."; }
+  return squash ? [".........", ...r.slice(0, 8)] : r;
+}
+const CANOPY = ["....CCCCC....", "..CCSSCSSCC..", ".CSSCCCCCSSC.", "CCCCCCCCCCCCC", "L.....L.....L", ".L....L....L.", "..L...L...L..", "..L...L...L.."];
+const BOARD = ["T.........T", ".TTTTTTTTT.", "..W.....W.."];
+
+const ROCKET = ["......K......", ".....KKK.....", "....KKKKK....", "....CCCCC....", "...CCCCCCC...", "...CCCCCCC...", "...CCQQQCC...", "...CQQQQQC...", "...CQQQQQC...", "...CCQQQCC...", "...CCCCCCC...", "...CCCCCCC...", "...CKKKKKC...", "...CCCCCCC...", "...CCCCCCC...", "..KCCCCCCCK..", ".KKCCCCCCCKK.", "KKKCCCCCCCKKK", "KKK.CCCCC.KKK", "KK...KKK...KK"];
+const ROCKET_IN = ROCKET.map((r, i) => ({ 6: "...CCFFFCC...", 7: "...CFEFEFC...", 8: "...CFFFFFC...", 9: "...CCFFFCC..." })[i] ?? r);
+const FLAME = [["....AAAAA....", ".....AYA.....", ".....AYA.....", "......A......", "......A......"], ["....AYAYA....", "....AAAAA....", ".....AAA.....", "......A......"]];
+const FLAME_S = [".....AYA.....", "......A......"];
+const UFO0 = ["....HHHHHHH....", "...HGGHHHHHH...", "..HGHHHHHHHHH..", ".LLLLLLLLLLLLL.", "LCYCCYCCYCCYCCL", ".LLLLLLLLLLLLL.", "...LL.....LL..."];
+const UFO1 = UFO0.map((r, i) => (i === 4 ? "LCCYCCYCCYCCYCL" : r));
+
+const BALLOON = ["..RRRRR..", ".RGGRRRR.", "RGGRRRRRR", "RGRRRRRRR", "RRRRRRRRR", "RRRRRRRRR", "RRRRRRRRR", ".RRRRRRR.", "..RRRRR..", "...RRR...", "....R...."];
+
+const padRows = (rows) => { const w = Math.max(...rows.map((r) => r.length)); return rows.map((r) => r.padEnd(w, ".")); };
+const rotorB = (r0) => { const i = r0.indexOf("T"), j = r0.lastIndexOf("T"), q = Math.round((j - i) / 4); return [...r0].map((c, k) => (c === "T" && (k < i + q || k > j - q) ? "." : c)).join(""); };
+const HELI_B = padRows(["....TTTTTTTTTTTTTTTTTT", "............K", "..........KKKK", "....KKKKKKSSSSKK............KK", "...KHHHHKSSSSSSSK..........KSK", "..KHHGHHKSKKKSSSSKKKKKKKKKKKSK", "..KHHHHHKSKQKSSSSSSSSSSSSSSKK", ".KFFFFFFKSKQKSSSKKKKKKKKKKK", ".KFAFFAFKSKKKSSK", "..KKKKKKKKKKKKKK", "....L.......L", "..LLLLLLLLLLLLLL"]);
+const HELI_B_IN = HELI_B.map((r, i) => (i === 5 ? "..KFEFEFK" + r.slice(9) : i === 6 ? "..KFFFFFK" + r.slice(9) : r));
+function heliScene(k, name, story, SPR, SPR_IN) {
+  const ROT_B = rotorB(SPR[0]);
+  return {
+    k, name, story, dur: 9.6,
+    frame(t) {
+      const ops = [], HX = 30, HY = 77;
+      let hx = HX, hy = HY;
+      const inside = t < 3.0;
+      if (t < 2.6) { hy = Math.round(lerp(-15, HY, ease.out(t / 2.6))); hx = HX + Math.round(Math.sin(t * 2.5) * (1 - t / 2.6)); }
+      else if (t >= 4.4) { const p = ease.in(seg(t, 4.4, 6.2)); hy = Math.round(lerp(HY, -16, p)); hx = Math.round(lerp(HX, 58, p)); }
+      if (t >= 3.0 && t < 3.6) { const p = seg(t, 3.0, 3.6); ops.push({ rows: body({ eyes: "left" }), x: Math.round(lerp(33, 18, p)), y: Math.round(HOME.y - Math.sin(p * Math.PI) * 5) }); }
+      else if (t >= 3.6 && t < 6.4) { const eyes = blinkAt(t, 4.0) || blinkAt(t, 5.9) ? "closed" : t >= 4.6 ? "up" : "right"; ops.push({ rows: body({ eyes }), x: 18, y: HOME.y }); }
+      else if (t >= 6.4) { const step = Math.floor((t - 6.4) / .1); ops.push({ rows: body({ eyes: "left", legs: Math.floor(step / 2) % 2 }), x: 18 - step, y: HOME.y }); }
+      for (const t0 of [2.4, 4.4]) {
+        const a = t - t0; if (a < 0 || a > .7) continue;
+        for (const d of [-1, 1]) ops.push({ rows: ["LL"], x: HX + 9 + d * Math.round(9 + a * 10), y: HY + 11 - Math.round(a * 2), alpha: (1 - a / .7) * .7 });
+      }
+      if (hy > -16) {
+        const rows = (inside ? SPR_IN : SPR).slice();
+        if (Math.floor(t / .06) % 2) rows[0] = ROT_B;
+        ops.push({ rows, x: hx, y: hy });
+      }
+      return ops;
+    },
+  };
+}
+const ease = { out: (p) => 1 - (1 - p) ** 3, in: (p) => p ** 3, io: (p) => (p < .5 ? 4 * p ** 3 : 1 - (-2 * p + 2) ** 3 / 2) };
+const clamp = (v) => Math.max(0, Math.min(1, v));
+const lerp = (a, b, p) => a + (b - a) * p;
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const blinkAt = (t, ...at) => at.some((a) => t >= a && t < a + .15);
+
+// Each scene: duration + frame(t) → list of draw ops {rows, x, y, alpha} (grid units), plus behind-composer flag.
+const SCENES = [
+  {
+    k: "para", name: "Paracadute",
+    story: "Scende piano dall'alto ondeggiando, atterra con un piccolo schiacciamento, il paracadute cade. Sbatte le palpebre, guarda di lato e se ne va camminando.",
+    dur: 10.6,
+    frame(t, run) {
+      const dir = run % 2 ? -1 : 1, ops = [];
+      if (t < 3.2) {
+        const p = ease.out(t / 3.2), x = HOME.x + Math.round(2 * Math.sin(t * 3.9)) * (1 - p) ** .5, y = lerp(-10, HOME.y, p);
+        ops.push({ rows: CANOPY, x: x - 2, y: y - 8 }, { rows: body(), x, y });
+        return ops;
+      }
+      const fall = seg(t, 3.2, 3.9);
+      if (fall < 1) ops.push({ rows: CANOPY.slice(0, 4), x: HOME.x - 2 + dir * -Math.round(fall * 4), y: HOME.y - 8 + Math.round(fall * 9), alpha: 1 - fall });
+      if (t < 3.4) return [...ops, { rows: body({ squash: true }), x: HOME.x, y: HOME.y }];
+      if (t < 6.0) {
+        const eyes = blinkAt(t, 4.5) ? "closed" : t > 5.3 ? (dir > 0 ? "right" : "left") : "open";
+        return [...ops, { rows: body({ eyes }), x: HOME.x, y: HOME.y }];
+      }
+      const step = Math.floor((t - 6.0) / .11);
+      return [{ rows: body({ eyes: dir > 0 ? "right" : "left", legs: Math.floor(step / 2) % 2 }), x: HOME.x + dir * step, y: HOME.y }];
+    },
+  },
+  {
+    k: "skate", name: "Skateboard",
+    story: "Entra da sinistra sullo skate e frena al centro. Si guarda intorno, fa un saltello e riparte veloce, uscendo a destra.",
+    dur: 6.8,
+    frame(t) {
+      let x, y = HOME.y, eyes = "open";
+      if (t < 1.8) x = Math.round(lerp(-13, HOME.x, ease.out(t / 1.8)));
+      else if (t < 4.6) { x = HOME.x; eyes = blinkAt(t, 2.9) ? "closed" : t > 3.7 ? "right" : t > 3.2 ? "left" : "open"; }
+      else if (t < 4.85) { x = HOME.x; y = HOME.y - 1; eyes = "right"; }
+      else { x = Math.round(lerp(HOME.x, 68, ease.in(seg(t, 4.85, 6.3)))); eyes = "right"; }
+      const by = t >= 4.6 && t < 4.85 ? HOME.y - 1 : HOME.y;
+      return [{ rows: BOARD, x: x - 1, y: by + 8 }, { rows: body({ eyes }), x, y: y }];
+    },
+  },
+  {
+    k: "peek", name: "Sbuca dal campo",
+    story: "Spunta da dietro il campo di scrittura, guarda a sinistra e a destra, saluta con un tentacolo e torna giù.",
+    dur: 5.8,
+    behind: true,
+    frame(t) {
+      const up = 96, down = 103;
+      let y = t < .7 ? Math.round(lerp(down, up, ease.out(t / .7))) : t < 4.6 ? up : Math.round(lerp(up, down, ease.in(seg(t, 4.6, 5.2))));
+      const eyes = t > 1.0 && t < 1.6 ? "left" : t > 1.6 && t < 2.2 ? "right" : blinkAt(t, 2.6) ? "closed" : "open";
+      const ops = [{ rows: body({ eyes }), x: HOME.x, y }];
+      if (t > 3.0 && t < 4.3) {
+        const up2 = Math.floor((t - 3.0) / .22) % 2;
+        ops.push({ rows: up2 ? [".K", "K."] : ["..", "KK"], x: HOME.x + 9, y: y + 2 });
+      }
+      return ops;
+    },
+  },
+  {
+    k: "swim", name: "Nuota",
+    story: "Arriva nuotando dal basso a sinistra a colpi di tentacoli, con qualche bolla. Galleggia un momento al centro e riparte in alto a destra.",
+    dur: 8.6,
+    behind: true,
+    frame(t) {
+      const inPath = [[-12, 112], [HOME.x, HOME.y]], outPath = [[HOME.x, HOME.y], [70, -14]];
+      const ops = [];
+      const swim = (t0, path) => {
+        const k = Math.min(3, Math.floor((t - t0) / .7)), tp = (t - t0 - k * .7) / .7;
+        const p = (k + ease.out(clamp(tp / .4))) / 4;
+        return { x: Math.round(lerp(path[0][0], path[1][0], p)), y: Math.round(lerp(path[0][1], path[1][1], p)), legs: tp < .4 ? 0 : 2 };
+      };
+      let s;
+      if (t < 2.8) s = swim(0, inPath);
+      else if (t < 5.4) s = { x: HOME.x, y: HOME.y + (Math.floor((t - 2.8) / .6) % 2), legs: 0, eyes: blinkAt(t, 4.0) ? "closed" : "open" };
+      else s = { ...swim(5.4, outPath), eyes: "right" };
+      for (const p0 of [0, .7, 1.4, 2.1, 5.4, 6.1, 6.8, 7.5]) {
+        const a = t - p0; if (a < 0 || a > 1.2) continue;
+        const src = p0 < 2.8 ? { x: lerp(-12, HOME.x, p0 / 2.8), y: lerp(112, HOME.y, p0 / 2.8) } : { x: lerp(HOME.x, 70, (p0 - 5.4) / 2.8), y: lerp(HOME.y, -14, (p0 - 5.4) / 2.8) };
+        ops.push({ rows: ["Q"], x: Math.round(src.x + 3 + Math.sin(a * 6) ), y: Math.round(src.y + 9 - a * 9), alpha: 1 - a / 1.2 });
+      }
+      ops.push({ rows: body({ eyes: s.eyes || "open", legs: s.legs }), x: s.x, y: s.y });
+      return ops;
+    },
+  },
+  {
+    k: "rocket", name: "Razzo",
+    story: "Entra camminando, guarda il razzo e ci salta dentro: dal finestrino spunta la sua faccina. Il razzo trema, si accende e parte verso l'alto uscendo dallo schermo, lasciando un po' di fumo.",
+    dur: 7.4,
+    frame(t) {
+      const RX = 40, RY = 69, ops = [];
+      let rx = RX, ry = RY, inside = false, flame = null;
+      if (t < 2.0) {
+        const step = Math.floor(t / .06);
+        ops.push({ rows: body({ eyes: "right", legs: Math.floor(step / 2) % 2 }), x: Math.min(22, -10 + step), y: HOME.y });
+      } else if (t < 3.0) {
+        ops.push({ rows: body({ eyes: blinkAt(t, 2.5) ? "closed" : "right" }), x: 22, y: HOME.y });
+      } else if (t < 3.8) {
+        const p = seg(t, 3.0, 3.8);
+        ops.push({ rows: body({ eyes: "right" }), x: Math.round(lerp(22, RX + 2, p)), y: Math.round(HOME.y - Math.sin(p * Math.PI) * 8) });
+      } else inside = true;
+      if (t >= 3.8 && t < 4.8) { rx = RX + (Math.floor(t / .07) % 2); flame = FLAME_S; }
+      if (t >= 4.8) { ry = Math.round(lerp(RY, -34, ease.in(seg(t, 4.8, 6.8)))); flame = FLAME[Math.floor(t / .08) % 2]; }
+      ops.push({ rows: inside ? ROCKET_IN : ROCKET, x: rx, y: ry });
+      if (flame) ops.push({ rows: flame, x: rx, y: ry + 20 });
+      if (t >= 4.8) {
+        const a = t - 4.8, f = Math.max(0, 1 - a / 2.4) * .7;
+        for (const d of [-1, 0, 1]) ops.push({ rows: ["LLL", "LLL"], x: RX + 5 + d * Math.round(a * 6), y: RY + 19 - Math.round(a * (d ? 1 : 2.5)), alpha: f });
+      }
+      return ops;
+    },
+  },
+  {
+    k: "ufo", name: "UFO",
+    story: "Polpetto è al suo posto. In alto arriva un UFO che si ferma sopra di lui: Polpetto si accorge, il raggio di luce lo smaterializza riga per riga e l'UFO se ne va con il bottino.",
+    dur: 6.2,
+    frame(t) {
+      const ops = [], cx = HOME.x + 4, UY = 22;
+      const parked = HOME.x + 4 - 7;
+      let ux, uy = UY + (Math.floor(t / .5) % 2);
+      if (t < 2.2) ux = Math.round(lerp(-17, parked, ease.out(t / 2.2)));
+      else if (t < 4.4) { ux = parked; uy = t > 4.1 ? UY - 1 : uy; }
+      else { const p = ease.in(seg(t, 4.4, 5.8)); ux = Math.round(lerp(parked, 70, p)); uy = Math.round(lerp(UY - 1, 4, p)); }
+      // beam: grows down 2.4–2.8, holds, retracts up 3.7–4.1
+      const top = UY + 7, bottom = HOME.y + 9;
+      let b0 = top, b1 = top;
+      if (t >= 2.4 && t < 2.8) b1 = Math.round(lerp(top, bottom, seg(t, 2.4, 2.8)));
+      else if (t >= 2.8 && t < 3.7) b1 = bottom;
+      else if (t >= 3.7 && t < 4.1) { b1 = bottom; b0 = Math.round(lerp(top, bottom, seg(t, 3.7, 4.1))); }
+      for (let r = b0; r < b1; r++) { const w = Math.min(13, 5 + Math.floor((r - top) / 5)); ops.push({ rect: [cx - Math.floor(w / 2), r, w, 1], color: "Q", alpha: .24 }); }
+      // Polpetto: there from the start; notices at 1.6; dematerialises feet first 2.9–3.8
+      if (t < 3.8) {
+        const eyes = blinkAt(t, .8) ? "closed" : t > 1.4 && t < 2.2 ? "left" : "open";
+        const gone = t < 2.9 ? 0 : Math.floor((t - 2.9) / .1);
+        ops.push({ rows: body({ eyes }).map((r, i) => (i >= 9 - gone ? "........." : r)), x: HOME.x, y: HOME.y });
+        if (t > 2.0 && t < 2.7) ops.push({ rows: ["Y", "Y", ".", "Y"], x: cx, y: HOME.y - 6 });
+      }
+      if (t > 2.9 && t < 4.0) {
+        for (let k = 0; k < 5; k++) {
+          const ph = ((t - 2.9) * 1.4 + k / 5) % 1;
+          ops.push({ rows: ["Y"], x: cx - 3 + ((k * 3) % 7), y: Math.round(lerp(HOME.y + 4, top, ph)), alpha: .9 });
+        }
+      }
+      ops.push({ rows: Math.floor(t / .15) % 2 ? UFO1 : UFO0, x: ux, y: uy });
+      return ops;
+    },
+  },
+  {
+    k: "camo", name: "Mimetismo",
+    story: "Cambia colore sempre più in fretta, poi prende il colore dello sfondo e diventa invisibile. Restano solo gli occhi, che sbattono e spariscono.",
+    dur: 5.4,
+    frame(t, run) {
+      if (t < 1.0) return [{ rows: body({ eyes: blinkAt(t, .5) ? "closed" : "open" }), x: HOME.x, y: HOME.y }];
+      if (t < 3.0) {
+        const times = [1.0, 1.5, 1.9, 2.2, 2.45, 2.65, 2.8, 2.92];
+        let i = 0; while (i < times.length - 1 && t >= times[i + 1]) i++;
+        return [{ rows: body(), x: HOME.x, y: HOME.y, map: { ...TONES[NAMES[(i + run * 3 + 1) % NAMES.length]], ...EXTRA } }];
+      }
+      if (t < 4.0) return [{ rows: body(), x: HOME.x, y: HOME.y, alpha: 1 - seg(t, 3.0, 4.0) }];
+      if (t < 5.0 && !blinkAt(t, 4.5)) return [{ rows: body().map((r) => r.replace(/[^E]/g, ".")), x: HOME.x, y: HOME.y, map: { E: "#e8eaed" } }];
+      return [];
+    },
+  },
+  {
+    k: "balloon", name: "Palloncino",
+    story: "Entra camminando con un palloncino legato a un tentacolo. Si ferma, guarda in su, e il palloncino lo solleva e lo porta via in alto.",
+    dur: 6.6,
+    frame(t) {
+      let px, py = HOME.y, legs = 0, eyes = "right";
+      if (t < 2.0) { const step = Math.floor(t / .05); px = Math.min(HOME.x, -12 + step); legs = Math.floor(step / 2) % 2; }
+      else if (t < 3.4) { px = HOME.x; eyes = blinkAt(t, 2.5) ? "closed" : t > 2.8 ? "up" : "open"; py = t > 3.1 ? HOME.y - 1 : HOME.y; }
+      else { px = HOME.x + Math.round(Math.sin((t - 3.4) * 3)); py = Math.round(lerp(HOME.y - 1, -34, ease.in(seg(t, 3.4, 6.2)))); legs = Math.floor(t / .18) % 2 ? 2 : 0; eyes = "up"; }
+      const bob = Math.floor(t / .6) % 2;
+      const ops = [{ rows: body({ eyes, legs }), x: px, y: py }, { rows: ["K"], x: px + 9, y: py + 4 }];
+      for (let y = py - 6 - bob; y <= py + 3; y++) ops.push({ rows: ["L"], x: px + 9, y });
+      ops.push({ rows: BALLOON, x: px + 5, y: py - 17 - bob });
+      return ops;
+    },
+  },
+  heliScene("heliB", "Elicottero", "Dall'alto scende un elicottero (cabina a bolla, porta con oblò) con Polpetto al vetro. Atterra alzando polvere, lui salta giù, l'elicottero riparte verso l'alto e lui se ne va camminando.", HELI_B, HELI_B_IN),
+];
+
+function drawHeader(ctx) {
+  ctx.fillStyle = "#161a1e"; ctx.fillRect(0, 0, W, 80);
+  ctx.fillStyle = "#e8eaed"; ctx.font = "600 17px Figtree, system-ui, sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("Nuova sessione", W / 2, 44);
+  ctx.fillStyle = "#8d969e"; ctx.font = "13px Figtree, system-ui, sans-serif"; ctx.fillText("~/assistant", W / 2, 63);
+  ctx.fillStyle = "#262b30"; ctx.fillRect(0, 80, W, 1);
+}
+function drawComposer(ctx) {
+  ctx.fillStyle = "#161a1e"; ctx.fillRect(0, COMPOSER_Y, W, H - COMPOSER_Y);
+  ctx.fillStyle = "#1f2428"; ctx.beginPath(); ctx.roundRect(14, COMPOSER_Y + 6, W - 28, 66, 24); ctx.fill();
+  ctx.fillStyle = "#6b737b"; ctx.font = "16px Figtree, system-ui, sans-serif"; ctx.textAlign = "left"; ctx.fillText("Message tentacle", 34, COMPOSER_Y + 34);
+}
+function drawOps(ctx, ops, map) {
+  for (const o of ops) {
+    ctx.globalAlpha = o.alpha ?? 1;
+    const m = o.map || map;
+    if (o.rect) { ctx.fillStyle = map[o.color]; ctx.fillRect(o.rect[0] * U, o.rect[1] * U, o.rect[2] * U, o.rect[3] * U); continue; }
+    o.rows.forEach((row, i) => [...row].forEach((ch, j) => {
+      const c = m[ch]; if (!c) return;
+      ctx.fillStyle = c; ctx.fillRect((o.x + j) * U, (o.y + i) * U, U + .05, U + .05);
+    }));
+  }
+  ctx.globalAlpha = 1;
+}
+
+const rm = document.getElementById("rm");
+if (matchMedia("(prefers-reduced-motion: reduce)").matches) rm.checked = true;
+const cards = SCENES.map((s) => {
+  const c = document.createElement("div"); c.className = "card";
+  c.innerHTML = `<h2>${s.name}<span class="n">${s.tag || "nuovo"}</span></h2><p>${s.story}</p><canvas role="img" aria-label="${s.name}: ${s.story}"></canvas><button>Rigioca</button>`;
+  document.getElementById("grid").append(c);
+  const cv = c.querySelector("canvas"), dpr = Math.max(1, window.devicePixelRatio || 1);
+  cv.width = Math.round(260 * dpr); cv.height = Math.round(467 * dpr);
+  const ctx = cv.getContext("2d"); ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
+  const st = { s, ctx, t0: performance.now(), run: 0, pal: NAMES[Math.floor(Math.random() * NAMES.length)] };
+  c.querySelector("button").onclick = () => { st.t0 = performance.now(); st.run++; st.pal = NAMES[Math.floor(Math.random() * NAMES.length)]; };
+  return st;
+});
+document.getElementById("all").onclick = () => cards.forEach((st) => { st.t0 = performance.now(); st.run++; });
+function loop(now) {
+  for (const st of cards) {
+    let t = (now - st.t0) / 1000;
+    if (t > st.s.dur + 1.2) { st.t0 = now; st.run++; st.pal = NAMES[Math.floor(Math.random() * NAMES.length)]; t = 0; }
+    const map = { ...TONES[st.pal], ...EXTRA };
+    st.ctx.fillStyle = "#161a1e"; st.ctx.fillRect(0, 0, W, H);
+    const ops = rm.checked ? [{ rows: body(), x: HOME.x, y: HOME.y }] : t <= st.s.dur ? st.s.frame(t, st.run) : [];
+    if (st.s.behind && !rm.checked) { drawOps(st.ctx, ops.filter((o) => !o.front), map); drawComposer(st.ctx); drawOps(st.ctx, ops.filter((o) => o.front), map); }
+    else { drawComposer(st.ctx); drawOps(st.ctx, ops, map); }
+    drawHeader(st.ctx);
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
