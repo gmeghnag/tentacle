@@ -543,26 +543,25 @@ describe("the startup header (docs/feat/tui-mascot.md)", () => {
     chalk.level = level;
   });
 
-  test("truecolor: the sprite sits beside the three text lines", async () => {
+  test("truecolor, the shipped default: three text lines, no sprite, no gutter", async () => {
+    // fix/tui-mascot-hidden: with `chalk.level` at 3 (a real terminal, where the
+    // sprite used to paint) the header is exactly the text-only one.
     chalk.level = 3;
     const t = await mount(fake(), { version: "0.7.1" });
     const rows = (t.app.lastFrame() ?? "").split("\n").map(stripAnsi);
-    expect(rows[1]).toContain("tentacle 0.7.1");
-    expect(rows[2]).toContain("m · /tmp/work");
-    expect(rows[3]).toContain("/help for commands");
-    // 9 sprite cells + a 2-cell gutter before the text; rows 0 and 4 are alone.
-    expect(rows[1]?.indexOf("tentacle")).toBe(11);
-    expect(rows[1]).toMatch(/[\u2580\u2584\u2588]/);
-    expect(rows[0]).not.toContain("tentacle");
+    expect(rows[0]?.trimEnd()).toBe("tentacle 0.7.1");
+    expect(rows[1]?.trimEnd()).toBe("m · /tmp/work");
+    expect(rows[2]?.trimEnd()).toBe("/help for commands");
+    // No sprite cell and no 11-cell gutter anywhere in the header.
+    expect(rows.slice(0, 3).join("\n")).not.toMatch(/[\u2580\u2584\u2588]/);
+    expect(rows[0]?.indexOf("tentacle")).toBe(0);
     t.app.unmount();
   });
 
   test("no version passed: line 1 is the name alone", async () => {
     chalk.level = 3;
     const rows = stripAnsi((await mount(fake())).app.lastFrame() ?? "").split("\n");
-    expect(rows[1]?.trimEnd()).toBe(
-      "\u2588\u2580\u2580\u2588\u2588\u2588\u2580\u2580\u2588  tentacle",
-    );
+    expect(rows[0]?.trimEnd()).toBe("tentacle");
   });
 
   test("colours off: the three text lines, no sprite glyph", async () => {

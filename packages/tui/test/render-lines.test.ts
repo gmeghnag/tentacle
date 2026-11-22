@@ -2200,8 +2200,8 @@ describe("the startup header (docs/feat/tui-mascot.md D4)", () => {
     ...over,
   });
 
-  test("truecolor, wide: five rows, the sprite beside the text", () => {
-    const lines = itemLines(header(), { expandAll: false, width: 80 });
+  test("truecolor, wide, sprite opted in: five rows, the sprite beside the text", () => {
+    const lines = itemLines(header(), { expandAll: false, width: 80, mascot: true });
     expect(lines.length).toBe(5);
     const plain = lines.map(strip);
     // Rows 1–3 carry the text, rows 0 and 4 the sprite alone.
@@ -2221,8 +2221,22 @@ describe("the startup header (docs/feat/tui-mascot.md D4)", () => {
     expect(cellWidth((plain[1] ?? "").slice(0, (plain[1] ?? "").indexOf("tentacle")))).toBe(11);
   });
 
+  test("the shipped default is the text-only header: three rows, no glyph, no gutter", () => {
+    // fix/tui-mascot-hidden: `chalk.level` is 3 here (the file's `beforeAll`),
+    // so this is the exact case that used to paint the sprite.
+    const lines = itemLines(header(), { expandAll: false, width: 80 });
+    expect(lines.length).toBe(3);
+    expect(lines.map(strip).join("\n")).not.toMatch(/[\u2580\u2584\u2588]/);
+    // No gutter means the text starts at column 1, not at 11.
+    expect(strip(lines[0] ?? "")).toBe("tentacle 0.7.1");
+    expect(strip(lines[1] ?? "")).toBe("deepseek-v4 · ~/tentacle");
+    expect(strip(lines[2] ?? "")).toBe("/help for commands");
+    // No sprite colour either: not one truecolor SGR sequence in the header.
+    expect(lines.join("\n")).not.toContain("38;2;");
+  });
+
   test("narrow: three text rows, no sprite glyph", () => {
-    const lines = itemLines(header(), { expandAll: false, width: 30 });
+    const lines = itemLines(header(), { expandAll: false, width: 30, mascot: true });
     expect(lines.length).toBe(3);
     expect(lines.map(strip).join("\n")).not.toMatch(/[▀▄█]/);
     expect(strip(lines[0] ?? "")).toContain("tentacle");
@@ -2240,7 +2254,7 @@ describe("the startup header (docs/feat/tui-mascot.md D4)", () => {
   });
 
   test("the sprite's colours are the palette's hexes, fg and bg", () => {
-    const row = itemLines(header(), { expandAll: false, width: 80 })[1] ?? "";
+    const row = itemLines(header(), { expandAll: false, width: 80, mascot: true })[1] ?? "";
     // Painted at level 3: the outline and the body shade appear as truecolor.
     expect(row).toContain("38;2;123;63;192"); // #7B3FC0, the soft outline
     expect(row).toContain("48;2;");

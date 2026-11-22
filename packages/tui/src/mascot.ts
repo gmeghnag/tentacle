@@ -124,6 +124,17 @@ export const GUTTER = MASCOT_CELLS + 2;
 /** The cwd keeps at least this many cells before the mascot yields to it. */
 const MIN_PATH = 12;
 
+/**
+ * The ONE switch that decides whether Polpetto may paint at all
+ * (`fix/tui-mascot-hidden`). OFF: the header is exactly the text-only one
+ * (three lines, no gutter) — the narrow / low-colour path that already exists.
+ * In macOS Terminal.app the half-block glyphs `▀ ▄` are drawn offset, so the
+ * sprite renders striped; until the owner decides how it should render (a
+ * full-cell version is 9 rows tall) the sprite shows nowhere. All the code,
+ * the palettes and the palette pick stay: the feature comes back.
+ */
+export const MASCOT_ENABLED = false;
+
 /** One header line: `strong` is painted bold, `text` subtle (the space is inside `text`). */
 export interface HeaderLine {
   readonly strong?: string;
@@ -140,6 +151,13 @@ export interface HeaderInput {
   /** `chalk.level` AT CALL TIME: 0/1 hide the mascot (docs/feat/tui-mascot.md D6). */
   readonly colorLevel: number;
   readonly palette: PaletteName;
+  /**
+   * Whether the sprite may be drawn at all. Default `MASCOT_ENABLED` — the
+   * shipped switch (`fix/tui-mascot-hidden`: OFF until the owner decides how the
+   * sprite should render). The override exists so the projection and the
+   * beside-the-text layout keep being tested while the sprite is hidden.
+   */
+  readonly mascot?: boolean;
 }
 
 export interface HeaderView {
@@ -166,7 +184,8 @@ export function headerView(input: HeaderInput): HeaderView {
     cellWidth("/help for commands"),
     cellWidth(model) + 3 + MIN_PATH,
   );
-  const shown = input.colorLevel >= 2 && input.width - GUTTER >= needed;
+  const shown =
+    (input.mascot ?? MASCOT_ENABLED) && input.colorLevel >= 2 && input.width - GUTTER >= needed;
   const path = shortPath(input.cwd, input.home, pathBudget(input.width - (shown ? GUTTER : 0)));
   return {
     mascot: shown ? mascotCells(MASCOT_PALETTES[input.palette]) : null,
