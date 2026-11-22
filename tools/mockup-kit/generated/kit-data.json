@@ -1,16 +1,16 @@
 {
   "source": {
     "apps/mobile/src/chat-header.ts": "9e509a71b3801a4486a838b353c31c96270fedcb",
-    "apps/mobile/src/motion.ts": "5ba1e612ac297c4c408d4c3201b32ac8bfab7745",
+    "apps/mobile/src/motion.ts": "cb710fd7643e02771a98beb41cf418b3a5364155",
     "apps/mobile/src/screens/ComputersScreen.tsx": "ac1fe5dee031bc713182ae3cee279af4ebed1daf",
     "apps/mobile/src/screens/PermissionSheet.tsx": "7ad6485e5d63f6bc963fdcf2a84e809fa621cc08",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "5cb64e4a707fb3ade80d489dc643e6bfac5cb60e",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "530772143b4f87280e31d996de1c9d8d2c6577ab",
-    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "42e5e0df45435214dd7578ad46eb0e09884a3a56",
+    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "4b50066bb6064cfb4cd31a6fbd77671b2267beb6",
     "apps/mobile/src/theme-beta.ts": "c1edfc8542fc4d77a28510a47ea39408be1877bb",
     "apps/mobile/src/theme.ts": "9ee7540c0231912af0f39ef77e18dab906030393",
-    "apps/mobile/src/thinking-motion.ts": "d2c8ff8d5c27d7113c523696cf2cbb357cced8ce",
-    "apps/mobile/src/tool-steps.ts": "3426958f5eb3c90aab1fe980a6627352639ccf68",
+    "apps/mobile/src/thinking-motion.ts": "4fd5a2e149a69bb6c58326516420a74efc077eaa",
+    "apps/mobile/src/tool-steps.ts": "f15fb0ac7bcd21a3f18122c398da755f5fdc638f",
     "apps/mobile/src/ui/BandSection.tsx": "7b65870db2faa7a51663560d2641476973ed7b2a",
     "apps/mobile/src/ui/CodeBlock.tsx": "567f9d97869b4e60f00d77a95185e75dd54d4e26",
     "apps/mobile/src/ui/Composer.tsx": "e767b7545c52d0e63f729dce7f957f25ad79492b",
@@ -21,7 +21,7 @@
     "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
     "apps/mobile/src/ui/ScreenHeader.tsx": "5056826ce4b0caed05dfa83cb777dc1e26ea1ba0",
     "apps/mobile/src/ui/Sheet.tsx": "3c6c0d8b0f8f8b450821ccc12f737b8e893258d7",
-    "apps/mobile/src/ui/StepNode.tsx": "1ac733e9a999d230c126f29a5b2b0162fea4864a",
+    "apps/mobile/src/ui/StepNode.tsx": "66f3a156c5bb8559f7f1d30ce95bbd5294a5f110",
     "packages/tui/src/blink.ts": "29c9f101f7942a0942e48c977a13e3759820c8e3",
     "packages/tui/src/components/Thinking.tsx": "c9f80123d32ad706b7c96d858b822d9336d15d2d",
     "packages/tui/src/shimmer.ts": "96515bf4852e36f0cf9ca27a3f665d00e37f076c",
@@ -38,8 +38,8 @@
     "HEADER_DOT_HALF": 700,
     "HUB_GLOW_IN": 220,
     "HUB_GLOW_OUT": 480,
+    "STEP_BLINK_HALF": 500,
     "STEP_ELAPSED_TICK": 1000,
-    "STEP_SPINNER_TURN": 900,
     "BREATHE": 1500,
     "THINKING_SHIMMER": 2200,
     "HUB_FLASH": 1600,
@@ -662,12 +662,6 @@
           "borderRadius": 4.5,
           "borderWidth": 1.2
         },
-        "spinner": {
-          "width": 10,
-          "height": 10,
-          "borderRadius": 5,
-          "borderWidth": 1.5
-        },
         "wake": {
           "fontSize": 13,
           "lineHeight": 15,
@@ -687,6 +681,12 @@
           "position": "absolute",
           "top": 0,
           "left": 0
+        },
+        "measure": {
+          "position": "absolute",
+          "top": 0,
+          "left": 0,
+          "opacity": 0
         },
         "column": {
           "flex": 1,

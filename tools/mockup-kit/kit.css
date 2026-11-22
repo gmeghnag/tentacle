@@ -262,15 +262,24 @@
   background: var(--c-page);
   box-sizing: border-box;
 }
-.k-node-spinner {
-  width: var(--m-step-spinner-width);
-  height: var(--m-step-spinner-height);
-  border-radius: var(--m-step-spinner-border-radius);
-  border: var(--m-step-spinner-border-width) solid var(--c-accent);
-  border-top-color: var(--c-page);
-  background: var(--c-page);
-  box-sizing: border-box;
-  animation: k-turn var(--ms-step-spinner-turn) linear infinite;
+/* A running step: the done dot's place and size, in accent, blinking ON/OFF on
+   the TUI's rhythm (docs/fix/mobile-running-row.md); steady under Reduce Motion. */
+.k-node-dot[data-kind="running"] {
+  background: var(--c-accent);
+  animation: k-blink calc(2 * var(--ms-step-blink-half)) step-end infinite;
+}
+@keyframes k-blink {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .k-node-dot[data-kind="running"] {
+    animation: none;
+  }
 }
 .k-node-wake {
   font-size: var(--m-step-wake-font-size);

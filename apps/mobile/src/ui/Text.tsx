@@ -10,10 +10,11 @@
  */
 import { type ComponentProps, createContext, useContext } from "react";
 import { Text as RNText, TextInput as RNTextInput, StyleSheet, type TextStyle } from "react-native";
-import { type AppFont, type FontInherit, textFont } from "../theme-beta.ts";
+import { type FontInherit, textFont } from "../theme-beta.ts";
+import { AppFontContext } from "./app-font.ts";
 
-/** The app font in force (`null`: the system font). */
-export const AppFontContext = createContext<AppFont>(null);
+/** The app font in force (`null`: the system font) — `app-font.ts`, re-exported here. */
+export { AppFontContext };
 
 /** What a Figtree text passes to the texts nested in it (RN inherits font props). */
 const InheritContext = createContext<FontInherit>({});

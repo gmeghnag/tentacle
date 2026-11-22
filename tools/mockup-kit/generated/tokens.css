@@ -289,8 +289,8 @@
   --ms-header-dot-half: 700ms;
   --ms-hub-glow-in: 220ms;
   --ms-hub-glow-out: 480ms;
+  --ms-step-blink-half: 500ms;
   --ms-step-elapsed-tick: 1000ms;
-  --ms-step-spinner-turn: 900ms;
   --ms-breathe: 1500ms;
   --ms-thinking-shimmer: 2200ms;
   --ms-hub-flash: 1600ms;
@@ -329,10 +329,6 @@
   --m-step-ring-height: 9px;
   --m-step-ring-border-radius: 4.5px;
   --m-step-ring-border-width: 1.2px;
-  --m-step-spinner-width: 10px;
-  --m-step-spinner-height: 10px;
-  --m-step-spinner-border-radius: 5px;
-  --m-step-spinner-border-width: 1.5px;
   --m-step-wake-font-size: 13px;
   --m-step-wake-line-height: 15px;
   --m-step-dot-box-width: 13px;
@@ -342,6 +338,9 @@
   --m-step-breath-dot-border-radius: 1.5px;
   --m-step-glyphs-top: 0;
   --m-step-glyphs-left: 0;
+  --m-step-measure-top: 0;
+  --m-step-measure-left: 0;
+  --m-step-measure-opacity: 0;
   --m-step-column-flex: 1;
   --m-step-column-margin-left: 10px;
   --m-step-line-min-height: 44px;

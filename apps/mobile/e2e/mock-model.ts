@@ -245,6 +245,18 @@ export const CHART_SPEC = {
 export const TOOLROWS_PROMPT = "TOOLROWS29";
 /** Round 3's thinking spacing (ms): long enough for a flow to shoot the footer. */
 export const TOOLROWS_THINK_MS = 2500;
+/**
+ * Flow 38's turn (docs/fix/mobile-running-row.md): round 1 thinks, then runs ONE
+ * described `shell` call that takes a while (the live running row: the sentence
+ * shimmering, the running node); round 2 thinks SLOWLY (the live `Thinking`
+ * footer) and answers. The thought folded into the step must NOT show in its
+ * tap detail (owner, docs/feat/shell-intent-line.md).
+ */
+export const RUNROW_PROMPT = "RUNROW38";
+/** Flow 38's described shell sentence — long, so a clipped label shows. */
+export const RUNROW_SENTENCE = "Test DNS con 50 query e latenze misurate per ogni risolutore";
+/** Flow 38's folded thought (asserted ABSENT from the tap detail). */
+export const RUNROW_THOUGHT = "Measure the resolver latency with fifty queries.";
 /** A child's prompt: `CHILDSTEPS <n>` — it calls `fs_read` n times, one per round, then reports. */
 export const CHILD_MARK = "CHILDSTEPS";
 /** The spacing of a child's rounds (ms): slow enough for a flow to see its steps advance. */
@@ -501,6 +513,30 @@ function stream(
           }
           send(frame({ content: "The workspace has **notes.txt** (40 lines). " }));
           send(frame({ content: "`missing-dir` is not there, and no browser tool is set up." }));
+          send(frame({}, "stop"));
+        }
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      // Flow 38: a described shell that runs a while, then a slow thought.
+      if (promptLine(prompt, RUNROW_PROMPT)) {
+        const think = (text: string) => send(frame({ reasoning_content: text }));
+        if (toolResultsThisTurn(body) === 0) {
+          think(RUNROW_THOUGHT);
+          for (const chunk of toolCallFrames(0, mint(), "shell", {
+            command: "sleep 20 && echo resolved 50/50",
+            description: RUNROW_SENTENCE,
+          })) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else {
+          for (const part of ["All fifty resolved. ", "Summarise the latency."]) {
+            think(part);
+            await Bun.sleep(ctx.thinkMs * 3);
+          }
+          send(frame({ content: "All 50 queries resolved." }));
           send(frame({}, "stop"));
         }
         send(DONE_FRAME);

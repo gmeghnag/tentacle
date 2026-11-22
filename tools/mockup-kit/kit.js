@@ -139,7 +139,7 @@ function therefore({ breathe = false, color = "var(--c-sec)" } = {}) {
 const NODE = {
   ok: () => '<span class="k-node-dot" data-kind="ok"></span>',
   error: () => '<span class="k-node-dot" data-kind="error"></span>',
-  running: () => '<span class="k-node-spinner"></span>',
+  running: () => '<span class="k-node-dot" data-kind="running"></span>',
   pending: () => '<span class="k-node-ring"></span>',
   thought: () => therefore(),
   thinking: () => therefore({ breathe: true, color: "var(--c-accent)" }),
