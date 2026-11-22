@@ -1,0 +1,195 @@
+<title>Transizione nodo-dettaglio</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: two live phones side by side (A morph, B zoom), the same 2C graph; tapping a node navigates with a transition instead of a bottom sheet. */
+:root {
+  --bg: #eceff0; --fg: #1b2123; --muted: #5a6568; --line: #d0d7d9; --pick: #0f7f93;
+  --app: #151B1D; --label: #D5DDDE; --sec: #98A6A8; --sep: #2D393D; --card: #1D2528; --fill: #262E32; --acc: #2ab3cf; --err: #e8737a; --off: #485058;
+  --sans: "Figtree", -apple-system, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark } }
+:root[data-theme="dark"] { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.45 var(--sans); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 22px 48px; }
+main { max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+h1 { font-size: 22px; margin: 0; }
+.lead { margin: 4px 0 0; color: var(--muted); max-width: 80ch; }
+.bar { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.bar button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); background: transparent; color: var(--fg); border-radius: 8px; cursor: pointer; }
+.row { display: flex; flex-wrap: wrap; gap: 26px; }
+.v { width: 360px; max-width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.v h2 { font-size: 15px; margin: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.v h2 .n { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--pick); font-weight: 600; }
+.v p { margin: 0; color: var(--muted); font-size: 13.5px; min-height: 4.4em; }
+
+.ph { position: relative; width: 360px; max-width: 100%; height: 660px; background: var(--app); color: var(--label); border-radius: 32px; overflow: hidden; -webkit-font-smoothing: antialiased; font-family: var(--sans); }
+.scr { position: absolute; inset: 0; padding: 16px; }
+.scr.det { opacity: 0; pointer-events: none; }
+.top { display: grid; grid-template-columns: 70px 1fr 70px; align-items: center; text-align: center; font-weight: 600; font-size: 15.5px; height: 40px; }
+.top small { display: block; color: var(--sec); font-weight: 400; font-size: 11.5px; }
+.back { color: var(--acc); font-size: 15px; text-align: left; cursor: pointer; background: none; border: 0; font-family: inherit; padding: 0; }
+.canvas { position: relative; height: 560px; margin-top: 8px; }
+.canvas svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.pill { position: absolute; height: 44px; border-radius: 22px; background: var(--card); border: 1px solid var(--sep); display: flex; align-items: center; gap: 10px; padding: 0 12px 0 8px; cursor: pointer; box-sizing: border-box; }
+.pill .bd { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; border: 2px solid var(--fill); background: var(--fill); flex: none; box-sizing: border-box; }
+.pill .tx { min-width: 0; display: flex; flex-direction: column; line-height: 1.15; }
+.pill .tx b { font-size: 13.5px; font-weight: 600; } .pill .tx span { font-size: 11px; color: var(--sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pill.err { border: 2px solid var(--err); } .pill.err .bd { background: var(--app); border: 3px solid var(--err); color: var(--err); }
+.pill.run { border: 2px solid var(--acc); } .pill.run .bd { background: var(--app); border-color: var(--acc); color: var(--acc); }
+.pill.run::before { content: ""; position: absolute; inset: -6px; border-radius: 28px; background: var(--acc); opacity: .15; z-index: -1; animation: halo 1.6s ease-in-out infinite; }
+.pill.wait { border-style: dashed; } .pill.wait .bd { background: var(--app); border: 2px dashed var(--off); color: var(--sec); }
+.pill.ask .bd { background: var(--app); border: 4px double var(--label); }
+.blink { animation: bl 1s steps(1) infinite; }
+@keyframes bl { 50% { opacity: .25; } }
+@keyframes halo { 0%, 100% { opacity: .12; } 50% { opacity: .45; } }
+.flow { stroke-dasharray: 5 6; animation: flow 1s linear infinite; }
+@keyframes flow { to { stroke-dashoffset: -11; } }
+
+.hero { position: relative; height: 64px; border-radius: 32px; margin-top: 10px; }
+.hero .pill { position: absolute; inset: 0; height: 64px; border-radius: 32px; padding-left: 12px; gap: 12px; }
+.hero .pill .bd { width: 38px; height: 38px; font-size: 17px; }
+.hero .pill .tx b { font-size: 17px; } .hero .pill .tx span { font-size: 13px; }
+.rows { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.kv { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 7px 10px; font-size: 14px; }
+.kv dt { color: var(--sec); } .kv dd { margin: 0; }
+.log { background: var(--card); border-radius: 12px; padding: 10px 12px; font: 12px/1.55 var(--mono); color: var(--sec); white-space: pre-wrap; }
+.log .e { color: var(--err); } .log .a { color: var(--acc); }
+.acts { display: flex; gap: 8px; }
+.btn { font: 600 14px var(--sans); border: 0; border-radius: 12px; padding: 11px 13px; background: var(--fill); color: var(--label); cursor: pointer; }
+.btn.pri { background: var(--label); color: var(--app); }
+
+/* skeleton: the real layout, text hidden behind shimmering bars of its own size → nothing moves when it loads */
+.rows .t { border-radius: 5px; transition: color .25s ease, background-color .25s ease; }
+.rows.loading .t, .rows.loading .t * { color: transparent !important; }
+.rows.loading .t { background: linear-gradient(90deg, var(--fill) 0%, #323c40 50%, var(--fill) 100%); background-size: 200% 100%; animation: shim 1.2s linear infinite; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.rows.loading .btn { color: transparent; background: var(--fill); }
+@keyframes shim { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .rows.loading .t { animation: none; } }
+.ghost { position: absolute; z-index: 5; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .blink, .pill.run::before, .flow { animation: none; } }
+.notes { border-top: 1px solid var(--line); padding-top: 12px; max-width: 80ch; display: flex; flex-direction: column; gap: 6px; }
+.notes h2 { margin: 0; font-size: 16px; }
+.notes ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
+</style>
+<main>
+  <div>
+    <h1>Dal nodo al dettaglio, senza foglio che si apre sopra</h1>
+    <p class="lead">Il grafo 2C (scelto). Tocca un nodo: invece del foglio dal basso, si passa al dettaglio con una transizione, e «‹» torna indietro con la transizione inversa. Due varianti: in A il nodo stesso si allarga e diventa l'intestazione del dettaglio; in B la vista fa zoom sul nodo ed entra nel dettaglio. Prova anche «Riduci movimento»: diventa una dissolvenza semplice.</p>
+  </div>
+  <div class="bar"><label><input type="checkbox" id="rm"> Riduci movimento</label><button id="slow">Rallenta ×3 (per vederla bene)</button></div>
+  <div class="row">
+    <section class="v"><h2>A · Il nodo diventa il dettaglio, con skeleton <span class="n">scelta</span></h2><p>La pillola vola in alto e diventa l'intestazione; intanto compaiono le righe del dettaglio come segnaposto grigi che luccicano, già nelle posizioni finali. Quando arrivano i dati il testo appare al loro posto: niente si sposta.</p><div class="ph" data-mode="morph"></div></section>
+    <section class="v"><h2>B · Zoom sul nodo</h2><p>Il grafo si ingrandisce verso il nodo toccato e sfuma, il dettaglio arriva da dietro. Più «spaziale», ma il nodo non resta riconoscibile durante il passaggio.</p><div class="ph" data-mode="zoom"></div></section>
+  </div>
+  <div class="notes">
+    <h2>Da sapere</h2>
+    <ul>
+      <li>Nell'app vera si fa con le animazioni native di React Native (Reanimated): si misura il nodo toccato e lo si anima fino al posto dell'intestazione. Gira a 60 fps, fuori dal thread JavaScript.</li>
+      <li>Lo stesso principio vale per tutta l'app: toccare qualcosa porta dentro quella cosa, niente fogli sovrapposti quando non servono.</li>
+      <li>Swipe dal bordo sinistro per tornare indietro, come nelle app iOS.</li>
+    </ul>
+  </div>
+</main>
+<script>
+const G = { ok: "✓", err: "✗", run: "▸", wait: "○", ask: "?" };
+const W = { ok: "ok", err: "errore", run: "in corso", wait: "in attesa", ask: "da approvare" };
+const STEPS = [
+  { id: "plan", st: "ok", sub: "opus · local", x: 64, y: 8, w: 200, rows: [["Tipo", "agente"], ["Modello", "opus"], ["Prompt", "plan.md"], ["Token", "in 38k · out 6k"], ["Durata", "2m"]], log: "doc scritto: docs/feat/cron-tool.md" },
+  { id: "exec", st: "ok", sub: "ds · local", x: 64, y: 80, w: 200, rows: [["Tipo", "agente"], ["Modello", "deepseek"], ["Tentativi", "2 (ECONNRESET)"], ["Token", "in 410k · out 31k"], ["Durata", "14m"]], log: "9 file cambiati\nscript gate verde" },
+  { id: "review", st: "err", sub: "opus", x: 6, y: 152, w: 150, rows: [["Tipo", "agente"], ["Modello", "opus"], ["Ramo preso", "on_fail → fix (1 di 3)"], ["Token", "in 41k · out 3k"], ["Durata", "3m"]], log: '<span class="e">REQUEST-CHANGES</span>\n1. task.ts:380 manca abort\n2. test vacuo' },
+  { id: "fix", st: "run", sub: "ds · local", x: 176, y: 222, w: 150, rows: [["Tipo", "agente"], ["Modello", "deepseek"], ["Giro", "1 di 3"], ["Token", "in 92k · out 4k (finora)"], ["Da", "1m40s"]], log: '<span class="a">▸ edit packages/x.ts</span>\n  bun test task.test.ts …' },
+  { id: "review 2", st: "wait", sub: "opus · local", x: 64, y: 306, w: 200, rows: [["Tipo", "agente"], ["Modello", "opus"], ["Parte", "dopo fix"]], log: "in attesa" },
+  { id: "gate", st: "wait", sub: "comando · docker", x: 64, y: 378, w: 200, rows: [["Tipo", "comando"], ["Comando", "bun run check"], ["Dove", "docker"]], log: "container usa e getta" },
+  { id: "merge", st: "ask", sub: "approvazione", x: 64, y: 450, w: 200, rows: [["Tipo", "approvazione"], ["Cosa", "merge su main"]], log: "attende la tua approvazione" },
+];
+const EDGES = [[0, 1], [1, 2], [2, 3, "loop"], [3, 4], [4, 5], [5, 6]];
+const rm = document.getElementById("rm");
+let speed = 1;
+document.getElementById("slow").onclick = (e) => { speed = speed === 1 ? 3 : 1; e.target.textContent = speed === 1 ? "Rallenta ×3 (per vederla bene)" : "Velocità normale"; };
+if (matchMedia("(prefers-reduced-motion: reduce)").matches) rm.checked = true;
+const EASE = "cubic-bezier(.2,.8,.2,1)";
+const pillHTML = (s) => `<span class="bd"><span class="${s.st === "run" ? "blink" : ""}">${G[s.st]}</span></span><span class="tx"><b>${s.id}</b><span>${W[s.st]} · ${s.sub}</span></span>`;
+
+function phone(root) {
+  const mode = root.dataset.mode;
+  const curve = (x1, y1, x2, y2) => `M ${x1} ${y1} C ${x1} ${(y1 + y2) / 2}, ${x2} ${(y1 + y2) / 2}, ${x2} ${y2}`;
+  const edges = EDGES.map(([a, b, k]) => {
+    const A = STEPS[a], B = STEPS[b], to = B.st, act = to === "run", fut = to === "wait" || to === "ask";
+    const from = a === 3 ? { x: A.x, y: A.y, w: A.w } : A;
+    const d = k === "loop" ? curve(A.x + A.w - 24, A.y + 44, B.x + 30, B.y) : a === 3 ? curve(A.x + A.w / 2, A.y + 44, B.x + B.w / 2, B.y) : curve(from.x + from.w / 2, from.y + 44, B.x + B.w / 2, B.y);
+    const back = k === "loop" ? `<path d="M ${B.x + 6} ${B.y + 22} C ${A.x + A.w / 2} ${B.y + 22}, ${A.x + A.w / 2} ${B.y + 6}, ${A.x + A.w / 2 - 8} ${A.y + 44}" fill="none" stroke="var(--off)" stroke-width="1.5" stroke-dasharray="2 5" stroke-linecap="round"/><text x="${B.x + B.w - 6}" y="${B.y - 8}" text-anchor="end" font-size="11" fill="var(--err)" font-family="Figtree">on_fail · ↻ 1/3</text>` : "";
+    return `<path d="${d}" fill="none" stroke="${act ? "var(--acc)" : fut ? "var(--off)" : "var(--sec)"}" stroke-width="${act ? 2 : 1.5}" stroke-linecap="round" ${act ? 'class="flow"' : fut ? 'stroke-dasharray="2 5"' : ""}/>${back}`;
+  }).join("");
+  root.innerHTML = `<div class="scr graph"><div class="top"><span></span><span>task · cron-tool<small>task v3 · a1b2c3d · 4 di 7</small></span><span></span></div>
+      <div class="canvas"><svg aria-hidden="true">${edges}</svg>${STEPS.map((s, i) => `<div class="pill ${s.st}" data-i="${i}" style="left:${s.x}px;top:${s.y}px;width:${s.w}px">${pillHTML(s)}</div>`).join("")}</div></div>
+    <div class="scr det"><div class="top"><button class="back">‹ Grafo</button><span></span><span></span></div><div class="hero"></div><div class="rows"></div></div>`;
+  const graph = root.querySelector(".graph"), det = root.querySelector(".det"), hero = det.querySelector(".hero"), rows = det.querySelector(".rows");
+  let cur = null, busy = false;
+  const rel = (el) => { const a = el.getBoundingClientRect(), b = root.getBoundingClientRect(); return { x: a.left - b.left, y: a.top - b.top, w: a.width, h: a.height }; };
+  const fill = (s) => {
+    hero.innerHTML = `<div class="pill ${s.st}">${pillHTML(s)}</div>`;
+    const sk = mode === "morph";
+    const t = (x) => (sk ? `<span class="t">${x}</span>` : x);
+    rows.innerHTML = `<dl class="kv"><dt>Stato</dt><dd>${t(G[s.st] + " " + W[s.st])}</dd>${s.rows.map(([k, v]) => `<dt>${k}</dt><dd>${t(v)}</dd>`).join("")}</dl><div class="log">${s.log.split("\n").map(t).join("\n")}</div>
+      <div class="acts">${s.st === "ask" ? '<button class="btn pri">Approva</button><button class="btn">Rifiuta</button>' : s.st === "wait" ? "" : '<button class="btn">Rilancia passo</button><button class="btn">Output completo</button>'}</div>`;
+  };
+  const T = (ms) => ms * speed;
+  // The ghost's inner parts grow WITH the pill (badge, glyph, title, subtitle), so nothing snaps when it lands.
+  const SMALL = { bd: 26, g: 13, b: 13.5, sp: 11, pad: 8, gap: 10 }, BIG = { bd: 38, g: 17, b: 17, sp: 13, pad: 12, gap: 12 };
+  const grow = (g, from, to, dur) => {
+    const o = { duration: dur, easing: EASE, fill: "both" };
+    g.animate([{ paddingLeft: from.pad + "px", gap: from.gap + "px" }, { paddingLeft: to.pad + "px", gap: to.gap + "px" }], o);
+    g.querySelector(".bd").animate([{ width: from.bd + "px", height: from.bd + "px", fontSize: from.g + "px" }, { width: to.bd + "px", height: to.bd + "px", fontSize: to.g + "px" }], o);
+    g.querySelector(".tx b").animate([{ fontSize: from.b + "px" }, { fontSize: to.b + "px" }], o);
+    g.querySelector(".tx span").animate([{ fontSize: from.sp + "px" }, { fontSize: to.sp + "px" }], o);
+  };
+  const stagger = (show) => [...rows.children].forEach((c, k) => c.animate(show ? [{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "none" }] : [{ opacity: 1 }, { opacity: 0 }], { duration: T(show ? 260 : 120), delay: T(show ? 60 + k * 45 : 0), easing: EASE, fill: "both" }));
+  async function open(i) {
+    if (busy) return; busy = true; cur = i; const s = STEPS[i], node = graph.querySelector(`[data-i="${i}"]`);
+    fill(s); det.style.pointerEvents = "auto";
+    if (rm.checked) { graph.animate([{ opacity: 1 }, { opacity: 0 }], { duration: T(180), fill: "both" }); await det.animate([{ opacity: 0 }, { opacity: 1 }], { duration: T(180), fill: "both" }).finished; busy = false; return; }
+    if (mode === "morph") {
+      det.animate([{ opacity: 1 }, { opacity: 1 }], { duration: 1, fill: "both" });
+      hero.style.visibility = "hidden"; rows.classList.add("loading");
+      [...rows.children].forEach((c, k) => c.animate([{ opacity: 0 }, { opacity: 1 }], { duration: T(160), delay: T(120 + k * 40), fill: "both" }));
+      const a = rel(node), b = rel(hero);
+      const g = document.createElement("div"); g.className = `pill ${s.st} ghost`; g.innerHTML = pillHTML(s); root.append(g);
+      node.style.visibility = "hidden";
+      graph.animate([{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(.97)" }], { duration: T(260), easing: EASE, fill: "both" });
+      grow(g, SMALL, BIG, T(380));
+      await g.animate([{ left: a.x + "px", top: a.y + "px", width: a.w + "px", height: a.h + "px", borderRadius: "22px" }, { left: b.x + "px", top: b.y + "px", width: b.w + "px", height: b.h + "px", borderRadius: "32px" }], { duration: T(380), easing: EASE, fill: "both" }).finished;
+      hero.style.visibility = ""; g.remove();
+      // the data "arrives": skeleton → text in place, no layout shift
+      await new Promise((r) => setTimeout(r, T(450))); if (cur === i) rows.classList.remove("loading");
+    } else {
+      const a = rel(node), ox = a.x + a.w / 2, oy = a.y + a.h / 2;
+      graph.style.transformOrigin = `${ox}px ${oy}px`;
+      graph.animate([{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(2.6)" }], { duration: T(360), easing: EASE, fill: "both" });
+      await det.animate([{ opacity: 0, transform: "scale(.92)" }, { opacity: 1, transform: "scale(1)" }], { duration: T(360), delay: T(120), easing: EASE, fill: "both" }).finished;
+      stagger(true);
+    }
+    busy = false;
+  }
+  async function close() {
+    if (busy || cur === null) return; busy = true; const s = STEPS[cur], node = graph.querySelector(`[data-i="${cur}"]`);
+    if (rm.checked) { det.animate([{ opacity: 1 }, { opacity: 0 }], { duration: T(180), fill: "both" }); await graph.animate([{ opacity: 0 }, { opacity: 1 }], { duration: T(180), fill: "both" }).finished; }
+    else if (mode === "morph") {
+      stagger(false);
+      const a = rel(hero); node.style.visibility = ""; const b = rel(node); node.style.visibility = "hidden";
+      const g = document.createElement("div"); g.className = `pill ${s.st} ghost`; g.innerHTML = pillHTML(s); root.append(g); hero.style.visibility = "hidden";
+      det.animate([{ opacity: 1 }, { opacity: 0 }], { duration: T(200), delay: T(80), fill: "both" });
+      graph.animate([{ opacity: 0, transform: "scale(.97)" }, { opacity: 1, transform: "scale(1)" }], { duration: T(320), easing: EASE, fill: "both" });
+      grow(g, BIG, SMALL, T(340));
+      await g.animate([{ left: a.x + "px", top: a.y + "px", width: a.w + "px", height: a.h + "px", borderRadius: "32px" }, { left: b.x + "px", top: b.y + "px", width: b.w + "px", height: b.h + "px", borderRadius: "22px" }], { duration: T(340), easing: EASE, fill: "both" }).finished;
+      node.style.visibility = ""; g.remove(); hero.style.visibility = "";
+    } else {
+      det.animate([{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(.92)" }], { duration: T(240), easing: EASE, fill: "both" });
+      await graph.animate([{ opacity: 0, transform: "scale(2.6)" }, { opacity: 1, transform: "scale(1)" }], { duration: T(360), delay: T(60), easing: EASE, fill: "both" }).finished;
+    }
+    det.style.pointerEvents = "none"; rows.classList.remove("loading"); cur = null; busy = false;
+  }
+  graph.querySelectorAll(".pill").forEach((n) => (n.onclick = () => open(+n.dataset.i)));
+  det.querySelector(".back").onclick = close;
+}
+document.querySelectorAll(".ph").forEach(phone);
+</script>

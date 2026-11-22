@@ -1,7 +1,7 @@
 # eval/agent-workflows — workflow agentici che il modello scrive e tentacle esegue, a step
 
-> **Status:** eval (Context + Review; Implementation/Execution vuote finché non promossa)
-> **Branch:** nessuno — un `eval` va committato direttamente su `main` (AGENTS §10)
+> **Status:** feat — promoted from eval 2026-11-22 (owner GO); Implementation being written
+> **Branch:** `feat/agent-workflows`
 > Type: eval · Size: — · Blast: — · Suited: —
 > **Changelog:** none
 
