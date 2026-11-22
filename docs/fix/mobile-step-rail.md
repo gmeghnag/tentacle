@@ -251,3 +251,16 @@ Executor: the coverage gap was stated honestly. The ok-path `exit=0` sits in the
 - **Open, not code:** the new failed long-command fixture (`mock-model.ts`, `_runrow-turn.yaml`) was **never run** (the e2e gate was denied, Execution notes). So flow 38 with the extra round is untested, and no shot yet shows `exit N` uncut or the branch's look. Before merge, run `scripts/e2e-gate.sh 0FA4B51F-… --only 38-running-row`; the owner signs off on the look from those shots.
 
 *— claude-opus-5-5, 2026-11-22* (same model family as the resume author; fresh context only)
+
+### Orchestrator finding (simulator, 2026-11-22 15:10)
+
+*— claude-opus-5-5 (orchestrator)*
+
+**MEDIUM — compactShell path still shows `exit=0` in an OK step's open body.** Run
+`1795355693243`, shot `38-beta-detail-dark.png` (beta theme, where `compactShell` is on): opening
+the ok step "Test DNS con 50 query…" shows `sleep 20 && echo resolved 50/50`, then `exit=0`, then
+`resolved 50/50`. With `compactShell` off (`38-default-detail-light.png`) the body is correct
+(`$` sub-line, output only). Decision 5: no exit line in the body of an ok step, command once.
+The round-2 fix (`tool-steps.ts:366-367`) does not cover the compact path (when `commandRow` is
+false, `packages/core` `shellRowParts`, the body seems to start with the command and keep the
+exit line). Fix it in the pure module, with a unit test for compact × ok (red first).
