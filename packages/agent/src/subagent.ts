@@ -177,10 +177,22 @@ export interface SubagentRunControls {
    * when the child stops reading (so a late text is refused, never lost).
    */
   readonly inbox?: AgentInbox;
+  /**
+   * This call's token cap, replacing `deps.maxTokens` for this child only (a
+   * workflow step's `tokens`, docs/feat/agent-workflows.md D3). A positive
+   * integer or `-1` (unlimited).
+   */
+  readonly maxTokens?: number;
+  /**
+   * Tools offered to THIS child beyond its type's (a workflow step's
+   * `step_verdict`, D3). Bypasses the type's allow-list — a channel back, like
+   * `agent_notify` — but never the parent-only exclusions.
+   */
+  readonly extraTools?: readonly Tool[];
 }
 
 /**
- * A child's requester: the parent's, with each ask attributed to the parent's
+ * A child's requester:the parent's, with each ask attributed to the parent's
  * `agent_task` call (`parentCallId`) and tagged with the asking sub-agent.
  * These fields WIN over the child gate's own: the child's call ids are unknown
  * to the parent history, so one must never escape — without a parent id the
@@ -437,6 +449,15 @@ export function createSubagentRunner(deps: SubagentDeps): {
     if (deps.notify && controls?.agentId !== undefined) {
       childTools.register(createAgentNotifyTool(controls.agentId, deps.notify));
     }
+    // This call's own channel back (a workflow step's `step_verdict`): like
+    // `agent_notify`, past `type.tools`; a name the child already holds wins.
+    for (const tool of controls?.extraTools ?? []) {
+      if (childTools.get(tool.name) === undefined) {
+        childTools.register(tool);
+      }
+    }
+    // This call's cap, else the runner's (a workflow step's `tokens`).
+    const maxTokens = controls?.maxTokens ?? deps.maxTokens;
 
     const model = chosen?.provider ?? deps.model;
     // The child counts against its own model's window: the chosen one's, else
@@ -457,7 +478,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       systemPrompt: type.prompt,
       ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
-      ...(deps.maxTokens !== undefined ? { maxTokens: deps.maxTokens } : {}),
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(deps.requestPermission
         ? {
             requestPermission: subagentRequester(
@@ -617,8 +638,8 @@ export function createSubagentRunner(deps: SubagentDeps): {
     // Appended to `finalReport` BELOW the empty-report fallback, which must still
     // fire for a child that wrote nothing (the note is not a report).
     const budgetNote =
-      stopReason === "max_token_budget" && deps.maxTokens !== undefined && deps.maxTokens > 0
-        ? `\n\n(token budget reached: ${tokens.toLocaleString("en-US")} of ${deps.maxTokens.toLocaleString("en-US")} tokens used)`
+      stopReason === "max_token_budget" && maxTokens !== undefined && maxTokens > 0
+        ? `\n\n(token budget reached: ${tokens.toLocaleString("en-US")} of ${maxTokens.toLocaleString("en-US")} tokens used)`
         : "";
     onEvent?.({ kind: "subagent_end", toolUses, stopReason });
     // Never hand the parent an empty report (the agent loop forces a final

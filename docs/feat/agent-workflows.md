@@ -704,6 +704,145 @@ file I touched). Full `bun run check` is the orchestrator's.
 - Wire `session/workflow` / `workflow/list` in `daemon/src/connection.ts`, the
   `workflows` update + snapshot field in `HostedSession`, and the client listeners.
 
+### Slice 4 — driver + wiring
+
+*— claude-opus-5-5 (executor), 2026-11-22 — slice 4 only · status: **PARTIAL** (see "Not done")*
+
+**Load-bearing check re-run (A1/A2), before any edit — holds.**
+- A1: `createSubagentRunner(deps)` → `{run, types, readOnlyType}`
+  (`agent/src/subagent.ts`), handed to `agent_task` only as a closure
+  (`cli/src/wiring.ts:684`); the cap is `deps.maxTokens` alone and extra tools are
+  per TYPE only (`deps.extraTools(type)`) — so the two per-call knobs were indeed
+  the only runner change needed.
+- A2: `HostedSession.awaitDecision` sends ANY ask whose `options.agent.id` is set
+  to `awaitBackgroundDecision` (`daemon/src/hosted-session.ts:1235-1237`), which
+  settles on `options.signal`, writes nothing to disk, takes
+  `turnId = spawnTurns.get(agentId)` (`:1425`) and re-offers on attach. So a
+  workflow step's asks need only `agent.id = "<runId>.<step>"` + a signal + a
+  `spawnTurns` entry for the run's start turn — no second session path.
+
+**As built, in dependency order**
+
+1. `core/src/permission.ts`: `PermissionRequest.kind` gains `"workflow_approve"`;
+   `autoApproves` refuses it; `WORKFLOW_APPROVE_TOOL` (the wire tool name).
+2. `client/src/permission-router.ts` `toPermissionRequest`: wire tool
+   `workflow_approve` → `kind: "workflow_approve"` (the one kind read off the
+   wire: it can only make auto-accept ask MORE, never answer).
+3. `daemon/src/permission-map.ts` `permissionOptions`: a `workflow_approve` offers
+   `allow_once` / `reject_once` only (drift 1).
+4. `agent/src/subagent.ts`: per-call `SubagentRunControls.maxTokens` (wins over
+   `deps.maxTokens`, also in the budget note) and `extraTools` (registered past the
+   type's allow-list like `agent_notify`; a name the child already holds wins).
+5. `agent/src/workflow-verdict.ts` (new): `step_verdict{verdict, reason}` tool,
+   zod-validated, first valid call wins, invalid input → tool error.
+6. `agent/src/workflow-driver.ts` (new): `WorkflowDriver` — `start` (validate +
+   inputs + one-run-per-session, returns at once; the hash approval is the run's
+   first wait), `stop`, `rerun(runId, stepId?, turnId?)` (resume / rerun_step: same
+   run id, attempt +1 via `rerunAt`, re-reads the file and refuses `changed` on a
+   different hash), `rows()`, `dispose()` (→ `interrupted`). Every ask goes through
+   `stepRequester`: the session's ONE requester, `agent.id` set, `host.attribute(id,
+   startTurn)`, signal = any(step's, run abort, `budget.wait` timer); expiry →
+   withdrawn, step cut, run `stopped: timeout`. Agent step = `runnerFor(stepRequester)`
+   + `step_verdict` + `maxTokens`; no verdict → `fail: no verdict`;
+   `max_token_budget` → `budget_hit` (`stopped: budget`); thrown → `fail: error: …`
+   with the partial report. Run step (local) = `commands.authorize` (the session's
+   gate, through `stepRequester`) + `commands.exec`; exit 0 pass, else
+   `exit N` + last 20 lines. Approve step = `workflow_approve` ask, allow → pass,
+   deny → `denied[: reply]`. Sub-agent cap full → `waiting` / live `slot`, retried.
+   Entries only through the core builders; the end note
+   `[workflow wf-N name: state[ · reason] · done/total · N tok] …` via `host.ended`.
+
+**Drift from the Implementation**
+
+1. `daemon/src/permission-map.ts` is not in the slice's file list: it is where the
+   offered options are decided, so "the driver offers no `allow_always`" lives there.
+2. **The driver takes `runnerFor(requester)`, not the session's `run`.** The
+   per-ask `budget.wait` timer must wrap every ask a CHILD raises, and the runner's
+   asker is fixed at construction (`deps.requestPermission`). So the wiring builds a
+   second runner from the SAME deps with the step's requester — same loop code,
+   same grants, same single broker; no third knob on the runner.
+3. **The hash approval is asked inside the run, not before `start` returns**
+   (row state `needs-approval`; `workflow_start` is logged only once approved; a
+   denial ends the run `error: not approved` with nothing logged). A start RPC / a
+   model tool call must not block for up to `budget.wait`.
+4. A thrown child is a `fail` (so `retry` / `on_fail` apply), logged `error`; the
+   machine has no separate error event.
+5. A `docker` `where` fails the step honestly ("not available yet") until Slice 5.
+6. `approve.detail` is passed untemplated (the machine templates `title` only).
+7. `WorkflowRow` / `WorkflowStepRow` are re-declared structurally in the driver:
+   `@tentacle/agent` does not depend on `@tentacle/protocol`; the daemon's schema
+   judges the rows on the way out.
+
+**Tests** (fakes only: fake runner, spy broker, fake clock)
+
+- `core/test/workflow-permission.test.ts` (2) — **red first** on the unmodified
+  `autoApproves` (`Expected: false, Received: true`), then green.
+- `client/test/workflow-permission.test.ts` (2) — **red first** (`kind` undefined).
+- `daemon/test/workflow-permission-map.test.ts` (2) — no `allow_always`.
+- `agent/test/workflow-runner-knobs.test.ts` (3) — per-call cap (alone and over the
+  runner's), extra tool offered to that child only.
+- `agent/test/workflow-driver.test.ts` (18): hash asked before any step and nothing
+  logged before; approved → not asked; one edited byte → asked; denied → error, no
+  log; child ask reaches the ONE requester with `agent.id` + start-turn attribution;
+  approve step kind + attribution + deny reply; `budget.wait` expiry → withdrawn,
+  `stopped: timeout`, step logged `stopped`; no verdict; invalid verdict → tool
+  error, first valid wins; token cap → `stopped: budget` and the step's `tokens`
+  reach the runner; one run per session; bad file / unknown model / missing or
+  unknown input refused before any ask; stop → `cancelled` + end logged + note;
+  dispose → `interrupted`; mid-run edit → snapshot used, rerun refused `changed`;
+  rerun → same id, attempt 1, ok; run step exit 2 tail / exit 0 + authorised
+  through the step requester; docker refused; full cap → `waiting · slot` → runs.
+
+```
+bun test <the 5 files above>  →  27 pass, 0 fail
+```
+
+**Mutation check** (`.tentacle/tmp/agent-workflows/mutate4.ts`: apply, run the
+pinning file, restore). First run found **M11 vacuous** (agent steps attribute in
+two places); fixed by asserting the approve step's and the hash approval's
+attribution. Final:
+
+```
+red OK  M1 autoApproves ignores workflow_approve      1 pass 1 fail
+red OK  M2 router drops the workflow_approve kind     1 pass 1 fail
+red OK  M3 per-call maxTokens ignored                 1 pass 2 fail
+red OK  M4 per-call extraTools ignored                2 pass 1 fail
+red OK  M5 driver asks a private broker               10 pass 8 fail
+red OK  M6 budget.wait never armed                    17 pass 1 fail
+red OK  M7 approval store ignored                     17 pass 1 fail
+red OK  M8 hash approval skipped                      13 pass 5 fail
+red OK  M9 no verdict counts as pass                  17 pass 1 fail
+red OK  M10 approve kind keeps allow_always           1 pass 1 fail
+red OK  M11 asks not attributed to the start turn     17 pass 1 fail
+red OK  M12 first verdict does not win                17 pass 1 fail
+```
+
+**Not done (remaining Slice 4 work, in order)** — the driver is built and tested
+but NOT yet reachable from a session:
+
+1. `cli/src/workflow-approvals.ts` (new): `<configDir>/workflow-approvals.json`,
+   `{project: projectKey(cwd), path, hash, approvedAt}[]`, atomic write.
+2. `cli/src/wiring.ts`: build the `WorkflowDriver` (only when NOT tunnelled,
+   `options.modelOverride === undefined`), `runnerFor` = `createSubagentRunner({...same
+   deps, requestPermission: r}).run`, `commands` = `new PermissionGate(r, hooks,
+   grants).authorize(shellTool, {command}, …)` + `env.exec`, `slots` =
+   `agentJobs.acquire`, `load` = read `workflows/<name>.yaml` + prompt files under
+   the repo; carry it on `WiredAgent` / `workerSessionBuild` like `agentJobs`.
+3. `tools/src/workflow.ts` (new): the model's `workflow` tool (`validate | run |
+   status | stop`), registered only beside the driver.
+4. `daemon/src/hosted-session.ts`: `driver.bind({logStart/Step/End` → the session
+   log emitters, `attribute` → `spawnTurns`, `publish` → `workflows` update + snapshot
+   field, `ended` → note `NOTE_KIND.workflowEnd` + `background_exit`-style notice +
+   wake`})`; re-log `workflow_start` after every `base` for a live run (Slice 3
+   obligation); `dispose` on close.
+5. `daemon/src/connection.ts`: `session/workflow` (refused on a tunnelled session:
+   "workflows run only on a laptop or serve session"; `wake-` turn ids refused) and
+   `workflow/list`.
+6. Tests for 1–5: tunnelled → no tool + refusal; the end-to-end A2 test (a step's
+   child ask reaches a `SpyBroker` through `HostedSession` with the start turn id).
+
+The branch must not merge before these land (Slice 3's note already says so).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22*

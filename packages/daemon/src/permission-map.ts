@@ -22,6 +22,14 @@ export function permissionOptions(req: PermissionRequest): PermissionOption[] {
   const alwaysName = req.suggestion
     ? `Allow \`${req.suggestion.prefix}\` commands for this session`
     : "Allow for the rest of this session";
+  // A workflow's hash approval / approve step is allow-once or deny only: a
+  // lasting answer would wave through a merge (docs/feat/agent-workflows.md D3).
+  if (req.kind === "workflow_approve") {
+    return [
+      { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+      { optionId: "reject_once", name: "Deny", kind: "reject_once" },
+    ];
+  }
   return [
     { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
     { optionId: "allow_always", name: alwaysName, kind: "allow_always" },
