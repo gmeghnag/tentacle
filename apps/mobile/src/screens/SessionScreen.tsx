@@ -120,6 +120,7 @@ import {
 } from "../hub-actions.ts";
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
+import { showsScene } from "../mascot-scenes.ts";
 import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
 import { noticeLooks } from "../notice-group.ts";
 import { PERF } from "../perf-probe.ts";
@@ -147,6 +148,7 @@ import { FloatingActivity, useAccessibilityFlags } from "../ui/FloatingActivity.
 import { HeaderDot } from "../ui/HeaderDot.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
+import { MascotSceneLayer } from "../ui/MascotScene.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
 import { Text } from "../ui/Text.tsx";
@@ -1499,20 +1501,25 @@ export function SessionScreen({
               }}
               ListEmptyComponent={
                 <View testID="transcript-empty">
-                  {state.status.phase === "open" ? (
-                    <EmptyState
-                      palette={palette}
-                      icon="bubble.left"
-                      title="Nothing here yet"
-                      body="Say something below."
-                    />
-                  ) : state.status.phase === "opening" ? (
+                  {state.status.phase === "opening" ? (
                     <EmptyState palette={palette} loading title="Opening the session…" />
                   ) : null}
                 </View>
               }
             />
           </View>
+          {/* Polpetto's entrance (docs/feat/mobile-mascot-scenes.md): one scene per
+              EMPTY session, drawn OVER the (transparent) empty transcript. The
+              band's own edges clip it — behind the header above, behind the
+              composer below — and it unmounts the moment a row arrives (owner
+              decision 5). */}
+          {showsScene({ phase: state.status.phase, rowCount: rows.length }) && !settling ? (
+            <MascotSceneLayer
+              geometry={band ?? { width: 0, height: 0 }}
+              reduceMotion={a11yFlags.reduceMotion}
+              eyeFade={palette.label}
+            />
+          ) : null}
           {jumpPill(follow) ? (
             <Pressable
               testID="jump-latest"

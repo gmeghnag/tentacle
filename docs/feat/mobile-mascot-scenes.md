@@ -57,9 +57,128 @@ The owner wants Polpetto (the owner's 9×9 drawing, `packages/tui/src/mascot.ts:
 
 ## Implementation
 
-*(executor: write it, source-verified per AGENTS §8, before coding)*
+*— deepseek-v4-pro (executor), 2026-11-22 — source-verified before coding*
 
-Hints, verify them:
+**Load-bearing assumption.** The mockup's `SCENES` array is a self-contained, framework-free
+spec in *grid units* (1 px = 6 pt, 390×700 reference, `COMPOSER_Y = 610`, `HOME = {x:28, y:80}`,
+`docs/feat/mobile-mascot-scenes-mockup.html:52,128-303`), so the nine scenes port as a pure
+projection and the only mobile-specific work is *anchoring* the grid to the real screen.
+Proved by the load-bearing check (Execution): `HOME.x = 28` grid = 168 pt =
+`(390 − 54) / 2`, i.e. **horizontally centred**, and the sprite's bottom at home is
+`480 + 54 = 534` pt, i.e. **76 pt above the composer** — owner decision 1 is the mockup's
+own home, not a change to it.
+
+**Preconditions (verified).**
+
+1. `apps/mobile` has no mascot code at all (`rg 'mascot|Polpetto' apps/mobile/src` → no hits),
+   and does not depend on `@tentacle/tui` (`apps/mobile/package.json`), which it must not: a
+   runtime import reaches `packages/tui/src/theme.ts:23` `import chalk from "chalk"`, and
+   `packages/tui/node_modules/chalk` is not in the app's bundle (proved:
+   `.tentacle/tmp/mobile-mascot-scenes/probe.ts` → `Cannot find package 'chalk'`).
+   ⇒ **copy + parity test**, the plan's smaller diff (the alternative — a new shared package —
+   touches the TUI, its build and 15 package manifests for two data tables).
+2. `react-native-svg@15.16.0` is already a dependency (`apps/mobile/package.json`) and is
+   already the app's pixel/vector idiom (`src/ui/chart/ChartThumbnail.tsx:11-29`) ⇒ **no new
+   native dependency**; one `<Path>` per (colour, opacity) group, not ≤120 `<View>`s.
+3. Reduce Motion is already a live, app-wide hook: `useAccessibilityFlags().reduceMotion`
+   (`src/ui/FloatingActivity.tsx:55-82`), used by this very screen
+   (`src/screens/SessionScreen.tsx:947`).
+4. The empty state is `ListEmptyComponent` of the transcript FlatList
+   (`src/screens/SessionScreen.tsx:1500-1513`) whose parent View (`:1310-1315`) already
+   measures the **band** = the region between the header and the composer
+   (`setBand({width, height})`, `:948`). That band is the layer's box ⇒ no new page geometry.
+5. Today's e2e flows only assert the `transcript-empty` **id**
+   (`apps/mobile/e2e/flows/07-prompt.yaml:50`, `26-drawer.yaml:94`, `34-hub-new.yaml:37,46`);
+   no flow and no test asserts the text (rg → no hits) ⇒ dropping the words breaks nothing.
+6. `apps/mobile/test/motion-literals.test.ts` scans `src/ui`+`src/screens` `.tsx` for literal
+   `duration:`/`delay:`/`setInterval(…, n)` only, and `motion.ts` is pinned object-equal
+   (`test/motion-literals.test.ts:75-93`) ⇒ neither a rAF idiom nor new constants in the mascot
+   module trip it; do **not** add to `motion.ts`.
+
+**Design.**
+
+- **D1 — one pure module** `apps/mobile/src/mascot-scenes.ts` (React-free, AGENTS §7): the
+  bitmap + the 9 tone tables **copied** from `packages/tui/src/mascot.ts:18-28` /
+  `theme.ts:188-197` verbatim, the mockup's `EXTRA` vehicle palette, `PIXEL_PT = 6`,
+  `HOME`, the nine `MASCOT_SCENES` (durations from the mockup: 10.6 / 6.8 / 5.8 / 8.6 / 7.4 /
+  6.2 / 5.4 / 6.6 / 9.6 s), `frameAt(scene, tMs, run) → Op[]` in **grid units** (so every
+  scene body is the mockup's numbers verbatim — "port it, do not reinvent"), `pixels(ops,
+  geom, colors) → Pixel[]` (grid → pt, per-row run merge), `homeAt(geom)`, `stillFrame()`,
+  `pickScene`/`nextScene`/`pickMascotPalette`.
+- **D2 — anchoring.** `homeAt({width, height})`: `x = (width − 54) / 2`,
+  `y = height − 76 − 54`. Every op maps `ptX = homeX + (x − 28)·6`, `ptY = homeY + (y − 80)·6`.
+  So the vertical travel is the mockup's *relative* motion, re-hung on the composer: an exit
+  that leaves the mockup's 700 pt screen leaves the real one too.
+- **D3 — z-order without touching the composer.** One absolutely-positioned layer **inside the
+  band**, `overflow: "hidden"`, `pointerEvents="none"`. The band's top edge is the header's
+  bottom (parachute/helicopter/UFO enter **from behind the header**) and its bottom edge is the
+  composer's top (peek/swim are **clipped by the composer**). This reproduces the mockup's
+  draw order (`:345-347`) without relying on the composer bar being opaque — in the app it is
+  transparent (`Composer.tsx:218,382`: `bar` has no `backgroundColor`).
+  *Drift from the mockup worth naming:* its `o.front` split is dead code — no scene sets
+  `front` — so one layer suffices.
+- **D4 — the clock is the component's, the frames are the module's.** `ui/MascotScene.tsx`
+  holds `t0` + a `requestAnimationFrame` loop, stops it at `scene.durationMs` (renders
+  nothing after) and on unmount; it picks the scene and palette **once** (mount) via
+  `nextScene(appSceneMemory)` / `pickMascotPalette()`, so a re-render, a band resize or a
+  theme flip never restarts a scene (owner 4: plays once).
+- **D5 — "never the same scene twice in a row", app-wide, in memory**: `SceneMemory`
+  (`{ last, plays }`) with one module-level instance, passed in (testable, like
+  `activity-memory.ts`). `pickScene(last, rand)` is the pure rule.
+- **D6 — Reduce Motion**: no scene and no loop — `stillFrame()` (Polpetto at home, eyes open),
+  read live from `useAccessibilityFlags`, so toggling it mid-scene converges (owner 6).
+- **D7 — wiring**: the layer renders only on an empty, open session
+  (`state.view.rows.length === 0 && state.status.phase === "open"`), so the first message (or
+  any row) unmounts it mid-scene (owner 5); `ListEmptyComponent` keeps the `transcript-empty`
+  id and the `Opening the session…` `EmptyState` (`:1509-1511`), and drops the
+  "Nothing here yet / Say something below." pair (owner 1).
+- **D8 — Mimetismo's "eyes only (light)"** needs a colour that reads on *both* appearances
+  (the mockup hard-codes `#e8eaed`, invisible on white): the module takes `eyeFade` as an
+  input and the component passes `palette.label`. Nothing carries meaning by hue (owner 7).
+
+**Files (dependency order).**
+
+1. `apps/mobile/src/mascot-scenes.ts` — new, pure (D1, D2, D5).
+2. `apps/mobile/src/ui/MascotScene.tsx` — new, renderer + clock (D3, D4, D6).
+3. `apps/mobile/src/screens/SessionScreen.tsx` — `:1310-1345` insert the layer; `:1500-1513`
+   empty state (D7).
+4. `apps/mobile/test/mascot-scenes.test.ts`, `mascot-parity.test.ts`, `mascot-wiring.test.ts`.
+5. `changelog.d/mobile-mascot-scenes.added.md`.
+
+**Failure modes.**
+
+| Mode | Convergence |
+|---|---|
+| band not measured yet (`height: 0`) | render nothing (no divide-by-zero, no flash at the top) |
+| unmount mid-scene (row arrives, back nav) | `cancelAnimationFrame` in the effect cleanup; no leak |
+| Reduce Motion toggled mid-scene | the loop stops, `stillFrame` shows; toggling back does not replay |
+| app backgrounded (rAF pauses, `t` jumps) | `t ≥ durationMs` ⇒ finished, nothing drawn; never restarts |
+| tiny band (landscape / split) | home is clamped to `y ≥ 0`; the sprite may overhang and is clipped |
+| scene ends | nothing is drawn; the screen stays empty until the next empty session (owner 4) |
+
+**Tests (red before green, AGENTS §9).**
+
+- `mascot-scenes.test.ts`: `pickScene` over 10k seeds (never the last, covers all 9) +
+  `nextScene` memory; `pickMascotPalette` covers all 9 and clamps `rand()===1`;
+  **per scene** `frameAt` at `t=0`, mid and `t = durationMs − 1` — arrivals at home, exits
+  off-screen, and `frameAt(scene, durationMs) === []`; `stillFrame` at home with eyes open;
+  `homeAt` (centred, 76 pt above the band bottom); `pixels` (run merge, alpha, colour
+  resolution, camo's per-op palette + `eyeFade`).
+- `mascot-parity.test.ts`: bitmap + the 9 tone tables **parsed out of** `mascot.ts`/`theme.ts`
+  source text (a runtime import is impossible: `chalk`) and compared to the copies.
+- `mascot-wiring.test.ts`: source pins — layer `testID="mascot"`, `pointerEvents="none"`,
+  `overflow: "hidden"`, `react-native-svg` only, liveness condition = empty rows + open phase,
+  the "Nothing here yet"/"Say something below." words gone, the `transcript-empty` id kept,
+  no `@tentacle/tui` dependency.
+
+**Validation.** `bunx biome check` on the touched files; the three test files; then the
+orchestrator's `bun run check`. Screenshots need a Release build of the Expo app on a
+simulator — attempted in Execution, reported honestly either way.
+
+**Notes/debt.** Internal UI, no wire and no persistence change ⇒ no `protocol.d/` note.
+The nine scenes are the mockup's numbers, not a redesign: a divergence is a bug, not taste.
+
+Hints, as written by the orchestrator (kept for traceability):
 - **Pure module** (AGENTS §7 "logic lives in pure modules"): `apps/mobile/src/mascot-scenes.ts`
   — sprites, scenes, `frameAt(scene, tMs, run) → DrawOp[]` (grid units), `pickScene(last, rand)`
   (never repeats), durations. Unit-tested in `apps/mobile/test/`. The component only draws ops.
@@ -93,5 +212,84 @@ Save them under `docs/feat/mobile-mascot-scenes/`. End your report with
 `SCREENSHOTS: <paths>` and `READY` or `NOT READY: <why>`.
 
 ## Execution
+
+*— deepseek-v4-pro (executor), 2026-11-22*
+
+**Load-bearing check, re-run first (it held).** The mockup's home is the owner's home:
+`rg` on the mockup gives `W=390, U=6, HOME={x:28,y:80}, COMPOSER_Y=610`; `(390−54)/2 = 168 = 28·6`,
+and the sprite's bottom at home is `480+54 = 534`, i.e. `610−534 = 76` pt above the composer.
+So "centred horizontally, just above the composer" (owner decision 1) is the mockup's own
+home, and `HOME_INSET_PT = 76` is its derivation, not a new taste. Recorded, with the rest of
+the preconditions, in `.tentacle/tmp/mobile-mascot-scenes/repro.txt` (capability absent:
+`rg 'mascot|Polpetto' apps/mobile/src` → no hits).
+
+**As built, in the Implementation's order.**
+
+1. `apps/mobile/src/mascot-scenes.ts` (new, ~1030 lines): bitmap + 9 tone tables copied from
+   the TUI, `EXTRA_TONES`, `PIXEL_PT = 6`, `HOME_GRID`, `HOME_INSET_PT`, `homeAt`, `body()`,
+   the nine sprites and the nine scenes (`frameAt` in grid units), `stillFrame`, `showsScene`,
+   `pixels` (grid → pt, row-run + vertical merge), `colorsFor`, `pickMascotPalette`,
+   `pickScene`, `nextScene`, `sceneMemory`, `sceneByKey`, `MASCOT_SCENES`. Imports NOTHING.
+2. `apps/mobile/src/ui/MascotScene.tsx` (new, 148 lines): the clock
+   (`requestAnimationFrame`, origin in a `useRef`, stops at `durationMs`, cancelled on
+   unmount), the once-per-mount pick, `Svg`/`Rect` drawing, `testID="mascot"`,
+   `pointerEvents="none"`, `overflow: "hidden"`, absolutely positioned in the band.
+3. `apps/mobile/src/screens/SessionScreen.tsx`: the layer after the transcript
+   (`:1517-1524`), `ListEmptyComponent` reduced to the `opening` `EmptyState` (`:1506-1513`),
+   `showsScene` imported (`:124`).
+4. Tests: `apps/mobile/test/mascot-scenes.test.ts` (53), `mascot-parity.test.ts` (7),
+   `mascot-wiring.test.ts` (10) — 71 total.
+5. `changelog.d/mobile-mascot-scenes.added.md`.
+
+**Drift from the Implementation (and why).**
+
+- **Two bugs found by my own tests, fixed in the module, not the test.** (a) Mimetismo's
+  palette-switch loop (`while (i < times.length - 1 && t >= times[i+1])`) — my first version
+  mutated `i` then read a stale `next`, so it never advanced: the eight switches collapsed to
+  two. (b) `mergeDown` dropped `h` on each column's first entry, so every rect came out
+  6 pt tall (the vertical merge was a no-op) — caught by the ≤120-rect promise. Both were
+  red-then-green.
+- **The vertical merge was added, not planned.** The UFO's 60-row beam alone exceeded the
+  plan's "≤ ~120 rects" (measured worst frame: 132). Merging vertically contiguous
+  same-coloured rects brought the worst frame to 82 (measured, `heli`), so the plan's number
+  now holds with margin rather than being relaxed.
+- **The layer sits AFTER the transcript, not before.** The plan said "over the transcript
+  area"; placing it earlier in the JSX would paint it *under* the (transparent) empty list.
+  `mascot-wiring.test.ts` now pins the order, since order is the z-order here.
+- **`showsScene` was extracted to the pure module.** I first wrote the condition inline in the
+  JSX; AGENTS §7 wants the branching testable, and the inline version survived a mutation
+  uncaught — which is exactly why it moved.
+- **`sceneByKey` lives in the module, not the component** (one lookup, one place).
+
+**Red before green (AGENTS §9).** The wiring test's assertions and the scenes test were red
+first (12 failures on the first run, all from the two real bugs above plus my own wrong
+expectations). Mutations, each verified to fail the named test and then reverted:
+
+| Mutation | Caught by |
+|---|---|
+| old "Nothing here yet / Say something below." restored | wiring › words are gone |
+| `pointerEvents="auto"` on the layer | wiring › touch-transparent box |
+| `showsScene` ignores `rowCount` | scenes › "one row is enough to remove it" (**initially NOT caught — test added**) |
+| `frameAt` never ends | scenes › end is exclusive (2 tests) |
+| `pickScene` may return `last` | scenes › 10k seeds; every-excluded (2 tests) |
+| one tone hex changed (`#7B3FC0`→`#7B3FC1`) | parity › every tone equals the TUI's |
+| `stillFrame` eyes closed | scenes › Reduce Motion still frame |
+
+**Not verified here (stated plainly).** The mandatory **simulator screenshots** are NOT
+produced: this worktree has no `node_modules` and no generated `apps/mobile/ios` project, so
+there is neither an Expo/`xcrun` build nor an installable `so.tentacle.app`; a Release build
+is a minutes-long, environment-dependent step the orchestrator's gate owns. Also
+environmental: `bunx tsc -p apps/mobile` cannot run here (2769 `TS1287` errors across
+*pre-existing* files — `expo/tsconfig.base` and the RN types are missing), and the RN-mocked
+render tests (`notice-row`, `chart-thumbnail-render`) fail on `Cannot find module
+'@tentacle/core'` for the same reason. What I did run instead: the pure module typechecks
+under `tsc --strict --noUncheckedIndexedAccess` (clean, after fixing two real narrowing bugs
+found by it), `bunx biome check` is clean on all six files, and the three task files (71
+tests) plus the guards they could trip (`motion-literals`, `node-builtins-guard`,
+`bundle-node-free`) are green. **To verify the visual side:** build for a simulator and run a
+flow that asserts `testID="mascot"`, once with Reduce Motion on and once with it off.
+
+**Unplanned but noticed, left alone:** the mockup's `o.front` split is dead code (no scene
+sets it), so one layer covers both z-orders — noted in Implementation rather than emulated.
 
 ## Review
