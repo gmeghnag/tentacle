@@ -1606,6 +1606,8 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "36-theme-beta-shots": "THEMEBETA_ID",
   "36-preview-cards": "PREVIEW_ID",
   "38-running-row": "RUNROW_ID",
+  // docs/fix/mobile-transcript-type.md: the transcript's type, dark + light.
+  "41-transcript-type-shots": "TRANSCRIPT_ID",
 };
 
 /** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */

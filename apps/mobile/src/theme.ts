@@ -329,8 +329,15 @@ export const typography = {
   monoCode: { fontSize: 12.5, lineHeight: 19, fontFamily: MONO },
   monoDiff: { fontSize: 12, lineHeight: 21, fontFamily: MONO },
   monoInline: { fontSize: 14, lineHeight: 20, fontFamily: MONO },
-  /** A step's name and its one mono line (docs/feat/mobile-tool-rows.md, mockup C). */
-  step: { fontSize: 14, lineHeight: 20, fontWeight: "500" },
+  /**
+   * A step's name and its one mono line (docs/feat/mobile-tool-rows.md, mockup C).
+   * 400 by owner decision 2026-11-22 (docs/fix/mobile-transcript-type.md): a step row
+   * steps back behind the prose by size and lightness, never by hue. Its lineHeight
+   * stays 20 — the rail's branch geometry measures it (`step-rail.ts`).
+   */
+  step: { fontSize: 14, lineHeight: 20, fontWeight: "400" },
+  /** A step's trailing duration: one size down from its name (owner decision 3). */
+  stepMeta: { fontSize: 13, lineHeight: 18 },
   stepMono: { fontSize: 12.5, lineHeight: 18, fontFamily: MONO },
   sas: { fontSize: 40, lineHeight: 48, fontWeight: "600", letterSpacing: 6, fontFamily: MONO },
 } as const satisfies Record<string, TextStyleToken>;

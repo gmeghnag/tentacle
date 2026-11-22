@@ -51,36 +51,76 @@ export function paletteVariant(palette: Palette): "petrol" | undefined {
 }
 
 /**
- * The four bundled faces (`assets/fonts`, SIL OFL 1.1). Each key is the face's
+ * The eight bundled faces (`assets/fonts`, SIL OFL 1.1): one per (weight, style)
+ * the app can ask (docs/fix/mobile-transcript-type.md — a weight no face carries
+ * is rounded away, so 500 and 600 have to exist as files). Each key is the face's
  * PostScript name, which is also the name `fonts-expo.ts` registers it under.
  */
 export const FIGTREE_FACES = {
   regular: "Figtree-Regular",
+  medium: "Figtree-Medium",
+  semiBold: "Figtree-SemiBold",
   bold: "Figtree-Bold",
   italic: "Figtree-Italic",
+  mediumItalic: "Figtree-MediumItalic",
+  semiBoldItalic: "Figtree-SemiBoldItalic",
   boldItalic: "Figtree-BoldItalic",
 } as const;
 
 export type FigtreeFace = (typeof FIGTREE_FACES)[keyof typeof FIGTREE_FACES];
 
+/** Each face's own `usWeightClass` (read from its `OS/2` table): the weight to name it with. */
+const FACE_WEIGHT: Readonly<Record<FigtreeFace, "400" | "500" | "600" | "700">> = {
+  [FIGTREE_FACES.regular]: "400",
+  [FIGTREE_FACES.medium]: "500",
+  [FIGTREE_FACES.semiBold]: "600",
+  [FIGTREE_FACES.bold]: "700",
+  [FIGTREE_FACES.italic]: "400",
+  [FIGTREE_FACES.mediumItalic]: "500",
+  [FIGTREE_FACES.semiBoldItalic]: "600",
+  [FIGTREE_FACES.boldItalic]: "700",
+};
+
 type Weight = string | number | undefined;
 type FontStyleValue = string | undefined;
 
-const BOLD_NAMES = new Set(["bold", "semibold", "heavy", "black"]);
+/** The weights a name stands for (CSS keyword names; numbers pass through). */
+const WEIGHT_NAMES: Readonly<Record<string, number>> = {
+  thin: 100,
+  extralight: 200,
+  light: 300,
+  normal: 400,
+  regular: 400,
+  medium: 500,
+  semibold: 600,
+  bold: 700,
+  extrabold: 800,
+  heavy: 800,
+  black: 900,
+};
 
-/** Bold from 600 up (and the bold names); 500 and below is Regular. */
-function isBold(weight: Weight): boolean {
-  if (weight === undefined) return false;
-  if (typeof weight === "number") return weight >= 600;
-  if (BOLD_NAMES.has(weight)) return true;
+/** A weight as a number, or 400 when it says nothing usable (RN's own default). */
+function weightOf(weight: Weight): number {
+  if (weight === undefined) return 400;
+  if (typeof weight === "number") return Number.isFinite(weight) ? weight : 400;
+  const named = WEIGHT_NAMES[weight.trim().toLowerCase()];
+  if (named !== undefined) return named;
   const n = Number(weight);
-  return Number.isFinite(n) && n >= 600;
+  return Number.isFinite(n) ? n : 400;
 }
 
+/**
+ * The face for a weight and a style, EXACT for the weights the app asks
+ * (400/500/600/700), the nearest BOLD for anything above 700 and the nearest
+ * face for anything below 400 — never `undefined`, so a text never falls back to
+ * the system font.
+ */
 export function figtreeFace(weight: Weight, style: FontStyleValue): FigtreeFace {
-  const bold = isBold(weight);
   const italic = style === "italic";
-  if (bold) return italic ? FIGTREE_FACES.boldItalic : FIGTREE_FACES.bold;
+  const w = weightOf(weight);
+  if (w >= 700) return italic ? FIGTREE_FACES.boldItalic : FIGTREE_FACES.bold;
+  if (w >= 600) return italic ? FIGTREE_FACES.semiBoldItalic : FIGTREE_FACES.semiBold;
+  if (w >= 500) return italic ? FIGTREE_FACES.mediumItalic : FIGTREE_FACES.medium;
   return italic ? FIGTREE_FACES.italic : FIGTREE_FACES.regular;
 }
 
@@ -100,12 +140,12 @@ export interface FontInherit {
 
 /**
  * The style a Figtree text gets on top of its own. The weight and the style are the
- * FACE's (400/700, normal/italic) so iOS's own family matching lands on the same
- * face it was named (a 500 left as 500 would round to Bold).
+ * FACE's own (400/500/600/700, normal/italic) so iOS's own family matching lands on
+ * the very face it was named — a weight left to RN's matcher is what lost 500.
  */
 export interface FigtreePatch {
   readonly fontFamily: FigtreeFace;
-  readonly fontWeight: "400" | "700";
+  readonly fontWeight: "400" | "500" | "600" | "700";
   readonly fontStyle: "normal" | "italic";
 }
 
@@ -126,12 +166,16 @@ export function textFont(
   };
   if (font === null || inherit.family !== undefined) return { patch: null, inherit };
   const face = figtreeFace(inherit.weight, inherit.style);
-  const bold = face === FIGTREE_FACES.bold || face === FIGTREE_FACES.boldItalic;
-  const italic = face === FIGTREE_FACES.italic || face === FIGTREE_FACES.boldItalic;
+  const italic =
+    face === FIGTREE_FACES.italic ||
+    face === FIGTREE_FACES.mediumItalic ||
+    face === FIGTREE_FACES.semiBoldItalic ||
+    face === FIGTREE_FACES.boldItalic;
   return {
     patch: {
       fontFamily: face,
-      fontWeight: bold ? "700" : "400",
+      // The FACE's own weight class (`FIGTREE_FACE_WEIGHTS`), so iOS matches it.
+      fontWeight: FACE_WEIGHT[face],
       fontStyle: italic ? "italic" : "normal",
     },
     inherit,
