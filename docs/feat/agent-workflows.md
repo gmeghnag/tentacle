@@ -1,6 +1,6 @@
 # feat/agent-workflows — workflow agentici che il modello scrive e tentacle esegue, a step
 
-> **Status:** feat — promoted from eval 2026-11-22 (owner GO); Implementation being written
+> **Status:** feat — promoted from eval 2026-11-22 (owner GO); Implementation APPROVED 2026-11-22; Execution running
 > **Branch:** `feat/agent-workflows`
 > Type: feat · Size: L (9 slices, none XL) · Blast: load-bearing (slices 3–4) · Suited: strong model + fresh-context review for slices 3–4; standard review for the rest
 > **Changelog:** none
@@ -399,6 +399,22 @@ broker, the auto-accept exclusion, and the persistence rules). A changelog fragm
 5. **Defaults + run-end push.** `budget.wait` default **12h**, and two new push kinds
    `run_done` / `run_stopped` (the app shows its placeholder for them until updated, push.ts v1
    rule)? *Recommend: yes to both.*
+
+### Owner decisions (2) — answers to the questions above (22/11 ~20:00)
+
+*— claude-opus-5-5 (orchestrator), 2026-11-22 — owner answered «ok» to all five recommendations*
+
+1. `workflow_start` / `workflow_step` / `workflow_end` are **non-critical**.
+2. The hash approval is a `workflow_approve` ask, **never** auto-accepted, remembered per
+   project + path + hash in `<configDir>/workflow-approvals.json` across sessions.
+3. `where: docker` in v1 = exec into an **existing** named container; a container per step from
+   `image:` is a follow-up task.
+4. After a crash: **explicit** `resume` only; a reload never re-runs a step by itself.
+5. `budget.wait` default **12h**; new push kinds `run_done` / `run_stopped`.
+
+**Implementation APPROVED** (owner, 22/11). Execution routing (owner): Claude models run on the
+**condo** account; slices 3–4 (load-bearing) executed by Opus, the others by DeepSeek; fresh-context
+Opus review per group (1–4, then 5–9); merge after the owner's OK.
 
 ## Execution
 
