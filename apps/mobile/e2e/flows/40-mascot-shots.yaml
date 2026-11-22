@@ -1,0 +1,141 @@
+appId: so.tentacle.app
+---
+# 40-mascot-shots (orchestrator, owner review of docs/feat/mobile-mascot-scenes.md):
+# opens NEW empty sessions (the hub's More → New, as flow 34) and shoots Polpetto's
+# random scene at a few moments, in light then dark. Visual only: no assertion on
+# which scene plays (it is random by design), only that the layer is there.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${HUBITEM_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${HUBITEM_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- tapOn:
+    id: "composer-input"
+- inputText: "hello from the mascot flow"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+# round 1 (light)
+
+
+- runFlow:
+    file: _hub-more.yaml
+    env:
+      ITEM: "new"
+- tapOn:
+    id: "hub-menu-new"
+# The scene layer is hidden from accessibility on purpose (decorative), so the
+# flow cannot wait on it: it waits for the empty transcript, then shoots on a clock.
+- extendedWaitUntil:
+    visible:
+      id: "transcript-empty"
+    timeout: 10000
+- takeScreenshot: 40-r1-a
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 700
+    optional: true
+- takeScreenshot: 40-r1-b
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 900
+    optional: true
+- takeScreenshot: 40-r1-c
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 1200
+    optional: true
+- takeScreenshot: 40-r1-d
+# round 2 (dark)
+- runScript:
+    file: "appearance.js"
+    env:
+      NAME: "dark"
+
+- runFlow:
+    file: _hub-more.yaml
+    env:
+      ITEM: "new"
+- tapOn:
+    id: "hub-menu-new"
+# The scene layer is hidden from accessibility on purpose (decorative), so the
+# flow cannot wait on it: it waits for the empty transcript, then shoots on a clock.
+- extendedWaitUntil:
+    visible:
+      id: "transcript-empty"
+    timeout: 10000
+- takeScreenshot: 40-r2-a
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 700
+    optional: true
+- takeScreenshot: 40-r2-b
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 900
+    optional: true
+- takeScreenshot: 40-r2-c
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 1200
+    optional: true
+- takeScreenshot: 40-r2-d
+# round 3 (light)
+
+- runScript:
+    file: "appearance.js"
+    env:
+      NAME: "light"
+- runFlow:
+    file: _hub-more.yaml
+    env:
+      ITEM: "new"
+- tapOn:
+    id: "hub-menu-new"
+# The scene layer is hidden from accessibility on purpose (decorative), so the
+# flow cannot wait on it: it waits for the empty transcript, then shoots on a clock.
+- extendedWaitUntil:
+    visible:
+      id: "transcript-empty"
+    timeout: 10000
+- takeScreenshot: 40-r3-a
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 700
+    optional: true
+- takeScreenshot: 40-r3-b
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 900
+    optional: true
+- takeScreenshot: 40-r3-c
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 1200
+    optional: true
+- takeScreenshot: 40-r3-d

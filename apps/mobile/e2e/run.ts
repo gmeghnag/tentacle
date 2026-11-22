@@ -1491,6 +1491,8 @@ export const FLOWS: readonly string[] = [
   "34-hub-scheduled",
   "34-hub-dictate",
   "34-hub-new",
+  // docs/feat/mobile-mascot-scenes.md: Polpetto's random scene on new empty sessions, light + dark (visual).
+  "40-mascot-shots",
   "35-gallery-shots",
   // docs/feat/mobile-theme-beta.md: the Figtree try-out, OFF vs ON, light + dark.
   "36-theme-beta-shots",
@@ -1597,6 +1599,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "34-hub-scheduled": "HUBITEM_ID",
   "34-hub-dictate": "HUBITEM_ID",
   "34-hub-new": "HUBITEM_ID",
+  "40-mascot-shots": "HUBITEM_ID",
   // docs/feat/mobile-gallery-polish.md: the gallery's six chart kinds + a page.
   "35-gallery-shots": "GALLERY_ID",
   // docs/feat/mobile-theme-beta.md: the try-out's chat + gallery.
