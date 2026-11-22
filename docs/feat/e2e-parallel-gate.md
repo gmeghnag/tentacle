@@ -192,4 +192,161 @@ Before done: `bun test` + `bun run typecheck` + `bun run lint` (baseline clean, 
 
 ## Execution
 
+*— deepseek-chat, 2026-11-22*
+
+As-built, in dependency order, with every drift from the Implementation named.
+
+### Step 0 — the load-bearing check, re-run first (PASSED, with a caveat I caused)
+
+The plan's one unproved item was whether two concurrent `maestro test` processes (2.12.1) on two
+different simulators collide on a fixed XCTest-driver host port. Decided empirically in
+`.tentacle/tmp/e2e-parallel-gate/step0/`: two `maestro --device … test` runs started together, one
+per simulator, both `exit 0` with every step `COMPLETED`, and each process's driver listening on its
+OWN ephemeral loopback port (`127.0.0.1:53051`, `127.0.0.1:53052`) — no clash, no
+`DeviceUnreachable`. `STEP0.txt` holds the command, the ports and the verdict. **No per-run driver
+port flag is needed.**
+
+Caveat, stated plainly: `0B43D716…` was running ANOTHER gate's flow at that moment
+(`run-gate-build-2211d.sh`, run `1795384590574`) and my probe shared that simulator. That gate's
+`24-ui-shots` failed 93 s in with `maestro.DeviceUnreachableException: Device became unreachable
+during screenshot` at 23:32:02 — inside my probe's window. The probe cannot be called the cause (the
+exception is the suite's documented flake class, and the plan's own failure-mode table treats
+`DeviceUnreachable` under load as `flaky`-only), but it cannot be excluded either: I should have
+waited for the simulator to be free. Step 0 should be re-run on an idle machine during Validation; no
+other finding below depends on the interfered run.
+
+### Slice 1 — `apps/mobile/e2e/shard.ts` (new, pure)
+
+`SEED_VAR_SOURCES` / `SHARED_SEED_VARS` (the map is the source of truth, so the splitter and
+`spawnFlow`'s `-e` list cannot drift), `parseUdids`, `flowGroups` (union-find over the seeded vars,
+with a `textOf` gatherer supplied by the caller), `latestDurations`, `splitShards` (LPT greedy over
+GROUPS, ties by `FLOWS` index), `mergeShardResults`, `parallelExitCode`, `builtAppPath`,
+`appCacheKey`, `isHarnessOrTest`, `cacheEvictions`, `relayLine`, `shardLabel`, `seedValues`,
+`DELETED`, `DEFAULT_FLOW_SECONDS`, `KEY_SCHEMA`.
+
+Written as stubs first (37 of 47 tests red), then implemented. Two of the six remaining reds were
+real semantics, not test typos:
+
+- `parallelExitCode([1, 0], green verdict)` returned **0** — a child's own red washed out by a green
+  merge. Fixed: a child code of `1` (or `null`) keeps the gate red unless the verdict is red too;
+  only a `2+` code short-circuits earlier. A genuine hole the plan did not name.
+- `cacheEvictions`' returned order (cosmetic).
+
+**Drift from the plan (test strength).** The plan's real-file ALPHA canary does NOT catch a dropped
+union step: every flow in `{02,05,06,07,11,17,22,26}` mentions `ALPHA_ID` directly, so the union is
+only load-bearing for a flow that reaches a seeded session through a SECOND variable. Measured, not
+assumed (M1 reddened only the synthetic bridge test). Added `flowGroups > the REAL flows: a
+CHARLIE-only flow joins ALPHA's group through 06's bridge`, which pins the real property.
+
+**Drift (`seedValues` instead of a bare constant).** The plan said `spawnFlow` builds its `-e` list
+from `SHARED_SEED_VARS`. Done through `SEED_VAR_SOURCES` + `seedValues(seeded)`: an index-arithmetic
+version was written first and rejected as fragile (an off-by-one on `askIds` would silently pass an
+empty id).
+
+### Slice 2 — `apps/mobile/e2e/run.ts`
+
+- `parseArgs`: `--shard-of` (requires `--app` and exactly one `--udid`) and `--no-app-cache`.
+- `versionOf`, `simctlRuntimes`, `simctlDevices` exported; `runSwiftTests()` extracted (both paths
+  call it).
+- `main()`: the parallel branch right after the tag check — `parseUdids`, `--hold` refused with
+  several UDIDs, `runParallel(udids, options)` dynamically imported (no cycle). `--shard-of` changes
+  exactly three things: `runDir = <parent>/sim-<udid8>`, no `test:swift`, no app cache.
+- `resolveApp` + `appCacheInputs`: `--app` verbatim → cached hit (`Info.plist` present) → build, then
+  store via `fs.cp` into `<key>.tmp-<pid>` + `rename`; a cache failure only warns; 3 newest kept.
+- `waitForServe` (D7) replacing the five `waitForPort` calls that follow a `startServe`; the probe
+  that checks serve is DOWN stays a plain `waitForPort`. The push payload file name is pid-qualified.
+
+**Drift (good one).** The shard's dir name is `shardLabel(udid)` — the SAME function the parent uses
+to read the child's summary, not the plan's inline `sim-${udid.slice(0,8)}`. Two copies of that slice
+would drift on a non-standard UDID and the merge would read nothing.
+
+**Drift (`versionOf`).** `.env(env ?? process.env)` did not typecheck under `strict` once the function
+was exported (a `ProcessEnv` index is `string | undefined`); it now materializes a
+`Record<string, string>`. Behaviour identical.
+
+**Drift (`appCacheInputs`).** It now applies `isHarnessOrTest` itself (963 inputs instead of 2359),
+not only in `appCacheKey`. The plan's pure requirement — "exclusion applied INSIDE the pure function,
+given the raw list" — still holds, and `appCacheKey` still filters, so the key is unchanged; this only
+stops the gate reading ~1400 files it would discard.
+
+### Slice 3 — `apps/mobile/e2e/parallel.ts` (new, effectful)
+
+`runParallel(udids, options)`: validate every device before any build, run `test:swift` once, boot
+device A, resolve the app ONCE, split, spawn the children concurrently with per-shard logs and
+relayed lines, merge, write `summary.txt`/`summary.json`/`parent.json`, print the `wall …` line,
+return `parallelExitCode`. `flowText` is the recursive gatherer (`runFlow:` and `file:`, with a
+visited set); `readHistory` reads one level under the runs dir (single runs and parallel PARENTS,
+never a child's).
+
+**Drift.** The plan's `ParallelDeps` indirection (an injected bag of callbacks) is gone: `parallel.ts`
+imports the effectful helpers from `run.ts` directly (it is loaded dynamically FROM `run.ts`, so
+there is no cycle). A second, hand-maintained interface to keep in sync was ceremony — the decisions
+it was meant to isolate all live in `shard.ts`, where they are unit-tested.
+
+**Drift.** A quarantined row's tags come from the parent's own `metas`; `mergeShardResults` takes a
+`tagsOf` callback so a synthesized red keeps a `known-bug`/`flaky` tag and is not miscounted.
+
+### Slice 4 — the docs and the consumers
+
+- `scripts/e2e-gate.sh`: usage/comment only (`<udid>[,<udid>…]`, the parallel form, the cache,
+  `--no-app-cache`); the `exec bun … --udid "$udid"` line is unchanged.
+- `scripts/mockup-kit/calibrate.ts`: `shotPath` also searches `<run>/sim-*/ios*/`.
+- `apps/mobile/e2e/README.md`: a "Two simulators at once" section + the app cache.
+
+### Slice 5 — tests
+
+`apps/mobile/test/e2e-shard.test.ts` (new, 52 tests) and `apps/mobile/test/e2e-gate.test.ts`
+(+`--shard-of`, `--no-app-cache`, and two `waitForServe` cases). Fixture:
+`apps/mobile/test/fixtures/e2e-summary-1795363693570.json` (the real last gate's 65 rows).
+
+Red first: stubs → 37 fail / 10 pass; then 6 fail → 0. `waitForServe` and the two `parseArgs` cases
+were green-on-new by construction (that code already existed), so they are covered by
+mutation-instead (M4–M6).
+
+### Mutation checks (all six bite)
+
+| # | Mutation | Reddened |
+|---|---|---|
+| M1 | drop the union step in `flowGroups` | the synthetic bridge test + the REAL-flows bridge test (48 pass, 2 fail) |
+| M2 | drop the missing-flow → `fail` synthesis | 2 `mergeShardResults` tests (48 pass, 2 fail) |
+| M3 | widen the key's exclusion to all of `apps/mobile/` | 3 `appCacheKey` tests (47 pass, 3 fail) |
+| M4 | `appCacheInputs` stops excluding the harness | the REAL-repo app-input test (50 pass, 1 fail) |
+| M5 | the key sees a file's path but not its content | 2 `appCacheKey` tests (49 pass, 2 fail) |
+| M6 | `waitForServe` degenerates to a bare `waitForPort` | the "serve exits before listening" test (40 pass, 1 fail) |
+
+### Real-data check (no simulators — the live runs are Validation's)
+
+Over the real repo and the real duration history:
+
+```
+history runs: 10 newest: 1795363693570
+flows with a duration: 58
+ALPHA group via parallel.flowText: ["02-session-list","05-daemon-down","17-persisted",
+  "06-session-open","07-prompt","11-disconnect-mid-turn","26-drawer","22-relay-only"]
+split sizes: [35, 33]  seconds: [2222, 1999]
+group never split: true
+```
+
+2222 s vs 1999 s — a 223 s difference, inside the plan's "within 237 s" bound (the largest single
+flow, `33-hub`). ALPHA is exactly the plan's predicted set and is never split.
+
+### Changelog (drift from the plan)
+
+The plan said "dev-only, so no `changelog.d/` fragment". The task's instructions require one, and the
+parallel form is visible to anyone running the gate, so `changelog.d/e2e-parallel-gate.added.md` was
+written (one bullet; `CHANGELOG.md` untouched).
+
+### Not done here (Validation's; stated as unverified)
+
+- No live two-simulator run, no cache hit/miss, no single-sim regression: `0B43D716…` was still busy
+  with `run-gate-build-2211d.sh` throughout Execution, and the plan assigns these to the orchestrator.
+  `parallel.ts`'s spawn/relay/signal code is therefore **verified only by typecheck and reading**, as
+  the plan anticipated ("checked live only").
+- `scripts/mockup-kit/calibrate.ts`'s new `sim-*` branch is exercised only by real artefacts; no test
+  covers it.
+
+Gate status: `tsc --noEmit -p apps/mobile` clean; `biome check` clean on all 6 changed files;
+`bun test apps/mobile/test/e2e-shard.test.ts apps/mobile/test/e2e-gate.test.ts` → 90 pass, 0 fail. The
+whole-repo gate is the orchestrator's.
+
 ## Review

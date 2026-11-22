@@ -21,7 +21,7 @@ import {
   verdictOf,
 } from "../e2e/gate.ts";
 import { hookFor } from "../e2e/hooks.ts";
-import { FLOWS, flowMetas, killFlowTree, parseArgs, runAttempt } from "../e2e/run.ts";
+import { FLOWS, flowMetas, killFlowTree, parseArgs, runAttempt, waitForServe } from "../e2e/run.ts";
 
 const flow = (header: string) => `appId: so.tentacle.app\n${header}---\n- tapOn: "x"\n`;
 
@@ -261,6 +261,54 @@ describe("run.ts arguments", () => {
     });
     expect(() => parseArgs(["--app"])).toThrow();
     expect(() => parseArgs(["--flow-timeout", "0"])).toThrow();
+  });
+
+  test("--shard-of needs --app and exactly one --udid", () => {
+    expect(parseArgs(["--shard-of", "/p/123", "--app", "/x/t.app", "--udid", "A"])).toEqual({
+      shardOf: "/p/123",
+      app: "/x/t.app",
+      udid: "A",
+    });
+    // A shard never builds its own: without --app two xcodebuilds would race the
+    // same DerivedData.
+    expect(() => parseArgs(["--shard-of", "/p/123", "--udid", "A"])).toThrow();
+    // …and two simulators would make it a parent again.
+    expect(() =>
+      parseArgs(["--shard-of", "/p/123", "--app", "/x/t.app", "--udid", "A,B"]),
+    ).toThrow();
+    expect(() => parseArgs(["--shard-of", "/p/123", "--app", "/x/t.app"])).toThrow();
+    expect(() => parseArgs(["--shard-of"])).toThrow();
+  });
+
+  test("--no-app-cache is a flag, not a value", () => {
+    expect(parseArgs(["--no-app-cache"])).toEqual({ noAppCache: true });
+    expect(parseArgs(["--app", "/x/t.app", "--no-app-cache"])).toEqual({
+      app: "/x/t.app",
+      noAppCache: true,
+    });
+  });
+});
+
+describe("waitForServe", () => {
+  // The TOCTOU a second run creates: `freePort` binds `:0` and releases it, so a
+  // port can be taken before our `serve` binds. The port then ANSWERS — from the
+  // other run's daemon, same token — and a bare `waitForPort` would seed and pair
+  // every flow against a stranger's serve. The child's own exit must win.
+  test("a serve that exits before listening fails loudly", async () => {
+    let exited: (code: number) => void = () => {};
+    const child = {
+      exited: new Promise<number>((resolve) => {
+        exited = resolve;
+      }),
+    };
+    const waiting = waitForServe(child, 1, 5_000);
+    exited(1);
+    await expect(waiting).rejects.toThrow(/serve exited \(code 1\) before listening/);
+  });
+
+  test("a serve that outlives the wait is the timeout's error, not an exit's", async () => {
+    const child = { exited: new Promise<number>(() => {}) };
+    await expect(waitForServe(child, 1, 200)).rejects.toThrow(/nothing listening/);
   });
 });
 
