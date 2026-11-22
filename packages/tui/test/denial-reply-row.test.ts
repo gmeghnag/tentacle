@@ -31,8 +31,9 @@ describe("the row of a call refused with a reply", () => {
     // Mutation (red): render `resultText` when `denialReply` is set → fails.
     for (const expanded of [false, true]) {
       const lines = body(refused(), expanded);
-      // Expanded, the full command leads on `│ ` rows (docs/feat/tui-tool-expand.md).
-      const command = expanded ? ["│ rm -rf build"] : [];
+      // Expanded, the full command leads in the `⎿ $ ` block
+      // (docs/fix/tui-shell-row-collapsed: no `  │ ` rows for a shell command).
+      const command = expanded ? ["$ rm -rf build"] : [];
       expect(lines).toEqual([...command, "✗ Denied · why?", "           try bun run build"]);
       expect(lines.join("\n")).not.toContain("Answer the user");
     }

@@ -185,3 +185,71 @@ vs 38 on the pristine copy — all `@tentacle/protocol` resolution and none in t
 lines I touched.
 
 ## Review
+
+*— claude-sonnet-4-5 (gate round), 2026-11-23*
+
+The orchestrator's gate ran `bun run check` on this branch and failed 8 tests.
+Diagnosis and fix, one per failure — all of them test/codegen-side, no product
+code changed in this round.
+
+1. **Codegen drift (2 failures, one cause).** `scripts/test/mockup-kit.test.ts`
+   "no drift" and `config/test/readme-config-table.test.ts` "the block equals the
+   generated one" were both stale BY CONSTRUCTION: this branch changes a rendered
+   row (`toolRunning` no longer draws `⎿ running…`) and `key-docs.ts`'s
+   `beta.compactShell` text, so the two generated artefacts had to move with it.
+   The executor updated `key-docs.ts` but never re-ran the generators. Fixed by
+   running them (`bun run mockup-kit` → `tools/mockup-kit/generated/kit-data.json`,
+   4 rows: `toolRunning`/`toolRunningOff` × 2 themes lose the `⎿ running…` line;
+   `bun run docs:config` → `README.md`'s `beta.compactShell` row). Both tests green.
+2. **`mockup-kit-calibration.test.tsx` `transcriptRow toolRunning` /
+   `toolRunningOff` (2 failures).** The same drift seen from the TUI side: the kit
+   served the old two-row `toolRunning` while Ink drew one. Regenerating (1)
+   fixed it; no test edit needed — it is the gate that was right.
+3. **`denial-reply-row.test.ts` "collapsed and expanded … no model text" (1).**
+   The test pinned the RETIRED expand shape (`  │ rm -rf build`); the branch's
+   expand is the `⎿ $ ` block (docs §Design 3). Its own `body()` helper already
+   strips `⎿ `, so the expectation becomes `$ rm -rf build`. Intent unchanged (the
+   structured `✗ Denied` fact, never the model-facing text) and it still asserts
+   `not.toContain("Answer the user")`. A stale test, not a regression: the branch
+   rewrote `shell-intent-rows.test.ts`/`render-lines.test.ts`/`app.test.tsx` for
+   the new shape but missed this file.
+4. **`app-mouse-layer.test.tsx` S4 "press+release in ONE write is still a CLICK"
+   (1).** Same miss, one level down: the test's `cont()` looked for `  │ ` rows to
+   observe that the call expanded, and a shell call no longer draws any. It now
+   accepts the block opener `⎿ $ ` or a 4-cell-hung continuation, matching the
+   `cont()` the branch already gave `app.test.tsx`. The property the test exists
+   for (a coalesced chunk threads the click state) is untouched — it re-asserts
+   `0` before the click and `> 0` after.
+5. **`serve-log-store.test.ts` S2 (a) and (b) (2 failures; (a) a 20 s timeout on
+   `until(() => c.ended("T1"))`).** A REAL race in the test harness, not a flake
+   of timing luck: `PARKED` stored its release in `PARKED.release`, overwritten by
+   every park, and `open()` called whatever was there. When the prompt's own write
+   landed and the test called `PARKED.open()` (or the round parked after the
+   release), the release was LOST and the parked model round never resumed — the
+   turn could never end, so only the 20 s `until` dead-man closed the test.
+   `PARKED` now LATCHES: `open()` sets `latched`, and a park that finds it set
+   consumes it instead of waiting, so one `open()` covers exactly one park in
+   either order. (b) also stopped keying off the global `PARKED.waiting === 1`,
+   which a still-parked round from a previous failed test could satisfy, and waits
+   on its OWN park via a monotonic `PARKED.parks`. Both tests reset `latched`
+   first so a test cannot inherit a stale release.
+
+**Red before green (5).** Probes: `await tick(50)` in `Scripted.stream` (so the
+release lands before the park, deterministically) + an `open()` right after
+`await hosted.persisted()`, with the latch branch removed → `(fail) S2 (a) …
+[20014.78ms]`, `error: timed out: () => c.ended("T1")` — byte for byte the gate's
+failure. Restoring the latch, same probes: `2 pass / 0 fail`. Probes then removed
+and both tests re-run green.
+
+**Verification.** `bun test` on all 6 affected files together: **73 pass, 0
+fail**; the full `serve-log-store.test.ts` also run `--rerun-each 2` under 8
+busy-loop CPUs: 44 pass, 0 fail. `bunx biome check` on the 4 changed source/test
+files: clean.
+
+**Not fixed, deliberately.** `render-lines.test.ts` "the shipped default is the
+text-only header" fails ONLY when run in the same process as
+`permission-shell-command.test.tsx` (a module-level theme/first-import
+interaction): the executor already reproduced it on a pristine `git archive HEAD`
+copy, and each file alone is green (127 pass / 0 fail alone). Pre-existing on
+`main`, unrelated to this branch, and out of the approved Implementation — it is
+not touched here.
