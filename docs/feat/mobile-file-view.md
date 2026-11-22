@@ -355,6 +355,20 @@ exact repro).
 **Local checks:** 4 narrow files `99 pass / 0 fail`; `tsc -p apps/mobile` clean; `biome check`
 clean on the 2 touched code/test files. Full gate: the orchestrator's script.
 
+**Gate round 2 — regenerated mockup-kit (orchestrator's gate red).** The gate's one failure was
+`scripts/test/mockup-kit.test.ts > drift: committed tools/mockup-kit/generated/* === regenerated
+from source > no drift`: the round-1 fixes edited four files the kit hashes
+(`ui/CodeBlock.tsx`, `ui/StepNode.tsx`, `screens/transcript/TranscriptRow.tsx`,
+`tool-steps.ts`) without running `bun run mockup-kit`, so `generated/kit-data.json` carried their
+old shas. Ran the generator: 3 files rewritten, only the 4 hashes actually change (no token,
+timing or style-metric drift), `kit-data.json` is the only modified file. Re-run:
+`bun test scripts/test/mockup-kit.test.ts` → 27 pass / 0 fail; the branch's own mobile tests
+(11 files touching the changed modules) → 191 pass / 0 fail; `bunx biome check` on the
+regenerated file clean. Lesson for the executor: the kit hashes are a gate, so a UI edit and
+`bun run mockup-kit` are one step.
+
+*— claude-opus-5-5, 2026-11-22 — gate round 2*
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22 (fresh context; same model as the Execution resume, different from the DeepSeek executor)*
