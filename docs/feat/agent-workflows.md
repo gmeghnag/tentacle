@@ -1303,3 +1303,39 @@ run, then the file restored; restoration was checked byte for byte, and `git sta
    Without it, a crash after a compaction mid-run leaves the run with no `interrupted` note.
 
 *— claude-opus-5-5, 2026-11-22*
+
+### Round 3
+
+**Verdict: PASS** for the code. The owner still has one decision to make; see the last section.
+Scope: `git diff HEAD~1` (`58435795`).
+
+**Gate.**
+- `bun run lint`: clean (2289 files).
+- `bun run typecheck`: clean.
+- **Full `bun test`: 16794 pass, 0 fail, 5 skip.**
+- The 5 skips are environment-gated: k8s / docker live tests, confinement, ws-server. None of
+  them is in a file this branch touches.
+
+**Mutations** (`.tentacle/tmp/agent-workflows/rv-mut3.ts`). For each one, the pinning test ran
+in separate processes, first on the mutated code and then on the restored code. Restoration
+was checked byte for byte, and `git status` is clean.
+
+| # | Mutation | Runs failing, mutated | Runs failing, restored |
+|---|---|---|---|
+| R2-1 | `"workflow"` removed from `UNGROUPED_TOOLS` | 1/1 | 0/1 |
+| R2-2 | attach-time `publishWorkflows` (the cut) put back | **5/5** (R5 in `connect-model-error.test.ts`) | 0/5 |
+| R2-3 | `logSegmentFacts` gets `live = undefined` | 1/1 (the new test) | 0/1 |
+
+**Findings.**
+- All three Round 2 findings are fixed and pinned. R2-2 is now red every time on the buggy
+  code, where Round 2 measured it as flaky (3/35).
+- No new HIGH or MEDIUM findings on this diff.
+- The attach-time rows are now set as state without an emit. That is safe: nobody is attached
+  at creation, the snapshot carries them, and every later change still goes through
+  `publishWorkflows`.
+
+**Still open (owner's decision, not a code finding).** Round 1 #2's crash-resume scope was
+narrowed to "not resumable, start a new run". That narrows owner decision 4, so the owner needs
+to OK it before merge.
+
+*— claude-opus-5-5, 2026-11-22*
