@@ -4,6 +4,7 @@ Running backlog of planned work. The near-term roadmap is **skills support** nex
 the rest are "value-add" improvements layered on the harness.
 
 ## Owner review queue
+- [ ] **fix/mobile-push-not-registered** (owner 2026-11-22 ~23:45, FIRST tomorrow) — phone notifications do not arrive: the owner's `serve` (~/assistant, 4001) logs `push-dropped empty turn_done with no registered device`; `~/.config/tentacle/devices/push/` empty since 20/11 17:44; the phone connects fine (`device-open a3b1d932`); iOS notifications ENABLED (owner). Opus triage + plan running tonight (`run-triage-push.sh`, branch fix/mobile-push-not-registered, NOMERGE); then on-device check with the owner. Type: fix · Size: — · Blast: cross-module · Suited: Opus.
 - [ ] **feat/e2e-parallel-gate** (owner 2026-11-22 ~23:30, «subito»; RUNNING `run-e2e-parallel-gate.sh`) — the mobile e2e gate (65 flows, ~70 min + Release build) on BOTH simulators in parallel with ONE Release build installed on both and reused across runs of the same app inputs; single-sim form unchanged; same results, ~half the wall time. Opus plan → DeepSeek exec → Opus review → Opus live validation; merge after PASS. Type: feat · Size: M · Blast: cross-module (test infra) · Suited: DeepSeek exec + Opus.
 - [ ] **eval/e2e-affected-flows** (owner 2026-11-22 ~23:30, idea only) — each e2e flow declares which screens/files it covers; a merge runs only the affected flows, the full suite stays before publish (or nightly). Needs the flow → code map first. Type: eval · Size: — · Blast: cross-module · Suited: Opus.
 
