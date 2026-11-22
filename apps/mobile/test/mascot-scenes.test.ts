@@ -20,6 +20,7 @@ import {
   type Op,
   PALETTE_NAMES,
   PIXEL_PT,
+  type Pixel,
   SPRITE_PT,
   type SceneMemory,
   body,
@@ -174,10 +175,8 @@ describe("drawOnce: the scene, its palette and the run (owner decisions 1–4)",
     const runs = [drawOnce(memory, seeded(7)).run, drawOnce(memory, seeded(8)).run];
     const para = sceneByKey("para");
     const exit = runs.map((run) => {
-      const at = frameAt(para, 10_599, run).find(
-        (op) => op.kind === "sprite" && op.rows.length === 9,
-      );
-      return at === undefined ? null : Math.sign(at.x - HOME_GRID.x);
+      const at = bodyOp(frameAt(para, 10_599, run));
+      return at === null ? null : Math.sign(at.x - HOME_GRID.x);
     });
     expect(exit).toEqual([1, -1]); // out to the right, then out to the left
   });
