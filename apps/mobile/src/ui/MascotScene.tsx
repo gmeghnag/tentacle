@@ -28,6 +28,7 @@ import {
   drawOnce,
   frameAt,
   pixels,
+  rectKey,
   sceneByKey,
   sceneMemory,
   stillFrame,
@@ -110,9 +111,9 @@ export function MascotSceneLayer({
       style={[styles.layer, { width: geometry.width, height: geometry.height }]}
     >
       <Svg width={geometry.width} height={geometry.height}>
-        {rects.map((rect) => (
+        {rects.map((rect, index) => (
           <Rect
-            key={`${rect.x}:${rect.y}:${rect.w}:${rect.h}:${rect.color}`}
+            key={rectKey(rect, index)}
             x={rect.x}
             y={rect.y}
             width={rect.w}

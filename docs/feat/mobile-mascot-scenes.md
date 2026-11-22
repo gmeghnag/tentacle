@@ -402,3 +402,57 @@ checks out. Screenshots (mandatory Validation) are still absent → not READY an
   Fix: key by index (the list is rebuilt every frame) or add the index to the key, plus a pin.
 - **Gate:** the 4 mascot/guard files: 83 pass / 0 fail; `bun run lint` clean; `bun run typecheck` OK.
   Worst frame is now 82 rects (heli), so the ≤120 budget holds.
+
+### Fix round 2
+
+*— claude-opus-5-5 (executor of fix round 2), 2026-11-22*
+
+**Scope.** Review round 2 confirmed R1-1 and R1-2 FIXED and raised exactly one new finding
+(NEW MEDIUM, duplicate React keys, no HIGHs). Nothing else was touched.
+
+**NEW MEDIUM (duplicate React keys) — FIXED.** Reproduced first: `.tentacle/tmp/mobile-mascot-scenes/keys2.ts`
+replays every scene × 5 palettes × runs 0–2 at 10 ms through `pixels` and keys each rect the old
+way (`${x}:${y}:${w}:${h}:${color}`) → **135 frames with duplicate keys**, first at rocket (bosco/run0)
+t=4800 ms, `270:558:18:12:#8d969e ×3` — the three stacked `alpha: 0.7` puffs that fix round 1
+deliberately keeps separate. Root cause: the key encoded the rect's SHAPE, and this round's
+correct behaviour is precisely that two rects may share a shape.
+
+The fix keeps the decision out of the component (AGENTS §7): `rectKey(rect, index)`
+(`mascot-scenes.ts:931-941`) returns `` `${index}:${x}:${y}:${w}:${h}:${color}` `` — the index,
+which the frame's list already has and rebuilds every tick, plus the shape, so a key also changes
+when a rect moves (no stale-child reuse). `MascotScene.tsx:113-116` becomes
+`rects.map((rect, index) => … key={rectKey(rect, index)}` and the component no longer builds a key
+at all. Argument order is `(rect, index)` on purpose so the call site is the idiomatic
+`rects.map(rectKey)` — the first attempt used `(index, rect)` and `Array.map` silently fed the
+index as the rect.
+
+**Tests added (red before green, AGENTS §9).** `mascot-scenes.test.ts`: *every rect in a frame has
+its own key* (all 9 scenes × 9 palettes × runs 0–2 × every 10 ms — the whole 100,500-frame space,
+not a sample) and *the rocket's three stacked puffs get three keys* (the named case: three rects
+identical in x/y/w/h/color/alpha, three distinct keys). `mascot-wiring.test.ts`: *every rect gets
+the pure module's key, and none is made up here* — pins the call shape, the import, and forbids a
+component-built template literal (`not.toMatch(/key=\{`/)`).
+
+**Mutations (§9 non-vacuity), each reverted with the tree clean.**
+
+| Mutation (temporary) | Red on |
+|---|---|
+| `rectKey` → shape-only key (the OLD behaviour) | scenes › *every rect in a frame has its own key* (`rocket/soft/run0 at 3650 ms: 1 duplicate key(s), e.g. 252:504:6:6:#7B3FC0`) AND › *the rocket's three stacked puffs get three keys* (61 pass / 2 fail) — the assertion, not a compile error |
+| `MascotScene.tsx`: back to an inline `key={`${…}`}` template | wiring › *every rect gets the pure module's key…* (73 pass / 1 fail) |
+| `MascotScene.tsx`: keep the seam but drop the index at the call site (`map((rect) =>`, `rectKey(rect, 0)`) | wiring › *every rect gets the pure module's key…* (11 pass / 1 fail) |
+
+**Evidence after the fix.** `.tentacle/tmp/mobile-mascot-scenes/keys3.ts` (the same 100,500-frame
+sweep through the shipped `rectKey`): **0 frames with duplicate keys** (was 135).
+
+**Files:** `apps/mobile/src/mascot-scenes.ts` (+12/−0), `apps/mobile/src/ui/MascotScene.tsx` (+3/−2),
+`apps/mobile/test/mascot-scenes.test.ts` (+44/−0), `apps/mobile/test/mascot-wiring.test.ts` (+10/−0).
+`Pixel` and `pixels`' public shape are unchanged; `rectKey` is additive.
+
+**Gate (run by the orchestrator's script, not here).** Local, narrow only: the mascot + guard files
+(5) → 87 pass / 0 fail; re-run after the formatting fix, the two mascot files → 74 pass / 0 fail;
+`bunx biome check` clean on the four changed files; the pure module under
+`tsc --strict --noUncheckedIndexedAccess` → 0 errors in the changed file.
+
+**Not fixed (deliberately):** the mandatory simulator screenshots, unchanged from both prior
+rounds — no `node_modules`/iOS project in this worktree. It is a build/run artefact, not a code
+property.

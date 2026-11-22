@@ -82,6 +82,16 @@ describe("the layer is in the empty session, and clipped between header and comp
     expect(code(layer)).toMatch(/frameAt\(scene, elapsedMs, drawn\.run,/);
     expect(code(layer)).not.toMatch(/frameAt\([^)]*,\s*0\s*,/);
   });
+  test("every rect gets the pure module's key, and none is made up here (Review round 2)", () => {
+    // The layer keys `<Rect>` from `rectKey`, which puts the index in the key: two
+    // stacked translucent puffs are two rects at one place and colour. A key built
+    // in the component from the rect's shape collides, and React then warns every
+    // frame and may reuse the child — dropping the blend the merge keeps.
+    expect(code(layer)).toMatch(/key=\{rectKey\(rect, index\)\}/);
+    expect(code(layer)).toMatch(/rects\.map\(\(rect, index\) =>/);
+    expect(code(layer)).toMatch(/import \{[^}]*rectKey[^}]*\} from "\.\.\/mascot-scenes\.ts"/);
+    expect(code(layer)).not.toMatch(/key=\{`/);
+  });
 });
 
 describe("the empty state keeps its id and loses the old words (owner decision 1)", () => {

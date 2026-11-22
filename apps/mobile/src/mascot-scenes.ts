@@ -928,6 +928,18 @@ export interface Pixel {
   readonly alpha: number;
 }
 
+/**
+ * A rect's React key. Computed HERE, not in the component (AGENTS §7): the
+ * property is "two rects are two", a decision with a failure mode a source
+ * regex cannot see. The index is what tells apart two rects that are identical
+ * in place, size, colour and alpha — the rocket's three stacked puffs — so it
+ * belongs in the key, and the frame's list is rebuilt every tick anyway.
+ * Takes `(rect, index)` so a caller writes `rects.map(rectKey)`.
+ */
+export function rectKey(rect: Pixel, index: number): string {
+  return `${index}:${rect.x}:${rect.y}:${rect.w}:${rect.h}:${rect.color}`;
+}
+
 /** The colours a glyph may resolve to: a palette's five tones plus the props' own. */
 export function colorsFor(palette: MascotPaletteName): Readonly<Record<string, string>> {
   return { ...MASCOT_PALETTES[palette], ...EXTRA_TONES };

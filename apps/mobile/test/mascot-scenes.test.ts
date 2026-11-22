@@ -32,6 +32,7 @@ import {
   pickMascotPalette,
   pickScene,
   pixels,
+  rectKey,
   sceneByKey,
   sceneMemory,
   showsScene,
@@ -676,6 +677,54 @@ describe("pixels: the one grid → points projection", () => {
     );
     // The rocket's own tone underneath, then one `<…` per puff: three blends.
     expect(stacked).toBe("#7B3FC0@1<#8d969e@0.7<#8d969e@0.7<#8d969e@0.7");
+  });
+
+  test("every rect in a frame has its own key, so React never reuses one (Review round 2)", () => {
+    // The layer keys `<Rect>` by `rectKey`. Two identical translucent ops are
+    // deliberately kept as two rects (see the smoke test above), so a key made of
+    // the rect's SHAPE collides: React would warn every frame and could reuse or
+    // drop a child, losing exactly the blend the merge was fixed to keep. Every
+    // scene, every run, every frame, every palette.
+    for (const s of MASCOT_SCENES) {
+      for (const palette of PALETTE_NAMES) {
+        for (let run = 0; run < 3; run += 1) {
+          for (let ms = 0; ms < s.durationMs; ms += 10) {
+            const rects = pixels(
+              frameAt(s, ms, run, { eyeFade: "#000000" }),
+              BAND,
+              colorsFor(palette),
+            );
+            const keys = rects.map(rectKey);
+            const dupes = keys.filter((key, i) => keys.indexOf(key) !== i);
+            if (dupes.length > 0) {
+              throw new Error(
+                `${s.key}/${palette}/run${run} at ${ms} ms: ${dupes.length} duplicate key(s), e.g. ${dupes[0]}`,
+              );
+            }
+          }
+        }
+      }
+    }
+  });
+
+  test("the rocket's three stacked puffs get three keys, at the same place and colour", () => {
+    // The named case: one cell, one shape, one colour, one alpha — three rects,
+    // three keys. Nothing but the index can tell them apart.
+    const rects = pixels(frameAt(scene("rocket"), 4800), BAND, colorsFor("soft"));
+    const smoke = rects
+      .map((rect, index) => ({ rect, key: rectKey(rect, index) }))
+      .filter(({ rect }) => rect.color === "#8d969e" && rect.alpha === 0.7);
+    expect(smoke.length).toBe(3);
+    // Identical in every field a shape key could hold: only the index tells them apart.
+    const [first] = smoke;
+    if (first === undefined) {
+      throw new Error("the rocket draws no smoke at 4.8 s");
+    }
+    const { x, y, w, h, color, alpha } = first.rect;
+    expect(smoke.every(({ rect }) => rect.x === x && rect.y === y)).toBe(true);
+    expect(smoke.every(({ rect }) => rect.w === w && rect.h === h)).toBe(true);
+    expect(smoke.every(({ rect }) => rect.color === color && rect.alpha === alpha)).toBe(true);
+    expect(new Set(smoke.map(({ key }) => key)).size).toBe(3);
   });
 
   test("no frame anywhere in any scene exceeds 120 rects", () => {
