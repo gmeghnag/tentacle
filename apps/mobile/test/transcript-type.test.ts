@@ -42,12 +42,14 @@ describe("a step row steps back by size and lightness (owner decision 3)", () =>
   test("the title token is 14 pt, regular, and keeps its 20 pt line (the rail measures it)", () => {
     expect(typography.step.fontSize).toBe(14);
     expect(typography.step.lineHeight).toBe(20);
-    expect(typography.step.fontWeight ?? "400").toBe("400");
+    expect(typography.step.fontWeight).toBe("400");
   });
 
   test("the duration has its own smaller token (13 pt), not the 12 pt caption", () => {
     expect(typography.stepMeta.fontSize).toBe(13);
-    expect(typography.stepMeta.fontWeight ?? "400").toBe("400");
+    // Spelled on the token (both step tokens state their weight) — no `?? "400"`
+    // fallback: a token that forgot it must fail here, not silently read regular.
+    expect(typography.stepMeta.fontWeight).toBe("400");
   });
 
   test("the drawn name is `sec`, not `label`, and the duration is the step token", () => {

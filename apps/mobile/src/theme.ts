@@ -336,8 +336,12 @@ export const typography = {
    * stays 20 — the rail's branch geometry measures it (`step-rail.ts`).
    */
   step: { fontSize: 14, lineHeight: 20, fontWeight: "400" },
-  /** A step's trailing duration: one size down from its name (owner decision 3). */
-  stepMeta: { fontSize: 13, lineHeight: 18 },
+  /**
+   * A step's trailing duration: one size down from its name (owner decision 3).
+   * 400 spelled out, like `step`: the quietest thing on the line is regular, not
+   * a lighter face (`transcript-type.test.ts` pins it).
+   */
+  stepMeta: { fontSize: 13, lineHeight: 18, fontWeight: "400" },
   stepMono: { fontSize: 12.5, lineHeight: 18, fontFamily: MONO },
   sas: { fontSize: 40, lineHeight: 48, fontWeight: "600", letterSpacing: 6, fontFamily: MONO },
 } as const satisfies Record<string, TextStyleToken>;

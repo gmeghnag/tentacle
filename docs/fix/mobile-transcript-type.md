@@ -107,8 +107,8 @@ decision is made, so it is the one place to fix. The whole task stands or falls 
    `[+N more characters]` notice keeps the plain token (it is meta, not prose).
 4. **`Markdown`'s `bold` becomes 700** so a bold run inside 500 prose still steps up.
 5. **Tool rows go quieter by size and lightness** (owner decision 4): `typography.step` becomes
-   14/20/**400** (lineHeight kept: the rail's geometry reads it); a new `stepMeta` 13/18 carries
-   the duration; the step NAME is drawn `palette.sec` instead of `palette.label`; the thought's
+   14/20/**400** (lineHeight kept: the rail's geometry reads it); a new `stepMeta` 13/18/**400**
+   carries the duration; the step NAME is drawn `palette.sec` instead of `palette.label`; the thought's
    `Thought · N s` label is already 14 + `sec` (`typography.step` + `styles.thoughtLine`), so it
    needs no change beyond the token's weight. Dots, rail and ring are untouched
    (`fix/mobile-step-rail`'s).
@@ -121,7 +121,7 @@ decision is made, so it is the one place to fix. The whole task stands or falls 
 | `apps/mobile/assets/fonts/README.md` | the four rows (PostScript name + sha256), the "not bundled" paragraph rewritten — the licence file is unchanged (same OFL text) |
 | `apps/mobile/src/theme-beta.ts` | `FIGTREE_FACES` +4 keys, `figtreeFace` exact map, `FigtreePatch.fontWeight` widened |
 | `apps/mobile/src/fonts-expo.ts` | four more `require`s, registered under their PostScript names |
-| `apps/mobile/src/theme.ts` | `step` 500→400, new `stepMeta` 13/18 |
+| `apps/mobile/src/theme.ts` | `step` 500→400, new `stepMeta` 13/18/400 |
 | `apps/mobile/src/transcript-type.ts` (new) | `proseFontWeight`, `proseStyle` (pure) |
 | `apps/mobile/src/screens/transcript/Markdown.tsx` | prose via `proseStyle(palette)`, `bold` 600→700 |
 | `apps/mobile/src/ui/StepNode.tsx` | name `palette.label`→`palette.sec`; duration `typography.caption`→`typography.stepMeta` |
@@ -225,7 +225,7 @@ So the failure is not stale: 500 was drawn at 400 (the owner's complaint) and 60
 3. **`fonts-expo.ts`.** Four more `require`s, registered under their PostScript names; doc
    comment says eight and why.
 4. **`theme.ts`.** `step` 500 → **400** (lineHeight kept at 20 — `step-rail.ts:44` measures it);
-   new `stepMeta` 13/18 for a step's trailing duration.
+   new `stepMeta` 13/18/**400** for a step's trailing duration.
 5. **`transcript-type.ts` (new, 28 lines).** `proseFontWeight(palette)` = `isDark(palette) ? "500"
    : "400"`; `proseStyle(palette)` = `typography.transcript` (16/23) + that weight.
 6. **`Markdown.tsx`.** `Ctx` carries `prose: proseStyle(palette)`; paragraph, heading, list
@@ -276,6 +276,12 @@ red. Re-ran the whole script afterwards — all eight caught.
 - **The weight walk had to grow past the token table** (above): the plan's test was scoped to
   "every typography token", which stopped being sufficient once prose got its weight outside the
   table. Fixed in the test, and the plan's Tests section is weaker than what shipped.
+- **`stepMeta` spells `fontWeight: "400"`** (gate fix after Execution). The token shipped as
+  `{ fontSize: 13, lineHeight: 18 }` and the test read `typography.stepMeta.fontWeight ?? "400"`,
+  which `tsc` rejects (`TS2339: Property 'fontWeight' does not exist` — the optional property is
+  absent from the inferred literal type, unlike `step` which spells it). `step` already states its
+  weight explicitly, so `stepMeta` now does too — the token is 13/18/**400** as the plan intended,
+  and the test asserts it without a fallback. Files, Tests and Validation above read 13/18/400.
 - **Nothing else.** No protocol, persistence or wire change: `packages/protocol` untouched, so
   `protocol.json` was not regenerated and no `protocol.d/` note is needed.
 
