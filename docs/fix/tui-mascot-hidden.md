@@ -183,3 +183,13 @@ change of round 0 is untouched and its tests were not re-run.
 **Lint:** `bunx biome check scripts/test/changelog-guard.test.ts` — clean (one
 `organizeImports` fix applied to the `type Fragment` position). Full gate is the
 orchestrator's (not run here, per the brief).
+
+### Round 2
+
+**Verdict: REQUEST-CHANGES** (finding 1 fixed; the new guard adds one MEDIUM).
+
+- **Finding 1: FIXED.** `changelog.d/tui-mascot-hidden.changed.md` is deleted, and `changelog.d/tui-mascot.added.md:1` now describes only the text header that ships. Mutation: putting the old `.changed` fragment back makes I3 ("the tree has no such pair") fail. Removed again, `git status` clean.
+- **R2-1 MEDIUM: the new guard rejects valid fragments.** `scripts/test/changelog-guard.test.ts:14-19` (`retractions`) flags ANY non-`added` fragment whose slug starts with `<another unreleased slug>-`. It does not check that the shorter slug is an `added` entry, or that the two are about the same feature. Repro: `changelog.d/detach-live.fixed.md` + `changelog.d/detach-live-followups.fixed.md` (both real task slugs in `docs/fix/`, two separate fixes, no retraction) → I3 fails and lists `detach-live-followups.fixed.md`. `session-log.added` + `session-log-serve-store.changed` would fail the same way. Since I3 runs in `bun run check`, an unrelated task whose slug happens to share a prefix gets a red gate. It is also a new repo-wide changelog rule added inside an S/`contained` fix; AGENTS §10(c) says a rule change is its own `feat` task, and `docs/feat/changelog-fragments.md` does not document it. Fix: drop I3 and the `retractions` helper (deleting the fragment was the whole fix). If the rule is wanted, it gets its own task.
+- Gate: `changelog-guard` + `mascot` + `render-lines` + `app-frames` tests: 166 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean. The round-2 diff touches no `packages/` source.
+
+*— claude-opus-5-5, 2026-11-22* (fresh context; different family from the executor)
