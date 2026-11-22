@@ -354,3 +354,11 @@ startup header (`mascot.ts`), which this round does not touch. Not fixed here:
 pre-existing, unrelated, outside the approved Implementation. Unverified part:
 whether the co-run also fails on `main` — the gate's own baseline run decides
 that.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-22* — **Verdict: PASS.** Diff `HEAD~1` (dfd63328).
+
+- **Finding 1 (MEDIUM) fixed.** `shell-row.ts` adds `backgroundStart` (`status === "ok"` and the text starts with `BACKGROUND_START`, matching `tools/src/builtins.ts:456`); `render-lines.ts` `shellBlock` excludes it from `outcomeOnly`. Repro `review.ts`: described start collapsed is header + `⎿ $ …`; plain start is `● Bash <cmd> 0.0s` only; expanded still shows the note.
+- **Mutation:** dropping `!row.backgroundStart` → 3 fail (both test files); dropping the `status === "ok"` guard → 1 fail (the spawn-failure / errored-start test). Both reverted, `git status` clean.
+- **Regressions:** spawn failure (error, no `exit=`) keeps its reason collapsed; 5 shell/render/app test files 301 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean. Full `bun test` not run here.
