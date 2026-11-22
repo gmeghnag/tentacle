@@ -544,6 +544,14 @@ or the cache thrashes), `cli/src/main.ts:1431, 2289`, `cli/src/connect.ts`
 `running…`, `✓` settled, `❯` input row at the same y before/after the result),
 `cli/test/connect-compact-shell.test.ts` (2).
 
+> **Superseded (2026-11-23, `docs/fix/tui-shell-row-collapsed`).** The beta is
+> retired in the TUI: every shell row has one shape (the command with `exit=N` on
+> it, the output on ctrl+o), `compactShell` left `RenderOptions`/`App.tsx`/
+> `run.tsx`/`app-types.ts`/`cli` entirely, and `connectCompactShell` +
+> `cli/test/connect-compact-shell.test.ts` were deleted. The config key stays
+> (the schema is `.strict()`, so a config that sets it must keep loading); the
+> phone keeps `shellRowParts`' `compact` argument and its own switch.
+
 **S3 — STOPPED (plan contradicts the code).** See the ⚠ correction in Design §5:
 the plan's client step fills `PermissionRequestOptions.toolCallId/origin` from the
 wire, which `foreign-turns.test.ts:775-777` and the attribution Review pin as

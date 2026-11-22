@@ -76,4 +76,112 @@ Constraints: TUI only — the phone (`apps/mobile`, `packages/core/src/shell-int
 
 ## Execution
 
+*— claude-sonnet-4-5, 2026-11-23*
+
+**Load-bearing check (before any edit).** The Context repro ran on this branch
+(`.tentacle/tmp/tui-shell-row-collapsed/repro.ts`, `transcriptRows`, width 80,
+SGR stripped) and reproduced the report byte for byte: `compactShell=true` drew
+`⎿ dormito 5s, sveglio` / `  riga 2` (the OUTPUT) under the sentence with no
+command row; `compactShell=false` drew the command then the output; expanded
+(ctrl+o) put `  │ $ sleep 5; …` on its own row ABOVE the `⎿` block. Both halves
+of the bug are real, so the plan's premise held and I proceeded.
+
+**As built, in the plan's order.**
+
+1. **`packages/tui/src/shell-row.ts` (new, pure; Design step 1–2).**
+   `shellRow(tool)` parses `{ command, exitCode }` ONCE for both views — `command`
+   from `shellCommand(args)`, `exitCode` via the existing `shellExitCode`
+   (reused, not duplicated) from `spill.head ?? resultText` and only when the call
+   is settled. `exitSuffix` (`""` on 0/null), `exitTailWidth`, `dollarRoom`,
+   `titleRoom` and `cutCommand` hold the room math so the cut can never eat the
+   code; `DOLLAR_WIDTH`/`DOLLAR_HANG` are the block's 4-cell geometry.
+2. **`dollarRows(row, cols, expanded)` (Design step 2).** Collapsed: one
+   `⎿ $ <cmd cut to cols − 4 − tail>` row + `  exit=N`. Expanded: the WHOLE
+   command, `expandTabs`, each line wrapped at `cols − 4`, line 1 on `⎿ $ ` and
+   the rest on `DOLLAR_HANG`, the code appended to the LAST command row, or on its
+   own hung row when it does not fit — never cut. A call with no command draws no
+   `$` row at all (the body keeps its own connector), which is what keeps a
+   resumed/argless call reading as before.
+3. **`shellIntentLines` (Design step 3).** Always `header` + `shellBlock`; the
+   call site passes `compact=false` to `shellRowParts` and `parts.commandRow` is
+   no longer read at all. `shellBlock` shows the body only when EXPANDED, or when
+   the call never produced a code (a denial, its reply, a hook's reason, a
+   background start) — an outcome, not output (Design step 5).
+4. **`plainShellLines` (new; Design step 4).** No sentence: collapsed
+   `● Bash <cmd cut>  exit=N <elapsed>` with no block; expanded `● Bash <elapsed>`
+   + the same `dollarRows` block + the output. `queuedToolRow` was extracted from
+   the old inline generic branch so every branch draws a queued row the same way.
+5. **`shellBodyText` now drops the `exit=` first line for BOTH codes** (was:
+   only `exit=0`). Without this an expanded failure printed the code twice — once
+   on its `$` row, once as the body's first line. This is a behaviour change the
+   plan implied but did not spell out.
+6. **Retired the beta (Design step 6, the "remove the plumbing" option).** Deleted
+   `compactShell` from `RenderOptions` **and from the row-cache key** (it can no
+   longer change a row, so keying on it would only throw layouts away),
+   `App.tsx`, `run.tsx`, `app-types.ts`, `cli/main.ts` (2 sites), `connect.ts`
+   (`connectCompactShell` + its option + the test file), and rewrote
+   `key-docs.ts`'s `beta.compactShell` summary/details. The config KEY stays
+   (`schema.ts` is `.strict()`), so a config that sets it still loads.
+7. **`permission-ui.ts` untouched behaviourally** — only its comment, which cited
+   the beta as the reason the ask must show the whole command; the reason is now
+   this row's cut. `apps/mobile` and `packages/core/src/shell-intent.ts` untouched
+   (`shellRowParts` keeps its `compact` parameter for the phone).
+
+**Tests.** New `packages/tui/test/shell-row-collapsed.test.ts` (32 cases) carries
+the whole failure-mode list from the plan: described ok/fail collapsed (no output),
+long command + code (cut with `…`, code intact, width ≤ cols at 40/80/190),
+multi-line command, expanded ok/fail/long-wrap/multi-line, the code on its own row,
+clicked row = ctrl+o, spilled failure, denial, `exit=124`/`-1`, background start,
+running/queued, plain `Bash` collapsed and expanded, a non-shell row untouched,
+"the beta changes nothing", and widths 40/190. New
+`packages/tui/test/app-shell-row-collapsed.test.tsx` pins both shapes at the Ink
+seam (collapsed frame has no output; ctrl+o and a header click both open the block;
+the input row does not move).
+
+**Drift, and why.**
+
+- **Mutation 4 (beta plumbed back) is no longer expressible**: `parts.commandRow`
+  is not read by the renderer at all, so re-passing `true` changes nothing (I ran
+  it: 47 pass, 0 fail). The beta's removal is therefore proven by the type (the
+  option is gone) and by "one shape" tests, not by a mutation — recorded honestly
+  rather than claimed.
+- **`cutCommand` also expands the first line's trailing whitespace and cuts with
+  `truncateCells`** rather than `fitSubtitle`: `fitSubtitle` flattens newlines, and
+  the multi-line `…` had to be applied first.
+- **Two test expectations of mine were arithmetically wrong** (not code bugs) and
+  were fixed: the 40-column room for the code, and the `  │ ` → `⎿ $ ` join in the
+  click-expand test.
+- **Existing tests pinned the retired shape** and were updated to the new one,
+  keeping their intent: `shell-intent-rows.test.ts` (rewritten),
+  `render-lines.test.ts` (the spill body helper skips `⎿ $ ` rows too; the four
+  shell expand tests now assert the block; a new test pins that a NON-shell call
+  still expands to `  │ ` rows), `app.test.tsx` (the `cont()` helper and the
+  blink view now read `⎿ $ `/4-cell rows), `tool-hit.test.ts` (the block's rows are
+  not controls). `connect-compact-shell.test.ts` was deleted with the function.
+- **Pre-existing failure, not mine**: `render-lines.test.ts > the shipped default
+  is the text-only header` fails when run alongside `permission-shell-command.test.tsx`
+  — reproduced on a pristine `git archive HEAD` copy in
+  `.tentacle/tmp/tui-shell-row-collapsed/pristine` (135 pass / 1 fail there).
+  Alone it passes.
+
+**Mutations (red, pasted).**
+
+1. Dropped the "no body when collapsed" guard in `shellBlock` → 13 fail
+   (`collapsed: … NO output`, `no sentence: … NO body`, `widths 40 and 190: …`).
+2. `const last = lines.length - 1` → `const last = 0` (the code ends the FIRST
+   command row) → `expanded: … a long command wraps at the width, continuation
+   rows indented 4` fails.
+3. Moved the code after the duration in a plain row → 2 fail
+   (`no sentence: … collapsed failure: ● Bash <cmd cut>  exit=N <elapsed>` and
+   `no sentence: … running / ok / error / queued / expanded`).
+
+All files restored after each mutation and re-run green (47 pass). `bunx biome
+check` on the 17 changed files: clean.
+
+**Gate.** Not run here (the orchestrator's script runs it). Locally: the touched
++ covering test files are green (237 pass) except the pre-existing header
+interaction failure above; `bunx tsc --noEmit -p packages/tui` reports 21 errors
+vs 38 on the pristine copy — all `@tentacle/protocol` resolution and none in the
+lines I touched.
+
 ## Review

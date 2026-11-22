@@ -703,10 +703,4 @@ export interface AppProps {
    * constant for the App's lifetime, never carried to a pod.
    */
   readonly chartGlyphs?: ChartGlyphs;
-  /**
-   * Beta `beta.compactShell` (docs/feat/shell-intent-line.md §4): a described
-   * `shell` row shows its `$ command` row only on failure. Absent → off.
-   * LAPTOP-ONLY display, constant for the App's lifetime.
-   */
-  readonly compactShell?: boolean;
 }

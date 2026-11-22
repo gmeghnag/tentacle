@@ -3619,7 +3619,13 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
   const rowsOf = (frame: string): string[] => frame.split("\n").map(stripAnsi);
   const headerRowOf = (frame: string, tail = ""): number =>
     rowsOf(frame).findIndex((r) => r.includes("Bash") && r.includes(tail)) + 1;
-  const cont = (frame: string): string[] => rowsOf(frame).filter((r) => r.startsWith("  │ "));
+  /**
+   * An expanded `shell` call's command rows: the `⎿ $ …` block opener and the
+   * continuation rows hung 4 cells under it (docs/fix/tui-shell-row-collapsed —
+   * no `  │ ` rows for a shell command any more).
+   */
+  const cont = (frame: string): string[] =>
+    rowsOf(frame).filter((r) => r.startsWith("⎿ $ ") || /^ {4}\S/.test(r));
 
   async function runLong(): Promise<{
     app: ReturnType<typeof render>;
@@ -3660,7 +3666,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     app.stdin.write(release(3, y));
     await delay(80);
     const expanded = frame();
-    // 160 columns: the whole command fits one `  │ ` row (the width-derived
+    // 160 columns: the whole command fits one `⎿ $ ` row (the width-derived
     // wrap is the render-lines tests' job). It is the FULL command, not the
     // 72-char cut.
     expect(cont(expanded)).toHaveLength(1);
@@ -3769,7 +3775,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     await delay(80);
     const first = cont(frame())[0] ?? "";
     expect(first).not.toBe("");
-    const contY = rowsOf(frame()).findIndex((r) => r.startsWith("  │ ")) + 1;
+    const contY = rowsOf(frame()).findIndex((r) => r.startsWith("⎿ $ ")) + 1;
     app.stdin.write(press(6, contY)); // a cell INSIDE the command text
     app.stdin.write(release(6, contY));
     await delay(80);
@@ -3941,7 +3947,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     await delay(80);
     expect(cont(frame())).toHaveLength(1); // 160 columns: one row
     expect(cont(frame()).join(" ")).toContain(COMMAND);
-    // Narrow to 60 columns: the command must re-wrap onto more `  │ ` rows, and
+    // Narrow to 60 columns: the command must re-wrap onto more block rows, and
     // the call must still be expanded (its id never changed).
     Object.defineProperty(app.stdout, "columns", { value: 60, configurable: true });
     app.stdout.emit("resize");
@@ -3949,7 +3955,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     const narrow = cont(frame());
     expect(narrow.length).toBeGreaterThan(1);
     const joined = narrow
-      .map((r) => r.slice("  │ ".length))
+      .map((r) => r.replace(/^⎿ \$ /, "").replace(/^ {4}/, ""))
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
@@ -4013,7 +4019,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
       app.stdin.write(release(3, y));
       await settle();
       const expanded = rows();
-      expect(expanded.filter((r) => r.startsWith("  │ ")).length).toBeGreaterThan(1);
+      expect(cont(expanded.join("\n")).length).toBeGreaterThan(1);
       /** The same rows WITH their SGR codes: the OFF phase lives in them. */
       const rawRows = (): string[] => (app.lastFrame() ?? "").split("\n");
       const views: { phase: string; count: number; conts: string[] }[] = [];
@@ -4023,7 +4029,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
         views.push({
           phase: concealed(rawRows()[head] ?? "") ? "off" : "on",
           count: r.length,
-          conts: r.filter((row) => row.startsWith("  │ ")),
+          conts: r.filter((row) => row.startsWith("⎿ $ ") || /^ {4}\S/.test(row)),
         });
         clock.advanceTimersByTime(BLINK_HALF_MS);
         await settle();

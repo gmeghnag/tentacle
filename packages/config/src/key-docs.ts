@@ -1012,14 +1012,14 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
   },
   "beta.compactShell": {
     summary:
-      "With the model's sentence on a `shell` row, show the `$ command` row only on failure.",
+      "No effect on the TUI any more: a `shell` row has one shape (the phone still honours it).",
     kind: "leaf",
     type: "boolean",
     scope: "both",
     carried: "no",
     default: () => false,
     details:
-      "With a sentence, the `$ command` row shows only on failure; the command stays in the permission ask and in the expanded row; a lying sentence is caught only by expanding. A display setting of this laptop — never carried to a pod. An older tentacle rejects a config file that has a `beta` section.",
+      "Retired in the TUI (docs/fix/tui-shell-row-collapsed): every `shell` row now shows its command — with `exit=N` when N is not 0 — and its output only with ctrl+o, so this key changes nothing there. The phone's own switch (`apps/mobile`) still reads it. The key stays accepted so a config that sets it keeps loading. A display setting of this laptop — never carried to a pod. An older tentacle rejects a config file that has a `beta` section.",
     example: "true",
   },
   sessions: {

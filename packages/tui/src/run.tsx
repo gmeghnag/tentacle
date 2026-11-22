@@ -116,11 +116,6 @@ export interface TuiOptions {
    * `braille` (default) or `blocks` for a font without braille. LAPTOP-ONLY.
    */
   readonly chartGlyphs?: ChartGlyphs;
-  /**
-   * Beta `beta.compactShell` (docs/feat/shell-intent-line.md §4): hide a
-   * described `shell` row's `$ command` row unless it failed. LAPTOP-ONLY.
-   */
-  readonly compactShell?: boolean;
 }
 
 /**
@@ -221,7 +216,6 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         {...(options.hop ? { hop: options.hop } : {})}
         {...(options.targetFeed ? { targetFeed: options.targetFeed } : {})}
         chartGlyphs={options.chartGlyphs ?? "braille"}
-        compactShell={options.compactShell === true}
         {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
         artifactOpener={createArtifactOpener()}
       />,
