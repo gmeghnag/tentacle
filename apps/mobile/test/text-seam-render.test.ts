@@ -56,6 +56,7 @@ function observe(): Cases {
 const cases = observe();
 
 const REGULAR = { fontFamily: "Figtree-Regular", fontWeight: "400", fontStyle: "normal" };
+const MEDIUM = { fontFamily: "Figtree-Medium", fontWeight: "500", fontStyle: "normal" };
 const BOLD = { fontFamily: "Figtree-Bold", fontWeight: "700", fontStyle: "normal" };
 
 /** The style the seam appended on top of the caller's own, if it appended one. */
@@ -108,9 +109,9 @@ describe("with Figtree on the seam patches the face on top of the own style", ()
     expect(rendered.ownStyleFirst).toBe(true);
   });
 
-  test("a bold text gets Figtree-Bold; a 500 is Regular, never a rounded Bold", () => {
+  test("a bold text gets Figtree-Bold; a 500 gets Figtree-Medium (never a rounded face)", () => {
     expect(patch(cases.onBold ?? { type: null, style: null })).toEqual(BOLD);
-    expect(patch(cases.onWeight500 ?? { type: null, style: null })).toEqual(REGULAR);
+    expect(patch(cases.onWeight500 ?? { type: null, style: null })).toEqual(MEDIUM);
   });
 
   test("a text input gets the face too", () => {
