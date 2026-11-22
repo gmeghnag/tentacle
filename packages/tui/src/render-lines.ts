@@ -72,6 +72,12 @@ export interface RenderOptions {
    */
   readonly blinkPhase?: number;
   /**
+   * Draw the header's mascot sprite. Default `MASCOT_ENABLED` — OFF in the
+   * shipped build (`fix/tui-mascot-hidden`); test-only, so the sprite's
+   * projection and layout keep being tested while it is hidden.
+   */
+  readonly mascot?: boolean;
+  /**
    * The daemon runs in a pod (`run`/`attach`): a spilled result's file is
    * "saved in the pod to" its path. Constant for an App's lifetime (the
    * runtime the laptop started), so it is not part of the row-cache key.
@@ -172,6 +178,7 @@ function headerLines(item: HeaderItem, opts: RenderOptions): string[] {
     // Read at CALL time, never at import (`blink.ts`'s trap).
     colorLevel: chalk.level,
     palette: item.palette,
+    ...(opts.mascot !== undefined ? { mascot: opts.mascot } : {}),
   });
   const text = view.lines.map((line) =>
     line.strong === undefined

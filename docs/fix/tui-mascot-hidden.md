@@ -19,4 +19,87 @@ Owner 2026-11-22 01:40: «nascondiamo/togliamo il polipetto fino che non abbiamo
 
 ## Execution
 
+*— deepseek-v4-pro (executor), 2026-11-22*
+
+**Load-bearing check (re-run first, passed).** `mascotCells` is called only from
+`mascot.ts:191` itself (`headerView`); the sole `headerView` caller is
+`render-lines.ts:170` (`headerLines`), which paints `view.mascot`; nothing else
+in `packages/` or `apps/` reaches the sprite (`rg -n "mascotCells|headerView"`).
+So one switch inside `headerView` hides it everywhere.
+
+**Slice 1 — red (tests first).** New assertions against the *shipped default*
+under `chalk.level 3` (a real terminal, where the sprite used to paint), in
+`mascot.test.ts` (`headerView` › "the shipped default hides the sprite": switch
+is `false`, `mascot === null` at levels 2 and 3 on a 200-column window, its lines
+equal the colour-off ones, explicit `false` too), `render-lines.test.ts` ("the
+shipped default is the text-only header": 3 rows, no `▀▄█`, text at column 1, no
+`38;2;`), and `app-frames.test.tsx` ("truecolor, the shipped default": rows 0–2
+are exactly the three text lines, `indexOf("tentacle") === 0`, no sprite cell;
+the "no version" case now expects `tentacle`, not `█▀▀███▀▀█  tentacle`).
+
+Red on the pre-fix code, on the assertion (not an import):
+
+```
+(fail) app-frames: Expected "tentacle 0.7.1"  Received " ▄▀▀▀▀▀▄"
+(fail) app-frames: Expected "tentacle"        Received " ▄▀▀▀▀▀▄"
+(fail) render-lines: Expected 3               Received 5
+```
+
+(`mascot.test.ts` also failed to import the missing `MASCOT_ENABLED`; the three
+above are the ones that show the sprite the tests pin absent.)
+
+Note: the worktree had no `node_modules`; `bun install --filter '!@tentacle/mobile'`
+was run once inside it (no source change).
+
+**Slice 2 — green**, per the Design:
+
+- `packages/tui/src/mascot.ts:129-136` — `export const MASCOT_ENABLED = false`,
+  with the reason (Terminal.app draws `▀ ▄` offset).
+- `packages/tui/src/mascot.ts:187-188` — `shown = (input.mascot ?? MASCOT_ENABLED) && …`.
+- `packages/tui/src/mascot.ts:151-160` — `HeaderInput.mascot?: boolean`: the
+  override the existing sprite tests need (default `MASCOT_ENABLED`).
+- `packages/tui/src/render-lines.ts:74-79`, `:181` (call at `:172`) — `RenderOptions.mascot?`
+  threaded to `headerView` (a test seam only: `App.tsx` never sets it).
+- Existing sprite tests updated to pass `mascot: true` (`mascot.test.ts`,
+  `render-lines.test.ts`); their assertions are unchanged.
+- `docs/feat/tui-mascot.md` Status line now says the sprite is hidden.
+
+No dead-code purge: bitmap, nine palettes, `pickPalette`, `mascotCells`, `GUTTER`
+and the beside-the-text layout all stay, and `App.tsx:423` still picks a palette
+per start.
+
+**Drift from Implementation (two, both small).**
+
+1. The Implementation said "make `headerView` take an optional `mascot?: boolean`
+   override ONLY if the existing mascot tests need it" — they do: `mascot.test.ts`
+   pins the five-row projection and the width threshold *through* `headerView`.
+   And the two existing sprite tests in `render-lines.test.ts` needed the same
+   seam one layer up (`RenderOptions.mascot`), which the Implementation did not
+   name: without it the beside-the-text layout (`headerLines`' gutter loop) would
+   have lost all coverage. Hence the extra field in `render-lines.ts`.
+2. The Implementation said "no changelog fragment (the sprite was never
+   released)". A `.changed` fragment was written anyway
+   (`changelog.d/tui-mascot-hidden.changed.md`): `changelog.d/tui-mascot.added.md`
+   is still UNRELEASED and advertises a sprite the build no longer draws, so the
+   two fragments land in the same release and the pair reads correctly. (If the
+   orchestrator prefers a single fragment, the two merge into one.)
+
+**Mutation checks (§9, each reverted).**
+
+1. `MASCOT_ENABLED = true` → 4 fail (all four new assertions); revert → 159 pass.
+2. Drop the `...(opts.mascot !== undefined ? …)` line in `render-lines.ts` → 2 fail
+   ("truecolor, wide, sprite opted in" and "the sprite's colours are the
+   palette's hexes, fg and bg"); revert → 126 pass.
+3. `shown = input.colorLevel >= 2 && …` (ignore the switch) → 1 fail
+   ("the shipped default hides the sprite"); revert → 19 pass.
+
+**Tests run** (narrow per slice): `mascot.test.ts` + `render-lines.test.ts` +
+`app-frames.test.tsx` → 159 pass / 0 fail; then the whole `packages/tui/test` →
+**2939 pass, 0 fail**. `bunx biome check` on the five touched files: clean.
+`bunx tsc --noEmit -p tsconfig.json`: clean, whole repo. Full `bun run check` is
+the orchestrator's gate (not run here, per the brief).
+
+**Unverified:** the owner's eye on macOS Terminal.app — the frame tests prove the
+header rows are the text-only ones, not how a real terminal draws them.
+
 ## Review

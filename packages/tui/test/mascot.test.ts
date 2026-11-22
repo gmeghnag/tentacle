@@ -8,6 +8,7 @@ import { Chalk } from "chalk";
 import { cellWidth } from "../src/cells.ts";
 import {
   MASCOT_BITMAP,
+  MASCOT_ENABLED,
   MASCOT_PALETTES,
   type MascotCell,
   PALETTE_NAMES,
@@ -172,9 +173,9 @@ describe("headerView", () => {
     expect(headerView({ ...base, colorLevel: 1 }).mascot).toBeNull();
   });
 
-  test("256 colours (level 2) and truecolor (level 3): shown", () => {
-    expect(headerView({ ...base, colorLevel: 2 }).mascot?.length).toBe(5);
-    expect(headerView({ ...base, colorLevel: 3 }).mascot?.length).toBe(5);
+  test("256 colours (level 2) and truecolor (level 3): shown with the opt-in", () => {
+    expect(headerView({ ...base, colorLevel: 2, mascot: true }).mascot?.length).toBe(5);
+    expect(headerView({ ...base, colorLevel: 3, mascot: true }).mascot?.length).toBe(5);
   });
 
   test("no version: line 1 is `tentacle` alone", () => {
@@ -184,8 +185,22 @@ describe("headerView", () => {
 
   test("text lines are the same whether the mascot shows or not", () => {
     const hidden = headerView({ ...base, colorLevel: 0 });
-    const shown = headerView({ ...base, colorLevel: 3 });
+    const shown = headerView({ ...base, colorLevel: 3, mascot: true });
     expect(shown.lines).toEqual(hidden.lines);
+  });
+
+  test("the shipped default hides the sprite: no room or colour makes it show", () => {
+    // fix/tui-mascot-hidden: the switch is off until the owner decides how the
+    // sprite should render (half blocks are drawn offset in Terminal.app).
+    expect(MASCOT_ENABLED).toBe(false);
+    for (const colorLevel of [2, 3]) {
+      const view = headerView({ ...base, colorLevel, width: 200 });
+      expect(view.mascot).toBeNull();
+      // …and it is exactly the text-only header: no gutter, same three lines.
+      expect(view.lines).toEqual(headerView({ ...base, colorLevel: 0, width: 200 }).lines);
+    }
+    // An explicit `false` is the same answer as no override at all.
+    expect(headerView({ ...base, colorLevel: 3, mascot: false }).mascot).toBeNull();
   });
 
   test("the width boundary: threshold shows, one cell less hides", () => {
@@ -198,8 +213,12 @@ describe("headerView", () => {
         cellWidth("/help for commands"),
         cellWidth(model) + 3 + 12,
       );
-    expect(headerView({ ...base, width: threshold, colorLevel: 3 }).mascot).not.toBeNull();
-    expect(headerView({ ...base, width: threshold - 1, colorLevel: 3 }).mascot).toBeNull();
+    expect(
+      headerView({ ...base, width: threshold, colorLevel: 3, mascot: true }).mascot,
+    ).not.toBeNull();
+    expect(
+      headerView({ ...base, width: threshold - 1, colorLevel: 3, mascot: true }).mascot,
+    ).toBeNull();
   });
 
   test("a long cwd is shortened with an ellipsis, inside the budget", () => {
@@ -207,6 +226,7 @@ describe("headerView", () => {
       ...base,
       cwd: "/home/me/a/very/long/path/that/keeps/going/and/going/for/ever/project",
       colorLevel: 3,
+      mascot: true,
     });
     const line = view.lines[1]?.text ?? "";
     expect(line.startsWith("deepseek-v4 · ")).toBe(true);

@@ -1,6 +1,8 @@
 # feat/tui-mascot — Polpetto, a pixel mascot in the TUI startup header
 
-> **Status:** implementation
+> **Status:** implementation — the sprite is currently HIDDEN in shipped builds
+> (`MASCOT_ENABLED = false`, `fix/tui-mascot-hidden`): half blocks render offset
+> in macOS Terminal.app, so how the sprite should draw is still being decided.
 > **Branch:** `feat/tui-mascot`
 > **Size:** M · **Blast:** cross-module · **Suited:** a weaker model may execute (no §7 invariant, no wire/persistence change); standard Review, plus the owner's eye on a real terminal (truecolor + 256 + light)
 > **Changelog:** `changelog.d/tui-mascot.added.md`
