@@ -40,6 +40,8 @@ appId: so.tentacle.app
       ITEM: "new"
 - tapOn:
     id: "hub-menu-new"
+# The scene layer is hidden from accessibility on purpose (decorative), so the
+# flow cannot wait on it: it waits for the empty transcript, then shoots on a clock.
 - extendedWaitUntil:
     visible:
       id: "transcript-empty"
@@ -48,19 +50,19 @@ appId: so.tentacle.app
 - extendedWaitUntil:
     visible:
       id: "never-there"
-    timeout: 1200
+    timeout: 700
     optional: true
 - takeScreenshot: 40-r1-b
 - extendedWaitUntil:
     visible:
       id: "never-there"
-    timeout: 1500
+    timeout: 900
     optional: true
 - takeScreenshot: 40-r1-c
 - extendedWaitUntil:
     visible:
       id: "never-there"
-    timeout: 2500
+    timeout: 1200
     optional: true
 - takeScreenshot: 40-r1-d
 # round 2 (dark)
@@ -75,6 +77,8 @@ appId: so.tentacle.app
       ITEM: "new"
 - tapOn:
     id: "hub-menu-new"
+# The scene layer is hidden from accessibility on purpose (decorative), so the
+# flow cannot wait on it: it waits for the empty transcript, then shoots on a clock.
 - extendedWaitUntil:
     visible:
       id: "transcript-empty"
@@ -83,19 +87,19 @@ appId: so.tentacle.app
 - extendedWaitUntil:
     visible:
       id: "never-there"
-    timeout: 1200
+    timeout: 700
     optional: true
 - takeScreenshot: 40-r2-b
 - extendedWaitUntil:
     visible:
       id: "never-there"
-    timeout: 1500
+    timeout: 900
     optional: true
 - takeScreenshot: 40-r2-c
 - extendedWaitUntil:
     visible:
       id: "never-there"
-    timeout: 2500
+    timeout: 1200
     optional: true
 - takeScreenshot: 40-r2-d
 # round 3 (light)
@@ -110,6 +114,8 @@ appId: so.tentacle.app
       ITEM: "new"
 - tapOn:
     id: "hub-menu-new"
+# The scene layer is hidden from accessibility on purpose (decorative), so the
+# flow cannot wait on it: it waits for the empty transcript, then shoots on a clock.
 - extendedWaitUntil:
     visible:
       id: "transcript-empty"
@@ -118,18 +124,18 @@ appId: so.tentacle.app
 - extendedWaitUntil:
     visible:
       id: "never-there"
-    timeout: 1200
+    timeout: 700
     optional: true
 - takeScreenshot: 40-r3-b
 - extendedWaitUntil:
     visible:
       id: "never-there"
-    timeout: 1500
+    timeout: 900
     optional: true
 - takeScreenshot: 40-r3-c
 - extendedWaitUntil:
     visible:
       id: "never-there"
-    timeout: 2500
+    timeout: 1200
     optional: true
 - takeScreenshot: 40-r3-d

@@ -1500,7 +1500,9 @@ export function SessionScreen({
                 }
               }}
               ListEmptyComponent={
-                <View testID="transcript-empty">
+                // minHeight: with the mascot the empty view has no child while open, and a
+                // 0-height view is "not visible" to XCUITest (flow 34-hub-new asserts it).
+                <View testID="transcript-empty" style={{ minHeight: 1 }}>
                   {state.status.phase === "opening" ? (
                     <EmptyState palette={palette} loading title="Opening the session…" />
                   ) : null}
