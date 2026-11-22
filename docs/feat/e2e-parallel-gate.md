@@ -350,3 +350,17 @@ Gate status: `tsc --noEmit -p apps/mobile` clean; `biome check` clean on all 6 c
 whole-repo gate is the orchestrator's.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-22* (fresh context; same model family as the planner, different from the executor)
+
+**Verdict: REQUEST-CHANGES**
+
+1. **HIGH — the app cache key ignores binary bytes.** `run.ts` `appCacheInputs` reads every input with `readFile(…, "utf8")`; invalid UTF-8 decodes to U+FFFD, so two different binaries (fonts under `apps/mobile/assets/fonts/*.ttf`, PNGs) hash the same. Repro `.tentacle/tmp/e2e-parallel-gate/review-utf8.ts`: `[89 50 FF 00]` vs `[89 50 FE 00]` → `keys equal: true`. Effect: an asset change reuses a stale cached `.app` and the gate passes on the old build. That falsifies the plan's "Stale cached .app — impossible by construction". Fix: hash the raw `Buffer` (`AppInput.content: Uint8Array | DELETED`), and add a test with two byte arrays that differ only in invalid-UTF-8 bytes.
+2. **MEDIUM — the relay splits lines on chunk boundaries.** `parallel.ts` `runChildren` `relay` splits each `data` chunk on `\n` and prints every fragment as its own line. A line cut across two pipe reads (coalesced Maestro output >64 KB, or a multi-byte `✗` cut in half) gets printed as two lines. `✗ 07-pr  [sim-…]` then gives the launchers' `awk '$2'` (P6) the wrong flow name, or none. Fix: keep a remainder buffer per stream and decode with `setEncoding("utf8")`/`StringDecoder`.
+3. **MEDIUM — undocumented drift: the parent skips `preflight`.** D2.1 says the parent runs `preflight(…, majors)` before the build. `runParallel` checks only `deviceChoice` and then builds. A missing Maestro/CocoaPods/runtime therefore shows up as a build failure (exit ≠2), or as an exit 2 from both children after a 10–15 min build, not as exit 2 within a second. The behaviour is loud, not silent, but it breaks D2.1 and the exit-code table. Fix: run the same preflight in the parent, or record the drift.
+
+Gate: `bun test apps/mobile/test/e2e-shard.test.ts apps/mobile/test/e2e-gate.test.ts` → 92 pass / 0 fail. `bun run lint` clean (2278 files). `bun run typecheck` clean. The full `bun test` was not run by me.
+Mutation: I made `parallelExitCode`'s child-red step dead → 2 tests failed (49 pass) → reverted, `git status` clean. The executor's M1–M6 were not re-run.
+Attacks tried: binary key collision (found #1); relay framing against the P6 grep contract (found #2); exit-code/prerequisite path vs D2.1 (found #3); child `runId` reuse (the parent dir name only labels `endpoint.json`/`meta.json`, harmless); `shardLabel` collision (needs two UDIDs with the same first 8 hex chars, negligible); merge synthesis and duplicate throw (both hold, tests pin them); single-sim path (unchanged apart from `resolveApp`/`waitForServe`, as D8 says).
+Holds: the D4 merge never turns a missing flow into a silent pass; the seed-var map is one source shared by `spawnFlow` and the splitter; `--shard-of` validation; `waitForServe`. No §7 runtime invariant is touched (test infrastructure only).
+Executor behaviour: honest Execution, with its drifts named (apart from #3) and the Step 0 interference disclosed. Live spawn/relay/signal behaviour is still unverified (Validation's job).
