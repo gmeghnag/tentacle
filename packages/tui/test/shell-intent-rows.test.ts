@@ -157,10 +157,12 @@ describe("a described shell row (one shape for every state)", () => {
           .slice(0, 2),
       ).toEqual([`● ${SENTENCE}`, `⎿ $ bun test apps/mobile  exit=${n}`]);
     }
-    // A background start has no `exit=` at all: the command, then the note.
+    // A background start has no `exit=` at all, and its start note is what the
+    // call says about a JOB — output, so ctrl+o only (review round 1, MEDIUM):
+    // collapsed the block is the command alone.
     expect(
       rows(shell({ status: "ok", resultText: "started background job j1: `x`" })).map(strip),
-    ).toEqual([`● ${SENTENCE}`, "⎿ $ bun test apps/mobile", "  started background job j1: `x`"]);
+    ).toEqual([`● ${SENTENCE}`, "⎿ $ bun test apps/mobile"]);
   });
 
   test("queued: the sentence on the dim ◌ row, then the block's `$ cmd` row", () => {

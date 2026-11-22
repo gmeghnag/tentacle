@@ -22,6 +22,13 @@ export const DOLLAR_WIDTH = 4;
 /** An expanded command's continuation rows hang under its text. */
 export const DOLLAR_HANG = "    ";
 
+/**
+ * The head of a `run_in_background` start's result (`packages/tools/src/builtins.ts`:
+ * `started background job <id> (pid N): \`<command>\``): the ONE marker that tells a
+ * start note from a settled command's own outcome, which is all the row needs.
+ */
+export const BACKGROUND_START = "started background job ";
+
 export interface ShellRow {
   readonly command: string;
   /**
@@ -31,6 +38,14 @@ export interface ShellRow {
    * the original text (`fix/tui-shell-row-uniform`).
    */
   readonly exitCode: number | null;
+  /**
+   * True when the call STARTED a background job instead of running a command to
+   * its end: its result is then the start note (a job id, where to read the
+   * output), NOT an outcome of the command. It has no `exit=` code, so without
+   * this flag it would read as "settled with no code" — an outcome — and its
+   * note would show collapsed (review round 1, MEDIUM).
+   */
+  readonly backgroundStart: boolean;
 }
 
 /** A `shell` call's command and code, parsed ONCE for both views. */
@@ -38,9 +53,13 @@ export function shellRow(
   tool: Pick<ToolItem, "args" | "status" | "resultText" | "spill">,
 ): ShellRow {
   const settled = tool.status === "ok" || tool.status === "error";
+  const text = tool.spill?.head ?? tool.resultText;
   return {
     command: shellCommand(tool.args),
-    exitCode: settled ? shellExitCode(tool.spill?.head ?? tool.resultText) : null,
+    exitCode: settled ? shellExitCode(text) : null,
+    // Only a call that SUCCEEDED started a job; an `isError` result about
+    // background execution (`not available here`) is a refusal, an outcome.
+    backgroundStart: tool.status === "ok" && (text ?? "").startsWith(BACKGROUND_START),
   };
 }
 

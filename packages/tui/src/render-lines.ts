@@ -1108,10 +1108,12 @@ function plainShellLines(tool: ToolItem, cols: number, opts: RenderOptions): str
  * command expanded) and, under them, the call's body at the block's indent.
  *
  * The body is what the call's own OUTCOME needed to say when it never ran (a
- * denial, its reply, a hook's reason, a background job's start note) — that is
- * an outcome, not output, so it stays visible. A settled call's OUTPUT is
- * ctrl+o only (owner, variant B): a code says what happened, the text does not
- * belong on the row.
+ * denial, its reply, a hook's reason, a spawn failure) — that is an outcome, not
+ * output, so it stays visible. A settled call's OUTPUT is ctrl+o only (owner,
+ * variant B): a code says what happened, the text does not belong on the row.
+ * A background START is the one no-code case that is NOT an outcome: its note
+ * says where the job's output will be read, i.e. it is that output's place, so
+ * it waits for ctrl+o like any other (review round 1, MEDIUM).
  */
 function shellBlock(
   tool: ToolItem,
@@ -1123,7 +1125,10 @@ function shellBlock(
 ): string[] {
   const dollar = showDollar ? dollarRows(row, cols, expanded) : [];
   const outcomeOnly =
-    row.exitCode === null && tool.status !== "running" && tool.status !== "queued";
+    row.exitCode === null &&
+    !row.backgroundStart &&
+    tool.status !== "running" &&
+    tool.status !== "queued";
   if (!expanded && !outcomeOnly) {
     return dollar;
   }

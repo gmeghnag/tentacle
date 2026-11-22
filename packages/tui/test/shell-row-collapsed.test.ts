@@ -117,14 +117,43 @@ describe("collapsed: the command, never the output", () => {
     ]);
   });
 
-  test("a background start writes no `exit=`; its start note is the block's outcome line", () => {
-    const out = rows(shell({ status: "ok", resultText: "started background job j1: `x`" }));
-    expect(out).toEqual([
+  test("a background start: NO start note collapsed — it is output, ctrl+o shows it", () => {
+    // Review round 1 (MEDIUM): a start note is what the call says about a JOB,
+    // not an outcome of the command, so the collapsed row is the `$` row only.
+    const over = { status: "ok" as const, resultText: "started background job j1: `x`" };
+    expect(rows(shell(over))).toEqual([`● ${SENTENCE}`, "⎿ $ bun test apps/mobile"]);
+    expect(rows(shell(over), { expandAll: true })).toEqual([
       `● ${SENTENCE}`,
       "⎿ $ bun test apps/mobile",
       "  started background job j1: `x`",
     ]);
-    expect(out[1]).toBe("⎿ $ bun test apps/mobile");
+  });
+
+  test("a background start with no sentence: the title alone, no block", () => {
+    expect(
+      rows(
+        shell({
+          command: "ls",
+          description: null,
+          status: "ok",
+          durationMs: 100,
+          resultText: "started background job j1: `ls`",
+        }),
+      ),
+    ).toEqual(["● Bash ls 0.1s"]);
+  });
+
+  test("a spawn failure (error, no `exit=`) KEEPS its reason — an outcome, not output", () => {
+    // The guard against over-fixing: only a background start loses its body.
+    expect(rows(shell({ status: "error", resultText: "spawn failed: ENOENT" }))).toEqual([
+      `● ${SENTENCE}`,
+      "⎿ $ bun test apps/mobile",
+      "  spawn failed: ENOENT",
+    ]);
+    // And a FAILED call is never read as a start, even when its text is one.
+    expect(
+      rows(shell({ status: "error", resultText: "started background job j1: `x`" })).at(-1),
+    ).toBe("  started background job j1: `x`");
   });
 
   test("a timeout kill and a signal death: the code is written, not hidden", () => {

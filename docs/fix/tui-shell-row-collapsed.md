@@ -64,7 +64,7 @@ Constraints: TUI only — the phone (`apps/mobile`, `packages/core/src/shell-int
 2. `dollarRows(command, exit, cols, expanded)`: collapsed → one row `⎿ $ <first line, cut so that "  exit=N" fits>  exit=N`; expanded → all command lines wrapped at `cols`, first on the connector, continuation rows indented 4, `  exit=N` appended to the last row (if it does not fit, it goes on its own continuation row — never cut).
 3. `shellIntentLines`: always `header` + `dollarRows`; body ONLY when expanded (output lines at INDENT). Ignore `parts.commandRow`/compact in the TUI (pass `compact=false` to `shellRowParts` at `:973`).
 4. Plain `shell` rows (`tool.name === "shell"`, no sentence): collapsed → title `● Bash <cmd cut>  exit=N <elapsed>` with NO body; expanded → `● Bash <elapsed>` + `dollarRows` + output. Non-shell tools: untouched.
-5. Queued/running: `⎿ $ cmd` (no exit, no body) — as today minus the compact variant. Denied: keep today's denial text as the block's line under the `$` line (unchanged wording) — it is an outcome, not output.
+5. Queued/running: `⎿ $ cmd` (no exit, no body) — as today minus the compact variant. Denied: keep today's denial text as the block's line under the `$` line (unchanged wording) — it is an outcome, not output. *Clarified in fix round 1 (review round 1 MEDIUM): only a case that never ran an outcome (a denial, its reply, a hook's reason, a spawn failure) keeps its body collapsed. A `run_in_background` START (`tools/src/builtins.ts:456`) has no `exit=` either but its note points at the job's OUTPUT, so it is output: collapsed it is the `$` row only.*
 6. Remove `compactShell` from the TUI props path (`App.tsx`, `run.tsx`, `app-types.ts`, `render-lines.ts` options + row cache key `:1349/1412/1434`, `cli/main.ts:1434/2294`, `cli/connect.ts` `connectCompactShell` + its test) OR keep the plumbing and ignore it — executor's choice, smallest clean diff; update `config/src/key-docs.ts:1013` text. Keep the config schema key.
 7. Click hit-testing (`tool-hit.ts`: header = row 0) must still toggle the row.
 
@@ -270,3 +270,87 @@ not touched here.
 **Attacks tried:** (a) background start collapsed → finding 1. (b) settled error with no `exit=` (spawn failure) → shows `$ x` + reason collapsed; reasonable as an outcome, not output. (c) wide CJK command + `exit=1` at w=40 → cut with `…`, `exit=1` intact, width ≤ cols. (d) `compactShell` removed from row-cache key → safe, no renderer reads it; config key kept in `.strict()` schema. (e) §7 "logic in pure modules": room math is in pure `shell-row.ts`; the assembly (`shellBlock`/`dollarRows`) still branches in `render-lines.ts`, consistent with the existing file — no finding. Permission ask untouched (comment only); `apps/mobile`/`core` untouched.
 
 **Executor behaviour:** honest Execution (red mutations pasted, drift recorded, pre-existing fail reproduced); the one miss is reading Design step 5's "denied → keep text" as covering background starts.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-23* (executor; review round 1 was claude-opus-5-5, the orchestrator's fresh-context reviewer)
+
+**The one finding (MEDIUM, no HIGH) — FIXED: a background start no longer shows its note collapsed.**
+
+Root cause, exactly as the review stated it: `shellBlock`'s `outcomeOnly` reads
+"settled with no `exit=`" as "an outcome the call had to say", and a
+`run_in_background` start is the one settled-no-code case that is not an outcome
+— its note says where the job's output will be read. One sentence:
+`packages/tui/src/shell-row.ts:62` now also returns `backgroundStart`, and
+`render-lines.ts:1127-1131` (its `outcomeOnly`) excludes it.
+
+- `shell-row.ts:30`: `BACKGROUND_START` — the marker `packages/tools/src/builtins.ts:456`
+  writes as the result's head (`started background job `), pinned in ONE place.
+- `shell-row.ts:48,62`: `ShellRow.backgroundStart` = `status === "ok" && head
+  starts with BACKGROUND_START`. `ok` only, deliberately: an `isError` result
+  about background execution (`background execution is not available here`) is a
+  REFUSAL, i.e. an outcome that must stay visible; and a failed shell call can
+  never have started a job.
+- `render-lines.ts:1127-1131`: `outcomeOnly` gains `!row.backgroundStart`; the
+  doc comment above `shellBlock` (`:1106-1116`) now names a spawn failure as
+  the outcome case and the background start as the exception.
+- Design step 5 clarified in place (Implementation), since it is the sentence
+  this round read the other way.
+
+**Red before green (the review's own repro, then the tests).** `.tentacle/tmp/tui-shell-row-collapsed/review.ts`
+on the pre-fix code, w=80, SGR stripped:
+```
+● Job in background 0.0s
+⎿ $ echo "partito"; sleep 8; echo fine
+  started background job bg-1 (pid 95): `echo "partito"; sleep 8; echo fine`
+  Read output with shell_output({ job_id: "bg-1" }); stop it with shell_kill({ …
+```
+(plain row at w=40: `● Bash echo "partito"; sleep 8; ec… 0.0s` + a 3-row
+`⎿ started background job …` block — the title-only shape replaced by a block.)
+Tests flipped first, run against the unfixed code — **3 fail**, on the
+assertion, not an import: `a background start: NO start note collapsed` (+ a
+spurious `"  started background job j1: `x`"` row), `… with no sentence: the
+title alone, no block` (+ `"⎿ started background job j1: `ls`"`), and
+`shell-intent-rows.test.ts`'s background case. Same repro after the fix: two
+rows, `● Job in background 0.0s` / `⎿ $ echo "partito"; sleep 8; echo fine`;
+plain: the single title row. `expandAll: true` still shows the note, so the
+information is ctrl+o away, never lost.
+
+**Mutation checks (each reverted; `git status` never carried the mutation).**
+1. `render-lines.ts` `!row.backgroundStart &&` deleted (the pre-fix guard) →
+   **3 fail**, byte for byte the RED above. Restored → 49 pass.
+2. Over-fix: `if (!expanded)` (every collapsed body dropped) → **6 fail**,
+   including the new `a spawn failure … KEEPS its reason` — the guard against
+   fixing this by hiding outcomes. This is the non-vacuity check for the
+   outcome half.
+3. `shell-row.ts` `tool.status === "ok"` → `settled` (an error read as a start) →
+   **1 fail**: the added assertion `a failed call is never read as a start` got
+   `⎿ $ bun test apps/mobile` where it wants the note. This is the non-vacuity
+   check for the new `ok`-only condition (it would otherwise be untested).
+
+**Drift from Implementation:** none beyond the fix itself — no new file, no
+plumbing change; the pure module keeps the parse (`shell-row.ts`, §7), the
+renderer keeps only assembly. Two cases the review listed as attacks are now
+pinned by tests instead of prose: a spawn failure (outcome, kept) and a plain
+row's background start (title only, `background start with no sentence`).
+
+**Verification.** `shell-row-collapsed` + `shell-intent-rows` +
+`denial-reply-row` + `render-lines` + `app-shell-row-collapsed` + `tool-hit`:
+**192 pass / 0 fail**. `scripts/test/mockup-kit.test.ts` + `app.test.tsx` (the
+codegen-drift and Ink seams): 150 pass / 0 fail — no generated artefact moved
+(nothing user-visible in the kit changes: the start note was never in it).
+`bunx biome check` on the 4 changed files: clean. `bun run check` on the whole
+branch is the orchestrator's script's job.
+
+**The known pre-existing fail, re-observed honestly.** Adding
+`permission-shell-command.test.tsx` to that set (7 files, 202 tests) yields
+**201 pass / 1 fail**: `render-lines.test.ts` "the shipped default is the
+text-only header" — the order-dependent module-level theme/first-import
+interaction already recorded in the gate-round Review and reproduced by the
+executor on a pristine `git archive HEAD` copy. It is green alone (127 pass) and
+green with `shell-row-collapsed` in the same process (161 pass); the test file is
+byte-identical to `HEAD` (`git show HEAD:…`), and the row it asserts is the
+startup header (`mascot.ts`), which this round does not touch. Not fixed here:
+pre-existing, unrelated, outside the approved Implementation. Unverified part:
+whether the co-run also fails on `main` — the gate's own baseline run decides
+that.
