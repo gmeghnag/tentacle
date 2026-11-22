@@ -1025,3 +1025,76 @@ per hash, vista run TUI + iPhone. Primo banco di prova: sostituire `night-task3.
 Size L complessiva → da spezzare in slice M (formato+validazione · esecutore · vista TUI · vista
 iPhone). Blast: load-bearing (broker, persistenza, pod trust): modello forte + Review a contesto
 fresco obbligatoria.
+
+## Review — slices 1–4 (fresh context, `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES.**
+
+Gate: the touched test files (13 files + `packages/protocol/test`) → **686 pass, 0 fail**;
+`bun run lint` clean (2281 files); `bun run typecheck` clean. Full `bun test` not re-run here.
+
+Findings (HIGH/MEDIUM only):
+
+1. **HIGH — run ids collide across processes of one session, so a crash goes un-noted.**
+   `packages/agent/src/workflow-driver.ts:267-268` mints `wf-${seq}` with `seq` starting at 0
+   in every driver. Since the driver lives one per process, every `--resume` / `serve` restart
+   mints `wf-1` again in the same log. `workflowLoadNotes` (`core/src/workflow-ledger.ts:270-281`)
+   keys by `runId`: the first run's live `workflow_end` note (`id: "wf-1"`) hides the second
+   run's open start. Repro (`.tentacle/tmp/agent-workflows/rv-collide.ts`): start wf-1, end
+   wf-1, start wf-1 (crash), old end note in messages → **0 notes (expected 1)**. The plan's
+   failure mode ("load appends `stopped: interrupted`; never shown as running") silently fails.
+   `rerun` (`:340-352`) does the same within one process: it reuses the id and does not re-log
+   `workflow_start`, so a crash during a resumed run sits after a `workflow_end` → no note.
+   Fix shape: seed `seq` from the log's highest `wf-N` (or use globally unique ids), and give a
+   rerun its own start/close fact.
+2. **HIGH — Slice 4 is not done, so the branch cannot merge.** The Execution says so itself
+   ("PARTIAL"). Specifically: `session/workflow` / `workflow/list` are registered
+   (`protocol/src/methods.ts`) with no daemon handler (→ `unexpected method`); there is no
+   `workflow-approvals.json` store, no wiring, no `workflow` tool, and no tunnelled-session refusal.
+   Also, the plan's failure mode "daemon crash mid-step → `resume` re-runs that step" has **no
+   path**: runs live only in `this.runs`, and `rerun` refuses an unknown id
+   (`workflow-driver.ts:319-321`). Nothing rebuilds a run from the log. This is not in the
+   "Not done" list; add it to the plan, or change the failure mode.
+3. **MEDIUM — `budget.wait` has no bound, so every ask times out immediately.**
+   `core/src/workflow-spec.ts:56-64` accepts up to 7 digits and `:795-799` stores it as-is. A
+   value of `0s`, or any value above about 596h (2^31 ms), is accepted. Repro
+   (`rv-timer.ts`): `wait: 1000h` → `waitMs=3600000000`, Bun's `TimeoutOverflowWarning`, and the
+   timer fires after **14 ms**. Then the hash approval itself ends `stopped: timeout` every time,
+   so the file can never run. Bound it like `timeout` (`WORKFLOW_MAX_TIMEOUT_MS`) and refuse `0`.
+4. **MEDIUM — clients still offer "allow always" on a `workflow_approve`.**
+   `daemon/src/permission-map.ts:27-31` offers only allow-once and deny. But the TUI
+   (`tui/src/permission-ui.ts:273`) and the phone (`apps/mobile/src/permission-sheet.ts:191`)
+   build their own option lists, and both still show "allow always". Choosing it sends
+   `allow_always` (`client/src/permission-map.ts:67`), which `hosted-session.ts:1595` rejects
+   with `InvalidParams` ("option not offered"). So the user's approval of a merge step errors
+   instead of landing. Not reachable until the wiring lands, but it must be fixed in the same
+   branch, or tracked explicitly in Slices 6/7.
+5. **MEDIUM — no test pins "stop withdraws an open approval".** Mutation: drop
+   `run.controller.signal` from the step requester's signals (`workflow-driver.ts:631`). Result:
+   **18/18 pass**. Then `stop()` during the hash approval or an `approve` step leaves the ask
+   open until `budget.wait` (12h), and the run does not end `cancelled`. Tree restored
+   byte-identical (`git status` clean).
+
+**Attacks tried, with results.**
+- Single broker: every ask goes through `deps.request`, and no broker in core caches
+  `scope:"session"`. Holds.
+- Auto-accept: all four deciders share `autoApproves`, which now refuses `workflow_approve`.
+  These are the TUI, the phone (via `toPermissionRequest`), the relay
+  (`relay-policy.ts:65`) and the daemon's own (`hosted-session.ts:1547`). Holds, once the
+  driver sets `kind`, which it does at `:472` and `:903`.
+- A daemon labelling an ordinary ask `workflow_approve` can only make auto-accept ask more.
+  Holds.
+- Older readers: the three entry types are non-critical and use free words, not enums. Holds;
+  the executor's mutations M7–M9 cover it.
+- Prompt path escape: `..` and absolute paths are refused (`workflow-spec.ts:336-341`).
+  Symlinks are the loader's job, and the loader is not built yet.
+
+**What holds.** The pure modules are separate from the I/O. The executor's mutation tables
+(slice 3: 11, slice 4: 12) are credible; I re-ran one mutation of my own (#5), which exposed
+the gap above. The executor was honest about the PARTIAL status. They missed the id-collision
+problem and the resume-without-rehydration gap.
+
+**Same model family as the executor of slices 3–4 (Opus; fresh context only).** We share blind
+spots, so a different-model pass on the load-bearing parts is advisable.
+
+*— claude-opus-5-5, 2026-11-22*
