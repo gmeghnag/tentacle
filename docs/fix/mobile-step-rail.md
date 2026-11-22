@@ -163,3 +163,14 @@ production change made). What the resume found and did:
   row (coverage gap above).
 
 ## Review
+
+**Verdict: REQUEST-CHANGES**
+
+1. **MEDIUM — an ok shell step's open body still begins with `exit=0`** (`apps/mobile/src/tool-steps.ts:366`: `withoutExitLine` runs only when `exitSuffix !== null`, i.e. failures). Decision 5 says the body has "no `exit=N` line" and the "same rules for an ok shell step". Seen in the executor's own shot `38-default-detail-light.png`: `$ sleep 20 && echo resolved 50/50`, then the body `exit=0` / `resolved 50/50`. No test pins the ok case (`tool-step-view.test.ts:170` and `shell-intent-step.test.ts:39` feed `exit=0\n…` without checking the body). Fix: when the `$` line is shown, strip the leading `exit=N` line for ok steps too. Add a red-first test.
+2. **MEDIUM — the decision-3 branch can't be checked as built.** `StepNode.tsx` `styles.branch` is 3 pt tall (`SUBLINE_MID` 32 − `NODE_Y+7` 29), with `borderBottomLeftRadius: 6` clamped by that height. In the shot it is a tiny tick, not a curved branch. It is a fixed number that does not follow Dynamic Type (the text scales up to `DENSE_FONT_SCALE`, the branch does not). No shot shows a failed long-command row, so decision 2/3 (`exit N` never cut, the branch on a failed row) were never seen rendered. Needed: owner sign-off on the look, plus one fixture shot.
+
+Gate: the 7 touched test files (6 mobile + mockup-kit), 105 pass / 0 fail; `bun run lint` clean (2256 files); `bun run typecheck` clean. Full `bun test` not re-run. I did not re-run the mutations: I accept the executor's 10-mutant table (all killed) but did not check it. M7–M10 check the source text, not a render.
+Attacks tried: (a) is the ok-path body duplicated? → finding 1. (b) beta compact + failure: `commandRow` is true on error (`shell-intent.ts` `shellRowParts`), so `exitSuffix` shows; holds. (c) a failure with no code / a denial: `trailingRed` keeps the red, the body keeps the text; holds. (d) one blink clock: `ThoughtDot` reuses `BlinkingDot`; holds. (e) §7: renderer/pure split is kept (decisions in `tool-steps.ts` / `step-blink.ts`); no protocol or persistence touched.
+Executor: the coverage gap was stated honestly. The ok-path `exit=0` sits in the executor's own screenshot and was not caught.
+
+*— claude-opus-5-5, 2026-11-22* (same model family as the resume author; fresh context only)
