@@ -40,6 +40,8 @@ export const WORKFLOW_DEFAULT_WAIT_MS = 12 * 3_600_000;
 /** A `run` step's own default. */
 export const WORKFLOW_DEFAULT_TIMEOUT_MS = 20 * 60_000;
 export const WORKFLOW_MAX_TIMEOUT_MS = 24 * 3_600_000;
+/** `budget.wait`'s ceiling: well under a timer's 2^31 ms (~24.8 days) overflow. */
+export const WORKFLOW_MAX_WAIT_MS = 7 * 24 * 3_600_000;
 export const WORKFLOW_MAX_APPROVE_TITLE = 200;
 export const WORKFLOW_MAX_APPROVE_DETAIL = 2000;
 /** A step's reason (the verdict's justification) as the log and the views carry it. */
@@ -716,6 +718,8 @@ export function validateWorkflow(text: string, ctx: WorkflowContext = {}): Workf
           : (parseWorkflowDuration(step.timeout) ?? WORKFLOW_DEFAULT_TIMEOUT_MS);
       if (timeoutMs > WORKFLOW_MAX_TIMEOUT_MS) {
         errors.push(`${at}.timeout: is longer than 24h`);
+      } else if (timeoutMs <= 0) {
+        errors.push(`${at}.timeout: should be longer than 0`);
       }
       steps.push({ ...base, kind: "run", command: step.run, where: where.where, timeoutMs });
       continue;
@@ -787,16 +791,24 @@ export function validateWorkflow(text: string, ctx: WorkflowContext = {}): Workf
       errors.push(...refsProblem(step.detail, `${step.at}.approve.detail`, inputs, ids));
     }
   }
+  // A timer past 2^31 ms fires at once in Bun/Node (TimeoutOverflowWarning), so
+  // an unbounded wait would time every ask out immediately (review round 1 #3).
+  const waitMs =
+    wf.budget?.wait === undefined
+      ? WORKFLOW_DEFAULT_WAIT_MS
+      : (parseWorkflowDuration(wf.budget.wait) ?? WORKFLOW_DEFAULT_WAIT_MS);
+  if (waitMs <= 0) {
+    errors.push("budget.wait: should be longer than 0");
+  } else if (waitMs > WORKFLOW_MAX_WAIT_MS) {
+    errors.push("budget.wait: is longer than 7 days");
+  }
   if (errors.length > 0) {
     return { ok: false, errors };
   }
 
   const budget: WorkflowBudget = {
     ...(wf.budget?.tokens === undefined ? {} : { tokens: wf.budget.tokens }),
-    waitMs:
-      wf.budget?.wait === undefined
-        ? WORKFLOW_DEFAULT_WAIT_MS
-        : (parseWorkflowDuration(wf.budget.wait) ?? WORKFLOW_DEFAULT_WAIT_MS),
+    waitMs,
     maxStepRuns: wf.budget?.max_step_runs ?? WORKFLOW_DEFAULT_MAX_STEP_RUNS,
   };
   return {

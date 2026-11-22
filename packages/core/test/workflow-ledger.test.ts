@@ -12,6 +12,7 @@ import {
   capWorkflowInputs,
   workflowEndBody,
   workflowLoadNotes,
+  workflowRunSeqFromHistory,
   workflowStartBody,
   workflowStepBody,
 } from "../src/workflow-ledger.ts";
@@ -198,5 +199,24 @@ describe("workflowLoadNotes — a run a crash left open is closed honestly, once
 
   test("no entries → []", () => {
     expect(workflowLoadNotes([], [])).toEqual([]);
+  });
+});
+
+describe("workflowRunSeqFromHistory (review round 1 #1)", () => {
+  test("the highest wf-N a note id or a message text names; 0 when none", () => {
+    expect(workflowRunSeqFromHistory([])).toBe(0);
+    const messages: ChatMessage[] = [
+      {
+        role: "user",
+        content: "[workflow wf-3 task: ok] done",
+        note: { kind: "workflow_end", id: "wf-3" },
+      },
+      { role: "assistant", content: "started wf-12 earlier; not wf-x nor awf-99" },
+      { role: "user", content: "plain", note: { kind: "workflow_interrupted", id: "wf-15" } },
+    ];
+    expect(workflowRunSeqFromHistory(messages)).toBe(15);
+    // A tool result may be the only trace of an id (no note names it).
+    messages.push({ role: "tool", content: "started wf-20", toolCallId: "c1" } as ChatMessage);
+    expect(workflowRunSeqFromHistory(messages)).toBe(20);
   });
 });

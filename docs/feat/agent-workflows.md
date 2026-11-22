@@ -339,7 +339,7 @@ broker, the auto-accept exclusion, and the persistence rules). A changelog fragm
 | 3 | crash between `workflow_start` and `workflow_end` | load appends `stopped: interrupted` note (idempotent); never shown as running |
 | 3 | older build reads the log | skips the three non-critical types; conversation intact (Q1) |
 | 3 | older client / daemon | `workflows` → `unsupported` once; `session/workflow` → MethodNotFound "update tentacle"; approve-kind skew → `VersionMismatch` at `initialize` (protocol.d) |
-| 4 | daemon crash mid-step | step closed `interrupted`; `resume` re-runs that step from scratch (attempt +1) — never mid-step |
+| 4 | daemon crash mid-step | the load closes the run `stopped: interrupted` (note); a run a restart cut is NOT resumable — `resume` refuses it ("start a new run"); never re-run by a reload (Q4). *(Changed in fix round 1: no path rebuilt a run from the log — see Execution.)* |
 | 4 | client disconnect (`serve`) | run continues; open asks re-offered on re-attach (`hosted-session.ts:300-310`) |
 | 4 | plain TUI quit (in-process worker) | worker dies with the run; next load closes it honestly (unattended needs `connect` to `serve`) |
 | 4 | ask unanswered past `budget.wait` | step `stopped`, run `stopped: timeout`, ask withdrawn |
@@ -842,6 +842,110 @@ but NOT yet reachable from a session:
    child ask reaches a `SpyBroker` through `HostedSession` with the start turn id).
 
 The branch must not merge before these land (Slice 3's note already says so).
+
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-22 — answers "Review — slices 1–4" findings 1–5*
+
+**#1 HIGH run-id collision — FIXED.** `core/src/workflow-ledger.ts`
+`workflowRunSeqFromHistory(messages)`: highest `wf-N` in any note id or message text
+(the `sa-N` ledger's rule). `WorkflowDriver.reserveRunIds(n)`; `HostedSession.attachWorkflows`
+seeds it from `session.messages` (the load notes are already in them). **Drift:** `rerun`
+(resume / rerun_step) now mints a NEW run (`wf-N+1`) carrying the old machine state, goes
+through `launch` (hash check, its own `workflow_start` … `workflow_end`); reusing the id made
+the old run's end note hide a crash during the rerun. Tests (driver): restarted session gets
+`wf-2` and a crashed 2nd run still gets its note (the reviewer's repro, now 1 note); a crash
+during a rerun is noted; ledger unit test.
+
+**#2 HIGH Slice 4 wiring — FIXED (with one plan change).**
+- `cli/src/workflow-approvals.ts` (new): `<configDir>/workflow-approvals.json`, project
+  (`projectKey`) + path + hash, temp+rename, fail closed on a bad file, capped at 1000.
+- `cli/src/workflow-files.ts` (new): `load` = `workflows/<name>.yaml` + every regular file
+  under `workflows/` (prompt paths relative to it), no symlinks followed, capped.
+- `tools/src/workflow.ts` (new): the model's `workflow` tool (`run | status | stop`; validate
+  is `run`'s refusal), on a structural driver interface (tools does not depend on agent).
+  `agent/src/subagent.ts`: `workflow` joins the child-filter lists.
+- `cli/src/wiring.ts`: `BuildAgentOptions.workflows?: true` → driver + tool, only when not
+  tunnelled; runner deps factored into `runnerDeps`, `runnerFor(r)` = same deps with
+  `requestPermission: r`; `commands` = `new PermissionGate(r, hooks, grants).authorize(shellTool,
+  {command})` + `env.exec`; `slots` = `agentJobs.acquire`. `WiredAgent.workflows`,
+  `workerSessionBuild` carries it. Opt-in: `worker.ts` and `serve.ts` (`serve`'s own factory);
+  the pod factories never pass it.
+- `agent/src/agent.ts`: `PendingWorkflowEnd` on the exits queue (`noteWorkflowEnd`; `Session`
+  forwards) → user message with `note{workflow_end, id: runId}` + `context_note`; counts in
+  `pendingExitCount` (it wakes).
+- `daemon/src/hosted-session.ts`: `attachWorkflows` (seed + `bind`: log emitters + `persist`,
+  `attribute`/`release` → `spawnTurns`, `publish` → `workflows` update judged by
+  `WorkflowRowSchema` + the cut, `ended` → exits queue + `kickWake`); `workflows` in the cut and
+  the first snapshot page; the live run's `workflow_start` re-logged in `logSegmentFacts`
+  (`driver.liveStart()`); `dispose` at close; `reusable().workflows`; `workflow(params)`
+  (no driver → "workflows run only on a laptop or serve session"; `wake-` turn ids refused;
+  duplicate input names refused); `workflowListRows()`.
+- `daemon/src/session-host.ts`: `AgentFactory.workflows`, `attachWorkflows` after construction,
+  rebuild reuse/discard like `agentJobs`; `workflowList()`. `connection.ts`: `session/workflow`,
+  `workflow/list` (no lock, no await on a turn).
+- **Plan change (failure mode "daemon crash mid-step"):** nothing could rebuild a run from the
+  log (the in-process worker's daemon is not even given the loaded segment's entries), so a run
+  a restart cut is closed `interrupted` and NOT resumable; `rerun` of an unknown id refuses
+  "… start a new run", and the interrupted note no longer promises `resume`. Implementation
+  table updated. Cross-process resume = follow-up (needs the segment's `workflow_*` entries in
+  the daemon + a machine replay).
+- Tests: `cli/test/workflow-approvals.test.ts` (3), `cli/test/workflow-wiring.test.ts` (4:
+  opted-in → driver + tool + carried; not opted in → none; tunnelled → none; missing file →
+  refused naming the path), `daemon/test/workflow-hosted.test.ts` (4: no driver → refused;
+  RPC start → snapshot row `ok` + exit queued; ids seeded `wf-5` after a `wf-4` note; `wake-`
+  refused).
+
+**#3 MEDIUM `budget.wait` unbounded — FIXED.** `workflow-spec.ts`: `WORKFLOW_MAX_WAIT_MS` = 7
+days (< 2^31 ms); `budget.wait` 0 → "should be longer than 0", > 7 days → "is longer than 7
+days"; a `run` step's `timeout: 0` refused too. Red first: 2 fail ("expected the workflow to be
+refused"), then green.
+
+**#4 MEDIUM "allow always" on `workflow_approve` — FIXED.** `tui/src/permission-ui.ts`
+`buildPermissionChoices` and `apps/mobile/src/permission-sheet.ts` `sheetOptions`: once / deny
+(+ reply when offered). Red first: 4 fail, then green.
+
+**#5 MEDIUM stop vs open approval untested — FIXED (tests).** Two driver tests: `stop` during
+the hash approval and during an approve step aborts the ask's signal at once (clock unmoved),
+run `stopped · cancelled`. The reviewer's mutation now goes red.
+
+**Mutations** (`.tentacle/tmp/agent-workflows/mutate-fix1.ts`; apply, run the pinning file,
+restore; `git status` unchanged after). F1c was vacuous at first (the highest id was also in a
+note) — test fixed, now red:
+
+```
+red OK  F3a wait unbounded                            46 pass 1 fail
+red OK  F3b wait zero accepted                        46 pass 1 fail
+red OK  F3c timeout zero accepted                     46 pass 1 fail
+red OK  F4a TUI offers always                         0 pass 2 fail
+red OK  F4b phone offers always                       0 pass 2 fail
+red OK  F5 stop does not reach asks                   21 pass 2 fail
+red OK  F1a driver ignores the seed                   22 pass 1 fail
+red OK  F1b rerun reuses the run id                   21 pass 2 fail
+red OK  F1c seed ignores message text                 12 pass 1 fail
+red OK  F2a hosted does not seed ids                  3 pass 1 fail
+red OK  F2b end note not queued                       3 pass 1 fail
+red OK  F2c snapshot drops workflows                  3 pass 1 fail
+red OK  F2d wake turn id accepted                     3 pass 1 fail
+red OK  F2e no driver not refused                     3 pass 1 fail
+red OK  F2f tunnelled gets a driver                   3 pass 1 fail
+red OK  F2g approvals ignore project                  2 pass 1 fail
+red OK  F2h approvals ignore hash                     2 pass 1 fail
+```
+
+Narrow gate: the 18 covering test files/dirs (workflow-*, permission-sheet, registry,
+history-cut, wiring, diagram-wiring, `packages/protocol/test`) → **755 pass, 0 fail**; agent
+`subagent*`/`background*` + daemon `session-settings*`/`wake*` → 91 pass, 0 fail. `biome check`
+on the 27 touched files: clean (6 reformatted). Full gate: the orchestrator's script.
+
+**Not covered / debt (one line each).**
+- The end-to-end A2 test through `HostedSession` + a real `SpyBroker` (a step child's ask
+  arriving with the start turn id) is not written; A2 holds by the driver test + the existing
+  `awaitBackgroundDecision` path. Verify: a daemon test that answers a step ask over a
+  `Connection`.
+- A model-started run has no `turnId` (`ToolContext` carries none), so its asks are
+  unattributed; the child filter's `workflow` entry has no dedicated test.
+- A settings rebuild in `serve` reuses the driver with the FIRST build's deps (models, hooks).
 
 ## Review
 

@@ -177,6 +177,8 @@ interface Run {
   done: boolean;
   /** The current step's own abort (a timed-out ask cuts the step). */
   stepAbort?: AbortController;
+  /** The `workflow_start` it logged (once approved): re-logged at a new segment. */
+  startBody?: WorkflowStartBody;
 }
 
 const systemClock: WorkflowClock = {
@@ -212,12 +214,32 @@ export class WorkflowDriver {
     this.host = host;
   }
 
+  /**
+   * Never mint `wf-N` for `N <= highest`: the host seeds it from the session's
+   * history (`workflowRunSeqFromHistory`), so a restarted process cannot reuse
+   * an id an older run's end note already closed (review round 1 #1).
+   */
+  reserveRunIds(highest: number): void {
+    if (Number.isSafeInteger(highest) && highest > this.seq) {
+      this.seq = highest;
+    }
+  }
+
   /** The `workflows` update / snapshot rows: the running run + the last ended ones. */
   rows(): WorkflowRow[] {
     const all = [...this.runs.values()];
     const live = all.filter((r) => !r.done);
     const ended = all.filter((r) => r.done).slice(-WORKFLOW_RECENT_RUNS);
     return [...ended, ...live].map((r) => r.row);
+  }
+
+  /**
+   * The live run's logged `workflow_start`, if it has one (approved, not
+   * ended): the host logs it again at every new segment, so a crash after a
+   * compaction still finds an open run to close at the next load.
+   */
+  liveStart(): WorkflowStartBody | undefined {
+    return [...this.runs.values()].find((r) => !r.done)?.startBody;
   }
 
   /** The run in flight, if any (one per session). */
@@ -317,7 +339,10 @@ export class WorkflowDriver {
   ): Promise<WorkflowStartResult> {
     const run = this.runs.get(runId);
     if (run === undefined) {
-      return { ok: false, reason: `${runId} is not a run of this session` };
+      return {
+        ok: false,
+        reason: `${runId} is not a run of this session process (a run a restart cut is not resumed): start a new run`,
+      };
     }
     if (!run.done) {
       return { ok: false, reason: `${runId} is still running` };
@@ -339,17 +364,38 @@ export class WorkflowDriver {
     if (this.current() !== undefined || this.disposed) {
       return { ok: false, reason: "another workflow started meanwhile" };
     }
+    // A NEW run (fresh id, its own `workflow_start` … `workflow_end`) carrying
+    // the old one's machine state: reusing the id would let the old run's end
+    // note hide a crash during this one at the next load (review round 1 #1).
     const resumed = rerunAt(run.state, at);
-    run.state = resumed.state;
-    run.turnId = turnId ?? run.turnId;
-    run.controller = new AbortController();
-    run.timedOut = false;
-    run.done = false;
+    this.seq += 1;
+    const nextId = `wf-${this.seq}`;
     const { endedAt: _endedAt, reason: _reason, stopReason: _stop, ...rest } = run.row;
-    run.row = { ...rest, state: "running" };
+    const next: Run = {
+      runId: nextId,
+      source: run.source,
+      spec: run.spec,
+      hash: run.hash,
+      turnId: turnId ?? run.turnId,
+      state: resumed.state,
+      row: {
+        ...rest,
+        runId: nextId,
+        state: "running",
+        startedAt: this.clock.now(),
+        steps: rest.steps.map((s) =>
+          s.state === "stopped" ? { ...s, state: "pending", live: undefined } : s,
+        ),
+      },
+      controller: new AbortController(),
+      timedOut: false,
+      asks: 0,
+      done: false,
+    };
+    this.runs.set(nextId, next);
     this.publish();
-    void this.drive(run, resumed.action).catch(() => {});
-    return { ok: true, runId };
+    void this.launch(next, resumed.action, "user").catch(() => {});
+    return { ok: true, runId: nextId };
   }
 
   /** The session closes: every live run is cut and closed `interrupted`. */
@@ -434,18 +480,17 @@ export class WorkflowDriver {
       this.finish(run, approved, false);
       return;
     }
-    this.host?.logStart(
-      workflowStartBody({
-        runId: run.runId,
-        name: run.spec.name,
-        version: run.spec.version,
-        hash: run.hash,
-        path: run.source.path,
-        inputs: run.state.inputs,
-        by,
-        ...(run.turnId !== undefined ? { turnId: run.turnId } : {}),
-      }),
-    );
+    run.startBody = workflowStartBody({
+      runId: run.runId,
+      name: run.spec.name,
+      version: run.spec.version,
+      hash: run.hash,
+      path: run.source.path,
+      inputs: run.state.inputs,
+      by,
+      ...(run.turnId !== undefined ? { turnId: run.turnId } : {}),
+    });
+    this.host?.logStart(run.startBody);
     run.row = { ...run.row, state: "running" };
     this.publish();
     await this.drive(run, first);

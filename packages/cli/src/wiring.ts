@@ -15,11 +15,13 @@ import {
   EMPTY_SKILL_LISTING,
   HookRunner,
   NO_CAPABILITIES,
+  PermissionGate,
   type ResultTransform,
   SessionGrants,
   type SessionSkills,
   type SkillListing,
   type ToolOutputStore,
+  WorkflowDriver,
   collapseRepeatedLines,
   createSubagentRunner,
   createToolOutputStore,
@@ -55,6 +57,7 @@ import {
   type JobController,
   type ModelProvider,
   PermissionBroker,
+  type PermissionRequester,
   type ScheduleLimits,
 } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
@@ -75,9 +78,11 @@ import {
   createSkillActivator,
   createSkillTool,
   createTaskTool,
+  createWorkflowTool,
   createWorkloadShellTool,
   diagramTool,
   presentTool,
+  shellTool,
   subagentExtraTools,
 } from "@tentacle/tools";
 import { logDaemonError } from "./daemon-log.ts";
@@ -89,6 +94,8 @@ import {
   subagentModelResolver,
   tunnelSubagentResolver,
 } from "./model-provider.ts";
+import { workflowApprovals } from "./workflow-approvals.ts";
+import { loadWorkflowSource } from "./workflow-files.ts";
 
 /**
  * Load user-defined agent types from `<configDir>/agents/*.md`, then from each
@@ -279,6 +286,8 @@ export interface WiredAgent {
    * this build offered `workload_shell`, and disposed next to `jobs`.
    */
   readonly workloadShells?: { dispose(): Promise<void> };
+  /** The workflow driver (docs/feat/agent-workflows.md D3): only with `workflows: true`, never tunnelled. */
+  readonly workflows?: WorkflowDriver;
 }
 
 /**
@@ -295,6 +304,7 @@ export function workerSessionBuild(wired: WiredAgent) {
     jobs: wired.jobs,
     agentJobs: wired.agentJobs,
     grants: wired.grants,
+    ...(wired.workflows ? { workflows: wired.workflows } : {}),
     // The main thread's config (the laptop's): absent with `autoTitle` off.
     ...(wired.titleModel ? { titleModel: wired.titleModel } : {}),
   };
@@ -366,6 +376,12 @@ export interface BuildAgentOptions {
   /** Likewise the background sub-agent runtime: its running children carry over. */
   readonly agentJobs?: AgentJobs;
   readonly grants?: SessionGrants;
+  /**
+   * Build the session's workflow driver and offer the `workflow` tool
+   * (docs/feat/agent-workflows.md D3): the worker and `serve` only. Ignored
+   * over a `modelOverride` (a tunnelled pod session never runs one).
+   */
+  readonly workflows?: true;
   /**
    * Daemon-side log for hook failures (`onFailure: "ignore"`). Never the
    * terminal while Ink owns it (AGENTS §7): a log file / the piped stderr.
@@ -613,6 +629,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // (docs/feat/parallel-agents.md, Design 3). The ONE broker is still the only
   // requester: the lane only orders calls to it.
   const grants = options.grants ?? new SessionGrants();
+  let workflows: WorkflowDriver | undefined;
 
   // Sub-agents: when enabled, register the `agent_task` delegation tool. Children
   // inherit the same confined env + permission requester; the runner filters
@@ -642,7 +659,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       : published && options.namedModelOverride
         ? tunnelSubagentResolver(published, options.namedModelOverride)
         : undefined;
-    const { run, types, readOnlyType } = createSubagentRunner({
+    const runnerDeps: Parameters<typeof createSubagentRunner>[0] = {
       model,
       ...(modelFor ? { modelFor } : {}),
       env,
@@ -670,7 +687,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // (docs/feat/session-capabilities.md): read at each child round, so
       // `agent` (built below) is always set by the time a child runs.
       capabilities: () => agent.capabilities(),
-    });
+    };
+    const { run, types, readOnlyType } = createSubagentRunner(runnerDeps);
     if (published) {
       // Said here because only the pod knows its own types (the laptop cannot).
       for (const line of unknownTypeModelWarnings(
@@ -704,6 +722,43 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     // is offered: without the runtime no child has an id to name. One tool, not
     // three, keeps each request's tool definitions ~1000 chars shorter.
     tools.register(createAgentControlTool(agentJobs, { twoWay: config.subagentsTwoWay }));
+    // Workflows (docs/feat/agent-workflows.md D3): only where the caller asks
+    // (the worker and `serve`) and NEVER tunnelled — a pod session's asks and
+    // approvals are not the laptop's to keep (AGENTS §7). Same runner deps, the
+    // step's requester as the asker (drift 2), the session's ONE broker below it.
+    if (options.workflows === true && !tunnelled) {
+      const gate = (requester: PermissionRequester) => new PermissionGate(requester, hooks, grants);
+      workflows = new WorkflowDriver({
+        load: async (name) => loadWorkflowSource(config.cwd, name),
+        context: () => ({
+          models: Object.keys(config.models),
+          agentTypes: types.map((t) => t.name),
+        }),
+        approvals: workflowApprovals(config.configDir, config.cwd),
+        request: (req, opts) => permissions.request(req, opts),
+        runnerFor: (requester) =>
+          createSubagentRunner({ ...runnerDeps, requestPermission: requester }).run,
+        commands: {
+          authorize: async (command, requester, call) => {
+            const outcome = await gate(requester).authorize(
+              shellTool,
+              { command },
+              { sessionId: "", toolCallId: call.toolCallId, signal: call.signal },
+            );
+            return outcome.allowed
+              ? { allowed: true }
+              : {
+                  allowed: false,
+                  reason: `not allowed${outcome.message !== undefined ? `: ${outcome.message}` : outcome.reason !== undefined ? `: ${outcome.reason}` : ""}`,
+                };
+          },
+          exec: (command, { signal, timeoutMs }) =>
+            env.exec(command, { signal, timeoutMs, cwd: config.cwd }),
+        },
+        slots: { acquire: (description) => agentJobs.acquire(description) },
+      });
+      tools.register(createWorkflowTool(workflows));
+    }
   }
 
   // Context reset (docs/feat/context-reset.md): the model renews its own
@@ -831,6 +886,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     grants,
     ...(titleModel ? { titleModel } : {}),
     ...(workloadShells !== undefined ? { workloadShells } : {}),
+    ...(workflows !== undefined ? { workflows } : {}),
   };
 }
 

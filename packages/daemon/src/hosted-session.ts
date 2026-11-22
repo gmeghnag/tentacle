@@ -50,6 +50,7 @@ import type {
   Session,
   SessionCapabilities,
   SessionGrants,
+  WorkflowDriver,
 } from "@tentacle/agent";
 import {
   CapabilityRefusal,
@@ -98,6 +99,7 @@ import {
   scheduleSettled,
   scheduleStep,
   wakeDue,
+  workflowRunSeqFromHistory,
   zoneOrDefault,
 } from "@tentacle/core";
 import {
@@ -147,6 +149,11 @@ import {
   type WatchCategory,
   type WatchNextResult,
   type WatchResult,
+  type WorkflowListRow,
+  type WorkflowParams,
+  type WorkflowResult,
+  type WorkflowRow,
+  WorkflowRowSchema,
   clientSupportsUpdate,
   watchAccepts,
 } from "@tentacle/protocol";
@@ -347,6 +354,8 @@ interface Cut {
   readonly jobs: readonly JobRow[];
   /** The scheduled wakes as of the cut: the last `schedules` list emitted (docs/feat/cron-tool.md D5). */
   readonly schedules: readonly ScheduleRow[];
+  /** The workflow runs as of the cut: the last `workflows` list emitted (docs/feat/agent-workflows.md D5). */
+  readonly workflows: readonly WorkflowRow[];
 }
 
 /**
@@ -943,6 +952,10 @@ export class HostedSession {
   private scheduleTimer: unknown = null;
   /** The last `schedules` list emitted (or the initial one): what the cut records. */
   private lastSchedules: readonly ScheduleRow[] = [];
+  /** The last `workflows` list emitted: what the cut records. */
+  private lastWorkflows: readonly WorkflowRow[] = [];
+  /** The workflow driver (docs/feat/agent-workflows.md D3); absent on a tunnelled session. */
+  private workflows: WorkflowDriver | undefined;
   /** The fired turns that have not ended, by turnId → the job that fired each (its failure budget). */
   private readonly firedTurns = new Map<string, string>();
   /** The committed history as a typed log (`session/log`), derived at the cut's own points. */
@@ -1052,6 +1065,7 @@ export class HostedSession {
       // no jobs), and every later job announces itself through `onStart`.
       jobs: [],
       schedules: [],
+      workflows: [],
     };
     // The scheduled wakes a restart or a reopen brings back (D6), with the
     // counter seeded from them and the history: no id the model saw is reused.
@@ -2206,6 +2220,8 @@ export class HostedSession {
       ...(cursor === undefined ? { jobs: [...cut.jobs] } : {}),
       // Only where the session schedules (a pod daemon sends none, D5).
       ...(cursor === undefined && this.scheduling ? { schedules: [...cut.schedules] } : {}),
+      // Only where the session runs workflows (a tunnelled session has no driver).
+      ...(cursor === undefined && this.workflows ? { workflows: [...cut.workflows] } : {}),
     };
   }
 
@@ -2248,6 +2264,7 @@ export class HostedSession {
       subagents: this.lastSubagents,
       jobs: this.lastJobs,
       schedules: this.lastSchedules,
+      workflows: this.lastWorkflows,
     };
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
@@ -2286,6 +2303,13 @@ export class HostedSession {
       } else {
         this.log.subagentBackground(fact);
       }
+    }
+    // A live workflow run's start, again (Slice 3 obligation): a segment that
+    // dropped the older `workflow_start` would leave a crash during the run
+    // with nothing to close at the next load.
+    const live = this.workflows?.liveStart();
+    if (live !== undefined) {
+      this.log.workflowStart(live);
     }
   }
 
@@ -2340,6 +2364,132 @@ export class HostedSession {
   /** The background sub-agents still running (6a's liveness, the quit count, `/clear`'s hand-over). */
   agentJobsRunning(): readonly AgentJob[] {
     return this.agentJobs.running();
+  }
+
+  /**
+   * Bind the session's workflow driver (docs/feat/agent-workflows.md D3). The
+   * session host calls it once, right after construction, and only where the
+   * factory built one (never on a tunnelled session). Seeded from the history,
+   * so a restart never re-mints a run id the log or the conversation names.
+   */
+  attachWorkflows(driver: WorkflowDriver): void {
+    this.workflows = driver;
+    driver.reserveRunIds(workflowRunSeqFromHistory(this.session.messages));
+    driver.bind({
+      // The durable facts: logged at once, made durable by the next write.
+      logStart: (body) => {
+        this.log.workflowStart(body);
+        this.persist();
+      },
+      logStep: (body) => {
+        this.log.workflowStep(body);
+        this.persist();
+      },
+      logEnd: (body) => {
+        this.log.workflowEnd(body);
+        this.persist();
+      },
+      // A step's asks ride the background path, attributed to the start turn (A2).
+      attribute: (agentId, turnId) => {
+        if (turnId !== undefined) {
+          this.spawnTurns.set(agentId, turnId);
+        }
+      },
+      release: (agentId) => {
+        this.spawnTurns.delete(agentId);
+      },
+      publish: (rows) => this.publishWorkflows(rows),
+      // The end note rides the exits queue (told at the next turn) and wakes.
+      ended: (runId, note) => {
+        this.spawnTurns.delete(runId);
+        this.session.noteWorkflowEnd(runId, note);
+        this.kickWake();
+      },
+    });
+    this.publishWorkflows(driver.rows());
+  }
+
+  /** The full `workflows` list, judged by its schema on the way out; the cut follows when idle. */
+  private publishWorkflows(rows: readonly unknown[]): void {
+    if (this.closed) {
+      return;
+    }
+    const parsed = WorkflowRowSchema.array().safeParse(rows);
+    if (!parsed.success) {
+      this.reportTurnError(new Error(`workflows: ${parsed.error.message}`));
+      return;
+    }
+    this.lastWorkflows = parsed.data;
+    try {
+      this.emit({ type: "workflows", runs: parsed.data });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+  }
+
+  /**
+   * `session/workflow` (D3): the USER starts / stops / resumes a run. A
+   * session without a driver (tunnelled: a pod's daemon) refuses — a run's
+   * asks and approvals belong to the laptop or a `serve` daemon.
+   */
+  async workflow(params: WorkflowParams): Promise<WorkflowResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return { ok: false, reason: "workflows run only on a laptop or serve session" };
+    }
+    if ("turnId" in params && params.turnId.startsWith(WAKE_TURN_PREFIX)) {
+      return { ok: false, reason: "a wake turn id cannot start a workflow" };
+    }
+    switch (params.action) {
+      case "start": {
+        const inputs = new Map<string, string>();
+        for (const { name, value } of params.inputs ?? []) {
+          if (inputs.has(name)) {
+            return { ok: false, reason: `input ${name} is given twice` };
+          }
+          inputs.set(name, value);
+        }
+        return driver.start({
+          name: params.name,
+          inputs: Object.fromEntries(inputs),
+          by: "user",
+          turnId: params.turnId,
+        });
+      }
+      case "stop":
+        return driver.stop(params.runId);
+      case "resume":
+        return driver.rerun(params.runId, undefined, params.turnId);
+      case "rerun_step":
+        return driver.rerun(params.runId, params.stepId, params.turnId);
+    }
+  }
+
+  /** This session's rows of `workflow/list` (D5): the hub's signal is `needsUser`. */
+  workflowListRows(): WorkflowListRow[] {
+    const title = this.wireTitle().text;
+    return this.lastWorkflows.map((run) => {
+      const step = run.steps.find(
+        (s) => s.state === "running" || s.state === "waiting" || s.state === "needs-approval",
+      );
+      return {
+        sessionId: this.id,
+        ...(title !== "" ? { title } : {}),
+        runId: run.runId,
+        name: run.name,
+        state: run.state,
+        ...(step !== undefined && run.endedAt === undefined ? { step: step.id } : {}),
+        done: run.steps.filter((s) => s.state === "ok").length,
+        total: run.steps.length,
+        needsUser:
+          run.endedAt === undefined && (run.state === "needs-approval" || run.state === "waiting"),
+        startedAt: run.startedAt,
+        ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
+      };
+    });
   }
 
   /**
@@ -3006,9 +3156,11 @@ export class HostedSession {
     readonly agentJobs?: AgentJobs;
     readonly grants?: SessionGrants;
     readonly workloadShells?: WorkloadShellsLike;
+    readonly workflows?: WorkflowDriver;
   } {
     return {
       permissions: this.permissions,
+      ...(this.workflows ? { workflows: this.workflows } : {}),
       ...(this.jobs ? { jobs: this.jobs } : {}),
       ...(this.agentRuntime ? { agentJobs: this.agentRuntime } : {}),
       ...(this.grants ? { grants: this.grants } : {}),
@@ -4050,6 +4202,8 @@ export class HostedSession {
       jobs: this.lastJobs,
       // And the scheduled wakes (owner Q7: `/clear` keeps them; a compaction too).
       schedules: this.lastSchedules,
+      // And the workflow runs: a run lives across a compaction or `/clear`.
+      workflows: this.lastWorkflows,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
@@ -4168,6 +4322,8 @@ export class HostedSession {
     this.unsubscribeAgentNotify?.();
     this.unsubscribeAgentRows?.();
     this.agentRuntime?.dispose();
+    // A live run is cut (`interrupted`); a reload closes it from the log too.
+    this.workflows?.dispose();
   }
 
   /**

@@ -341,6 +341,22 @@ describe("validateWorkflow — every refusal names its YAML path", () => {
     );
   });
 
+  test("budget.wait is bounded: zero and anything past 7 days (a timer overflow) are refused", () => {
+    expect(errorsOf(variant("wait: 12h", "wait: 0s"))).toContain(
+      "budget.wait: should be longer than 0",
+    );
+    expect(errorsOf(variant("wait: 12h", "wait: 1000h"))).toContain(
+      "budget.wait: is longer than 7 days",
+    );
+    expect(validateWorkflow(variant("wait: 12h", "wait: 168h"), {}).ok).toBe(true);
+  });
+
+  test("a run step's timeout of zero is refused", () => {
+    expect(errorsOf(variant("timeout: 20m", "timeout: 0m"))).toContain(
+      "steps[4].timeout: should be longer than 0",
+    );
+  });
+
   test("every error is reported at once, not one per round", () => {
     const broken = EXAMPLE.replace("goto: fix, max: 3", "goto: fx, max: 3")
       .replace("next: gate", "next: gatee")

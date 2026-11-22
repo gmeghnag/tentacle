@@ -236,6 +236,9 @@ export function createServeAgent(
       // Scheduled wakes (docs/feat/cron-tool.md D1): `serve` keeps the table (in its
       // sidecar) and fires it with nobody attached. `tunnelledAgent` never passes this.
       ...(ctx.schedules ? { schedules: ctx.schedules } : {}),
+      // Workflows (docs/feat/agent-workflows.md D3): `serve` runs them unattended
+      // on the user's own host. `tunnelledAgent` never passes this.
+      workflows: true,
     },
   );
   // The MCP tools join THIS registry too — now, or at settle through the hub's

@@ -39,6 +39,7 @@ import {
   SCHEDULE_CONTROL_TOOL_NAME,
   SCHEDULE_CREATE_TOOL_NAME,
   ToolRegistry,
+  WORKFLOW_TOOL_NAME,
   createAgentNotifyTool,
 } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
@@ -428,6 +429,9 @@ export function createSubagentRunner(deps: SubagentDeps): {
         // turn (docs/feat/cron-tool.md P4): a child may neither arm nor drop one.
         tool.name === SCHEDULE_CREATE_TOOL_NAME ||
         tool.name === SCHEDULE_CONTROL_TOOL_NAME ||
+        // A workflow run is the SESSION's (one per session): a child (a step's
+        // own child included) may neither start nor stop one.
+        tool.name === WORKFLOW_TOOL_NAME ||
         tool.name === AGENT_CONTROL_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
         tool.name === AGENT_MESSAGE_TOOL_NAME ||
@@ -674,6 +678,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === PRESENT_TOOL_NAME ||
         toolName === CHART_TOOL_NAME ||
         toolName === DIAGRAM_TOOL_NAME ||
+        toolName === WORKFLOW_TOOL_NAME ||
         toolName === AGENT_CONTROL_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||

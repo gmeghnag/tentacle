@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import type {
-  PermissionRequest,
-  PermissionRequestOptions,
-  PermissionRequester,
-  PermissionResponse,
-  ToolContext,
+import {
+  type ChatMessage,
+  NOTE_KIND,
+  type PermissionRequest,
+  type PermissionRequestOptions,
+  type PermissionRequester,
+  type PermissionResponse,
+  type ToolContext,
+  workflowLoadNotes,
+  workflowRunSeqFromHistory,
 } from "@tentacle/core";
 import type {
   SubagentResult,
@@ -433,6 +437,40 @@ describe("lifecycle", () => {
     expect(host.notes.at(-1)).toContain("[workflow wf-1 task: stopped · cancelled");
   });
 
+  test("stop withdraws an open hash approval at once; the run ends `cancelled`", async () => {
+    const { driver, broker, host, clock } = setup();
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const ask = broker.asks[0];
+    expect(ask?.req.kind).toBe("workflow_approve");
+    expect(driver.stop("wf-1")).toEqual({ ok: true, runId: "wf-1" });
+    await flush();
+    // Withdrawn by the stop itself — not by budget.wait, which never elapsed.
+    expect(ask?.options?.signal?.aborted).toBe(true);
+    expect(clock.t).toBe(1_000);
+    const row = last(host.rows);
+    expect(row?.state).toBe("stopped");
+    expect(row?.stopReason).toBe("cancelled");
+    expect(host.entries).toEqual([]);
+  });
+
+  test("stop withdraws an open approve-step ask at once; the run ends `cancelled`", async () => {
+    const { driver, broker, host } = setup({
+      text: YAML("  - id: merge\n    approve: { title: Merge it }\n"),
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    broker.asks[0]?.answer({ allowed: true, scope: "once" }); // the hash
+    await flush();
+    const merge = broker.asks.find((a) => a.options?.agent?.id === "wf-1.merge");
+    expect(merge?.options?.signal?.aborted).toBe(false);
+    driver.stop("wf-1");
+    await flush();
+    expect(merge?.options?.signal?.aborted).toBe(true);
+    expect(last(host.rows)?.stopReason).toBe("cancelled");
+    expect(host.entries.at(-1)?.type).toBe("workflow_end");
+  });
+
   test("dispose closes a live run `interrupted`", async () => {
     const { driver, host } = setup({
       approved: true,
@@ -482,7 +520,80 @@ describe("lifecycle", () => {
     expect(prompts).toEqual([]);
   });
 
-  test("rerun of an ended run from a step: same run id, attempt +1, the file unchanged", async () => {
+  test("a restarted session never re-mints an id its history names: a crashed 2nd run still gets its note", async () => {
+    // Process 1: wf-1 runs to its end; its live end note is in the conversation.
+    const first = setup({ approved: true });
+    void first.driver.start({ name: "task", by: "user" });
+    await flush();
+    const endNote = first.host.notes.at(-1) ?? "";
+    expect(endNote).toContain("[workflow wf-1 ");
+    const messages: ChatMessage[] = [
+      { role: "user", content: endNote, note: { kind: NOTE_KIND.workflowEnd, id: "wf-1" } },
+    ];
+    // Process 2 of the SAME session: seeded from the history, then crashes mid-step.
+    const second = setup({
+      approved: true,
+      children: { plan: () => new Promise<SubagentResult>(() => {}) },
+    });
+    second.driver.reserveRunIds(workflowRunSeqFromHistory(messages));
+    const started = await second.driver.start({ name: "task", by: "user" });
+    expect(started).toEqual({ ok: true, runId: "wf-2" });
+    await flush();
+    const entries = [...first.host.entries, ...second.host.entries].map((e, i) => ({
+      ...e.body,
+      type: e.type,
+      critical: false,
+      seq: i + 1,
+      id: `D/${i + 1}`,
+      ts: 1,
+    })) as unknown as Parameters<typeof workflowLoadNotes>[0];
+    const notes = workflowLoadNotes(entries, messages);
+    expect(notes.map((n) => n.note?.id)).toEqual(["wf-2"]);
+  });
+
+  test("a rerun is its own run (new id, own start fact), so a crash during it is still noted", async () => {
+    let fails = true;
+    const { driver, host } = setup({
+      approved: true,
+      children: {
+        exec: async (o, c, a) =>
+          fails ? says("fail", "red")(o, c, a) : new Promise<SubagentResult>(() => {}),
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    fails = false;
+    const rerun = await driver.rerun("wf-1", "exec", "t-2");
+    expect(rerun).toEqual({ ok: true, runId: "wf-2" });
+    await flush();
+    expect(
+      host.entries.filter((e) => e.type === "workflow_start").map((e) => e.body.runId),
+    ).toEqual(["wf-1", "wf-2"]);
+    // The crash during the rerun: wf-1's end note does not hide wf-2's open start.
+    const entries = host.entries.map((e, i) => ({
+      ...e.body,
+      type: e.type,
+      critical: false,
+      seq: i + 1,
+      id: `D/${i + 1}`,
+      ts: 1,
+    })) as unknown as Parameters<typeof workflowLoadNotes>[0];
+    const messages: ChatMessage[] = host.notes.map((content) => ({
+      role: "user",
+      content,
+      note: { kind: NOTE_KIND.workflowEnd, id: "wf-1" },
+    }));
+    expect(workflowLoadNotes(entries, messages).map((n) => n.note?.id)).toEqual(["wf-2"]);
+  });
+
+  test("a run a restart cut (unknown to this process) is refused with a clear reason", async () => {
+    const { driver } = setup({ approved: true });
+    const resumed = await driver.rerun("wf-7", undefined, "t-2");
+    expect(resumed.ok).toBe(false);
+    expect(resumed.ok === false ? resumed.reason : "").toContain("start a new run");
+  });
+
+  test("rerun of an ended run from a step: a new run, attempt +1, the file unchanged", async () => {
     let fails = true;
     const { driver, host } = setup({
       approved: true,
@@ -494,7 +605,7 @@ describe("lifecycle", () => {
     await flush();
     expect(last(host.rows)?.state).toBe("error");
     fails = false;
-    expect(await driver.rerun("wf-1", "exec", "t-2")).toEqual({ ok: true, runId: "wf-1" });
+    expect(await driver.rerun("wf-1", "exec", "t-2")).toEqual({ ok: true, runId: "wf-2" });
     await flush();
     const row = last(host.rows);
     expect(row?.state).toBe("ok");

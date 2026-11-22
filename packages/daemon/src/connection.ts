@@ -94,6 +94,7 @@ import {
   type WatchParams,
   type WatchResult,
   type WireChatRequest,
+  type WorkflowParams,
   isWakeTurnId,
 } from "@tentacle/protocol";
 import {
@@ -442,6 +443,15 @@ export class Connection {
         const { sessionId, agentId, text } = params as SubagentMessageParams;
         return this.messageSubagent(this.lookup(sessionId), agentId, text);
       }
+      // A run starts / stops and returns at once (its approval is the run's
+      // first wait, never this request's): no lock, no turn awaited (AGENTS §7).
+      case Method.Workflow: {
+        const workflowParams = params as WorkflowParams;
+        return this.lookup(workflowParams.sessionId).workflow(workflowParams);
+      }
+      // Daemon-wide read: attaches this connection to nothing.
+      case Method.WorkflowList:
+        return this.host.workflowList();
       case Method.AgentKill: {
         const { sessionId, agentId } = params as AgentKillParams;
         return this.lookup(sessionId).killSubagent(agentId);

@@ -62,6 +62,35 @@ export type WorkflowEndBody = Omit<LogWorkflowEndEntry, Envelope>;
 /** The id prefix of a workflow run: `wf-1`, `wf-2`, … */
 export const WORKFLOW_RUN_ID_PREFIX = "wf-";
 
+const RUN_ID_IN_TEXT = /\bwf-(\d+)\b/g;
+
+/**
+ * The highest `N` of any `wf-N` a history already names — a note's `id` or a
+ * message's text (an end note, an interrupted note, a tool result). A driver
+ * seeded with it never mints an id this session's log or conversation has
+ * seen, so `workflowLoadNotes` (which keys by run id) never lets an old run's
+ * end note hide a new run's open start (review round 1 #1). 0 when none.
+ */
+export function workflowRunSeqFromHistory(messages: readonly ChatMessage[]): number {
+  let highest = 0;
+  const consider = (digits: string | undefined): void => {
+    const n = digits !== undefined ? Number(digits) : 0;
+    if (Number.isSafeInteger(n) && n > highest) {
+      highest = n;
+    }
+  };
+  for (const message of messages) {
+    const id = message.note?.id;
+    if (id !== undefined) {
+      consider(/^wf-(\d+)$/.exec(id)?.[1]);
+    }
+    for (const match of message.content.matchAll(RUN_ID_IN_TEXT)) {
+      consider(match[1]);
+    }
+  }
+  return highest;
+}
+
 /** Throw unless `body` is a valid entry of `schema` (a dummy envelope stands in for the emitter's). */
 function judged<T extends object>(schema: z.ZodTypeAny, type: string, body: T): T {
   const parsed = schema.safeParse({ ...body, type, seq: 1, id: "check/1", ts: 0 });
@@ -234,7 +263,7 @@ export function workflowInterruptedNote(run: OpenWorkflowRun): ChatMessage {
       : " before any step finished";
   return {
     role: "user",
-    content: `[workflow ${run.runId} ${run.name} v${run.version}: stopped · interrupted] the session restarted${after}. The step that was running may have had side effects; check before redoing it. Resume it explicitly (session/workflow resume ${run.runId}) or start a new run.`,
+    content: `[workflow ${run.runId} ${run.name} v${run.version}: stopped · interrupted] the session restarted${after}. The step that was running may have had side effects; check before redoing it. A run a restart cut is not resumed; start a new run if it is still wanted.`,
     note: { kind: NOTE_KIND.workflowInterrupted, id: run.runId },
   };
 }
