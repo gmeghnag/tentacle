@@ -530,7 +530,7 @@ describe("AnthropicProvider.stream", () => {
       baseURL: "http://unused.local/v1",
       model: "m",
       fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
-        fetchSignal = init?.signal;
+        fetchSignal = init?.signal ?? undefined;
         return new Response(body);
       }) as typeof fetch,
     });

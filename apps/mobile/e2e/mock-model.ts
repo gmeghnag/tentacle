@@ -25,6 +25,8 @@
  * whole-call frame would not exercise it.
  */
 
+import { FILE_VIEW_EDIT, FILE_VIEW_MULTI_EDITS, FILE_VIEW_PAGE } from "./file-view-fixture.ts";
+
 export interface MockModelOptions {
   /** How long a `HOLD` stream keeps streaming (a rough total, ms). */
   readonly holdMs?: number;
@@ -259,6 +261,13 @@ export const RUNROW_SENTENCE = "Test DNS con 50 query e latenze misurate per ogn
 export const RUNROW_THOUGHT = "Measure the resolver latency with fifty queries.";
 /** Flow 38's FAILED described shell (fix round 1): `exit N` on the `$` line, a command too long for one. */
 export const RUNROW_FAIL_SENTENCE = "Controllo il container del resolver";
+/**
+ * Flow 41's turn (docs/feat/mobile-file-view.md, Validation part 1): round 1
+ * WRITES a new html page, round 2 READS a range of it, round 3 EDITS it once,
+ * round 4 MULTI-EDITS it, round 5 answers. The page's name is new on every turn
+ * (a retried flow must still write a NEW file: `new file`).
+ */
+export const FILEVIEW_PROMPT = "FILEVIEW41";
 /** A child's prompt: `CHILDSTEPS <n>` — it calls `fs_read` n times, one per round, then reports. */
 export const CHILD_MARK = "CHILDSTEPS";
 /** The spacing of a child's rounds (ms): slow enough for a flow to see its steps advance. */
@@ -363,6 +372,8 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
   const prompts: string[] = [];
   const replies: string[] = [];
   const calls: string[] = [];
+  // Flow 41's page: a new name per turn.
+  const fileView = { turns: 0, path: "" };
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -398,6 +409,7 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
           prompts,
           replies,
           calls,
+          fileView,
         }),
         {
           headers: { "content-type": "text/event-stream", "cache-control": "no-store" },
@@ -431,6 +443,7 @@ function stream(
     readonly prompts: string[];
     readonly replies: string[];
     readonly calls: string[];
+    readonly fileView: { turns: number; path: string };
   },
 ): ReadableStream {
   const encoder = new TextEncoder();
@@ -516,6 +529,40 @@ function stream(
           send(frame({ content: "The workspace has **notes.txt** (40 lines). " }));
           send(frame({ content: "`missing-dir` is not there, and no browser tool is set up." }));
           send(frame({}, "stop"));
+        }
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      // Flow 41: one html page written, read, edited, multi-edited.
+      if (promptLine(prompt, FILEVIEW_PROMPT)) {
+        const done = toolResultsThisTurn(body);
+        if (done === 0) {
+          ctx.fileView.turns += 1;
+          ctx.fileView.path =
+            ctx.fileView.turns === 1
+              ? "project/polpetto.html"
+              : `project/polpetto-${ctx.fileView.turns}.html`;
+        }
+        const path = ctx.fileView.path;
+        const call =
+          done === 0
+            ? { name: "fs_write", args: { path, content: FILE_VIEW_PAGE } }
+            : done === 1
+              ? { name: "fs_read", args: { path, offset: 1, limit: 40 } }
+              : done === 2
+                ? { name: "fs_edit", args: { path, ...FILE_VIEW_EDIT } }
+                : done === 3
+                  ? { name: "fs_multi_edit", args: { path, edits: FILE_VIEW_MULTI_EDITS } }
+                  : null;
+        if (call === null) {
+          send(frame({ content: "The page is written, read and edited." }));
+          send(frame({}, "stop"));
+        } else {
+          for (const chunk of toolCallFrames(0, mint(), call.name, call.args)) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
         }
         send(DONE_FRAME);
         controller.close();

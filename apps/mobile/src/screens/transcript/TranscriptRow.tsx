@@ -46,6 +46,7 @@ import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
 import { type StepCell, type ThreadPos, stepRowView, thoughtRowView } from "../../tool-steps.ts";
 import { subAgentLine } from "../../tool-summary.ts";
 import { type ImageRef, type Row, imageRowText } from "../../transcript-rows.ts";
+import { FileBody } from "../../ui/FileBody.tsx";
 import { Icon } from "../../ui/Icon.tsx";
 import { StepBody, StepNode } from "../../ui/StepNode.tsx";
 import { Text } from "../../ui/Text.tsx";
@@ -668,9 +669,27 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
             output={view.output}
             outputTestID={`tool-${tool.id}-output`}
             {...(step === undefined ? {} : { onShowAll: step.onShowAll })}
-            diff={
-              diff === null ? null : <DiffView view={diff} palette={palette} callId={tool.id} />
-            }
+            {...(view.file === undefined
+              ? {
+                  diff:
+                    diff === null ? null : (
+                      <DiffView view={diff} palette={palette} callId={tool.id} />
+                    ),
+                }
+              : {
+                  // A FILE tool's content (docs/feat/mobile-file-view.md): the
+                  // coloured body replaces both the plain output and the diff
+                  // block, and carries `diff-<callId>` itself.
+                  file: (
+                    <FileBody
+                      view={view.file}
+                      palette={palette}
+                      callId={tool.id}
+                      full={step?.full ?? false}
+                      {...(step === undefined ? {} : { onShowAll: step.onShowAll })}
+                    />
+                  ),
+                })}
             {...(tool.denialReply === undefined
               ? {}
               : { reply: tool.denialReply, replyTestID: `tool-${tool.id}-reply` })}

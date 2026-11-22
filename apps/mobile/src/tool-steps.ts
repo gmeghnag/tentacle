@@ -10,6 +10,7 @@
  */
 import { shellExitCode, shellRowParts } from "@tentacle/core";
 import { chartRowSpec } from "./chart-row.ts";
+import { type FileBodyView, fileBodyView } from "./file-body.ts";
 import {
   type ToolNameParts,
   type ToolTone,
@@ -325,6 +326,13 @@ export interface StepRowView {
     readonly hidden: number;
     readonly error: boolean;
   } | null;
+  /**
+   * A FILE tool's coloured content (docs/feat/mobile-file-view.md part 1), or
+   * undefined for every other tool. When present it IS the body: `command` and
+   * `output` are empty (the step line and this header already said the path and
+   * the counts), and `ui/FileBody.tsx` draws it.
+   */
+  readonly file?: FileBodyView;
   /** False when the body would be empty (no command, result, diff or reply). */
   readonly tappable: boolean;
   readonly a11yLabel: string;
@@ -378,6 +386,11 @@ export function stepRowView(
           hidden: cut.hidden,
           error: cut.error,
         };
+  // A file tool's content REPLACES the plain body (docs/feat/mobile-file-view.md):
+  // the tool's own result line (`edited … with 2 edits (+78 -30)`, the raw
+  // `[path lines 1-12 of 521]` header) is never drawn, and neither is the
+  // command line — the step's own line already names the path.
+  const file = fileBodyView(row, full) ?? undefined;
   return {
     name: shell === null ? toolName(row.name, row.label) : { tool: shell.sentence },
     subtitle,
@@ -388,9 +401,11 @@ export function stepRowView(
     trailingRed: exitSuffix === null && (row.status === "error" || row.status === "denied"),
     exitSuffix,
     live: dot === "running" && row.at !== undefined && meta.trailing === "",
-    command: bodyCommandLines,
-    output,
+    ...(file === undefined ? {} : { file }),
+    command: file === undefined ? bodyCommandLines : [],
+    output: file === undefined ? output : null,
     tappable:
+      file !== undefined ||
       bodyCommandLines.length > 0 ||
       output !== null ||
       row.diff !== undefined ||
