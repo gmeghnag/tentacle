@@ -293,3 +293,32 @@ flow that asserts `testID="mascot"`, once with Reduce Motion on and once with it
 sets it), so one layer covers both z-orders — noted in Implementation rather than emulated.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-22 (fresh context; different model family from the executor)*
+
+**Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH).
+
+1. **MEDIUM — Paracadute never alternates.** `apps/mobile/src/ui/MascotScene.tsx:108` always
+   calls `frameAt(scene, elapsedMs, 0, …)`, so `run` is 0 every time and Polpetto always walks
+   off the same side, against owner decision 2 ("alternating left/right per run"). The module
+   supports it (`mascot-scenes.ts:395`, and a mutation there is caught by `mascot-scenes.test.ts`),
+   but at the integration point that test proves nothing. Camo's palette order (`:729`) is frozen
+   too. Fix: take `run` from the memory (e.g. `memory.plays` at pick time) and pin the wiring.
+2. **MEDIUM — `mergeDown` breaks paint order.** `mascot-scenes.ts:1011-1063` groups rects by
+   `x|w|color|alpha` and emits them in first-seen key order, so a later op no longer paints over
+   an earlier one. Repro (`.tentacle/tmp/mobile-mascot-scenes/order.ts`, `detail.ts`: painter over
+   `pixels(ops)` vs. over each `pixels([op])` in op order): heli 3 frames wrong from t=3.0 s
+   (6 cells, e.g. `234,482` expected `#A274DE` got `#B387EA` — Polpetto's face in the windscreen),
+   rocket 2 frames from t=4.8 s (alpha stacking of smoke). No test checks that occlusion survives
+   the merge. Fix: merge only vertically adjacent rects with nothing drawn between them in op
+   order (or merge per op), plus a test of that property across all scenes.
+
+**Gate:** the 4 touched/guard files: 76 pass / 0 fail; `bun run lint` clean; `bun run typecheck`
+clean. (Full `bun test` not re-run here.)
+**Mutation:** Paracadute `dir` forced to 1 → 2 fails in `mascot-scenes.test.ts`; reverted, tree clean.
+**Attacks tried:** layer box = the measured band (`SessionScreen.tsx:1312-1316`, it is the child of
+that View; holds) · paint order under the merge (finding 2) · run plumbing (finding 1) ·
+unmount / Reduce Motion / finished scene in the rAF effect (holds; `origin` survives a toggle, so
+toggling back resumes in wall time and never replays).
+**Executor:** honest about the missing screenshots and the environment; its own mutation table
+checks out. Screenshots (mandatory Validation) are still absent → not READY anyway.
