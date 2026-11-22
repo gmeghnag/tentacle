@@ -1499,6 +1499,9 @@ export const FLOWS: readonly string[] = [
   "35-gallery-shots",
   // docs/feat/mobile-theme-beta.md: the Figtree try-out, OFF vs ON, light + dark.
   "36-theme-beta-shots",
+  // docs/fix/mobile-transcript-type.md: the transcript's type (prose, a Bash
+  // step, a Thought row, a bold list), light + dark — on a session of its own.
+  "41-transcript-type-shots",
   // docs/feat/mobile-file-preview-cards.md: the transcript's preview cards (a
   // PDF page, an image, markdown lines, an HTML page), light and dark.
   "36-preview-cards",
@@ -1610,6 +1613,8 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "36-theme-beta-shots": "THEMEBETA_ID",
   "36-preview-cards": "PREVIEW_ID",
   "38-running-row": "RUNROW_ID",
+  // docs/fix/mobile-transcript-type.md: the transcript's type, dark + light.
+  "41-transcript-type-shots": "TRANSCRIPT_ID",
 };
 
 /** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */

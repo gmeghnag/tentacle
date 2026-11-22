@@ -16,6 +16,7 @@ import { inlineCodeLook } from "../../code-block.ts";
 import { type MdBlock, type MdInline, type Parsed, flatten } from "../../markdown.ts";
 import { columnAlign } from "../../table-layout.ts";
 import { MONO, type Palette, radius, typography } from "../../theme.ts";
+import { proseStyle } from "../../transcript-type.ts";
 import { CodeBlock } from "../../ui/CodeBlock.tsx";
 import { Text } from "../../ui/Text.tsx";
 
@@ -40,6 +41,12 @@ interface Ctx {
   readonly palette: Palette;
   readonly onLink: (href: string) => void;
   readonly codeBackground: string;
+  /**
+   * The prose style for this palette (16/23 at 500 on a dark ground, 400 on light):
+   * `transcript-type.ts` decides, this file only applies it
+   * (docs/fix/mobile-transcript-type.md owner decision 2).
+   */
+  readonly prose: ReturnType<typeof proseStyle>;
 }
 
 function inline(items: readonly MdInline[], ctx: Ctx, key: string): JSX.Element[] {
@@ -190,7 +197,7 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
           // An explicit colour (B4): RN's default text colour is black, so in dark
           // mode an answer was black on black. List bodies and quotes are
           // paragraphs too, and inline runs inherit it.
-          <Text key={id} style={[styles.paragraph, { color: ctx.palette.label }]}>
+          <Text key={id} style={[ctx.prose, { color: ctx.palette.label }]}>
             {inline(block.children, ctx, id)}
           </Text>
         );
@@ -199,7 +206,7 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
           <Text
             key={id}
             style={[
-              styles.paragraph,
+              ctx.prose,
               styles.bold,
               { fontSize: HEADING_SIZE[block.depth] ?? 16, color: ctx.palette.label },
             ]}
@@ -226,7 +233,7 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
               const itemKey = `${id}-${itemText(item)}`;
               return (
                 <View key={itemKey} style={styles.listItem}>
-                  <Text style={[styles.bullet, { color: ctx.palette.sec }]}>
+                  <Text style={[ctx.prose, styles.bullet, { color: ctx.palette.sec }]}>
                     {block.ordered ? `${(block.start ?? 1) + at}.` : "•"}
                   </Text>
                   <View style={styles.listBody}>{blocks(item, ctx, itemKey)}</View>
@@ -255,11 +262,17 @@ function blocks(list: readonly MdBlock[], ctx: Ctx, key: string): JSX.Element[] 
  * shown as plain text with what was held back (plan F21).
  */
 export function Markdown({ parsed, palette, onLink, codeBackground }: MarkdownProps): JSX.Element {
-  const ctx: Ctx = { palette, onLink, codeBackground: codeBackground ?? palette.code };
+  const ctx: Ctx = {
+    palette,
+    onLink,
+    codeBackground: codeBackground ?? palette.code,
+    prose: proseStyle(palette),
+  };
   if (parsed.kind === "chunked") {
     return (
       <View testID="md-chunked">
-        <Text style={[styles.paragraph, { color: palette.label }]}>{parsed.shown}</Text>
+        <Text style={[ctx.prose, { color: palette.label }]}>{parsed.shown}</Text>
+        {/* The held-back count is meta, not prose: it keeps the plain 16/23 token. */}
         <Text testID="md-hidden" style={[styles.paragraph, { color: palette.sec }]}>
           {`[+${parsed.hidden} more characters]`}
         </Text>
@@ -271,8 +284,11 @@ export function Markdown({ parsed, palette, onLink, codeBackground }: MarkdownPr
 }
 
 const styles = StyleSheet.create({
+  // Only the CHUNKED notice's own style now: prose comes from `proseStyle(palette)`.
   paragraph: { ...typography.transcript },
-  bold: { fontWeight: "600" },
+  // Owner decision 2 (docs/fix/mobile-transcript-type.md): 700, so a bold run is
+  // heavier than 500 prose (a SemiBold would read LIGHTER than the prose).
+  bold: { fontWeight: "700" },
   italic: { fontStyle: "italic" },
   strike: { textDecorationLine: "line-through" },
   // The mockup's `padding: 1px 5px; border-radius: 5px`. An inline view sits ON
@@ -291,7 +307,7 @@ const styles = StyleSheet.create({
   quote: { borderLeftWidth: 3, paddingLeft: 12, gap: 8 },
   list: { gap: 6 },
   listItem: { flexDirection: "row", gap: 8 },
-  bullet: { ...typography.transcript, minWidth: 18, textAlign: "right" },
+  bullet: { minWidth: 18, textAlign: "right" },
   listBody: { flex: 1, gap: 6 },
   table: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.tile },
   // At least the box's width; the columns split what is left over.

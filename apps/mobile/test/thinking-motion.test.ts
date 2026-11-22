@@ -152,9 +152,10 @@ describe("the shimmering label's svg text (docs/fix/mobile-running-row.md)", () 
 
   test("the svg face is the RN text's face: Figtree under the beta, the system font otherwise", () => {
     expect(shimmerFont(null, "500")).toEqual({ fontWeight: "500", fontStyle: "italic" });
+    // 500 is Medium Italic now that the face ships (docs/fix/mobile-transcript-type.md).
     expect(shimmerFont("figtree", "500")).toEqual({
-      fontFamily: "Figtree-Italic",
-      fontWeight: "400",
+      fontFamily: "Figtree-MediumItalic",
+      fontWeight: "500",
       fontStyle: "italic",
     });
   });

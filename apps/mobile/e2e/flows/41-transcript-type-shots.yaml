@@ -1,0 +1,80 @@
+appId: so.tentacle.app
+---
+# 41 (docs/fix/mobile-transcript-type.md, Validation): the owner's evidence set for
+# the transcript's type — dark AND light — of a chat with prose, a Bash step, a
+# Thought row and a bold list, i.e. the mockup's own transcript
+# (`docs/fix/mobile-transcript-type-mockup.html`, variant A).
+#
+# Two turns, because the two mocks answer different shapes: `TOOLROWS29` gives the
+# steps (two approved `shell` calls, one failing, plus folded thoughts), and
+# `SHOWCASE` gives the prose with a bold list, a table and inline code. Its own
+# session (`TRANSCRIPT_ID`).
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${TRANSCRIPT_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${TRANSCRIPT_ID}"
+- assertVisible:
+    id: "session-view"
+# --- the steps: prose, a Bash step, a Thought row ---------------------------
+- tapOn:
+    id: "composer-input"
+- inputText: "TOOLROWS29"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+# Both shell calls are ask tools: approve each.
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 30000
+# The transcript's own type: prose at the ground's weight, the step rows below it.
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-transcript-type-steps"
+# --- the prose: a bold list, a table, inline code ---------------------------
+- tapOn:
+    id: "composer-input"
+- inputText: "SHOWCASE"
+- pressKey: Enter
+- extendedWaitUntil:
+    visible:
+      id: "code-2-copy"
+    timeout: 20000
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-transcript-type-prose"
+# The bold list is the mockup's own ("50/50 risoluzioni ok", "3 ms"): scrolled to,
+# so the shot shows prose + list together rather than the tail of the code block.
+- scrollUntilVisible:
+    element:
+      text: "Quitting now only.*"
+    direction: DOWN
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-transcript-type-bold-list"
