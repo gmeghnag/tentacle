@@ -266,3 +266,45 @@ a follow-up executor or split it into its own task. Validation screenshots need 
 NOT READY: part 2 not built; no screenshots.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-22 (fresh context; same model as the Execution resume, different from the DeepSeek executor)*
+
+**Verdict: REQUEST-CHANGES**
+
+Findings (HIGH/MEDIUM only):
+
+1. **HIGH — a spilled `fs_read` is drawn as file content with false line numbers.**
+   `apps/mobile/src/file-body.ts:288-305` ignores `row.spill`. A read over
+   `maxInlineOutputChars` arrives as `[large fs_read output …]\n<head>\n…[N characters omitted]…\n<tail>`
+   (`packages/agent/src/result-pipeline.ts:89-104`). Repro (`.tentacle/tmp/mobile-file-view/review.ts`):
+   header `4 lines · TypeScript`; line 1 = the banner, line 3 = the omission marker, the
+   file's last line numbered 4. The body lies about the file (§8: synthesised data from
+   truncated input). Fix: a row with `spill` gets no file body (or a plain one without numbers/
+   line-count header) + a test.
+2. **HIGH — a diff over `DIFF_MAX_LINES` (400) silently loses its tail.** `file-body.ts:194-218`
+   drops `diffView(...).hidden`; `preview` counts only the 400 rendered rows. Repro: a 600-line
+   Write, `full=true` → 400 lines, `hidden 0`, no marker; the old `DiffView` said
+   `N more lines not shown` (`screens/transcript/DiffView.tsx:126`). The Failure-modes row
+   "400-line patch → the remainder is the preview's `hidden`" is FALSE. Fix: carry
+   `view.hidden` into the body (a "not shown" line) + a test.
+3. **HIGH (scope) — Part 2 is not built, Validation screenshots not taken.** The task bundles
+   part 2 (the load-bearing reason for this review); nothing to red-team on §7 pod trust because
+   no code exists. Either split part 2 into its own task (doc + TODO) or build it before merge.
+4. **MEDIUM — an append-only overwrite by `fs_write` is labelled `LANG · new file`.**
+   `file-body.ts:281` infers "created" from `removed === 0`; `ToolDiffDetail` has no created
+   flag (`packages/tools/src/builtins.ts:42`), so overwriting a file with only added lines
+   claims a new file. Use the hunk start (`@@ -0,0`) instead.
+
+Gate (re-run): 5 touched test files 99 pass / 0 fail; `bun run lint` clean (2264 files);
+`bun run typecheck` clean. Full `bun test` not re-run here.
+Mutation: removing the `status !== "ok"` guard → 3 fail (file-body + tool-step-view); reverted,
+tree byte-identical (`git status` clean). Executor's M1–M8 table not re-run.
+
+Attacks tried: spilled read (found #1); >400-line patch (found #2); >200 KB patch → `hunks: []`
+→ `null` → old `DiffView` with its marker (holds); failed/denied row keeps plain output (holds,
+mutation-proved); `packages/*` diff = test-fixture type casts only, no behaviour (holds);
+part-2 pod exclusion (no code — #3).
+
+Executor behaviour: DeepSeek stopped at the watchdog without red-first evidence; the resume
+substituted a mutation table and was honest about part 2 / screenshots. The Failure-modes table
+overstated the 400-line case without a test behind it.
