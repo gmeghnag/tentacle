@@ -1,0 +1,170 @@
+<title>File colorati nei tool</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+/* Layout: theme toggle, then three phones in a wrap row (today / A no line numbers / B line numbers), same transcript. */
+:root {
+  --bg: #eceff0; --fg: #1b2123; --muted: #5a6568; --line: #d0d7d9; --pick: #0f7f93;
+  --sans: "Figtree", -apple-system, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark } }
+:root[data-theme="dark"] { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.45 var(--sans); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 22px 48px; }
+main { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+h1 { font-size: 22px; margin: 0; }
+.lead { margin: 4px 0 0; color: var(--muted); max-width: 84ch; }
+.bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.bar button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); background: transparent; color: var(--fg); border-radius: 8px; cursor: pointer; }
+.bar button[aria-pressed="true"] { border-color: var(--pick); color: var(--pick); font-weight: 600; }
+.row { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
+.v { width: 380px; max-width: 100%; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.v h2 { font-size: 15px; margin: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.v h2 .n { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--pick); font-weight: 600; }
+.v p { margin: 0; color: var(--muted); font-size: 13.5px; min-height: 3em; }
+
+/* phone palettes: petrol dark (Figtree theme) and light */
+.ph { --p-bg: #151B1D; --p-label: #D5DDDE; --p-sec: #98A6A8; --p-sep: #2D393D; --p-code: #1D2528; --p-acc: #22D3EE; --p-off: #485058; --p-red: #FF6D65;
+  --kw: #FF7AB2; --com: #8E9AA6; --str: #30D158; --num: #FF9F0A; --addBg: #0F2A19; --delBg: #34141A; --wt: 500;
+  background: var(--p-bg); color: var(--p-label); border-radius: 30px; padding: 16px 16px 22px; font-family: var(--sans); display: flex; flex-direction: column; gap: 12px; -webkit-font-smoothing: antialiased; }
+.light .ph { --p-bg: #F2F2F7; --p-label: #000000; --p-sec: #636366; --p-sep: #C6C6C8; --p-code: #FFFFFF; --p-acc: #0E7490; --p-off: #AEAEB2; --p-red: #C4001A;
+  --kw: #9B2393; --com: #55606B; --str: #1E7B34; --num: #B33000; --addBg: #E3F5E8; --delBg: #FCE8EA; --wt: 400; }
+.ph .top { text-align: center; font-weight: 600; font-size: 15px; } .ph .top small { display: block; color: var(--p-sec); font-weight: 400; font-size: 12px; font-family: var(--mono); }
+.ph .p { font-size: 16px; line-height: 23px; font-weight: var(--wt); margin: 0; }
+.steps { display: flex; flex-direction: column; }
+.st { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; column-gap: 12px; align-items: center; position: relative; min-height: 28px; }
+.st .nd { width: 8px; height: 8px; border-radius: 50%; justify-self: center; background: var(--str); } /* outcome dot as in the app: green ok, red on a failure */
+.st .nd.th { background: transparent; border: 1.5px solid var(--p-off); width: 7px; height: 7px; }
+.st .nd.run { background: var(--p-acc); animation: bl 1s steps(1) infinite; }
+@keyframes bl { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .st .nd.run { animation: none; } }
+.st .tt { font-size: 14px; color: var(--p-sec); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st .tt b { font-weight: 600; color: var(--p-label); }
+.st .tt .path { font-family: var(--mono); font-size: 12.5px; }
+.st .du { font-size: 13px; color: var(--p-sec); font-variant-numeric: tabular-nums; }
+.st .du .add, .st .du .del { font-family: var(--mono); font-size: 12px; }
+.rail { position: relative; }
+.rail > .st:not(:last-child)::after, .rail > .body::before { content: ""; position: absolute; left: 6.5px; width: 1px; background: var(--p-sep); }
+.rail > .st:not(:last-child)::after { top: 18px; bottom: -10px; }
+.body { position: relative; margin: 2px 0 8px 26px; background: var(--p-code); border-radius: 10px; padding: 8px 10px; font: 11.5px/17px var(--mono); overflow-x: auto; }
+.rail > .body::before { left: -19.5px; top: -8px; bottom: -10px; }
+.body .hd { font-family: var(--sans); font-size: 12.5px; color: var(--p-sec); margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; }
+.body .hd .fn { font-family: var(--mono); font-size: 12px; color: var(--p-label); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.body .more { font-family: var(--sans); font-size: 12.5px; color: var(--p-sec); margin-top: 6px; }
+.code { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 10px; white-space: pre; }
+.code .ln { color: var(--p-off); text-align: right; user-select: none; }
+.nolines .code .ln { display: none; }
+.nolines .code { grid-template-columns: minmax(0, 1fr); }
+.body, .st .path { font-variant-ligatures: none; }
+.body .hd .fn { flex: 1; min-width: 0; }
+.body .hd > span:last-child { white-space: nowrap; }
+.code .l.add { background: var(--addBg); } .code .l.del { background: var(--delBg); }
+.code .sg { color: var(--p-sec); }
+.k { color: var(--kw); } .c { color: var(--com); font-style: italic; } .s { color: var(--str); } .n { color: var(--num); } .t { color: var(--p-acc); }
+.plain .k, .plain .c, .plain .s, .plain .n, .plain .t { color: var(--p-sec); font-style: normal; }
+.plain .body { color: var(--p-sec); }
+.notes { border-top: 1px solid var(--line); padding-top: 12px; max-width: 84ch; display: flex; flex-direction: column; gap: 6px; }
+.notes h2 { margin: 0; font-size: 16px; }
+.notes ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
+</style>
+<main>
+  <div>
+    <h1>File colorati nei tool (iPhone)</h1>
+    <p class="lead">Quando un tool legge, modifica o scrive un file, il contenuto viene colorato secondo il tipo di file, come nella TUI. Il linguaggio si sceglie solo dall'estensione: un'estensione sconosciuta resta grigia. Il mockup include già le decisioni prese: Figtree medio per il testo in tema scuro, righe dei tool più piccole e grigie, nessuna ✓ sui passi riusciti, Read ed Edit senza durata, Edit con <code>+N −M</code>, anello grigio per «Thought», pallino ciano che lampeggia sul passo in corso.</p>
+  </div>
+  <div class="bar"><span>Tema del telefono:</span><button id="tDark" aria-pressed="true">Scuro (Figtree)</button><button id="tLight" aria-pressed="false">Chiaro</button></div>
+  <div class="row" id="row">
+    <section class="v plain nolines"><h2>Oggi</h2><p>Il contenuto è testo grigio senza colori; l'intestazione è la riga grezza del tool.</p><div class="ph" data-today="1"></div></section>
+    <section class="v nolines"><h2>A · colori, senza numeri di riga <span class="n">consiglio</span></h2><p>Più pulito sul telefono: lo spazio va al codice, e le righe lunghe vanno a capo di meno.</p><div class="ph"></div></section>
+    <section class="v"><h2>B · colori con i numeri di riga</h2><p>Come la TUI: utile quando la lettura parte a metà file (qui dalla riga 1) o per citare una riga.</p><div class="ph"></div></section>
+  </div>
+
+  <h2 style="font-size:18px;margin:8px 0 0">Il tuo esempio: MultiEdit lungo</h2>
+  <p class="lead" style="margin:0">Oggi il nome del file compare quattro volte (riga del passo, intestazione, «⎿ edited … with 2 edits», scheda) e il conteggio +78 −30 tre volte. Nel nuovo lo si dice una volta sola, nella riga del passo; il diff mostra le prime righe e «tocca per vedere tutto». Il codice è JavaScript dentro un file .html: va deciso se colorarlo (la TUI oggi non colora i file .html).</p>
+  <div class="row" id="row2">
+    <section class="v plain"><h2>Oggi</h2><p>Com'è nel tuo screenshot.</p><div class="ph" data-me="today"></div></section>
+    <section class="v nolines"><h2>A · senza numeri di riga <span class="n">consiglio</span></h2><p>Solo il segno + / − davanti, la zona («righe 87–135») al posto di «@@ -87,20 +87,48 @@».</p><div class="ph" data-me="a"></div></section>
+    <section class="v"><h2>B · con i numeri di riga</h2><p>Un solo numero (quello nuovo; per le righe tolte quello vecchio), invece di due colonne.</p><div class="ph" data-me="b"></div></section>
+  </div>
+  <div class="notes">
+    <h2>Da decidere</h2>
+    <ul>
+      <li>A (senza numeri) o B (con i numeri)? Nel diff dell'Edit il segno + / − resta comunque, così una riga aggiunta o tolta si riconosce anche senza colore.</li>
+      <li>JavaScript e CSS dentro un file .html: li coloriamo (sul telefono si può, la TUI oggi lascia l'.html senza colori)?</li>
+      <li>Linguaggi: oggi l'app ne colora 14 (bash, css, diff, go, java, js, json, markdown, python, rust, sql, ts, html/xml, yaml). Ne aggiungiamo altri?</li>
+      <li>File molto grandi restano senza colori, come nella TUI (oltre 2000 righe o 200 KB), per non rallentare lo scorrimento.</li>
+    </ul>
+  </div>
+</main>
+<script>
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const RULES = {
+  html: [[/<!--.*?-->/y, "c"], [/\/\*.*?\*\//y, "c"], [/<\/?(?=[a-zA-Z])/y, ""], [/(?<=<\/?)[a-zA-Z][\w-]*/y, "k"], [/"[^"]*"/y, "s"], [/--[a-z-]+(?=:)/y, "t"], [/[a-zA-Z:-]+(?==)/y, "t"], [/#[0-9a-fA-F]{3,6}\b/y, "n"], [/[A-Za-z_][\w-]*/y, ""]],
+  ts: [[/\/\/.*/y, "c"], [/"[^"]*"/y, "s"], [/\b(?:const|let|return|export|function|if|else|import|from|readonly|new)\b/y, "k"], [/[A-Za-z_]\w*(?=\()/y, "t"], [/[A-Za-z_]\w*/y, ""], [/\d+(?:\.\d+)?/y, "n"]],
+  json: [[/"[^"]*"(?=\s*:)/y, "t"], [/"[^"]*"/y, "s"], [/\b(?:true|false|null)\b/y, "k"], [/-?\d+(?:\.\d+)?/y, "n"]],
+};
+// A tiny sticky-regex tokenizer over the RAW line: each token is escaped once and wrapped once.
+function hl(line, lang) {
+  const rules = RULES[lang] || []; let out = "", i = 0;
+  while (i < line.length) {
+    let hit = null;
+    for (const [re, cls] of rules) { re.lastIndex = i; const m = re.exec(line); if (m && m[0].length) { hit = [m[0], cls]; break; } }
+    if (!hit) hit = [line[i], ""];
+    out += hit[1] ? `<span class="${hit[1]}">${esc(hit[0])}</span>` : esc(hit[0]);
+    i += hit[0].length;
+  }
+  return out;
+}
+const READ = ['<title>Entrate di Polpetto</title>', '<meta name="claude:viewport-fit-sides" content="cover">', '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree">', '<style>', '/* Layout: a wrap of phone cards */', ':root {', '  --bg: #eceef0; --fg: #1c2125;', '  --muted: #5c646c; --line: #d2d7db;', '}', '</style>', '<main>', '  <h1>Entrate e uscite di Polpetto</h1>'];
+const EDIT = [[" ", 'export const SCENES = ['], ["-", '  { k: "heli", dur: 9.6, tag: "proposta" },'], ["+", '  { k: "heli", dur: 9.6 }, // approvato 22/11'], ["+", '  { k: "camo", dur: 5.4 },'], ["+", '  { k: "balloon", dur: 6.6 },'], [" ", '];']];
+const WRITE = ['{', '  "scene": "palloncino",', '  "approvata": true,', '  "durata": 6.6,', '  "pixel": [9, 11]', '}'];
+function code(lines, lang, start, diff) {
+  return `<div class="code">${lines.map((l, i) => {
+    const [sg, txt] = diff ? l : [null, l];
+    const cls = sg === "+" ? " add" : sg === "-" ? " del" : "";
+    const ln = `<span class="ln">${start + i}</span>`;
+    return `${ln}<span class="l${cls}">${diff ? `<span class="sg">${sg}</span> ` : ""}${hl(txt, lang) || " "}</span>`;
+  }).join("")}</div>`;
+}
+function phone(today) {
+  const readHd = today ? `<div class="hd"><span>⎿ [polpetto-entrate-uscite.html lines 1–12 of 521]</span></div>` : `<div class="hd"><span class="fn">polpetto-entrate-uscite.html</span><span>righe 1–12 di 521 · HTML</span></div>`;
+  return `<div class="top">(new)<small>~/assistant · Qwen3.8-27B</small></div>
+  <p class="p">Leggo il mockup, aggiorno le scenette e salvo la scheda del palloncino:</p>
+  <div class="steps rail">
+    <div class="st"><i class="nd"></i><span class="tt"><b>Read</b> <span class="path">polpetto-entrate-uscite.html</span> · 1–12</span><span class="du"></span></div>
+    <div class="body">${readHd}${code(READ, "html", 1, false)}<div class="more">… altre 509 righe</div></div>
+    <div class="st"><i class="nd th"></i><span class="tt">Thought · 2 s</span><span></span></div>
+    <div class="st"><i class="nd"></i><span class="tt"><b>Edit</b> <span class="path">scenes.ts</span></span><span class="du"><span class="add">+3</span> <span class="del">−1</span></span></div>
+    <div class="body">${today ? "" : `<div class="hd"><span class="fn">src/scenes.ts</span><span>TypeScript</span></div>`}${code(EDIT, "ts", 40, true)}</div>
+    <div class="st"><i class="nd"></i><span class="tt"><b>Write</b> <span class="path">note/palloncino.json</span></span><span class="du">6 righe</span></div>
+    <div class="body">${today ? "" : `<div class="hd"><span class="fn">note/palloncino.json</span><span>JSON · nuovo file</span></div>`}${code(WRITE, "json", 1, false)}</div>
+    <div class="st"><i class="nd run"></i><span class="tt">Controllo che il mockup si apra</span><span class="du">3 s</span></div>
+  </div>`;
+}
+document.querySelectorAll(".ph").forEach((p) => (p.innerHTML = phone(p.dataset.today === "1")));
+
+const ME = [[" ", 87, 'const UFO0 = ["....HHHHHHH....", "...HGGHHHHHH...", "..HGHHHHHHHHH.."];'], [" ", 88, 'const UFO1 = UFO0.map((r, i) => (i === 4 ? "LCCYCCYCCYCCYCL" : r));'], [" ", 90, 'const BALLOON = ["..RRRRR..", ".RGGRRRR.", "RGGRRRRRR"];'],
+  ["-", 91, 'const BANNER = ['], ["-", 92, '  "..BBBBBBBBBBBBBBBBBBBBBBBBBBB..",'], ["-", 93, '  "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",'], ["-", 94, '  "BBBBBBBBBBBBBWWWWWWWWWWWWWBBBBBB",'],
+  ["+", 91, 'const NOTIF_A = ['], ["+", 92, '  "....KKKKKKKKKKKKKKKKKK....",'], ["+", 93, '  "...KCCCCCCCCCCCCCCCCCCK...",'], ["+", 94, '  "..KCCCCCCCCCCCCCCCCCCCCK..",'], ["+", 95, '  "..KCCCCCCCCCCCCCCCCCCCCK..",']];
+function meCode(withNums) {
+  return `<div class="code">${ME.map(([sg, n, txt]) => {
+    const cls = sg === "+" ? " add" : sg === "-" ? " del" : "";
+    return `<span class="ln">${n}</span><span class="l${cls}"><span class="sg">${sg}</span> ${hl(txt, "ts")}</span>`;
+  }).join("")}</div>`;
+}
+function mePhone(kind) {
+  if (kind === "today") {
+    return `<div class="top">(new)<small>~/assistant · Qwen3.8-27B</small></div><div class="steps rail">
+      <div class="st"><i class="nd"></i><span class="tt"><b>MultiEdit</b> <span class="path">polpetto-entrate-uscite.html</span> ·…</span><span class="du">+78 -30</span></div>
+      <div class="body"><div class="hd"><span class="fn">polpetto-entrate-uscite.html · 2 edits</span></div><div class="hd"><span>⎿ edited polpetto-entrate-uscite.html with 2 edits (+78 -30)</span></div><div class="hd"><span class="fn">▢ polpetto-entrate-uscite.html</span><span>+78 −30 ⌄</span></div><div class="hd"><span>@@ -87,20 +87,48 @@</span></div>${meCode(true)}</div></div>`;
+  }
+  return `<div class="top">(new)<small>~/assistant · Qwen3.8-27B</small></div><div class="steps rail">
+    <div class="st"><i class="nd"></i><span class="tt"><b>MultiEdit</b> <span class="path">polpetto-entrate-uscite.html</span> · 2 modifiche</span><span class="du"><span class="add">+78</span> <span class="del">−30</span></span></div>
+    <div class="body"><div class="hd"><span>righe 87–135</span><span>JavaScript in HTML</span></div>${meCode(kind === "b")}<div class="more">… altre 96 righe · tocca per vedere tutto</div></div>
+    <div class="st"><i class="nd run"></i><span class="tt">Controllo che il mockup si apra</span><span class="du">2 s</span></div></div>`;
+}
+document.querySelectorAll("[data-me]").forEach((p) => (p.innerHTML = mePhone(p.dataset.me)));
+const row = document.getElementById("row"), d = document.getElementById("tDark"), l = document.getElementById("tLight");
+const row2 = document.getElementById("row2");
+d.onclick = () => { row2.classList.remove("light"); row.classList.remove("light"); d.setAttribute("aria-pressed", "true"); l.setAttribute("aria-pressed", "false"); };
+l.onclick = () => { row2.classList.add("light"); row.classList.add("light"); l.setAttribute("aria-pressed", "true"); d.setAttribute("aria-pressed", "false"); };
+</script>
