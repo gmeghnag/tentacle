@@ -39,9 +39,10 @@ const offers = (wired: ReturnType<typeof buildAgent>): boolean =>
 describe("workflow wiring", () => {
   test("opted in (worker / serve): a driver, carried to the session host, and the tool", () => {
     const wired = buildAgent(config, { workflows: true });
-    expect(wired.workflows).toBeDefined();
+    const driver = wired.workflows;
+    expect(driver).toBeDefined();
     expect(offers(wired)).toBe(true);
-    expect(workerSessionBuild(wired).workflows).toBe(wired.workflows);
+    if (driver) expect(workerSessionBuild(wired).workflows).toBe(driver);
   });
 
   test("not opted in (one-shot, pod builds): no driver, no tool", () => {
