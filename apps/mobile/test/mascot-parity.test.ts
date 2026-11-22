@@ -67,7 +67,7 @@ describe("the bitmap is the owner's drawing, unchanged", () => {
 
 describe("the nine palettes are the TUI's, by name, order and hex", () => {
   test("the names and their order equal `MASCOT_PALETTE_NAMES`", () => {
-    expect([...PALETTE_NAMES]).toEqual(stringArray(themeSrc, "MASCOT_PALETTE_NAMES"));
+    expect(stringArray(themeSrc, "MASCOT_PALETTE_NAMES")).toEqual([...PALETTE_NAMES]);
     expect(PALETTE_NAMES.length).toBe(9);
   });
 

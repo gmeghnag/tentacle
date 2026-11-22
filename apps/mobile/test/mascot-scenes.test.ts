@@ -20,6 +20,7 @@ import {
   PALETTE_NAMES,
   PIXEL_PT,
   SPRITE_PT,
+  type SceneMemory,
   body,
   colorsFor,
   frameAt,
@@ -117,7 +118,7 @@ describe("pickScene: never the same scene twice in a row (owner decision 3)", ()
 
 describe("nextScene: the in-memory record, app-wide", () => {
   test("records the play and constrains the next one", () => {
-    const memory = { last: null, plays: 0 };
+    const memory: SceneMemory = { last: null, plays: 0 };
     const first = nextScene(memory, seeded(3));
     expect(memory.last).toBe(first.key);
     expect(memory.plays).toBe(1);
@@ -394,13 +395,16 @@ describe("Mimetismo", () => {
 
   test("switches palette eight times in two seconds, faster and faster", () => {
     const maps = [1050, 1550, 1950, 2250, 2500, 2700, 2850, 2950].map(
-      (ms) => frameAt(s, ms, 0)[0]?.map ?? {},
+      (ms): Readonly<Record<string, string>> => {
+        const op = frameAt(s, ms, 0)[0];
+        return op?.kind === "sprite" ? (op.map ?? {}) : {};
+      },
     );
     // Every switch is a different palette's outline colour…
     const outlines = maps.map((m) => m.K);
     expect(new Set(outlines).size).toBe(8);
     // …and each op carries the props' colours too, so the sprite stays whole.
-    expect(maps[0]?.Q).toBe(colorsFor("soft").Q);
+    expect({ q: maps[0]?.Q }).toEqual({ q: colorsFor("soft").Q });
   });
 
   test("then fades out, leaving only the eyes — in the appearance's light colour", () => {
