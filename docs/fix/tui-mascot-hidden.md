@@ -247,3 +247,13 @@ clean. Full gate (`bun run check`) is the orchestrator's, per the brief.
 
 **Unverified:** nothing in this round beyond the gate; the round-0 item (the
 owner's eye on macOS Terminal.app) still stands.
+
+### Round 3
+
+**Verdict: APPROVE.**
+
+- **R2-1: FIXED.** I3 and `retractions` are removed. `scripts/test/changelog-guard.test.ts` is byte-identical to `main` (`git diff main...HEAD -- scripts` is empty). Mutation: adding the two real-slug fragments `detach-live.fixed` + `detach-live-followups.fixed` → guard 5 pass / 0 fail (round 2: red). Removed again, tree clean.
+- **Finding 1 still holds:** no `.changed` fragment, and `tui-mascot.added.md` describes only the text header.
+- **Regressions:** the round-3 diff touches only that test file and this doc. Gate: `changelog-guard` + `mascot` + `render-lines` + `app-frames` tests: 164 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+
+*— claude-opus-5-5, 2026-11-22* (fresh context; different family from the executor)
