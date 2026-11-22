@@ -587,3 +587,19 @@ orchestrator's gate runs it).
 diff bodies (the previous set shows the plain script/style lines this fix colours); MultiEdit's
 first hunk remains plain by the limit documented above.
 
+
+### Round 2 — re-review of the fix for Round 3's HIGH (html diffs)
+
+*— claude-opus-5-5, 2026-11-22 (same reviewer context; diff `eae20fa5..HEAD` = e6adf7ad + c8b9faca, `file-body.ts` + its test)*
+
+**Verdict: PASS.** Part 1 only, as the owner decided for #3.
+
+- **The HIGH is fixed.** An `.html` diff now colours `<script>`/`<style>` lines when the hunk itself proves the state: an opener walked forward, or a closer with no opener before it. My mutations, each reverted:
+  - sub-language path off (`subLanguageSpans` → `null`) → 3 fail;
+  - backward evidence off (`hunkStartState` never returns a closer's language) → 1 fail (`only CLOSES </script>`).
+  - The executor's M3 (guessing "always script") is covered by the limit test and the top-level test.
+- **The text is drawn byte for byte.** A probe (`.tentacle/tmp/mobile-file-view/r3.ts`) covered `<`/`&&`/`&amp;`/`&lt;` in JS, a template literal with tags, `"</style>"` inside a JS string, CSS `content: "<"`, and `&nbsp;` at top level. Every line's joined span text equals the source line, except an empty line (next bullet).
+- **Not new here:** an empty line in a coloured diff gets one span `""` instead of `" "`. It happens for `.ts` too, so it does not come from this fix. It comes from `highlight("")` and the `spans.length === 0` check (`file-body.ts`, `diffLines`). The FileBody row still has its number gutter, so the row height holds. Use `plainSpans` when the joined text is `""`.
+- **Not blocking (colour only, text intact):** `nextState` runs one state for both sides of the diff. A hunk that removes `-<script>` and adds `+<div>` therefore draws `+<div>` plain and the context below it as JS (probe P2). The fix: track an old state and a new state (`del` advances old, `add` advances new, `ctx` both).
+- **The limit is documented and tested:** a hunk that starts inside a block and has no tag stays plain. The screenshots still have to be retaken for the diff bodies, as Fix round 1 says.
+- **Gate:** after the mutations the tree was byte-identical (`git status` clean). The 5 touched test files: 113 pass / 0 fail. `bun run lint`: clean, 2270 files. `bun run typecheck`: clean. Full `bun test` not run here.
