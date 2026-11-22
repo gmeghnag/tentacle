@@ -169,6 +169,7 @@ steps:
   - id: review
     agent: { prompt: prompts/review.md, model: opus }
     on_fail: { goto: fix, max: 3 }
+    next: gate                     # pass leaves the fix/review loop (see D1.1)
   - id: fix
     agent: { prompt: prompts/fix.md, model: deepseek }
     next: review
@@ -417,6 +418,150 @@ broker, the auto-accept exclusion, and the persistence rules). A changelog fragm
 Opus review per group (1–4, then 5–9); merge after the owner's OK.
 
 ## Execution
+
+*— deepseek-v4-pro (executor), 2026-11-22 — slices 1 and 2 only*
+
+### Load-bearing check re-run (before any edit)
+
+`.tentacle/tmp/agent-workflows/repro-missing.ts` on the branch tip (`00b5c059`):
+
+```
+core exports: 249
+workflow exports: []
+Bun.YAML.parse: function
+sha256: 2d711642
+```
+
+A1's premise holds but is **not** what slices 1–2 consume: they never touch
+`createSubagentRunner` (that is Slice 4's). What they do stand on is proved here:
+`Bun.YAML.parse` exists on the pinned runtime (Bun 1.4.3) and sha-256 is available
+with no new dependency. Capability missing, as expected for a feat.
+
+### Drift from the Implementation (2 items, both reconciled in this doc)
+
+1. **D1's termination rule contradicted D1's own example.** The rule says "the graph
+   of *pass* edges must be acyclic", but the example's `review` had `on_fail: {goto:
+   fix, max: 3}` and no `next:`, so after `pass` it fell through into `fix`, whose
+   `next: review` closed a pass-only cycle. Proved with a script
+   (`.tentacle/tmp/agent-workflows/cycle-check.ts` → `pass-edge cycle: plan → exec →
+   review → fix → review`), and by the validator itself refusing the fixture.
+   **Fixed the example, not the rule** (the rule is what makes the machine
+   terminate): added `next: gate` to `review`. This is the one edit to the
+   Implementation text; nothing else in it changed.
+2. **`WorkflowContext.readPrompt` / `prompts` instead of the doc's "a pure
+   `validateWorkflow(text, ctx)`" reading files itself.** The module stays I/O-free
+   (it is in the phone's bundle, where `node:` does not exist), so the caller reads
+   prompt files and `ctx.readPrompt` only *checks* a path. `spec.prompts` (path +
+   bytes, sorted) is what `workflowHash` covers — same property, D2's "the hash
+   covers the prompts because they ARE the workflow".
+
+### As built, in order
+
+**Slice 1 — `packages/core/src/workflow-spec.ts` (new, 876 lines) + `core/src/index.ts`**
+
+- One zod schema (`.strict()` on every object, so an unknown key is a refusal) for
+  structure, then hand-written readers for the polymorphic parts (`where`,
+  `on_fail`, which of `agent`/`run`/`approve`) because a zod union reports
+  `invalid_union`, which names neither the fix nor the YAML path. Every error is
+  `steps[3].on_fail.goto: no step "fx" (did you mean "fix"?)`; all errors are
+  returned at once (`errorsOf(broken).length === 3` is a test).
+- Rules implemented exactly as D1: `schemaVersion` refused first (unknown → one
+  message, file untouched), `[a-z0-9-]` ids and name, name == file stem, exactly one
+  kind per step, `retry 0..5`, `on_fail stop|{goto,max 1..10}`, `next` overrides
+  fall-through, agent steps `local` only, `where: local|{docker[,container]}`,
+  durations `30s|20m|12h`, `approve.title ≤ 200` / `detail ≤ 2000`, template
+  references (`{{inputs.k}}`, `{{steps.id.reason|report}}`) validated against the
+  declared inputs and step ids.
+- **Termination** (`cycleProblem`): DFS over the PASS graph only — a back edge there
+  is an uncounted loop and is refused; a cycle through an `on_fail.goto` edge is
+  allowed (it has a `max`) and `budget.max_step_runs` backs it. The first
+  implementation walked goto edges too and thereby *laundered* pass-only cycles that
+  shared a goto's endpoints — a real defect the uncounted-cycle test caught; it now
+  walks pass edges alone.
+- `workflowHash(text, prompts, hasher)`: sha-256 over `"tentacle-workflow-v1\0"` +
+  YAML (BOM stripped)+ for each prompt sorted by path `path\0bytes\0`. **No
+  `node:crypto`**: the hasher comes from `Bun.CryptoHasher` via `runtimeHasher()`,
+  and with none it THROWS rather than return a weaker digest (`core` is imported by
+  `apps/mobile`, which has neither `Bun` nor a read-only global to stub — proved:
+  `Object.getOwnPropertyDescriptor(globalThis,"Bun")` → `writable:false`).
+- Also exported: `renderTemplate`/`resolveInputs`-style helpers the machine and the
+  driver both need, `parseWorkflowDuration`, `promptPathProblem`, `capWorkflowText`,
+  `shortHash`.
+
+**Slice 2 — `packages/core/src/workflow-machine.ts` (new, 445 lines)**
+
+- `start(spec, inputs)` → state + first `run_step`; `next(state, event)` → state +
+  action. Events: `step_result{verdict,reason?,tokens?,report?}`, `budget_hit`,
+  `timeout`, `cancel`, `interrupted`, `changed`. Actions: `run_step{id,attempt,
+  round,maxRound?,text}` (text already templated) and `end{status,reason}`.
+- Owns: fall-through/`next` order, `retry` (same step, `attempt+1`), per-EDGE goto
+  counters (`from->to`, so two loops never share one), `max_step_runs`, the token
+  sum, and the two guards checked **before** a step starts (never after).
+- `rerunAt(state,id)` = owner Q4's explicit resume: re-enters from scratch with
+  `attempt+1`, keeps the execution counters, so a resume cannot loop past the cap.
+- Terminal states are FINAL (`next` returns the identical end) and carry their own
+  `detail` sentence, so the action's reason and `endReason` can never disagree —
+  found by a test: a derived sentence had silently dropped the
+  `on_fail.goto fix already ran 2/2 times` detail.
+- One more caught defect: `cancel` mapped to stopReason `cancel`, which is not a
+  `WorkflowStopReason` (`cancelled` is); fixed in `next`.
+
+### Tests (red first, then mutation-checked)
+
+`packages/core/test/workflow-spec.test.ts` (45 tests) and
+`packages/core/test/workflow-machine.test.ts` (21 tests). For NEW modules "red
+first" is the refused/accepted fixture pairs plus the mutation run below (§9).
+
+Every failure mode in the plan's table that belongs to slice 1–2 has a test: bad
+YAML, unknown `schemaVersion`, missing prompt, path escape, unknown model/type,
+uncounted cycle vs the counted loop, and (slice 2) goto max reached, retry
+exhausted, `max_step_runs`, token sum ≥ budget, budget_hit, timeout/cancel/
+interrupted/changed, a late event on a terminal run, per-edge counters, resume.
+
+```
+bun test packages/core/test/workflow-spec.test.ts packages/core/test/workflow-machine.test.ts
+ 66 pass, 0 fail, 182 expect() calls
+```
+
+**Mutation check** (`.tentacle/tmp/agent-workflows/mutations.sh`; each mutates the
+real source, runs only the pinning file, restores). All 11 went red — none vacuous:
+
+```
+red OK: S1 hash ignores prompt bytes          red OK: S2 goto off-by-one
+red OK: S1 hash is order-dependent            red OK: S2 retry ignored
+red OK: S1 pass-edge cycle accepted           red OK: S2 token budget not enforced
+red OK: S1 unknown reference accepted         red OK: S2 max_step_runs not enforced
+red OK: S1 unknown schemaVersion accepted     red OK: S2 terminal state not final
+                                              red OK: S2 shared goto counter
+```
+
+No neighbouring suite regressed: `bun test packages/core/test/schedule.test.ts
+packages/core/test/agent-job-ledger.test.ts packages/config/test` → 545 pass,
+0 fail.
+
+### Gate / changelog / protocol
+
+- `bunx biome check` on the five changed files: clean.
+- `bunx tsc --noEmit`: no `workflow` error. `bunx tsc -p apps/mobile`: clean (the
+  module is in the phone's bundle — the reason for the no-`node:` rule).
+- **Full `bun run check` is the orchestrator's** (per the executor instruction).
+- **No changelog fragment**: the plan puts `changelog.d/agent-workflows.added.md`
+  with Slice 6, the first user-visible surface; slices 1–2 are internal modules
+  (`docs/eval/changelog-discipline.md`).
+- **No `protocol.d/` note, no `PROTOCOL_VERSION` edit, no schema regeneration**:
+  slices 1–2 touch no wire, no log type, no persisted format. `packages/protocol/
+  schema/protocol.json` is unchanged.
+
+### Unverified / left to later slices
+
+- `WorkflowSpec.budget.waitMs` and `step.timeoutMs` are parsed and carried but
+  nothing enforces them yet — the driver (Slice 4) is what arms the timer.
+- `rerunAt` has no test for the "file changed" refusal: the hash comparison is
+  Slice 4's (`stopped: changed` needs the laptop store); the state/event exists and
+  is tested, the comparison is not built.
+- `promptText` is only populated from `prompt_text:` in the fixture path; a
+  `prompt:` file's bytes reach the spec via `spec.prompts` and are joined by the
+  driver, deliberately (the validator never holds two copies).
 
 ## Review
 
