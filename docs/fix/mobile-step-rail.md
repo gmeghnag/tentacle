@@ -239,3 +239,15 @@ Attacks tried: (a) is the ok-path body duplicated? → finding 1. (b) beta compa
 Executor: the coverage gap was stated honestly. The ok-path `exit=0` sits in the executor's own screenshot and was not caught.
 
 *— claude-opus-5-5, 2026-11-22* (same model family as the resume author; fresh context only)
+
+### Round 2
+
+**Verdict: APPROVE (with one open check that isn't code)** — reviewed `git diff HEAD~1` (`f0ab653a`).
+
+- **Finding 1 — fixed.** `tool-steps.ts:367` now strips the leading `exit=N` line whenever the `$` line is drawn (`sublineShown`). When the `$` line is hidden (beta, ok step) nothing is stripped; a later `exit=…` line is left alone; a failure with no code is unchanged. Mutation (put the old `exitSuffix !== null` condition back): the new test «an OK step drops the body's `exit=0` too…» **fails**; restored.
+- **Finding 2 — fixed in code.** `src/step-rail.ts` `branchGeometry(fontScale)` is pure and capped at `DENSE_FONT_SCALE`. At the default size the branch runs from the node centre (y 22) to the `$` line's middle (y 32): 10 pt, more than `BRANCH_TURN` 6. It grows with Dynamic Type; `StepNode.tsx` only maps the numbers. Mutation (fixed `top: NODE_Y+7, height: 3`): all 4 `step-rail.test.ts` tests **fail**; restored, and `git status` is clean.
+- **Regressions:** none found. The mockup kit now reads `step-rail.ts` (hash + module). The `--m-step-branch-top/height/radius` tokens are gone (their values now depend on the font scale); the mockup-kit test passes.
+- **Gate:** `bun test apps/mobile/test scripts/test/mockup-kit.test.ts` 4338 pass / 0 fail; `bun run lint` clean (2258 files); `bun run typecheck` clean. Full `bun test` not run.
+- **Open, not code:** the new failed long-command fixture (`mock-model.ts`, `_runrow-turn.yaml`) was **never run** (the e2e gate was denied, Execution notes). So flow 38 with the extra round is untested, and no shot yet shows `exit N` uncut or the branch's look. Before merge, run `scripts/e2e-gate.sh 0FA4B51F-… --only 38-running-row`; the owner signs off on the look from those shots.
+
+*— claude-opus-5-5, 2026-11-22* (same model family as the resume author; fresh context only)
