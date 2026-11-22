@@ -61,9 +61,13 @@ describe("the rail branches to a step's `$` line (owner decision 3)", () => {
     expect(gutter).toBeGreaterThan(0);
     expect(gutter).toBeLessThan(at);
     expect(src.slice(gutter, at)).toContain("subline == null ? null : (");
-    // It hangs off the rail's own x and turns once, onto the sub-line.
+    // It hangs off the rail's own x and turns once, onto the sub-line. The box —
+    // top, height, radius — is geometry, so it comes from `step-rail.ts` (pure,
+    // `step-rail.test.ts`) and is mapped here per the type's scale.
     expect(src).toMatch(/branch: \{\s*position: "absolute",\s*left: GUTTER \/ 2 - 0\.5,/);
-    expect(src).toMatch(/borderBottomLeftRadius: \d+/);
+    expect(src).toContain("borderBottomLeftRadius: BRANCH_TURN");
+    expect(src).toContain("height: branch.height");
+    expect(src).toContain("const branch = branchGeometry(fontScale);");
   });
 });
 

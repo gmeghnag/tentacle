@@ -26,6 +26,13 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "${PHASE}-running"
+# Round 2: the FAILED described shell asks its own permission (fix round 1).
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 30000
+- tapOn:
+    id: "perm-allow_once"
 - extendedWaitUntil:
     visible:
       id: "thinking-footer"
@@ -54,4 +61,27 @@ appId: so.tentacle.app
     text: ".*Measure the resolver latency.*"
 - tapOn:
     id: "tool-mocked-.*-ok"
+    index: -1
+# The FAILED step with a command longer than one line (fix round 1): `exit N` at
+# the end of the `$` line — never cut — the branch off the rail onto that line,
+# and an open body that repeats neither the command nor the code.
+- scrollUntilVisible:
+    element:
+      id: "tool-mocked-.*-error"
+    direction: DOWN
+- tapOn:
+    id: "tool-mocked-.*-error"
+    index: -1
+- extendedWaitUntil:
+    visible:
+      id: "tool-mocked-.*-output"
+    timeout: 5000
+- assertVisible:
+    text: ".*exit 125.*"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "${PHASE}-failed"
+- tapOn:
+    id: "tool-mocked-.*-error"
     index: -1

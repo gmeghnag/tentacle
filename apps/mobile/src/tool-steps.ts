@@ -362,7 +362,9 @@ export function stepRowView(
   const lineShows = shell !== null && sublineShown ? firstLine(shell.command) : subtitle;
   const oneLine = command.length === 1 ? command[0] : null;
   const bodyCommandLines = oneLine !== null && oneLine === lineShows ? [] : command;
-  const cut = outputView(exitSuffix === null ? (row.output ?? "") : withoutExitLine(row.output), {
+  // Decision 5 applies to an ok step too: once the `$` line is drawn, the exit
+  // code is said ONCE, and a success's `exit=0` is no information in the body.
+  const cut = outputView(sublineShown ? withoutExitLine(row.output) : (row.output ?? ""), {
     full,
     error: row.status === "error",
   });
@@ -417,7 +419,10 @@ function shellExitSuffix(row: ToolRow): string | null {
   return code === null ? null : `exit ${code}`;
 }
 
-/** A result without its leading `exit=N` line: that code is on the `$` line now. */
+/**
+ * A result without its leading `exit=N` line: that code is on the `$` line now
+ * (drawn for a success too — decision 5 has no ok exception).
+ */
 function withoutExitLine(output: string | undefined): string {
   return (output ?? "").replace(/^exit=-?\d+(?:\r?\n|$)/, "");
 }

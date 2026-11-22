@@ -162,6 +162,71 @@ production change made). What the resume found and did:
   proof is the flow-38 shots above, which do not include the failed long-command
   row (coverage gap above).
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-22* (resumed DeepSeek's partial fix-round edits after the watchdog stopped it; kept what was right, finished the rest)
+
+**Finding 1 (MEDIUM, ok body `exit=0`) — FIXED.** `apps/mobile/src/tool-steps.ts:367`:
+the body drops its leading `exit=N` line whenever the `$` line is shown
+(`sublineShown`), not only when `exitSuffix !== null`. With no `$` line (beta
+compact success, or a call without a sentence) the code stays in the body: it has
+nowhere else to be read. Test `shell-intent-step.test.ts` «an OK step drops the
+body's `exit=0` too» (ok + `$` line → stripped; only the LEADING line goes; no `$`
+line → kept). Red on the old condition (1 fail), green after.
+
+**Finding 2 (MEDIUM, branch a 3 pt tick, not following Dynamic Type) — FIXED in code; the look still needs owner sign-off.**
+- New pure `apps/mobile/src/step-rail.ts`: `GUTTER`, `NODE_Y`, `BRANCH_TURN` (6),
+  `BRANCH_REACH`, `branchGeometry(fontScale)` → `{top, height}`. The branch runs
+  from the node's centre (its vertical stroke lies on the rail, and the node is
+  drawn over its first points) down to the `$` line's middle at
+  `min(fontScale, DENSE_FONT_SCALE)`, the same cap as the texts. Height is 10 pt at
+  the default type, 18.6 pt at 1.4, 8.2 pt at iOS xSmall (0.82). It is always taller
+  than the 6 pt turn, so the curve has room.
+- DeepSeek's version floored the height at a 7 pt "stub" from `NODE_Y+7`. At the
+  default type that ended 4 pt past the `$` line's middle (36 vs 32), and it clamped
+  scales below 1, so xSmall drifted too. Both removed.
+- `ui/StepNode.tsx`: DeepSeek left a placeholder `const branch = { top: 29, height: 3 }`.
+  It is now `branchGeometry(fontScale)`. The local `GUTTER`/`NODE_Y` were deleted and
+  imported from `step-rail.ts`, so the rail and the branch use one truth.
+- `bun run mockup-kit` regenerated. The kit no longer carries `--m-step-branch-top/height/radius`
+  or `--m-step-k-gutter/node-y/subline-mid/branch-reach`: those values now come from
+  a function or an import. `rg` shows `tools/mockup-kit/kit.css` uses none of them.
+- Tests `step-rail.test.ts`: taller than the turn at every scale; grows with the
+  type; **ends ON the `$` line's middle at 1 / 1.15 / 1.4** (new: red on DeepSeek's
+  floor, `Expected 32, Received 36`); capped at `DENSE_FONT_SCALE` and followed at
+  xSmall. `step-rail-render.test.ts` pins that `StepNode` maps `branchGeometry(fontScale)`
+  (red on the placeholder).
+- **e2e fixture (the failed long-command shot).** DeepSeek's draft could not have
+  worked as written, for two reasons:
+  - It issued the failing call in the SAME round as `sleep 20`, so there were two
+    permission asks and only one tap.
+  - It used `podman ps … | grep tentacle`, which really runs on the host and exits
+    with grep's code (0/1), never the asserted 125.
+  
+  Now `e2e/mock-model.ts` issues it in round 2. The command is
+  `echo "Error: no container named …" >&2; exit 125` (long enough to ellipsize,
+  and a fixed code). `_runrow-turn.yaml` approves the second ask, then opens the
+  error row, asserts `exit 125` and shoots `${PHASE}-failed`.
+  **NOT RUN:** `scripts/e2e-gate.sh … --only 38-running-row` was denied
+  permission in this session. To verify, run that command and look at
+  `38-*-failed-*.png` (light/dark × default/beta).
+
+**Mutations (each applied by hand, run, reverted):**
+
+| Mutant | Tests | Result |
+|---|---|---|
+| M-A body strips only on failure (the pre-fix condition) | shell-intent-step + tool-step-view | killed (1 fail) |
+| M-B body always strips, even with no `$` line | same | killed (2 fail) |
+| M-C `StepNode` fixed `{top:29,height:3}` (the placeholder) | step-rail-render | killed (1 fail) |
+| M-D DeepSeek's floored geometry (`NODE_Y+7`, `max(7,…)`) | step-rail | killed (1 fail, 36≠32) |
+| M-E `branchGeometry` ignores the font scale | step-rail | killed (3 fail) |
+| M-F no cap at `DENSE_FONT_SCALE` | step-rail | killed (1 fail) |
+
+**Narrow gate:** step-rail, step-rail-render, shell-intent-step, tool-step-view,
+tool-rows-wiring, mockup-kit, mockup-kit-png: 104 pass / 0 fail.
+`bunx tsc -p apps/mobile` is clean. `bunx biome check` on every changed file is clean.
+The full gate is left to the orchestrator's script.
+
 ## Review
 
 **Verdict: REQUEST-CHANGES**

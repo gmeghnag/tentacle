@@ -7,10 +7,11 @@
     "apps/mobile/src/screens/SessionsDrawer.tsx": "5cb64e4a707fb3ade80d489dc643e6bfac5cb60e",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "530772143b4f87280e31d996de1c9d8d2c6577ab",
     "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "3fedea4b0a795f2d0903755263c707c643dac5f3",
+    "apps/mobile/src/step-rail.ts": "83bd11f3b10e19be6edd27a835ef90252f69f46e",
     "apps/mobile/src/theme-beta.ts": "c1edfc8542fc4d77a28510a47ea39408be1877bb",
     "apps/mobile/src/theme.ts": "a8c3adcd473504068be6b8576fa4818a29a453b7",
     "apps/mobile/src/thinking-motion.ts": "4fd5a2e149a69bb6c58326516420a74efc077eaa",
-    "apps/mobile/src/tool-steps.ts": "3f64d5eb9af76b7dde8b0404bf369101f1ae3efb",
+    "apps/mobile/src/tool-steps.ts": "ba148ff5256f67140c04c5e5948cdf84d8d54508",
     "apps/mobile/src/ui/BandSection.tsx": "7b65870db2faa7a51663560d2641476973ed7b2a",
     "apps/mobile/src/ui/CodeBlock.tsx": "567f9d97869b4e60f00d77a95185e75dd54d4e26",
     "apps/mobile/src/ui/Composer.tsx": "e767b7545c52d0e63f729dce7f957f25ad79492b",
@@ -21,7 +22,7 @@
     "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
     "apps/mobile/src/ui/ScreenHeader.tsx": "5056826ce4b0caed05dfa83cb777dc1e26ea1ba0",
     "apps/mobile/src/ui/Sheet.tsx": "3c6c0d8b0f8f8b450821ccc12f737b8e893258d7",
-    "apps/mobile/src/ui/StepNode.tsx": "1e5f137ae96b0a9c6b8dcd4f567f7888c52f323a",
+    "apps/mobile/src/ui/StepNode.tsx": "71860d4dc07a1ac42e89e885eea0b06c965a0926",
     "packages/tui/src/blink.ts": "29c9f101f7942a0942e48c977a13e3759820c8e3",
     "packages/tui/src/components/Thinking.tsx": "c9f80123d32ad706b7c96d858b822d9336d15d2d",
     "packages/tui/src/shimmer.ts": "96515bf4852e36f0cf9ca27a3f665d00e37f076c",
@@ -738,12 +739,9 @@
         "branch": {
           "position": "absolute",
           "left": 4.5,
-          "top": 29,
-          "height": 3,
           "width": 9,
           "borderLeftWidth": 1,
-          "borderBottomWidth": 1,
-          "borderBottomLeftRadius": 6
+          "borderBottomWidth": 1
         },
         "name": {
           "flexShrink": 0,
@@ -802,11 +800,7 @@
         }
       },
       "consts": {
-        "GUTTER": 10,
-        "NODE_Y": 22,
         "THEREFORE_SIZE": 13,
-        "SUBLINE_MID": 32,
-        "BRANCH_REACH": 9,
         "DOT_AT": {
           "top": {
             "left": 5,

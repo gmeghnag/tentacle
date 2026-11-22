@@ -257,6 +257,8 @@ export const RUNROW_PROMPT = "RUNROW38";
 export const RUNROW_SENTENCE = "Test DNS con 50 query e latenze misurate per ogni risolutore";
 /** Flow 38's folded thought (asserted ABSENT from the tap detail). */
 export const RUNROW_THOUGHT = "Measure the resolver latency with fifty queries.";
+/** Flow 38's FAILED described shell (fix round 1): `exit N` on the `$` line, a command too long for one. */
+export const RUNROW_FAIL_SENTENCE = "Controllo il container del resolver";
 /** A child's prompt: `CHILDSTEPS <n>` — it calls `fs_read` n times, one per round, then reports. */
 export const CHILD_MARK = "CHILDSTEPS";
 /** The spacing of a child's rounds (ms): slow enough for a flow to see its steps advance. */
@@ -527,6 +529,18 @@ function stream(
           for (const chunk of toolCallFrames(0, mint(), "shell", {
             command: "sleep 20 && echo resolved 50/50",
             description: RUNROW_SENTENCE,
+          })) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else if (toolResultsThisTurn(body) === 1) {
+          // The FAILED row (mobile-step-rail fix round 1), its own round so its
+          // permission ask comes after the first call's: a command too long for
+          // one line, and a fixed `exit 125` (it really runs on the host, so it
+          // must not depend on what is installed there).
+          for (const chunk of toolCallFrames(0, mint(), "shell", {
+            command: `echo "Error: no container named tentacle-dns-resolver-cache matches the filter" >&2; exit 125`,
+            description: RUNROW_FAIL_SENTENCE,
           })) {
             send(chunk);
           }

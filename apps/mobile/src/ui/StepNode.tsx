@@ -4,7 +4,8 @@
  * centre (a dot — blinking while it runs —, or a ring), then ONE line — name, mono
  * subtitle, the duration — and, when open, the body under it. A dumb renderer:
  * every string and decision comes from `tool-steps.ts` / `tool-summary.ts` /
- * `step-blink.ts`; this file owns only the look, the 1 s clock and the spin.
+ * `step-blink.ts` / `step-rail.ts`; this file owns only the look, the 1 s clock
+ * and the spin.
  *
  * docs/fix/mobile-step-rail.md (owner 22/11): ONE node shape for every step, so
  * the rail reads as one continuous line — a tool's dot, the live thought's dot
@@ -31,6 +32,7 @@ import {
   runningDotLook,
   thoughtLook,
 } from "../step-blink.ts";
+import { BRANCH_REACH, BRANCH_TURN, GUTTER, NODE_Y, branchGeometry } from "../step-rail.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, size, space, typography } from "../theme.ts";
 import {
   DOT_ORDER,
@@ -53,23 +55,8 @@ import { AppFontContext } from "./app-font.ts";
 /** `wake`: a fired scheduled wake's `◷` (docs/feat/scheduled-fire-row.md). */
 export type NodeKind = StepDot | "thought" | "thinking" | "wake";
 
-const GUTTER = 10;
-/** The node sits on the first line's centre; the line is one touch target tall. */
-const NODE_Y = size.touch / 2;
 /** Every ∴ (a folded thought in the open body): owner asked a bit larger than 10. */
 const THEREFORE_SIZE = 13;
-/**
- * Where the `$` line's middle sits in a stacked line (docs/fix/mobile-step-rail.md
- * decision 3): the title row, ONE touch target tall with its two lines centred,
- * then half the mono line — so the branch off the rail lands ON the sub-line
- * instead of ending beside it. Derived from the tokens, never a magic number.
- */
-const SUBLINE_MID =
-  typography.step.lineHeight +
-  (size.touch - typography.step.lineHeight - typography.stepMono.lineHeight) / 2 +
-  typography.stepMono.lineHeight / 2;
-/** How far the branch leaves the rail before turning down: into the text column. */
-const BRANCH_REACH = GUTTER / 2 + 4;
 
 /** Milliseconds since `from`, re-read once a second; null when there is no `from`. */
 function useElapsed(from: number | undefined): number | null {
@@ -460,6 +447,8 @@ export function StepNode({
   const elapsed = useElapsed(liveFrom);
   const shown = elapsed === null ? trailing : liveElapsed(elapsed);
   const tappable = onToggle !== undefined;
+  const { fontScale } = useWindowDimensions();
+  const branch = branchGeometry(fontScale);
   return (
     <View style={styles.node}>
       <View
@@ -472,10 +461,16 @@ export function StepNode({
         {thread.down ? <View style={[styles.down, { backgroundColor: palette.sep }]} /> : null}
         {subline == null ? null : (
           // The rail grows a branch to the `$` line (owner decision 3): the line
-          // stays continuous, and the sub-line is visibly THIS step's.
+          // stays continuous, and the sub-line is visibly THIS step's. Its height
+          // and turn follow the type (`branchGeometry`), so Dynamic Type cannot
+          // shrink it back to a tick.
           <View
             testID="step-subline-branch"
-            style={[styles.branch, { borderColor: palette.sep }]}
+            style={[
+              styles.branch,
+              { top: branch.top, height: branch.height, borderColor: palette.sep },
+              { borderBottomLeftRadius: BRANCH_TURN },
+            ]}
           />
         )}
         <View style={styles.nodeBox}>
@@ -781,19 +776,17 @@ const styles = StyleSheet.create({
   exitSuffix: { flexShrink: 0 },
   /**
    * The branch off the rail to a step's `$` line (decision 3): it leaves the rail
-   * level with the title and curves onto the sub-line — the `⎿` idea, hung on the
-   * rail instead of stamped in front of the text. Left + bottom border only, one
-   * radius rounding the turn.
+   * below the node and curves onto the sub-line — the `⎿` idea, hung on the rail
+   * instead of stamped in front of the text. Left + bottom border only, one
+   * radius rounding the turn; `top`/`height`/radius come from `branchGeometry`,
+   * which follows the type's Dynamic Type scale.
    */
   branch: {
     position: "absolute",
     left: GUTTER / 2 - 0.5,
-    top: NODE_Y + 7,
-    height: SUBLINE_MID - (NODE_Y + 7),
     width: BRANCH_REACH,
     borderLeftWidth: 1,
     borderBottomWidth: 1,
-    borderBottomLeftRadius: 6,
   },
   name: { flexShrink: 0, maxWidth: "45%" },
   // No subtitle beside it (a sentence): the name may take the whole line.

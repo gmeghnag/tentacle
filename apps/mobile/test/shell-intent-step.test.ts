@@ -136,6 +136,22 @@ describe("a described shell step", () => {
     expect(plain.exitSuffix).toBeNull();
     expect(plain.output?.text).toBe("exit=125\nError: no such pod");
   });
+
+  test("an OK step drops the body's `exit=0` too — decision 5 has no ok exception", () => {
+    // The review's finding: the open body of a successful described call began
+    // with `exit=0`, right under a `$` line that already carries the outcome.
+    const v = stepRowView(row("ok", { output: "exit=0\nresolved 50/50" }), null, false);
+    expect(v.subline).toBe("$ bun test apps/mobile");
+    expect(v.output?.text).toBe("resolved 50/50");
+    // Only the leading line goes: a later `exit=…` is output, not the code.
+    const later = stepRowView(row("ok", { output: "exit=0\nran\nexit=0 fine" }), null, false);
+    expect(later.output?.text).toBe("ran\nexit=0 fine");
+    // With NO `$` line (beta hides it on a success) nothing is stripped: the code
+    // then has nowhere else to be read, exactly as for a failure without one.
+    const hidden = stepRowView(row("ok", { output: "exit=0\nresolved" }), null, false, false, true);
+    expect(hidden.subline).toBeNull();
+    expect(hidden.output?.text).toBe("exit=0\nresolved");
+  });
 });
 
 describe("no sentence: today's view", () => {
