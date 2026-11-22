@@ -369,6 +369,47 @@ regenerated file clean. Lesson for the executor: the kit hashes are a gate, so a
 
 *— claude-opus-5-5, 2026-11-22 — gate round 2*
 
+### Validation (part 1)
+
+*— claude-opus-5-5, 2026-11-22 — simulator shots, iOS 26 `0FA4B51F-…`, Release build*
+
+**How:** new flow `apps/mobile/e2e/flows/41-file-view-shots.yaml` (registered in `e2e/run.ts`
+`FLOWS` + its own session `FILEVIEW_ID`), driven by a new mock-model turn `FILEVIEW41`
+(`e2e/mock-model.ts`) over the fixture `e2e/file-view-fixture.ts`: one 71-line html page with a
+`<style>` and a `<script>` — round 1 `fs_write` (new file), 2 `fs_read` lines 1–40, 3 `fs_edit`
+(+3 −1), 4 `fs_multi_edit` (2 edits, +10 −5); each ask approved from the phone. Each shot is
+taken light then dark (`_shot.yaml`). Run: `scripts/e2e-gate.sh 0FA4B51F-A0E3-421B-BE66-CE29EF45213D
+--only 41-file-view-shots` → `GATE PASS — 1 passed, 0 failed (96 s)`. Harness tests
+(`e2e-flows`, `e2e-escape-probes`): 50 pass / 0 fail; biome clean on the touched e2e files.
+
+**Files** (`docs/feat/mobile-file-view/`, each `-light.png` + `-dark.png`):
+`41-collapsed` (the four steps closed) · `41-write-open` · `41-read-open` · `41-read-full` ·
+`41-edit-open` · `41-multiedit-open` · `41-multiedit-full`.
+
+**What I saw (vs the mockup, variant B):**
+- Holds: step line says the header once — `Write polpetto.html +70 −0`, `Read polpetto.html · 1–40`,
+  `Edit polpetto.html +3 −1`, `MultiEdit polpetto.html · 2 edits +10 −5`; no `⎿ edited … with N
+  edits` line, no duplicated file card or counts. Body opens with one light line (`HTML · new
+  file`, `lines 1–40 of 71 · HTML`, `lines 26–37 · HTML`, `lines 34–78 · HTML`). One number
+  column; a removed line keeps its old number. `+`/`−` sign column and add/del tints on every
+  diff row, both themes. Preview 12 lines + `… N more lines · tap to see all`; tap → full view.
+  **Read** of the html is fully coloured, tags/attrs/strings in the markup, the CSS in `<style>`
+  (custom properties, hex numbers) AND the JS in `<script>` (`export const`, strings, numbers,
+  `=>`): `41-read-open`, `41-read-full`.
+- **Wrong vs spec (#2/#6, mockup's MultiEdit with coloured JS):** in every DIFF body (Write,
+  Edit, MultiEdit) only the html markup lines are coloured; the lines inside `<style>` and
+  `<script>` are plain text (`41-write-open`: lines 8–12 CSS plain; `41-edit-open`: `export
+  const SCENES`, `{ k: "heli", … }` plain; `41-multiedit-*`: `const NOTIF_A`, `function draw`
+  plain), while the same lines are coloured in the Read. Cause: diff lines are highlighted one
+  line at a time (Execution, "Drift"), so a script/style line out of its `<script>` context is
+  not JS/CSS. Not a cosmetic edge case: it is every script/style line of every html diff.
+  Not fixed (production code is out of this pass).
+- Minor: a multi-hunk diff (`41-multiedit-full`) has no separator between hunks — numbers jump
+  `50 → 68` with nothing drawn, and a removed line numbered `68` sits right after context `71`
+  (its old number, as variant B says). Readable, but a gap marker would help.
+- Minor: the body's header says `HTML`, the mockup's MultiEdit said `JavaScript in HTML` — the
+  spec (#4) only asks for `LANG`, so this is consistent with it.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22 (fresh context; same model as the Execution resume, different from the DeepSeek executor)*
