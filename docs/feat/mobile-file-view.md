@@ -477,3 +477,11 @@ overstated the 400-line case without a test behind it.
   exclusion (AGENTS §7).
 - **This branch = part 1 only.** Validation shrinks to part 1's screenshots (dark + light: Read of
   an `.html`, Edit diff, MultiEdit, Write), then merge on the owner's OK.
+
+### Round 3 — validation shots (orchestrator, 22/11 ~21:25)
+
+*— claude-opus-5-5 (orchestrator), 2026-11-22 — from the Opus validation-shots run (`docs/feat/mobile-file-view/41-*.png`, flow 41-file-view-shots)*
+
+- **HIGH — html diffs are not coloured.** In a Write / Edit / MultiEdit of an `.html` file, the `<script>` and `<style>` lines are drawn plain: spec #2/#6 (JS/CSS colour inside .html) and the variant-B mockup fail for diff bodies (the Read body is coloured). Fix: diff bodies of an `.html` file colour embedded script/style lines like the Read body does, with a red-first unit test on the pure colouring module (an Edit and a MultiEdit hunk that START inside a `<script>` block, so the language state must come from context, not from the hunk's first line — say how the hunk's starting state is known, or document the limit). The owner chose: fix this before merge (22/11 21:25).
+
+Verdict for this round: REQUEST-CHANGES (one HIGH).
