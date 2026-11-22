@@ -176,9 +176,9 @@ export interface PermissionView {
  * The ONE decision both the layout (row count) and `PermissionPrompt` (paint)
  * read (docs/feat/shell-intent-line.md Design §5, Q3). A `shell` ask shows the
  * WHOLE command: each of its lines wrapped to the width, capped at
- * `MAX_DETAIL_ROWS` with a `… N more lines` row — never a silent cut (the row
- * may show only the model's sentence under `beta.compactShell`; the ask must
- * show what really runs). Other asks: today's rows, each cut to one row.
+ * `MAX_DETAIL_ROWS` with a `… N more lines` row — never a silent cut (a shell
+ * ROW cuts its command to make room for `exit=N`; the ask must show what really
+ * runs). Other asks: today's rows, each cut to one row.
  * `intent`: the asking call's own sentence (display only, never decided on).
  */
 export function permissionView(

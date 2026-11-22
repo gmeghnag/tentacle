@@ -5,10 +5,12 @@ import { transcriptRows } from "../src/render-lines.ts";
 import type { ToolItem } from "../src/state.ts";
 import { theme } from "../src/theme.ts";
 
-// docs/feat/shell-intent-line.md §3 + docs/fix/tui-shell-row-uniform.md: a
-// described `shell` call draws as the sentence, then ONE block whose first line
-// is `$ <command>`; the outcome is never a glyph in the title and `exit=N` is
-// written only when N ≠ 0 (a colour-blind owner reads the line's absence).
+// docs/feat/shell-intent-line.md §3 + docs/fix/tui-shell-row-collapsed: a
+// described `shell` call draws as the sentence, then the command with its exit
+// code on it; the outcome is never a glyph in the title, `exit=N` is written
+// only when N ≠ 0 (a colour-blind owner reads the line's absence), and the
+// OUTPUT is ctrl+o only — success or failure alike. The beta `compactShell` is
+// retired in the TUI: one shape.
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -45,23 +47,24 @@ describe("a described shell row (one shape for every state)", () => {
     expect(out).toEqual([`● ${SENTENCE}`, "⎿ $ bun test apps/mobile"]);
   });
 
-  test("settled ok: NO ✓ and NO exit=0 — the block starts with the command, then the output", () => {
+  test("settled ok: NO ✓, no `exit=0`, and NO output — the block is the command alone", () => {
     const out = rows(shell({ status: "ok", durationMs: 1200, resultText: "exit=0\nall good" })).map(
       strip,
     );
-    expect(out).toEqual([`● ${SENTENCE} 1.2s`, "⎿ $ bun test apps/mobile", "  all good"]);
+    expect(out).toEqual([`● ${SENTENCE} 1.2s`, "⎿ $ bun test apps/mobile"]);
     expect(out.join("\n")).not.toContain("✓");
+    expect(out.join("\n")).not.toContain("all good");
   });
 
-  test("error exit=2: no `✗ exit 2` in the title; `exit=2` is the block's first line after the command", () => {
+  test("error exit=2: no `✗ exit 2` in the title; `exit=2` ends the `$` row, no output", () => {
     const out = rows(shell({ status: "error", durationMs: 3400, resultText: "exit=2\nboom" })).map(
       strip,
     );
-    expect(out).toEqual([`● ${SENTENCE} 3.4s`, "⎿ $ bun test apps/mobile", "  exit=2", "  boom"]);
+    expect(out).toEqual([`● ${SENTENCE} 3.4s`, "⎿ $ bun test apps/mobile  exit=2"]);
     expect(out[0]).not.toContain("✗");
   });
 
-  test("a denial: no ✗ in the title, no invented code, and no exit= line", () => {
+  test("a denial: no ✗ in the title, no invented code, and the reply is the block's line", () => {
     const out = rows(
       shell({ status: "error", resultText: "Permission denied by the user: no" }),
     ).map(strip);
@@ -78,7 +81,7 @@ describe("a described shell row (one shape for every state)", () => {
     );
   });
 
-  test("a multi-line command: the block's first row is its first line + …", () => {
+  test("a multi-line command: the block's row is its first line + …", () => {
     const out = rows(shell({ command: "cd x\nbun test\nexit 0" })).map(strip);
     expect(out).toEqual([`● ${SENTENCE}`, "⎿ $ cd x…"]);
   });
@@ -104,24 +107,24 @@ describe("a described shell row (one shape for every state)", () => {
     }
   });
 
-  test("expanded (click): the whole command on `  │ $ …` rows, wrapped", () => {
+  test("expanded (click): the whole command in the `⎿ $` block, wrapped, no `│`", () => {
     const cmd = `bun test ${"packages/tui/test/".repeat(8)}`;
     const item = shell({ command: cmd });
     const out = rows(item, { expandedIds: [item.id] }).map(strip);
     expect(out[0]).toBe(`● ${SENTENCE}`);
-    expect(out[1]?.startsWith("  │ $ bun test")).toBe(true);
+    expect(out[1]?.startsWith("⎿ $ bun test")).toBe(true);
     const joined = out
       .slice(1)
-      .map((r) => r.replace(/^ {2}│ /, ""))
+      .map((r) => r.replace(/^⎿ \$ /, "").replace(/^ {4}/, ""))
       .join("");
-    expect(joined).toBe(`$ ${cmd}`);
+    expect(joined).toBe(cmd);
+    expect(out.some((r) => r.includes("│"))).toBe(false);
   });
 
-  test("a spilled success drops the `exit=0` in the spill head too; a spill with a code keeps it", () => {
+  test("a spilled result: the code comes from the spill head, the output stays hidden", () => {
     const spill = (head: string) => ({ chars: 40_800, head, tail: "", omitted: 0 });
-    const NOTE = "40.8k chars · too large, could not be saved — the model sees only this preview";
-    // The row says NO outcome, so a spill head still carrying `exit=0` would be
-    // the only thing claiming a success: dropped, exactly like the plain body.
+    // A success writes nothing on the `$` row, so a spill head still carrying
+    // `exit=0` would be the only thing claiming one: it never reaches the row.
     expect(
       rows(
         shell({
@@ -131,19 +134,13 @@ describe("a described shell row (one shape for every state)", () => {
           spill: spill("exit=0\nPageouts: 77"),
         }),
       ).map(strip),
-    ).toEqual([`● ${SENTENCE} 0.9s`, "⎿ $ bun test apps/mobile", `  ${NOTE}`, "  Pageouts: 77"]);
-    // A failure's code is read from the same head and stays (first body line).
+    ).toEqual([`● ${SENTENCE} 0.9s`, "⎿ $ bun test apps/mobile"]);
+    // A failure's code is read from that same head and ends the `$` row.
     expect(
       rows(
         shell({ status: "error", resultText: "banner", spill: spill("exit=3\nmany lines") }),
       ).map(strip),
-    ).toEqual([
-      `● ${SENTENCE}`,
-      "⎿ $ bun test apps/mobile",
-      `  ${NOTE}`,
-      "  exit=3",
-      "  many lines",
-    ]);
+    ).toEqual([`● ${SENTENCE}`, "⎿ $ bun test apps/mobile  exit=3"]);
   });
 
   test("failure modes: a denial's reply, a killed code, a background start", () => {
@@ -157,13 +154,15 @@ describe("a described shell row (one shape for every state)", () => {
       expect(
         rows(shell({ status: "error", resultText: `exit=${n}\n[killed]` }))
           .map(strip)
-          .slice(0, 3),
-      ).toEqual([`● ${SENTENCE}`, "⎿ $ bun test apps/mobile", `  exit=${n}`]);
+          .slice(0, 2),
+      ).toEqual([`● ${SENTENCE}`, `⎿ $ bun test apps/mobile  exit=${n}`]);
     }
-    // A background start has no `exit=` at all: the block is the command + the note.
+    // A background start has no `exit=` at all, and its start note is what the
+    // call says about a JOB — output, so ctrl+o only (review round 1, MEDIUM):
+    // collapsed the block is the command alone.
     expect(
       rows(shell({ status: "ok", resultText: "started background job j1: `x`" })).map(strip),
-    ).toEqual([`● ${SENTENCE}`, "⎿ $ bun test apps/mobile", "  started background job j1: `x`"]);
+    ).toEqual([`● ${SENTENCE}`, "⎿ $ bun test apps/mobile"]);
   });
 
   test("queued: the sentence on the dim ◌ row, then the block's `$ cmd` row", () => {
@@ -172,82 +171,63 @@ describe("a described shell row (one shape for every state)", () => {
   });
 });
 
-describe("beta compactShell", () => {
-  test("a success drops the `$` row, so `⎿` starts the output; a failure shows it in full", () => {
-    const c = { compactShell: true };
-    expect(rows(shell({}), c).map(strip)).toEqual([`● ${SENTENCE}`]);
-    expect(
-      rows(shell({ status: "ok", durationMs: 0, resultText: "exit=0\nPageouts: 77" }), c).map(
-        strip,
-      ),
-    ).toEqual([`● ${SENTENCE} 0.0s`, "⎿ Pageouts: 77"]);
-    const err = rows(shell({ status: "error", resultText: "exit=2\nboom" }), c).map(strip);
-    expect(err).toEqual([`● ${SENTENCE}`, "⎿ $ bun test apps/mobile", "  exit=2", "  boom"]);
+describe("the retired beta: one shape whatever `compactShell` says", () => {
+  test("success, failure and running alike: the `$` row is always there", () => {
+    for (const status of ["running", "ok", "error"] as const) {
+      const over = {
+        status,
+        durationMs: 0,
+        resultText: status === "error" ? "exit=2\nboom" : "exit=0\nPageouts: 77",
+      };
+      const compact = rows(shell(over), { compactShell: true }).map(strip);
+      expect(compact).toEqual(rows(shell(over)).map(strip));
+      expect(compact[1]).toBe(
+        status === "error" ? "⎿ $ bun test apps/mobile  exit=2" : "⎿ $ bun test apps/mobile",
+      );
+    }
   });
 
-  test("a successful command with no output is the title line alone", () => {
-    const out = rows(shell({ status: "ok", durationMs: 0, resultText: "exit=0" }), {
-      compactShell: true,
-    }).map(strip);
-    expect(out).toEqual([`● ${SENTENCE} 0.0s`]);
-  });
-
-  test("expanded (ctrl+o): the whole command is there, whatever the beta says", () => {
+  test("the option is not in the row-cache key either: one layout, both flags", () => {
     const item = shell({ status: "ok", resultText: "exit=0\nfine" });
-    const open = rows(item, { compactShell: true, expandedIds: [item.id] }).map(strip);
-    expect(open[1]).toBe("  │ $ bun test apps/mobile");
-  });
-
-  test("the same item drawn compact then not compact gets different rows (cache key)", () => {
-    const item = shell({ status: "ok", resultText: "exit=0\nfine" });
-    const compact = rows(item, { compactShell: true }).map(strip);
-    const full = rows(item, { compactShell: false }).map(strip);
-    expect(full.length).toBe(compact.length + 1);
-    expect(full[1]).toBe("⎿ $ bun test apps/mobile");
+    const on = rows(item, { compactShell: true });
+    const off = rows(item, { compactShell: false });
+    expect(off).toEqual(on);
   });
 });
 
-describe("no sentence: the command stays in the title, the same exit rule", () => {
-  // Built through the live palette; the command stays in the title (no block
-  // `$` row), and a success writes no `exit=` line (fix/tui-shell-row-uniform).
+describe("no sentence: the command in the title, the same exit rule", () => {
+  // docs/fix/tui-shell-row-collapsed: collapsed the command stays in the title,
+  // with the code before the duration and no body; expanded it moves into the
+  // same `⎿ $` block a described row draws.
   test("running / ok / error / queued / expanded", () => {
     const g = theme.subtle;
     const B = (s: string) => chalk.bold(s);
     const base = { description: null, command: "bun test apps/mobile" } as const;
     const cmd = "bun test apps/mobile";
-    expect(rows(shell({ ...base }))).toEqual([
-      `${theme.accent("●")} ${B("Bash")} ${g(cmd)}`,
-      `${g("⎿")} ${g("running…")}`,
-    ]);
+    expect(rows(shell({ ...base }))).toEqual([`${theme.accent("●")} ${B("Bash")} ${g(cmd)}`]);
     expect(
       rows(shell({ ...base, status: "ok", durationMs: 1200, resultText: "exit=0\nall good" })),
-    ).toEqual([
-      `${theme.success("●")} ${B("Bash")} ${g(cmd)}${g(" 1.2s")}`,
-      `${g("⎿")} ${g("all good")}`,
-    ]);
-    // A success with no output at all: the title row only, never `⎿ exit=0`.
+    ).toEqual([`${theme.success("●")} ${B("Bash")} ${g(cmd)}${g(" 1.2s")}`]);
+    // A success with no output at all: the title row only.
     expect(rows(shell({ ...base, status: "ok", durationMs: 1200, resultText: "exit=0" }))).toEqual([
       `${theme.success("●")} ${B("Bash")} ${g(cmd)}${g(" 1.2s")}`,
     ]);
     expect(
       rows(shell({ ...base, status: "error", durationMs: 3400, resultText: "exit=2\nboom" })),
     ).toEqual([
-      `${theme.error("●")} ${B("Bash")} ${g(cmd)}${g(" 3.4s")}`,
-      `${g("⎿")} ${theme.error("exit=2")}`,
-      `  ${theme.error("boom")}`,
+      `${theme.error("●")} ${B("Bash")} ${g(cmd)}${theme.error("  exit=2")}${g(" 3.4s")}`,
     ]);
     expect(rows(shell({ ...base, status: "queued" }))).toEqual([g(`◌ Bash ${cmd} · queued`)]);
     const item = shell({ ...base, status: "ok", resultText: "exit=0\nx" });
     expect(rows(item, { expandedIds: [item.id] })).toEqual([
       `${theme.success("●")} ${B("Bash")}`,
-      `${g("  │ ")}${cmd}`,
-      `${g("⎿")} ${g("x")}`,
+      `${g("⎿")} ${g(`$ ${cmd}`)}`,
+      `  ${g("x")}`,
     ]);
     const failed = shell({ ...base, status: "error", resultText: "exit=3\nx" });
     expect(rows(failed, { expandedIds: [failed.id] })).toEqual([
       `${theme.error("●")} ${B("Bash")}`,
-      `${g("  │ ")}${cmd}`,
-      `${g("⎿")} ${theme.error("exit=3")}`,
+      `${g("⎿")} ${g(`$ ${cmd}`)}${theme.error("  exit=3")}`,
       `  ${theme.error("x")}`,
     ]);
   });

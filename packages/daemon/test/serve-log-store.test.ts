@@ -6,7 +6,7 @@
  * (history and state together), "pending on disk ⇒ never started" holds, and
  * a capture it cannot pair is closed, never resumed.
  */
-import { beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,10 +35,6 @@ import { LogSessionStore, type LogStoreIo } from "../src/session-log-store.ts";
 import { SessionLog } from "../src/session-log.ts";
 import { type DaemonStore, SessionPersister, type StateBuild } from "../src/session-persister.ts";
 
-// Every test starts with a closed latch: a test that fails mid-turn leaves a
-// round parked, and a leaked waiter made the NEXT test's `until` pass at once.
-beforeEach(() => PARKED.reset());
-
 const CWD = "/tmp/serve-log-store";
 const env = {} as ExecutionEnvironment;
 const anyInput = z.object({}).passthrough();
@@ -60,40 +56,24 @@ async function until(cond: () => boolean, ms = 20_000): Promise<void> {
 
 /**
  * A round that waits (the model "streaming") until the turn is aborted or
- * `PARKED.open()`. `open()` is STICKY: a test's `persisted()` resolves long
- * before the model call starts, so a release can arrive BEFORE the round parks
- * — losing it hung the turn (20 s, then `timed out: () => c.ended("T1")`) and
- * left a waiter behind, which made the next test's `until` pass at once.
+ * `PARKED.open()`. The release is LATCHED: an `open()` that lands before a round
+ * parks (the prompt path's write can flush first) covers that round instead of
+ * being lost — a lost release parked the round forever and only the `until`
+ * dead-man ended the test (S2 (a) at 20003 ms, and (b) cascading off the round
+ * (a) left waiting). One `open()` covers exactly one park, in either order.
  */
 const PARK = "park" as const;
 type Round = readonly StreamEvent[] | typeof PARK;
 const PARKED = {
-  /** The rounds waiting in `park()` (a test awaits a count of them). */
-  waiters: new Set<() => void>(),
-  /** An `open()` already happened: the next `park()` returns at once. */
-  opened: false,
+  waiting: 0,
+  /** Rounds that have parked so far, monotonic: a test can wait for its OWN park. */
+  parks: 0,
+  /** An `open()` no round has consumed yet. */
+  latched: false,
+  release: (): void => {},
   open(): void {
-    this.opened = true;
-    for (const release of [...this.waiters]) release();
-    this.waiters.clear();
-  },
-  /** Closed latch, empty set: no waiter (and no released latch) crosses a test boundary. */
-  reset(): void {
-    this.opened = false;
-    this.waiters.clear();
-  },
-  park(signal?: AbortSignal): Promise<void> {
-    if (this.opened || signal?.aborted) {
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve) => {
-      const release = (): void => {
-        this.waiters.delete(release);
-        resolve();
-      };
-      this.waiters.add(release);
-      signal?.addEventListener("abort", release, { once: true });
-    });
+    this.latched = true;
+    this.release();
   },
 };
 
@@ -107,7 +87,17 @@ class Scripted implements ModelProvider {
     await tick();
     const round = this.script[this.calls.length - 1] ?? [{ type: "done" }];
     if (round === PARK) {
-      await PARKED.park(request.signal);
+      PARKED.parks++;
+      PARKED.waiting++;
+      if (PARKED.latched) {
+        PARKED.latched = false;
+      } else {
+        await new Promise<void>((resolve) => {
+          PARKED.release = resolve;
+          request.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+      PARKED.waiting--;
       yield* text("late");
       return;
     }
@@ -500,6 +490,7 @@ async function stateFile(dir: string, id = "s1"): Promise<Record<string, unknown
 describe("S2 — the overlay: what the log has not committed yet survives a crash", () => {
   test("(a) a crash right after a prompt was accepted: the reload has the prompt (the state file's tail)", async () => {
     // Mutation: the state file's `tail` dropped (`sidecarOf` → []) → the prompt is gone.
+    PARKED.latched = false;
     const dir = await freshDir();
     const persister = persisterOn(dir);
     const host = hostWith(persister, [PARK], []);
@@ -528,6 +519,7 @@ describe("S2 — the overlay: what the log has not committed yet survives a cras
   test("(b) an in-place annotation of a committed message, then a steer before the next commit: k < the log's length, the annotated copy kept", async () => {
     // Mutation: `k = logged.length` whenever the capture is at least as long (no reference
     // compare) → the reload has the log's old, unannotated copy.
+    PARKED.latched = false;
     const dir = await freshDir();
     const persister = persisterOn(dir);
     const host = hostWith(
@@ -539,8 +531,11 @@ describe("S2 — the overlay: what the log has not committed yet survives a cras
     );
     const c = client();
     const { hosted } = host.open({ sessionId: "s1", create: true }, c.attachment);
+    // Wait for THIS test's park, not for "a" park: a round another test left
+    // waiting (it failed) made `waiting === 1` true before ours existed.
+    const start = PARKED.parks;
     hosted.prompt("T1", [{ type: "text", text: "go" }]);
-    await until(() => PARKED.waiters.size === 1);
+    await until(() => PARKED.parks > start);
     hosted.enqueue("e1", "T1", "steer-1");
     await hosted.persisted();
     const record = await loaded(dir);

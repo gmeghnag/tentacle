@@ -248,7 +248,6 @@ export function App({
   targetFeed,
   columns: fixedColumns,
   chartGlyphs = "braille",
-  compactShell = false,
   jobRefreshMs,
   voice: voiceConfig = VOICE_DEFAULTS,
   voiceConfigDir,
@@ -608,7 +607,6 @@ export function App({
     width: 80,
     spillInPod: shownInPod,
     chartGlyphs,
-    compactShell,
   });
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
@@ -892,7 +890,6 @@ export function App({
         spillInPod: shownInPod,
         expandedIds,
         chartGlyphs,
-        compactShell,
       };
       runChunked(items.length, (from, budgetMs) => warmRowsChunk(items, opts, from, budgetMs), {
         isStale: () => warmGenRef.current !== gen,
@@ -905,7 +902,7 @@ export function App({
       stdout.off?.("resize", onResize);
       warmGenRef.current += 1; // cancel any in-flight warm on unmount/resubscribe
     };
-  }, [stdout, size.columns, expandAll, shownInPod, expandedIds, chartGlyphs, compactShell]);
+  }, [stdout, size.columns, expandAll, shownInPod, expandedIds, chartGlyphs]);
 
   // Reset the palette selection whenever the typed text changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
@@ -1028,7 +1025,6 @@ export function App({
     blinkPhase: blinkPhase(blinkClock, blink),
     expandedIds,
     chartGlyphs,
-    compactShell,
   });
   // ARM the ONE blink clock: `blink.running` is the whole gate (the turn runs AND
   // a call is unanswered), so an idle transcript has no timer at all and a dead
@@ -1056,7 +1052,6 @@ export function App({
     spillInPod: shownInPod,
     expandedIds,
     chartGlyphs,
-    compactShell,
   };
   // Once the transcript is quiet, fill the cache for the OTHER Ctrl+O view in
   // small chunks (idle-warm.ts) so the first toggle is a hit. Any change to the
@@ -1075,7 +1070,6 @@ export function App({
           spillInPod: shownInPod,
           expandedIds,
           chartGlyphs,
-          compactShell,
         },
         running: idleRunning,
         busy: idleBusy,
@@ -1083,17 +1077,7 @@ export function App({
       { onError: (error) => warmErrorRef.current(error) },
     );
     return idleWarmCancelRef.current;
-  }, [
-    idleItems,
-    idleRunning,
-    idleBusy,
-    expandAll,
-    columns,
-    shownInPod,
-    expandedIds,
-    chartGlyphs,
-    compactShell,
-  ]);
+  }, [idleItems, idleRunning, idleBusy, expandAll, columns, shownInPod, expandedIds, chartGlyphs]);
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);

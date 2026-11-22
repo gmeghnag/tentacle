@@ -49,7 +49,10 @@ const results: Record<string, unknown> = {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let buffer = "";
-for await (const chunk of Bun.stdin.stream()) {
+// `Bun.stdin.stream()` is async-iterable at runtime, but a DOM-lib `ReadableStream`
+// type has no `[Symbol.asyncIterator]`: cast so this stays lib-agnostic.
+const stdin = Bun.stdin.stream() as unknown as AsyncIterable<Uint8Array>;
+for await (const chunk of stdin) {
   buffer += new TextDecoder().decode(chunk);
   const lines = buffer.split("\n");
   buffer = lines.pop() ?? "";

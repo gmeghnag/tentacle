@@ -92,9 +92,13 @@ describe("toolCallAt: which tool call is under screen row y (docs/feat/tui-tool-
     const c1 = laid.find((l) => l.id === "c1");
     if (!c1) return;
     expect(toolCallAt(laid, c1.start)).toBe("c1");
-    // The `  │ ` block sits directly under the header.
-    expect(c1.rows[1]?.startsWith("  │ ")).toBe(true);
+    // The `⎿ $ …` block (and its hung continuation rows) sits directly under
+    // the header, and none of it is a control.
+    expect(c1.rows[1]?.startsWith("⎿ $ ")).toBe(true);
     expect(toolCallAt(laid, c1.start + 1)).toBeNull();
+    for (let r = c1.start + 1; r < c1.start + c1.rows.length; r++) {
+      expect(toolCallAt(laid, r)).toBeNull();
+    }
   });
 
   test("an empty layout answers null for every row", () => {

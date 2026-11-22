@@ -34,6 +34,17 @@ import { messageRows } from "./message-row.ts";
 import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import { firedRowLines, isFiredWake } from "./schedule-view.ts";
+import {
+  DOLLAR_HANG,
+  DOLLAR_WIDTH,
+  type ShellRow,
+  cutCommand,
+  dollarRoom,
+  exitSuffix,
+  exitTailWidth,
+  shellRow,
+  titleRoom,
+} from "./shell-row.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, HeaderItem, ToolItem } from "./state.ts";
 import {
@@ -97,14 +108,6 @@ export interface RenderOptions {
    * the row-cache key.
    */
   readonly chartGlyphs?: ChartGlyphs;
-  /**
-   * Beta `beta.compactShell` (docs/feat/shell-intent-line.md §4): a described
-   * `shell` row hides its `$ command` row while running and on success. Decided
-   * at launch like `chartGlyphs`, but it IS in the row-cache key: the cache is
-   * module-level, so an item drawn compact must not be served to a render that
-   * is not.
-   */
-  readonly compactShell?: boolean;
 }
 
 const DEFAULT_THRESHOLD = 8;
@@ -684,15 +687,15 @@ function plainToolBody(tool: ToolItem, width: number, inPod: boolean, fit: BodyF
 }
 
 /**
- * A shell result's text as the ROW shows it (docs/fix/tui-shell-row-uniform.md):
- * the `exit=N` header the tool writes is a WRITTEN outcome, not output, so a
- * SUCCESS (`exit=0`) drops it — the block states a failure and stays silent on
- * success, which is what a colour-blind owner reads (the line's absence IS the
- * success; colour only reinforces). A non-zero code stays: it is the block's
- * first line, right under the `$ command` row.
+ * A shell result's text as the BODY shows it (docs/fix/tui-shell-row-collapsed):
+ * the `exit=N` first line the tool writes is a WRITTEN outcome, not output, and
+ * it now always rides the `$ <command>` row (collapsed and expanded alike), so
+ * it is dropped here for BOTH codes — otherwise an expanded failure would state
+ * its code twice. The owner is colour-blind: the line's absence on the `$` row
+ * is the success, colour only reinforces it.
  */
 function shellBodyText(text: string): string {
-  return shellExitCode(text) === 0 ? text.replace(/^exit=-?\d+\n?/, "") : text;
+  return text.replace(/^exit=-?\d+\n?/, "");
 }
 
 /** A status-coloured bullet that opens a tool call. */
@@ -965,23 +968,21 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   if (diagram !== undefined) {
     return [...diagram];
   }
-  // A `shell` call the model described: the sentence titles the row, the
-  // command follows as a subtle `$` row (docs/feat/shell-intent-line.md §3).
-  // No sentence ⇒ `null` ⇒ the row below, unchanged.
-  const shell =
-    tool.name === "shell"
-      ? shellRowParts(tool.args, tool.status, opts.compactShell === true)
-      : null;
-  if (shell !== null) {
-    return shellIntentLines(tool, shell, cols, opts);
+  // A `shell` call has ONE shape (docs/fix/tui-shell-row-collapsed, owner
+  // variant B) whichever way it is drawn: the command with `exit=N` when N ≠ 0,
+  // and its OUTPUT only under ctrl+o. With the model's sentence it is
+  // `● <sentence>` + the block; without one the command rides the title
+  // collapsed and moves into the block expanded. `compact` is passed as `false`:
+  // the beta retired in the TUI (the phone's `shellRowParts` keeps it).
+  if (tool.name === "shell") {
+    const shell = shellRowParts(tool.args, tool.status, false);
+    return shell !== null
+      ? shellIntentLines(tool, shell, cols, opts)
+      : plainShellLines(tool, cols, opts);
   }
   if (tool.status === "queued") {
     // Approved, not started: one dim row, no body, no spinner.
-    const row = queuedRow(toolTitle(tool));
-    const head = `${row.glyph} ${row.label}`;
-    const budget = cols - stringWidth(head) - stringWidth(row.suffix) - 2;
-    const fitted = row.subtitle === "" ? "" : fitSubtitle(row.subtitle, budget);
-    return [theme.subtle(`${head}${fitted === "" ? "" : ` ${fitted}`} ${row.suffix}`)];
+    return [queuedToolRow(tool, cols)];
   }
   const elapsed = tool.durationMs !== undefined ? ` ${formatDurationMs(tool.durationMs)}` : "";
   const { label, subtitle } = toolTitle(tool);
@@ -1001,6 +1002,18 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
 /** A tool's body under its header: cut, the first line on the `⎿` connector. */
 function toolBodyRows(tool: ToolItem, cols: number, opts: RenderOptions): string[] {
   return bodyRows(toolBodyLines(tool, cols, opts));
+}
+
+/**
+ * A queued call's one row: approved but not started, so no body and no spinner
+ * — just the dim `◌ <label><subtitle> · queued`, its subtitle cut to the room.
+ */
+function queuedToolRow(tool: ToolItem, cols: number): string {
+  const row = queuedRow(toolTitle(tool));
+  const head = `${row.glyph} ${row.label}`;
+  const budget = cols - stringWidth(head) - stringWidth(row.suffix) - 2;
+  const fitted = row.subtitle === "" ? "" : fitSubtitle(row.subtitle, budget);
+  return theme.subtle(`${head}${fitted === "" ? "" : ` ${fitted}`} ${row.suffix}`);
 }
 
 /** Those rows' TEXT: the cut, unwrapped-into-a-prefix body of a tool call. */
@@ -1029,17 +1042,16 @@ function bodyRows(lines: readonly string[]): string[] {
 }
 
 /**
- * A described `shell` call (docs/fix/tui-shell-row-uniform.md, owner variant B):
+ * A described `shell` call (docs/fix/tui-shell-row-collapsed, owner variant B):
  * row 0 = `● <bold sentence><elapsed>` — NO outcome glyph and no `✗ exit N`:
- * the outcome is WRITTEN, on the block's own lines. Then ONE block: its first
- * line is `⎿ $ <first command line>` (subtle and cut) when the `$` row shows at
- * all, and the output follows at the block's indent; a failure's `exit=N` is the
- * first line under the command, and a success writes no `exit=` line at all
- * (the owner is colour-blind: the line's ABSENCE is the success). Under the beta
- * `compactShell` a running/succeeded call drops the `$` row, so the connector
- * then starts the output. Expanded (ctrl+o): the whole command on `  │ $ …`
- * rows, whatever the beta says. While it runs: no body (no `running…` line) —
- * the blinking bullet says it.
+ * the outcome is WRITTEN, on the command's own row. Then ONE block opened by
+ * `⎿ $ <command>`: collapsed it is that one row, the command cut so its
+ * `exit=N` (when N ≠ 0) always fits, and NOTHING of the output — the owner reads
+ * the code's absence as the success (colour only reinforces). Expanded
+ * (ctrl+o, or a click): the whole command wrapped under the same opening row,
+ * continuation rows indented 4, the code ending its last row, then the output at
+ * col 2. While it runs, or queued: no body at all (no `running…` line) — the
+ * blinking bullet says it.
  */
 function shellIntentLines(
   tool: ToolItem,
@@ -1048,32 +1060,143 @@ function shellIntentLines(
   opts: RenderOptions,
 ): string[] {
   const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
-  const dollar = `$ ${parts.command}`;
-  const lines = parts.command.split(/\r?\n/);
-  const firstLine = `$ ${lines[0] ?? ""}${lines.length > 1 ? "…" : ""}`;
-  // The `$` row OPENS the block, on the connector cell: it is the block's first
-  // line, not a row of its own above it (the shape every other tool row has).
-  const commandRow =
-    parts.commandRow && !expanded
-      ? [connector() + theme.subtle(fitSubtitle(firstLine, cols - 2))]
-      : [];
+  const row = shellRow(tool);
   if (tool.status === "queued") {
-    const row = queuedRow({ label: parts.sentence, subtitle: "" });
-    const budget = cols - stringWidth(row.glyph) - stringWidth(row.suffix) - 2;
+    const queued = queuedRow({ label: parts.sentence, subtitle: "" });
+    const budget = cols - stringWidth(queued.glyph) - stringWidth(queued.suffix) - 2;
     return [
-      theme.subtle(`${row.glyph} ${fitSubtitle(row.label, budget)} ${row.suffix}`),
-      ...(expanded ? commandRows(dollar, cols) : commandRow),
+      theme.subtle(`${queued.glyph} ${fitSubtitle(queued.label, budget)} ${queued.suffix}`),
+      ...shellBlock(tool, row, cols, opts, expanded, true),
     ];
   }
   const elapsed = tool.durationMs !== undefined ? ` ${formatDurationMs(tool.durationMs)}` : "";
   const budget = cols - (stringWidth(BULLET) + 1) - stringWidth(elapsed);
   const header = `${bullet(tool)} ${chalk.bold(fitSubtitle(parts.sentence, budget))}${theme.subtle(elapsed)}`;
+  // The sentence TITLES the row; the command and the outcome hang under it.
+  return [header, ...shellBlock(tool, row, cols, opts, expanded, true)];
+}
+
+/**
+ * A `shell` call with NO sentence (docs/fix/tui-shell-row-collapsed, owner
+ * variant B): the command rides the title collapsed — `● Bash <cmd cut>
+ * exit=N <elapsed>`, the code before the duration, no body — and moves into the
+ * block when expanded (`● Bash <elapsed>` + the same block a described row
+ * draws), so ctrl+o reads the same for every `shell` call.
+ */
+function plainShellLines(tool: ToolItem, cols: number, opts: RenderOptions): string[] {
+  const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  if (tool.status === "queued") {
+    // Approved, not started: one dim row carrying the command, as any other tool.
+    return [queuedToolRow(tool, cols)];
+  }
+  const row = shellRow(tool);
+  const { label } = toolTitle(tool);
+  const elapsed = tool.durationMs !== undefined ? ` ${formatDurationMs(tool.durationMs)}` : "";
+  const head = `${bullet(tool)} ${chalk.bold(label)}`;
+  if (expanded) {
+    return [`${head}${theme.subtle(elapsed)}`, ...shellBlock(tool, row, cols, opts, true, true)];
+  }
+  const cut = cutCommand(row.command, titleRoom(label, cols, row.exitCode, elapsed));
+  return [
+    `${head}${cut === "" ? "" : ` ${theme.subtle(cut)}`}${exitTail(row.exitCode)}${theme.subtle(elapsed)}`,
+    ...shellBlock(tool, row, cols, opts, false, false),
+  ];
+}
+
+/**
+ * A shell row's block under its title: the `$` rows (one collapsed, the whole
+ * command expanded) and, under them, the call's body at the block's indent.
+ *
+ * The body is what the call's own OUTCOME needed to say when it never ran (a
+ * denial, its reply, a hook's reason, a spawn failure) — that is an outcome, not
+ * output, so it stays visible. A settled call's OUTPUT is ctrl+o only (owner,
+ * variant B): a code says what happened, the text does not belong on the row.
+ * A background START is the one no-code case that is NOT an outcome: its note
+ * says where the job's output will be read, i.e. it is that output's place, so
+ * it waits for ctrl+o like any other (review round 1, MEDIUM).
+ */
+function shellBlock(
+  tool: ToolItem,
+  row: ShellRow,
+  cols: number,
+  opts: RenderOptions,
+  expanded: boolean,
+  showDollar: boolean,
+): string[] {
+  const dollar = showDollar ? dollarRows(row, cols, expanded) : [];
+  const outcomeOnly =
+    row.exitCode === null &&
+    !row.backgroundStart &&
+    tool.status !== "running" &&
+    tool.status !== "queued";
+  if (!expanded && !outcomeOnly) {
+    return dollar;
+  }
   const body = tool.status === "running" ? [] : toolBodyLines(tool, cols, opts);
-  // The command takes the connector row, so the body lines hang under it; with
-  // no command row the body's own first line carries the connector.
-  const block =
-    commandRow.length > 0 ? [...commandRow, ...body.map((l) => INDENT + l)] : bodyRows(body);
-  return [header, ...(expanded ? commandRows(dollar, cols) : []), ...block];
+  if (body.length === 0) {
+    return dollar;
+  }
+  // The `$` rows (when drawn) take the connector, so the body hangs under them;
+  // otherwise the body's own first line carries it.
+  return dollar.length > 0 ? [...dollar, ...body.map((l) => INDENT + l)] : bodyRows(body);
+}
+
+/** The `exit=N` tail of a row: two spaces, the code (never cut), error-coloured. */
+function exitTail(exitCode: number | null): string {
+  const suffix = exitSuffix(exitCode);
+  return suffix === "" ? "" : theme.error(`  ${suffix}`);
+}
+
+/**
+ * The `$ <command>` rows that OPEN a shell block, on the connector cell — the
+ * block's first line, not a row above it (the shape every other tool row has).
+ *
+ * Collapsed: ONE row, the command cut so the code always fits it, never the
+ * other way round. Expanded: the WHOLE command, each line wrapped at the width,
+ * the first on `⎿ $ ` and the rest hung four cells under it, with the code at
+ * the END of the last command row (its own continuation row when it cannot fit
+ * — never cut).
+ */
+function dollarRows(row: ShellRow, cols: number, expanded: boolean): string[] {
+  // No command to open the block with (a resumed call whose args are gone, an
+  // older daemon's log): there is no `$` row, so the BODY's own first line
+  // carries the connector as for any other tool. A code the call still reports
+  // is kept — the outcome is never silently dropped.
+  if (row.command === "") {
+    const suffix = exitSuffix(row.exitCode);
+    return suffix === "" ? [] : [`${connector()}${theme.error(suffix)}`];
+  }
+  if (!expanded) {
+    const cut = cutCommand(row.command, dollarRoom(cols, row.exitCode));
+    return [`${connector()}${theme.subtle(`$ ${cut}`)}${exitTail(row.exitCode)}`];
+  }
+  const room = Math.max(1, cols - DOLLAR_WIDTH);
+  const lines: string[] = [];
+  for (const line of expandTabs(row.command).split(/\r?\n/)) {
+    const trimmed = line.replace(/\s+$/, "");
+    lines.push(...(trimmed === "" ? [""] : wrapLines([trimmed], room)));
+  }
+  if (lines.length === 0) {
+    lines.push("");
+  }
+  const last = lines.length - 1;
+  const used =
+    (last === 0 ? DOLLAR_WIDTH : stringWidth(DOLLAR_HANG)) + stringWidth(lines[last] ?? "");
+  const out = lines.map((line, i) =>
+    i === 0 ? `${connector()}${theme.subtle(`$ ${line}`)}` : theme.subtle(DOLLAR_HANG + line),
+  );
+  const suffix = exitSuffix(row.exitCode);
+  if (suffix === "") {
+    return out;
+  }
+  // The code ends the LAST command row when it fits, else a continuation row.
+  const tail = exitTail(row.exitCode);
+  if (used + exitTailWidth(row.exitCode) <= cols) {
+    out[last] = `${out[last]}${tail}`;
+    return out;
+  }
+  out.push(theme.error(`${DOLLAR_HANG}${suffix}`));
+  return out;
 }
 
 /** A full-width grey rule with `text` in it: `── text ─────…`. */
@@ -1346,7 +1469,6 @@ interface RowCacheEntry {
   readonly width: number;
   readonly threshold: number;
   readonly preview: number;
-  readonly compactShell: boolean;
   collapsed?: readonly string[];
   expanded?: readonly string[];
   command?: readonly string[];
@@ -1409,7 +1531,6 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   const expand = opts.expandAll;
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
-  const compact = opts.compactShell === true;
   // Only `tool` items collapse, so only their layout depends on
   // expand/threshold/preview/expandedIds; every other kind is a function of
   // width alone (always the `collapsed` slot) — except a notice with a BODY
@@ -1431,7 +1552,6 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   if (
     entry &&
     entry.width === width &&
-    entry.compactShell === compact &&
     (!expandMatters || (entry.threshold === threshold && entry.preview === preview))
   ) {
     const hit = entry[slot];
@@ -1439,7 +1559,7 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
       return withPhase(item, hit, opts);
     }
   } else {
-    entry = { width, threshold, preview, compactShell: compact };
+    entry = { width, threshold, preview };
     rowCache.set(item, entry);
   }
   const rows = wrapLines(itemLines(item, opts), width);

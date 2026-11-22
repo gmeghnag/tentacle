@@ -103,7 +103,10 @@ describe("S4 mouse layer: a coalesced chunk threads its own state", () => {
     const rows = () => frame().split("\n").map(strip);
     const y = rows().findIndex((r) => r.includes("Bash")) + 1;
     expect(y).toBeGreaterThan(0);
-    const cont = () => rows().filter((r) => r.startsWith("  │ "));
+    // An expanded `shell` call's command rows: the `⎿ $ …` block opener and the
+    // continuation rows hung 4 cells under it (docs/fix/tui-shell-row-collapsed —
+    // no `  │ ` rows for a shell command any more).
+    const cont = () => rows().filter((r) => r.startsWith("⎿ $ ") || /^ {4}\S/.test(r));
     expect(cont()).toHaveLength(0); // nothing expanded yet
     app.stdin.write(`${press(3, y)}${release(3, y)}`);
     await delay(120);

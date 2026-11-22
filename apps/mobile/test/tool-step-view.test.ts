@@ -32,6 +32,74 @@ const tool = (key: string, status: ToolStatus = "ok", extra: Partial<ToolRow> = 
   ...extra,
 });
 
+describe("stepRowView: a FILE tool's body (docs/feat/mobile-file-view.md)", () => {
+  const editRow = (extra: Partial<ToolRow> = {}): ToolRow =>
+    tool("t", "ok", {
+      name: "fs_edit",
+      label: "Edit",
+      args: '{"path":"src/app.ts"}',
+      output: "edited src/app.ts (+2 -1)",
+      diff: {
+        kind: "diff",
+        path: "src/app.ts",
+        patch: [
+          "--- a/src/app.ts",
+          "+++ b/src/app.ts",
+          "@@ -40,2 +40,3 @@",
+          " const a = 1;",
+          "-const b = 2;",
+          "+const b = 3;",
+          "+const c = 4;",
+        ].join("\n"),
+        added: 2,
+        removed: 1,
+      },
+      ...extra,
+    });
+
+  test("a file step carries its coloured body and NO raw result line", () => {
+    const v = stepRowView(editRow(), null, false);
+    expect(v.file?.header).toBe("lines 40–42 · TypeScript");
+    // The body is the file's content, not the tool's result text: `edited …`
+    // and the repeated `+2 -1` are gone (owner: the row says them once).
+    expect(v.command).toEqual([]);
+    expect(v.output).toBe(null);
+    expect(v.file?.lines.length).toBe(4);
+  });
+
+  test("a file step is still tappable (the body opens on tap)", () => {
+    expect(stepRowView(editRow(), null, false).tappable).toBe(true);
+  });
+
+  test("`full` reaches the file body's preview", () => {
+    const many = Array.from({ length: 30 }, (_, at) => `const a${at} = 1;`);
+    const row = tool("t", "ok", {
+      name: "fs_read",
+      label: "Read",
+      args: '{"path":"src/big.ts"}',
+      output: many.join("\n"),
+    });
+    expect(stepRowView(row, null, false).file?.hidden).toBe(18);
+    expect(stepRowView(row, null, true).file?.hidden).toBe(0);
+  });
+
+  test("a non-file tool has no file body (nothing else changes)", () => {
+    const v = stepRowView(tool("t", "ok", { output: "hi" }), null, false);
+    expect(v.file).toBeUndefined();
+    expect(v.output?.text).toBe("hi");
+  });
+
+  test("a FAILED file step keeps today's output, no body", () => {
+    const v = stepRowView(
+      editRow({ status: "error", output: "old_string not found in src/app.ts" }),
+      null,
+      false,
+    );
+    expect(v.file).toBeUndefined();
+    expect(v.output?.text).toBe("old_string not found in src/app.ts");
+  });
+});
+
 describe("stepRowView: one step's line and body", () => {
   test("a finished shell step: green dot, its command, the duration, the cut output, no ⎿", () => {
     const out = Array.from({ length: 9 }, (_, i) => `line ${i + 1}`).join("\n");

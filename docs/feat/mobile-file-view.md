@@ -1,0 +1,638 @@
+# feat/mobile-file-view — coloured file content in tool rows + per-session trust for HTML scripts (iPhone)
+
+> Type: feat · Size: M · Blast: contained (part 1 only — part 2 split out 22/11, see the end) · Suited: DeepSeek executes, Opus review
+> **Branch:** `feat/mobile-file-view` · **Changelog:** `changelog.d/mobile-file-view.added.md`
+
+## Context
+
+*— claude-opus-5-5 (orchestrator), 2026-11-22 — owner decisions, verbatim intent*
+
+Two owner requests, bundled by the owner into one job.
+
+### Part 1 — file content coloured by file type in Read / Edit / MultiEdit / Write rows
+
+Today the phone shows a tool's file content as flat grey monospace, with the raw tool header
+(`⎿ [file lines 1–147 of 521]`). On a MultiEdit the file name shows four times and `+78 −30`
+three times. The TUI colours a read by the file EXTENSION (`packages/tui/src/read-highlight.ts`,
+cap `READ_HIGHLIGHT_CAP` 2000 lines / 200 KB). The app already ships highlight.js core with 14
+grammars (`apps/mobile/src/highlight.ts`), used today only by chat code blocks
+(`apps/mobile/src/ui/CodeBlock.tsx`, `scopeColor`).
+
+**Spec = the mockup** `docs/feat/mobile-file-view-mockup.html`, **variant B** (chosen 22/11):
+
+1. **Language from the extension only** (never auto-detect); unknown extension → plain, as
+   today. Same size cap as the TUI → plain above it.
+2. **`.html` IS coloured, including the JavaScript inside `<script>` and the CSS inside
+   `<style>`** (owner: "sì coloriamolo"). The phone may do more than the TUI here; leave the TUI
+   untouched.
+3. **One line-number column** (variant B): the new number, or the old one for a removed line.
+   Not two columns.
+4. **Header said once.** The step row carries `<Tool> <path> · N modifiche  +A −D` (no
+   duration for Read/Edit/Write, per earlier decisions). The body opens with ONE light line:
+   Read → `righe A–B di N · LANG`; Edit/MultiEdit → `righe A–B · LANG` instead of `@@ … @@`;
+   Write → `LANG · nuovo file`. Remove the `⎿ edited … with N edits` line and the repeated
+   file card / counts inside the body.
+5. **Preview + full view:** the collapsed body shows the first lines and `… altre N righe ·
+   tocca per vedere tutto`; tap shows everything (existing full-view mechanism if there is one).
+6. Diff lines keep the `+` / `−` sign column and the add/del backgrounds (never colour alone —
+   the owner is colour-blind). Syntax colours inside diff lines.
+7. Reuse the existing scope→colour mapping (`scopeColor`) so chat code blocks and tool bodies
+   look the same; extend it only for the scopes html needs (tag name, attribute).
+
+### Part 2 — "run scripts always in this session" for HTML artifacts
+
+Today scripts in an HTML artifact are OFF, and every open needs a "Run scripts" tap
+(`apps/mobile/src/artifact-viewer.ts:30-70` `viewerFor`, `scripts: false`;
+`apps/mobile/src/screens/artifacts/HtmlViewer.tsx:45-70`). Rationale (docs/feat/model-artifacts.md
+Owner Q5/Q5b, risk table line ~541): CSP cannot block a WebRTC beacon, so a page with scripts
+can leak its own content; "per open, never remembered".
+
+**Owner decision (22/11), final:**
+1. The scripts confirm gets a second action: **«Esegui sempre in questa sessione»** (keep
+   «Esegui» = this open only, and «Annulla»).
+2. The trust is **per session only**, remembered for that session (persist it the way other
+   per-session phone settings are persisted, or in memory if none — say which), and it can be
+   **revoked from the session info sheet**.
+3. **Network stays off and stays per-open**, exactly as today — trust covers scripts only.
+4. **Never offered for a session that runs in a pod/container** (`run`/`attach`, detached
+   runs): HTML there may come from untrusted code, and AGENTS §7 forbids a pod-originated thing
+   getting a lasting approval. If the app cannot tell reliably whether a session is pod-backed,
+   it does NOT offer the option (safe default) — prove which signal you use, `file:line`.
+5. While a trusted session's page runs scripts, the viewer's thin bar says
+   «script attivi · sessione fidata» (text, not colour).
+6. Update the Q5 notes in `docs/feat/model-artifacts.md` with a dated owner amendment.
+
+## Implementation
+
+*— deepseek-v3.2, 2026-11-22 — written before coding, each claim re-verified against the source.*
+
+### Load-bearing assumptions (proved first)
+
+**Part 1 — `spansOf` can see html's sub-language wrappers.** `packages/tui/src/read-highlight.ts`
+is irrelevant here: the phone's path is `highlight.ts` → `spansOf` (`apps/mobile/src/highlight.ts:158`),
+which only recognises `<span class="hljs-`. Probed on the worktree (`bun` over the real modules,
+`.tentacle/tmp/mobile-file-view/probe-leak.ts`) with a `.html` body:
+
+```
+label: html lines: 6
+"<style><span class=\"language-css\">"     <- the wrapper leaks as TEXT
+":root { --bg: #eee; }"                    <- coloured, but the marker is drawn too
+"<script><span class=\"language-javascript\">"
+```
+
+So `.html` is *not* merely uncoloured — going through `spansOf` it is **corrupted** (raw
+`<span class="language-css">` printed into the code). The `xml` grammar does emit the
+sub-languages (`node_modules/highlight.js/lib/languages/xml.js:164,177` `subLanguage: 'css'` /
+`'javascript'`), and the inner tokens are ordinary `hljs-*`. **The fix is in `spansOf`: treat a
+`class="language-<x>"` wrapper as a TRANSPARENT scope** (push `""`, which `pushText` already
+renders as the parent's scope) instead of text. This also fixes chat code blocks, which today
+would print the same markers for a ```` ```html ```` fence — a bug the spec did not name.
+
+**Part 2 — the wire carries no host kind.** The phone never learns whether its daemon is a pod:
+`initialize`'s `agentInfo` (`packages/daemon/src/connection.ts:850-860`) carries `version`,
+`model`, `contextWindow` only, though the daemon KNOWS (`DaemonIdentity.kind`,
+`packages/daemon/src/version-mismatch.ts:10-14`). The one structural signal on the wire is the
+attachment policy: `daemonDocumentPolicy("pod")` (`packages/cli/src/image-policy.ts:53-57`) is
+wired unconditionally for a pod host (`packages/cli/src/serve.ts:1322`) and `"host"` for
+`serve`/worker (`serve.ts:800`, `worker.ts:170`), advertised as
+`agentCapabilities.documents.input` (`connection.ts:840-848`) — `"client"` ⇔ pod, `"upload"` ⇔
+host. `images.input === "client"` is the same fact for the `--model-proxy` pod
+(`image-policy.ts:35-44`). Rule, **fail closed**: a daemon that proves neither ⇒ treated as
+pod-backed ⇒ the option is not offered.
+
+Two supporting facts: a device route exists only on a host `serve` — `startWsServer` with a
+`devices` authority is started in one place (`serve.ts:975`), a pod daemon is hosted over stdio
+(`serve.ts:1375-1380`) — and the phone already relies on exactly this (`connection.ts:60-66`,
+"the phone reaches a `serve` on the user's own host and nothing else"). The phone declares no
+`hop` (`connection.ts:63-82`), so a phone session is never moved into a workload
+(`protocol/src/session.ts:263-270`), which is what makes a once-pod session unreachable.
+
+### Design — part 1
+
+Pure first (AGENTS §7). New `apps/mobile/src/file-body.ts`:
+
+- `FILE_TOOLS` = `fs_read | fs_write | fs_edit | fs_multi_edit`.
+- `fileBodyView(row, full)` → `null` for anything else, for a non-`ok` row (an error/denial
+  keeps today's plain output — never a coloured body hiding the failure), and for a row with no
+  content yet. Otherwise `{ language, header, lines, hidden, sign }`:
+  - **language** from the EXTENSION only (`pathExtension` + the existing `languageOf` alias table,
+    `highlight.ts:96`), never auto-detection; above `FILE_HIGHLIGHT_CAP` (2000 lines / 200 KB,
+    the TUI's) → `language: null` = plain.
+  - **Read** (`fs_read`): parse the `[path lines A-B of N]` header (`packages/tools/src/builtins.ts:137`),
+    strip it, one line per source line; `header` = `lines A–B of N · LANG` (from the header), or
+    `N lines · LANG` for a whole-file read.
+  - **Edit/MultiEdit** (`fs_edit`, `fs_multi_edit`): `diffView(row.diff)` (`diff-view.ts:99`),
+    hunks flattened, `header` = `lines A–B · LANG` where A/B are the first hunk's start and the
+    last hunk's end — replacing `@@ … @@`, which is dropped.
+  - **Write** (`fs_write`): its diff with no removal line ⇒ `header` = `LANG · new file`, else the
+    Edit header. (A Write over an existing file is a real diff and says so.)
+  - **ONE number column** (variant B): the new number, else the old one for a removed line.
+  - **Preview**: more than `FILE_BODY_PREVIEW` (12) lines → the first `full ? all : 12`, `hidden`
+    = the rest, drawn as `… N more lines · tap to see all`; `full` is the screen's existing
+    show-all seam (`step.onShowAll`, `tool-steps.ts:341`).
+- `stepRowView` (`tool-steps.ts:338`): for a file tool — `command: []` (the step line already
+  says the path), `output: null` (drops `⎿ edited … with N edits` / `wrote N bytes` and the
+  duplicated counts), and a new optional `file: FileBodyView`; `tappable` stays true.
+- `DiffView` keeps its `diff-<callId>` testID role by moving it onto the new body's wrapper (an
+  e2e flow asserts it, `apps/mobile/e2e/flows/08-call-id.js`) — the component itself stays for
+  no other caller today, so `TranscriptRow` stops rendering it for file rows.
+
+Render: `apps/mobile/src/ui/FileBody.tsx` (dumb): the light header line, a horizontal
+`ScrollView`, one row per line = number gutter (`sec`) · `+`/`−` sign · coloured spans, the
+row tinted `addBg`/`delBg`. `scopeColor` moves from `CodeBlock.tsx:28` to a pure
+`apps/mobile/src/syntax-color.ts` so chat blocks and tool bodies cannot drift, extended for the
+scopes html needs (`tag`, `name`, `attr`).
+
+**Copy language:** the spec quotes the mockup's Italian; the app has no i18n layer and every
+string is English (`… +N more lines`, `more lines not shown`). Shipped copy is English —
+`docs/fix/mobile-step-rail.md` made the same call for `«Thinking»` → `Thinking`.
+
+### Design — part 2
+
+Not implemented in this pass (see Execution): the design is `sessionTrust` (pure,
+`apps/mobile/src/session-trust.ts`): `podBacked(init)` = the fail-closed rule above;
+`scriptsAllowed(init)` = trust offered only when `!podBacked`; a per-`sessionKey(computerId,
+sessionId)` record (`artifact-seen-store.ts` is the pattern: versioned `SecureKV`, unknown `v`
+refuses writes), `grant` / `revoke` / `isTrusted`, and `scriptsBarLabel(trusted)` =
+`scripts on · trusted session` while a trusted page runs. Wire it: `init` already rides
+`ComputerLink` (`connection.ts:114`) → gallery → `ArtifactViewerModal` → `HtmlViewer`; the
+confirm gains «Run always in this session»; Session info's sheet row revokes.
+
+### Files to change
+
+`apps/mobile/src/highlight.ts` (transparent sub-language wrapper + a `maxChars` argument) ·
+`apps/mobile/src/syntax-color.ts` (new) · `apps/mobile/src/file-body.ts` (new) ·
+`apps/mobile/src/ui/FileBody.tsx` (new) · `apps/mobile/src/ui/CodeBlock.tsx` (use the shared
+colour) · `apps/mobile/src/tool-steps.ts` (`file`, empty command/output) ·
+`apps/mobile/src/screens/transcript/TranscriptRow.tsx` (draw `FileBody`) · tests ·
+`changelog.d/mobile-file-view.added.md`.
+
+### Failure modes
+
+| Case | Behaviour |
+|---|---|
+| Unknown / no extension | plain, exactly today (`language: null`) |
+| Over the cap | plain, one build's worth of work only |
+| A failed/denied file tool | no file body at all: today's plain output (the failure must stay legible) |
+| Non-JSON args / no path | plain body, header without a language |
+| Read with no `[path lines …]` header (whole-file read, a PDF's text) | lines shown, header `N lines` |
+| Empty content / empty patch | `null` → not tappable, today's row |
+| `.html` with `<script>` | coloured, no marker text (the `spansOf` fix) |
+| 400-line patch | `diffView`'s own bound; the remainder is counted in the body's `hidden` (`… N more lines · tap to see all`) — fixed in Review round 1, item #2 |
+| A spilled read (the row carries a `spill`) | no file body: today's plain output (its text is a banner + head + marker + tail, not a file) |
+
+## Tests (minimum, red first — AGENTS §9)
+
+- Part 1: language by extension (incl. `.html` with script/style sub-languages), unknown →
+  plain, cap → plain; header strings for Read/Edit/MultiEdit/Write; one number column for
+  add/del/context lines; no repeated file name/counts in the body.
+- Part 2: pure trust module: offered only for non-pod sessions; trust is per session id;
+  revoke; network unaffected; a pod session never trusted even if a stale record says so.
+  Mutation-check the pod exclusion.
+
+## Validation (mandatory)
+
+Simulator screenshots, dark AND light: a Read of an `.html` (script coloured), an Edit diff,
+a MultiEdit like the mockup's, a Write; the scripts confirm with the new action; the viewer bar
+in a trusted session. Save under `docs/feat/mobile-file-view/`. End with
+`SCREENSHOTS: <paths>` and `READY` or `NOT READY: <why>`.
+
+## Execution
+
+*— deepseek-v3.2 (slices 1–3, stopped by the watchdog at 251 tool calls) + claude-opus-5-5 (resume: verification, mutations, this section), 2026-11-22*
+
+**Part 1 — DONE (code + tests). Part 2 — NOT STARTED** (the approved Implementation scoped
+it out: "Design — part 2: not implemented in this pass"; its files are not in *Files to
+change*, so the resume did not touch them). **Validation (simulator screenshots) — NOT DONE.**
+
+As built, in the plan's order:
+
+1. `apps/mobile/src/highlight.ts` — `spansOf` treats `<span class="language-…">` as a
+   transparent scope (pushes `""`; `pushText` maps `""` → parent/plain); `highlight()` gains
+   `maxChars` (default `HIGHLIGHT_MAX_CHARS`, so chat blocks are unchanged).
+2. `apps/mobile/src/syntax-color.ts` (new) — `scopeColor` moved out of `ui/CodeBlock.tsx`
+   verbatim, plus `doctag`, `regexp`, `symbol`, `section`, `function`, and the html scopes
+   (`tag`/`selector-*` → `sec`, `name`/`attr`/`attribute` → `kw`). `CodeBlock.tsx` imports it.
+3. `apps/mobile/src/file-body.ts` (new) — `fileBodyView(row, full)` per the Design (ext-only
+   language, `FILE_HIGHLIGHT_CAP` 2000 lines / 200 000 chars, Read/Edit/MultiEdit/Write
+   headers, one number column `newNo ?? oldNo`, preview 12 + `hidden`).
+4. `apps/mobile/src/tool-steps.ts` — `StepRowView.file?`; when present `command: []`,
+   `output: null`, `tappable: true`.
+5. `apps/mobile/src/ui/FileBody.tsx` (new, dumb) + `ui/StepNode.tsx` (`StepBody` `file` slot) +
+   `screens/transcript/TranscriptRow.tsx` (FileBody for a file row, `DiffView` otherwise; the
+   `diff-<callId>` testID moves onto `FileBody`).
+6. Tests: `test/file-body.test.ts`, `test/file-body-render.test.ts`, `test/syntax-color.test.ts`
+   (new); `test/highlight.test.ts`, `test/tool-step-view.test.ts` (extended).
+7. `changelog.d/mobile-file-view.added.md`.
+
+**Drift from Implementation:** none in part 1. `scopeColor` got a few non-html scopes too
+(`doctag`, `regexp`, `symbol`, `section`, `function`) — mapped to the colours their siblings
+already use; chat blocks change only for those scopes. Diff lines are highlighted **per line**
+(a hunk is fragments; a multi-line construct split across lines may colour imperfectly —
+documented in `file-body.ts`). A permission-pending Edit row is not `ok`, so it keeps the old
+`DiffView` (and `diff-<callId>`) until it completes — the `08-permission` flow is unaffected.
+
+**Load-bearing re-check (resume, on the fixed code)** — `.tentacle/tmp/mobile-file-view/probe2.ts`
+highlights an html body with a `<style>` and a `<script>`:
+
+```
+label: xml leak: false roundtrip: true
+scopes: tag,name,plain,selector-pseudo,attr,number,keyword
+```
+
+(The pre-fix leak is the Implementation's probe above: `<span class="language-css">` as text.)
+Red-first: DeepSeek's run did not record red output; the resume substitutes the mutation table
+below (each target reverted after its run, tree verified unchanged).
+
+**Mutations** (`.tentacle/tmp/mobile-file-view/mutate.ts`, the 5 narrow test files):
+
+```
+M1 sub-language wrapper read as text: 4 fail — .html IS coloured, script and style included | an html <style> body is coloured, and no marker text is emitted
+M2 number column old-first: 1 fail — ONE number column: the new number; a removed line keeps its old one
+M3 failed row gets a body: 2 fail — a FAILED file tool keeps today's plain output | a denied file tool
+M4 cap ignored: 1 fail — over the line cap
+M5 raw output kept: 1 fail — a file step carries its coloured body and NO raw result line
+M6 language auto-detected for unknown ext: 4 fail — an unknown extension is plain… | no extension at all is plain
+M7 preview never cuts: 2 fail — collapsed: the first lines, and the rest counted | `full` reaches the file body's preview
+M8 write-new header lost: 1 fail — a created file says `LANG · new file`
+```
+
+**Local checks:** narrow files 99 pass / 0 fail; `apps/mobile/test/` 4371 pass / 0 fail;
+`tsc -p apps/mobile` clean; `biome check` on the 13 touched files clean. Full gate: left to the
+orchestrator's script.
+
+**Open (decision needed):** part 2 (session script trust) is designed above but unbuilt and
+unapproved for code — the owner bundled it into this job, so either approve its Files list for
+a follow-up executor or split it into its own task. Validation screenshots need a simulator run.
+NOT READY: part 2 not built; no screenshots.
+
+### Fix round 1
+
+*— deepseek-v4-pro, 2026-11-22 — the three code findings of Review round 1. Red first, then
+green, each fix mutation-checked.*
+
+Repro re-run on the branch (`.tentacle/tmp/mobile-file-view/review.ts`, the reviewer's own):
+
+```
+SPILL header: 4 lines · TypeScript
+1 [large fs_read output: full output (90000 chars) saved to /x/spill.txt — …]
+2 const a = 1;
+3 …[88800 characters omitted]…
+4 export {};
+DIFF full: lines 400 hidden 0 header TypeScript · new file
+```
+
+After (`fix-repro.ts` of the same directory — the three findings' observables, on the fixed code):
+
+```
+#1 SPILL body: null -> plain output, no numbered lines
+#2 full: lines 400 hidden 202 | diffView.hidden 202
+#4 overwrite header: lines 42–43 · TypeScript
+```
+
+1. **#1 (spilled read) — FIXED.** `file-body.ts` `readBody` now takes the row and returns
+   `null` when the row HAS a `spill`: `result-pipeline.ts:80-104` attaches `spill` only when it
+   rewrote `content` (a banner prepended), so its presence — not its `omitted` — is the fact that
+   disqualifies the body. A spilled read keeps today's plain output; no body ever numbers a
+   banner/marker/tail as file lines. The guard sits on the pure body view, so `tool-steps.ts`
+   needs no change: `file` stays `undefined`, `command` and `output` come back as they were. The
+   row's own type is narrowed to `ToolResultSpill` (core's), not a hand-rolled `{ omitted }` —
+   `ToolRow` passes its `spill` straight through.
+2. **#2 (diff over `DIFF_MAX_LINES`) — FIXED.** `diffLines` returns the `diffView` bound as
+   `held = view.hidden`; `preview(rows, full, bound)` adds it to the preview's own `hidden`
+   (`full` included, where the preview cuts nothing). The body's one `hidden` is therefore the
+   TRUE remainder, and `ui/FileBody.tsx` needed no change — it already draws
+   `… N more lines · tap to see all` from `view.hidden`. At `full=true` a 600-line patch says
+   `200 more lines · tap to see all`; the old card said `182 more lines not shown`, the body now
+   counts the patch too. Also fixed the Failure-modes row that claimed this worked.
+3. **#4 (append-only overwrite labelled new file) — FIXED.** "created" now comes from the first
+   hunk's `@@ -0,0` (`CREATED_HUNK`), not from `removed === 0`: an overwrite whose every line is
+   an addition says its range. The reviewer's premise that `ToolDiffDetail` carries no created
+   flag is correct — the hunk start is the wire's only statement of it, which is why the flag was
+   not added.
+4. **#3 — PARTIAL, escalated, not code.** Part 2 (per-session script trust) is unbuilt because
+   the APPROVED Implementation scoped it out (`Design — part 2: not implemented in this pass`,
+   and its files are absent from *Files to change*). An executor may not write production code
+   outside the approved Implementation, and adding its Files list myself would be approving a
+   `load-bearing` §7 design (pod exclusion) on my own signature. The decision needed — approve
+   Part 2's files for a follow-up executor, or split it into its own task — is stated below,
+   unchanged from the last Execution. The screenshots are also still missing (`xcrun simctl`
+   booted devices exist, but the sim must run THIS worktree's JS bundle; this branch's flows and
+   seeds are untouched by the fixes above). Both stay **NOT READY** items.
+
+**Tests (red → green).** `apps/mobile/test/file-body.test.ts`: 5 new tests — a spilled read has
+no body, a spill that omitted NOTHING is still banner + content (the same trap one step finer),
+an append-only write says `lines 42–43 · TypeScript`, and the bound's tail is counted both at
+`full` and collapsed; plus its control (the same text with no `spill` keeps
+`4 lines · TypeScript`). Red on the old code:
+
+```
+(fail) a write > a write that only ADDS lines to an existing file is NOT a new file
+(fail) a patch longer than the diff bound keeps its tail counted > full: … REPORTED, not lost
+(fail) a patch longer than the diff bound keeps its tail counted > collapsed: … includes the bound's tail
+(fail) a spilled read is not file content > no numbered body and no line-count header: …
+ 33 pass
+ 4 fail
+```
+
+Green after: `99 pass / 0 fail` (with `file-body-render.test.ts`, `tool-step-view.test.ts`,
+`highlight.test.ts`).
+
+**Mutations** (each reverted; `file-body.ts` sha1 `8550b95051ec` before and after):
+
+```
+M-A  spill guard → `if (false) {`:                     2 fail — no numbered body and no line-count header | a spill that omitted NOTHING …
+M-A2 spill guard → `spill.omitted > 0` only:           1 fail — a spill that omitted NOTHING is still a banner + content
+M-B  held tail dropped (preview(rows, full)):          2 fail — full: … REPORTED, not lost | collapsed: …
+M-B2 held dropped on the `full` path only:              1 fail — full: … REPORTED, not lost
+M-C  created back to `removed === 0`:                  1 fail — a write that only ADDS lines … NOT a new file
+```
+
+M-A2 is why the guard is presence-based: `omitted > 0` would have looked right and still
+numbered a banner. M-B2 pins that the `full` branch carries the bound too (that is the reviewer's
+exact repro).
+
+**Local checks:** 4 narrow files `99 pass / 0 fail`; `tsc -p apps/mobile` clean; `biome check`
+clean on the 2 touched code/test files. Full gate: the orchestrator's script.
+
+**Gate round 2 — regenerated mockup-kit (orchestrator's gate red).** The gate's one failure was
+`scripts/test/mockup-kit.test.ts > drift: committed tools/mockup-kit/generated/* === regenerated
+from source > no drift`: the round-1 fixes edited four files the kit hashes
+(`ui/CodeBlock.tsx`, `ui/StepNode.tsx`, `screens/transcript/TranscriptRow.tsx`,
+`tool-steps.ts`) without running `bun run mockup-kit`, so `generated/kit-data.json` carried their
+old shas. Ran the generator: 3 files rewritten, only the 4 hashes actually change (no token,
+timing or style-metric drift), `kit-data.json` is the only modified file. Re-run:
+`bun test scripts/test/mockup-kit.test.ts` → 27 pass / 0 fail; the branch's own mobile tests
+(11 files touching the changed modules) → 191 pass / 0 fail; `bunx biome check` on the
+regenerated file clean. Lesson for the executor: the kit hashes are a gate, so a UI edit and
+`bun run mockup-kit` are one step.
+
+*— claude-opus-5-5, 2026-11-22 — gate round 2*
+
+### Validation (part 1)
+
+*— claude-opus-5-5, 2026-11-22 — simulator shots, iOS 26 `0FA4B51F-…`, Release build*
+
+**How:** new flow `apps/mobile/e2e/flows/41-file-view-shots.yaml` (registered in `e2e/run.ts`
+`FLOWS` + its own session `FILEVIEW_ID`), driven by a new mock-model turn `FILEVIEW41`
+(`e2e/mock-model.ts`) over the fixture `e2e/file-view-fixture.ts`: one 71-line html page with a
+`<style>` and a `<script>` — round 1 `fs_write` (new file), 2 `fs_read` lines 1–40, 3 `fs_edit`
+(+3 −1), 4 `fs_multi_edit` (2 edits, +10 −5); each ask approved from the phone. Each shot is
+taken light then dark (`_shot.yaml`). Run: `scripts/e2e-gate.sh 0FA4B51F-A0E3-421B-BE66-CE29EF45213D
+--only 41-file-view-shots` → `GATE PASS — 1 passed, 0 failed (96 s)`. Harness tests
+(`e2e-flows`, `e2e-escape-probes`): 50 pass / 0 fail; biome clean on the touched e2e files.
+
+**Files** (`docs/feat/mobile-file-view/`, each `-light.png` + `-dark.png`):
+`41-collapsed` (the four steps closed) · `41-write-open` · `41-read-open` · `41-read-full` ·
+`41-edit-open` · `41-multiedit-open` · `41-multiedit-full`.
+
+**What I saw (vs the mockup, variant B):**
+- Holds: step line says the header once — `Write polpetto.html +70 −0`, `Read polpetto.html · 1–40`,
+  `Edit polpetto.html +3 −1`, `MultiEdit polpetto.html · 2 edits +10 −5`; no `⎿ edited … with N
+  edits` line, no duplicated file card or counts. Body opens with one light line (`HTML · new
+  file`, `lines 1–40 of 71 · HTML`, `lines 26–37 · HTML`, `lines 34–78 · HTML`). One number
+  column; a removed line keeps its old number. `+`/`−` sign column and add/del tints on every
+  diff row, both themes. Preview 12 lines + `… N more lines · tap to see all`; tap → full view.
+  **Read** of the html is fully coloured, tags/attrs/strings in the markup, the CSS in `<style>`
+  (custom properties, hex numbers) AND the JS in `<script>` (`export const`, strings, numbers,
+  `=>`): `41-read-open`, `41-read-full`.
+- **Wrong vs spec (#2/#6, mockup's MultiEdit with coloured JS):** in every DIFF body (Write,
+  Edit, MultiEdit) only the html markup lines are coloured; the lines inside `<style>` and
+  `<script>` are plain text (`41-write-open`: lines 8–12 CSS plain; `41-edit-open`: `export
+  const SCENES`, `{ k: "heli", … }` plain; `41-multiedit-*`: `const NOTIF_A`, `function draw`
+  plain), while the same lines are coloured in the Read. Cause: diff lines are highlighted one
+  line at a time (Execution, "Drift"), so a script/style line out of its `<script>` context is
+  not JS/CSS. Not a cosmetic edge case: it is every script/style line of every html diff.
+  Not fixed (production code is out of this pass).
+- Minor: a multi-hunk diff (`41-multiedit-full`) has no separator between hunks — numbers jump
+  `50 → 68` with nothing drawn, and a removed line numbered `68` sits right after context `71`
+  (its old number, as variant B says). Readable, but a gap marker would help.
+- Minor: the body's header says `HTML`, the mockup's MultiEdit said `JavaScript in HTML` — the
+  spec (#4) only asks for `LANG`, so this is consistent with it.
+
+### Validation (part 1)
+
+*— claude-opus-5-5, 2026-11-22 — RETAKE after Fix round 1 (html diffs), simulator `0FA4B51F-…`, iOS 26, Release build*
+
+**How:** the same flow `41-file-view-shots.yaml` and fixture, unchanged (they already shoot
+Read / Edit / MultiEdit / Write, collapsed + tapped open, light + dark via `_shot.yaml`).
+`scripts/e2e-gate.sh 0FA4B51F-A0E3-421B-BE66-CE29EF45213D --only 41-file-view-shots` →
+`GATE PASS — 1 passed, 0 failed (97 s)`. The 14 PNGs in `docs/feat/mobile-file-view/` were
+overwritten with this run's (same names): `41-collapsed`, `41-write-open`, `41-read-open`,
+`41-read-full`, `41-edit-open`, `41-multiedit-open`, `41-multiedit-full`, each `-light`/`-dark`.
+
+**What I saw (vs the mockup, variant B):**
+- **Round 3's HIGH is fixed on device.** `41-edit-open`: the `// The scenes…` comment, `export const SCENES`,
+  the keys/strings/numbers of the `+`/`−` rows and `const UFO0/UFO1 … =>` are coloured as JS,
+  both themes, same colours as the Read. `41-write-open`: the `<style>` lines are coloured CSS
+  (comment, `--bg`/`--fg` custom properties, hex values). Diff bodies now match the mockup's look.
+- Holds (as in the first pass): header said once on the step line; one light body line
+  (`HTML · new file`, `lines 1–40 of 71 · HTML`, `lines 26–37 · HTML`, `lines 34–78 · HTML`);
+  one number column; `+`/`−` sign column + add/del tints in both themes; preview 12 lines +
+  `… N more lines · tap to see all`; tap → full view. Read fully coloured (`41-read-full`).
+- **Differs from the mockup's MultiEdit (known, documented limit):** the MultiEdit's FIRST hunk
+  (`41-multiedit-open`, lines 34–50: `const UFO0`, `const BANNER`/`NOTIF_A`, `function draw`) is
+  plain, while variant B shows those very JS lines coloured. It is Fix round 1's documented
+  limit (that hunk has no `<script>`/`</script>` tag, the patch carries no context). The
+  second hunk (68–78, with `</script>`) is coloured (`41-multiedit-full`). So the MultiEdit shot
+  — the one the owner compares with variant B — looks half-done in its preview; the owner
+  should know this before approving.
+- Minor (still open from the first pass): no separator between hunks in `41-multiedit-full`
+  (`50 → 68`, then a removed `68` right after context `71`).
+- Minor, spec #4: the Read step line shows a duration (`2 ms`); #4 says no duration for
+  Read/Edit/Write (Edit/Write indeed show none).
+- Not code: the session title/first bubble `compose` is the harness's shared session, not this feature.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-22 (fresh context; same model as the Execution resume, different from the DeepSeek executor)*
+
+**Verdict: REQUEST-CHANGES**
+
+Findings (HIGH/MEDIUM only):
+
+1. **HIGH — a spilled `fs_read` is drawn as file content with false line numbers.**
+   `apps/mobile/src/file-body.ts:288-305` ignores `row.spill`. A read over
+   `maxInlineOutputChars` arrives as `[large fs_read output …]\n<head>\n…[N characters omitted]…\n<tail>`
+   (`packages/agent/src/result-pipeline.ts:89-104`). Repro (`.tentacle/tmp/mobile-file-view/review.ts`):
+   header `4 lines · TypeScript`; line 1 = the banner, line 3 = the omission marker, the
+   file's last line numbered 4. The body lies about the file (§8: synthesised data from
+   truncated input). Fix: a row with `spill` gets no file body (or a plain one without numbers/
+   line-count header) + a test.
+2. **HIGH — a diff over `DIFF_MAX_LINES` (400) silently loses its tail.** `file-body.ts:194-218`
+   drops `diffView(...).hidden`; `preview` counts only the 400 rendered rows. Repro: a 600-line
+   Write, `full=true` → 400 lines, `hidden 0`, no marker; the old `DiffView` said
+   `N more lines not shown` (`screens/transcript/DiffView.tsx:126`). The Failure-modes row
+   "400-line patch → the remainder is the preview's `hidden`" is FALSE. Fix: carry
+   `view.hidden` into the body (a "not shown" line) + a test.
+3. **HIGH (scope) — Part 2 is not built, Validation screenshots not taken.** The task bundles
+   part 2 (the load-bearing reason for this review); nothing to red-team on §7 pod trust because
+   no code exists. Either split part 2 into its own task (doc + TODO) or build it before merge.
+4. **MEDIUM — an append-only overwrite by `fs_write` is labelled `LANG · new file`.**
+   `file-body.ts:281` infers "created" from `removed === 0`; `ToolDiffDetail` has no created
+   flag (`packages/tools/src/builtins.ts:42`), so overwriting a file with only added lines
+   claims a new file. Use the hunk start (`@@ -0,0`) instead.
+
+Gate (re-run): 5 touched test files 99 pass / 0 fail; `bun run lint` clean (2264 files);
+`bun run typecheck` clean. Full `bun test` not re-run here.
+Mutation: removing the `status !== "ok"` guard → 3 fail (file-body + tool-step-view); reverted,
+tree byte-identical (`git status` clean). Executor's M1–M8 table not re-run.
+
+Attacks tried: spilled read (found #1); >400-line patch (found #2); >200 KB patch → `hunks: []`
+→ `null` → old `DiffView` with its marker (holds); failed/denied row keeps plain output (holds,
+mutation-proved); `packages/*` diff = test-fixture type casts only, no behaviour (holds);
+part-2 pod exclusion (no code — #3).
+
+Executor behaviour: DeepSeek stopped at the watchdog without red-first evidence; the resume
+substituted a mutation table and was honest about part 2 / screenshots. The Failure-modes table
+overstated the 400-line case without a test behind it.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-22 (same reviewer context; diff reviewed `50ceb0ef..HEAD`: bc9a56b6 code + 00f43294 kit-data/doc)*
+
+**Verdict: PASS for part 1's code.** Merge still depends on the owner deciding #3 (below).
+
+- **#1 spill — FIXED.** `file-body.ts` `readBody` returns `null` when `row.spill` is set (the row keeps today's plain output, banner visible). Mutation (`!== undefined` → `=== null`) → 2 fail (`a spilled read is not file content …`). Reverted.
+- **#2 400-line bound — FIXED.** `diffView().hidden` is passed through `preview(…, bound)` into `hidden`, both collapsed and full. Repro: a 600-line Write, `full` → 400 lines, `hidden 202`. Mutation (`bound` → `0`) → 2 fail. Reverted. (202, not 200: `diffView`'s count includes the `---`/`+++` lines, `diff-view.ts:137`. That predates this task.)
+- **#4 new-file label — FIXED.** `CREATED_HUNK` `/^@@ -0,0 …/m`. Confirmed against the real `createTwoFilesPatch`: creation → `@@ -0,0 +1,2 @@`, append → `@@ -1,1 +1,2 @@`. Mutation (back to `removed === 0`) → 1 fail. Reverted.
+- **#3 part 2 + screenshots — ESCALATED, not fixed.** This is the owner's call, not the executor's: either split part 2 into its own task (with a TODO entry) or approve its Files list. Do not merge this branch as "the job" until that is recorded.
+- After the mutations the tree was byte-identical (`git status` clean). The 3 touched test files: 84 pass / 0 fail. `bun run lint`: clean, 2264 files. `bun run typecheck`: clean. Full `bun test` not re-run here.
+- Nit (not blocking): in the full view with `hidden > 0`, which only happens when a diff hits its bound, `ui/FileBody.tsx:113` still says `· tap to see all`, but the Pressable is disabled (`:54`). The count is honest; the promise is not. Say `not shown` when `full`.
+
+### Owner decision on #3 (22/11 ~20:10)
+
+*— claude-opus-5-5 (orchestrator), 2026-11-22 — owner: «A, separa la parte 2, la faremo poi dopo workflows, mettiamola in coda»*
+
+- **Part 2 is split out** into its own task, `feat/mobile-artifact-session-trust`, queued in
+  `TODO.md` after `feat/agent-workflows`. Its spec is the §Context "Part 2" above (owner decision
+  1–6, unchanged); it gets its own plan and a fresh-context Opus review that red-teams the pod
+  exclusion (AGENTS §7).
+- **This branch = part 1 only.** Validation shrinks to part 1's screenshots (dark + light: Read of
+  an `.html`, Edit diff, MultiEdit, Write), then merge on the owner's OK.
+
+### Round 3 — validation shots (orchestrator, 22/11 ~21:25)
+
+*— claude-opus-5-5 (orchestrator), 2026-11-22 — from the Opus validation-shots run (`docs/feat/mobile-file-view/41-*.png`, flow 41-file-view-shots)*
+
+- **HIGH — html diffs are not coloured.** In a Write / Edit / MultiEdit of an `.html` file, the `<script>` and `<style>` lines are drawn plain: spec #2/#6 (JS/CSS colour inside .html) and the variant-B mockup fail for diff bodies (the Read body is coloured). Fix: diff bodies of an `.html` file colour embedded script/style lines like the Read body does, with a red-first unit test on the pure colouring module (an Edit and a MultiEdit hunk that START inside a `<script>` block, so the language state must come from context, not from the hunk's first line — say how the hunk's starting state is known, or document the limit). The owner chose: fix this before merge (22/11 21:25).
+
+Verdict for this round: REQUEST-CHANGES (one HIGH).
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-23 — Review round 3's HIGH: an `.html` diff body drew its `<script>`/`<style>` lines plain*
+
+**Root cause (one sentence).** `diffLines` coloured each diff line as a standalone
+fragment, and the `xml` grammar only enters a subLanguage after the `<script>`/`<style>`
+opener — so a script/style line out of its context had no grammar to colour it.
+
+**Repro, before (`.tentacle/tmp/mobile-file-view/fix1-html-diff.ts`, the real flow-41
+`fs_edit` patch through `createTwoFilesPatch`):**
+
+```
+language: xml | header: lines 26–37 · HTML
+  27   [tag,name,tag] <script>
+  28   [plain] // The scenes, in the order the gallery plays them.
+  29   [plain] export const SCENES = [
+  36   [plain] const UFO1 = UFO0.map((r, i) => (i === 4 ? "LCCYCCYCCYCCYCL" : r));
+has keyword (JS): false   has attribute (CSS/HTML): false
+```
+
+**Where the hunk's starting state comes from (the reviewer's question).** From the hunk's
+OWN drawn lines only, and each fact is the patch's own text:
+
+- **forward** — the hunk contains the opener (`<script>`/`<style>`): the lines after it are
+  walked by `nextState`, so the state is the hunk's own text, not a guess;
+- **backward** — a closer (`</script>`) appears with no opener before it *inside* the hunk:
+  the hunk began inside that block.
+
+**The documented limit.** A hunk that starts inside a `<script>` and closes nothing within it
+carries no evidence either way, so it stays plain (never a guess). It cannot be recovered from
+the rest of the file either: `fs_edit`'s patch is hunks only, never the untouched lines between
+them. Measured on the real flow-41 patches: `fs_edit` one hunk, opener inside (`BACKWARD_KNOWN=no`);
+`fs_multi_edit` hunk 1 has NO tag at all (the limit), hunk 2 carries `</script>` (`BACKWARD_KNOWN=script`);
+the created `fs_write` is one hunk with both. So this fix colours the whole `fs_edit` body, the
+created-Write body, and MultiEdit's second hunk; MultiEdit's first hunk is the limit.
+
+**How a line inside a block is coloured.** `subLanguageSpans` feeds the `xml` grammar the opener
+plus the line and drops the opener's own row, so the subLanguage is entered and the line's real
+tokens come out (`export` → `keyword`, `--bg` → `attr`). Probed: the grammar does not close the
+block at input's end, so no closer is needed, and every case was checked to keep the text
+byte-identical (`line 33–36 of the whole-page probe`, `probe-edge.ts`: `</script>`, `}`,
+`const s = '</script>';`).
+
+**After (same repro):**
+
+```
+  27   [tag,name,tag] <script>
+  28   [comment] // The scenes, in the order the gallery plays them.
+  29   [keyword,plain,keyword,plain,variable constant_,plain] export const SCENES = [
+  36   [keyword,plain,title class_,…,function,params,function,plain,number,plain,string,plain] const UFO1 = UFO0.map(…)
+has keyword (JS): true
+```
+
+The created-Write body of the same page: `keyword` (JS), `attr`+`selector-pseudo` (CSS),
+`comment`, `tag` all present, and all 70 source lines drawn identical (`fix1-write.ts`:
+`differing lines: 0`).
+
+**Files.** `apps/mobile/src/file-body.ts` — `SubLanguage`, `SUB_LANGUAGES`, `subTagAt`/
+`subTagOf`, `hunkStartState`, `nextState`, `subLanguageSpans`, the per-line state walk in
+`diffLines`; `splitSpans`/`plainSpans` extracted so `colourLines` and `subLanguageSpans` share
+one splitter (no duplicated loop). `apps/mobile/test/file-body.test.ts` — one `describe` with 5
+tests. **Drift:** none from the plan — this fix is what Review round 3 asked for; no other file
+changed (no `highlight.ts` edit was needed: the `spansOf` sub-language wrapper fix from round 1
+already made the wrapper transparent). Two design notes not in the plan: the cap is applied to
+the line as the file wrote it (the wrapper is this module's, so it is added to the allowance),
+and an empty own-row returns `null` so the caller draws the blank-row space.
+
+**Red first, then green.** The 2 failing test names before the fix, on the assertion of the
+property (received `plain` scopes, not an import error):
+
+```
+(fail) … an edit whose hunk opens INSIDE <script> colours its lines as JavaScript
+       Expected to contain: "keyword"  Received: [ "plain", "plain", "plain", "plain", "plain" ]
+(fail) … a MultiEdit hunk that starts inside <style> colours CSS
+       Expected to contain: "attr"     Received: [ "plain", "plain", "plain" ]
+```
+
+(That first shape asserted the *unknowable* state, so it was corrected rather than kept: the
+shipped tests prove forward, backward, the limit, and top-level — see the next paragraph.)
+
+**Mutation checks** (`.tentacle/tmp/mobile-file-view/mutate-fix1.sh`, file restored from a copy,
+`git status` showed only the two intended files afterwards; `diff -q` byte-identical):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | the sub-language path never runs (`subLanguageSpans(...) ??` → `null ??`) | **3 fail** — the 3 colouring tests |
+| M2 | forward-only: an unmatched closer yields no start state | **1 fail** — "only CLOSES `</script>`" |
+| M3 | guess instead of prove: every xml hunk starts in `<script>` | **2 fail** — the limit test + top-level test |
+| M4 | no forward walk (state reset after line 1) | **2 fail** — the opener tests |
+
+M1 is the HIGH itself; M3 is the test that keeps the fix honest (a guess fails the limit test).
+
+**Tests.** 5 touched files, 113 pass / 0 fail: `file-body` 43, `file-body-render`, `diff-view`,
+`highlight`, `tool-step-view`. `bunx biome check` on both changed files: clean.
+`bunx tsc -p apps/mobile --noEmit`: clean. Full suite/typecheck/lint NOT run here (the
+orchestrator's gate runs it).
+
+**Still not done, and outside this fix:** the Validation screenshots must be retaken for the
+diff bodies (the previous set shows the plain script/style lines this fix colours); MultiEdit's
+first hunk remains plain by the limit documented above.
+
+
+### Round 2 — re-review of the fix for Round 3's HIGH (html diffs)
+
+*— claude-opus-5-5, 2026-11-22 (same reviewer context; diff `eae20fa5..HEAD` = e6adf7ad + c8b9faca, `file-body.ts` + its test)*
+
+**Verdict: PASS.** Part 1 only, as the owner decided for #3.
+
+- **The HIGH is fixed.** An `.html` diff now colours `<script>`/`<style>` lines when the hunk itself proves the state: an opener walked forward, or a closer with no opener before it. My mutations, each reverted:
+  - sub-language path off (`subLanguageSpans` → `null`) → 3 fail;
+  - backward evidence off (`hunkStartState` never returns a closer's language) → 1 fail (`only CLOSES </script>`).
+  - The executor's M3 (guessing "always script") is covered by the limit test and the top-level test.
+- **The text is drawn byte for byte.** A probe (`.tentacle/tmp/mobile-file-view/r3.ts`) covered `<`/`&&`/`&amp;`/`&lt;` in JS, a template literal with tags, `"</style>"` inside a JS string, CSS `content: "<"`, and `&nbsp;` at top level. Every line's joined span text equals the source line, except an empty line (next bullet).
+- **Not new here:** an empty line in a coloured diff gets one span `""` instead of `" "`. It happens for `.ts` too, so it does not come from this fix. It comes from `highlight("")` and the `spans.length === 0` check (`file-body.ts`, `diffLines`). The FileBody row still has its number gutter, so the row height holds. Use `plainSpans` when the joined text is `""`.
+- **Not blocking (colour only, text intact):** `nextState` runs one state for both sides of the diff. A hunk that removes `-<script>` and adds `+<div>` therefore draws `+<div>` plain and the context below it as JS (probe P2). The fix: track an old state and a new state (`del` advances old, `add` advances new, `ctx` both).
+- **The limit is documented and tested:** a hunk that starts inside a block and has no tag stays plain. The screenshots still have to be retaken for the diff bodies, as Fix round 1 says.
+- **Gate:** after the mutations the tree was byte-identical (`git status` clean). The 5 touched test files: 113 pass / 0 fail. `bun run lint`: clean, 2270 files. `bun run typecheck`: clean. Full `bun test` not run here.

@@ -2,8 +2,9 @@
  * The shell permission ask shows the WHOLE command (docs/feat/shell-intent-line.md
  * Design §5, Q3): wrapped to the dialog's width over up to `MAX_DETAIL_ROWS`
  * rows, the last one `… N more lines` — never a silent cut. This is the safety
- * net `beta.compactShell` relies on (the row may show only the model's
- * sentence; the ask must still show what really runs).
+ * net the transcript row relies on (a shell row CUTS its command to make room
+ * for `exit=N`, docs/fix/tui-shell-row-collapsed; the ask must still show what
+ * really runs).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { PermissionRequest } from "@tentacle/core";
