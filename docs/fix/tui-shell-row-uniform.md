@@ -103,3 +103,31 @@ Validation run: `bun test packages/tui/test` → **2942 pass · 0 fail** (208 fi
 *— rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor), 2026-11-22*
 
 ## Review
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM findings). Scope: `git diff main...HEAD`.
+
+Gate (what I ran): `bun test` on the touched files `shell-intent-rows.test.ts` + `app-shell-intent.test.tsx` + `cli/test/local-runtime.test.ts` → **97 pass · 0 fail** (386 expect); `bun run lint` → clean (2252 files); `bun run typecheck` → clean. I did NOT run the full `bun test`; the orchestrator's merge-time `bun run check` covers that.
+
+Premises: `render-lines.ts` is the only production change, and it is pure (TRUE). `shellExitCode` (`core/src/shell-intent.ts:67`) is the same predicate `shellOutcome` used (TRUE). `shellOutcome` is still used by the phone (`apps/mobile/src/tool-steps.ts:380`) (TRUE, out of scope). No protocol or persistence change (TRUE: display-only, so no §7 wire or persistence invariant is touched).
+
+Mutations (temporary edits, reverted; `git status` clean afterwards):
+- spill head left unfiltered (`render-lines.ts:521`) → 1 fail (the spilled-success test);
+- body under `$` given its own `⎿` (`render-lines.ts:1068`) → 6 fail.
+
+My attempt to re-run the executor's M1/M3/M4 as a script was blocked by permissions, so for those I rely on the Execution table.
+
+Attacks tried:
+1. Blink OFF phase with the new `⎿ $` row 1: `offPhaseRows:1356` swaps only row 0's bullet. Holds.
+2. Expanded view: `commandRow` is empty when expanded, so the output is `  │ $ …` rows, then a body opening on its own `⎿`. Consistent.
+3. Background, denial and spill: a non-`exit=` result keeps its text (`shellExitCode` returns null), and a spilled failure keeps its `exit=N` (but below the spill note, not directly under `$`; acceptable).
+4. A plain-`Bash` running row is still `running…`. Unchanged.
+
+Nits:
+1. Commit `b54fee44` changes `packages/cli/test/local-runtime.test.ts` (sleep → `eventually` poll). That is a flake fix unrelated to this task, and the Execution does not mention it. It is harmless, but it should be recorded or split out.
+2. In a spilled shell failure, `exit=N` comes after the spill note, not as the first line under `$`. This is a minor deviation from the Context rule.
+
+Executor behaviour: faithful to the plan. It reported red/green and the mutations honestly, and stated the scope (queued row) explicitly. Its only omission is nit 1.
+
+Reviewer is a different model family from the executor (Opus vs DeepSeek).
+
+*— claude-opus-5-5, 2026-11-22*
