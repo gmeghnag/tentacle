@@ -167,11 +167,27 @@ decides *which sheet* and *which detent*:
   Session info opens with a reveal (`openScheduled`, `SessionScreen.tsx:993`).
 - `desiredStack({ user: "commands"|"tools"|"info"|null, outbox: boolean, permission: boolean })`
   → bottom→top kinds. At most one user sheet; outbox above it; permission always on top.
-- `reconcile(desired, actual: {kind,key}[], { locked, transitioning })` → ONE next step:
+- `reconcile(desired, actual: {kind,key}[], { hidden, transitioning })` → ONE next step:
   `push kind` | `pop key` | `null`. It only ever pops the **top**: a lower sheet that
   must go waits until the sheets above it are gone (no F4 flash). Nothing runs while
-  `transitioning`. While `locked` there is no `push` (F5b). Existing sheets stay under
-  the cover.
+  `transitioning`, **except the drain**.
+  *Lock drain (owner decision A, Step 0b; revised by claude-opus-5-5, 2026-11-23):*
+  `hidden = locked || appState !== "active"`. While `hidden`, the step is always
+  `pop top`, and it does not wait for `transitioning`. The screen applies it repeatedly in
+  one pass until `actual` is empty (Step 0b: the stack empties ~6 ms after `inactive`,
+  ~1 s before `background`). `desired` is untouched, and the drain's pops are planned, so
+  `dismissedNatively` reports nothing and no close handler runs (an ask stays pending,
+  L4). While `hidden` there is never a `push`. When it turns false, the normal steps
+  re-push `desired` bottom→top, each at its remembered detent.
+  `inactive` is the load-bearing leg (JS may see no `background` before the resume). `locked`
+  gates the `active`-while-locked window, so it must come from the lock instance's own
+  subscription, never from `AppShell`'s render-time `lockView` (stale, Step 0b).
+- `rememberDetent(kind, identity, index)` / `openingDetent(kind, identity)`: the last
+  stable `sheetDetentChange` per sheet identity (user sheets: the kind; Permission: the
+  ask's request id). A re-push uses it, otherwise `initialDetent`. Permission's `desired`
+  entry is keyed on the ask identity. A re-delivery of the SAME ask on resume
+  (`idle → asking` within one resume, Step 0b L3) therefore keeps its detent. A *different* ask
+  opens at the spec's detent.
 - `dismissedNatively(prevActual, nextActual, lastPlannedPop)` → kinds the person swiped
   away → the screen runs that kind's existing close handler (`closeTools`,
   `closeCommands`, `setDeciding(null)`, the info close at `:1814-1818`).
@@ -233,8 +249,16 @@ Pure black and inset cards: none are added.
 
 - **S1 (S):** `sheet-plan.ts` + tests. Pure, no UI change.
 - **S2 (S):** `sheet-host.ts`, the route type, `NativeSheetRoute`, the `App.tsx` screen. Nothing pushes it yet. Wiring test: the route exists and is `formSheet`.
-- **S3 (M):** `SessionScreen` reconcile loop + native-dismiss sync + lock gate + yield +
+- **S3 (M):** `SessionScreen` reconcile loop + native-dismiss sync + **lock drain (A)** + yield +
   `sessionInFront`. Migrate **Commands** and **Outbox** (no keyboard, simplest).
+  The drain's inputs: `AppState` (`inactive`/`background` ⇒ hidden) and `locked` from a
+  subscription on the lock instance (`app-lock.ts`). Add one if none exists. Do NOT use
+  `AppShell`'s `lockView`. Detent memory per identity (D3). Tests: `reconcile` drains
+  top-down while `hidden` even while `transitioning`, never pushes while `hidden`, and
+  re-pushes in order after it. Planned drain pops are not reported as swipes. A
+  re-delivered ask with the same id keeps its detent (red first). The gate flow for L1
+  (lock `immediately` + Home + relaunch with a sheet up → `lock-screen` visible) goes into S6.
+  *— claude-opus-5-5, 2026-11-23 (Step 0b).*
 - **S4 (M):** `Sheet native` variant. Migrate **Tools** and **Session info** (pinned
   head, reveal at L, close-then-push to Artifacts).
 - **S5 (M):** Migrate **Permission** (D5, keyboard).
@@ -249,9 +273,19 @@ Pure black and inset cards: none are added.
   its pop is keyed. A lower sheet is never popped under it. Today's behaviour (F7) is
   recorded as evidence. If it is the expected silent drop, the fix lands here, with a
   test.
-- **Ask while locked:** no push until `locked` turns false. Then reconcile pushes it.
-  The ask stays in `state.sheet` meanwhile (nothing is lost). Sheets already up stay
-  under the cover (fact 3, F5a).
+- **Lock / app switcher with sheets up** (A, Step 0b): on `inactive` (or `locked`) the
+  stack is drained top-down. The lock `Modal` then presents on a root that is no longer
+  presenting (L1). `desired` survives, and on unlock the same sheets return at their
+  detents (L3), the ask still pending (L4). Rapid lock/unlock converges (L5).
+  *— claude-opus-5-5, 2026-11-23.*
+- **Ask while locked:** no push while `hidden`. Then reconcile pushes it. The ask stays
+  in `state.sheet` meanwhile (nothing is lost).
+- **Resume flicker of an ask** (`idle → asking` on link resume, Step 0b): the identity-keyed
+  entry and the remembered detent mean the same ask returns at its detent.
+- **Control Center / a call banner / the Face ID prompt** (`inactive` without leaving): these
+  also drain, and the sheets re-push on `active`. That is a visible dismiss + re-present,
+  a direct consequence of draining on `inactive`. Not seen on the simulator. **Owner to
+  confirm it is acceptable** (Step 0b).
 - **Native swipe vs. programmatic close race:** `dismissedNatively` ignores the key it
   just popped itself. A keyed pop of a missing key is a router no-op, so Session is
   never popped.
@@ -392,6 +426,57 @@ Plan impact (no plan text rewritten here; for the planner/owner):
   keyboard moves. Nothing in the plan depends on it today; keep it that way.
 - **F7 baseline.** Likely a pre-existing bug, removed by construction once Permission is the
   top route (D3 `desiredStack`). Add an e2e assertion for it in S5.
+
+### Step 0b — lock drain (A) results
+
+*— claude-opus-5-5, 2026-11-23*
+
+How it ran: a throwaway patch on top of Step 0's harness. `src/sheet-spike.tsx` held a module
+registry with a desired stack `{id, held, detent}`. A reconcile effect in `SessionScreen` drained
+the stack whenever `locked || AppState !== "active"`, popping every sheet top-down with keyed
+pops. Otherwise it pushed the first missing entry with `sheetInitialDetentIndex = entry.detent`,
+and `sheetDetentChange` (stable) updated `entry.detent`. A `state` listener treated an unplanned
+removal as a swipe and dropped that entry. The REAL `PermissionSheetView` was rendered
+without its `Modal` (a `native` prop) inside a held (`gestureEnabled:false`) route. An on-screen
+event log (`inactive@t pop:x push:x/dN perm:true|false …`) went in every sheet head. `App.tsx`
+fed `lockView.locked` in through an effect. Flow `99-sheet-spike`: session `ASK4`, lock
+`immediately`, user sheet dragged to L, a laptop `EDIT` ask on top dragged to L, then L1–L5.
+Five gate runs on `0B43D716…` (iOS 26, dark). Runs 1–4 found the flow mechanics below; **run 5
+`1795436513826` = GATE PASS**. The patch is in `.tentacle/tmp/mobile-native-sheets/spike-lock.patch`,
+reverted with `git apply -R`. Shots: `docs/feat/mobile-native-sheets/spike-lock/`.
+
+| # | Result | What was seen | Shots |
+|---|---|---|---|
+| L1 | **PASS** | Two sheets up (user at L, ask at L) → Home → relaunch: Maestro's `lock-screen` assert **passes** (151 ms; it WARNED in Step 0 F5a). The shot shows only the lock cover, with no sheet and no session content. Log: `inactive@44360 pop:user@44366 background@45424`. The drain runs ~6 ms after `inactive`, about 1 s before `background`, so the lock's `Modal` presents on a root that has stopped presenting. | `L1-a-relaunch-locked` |
+| L2 | **NOT PROVEN** | The switcher could not be opened on the simulator. Maestro has no app-switcher command. A bottom-edge swipe-and-hold only drags the sheet (`L2-x-edge-swipe-no-switcher`), and `osascript` (Simulator ⌃⇧⌘H) was not approved in this session. Indirect evidence: (a) the stack is empty ~1 s before `background` (L1 log); (b) the relaunch card iOS animates from shows the lock only (`L1-a`); (c) the native expo blur is on for `immediately` anyway (`switcher-cover.ts`). This is the same gap as `docs/feat/mobile-lock.md` 0.4. | `L2-x-edge-swipe-no-switcher` |
+| L3 | **PASS** (user sheet) · ask detent reset, explained | After unlock: `push:user/d2 push:perm/d2`, so both re-pushed at their remembered detent, with the same content (the published counter is live in the re-pushed route: 39 in `L3-a`). The ask then **re-opens at M**. The log shows why: `perm:false@20528 pop:perm perm:true@20599 push:perm/d1`. On resume the link re-delivers the ask, so `state.sheet` goes `idle → asking` for ~70 ms, the entry is dropped and then re-created at the spec's detent. That is not the drain; it happens on every resume. | `L0-c-ask-large`, `L4-run4-ask-back-log`, `L3-a-user-back-large` |
+| L4 | **PASS** | The same ask (`Write a file · project/spike.txt`) is back after unlock with live options, unanswered. The drain's pops are planned, so `swiped 0` and nothing ran `sheet.dismiss()`. Tapping *Allow once* closes it, and the user sheet below stays at L. | `L4-a-ask-back`, `L4-b-ask-at-m`, `L3-a-user-back-large` |
+| L5 | **PASS** | Three Home/relaunch/Face ID cycles with no waits (`drains 6`): the user sheet re-pushes at `d2` each time. Afterwards a native swipe closes it (`swiped:user`, `desired none`), and `spike-open` pushes a fresh one at M. The navigator does not wedge. | `L5-a-after-rapid`, `L5-b-swiped`, `L5-c-reopened` |
+
+Found on the way (plan impact):
+- **`lockView.locked` read in `App.tsx` is stale.** The log never showed a `LOCKED`/`unlocked`
+  edge: `AppShell` reads `lockInstance.view()` at render, and `LockGate` owns the re-render
+  (`App.tsx:2379`, no subscription). Every drain in this spike came from the `AppState` leg.
+  The `locked` input must come from the lock itself (a `subscribe` on the instance, or
+  `LockGate` publishing it), not from `AppShell`'s render.
+- **`inactive` is the load-bearing trigger, not `background` or `locked`.** In L1/L3, JS saw
+  `inactive`, then nothing until `active` (iOS suspends JS; `background` was not always
+  delivered before the resume). `active` with the lock still up is then gated only by `locked`,
+  so the stale value above matters. Here the pushes landed under the cover and the cover stayed
+  on top (L1 assert, consistent with F5b), but the design must not rely on that.
+- **The ask flickers on resume** (`idle → asking`). The desired entry for Permission must not
+  be keyed on "an ask is pending". It must be keyed on the ask's identity (request id/seq), with
+  the detent remembered per identity, so a re-delivery of the SAME ask re-opens at its last
+  detent and does not pop and re-push.
+- **Two stacked formSheets hide the whole app from XCUITest.** With the ask over a user sheet,
+  the hierarchy dump holds only the status bar (runs 1–2: `perm-sheet`, `spike-sheet-perm`,
+  "Write a file" all not found, although on screen). S6 flows that assert inside a stacked sheet
+  must tap by point or close the lower sheet first. Whether a SINGLE sheet's inner `perm-sheet`
+  id is visible was not isolated here: re-check it in S5.
+
+Verdict: the drain (A) works for L1, L3, L4 and L5. **L2 cannot be proven on this simulator
+without one approval** (osascript → Simulator "App Switcher", then a screenshot) or a real
+device.
 
 ## Review
 
