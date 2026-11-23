@@ -158,6 +158,8 @@ import {
   type WorkflowResult,
   type WorkflowRow,
   WorkflowRowSchema,
+  type WorkflowStepParams,
+  type WorkflowStepResult,
   clientSupportsUpdate,
   watchAccepts,
 } from "@tentacle/protocol";
@@ -2510,6 +2512,63 @@ export class HostedSession {
         ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
       };
     });
+  }
+
+  /**
+   * `session/workflow_step` (docs/feat/workflows-ui.md D1): ONE step execution's
+   * `prompt`/`report`, which the `workflows` row deliberately does not carry.
+   * Synchronous from the retained log, so it holds no lock and never serializes
+   * the peer (AGENTS §7).
+   *
+   * The durable entry wins: it is the execution that ENDED. A step still running
+   * has none yet, so the driver's in-flight record answers instead — `live: true`
+   * and the row's live text, no report. Nothing available (a step that never ran,
+   * or one whose entry a compaction left behind) is `{}`: the UI says so, it
+   * never paints another step's text.
+   */
+  workflowStep(params: WorkflowStepParams): WorkflowStepResult {
+    const entry = this.log.workflowStepDetail({
+      runId: params.runId,
+      stepId: params.stepId,
+      ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
+      ...(params.round !== undefined ? { round: params.round } : {}),
+    });
+    if (entry !== undefined) {
+      return {
+        detail: {
+          attempt: entry.attempt,
+          round: entry.round,
+          live: false,
+          state: entry.state,
+          ...(entry.verdict !== undefined ? { verdict: entry.verdict } : {}),
+          reason: entry.reason,
+          ...(entry.prompt !== undefined ? { prompt: entry.prompt } : {}),
+          ...(entry.report !== undefined ? { report: entry.report } : {}),
+          tokens: entry.tokens,
+          durationMs: entry.durationMs,
+        },
+      };
+    }
+    // No entry: the step is either running now or its record is gone.
+    const live = this.workflows?.liveStep(params.runId);
+    if (
+      live !== undefined &&
+      live.stepId === params.stepId &&
+      (params.attempt === undefined || params.attempt === live.attempt) &&
+      (params.round === undefined || params.round === live.round)
+    ) {
+      return {
+        detail: {
+          attempt: live.attempt,
+          round: live.round,
+          live: true,
+          state: "running",
+          prompt: live.prompt,
+          ...(live.live !== undefined ? { reason: live.live } : {}),
+        },
+      };
+    }
+    return {};
   }
 
   /**

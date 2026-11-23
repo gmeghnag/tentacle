@@ -1026,6 +1026,104 @@ the TUI workflows row and the phone start screen name the folder in slices 2/2b/
 is 5a's catalogue `elsewhere` field, and slice 0 ships it with its bound, its `$HOME`/`/` rule and
 its "cannot change behaviour" property already pinned by tests.
 
+### Slice 1a — `session/workflow_step` (D1)
+
+*— claude-sonnet-4-5, 2026-11-23*
+
+**Load-bearing check re-run FIRST (PARTIAL rule): PASSES, unchanged.**
+`.tentacle/tmp/workflows-ui/lb.ts` on this branch returns the same gaps slice 0 recorded —
+the missing client seams are all still `false` (`RemoteClient.workflowStep`,
+`RemoteSession.onWorkflows`, …), `Method.WorkflowStep` is absent from `Method`, `WorkflowStepRow`
+carries no `prompt`/`report`, `UPDATE_CLASS.workflows === "display"`. What the plan's
+load-bearing assumption needs — **the daemon already has the detail** — holds: the
+`workflow_step` log entry is written whole (`workflow-driver.ts:835-848` →
+`daemon/src/session-log.ts:230-232`) with `prompt`, `report`, `state`, `verdict`, `reason`,
+`tokens`, `durationMs`, and nothing exposed it. So 1a proceeded.
+
+**Red first (§9).** `packages/daemon/test/workflow-step-detail.test.ts` was written before the
+daemon half and run against it stubbed (`workflowStep` → `{}`, the log reader removed):
+**5 pass / 4 fail**, and the four failures were at the ASSERTIONS (`toMatchObject` on
+`detail` receiving `undefined`), not at an import or compile error. The five passers are the
+"not available" cases, which a stub satisfies by construction — they are pinned by mutation
+instead (below).
+
+**As built, in dependency order.**
+
+1. `packages/protocol/src/session-log.ts` — `WorkflowStepParamsSchema` /
+   `WorkflowStepDetailSchema` / `WorkflowStepResultSchema` (+ their types). **DRIFT 1** (below).
+2. `packages/protocol/src/methods.ts` — `Method.WorkflowStep = "session/workflow_step"` and its
+   `RequestSchemas` row.
+3. `packages/protocol/test/workflow-wire.test.ts` — the method is registered, the params refuse a
+   bad run/step id and a negative/fractional `attempt`/`round`, an empty result is valid, a detail
+   round-trips and `reason` is bounded at the LOG's 2 KiB (not a second number).
+4. `packages/protocol/test/json-schema.test.ts` — three fixtures added (the table asserts every
+   method has one; without them the drift test fails).
+5. `packages/agent/src/workflow-driver.ts` — `Run.liveStep` (the execution in flight: its
+   `prompt`, attempt, round, and the row's live text, updated by `setStep`, cleared by `finish`)
+   and the public `liveStep(runId?)` accessor.
+6. `packages/daemon/src/session-log.ts` — `workflowStepDetail(request)`: a newest-first scan of
+   the RETAINED slots (current segment + previous one), so what compaction dropped is honestly
+   `undefined`. Synchronous, no await, no lock (§7).
+7. `packages/daemon/src/hosted-session.ts` — `workflowStep(params)`: the durable entry wins
+   (`live:false`, prompt + report); with none, the driver's in-flight record answers for the same
+   run AND step AND attempt/round (`live:true`, prompt, no report); otherwise `{}`.
+8. `packages/daemon/src/connection.ts` — `case Method.WorkflowStep`, through `lookup` (it reads a
+   session this connection opened or watches).
+9. `packages/protocol/schema/protocol.json` — regenerated (`bun run schema:export`).
+10. `changelog.d/workflows-ui.added.md`.
+
+**Drift from Implementation — one, recorded rather than forced:**
+
+1. **The two schemas live in `session-log.ts`, not `session.ts`.** The plan says `session.ts`. It
+   cannot: `WorkflowWordSchema` and the three caps (`WORKFLOW_REASON_MAX_CHARS`,
+   `WORKFLOW_PROMPT_MAX_CHARS`, `SUBAGENT_REPORT_MAX_CHARS`) live in `session-log.ts`, which
+   already imports `session.ts` — a back-import closes a cycle that breaks module init
+   (`ReferenceError: Cannot access 'TurnIdSchema' before initialization`, reproduced in
+   `.tentacle/tmp/workflows-ui/cycle.ts`). The alternative was duplicating the bounds and the word
+   schema, i.e. a second source of truth for the log's own caps. Placing them beside the entry they
+   read keeps ONE source and adds no cycle. `methods.ts` therefore imports them from
+   `./session-log.ts`, next to `LogParamsSchema`. Everything else the plan lists landed where it
+   says.
+
+**No `protocol.d/` note**, and `PROTOCOL_VERSION` untouched: a NEW method with an optional result
+field is additive (§7 "fields and methods are free"); an older daemon answers `MethodNotFound`,
+which 1b maps to `{unsupported:true}`. A display-class method needs no bump.
+
+**Mutation checks (each reverted; all on the finished code, test file unchanged):**
+
+| Mutation | Result |
+|---|---|
+| the scan ignores `attempt`/`round` | RED — "an attempt the step never ran is `{}`" |
+| live record answered even when the entry exists | RED — 4 tests (the report/live split) |
+| scan oldest-first instead of newest-first | **GREEN first time (vacuous)** → added the `retry: 1` case (two executions of one step), then RED |
+| driver records no `liveStep` | RED — "live:true with the prompt and no report" |
+| `read`'s window start (wrong site: `read`, not the reader) | GREEN — no-op, discarded as an invalid mutation |
+| never drop an old segment (retention) | RED — "an entry two segments back is `{}`" |
+| no `case Method.WorkflowStep` in the dispatch | RED — "the method is dispatched" |
+
+The third row is the §9 non-vacuity catch: the first version of the "newest" test passed with the
+scan reversed, because every step had exactly one entry. The retry case fixed that.
+
+**Tests.** `packages/daemon/test/workflow-step-detail.test.ts` (11 tests): the ended execution
+(prompt + report, measured fields), unknown step/run, a run that never started, the in-flight
+answer and its replacement by the entry, a live record not leaking to another run/step, the newest
+vs the asked-for execution (incl. the retry), an attempt that never ran, the retention window
+(two `clear()` replacements), a session with no driver, and one end-to-end `RpcPeer` call through
+`Connection`. Plus 4 in `protocol/test/workflow-wire.test.ts` and 3 fixtures in
+`protocol/test/json-schema.test.ts`.
+
+**Gate (my own narrow runs; the orchestrator's full gate follows).** `bun test` on
+`packages/protocol/test`, `packages/agent/test`, `packages/daemon/test`, `packages/client/test`,
+`packages/cli/test`, `packages/tools/test`, `packages/core/test`, `scripts/test/changelog*`:
+**0 fail** (3 skips: the opt-in baseline). Root `tsc --noEmit -p tsconfig.json`: **0 errors**.
+`bunx biome check` on every file this slice touched (plus all of `packages/{protocol,daemon,agent}/
+{src,test}`): clean.
+
+**Not done in this slice (deliberately, and why):** nothing from 1b/5a/2/2b/3/4/5b — the client
+seam (`RemoteClient.workflowStep`, `{unsupported:true}` on `MethodNotFound`), the TUI panel, the
+phone screens. `session/workflow_step` is answered by the daemon and reachable over RPC; no client
+calls it yet.
+
 ## Review
 
 ### Owner answers (2026-11-23)

@@ -268,6 +268,18 @@ interface Run {
   stepAbort?: AbortController;
   /** The `workflow_start` it logged (once approved): re-logged at a new segment. */
   startBody?: WorkflowStartBody;
+  /**
+   * The step execution in flight, for `session/workflow_step`
+   * (docs/feat/workflows-ui.md D1): its resolved prompt and the row's `live`
+   * text. Only the LIVE half is here — the ledger's entry is the durable one.
+   */
+  liveStep?: {
+    readonly id: string;
+    readonly attempt: number;
+    readonly round: number;
+    readonly prompt: string;
+    live: string | undefined;
+  };
 }
 
 const systemClock: WorkflowClock = {
@@ -327,6 +339,41 @@ export class WorkflowDriver {
   /** The run in flight, if any (one per session). */
   current(): string | undefined {
     return [...this.runs.values()].find((r) => !r.done)?.runId;
+  }
+
+  /**
+   * The step execution running NOW, if any (docs/feat/workflows-ui.md D1): what
+   * `session/workflow_step` adds to a run whose step has no entry yet. `runId`
+   * narrows it to that run; without one, the single run in flight is used (a
+   * session runs one at a time), and a run that already ended has none.
+   */
+  liveStep(runId?: string):
+    | {
+        readonly runId: string;
+        readonly stepId: string;
+        readonly attempt: number;
+        readonly round: number;
+        readonly prompt: string;
+        readonly live?: string;
+      }
+    | undefined {
+    for (const run of this.runs.values()) {
+      if (run.done || (runId !== undefined && run.runId !== runId)) {
+        continue;
+      }
+      const step = run.liveStep;
+      if (step !== undefined) {
+        return {
+          runId: run.runId,
+          stepId: step.id,
+          attempt: step.attempt,
+          round: step.round,
+          prompt: step.prompt,
+          ...(step.live !== undefined ? { live: step.live } : {}),
+        };
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -694,6 +741,10 @@ export class WorkflowDriver {
   }
 
   private setStep(run: Run, id: string, patch: Partial<WorkflowStepRow>): void {
+    // The live half of `session/workflow_step` follows the row it mirrors.
+    if (run.liveStep !== undefined && run.liveStep.id === id) {
+      run.liveStep.live = patch.live;
+    }
     run.row = {
       ...run.row,
       steps: run.row.steps.map((s) => {
@@ -806,6 +857,15 @@ export class WorkflowDriver {
       });
       run.row = { ...run.row, state: "running" };
       this.publish();
+      // What `session/workflow_step` answers while this execution has no entry
+      // yet: the prompt it was run with, and the row's live text as it changes.
+      run.liveStep = {
+        id: step.id,
+        attempt: action.attempt,
+        round: action.round,
+        prompt: action.text,
+        live: undefined,
+      };
       const outcome = await this.runStep(run, step, action);
       const durationMs = Math.max(0, this.clock.now() - startedAt);
       const logState =
@@ -837,6 +897,8 @@ export class WorkflowDriver {
         live: undefined,
         durationMs,
       });
+      // Its `workflow_step` entry IS the detail now: nothing live is left to add.
+      run.liveStep = undefined;
       const advanced = nextAction(run.state, outcome.event);
       run.state = advanced.state;
       run.row = { ...run.row, tokens: run.state.tokens };
@@ -857,6 +919,7 @@ export class WorkflowDriver {
       return;
     }
     run.done = true;
+    run.liveStep = undefined;
     const status = instead?.status ?? (run.state.status === "running" ? "error" : run.state.status);
     const stopReason = instead !== undefined ? instead.stopReason : run.state.stopReason;
     const reason = instead?.reason ?? endReason(run.state);

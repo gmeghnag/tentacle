@@ -5,6 +5,8 @@ import {
   SnapshotResultSchema,
   UPDATE_CLASS,
   WorkflowParamsSchema,
+  WorkflowStepParamsSchema,
+  WorkflowStepResultSchema,
   isKnownUpdateType,
   isMethodName,
 } from "../src/index.ts";
@@ -83,5 +85,54 @@ describe("workflow wire", () => {
       ok({ sessionId: "s", action: "rerun_step", runId: "wf-1", stepId: "gate", turnId: "t3" }),
     ).toBe(true);
     expect(ok({ sessionId: "s", action: "explode", runId: "wf-1" })).toBe(false);
+  });
+});
+
+// docs/feat/workflows-ui.md slice 1a (D1): one step execution's detail — an
+// ADDITIVE display-adjacent read, so no PROTOCOL_VERSION note is due.
+describe("session/workflow_step", () => {
+  test("is a registered request method, with its own param/result schemas", () => {
+    expect(Method.WorkflowStep).toBe("session/workflow_step");
+    expect(isMethodName("session/workflow_step")).toBe(true);
+    expect(RequestSchemas[Method.WorkflowStep].params).toBe(WorkflowStepParamsSchema);
+    expect(RequestSchemas[Method.WorkflowStep].result).toBe(WorkflowStepResultSchema);
+  });
+
+  test("params: a bad run id / step id / negative attempt is refused", () => {
+    // Mutation: drop `nonnegative()` → the `attempt: -1` case goes green.
+    const ok = (p: unknown) => WorkflowStepParamsSchema.safeParse(p).success;
+    expect(ok({ sessionId: "s", runId: "wf-1", stepId: "plan" })).toBe(true);
+    expect(ok({ sessionId: "s", runId: "wf-1", stepId: "plan", attempt: 0, round: 2 })).toBe(true);
+    expect(ok({ sessionId: "s", runId: "sa-1", stepId: "plan" })).toBe(false);
+    expect(ok({ sessionId: "s", runId: "wf-1", stepId: "Not A Step" })).toBe(false);
+    expect(ok({ sessionId: "s", runId: "wf-1", stepId: "plan", attempt: -1 })).toBe(false);
+    expect(ok({ sessionId: "s", runId: "wf-1", stepId: "plan", round: 1.5 })).toBe(false);
+  });
+
+  test("a result with NO detail is valid (the 'not available' answer)", () => {
+    expect(WorkflowStepResultSchema.safeParse({}).success).toBe(true);
+  });
+
+  test("a detail round-trips, and a display field is bounded exactly as the log caps it", () => {
+    const detail = {
+      attempt: 1,
+      round: 0,
+      live: false,
+      state: "ok",
+      verdict: "pass",
+      reason: "planned",
+      prompt: "plan it",
+      report: "the report",
+      tokens: 12,
+      durationMs: 34,
+    };
+    const parsed = WorkflowStepResultSchema.safeParse({ detail });
+    expect(parsed.success && parsed.data.detail).toEqual(detail);
+    // `reason` is the LOG's cap (2 KiB), not a fresh number of its own.
+    const big = { ...detail, reason: "x".repeat(2 * 1024 + 1) };
+    expect(WorkflowStepResultSchema.safeParse({ detail: big }).success).toBe(false);
+    // A free word stays a free word (a newer daemon's state is not refused).
+    const newer = { ...detail, state: "paused-by-daemon" };
+    expect(WorkflowStepResultSchema.safeParse({ detail: newer }).success).toBe(true);
   });
 });

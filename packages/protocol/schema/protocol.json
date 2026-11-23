@@ -7043,11 +7043,88 @@
       "pattern": "^wf-[1-9][0-9]*$",
       "type": "string"
     },
+    "WorkflowStepDetail": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "live": {
+          "type": "boolean"
+        },
+        "prompt": {
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "report": {
+          "maxLength": 65536,
+          "type": "string"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "verdict": {
+          "$ref": "#/$defs/WorkflowWord"
+        }
+      },
+      "required": ["attempt", "live", "round"],
+      "type": "object"
+    },
     "WorkflowStepId": {
       "maxLength": 64,
       "minLength": 1,
       "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
       "type": "string"
+    },
+    "WorkflowStepParams": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunId"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "stepId": {
+          "$ref": "#/$defs/WorkflowStepId"
+        }
+      },
+      "required": ["runId", "sessionId", "stepId"],
+      "type": "object"
+    },
+    "WorkflowStepResult": {
+      "additionalProperties": true,
+      "properties": {
+        "detail": {
+          "$ref": "#/$defs/WorkflowStepDetail"
+        }
+      },
+      "type": "object"
     },
     "WorkflowStepRow": {
       "additionalProperties": true,
@@ -7562,6 +7639,14 @@
       },
       "result": {
         "$ref": "#/$defs/WorkflowResult"
+      }
+    },
+    "session/workflow_step": {
+      "params": {
+        "$ref": "#/$defs/WorkflowStepParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowStepResult"
       }
     },
     "workflow/list": {

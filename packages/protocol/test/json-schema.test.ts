@@ -328,6 +328,29 @@ const FIXTURES: Record<string, Json[]> = {
     { ok: true, runId: "wf-1" },
     { ok: false, reason: "workflows run only on a laptop or serve session" },
   ],
+  // feat/workflows-ui slice 1a: ONE step execution's detail (D1).
+  "methods/session~1workflow_step/params": [
+    { sessionId: "s", runId: "wf-1", stepId: "plan" },
+    { sessionId: "s", runId: "wf-1", stepId: "plan", attempt: 0, round: 1 },
+  ],
+  "methods/session~1workflow_step/result": [
+    {},
+    {
+      detail: {
+        attempt: 1,
+        round: 0,
+        live: false,
+        state: "ok",
+        verdict: "pass",
+        reason: "planned",
+        prompt: "plan it",
+        report: "the report",
+        tokens: 12,
+        durationMs: 34,
+      },
+    },
+    { detail: { attempt: 0, round: 0, live: true, state: "running", prompt: "plan it" } },
+  ],
   "methods/workflow~1list/params": [{}],
   "methods/workflow~1list/result": [
     { runs: [] },
