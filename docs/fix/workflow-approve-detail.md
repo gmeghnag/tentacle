@@ -157,6 +157,8 @@ No protocol schema change, so no `protocol.d/` note.
 - **D2's `seen` state is gone** with the gate: `ApprovalScroll` is `{ offset }` only, sticky-by-nature (a resize re-wraps and the view clamps; nothing is remembered because nothing is gated).
 - **`b` key:** wired as the Implementation listed (PgUp / `b` page back). `b` had no other meaning in the dialog, so nothing is shadowed.
 
+**Gate fix (orchestrator run after exec).** The exec updated every `PermissionController` fixture that had to gain `approvalScroll()` (`test/key-snapshot.ts`, `keys-route`, `keys-layers`, `voice-layer`) but missed `noPermission()` in `packages/tui/test/app-layout.test.ts`, so the two tests that reach `frameLayout`'s permission branch threw `permission.approvalScroll is not a function`. Production was correct (`App.tsx:2245` provides it); only the fixture was stale. Fixed in the fixture (`approvalScroll: () => NO_APPROVAL_SCROLL`), nothing else changed: `app-layout.test.ts` 22 pass / 0 fail, the five sibling suites 83 pass / 0 fail, `biome check` clean on the file.
+
 **Red before green.** Mutation-checked on this tree, each reverted after (§9). Command output verbatim:
 
 - **The bug itself** (restore `permissionDetailLines` + per-row `truncateCells` in the `workflow_approve` branch) → `8 pass / 6 fail`, incl. `a stale offset … "step-20"` receiving `… 11 more lines`, and `a long command is drawn in full` failing. This is the pre-fix behaviour, so the new tests are red on it.
