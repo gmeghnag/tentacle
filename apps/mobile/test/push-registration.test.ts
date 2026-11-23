@@ -133,9 +133,9 @@ describe("planPushRegistration: when one connect registers", () => {
     expect(plan).toEqual({ kind: "register", hash: pushFactsHash(facts()) });
   });
 
-  test("the SAME fingerprint already accepted → skip `same` (mutation: register regardless → red)", () => {
+  test("the SAME fingerprint already registered in THIS run → skip `same` (mutation: register regardless → red)", () => {
     const plan = planPushRegistration({
-      state: initialPushState(),
+      state: { enabled: true, phase: "on", registeredHash: pushFactsHash(facts()) },
       permission: "granted",
       facts: facts(),
       last: { hash: pushFactsHash(facts()), registeredAt: 1 },
@@ -143,9 +143,21 @@ describe("planPushRegistration: when one connect registers", () => {
     expect(plan).toEqual({ kind: "skip", reason: "same" });
   });
 
-  test("a rotated TOKEN re-registers (F11)", () => {
+  test("a fingerprint only the KEYCHAIN knows does not skip: a launch re-registers (the self-heal)", () => {
+    // The property root cause 2 was: `last` (the persisted record) outlives the
+    // daemon's copy, so it can never say the daemon still holds one.
     const plan = planPushRegistration({
       state: initialPushState(),
+      permission: "granted",
+      facts: facts(),
+      last: { hash: pushFactsHash(facts()), registeredAt: 1 },
+    });
+    expect(plan).toEqual({ kind: "register", hash: pushFactsHash(facts()) });
+  });
+
+  test("a rotated TOKEN re-registers (F11)", () => {
+    const plan = planPushRegistration({
+      state: { enabled: true, phase: "on", registeredHash: pushFactsHash(facts()) },
       permission: "granted",
       facts: facts({ token: "c".repeat(64) }),
       last: { hash: pushFactsHash(facts()), registeredAt: 1 },
@@ -157,7 +169,7 @@ describe("planPushRegistration: when one connect registers", () => {
     for (const changed of [facts({ key: "j".repeat(43) }), facts({ env: "production" })]) {
       expect(
         planPushRegistration({
-          state: initialPushState(),
+          state: { enabled: true, phase: "on", registeredHash: pushFactsHash(facts()) },
           permission: "granted",
           facts: changed,
           last: { hash: pushFactsHash(facts()), registeredAt: 1 },
@@ -238,11 +250,65 @@ describe("the runner: one registration per fingerprint per computer", () => {
     expect(sink.calls[1]?.facts.token).toBe("e".repeat(64));
   });
 
-  test("a registration stored by an EARLIER app run is honoured (the hash lives in the Keychain)", async () => {
-    const { created } = registrar({ last: { hash: pushFactsHash(facts()), registeredAt: 5 } });
+  test("a daemon-side delete heals on the next launch (mutation: dedupe on the Keychain → red)", async () => {
+    // The bug this pins (docs/fix/mobile-push-not-registered.md, root cause 2):
+    // the fingerprint lives in the Keychain ACROSS launches, so a registration
+    // the daemon deleted (an APNs `gone`, a hand-deleted file, a re-adoption)
+    // was invisible to the phone — every later launch skipped `same` and the
+    // device stayed unregistered for ever. The dedupe is per PROCESS now: the
+    // first sync of a launch registers whenever the facts exist.
+    const store = memory();
+    const launch = () =>
+      createPushRegistrar({
+        computerId: "c1",
+        memory: store,
+        permission: async () => "granted",
+        facts: async () => facts(),
+        now: () => 1_000,
+        onChange: () => {},
+      });
+    const first = spySink();
+    await launch().sync(first);
+    expect(first.calls.length).toBe(1);
+    // The daemon forgets: a `gone` deleted the store row. The Keychain record —
+    // the phone's own memory — still says `on`.
+    expect(store.written()?.hash).toBe(pushFactsHash(facts()));
+    const second = spySink();
+    const warmed = launch();
+    await warmed.sync(second);
+    await warmed.sync(second);
+    await warmed.sync(second);
+    // Exactly ONE more register: the launch heals the loss, the two re-connects
+    // in that same process send nothing (the reconnect-storm guard is kept).
+    expect(second.calls.length).toBe(1);
+    expect(second.calls[0]?.facts).toEqual(facts());
+  });
+
+  test("a toggle-off DEBT still drains before the launch's register, and both land (H2 + the heal)", async () => {
+    // The two fixes must compose: a debt says the daemon may still hold a row
+    // (`off: true`), and the self-heal says a launch registers whenever the facts
+    // exist. One connect therefore has to do BOTH, in that order, or a person who
+    // turned notifications off while the computer was away would either keep
+    // being buzzed (debt lost) or stay unregistered for ever (heal lost).
+    const store = memory();
+    store.write("c1", { hash: "", registeredAt: 1, off: true });
+    const created = createPushRegistrar({
+      computerId: "c1",
+      memory: store,
+      permission: async () => "granted",
+      facts: async () => facts(),
+      now: () => 1_000,
+      onChange: () => {},
+    });
     const sink = spySink();
     await created.sync(sink);
-    expect(sink.calls).toEqual([]);
+    // The debt was sent…
+    expect(sink.unregisters()).toBe(1);
+    // …and the registration followed it (the heal), so the daemon ends up holding
+    // a live row rather than nothing.
+    expect(sink.calls.length).toBe(1);
+    expect(store.written()?.hash).toBe(pushFactsHash(facts()));
+    expect(created.state().phase).toBe("on");
   });
 
   test("concurrent syncs do not double-register (mutation: drop the queue → red)", async () => {

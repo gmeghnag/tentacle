@@ -1,27 +1,22 @@
 /**
- * The two PURE decisions in the Expo adapter (docs/feat/mobile-push.md P9).
+ * The PURE decisions in the Expo adapter (docs/feat/mobile-push.md P9).
  *
- * `push-expo.ts` imports native modules, so Bun cannot load it; but the two
- * branches that can be wrong silently — which APNs environment a build's tokens
- * belong to, and what the OS's permission means — are decided by functions that
- * take plain data. They are re-declared here rather than imported so the test
- * proves the RULE, and a second test below pins that the module still exports
- * exactly these two and still calls `getDevicePushTokenAsync` (never
- * `getExpoPushTokenAsync`, decision 19).
+ * `push-expo.ts` imports native modules, so Bun cannot load it; but the branch
+ * that can be wrong silently — what the OS's permission means — is decided by a
+ * function that takes plain data. It is re-declared here rather than imported so
+ * the test proves the RULE, and the guard tests below pin that the module still
+ * calls `getDevicePushTokenAsync` (never `getExpoPushTokenAsync`, decision 19)
+ * and no longer derives the APNs environment from `NODE_ENV`.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { PushEnvironment } from "@tentacle/protocol";
 
 /**
- * The rules, transcribed from `push-expo.ts` — and the guard test below keeps the
- * two copies honest by failing if the source stops containing them.
+ * The OS permission rule, transcribed from `push-expo.ts` — and the guard test
+ * below keeps the two copies honest. The APNs-environment rule moved to the pure
+ * `push-env.ts` (its own table in `push-env.test.ts`).
  */
-function environmentOf(nodeEnv: string | undefined): PushEnvironment {
-  return nodeEnv === "production" ? "production" : "sandbox";
-}
-
 function permissionOf(status: { readonly status: string; readonly canAskAgain?: boolean }): string {
   if (status.status === "granted") {
     return "granted";
@@ -31,16 +26,13 @@ function permissionOf(status: { readonly status: string; readonly canAskAgain?: 
 
 const SOURCE = readFileSync(join(import.meta.dir, "..", "src", "push-expo.ts"), "utf8");
 
-describe("the APNs environment follows the BUILD (a wrong one is a silent BadDeviceToken)", () => {
-  test("a development build is `sandbox`, a release build is `production`", () => {
-    expect(environmentOf("development")).toBe("sandbox");
-    expect(environmentOf(undefined)).toBe("sandbox");
-    expect(environmentOf("production")).toBe("production");
-  });
-
-  test("the source decides it from NODE_ENV, in one place", () => {
-    expect(SOURCE).toContain('nodeEnv === "production" ? "production" : "sandbox"');
-    expect(SOURCE).toContain("process.env.NODE_ENV");
+describe("the APNs environment no longer follows the bundle mode (a wrong one is a silent BadDeviceToken)", () => {
+  test("the source does not read NODE_ENV at all", () => {
+    // A Release archive exported `method: debugging` is a production bundle
+    // signed with the SANDBOX entitlement, so the bundle mode was never the
+    // token's environment (docs/fix/mobile-push-not-registered.md). The mapping
+    // and its table now live in `push-env.test.ts`.
+    expect(SOURCE).not.toContain("process.env.NODE_ENV");
   });
 });
 

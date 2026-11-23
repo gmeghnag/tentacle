@@ -64,7 +64,7 @@ Rejected: reading `expo-notifications`' `mode` from `Constants.expoConfig` (it I
 
 - **Fix A — env from the signature.** `push-expo.ts`: `env = pushEnvironmentOfAps(await apsEnvironment())`, the mapper in a pure React-free module: `"development" → "sandbox"`, `"production" → "production"`, `null → "production"` (no embedded profile on a device = store build; the simulator has no token anyway). `pushEnvironmentOf(NODE_ENV)` is deleted — it is the bug. A read error → `undefined` facts (nothing sent), never a guess.
 - **Fix B — self-heal.** The registrar dedupes per *registrar lifetime* (process), not across launches: the first `sync` after launch registers whenever permission + facts exist, even if the Keychain hash matches; later syncs in the same process skip on `state.registeredHash === hash`. The Keychain record stays for the `off` debt (H2) and is still written on `on`. Any daemon-side loss (a `gone`, a hand-deleted file, a re-adoption) heals on the next launch; a reconnect storm still sends nothing.
-- **Fix C — observability (daemon).** `registerPush` audits `push-registered <id8> <env>`; the `gone` audit carries the relay's reason (`push-gone <id8> BadDeviceToken`) when `push-result` has one. Today a successful register is silent, which is why E1 had to be inferred from a directory mtime.
+- **Fix C — observability (daemon).** `registerPush` audits `push-registered <id8> <env>`. The `gone` line gains the relay's reason (`push-gone <id8> BadDeviceToken`) — **DEFERRED, see Design note C2**: the reason never leaves `relay-link.ts` (the plan's file list omitted it), so it is a wider change than this task's approved diff, and it is not needed to diagnose the bug (the `env` in `push-registered`, plus the relay host's own journal, already name it).
 
 ### Files (dependency order)
 
@@ -74,6 +74,20 @@ Rejected: reading `expo-notifications`' `mode` from `Constants.expoConfig` (it I
 4. `apps/mobile/src/push-registration.ts:160-163` (`planPushRegistration`) — dedupe on the in-process `state.registeredHash`, not `last.hash`; `last` stays for the debt.
 5. `apps/mobile/test/pairing-guards.test.ts:124-127` — fix the comment's assumption ("development build ⇒ sandbox" is false for a Release archive).
 6. `packages/daemon/src/session-host.ts:735-753` (via its audit seam) and `packages/daemon/src/push-notifier.ts:311-315` — Fix C.
+   - **Executed:** the `push-registered` half only (`session-host.ts`).
+   - **Design note C2 — the `gone` reason is deferred (drift, discovered in
+     Execution).** The plan assumed the relay's `push-result.reason` was
+     available at `push-notifier.ts:416`; it is not. The reason is read in
+     `relay-link.ts` (`entry.resolve(isPushDeliveryStatus(frame.status) ? …)`,
+     ~:638) and DROPPED there: `RelayPushStatus` is a bare string union and
+     `PushSink` is `(delivery) => Promise<string>`. Carrying it means shaping the
+     resolved value through `RunningRelayLink.push` / `liveActivity`, the
+     `pendingPushes`/`heldPushes` entries, `sendFrameOf`'s resolver and every
+     audit caller — ~17 status assertions in `relay-link-push.test.ts` alone, a
+     public-ish daemon seam, for a diagnostic that does not decide the bug (the
+     `env` now logged by `push-registered` plus the relay host's journal already
+     name `BadDeviceToken`). Not done here: it is outside the approved diff and
+     belongs to its own task.
 7. `changelog.d/mobile-push-not-registered.fixed.md` — user-visible.
 
 ### Failure modes
@@ -90,8 +104,142 @@ Rejected: reading `expo-notifications`' `mode` from `Constants.expoConfig` (it I
 - `apps/mobile/test/push-registration.test.ts` — **"a daemon-side delete heals on the next launch"**: registrar A syncs (1 register) → the fake daemon forgets → registrar B over the SAME memory syncs 3× ⇒ exactly 1 more register. **Red today** (0: `skip "same"`). Plus: B's 2nd/3rd sync send nothing (storm guard kept); a toggle-off debt still drains before the register.
 - `apps/mobile/test/push-env.test.ts` — the mapping table; and a source guard that `push-expo.ts` no longer derives `env` from `process.env.NODE_ENV` (like `push-wiring-guards.test.ts`). **Red today** (module missing / scan finds `NODE_ENV`).
 - `packages/daemon/test/push-notifier.test.ts` (next to :490) — `push-gone <id8> BadDeviceToken`; a `session-host` test for `push-registered`. Red today (no such lines).
+  - **Executed:** `packages/daemon/test/push-registered-audit.test.ts` (new file — a `SessionHost` unit test, cheaper and more direct than driving the whole hook harness) pins `push-registered <id8> <env>`, red first. The `push-gone … <reason>` test is deferred with note C2.
 - Non-vacuity: revert the `planPushRegistration` change ⇒ the heal test goes red; map `development → production` ⇒ the env table goes red.
 
 ### Validation (device)
 
 A new `build.sh` archive on the owner's phone: launch → `devices/push/a3b1d9320694285b.json` appears with no toggle; `serve.log` shows `push-registered a3b1d932 sandbox`; background the app, end an unattended turn ⇒ a banner arrives, no `push-gone`, the file survives. Then delete the file by hand and relaunch ⇒ it reappears (Fix B). The simulator cannot prove Fix A (no APNs token; `push-placeholder` is quarantined) — only the device run does.
+
+## Execution
+
+*— claude-opus-5-5 (executor), 2026-11-23*
+
+**Load-bearing check — PASSED (before any edit).** `expo-application@58.1.2` is
+the version Expo's own `bundledNativeModules.json` pins for this SDK
+(`apps/mobile/node_modules/expo/bundledNativeModules.json:23` → `~58.1.2`), and
+it ships `getIosPushNotificationServiceEnvironmentAsync()`
+(`package/build/Application.js:144`) → native
+`ApplicationModule.swift:84` → `EXProvisioningProfile.m`'s
+`notificationServiceEnvironment`, which reads `Entitlements.aps-environment` out
+of `embedded.mobileprovision` and answers `"development" | "production" | null`.
+No fallback native module needed. Repo-wide `rg expo-application apps/mobile`
+had exactly one pre-existing hit, a comment in `App.tsx`.
+
+**Repro (red → green).** `.tentacle/tmp/mobile-push-not-registered/repro-fix-b.ts`
+(the plan's repro, written but never run in triage), on the unfixed tree:
+
+```
+launch 1: registers=1 daemonHas=true
+launch 2: registers=1 daemonHas=false
+launch 3: registers=1 daemonHas=false
+Fix B: ... the daemon holds the registration? false (registers=1) — expected true
+Fix A: push-expo derives env from NODE_ENV? true — expected false
+```
+
+The plan's `.tentacle/tmp/mobile-push-not-registered/` is outside this session's
+writable workspace (the worktree is the root), so it lives at
+`<worktree>/.tentacle/tmp/mobile-push-not-registered/` — same gitignored
+convention, same slug. After the fixes: `registers=3 daemonHas=true` on every
+launch, `NODE_ENV` false.
+
+**As built, in dependency order.**
+
+1. `apps/mobile/package.json` — `expo-application: ~58.1.2` (+ `bun.lock`).
+2. `apps/mobile/src/push-env.ts` (new, pure) — `pushEnvironmentOfAps`:
+   `development → sandbox`, `production → production`, `null → production`.
+   The `null` reasoning is Apple's, and is in the file: no
+   `embedded.mobileprovision` = App Store/TestFlight (re-signed at the store,
+   production tokens); the simulator, the other `null`, has no token at all.
+3. `apps/mobile/src/push-expo.ts` — `pushEnvironmentOf` DELETED;
+   `signedPushEnvironment()` wraps the getter and returns `undefined` on a throw
+   (a read that fails sends nothing, never a guess). `readPushFacts` reads the
+   env **before** the token and returns `undefined` when it is unknown, so a
+   build that cannot state its environment never spends a token read.
+4. `apps/mobile/src/push-registration.ts` — `planPushRegistration` dedupes on
+   `state.registeredHash` (in-process) instead of `last.hash` (Keychain). `last`
+   keeps its one remaining job, the H2 toggle-off debt; its docblock says so.
+   `PushPlanInput` keeps `last` in the destructure-free signature, and the
+   module header's load-bearing-property list is updated (per-process dedupe).
+5. `apps/mobile/test/pairing-guards.test.ts` — the comment asserting
+   "development build ⇒ sandbox" (false for a Release archive) replaced with the
+   signature rule.
+6. `packages/daemon/src/session-host.ts` — `registerPush` audits
+   `push-registered <id8> <env>` after a successful write (never a token, never a
+   key). `options.onAudit` already reaches `serve.log` via `serve.ts:751` →
+   `main.ts:1193`, so no wiring change was needed.
+7. `changelog.d/mobile-push-not-registered.fixed.md`.
+
+**Drift from the Implementation — one, and deliberately not forced.**
+
+*Fix C's second half (`push-gone <id8> <reason>`) is NOT implemented; the plan
+is corrected rather than the code.* The plan put that change at
+`push-notifier.ts:311-315` "when `push-result` has one", assuming the relay's
+reason reaches the notifier. It does not: the reason is read at
+`relay-link.ts:638` (`isPushDeliveryStatus(frame.status) ? frame.status : …`) and
+**dropped there** — `RelayPushStatus` (`relay-link.ts:225`) is a bare union and
+`PushSink` (`push-notifier.ts:75`) is `(delivery) => Promise<string>`. Carrying it
+means shaping the resolved value through `RunningRelayLink.push`/`liveActivity`,
+the `pendingPushes` and `heldPushes` entries, `sendFrameOf`'s resolver and every
+audit caller — ~17 status assertions in `relay-link-push.test.ts` alone — on a
+daemon seam the plan's file list never named. It also does not decide the bug:
+the `env` now in `push-registered`, plus the relay host's own journal, already
+name `BadDeviceToken`. Per the brief ("if a step contradicts the code, STOP that
+step and fix the plan"), Design note **C2** and the Files/Tests entries were
+updated to record it as deferred debt. Nothing else drifted.
+
+Two pre-existing tests pinned root cause 2 as *desired* behaviour and were
+inverted, not deleted: `push-manager.test.ts` "the fingerprint survives a NEW
+manager" (now "a relaunch REGISTERS again") and `push-registration.test.ts` "the
+SAME fingerprint already accepted → skip `same`" (now "…registered in THIS run"),
+plus `push-expo-rules.test.ts`'s `NODE_ENV` guard. `push-expo-rules.test.ts`
+lost its local `environmentOf` transcription (and its `PushEnvironment` import)
+because the rule moved to the pure module with its own table.
+
+**Tests — red first, all listed failure modes.**
+
+| Test | Red evidence (buggy tree) |
+|---|---|
+| `push-registration.test.ts` "a daemon-side delete heals on the next launch" | `Expected: 1, Received: 0` — the launch skipped `same` |
+| "a toggle-off DEBT still drains before the launch's register" | new; debt + heal in ONE connect (unregisters 1, registers 1) |
+| "a fingerprint only the KEYCHAIN knows does not skip" | `skip same` → `register` |
+| `push-env.test.ts` mapping table + 2 source guards | `Cannot find module '../src/push-env.ts'` on the old tree; with the module added the guards failed on `process.env.NODE_ENV` (present) and `expo-application` (absent) — red on the property, not just an import |
+| `push-registered-audit.test.ts` `push-registered 01234567 sandbox` | `Received: []` |
+| `push-manager.test.ts` relaunch | `Expected: 1, Received: 2` under the fix (the inverse of the old pin) |
+
+Failure modes covered: the store/`null`→production path (mapping table);
+`development`→sandbox; a failed env read → no facts, nothing sent (the
+`undefined` branch); a dead token (bounded, per launch — the heal test asserts
+exactly ONE register per launch against three syncs); toggle-off unchanged (the
+debt test, and `push-registration`'s off-with-no-link debt); `daemon-too-old`
+still terminal (existing test, still green); two computers (per-computer
+registrars, existing test); concurrent link-ups (`serialise`, existing test).
+A daemon with no audit sink still registers and never throws (`push-registered-audit`
+test 2).
+
+**Mutations (non-vacuity, run and reverted).**
+
+1. `planPushRegistration`: `state.registeredHash === hash` → `input.last?.hash === hash`
+   ⇒ 2 fail ("a daemon-side delete heals", "a fingerprint only the KEYCHAIN knows
+   does not skip").
+2. `push-env.ts`: `apsEnvironment === "development" ? "sandbox" : "production"` →
+   `return "production"` ⇒ 1 fail (the mapping table).
+3. `session-host.ts`: audit line removed ⇒ 1 fail (`push-registered`).
+4. `planPushRegistration`: dedupe disabled (`if (true)`) ⇒ 26 fail (the
+   reconnect-storm guard and every off/on path that relies on it).
+
+Sources restored after each (`grep -c` confirmed the original line back).
+
+**Gate.** Not run here by instruction (the orchestrator's script owns the full
+`bun run check`). Run instead, per §4's narrow rules: `bunx tsc --noEmit` (root,
+clean), `bunx tsc -p apps/mobile --noEmit` (clean), `bunx biome check` on all 11
+changed/added files (clean, no fixes), and the 10 touched/covering test files
+(144 pass, 0 fail) plus `scripts/test/changelog{,-guard}.test.ts` (21 pass). No
+protocol schema changed (`env` was already on the wire), so
+`protocol.json` is untouched and no `protocol.d/` note is needed.
+
+**Unverified here (one line).** The device run in *Validation*: no simulator can
+prove Fix A (no APNs token; `push-placeholder` is quarantined), and the
+`gone`-reason audit remains deferred (note C2). Verify Fix A on the owner's
+phone with one `build.sh` archive — `serve.log` must show
+`push-registered a3b1d932 sandbox`, and a banner must arrive with no `push-gone`.
