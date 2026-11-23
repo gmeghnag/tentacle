@@ -344,7 +344,8 @@ describe("the screen mounts it, on the controller's own view-model", () => {
     // publishes its element on `SHEET_HOSTS` and `desiredStack` decides whether a
     // route is up. `commandsOpen` is read there — the mount is no longer what
     // closes C1's no-op tap, the derived `desired` stack is.
-    expect(SCREEN).toContain('user: commandsOpen ? "commands" : null');
+    // (`userSheet` in `sheet-plan.ts` maps the three flags to one sheet.)
+    expect(SCREEN).toContain("user: userSheet({ commands: commandsOpen,");
     const at = SCREEN.indexOf('host.publish(\n      "commands"');
     expect(at).toBeGreaterThan(-1);
     const props = SCREEN.slice(at, SCREEN.indexOf("/>,", at));
