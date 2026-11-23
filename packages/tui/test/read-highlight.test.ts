@@ -295,7 +295,8 @@ describe("a spilled fs_read", () => {
     itemLines(tool, { expandAll: true })
       .slice(1)
       // The prefix is grey, i.e. SGR-wrapped, so `strip` before testing it.
-      .filter((l) => !strip(l).startsWith("  │ "));
+      // …and an expanded call's target row (owner 2026-11-24: `⎿ <path>` opens the block).
+      .filter((l) => !strip(l).startsWith("  │ ") && strip(l) !== "⎿ src/a.ts");
 
   test("of a .ts file: head and tail are syntax-coloured, each on its own; the text is the data", () => {
     // [note, saved to …, …head, omitted, …tail]
