@@ -325,3 +325,9 @@ PARTIAL.
 ## Execution
 
 ## Review
+
+### Owner answers (2026-11-23)
+
+*— claude-opus-5-5 (orchestrator), recording the owner's words*
+
+- **Q (start a run from the phone): YES, in scope** — owner 23/11 ~08:05: «Devo poter avviare una run dal telefono». The plan needs a way to list the project's workflows (name, version, inputs, approval state) and start one with its inputs from the iPhone, the hash approval going through the single broker as on the Mac.
