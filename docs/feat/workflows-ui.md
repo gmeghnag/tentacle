@@ -12,6 +12,316 @@ Decisions already taken by the owner (keep them): iPhone main view = vertical gr
 
 ## Implementation
 
+*— claude-opus-5-5 (planner), 2026-11-23*
+
+### Load-bearing assumption (named first, proved against the source)
+
+**"Everything the views need is already on the wire and answered by the daemon, except one
+thing — a step's `prompt`/`report`; what is missing is the client keeping and exposing it."**
+If this were false (e.g. the daemon did not publish runs to every client, or `workflow/list`
+were not answered), the slices below would need a daemon redesign, not plumbing.
+
+**What the daemon already sends / answers (verified):**
+
+| Fact | Where |
+|---|---|
+| `workflows` update = FULL state (current + last ended), class `display`, sent to every attached client, idle too | `protocol/src/updates.ts:484-495`, `:599`; emitted `daemon/src/hosted-session.ts:2433-2444` |
+| Row shapes: `WorkflowRowSchema` (runId, name, version, hash, state, stopReason, reason, tokens, budget, startedAt, endedAt, steps ≤ 64) and `WorkflowStepRowSchema` (id, kind, model, where, state, attempt, round, maxRound, reason ≤ 2000, live ≤ 200, durationMs) — **no `prompt`, no `report`** | `protocol/src/session.ts:807-849` |
+| Snapshot field `workflows` on the open/resync snapshot (first page; absent on a pod) | `protocol/src/session.ts:1196-1201`; filled `hosted-session.ts:2236` |
+| `session/workflow` (start / stop / resume / rerun_step; start-like actions carry a client-minted `turnId`; `wake-` refused) | `methods.ts:170-173`, `:320`; schema `session.ts:883-925`; daemon `connection.ts:450-451`, `hosted-session.ts:2458-2489` |
+| `workflow/list` (serve; every LIVE session's runs, newest first, with `needsUser`) | `methods.ts:174-175`, `:321`; `session.ts:927-953`; `session-host.ts:909-917`; `hosted-session.ts:2491-2513` |
+| A step's ask is an ordinary `permission_request` whose `agent.id` is `"<runId>.<stepId>"` (the hash approval: `"<runId>"`), approve steps raise kind `workflow_approve` | `agent/src/workflow-driver.ts:915-945`, `:762-778` |
+| The phone already renders a `workflow_approve` ask allow-once / deny only | `apps/mobile/src/permission-sheet.ts:184` (`sheetOptions`), pinned by `apps/mobile/test/workflow-approve-sheet.test.ts` |
+| Step detail is durable ONLY in the `workflow_step` log entry (`prompt` ≤ 16 KiB, `report` ≤ 64 KiB) | `protocol/src/session-log.ts:373-394`, `:83`; written `workflow-driver.ts:835-848`; daemon log `daemon/src/session-log.ts:230-232` |
+| The daemon's log keeps only the current + previous segment in memory (older dropped at a replacement) | `daemon/src/session-log.ts:72-78`, `:118-119` |
+
+**What the client lacks (verified; `rg -n "workflow|Workflow"` over `packages/client/src`
+hits only `mapping.ts` and `permission-router.ts`; over `packages/tui/src` only
+`permission-ui.ts`; over `apps/mobile/src` only the four pure modules + push/permission):**
+- `mapping.ts:389-391` returns `null` for `workflows` ("by its own listeners") — correct shape,
+  but no such listener exists. Sibling to mirror: `subagents` — listener set
+  `remote-client.ts:965`, `onSessionSubagents`/`subagentsOf` `:1549-1557`,
+  `subagentsChanged` `:3559-3564`, snapshot fold `:3984-3989`, live branch `:4178-4180`.
+- `RemoteSession` has no `workflows`/`onWorkflows`/`workflow()` (sibling: `subagents` getter
+  `remote-session.ts:1058`, `onSubagents` `:1104-1116`, a trust-gated method `deleteSchedule`
+  `:1250-1261`).
+- No public call sends `session/workflow`, `workflow/list`, nor reads a step's detail.
+  `readBack` (`remote-client.ts:2843`) is the persistence read: it needs `sha256`, mutates the
+  held copy (`entry.log`), and its `LogState` keeps only messages (`session-log-reader.ts:38-44`)
+  — not a display source, and a cold read from the phone would page the whole conversation to find
+  one entry.
+- Pass-throughs missing: `cli/src/local-runtime.ts:369-380`/`:947-966` (sub-agents/schedules
+  have them), TUI session type `tui/src/app-types.ts:283-321`, subscriptions
+  `tui/src/useSessionLink.ts:469-475`.
+
+**Empirical check (paste-in for the executor; I could not run `bun` in this planning session —
+the executor runs it FIRST and pastes the output in Execution):**
+`.tentacle/tmp/workflows-ui/lb.ts` — prints, for `RemoteClient.prototype` /
+`RemoteSession.prototype`, whether `workflowsOf`, `onSessionWorkflows`, `workflowList`,
+`workflow`, `workflowStep`, `onWorkflows`, the `workflows` getter exist (expected today: all
+`false`; `subagentsOf`/`onSessionSubagents`/`onSubagents`/`readBack` `true`), `"WorkflowStep" in
+Method` (`false`), the `WorkflowStepRowSchema` keys (no `prompt`/`report`), `UPDATE_CLASS.workflows`
+(`display`), and that `{type:"workflows",runs:[]}` parses. If any "today" value differs, STOP and
+report — the plan's premise moved.
+
+**Consequence → one protocol addition, additive:** a NEW request `session/workflow_step` (the
+step detail on demand). Rejected alternatives: (a) put `prompt`/`report` on the step row — the
+row rides a full-state update re-sent at every step move, up to 64 steps × 80 KiB per frame;
+(b) the client reads `session/log` — persistence-coupled and O(conversation) per tap (above).
+**No `PROTOCOL_VERSION` move, no `protocol.d/` note:** a new method is free (AGENTS §7 forward
+compat: an older daemon answers `MethodNotFound`, handled as "update tentacle"). Nothing existing
+changes shape. The executor regenerates `packages/protocol/schema/protocol.json` with
+`bun run schema:export` on the branch (as slice 9 did) so `json-schema.test.ts` stays green;
+the orchestrator's `protocol:bump` at merge regenerates it again either way.
+
+### Preconditions (verified invariants relied on)
+
+- **One session path** (§7): every runtime goes through `RemoteClient` ↔ `Connection`; the
+  in-process worker AND `serve` have a driver (`cli/src/wiring.ts:835-842`: "the worker and
+  `serve` and NEVER tunnelled"), so the same client code serves TUI-local, `connect` and phone.
+- **Peer not serialized** (§7): `session/log` is served synchronously from the derived log
+  (`connection.ts:425-430`, `hosted-session.ts:2620-2628`); the new method follows the same rule
+  (synchronous, no await, no lock).
+- **Trust bit**: `daemonWakes` is set exactly by the worker, `connect` and the phone
+  (`remote-client.ts:550-557`, `apps/mobile/src/connection.ts:72`, `cli/src/connect.ts:301`) —
+  the same set of daemons that can run a workflow. A pod never runs one (`session.ts:1198-1200`).
+  So the client drops a `workflows` frame / snapshot field with the bit off, exactly like
+  `schedules` (`remote-client.ts:4181-4187`, `:3996-4000`): a pod's runs are a pod-supplied claim
+  about laptop-owned state. `RemoteSession.workflow()` answers its own refusal with the bit off
+  and sends nothing (pattern `deleteSchedule`).
+- **Own-turn attribution**: a run's asks carry its start `turnId` (`workflow-driver.ts:936`);
+  auto-accept answers only asks whose turn this session owns (`remote-session.ts:726-754`), and
+  ownership comes from `mint()` (`:764-772`). So `workflow{start|resume|rerun_step}` MUST
+  `mint` its turnId, or auto-accept silently stops answering the run's tool asks.
+- **Pure modules / dumb components** (§7): every branch below lives in a `.ts` module with tests;
+  `.tsx` only paints a view-model. The four phone pure modules already exist and are tested
+  (`agent-workflows.md:1903-1912`, 47 tests).
+- **Ink gotcha** (§6): blank rows are `" "`.
+
+### Design
+
+**D1 — `session/workflow_step` (protocol + daemon).**
+- `protocol/src/session.ts`: `WorkflowStepParamsSchema {sessionId, runId: WorkflowRunRefSchema,
+  stepId (same regex as rerun_step), attempt?: int ≥ 0, round?: int ≥ 0}` and
+  `WorkflowStepResultSchema {detail?: {attempt, round, live: boolean, state?: line(32),
+  verdict?: line(32), reason?: ≤ 2000, prompt?: ≤ WORKFLOW_PROMPT_MAX_CHARS, report?: ≤
+  SUBAGENT_REPORT_MAX_CHARS, tokens?, durationMs?}}`. Strip schemas. `detail` absent = "not
+  available" (never ran; or its entry left the retained log — compaction, a serve reload).
+- `methods.ts`: `WorkflowStep: "session/workflow_step"` + its table row.
+- `daemon/src/session-log.ts`: `findWorkflowStep(runId, stepId, attempt?, round?)` — scan the
+  retained slots newest-first for a `workflow_step` match (latest attempt/round when omitted);
+  synchronous.
+- `agent/src/workflow-driver.ts`: `Run.current?: {stepId, attempt, round, text}` set when a
+  step's action starts, cleared at its end; `liveStep(runId, stepId)` returns it.
+- `daemon/src/hosted-session.ts`: `workflowStepDetail(params)` — the driver's live step first
+  (`live: true`, prompt, no report), else the log entry (`live: false`); no driver → `{}`.
+- `daemon/src/connection.ts`: `case Method.WorkflowStep` via `this.readable(sessionId)`
+  (reading needs no open, like `session/log`, `:428-431`).
+
+**D2 — client data path.**
+- NEW `packages/client/src/workflows.ts` (pure): `MAX_WORKFLOW_RUNS = 8`, `boundWorkflows(rows)`
+  (keeps newest-first order, caps runs; steps are already ≤ 64 by schema), `workflowsFromSnapshot`,
+  `askForStep(pending, runId, stepId | null)` (matches `agent.id` `"<runId>.<stepId>"` /
+  `"<runId>"`), `WORKFLOW_OLD_DAEMON` / `WORKFLOW_UNTRUSTED_DAEMON` refusal texts.
+- `remote-client.ts`: `workflowListeners`, `onSessionWorkflows`, `workflowsOf`,
+  private `workflowsChanged(entry, rows)`; live branch beside `subagents` (`:4178`) and snapshot
+  fold beside `:3986`, BOTH gated on `daemonWakes`; `workflow(sessionId, params)`,
+  `workflowList()` → `WorkflowListResult | {unsupported: true}` (MethodNotFound),
+  `workflowStep(sessionId, …)` → `WorkflowStepResult | {unsupported: true}`.
+- `remote-session.ts`: `workflows` getter, `onWorkflows` (current list given at once, like
+  `onSubagents`), `workflow(action)` (mints the turnId for start/resume/rerun_step; refuses
+  locally with no id / bit off), `workflowStep(runId, stepId, attempt?)`.
+- `cli/src/local-runtime.ts`: pass-throughs `onWorkflows`, `workflow`, `workflowStep`.
+- `tui/src/app-types.ts`: the same three, optional (absent ⇒ "not supported by this session").
+- `mapping.ts`: unchanged (its `null` is right once the listener exists); its comment names the
+  listener.
+
+**D3 — TUI (spec: mockup `agent-workflows-view` TUI 1 + TUI 2).**
+- `tui/src/workflow-view.ts` (pure): `railLines(run, width, now)` — header
+  `workflow <name> · <done>/<total> · <tok>/<budget> tok`, one line per step `glyph id model
+  [where] dur note` (glyph + WORD always: `✓ ok`, `✗ error`, `▸ running`, `⧗ waiting`,
+  `? needs approval`, `‖ stopped`, `○ pending`, `↻ n/m` on a goto round; an unknown state →
+  `· <word>` as is, never coerced); width tiers drop `where` then `model` (pattern
+  `background-list.ts:36-40`); a long graph windows to `WORKFLOW_RAIL_MAX_STEPS = 7` around the
+  active step with `… +k` rows; `live` tail one line under the running step; reason/live flattened
+  (`oneLine`). Plus `panelView(run, sel, detail, width, maxBody)` (two columns), `workflowKey`
+  (↑↓ / r / o / esc), and `parseWorkflowCommand(args)` (`/workflow` | `run <name> [k=v…]` |
+  `stop` | `resume`).
+- `tui/src/components/WorkflowRail.tsx` paints `railLines`; mounted in `AppView.tsx` in the
+  live area above the queued/slot block (`AppView.tsx:149-157`), ONLY while the current run has
+  no `endedAt` (the end is already an ordinary transcript note, `hosted-session.ts:2417`); its
+  rows counted in the live-area row budget (`activeRows`, `AppView.tsx:190-192` comment) so
+  the input never moves.
+- `tui/src/panels/workflow.ts` + one line in `panels/registry.ts:26-31` + the `OpenPanel` union
+  in `tui/src/panel.ts` (registry's `PanelKindName` derives from it, `registry.ts:37`).
+  `o` fetches `workflowStep` and shows prompt/report in the right column (windowed to
+  `maxBody`); `r` sends `rerun_step`; the reply/refusal is a notice.
+- `tui/src/commands/workflow.ts` + registry line in `commands/registry.ts` (pattern
+  `commands/schedule.ts`: unsupported notice when `sessionRef.current?.onWorkflows` is absent).
+- `useSessionLink.ts`: subscribe `onWorkflows` beside `:469-475`, reset on session switch
+  (`:456`); state held where the dock holds `schedules` (`useDock`).
+- **No `[a]/[d]` in the panel (drift from D6, deliberate):** an approve ask already takes the
+  input as the permission dialog (`AppView.tsx:~130-147`), with the verbatim detail; a second
+  answer path would be a second UI for one ask. The panel line says `? needs approval — answer
+  in the prompt`.
+
+**D4 — iPhone list + graph 2C ⇄ cards 2A + approve.**
+- Routes (`apps/mobile/src/routes.ts`): `WorkflowRuns {computerId, name, sessionId?}` and
+  `WorkflowRun {computerId, sessionId, runId, title}` — two native-stack PUSH screens in
+  `App.tsx` beside `:2714-2820`. Names chosen not to touch `feat/mobile-native-sheets`'s `Sheet`
+  route; no `<Modal>` used.
+- Hub entry `workflows` in `hub-actions.ts:12-27` (label "Workflows"; badge = `needsUserCount`
+  in the current hub idiom: rim arc, no dot); dimmed with `emptyLabel` "No workflow runs" when
+  `workflow/list` returned none.
+- NEW `apps/mobile/src/workflow-runs-controller.ts` (pure, injected client): loads
+  `workflowList()` on focus, on pull, and on any `onSessionWorkflows` notice (debounced 500 ms);
+  `unsupported` → "Update tentacle on this computer"; link down → keeps the last list + an offline
+  line (no spinner loop). Uses `fromListRow`/`elencoSections` (`workflow-list.ts:115`, `:252`).
+- NEW `apps/mobile/src/workflow-run-controller.ts` (pure): attaches through the SAME session
+  runtime (`session-runtimes.ts:35`), follows `onWorkflows`, selects the run by `runId`, view mode
+  `graph | cards` (persisted per app), pairs each approve/waiting step with its pending ask
+  (`askForStep`), answers through the phone's existing sheet path (`permission-sheet.ts:154`,
+  `responseFor` `:217`). If the sheet can only answer its HEAD ask, this slice adds a pure
+  `answerFor(requestId, optionId)` to `permission-sheet.ts` (red-first) — never a second
+  resolve path. Stop / resume / rerun step → `session.workflow(...)`; a refusal is a notice.
+- Screens `apps/mobile/src/screens/WorkflowRuns.tsx`, `WorkflowRun.tsx` (graph via
+  `graphGeometry` + `react-native-svg` if already a dependency, else Views + absolutely
+  positioned pills — the executor checks `apps/mobile/package.json` and uses what is there, never
+  adds a native dep in this slice); cards = one card per step (2A). The approve card shows the
+  ask's `title` + `detail` VERBATIM (scrollable, never truncated: §7 "verbatim `run` commands")
+  and Allow once / Deny.
+- **Labels in English.** `workflow-skeleton.ts:241-262` (`detailBlocks`) and the list words carry
+  the mockup's Italian ("Stato", "Tipo", …); the app UI is English (`Computers`, `Settings`, push
+  "Workflow finished"). This slice switches those strings to English (tests updated with them).
+
+**D5 — iPhone node → detail morph + skeleton (react-native-reanimated: NOT added).**
+- **Decision: RN `Animated`.** Already used in the app (`screens/SessionsDrawer.tsx:30`, `:125`)
+  and enough for one 380 ms transition: progress `Animated.Value` (JS driver,
+  `useNativeDriver: false`, because width/height/borderRadius/fontSize are layout props the native
+  driver refuses) interpolated from a TABLE the pure module computes (new pure
+  `morphTable(from, to, samples = 11)` in `workflow-morph.ts`: inputRange 0..1 → each property's
+  outputs from `morphFrame`), so `workflow-morph.ts` stays the only source of the motion; the
+  graph layer's fade/scale and each row's opacity on separate native-driven values started in
+  `Animated.parallel` with `rowStartMs(i)` delays. Adding reanimated would mean a native module
+  (pods, Babel plugin, worklets package, a new dev-client build, the e2e gate re-baselined) for
+  one screen — cost without a measured need. Revisit only if the e2e shows dropped frames.
+- The detail is a LAYER inside `WorkflowRun` (not a navigation push: a native-stack transition
+  cannot morph from a pill); while it is open, `gestureEnabled: false` and the header back
+  reverses the morph.
+- Skeleton: on tap the kv block is final at once (from the row); `workflowStep(...)` fills
+  prompt/report into the log block, whose skeleton bars are `skeletonBars` (`workflow-skeleton.ts:172`).
+  The property pinned: **no box above the log block moves when the detail arrives**; the log block
+  only grows downward. Reduce Motion (`useAccessibilityFlags`, `SessionScreen.tsx:949`) →
+  `morphLook(true)` crossfade + `skeletonMotion(true)` still bars.
+
+### Slices (dependency order; each S/M; one executor at a time)
+
+| # | Slice | Size · Blast · Suited | Files |
+|---|---|---|---|
+| 1a | `session/workflow_step` (D1) | S · cross-module (additive method) · standard review | `protocol/src/{session,methods}.ts`, `protocol/schema/protocol.json` (regenerated), `daemon/src/{session-log,hosted-session,connection}.ts`, `agent/src/workflow-driver.ts` |
+| 1b | Client data path (D2) | M · cross-module · standard review | `client/src/{workflows (new),remote-client,remote-session,mapping,index}.ts`, `cli/src/local-runtime.ts`, `tui/src/app-types.ts` |
+| 2 | TUI rail + panel + `/workflow` (D3) | M · contained · standard review | `tui/src/{workflow-view (new),panel,useSessionLink,useDock,AppView}.ts(x)`, `tui/src/components/WorkflowRail.tsx` (new), `tui/src/panels/{workflow (new),registry}.ts`, `tui/src/commands/{workflow (new),registry}.ts`, `changelog.d/workflows-ui.added.md` |
+| 3 | iPhone list + graph ⇄ cards + approve (D4) | M · contained · standard review + e2e | `apps/mobile/src/{routes,hub-actions,workflow-runs-controller (new),workflow-run-controller (new),workflow-list,workflow-skeleton,permission-sheet}.ts`, `apps/mobile/src/screens/{WorkflowRuns,WorkflowRun}.tsx` (new), `apps/mobile/App.tsx`, `apps/mobile/src/screens/SessionScreen.tsx` (hub entry wiring only), e2e flow + seed |
+| 4 | iPhone morph + skeleton (D5) | M · contained · standard review + e2e | `apps/mobile/src/workflow-morph.ts` (`morphTable`), `apps/mobile/src/screens/WorkflowStep.tsx` (new, the layer), `WorkflowRun.tsx`, e2e flow |
+
+**PARTIAL rule (every slice):** the executor first re-runs the checks its slice stands on — 1a:
+`lb.ts`; 1b: `"WorkflowStep" in Method` true and the daemon answers it; 2: `RemoteSession.onWorkflows`
+/ `workflow` / `workflowStep` exist and `local-runtime` passes them; 3–4: `RemoteClient.workflowList`
+and `RemoteSession.workflowStep` exist. If any is missing, write `### Slice N — PARTIAL` in
+Execution with the failing line and STOP — no screen without its data path. The chain stops on
+PARTIAL.
+
+### Failure modes (how each converges)
+
+| Slice | Failure | Converges to |
+|---|---|---|
+| 1a | step never ran / its entry left the retained log (compaction, serve reload) | `{}` → UI "detail no longer available" (never a throw, never a stale other step's text) |
+| 1a | asked mid-step | `live: true` + resolved prompt, no report; re-asked when the row says ended |
+| 1a | tunnelled session (no driver) | `{}` |
+| 1a/1b | older daemon | `MethodNotFound` → `{unsupported:true}` → "update tentacle" |
+| 1b | disconnect mid-run / lost update | full-state update + snapshot field on resync repaint (`workflowsChanged` from the snapshot, then buffered frames in seq order); nothing stale |
+| 1b | run started elsewhere (model, another client, a schedule) | every attached client gets the frame (`updates.ts:486`) and shows it; its asks are foreign to this client's auto-accept (correct: not mine) |
+| 1b | pod daemon sends `workflows` | dropped (bit off); `workflow()` refused locally, nothing sent |
+| 1b | start reply refused (`ok:false`, one run already running, hash changed) | `reason` returned as a value, shown as a notice |
+| 1b | client forgets `mint` | caught by the test below (auto-accept would silently stop) |
+| 2/3/4 | unknown step kind / state from a newer daemon | shown as its own word with a neutral glyph (`·`), never coerced (pattern `stateLook`, `workflow-list.ts:79`; phone already tested M6) |
+| 2/3/4 | very long graph (64 steps) | TUI windows ±3 around the active step with `… +k`; phone scrolls (64-step non-overlap already pinned, `workflow-list-graph.test.ts`) |
+| 2/3/4 | multi-line / escape-laden reason from a `run` step | flattened `oneLine` for rows; the detail shows it as lines; never raw SGR |
+| 3 | session ended between list and tap | open refused → "This session has ended" + back; never `open{reopen}` (archive rule §7) |
+| 3 | `workflow/list` against a worker (not serve) | the phone only reaches `serve`; on `unsupported` the hub entry is dimmed |
+| 3 | approve ask answered elsewhere first | `permission_resolved` removes it; the card falls back to the step's state, buttons gone |
+| 4 | Reduce Motion | crossfade 200 ms + static bars (the layout still holds) |
+| 4 | detail arrives during the flight | the log block fills in place; boxes above unchanged |
+| 4 | tap while a morph runs | ignored until settled (one flight at a time) |
+
+### Tests (red first; the property each kills)
+
+- **1a** `daemon/test/workflow-step-detail.test.ts` (fakes as `workflow-hosted.test.ts`):
+  ended step → its `prompt` + `report` from the log, `live:false`; running step → `live:true`,
+  prompt, no report; latest attempt when `attempt` omitted, the asked one when given; unknown step
+  → `{}`; after a `replaced` (compaction) beyond the previous segment → `{}`; tunnelled → `{}`.
+  `protocol/test/json-schema.test.ts` green after `schema:export`. Red: method missing →
+  `MethodNotFound`.
+- **1b** `client/test/workflows-client.test.ts` (fake peer as `client/test/subagents.test.ts`):
+  a `workflows` frame reaches `onSessionWorkflows` and `RemoteSession.onWorkflows` in seq order;
+  a resync snapshot repaints (failure row "lost update"); bit off → frame and snapshot DROPPED and
+  `workflow()` sends nothing; `workflow({action:"start"})` sends a non-`wake-` turnId AND
+  `session.ownsTurn(thatId)` is true (mutation: remove `mint` → red); `workflowList`/`workflowStep`
+  map `MethodNotFound` to `{unsupported:true}`; `askForStep` matches `wf-1.merge` and not
+  `wf-11.merge`. Pass-through: `cli/test/local-runtime*.test.ts` pattern, the three methods reach
+  `inner`.
+- **2** `tui/test/workflow-view.test.ts` (pure: every state glyph + word, width tiers, window
+  `… +k`, unknown state as is, flattening) and `tui/test/workflow-frames.test.tsx`
+  (ink-testing-library, pattern `schedule-panel-frames.test.tsx`): rail frame text equals the
+  mockup TUI 1 lines for the fixture run; the input row's y does not change when the rail
+  appears/disappears (the exact property, not "height constant"); `/workflow` opens the panel,
+  ↑↓ moves, `o` paints the fetched report, `r` sends `rerun_step`, unsupported session → notice.
+- **3** `apps/mobile/test/workflow-runs-controller.test.ts`, `workflow-run-controller.test.ts`
+  (pure, fake client): refresh triggers; offline keeps the list; unsupported; mode toggle;
+  ask↔step pairing; answer goes through the sheet's path with that `requestId`; resolved-elsewhere
+  removes buttons; hub entry dimmed/badged (`hub-actions.test.ts`); routes (`routes.test.ts`).
+  Screens are pinned by source-reading tests only (RN is Flow, unimportable from Bun — see
+  `apps/mobile/test/hub-tools-wiring.test.ts` header) plus the e2e shots.
+- **4** `apps/mobile/test/workflow-morph-skeleton.test.ts` additions: `morphTable` inputRange
+  strictly increasing, every output equals `morphFrame` at that sample, endpoints exact; the
+  boxes above the log block are identical before and after the detail lands (mutation: lay the
+  log above the kv → red).
+
+### Validation (screenshots — the orchestrator runs them)
+
+- **TUI (slice 2):** frames captured by `workflow-frames.test.tsx` and pasted (SGR-stripped) into
+  Execution: (T1) rail with the mockup fixture at 120 cols; (T2) same at 60 cols (tiers);
+  (T3) 64-step run windowed; (T4) `/workflow` panel, `review` selected; (T5) panel after `o`.
+- **iPhone (slices 3–4):** a new Maestro flow `apps/mobile/e2e/flows/42-workflow-shots.yaml` +
+  a seed step (`seed.ts` gains `startWorkflow`, through its own `RemoteClient`, `seed.ts:9-13`)
+  that writes `project/workflows/demo.yaml` (an `agent` step on the mock model, a `run` step
+  `echo ok`, an `approve` step) and starts it. Shots on iOS 26 and 18: (P1) hash-approval sheet
+  showing the `run` command verbatim; (P2) Workflows list with "needs you" section; (P3) graph 2C
+  with the running blink frame; (P4) cards 2A; (P5) approve card with Allow once / Deny; (P6)
+  after allow → run `ok`; slice 4 adds (P7) mid-morph frame, (P8) skeleton, (P9) detail loaded,
+  (P10) Reduce Motion on (simulator accessibility setting) — skeleton still. Run:
+  `bun run e2e:mobile --ios 26 --only 42-workflow-shots` (and `--ios 18`).
+
+### Owner questions (each with a recommendation)
+
+1. **TUI rail placement** — live block above the input only while a run is not ended (the end
+   stays as the transcript note), not a block re-painted inside the scrolled transcript?
+   *Recommend: yes* — the transcript is static once printed; a live block there would reflow.
+2. **Starting a NEW run from the phone** — needs a list of workflow files (no such method today).
+   *Recommend: not in this task*; the phone does stop / resume / rerun step / approve; start stays
+   TUI `/workflow run` or the model. A `workflow/defs` method can follow with the editor task.
+3. **Phone labels in English** (the pure modules carry the mockup's Italian). *Recommend: English*,
+   as the rest of the app.
+
+### Notes / debt (deliberate)
+
+- No global key opens the TUI panel (the `keys/` contract tests make a new binding a cross-cutting
+  change); `/workflow` and the palette do. A key can follow if asked.
+- After a `serve` restart, ended runs from before it are not in the driver's rows (unchanged
+  behaviour of agent-workflows); out of scope.
+- `needsUser` counts `waiting · slot` as "needs you" (`hosted-session.ts:2507-2508`) — pre-existing;
+  noted, not changed here.
+
 ## Execution
 
 ## Review
