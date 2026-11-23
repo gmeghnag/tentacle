@@ -404,3 +404,9 @@ Plan impact (no plan text rewritten here; for the planner/owner):
 3. Activity stays the JS sheet in this task.
 
 **Implementation APPROVED.**
+
+### Owner decision on F5a (2026-11-23 ~12:55)
+
+*— claude-opus-5-5 (orchestrator), recording the owner*
+
+**A:** the lock wins by DRAINING the sheet stack — when the app locks, and already on `inactive` (before the app-switcher snapshot), `reconcile` pops every native sheet; `desired` survives, so the same sheets re-push after the unlock. Pure JS, reuses the plan's reconcile loop. Needs its OWN simulator proof before S3 (lock `immediately` + Home + relaunch → `lock-screen` visible, no session content in the app-switcher snapshot; unlock → the same sheets back at their detents; an ask pending in a Permission sheet survives as a pending ask). Alternative **B** (the lock presented from the top-most VC / its own `UIWindow`, native) is NOT taken now — parked in TODO (`eval/lock-own-window`). Also: re-check `docs/feat/mobile-lock.md` fact 3, false for this route (F5a).
