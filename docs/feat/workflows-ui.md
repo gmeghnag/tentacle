@@ -645,3 +645,11 @@ not-versioned sentence.
 - **Owner 23/11 ~10:30: YES** — `.gitignore` becomes `.tentacle/*` + `!.tentacle/workflows/` (tentacle repo, part of this task), so `.tentacle/workflows/` is versioned. Other repos: tentacle never edits a user's `.gitignore` by itself; the `/workflow` view says when `.tentacle/workflows/` is ignored by git (approval still works, but no versioning).
 
 **Implementation v3 APPROVED** — owner 23/11 ~10:45 («ok»). Slice order 0 → 1a → 1b → 5a → 2 → 2b → 3 → 4 → 5b; execution after `feat/mobile-native-sheets`.
+
+### Owner review of v3 (2026-11-23 ~11:00) — slice 0 is REDESIGNED (v3 approval suspended for slice 0)
+
+*— claude-opus-5-5 (orchestrator), recording the owner's objections, verified in the source*
+
+- The owner objected to «the path is built in one place and becomes a constant». Verified: the only reader is `packages/cli/src/workflow-files.ts:41` `join(cwd, "workflows")`, plus hand-written `workflows/…` strings in messages and the approval-store key (`:47-55`, `agent/src/workflow-driver.ts:86-89`, `core/src/workflow-spec.ts:337-349,777`). Two real problems a constant does not fix: (1) it resolves against **`cwd`**, not the **project root** — started in a subfolder (`~/tentacle/apps/mobile`) tentacle would look in `apps/mobile/.tentacle/workflows`; (2) **`.tentacle/` is already used by other features, each with its own hand-written path**: `.tentacle/hide` (`cli/src/workspace-mount.ts:252,287`, `cli/src/engine-select.ts:373,421,446`), `.tentacle/tool-output` (`agent/src/agent.ts:2973`).
+- **Owner decision:** slice 0 becomes ONE project-paths module in core: find the project root (git root, or the nearest ancestor with `.tentacle/`, decide and justify; what for a non-git dir like `~/assistant`), define `.tentacle/` and its children (`workflows`, `hide`, `tool-output`, …) with the symlink/escape checks in ONE place, and migrate **workflows, hide and tool-output** to it (no behaviour change for hide/tool-output beyond the root resolution — say exactly what changes, if anything, e.g. a pod/container workspace or `--cwd`).
+- «Approvals are not migrated, workflows must be re-approved»: irrelevant (no approved workflow exists yet: the feature landed 23/11 04:45) — drop it from the plan.
