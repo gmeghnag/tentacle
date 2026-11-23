@@ -243,3 +243,4 @@ includes the user's text in that message.
 
 1. **Supersede pdf-images S3 with `feat/image-view`: YES** («assolutamente d'accordo»). The (a)/(b) cap decision and its protocol bump are dropped.
 2. **Old user images on demand after N = 2 turns (slice 2): YES** («assolutamente, queste scelte di ottimizzazione sono quello che fa la differenza»). The current turn's images stay always-sent; the log is untouched (request projection only).
+3. **Per-model escape hatch (`imageToolPolicy: inline`): NOT now** — only if the Qwen farmaquiz acceptance (≈10 questions answerable only from an image; count `image_view` calls) shows Qwen skips looking (owner «ok», 23/11).
