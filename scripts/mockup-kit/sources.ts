@@ -17,6 +17,15 @@ import { FADE_MS as FLOAT_FADE_MS, FLOAT_SIZE } from "../../apps/mobile/src/floa
 import { LANDING_REVEAL_MS, SETTLE_MS } from "../../apps/mobile/src/follow.ts";
 import * as hubFan from "../../apps/mobile/src/hub-fan.ts";
 import { FLASH_MS } from "../../apps/mobile/src/hub-flash.ts";
+import {
+  HOME_INSET_PT,
+  SPRITE_PT,
+  colorsFor,
+  frameAt,
+  pixels,
+  sceneByKey,
+  stillFrame,
+} from "../../apps/mobile/src/mascot-scenes.ts";
 import * as motion from "../../apps/mobile/src/motion.ts";
 import { NOTICE_GLYPHS } from "../../apps/mobile/src/notice-group.ts";
 import { ARM_MS } from "../../apps/mobile/src/permission-sheet.ts";
@@ -236,6 +245,27 @@ export function viewModels(dotLook: DotLookFn): Record<string, Value> {
       };
     })(),
     hubButton: { size: FLOAT_SIZE },
+    mascot: mascotViewModel(),
+  };
+}
+
+/**
+ * Polpetto as the app draws him (`mascot-scenes.ts` `pixels`): rects relative to
+ * the home's top-left corner (a geometry whose home is (0, 0)), in the `mint`
+ * palette of the owner's screenshot. `still` is Reduce Motion's frame; `skate`
+ * the Skateboard scene braked at home (t = 2.5 s, eyes open).
+ */
+function mascotViewModel(): Record<string, Value> {
+  const geometry = { width: SPRITE_PT, height: SPRITE_PT + HOME_INSET_PT };
+  const colors = colorsFor("mint");
+  const rects = (ops: Parameters<typeof pixels>[0]): Value =>
+    pixels(ops, geometry, colors).map((r) => ({ ...r }));
+  return {
+    palette: "mint",
+    homeInset: HOME_INSET_PT,
+    sprite: SPRITE_PT,
+    still: rects(stillFrame()),
+    skate: rects(frameAt(sceneByKey("skate"), 2_500)),
   };
 }
 

@@ -155,8 +155,8 @@ function assistantLines(text: string): string[] {
   }
   const rendered = renderMarkdown(text).replace(/\n+$/, "");
   const [first = "", ...rest] = rendered.split("\n");
-  // A brand-accent bullet marks the reply; continuation lines hang under it.
-  return [`${theme.accent(BULLET)} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
+  // The reply's bullet has the reply text's colour (owner 2026-11-23); continuation lines hang under it.
+  return [`${BULLET} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
 }
 
 /**
