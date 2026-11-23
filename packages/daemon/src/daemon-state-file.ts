@@ -73,12 +73,25 @@ export const DAEMON_STATE_VERSION_NO_MEDIA = 1;
  * leaves its files untouched; every session without schedules stays 1 or 2.
  */
 export const DAEMON_STATE_VERSION_SCHEDULES = 3;
+/**
+ * 4: some schedule starts a WORKFLOW or is of kind `daily`
+ * (docs/feat/agent-workflows.md slice 10), written only then. A v3 reader keeps
+ * such a job but DROPS its `target` — it would fire the job's label as a model
+ * turn. Stamped 4, that build refuses the one session loudly instead.
+ */
+export const DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES = 4;
 /** The versions this build READS (a tail without refs is equally valid as either). */
 export const DAEMON_STATE_VERSIONS: readonly number[] = [
   DAEMON_STATE_VERSION_NO_MEDIA,
   DAEMON_STATE_VERSION,
   DAEMON_STATE_VERSION_SCHEDULES,
+  DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES,
 ];
+
+/** Whether a table holds v4 content (a workflow target or a `daily` job). */
+export function hasWorkflowSchedules(table: readonly ScheduledJob[] | undefined): boolean {
+  return (table ?? []).some((job) => job.target !== undefined || job.kind === "daily");
+}
 
 /** The state file, as written (compact JSON, one object). */
 export interface DaemonSidecar {
@@ -138,11 +151,13 @@ export function sidecarOf(record: DaemonSessionRecord): DaemonSidecar {
     // v3 exactly when it carries schedules, else v2 exactly when a tail message
     // carries refs: a file with neither is readable by every build, which is
     // the whole point of the split.
-    schemaVersion: schedules
-      ? DAEMON_STATE_VERSION_SCHEDULES
-      : tail.some(hasAttachments)
-        ? DAEMON_STATE_VERSION
-        : DAEMON_STATE_VERSION_NO_MEDIA,
+    schemaVersion: hasWorkflowSchedules(record.schedules)
+      ? DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES
+      : schedules
+        ? DAEMON_STATE_VERSION_SCHEDULES
+        : tail.some(hasAttachments)
+          ? DAEMON_STATE_VERSION
+          : DAEMON_STATE_VERSION_NO_MEDIA,
     id: record.id,
     logHead: { seq: record.logHead.seq, id: record.logHead.id },
     k,
@@ -393,13 +408,19 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
   // that has them is not this build's own, refused like refs in a v1 tail.
   let schedules: ScheduledJob[] | undefined;
   if (value.schedules !== undefined) {
-    if (version !== DAEMON_STATE_VERSION_SCHEDULES) {
+    if (
+      version !== DAEMON_STATE_VERSION_SCHEDULES &&
+      version !== DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES
+    ) {
       return {
         ok: false,
         reason: `a schemaVersion ${version} state file carries "schedules" (it must be ${DAEMON_STATE_VERSION_SCHEDULES})`,
       };
     }
-    const parsed = parseScheduleRecords(value.schedules);
+    // v3 PROMISES no workflow target / `daily` (what a v3 build reads).
+    const parsed = parseScheduleRecords(value.schedules, {
+      workflowTargets: version === DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES,
+    });
     if (parsed === null) {
       return { ok: false, reason: '"schedules" is malformed' };
     }

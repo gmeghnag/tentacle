@@ -90,6 +90,8 @@ export interface PushCommand {
   readonly turnId?: string;
   /** The workflow run this is about (`run_done`, `run_stopped`): its own banner. */
   readonly runId?: string;
+  /** The schedule this is about (`run_not_started`). */
+  readonly scheduleId?: string;
   /** "+N more waiting": other asks of this session whose grace had also ended. */
   readonly more?: number;
   /** When the rules decided it (`now()`), so the caller's `at` and the audit line agree. */
@@ -148,6 +150,16 @@ export type PushEvent =
       readonly state: string;
       /** With `stopped`: `budget` | `timeout` | `cancelled` | `interrupted` | `changed` today. */
       readonly stopReason?: string;
+      readonly attached: PushAttached;
+    }
+  // A SCHEDULED workflow fire could not start for a reason the user must fix
+  // (agent-workflows slice 10 S10-7). Idempotent by `fireKey`
+  // (`<scheduleId>#<fires>`): the `schedules` update is full state too.
+  | {
+      readonly type: "run_not_started";
+      readonly sessionId: string;
+      readonly scheduleId: string;
+      readonly fireKey: string;
       readonly attached: PushAttached;
     }
   | { readonly type: "tick" };
@@ -511,10 +523,72 @@ export function createPushRules(options: PushRulesOptions): PushRules {
     };
   };
 
+  /**
+   * A scheduled workflow fire that did not start (slice 10 S10-7): unattended
+   * only (a watching client already shows the row), ONCE per fire (mutation:
+   * drop the memory → a buzz per later `schedules` update), under the storm cap.
+   */
+  const notStartedCommand = (
+    event: Extract<PushEvent, { type: "run_not_started" }>,
+    at: number,
+  ): PushRulesResult => {
+    const key = `sc:${event.fireKey}`;
+    const state = stateOf(event.sessionId, event.attached);
+    if (state.announcedRuns.includes(key)) {
+      return NONE;
+    }
+    remember(event.sessionId, event.attached, key);
+    if (event.attached.clients > 0) {
+      return NONE;
+    }
+    const devices = sortedIds(options.registered());
+    if (devices.length === 0) {
+      return {
+        commands: [],
+        notes: [
+          {
+            code: "push-empty",
+            sessionId: event.sessionId,
+            detail: "run_not_started with no registered device",
+          },
+        ],
+      };
+    }
+    if (capReached(at)) {
+      return {
+        commands: [],
+        notes: [
+          {
+            code: "push-capped",
+            sessionId: event.sessionId,
+            detail: `${maxPerMinute}/min reached`,
+          },
+        ],
+      };
+    }
+    recent = [...recentAt(at), at];
+    return {
+      commands: [
+        {
+          kind: "run_not_started",
+          sessionId: event.sessionId,
+          devices,
+          collapseId: pushCollapseIdOf(event.sessionId, key),
+          scheduleId: event.scheduleId,
+          at,
+        },
+      ],
+      notes: [],
+    };
+  };
+
   return {
     apply(event) {
       if (event.type === "run_end") {
         return runCommand(event, now());
+      }
+      if (event.type === "run_not_started") {
+        return notStartedCommand(event, now());
       }
       if (event.type === "tick") {
         const at = now();

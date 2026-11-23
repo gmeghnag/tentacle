@@ -77,6 +77,7 @@ import {
   type PermissionResponse,
   SCHEDULE_ID_PREFIX,
   type ScheduleCreateResult,
+  type ScheduleLast,
   type ScheduleLimits,
   type ScheduleLink,
   type ScheduleRequest,
@@ -96,6 +97,7 @@ import {
   scheduleCreate,
   scheduleDelete,
   schedulePromptText,
+  scheduleRecordFire,
   scheduleSettled,
   scheduleStep,
   wakeDue,
@@ -125,6 +127,8 @@ import {
   type QueuedEntry,
   type ReturnedEntry,
   SCHEDULE_LABEL_MAX,
+  type ScheduleCreateParams,
+  type ScheduleCreateResult as ScheduleCreateRpcResult,
   type ScheduleDeleteResult,
   type ScheduleRow,
   type SendNowMessage,
@@ -512,7 +516,10 @@ export type PushWatchedUpdate =
   // too, and the `workflows` update is where the session says it. Fed to the
   // push rules as `run_end`, which ignores a run it has already announced (the
   // list is FULL STATE and repeats an ended run on every later step).
-  | UpdateOf<"workflows">;
+  | UpdateOf<"workflows">
+  // Slice 10: the `schedules` list carries a workflow fire's outcome (`last`);
+  // the push rules turn a "needs the human" one into `run_not_started`, once.
+  | UpdateOf<"schedules">;
 
 /**
  * What a push observer is told, when (`PushEvent` in `push-rules.ts` is the
@@ -2728,7 +2735,9 @@ export class HostedSession {
       update.type !== "session_title" &&
       // Slice 9: a run's end (owner Q5). Full state, so the push rules see the
       // same ended run again on a later step; they announce each run id ONCE.
-      update.type !== "workflows"
+      update.type !== "workflows" &&
+      // Slice 10: a scheduled workflow fire that did not start (`run_not_started`).
+      update.type !== "schedules"
     ) {
       return;
     }
@@ -3666,6 +3675,12 @@ export class HostedSession {
     return {
       now: () => this.now(),
       create: (request) => this.createSchedule(request),
+      createWorkflow: (request) =>
+        this.createWorkflowSchedule(
+          request,
+          this.activeTurnId ?? "",
+          this.activeTurnId ?? undefined,
+        ),
       list: () => this.scheduleTable,
       delete: (id) => this.removeSchedule(id),
     };
@@ -3687,6 +3702,90 @@ export class HostedSession {
       this.scheduleChanged(result.table);
     }
     return result;
+  }
+
+  /**
+   * A WORKFLOW schedule (agent-workflows slice 10 S10-4), from the model's
+   * `schedule_create{workflow}` or the user's `session/schedule_create`. The
+   * file and inputs are validated through the driver and the CURRENT hash is
+   * pinned. An unapproved hash does not refuse: the job is created and the
+   * approval is asked NOW, while someone is there (raised, never awaited —
+   * a fire before the answer records `unapproved`).
+   */
+  async createWorkflowSchedule(
+    request: ScheduleRequest,
+    createdBy: string,
+    approvalTurnId: string | undefined,
+  ): Promise<ScheduleCreateResult> {
+    const workflow = request.workflow;
+    if (workflow === undefined || request.prompt !== undefined) {
+      return { ok: false, reason: "give exactly one of `prompt` or `workflow`" };
+    }
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return { ok: false, reason: "workflows run only on a laptop or serve session" };
+    }
+    if (this.scheduling === undefined) {
+      return { ok: false, reason: "this session cannot schedule" };
+    }
+    const inputs = new Map<string, string>();
+    for (const { name, value } of workflow.inputs) {
+      if (inputs.has(name)) {
+        return { ok: false, reason: `input ${name} is given twice` };
+      }
+      inputs.set(name, value);
+    }
+    const seen = await driver.inspect(workflow.name, Object.fromEntries(inputs));
+    if (!seen.ok) {
+      return { ok: false, reason: seen.reason };
+    }
+    if (this.closed) {
+      return { ok: false, reason: "this session has ended" };
+    }
+    const result = scheduleCreate(
+      this.scheduleTable,
+      { ...request, workflow: { ...workflow, hash: seen.hash } },
+      {
+        id: `${SCHEDULE_ID_PREFIX}${this.scheduleSeq + 1}`,
+        now: this.now(),
+        createdBy,
+        ...(this.scheduling.limits ? { limits: this.scheduling.limits } : {}),
+      },
+    );
+    if (!result.ok) {
+      return result;
+    }
+    this.scheduleSeq += 1;
+    this.scheduleChanged(result.table);
+    this.scheduleAudit(`schedule: ${result.job.id} created workflow ${workflow.name} ${this.id}`);
+    if (!seen.approved) {
+      void driver.requestApproval(workflow.name, approvalTurnId).catch(() => {});
+    }
+    return result;
+  }
+
+  /**
+   * `session/schedule_create` (S10-4): the USER schedules a workflow. Answers up
+   * to the create; the approval ask, when needed, is raised and never awaited
+   * (§7). A `wake-` id is the daemon's own and is refused, as on `session/workflow`.
+   */
+  async scheduleCreateRpc(params: ScheduleCreateParams): Promise<ScheduleCreateRpcResult> {
+    if (params.turnId.startsWith(WAKE_TURN_PREFIX)) {
+      return { ok: false, reason: "a wake turn id cannot create a schedule" };
+    }
+    const result = await this.createWorkflowSchedule(
+      {
+        workflow: { name: params.workflow.name, inputs: params.workflow.inputs ?? [] },
+        ...(params.every !== undefined ? { every: params.every } : {}),
+        ...(params.at !== undefined ? { at: params.at } : {}),
+        ...(params.daily !== undefined ? { daily: params.daily } : {}),
+      },
+      params.turnId,
+      params.turnId,
+    );
+    return result.ok
+      ? { ok: true, scheduleId: result.job.id }
+      : { ok: false, reason: result.reason.slice(0, 2000) };
   }
 
   /** Drop one job (the model's `schedule_control{delete}` or the user's method). */
@@ -3749,6 +3848,14 @@ export class HostedSession {
     for (const job of step.expired) {
       this.scheduleAudit(`schedule: ${job.id} expired ${this.id}`);
     }
+    for (const job of step.missed) {
+      this.scheduleAudit(`schedule: ${job.id} missed (later than the grace) ${this.id}`);
+    }
+    if (step.due !== null && step.due.target !== undefined) {
+      // A workflow job: the driver starts the run directly — no turn, no slot.
+      this.fireWorkflow(step.due, step.table);
+      return;
+    }
     if (step.due === null) {
       if (changed) {
         this.scheduleTable = step.table;
@@ -3797,6 +3904,91 @@ export class HostedSession {
       this.reportTurnError(error);
     }
     this.scheduleAudit(`wake: scheduled ${job.id} ${this.id}`);
+    this.armSchedules();
+  }
+
+  /**
+   * Fire a WORKFLOW job (slice 10 S10-2), already advanced in `table`: commit
+   * and capture the advance FIRST (at-most-once, as `fireSchedule`), then ask
+   * the driver for a scheduled start under a daemon-minted `wake-` turn id (A10:
+   * the id both sides' auto-accept trust, and never a client's). No `prompt()`,
+   * no `firedTurns`, no turn slot. The outcome is recorded on the row (`last`),
+   * captured, published and audited when the driver answers.
+   */
+  private fireWorkflow(job: ScheduledJob, table: readonly ScheduledJob[]): void {
+    this.scheduleTable = table;
+    this.persist();
+    this.publishSchedules();
+    const target = job.target?.workflow;
+    const driver = this.workflows;
+    const at = this.now();
+    if (target === undefined || driver === undefined) {
+      this.settleWorkflowFire(job.id, {
+        at,
+        outcome: "unavailable",
+        reason: "workflows run only on a laptop or serve session",
+      });
+      this.armSchedules();
+      return;
+    }
+    const inputs: Record<string, string> = {};
+    for (const { name, value } of target.inputs) inputs[name] = value;
+    void driver
+      .startScheduled({
+        name: target.name,
+        inputs,
+        pinnedHash: target.hash,
+        scheduleId: job.id,
+        turnId: `${WAKE_TURN_PREFIX}${crypto.randomUUID()}`,
+      })
+      .then(
+        (result) =>
+          this.settleWorkflowFire(
+            job.id,
+            result.ok
+              ? { at, outcome: "started", runId: result.runId }
+              : { at, outcome: result.outcome, reason: result.reason },
+          ),
+        (error: unknown) =>
+          this.settleWorkflowFire(job.id, {
+            at,
+            outcome: "invalid",
+            reason: error instanceof Error ? error.message : String(error),
+          }),
+      );
+    this.armSchedules();
+  }
+
+  /** Record a workflow fire's outcome (`last`), the failure stop, and tell everyone. */
+  private settleWorkflowFire(jobId: string, last: ScheduleLast): void {
+    if (this.closed) {
+      return;
+    }
+    const { table, removed } = scheduleRecordFire(this.scheduleTable, jobId, last);
+    if (removed) {
+      // The row with its last outcome is published once before it goes, so a
+      // reader (the push rules) sees WHY it was removed.
+      this.scheduleTable = this.scheduleTable.map((job) =>
+        job.id === jobId
+          ? {
+              ...job,
+              last: { ...last, reason: `${last.reason ?? last.outcome} · schedule removed` },
+            }
+          : job,
+      );
+      this.publishSchedules();
+    }
+    this.scheduleTable = table;
+    this.persist();
+    this.publishSchedules();
+    this.scheduleAudit(
+      last.outcome === "started"
+        ? `schedule: ${jobId} started ${last.runId ?? ""} ${this.id}`
+        : `schedule: ${jobId} not started · ${last.outcome} ${this.id}`,
+    );
+    if (removed) {
+      this.scheduleAudit(`schedule: ${jobId} stopped after failures ${this.id}`);
+    }
     this.armSchedules();
   }
 

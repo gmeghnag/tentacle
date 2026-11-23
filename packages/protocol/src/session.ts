@@ -1083,6 +1083,32 @@ export const ScheduleRowSchema = z.object({
   /** Fired turns so far: the ordinal the fired prompt quotes (`fire 5`). */
   fires: z.number().int().nonnegative(),
   createdAt: z.number().int().nonnegative(),
+  /**
+   * Present iff the job starts a WORKFLOW instead of a turn (agent-workflows
+   * slice 10). Lenient labels like the rest of the row: `inputs` as `k=v`
+   * strings, `hash` shortened. An older client drops it and paints `prompt`
+   * (the daemon fills it with `workflow <name> k=v…`).
+   */
+  workflow: z
+    .object({
+      name: z.string(),
+      inputs: z.array(z.string()),
+      hash: z.string(),
+    })
+    .optional(),
+  /**
+   * The last fire of a workflow job: when, and its outcome word (`started`,
+   * `skipped`, `missed`, `changed`, `unapproved`, `invalid`, `unavailable`, or a
+   * newer build's — a free string).
+   */
+  last: z
+    .object({
+      at: z.number().int().nonnegative(),
+      outcome: z.string(),
+      reason: z.string().optional(),
+      runId: z.string().optional(),
+    })
+    .optional(),
 });
 export type ScheduleRow = z.infer<typeof ScheduleRowSchema>;
 
@@ -1112,6 +1138,36 @@ export const ScheduleDeleteResultSchema = z.object({
   reason: z.string().optional(),
 });
 export type ScheduleDeleteResult = z.infer<typeof ScheduleDeleteResultSchema>;
+
+/**
+ * `session/schedule_create` (agent-workflows slice 10): the USER schedules a
+ * workflow to start by itself — `every 2h` / `daily 03:00` / `at …`, exactly
+ * one. Workflow targets only in v1. `turnId` is client-minted (a `wake-` id is
+ * refused, as on `session/workflow`); the daemon answers up to the create and
+ * RAISES the hash approval when needed, never awaiting it (§7 don't serialize
+ * the peer). Additive: an older daemon answers `MethodNotFound`.
+ */
+export const ScheduleCreateParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  turnId: TurnIdSchema,
+  workflow: z.object({
+    name: WorkflowNameSchema,
+    inputs: z.array(WorkflowInputValueSchema).max(64).optional(),
+  }),
+  every: z.string().min(1).max(32).optional(),
+  at: z.string().min(1).max(64).optional(),
+  daily: z.string().min(1).max(16).optional(),
+});
+export type ScheduleCreateParams = z.infer<typeof ScheduleCreateParamsSchema>;
+
+export const ScheduleCreateResultSchema = z.object({
+  ok: z.boolean(),
+  /** The new job's `sc-N`. */
+  scheduleId: z.string().max(64).optional(),
+  /** Why nothing was created (or a note, e.g. "approval asked"): a notice, never thrown. */
+  reason: z.string().max(2000).optional(),
+});
+export type ScheduleCreateResult = z.infer<typeof ScheduleCreateResultSchema>;
 
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */

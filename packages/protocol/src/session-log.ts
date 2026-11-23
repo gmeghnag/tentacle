@@ -365,6 +365,8 @@ export const LogWorkflowStartEntrySchema = z.object({
   by: WorkflowWordSchema,
   /** The turn the run's asks are attributed to (A2). */
   turnId: TurnIdSchema.optional(),
+  /** The schedule that started it (`by: schedule`, slice 10); additive. */
+  scheduleId: z.string().min(1).max(64).optional(),
 });
 
 /** One step execution ended (a retry or a goto round is another entry). */

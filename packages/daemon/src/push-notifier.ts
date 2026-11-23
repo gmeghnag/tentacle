@@ -1,3 +1,4 @@
+import { scheduleOutcomeNeedsHuman } from "@tentacle/core";
 /**
  * The daemon's push SHELL (docs/feat/mobile-push.md Design 5, slice P7): the
  * one place where "a session event happened" becomes "an encrypted blob is on
@@ -158,6 +159,10 @@ const id8 = (id: string): string => id.slice(0, 8);
  * is the tail of its output. `undefined` = nothing usable, so the field is
  * absent rather than invalid.
  */
+/** The `run_not_started` facts key: a schedule id is unique per session only. */
+const scheduleFactsKey = (sessionId: string, scheduleId: string): string =>
+  `${sessionId}\u0000${scheduleId}`;
+
 const oneLine = (text: string | undefined): string | undefined => {
   if (text === undefined) {
     return undefined;
@@ -266,6 +271,8 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
    * (and, since a full-state list repeats an ended run, that is the common case).
    */
   const runs = new Map<string, { readonly name: string; readonly reason?: string }>();
+  /** The `run_not_started` facts (slice 10), by `scheduleFactsKey`; bounded as `runs`. */
+  const schedules = new Map<string, { readonly name: string; readonly reason: string }>();
 
   /** Map one `PushNote` to one audit line. A refusal is never silent (F20). */
   const auditNote = (note: PushNote): void => {
@@ -331,6 +338,19 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
         run: {
           runId,
           name: oneLine(held?.name) ?? runId,
+          ...(reason !== undefined ? { reason } : {}),
+        },
+      };
+    }
+    if (command.kind === "run_not_started") {
+      const scheduleId = command.scheduleId ?? "";
+      const held = schedules.get(scheduleFactsKey(command.sessionId, scheduleId));
+      const reason = oneLine(held?.reason);
+      return {
+        ...message,
+        schedule: {
+          scheduleId,
+          name: oneLine(held?.name) ?? scheduleId,
           ...(reason !== undefined ? { reason } : {}),
         },
       };
@@ -582,6 +602,36 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
               runs.delete(runId);
             }
           });
+        } else if (update.type === "schedules") {
+          // Slice 10 S10-7: a fire the user must fix. Full state: each row's
+          // last outcome is offered, and the rules push each fire ONCE.
+          const commands: PushCommand[] = [];
+          const notes: PushNote[] = [];
+          const held: string[] = [];
+          for (const row of update.schedules) {
+            if (row.last === undefined || !scheduleOutcomeNeedsHuman(row.last.outcome)) {
+              continue;
+            }
+            const key = scheduleFactsKey(sessionId, row.id);
+            held.push(key);
+            schedules.set(key, {
+              name: row.workflow?.name ?? row.prompt,
+              reason: row.last.reason ?? row.last.outcome,
+            });
+            const result = rules.apply({
+              type: "run_not_started",
+              sessionId,
+              scheduleId: row.id,
+              fireKey: `${row.id}#${row.fires}`,
+              attached,
+            });
+            commands.push(...result.commands);
+            notes.push(...result.notes);
+          }
+          // Bounded like `runs`: the facts go once the messages are built.
+          consume({ commands, notes }, () => {
+            for (const key of held) schedules.delete(key);
+          });
         } else {
           // `session_closed`: its asks were settled `cancelled` (so any banner was
           // already replaced), and its timers must not outlive it.
@@ -606,6 +656,7 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
       asks.clear();
       turnErrors.clear();
       runs.clear();
+      schedules.clear();
     },
   };
 }

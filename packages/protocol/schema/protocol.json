@@ -2678,6 +2678,11 @@
         "runId": {
           "$ref": "#/$defs/WorkflowRunId"
         },
+        "scheduleId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
         "seq": {
           "exclusiveMinimum": 0,
           "type": "integer"
@@ -3845,7 +3850,15 @@
       "type": "string"
     },
     "PushKind": {
-      "enum": ["ask", "ask_resolved", "turn_done", "turn_failed", "run_done", "run_stopped"],
+      "enum": [
+        "ask",
+        "ask_resolved",
+        "turn_done",
+        "turn_failed",
+        "run_done",
+        "run_stopped",
+        "run_not_started"
+      ],
       "type": "string"
     },
     "PushMessage": {
@@ -3879,6 +3892,9 @@
         },
         "run": {
           "$ref": "#/$defs/PushRun"
+        },
+        "schedule": {
+          "$ref": "#/$defs/PushSchedule"
         },
         "sessionId": {
           "maxLength": 128,
@@ -3940,6 +3956,31 @@
         }
       },
       "required": ["name", "runId"],
+      "type": "object"
+    },
+    "PushSchedule": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "scheduleId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["name", "scheduleId"],
       "type": "object"
     },
     "PushTurn": {
@@ -4544,6 +4585,69 @@
       "required": ["cause", "id", "text"],
       "type": "object"
     },
+    "ScheduleCreateParams": {
+      "additionalProperties": true,
+      "properties": {
+        "at": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "daily": {
+          "maxLength": 16,
+          "minLength": 1,
+          "type": "string"
+        },
+        "every": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "workflow": {
+          "additionalProperties": true,
+          "properties": {
+            "inputs": {
+              "items": {
+                "$ref": "#/$defs/WorkflowInputValue"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "name": {
+              "$ref": "#/$defs/WorkflowName"
+            }
+          },
+          "required": ["name"],
+          "type": "object"
+        }
+      },
+      "required": ["sessionId", "turnId", "workflow"],
+      "type": "object"
+    },
+    "ScheduleCreateResult": {
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "scheduleId": {
+          "maxLength": 64,
+          "type": "string"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
     "ScheduleDeleteParams": {
       "additionalProperties": true,
       "properties": {
@@ -4597,6 +4701,26 @@
         "kind": {
           "type": "string"
         },
+        "last": {
+          "additionalProperties": true,
+          "properties": {
+            "at": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "runId": {
+              "type": "string"
+            }
+          },
+          "required": ["at", "outcome"],
+          "type": "object"
+        },
         "nextAt": {
           "minimum": 0,
           "type": "integer"
@@ -4606,6 +4730,25 @@
         },
         "spec": {
           "type": "string"
+        },
+        "workflow": {
+          "additionalProperties": true,
+          "properties": {
+            "hash": {
+              "type": "string"
+            },
+            "inputs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": ["hash", "inputs", "name"],
+          "type": "object"
         }
       },
       "required": ["createdAt", "fires", "id", "kind", "nextAt", "prompt", "spec"],
@@ -7299,6 +7442,14 @@
       },
       "result": {
         "$ref": "#/$defs/ResolvePermissionResult"
+      }
+    },
+    "session/schedule_create": {
+      "params": {
+        "$ref": "#/$defs/ScheduleCreateParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ScheduleCreateResult"
       }
     },
     "session/schedule_delete": {

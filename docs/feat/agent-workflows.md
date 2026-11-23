@@ -2151,3 +2151,135 @@ Same model as the executor of slices 5 and 7–9 (Opus; fresh context only).
   - `bun run lint` and `bun run typecheck` are clean, and the tree is clean after the mutations.
 
 *— claude-opus-5-5, 2026-11-23*
+
+## Execution — slice 10 (scheduled start)
+
+*— claude-opus-5-5, 2026-11-23*
+
+**Status: 10a DONE · 10b NOT STARTED · 10c NOT STARTED** (stopped at a clean boundary for
+context budget; 10b/10c touch none of 10a's files' logic and can be executed fresh from this
+doc).
+
+### Load-bearing check re-run (before any edit)
+
+`TZ=Europe/Rome bun .tentacle/tmp/agent-workflows-s10/repro.ts` on this branch, unchanged
+result — A10 holds:
+```
+1 daemon autoAnswer (serve): tool ask, run turnId=wake-…  : true
+1 daemon autoAnswer (serve): tool ask, run turnId=undefined: false
+1 daemon autoAnswer: workflow_approve, wake turn          : false
+2 client autoAcceptsTurn arm: isWakeTurnId(wake)          : true
+3 overdue 6h → due: sc-1 fires 1 next in h: 2
+4 TZ Europe/Rome `every 1d` local fire hours: 3,2,2
+5 v3 parser keeps job: 1 · has workflow field: false
+```
+
+### As built (10a), in dependency order
+
+1. **core** `schedule.ts`: `ScheduleKind` + `daily`; `ScheduledJob.daily/target/last`;
+   `ScheduleRequest.prompt` optional + `workflow` + `daily`; `dailyAfter` (local components,
+   DST-safe); `SCHEDULE_WORKFLOW_GRACE_MS` (15 min) → `ScheduleStep.missed`; workflow jobs
+   eligible with `{idle:false}` (and `scheduleCheckDelayMs` re-arms to the next workflow slot
+   while busy); `daily` back-jump clamp (> 25 h → recompute); recurring workflow jobs
+   `expiresAt = MAX_SAFE_INTEGER`; `scheduleRecordFire` (sets `last`, needs-human → `error`,
+   `started` → reset, skip/miss → nothing); `scheduleOutcomeNeedsHuman`; `workflowLabel`
+   (`workflow <name> k=v…` is the row's `prompt`); `ScheduleLink.createWorkflow?` (async).
+   `workflow-ledger.ts`: `by: "schedule"`, `scheduleId?`.
+2. **protocol**: `LogWorkflowStartEntry.scheduleId?`; `ScheduleRow.workflow?/last?` (lenient);
+   `session/schedule_create` params/result + method table; push kind `run_not_started` +
+   `PushMessage.schedule?` (`PushScheduleSchema`). `protocol.json` regenerated
+   (`bun run schema:export`). All additive → no `protocol.d/` note.
+3. **agent** `workflow-driver.ts`: `start` refactored onto a private `begin` (no behaviour
+   change); `inspect(name, inputs)` (hash + approved, no ask); `startScheduled` (skipped /
+   invalid / changed / unapproved / unavailable, no run and no row on refusal; re-checks the
+   slot after its last await; `launch` skips `approveHash` for a scheduled run);
+   `requestApproval(name, turnId?)` (background `workflow_approve`, agent id `approval:<name>`,
+   withdrawn after `budget.wait`, writes the store on allow).
+4. **daemon**: `schedules-view.ts` (rows carry `workflow` (short hash) + `last`; no `expiresAt`
+   for a no-expiry job; `parseScheduleRecords(…, {workflowTargets})` reads `target`/`daily`
+   only for v4, `last` always, unknown outcome refused); `daemon-state-file.ts`
+   (`DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES = 4`, stamped iff a workflow target or `daily`
+   job exists; v3 file carrying either is refused); `hosted-session.ts`
+   (`createWorkflowSchedule` — driver `inspect`, pin, create, raise `requestApproval` unawaited
+   when unapproved; `scheduleCreateRpc` — `wake-` refused; `checkSchedules` audits `missed` and
+   routes a workflow `due` to `fireWorkflow` — advance + `persist()` FIRST, then
+   `startScheduled` under a minted `wake-<uuid>`, outcome → `settleWorkflowFire`
+   (`scheduleRecordFire`, persist, publish, audit; on the failure stop the row is published
+   once with `… · schedule removed` before it goes, so the push sees why); push hook also
+   observes `schedules`); `connection.ts` (method); `push-rules.ts` (`run_not_started` event +
+   `notStartedCommand`: unattended only, once per `<scheduleId>#<fires>`, storm cap);
+   `push-notifier.ts` (feeds needs-human `last` rows, builds `schedule:{scheduleId,name,reason}`,
+   facts keyed per session and cleared after the build).
+5. **tools** `schedule.ts`: `prompt` optional, `workflow`, `inputs`, `daily`; a workflow
+   create goes through `link.createWorkflow` (absent → "workflows run only on a laptop or
+   serve session"); both/neither → the core's repair sentence; reply names workflow, inputs,
+   short hash, "no expiry".
+6. `changelog.d/agent-workflows-schedule.added.md` (the plan's name; `agent-workflows.added.md`
+   already exists and holds one bullet).
+
+### Drift from the Implementation (reconciled here)
+
+1. **`ScheduleLink.create` is synchronous; validating a workflow reads the file.** Added an
+   optional async `createWorkflow` to the link instead of making `create` async (every prompt
+   caller stays synchronous). The tool awaits it.
+2. **"The tool ask names the workflow, inputs and short hash."** A static `ask` is raised
+   BEFORE `execute`, and `Tool` has no title hook, so the ask shows the input (workflow +
+   inputs) but cannot show a hash it has not computed. The hash is shown by the create-time
+   `workflow_approve` ask (when unapproved) and in the tool's reply.
+3. **Tests in new files** `core/test/schedule-workflow.test.ts` and
+   `daemon/test/schedule-workflow.test.ts` (plan: `schedule.test.ts` / `schedules.test.ts`) —
+   same harness shapes, smaller writes.
+4. **Existing test edits (by design, not to force green):** `daemon/test/schedules.test.ts`
+   "an unknown newer version is refused" now uses `schemaVersion: 5` (4 is this slice's).
+5. **View state `? needs approval`** (Views) has no wire field (S10-6 lists none); left to 10b
+   to derive or to a later field. The `last` outcome words are on the row.
+6. **Push memory is in-process**: after a `serve` restart, the first `schedules` publish of a
+   row whose `last` is still `changed` can push once more. Accepted (bounded: once per restart).
+
+### Tests (red first, then mutation-checked)
+
+Red: every new test file failed before its implementation existed (core: import of
+`scheduleRecordFire` failed; others written against missing methods). Non-vacuity by mutation
+(each applied alone, then restored by the runner; tree checked clean after):
+```
+M-a daily uses fixed 24h:                    13 pass | 1 fail (DST 03:00 test)
+M-b gate workflow jobs on idle:              13 pass | 1 fail
+M-c catch-up for workflow jobs:              11 pass | 3 fail
+M-d apply 7d TTL to workflow jobs:           13 pass | 1 fail
+M-e count skipped/missed:                    13 pass | 1 fail
+M-f unapproved falls back to asking start:   34 pass | 1 fail (driver: NO ask, no row)
+M-g compare against the store only:          34 pass | 1 fail (changed)
+M-t scheduled run drops the turn id:         34 pass | 1 fail
+M-s running check removed:                   34 pass | 1 fail (skipped)
+M-h drop the minted wake- id (daemon):        9 pass | 1 fail (tool ask stays pending)
+M-i persist after the driver call:            9 pass | 1 fail
+M-j stamp v3 for a workflow job:              9 pass | 1 fail
+M-k accept a wake- id on schedule_create:     9 pass | 1 fail
+M-w workflow job fired as a prompt turn:      4 pass | 6 fail
+M-l drop the per-fire push memory:           69 pass | 2 fail
+M-p push skipped/missed too:                 28 pass | 1 fail
+M-a2 ignore attached clients (push):         41 pass | 1 fail
+```
+Narrow run after lint: core schedule ×2, driver, daemon schedule-workflow + schedules +
+push-rules + push-notifier, tools schedule, `packages/protocol` → **730 pass, 0 fail**.
+`biome check` on every changed file: clean.
+
+### Gate / protocol
+
+- Full gate NOT run here (owner rule): the orchestrator's script runs it. Per-package `tsc -p`
+  for core/protocol/agent/daemon is clean; `tsc -p packages/cli|tui` show errors in files this
+  slice does not touch (per-package resolution) — the root `bun run typecheck` decides.
+- `protocol.json` regenerated; no `protocol.d/` note (all additive: optional fields, a new
+  method, a display push kind).
+
+### Left for 10b / 10c (exact next steps)
+
+- **10b**: `client/src/remote-client.ts` + `remote-session.ts` `scheduleCreate` (mirror
+  `scheduleDelete`, mint a non-`wake-` turn id), `cli/src/local-runtime.ts` pass-through,
+  `tui/src/schedule-command.ts` (pure parse of `/schedule workflow <name> <every 2h | daily 03:00
+  | at …> [k=v …]`), `commands/schedule.ts`, `schedule-view.ts`/`panels/schedule.ts` rows
+  (target + `last` glyph+word). Tests per the plan's 10b list.
+- **10c**: `apps/mobile/src/session-info.ts` row, `push-render.ts` `run_not_started`
+  ("Workflow not started: <name> — <reason>"), Swift `PushEnvelope.swift`/`PushRender.swift`,
+  `fixtures/push-render-v1.json` vector, `swift test`. Until 10c the app shows its placeholder
+  for `run_not_started` (the v1 kind enum refuses an unknown kind — by design).

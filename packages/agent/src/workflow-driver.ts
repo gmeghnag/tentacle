@@ -215,6 +215,45 @@ export type WorkflowStartResult =
   | { readonly ok: true; readonly runId: string }
   | { readonly ok: false; readonly reason: string };
 
+/** Who started a run (the `workflow_start` `by` word). */
+export type WorkflowStartedBy = "user" | "model" | "schedule";
+
+/**
+ * A scheduled start (slice 10): a run, or why none was made. `skipped` = a run
+ * in flight; the rest are the schedule's `ScheduleOutcome` words a human fixes.
+ */
+export type WorkflowScheduledStartResult =
+  | { readonly ok: true; readonly runId: string }
+  | {
+      readonly ok: false;
+      readonly outcome: "skipped" | "invalid" | "changed" | "unapproved" | "unavailable";
+      readonly reason: string;
+    };
+
+/** The input problem a start refuses with, or undefined. */
+function inputsProblem(
+  spec: WorkflowSpec,
+  given: Readonly<Record<string, string>>,
+): string | undefined {
+  const unknown = Object.keys(given).filter((k) => !(k in spec.inputs));
+  if (unknown.length > 0) {
+    return `unknown input(s): ${unknown.join(", ")}`;
+  }
+  const missing = missingInputs(spec, given);
+  return missing.length > 0 ? `missing required input(s): ${missing.join(", ")}` : undefined;
+}
+
+/** One line per step: what a hash approval shows. */
+function stepsSummary(spec: WorkflowSpec): string[] {
+  return spec.steps.map((s) =>
+    s.kind === "run"
+      ? `${s.id}: run \`${s.command}\` (${whereLabel(s)})`
+      : s.kind === "agent"
+        ? `${s.id}: agent${s.model !== undefined ? ` ${s.model}` : ""}`
+        : `${s.id}: approve`,
+  );
+}
+
 /** The runs kept on the wire beside the current one. */
 export const WORKFLOW_RECENT_RUNS = 5;
 
@@ -224,6 +263,8 @@ interface Run {
   readonly spec: WorkflowSpec;
   readonly hash: string;
   turnId: string | undefined;
+  /** Set iff a schedule started it (slice 10): its hash was checked, it never asks for it. */
+  readonly scheduleId?: string;
   state: WorkflowRunState;
   row: WorkflowRow;
   controller: AbortController;
@@ -329,20 +370,176 @@ export class WorkflowDriver {
     if (!prepared.ok) {
       return prepared;
     }
-    const { source, spec, hash } = prepared;
     const given = request.inputs ?? {};
-    const unknown = Object.keys(given).filter((k) => !(k in spec.inputs));
-    if (unknown.length > 0) {
-      return { ok: false, reason: `unknown input(s): ${unknown.join(", ")}` };
-    }
-    const missing = missingInputs(spec, given);
-    if (missing.length > 0) {
-      return { ok: false, reason: `missing required input(s): ${missing.join(", ")}` };
+    const bad = inputsProblem(prepared.spec, given);
+    if (bad !== undefined) {
+      return { ok: false, reason: bad };
     }
     // Claimed synchronously after the last await: two starts cannot both pass.
     if (this.current() !== undefined || this.disposed) {
       return { ok: false, reason: "another workflow started meanwhile" };
     }
+    return {
+      ok: true,
+      runId: this.begin(prepared, given, {
+        by: request.by,
+        ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
+      }),
+    };
+  }
+
+  /**
+   * Validate `name` + `inputs` against the CURRENT file, without starting or
+   * asking anything: its hash and whether that hash is approved. What a schedule
+   * create pins (slice 10 S10-4).
+   */
+  async inspect(
+    name: string,
+    inputs: Readonly<Record<string, string>>,
+  ): Promise<
+    | { readonly ok: true; readonly hash: string; readonly approved: boolean }
+    | { readonly ok: false; readonly reason: string }
+  > {
+    const prepared = await this.prepare(name);
+    if (!prepared.ok) {
+      return prepared;
+    }
+    const bad = inputsProblem(prepared.spec, inputs);
+    if (bad !== undefined) {
+      return { ok: false, reason: bad };
+    }
+    const approved = await this.deps.approvals.has(prepared.source.path, prepared.hash);
+    return { ok: true, hash: prepared.hash, approved };
+  }
+
+  /**
+   * A SCHEDULED start (slice 10 S10-3): deterministic, never asks. It refuses —
+   * with no run and no row — when a run is in flight (`skipped`, never queued),
+   * the file or inputs are bad (`invalid`), the file's hash is not the one the
+   * schedule pinned (`changed`), or that hash is not approved (`unapproved`).
+   * Otherwise it is an ordinary run (`by: "schedule"`), its asks attributed to
+   * the daemon-minted `wake-` turn (A10).
+   */
+  async startScheduled(request: {
+    readonly name: string;
+    readonly inputs: Readonly<Record<string, string>>;
+    readonly pinnedHash: string;
+    readonly scheduleId: string;
+    readonly turnId: string;
+  }): Promise<WorkflowScheduledStartResult> {
+    const busy = (): WorkflowScheduledStartResult | undefined => {
+      if (this.disposed) {
+        return { ok: false, outcome: "unavailable", reason: "the session is closing" };
+      }
+      const running = this.current();
+      return running === undefined
+        ? undefined
+        : { ok: false, outcome: "skipped", reason: `${running} running` };
+    };
+    const before = busy();
+    if (before !== undefined) {
+      return before;
+    }
+    const prepared = await this.prepare(request.name);
+    if (!prepared.ok) {
+      return { ok: false, outcome: "invalid", reason: prepared.reason };
+    }
+    const bad = inputsProblem(prepared.spec, request.inputs);
+    if (bad !== undefined) {
+      return { ok: false, outcome: "invalid", reason: bad };
+    }
+    if (prepared.hash !== request.pinnedHash) {
+      return {
+        ok: false,
+        outcome: "changed",
+        reason:
+          `${prepared.source.path} changed since ${request.scheduleId} was created ` +
+          `(${shortHash(request.pinnedHash)} → ${shortHash(prepared.hash)}): re-create the schedule`,
+      };
+    }
+    if (!(await this.deps.approvals.has(prepared.source.path, prepared.hash))) {
+      return {
+        ok: false,
+        outcome: "unapproved",
+        reason: `${prepared.source.path} (hash ${shortHash(prepared.hash)}) was never approved`,
+      };
+    }
+    // Re-checked after the last await: a start that raced us wins, we skip.
+    const after = busy();
+    if (after !== undefined) {
+      return after;
+    }
+    return {
+      ok: true,
+      runId: this.begin(prepared, request.inputs, {
+        by: "schedule",
+        turnId: request.turnId,
+        scheduleId: request.scheduleId,
+      }),
+    };
+  }
+
+  /**
+   * The hash approval of `name`'s CURRENT file, asked NOW (a schedule's create,
+   * while someone is there — never at fire time). A background ask through the
+   * ONE requester (agent id `approval:<name>`, attributed to `turnId`), withdrawn
+   * after the file's `budget.wait`; on allow the hash is written to the store.
+   * Resolves `true` iff that hash is approved at the end.
+   */
+  async requestApproval(name: string, turnId?: string): Promise<boolean> {
+    const prepared = await this.prepare(name);
+    if (!prepared.ok) {
+      return false;
+    }
+    const { source, spec, hash } = prepared;
+    if (await this.deps.approvals.has(source.path, hash)) {
+      return true;
+    }
+    const agentId = `approval:${spec.name}`;
+    const waited = new AbortController();
+    const timer = this.clock.setTimeout(() => waited.abort(), spec.budget.waitMs);
+    this.host?.attribute(agentId, turnId);
+    try {
+      const answer = await this.deps.request(
+        {
+          kind: "workflow_approve",
+          tool: WORKFLOW_APPROVE_TOOL,
+          level: "ask",
+          title: oneLine(
+            `Approve workflow ${spec.name} v${spec.version} (hash ${shortHash(hash)}) for its schedule`,
+            200,
+          ),
+          detail: capWorkflowText(stepsSummary(spec).join("\n"), 2000),
+          input: {},
+        },
+        {
+          toolCallId: agentId,
+          agent: { type: "workflow", description: `${spec.name}/approval`, id: agentId },
+          signal: waited.signal,
+        },
+      );
+      if (!answer.allowed) {
+        return false;
+      }
+      await this.deps.approvals.add(source.path, hash);
+      return true;
+    } finally {
+      this.clock.clearTimeout(timer);
+      this.host?.release(agentId);
+    }
+  }
+
+  /** Create the run row and launch it; the caller has validated and claimed the slot. */
+  private begin(
+    prepared: { source: WorkflowSource; spec: WorkflowSpec; hash: string },
+    given: Readonly<Record<string, string>>,
+    origin: {
+      readonly by: WorkflowStartedBy;
+      readonly turnId?: string;
+      readonly scheduleId?: string;
+    },
+  ): string {
+    const { source, spec, hash } = prepared;
     this.seq += 1;
     const runId = `wf-${this.seq}`;
     const begun = startMachine(spec, given);
@@ -351,7 +548,8 @@ export class WorkflowDriver {
       source,
       spec,
       hash,
-      turnId: request.turnId,
+      turnId: origin.turnId,
+      ...(origin.scheduleId !== undefined ? { scheduleId: origin.scheduleId } : {}),
       state: begun.state,
       row: {
         runId,
@@ -371,8 +569,8 @@ export class WorkflowDriver {
     };
     this.runs.set(runId, run);
     this.publish();
-    void this.launch(run, begun.action, request.by).catch(() => {});
-    return { ok: true, runId };
+    void this.launch(run, begun.action, origin.by).catch(() => {});
+    return runId;
   }
 
   /** Stop the run: its step is aborted, the run ends `stopped: cancelled`. */
@@ -531,8 +729,9 @@ export class WorkflowDriver {
   }
 
   /** The hash approval (D2), then the steps. */
-  private async launch(run: Run, first: WorkflowAction, by: "user" | "model"): Promise<void> {
-    const approved = await this.approveHash(run);
+  private async launch(run: Run, first: WorkflowAction, by: WorkflowStartedBy): Promise<void> {
+    // A scheduled run's hash was checked approved by `startScheduled`: it never asks.
+    const approved = run.scheduleId !== undefined ? true : await this.approveHash(run);
     if (approved !== true) {
       this.finish(run, approved, false);
       return;
@@ -546,6 +745,7 @@ export class WorkflowDriver {
       inputs: run.state.inputs,
       by,
       ...(run.turnId !== undefined ? { turnId: run.turnId } : {}),
+      ...(run.scheduleId !== undefined ? { scheduleId: run.scheduleId } : {}),
     });
     this.host?.logStart(run.startBody);
     run.row = { ...run.row, state: "running" };
@@ -562,13 +762,7 @@ export class WorkflowDriver {
     if (await this.deps.approvals.has(run.source.path, run.hash)) {
       return true;
     }
-    const steps = run.spec.steps.map((s) =>
-      s.kind === "run"
-        ? `${s.id}: run \`${s.command}\` (${whereLabel(s)})`
-        : s.kind === "agent"
-          ? `${s.id}: agent${s.model !== undefined ? ` ${s.model}` : ""}`
-          : `${s.id}: approve`,
-    );
+    const steps = stepsSummary(run.spec);
     const answer = await this.stepRequester(run, null)(
       {
         kind: "workflow_approve",

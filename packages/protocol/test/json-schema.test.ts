@@ -297,6 +297,20 @@ const FIXTURES: Record<string, Json[]> = {
     { deleted: false },
     { deleted: false, reason: "no schedule sc-9 in this session" },
   ],
+  // feat/agent-workflows slice 10: the user schedules a workflow.
+  "methods/session~1schedule_create/params": [
+    {
+      sessionId: "s",
+      turnId: "t-1",
+      workflow: { name: "nightly", inputs: [{ name: "slug", value: "main" }] },
+      daily: "03:00",
+    },
+    { sessionId: "s", turnId: "t-1", workflow: { name: "gate" }, every: "2h" },
+  ],
+  "methods/session~1schedule_create/result": [
+    { ok: true, scheduleId: "sc-3" },
+    { ok: false, reason: "workflows run only on a laptop or serve session" },
+  ],
   // feat/agent-workflows S3: the user drives a workflow run; the phone lists them.
   "methods/session~1workflow/params": [
     {

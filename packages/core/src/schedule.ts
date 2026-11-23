@@ -66,8 +66,66 @@ export const DEFAULT_SCHEDULE_LIMITS: ScheduleLimits = {
  */
 export const SCHEDULE_CHECK_INTERVAL_MS = 60_000;
 
-/** How a job repeats: a fixed interval, or never (`at` = one-shot). */
-export type ScheduleKind = "every" | "at";
+/**
+ * How late a fire of a WORKFLOW job may be and still start (agent-workflows
+ * slice 10): past this the slot is recorded `missed` and skipped — heavy work
+ * hours late at a time nobody chose is a surprise. Prompt jobs keep anacron.
+ */
+export const SCHEDULE_WORKFLOW_GRACE_MS = 15 * 60_000;
+/** A `daily` slot further ahead than this is a back-jumped clock: recompute it. */
+const DAILY_CLAMP_MS = 25 * 3_600_000;
+
+/**
+ * How a job repeats: a fixed interval, never (`at` = one-shot), or every day at
+ * a local wall-clock time (`daily 03:00` — DST keeps 03:00; `every 1d` does not).
+ */
+export type ScheduleKind = "every" | "at" | "daily";
+
+/** One `name=value` input of a scheduled workflow. */
+export interface ScheduleWorkflowInput {
+  readonly name: string;
+  readonly value: string;
+}
+
+/** The workflow a job starts (slice 10). `hash` is PINNED at create: the schedule authorises THIS content. */
+export interface ScheduleWorkflowTarget {
+  readonly name: string;
+  readonly inputs: readonly ScheduleWorkflowInput[];
+  readonly hash: string;
+}
+
+/**
+ * What one fire of a workflow job did. `started` = a run began (its verdict is
+ * the workflow's, not the schedule's); `skipped` = a run was already in flight;
+ * `missed` = later than the grace; the rest could not start for a reason the
+ * human must fix (`changed` file, `unapproved` hash, `invalid` file/inputs,
+ * `unavailable` = no workflow driver here).
+ */
+export type ScheduleOutcome =
+  | "started"
+  | "skipped"
+  | "missed"
+  | "changed"
+  | "unapproved"
+  | "invalid"
+  | "unavailable";
+
+export interface ScheduleLast {
+  readonly at: number;
+  readonly outcome: ScheduleOutcome;
+  readonly reason?: string;
+  readonly runId?: string;
+}
+
+/** Outcomes the human must fix: they count toward the failure stop and push `run_not_started`. */
+export function scheduleOutcomeNeedsHuman(outcome: string): boolean {
+  return (
+    outcome === "changed" ||
+    outcome === "unapproved" ||
+    outcome === "invalid" ||
+    outcome === "unavailable"
+  );
+}
 
 /**
  * One scheduled wake. `spec` is the text as the model gave it (`every 10m`,
@@ -80,8 +138,17 @@ export interface ScheduledJob {
   readonly spec: string;
   /** Set for `every`: the fixed interval. */
   readonly intervalMs?: number;
-  /** What the fired turn is told. Self-sufficient on purpose: the context may be compacted by then. */
+  /** Set for `daily`: the local wall-clock time, `HH:MM`. */
+  readonly daily?: string;
+  /**
+   * What the fired turn is told. Self-sufficient on purpose: the context may be
+   * compacted by then. For a workflow job: the display label (`workflow <name> k=v…`).
+   */
   readonly prompt: string;
+  /** Absent = the prompt target (a model turn). Present = start this workflow, no turn. */
+  readonly target?: { readonly workflow: ScheduleWorkflowTarget };
+  /** The last fire of a workflow job, as the daemon recorded it. */
+  readonly last?: ScheduleLast;
   readonly createdAt: number;
   /** Past this the job is removed (never fired). */
   readonly expiresAt: number;
@@ -95,11 +162,21 @@ export interface ScheduledJob {
   readonly createdBy: string;
 }
 
-/** What the model may ask for. Exactly one of `every`/`at` (owner Q2: no `cron` in v1). */
+/**
+ * What the model (or the user) may ask for: exactly one of `every`/`at`/`daily`
+ * (owner Q2: no `cron` in v1) and exactly one of `prompt`/`workflow`. A workflow
+ * request reaches `scheduleCreate` only with its `hash` filled by the host.
+ */
 export interface ScheduleRequest {
-  readonly prompt: string;
+  readonly prompt?: string;
   readonly every?: string;
   readonly at?: string;
+  readonly daily?: string;
+  readonly workflow?: {
+    readonly name: string;
+    readonly inputs: readonly ScheduleWorkflowInput[];
+    readonly hash?: string;
+  };
 }
 
 const MINUTE_MS = 60_000;
@@ -134,10 +211,39 @@ export type ParsedSpec =
       /** The canonical display text (`every 10m`, `at 2026-11-16T17:00:00+01:00`). */
       readonly spec: string;
       readonly intervalMs?: number;
+      readonly daily?: string;
       readonly nextAt: number;
       readonly expiresAt: number;
     }
   | { readonly ok: false; readonly reason: string };
+
+const DAILY_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+/**
+ * The next local `HH:MM` strictly after `now`, built from local components (as
+ * `parseAtMs` does) so a DST change keeps the wall-clock time. A local time DST
+ * skips lands on the first valid instant after it (the `Date` constructor rolls
+ * forward); a repeated hour fires once, because the next slot is computed
+ * strictly after the fire — on the next day.
+ */
+export function dailyAfter(hhmm: string, now: number): number {
+  const match = DAILY_RE.exec(hhmm);
+  const hour = Number(match?.[1] ?? 0);
+  const minute = Number(match?.[2] ?? 0);
+  const today = new Date(now);
+  for (let offset = 0; offset < 3; offset++) {
+    const slot = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      today.getDate() + offset,
+      hour,
+      minute,
+      0,
+    ).getTime();
+    if (slot > now) return slot;
+  }
+  return now + 86_400_000;
+}
 
 /**
  * One accepted `at` syntax: a bare date (the host's local midnight), a local
@@ -220,17 +326,34 @@ function localMinuteText(ms: number): string {
  * model can get wrong is answered with a reason, never a silent clamp (D3).
  */
 export function parseScheduleSpec(
-  request: { readonly every?: string; readonly at?: string },
+  request: { readonly every?: string; readonly at?: string; readonly daily?: string },
   now: number,
   limits: ScheduleLimits = DEFAULT_SCHEDULE_LIMITS,
 ): ParsedSpec {
-  const kinds = [request.every, request.at].filter((value) => value !== undefined).length;
+  const kinds = [request.every, request.at, request.daily].filter(
+    (value) => value !== undefined,
+  ).length;
   if (kinds !== 1) {
     return {
       ok: false,
       reason:
-        "give exactly one of `every` (recurring, 1m..7d, e.g. every 10m) or `at` " +
-        "(one-shot, an ISO time or `in 20m`) — not both, not neither",
+        "give exactly one of `every` (recurring, 1m..7d, e.g. every 10m), `at` " +
+        "(one-shot, an ISO time or `in 20m`) or `daily` (every day at a local time, " +
+        "e.g. 03:00) — not two, not none",
+    };
+  }
+  if (request.daily !== undefined) {
+    const daily = request.daily.trim();
+    if (!DAILY_RE.test(daily)) {
+      return { ok: false, reason: "daily: a local time HH:MM, 24-hour (`03:00`, `18:30`)" };
+    }
+    return {
+      ok: true,
+      kind: "daily",
+      spec: `daily ${daily}`,
+      daily,
+      nextAt: dailyAfter(daily, now),
+      expiresAt: now + limits.ttlMs,
     };
   }
   if (request.every !== undefined) {
@@ -309,7 +432,21 @@ export function scheduleCreate(
   const limits = options.limits ?? DEFAULT_SCHEDULE_LIMITS;
   const spec = parseScheduleSpec(request, options.now, limits);
   if (!spec.ok) return { ok: false, reason: spec.reason };
-  const prompt = request.prompt.trim();
+  if ((request.prompt === undefined) === (request.workflow === undefined)) {
+    return {
+      ok: false,
+      reason:
+        "give exactly one of `prompt` (what you are told when it fires) or `workflow` " +
+        "(a workflow to start, no turn) — not both, not neither",
+    };
+  }
+  const workflow = request.workflow;
+  if (workflow !== undefined && (workflow.hash ?? "") === "") {
+    return { ok: false, reason: `workflow: ${workflow.name} could not be checked here` };
+  }
+  const prompt = (
+    workflow === undefined ? (request.prompt ?? "") : workflowLabel(workflow.name, workflow.inputs)
+  ).trim();
   if (prompt === "") {
     return {
       ok: false,
@@ -333,9 +470,24 @@ export function scheduleCreate(
     kind: spec.kind,
     spec: spec.spec,
     ...(spec.intervalMs === undefined ? {} : { intervalMs: spec.intervalMs }),
+    ...(spec.daily === undefined ? {} : { daily: spec.daily }),
     prompt,
+    ...(workflow === undefined
+      ? {}
+      : {
+          target: {
+            workflow: {
+              name: workflow.name,
+              inputs: workflow.inputs.map((input) => ({ name: input.name, value: input.value })),
+              hash: workflow.hash ?? "",
+            },
+          },
+        }),
     createdAt: options.now,
-    expiresAt: spec.expiresAt,
+    // A recurring workflow job has no time expiry (decision 7): it cannot loop
+    // on the model; the failure stop, delete and archive bound it.
+    expiresAt:
+      workflow !== undefined && spec.kind !== "at" ? Number.MAX_SAFE_INTEGER : spec.expiresAt,
     nextAt: spec.nextAt,
     fires: 0,
     failures: 0,
@@ -344,8 +496,16 @@ export function scheduleCreate(
   return { ok: true, job, table: [...table, job] };
 }
 
-/** The next slot for `every` strictly after `now`: missed slots are skipped, never replayed. */
+/** A workflow job's row label: what every reader (an older client too) can show. */
+export function workflowLabel(name: string, inputs: readonly ScheduleWorkflowInput[]): string {
+  return ["workflow", name, ...inputs.map((input) => `${input.name}=${input.value}`)].join(" ");
+}
+
+/** The next slot for `every`/`daily` strictly after `now`: missed slots are skipped, never replayed. */
 function slotAfter(job: ScheduledJob, now: number): number {
+  if (job.kind === "daily") {
+    return job.nextAt > now ? job.nextAt : dailyAfter(job.daily ?? "", now);
+  }
   const interval = job.intervalMs ?? SCHEDULE_MIN_INTERVAL_MS;
   if (job.nextAt > now) return job.nextAt;
   const missed = Math.floor((now - job.nextAt) / interval) + 1;
@@ -359,6 +519,11 @@ export interface ScheduleStep {
   readonly table: readonly ScheduledJob[];
   /** Jobs removed because they passed `expiresAt` (the caller notices them). */
   readonly expired: readonly ScheduledJob[];
+  /**
+   * Workflow jobs later than `SCHEDULE_WORKFLOW_GRACE_MS`: advanced WITHOUT
+   * firing (post-advance rows, `last` = missed; a one-shot left the table).
+   */
+  readonly missed: readonly ScheduledJob[];
 }
 
 /**
@@ -387,6 +552,7 @@ export function scheduleStep(
 ): ScheduleStep {
   const kept: ScheduledJob[] = [];
   const expired: ScheduledJob[] = [];
+  const missed: ScheduledJob[] = [];
   // Expiry and the back-jump clamp first, in table order (the row order the
   // wire publishes is creation order, not the fire order).
   for (const job of table) {
@@ -395,35 +561,52 @@ export function scheduleStep(
       continue;
     }
     // The clock went backwards: unclamped, a 10m job would stall for hours.
-    kept.push(
+    const clamped =
       job.kind === "every" && job.nextAt - now > (job.intervalMs ?? 0)
         ? { ...job, nextAt: now + (job.intervalMs ?? 0) }
-        : job,
-    );
+        : job.kind === "daily" && job.nextAt - now > DAILY_CLAMP_MS
+          ? { ...job, nextAt: dailyAfter(job.daily ?? "", now) }
+          : job;
+    // A workflow job past its grace is skipped, not caught up (decision 5).
+    if (clamped.target !== undefined && now - clamped.nextAt > SCHEDULE_WORKFLOW_GRACE_MS) {
+      const last: ScheduleLast = { at: now, outcome: "missed" };
+      if (clamped.kind === "at") {
+        missed.push({ ...clamped, last });
+        continue;
+      }
+      const advanced: ScheduledJob = { ...clamped, nextAt: slotAfter(clamped, now), last };
+      missed.push(advanced);
+      kept.push(advanced);
+      continue;
+    }
+    kept.push(clamped);
   }
   // Then the ONE job to fire: the overdue job with the smallest `nextAt` (ties
   // go to table order). Picking the first overdue row instead would let a
   // short-interval job starve every longer one created after it.
-  if (!options.idle) return { due: null, table: kept, expired };
+  // A WORKFLOW job is eligible while a turn runs (decision 4): a run lives
+  // between turns, and a long user turn must not delay the nightly.
   let picked = -1;
   for (let index = 0; index < kept.length; index++) {
     const job = kept[index];
     if (job === undefined || job.nextAt > now) continue;
+    if (!options.idle && job.target === undefined) continue;
     const best = picked < 0 ? undefined : kept[picked];
     if (best === undefined || job.nextAt < best.nextAt) picked = index;
   }
   const chosen = picked < 0 ? undefined : kept[picked];
-  if (chosen === undefined) return { due: null, table: kept, expired };
+  if (chosen === undefined) return { due: null, table: kept, expired, missed };
   const fired: ScheduledJob = { ...chosen, fires: chosen.fires + 1 };
   if (chosen.kind === "at") {
     // A one-shot leaves the table the moment it fires; nothing to re-arm.
-    return { due: fired, table: kept.filter((job) => job !== chosen), expired };
+    return { due: fired, table: kept.filter((job) => job !== chosen), expired, missed };
   }
   const advanced: ScheduledJob = { ...fired, nextAt: slotAfter(fired, now) };
   return {
     due: advanced,
     table: kept.map((job) => (job === chosen ? advanced : job)),
     expired,
+    missed,
   };
 }
 
@@ -459,6 +642,23 @@ export function scheduleSettled(
   };
 }
 
+/**
+ * Record one fire of a workflow job (`last`) and settle its failure budget: an
+ * outcome the human must fix counts as an `error`, a started run resets the
+ * count (a red nightly is the workflow's verdict, not the schedule's), and a
+ * skip or a miss counts nothing (decision 8). `removed` = the failure stop.
+ */
+export function scheduleRecordFire(
+  table: readonly ScheduledJob[],
+  id: string,
+  last: ScheduleLast,
+): { readonly table: readonly ScheduledJob[]; readonly removed: boolean } {
+  const recorded = table.map((job) => (job.id === id ? { ...job, last } : job));
+  if (last.outcome === "started") return scheduleSettled(recorded, id, "ok");
+  if (scheduleOutcomeNeedsHuman(last.outcome)) return scheduleSettled(recorded, id, "error");
+  return { table: recorded, removed: false };
+}
+
 /** Delete by id. `deleted: false` means the id was not in this session (the model is told). */
 export function scheduleDelete(
   table: readonly ScheduledJob[],
@@ -488,6 +688,12 @@ export interface ScheduleLink {
   now(): number;
   /** Add one job; the id is minted by the session (`sc-N`, never reused). */
   create(request: ScheduleRequest): ScheduleCreateResult;
+  /**
+   * Add one WORKFLOW job (slice 10): the host validates the file and inputs and
+   * pins the current hash (asynchronous: it reads the file). Absent = this
+   * runtime runs no workflows.
+   */
+  createWorkflow?(request: ScheduleRequest): Promise<ScheduleCreateResult>;
   /** The live table, in creation order. */
   list(): readonly ScheduledJob[];
   /** Remove one job by id; `false` when it is not in this session. */
@@ -521,6 +727,12 @@ export function scheduleCheckDelayMs(
 ): number | null {
   const next = nextDueAt(table);
   if (next === null) return null;
-  if (!options.idle) return SCHEDULE_CHECK_INTERVAL_MS;
+  if (!options.idle) {
+    // Only a workflow job can fire while busy: wait for the next one of those.
+    const workflowNext = nextDueAt(table.filter((job) => job.target !== undefined));
+    return workflowNext === null
+      ? SCHEDULE_CHECK_INTERVAL_MS
+      : Math.min(Math.max(workflowNext - now, 0), SCHEDULE_CHECK_INTERVAL_MS);
+  }
   return Math.min(Math.max(next - now, 0), SCHEDULE_CHECK_INTERVAL_MS);
 }

@@ -856,6 +856,141 @@ describe("the sub-agent cap", () => {
   });
 });
 
+// Slice 10 — a scheduled start: deterministic, never asks, no run on refusal.
+describe("startScheduled (slice 10)", () => {
+  const WAKE = "wake-0b6e";
+  async function pinned(t: ReturnType<typeof setup>): Promise<string> {
+    const seen = await t.driver.inspect("task", {});
+    if (!seen.ok) throw new Error(seen.reason);
+    return seen.hash;
+  }
+  const sched = (hash: string, name = "task") => ({
+    name,
+    inputs: {},
+    pinnedHash: hash,
+    scheduleId: "sc-3",
+    turnId: WAKE,
+  });
+
+  test("an approved, unchanged file starts a run: by schedule, scheduleId, asks on the wake- turn", async () => {
+    const t = setup({
+      children: {
+        plan: async (o, c, ask) => {
+          await ask(
+            { tool: "shell", level: "ask", title: "Run", input: {} },
+            { agent: { type: "general", description: o.description, id: c?.agentId ?? "" } },
+          );
+          return says("pass")(o, c, ask);
+        },
+      },
+    });
+    const hash = await pinned(t);
+    t.approvals.add(`workflows/task.yaml#${hash}`);
+    const started = await t.driver.startScheduled(sched(hash));
+    expect(started).toEqual({ ok: true, runId: "wf-1" });
+    await flush();
+    expect(t.broker.asks.map((a) => a.req.kind ?? a.req.tool)).toEqual(["shell"]);
+    expect(t.host.attributed).toContainEqual(["wf-1.plan", WAKE]);
+    const start = t.host.entries.find((e) => e.type === "workflow_start");
+    expect(start?.body.by).toBe("schedule");
+    expect(start?.body.scheduleId).toBe("sc-3");
+    expect(start?.body.turnId).toBe(WAKE);
+  });
+
+  test("unapproved → `unapproved`, NO ask, no run row", async () => {
+    const t = setup();
+    const hash = await pinned(t);
+    const result = await t.driver.startScheduled(sched(hash));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.outcome).toBe("unapproved");
+    await flush();
+    expect(t.broker.asks).toHaveLength(0);
+    expect(t.host.rows).toEqual([]);
+    expect(t.driver.current()).toBeUndefined();
+  });
+
+  test("the file changed since the pin → `changed` naming both hashes, no ask, no run row", async () => {
+    const t = setup();
+    const old = await pinned(t);
+    t.approvals.add(`workflows/task.yaml#${old}`);
+    t.files.text = t.files.text.replace("do it", "do it!");
+    // the NEW content is approved too: the pin, not the store, is what decides
+    const fresh = await pinned(t);
+    t.approvals.add(`workflows/task.yaml#${fresh}`);
+    const result = await t.driver.startScheduled(sched(old));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.outcome).toBe("changed");
+      expect(result.reason).toContain("re-create the schedule");
+    }
+    await flush();
+    expect(t.broker.asks).toHaveLength(0);
+    expect(t.host.rows).toEqual([]);
+  });
+
+  test("a missing / invalid file or a missing input → `invalid`, no ask", async () => {
+    const t = setup();
+    const gone = await t.driver.startScheduled(sched("abc", "nope"));
+    expect(gone.ok ? "" : gone.outcome).toBe("invalid");
+    t.files.text = "schemaVersion: 1\nname: task\n";
+    const broken = await t.driver.startScheduled(sched("abc"));
+    expect(broken.ok ? "" : broken.outcome).toBe("invalid");
+    t.files.text = YAML("  - id: a\n    agent: { prompt_text: hi }\n").replace(
+      "steps:",
+      "inputs:\n  slug: { required: true }\nsteps:",
+    );
+    const hash = await t.driver.inspect("task", { slug: "x" });
+    const noInput = await t.driver.startScheduled(sched(hash.ok ? hash.hash : "abc"));
+    expect(noInput.ok ? "" : noInput.outcome).toBe("invalid");
+    if (!noInput.ok) expect(noInput.reason).toContain("slug");
+    await flush();
+    expect(t.broker.asks).toHaveLength(0);
+  });
+
+  test("a run in flight → `skipped`; the first run is untouched", async () => {
+    const t = setup({ text: YAML("  - id: merge\n    approve: { title: Merge it }\n") });
+    const hash = await pinned(t);
+    t.approvals.add(`workflows/task.yaml#${hash}`);
+    expect((await t.driver.startScheduled(sched(hash))).ok).toBe(true);
+    await flush();
+    const asksBefore = t.broker.asks.length;
+    const second = await t.driver.startScheduled(sched(hash));
+    expect(second.ok ? "" : second.outcome).toBe("skipped");
+    if (!second.ok) expect(second.reason).toBe("wf-1 running");
+    await flush();
+    expect(t.driver.current()).toBe("wf-1");
+    expect(t.broker.asks).toHaveLength(asksBefore);
+    expect(last(t.host.rows)?.state).toBe("needs-approval"); // its approve step still waits
+  });
+
+  test("requestApproval asks once through the ONE requester and writes the store on allow", async () => {
+    const t = setup();
+    const pending = t.driver.requestApproval("task", "t-9");
+    await flush();
+    expect(t.broker.asks).toHaveLength(1);
+    expect(t.broker.asks[0]?.req.kind).toBe("workflow_approve");
+    expect(t.broker.asks[0]?.options?.agent?.id).toBe("approval:task");
+    expect(t.host.attributed).toContainEqual(["approval:task", "t-9"]);
+    t.broker.asks[0]?.answer({ allowed: true, scope: "once" });
+    expect(await pending).toBe(true);
+    const seen = await t.driver.inspect("task", {});
+    expect(seen.ok && seen.approved).toBe(true);
+    // already approved: no second ask
+    expect(await t.driver.requestApproval("task")).toBe(true);
+    expect(t.broker.asks).toHaveLength(1);
+  });
+
+  test("requestApproval is withdrawn after budget.wait and approves nothing", async () => {
+    const t = setup();
+    const pending = t.driver.requestApproval("task");
+    await flush();
+    t.clock.advance(60_000);
+    expect(await pending).toBe(false);
+    const seen = await t.driver.inspect("task", {});
+    expect(seen.ok && seen.approved).toBe(false);
+  });
+});
+
 function noopHost(): WorkflowHost {
   return {
     logStart: () => {},

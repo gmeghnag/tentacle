@@ -827,6 +827,40 @@ describe("the notifier's own failure modes", () => {
     expect(r.notifier.retained().runs).toBe(0);
   });
 
+  test("a scheduled fire that did not start reaches the phone once, named; `skipped` never does (slice 10)", async () => {
+    // Mutations: drop the `schedules` case → no delivery; push `skipped` too → 2 deliveries.
+    const r = rig({ graceMs: 0, registrations: [DEVICE_A] });
+    r.allow(DEVICE_A);
+    const row = (id: string, fires: number, outcome: string) => ({
+      id,
+      kind: "daily",
+      spec: "daily 03:00",
+      prompt: "workflow nightly",
+      nextAt: 10,
+      fires,
+      createdAt: 1,
+      workflow: { name: "nightly", inputs: [], hash: "3f2a9b1c" },
+      last: { at: 5, outcome, reason: `${outcome}\nsecond line` },
+    });
+    const update: PushWatchedUpdate = {
+      type: "schedules",
+      schedules: [row("sc-3", 1, "changed"), row("sc-4", 2, "skipped")],
+    };
+    r.notifier.onPushEvent("S", { type: "update", update }, NOBODY);
+    await settled();
+    expect(r.deliveries).toHaveLength(1);
+    const message = open(r.deliveries[0] as PushDelivery);
+    expect(message.kind).toBe("run_not_started");
+    expect(message.schedule).toEqual({
+      scheduleId: "sc-3",
+      name: "nightly",
+      reason: "changed second line",
+    });
+    r.notifier.onPushEvent("S", { type: "update", update }, NOBODY);
+    await settled();
+    expect(r.deliveries).toHaveLength(1);
+  });
+
   test("a run stopped with a reason carries it, one line", async () => {
     const r = rig({ graceMs: 0, registrations: [DEVICE_A] });
     r.allow(DEVICE_A);

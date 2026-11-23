@@ -219,6 +219,19 @@ export const PushRunSchema = z.object({
 export type PushRun = z.infer<typeof PushRunSchema>;
 
 /**
+ * The schedule a `run_not_started` push is about (agent-workflows slice 10): a
+ * scheduled workflow fire that could not start for a reason the user must fix
+ * — its `sc-N`, the workflow's name, and the one-line why (`changed`,
+ * `unapproved`, …). No run id: a fire that did not start made no run.
+ */
+export const PushScheduleSchema = z.object({
+  scheduleId: line(64),
+  name: line(64),
+  reason: line(PUSH_RUN_REASON_MAX).optional(),
+});
+export type PushSchedule = z.infer<typeof PushScheduleSchema>;
+
+/**
  * The push kinds: an ask, its replacement, the two ways a turn ends that are
  * worth a buzz, and the two ways a WORKFLOW RUN ends (docs/feat/agent-workflows.md
  * Q5). The run kinds are additive on a v1 plaintext: an older app's `PushKind`
@@ -232,6 +245,8 @@ export const PUSH_KINDS = [
   "turn_failed",
   "run_done",
   "run_stopped",
+  // slice 10: a scheduled workflow fire that could not start (additive on v1).
+  "run_not_started",
 ] as const;
 export const PushKindSchema = z.enum(PUSH_KINDS);
 export type PushKind = z.infer<typeof PushKindSchema>;
@@ -257,6 +272,8 @@ export const PushMessageSchema = z.object({
   ask: PushAskSchema.optional(),
   turn: PushTurnSchema.optional(),
   run: PushRunSchema.optional(),
+  /** For kind `run_not_started`. */
+  schedule: PushScheduleSchema.optional(),
 });
 export type PushMessage = z.infer<typeof PushMessageSchema>;
 

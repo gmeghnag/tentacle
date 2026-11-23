@@ -67,6 +67,7 @@ import {
   type RenameResult,
   type ResolvePermissionParams,
   type ResolvePermissionResult,
+  type ScheduleCreateParams,
   type ScheduleDeleteParams,
   type SendNowParams,
   type SessionContextParams,
@@ -470,6 +471,12 @@ export class Connection {
         // Synchronous (docs/feat/cron-tool.md D5): never waits on a turn.
         const { sessionId, scheduleId } = params as ScheduleDeleteParams;
         return this.lookup(sessionId).deleteSchedule(scheduleId);
+      }
+      case Method.ScheduleCreate: {
+        // agent-workflows slice 10: answers up to the create (reads the file);
+        // the approval ask is raised, never awaited (§7).
+        const create = params as ScheduleCreateParams;
+        return this.lookup(create.sessionId).scheduleCreateRpc(create);
       }
       case Method.McpStatus:
         return this.mcpStatus();

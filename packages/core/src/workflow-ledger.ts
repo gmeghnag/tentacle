@@ -162,8 +162,10 @@ export interface WorkflowStartInput {
   readonly hash: string;
   readonly path: string;
   readonly inputs: Readonly<Record<string, string>>;
-  readonly by: "user" | "model";
+  readonly by: "user" | "model" | "schedule";
   readonly turnId?: string;
+  /** The schedule that started it (`by: "schedule"`, slice 10). */
+  readonly scheduleId?: string;
 }
 
 /** The `workflow_start` body: capped, and judged by its schema (throws on a bad id/hash). */
@@ -177,6 +179,9 @@ export function workflowStartBody(input: WorkflowStartInput): WorkflowStartBody 
     inputs: capWorkflowInputs(input.inputs),
     by: input.by,
     ...(input.turnId !== undefined && input.turnId !== "" ? { turnId: input.turnId } : {}),
+    ...(input.scheduleId !== undefined && input.scheduleId !== ""
+      ? { scheduleId: input.scheduleId }
+      : {}),
   });
 }
 

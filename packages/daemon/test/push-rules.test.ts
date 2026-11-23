@@ -472,6 +472,32 @@ describe("the turn rule", () => {
   });
 });
 
+describe("the not-started rule (docs/feat/agent-workflows.md slice 10)", () => {
+  const notStarted = (fires: number, clients = 0): PushEvent => ({
+    type: "run_not_started",
+    sessionId: "s1",
+    scheduleId: "sc-3",
+    fireKey: `sc-3#${fires}`,
+    attached: { clients, devices: clients > 0 ? [ALICE] : [] },
+  });
+
+  test("unattended → ONE `run_not_started` per fire, naming the schedule", () => {
+    // Mutation M-l: drop the memory → the same fire buzzes on every later update.
+    const h = harness([ALICE]);
+    const pushed = h.send(notStarted(1));
+    expect(pushed.map((c) => c.kind)).toEqual(["run_not_started"]);
+    expect(pushed[0]?.scheduleId).toBe("sc-3");
+    expect(h.send(notStarted(1))).toEqual([]);
+    // the next fire of the same schedule is news again
+    expect(h.send(notStarted(2)).map((c) => c.kind)).toEqual(["run_not_started"]);
+  });
+
+  test("a watching client silences it", () => {
+    const h = harness([ALICE]);
+    expect(h.send(notStarted(1, 1))).toEqual([]);
+  });
+});
+
 describe("the run rule (docs/feat/agent-workflows.md slice 9, owner Q5)", () => {
   const runEnd = (
     state: "ok" | "error" | "stopped",
