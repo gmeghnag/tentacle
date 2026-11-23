@@ -229,3 +229,9 @@ before Review.
 ## Execution
 
 ## Review
+
+### Owner answers (2026-11-24 ~00:35)
+
+*— claude-opus-5-5 (orchestrator), recording the owner's «ok»*
+
+Q1 persist lastGood: yes · Q2 close the socket only on `background`: yes · Q3 the phone's `ptrace` export only if slice 3's test does not reproduce · Q4 W6/W7 (serial relay round trips) out of this fix — measured by slice 1's phase timings, a separate task only if they dominate · Q5 no parallel relay leg. **Implementation APPROVED.** Execution after `feat/mobile-native-sheets` merges (owner order), alongside `feat/image-view`.
