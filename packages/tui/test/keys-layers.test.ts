@@ -11,6 +11,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { Key } from "ink";
+import { NO_APPROVAL_SCROLL } from "../src/approval-scroll.ts";
 import { PURE_LAYERS } from "../src/keys/layers.ts";
 import { routeKey } from "../src/keys/route.ts";
 import type { KeySnapshot } from "../src/keys/snapshot.ts";
@@ -68,6 +69,7 @@ function snap(over: Partial<KeySnapshot> = {}, char = "", key: Partial<Key> = {}
       mode: () => ({ mode: "menu" }),
       // `0` = long armed: the arming window has passed (docs/fix/quit-enter-ask.md).
       shownAt: () => 0,
+      approvalScroll: () => NO_APPROVAL_SCROLL,
     },
     sessions: undefined,
     detachOnQuit: false,
@@ -113,6 +115,7 @@ describe("artifact-confirm (model-artifacts S6b: the pod / network open)", () =>
             selected: 0,
             mode: () => ({ mode: "menu" }),
             shownAt: () => 0,
+            approvalScroll: () => NO_APPROVAL_SCROLL,
           },
         },
         "y",
@@ -266,6 +269,7 @@ describe("the permission dialog", () => {
         selected: 0,
         mode: () => ({ mode: "menu" }),
         shownAt: () => 0,
+        approvalScroll: () => NO_APPROVAL_SCROLL,
       },
       ...over,
     });
@@ -305,6 +309,7 @@ describe("the permission dialog", () => {
         selected: 0,
         mode: () => ({ mode: "reply", editor: { value: "", cursor: 0, anchor: null } }),
         shownAt: () => 0,
+        approvalScroll: () => NO_APPROVAL_SCROLL,
       },
       replyMaxChars: 100,
       pasteBuffer: () => null,
@@ -447,6 +452,7 @@ describe("ordering invariants (the reason this is ONE list)", () => {
           selected: 0,
           mode: () => ({ mode: "menu" }),
           shownAt: () => 0,
+          approvalScroll: () => NO_APPROVAL_SCROLL,
         },
       },
       {

@@ -16,6 +16,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { type FrameInput, frameLayout } from "../src/app-layout.ts";
+import { NO_APPROVAL_SCROLL } from "../src/approval-scroll.ts";
 import type { DockState } from "../src/background-focus.ts";
 import { skillsPanel } from "../src/panel.ts";
 import type { PermissionController } from "../src/permission-ui.ts";
@@ -64,6 +65,9 @@ const noPermission = (over: Partial<PermissionController> = {}): PermissionContr
     mode: { mode: "menu" },
     setMode: () => {},
     readMode: () => ({ mode: "menu" }),
+    // A ref read the layout makes for a `workflow_approve`'s window (the list is
+    // scrolled, never cut); at rest it is the top of the list.
+    approvalScroll: () => NO_APPROVAL_SCROLL,
     ...over,
   }) as unknown as PermissionController;
 

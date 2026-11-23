@@ -38,10 +38,12 @@ import {
   shortHash,
   start as startMachine,
   validateWorkflow,
+  workflowApprovalSummary,
   workflowEndBody,
   workflowHash,
   workflowStartBody,
   workflowStepBody,
+  workflowWhereLabel,
 } from "@tentacle/core";
 import type { SubagentRunner } from "./subagent.ts";
 import { createStepVerdict } from "./workflow-verdict.ts";
@@ -243,17 +245,6 @@ function inputsProblem(
   return missing.length > 0 ? `missing required input(s): ${missing.join(", ")}` : undefined;
 }
 
-/** One line per step: what a hash approval shows. */
-function stepsSummary(spec: WorkflowSpec): string[] {
-  return spec.steps.map((s) =>
-    s.kind === "run"
-      ? `${s.id}: run \`${s.command}\` (${whereLabel(s)})`
-      : s.kind === "agent"
-        ? `${s.id}: agent${s.model !== undefined ? ` ${s.model}` : ""}`
-        : `${s.id}: approve`,
-  );
-}
-
 /** The runs kept on the wire beside the current one. */
 export const WORKFLOW_RECENT_RUNS = 5;
 
@@ -284,13 +275,6 @@ const systemClock: WorkflowClock = {
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
-
-function whereLabel(step: WorkflowStep): string {
-  if (step.kind !== "run" || step.where.engine === "local") {
-    return "local";
-  }
-  return `docker:${step.where.name}`;
-}
 
 /** A label for a `line()`-bounded wire field: whitespace runs (newlines too) collapsed. */
 function oneLine(text: string, max: number): string {
@@ -509,7 +493,7 @@ export class WorkflowDriver {
             `Approve workflow ${spec.name} v${spec.version} (hash ${shortHash(hash)}) for its schedule`,
             200,
           ),
-          detail: capWorkflowText(stepsSummary(spec).join("\n"), 2000),
+          detail: workflowApprovalSummary(spec.steps),
           input: {},
         },
         {
@@ -698,7 +682,7 @@ export class WorkflowDriver {
       id: step.id,
       kind: step.kind,
       ...(step.kind === "agent" && step.model !== undefined ? { model: step.model } : {}),
-      where: whereLabel(step),
+      where: workflowWhereLabel(step),
       state: "pending",
       attempt: 0,
       round: 0,
@@ -762,7 +746,7 @@ export class WorkflowDriver {
     if (await this.deps.approvals.has(run.source.path, run.hash)) {
       return true;
     }
-    const steps = stepsSummary(run.spec);
+    const steps = workflowApprovalSummary(run.spec.steps);
     const answer = await this.stepRequester(run, null)(
       {
         kind: "workflow_approve",
@@ -772,7 +756,7 @@ export class WorkflowDriver {
           `Run workflow ${run.spec.name} v${run.spec.version} (hash ${shortHash(run.hash)})`,
           200,
         ),
-        detail: capWorkflowText(steps.join("\n"), 2000),
+        detail: steps,
         input: {},
       },
       { toolCallId: run.runId },
@@ -840,7 +824,7 @@ export class WorkflowDriver {
           ...(outcome.event.kind === "step_result" ? { verdict: outcome.event.verdict } : {}),
           reason: outcome.reason,
           ...(step.kind === "agent" && step.model !== undefined ? { model: step.model } : {}),
-          where: whereLabel(step),
+          where: workflowWhereLabel(step),
           tokens: outcome.tokens,
           durationMs,
           prompt: action.text,
@@ -1161,7 +1145,9 @@ export class WorkflowDriver {
     // A container step needs the seam that reaches one; without it the step fails
     // saying what is missing rather than running the command on the LAPTOP.
     if (step.where.engine !== "local" && commands.execOn === undefined) {
-      return fail(`where: ${whereLabel(step)} is not available in this session (no workload seam)`);
+      return fail(
+        `where: ${workflowWhereLabel(step)} is not available in this session (no workload seam)`,
+      );
     }
     const requestedTarget: WorkflowContainerTarget | undefined =
       step.where.engine === "local"
@@ -1242,7 +1228,7 @@ export class WorkflowDriver {
         tool: WORKFLOW_APPROVE_TOOL,
         level: "ask",
         title: oneLine(action.text, 200),
-        ...(step.detail !== undefined ? { detail: capWorkflowText(step.detail, 2000) } : {}),
+        ...(step.detail !== undefined ? { detail: step.detail } : {}),
         input: {},
         reply: { maxChars: 2000 },
       },

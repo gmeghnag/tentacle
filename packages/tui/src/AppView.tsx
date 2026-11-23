@@ -139,6 +139,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
             selected={permission.selected}
             cwd={cwd}
             columns={columns}
+            approvalScroll={permission.approvalScroll()}
             {...(replyShown ? { reply: replyShown } : {})}
             replyable={permission.choices.some((c) => c.reply === true)}
             {...(permission.pendingAgent
