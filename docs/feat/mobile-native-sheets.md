@@ -502,3 +502,4 @@ device.
 
 1. Draining on `inactive` (so Control Center, a call banner or the Face ID prompt also close and re-open the sheets visibly): **accepted** — the price of never showing content in the app-switcher snapshot.
 2. L2: **approved** — the spike may run `osascript` to press ⌃⇧⌘H in Simulator.app and screenshot the app switcher.
+- **L2 (owner, 23/11 ~14:25):** `osascript` cannot drive Simulator.app from the agent process (`-1728`, no automation permission). Owner chose to verify L2 **on the real phone** during S6's Validation (as `docs/feat/mobile-lock.md` 0.4 accepted). Evidence so far: sheets drained ~1 s before `background`, the relaunch card shows only the lock, native blur on. If L2 fails on the device → alternative B (`eval/lock-own-window`). **Execution may start (S1–S6).**
