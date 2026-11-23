@@ -85,10 +85,10 @@ export interface WorkflowRow {
 
 /** A workflow file as read from disk: the YAML and every prompt file it names. */
 export interface WorkflowSource {
-  /** `workflows/<name>.yaml`, repo-relative (recorded, and keyed in the approval store). */
+  /** `.tentacle/workflows/<name>.yaml`, project-relative (recorded, and keyed in the approval store). */
   readonly path: string;
   readonly text: string;
-  /** Prompt files by their path relative to `workflows/`; absent → validation names it. */
+  /** Prompt files by their path relative to `.tentacle/workflows/`; absent → validation names it. */
   readonly prompts: Readonly<Record<string, string>>;
 }
 

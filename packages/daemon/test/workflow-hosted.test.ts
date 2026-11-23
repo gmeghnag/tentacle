@@ -49,7 +49,7 @@ function hosted(messages: ChatMessage[] = []): HostedSession {
 
 function driver(): WorkflowDriver {
   const deps: WorkflowDriverDeps = {
-    load: async () => ({ path: "workflows/task.yaml", text: YAML, prompts: {} }),
+    load: async () => ({ path: ".tentacle/workflows/task.yaml", text: YAML, prompts: {} }),
     context: () => ({ models: [], agentTypes: ["general"] }),
     approvals: { has: async () => true, add: async () => {} },
     request: async () => ({ allowed: false }),
@@ -127,7 +127,7 @@ describe("session/workflow on a hosted session", () => {
       release = resolve;
     });
     const d = new WorkflowDriver({
-      load: async () => ({ path: "workflows/task.yaml", text: YAML, prompts: {} }),
+      load: async () => ({ path: ".tentacle/workflows/task.yaml", text: YAML, prompts: {} }),
       context: () => ({ models: [], agentTypes: ["general"] }),
       approvals: { has: async () => true, add: async () => {} },
       request: async () => ({ allowed: false }),
@@ -182,7 +182,7 @@ describe("session/workflow on a hosted session", () => {
       released = resolve;
     });
     const d = new WorkflowDriver({
-      load: async () => ({ path: "workflows/task.yaml", text: APPROVE_YAML, prompts: {} }),
+      load: async () => ({ path: ".tentacle/workflows/task.yaml", text: APPROVE_YAML, prompts: {} }),
       context: () => ({ models: [], agentTypes: ["general"] }),
       approvals: { has: async () => true, add: async () => {} },
       request: async () => {

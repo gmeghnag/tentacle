@@ -42,6 +42,7 @@ export * from "./pdf-images.ts";
 export * from "./png.ts";
 export * from "./voice/index.ts";
 export * from "./tool-groups.ts";
+export * from "./project-paths.ts";
 export * from "./workflow-spec.ts";
 export * from "./workflow-machine.ts";
 export * from "./workflow-ledger.ts";

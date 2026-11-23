@@ -293,12 +293,12 @@ describe("validateWorkflow — every refusal names its YAML path", () => {
     ).toContain("steps[3].agent: needs exactly ONE of prompt: (a file) or prompt_text: (inline)");
   });
 
-  test("a prompt path that leaves workflows/ is refused", () => {
+  test("a prompt path that leaves .tentacle/workflows/ is refused", () => {
     expect(
       errorsOf(
         variant('    agent: { prompt_text: "fix it" }', "    agent: { prompt: ../secrets/fix.md }"),
       ),
-    ).toContain("steps[3].agent.prompt: should stay inside workflows/ — remove the ..");
+    ).toContain("steps[3].agent.prompt: should stay inside .tentacle/workflows/ — remove the ..");
   });
 
   test("a prompt file that does not exist is refused", () => {
@@ -309,7 +309,7 @@ describe("validateWorkflow — every refusal names its YAML path", () => {
           readPrompt: () => undefined,
         },
       ),
-    ).toContain('steps[3].agent.prompt: no file "prompts/fix.md" under workflows/');
+    ).toContain('steps[3].agent.prompt: no file "prompts/fix.md" under .tentacle/workflows/');
   });
 
   test("an unknown model names the session's models", () => {

@@ -9,7 +9,12 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkflowRow } from "@tentacle/agent";
-import { type ModelProvider, PermissionBroker, type PermissionRequest } from "@tentacle/core";
+import {
+  type ModelProvider,
+  PROJECT_PATHS,
+  PermissionBroker,
+  type PermissionRequest,
+} from "@tentacle/core";
 import { NOTICES, WORKFLOW_TOOL_NAME, type WorkloadShellBackend } from "@tentacle/tools";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { buildAgent, workerSessionBuild, workflowContainerOutcome } from "../src/wiring.ts";
@@ -65,7 +70,9 @@ describe("workflow wiring", () => {
     const wired = buildAgent(config, { workflows: true });
     const started = await wired.workflows?.start({ name: "nope", by: "user" });
     expect(started?.ok).toBe(false);
-    expect(started?.ok === false ? started.reason : "").toContain("workflows/nope.yaml");
+    expect(started?.ok === false ? started.reason : "").toContain(
+      `${join(dir, PROJECT_PATHS.workflows, "nope.yaml")}`,
+    );
   });
 });
 
@@ -100,9 +107,9 @@ describe("a `run` step runs what the GATE approved (fix round 1, HIGH)", () => {
         hooks: [{ event: "tool_call", matcher: "shell|workload_shell", command: hookCommand }],
       }),
     );
-    await mkdir(join(dir, "workflows"), { recursive: true });
+    await mkdir(join(dir, PROJECT_PATHS.workflows), { recursive: true });
     await writeFile(
-      join(dir, "workflows", "rewrite.yaml"),
+      join(dir, PROJECT_PATHS.workflows, "rewrite.yaml"),
       `schemaVersion: 1\nname: rewrite\nversion: 1\nsteps:\n  - id: gate\n    run: make test\n${options.docker === true ? "    where: { docker: devbox }\n" : ""}`,
     );
     const saved = process.env.TENTACLE_CONFIG_DIR;
@@ -214,9 +221,9 @@ describe("run steps in a container (Slice 5)", () => {
 
   /** A real build (real gate, real `WorkloadShells`) over a backend that cannot dial. */
   async function dockerRun(withBackend: boolean) {
-    await mkdir(join(dir, "workflows"), { recursive: true });
+    await mkdir(join(dir, PROJECT_PATHS.workflows), { recursive: true });
     await writeFile(
-      join(dir, "workflows", "ship.yaml"),
+      join(dir, PROJECT_PATHS.workflows, "ship.yaml"),
       "schemaVersion: 1\nname: ship\nversion: 1\nsteps:\n  - id: gate\n    run: make test\n    where: { docker: devbox }\n",
     );
     const asks: PermissionRequest[] = [];

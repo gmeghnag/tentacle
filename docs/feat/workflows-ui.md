@@ -904,6 +904,128 @@ not-versioned sentence.
 
 ## Execution
 
+### Slice 0 — `core/src/project-paths.ts` + node adapter; workflows → `.tentacle/workflows` (D7 v5)
+
+*— claude-sonnet-4-5, 2026-11-23*
+
+**Load-bearing check re-run FIRST (PARTIAL rule): PASSES, unchanged.** `rg`/`grep` inventory
+(`.tentacle/tmp/workflows-ui/lb-inventory.sh`, paste-in below) returns exactly the plan's three
+readers and nothing else:
+
+| Expectation | Result |
+|---|---|
+| the only workflow path construction is `cli/src/workflow-files.ts:41` | **yes** — that line only |
+| the only `loadWorkflowSource` caller is `wiring.ts:843` (`config.cwd`) | **yes** |
+| `.tentacle/` product readers are hide + tool-output only | **yes** — `workspace-mount.ts:252,287`, `agent.ts:2973` (+ their comments) |
+| `@tentacle/core` has no `node:fs` (the module must stay pure) | **yes** — no hit |
+| no `PROJECT_PATHS`/`project-paths` anywhere yet | **yes** — no hit |
+
+```
+--- A. workflow path construction (expect ONLY workflow-files.ts:41) ---
+packages/cli/src/workflow-files.ts:41:  const root = join(cwd, "workflows");
+--- B. loadWorkflowSource callers (expect ONLY wiring.ts:843) ---
+packages/cli/src/wiring.ts:843:        load: async (name) => loadWorkflowSource(config.cwd, name),
+--- E. core has no node:fs (the module must stay pure) ---
+(none)
+--- F. PROJECT_PATHS does not exist yet (expect nothing) ---
+(none)
+```
+No new reader appeared, so D7's inventory still holds and slice 0 proceeded.
+
+**As built, in dependency order.**
+
+1. **`packages/core/src/project-paths.ts` (NEW, pure).** `TENTACLE_DIR`, `PROJECT_PATHS`
+   (`workflows` = `.tentacle/workflows`, `hide`, `toolOutput`) — the only place the names are
+   spelled; `WORKFLOW_NAME_RE` (the loader's `NAME`, moved here so the folder and the name rule
+   have one home); `ProjectFs` (`lstat`/`list`, both `undefined` for "nothing there");
+   `resolveInside(base, rel, fs)` (no-links: refuses a link at **any** component, plus
+   absolute/`..`/empty escapes, and returns `absent` vs `problem`); `workflowsAbove(cwd, fs,
+   {home})` (the display-only hint: 4 ancestors, never `$HOME`/`/`, real dirs only, valid
+   `<stem>.yaml` regular files only, count capped at 200, ≤ 8 `lstat` + 1 listing per ancestor).
+   Exported from `core/src/index.ts`.
+2. **`packages/cli/src/project-fs.ts` (NEW).** `nodeProjectFs()`: `lstatSync`/`readdirSync`,
+   ENOENT/ENOTDIR → `undefined`, a symlink reported as `link` (never followed) — same shape as
+   `nodeHideFileFs` (`engine-select.ts`).
+3. **workflows moved.** `workflow-files.ts` now resolves `${PROJECT_PATHS.workflows}/<name>.yaml`
+   through `resolveInside` and records `path` = `.tentacle/workflows/<name>.yaml`; the missing-file
+   error names the **absolute** folder (`no workflow x: /…/proj/.tentacle/workflows/x.yaml does not
+   exist`), and a symlinked `.tentacle`/`workflows`/file is refused by path. Prompts are still
+   keyed relative to the folder, so the validator, hash and approval key are untouched
+   (`projectKey(cwd)` unchanged, per D7 v5). `workflowsGitIgnored(cwd)` added here too (it is
+   slice 0's "unchanged from v4 and still part of slice 0" item; its consumer is 5a).
+4. **Messages/texts from the module.** `workflow-spec.ts` (header, `promptPath`/`readPrompt`
+   docs, `promptPathProblem`'s two sentences, the "no file … under" error) and
+   `tools/src/{workflow,schedule}.ts` (the `workflow` DESCRIPTION, `schedule_create`'s `workflow`
+   field) build `${PROJECT_PATHS.workflows}` instead of a hand-written `workflows/`.
+5. **hide: names only** — `HIDE_FILE_LABEL = PROJECT_PATHS.hide`, and `loadHideFile` builds its
+   path from that label. The reader, its realpath-inside rule and the fd-level
+   `O_NOFOLLOW|O_NONBLOCK` re-check are untouched, exactly as the Notes/debt entry recommends.
+6. **tool-output: name only** — `agent.ts` builds `${PROJECT_PATHS.toolOutput}/…`; still relative,
+   still through `env.writeFile`, never root-resolved.
+7. **`.gitignore`**: `.tentacle/` → `.tentacle/*` + `!.tentacle/workflows/`, with a comment saying
+   why (`/*` because git cannot re-include a child of an excluded DIRECTORY).
+8. **Docs**: `AGENTS.md` §6's repro fact line now says `.tentacle/*` is gitignored **except
+   `.tentacle/workflows/`**; `docs/feat/agent-workflows.md` gained a dated note that D1's
+   `workflows/` is now `.tentacle/workflows/` and nothing else about that task changed.
+
+**Every path-only fixture moved** (inputs, not proofs — the plan's list, exactly):
+`agent/test/workflow-driver.test.ts` (`:155` + the four approval keys), 
+`daemon/test/workflow-hosted.test.ts:52,130,185`, `daemon/test/workflow-load.test.ts:151`,
+`daemon/test/schedule-workflow.test.ts:101`, `daemon/test/support/log-fixture.ts:104`, and
+`cli/test/workflow-wiring.test.ts` (its two real fixture writes + the not-found assertion, which
+now pins the absolute folder). `cli/test/workflow-approvals.test.ts` keeps its literal
+`workflows/task.yaml` **on purpose**: the store keys on whatever `path` it is handed, and that
+suite is the "path is opaque to the store" contract — editing it would have weakened the test.
+
+**Red before green (each shown failing on the pre-change code).**
+- `core/test/project-paths.test.ts` (NEW, 17 tests): written against the module — the red step was
+  the export/caller wiring, not an assertion, so the *property* proof is the mutation column below
+  (§9's non-vacuity rule is what carries here).
+- `cli/test/workflow-files.test.ts` (NEW, 9 tests) — **RED on today's loader, 7 of 8 failing** by
+  assertion, not compile error: it read `<cwd>/workflows`, so `.tentacle/workflows` loads failed and
+  every symlink case fell through to `no workflow task: workflows/task.yaml does not exist`.
+- `core/test/workflow-spec.test.ts` — the two message assertions FAILED after the text moved
+  (`.tentacle/workflows/` vs `workflows/`), which is the behaviour change itself surfacing; updated
+  with the code, as the plan's "messages" item requires.
+- `cli/test/project-fs.test.ts`, `cli/test/workflow-gitignored.test.ts` — new readers; their
+  non-vacuity is the mutation/repo-shape evidence (`git init` in a temp dir, both `.gitignore`
+  shapes), no old code to fail on.
+
+**Mutation checks (all applied, all reverted; tree clean afterwards).**
+
+| Mutation | Killed |
+|---|---|
+| `resolveInside` checks only the LAST component for a link (the plan's named mutation) | 3 core tests (link at `.tentacle`, at `workflows`, …) **and** 2 loader tests (symlinked `.tentacle`, symlinked `workflows`) — the property propagates end to end |
+| `workflowsAbove`'s walk unbounded (drop `WORKFLOWS_ABOVE_DEPTH`) | "NOT found at depth 5: the walk is bounded" |
+| feed the hint's `dir` to the loader (the plan's named mutation, "a parent's `x.yaml` becomes loadable from the child") | "a parent's workflow is NOT loadable from the child (the hint never feeds a run)" — nothing else failed, so the hint is provably confined to display |
+
+**Gate.** This executor did **not** run the full suite / repo-wide typecheck / lint (per the brief
+the orchestrator's script does). What was run, foreground and narrow: every affected suite —
+`core/test` (65 files, 929 tests), the four new/extended cli suites, `workspace-mount`,
+`engine-select`, `tool-output-wiring` + agent `tool-output`, the four workflow driver/daemon suites,
+all of `packages/tools/test`, `daemon/test/{mapping,push-hook}`, `core/workflow-ledger`,
+`cli/workflow-approvals`, `scripts/test/changelog-guard` — **0 fail**. `bunx biome check` on all 17
+changed/new source+test files: **clean** (5 auto-fixed, then no fixes applied). `tsc -p` per
+package: `core`, `agent`, `tools`, `daemon` clean; `cli` reports 119 pre-existing errors in
+untouched files (`attach-run.ts`, `connect.ts`, …) — **zero** in the files this slice touched.
+
+**Drift from Implementation — two, both recorded here rather than forced:**
+1. **`protocol/src/session.ts:856`** — the plan lists a comment edit; done (`.tentacle/workflows/<name>.yaml`).
+   **No schema change**, so `packages/protocol/schema/protocol.json` is NOT regenerated and no
+   `protocol.d/` note is due: slice 0 adds no wire shape. `json-schema.test.ts` therefore stays green
+   as-is (drift: the plan's slice table lists the schema file only for slices 1a and 5a).
+2. **The changelog fragment is `changed`, not `added`.** §10 allows ONE fragment per
+   slug+category, and slice 2's row already claims `changelog.d/workflows-ui.added.md`. Writing
+   `added` here would have created that exact filename collision at merge, so slice 0's fragment is
+   `changelog.d/workflows-ui.changed.md` (a move, which is what this is) and slice 2 keeps `added`.
+
+**Not done in this slice (deliberately, and why):** nothing from 1a/1b/5a/2/2b/3/4/5b.
+`PROJECT_PATHS` has no root function (cwd is the root, owner 11:25). The `/workflow` header,
+the TUI workflows row and the phone start screen name the folder in slices 2/2b/5b — they read
+`PROJECT_PATHS`/the catalogue's `dir`. `workflowsAbove` has no production caller yet: its consumer
+is 5a's catalogue `elsewhere` field, and slice 0 ships it with its bound, its `$HOME`/`/` rule and
+its "cannot change behaviour" property already pinned by tests.
+
 ## Review
 
 ### Owner answers (2026-11-23)

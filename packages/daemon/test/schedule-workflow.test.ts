@@ -98,7 +98,7 @@ function rig(opts: RigOptions = {}) {
       });
       if (opts.driver === false) return { agent, permissions };
       driver ??= new WorkflowDriver({
-        load: async () => ({ path: "workflows/nightly.yaml", text: files.text, prompts: {} }),
+        load: async () => ({ path: ".tentacle/workflows/nightly.yaml", text: files.text, prompts: {} }),
         context: () => ({ models: [], agentTypes: ["general"] }),
         approvals: {
           has: async (path, hash) => opts.approved !== false || approvals.has(`${path}#${hash}`),

@@ -152,7 +152,7 @@ function setup(
       if (name !== "task") {
         throw new Error(`no workflow ${name}`);
       }
-      return { path: "workflows/task.yaml", text: files.text, prompts: files.prompts };
+      return { path: ".tentacle/workflows/task.yaml", text: files.text, prompts: files.prompts };
     },
     context: () => ({ models: ["opus", "deepseek"], agentTypes: ["general", "explore"] }),
     approvals: {
@@ -885,7 +885,7 @@ describe("startScheduled (slice 10)", () => {
       },
     });
     const hash = await pinned(t);
-    t.approvals.add(`workflows/task.yaml#${hash}`);
+    t.approvals.add(`.tentacle/workflows/task.yaml#${hash}`);
     const started = await t.driver.startScheduled(sched(hash));
     expect(started).toEqual({ ok: true, runId: "wf-1" });
     await flush();
@@ -912,11 +912,11 @@ describe("startScheduled (slice 10)", () => {
   test("the file changed since the pin → `changed` naming both hashes, no ask, no run row", async () => {
     const t = setup();
     const old = await pinned(t);
-    t.approvals.add(`workflows/task.yaml#${old}`);
+    t.approvals.add(`.tentacle/workflows/task.yaml#${old}`);
     t.files.text = t.files.text.replace("do it", "do it!");
     // the NEW content is approved too: the pin, not the store, is what decides
     const fresh = await pinned(t);
-    t.approvals.add(`workflows/task.yaml#${fresh}`);
+    t.approvals.add(`.tentacle/workflows/task.yaml#${fresh}`);
     const result = await t.driver.startScheduled(sched(old));
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -950,7 +950,7 @@ describe("startScheduled (slice 10)", () => {
   test("a run in flight → `skipped`; the first run is untouched", async () => {
     const t = setup({ text: YAML("  - id: merge\n    approve: { title: Merge it }\n") });
     const hash = await pinned(t);
-    t.approvals.add(`workflows/task.yaml#${hash}`);
+    t.approvals.add(`.tentacle/workflows/task.yaml#${hash}`);
     expect((await t.driver.startScheduled(sched(hash))).ok).toBe(true);
     await flush();
     const asksBefore = t.broker.asks.length;

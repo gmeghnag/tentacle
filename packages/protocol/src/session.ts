@@ -853,7 +853,7 @@ export type WorkflowRow = z.infer<typeof WorkflowRowSchema>;
 // `session/prompt` (the run's asks are attributed to it, A2). Additive: an
 // older daemon answers `MethodNotFound` ("update tentacle").
 
-/** A workflow's name as `workflows/<name>.yaml` names it. */
+/** A workflow's name as `.tentacle/workflows/<name>.yaml` names it. */
 export const WorkflowNameSchema = z
   .string()
   .min(1)

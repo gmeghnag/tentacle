@@ -101,7 +101,7 @@ export class FakeLog {
       name,
       version: 3,
       hash: "a".repeat(64),
-      path: `workflows/${name}.yaml`,
+      path: `.tentacle/workflows/${name}.yaml`,
       inputs: [{ name: "slug", value: "x" }],
       by: "user",
     });

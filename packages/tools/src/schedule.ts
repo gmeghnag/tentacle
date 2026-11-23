@@ -14,6 +14,7 @@
  * the worker; never a pod, D1) and never given to a child (`subagent.ts`).
  */
 import {
+  PROJECT_PATHS,
   type ResourceKey,
   type ScheduleCreateResult,
   type ScheduleLink,
@@ -91,7 +92,7 @@ const createInput = z.object({
     .min(1)
     .optional()
     .describe(
-      "Instead of a prompt: the workflow (workflows/<name>.yaml) to START by itself when it fires — no turn, the file's current content is pinned.",
+      `Instead of a prompt: the workflow (${PROJECT_PATHS.workflows}/<name>.yaml) to START by itself when it fires — no turn, the file's current content is pinned.`,
     ),
   inputs: z
     .array(z.object({ name: z.string().min(1), value: z.string() }))
