@@ -1145,7 +1145,9 @@ export class WorkflowDriver {
     // A container step needs the seam that reaches one; without it the step fails
     // saying what is missing rather than running the command on the LAPTOP.
     if (step.where.engine !== "local" && commands.execOn === undefined) {
-      return fail(`where: ${workflowWhereLabel(step)} is not available in this session (no workload seam)`);
+      return fail(
+        `where: ${workflowWhereLabel(step)} is not available in this session (no workload seam)`,
+      );
     }
     const requestedTarget: WorkflowContainerTarget | undefined =
       step.where.engine === "local"

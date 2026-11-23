@@ -12,8 +12,8 @@
  */
 import type { PermissionResponse } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
-import type { ArtifactIntent } from "../artifact-open.ts";
 import type { ApprovalScroll } from "../approval-scroll.ts";
+import type { ArtifactIntent } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";

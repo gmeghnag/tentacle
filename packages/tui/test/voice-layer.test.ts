@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { NO_APPROVAL_SCROLL } from "../src/approval-scroll.ts";
 import { NOTHING } from "../src/keys/contract.ts";
 import { voiceKeyLayer } from "../src/keys/layer-voice.ts";
 import { PURE_LAYERS } from "../src/keys/layers.ts";
@@ -126,6 +127,7 @@ describe("T5: behind an open panel or dialog the voice layer passes", () => {
         selected: 0,
         mode: () => ({ mode: "menu" }),
         shownAt: () => 0,
+        approvalScroll: () => NO_APPROVAL_SCROLL,
       },
     });
     expect(voiceKeyLayer.step(s)).toEqual(NOTHING);

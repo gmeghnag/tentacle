@@ -8,6 +8,7 @@
  * by the S0/S0b nets, which this slice must leave green and unedited.
  */
 import { describe, expect, test } from "bun:test";
+import { NO_APPROVAL_SCROLL } from "../src/approval-scroll.ts";
 import type { DockState } from "../src/background-focus.ts";
 import { LAYER_ORDER, PURE_LAYERS } from "../src/keys/layers.ts";
 import { routeKey } from "../src/keys/route.ts";
@@ -79,6 +80,7 @@ describe("the walk", () => {
             selected: 0,
             mode: () => ({ mode: "menu" }),
             shownAt: () => 0,
+            approvalScroll: () => NO_APPROVAL_SCROLL,
           },
         },
         "y",

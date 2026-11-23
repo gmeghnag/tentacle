@@ -1,7 +1,7 @@
 import type { PermissionRequest } from "@tentacle/core";
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import { NO_APPROVAL_SCROLL, type ApprovalScroll, approvalDetailMaxRows } from "../approval-scroll.ts";
+import { type ApprovalScroll, NO_APPROVAL_SCROLL } from "../approval-scroll.ts";
 import { MENU_FOOTER, MENU_FOOTER_REPLY, type ReplyView } from "../permission-reply.ts";
 import { permissionCwdLine, permissionShowsCwd, permissionView } from "../permission-ui.ts";
 import { dimProps, palette } from "../theme.ts";
@@ -36,7 +36,6 @@ export function PermissionPrompt({
   selected,
   cwd,
   columns = 80,
-  termRows = 24,
   approvalScroll = NO_APPROVAL_SCROLL,
   reply,
   replyable = false,
@@ -47,8 +46,6 @@ export function PermissionPrompt({
   selected: number;
   cwd: string;
   columns?: number;
-  /** The terminal height: how tall a `workflow_approve` detail window may be. */
-  termRows?: number;
   /** The `workflow_approve` detail's scroll (`approval-scroll.ts`). */
   approvalScroll?: ApprovalScroll;
   reply?: ReplyView;
@@ -62,13 +59,7 @@ export function PermissionPrompt({
   const dashes = Math.max(0, columns - titlePrefix.length - 1);
   // The same view the layout counts rows from (`app-layout.ts`). No sentence
   // yet: the ask's own call id is not on the request (Design §5 ⚠, `askedFor`).
-  const view = permissionView(
-    req,
-    null,
-    columns,
-    approvalScroll,
-    approvalDetailMaxRows(termRows),
-  );
+  const view = permissionView(req, null, columns, approvalScroll);
 
   return (
     <Box flexDirection="column">

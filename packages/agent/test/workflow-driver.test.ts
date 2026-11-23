@@ -1027,9 +1027,7 @@ describe("the approval shows every command, verbatim (docs/fix/workflow-approve-
     // Mutation: `capWorkflowText(step.detail, 2000)` never fires on 2000 — the
     // property is that the ask carries the STEP's text, unmodified.
     const detail = `D${"y".repeat(1999)}`;
-    const text = YAML(
-      `  - id: gate\n    approve: { title: "Merge it", detail: "${detail}" }\n`,
-    );
+    const text = YAML(`  - id: gate\n    approve: { title: "Merge it", detail: "${detail}" }\n`);
     const { driver, broker } = setup({ text, approved: true });
     void driver.start({ name: "task", by: "user" });
     await flush();

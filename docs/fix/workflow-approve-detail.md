@@ -139,6 +139,41 @@ No protocol schema change, so no `protocol.d/` note.
 
 ## Execution
 
+*— deepseek-v4-pro (executor), 2026-11-23*
+
+**Load-bearing check, re-run first.** `workflowApprovalSummary` is the ONE reader of the list shape (`core/src/workflow-spec.ts:154`), the validator bounds it (`:802`), and no ask path caps it (`workflow-driver.ts:496`, `:749`, `:1231`). The wire still carries `explanation: z.string().optional()` with no max (`protocol/src/permission.ts:69`) and the mobile sheet draws `asking.request.detail` in one `<Text>` inside the sheet's `ScrollView` (`apps/mobile/src/screens/PermissionSheet.tsx:160-166`), so no protocol change and no sheet change. Holds.
+
+**As built (dependency order).**
+
+1. **Daemon (`core` + `agent`).** Moved `whereLabel` → `workflowWhereLabel` and the summary → `workflowApprovalSummary(steps): string` into `core/src/workflow-spec.ts`, exported via the existing `export *` (`core/src/index.ts:45`); added `WORKFLOW_MAX_APPROVE_SUMMARY = 16_000` and the validator check after the step checks (`workflow-spec.ts:795-807`, message names the size and the way out). The driver dropped its private `stepsSummary`, uses the shared function at the hash ask (`:749`) and the schedule ask (`:496`), and passes `step.detail` raw at the approve step (`:1231`).
+2. **TUI.** New pure `tui/src/approval-scroll.ts` (`offset` only; `isApprovalScrollKey`, `stepApprovalScroll`, `approvalRows`, `approvalHint`). `permissionView` gained a `workflow_approve` branch that wraps every line and windows it, never `truncateCells`/`capRows`; it reports `detailTotal`/`detailWindow` so the key layer and the paint read one decision. `permissionLayer` routes Space/PgUp/PgDn to the scroll before `stepPermissionKey`, in menu mode only, emitting a new `approvalScroll` effect (`keys/effects.ts`, `keys/execute.ts`, `App.tsx` key host). `usePermissionBroker` holds the scroll in a ref beside `shownAt` and resets it at the same three places.
+3. **Mobile push/LA — DROPPED**, per the owner's delta (they keep «Approve» on the lock screen). No change to `push-render.ts`, `notification-action.ts`, `la-render.ts`, `live-activity-action.ts`; their tests are untouched.
+4. **Changelog:** `changelog.d/workflow-approve-detail.security.md`.
+
+**Drift from the Implementation (and why).**
+
+- **D2's `reviewed` gate is not implemented** — the owner's approved delta overrides it («Devo poter premere yes anche senza averla vista tutta»). `DialogContext` has no `reviewed`, and `answer()` keeps its arming-only predicate. The test that would catch a regression here is `workflow-approve-view.test.tsx` "`y` answers allow-once at the TOP of the list too (no gate)".
+- **D2's dialog height.** The Implementation said the dialog stays ≤ 10 rows; the WIP I inherited made the detail area grow with the terminal (`approvalDetailMaxRows(termRows)`), which re-derives geometry in a component and changes `permissionPromptRows`' meaning. I reverted it: a scrollable list is exactly `MAX_DETAIL_ROWS` rows (9 window + 1 hint row), so the layout's row count and the paint stay one decision, and a short list is drawn whole with no hint.
+- **D2's `seen` state is gone** with the gate: `ApprovalScroll` is `{ offset }` only, sticky-by-nature (a resize re-wraps and the view clamps; nothing is remembered because nothing is gated).
+- **`b` key:** wired as the Implementation listed (PgUp / `b` page back). `b` had no other meaning in the dialog, so nothing is shadowed.
+
+**Red before green.** Mutation-checked on this tree, each reverted after (§9). Command output verbatim:
+
+- **The bug itself** (restore `permissionDetailLines` + per-row `truncateCells` in the `workflow_approve` branch) → `8 pass / 6 fail`, incl. `a stale offset … "step-20"` receiving `… 11 more lines`, and `a long command is drawn in full` failing. This is the pre-fix behaviour, so the new tests are red on it.
+- **Driver cap restored** (`capWorkflowText(steps, 2000)` at `:749`) → `1 fail`: "the hash ask carries the WHOLE list, past 2000 chars, with no trailing …".
+- **Schedule path cap restored** (`:496`) → `1 fail`: "requestApproval's ask carries the same whole list".
+- **Validator bound dropped** (`if (false)`) → `1 fail`: "one character more is refused, naming the size and the way out".
+- **`>` → `>=`** (boundary) → `1 fail`: "a list of exactly WORKFLOW_MAX_APPROVE_SUMMARY characters loads".
+- **Scroll routing disabled** (`kind === "workflow_approve" &&` → `false &&` in `layer-dialog.ts`) → view suite `1 fail` ("Space pages the list…"), app suite `2 fail` (Space never reaches `LAST-COMMAND`).
+- **The dropped gate re-introduced** (`y` consumed while `offset === 0`) → `2 fail`: both "`y` answers … (no gate)" tests.
+- **Per-request scroll reset dropped** (all three `approvalScrollRef.current = NO_APPROVAL_SCROLL` sites) → `1 fail`: "a NEW request opens at the top".
+- **Fixed wrap width** (`wrapCells(line, 80)` instead of the terminal's) → `1 fail`: "a narrow terminal wraps MORE rows".
+- **Newlines collapsed** (`oneLine`-style) → `4 fail`, incl. "a multi-line `run: |` keeps its newlines".
+- **`b` dropped from the step** (`dir` without `char === "b"`) → `1 fail`: "`b` pages BACK, and Space pages forward".
+- **Effect applied but never reaching the view** (`execute.ts` consumes `approvalScroll` without calling the host) → app suite `3 fail`: the offset never moves. This is the seam the pure tests cannot see.
+
+**Verification.** `bunx tsc --noEmit` clean; `bunx biome check` on every changed file clean. Tests, all green: `workflow-approve-view.test.tsx` (17), `workflow-approve-app.test.tsx` (4), `workflow-approve-choices`, `permission-{shell-command,detail,reply,reply-app,cwd-line,agent-line,workload-shell}`, `keys-layers`, `keys-route`, `voice-layer`, `app.test.tsx`, `core/test/workflow-spec`, `core/test/workflow-permission`, `agent/test/workflow-driver` — **365 pass / 0 fail across 17 files**. The full gate is the orchestrator's. The mobile push/LA and sheet paths were read, not tested (owner-dropped). The TUI's parity claim for a hostile daemon that sends a huge `explanation` rests on the view's window+clamp (a pure test), not on an App-level one — verify by sending an oversized `detail` through `permissionView` if that ever matters.
+
 ## Review
 
 ### Owner answers (2026-11-23 ~10:15)

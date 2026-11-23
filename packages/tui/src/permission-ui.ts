@@ -29,8 +29,13 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  type ApprovalScroll,
+  NO_APPROVAL_SCROLL,
+  approvalHint,
+  approvalRows,
+} from "./approval-scroll.ts";
 import { cellWidth, graphemes, truncateCells } from "./cells.ts";
-import { NO_APPROVAL_SCROLL, type ApprovalScroll, approvalHint, approvalRows } from "./approval-scroll.ts";
 import { MENU, type OrphanCause, type ReplyMode, draftOf } from "./permission-reply.ts";
 
 /** The sub-agent a request comes from. */
@@ -187,10 +192,10 @@ export interface PermissionView {
  * `MAX_DETAIL_ROWS` with a `… N more lines` row — never a silent cut (a shell
  * ROW cuts its command to make room for `exit=N`; the ask must show what really
  * runs). A `workflow_approve` shows its WHOLE step list the same way — every
- * `run` command verbatim, wrapped, never cut — over `detailMaxRows` rows, scroll-
- * ed by `scroll` with a row saying how much is left (docs/fix/workflow-approve-
- * detail.md D2: an approval must never hide a command, and Yes stays allowed).
- * Other asks: today's rows, each cut to one row.
+ * `run` command verbatim, wrapped, never cut — in a window of at most
+ * `MAX_DETAIL_ROWS` rows, scrolled by `scroll` with a row saying how much is
+ * left (docs/fix/workflow-approve-detail.md D2: an approval must never hide a
+ * command, and Yes stays allowed). Other asks: today's rows, each cut to one row.
  * `intent`: the asking call's own sentence (display only, never decided on).
  */
 export function permissionView(
@@ -198,17 +203,18 @@ export function permissionView(
   intent: string | null,
   columns: number,
   scroll: ApprovalScroll = NO_APPROVAL_SCROLL,
-  detailMaxRows: number = MAX_DETAIL_ROWS,
 ): PermissionView {
   const width = Math.max(10, columns - 3);
   if (req.kind === "workflow_approve") {
     // Every line of the list, wrapped: the dialog never cuts a step or a command.
     const wrapped = (req.detail ?? "—").split("\n").flatMap((line) => wrapCells(line, width));
-    const window = Math.max(1, Math.min(detailMaxRows, wrapped.length));
+    // Scrollable: the last row is the hint, so the window is one row shorter and
+    // the dialog stays exactly `MAX_DETAIL_ROWS` tall (the layout counts this).
+    const scrollable = wrapped.length > MAX_DETAIL_ROWS - 1;
+    const window = scrollable ? MAX_DETAIL_ROWS - 1 : Math.max(1, wrapped.length);
     const { rows, below } = approvalRows(wrapped, scroll.offset, window);
-    const hint = approvalHint(below, wrapped.length > window);
     return {
-      detailRows: [...rows, ...(hint === null ? [] : [truncateCells(hint, width)])],
+      detailRows: [...rows, ...(scrollable ? [truncateCells(approvalHint(below), width)] : [])],
       intentRow: intent === null ? null : truncateCells(`the model says: “${intent}”`, width),
       detailTotal: wrapped.length,
       detailWindow: window,

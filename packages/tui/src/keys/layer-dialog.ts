@@ -1,9 +1,9 @@
+import { isApprovalScrollKey, stepApprovalScroll } from "../approval-scroll.ts";
 import { backgroundCount, backgroundNames } from "../background-view.ts";
 import { ctrlCQuitStep } from "../commands.ts";
 import { sanitizePasted, stepPaste } from "../paste.ts";
 import { isArmed, stepPermissionKey } from "../permission-reply.ts";
 import { permissionView } from "../permission-ui.ts";
-import { isApprovalScrollKey, stepApprovalScroll } from "../approval-scroll.ts";
 /**
  * The dialog layers (docs/feat/app-decomposition.md S3): the permission prompt,
  * Ctrl+C, and bracketed paste — in that precedence order, which is load-bearing:
@@ -76,9 +76,8 @@ export const permissionLayer: KeyLayer = {
       const view = permissionView(
         snap.permission.pending,
         null,
-        snap.columns ?? 80,
+        snap.columns,
         snap.permission.approvalScroll(),
-        snap.approvalDetailRows ?? 10,
       );
       const step = stepApprovalScroll(
         snap.permission.approvalScroll(),

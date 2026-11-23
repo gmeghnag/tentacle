@@ -105,11 +105,6 @@ export interface KeySnapshot {
   readonly replyMaxChars: number;
   /** The frame's column count, a render value (the dialog's wrap width). */
   readonly columns: number;
-  /**
-   * How many detail rows a `workflow_approve` dialog may show at this terminal
-   * height (`approvalDetailMaxRows`), a render value.
-   */
-  readonly approvalDetailRows: number;
   subagents(): readonly BackgroundAgentRow[];
   jobRows(): readonly DockJobRow[];
 

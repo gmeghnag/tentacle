@@ -7,7 +7,9 @@
  * Pure and React-free (AGENTS §7): the offset is the only state, `total` and
  * `window` come from the view (`permissionView`), so the layout's row count and
  * the paint read one decision. **Nothing gates the answer**: the owner decided
- * Yes is always allowed, so this decides only what is on screen.
+ * Yes is always allowed, so this decides only what is on screen. The dialog is
+ * no taller than it is today (`MAX_DETAIL_ROWS`), so `permissionPromptRows`
+ * keeps describing the frame exactly.
  */
 import type { Key } from "ink";
 
@@ -23,18 +25,9 @@ export interface ApprovalScroll {
 
 export const NO_APPROVAL_SCROLL: ApprovalScroll = { offset: 0 };
 
-/**
- * How tall the detail area may be at this terminal height: the owner's "no
- * 10-row cap" — the dialog takes the room the terminal has, minus its own rows
- * (title, options, footer, cwd) and a few transcript rows above it. The floor is
- * today's `MAX_DETAIL_ROWS`, so a short terminal shows a window, never nothing.
- */
-export const APPROVAL_DIALOG_FIXED_ROWS = 8;
-/** The detail area's floor (today's `MAX_DETAIL_ROWS`). */
-export const APPROVAL_DETAIL_FLOOR = 10;
-
-export function approvalDetailMaxRows(termRows: number): number {
-  return Math.max(APPROVAL_DETAIL_FLOOR, termRows - APPROVAL_DIALOG_FIXED_ROWS);
+/** Does this key scroll the approval list? */
+export function isApprovalScrollKey(char: string, key: Key): boolean {
+  return key.pageDown || key.pageUp || char === " " || char === "b";
 }
 
 /** One key's scroll step, and whether it was a scroll key at all. */
@@ -47,16 +40,11 @@ export interface ApprovalScrollStep {
   readonly taken: boolean;
 }
 
-/** Does this key scroll the approval list? */
-export function isApprovalScrollKey(char: string, key: Key): boolean {
-  return key.pageDown || key.pageUp || char === " ";
-}
-
 /**
- * One key's scroll step: PgDn / Space move one window down, PgUp one window up,
- * clamped to the last window. Any other key leaves the offset alone and reports
- * `taken: false`, so the caller can pass every key through here first and then
- * to `stepPermissionKey`.
+ * One key's scroll step: PgDn / Space move one window down, PgUp / `b` one
+ * window up, clamped to the last window. Any other key leaves the offset alone
+ * and reports `taken: false`, so the caller can pass every key through here
+ * first and then to `stepPermissionKey`.
  */
 export function stepApprovalScroll(
   state: ApprovalScroll,
@@ -65,7 +53,7 @@ export function stepApprovalScroll(
   total: number,
   window: number,
 ): ApprovalScrollStep {
-  const dir = key.pageDown || char === " " ? 1 : key.pageUp ? -1 : 0;
+  const dir = key.pageDown || char === " " ? 1 : key.pageUp || char === "b" ? -1 : 0;
   if (dir === 0) {
     return { scroll: state, taken: false };
   }
@@ -96,11 +84,8 @@ export function approvalRows(
   return { rows: shown, start, below: Math.max(0, rows.length - (start + shown.length)) };
 }
 
-/** The row under the window: how much is left, and which keys scroll. */
-export function approvalHint(below: number, scrollable: boolean): string | null {
-  if (!scrollable) {
-    return null;
-  }
+/** The row under a scrollable window: how much is left, and which keys scroll. */
+export function approvalHint(below: number): string {
   if (below === 0) {
     return "↑ all shown · PgUp back";
   }
