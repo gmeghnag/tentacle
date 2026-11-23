@@ -21,6 +21,11 @@
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
+      },
+      "icon": {
+        "light": "./assets/icon-ios-light.png",
+        "dark": "./assets/icon-ios-dark.png",
+        "tinted": "./assets/icon-ios-tinted.png"
       }
     },
     "plugins": [
@@ -68,6 +73,13 @@
       ],
       "@bacons/apple-targets"
     ],
-    "icon": "./assets/icon.png"
+    "icon": "./assets/icon.png",
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon-android-foreground.png",
+        "backgroundImage": "./assets/icon-android-background.png",
+        "monochromeImage": "./assets/icon-android-monochrome.png"
+      }
+    }
   }
 }

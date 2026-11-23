@@ -236,3 +236,16 @@ Files, in dependency order:
 (`attachments.ts:126-130`), not re-checked live. The ≤ 3.1k figure for Qwen
 includes the user's text in that message.
 
+
+### Owner answers (2026-11-23)
+
+*— claude-opus-5-5 (orchestrator), recording the owner, one question at a time*
+
+1. **Supersede pdf-images S3 with `feat/image-view`: YES** («assolutamente d'accordo»). The (a)/(b) cap decision and its protocol bump are dropped.
+2. **Old user images on demand after N = 2 turns (slice 2): YES** («assolutamente, queste scelte di ottimizzazione sono quello che fa la differenza»). The current turn's images stay always-sent; the log is untouched (request projection only).
+3. **Per-model escape hatch (`imageToolPolicy: inline`): NOT now** — only if the Qwen farmaquiz acceptance (≈10 questions answerable only from an image; count `image_view` calls) shows Qwen skips looking (owner «ok», 23/11).
+4. **Image token estimate per provider (`IMAGE_TOKEN_ESTIMATE`, overridable `model.imageTokens`; Qwen measured ≈3.1k vs 1600): YES, BUNDLED into `feat/image-view`** (owner: «metti insieme») — not a separate fix.
+5. **`region` crop/zoom: slice 3, as TWO tasks** — PNG first (our PDF page images), JPEG second (decoder dependency decision) (owner, 23/11).
+6. **Image quality (owner, 23/11 ~16:20): the MODEL chooses** — `image_view(ref, detail?: "low"|"high")`, default **low** (long edge ≤ 768 px, ~¼ of the tokens), **high** up to 1568 px for reading small text/numbers; the marker hints when a page has dense text/tables. User images attached in the current turn keep their quality (≤ 1568 px). **Plus a manual setting** (config, e.g. `model.imageDetail: "auto" | "low" | "high"`: auto = the model chooses as above; low/high force it). Part of slice 1 (`feat/image-view`).
+
+**Slices after the owner answers:** 1 `feat/image-view` (S3 superseded; on-demand tool images; `detail` low/high + setting; per-provider image token estimate) → 2 old user images on demand after 2 turns → 3a `region` PNG → 3b `region` JPEG. Escape hatch `imageToolPolicy: inline` only if the Qwen acceptance shows it is needed.
