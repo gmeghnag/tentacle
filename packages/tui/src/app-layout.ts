@@ -362,8 +362,11 @@ export function frameLayout(input: FrameInput) {
       ? replyView(permission.mode, columns, replyMax)
       : undefined;
   // The dialog's subject rows: the SAME view `PermissionPrompt` paints (a
-  // wrapped shell command takes several rows, the sentence one more).
-  const permView = permission.pending ? permissionView(permission.pending, null, columns) : null;
+  // wrapped shell command takes several rows, the sentence one more; a
+  // `workflow_approve` list is wrapped and windowed, never cut).
+  const permView = permission.pending
+    ? permissionView(permission.pending, null, columns, permission.approvalScroll())
+    : null;
   const activeRows = confirmShown
     ? QUIT_CONFIRM_ROWS
     : permission.pending
