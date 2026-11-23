@@ -210,41 +210,84 @@ export function thoughtRow({ ms = 12000 } = {}) {
   return stepNode({ node: "thought", subtitle: v.subtitle });
 }
 
+/**
+ * The SF Symbols the composer draws (`Icon.tsx` names, weights and sizes from
+ * `Composer.tsx`), as thin strokes in `currentColor`: the browser has no SF
+ * Symbols, so these are drawn to their proportions (light = a hairline stroke,
+ * bold = a heavy one). `size` is the symbol's point size.
+ */
+const ICON = {
+  plus: (w) => `<path d="M10 2.6v14.8M2.6 10h14.8" stroke-width="${w}"/>`,
+  mic: (w) =>
+    `<rect x="7" y="1.6" width="6" height="10.4" rx="3" stroke-width="${w}"/><path d="M4 9.2a6 6 0 0 0 12 0M10 15.2v3.4M6.8 18.6h6.4" stroke-width="${w}"/>`,
+  "arrow.up": (w) => `<path d="M10 17V3.4M4.2 9.2 10 3.4l5.8 5.8" stroke-width="${w}"/>`,
+  clock: (w) =>
+    `<circle cx="10" cy="10" r="7.8" stroke-width="${w}"/><path d="M10 5.4V10l3 2" stroke-width="${w}"/>`,
+};
+const WEIGHT = { light: 1.15, regular: 1.5, bold: 2.3 };
+/** An SF Symbol (`Icon.tsx`): `name`, point `size`, `weight` ∈ light | regular | bold. */
+export function icon(name, { size = 20, weight = "regular" } = {}) {
+  const draw = ICON[name];
+  if (!draw) throw new Error(`K.icon: no symbol "${name}" (have ${Object.keys(ICON)})`);
+  return out(
+    `<svg class="k-sym" width="${size}" height="${size}" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${draw(WEIGHT[weight])}</svg>`,
+  );
+}
+
+/** The 36 pt slot (`Composer.tsx` `slot`): its four faces, as the code paints them. */
 const SLOT = {
-  send: '<span class="k-slot">↑</span>',
-  disabled: '<span class="k-slot" data-dim>↑</span>',
-  stop: '<span class="k-slot"><span class="k-stop-square"></span></span>',
-  later: '<span class="k-slot">◷</span>',
+  // `ready` = the soft strong circle, the ↑ in accent, bold 18.
+  send: `<span class="k-slot">${icon("arrow.up", { size: 18, weight: "bold" }).html}</span>`,
+  // `up-dim` (empty): no circle at all, the ↑ in `sec` at 0.5.
+  disabled: `<span class="k-slot" data-dim><span class="k-dim">${icon("arrow.up", { size: 18, weight: "bold" }).html}</span></span>`,
+  // `stop`: a `label` circle, a `page` square.
+  stop: '<span class="k-slot" data-stop><span class="k-stop-square"></span></span>',
+  // `clock` (send later): a `fill` circle, the clock in `label`, 17.
+  later: `<span class="k-slot" data-clock>${icon("clock", { size: 17 }).html}</span>`,
+};
+
+/** The mic button's face (`Composer.tsx` mic): idle, listening (halo + ■), finalizing (arc). */
+const MIC = {
+  idle: `<span class="k-hit"><span class="k-circle">${icon("mic", { size: 22, weight: "light" }).html}</span></span>`,
+  dictating:
+    '<span class="k-hit"><span class="k-circle" data-strong><span class="k-halo"></span><span class="k-rec-square"></span></span></span>',
+  transcribing:
+    '<span class="k-hit"><span class="k-circle"><span class="k-arc"></span></span></span>',
 };
 
 /**
  * The composer: `state` ∈ empty | draft | ready | dictating | transcribing;
- * `queued` = chips above the bar; `home` = keyboard closed (home indicator).
+ * `queued` = chips above the bar; `home` = keyboard closed (home indicator);
+ * `caption` = the dictation clock beside the mic; `slot` overrides the face
+ * (send | disabled | stop | later).
  */
 export function composer({
   state = "empty",
   text = "",
-  placeholder = "Message",
+  placeholder = "Message tentacle",
   queued = [],
   slot,
+  caption = "",
   home = true,
 } = {}) {
   const empty = text === "";
-  const mic =
-    state === "dictating"
-      ? '<span class="k-hit"><span class="k-halo"></span><span class="k-circle">●</span></span>'
-      : state === "transcribing"
-        ? '<span class="k-hit"><span class="k-arc"></span></span>'
-        : '<span class="k-hit">🎙︎</span>';
+  const mic = MIC[state === "dictating" || state === "transcribing" ? state : "idle"];
   const face = SLOT[slot ?? (state === "ready" || !empty ? "send" : "disabled")];
   const chips = queued.length
     ? `<div class="k-queue">${queued.map((q) => `<div class="k-queue-chip k-t-subhead">${esc(q)}</div>`).join("")}</div>`
     : "";
   return out(
-    `${chips}<div class="k-composer" ${home ? "data-home" : ""}><div class="k-field"><div class="k-input" ${empty ? "data-empty" : ""}>${esc(empty ? placeholder : text)}</div><div class="k-composer-row"><span class="k-hit">+</span><span style="flex:1"></span>${mic}${face}</div></div></div>`,
+    `${chips}<div class="k-composer" ${home ? "data-home" : ""}><div class="k-field"><div class="k-input" ${empty ? "data-empty" : ""}>${esc(empty ? placeholder : text)}</div><div class="k-composer-row">${composerParts.plus}<span class="k-flex"></span>${caption ? `<span class="k-mic-caption">${esc(caption)}</span>` : ""}${mic}${face}</div></div></div>`,
     empty ? placeholder : text,
   );
 }
+
+/** The composer's own buttons, for a «nuovo» layout of them (same markup as `composer`). */
+export const composerParts = {
+  plus: `<span class="k-hit"><span class="k-circle">${icon("plus", { size: 20, weight: "light" }).html}</span></span>`,
+  mic: MIC,
+  slot: SLOT,
+};
 
 /** A bottom sheet over the scrim (`Sheet`): grabber, `radius.sheet`. */
 export function sheet({ children = [], permission = false } = {}) {
@@ -302,6 +345,30 @@ export function hubFan({
     })
     .join("");
   return out(`${html}${hubButton({ right, bottom }).html}`);
+}
+
+/**
+ * Polpetto at home (`MascotScene.tsx`): the rects `mascot-scenes.ts` `pixels`
+ * draws (`KIT.data.viewModels.mascot`, mint), `frame` ∈ still | skate. Placed
+ * centred, `homeInset` above the band's bottom (`homeAt`); `inset` overrides it.
+ */
+export function polpetto({ frame = "still", inset } = {}) {
+  const m = vm.mascot;
+  const rects = m[frame];
+  if (!rects) throw new Error(`K.polpetto: no frame "${frame}" (still | skate)`);
+  const xs = rects.map((r) => r.x);
+  const x0 = Math.min(0, ...xs);
+  const w = Math.max(m.sprite, ...rects.map((r) => r.x + r.w)) - x0;
+  const h = Math.max(m.sprite, ...rects.map((r) => r.y + r.h));
+  const body = rects
+    .map(
+      (r) =>
+        `<rect x="${r.x - x0}" y="${r.y}" width="${r.w}" height="${r.h}" fill="${r.color}" opacity="${r.alpha}"/>`,
+    )
+    .join("");
+  return out(
+    `<span class="k-mascot" style="bottom:${(inset ?? m.homeInset) - (h - m.sprite)}px;margin-left:${x0 - m.sprite / 2}px"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges" aria-hidden="true">${body}</svg></span>`,
+  );
 }
 
 /** The `EmptyState` standard: one line, one action. */
@@ -548,6 +615,9 @@ export const K = {
   banner,
   hubButton,
   hubFan,
+  polpetto,
+  icon,
+  composerParts,
   emptyAction,
   row,
   band,
