@@ -984,6 +984,12 @@ export function SessionScreen({
   // Session info (docs/feat/mobile-session-info.md): the sheet, and which row the
   // person expanded. Every value it draws is decided in `session-info.ts`.
   const [infoOpen, setInfoOpen] = useState(false);
+  /**
+   * Session info was opened ON a section (`openScheduled`), so the list scrolls
+   * inside the sheet and the route opens at its largest detent (D3). It rides the
+   * route's params (`SheetRouteParam.reveal`), never the sheet's content.
+   */
+  const [revealWanted, setRevealWanted] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const info = state.info;
   // The Tools sheet (docs/feat/mobile-hub-tools.md D5/D6): its own surface, its
@@ -1062,6 +1068,9 @@ export function SessionScreen({
     setExpanded(null);
     startReveal(revealTrack.current, revealTo);
     setInfoOpen(true);
+    // The route opens at L when a section is wanted (D3): the reveal scrolls
+    // inside the sheet, so the sheet needs the room to scroll in.
+    setRevealWanted(revealTo !== null);
     void controller.openInfo();
   };
   // The hub's Scheduled item: Session info, scrolled to SCHEDULED WAKES — the one
@@ -1081,11 +1090,28 @@ export function SessionScreen({
     setToolsOpen(true);
     void controller.openInfo();
   };
-  const closeTools = () => {
+  const closeTools = useCallback(() => {
     setToolsOpen(false);
     setToolsExpanded(new Set());
     controller.closeInfo();
-  };
+  }, [controller]);
+  /**
+   * Tools' close, the body both paths share — the SAME rule as Session info's
+   * below: a native swipe must leave exactly the state the glyph does.
+   */
+  const closeToolsSheetOnly = closeTools;
+  /**
+   * Session info's close, the body both paths share: the pinned glyph and a
+   * native swipe must leave the SAME state, or one of them stops telling the
+   * controller and its figures go stale (D3 `dismissedNatively`).
+   */
+  const closeInfoSheetOnly = useCallback(() => {
+    setInfoOpen(false);
+    setExpanded(null);
+    // The next plain open is not a reveal (D3): a stale `true` would open it at L.
+    setRevealWanted(false);
+    controller.closeInfo();
+  }, [controller]);
   const openCommands = () => setCommandsOpen(true);
   const closeCommands = () => setCommandsOpen(false);
   // Rename is the header title's OWN path (Owner decision 5): the sheet closes and
@@ -1096,6 +1122,16 @@ export function SessionScreen({
   const renameFromCommands = () => {
     setCommandsOpen(false);
     setAfterDismiss((queue) => queueAfterDismiss(queue, "rename"));
+  };
+  /**
+   * Session info's Artifacts row: the gallery needs the whole frame, so the route
+   * must be GONE before it pushes — a second presentation while a formSheet is up
+   * wedges it (F6b), and the same `afterDismiss` queue Commands → Rename uses
+   * (D3). The sheet only reports the tap; `runIntent` pushes once the route has
+   * left the navigation state, and the state it needs is this one's.
+   */
+  const openArtifactsFromInfo = () => {
+    setAfterDismiss((queue) => queueAfterDismiss(queue, "artifacts"));
   };
   /** A pull-to-refresh or a Retry: the same `refreshInfo` Session info uses. */
   const refreshTools = () => {
@@ -1226,6 +1262,62 @@ export function SessionScreen({
         onClose={() => setDeciding(null)}
       />,
     );
+    // Session info and Tools (S4) are routes too: their content is the same
+    // element it was inside a `<Modal>`, with no `visible` — the route exists only
+    // while the sheet is up, and the sheet's own list is `Sheet native`'s one
+    // scroller (F8).
+    if (info !== null) {
+      host.publish(
+        "info",
+        <SessionInfoSheet
+          palette={palette}
+          view={info.view}
+          autoAcceptOn={controller.autoAcceptOn()}
+          autoAcceptError={info.autoAcceptError}
+          onAutoAccept={(on) => void controller.setAutoAccept(on)}
+          onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+          onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
+          scrollRef={(node) => {
+            infoScroller.current = node;
+          }}
+          onSectionLayout={revealOnLayout}
+          onRefresh={() => void controller.refreshInfo()}
+          onRetry={() => void controller.refreshInfo()}
+          expanded={expanded}
+          onExpand={setExpanded}
+          onOpenArtifacts={openArtifactsFromInfo}
+          onClose={closeInfoSheetOnly}
+        />,
+      );
+      host.publish(
+        "tools",
+        <ToolsSheet
+          palette={palette}
+          view={toolsView(info.tools, {
+            segment: toolsSegment,
+            query: toolsQuery,
+            open: toolsExpanded,
+          })}
+          onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+          onSegment={setToolsSegment}
+          onQuery={setToolsQuery}
+          onToggle={(key, open) =>
+            setToolsExpanded((prev) => {
+              const next = new Set(prev);
+              if (open) {
+                next.add(key);
+              } else {
+                next.delete(key);
+              }
+              return next;
+            })
+          }
+          onRefresh={refreshTools}
+          refreshing={toolsRefreshing}
+          onClose={closeTools}
+        />,
+      );
+    }
   });
   // Unmount: the host is forgotten, so a route still up pops ITSELF instead of
   // drawing an empty sheet (the orphan leg, `sheetRouteView`).
@@ -1255,7 +1347,15 @@ export function SessionScreen({
     if (gone.includes("outbox")) {
       setDeciding(null);
     }
-  }, [actual]);
+    // Tools and Session info (S4): the same kind's OWN close, so a swipe never
+    // leaves the controller's figures half-torn-down.
+    if (gone.includes("tools")) {
+      closeToolsSheetOnly();
+    }
+    if (gone.includes("info")) {
+      closeInfoSheetOnly();
+    }
+  }, [actual, closeToolsSheetOnly, closeInfoSheetOnly]);
   // The intents that need the sheet gone first (Commands → Rename is the only
   // one S3 owns; Rename is still an RN `Modal`, so F6b): they run once the route
   // has left the navigation state.
@@ -1315,8 +1415,15 @@ export function SessionScreen({
     if (!inFront) {
       return;
     }
-    openSheet(navigation, { ...owner, kind: step.kind });
-  }, [hidden, wanted, actual, inFront, owner, navigation]);
+    // The ONE param a sheet route carries beyond its identity (D3): Session info
+    // opened on a section opens at L. `openScheduled` is the only path that sets
+    // it, and the sheet is pushed once per presentation.
+    openSheet(navigation, {
+      ...owner,
+      kind: step.kind,
+      ...(step.kind === "info" && revealWanted ? { reveal: true } : {}),
+    });
+  }, [hidden, wanted, actual, inFront, owner, navigation, revealWanted]);
   // An RN `Modal` must not be drawn while a native sheet is up or coming (F6):
   // a stale `visible` one wedges every later formSheet.
   const yields = yieldForeign(wanted, actual);
@@ -2020,67 +2127,10 @@ export function SessionScreen({
           }))}
           onCancel={() => setMenuOpen(false)}
         />
-        {info === null ? null : (
-          <SessionInfoSheet
-            palette={palette}
-            visible={infoOpen}
-            view={info.view}
-            autoAcceptOn={controller.autoAcceptOn()}
-            autoAcceptError={info.autoAcceptError}
-            onAutoAccept={(on) => void controller.setAutoAccept(on)}
-            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
-            onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
-            scrollRef={(node) => {
-              infoScroller.current = node;
-            }}
-            onSectionLayout={revealOnLayout}
-            onRefresh={() => void controller.refreshInfo()}
-            onRetry={() => void controller.refreshInfo()}
-            expanded={expanded}
-            onExpand={setExpanded}
-            onOpenArtifacts={() => {
-              // The sheet is a way IN: the gallery needs the whole frame, so the
-              // sheet closes before the route pushes (docs D9).
-              setInfoOpen(false);
-              setExpanded(null);
-              controller.closeInfo();
-              onOpenArtifacts?.("session-info");
-            }}
-            onClose={() => {
-              setInfoOpen(false);
-              setExpanded(null);
-              controller.closeInfo();
-            }}
-          />
-        )}
-        {info === null ? null : (
-          <ToolsSheet
-            palette={palette}
-            visible={toolsOpen}
-            view={toolsView(info.tools, {
-              segment: toolsSegment,
-              query: toolsQuery,
-              open: toolsExpanded,
-            })}
-            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
-            onSegment={setToolsSegment}
-            onQuery={setToolsQuery}
-            onToggle={(key, open) =>
-              setToolsExpanded((prev) => {
-                const next = new Set(prev);
-                if (open) {
-                  next.add(key);
-                } else {
-                  next.delete(key);
-                }
-                return next;
-              })
-            }
-            onRefresh={refreshTools}
-            refreshing={toolsRefreshing}
-            onClose={closeTools}
-          />
-        )}
+        {/* Session info and Tools are native sheet ROUTES now
+            (docs/feat/mobile-native-sheets.md S4), like Outbox and Commands: this
+            screen PUBLISHES their elements on `SHEET_HOSTS` (the block above) and
+            the route draws them, so they are not mounted here. */}
         <ActivitySheet
           palette={palette}
           visible={activityOpen && !yields}

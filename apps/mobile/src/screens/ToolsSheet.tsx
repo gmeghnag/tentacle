@@ -5,18 +5,15 @@
  * info's own builders — so this file decides nothing but placement.
  *
  * The grammar is Session info's (docs/feat/mobile-chrome.md Design 4): the E2
- * band of 44 pt `Row`s inside a native `pageSheet`, everything `onSheet`.
+ * band of 44 pt `Row`s, everything `onSheet`. Since
+ * docs/feat/mobile-native-sheets.md the PRESENTATION is the stack's (`Sheet`
+ * route, a native `formSheet`), so there is no `Modal` here and no `visible`
+ * prop: this file is drawn only while it is on screen. The list is the sheet's
+ * OWN scroller (`Sheet native scroll`): a second one inside it would scroll
+ * instead of expanding the sheet (F8), and the head stays pinned above it (F0).
  */
 import type { JSX } from "react";
-import {
-  Modal,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  View,
-} from "react-native";
+import { Pressable, RefreshControl, StyleSheet, Switch, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DENSE_FONT_SCALE, type Palette, radius, size, space, typography } from "../theme.ts";
 import type { ToolsBand, ToolsSegmentId, ToolsView } from "../tools-view.ts";
@@ -29,7 +26,6 @@ import { Text, TextInput } from "../ui/Text.tsx";
 
 export interface ToolsSheetProps {
   readonly palette: Palette;
-  readonly visible: boolean;
   readonly view: ToolsView;
   /** The "show or hide it from the model in this session" write (the one source's own). */
   readonly onSwitch: (kind: "mcp" | "skill", name: string, enabled: boolean) => void;
@@ -110,7 +106,6 @@ function Band({
 
 export function ToolsSheet({
   palette,
-  visible,
   view,
   onSwitch,
   onSegment,
@@ -124,155 +119,137 @@ export function ToolsSheet({
   const active = view.segments.find((segment) => segment.id === view.segment);
   const empty = active === undefined ? undefined : active.empty;
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={onClose}
-    >
-      <View style={[styles.root, { backgroundColor: palette.bg }]}>
-        <Sheet
-          palette={palette}
-          title="Tools"
-          subtitle="What this session offers the model"
-          testID="tools-sheet"
-          insetBottom={false}
-          scroll
-          onClose={onClose}
-          closeTestID="tools-close"
-        >
-          <ScrollView
-            testID="tools-scroll"
-            contentContainerStyle={styles.content}
-            showsVerticalScrollIndicator
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                onRefresh={onRefresh}
-                tintColor={palette.sec}
-              />
-            }
-          >
-            <View style={[styles.segments, { backgroundColor: palette.fill }]}>
-              {view.segments.map((segment) => {
-                const on = segment.id === view.segment;
-                return (
-                  <Pressable
-                    key={segment.id}
-                    testID={`tools-segment-${segment.id}`}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: on }}
-                    accessibilityLabel={
-                      segment.count === null ? segment.label : `${segment.label}, ${segment.count}`
-                    }
-                    onPress={() => onSegment(segment.id)}
-                    style={[styles.segment, on ? { backgroundColor: palette.card } : null]}
-                  >
-                    <Text
-                      maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                      style={[
-                        typography.subhead,
-                        on ? styles.segmentOn : null,
-                        { color: on ? palette.label : palette.sec },
-                      ]}
-                    >
-                      {segment.label}
-                    </Text>
-                    {segment.count === null ? null : (
-                      <Text
-                        maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                        style={[typography.caption, { color: palette.sec }]}
-                      >
-                        {segment.count}
-                      </Text>
-                    )}
-                  </Pressable>
-                );
-              })}
-            </View>
-            <View style={[styles.search, { backgroundColor: palette.fill }]}>
-              <Icon name="magnifyingglass" color={palette.sec} size={15} />
-              <TextInput
-                testID="tools-search"
-                value={view.query}
-                onChangeText={onQuery}
-                placeholder="Search servers, skills and tools"
-                placeholderTextColor={palette.sec}
-                style={[typography.body, styles.searchInput, { color: palette.label }]}
-                autoCorrect={false}
-                autoCapitalize="none"
-                clearButtonMode="while-editing"
-                returnKeyType="search"
-                accessibilityLabel="Search servers, skills and tools"
-              />
-            </View>
-            {view.bands.length === 0 ? (
-              <EmptyState
-                palette={palette}
-                testID={view.noMatches ? "tools-nomatch" : "tools-empty"}
-                {...(view.noMatches
-                  ? { title: "No matches", icon: "magnifyingglass" as const }
-                  : empty === undefined
-                    ? { loading: active?.phase === "loading" }
-                    : {
-                        title: empty.title,
-                        ...(empty.footnote === undefined ? {} : { body: empty.footnote }),
-                      })}
-                {...(active?.retry === true
-                  ? {
-                      action: (
-                        <Pressable
-                          testID="tools-retry"
-                          accessibilityRole="button"
-                          onPress={onRefresh}
-                          style={styles.retry}
-                        >
-                          <Text style={[typography.subhead, { color: palette.accent }]}>
-                            Try again
-                          </Text>
-                        </Pressable>
-                      ),
-                    }
-                  : {})}
-              />
-            ) : (
-              <BandSection
-                palette={palette}
-                onSheet
-                testID="tools-bands"
-                {...(view.note === undefined ? {} : { footnote: view.note })}
+    <View style={[styles.root, { backgroundColor: palette.bg }]}>
+      <Sheet
+        palette={palette}
+        title="Tools"
+        subtitle="What this session offers the model"
+        testID="tools-sheet"
+        insetBottom={false}
+        scroll
+        native
+        onClose={onClose}
+        closeTestID="tools-close"
+        scrollTestID="tools-scroll"
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={palette.sec} />
+        }
+      >
+        <View style={[styles.segments, { backgroundColor: palette.fill }]}>
+          {view.segments.map((segment) => {
+            const on = segment.id === view.segment;
+            return (
+              <Pressable
+                key={segment.id}
+                testID={`tools-segment-${segment.id}`}
+                accessibilityRole="button"
+                accessibilityState={{ selected: on }}
+                accessibilityLabel={
+                  segment.count === null ? segment.label : `${segment.label}, ${segment.count}`
+                }
+                onPress={() => onSegment(segment.id)}
+                style={[styles.segment, on ? { backgroundColor: palette.card } : null]}
               >
-                {view.bands.map((band, index) => (
-                  <Band
-                    key={band.key}
-                    palette={palette}
-                    band={band}
-                    first={index === 0}
-                    onSwitch={onSwitch}
-                    onToggle={onToggle}
-                  />
-                ))}
-              </BandSection>
-            )}
-            <Pressable
-              testID="tools-refresh"
-              accessibilityRole="button"
-              onPress={onRefresh}
-              style={styles.refresh}
-            >
-              <Text style={[typography.footnote, { color: palette.accent }]}>Refresh</Text>
-            </Pressable>
-            <View style={{ height: insets.bottom + 20 }} />
-          </ScrollView>
-        </Sheet>
-      </View>
-    </Modal>
+                <Text
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[
+                    typography.subhead,
+                    on ? styles.segmentOn : null,
+                    { color: on ? palette.label : palette.sec },
+                  ]}
+                >
+                  {segment.label}
+                </Text>
+                {segment.count === null ? null : (
+                  <Text
+                    maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                    style={[typography.caption, { color: palette.sec }]}
+                  >
+                    {segment.count}
+                  </Text>
+                )}
+              </Pressable>
+            );
+          })}
+        </View>
+        <View style={[styles.search, { backgroundColor: palette.fill }]}>
+          <Icon name="magnifyingglass" color={palette.sec} size={15} />
+          <TextInput
+            testID="tools-search"
+            value={view.query}
+            onChangeText={onQuery}
+            placeholder="Search servers, skills and tools"
+            placeholderTextColor={palette.sec}
+            style={[typography.body, styles.searchInput, { color: palette.label }]}
+            autoCorrect={false}
+            autoCapitalize="none"
+            clearButtonMode="while-editing"
+            returnKeyType="search"
+            accessibilityLabel="Search servers, skills and tools"
+          />
+        </View>
+        {view.bands.length === 0 ? (
+          <EmptyState
+            palette={palette}
+            testID={view.noMatches ? "tools-nomatch" : "tools-empty"}
+            {...(view.noMatches
+              ? { title: "No matches", icon: "magnifyingglass" as const }
+              : empty === undefined
+                ? { loading: active?.phase === "loading" }
+                : {
+                    title: empty.title,
+                    ...(empty.footnote === undefined ? {} : { body: empty.footnote }),
+                  })}
+            {...(active?.retry === true
+              ? {
+                  action: (
+                    <Pressable
+                      testID="tools-retry"
+                      accessibilityRole="button"
+                      onPress={onRefresh}
+                      style={styles.retry}
+                    >
+                      <Text style={[typography.subhead, { color: palette.accent }]}>Try again</Text>
+                    </Pressable>
+                  ),
+                }
+              : {})}
+          />
+        ) : (
+          <BandSection
+            palette={palette}
+            onSheet
+            testID="tools-bands"
+            {...(view.note === undefined ? {} : { footnote: view.note })}
+          >
+            {view.bands.map((band, index) => (
+              <Band
+                key={band.key}
+                palette={palette}
+                band={band}
+                first={index === 0}
+                onSwitch={onSwitch}
+                onToggle={onToggle}
+              />
+            ))}
+          </BandSection>
+        )}
+        <Pressable
+          testID="tools-refresh"
+          accessibilityRole="button"
+          onPress={onRefresh}
+          style={styles.refresh}
+        >
+          <Text style={[typography.footnote, { color: palette.accent }]}>Refresh</Text>
+        </Pressable>
+        <View style={{ height: insets.bottom + 20 }} />
+      </Sheet>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  content: { gap: 0 },
   segments: {
     flexDirection: "row",
     marginHorizontal: space.inset,

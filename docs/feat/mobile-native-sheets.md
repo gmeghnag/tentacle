@@ -791,7 +791,116 @@ remembered detents); no second fragment. The full gate is the orchestrator's. No
 **Not done, by instruction:** S4 (Tools, Session info, `Sheet native`), S5 (Permission, D5), S6 (e2e + Validation).
 `TODO.md` untouched.
 
-## Review
+### S4 — `Sheet native`, Tools and Session info
+
+*— claude-opus-5-5 (executor), 2026-11-23*
+
+**Load-bearing check first (re-run, reproduced)** — `.tentacle/tmp/mobile-native-sheets/s4-baseline.log`:
+`ui/Sheet.tsx` has no `native` variant (only a doc-comment mentions "native"); `ToolsSheet.tsx:127-130`
+and `SessionInfoSheet.tsx:366-369` still draw `<Modal visible presentationStyle="pageSheet">`;
+`ui/Sheet.tsx`'s `scroll` variant still nests the list inside a second `ScrollView` at the call sites
+(Tools/Info each pass their own); `PRESENTED_SHEET_KINDS` is still `["commands","outbox"]`, so nothing
+pushes Tools or Info; `sheetDetentContext` ignores a reveal; `afterDismiss` is only ever fed `"rename"`.
+So S4's capability was genuinely missing.
+
+**Red first (AGENTS §9), on the S3 tree:** `bun test sheet-plan native-sheets-wiring` → **97 pass / 19 fail**
+(`.tentacle/tmp/mobile-native-sheets/red-s4.log`), and every one of the 19 is red **on its assertion**
+(no module resolution or import error): 7 for the native variant + the two-child shape, 5 for the
+publish/one-scroller wiring, 3 for the reveal, 2 for the two swipes' closes, 1 for the queued Artifacts
+intent, 1 for `PRESENTED_SHEET_KINDS`.
+
+**As built (dependency order).**
+1. `src/sheet-plan.ts` — `PRESENTED_SHEET_KINDS` grows to `["commands","outbox","tools","info"]`
+   (`:304`); `sheetDetentContext` takes the reveal and states it on the context (`:376`) so the
+   navigator can open Info at L.
+2. `src/routes.ts:97` — `SheetRouteParam.reveal?`: the one fact a push carries beyond identity.
+3. `src/ui/Sheet.tsx` — the `native` variant (`:86`, default false so `PairScreen` is unchanged): no
+   drawn grabber (`:115`), no top radius (`:122-124`), and the **F0 shape** — exactly two direct children,
+   a `collapsable={false}` head and ONE scroller (`:172-178`). The scroller now owns
+   `keyboardShouldPersistTaps`, `scrollRef`, `scrollTestID` and `refreshControl`; its content carries
+   `scrollContent: { gap: 0 }`, which is where Session info's old `styles.content` gap went (F8: one
+   scroller, no nested pair).
+4. `screens/ToolsSheet.tsx`, `screens/SessionInfoSheet.tsx` — `<Modal>`/`visible` removed; both are
+   render-only, they hand their list to `Sheet`'s ONE scroller (`scroll native`) and add no
+   `ScrollView` of their own. Tools keeps its `RefreshControl` and testIDs; Session info keeps
+   `scrollRef` (the reveal's target) and its per-section `onLayout`.
+5. `screens/SessionScreen.tsx` — both elements now published on `SHEET_HOSTS` (`:1269`, `:1291`) in the
+   same layout effect as Commands/Outbox, instead of mounted in the JSX; a native swipe of either runs
+   that kind's OWN close (`:1352`, `:1356`; both bodies are `useCallback`'d, shared with the glyph);
+   `openArtifactsFromInfo` queues `"artifacts"` (`:1133`) so the gallery never opens under the sheet
+   (F6b); the Info push states the reveal (`:1423`).
+6. `App.tsx` — the `Sheet` screen's options pass `route.params.reveal === true` into
+   `sheetDetentContext`.
+
+**Drift from the Implementation — three, all inside S4:**
+
+1. **`sheetDetentContext` carries the reveal as a 4th argument** rather than the design's
+   `{fontScale, reveal}` being assembled in `App.tsx`. The reason is the one the plan already states for
+   the detent memory: the route's options are resolved by the navigator *before* the route's screen
+   mounts, so the fact has to ride the route's params — and having the screen read the reveal tracker
+   (`reveal-report.ts`, a `useRef` in `SessionScreen`) from `App.tsx` would be a second source of truth.
+   So the screen states it (`:1423`), the param carries it (`routes.ts:97`), and the decision stays in the
+   pure module.
+2. **The gap that kept Session info from doubling its section rhythm moved from its own
+   `styles.content` to `Sheet`'s scroller** (`scrollContent`). With the inner `ScrollView` gone there is
+   no place in the sheet for it, and leaving it out would have re-introduced the doubled `sectionTop`
+   that `band-screens.test.ts` pins — that assertion now reads `ui/Sheet.tsx` and says why.
+3. **`closeTools` / `closeInfoSheetOnly` are `useCallback`'d.** A `dismissedNatively` effect now depends
+   on both, and an inline body would either re-run the effect every render or be an exhaustive-deps
+   error (Biome caught it, `:1357`). Same bodies, stable identities. `closeToolsSheetOnly` is the alias
+   the swipe path names, so Tools and Session info read the same way at the call site.
+
+**Mutation checks (`.tentacle/tmp/mobile-native-sheets/mutate-s4.sh`; each applied to the real file, the
+two narrow suites run, the file restored from a scratch copy — never `git checkout` — and `cmp`-verified
+byte-identical: log `mutations-s4.log`).** Baseline 116 pass / 0 fail, restored 116 / 0 with all five
+files `identical`.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | the native sheet draws its own grabber | 115 pass **1 fail** |
+| M2 | the native sheet keeps the drawn corner radius | 115 **1 fail** |
+| M3 | native keeps the wrapper `View` (F0 two-child shape lost) | 115 **1 fail** |
+| M4 | the one scroller's `keyboardShouldPersistTaps` dropped | 115 **1 fail** |
+| M5 | Tools back to the flat sheet (`scroll={false}`) | 115 **1 fail** |
+| M6 | Session info not the native variant | 115 **1 fail** |
+| M7 | the reveal's scroller loses its testID | 115 **1 fail** |
+| M8 | the reveal is never stated on the push | 115 **1 fail** |
+| M9 | a Tools swipe runs no close (controller goes stale) | 115 **1 fail** |
+| M10 | a Session info swipe runs no close | 115 **1 fail** |
+| M11 | Artifacts opens UNDER the sheet (F6b) | 115 **1 fail** |
+| M12 | the S3 two-kind list comes back (tools/info never pushed) | 114 **2 fail** |
+| M13 | the reveal's context leg dropped | 115 **1 fail** |
+| M14 | Session info drops the scroll ref (the reveal scrolls nothing) | 115 **1 fail** |
+| M15 | Tools loses its scroller testID | 115 **1 fail** |
+
+Two findings from the first pass, both fixed before the table above: M5 and M12 initially **survived**
+(M5 because nothing asserted why Tools asks for `scroll`; M12 because my mutation re-inserted the same
+four kinds, i.e. it was not a mutation at all). M5 gained `expect(body).toMatch(/\n\s+scroll\n/)` plus the
+`native` leg; M12 now restores the two-kind list. Both then went red.
+
+**Verified.** `bun test` on the 50 test files that read the six changed sources or their call sites →
+**751 pass / 0 fail**; `sheet-plan`/`native-sheets-wiring`/`sheet-host` → 127 pass; the source-scanning
+guards (`bundle-node-free`, `node-builtins-guard`, `motion-literals`, `text-seam`, `theme`, `app-config`,
+`drawer-nav`, `routes`) and the changelog guards → 217 pass / 0 fail; `bunx tsc -p apps/mobile` clean;
+`bunx biome check` on `apps/mobile/src`, `apps/mobile/App.tsx`, `apps/mobile/test` → **0 errors, 0
+warnings**. **One pre-existing failure class, NOT S4's:** two of these suites (`row-a11y`,
+`session-info-schedules-render`, and the `band-notes` triple) raise `Export named 'ActivityIndicator' not
+found` when run in the same process — their `mock.module("react-native")` bodies shadow each other. It
+reproduces byte-for-byte with `HEAD`'s own copies of those test files (checked by restoring them to HEAD
+in place and re-running, then restoring this slice's), and each file passes alone; the merge gate runs
+the whole suite in its own process order, where they pass. No schema change, so
+`packages/protocol/schema/protocol.json` is untouched. The changelog fragment written in S1 already
+claims the feature; S4 adds no user-visible claim of its own, so no second fragment. The full `bun run
+check` gate is the orchestrator's.
+
+**Gate line (this slice, as run by me):** narrow suites green, `tsc -p apps/mobile` exit 0,
+`biome check` 0/0 on every changed file — full `check` left to the orchestrator's script.
+
+**Not done, by instruction:** S5 (Permission, D5/`perm-later`/`perm-hold`), S6 (e2e flows + the
+simulator Validation: 5 sheets × 3 detents × light/dark, petrol, rotation, AX5, Reduce Motion). **The
+native variant's F0 two-child shape and its scroll-to-expand are proven by Step 0's spike and by the
+source guards, not on a device in this slice** — S6's simulator pass is where they are confirmed.
+`TODO.md` untouched.
 
 ### Owner answers (2026-11-23 ~08:35)
 

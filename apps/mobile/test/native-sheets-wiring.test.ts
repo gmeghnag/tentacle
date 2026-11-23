@@ -24,6 +24,10 @@ const code = (src: string) =>
 
 const APP = code(read("App.tsx"));
 const ROUTE = code(read("src", "screens", "NativeSheetRoute.tsx"));
+const SCREEN = code(read("src", "screens", "SessionScreen.tsx"));
+const UI_SHEET = read("src", "ui", "Sheet.tsx");
+const TOOLS = code(read("src", "screens", "ToolsSheet.tsx"));
+const INFO = code(read("src", "screens", "SessionInfoSheet.tsx"));
 
 /** A source's slice from `from` to the first `to` after it. */
 const sliceOf = (src: string, from: string, to: string): string => {
@@ -132,8 +136,6 @@ describe("S2 — the route component (File 5)", () => {
 });
 
 describe("S3 — the reconciler is the pure module's, and the screen only dispatches", () => {
-  const SCREEN = code(read("src", "screens", "SessionScreen.tsx"));
-
   test("the wanted stack is `desiredStack` → `managedStack`, never a local if-chain", () => {
     expect(SCREEN).toContain("desiredStack({");
     expect(SCREEN).toContain("managedStack(desired, PRESENTED_SHEET_KINDS)");
@@ -187,7 +189,8 @@ describe("S3 — the reconciler is the pure module's, and the screen only dispat
   });
 
   test("a sheet is opened with `push` and closed with a KEYED pop (never `goBack`)", () => {
-    expect(SCREEN).toContain("openSheet(navigation, { ...owner, kind: step.kind })");
+    expect(SCREEN).toContain("openSheet(navigation, {");
+    expect(SCREEN).toContain("kind: step.kind,");
     expect(SCREEN).toContain("popSheet(navigation, step.key)");
     expect(SCREEN).not.toContain("goBack(");
   });
@@ -245,5 +248,169 @@ describe("S3 — the reconciler is the pure module's, and the screen only dispat
     expect(shell).toContain("locked={sheetLocked}");
     // The drain must never read the render-time `lockView` (stale, Step 0b).
     expect(shell).not.toContain("locked={lockView.locked}");
+  });
+});
+
+/** A component's own JSX slice: from `export function Name(` to the next `export `. */
+const bodyOf = (src: string, name: string): string => {
+  const at = src.indexOf(`export function ${name}(`);
+  expect(at).toBeGreaterThan(-1);
+  const end = src.indexOf("\nexport ", at);
+  return src.slice(at, end === -1 ? undefined : end);
+};
+
+describe("S4 — neither migrated sheet draws a Modal any more", () => {
+  test("no `<Modal>` and no `visible` prop in Tools or Session info", () => {
+    // A `<Modal>` here would wedge the native sheet (F6) and draw a second copy of
+    // the same content over it.
+    for (const sheet of [TOOLS, INFO]) {
+      expect(sheet).not.toContain("<Modal");
+      expect(sheet).not.toMatch(/readonly visible: boolean/);
+      expect(sheet).not.toContain("visible=");
+    }
+  });
+
+  test("neither imports `Modal` from react-native either (an unused import is a plan to return)", () => {
+    for (const sheet of [TOOLS, INFO]) {
+      expect(sheet).not.toMatch(/\bModal,/);
+    }
+  });
+
+  test("neither is mounted in the screen's JSX any more: it is PUBLISHED", () => {
+    // A mounted copy draws a second sheet under the route, and its empty route
+    // (nothing published) would pop itself.
+    expect(SCREEN.match(/<ToolsSheet/g) ?? []).toHaveLength(1);
+    expect(SCREEN.match(/<SessionInfoSheet/g) ?? []).toHaveLength(1);
+    expect(SCREEN).toMatch(/host\.publish\(\s*"tools"/);
+    expect(SCREEN).toMatch(/host\.publish\(\s*"info"/);
+    expect(SCREEN).not.toContain("visible={toolsOpen}");
+    expect(SCREEN).not.toContain("visible={infoOpen}");
+  });
+});
+
+describe("S4 — `Sheet`'s `native` variant (D4)", () => {
+  test("it is a prop, defaulting to false so every other caller is unchanged", () => {
+    // `PairScreen`'s floating card is the one other caller; a default of true
+    // would strip its drawn grabber and its top radius silently.
+    expect(UI_SHEET).toMatch(/readonly native\?: boolean;/);
+    expect(UI_SHEET).toMatch(/\n\s+native = false,/);
+  });
+
+  test("it drops the DRAWN grabber, because the native one replaces it", () => {
+    // The native control draws the grabber; a second one is two grabbers.
+    expect(UI_SHEET).toMatch(/native \? null : \(\n\s*<View style=\{\[styles\.grabber/);
+  });
+
+  test("it drops the top radius: UIKit's corner is the sheet's own", () => {
+    // Two radii on one corner is a visible seam at the top of the sheet.
+    expect(UI_SHEET).toContain("borderTopLeftRadius: native ? 0 : radius.sheet");
+    expect(UI_SHEET).toContain("borderTopRightRadius: native ? 0 : radius.sheet");
+  });
+
+  test("`scroll` pins the head and leaves ONE inner scroller (F8, no nesting)", () => {
+    // The head (title, subtitle, close) is OUTSIDE the scroller and the body is
+    // inside it: with the head inside too, a scroll drags the title away, and the
+    // two nested scrollers are what fails to expand the sheet to L.
+    const scroll = UI_SHEET.slice(UI_SHEET.indexOf("if (scroll) {"));
+    // The scroller's own tag comes after the head is BUILT and before the
+    // children are placed in it (the head is a variable, so the order is read
+    // from where each is declared/used).
+    const head = scroll.indexOf("const head = (");
+    const scroller = scroll.indexOf("const scroller = (");
+    expect(head).toBeGreaterThan(-1);
+    expect(scroller).toBeGreaterThan(head);
+    expect(scroll).toContain("{head}");
+    expect(scroll).toContain("{children}");
+    // The native variant returns the TWO direct children F0 requires, in order.
+    expect(scroll).toMatch(/if \(native\) \{[\s\S]*\{head\}\s*\{scroller\}/);
+  });
+});
+
+describe("S4 — Tools and Session info hand their list to `Sheet`'s ONE scroller", () => {
+  for (const [name, sheet] of [
+    ["Tools", TOOLS],
+    ["Session info", INFO],
+  ] as const) {
+    test(`${name}: \`Sheet\` is asked for the native variant`, () => {
+      expect(bodyOf(sheet, name === "Tools" ? "ToolsSheet" : "SessionInfoSheet")).toMatch(
+        /\n\s+native\n/,
+      );
+    });
+  }
+
+  test("Tools' list is the sheet's scroller, not a second ScrollView", () => {
+    // `Sheet scroll` + an inner list is exactly F8's nesting. The list is passed
+    // as the sheet's children, so there is ONE scroller and scroll-to-expand
+    // reaches the sheet's edge (Step 0's F8: nested stays at M).
+    const body = bodyOf(TOOLS, "ToolsSheet");
+    expect(body).not.toContain("<ScrollView");
+    // The pinned head + one scroller shape is ASKED FOR, not inherited from
+    // `Sheet`'s default (which is the flat sheet).
+    expect(body).toMatch(/\n\s+scroll\n/);
+    expect(body).toMatch(/\n\s+native\n/);
+    // The pull-to-refresh and the keyboard contract ride the ONE scroller now.
+    expect(body).toContain('scrollTestID="tools-scroll"');
+    expect(body).toContain("refreshControl={");
+    // The keyboard contract is the scroller's, and the scroller is `Sheet`'s.
+    expect(UI_SHEET).toContain('keyboardShouldPersistTaps="handled"');
+  });
+
+  test("Session info's list is the sheet's scroller, and the reveal still rides it", () => {
+    const body = bodyOf(INFO, "SessionInfoSheet");
+    expect(body).not.toContain("<ScrollView");
+    // The reveal's ref + the measuring band are `Sheet`'s scroller's now: a
+    // wrapper that dropped them would scroll nothing (H4a) and never report a y.
+    expect(body).toContain("scrollRef === undefined ? {} : { scrollRef }");
+    expect(body).toContain("onSectionLayout(section.id, event.nativeEvent.layout.y)");
+    expect(body).toContain('scrollTestID="session-info-scroll"');
+  });
+});
+
+describe("S4 — Session info opens at L when it was opened with a reveal", () => {
+  test("the screen states the reveal, and the route resolves the detent", () => {
+    // The tracker lives in the screen (`reveal-report.ts`), so the screen states
+    // the fact on the route's params and `sheetDetentContext` decides the detent.
+    expect(SCREEN).toContain('...(step.kind === "info" && revealWanted ? { reveal: true } : {})');
+    expect(APP).toContain("route.params.reveal === true,");
+  });
+
+  test("App.tsx resolves the opening context from the route's params", () => {
+    // The route's options are resolved before the route's screen mounts, so the
+    // context comes from the PARAMS the screen published.
+    expect(code(APP)).toContain("route.params.reveal === true,");
+    expect(code(APP)).toContain("sheetDetentContext(");
+  });
+});
+
+describe("S4 — Session info's Artifacts row waits for the route to go (F6b)", () => {
+  test("it is QUEUED, and never opens the gallery under the sheet", () => {
+    // The gallery is a `push` — a second presentation while the sheet is up
+    // (F6a/b). Its own close is not the path either: the route must be gone.
+    expect(SCREEN).toContain('setAfterDismiss((queue) => queueAfterDismiss(queue, "artifacts"))');
+    const open = SCREEN.slice(SCREEN.indexOf("const openArtifactsFromInfo"));
+    expect(open.slice(0, open.indexOf("};"))).not.toContain("onOpenArtifacts?.(");
+  });
+
+  test("the intent runs the gallery's own one entry once the route is gone", () => {
+    const run = SCREEN.slice(SCREEN.indexOf("const runIntent = (intent: AfterDismissIntent) => {"));
+    expect(run.slice(0, run.indexOf("\n  };"))).toContain('onOpenArtifacts("session-info")');
+  });
+});
+
+describe("S4 — a native swipe of Tools or Session info runs that sheet's own close", () => {
+  test("`closeTools` and the info close are the handlers a swipe reaches", () => {
+    const gone = SCREEN.slice(SCREEN.indexOf("const gone = dismissedNatively("));
+    const body = gone.slice(0, gone.indexOf("}, [actual]);"));
+    expect(body).toContain('gone.includes("tools")');
+    expect(body).toContain("closeToolsSheetOnly()");
+    expect(body).toContain('gone.includes("info")');
+    expect(body).toContain("closeInfoSheetOnly()");
+  });
+
+  test("the close body is ONE function, shared by the glyph and the swipe", () => {
+    // Two copies of "unset the flag, clear the expansion, tell the controller"
+    // drift: the glyph would clear the controller and a swipe would not.
+    expect(SCREEN).toContain("const closeInfoSheetOnly = useCallback(() => {");
+    expect(SCREEN.match(/controller\.closeInfo\(\)/g) ?? []).toHaveLength(2);
   });
 });

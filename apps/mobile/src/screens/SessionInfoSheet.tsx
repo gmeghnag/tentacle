@@ -6,12 +6,19 @@
  *
  * The grammar is the E2 band (docs/feat/mobile-chrome.md Design 4, S4):
  * `BandSection` — one full-width surface per section, square, a small uppercase
- * label above it — of 44 pt `Row`s, inside a native `pageSheet`. Every band and
- * every row says `onSheet`, so the ground and the hairlines are the sheet's own
- * tokens (`bandOnSheet`, `sepSheet`).
+ * label above it — of 44 pt `Row`s. Since docs/feat/mobile-native-sheets.md the
+ * PRESENTATION is the stack's (`Sheet` route, a native `formSheet`), so there is
+ * no `Modal` here and no `visible` prop: this file is drawn only while it is on
+ * screen. Every band and every row says `onSheet`, so the ground and the
+ * hairlines are the sheet's own tokens (`bandOnSheet`, `sepSheet`).
+ *
+ * The list is the sheet's OWN scroller (`Sheet native scroll`): a second one
+ * inside it would scroll instead of expanding the sheet (F8), and the head stays
+ * pinned above it (F0). The reveal's ref and the bands' measurements ride that
+ * one scroller, so H4a still lands on its section.
  */
 import type { ComponentRef, JSX, ReactNode } from "react";
-import { Modal, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
+import { Pressable, type ScrollView, StyleSheet, Switch, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { sectionNotes } from "../band-notes.ts";
 import {
@@ -32,7 +39,6 @@ import { Text } from "../ui/Text.tsx";
 
 export interface SessionInfoSheetProps {
   readonly palette: Palette;
-  readonly visible: boolean;
   readonly view: SessionInfoView;
   /** The auto-accept switch's value and setter (Owner Q3, F11). */
   readonly autoAcceptOn: boolean;
@@ -345,7 +351,6 @@ function Section({
 
 export function SessionInfoSheet({
   palette,
-  visible,
   view,
   autoAcceptOn,
   autoAcceptError,
@@ -363,113 +368,101 @@ export function SessionInfoSheet({
 }: SessionInfoSheetProps): JSX.Element {
   const insets = useSafeAreaInsets();
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={onClose}
-    >
-      <View style={[styles.root, { backgroundColor: palette.bg }]}>
-        <Sheet
-          palette={palette}
-          title="Session info"
-          subtitle={view.subtitle}
-          testID="session-info-sheet"
-          insetBottom={false}
-          scroll
-          onClose={onClose}
-          closeTestID="session-info-close"
-        >
-          <ScrollView
-            testID="session-info-scroll"
-            {...(scrollRef === undefined ? {} : { ref: scrollRef })}
-            contentContainerStyle={styles.content}
-            showsVerticalScrollIndicator
+    <View style={[styles.root, { backgroundColor: palette.bg }]}>
+      <Sheet
+        palette={palette}
+        title="Session info"
+        subtitle={view.subtitle}
+        testID="session-info-sheet"
+        insetBottom={false}
+        scroll
+        native
+        onClose={onClose}
+        closeTestID="session-info-close"
+        scrollTestID="session-info-scroll"
+        {...(scrollRef === undefined ? {} : { scrollRef })}
+      >
+        {view.banner === undefined ? null : (
+          <Banner
+            palette={palette}
+            tone="warn"
+            icon="wifi.slash"
+            body={view.banner.text}
+            testID="session-info-offline"
+          />
+        )}
+        {view.sections.map((section) => (
+          <View
+            key={section.id}
+            style={styles.sectionGroup}
+            {...(onSectionLayout === undefined
+              ? {}
+              : {
+                  onLayout: (event: { nativeEvent: { layout: { y: number } } }) =>
+                    onSectionLayout(section.id, event.nativeEvent.layout.y),
+                })}
           >
-            {view.banner === undefined ? null : (
-              <Banner
-                palette={palette}
-                tone="warn"
-                icon="wifi.slash"
-                body={view.banner.text}
-                testID="session-info-offline"
-              />
-            )}
-            {view.sections.map((section) => (
-              <View
-                key={section.id}
-                style={styles.sectionGroup}
-                {...(onSectionLayout === undefined
-                  ? {}
-                  : {
-                      onLayout: (event: { nativeEvent: { layout: { y: number } } }) =>
-                        onSectionLayout(section.id, event.nativeEvent.layout.y),
-                    })}
-              >
-                <Section
-                  palette={palette}
-                  section={section}
-                  expanded={expanded}
-                  onExpand={onExpand}
-                  onRetry={onRetry}
-                  onSwitch={onSwitch}
-                  onDeleteSchedule={onDeleteSchedule}
-                  onOpenArtifacts={onOpenArtifacts}
-                  {...(section.id === "session" && view.autoAccept === true
-                    ? {
-                        // Design 4 / the mockup's `infoE2` (`index.html:394-397`):
-                        // Auto-accept is the SESSION band's LAST ROW, not a band of
-                        // its own — the switch belongs to this session's settings.
-                        lastRow: (
-                          <Row
-                            palette={palette}
-                            title="Auto-accept"
-                            subtitle={
-                              autoAcceptError ?? "Allow every ask in this session, on every device"
-                            }
-                            onSheet
-                            minHeight={44}
-                            testID="session-info-autoaccept"
-                            trailing={
-                              <Switch
-                                testID="session-info-autoaccept-switch"
-                                accessibilityLabel="Auto-accept for this session, on every device"
-                                value={autoAcceptOn}
-                                onValueChange={(on) => onAutoAccept(on)}
-                              />
-                            }
+            <Section
+              palette={palette}
+              section={section}
+              expanded={expanded}
+              onExpand={onExpand}
+              onRetry={onRetry}
+              onSwitch={onSwitch}
+              onDeleteSchedule={onDeleteSchedule}
+              onOpenArtifacts={onOpenArtifacts}
+              {...(section.id === "session" && view.autoAccept === true
+                ? {
+                    // Design 4 / the mockup's `infoE2` (`index.html:394-397`):
+                    // Auto-accept is the SESSION band's LAST ROW, not a band of
+                    // its own — the switch belongs to this session's settings.
+                    lastRow: (
+                      <Row
+                        palette={palette}
+                        title="Auto-accept"
+                        subtitle={
+                          autoAcceptError ?? "Allow every ask in this session, on every device"
+                        }
+                        onSheet
+                        minHeight={44}
+                        testID="session-info-autoaccept"
+                        trailing={
+                          <Switch
+                            testID="session-info-autoaccept-switch"
+                            accessibilityLabel="Auto-accept for this session, on every device"
+                            value={autoAcceptOn}
+                            onValueChange={(on) => onAutoAccept(on)}
                           />
-                        ),
-                      }
-                    : {})}
-                />
-              </View>
-            ))}
-            <Text
-              maxFontSizeMultiplier={DENSE_FONT_SCALE}
-              style={[typography.caption, styles.footer, { color: palette.sec }]}
-            >
-              {view.footer}
-            </Text>
-            <Pressable
-              testID="session-info-refresh"
-              accessibilityRole="button"
-              onPress={onRefresh}
-              style={styles.refresh}
-            >
-              <Text style={[typography.footnote, { color: palette.accent }]}>Refresh</Text>
-            </Pressable>
-            <View style={{ height: insets.bottom + 20 }} />
-          </ScrollView>
-        </Sheet>
-      </View>
-    </Modal>
+                        }
+                      />
+                    ),
+                  }
+                : {})}
+            />
+          </View>
+        ))}
+        <Text
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          style={[typography.caption, styles.footer, { color: palette.sec }]}
+        >
+          {view.footer}
+        </Text>
+        <Pressable
+          testID="session-info-refresh"
+          accessibilityRole="button"
+          onPress={onRefresh}
+          style={styles.refresh}
+        >
+          <Text style={[typography.footnote, { color: palette.accent }]}>Refresh</Text>
+        </Pressable>
+        <View style={{ height: insets.bottom + 20 }} />
+      </Sheet>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  content: { gap: 0 },
   sectionGroup: { gap: 0 },
   section: { gap: 0 },
   footer: { textAlign: "center", paddingHorizontal: space.inset, paddingTop: 4 },

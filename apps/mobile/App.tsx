@@ -2866,6 +2866,9 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                   route.params.kind,
                   sheetIdentity(route.params.kind, null),
                   PixelRatio.getFontScale(),
+                  // Session info opened on a section (`openScheduled`) scrolls
+                  // inside the sheet, so it opens at L (D3).
+                  route.params.reveal === true,
                 ),
               ),
               contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] },

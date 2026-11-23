@@ -13,6 +13,7 @@ import {
   type DetentMemory,
   INTENT_SHEET,
   PRESENTED_SHEET_KINDS,
+  SHEET_DETENTS,
   SHEET_KINDS,
   SHEET_ROUTE,
   SHEET_SPEC,
@@ -33,6 +34,7 @@ import {
   rememberDetent,
   rememberedDetent,
   sessionInFront,
+  sheetDetentContext,
   sheetEntriesOf,
   sheetGestureEnabled,
   sheetGround,
@@ -394,6 +396,28 @@ describe("detent memory — per identity, bounded", () => {
     expect(openingDetent(null, "tools", null, CALM)).toBe(1);
     expect(openingDetent(createDetentMemory(), "info", null, { ...CALM, reveal: true })).toBe(2);
   });
+
+  /**
+   * The route's option object cannot see whether Session info was opened with a
+   * reveal (`session-info.ts`'s tracker lives in the screen), so the screen
+   * states it on that route's PARAMS and the navigator passes it in here (S4).
+   * A remembered detent still wins: a sheet the person left at L re-opens at L.
+   */
+  test("`sheetDetentContext` carries the font scale, the remembered detent and the reveal", () => {
+    // No memory, no reveal: the spec's index, and nothing else invented.
+    expect(sheetDetentContext("info", null, 1)).toEqual({ fontScale: 1 });
+    expect(initialDetent("info", sheetDetentContext("info", null, 1))).toBe(1);
+    // Dynamic Type still reaches the larger detent through the same context.
+    expect(initialDetent("tools", sheetDetentContext("tools", null, DENSE_FONT_SCALE))).toBe(2);
+    // Info opened with a reveal (the hub's Scheduled item, `openScheduled`) opens
+    // at L; the reveal belongs to Session info alone.
+    expect(sheetDetentContext("info", null, 1, true)).toEqual({ fontScale: 1, reveal: true });
+    expect(initialDetent("info", sheetDetentContext("info", null, 1, true))).toBe(2);
+    expect(sheetDetentContext("tools", null, 1, true)).toEqual({ fontScale: 1 });
+    // A remembered detent still wins: a sheet the person left at L re-opens at L.
+    rememberDetent(SHEET_DETENTS, "tools", null, 2);
+    expect(sheetDetentContext("tools", null, 1)).toEqual({ fontScale: 1, detent: 2 });
+  });
 });
 
 describe("afterDismiss — intents that need the sheet gone first", () => {
@@ -489,8 +513,11 @@ describe("sheetGround — the route's colour token", () => {
 describe("managedStack + stackSignature — what S3 actually presents (S3)", () => {
   test("only the migrated kinds are pushed; order is desiredStack's", () => {
     expect(managedStack(["tools", "outbox", "permission"], PRESENTED_SHEET_KINDS)).toEqual([
+      "tools",
       "outbox",
     ]);
+    // Session info is presented too (S4); the ask is still S5's.
+    expect(managedStack(["info", "permission"], PRESENTED_SHEET_KINDS)).toEqual(["info"]);
     expect(managedStack(["commands", "outbox"], PRESENTED_SHEET_KINDS)).toEqual([
       "commands",
       "outbox",
@@ -498,10 +525,10 @@ describe("managedStack + stackSignature — what S3 actually presents (S3)", () 
     expect(managedStack([], PRESENTED_SHEET_KINDS)).toEqual([]);
   });
 
-  test("S3's list is exactly the two sheets it migrated (no premature push)", () => {
-    // The other three still draw their own RN Modal: pushing a route for them
-    // would show an empty native sheet over the modal one.
-    expect([...PRESENTED_SHEET_KINDS].sort()).toEqual(["commands", "outbox"]);
+  test("S4's list is exactly the four sheets migrated so far (no premature push)", () => {
+    // Permission is still its own RN Modal (S5): pushing a route for it would
+    // show an empty native sheet over the modal one.
+    expect([...PRESENTED_SHEET_KINDS].sort()).toEqual(["commands", "info", "outbox", "tools"]);
   });
 
   test("the signature is a string, and it changes only when the stack does", () => {

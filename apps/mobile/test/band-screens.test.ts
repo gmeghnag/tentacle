@@ -39,6 +39,7 @@ const src = (name: string): string => read("src", "screens", `${name}.tsx`);
 const ROW = read("src", "ui", "Row.tsx");
 const BAND = read("src", "ui", "BandSection.tsx");
 const THEME = read("src", "theme.ts");
+const UI_SHEET = read("src", "ui", "Sheet.tsx");
 
 /**
  * The JSX opening tags of `name` in `source`. Arrow functions are flattened first,
@@ -364,7 +365,9 @@ describe("S4 · the band owns the section rhythm (no wrapper gap doubles it)", (
     expect([
       { screen: "SettingsScreen", gap: /body: \{ gap: 0 \}/.test(src("SettingsScreen")) },
       { screen: "SessionsScreen", gap: /sections: \{ gap: 0 \}/.test(src("SessionsScreen")) },
-      { screen: "SessionInfoSheet", gap: /content: \{ gap: 0 \}/.test(src("SessionInfoSheet")) },
+      // `styles.content` (gap: 0) moved onto `Sheet`'s own scroller with the ONE
+      // scroller (S4, D4/F8): the content gap lives where the scroller is.
+      { screen: "SessionInfoSheet", gap: /scrollContent: \{ gap: 0 \}/.test(UI_SHEET) },
     ]).toEqual([
       { screen: "SettingsScreen", gap: true },
       { screen: "SessionsScreen", gap: true },

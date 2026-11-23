@@ -177,7 +177,6 @@ describe("`SessionInfoSheet` renders the wakes band, and measures every single b
     const tree = walk(
       h(sheet.SessionInfoSheet, {
         palette: theme.darkPalette,
-        visible: true,
         view,
         autoAcceptOn: false,
         autoAcceptError: null,
@@ -303,7 +302,6 @@ describe("`SessionInfoSheet` renders the wakes band, and measures every single b
     const tree = walk(
       h(sheet.SessionInfoSheet, {
         palette: theme.darkPalette,
-        visible: true,
         view,
         autoAcceptOn: false,
         autoAcceptError: null,

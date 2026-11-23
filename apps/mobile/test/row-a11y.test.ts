@@ -243,7 +243,6 @@ describe("a row's trailing element decides whether the row is ONE element", () =
       walk(
         h(sheet.SessionInfoSheet, {
           palette: theme.lightPalette,
-          visible: true,
           view: {
             subtitle: "Fix the flaky test",
             sections: [{ id: "model", title: "Model", phase: "ready", rows }],

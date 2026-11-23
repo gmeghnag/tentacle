@@ -301,7 +301,7 @@ export function sameStack(a: readonly SheetEntry[], b: readonly SheetEntry[]): b
  * route — the route would have nothing to draw and the person would see an empty
  * sheet over the modal. `managedStack` filters with this list.
  */
-export const PRESENTED_SHEET_KINDS: readonly SheetKind[] = ["commands", "outbox"];
+export const PRESENTED_SHEET_KINDS: readonly SheetKind[] = ["commands", "outbox", "tools", "info"];
 
 /**
  * The stack's SIGNATURE: one string per sheet route, in order. `useNavigationState`
@@ -359,18 +359,26 @@ export function appActivity(state: string | null | undefined): AppActivity {
 export const SHEET_DETENTS: DetentMemory = createDetentMemory();
 
 /**
- * The opening context for a sheet's options: Dynamic Type, plus the detent the
- * person left this sheet at (D3). `sheetOptions` stays pure — the caller hands it
- * the remembered index.
+ * The opening context for a sheet's options: Dynamic Type, the detent the person
+ * left this sheet at (D3), and whether Session info was opened with a reveal —
+ * the one opening that scrolls inside the sheet, so it needs the room.
+ *
+ * `reveal` is a parameter rather than something this module could look up: the
+ * reveal's tracker (`reveal-report.ts`) belongs to the session screen, and the
+ * route's options are resolved by the navigator (`App.tsx`) before the route's
+ * screen mounts. So the screen states the fact on the route's params
+ * (`SheetRouteParam.reveal`), and this resolves it — the decision stays here.
  */
 export function sheetDetentContext(
   kind: SheetKind,
   identity: string | null,
   fontScale: number,
+  reveal = false,
 ): DetentContext {
   const remembered = rememberedDetent(SHEET_DETENTS, kind, identity);
   return {
     fontScale,
+    ...(kind === "info" && reveal ? { reveal: true } : {}),
     ...(remembered === null ? {} : { detent: remembered }),
   };
 }

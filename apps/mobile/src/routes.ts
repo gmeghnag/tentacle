@@ -89,6 +89,12 @@ export interface SheetRouteParam {
   readonly computerId: string;
   readonly sessionId: string;
   readonly kind: SheetKind;
+  /**
+   * Session info was opened with a section to land on (`openScheduled`), so the
+   * list scrolls inside the sheet: it opens at the LARGEST detent (`initialDetent`).
+   * Every other kind ignores it.
+   */
+  readonly reveal?: boolean;
 }
 
 /** The stack's route table (`@react-navigation/native-stack` params). */
