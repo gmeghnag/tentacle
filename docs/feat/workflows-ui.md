@@ -810,3 +810,13 @@ not-versioned sentence.
 - «Approvals are not migrated, workflows must be re-approved»: irrelevant (no approved workflow exists yet: the feature landed 23/11 04:45) — drop it from the plan.
 
 **Implementation v4 APPROVED** — owner 23/11 ~10:48 («ok»). Slice 0 = shared project-paths module (project root, not cwd); execution after `feat/mobile-native-sheets`.
+
+### Owner review of v4 (2026-11-23 ~11:25) — project root = cwd, NO upward walk
+
+*— claude-opus-5-5 (orchestrator), recording the owner*
+
+- The owner found v4's root walk (up to any `.git`, else the nearest `.tentacle/`, stopping before `$HOME`) «sporca e fuori controllo»: implicit, depends on folders you don't see, two rules for one thing.
+- **Decision: the project root is the directory tentacle runs in (`cwd`), full stop — no upward walk.** (Same as today's project config and the mount folder's `.tentacle/hide`.)
+- **Visibility instead of magic:** when started in a subfolder of a project that has workflows higher up, tentacle SAYS so and does not use them (e.g. the TUI workflows row: «no workflows here — ~/tentacle/.tentacle/workflows has 3 (start tentacle in ~/tentacle)»); the `/workflow` view always names the folder it reads. Bounded, read-only, display-only check (say how far it looks and why it cannot change behaviour).
+- Verified with the owner (subagents): the driver reads YAML + prompts once at start from the session cwd (`cli/src/workflow-files.ts:37-41`), children cannot start/stop workflows (`agent/src/subagent.ts:432-434`), children share the session cwd — so root = cwd keeps the workflow's files and the agents' working folder the same. In a container, root = the mounted folder (unchanged).
+- Keep the single project-paths module (names of `.tentacle/` children, symlink/escape checks once); drop `findProjectRoot`'s walk; re-check what 0b (hide) still needs (likely nothing beyond using the module's names).
