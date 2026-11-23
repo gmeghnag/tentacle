@@ -1214,6 +1214,60 @@ edit here is a claim about a finger on a sheet; the 0.5-detent fold estimates (w
 below it) come from the sheets' contents, not from a screenshot, and neither `42` nor `43`
 has ever run. `TODO.md` untouched.
 
+### Validation (simulator)
+
+*— claude-opus-5-5 (validator), 2026-11-23*
+
+**Source.** The orchestrator's full gate on this branch (iOS 26 simulator, Release build):
+`.tentacle/tmp/orchestration/runs/e2e-gate-mobile-native-sheets.log` → **GATE FAIL, 57 pass /
+6 fail / 7 quarantined**, results `.tentacle/tmp/e2e-mobile/1795466539487/`. The six fails:
+`08-permission` (no `perm-hold`), `08c-permission-reply` (no `perm-reply-input`),
+`25-session-info` (no `session-info-mcp-demo`), `34-hub-scheduled` (no "WAKEPING hub" row),
+`42-native-sheets-shots` (`tools-sheet` not visible after the drag back up — it is on screen, see
+below), `43-native-sheets-lock` (`app-content` never visible in `_unlock`). No re-run: `42` would
+fail at the same step, so a re-run adds no shot. Every PNG below was opened and looked at; copies in
+`docs/feat/mobile-native-sheets/validation/`.
+
+| File | What it shows |
+|---|---|
+| `commands-M-light.png` / `commands-M-dark.png` | Commands at the middle detent (top edge ≈ 52 % of the screen), grabber, close ×, title and subtitle pinned, the list starts below them (F0 holds here). Both themes are correct. |
+| `tools-M-light.png` / `tools-M-dark.png` | Tools at M: pinned head, MCP/Skills segment, search, `demo`/`broken` rows, Refresh. Correct in both themes. |
+| `tools-drag-up-expected-L-still-M-light.png` / `…-content-scrolled-dark.png` | After the flow's drag UP (named `42-tools-L`): **the sheet is still at M**, the same top edge. In dark the *content* scrolled (the segment slid under the pinned head), so the drag went to the scroller and not to the sheet. |
+| `tools-drag-down-expected-S-still-M-light.png` / `…-dark.png` | After two drags DOWN (named `42-tools-S`): **still M**, the same height as before. A light-theme scroll indicator is visible. |
+| `tools-drag-up-again-still-M-flow42-fail.png` | `42`'s failing step: Tools is plainly on screen, at M, with the content scrolled. The assert `tools-sheet` "not visible" fails anyway. Session info and Permission shots of `42` never ran. |
+| `session-info-M-light.png` / `session-info-M-dark.png` | Session info at M (from flow 25): pinned head, MODEL and SESSION bands. Correct in both themes. |
+| `session-info-M-mcp-below-fold-no-scroll-light.png` | `25`'s fail: the same frame **after** `scrollUntilVisible` — nothing scrolled, and the MCP band stays below the fold. |
+| `permission-M-reply-field-below-fold-no-scroll-light.png` | Permission at M (08c): the four options and Auto-accept. After tapping "No, let's talk about it", the reply field is below the fold and `scrollUntilVisible` did not scroll to it. |
+| `permission-after-blocked-swipe-still-up-lower-detent-no-perm-hold-light.png` | `08` after D5's swipe: **the sheet is still up and the ask is unanswered** (title dot, `Write a.txt` row 24 s). The swipe only moved it to a lower detent (top ≈ 70 %, Deny is cut off). The `perm-hold` note never appears, and nothing scrolls to it. |
+| `lock-after-unlock-tools-restored-app-content-unseen-light.png` | `43` after `_unlock`: Tools is **back, at M**, over the session. |
+
+**Against the plan's Validation:**
+- **Each sheet × S/M/L × light/dark — NOT met.** On screen there is only **M**, for Commands,
+  Tools and Session info, in both themes. On iOS 26 the flow's drags never moved a user sheet to
+  S or L: they scrolled the content, or did nothing. The shots named `L`/`S` are mislabelled M
+  frames. Permission was never shot in dark. Outbox was not shot at all, by design (S6 drift 4).
+  Petrol is also missing.
+- **Permission not swipe-dismissible — met for dismissal:** after the swipe the sheet is still
+  up and the ask is still live. **Not met for `perm-hold`:** the note never appears, so D5's
+  explanation and way out are not shown.
+- **Lock drains the sheets — the property passed, but there is no picture of it.**
+  `commands.json` of `43` records `lock-screen` visible, then `assertNotVisible tools-sheet` and
+  `assertNotVisible session-view` **COMPLETED**, all before `_unlock`, which is F5a's exact
+  property. After the unlock the sheet re-pushed (`desired` survived), as the screenshot shows.
+  The flow then fails inside `_unlock`, because `app-content` is never reported visible while
+  the re-pushed sheet is up. A plausible cause, not verified: the native sheet hides the
+  presenter from the accessibility tree. No frame captured the lock cover itself, so the drain is
+  proven by the assertions only.
+- **Common pattern (not diagnosed here).** Inside the native sheets, `scrollUntilVisible` and the
+  drags do not behave as the flows assume. Session info and Permission do not scroll at all
+  (`25`, `08`, `08c`). Tools scrolls, but its detent does not move. `42`'s "not visible" assert
+  fails on a sheet that is on screen, which is the same blindness as `43`'s `app-content`. This
+  matches the "Write a file" not-found note in Step 0b. Whether this is the app (the scroller does
+  not fill, F0) or Maestro's view of a `formSheet` is the next cheap test to run. Not touched:
+  `34-hub-scheduled`.
+- Not attempted, by instruction or because nothing scripted them: L2 (the owner's on-device
+  check), AX5, Reduce Motion, landscape, Permission over Tools, keyboard checks.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-23 (fresh context; same model family as the S1/S2/S4/S5 executor, so shared blind spots are possible)*
