@@ -156,9 +156,10 @@ describe("itemLines", () => {
     };
     const text = itemLines(tool, { expandAll: true }).map(strip).join("\n");
     // The header keeps only label + elapsed when expanded: the primary target
-    // (the description) is the first `  │ ` row under it (the command block,
-    // docs/feat/tui-tool-expand.md) — NOT `Agent find bug` on one row any more.
-    expect(text).toContain("  │ find bug");
+    // (the description) opens the `⎿` block under it (owner 2026-11-24: one
+    // shape for every expanded tool row) — NOT `Agent find bug` on one row.
+    expect(text).toContain("⎿ find bug");
+    expect(text).not.toContain("  │ find bug");
     // Own tokens: a bare number, the session total's formatter (12345 → "12k").
     expect(text).toContain("explore · 2 tool uses · 12k"); // tree head
     expect(text).toContain("Read auth.ts");
@@ -1473,7 +1474,7 @@ describe("a spilled tool result", () => {
   });
   const NOTE = "40.8k chars · too large, the model reads it in parts";
   // The body's rows: the header (row 0) and any command row of an expanded
-  // call — `  │ ` (docs/feat/tui-tool-expand.md) or, for a `shell` call, the
+  // call — `⎿ <target>` for a non-shell call (owner 2026-11-24), or, for a `shell` call, the
   // `⎿ $ <command>` block opener (docs/fix/tui-shell-row-collapsed) — are not
   // body rows, so skip them all: these tests are about the spelling of the body
   // itself.
@@ -1482,7 +1483,12 @@ describe("a spilled tool result", () => {
       .filter((l) => {
         const text = strip(l);
         return (
-          !text.startsWith("  │ ") && text !== "  │" && !text.startsWith("⎿ $ ") && text !== "⎿ $"
+          !text.startsWith("  │ ") &&
+          text !== "  │" &&
+          !text.startsWith("⎿ $ ") &&
+          text !== "⎿ $" &&
+          // an expanded non-shell call's target row (owner 2026-11-24: `⎿ <path>`)
+          text !== "⎿ src/a.ts"
         );
       })
       .slice(1)
@@ -1753,7 +1759,7 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
     expect(rows.at(-1)).toBe("  ok");
   });
 
-  test("a NON-shell call still expands to `  │ ` rows (the generic path is unchanged)", () => {
+  test("a NON-shell call expands like a shell row: its target opens the `⎿` block, no `│` rows (owner 2026-11-24)", () => {
     const path = `src/${"deep/".repeat(12)}file.ts`;
     const edit: ToolItem = {
       kind: "tool",
@@ -1768,7 +1774,11 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
       strip,
     );
     expect(rows[0]).toBe("● Edit 0.0s");
-    expect(rows.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(1);
+    // The whole path, wrapped, opens the block on the connector; the body hangs under it at col 2.
+    expect(rows[1]?.startsWith("⎿ src/deep/")).toBe(true);
+    expect(rows.filter((r) => r.startsWith(CONT))).toEqual([]);
+    expect(rows.join("").replace(/\s|⎿/g, "")).toContain(path.replace(/\s/g, ""));
+    expect(rows[rows.length - 1]).toBe("  edited");
   });
 
   test("expanding one call does not touch its BODY, Ctrl+O does both", () => {
