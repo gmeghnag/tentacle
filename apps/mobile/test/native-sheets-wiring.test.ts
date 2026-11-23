@@ -93,6 +93,24 @@ describe("S2 — the navigator (File 4)", () => {
   });
 });
 
+describe("S2 — the pure module stays OUT of react-native's types", () => {
+  test("`sheet-plan.ts` imports no RN / navigation module", () => {
+    // A type-only import is not harmless: `@react-navigation/native-stack` pulls
+    // `react-native`, whose `src/types/globals.d.ts` `declare global`s
+    // `setInterval(...): number`. `scripts/mockup-kit/sources.ts` imports
+    // `drawer-nav.ts` → `routes.ts` → here, so that ambient global enters the
+    // ROOT `tsc --noEmit` program and retypes every timer in the monorepo —
+    // seven `setInterval/setTimeout(...).unref()` sites in cli/exec/docker/k8s/
+    // daemon stop compiling. The option shape is declared locally instead.
+    const plan = read("src", "sheet-plan.ts");
+    expect(plan).not.toContain('from "react-native"');
+    expect(plan).not.toContain('from "@react-navigation/');
+    // The safety net: if RNS renames an option, the App.tsx spread (checked by
+    // `tsc -p apps/mobile`) is what catches it — but the harness asserts here too.
+    expect(plan).toContain("export interface SheetNavigationOptions");
+  });
+});
+
 describe("S2 — the route component (File 5)", () => {
   test("it reads the published content through the host, keyed on the session", () => {
     expect(ROUTE).toContain("SHEET_HOSTS.host(computerId, sessionId)");

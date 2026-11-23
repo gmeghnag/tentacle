@@ -22,7 +22,6 @@
  *   `sheetHidden` is "locked OR not active", and the drain never waits for a
  *   transition.
  */
-import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import { DENSE_FONT_SCALE } from "./theme.ts";
 
 /**
@@ -127,6 +126,29 @@ export function sheetGestureEnabled(kind: SheetKind, asking: boolean): boolean {
 }
 
 /**
+ * The subset of `NativeStackNavigationOptions` this table decides, spelled out
+ * instead of imported. The import would be TYPE-only but not type-ERASABLE at
+ * the program level: `@react-navigation/native-stack` pulls `react-native`,
+ * whose `src/types/globals.d.ts` `declare global`s `setInterval(...): number`.
+ * `scripts/mockup-kit/sources.ts` imports `drawer-nav.ts` → this module, so that
+ * ambient global landed in the ROOT `tsc --noEmit` program and retyped every
+ * timer in the monorepo — seven `setInterval/setTimeout(...).unref()` sites in
+ * cli/exec/docker/k8s/daemon stopped compiling. `App.tsx` (a `.tsx`, compiled by
+ * `tsc -p apps/mobile` only) passes these to `Stack.Screen`, where the object is
+ * checked against the real option type — the assignment is the acceptance test.
+ */
+export interface SheetNavigationOptions {
+  readonly headerShown: boolean;
+  readonly presentation: "formSheet";
+  readonly sheetAllowedDetents: number[];
+  readonly sheetInitialDetentIndex: number;
+  readonly sheetLargestUndimmedDetentIndex: number;
+  readonly sheetGrabberVisible: boolean;
+  readonly sheetExpandsWhenScrolledToEdge: boolean;
+  readonly gestureEnabled: boolean;
+}
+
+/**
  * The route's options for one kind (`Stack.Screen options`). Every index passes
  * `clampDetent`, so RNS's dev asserts are unreachable; `contentStyle` is not set
  * here (the route resolves `sheetGround` through the palette).
@@ -134,7 +156,7 @@ export function sheetGestureEnabled(kind: SheetKind, asking: boolean): boolean {
 export function sheetOptions(
   kind: SheetKind,
   ctx: DetentContext & { readonly asking?: boolean },
-): NativeStackNavigationOptions {
+): SheetNavigationOptions {
   const spec = SHEET_SPEC[kind];
   const opening =
     ctx.detent === undefined ? initialDetent(kind, ctx) : clampDetent(spec, ctx.detent);

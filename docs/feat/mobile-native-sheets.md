@@ -640,6 +640,65 @@ change, so `protocol.json` is untouched. The full `bun run check` gate is the or
 `SHEET_HOSTS` (so the route would `wait` forever if pushed), the five components keep their `<Modal>`,
 and no e2e/Validation run. `TODO.md` untouched.
 
+### Gate fix after exec — the root program's ambient timers (2026-11-23)
+
+*— deepseek-v4-pro, gate repair on `feat/mobile-native-sheets`*
+
+**Symptom (orchestrator's gate, `tsc --noEmit`, 7 errors in 6 files):** every
+`setInterval(...)` / `setTimeout(...)` handle in `cli`, `exec`, `docker`, `k8s` and `daemon` was typed
+`number`, so `timer.unref()` did not exist:
+
+```
+packages/cli/src/shared-auto-accept.ts(45,9): error TS2339: Property 'unref' does not exist on type 'number'.
+packages/cli/src/status-line.ts(155,16): …  packages/daemon/src/session-reaper.ts(186,14)…(204,16)
+packages/docker/src/ssh-dialer.ts(311,76): …  packages/exec/src/host-execution.ts(441,72): …
+packages/exec/src/process-group.ts(182,16): …  packages/k8s/src/exec-run.ts(220,22): …
+```
+
+**Root cause — one new type-only import leaked a `declare global` into the ROOT program.**
+`apps/mobile/src/sheet-plan.ts:25` imported `type { NativeStackNavigationOptions } from
+"@react-navigation/native-stack"`. That package pulls `react-native`, whose
+`src/types/globals.d.ts` (`// #region Timer Functions`) `declare global`s
+`function setInterval(handler: () => void, timeout: number): number` and the same for `setTimeout`.
+Type-only does not mean type-*erasable*: the file still joins the program that resolves its
+declarations, so the ambient override of the Bun timers applied to the whole monorepo.
+
+The reach into the ROOT `tsc --noEmit` (not just `tsc -p apps/mobile`) is
+`scripts/mockup-kit/sources.ts` → `apps/mobile/src/drawer-nav.ts` → `routes.ts` → `sheet-plan.ts`. The
+new `import type { SheetKind }` in `routes.ts` is what first made that chain pull `sheet-plan.ts` into
+the root program (`scripts/**` is in the root `include`). `apps/mobile`'s own program was never
+affected — `tsc -p apps/mobile` is clean on `main` and on this branch.
+
+**Evidence (decisive, one probe).** `tsc --noEmit --listFiles`: `react-native/types_generated/index.d.ts`
+in the program → **0 files on `main`, 1 on this branch**. A focused tsconfig including only
+`packages/exec/src/process-group.ts` typechecks clean; adding `apps/mobile/src/sheet-plan.ts` alone
+reproduces it. `--explainFiles` names the chain above.
+
+**Fix — declare the option subset locally instead of importing the navigation type.** `sheet-plan.ts`
+gains `export interface SheetNavigationOptions` (the eight fields the table actually decides:
+`headerShown`, `presentation`, `sheetAllowedDetents`, `sheetInitialDetentIndex`,
+`sheetLargestUndimmedDetentIndex`, `sheetGrabberVisible`, `sheetExpandsWhenScrolledToEdge`,
+`gestureEnabled`), and `sheetOptions` returns it. `App.tsx` still spreads it into `Stack.Screen` under
+`tsc -p apps/mobile`, where the object is checked against the real `NativeStackNavigationOptions` — that
+assignment is the acceptance test, so an RNS rename is caught, not silently accepted. This keeps the
+pure module React-free (AGENTS §7) as the doc already required; the plan's §D3 wording ("the NS option
+object") is unchanged in spirit — the object is still built from the table.
+
+No cast, no `as`, and **no edit to the seven consuming packages**: the fixed property is "the root
+program keeps Bun's timer types", not "silence seven errors".
+
+**Regression test (non-vacuous).** A new source guard in `native-sheets-wiring.test.ts` ("the pure
+module stays OUT of react-native's types") asserts `sheet-plan.ts` imports neither `react-native` nor
+`@react-navigation/*` and still exports `SheetNavigationOptions`. Mutation: re-adding the
+`import type { NativeStackNavigationOptions }` line makes it **fail** (1 fail / 10 pass) and the root
+`tsc` red with the same 7 errors; restoring it gives 11 pass / 0 fail and a clean gate.
+
+**Verified after the fix.** `tsc --noEmit` → clean, 0 react-native type files in program ·
+`tsc -p apps/mobile` → clean · `tsc -p apps/relay` → clean ·
+`bun test` on `sheet-plan`, `sheet-host`, `native-sheets-wiring`, `permission-sheet`,
+`workflow-approve-sheet` → 105 pass / 0 fail · `bunx biome check` on both changed files → clean.
+The full `bun run check` gate remains the orchestrator's.
+
 ## Review
 
 ### Owner answers (2026-11-23 ~08:35)
