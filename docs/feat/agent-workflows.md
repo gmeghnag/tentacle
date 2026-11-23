@@ -2283,3 +2283,35 @@ push-rules + push-notifier, tools schedule, `packages/protocol` → **730 pass, 
   ("Workflow not started: <name> — <reason>"), Swift `PushEnvelope.swift`/`PushRender.swift`,
   `fixtures/push-render-v1.json` vector, `swift test`. Until 10c the app shows its placeholder
   for `run_not_started` (the v1 kind enum refuses an unknown kind — by design).
+
+## Review — slice 10a (fresh context, `git diff main...HEAD`)
+
+*— claude-opus-5-5, 2026-11-23* (same model as the slice-10 planner; executor deepseek)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+Gate (narrow, as asked): touched tests (core schedule ×2, driver, daemon schedule-workflow /
+schedules / push-rules / push-notifier / persistence, tools schedule, cli serve-persistence,
+`packages/protocol`) → **866 pass, 0 fail**; `bun run lint` clean; `bun run typecheck` clean.
+
+1. **MEDIUM — false / stale `run_not_started` push, keyed on the wrong fire.**
+   `fireWorkflow` (`daemon/src/hosted-session.ts` ~3918-3920) publishes the ADVANCED row
+   (`fires` already +1) while `last` still holds the PREVIOUS fire's outcome; the notifier
+   (`daemon/src/push-notifier.ts` ~605-626) keys the push `<id>#<fires>` from that row, so the
+   NEW fire's key is consumed by the OLD outcome. Repro (`.tentacle/tmp/agent-workflows/push-stale.ts`,
+   real `SessionHost`): fire 1 unapproved, user approves, fire 2 starts — frames:
+   `fires=1 last=unapproved` → `fires=2 last=unapproved` → `fires=2 last=started`. Unattended,
+   the middle frame pushes "Workflow not started: … unapproved" for a run that DID start. Same
+   cause: on the failure stop, the `· schedule removed` row (`settleWorkflowFire` ~3976-3986)
+   arrives with an already-announced key, so the push never says the schedule was removed
+   (Execution item 4's "so the push sees why" does not hold). Fix direction: clear `last` (or
+   key on `last.at`) when advancing, and a test that drives the real frame sequence, not
+   hand-built rows (the push tests feed rows directly, which is why this passed).
+
+Mutation (mine, reverted, tree clean): exempt-from-idle removed in `scheduleStep` → core
+"due while a turn runs" + daemon "running user turn does not delay the fire" both FAIL.
+Attacks that found nothing: v3 reader vs `target`/`daily` (refused via `workflowTargets`);
+`wake-` on `session/schedule_create` (refused); `workflow_approve` never auto-answered; advance
+persisted before the driver call; single broker (driver asks through `permissions.request`).
+Not checked: `requestApproval` re-reads the file after `inspect` (a tiny window approves a
+different hash than pinned → fails closed as `unapproved`; LOW).
