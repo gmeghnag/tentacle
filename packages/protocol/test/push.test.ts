@@ -24,7 +24,9 @@ import {
   PUSH_DELIVERY_STATUSES,
   PUSH_ENVELOPE_CIPHERTEXT_LENGTHS,
   PUSH_GRACE_MAX_SECONDS,
+  PUSH_KINDS,
   PUSH_PLAINTEXT_MAX_BYTES,
+  PUSH_RUN_REASON_MAX,
   PushEnvelopeSchema,
   PushMessageSchema,
   PushPayloadSchema,
@@ -91,6 +93,45 @@ describe("PushMessage (the sealed plaintext)", () => {
     for (const kind of ["ask", "ask_resolved", "turn_done", "turn_failed"] as const) {
       expect(PushMessageSchema.safeParse({ ...base, kind }).success).toBe(true);
     }
+  });
+
+  // docs/feat/agent-workflows.md slice 9 (owner Q5): a run's end is worth the
+  // same buzz a turn's end is. Mutation: drop `run_done`/`run_stopped` from
+  // `PUSH_KINDS` → both assertions below fail (the daemon could not seal one).
+  test("a run's two kinds exist, and carry its id, name and stop reason", () => {
+    expect(PUSH_KINDS).toContain("run_done");
+    expect(PUSH_KINDS).toContain("run_stopped");
+    const base = worstCase();
+    for (const kind of ["run_done", "run_stopped"] as const) {
+      const message = {
+        ...base,
+        kind,
+        ask: undefined,
+        run: { runId: "wf-3", name: "task", reason: "exit 2" },
+      };
+      const parsed = PushMessageSchema.parse(message);
+      expect(parsed.kind).toBe(kind);
+      expect(parsed.run).toEqual({ runId: "wf-3", name: "task", reason: "exit 2" });
+    }
+    // The reason is ONE display line, like every other label on this wire.
+    const reasonAtCap = { runId: "wf-1", name: "task", reason: "x".repeat(PUSH_RUN_REASON_MAX) };
+    expect(
+      PushMessageSchema.safeParse({ ...base, kind: "run_stopped", run: reasonAtCap }).success,
+    ).toBe(true);
+    expect(
+      PushMessageSchema.safeParse({
+        ...base,
+        kind: "run_stopped",
+        run: { ...reasonAtCap, reason: "x".repeat(PUSH_RUN_REASON_MAX + 1) },
+      }).success,
+    ).toBe(false);
+    expect(
+      PushMessageSchema.safeParse({
+        ...base,
+        kind: "run_stopped",
+        run: { ...reasonAtCap, reason: "a\u001bb" },
+      }).success,
+    ).toBe(false);
   });
 
   test("every text field is capped (the clip limits are the schema's own bounds)", () => {

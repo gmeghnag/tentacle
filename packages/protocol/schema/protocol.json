@@ -3845,7 +3845,7 @@
       "type": "string"
     },
     "PushKind": {
-      "enum": ["ask", "ask_resolved", "turn_done", "turn_failed"],
+      "enum": ["ask", "ask_resolved", "turn_done", "turn_failed", "run_done", "run_stopped"],
       "type": "string"
     },
     "PushMessage": {
@@ -3876,6 +3876,9 @@
         },
         "kind": {
           "$ref": "#/$defs/PushKind"
+        },
+        "run": {
+          "$ref": "#/$defs/PushRun"
         },
         "sessionId": {
           "maxLength": 128,
@@ -3913,6 +3916,31 @@
     "PushRegisterStatus": {
       "enum": ["on", "off", "relay-off", "relay-no-push"],
       "type": "string"
+    },
+    "PushRun": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "runId": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["name", "runId"],
+      "type": "object"
     },
     "PushTurn": {
       "additionalProperties": true,

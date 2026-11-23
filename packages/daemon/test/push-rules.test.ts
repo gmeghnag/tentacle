@@ -20,7 +20,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { PushAttached, PushCommand, PushEvent, PushRules } from "../src/push-rules.ts";
-import { PUSH_MAX_PER_MINUTE, PUSH_TTL_SECONDS, createPushRules } from "../src/push-rules.ts";
+import {
+  PUSH_MAX_PER_MINUTE,
+  PUSH_RUN_MEMORY,
+  PUSH_TTL_SECONDS,
+  createPushRules,
+} from "../src/push-rules.ts";
 
 /** A clock a test moves by hand. */
 interface Clock {
@@ -464,6 +469,92 @@ describe("the turn rule", () => {
     const first = h.send(turnEnd("end_turn", 0));
     const second = h.send({ ...turnEnd("error", 0), turnId: "t2" } as PushEvent);
     expect(first[0]?.collapseId).not.toBe(second[0]?.collapseId);
+  });
+});
+
+describe("the run rule (docs/feat/agent-workflows.md slice 9, owner Q5)", () => {
+  const runEnd = (
+    state: "ok" | "error" | "stopped",
+    clients = 0,
+    extra: {
+      runId?: string;
+      stopReason?: "budget" | "timeout" | "cancelled" | "interrupted" | "changed";
+    } = {},
+  ): PushEvent => ({
+    type: "run_end",
+    sessionId: "s1",
+    runId: extra.runId ?? "wf-1",
+    state,
+    ...(extra.stopReason !== undefined ? { stopReason: extra.stopReason } : {}),
+    attached: { clients, devices: clients > 0 ? [ALICE] : [] },
+  });
+
+  test("nobody attached → `run_done`, to every registered device, under the run's own id", () => {
+    const h = harness([ALICE, BOB]);
+    const pushed = h.send(runEnd("ok"));
+    expect(pushed.map((c) => c.kind)).toEqual(["run_done"]);
+    expect(pushed[0]?.devices).toEqual([ALICE, BOB]);
+    expect(pushed[0]?.runId).toBe("wf-1");
+    // Mutation: a fresh random collapse id → two runs share a banner. Two runs
+    // ending are two notifications, and each replaces only its own.
+    const second = h.send(runEnd("ok", 0, { runId: "wf-2" }));
+    expect(second[0]?.collapseId).not.toBe(pushed[0]?.collapseId);
+  });
+
+  test("`error` and `stopped: timeout` are `run_stopped`; a watching client silences it", () => {
+    const h = harness([ALICE]);
+    expect(h.send(runEnd("error")).map((c) => c.kind)).toEqual(["run_stopped"]);
+    expect(
+      h.send(runEnd("stopped", 0, { runId: "wf-2", stopReason: "timeout" })).map((c) => c.kind),
+    ).toEqual(["run_stopped"]);
+    // Mutation: ignore `attached.clients` → a desk session buzzes the phone in
+    // the owner's pocket while its own TUI already showed the run end.
+    expect(h.send(runEnd("ok", 1, { runId: "wf-3" }))).toEqual([]);
+  });
+
+  test("`stopped: cancelled` is silence: someone stopped it on purpose", () => {
+    const h = harness([ALICE]);
+    expect(h.send(runEnd("stopped", 0, { stopReason: "cancelled" }))).toEqual([]);
+    expect(h.commands).toEqual([]);
+    // …but it is still REMEMBERED: a later `stopped`/`ok` for it is not news either.
+    expect(h.send(runEnd("ok"))).toEqual([]);
+  });
+
+  test("ONE push per run: the full-state list repeats an ended run (mutation: no memory → a buzz per step)", () => {
+    const h = harness([ALICE]);
+    expect(h.send(runEnd("ok")).map((c) => c.kind)).toEqual(["run_done"]);
+    // Every later `workflows` update of the NEXT run re-reports wf-1.
+    for (let i = 0; i < 5; i++) {
+      expect(h.send(runEnd("ok"))).toEqual([]);
+    }
+    expect(h.commands).toHaveLength(1);
+    // A genuinely new run still pushes.
+    expect(h.send(runEnd("ok", 0, { runId: "wf-2" })).map((c) => c.kind)).toEqual(["run_done"]);
+  });
+
+  test("the run memory is bounded, oldest first (a `serve` runs for weeks)", () => {
+    const h = harness([ALICE]);
+    for (let i = 0; i < PUSH_RUN_MEMORY + 5; i++) {
+      h.send(runEnd("ok", 0, { runId: `wf-${i + 1}` }));
+    }
+    // The last PUSH_RUN_MEMORY ids are remembered; the first ones fell out.
+    expect(h.send(runEnd("ok", 0, { runId: "wf-1" })).map((c) => c.kind)).toEqual(["run_done"]);
+    expect(h.send(runEnd("ok", 0, { runId: `wf-${PUSH_RUN_MEMORY + 5}` }))).toEqual([]);
+  });
+
+  test("no registered device → nothing, and it is SAID (never silent)", () => {
+    const h = harness([]);
+    const result = h.rules.apply(runEnd("ok"));
+    expect(result.commands).toEqual([]);
+    expect(result.notes.map((n) => n.code)).toEqual(["push-empty"]);
+  });
+
+  test("the storm cap holds it back, and says so", () => {
+    const h = harness([ALICE], { maxPerMinute: 1, graceMs: 0 });
+    expect(h.send(ask("s9", "r9")).map((c) => c.kind)).toEqual(["ask"]);
+    const capped = h.rules.apply(runEnd("ok"));
+    expect(capped.commands).toEqual([]);
+    expect(capped.notes.map((n) => n.code)).toEqual(["push-capped"]);
   });
 });
 

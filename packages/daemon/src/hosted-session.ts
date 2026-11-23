@@ -507,7 +507,12 @@ export type PushWatchedUpdate =
   // deliberately NOT watched.
   | UpdateOf<"turn_start">
   | UpdateOf<"tool_call">
-  | UpdateOf<"session_title">;
+  | UpdateOf<"session_title">
+  // docs/feat/agent-workflows.md slice 9: a run's end is the session's own news
+  // too, and the `workflows` update is where the session says it. Fed to the
+  // push rules as `run_end`, which ignores a run it has already announced (the
+  // list is FULL STATE and repeats an ended run on every later step).
+  | UpdateOf<"workflows">;
 
 /**
  * What a push observer is told, when (`PushEvent` in `push-rules.ts` is the
@@ -2720,7 +2725,10 @@ export class HostedSession {
       // of `attachments`, stays synchronous, and is still never awaited.
       update.type !== "turn_start" &&
       update.type !== "tool_call" &&
-      update.type !== "session_title"
+      update.type !== "session_title" &&
+      // Slice 9: a run's end (owner Q5). Full state, so the push rules see the
+      // same ended run again on a later step; they announce each run id ONCE.
+      update.type !== "workflows"
     ) {
       return;
     }

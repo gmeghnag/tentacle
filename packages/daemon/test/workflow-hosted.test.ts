@@ -27,6 +27,10 @@ const noopEnv: ExecutionEnvironment = {
 const YAML =
   "schemaVersion: 1\nname: task\nversion: 1\nsteps:\n  - id: plan\n    agent: { prompt_text: plan it }\n";
 
+/** An `approve` step: the one step kind that asks the USER directly (D3). */
+const APPROVE_YAML =
+  'schemaVersion: 1\nname: task\nversion: 1\nsteps:\n  - id: merge\n    approve: { title: "Merge it" }\n';
+
 function hosted(messages: ChatMessage[] = []): HostedSession {
   const agent = new Agent({
     model: {
@@ -159,6 +163,54 @@ describe("session/workflow on a hosted session", () => {
     expect(segment).toContain("workflow_start");
     release();
     await settle();
+  });
+
+  test("a run WAITING on the user flips `needsUser` on the hub signal (slice 9)", async () => {
+    // docs/feat/agent-workflows.md slice 9: "`workflow/list` `needsUser`". The
+    // hub's badge reads THIS flag, so a run that opens an ask must move it from
+    // false to true and back — otherwise the phone never lights up.
+    // Mutation: derive `needsUser` from the run's state alone and forget that an
+    // ask also shows as `waiting`/`needs-approval` on a STEP → the row stays
+    // false while the run is parked on a human.
+    const session = hosted();
+    let answer = (): void => {};
+    const asked = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    let released = (): void => {};
+    const blocked = new Promise<void>((resolve) => {
+      released = resolve;
+    });
+    const d = new WorkflowDriver({
+      load: async () => ({ path: "workflows/task.yaml", text: APPROVE_YAML, prompts: {} }),
+      context: () => ({ models: [], agentTypes: ["general"] }),
+      approvals: { has: async () => true, add: async () => {} },
+      request: async () => {
+        answer();
+        await blocked;
+        return { allowed: true };
+      },
+      runnerFor: () => async (_opts, controls) => {
+        const verdict = controls?.extraTools?.find((t) => t.name === "step_verdict");
+        await verdict?.execute({ verdict: "pass", reason: "ok" }, {} as ToolContext);
+        return { report: "ok", toolUses: 0, stopReason: "end_turn" };
+      },
+    });
+    session.attachWorkflows(d);
+    const started = await session.workflow({
+      sessionId: "s1",
+      action: "start",
+      name: "task",
+      turnId: "t-1",
+    });
+    expect(started).toEqual({ ok: true, runId: "wf-1" });
+    await asked;
+    // Parked on an ask: the hub must say so.
+    expect(session.workflowListRows()[0]).toMatchObject({ runId: "wf-1", needsUser: true });
+    released();
+    await settle();
+    // Answered and finished: it no longer does.
+    expect(session.workflowListRows()[0]?.needsUser).toBe(false);
   });
 
   test("a wake turn id cannot start a run", async () => {

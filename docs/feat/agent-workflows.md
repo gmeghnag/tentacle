@@ -1587,3 +1587,112 @@ files: 47 pass, 0 fail. New files: none outside the approved list except the two
 Changelog: none added — both slices' user-visible effect (a phone that lists and shows runs) is
 NOT delivered, and a fragment claiming it would be false; the existing
 `changelog.d/agent-workflows.added.md` already covers the wire and the `run` step.
+
+### Slice 9 — DONE: notifications + hub signal (`needsUser`, run-end push per Q5)
+
+*— claude-opus-5-5 (executor), 2026-11-23*
+
+**Load-bearing check re-run first, before any edit** — `.tentacle/tmp/agent-workflows/lb9.ts`,
+on this branch tip: **14/14 hold**. The four claims slice 9 stands on, each proved by reading the
+code and by execution:
+
+| # | Claim | How it was proved |
+|---|---|---|
+| 1 | a step's ask needs NO new mechanism — it is a `permission_request` the push hook already watches | `workflow-driver.ts` calls `this.deps.request(req, …)`; `offerPush` watches `permission_request`; end-to-end in `push-notifier.test.ts` (one `ask` push, then `ask_resolved`) |
+| 2 | `workflow/list` exists and its rows already carry `needsUser` | `methods.ts:168`, `session-host.ts:910`, `hosted-session.ts:2495`; executed: the row flips `false → true → false` as a run parks on an ask (`workflow-hosted.test.ts`) |
+| 3 | the push wire has NO run kind today | `PUSH_KINDS` was the four; `PushEvent` had no run member; the notifier had no run hook; `run_done` is REFUSED by `PushMessageSchema` |
+| 4 | two new kinds are additive on `v: 1` because both renderers refuse a kind they do not know | Swift `PushKind(rawValue:)` → `nil` → placeholder; the TS renderer's enum the same |
+
+So slice 9's real work was exactly one thing — the run-end push — plus the hub signal, which
+turned out to need no code at all (claim 2). That is what shipped.
+
+**Design (as built), in dependency order — protocol → daemon → app.**
+
+1. **`packages/protocol/src/push.ts`** — two new `PUSH_KINDS` (`run_done`, `run_stopped`) and
+   `PushRunSchema` (`runId`, `name`, optional `reason ≤ 300`, all `line()`-bounded). Additive: no
+   `v` bump, no `protocol.d/` note (a new display-only plaintext kind, and an older build shows its
+   placeholder). The fit ladder clips `run.reason` at rungs 6 and 7 like every other free text, and
+   an ABSENT reason stays absent (`line()` refuses `""`, so a rung must never invent one).
+2. **`packages/daemon/src/push-rules.ts`** — one pure rule, `runCommand`, beside `turnCommand`:
+   - **unattended** (`attached.clients > 0` → nothing): a run is unattended by definition, so a
+     desk-side run must not buzz the owner's pocket;
+   - **idempotent by run id** (`announcedRuns`, bounded by `PUSH_RUN_MEMORY`): the session reports
+     runs as a FULL-STATE list that necessarily repeats an ended run on every later step, so this
+     is what keeps it to one buzz;
+   - **`stopped: cancelled` is silence**, `stopped: timeout` is news (an unanswered ask parks the
+     run; a deliberate stop is not news);
+   - the storm cap still applies (a run end is a push in the rolling minute).
+3. **`packages/daemon/src/push-notifier.ts`** — a `workflows` branch: remember each ended run's
+   name/reason, feed one `run_end` per ended row, and build the plaintext's `run` payload. Two
+   details the plan did not name and the code forced (reconciled below).
+4. **`packages/daemon/src/hosted-session.ts`** — one line: `offerPush`'s filter widens to
+   `workflows`. No new update, no new method: D5 already put the full run list on the wire.
+5. **`apps/mobile/src/push-render.ts` + the Swift NSE (`PushEnvelope.swift`, `PushRender.swift`)** —
+   the two run kinds render ("Workflow finished" / "Workflow stopped: <reason>"), the Swift
+   `PushKind` enum learns them and decodes `run`, and two cases land in the shared vector table
+   (`apps/mobile/test/fixtures/push-render-v1.json`) so the two implementations stay pinned to one
+   spec (decision 20).
+6. **Hub signal** — no code. `needsUser` was already derived on `workflow/list` (claim 2); this
+   slice pinned it with a test that a run waiting on the user actually flips it.
+
+**Drift from the Implementation (1 item, reconciled in the code, not the plan text).**
+
+1. **A run's `reason` had to be flattened, and the plan's D5 row does not say so.** A failed `run`
+   step's reason is the tail of its output, i.e. multi-line (`fail: "exit N"` + last 20 lines) —
+   and the plaintext's `line()` refuses a control character AND the empty string. Passing it through
+   would have produced a message `PushMessageSchema` rejects, so `fitPushMessage`'s caller would
+   have dropped the push: a silent loss, exactly the failure AGENTS §8 says to design out. The
+   notifier now squeezes it to one non-empty line (`oneLine`) and omits the field when nothing
+   usable remains; a missing name falls back to the run id (never `""`). Pinned by a test whose
+   mutation is M8.
+2. **The plan's "`needsUser`" is a READ, not a build.** D5 already specified the derivation and
+   slice 4 shipped it; slice 9's row read as if the signal needed work. Nothing was added — one
+   test pins the flip, which is what the hub badge consumes.
+
+**Tests (red first — each was written before the code path it exercises, and the two that failed
+were fixed in the CODE, not the assertion).**
+
+| File | Added | What it pins |
+|---|---|---|
+| `packages/protocol/test/push.test.ts` | 2 | the six kinds all parse; `RunSchema` bounds `runId`/`name`/`reason`, refuses a control character, and keeps an absent reason absent |
+| `packages/daemon/test/push-rules.test.ts` | 10 | S9's own row: a run waiting on the user → exactly one `ask`, resolved → `ask_resolved`. Plus `run_done`/`run_stopped`, unattended-only, one-per-run-id across a repeated full-state list, `cancelled` silent but still remembered, `timeout` news, no-device/still-audited, the storm cap, and the 5-run memory bound |
+| `packages/daemon/test/push-notifier.test.ts` | 5 | a run's ask → ONE sealed push then `ask_resolved`; a run end reaches the phone named, once; a multi-line reason is flattened and a blank one is absent; a watched run pushes nothing and leaks no retention |
+| `packages/daemon/test/push-hook.test.ts` | 1 | `offerPush` forwards `workflows` (the widening has a test of its own) |
+| `packages/daemon/test/workflow-hosted.test.ts` | 1 | `needsUser` flips true while a run is parked on an `approve` step, false once answered |
+| `apps/mobile/test/push-render.test.ts` | 1 | both run kinds' words, quiet level, no `requestId` in the hints, and `clean()` stripping an escape from the reason |
+| `apps/mobile/test/fixtures/push-render-v1.json` | 2 cases | `run-done`, `run-stopped` — asserted by BOTH the TS test and `swift test` |
+
+**Green, narrowed:** 126 tests across the 6 touched TS files, 0 fail; `swift test` (the NSE's own
+package) 15/15.
+
+**Mutations** (`.tentacle/tmp/agent-workflows/mut9.sh`; each breaks ONE property, runs only the file
+that pins it, restores, `git status` verified):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | drop the announced-run memory (full-state list re-pushes) | red |
+| M2 | push a `stopped: cancelled` run | red |
+| M3 | remove `workflows` from `offerPush`'s filter | red |
+| M4 | do not look up the run's name/reason | red |
+| M5 | the wire refuses `run_done` | red |
+| M6 | let `run_done` fall through to "Turn finished" | red |
+| M7 | skip `clean()` on a stopped run's reason | red |
+| M8 | pass a run's reason through unflattened | red |
+
+All 8 red on the mutated tree, all 8 green after restore — so no test here is vacuous.
+
+**Gate.** Not run here (§4: the orchestrator's script runs it). What was run, and is green:
+`bunx biome check` on the 11 touched TS files (0 errors/warnings), `bunx tsc --noEmit -p
+packages/daemon` and `-p apps/mobile` (clean; a `-p packages/protocol` run reports pre-existing
+TUI module-resolution errors unrelated to this slice), the 6 touched test files, and `swift test`.
+`packages/protocol/schema/protocol.json` was REGENERATED (`bun run schema:export`) — additive only:
+`PushKind`'s enum plus the new `PushRun` definition.
+
+**Changelog.** One bullet appended to the existing `changelog.d/agent-workflows.added.md` (same
+task slug+category — a new file would have collided by name). No `protocol.d/` note: a new
+display-only push kind is additive, and an older build shows its placeholder.
+
+**Unverified / left to later slices.** The phone's *screens* still cannot show a run (the slice-6a
+plumbing wall, unchanged by this slice): a push is a nudge and its tap opens the session, so
+nothing here depends on it. `PUSH_KINDS`' run kinds are end-to-end only to the sealed plaintext —
+the real APNs round trip is `apps/mobile/e2e/run.ts`'s territory and was not exercised.
