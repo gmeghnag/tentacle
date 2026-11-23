@@ -138,6 +138,11 @@ describe("S2 — the route component (File 5)", () => {
 describe("S3 — the reconciler is the pure module's, and the screen only dispatches", () => {
   test("the wanted stack is `desiredStack` → `managedStack`, never a local if-chain", () => {
     expect(SCREEN).toContain("desiredStack({");
+    // ALL three user sheets reach the stack through the pure precedence, so
+    // Tools and Session info (no `<Modal>` since S4) can open at all.
+    expect(SCREEN).toContain(
+      "user: userSheet({ commands: commandsOpen, tools: toolsOpen, info: infoOpen }),",
+    );
     expect(SCREEN).toContain("managedStack(desired, PRESENTED_SHEET_KINDS)");
     // The loop's dependency is stable between renders (keyed on the content).
     expect(SCREEN).toContain("useMemo(() => wantedNow, [wantedKey])");
@@ -335,6 +340,24 @@ describe("S4 — Tools and Session info hand their list to `Sheet`'s ONE scrolle
       expect(bodyOf(sheet, name === "Tools" ? "ToolsSheet" : "SessionInfoSheet")).toMatch(
         /\n\s+native\n/,
       );
+    });
+  }
+
+  // F0 holds only for the COMPOSED tree: `Sheet native`'s head + scroller must be
+  // the route root's direct children, so neither the route nor the sheet may put
+  // a View between them (review round 1, finding 2).
+  test("composed F0 shape: the route draws no wrapper around the content", () => {
+    expect(ROUTE).not.toContain("<View");
+    expect(ROUTE).toMatch(/return <>\{snapshot\.content as ReactNode\}<\/>;/);
+  });
+
+  for (const [name, sheet] of [
+    ["Tools", TOOLS],
+    ["Session info", INFO],
+  ] as const) {
+    test(`composed F0 shape: ${name} returns \`Sheet\` itself, no wrapper View`, () => {
+      const body = bodyOf(sheet, name === "Tools" ? "ToolsSheet" : "SessionInfoSheet");
+      expect(body).toMatch(/\n {2}return \(\n {4}<Sheet\n/);
     });
   }
 

@@ -118,138 +118,137 @@ export function ToolsSheet({
   const insets = useSafeAreaInsets();
   const active = view.segments.find((segment) => segment.id === view.segment);
   const empty = active === undefined ? undefined : active.empty;
+  // No wrapper View (F0): `Sheet native`'s head + scroller are the route
+  // root's direct children; the route's `contentStyle` paints the `bg` ground.
   return (
-    <View style={[styles.root, { backgroundColor: palette.bg }]}>
-      <Sheet
-        palette={palette}
-        title="Tools"
-        subtitle="What this session offers the model"
-        testID="tools-sheet"
-        insetBottom={false}
-        scroll
-        native
-        onClose={onClose}
-        closeTestID="tools-close"
-        scrollTestID="tools-scroll"
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={palette.sec} />
-        }
-      >
-        <View style={[styles.segments, { backgroundColor: palette.fill }]}>
-          {view.segments.map((segment) => {
-            const on = segment.id === view.segment;
-            return (
-              <Pressable
-                key={segment.id}
-                testID={`tools-segment-${segment.id}`}
-                accessibilityRole="button"
-                accessibilityState={{ selected: on }}
-                accessibilityLabel={
-                  segment.count === null ? segment.label : `${segment.label}, ${segment.count}`
-                }
-                onPress={() => onSegment(segment.id)}
-                style={[styles.segment, on ? { backgroundColor: palette.card } : null]}
+    <Sheet
+      palette={palette}
+      title="Tools"
+      subtitle="What this session offers the model"
+      testID="tools-sheet"
+      insetBottom={false}
+      scroll
+      native
+      onClose={onClose}
+      closeTestID="tools-close"
+      scrollTestID="tools-scroll"
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={palette.sec} />
+      }
+    >
+      <View style={[styles.segments, { backgroundColor: palette.fill }]}>
+        {view.segments.map((segment) => {
+          const on = segment.id === view.segment;
+          return (
+            <Pressable
+              key={segment.id}
+              testID={`tools-segment-${segment.id}`}
+              accessibilityRole="button"
+              accessibilityState={{ selected: on }}
+              accessibilityLabel={
+                segment.count === null ? segment.label : `${segment.label}, ${segment.count}`
+              }
+              onPress={() => onSegment(segment.id)}
+              style={[styles.segment, on ? { backgroundColor: palette.card } : null]}
+            >
+              <Text
+                maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                style={[
+                  typography.subhead,
+                  on ? styles.segmentOn : null,
+                  { color: on ? palette.label : palette.sec },
+                ]}
               >
+                {segment.label}
+              </Text>
+              {segment.count === null ? null : (
                 <Text
                   maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                  style={[
-                    typography.subhead,
-                    on ? styles.segmentOn : null,
-                    { color: on ? palette.label : palette.sec },
-                  ]}
+                  style={[typography.caption, { color: palette.sec }]}
                 >
-                  {segment.label}
+                  {segment.count}
                 </Text>
-                {segment.count === null ? null : (
-                  <Text
-                    maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                    style={[typography.caption, { color: palette.sec }]}
+              )}
+            </Pressable>
+          );
+        })}
+      </View>
+      <View style={[styles.search, { backgroundColor: palette.fill }]}>
+        <Icon name="magnifyingglass" color={palette.sec} size={15} />
+        <TextInput
+          testID="tools-search"
+          value={view.query}
+          onChangeText={onQuery}
+          placeholder="Search servers, skills and tools"
+          placeholderTextColor={palette.sec}
+          style={[typography.body, styles.searchInput, { color: palette.label }]}
+          autoCorrect={false}
+          autoCapitalize="none"
+          clearButtonMode="while-editing"
+          returnKeyType="search"
+          accessibilityLabel="Search servers, skills and tools"
+        />
+      </View>
+      {view.bands.length === 0 ? (
+        <EmptyState
+          palette={palette}
+          testID={view.noMatches ? "tools-nomatch" : "tools-empty"}
+          {...(view.noMatches
+            ? { title: "No matches", icon: "magnifyingglass" as const }
+            : empty === undefined
+              ? { loading: active?.phase === "loading" }
+              : {
+                  title: empty.title,
+                  ...(empty.footnote === undefined ? {} : { body: empty.footnote }),
+                })}
+          {...(active?.retry === true
+            ? {
+                action: (
+                  <Pressable
+                    testID="tools-retry"
+                    accessibilityRole="button"
+                    onPress={onRefresh}
+                    style={styles.retry}
                   >
-                    {segment.count}
-                  </Text>
-                )}
-              </Pressable>
-            );
-          })}
-        </View>
-        <View style={[styles.search, { backgroundColor: palette.fill }]}>
-          <Icon name="magnifyingglass" color={palette.sec} size={15} />
-          <TextInput
-            testID="tools-search"
-            value={view.query}
-            onChangeText={onQuery}
-            placeholder="Search servers, skills and tools"
-            placeholderTextColor={palette.sec}
-            style={[typography.body, styles.searchInput, { color: palette.label }]}
-            autoCorrect={false}
-            autoCapitalize="none"
-            clearButtonMode="while-editing"
-            returnKeyType="search"
-            accessibilityLabel="Search servers, skills and tools"
-          />
-        </View>
-        {view.bands.length === 0 ? (
-          <EmptyState
-            palette={palette}
-            testID={view.noMatches ? "tools-nomatch" : "tools-empty"}
-            {...(view.noMatches
-              ? { title: "No matches", icon: "magnifyingglass" as const }
-              : empty === undefined
-                ? { loading: active?.phase === "loading" }
-                : {
-                    title: empty.title,
-                    ...(empty.footnote === undefined ? {} : { body: empty.footnote }),
-                  })}
-            {...(active?.retry === true
-              ? {
-                  action: (
-                    <Pressable
-                      testID="tools-retry"
-                      accessibilityRole="button"
-                      onPress={onRefresh}
-                      style={styles.retry}
-                    >
-                      <Text style={[typography.subhead, { color: palette.accent }]}>Try again</Text>
-                    </Pressable>
-                  ),
-                }
-              : {})}
-          />
-        ) : (
-          <BandSection
-            palette={palette}
-            onSheet
-            testID="tools-bands"
-            {...(view.note === undefined ? {} : { footnote: view.note })}
-          >
-            {view.bands.map((band, index) => (
-              <Band
-                key={band.key}
-                palette={palette}
-                band={band}
-                first={index === 0}
-                onSwitch={onSwitch}
-                onToggle={onToggle}
-              />
-            ))}
-          </BandSection>
-        )}
-        <Pressable
-          testID="tools-refresh"
-          accessibilityRole="button"
-          onPress={onRefresh}
-          style={styles.refresh}
+                    <Text style={[typography.subhead, { color: palette.accent }]}>Try again</Text>
+                  </Pressable>
+                ),
+              }
+            : {})}
+        />
+      ) : (
+        <BandSection
+          palette={palette}
+          onSheet
+          testID="tools-bands"
+          {...(view.note === undefined ? {} : { footnote: view.note })}
         >
-          <Text style={[typography.footnote, { color: palette.accent }]}>Refresh</Text>
-        </Pressable>
-        <View style={{ height: insets.bottom + 20 }} />
-      </Sheet>
-    </View>
+          {view.bands.map((band, index) => (
+            <Band
+              key={band.key}
+              palette={palette}
+              band={band}
+              first={index === 0}
+              onSwitch={onSwitch}
+              onToggle={onToggle}
+            />
+          ))}
+        </BandSection>
+      )}
+      <Pressable
+        testID="tools-refresh"
+        accessibilityRole="button"
+        onPress={onRefresh}
+        style={styles.refresh}
+      >
+        <Text style={[typography.footnote, { color: palette.accent }]}>Refresh</Text>
+      </Pressable>
+      <View style={{ height: insets.bottom + 20 }} />
+    </Sheet>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
   segments: {
     flexDirection: "row",
     marginHorizontal: space.inset,

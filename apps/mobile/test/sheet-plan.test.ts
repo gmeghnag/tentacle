@@ -48,6 +48,7 @@ import {
   sheetIdentity,
   sheetOptions,
   stackSignature,
+  userSheet,
   yieldForeign,
 } from "../src/sheet-plan.ts";
 import { DENSE_FONT_SCALE } from "../src/theme.ts";
@@ -201,6 +202,28 @@ describe("desiredStack — one user sheet, outbox above it, the ask on top", () 
     const all = desiredStack({ user: "info", outbox: true, permission: true });
     expect(all.filter((k) => k === "permission").length).toBe(1);
     expect(all[all.length - 1]).toBe("permission");
+  });
+});
+
+describe("userSheet — each of the three flags opens ITS sheet, one at a time", () => {
+  const off = { commands: false, tools: false, info: false } as const;
+
+  test("no flag, no user sheet", () => {
+    expect(userSheet(off)).toBeNull();
+  });
+
+  test("each flag alone names its own sheet (Tools and Info reach the stack)", () => {
+    expect(userSheet({ ...off, commands: true })).toBe("commands");
+    expect(userSheet({ ...off, tools: true })).toBe("tools");
+    expect(userSheet({ ...off, info: true })).toBe("info");
+    const user = userSheet({ ...off, tools: true });
+    expect(desiredStack({ user, outbox: false, permission: false })).toEqual(["tools"]);
+  });
+
+  test("two flags at once: the fixed precedence info > tools > commands", () => {
+    expect(userSheet({ commands: true, tools: true, info: false })).toBe("tools");
+    expect(userSheet({ commands: true, tools: false, info: true })).toBe("info");
+    expect(userSheet({ commands: true, tools: true, info: true })).toBe("info");
   });
 });
 

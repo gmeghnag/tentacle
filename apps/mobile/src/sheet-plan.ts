@@ -184,6 +184,33 @@ export function sheetGround(kind: SheetKind): SheetGround {
  */
 export type UserSheet = "commands" | "tools" | "info";
 
+/** The session screen's three open flags, one per user sheet. */
+export interface UserSheetFlags {
+  readonly commands: boolean;
+  readonly tools: boolean;
+  readonly info: boolean;
+}
+
+/**
+ * The ONE user sheet `desiredStack` gets from the screen's three flags. Every
+ * opener is reached from the session UI under no sheet, so two flags are not
+ * expected together. If they ever are, the precedence is fixed here:
+ * info > tools > commands. Info is the sheet the others link into, and Commands
+ * closes itself before anything it starts.
+ */
+export function userSheet(flags: UserSheetFlags): UserSheet | null {
+  if (flags.info) {
+    return "info";
+  }
+  if (flags.tools) {
+    return "tools";
+  }
+  if (flags.commands) {
+    return "commands";
+  }
+  return null;
+}
+
 /** What the session screen knows, in the form the stack is derived from. */
 export interface DesiredInput {
   /** The one user sheet that is open, if any. */

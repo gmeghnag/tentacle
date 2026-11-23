@@ -162,6 +162,7 @@ import {
   sheetHidden,
   sheetsOfSession,
   stackSignature,
+  userSheet,
   yieldForeign,
 } from "../sheet-plan.ts";
 import { dictationLocale } from "../speech-locale.ts";
@@ -1220,7 +1221,7 @@ export function SessionScreen({
   }, []);
   const hidden = sheetHidden(locked, appActivityState);
   const desired = desiredStack({
-    user: commandsOpen ? "commands" : null,
+    user: userSheet({ commands: commandsOpen, tools: toolsOpen, info: infoOpen }),
     outbox: decision !== null,
     // The ask is on screen while the sheet holds ONE, answered or not: a
     // `returned` reply still has words to read, and it is swipe-dismissible

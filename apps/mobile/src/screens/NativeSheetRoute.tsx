@@ -12,7 +12,6 @@
  * `sheetGround`, set by App.tsx's screen options) — already paints behind it.
  */
 import { type JSX, type ReactNode, useEffect, useMemo, useSyncExternalStore } from "react";
-import { StyleSheet, View } from "react-native";
 import { SHEET_HOSTS, sheetRouteView } from "../sheet-host.ts";
 import type { SheetKind } from "../sheet-plan.ts";
 
@@ -39,13 +38,8 @@ export function NativeSheetRoute(props: NativeSheetRouteProps): JSX.Element | nu
   if (view !== "draw") {
     return null;
   }
-  return (
-    <View testID={`native-sheet-${kind}`} style={styles.fill}>
-      {snapshot.content as ReactNode}
-    </View>
-  );
+  // No wrapper (F0): `Sheet native`'s head + scroller must be the route root's
+  // DIRECT children, or RNS sizes the scroller to the whole sheet and draws the
+  // list over the pinned head. The content's own root sits where a wrapper would.
+  return <>{snapshot.content as ReactNode}</>;
 }
-
-const styles = StyleSheet.create({
-  fill: { flex: 1 },
-});

@@ -1057,6 +1057,30 @@ is F0 for Tools/Info as S4 built them. The permission sheet is a single scroller
 2. L2: **approved** — the spike may run `osascript` to press ⌃⇧⌘H in Simulator.app and screenshot the app switcher.
 - **L2 (owner, 23/11 ~14:25):** `osascript` cannot drive Simulator.app from the agent process (`-1728`, no automation permission). Owner chose to verify L2 **on the real phone** during S6's Validation (as `docs/feat/mobile-lock.md` 0.4 accepted). Evidence so far: sheets drained ~1 s before `background`, the relaunch card shows only the lock, native blur on. If L2 fails on the device → alternative B (`eval/lock-own-window`). **Execution may start (S1–S6).**
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-23 (fixing Review round 1, both HIGH)*
+
+**F1 (HIGH): Tools and Session info never opened. FIXED.**
+- `src/sheet-plan.ts`: added `userSheet(flags)`. It is pure and turns the three open flags into the ONE user sheet. The fixed precedence is info > tools > commands. Every opener starts from the session UI with no sheet up, so two flags should not be set together; the precedence only makes the result deterministic if they ever are.
+- `src/screens/SessionScreen.tsx` (the `desiredStack` call): `user: userSheet({ commands: commandsOpen, tools: toolsOpen, info: infoOpen })`. It replaced `commandsOpen ? "commands" : null`.
+- Tests: `test/sheet-plan.test.ts` gets a new `userSheet` describe (each flag alone, desiredStack→`["tools"]`, precedence). `test/native-sheets-wiring.test.ts` (S3 wanted-stack test) now pins the three-flag leg.
+- **Red** on the old screen: `(fail) S3 … the wanted stack is desiredStack → managedStack…` with 138 pass / 1 fail. **Green:** 139 / 0.
+- **Mutation M-F1:** `if (flags.tools && false)` in `userSheet` gave 2 fail (`each flag alone…`, `two flags at once…`). Reverted.
+
+**F2 (HIGH): the composed tree broke F0 for Tools and Info. FIXED (source-level). The layout still needs a simulator check.**
+- `src/screens/NativeSheetRoute.tsx`: the route now returns `<>{snapshot.content as ReactNode}</>`. The `View testID="native-sheet-<kind>" flex:1` wrapper and its `StyleSheet` are gone. Nothing else referenced that testID: rg over `apps/mobile` found only this file, and no e2e flow uses it.
+- `src/screens/ToolsSheet.tsx` and `src/screens/SessionInfoSheet.tsx`: the `styles.root` wrapper `View` is removed, and `styles.root` with it. Each component now returns `<Sheet native scroll …>` directly, so `Sheet`'s head (`collapsable={false}`) and its ONE `ScrollView` become the route root's direct children. The `bg` ground still comes from the route's `contentStyle` (`sheetGround`). The rest of the diff in those two files is Biome re-indenting.
+- The other three kinds lose only the route's `flex:1` wrapper. Their own root now sits in the same column container, so a child with `flex:1` still fills it. This is unverified on a device; S6 Validation should look at it.
+- Tests: three new guards in `test/native-sheets-wiring.test.ts` under "S4 — … ONE scroller". The first checks that the route has no `<View` and returns the bare fragment. The other two check that each of Tools and Info has `return (\n    <Sheet`.
+- **Red** before the fix: 3 fail (route, Tools, Info), 52 pass. **Green:** 55 / 0.
+- **Mutation M-F2a:** wrapping the route's return in `<View style={{ flex: 1 }}>` gave 1 fail (`the route draws no wrapper`). Reverted.
+- **Mutation M-F2b:** wrapping Tools' `<Sheet` in `<View style={{ flex: 1 }}>` gave 1 fail (`Tools returns Sheet itself`). Reverted.
+
+**Checks run:** `sheet-plan`, `native-sheets-wiring`, `hub-tools-wiring` and `sheet-host` gave 162 pass / 0 fail. `tsc -p apps/mobile` is clean. `biome check` on the 7 changed files is clean. The full gate is left to the orchestrator's script.
+
+**Unverified:** these guards check the source shape. The real proof of F0 is S6's simulator check: open Tools and Session info, then confirm the list starts under the pinned head and the close glyph can be tapped.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-23 (fresh context; same model family as the S1/S2/S4/S5 executor, so shared blind spots are possible)*
