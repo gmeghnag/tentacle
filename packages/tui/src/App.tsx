@@ -1987,6 +1987,7 @@ export function App({
     clearPasteTimeout,
     insertReply: (text) => insertIntoReply(text),
     setReplyMode: permission.setMode,
+    approvalScroll: permission.setApprovalScroll,
     permissionSelect: permission.setSelected,
     permissionAnswer: permission.answer,
     permissionStop: () => {
@@ -2241,7 +2242,9 @@ export function App({
           selected: permission.selected,
           mode: () => permission.readMode(),
           shownAt: () => permission.shownAt(),
+          approvalScroll: () => permission.approvalScroll(),
         },
+        columns,
         sessions,
         detachOnQuit,
         // Live reads: the phase can move between two chunks in one tick.

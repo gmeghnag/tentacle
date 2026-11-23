@@ -39,7 +39,13 @@ import {
   toolResultText,
   userParts,
 } from "./images.ts";
-import { ModelRequestError, parseRetryAfter } from "./openai-provider.ts";
+import {
+  ModelRequestError,
+  ModelServerError,
+  inBandError,
+  inBandErrorFromText,
+  parseRetryAfter,
+} from "./openai-provider.ts";
 import { parseSSE } from "./sse.ts";
 
 /** Default Messages API version header (overridable for gateways). */
@@ -205,7 +211,11 @@ export class AnthropicProvider implements ModelProvider {
     /** The cache-hit part of the prompt, when the server reports one (docs/feat/token-usage-log.md). */
     let cachedPromptTokens: number | undefined;
 
-    for await (const data of parseSSE(res.body, request.signal)) {
+    for await (const item of parseSSE(res.body, request.signal)) {
+      if (item.field === "error") {
+        throw inBandErrorFromText(item.value);
+      }
+      const data = item.value;
       if (data.length === 0) {
         continue;
       }
@@ -300,7 +310,10 @@ export class AnthropicProvider implements ModelProvider {
           break;
         // In-band errors arrive as `type: "error"`, the kind in `error.type`.
         case "error":
-          throw new ModelRequestError(0, JSON.stringify(event.error ?? event).slice(0, 200));
+          throw (
+            inBandError(event) ??
+            new ModelServerError(JSON.stringify(event.error ?? event).slice(0, 200))
+          );
         default:
           break;
       }

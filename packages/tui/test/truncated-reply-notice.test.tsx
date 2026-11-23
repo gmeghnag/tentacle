@@ -274,3 +274,29 @@ describe("a stream cut with no stop reason (case 2) fails the turn loudly", () =
     }
   });
 });
+
+describe("a server-side error in a REMOTE session (docs/fix/model-stream-error.md)", () => {
+  test("shows the server's own words, no config hint, no cut line", async () => {
+    const createSession = () => ({
+      ...inertSession(),
+      // biome-ignore lint/correctness/useYield: the turn fails before any event.
+      async *send(): AsyncGenerator<AgentEvent> {
+        throw new Error("model server error: Context size has been exceeded.");
+      },
+    });
+    const app = render(<App createSession={createSession} model="remote" cwd="/tmp/work" />);
+    try {
+      await delay(30);
+      app.stdin.write("hi");
+      await delay(20);
+      app.stdin.write("\r");
+      await delay(200);
+      const last = app.lastFrame() ?? "";
+      expect(last).toContain("model server error: Context size has been exceeded.");
+      expect(last).not.toContain("tentacle config");
+      expect(last).not.toContain("cut before it produced");
+    } finally {
+      app.unmount();
+    }
+  });
+});

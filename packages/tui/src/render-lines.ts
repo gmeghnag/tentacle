@@ -155,8 +155,8 @@ function assistantLines(text: string): string[] {
   }
   const rendered = renderMarkdown(text).replace(/\n+$/, "");
   const [first = "", ...rest] = rendered.split("\n");
-  // A brand-accent bullet marks the reply; continuation lines hang under it.
-  return [`${theme.accent(BULLET)} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
+  // The reply's bullet has the reply text's colour (owner 2026-11-23); continuation lines hang under it.
+  return [`${BULLET} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
 }
 
 /**
@@ -701,7 +701,7 @@ function shellBodyText(text: string): string {
 /** A status-coloured bullet that opens a tool call. */
 function bullet(tool: ToolItem): string {
   if (tool.status === "running") {
-    return theme.accent(BULLET);
+    return theme.subtle(BULLET); // grey like the command it runs (owner 2026-11-23); blinks while running
   }
   if (tool.status === "queued") {
     return theme.subtle(BULLET); // unreachable: a queued row has its own header (`toolLines`)

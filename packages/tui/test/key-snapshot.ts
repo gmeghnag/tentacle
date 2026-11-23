@@ -8,6 +8,7 @@
  * `KeySnapshot` therefore breaks THIS file once, not every suite.
  */
 import type { Key } from "ink";
+import { NO_APPROVAL_SCROLL } from "../src/approval-scroll.ts";
 import type { KeySnapshot } from "../src/keys/snapshot.ts";
 
 export const NO_KEY: Key = {
@@ -44,6 +45,7 @@ export function snap(
     compacting: () => false,
     pasteBuffer: () => null,
     replyMaxChars: 0,
+    columns: 80,
     dockIds: () => [],
     othersOnSession: () => 0,
     sessionId: () => "s1",
@@ -65,6 +67,7 @@ export function snap(
       selected: 0,
       mode: () => ({ mode: "menu" }),
       shownAt: () => 0,
+      approvalScroll: () => NO_APPROVAL_SCROLL,
     },
     sessions: undefined,
     detachOnQuit: false,
