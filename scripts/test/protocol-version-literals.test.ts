@@ -26,9 +26,8 @@ const ALLOWED = new Map([
   ["scripts/test/protocol-bump.test.ts", "fixtures of a fake version.ts and a fake pin"],
 ]);
 
-/** One hit: the repo-relative path, the 1-based line and the matched text. */
+/** One hit: the 1-based line of the match start and its text, normalized. */
 interface VersionLiteral {
-  readonly path: string;
   readonly line: number;
   readonly match: string;
 }
