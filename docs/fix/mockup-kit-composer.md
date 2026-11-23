@@ -119,3 +119,15 @@ Premises: `Composer.tsx:257` accentSoft circles — not opened (style claim, see
 Executor behaviour: fixed the kit at the source (good), honest about approximations in the doc, but shipped without a test and bypassed a kit rule rather than surfacing it. Reviewer is the same model family as the executor (fresh context only).
 
 *— claude-opus-5-5, 2026-11-23*
+
+### Round 2
+
+**Verdict: APPROVE.** Reviewed `git diff HEAD~1` (11918d6b).
+
+- **Finding 1 (no regression test) — resolved.** 8 new tests (composer faces, `accentSoft` paint, `caption`/`composerParts`/`K.icon` throw, Polpetto = `pixels(stillFrame())`, inset/no-clip, unknown frame). Mutations, each reverted: `composerParts.plus` → bare `<span class="k-hit">+</span>` ⇒ 3 fail; `.k-circle` `background: var(--c-accent-soft)` removed ⇒ "painted accentSoft" fails; Polpetto `x="${r.x - x0}"` → `${r.x}` ⇒ "nothing clipped" fails.
+- **Finding 2 (calc(12 * 1px) evasion) — resolved.** `literalViolations` now matches `calc(N * 1px)`; the one blur is a named, exact-match entry in `APPROXIMATIONS` (`scripts/mockup-kit/kit-rules.ts:51`). Mutations: drop the calc regex ⇒ 2 fail; entry number 12→11 (CSS unchanged) ⇒ 3 fail (the literal resurfaces, and the "each is in the CSS" check fires).
+- Regressions: the exemption is an exact trimmed-declaration match (a different number or a dropped `saturate` is not exempt — pinned by the test); `calc(var(--m-x) * 1px)` is still allowed. Tree byte-identical after the mutations (`git status` clean).
+- Gate: kit tests 44 pass / 0 fail (2 files); `bun run lint` clean; `bun run typecheck` clean. Full `bun test` not re-run (kit-only diff).
+- Same model family as the round-1 executor-reviewer pairing caveat holds; round-2 executor was a different model (deepseek).
+
+*— claude-opus-5-5, 2026-11-23*
