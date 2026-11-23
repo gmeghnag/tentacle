@@ -1056,3 +1056,25 @@ is F0 for Tools/Info as S4 built them. The permission sheet is a single scroller
 1. Draining on `inactive` (so Control Center, a call banner or the Face ID prompt also close and re-open the sheets visibly): **accepted** — the price of never showing content in the app-switcher snapshot.
 2. L2: **approved** — the spike may run `osascript` to press ⌃⇧⌘H in Simulator.app and screenshot the app switcher.
 - **L2 (owner, 23/11 ~14:25):** `osascript` cannot drive Simulator.app from the agent process (`-1728`, no automation permission). Owner chose to verify L2 **on the real phone** during S6's Validation (as `docs/feat/mobile-lock.md` 0.4 accepted). Evidence so far: sheets drained ~1 s before `background`, the relaunch card shows only the lock, native blur on. If L2 fails on the device → alternative B (`eval/lock-own-window`). **Execution may start (S1–S6).**
+
+## Review
+
+*— claude-opus-5-5, 2026-11-23 (fresh context; same model family as the S1/S2/S4/S5 executor, so shared blind spots are possible)*
+
+**Verdict: REQUEST-CHANGES** (scope: S1–S5, `git diff main...HEAD`).
+
+Gate as run by me: `bun run typecheck` clean (root + mobile + relay); `bun run lint` clean (2324 files, 0/0); the touched suites (`sheet-plan`, `sheet-host`, `native-sheets-wiring`, `app-lock`, `permission-sheet`, `commands-sheet`, `band-wiring`, `band-screens`, `hub-tools-wiring`, `client/foreign-turns`) → 323 pass / 0 fail. Full `bun test` not run here.
+
+**Findings**
+
+1. **HIGH — Tools and Session info can never open.** `apps/mobile/src/screens/SessionScreen.tsx:1222-1229`: `desiredStack({ user: commandsOpen ? "commands" : null, … })` never names `"tools"` or `"info"`, even though `toolsOpen`/`infoOpen` are set (`:1077`, `:1097`) and S4 removed both `<Modal>`s and added both kinds to `PRESENTED_SHEET_KINDS`. So `reconcile` never pushes them. *Scenario:* tap the Tools glyph or the hub's Session info → `setToolsOpen(true)` → nothing appears (only the floating button hides, `:1048-1050`). Every e2e flow on `tools-sheet` / `session-info-sheet` (25, 29, 34-hub-*) breaks, and so does the reveal-at-L path. No test catches it: the wiring suite pins the `commands` leg literally (mutating it to `user: null` → 1 fail), but no tools/info leg exists to pin. Fix: derive `user` from all three flags (one user sheet, in a precedence order the pure module decides) and add a red-first wiring/pure test.
+2. **HIGH — F0 layout shape is broken for the `Sheet native` sheets (Tools, Info).** `NativeSheetRoute.tsx:42-45` wraps the content in `<View testID="native-sheet-…" style={flex:1}>`, and `ToolsSheet.tsx:122` / `SessionInfoSheet.tsx:371` wrap `Sheet` in another `styles.root` `View`. `Sheet native`'s two-child fragment (`ui/Sheet.tsx` native branch) is therefore two levels below the route root, which is exactly the F0 failure Step 0 recorded (RNS sizes the ScrollView to the whole sheet, so the list is drawn over the pinned head and the close/segments/search can't be tapped). The S5 executor flagged this and left it open. Mutation M3 (S4) checks only `Sheet.tsx`, so the source guards pass while the composed tree breaks F0. Fix: render the content as the route root's direct children (no wrappers on the native path) and pin the composed shape in a test.
+
+**Attacks tried (and what came of them)**
+- Lock drain: it pops every key in one pass, marks them planned, and only spends the pops that landed (`:1367-1376`, `:1433-1439`). With `locked` taken from `lockInstance.subscribe`, it holds. No finding.
+- Lower-sheet pop (F4): `reconcile` is top-only, and the user-close path waits for the permission sheet above it. No finding.
+- Double-close / Session pop: `popSheet` and `updateSheetParams` are keyed on `source`. No `goBack(` in sheet code. No finding.
+- Single broker (§7): the `PermissionSheet` object is unchanged. `requestId` is process-internal (core/client) and never reaches the wire. No finding.
+- Mutation: `user: null` → 1 fail. Reverted, and `git status` is clean.
+
+**Executor behaviour:** thorough mutation tables per slice and honest drift notes. But S4 shipped the Modal removal without the `desiredStack` leg that replaces it, and the F0 regression was noticed in S5 and deferred instead of being called a blocker. The guards check each file on its own, not how the files compose.
