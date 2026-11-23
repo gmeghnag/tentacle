@@ -242,3 +242,4 @@ includes the user's text in that message.
 *— claude-opus-5-5 (orchestrator), recording the owner, one question at a time*
 
 1. **Supersede pdf-images S3 with `feat/image-view`: YES** («assolutamente d'accordo»). The (a)/(b) cap decision and its protocol bump are dropped.
+2. **Old user images on demand after N = 2 turns (slice 2): YES** («assolutamente, queste scelte di ottimizzazione sono quello che fa la differenza»). The current turn's images stay always-sent; the log is untouched (request projection only).
