@@ -187,3 +187,44 @@ No protocol schema change, so no `protocol.d/` note.
 - **Q1 (TUI): scroll, but Yes is ALWAYS allowed** — owner: «Devo poter premere yes anche senza averla vista tutta». So: the TUI dialog shows the WHOLE list (no 10-row cap, no per-row cut: long commands wrap), scrollable (PgUp/PgDn/Space) when taller than the dialog, with a visible «N more lines below» hint; NO gate on y/Enter.
 
 **Implementation APPROVED with these owner deltas** (they override the Design where it differs): (1) daemon: no cut; > 16 000 chars of approval list ⇒ the workflow is invalid (validator error naming the size), never asked; (2) TUI: whole list, wrapped, scrollable, Yes always allowed; (3) NO change to push/lock screen/Live Activity (drop those slices and their tests). Size back to S–M.
+
+### Adversarial review (fresh context)
+
+*— claude-opus-5-5, 2026-11-23* (same model as the planner/orchestrator, so blind spots may be shared; the executor was DeepSeek)
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings in `git diff main...HEAD`.
+
+**Gate (re-run by me):** the full `bun test` gives 17122 pass / 5 skip / 0 fail (1211 files). The branch adds no skip, so the 5 are pre-existing opt-ins. Touched suites: 195 pass / 0 fail. `bun run lint` is clean (2316 files). `bun run typecheck` is clean (root + mobile + relay).
+
+**Mutation check (§9).** I applied three mutations together, then reverted them by copying the files back from `.tentacle/tmp/workflow-approve-detail/`. `git status` was clean afterwards.
+- Driver hash ask cut to `slice(0, 2000)`: fails "the hash ask carries the WHOLE list…".
+- View `wrapCells` → `truncateCells`: fails "a long command is drawn in full", "a narrow terminal wraps MORE rows", and the App suite's paging to LAST.
+- `execute.ts` swallows the `approvalScroll` effect: 3 App-suite tests fail.
+
+In all, 6 tests failed under the three mutations, and each failure points at the hop it guards.
+
+**Premises checked:**
+
+| Premise | Result |
+| --- | --- |
+| The wire does not cut `explanation` (`toPermissionRequest` copies it 1:1) | TRUE |
+| The validator bound runs inside `errors.length === 0`, after the step checks (`workflow-spec.ts` ~:795) | TRUE |
+| The approve-step `detail` is passed raw and is bounded at 2000 by validation | TRUE |
+| Space and `b` have no meaning in menu mode (`stepPermissionKey` returns `NONE` for them; reply opens only on `t`/Enter) | TRUE |
+
+So routing these keys to the scroll shadows nothing. Blank rows render as `" "` plus the line, so the Ink empty-`<Text>` gotcha cannot hit.
+
+**Attacks tried:**
+1. *Single broker / RPC path* (§7): untouched. Only the view and key layer changed, and the answer still goes through `permissionAnswer`. Holds.
+2. *Layout vs paint drift*: the layout, the prompt and the key layer all call the same `permissionView(…, scroll)`, and the dialog stays at most `MAX_DETAIL_ROWS` tall. The App test asserts the frame height. Holds.
+3. *Scroll leaking across requests*: the scroll is reset at all three sites, together with `shownAt`, and the mutation evidence covers this. Holds.
+4. *Reply-mode Space*: the scroll is gated on `mode === "menu"`. Holds.
+5. *Hostile pod with a huge `explanation`* (LOW, not blocking): `wrapCells` now walks the whole detail on every render and keypress. Before, the work was bounded at 10 lines. A pod could make the TUI slow, but it cannot hide or cut anything. An untrusted pod already has other ways to flood the TUI.
+
+The following are owner decisions, not findings:
+- The lock screen and Live Activity can still approve without showing the list.
+- There is no read-to-the-end gate on `y`.
+
+**Pre-existing (not this diff):** commands are shown without stripping control or ESC characters. The shell branch behaves the same way. A follow-up could check whether a `run:` containing `\r` or `ESC[2K` can visually hide part of a command.
+
+**How the executor behaved:** it followed the owner deltas faithfully and recorded the drift honestly (the gate dropped, `seen` removed, the height growth reverted). The evidence for each mutation is specific and reproduced here. It missed one stale fixture (`app-layout.test.ts`), which the orchestrator fixed.
