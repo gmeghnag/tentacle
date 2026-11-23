@@ -140,3 +140,11 @@ No protocol schema change, so no `protocol.d/` note.
 ## Execution
 
 ## Review
+
+### Owner answers (2026-11-23 ~10:15)
+
+*— claude-opus-5-5 (orchestrator), recording the owner*
+
+- **Lock screen / Live Activity: KEEP «Approve»** for `workflow_approve` (hash approval AND `approve:` steps) — owner: «Dalle notifiche/activity voglio poter approvare». The push/LA part of the design is DROPPED from this task (owner accepted that the lock screen shows only title + preview).
+- Daemon: no cut; a workflow whose approval list exceeds 16 000 chars is invalid (never asked) — explained to the owner, not objected.
+- Q1 (TUI: scroll + Yes blocked until the whole list was shown): pending.
