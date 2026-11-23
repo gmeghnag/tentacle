@@ -243,3 +243,27 @@ prove Fix A (no APNs token; `push-placeholder` is quarantined), and the
 `gone`-reason audit remains deferred (note C2). Verify Fix A on the owner's
 phone with one `build.sh` archive — `serve.log` must show
 `push-registered a3b1d932 sandbox`, and a banner must arrive with no `push-gone`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-23* (fresh context; SAME model as the executor and planner — shared blind spots possible)
+
+**Verdict: APPROVE** — no HIGH/MEDIUM findings. Scope: `git diff main...HEAD` only.
+
+**Gate (narrow, as instructed):** the 6 touched test files → 82 pass / 0 fail; `bun run lint` clean (2313 files); `bun run typecheck` clean (root + mobile + relay). Full `bun test` not run here (orchestrator's gate).
+
+**Mutations (run, reverted, `git status --porcelain` empty after):**
+1. `planPushRegistration` dedupe `state.registeredHash` → `input.last?.hash` ⇒ 3 fail (heal-on-launch, Keychain-only fingerprint, manager relaunch).
+2. `pushEnvironmentOfAps(null)` → `sandbox` ⇒ 1 fail (store-build row).
+3. `push-registered` audit hard-coded `production` instead of `params.env` ⇒ 1 fail.
+
+**Attacks tried:**
+- *Toggle off → on in the same process skips `same` and never re-registers?* No: the off path `set({ enabled: false, phase: "off" })` (`push-registration.ts:466`) drops `registeredHash`, so the next on registers. Holds.
+- *Is the in-process hash secretly seeded from the Keychain (vacuous fix)?* No: `push-manager.ts:239` initial state carries no `registeredHash`; it is set only on an `on` answer (`push-registration.ts:322`). Holds.
+- *`expo-application` uses `requireNativeModule` (throws at import), so a JS bundle on a binary without the native module would crash at load, outside the `try` in `signedPushEnvironment`.* Not reachable: no `expo-updates`/OTA in `apps/mobile` — JS always ships with its native build. Note only.
+- *§7 trust/persistence:* the audit line carries only id8 + env (no token/key); pod/worker daemons throw `MethodNotFound` before it; no wire/on-disk format change, so no `protocol.d/` note needed. Holds.
+- *Reconnect storm / dead token:* one register per launch (heal test asserts 1 across 3 syncs); a truly dead token costs one `gone` per launch — bounded, recorded as debt. Accepted.
+
+**What does not hold / is unverified:** Fix A can only be proven on a device (no APNs token on the simulator); the `push-gone <reason>` half of Fix C is deferred (note C2), and that deferral is justified (`relay-link.ts` drops the reason). A loss *within* one long-lived app process heals only at the next launch — by design.
+
+**Executor behaviour:** stuck to the plan, stopped and fixed the plan (C2) instead of forcing the code, inverted the two tests that pinned the bug as intended behaviour (it did not delete them), and recorded red evidence and its mutations honestly.
