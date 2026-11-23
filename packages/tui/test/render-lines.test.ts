@@ -22,6 +22,7 @@ import {
   wrapLines,
 } from "../src/render-lines.ts";
 import type { DisplayItem, ToolItem } from "../src/state.ts";
+import { theme } from "../src/theme.ts";
 import { FIXTURES } from "./chart-fixtures.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -49,6 +50,13 @@ describe("itemLines", () => {
     const lines = itemLines({ kind: "assistant", text: "hello **world**" }, opts).map(strip);
     expect(lines.join("\n")).toContain("hello");
     expect(lines.join("\n")).toContain("world");
+  });
+
+  test("the reply's bullet has the reply text's colour (owner 2026-11-23), not the accent", () => {
+    const first = itemLines({ kind: "assistant", text: "plain reply" }, opts)[0] ?? "";
+    // The row opens with the bare bullet: no SGR colour before it, as the text has none.
+    expect(first.startsWith("● ")).toBe(true);
+    expect(first).not.toContain(theme.accent("●"));
   });
 
   test("skips an empty assistant item", () => {
