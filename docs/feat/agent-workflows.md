@@ -1452,3 +1452,138 @@ narrowed to "not resumable, start a new run". That narrows owner decision 4, so 
 to OK it before merge.
 
 *— claude-opus-5-5, 2026-11-22*
+
+### Slice 7–8 — PARTIAL: the pure modules shipped; the screens have no data path (the slice-6 wall, again)
+
+*— claude-opus-5-5, 2026-11-23*
+
+**Load-bearing check re-run first (as instructed), before any edit.**
+
+1. **A1–A3 (the assumptions every slice stands on) still hold** —
+   `.tentacle/tmp/agent-workflows/lb-a1a3.ts`:
+   `createSubagentRunner` exported `true`, returns `{run,types,readOnlyType}` `true`,
+   `maxTokens` knob `true`, `extraTools` knob `true`, wiring hands `run(opts, controls)` to
+   `createTaskTool` `true`; `spawnTurns.set` `true`, background asks re-offered on attach `true`,
+   workflow driver wired daemon-side `true`; `workflow_start/step/end` in the log `true`.
+   (The only `false` rows are export names I guessed — `subagentLoadNotes`/`workflowLoadNotes` are
+   not exported from `core/src/index.ts` under those names; slices 3–4 landed them elsewhere.
+   Nothing slices 7–8 read depends on that.)
+2. **The check that governs slices 7–8 — D5's client path — FAILS.**
+   `.tentacle/tmp/agent-workflows/lb-78.ts`, on this branch tip:
+
+   ```
+   1. A ROWS source on the client (workflow/list)
+      RemoteClient.workflowList()      : false
+   2. A DETAIL source on the client (session/log)
+      RemoteClient.readLog (public)    : false
+   3. The `workflows` UPDATE reaching client state
+      RemoteClient.workflowsOf()       : false
+      RemoteClient.onSessionWorkflows  : false
+      RemoteSession.onWorkflows        : false
+      RemoteSession.workflows (getter) : false
+   4. Sending session/workflow (approve/stop/rerun from the phone)
+      RemoteClient.workflow()          : false
+      RemoteSession.workflow()         : false
+   6. What the wire DOES carry (so it is only the client that drops it)
+      snapshot SessionOpenResult.workflows: true
+      daemon answers workflow/list       : true
+      mapping.ts turns `workflows` into  : case "workflows":  (→ null, discarded)
+   7. Step DETAIL exists on the row?
+      WorkflowStepRowSchema carries prompt/report: false
+   ```
+
+   The wire, the daemon and the schemas are all in place (slice 3). What is missing is exactly
+   what slice 6a was split out to add and was never built: **the client never keeps a run and
+   never exposes it.** `mapping.ts:391` returns `null` for `workflows`; `RemoteClient` has no
+   `workflowsOf`/`onSessionWorkflows` (its sibling `subagentsOf`/`onSessionSubagents` **do**
+   exist — the shape to mirror is there); `RemoteSession` has neither a getter nor a listener;
+   no public method sends `session/workflow`; and the private `readLog`/`call` are unreachable
+   from the app, so D5's "read the detail on demand from `session/log`" has no
+   phone-reachable form either (worse: `WorkflowStepRowSchema` carries no `prompt`/`report`
+   at all, so even with `session/log` the detail is not on that wire).
+
+**Why I stopped at the screens rather than writing them — a judgement call, not a hard block.**
+The screens ARE in slices 7–8's approved file list, so the owner's binding rule did not forbid
+them; I chose not to write them, for reasons the owner can overrule cheaply:
+
+- Nothing could mount them. `App.tsx` (where `Stack.Screen` is registered) is NOT in the list, and
+  `routes.ts` is — so a route would name a screen no navigator ever renders. That is the slice-6
+  failure again, one layer up.
+- They cannot be tested. React Native's sources are Flow, so a `.tsx` screen is unimportable from
+  Bun (`test/hub-tools-wiring.test.ts` says so in its own header); every screen here is pinned
+  only by a source-reading test. Writing ~600 lines of untestable, unmountable UI is the opposite
+  of §9.
+
+What the screens would need is the missing data path, which lives in
+`packages/client/src/{remote-client,remote-session,mapping}.ts`,
+`packages/cli/src/local-runtime.ts`, `apps/mobile/src/session-screen-controller.ts` and
+`apps/mobile/App.tsx` — **all outside the approved file list**. That, not the screens, is the
+hard block.
+
+**What DID ship (complete, tested, mutation-checked).** The four pure modules — the whole
+decision surface of both slices — because they take wire-shape-typed input and a clock, and are
+therefore true and testable before any plumbing exists:
+
+| File | Lines | What it decides |
+|---|---|---|
+| `apps/mobile/src/workflow-list.ts` | 273 | the Elenco's rows, sections, step strip, `needsUser`; a wire state → glyph + word + tone |
+| `apps/mobile/src/workflow-graph.ts` | 264 | the 2C drawing: pill boxes, curved edges, the loop pair read from `round`/`maxRound`, the header, tap hit-testing |
+| `apps/mobile/src/workflow-morph.ts` | 247 | the node→detail morph: one `progress` → every inner part, the graph's fade, the row clock, the crossfade choice |
+| `apps/mobile/src/workflow-skeleton.ts` | 263 | the detail's loaded layout and its skeleton bars, from ONE `detailBlocks` so the two cannot drift |
+
+Two plan claims the code refuted, reconciled in the modules (not in the plan text, since the plan
+is the owner's):
+
+1. **The mockup places the loop by step id** (`s.id === "review"` / `"fix"`,
+   `diagram.html:205`). That is the mockup's fixture, not a rule: a workflow may name them
+   anything. The graph places the pair from the wire's own goto fact — the step ENTERED through
+   `on_fail` carries `round`/`maxRound` (`workflow-driver.ts:610-611`), the step it left does not.
+   Pinned by a test that renames the pair `critique`/`patch` and by mutation M4 (id-matching it
+   turns the test red).
+2. **A fixed row stagger cannot fit inside the flight.** The mockup's own timings (fade from
+   120 ms for 260 ms, over a 380 ms flight) put the block's settle at 380 ms+; my first cut
+   derived the rows from the same 0..1 `progress` and a 12-row detail's last rows then never
+   arrived. The rows got their own millisecond clock (`rowStartMs`/`rowOpacityAt`/`rowsSettledMs`)
+   and `MorphFrame` carries no `rows` field any more — a stale field would invite the same bug
+   back.
+
+**Tests** (red first — each was written before the code path it exercises, and the two that did
+not hold were fixed in the code, not the assertion): `apps/mobile/test/workflow-list-graph.test.ts`
+(24 tests) and `apps/mobile/test/workflow-morph-skeleton.test.ts` (23 tests) → **47 pass, 0 fail**.
+They cover the plan's S7–S8 rows verbatim (list rows / `needsUser`; graph geometry; monotone
+frames with no property jumps; skeleton boxes equal to the loaded boxes; reduce-motion →
+crossfade) plus the failure modes a mockup cannot state: 64 steps without overlap, an unknown
+state never coerced, an absent field absent rather than empty, NaN progress, a ragged tail that
+does not re-randomise, untrusted pod bytes flattened.
+
+**Mutations** (`.tentacle/tmp/agent-workflows/mut78.sh`, each on the mutated code then restored,
+`git status` clean after):
+
+| # | Mutation | Tests failing, mutated | After restore |
+|---|---|---|---|
+| M1 | the badge snaps instead of interpolating | 2 | 0 of 47 |
+| M2 | the skeleton lists other rows than the loaded view | 2 | 0 of 47 |
+| M3 | Reduce Motion no longer picks the crossfade | 1 | 0 of 47 |
+| M4 | the loop is placed by the mockup's ids | 1 | 0 of 47 |
+| M5 | pills compressed into overlapping rows | 2 | 0 of 47 |
+| M6 | an unknown state coerced into `waiting` | 2 | 0 of 47 |
+
+**What remains, and the specific decision needed.** Slices 6a and 7–8's screens are ONE
+plumbing task, and the plan should say so. Proposed split (replacing the slice-6 STOPPED row and
+the screens row of 7–8):
+
+| # | Slice | Size · Blast | Files |
+|---|---|---|---|
+| 6a | Client plumbing for runs — `workflows` listener + entry state + snapshot hydrate mirroring `subagents`; `RemoteSession.onWorkflows`/`workflows()`/`workflow(action, …)`; `workflowList()`; a phone-reachable detail read | M · **cross-module** (persistence/protocol client path) | `packages/client/src/{remote-client,remote-session,mapping}.ts`, `packages/cli/src/local-runtime.ts`, `packages/tui/src/{app-types,useSessionLink}.ts`, and (phone) `apps/mobile/src/session-screen-controller.ts` + `App.tsx` |
+| 7b/8b | The screens, on 6a's types — Elenco, 2C⇄2A, approve buttons, the morph + skeleton | M · contained | `apps/mobile/src/screens/Workflow*.tsx`, `routes.ts`, `hub-actions.ts` |
+
+Also needed before the detail can show anything (D5's "read on demand" is not implementable as
+written): `prompt` and `report` are NOT on `WorkflowStepRowSchema`; they live only in
+`workflow_step` log entries (`session-log.ts`). So either the step row grows two bounded fields
+(display-class, free) or the phone reads the log — which is a second, larger decision.
+
+**Gate.** Not run here (the orchestrator's script runs `bun run check`). The two touched test
+files: 47 pass, 0 fail. New files: none outside the approved list except the two test files.
+Changelog: none added — both slices' user-visible effect (a phone that lists and shows runs) is
+NOT delivered, and a fragment claiming it would be false; the existing
+`changelog.d/agent-workflows.added.md` already covers the wire and the `run` step.
