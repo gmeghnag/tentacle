@@ -175,7 +175,7 @@ steps:
     next: review
   - id: gate
     run: bun run check
-    where: { docker: tentacle-ci }   # local (default) | { docker: <container> [, container: <c>] }
+    where: { docker: tentacle-ci }   # local (default) | { docker: <container> }
     timeout: 20m
   - id: merge
     approve: { title: "Merge {{inputs.slug}} into main" }
@@ -468,7 +468,8 @@ with no new dependency. Capability missing, as expected for a feat.
 - Rules implemented exactly as D1: `schemaVersion` refused first (unknown → one
   message, file untouched), `[a-z0-9-]` ids and name, name == file stem, exactly one
   kind per step, `retry 0..5`, `on_fail stop|{goto,max 1..10}`, `next` overrides
-  fall-through, agent steps `local` only, `where: local|{docker[,container]}`,
+  fall-through, agent steps `local` only, `where: local|{docker}`,
+  a docker target refuses `container` (no sub-containers — fix round 1),
   durations `30s|20m|12h`, `approve.title ≤ 200` / `detail ≤ 2000`, template
   references (`{{inputs.k}}`, `{{steps.id.reason|report}}`) validated against the
   declared inputs and step ids.
@@ -1102,6 +1103,80 @@ Tests for 6a:
 - `workflow{start}` mints the `turnId` as `session/prompt` does, and a `wake-` id is refused.
 
 *— claude-opus-5-5, 2026-11-23*
+
+### Fix round 1 (slices 5–9)
+
+Scope: the two findings of **Review — slices 5–9**. Each was shown red on the assertion of
+the property before the fix, then mutation-checked. Scratch:
+`.tentacle/tmp/agent-workflows/mut-fix1r1.ts` (apply one mutation, run only the pinning file,
+restore byte for byte; kept in `.tentacle/`, so it is not committed).
+
+- **#1 HIGH — a `run` step executed the ORIGINAL command, not the input the gate approved.
+  FIXED.**
+  `WorkflowCommands.authorize`'s allowed branch now carries `{command: string; target?}`
+  (`agent/src/workflow-driver.ts:143-154`) — mandatory, so a build cannot forget it — and
+  `runCommand` runs `authorized.command` / `authorized.target` instead of `action.text` / the
+  step's own target (`:991-992`, `:999`, `:1022`). `cli/src/wiring.ts` builds those from
+  `outcome.input` through the TOOL'S OWN schema (`readApprovedCall`, `:537-575`) — the same
+  schema the agent loop would validate a hook rewrite with — and refuses the step when the
+  approved input is unparseable, names no command, or names a target a `run` step cannot
+  express (`:882-906`). **No fallback to the file's text or target on any of those paths:**
+  silently running the original is exactly the mismatch being fixed. `WorkflowContainerTarget`
+  loses `container` (a docker target has none, see #2), which also removes the `docker:name/c`
+  label — nothing could produce a container for it any more.
+  *Tests (red first, both layers):*
+  - `agent/test/workflow-driver.test.ts` — "the APPROVED command runs, never the file's"
+    (red: ran `rm -rf /work`, expected `echo blocked`) and "the approved TARGET is where it
+    runs" (a rewrite retargets the workload).
+  - `cli/test/workflow-wiring.test.ts` — a REAL `PermissionGate` + a REAL `HookRunner` over a
+    `tool_call` hook that rewrites the input, through a real `buildAgent`: "a hook's
+    rewritten command is the one that runs, and the one that was asked" (the ask showed
+    `echo rewritten`, and the step ran it — `make test` exits 127 there), "a rewrite that
+    drops the command is refused" (`shell` at its schema, `workload_shell` at the gate's own
+    guard, since its schema allows an absent `command`), and "a rewrite that retargets the
+    step elsewhere is refused" (a pod target parses but a `run` step cannot express it).
+- **#2 MEDIUM — the spec accepted `{docker: x, container: y}`, which the seam can never run.
+  FIXED.** `core/src/workflow-spec.ts` `readWhere`: a docker target refuses `container`
+  outright (before the generic unknown-key refusal, so the message says why), and
+  `WorkflowWhere`'s docker arm no longer has the field. So the file is refused at load, with
+  its YAML path, before any hash approval or ask — restoring failure-mode row 1. *Test:*
+  `core/test/workflow-spec.test.ts` "a docker target naming a sub-container is refused before
+  any ask" (red: the fixture was accepted).
+
+**Drift from the Implementation.** None in Design; two consequences worth stating. (a) The
+`authorize` contract got *narrower* (an allowed answer must carry the command), which is a
+breaking change to an internal seam — every fake in the repo was updated, and no wire/log
+format moved, so no `protocol.d` note. (b) The reviewer's suggested fix "drop the field" was
+taken literally for the TYPE (`WorkflowWhere`, `WorkflowContainerTarget`), while the PARSER
+still recognizes the key in order to refuse it with a better sentence than "does not know
+container" — a removal without that would fall through to the unknown-key branch and lose the
+reason.
+
+**Narrow gate.** Touched + covering files: **265 pass / 0 fail across 16 files** (the three
+workflow suites, `workflow-ledger`, `workflow-hosted`, `workflow-load`, `workflow-approvals`,
+`wiring`, `workload-shell-wiring`, `workload-shell`, `hooks`, `permission`,
+`workflow-mapping`, `workflow-wire`, `workflow-approve-choices`, `changelog`).
+`tsc --noEmit` clean on the whole repo; `biome check` clean on the 6 touched files;
+`changelog.d/agent-workflows.fixed.md` passes the fragment gate. The full `bun run check` is
+the orchestrator's script's.
+
+**Mutations (mine, reverted, tree clean).**
+```
+red OK   H1a driver runs action.text          27 pass 1 fail
+red OK   H1b driver uses the file's target    27 pass 1 fail
+red OK   H1c wiring ignores outcome.input     9 pass 1 fail
+red OK   H1d wiring falls back to the file's  8 pass 2 fail
+red OK   H1e wiring ignores a bad target      9 pass 1 fail
+red OK   M2a spec accepts docker+container    47 pass 1 fail
+```
+
+**Left / debt (one line each).** A `run` step's refused-dial path still reports the seam's
+sentence, not a `where`-qualified one — unchanged by this round and out of its scope. Nothing
+pins the case where a hook rewrites a LOCAL step's command to a string the `shell` schema
+accepts but the env rejects (the exec error already fails the step honestly).
+
+*— Claude (Claude Code agent, build `claude-code_2-1-325`), 2026-11-23 — exact model id not
+self-verifiable from inside the session; the orchestrator's run record holds it.*
 
 ## Review
 

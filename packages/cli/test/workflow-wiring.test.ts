@@ -69,6 +69,127 @@ describe("workflow wiring", () => {
   });
 });
 
+describe("a `run` step runs what the GATE approved (fix round 1, HIGH)", () => {
+  /** A backend that records a dial: the refusal tests must never reach it. */
+  let dialled = false;
+  const dialledOnce: WorkloadShellBackend = {
+    open() {
+      dialled = true;
+      throw new Error("not dialled in this test");
+    },
+    oneShot() {
+      dialled = true;
+      throw new Error("not dialled in this test");
+    },
+    async explain(error: unknown) {
+      return error instanceof Error ? error : new Error(String(error));
+    },
+  };
+  /**
+   * A real build, a real `PermissionGate`, a real `HookRunner`: the `shell` hook
+   * below rewrites the input (`{"input": {"command": …}}`), which
+   * `PermissionGate.authorize` shows in the ask and returns as `outcome.input`.
+   * The step must run THAT command — the file's `make test` would exit 127 here.
+   */
+  async function rewrittenRun(hookCommand: string, options: { readonly docker?: boolean } = {}) {
+    const configDir = join(dir, "config-hook");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, "config.jsonc"),
+      JSON.stringify({
+        hooks: [{ event: "tool_call", matcher: "shell|workload_shell", command: hookCommand }],
+      }),
+    );
+    await mkdir(join(dir, "workflows"), { recursive: true });
+    await writeFile(
+      join(dir, "workflows", "rewrite.yaml"),
+      `schemaVersion: 1\nname: rewrite\nversion: 1\nsteps:\n  - id: gate\n    run: make test\n${options.docker === true ? "    where: { docker: devbox }\n" : ""}`,
+    );
+    const saved = process.env.TENTACLE_CONFIG_DIR;
+    process.env.TENTACLE_CONFIG_DIR = configDir;
+    let configWithHook: TentacleConfig;
+    try {
+      configWithHook = await loadConfig({ cwd: dir });
+    } finally {
+      if (saved === undefined) Reflect.deleteProperty(process.env, "TENTACLE_CONFIG_DIR");
+      else process.env.TENTACLE_CONFIG_DIR = saved;
+    }
+    const asks: PermissionRequest[] = [];
+    const broker = new PermissionBroker(async (req) => {
+      asks.push(req);
+      return { allowed: true };
+    });
+    const wired = buildAgent(
+      { ...configWithHook, workloadShell: { ...configWithHook.workloadShell, tool: true } },
+      {
+        workflows: true,
+        permissions: broker,
+        ...(options.docker === true ? { workloadShell: { backend: dialledOnce } } : {}),
+      },
+    );
+    let rows: readonly WorkflowRow[] = [];
+    const done = new Promise<void>((resolve) => {
+      wired.workflows?.bind({
+        logStart: () => {},
+        logStep: () => {},
+        logEnd: () => {},
+        attribute: () => {},
+        release: () => {},
+        publish: (r) => {
+          rows = r;
+        },
+        ended: () => resolve(),
+      });
+    });
+    const started = await wired.workflows?.start({ name: "rewrite", by: "user" });
+    expect(started?.ok).toBe(true);
+    await done;
+    return { asks, step: rows[0]?.steps[0] };
+  }
+
+  test("a hook's rewritten command is the one that runs, and the one that was asked", async () => {
+    const { asks, step } = await rewrittenRun('printf \'{"input":{"command":"echo rewritten"}}\'');
+    // The ask showed the REWRITE (never the file's original command)…
+    const toolAsk = asks.find((a) => a.kind !== "workflow_approve");
+    expect(toolAsk?.tool).toBe("shell");
+    expect(toolAsk?.input).toMatchObject({ command: "echo rewritten" });
+    // …and the rewrite is what ran: `make test` would have exited 127 here.
+    expect(step?.state).toBe("ok");
+    expect(step?.reason).toBe("exit 0");
+  });
+
+  test("a rewrite that drops the command is refused, never run as the file's own", async () => {
+    // `shell` refuses that rewrite at its own schema (the command is required)…
+    const local = await rewrittenRun('printf \'{"input":{"action":"close"}}\'');
+    expect(local.step?.state).toBe("error");
+    expect(local.step?.reason).toContain("unusable");
+    // …and `workload_shell` lets `command` be absent (its other actions take
+    // none), so the rewrite PARSES there: the gate's own guard must refuse it,
+    // because the file's command was never what was approved.
+    const container = await rewrittenRun(
+      'printf \'{"input":{"action":"close","target":{"engine":"docker","name":"devbox"}}}\'',
+      { docker: true },
+    );
+    expect(container.step?.state).toBe("error");
+    expect(container.step?.reason).toContain("names no command");
+    // Never dialled: the refusal happens before any exec.
+    expect(dialled).toBe(false);
+  });
+
+  test("a rewrite that retargets the step elsewhere is refused, never the file's own", async () => {
+    // A `run` step's `where` is `local | {docker}` only, so a rewrite naming a
+    // pod parses (the tool supports it) but cannot run as a step. Reading that
+    // as "no target" would dial the FILE's `devbox` instead — the same mismatch.
+    const { step } = await rewrittenRun(
+      'printf \'{"input":{"action":"run","command":"echo elsewhere","target":{"engine":"kubernetes","name":"pod"}}}\'',
+      { docker: true },
+    );
+    expect(step?.state).toBe("error");
+    expect(step?.reason).toContain("target is unusable");
+    expect(dialled).toBe(false);
+  });
+});
+
 describe("run steps in a container (Slice 5)", () => {
   test("only a kill / lost / exited notice fails; a reopened shell is information", () => {
     // The ladder reports a timeout kill with exit code 0: the notice IS the failure.
@@ -96,7 +217,7 @@ describe("run steps in a container (Slice 5)", () => {
     await mkdir(join(dir, "workflows"), { recursive: true });
     await writeFile(
       join(dir, "workflows", "ship.yaml"),
-      "schemaVersion: 1\nname: ship\nversion: 1\nsteps:\n  - id: gate\n    run: make test\n    where: { docker: devbox, container: app }\n",
+      "schemaVersion: 1\nname: ship\nversion: 1\nsteps:\n  - id: gate\n    run: make test\n    where: { docker: devbox }\n",
     );
     const asks: PermissionRequest[] = [];
     const broker = new PermissionBroker(async (req) => {
@@ -148,14 +269,14 @@ describe("run steps in a container (Slice 5)", () => {
 
   test("the ask is the container's `workload_shell` call; a dial failure is the seam's sentence", async () => {
     const { asks, step } = await dockerRun(true);
-    // Approved AS the workload call it is, naming the container: the session's
+    // Approved AS the workload call it is, naming the workload: the session's
     // "always" rule is keyed per workload there, never shared with the laptop shell.
     const toolAsk = asks.find((a) => a.kind !== "workflow_approve");
     expect(toolAsk?.tool).toBe("workload_shell");
     expect(toolAsk?.input).toMatchObject({
       action: "run",
       command: "make test",
-      target: { engine: "docker", name: "devbox", container: "app" },
+      target: { engine: "docker", name: "devbox" },
     });
     expect(step?.state).toBe("error");
     expect(step?.reason).toContain("container devbox is not running (explained)");

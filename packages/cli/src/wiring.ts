@@ -72,6 +72,7 @@ import {
   type SkillBodyReader,
   ToolRegistry,
   WorkloadShellAborted,
+  type WorkloadShellBackend,
   WorkloadShellRefused,
   WorkloadShells,
   builtinTools,
@@ -525,6 +526,66 @@ export function workflowContainerOutcome(
   return { exitCode: outcome.exitCode, output, notes };
 }
 
+/**
+ * A `run` step's APPROVED command and workload, read from the gate's
+ * `outcome.input` through the tool's own schema — which is what would validate
+ * it in the agent loop, so a rewrite the loop could run is one a step can run.
+ * A docker step is approved as the `workload_shell` call it is; a local one as
+ * `shell`. A rewrite the schema rejects fails the step closed (never falls back
+ * to the file's original: that one was not what the person approved).
+ */
+export function readApprovedCall(
+  parsed:
+    | { readonly success: true; readonly data: unknown }
+    | {
+        readonly success: false;
+        readonly error: { readonly issues: readonly { readonly message: string }[] };
+      },
+):
+  | {
+      readonly ok: true;
+      readonly command?: string;
+      readonly target?: WorkflowContainerTarget;
+      /** The rewrite NAMED a target that a `run` step cannot express. */
+      readonly badTarget?: string;
+    }
+  | { readonly ok: false; readonly why: string } {
+  if (!parsed.success) {
+    return { ok: false, why: parsed.error.issues[0]?.message ?? "invalid" };
+  }
+  const data = parsed.data;
+  if (typeof data !== "object" || data === null) {
+    return { ok: false, why: "not an object" };
+  }
+  const record = data as { command?: unknown; target?: unknown };
+  const command = typeof record.command === "string" ? record.command : undefined;
+  const target = readApprovedTarget(record.target);
+  // A rewrite that named a target this step cannot express is refused below:
+  // reading it as "no target" would run the FILE's workload instead.
+  const badTarget =
+    record.target !== undefined && target === undefined ? "not a docker workload" : undefined;
+  return {
+    ok: true,
+    ...(command !== undefined ? { command } : {}),
+    ...(target !== undefined ? { target } : {}),
+    ...(badTarget !== undefined ? { badTarget } : {}),
+  };
+}
+
+/** The `workload_shell` target of an approved call, as a `run` step's own. */
+function readApprovedTarget(value: unknown): WorkflowContainerTarget | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const target = value as { engine?: unknown; name?: unknown };
+  if (typeof target.name !== "string" || target.engine !== "docker") {
+    return undefined;
+  }
+  // No `container`: a docker target has none, and the tool's own schema (which
+  // just parsed this) already refuses one.
+  return { engine: "docker", name: target.name };
+}
+
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
   const model =
     options.modelOverride ?? configuredModelProvider(config, config.model, options.createProvider);
@@ -806,12 +867,46 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
               toolCallId: call.toolCallId,
               signal: call.signal,
             });
-            return outcome.allowed
-              ? { allowed: true }
-              : {
-                  allowed: false,
-                  reason: `not allowed${outcome.message !== undefined ? `: ${outcome.message}` : outcome.reason !== undefined ? `: ${outcome.reason}` : ""}`,
-                };
+            if (!outcome.allowed) {
+              return {
+                allowed: false,
+                reason: `not allowed${outcome.message !== undefined ? `: ${outcome.message}` : outcome.reason !== undefined ? `: ${outcome.reason}` : ""}`,
+              };
+            }
+            // What the step runs is what was APPROVED: a `tool_call` hook may
+            // rewrite the input (`effective = verdict.input`, and the ask shows
+            // exactly that), and the agent loop runs `outcome.input` — so a
+            // rewrite of the command or of the target must reach the step, or a
+            // hook turning `rm -rf /work` into `echo blocked` would show the
+            // safe form and run the dangerous one.
+            const approved = readApprovedCall(tool.inputSchema.safeParse(outcome.input));
+            if (!approved.ok) {
+              return {
+                allowed: false,
+                reason: `the approved ${tool.name} input is unusable: ${approved.why}`,
+              };
+            }
+            // No fallback to the file's own command: a rewrite that dropped it
+            // approved something else, and running the original would be exactly
+            // the mismatch this guards against. `workload_shell`'s own schema
+            // allows an absent `command` (its other actions need none).
+            if (approved.command === undefined) {
+              return {
+                allowed: false,
+                reason: `the approved ${tool.name} input names no command`,
+              };
+            }
+            if (approved.badTarget !== undefined) {
+              return {
+                allowed: false,
+                reason: `the approved ${tool.name} target is unusable for a run step: ${approved.badTarget}`,
+              };
+            }
+            return {
+              allowed: true,
+              command: approved.command,
+              ...(approved.target !== undefined ? { target: approved.target } : {}),
+            };
           },
           exec: (command, { signal, timeoutMs }) =>
             env.exec(command, { signal, timeoutMs, cwd: config.cwd }),

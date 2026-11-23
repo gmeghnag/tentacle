@@ -248,6 +248,23 @@ describe("validateWorkflow — every refusal names its YAML path", () => {
     ).toContain('steps[4].where: does not know "podman" — use local, or {docker: <container>}');
   });
 
+  test("a docker target naming a sub-container is refused before any ask", () => {
+    // The workload exec seam refuses a docker target WITH a container
+    // (`workload-shell.ts` `engineOnlyFields`), and the engine throws at dial
+    // time (`engine-docker.ts` `noSubContainer`): accepting it here would
+    // validate the file, approve its hash and ASK, then fail the step.
+    expect(
+      errorsOf(variant("where: { docker: tentacle-ci }", "where: { docker: box, container: app }")),
+    ).toContain(
+      "steps[4].where: does not take a container — a docker target has no sub-containers; use {docker: <container>}",
+    );
+    expect(
+      errorsOf(variant("where: { docker: tentacle-ci }", "where: { docker: box, container: '' }")),
+    ).toContain(
+      "steps[4].where: does not take a container — a docker target has no sub-containers; use {docker: <container>}",
+    );
+  });
+
   test("an on_fail with no goto id is refused", () => {
     expect(errorsOf(variant("on_fail: { goto: fix, max: 3 }", "on_fail: { max: 3 }"))).toContain(
       "steps[2].on_fail: needs a step id — {goto: <step>, max: 1..10}",

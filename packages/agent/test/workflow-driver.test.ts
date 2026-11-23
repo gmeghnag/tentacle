@@ -18,6 +18,7 @@ import type {
 } from "../src/subagent.ts";
 import {
   type WorkflowClock,
+  type WorkflowContainerTarget,
   WorkflowDriver,
   type WorkflowDriverDeps,
   type WorkflowHost,
@@ -632,7 +633,7 @@ describe("run steps (local)", () => {
             title: command,
             input: { command },
           });
-          return r.allowed ? { allowed: true } : { allowed: false, reason: "denied" };
+          return r.allowed ? { allowed: true, command } : { allowed: false, reason: "denied" };
         },
         exec: async () => ({ stdout: "line1\nline2", stderr: "boom", exitCode: exit }),
       },
@@ -651,6 +652,32 @@ describe("run steps (local)", () => {
     expect(last(rows)?.state).toBe("ok");
   });
 
+  test("the APPROVED command runs, never the file's: a gate that rewrites the input is honoured", async () => {
+    // `PermissionGate.authorize` lets a `tool_call` hook rewrite the input (and
+    // forcefully allow it): the ask then shows the REWRITTEN form, and the agent
+    // loop executes `outcome.input`. A run step must run what was approved, or a
+    // hook that rewrites `rm -rf /work` into `echo blocked` shows the safe form
+    // and runs the dangerous one.
+    const ran: string[] = [];
+    const t = setup({ approved: true, text: YAML("  - id: gate\n    run: rm -rf /work\n") });
+    const driver = new WorkflowDriver({
+      ...t.deps,
+      commands: {
+        authorize: async () => ({ allowed: true, command: "echo blocked" }),
+        exec: async (command) => {
+          ran.push(command);
+          return { stdout: "blocked", stderr: "", exitCode: 0 };
+        },
+      },
+    });
+    const rows: WorkflowRow[][] = [];
+    driver.bind({ ...noopHost(), publish: (r) => rows.push([...r]) });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(ran).toEqual(["echo blocked"]);
+    expect(last(rows)?.steps[0]?.state).toBe("ok");
+  });
+
   test("a docker step with no workload seam is refused, never run on the laptop", async () => {
     // The laptop must never stand in for a container: without `execOn` the step
     // fails saying what is missing (`commands.exec` is present and would succeed).
@@ -661,7 +688,7 @@ describe("run steps (local)", () => {
     const driver = new WorkflowDriver({
       ...t.deps,
       commands: {
-        authorize: async () => ({ allowed: true }),
+        authorize: async (command) => ({ allowed: true, command }),
         exec: async () => ({ stdout: "laptop", stderr: "", exitCode: 0 }),
       },
     });
@@ -690,7 +717,11 @@ describe("run steps in a container (Slice 5)", () => {
           // The ask names WHERE as well as WHAT: the driver hands the seam the
           // step's own target, so the gate can key a rule per workload.
           asks.push(`${String(call.target?.engine)} ${String(call.target?.name)}: ${command}`);
-          return { allowed: true };
+          return {
+            allowed: true,
+            command,
+            ...(call.target !== undefined ? { target: call.target } : {}),
+          };
         },
         exec: async () => ({ stdout: "laptop", stderr: "", exitCode: 0 }),
         execOn: async (target, command, options) => {
@@ -713,13 +744,13 @@ describe("run steps in a container (Slice 5)", () => {
 
   test("exit 0 passes; exit 2 fails with the tail; the ask names the container", async () => {
     const t = containerRun(
-      YAML("  - id: gate\n    run: make test\n    where: { docker: devbox, container: app }\n"),
+      YAML("  - id: gate\n    run: make test\n    where: { docker: devbox }\n"),
     );
     t.set(() => ({ exitCode: 0, output: "ok\n" }));
     void t.driver.start({ name: "task", by: "user" });
     await flush();
     expect(t.asks).toEqual(["docker devbox: make test"]);
-    expect(t.calls[0]?.target).toEqual({ engine: "docker", name: "devbox", container: "app" });
+    expect(t.calls[0]?.target).toEqual({ engine: "docker", name: "devbox" });
     // The step's own timeout is the one the seam gets (never a default).
     expect(t.calls[0]?.timeoutMs).toBeGreaterThan(0);
     expect(last(t.rows)?.steps[0]?.state).toBe("ok");
@@ -756,6 +787,37 @@ describe("run steps in a container (Slice 5)", () => {
     expect(t.calls[0]?.timeoutMs).toBe(1_000);
     expect(last(t.rows)?.steps[0]?.state).toBe("error");
     expect(last(t.rows)?.steps[0]?.reason).toContain("killed after 1s");
+  });
+
+  test("the approved TARGET is where it runs: a rewrite retargets the workload", async () => {
+    // The same hole as the command, on the other axis: the ask names the workload
+    // the exec will go to, so the approved target must be the one dialled.
+    const calls: { target: WorkflowContainerTarget; command: string }[] = [];
+    const t = setup({
+      approved: true,
+      text: YAML("  - id: gate\n    run: make\n    where: { docker: devbox }\n"),
+    });
+    const driver = new WorkflowDriver({
+      ...t.deps,
+      commands: {
+        authorize: async (command) => ({
+          allowed: true,
+          command,
+          target: { engine: "docker", name: "other" },
+        }),
+        exec: async () => ({ stdout: "laptop", stderr: "", exitCode: 0 }),
+        execOn: async (target, command) => {
+          calls.push({ target, command });
+          return { exitCode: 0, output: "ok" };
+        },
+      },
+    });
+    const rows: WorkflowRow[][] = [];
+    driver.bind({ ...noopHost(), publish: (r) => rows.push([...r]) });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(calls[0]?.target).toEqual({ engine: "docker", name: "other" });
+    expect(last(rows)?.steps[0]?.state).toBe("ok");
   });
 
   test("a seam that throws fails the step with its own sentence", async () => {

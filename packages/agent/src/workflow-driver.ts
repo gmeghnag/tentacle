@@ -99,11 +99,11 @@ export interface WorkflowApprovals {
 /**
  * A `where: {docker: …}` target of a `run` step, structurally the
  * `workload_shell` tool's `target` (this package may not depend on `@tentacle/tools`).
+ * No `container`: a docker target has none, and the spec refuses one (fix round 1).
  */
 export interface WorkflowContainerTarget {
   readonly engine: "docker";
   readonly name: string;
-  readonly container?: string;
 }
 
 /** What running one command in a container gave back (structurally `RunOutcome`). */
@@ -126,6 +126,12 @@ export interface WorkflowCommands {
    * step): the gate then asks the `workload_shell` tool, whose "always" rule is
    * keyed per workload (`session-grants.ts` `workloadTargetKey`), so an approval
    * given for one container can never cover another.
+   *
+   * The answer is the form that was ACTUALLY approved — a `tool_call` hook may
+   * rewrite the input (`PermissionGate.authorize` returns `outcome.input`, and
+   * the ask then shows the rewritten form), and the agent loop runs
+   * `outcome.input` rather than the model's original. So `command` is what the
+   * step runs and `target` (when present) is where: never the step's own text.
    */
   authorize(
     command: string,
@@ -135,7 +141,15 @@ export interface WorkflowCommands {
       readonly signal: AbortSignal;
       readonly target?: WorkflowContainerTarget;
     },
-  ): Promise<{ readonly allowed: true } | { readonly allowed: false; readonly reason: string }>;
+  ): Promise<
+    | {
+        readonly allowed: true;
+        /** The command that was approved — always present, never the file's own. */
+        readonly command: string;
+        readonly target?: WorkflowContainerTarget;
+      }
+    | { readonly allowed: false; readonly reason: string }
+  >;
   exec(
     command: string,
     options: { readonly signal: AbortSignal; readonly timeoutMs: number },
@@ -234,7 +248,7 @@ function whereLabel(step: WorkflowStep): string {
   if (step.kind !== "run" || step.where.engine === "local") {
     return "local";
   }
-  return `docker:${step.where.name}${step.where.container !== undefined ? `/${step.where.container}` : ""}`;
+  return `docker:${step.where.name}`;
 }
 
 /** A label for a `line()`-bounded wire field: whitespace runs (newlines too) collapsed. */
@@ -955,32 +969,37 @@ export class WorkflowDriver {
     if (step.where.engine !== "local" && commands.execOn === undefined) {
       return fail(`where: ${whereLabel(step)} is not available in this session (no workload seam)`);
     }
-    const target =
+    const requestedTarget: WorkflowContainerTarget | undefined =
       step.where.engine === "local"
         ? undefined
-        : {
-            engine: "docker" as const,
-            name: step.where.name,
-            ...(step.where.container !== undefined ? { container: step.where.container } : {}),
-          };
+        : { engine: "docker" as const, name: step.where.name };
     const authorized = await commands.authorize(action.text, this.stepRequester(run, step.id), {
       toolCallId: run.runId,
       signal,
-      ...(target !== undefined ? { target } : {}),
+      ...(requestedTarget !== undefined ? { target: requestedTarget } : {}),
     });
     if (!authorized.allowed) {
       return fail(authorized.reason);
     }
+    // What runs is what was APPROVED, never the file's own text: a `tool_call`
+    // hook may rewrite the input (`PermissionGate.authorize` hands back
+    // `outcome.input`, and its ask shows that rewritten form), and the agent
+    // loop runs exactly that. Running the file's own text here would show the
+    // person the safe rewrite and execute the dangerous original — and the same
+    // holds for the workload it runs on. `authorize` guarantees the approved
+    // command is present, so there is no fallback to fall back to.
+    const command = authorized.command;
+    const target =
+      requestedTarget === undefined ? undefined : (authorized.target ?? requestedTarget);
     // The container's own run: exit code + output, and the seam's notes, which
     // say a killed/lost/reopened shell did not simply run the command.
     if (target !== undefined) {
       let ran: WorkflowContainerOutcome;
       try {
-        ran = await (commands.execOn as NonNullable<WorkflowCommands["execOn"]>)(
-          target,
-          action.text,
-          { signal, timeoutMs: step.timeoutMs },
-        );
+        ran = await (commands.execOn as NonNullable<WorkflowCommands["execOn"]>)(target, command, {
+          signal,
+          timeoutMs: step.timeoutMs,
+        });
       } catch (error) {
         return fail(`error: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -1000,7 +1019,7 @@ export class WorkflowDriver {
     }
     let result: ExecResult;
     try {
-      result = await commands.exec(action.text, { signal, timeoutMs: step.timeoutMs });
+      result = await commands.exec(command, { signal, timeoutMs: step.timeoutMs });
     } catch (error) {
       return fail(`error: ${error instanceof Error ? error.message : String(error)}`);
     }

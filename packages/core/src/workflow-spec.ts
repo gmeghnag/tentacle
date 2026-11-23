@@ -75,10 +75,16 @@ export interface WorkflowInput {
  * Where a `run` step executes. `local` is the daemon's own shell; `docker` is
  * that named container through the workload exec seam. `agent` steps are
  * `local` ONLY (owner decision 4: no agent step in a pod).
+ *
+ * A docker target carries NO `container`: a docker workload has no
+ * sub-containers, as `workload_shell`'s schema (`engineOnlyFields`) and the
+ * engine (`engine-docker.ts` `noSubContainer`) both say. Accepting one would
+ * validate the file, approve its hash and ask its command, and only then fail
+ * the step.
  */
 export type WorkflowWhere =
   | { readonly engine: "local" }
-  | { readonly engine: "docker"; readonly name: string; readonly container?: string };
+  | { readonly engine: "docker"; readonly name: string };
 
 interface WorkflowStepBase {
   readonly id: string;
@@ -506,7 +512,16 @@ function readWhere(
   }
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     const raw = value as Record<string, unknown>;
-    const extra = Object.keys(raw).filter((k) => k !== "docker" && k !== "container");
+    // A docker target has no sub-containers: said HERE, before the generic
+    // unknown-key refusal, because a file carrying one must be refused before
+    // any ask — not validated, approved, asked, and then failed at dial time.
+    if (raw.container !== undefined) {
+      return {
+        ok: false,
+        why: "does not take a container — a docker target has no sub-containers; use {docker: <container>}",
+      };
+    }
+    const extra = Object.keys(raw).filter((k) => k !== "docker");
     if (extra.length > 0) {
       return {
         ok: false,
@@ -517,17 +532,7 @@ function readWhere(
     if (typeof name !== "string" || name.trim() === "") {
       return { ok: false, why: "needs a container name — {docker: <container>}" };
     }
-    const container = raw.container;
-    if (container !== undefined && (typeof container !== "string" || container.trim() === "")) {
-      return { ok: false, why: "needs a container name when present — remove it or name one" };
-    }
-    return {
-      ok: true,
-      where:
-        typeof container === "string"
-          ? { engine: "docker", name, container }
-          : { engine: "docker", name },
-    };
+    return { ok: true, where: { engine: "docker", name } };
   }
   return { ok: false, why: 'should be "local" or {docker: <container>}' };
 }
