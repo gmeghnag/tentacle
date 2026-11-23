@@ -212,4 +212,96 @@ Implementation APPROVED (orchestrator, owner delegated: S fix)
 
 ## Execution
 
+*— claude-code_2-1-325_agent (Claude Code executor; the model id itself is not
+exposed to this harness), 2026-11-23*
+
+### Load-bearing check (re-run first, as instructed)
+
+Verified on the branch head before any edit, `PROTOCOL_VERSION` = 25
+(`packages/protocol/src/version.ts:40`):
+
+```
+$ rg -n '"?\b(protocolVersion|protocol|PROTOCOL_VERSION|x-protocol-version)"?\s*:\s*25\b' packages apps scripts
+(no hits)
+$ rg -n -U '\b(protocolVersion|PROTOCOL_VERSION)\s*\)\s*\.to(Be|Equal|StrictEqual)\(\s*25\b' …
+packages/protocol/test/version.test.ts:30:    expect(PROTOCOL_VERSION).toBe(25);
+```
+
+Exactly one hit, the allowlisted pin ⇒ **0 hits once allowlisted**. The plan's
+assumption holds; proceeded.
+
+### As built, in order
+
+1. **`scripts/protocol-bump.ts`** — `PIN_PATH`, `PIN_LINE`, `applyPin` added;
+   `applyPin` is called in `runProtocolBump` **before the first write**, with
+   `readVersion(before)`/`readVersion(after)` as its from/to. Write order is
+   **pin → `version.ts` → delete notes**; `writeVersion` renamed to `writeFile`
+   (called for every write, so a spy records the order). Messages now name
+   `PIN_PATH` (fold line and the final "Stage …" line); header doc comment
+   updated. `PIN_LINE` is matched with a `gm` copy to count hits, exactly like
+   `readVersion`.
+2. **`scripts/test/protocol-bump.test.ts`** — `PIN` fixture, `fixture()` writes
+   `PIN_PATH` (mkdir of `packages/protocol/test`), `pinOf` reader; R1, R2 (four
+   cases), R3 (missing/moved/duplicated pin table + a hand-edited pin), R4 (path
+   order `[PIN_PATH, VERSION_PATH]`, adapted from M7), R5 (both crash states), the
+   missing-pin-**file** case, and a no-notes "nothing is rewritten" case.
+3. **`packages/protocol/test/version.test.ts`** — comment only: says the bump
+   rewrites the line (`applyPin`), names the guard test, and drops the stale
+   `version.ts:32` line number.
+4. **`scripts/test/protocol-version-literals.test.ts`** (new) — `findVersionLiterals`,
+   `testFiles`, `scanVersionLiterals` (module-local: Biome's `noExportsInTest`);
+   tests 1–4 as planned, allowlist by exact path with reasons.
+
+### Red before green
+
+- Import error first: `SyntaxError: Export named 'PIN_PATH' not found` — the
+  R1/R2 tests were red for the missing capability, then green after the change.
+- **Mutation 1** (drop the pin write, i.e. the 23/11 bug): `2 fail` — R1 (*one
+  note: the pin line moves with version.ts*) and R4 (path order).
+- **Mutation 2** (swap the order to `version.ts` → pin): `1 fail` — R4's order
+  assertion. `applyPin`'s "pin == to ⇒ unchanged" case is what makes the correct
+  order converge; the reverse order is covered by R5's refused state.
+- **Mutation 3** (stub `findVersionLiterals` to return `[]`): `1 fail` — the
+  non-vacuity test (*the historic literals are caught*), i.e. the guard is not
+  passing because the matcher matches nothing.
+- **Mutation 4** (end-to-end, not committed): added
+  `const MUTANT = { protocolVersion: 25, … }` to
+  `packages/transport/test/peer.test.ts:7` → the repo guard went red naming
+  `packages/transport/test/peer.test.ts:7  protocolVersion: 25`; reverted.
+
+### Drift from the Implementation (and why)
+
+- **`applyPin` does no pin write in the no-notes branch.** The plan said the pin
+  is "checked" there; it is, but a write is impossible: `after === before` means
+  from == to, so `applyPin` returns the text unchanged or refuses. Implemented as
+  a comment at that site instead of a dead `put`, with a test proving the no-notes
+  run issues **zero** writes.
+- **One extra test** (missing pin *file*, ENOENT): the plan listed "missing or
+  malformed" as text-level cases; a deleted file is the shell's own refusal and
+  deserves its own red-capable case.
+- **`applyPin`'s comment was kept inside the test file, not moved to
+  `protocol-bump.ts`**, and the helpers are unexported (Biome forbids exports in
+  test files) — the plan allowed either location.
+- **No `changelog.d/` fragment**: confirmed internal by
+  `docs/feat/changelog-fragments.md:223` ("Internal/dev/test-only work adds no
+  fragment") — the change touches merge tooling and tests only, with no user-visible
+  behaviour. Flagged for the orchestrator: this is the one plan-stated decision
+  that the spawn prompt asked for unconditionally.
+- **No `protocol.d/` note**: the wire version is not changed (no schema edit, so
+  `protocol.json` is untouched).
+
+### Narrow verification
+
+```
+$ bun test scripts/test/protocol-bump.test.ts ./scripts/test/protocol-version-literals.test.ts packages/protocol/test/version.test.ts
+ 39 pass, 0 fail
+$ bun test packages/protocol/test/{version,json-schema}.test.ts packages/daemon/test/version-mismatch.test.ts scripts/test/changelog-guard.test.ts
+ 51 pass, 0 fail
+$ bunx biome check <the 4 changed files>
+Checked 4 files in 9ms. No fixes applied.
+```
+
+Full `bun run check` is the orchestrator's (per the spawn brief); nothing was
+run at repo scope. Nothing unverified except that gate itself.
+
 ## Review
