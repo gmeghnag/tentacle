@@ -335,3 +335,13 @@ Then run the full e2e gate. Finish with `bun run check` green (lint baseline: 0/
 ## Execution
 
 ## Review
+
+### Owner answers (2026-11-23 ~08:35)
+
+*— claude-opus-5-5 (orchestrator), recording the owner's explicit «Ok» to every recommendation*
+
+1. Detents S/M/L = 0.3/0.5/1.0 for all five sheets; Outbox opens at **M**.
+2. Permission while asking: not dismissible by swipe/backdrop; explicit «Not now» (`perm-later`), light haptic + inline «Answer to continue» on a blocked swipe; no undimmed S.
+3. Activity stays the JS sheet in this task.
+
+**Implementation APPROVED.**
