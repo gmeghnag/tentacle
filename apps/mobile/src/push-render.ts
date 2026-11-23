@@ -206,6 +206,39 @@ export function render(msg: PushMessage, peer: RenderPeer, now: number): Rendere
     };
   }
 
+  if (msg.kind === "run_stopped") {
+    // docs/feat/agent-workflows.md slice 9 (owner Q5): a run stopped is the one
+    // run end worth the Sensitive level when it did NOT finish on its own. The
+    // reason is the daemon's one line (already clipped on the wire); the run is
+    // named so two runs of one session are two banners.
+    const why = msg.run?.reason === undefined ? "" : clean(msg.run.reason);
+    return {
+      title: heading,
+      ...(title !== "" ? { subtitle: title } : {}),
+      body: why === "" ? "Workflow stopped" : `Workflow stopped: ${why}`,
+      category: CATEGORY_OPEN,
+      interruptionLevel: "passive",
+      sound: false,
+      threadIdentifier,
+      hints: hints(),
+      placeholder: false,
+    };
+  }
+
+  if (msg.kind === "run_done") {
+    return {
+      title: heading,
+      ...(title !== "" ? { subtitle: title } : {}),
+      body: "Workflow finished",
+      category: CATEGORY_OPEN,
+      interruptionLevel: "passive",
+      sound: false,
+      threadIdentifier,
+      hints: hints(),
+      placeholder: false,
+    };
+  }
+
   // turn_done: quiet, grouped per session (decision 8).
   return {
     title: heading,

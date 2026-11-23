@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RELAY_PROTOCOL_VERSION, encodeBase64Url, relayAddress } from "@tentacle/protocol";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { type ByteCarrier, type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { RpcPeer } from "@tentacle/transport";
 import { NoiseError, noiseInitiator, publicKeyOf, systemRandom } from "@tentacle/transport/noise";
@@ -530,11 +531,11 @@ describe("the end-to-end proof: a phone reaches a session THROUGH the relay", ()
     });
     cleanups.push(() => peer.close());
     const init = (await peer.request("initialize", {
-      protocolVersion: 24,
+      protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "phone", version: "0" },
     })) as { protocolVersion: number };
-    expect(init.protocolVersion).toBe(24);
+    expect(init.protocolVersion).toBe(PROTOCOL_VERSION);
     const list = (await peer.request("session/list", {})) as { sessions?: unknown[] };
     expect(Array.isArray(list.sessions)).toBe(true);
     // The audit names both halves: the relay's own line, then the device path's.
@@ -571,7 +572,7 @@ describe("revoke closes the relay stream within one authority poll (F11)", () =>
       onNotification: () => {},
     });
     await peer.request("initialize", {
-      protocolVersion: 24,
+      protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "phone", version: "0" },
     });
@@ -622,11 +623,11 @@ describe("today's phone over the relay: zero steps after the upgrade (Q3, review
     });
     cleanups.push(() => peer.close());
     const init = (await peer.request("initialize", {
-      protocolVersion: 24,
+      protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "phone", version: "0" },
     })) as { protocolVersion: number };
-    expect(init.protocolVersion).toBe(24);
+    expect(init.protocolVersion).toBe(PROTOCOL_VERSION);
     const adoption = readAdoption(configDir, id);
     expect(adoption.kind === "bound" ? adoption.project.key : adoption.kind).toBe(TEST_PROJECT.key);
     expect(h.authority.knows(id)).toBe(true);
@@ -748,7 +749,7 @@ describe("the limiter slot ends EXACTLY once per stream", () => {
       onNotification: () => {},
     });
     await peer.request("initialize", {
-      protocolVersion: 24,
+      protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "phone", version: "0" },
     });
@@ -792,11 +793,11 @@ describe("a phone that walks away mid-handshake frees its limiter slot", () => {
     });
     cleanups.push(() => peer.close());
     const init = (await peer.request("initialize", {
-      protocolVersion: 24,
+      protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "phone", version: "0" },
     })) as { protocolVersion: number };
-    expect(init.protocolVersion).toBe(24);
+    expect(init.protocolVersion).toBe(PROTOCOL_VERSION);
     // The second stream is LIVE: the slot it took was free because the
     // abandoned one gave its own back (mutation: drop the leg's close handler ->
     // `inFlight` never returns to 0 and this test times out above).

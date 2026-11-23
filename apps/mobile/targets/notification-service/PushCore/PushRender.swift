@@ -251,5 +251,33 @@ public func renderMessage(_ message: PushMessage, peer: RenderPeer) -> Rendered 
             hints: hints(),
             placeholder: false
         )
+    // Slice 9 of docs/feat/agent-workflows.md (owner Q5): a workflow run's end.
+    // Mirrors `apps/mobile/src/push-render.ts` case for case; the shared vector
+    // table (`run-done`, `run-stopped`) is what proves the two agree.
+    case .runStopped:
+        let why = message.run?.reason.map(stripped) ?? ""
+        return Rendered(
+            title: heading,
+            subtitle: subtitle(),
+            body: why.isEmpty ? "Workflow stopped" : "Workflow stopped: \(why)",
+            category: NotificationCategoryId.open,
+            interruptionLevel: .passive,
+            sound: false,
+            threadIdentifier: thread,
+            hints: hints(),
+            placeholder: false
+        )
+    case .runDone:
+        return Rendered(
+            title: heading,
+            subtitle: subtitle(),
+            body: "Workflow finished",
+            category: NotificationCategoryId.open,
+            interruptionLevel: .passive,
+            sound: false,
+            threadIdentifier: thread,
+            hints: hints(),
+            placeholder: false
+        )
     }
 }

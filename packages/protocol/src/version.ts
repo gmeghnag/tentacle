@@ -29,4 +29,12 @@
 // older client would fail the turn on it; `subagents.maxTokens` rides
 // `SessionSettings` (an additive optional field on its own, but the enum member
 // forces the bump, AGENTS §7).
-export const PROTOCOL_VERSION = 24 as const;
+// 25: Agent workflows (docs/feat/agent-workflows.md D5): a permission_request whose
+// tool is workflow_approve (the approval of a workflow's content hash, and a
+// workflow's approve step such as a merge) must NEVER be auto-accepted. An older
+// client's auto-accept would answer it allow-once, approving a merge with no human,
+// so a mixed pair must fail at initialize instead. Additive in the same task: the
+// session/workflow and workflow/list methods, the display update workflows, the
+// snapshot field workflows, and three non-critical log entry types workflow_start,
+// workflow_step and workflow_end.
+export const PROTOCOL_VERSION = 25 as const;

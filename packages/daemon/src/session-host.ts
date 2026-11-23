@@ -13,6 +13,7 @@ import {
   Session,
   type SessionGrants,
   type SkillListing,
+  type WorkflowDriver,
   recordTitleText,
 } from "@tentacle/agent";
 import type {
@@ -52,6 +53,8 @@ import {
   type SessionTtlParams,
   type SessionTtlResult,
   type UpdateSettingsResult,
+  type WorkflowListResult,
+  type WorkflowListRow,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
@@ -171,6 +174,8 @@ export interface AgentReuse {
    * shells (and their remote state) on the floor.
    */
   readonly workloadShells?: WorkloadShellsLike;
+  /** The workflow driver (docs/feat/agent-workflows.md D3): a live run carries over. */
+  readonly workflows?: WorkflowDriver;
 }
 
 /** The teardown half of `@tentacle/tools`' `WorkloadShells` (no daemon-side import). */
@@ -191,6 +196,12 @@ export type AgentFactory = (
    * (ids, markers, exits, the ask) and disposes it at close.
    */
   agentJobs?: AgentJobs;
+  /**
+   * Optional: the workflow driver (docs/feat/agent-workflows.md D3). Absent on
+   * a tunnelled session — then `session/workflow` is refused. The hosted
+   * session binds it and disposes it at close.
+   */
+  workflows?: WorkflowDriver;
   /**
    * Optional: the session's shells (docs/feat/workload-shell.md D4). The hosted
    * session disposes them at close, and hands them to the next agent on a
@@ -895,6 +906,16 @@ export class SessionHost {
    * either fully registered or gone. A read only: it attaches nothing and
    * moves no stamp, so a list never keeps a session alive.
    */
+  /** `workflow/list` (docs/feat/agent-workflows.md D5): every live session's runs, newest first. */
+  workflowList(): WorkflowListResult {
+    const runs: WorkflowListRow[] = [];
+    for (const hosted of this.sessions.values()) {
+      runs.push(...hosted.workflowListRows());
+    }
+    runs.sort((a, b) => b.startedAt - a.startedAt);
+    return { runs };
+  }
+
   list(params: SessionListParams): SessionListResult {
     const summaries: SessionSummary[] = [];
     for (const hosted of this.sessions.values()) {
@@ -1559,6 +1580,7 @@ export class SessionHost {
       settingsReport,
       grants,
       workloadShells,
+      workflows,
     } = this.opts.createAgent(this.opts.defaultCwd, {
       modelLink: () => bound.hosted?.modelLink() ?? null,
       ...(settings ? { settings } : {}),
@@ -1615,6 +1637,9 @@ export class SessionHost {
     hosted.imagesPolicy = this.opts.images;
     hosted.grants = grants;
     hosted.workloadShells = workloadShells;
+    if (workflows) {
+      hosted.attachWorkflows(workflows);
+    }
     hosted.hop = hop === true;
     // The push observer (docs/feat/mobile-push.md P7): `serve` with push on
     // only. A pod daemon and the worker pass no `push`, so nothing observes
@@ -1665,7 +1690,8 @@ export class SessionHost {
       next.permissions !== reuse.permissions ||
       next.jobs !== reuse.jobs ||
       next.agentJobs !== reuse.agentJobs ||
-      next.workloadShells !== reuse.workloadShells;
+      next.workloadShells !== reuse.workloadShells ||
+      next.workflows !== reuse.workflows;
     if (!next.settingsReport || foreign) {
       // It leaves the session's jobs; jobs of its own (a factory that ignored
       // `reuse`) go with it.
@@ -1681,6 +1707,9 @@ export class SessionHost {
       // factory that IGNORED `reuse` and built its own is closed here.
       if (next.workloadShells && next.workloadShells !== reuse.workloadShells) {
         void next.workloadShells.dispose();
+      }
+      if (next.workflows && next.workflows !== reuse.workflows) {
+        next.workflows.dispose();
       }
       if (!next.settingsReport) {
         return { applied: false };

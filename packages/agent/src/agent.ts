@@ -321,7 +321,26 @@ function lastUserText(messages: readonly ChatMessage[]): string {
 }
 
 /** A finished background job awaiting its note: a shell job, or a sub-agent (`agentId` in it). */
-export type PendingExit = BackgroundJob | AgentJobExit | PendingAgentMessage | PendingUserNote;
+export type PendingExit =
+  | BackgroundJob
+  | AgentJobExit
+  | PendingAgentMessage
+  | PendingUserNote
+  | PendingWorkflowEnd;
+
+/**
+ * A workflow run ended (docs/feat/agent-workflows.md D3): its end note, keyed
+ * `note.id = runId` (the load derivation's dedupe), rides the SAME queue as a
+ * job exit, so it is told at the next turn's start and WAKES like one.
+ */
+export type PendingWorkflowEnd = {
+  readonly kind: "workflow_end";
+  readonly runId: string;
+  readonly text: string;
+};
+
+const isWorkflowEnd = (job: PendingExit): job is PendingWorkflowEnd =>
+  "kind" in job && job.kind === "workflow_end";
 
 /**
  * A running background child's `agent_notify` text, queued for the parent agent
@@ -948,6 +967,11 @@ export class Agent {
    */
   noteUserToSubagent(agentId: string, text: string): void {
     this.pendingExits.push({ kind: "user_note", agentId, text });
+  }
+
+  /** A workflow run ended: its note, told at the next turn's start (and it wakes). */
+  noteWorkflowEnd(runId: string, text: string): void {
+    this.pendingExits.push({ kind: "workflow_end", runId, text });
   }
 
   /** Whether the user may activate `name` (`/name`) in this agent. */
@@ -2881,6 +2905,15 @@ export class Agent {
       // event — the live notice came from `session/subagent_message`.
       if (isUserNote(job)) {
         messages.push(userToSubagentNote(job));
+        continue;
+      }
+      if (isWorkflowEnd(job)) {
+        messages.push({
+          role: "user",
+          content: job.text,
+          note: { kind: NOTE_KIND.workflowEnd, id: job.runId },
+        });
+        events.push({ type: "context_note", text: job.text, reason: "background_exit" });
         continue;
       }
       if ("agentId" in job) {

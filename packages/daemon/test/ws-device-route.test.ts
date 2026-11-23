@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { type ByteCarrier, type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { RpcPeer } from "@tentacle/transport";
 import { NoiseError, noiseInitiator, publicKeyOf, systemRandom } from "@tentacle/transport/noise";
@@ -146,7 +147,7 @@ async function connect(
   });
   const init = (): Promise<unknown> =>
     peer.request("initialize", {
-      protocolVersion: 24,
+      protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "phone", version: "0" },
     });
@@ -206,7 +207,7 @@ describe("the device route authenticates by key, not by Origin", () => {
     const client = await connect(url, key(2), identity.identity.publicKey);
     try {
       const result = (await client.init()) as { protocolVersion: number };
-      expect(result.protocolVersion).toBe(24);
+      expect(result.protocolVersion).toBe(PROTOCOL_VERSION);
     } finally {
       client.close();
     }
@@ -256,7 +257,7 @@ describe("the device route authenticates by key, not by Origin", () => {
           id: 1,
           method: "initialize",
           params: {
-            protocolVersion: 24,
+            protocolVersion: PROTOCOL_VERSION,
             clientCapabilities: {},
             clientInfo: { name: "cli", version: "0" },
           },
@@ -268,7 +269,7 @@ describe("the device route authenticates by key, not by Origin", () => {
       }
       expect(replies).toHaveLength(1);
       expect((replies[0] as { result: { protocolVersion: number } }).result.protocolVersion).toBe(
-        24,
+        PROTOCOL_VERSION,
       );
     } finally {
       ws.close();
@@ -501,7 +502,7 @@ describe("the upgrade is rate limited before any crypto (F6)", () => {
     const client = await connect(url, key(2), created.identity.publicKey);
     try {
       const result = (await client.init()) as { protocolVersion: number };
-      expect(result.protocolVersion).toBe(24);
+      expect(result.protocolVersion).toBe(PROTOCOL_VERSION);
     } finally {
       client.close();
     }

@@ -13,7 +13,16 @@
  * own repair sentence. Registered only where the host schedules (`serve` and
  * the worker; never a pod, D1) and never given to a child (`subagent.ts`).
  */
-import type { ResourceKey, ScheduleLink, Tool, ToolConcurrency, ToolResult } from "@tentacle/core";
+import {
+  type ResourceKey,
+  type ScheduleCreateResult,
+  type ScheduleLink,
+  type ScheduledJob,
+  type Tool,
+  type ToolConcurrency,
+  type ToolResult,
+  shortHash,
+} from "@tentacle/core";
 import { z } from "zod";
 import { oneLine } from "./agent-status.ts";
 
@@ -73,10 +82,27 @@ const createInput = z.object({
   prompt: z
     .string()
     .min(1)
+    .optional()
     .describe(
-      "What you will be told when it fires. Self-sufficient: your context may be compacted by then.",
+      "What you will be told when it fires. Self-sufficient: your context may be compacted by then. Give this OR workflow.",
     ),
+  workflow: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Instead of a prompt: the workflow (workflows/<name>.yaml) to START by itself when it fires — no turn, the file's current content is pinned.",
+    ),
+  inputs: z
+    .array(z.object({ name: z.string().min(1), value: z.string() }))
+    .optional()
+    .describe("The workflow's inputs, [{name, value}]. Only with workflow."),
   every: z.string().min(1).optional().describe("Recurring interval: 10m, 2h, 1d (at least 1m)."),
+  daily: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Every day at this local time, HH:MM (03:00). Keeps the time across DST."),
   at: z
     .string()
     .min(1)
@@ -89,7 +115,24 @@ const createInput = z.object({
 export type ScheduleCreateInput = z.infer<typeof createInput>;
 
 const CREATE_DESCRIPTION =
-  "Schedule a wake-up: when due, a new turn starts with your prompt (even with nobody watching). Give exactly one of `every` (recurring) or `at` (one-shot). The user is asked first. List or delete with schedule_control.";
+  "Schedule a wake-up: when due, a new turn starts with your prompt (even with nobody watching) — or, with `workflow`, that workflow starts by itself (no turn). Give exactly one of `prompt` or `workflow`, and exactly one of `every` (recurring), `daily` (local time) or `at` (one-shot). The user is asked first. List or delete with schedule_control.";
+
+/** The tool's reply for a created job: when it fires, and what happens then. */
+function createdText(job: ScheduledJob, now: number): string {
+  const expires =
+    job.expiresAt >= Number.MAX_SAFE_INTEGER
+      ? "no expiry"
+      : `expires ${scheduleClock(job.expiresAt, now).replace(/ \(.*\)$/, "")}`;
+  const when =
+    job.kind === "at"
+      ? `one-shot at ${scheduleClock(job.nextAt, now)}.`
+      : `${job.spec}, next at ${scheduleClock(job.nextAt, now)}, ${expires}.`;
+  const target = job.target?.workflow;
+  if (target !== undefined) {
+    return `Scheduled ${job.id}: ${when} It starts ${job.prompt} (hash ${shortHash(target.hash)}) by itself — no turn; if the file changes, it stops starting until the schedule is re-created. It lasts while this session runs.`;
+  }
+  return `Scheduled ${job.id}: ${when} When it fires you get: "[scheduled ${job.id} · ${job.spec} · fire N] ${job.prompt}". It lasts while this session runs.`;
+}
 
 /** Build `schedule_create` (D2). `permission: "ask"` through the session's single broker (D4). */
 export function createScheduleCreateTool(link: ScheduleLinkSource): Tool<ScheduleCreateInput> {
@@ -101,22 +144,27 @@ export function createScheduleCreateTool(link: ScheduleLinkSource): Tool<Schedul
     async execute(input) {
       const schedules = link();
       if (schedules === null) return UNAVAILABLE;
-      const result = schedules.create({
-        prompt: input.prompt,
+      const request = {
+        ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+        ...(input.workflow === undefined
+          ? {}
+          : { workflow: { name: input.workflow, inputs: input.inputs ?? [] } }),
         ...(input.every === undefined ? {} : { every: input.every }),
         ...(input.at === undefined ? {} : { at: input.at }),
-      });
-      if (!result.ok) return { content: result.reason, isError: true };
-      const { job } = result;
-      const now = schedules.now();
-      const when =
-        job.kind === "every"
-          ? `${job.spec}, next at ${scheduleClock(job.nextAt, now)}, expires ${scheduleClock(job.expiresAt, now).replace(/ \(.*\)$/, "")}.`
-          : `one-shot at ${scheduleClock(job.nextAt, now)}.`;
-      return {
-        content: `Scheduled ${job.id}: ${when} When it fires you get: "[scheduled ${job.id} · ${job.spec} · fire N] ${job.prompt}". It lasts while this session runs.`,
-        isError: false,
+        ...(input.daily === undefined ? {} : { daily: input.daily }),
       };
+      // Both / neither of prompt|workflow: the core's own repair sentence (`create`).
+      let result: ScheduleCreateResult;
+      if (input.workflow !== undefined && input.prompt === undefined) {
+        if (schedules.createWorkflow === undefined) {
+          return { content: "workflows run only on a laptop or serve session", isError: true };
+        }
+        result = await schedules.createWorkflow(request);
+      } else {
+        result = schedules.create(request);
+      }
+      if (!result.ok) return { content: result.reason, isError: true };
+      return { content: createdText(result.job, schedules.now()), isError: false };
     },
   };
 }

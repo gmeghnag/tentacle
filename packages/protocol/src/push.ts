@@ -79,6 +79,8 @@ export const PUSH_TITLE_MAX = 200;
 /** An ask's tool name and its title (the tool call's one-line summary), and its preview. */
 export const PUSH_TOOL_MAX = 128;
 export const PUSH_ASK_TITLE_MAX = 300;
+/** A workflow run's stop reason on a banner: its first line, never its report. */
+export const PUSH_RUN_REASON_MAX = 300;
 export const PUSH_PREVIEW_MAX = 500;
 /** The fewest/most options an ask can offer (a permission request always offers one). */
 export const PUSH_OPTIONS_MAX = 8;
@@ -200,8 +202,52 @@ export const PushTurnSchema = z.object({
 });
 export type PushTurn = z.infer<typeof PushTurnSchema>;
 
-/** The push kinds: an ask, its replacement, and the two ways a turn ends that are worth a buzz. */
-export const PUSH_KINDS = ["ask", "ask_resolved", "turn_done", "turn_failed"] as const;
+/**
+ * The workflow run a push is about (kinds `run_done` / `run_stopped`): its id
+ * (`wf-N`, what the app's Elenco lists), the workflow's name, and — for a run a
+ * step cut short — the one-line reason the run states it with.
+ *
+ * No step list, no prompt, no report: those are detail the app reads over Noise
+ * (`workflow/list`, then the session's log), never something a banner carries.
+ */
+export const PushRunSchema = z.object({
+  runId: line(32),
+  name: line(64),
+  /** Why it stopped (`exit 2`, `a step was not answered in time`, …). */
+  reason: line(PUSH_RUN_REASON_MAX).optional(),
+});
+export type PushRun = z.infer<typeof PushRunSchema>;
+
+/**
+ * The schedule a `run_not_started` push is about (agent-workflows slice 10): a
+ * scheduled workflow fire that could not start for a reason the user must fix
+ * — its `sc-N`, the workflow's name, and the one-line why (`changed`,
+ * `unapproved`, …). No run id: a fire that did not start made no run.
+ */
+export const PushScheduleSchema = z.object({
+  scheduleId: line(64),
+  name: line(64),
+  reason: line(PUSH_RUN_REASON_MAX).optional(),
+});
+export type PushSchedule = z.infer<typeof PushScheduleSchema>;
+
+/**
+ * The push kinds: an ask, its replacement, the two ways a turn ends that are
+ * worth a buzz, and the two ways a WORKFLOW RUN ends (docs/feat/agent-workflows.md
+ * Q5). The run kinds are additive on a v1 plaintext: an older app's `PushKind`
+ * enum refuses a kind it does not know, and shows its placeholder (nothing else)
+ * — which is exactly why they could ship without moving `v`.
+ */
+export const PUSH_KINDS = [
+  "ask",
+  "ask_resolved",
+  "turn_done",
+  "turn_failed",
+  "run_done",
+  "run_stopped",
+  // slice 10: a scheduled workflow fire that could not start (additive on v1).
+  "run_not_started",
+] as const;
 export const PushKindSchema = z.enum(PUSH_KINDS);
 export type PushKind = z.infer<typeof PushKindSchema>;
 
@@ -225,6 +271,9 @@ export const PushMessageSchema = z.object({
   title: line(PUSH_TITLE_MAX),
   ask: PushAskSchema.optional(),
   turn: PushTurnSchema.optional(),
+  run: PushRunSchema.optional(),
+  /** For kind `run_not_started`. */
+  schedule: PushScheduleSchema.optional(),
 });
 export type PushMessage = z.infer<typeof PushMessageSchema>;
 
@@ -365,6 +414,10 @@ const LADDER: readonly ((message: PushMessage) => PushMessage)[] = [
             turnId: clipKeep(m.turn.turnId, 32),
             error: m.turn.error === undefined ? undefined : clipKeep(m.turn.error, 60),
           },
+    run:
+      m.run === undefined || m.run.reason === undefined
+        ? m.run
+        : { ...m.run, reason: clipKeep(m.run.reason, 60) },
   }),
   // 9. Last resort: every text at a stub. Still a valid, openable message.
   (m) => ({
@@ -387,6 +440,10 @@ const LADDER: readonly ((message: PushMessage) => PushMessage)[] = [
             })),
           },
     turn: m.turn === undefined ? undefined : { turnId: clipKeep(m.turn.turnId, 16) },
+    run:
+      m.run === undefined || m.run.reason === undefined
+        ? m.run
+        : { ...m.run, reason: clipKeep(m.run.reason, 24) },
   }),
 ];
 

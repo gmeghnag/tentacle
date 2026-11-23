@@ -173,3 +173,54 @@ describe("scheduleClock", () => {
     expect(scheduleClock(NOW - MIN, NOW)).toBe("14:19 (due now)");
   });
 });
+
+describe("schedule_create with a workflow target (agent-workflows slice 10)", () => {
+  /** A link whose `createWorkflow` pins a fixed hash through the real core create. */
+  function workflowLink(): ScheduleLink & { at: number } {
+    const base = fakeLink();
+    return {
+      ...base,
+      createWorkflow: async (request) =>
+        base.create({
+          ...request,
+          ...(request.workflow ? { workflow: { ...request.workflow, hash: "3f2a9b1c0d" } } : {}),
+        }),
+    };
+  }
+  const run = (input: Record<string, unknown>, link = workflowLink()) =>
+    createScheduleCreateTool(() => link).execute(input as never, ctx);
+
+  test("prompt AND workflow, or neither → refused with the repair sentence", async () => {
+    const both = await run({ prompt: "x", workflow: "nightly", every: "2h" });
+    expect(both.isError).toBe(true);
+    expect(both.content).toContain("exactly one of `prompt`");
+    const neither = await run({ every: "2h" });
+    expect(neither.isError).toBe(true);
+    expect(neither.content).toContain("exactly one of `prompt`");
+  });
+
+  test("`daily` + `every` → refused with the repair sentence", async () => {
+    const result = await run({ workflow: "nightly", daily: "03:00", every: "2h" });
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("`daily`");
+  });
+
+  test("a workflow job: the reply names the workflow, its inputs, the pinned hash, no expiry", async () => {
+    const result = await run({
+      workflow: "nightly",
+      inputs: [{ name: "slug", value: "main" }],
+      daily: "03:00",
+    });
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain("starts workflow nightly slug=main (hash 3f2a9b1c");
+    expect(result.content).toContain("no expiry");
+  });
+
+  test("a runtime with no workflows (no createWorkflow) → refused", async () => {
+    const result = await run({ workflow: "nightly", every: "2h" }, fakeLink());
+    expect(result).toEqual({
+      content: "workflows run only on a laptop or serve session",
+      isError: true,
+    });
+  });
+});

@@ -32,6 +32,7 @@ import {
   writePairingDecision,
 } from "@tentacle/daemon";
 import type { PairingPayload } from "@tentacle/protocol";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import {
   type ByteCarrier,
   type CarrierFrame,
@@ -306,11 +307,11 @@ describe("pairDevice, the happy path", () => {
     });
     try {
       const init = (await peer.request("initialize", {
-        protocolVersion: 24,
+        protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {},
         clientInfo: { name: "phone", version: "0" },
       })) as { protocolVersion: number };
-      expect(init.protocolVersion).toBe(24);
+      expect(init.protocolVersion).toBe(PROTOCOL_VERSION);
       // A paired device has a token client's rights (decision 5).
       const list = (await peer.request("session/list", {})) as { sessions: unknown[] };
       expect(Array.isArray(list.sessions)).toBe(true);

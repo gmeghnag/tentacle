@@ -10,6 +10,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import type { ByteCarrier } from "@tentacle/transport";
 import { RpcPeer, createByteCarrierPair } from "@tentacle/transport";
 import {
@@ -191,11 +192,11 @@ describe("acceptDevice builds a real Connection on a plain channel", () => {
     const peer = await connect(h.phone, key(2), identity.identity.publicKey);
     try {
       const result = (await peer.request("initialize", {
-        protocolVersion: 24,
+        protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {},
         clientInfo: { name: "phone", version: "0" },
       })) as { protocolVersion: number };
-      expect(result.protocolVersion).toBe(24);
+      expect(result.protocolVersion).toBe(PROTOCOL_VERSION);
       expect(h.built()).toBe(1);
       expect(h.settled()).toBe(1);
       expect(h.audit).toContain(`device-open ${added.device.id.slice(0, 8)}`);
@@ -335,7 +336,7 @@ describe("every outcome settles exactly once (the caller's slot)", () => {
     const h = acceptOn(configDir);
     const peer = await connect(h.phone, key(2), identity.identity.publicKey);
     await peer.request("initialize", {
-      protocolVersion: 24,
+      protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "phone", version: "0" },
     });

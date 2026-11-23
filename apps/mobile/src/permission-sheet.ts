@@ -186,9 +186,12 @@ export function sheetOptions(req: PermissionRequest): readonly SheetOption[] {
     req.suggestion !== undefined
       ? `Allow \`${req.suggestion.prefix}\` commands for this session`
       : "Allow for the rest of this session";
+  // A workflow approval is ONE human decision: the daemon offers no
+  // `allow_always` for it, so offering one here would be rejected.
+  const once = req.kind === "workflow_approve";
   return [
     { optionId: "allow_once", label: "Allow once", kind: "allow" },
-    { optionId: "allow_always", label: always, kind: "allow" },
+    ...(once ? [] : ([{ optionId: "allow_always", label: always, kind: "allow" }] as const)),
     { optionId: "reject_once", label: "Deny", kind: "deny" },
     ...(req.reply !== undefined
       ? ([{ optionId: "reply", label: "No, let's talk about it", kind: "reply" }] as const)

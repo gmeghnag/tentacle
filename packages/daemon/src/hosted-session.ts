@@ -50,6 +50,7 @@ import type {
   Session,
   SessionCapabilities,
   SessionGrants,
+  WorkflowDriver,
 } from "@tentacle/agent";
 import {
   CapabilityRefusal,
@@ -76,6 +77,7 @@ import {
   type PermissionResponse,
   SCHEDULE_ID_PREFIX,
   type ScheduleCreateResult,
+  type ScheduleLast,
   type ScheduleLimits,
   type ScheduleLink,
   type ScheduleRequest,
@@ -95,9 +97,11 @@ import {
   scheduleCreate,
   scheduleDelete,
   schedulePromptText,
+  scheduleRecordFire,
   scheduleSettled,
   scheduleStep,
   wakeDue,
+  workflowRunSeqFromHistory,
   zoneOrDefault,
 } from "@tentacle/core";
 import {
@@ -123,6 +127,8 @@ import {
   type QueuedEntry,
   type ReturnedEntry,
   SCHEDULE_LABEL_MAX,
+  type ScheduleCreateParams,
+  type ScheduleCreateResult as ScheduleCreateRpcResult,
   type ScheduleDeleteResult,
   type ScheduleRow,
   type SendNowMessage,
@@ -147,6 +153,11 @@ import {
   type WatchCategory,
   type WatchNextResult,
   type WatchResult,
+  type WorkflowListRow,
+  type WorkflowParams,
+  type WorkflowResult,
+  type WorkflowRow,
+  WorkflowRowSchema,
   clientSupportsUpdate,
   watchAccepts,
 } from "@tentacle/protocol";
@@ -347,6 +358,8 @@ interface Cut {
   readonly jobs: readonly JobRow[];
   /** The scheduled wakes as of the cut: the last `schedules` list emitted (docs/feat/cron-tool.md D5). */
   readonly schedules: readonly ScheduleRow[];
+  /** The workflow runs as of the cut: the last `workflows` list emitted (docs/feat/agent-workflows.md D5). */
+  readonly workflows: readonly WorkflowRow[];
 }
 
 /**
@@ -498,7 +511,15 @@ export type PushWatchedUpdate =
   // deliberately NOT watched.
   | UpdateOf<"turn_start">
   | UpdateOf<"tool_call">
-  | UpdateOf<"session_title">;
+  | UpdateOf<"session_title">
+  // docs/feat/agent-workflows.md slice 9: a run's end is the session's own news
+  // too, and the `workflows` update is where the session says it. Fed to the
+  // push rules as `run_end`, which ignores a run it has already announced (the
+  // list is FULL STATE and repeats an ended run on every later step).
+  | UpdateOf<"workflows">
+  // Slice 10: the `schedules` list carries a workflow fire's outcome (`last`);
+  // the push rules turn a "needs the human" one into `run_not_started`, once.
+  | UpdateOf<"schedules">;
 
 /**
  * What a push observer is told, when (`PushEvent` in `push-rules.ts` is the
@@ -943,6 +964,10 @@ export class HostedSession {
   private scheduleTimer: unknown = null;
   /** The last `schedules` list emitted (or the initial one): what the cut records. */
   private lastSchedules: readonly ScheduleRow[] = [];
+  /** The last `workflows` list emitted: what the cut records. */
+  private lastWorkflows: readonly WorkflowRow[] = [];
+  /** The workflow driver (docs/feat/agent-workflows.md D3); absent on a tunnelled session. */
+  private workflows: WorkflowDriver | undefined;
   /** The fired turns that have not ended, by turnId → the job that fired each (its failure budget). */
   private readonly firedTurns = new Map<string, string>();
   /** The committed history as a typed log (`session/log`), derived at the cut's own points. */
@@ -1052,6 +1077,7 @@ export class HostedSession {
       // no jobs), and every later job announces itself through `onStart`.
       jobs: [],
       schedules: [],
+      workflows: [],
     };
     // The scheduled wakes a restart or a reopen brings back (D6), with the
     // counter seeded from them and the history: no id the model saw is reused.
@@ -2206,6 +2232,8 @@ export class HostedSession {
       ...(cursor === undefined ? { jobs: [...cut.jobs] } : {}),
       // Only where the session schedules (a pod daemon sends none, D5).
       ...(cursor === undefined && this.scheduling ? { schedules: [...cut.schedules] } : {}),
+      // Only where the session runs workflows (a tunnelled session has no driver).
+      ...(cursor === undefined && this.workflows ? { workflows: [...cut.workflows] } : {}),
     };
   }
 
@@ -2248,6 +2276,7 @@ export class HostedSession {
       subagents: this.lastSubagents,
       jobs: this.lastJobs,
       schedules: this.lastSchedules,
+      workflows: this.lastWorkflows,
     };
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
@@ -2286,6 +2315,13 @@ export class HostedSession {
       } else {
         this.log.subagentBackground(fact);
       }
+    }
+    // A live workflow run's start, again (Slice 3 obligation): a segment that
+    // dropped the older `workflow_start` would leave a crash during the run
+    // with nothing to close at the next load.
+    const live = this.workflows?.liveStart();
+    if (live !== undefined) {
+      this.log.workflowStart(live);
     }
   }
 
@@ -2340,6 +2376,140 @@ export class HostedSession {
   /** The background sub-agents still running (6a's liveness, the quit count, `/clear`'s hand-over). */
   agentJobsRunning(): readonly AgentJob[] {
     return this.agentJobs.running();
+  }
+
+  /**
+   * Bind the session's workflow driver (docs/feat/agent-workflows.md D3). The
+   * session host calls it once, right after construction, and only where the
+   * factory built one (never on a tunnelled session). Seeded from the history,
+   * so a restart never re-mints a run id the log or the conversation names.
+   */
+  attachWorkflows(driver: WorkflowDriver): void {
+    this.workflows = driver;
+    driver.reserveRunIds(workflowRunSeqFromHistory(this.session.messages));
+    driver.bind({
+      // The durable facts: logged at once, made durable by the next write.
+      logStart: (body) => {
+        this.log.workflowStart(body);
+        this.persist();
+      },
+      logStep: (body) => {
+        this.log.workflowStep(body);
+        this.persist();
+      },
+      logEnd: (body) => {
+        this.log.workflowEnd(body);
+        this.persist();
+      },
+      // A step's asks ride the background path, attributed to the start turn (A2).
+      attribute: (agentId, turnId) => {
+        if (turnId !== undefined) {
+          this.spawnTurns.set(agentId, turnId);
+        }
+      },
+      release: (agentId) => {
+        this.spawnTurns.delete(agentId);
+      },
+      publish: (rows) => this.publishWorkflows(rows),
+      // The end note rides the exits queue (told at the next turn) and wakes.
+      ended: (runId, note) => {
+        this.spawnTurns.delete(runId);
+        this.session.noteWorkflowEnd(runId, note);
+        this.kickWake();
+      },
+    });
+    // The starting list is STATE, not an event: nobody is attached yet (this runs
+    // inside session creation), so it is set for the snapshot without an emit or a
+    // cut. A cut here committed before the session's open had finished and lost
+    // the first turn's text (review R2-2, connect-model-error (R5)).
+    const initial = WorkflowRowSchema.array().safeParse(driver.rows());
+    if (initial.success) {
+      this.lastWorkflows = initial.data;
+      this.cut = { ...this.cut, workflows: initial.data };
+    }
+  }
+
+  /** The full `workflows` list, judged by its schema on the way out; the cut follows when idle. */
+  private publishWorkflows(rows: readonly unknown[]): void {
+    if (this.closed) {
+      return;
+    }
+    const parsed = WorkflowRowSchema.array().safeParse(rows);
+    if (!parsed.success) {
+      this.reportTurnError(new Error(`workflows: ${parsed.error.message}`));
+      return;
+    }
+    this.lastWorkflows = parsed.data;
+    try {
+      this.emit({ type: "workflows", runs: parsed.data });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+  }
+
+  /**
+   * `session/workflow` (D3): the USER starts / stops / resumes a run. A
+   * session without a driver (tunnelled: a pod's daemon) refuses — a run's
+   * asks and approvals belong to the laptop or a `serve` daemon.
+   */
+  async workflow(params: WorkflowParams): Promise<WorkflowResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return { ok: false, reason: "workflows run only on a laptop or serve session" };
+    }
+    if ("turnId" in params && params.turnId.startsWith(WAKE_TURN_PREFIX)) {
+      return { ok: false, reason: "a wake turn id cannot start a workflow" };
+    }
+    switch (params.action) {
+      case "start": {
+        const inputs = new Map<string, string>();
+        for (const { name, value } of params.inputs ?? []) {
+          if (inputs.has(name)) {
+            return { ok: false, reason: `input ${name} is given twice` };
+          }
+          inputs.set(name, value);
+        }
+        return driver.start({
+          name: params.name,
+          inputs: Object.fromEntries(inputs),
+          by: "user",
+          turnId: params.turnId,
+        });
+      }
+      case "stop":
+        return driver.stop(params.runId);
+      case "resume":
+        return driver.rerun(params.runId, undefined, params.turnId);
+      case "rerun_step":
+        return driver.rerun(params.runId, params.stepId, params.turnId);
+    }
+  }
+
+  /** This session's rows of `workflow/list` (D5): the hub's signal is `needsUser`. */
+  workflowListRows(): WorkflowListRow[] {
+    const title = this.wireTitle().text;
+    return this.lastWorkflows.map((run) => {
+      const step = run.steps.find(
+        (s) => s.state === "running" || s.state === "waiting" || s.state === "needs-approval",
+      );
+      return {
+        sessionId: this.id,
+        ...(title !== "" ? { title } : {}),
+        runId: run.runId,
+        name: run.name,
+        state: run.state,
+        ...(step !== undefined && run.endedAt === undefined ? { step: step.id } : {}),
+        done: run.steps.filter((s) => s.state === "ok").length,
+        total: run.steps.length,
+        needsUser:
+          run.endedAt === undefined && (run.state === "needs-approval" || run.state === "waiting"),
+        startedAt: run.startedAt,
+        ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
+      };
+    });
   }
 
   /**
@@ -2562,7 +2732,12 @@ export class HostedSession {
       // of `attachments`, stays synchronous, and is still never awaited.
       update.type !== "turn_start" &&
       update.type !== "tool_call" &&
-      update.type !== "session_title"
+      update.type !== "session_title" &&
+      // Slice 9: a run's end (owner Q5). Full state, so the push rules see the
+      // same ended run again on a later step; they announce each run id ONCE.
+      update.type !== "workflows" &&
+      // Slice 10: a scheduled workflow fire that did not start (`run_not_started`).
+      update.type !== "schedules"
     ) {
       return;
     }
@@ -3006,9 +3181,11 @@ export class HostedSession {
     readonly agentJobs?: AgentJobs;
     readonly grants?: SessionGrants;
     readonly workloadShells?: WorkloadShellsLike;
+    readonly workflows?: WorkflowDriver;
   } {
     return {
       permissions: this.permissions,
+      ...(this.workflows ? { workflows: this.workflows } : {}),
       ...(this.jobs ? { jobs: this.jobs } : {}),
       ...(this.agentRuntime ? { agentJobs: this.agentRuntime } : {}),
       ...(this.grants ? { grants: this.grants } : {}),
@@ -3498,6 +3675,12 @@ export class HostedSession {
     return {
       now: () => this.now(),
       create: (request) => this.createSchedule(request),
+      createWorkflow: (request) =>
+        this.createWorkflowSchedule(
+          request,
+          this.activeTurnId ?? "",
+          this.activeTurnId ?? undefined,
+        ),
       list: () => this.scheduleTable,
       delete: (id) => this.removeSchedule(id),
     };
@@ -3519,6 +3702,90 @@ export class HostedSession {
       this.scheduleChanged(result.table);
     }
     return result;
+  }
+
+  /**
+   * A WORKFLOW schedule (agent-workflows slice 10 S10-4), from the model's
+   * `schedule_create{workflow}` or the user's `session/schedule_create`. The
+   * file and inputs are validated through the driver and the CURRENT hash is
+   * pinned. An unapproved hash does not refuse: the job is created and the
+   * approval is asked NOW, while someone is there (raised, never awaited —
+   * a fire before the answer records `unapproved`).
+   */
+  async createWorkflowSchedule(
+    request: ScheduleRequest,
+    createdBy: string,
+    approvalTurnId: string | undefined,
+  ): Promise<ScheduleCreateResult> {
+    const workflow = request.workflow;
+    if (workflow === undefined || request.prompt !== undefined) {
+      return { ok: false, reason: "give exactly one of `prompt` or `workflow`" };
+    }
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return { ok: false, reason: "workflows run only on a laptop or serve session" };
+    }
+    if (this.scheduling === undefined) {
+      return { ok: false, reason: "this session cannot schedule" };
+    }
+    const inputs = new Map<string, string>();
+    for (const { name, value } of workflow.inputs) {
+      if (inputs.has(name)) {
+        return { ok: false, reason: `input ${name} is given twice` };
+      }
+      inputs.set(name, value);
+    }
+    const seen = await driver.inspect(workflow.name, Object.fromEntries(inputs));
+    if (!seen.ok) {
+      return { ok: false, reason: seen.reason };
+    }
+    if (this.closed) {
+      return { ok: false, reason: "this session has ended" };
+    }
+    const result = scheduleCreate(
+      this.scheduleTable,
+      { ...request, workflow: { ...workflow, hash: seen.hash } },
+      {
+        id: `${SCHEDULE_ID_PREFIX}${this.scheduleSeq + 1}`,
+        now: this.now(),
+        createdBy,
+        ...(this.scheduling.limits ? { limits: this.scheduling.limits } : {}),
+      },
+    );
+    if (!result.ok) {
+      return result;
+    }
+    this.scheduleSeq += 1;
+    this.scheduleChanged(result.table);
+    this.scheduleAudit(`schedule: ${result.job.id} created workflow ${workflow.name} ${this.id}`);
+    if (!seen.approved) {
+      void driver.requestApproval(workflow.name, approvalTurnId).catch(() => {});
+    }
+    return result;
+  }
+
+  /**
+   * `session/schedule_create` (S10-4): the USER schedules a workflow. Answers up
+   * to the create; the approval ask, when needed, is raised and never awaited
+   * (§7). A `wake-` id is the daemon's own and is refused, as on `session/workflow`.
+   */
+  async scheduleCreateRpc(params: ScheduleCreateParams): Promise<ScheduleCreateRpcResult> {
+    if (params.turnId.startsWith(WAKE_TURN_PREFIX)) {
+      return { ok: false, reason: "a wake turn id cannot create a schedule" };
+    }
+    const result = await this.createWorkflowSchedule(
+      {
+        workflow: { name: params.workflow.name, inputs: params.workflow.inputs ?? [] },
+        ...(params.every !== undefined ? { every: params.every } : {}),
+        ...(params.at !== undefined ? { at: params.at } : {}),
+        ...(params.daily !== undefined ? { daily: params.daily } : {}),
+      },
+      params.turnId,
+      params.turnId,
+    );
+    return result.ok
+      ? { ok: true, scheduleId: result.job.id }
+      : { ok: false, reason: result.reason.slice(0, 2000) };
   }
 
   /** Drop one job (the model's `schedule_control{delete}` or the user's method). */
@@ -3581,6 +3848,14 @@ export class HostedSession {
     for (const job of step.expired) {
       this.scheduleAudit(`schedule: ${job.id} expired ${this.id}`);
     }
+    for (const job of step.missed) {
+      this.scheduleAudit(`schedule: ${job.id} missed (later than the grace) ${this.id}`);
+    }
+    if (step.due !== null && step.due.target !== undefined) {
+      // A workflow job: the driver starts the run directly — no turn, no slot.
+      this.fireWorkflow(step.due, step.table);
+      return;
+    }
     if (step.due === null) {
       if (changed) {
         this.scheduleTable = step.table;
@@ -3629,6 +3904,99 @@ export class HostedSession {
       this.reportTurnError(error);
     }
     this.scheduleAudit(`wake: scheduled ${job.id} ${this.id}`);
+    this.armSchedules();
+  }
+
+  /**
+   * Fire a WORKFLOW job (slice 10 S10-2), already advanced in `table`: commit
+   * and capture the advance FIRST (at-most-once, as `fireSchedule`), then ask
+   * the driver for a scheduled start under a daemon-minted `wake-` turn id (A10:
+   * the id both sides' auto-accept trust, and never a client's). No `prompt()`,
+   * no `firedTurns`, no turn slot. The outcome is recorded on the row (`last`),
+   * captured, published and audited when the driver answers.
+   */
+  private fireWorkflow(job: ScheduledJob, table: readonly ScheduledJob[]): void {
+    // The advanced row is a NEW fire (`fires` +1): it must not carry the
+    // previous fire's `last`, or a reader keyed on `<id>#<fires>` (the push
+    // rules) takes the old outcome for this fire. `last` is set again when the
+    // driver answers (`settleWorkflowFire`).
+    this.scheduleTable = table.map((row) => {
+      if (row.id !== job.id || row.last === undefined) return row;
+      const { last: _previous, ...fresh } = row;
+      return fresh;
+    });
+    this.persist();
+    this.publishSchedules();
+    const target = job.target?.workflow;
+    const driver = this.workflows;
+    const at = this.now();
+    if (target === undefined || driver === undefined) {
+      this.settleWorkflowFire(job.id, {
+        at,
+        outcome: "unavailable",
+        reason: "workflows run only on a laptop or serve session",
+      });
+      this.armSchedules();
+      return;
+    }
+    const inputs: Record<string, string> = {};
+    for (const { name, value } of target.inputs) inputs[name] = value;
+    void driver
+      .startScheduled({
+        name: target.name,
+        inputs,
+        pinnedHash: target.hash,
+        scheduleId: job.id,
+        turnId: `${WAKE_TURN_PREFIX}${crypto.randomUUID()}`,
+      })
+      .then(
+        (result) =>
+          this.settleWorkflowFire(
+            job.id,
+            result.ok
+              ? { at, outcome: "started", runId: result.runId }
+              : { at, outcome: result.outcome, reason: result.reason },
+          ),
+        (error: unknown) =>
+          this.settleWorkflowFire(job.id, {
+            at,
+            outcome: "invalid",
+            reason: error instanceof Error ? error.message : String(error),
+          }),
+      );
+    this.armSchedules();
+  }
+
+  /** Record a workflow fire's outcome (`last`), the failure stop, and tell everyone. */
+  private settleWorkflowFire(jobId: string, last: ScheduleLast): void {
+    if (this.closed) {
+      return;
+    }
+    const { table, removed } = scheduleRecordFire(this.scheduleTable, jobId, last);
+    if (removed) {
+      // The row with its last outcome is published once before it goes, so a
+      // reader (the push rules) sees WHY it was removed.
+      this.scheduleTable = this.scheduleTable.map((job) =>
+        job.id === jobId
+          ? {
+              ...job,
+              last: { ...last, reason: `${last.reason ?? last.outcome} · schedule removed` },
+            }
+          : job,
+      );
+      this.publishSchedules();
+    }
+    this.scheduleTable = table;
+    this.persist();
+    this.publishSchedules();
+    this.scheduleAudit(
+      last.outcome === "started"
+        ? `schedule: ${jobId} started ${last.runId ?? ""} ${this.id}`
+        : `schedule: ${jobId} not started · ${last.outcome} ${this.id}`,
+    );
+    if (removed) {
+      this.scheduleAudit(`schedule: ${jobId} stopped after failures ${this.id}`);
+    }
     this.armSchedules();
   }
 
@@ -4050,6 +4418,8 @@ export class HostedSession {
       jobs: this.lastJobs,
       // And the scheduled wakes (owner Q7: `/clear` keeps them; a compaction too).
       schedules: this.lastSchedules,
+      // And the workflow runs: a run lives across a compaction or `/clear`.
+      workflows: this.lastWorkflows,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
@@ -4168,6 +4538,8 @@ export class HostedSession {
     this.unsubscribeAgentNotify?.();
     this.unsubscribeAgentRows?.();
     this.agentRuntime?.dispose();
+    // A live run is cut (`interrupted`); a reload closes it from the log too.
+    this.workflows?.dispose();
   }
 
   /**

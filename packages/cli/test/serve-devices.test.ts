@@ -15,6 +15,7 @@ import {
   DEVICE_DIR,
   readDaemonRecords,
 } from "@tentacle/daemon";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { startDaemon } from "../src/serve.ts";
 
@@ -215,11 +216,11 @@ describe("the device route is on for a serve daemon", () => {
     });
     try {
       const result = (await peer.request("initialize", {
-        protocolVersion: 24,
+        protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {},
         clientInfo: { name: "phone", version: "0" },
       })) as { protocolVersion: number };
-      expect(result.protocolVersion).toBe(24);
+      expect(result.protocolVersion).toBe(PROTOCOL_VERSION);
     } finally {
       peer.close();
     }

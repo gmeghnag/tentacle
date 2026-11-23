@@ -16,8 +16,9 @@ import {
   decodeBase64Url,
   encodeBase64Url,
 } from "@tentacle/protocol";
-import type { PermissionRequestUpdate } from "@tentacle/protocol";
+import type { PermissionRequestUpdate, WorkflowRow } from "@tentacle/protocol";
 import { openPush, publicKeyOf } from "@tentacle/transport/push";
+import type { PushWatchedUpdate } from "../src/hosted-session.ts";
 import {
   type PushDelivery,
   type PushNotifier,
@@ -200,6 +201,32 @@ function open(delivery: PushDelivery): PushMessage {
 async function settled(rounds = 50): Promise<void> {
   for (let i = 0; i < rounds; i++) await Promise.resolve();
 }
+
+/** One `workflows` update's row (docs/feat/agent-workflows.md D5), minimal for a push. */
+function runRow(over: {
+  runId: string;
+  name: string;
+  state: string;
+  stopReason?: string;
+  reason?: string;
+  endedAt?: number;
+}): WorkflowRow {
+  return {
+    runId: over.runId,
+    name: over.name,
+    version: 1,
+    hash: "a".repeat(64),
+    state: over.state,
+    ...(over.stopReason !== undefined ? { stopReason: over.stopReason } : {}),
+    ...(over.reason !== undefined ? { reason: over.reason } : {}),
+    tokens: 0,
+    startedAt: 1,
+    ...(over.endedAt !== undefined ? { endedAt: over.endedAt } : {}),
+    steps: [{ id: "plan", kind: "agent", where: "local", state: "ok", attempt: 1, round: 0 }],
+  };
+}
+
+const workflowsUpdate = (runs: WorkflowRow[]): PushWatchedUpdate => ({ type: "workflows", runs });
 describe("the sealed envelope opens with the device key + the computer key", () => {
   test("an unanswered ask reaches the registered device, and it OPENS", async () => {
     // Mutation: seal to the COMPUTER's key instead of the device's, or drop
@@ -726,6 +753,206 @@ describe("the notifier's own failure modes", () => {
     await settled();
     expect(r.deliveries).toEqual([]);
     expect(r.notifier.retained().turnErrors).toBe(0);
+  });
+
+  test("a run's ask is ONE push, and its answer replaces it (slice 9's S9 row)", async () => {
+    // docs/feat/agent-workflows.md §Tests S9: "a run waiting on the user
+    // produces exactly one push; resolved → ask_resolved". A step's ask needs no
+    // new mechanism — it IS a `permission_request` (D5), including the
+    // `workflow_approve` kind the app must never auto-answer.
+    // Mutation: push on every `permission_request` without the grace → two
+    // buzzes for one wait, and the store's "one banner" claim breaks.
+    const r = rig({ graceMs: 30_000, registrations: [DEVICE_A] });
+    r.allow(DEVICE_A);
+    const approve: PermissionRequestUpdate = {
+      ...askUpdate("wf-ask-1"),
+      tool: "workflow_approve",
+      title: "Run workflow task v1",
+      options: [
+        { optionId: "allow_once", kind: "allow_once", name: "Allow once" },
+        { optionId: "reject_once", kind: "reject_once", name: "Deny" },
+      ],
+    };
+    r.notifier.onPushEvent("S", { type: "update", update: approve }, NOBODY);
+    expect(r.deliveries).toEqual([]);
+    r.clock.advance(30_000);
+    r.timers.fire();
+    await settled();
+    expect(r.deliveries).toHaveLength(1);
+    const asked = open(r.deliveries[0] as PushDelivery);
+    expect(asked.kind).toBe("ask");
+    expect(asked.ask?.tool).toBe("workflow_approve");
+    r.notifier.onPushEvent(
+      "S",
+      {
+        type: "update",
+        update: {
+          type: "permission_resolved",
+          requestId: "wf-ask-1",
+          outcome: { optionId: "allow_once", outcome: "selected" },
+        },
+      },
+      NOBODY,
+    );
+    await settled();
+    expect(r.deliveries).toHaveLength(2);
+    expect(open(r.deliveries[1] as PushDelivery).kind).toBe("ask_resolved");
+    expect(r.notifier.retained().asks).toBe(0);
+  });
+
+  test("a run's end reaches the phone, named, once (slice 9: the sealed push)", async () => {
+    // docs/feat/agent-workflows.md slice 9 (owner Q5): a run ending is news the
+    // same way a turn ending is. The session reports runs ONLY through the
+    // full-state `workflows` update, so that update is the seam — and because it
+    // repeats an ended run on every later step, the notifier must push once.
+    // Mutations: (a) drop the `workflows` case → no delivery at all;
+    // (b) drop the rules' announced-run memory → one push per repeated update.
+    const r = rig({ graceMs: 0, registrations: [DEVICE_A] });
+    r.allow(DEVICE_A);
+    const update = workflowsUpdate([
+      runRow({ runId: "wf-1", name: "task", state: "ok", endedAt: 5 }),
+      runRow({ runId: "wf-2", name: "task", state: "running" }),
+    ]);
+    r.notifier.onPushEvent("S", { type: "update", update }, NOBODY);
+    await settled();
+    expect(r.deliveries).toHaveLength(1);
+    const message = open(r.deliveries[0] as PushDelivery);
+    expect(message.kind).toBe("run_done");
+    // The run is NAMED: the wheels carry `wf-N`, and the banner says the workflow.
+    expect(message.run).toEqual({ runId: "wf-1", name: "task" });
+    // The full-state list repeats it: no second buzz.
+    r.notifier.onPushEvent("S", { type: "update", update }, NOBODY);
+    await settled();
+    expect(r.deliveries).toHaveLength(1);
+    expect(r.notifier.retained().runs).toBe(0);
+  });
+
+  test("a scheduled fire that did not start reaches the phone once, named; `skipped` never does (slice 10)", async () => {
+    // Mutations: drop the `schedules` case → no delivery; push `skipped` too → 2 deliveries.
+    const r = rig({ graceMs: 0, registrations: [DEVICE_A] });
+    r.allow(DEVICE_A);
+    const row = (id: string, fires: number, outcome: string) => ({
+      id,
+      kind: "daily",
+      spec: "daily 03:00",
+      prompt: "workflow nightly",
+      nextAt: 10,
+      fires,
+      createdAt: 1,
+      workflow: { name: "nightly", inputs: [], hash: "3f2a9b1c" },
+      last: { at: 5, outcome, reason: `${outcome}\nsecond line` },
+    });
+    const update: PushWatchedUpdate = {
+      type: "schedules",
+      schedules: [row("sc-3", 1, "changed"), row("sc-4", 2, "skipped")],
+    };
+    r.notifier.onPushEvent("S", { type: "update", update }, NOBODY);
+    await settled();
+    expect(r.deliveries).toHaveLength(1);
+    const message = open(r.deliveries[0] as PushDelivery);
+    expect(message.kind).toBe("run_not_started");
+    expect(message.schedule).toEqual({
+      scheduleId: "sc-3",
+      name: "nightly",
+      reason: "changed second line",
+    });
+    r.notifier.onPushEvent("S", { type: "update", update }, NOBODY);
+    await settled();
+    expect(r.deliveries).toHaveLength(1);
+  });
+
+  test("a run stopped with a reason carries it, one line", async () => {
+    const r = rig({ graceMs: 0, registrations: [DEVICE_A] });
+    r.allow(DEVICE_A);
+    r.notifier.onPushEvent(
+      "S",
+      {
+        type: "update",
+        update: workflowsUpdate([
+          runRow({
+            runId: "wf-3",
+            name: "gate",
+            state: "stopped",
+            stopReason: "timeout",
+            reason: "gate: an ask was not answered in time",
+            endedAt: 9,
+          }),
+        ]),
+      },
+      NOBODY,
+    );
+    await settled();
+    const message = open(r.deliveries[0] as PushDelivery);
+    expect(message.kind).toBe("run_stopped");
+    expect(message.run).toEqual({
+      runId: "wf-3",
+      name: "gate",
+      reason: "gate: an ask was not answered in time",
+    });
+  });
+
+  test("a multi-line reason is flattened, never dropped: the wire refuses a newline", async () => {
+    // A failed `run` step's reason is the TAIL of its output, so it holds
+    // newlines — which the plaintext's `line()` rejects. Building the message
+    // with them makes `fitPushMessage` return a shape `PushMessageSchema`
+    // refuses, and the push is silently dropped. Mutation: pass `reason` through
+    // unchanged → `open()` here throws.
+    const r = rig({ graceMs: 0, registrations: [DEVICE_A] });
+    r.allow(DEVICE_A);
+    r.notifier.onPushEvent(
+      "S",
+      {
+        type: "update",
+        update: workflowsUpdate([
+          runRow({
+            runId: "wf-5",
+            name: "gate",
+            state: "error",
+            reason: "exit 2\nfailing test: foo\n  at bar.ts:1",
+            endedAt: 3,
+          }),
+        ]),
+      },
+      NOBODY,
+    );
+    await settled();
+    expect(r.deliveries).toHaveLength(1);
+    const message = open(r.deliveries[0] as PushDelivery);
+    expect(message.kind).toBe("run_stopped");
+    expect(message.run?.reason).toBe("exit 2 failing test: foo at bar.ts:1");
+    // A reason that is only whitespace is ABSENT, never an empty string.
+    const empty = rig({ graceMs: 0, registrations: [DEVICE_A] });
+    empty.allow(DEVICE_A);
+    empty.notifier.onPushEvent(
+      "S",
+      {
+        type: "update",
+        update: workflowsUpdate([
+          runRow({ runId: "wf-6", name: "gate", state: "error", reason: "  \n ", endedAt: 4 }),
+        ]),
+      },
+      NOBODY,
+    );
+    await settled();
+    const bare = open(empty.deliveries[0] as PushDelivery);
+    expect(bare.run).toEqual({ runId: "wf-6", name: "gate" });
+  });
+
+  test("a run end with a client watching pushes nothing, and leaks nothing", async () => {
+    const r = rig({ graceMs: 0, registrations: [DEVICE_A] });
+    r.allow(DEVICE_A);
+    r.notifier.onPushEvent(
+      "S",
+      {
+        type: "update",
+        update: workflowsUpdate([runRow({ runId: "wf-1", name: "t", state: "ok", endedAt: 1 })]),
+      },
+      { clients: 1, devices: [DEVICE_A] },
+    );
+    await settled();
+    expect(r.deliveries).toEqual([]);
+    // The rules decided not to push, so the fact it would have used is gone.
+    expect(r.notifier.retained().runs).toBe(0);
   });
 
   test("stop() clears the timer: nothing fires afterwards", async () => {

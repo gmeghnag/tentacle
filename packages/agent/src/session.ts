@@ -249,6 +249,10 @@ export class Session {
    * docs/feat/subagent-panel.md): the parent's note, on the CURRENT agent (a
    * replacement carries it over like any pending exit).
    */
+  noteWorkflowEnd(runId: string, text: string): void {
+    this.agent.noteWorkflowEnd(runId, text);
+  }
+
   noteUserToSubagent(agentId: string, text: string): void {
     this.agent.noteUserToSubagent(agentId, text);
   }

@@ -1,0 +1,265 @@
+<title>Diagramma dei workflow</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: four phones in a wrap row — runs list → diagram A (cards) → diagram B (graph) → step detail; tapping drives the others. */
+:root {
+  --bg: #eceff0; --fg: #1b2123; --muted: #5a6568; --line: #d0d7d9; --pick: #0f7f93;
+  --app: #151B1D; --label: #D5DDDE; --sec: #98A6A8; --sep: #2D393D; --card: #1D2528; --fill: #262E32; --acc: #2ab3cf; --err: #e8737a; --off: #485058;
+  --sans: "Figtree", -apple-system, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark } }
+:root[data-theme="dark"] { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.45 var(--sans); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 22px 48px; }
+main { max-width: 1560px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+h1 { font-size: 22px; margin: 0; }
+.lead { margin: 4px 0 0; color: var(--muted); max-width: 84ch; }
+.row { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
+.v { width: 350px; max-width: 100%; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.v h2 { font-size: 15px; margin: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.v h2 .n { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--pick); font-weight: 600; }
+.v p { margin: 0; color: var(--muted); font-size: 13.5px; min-height: 4.2em; }
+.ph { background: var(--app); color: var(--label); border-radius: 30px; padding: 16px 16px 20px; display: flex; flex-direction: column; gap: 12px; min-height: 640px; -webkit-font-smoothing: antialiased; }
+.top { display: grid; grid-template-columns: 28px 1fr 28px; align-items: center; text-align: center; font-weight: 600; font-size: 16px; }
+.top small { display: block; color: var(--sec); font-weight: 400; font-size: 12px; }
+.top .bk { color: var(--acc); font-size: 20px; text-align: left; }
+.sec { color: var(--sec); font-size: 12.5px; letter-spacing: .04em; text-transform: uppercase; margin-top: 4px; }
+.run { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 10px 12px; border-radius: 12px; cursor: pointer; }
+.run.on { background: var(--card); }
+.run .nm { font-weight: 600; font-size: 15px; } .run .when { color: var(--sec); font-size: 12.5px; text-align: right; }
+.run .stt { font-size: 13.5px; color: var(--sec); } .run .stt.e { color: var(--err); } .run .stt.a { color: var(--acc); }
+.run .strip { grid-column: 1 / -1; font: 13px var(--mono); letter-spacing: 3px; color: var(--sec); }
+.run .ver { grid-column: 1 / -1; font: 11px var(--mono); color: var(--off); }
+.blink { animation: bl 1s steps(1) infinite; }
+@keyframes bl { 50% { opacity: .25; } }
+/* A: cards */
+.flow { display: flex; flex-direction: column; align-items: stretch; gap: 0; position: relative; }
+.nd { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; padding: 9px 11px; border-radius: 12px; border: 1.5px solid var(--sep); cursor: pointer; background: transparent; }
+.nd .g { font-size: 15px; text-align: center; }
+.nd .nm { font-weight: 600; font-size: 14.5px; } .nd .mt { color: var(--sec); font-size: 12px; grid-column: 2; }
+.nd .du { color: var(--sec); font-size: 12.5px; grid-row: 1 / 3; grid-column: 3; text-align: right; }
+.nd.ok { background: var(--card); border-color: var(--card); }
+.nd.err { border-color: var(--err); border-width: 2.5px; }
+.nd.err .g, .nd.err .w { color: var(--err); }
+.nd.run { border-color: var(--acc); animation: pulse 1.2s steps(1) infinite; }
+@keyframes pulse { 50% { border-color: var(--sep); } }
+.nd.wait { border-style: dashed; color: var(--sec); }
+.nd.ask { border-style: double; border-width: 4px; border-color: var(--label); }
+.nd.sel { box-shadow: 0 0 0 2px var(--pick); }
+.wire { height: 14px; width: 1.5px; background: var(--sep); margin-left: 21px; }
+.wire.fut { background: repeating-linear-gradient(var(--off) 0 3px, transparent 3px 6px); }
+.loop { display: grid; grid-template-columns: minmax(0, 1fr) 70px; align-items: stretch; }
+.loop .br { border: 1.5px solid var(--err); border-left: 0; border-radius: 0 12px 12px 0; margin: 18px 0 18px 0; position: relative; }
+.loop .br span { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); font-size: 11.5px; color: var(--err); line-height: 1.2; }
+.loop .pair { display: flex; flex-direction: column; }
+/* B: graph */
+svg text { font-family: var(--sans); }
+.gn { cursor: pointer; }
+.gn.run .shape { animation: pulseS 1.2s steps(1) infinite; }
+@keyframes pulseS { 50% { stroke: var(--sep); } }
+/* detail */
+.dt { display: flex; flex-direction: column; gap: 10px; }
+.dt .hd { display: flex; gap: 10px; align-items: center; }
+.dt .hd .big { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: 17px; border: 2px solid var(--sep); }
+.dt .hd .big.run { border-color: var(--acc); color: var(--acc); }
+.dt .hd .big.err { border-color: var(--err); color: var(--err); }
+.dt .hd .big.ok { background: var(--card); border-color: var(--card); }
+.dt .hd .big.wait { border-style: dashed; color: var(--sec); }
+.dt .hd .big.ask { border-style: double; border-width: 4px; }
+.dt .hd b { font-size: 17px; } .dt .hd small { display: block; color: var(--sec); font-size: 13px; }
+.kv { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 6px 10px; font-size: 13.5px; }
+.kv dt { color: var(--sec); } .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.log { background: var(--card); border-radius: 10px; padding: 10px; font: 11.5px/1.55 var(--mono); color: var(--sec); white-space: pre-wrap; }
+.log .e { color: var(--err); } .log .a { color: var(--acc); }
+.acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn { font: 600 14px var(--sans); border: 0; border-radius: 11px; padding: 10px 12px; cursor: pointer; background: var(--fill); color: var(--label); }
+.btn.pri { background: var(--label); color: var(--app); }
+@media (prefers-reduced-motion: reduce) { .blink, .nd.run, .gn.run .shape { animation: none; } }
+
+.mg .pill { cursor: pointer; }
+.mg .run .halo { animation: halo 1.6s ease-in-out infinite; }
+@keyframes halo { 0%, 100% { opacity: .15; } 50% { opacity: .5; } }
+.mg .flow { stroke-dasharray: 5 6; animation: flow 1s linear infinite; }
+@keyframes flow { to { stroke-dashoffset: -11; } }
+.hscroll { overflow-x: auto; margin: 0 -16px; padding: 0 16px; }
+@media (prefers-reduced-motion: reduce) { .mg .run .halo, .mg .flow { animation: none; } }
+.notes { border-top: 1px solid var(--line); padding-top: 12px; max-width: 84ch; display: flex; flex-direction: column; gap: 6px; }
+.notes h2 { margin: 0; font-size: 16px; }
+.notes ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
+</style>
+<main>
+  <div>
+    <h1>Workflow su iPhone: elenco, diagramma, dettaglio</h1>
+    <p class="lead">Tutte le corse dei workflow stanno in un posto solo, la schermata «Workflow», raggiungibile dall'hub. Tocca una corsa: il diagramma la mostra a schede (A, scelta) e in due grafi moderni da valutare (C verticale, D orizzontale). Tocca un passo, in una delle due, e il dettaglio a destra cambia. Lo stato si capisce dalla forma prima che dal colore: pieno = fatto, bordo spesso con ✗ = errore, bordo che lampeggia = in corso, tratteggio = in attesa, doppio bordo con ? = da approvare. Tutto «nuovo».</p>
+  </div>
+  <div class="row">
+    <section class="v"><h2>1 · Elenco delle corse <span class="n">nuovo</span></h2><p>Un solo posto per tutte le corse, prima quelle in corso. La striscia di simboli riassume i passi; sotto, il workflow con la sua versione (appunto: versione + hash del file).</p><div class="ph" id="list"></div></section>
+    <section class="v"><h2>2A · Diagramma a schede <span class="n">consiglio</span></h2><p>Un passo per scheda, dall'alto in basso. Il giro review ⇄ fix è una parentesi a destra con il contatore. Si legge bene anche con molti passi.</p><div class="ph" id="dA"></div></section>
+    <section class="v"><h2>2C · Grafo moderno, verticale <span class="n">nuovo</span></h2><p>Nodi a «pillola» con il simbolo dentro, linee curve morbide al posto di quelle spezzate. Il collegamento verso il passo in corso scorre, il nodo in corso ha un alone che pulsa.</p><div class="ph" id="dC"></div></section>
+    <section class="v"><h2>2D · Grafo moderno, orizzontale <span class="n">nuovo</span></h2><p>Come una tela di n8n: schede da sinistra a destra, si scorre col dito. Fix sotto review, il giro tra i due è un arco. Più spazio per il grafo, meno per il testo.</p><div class="ph" id="dD"></div></section>
+    <section class="v"><h2>3 · Dettaglio del passo <span class="n">nuovo</span></h2><p>Si apre toccando un passo. Se è in corso il simbolo lampeggia e si vede l'ultima azione. In fondo: rilancia solo questo passo, output completo.</p><div class="ph" id="det"></div></section>
+  </div>
+  <div class="notes">
+    <h2>Da decidere</h2>
+    <ul>
+      <li>Schede (A) scelte. Grafo moderno: C (verticale) o D (orizzontale)? Il grafo può essere un secondo modo di vedere la stessa corsa (un tasto «schede / grafo»).</li>
+      <li>L'elenco delle corse nell'hub (bottone flottante) con un badge quando un passo aspetta te?</li>
+      <li>Appunto: ogni corsa ricorda versione e hash del file del workflow, così si sa sempre con quale versione è girata.</li>
+    </ul>
+  </div>
+</main>
+<script>
+const G = { ok: "✓", err: "✗", run: "▸", wait: "○", ask: "?", stop: "‖" };
+const W = { ok: "ok", err: "errore", run: "in corso", wait: "in attesa", ask: "da approvare", stop: "fermato" };
+const mk = (id, kind, st, model, where, du, extra) => ({ id, kind, st, model, where, du, ...extra });
+const RUNS = [
+  { name: "task · cron-tool", wf: "task", ver: "v3 · a1b2c3d", when: "da 23 min", st: "run", pos: "4 di 7", loop: "1/3",
+    steps: [
+      mk("plan", "agent", "ok", "opus", "local", "2m", { prompt: "plan.md", tok: "in 38k · out 6k", log: "doc scritto: docs/feat/cron-tool.md" }),
+      mk("exec", "agent", "ok", "deepseek", "local", "14m", { prompt: "exec.md", tok: "in 410k · out 31k", retry: "1 (ECONNRESET)", log: "9 file cambiati\nscript gate verde" }),
+      mk("review", "agent", "err", "opus", "local", "3m", { prompt: "review.md", tok: "in 41k · out 3k", branch: "on_fail → fix (1 di 3)", log: "<span class=e>REQUEST-CHANGES</span>\n1. task.ts:380 manca abort\n2. test vacuo" }),
+      mk("fix", "agent", "run", "deepseek", "local", "1m40s", { prompt: "fix.md", tok: "in 92k · out 4k (finora)", log: "<span class=a>▸ edit packages/x.ts</span>\n  bun test task.test.ts …" }),
+      mk("review 2", "agent", "wait", "opus", "local", "", { prompt: "review.md", log: "parte dopo fix" }),
+      mk("gate", "cmd", "wait", "", "docker", "", { cmd: "bun run check", log: "container usa e getta" }),
+      mk("merge", "ask", "ask", "", "", "", { log: "attende la tua approvazione" }),
+    ] },
+  { name: "task · pdf-images", wf: "task", ver: "v3 · a1b2c3d", when: "ieri 01:12", st: "ok", pos: "7 di 7",
+    steps: [
+      mk("plan", "agent", "ok", "opus", "local", "3m", { prompt: "plan.md", tok: "in 40k · out 7k", log: "ok" }),
+      mk("exec", "agent", "ok", "deepseek", "local", "22m", { prompt: "exec.md", tok: "in 520k · out 40k", log: "ok" }),
+      mk("review", "agent", "ok", "opus", "local", "4m", { prompt: "review.md", tok: "in 44k · out 3k", log: "PASS" }),
+      mk("gate", "cmd", "ok", "", "docker", "6m", { cmd: "bun run check", log: "16497 pass · 0 fail" }),
+      mk("merge", "ask", "ok", "", "", "", { log: "approvato da te alle 01:40" }),
+    ] },
+  { name: "release · 0.7.1", wf: "release", ver: "v1 · 9f04e2b", when: "20/11 18:05", st: "stop", pos: "2 di 4",
+    steps: [
+      mk("changelog", "agent", "ok", "deepseek", "local", "1m", { prompt: "changelog.md", tok: "in 12k · out 2k", log: "ok" }),
+      mk("build", "cmd", "err", "", "docker", "4m", { cmd: "bun run compile", log: "<span class=e>exit 1</span>\nerror: bun ≥ 1.4.3 required" }),
+      mk("tag", "cmd", "stop", "", "local", "", { cmd: "git tag v0.7.1", log: "non eseguito: build in errore" }),
+      mk("publish", "ask", "stop", "", "", "", { log: "non eseguito" }),
+    ] },
+];
+let R = 0, S = 3;
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+function list() {
+  const sec = (t, items) => `<div class="sec">${t}</div>` + items.map(({ r, i }) => {
+    const strip = r.steps.map((s) => (s.st === "run" ? `<span class="blink">${G[s.st]}</span>` : G[s.st])).join("");
+    const cls = r.st === "run" ? "a" : r.st === "ok" ? "" : "e";
+    const word = r.st === "run" ? `▸ in corso · ${r.pos}` : r.st === "ok" ? `✓ completato · ${r.pos}` : `‖ fermato · ${r.pos}`;
+    return `<div class="run${i === R ? " on" : ""}" data-r="${i}"><span class="nm">${esc(r.name)}</span><span class="when">${r.when}</span><span class="stt ${cls}">${word}</span><span></span><span class="strip">${strip}</span><span class="ver">${r.wf} ${r.ver}</span></div>`;
+  }).join("");
+  const all = RUNS.map((r, i) => ({ r, i }));
+  document.getElementById("list").innerHTML = `<div class="top"><span></span><span>Workflow<small>tutte le corse</small></span><span></span></div>` +
+    sec("In corso", all.filter((x) => x.r.st === "run")) + sec("Finite", all.filter((x) => x.r.st !== "run"));
+  document.querySelectorAll("#list .run").forEach((n) => (n.onclick = () => { R = +n.dataset.r; const k = RUNS[R].steps.findIndex((s) => s.st === "run" || s.st === "err"); S = k < 0 ? 0 : k; all3(); }));
+}
+function hdr(r) { return `<div class="top"><span class="bk">‹</span><span>${esc(r.name)}<small>${r.wf} ${r.ver} · ${r.pos}</small></span><span></span></div>`; }
+function card(s, i) {
+  const meta = [s.kind === "agent" ? "agente" : s.kind === "cmd" ? "comando" : "approvazione", s.model, s.where, s.cmd].filter(Boolean).join(" · ");
+  return `<div class="nd ${s.st}${i === S ? " sel" : ""}" data-s="${i}"><span class="g">${G[s.st]}</span><span class="nm">${esc(s.id)} <span class="w" style="font-weight:400;color:var(--sec);font-size:12.5px">· ${W[s.st]}</span></span><span class="du">${s.du}</span><span class="mt">${esc(meta)}</span></div>`;
+}
+function dA() {
+  const r = RUNS[R], st = r.steps;
+  let h = hdr(r) + `<div class="flow">`;
+  for (let i = 0; i < st.length; i++) {
+    if (i > 0) h += `<div class="wire${st[i].st === "wait" || st[i].st === "ask" || st[i].st === "stop" ? " fut" : ""}"></div>`;
+    if (r.loop && st[i].id === "review" && st[i + 1]?.id === "fix") {
+      h += `<div class="loop"><div class="pair">${card(st[i], i)}<div class="wire"></div>${card(st[i + 1], i + 1)}</div><div class="br"><span>↻ on_fail<br>fix ${r.loop}</span></div></div>`;
+      i++; continue;
+    }
+    h += card(st[i], i);
+  }
+  h += `</div>`;
+  if (st.some((s) => s.st === "ask")) h += `<div class="acts"><button class="btn pri">Approva merge</button><button class="btn">Ferma</button></div>`;
+  const el = document.getElementById("dA"); el.innerHTML = h;
+  el.querySelectorAll(".nd").forEach((n) => (n.onclick = () => { S = +n.dataset.s; all3(); }));
+}
+const STROKE = { ok: "var(--fill)", err: "var(--err)", run: "var(--acc)", wait: "var(--off)", ask: "var(--label)", stop: "var(--off)" };
+const KIND = { agent: "agente", cmd: "comando", ask: "approvazione" };
+// One node badge: the state lives in the badge's own shape (filled / thick ring / pulsing / dashed / double), plus the glyph.
+function badge(s, cx, cy, r) {
+  const st = s.st, dash = st === "wait" || st === "stop" ? 'stroke-dasharray="3 3"' : "";
+  const fill = st === "ok" ? "var(--fill)" : "var(--app)", sw = st === "err" ? 3 : 2;
+  const dbl = st === "ask" ? `<circle cx="${cx}" cy="${cy}" r="${r - 4}" fill="none" stroke="var(--label)" stroke-width="1.5"/>` : "";
+  const gc = st === "err" ? "var(--err)" : st === "run" ? "var(--acc)" : st === "wait" || st === "stop" ? "var(--sec)" : "var(--label)";
+  return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}" stroke="${STROKE[st]}" stroke-width="${sw}" ${dash}/>${dbl}<text x="${cx}" y="${cy + 4.5}" text-anchor="middle" font-size="13" fill="${gc}" ${st === "run" ? 'class="blink"' : ""}>${G[st]}</text>`;
+}
+function pill(s, i, x, y, w) {
+  const h = 44, sel = i === S, st = s.st;
+  const border = st === "err" ? "var(--err)" : st === "run" ? "var(--acc)" : sel ? "var(--pick)" : "var(--sep)";
+  const halo = st === "run" ? `<rect class="halo" x="${x - 5}" y="${y - 5}" width="${w + 10}" height="${h + 10}" rx="${(h + 10) / 2}" fill="var(--acc)"/>` : "";
+  const sub = [s.model === "deepseek" ? "ds" : s.model || KIND[s.kind], s.where].filter(Boolean).join(" · ");
+  return `<g class="pill ${st}" data-s="${i}">${halo}<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${h / 2}" fill="var(--card)" stroke="${border}" stroke-width="${sel || st === "err" || st === "run" ? 2 : 1}" ${st === "wait" || st === "stop" ? 'stroke-dasharray="4 4"' : ""}/>
+    ${badge(s, x + 22, y + h / 2, 13)}
+    <text x="${x + 42}" y="${y + 19}" font-size="13.5" font-weight="600" fill="var(--label)">${esc(s.id)}</text>
+    <text x="${x + 42}" y="${y + 34}" font-size="11" fill="var(--sec)">${W[st]}${w > 160 ? " · " + esc(sub) : ""}</text></g>`;
+}
+const curve = (x1, y1, x2, y2) => `M ${x1} ${y1} C ${x1} ${(y1 + y2) / 2}, ${x2} ${(y1 + y2) / 2}, ${x2} ${y2}`;
+const edge = (d, to) => {
+  const fut = ["wait", "ask", "stop"].includes(to.st), act = to.st === "run";
+  return `<path d="${d}" fill="none" stroke="${act ? "var(--acc)" : fut ? "var(--off)" : "var(--sec)"}" stroke-width="${act ? 2 : 1.5}" stroke-linecap="round" ${act ? 'class="flow"' : fut ? 'stroke-dasharray="2 5"' : ""}/>`;
+};
+function dC() {
+  const r = RUNS[R], st = r.steps, Wd = 318, pos = []; let y = 14;
+  st.forEach((s, i) => {
+    if (r.loop && s.id === "fix") { pos.push({ x: 172, y: pos[i - 1].y + 70, w: 140 }); y = pos[i].y + 78; return; }
+    const side = r.loop && s.id === "review";
+    pos.push({ x: side ? 6 : 64, y, w: side ? 150 : 190 }); if (!side) y += 70;
+  });
+  let ed = "";
+  for (let i = 1; i < st.length; i++) {
+    const a = r.loop && st[i - 1].id === "fix" ? pos[i - 2] : pos[i - 1], b = pos[i];
+    if (r.loop && st[i].id === "fix") {
+      ed += edge(curve(a.x + a.w - 20, a.y + 44, b.x + 30, b.y), st[i]);
+      ed += `<path d="M ${b.x + 8} ${b.y + 22} C ${a.x + a.w / 2} ${b.y + 22}, ${a.x + a.w / 2} ${b.y + 10}, ${a.x + a.w / 2 - 10} ${a.y + 44}" fill="none" stroke="var(--off)" stroke-width="1.5" stroke-dasharray="2 5" stroke-linecap="round"/>
+        <text x="${b.x + b.w / 2}" y="${b.y + 60}" text-anchor="middle" font-size="11" fill="var(--err)">on_fail · ↻ ${r.loop}</text>`;
+      continue;
+    }
+    const from = r.loop && st[i - 1].id === "fix" ? { x: pos[i - 2].x, y: pos[i - 2].y, w: pos[i - 2].w } : a;
+    const fx = r.loop && st[i - 1].id === "fix" ? pos[i - 1].x + pos[i - 1].w / 2 : from.x + from.w / 2, fy = r.loop && st[i - 1].id === "fix" ? pos[i - 1].y + 44 : from.y + 44;
+    ed += edge(curve(fx, fy, b.x + b.w / 2, b.y), st[i]);
+  }
+  const H = Math.max(...pos.map((p) => p.y)) + 60;
+  const el = document.getElementById("dC");
+  el.innerHTML = hdr(r) + `<svg class="mg" viewBox="0 0 ${Wd} ${H}" width="100%" role="img" aria-label="Grafo verticale della corsa ${esc(r.name)}">${ed}${st.map((s, i) => pill(s, i, pos[i].x, pos[i].y, pos[i].w)).join("")}</svg>`;
+  el.querySelectorAll(".pill").forEach((n) => (n.onclick = () => { S = +n.dataset.s; all3(); }));
+}
+function dD() {
+  const r = RUNS[R], st = r.steps, CW = 150, cw = 128, h = 44, pos = []; let col = 0;
+  st.forEach((s, i) => {
+    if (r.loop && s.id === "fix") { pos.push({ x: pos[i - 1].x, y: 120 }); return; }
+    pos.push({ x: 12 + col * CW, y: 40 }); col++;
+  });
+  const Wd = 12 + col * CW, H = r.loop ? 190 : 120;
+  const hcurve = (x1, y1, x2, y2) => `M ${x1} ${y1} C ${x1 + 30} ${y1}, ${x2 - 30} ${y2}, ${x2} ${y2}`;
+  let ed = "";
+  for (let i = 1; i < st.length; i++) {
+    const b = pos[i];
+    if (r.loop && st[i].id === "fix") {
+      const a = pos[i - 1];
+      ed += edge(`M ${a.x + cw - 24} ${a.y + h} C ${a.x + cw - 24} ${a.y + h + 30}, ${b.x + cw - 24} ${b.y - 30}, ${b.x + cw - 24} ${b.y}`, st[i]);
+      ed += `<path d="M ${b.x + 24} ${b.y} C ${b.x + 24} ${b.y - 30}, ${a.x + 24} ${a.y + h + 30}, ${a.x + 24} ${a.y + h}" fill="none" stroke="var(--off)" stroke-width="1.5" stroke-dasharray="2 5" stroke-linecap="round"/>
+        <text x="${a.x + cw / 2}" y="${(a.y + h + b.y) / 2 + 4}" text-anchor="middle" font-size="11" fill="var(--err)">↻ ${r.loop}</text>`;
+      continue;
+    }
+    const a = r.loop && st[i - 1].id === "fix" ? pos[i - 2] : pos[i - 1];
+    ed += edge(hcurve(a.x + cw, a.y + h / 2, b.x, b.y + h / 2), st[i]);
+  }
+  const el = document.getElementById("dD");
+  el.innerHTML = hdr(r) + `<div class="hscroll"><svg class="mg" viewBox="0 0 ${Wd} ${H}" width="${Wd}" height="${H}" role="img" aria-label="Grafo orizzontale della corsa ${esc(r.name)}">${ed}${st.map((s, i) => pill(s, i, pos[i].x, pos[i].y, cw)).join("")}</svg></div>
+    <div style="color:var(--sec);font-size:12px">← scorri per vedere tutti i passi →</div>`;
+  el.querySelectorAll(".pill").forEach((n) => (n.onclick = () => { S = +n.dataset.s; all3(); }));
+}
+function det() {
+  const r = RUNS[R], s = r.steps[S];
+  const rows = [["Stato", `${G[s.st]} ${W[s.st]}`], ["Tipo", s.kind === "agent" ? "agente" : s.kind === "cmd" ? "comando" : "approvazione"], s.model && ["Modello", s.model], s.where && ["Dove", s.where], s.prompt && ["Prompt", s.prompt], s.cmd && ["Comando", s.cmd], s.tok && ["Token", s.tok], s.du && ["Durata", s.du], s.retry && ["Tentativi", s.retry], s.branch && ["Ramo preso", s.branch]].filter(Boolean);
+  const acts = s.st === "ask" ? `<button class="btn pri">Approva</button><button class="btn">Rifiuta</button>` : s.st === "wait" || s.st === "stop" ? `` : `<button class="btn">Rilancia passo</button><button class="btn">Output completo</button>`;
+  document.getElementById("det").innerHTML = `<div class="top"><span class="bk">‹</span><span>${esc(s.id)}<small>${esc(r.name)}</small></span><span></span></div>
+    <div class="dt"><div class="hd"><span class="big ${s.st}"><span class="${s.st === "run" ? "blink" : ""}">${G[s.st]}</span></span><span><b>${esc(s.id)}</b><small>${W[s.st]}${s.st === "run" ? " da " + s.du : ""}</small></span></div>
+    <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
+    <div class="log">${s.log}</div><div class="acts">${acts}</div></div>`;
+}
+function all3() { list(); dA(); dC(); dD(); det(); }
+all3();
+</script>
