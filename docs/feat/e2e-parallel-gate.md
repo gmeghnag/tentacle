@@ -440,6 +440,71 @@ mutation check proving it bites. Repro scripts and mutation runs live in
 test files above (165 pass). The live simulator behaviour (D2.1's second-level
 promise, the relay under real Maestro output) remains Validation's, as before.
 
+### Validation (live)
+
+*— claude-opus-5-5, 2026-11-23*
+
+No code changed. One data-only setup step: the worktree's `RUNS_DIR` had no history,
+so I copied the baseline's `summary.json` (run `1795384590574`) into
+`<worktree>/.tentacle/tmp/e2e-mobile/1795384590574/`. Without it, `latestDurations`
+falls back to 60 s per flow. After the merge, the root repo's `RUNS_DIR` provides this history.
+
+**Baseline:** `e2e-gate-2211d.log`, run `1795384590574`, single sim **iPhone 17 Pro
+Max (0B43D716)**. `GATE FAIL — 59 passed, 2 failed, 0 known-bug, 7 quarantined (of
+68; 4450 s)`. The 2 reds (`24-ui-shots`, `25-session-info`) passed on the single-sim
+rerun. Wall time 22:56:30 → 00:16:36 = **4806 s (~80 min)**, build included.
+
+**Cold parallel run** (`e2e-gate-parallel-1.log`, run `1795393071084`, launched by the
+orchestrator with the doc's command, empty cache):
+- Exit **1**. `GATE FAIL — 60 passed, 1 failed, 0 known-bug, 7 quarantined (of 68; 4444 s)`.
+- `wall 2701 s on 2 simulators`, build included (**~45 min, −44 % vs 4806 s**).
+- Children's actual flow sums: sim-0FA4B51F 2153 s (33 flows), sim-0B43D716 2290 s
+  (28 flows). The history estimates were 2212 / 2238 s, so the split was balanced
+  within 137 s.
+- Merged `summary.txt` has **68 rows, the same flow names in the same order** as the
+  baseline. Flow seconds sum to 4444 vs 4450.
+- Exactly one build: `build-ios26.log` is only in the parent dir, none under `sim-*/`.
+  `app: cached 395fdbcb989d for the next run`.
+- Both `sim-*/summary.json` exist. `parent.json`'s shards are disjoint
+  (33 + 28 + 7 quarantined = 68).
+- The whole ALPHA group (`02,05,06,07,11,17,22-relay-only,26`) is on sim-0FA4B51F.
+- The relay keeps `^✗ <flow>` greppable: `✗ 26-drawer (iOS 26) fail  [sim-0FA4B51F]`.
+
+**Result diff vs baseline, flow by flow:**
+- `24-ui-shots`, `25-session-info`: FAIL → PASS. These were the baseline's flakes.
+- `26-drawer`: PASS → FAIL, with `Element not found: Id matching regex: session-rename-save`.
+  - **Not this task's.** The flow is device-dependent: it fails on the **iPhone 17 Pro
+    (0FA4B51F)** and passes on the Pro Max.
+  - Evidence, on the same `.app` (cache key `395fdbcb989d`), single-sim:
+    - `--only 01-shell,26-drawer` on 0FA4B51F → 26-drawer **FAIL** (76 s), same
+      error, exit 1 (`e2e-gate-parallel-single.log`, run `1795395823663`).
+    - `--only 26-drawer,19-deep-link` on 0B43D716 → **PASS** (82 s), exit 0
+      (`e2e-gate-parallel-single-promax.log`, run `1795395974196`).
+    - Run `1795279573638` (`e2e-gate-1121b.log`, single-sim on 0FA4B51F) failed
+      the same way.
+    - Every baseline that passed it ran on the Pro Max.
+  - App sources and flows are identical between this branch and `main`
+    (`git diff 0ffc00fd e6fee2b0 -- apps/mobile packages` and
+    `0ffc00fd HEAD -- apps/mobile/src apps/mobile/e2e/flows packages/*/src` are empty).
+  - Consequence: until `26-drawer` is fixed for the smaller screen, the parallel gate
+    is red whenever ALPHA lands on the Pro. The launcher's single-sim rerun on the
+    Pro Max turns it green. Needs its own `fix` task.
+
+**Single-sim unchanged (Validation step 4, partial):** both `--only` runs above
+used the old layout (`RUNS_DIR/<runId>/ios26/<flow>/`) and printed
+`app: cached 395fdbcb989d (built in run 1795393071084)`, so neither rebuilt. They
+took 114 s and 111 s of flow time, well under 10 min including setup. The exit
+codes were 1 (from 26-drawer on the Pro, above) and 0.
+
+**Not run here:**
+- Step 3: the warm full parallel run.
+- Step 4: the cache-MISS-on-touch check.
+- Step 5: red propagation with `--flow-timeout 5`.
+- Step 6: `kill -9` crash propagation.
+
+The cold run's red row is a partial, real check of red propagation: a child exited
+1, and the merged summary, the verdict and the parent's exit code are all 1.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-22* (fresh context; same model family as the planner, different from the executor)
