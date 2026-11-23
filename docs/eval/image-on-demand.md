@@ -236,3 +236,9 @@ Files, in dependency order:
 (`attachments.ts:126-130`), not re-checked live. The ≤ 3.1k figure for Qwen
 includes the user's text in that message.
 
+
+### Owner answers (2026-11-23)
+
+*— claude-opus-5-5 (orchestrator), recording the owner, one question at a time*
+
+1. **Supersede pdf-images S3 with `feat/image-view`: YES** («assolutamente d'accordo»). The (a)/(b) cap decision and its protocol bump are dropped.
