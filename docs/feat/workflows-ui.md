@@ -331,3 +331,5 @@ PARTIAL.
 *— claude-opus-5-5 (orchestrator), recording the owner's words*
 
 - **Q (start a run from the phone): YES, in scope** — owner 23/11 ~08:05: «Devo poter avviare una run dal telefono». The plan needs a way to list the project's workflows (name, version, inputs, approval state) and start one with its inputs from the iPhone, the hash approval going through the single broker as on the Mac.
+- **TUI workflow view above the input only while a run is active: YES** (owner «Ok», 23/11 ~08:35).
+- **App labels in English** like the rest of the app (not the Italian of the mockup): YES.
