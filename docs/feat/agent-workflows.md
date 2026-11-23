@@ -636,7 +636,10 @@ new type needs no reader edit. `MessageNote.kind` is a bounded free string
    slice table puts it here. It is only true once Slice 4 lands — same merge gate.
 7. **Changelog**: the plan put the fragment with Slice 6; the executor instruction
    asked for one now, so `changelog.d/agent-workflows.added.md` exists (groundwork
-   wording). Slice 6 should REWRITE that file, not add a second one.
+   wording). Slice 6 should REWRITE that file, not add a second one. (Amended at
+   Slice 9: a fragment is ONE bullet per file — `scripts/changelog.ts`'s
+   `parseFragment` refuses two — so a later user-visible slice adds
+   `changelog.d/agent-workflows-<topic>.added.md` instead.)
 
 **Tests (all new code; red shown by mutation, §9)**
 
@@ -1688,8 +1691,12 @@ TUI module-resolution errors unrelated to this slice), the 6 touched test files,
 `packages/protocol/schema/protocol.json` was REGENERATED (`bun run schema:export`) — additive only:
 `PushKind`'s enum plus the new `PushRun` definition.
 
-**Changelog.** One bullet appended to the existing `changelog.d/agent-workflows.added.md` (same
-task slug+category — a new file would have collided by name). No `protocol.d/` note: a new
+**Changelog.** One new fragment file, `changelog.d/agent-workflows-notifications.added.md`.
+The plan said to append the bullet to `changelog.d/agent-workflows.added.md`, but a fragment is
+one bullet per file (`scripts/changelog.ts:parseFragment`; AGENTS.md §10), so appending made
+that file two bullets and the guard test `I2: every entry in changelog.d/ is a well-formed
+fragment` red. Renamed to `-notifications` to keep it on the same task slug; the original file
+kept its one bullet. No `protocol.d/` note: a new
 display-only push kind is additive, and an older build shows its placeholder.
 
 **Unverified / left to later slices.** The phone's *screens* still cannot show a run (the slice-6a
