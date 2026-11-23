@@ -2344,3 +2344,17 @@ Attacks that found nothing: v3 reader vs `target`/`daily` (refused via `workflow
 persisted before the driver call; single broker (driver asks through `permissions.request`).
 Not checked: `requestApproval` re-reads the file after `inspect` (a tiny window approves a
 different hash than pinned → fails closed as `unapproved`; LOW).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-23*
+
+**Verdict: APPROVE.** Finding 1 fixed: `fireWorkflow` (`daemon/src/hosted-session.ts` ~3923)
+drops the previous `last` from the advanced row, so the first frame per `<id>#<fires>` carries
+THIS fire's outcome (`started`, or `… · schedule removed` on the failure stop). The new test
+drives the real frame sequence. Mutation (keep the old `last`) → that test FAILS; reverted, tree
+clean. Narrow suites (daemon schedule-workflow/schedules/push-notifier/push-rules, core
+schedule-workflow, driver) 149 pass 0 fail; `bun run lint` and `bun run typecheck` clean.
+Regression check: a crash between advance and settle now shows the row with no `last` (it was
+going to show an old one); acceptable and consistent with the plan's "crash between advance and
+start" row. No new findings.
