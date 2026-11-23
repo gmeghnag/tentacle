@@ -442,12 +442,16 @@
   --m-composer-hidden-font-size: 1px;
   --m-composer-hidden-color: transparent;
   --m-composer-k-halo-scale: 1.3125;
-  --m-sheet-sheet-border-top-left-radius: 14px;
-  --m-sheet-sheet-border-top-right-radius: 14px;
   --m-sheet-sheet-padding-horizontal: 20px;
   --m-sheet-sheet-padding-top: 8px;
   --m-sheet-sheet-gap: 12px;
+  --m-sheet-head-padding-horizontal: 20px;
+  --m-sheet-head-padding-top: 8px;
+  --m-sheet-head-padding-bottom: 12px;
+  --m-sheet-head-gap: 12px;
   --m-sheet-scroll-body-flex: 1;
+  --m-sheet-scroll-body-gap: 0;
+  --m-sheet-scroll-content-gap: 0;
   --m-sheet-floating-margin-horizontal: 8px;
   --m-sheet-floating-margin-bottom: 8px;
   --m-sheet-floating-border-radius: 14px;

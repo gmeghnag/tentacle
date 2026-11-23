@@ -21,7 +21,7 @@
     "apps/mobile/src/ui/HubFan.tsx": "4826433ccc23d36237be9f6029cc80e6a827ee13",
     "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
     "apps/mobile/src/ui/ScreenHeader.tsx": "5056826ce4b0caed05dfa83cb777dc1e26ea1ba0",
-    "apps/mobile/src/ui/Sheet.tsx": "3c6c0d8b0f8f8b450821ccc12f737b8e893258d7",
+    "apps/mobile/src/ui/Sheet.tsx": "3ba86ce77754ddb1662e0b91bc47eca0d2c49420",
     "apps/mobile/src/ui/StepNode.tsx": "1ecdb5ef3a4b4e5d35d5affd320351564fb4cde1",
     "packages/tui/src/blink.ts": "29c9f101f7942a0942e48c977a13e3759820c8e3",
     "packages/tui/src/components/Thinking.tsx": "c9f80123d32ad706b7c96d858b822d9336d15d2d",
@@ -956,14 +956,22 @@
       "file": "apps/mobile/src/ui/Sheet.tsx",
       "styles": {
         "sheet": {
-          "borderTopLeftRadius": 14,
-          "borderTopRightRadius": 14,
           "paddingHorizontal": 20,
           "paddingTop": 8,
           "gap": 12
         },
+        "head": {
+          "paddingHorizontal": 20,
+          "paddingTop": 8,
+          "paddingBottom": 12,
+          "gap": 12
+        },
         "scrollBody": {
-          "flex": 1
+          "flex": 1,
+          "gap": 0
+        },
+        "scrollContent": {
+          "gap": 0
         },
         "floating": {
           "marginHorizontal": 8,
