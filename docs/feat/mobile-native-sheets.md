@@ -1102,3 +1102,15 @@ Gate as run by me: `bun run typecheck` clean (root + mobile + relay); `bun run l
 - Mutation: `user: null` → 1 fail. Reverted, and `git status` is clean.
 
 **Executor behaviour:** thorough mutation tables per slice and honest drift notes. But S4 shipped the Modal removal without the `desiredStack` leg that replaces it, and the F0 regression was noticed in S5 and deferred instead of being called a blocker. The guards check each file on its own, not how the files compose.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-23 (diff `212e4cd6..HEAD`: the fix round `00ebbe6a` + the gate fix `180ef735`)*
+
+**Verdict: REQUEST-CHANGES.** Both round-1 HIGH findings are fixed and pinned. One test regression remains.
+
+- **R1-F1 (Tools/Info never open): FIXED.** `userSheet` (`sheet-plan.ts`) feeds `desiredStack` from all three flags (`SessionScreen.tsx:1224`). Mutation `info: false` at the call site → wiring test red. Mutation `flags.info && false` in `userSheet` → 2 `userSheet` tests red. Both reverted.
+- **R1-F2 (composed F0 shape): FIXED (source level; S6 still needs the simulator check).** `NativeSheetRoute` returns a bare fragment, and Tools/Info return `<Sheet native scroll>` with no wrapper. Mutation `<View>` around the route's fragment → "the route draws no wrapper" red. Reverted.
+- **NEW — MEDIUM: the gate is red.** `apps/mobile/test/band-screens.test.ts:284-292` ("the sheet's ground is the banded ground") slices `SessionInfoSheet.tsx` at `<View style={[styles.root`, which the fix removed. It fails alone (35 pass / 1 fail) and in `bun test apps/mobile/test` (4769 pass / 1 fail). So `bun run check` fails. The property itself still holds through the route's `contentStyle` = `palette[sheetGround("info")]` = `bg`. The test should be repointed at that (or at `sheetGround`), not deleted.
+- `bun run typecheck` clean. `bun run lint` clean (2324 files). After the reverts the tree is byte-identical (`git status` empty).
+- Regressions attacked: (a) Commands/Outbox/Permission lose the route's `flex:1` wrapper. Each still has its own root, and RN's ScrollView has `flexGrow:1` by default, so the risk is low but unverified on a device (S6). (b) No test or e2e flow references `native-sheet-<kind>` (rg). (c) info > tools > commands precedence: there is no opener path where two flags are set together (`openInfo`/`openTools`, `SessionScreen.tsx:1075-1098`). No finding.
