@@ -231,20 +231,19 @@ the orchestrator's `protocol:bump` at merge regenerates it again either way.
 | # | Slice | Size · Blast · Suited | Files |
 |---|---|---|---|
 | ~~0~~ | ~~(v3) workflows path constant~~ — **replaced by 0a + 0b (v4, D7 rewritten after the owner's review)** | | |
-| 0a | `core/src/project-paths.ts` (root resolution + `.tentacle/` children + the one inside/symlink check) + node adapter; migrate **workflows** (loader, messages, approvals key, tool texts) and the **tool-output** literal; `.gitignore` exception | M · cross-module (approval-store key, tool texts, a new core seam) · standard review | `core/src/project-paths.ts` (new), `core/src/index.ts`, `cli/src/project-fs.ts` (new, node adapter), `cli/src/workflow-files.ts`, `cli/src/workflow-approvals.ts`, `cli/src/wiring.ts` (root once, `:843-848`), `core/src/workflow-spec.ts` (messages), `agent/src/workflow-driver.ts` (comments), `agent/src/agent.ts:2973` (literal from core), `tools/src/{workflow,schedule}.ts` (texts), `protocol/src/session.ts:856` (comment), tests in D7, `.gitignore`, `AGENTS.md` §6 one line, a dated note in `docs/feat/agent-workflows.md` |
-| 0b | Migrate **`.tentacle/hide`** to `project-paths` (root file added, mount-folder file kept) | S · **load-bearing** (the container hide set — what a container must not read) · strong executor + mandatory fresh-context review | `cli/src/workspace-mount.ts` (`loadHideFile`, `resolveHideFile` anchor/walk split, `HIDE_FILE_LABEL`), `cli/src/engine-select.ts:373-385` (root + both files), their tests |
+| ~~0a / 0b (v4)~~ | ~~root walk, hide root file~~ — **replaced by slice 0 (v5, owner review of v4: root = cwd)** | | |
+| 0 | `core/src/project-paths.ts` (the `.tentacle/` names + the one no-links check + the bounded display-only `workflowsAbove` hint) + node adapter; **workflows** move to `<cwd>/.tentacle/workflows` (loader, messages, tool texts); **hide** and **tool-output** take their names from the module (strings only); `.gitignore` exception (D7 v5) | M · cross-module (a new core seam, tool texts; no change to the hide set, no approval-key change) · standard review | `core/src/project-paths.ts` (new), `core/src/index.ts`, `cli/src/project-fs.ts` (new, node adapter), `cli/src/workflow-files.ts`, `core/src/workflow-spec.ts` (messages), `agent/src/workflow-driver.ts` (comments), `agent/src/agent.ts:2973`, `cli/src/workspace-mount.ts:252,287` (names only), `tools/src/{workflow,schedule}.ts` (texts), `protocol/src/session.ts:856` (comment), tests in D7 v5, `.gitignore`, `AGENTS.md` §6 one line, a dated note in `docs/feat/agent-workflows.md` |
 | 2b | TUI: the project's workflows shown automatically (D8) | M · contained · standard review | `tui/src/workflow-view.ts` (`catalogueLine`, panel section), `tui/src/useSessionLink.ts`, `tui/src/AppView.tsx`, `tui/src/components/WorkflowRail.tsx` (or a sibling `WorkflowsLine.tsx`), `tui/src/panels/workflow.ts`, `tui/src/commands/workflow.ts` |
 
-**Order (v4): 0a → 0b → 1a → 1b → 5a → 2 → 2b → 3 → 4 → 5b.** 0a first: every later slice that
-touches a workflow file reads the root and the folder from it — 5a (`listWorkflowSources(root)`,
-`workflowsGitIgnored(root)`), 2b/5b (messages naming the folder), the e2e seeds of 3/5b (write
-under `findProjectRoot(serveCwd)` + `PROJECT_PATHS.workflows`, never a hand-written path). 0b
-depends only on 0a and nothing later depends on it; it goes second so the load-bearing change is
-reviewed alone, early. 1a/1b do not read the path. 5a before the TUI (2b reads its catalogue);
-5b needs 3's routes. One executor at a time; PARTIAL rule as below, plus: 0a — the D7 inventory
-`rg` still returns exactly the readers listed (a new one → STOP, update D7); 0b — 0a's
-`resolveInside` and `findProjectRoot` exist; 2b — `RemoteSession.workflowCatalogue` exists (5a)
-and slice 2's rail is mounted.
+**Order (v5): 0 → 1a → 1b → 5a → 2 → 2b → 3 → 4 → 5b.** 0 first: every later slice that touches
+a workflow file takes the folder from it — 5a (`listWorkflowSources(cwd)`, `workflowsGitIgnored(cwd)`,
+the catalogue's `dir` and `elsewhere` hint), 2b/5b (the folder named on screen, the hint), the
+e2e seeds of 3/5b (write under `<serveCwd>/${PROJECT_PATHS.workflows}`, never a hand-written
+path). 0b is gone: hide keeps its exact behaviour and only takes its names from the module (D7
+v5), which is a string change inside slice 0. 1a/1b do not read the path. 5a before the TUI (2b
+reads its catalogue); 5b needs 3's routes. One executor at a time; PARTIAL rule as below, plus:
+0 — the D7 inventory `rg` still returns exactly the readers listed (a new one → STOP, update D7);
+2b — `RemoteSession.workflowCatalogue` exists (5a) and slice 2's rail is mounted.
 
 **PARTIAL rule (every slice):** the executor first re-runs the checks its slice stands on — 1a:
 `lb.ts`; 1b: `"WorkflowStep" in Method` true and the daemon answers it; 2: `RemoteSession.onWorkflows`
@@ -318,8 +317,8 @@ path. The chain stops on PARTIAL.
   (T3) 64-step run windowed; (T4) `/workflow` panel, `review` selected; (T5) panel after `o`.
 - **iPhone (slices 3–4):** a new Maestro flow `apps/mobile/e2e/flows/42-workflow-shots.yaml` +
   a seed step (`seed.ts` gains `startWorkflow`, through its own `RemoteClient`, `seed.ts:9-13`)
-  that writes `demo.yaml` under `findProjectRoot(serveCwd)` + `PROJECT_PATHS.workflows` (v4: the
-  same functions the daemon uses, never a hand-written path) (an `agent` step on the mock model, a `run` step
+  that writes `demo.yaml` under `<serveCwd>/${PROJECT_PATHS.workflows}` (v5: the module's name,
+  never a hand-written path) (an `agent` step on the mock model, a `run` step
   `echo ok`, an `approve` step) and starts it. Shots on iOS 26 and 18: (P1) hash-approval sheet
   showing the `run` command verbatim; (P2) Workflows list with "needs you" section; (P3) graph 2C
   with the running blink frame; (P4) cards 2A; (P5) approve card with Allow once / Deny; (P6)
@@ -377,9 +376,12 @@ at start are missing.* Proved:
   errors?: string(≤ 300)[] ≤ 20}` — `ok:false` rows carry `errors` and nothing else beyond
   name/path. Model-free and deterministic: no LLM, no ask, no write; one directory walk.
   Caps: ≤ 64 YAML files (beyond → `truncated`), the loader's existing per-file/byte caps.
-- `cli/src/workflow-files.ts`: `listWorkflowSources(root): Promise<WorkflowSource[]>` (v4: `root`
-  from 0a's `findProjectRoot`, folder from `PROJECT_PATHS.workflows`, checks via `resolveInside(…,
-  "no-links")` — never its own path or symlink code) — ONE async
+- `cli/src/workflow-files.ts`: `listWorkflowSources(cwd): Promise<WorkflowSource[]>` (v5: the
+  session cwd IS the project root; folder from `PROJECT_PATHS.workflows`, checks via
+  `resolveInside(…, "no-links")` — never its own path or symlink code). The catalogue result also
+  carries `dir: string` (≤ 1024, the ABSOLUTE folder it read — `/workflow` and the phone show it)
+  and, only when that folder lists no workflow, `elsewhere?: {dir: string ≤ 1024, count: int}` from
+  `workflowsAbove` (D7 v5; display only) — ONE async
   walk (`fs/promises`, so a big folder does not block the serve event loop the concurrent peer
   shares, §7), the same no-symlink / regular-file / size rules, every top-level `<stem>.yaml`; a
   stem that is not a workflow name becomes an `ok:false` row ("not a workflow name"), never a
@@ -490,7 +492,115 @@ from a session (it has that `sessionId`); route `WorkflowStart {computerId, sess
   the flow taps Start on the stale screen → (S6) "This workflow changed" banner. iOS 26 and 18:
   `bun run e2e:mobile --ios 26 --only 43-workflow-start`.
 
-### D7 (v4) — ONE project-paths module: the project root, `.tentacle/` and its children (owner review 23/11 ~11:00)
+### D7 (v5) — ONE project-paths module; the project root IS the cwd (owner review of v4, 23/11 ~11:25)
+
+*— claude-opus-5-5 (planner), 2026-11-23 — supersedes D7 v4 (its root walk and 0b are dropped).*
+
+**Load-bearing assumption:** *with root = cwd, every `.tentacle/` reader keeps exactly the folder
+it reads today except workflows, which only change folder name — so the module is names + one
+check + a hint, and nothing it adds can steer a run.* Proved:
+- The reader inventory of D7 v4 still holds (same `rg`; three readers: hide, tool-output,
+  workflows — v4 table "Load-bearing assumption", unchanged).
+- hide reads `` `${source}/.tentacle/hide` `` with `source = real(input.cwd)`
+  (`cli/src/workspace-mount.ts:287`, `cli/src/engine-select.ts:378-380`): already cwd-rooted.
+- tool-output: relative to the confined env, unreached in product (`wiring.ts:592-593`, `:786`,
+  `:1025`): no root at all.
+- workflows: `loadWorkflowSource(config.cwd, …)` (`wiring.ts:843`, `workflow-files.ts:37-41`),
+  approvals keyed `projectKey(config.cwd)` (`wiring.ts:848`, `workflow-approvals.ts:78`): already
+  cwd-rooted; only `"workflows"` → `.tentacle/workflows` moves. A child cannot start/stop a run
+  (`agent/src/subagent.ts:432-434`) and works in the same session cwd, so the files a run reads
+  and the folder its agents work in stay the same directory.
+- No `--cwd` flag exists (D7 v4 evidence); a container's root is its mount folder, unchanged.
+
+**Design.**
+- NEW `packages/core/src/project-paths.ts` (pure; core has no `node:fs`, I/O injected):
+  - `TENTACLE_DIR = ".tentacle"`; `PROJECT_PATHS = { workflows: ".tentacle/workflows",
+    hide: ".tentacle/hide", toolOutput: ".tentacle/tool-output" } as const` — the only place these
+    are spelled. NO root function: callers pass the cwd they already have.
+  - `resolveInside(base, rel, fs, "no-links")` — refuses a symlink at ANY component from `base`
+    down (`.tentacle`, `workflows`, the file); today the loader checks only `workflows` and the file
+    (`workflow-files.ts:25-26`, `:49`). Returns `{path}` | `{absent}` | `{problem}`.
+  - `workflowsAbove(cwd, fs, {home}) → {dir, count} | undefined` — the DISPLAY-ONLY hint (below).
+  - `ProjectFs = {lstat(path) → "dir"|"file"|"link"|"other"|undefined, list(dir) → names+kinds | undefined}`.
+- NEW `packages/cli/src/project-fs.ts`: the node adapter (ENOENT/ENOTDIR → `undefined`, pattern
+  `engine-select.ts:446-458`).
+- **workflows:** `workflow-files.ts` reads `<cwd>/${PROJECT_PATHS.workflows}` through
+  `resolveInside`; recorded `path` `.tentacle/workflows/<name>.yaml`; messages
+  (`workflow-spec.ts:2`, `:106`, `:145`, `:172`, `:337-349`, `:777`) and tool texts
+  (`tools/src/workflow.ts:53`, `tools/src/schedule.ts:94`) built from `PROJECT_PATHS.workflows`; the
+  not-found error and the `workflow` tool's `validate` name the ABSOLUTE folder read
+  (`no workflow x: /Users/…/proj/.tentacle/workflows/x.yaml does not exist`), so a model or a user in
+  the wrong folder sees where tentacle looks. Approvals: unchanged (`projectKey(cwd)`).
+- **hide: names only.** `HIDE_FILE_LABEL = PROJECT_PATHS.hide` (`workspace-mount.ts:252`) and the
+  path built from it (`:287`). Its reader and checks stay where they are — `loadHideFile`'s
+  realpath-inside rule (`:292-296`) and the fd-level `O_NOFOLLOW|O_NONBLOCK` re-check
+  (`engine-select.ts:458-470`) are a FIFO-safe primitive the pure module cannot express; moving a
+  container-secrets reader for no behaviour gain is load-bearing churn (see Notes). Proof of "no
+  change": the hide test files are NOT edited and stay green.
+- **tool-output: name only.** `agent.ts:2973` builds from `PROJECT_PATHS.toolOutput`.
+- **`/workflow` names its folder:** the catalogue (5a) returns `dir` = the absolute folder read;
+  the TUI panel header says `reading ~/proj/.tentacle/workflows` and the phone's start screen shows
+  it under the list.
+- **The "workflows higher up" hint — bounded, read-only, display-only.**
+  `workflowsAbove(cwd, fs, {home})`: runs ONLY inside a catalogue call and ONLY when the cwd's
+  folder yields zero rows. It looks at the **4 nearest ancestors** of `cwd` (parent … great-great-
+  grandparent), stopping earlier at `$HOME` (home itself is NOT looked at) or `/` (never looked
+  at). At each, lstat `.tentacle` and `.tentacle/workflows` (both must be real dirs — a symlink
+  is skipped, never followed); the FIRST ancestor whose folder lists ≥ 1 regular `<stem>.yaml`
+  with a valid workflow name wins, returning `{dir, count}` (count capped at 200). No file is
+  opened, no YAML parsed, no hash computed, nothing written. Cost ≤ 8 lstat + 1 listing.
+  *Why 4:* the owner's case `~/tentacle/apps/mobile` is depth 2; a source folder
+  (`apps/mobile/src/screens`) is depth 4; past that a match is more likely a different project.
+  *Why it cannot change behaviour:* (1) structurally — its result has ONE consumer, the
+  catalogue's `elsewhere` field; `loadWorkflowSource(cwd, name)`, `listWorkflowSources(cwd)` and
+  the driver's `prepare` take no ancestor input, so nothing it finds can be loaded, hashed,
+  approved or started; (2) by test — a parent holding `x.yaml` → the child's catalogue has 0 rows
+  and `start x` fails "not found" naming `<cwd>/.tentacle/workflows` (mutation: feed the hint's dir
+  to the loader → red).
+
+**Every behaviour change (exhaustive).**
+
+| Reader | Before | After |
+|---|---|---|
+| workflows | `<cwd>/workflows/<n>.yaml`; symlink refused on `workflows` and the file | `<cwd>/.tentacle/workflows/<n>.yaml`; symlink refused on every component incl. `.tentacle`; errors name the absolute folder |
+| workflows hint | — | new display-only `dir` / `elsewhere` on the catalogue |
+| hide | `<cwd>/.tentacle/hide` | identical (same string, now from the module) |
+| tool-output | `.tentacle/tool-output/…` relative to the env | identical (same string, from the module) |
+| approvals, mount source, session store, spill store | keyed / rooted on `cwd` | unchanged |
+
+**Failure modes.**
+
+| Failure | Converges to |
+|---|---|
+| started in a subfolder of a project with workflows | that folder's own (usually none) + the hint `~/tentacle/.tentacle/workflows has 3 (start tentacle in ~/tentacle)`; nothing from above is used |
+| the subfolder has its own `.tentacle/workflows` | those are used; no hint (it runs only on zero rows) |
+| ancestor folder is a symlink / unreadable / not a dir | skipped; the walk continues to the next ancestor within the bound |
+| workflows only at depth 5+, at `$HOME` or `/` | no hint (bounded by design) |
+| `.tentacle` or `.tentacle/workflows` in cwd is a symlink | refused with the path (`no-links`) |
+| the model wrote a file under a subfolder while the session runs at the root (or vice versa) | not loaded; the tool's answer names the absolute folder it reads |
+| old `workflows/x.yaml` at the repo root | not read; not-found names `.tentacle/workflows` |
+
+**Tests (red first).**
+- `core/test/project-paths.test.ts` (injected `ProjectFs`): `resolveInside` refuses a link at
+  `.tentacle`, at `workflows`, at the file (mutation: check the last component only → red);
+  `workflowsAbove`: found at depth 1 and 4, NOT at 5 (mutation: unbounded → red), never at
+  `$HOME` or `/`, skips a symlinked `.tentacle`, counts only valid `*.yaml` regular files, first
+  match wins, never calls a read (the fake has no read method — a call would not type-check).
+- `cli/test/project-fs.test.ts`: the adapter on a temp dir.
+- `cli/test/workflow-files.test.ts` + `workflow-wiring.test.ts:68,103-105,217-219`: loads
+  `<cwd>/.tentacle/workflows/x.yaml` (red today); the old `workflows/` not read; a parent's
+  `x.yaml` is NOT loadable from the child (the "cannot change behaviour" property, mutation above).
+- 5a's catalogue tests gain `dir` and `elsewhere` (present only on zero rows).
+- Hide: no test edited; the existing hide suites green (the no-change proof). Tool-output: the
+  existing spill tests green.
+- Path-only fixtures (`agent/test/workflow-driver.test.ts:155,888,915,919,953`,
+  `daemon/test/workflow-hosted.test.ts:52,130,185`, `schedule-workflow.test.ts:101`,
+  `support/log-fixture.ts:104`) move to `.tentacle/workflows/…`.
+
+**Unchanged from v4 and still part of slice 0:** the `.gitignore` exception and its
+`git check-ignore` proof, the `AGENTS.md` §6 fact line, and `workflowsGitIgnored(cwd)` for 5a.
+
+### D7 (v4, superseded by v5 — kept for the trail) — ONE project-paths module: the project root, `.tentacle/` and its children (owner review 23/11 ~11:00)
 
 *— claude-opus-5-5 (planner), 2026-11-23 — v4 rewrite; the v3 "one constant" text is replaced,
 and the v3 "approvals re-asked" note is dropped (owner: no approval exists yet).*
@@ -727,7 +837,11 @@ the dock list is shown iff something is running OR armed (`tui/src/background-li
 - **When it shows / hides.** Shown when the catalogue has ≥ 1 row AND no run is active. Hidden
   when: a run is active (the rail, D3, takes its place — the owner's "only while a run is active"
   rule is for the rail; the line is the at-rest view); the catalogue is empty (**empty state =
-  no line**: an empty project must not carry a permanent hint); the session cannot run workflows
+  no line**: an empty project must not carry a permanent hint) — **v5 exception:** empty AND the
+  catalogue carries `elsewhere` → ONE dim line `◇ no workflows here — ~/tentacle/.tentacle/workflows
+  has 3 (start tentacle in ~/tentacle)` (path `~`-shortened, cut in cells; pure
+  `elsewhereLine(cat, width, home)`), never actionable: Enter/`/workflow` cannot start anything from
+  it; the session cannot run workflows
   (`unavailable`, `unsupported`, a pod — `onWorkflows`/`workflowCatalogue` absent); the permission
   dialog or a panel owns the live area (as the dock today). Counted in the live-area row budget
   like the dock, so it appearing/vanishing never moves the input row.
@@ -769,6 +883,11 @@ not-versioned sentence.
 
 ### Notes / debt (deliberate)
 
+- **(v5) Two symlink checks remain, on purpose.** The module's `resolveInside` serves workflow
+  files; `.tentacle/hide` keeps its own FIFO-safe fd reader (`workspace-mount.ts:292-296`,
+  `engine-select.ts:458-470`). Folding it into the module would touch the container-secrets path
+  (load-bearing) with no behaviour gain; if the owner wants literally one checker, that is its own
+  small load-bearing task with fresh-context review. *Recommend: leave it.*
 - **The hash ask's `detail` is capped at 2000 chars** (`workflow-driver.ts:775`), so a long
   workflow's approval sheet can cut `run` commands — in tension with "verbatim `run` commands"
   (Context). D6 mitigates on the phone (full list before Start); the TUI and a model-started run
