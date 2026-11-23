@@ -33,6 +33,12 @@ appId: so.tentacle.app
     visible:
       id: "perm-sheet"
     timeout: 20000
+# The third option sits below the fold at the native sheet's MIDDLE detent
+# (docs/feat/mobile-native-sheets.md S5), so it is scrolled to before the tap.
+- scrollUntilVisible:
+    element:
+      id: "perm-reject_once"
+    direction: DOWN
 - tapOn:
     id: "perm-reject_once"
 - extendedWaitUntil:

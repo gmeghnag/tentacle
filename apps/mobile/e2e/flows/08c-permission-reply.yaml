@@ -34,14 +34,29 @@ appId: so.tentacle.app
       id: "perm-sheet"
     timeout: 20000
 # The reply option opens the refusal field; the words go with the refusal (F7).
+# A native `formSheet` opens at the MIDDLE detent (docs/feat/mobile-native-sheets.md
+# S5), so the reply field and its "Send reply" pill sit below the fold: each is
+# scrolled to before it is touched.
+- scrollUntilVisible:
+    element:
+      id: "perm-reply"
+    direction: DOWN
 - tapOn:
     id: "perm-reply"
+- scrollUntilVisible:
+    element:
+      id: "perm-reply-input"
+    direction: DOWN
 - tapOn:
     id: "perm-reply-input"
 - inputText: "put it in tmp instead"
 # The keyboard covers the composer's button: dismiss it, so the tap lands
 # on the button and not on a key (found by the first iOS 26 run).
 - hideKeyboard
+- scrollUntilVisible:
+    element:
+      id: "perm-reply-send"
+    direction: DOWN
 - tapOn:
     id: "perm-reply-send"
 - extendedWaitUntil:

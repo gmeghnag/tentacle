@@ -41,7 +41,12 @@ appId: so.tentacle.app
     visible:
       id: "session-info-sheet"
     timeout: 10000
-- extendedWaitUntil:
-    visible:
+# The reveal (S4) opens the sheet at its LARGEST detent and scrolls the Scheduled
+# section into view; since docs/feat/mobile-native-sheets.md that is ONE scroller
+# inside a native `formSheet` (F8), so the row is hunted rather than captured at a
+# fixed moment.
+- scrollUntilVisible:
+    element:
       text: ".*WAKEPING hub.*"
+    direction: DOWN
     timeout: 15000

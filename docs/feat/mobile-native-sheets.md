@@ -1095,6 +1095,125 @@ is F0 for Tools/Info as S4 built them. The permission sheet is a single scroller
 - **Mutation M-R2b:** the route's `contentStyle` set to `palette.sheet` in `App.tsx` → 1 fail (that test). Reverted. `git diff --stat` afterwards shows only the test file.
 - **Checks:** `bunx biome check` on the test file is clean. The full gate is left to the orchestrator's script.
 
+### S6 — e2e flows + Validation
+
+*— claude-opus-5-5 (executor), 2026-11-23*
+
+**Load-bearing check (re-run before any edit, log
+`.tentacle/tmp/mobile-native-sheets/s6-baseline.log`).** The gap S6 exists to close is
+genuine, on every count:
+- `perm-later` / `perm-hold` appeared in **no** flow (rg over `e2e/flows`: no hit), so D5's
+  blocked swipe and its explicit way out were unproven on a device;
+- **no** flow raised an ask while a user sheet was up (a flow naming `tools-sheet` /
+  `session-info-sheet` / `commands-sheet` never ran `laptop-prompt`), so the stacked-sheet
+  case was undriven;
+- the below-the-fold ids were asserted with a bare `assertVisible`/`tapOn` — `08-permission`
+  (`perm-reply`), `08c` (`perm-reply`, `perm-reply-input`, `perm-reply-send`),
+  `25-session-info` (`session-info-mcp-demo`, `-mcp-broken`), `34-hub-tools`
+  (`tools-mcp:demo`), `34-hub-info` (`session-info-model-Model`) — which a native
+  `formSheet` at the MIDDLE detent no longer guarantees;
+- no shots flow for the sheets and no lock-with-a-sheet-up flow existed (`ls 42-* 43-*` → no
+  hit), and `FLOWS` had no entry for either.
+
+**As built (dependency order).**
+
+1. `apps/mobile/e2e/flows/08-permission.yaml` — the fold: `scrollUntilVisible` to
+   `perm-reply`, then D5 driven for real: `swipe start "50%, 55%" → end "50%, 95%"` (from
+   the pinned head, past the bottom edge — the gesture RNS's
+   `presentationControllerShouldDismiss` refuses), `scrollUntilVisible` to `perm-hold`
+   (a blocked swipe still moves the sheet between detents, Step 0 F3, so the note is below
+   the fold), re-assert the ask is unanswered, then scroll to `perm-later` (the offered way
+   out) and back up to `perm-allow_once` before answering.
+2. `08c-permission-reply.yaml` — three `scrollUntilVisible`s (reply pill, reply field, "Send
+   reply"), each **before** its tap.
+3. `08b-permission-deny.yaml` — `perm-reject_once` (the third option) scrolled to first.
+4. `25-session-info.yaml` — `session-info-mcp-demo` scrolled to before the MCP
+   assert/switch section (`-mcp-broken` follows it).
+5. `34-hub-tools.yaml`, `34-hub-info.yaml`, `34-hub-scheduled.yaml` — the first band / the
+   Model band / the revealed Scheduled row are `scrollUntilVisible`d instead of
+   `extendedWaitUntil`: at 0.5 nothing of them is guaranteed on screen.
+6. **New** `flows/42-native-sheets-shots.yaml` + `flows/42-native-sheets-file.js` — the
+   Validation evidence set: Commands at M, Tools at M → dragged UP to L → two drags DOWN to
+   S → back UP (`tools-scroll`, the ONE scroller, F8), Session info at M, and a live
+   Permission ask at M; each through `_shot` (light + dark). Ends on daemon truth
+   (`file-exists?file=ns42.txt`), 12c's rule.
+7. **New** `flows/43-native-sheets-lock.yaml` — S3's L1 on a simulator: `immediately`, Tools
+   up, `pressKey: Home`, `launchApp {stopApp:false}` → `lock-screen`, **`assertNotVisible
+   tools-sheet` and `session-view`** (F5a's exact failure: the cover must win because the
+   drain popped the route, not because it is drawn over it), `_unlock` → the sheet is BACK
+   (the drain leaves `desired` alone), close it, end on `20-log-dialled.js`.
+8. `e2e/run.ts` — `42-native-sheets-shots` in `FLOWS` (after `41-file-view-shots`),
+   `43-native-sheets-lock` with the other lock flows (it changes the lock setting), and
+   `NATIVESHEETS_ID` / `SHEETLOCK_ID` in `COMPOSE_SESSION_VARS` (one session per flow,
+   created just before it runs).
+9. `test/e2e-flows.test.ts` (+205 lines, 5 describes): the fold rule per low id + the
+   scroll-before-tap ORDER; D5's swipe-then-`perm-hold` order (and that it precedes the
+   answer); flow 43's properties (registered, own session, a sheet really up before Home,
+   `lock-screen` and no sheet between it and `_unlock`, the sheet back after it, daemon
+   truth last); flow 42's (registered, own session, the four shot names unique, the
+   UP/DOWN/DOWN/UP drag sequence, each sheet asserted open, daemon truth last); and the
+   reverse flow-list guard (no yaml file is silently not run — 74 files vs `FLOWS`).
+
+**Red before green (AGENTS §9).** The whole S6 guard block was written and run on the
+**old** flows first: `git show HEAD:…/08-permission.yaml` restored → **52 pass / 3 fail**,
+each red on its own assertion (the fold, the swipe, `perm-hold` — no import/module error).
+The new-flow guards were red at authoring time because `42`/`43` did not exist (the file
+reads throw). Mutations (each applied to the real file, run, reverted; backups in
+`.tentacle/tmp/mobile-native-sheets/bak-s6/`):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `08` drops the `scrollUntilVisible` to `perm-reply` | 54 pass **1 fail** |
+| M2 | `08` answers BEFORE the blocked swipe | 54 pass **1 fail** |
+| M3 | `43` drops `assertNotVisible tools-sheet` while locked | 54 pass **1 fail** |
+| M7 | `43` moves that assert AFTER the unlock (vacuous) | 54 pass **1 fail** |
+| M4 | `42` loses its second DOWN drag (one step ≠ two) | 54 pass **1 fail** |
+| M5 | `43` unregistered from `FLOWS` | 53 pass **2 fail** |
+| M6 | `42` ends on `session-view` instead of the file hook | 54 pass **1 fail** |
+
+Restored → **55 pass / 0 fail**. M7 was added because the first `43` guard passed on
+`body.slice(lockAt).toContain("tools-sheet")`, a weaker correlate (it also matches the
+post-unlock re-present); the guard is now an index comparison
+(`lockAt < notSheetAt < unlockAt`), and M3/M7 both fail on it.
+
+**Drift from Implementation (and why).**
+
+1. **Two flows, not one shots flow.** The Implementation lists
+   `{08c,25,29,34-hub-*}` + `42-native-sheets-shots`. `29-tool-rows` needed **no** edit:
+   its perm taps are `perm-allow_once`, the sheet's FIRST option, always above the fold —
+   editing it would be noise. The lock gate wanted by S3 ("goes into S6") cannot live in a
+   shots flow (it changes the app's lock setting and ends on the log, not a screenshot), so
+   it is its own `43-native-sheets-lock`.
+2. **`34-hub-*` = tools, info, scheduled** (not all ten): commands/attach/artifacts/
+   sessions/dictate/new assert nothing that sits below the fold of a native sheet.
+3. **The swipe is a `start`/`end` percentage pair, not `from: {id}`.** A `from` id targets
+   the element's centre — inside the options, where the drag scrolls the scroller instead of
+   dragging the sheet. `"50%, 55%"` is the pinned head, the surface the presentation
+   controller judges (the same shape `03-refresh` uses).
+4. **`42` shoots Permission with a LIVE ask** (the blocked-swipe evidence is flow 08's) and
+   does **not** try Outbox: its only route is an offline item whose basis CHANGED, i.e. flow
+   17's whole stop/`serve`/laptop-turn round trip — repeating it here would double the gate's
+   cost for one screenshot.
+5. **Not automated, by instruction** (the orchestrator's simulator pass, listed in this
+   doc's Validation): Outbox at S/M/L, petrol at M, AX5 Dynamic Type, Reduce Motion,
+   landscape, Permission-over-Tools, and the real-device L2 app-switcher check (Step 0b:
+   `osascript` cannot drive Simulator.app from an agent).
+
+**Verified (narrow, as instructed).** `e2e-flows` + `e2e-gate` + `e2e-shard` +
+`e2e-appearance` + `e2e-preflight` + `e2e-escape-probes` → **201 pass / 0 fail**;
+`tsc -p apps/mobile` exit 0; `biome check` **0/0** on the three changed JS/TS files (the yaml
+flows are not linted, AGENTS §6). No schema change →
+`packages/protocol/schema/protocol.json` untouched. Changelog: none added — the S1 fragment
+(`changelog.d/mobile-native-sheets.changed.md`) already describes the feature end to end and
+e2e flows are dev/test-only, which the changelog discipline excludes. The full gate is the
+orchestrator's.
+
+**Not done, by instruction:** the simulator Validation itself (the 5×3×light/dark matrix and
+its extra checks) — the orchestrator runs it after this slice. **Unverified:** every flow
+edit here is a claim about a finger on a sheet; the 0.5-detent fold estimates (which ids land
+below it) come from the sheets' contents, not from a screenshot, and neither `42` nor `43`
+has ever run. `TODO.md` untouched.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-23 (fresh context; same model family as the S1/S2/S4/S5 executor, so shared blind spots are possible)*

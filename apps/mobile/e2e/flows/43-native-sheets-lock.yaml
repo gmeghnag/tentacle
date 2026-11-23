@@ -1,0 +1,98 @@
+appId: so.tentacle.app
+---
+# 43-native-sheets-lock (docs/feat/mobile-native-sheets.md S3's L1, driven here):
+# a native sheet up, the app leaves the screen, and the LOCK COVER still wins.
+#
+# Step 0 F5a found the opposite on the spike: with a formSheet presented, the lock
+# (an RN `Modal` at the time) never appeared, and the Face ID prompt came up OVER
+# the live session and the sheet — a session visible in the app switcher, which is
+# what the lock exists to prevent. S3's answer is a DRAIN: while the app is hidden
+# or locked, `reconcile` pops the whole sheet stack (top-down, one pass, every pop
+# planned so none is reported as a person's swipe), and `desired` is untouched, so
+# the same sheets re-push after the unlock. This flow is the proof of both halves,
+# and it is the one thing no unit test can show: the drain is a `state` on the
+# navigator, but the ORDER of "pop the sheets" and "the cover comes up" is a device
+# fact.
+#
+# LAST of the flows that change the lock setting (like 18/19/20): it leaves
+# `immediately` behind in the Keychain, which `_pair`'s `clearKeychain` resets.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "open-settings"
+- assertVisible:
+    id: "settings"
+# `immediately` (the shipped default, stated explicitly): with a delay this flow
+# would assert nothing at all.
+- tapOn:
+    id: "lock-delay-immediately"
+- tapOn:
+    id: "settings-back"
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${SHEETLOCK_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${SHEETLOCK_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+# A sheet is UP: Tools, because it is reachable from the hub without any daemon
+# data beyond the session's own open (the `demo` server, `run.ts`'s harness config).
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "tools"
+- tapOn:
+    id: "hub-item-tools"
+- extendedWaitUntil:
+    visible:
+      id: "tools-sheet"
+    timeout: 10000
+- pressKey: Home
+# `launchApp` WITHOUT `clearState` and WITHOUT a stop: the record must survive and
+# this is a RESUME, not a cold start (a cold start auto-prompts Face ID over the
+# lock, docs/fix/mobile-e2e-reds.md).
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: "lock-screen"
+    timeout: 15000
+# THE PROPERTY (F5a): the cover wins. The drain popped the sheet's route before the
+# cover came up, so while locked neither the sheet nor the session behind it is on
+# screen.
+- assertNotVisible:
+    id: "tools-sheet"
+- assertNotVisible:
+    id: "session-view"
+- runFlow:
+    file: _unlock.yaml
+# After the unlock the sheet is BACK, at its detent: `desired` survived the drain,
+# so `reconcile` re-pushed it in order.
+- extendedWaitUntil:
+    visible:
+      id: "tools-sheet"
+    timeout: 20000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "43-lock-drained-restored"
+- tapOn:
+    id: "tools-close"
+- extendedWaitUntil:
+    notVisible:
+      id: "tools-sheet"
+    timeout: 10000
+# DAEMON truth (12c's rule): the app's own log records the dial that only happens
+# after a successful unlock, and throws if it does not.
+- runScript:
+    file: "20-log-dialled.js"

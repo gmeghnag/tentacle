@@ -1,0 +1,172 @@
+appId: so.tentacle.app
+---
+# 42-native-sheets-shots (docs/feat/mobile-native-sheets.md S6, Validation): the
+# evidence set for the five native sheets. Since S3–S5 each one is a stack
+# `formSheet` route (three detents, S/M/L), not a `<Modal>`, so the two things a
+# screenshot must show are that it OPENS at the middle detent with the chat dimmed
+# behind it, and that a drag really reaches L and S — the sheet keeps its own
+# layout at each one (F0: the pinned head with its close glyph, ONE scroller under
+# it). Its own session (`NATIVESHEETS_ID`).
+#
+# Not driven here, by instruction (they are the orchestrator's simulator pass):
+# Outbox's decision sheet (its only route is an offline item whose basis CHANGED —
+# flow 17's whole stop/`serve`/laptop-turn round trip — so shooting it here would
+# repeat that flow), petrol at M, AX5 Dynamic Type, Reduce Motion, landscape, and
+# Permission over Tools (two stacked formSheets hide the hierarchy from XCUITest:
+# Step 0 run 1–2, seen again in flow 09's design).
+#
+# The shots are `_shot`'s: light, then dark, then light again, so each name below
+# is TWO screenshots. Ids are the sheets' own, unchanged by the migration.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${NATIVESHEETS_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${NATIVESHEETS_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+# --- Commands at M -----------------------------------------------------------
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "commands"
+- tapOn:
+    id: "hub-item-commands"
+- extendedWaitUntil:
+    visible:
+      id: "commands-sheet"
+    timeout: 10000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "42-commands-M"
+# The close glyph is in the pinned head, so it is tappable at every detent: no
+# `perm-later`-style way out is needed to leave a sheet here.
+- tapOn:
+    id: "commands-sheet-close"
+- extendedWaitUntil:
+    notVisible:
+      id: "commands-sheet"
+    timeout: 10000
+# --- Tools at M, then dragged to L and S -------------------------------------
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "tools"
+- tapOn:
+    id: "hub-item-tools"
+- extendedWaitUntil:
+    visible:
+      id: "tools-sheet"
+    timeout: 10000
+- extendedWaitUntil:
+    visible:
+      id: "tools-mcp:demo"
+    timeout: 15000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "42-tools-M"
+# An upward drag on the ONE scroller (F8: a nested pair scrolls the inner list and
+# the sheet stays put): medium → large.
+- swipe:
+    from:
+      id: "tools-scroll"
+    direction: UP
+- waitForAnimationToEnd
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "42-tools-L"
+# Two drags down: large → medium → small (Step 0 F1: a drag moves ONE step). At the
+# scroller's TOP there is nothing left to scroll, so the same drag on `tools-scroll`
+# is the sheet's own (the pair F8 recorded the other way round).
+- swipe:
+    from:
+      id: "tools-scroll"
+    direction: DOWN
+- waitForAnimationToEnd
+- swipe:
+    from:
+      id: "tools-scroll"
+    direction: DOWN
+- waitForAnimationToEnd
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "42-tools-S"
+- swipe:
+    from:
+      id: "tools-scroll"
+    direction: UP
+- waitForAnimationToEnd
+- tapOn:
+    id: "tools-close"
+- extendedWaitUntil:
+    notVisible:
+      id: "tools-sheet"
+    timeout: 10000
+# --- Session info at M -------------------------------------------------------
+- tapOn:
+    id: "session-menu"
+- assertVisible:
+    id: "session-menu-info"
+- tapOn:
+    id: "session-menu-info"
+- extendedWaitUntil:
+    visible:
+      id: "session-info-sheet"
+    timeout: 10000
+- extendedWaitUntil:
+    visible:
+      id: "session-info-model-Model"
+    timeout: 15000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "42-info-M"
+- tapOn:
+    id: "session-info-close"
+- extendedWaitUntil:
+    notVisible:
+      id: "session-info-sheet"
+    timeout: 10000
+# --- Permission at M (the ask is raised by the phone's own turn) --------------
+- tapOn:
+    id: "composer-input"
+- inputText: "EDIT ns42.txt"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- assertVisible:
+    id: "perm-allow_once"
+# D5: while the ask is unanswered the sheet cannot be swiped away at all, so the
+# evidence shot has a live ask under it (the same blocked swipe flow 08 asserts).
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "42-permission-M"
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+# The last step is DAEMON truth (12c's rule): the approval really ran the tool.
+- runScript:
+    file: "42-native-sheets-file.js"

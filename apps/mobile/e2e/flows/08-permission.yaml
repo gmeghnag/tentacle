@@ -36,15 +36,45 @@ appId: so.tentacle.app
       id: "perm-sheet"
     timeout: 20000
 # What the daemon offered, drawn by the sheet: the three options and the reply one
-# (this daemon takes a reply with a refusal).
+# (this daemon takes a reply with a refusal). A native `formSheet` opens at the
+# MIDDLE detent (0.5) since docs/feat/mobile-native-sheets.md S5, so the items low
+# in it are scrolled to, never assumed on screen.
 - assertVisible:
     id: "perm-allow_once"
 - assertVisible:
     id: "perm-allow_always"
 - assertVisible:
     id: "perm-reject_once"
+- scrollUntilVisible:
+    element:
+      id: "perm-reply"
+    direction: DOWN
+# D5: while the ask is unanswered the sheet cannot be swiped away — `gestureEnabled`
+# is false on the route — so the drag reports a BLOCKED attempt instead: the hold
+# note appears under the options and the ask is still unanswered. This is the one
+# property a unit test cannot check (a native gesture), so it is driven here. It
+# starts on the sheet's pinned head (just under the grabber, above the options) and
+# goes past the bottom edge: RNS's `presentationControllerShouldDismiss` refuses it.
+- swipe:
+    start: "50%, 55%"
+    end: "50%, 95%"
+# A blocked swipe leaves the sheet at the SMALL detent (Step 0 F3: the drag still
+# moves between detents), so the note under the options is scrolled to, not assumed
+# on screen — the same fold rule as above.
+- scrollUntilVisible:
+    element:
+      id: "perm-hold"
+    direction: DOWN
 - assertVisible:
-    id: "perm-reply"
+    id: "perm-allow_once"
+- scrollUntilVisible:
+    element:
+      id: "perm-later"
+    direction: DOWN
+- scrollUntilVisible:
+    element:
+      id: "perm-allow_once"
+    direction: UP
 - runFlow:
     file: _shot.yaml
     env:

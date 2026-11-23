@@ -32,7 +32,13 @@ appId: so.tentacle.app
     visible:
       id: "session-info-sheet"
     timeout: 10000
-- extendedWaitUntil:
-    visible:
+# A native `formSheet` at the MIDDLE detent (docs/feat/mobile-native-sheets.md
+# S4): the Model band is the sheet's first section and starts just under the
+# pinned head, so it is scrolled to rather than assumed at the sheet's edge.
+- scrollUntilVisible:
+    element:
       id: "session-info-model-Model"
+    direction: DOWN
     timeout: 15000
+- assertVisible:
+    id: "session-info-model-Model"
