@@ -145,3 +145,24 @@ Evidence: `bun test` on `packages/providers/test`, `model-error.test.ts` and `tr
 Unverified: a real llama.cpp stream. The `error:` wire shape comes from the plan's reading of the llama.cpp server code and from the owner's log, not from a captured stream. Verify by reproducing the three-request overload against the `~/assistant` serve.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-23*
+
+**Verdict: APPROVE** (no HIGH/MEDIUM findings). Same model family as the planner (Opus), a different family from the executor (Sonnet). Only the context is fresh.
+
+- **Gate (scoped, as briefed):** the touched test files (providers/test, tui model-error and truncated-reply-notice, mobile transcript) give 263 pass, 0 fail. `bun run lint` is clean (2318 files). `bun run typecheck` is clean (root, mobile, relay). I did not run the full `bun test`; it is left to the orchestrator's merge check.
+- **Mutations** (each applied, then reverted; `git status` clean afterwards). Turning off the `error:` branch in `sse.ts`, the `inBandError(chunk)` throw in `openai-provider.ts`, and adding `\bmodel\b` back to the hint regex makes 9 tests fail: (a)–(e), the no-message case, the sse `error:` test, the decision-(c) negatives and the remote App frame test. The tests are not vacuous.
+- **Premises checked:**
+  - TRUE: `parseSSE` was the only drop point and has only two callers. `retry.ts:34-38` keys on a string `code`, and `ModelServerError` has none, so it is never retried (test (e) shows one fetch). `sanitizeTurnError` redacts and caps the text before it goes on the wire.
+  - Protocol unchanged, so a missing `protocol.d/` note is correct.
+- **Attacks tried, no finding:**
+  - Anthropic `event: error` + `data:{type:"error"}`: gives «model server error: Overloaded».
+  - Null `error` member in a normal chunk: skipped.
+  - Partial tool call before the error: never yielded.
+  - Abort path: unchanged.
+  - Hint removal hiding a real config error: the `apiKeyCommand` config errors were not matched before either; they fail at load time, not in a turn.
+  - Mid-stream `ECONNRESET`: still gets the hint, which fits (c), since it is a connection failure.
+- **Low-risk notes (not blocking):**
+  - `inBandError`'s bare-`{message:string}` rule also applies to `data:` chunks. A gateway that put a top-level string `message` in normal chunks would turn them into errors. No known server does this. To remove the risk, limit that rule to the `error:` field.
+  - The proxy path (`run`/`attach`, where the error crosses `model/stream`) was not traced. It behaves the same as any provider throw did before this change.
+- **Executor behaviour:** followed the plan. Red was shown first. Its drift (`inBandErrorFromText` helper, barrel untouched) is reported honestly. It did not claim a full gate it had not run.
