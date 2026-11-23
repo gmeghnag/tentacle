@@ -4,7 +4,7 @@
  * rule is tested without a simulator. The stack's screens are `Pair` and
  * `Computers` → `Sessions` → `Session`.
  */
-import type { SheetKind } from "./sheet-plan.ts";
+import type { SheetKind, SheetRouteLike } from "./sheet-plan.ts";
 
 export type { SheetKind };
 
@@ -126,6 +126,59 @@ export function openArtifactGallery(
     archived: input.archived,
     from: input.from,
     ...(input.open === undefined ? {} : { open: input.open }),
+  });
+}
+
+/**
+ * The narrow navigation surface a sheet uses — never the whole router object.
+ * Mirrors `openArtifactGallery`: the screen's `useNavigation<SheetStackNavigation>()`
+ * is cast from a generic prop, so the sheet paths are pinned HERE (a router
+ * change that renamed `POP`'s `source` would break this file, not a screen).
+ */
+export interface SheetPopAction {
+  readonly type: "POP";
+  readonly payload: { readonly count: number };
+  /** The route being removed — `StackRouter` looks the key up by it. */
+  readonly source: string;
+  /** The stack that owns it. */
+  readonly target: string;
+}
+
+export interface SheetStackNavigation {
+  push(name: "Sheet", params: SheetRouteParam): void;
+  dispatch(action: SheetPopAction): void;
+  getState(): { readonly key: string; readonly routes: readonly SheetRouteLike[] };
+  setOptions(options: { gestureEnabled?: boolean }): void;
+}
+
+/**
+ * Open a native sheet (D1): `push`, never `navigate` — a second sheet must
+ * STACK. `navigate` would reuse the one `Sheet` route and REPLACE its params,
+ * which silently drops the sheet underneath (Outbox under a permission ask).
+ */
+export function openSheet(nav: Pick<SheetStackNavigation, "push">, params: SheetRouteParam): void {
+  nav.push("Sheet", params);
+}
+
+/**
+ * Close ONE sheet: a `pop` keyed on that route (`source`) and targeted at the
+ * stack, which is what `StackRouter`'s `POP` needs to remove a single route
+ * (`routers/src/StackRouter.tsx:557-578`). An unkeyed `goBack()` would pop the
+ * route underneath — the Session itself when one sheet is up.
+ *
+ * The action is written out rather than taken from `StackActions.pop`, so this
+ * module stays free of a react-navigation import (it is imported by tests under
+ * `bun test`, where RN does not load).
+ */
+export function popSheet(
+  nav: Pick<SheetStackNavigation, "dispatch" | "getState">,
+  key: string,
+): void {
+  nav.dispatch({
+    type: "POP",
+    payload: { count: 1 },
+    source: key,
+    target: nav.getState().key,
   });
 }
 

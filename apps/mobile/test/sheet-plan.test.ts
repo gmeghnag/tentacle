@@ -12,7 +12,9 @@ import {
   DETENT_MEMORY_MAX,
   type DetentMemory,
   INTENT_SHEET,
+  PRESENTED_SHEET_KINDS,
   SHEET_KINDS,
+  SHEET_ROUTE,
   SHEET_SPEC,
   type SheetEntry,
   type SheetKind,
@@ -20,18 +22,24 @@ import {
   createDetentMemory,
   desiredStack,
   dismissedNatively,
+  drainPops,
   initialDetent,
+  managedStack,
   openingDetent,
   queueAfterDismiss,
   readyIntents,
   reconcile,
+  recordDetent,
   rememberDetent,
   rememberedDetent,
   sessionInFront,
+  sheetEntriesOf,
   sheetGestureEnabled,
   sheetGround,
   sheetHidden,
+  sheetIdentity,
   sheetOptions,
+  stackSignature,
   yieldForeign,
 } from "../src/sheet-plan.ts";
 import { DENSE_FONT_SCALE } from "../src/theme.ts";
@@ -475,5 +483,182 @@ describe("sheetGround — the route's colour token", () => {
       if (kind === "permission") continue;
       expect(sheetGround(kind)).toBe("bg");
     }
+  });
+});
+
+describe("managedStack + stackSignature — what S3 actually presents (S3)", () => {
+  test("only the migrated kinds are pushed; order is desiredStack's", () => {
+    expect(managedStack(["tools", "outbox", "permission"], PRESENTED_SHEET_KINDS)).toEqual([
+      "outbox",
+    ]);
+    expect(managedStack(["commands", "outbox"], PRESENTED_SHEET_KINDS)).toEqual([
+      "commands",
+      "outbox",
+    ]);
+    expect(managedStack([], PRESENTED_SHEET_KINDS)).toEqual([]);
+  });
+
+  test("S3's list is exactly the two sheets it migrated (no premature push)", () => {
+    // The other three still draw their own RN Modal: pushing a route for them
+    // would show an empty native sheet over the modal one.
+    expect([...PRESENTED_SHEET_KINDS].sort()).toEqual(["commands", "outbox"]);
+  });
+
+  test("the signature is a string, and it changes only when the stack does", () => {
+    const route = (key: string, kind: SheetKind) => ({
+      key,
+      name: SHEET_ROUTE,
+      params: { kind },
+    });
+    const one = stackSignature([route("a", "commands")]);
+    expect(one).toBe("a:commands");
+    // The same stack, a fresh array: the same string (`useNavigationState` uses
+    // Object.is, so an array here would re-render for ever).
+    expect(stackSignature([route("a", "commands")])).toBe(one);
+    expect(stackSignature([route("a", "commands"), route("b", "outbox")])).not.toBe(one);
+    // A non-sheet route changes nothing.
+    expect(stackSignature([{ key: "s", name: "Session" }, route("a", "commands")])).toBe(one);
+    expect(stackSignature([])).toBe("");
+  });
+});
+
+describe("sheetEntriesOf — the sheet stack read back from the navigator (S3)", () => {
+  const route = (key: string, name: string, kind?: SheetKind) => ({
+    key,
+    name,
+    ...(kind === undefined ? {} : { params: { computerId: "c", sessionId: "s", kind } }),
+  });
+
+  test("keeps only the `Sheet` routes, bottom→top, with their kinds", () => {
+    const entries = sheetEntriesOf([
+      route("s", "Session"),
+      route("a", SHEET_ROUTE, "commands"),
+      route("b", SHEET_ROUTE, "permission"),
+    ]);
+    expect(entries).toEqual([
+      { kind: "commands", key: "a" },
+      { kind: "permission", key: "b" },
+    ]);
+  });
+
+  test("no sheet route at all is an empty stack, never a throw", () => {
+    expect(sheetEntriesOf([route("s", "Session")])).toEqual([]);
+    expect(sheetEntriesOf([])).toEqual([]);
+  });
+
+  test("another route carrying a `kind` param is not a sheet", () => {
+    // The name is checked, not just the params: a future screen that names a
+    // `kind` (a hub panel, say) must never enter the sheet stack.
+    const entries = sheetEntriesOf([
+      route("h", "Hub", "tools"),
+      route("a", SHEET_ROUTE, "commands"),
+    ]);
+    expect(entries).toEqual([{ kind: "commands", key: "a" }]);
+  });
+
+  test("a route whose params name no known kind is ignored, not guessed", () => {
+    // A stale/restored state, or a future kind this build does not know.
+    const entries = sheetEntriesOf([
+      { key: "a", name: SHEET_ROUTE },
+      { key: "b", name: SHEET_ROUTE, params: { kind: "hologram" } },
+      { key: "c", name: SHEET_ROUTE, params: { kind: 7 } },
+    ]);
+    expect(entries).toEqual([]);
+  });
+
+  test("the route name is the ONE constant, not a literal per call site", () => {
+    expect(SHEET_ROUTE).toBe("Sheet");
+  });
+});
+
+describe("drainPops — the lock drain empties the stack in ONE pass (S3)", () => {
+  test("every key, top-down", () => {
+    expect(drainPops(stack("commands", "outbox", "permission"))).toEqual(["a2", "a1", "a0"]);
+  });
+
+  test("an empty stack has nothing to drain", () => {
+    expect(drainPops([])).toEqual([]);
+  });
+
+  test("its pops are planned pops: no swipe is reported for any of them", () => {
+    const prev = stack("tools", "permission");
+    // The screen pops all of them and keeps them as the pass's planned pops.
+    expect(dismissedNatively(prev, [], drainPops(prev))).toEqual([]);
+  });
+
+  test("draining never touches `desired`: the same sheets re-push in order", () => {
+    const desired = desiredStack({ user: "tools", outbox: true, permission: true });
+    let actual = stack("tools", "outbox", "permission");
+    for (const key of drainPops(actual)) {
+      actual = actual.filter((e) => e.key !== key);
+    }
+    expect(actual).toEqual([]);
+    const pushed: SheetKind[] = [];
+    for (let i = 0; i < 10; i++) {
+      const step = reconcile(desired, actual, SHOWN);
+      if (step === null) break;
+      expect(step.action).toBe("push");
+      if (step.action !== "push") break;
+      pushed.push(step.kind);
+      actual = [...actual, { kind: step.kind, key: `r${i}` }];
+    }
+    expect(pushed).toEqual(["tools", "outbox", "permission"]);
+  });
+
+  test("while hidden the loop pops the top only — never a lower key", () => {
+    // The screen applies this repeatedly (the keys are drained in one pass).
+    const actual = stack("tools", "permission");
+    const step = reconcile(["tools"], actual, HIDDEN);
+    expect(step).toEqual({ action: "pop", key: "a1" });
+  });
+});
+
+describe("sheetIdentity — what a detent is remembered against (S3)", () => {
+  test("a user sheet is remembered by its KIND, not by a route key", () => {
+    for (const kind of SHEET_KINDS) {
+      if (kind === "permission") continue;
+      expect(sheetIdentity(kind, "req-9")).toBeNull();
+    }
+  });
+
+  test("the ask is remembered by ITS OWN id", () => {
+    expect(sheetIdentity("permission", "req-9")).toBe("req-9");
+    // No ask (the `returned` state): the kind's own slot, never another ask's.
+    expect(sheetIdentity("permission", null)).toBeNull();
+  });
+
+  test("a re-delivered ask keeps the detent the person left it at (Step 0b L3)", () => {
+    const memory = createDetentMemory();
+    // The person dragged the ask of `req-9` to L.
+    recordDetent(memory, "permission", sheetIdentity("permission", "req-9"), {
+      index: 2,
+      stable: true,
+    });
+    // On resume the link re-delivers the SAME ask: it re-opens at L.
+    expect(openingDetent(memory, "permission", sheetIdentity("permission", "req-9"), CALM)).toBe(2);
+    // A DIFFERENT ask opens at the spec's detent, not at the last ask's.
+    expect(openingDetent(memory, "permission", sheetIdentity("permission", "req-10"), CALM)).toBe(
+      SHEET_SPEC.permission.initial,
+    );
+  });
+});
+
+describe("recordDetent — only a STABLE change is remembered (S3)", () => {
+  test("a stable change is remembered and clamped to the spec", () => {
+    const memory = createDetentMemory();
+    expect(recordDetent(memory, "tools", null, { index: 2, stable: true })).toBe(true);
+    expect(rememberedDetent(memory, "tools", null)).toBe(2);
+    recordDetent(memory, "tools", null, { index: 99, stable: true });
+    expect(rememberedDetent(memory, "tools", null)).toBe(2);
+  });
+
+  test("a mid-drag (unstable) index is NOT remembered", () => {
+    const memory = createDetentMemory();
+    expect(recordDetent(memory, "tools", null, { index: 0, stable: false })).toBe(false);
+    expect(rememberedDetent(memory, "tools", null)).toBeNull();
+    // And it does not overwrite a remembered one either.
+    recordDetent(memory, "tools", null, { index: 2, stable: true });
+    expect(recordDetent(memory, "tools", null, { index: 0, stable: false })).toBe(false);
+    expect(rememberedDetent(memory, "tools", null)).toBe(2);
   });
 });

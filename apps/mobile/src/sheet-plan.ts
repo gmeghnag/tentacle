@@ -219,6 +219,190 @@ export interface SheetEntry {
   readonly key: string;
 }
 
+/**
+ * The ONE route name the sheets live under (`routes.ts`'s `Sheet`, D1). App.tsx
+ * declares the screen with it and the screen reads the stack back with it, so the
+ * two cannot drift.
+ */
+export const SHEET_ROUTE = "Sheet";
+
+/** What a navigation route looks like to `sheetEntriesOf` (no router import). */
+export interface SheetRouteLike {
+  readonly key: string;
+  readonly name: string;
+  readonly params?: unknown;
+}
+
+/**
+ * The sheet routes in a navigation state, bottom→top — the `actual` the
+ * reconcile loop runs on. Anything that is not the `Sheet` route (the Session
+ * itself, a screen pushed before the sheets) is not part of the stack, and a
+ * route whose params name no known kind is ignored rather than guessed.
+ */
+export function sheetEntriesOf(routes: readonly SheetRouteLike[]): SheetEntry[] {
+  const entries: SheetEntry[] = [];
+  for (const route of routes) {
+    if (route.name !== SHEET_ROUTE) {
+      continue;
+    }
+    const params = route.params as { readonly kind?: unknown } | undefined;
+    const kind = params?.kind;
+    if (typeof kind !== "string" || !(SHEET_KINDS as readonly string[]).includes(kind)) {
+      continue;
+    }
+    entries.push({ kind: kind as SheetKind, key: route.key });
+  }
+  return entries;
+}
+
+/**
+ * The DRAIN: every key to pop, TOP-DOWN, for one pass of the loop (Owner
+ * decision A, Step 0b). The screen dispatches these in order, in one pass — the
+ * stack must be empty ~before the app-switcher snapshot, and one step per render
+ * would take as many renders as there are sheets. Every key is popped by itself
+ * (`reconcile`'s top-only rule), so a lower sheet never takes an upper route
+ * with it and `dismissedNatively` reports nothing.
+ */
+export function drainPops(actual: readonly SheetEntry[]): string[] {
+  return actual.map((entry) => entry.key).reverse();
+}
+
+/**
+ * The wanted stack, restricted to the kinds this build PRESENTS natively (the
+ * sheet migrations land slice by slice: S3 commands + outbox, S4 tools + info,
+ * S5 permission). A kind whose content is still drawn by its own RN `Modal` must
+ * never be pushed as a route — the route would draw nothing and the person would
+ * see an empty sheet over the modal one. Order is `desiredStack`'s, untouched.
+ */
+export function managedStack(
+  desired: readonly SheetKind[],
+  managed: readonly SheetKind[],
+): SheetKind[] {
+  return desired.filter((kind) => managed.includes(kind));
+}
+
+/** Whether two `actual` stacks are the same (the state listener's no-op test). */
+export function sameStack(a: readonly SheetEntry[], b: readonly SheetEntry[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]?.key !== b[i]?.key || a[i]?.kind !== b[i]?.kind) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The kinds THIS build presents as native routes. The sheet migration lands slice
+ * by slice (S3: commands + outbox; S4: tools + info; S5: permission), and a kind
+ * whose content is still drawn by its own RN `Modal` must never be pushed as a
+ * route — the route would have nothing to draw and the person would see an empty
+ * sheet over the modal. `managedStack` filters with this list.
+ */
+export const PRESENTED_SHEET_KINDS: readonly SheetKind[] = ["commands", "outbox"];
+
+/**
+ * The stack's SIGNATURE: one string per sheet route, in order. `useNavigationState`
+ * compares its selection with `Object.is`, so a selector returning a fresh array
+ * would re-render for ever; this returns a string that only changes when the
+ * stack does. A route whose params name no known kind contributes nothing, exactly
+ * like `sheetEntriesOf`.
+ */
+export function stackSignature(routes: readonly SheetRouteLike[]): string {
+  return sheetEntriesOf(routes)
+    .map((entry) => `${entry.key}:${entry.kind}`)
+    .join("|");
+}
+
+/**
+ * The sheet routes belonging to ONE session screen.
+ *
+ * Two Session screens can be mounted at once (a native stack keeps blur's
+ * screens mounted), and every `Sheet` route lives in the SAME root stack — so a
+ * blurred screen must never pop or push a sheet that is not its own. The drain is
+ * the exception: privacy drains the WHOLE stack, whoever pushed it.
+ */
+export function sheetsOfSession(
+  routes: readonly SheetRouteLike[],
+  owner: { readonly computerId: string; readonly sessionId: string },
+): SheetEntry[] {
+  return sheetEntriesOf(routes).filter((entry) => {
+    const route = routes.find((candidate) => candidate.key === entry.key);
+    const params = route?.params as
+      | { readonly computerId?: unknown; readonly sessionId?: unknown }
+      | undefined;
+    return params?.computerId === owner.computerId && params?.sessionId === owner.sessionId;
+  });
+}
+
+/**
+ * `AppState.currentState` as `sheet-plan`'s activity. RN reports `null` before
+ * the first event and `"unknown"`/`"extension"` on some platforms; neither may
+ * read as `active` (that would leave a sheet up in the switcher), so anything
+ * unrecognised is `unknown` — which `sheetHidden` drains on.
+ */
+export function appActivity(state: string | null | undefined): AppActivity {
+  return state === "active" || state === "inactive" || state === "background"
+    ? state
+    : state === "extension"
+      ? "extension"
+      : "unknown";
+}
+
+/**
+ * The app's ONE detent memory (D3): held outside React, like the reveal's
+ * tracker, so the route that observes a change and the screen options that apply
+ * it on the next presentation share one store.
+ */
+export const SHEET_DETENTS: DetentMemory = createDetentMemory();
+
+/**
+ * The opening context for a sheet's options: Dynamic Type, plus the detent the
+ * person left this sheet at (D3). `sheetOptions` stays pure — the caller hands it
+ * the remembered index.
+ */
+export function sheetDetentContext(
+  kind: SheetKind,
+  identity: string | null,
+  fontScale: number,
+): DetentContext {
+  const remembered = rememberedDetent(SHEET_DETENTS, kind, identity);
+  return {
+    fontScale,
+    ...(remembered === null ? {} : { detent: remembered }),
+  };
+}
+
+/**
+ * A sheet's detent-memory identity (`DetentMemory`): the ask's own id for
+ * Permission — so a re-delivery of the SAME ask keeps the detent the person left
+ * it at (Step 0b L3) — and `null` (the kind itself) for the user sheets.
+ */
+export function sheetIdentity(kind: SheetKind, askId: string | null): string | null {
+  return kind === "permission" ? askId : null;
+}
+
+/**
+ * Fold one `sheetDetentChange` into the memory. Only a STABLE change is
+ * remembered: RNS reports the intermediate detents of a drag too, and a
+ * remembered mid-drag value would re-open the sheet where the finger passed.
+ * Returns whether it was remembered (a drag's transient index is not).
+ */
+export function recordDetent(
+  memory: DetentMemory,
+  kind: SheetKind,
+  identity: string | null,
+  change: { readonly index: number; readonly stable: boolean },
+): boolean {
+  if (!change.stable) {
+    return false;
+  }
+  rememberDetent(memory, kind, identity, change.index);
+  return true;
+}
+
 /** What the loop may do in one pass: push the first missing kind, or pop the top. */
 export type SheetStep =
   | { readonly action: "push"; readonly kind: SheetKind }

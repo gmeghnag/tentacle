@@ -699,6 +699,98 @@ module stays OUT of react-native's types") asserts `sheet-plan.ts` imports neith
 `workflow-approve-sheet` → 105 pass / 0 fail · `bunx biome check` on both changed files → clean.
 The full `bun run check` gate remains the orchestrator's.
 
+### S3 — reconcile loop, native-dismiss sync, lock drain, yield, `sessionInFront`; Commands + Outbox
+
+*— deepseek-v4-pro (first pass, stopped by the watchdog at 253 tool calls) + claude-opus-5-5 (resume: review of the partial tree, fixes, wiring, mutations), 2026-11-23*
+
+**Load-bearing check (re-run, reproduced)** — `.tentacle/tmp/mobile-native-sheets/s3-baseline.log`:
+`SessionScreen` neither publishes to `SHEET_HOSTS` nor pushes `Sheet` nor reconciles (no hit); `createAppLock`
+had `state/dispatch/view` only (no subscription); `AppShell` read `lockInstance.view()` at render (the stale
+leg, Step 0b); Commands and Outbox still drew a `<Modal>`. So the capability S3 adds was missing.
+
+**As built (dependency order).**
+1. `src/app-lock.ts` — `AppLock.subscribe(listener)`: every `dispatch` notifies with the NEW view; per-instance
+   listener set (the drain's `locked` source, Step 0b; never `AppShell`'s render-time `lockView`).
+2. `src/sheet-plan.ts` (additions, still React-free) — `SHEET_ROUTE`, `sheetEntriesOf` (the `Sheet` routes,
+   unknown kinds ignored), `drainPops` (every key, top-down, one pass), `managedStack` +
+   `PRESENTED_SHEET_KINDS = ["commands","outbox"]` (a kind still drawn by its own Modal is never pushed),
+   `sameStack`, `stackSignature` (a string, so `useNavigationState` does not re-render forever),
+   `sheetsOfSession` (two Session screens share one root stack), `appActivity` (`null`/`unknown` ⇒ hidden),
+   `SHEET_DETENTS` (the app's one detent memory), `sheetDetentContext`, `sheetIdentity` (ask id for
+   Permission, the kind otherwise), `recordDetent` (stable changes only).
+3. `src/routes.ts` — `SheetStackNavigation`, `openSheet` (`push`, never `navigate`), `popSheet` (a `POP` keyed
+   on `source`, targeted at the stack; no react-navigation import).
+4. `App.tsx` — `AppShell` mirrors `lockInstance.subscribe` into `sheetLocked` → `SessionRoute` → `SessionScreen`
+   (`locked`, `computerId`, `sessionId`); the `Sheet` screen opens at `sheetDetentContext(...)` (remembered
+   detent + font scale) and records `sheetDetentChange` through `recordDetent`.
+5. `CommandsSheet.tsx`, `compose/OutboxDecisionSheet.tsx` — `<Modal>` and `visible` removed (render only).
+6. `SessionScreen.tsx` — publishes both elements in a layout effect, `forget` on unmount; `desiredStack` →
+   `managedStack`; one effect = drain (`sheetHidden(locked, appActivity(AppState))`, every key in one pass,
+   all marked planned) else ONE `reconcile` step (pop keyed / push only while `inFront`); `dismissedNatively`
+   runs the swiped kind's own close (`setCommandsOpen(false)`, `setDeciding(null)`); Commands → Rename goes
+   through `queueAfterDismiss`/`readyIntents`; `yieldForeign` hides the hub/session `ActionSheet`s, `ActivitySheet`
+   and `RenameSheet` (its text stays in the controller); voice gates read `sessionInFront(focused, sheetStack)`.
+
+**Fixed on resume (the partial tree had them wrong; each now pinned by a wiring test, see mutations):**
+- `owner` was a fresh object per render and the `forget` effect depended on it → the host was forgotten on
+  EVERY render (the route could read `orphaned` and pop itself). Now `useMemo([computerId, sessionId])`.
+- The push was gated on raw `useIsFocused()`; this session's own sheet blurs Session, so an Outbox decision
+  arriving while Commands is up would never be pushed. Now gated on `inFront` (`sessionInFront`).
+- `plannedPop` was reset to `[]` on every stack change; a drain whose pops land over more than one navigator
+  state would report the later ones as swipes (running Outbox "Not now"). Now only landed keys are spent.
+- `afterDismiss` was declared but never fed (Rename began under the sheet, only hidden by `yields`). Now
+  `renameFromCommands` queues `"rename"` and `controller.beginRename()` runs once the route is gone.
+- The detent memory functions existed but nothing called them; wired in `App.tsx` (above).
+- The wanted stack is memoized on its content (`wantedKey`) so the loop does not re-run on every render.
+- A wiring assertion `not.toContain('"tools"')` was vacuous-by-accident (red on unrelated `"tools"` strings);
+  replaced.
+
+**Drift from the Implementation.**
+1. `afterDismiss` readiness = the route has LEFT the navigation state (`readyIntents` with `actual` empty), not
+   `transitionEnd {closing:true}`: a popped route is unmounted, so its own `transitionEnd` listener is gone
+   (`NativeStackView.native.tsx:114-120` emits it on the route). **Unverified:** whether an RN Modal (Rename)
+   presents cleanly during the native dismiss animation — check in S6 (Commands → Rename on the simulator).
+2. Detent identity is wired as `sheetIdentity(kind, null)` — correct for the two S3 kinds (keyed on the kind).
+   The ask id joins the route params when Permission becomes a route (S5); the pure identity rule and its
+   re-delivery test land here.
+3. `PRESENTED_SHEET_KINDS` (not in the plan): with three sheets still on RN Modals, pushing their kinds would
+   draw an empty route over a modal sheet. S4/S5 extend the list.
+4. Commands/Outbox render through today's `Sheet` (not the `native` variant, S4): the F0 two-child layout and
+   the single-scroller expand are S4's; until then their in-sheet scrolling is unverified on device.
+
+**Tests.** `sheet-plan.test.ts` (+S3 blocks: `sheetEntriesOf`, `drainPops`, `sheetIdentity` incl. "a re-delivered
+ask keeps its detent" (L3), `recordDetent`, `managedStack`/`stackSignature`, `appActivity`, `sheetsOfSession`),
+`app-lock.test.ts` (subscription: every view, the `loaded` leg, unsubscribe, per-instance list),
+`native-sheets-wiring.test.ts` (S3 block: 16 source-structure tests), `commands-sheet.test.ts`/`row-a11y.test.ts`
+(no `visible`; Rename queued).
+
+**Mutation checks.** DeepSeek's (`.tentacle/tmp/mobile-native-sheets/mutations-s3.log`): M1 `drainPops`
+bottom-up → 1 fail · M2 `sheetIdentity` drops the ask id → 2 fail (incl. L3 re-delivery) · M3 `recordDetent`
+keeps mid-drag → 1 fail · M4 `sheetEntriesOf` keeps non-`Sheet` routes → 0 fail at first, a name-masking test
+added → 1 fail · M5 unknown kind guessed → 1 fail · M6 lock never notifies → 3 fail · M7 module-global listener
+list → 0 fail at first, an instance-isolation test added → 1 fail · M8 `managedStack` pushes every kind → 1
+fail · M9 signature counts routes → 1 fail; each restored green. Resume (wiring + commands tests, applied by
+hand and reverted):
+
+| # | Mutation | Result |
+|---|---|---|
+| R1 | `owner` not memoized | 43 pass **1 fail** |
+| R2 | push gated on raw `focused` | **fail** (`inFront` test) |
+| R3 | `plannedPop.current = []` | **fail** (landed-pops test) |
+| R4 | Rename `beginRename()` under the sheet | **2 fail** (wiring + commands-sheet) |
+| R5 | `sheetDetentChange` listener renamed | **fail** (detent-memory test) |
+| — | R2–R5 applied together | 39 pass **5 fail**, each its own named test; restored → 44 pass |
+
+**Verified.** S3 files (`native-sheets-wiring`, `sheet-plan`, `app-lock`, `commands-sheet`, `row-a11y`,
+`sheet-host`) → 169 pass / 0 fail · the 42 other suites that read `SessionScreen.tsx`/`App.tsx`/`app-lock`/the two
+sheets, plus `bundle-node-free`, `theme`, `band-screens`, `routes` → 723 pass / 0 fail · `bunx tsc -p apps/mobile`
+clean · `bunx biome check` on the 12 changed files clean. No schema change (`protocol.json` untouched). Changelog:
+the S1 fragment `changelog.d/mobile-native-sheets.changed.md` already states the feature (incl. the drain and
+remembered detents); no second fragment. The full gate is the orchestrator's. Not simulator-run (S6).
+
+**Not done, by instruction:** S4 (Tools, Session info, `Sheet native`), S5 (Permission, D5), S6 (e2e + Validation).
+`TODO.md` untouched.
+
 ## Review
 
 ### Owner answers (2026-11-23 ~08:35)

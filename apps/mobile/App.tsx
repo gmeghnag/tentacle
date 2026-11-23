@@ -204,7 +204,14 @@ import {
   type SessionScreenController,
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
-import { sheetGround, sheetOptions } from "./src/sheet-plan.ts";
+import {
+  SHEET_DETENTS,
+  recordDetent,
+  sheetDetentContext,
+  sheetGround,
+  sheetIdentity,
+  sheetOptions,
+} from "./src/sheet-plan.ts";
 import { SHELL_ROWS } from "./src/shell-rows-expo.ts";
 import type { ShellRowsSettings } from "./src/shell-rows-store.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
@@ -1744,6 +1751,7 @@ function SessionRoute({
   cwd,
   onOpenDrawer,
   drawerOpen,
+  locked,
   onOpenArtifacts,
   onNewSession,
 }: {
@@ -1761,6 +1769,12 @@ function SessionRoute({
   readonly onOpenArtifacts: (from: ArtifactGalleryRoute["from"], open?: string) => void;
   /** The drawer's New session, reached from the hub too (docs/feat/mobile-hub.md H3). */
   readonly onNewSession: () => void;
+  /**
+   * The lock's own current value, subscribed in `AppShell` (never a render-time
+   * read): the native sheets' drain is gated on it (docs/feat/mobile-native-sheets.md
+   * D3, Owner decision A).
+   */
+  readonly locked: boolean;
 }): JSX.Element {
   const shellRows = useShellRows();
   const [controller, setController] = useState<SessionScreenController | null>(null);
@@ -1889,6 +1903,9 @@ function SessionRoute({
       drawerOpen={drawerOpen}
       onOpenArtifacts={onOpenArtifacts}
       onNewSession={onNewSession}
+      computerId={computerId}
+      sessionId={sessionId}
+      locked={locked}
       artifactsSeenKey={sessionKey(computerId, sessionId)}
       onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
       compactShell={shellRows.settings.compactShell}
@@ -2380,6 +2397,15 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   }
   const lockInstance = lock.current;
   const lockView = lockInstance.view();
+  /**
+   * The sheets' drain reads `locked` from the LOCK, not from this render
+   * (docs/feat/mobile-native-sheets.md D3, Step 0b): `AppShell` re-renders for its
+   * own reasons, so `lockView` above is stale exactly when the lock changes
+   * without one. `LockGate`'s own dispatch is what notifies (`app-lock.ts`'s
+   * `subscribe`), and this subscription only mirrors the flag the sheets need.
+   */
+  const [sheetLocked, setSheetLocked] = useState(() => lockInstance.view().locked);
+  useEffect(() => lockInstance.subscribe((view) => setSheetLocked(view.locked)), [lockInstance]);
   const lockGateDeps = {
     lock: lockInstance,
     authenticate,
@@ -2772,6 +2798,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     palette={palette}
                     onOpenDrawer={openDrawer}
                     drawerOpen={drawerOpen}
+                    locked={sheetLocked}
                     onNewSession={newSession}
                     computerId={route.params.computerId}
                     sessionId={route.params.sessionId}
@@ -2830,8 +2857,29 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
           <Stack.Screen
             name="Sheet"
             options={({ route }) => ({
-              ...sheetOptions(route.params.kind, { fontScale: PixelRatio.getFontScale() }),
+              // The opening detent is the one the person left this sheet at, if
+              // any (D3 detent memory); the identity is the kind for the user
+              // sheets (the ask's id joins with Permission, S5).
+              ...sheetOptions(
+                route.params.kind,
+                sheetDetentContext(
+                  route.params.kind,
+                  sheetIdentity(route.params.kind, null),
+                  PixelRatio.getFontScale(),
+                ),
+              ),
               contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] },
+            })}
+            listeners={({ route }) => ({
+              // Only a STABLE change is remembered (`recordDetent`): a re-push
+              // after the lock drain re-opens at it (Step 0b L3).
+              sheetDetentChange: (event) =>
+                recordDetent(
+                  SHEET_DETENTS,
+                  route.params.kind,
+                  sheetIdentity(route.params.kind, null),
+                  event.data,
+                ),
             })}
           >
             {({ navigation, route }) => (

@@ -63,8 +63,9 @@ describe("S2 — the navigator (File 4)", () => {
     const screen = sliceOf(APP, 'name="Sheet"', "</Stack.Screen>");
     // The detents, the initial index, the undimmed index and the grabber all come
     // from `sheetOptions` — which is what keeps RNS's dev asserts unreachable.
-    expect(screen).toContain("...sheetOptions(route.params.kind,");
-    expect(screen).toContain("fontScale: PixelRatio.getFontScale()");
+    expect(screen).toContain("...sheetOptions(\n                route.params.kind,");
+    // S3: the context is the remembered detent + Dynamic Type (D3).
+    expect(screen).toContain("PixelRatio.getFontScale(),");
     // Nothing may restate the presentation in the navigator: a second source of
     // truth here is exactly how the sheet loses its detents.
     expect(screen).not.toContain('presentation: "formSheet"');
@@ -127,5 +128,122 @@ describe("S2 — the route component (File 5)", () => {
     expect(ROUTE).toContain("onClose()");
     expect(ROUTE).not.toContain("goBack(");
     expect(ROUTE).not.toContain("navigation.");
+  });
+});
+
+describe("S3 — the reconciler is the pure module's, and the screen only dispatches", () => {
+  const SCREEN = code(read("src", "screens", "SessionScreen.tsx"));
+
+  test("the wanted stack is `desiredStack` → `managedStack`, never a local if-chain", () => {
+    expect(SCREEN).toContain("desiredStack({");
+    expect(SCREEN).toContain("managedStack(desired, PRESENTED_SHEET_KINDS)");
+    // The loop's dependency is stable between renders (keyed on the content).
+    expect(SCREEN).toContain("useMemo(() => wantedNow, [wantedKey])");
+  });
+
+  test("the session identity is memoized (else `forget` would run on every render)", () => {
+    expect(SCREEN).toMatch(/const owner = useMemo\(/);
+    expect(SCREEN).toContain("[computerId, sessionId],");
+  });
+
+  test("a push is gated on `inFront`, not the raw flag its own sheet blurs", () => {
+    expect(SCREEN).toContain("if (!inFront) {\n      return;\n    }\n    openSheet(");
+    expect(SCREEN).not.toContain("focusedNow");
+  });
+
+  test("a planned pop is spent only once it landed (a drain spans several states)", () => {
+    expect(SCREEN).toContain(
+      "plannedPop.current = plannedPop.current.filter((key) => still.has(key))",
+    );
+    expect(SCREEN).not.toContain("plannedPop.current = [];");
+  });
+
+  test("Commands → Rename waits for the route to go (`afterDismiss`, F6b)", () => {
+    expect(SCREEN).toContain('setAfterDismiss((queue) => queueAfterDismiss(queue, "rename"))');
+    const rename = SCREEN.slice(SCREEN.indexOf("const renameFromCommands"));
+    expect(rename.slice(0, rename.indexOf("};"))).not.toContain("beginRename");
+  });
+
+  test("App.tsx opens a sheet at its remembered detent and records stable changes", () => {
+    const shell = code(APP);
+    expect(shell).toContain("sheetDetentContext(");
+    expect(shell).toContain("sheetDetentChange: (event) =>");
+    expect(shell).toContain("recordDetent(");
+  });
+
+  test("one step per pass: `reconcile` decides push/pop, `drainPops` empties the stack", () => {
+    expect(SCREEN).toContain("reconcile(wanted, actual,");
+    expect(SCREEN).toContain("drainPops(actual)");
+    // The drain runs EVERY key in one pass (Owner decision A, Step 0b L1).
+    expect(SCREEN).toContain("for (const key of keys) {");
+  });
+
+  test("the drain's trigger is `sheetHidden(locked, AppState)`, and nothing pushes while hidden", () => {
+    expect(SCREEN).toContain("sheetHidden(locked, appActivityState)");
+    expect(SCREEN).toContain("appActivity(AppState.currentState)");
+    // `locked` is a props value subscribed in App.tsx — never `lock.view()` here.
+    expect(SCREEN).not.toContain(".view().locked");
+    expect(SCREEN).not.toContain("lockInstance");
+  });
+
+  test("a sheet is opened with `push` and closed with a KEYED pop (never `goBack`)", () => {
+    expect(SCREEN).toContain("openSheet(navigation, { ...owner, kind: step.kind })");
+    expect(SCREEN).toContain("popSheet(navigation, step.key)");
+    expect(SCREEN).not.toContain("goBack(");
+  });
+
+  test("a native swipe is read back as that kind's OWN close handler", () => {
+    expect(SCREEN).toContain("dismissedNatively(lastActual.current, actual, plannedPop.current)");
+    expect(SCREEN).toContain(
+      '      setCommandsOpen(false);\n    }\n    if (gone.includes("outbox"))',
+    );
+    expect(SCREEN).toContain("setDeciding(null)");
+  });
+
+  test("the stack is read through a stable selector, and scoped to THIS session", () => {
+    expect(SCREEN).toContain("useNavigationState((state) =>");
+    expect(SCREEN).toContain("stackSignature(state.routes as readonly SheetRouteLike[])");
+    expect(SCREEN).toContain("sheetsOfSession(rootRoutes, owner)");
+  });
+
+  test("the voice gates read `sessionInFront`, not the raw blur-able flag", () => {
+    expect(SCREEN).toContain("sessionInFront(focused, sheetStack)");
+    expect(SCREEN).toContain("focused: inFront");
+    expect(SCREEN).toContain("askSeq, inFront)");
+  });
+
+  test("a foreign RN Modal yields while a sheet is up or coming (F6)", () => {
+    expect(SCREEN).toContain("yieldForeign(wanted, actual)");
+    for (const prop of ["hubMenu !== null && !yields", "menuOpen && !yields"]) {
+      expect(SCREEN).toContain(prop);
+    }
+    expect(SCREEN).toContain("activityOpen && !yields");
+    // Rename's text survives in the controller, so hiding it loses nothing.
+    expect(SCREEN).toContain("state={yields ? null : renaming}");
+  });
+
+  test("the content is PUBLISHED, and the host is forgotten on unmount (the orphan pop)", () => {
+    expect(SCREEN).toContain("SHEET_HOSTS.host(owner.computerId, owner.sessionId)");
+    expect(SCREEN).toContain('host.publish(\n      "commands"');
+    expect(SCREEN).toContain('host.publish(\n      "outbox"');
+    expect(SCREEN).toContain("SHEET_HOSTS.forget(at.computerId, at.sessionId)");
+  });
+
+  test("the two migrated sheets are no longer mounted in the JSX", () => {
+    // A `<Modal>` here would wedge the native sheet (F6) and draw a second copy.
+    expect(SCREEN.match(/<CommandsSheet/g) ?? []).toHaveLength(1);
+    expect(SCREEN.match(/<OutboxDecisionSheet/g) ?? []).toHaveLength(1);
+    expect(SCREEN).not.toContain("visible={commandsOpen}");
+  });
+
+  test("App.tsx passes the session's identity and the lock's SUBSCRIBED value", () => {
+    expect(APP).toContain(
+      "computerId={computerId}\n      sessionId={sessionId}\n      locked={locked}",
+    );
+    const shell = code(APP);
+    expect(shell).toContain("lockInstance.subscribe((view) => setSheetLocked(view.locked))");
+    expect(shell).toContain("locked={sheetLocked}");
+    // The drain must never read the render-time `lockView` (stale, Step 0b).
+    expect(shell).not.toContain("locked={lockView.locked}");
   });
 });

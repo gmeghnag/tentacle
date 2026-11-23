@@ -17,7 +17,7 @@
  * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-drawer`,
  * `jump-latest`, `session-menu`, `session-menu-sheet`, `session-menu-copy-last|copy-all`.
  */
-import { useIsFocused, useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation, useNavigationState } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import {
   type ComponentRef,
@@ -125,12 +125,38 @@ import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
 import { noticeLooks } from "../notice-group.ts";
 import { PERF } from "../perf-probe.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
-import type { ArtifactGalleryRoute } from "../routes.ts";
+import {
+  type ArtifactGalleryRoute,
+  type SheetStackNavigation,
+  openSheet,
+  popSheet,
+} from "../routes.ts";
 import { rowErrorFields } from "../row-guard.ts";
 import { rowTimeLabel } from "../row-swipe.ts";
 import { type SectionId, scheduledSection } from "../session-info.ts";
 import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
+import { SHEET_HOSTS } from "../sheet-host.ts";
+import {
+  type AfterDismissIntent,
+  PRESENTED_SHEET_KINDS,
+  type SheetEntry,
+  type SheetRouteLike,
+  appActivity,
+  desiredStack,
+  dismissedNatively,
+  drainPops,
+  managedStack,
+  queueAfterDismiss,
+  readyIntents,
+  reconcile,
+  sessionInFront,
+  sheetEntriesOf,
+  sheetHidden,
+  sheetsOfSession,
+  stackSignature,
+  yieldForeign,
+} from "../sheet-plan.ts";
 import { dictationLocale } from "../speech-locale.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
@@ -212,6 +238,19 @@ export interface SessionScreenProps {
    * `shell` step shows its `$ cmd` line only on failure. Absent → off.
    */
   readonly compactShell?: boolean;
+  /**
+   * This session's identity, for the native sheets (docs/feat/mobile-native-sheets.md
+   * D1/D2): the `Sheet` route's params, and the key `SHEET_HOSTS` publishes under.
+   * Absent → no native sheet at all (a unit test with no router/Wrapper).
+   */
+  readonly computerId?: string;
+  readonly sessionId?: string;
+  /**
+   * The app lock's own value (`AppLock.view().locked`, subscribed in App.tsx).
+   * The sheet DRAIN reads it (Owner decision A): never a render-time read of an
+   * unrelated render, which Step 0b proved stale.
+   */
+  readonly locked?: boolean;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -248,6 +287,9 @@ export function SessionScreen({
   artifactsSeenKey,
   onRowError,
   compactShell = false,
+  computerId,
+  sessionId,
+  locked = false,
 }: SessionScreenProps): JSX.Element {
   // The perf trace (docs/fix/mobile-fan-jank-device.md): render start → commit.
   const renderStart = PERF.now();
@@ -256,6 +298,37 @@ export function SessionScreen({
   });
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
+  //
+  // This session's identity for the native sheets (D1/D2): the `Sheet` route's
+  // params and the key `SHEET_HOSTS` publishes under. `null` with no ids (a unit
+  // test, or a screen mounted with no router) — then no sheet route is touched.
+  // Memoized: it is an effect dependency (the host's `forget` on unmount), so a
+  // fresh object per render would forget the host on EVERY render.
+  const owner = useMemo(
+    () => (computerId === undefined || sessionId === undefined ? null : { computerId, sessionId }),
+    [computerId, sessionId],
+  );
+  // The navigator's routes, as ONE string: `useNavigationState` compares its
+  // selection with `Object.is`, so a selector handing back a fresh array would
+  // re-render on every state emit. This is the reconciler's dependency and the
+  // voice gates' input; the entries themselves come from the same state.
+  const navigation = useNavigation<SheetStackNavigation>();
+  const stackKey = useNavigationState((state) =>
+    stackSignature(state.routes as readonly SheetRouteLike[]),
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `stackKey` IS the routes' content.
+  const rootRoutes = useMemo(
+    () => navigation.getState()?.routes ?? [],
+    // `stackKey` IS the routes' content: every push/pop changes it, and the
+    // navigator's own state may still be uninitialised (`undefined`) at mount.
+    [stackKey, navigation],
+  );
+  // THIS session's sheet routes, bottom→top: two Session screens can be mounted
+  // at once and every `Sheet` route lives in the same root stack.
+  const sheetStack = useMemo(
+    () => (owner === null ? [] : sheetsOfSession(rootRoutes, owner)),
+    [rootRoutes, owner],
+  );
 
   // Mount: subscribe first (so the attach's own progress is seen), then attach.
   // Unmount: `leave()` DETACHES — the session keeps running for every device
@@ -353,25 +426,29 @@ export function SessionScreen({
     voice?.settingsChanged(previous, voiceSettings);
   }, [voiceSettings, voice]);
 
-  // Auto-read (F12): a turn that just ended, while this screen is focused.
+  // Auto-read (F12): a turn that just ended, while this session is IN FRONT.
+  // `sessionInFront`, not `useIsFocused()` alone: a sheet route on top blurs
+  // Session, so the raw flag would stop the auto-read exactly when the ask's own
+  // sheet opens (docs/feat/mobile-native-sheets.md D4).
   const focused = useIsFocused();
+  const inFront = sessionInFront(focused, sheetStack);
   const lastTurn = useRef(state.view.turn);
   useEffect(() => {
     const ended = endedTurn(lastTurn.current, state.view.turn);
     lastTurn.current = state.view.turn;
     if (ended !== undefined && voice !== null) {
-      void voice.turnEnded({ ownTurn: ended.own, focused, rows: state.view.rows });
+      void voice.turnEnded({ ownTurn: ended.own, focused: inFront, rows: state.view.rows });
     }
-  }, [state.view.turn, state.view.rows, voice, focused]);
+  }, [state.view.turn, state.view.rows, voice, inFront]);
 
   // The spoken permission ask (eval Q4): the title template only, approval stays a tap.
   const askSeq = state.sheet.kind === "asking" ? state.sheet.seq : undefined;
   const askTitle = state.sheet.kind === "asking" ? state.sheet.request.title : undefined;
   useEffect(() => {
     if (askSeq !== undefined && askTitle !== undefined && voice !== null) {
-      voice.permissionAsked({ title: askTitle }, askSeq, focused);
+      voice.permissionAsked({ title: askTitle }, askSeq, inFront);
     }
-  }, [askSeq, askTitle, voice, focused]);
+  }, [askSeq, askTitle, voice, inFront]);
 
   // A link tap asks first: the whole URL, then Safari (plan F22 / Owner Q7).
   const onLink = useCallback((href: string) => {
@@ -1013,9 +1090,12 @@ export function SessionScreen({
   const closeCommands = () => setCommandsOpen(false);
   // Rename is the header title's OWN path (Owner decision 5): the sheet closes and
   // the one field opens, so there is never a second rename surface.
+  // Rename is an RN `Modal`, which cannot present while the native sheet is up
+  // (F6b): it is QUEUED and begins once the Commands route is gone (D3
+  // `afterDismiss`, run by `readyIntents` below).
   const renameFromCommands = () => {
     setCommandsOpen(false);
-    controller.beginRename();
+    setAfterDismiss((queue) => queueAfterDismiss(queue, "rename"));
   };
   /** A pull-to-refresh or a Retry: the same `refreshInfo` Session info uses. */
   const refreshTools = () => {
@@ -1077,7 +1157,169 @@ export function SessionScreen({
   };
   const hub = hubActions(hubCtx, hubEntries);
   const hubOpenAt = useRef<HubOpen>(hubOpen(hubCtx));
-  const navigation = useNavigation();
+  // ── The native sheets (docs/feat/mobile-native-sheets.md D1–D5, slice S3) ──
+  // The sheet is a stack ROUTE; this screen publishes its content, derives the
+  // stack it WANTS and pops/pushes one step at a time. Every decision is
+  // `sheet-plan.ts`'s (AGENTS §7); this block only feeds it the two live inputs
+  // (the navigator's routes above, and `hidden`) and dispatches what it returns.
+  const actual = sheetStack;
+  // The drain's trigger (Owner decision A, Step 0b): `locked` comes from the
+  // lock's own subscription (`App.tsx`), `inactive` from `AppState` — the
+  // load-bearing leg, because iOS may suspend JS before delivering `background`.
+  const [appActivityState, setAppActivityState] = useState(() =>
+    appActivity(AppState.currentState),
+  );
+  useEffect(() => {
+    const app = AppState.addEventListener("change", (next) =>
+      setAppActivityState(appActivity(next)),
+    );
+    return () => app.remove();
+  }, []);
+  const hidden = sheetHidden(locked, appActivityState);
+  const desired = desiredStack({
+    user: commandsOpen ? "commands" : null,
+    outbox: decision !== null,
+    permission: state.sheet.kind === "asking",
+  });
+  // Only the kinds this build presents natively are pushed: the other three
+  // still draw their own RN `Modal` (S4/S5 migrate them).
+  const wantedNow = managedStack(desired, PRESENTED_SHEET_KINDS);
+  // Stable between renders while the stack it names is the same: the loop below
+  // depends on it, and a fresh array per render would re-run it on every render.
+  const wantedKey = wantedNow.join("|");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `wantedKey` IS `wantedNow`'s content.
+  const wanted = useMemo(() => wantedNow, [wantedKey]);
+  // Publish what the routes draw (D2). A layout effect, so the element is in the
+  // host before the reconciler below can push the route that reads it.
+  useLayoutEffect(() => {
+    if (owner === null) {
+      return;
+    }
+    const host = SHEET_HOSTS.host(owner.computerId, owner.sessionId);
+    host.publish(
+      "commands",
+      <CommandsSheet
+        palette={palette}
+        rows={state.commands}
+        onCompact={() => void controller.compact()}
+        onStopCompact={() => controller.cancelCompaction()}
+        onArmClear={() => controller.armClear()}
+        onCancelClear={() => controller.cancelClear()}
+        onClear={() => void controller.clear()}
+        onRename={renameFromCommands}
+        onRetry={() => controller.retryLast()}
+        onAutoAccept={(on) => void controller.setAutoAccept(on)}
+        onClose={closeCommands}
+      />,
+    );
+    host.publish(
+      "outbox",
+      <OutboxDecisionSheet
+        item={decision === null ? null : { text: decision.text }}
+        palette={palette}
+        why="something changed since you wrote this — your message is still here"
+        steerable={state.view.composer.running}
+        onSend={() => void controller.outbox("send", deciding ?? "")}
+        onSteer={() => void controller.outbox("steer", deciding ?? "")}
+        onDiscard={() => void controller.outbox("discard", deciding ?? "")}
+        onEdit={() => void controller.outbox("edit", deciding ?? "")}
+        onClose={() => setDeciding(null)}
+      />,
+    );
+  });
+  // Unmount: the host is forgotten, so a route still up pops ITSELF instead of
+  // drawing an empty sheet (the orphan leg, `sheetRouteView`).
+  useEffect(() => {
+    if (owner === null) {
+      return;
+    }
+    const at = owner;
+    return () => SHEET_HOSTS.forget(at.computerId, at.sessionId);
+  }, [owner]);
+  // What the person SWIPED away between two states runs that kind's own close
+  // handler — its pop is not ours (`dismissedNatively`'s planned-pop rule).
+  const plannedPop = useRef<readonly string[]>([]);
+  const lastActual = useRef<readonly SheetEntry[]>(actual);
+  useEffect(() => {
+    const gone = dismissedNatively(lastActual.current, actual, plannedPop.current);
+    lastActual.current = actual;
+    // Spend only the planned pops that LANDED: a drain dispatches several, and
+    // the navigator may report them over more than one state — a key still up is
+    // still ours to pop, never a swipe.
+    const still = new Set(actual.map((entry) => entry.key));
+    plannedPop.current = plannedPop.current.filter((key) => still.has(key));
+    if (gone.includes("commands")) {
+      // `closeCommands`'s body, through the stable setter (an effect dependency).
+      setCommandsOpen(false);
+    }
+    if (gone.includes("outbox")) {
+      setDeciding(null);
+    }
+  }, [actual]);
+  // The intents that need the sheet gone first (Commands → Rename is the only
+  // one S3 owns; Rename is still an RN `Modal`, so F6b): they run once the route
+  // has left the navigation state.
+  const [afterDismiss, setAfterDismiss] = useState<readonly AfterDismissIntent[]>([]);
+  const runIntent = (intent: AfterDismissIntent) => {
+    if (intent === "rename") {
+      controller.beginRename();
+    } else if (onOpenArtifacts !== undefined) {
+      onOpenArtifacts("session-info");
+    }
+  };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `runIntent` is rebuilt every render; the queue and the stack are what decide.
+  useEffect(() => {
+    const ready = readyIntents(afterDismiss, actual, {
+      // Readiness is the route leaving the navigation STATE: once popped, the
+      // route is unmounted, so its `transitionEnd {closing:true}` has no JS
+      // listener left. Whether an RN Modal presents cleanly during the native
+      // dismiss animation is a simulator check (S6, Commands → Rename).
+      transitioning: false,
+    });
+    if (ready.run.length === 0) {
+      return;
+    }
+    setAfterDismiss(ready.rest);
+    for (const intent of ready.run) {
+      runIntent(intent);
+    }
+  }, [afterDismiss, actual]);
+  // The loop. The drain runs the WHOLE stack in one pass (Owner decision A: it
+  // must be empty ~before the app-switcher snapshot); otherwise it takes ONE
+  // step and lets the state change drive the next.
+  useEffect(() => {
+    if (owner === null) {
+      return;
+    }
+    if (hidden) {
+      const keys = drainPops(actual);
+      plannedPop.current = keys;
+      for (const key of keys) {
+        popSheet(navigation, key);
+      }
+      return;
+    }
+    // A screen that is not in front (a second Session mounted under this one)
+    // may tidy its own routes away but must never push: the person is not looking
+    // at it. `inFront`, not `focused`: this session's OWN sheet on top blurs it,
+    // and a second sheet (an Outbox over Commands) must still be pushed.
+    const step = reconcile(wanted, actual, { hidden: false, transitioning: false });
+    if (step === null) {
+      return;
+    }
+    if (step.action === "pop") {
+      plannedPop.current = [step.key];
+      popSheet(navigation, step.key);
+      return;
+    }
+    if (!inFront) {
+      return;
+    }
+    openSheet(navigation, { ...owner, kind: step.kind });
+  }, [hidden, wanted, actual, inFront, owner, navigation]);
+  // An RN `Modal` must not be drawn while a native sheet is up or coming (F6):
+  // a stale `visible` one wedges every later formSheet.
+  const yields = yieldForeign(wanted, actual);
   const hubFanOpen = useRef(false);
   const onHubFan = (open: boolean) => {
     hubFanOpen.current = open;
@@ -1726,22 +1968,15 @@ export function SessionScreen({
           </Text>
         )}
         <PermissionSheetView sheet={sheet} state={state.sheet} palette={palette} />
-        <OutboxDecisionSheet
-          item={decision === null ? null : { text: decision.text }}
-          palette={palette}
-          why="something changed since you wrote this — your message is still here"
-          steerable={state.view.composer.running}
-          onSend={() => void controller.outbox("send", deciding ?? "")}
-          onSteer={() => void controller.outbox("steer", deciding ?? "")}
-          onDiscard={() => void controller.outbox("discard", deciding ?? "")}
-          onEdit={() => void controller.outbox("edit", deciding ?? "")}
-          onClose={() => setDeciding(null)}
-        />
+        {/* Outbox's decision and Commands are native sheet ROUTES now
+            (docs/feat/mobile-native-sheets.md S3): this screen PUBLISHES their
+            elements on `SHEET_HOSTS` (the block above) and the route draws them,
+            so they are not mounted here. */}
         {/* The hub's plain menu (Design 5/7): "More" (the overflow), no fan fits,
           or VoiceOver's long-press / Show all (everything). */}
         <ActionSheet
           palette={palette}
-          visible={hubMenu !== null}
+          visible={hubMenu !== null && !yields}
           testID="hub-menu-sheet"
           cancelTestID="hub-menu-cancel"
           actions={hubMenuItems.map((item) => ({
@@ -1758,7 +1993,7 @@ export function SessionScreen({
         />
         <ActionSheet
           palette={palette}
-          visible={menuOpen}
+          visible={menuOpen && !yields}
           testID="session-menu-sheet"
           cancelTestID="session-menu-cancel"
           message={menu.every((action) => action.text === "") ? "Nothing to copy yet" : undefined}
@@ -1846,23 +2081,9 @@ export function SessionScreen({
             onClose={closeTools}
           />
         )}
-        <CommandsSheet
-          palette={palette}
-          visible={commandsOpen}
-          rows={state.commands}
-          onCompact={() => void controller.compact()}
-          onStopCompact={() => controller.cancelCompaction()}
-          onArmClear={() => controller.armClear()}
-          onCancelClear={() => controller.cancelClear()}
-          onClear={() => void controller.clear()}
-          onRename={renameFromCommands}
-          onRetry={() => controller.retryLast()}
-          onAutoAccept={(on) => void controller.setAutoAccept(on)}
-          onClose={closeCommands}
-        />
         <ActivitySheet
           palette={palette}
-          visible={activityOpen}
+          visible={activityOpen && !yields}
           view={activityVm}
           detail={activityDetail}
           focus={activityFocus}
@@ -1892,7 +2113,7 @@ export function SessionScreen({
         />
         <RenameSheet
           palette={palette}
-          state={renaming}
+          state={yields ? null : renaming}
           onChange={(text) => controller.setRenameText(text)}
           onSave={() => void controller.submitRename()}
           onCancel={() => controller.cancelRename()}
