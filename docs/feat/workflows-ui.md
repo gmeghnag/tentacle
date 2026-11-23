@@ -226,10 +226,19 @@ the orchestrator's `protocol:bump` at merge regenerates it again either way.
 | 5a | Workflow catalogue + start-by-hash on the wire (D6, below) | M · cross-module (additive method + additive fields) · standard review | `protocol/src/{session,methods}.ts`, `protocol/schema/protocol.json` (regenerated), `cli/src/workflow-files.ts` (`listWorkflowSources`), `cli/src/wiring.ts` (pass `list` dep), `agent/src/workflow-driver.ts` (`catalogue`, `start{hash}`, `refusal`), `daemon/src/{hosted-session,connection}.ts`, `client/src/{workflows,remote-client,remote-session}.ts`, `cli/src/local-runtime.ts`, `tui/src/app-types.ts` |
 | 5b | iPhone "Start a workflow": catalogue + inputs form + start (D6) | M · contained · standard review + e2e | `apps/mobile/src/workflow-start.ts` (new, pure), `apps/mobile/src/workflow-start-controller.ts` (new, pure), `apps/mobile/src/screens/WorkflowStart.tsx` (new), `apps/mobile/src/routes.ts`, `apps/mobile/App.tsx`, `WorkflowRuns.tsx` (entry button), e2e flow + seed |
 
-Order: 1a → 1b → 2 → 3 → 4 → 5a → 5b. 5a/5b come after 4 only to keep one executor at a time;
-they depend on 1b (client) and 3 (routes/screens), not on 4 — the orchestrator may run them
-before 4 if the owner wants the start sooner (no file overlap with 4: 5b does not touch
-`WorkflowRun.tsx` or `workflow-morph.ts`).
+~~Order: 1a → 1b → 2 → 3 → 4 → 5a → 5b.~~ **Superseded by plan v3 (owner 23/11 ~10:30, see D7/D8):**
+
+| # | Slice | Size · Blast · Suited | Files |
+|---|---|---|---|
+| 0 | Workflows live in `.tentacle/workflows/` + `.gitignore` exception (D7) | S · cross-module (approval-store keys, tool texts) · standard review | `core/src/workflow-spec.ts`, `cli/src/workflow-files.ts`, `agent/src/workflow-driver.ts` (comments), `tools/src/{workflow,schedule}.ts` (descriptions), `protocol/src/session.ts` (comment), the tests listed in D7, `.gitignore`, `AGENTS.md` §6 one line, `docs/feat/agent-workflows.md` (a dated note, not a rewrite) |
+| 2b | TUI: the project's workflows shown automatically (D8) | M · contained · standard review | `tui/src/workflow-view.ts` (`catalogueLine`, panel section), `tui/src/useSessionLink.ts`, `tui/src/AppView.tsx`, `tui/src/components/WorkflowRail.tsx` (or a sibling `WorkflowsLine.tsx`), `tui/src/panels/workflow.ts`, `tui/src/commands/workflow.ts` |
+
+**Order (v3): 0 → 1a → 1b → 5a → 2 → 2b → 3 → 4 → 5b.** 0 first: it moves the path every
+later slice reads and tests against. 5a moves before the TUI because 2b reads its catalogue (and
+its `gitIgnored` bit, D7); 2 and 2b stay apart so each is M. 5b still needs 3's routes. One
+executor at a time; PARTIAL rule as below, plus: 0 — `lb.ts` still as expected and
+`rg -n '"workflows"' packages/cli/src/workflow-files.ts` hits the join to move; 2b —
+`RemoteSession.workflowCatalogue` exists (5a) and slice 2's rail is mounted.
 
 **PARTIAL rule (every slice):** the executor first re-runs the checks its slice stands on — 1a:
 `lb.ts`; 1b: `"WorkflowStep" in Method` true and the daemon answers it; 2: `RemoteSession.onWorkflows`
@@ -352,7 +361,7 @@ at start are missing.* Proved:
 **Design (additive only — no `PROTOCOL_VERSION` move, no `protocol.d/` note).**
 - **New method `session/workflow_catalogue`** (session-scoped: the catalogue is validated against
   THAT session's `models`/agent types, and the run starts in that session). Params `{sessionId}`.
-  Result `{workflows: WorkflowDefRow[], truncated?: true, unavailable?: string(≤ 200)}`
+  Result `{workflows: WorkflowDefRow[], truncated?: true, unavailable?: string(≤ 200), gitIgnored?: boolean}` (`gitIgnored`: D7)
   (`unavailable` = this session cannot run workflows, e.g. tunnelled — distinct from an empty
   folder), `WorkflowDefRow = {name: line(64),
   path: line(512), ok: boolean, version?, description?: ≤ 500, hash?: sha-256 hex,
@@ -365,7 +374,7 @@ at start are missing.* Proved:
   walk (`fs/promises`, so a big folder does not block the serve event loop the concurrent peer
   shares, §7), the same no-symlink / regular-file / size rules, every top-level `<stem>.yaml`; a
   stem that is not a workflow name becomes an `ok:false` row ("not a workflow name"), never a
-  silent skip. Missing `workflows/` → `[]`.
+  silent skip. Missing `.tentacle/workflows/` → `[]` (the folder per D7, slice 0).
 - `agent/src/workflow-driver.ts`: dep `list?: () => Promise<WorkflowSource[]>` (wired in
   `cli/src/wiring.ts` beside `load`, `:843`); `catalogue()` = for each source, the existing
   `prepare` path (refactored to take a source instead of a name, no behaviour change) +
@@ -470,6 +479,138 @@ from a session (it has that `sessionId`); route `WorkflowStart {computerId, sess
   sheet on the phone; (S5) run screen running after Allow once; then the seed edits `demo.yaml` and
   the flow taps Start on the stale screen → (S6) "This workflow changed" banner. iOS 26 and 18:
   `bun run e2e:mobile --ios 26 --only 43-workflow-start`.
+
+### D7 — The workflows' home is `.tentacle/workflows/` (owner 23/11 ~10:30)
+
+*— claude-opus-5-5 (planner), 2026-11-23*
+
+**Load-bearing assumption:** *the folder is named in exactly ONE code place, everything else is
+texts, comments and tests; nothing durable depends on it except the approval-store key.* Proved
+by `rg -n 'workflows/|"workflows"'` over `packages/*/src` (excluding the update type name):
+- the only path construction: `cli/src/workflow-files.ts:41` (`join(cwd, "workflows")`) and the
+  recorded `path` it returns, `:47`, `:50`, `:55`;
+- texts/comments: `core/src/workflow-spec.ts:2`, `:106`, `:145`, `:172`, `:337`, `:345`,
+  `:349`, `:777`; `agent/src/workflow-driver.ts:86`, `:89`; `tools/src/workflow.ts:53`;
+  `tools/src/schedule.ts:94`; `protocol/src/session.ts:856`;
+- durable: the approval store keys `{project, path, hash}` with `path` = the loader's
+  `workflows/<name>.yaml` (`workflow-driver.ts:86`, `:780-782`); the log's `workflow_start.path`
+  (display only, `session-log.ts:362`); a schedule pins name + hash, not path
+  (`rg path core/src/schedule.ts` → no hit). No README/ARCHITECTURE/AGENTS mention.
+- tests that build or assert the path: `cli/test/workflow-wiring.test.ts:68,103-105,217-219`,
+  `cli/test/workflow-approvals.test.ts:18-44`, `agent/test/workflow-driver.test.ts:155,888,915,919,953`,
+  `daemon/test/{workflow-hosted.test.ts:52,130,185, schedule-workflow.test.ts:101,
+  support/log-fixture.ts:104}`.
+
+**Design.**
+- `core/src/workflow-spec.ts`: `export const WORKFLOWS_DIR = ".tentacle/workflows"` — the ONE
+  name; every message above is built from it (`should stay inside ${WORKFLOWS_DIR}/`, `no file
+  "x" under ${WORKFLOWS_DIR}/`), the comments say it.
+- `cli/src/workflow-files.ts`: root = `join(cwd, ...WORKFLOWS_DIR.split("/"))`; the symlink
+  guard now refuses a symlinked `.tentacle` AS WELL AS a symlinked `workflows`
+  (`:49` checked only the last component; a linked `.tentacle` could point the reader outside the
+  repo); recorded `path` = `${WORKFLOWS_DIR}/<name>.yaml`; same for 5a's `listWorkflowSources`.
+- Approval store: NO migration — the key changes with the path, so an approval given for
+  `workflows/x.yaml` simply does not match and the hash is asked again (the owner: no workflow
+  exists yet in his repos; a re-ask is the safe direction anyway, never a silent carry-over).
+- Tool descriptions (`workflow`, `schedule_create`) name `.tentacle/workflows/<name>.yaml`, so
+  the model writes the file there.
+- `.gitignore:28` `.tentacle/` → `.tentacle/*` + `!.tentacle/workflows/` (git cannot re-include
+  a path whose parent DIRECTORY is excluded, so the `/*` form is required). Every other
+  `.tentacle/` child (tmp, worktrees, mockups, tool-output) stays ignored — the executor proves it
+  with `git check-ignore -v .tentacle/tmp/x .tentacle/worktrees/x .tentacle/mockups/x`
+  (all ignored) and `git check-ignore .tentacle/workflows/x.yaml` (exit 1, not ignored), pasted.
+  Biome reads the ignore file (`biome.json:3` `useIgnoreFile`): it does not lint YAML/Markdown,
+  but the executor runs `bun run lint` to prove no new file kind is picked up.
+- `AGENTS.md` §6 says "`.tentacle/` is gitignored" (repro dir rule): one-line fact fix
+  ("`.tentacle/*` is gitignored except `.tentacle/workflows/`") — bundled with this code (§10).
+- **"Not versioned" notice (owner: tentacle never edits a user's `.gitignore`).** 5a's catalogue
+  result gains `gitIgnored?: boolean`: `cli/src/workflow-files.ts` `workflowsGitIgnored(cwd)` runs
+  `git check-ignore -q -- .tentacle/workflows/` (async spawn, argv only, cwd = the repo, 2 s
+  timeout) → exit 0 `true`, exit 1 `false`, anything else (no git, not a repo, timeout) ABSENT
+  ("unknown", never claimed). Shown by the TUI (D8) and the phone's start screen as
+  "`.tentacle/workflows/` is ignored by git — approvals work, but the files are not versioned".
+  It is computed only with a catalogue call, never on a hot path.
+
+**Failure modes.** Old `workflows/x.yaml` left in a repo → not found; the error says
+`no workflow x: .tentacle/workflows/x.yaml does not exist` (the user sees where it must be);
+symlinked `.tentacle` → refused like a symlinked `workflows`; old approval → re-asked; old logs
+keep their old `path` (display only).
+
+**Tests (red first).** `cli/test/workflow-files.test.ts`: a file under `.tentacle/workflows/`
+loads with `path` `.tentacle/workflows/x.yaml`; one under the old `workflows/` is NOT found
+(mutation: keep the old join → red); symlinked `.tentacle` refused; `workflowsGitIgnored` on a
+temp repo with and without an ignore rule, and outside a repo → absent (in `.tentacle/tmp`-free
+temp dirs the test env guard already provides, `scripts/test-env-guard.ts`). `core` message tests
+assert `WORKFLOWS_DIR` in the text; the listed fixtures move to the new path (they are inputs,
+not assertions of the move, except `workflow-wiring.test.ts:68`, which becomes the red one).
+
+### D8 — TUI: the project's workflows, automatically (owner 23/11 ~10:30)
+
+*— claude-opus-5-5 (planner), 2026-11-23*
+
+**Load-bearing assumption:** *the live area already has an always-visible, row-budgeted strip
+for "things armed in this session" that a new line can join without moving the input.* Proved:
+the dock list is shown iff something is running OR armed (`tui/src/background-list.ts:166-173`
+`listVisible`), its rows are reserved in `activeRows` so the input never moves
+(`AppView.tsx:188-193`); schedules join it as one glyph kind (`background-list.ts:70`,
+`:480-490`) from a pure view module (`schedule-view.ts:1-11`). The data comes from 5a's
+`workflowCatalogue()` (D6) — so 2b runs after 5a.
+
+**Design (decided; alternative noted).**
+- **ONE summary line, not one dock row per workflow.** A workflow file is not a running or armed
+  thing: making each one a focusable dock row would grow the dock with every file and add a new
+  focus kind to the `keys/` contract. Instead a single non-focusable line sits as the dock's top
+  row (or alone when the dock is empty), painted from pure `catalogueLine(cat, width)` in
+  `workflow-view.ts`:
+  `◇ workflows  task v3 approved · nightly v1 needs approval · broken invalid · +3   /workflow`
+  — state always as a WORD (colour-blind rule); width tiers: words → glyph + word for the first
+  only (`task v3 ✓ approved · nightly v1 ? · …`) → `◇ 6 workflows · 1 needs approval · /workflow`.
+  Order: needs-approval first, then invalid, then approved, by name inside each (what needs the
+  user surfaces even at narrow widths). Many workflows: as many as fit, then `+k`; the full list
+  is the `/workflow` panel. Ignored by git (D7) → suffix `· not versioned` on the widest tier only;
+  the full sentence is in the panel.
+- **When it shows / hides.** Shown when the catalogue has ≥ 1 row AND no run is active. Hidden
+  when: a run is active (the rail, D3, takes its place — the owner's "only while a run is active"
+  rule is for the rail; the line is the at-rest view); the catalogue is empty (**empty state =
+  no line**: an empty project must not carry a permanent hint); the session cannot run workflows
+  (`unavailable`, `unsupported`, a pod — `onWorkflows`/`workflowCatalogue` absent); the permission
+  dialog or a panel owns the live area (as the dock today). Counted in the live-area row budget
+  like the dock, so it appearing/vanishing never moves the input row.
+- **When it refreshes (no filesystem watcher, no polling):** after the session opens/attaches;
+  at every `turn_end` (the model may have written or edited a file); when a run ends (`workflows`
+  frame with a new `endedAt`); after a `workflow_approve` ask is resolved (the approval state
+  changed); on `/workflow`. A user editing a file in an external editor while idle sees it at the
+  next of these — stated in the panel footer ("updated at turn end · /workflow to refresh").
+  Requests are coalesced (one in flight per session; a trigger during it schedules one more).
+- **`/workflow` to act** (slice 2's panel gains a "Workflows" section above the runs): every
+  catalogue row with version, approval word, step count, the invalid ones with their errors and
+  YAML paths, and the not-versioned sentence. Enter on a valid workflow → with no required input it
+  starts at once (`start{hash}`, 5a; a `changed` refusal refreshes and says so); with required
+  inputs it pre-fills the input line with `/workflow run <name> <req1>= <req2>=` and closes the
+  panel (pure `startCommandFor(def)`); `/workflow run <name> k=v…` also sends the catalogue's hash
+  when it holds one for that name.
+- Files: `workflow-view.ts` (pure: `catalogueLine`, `catalogueOrder`, `catalogueSection`,
+  `startCommandFor`, `refreshTriggers` reducer), `useSessionLink.ts` (fetch + coalesce),
+  `AppView.tsx` (mount + budget), a `WorkflowsLine.tsx` painter, `panels/workflow.ts`,
+  `commands/workflow.ts`.
+
+**Failure modes.** Catalogue call fails / link down → keep the last line (stale is better than
+flicker) and refresh on the next trigger; `unsupported` → no line, `/workflow` says "update
+tentacle"; 200-cell names → cut in cells with `…` (pod-free: the files are the host's, but names
+are still `oneLine`d); a workflow deleted while listed → gone at the next refresh; Enter on a
+row whose file changed → `changed` refusal, refresh, notice; terminal shorter than the live-area
+budget → the line is the first thing dropped (before dock rows), as a decision in the pure budget.
+
+**Tests (red first).** `tui/test/workflow-view.test.ts`: tier at 120/80/50 cols; ordering puts
+needs-approval first; `+k` arithmetic exact at the boundary; every state carries a word; empty →
+`null`; unavailable → `null`; `startCommandFor` with/without required inputs.
+`tui/test/workflow-frames.test.tsx` (ink-testing-library): the line appears after open with a
+fake catalogue; the input row's y is identical with and without it (the exact property); it is
+replaced by the rail when a `workflows` frame starts a run and comes back at its end; a
+`turn_end` triggers exactly one catalogue request (mutation: refresh on every frame → red on the
+count). Validation frames (pasted in Execution): (T6) line at 120 cols with 3 workflows, (T7)
+at 50 cols with 9, (T8) `/workflow` Workflows section with an invalid file's errors and the
+not-versioned sentence.
 
 ### Notes / debt (deliberate)
 
