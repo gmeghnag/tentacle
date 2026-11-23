@@ -204,7 +204,8 @@ describe("no sentence: the command in the title, the same exit rule", () => {
     const B = (s: string) => chalk.bold(s);
     const base = { description: null, command: "bun test apps/mobile" } as const;
     const cmd = "bun test apps/mobile";
-    expect(rows(shell({ ...base }))).toEqual([`${theme.accent("●")} ${B("Bash")} ${g(cmd)}`]);
+    // A running row's bullet is grey like its command (owner 2026-11-23); the outcome colours it.
+    expect(rows(shell({ ...base }))).toEqual([`${theme.subtle("●")} ${B("Bash")} ${g(cmd)}`]);
     expect(
       rows(shell({ ...base, status: "ok", durationMs: 1200, resultText: "exit=0\nall good" })),
     ).toEqual([`${theme.success("●")} ${B("Bash")} ${g(cmd)}${g(" 1.2s")}`]);
