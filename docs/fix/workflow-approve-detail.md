@@ -147,4 +147,6 @@ No protocol schema change, so no `protocol.d/` note.
 
 - **Lock screen / Live Activity: KEEP «Approve»** for `workflow_approve` (hash approval AND `approve:` steps) — owner: «Dalle notifiche/activity voglio poter approvare». The push/LA part of the design is DROPPED from this task (owner accepted that the lock screen shows only title + preview).
 - Daemon: no cut; a workflow whose approval list exceeds 16 000 chars is invalid (never asked) — explained to the owner, not objected.
-- Q1 (TUI: scroll + Yes blocked until the whole list was shown): pending.
+- **Q1 (TUI): scroll, but Yes is ALWAYS allowed** — owner: «Devo poter premere yes anche senza averla vista tutta». So: the TUI dialog shows the WHOLE list (no 10-row cap, no per-row cut: long commands wrap), scrollable (PgUp/PgDn/Space) when taller than the dialog, with a visible «N more lines below» hint; NO gate on y/Enter.
+
+**Implementation APPROVED with these owner deltas** (they override the Design where it differs): (1) daemon: no cut; > 16 000 chars of approval list ⇒ the workflow is invalid (validator error naming the size), never asked; (2) TUI: whole list, wrapped, scrollable, Yes always allowed; (3) NO change to push/lock screen/Live Activity (drop those slices and their tests). Size back to S–M.
