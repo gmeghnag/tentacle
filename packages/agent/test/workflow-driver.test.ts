@@ -991,6 +991,53 @@ describe("startScheduled (slice 10)", () => {
   });
 });
 
+describe("the approval shows every command, verbatim (docs/fix/workflow-approve-detail.md)", () => {
+  /** `n` run steps, each command `len` chars, the last one carrying `LAST-COMMAND`. */
+  const longWorkflow = (n: number, len: number, last = "echo LAST-COMMAND"): string =>
+    YAML(
+      Array.from({ length: n }, (_, i) => {
+        const command = i === n - 1 ? last : `echo ${"x".repeat(len)}`;
+        return `  - id: step-${i + 1}\n    run: ${command}\n`;
+      }).join(""),
+    );
+
+  test("the hash ask carries the WHOLE list, past 2000 chars, with no trailing …", async () => {
+    // Mutation: `detail: capWorkflowText(summary, 2000)` → the last command is gone.
+    const { driver, broker } = setup({ text: longWorkflow(12, 200) });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const detail = broker.asks[0]?.req.detail ?? "";
+    expect(detail.length).toBeGreaterThan(2000);
+    expect(detail).toContain("echo LAST-COMMAND");
+    expect(detail.endsWith("…")).toBe(false);
+  });
+
+  test("requestApproval's ask carries the same whole list", async () => {
+    // Mutation: the same cap on the schedule path → red here too.
+    const { driver, broker } = setup({ text: longWorkflow(12, 200) });
+    void driver.requestApproval("task");
+    await flush();
+    const detail = broker.asks[0]?.req.detail ?? "";
+    expect(detail.length).toBeGreaterThan(2000);
+    expect(detail).toContain("echo LAST-COMMAND");
+    expect(detail.endsWith("…")).toBe(false);
+  });
+
+  test("an approve step's detail of exactly 2000 chars arrives byte-identical", async () => {
+    // Mutation: `capWorkflowText(step.detail, 2000)` never fires on 2000 — the
+    // property is that the ask carries the STEP's text, unmodified.
+    const detail = `D${"y".repeat(1999)}`;
+    const text = YAML(
+      `  - id: gate\n    approve: { title: "Merge it", detail: "${detail}" }\n`,
+    );
+    const { driver, broker } = setup({ text, approved: true });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const ask = broker.asks.find((a) => a.req.title.includes("Merge it"));
+    expect(ask?.req.detail).toBe(detail);
+  });
+});
+
 function noopHost(): WorkflowHost {
   return {
     logStart: () => {},

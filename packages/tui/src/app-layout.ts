@@ -46,6 +46,7 @@ import {
   paletteWindow,
 } from "./commands.ts";
 import { permissionPromptRows } from "./components/PermissionPrompt.tsx";
+import { approvalDetailMaxRows } from "./approval-scroll.ts";
 import { QUIT_CONFIRM_ROWS } from "./components/QuitConfirm.tsx";
 import { VOICE_STRIP_ROWS } from "./components/VoiceStrip.tsx";
 import { inputRowCount } from "./input-view.ts";
@@ -362,16 +363,23 @@ export function frameLayout(input: FrameInput) {
       ? replyView(permission.mode, columns, replyMax)
       : undefined;
   // The dialog's subject rows: the SAME view `PermissionPrompt` paints (a
-  // wrapped shell command takes several rows, the sentence one more).
-  const permView = permission.pending ? permissionView(permission.pending, null, columns) : null;
+  // wrapped shell command takes several rows, the sentence one more; a
+  // `workflow_approve` list is wrapped and windowed, never cut).
+  const permView = permission.pending
+    ? permissionView(
+        permission.pending,
+        null,
+        columns,
+        permission.approvalScroll,
+        approvalDetailMaxRows(termRows),
+      )
+    : null;
   const activeRows = confirmShown
     ? QUIT_CONFIRM_ROWS
     : permission.pending
       ? permissionPromptRows(
           permission.choices.length,
-          permView === null
-            ? 0
-            : permView.detailRows.length + (permView.intentRow !== null ? 1 : 0),
+          permView === null ? 0 : permView.detailRows.length + (permView.intentRow !== null ? 1 : 0),
           permission.pending !== null && permissionShowsCwd(permission.pending),
           replyShown?.rows.length,
           permission.pendingAgent !== null,

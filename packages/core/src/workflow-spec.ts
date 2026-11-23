@@ -44,6 +44,13 @@ export const WORKFLOW_MAX_TIMEOUT_MS = 24 * 3_600_000;
 export const WORKFLOW_MAX_WAIT_MS = 7 * 24 * 3_600_000;
 export const WORKFLOW_MAX_APPROVE_TITLE = 200;
 export const WORKFLOW_MAX_APPROVE_DETAIL = 2000;
+/**
+ * The longest step list an approval may SHOW (docs/fix/workflow-approve-detail.md
+ * D1): the hash ask's `detail` is never cut, so a workflow whose list would not
+ * fit here is refused at validation — never asked with a command missing. About
+ * 64 steps of 250 characters, ~200 rows at 80 columns: a list a human can read.
+ */
+export const WORKFLOW_MAX_APPROVE_SUMMARY = 16_000;
 /** A step's reason (the verdict's justification) as the log and the views carry it. */
 export const WORKFLOW_MAX_REASON = 2000;
 /** A run's `inputs` — strings only in v1. */
@@ -129,6 +136,32 @@ export interface WorkflowApproveStep extends WorkflowStepBase {
 }
 
 export type WorkflowStep = WorkflowAgentStep | WorkflowRunStep | WorkflowApproveStep;
+
+/** A run step's target as an approval line names it: `local`, or `docker:<name>`. */
+export function workflowWhereLabel(step: WorkflowStep): string {
+  if (step.kind !== "run" || step.where.engine === "local") {
+    return "local";
+  }
+  return `docker:${step.where.name}`;
+}
+
+/**
+ * One line per step — what a hash approval SHOWS (and what the validator bounds):
+ * a `run` step's command verbatim, in backticks, with its target. The ONE reader
+ * of this shape, so the driver can never disagree with the validator about how
+ * long an approval list is (docs/fix/workflow-approve-detail.md D1).
+ */
+export function workflowApprovalSummary(steps: readonly WorkflowStep[]): string {
+  return steps
+    .map((s) =>
+      s.kind === "run"
+        ? `${s.id}: run \`${s.command}\` (${workflowWhereLabel(s)})`
+        : s.kind === "agent"
+          ? `${s.id}: agent${s.model !== undefined ? ` ${s.model}` : ""}`
+          : `${s.id}: approve`,
+    )
+    .join("\n");
+}
 
 /** The run-wide caps, defaults resolved. */
 export interface WorkflowBudget {
@@ -760,6 +793,15 @@ export function validateWorkflow(text: string, ctx: WorkflowContext = {}): Workf
     if (cycle !== null) {
       errors.push(
         `steps: ${cycle} is a pass loop with no counter — give a step in the loop an on_fail: {goto: …, max: n}, or a next: that leaves it`,
+      );
+    }
+    // The hash approval shows every step's line, uncut (D1): a list too long to
+    // show is refused here, where every path to an ask passes, so no approval is
+    // ever granted against a list with a command missing.
+    const summary = workflowApprovalSummary(steps).length;
+    if (summary > WORKFLOW_MAX_APPROVE_SUMMARY) {
+      errors.push(
+        `steps: the step list an approval shows is ${summary} characters, over ${WORKFLOW_MAX_APPROVE_SUMMARY} — move long commands into a script and run that`,
       );
     }
   }

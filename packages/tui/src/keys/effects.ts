@@ -13,6 +13,7 @@
 import type { PermissionResponse } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
 import type { ArtifactIntent } from "../artifact-open.ts";
+import type { ApprovalScroll } from "../approval-scroll.ts";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";
@@ -41,6 +42,8 @@ export type KeyEffect =
   | { readonly kind: "insertReply"; readonly text: string }
   | { readonly kind: "setReplyMode"; readonly mode: ReplyMode }
   | { readonly kind: "permissionSelect"; readonly index: number }
+  /** Write the `workflow_approve` dialog's own scroll (docs/fix/workflow-approve-detail.md D2). */
+  | { readonly kind: "approvalScroll"; readonly scroll: ApprovalScroll }
   | { readonly kind: "permissionAnswer"; readonly response: PermissionResponse }
   /** Ctrl+C on the dialog: dismiss + abort the shown turn (no deny goes out). */
   | { readonly kind: "permissionStop" }

@@ -2,6 +2,8 @@ import { backgroundCount, backgroundNames } from "../background-view.ts";
 import { ctrlCQuitStep } from "../commands.ts";
 import { sanitizePasted, stepPaste } from "../paste.ts";
 import { isArmed, stepPermissionKey } from "../permission-reply.ts";
+import { permissionView } from "../permission-ui.ts";
+import { isApprovalScrollKey, stepApprovalScroll } from "../approval-scroll.ts";
 /**
  * The dialog layers (docs/feat/app-decomposition.md S3): the permission prompt,
  * Ctrl+C, and bracketed paste — in that precedence order, which is load-bearing:
@@ -60,6 +62,38 @@ export const permissionLayer: KeyLayer = {
       armed: isArmed(snap.permission.shownAt(), Date.now()),
     });
     const effects: KeyEffect[] = [];
+    // A `workflow_approve` list taller than the dialog is SCROLLED here, before
+    // the key reaches the menu (docs/fix/workflow-approve-detail.md D2): the
+    // list is never cut, so the person reads it a window at a time. Only in menu
+    // mode (in the reply field those keys are text), and Space/PgUp/PgDn take no
+    // other meaning there. Nothing gates the answer: Yes is always allowed (the
+    // owner's decision), so the scroll decides what is on screen only.
+    if (
+      mode.mode === "menu" &&
+      snap.permission.pending?.kind === "workflow_approve" &&
+      isApprovalScrollKey(snap.char, snap.key)
+    ) {
+      const view = permissionView(
+        snap.permission.pending,
+        null,
+        snap.columns ?? 80,
+        snap.permission.approvalScroll(),
+        snap.approvalDetailRows ?? 10,
+      );
+      const step = stepApprovalScroll(
+        snap.permission.approvalScroll(),
+        snap.char,
+        snap.key,
+        view.detailTotal,
+        view.detailWindow,
+      );
+      if (step.taken) {
+        if (step.scroll !== snap.permission.approvalScroll()) {
+          effects.push({ kind: "approvalScroll", scroll: step.scroll });
+        }
+        return { effects, verdict: "consumed", carry: "" };
+      }
+    }
     if (state !== mode) {
       effects.push({ kind: "setReplyMode", mode: state });
     }

@@ -13,6 +13,7 @@
 import type { PermissionResponse } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
 import type { ArtifactIntent } from "../artifact-open.ts";
+import type { ApprovalScroll } from "../approval-scroll.ts";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
 import type { QuitConfirmFacts } from "../commands.ts";
@@ -49,6 +50,8 @@ export interface KeyHost {
   clearPasteTimeout(): void;
   insertReply(text: string): boolean;
   setReplyMode(mode: ReplyMode): void;
+  /** Write the `workflow_approve` dialog's detail scroll. */
+  approvalScroll(scroll: ApprovalScroll): void;
   permissionSelect(index: number): void;
   permissionAnswer(response: PermissionResponse): void;
   /** Ctrl+C on the dialog: dismiss it and abort the turn shown here, if any. */
@@ -155,6 +158,9 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "setReplyMode":
       host.setReplyMode(effect.mode);
+      return;
+    case "approvalScroll":
+      host.approvalScroll(effect.scroll);
       return;
     case "permissionSelect":
       host.permissionSelect(effect.index);
