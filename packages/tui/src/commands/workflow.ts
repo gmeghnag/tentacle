@@ -62,7 +62,7 @@ function runFromCatalogue(ctx: Ctx, name: string, typed: number): string | null 
   // Typed inputs for a row that needed them: the row is the one to run, so its
   // hash is pinned too (a file edited since is refused `changed`, 5a). A row the
   // catalogue could not hash (an older daemon) pins nothing, exactly as today.
-  return row.hash;
+  return row.hash ?? null;
 }
 
 export const command = {
