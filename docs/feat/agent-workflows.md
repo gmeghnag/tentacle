@@ -1703,3 +1703,47 @@ display-only push kind is additive, and an older build shows its placeholder.
 plumbing wall, unchanged by this slice): a push is a nudge and its tap opens the session, so
 nothing here depends on it. `PUSH_KINDS`' run kinds are end-to-end only to the sealed plaintext —
 the real APNs round trip is `apps/mobile/e2e/run.ts`'s territory and was not exercised.
+
+## Review — slices 5–9 (fresh context, `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 1 MEDIUM).
+
+1. **HIGH — a `run` step executes the ORIGINAL command, not the input the gate approved.**
+   `packages/cli/src/wiring.ts:809` returns only `{allowed: true}` and drops `outcome.input`. Then
+   `execOn` (`:830`) and `exec` run `action.text` / the step's own `target`.
+   `PermissionGate.authorize` (`agent/src/permission-gate.ts:174-197`) lets a `tool_call` hook
+   rewrite the input (`effective = verdict.input`), shows the REWRITTEN input in the ask
+   (`describeToolCall(tool, effective)`), and can `force: "allow"` it. The agent loop honours this:
+   it executes `outcome.input` (`agent.ts:3095`).
+   *Scenario:* a hook rewrites `rm -rf /work` to `echo blocked` (or changes `target.name`) and
+   force-allows. The user is shown or auto-approves the safe form, and the dangerous original runs
+   in the container. The same bug sits on the local branch (slice 4's code, the same callback).
+   No test pins it.
+   *Fix:* return the approved `input` from `authorize`, run its `command`/`target`, and add a test
+   with a modifying hook.
+2. **MEDIUM — the spec accepts `{docker: x, container: y}`, which slice 5's seam can never run.**
+   `core/src/workflow-spec.ts:520` accepts `container` on a docker target. `workload_shell`'s schema
+   refuses that combination (`workload-shell.ts` `engineOnlyFields`), and the engine throws at
+   dial time (`cli/src/engine-docker.ts:370` `noSubContainer`). The workflow path skips the tool's
+   schema, so the file is validated, its hash approved and the command asked, and only then does
+   the step fail. This breaks failure-mode row 1 ("refused before any ask"). The name is also not
+   checked against `WORKLOAD_PART`; it is URL-encoded downstream, so that part is harmless.
+   *Fix:* refuse `container` with docker in the spec (or drop the field), with a test.
+
+**Gate (narrow):** 228 pass / 0 fail across 11 touched test files. `bun run lint` is clean.
+`bun run typecheck` is clean.
+**Mutations (mine, reverted, tree clean):**
+- Kill notices removed from the failing set in `workflowContainerOutcome` → 1 fail.
+- The unattended check in `runCommand` disabled → 2 fail.
+
+**Attacks that found nothing:**
+- Rounding of the kill notice's seconds: the same as the seam (`workload-shell.ts:482`).
+- Push re-announce after a daemon restart: impossible, because the driver's rows are in memory only.
+- Overflow of `PUSH_RUN_MEMORY` (32) vs `WORKFLOW_RECENT_RUNS` (5): safe.
+- Docker URL injection: the name is encoded.
+- Slices 7–8: pure, unmounted modules, contained.
+- Slice 6: no code, honestly STOPPED.
+
+Same model as the executor of slices 5 and 7–9 (Opus; fresh context only).
+
+*— claude-opus-5-5, 2026-11-23*
