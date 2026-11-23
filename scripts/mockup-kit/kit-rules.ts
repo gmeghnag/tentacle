@@ -40,6 +40,25 @@ export function missingVars(
   return out;
 }
 
+/**
+ * The kit's hand-mapped approximations: a declaration that carries a chosen
+ * number because the app's value cannot be extracted (an inline-JSX prop, a
+ * native blur with no CSS equivalent). Each names WHY, and `literalViolations`
+ * exempts that exact declaration — a second number needs a second entry, so a
+ * copied trick is a reviewable diff, never a silent pass. Pinned by
+ * `scripts/test/mockup-kit.test.ts` ("the kit's approximations are named").
+ */
+export const APPROXIMATIONS: readonly { readonly declaration: string; readonly why: string }[] = [
+  {
+    // The hub's glass: FloatingActivity.tsx:563 `BlurView intensity={60}
+    // tint="systemUltraThinMaterial"` — an inline JSX prop (no stylesheet to
+    // extract) over a native material CSS cannot express; 12 px of backdrop
+    // blur is the hand-mapped stand-in, and calibration is its net.
+    declaration: "backdrop-filter: blur(calc(12 * 1px)) saturate(1.4)",
+    why: "FloatingActivity.tsx:563 BlurView intensity 60, native material",
+  },
+];
+
 /** Hand-copied values in a kit stylesheet: `line: token`. */
 export function literalViolations(css: string): string[] {
   const out: string[] = [];
@@ -47,6 +66,10 @@ export function literalViolations(css: string): string[] {
     .split("\n")
     .forEach((line, i) => {
       const hits = [
+        // `calc(12 * 1px)`: a chosen number riding the `1px` exemption. A token
+        // times 1px (`calc(var(--m-x) * 1px)`) is the kit's unit conversion, not
+        // a literal, and does not match (`\d` is not `v`).
+        ...line.matchAll(/calc\(\s*\d*\.?\d+\s*\*\s*1px\s*\)/g),
         ...line.matchAll(/#[0-9a-fA-F]{3,8}\b/g),
         ...line.matchAll(/(?<![\w.-])(\d*\.?\d+)px\b/g),
         ...line.matchAll(/(?<![\w.-])\d*\.?\d+ms\b/g),
@@ -54,7 +77,9 @@ export function literalViolations(css: string): string[] {
       ]
         .map((m) => m[0])
         .filter((t) => t !== "0px" && t !== "1px");
-      for (const h of hits) out.push(`${i + 1}: ${h}`);
+      const declaration = line.trim().replace(/;$/, "");
+      const approved = APPROXIMATIONS.some((a) => a.declaration === declaration);
+      for (const h of hits) if (!approved) out.push(`${i + 1}: ${h}`);
     });
   return out;
 }

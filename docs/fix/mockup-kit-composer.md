@@ -16,6 +16,92 @@ Already executed by the mockup agent (commits on this branch): `tools/mockup-kit
 
 *— claude-opus-5-5 (mockup designer), 2026-11-23 — see the commits; no separate executor run.*
 
+### Fix round 1
+
+*— claude-opus-5-5 (executor, fix round 1), 2026-11-23*
+
+Both findings fixed, no production code changed outside them: the kit's markup and
+look are untouched, `kit.js`/`kit.css` gained only comments (verified: `git diff
+tools/mockup-kit/kit.css` is two comment blocks, `kit.js` unmodified).
+
+**Finding 1 (MEDIUM, no regression test) — FIXED.** `scripts/test/mockup-kit.test.ts`
+gained two describes (10 tests, none touching shipped code):
+
+- *the composer's faces* — + and the mic are `k-circle`s holding `k-sym` SVGs (the
+  emoji is asserted absent), the four slot faces (`ready` / `up-dim` / `stop` /
+  `clock` at 17 pt) are distinguished, listening is `[data-strong]` + `k-rec-square`,
+  finalizing an arc, `caption` and `K.composerParts` reuse the same markup, and
+  `K.icon` throws on an unknown symbol. Plus the LOOK: `.k-circle` is painted
+  `background: var(--c-accent-soft)`, `color: var(--c-accent)`, `[data-strong]` the
+  strong variant — a correct-markup/wrong-look regression is caught too.
+- *Polpetto* — the still frame's rects are compared element-by-element
+  (`toEqual`) with `pixels(stillFrame(), {SPRITE_PT, SPRITE_PT+HOME_INSET_PT},
+  colorsFor("mint"))` imported from the app, i.e. the kit is pinned to the app's
+  own output; every frame's rects lie inside its declared svg box and its sprite
+  bottom lands on `HOME_INSET_PT` (the overhang lift); an unknown frame throws
+  naming the two that exist.
+
+Evidence the tests hold (§9 non-vacuity). RED first, against `main`'s kit.js +
+kit-data.json dropped in place: 8 fail (`+ and the mic…`, `the four slot faces…`,
+`listening…`, `the circle is painted…`, `caption…`, both Polpetto rects/geometry
+tests, `an unknown frame throws`) with assertion errors, not import errors — the
+`K.icon`/`K.polpetto`/`composerParts` names do not exist on main. Then restored →
+all green.
+
+Mutation checks (each applied to the branch's file, test run, file restored from a
+saved pristine copy):
+
+| # | Mutation | Killed by |
+|---|---|---|
+| M1 | `SLOT.send` back to a bare `↑` | `the four slot faces differ` |
+| M2 | `composerParts.plus` back to a bare `+` | `+ and the mic are filled k-circles`, `caption/composerParts` |
+| M3 | `MIC.idle` back to the 🎙︎ emoji | same two |
+| M4 | `polpetto` recolours `still` (`#7B3FC0`, the soft palette) | `the still frame's rects are pixels(stillFrame())` |
+| M5 | drop the overhang lift (`bottom: inset ?? homeInset`) | `every frame sits HOME_INSET_PT above…` |
+| M6 | remove the unknown-frame guard | `an unknown frame throws…` |
+| M7 | `clock` loses its `size: 17` | `the four slot faces differ` |
+| M8 | drop the `caption` span | `caption and K.composerParts…` |
+| M11 | `.k-circle` loses its `accentSoft` fill | `the circle is painted accentSoft…` |
+| M13 | `rects.slice(1)` — one mascot rect dropped | `the still frame's rects are…` |
+
+**Finding 2 (MEDIUM, `calc(12 * 1px)` evades the no-literal rule) — FIXED, both
+halves.** Extracted AND caught, because either alone is weak:
+
+- `scripts/mockup-kit/kit-rules.ts:63` `literalViolations` now also flags
+  `calc(<number> * 1px)`; a TOKEN times 1px (`calc(var(--m-x) * 1px)`, the kit's
+  normal unit conversion, e.g. `kit.css:93`) does not match and stays legal.
+- New `APPROXIMATIONS` (`kit-rules.ts:51`) is a named, published list
+  (`declaration` + `why`), and the rule exempts only an exact declaration match.
+  The one entry is the hub's `backdrop-filter: blur(calc(12 * 1px)) saturate(1.4)`,
+  whose `why` cites `FloatingActivity.tsx:563` (inline-JSX `BlurView intensity={60}`,
+  a native material with no CSS equivalent).
+- Tests: `a hand-picked size dressed as a hairline…` (the rule catches `12 * 1px`
+  and `13.5 * 1px`, allows the token form) and `the kit's approximations are named,
+  narrow, and each is in the CSS` (every entry carries a `why` and appears in
+  `kit.css`; the same declaration at `14 * 1px` or without its `saturate(1.4)` is
+  still a violation, so the exemption is exact, not a prefix; an entry absent from
+  the CSS fails).
+- Doc surface kept in sync: the `kit.css` header rule, the approximation's own
+  comment, and `tools/mockup-kit/README.md`'s row now name `APPROXIMATIONS`.
+
+RED/mutations for finding 2: the `calc` test fails on the old rule (assertion, not
+an import error). M9 (remove the `calc` matcher) → both finding-2 tests red. M10
+(widen the exemption to `declaration.startsWith("backdrop-filter:")`) → red, after I
+sharpened the narrowness assertion: my first version used a `.x { … }` one-liner,
+which M10 survived — a real weakness (the exemption compares a whole trimmed
+declaration, so it needs a real declaration line to test). M12 (a second, unlisted
+`padding: calc(7 * 1px)`) → red with `683: calc(7 * 1px)`.
+
+Gate on the touched scope: `bun test scripts/test/mockup-kit.test.ts
+scripts/test/mockup-kit-png.test.ts` → **44 pass / 0 fail**; `bunx biome check` on
+the changed TS/CSS files → clean; `bunx tsc --noEmit` → clean. The full `bun run
+check` is the orchestrator's, run after this round.
+
+Unverified (one line): the rendered look was not re-screenshotted — these tests pin
+the markup, the tokens and the app's own rects, not pixels on screen; calibration
+(`bun scripts/mockup-kit.ts calibrate`, needs Chrome + an e2e run) is how to check
+that.
+
 ## Review
 
 **Verdict: REQUEST-CHANGES.**

@@ -1,8 +1,11 @@
 /*
  * The mockup kit's look (docs/feat/mobile-mockup-kit.md Slice 2). Layout only:
  * EVERY size, colour and timing is a var() from generated/tokens.css (read from
- * apps/mobile/src). A literal hex / px (other than 0 and 1px) / ms here fails
- * scripts/test/mockup-kit.test.ts. Device-only values live in frame.css.
+ * apps/mobile/src). A literal hex / px (other than 0 and 1px) / ms, or a chosen
+ * number dressed as one (`calc(12 * 1px)`), fails
+ * scripts/test/mockup-kit.test.ts — unless it is a NAMED approximation in
+ * `APPROXIMATIONS` (scripts/mockup-kit/kit-rules.ts). Device-only values live in
+ * frame.css.
  */
 
 /* ── text styles ─────────────────────────────────────────────────────────── */
@@ -686,8 +689,11 @@
   border: var(--m-hub-button-body-border-width) solid var(--c-glass-border);
   background: var(--c-glass);
   box-shadow: var(--shadow-glass);
-  /* FloatingActivity.tsx:563 BlurView intensity 60, systemUltraThinMaterial: inline
-     JSX (not extractable), hand-mapped to a CSS blur; calibration is its net. */
+  /* FloatingActivity.tsx:563 BlurView intensity 60, systemUltraThinMaterial: an
+     inline JSX prop (nothing to extract), hand-mapped to a CSS blur. The number
+     is a NAMED approximation — `APPROXIMATIONS` in scripts/mockup-kit/kit-rules.ts,
+     which is what exempts this one line from the no-literal rule; calibration is
+     its net. A second hand-picked number needs its own entry there. */
   backdrop-filter: blur(calc(12 * 1px)) saturate(1.4);
   display: flex;
   align-items: center;
