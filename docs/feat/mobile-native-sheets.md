@@ -1128,3 +1128,13 @@ Gate as run by me: `bun run typecheck` clean (root + mobile + relay); `bun run l
 - **NEW — MEDIUM: the gate is red.** `apps/mobile/test/band-screens.test.ts:284-292` ("the sheet's ground is the banded ground") slices `SessionInfoSheet.tsx` at `<View style={[styles.root`, which the fix removed. It fails alone (35 pass / 1 fail) and in `bun test apps/mobile/test` (4769 pass / 1 fail). So `bun run check` fails. The property itself still holds through the route's `contentStyle` = `palette[sheetGround("info")]` = `bg`. The test should be repointed at that (or at `sheetGround`), not deleted.
 - `bun run typecheck` clean. `bun run lint` clean (2324 files). After the reverts the tree is byte-identical (`git status` empty).
 - Regressions attacked: (a) Commands/Outbox/Permission lose the route's `flex:1` wrapper. Each still has its own root, and RN's ScrollView has `flexGrow:1` by default, so the risk is low but unverified on a device (S6). (b) No test or e2e flow references `native-sheet-<kind>` (rg). (c) info > tools > commands precedence: there is no opener path where two flags are set together (`openInfo`/`openTools`, `SessionScreen.tsx:1075-1098`). No finding.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-23 (diff `HEAD~1`, `2e11bfbc`)*
+
+**Verdict: PASS** (scope S1–S5; S6's simulator checks for F0, keyboard, `perm-hold` and L2 are still open, as the plan says).
+
+- **R2 (band-screens test red): FIXED.** `band-screens.test.ts:285-295` now asserts the property where it lives: `sheetGround("info") === "bg"`, App.tsx's `contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] }`, and no `palette.sheet` in `SessionInfoSheet.tsx`. Mutation `sheetGround` → `"sheet"` for `info` → the test goes red (35 pass / 1 fail). Reverted; `git status` empty.
+- Gate: `bun run typecheck` clean; `bun run lint` clean (2324 files); `bun test apps/mobile/test` → **4770 pass / 0 fail**. The full root `bun test` was not run by me.
+- Regressions on this diff: test-only plus doc. The import is `../src/sheet-plan` without `.ts`, unlike its neighbours, but typecheck and lint accept it. No finding.
