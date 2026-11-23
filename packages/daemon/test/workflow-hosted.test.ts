@@ -182,7 +182,11 @@ describe("session/workflow on a hosted session", () => {
       released = resolve;
     });
     const d = new WorkflowDriver({
-      load: async () => ({ path: ".tentacle/workflows/task.yaml", text: APPROVE_YAML, prompts: {} }),
+      load: async () => ({
+        path: ".tentacle/workflows/task.yaml",
+        text: APPROVE_YAML,
+        prompts: {},
+      }),
       context: () => ({ models: [], agentTypes: ["general"] }),
       approvals: { has: async () => true, add: async () => {} },
       request: async () => {
