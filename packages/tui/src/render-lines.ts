@@ -701,7 +701,7 @@ function shellBodyText(text: string): string {
 /** A status-coloured bullet that opens a tool call. */
 function bullet(tool: ToolItem): string {
   if (tool.status === "running") {
-    return theme.accent(BULLET);
+    return theme.subtle(BULLET); // grey like the command it runs (owner 2026-11-23); blinks while running
   }
   if (tool.status === "queued") {
     return theme.subtle(BULLET); // unreachable: a queued row has its own header (`toolLines`)
