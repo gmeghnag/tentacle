@@ -334,6 +334,65 @@ Then run the full e2e gate. Finish with `bun run check` green (lint baseline: 0/
 
 ## Execution
 
+### Step 0 — results
+
+*— claude-opus-5-5, 2026-11-23*
+
+How it ran: a throwaway patch (`SheetSpike` route in `App.tsx`: `presentation:"formSheet"`,
+`sheetAllowedDetents:[0.3,0.5,1]`, `sheetInitialDetentIndex:1`, `sheetGrabberVisible:true`,
+`gestureEnabled` per param; `src/sheet-spike.tsx` = a module registry +
+`useSyncExternalStore`, a 1 s counter published by `SessionScreen`, a `state` listener
+counting removed `SheetSpike` keys, push / keyed-pop / RN-Modal buttons) plus a gate flow
+`99-sheet-spike` (registered in `e2e/run.ts` for the run only). Three gate runs on simulator
+`0B43D716…` (iOS 26, dark): `scripts/e2e-gate.sh 0B43D716-9670-421A-BE51-9162004F2963 --only 99-sheet-spike`
+(run ids `1795428782840`, `1795428943689`, `1795429478700`). Evidence comes from the screenshots
+plus the on-screen probes (`dismissed N`, `detent N`, `gestureCancel N`, `published counter N`).
+Optional Maestro asserts were read in the run's `maestro.log`. The patch is in
+`.tentacle/tmp/mobile-native-sheets/spike.patch` and was reverted with `git apply -R`. Shots:
+`docs/feat/mobile-native-sheets/spike/`.
+
+| # | Result | What was seen | Shots |
+|---|---|---|---|
+| F0 (found) | — | **RNS resizes a formSheet's ScrollView to the whole sheet** (`RNSScreenContentWrapper.mm:145-177`, `RNSScreen.mm:202-237`). It does this unless the route root's DIRECT children are `[header View collapsable={false}, ScrollView]` (at most 2). The first run used one wrapping `View`, so the list was drawn OVER the head, and the head's buttons were untappable (Maestro's tap on `pop self` hit a row). Run 2 used the two-child shape and laid out correctly. | `F0-scrollview-overlaps-head` |
+| F1 | **PASS** | Opens at the middle detent (the sheet's top at ~52 % of the screen). The background is dimmed and the grabber is drawn. The published counter keeps ticking inside the route (3 → 22 s apart). Drag → `detent 2` (large), drag down → `detent 0` (small). `sheetDetentChange` fires on drags only: the probe reads `-1` until the first drag (nothing on the initial presentation, nothing on a keyboard-driven move). | `F1-a-medium`, `F1-b-large`, `F1-c-small` |
+| F2 | **PASS** | A native swipe-down from small removes the route. The `state` listener in `SessionScreen` counted exactly one removal (`dismissed 1`), and `spike-sheet-1` is gone. | `F2-dismissed` |
+| F3 | **PASS** | `gestureEnabled:false`: a hard swipe-down only moves the sheet to small, and `gestureCancel 1` arrives. A backdrop tap does nothing. Dragging small → large still works (`detent 2`). A keyed `pop` of its own key then closes it (`dismissed 2`). | `F3-a-after-swipe-down`, `F3-b-after-backdrop-tap`, `F3-c-dragged-large`, `F3-d-popped` |
+| F4 | **PASS** (top-pop) · lower recorded | A push while one sheet is up stacks a second sheet (`depth 2`). A keyed pop of the TOP removes only it (`depth 1` stays, `dismissed 3`). **A keyed pop of the LOWER sheet removes BOTH routes** (`dismissed` 3 → 5 at once, empty screen at 0 s and at 1.5 s). There was no re-present: the upper route is lost from state as well, not just flashed. | `F4-a-stacked`, `F4-b-top-popped`, `F4-c-lower-pop-0s` |
+| F5 | **(a) FAIL** · (b) recorded | (a) Sheet up, lock `immediately`, Home, relaunch: **`lock-screen` never appears** (optional assert WARNED after 15 s). The Face ID prompt shows over the LIVE session and sheet, so their content is visible while locked. After the match the sheet is still there, ticking. (b) No sheet up → lock → a push fires while locked (5 s timer): the cover stays on top (no sheet over it). After unlock the sheet is up, so the push landed under the cover or after it. | `F5-a-locked-over-sheet`, `F5-a2-unlocked`, `F5-b-push-while-locked`, `F5-b2-unlocked` |
+| F6 | recorded — **both wedge the navigator** | (a) RN `Modal` up → push: the Modal is dismissed natively and the sheet shows. React still holds `visible:true`. After that sheet is popped, the next push presents **nothing** (`spike-sheet-1` assert fails, run 2). (b) Sheet up → open an RN `Modal` from `SessionScreen`: it never shows, not even after the sheet is popped. The next push also presents nothing (run 3, `F6-b3`). In both cases the stale `visible` Modal blocks every later formSheet. | `F6-a-modal-then-push`, `F6-a2-push-after-wedged`, `F6-b-sheet-then-modal`, `F6-b2-after-sheet-pop`, `F6-b3-push-after` |
+| F7 | recorded (pre-existing bug, likely) | Current code: Tools open, then the laptop raises an `EDIT` ask on the session (`laptop-prompt` hook). `perm-sheet` never shows while Tools is up (WARNED, 8 s), **nor after Tools is swiped away** (WARNED, 5 s). The row shows `Write spike.txt` running. Caveat: the ask was raised by the laptop on a fresh session, and the phone receiving it was not separately proven (flow 09 proves the same hook for a seeded session). | `F7-a-tools-then-ask`, `F7-b-after-tools-closed` |
+| F8 | **PASS** (single) · nested recorded | With the head fixed and ONE ScrollView, an upward drag on the list expands medium → large (`detent 2`). With nested ScrollViews (outer + inner), the same drag scrolls the inner list (rows 15–21) and the sheet stays at medium. | `F8-a-single-scroll-up`, `F8-b-nested-scroll-up` |
+| F9 | **PASS** | `TextInput` focused in a 0.5 sheet: UIKit moves the sheet to full height above the keyboard. The field (`hello`) and the button under it stay visible. | `F9-keyboard` |
+
+Verdict: F1 and F2 pass, so the route approach (D1/D2) works. **F5a fails**, so the
+load-bearing assumption's second half ("the lock cover still goes above it") is false as
+built. The RN-`Modal` lock cannot present while the root VC is presenting a native sheet.
+
+Plan impact (no plan text rewritten here; for the planner/owner):
+- **Lock vs sheet (blocking, F5a).** The cover must win over any sheet. Candidate: make
+  `reconcile` drain the stack while `locked` (pop the top until it is empty; `desired` survives,
+  so the same sheets re-push after the unlock), and also pre-empt on `inactive`, before the
+  app-switcher snapshot. Alternative: present the lock from the top-most VC or its own
+  `UIWindow` (native work). Either one needs its own simulator proof, including the snapshot,
+  before S3. Also re-check `docs/feat/mobile-lock.md` fact 3: it does not hold for this route.
+- **Never pop a lower sheet (F4).** This is not cosmetic: it deletes the upper route too, and
+  `dismissedNatively` would then report the upper sheet as swiped away and run its close
+  handler (e.g. Outbox "Not now", or the permission sheet's `dismiss()`). `reconcile`'s
+  top-only rule is mandatory. `dismissedNatively` must ignore keys removed by a planned pop of
+  a sheet below them.
+- **Foreign RN Modals must be fully gone before a push, and none may open while a sheet is up
+  (F6).** `yieldForeign` has to close the Modal AND wait for its dismissal (`onDismiss`) before
+  `push`. It must also stop new RN Modals while `actual.length > 0`, because a stale `visible`
+  Modal wedges all later sheets. Rename (an RN Modal) after Commands therefore has to wait
+  for `transitionEnd {closing:true}`, and Info → Artifacts the same way.
+- **Sheet layout shape (F0).** `NativeSheetRoute` / `Sheet native` must render exactly two
+  direct children: a `collapsable={false}` head and ONE `ScrollView`. Any wrapper `View`
+  breaks the layout. D4's "pinned head + one inner scroller" is required, not optional.
+- **Detent probe (F1).** `sheetDetentChange` does not fire on the initial presentation or on
+  keyboard moves. Nothing in the plan depends on it today; keep it that way.
+- **F7 baseline.** Likely a pre-existing bug, removed by construction once Permission is the
+  top route (D3 `desiredStack`). Add an e2e assertion for it in S5.
+
 ## Review
 
 ### Owner answers (2026-11-23 ~08:35)
