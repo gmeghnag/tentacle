@@ -49,11 +49,21 @@ function latestRun(): string | undefined {
   return runs[0];
 }
 
-/** `<run>/ios<major>/<flow>/<shot>-<theme>.png`, searched under any ios<major>. */
+/**
+ * `<run>/ios<major>/<flow>/<shot>-<theme>.png`, searched under any ios<major> —
+ * at the top of the run dir (a single-simulator run) or one level down in
+ * `sim-<udid8>/` (a parallel run's shard, docs/feat/e2e-parallel-gate.md P7).
+ */
 function shotPath(run: string, c: Case, theme: string): string | undefined {
   for (const ios of readdirSync(run).filter((d) => d.startsWith("ios"))) {
     const p = join(run, ios, c.flow, `${c.shot}-${theme}.png`);
     if (existsSync(p)) return p;
+  }
+  for (const shard of readdirSync(run).filter((d) => d.startsWith("sim-"))) {
+    for (const ios of readdirSync(join(run, shard)).filter((d) => d.startsWith("ios"))) {
+      const p = join(run, shard, ios, c.flow, `${c.shot}-${theme}.png`);
+      if (existsSync(p)) return p;
+    }
   }
   return undefined;
 }

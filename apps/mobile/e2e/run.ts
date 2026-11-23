@@ -14,8 +14,8 @@
  * Exit codes: 0 = every flow passed; 2 = a prerequisite is missing (named, with
  * its install command — never a silent skip); anything else = Maestro's own.
  */
-import { readFileSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
@@ -43,15 +43,27 @@ import { payloadFor, sealPushMessage } from "./notify-steps.ts";
 import { createPairingHooks } from "./pairing.ts";
 import {
   type IosMajor,
+  type Missing,
   REQUIRED_IOS_MAJORS,
   missingText,
   parseRuntimes,
   preflight,
 } from "./preflight.ts";
 import { type ApnsPayload, type PushSteps, createPushSteps } from "./push-steps.ts";
+import {
+  type AppInput,
+  DELETED,
+  appCacheKey,
+  builtAppPath,
+  cacheEvictions,
+  isHarnessOrTest,
+  parseUdids,
+  seedValues,
+  shardLabel,
+} from "./shard.ts";
 
-const REPO = join(import.meta.dir, "..", "..", "..");
-const RUNS_DIR = join(REPO, ".tentacle", "tmp", "e2e-mobile");
+export const REPO = join(import.meta.dir, "..", "..", "..");
+export const RUNS_DIR = join(REPO, ".tentacle", "tmp", "e2e-mobile");
 
 type Child = Subprocess<"ignore", "inherit", "inherit">;
 
@@ -72,7 +84,21 @@ export function parseArgs(argv: readonly string[]): {
   readonly hold?: true;
   readonly app?: string;
   readonly flowTimeoutS?: number;
+  readonly shardOf?: string;
+  readonly noAppCache?: true;
 } {
+  // `--shard-of <parentRunDir>`: this process is ONE shard of a parallel run
+  // (docs/feat/e2e-parallel-gate.md D5). It never builds (`--app` is required,
+  // the parent built once) and never runs the Swift suite (the parent did).
+  const shardOfAt = argv.indexOf("--shard-of");
+  let shardOf: string | undefined;
+  if (shardOfAt !== -1) {
+    const value = argv[shardOfAt + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--shard-of needs a value (the parent run dir)");
+    }
+    shardOf = value;
+  }
   // `--app <path.app>`: install THIS simulator build instead of building one
   // (docs/feat/mobile-e2e-gate.md) — still a clean reinstall, once per run.
   const appAt = argv.indexOf("--app");
@@ -119,7 +145,20 @@ export function parseArgs(argv: readonly string[]): {
     ...(argv.includes("--hold") ? { hold: true as const } : {}),
     ...(app === undefined ? {} : { app }),
     ...(flowTimeoutS === undefined ? {} : { flowTimeoutS }),
+    ...(shardOf === undefined ? {} : { shardOf }),
+    ...(argv.includes("--no-app-cache") ? { noAppCache: true as const } : {}),
   };
+  // A shard is ONE simulator on a build the parent made: without `--app` it
+  // would build too (two xcodebuilds racing the same DerivedData), and a
+  // comma-separated `--udid` would make it a parent again.
+  if (shardOf !== undefined) {
+    if (app === undefined) {
+      throw new Error("--shard-of needs --app (a shard never builds its own)");
+    }
+    if (udid === undefined || udid.includes(",")) {
+      throw new Error("--shard-of needs exactly one --udid");
+    }
+  }
   const at = argv.indexOf("--ios");
   if (at === -1) {
     return withFlows;
@@ -141,26 +180,72 @@ export function parseArgs(argv: readonly string[]): {
  * `--version`) — so it is a parameter, not a constant, and each call site names
  * the one its tool needs.
  */
-async function versionOf(
+export async function versionOf(
   command: string,
   flag: string,
   env?: Record<string, string>,
 ): Promise<string | undefined> {
-  const result = await $`${command} ${flag}`
-    .quiet()
-    .nothrow()
-    .env(env ?? process.env);
+  const fullEnv: Record<string, string> =
+    env ??
+    Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    );
+  const result = await $`${command} ${flag}`.quiet().nothrow().env(fullEnv);
   return result.exitCode === 0 ? result.stdout.toString().trim() : undefined;
 }
 
-async function simctlRuntimes(): Promise<string> {
+export async function simctlRuntimes(): Promise<string> {
   const result = await $`xcrun simctl list -j runtimes`.quiet().nothrow();
   return result.exitCode === 0 ? result.stdout.toString() : "";
 }
 
-async function simctlDevices(): Promise<string> {
+export async function simctlDevices(): Promise<string> {
   const result = await $`xcrun simctl list -j devices`.quiet().nothrow();
   return result.exitCode === 0 ? result.stdout.toString() : "";
+}
+
+/**
+ * Every prerequisite this machine is missing, most fundamental first (empty =
+ * run), with the SAME probes and the same per-major runtime rule on both paths:
+ * the single-simulator one and the parallel parent's. One function, so a
+ * prerequisite can never be checked by one path and not the other
+ * (docs/feat/e2e-parallel-gate.md D2.1, review round 1 M3: the parent used to
+ * skip it and paid for it with a 10–15 min build before the exit 2).
+ *
+ * `onlys` are the majors the run will actually drive (each parallel device's
+ * own); empty keeps `preflight`'s default rule — every required major. The
+ * probes run ONCE for all of them, and a tool missing for both is reported once.
+ */
+export async function missingPrerequisites(
+  onlys: readonly IosMajor[] = [],
+): Promise<readonly Missing[]> {
+  const [xcode, cocoapods, maestro, runtimesJson] = await Promise.all([
+    versionOf("xcodebuild", "-version"),
+    versionOf("pod", "--version"),
+    // Maestro's launcher needs a JDK BEFORE it can print its version, so the
+    // probe carries the same JAVA_HOME/PATH the flows run with.
+    versionOf("maestro", "--version", maestroEnv()),
+    simctlRuntimes(),
+  ]);
+  const input = {
+    platform: process.platform,
+    runtimes: parseRuntimes(runtimesJson),
+    ...(xcode === undefined ? {} : { xcode }),
+    ...(cocoapods === undefined ? {} : { cocoapods }),
+    ...(maestro === undefined ? {} : { maestro }),
+  };
+  const groups: readonly (IosMajor | undefined)[] =
+    onlys.length === 0 ? [undefined] : [...new Set(onlys)];
+  const missing = new Map<string, Missing>();
+  for (const only of groups) {
+    for (const item of preflight(input, ...(only === undefined ? [] : [only]))) {
+      // A tool missing for both devices is one missing tool, named once.
+      missing.set(item.tool, item);
+    }
+  }
+  return [...missing.values()];
 }
 
 /**
@@ -296,6 +381,36 @@ export async function waitForPort(port: number, timeoutMs = 20_000): Promise<voi
   throw new Error(`nothing listening on 127.0.0.1:${port} after ${timeoutMs}ms`);
 }
 
+/** The little of a spawned child this needs: it can exit while we wait. */
+export interface Servable {
+  readonly exited: Promise<number>;
+}
+
+/**
+ * Wait for the `serve` we JUST started to listen: the port answering is not
+ * enough. `freePort()` binds `:0` and releases it, so between that and `serve`'s
+ * own bind another process can take the port — and then the port DOES answer,
+ * from the other run's daemon (same token, same protocol), which is silent
+ * cross-talk: the flow would seed and pair against a stranger's `serve` and its
+ * assertions would be about nothing (docs/feat/e2e-parallel-gate.md D7).
+ * Racing the child's own exit turns that into a loud red.
+ */
+export async function waitForServe(
+  child: Servable,
+  port: number,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const died = child.exited.then((code) => {
+    throw new Error(
+      `serve exited (code ${code}) before listening on 127.0.0.1:${port} — port taken by another run?`,
+    );
+  });
+  // The loser of the race stays pending; its rejection is already handled by
+  // `Promise.race`, so it must not surface as an unhandled one.
+  died.catch(() => {});
+  await Promise.race([waitForPort(port, timeoutMs), died]);
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   // Checked before any build, so a typo fails in a second, not after one.
@@ -308,18 +423,26 @@ async function main(): Promise<number> {
     console.error(metaErrors.join("\n"));
     return 2;
   }
-  const udid = args.udid ?? process.env.E2E_SIM_UDID;
-  const [xcode, cocoapods, maestro, runtimesJson, devicesJson] = await Promise.all([
-    versionOf("xcodebuild", "-version"),
-    versionOf("pod", "--version"),
-    // Maestro's launcher needs a JDK BEFORE it can print its version, so the
-    // probe carries the same JAVA_HOME/PATH the flows run with.
-    versionOf("maestro", "--version", maestroEnv()),
-    // Two DIFFERENT listings: runtimes carry the iOS versions, devices carry the
-    // simulators to boot (a `devices` key is absent from `-j runtimes`).
-    simctlRuntimes(),
-    simctlDevices(),
-  ]);
+  const udids = parseUdids(args.udid ?? process.env.E2E_SIM_UDID ?? "");
+  const udid = udids.length === 1 ? udids[0] : undefined;
+  // A parent: several simulators, in ONE run (docs/feat/e2e-parallel-gate.md D1).
+  // It does no work itself — it validates the devices, builds once, splits the
+  // flows and merges the halves (`parallel.ts`) — so it branches before the
+  // single-simulator setup below.
+  if (udids.length > 1) {
+    if (args.hold === true || process.env.E2E_HOLD === "1") {
+      console.error("e2e:mobile: --hold (E2E_HOLD) is a single-simulator form");
+      return 2;
+    }
+    const { runParallel } = await import("./parallel.ts");
+    return runParallel(udids, {
+      flows: runFlows,
+      only: args.only,
+      flowTimeoutS: args.flowTimeoutS,
+      noAppCache: args.noAppCache === true,
+    });
+  }
+  const devicesJson = await simctlDevices();
   // A UDID names ONE simulator, so it names the major too: the gate runs that
   // simulator only (the other required runtime need not be installed), and
   // never falls back to another device — a run must not drive one it was not
@@ -331,16 +454,7 @@ async function main(): Promise<number> {
     return 2;
   }
   const only: IosMajor | undefined = choice.kind === "device" ? choice.major : choice.only;
-  const missing = preflight(
-    {
-      platform: process.platform,
-      runtimes: parseRuntimes(runtimesJson),
-      ...(xcode === undefined ? {} : { xcode }),
-      ...(cocoapods === undefined ? {} : { cocoapods }),
-      ...(maestro === undefined ? {} : { maestro }),
-    },
-    ...(only === undefined ? [] : [only]),
-  );
+  const missing = await missingPrerequisites(only === undefined ? [] : [only]);
   if (missing.length > 0) {
     console.error(missingText(missing));
     return 2;
@@ -349,22 +463,31 @@ async function main(): Promise<number> {
   // The Notification Service Extension's Swift logic, against the SAME vectors
   // the TypeScript side is pinned by (docs/feat/mobile-notifications.md N5,
   // decision 20). Run here, before any build: it takes seconds and it is the only
-  // gate that exercises the extension's crypto (`swift test`, macOS only).
-  const swiftTests = Bun.spawnSync(["bun", "run", "test:swift"], {
-    cwd: REPO,
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  if (swiftTests.exitCode !== 0) {
+  // gate that exercises the extension's crypto (`swift test`, macOS only). A
+  // parallel run's CHILDREN skip it: the parent already ran it once.
+  const swiftCode = args.shardOf === undefined ? await runSwiftTests() : 0;
+  if (swiftCode !== 0) {
     console.error("e2e:mobile: `bun run test:swift` failed (the NSE's PushCore suite)");
     return 2;
   }
 
-  const runId = `${Date.now()}`;
-  const runDir = join(RUNS_DIR, runId);
+  // `--shard-of <parentRunDir>`: this process is one shard, so its artefact dir
+  // is the parent's, under its own label — never `RUNS_DIR/<runId>`, which is
+  // how the parent finds each child's summary (docs/feat/e2e-parallel-gate.md D5).
+  const runId =
+    args.shardOf === undefined ? `${Date.now()}` : (args.shardOf.split(/[/\\]/).pop() ?? "");
+  // The dir name comes from `shardLabel` — the SAME function the parent uses to
+  // find this child's `summary.json` (`parallel.ts`). Two independent slices of
+  // the udid would drift on a non-standard one and the merge would read nothing.
+  const runDir =
+    args.shardOf === undefined ? join(RUNS_DIR, runId) : join(args.shardOf, shardLabel(udid ?? ""));
   await mkdir(join(runDir, "project"), { recursive: true });
   await mkdir(join(runDir, "config"), { recursive: true });
-  console.log(`e2e:mobile run ${runId} → ${runDir}`);
+  console.log(
+    args.shardOf === undefined
+      ? `e2e:mobile run ${runId} → ${runDir}`
+      : `e2e:mobile shard of ${args.shardOf} → ${runDir}`,
+  );
 
   // The escape suite's listener (docs/feat/model-artifacts.md T8.1, flow 30): the
   // ONLY thing that can say whether a hostile artifact reached the network.
@@ -486,7 +609,9 @@ async function main(): Promise<number> {
   let projectB: { child: Child | undefined; readonly port: number } | undefined;
 
   try {
-    await waitForPort(daemonPort);
+    // `waitForServe`, not `waitForPort`: a port taken by another run would
+    // answer, and every flow would then seed against a stranger's daemon.
+    await waitForServe(serving, daemonPort);
     // The address the PHONE dials: the daemon's own `/e2e` route, no proxy in
     // between (11b.1 step 5). Loopback contributes nothing to a QR (task 9), so
     // `pair` is given it explicitly.
@@ -562,7 +687,7 @@ async function main(): Promise<number> {
         },
         startServe: async () => {
           serving = startServe();
-          await waitForPort(daemonPort);
+          await waitForServe(serving, daemonPort);
         },
         projectBStart: async () => {
           if (projectB?.child !== undefined) {
@@ -570,8 +695,9 @@ async function main(): Promise<number> {
           }
           await mkdir(projectBDir, { recursive: true });
           const port = projectB?.port ?? freePort();
-          projectB = { child: startServe(port, projectBDir), port };
-          await waitForPort(port);
+          const child = startServe(port, projectBDir);
+          projectB = { child, port };
+          await waitForServe(child, port);
         },
         projectBStop: async () => {
           const child = projectB?.child;
@@ -599,7 +725,7 @@ async function main(): Promise<number> {
           const port = freePort();
           const side = startServe(port);
           try {
-            await waitForPort(port);
+            await waitForServe(side, port);
             await turnOnce(
               { url: `ws://127.0.0.1:${port}/`, token: endpoint.token },
               session,
@@ -805,13 +931,17 @@ async function main(): Promise<number> {
       // A CLEAN install once per run: whatever an earlier run (or a person) left
       // on this simulator goes first, so the run starts from the build it tests.
       await $`xcrun simctl uninstall ${device} so.tentacle.app`.quiet().nothrow();
-      const buildCode =
-        args.app === undefined
-          ? await buildAndInstall(device, runDir, major)
-          : (await $`xcrun simctl install ${device} ${args.app}`.nothrow()).exitCode;
-      if (buildCode !== 0) {
-        console.error(`build/install failed for iOS ${major} (exit ${buildCode})`);
-        return buildCode;
+      const resolved = await resolveApp({
+        device,
+        runDir,
+        major,
+        app: args.app,
+        // A shard never builds (it is given `--app`): the cache is the parent's.
+        noAppCache: args.noAppCache === true || args.shardOf !== undefined,
+      });
+      if (resolved.code !== 0) {
+        console.error(`build/install failed for iOS ${major} (exit ${resolved.code})`);
+        return resolved.code;
       }
       for (const flow of runFlows) {
         const meta = metas.get(flow) ?? parseFlowMeta(flow, "");
@@ -857,7 +987,7 @@ async function main(): Promise<number> {
             await waitForPort(daemonPort, 1_000).catch(async () => {
               console.error(`  serve was down before ${flow}: restarting it`);
               serving = startServe();
-              await waitForPort(daemonPort);
+              await waitForServe(serving, daemonPort);
             });
             outcome = await spawnFlow(
               `${flows}/${flow}.yaml`,
@@ -975,6 +1105,220 @@ async function appLogFile(udid: string): Promise<string> {
     }
   }
   return "";
+}
+
+/**
+ * The Notification Service Extension's Swift suite (`bun run test:swift`). In a
+ * function so the PARALLEL parent can run it once and its children skip it: the
+ * three would share one SwiftPM `.build` lock (docs/feat/e2e-parallel-gate.md).
+ */
+export async function runSwiftTests(): Promise<number> {
+  const child = Bun.spawn(["bun", "run", "test:swift"], {
+    cwd: REPO,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  return await child.exited;
+}
+
+/** Where a reused Release build lives: outside `e2e-mobile/` (a run-dir consumer reads that). */
+export const APP_CACHE_DIR = join(REPO, ".tentacle", "tmp", "e2e-app-cache");
+
+/** How many cached builds are kept (an app is ~100–200 MB). */
+export const APP_CACHE_KEEP = 3;
+
+/**
+ * The files the Release build is made of — what a cached build may be reused for
+ * (docs/feat/e2e-parallel-gate.md D6). Over-inclusive on purpose, and keyed by
+ * CONTENT rather than by a commit: a worktree full of uncommitted edits (how
+ * every task is validated) must still get an honest answer. The exclusions
+ * (harness, flows, unit tests) are applied by `appCacheKey`, not here.
+ */
+export async function appCacheInputs(repo: string): Promise<readonly AppInput[]> {
+  const listing = Bun.spawn(
+    [
+      "git",
+      "ls-files",
+      "-co",
+      "--exclude-standard",
+      "--",
+      "apps/mobile",
+      "packages",
+      "package.json",
+      "bun.lock",
+      "patches",
+    ],
+    { cwd: repo, stdout: "pipe", stderr: "pipe" },
+  );
+  const text = await new Response(listing.stdout).text();
+  if ((await listing.exited) !== 0) {
+    throw new Error("git ls-files failed: the app cache key cannot be computed");
+  }
+  const files: AppInput[] = [];
+  for (const path of text.split("\n").filter((line) => line !== "")) {
+    // The harness, the flows and the unit tests are never imported by the bundle:
+    // skipped here so a gate does not read ~2300 files to discard a third of them
+    // (`appCacheKey` applies the same rule, so the key is the same either way).
+    if (isHarnessOrTest(path)) {
+      continue;
+    }
+    try {
+      // RAW bytes, never `readFile(…, "utf8")`: fonts and PNGs are not UTF-8,
+      // and a lossy decode made two different binaries hash the same.
+      files.push({ path, content: await readFile(join(repo, path)) });
+    } catch {
+      // A tracked file deleted from the worktree: a DIFFERENT key from one that
+      // never existed, so the deletion is part of what a build would see.
+      files.push({ path, content: DELETED });
+    }
+  }
+  return files;
+}
+
+/**
+ * The app to install on a simulator: `--app` verbatim, else a cached build of
+ * exactly this tree, else a fresh Release build (which is then cached). Returns
+ * the build's exit code, or 0 when the app is installed.
+ *
+ * A cache failure NEVER fails a gate (a build that worked still runs); it is a
+ * warning, because the goal is speed, not a new way to be red.
+ */
+export async function resolveApp(options: {
+  readonly device: string;
+  readonly runDir: string;
+  /** The major whose build/prebuild logs this run writes. */
+  readonly major: IosMajor;
+  readonly app: string | undefined;
+  readonly noAppCache: boolean;
+  readonly repo?: string;
+  readonly cacheDir?: string;
+  readonly log?: (line: string) => void;
+}): Promise<{ readonly code: number; readonly appPath: string | undefined }> {
+  const repo = options.repo ?? REPO;
+  const log = options.log ?? ((line: string) => console.log(line));
+  const install = async (appPath: string): Promise<number> =>
+    (await $`xcrun simctl install ${options.device} ${appPath}`.nothrow()).exitCode;
+  if (options.app !== undefined) {
+    return { code: await install(options.app), appPath: options.app };
+  }
+  const cacheDir = options.cacheDir ?? APP_CACHE_DIR;
+  let key: string | undefined;
+  let extras: { xcode: string; bun: string } | undefined;
+  try {
+    const xcode = await versionOf("xcodebuild", "-version");
+    extras = { xcode: xcode ?? "(no xcodebuild)", bun: Bun.version };
+    key = appCacheKey(await appCacheInputs(repo), extras);
+  } catch (error) {
+    log(`app: no cache key (${error instanceof Error ? error.message : String(error)}) — building`);
+  }
+  const entryDir = key === undefined ? undefined : join(cacheDir, key);
+  const cached = entryDir === undefined ? undefined : join(entryDir, "tentacle.app");
+  if (entryDir !== undefined && cached !== undefined && !options.noAppCache) {
+    if (existsSync(join(cached, "Info.plist"))) {
+      const code = await install(cached);
+      if (code === 0) {
+        const builtIn = readCachedRunId(entryDir) ?? "?";
+        log(`app: cached ${key?.slice(0, 12)} (built in run ${builtIn})`);
+        return { code, appPath: cached };
+      }
+      // A cached app the simulator refuses is a MISS, not a red: rebuild below.
+      log(`app: cached ${key?.slice(0, 12)} failed to install (${code}) — building`);
+    } else {
+      // A dir without its Info.plist is a half-written entry (a crashed copy):
+      // remove it so the store below is free to take the key.
+      await rm(entryDir, { recursive: true, force: true });
+    }
+  }
+  const code = await buildAndInstall(options.device, options.runDir, options.major);
+  if (code !== 0) {
+    return { code, appPath: undefined };
+  }
+  let built: string | undefined;
+  try {
+    built = builtAppPath(
+      await readFile(join(options.runDir, `build-ios${options.major}.log`), "utf8"),
+    );
+  } catch {
+    built = undefined;
+  }
+  if (built === undefined) {
+    log("app not cached: no install path in build log");
+    return { code, appPath: undefined };
+  }
+  log(`app: built ${built}`);
+  if (key !== undefined && entryDir !== undefined) {
+    await storeApp({
+      built,
+      entryDir,
+      key,
+      runId: options.runDir.split(/[/\\]/).pop() ?? "",
+      cacheDir,
+      log,
+    });
+  }
+  return { code, appPath: built };
+}
+
+/** The run id a cached build records (`meta.json`), for the `app: cached` line. */
+function readCachedRunId(entryDir: string): string | undefined {
+  try {
+    const meta = JSON.parse(readFileSync(join(entryDir, "meta.json"), "utf8")) as {
+      runId?: unknown;
+    };
+    return typeof meta.runId === "string" ? meta.runId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Copy a just-built app into the cache: a tmp dir then one `rename`, so a
+ * concurrent reader never sees a half-copied `.app` (and two builds of the same
+ * key cannot interleave — the loser discards its tmp).
+ */
+async function storeApp(options: {
+  readonly built: string;
+  readonly entryDir: string;
+  readonly key: string;
+  readonly runId: string;
+  readonly cacheDir: string;
+  readonly log: (line: string) => void;
+}): Promise<void> {
+  const tmp = `${options.entryDir}.tmp-${process.pid}`;
+  try {
+    await rm(tmp, { recursive: true, force: true });
+    await mkdir(tmp, { recursive: true });
+    const app = join(tmp, "tentacle.app");
+    await cp(options.built, app, { recursive: true });
+    await writeFile(
+      join(tmp, "meta.json"),
+      `${JSON.stringify({ key: options.key, runId: options.runId, builtAt: new Date().toISOString() }, null, 2)}\n`,
+    );
+    if (existsSync(options.entryDir)) {
+      // Another run stored this exact key while we built: keep theirs.
+      await rm(tmp, { recursive: true, force: true });
+    } else {
+      await rename(tmp, options.entryDir);
+      options.log(`app: cached ${options.key.slice(0, 12)} for the next run`);
+    }
+  } catch (error) {
+    await rm(tmp, { recursive: true, force: true }).catch(() => {});
+    options.log(
+      `app not cached: ${error instanceof Error ? error.message : String(error)} (the run proceeds)`,
+    );
+    return;
+  }
+  // Eviction: keep the newest APP_CACHE_KEEP entries. Never fails the gate.
+  try {
+    const entries = readdirSync(options.cacheDir)
+      .filter((name) => !name.includes(".tmp-"))
+      .map((name) => ({ key: name, mtimeMs: statSync(join(options.cacheDir, name)).mtimeMs }));
+    for (const key of cacheEvictions(entries, APP_CACHE_KEEP)) {
+      await rm(join(options.cacheDir, key), { recursive: true, force: true });
+    }
+  } catch {
+    // A cache that cannot prune itself is still a working cache.
+  }
 }
 
 /**
@@ -1375,8 +1719,11 @@ async function placeOnSimulator(
   if (udid === "") {
     throw new Error("no simulator selected yet");
   }
-  // The payload is written under the run's OWN scratch dir and removed after.
-  const file = join(RUNS_DIR, `push-payload-${Date.now()}.json`);
+  // The payload is written under the run's OWN scratch dir and removed after. The
+  // name carries the PID: two runs (a parallel pair, or a worktree) share
+  // `RUNS_DIR`, and a same-millisecond name would let one remove the other's
+  // file before `simctl push` read it (docs/feat/e2e-parallel-gate.md).
+  const file = join(RUNS_DIR, `push-payload-${process.pid}-${Date.now()}.json`);
   await mkdir(RUNS_DIR, { recursive: true });
   await writeFile(file, JSON.stringify({ aps: payload.aps, tp: payload.tp }, null, 2));
   try {
@@ -1763,6 +2110,10 @@ async function spawnFlow(
         ?.replace(/\.yaml$/, "") ?? ""
     ];
   const fresh = compose === undefined ? {} : { [compose]: await newComposeSession() };
+  // The seeded ids the flows interpolate come from ONE map (`shard.ts`), the
+  // same one the splitter unions over: a new seeded session cannot be handed to
+  // the flows yet stay invisible to "these flows cannot be separated".
+  const seededValues = seedValues(seeded);
   const { code, timedOut } = await runAttempt(
     [
       "maestro",
@@ -1772,17 +2123,7 @@ async function spawnFlow(
       // Maestro's OWN env flags (`-e K=V`): its `${VAR}` substitution reads
       // these, NOT the process environment (a shell export is invisible to it).
       ...envFlags({
-        ALPHA_ID: seeded.alphaId,
-        BRAVO_ID: seeded.bravoId,
-        CHARLIE_ID: seeded.charlieId,
-        // One session per permission flow: an ask is daemon-side state that
-        // outlives a flow's `clearState`, so a shared session would leak a
-        // pending sheet into the next flow (found by the iOS 26 run).
-        ASK1_ID: seeded.askIds[0] ?? "",
-        ASK2_ID: seeded.askIds[1] ?? "",
-        ASK3_ID: seeded.askIds[2] ?? "",
-        ASK4_ID: seeded.askIds[3] ?? "",
-        ASK5_ID: seeded.askIds[4] ?? "",
+        ...seededValues,
         ...fresh,
         MAESTRO_HOOKS: hooks,
       }),
