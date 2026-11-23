@@ -1712,3 +1712,79 @@ hands back.
 - Keep the single project-paths module (names of `.tentacle/` children, symlink/escape checks once); drop `findProjectRoot`'s walk; re-check what 0b (hide) still needs (likely nothing beyond using the module's names).
 
 **Implementation v5 APPROVED** — owner 23/11 ~11:40 («approva v5»), incl. the recommendation: `hide` keeps its own stricter symlink reader. Slice order 0 → 1a → 1b → 5a → 2 → 2b → 3 → 4 → 5b; execution after `feat/mobile-native-sheets` merges (owner order), after resolving `fix/workflow-approve-detail` (same file).
+
+### Adversarial review — slices 0, 1a, 1b, 5a, 2, 2b (fresh context)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM convergence bug in 5a; one MEDIUM silent truncation).
+
+**Gate (re-run by the reviewer).** Touched test files (agent workflow-catalogue/driver, cli
+local-runtime/project-fs/workflow-files/-gitignored/-wiring/subagent-panel-controller, client
+workflows-client, core project-paths/workflow-spec, all of `packages/{daemon,protocol,tui}/test`):
+**5350 pass, 1 skip, 0 fail** (387 files). `bun run typecheck`: clean. `bun run lint`: clean (2336
+files). The full `bun test` was NOT run here (owner's token budget) — the merge gate runs it.
+
+**Findings.**
+1. **MEDIUM — one valid workflow blanks the whole catalogue as "unavailable"**
+   (`packages/protocol/src/session.ts` `WorkflowDefStepSchema.command: max(4096)` vs
+   `packages/core/src/workflow-spec.ts` `run: z.string()` uncapped, bounded only by the 16 000-char
+   approval summary; `packages/daemon/src/hosted-session.ts` `workflowCatalogue` parse fallback).
+   Scenario: `.tentacle/workflows/big.yaml` with one `run:` of 5 005 chars — `validateWorkflow` says
+   `ok`, so the driver emits an `ok:true` row; `WorkflowCatalogueResultSchema.safeParse` fails
+   (repro below), and the daemon answers `{workflows: [], unavailable: "the catalogue could not be
+   read: …"}`. Every OTHER valid workflow vanishes: the TUI at-rest line paints nothing, the `/workflow`
+   section says this session cannot run workflows, the phone (5b) gets no Start. Exactly the
+   "one bad file loses the catalogue" the errors-sanitizer comment says it prevents, and a silent
+   wrong state ("unavailable" ≠ "one file is too long"). Fix: cap per row (the row → `ok:false` with
+   an error naming the step) or align the wire cap with the spec's, and test it red-first.
+2. **MEDIUM — validation errors are joined and cut, not listed** (`packages/agent/src/workflow-driver.ts`
+   `catalogue()` `errors: [prepared.reason]`; `hosted-session.ts` `.slice(0, 300)`). `prepareSource`
+   joins every validator error with `"; "` behind the path prefix; the catalogue puts that ONE string
+   in `errors`, and the daemon cuts it at 300 chars with no `…`. D6's failure-mode row ("an `ok:false`
+   row with **every** error and its YAML path") does not hold: a file with several errors shows the
+   first ~270 chars and the rest disappear without a marker. Not recorded as drift in 5a's Execution.
+   Fix: return `validation.errors` as the array (each one line, ≤ 300, ≤ 20, `+k more` if over).
+
+**Repro (finding 1), `.tentacle/tmp/workflows-ui/rev/cat.ts` against this worktree's sources:**
+```
+validate ok? true                                   # 5005-char run command is a VALID workflow
+catalogue with one 5005-char command parses: false  # → daemon answers `unavailable`
+no-driver answer (dir:'') parses: false             # see note (a)
+```
+
+**Mutations (each red, reverted from a scratch copy; `git diff --stat` empty after each).**
+
+| Mutation | Red test |
+|---|---|
+| `remote-client.ts` live `workflows` frame ungated (`if (true)`) | workflows-client "with the bit OFF … the frame is DROPPED" |
+| `remote-session.ts` `workflow()` uses `randomUUID()` without `mint` | 3 tests (start / resume+rerun / start{hash} own their turn) |
+| `workflow-driver.ts` stale-hash check → `false` | workflow-catalogue "a STALE hash is refused `changed`, zero asks, no row" |
+| `session-log.ts` `workflowStepDetail` ignores `attempt` | workflow-step-detail "omitted is the LAST attempt…", "an attempt never ran is `{}`" |
+
+**§7 attacks tried.**
+- *Pod trust:* live frame and snapshot field both gated on `daemonWakes` (`remote-client.ts`
+  workflowsChanged call sites); `workflow()` and `workflowCatalogue()` refuse locally with the bit
+  off and send nothing. Holds. (`workflowStep` is ungated, but a pod has no driver and the panel only
+  lists runs from the gated feed — no pod text reaches it in practice.)
+- *Single broker / hash approval:* the hash check sits after `prepare`, before the inputs check and the
+  slot claim, so a stale start asks nothing; catalogue asks nothing (spy-tested). Holds.
+- *Peer not serialized:* `workflow_step` is synchronous over retained slots; `workflow_catalogue` is
+  async I/O with no lock/await on a shared mutex. Holds.
+- *Protocol:* two new methods + optional fields on strip schemas, no update kind added → no
+  `protocol.d/` note needed. Holds.
+- *Pure modules:* coalescing rule is the pure `catalogueRefresh`; `useCatalogue` only executes edges.
+  Acceptable.
+
+**Notes below the bar (not blocking).** (a) The no-driver answer `dir: ""` violates the schema's
+`dir: min(1)` — a client would reject it as a parse error; unreachable today (no trusted client meets a
+driverless session), but the test pins a value the wire refuses. (b) `useCatalogue.resetCatalogue`
+is never called: after a session switch the previous session's catalogue stays painted until the new
+read lands (forever if it fails); a pinned stale hash is refused `changed`, so it is safe, only stale.
+(c) Plan drift accepted as recorded: `workflow_step` uses `lookup` (needs open) not `readable`; Enter
+on a catalogue row does not start (2b "Not done").
+
+**Executor behaviour.** Thorough, honest Execution sections with recorded drift and real mutation
+tables (2b's M3/M4 caught genuine gaps). Missed: the wire-vs-spec cap mismatch on `command`, and the
+errors-array collapse, both in 5a. Reviewer is the same model family (Opus) as the planner, not as the
+executors; shared planner blind spots may survive.
+
+*— claude-opus-5-5, 2026-11-23*
