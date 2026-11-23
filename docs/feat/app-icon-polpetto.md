@@ -15,3 +15,9 @@ Three 1024 px PNGs rendered pixel-exact (no blur) from the owner's 9×9 bitmap (
 ## Review
 
 *— claude-opus-5-5 (orchestrator), 2026-11-23* — assets + config only, no code path; the device check is the owner's (home screen light/dark/tinted).
+
+## Final choice (owner, 2026-11-23 ~17:05) — `fix/app-icon-h-i`
+
+*— claude-opus-5-5 (orchestrator)*
+
+«selezione definitiva fin da subito (sia iOS che Android): H su tema scuro, I su tema chiaro» (mockup v6, https://claude.ai/artifact/D48dfz4Q6bjsJiutY5XQQW). Same pastel-cyan Polpetto (`tokens.dark.mascot.tones.cyan`) on a diagonal petrol gradient: **light = I** (#C9E6EA → #F1F5F4), **dark = H** (#1F4A55 → #151A1D); tinted = the same bitmap in luminance grey on transparent. **Android** (config only — no Android build today): `android.adaptiveIcon` = Polpetto foreground inside the 66/108 safe zone + the I gradient background + a white monochrome (themed icons). Android has no per-theme (dark) app icon: the light I is the icon, the monochrome serves themed icons.
