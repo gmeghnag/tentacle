@@ -13,6 +13,8 @@ import type {
   DocumentContent,
   JobOutputResult,
   JobRow,
+  WorkflowRow,
+  WorkflowStepDetail,
 } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
@@ -46,6 +48,22 @@ import type { VoiceSpawner } from "./voice-spawn.ts";
  * `AppProps` below — keeps working unchanged.
  */
 export type { RunQuit } from "./useQuitClear.ts";
+
+/**
+ * What the TUI asks of a run, MIRRORED structurally (never the protocol's
+ * type — the TUI does not depend on `@tentacle/client`, and the wire's
+ * `sessionId`/`turnId` are the client's own to fill: it alone knows which turns
+ * this device began). The `turnId` is therefore absent here on purpose.
+ */
+export type WorkflowActionView =
+  | {
+      readonly action: "start";
+      readonly name: string;
+      readonly inputs?: readonly { readonly name: string; readonly value: string }[];
+    }
+  | { readonly action: "stop"; readonly runId: string }
+  | { readonly action: "resume"; readonly runId: string }
+  | { readonly action: "rerun_step"; readonly runId: string; readonly stepId: string };
 
 /**
  * The conversation the App drives. Both the local agent `Session` and the
@@ -319,6 +337,37 @@ export interface SessionController {
    * their own. Optional with `onSchedules`.
    */
   deleteSchedule?(scheduleId: string): Promise<{ deleted: boolean; reason?: string }>;
+  /**
+   * The session's workflow runs (`workflows`, docs/feat/workflows-ui.md D2): the
+   * current run plus the last few ended, bounded and sanitized by the client (a
+   * `run` step's `reason` is a MODEL's text on its way to a terminal, and a
+   * pod's daemon is not trusted). The current list, if any, is given at once;
+   * then every change, since a run lives between turns. Optional: absent on a
+   * pod's client, on an older daemon and on a client whose daemon is not trusted
+   * to run workflows — where no run exists, and painting an empty rail would
+   * claim there is none.
+   */
+  onWorkflows?(listener: (rows: readonly WorkflowRow[]) => void): (() => void) | undefined;
+  /**
+   * Start, stop or resume a run, or re-run one step (`session/workflow`). A
+   * refusal — one run already going, the file's hash changed, an older daemon,
+   * a client whose daemon is not trusted — is a typed RESULT with a `reason`,
+   * never a throw. The turn id a `start`/`resume`/`rerun_step` is attributed to
+   * is the client's own (it alone knows which turns this device began). Optional
+   * with `onWorkflows`.
+   */
+  workflow?(params: WorkflowActionView): Promise<{ ok: boolean; runId?: string; reason?: string }>;
+  /**
+   * ONE step execution's `prompt`/`report` (`session/workflow_step`, D1): the
+   * detail a run's row deliberately does not carry. `detail` absent means "not
+   * available" (never ran, or a compaction dropped its entry). Optional: absent
+   * on an older daemon.
+   */
+  workflowStep?(
+    runId: string,
+    stepId: string,
+    attempt?: number,
+  ): Promise<{ detail?: WorkflowStepDetail } | { unsupported: true }>;
   /**
    * Subscribe to this session's running background SHELL jobs as the daemon
    * reports them (bounded by the client; `count` is the daemon's own number).

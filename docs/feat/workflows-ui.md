@@ -1124,6 +1124,117 @@ seam (`RemoteClient.workflowStep`, `{unsupported:true}` on `MethodNotFound`), th
 phone screens. `session/workflow_step` is answered by the daemon and reachable over RPC; no client
 calls it yet.
 
+### Slice 1b — client data path (D2)
+
+*— claude-sonnet-4-5, 2026-11-23*
+
+**Load-bearing check re-run FIRST (PARTIAL rule): PASSES.** `.tentacle/tmp/workflows-ui/lb.ts`
+prints `"WorkflowStep" in Method: true session/workflow_step`, and the daemon answers it:
+`protocol/src/methods.ts:184` + its `RequestSchemas` row `:332`, dispatched at
+`daemon/src/connection.ts:459` into `hosted-session.workflowStep` (1a's work). So 1b proceeded.
+
+**Red first (§9).** `client/test/workflows-client.test.ts` was written before the client half and
+run against it: **7 pass / 10 fail**, and every one of the ten was at an ASSERTION, not an
+import/compile error — `session.workflow is not a function`, `session.workflowStep is not a
+function`, `client.workflowList is not a function`, and two `until: timed out … waiting for
+session.workflows !== undefined`. The seven passers are the pure-module cases (`boundWorkflows`,
+`askForStep`), which no stub can fail by construction — their non-vacuity is the mutation column
+below, not the red run.
+
+**As built, in dependency order.**
+
+1. `packages/client/src/workflows.ts` (**NEW**, pure — the module's own header states the two
+   rules): `MAX_WORKFLOW_RUNS = 8`, the three per-field caps, `sanitizeWorkflowText`, `boundWorkflows`
+   / `workflowsFromSnapshot`, `askForStep`, `WORKFLOW_OLD_DAEMON` / `WORKFLOW_UNTRUSTED_DAEMON`,
+   and the exported `WorkflowAction` (the user's ask: the wire params MINUS `sessionId`/`turnId`,
+   which the session owns — a caller cannot forget the mint).
+2. `packages/client/src/remote-client.ts`: `SessionWorkflowsNotice`; `Snap.workflows` / `SessionEntry.workflows`;
+   `workflowListeners` + `onSessionWorkflows` / `workflowsOf`; private `workflowsChanged`; the live
+   branch beside `schedules` and the snapshot fold beside it, **both** gated on `daemonWakes`;
+   `workflow(sessionId, params)` (`"once"`, `MethodNotFound` → `{ok:false, reason: WORKFLOW_OLD_DAEMON}`),
+   `workflowList()` (daemon-wide, `{unsupported:true}` on `MethodNotFound`), `workflowStep(sessionId, params)`
+   (same mapping).
+3. `packages/client/src/remote-session.ts`: `get workflows()`, `onWorkflows` (the current list given
+   at once, like `onSubagents`), `workflow(WorkflowAction)` (refuses locally with no id or with the
+   bit off, mints through the new `mintTurn()` for the three work-BEGINNING actions, none for `stop`),
+   `workflowStep(runId, stepId, attempt?)`.
+4. `packages/client/src/index.ts` — exports the new module. `packages/client/src/mapping.ts` — no
+   code change: its comment now names `onSessionWorkflows` (the plan's "unchanged, its comment names
+   the listener").
+5. `packages/cli/src/local-runtime.ts`: the three `SessionController` members + the three forwards in
+   `persistingController`.
+6. `packages/tui/src/app-types.ts`: the same three, optional, plus the structurally-mirrored
+   `WorkflowActionView` (the TUI does not depend on `@tentacle/client`, so a wire type cannot be
+   imported — the `ScheduleDockRow` precedent).
+7. Tests: `client/test/workflows-client.test.ts` (NEW, 18), one new forward test in
+   `cli/test/local-runtime.test.ts`, and the three entries the guard demands in
+   `cli/test/subagent-panel-controller.test.ts`.
+8. `changelog.d/workflows-ui.added.md` — EXTENDED, not duplicated (**drift 2**, below).
+
+**Drift from Implementation — three, recorded rather than forced:**
+
+1. **The trust gate on `workflow()`, not only on the feed.** D2 says "`workflow()` refused locally
+   with no id / bit off"; the plan also says `stop` needs no `turnId`. The two combined left `stop`
+   ungated in v5's wording, so this slice gates EVERY action on `daemonWakes`: a pod client has no
+   run of the laptop's to stop either, and the plan's own failure row ("pod daemon … `workflow()`
+   refused locally, nothing sent") states the behaviour without carving out `stop`. The
+   `!daemonWakes` branch is one `if`, before the `stop`/turnId split, so there is one gate and no
+   second path to keep in sync.
+2. **The changelog fragment is EXTENDED, not added.** §10 allows one fragment per slug+category, and
+   on this branch `changelog.d/workflows-ui.added.md` already exists (1a's) while slice 2's row
+   claims it too. 1b is what makes 1a's bullet literally true — "readable from any client" — so the
+   one existing `added` bullet gained the client seam sentence. A new `changed` fragment would have
+   claimed a user-visible behaviour change this slice does not have: it adds no surface (no panel, no
+   rail, no command), it wires the data path those slices will paint.
+3. **`MAX_WORKFLOW_STEPS` is NOT a new constant; the cap is the schema's own 64.** The plan's D2 lists
+   only `MAX_WORKFLOW_RUNS`, and the wire already refuses more than 64 steps
+   (`WorkflowRowSchema.steps`, `session.ts:833`). A named constant would have been a second source of
+   that number in another package; `boundWorkflows` slices at 64 and its comment cites the schema.
+
+**Mutation checks (each applied, run, reverted; tree clean afterwards; test file unchanged except
+where stated):**
+
+| Mutation | Result |
+|---|---|
+| `mintTurn` returns the id without `mint` (the plan's named mutation, "client forgets `mint`") | **RED** — 2 tests (start; resume/rerun_step) |
+| the live `workflows` branch ignores `daemonWakes` | **RED** — "with the bit OFF (a pod…) the frame is DROPPED" |
+| the snapshot fold ignores `daemonWakes` | **RED** — "a resync snapshot repaints the list" |
+| `boundWorkflows` keeps the OLDEST 8 (`slice(0, 8)`) | **RED** — "at most MAX_WORKFLOW_RUNS, the daemon's order kept" |
+| `askForStep` matches by PREFIX (`startsWith(runId)`) | **RED** — 2 tests (`wf-1` pairing, and the `wf-11` trap) |
+| `workflowStep`'s `MethodNotFound` rethrown instead of `{unsupported:true}` | **RED** — "workflowStep … or says the daemon is older" |
+| a refusal THROWN instead of returned as a value | **RED** — "a refusal is a VALUE with its reason" |
+| `boundStep` leaves `where` unsanitized | **GREEN first time (vacuous)** → the fixture's `where` carried no escapes; added one (`docker:box\u001b[2J\u0007`) and extended the label loop to `where`/`model`/`live`, then **RED** |
+| `boundRun` drops the 64-step slice | **RED** — "a step list is sliced at the schema's 64" |
+
+The eighth row is the §9 non-vacuity catch of this slice: the sanitizer's test named every field but
+fed only `name`/`state`/`reason`/`model`/`live` hostile text, so `where` could have shipped
+unsanitized with a green suite.
+
+**Tests.** `client/test/workflows-client.test.ts` (18): the bounding (count, order, the 64-step
+slice, every label escape-free, unknown state kept as sent, snapshot-vs-absent); `askForStep`'s three
+pairings (a step, the run's own approval, the `wf-11` trap, a main-agent ask); the trust bit on the
+live frame AND on the snapshot AND on `workflow()`; the mint (non-`wake-`, `ownsTurn` true, resume /
+rerun_step minted, `stop` not); a refusal as a value; `MethodNotFound` on both reads; and `onWorkflows`
+giving a late subscriber the state at once. Plus 1 in `cli/test/local-runtime.test.ts` (the three
+forwards, and an absent `attempt` staying absent — never an invented `0`, which would ask for the
+first execution) and the 3 deliberate entries in `subagent-panel-controller.test.ts`'s guard list.
+
+**Gate (my own narrow runs; the orchestrator's full gate follows).** `bun test` on
+`packages/client/test` (897 tests), `packages/tui/test` (3005), `packages/cli/test` (2760, 2 opt-in
+skips), `packages/protocol/test/json-schema.test.ts` and `scripts/test/changelog*`: **0 fail**.
+`tsc --noEmit` on the root project: **0 errors in the files this slice touched** (the repo's
+pre-existing errors elsewhere are the orchestrator's baseline). `bunx biome check` on all 10
+changed/new files: clean (4 auto-formatted, then no fixes applied). `bun run schema:export` run:
+`packages/protocol/schema/protocol.json` came back **unchanged** — this slice adds no wire shape, so
+no `protocol.d/` note and no `PROTOCOL_VERSION` edit (AGENTS §7: fields and methods are free; the
+method 1b consumes already existed).
+
+**Not done in this slice (deliberately, and why):** nothing from 5a/2/2b/3/4/5b. `askForStep` takes a
+`PendingWorkflowAsk` (id + `agent.id`) rather than a concrete pending-asks container, because the
+phone's controller owns that container (`workflow-run-controller`, slice 3); the pure pairing is here
+now so both surfaces share one rule, and slice 3 supplies the list. The TUI's `onWorkflows` subscriber
+in `useSessionLink` and the rail/panel are slice 2's, as the plan's files column says.
+
 ## Review
 
 ### Owner answers (2026-11-23)

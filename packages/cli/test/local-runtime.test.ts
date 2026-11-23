@@ -600,6 +600,61 @@ describe("createLocalRuntime (local over RPC)", () => {
     await expect(rejEnqueue?.("nope")).rejects.toThrow(/method not found/);
   });
 
+  // docs/feat/workflows-ui.md D2: the TUI reads a run's feed and acts on a run
+  // through the controller, so a forward dropped here leaves a rail that never
+  // repaints and a `/workflow` whose buttons do nothing — with no reason shown.
+  // Mutation: delete any of the three forwards below → red.
+  test("persistingController forwards onWorkflows / workflow / workflowStep to the inner session", async () => {
+    const seen: string[] = [];
+    const unsubscribe = () => {
+      seen.push("unsubscribe");
+    };
+    const inner = {
+      onWorkflows: (listener: (rows: readonly unknown[]) => void) => {
+        seen.push("onWorkflows");
+        listener([]);
+        return unsubscribe;
+      },
+      workflow: async (params: { action: string; runId?: string }) => {
+        seen.push(`workflow:${params.action}`);
+        return { ok: true, runId: "wf-1" };
+      },
+      workflowStep: async (runId: string, stepId: string, attempt?: number) => {
+        seen.push(`workflowStep:${runId}.${stepId}:${String(attempt)}`);
+        return { detail: { attempt: 0, round: 0, live: false } };
+      },
+      readBack: async () => null,
+      onTitle: () => () => {},
+    } as unknown as RemoteSession;
+    const ctl = persistingController(inner, () => {});
+    let rows: readonly unknown[] | undefined;
+    const off = ctl.onWorkflows?.((next) => {
+      rows = next;
+    });
+    expect(seen).toEqual(["onWorkflows"]);
+    expect(rows).toEqual([]);
+    off?.();
+    expect(seen.at(-1)).toBe("unsubscribe");
+    expect(await ctl.workflow?.({ action: "stop", runId: "wf-1" })).toEqual({
+      ok: true,
+      runId: "wf-1",
+    });
+    // The attempt is passed through as given, and ABSENT stays absent (the
+    // daemon's "newest" — never a `0` invented here, which would ask for the
+    // first execution instead).
+    expect(await ctl.workflowStep?.("wf-1", "merge")).toEqual({
+      detail: { attempt: 0, round: 0, live: false },
+    });
+    await ctl.workflowStep?.("wf-1", "merge", 2);
+    expect(seen).toEqual([
+      "onWorkflows",
+      "unsubscribe",
+      "workflow:stop",
+      "workflowStep:wf-1.merge:undefined",
+      "workflowStep:wf-1.merge:2",
+    ]);
+  });
+
   // docs/feat/send-now-b.md: the send-now turn is saved like a `send` turn.
   test("persistingController.sendNow: forwarded as is, saved once after the new turn settles", async () => {
     const log: string[] = [];
