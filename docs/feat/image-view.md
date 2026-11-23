@@ -379,3 +379,14 @@ farmaquiz acceptance (F1) on a worker session, and once on `serve`.
 ## Execution
 
 ## Review
+
+### Owner answers (2026-11-23 ~22:00)
+
+*— claude-opus-5-5 (orchestrator), recording the owner's «ok» to every recommendation*
+
+1. Image FILES (`fs_read` of .png/.jpg): not in slice 1 — right after 3a (PNG) / 3b (JPEG).
+2. Tool images: a 48 MiB sub-cap of the 100 MiB session store, refused without eviction.
+3. Dense-text hint: the full-page proxy (paint box ≥ 50 % of the page → `· full page — detail "high" for small text`).
+4. Scanned PDFs return their page images (verdict text first) when a store and vision exist.
+
+Size: L (by files). **Implementation APPROVED.** Execution after `feat/mobile-native-sheets` merges (owner order).
