@@ -153,6 +153,7 @@ describe("S7: a panel kind is described by its OWN descriptor, found by lookup",
       "sessions",
       "skills",
       "tools",
+      "workflow",
     ]);
     for (const desc of PANEL_KINDS) {
       // A descriptor whose `kind` field disagreed with its body would hand a
@@ -196,7 +197,8 @@ describe("S7: a panel kind is described by its OWN descriptor, found by lookup",
     // untouched: `keys/layers.ts` still lists sessions then tree — `/schedule`
     // rides the same one).
     for (const desc of PANEL_KINDS) {
-      const flat = desc.kind === "sessions" || desc.kind === "schedule";
+      // `/workflow` (docs/feat/workflows-ui.md D3) is a cursor list too.
+      const flat = desc.kind === "sessions" || desc.kind === "schedule" || desc.kind === "workflow";
       expect(desc.layer).toBe(flat ? "sessions" : "tree");
     }
   });

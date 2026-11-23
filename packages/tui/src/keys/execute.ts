@@ -96,6 +96,10 @@ export interface KeyHost {
   deleteSchedule(id: string): void;
   /** Write the `/schedule` panel's own state (its arm/answer). */
   setSchedulesState(state: SchedulesState): void;
+  /** `o` in `/workflow`: read one step's prompt/report (`session/workflow_step`). */
+  workflowDetail(runId: string, stepId: string, startedGen: number): void;
+  /** `r` in `/workflow`: re-run the selected step (`rerun_step`). */
+  workflowRerun(runId: string, stepId: string, startedGen: number): void;
   setDock(state: DockState): void;
   toggleAgents(): void;
   toggleExpandAll(): void;
@@ -233,6 +237,12 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "setSchedulesState":
       host.setSchedulesState(effect.state);
+      return;
+    case "workflowDetail":
+      host.workflowDetail(effect.runId, effect.stepId, effect.startedGen);
+      return;
+    case "workflowRerun":
+      host.workflowRerun(effect.runId, effect.stepId, effect.startedGen);
       return;
     case "setDock":
       host.setDock(effect.state);

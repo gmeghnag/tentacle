@@ -1,3 +1,4 @@
+import type { WorkflowRow } from "@tentacle/protocol";
 /**
  * docs/feat/app-decomposition.md S10 — the frame's VIEW-MODEL, pure and
  * React-free (AGENTS §7: every decision with branching lives in a pure module,
@@ -64,6 +65,7 @@ import { type ContextOpen, contextShown, pillView, statusTokens } from "./status
 import type { TargetBadge } from "./target-view.ts";
 import { panelHeight, panelMaxBody } from "./tree-panel.ts";
 import type { VoiceStripView } from "./voice-view.ts";
+import { type RailLine, railRows, workflowRailLines } from "./workflow-view.ts";
 
 /** Rows reserved below the transcript viewport: a blank spacer, the input/thinking
  * line, the status bar, plus one slack row so the frame never overflows the
@@ -97,6 +99,18 @@ export interface FrameInput {
    * and pill as the children and jobs. `undefined` = no table to report.
    */
   readonly scheduleRows: readonly ScheduleDockRow[] | undefined;
+  /**
+   * The session's CURRENT workflow run (docs/feat/workflows-ui.md D3): the rail
+   * above the queued/slot block paints it, and ONLY while it has no `endedAt`
+   * (its end is an ordinary transcript note). `undefined` = no run, or no run
+   * feed at all: nothing is painted either way.
+   */
+  readonly workflowRun?: WorkflowRow | undefined;
+  /**
+   * When the rail's live durations were computed. Absent: `now` (the frame's own
+   * clock, already an input). Only the rail reads it, so a test can hold it.
+   */
+  readonly workflowNow?: number;
   readonly drawerRow: BackgroundAgentRow | null;
   readonly drawerJob: DockJobRow | null;
   /** `jobOutputRef.current`: a job's cached output tail, keyed by its wire id. */
@@ -179,6 +193,8 @@ export function frameLayout(input: FrameInput) {
     jobRows,
     jobRowsRef,
     scheduleRows,
+    workflowRun,
+    workflowNow,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputMap,
@@ -268,6 +284,27 @@ export function frameLayout(input: FrameInput) {
     (slot === null ? 0 : 1) +
     (st.running || compacting ? shown.length + (shown.length > 0 ? 1 : 0) : 0) +
     (st.running && shown.length > 0 ? 1 : 0);
+  /**
+   * The workflow rail's lines (docs/feat/workflows-ui.md D3, mockup TUI 1): the
+   * run in flight, as `workflow-view.ts` projects it — this module adds no cell.
+   * `null` when it paints nothing: no run, a run that ENDED (its end is already a
+   * transcript note), a panel OWNING that slot, or a terminal too short to give
+   * the rail any room beside the transcript's floor.
+   */
+  const workflowRail = workflowRailLines(workflowRun, columns, workflowNow ?? now, {
+    slotTaken: listView !== null || paletteOpen || confirmShown || permission.pending !== null,
+    termRows,
+    runningRows,
+    inputBoxRows,
+  });
+  /**
+   * The rail's rows, INSIDE the live area's budget (`activeRows`): the transcript
+   * viewport gives them up, so the input and the status bar never move when the
+   * rail appears or leaves. That is the property the frames test pins — not "the
+   * frame's height is constant", which a rail painted below the input would also
+   * satisfy.
+   */
+  const workflowHeight = workflowRail === null ? 0 : railRows(workflowRail);
   // Rows the bottom area occupies: the permission dialog; or the running rows,
   // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
@@ -381,11 +418,12 @@ export function frameLayout(input: FrameInput) {
         ) + dockHeight
       : runningRows +
         (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length) +
+        workflowHeight +
         dockHeight;
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
   // Terminal row (1-based) of the panel's first body row: the transcript
   // viewport, the bottom area's marginTop row, the running rows, the title rule.
-  const panelBodyTop = viewport + 1 + runningRows + 2;
+  const panelBodyTop = viewport + 1 + workflowHeight + runningRows + 2;
   /**
    * Where the DOCK's first row sits on screen (1-based), or `null` when it paints
    * nothing. Derived from the same parts `activeRows` sums, in the order the
@@ -394,12 +432,14 @@ export function frameLayout(input: FrameInput) {
    * input rule, the input and the status bar come after it.
    *
    * A panel, the palette, a quit confirm and a permission prompt each own that
-   * slot instead, and none of them paints the dock.
+   * slot instead, and none of them paints the dock. The workflow rail sits ABOVE
+   * it, in the same live area (its rows are `workflowHeight`'s, inside
+   * `activeRows`).
    */
   const dockTop =
     dockHeight === 0 || listView || paletteOpen || confirmShown || permission.pending
       ? null
-      : viewport + 1 + runningRows + 1;
+      : viewport + 1 + workflowHeight + runningRows + 1;
   /**
    * The row the STATUS BAR paints on (1-based): the frame's own rows, derived
    * exactly as the tree lays them out (the transcript viewport, the spacer, the
@@ -410,7 +450,7 @@ export function frameLayout(input: FrameInput) {
    * re-derive either (AGENTS §7: one source of truth — the component paints and
    * reports, it decides nothing), which is why the arithmetic lives here, once.
    */
-  const statusRowY = viewport + 1 + runningRows + dockHeight + inputBoxRows + 1;
+  const statusRowY = viewport + 1 + workflowHeight + runningRows + dockHeight + inputBoxRows + 1;
 
   return {
     tokensShown,
@@ -433,6 +473,8 @@ export function frameLayout(input: FrameInput) {
     shown,
     slot,
     runningRows,
+    workflowRail,
+    workflowHeight,
     dockListVisible,
     dockView,
     drawerOpen,

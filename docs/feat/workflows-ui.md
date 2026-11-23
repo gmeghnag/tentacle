@@ -1380,6 +1380,149 @@ phone screen — 5a is the data path only; `app-types.ts` declares `workflowCata
 ≤ 64 steps — so a full `run` command travels verbatim while the row still has a wire cap (a
 `line`-in-a-loop over 10 000 commands would be a different, unbounded shape).
 
+### Slice 2 — TUI rail + `/workflow` panel + command (D3)
+
+*— claude-opus-5-5 (executor, resuming DeepSeek's partial edits), 2026-11-23*
+
+**Load-bearing check (PARTIAL rule) — holds.** `RemoteSession.onWorkflows`
+(`client/src/remote-session.ts:1280`), `workflow` (`:1310`), `workflowStep` (`:1352`) exist;
+`cli/src/local-runtime.ts:979-986` passes all three to `inner`; `tui/src/app-types.ts:351-370`
+declares them optional.
+
+**As built (DeepSeek's working-tree edits kept where right, then finished):**
+- `tui/src/workflow-view.ts` (new, pure): `stateLook` (glyph + word; unknown → `· <word>`),
+  `railLines` / `railWindow` (7 rows centred on the active step, `… +k earlier` / `… +k more`),
+  `workflowRailLines` (null for no run, an ENDED run, a taken slot, or a terminal too short to keep
+  the transcript floor), `workflowPanelView` (two columns), `workflowKey`, `workflowMove`,
+  `parseWorkflowCommand`, `workflowTarget`, `workflowReplyNotice`.
+- `components/WorkflowRail.tsx` (new, paints the lines); `AppView.tsx` mounts it above the
+  queued/slot block; `app-layout.ts` adds `workflowHeight` to `activeRows`, `panelBodyTop`,
+  `dockTop` and `statusRowY`.
+- `panels/workflow.ts` (new kind, flat-list `sessions` layer) + `panels/registry.ts` line +
+  `panels/types.ts` `WorkflowPanel` in `OpenPanel`; `keys/effects.ts` + `keys/execute.ts` two
+  effects (`workflowDetail`, `workflowRerun`) carrying runId/stepId/panel generation;
+  `usePanels.ts` `fetchWorkflowStep` / `rerunWorkflowStep` / `setWorkflowsData` /
+  `setWorkflowState`.
+- `useDock.ts` holds `workflowRows`/`workflowsRef`/`setWorkflows`; `useSessionLink.ts` subscribes
+  `onWorkflows` and resets on switch; `App.tsx` `followWorkflows` feeds the dock AND an open
+  panel (the `followSchedules` pattern), passes `currentRun(workflowRows)` to `frameLayout`.
+- `commands/workflow.ts` (new) + `commands/registry.ts` (`/workflow`, alias `/workflows`) +
+  `commands/context.ts` `workflowsRef`.
+
+**What I fixed in DeepSeek's partial:** `App.tsx` passed a `followWorkflows` key the host does not
+have and lacked the `KeyHost` `workflowDetail`/`workflowRerun` and the usePanels destructuring;
+`usePanels.ts` used `oneLine` unimported; `app-layout.ts` passed `PermissionRequest | null` as a
+boolean; `workflow-view.ts` pushed onto a readonly array; `frameLayout` was never given the run (the
+rail could not appear). The command file and its registry/context lines did not exist. A test
+called `toContain` with two arguments and another asserted on an array (vacuous).
+
+**Drift from Implementation (and why):**
+- The panel's left column was 20 cells and cut every step id to `p…`; widened to
+  `3 + WORD_COLS + 1 + 12` = 30 (found from the T4 frame).
+- Rail columns are decided over the WINDOW, not per row: a step with no model (`run`, `approve`)
+  keeps an empty cell, else `[docker]` slid under the model column (found from the T1 frame;
+  pinned by an alignment assertion, M6).
+- `? needs approval — answer in the prompt` added to the detail column (D3 names it; the partial
+  lacked it). `WORKFLOW_APPROVE_HINT`.
+- Plan file list says `useSessionLink, useDock, AppView, panel` only; the as-built also touches
+  `App.tsx`, `app-layout.ts`, `usePanels.ts`, `keys/{effects,execute}.ts`, `panels/types.ts`,
+  `commands/context.ts` — the existing seams a panel kind with async keys and a live-area row needs
+  (the `/schedule` precedent touches the same files). No new seam.
+- Existing enumerating tests updated for the new command / kind: `commands-registry.test.ts`,
+  `app-commands.test.tsx`, `panels-registry.test.ts`, `app-panels-structure.test.tsx`.
+
+**Tests.** `tui/test/workflow-view.test.ts` (22: every state's glyph+word, unknown as is,
+flattening, tiers + alignment, 64-step window `+37`/`+20`, `workflowRailLines` null cases, panel
+columns / detail phases / approve hint, `undefined` vs empty, keys, command parsing, targets,
+reply notices, `withWorkflowDetail` stale drop, `withWorkflowsData` clamp/drop).
+`tui/test/workflow-frames.test.tsx` (9, real `App`): rail equals `railLines`; **input row y equal
+with and without the rail**; a run ending live leaves the input in place; 60-col tier; `/workflow`
+opens the panel and hides the rail; ↓ / `o` paints the report / `r` sends `rerun_step` + notice /
+esc brings the rail back; `/workflow run task branch=main` → `start` with inputs, `stop` → the live
+run, `resume` with nothing stopped refused locally (nothing sent), bad line → usage; a daemon
+refusal shows its reason; no feed → notice.
+
+**Mutations (each red, then reverted green):**
+| # | Mutation | Red test |
+|---|---|---|
+| M1 | drop `workflowHeight` from `activeRows` (`app-layout.ts`) | frames: "input sits on the SAME row…", "a run that ends…" |
+| M2 | `withWorkflowDetail` ignores `stepId` | "a detail lands only on the step it was asked for" |
+| M3 | drop `endedAt` check in `workflowRailLines` | was GREEN at first (App's `currentRun` already filters) → added the pure `workflowRailLines` test → red |
+| M4 | `stateLook` unknown → `pending` | "an UNKNOWN state … never coerced" |
+| M5 | `o` emits `workflowRerun` | frames: "↓ moves the cursor; `o` paints…" |
+| M6 | model column per row | "width tiers … " (alignment assertion) |
+| M7 | (a real bug, found writing this section) the view painted `currentRun ?? data[0]` but keys/rules used `currentRun` only, so with no run in flight `o`/`r`/↑↓ acted on nothing | new assertion "No run in flight…" red on the old `workflowPanelRun`; fixed with ONE `shownRun` used by both |
+
+**Validation frames (from `.tentacle/tmp/workflows-ui/frames.ts`, renderAt, SGR stripped):**
+```
+--- T1 rail (120 cols)
+workflow task · 2/6 · 1.2M/3M tok
+✓   plan   ok             opus       [local]   2m 4s
+✓   exec   ok             deepseek   [local]   14m 10s ↻ 1/1
+✗   review error          opus       [local]           REQUEST-CHANGES
+▸   fix    running        deepseek   [local]   …
+    ↳ edit packages/x.ts
+⧗   gate   waiting                   [docker]
+?   merge  needs approval
+──────────────────────────────────────────────────────────────────────────── m ─
+❯  Type a task or /command
+--- T2 rail (60 cols)
+workflow task · 2/6 · 1.2M/3M tok
+✓   plan   ok             2m 4s
+✓   exec   ok             14m 10s ↻ 1/1
+✗   review error                  REQUEST-CHANGES
+▸   fix    running        …
+    ↳ edit packages/x.ts
+⧗   gate   waiting
+?   merge  needs approval
+--- T3 64-step rail (120 cols)
+workflow task · 40/64 · 1.2M/3M tok
+  … +37 earlier
+✓   s37  ok             [local]
+✓   s38  ok             [local]
+✓   s39  ok             [local]
+▸   s40  running        [local]   …
+○   s41  pending        [local]
+○   s42  pending        [local]
+○   s43  pending        [local]
+  … +20 more
+--- T4 /workflow, review selected (120 cols)
+╭─ Workflow task · 2/6 ─────────────────────────────────────────────
+ ✓ ok             plan         │ ✗ error · opus · [local]
+ ✓ ok             exec         │ REQUEST-CHANGES
+›✗ error          review       │
+ ▸ running        fix          │ [o] prompt and report
+ ⧗ waiting        gate         │
+ ? needs approval merge        │
+ ↑↓ step · r rerun · o prompt/report · esc close
+--- T5 after o (120 cols)
+╭─ Workflow task · 2/6 ─────────────────────────────────────────────
+ ✓ ok             plan         │ ✗ error · opus · [local]
+ ✓ ok             exec         │ REQUEST-CHANGES
+›✗ error          review       │
+ ▸ running        fix          │ prompt:
+ ⧗ waiting        gate         │ review the diff of the branch
+ ? needs approval merge        │
+                               │ report:
+                               │ REQUEST-CHANGES: task.ts:380 misses an abort
+ ↑↓ step · r rerun · o prompt/report · esc close
+```
+(Rules shortened here; the rest of each frame is the input rule, input and status bar.)
+
+**Gate (narrow, per the owner's token budget):** `bun test` on the 9 touched/covering TUI files
+(`workflow-view`, `workflow-frames`, `app-panels-structure`, `app-commands`, `commands-registry`,
+`panels-registry`, `schedule-panel-frames`, `commands`, `app`): 266 pass, 0 fail (before the last
+pure fixes; `workflow-view` + `workflow-frames` + `panels-registry` re-run after them: 42 pass). `tsc --noEmit -p packages/tui`:
+no error in changed files (one pre-existing `artifact-open.ts:95` under the package config only).
+`bunx biome check packages/tui/src packages/tui/test changelog.d`: clean. Full `bun run check` is
+the orchestrator's script. No protocol change → no `schema:export`, no `protocol.d/` note.
+Changelog: the TUI sentence appended to the existing one-bullet `changelog.d/workflows-ui.added.md`
+(same slug+category: one file, one bullet).
+
+**Not done (deliberately):** nothing of 2b (catalogue line, Workflows section), 3, 4, 5b. A
+`/workflow` panel with a pinned `runId` other than the live one is supported by the model but no
+key selects an older run yet (the panel shows the run in flight, else the newest).
+
 ## Review
 
 ### Owner answers (2026-11-23)

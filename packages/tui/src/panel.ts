@@ -28,12 +28,14 @@ export {
   type SchedulesPanel,
   type SessionsPanel,
   type TreePanel,
+  type WorkflowPanel,
   artifactsPanel,
   mcpPanel,
   schedulesPanel,
   sessionsPanel,
   skillsPanel,
   toolsPanel,
+  workflowPanel,
 } from "./panels/types.ts";
 
 /**

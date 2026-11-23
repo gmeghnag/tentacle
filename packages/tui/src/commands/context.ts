@@ -16,6 +16,7 @@
  *
  * Nothing here is React, and nothing here is a snapshot of a render.
  */
+import type { WorkflowRow } from "@tentacle/protocol";
 import type { AppProps, SessionController } from "../app-types.ts";
 import type { SlashSkill } from "../commands.ts";
 import type { OpenPanel } from "../panel.ts";
@@ -46,6 +47,12 @@ export interface CommandContext {
    * delete is the daemon's echo, never a local edit.
    */
   readonly schedulesRef: Live<readonly ScheduleDockRow[] | undefined>;
+  /**
+   * The session's workflow runs, as this TUI last reported them
+   * (docs/feat/workflows-ui.md D3): `/workflow` opens on them and picks the run
+   * `stop`/`resume` act on. `undefined` = no run feed (never "no run").
+   */
+  readonly workflowsRef: Live<readonly WorkflowRow[] | undefined>;
   /** The display state (`running`, the transcript rows, the token totals). */
   readonly stateRef: Live<DisplayState>;
   /**
