@@ -223,6 +223,41 @@ describe("harnessConfigText (the serve's config.jsonc)", () => {
   });
 });
 
+// Review round 1 MEDIUM: D2.1 says the parallel PARENT runs preflight before the
+// build; it did not, so a missing Maestro/runtime surfaced after a 10–15 min
+// Release build (or as both children's exit 2) instead of within a second.
+describe("preflight on BOTH paths (D2.1)", () => {
+  test("the parent runs missingPrerequisites BEFORE it builds anything", () => {
+    const parallel = readFileSync(join(import.meta.dir, "..", "e2e", "parallel.ts"), "utf8");
+    const checked = parallel.indexOf("missingPrerequisites(");
+    expect(checked).toBeGreaterThan(-1);
+    // Before the Swift suite, the boot and the one build: a missing tool must
+    // cost a second, and every one of those three costs minutes.
+    expect(checked).toBeLessThan(parallel.indexOf("runSwiftTests()"));
+    expect(checked).toBeLessThan(parallel.indexOf("resolveApp("));
+    expect(checked).toBeLessThan(parallel.indexOf("await boot("));
+  });
+
+  test("the parent's check exits 2 with the named report, like the single path", () => {
+    const parallel = readFileSync(join(import.meta.dir, "..", "e2e", "parallel.ts"), "utf8");
+    const at = parallel.indexOf("missingPrerequisites(");
+    const after = parallel.slice(at, at + 400);
+    expect(after).toContain("missingText(missing)");
+    expect(after).toContain("return 2;");
+  });
+
+  test("both paths ask the ONE helper — a copy would drift", () => {
+    const run = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    const parallel = readFileSync(join(import.meta.dir, "..", "e2e", "parallel.ts"), "utf8");
+    expect(run).toContain("export async function missingPrerequisites(");
+    // The single path calls it; it does not call `preflight` itself any more.
+    const main = run.slice(run.indexOf("async function main()"));
+    expect(main).toContain("await missingPrerequisites(");
+    expect(main).not.toContain("preflight(\n");
+    expect(parallel).toContain("await missingPrerequisites(");
+  });
+});
+
 describe("firstDevice", () => {
   test("picks an available device of the wanted major, ignoring other runtimes", () => {
     const json = JSON.stringify({
