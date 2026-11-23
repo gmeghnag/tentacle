@@ -305,3 +305,28 @@ Full `bun run check` is the orchestrator's (per the spawn brief); nothing was
 run at repo scope. Nothing unverified except that gate itself.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-23* (fresh context; same model family as the planner, a different family from the DeepSeek executor)
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings. Scope is `git diff main...HEAD`.
+
+**Gate (narrow, as instructed):** the touched files (`protocol-bump`, `protocol-version-literals`, `protocol/version`) → **40 pass / 0 fail**. Execution says 39; the fix commit `6def4695` added one test. All of `scripts/test` → 167 pass / 0 fail. `bun run lint` → clean (2314 files). `bun run typecheck` → clean, all three projects. I did not run the full `bun test`: that is left to the orchestrator's merge gate.
+
+**Mutation (each reverted by an inverse edit; `git status --porcelain` empty afterwards):**
+- M1: swap the writes to `version.ts` → pin. R4 order test goes red (1 fail).
+- M2: drop the pin write. R1 (the 23/11 bug) and R4 go red (2 fail).
+- M3: overwrite a pin that is neither `from` nor `to`. Three tests go red: the `applyPin` unit test, the hand-edited case and the reverse-order case.
+- M4: change `protocolVersion: 1` to `25` at `packages/transport/test/peer.test.ts:9`. The repo guard goes red and names `peer.test.ts:9  protocolVersion: 25`.
+
+**Attacks tried:**
+1. *Does the guard catch the real historic class?* I copied the guard's two patterns into a script, set N=24, and ran them over `4ceba7b3^1` and `4ceba7b3^2` for all 7 Context files. Each file has ≥1 hit (2/8/1/3/1/5/2). The `toBeGreaterThanOrEqual(24)` floors in `project-pairing:494` and `ws-device-route:858` are not hits. The wrapped `.toBe(\n 24,\n)` at `ws-device-route:271` is not counted on its own, but that file still has 5 other hits, so it is caught. Holds.
+2. *`applyPin` on the real pin file.* With (25→26) it changes exactly line 32 and keeps the 53-line count. (25,25) is byte-identical. (24→26) is refused with the "fix it to 24" message. Holds.
+3. *Crash convergence.* Pin is written first, so a crash between the writes leaves pin==`to`, and the re-run passes (tested). The reverse state (version.ts bumped, pin stale) is refused, not overwritten (tested). A crash after both writes is a no-op that also deletes the notes (tested). Holds.
+4. *`PIN_LINE`'s `^(\s*)` under the `m` flag can span blank lines.* It can match newlines before the pin, but `$1` is put back unchanged and the `gm` count is non-overlapping, so a single pin can never count as 2. Harmless.
+5. *Is the guard's scan silently empty?* The glob covers `{packages,apps}/*/test/**` and `scripts/test/**`. No tracked `*.test.ts*` lives outside a `/test/` dir. The non-vacuity test pins >100 files and both allowlisted paths. Holds.
+
+**§7 touched:** only "Protocol: versioned honestly". The pin is still the ONE exact-number test. The floors are kept. No wire, schema or persisted change, and no `protocol.d/` note is needed. Holds.
+
+**Residual (accepted in the plan, no live case found):** the guard does not catch a version written inside a string, a computed version, or a key outside its list (e.g. `version: 25`).
+
+**Executor behaviour:** stayed in scope. It followed the plan's write order and its refuse-don't-guess rules. Its Execution is honest; the only mismatch is the test count, which comes from the later fix commit.
