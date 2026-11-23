@@ -1,6 +1,6 @@
 # feat/agent-workflows — workflow agentici che il modello scrive e tentacle esegue, a step
 
-> **Status:** feat — promoted from eval 2026-11-22 (owner GO); Implementation APPROVED 2026-11-22; Execution running
+> **Status:** feat — promoted from eval 2026-11-22 (owner GO); Implementation APPROVED 2026-11-22; Execution running; Slice 10 (scheduled start) APPROVED 2026-11-23
 > **Branch:** `feat/agent-workflows`
 > Type: feat · Size: L (9 slices, none XL) · Blast: load-bearing (slices 3–4) · Suited: strong model + fresh-context review for slices 3–4; standard review for the rest
 > **Changelog:** none
@@ -311,6 +311,9 @@ Only TERMINAL facts are durable; `running`/`waiting` live in memory and on the w
   `runningDotLook(reduceMotion)` (`apps/mobile/src/step-blink.ts:30`); Reduce Motion → crossfade +
   static skeleton. Hub entry `runs` in `hub-actions.ts:12`; its "badge" uses the CURRENT hub idiom
   — rim arc + one-shot glow/haptic, no dot (`docs/feat/mobile-hub-badges.md` Q1 C/Q2 C).
+- **Scheduled start (slice 10):** the TUI `/schedule` panel/dock rows and the phone's Session-info
+  "SCHEDULED WAKES" section show a workflow target and its last fire outcome; mockups in
+  "Slice 10 → Views".
 
 ### Slices (dependency order; no XL)
 
@@ -325,6 +328,9 @@ Only TERMINAL facts are durable; `running`/`waiting` live in memory and on the w
 | 7 | iPhone Elenco + graph 2C ⇄ cards 2A + approve buttons | M · contained · standard review | `apps/mobile/src/workflow-list.ts`, `workflow-graph.ts`, screens, `routes.ts`, `hub-actions.ts` |
 | 8 | iPhone morph + skeleton | M · contained · standard review | `workflow-morph.ts`, `workflow-skeleton.ts`, `WorkflowStep.tsx` |
 | 9 | Notifications + hub signal (`workflow/list` `needsUser`, run-end push per Q5) | M · cross-module (push plaintext is versioned) · standard review | `protocol/src/push.ts`, `daemon/src/push-notifier.ts`, `push-rules.ts`, app extension mapping |
+| 10a | Scheduled start — core table (`daily`, workflow target, grace), sidecar v4, daemon fire, driver `startScheduled`, `schedule_create` workflow target, `run_not_started` push (see "Slice 10") | L · **load-bearing** (sidecar format, unattended auto-accept, the hash gate) · strong executor + mandatory fresh-context review | `core/src/schedule.ts`, `core/src/workflow-ledger.ts`, `protocol/src/{session,methods,push,session-log}.ts`, `daemon/src/{schedules-view,daemon-state-file,hosted-session,connection,push-rules,push-notifier}.ts`, `agent/src/workflow-driver.ts`, `tools/src/schedule.ts` |
+| 10b | User-side create + rows — `session/schedule_create` client call, `/schedule workflow …`, panel/dock rows with target + last outcome | M · cross-module · standard review | `client/src/{remote-client,remote-session}.ts`, `cli/src/local-runtime.ts` (pass-through), `tui/src/{schedule-command,schedule-view}.ts`, `tui/src/commands/schedule.ts`, `tui/src/panels/schedule.ts` |
+| 10c | Phone: schedule row label + `run_not_started` render | S · contained · standard review | `apps/mobile/src/{session-info,push-render}.ts`, Swift NSE `PushEnvelope.swift`/`PushRender.swift`, `apps/mobile/test/fixtures/push-render-v1.json` |
 
 Load-bearing: 3 and 4 (strong executor, mandatory fresh-context review red-teaming the single
 broker, the auto-accept exclusion, and the persistence rules). A changelog fragment
@@ -416,6 +422,302 @@ broker, the auto-accept exclusion, and the persistence rules). A changelog fragm
 **Implementation APPROVED** (owner, 22/11). Execution routing (owner): Claude models run on the
 **condo** account; slices 3–4 (load-bearing) executed by Opus, the others by DeepSeek; fresh-context
 Opus review per group (1–4, then 5–9); merge after the owner's OK.
+
+### Slice 10 — scheduled start
+
+*— claude-opus-5-5, 2026-11-23*
+
+**Owner decision (22/11, binding):** a workflow can be STARTED ON A SCHEDULE ("every day at
+03:00", "every 2h"), deterministically — the schedule starts the run itself; the model is not in
+the loop deciding whether to start it. **Shape (orchestrator's, kept — the code confirms it):** a
+workflow TARGET `{workflow: <name>, inputs}` on the EXISTING schedule seam (`schedule_create`,
+`/schedule`, the `HostedSession` table, the `serve` sidecar), beside today's prompt target. Not a
+`schedule:` key in the YAML: editing the file would silently change when it runs, and the hash
+would then gate *timing* as well as content.
+
+**Status: APPROVED** (orchestrator, under the owner's decision above). Rows 10a/10b/10c in the
+Slices table; executed in that order.
+
+#### Load-bearing assumption (proved)
+
+**A10 — a daemon-minted `wake-` turn id is the right identity for a scheduled run: the run's
+asks carry it, auto-accept answers its tool asks exactly when the session is in auto-accept (and
+never its `workflow_approve`), and starting the run needs neither the turn slot nor a client.**
+
+Proof (code + execution; repro `.tentacle/tmp/agent-workflows-s10/repro.ts`, run on this
+branch's packages with `TZ=Europe/Rome`):
+
+```
+1 daemon autoAnswer (serve): tool ask, run turnId=wake-…  : true
+1 daemon autoAnswer (serve): tool ask, run turnId=undefined: false
+1 daemon autoAnswer: workflow_approve, wake turn          : false
+2 client autoAcceptsTurn arm: isWakeTurnId(wake)          : true
+3 overdue 6h → due: sc-1 fires 1 next in h: 2
+4 TZ Europe/Rome `every 1d` local fire hours: 3,2,2
+5 v3 parser keeps job: 1 · has workflow field: false
+```
+(+ existing tests run green: `daemon/test/schedules.test.ts -t "T-D1|T-D4|T-D7"` 7 pass,
+`daemon/test/workflow-hosted.test.ts -t wake` 2 pass. The repro's own step 6, a hand-built
+sidecar, failed on MY fixture's `logHead`; T-D4 proves the restart instead.)
+
+- **How a cron fire starts work today.** `checkSchedules` (`daemon/src/hosted-session.ts:3735-3762`)
+  runs the pure `scheduleStep` (`core/src/schedule.ts:383-428`) gated on the idle slot
+  (`hosted-session.ts:3741-3745`); `fireSchedule` (`:3765-3801`) advances + `persist()`s BEFORE
+  starting (at-most-once), mints `wake-<uuid>` (`:3770`) and calls `prompt()` (`:2880`) — a model
+  TURN. So the existing fire is "start a turn"; a workflow target must instead call the driver
+  directly — a turn would put the model in the loop, which the owner excludes.
+- **The `wake-` refusal.** `HostedSession.workflow()` refuses a `wake-` id
+  (`hosted-session.ts:2456-2458`, test green): it guards the CLIENT RPC (a client must not
+  borrow the daemon's trusted identity). A scheduled start does not go through that RPC; it is
+  a daemon-internal call to the driver, so the refusal stays untouched and still holds for clients.
+- **Which turnId a run's asks carry.** `driver.start({turnId})` stores it on the run
+  (`agent/src/workflow-driver.ts:354`); every ask does `host.attribute(agentId, run.turnId)`
+  (`:742`, `:829`) → `spawnTurns.set` (`hosted-session.ts:2398-2402`); the background ask names it
+  on the wire (`:1444-1454`). A model-started run has NO turn id (Fix round 1 debt), and repro
+  line 1b shows the daemon's auto-answer then never fires: `autoAnswers` requires one
+  (`:1562-1571` → `ownRequest(undefined, …)` = false, `core/src/permission.ts:322-330`).
+  Hence the scheduled start MUST mint one, and `wake-` is the one both sides already trust:
+- **Whether auto-accept answers them.** `serve` answers daemon-side (`answersAutoAccept: true`,
+  `cli/src/serve.ts:779`; `autoAnswer`, `hosted-session.ts:1583-1592`) when the SESSION's
+  auto-accept is on — with nobody attached, i.e. at 03:00 (repro 1a). The worker/`connect`
+  client answers a `wake-` ask through `autoAcceptsTurn` (`client/src/remote-session.ts:747-755`,
+  `daemonWakes` set by the worker since cron-tool D1, `cli/src/local-runtime.ts:1200`; repro 2).
+  `workflow_approve` is refused by `autoApproves` (`core/src/permission.ts:302-310`; repro 1c),
+  so the hash approval and every `approve` step wait for a human. With auto-accept OFF a step's
+  ask waits (`budget.wait`, then `stopped: timeout` — existing driver behaviour, slice 4).
+- **Where a schedule lives across a `serve` restart.** `DaemonSidecar.schedules`
+  (`daemon/src/daemon-state-file.ts:119-120`), written v3 exactly when non-empty (`:65-80`,
+  `:135-145`), read back through `parseScheduleRecords` (`daemon/src/schedules-view.ts:98-141`) and
+  re-armed at construction (`hosted-session.ts:1075-1082`); catch-up once (repro 3, T-D4). The
+  worker keeps it in memory only (cron-tool D6). **Repro 5 is the trap:** a v3 reader keeps a job
+  whose record carries an unknown `workflow` field and DROPS the field — an older build would fire
+  the job's `prompt` as a model turn. So a workflow target MUST bump the sidecar version.
+- **Repro 4 is the second trap:** `every 1d` is a fixed 24 h (`slotAfter`, `schedule.ts:348-353`),
+  so "03:00" becomes 02:00 after the October DST change. "Every day at 03:00" needs a wall-clock
+  kind.
+
+#### Preconditions (verified)
+
+- **Same runtimes for both features.** Schedules: `serve` + worker only (`cli/src/serve.ts:796`,
+  `cli/src/worker.ts:162`; pods never pass `schedules`). Workflows: `serve` + worker only, never
+  tunnelled (slice 4, `HostedSession.workflows` undefined otherwise, `:2453-2455`). The
+  intersection is exactly "where workflows run"; a pod has neither.
+- **Single broker.** The scheduled run's asks go through the driver's `stepRequester` → the
+  session's ONE requester (slice 4); the create-time hash ask is a `workflow_approve` through the
+  same path. No new broker, no new rule store.
+- **One run per session** (`workflow-driver.ts:320-327`, re-checked after the last await at
+  `:343-345`) — the overlap rule reads it.
+- **Liveness.** An armed schedule keeps a `serve` session out of the idle TTL
+  (`hosted-session.ts:2082-2088`); the opt-in admin cap and the detached cap still apply.
+- **Push.** A run's asks already push (`ask`); a run's end already pushes `run_done`/`run_stopped`
+  when unattended (slice 9, `daemon/src/push-rules.ts:451`). A push kind is additive on `v: 1`
+  (slice 9 claim 4).
+- **Wire rows are lenient.** `ScheduleRow.kind` is a free string (`protocol/src/session.ts:1060-1067`),
+  so `daily` costs an older client one word, not the list.
+
+#### Design
+
+**S10-1 — The table (pure, `core/src/schedule.ts`).**
+- `ScheduledJob` gains `target?: {workflow: {name, inputs: [{name, value}], hash}}` (absent =
+  today's prompt target; `prompt` stays, holding the display label `workflow <name> k=v…` for a
+  workflow job so every reader has a sentence) and `last?: {at, outcome, reason?, runId?}`.
+  `hash` is PINNED at create: the schedule authorises THIS content.
+- New kind **`daily`** (`daily: "03:00"`, `HH:MM`, the daemon host's zone): `nextAt` = the next
+  local `HH:MM` strictly after `now`, built from local components (like `parseAtMs`,
+  `schedule.ts:190-202`), so DST keeps 03:00 (kills repro 4). A local time DST skips → the first
+  valid instant after it; a repeated hour → fires once (the next slot is the next DAY's). Usable by
+  prompt targets too (free, same rules).
+- **Eligibility:** a prompt job still needs `idle` (`scheduleStep` options unchanged); a
+  WORKFLOW job is eligible whether or not a turn runs — the run lives between turns (A2) and a long
+  user turn at 03:00 must not delay the nightly. `scheduleStep` returns it as `due` like any job.
+- **Grace, not catch-up, for workflow targets:** a workflow job late by more than
+  `SCHEDULE_WORKFLOW_GRACE_MS` = 15 min is advanced WITHOUT firing and returned in a new
+  `missed: ScheduledJob[]` (outcome `missed`). Prompt jobs keep anacron catch-up once.
+- **Clock:** `daily` back-jump → if `nextAt - now > 25 h`, recompute from now; forward jump past
+  the grace → `missed`, next slot. `every` keeps its clamp.
+- **Expiry:** a workflow target's `every`/`daily` job has NO time expiry (`expiresAt` =
+  `Number.MAX_SAFE_INTEGER`; the row omits `expiresAt`). One-shot `at` keeps ≤ 7 d ahead + grace.
+- **Failure stop:** reuse `scheduleSettled`: a fire that could not START for a reason the human
+  must fix (`changed`, `unapproved`, `invalid` — file missing/unparseable/inputs — `unavailable` —
+  no driver) counts `error`; a STARTED run resets the count (its own verdict is the workflow's,
+  not the schedule's — a red nightly must not delete the schedule); `skipped` and `missed` count
+  nothing. 3 in a row → the job is removed (existing rule) with a `run_not_started` push.
+- `scheduleRecordFire(table, id, last)`: one pure setter for `last`.
+
+**S10-2 — Fire (daemon, `hosted-session.ts`).** `checkSchedules` branches on the due job's target:
+prompt → `fireSchedule` unchanged; workflow → `fireWorkflow(job, table)`: same stretch, advance +
+`persist()` FIRST (at-most-once, as `:3765-3768`), then
+`driver.startScheduled({name, inputs, pinnedHash, scheduleId, turnId: wake-<uuid>})`, then
+`scheduleRecordFire` + `persist()` + `publishSchedules()` + audit `schedule: sc-N started wf-M` /
+`… not started · <outcome>`. `missed` jobs from the step: `last = missed`, persisted, audited.
+No `prompt()`, no `firedTurns` entry, no turn slot taken.
+
+**S10-3 — Driver (`agent/src/workflow-driver.ts`).** `startScheduled(req)` → `{ok: true, runId} |
+{ok: false, outcome, reason}`; it NEVER asks for the hash and creates NO run/row on refusal:
+- a run in flight → `skipped` ("wf-7 running") — never queued;
+- `prepare` fails (file deleted, invalid, unknown model) or inputs missing → `invalid`;
+- recomputed hash ≠ pinned → `changed` ("workflows/x.yaml changed since sc-3 was created
+  (a1b2… → c3d4…): re-create the schedule");
+- pinned hash not in `approvals` → `unapproved`;
+- else the normal `start` path with `by: "schedule"` (the `by` union widens; the log word is free,
+  `WorkflowWordSchema`), the run's `turnId` = the minted `wake-` id, and `workflow_start` carries
+  an optional `scheduleId` (additive field, strip schema). From here it IS an ordinary run: its
+  steps, `budget.wait`, approve steps, end note + wake (`hosted-session.ts:2408-2411`), and the
+  slice-9 end push.
+- `requestApproval(name, turnId?)`: the hash `workflow_approve` ask of the CURRENT file, raised as a
+  background ask (agent id `approval:<name>`, signal = `budget.wait`), on allow written to the store.
+  Used at CREATE time only.
+
+**S10-4 — Create.**
+- **Model:** `schedule_create` (`tools/src/schedule.ts:72-87`) gains `workflow?`, `inputs?`
+  (`[{name, value}]`), `daily?`; exactly one of `prompt` | `workflow`, exactly one of
+  `every` | `at` | `daily` (repair sentences, `agent_control` rule). The tool ask (static `ask`)
+  names the workflow, inputs and short hash. The link's `create` validates through the driver
+  (file, inputs, hash) and refuses with no driver ("workflows run only on a laptop or serve
+  session"). An unapproved hash does NOT refuse: the job is created and `requestApproval` asks
+  NOW, while someone is there — never at 03:00 (a fire before the answer → `unapproved`).
+- **User:** new method **`session/schedule_create`** `{sessionId, turnId, workflow: {name, inputs},
+  every? | at? | daily?}` → `{ok, scheduleId?, reason?}` (synchronous up to the create; the
+  approval ask is raised, never awaited — §7 don't serialize the peer). `turnId` client-minted,
+  `wake-` refused (same rule as `session/workflow`). Workflow targets only in v1 (a user prompt
+  schedule is a separate question). TUI: `/schedule workflow <name> <every 2h | daily 03:00 | at …>
+  [k=v …]`, parsed in a pure `tui/src/schedule-command.ts`; bare `/schedule` unchanged (the panel).
+
+**S10-5 — Persistence.** `DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES = 4`, stamped exactly when some
+job has a workflow target or kind `daily` (else v3/v2/v1 as today), so an older build REFUSES that
+session loudly instead of firing a workflow job as a prompt (repro 5). `parseScheduleRecords`
+reads `target`, `daily`, `last` (v4 only for the first two). Worker: memory only (unchanged; the
+M6 quit warning already names armed schedules).
+
+**S10-6 — Wire (all additive; no `protocol.d/` note).** `ScheduleRow` gains optional
+`workflow?: {name, inputs (labels), hash (short)}` and `last?: {at, outcome, reason?, runId?}`
+(lenient strings like the rest of the row); `kind` may be `daily`; method
+`session/schedule_create`; push kind **`run_not_started`** `{scheduleId, name, reason?}`
+(`line()`-bounded, absent reason absent — slice 9's rules). Optional fields + a new method + a
+display push kind are free under v10 forward-compat; an older client paints the row's `prompt`
+label and shows the push placeholder. `protocol.json` regenerated.
+
+**S10-7 — Push.** `push-rules.ts` gains `notStartedCommand` beside `runCommand`, fed by the
+`schedules` update when a row's `last` changes to `changed | unapproved | invalid | unavailable`
+or the job was removed by the failure stop: unattended only, idempotent per `scheduleId#fires`,
+storm cap. `skipped` / `missed` push nothing (recorded on the row). A started run needs nothing
+new (slice 9).
+
+#### Views
+
+TUI `/schedule` panel (M3 grammar) and dock row:
+```
+─ scheduled wakes · 2 ─────────────────────────────────── x delete · esc close ─
+› sc-3  ▶ workflow nightly  daily 03:00   next 03:00 (in 9h)   no expiry
+        slug=main · hash 3f2a… · last: ✓ started wf-12 (today 03:00)
+  sc-4  ▶ workflow gate     every 2h      next 16:00           no expiry
+        last: ‖ skipped · wf-12 running (14:00)
+  sc-5  ▶ workflow deploy   daily 06:00   next 06:00
+        last: ✗ not started · changed — re-create the schedule
+```
+Outcome glyph + word always (colour-blind rule): `✓ started` · `‖ skipped` · `○ missed` ·
+`✗ not started · <why>` · `? needs approval` (hash not yet approved).
+
+iPhone Session info → SCHEDULED WAKES (pure `session-info.ts` row):
+```
+│ ▶ workflow nightly                 ›    │
+│   daily 03:00 · last ✓ wf-12            │
+```
+Push `run_not_started`: "Workflow not started: nightly — changed".
+
+#### Files (dependency order)
+
+1. `core/src/schedule.ts` (target, `daily`, eligibility, grace/`missed`, no-expiry, `scheduleRecordFire`); `core/src/workflow-ledger.ts` (`by: "schedule"`, `scheduleId?`).
+2. `protocol/src/session.ts` (`ScheduleRow` fields, create params/result), `methods.ts`, `push.ts` (`run_not_started`), `session-log.ts` (`workflow_start.scheduleId?`); regenerate `schema/protocol.json`.
+3. `agent/src/workflow-driver.ts` (`startScheduled`, `requestApproval`).
+4. `daemon/src/schedules-view.ts`, `daemon-state-file.ts` (v4), `hosted-session.ts` (`fireWorkflow`, create validation, `scheduleCreateRpc`), `connection.ts` (method), `push-rules.ts`, `push-notifier.ts`.
+5. `tools/src/schedule.ts` (fields, repair sentences, ask text).
+6. (10b) `client/src/remote-client.ts` + `remote-session.ts` (`scheduleCreate`, mirroring `scheduleDelete` at `remote-client.ts:1582`, `remote-session.ts:1244`), `cli/src/local-runtime.ts` pass-through, `tui/src/schedule-command.ts` (new), `commands/schedule.ts` (`run: (ctx, raw)` as `commands/attach.ts:9`), `schedule-view.ts`, `panels/schedule.ts`.
+7. (10c) `apps/mobile/src/session-info.ts`, `push-render.ts`, Swift NSE + `fixtures/push-render-v1.json`.
+8. `changelog.d/agent-workflows-schedule.added.md` (one bullet).
+
+#### Failure modes (how each converges)
+
+| Failure | Converges to |
+|---|---|
+| `serve` daemon down at fire time | sidecar keeps the job; at restart the first check: late ≤ 15 min → starts; later → `missed`, next slot. Never a burst. |
+| missed fires on restart (N slots) | ONE `missed` record, next slot strictly after now (`slotAfter`); never replayed |
+| worker (TUI) quit | schedule ends with the session (memory only); M6 warns at quit |
+| Mac asleep at 03:00 | same as daemon down (the ≤ 60 s re-check notices on wake) |
+| clock back | `daily` recompute when `nextAt - now > 25 h`; `every` clamp (existing) |
+| clock forward / DST | forward past grace → `missed`; DST → local 03:00 kept; skipped local time → first valid instant; repeated hour → once |
+| overlap (a run in flight) | `skipped · wf-N running` recorded; never queued; no failure count, no push |
+| user turn running at fire | the run starts anyway (between turns, A2) |
+| file deleted / invalid / input missing | `not started · invalid` + push; 3 in a row → job removed + push |
+| file edited after create | `not started · changed` + push; re-create to pin the new content |
+| hash never approved | `not started · unapproved` + push; the create-time ask was the only ask |
+| step ask, auto-accept off | waits `budget.wait` (push `ask`) → `stopped: timeout` (slice 4) |
+| step ask, auto-accept on | allow-once (serve daemon-side; worker/connect client) — tool asks only |
+| approve step | always waits for a human; never auto-accepted |
+| crash mid-run | load closes it `interrupted` (slice 3); the slot was advanced before the start → never re-fired |
+| crash between advance and start | at-most-once: the slot is gone; `last` not written → the row shows the advanced `nextAt`; audit absent (accepted, same as prompt fires) |
+| older build reads a v4 sidecar | refuses that session loudly, files untouched (never fires a workflow job as a prompt) |
+| older client | `daily` shown as a word, `workflow`/`last` dropped (row shows the `prompt` label); `session/schedule_create` → MethodNotFound notice; `run_not_started` → placeholder push |
+| pod / tunnelled session | no schedule link, no driver: nothing offered; the RPC answers "workflows run only on a laptop or serve session" |
+| session archived | nothing fires (existing); `reopen` re-arms (grace rule applies) |
+
+#### Tests (red first; mutation targets)
+
+- **core** `core/test/schedule.test.ts`: `daily 03:00` fires at local 03:00 across both 2026 DST
+  changes in `Europe/Rome` (red today: `3,2,2`; **M-a** use `slotAfter` 24 h); a workflow job is
+  `due` with `{idle: false}` while a prompt job is not (**M-b** gate workflow jobs on idle); late
+  16 min → `missed`, not `due`, `nextAt` strictly after now (**M-c** catch-up for workflow jobs);
+  late 14 min → `due`; workflow job never expires at +30 d (**M-d** apply 7 d TTL); a prompt job
+  still catches up once (regression); failure accounting: `changed` ×3 removes, `skipped`/`missed`
+  never count, a start resets (**M-e** count skipped).
+- **driver** `agent/test/workflow-driver.test.ts`: `startScheduled` raises NO ask on any path
+  (`SpyBroker` count 0 for changed/unapproved/invalid/skipped; **M-f** fall back to `approveHash`);
+  changed hash → `changed` with no run row (**M-g** compare against the store only); running →
+  `skipped` and the first run untouched; started run's asks carry the minted `wake-` id and its
+  `workflow_start` has `by: "schedule"` + `scheduleId`.
+- **daemon** `daemon/test/schedules.test.ts` (injected clock, real `SessionHost` + `Connection`):
+  a due workflow job on a `serve`-shaped host with auto-accept ON and NO client attached runs a
+  run step whose tool ask is answered daemon-side, and its `approve` step stays pending
+  (**M-h** drop the minted turn id → the tool ask stays pending); auto-accept OFF → the ask stays
+  pending; the advance is persisted BEFORE the driver call (**M-i** persist after); a v4 sidecar
+  round-trips target/`daily`/`last` and a v3-only build's `DAEMON_STATE_VERSIONS` refuses it
+  (**M-j** stamp v3 for a workflow job); `session/schedule_create` with a `wake-` id refused
+  (**M-k**); no driver → refused.
+- **push** `daemon/test/push-rules.test.ts`: `changed` unattended → one `run_not_started`;
+  attached → none; same `scheduleId#fires` twice → one (**M-l** drop the memory); `skipped` → none.
+- **tool** `tools/test/schedule.test.ts`: `prompt`+`workflow` both / neither refused with the
+  repair sentence; `daily` + `every` refused.
+- **10b** `tui/test/schedule-command.test.ts` (pure parse: `daily 03:00`, `every 2h`, `k=v`,
+  errors) and a client test that `scheduleCreate` sends the method with a minted, non-`wake-` id.
+- **10c** pure `session-info` row + the shared push vector (`run-not-started`) asserted by TS and
+  `swift test`.
+
+#### Orchestrator decisions (slice 10)
+
+1. **Turn identity = daemon-minted `wake-<uuid>`** — the one id both the daemon's and the
+   clients' auto-accept already treat as the session's own; `undefined` would never be auto-answered (repro 1b).
+2. **Hash pinned at create; any change stops (`changed`) until re-created** — the schedule
+   authorises one content, as the owner's "editing must not silently change it" demands.
+3. **Hash approval asked at CREATE, never at fire** — the human is present then; at 03:00 nobody is.
+4. **Workflow jobs fire regardless of a running turn** — a run lives between turns; determinism
+   beats politeness.
+5. **15-min grace instead of catch-up for workflow jobs** — heavy work hours late at an unchosen
+   time is a surprise; prompts keep anacron.
+6. **New `daily HH:MM` kind** — `every 1d` drifts an hour at DST (repro 4).
+7. **No time expiry for recurring workflow jobs** — the 7 d cap bounded a model's self-pacing
+   loop; a workflow job cannot loop on the model (one run, pinned hash, own budget). Bounded by
+   the failure stop, delete and archive.
+8. **Only "needs the human" outcomes count toward the failure stop and push** — a red nightly is
+   the workflow's verdict; a skip or a miss is not the user's to fix.
+9. **Sidecar v4 when a workflow target or `daily` is present** — repro 5: a v3 reader would fire
+   the job as a prompt turn.
+10. **Not-started fires create no run row** — one record (`last` on the schedule, persisted) and
+    one push path (`run_not_started`); a fake run with no spec would lie in the run list.
+11. **User create = workflow targets only, TUI only, in v1** — the owner asked for workflow
+    scheduling; phone create and user prompt-schedules are separate decisions.
+12. **A scheduled run's end keeps the existing note + wake** — reporting after the fact is not
+   deciding to start; one rule for every run.
+13. **Split 10a/10b/10c** — the whole is XL-shaped across 8 packages; 10a is the load-bearing core.
 
 ## Execution
 
