@@ -1453,6 +1453,16 @@ refusal shows its reason; no feed → notice.
 | M6 | model column per row | "width tiers … " (alignment assertion) |
 | M7 | (a real bug, found writing this section) the view painted `currentRun ?? data[0]` but keys/rules used `currentRun` only, so with no run in flight `o`/`r`/↑↓ acted on nothing | new assertion "No run in flight…" red on the old `workflowPanelRun`; fixed with ONE `shownRun` used by both |
 
+**Post-slice fix (gate, `feat/workflows-ui`).** The rail made `statusRowY` — and with it
+`app-layout.test.ts`'s "the status bar's row is the sum of the parts the tree paints above it" and
+`app-view-structure.test.ts`'s "onPillRange is still wired" (S10, whose regex pins the expression
+verbatim) — stale: both pinned the pre-rail sum, so the gate failed on the app-decomposition half.
+Both expectations now name `workflowHeight` in the position the tree paints it (spacer → rail →
+queued/slot → dock → input box → bar's own), i.e. they follow this slice's addition instead of
+contradicting it. P8's invariance (the attach row moves `viewport` and `inputBoxRows` by one each,
+`statusRowY` unchanged) still holds with a rail present, and the M1 mutation above stays red (M1
+drops `workflowHeight` from `activeRows`, which moves `statusRowY` too — the pin catches it).
+
 **Validation frames (from `.tentacle/tmp/workflows-ui/frames.ts`, renderAt, SGR stripped):**
 ```
 --- T1 rail (120 cols)
