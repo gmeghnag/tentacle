@@ -59,6 +59,9 @@ export const PUSH_ASK_WINDOW_MS = 10_000;
 /** Relay-wide storm ceiling: pushes per rolling minute, every kind but `ask_resolved`. */
 export const PUSH_MAX_PER_MINUTE = 60;
 
+/** Longest the announced-run memory gets: the runs a phone could still be shown. */
+export const PUSH_RUN_MEMORY = 32;
+
 /** How long APNs keeps an undelivered push (`apns-expiration`, ≤ 86 400). Every kind uses the same hour. */
 export const PUSH_TTL_SECONDS = 3_600;
 
@@ -85,6 +88,10 @@ export interface PushCommand {
   readonly requestId?: string;
   /** The turn this is about (`turn_done`, `turn_failed`). */
   readonly turnId?: string;
+  /** The workflow run this is about (`run_done`, `run_stopped`): its own banner. */
+  readonly runId?: string;
+  /** The schedule this is about (`run_not_started`). */
+  readonly scheduleId?: string;
   /** "+N more waiting": other asks of this session whose grace had also ended. */
   readonly more?: number;
   /** When the rules decided it (`now()`), so the caller's `at` and the audit line agree. */
@@ -131,6 +138,30 @@ export type PushEvent =
       readonly attached: PushAttached;
     }
   | { readonly type: "session_closed"; readonly sessionId: string }
+  // A WORKFLOW RUN ended (docs/feat/agent-workflows.md slice 9, owner Q5).
+  // Idempotent by `runId`: the session's `workflows` update carries its whole
+  // list every time a step moves, so the caller may report the same ended run
+  // again — the rules push it once, exactly as a re-offered ask keeps its grace.
+  | {
+      readonly type: "run_end";
+      readonly sessionId: string;
+      readonly runId: string;
+      /** `ok` | `error` | `stopped` — what the run ended as. */
+      readonly state: string;
+      /** With `stopped`: `budget` | `timeout` | `cancelled` | `interrupted` | `changed` today. */
+      readonly stopReason?: string;
+      readonly attached: PushAttached;
+    }
+  // A SCHEDULED workflow fire could not start for a reason the user must fix
+  // (agent-workflows slice 10 S10-7). Idempotent by `fireKey`
+  // (`<scheduleId>#<fires>`): the `schedules` update is full state too.
+  | {
+      readonly type: "run_not_started";
+      readonly sessionId: string;
+      readonly scheduleId: string;
+      readonly fireKey: string;
+      readonly attached: PushAttached;
+    }
   | { readonly type: "tick" };
 
 export interface PushRulesResult {
@@ -167,6 +198,12 @@ interface TrackedAsk {
 interface SessionState {
   attached: PushAttached;
   readonly asks: Map<string, TrackedAsk>;
+  /**
+   * The run ids already announced (a `workflows` update repeats an ended run on
+   * every later step of ANOTHER run). Bounded by `PUSH_RUN_MEMORY`, oldest
+   * first, so a `serve` that runs for weeks cannot grow it without limit.
+   */
+  readonly announcedRuns: string[];
   /** When this session last pushed an `ask` (the rate window); absent = never. */
   lastAskAt?: number;
 }
@@ -207,6 +244,7 @@ export function createPushRules(options: PushRulesOptions): PushRules {
     const fresh: SessionState = {
       attached: attached ?? { clients: 0, devices: [] },
       asks: new Map(),
+      announcedRuns: [],
     };
     sessions.set(sessionId, fresh);
     return fresh;
@@ -392,8 +430,166 @@ export function createPushRules(options: PushRulesOptions): PushRules {
     };
   };
 
+  /**
+   * Remember one run id as announced, oldest out first at `PUSH_RUN_MEMORY`.
+   * The bound is what keeps a long-lived `serve` from remembering every run it
+   * ever pushed (the map that only ever grows is the leak F-series warns of).
+   */
+  const remember = (sessionId: string, attached: PushAttached, runId: string): void => {
+    const state = stateOf(sessionId, attached);
+    state.announcedRuns.push(runId);
+    if (state.announcedRuns.length > PUSH_RUN_MEMORY) {
+      state.announcedRuns.shift();
+    }
+  };
+
+  /**
+   * A run's end (docs/feat/agent-workflows.md slice 9, owner Q5): the same rule
+   * a turn's end follows, for the same reasons.
+   *
+   *  - **`cancelled` is silence**: someone stopped it on purpose.
+   *  - **A watching client silences it**: the TUI (or any client on the
+   *    session) already showed the run end. A run is unattended by definition,
+   *    so this is what keeps a desk-side run from buzzing the phone in the
+   *    owner's pocket.
+   *  - **`stopped: timeout` is a buzz, `stopped: cancelled` is not**: an ask the
+   *    person never answered is news (the run is parked, not finished), while a
+   *    deliberate stop is not.
+   *  - **Idempotent by run id** (mutation: drop `announcedRuns` → a run's end is
+   *    pushed once per later `workflows` update, i.e. a buzz per step of the
+   *    NEXT run): the caller feeds the session's whole run list every time a
+   *    step moves, so it necessarily reports an already-ended run again.
+   */
+  const runCommand = (
+    event: Extract<PushEvent, { type: "run_end" }>,
+    at: number,
+  ): PushRulesResult => {
+    if (event.state === "stopped" && event.stopReason === "cancelled") {
+      // A deliberate stop is not news. Recorded all the same: a run id is
+      // announced ONCE, whatever it ended as, which is the one invariant that
+      // keeps a full-state list from ever re-deciding about the same run.
+      remember(event.sessionId, event.attached, event.runId);
+      return NONE;
+    }
+    const state = stateOf(event.sessionId, event.attached);
+    if (state.announcedRuns.includes(event.runId)) {
+      return NONE;
+    }
+    remember(event.sessionId, event.attached, event.runId);
+    if (event.attached.clients > 0) {
+      return NONE;
+    }
+    const devices = sortedIds(options.registered());
+    const kind: PushKind = event.state === "ok" ? "run_done" : "run_stopped";
+    if (devices.length === 0) {
+      return {
+        commands: [],
+        notes: [
+          {
+            code: "push-empty",
+            sessionId: event.sessionId,
+            detail: `${kind} with no registered device`,
+          },
+        ],
+      };
+    }
+    if (capReached(at)) {
+      return {
+        commands: [],
+        notes: [
+          {
+            code: "push-capped",
+            sessionId: event.sessionId,
+            detail: `${maxPerMinute}/min reached`,
+          },
+        ],
+      };
+    }
+    recent = [...recentAt(at), at];
+    return {
+      commands: [
+        {
+          kind,
+          sessionId: event.sessionId,
+          devices,
+          // The run's own banner: two runs ending are two notifications, and a
+          // later run re-using an id is the daemon's bug, not a collapse.
+          collapseId: pushCollapseIdOf(event.sessionId, event.runId),
+          runId: event.runId,
+          at,
+        },
+      ],
+      notes: [],
+    };
+  };
+
+  /**
+   * A scheduled workflow fire that did not start (slice 10 S10-7): unattended
+   * only (a watching client already shows the row), ONCE per fire (mutation:
+   * drop the memory → a buzz per later `schedules` update), under the storm cap.
+   */
+  const notStartedCommand = (
+    event: Extract<PushEvent, { type: "run_not_started" }>,
+    at: number,
+  ): PushRulesResult => {
+    const key = `sc:${event.fireKey}`;
+    const state = stateOf(event.sessionId, event.attached);
+    if (state.announcedRuns.includes(key)) {
+      return NONE;
+    }
+    remember(event.sessionId, event.attached, key);
+    if (event.attached.clients > 0) {
+      return NONE;
+    }
+    const devices = sortedIds(options.registered());
+    if (devices.length === 0) {
+      return {
+        commands: [],
+        notes: [
+          {
+            code: "push-empty",
+            sessionId: event.sessionId,
+            detail: "run_not_started with no registered device",
+          },
+        ],
+      };
+    }
+    if (capReached(at)) {
+      return {
+        commands: [],
+        notes: [
+          {
+            code: "push-capped",
+            sessionId: event.sessionId,
+            detail: `${maxPerMinute}/min reached`,
+          },
+        ],
+      };
+    }
+    recent = [...recentAt(at), at];
+    return {
+      commands: [
+        {
+          kind: "run_not_started",
+          sessionId: event.sessionId,
+          devices,
+          collapseId: pushCollapseIdOf(event.sessionId, key),
+          scheduleId: event.scheduleId,
+          at,
+        },
+      ],
+      notes: [],
+    };
+  };
+
   return {
     apply(event) {
+      if (event.type === "run_end") {
+        return runCommand(event, now());
+      }
+      if (event.type === "run_not_started") {
+        return notStartedCommand(event, now());
+      }
       if (event.type === "tick") {
         const at = now();
         const commands: PushCommand[] = [];

@@ -567,6 +567,81 @@
         },
         "placeholder": false
       }
+    },
+    {
+      "name": "run-done",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "run_done",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "run": {
+          "runId": "wf-1",
+          "name": "task"
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Workflow finished",
+        "category": "tentacle.open",
+        "interruptionLevel": "passive",
+        "sound": false,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "run_done",
+          "computerId": "computer-1",
+          "sessionId": "sess-1"
+        },
+        "placeholder": false
+      }
+    },
+    {
+      "name": "run-stopped",
+      "message": {
+        "v": 1,
+        "id": "0123456789abcdef0123456789abcdef",
+        "at": 1800000000000,
+        "kind": "run_stopped",
+        "computer": "computer-1",
+        "cwd": "/home/me/tentacle",
+        "sessionId": "sess-1",
+        "title": "Fix the failing test",
+        "run": {
+          "runId": "wf-3",
+          "name": "gate",
+          "reason": "gate: an ask was not answered in time"
+        }
+      },
+      "peer": {
+        "computerName": "MacBook"
+      },
+      "now": 1800000000000,
+      "expected": {
+        "title": "MacBook · tentacle",
+        "subtitle": "Fix the failing test",
+        "body": "Workflow stopped: gate: an ask was not answered in time",
+        "category": "tentacle.open",
+        "interruptionLevel": "passive",
+        "sound": false,
+        "threadIdentifier": "s:sess-1",
+        "hints": {
+          "v": 1,
+          "kind": "run_stopped",
+          "computerId": "computer-1",
+          "sessionId": "sess-1"
+        },
+        "placeholder": false
+      }
     }
   ]
 }

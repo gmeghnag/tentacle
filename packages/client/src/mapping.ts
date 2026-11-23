@@ -386,6 +386,9 @@ export function updateToEvent(
     case "auto_accept":
     // `capabilities` by the session's capability listeners (`RemoteClient`, likewise).
     case "capabilities":
+    // `workflows` (a session's workflow runs, full state, not turn-scoped) by its
+    // own listeners, likewise (docs/feat/agent-workflows.md D5).
+    case "workflows":
     case "plan":
     case "turn_start":
     case "turn_end":

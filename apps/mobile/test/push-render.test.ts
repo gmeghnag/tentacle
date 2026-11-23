@@ -114,6 +114,46 @@ describe("render: the banner's words (decision 17: one session title)", () => {
     expect(bare.body).toBe("Turn failed");
   });
 
+  test("run_done / run_stopped: named, quiet, and the reason is one line", () => {
+    // docs/feat/agent-workflows.md slice 9 (owner Q5). The two run kinds are
+    // ADDITIVE on the v1 plaintext: an older build's enum refuses them and shows
+    // its placeholder, so this build is the first that can render them at all.
+    // Mutations: (a) let a run kind fall through to `turn_done`'s return → the
+    // body says "Turn finished" for a workflow; (b) skip `clean()` on the reason
+    // → a control character reaches the notification centre.
+    const done = render(
+      message({ kind: "run_done", ask: undefined, run: { runId: "wf-1", name: "task" } }),
+      peer,
+      NOW,
+    );
+    expect(done.body).toBe("Workflow finished");
+    expect(done.interruptionLevel).toBe("passive");
+    expect(done.sound).toBe(false);
+    expect(done.threadIdentifier).toBe("s:sess-1");
+    expect(done.category).toBe(CATEGORY_OPEN);
+    const stopped = render(
+      message({
+        kind: "run_stopped",
+        ask: undefined,
+        run: { runId: "wf-3", name: "gate", reason: "gate\u001b[31m: timeout" },
+      }),
+      peer,
+      NOW,
+    );
+    expect(stopped.body).toBe("Workflow stopped: gate: timeout");
+    expect(stopped.body.includes("\u001b")).toBe(false);
+    const bare = render(
+      message({ kind: "run_stopped", ask: undefined, run: { runId: "wf-4", name: "x" } }),
+      peer,
+      NOW,
+    );
+    expect(bare.body).toBe("Workflow stopped");
+    // A run kind never carries an ask's requestId: it is not answerable.
+    for (const rendered of [done, stopped, bare]) {
+      expect(rendered.hints !== undefined && "requestId" in rendered.hints).toBe(false);
+    }
+  });
+
   test("the routing hints carry the ask's requestId, and only an ask's", () => {
     expect(render(message(), peer, NOW).hints).toEqual({
       v: 1,

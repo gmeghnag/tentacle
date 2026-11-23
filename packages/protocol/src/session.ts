@@ -795,6 +795,163 @@ export const AgentKillResultSchema = z.object({
 });
 export type AgentKillResult = z.infer<typeof AgentKillResultSchema>;
 
+// --- workflow runs (docs/feat/agent-workflows.md D5) ---
+// The session's runs (the current one + the last few ended) as ONE full-state
+// `workflows` update, never a delta, so a client converges from any loss; the
+// snapshot's first page carries the same list. Not turn-scoped: a run lives
+// between turns. Labels are `line()`-bounded; `reason`/`live` are bounded free
+// text (a failed `run` step's reason carries its last output lines), which the
+// client flattens for display. States are free words (a newer daemon's state is
+// shown as is), never an enum.
+
+/** One step of a run, as the daemon reports it. */
+export const WorkflowStepRowSchema = z.object({
+  id: line(64),
+  /** `agent` | `run` | `approve` today; free word. */
+  kind: line(16),
+  /** The step's `models` NAME only, never an id or URL (AGENTS §7). */
+  model: line(128).optional(),
+  /** `local` | `docker:<name>[/<container>]`. */
+  where: line(256),
+  /** `pending` | `running` | `waiting` | `needs-approval` | `ok` | `error` | `stopped` today. */
+  state: line(32),
+  attempt: z.number().int().nonnegative(),
+  round: z.number().int().nonnegative(),
+  /** The goto edge's `max` when `round` is a goto round. */
+  maxRound: z.number().int().positive().optional(),
+  reason: z.string().max(2000).optional(),
+  /** The running step's last action (a tool label, a output line). */
+  live: z.string().max(200).optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+});
+export type WorkflowStepRow = z.infer<typeof WorkflowStepRowSchema>;
+
+/** One run, as the daemon reports it. */
+export const WorkflowRowSchema = z.object({
+  /** `wf-N`: what `session/workflow` takes and the log entries carry. */
+  runId: line(32),
+  name: line(64),
+  version: z.number().int().nonnegative(),
+  hash: z.string().regex(/^[0-9a-f]{64}$/),
+  /** `running` | `waiting` | `needs-approval` | `ok` | `error` | `stopped` today. */
+  state: line(32),
+  /** With `stopped`: `budget` | `timeout` | `cancelled` | `interrupted` | `changed` today. */
+  stopReason: line(32).optional(),
+  reason: z.string().max(2000).optional(),
+  /** The run's token sum so far. */
+  tokens: z.number().int().nonnegative(),
+  /** `budget.tokens`, when the file sets one. */
+  budget: z.number().int().positive().optional(),
+  startedAt: z.number().int().nonnegative(),
+  endedAt: z.number().int().nonnegative().optional(),
+  steps: z.array(WorkflowStepRowSchema).max(64),
+});
+export type WorkflowRow = z.infer<typeof WorkflowRowSchema>;
+
+// --- session/workflow: the USER starts / stops / resumes a run (D3) ---
+// Start paths that begin work carry a client-minted `turnId` like
+// `session/prompt` (the run's asks are attributed to it, A2). Additive: an
+// older daemon answers `MethodNotFound` ("update tentacle").
+
+/** A workflow's name as `workflows/<name>.yaml` names it. */
+export const WorkflowNameSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/);
+/** A run id (`wf-N`), as the methods take it. Its own named export (JSON-schema `$defs`). */
+export const WorkflowRunRefSchema = z
+  .string()
+  .max(32)
+  .regex(/^wf-[1-9][0-9]*$/);
+
+export const WORKFLOW_INPUT_NAME_MAX_CHARS = 64;
+/** One input value; the log's emitter also caps the whole list at this much JSON. */
+export const WORKFLOW_INPUTS_MAX_CHARS = 4 * 1024;
+
+/**
+ * One input of a run, `{name, value}` (strings only in v1). A list, not a
+ * record: the JSON-schema export does not represent `z.record`. Names are
+ * unique (the daemon refuses a duplicate against the file's `inputs`).
+ */
+export const WorkflowInputValueSchema = z.object({
+  name: z.string().min(1).max(WORKFLOW_INPUT_NAME_MAX_CHARS),
+  value: z.string().max(WORKFLOW_INPUTS_MAX_CHARS),
+});
+export type WorkflowInputValue = z.infer<typeof WorkflowInputValueSchema>;
+
+export const WorkflowParamsSchema = z.discriminatedUnion("action", [
+  z.object({
+    sessionId: SessionIdSchema,
+    action: z.literal("start"),
+    name: WorkflowNameSchema,
+    /** The daemon validates them against the file's `inputs`. */
+    inputs: z.array(WorkflowInputValueSchema).max(64).optional(),
+    turnId: TurnIdSchema,
+  }),
+  z.object({
+    sessionId: SessionIdSchema,
+    action: z.literal("stop"),
+    runId: WorkflowRunRefSchema,
+  }),
+  z.object({
+    sessionId: SessionIdSchema,
+    action: z.literal("resume"),
+    runId: WorkflowRunRefSchema,
+    turnId: TurnIdSchema,
+  }),
+  z.object({
+    sessionId: SessionIdSchema,
+    action: z.literal("rerun_step"),
+    runId: WorkflowRunRefSchema,
+    stepId: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/),
+    turnId: TurnIdSchema,
+  }),
+]);
+export type WorkflowParams = z.infer<typeof WorkflowParamsSchema>;
+
+export const WorkflowResultSchema = z.object({
+  /** `false` with a `reason` (one run already running, hash changed, not allowed here, …). */
+  ok: z.boolean(),
+  /** The run started or acted on. */
+  runId: z.string().max(32).optional(),
+  /** Why nothing happened: shown to the user as a notice, never thrown at a UI. */
+  reason: z.string().max(2000).optional(),
+});
+export type WorkflowResult = z.infer<typeof WorkflowResultSchema>;
+
+// --- workflow/list: every live session's runs (serve only; the phone's "Elenco") ---
+
+export const WorkflowListParamsSchema = z.object({});
+export type WorkflowListParams = z.infer<typeof WorkflowListParamsSchema>;
+
+export const WorkflowListRowSchema = z.object({
+  sessionId: SessionIdSchema,
+  /** The session's title text, when it has one. */
+  title: z.string().max(MAX_SESSION_TITLE).optional(),
+  runId: line(32),
+  name: line(64),
+  state: line(32),
+  /** The step running / waiting now (absent once ended). */
+  step: line(64).optional(),
+  done: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  /** A step waits for the user (an approve step or an open ask): the hub's signal. */
+  needsUser: z.boolean(),
+  startedAt: z.number().int().nonnegative(),
+  endedAt: z.number().int().nonnegative().optional(),
+});
+export type WorkflowListRow = z.infer<typeof WorkflowListRowSchema>;
+
+export const WorkflowListResultSchema = z.object({
+  runs: z.array(WorkflowListRowSchema),
+});
+export type WorkflowListResult = z.infer<typeof WorkflowListResultSchema>;
+
 // --- the session's background shell jobs (docs/feat/shell-jobs-panel.md) ---
 // The live list of the `shell{run_in_background}` jobs a session started: one
 // full-state update (`jobs`), sent only on a start or an exit (never a stream).
@@ -926,6 +1083,32 @@ export const ScheduleRowSchema = z.object({
   /** Fired turns so far: the ordinal the fired prompt quotes (`fire 5`). */
   fires: z.number().int().nonnegative(),
   createdAt: z.number().int().nonnegative(),
+  /**
+   * Present iff the job starts a WORKFLOW instead of a turn (agent-workflows
+   * slice 10). Lenient labels like the rest of the row: `inputs` as `k=v`
+   * strings, `hash` shortened. An older client drops it and paints `prompt`
+   * (the daemon fills it with `workflow <name> k=v…`).
+   */
+  workflow: z
+    .object({
+      name: z.string(),
+      inputs: z.array(z.string()),
+      hash: z.string(),
+    })
+    .optional(),
+  /**
+   * The last fire of a workflow job: when, and its outcome word (`started`,
+   * `skipped`, `missed`, `changed`, `unapproved`, `invalid`, `unavailable`, or a
+   * newer build's — a free string).
+   */
+  last: z
+    .object({
+      at: z.number().int().nonnegative(),
+      outcome: z.string(),
+      reason: z.string().optional(),
+      runId: z.string().optional(),
+    })
+    .optional(),
 });
 export type ScheduleRow = z.infer<typeof ScheduleRowSchema>;
 
@@ -956,6 +1139,36 @@ export const ScheduleDeleteResultSchema = z.object({
 });
 export type ScheduleDeleteResult = z.infer<typeof ScheduleDeleteResultSchema>;
 
+/**
+ * `session/schedule_create` (agent-workflows slice 10): the USER schedules a
+ * workflow to start by itself — `every 2h` / `daily 03:00` / `at …`, exactly
+ * one. Workflow targets only in v1. `turnId` is client-minted (a `wake-` id is
+ * refused, as on `session/workflow`); the daemon answers up to the create and
+ * RAISES the hash approval when needed, never awaiting it (§7 don't serialize
+ * the peer). Additive: an older daemon answers `MethodNotFound`.
+ */
+export const ScheduleCreateParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  turnId: TurnIdSchema,
+  workflow: z.object({
+    name: WorkflowNameSchema,
+    inputs: z.array(WorkflowInputValueSchema).max(64).optional(),
+  }),
+  every: z.string().min(1).max(32).optional(),
+  at: z.string().min(1).max(64).optional(),
+  daily: z.string().min(1).max(16).optional(),
+});
+export type ScheduleCreateParams = z.infer<typeof ScheduleCreateParamsSchema>;
+
+export const ScheduleCreateResultSchema = z.object({
+  ok: z.boolean(),
+  /** The new job's `sc-N`. */
+  scheduleId: z.string().max(64).optional(),
+  /** Why nothing was created (or a note, e.g. "approval asked"): a notice, never thrown. */
+  reason: z.string().max(2000).optional(),
+});
+export type ScheduleCreateResult = z.infer<typeof ScheduleCreateResultSchema>;
+
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */
   messages: z.array(ChatMessageSchema),
@@ -980,6 +1193,12 @@ export const SnapshotResultSchema = z.object({
    * not report them", never "none left".
    */
   schedules: z.array(ScheduleRowSchema).optional(),
+  /**
+   * The session's workflow runs at the cut — the current one + the last few
+   * ended (docs/feat/agent-workflows.md D5; first page only). Absent from an
+   * older daemon, and from a pod daemon (it never runs one, MVP).
+   */
+  workflows: z.array(WorkflowRowSchema).optional(),
   /**
    * Each message's ARRIVAL time (docs/fix/mobile-open-at-end.md, slice B):
    * epoch ms, same length and order as `messages`, `0` = not known (a message a

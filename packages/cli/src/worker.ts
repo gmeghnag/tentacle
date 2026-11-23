@@ -106,6 +106,9 @@ export function workerAgentFactory(
       // user's own host, so it holds the kubeconfig / docker endpoint the tool
       // dials. A pod daemon never passes this.
       workloadShell: { backend: new LaptopWorkloadShellBackend() },
+      // Workflows (docs/feat/agent-workflows.md D3): the laptop runs them; a run
+      // lives as long as this worker (a TUI quit cuts it, closed at next load).
+      workflows: true,
     },
   );
 }

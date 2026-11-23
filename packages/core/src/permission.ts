@@ -23,6 +23,12 @@ export function isPermissionReplyText(value: unknown): value is string {
   return PermissionReplyTextSchema.safeParse(value).success;
 }
 
+/**
+ * The wire `tool` of a `workflow_approve` ask (docs/feat/agent-workflows.md D2/D3):
+ * the daemon raises it, the client maps it back to `kind: "workflow_approve"`.
+ */
+export const WORKFLOW_APPROVE_TOOL = "workflow_approve";
+
 export interface PermissionRequest {
   /**
    * What is asked (laptop-internal, never on the wire): a tool call (absent =
@@ -30,9 +36,11 @@ export interface PermissionRequest {
    * docs/feat/hooks-project-trust.md) — or whether to move this session to
    * another target (`"session_hop"`, docs/feat/session-hop.md D6/D9). A
    * `hooks_trust` is never answered by auto-accept. A `session_hop` is answered
-   * ONLY when `hopAuto` is set (docs/feat/session-hop-ux OD4).
+   * ONLY when `hopAuto` is set (docs/feat/session-hop-ux OD4). A
+   * `workflow_approve` (a workflow's hash approval, or its `approve` step —
+   * docs/feat/agent-workflows.md D2/D3) is NEVER answered by auto-accept.
    */
-  readonly kind?: "tool" | "hooks_trust" | "session_hop";
+  readonly kind?: "tool" | "hooks_trust" | "session_hop" | "workflow_approve";
   /**
    * Slack (laptop-internal, never on the wire): this `session_hop` is one
    * auto-accept MAY answer, because the LAPTOP's own rule said so
@@ -292,7 +300,14 @@ export class PermissionBroker {
  * AGENTS §7) still reaches a human.
  */
 export function autoApproves(req: PermissionRequest, own = true): boolean {
-  return own && req.kind !== "hooks_trust" && (req.kind !== "session_hop" || req.hopAuto === true);
+  return (
+    own &&
+    req.kind !== "hooks_trust" &&
+    // A workflow's hash approval authorises a whole sequence, and its approve
+    // step is a merge/push: a human decision (docs/feat/agent-workflows.md D3).
+    req.kind !== "workflow_approve" &&
+    (req.kind !== "session_hop" || req.hopAuto === true)
+  );
 }
 
 /**

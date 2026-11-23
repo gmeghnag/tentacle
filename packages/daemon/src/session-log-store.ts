@@ -36,7 +36,7 @@ import {
   isValidSessionId,
   recordTitleState,
 } from "@tentacle/agent";
-import { type ChatMessage, subagentLoadNotes } from "@tentacle/core";
+import { type ChatMessage, subagentLoadNotes, workflowLoadNotes } from "@tentacle/core";
 import {
   type ArtifactMeta,
   type KnownLogEntry,
@@ -1174,7 +1174,13 @@ export class LogSessionStore {
     // history already notes (docs/feat/subagent-ledger-log.md). The LOAD writes
     // nothing — the note rides the next save's segment. (The listing,
     // `summarize`, stays without them: its count is short until the resume.)
-    const messages = [...closed, ...subagentLoadNotes(segment.entries, closed)];
+    // Likewise a workflow run a crash left open (docs/feat/agent-workflows.md D4):
+    // closed `stopped: interrupted` by a note, never resumed by a load (Q4).
+    const messages = [
+      ...closed,
+      ...subagentLoadNotes(segment.entries, closed),
+      ...workflowLoadNotes(segment.entries, closed),
+    ];
     // The switches (docs/feat/session-capabilities.md S3b): the current
     // segment's last `capabilities` entry — a superseded segment's never apply.
     const capabilities = lastCapabilities(segment.entries);

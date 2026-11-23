@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { Agent } from "@tentacle/agent";
 import { PermissionBroker, type PermissionRequest, type PermissionResponse } from "@tentacle/core";
 import { type PushPayload, RELAY_PROTOCOL_VERSION, encodeBase64Url } from "@tentacle/protocol";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { type ByteCarrier, type CarrierFrame, RpcPeer, carrierFrameOf } from "@tentacle/transport";
 import { noiseInitiator, systemRandom } from "@tentacle/transport/noise";
@@ -567,7 +568,7 @@ describe("a phone that goes away DETACHES its session (the relay path, F17)", ()
       onNotification: () => {},
     });
     await peer.request("initialize", {
-      protocolVersion: 24,
+      protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "phone", version: "0" },
     });

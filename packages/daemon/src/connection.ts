@@ -67,6 +67,7 @@ import {
   type RenameResult,
   type ResolvePermissionParams,
   type ResolvePermissionResult,
+  type ScheduleCreateParams,
   type ScheduleDeleteParams,
   type SendNowParams,
   type SessionContextParams,
@@ -94,6 +95,7 @@ import {
   type WatchParams,
   type WatchResult,
   type WireChatRequest,
+  type WorkflowParams,
   isWakeTurnId,
 } from "@tentacle/protocol";
 import {
@@ -442,6 +444,15 @@ export class Connection {
         const { sessionId, agentId, text } = params as SubagentMessageParams;
         return this.messageSubagent(this.lookup(sessionId), agentId, text);
       }
+      // A run starts / stops and returns at once (its approval is the run's
+      // first wait, never this request's): no lock, no turn awaited (AGENTS §7).
+      case Method.Workflow: {
+        const workflowParams = params as WorkflowParams;
+        return this.lookup(workflowParams.sessionId).workflow(workflowParams);
+      }
+      // Daemon-wide read: attaches this connection to nothing.
+      case Method.WorkflowList:
+        return this.host.workflowList();
       case Method.AgentKill: {
         const { sessionId, agentId } = params as AgentKillParams;
         return this.lookup(sessionId).killSubagent(agentId);
@@ -460,6 +471,12 @@ export class Connection {
         // Synchronous (docs/feat/cron-tool.md D5): never waits on a turn.
         const { sessionId, scheduleId } = params as ScheduleDeleteParams;
         return this.lookup(sessionId).deleteSchedule(scheduleId);
+      }
+      case Method.ScheduleCreate: {
+        // agent-workflows slice 10: answers up to the create (reads the file);
+        // the approval ask is raised, never awaited (§7).
+        const create = params as ScheduleCreateParams;
+        return this.lookup(create.sessionId).scheduleCreateRpc(create);
       }
       case Method.McpStatus:
         return this.mcpStatus();

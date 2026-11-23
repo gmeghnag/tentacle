@@ -34,6 +34,7 @@ const UNGROUPED_TOOLS: readonly string[] = [
   "fs_multi_edit",
   "search",
   "skill",
+  "workflow",
 ];
 
 /** Every built-in a session may offer (grouped or not), `skill` included. Sorted. */

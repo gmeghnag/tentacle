@@ -92,6 +92,47 @@ export class FakeLog {
       ...(report !== undefined ? { report } : {}),
     });
   }
+  /** A workflow run started (docs/feat/agent-workflows.md D4; non-critical). */
+  workflowStart(runId: string, name = "task"): KnownLogEntry {
+    return this.next({
+      type: "workflow_start",
+      critical: false,
+      runId,
+      name,
+      version: 3,
+      hash: "a".repeat(64),
+      path: `workflows/${name}.yaml`,
+      inputs: [{ name: "slug", value: "x" }],
+      by: "user",
+    });
+  }
+  /** One workflow step execution ended. */
+  workflowStep(runId: string, stepId: string): KnownLogEntry {
+    return this.next({
+      type: "workflow_step",
+      critical: false,
+      runId,
+      stepId,
+      attempt: 0,
+      round: 0,
+      state: "ok",
+      verdict: "pass",
+      reason: "done",
+      where: "local",
+      tokens: 10,
+      durationMs: 5,
+    });
+  }
+  /** A workflow run ended. */
+  workflowEnd(runId: string): KnownLogEntry {
+    return this.next({
+      type: "workflow_end",
+      critical: false,
+      runId,
+      state: "ok",
+      reason: "7/7",
+    });
+  }
   /** One model round's usage (docs/feat/token-usage-log.md; non-critical, projects nothing). */
   usage(body: {
     readonly round?: number;

@@ -27,7 +27,7 @@ describe("the wire version", () => {
   test("PROTOCOL_VERSION is the number this build speaks", () => {
     // THE pin. A bump edits this line and `version.ts`; nothing else.
     // Mutation: change `version.ts:32` alone → red.
-    expect(PROTOCOL_VERSION).toBe(24);
+    expect(PROTOCOL_VERSION).toBe(25);
   });
 
   test("the newest reason comment names the number the file exports", () => {

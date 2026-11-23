@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DaemonDiscovery } from "@tentacle/protocol";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import {
   type ByteCarrier,
   type CarrierFrame,
@@ -172,7 +173,7 @@ async function handshake(phone: ByteCarrier, privateKey: Uint8Array, computer: U
 
 const initialize = (peer: RpcPeer) =>
   peer.request("initialize", {
-    protocolVersion: 24,
+    protocolVersion: PROTOCOL_VERSION,
     clientCapabilities: {},
     clientInfo: { name: "phone", version: "0" },
   });

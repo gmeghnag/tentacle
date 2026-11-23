@@ -30,6 +30,25 @@ public enum PushKind: String, Equatable {
     case askResolved = "ask_resolved"
     case turnDone = "turn_done"
     case turnFailed = "turn_failed"
+    // Slice 9 of docs/feat/agent-workflows.md (owner Q5): a workflow run's end.
+    // A build that predates them REFUSES the string and shows the placeholder
+    // (`PushEnvelope.parse`), which is why they were additive on `v: 1`.
+    case runDone = "run_done"
+    case runStopped = "run_stopped"
+}
+
+/// The workflow run a push is about (`PushRunSchema`): its id, its name, and the
+/// one line it stopped with. Absent on every other kind.
+public struct PushRun: Equatable {
+    public let runId: String
+    public let name: String
+    public let reason: String?
+
+    public init(runId: String, name: String, reason: String? = nil) {
+        self.runId = runId
+        self.name = name
+        self.reason = reason
+    }
 }
 
 public struct PushAskOption: Equatable {
@@ -95,6 +114,7 @@ public struct PushMessage: Equatable {
     public let title: String
     public let ask: PushAsk?
     public let turn: PushTurn?
+    public let run: PushRun?
 
     public init(
         v: Int,
@@ -106,7 +126,8 @@ public struct PushMessage: Equatable {
         sessionId: String,
         title: String,
         ask: PushAsk? = nil,
-        turn: PushTurn? = nil
+        turn: PushTurn? = nil,
+        run: PushRun? = nil
     ) {
         self.v = v
         self.id = id
@@ -118,6 +139,7 @@ public struct PushMessage: Equatable {
         self.title = title
         self.ask = ask
         self.turn = turn
+        self.run = run
     }
 }
 
@@ -205,6 +227,13 @@ public func parsePushMessage(_ data: Data) -> PushMessage? {
         guard let turnId = rawTurn["turnId"] as? String else { return nil }
         turn = PushTurn(turnId: turnId, error: rawTurn["error"] as? String)
     }
+    var run: PushRun?
+    if let rawRun = object["run"] as? [String: Any] {
+        guard let runId = rawRun["runId"] as? String, let name = rawRun["name"] as? String else {
+            return nil
+        }
+        run = PushRun(runId: runId, name: name, reason: rawRun["reason"] as? String)
+    }
     return PushMessage(
         v: v,
         id: id,
@@ -215,6 +244,7 @@ public func parsePushMessage(_ data: Data) -> PushMessage? {
         sessionId: sessionId,
         title: title,
         ask: ask,
-        turn: turn
+        turn: turn,
+        run: run
     )
 }
