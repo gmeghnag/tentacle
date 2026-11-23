@@ -23,6 +23,7 @@ import {
   SubagentFailure,
   type Tool,
   type ToolProgressEvent,
+  shellIntent,
   toolLabel,
 } from "@tentacle/core";
 import {
@@ -272,7 +273,9 @@ export function childToolLabel(name: string, args: string): string {
     typeof obj[key] === "string" ? (obj[key] as string) : undefined;
   switch (name) {
     case "shell":
-      return `$ ${str("command") ?? ""}`.trimEnd();
+      // A described call reads as its intent sentence, like the parent's rows (owner 2026-11-23);
+      // no sentence → the command, as before.
+      return shellIntent(args) ?? `$ ${str("command") ?? ""}`.trimEnd();
     case "fs_read":
       return `Read ${str("path") ?? ""}`.trimEnd();
     case "fs_write":
