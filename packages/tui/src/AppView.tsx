@@ -41,6 +41,7 @@ import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
 import { VoiceStrip } from "./components/VoiceStrip.tsx";
 import { WorkflowRail } from "./components/WorkflowRail.tsx";
+import { WorkflowsLine } from "./components/WorkflowsLine.tsx";
 import { permissionAgentLine } from "./permission-ui.ts";
 import { rowTexts } from "./queued.ts";
 import { stripAnsi } from "./render-lines.ts";
@@ -83,6 +84,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     listView,
     capsShown,
     workflowRail,
+    workflowsAtRest,
     shown,
     dockView,
     drawer,
@@ -157,6 +159,12 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
                 nothing paints (no run, an ended one, a panel's slot, a short
                 terminal). */}
             {workflowRail === null ? null : <WorkflowRail lines={workflowRail} columns={columns} />}
+            {/* The project's workflows AT REST (docs/feat/workflows-ui.md D8,
+                slice 2b): the same slot, only while no run is in flight — the
+                rail above speaks for a run, and the two never both paint. Its
+                ONE row is inside `activeRows` (`catalogueHeight`), so a turn
+                ending or `/workflow` closing never moves the input. */}
+            {workflowsAtRest === null ? null : <WorkflowsLine line={workflowsAtRest} />}
             {/* Queued messages sit where a sent message would (right under the
                 conversation); the thinking/working line stays just above the
                 input, under them (owner, 2026-10-25). */}

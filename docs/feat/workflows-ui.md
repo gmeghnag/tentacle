@@ -1533,6 +1533,148 @@ Changelog: the TUI sentence appended to the existing one-bullet `changelog.d/wor
 `/workflow` panel with a pinned `runId` other than the live one is supported by the model but no
 key selects an older run yet (the panel shows the run in flight, else the newest).
 
+### Slice 2b — TUI: the project's workflows, automatically (D8)
+
+*— claude-sonnet-4-5 (executor), 2026-11-24*
+
+**Load-bearing check re-run first (PARTIAL rule) — PASSES.** `RemoteSession.workflowCatalogue`
+exists (`packages/client/src/remote-session.ts:1333`, `packages/tui/src/app-types.ts:378`) and
+slice 2's rail is mounted (`packages/tui/src/AppView.tsx:159`, `app-layout.ts:294`).
+
+**What changed, in dependency order.**
+
+1. **Pure module (`packages/tui/src/workflow-view.ts`, +~380 lines).** `catalogueState` (the wire's
+   own facts → one of four WORDS: `needs approval` / `invalid` / `unknown` / `approved`; an `ok`
+   row whose store said nothing is `unknown`, never a false `approved`), `catalogueOrder` (needs
+   approval → invalid → unknown → approved, by name inside each), `catalogueLine` (tiers at 100 and
+   60 cols; `assemble` keeps whole names and counts the rest `+k`, never a cut name),
+   `elsewhereLine` (`~`-shortened, cut in cells), `workflowsLine`/`catalogueRows` (the frame's
+   decision: null behind a panel/dialog/palette, while a run is in flight, or when the terminal
+   cannot spare the row), `startCommandFor` (start pinned to the hash / prefill the required inputs
+   / refuse an invalid file), `catalogueRowFor`, `catalogueSection` (the panel's section),
+   `catalogueRefresh` (the coalescing reducer).
+2. **The fetch (`packages/tui/src/useCatalogue.ts`, new).** ONE read at D8's triggers — mount/open,
+   a turn SETTLING (`running`'s falling edge, never its rise), a run ending, an approval ANSWERED,
+   `/workflow` — no watcher and no polling. `catalogueRefresh` is the rule and this hook only
+   executes it: one request in flight, one scheduled, so a burst is never a queue. An answer for a
+   session the TUI has left is dropped; a failed read keeps the last answer (stale beats flicker)
+   and the next trigger asks again. A session with no seam gets `undefined`, which paints nothing.
+3. **Layout (`app-layout.ts`).** `workflowCatalogue` + `home` are frame inputs; `workflowsAtRest`
+   and `catalogueHeight` join `activeRows`, `panelBodyTop`, `dockTop` and `statusRowY` in the same
+   position the rail occupies (`spacer → rail → at-rest line → queued/slot → dock → input → bar`).
+4. **Painting.** `components/WorkflowsLine.tsx` (new, one `<Text>`, tone from the projection) is
+   mounted in `AppView.tsx` right after the rail; the two can never both paint.
+5. **Panel (`panels/{types,workflow}.ts`, `usePanels.ts`).** `WorkflowPanel.catalogue` and
+   `workflowPanel(now, runs, runId, catalogue)`; `workflowPanelView` prepends `catalogueSection`'s
+   rows to the two-column view (so the section sits above the runs on every answer, including the
+   two with no run) while `start` still indexes the STEP list — the section's rows are `note`s, so
+   a click there is a no-op; `withWorkflowsData` carries the catalogue; `setCatalogueData` is the
+   one writer both paint sites go through.
+6. **`/workflow` (`commands/{workflow,context}.ts`, `App.tsx`).** The panel opens WITH the
+   catalogue, every `/workflow` asks for a re-read (coalesced), `run <name>` pins the catalogue
+   hash it holds (a file edited since is refused `changed`, 5a), a workflow whose required inputs
+   were never given pre-fills the command instead of starting half-specified, and an invalid file
+   says its first error. `App` owns the state, the ref the command reads, and the token a re-read
+   is asked by (`askCatalogue`, a stable callback over the live binding).
+
+**Drift from the Implementation (and why).**
+
+- **The fetch did not go into `useSessionLink.ts`.** The plan names that file, but its whole
+  contract is "this hook declares NO `useEffect`" (`useSessionLink.ts:21`) and `App`'s effect count
+  is pinned by `app-tidy-structure.test.ts` (22). D8's triggers are five independent render VALUES,
+  not session-link latches, so they live in a leaf hook (`useCatalogue.ts`) — same seam, one file
+  the plan did not name, named here rather than smuggled in.
+- **`catalogueView` became `CatalogueView`** (`WorkflowCatalogueResult | {unsupported:true} |
+  undefined`) and is declared once, in `workflow-view.ts`; `app-types.ts` already exported the
+  wire result, so nothing new reached `@tentacle/client`.
+- **The panel's section is a PREFIX of `rows`, not a separate block.** A `PanelView` has one
+  `start`, and clicks resolve `start + bodyIndex`; a parallel section would have meant a second
+  index space in `panels/workflow.ts` for no gain. The section is unselectable (`note`), so the
+  click subtracts its length after refusing a non-`head` row.
+- **`followCatalogue` writes the panel through a late-bound ref** (`setCataloguePanelRef`), because
+  `usePanels` is declared BELOW the frame the catalogue feeds (the catalogue's row is part of the
+  layout's budget). That is the same late-binding pattern the file already uses for `pushNoticeRef`,
+  `runRef` and `openArtifactRef` — not a second source of truth (the state is the truth; the ref is
+  the writer).
+- **`/workflow`'s hint gained nothing.** I first added ` · run <name> starts one` to the panel's
+  hint when a section was present; slice 2's frames test pins that hint verbatim and the extra
+  words earn nothing (`/workflow run <name>` is already in the section's own last line), so the
+  hint is unchanged.
+- **`askCatalogue` is a separate stable callback** rather than passing `refreshCatalogueRef.current`
+  into the command context: the latter tripped `useExhaustiveDependencies` on `handleCommand`
+  (a ref read inside a `useCallback` body is a render-scope value to Biome). One `useCallback` over
+  the ref keeps the lint gate clean and the identity stable.
+
+**Tests (red first; every listed failure mode).**
+
+`packages/tui/test/workflow-view.test.ts` (+14: the four words from the wire's facts — including
+`unknown`, never a guessed `approved` — the ordering, the 120/80/50-col tiers with the width
+asserted in CELLS, `+k` arithmetic summing to the row count, `null` for all four "nothing to say"
+answers, `not versioned` on the widest tier only, the `elsewhere` hint's `~`/cut/negatives, the
+mounted line's three null cases plus its two tones, `startCommandFor`'s three shapes {hash, no
+hash, a required input WITH a default, prefill, refused}, `catalogueRowFor`, the panel section's
+rows/errors/paths/folder/`truncated`, the section's three empty answers said DIFFERENTLY, and the
+coalescing reducer's burst→one-extra→idle).
+
+`packages/tui/test/workflow-frames.test.tsx` (+9, real `App` at a real terminal size): the App
+paints the line exactly as `catalogueLine` projects it; **the input row is the SAME with and
+without the line** (the exact property); a run in flight replaces it and its end brings it back; a
+turn ending re-reads the catalogue exactly once and its START asks for none; a burst of `/workflow`
+while a read is held is ONE read plus ONE scheduled, never a queue; a row needing input PRE-FILLS
+the command (nothing sent, the blank line in the input, `needs input` said) and the same command
+filled in starts with the catalogue's hash; an invalid file is refused with its FIRST error and
+nothing sent; an older daemon's `unsupported` paints no line and `/workflow` says "update
+tentacle"; the section paints above the run with its errors, path, folder and not-versioned
+sentence; a terminal too short drops the line and nothing else.
+
+**Mutations (each run against the real code, then reverted from a file copy — never `git
+checkout`; every one went RED).**
+
+| # | Mutation | Red test |
+|---|---|---|
+| M1 | drop `catalogueHeight` from `activeRows` (`app-layout.ts`) | frames: "the input sits on the SAME row …" (both halves) and "a run in flight replaces it" |
+| M2 | re-read on every settle render (`wasRunning \|\| !running`) | "a turn ENDING re-reads the catalogue exactly once (not on its start)" |
+| M3 | drop the coalescing in `refreshCatalogue` (read on every trigger) | "a burst of triggers is ONE read plus ONE scheduled" — **was GREEN at first**, so that test was added and re-run against this mutation to prove it kills it |
+| M4 | `runFromCatalogue` returns `null` (no hash pinned) | "/workflow run\|stop\|resume send the action …" AND "a workflow needing input PRE-FILLS …" — **the second one was RED for a real reason**: D8's prefill path pinned no hash, so the fix (`return row.hash`, the catalogue's hash whether or not the inputs were typed) came out of this mutation |
+| M7 | the prefill path starts anyway (`if (false)`) | "a workflow needing input PRE-FILLS the command instead of starting half-specified" (nothing is sent is the assertion that fails) |
+| M5 | drop the `runActive` guard in `workflowsLine` | the pure "mounted line: null while a run is in flight …" and the frames "a run in flight replaces it" |
+| M6 | an empty catalogue returns `"◇ workflows  none yet"` | the pure "nothing to say → null" and the frames' mounted-line case |
+
+**Validation frames** (from `.tentacle/tmp/workflows-ui/frames2b.tsx`):
+```
+--- T6 line, 120 cols, 3 workflows
+◇ workflows  nightly v1 ? needs approval · broken ✗ invalid · task v3 ✓ approved  · not versioned   /workflow
+--- T7 line, 9 workflows at 120 / 80 / 50 cols
+◇ workflows  wf-0 v1 ? needs approval · wf-1 v1 ✓ approved · wf-2 v1 ✓ approved · wf-3 v1 ✓ approved · +5   /workflow
+◇ workflows  wf-0 v1 ? needs approval · wf-1 v1 ✓ · wf-2 v1 ✓ · wf-3 v1 ✓ · +5
+◇ 9 workflows · 1 needs approval · /workflow
+--- T8 /workflow Workflows section (120 cols)
+  ? nightly v1               needs approval
+  ✗ broken                   invalid
+      steps[0].run: missing
+      .tentacle/workflows/broken.yaml
+  ✓ task v3                  approved       · 2 steps
+  not versioned: git ignores this folder
+  in /tmp/work/.tentacle/workflows · /workflow run <name> to start one
+```
+
+**Gate (narrow, per the owner's token budget).** `bun test` on the 13 touched/covering TUI files
+(`workflow-view`, `workflow-frames`, `app-layout`, `app-view-structure`, `app-tidy-structure`,
+`commands-registry`, `panels-registry`, `app-panels-structure`, `app-commands`, `app`,
+`schedule-panel-frames`, `keys-layers`, `keys-route`): **346 pass, 0 fail**;
+`changelog-guard`: 5 pass. `tsc --noEmit -p packages/tui`: no error in any changed file
+(the one pre-existing `artifact-open.ts:95` under the package config is slice 2's, untouched here).
+`bunx biome check packages/tui/src packages/tui/test`: clean (406 files). The full `bun run check`
+is the orchestrator's script. No protocol change → no `schema:export`, no `protocol.d/` note.
+Changelog: the at-rest sentence appended to the existing one-bullet
+`changelog.d/workflows-ui.added.md` (same slug+category: one file, one bullet — the guard's I2
+passes).
+
+**Not done (deliberately):** nothing of 3, 4, 5b. The section has no cursor of its own (D8 was
+decided that way: the line summarizes, `/workflow run <name>` acts), so no key selects a catalogue
+row yet; starting one from the panel means typing the command, which is exactly what the prefill
+hands back.
+
 ## Review
 
 ### Owner answers (2026-11-23)

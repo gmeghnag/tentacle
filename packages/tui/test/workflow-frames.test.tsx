@@ -14,9 +14,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
-import type { WorkflowRow, WorkflowStepRow } from "@tentacle/protocol";
+import type { WorkflowCatalogueResult, WorkflowRow, WorkflowStepRow } from "@tentacle/protocol";
 import { App, type SessionController } from "../src/App.tsx";
-import { railLines } from "../src/workflow-view.ts";
+import { catalogueLine, railLines, workflowsLine } from "../src/workflow-view.ts";
 import { renderAt } from "./real-term.tsx";
 import { inertSession } from "./session-stub.ts";
 
@@ -71,6 +71,30 @@ const ENDED: WorkflowRow = {
   steps: RUN.steps.map((s) => (s.state === "running" ? { ...s, state: "ok" } : s)),
 };
 
+/** The project's workflow files, as slice 5a's catalogue answers them. */
+const CATALOGUE: WorkflowCatalogueResult = {
+  dir: "/tmp/work/.tentacle/workflows",
+  workflows: [
+    {
+      name: "task",
+      path: ".tentacle/workflows/task.yaml",
+      ok: true,
+      version: 3,
+      approved: true,
+      hash: "a".repeat(64),
+      steps: [{ id: "plan", kind: "agent", where: "local" }],
+    },
+    {
+      name: "nightly",
+      path: ".tentacle/workflows/nightly.yaml",
+      ok: true,
+      version: 1,
+      approved: false,
+      hash: "b".repeat(64),
+    },
+  ],
+};
+
 const DETAIL = {
   attempt: 0,
   round: 0,
@@ -87,21 +111,52 @@ interface WorkflowApi {
   readonly reads: readonly string[];
   /** Push a new run list, as the daemon's `workflows` frame would. */
   readonly report: (rows: readonly WorkflowRow[]) => void;
+  /** Every `workflowCatalogue` READ this TUI made (the coalescing test counts them). */
+  readonly catalogueReads: number;
+  /** The next answer `workflowCatalogue` gives (a test swaps it mid-run). */
+  readonly setCatalogue: (answer: WorkflowCatalogueResult | { unsupported: true }) => void;
+  /** Answer the OLDEST held read (only with `holdReads`). */
+  readonly settleOne: () => void;
 }
 
 /**
  * A session whose run list this test drives: `onWorkflows` delivers the first
  * report at once (as the client's does), then whatever `report` sends.
  */
-function fake(rows: readonly WorkflowRow[], opts: { readonly noFeed?: boolean } = {}): WorkflowApi {
+function fake(
+  rows: readonly WorkflowRow[],
+  opts: {
+    readonly noFeed?: boolean;
+    /** No catalogue seam at all (a pod, an older daemon). */
+    readonly noCatalogue?: boolean;
+    /** `send` streams a real, settling turn (the re-read trigger's own test). */
+    readonly settles?: boolean;
+    /**
+     * Every read STAYS in flight until the test releases it (the coalescing
+     * property's own test): `settleOne` answers the oldest held read.
+     */
+    readonly holdReads?: boolean;
+    readonly catalogue?: WorkflowCatalogueResult | { unsupported: true };
+  } = {},
+): WorkflowApi {
   const actions: unknown[] = [];
   const reads: string[] = [];
+  const counts = { reads: 0 };
+  /** One resolver per held read: the test releases them in order. */
+  const pending: (() => void)[] = [];
   let listener: ((rows: readonly WorkflowRow[]) => void) | null = null;
+  let answer: WorkflowCatalogueResult | { unsupported: true } = opts.catalogue ?? CATALOGUE;
   const session = {
     ...inertSession(),
     async *send() {
-      // A turn that never yields: the App stays idle and no reply is painted.
-      yield* [] as never[];
+      // A turn that ends at once unless a test asks for a real one: the App goes
+      // running and settles, which is what a catalogue re-read is triggered by.
+      if (opts.settles !== true) {
+        yield* [] as never[];
+        return;
+      }
+      yield { type: "text" as const, delta: "ok" };
+      yield { type: "turn_end" as const, reason: "end_turn" as const };
     },
     watch: () => () => {},
     onWorkflows: (l: (rows: readonly WorkflowRow[]) => void) => {
@@ -121,6 +176,18 @@ function fake(rows: readonly WorkflowRow[], opts: { readonly noFeed?: boolean } 
     },
     ownsTurn: () => true,
     close() {},
+    ...(opts.noCatalogue === true
+      ? { workflowCatalogue: undefined }
+      : {
+          workflowCatalogue: () => {
+            counts.reads += 1;
+            return opts.holdReads === true
+              ? new Promise<WorkflowCatalogueResult | { unsupported: true }>((resolve) => {
+                  pending.push(() => resolve(answer));
+                })
+              : Promise.resolve(answer);
+          },
+        }),
     ...(opts.noFeed === true
       ? {
           // An older daemon (or a pod): the session has no run feed at all.
@@ -135,6 +202,15 @@ function fake(rows: readonly WorkflowRow[], opts: { readonly noFeed?: boolean } 
     actions,
     reads,
     report: (next) => listener?.(next),
+    get catalogueReads() {
+      return counts.reads;
+    },
+    setCatalogue: (next) => {
+      answer = next;
+    },
+    settleOne: () => {
+      pending.shift()?.();
+    },
   };
 }
 
@@ -289,8 +365,15 @@ describe("slice 2 TUI 2: the /workflow panel", () => {
     const api = fake([RUN]);
     const t = await mount(api);
     await t.line("/workflow run task branch=main");
+    // The catalogue's hash rides the start (slice 2b / D8): a file edited since
+    // the user saw it is refused `changed` (5a) instead of run as something else.
     expect(api.actions).toEqual([
-      { action: "start", name: "task", inputs: [{ name: "branch", value: "main" }] },
+      {
+        action: "start",
+        name: "task",
+        hash: "a".repeat(64),
+        inputs: [{ name: "branch", value: "main" }],
+      },
     ]);
     expect(t.frame()).toContain("Started workflow task.");
     await t.line("/workflow stop");
@@ -329,5 +412,227 @@ describe("slice 2 TUI 2: the /workflow panel", () => {
     expect(frame).toContain("Workflows are not supported by this session.");
     expect(frame).not.toContain("Workflow task");
     t.term.unmount();
+  });
+});
+
+describe("slice 2b (D8): the project's workflows at rest", () => {
+  const line = catalogueLine(CATALOGUE, 120) ?? "MISSING";
+
+  test("the App paints the catalogue line exactly as `workflowCatalogue` projects it", async () => {
+    // Non-vacuity first: the projection really names both files, with words.
+    expect(line).toBe("◇ workflows  nightly v1 ? needs approval · task v3 ✓ approved   /workflow");
+    const t = await mount(fake([], { catalogue: CATALOGUE }));
+    const frame = t.frame();
+    expect(frame).toContain(line);
+    // The at-rest line and the rail never both paint.
+    expect(frame).not.toContain("workflow task · 2/6");
+    t.term.unmount();
+  });
+
+  test("the input sits on the SAME row with and without the line (the exact property)", async () => {
+    const withLine = await mount(fake([], { catalogue: CATALOGUE }));
+    const frameA = withLine.frame();
+    const inputA = rowOf(frameA, "Type a task or /command");
+    expect(frameA).toContain(line);
+    expect(inputA).toBeGreaterThan(0);
+    withLine.term.unmount();
+
+    // No catalogue answer at all (no seam): nothing is painted…
+    const bare = await mount(fake([], { noCatalogue: true }));
+    const frameB = bare.frame();
+    const inputB =
+      rowOf(frameB, "Type a task /command") >= 0
+        ? rowOf(frameB, "Type a task /command")
+        : rowOf(frameB, "Type a task");
+    expect(frameB).not.toContain("◇ workflows");
+    // …and the input has NOT moved: the line's row came out of the transcript's
+    // viewport, not out of the input's slot (the property, not "height constant").
+    expect(inputB).toBe(inputA);
+    bare.term.unmount();
+  });
+
+  test("a run in flight replaces it; its end brings it back", async () => {
+    const api = fake([RUN], { catalogue: CATALOGUE });
+    const t = await mount(api);
+    const running = t.frame();
+    expect(running).toContain("workflow task · 2/6 · 1.2M/3M tok");
+    expect(running).not.toContain("◇ workflows");
+    const inputRunning = rowOf(running, "Type a task");
+
+    api.report([ENDED]);
+    await delay(80);
+    const ended = t.frame();
+    expect(ended).toContain(line);
+    expect(ended).not.toContain("workflow task · 2/6");
+    // The rail leaving and the line arriving is ONE swap inside the same budget:
+    // the input still sits where it did (within the rail's now-free rows).
+    expect(rowOf(ended, "Type a task")).toBeLessThanOrEqual(inputRunning);
+    t.term.unmount();
+  });
+
+  test("a turn ENDING re-reads the catalogue exactly once (not on its start)", async () => {
+    const api = fake([], { catalogue: CATALOGUE, settles: true });
+    const t = await mount(api);
+    // The open's own read, and nothing else yet.
+    const afterOpen = api.catalogueReads;
+    expect(afterOpen).toBe(1);
+
+    await t.line("hello", 300);
+    // A turn that yields no event still settles: exactly ONE more read, and the
+    // turn's START asked for none (the coalescing rule, counted).
+    expect(api.catalogueReads).toBe(afterOpen + 1);
+    t.term.unmount();
+  });
+
+  test("a burst of triggers is ONE read plus ONE scheduled, never a queue (coalescing)", async () => {
+    const api = fake([], { catalogue: CATALOGUE, settles: true, holdReads: true });
+    const t = await mount(api);
+    // The open's read is in flight and the fake holds it there.
+    expect(api.catalogueReads).toBe(1);
+    // Four more triggers land while it is in flight — through `/workflow`, which
+    // is one of D8's own triggers. Each asks, none starts a second read.
+    for (let i = 0; i < 4; i += 1) {
+      await t.line("/workflow", 40);
+      expect(t.frame()).toContain("Workflows");
+    }
+    expect(api.catalogueReads).toBe(1);
+    // The held read lands: the scheduled one starts — exactly ONE more.
+    api.settleOne();
+    await delay(60);
+    expect(api.catalogueReads).toBe(2);
+    // It lands with nothing pending: the count stays put (no third read).
+    api.settleOne();
+    await delay(60);
+    expect(api.catalogueReads).toBe(2);
+    t.term.unmount();
+  });
+
+  test("a workflow needing input PRE-FILLS the command instead of starting half-specified", async () => {
+    const needs: WorkflowCatalogueResult = {
+      dir: "/tmp/work/.tentacle/workflows",
+      workflows: [
+        {
+          name: "ship",
+          path: ".tentacle/workflows/ship.yaml",
+          ok: true,
+          approved: true,
+          hash: "c".repeat(64),
+          inputs: [
+            { name: "branch", required: true },
+            { name: "note", required: false },
+          ],
+        },
+      ],
+    };
+    const api = fake([], { catalogue: needs });
+    const t = await mount(api);
+    await t.line("/workflow run ship");
+    // Nothing was sent: the required value was never given.
+    expect(api.actions).toEqual([]);
+    // The input line holds the command with the blank waiting for the value…
+    expect(t.frame()).toContain("/workflow run ship branch=");
+    // …and the person is told why nothing ran.
+    expect(t.frame()).toContain("needs input");
+
+    t.term.unmount();
+
+    // Filled in from the start, the SAME command does start — pinned to the
+    // catalogue's hash, so a file edited meanwhile is refused rather than run.
+    const filled = fake([], { catalogue: needs });
+    const u = await mount(filled);
+    await u.line("/workflow run ship branch=main");
+    expect(filled.actions).toEqual([
+      {
+        action: "start",
+        name: "ship",
+        hash: "c".repeat(64),
+        inputs: [{ name: "branch", value: "main" }],
+      },
+    ]);
+    u.term.unmount();
+  });
+
+  test("an invalid workflow file is refused with its first error, and nothing is sent", async () => {
+    const broken: WorkflowCatalogueResult = {
+      dir: "/tmp/work/.tentacle/workflows",
+      workflows: [
+        {
+          name: "broken",
+          path: ".tentacle/workflows/broken.yaml",
+          ok: false,
+          errors: ["steps[0].run: missing"],
+        },
+      ],
+    };
+    const api = fake([], { catalogue: broken });
+    const t = await mount(api);
+    await t.line("/workflow run broken");
+    expect(api.actions).toEqual([]);
+    expect(t.frame()).toContain("steps[0].run: missing");
+    t.term.unmount();
+  });
+
+  test("an older daemon's `unsupported` paints no line at all", async () => {
+    const t = await mount(fake([], { catalogue: { unsupported: true } }));
+    const frame = t.frame();
+    expect(frame).not.toContain("◇ workflows");
+    expect(frame).not.toContain("no workflows here");
+    // `/workflow` still opens, and its section says to update tentacle.
+    await t.line("/workflow");
+    expect(t.frame()).toContain("update tentacle");
+    t.term.unmount();
+  });
+
+  test("/workflow paints the Workflows section above the run, with the folder and its errors", async () => {
+    const broken: WorkflowCatalogueResult = {
+      dir: "/tmp/work/.tentacle/workflows",
+      gitIgnored: true,
+      workflows: [
+        ...CATALOGUE.workflows,
+        {
+          name: "broken",
+          path: ".tentacle/workflows/broken.yaml",
+          ok: false,
+          errors: ["steps[0].run: missing"],
+        },
+      ],
+    };
+    const t = await mount(fake([RUN], { catalogue: broken }));
+    await t.line("/workflow");
+    const frame = t.frame();
+    // The section is ABOVE the run's columns.
+    expect(rowOf(frame, "nightly")).toBeLessThan(rowOf(frame, "plan"));
+    expect(frame).toContain("steps[0].run: missing");
+    expect(frame).toContain(".tentacle/workflows/broken.yaml");
+    expect(frame).toContain("not versioned");
+    expect(frame).toContain("/tmp/work/.tentacle/workflows");
+    t.term.unmount();
+  });
+
+  test("the line says nothing on a terminal too short to keep the transcript's floor", async () => {
+    const term = renderAt(
+      <App
+        createSession={() => fake([], { catalogue: CATALOGUE }).session}
+        permissions={new PermissionBroker()}
+        model="m"
+        cwd="/tmp/work"
+      />,
+      { columns: 120, rows: 9 },
+    );
+    await delay(60);
+    const frame = term.frame();
+    // The layout's decision (the pure grant) is what the frame follows: on this
+    // terminal the line yields to the transcript, and nothing else moves.
+    expect(
+      workflowsLine(CATALOGUE, 120, undefined, {
+        slotTaken: false,
+        runActive: false,
+        termRows: 9,
+        runningRows: 0,
+        inputBoxRows: 3,
+      }),
+    ).toBeNull();
+    expect(frame).not.toContain("◇ workflows");
+    term.unmount();
   });
 });

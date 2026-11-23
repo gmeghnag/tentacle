@@ -330,7 +330,7 @@ describe("S10: the view-model and the tree leave App.tsx", () => {
     // spacer and the running rows — exactly as `activeRows`/`dockTop` count them.
     expect(layout).toContain("const statusRowY =");
     expect(layout).toMatch(
-      /const statusRowY = viewport \+ 1 \+ workflowHeight \+ runningRows \+ dockHeight \+ inputBoxRows \+ 1;/,
+      /const statusRowY =\s*viewport \+ 1 \+ workflowHeight \+ catalogueHeight \+ runningRows \+ dockHeight \+ inputBoxRows \+ 1;/,
     );
     // …and the view never re-derives it.
     expect(code(view)).not.toContain("statusRowY");

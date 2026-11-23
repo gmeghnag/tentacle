@@ -13,12 +13,25 @@
  * an unknown state (a newer daemon's) is painted as its own word with a neutral
  * glyph, never coerced into one this build happens to know.
  */
-import type { WorkflowRow, WorkflowStepDetail, WorkflowStepRow } from "@tentacle/protocol";
+import { PROJECT_PATHS } from "@tentacle/core";
+import type {
+  WorkflowCatalogueResult,
+  WorkflowDefRow,
+  WorkflowRow,
+  WorkflowStepDetail,
+  WorkflowStepRow,
+} from "@tentacle/protocol";
 import type { DockTone } from "./background-list.ts";
-import { truncateCells } from "./cells.ts";
+import { cellWidth, truncateCells } from "./cells.ts";
 import { oneLine, paletteWindow } from "./commands.ts";
 import { formatDurationMs, formatTokens } from "./format.ts";
-import { type PanelKeyState, type PanelView, fit, wrapText } from "./tree-panel.ts";
+import {
+  type PanelKeyState,
+  type PanelView,
+  type PanelViewRow,
+  fit,
+  wrapText,
+} from "./tree-panel.ts";
 
 /**
  * The most step rows the rail shows before it windows around the active step. A
@@ -494,11 +507,17 @@ export function workflowPanelView(
   detail: WorkflowDetailState | null | undefined,
   width: number,
   maxBody: number,
+  catalogue?: CatalogueView,
 ): PanelView {
+  // The "Workflows" section (slice 2b / D8) sits ABOVE the runs on every answer —
+  // including the two that have no run: what the project HAS is the first thing
+  // the panel is for, and a session with no run still has files to start.
+  const section = catalogueSection(catalogue, width);
   if (data === undefined) {
     return {
       title: "Workflows",
       rows: [
+        ...section,
         {
           text: fit("  not supported by this computer's tentacle", width),
           kind: "note",
@@ -514,6 +533,7 @@ export function workflowPanelView(
     return {
       title: "Workflows",
       rows: [
+        ...section,
         {
           text: fit(
             "  No workflow run in this session. Start one with /workflow run <name>.",
@@ -557,7 +577,10 @@ export function workflowPanelView(
   const range = win.end - win.start < height ? ` · ${win.start + 1}–${win.end} of ${height}` : "";
   return {
     title: `Workflow ${oneLine(run.name)} · ${doneCount(run)}/${steps.length}`,
-    rows,
+    // The section is a PREFIX of `rows`, and `start` still indexes the STEP list:
+    // the section's rows are notes (never selectable), so `panels/workflow.ts`'s
+    // click subtracts `catalogueSection`'s own length to find the step.
+    rows: [...section, ...rows],
     hint: `↑↓ step · r rerun · o prompt/report · esc close${range}`,
     start: win.start,
   };
@@ -652,3 +675,413 @@ export function workflowReplyNotice(
 
 /** A `notice`-safe form of a step's id (a daemon's label, cut before it paints). */
 export const stepIdText = (id: string): string => fit(oneLine(id), 40);
+
+// --- the project's workflows, at rest (docs/feat/workflows-ui.md D8) --------------
+
+/**
+ * What the catalogue read answered, as this TUI sees it: the rows; `unsupported`
+ * (an older daemon — the panel says "update tentacle"); or `undefined` (no answer
+ * yet, or a session with no catalogue seam at all). Three DIFFERENT states, never
+ * one empty list: an empty project must not carry a permanent hint.
+ */
+export type CatalogueView = WorkflowCatalogueResult | { readonly unsupported: true } | undefined;
+
+/** The four ways a catalogue row can read — always a WORD (colour-blind safe). */
+export type CatalogueState = "needs approval" | "invalid" | "unknown" | "approved";
+
+/**
+ * A row's state, decided from the wire's own facts and never guessed: `ok:false`
+ * is invalid whatever else it carries; an `ok` row is approved only if the store
+ * said so (`approved:true`), needs approval if it said `false`, and is `unknown`
+ * when the daemon could not answer — a fourth word rather than claiming an
+ * approval nobody checked.
+ */
+export function catalogueState(row: WorkflowDefRow): CatalogueState {
+  if (!row.ok) {
+    return "invalid";
+  }
+  if (row.approved === true) {
+    return "approved";
+  }
+  return row.approved === false ? "needs approval" : "unknown";
+}
+
+/** Each state's glyph (the word is the meaning; the glyph only shortens it). */
+const CATALOGUE_GLYPH: Readonly<Record<CatalogueState, string>> = {
+  "needs approval": "?",
+  invalid: "✗",
+  unknown: "·",
+  approved: "✓",
+};
+
+/** The same four, as a panel row's semantic tone (the component colours it). */
+const CATALOGUE_TONE: Readonly<Record<CatalogueState, DockTone>> = {
+  "needs approval": "warn",
+  invalid: "error",
+  unknown: "subtle",
+  approved: "success",
+};
+
+/** How urgent a state is in the line: what needs the user surfaces first. */
+const CATALOGUE_RANK: Readonly<Record<CatalogueState, number>> = {
+  "needs approval": 0,
+  invalid: 1,
+  unknown: 2,
+  approved: 3,
+};
+
+/**
+ * The rows in the order the line (and the panel's section) lists them: what needs
+ * a person first (needs approval, then invalid, then unknown), then the approved
+ * ones — by NAME inside each, so two refreshes never reshuffle equal rows.
+ */
+export function catalogueOrder(
+  rows: readonly WorkflowDefRow[] | undefined,
+): readonly WorkflowDefRow[] {
+  return [...(rows ?? [])].sort((a, b) => {
+    const rank = CATALOGUE_RANK[catalogueState(a)] - CATALOGUE_RANK[catalogueState(b)];
+    return rank !== 0 ? rank : a.name.localeCompare(b.name);
+  });
+}
+
+/** The width at which the line drops the words and keeps glyphs (tiers, D8). */
+export const TIER_CATALOGUE_WORDS = 100;
+/** At or below this width it drops the names too and counts instead (60: no names fit). */
+export const TIER_CATALOGUE_NAMES = 60;
+
+/** One row as the line names it: `task v3` (the version only when it has one). */
+const catalogueName = (row: WorkflowDefRow): string =>
+  row.version === undefined ? row.name : `${row.name} v${row.version}`;
+
+/** The line's fixed head: the glyph says "these are workflow files", not a run. */
+const CATALOGUE_HEAD = "◇ workflows";
+/** Two spaces after the head when names follow it (the mockup's own spacing). */
+const CATALOGUE_HEAD_GAP = "  ";
+/** Where `/workflow` is offered, on the tiers that have room for it. */
+const CATALOGUE_HINT = "   /workflow";
+const CATALOGUE_SEP = " · ";
+
+/**
+ * `head + items + (+k)`, in the widest form that fits `width` cells — the full
+ * list WITH the hint first, then without it, then with entries dropped and `+k`
+ * counting them. Never a cut mid-name: a truncated row would name a workflow that
+ * may not exist.
+ */
+function assemble(
+  head: string,
+  gap: string,
+  items: readonly string[],
+  width: number,
+  hint: string,
+  sep: string,
+): string {
+  for (let shown = items.length; shown >= 0; shown -= 1) {
+    const kept = items.slice(0, shown).join(sep);
+    const more = shown === items.length ? "" : `${sep}+${items.length - shown}`;
+    const body = shown === 0 ? head : `${head}${gap}${kept}`;
+    const full = `${body}${more}`;
+    for (const candidate of [full + hint, full]) {
+      if (cellWidth(candidate) <= width) {
+        return candidate;
+      }
+    }
+  }
+  // Narrower than the head itself: the head, cut (it is a fixed phrase).
+  return truncateCells(head, width);
+}
+
+/**
+ * The at-rest line (D8, mockup TUI 1): the project's workflows as ONE summary.
+ * `null` when there is nothing to say — no answer, an older daemon, a session
+ * that cannot run workflows, or NO workflow files (an empty project carries no
+ * permanent hint; the `elsewhere` hint is `elsewhereLine`'s job).
+ *
+ * Tiers, widest first: `◇ workflows  task v3 approved · nightly v1 needs
+ * approval` → glyphs after the first row's word (`task v3 ✓ approved · nightly
+ * v1 ?`) → counts only (`◇ 9 workflows · 1 needs approval · /workflow`). Ignored
+ * by git: `· not versioned`, on the widest tier only (the panel says it in full).
+ */
+export function catalogueLine(cat: CatalogueView, width: number): string | null {
+  if (cat === undefined || "unsupported" in cat || cat.unavailable !== undefined) {
+    return null;
+  }
+  const rows = catalogueOrder(cat.workflows);
+  if (rows.length === 0) {
+    return null;
+  }
+  if (width <= TIER_CATALOGUE_NAMES) {
+    const need = rows.filter((r) => catalogueState(r) === "needs approval").length;
+    const bad = rows.filter((r) => catalogueState(r) === "invalid").length;
+    const head = `◇ ${rows.length} ${rows.length === 1 ? "workflow" : "workflows"}`;
+    const items: string[] = [];
+    if (need > 0) {
+      items.push(`${need} ${need === 1 ? "needs" : "need"} approval`);
+    }
+    if (bad > 0) {
+      items.push(`${bad} invalid`);
+    }
+    return assemble(
+      head,
+      CATALOGUE_SEP,
+      items,
+      width,
+      `${CATALOGUE_SEP.trimEnd()} /workflow`,
+      CATALOGUE_SEP,
+    );
+  }
+  const words = width >= TIER_CATALOGUE_WORDS;
+  const items = rows.map((row, i) => {
+    const state = catalogueState(row);
+    // Below the words tier only the FIRST row keeps its word: it is the one that
+    // needs the user (the order puts it there), and a glyph alone is unreadable
+    // for the rest at that width.
+    const glyph = CATALOGUE_GLYPH[state];
+    const tail = words || i === 0 ? ` ${glyph} ${state}` : ` ${glyph}`;
+    return `${catalogueName(row)}${tail}`;
+  });
+  const ignored = cat.gitIgnored === true && words ? "  · not versioned" : "";
+  return assemble(
+    CATALOGUE_HEAD,
+    CATALOGUE_HEAD_GAP,
+    items,
+    width,
+    `${ignored}${CATALOGUE_HINT}`,
+    CATALOGUE_SEP,
+  );
+}
+
+/** `~`-shortened for display (a home the host cannot name stays as it is). */
+function tilde(text: string, home: string | undefined): string {
+  if (home === undefined || home === "" || !text.startsWith(`${home}/`)) {
+    return text;
+  }
+  return `~${text.slice(home.length)}`;
+}
+
+/**
+ * The ONE line an empty catalogue earns when the workflows live HIGHER UP (D8 v5):
+ * `◇ no workflows here — ~/tentacle/.tentacle/workflows has 3 (start tentacle in
+ * ~/tentacle)`. Never actionable (Enter and `/workflow` cannot start anything
+ * from it) and never invented: it exists only when the read found files above.
+ */
+export function elsewhereLine(
+  cat: CatalogueView,
+  width: number,
+  home: string | undefined,
+): string | null {
+  if (cat === undefined || "unsupported" in cat || cat.unavailable !== undefined) {
+    return null;
+  }
+  if (cat.workflows.length > 0 || cat.elsewhere === undefined) {
+    return null;
+  }
+  const dir = tilde(cat.elsewhere.dir, home);
+  // The project root is that folder's own parent-of-parent (`<root>/.tentacle/workflows`).
+  const at = cat.elsewhere.dir.lastIndexOf(`/${PROJECT_PATHS.workflows}`);
+  const root = at > 0 ? tilde(cat.elsewhere.dir.slice(0, at), home) : dir;
+  const text = `◇ no workflows here — ${dir} has ${cat.elsewhere.count} (start tentacle in ${root})`;
+  return truncateCells(text, width);
+}
+
+/** What the frame must know before it can hoist the at-rest line into its budget. */
+export interface CatalogueGrant {
+  /** Something else owns the live area's slot (a panel, the palette, a dialog). */
+  readonly slotTaken: boolean;
+  /** A run is IN FLIGHT: the rail speaks for it, and the line would contradict it. */
+  readonly runActive: boolean;
+  /** The terminal's rows, and the rows already taken above the input. */
+  readonly termRows: number;
+  readonly runningRows: number;
+  readonly inputBoxRows: number;
+}
+
+/** Rows reserved below the transcript viewport (`app-layout.ts`'s own sum). */
+const CATALOGUE_RESERVED_ROWS = 4;
+
+/**
+ * The line the frame mounts: the catalogue's summary, or the `elsewhere` hint, or
+ * `null` when it must not paint. A run in flight, a taken slot, or a terminal too
+ * short to keep the transcript's floor all answer `null` — the frame's row
+ * arithmetic then reserves nothing and the input never moves.
+ */
+export function workflowsLine(
+  cat: CatalogueView,
+  width: number,
+  home: string | undefined,
+  grant: CatalogueGrant,
+): RailLine | null {
+  if (grant.slotTaken || grant.runActive) {
+    return null;
+  }
+  const text = catalogueLine(cat, width) ?? elsewhereLine(cat, width, home);
+  if (text === null) {
+    return null;
+  }
+  const room =
+    grant.termRows - (CATALOGUE_RESERVED_ROWS - 1 + grant.runningRows + grant.inputBoxRows);
+  if (1 + TRANSCRIPT_FLOOR > room) {
+    return null;
+  }
+  // The `elsewhere` hint is a fact about ANOTHER folder: dim, never a run's tone.
+  return { text, tone: catalogueLine(cat, width) === null ? "dim" : "subtle" };
+}
+
+/** The rows the at-rest line takes in the live area (`0` when it paints nothing). */
+export const catalogueRows = (line: RailLine | null): number => (line === null ? 0 : 1);
+
+// --- starting one from the catalogue (D8) ---------------------------------------
+
+/** What a catalogue row asks of the input line, or of the daemon. */
+export type CatalogueStart =
+  /** Start it now, pinning the hash the user saw (the daemon refuses `changed`). */
+  | { readonly kind: "start"; readonly name: string; readonly hash?: string }
+  /** It needs input: the line to put in the input, ready to fill in. */
+  | { readonly kind: "prefill"; readonly text: string }
+  /** It cannot be started, and why (its file's own errors, said once). */
+  | { readonly kind: "refused"; readonly text: string };
+
+/**
+ * What Enter (or `/workflow run <name>`) does with one catalogue row: a valid file
+ * with no REQUIRED input (a required input with a default is not required of the
+ * person) starts at once, pinning its hash; a required one pre-fills the command
+ * instead of starting something half-specified; an invalid file says its errors.
+ */
+export function startCommandFor(row: WorkflowDefRow): CatalogueStart {
+  if (!row.ok) {
+    const why = row.errors?.[0];
+    return {
+      kind: "refused",
+      text:
+        why === undefined
+          ? `${oneLine(row.name)} is not a valid workflow`
+          : `${oneLine(row.name)} is not a valid workflow: ${oneLine(why)}`,
+    };
+  }
+  const required = (row.inputs ?? []).filter((i) => i.required && i.default === undefined);
+  if (required.length > 0) {
+    const pins = required.map((i) => `${i.name}=`).join(" ");
+    return { kind: "prefill", text: `/workflow run ${row.name} ${pins}` };
+  }
+  return { kind: "start", name: row.name, ...(row.hash === undefined ? {} : { hash: row.hash }) };
+}
+
+/** The row `/workflow run <name>` names, or undefined (the daemon decides anyway). */
+export function catalogueRowFor(cat: CatalogueView, name: string): WorkflowDefRow | undefined {
+  if (cat === undefined || "unsupported" in cat) {
+    return undefined;
+  }
+  return cat.workflows.find((row) => row.name === name);
+}
+
+// --- the panel's Workflows section (D8, frame T8) --------------------------------
+
+/** How many catalogue rows the panel's section paints before `+k more`. */
+export const CATALOGUE_SECTION_MAX = 4;
+
+/**
+ * The `/workflow` panel's "Workflows" section, above the runs: every catalogue row
+ * with its version, approval WORD and step count; the invalid ones with their
+ * errors and YAML paths; the not-versioned sentence; and the folder it read.
+ * Painted rows only (no cursor of its own): the section is what the at-rest line
+ * summarizes, and `/workflow run <name>` is how one starts.
+ */
+export function catalogueSection(cat: CatalogueView, width: number): PanelViewRow[] {
+  if (cat === undefined) {
+    return [];
+  }
+  if ("unsupported" in cat) {
+    return [noteRow("  this daemon cannot list the project's workflows (update tentacle)", width)];
+  }
+  if (cat.unavailable !== undefined) {
+    return [noteRow(`  ${oneLine(cat.unavailable)}`, width)];
+  }
+  const rows = catalogueOrder(cat.workflows);
+  if (rows.length === 0) {
+    const hint =
+      cat.elsewhere === undefined
+        ? `  no workflow files in ${oneLine(cat.dir)}`
+        : `  no workflow files here — ${oneLine(cat.elsewhere.dir)} has ${cat.elsewhere.count}`;
+    return [noteRow(hint, width)];
+  }
+  const out: PanelViewRow[] = [];
+  const shown = rows.slice(0, CATALOGUE_SECTION_MAX);
+  const runs = rows.length - shown.length;
+  for (const row of shown) {
+    const state = catalogueState(row);
+    const steps =
+      row.steps === undefined
+        ? ""
+        : ` · ${row.steps.length} step${row.steps.length === 1 ? "" : "s"}`;
+    out.push({
+      text: fit(
+        `  ${CATALOGUE_GLYPH[state]} ${fit(oneLine(catalogueName(row)), 24).padEnd(24)} ${fit(state, WORD_COLS).padEnd(WORD_COLS)}${steps}`,
+        width,
+      ),
+      kind: "note",
+      selected: false,
+      dim: CATALOGUE_TONE[state] === "subtle",
+    });
+    for (const error of row.errors ?? []) {
+      out.push(noteRow(`      ${oneLine(error)}`, width));
+    }
+    if (!row.ok) {
+      out.push(noteRow(`      ${oneLine(row.path)}`, width));
+    }
+  }
+  if (runs > 0) {
+    out.push(noteRow(`  … +${runs} more`, width));
+  }
+  if (cat.truncated === true) {
+    out.push(noteRow("  more than the 64 files listed — the rest is not shown", width));
+  }
+  if (cat.gitIgnored === true) {
+    out.push(noteRow("  not versioned: git ignores this folder", width));
+  }
+  out.push(noteRow(`  in ${oneLine(cat.dir)} · /workflow run <name> to start one`, width));
+  return out;
+}
+
+/** A section line that is not selectable (a note, cut to the panel's width). */
+function noteRow(text: string, width: number): PanelViewRow {
+  return { text: fit(text, width), kind: "note", selected: false };
+}
+
+// --- when the catalogue is re-read (D8) ------------------------------------------
+
+/** The catalogue read's own state: at most ONE request in flight per session. */
+export interface CatalogueRefresh {
+  readonly inFlight: boolean;
+  /** A trigger landed while a read was in flight: read once more when it lands. */
+  readonly pending: boolean;
+}
+
+export const CATALOGUE_IDLE: CatalogueRefresh = { inFlight: false, pending: false };
+
+/** What asks for a re-read (D8's list, as data). */
+export type CatalogueTrigger =
+  /** The session opened or attached. */
+  | "open"
+  /** A turn ended: the model may have written or edited a file. */
+  | "turn_end"
+  /** A run ended: its approval state may have moved. */
+  | "run_end"
+  /** A `workflow_approve` ask was answered: the approval state changed. */
+  | "approval"
+  /** `/workflow` was typed. */
+  | "command";
+
+/**
+ * The read's state after one event: `trigger` starts a read (or, while one is in
+ * flight, schedules exactly ONE more — a burst of turn ends is one extra read,
+ * never a queue of them); `settled` starts the scheduled one, or goes idle. This
+ * is the whole coalescing rule, in ONE pure place.
+ */
+export function catalogueRefresh(
+  state: CatalogueRefresh,
+  event: "trigger" | "settled",
+): CatalogueRefresh {
+  if (event === "trigger") {
+    return state.inFlight ? { inFlight: true, pending: true } : { inFlight: true, pending: false };
+  }
+  return state.pending ? { inFlight: true, pending: false } : CATALOGUE_IDLE;
+}

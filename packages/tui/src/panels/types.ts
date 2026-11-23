@@ -18,6 +18,7 @@ import type { SkillsListView } from "../skills-panel.ts";
 import type { ToolEntryView } from "../tools-panel.ts";
 import { TREE_START, type TreeState } from "../tree-panel.ts";
 import { WORKFLOW_START, type WorkflowDetailState, type WorkflowState } from "../workflow-view.ts";
+import type { CatalogueView } from "../workflow-view.ts";
 
 /** A tree panel (`/mcp`, `/skills`, `/tools`): groups and an expandable cursor. */
 export type TreePanel =
@@ -91,6 +92,13 @@ export interface WorkflowPanel {
   readonly detail: WorkflowDetailState | null;
   /** When the rows were projected (the rail's live durations share it). */
   readonly now: number;
+  /**
+   * The project's workflows (docs/feat/workflows-ui.md D8, slice 2b): the
+   * "Workflows" section ABOVE the runs, from `session/workflow_catalogue`.
+   * `undefined` = not read (yet, or this session has no such read) — never
+   * "the folder is empty", which is what an absent section would claim.
+   */
+  readonly catalogue?: CatalogueView;
 }
 
 export type OpenPanel = TreePanel | SessionsPanel | ArtifactsPanel | SchedulesPanel | WorkflowPanel;
@@ -128,15 +136,21 @@ export const toolsPanel = (data: readonly ToolEntryView[] | null = null): TreePa
   tree: TREE_START,
 });
 
-/** The `/workflow` panel (docs/feat/workflows-ui.md D3): the runs, or `undefined` until one is reported. */
+/**
+ * The `/workflow` panel (docs/feat/workflows-ui.md D3): the runs, or `undefined`
+ * until one is reported — plus (slice 2b / D8) the project's own catalogue, which
+ * the panel paints as its "Workflows" section above the runs.
+ */
 export const workflowPanel = (
   now: number,
   data: readonly WorkflowRow[] | undefined = undefined,
   runId?: string,
+  catalogue?: CatalogueView,
 ): WorkflowPanel => ({
   kind: "workflow",
   data,
   ...(runId === undefined ? {} : { runId }),
+  ...(catalogue === undefined ? {} : { catalogue }),
   state: WORKFLOW_START,
   detail: null,
   now,

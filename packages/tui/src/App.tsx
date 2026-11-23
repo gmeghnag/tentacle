@@ -82,6 +82,7 @@ import {
 } from "./permission-ui.ts";
 import type { ScheduleDockRow } from "./schedule-view.ts";
 import { useAttachments } from "./useAttachments.ts";
+import { useCatalogue } from "./useCatalogue.ts";
 import { useDock } from "./useDock.ts";
 import { useHop } from "./useHop.ts";
 import { useMouse } from "./useMouse.ts";
@@ -93,7 +94,7 @@ import { useVoice } from "./useVoice.ts";
 import { VOICE_DEFAULTS, dictationInsertion } from "./voice-session.ts";
 import { voiceGhost, voiceStripView } from "./voice-view.ts";
 import { tryWake } from "./wake-gate.ts";
-import { currentRun } from "./workflow-view.ts";
+import { type CatalogueView, currentRun } from "./workflow-view.ts";
 
 export type { AutoAcceptFeed, AutoAcceptSharedFeed };
 
@@ -600,6 +601,17 @@ export function App({
   const { scheduleRows, schedulesRef, setSchedules, ownScheduleDeletesRef, deleteSchedule } =
     dockLayer;
   const { workflowRows, workflowsRef, setWorkflows } = dockLayer;
+  // The project's workflows (docs/feat/workflows-ui.md D8 / slice 2b): the last
+  // catalogue answer, the ref a non-render caller reads, and the token `/workflow`
+  // and an answered approval bump to ask for a fresh read.
+  const [workflowCatalogue, setCatalogue] = useState<CatalogueView>(undefined);
+  const workflowCatalogueRef = useRef<CatalogueView>(undefined);
+  workflowCatalogueRef.current = workflowCatalogue;
+  const [workflowCatalogueToken, setCatalogueToken] = useState(0);
+  /** The `/workflow` panel's catalogue writer, set where `usePanels` declares it. */
+  const setCataloguePanelRef = useRef<(cat: CatalogueView) => void>(() => {});
+  /** The input's text writer, for a command that hands back a prepared line (D8). */
+  const fieldSetRef = useRef<(text: string) => void>(() => {});
   const { dockOutcomeRef, dockFinishedRef, dockStoppedRef } = dockLayer;
   const { jobOutputRef, setJobOutputGen, jobReadAtRef } = dockLayer;
   const { dock, dockRef, setDock, dockIds, dockVisible } = dockLayer;
@@ -947,6 +959,37 @@ export function App({
   const voicePhaseRef = useRef(voice.model.phase);
   voicePhaseRef.current = voice.model.phase;
 
+  /**
+   * The project's workflows at rest (docs/feat/workflows-ui.md D8 / slice 2b):
+   * ONE read, at the moments that can change it — no watcher, no polling. It is
+   * declared HERE because the line's ONE row is part of the layout's row budget
+   * (`app-layout.ts` counts it once), exactly as the rail's is. ONE write feeds
+   * both paint sites: the line (this state) and, if it is open, the panel.
+   */
+  const endedRunId = workflowRows?.find((run) => run.endedAt !== undefined)?.runId ?? null;
+  /**
+   * ONE answer, two paint sites: the at-rest line's state (a render) and, if it is
+   * open, the `/workflow` panel's section. The panel's writer is declared BELOW
+   * (with `usePanels`), so it travels through the ref every other late caller in
+   * this file already uses — a late binding, not a second source of truth.
+   */
+  const followCatalogue = useCallback((cat: CatalogueView) => {
+    setCatalogue(cat);
+    setCataloguePanelRef.current(cat);
+  }, []);
+  const { catalogue: catalogueNow, refreshCatalogueRef } = useCatalogue({
+    sessionRef,
+    sessionId: sessionRef.current?.sessionId ?? null,
+    running: st.running,
+    endedRunId,
+    commandToken: workflowCatalogueToken,
+    approvalPending: permission.pending?.kind === "workflow_approve",
+    catalogueRef: workflowCatalogueRef,
+    setCatalogue: followCatalogue,
+  });
+  /** The command port's re-read trigger: a STABLE callback over the live binding. */
+  const askCatalogue = useCallback(() => refreshCatalogueRef.current(), [refreshCatalogueRef]);
+
   const view = frameLayout({
     state: st,
     permission,
@@ -958,6 +1001,8 @@ export function App({
     jobRowsRef,
     scheduleRows,
     workflowRun: currentRun(workflowRows),
+    workflowCatalogue: catalogueNow,
+    home,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputRef.current,
@@ -1296,6 +1341,7 @@ export function App({
   warmErrorRef.current = (error: unknown) => pushNotice(warmFailureNotice(error));
 
   /** Put texts a send-now did not deliver back in the input field (after any draft), and say why. */
+  fieldSetRef.current = (text) => field.set(text);
   const restoreInput = useCallback(
     (text: string, why: string) => {
       if (text !== "") {
@@ -1418,6 +1464,7 @@ export function App({
     setSchedulesState,
     setSchedulesData,
     setWorkflowsData,
+    setCatalogueData,
     fetchWorkflowStep,
     rerunWorkflowStep,
     claimArtifactsPreview,
@@ -1437,6 +1484,8 @@ export function App({
     sessionRef,
     ownScheduleDeletesRef,
   });
+
+  setCataloguePanelRef.current = (cat: CatalogueView) => setCatalogueData(cat, Date.now());
 
   /**
    * The daemon's `schedules` report, for EVERY surface at once (cron-tool fix
@@ -1809,6 +1858,9 @@ export function App({
           sessionRef,
           schedulesRef,
           workflowsRef,
+          workflowCatalogueRef,
+          refreshCatalogue: askCatalogue,
+          prefill: (text) => fieldSetRef.current(text),
           stateRef,
           busyCompacting: () => compactingRef.current,
           syncingRef,
@@ -1842,6 +1894,7 @@ export function App({
       );
     },
     [
+      askCatalogue,
       askContext,
       attachCommand,
       clipboard,

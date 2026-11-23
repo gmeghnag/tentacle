@@ -20,8 +20,10 @@ import { NOTHING, consumed } from "../keys/contract.ts";
 import type { KeySnapshot } from "../keys/snapshot.ts";
 import type { PanelView, TreeAction } from "../tree-panel.ts";
 import {
+  type CatalogueView,
   type WorkflowDetailState,
   type WorkflowState,
+  catalogueSection,
   selectedStep,
   shownRun,
   workflowKey,
@@ -53,6 +55,7 @@ function view(panel: WorkflowPanel, at: PanelAt): PanelView {
     panel.detail,
     at.width,
     at.maxBody,
+    panel.catalogue,
   );
 }
 
@@ -77,14 +80,23 @@ export const workflowKind: PanelKind<WorkflowPanel> = {
           state: workflowMove(panel.state, action, workflowPanelRun(panel)?.steps.length ?? 0),
         }
       : panel,
-  click: (panel: WorkflowPanel, view: PanelView, bodyIndex: number): WorkflowPanel => {
+  click: (
+    panel: WorkflowPanel,
+    view: PanelView,
+    bodyIndex: number,
+    width: number,
+  ): WorkflowPanel => {
     const row = view.rows[bodyIndex];
     if (row?.kind !== "head") {
+      // The "Workflows" section's rows are notes: the section has no cursor of its
+      // own (`/workflow run <name>` is how one starts), so a click there is a no-op.
       return panel;
     }
-    const index = view.start + bodyIndex;
+    // The step rows follow the section in the same list; `start` indexes the steps.
+    const section = catalogueSection(panel.catalogue, width);
+    const index = view.start + bodyIndex - section.length;
     const count = workflowPanelRun(panel)?.steps.length ?? 0;
-    return index >= count ? panel : { ...panel, state: { cursor: index } };
+    return index < 0 || index >= count ? panel : { ...panel, state: { cursor: index } };
   },
   key: (panel: WorkflowPanel, snap: KeySnapshot): LayerStep => {
     const action = workflowKey(snap.char, snap.key);
@@ -164,16 +176,24 @@ export const withWorkflowDetail = (
  * the daemon's new runs, the clock re-stamped, and the cursor brought back in
  * range by `workflowMove`'s own clamp — with the fetched detail KEPT only while
  * its step still exists (a re-run replaces the attempt the report describes).
+ * The project's catalogue rides the same update (slice 2b / D8): its own answer
+ * lands independently of the run feed, and the section above the runs repaints.
  */
 export const withWorkflowsData = (
   panel: OpenPanel | null,
   rows: readonly WorkflowRow[] | undefined,
   now: number,
+  catalogue?: CatalogueView,
 ): OpenPanel | null => {
   if (panel?.kind !== "workflow") {
     return panel;
   }
-  const next: WorkflowPanel = { ...panel, data: rows, now };
+  const next: WorkflowPanel = {
+    ...panel,
+    data: rows,
+    now,
+    ...(catalogue === undefined ? {} : { catalogue }),
+  };
   const run = workflowPanelRun(next);
   const count = run?.steps.length ?? 0;
   const cursor = count === 0 ? 0 : Math.min(Math.max(0, panel.state.cursor), count - 1);

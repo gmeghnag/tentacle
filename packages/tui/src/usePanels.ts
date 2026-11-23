@@ -47,6 +47,7 @@ import {
 } from "./panels/workflow.ts";
 import type { ScheduleDockRow, SchedulesState } from "./schedule-view.ts";
 import type { SessionsState } from "./sessions-panel.ts";
+import type { CatalogueView } from "./workflow-view.ts";
 import {
   WORKFLOW_DETAIL_UNSUPPORTED,
   WORKFLOW_UNSUPPORTED,
@@ -126,6 +127,11 @@ export interface PanelsLayer {
    * the new runs, re-stamped, cursor clamped, detail dropped when its step moved.
    */
   setWorkflowsData(rows: readonly WorkflowRow[] | undefined, now: number): void;
+  /**
+   * The open `/workflow` panel's catalogue section (slice 2b / D8): its own
+   * answer, which lands on the section without touching the runs or the cursor.
+   */
+  setCatalogueData(catalogue: CatalogueView, now: number): void;
   /** Delete one scheduled wake; the row leaves on the daemon's own frame. */
   deleteSchedule(id: string, startedGen: number): void;
   /**
@@ -225,6 +231,18 @@ export function usePanels(host: PanelsHost): PanelsLayer {
   const setWorkflowsData = useCallback(
     (rows: readonly WorkflowRow[] | undefined, now: number) =>
       setPanel((p) => withWorkflowsData(p, rows, now)),
+    [setPanel],
+  );
+
+  /**
+   * An open `/workflow` panel's "Workflows" section follows the catalogue read
+   * (slice 2b / D8): the project's files, independently of the run feed.
+   */
+  const setCatalogueData = useCallback(
+    (catalogue: CatalogueView, now: number) =>
+      setPanel((p) =>
+        withWorkflowsData(p, p?.kind === "workflow" ? p.data : undefined, now, catalogue),
+      ),
     [setPanel],
   );
 
@@ -401,6 +419,7 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     setSchedulesData,
     setWorkflowState,
     setWorkflowsData,
+    setCatalogueData,
     fetchWorkflowStep,
     rerunWorkflowStep,
     claimArtifactsPreview,
