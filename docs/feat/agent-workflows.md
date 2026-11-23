@@ -1822,3 +1822,30 @@ the real APNs round trip is `apps/mobile/e2e/run.ts`'s territory and was not exe
 Same model as the executor of slices 5 and 7–9 (Opus; fresh context only).
 
 *— claude-opus-5-5, 2026-11-23*
+
+### Round 2
+
+**Verdict: PASS** (`git diff HEAD~1`, commit `0028b7c7`).
+
+- **#1 HIGH: fixed.**
+  - `authorize` now returns the approved `command` and `target`. The wiring reads them from
+    `outcome.input` through the tool's own schema (`readApprovedCall`).
+  - The step fails closed when the rewrite drops the command, does not parse, or names a target
+    that is not docker.
+  - The driver runs `authorized.command` and dials `authorized.target`. The driver never takes the
+    file's target when the wiring is used: `workload_shell`'s schema requires a target, so the
+    fallback in the driver is never reached.
+  - Mutations, each reverted:
+    - driver runs `action.text` → 2 fail (driver + real-hook wiring test);
+    - approved target ignored → 1 fail;
+    - `badTarget` guard disabled → 1 fail.
+- **#2 MEDIUM: fixed.**
+  - `readWhere` refuses `container` before any ask, and the field is gone from
+    `WorkflowWhere` / `WorkflowContainerTarget`. No caller of `where.container` is left.
+  - Mutation (guard disabled) → 1 fail. The file is still refused through the unknown-key path;
+    only the message differs, so the property holds either way.
+- **Regressions:**
+  - 588 pass / 0 fail across driver, wiring, spec, workflow-hosted, workflow-load and `packages/tools`.
+  - `bun run lint` and `bun run typecheck` are clean, and the tree is clean after the mutations.
+
+*— claude-opus-5-5, 2026-11-23*
