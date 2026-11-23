@@ -223,13 +223,22 @@ the orchestrator's `protocol:bump` at merge regenerates it again either way.
 | 2 | TUI rail + panel + `/workflow` (D3) | M · contained · standard review | `tui/src/{workflow-view (new),panel,useSessionLink,useDock,AppView}.ts(x)`, `tui/src/components/WorkflowRail.tsx` (new), `tui/src/panels/{workflow (new),registry}.ts`, `tui/src/commands/{workflow (new),registry}.ts`, `changelog.d/workflows-ui.added.md` |
 | 3 | iPhone list + graph ⇄ cards + approve (D4) | M · contained · standard review + e2e | `apps/mobile/src/{routes,hub-actions,workflow-runs-controller (new),workflow-run-controller (new),workflow-list,workflow-skeleton,permission-sheet}.ts`, `apps/mobile/src/screens/{WorkflowRuns,WorkflowRun}.tsx` (new), `apps/mobile/App.tsx`, `apps/mobile/src/screens/SessionScreen.tsx` (hub entry wiring only), e2e flow + seed |
 | 4 | iPhone morph + skeleton (D5) | M · contained · standard review + e2e | `apps/mobile/src/workflow-morph.ts` (`morphTable`), `apps/mobile/src/screens/WorkflowStep.tsx` (new, the layer), `WorkflowRun.tsx`, e2e flow |
+| 5a | Workflow catalogue + start-by-hash on the wire (D6, below) | M · cross-module (additive method + additive fields) · standard review | `protocol/src/{session,methods}.ts`, `protocol/schema/protocol.json` (regenerated), `cli/src/workflow-files.ts` (`listWorkflowSources`), `cli/src/wiring.ts` (pass `list` dep), `agent/src/workflow-driver.ts` (`catalogue`, `start{hash}`, `refusal`), `daemon/src/{hosted-session,connection}.ts`, `client/src/{workflows,remote-client,remote-session}.ts`, `cli/src/local-runtime.ts`, `tui/src/app-types.ts` |
+| 5b | iPhone "Start a workflow": catalogue + inputs form + start (D6) | M · contained · standard review + e2e | `apps/mobile/src/workflow-start.ts` (new, pure), `apps/mobile/src/workflow-start-controller.ts` (new, pure), `apps/mobile/src/screens/WorkflowStart.tsx` (new), `apps/mobile/src/routes.ts`, `apps/mobile/App.tsx`, `WorkflowRuns.tsx` (entry button), e2e flow + seed |
+
+Order: 1a → 1b → 2 → 3 → 4 → 5a → 5b. 5a/5b come after 4 only to keep one executor at a time;
+they depend on 1b (client) and 3 (routes/screens), not on 4 — the orchestrator may run them
+before 4 if the owner wants the start sooner (no file overlap with 4: 5b does not touch
+`WorkflowRun.tsx` or `workflow-morph.ts`).
 
 **PARTIAL rule (every slice):** the executor first re-runs the checks its slice stands on — 1a:
 `lb.ts`; 1b: `"WorkflowStep" in Method` true and the daemon answers it; 2: `RemoteSession.onWorkflows`
 / `workflow` / `workflowStep` exist and `local-runtime` passes them; 3–4: `RemoteClient.workflowList`
-and `RemoteSession.workflowStep` exist. If any is missing, write `### Slice N — PARTIAL` in
-Execution with the failing line and STOP — no screen without its data path. The chain stops on
-PARTIAL.
+and `RemoteSession.workflowStep` exist; 5a: `RemoteSession.workflow` exists (1b) and the driver's
+`inspect`/`prepare` are as cited in D6; 5b: `RemoteSession.workflowCatalogue` exists and a
+`start{hash}` with a stale hash is refused `changed` by the daemon. If any is missing, write
+`### Slice N — PARTIAL` in Execution with the failing line and STOP — no screen without its data
+path. The chain stops on PARTIAL.
 
 ### Failure modes (how each converges)
 
@@ -310,10 +319,166 @@ PARTIAL.
 2. **Starting a NEW run from the phone** — needs a list of workflow files (no such method today).
    *Recommend: not in this task*; the phone does stop / resume / rerun step / approve; start stays
    TUI `/workflow run` or the model. A `workflow/defs` method can follow with the editor task.
+   **→ Owner overruled: IN scope** (see Owner answers) — designed in D6, slices 5a/5b.
 3. **Phone labels in English** (the pure modules carry the mockup's Italian). *Recommend: English*,
    as the rest of the app.
 
+### D6 — Start a run from the phone (owner answer 23/11: in scope)
+
+*— claude-opus-5-5 (planner), 2026-11-23*
+
+**Load-bearing assumption for D6:** *the daemon can already validate, hash and approval-check a
+workflow without starting or asking anything; only enumerating the files and pinning the hash
+at start are missing.* Proved:
+- `WorkflowDriver.inspect(name, inputs)` validates the CURRENT file, hashes it and answers
+  `approved` with no run and no ask (`agent/src/workflow-driver.ts:391-412`); it rides `prepare`
+  (`:668-697`): `deps.load` → `validateWorkflow` with the session's `models`/agent types →
+  `workflowHash` over the YAML + the referenced prompts.
+- Validation errors are already strings that name their YAML path (`core/src/workflow-spec.ts:566-571`
+  "every problem is returned at once"; e.g. `steps[3].on_fail.goto: …`, D1 of agent-workflows);
+  `prepare` prefixes the file path (`workflow-driver.ts:684-686`).
+- Inputs are strings, `{required, default?}` (`core/src/workflow-spec.ts:69-72`, spec field
+  `inputs` `:155`); the daemon is the authority on them (`inputsProblem`, `workflow-driver.ts:234-244`:
+  unknown → refused, missing required → refused).
+- The loader reads only regular files under `<cwd>/workflows/`, never a symlink
+  (`cli/src/workflow-files.ts:1-56`), and the driver exists only on the worker and `serve`, never
+  tunnelled (`cli/src/wiring.ts:835-843`) — so every file the catalogue reads is the serve host's
+  own repo, never pod-supplied.
+- Missing today: nothing lists `workflows/*.yaml` (the loader takes one `name`,
+  `workflow-files.ts:37`); `session/workflow{start}` has no hash (`protocol/src/session.ts:884-891`),
+  so a start re-reads the file and would run an edit the user never saw; the start result has no
+  machine-readable refusal (`session.ts:917-924`: `ok`, `runId?`, `reason?`).
+
+**Design (additive only — no `PROTOCOL_VERSION` move, no `protocol.d/` note).**
+- **New method `session/workflow_catalogue`** (session-scoped: the catalogue is validated against
+  THAT session's `models`/agent types, and the run starts in that session). Params `{sessionId}`.
+  Result `{workflows: WorkflowDefRow[], truncated?: true, unavailable?: string(≤ 200)}`
+  (`unavailable` = this session cannot run workflows, e.g. tunnelled — distinct from an empty
+  folder), `WorkflowDefRow = {name: line(64),
+  path: line(512), ok: boolean, version?, description?: ≤ 500, hash?: sha-256 hex,
+  approved?: boolean, inputs?: [{name, required: boolean, default?: ≤ WORKFLOW_INPUTS_MAX_CHARS}]
+  ≤ 64, steps?: [{id, kind: line(16), model?, where: line(256), command?: ≤ 4096}] ≤ 64,
+  errors?: string(≤ 300)[] ≤ 20}` — `ok:false` rows carry `errors` and nothing else beyond
+  name/path. Model-free and deterministic: no LLM, no ask, no write; one directory walk.
+  Caps: ≤ 64 YAML files (beyond → `truncated`), the loader's existing per-file/byte caps.
+- `cli/src/workflow-files.ts`: `listWorkflowSources(cwd): Promise<WorkflowSource[]>` — ONE async
+  walk (`fs/promises`, so a big folder does not block the serve event loop the concurrent peer
+  shares, §7), the same no-symlink / regular-file / size rules, every top-level `<stem>.yaml`; a
+  stem that is not a workflow name becomes an `ok:false` row ("not a workflow name"), never a
+  silent skip. Missing `workflows/` → `[]`.
+- `agent/src/workflow-driver.ts`: dep `list?: () => Promise<WorkflowSource[]>` (wired in
+  `cli/src/wiring.ts` beside `load`, `:843`); `catalogue()` = for each source, the existing
+  `prepare` path (refactored to take a source instead of a name, no behaviour change) +
+  `approvals.has(path, hash)`; the `steps` summary is the spec's steps (the same facts
+  `stepsSummary` puts in the hash ask, `:247-255`, but uncapped per row so the phone shows every
+  `run` command in full BEFORE the approval).
+- **`session/workflow{start}` gains optional `hash`** (`WorkflowHashSchema`). Present and ≠ the
+  file's current hash → `{ok:false, refusal:"changed", reason:"workflows/x.yaml changed since you
+  opened it"}`, nothing asked, nothing run. Checked in `start` after `prepare`, before the slot
+  claim (`workflow-driver.ts:369-381`). Absent → today's behaviour (TUI `/workflow run`, the
+  model's tool).
+- **`WorkflowResultSchema` gains optional `refusal`** (bounded free word, never an enum):
+  `changed` | `running` (with the run id in `runId`) | `invalid` | `inputs` | `unavailable`
+  today; the driver's existing refusals get their word (`:362-367` running, `:370-371` invalid,
+  `:374-377` inputs, `:380` running). The UI branches on the word; the `reason` stays the text.
+- Version skew: a daemon that answers `workflow_catalogue` is by construction one that knows
+  `start{hash}` and `refusal` (same slice), so the phone offers Start ONLY after a successful
+  catalogue — an older daemon answers `MethodNotFound` → "Update tentacle on this computer",
+  and never receives a `hash` it would silently drop.
+- Client (`client/src/remote-client.ts`, `remote-session.ts`): `workflowCatalogue()` →
+  `WorkflowCatalogueResult | {unsupported:true}`, trust-gated on `daemonWakes` (refused locally
+  otherwise, like `workflow()`); `workflow({action:"start", name, inputs, hash})` reuses 1b's
+  minting path. Pass-through in `local-runtime.ts` + optional in `tui/src/app-types.ts` (the TUI
+  can complete `/workflow run <name>` from it later; not required here).
+
+**Hash approval from the phone — single broker, exactly as on the Mac (§7).** Nothing new on the
+approval path: the start is an ordinary `session/workflow{start}`; the driver asks the hash
+approval through the session's ONE requester (`workflow-driver.ts:762-778` →
+`deps.request` = `permissions.request`, `wiring.ts:848`); the phone receives it as a
+`permission_request` kind `workflow_approve` and answers through its existing sheet, which offers
+ONLY allow-once / deny (`apps/mobile/src/permission-sheet.ts:184`); auto-accept never answers it
+(`core/src/permission.ts:302-308`). On allow, the DAEMON records `{project, path, hash}` in the
+serve host's own store (`workflow-driver.ts:780-782`) — the same record a Mac answer writes; the
+phone stores nothing. This does not violate "never a lasting approval for pod-supplied input":
+the file is the serve host's own repo (the driver never exists on a tunnelled session), and the
+record is bound to the exact hash, so any edit asks again. The phone's start screen shows the
+full step list with every `run` command verbatim (from `steps[].command`) before the user taps
+Start, because the ask's own `detail` is capped at 2000 chars (`workflow-driver.ts:775`, see
+Notes).
+
+**Phone flow (5b).** Entry: `WorkflowRuns` gets a "Start a workflow" button when it was opened
+from a session (it has that `sessionId`); route `WorkflowStart {computerId, sessionId}`.
+- `apps/mobile/src/workflow-start.ts` (pure): `catalogueRows(result)` (valid first by name, then
+  invalid rows with their errors; `approved` → "Approved" / "Needs approval" — word + glyph, never
+  hue alone); `formFor(def)` (one field per input, prefilled with `default`, marked required);
+  `formProblems(def, values)` (required empty, value over `WORKFLOW_INPUTS_MAX_CHARS`, the whole
+  list over the 4 KiB JSON bound, control characters) — a hint only, the daemon decides;
+  `startParams(def, values)` (only declared names, `hash: def.hash`, empty optional fields left
+  out so the file's default applies); `afterRefusal(result)` → `reload` (changed) | `openRun`
+  (running, runId) | `showReason`.
+- `apps/mobile/src/workflow-start-controller.ts` (pure, injected session): load the catalogue on
+  focus/pull; Start disabled while the link is down, while a start is in flight, or when
+  `formProblems` is non-empty; on `ok` → navigate to `WorkflowRun {runId}` (the hash ask, if any,
+  arrives there as the normal sheet); on `changed` → reload the catalogue and keep the typed values
+  for inputs that still exist, banner "This workflow changed — review it again"; on `running` →
+  "Workflow X is already running" + Open run.
+- `apps/mobile/src/screens/WorkflowStart.tsx`: list → tap a valid row → detail (description, full
+  step list with verbatim commands, inputs form, Start); tap an invalid row → its errors verbatim,
+  each with its YAML path, no Start.
+
+**Failure modes (D6).**
+
+| Failure | Converges to |
+|---|---|
+| invalid YAML / unknown `schemaVersion` / bad reference | an `ok:false` row with every error and its YAML path; no Start; listing never throws for one bad file |
+| a stem that is not a workflow name, a symlink, an oversize file | an `ok:false` row ("not a workflow name" / "not a regular file") or skipped by the loader's caps with `truncated` — never a silent partial list without the flag |
+| file edited after listing (YAML or any prompt) | `start{hash}` refused `changed` before any ask; catalogue reloads; the user reviews the new steps |
+| file edited after start | irrelevant: the run holds the snapshot it hashed (agent-workflows D3 "Snapshot at start") |
+| a run already active (this or another client, the model, a schedule) | refused `running` with its run id → Open run; two simultaneous starts: the driver claims synchronously, the second gets `running` (`workflow-driver.ts:379-381`) |
+| hash approval denied / unanswered past `budget.wait` / run stopped first | the run ends `error: not approved…` / `stopped: timeout` / `stopped: cancelled` (`:784-801`); the run screen shows it |
+| offline when tapping Start | Start disabled; the form keeps its values |
+| link drops after Start was sent | never re-sent automatically; on resync the `workflows` snapshot shows the run if it started, else Start is enabled again (a duplicate tap is refused `running`, never a second run) |
+| `approved` flips meanwhile (approved from the Mac) | display only; the daemon decides at start |
+| pod session / older daemon / worker-only feature missing | `unsupported` or local refusal → "Update tentacle on this computer" / "Workflows run only on a laptop or serve session"; no Start button |
+| `models` name in the file not in this session | an `ok:false` row with the validator's error (it is checked against the session's list, `workflow-driver.ts:680-683`) |
+
+**Tests (red first; each names the property).**
+- 5a `cli/test/workflow-files.test.ts` additions: one walk lists every `*.yaml`; symlinked file
+  and symlinked `workflows/` refused; bad stem → error row; missing dir → `[]`; > 64 →
+  `truncated`.
+- 5a `agent/test/workflow-driver.test.ts` additions (fakes, `SpyBroker` pattern): `catalogue()`
+  returns valid rows with hash = `workflowHash` of the same bytes, `approved` from the fake store,
+  an invalid file's errors with their YAML path, and **asks nothing and starts nothing** (spy
+  broker sees zero requests); `start{hash: stale}` → `refusal:"changed"`, zero asks, no row
+  (mutation: drop the hash check → red); `start{hash: current}` on an unapproved hash → exactly ONE
+  `workflow_approve` ask through the ONE requester (mutation: a private requester → red);
+  `running` / `inputs` / `invalid` words on the existing refusals.
+- 5a `daemon/test/workflow-hosted.test.ts`: `session/workflow_catalogue` answered on a session
+  with a driver; on a tunnelled one (no driver) an explicit `refusal:"unavailable"`-style empty
+  answer, never a list that looks like "no workflows"; `protocol/test/json-schema.test.ts`
+  green after `schema:export`.
+- 5a `client/test/workflows-client.test.ts`: `workflowCatalogue` maps `MethodNotFound` →
+  `unsupported`; bit off → nothing sent; `start` carries `hash` and mints its turn.
+- 5b `apps/mobile/test/workflow-start.test.ts` (pure): defaults prefilled; required empty blocks;
+  optional empty is OMITTED (not `""`, which would override the file's default — mutation: send
+  `""` → red); undeclared names never sent; `changed` → reload with surviving values kept;
+  `running` → openRun with the id; Start disabled offline / in flight.
+- 5b e2e `apps/mobile/e2e/flows/43-workflow-start.yaml`: seed writes `project/workflows/demo.yaml`
+  (input `slug` required, `note` default) and a broken `project/workflows/broken.yaml`; shots:
+  (S1) catalogue with "Needs approval" and the broken row; (S2) broken row's errors with YAML path;
+  (S3) form with the default prefilled and Start disabled until `slug` is typed; (S4) hash-approval
+  sheet on the phone; (S5) run screen running after Allow once; then the seed edits `demo.yaml` and
+  the flow taps Start on the stale screen → (S6) "This workflow changed" banner. iOS 26 and 18:
+  `bun run e2e:mobile --ios 26 --only 43-workflow-start`.
+
 ### Notes / debt (deliberate)
+
+- **The hash ask's `detail` is capped at 2000 chars** (`workflow-driver.ts:775`), so a long
+  workflow's approval sheet can cut `run` commands — in tension with "verbatim `run` commands"
+  (Context). D6 mitigates on the phone (full list before Start); the TUI and a model-started run
+  still see the capped detail. Not fixed here (it is the agent loop's ask, load-bearing); proposed
+  as its own `fix/` task: raise the cap or end the detail with an explicit "… N more steps, see
+  `/workflow`" line.
 
 - No global key opens the TUI panel (the `keys/` contract tests make a new binding a cross-cutting
   change); `/workflow` and the palette do. A key can follow if asked.
