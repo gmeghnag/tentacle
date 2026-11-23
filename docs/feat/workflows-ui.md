@@ -230,15 +230,21 @@ the orchestrator's `protocol:bump` at merge regenerates it again either way.
 
 | # | Slice | Size · Blast · Suited | Files |
 |---|---|---|---|
-| 0 | Workflows live in `.tentacle/workflows/` + `.gitignore` exception (D7) | S · cross-module (approval-store keys, tool texts) · standard review | `core/src/workflow-spec.ts`, `cli/src/workflow-files.ts`, `agent/src/workflow-driver.ts` (comments), `tools/src/{workflow,schedule}.ts` (descriptions), `protocol/src/session.ts` (comment), the tests listed in D7, `.gitignore`, `AGENTS.md` §6 one line, `docs/feat/agent-workflows.md` (a dated note, not a rewrite) |
+| ~~0~~ | ~~(v3) workflows path constant~~ — **replaced by 0a + 0b (v4, D7 rewritten after the owner's review)** | | |
+| 0a | `core/src/project-paths.ts` (root resolution + `.tentacle/` children + the one inside/symlink check) + node adapter; migrate **workflows** (loader, messages, approvals key, tool texts) and the **tool-output** literal; `.gitignore` exception | M · cross-module (approval-store key, tool texts, a new core seam) · standard review | `core/src/project-paths.ts` (new), `core/src/index.ts`, `cli/src/project-fs.ts` (new, node adapter), `cli/src/workflow-files.ts`, `cli/src/workflow-approvals.ts`, `cli/src/wiring.ts` (root once, `:843-848`), `core/src/workflow-spec.ts` (messages), `agent/src/workflow-driver.ts` (comments), `agent/src/agent.ts:2973` (literal from core), `tools/src/{workflow,schedule}.ts` (texts), `protocol/src/session.ts:856` (comment), tests in D7, `.gitignore`, `AGENTS.md` §6 one line, a dated note in `docs/feat/agent-workflows.md` |
+| 0b | Migrate **`.tentacle/hide`** to `project-paths` (root file added, mount-folder file kept) | S · **load-bearing** (the container hide set — what a container must not read) · strong executor + mandatory fresh-context review | `cli/src/workspace-mount.ts` (`loadHideFile`, `resolveHideFile` anchor/walk split, `HIDE_FILE_LABEL`), `cli/src/engine-select.ts:373-385` (root + both files), their tests |
 | 2b | TUI: the project's workflows shown automatically (D8) | M · contained · standard review | `tui/src/workflow-view.ts` (`catalogueLine`, panel section), `tui/src/useSessionLink.ts`, `tui/src/AppView.tsx`, `tui/src/components/WorkflowRail.tsx` (or a sibling `WorkflowsLine.tsx`), `tui/src/panels/workflow.ts`, `tui/src/commands/workflow.ts` |
 
-**Order (v3): 0 → 1a → 1b → 5a → 2 → 2b → 3 → 4 → 5b.** 0 first: it moves the path every
-later slice reads and tests against. 5a moves before the TUI because 2b reads its catalogue (and
-its `gitIgnored` bit, D7); 2 and 2b stay apart so each is M. 5b still needs 3's routes. One
-executor at a time; PARTIAL rule as below, plus: 0 — `lb.ts` still as expected and
-`rg -n '"workflows"' packages/cli/src/workflow-files.ts` hits the join to move; 2b —
-`RemoteSession.workflowCatalogue` exists (5a) and slice 2's rail is mounted.
+**Order (v4): 0a → 0b → 1a → 1b → 5a → 2 → 2b → 3 → 4 → 5b.** 0a first: every later slice that
+touches a workflow file reads the root and the folder from it — 5a (`listWorkflowSources(root)`,
+`workflowsGitIgnored(root)`), 2b/5b (messages naming the folder), the e2e seeds of 3/5b (write
+under `findProjectRoot(serveCwd)` + `PROJECT_PATHS.workflows`, never a hand-written path). 0b
+depends only on 0a and nothing later depends on it; it goes second so the load-bearing change is
+reviewed alone, early. 1a/1b do not read the path. 5a before the TUI (2b reads its catalogue);
+5b needs 3's routes. One executor at a time; PARTIAL rule as below, plus: 0a — the D7 inventory
+`rg` still returns exactly the readers listed (a new one → STOP, update D7); 0b — 0a's
+`resolveInside` and `findProjectRoot` exist; 2b — `RemoteSession.workflowCatalogue` exists (5a)
+and slice 2's rail is mounted.
 
 **PARTIAL rule (every slice):** the executor first re-runs the checks its slice stands on — 1a:
 `lb.ts`; 1b: `"WorkflowStep" in Method` true and the daemon answers it; 2: `RemoteSession.onWorkflows`
@@ -312,7 +318,8 @@ path. The chain stops on PARTIAL.
   (T3) 64-step run windowed; (T4) `/workflow` panel, `review` selected; (T5) panel after `o`.
 - **iPhone (slices 3–4):** a new Maestro flow `apps/mobile/e2e/flows/42-workflow-shots.yaml` +
   a seed step (`seed.ts` gains `startWorkflow`, through its own `RemoteClient`, `seed.ts:9-13`)
-  that writes `project/workflows/demo.yaml` (an `agent` step on the mock model, a `run` step
+  that writes `demo.yaml` under `findProjectRoot(serveCwd)` + `PROJECT_PATHS.workflows` (v4: the
+  same functions the daemon uses, never a hand-written path) (an `agent` step on the mock model, a `run` step
   `echo ok`, an `approve` step) and starts it. Shots on iOS 26 and 18: (P1) hash-approval sheet
   showing the `run` command verbatim; (P2) Workflows list with "needs you" section; (P3) graph 2C
   with the running blink frame; (P4) cards 2A; (P5) approve card with Allow once / Deny; (P6)
@@ -370,7 +377,9 @@ at start are missing.* Proved:
   errors?: string(≤ 300)[] ≤ 20}` — `ok:false` rows carry `errors` and nothing else beyond
   name/path. Model-free and deterministic: no LLM, no ask, no write; one directory walk.
   Caps: ≤ 64 YAML files (beyond → `truncated`), the loader's existing per-file/byte caps.
-- `cli/src/workflow-files.ts`: `listWorkflowSources(cwd): Promise<WorkflowSource[]>` — ONE async
+- `cli/src/workflow-files.ts`: `listWorkflowSources(root): Promise<WorkflowSource[]>` (v4: `root`
+  from 0a's `findProjectRoot`, folder from `PROJECT_PATHS.workflows`, checks via `resolveInside(…,
+  "no-links")` — never its own path or symlink code) — ONE async
   walk (`fs/promises`, so a big folder does not block the serve event loop the concurrent peer
   shares, §7), the same no-symlink / regular-file / size rules, every top-level `<stem>.yaml`; a
   stem that is not a workflow name becomes an `ok:false` row ("not a workflow name"), never a
@@ -472,21 +481,170 @@ from a session (it has that `sessionId`); route `WorkflowStart {computerId, sess
   optional empty is OMITTED (not `""`, which would override the file's default — mutation: send
   `""` → red); undeclared names never sent; `changed` → reload with surviving values kept;
   `running` → openRun with the id; Start disabled offline / in flight.
-- 5b e2e `apps/mobile/e2e/flows/43-workflow-start.yaml`: seed writes `project/workflows/demo.yaml`
-  (input `slug` required, `note` default) and a broken `project/workflows/broken.yaml`; shots:
+- 5b e2e `apps/mobile/e2e/flows/43-workflow-start.yaml`: seed writes `demo.yaml`
+  (input `slug` required, `note` default) and a broken `broken.yaml` in the root's
+  `PROJECT_PATHS.workflows` (v4, as slice 3's seed); shots:
   (S1) catalogue with "Needs approval" and the broken row; (S2) broken row's errors with YAML path;
   (S3) form with the default prefilled and Start disabled until `slug` is typed; (S4) hash-approval
   sheet on the phone; (S5) run screen running after Allow once; then the seed edits `demo.yaml` and
   the flow taps Start on the stale screen → (S6) "This workflow changed" banner. iOS 26 and 18:
   `bun run e2e:mobile --ios 26 --only 43-workflow-start`.
 
-### D7 — The workflows' home is `.tentacle/workflows/` (owner 23/11 ~10:30)
+### D7 (v4) — ONE project-paths module: the project root, `.tentacle/` and its children (owner review 23/11 ~11:00)
+
+*— claude-opus-5-5 (planner), 2026-11-23 — v4 rewrite; the v3 "one constant" text is replaced,
+and the v3 "approvals re-asked" note is dropped (owner: no approval exists yet).*
+
+**Load-bearing assumption:** *every reader of a `.tentacle/` path in product code is one of
+exactly three — `workflows` (to be), `hide`, `tool-output` — so one module can own them all.*
+Proved by `rg -n '\.tentacle'` and `rg -n '"\.tentacle"|tool-output|"hide"'` over
+`packages/*/src`, `apps/*/src`, `apps/mobile/App.tsx`, `scripts` (run here, 23/11):
+- **hide** — `cli/src/workspace-mount.ts:252` (`HIDE_FILE_LABEL`), `:287` (the path:
+  `` `${source}/.tentacle/hide` ``, `source` = the MOUNT folder), the realpath-inside check
+  `:293-296`; caller `cli/src/engine-select.ts:373-385` (`source = real(input.cwd)`, read only
+  for a local, non-kubernetes, mounting engine); readers `:421-470` (`nodeHideFs`,
+  `nodeHideFileFs`). Comments `:265`, `:278`, `:487`, `:536-557`.
+- **tool-output** — `agent/src/agent.ts:2973`, a path RELATIVE to the confined `env`, used only
+  when the agent has no `toolOutput` sink (`:727-730`, `:2954-2957`). Every product agent gets a
+  sink: `cli/src/wiring.ts:592-593` (`outputs.forProject(config.cwd)`), passed at `:786`
+  (sub-agents) and `:1025` (the main `new Agent`, `:1011` — the only `new Agent(` in
+  `cli`/`daemon` src). So in product the literal is never reached; it is the library fallback.
+- **workflows** — none yet under `.tentacle/`: today `cli/src/workflow-files.ts:41`
+  `join(cwd, "workflows")`, returned paths `:47`, `:50`, `:55`.
+- Every other hit is NOT a `.tentacle/` path: `.tentacle-source.json`
+  (`config/src/packages.ts:18`), temp names (`exec/src/host-execution.ts:665`,
+  `cli/src/update.ts:93`, `cli/src/pod-install-dir.ts:90`, `scripts/install.sh:177-178`),
+  `relay.tentacle.so`, `so.tentacle.app`, a MIME type, mockup comments; the cache spill dir is
+  `<cache>/tentacle/tool-output` (`agent/src/tool-output.ts:123`, `:147`) — not in the project.
+- No `--cwd` flag exists (`rg -- '--cwd|"-C"|chdir' packages/cli/src` → only `git -C` in
+  `packages-cmd.ts:317-350`); the project is always the process cwd (`config.cwd`).
+
+**Root resolution — decision, with evidence.**
+`findProjectRoot(cwd, fs, {home})` →
+1. walk up from `cwd` (inclusive) for a `.git` entry (a directory OR a file — a worktree and a
+   submodule have a `.git` FILE); the first one found is the root (`how: "git"`);
+2. no `.git` → the nearest ancestor (inclusive) holding a `.tentacle` DIRECTORY (not a symlink)
+   (`how: "tentacle"`);
+3. neither → `cwd` (`how: "cwd"`).
+Both walks stop BEFORE `$HOME` and before `/`: neither is ever discovered as a root (only
+`cwd === home` makes home the root, by rule 3).
+Why, not "nearest `.tentacle/`" first:
+- **Worktrees prove it.** This very checkout, `…/tentacle/.tentacle/worktrees/workflows-ui`, has
+  a `.git` file and NO `.tentacle/` (`ls -a` at its root, 23/11). "Nearest `.tentacle/`" would
+  climb to `…/tentacle/` and read the MAIN checkout's workflows from a branch — wrong files,
+  approved against the wrong tree. The git rule gives the worktree's own root, whose
+  `.tentacle/workflows/` is that branch's versioned copy (the `.gitignore` exception below).
+- In a repo the git root is what a user calls "the project" (versioning, `.gitignore`, the
+  owner's `~/tentacle/apps/mobile` example → `~/tentacle`).
+- **Non-git dirs** (`~/assistant`): rule 2 lets `~/assistant/notes` find
+  `~/assistant/.tentacle/`; rule 3 keeps a lone folder self-contained. The `$HOME` stop prevents
+  a dotfiles `~/.git` or a stray `~/.tentacle` from turning every folder into one project.
+- A pure walk (lstat only), not `git rev-parse`: no process spawn, works without git installed,
+  same answer as git for work trees, worktrees and submodules.
+- **Pods/containers:** none of the three readers resolves inside a pod. Workflows: the driver
+  never exists on a tunnelled session (`cli/src/wiring.ts:839`). Hide: read on the HOST before the
+  container starts, local engines only (`engine-select.ts:377`). Tool-output fallback: not reached
+  in product (above). So the root is always a host path; nothing new is mounted or sent to a pod.
+
+**Design.**
+- NEW `packages/core/src/project-paths.ts` — pure (core has no `node:fs`: `rg 'from "node:fs'
+  packages/core/src` → none; I/O injected as `HideFs`/`HideFileFs` already are):
+  - `TENTACLE_DIR = ".tentacle"`; `PROJECT_PATHS = { workflows: ".tentacle/workflows",
+    hide: ".tentacle/hide", toolOutput: ".tentacle/tool-output" } as const` — the ONLY place the
+    folder and its children are spelled; labels/messages use them.
+  - `findProjectRoot(cwd, fs, {home}) → {root, how}` (above).
+  - `resolveInside(base, rel, fs, policy)` — the ONE escape/symlink check:
+    `policy: "no-links"` (no component from `base` down may be a symlink; what the workflow loader
+    does today, `workflow-files.ts:25-26`, `:49`, now over EVERY component incl. `.tentacle`) or
+    `"real-inside"` (links allowed if the realpath stays inside `base`; what hide does today,
+    `workspace-mount.ts:293-296`). Returns `{path, real}` | `{absent}` | `{problem}`.
+  - `ProjectFs` = `{lstat(path) → "dir"|"file"|"link"|"other"|undefined, realpath(path)}`.
+- NEW `packages/cli/src/project-fs.ts` — the node adapter (lstat/realpath, ENOENT/ENOTDIR →
+  undefined, as `nodeHideFileFs`, `engine-select.ts:446-458`).
+- **workflows (0a):** `wiring.ts` computes `const project = findProjectRoot(config.cwd, …)` ONCE
+  per agent build and hands `project.root` to `loadWorkflowSource` (`:843`), 5a's
+  `listWorkflowSources`, `workflowsGitIgnored`, and `workflowApprovals(configDir, root)` (`:848`;
+  the store's `project` key becomes `projectKey(root)`, `workflow-approvals.ts:78`). The loader
+  reads `<root>/${PROJECT_PATHS.workflows}` through `resolveInside(root, …, "no-links")`; recorded
+  `path` = `.tentacle/workflows/<name>.yaml` (root-relative). Validator messages
+  (`workflow-spec.ts:337-349`, `:777`, comments `:2`, `:106`, `:145`, `:172`) and tool texts
+  (`tools/src/workflow.ts:53`, `tools/src/schedule.ts:94`) built from `PROJECT_PATHS.workflows`.
+  The model writes files relative to ITS cwd, which may be a subfolder: the `workflow` tool's
+  `validate`/not-found answer names the ABSOLUTE folder searched (`<root>/.tentacle/workflows`),
+  so a file written in the wrong place is reported with where it must go.
+- **tool-output (0a):** `agent.ts:2973` builds its path from `PROJECT_PATHS.toolOutput`. Still
+  relative, still through `env.writeFile`, never root-resolved (the agent package has no host fs
+  and the env is confined).
+- **hide (0b):** `engine-select.ts` resolves `root = findProjectRoot(real(input.cwd))`. Read
+  (a) `<root>/.tentacle/hide` with `resolveInside(root, …, "real-inside")` — when `root` ≠ the
+  mount folder — and (b) `<mount>/.tentacle/hide` exactly as today (`loadHideFile(source, …)`).
+  The resolved sets are UNIONED (add-only, as the file's semantics already are,
+  `workspace-mount.ts:238-244`). For (a), `resolveHideFile` gets two roots: patterns ANCHORED at
+  `root` (they were written for the project), the walk BOUNDED to the mount folder (paths outside
+  it are not in the container; walking a whole monorepo from a small subfolder would hit
+  `HIDE_SCAN_CAP`, `:249`). A problem in either file refuses the start, as today (`:536`).
+  Labels say which file (`.tentacle/hide (project root)` / `.tentacle/hide`).
+- `.gitignore:28` `.tentacle/` → `.tentacle/*` + `!.tentacle/workflows/` (git cannot re-include
+  a child of an excluded DIRECTORY, hence `/*`). The executor proves every other child stays
+  ignored: `git check-ignore -v .tentacle/tmp/x .tentacle/worktrees/x .tentacle/mockups/x
+  .tentacle/tool-output/x .tentacle/hide` (all ignored) and `git check-ignore
+  .tentacle/workflows/x.yaml` (exit 1), pasted. `bun run lint` re-run (Biome honours the ignore
+  file, `biome.json:3`). `AGENTS.md` §6's "`.tentacle/` is gitignored" → "`.tentacle/*` is
+  gitignored except `.tentacle/workflows/`" (fact fix bundled with the code, §10).
+- **"Not versioned" notice** (unchanged from v3, now at the root): 5a's catalogue gains
+  `gitIgnored?: boolean` from `workflowsGitIgnored(root)` — `git check-ignore -q --
+  .tentacle/workflows/` (async spawn, argv only, cwd = root, 2 s timeout): exit 0 → `true`,
+  exit 1 → `false`, anything else → ABSENT (unknown, never claimed). Only on a catalogue call.
+
+**Every behaviour change (exhaustive).**
+
+| Reader | Before | After | Direction |
+|---|---|---|---|
+| workflows | `<cwd>/workflows/<n>.yaml`; approvals keyed `projectKey(cwd)` | `<root>/.tentacle/workflows/<n>.yaml`; keyed `projectKey(root)` (same approval from any subfolder); a symlinked `.tentacle` now refused too | the requested move + root resolution |
+| hide, `root` = mount folder (the common case: started at the repo root, or no git and no `.tentacle` above) | `<mount>/.tentacle/hide` | identical (one file, same checks) | none |
+| hide, started in a subfolder of a project | only `<mount>/.tentacle/hide` | that file AND `<root>/.tentacle/hide` (patterns anchored at root, walk bounded to the mount) | only MORE is hidden, never less; a broken root file now refuses the start (as a broken mount file does) |
+| tool-output | `.tentacle/tool-output/…` relative to the env | identical string, from core | none |
+| not touched | mount source (still `cwd`, `workspace-mount.ts:682`), session store `projectKey(cwd)`, spill store `forProject(config.cwd)` (`wiring.ts:593`) | — | — |
+
+**Failure modes.**
+
+| Failure | Converges to |
+|---|---|
+| started in a subfolder | same root, same workflows, same approvals, hide gains the root file |
+| a worktree / submodule | its own root (`.git` file), its own versioned workflows |
+| non-git `~/assistant/notes` with `~/assistant/.tentacle/` | root `~/assistant` |
+| `~/.git` (dotfiles) or `~/.tentacle` | never chosen (the `$HOME` stop); a non-git folder without its own `.tentacle` stays its own root |
+| `.tentacle` or `.tentacle/workflows` is a symlink | workflows: refused with the path; hide: allowed only if its realpath stays inside the root (as today) |
+| the model wrote a file under a subfolder's `.tentacle/workflows` | not loaded; the tool says the absolute folder it reads |
+| an unreadable ancestor during the walk | the walk stops there and takes the next rule (never throws at startup) |
+| root file + mount file both hide a path | union, deduped by realpath |
+
+**Tests (red first; fakes, no real fs except the adapter's own test).**
+- `core/test/project-paths.test.ts` (injected `ProjectFs`): git dir → its root; `.git` FILE
+  (worktree) → its root even when an ancestor has `.tentacle/` (mutation: prefer `.tentacle` →
+  red); no git + ancestor `.tentacle/` → that ancestor; neither → cwd; `~/.git` and `~/.tentacle`
+  never chosen (mutation: drop the `$HOME` stop → red); `/` never chosen; `resolveInside`
+  `no-links` refuses a link at ANY component (`.tentacle`, `workflows`, the file — mutation: check
+  the last only → red), `real-inside` accepts an inside link and refuses an escaping one.
+- `cli/test/project-fs.test.ts`: the adapter on a temp dir (ENOENT/ENOTDIR → undefined, a link
+  reported as `link`).
+- `cli/test/workflow-files.test.ts` + `workflow-wiring.test.ts:68,103-105,217-219`: a run started
+  from `<repo>/sub` loads `<repo>/.tentacle/workflows/x.yaml` (red today: it reads
+  `<repo>/sub/workflows`); the recorded `path` is root-relative; the old `workflows/` is not read.
+  `workflow-approvals.test.ts`: an approval from `<repo>` is found from `<repo>/sub`.
+- 0b `cli/test/workspace-mount.test.ts` / `engine-select*.test.ts` pattern: root == mount →
+  byte-identical hide set to today (pin with a fixture recorded BEFORE the change); subfolder
+  mount → root-file paths inside the mount are hidden, those outside it are not walked (scan
+  counter), the mount-folder file still applies (mutation: read only the root file → red — the
+  "never less hidden" property); a root file escaping by link → refused.
+- The fixtures that only feed a path (`agent/test/workflow-driver.test.ts:155,888,915,919,953`,
+  `daemon/test/workflow-hosted.test.ts:52,130,185`, `schedule-workflow.test.ts:101`,
+  `support/log-fixture.ts:104`) move to `.tentacle/workflows/…`; they are inputs, not proofs.
+
+### D7 (v3, superseded — kept for the trail)
 
 *— claude-opus-5-5 (planner), 2026-11-23*
 
-**Load-bearing assumption:** *the folder is named in exactly ONE code place, everything else is
-texts, comments and tests; nothing durable depends on it except the approval-store key.* Proved
-by `rg -n 'workflows/|"workflows"'` over `packages/*/src` (excluding the update type name):
 - the only path construction: `cli/src/workflow-files.ts:41` (`join(cwd, "workflows")`) and the
   recorded `path` it returns, `:47`, `:50`, `:55`;
 - texts/comments: `core/src/workflow-spec.ts:2`, `:106`, `:145`, `:172`, `:337`, `:345`,
@@ -509,9 +667,6 @@ by `rg -n 'workflows/|"workflows"'` over `packages/*/src` (excluding the update 
   guard now refuses a symlinked `.tentacle` AS WELL AS a symlinked `workflows`
   (`:49` checked only the last component; a linked `.tentacle` could point the reader outside the
   repo); recorded `path` = `${WORKFLOWS_DIR}/<name>.yaml`; same for 5a's `listWorkflowSources`.
-- Approval store: NO migration — the key changes with the path, so an approval given for
-  `workflows/x.yaml` simply does not match and the hash is asked again (the owner: no workflow
-  exists yet in his repos; a re-ask is the safe direction anyway, never a silent carry-over).
 - Tool descriptions (`workflow`, `schedule_create`) name `.tentacle/workflows/<name>.yaml`, so
   the model writes the file there.
 - `.gitignore:28` `.tentacle/` → `.tentacle/*` + `!.tentacle/workflows/` (git cannot re-include
@@ -533,7 +688,7 @@ by `rg -n 'workflows/|"workflows"'` over `packages/*/src` (excluding the update 
 
 **Failure modes.** Old `workflows/x.yaml` left in a repo → not found; the error says
 `no workflow x: .tentacle/workflows/x.yaml does not exist` (the user sees where it must be);
-symlinked `.tentacle` → refused like a symlinked `workflows`; old approval → re-asked; old logs
+symlinked `.tentacle` → refused like a symlinked `workflows`; old logs
 keep their old `path` (display only).
 
 **Tests (red first).** `cli/test/workflow-files.test.ts`: a file under `.tentacle/workflows/`
