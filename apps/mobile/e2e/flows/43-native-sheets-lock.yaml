@@ -74,14 +74,37 @@ appId: so.tentacle.app
     id: "tools-sheet"
 - assertNotVisible:
     id: "session-view"
-- runFlow:
-    file: _unlock.yaml
+# The picture of the property: only the cover, no sheet, no session.
+- takeScreenshot: 43-locked-cover
+# The unlock, inlined from `_unlock` with ONE change: it keys on the re-presented
+# SHEET, not on `app-content`. A presented `formSheet` hides its presenter's tree
+# from XCUITest (Step 0b; gate run 1795466539487: Tools on screen, `app-content`
+# never reported), so `_unlock`'s positive signal cannot appear while the sheet is
+# back — which is exactly what this flow expects. The sheet can only be up once
+# the cover is down: while locked the drain keeps the stack empty (asserted above).
+- runScript:
+    file: "faceid-enroll.js"
+- repeat:
+    times: 8
+    while:
+      notVisible:
+        id: "tools-sheet"
+    commands:
+      - runScript:
+          file: "faceid-match.js"
+      - extendedWaitUntil:
+          visible:
+            id: "tools-sheet"
+          timeout: 2500
+          optional: true
 # After the unlock the sheet is BACK, at its detent: `desired` survived the drain,
 # so `reconcile` re-pushed it in order.
 - extendedWaitUntil:
     visible:
       id: "tools-sheet"
     timeout: 20000
+- assertNotVisible:
+    id: "lock-screen"
 - runFlow:
     file: _shot.yaml
     env:
@@ -92,6 +115,12 @@ appId: so.tentacle.app
     notVisible:
       id: "tools-sheet"
     timeout: 10000
+# With the sheet gone the presenter is readable again: `_unlock`'s own positive
+# signal (the app is in, the cover is down) — the check it could not make above.
+- assertVisible:
+    id: "app-content"
+- assertNotVisible:
+    id: "lock-screen"
 # DAEMON truth (12c's rule): the app's own log records the dial that only happens
 # after a successful unlock, and throws if it does not.
 - runScript:

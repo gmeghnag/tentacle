@@ -68,9 +68,11 @@ describe("H4a: the sheet is handed the reveal's two seams", () => {
 describe("H4a: one opening path for Session info", () => {
   test("`openScheduled` goes through `openInfo` (never a second way in)", () => {
     const source = screen();
-    // The hub's item resolves the band from the sheet's OWN view-model first…
+    // The hub's item resolves the band from the wakes the session already knows of
+    // (the count the menu's Scheduled item is shown for) and the sheet's OWN
+    // view-model — a value that can predate the wake (Fix round (simulator))…
     expect(source).toContain(
-      "const openScheduled = () => openInfo(scheduledSection(info?.view ?? null));",
+      "openInfo(scheduledSection(info?.view ?? null, state.schedules?.length ?? 0));",
     );
     // …and `openInfo` is the only place that opens the sheet.
     expect(source).toMatch(/const openInfo = \(revealTo: SectionId \| null = null\) => \{/);

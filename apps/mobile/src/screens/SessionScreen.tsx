@@ -1084,7 +1084,8 @@ export function SessionScreen({
   // The hub's Scheduled item: Session info, scrolled to SCHEDULED WAKES — the one
   // place the wakes live and can be deleted, so the hub reaches it rather than
   // growing a second wakes screen.
-  const openScheduled = () => openInfo(scheduledSection(info?.view ?? null));
+  const openScheduled = () =>
+    openInfo(scheduledSection(info?.view ?? null, state.schedules?.length ?? 0));
   /**
    * Tools opened (D6): its controls always start fresh (a segment, a search and
    * an accordion are about the visit, not the session), and the controller is

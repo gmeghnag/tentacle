@@ -78,39 +78,66 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "42-tools-M"
-# An upward drag on the ONE scroller (F8: a nested pair scrolls the inner list and
-# the sheet stays put): medium → large.
+# At M the whole short list fits: its last control is on screen.
+- assertVisible:
+    id: "tools-refresh"
+# Every drag below is a SLOW coordinate drag on the PINNED HEAD, just under the
+# grabber (Fix round (simulator)). A `swipe from: id` is a flick from the
+# element's centre, which the scroller takes as a scroll, so the sheet never left
+# M in the gate run; and Tools' LIST does not expand the sheet even with a slow
+# drag (run 1795476170131: the list scrolled, the sheet stayed at M — an open
+# finding, see the doc), so the head carries the detent changes here.
+# Medium → large (M's head ≈ 53–60 %, L's ≈ 7–14 % of the screen).
 - swipe:
-    from:
-      id: "tools-scroll"
-    direction: UP
+    start: "50%, 56%"
+    end: "50%, 8%"
+    duration: 900
 - waitForAnimationToEnd
+# THE L PROOF: (4 %, 30 %) is the dimmed backdrop at M — a tap there dismisses
+# the sheet — and the sheet's own empty side margin at L. So the sheet is still
+# up after it only if it really is at L.
+- tapOn:
+    point: "4%,30%"
+- waitForAnimationToEnd
+- assertVisible:
+    id: "tools-sheet"
 - runFlow:
     file: _shot.yaml
     env:
       SHOT: "42-tools-L"
-# Two drags down: large → medium → small (Step 0 F1: a drag moves ONE step). At the
-# scroller's TOP there is nothing left to scroll, so the same drag on `tools-scroll`
-# is the sheet's own (the pair F8 recorded the other way round).
+# Large → medium → small: two slow drags DOWN, each starting on the pinned head
+# just under the grabber (L ≈ 7 %, M ≈ 53 % of the screen), so no scroller and no
+# refresh control takes them, each ending at the next detent's top edge.
 - swipe:
-    from:
-      id: "tools-scroll"
-    direction: DOWN
+    start: "50%, 9%"
+    end: "50%, 54%"
+    duration: 900
 - waitForAnimationToEnd
+- assertVisible:
+    id: "tools-refresh"
 - swipe:
-    from:
-      id: "tools-scroll"
-    direction: DOWN
+    start: "50%, 56%"
+    end: "50%, 74%"
+    duration: 900
 - waitForAnimationToEnd
+# At S (0.3) the sheet is still up but its list is cut: Refresh, on screen at M
+# and L, is below the fold — the proof the sheet really moved down a detent.
+- assertVisible:
+    id: "tools-sheet"
+- assertNotVisible:
+    id: "tools-refresh"
 - runFlow:
     file: _shot.yaml
     env:
       SHOT: "42-tools-S"
+# Back up (small → large), the same slow drag on the head (S's ≈ 73–80 %).
 - swipe:
-    from:
-      id: "tools-scroll"
-    direction: UP
+    start: "50%, 75%"
+    end: "50%, 8%"
+    duration: 900
 - waitForAnimationToEnd
+- assertVisible:
+    id: "tools-refresh"
 - tapOn:
     id: "tools-close"
 - extendedWaitUntil:

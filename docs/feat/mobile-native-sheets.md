@@ -1268,6 +1268,54 @@ fail at the same step, so a re-run adds no shot. Every PNG below was opened and 
 - Not attempted, by instruction or because nothing scripted them: L2 (the owner's on-device
   check), AX5, Reduce Motion, landscape, Permission over Tools, keyboard checks.
 
+### Fix round (simulator)
+
+*— claude-opus-5-5 (fix-round executor), 2026-11-24*
+
+**Result.** The six failed flows are green on a probe-free Release build: `scripts/e2e-gate.sh
+0B43D716… --only 08-permission,08c-permission-reply,25-session-info,34-hub-scheduled,42-native-sheets-shots,43-native-sheets-lock`
+→ **GATE PASS 6/6** (run `1795476170131`). After that run, `42` was made stricter (see 5):
+run `1795476998637` PASS. Every verdict below comes from a simulator run (screenshots,
+Maestro's hierarchy dump, or the app's own log read through the `log-file` hook). None comes
+from reading code alone. The probes were temporary `APP_LOG` lines (`probe …`) and a
+`99-probe-log.js` dump. They are all removed (`rg __probe|PROBE-FIXROUND` → no hit).
+
+| # | Symptom (validator) | Verdict | Evidence | Fix |
+|---|---|---|---|---|
+| 1 | Only M ever; a drag scrolls the content, not the sheet | **HARNESS** for Session info and Permission. **APP, open** for Tools' list (row 7) | Probe `1795473183450` (25): at M, a SLOW coordinate drag on the content (`85%→45%`, 900 ms) moved Session info **M → L** (`P1`). At L the same drag scrolled the list (`P3`). The gate's `swipe from: id` is a short flick from the element's centre. Maestro's `scrollUntilVisible` starts at the SCREEN's centre, which at M (top edge ≈ 52 %) is the dimmed backdrop | New `flows/_sheet-expand.yaml`: a slow drag from 85 % to 15 %. `42` drags the pinned HEAD for every detent change |
+| 2 | Permission never shows `perm-hold` after a blocked swipe | **HARNESS** | Probe `1795473321845` (08): after the drags the sheet sits at **S** (Deny is cut), so the note (under the options) is below the fold, and the old `scrollUntilVisible` hit the backdrop. In run `1795473632080`, `08` **passes**: two hard drags from the top edge → the sheet is still up → drag back to L → `perm-hold` visible. Observation: a backdrop TAP (`Q1`) did not show the note (as in Step 0 F3). Whether `gestureCancel` fires on a backdrop tap is not proven | `08`: `assertNotVisible perm-hold` BEFORE the swipe (non-vacuity), two drags (`54%→99%`, `74%→99%`), `_sheet-expand`, then `perm-hold`, `perm-later`, and the answer |
+| 3 | Session info and Permission do not scroll | **HARNESS** (the cause in 1) | As in 1. In `25`, `session-info-mcp-demo` is asserted NOT visible at M, then visible after `_sheet-expand`. **08c, a second harness fault:** Maestro's `hideKeyboard` touched the sheet and **sent the reply itself** (run `1795473632080`: the ask was gone and the row said `denied` before the flow's own tap) | `25`/`08c`: `_sheet-expand` before the first scroll. `08c`: no `hideKeyboard`. "Send reply" is reached with the keyboard UP, which is the property `docs/fix/mobile-e2e-1121.md` exists for |
+| 4 | After the unlock `_unlock` never finds `app-content` with the sheet re-presented | **HARNESS** | A presented formSheet hides its presenter's tree from XCUITest (Step 0b). Inside a single sheet its own ids ARE visible (probe `1795473183450`: `session-info-mcp-demo` and `-close` asserted visible) | `43` inlines the unlock, keyed on `tools-sheet` (it can only be back once the cover is down: the drain keeps the stack empty while locked, asserted before). It adds a `43-locked-cover` shot, asserts `lock-screen` not visible after the unlock, and asserts `_unlock`'s own `app-content` once the sheet is closed |
+| 5 | Maestro reports an on-screen sheet as not visible (`42`) | **APP** (misread: the failing assert was `notVisible tools-sheet` after `tapOn tools-close`; the × did not close the sheet) | Maestro tapped (399,520) = `tools-close` bounds `[387,508][412,533]`. The app log shows `pressIn`/`press` for Commands' ×, and **none** for Tools' ×. The hierarchy has the title `[27,508][412,535]` over the ×: without the drawn grabber (`native`) the title moves up onto the ×'s row, and since it is drawn after the ×, it takes the touch. Session info had the same fault (`25` stopped at `session-title-tap` because the sheet never closed) | `ui/Sheet.tsx`: `{closeGlyph}` is drawn LAST in both variants. Red-first: `native-sheets-wiring.test.ts` "the close glyph is drawn LAST…" (55 pass / 1 fail → 56/0) |
+| 6 | `34-hub-scheduled`: no "WAKEPING hub" row | **APP** (existed before this branch; the old full-height sheet hid it) | App log at the tap: `T=null`, sections `mod ses mcp ski`, 1 known wake (run `1795475314390`). Session info's value had been pulled before the wake existed and had no Scheduled band, so `scheduledSection` asked for no reveal → the route had no `reveal` → it opened at M on its top band, with no scroll | `scheduledSection(view, wakes)` (`session-info.ts`): when the session knows of any wake, it asks for `schedules`. `revealStep` still scrolls only once the band reports its y. Call site: `SessionScreen.openScheduled` passes `state.schedules?.length`. Red-first: `session-info-reveal.test.ts` (7/1 → 8/0). `34` now WAITS for the row with no flow scroll, so the pass is the reveal's |
+| 7 | (found here) Tools' LIST does not expand the sheet | **APP, open, not fixed** | Run `1795476170131`: after `_sheet-expand` on Tools, the shot named `42-tools-L` is at **M**. The list scrolled (scroll indicator visible, segments under the head). The same drag expands Session info and Permission. Likely cause, **unverified**: Tools is the only native sheet with a `RefreshControl` (`ToolsSheet.tsx:135`) | Not fixed: the fix is a product choice (drop pull-to-refresh, since Tools already has its Refresh link, or keep it and accept head-only expansion). `42` now drives Tools by its head and PROVES L (next row) |
+
+**What each flow now proves.**
+- `08`: the note is absent before the swipe. Two hard drags past the bottom do not dismiss the ask (the first option is still on screen). The note then appears, and `perm-later` and the answer are reachable. The approval runs the tool (daemon truth, unchanged).
+- `08c`: the sheet reaches L. The reply pill, the field and "Send reply" (with the keyboard up) are each scrolled to before they are touched. The words reach the model (`08c-reply.js`, unchanged).
+- `25`: the MCP band is NOT on screen at M and IS on screen after the drag (a real detent change). The rest is unchanged (switch daemon truth, the close glyph, the rename).
+- `34-hub-scheduled`: the reveal alone brings "WAKEPING hub" on screen. The flow does no scroll.
+- `42`: Commands at M, then Tools at M with Refresh visible. **L is proven**: after the head drag, a tap at (4 %, 30 %) leaves the sheet up. That point is the backdrop at M, where a tap dismisses Tools. Negative control: with the M → L drag removed, the flow fails
+  exactly there (run `1795477130523`: `tools-sheet is visible` false). M again: Refresh visible. **S is proven**: Refresh is NOT visible, while the sheet is still up. Then back to L, the close glyph, Session info at M, a live ask at M, and daemon truth.
+- `43`: unchanged up to the lock (cover up, no sheet, no session). Then the unlock brings the sheet back, the cover is down, and after the close `app-content` is visible. It ends on the dial log.
+
+**Guards (red before green, AGENTS §9).** `e2e-flows.test.ts` was updated with the new shapes
+(D5 swipe and its pre-swipe absence, expand-before-scroll for 08/08c/25, `_sheet-expand`'s
+slow drag, 42's UP/DOWN/DOWN/UP head drags, the L proof and the S proof, 43's inlined
+unlock and its post-close `app-content`). Run on the **old** flows (`bak-fix` copies) →
+**52 pass / 8 fail**, each on its own guard. On the fixed flows → **61 pass / 0 fail**.
+
+**Gate (narrow + mobile).** `bun test apps/mobile/test` → **4794 pass / 0 fail**, `tsc -p apps/mobile`
+clean, `biome check apps/mobile/{src,test,App.tsx}` clean. The full root `bun test`, root
+`tsc` and `bun run lint` were not run in this round (`bun run …` scripts needed an approval
+that was not given). The change touches only `apps/mobile`.
+
+**Drift.** The first 34 hypothesis ("the value is null at the first open") was disproved by
+the probe (`view=y n=1`). The rule was then rewritten on that evidence. `29`, `34-hub-tools`
+and `34-hub-info` were not re-run in this round, although `Sheet.tsx`'s close-glyph order
+changed under them (presentation only: the glyph is absolutely positioned, so no layout
+change). They should be checked in the next full gate.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-23 (fresh context; same model family as the S1/S2/S4/S5 executor, so shared blind spots are possible)*

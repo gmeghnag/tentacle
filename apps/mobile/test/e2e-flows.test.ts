@@ -749,6 +749,36 @@ describe("native sheets S6: a sheet's below-the-fold content is scrolled to", ()
     expect(tapAt).toBeGreaterThan(scrollAt);
   });
 
+  test("a flow drags the sheet to LARGE before its first scroll inside it", () => {
+    // Fix round (simulator): Maestro's `scrollUntilVisible` starts at the SCREEN's
+    // centre, which at the middle detent is the backdrop above the sheet — the
+    // scroll moved nothing (gate run 1795466539487: 08, 08c, 25). `_sheet-expand`
+    // is a slow drag on the sheet's one scroller, which takes it to L.
+    const firsts: readonly (readonly [string, string])[] = [
+      ["08c-permission-reply", "perm-reply"],
+      ["25-session-info", "session-info-mcp-demo"],
+      ["08-permission", "perm-hold"],
+    ];
+    for (const [flow, id] of firsts) {
+      const expandAt = flowIndexOf(flow, "- runFlow: _sheet-expand.yaml");
+      const scrollAt = flowIndexOf(flow, `- scrollUntilVisible:\n    element:\n      id: "${id}"`);
+      expect({ flow, expandFirst: expandAt < scrollAt }).toEqual({ flow, expandFirst: true });
+    }
+    // 25 proves the expand is a real detent change: the band is NOT on screen at M.
+    const notAtM = flowIndexOf(
+      "25-session-info",
+      '- assertNotVisible:\n    id: "session-info-mcp-demo"',
+    );
+    expect(notAtM).toBeLessThan(flowIndexOf("25-session-info", "- runFlow: _sheet-expand.yaml"));
+  });
+
+  test("`_sheet-expand` is a SLOW coordinate drag from low in the sheet to near the top", () => {
+    const body = readFileSync(join(FLOWS_DIR, "_sheet-expand.yaml"), "utf8");
+    expect(body).toMatch(
+      /- swipe:\n {4}start: "50%, (8\d|9\d)%"\n {4}end: "50%, (\d|1\d)%"\n {4}duration: (\d{3,})/,
+    );
+  });
+
   test("the sheet flows are the ones the task names, and they exist", () => {
     for (const name of SHEET_FLOWS) {
       expect(() => readFileSync(join(FLOWS_DIR, `${name}.yaml`), "utf8")).not.toThrow();
@@ -760,17 +790,25 @@ describe("native sheets S6: a sheet's below-the-fold content is scrolled to", ()
 describe("native sheets S6: D5's blocked swipe is driven, not assumed", () => {
   const body = readFileSync(join(FLOWS_DIR, "08-permission.yaml"), "utf8");
 
+  const SWIPE = '- swipe:\n    start: "50%, 54%"\n    end: "50%, 99%"';
+
   test("flow 08 swipes DOWN on the ask and asserts the held note", () => {
     // A native gesture is the only proof that `gestureEnabled:false` holds: the
     // unit tests pin the OPTION, not what UIKit does with a finger.
-    const swipeAt = body.indexOf('- swipe:\n    start: "50%, 55%"\n    end: "50%, 95%"');
-    const holdAt = body.indexOf('id: "perm-hold"');
+    const swipeAt = body.indexOf(SWIPE);
+    const holdAt = body.indexOf('- scrollUntilVisible:\n    element:\n      id: "perm-hold"');
     expect(swipeAt).toBeGreaterThan(-1);
     expect(holdAt).toBeGreaterThan(swipeAt);
   });
 
+  test("the note is NOT there before the swipe (or its presence after proves nothing)", () => {
+    const absentAt = body.indexOf('- assertNotVisible:\n    id: "perm-hold"');
+    expect(absentAt).toBeGreaterThan(-1);
+    expect(absentAt).toBeLessThan(body.indexOf(SWIPE));
+  });
+
   test("the swipe comes BEFORE the ask is answered (a held note is a pre-answer state)", () => {
-    const swipeAt = body.indexOf('- swipe:\n    start: "50%, 55%"\n    end: "50%, 95%"');
+    const swipeAt = body.indexOf(SWIPE);
     const answerAt = body.indexOf('- tapOn:\n    id: "perm-allow_once"');
     expect(answerAt).toBeGreaterThan(-1);
     expect(answerAt).toBeGreaterThan(swipeAt);
@@ -802,22 +840,33 @@ describe("native sheets S6: the lock gate with a sheet up (S3's L1, run here)", 
     expect(homeAt).toBeGreaterThan(sheetAt);
   });
 
+  // The unlock is inlined (Fix round (simulator)): `_unlock` keys on `app-content`,
+  // which a presented formSheet hides from XCUITest, so it keys on the sheet here.
+  const UNLOCK = 'file: "faceid-match.js"';
+
   test("the cover wins over the sheet: `lock-screen`, and no sheet in front", () => {
     // The exact property F5a failed: while the cover is up, the sheet's route is
     // GONE (the drain popped it), not merely hidden behind the cover.
     const lockAt = at('id: "lock-screen"');
     const notSheetAt = at('- assertNotVisible:\n    id: "tools-sheet"');
-    const unlockAt = at("- runFlow:\n    file: _unlock.yaml");
+    const unlockAt = at(UNLOCK);
     expect(lockAt).toBeGreaterThan(-1);
     expect(notSheetAt).toBeGreaterThan(lockAt);
     expect(notSheetAt).toBeLessThan(unlockAt);
   });
 
   test("after the unlock the sheet is BACK (the drain pops the route, `desired` survives)", () => {
-    const unlockAt = at("- runFlow:\n    file: _unlock.yaml");
+    const unlockAt = at(UNLOCK);
     expect(unlockAt).toBeGreaterThan(at('id: "lock-screen"'));
     const after = body.slice(unlockAt);
     expect(after).toMatch(/- extendedWaitUntil:\n {4}visible:\n {6}id: "tools-sheet"/);
+  });
+
+  test("once the sheet is closed the app is IN: `_unlock`'s own signal, after the sheet", () => {
+    const closedAt = at('- extendedWaitUntil:\n    notVisible:\n      id: "tools-sheet"');
+    const inAt = at('- assertVisible:\n    id: "app-content"');
+    expect(closedAt).toBeGreaterThan(at(UNLOCK));
+    expect(inAt).toBeGreaterThan(closedAt);
   });
 
   test("it ends on daemon truth, never on the screen it came back to", () => {
@@ -847,10 +896,36 @@ describe("native sheets S6: the sheet shots flow (Validation's evidence set)", (
   });
 
   test("it drags the sheet between detents (a shot of M alone says nothing about S/L)", () => {
+    // Fix round (simulator): slow COORDINATE drags on the pinned head (a `from: id`
+    // flick scrolled the list instead, and Tools' list does not expand the sheet).
+    const tools = body.slice(body.indexOf('SHOT: "42-tools-M"'), body.indexOf('SHOT: "42-info-M"'));
     const drags = [
-      ...body.matchAll(/- swipe:\n {4}from:\n {6}id: "tools-scroll"\n {4}direction: (UP|DOWN)/g),
-    ];
-    expect(drags.map((m) => m[1])).toEqual(["UP", "DOWN", "DOWN", "UP"]);
+      ...tools.matchAll(
+        /- runFlow: _sheet-expand\.yaml|- swipe:\n {4}start: "50%, (\d+)%"\n {4}end: "50%, (\d+)%"\n {4}duration: \d{3,}/g,
+      ),
+    ].map((m) =>
+      m[0].startsWith("- runFlow") ? "UP" : Number(m[2]) > Number(m[1]) ? "DOWN" : "UP",
+    );
+    expect(drags).toEqual(["UP", "DOWN", "DOWN", "UP"]);
+  });
+
+  test("L is proven, not named: a backdrop-at-M tap leaves the sheet up before the L shot", () => {
+    // Fix round (simulator): run 1795476170131 shot `42-tools-L` at M — the list
+    // drag scrolled the list, and `assertVisible tools-sheet` held at any detent.
+    const lShotAt = body.indexOf('SHOT: "42-tools-L"');
+    const tapAt = body.indexOf('- tapOn:\n    point: "4%,30%"');
+    expect(tapAt).toBeGreaterThan(body.indexOf('SHOT: "42-tools-M"'));
+    expect(tapAt).toBeLessThan(lShotAt);
+    const between = body.slice(tapAt, lShotAt);
+    expect(between).toContain('- assertVisible:\n    id: "tools-sheet"');
+  });
+
+  test("S is proven by what it cuts: Refresh is on screen at M, gone at S", () => {
+    const sShotAt = body.indexOf('SHOT: "42-tools-S"');
+    const goneAt = body.indexOf('- assertNotVisible:\n    id: "tools-refresh"');
+    expect(goneAt).toBeGreaterThan(body.indexOf('SHOT: "42-tools-L"'));
+    expect(goneAt).toBeLessThan(sShotAt);
+    expect(body.indexOf('- assertVisible:\n    id: "tools-refresh"')).toBeLessThan(goneAt);
   });
 
   test("every sheet it opens asserts that it opened", () => {

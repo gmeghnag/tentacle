@@ -312,6 +312,25 @@ describe("S4 — `Sheet`'s `native` variant (D4)", () => {
     expect(UI_SHEET).toContain("borderTopRightRadius: native ? 0 : radius.sheet");
   });
 
+  test("the close glyph is drawn LAST, above the title it shares a row with", () => {
+    // Fix round (simulator): without the drawn grabber (native) the title moves up
+    // onto the close glyph's row, and a full-width title drawn AFTER the glyph sits
+    // on top of it and takes the touch — Tools' and Session info's × never fired
+    // (no `pressIn` in the app log; hierarchy: title [27,508][412,535] over
+    // `tools-close` [387,508][412,533]). Drawn last, the glyph is hit first.
+    const lastChild = (block: string): void => {
+      const glyph = block.indexOf("{closeGlyph}");
+      expect(glyph).toBeGreaterThan(-1);
+      expect(glyph).toBeGreaterThan(block.indexOf("{title === undefined"));
+      expect(glyph).toBeGreaterThan(block.indexOf("{subtitle === undefined"));
+    };
+    // The scroll variant's pinned head (Tools, Session info)…
+    lastChild(sliceOf(UI_SHEET, "const head = (", "const scroller = ("));
+    // …and the plain variant (Commands, Outbox), which has the same order rule.
+    const plain = UI_SHEET.slice(UI_SHEET.lastIndexOf("<View testID={testID} style={container}>"));
+    lastChild(plain.slice(0, plain.indexOf("{children}")));
+  });
+
   test("`scroll` pins the head and leaves ONE inner scroller (F8, no nesting)", () => {
     // The head (title, subtitle, close) is OUTSIDE the scroller and the body is
     // inside it: with the head inside too, a scroll drags the title away, and the

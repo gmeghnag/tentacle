@@ -35,8 +35,10 @@ appId: so.tentacle.app
     timeout: 20000
 # The reply option opens the refusal field; the words go with the refusal (F7).
 # A native `formSheet` opens at the MIDDLE detent (docs/feat/mobile-native-sheets.md
-# S5), so the reply field and its "Send reply" pill sit below the fold: each is
-# scrolled to before it is touched.
+# S5), so the reply field and its "Send reply" pill sit below the fold: the sheet
+# is dragged to LARGE first (Maestro's scroll starts at the screen's centre, which
+# at M is the backdrop), then each is scrolled to before it is touched.
+- runFlow: _sheet-expand.yaml
 - scrollUntilVisible:
     element:
       id: "perm-reply"
@@ -50,9 +52,12 @@ appId: so.tentacle.app
 - tapOn:
     id: "perm-reply-input"
 - inputText: "put it in tmp instead"
-# The keyboard covers the composer's button: dismiss it, so the tap lands
-# on the button and not on a key (found by the first iOS 26 run).
-- hideKeyboard
+# NO `hideKeyboard` here (Fix round (simulator)): with the keyboard up the sheet
+# scrolls its END — "Send reply" — into view above it (docs/fix/mobile-e2e-1121.md),
+# and Maestro's keyboard dismissal is a touch on the screen, which landed on the
+# sheet and sent the reply itself (gate run 1795473632080: the ask was gone and the
+# row `denied` before the flow's own tap). So the send is reached with the keyboard
+# UP — the property that fix exists for — and tapped by this flow, nothing else.
 - scrollUntilVisible:
     element:
       id: "perm-reply-send"

@@ -49,11 +49,18 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "25-session-info-top"
+# Since docs/feat/mobile-native-sheets.md S4 this is a native `formSheet` that
+# opens at the MIDDLE detent: the MCP band is below its fold. Asserted, so the
+# expand below is a real detent change and not a sheet that was already large.
+- assertNotVisible:
+    id: "session-info-mcp-demo"
+# A slow drag on the ONE scroller (F8) takes the sheet to LARGE; then the MCP
+# band is on screen. That is the person's way to the band, and it is the scroll.
+- runFlow: _sheet-expand.yaml
+- assertVisible:
+    id: "session-info-sheet"
 # The four sections' own facts: the working server with its tools, the failing
-# one with its state word, and the user-scope skill. Since docs/feat/
-# mobile-native-sheets.md S4 this is a native `formSheet` at the MIDDLE detent, so
-# the MCP band starts below the fold: the scroll IS the visibility assertion
-# (docs/fix/mobile-e2e-reds.md).
+# one with its state word, and the user-scope skill.
 - scrollUntilVisible:
     element:
       id: "session-info-mcp-demo"
@@ -63,7 +70,8 @@ appId: so.tentacle.app
 - assertVisible:
     id: "session-info-mcp-broken"
 # Below the fold since the Scheduled wakes section (cron S6) grew the sheet: the
-# scroll IS the visibility assertion (docs/fix/mobile-e2e-reds.md).
+# scroll IS the visibility assertion (docs/fix/mobile-e2e-reds.md). At L the
+# screen's centre is inside the sheet, so this scrolls the content.
 - scrollUntilVisible:
     element:
       id: "session-info-skills-/e2e-demo"

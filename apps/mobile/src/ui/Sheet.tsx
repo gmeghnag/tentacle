@@ -141,7 +141,6 @@ export function Sheet({
         style={[styles.head, { backgroundColor: ground }]}
       >
         {grabber}
-        {closeGlyph}
         {title === undefined ? null : (
           <Text
             accessibilityRole="header"
@@ -153,6 +152,9 @@ export function Sheet({
         {subtitle === undefined ? null : (
           <Text style={[typography.subhead, align, { color: palette.sec }]}>{subtitle}</Text>
         )}
+        {/* LAST, so it is on top: without the drawn grabber (native) the title
+            shares its row, and a title drawn after it took the touch. */}
+        {closeGlyph}
       </View>
     );
     const scroller = (
@@ -186,7 +188,6 @@ export function Sheet({
   return (
     <View testID={testID} style={container}>
       {grabber}
-      {closeGlyph}
       {title === undefined ? null : (
         <Text
           accessibilityRole="header"
@@ -198,6 +199,8 @@ export function Sheet({
       {subtitle === undefined ? null : (
         <Text style={[typography.subhead, align, { color: palette.sec }]}>{subtitle}</Text>
       )}
+      {/* Above the title (the same rule as the scroll variant's head). */}
+      {closeGlyph}
       {children}
     </View>
   );
