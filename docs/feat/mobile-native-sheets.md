@@ -1081,6 +1081,20 @@ is F0 for Tools/Info as S4 built them. The permission sheet is a single scroller
 
 **Unverified:** these guards check the source shape. The real proof of F0 is S6's simulator check: open Tools and Session info, then confirm the list starts under the pinned head and the close glyph can be tapped.
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-23 (fixing Review round 2, the one MEDIUM)*
+
+**R2 MEDIUM (gate red: `band-screens` "the sheet's ground is the banded ground"). FIXED.** This is a test-only change; no production code changed.
+- `apps/mobile/test/band-screens.test.ts:285-294`: the test sliced `SessionInfoSheet.tsx` at `<View style={[styles.root`, and Fix round 1 removed that root. The test now checks the property where it actually lives:
+  - `sheetGround("info") === "bg"`, through an import of `../src/sheet-plan`.
+  - `App.tsx` gives the route `contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] }`.
+  - `SessionInfoSheet.tsx` never paints `palette.sheet`.
+- **Red** on HEAD before the edit: 35 pass / 1 fail (`Expected to contain: "palette.bg"`, `Received: ""`). **Green:** 36 / 0.
+- **Mutation M-R2a:** `sheetGround` returns `"sheet"` for `info` too → 1 fail (that test). Reverted.
+- **Mutation M-R2b:** the route's `contentStyle` set to `palette.sheet` in `App.tsx` → 1 fail (that test). Reverted. `git diff --stat` afterwards shows only the test file.
+- **Checks:** `bunx biome check` on the test file is clean. The full gate is left to the orchestrator's script.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-23 (fresh context; same model family as the S1/S2/S4/S5 executor, so shared blind spots are possible)*

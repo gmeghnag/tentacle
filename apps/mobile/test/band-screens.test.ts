@@ -24,6 +24,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { sheetGround } from "../src/sheet-plan";
 
 const APP = join(import.meta.dir, "..");
 const read = (...parts: string[]): string => readFileSync(join(APP, ...parts), "utf8");
@@ -284,12 +285,13 @@ describe("S4 · Session info · bands on a sheet, and the sheet's own close glyp
   test("the sheet's ground is the banded ground (`bg`), not `sheet`", () => {
     // `Sheet` re-grounds a full sheet to `bg` (S3, Design 4): a root still painting
     // `sheet` leaves a lighter strip above it, at the top safe-area inset.
-    const root = info.slice(
-      info.indexOf("<View style={[styles.root"),
-      info.indexOf("<View style={[styles.root") + 200,
+    // Since mobile-native-sheets the ground is the native route's `contentStyle`
+    // (`palette[sheetGround(kind)]`, App.tsx): the screen draws no root of its own.
+    expect(sheetGround("info")).toBe("bg");
+    expect(read("App.tsx")).toContain(
+      "contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] }",
     );
-    expect(root).toContain("palette.bg");
-    expect(root).not.toContain("palette.sheet");
+    expect(info).not.toContain("palette.sheet");
   });
 
   test("Auto-accept is the LAST ROW of the Session band (the mockup's `infoE2`)", () => {
