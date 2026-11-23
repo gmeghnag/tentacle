@@ -122,6 +122,7 @@ import { createDrawerRename } from "./src/drawer-rename.ts";
 import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
 import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { loadFigtree } from "./src/fonts-expo.ts";
+import { playHaptic } from "./src/haptics.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -206,6 +207,8 @@ import {
 } from "./src/session-screen-controller.ts";
 import {
   SHEET_DETENTS,
+  SHEET_HOLDS,
+  holdKey,
   recordDetent,
   sheetDetentContext,
   sheetGround,
@@ -2859,18 +2862,23 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
             options={({ route }) => ({
               // The opening detent is the one the person left this sheet at, if
               // any (D3 detent memory); the identity is the kind for the user
-              // sheets (the ask's id joins with Permission, S5).
-              ...sheetOptions(
-                route.params.kind,
-                sheetDetentContext(
+              // sheets, the ask's own id for Permission (S5) — so a re-delivery
+              // of the SAME ask opens where the person left it.
+              ...sheetOptions(route.params.kind, {
+                ...sheetDetentContext(
                   route.params.kind,
-                  sheetIdentity(route.params.kind, null),
+                  sheetIdentity(route.params.kind, route.params.askId ?? null),
                   PixelRatio.getFontScale(),
                   // Session info opened on a section (`openScheduled`) scrolls
                   // inside the sheet, so it opens at L (D3).
                   route.params.reveal === true,
                 ),
-              ),
+                // D5: an unanswered ask cannot be swiped away — it rides the
+                // params because options resolve before the screen mounts, so
+                // the sheet is un-swipeable from its first frame. The screen
+                // rewrites it in place once the ask settles (S5).
+                ...(route.params.asking === true ? { asking: true } : {}),
+              }),
               contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] },
             })}
             listeners={({ route }) => ({
@@ -2880,9 +2888,20 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                 recordDetent(
                   SHEET_DETENTS,
                   route.params.kind,
-                  sheetIdentity(route.params.kind, null),
+                  sheetIdentity(route.params.kind, route.params.askId ?? null),
                   event.data,
                 ),
+              // A swipe/backdrop that the blocked `gestureEnabled:false` refused
+              // (D5): RNS reports it, so the attempt is not silent — the light
+              // haptic and the inline footnote under the ask's options.
+              gestureCancel: () => {
+                const askId = route.params.askId;
+                if (route.params.kind !== "permission" || askId === undefined) {
+                  return;
+                }
+                playHaptic("light");
+                SHEET_HOLDS.note(holdKey(route.params.computerId, route.params.sessionId, askId));
+              },
             })}
           >
             {({ navigation, route }) => (

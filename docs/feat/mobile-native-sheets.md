@@ -902,6 +902,137 @@ native variant's F0 two-child shape and its scroll-to-expand are proven by Step 
 source guards, not on a device in this slice** — S6's simulator pass is where they are confirmed.
 `TODO.md` untouched.
 
+### S5 — Permission (D5, keyboard)
+
+*— claude-opus-5-5 (executor), 2026-11-23*
+
+**Load-bearing check (re-run before any edit; log `.tentacle/tmp/mobile-native-sheets/s5-baseline.log`):**
+reproduced the missing capability — `PermissionSheet.tsx:131-133` still drew
+`<Modal visible={asking !== null || returned !== null} presentationStyle="pageSheet">`,
+`PRESENTED_SHEET_KINDS` held **four** kinds (`sheet-plan.ts:304`), `sheetIdentity(kind, null)` at
+`App.tsx:2867,2883`, `<PermissionSheetView>` mounted at `SessionScreen.tsx:2077`, and
+`perm-later|perm-hold|gestureCancel` appeared nowhere in the app. So the ask was still a JS modal with
+a swipe nobody could refuse, and no work of S5 existed yet.
+
+**As built, in order** (all eleven edits; each narrow suite kept green):
+
+1. **`packages/core/src/permission.ts:184`** — `readonly requestId?: string` on
+   `PermissionRequestOptions`: process-internal attribution (the daemon's own ask id), documented as
+   never on the wire. Additive, no protocol change.
+2. **`packages/client/src/remote-client.ts:4721`** — `runPermissionActions`'s `prompt` action now passes
+   `action.requestId` into `.request(...)`, so the laptop requester is handed the id. That id is what
+   makes the ask's detent identity and its blocked-note key stable across a re-delivery.
+3. **`apps/mobile/src/permission-sheet.ts:290`** — `SheetState.asking` gained `requestId: string | null`
+   (`entry.options?.requestId ?? null`), so the sheet's state can say WHICH ask is on screen.
+4. **`apps/mobile/src/sheet-plan.ts`** — `PRESENTED_SHEET_KINDS` is now all **five** kinds (`:304`);
+   `askRouteId` (`:374`, the daemon's id, else `seq:<n>` — a local ask can never collide with a
+   numeric `requestId`); `holdKey` (`:382`, `computerId\0sessionId\0askId`, one note per ASK);
+   `createSheetHolds`/`SHEET_HOLDS` (`:538`, the app's one store: `note`/`sequence`/`subscribe`/`forget`);
+   `askRouteParams` (`:568`, what the ask's route says — read from params because a settled sheet is a
+   `returned` reply and holds no id); `askingParamUpdate` (`:597`, the `SET_PARAMS` the route needs, or
+   `null` when it already says so).
+5. **`apps/mobile/src/routes.ts:88-111,199`** — `SheetRouteParam` gained `askId?`/`asking?`, and
+   `updateSheetParams(nav, key, params)` dispatches a `SET_PARAMS` **keyed on `source`**. Verified in the
+   library: `BaseRouter.tsx:18-44` merges `{...r.params, ...action.payload.params}` on the route whose
+   `key === action.source`, so the patch keeps the pushed identity and `navigate` never REPLACES it
+   (which is why a settle is a rewrite in place, not a re-push: the sheet must not blink).
+6. **`apps/mobile/src/screens/PermissionSheet.tsx`** — `<Modal>` and `visible` gone, the drawn grabber
+   gone (the native one replaces it), new `held: boolean` prop, `perm-later` ("Not now") →
+   `sheet.dismiss()` (withdraw, send nothing — the old swipe's semantics, made explicit), and a
+   `perm-hold` footnote *"Answer to continue — or Not now"* while `asking && held`. Kept:
+   `automaticallyAdjustKeyboardInsets`, the `keyboardDidShow` → `scrollToEnd` fix, `testID="perm-sheet"`.
+7. **`apps/mobile/App.tsx`** — the `Sheet` screen's options take `asking` from the route
+   (`route.params.asking === true ? { asking: true } : {}`, D5's `gestureEnabled:false`), in the same
+   `sheetOptions`/`sheetDetentContext` call; `sheetIdentity(route.params.kind,
+   route.params.askId ?? null)` in that call AND in the `sheetDetentChange` listener; a new
+   `gestureCancel` listener plays `playHaptic("light")` and calls `SHEET_HOLDS.note(holdKey(…))`.
+8. **`apps/mobile/src/screens/SessionScreen.tsx`** — `permission: state.sheet.kind !== "idle"` (a
+   `returned` reply still has words to read, so its sheet stays up); the permission element is published
+   to `SHEET_HOSTS` with `held` and `undefined` while idle; the push carries `askId` + `asking: true`;
+   one effect dispatches `askingParamUpdate` and forgets the ask's note under the ROUTE's id;
+   `dismissedNatively`'s `permission` leg runs `sheet.dismiss()`. The ask's own `held` comes from
+   `useSyncExternalStore` over `SHEET_HOLDS`, keyed `holdKey(computerId, sessionId, askId)`.
+9. **Tests** — `packages/client/test/foreign-turns.test.ts` (the requester is handed the id),
+   `apps/mobile/test/permission-sheet.test.ts` (asking carries it, null when the requester had none),
+   `apps/mobile/test/sheet-plan.test.ts` (kinds = 5, holds store, `askRouteId`, `askRouteParams`,
+   `askingParamUpdate` incl. the second-ask rewrite), `apps/mobile/test/native-sheets-wiring.test.ts`
+   (no `<Modal>`, `perm-later` calls `dismiss`, `held` published, push params, gestureCancel notes).
+10. **`changelog.d/mobile-native-sheets.changed.md`** — extended, not duplicated: the one existing
+    fragment already claimed "Not now"; the blocked-attempt behaviour (light haptic + inline note) was
+    missing and is now in the same bullet.
+11. **Mutations** (`sh .tentacle/tmp/mobile-native-sheets/mutate-s5.sh`; each applied to the real source,
+    the narrow suite run, the file restored from a scratch copy — never `git checkout`, and
+    `cmp`-verified byte-identical). Baseline **165 pass / 0 fail** before and after:
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `holdKey` ignores `askId` | 83 pass **1 fail** |
+| M2 | `askingParamUpdate` always `null` | 81 pass **3 fail** |
+| M3 | `PRESENTED_SHEET_KINDS` back to 4 | 76 pass **7 fail** |
+| M4 | `askRouteParams` ignores `askId` | 81 pass **3 fail** |
+| M5 | screen: `permission: state.sheet.kind === "asking"` | 51 pass **1 fail** |
+| M6 | published element drops `held` | 51 pass **1 fail** |
+| M7 | push without `askId`/`asking` | 51 pass **1 fail** |
+| M8 | App: `sheetIdentity(kind, null)` | 51 pass **1 fail** |
+| M9 | App: `gestureCancel` notes nothing | 51 pass **1 fail** |
+| M10 | `perm-later` → `clearReturned()` | 51 pass **1 fail** |
+| M11 | a permission swipe runs nothing | 51 pass **1 fail** |
+| M12 | client drops `requestId` | 32 pass **1 fail** |
+| M13 | sheet hardcodes `requestId: null` | 28 pass **1 fail** |
+
+**Red before green** (AGENTS §9), each shown on the un-fixed source first: `M12`'s red is the new
+`foreign-turns` case (`Expected "ask-7" / Received undefined`), `M13`'s is the new
+`permission-sheet.test.ts` case, and steps 4/5/6–8's reds are the M3–M11 rows above (they were also
+seen before their source edits for M3). No test asserted a weaker correlate: M5 and M6 in particular fail
+on the *published element*, and M11 on the dismissal handler itself, which are the exact properties D5
+turns on.
+
+**Drift from Implementation (and why):**
+
+1. **`askingParamUpdate` takes an object, not a boolean.** The Implementation says
+   `askingParamUpdate(routes, owner, asking)`. The as-built signature is
+   `(routes, owner, { asking, askId })`, because a second ask can arrive while the route is already up
+   (the sheet presents the queued ask at once): with a boolean alone the route keeps naming the FIRST
+   ask, so `sheetIdentity` would restore the dead ask's detent and `holdKey` would attach the new ask's
+   note to the old id. M2/M4 and the `SECOND ask` case pin it.
+2. **`askRouteParams` exists at all.** The forget-the-note step cannot use `state.sheet`'s `askId`: once
+   the ask settles the sheet is a `returned` reply and holds none, so the note would leak and the next
+   delivery of the same ask would open already "held". Reading the id back off the route is the only
+   place that still knows it. Same module, one new pure reader.
+3. **`updateSheetParams` sends a PATCH, not rebuilt params.** `routes.ts` rebuilds nothing: the library
+   merges over the route's own params (`BaseRouter.tsx:18-44`), so the pushed identity survives and the
+   patch is one property.
+4. **S3/S4's `dismissedNatively` body is sliced with `indexOf("}, [actual")`.** S4's wiring test pinned
+   `indexOf("}, [actual]);")`; the new `askId` dependency changes that line to `}, [actual, askId]);`.
+   The assertion is now the prefix, which pins the same body without pinning a dependency list.
+5. **One S2 assertion became a regex.** After `biome --write`, the `sheetOptions(route.params.kind, {`
+   call fits on one line, so `native-sheets-wiring.test.ts`'s literal `"...sheetOptions(\n<16 spaces>…"`
+   no longer matched. It is now `/\.\.\.sheetOptions\(\s*route\.params\.kind,/` — same property (the
+   navigator takes the table's options), no formatting pinned.
+
+**Library facts cited** (`@react-navigation/routers@7.6.5`, read in the bun cache):
+`src/BaseRouter.tsx:18-44` — `SET_PARAMS`/`REPLACE_PARAMS` find the route by `action.source`, and only
+`SET_PARAMS` merges (`{...r.params, ...action.payload.params}`); an unmatched `source` returns `null`, so
+a keyed patch never lands on another route.
+
+**Gate line (this slice, as run by me):** narrow suites green (`sheet-plan`, `native-sheets-wiring`,
+`permission-sheet`, `sheet-host`, `foreign-turns`; then the whole `apps/mobile/test` folder **4764 pass /
+0 fail** and `packages/client/test` + `packages/core/test` **1751 pass / 0 fail**), `tsc -p apps/mobile`
+and `tsc -p packages/client` exit 0, `biome check` **0/0** on all twelve changed files — the full `bun run
+check` is the orchestrator's script. No schema change, so `packages/protocol/schema/protocol.json` is
+untouched; one changelog fragment (extended); `TODO.md` untouched.
+
+**Not done, by instruction:** S6 (the e2e flows and the simulator Validation: 5 sheets × 3 detents ×
+light/dark, petrol, rotation, AX5, Reduce Motion — plus the real-device L2 app-switcher check). In
+particular **the blocked-swipe haptic + `perm-hold` note, the `asking` → `gestureEnabled:false` path and
+the keyboard inset are proven by the pure tests and the source guards, not on a simulator in this
+slice**; S6 is where a finger confirms them.
+
+**Flagged for S4's owner (NOT S5, not fixed here):** `NativeSheetRoute` renders a sheet's content inside
+a wrapper `View`, so the route root has ONE direct child and `RNSScreenContentWrapper.mm:122-181` cannot
+find the `ScrollView` — `:230-235` falls back to `setFrame(frame)` and sizes it to the whole sheet, which
+is F0 for Tools/Info as S4 built them. The permission sheet is a single scroller and is unaffected.
+
 ### Owner answers (2026-11-23 ~08:35)
 
 *— claude-opus-5-5 (orchestrator), recording the owner's explicit «Ok» to every recommendation*

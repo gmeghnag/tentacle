@@ -14,16 +14,22 @@ import {
   INTENT_SHEET,
   PRESENTED_SHEET_KINDS,
   SHEET_DETENTS,
+  SHEET_HOLDS,
   SHEET_KINDS,
   SHEET_ROUTE,
   SHEET_SPEC,
   type SheetEntry,
   type SheetKind,
+  askRouteId,
+  askRouteParams,
+  askingParamUpdate,
   clampDetent,
   createDetentMemory,
+  createSheetHolds,
   desiredStack,
   dismissedNatively,
   drainPops,
+  holdKey,
   initialDetent,
   managedStack,
   openingDetent,
@@ -510,14 +516,17 @@ describe("sheetGround — the route's colour token", () => {
   });
 });
 
-describe("managedStack + stackSignature — what S3 actually presents (S3)", () => {
+describe("managedStack + stackSignature — what the build presents (S3/S4/S5)", () => {
   test("only the migrated kinds are pushed; order is desiredStack's", () => {
     expect(managedStack(["tools", "outbox", "permission"], PRESENTED_SHEET_KINDS)).toEqual([
       "tools",
       "outbox",
+      "permission",
     ]);
-    // Session info is presented too (S4); the ask is still S5's.
-    expect(managedStack(["info", "permission"], PRESENTED_SHEET_KINDS)).toEqual(["info"]);
+    expect(managedStack(["info", "permission"], PRESENTED_SHEET_KINDS)).toEqual([
+      "info",
+      "permission",
+    ]);
     expect(managedStack(["commands", "outbox"], PRESENTED_SHEET_KINDS)).toEqual([
       "commands",
       "outbox",
@@ -525,10 +534,10 @@ describe("managedStack + stackSignature — what S3 actually presents (S3)", () 
     expect(managedStack([], PRESENTED_SHEET_KINDS)).toEqual([]);
   });
 
-  test("S4's list is exactly the four sheets migrated so far (no premature push)", () => {
-    // Permission is still its own RN Modal (S5): pushing a route for it would
-    // show an empty native sheet over the modal one.
-    expect([...PRESENTED_SHEET_KINDS].sort()).toEqual(["commands", "info", "outbox", "tools"]);
+  test("S5's list is all five: the ask is a route too now", () => {
+    // Mutation: drop "permission" from the list → red. Every kind is native as
+    // of S5, so a kind missing here would be a Modal over an empty route.
+    expect([...PRESENTED_SHEET_KINDS].sort()).toEqual(SHEET_KINDS.toSorted());
   });
 
   test("the signature is a string, and it changes only when the stack does", () => {
@@ -687,5 +696,193 @@ describe("recordDetent — only a STABLE change is remembered (S3)", () => {
     recordDetent(memory, "tools", null, { index: 2, stable: true });
     expect(recordDetent(memory, "tools", null, { index: 0, stable: false })).toBe(false);
     expect(rememberedDetent(memory, "tools", null)).toBe(2);
+  });
+});
+
+describe("SHEET_HOLDS — the blocked-dismissal note (D5)", () => {
+  test("one note per ask: the sequence is monotonic and the store notifies", () => {
+    // Mutation: `note` not notifying (or a key shared across asks) → red.
+    const holds = createSheetHolds();
+    let seen = 0;
+    const off = holds.subscribe(() => {
+      seen++;
+    });
+    const key = holdKey("c1", "s1", "ask-7");
+    expect(holds.sequence(key)).toBe(0);
+    holds.note(key);
+    expect(holds.sequence(key)).toBe(1);
+    holds.note(key);
+    expect(holds.sequence(key)).toBe(2);
+    expect(seen).toBe(2);
+    off();
+    holds.note(key);
+    expect(seen).toBe(2);
+  });
+
+  test("a new ask never inherits the previous one's note", () => {
+    const holds = createSheetHolds();
+    holds.note(holdKey("c1", "s1", "ask-7"));
+    expect(holds.sequence(holdKey("c1", "s1", "ask-7"))).toBe(1);
+    // The SAME ask on another session, and the next ask on this one: both clean.
+    expect(holds.sequence(holdKey("c1", "s2", "ask-7"))).toBe(0);
+    expect(holds.sequence(holdKey("c1", "s1", "ask-8"))).toBe(0);
+    expect(holds.sequence(holdKey("c2", "s1", "ask-7"))).toBe(0);
+  });
+
+  test("forget drops the note, and only notifies when there was one", () => {
+    const holds = createSheetHolds();
+    const key = holdKey("c1", "s1", "ask-7");
+    let seen = 0;
+    holds.subscribe(() => {
+      seen++;
+    });
+    holds.forget(key); // nothing there: no notification
+    expect(seen).toBe(0);
+    holds.note(key);
+    holds.forget(key);
+    expect(holds.sequence(key)).toBe(0);
+    expect(seen).toBe(2);
+  });
+
+  test("the app's ONE store is live (the navigator writes, the screen reads)", () => {
+    const key = holdKey("app", "one", "ask-1");
+    SHEET_HOLDS.note(key);
+    expect(SHEET_HOLDS.sequence(key)).toBe(1);
+    SHEET_HOLDS.forget(key);
+    expect(SHEET_HOLDS.sequence(key)).toBe(0);
+  });
+});
+
+describe("askingParamUpdate — the ask's route says which ask, and whether it is blocked (D5)", () => {
+  const OWNER = { computerId: "c1", sessionId: "s1" };
+  const ask = (key: string, asking?: boolean, askId?: string) => ({
+    key,
+    name: SHEET_ROUTE,
+    params: {
+      computerId: "c1",
+      sessionId: "s1",
+      kind: "permission" as const,
+      ...(asking === undefined ? {} : { asking }),
+      ...(askId === undefined ? {} : { askId }),
+    },
+  });
+  const ANSWERED = { asking: false, askId: "a1" };
+
+  test("settling the ask is a keyed rewrite of the ask's own route", () => {
+    // Mutation: `askingParamUpdate` always returns null → red.
+    expect(askingParamUpdate([ask("k1", true, "a1")], OWNER, ANSWERED)).toEqual({
+      key: "k1",
+      params: { asking: false },
+    });
+  });
+
+  test("a route that already says so is not rewritten (no render loop)", () => {
+    expect(askingParamUpdate([ask("k1", false, "a1")], OWNER, ANSWERED)).toBeNull();
+    expect(
+      askingParamUpdate([ask("k1", true, "a1")], OWNER, { asking: true, askId: "a1" }),
+    ).toBeNull();
+  });
+
+  test("a SECOND ask on the same route rewrites the id, so the note and detent follow it", () => {
+    // The sheet presents the queued ask at once; a route still naming the first
+    // one would key the note and the detent memory on an ask that is gone.
+    expect(
+      askingParamUpdate([ask("k1", true, "a1")], OWNER, { asking: true, askId: "a2" }),
+    ).toEqual({ key: "k1", params: { asking: true, askId: "a2" } });
+    // Settled AND a new id: both legs in one patch.
+    expect(
+      askingParamUpdate([ask("k1", true, "a1")], OWNER, { asking: false, askId: "a2" }),
+    ).toEqual({ key: "k1", params: { asking: false, askId: "a2" } });
+  });
+
+  test("the TOP of our stack is the target, never a lower route", () => {
+    const routes = [
+      {
+        key: "u1",
+        name: SHEET_ROUTE,
+        params: { computerId: "c1", sessionId: "s1", kind: "tools" },
+      },
+      ask("k2", true, "a1"),
+    ];
+    expect(askingParamUpdate(routes, OWNER, ANSWERED)?.key).toBe("k2");
+  });
+
+  test("another session's sheet is never rewritten, and no ask means nothing to do", () => {
+    const other = {
+      key: "o1",
+      name: SHEET_ROUTE,
+      params: { computerId: "c1", sessionId: "s2", kind: "permission", asking: true, askId: "a1" },
+    };
+    expect(askingParamUpdate([other], OWNER, ANSWERED)).toBeNull();
+    expect(askingParamUpdate([], OWNER, ANSWERED)).toBeNull();
+    expect(
+      askingParamUpdate(
+        [
+          {
+            key: "t1",
+            name: SHEET_ROUTE,
+            params: { computerId: "c1", sessionId: "s1", kind: "tools" },
+          },
+        ],
+        OWNER,
+        ANSWERED,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("askRouteParams — the route is the only place a settled ask still has an id", () => {
+  const OWNER = { computerId: "c1", sessionId: "s1" };
+  test("reads back what the route says, and null when no ask route is up", () => {
+    // The note must be forgotten under the id of the ask that EARNED it, after
+    // the sheet is a `returned` reply and holds none (mutation: drop this reader
+    // and forget under `askId` → the settled ask's note leaks).
+    const route = {
+      key: "k1",
+      name: SHEET_ROUTE,
+      params: {
+        computerId: "c1",
+        sessionId: "s1",
+        kind: "permission" as const,
+        asking: false,
+        askId: "a1",
+      },
+    };
+    expect(askRouteParams([route], OWNER)).toEqual({ asking: false, askId: "a1" });
+    // Nothing pushed, another session's sheet, or a user sheet on top: no ask.
+    expect(askRouteParams([], OWNER)).toBeNull();
+    expect(
+      askRouteParams([{ ...route, params: { ...route.params, sessionId: "s2" } }], OWNER),
+    ).toBeNull();
+    expect(
+      askRouteParams(
+        [
+          {
+            key: "t1",
+            name: SHEET_ROUTE,
+            params: { computerId: "c1", sessionId: "s1", kind: "tools" },
+          },
+        ],
+        OWNER,
+      ),
+    ).toBeNull();
+  });
+
+  test("a route with no id reads as null, and asking defaults to false", () => {
+    const route = {
+      key: "k1",
+      name: SHEET_ROUTE,
+      params: { computerId: "c1", sessionId: "s1", kind: "permission" },
+    };
+    expect(askRouteParams([route], OWNER)).toEqual({ asking: false, askId: null });
+  });
+});
+
+describe("askRouteId — the id an ask's route carries (S5)", () => {
+  test("the daemon's id when there is one, else the sheet's own seq (never colliding)", () => {
+    expect(askRouteId("ask-7", 3)).toBe("ask-7");
+    expect(askRouteId(null, 3)).toBe("seq:3");
+    // A numeric-looking requestId can never equal a local ask's id.
+    expect(askRouteId("3", 3)).not.toBe(askRouteId(null, 3));
   });
 });

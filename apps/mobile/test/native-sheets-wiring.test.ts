@@ -67,7 +67,7 @@ describe("S2 — the navigator (File 4)", () => {
     const screen = sliceOf(APP, 'name="Sheet"', "</Stack.Screen>");
     // The detents, the initial index, the undimmed index and the grabber all come
     // from `sheetOptions` — which is what keeps RNS's dev asserts unreachable.
-    expect(screen).toContain("...sheetOptions(\n                route.params.kind,");
+    expect(screen).toMatch(/\.\.\.sheetOptions\(\s*route\.params\.kind,/);
     // S3: the context is the remembered detent + Dynamic Type (D3).
     expect(screen).toContain("PixelRatio.getFontScale(),");
     // Nothing may restate the presentation in the navigator: a second source of
@@ -400,7 +400,7 @@ describe("S4 — Session info's Artifacts row waits for the route to go (F6b)", 
 describe("S4 — a native swipe of Tools or Session info runs that sheet's own close", () => {
   test("`closeTools` and the info close are the handlers a swipe reaches", () => {
     const gone = SCREEN.slice(SCREEN.indexOf("const gone = dismissedNatively("));
-    const body = gone.slice(0, gone.indexOf("}, [actual]);"));
+    const body = gone.slice(0, gone.indexOf("}, [actual"));
     expect(body).toContain('gone.includes("tools")');
     expect(body).toContain("closeToolsSheetOnly()");
     expect(body).toContain('gone.includes("info")');
@@ -412,5 +412,88 @@ describe("S4 — a native swipe of Tools or Session info runs that sheet's own c
     // drift: the glyph would clear the controller and a swipe would not.
     expect(SCREEN).toContain("const closeInfoSheetOnly = useCallback(() => {");
     expect(SCREEN.match(/controller\.closeInfo\(\)/g) ?? []).toHaveLength(2);
+  });
+});
+
+describe("S5 — the ask is a route, and its dismissal is explicit (D5)", () => {
+  test("the sheet no longer draws its own Modal or `visible`", () => {
+    const ask = code(read("src", "screens", "PermissionSheet.tsx"));
+    expect(ask).not.toContain("<Modal");
+    expect(ask).not.toContain("presentationStyle");
+    // The native grabber replaces the one it drew (D4).
+    expect(ask).not.toContain("styles.grabber");
+    // The keyboard fix it must keep (docs/fix/mobile-e2e-1121.md, flow 08c).
+    expect(ask).toContain("automaticallyAdjustKeyboardInsets");
+    expect(ask).toContain('Keyboard.addListener("keyboardDidShow"');
+    expect(ask).toContain("scrollToEnd");
+    expect(ask).toContain('testID="perm-sheet"');
+  });
+
+  test("`Not now` is the ONLY way out of a blocked ask, and it withdraws", () => {
+    const ask = code(read("src", "screens", "PermissionSheet.tsx"));
+    const later = ask.slice(ask.indexOf('testID="perm-later"'));
+    // `dismiss()`: withdraw, send nothing (today's swipe semantics, made explicit).
+    expect(later.slice(0, 400)).toContain("sheet.dismiss()");
+    // The footnote the blocked swipe earns is drawn from the `held` prop.
+    expect(ask).toContain('testID="perm-hold"');
+    expect(ask).toContain("Answer to continue — or Not now");
+    expect(ask).toContain("held: boolean");
+  });
+
+  test("the screen publishes the ask's element WITH `held`, and only while there is one", () => {
+    const screen = SCREEN.slice(SCREEN.indexOf('host.publish(\n      "permission"'));
+    expect(screen).toBeTruthy();
+    const block = screen.slice(0, screen.indexOf(");"));
+    expect(block).toContain('state.sheet.kind === "idle" ? undefined :');
+    expect(block).toContain("held={held}");
+    // Noted by the navigator, read by the screen: ONE store, through the ask's key.
+    expect(SCREEN).toContain("SHEET_HOLDS.sequence(holdsKey)");
+    // The note is forgotten under the ROUTE's id: a settled ask holds none.
+    expect(SCREEN).toContain("askRouteParams(navigation.getState().routes, owner)");
+    expect(SCREEN).toContain(
+      "SHEET_HOLDS.forget(holdKey(owner.computerId, owner.sessionId, settled.askId))",
+    );
+    expect(SCREEN).toContain("holdKey(owner.computerId, owner.sessionId, askId)");
+  });
+
+  test("the ask is pushed with its id and `asking`, and never re-pushed to settle", () => {
+    expect(SCREEN).toContain('step.kind === "permission" && askId !== null');
+    expect(SCREEN).toContain(
+      '{ askId, ...(state.sheet.kind === "asking" ? { asking: true } : {}) }',
+    );
+    // `asking:false` is a keyed in-place rewrite, decided by the pure module.
+    expect(SCREEN).toContain("askingParamUpdate(navigation.getState().routes, owner, {");
+    expect(SCREEN).toContain("updateSheetParams(navigation, update.key, update.params)");
+    expect(ROUTE).not.toContain("setParams");
+  });
+
+  test("`returned` keeps the ask up (it has words to read) — only idle does not", () => {
+    expect(SCREEN).toContain('permission: state.sheet.kind !== "idle"');
+  });
+
+  test("a swipe of a RETURNED ask is a real dismissal (dismiss), never a silent drop", () => {
+    const gone = SCREEN.slice(SCREEN.indexOf("const gone = dismissedNatively("));
+    const body = gone.slice(0, gone.indexOf("}, [actual"));
+    expect(body).toContain('gone.includes("permission")');
+    expect(body).toContain("sheet.dismiss()");
+  });
+
+  test("the navigator blocks the gesture while asking, and notes a blocked attempt", () => {
+    expect(APP).toContain("route.params.asking === true ? { asking: true } : {}");
+    const listeners = APP.slice(APP.indexOf("gestureCancel: () => {"));
+    const body = listeners.slice(0, listeners.indexOf("},\n            })}"));
+    expect(body).toContain('playHaptic("light")');
+    expect(body).toContain("SHEET_HOLDS.note(holdKey(");
+    // Keyed on the ask, not on the kind: the note belongs to ONE ask.
+    expect(APP).toContain("sheetIdentity(route.params.kind, route.params.askId ?? null)");
+    expect(
+      APP.match(/sheetIdentity\(route\.params\.kind, route\.params\.askId \?\? null\)/g),
+    ).toHaveLength(2);
+  });
+
+  test("every kind is presented natively now — no Modal is left to sit over a route", () => {
+    for (const file of ["PermissionSheet", "ToolsSheet", "SessionInfoSheet"]) {
+      expect(code(read("src", "screens", `${file}.tsx`))).not.toContain("<Modal");
+    }
   });
 });

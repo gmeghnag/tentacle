@@ -95,6 +95,20 @@ export interface SheetRouteParam {
    * Every other kind ignores it.
    */
   readonly reveal?: boolean;
+  /**
+   * The ask's own id (`PermissionRequestOptions.requestId`), on Permission only:
+   * the detent memory is keyed on it (`sheetIdentity`), so a re-delivery of the
+   * SAME ask keeps the detent the person left it at (D3, Step 0b L3).
+   */
+  readonly askId?: string;
+  /**
+   * The ask on this route is still UNANSWERED (D5). It rides the params because
+   * the navigator resolves a route's options before its screen mounts, and
+   * `gestureEnabled` is an option: the sheet must be un-swipeable from the very
+   * first frame, not one render later. The screen rewrites it in place with a
+   * keyed `SET_PARAMS` once the ask settles (`updateSheetParams`).
+   */
+  readonly asking?: boolean;
 }
 
 /** The stack's route table (`@react-navigation/native-stack` params). */
@@ -152,9 +166,47 @@ export interface SheetPopAction {
 
 export interface SheetStackNavigation {
   push(name: "Sheet", params: SheetRouteParam): void;
-  dispatch(action: SheetPopAction): void;
+  /** The two actions a sheet dispatches: a keyed `POP`, a keyed `SET_PARAMS`. */
+  dispatch(action: SheetPopAction | SheetSetParamsAction): void;
   getState(): { readonly key: string; readonly routes: readonly SheetRouteLike[] };
   setOptions(options: { gestureEnabled?: boolean }): void;
+}
+
+/** The one in-place params rewrite a sheet makes: `SET_PARAMS`, keyed on its route. */
+export interface SheetSetParamsAction {
+  readonly type: "SET_PARAMS";
+  /**
+   * A PATCH, not the whole params: `BaseRouter` merges it over what the route
+   * holds (`{ ...r.params, ...action.payload.params }`,
+   * `routers@7.6.5/src/BaseRouter.tsx:18-39`), so the identity a sheet was pushed
+   * with is never restated (and never silently dropped).
+   */
+  readonly payload: { readonly params: Partial<SheetRouteParam> };
+  /** The route whose params change — `BaseRouter` looks it up by it. */
+  readonly source: string;
+  /** The stack that owns it. */
+  readonly target: string;
+}
+
+/**
+ * Rewrite ONE sheet's params in place (D5's `asking`, from `askingParamUpdate`'s
+ * decision). Keyed on the route (`source`), like `popSheet`: an unkeyed one would
+ * hit the WRONG route — the top of the stack, which is not necessarily ours. The
+ * action is written out rather than taken from `StackActions`, so this module
+ * stays free of a react-navigation import (it is loaded by `bun test`, where RN
+ * does not).
+ */
+export function updateSheetParams(
+  nav: Pick<SheetStackNavigation, "dispatch" | "getState">,
+  key: string,
+  params: Partial<SheetRouteParam>,
+): void {
+  nav.dispatch({
+    type: "SET_PARAMS",
+    payload: { params },
+    source: key,
+    target: nav.getState().key,
+  });
 }
 
 /**

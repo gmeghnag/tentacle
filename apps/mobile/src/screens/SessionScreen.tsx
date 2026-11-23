@@ -28,6 +28,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   Alert,
@@ -130,6 +131,7 @@ import {
   type SheetStackNavigation,
   openSheet,
   popSheet,
+  updateSheetParams,
 } from "../routes.ts";
 import { rowErrorFields } from "../row-guard.ts";
 import { rowTimeLabel } from "../row-swipe.ts";
@@ -140,12 +142,17 @@ import { SHEET_HOSTS } from "../sheet-host.ts";
 import {
   type AfterDismissIntent,
   PRESENTED_SHEET_KINDS,
+  SHEET_HOLDS,
   type SheetEntry,
   type SheetRouteLike,
   appActivity,
+  askRouteId,
+  askRouteParams,
+  askingParamUpdate,
   desiredStack,
   dismissedNatively,
   drainPops,
+  holdKey,
   managedStack,
   queueAfterDismiss,
   readyIntents,
@@ -1215,7 +1222,10 @@ export function SessionScreen({
   const desired = desiredStack({
     user: commandsOpen ? "commands" : null,
     outbox: decision !== null,
-    permission: state.sheet.kind === "asking",
+    // The ask is on screen while the sheet holds ONE, answered or not: a
+    // `returned` reply still has words to read, and it is swipe-dismissible
+    // (D5). Only `idle` means "no ask to show" (today's `<Modal visible>`).
+    permission: state.sheet.kind !== "idle",
   });
   // Only the kinds this build presents natively are pushed: the other three
   // still draw their own RN `Modal` (S4/S5 migrate them).
@@ -1225,6 +1235,21 @@ export function SessionScreen({
   const wantedKey = wantedNow.join("|");
   // biome-ignore lint/correctness/useExhaustiveDependencies: `wantedKey` IS `wantedNow`'s content.
   const wanted = useMemo(() => wantedNow, [wantedKey]);
+  // The ask's route identity (D5): the daemon's id for it, so a re-delivery of
+  // the SAME ask keeps its detent and its note; the sheet's own `seq` when the
+  // requester had none. Recomputed only when the presented ask changes.
+  const askingSheet = state.sheet.kind === "asking" ? state.sheet : null;
+  const askId = askingSheet === null ? null : askRouteId(askingSheet.requestId, askingSheet.seq);
+  // The blocked-dismissal note is STORED outside React (the navigator's
+  // `gestureCancel` listener writes it) and READ here, where the ask's element is
+  // built: one subscription, one `held` per ask. A new ask starts un-held.
+  const holdsKey =
+    askId === null || owner === null ? null : holdKey(owner.computerId, owner.sessionId, askId);
+  const subscribeHolds = useCallback((listener: () => void) => SHEET_HOLDS.subscribe(listener), []);
+  const heldNote = useSyncExternalStore(subscribeHolds, () =>
+    holdsKey === null ? 0 : SHEET_HOLDS.sequence(holdsKey),
+  );
+  const held = heldNote > 0;
   // Publish what the routes draw (D2). A layout effect, so the element is in the
   // host before the reconciler below can push the route that reads it.
   useLayoutEffect(() => {
@@ -1318,6 +1343,15 @@ export function SessionScreen({
         />,
       );
     }
+    // The ask (S5) is a route too. Published even when `idle` → `undefined`, so a
+    // route pushed for the PREVIOUS ask can never draw a stale one: the host's
+    // orphan/wait rule keeps that honest (`sheetRouteView`).
+    host.publish(
+      "permission",
+      state.sheet.kind === "idle" ? undefined : (
+        <PermissionSheetView sheet={sheet} state={state.sheet} palette={palette} held={held} />
+      ),
+    );
   });
   // Unmount: the host is forgotten, so a route still up pops ITSELF instead of
   // drawing an empty sheet (the orphan leg, `sheetRouteView`).
@@ -1355,7 +1389,12 @@ export function SessionScreen({
     if (gone.includes("info")) {
       closeInfoSheetOnly();
     }
-  }, [actual, closeToolsSheetOnly, closeInfoSheetOnly]);
+    // The ask (S5): a swipe while `returned` is free (D5), so it is a real
+    // dismissal — today's `onRequestClose`, which is what `dismiss()` did.
+    if (gone.includes("permission")) {
+      sheet.dismiss();
+    }
+  }, [actual, closeToolsSheetOnly, closeInfoSheetOnly, sheet]);
   // The intents that need the sheet gone first (Commands → Rename is the only
   // one S3 owns; Rename is still an RN `Modal`, so F6b): they run once the route
   // has left the navigation state.
@@ -1417,13 +1456,47 @@ export function SessionScreen({
     }
     // The ONE param a sheet route carries beyond its identity (D3): Session info
     // opened on a section opens at L. `openScheduled` is the only path that sets
-    // it, and the sheet is pushed once per presentation.
+    // it, and the sheet is pushed once per presentation. The ask's own params
+    // (S5): its id (detent memory + the hold note's key) and `asking`, which the
+    // navigator needs BEFORE this screen mounts the route (D5's `gestureEnabled`).
     openSheet(navigation, {
       ...owner,
       kind: step.kind,
       ...(step.kind === "info" && revealWanted ? { reveal: true } : {}),
+      ...(step.kind === "permission" && askId !== null
+        ? { askId, ...(state.sheet.kind === "asking" ? { asking: true } : {}) }
+        : {}),
     });
-  }, [hidden, wanted, actual, inFront, owner, navigation, revealWanted]);
+  }, [hidden, wanted, actual, inFront, owner, navigation, revealWanted, askId, state.sheet.kind]);
+  // The ask SETTLED while its route is up (D5): the sheet must be swipeable again
+  // — that is `returned` — so the route's params are rewritten in place, never
+  // re-pushed (`navigate` would replace the stack's params, `openSheet`'s reason).
+  // The decision is `askingParamUpdate`'s; this effect only dispatches it.
+  const permissionAsking = state.sheet.kind === "asking";
+  useEffect(() => {
+    if (owner === null) {
+      return;
+    }
+    const update = askingParamUpdate(navigation.getState().routes, owner, {
+      asking: permissionAsking,
+      askId,
+    });
+    if (update !== null) {
+      // A PATCH: `BaseRouter` merges it over the params the route holds, so the
+      // identity it was pushed with (computer, session, kind, askId) stays.
+      updateSheetParams(navigation, update.key, update.params);
+    }
+    // The ask's note is spent with the ask: read back from the ROUTE, because a
+    // settled sheet no longer holds an id (it is a `returned` reply) — a note left
+    // behind would be inherited by the next delivery of the same ask.
+    if (permissionAsking) {
+      return;
+    }
+    const settled = askRouteParams(navigation.getState().routes, owner);
+    if (settled?.askId != null) {
+      SHEET_HOLDS.forget(holdKey(owner.computerId, owner.sessionId, settled.askId));
+    }
+  }, [navigation, owner, permissionAsking, askId]);
   // An RN `Modal` must not be drawn while a native sheet is up or coming (F6):
   // a stale `visible` one wedges every later formSheet.
   const yields = yieldForeign(wanted, actual);
@@ -2074,7 +2147,10 @@ export function SessionScreen({
             {state.view.composer.photosNotice}
           </Text>
         )}
-        <PermissionSheetView sheet={sheet} state={state.sheet} palette={palette} />
+        {/* The ask is a native sheet ROUTE now (docs/feat/mobile-native-sheets.md
+            S5): this screen PUBLISHES its element on `SHEET_HOSTS` (the block
+            above) and the route draws it, so it is not mounted here — no RN
+            `Modal` over a `formSheet` (F6). */}
         {/* Outbox's decision and Commands are native sheet ROUTES now
             (docs/feat/mobile-native-sheets.md S3): this screen PUBLISHES their
             elements on `SHEET_HOSTS` (the block above) and the route draws them,

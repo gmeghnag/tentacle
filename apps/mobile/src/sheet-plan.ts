@@ -301,7 +301,13 @@ export function sameStack(a: readonly SheetEntry[], b: readonly SheetEntry[]): b
  * route — the route would have nothing to draw and the person would see an empty
  * sheet over the modal. `managedStack` filters with this list.
  */
-export const PRESENTED_SHEET_KINDS: readonly SheetKind[] = ["commands", "outbox", "tools", "info"];
+export const PRESENTED_SHEET_KINDS: readonly SheetKind[] = [
+  "commands",
+  "outbox",
+  "tools",
+  "info",
+  "permission",
+];
 
 /**
  * The stack's SIGNATURE: one string per sheet route, in order. `useNavigationState`
@@ -357,6 +363,73 @@ export function appActivity(state: string | null | undefined): AppActivity {
  * it on the next presentation share one store.
  */
 export const SHEET_DETENTS: DetentMemory = createDetentMemory();
+
+/**
+ * The id a permission route carries for one presented ask (`SheetRouteParam
+ * .askId`): the daemon's `requestId` when the requester had one, else the
+ * sheet's own per-presentation `seq` — prefixed, so a numeric requestId and a
+ * seq can never collide. It is only an identity (detent memory, and the key the
+ * blocked-dismissal note is stored under), so a local ask still has one.
+ */
+export function askRouteId(requestId: string | null, seq: number): string {
+  return requestId ?? `seq:${seq}`;
+}
+
+/**
+ * What one ask's blocked-dismissal note is stored under: the ask's OWN id, so a
+ * new ask never inherits the note the previous one earned (D5).
+ */
+export function holdKey(computerId: string, sessionId: string, askId: string): string {
+  return `${computerId}\u0000${sessionId}\u0000${askId}`;
+}
+
+/** How many times a blocked dismissal was attempted for one ask. */
+export interface SheetHolds {
+  /**
+   * A blocked swipe/backdrop was attempted on this ask (`gestureCancel`): the
+   * ask plays the `light` haptic and shows the inline footnote under its options
+   * (D5). Monotonic per key: a second attempt is a NEW note, never a no-op.
+   */
+  note(key: string): void;
+  /** How many attempts this ask has had; 0 = none (the footnote is hidden). */
+  sequence(key: string): number;
+  /** The screen's `useSyncExternalStore` subscription. */
+  subscribe(listener: () => void): () => void;
+  /** The ask is settled, or the session is gone: drop its note. */
+  forget(key: string): void;
+}
+
+/**
+ * The blocked-dismissal notes, held outside React like `SHEET_DETENTS`: the
+ * navigator's `gestureCancel` listener observes an attempt on a route it does
+ * not own the state of, and the session screen that publishes the ask's element
+ * reads it back — the two are different screens (`sheet-host.ts`'s reason).
+ */
+export function createSheetHolds(): SheetHolds {
+  const counts = new Map<string, number>();
+  const listeners = new Set<() => void>();
+  const notify = (): void => {
+    for (const listener of listeners) {
+      listener();
+    }
+  };
+  return {
+    note(key) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      notify();
+    },
+    sequence: (key) => counts.get(key) ?? 0,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    forget(key) {
+      if (counts.delete(key)) {
+        notify();
+      }
+    },
+  };
+}
 
 /**
  * The opening context for a sheet's options: Dynamic Type, the detent the person
@@ -459,6 +532,93 @@ export function reconcile(
   }
   const wanted = desired[i];
   return wanted === undefined ? null : { action: "push", kind: wanted };
+}
+
+/** The app's ONE note store (the navigator writes it, the session screen reads it). */
+export const SHEET_HOLDS: SheetHolds = createSheetHolds();
+
+/**
+ * The route's params a screen may rewrite in place, by `SET_PARAMS` keyed on the
+ * route: `asking` is the ONLY one (`{asking:false}` once the ask is settled and
+ * its reply or decision is on its way down, so the sheet is free to swipe again
+ * — D5's `returned`).
+ */
+export interface SheetParamUpdate {
+  readonly key: string;
+  readonly params: { readonly asking: boolean; readonly askId?: string };
+}
+
+/**
+ * What the presented ask now is, as the route's params must say it: whether it is
+ * still unanswered (D5's `gestureEnabled`), and which ask it is (`askId` — the
+ * detent identity and the blocked-note key). `null` = nothing to say (idle).
+ */
+export interface SheetAskParams {
+  readonly asking: boolean;
+  readonly askId: string | null;
+}
+
+/**
+ * What OUR ask's route currently SAYS, or `null` when no permission route of this
+ * session is up. Read from the params rather than from the sheet's state on
+ * purpose: once the ask settles the sheet holds no id any more (it is a
+ * `returned` reply), and the route is then the only place that still knows which
+ * ask it was — which is what the note that ask earned must be forgotten under.
+ */
+export function askRouteParams(
+  routes: readonly SheetRouteLike[],
+  owner: { readonly computerId: string; readonly sessionId: string },
+): SheetAskParams | null {
+  const mine = sheetsOfSession(routes, owner);
+  const top = mine[mine.length - 1];
+  if (top === undefined || top.kind !== "permission") {
+    return null;
+  }
+  const route = routes.find((candidate) => candidate.key === top.key);
+  const params = route?.params as
+    | { readonly asking?: unknown; readonly askId?: unknown }
+    | undefined;
+  return {
+    asking: params?.asking === true,
+    askId: typeof params?.askId === "string" ? params.askId : null,
+  };
+}
+
+/**
+ * The `SET_PARAMS` the ask's own route needs, or `null` when it already says so.
+ * A rewrite in place rather than a re-push: `navigate` would REPLACE the stack's
+ * params (`openSheet`'s reason), and the sheet is already up — it must not blink.
+ *
+ * BOTH facts are compared: a SECOND ask arrives while the same route is up (the
+ * sheet presents the queued one at once, `permission-sheet.ts`'s `present`), and a
+ * route left saying the previous ask's id would key its note and its detent on an
+ * ask that is gone.
+ */
+export function askingParamUpdate(
+  routes: readonly SheetRouteLike[],
+  owner: { readonly computerId: string; readonly sessionId: string },
+  next: SheetAskParams,
+): SheetParamUpdate | null {
+  const current = askRouteParams(routes, owner);
+  if (current === null) {
+    return null;
+  }
+  const askingStale = current.asking !== next.asking;
+  const idStale = next.askId !== null && current.askId !== next.askId;
+  if (!askingStale && !idStale) {
+    return null;
+  }
+  const key = sheetsOfSession(routes, owner).at(-1)?.key;
+  if (key === undefined) {
+    return null;
+  }
+  return {
+    key,
+    params: {
+      asking: next.asking,
+      ...(idStale && next.askId !== null ? { askId: next.askId } : {}),
+    },
+  };
 }
 
 /**
