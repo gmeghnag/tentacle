@@ -1,0 +1,479 @@
+/**
+ * The native sheets' decisions (docs/feat/mobile-native-sheets.md D3): which
+ * sheet, at which detent, and the ONE next step of the reconcile loop. Every
+ * rule is pure, so it is pinned here rather than on a simulator (AGENTS §7).
+ *
+ * The dev asserts it must make impossible live in RNS
+ * (`react-native-screens/src/components/helpers/sheet.tsx:11-19,58-66,92-99`):
+ * unsorted detents, and an out-of-range initial or undimmed index, THROW in dev.
+ */
+import { describe, expect, test } from "bun:test";
+import {
+  DETENT_MEMORY_MAX,
+  type DetentMemory,
+  INTENT_SHEET,
+  SHEET_KINDS,
+  SHEET_SPEC,
+  type SheetEntry,
+  type SheetKind,
+  clampDetent,
+  createDetentMemory,
+  desiredStack,
+  dismissedNatively,
+  initialDetent,
+  openingDetent,
+  queueAfterDismiss,
+  readyIntents,
+  reconcile,
+  rememberDetent,
+  rememberedDetent,
+  sessionInFront,
+  sheetGestureEnabled,
+  sheetGround,
+  sheetHidden,
+  sheetOptions,
+  yieldForeign,
+} from "../src/sheet-plan.ts";
+import { DENSE_FONT_SCALE } from "../src/theme.ts";
+
+const CALM = { fontScale: 1 };
+const DENSE = { fontScale: DENSE_FONT_SCALE };
+const HIDDEN = { hidden: true, transitioning: false };
+const SHOWN = { hidden: false, transitioning: false };
+const MOVING = { hidden: false, transitioning: true };
+
+/** Bottom→top entries, keys numbered in order (`a0`, `a1`, …). */
+function stack(...kinds: SheetKind[]): SheetEntry[] {
+  return kinds.map((kind, i) => ({ kind, key: `a${i}` }));
+}
+
+describe("SHEET_SPEC — the RNS dev asserts must be unreachable", () => {
+  for (const kind of SHEET_KINDS) {
+    test(`${kind}: detents ascend, initial and undimmed indexes are in range`, () => {
+      const spec = SHEET_SPEC[kind];
+      expect(spec.detents.length).toBe(3);
+      for (let i = 1; i < spec.detents.length; i++) {
+        expect(spec.detents[i] ?? 0).toBeGreaterThan(spec.detents[i - 1] ?? 0);
+      }
+      expect(Number.isInteger(spec.initial)).toBe(true);
+      expect(spec.initial).toBeGreaterThanOrEqual(0);
+      expect(spec.initial).toBeLessThanOrEqual(spec.detents.length - 1);
+      // -1 is RNS's "dimmed at every detent"; any other value is an index.
+      expect(spec.dimmed === -1 || (spec.dimmed >= 0 && spec.dimmed < spec.detents.length)).toBe(
+        true,
+      );
+    });
+  }
+
+  test("every sheet opens at the middle detent and is dimmed throughout", () => {
+    for (const kind of SHEET_KINDS) {
+      expect(initialDetent(kind, CALM)).toBe(1);
+      expect(SHEET_SPEC[kind].dimmed).toBe(-1);
+      expect(SHEET_SPEC[kind].grabber).toBe(true);
+    }
+  });
+});
+
+describe("initialDetent", () => {
+  test("the spec's index at a normal font scale", () => {
+    expect(initialDetent("tools", CALM)).toBe(1);
+    expect(initialDetent("permission", { fontScale: 1.0 })).toBe(1);
+  });
+
+  test("raised one step at a dense font scale", () => {
+    expect(initialDetent("outbox", DENSE)).toBe(2);
+    expect(initialDetent("permission", { fontScale: DENSE_FONT_SCALE })).toBe(2);
+    expect(initialDetent("tools", { fontScale: DENSE_FONT_SCALE + 1 })).toBe(2);
+  });
+
+  test("a reveal opens at the largest detent, whatever the font scale", () => {
+    expect(initialDetent("info", { ...CALM, reveal: true })).toBe(2);
+    expect(initialDetent("info", { ...DENSE, reveal: true })).toBe(2);
+    expect(initialDetent("info", CALM)).toBe(1);
+  });
+
+  test("a nonsense font scale is not dense", () => {
+    expect(initialDetent("tools", { fontScale: Number.NaN })).toBe(1);
+    expect(initialDetent("tools", { fontScale: 0 })).toBe(1);
+  });
+});
+
+describe("sheetOptions — always accepted by RNS", () => {
+  test("formSheet with the spec's detents, no header, expand on scroll", () => {
+    const options = sheetOptions("tools", CALM);
+    expect(options.presentation).toBe("formSheet");
+    expect(options.headerShown).toBe(false);
+    expect(options.sheetAllowedDetents).toEqual([0.3, 0.5, 1.0]);
+    expect(options.sheetInitialDetentIndex).toBe(1);
+    expect(options.sheetLargestUndimmedDetentIndex).toBe(-1);
+    expect(options.sheetGrabberVisible).toBe(true);
+    expect(options.sheetExpandsWhenScrolledToEdge).toBe(true);
+  });
+
+  test("detents come back sorted and the initial index clamped, whatever is passed", () => {
+    const options = sheetOptions("permission", { ...CALM, detent: 9 });
+    expect(options.sheetInitialDetentIndex).toBe(2);
+    expect(sheetOptions("permission", { ...CALM, detent: -4 }).sheetInitialDetentIndex).toBe(0);
+    const allowed = options.sheetAllowedDetents;
+    const detents = Array.isArray(allowed) ? allowed : [];
+    expect(detents.length).toBe(3);
+    for (let i = 1; i < detents.length; i++) {
+      expect(detents[i] ?? 0).toBeGreaterThanOrEqual(detents[i - 1] ?? 0);
+    }
+  });
+
+  test("a remembered detent wins over the spec's", () => {
+    expect(sheetOptions("outbox", { ...CALM, detent: 2 }).sheetInitialDetentIndex).toBe(2);
+    expect(sheetOptions("outbox", DENSE).sheetInitialDetentIndex).toBe(2);
+    expect(sheetOptions("outbox", CALM).sheetInitialDetentIndex).toBe(1);
+  });
+
+  test("clampDetent keeps an index inside the spec", () => {
+    expect(clampDetent(SHEET_SPEC.tools, 1)).toBe(1);
+    expect(clampDetent(SHEET_SPEC.tools, 7)).toBe(2);
+    expect(clampDetent(SHEET_SPEC.tools, 1.5)).toBe(1);
+    expect(clampDetent(SHEET_SPEC.tools, Number.NaN)).toBe(1);
+  });
+});
+
+describe("sheetGestureEnabled — blocked only for an ask in progress", () => {
+  test("permission while asking is held; permission returned is free", () => {
+    expect(sheetGestureEnabled("permission", true)).toBe(false);
+    expect(sheetGestureEnabled("permission", false)).toBe(true);
+  });
+
+  test("every other sheet is always dismissible", () => {
+    for (const kind of SHEET_KINDS) {
+      if (kind === "permission") continue;
+      expect(sheetGestureEnabled(kind, true)).toBe(true);
+      expect(sheetGestureEnabled(kind, false)).toBe(true);
+    }
+  });
+
+  test("reaching sheetOptions", () => {
+    expect(sheetOptions("permission", { ...CALM, asking: true }).gestureEnabled).toBe(false);
+    expect(sheetOptions("permission", CALM).gestureEnabled).toBe(true);
+    expect(sheetOptions("tools", { ...CALM, asking: true }).gestureEnabled).toBe(true);
+  });
+});
+
+describe("desiredStack — one user sheet, outbox above it, the ask on top", () => {
+  const none = { user: null, outbox: false, permission: false } as const;
+
+  test("empty", () => {
+    expect(desiredStack(none)).toEqual([]);
+  });
+
+  test("one user sheet, whatever it is", () => {
+    expect(desiredStack({ ...none, user: "tools" })).toEqual(["tools"]);
+    expect(desiredStack({ ...none, user: "info" })).toEqual(["info"]);
+    expect(desiredStack({ ...none, user: "commands" })).toEqual(["commands"]);
+  });
+
+  test("outbox sits above the user sheet", () => {
+    expect(desiredStack({ ...none, user: "tools", outbox: true })).toEqual(["tools", "outbox"]);
+    expect(desiredStack({ ...none, outbox: true })).toEqual(["outbox"]);
+  });
+
+  test("the ask is always on top, and only ever once", () => {
+    expect(desiredStack({ user: "commands", outbox: true, permission: true })).toEqual([
+      "commands",
+      "outbox",
+      "permission",
+    ]);
+    expect(desiredStack({ ...none, permission: true })).toEqual(["permission"]);
+    const all = desiredStack({ user: "info", outbox: true, permission: true });
+    expect(all.filter((k) => k === "permission").length).toBe(1);
+    expect(all[all.length - 1]).toBe("permission");
+  });
+});
+
+describe("reconcile — ONE step, top-only pops", () => {
+  test("converged means no step", () => {
+    expect(reconcile(["tools"], stack("tools"), SHOWN)).toBeNull();
+    expect(reconcile([], [], SHOWN)).toBeNull();
+    expect(reconcile(["tools", "permission"], stack("tools", "permission"), SHOWN)).toBeNull();
+  });
+
+  test("pushes the first missing kind, bottom→top", () => {
+    expect(reconcile(["tools"], [], SHOWN)).toEqual({ action: "push", kind: "tools" });
+    expect(reconcile(["tools", "permission"], stack("tools"), SHOWN)).toEqual({
+      action: "push",
+      kind: "permission",
+    });
+  });
+
+  test("pops the TOP when there is one too many", () => {
+    expect(reconcile(["tools"], stack("tools", "permission"), SHOWN)).toEqual({
+      action: "pop",
+      key: "a1",
+    });
+  });
+
+  test("never pops a lower key — the top goes first", () => {
+    // commands under tools where tools is wanted: pop the TOP (tools), then commands.
+    const first = reconcile(["tools"], stack("commands", "tools"), SHOWN);
+    expect(first).toEqual({ action: "pop", key: "a1" });
+    const second = reconcile(["tools"], stack("commands"), SHOWN);
+    expect(second).toEqual({ action: "pop", key: "a0" });
+    expect(reconcile(["tools"], [], SHOWN)).toEqual({ action: "push", kind: "tools" });
+  });
+
+  test("a swap converges with pops only, never a push first", () => {
+    let actual = stack("info", "permission");
+    const steps: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const step = reconcile(["tools"], actual, SHOWN);
+      if (step === null) break;
+      steps.push(`${step.action}:${step.action === "pop" ? step.key : step.kind}`);
+      actual =
+        step.action === "pop"
+          ? actual.filter((e) => e.key !== step.key)
+          : [...actual, { kind: step.kind, key: `n${i}` }];
+    }
+    expect(steps).toEqual(["pop:a1", "pop:a0", "push:tools"]);
+  });
+
+  test("nothing runs while a transition is in flight (except the drain)", () => {
+    expect(reconcile(["tools"], [], MOVING)).toBeNull();
+    expect(reconcile([], stack("tools"), MOVING)).toBeNull();
+  });
+
+  test("hidden drains top-down and never pushes", () => {
+    let actual = stack("tools", "permission");
+    const popped: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const step = reconcile(["tools", "permission"], actual, HIDDEN);
+      if (step === null) break;
+      expect(step.action).toBe("pop");
+      if (step.action !== "pop") break;
+      popped.push(step.key);
+      actual = actual.filter((e) => e.key !== step.key);
+    }
+    expect(popped).toEqual(["a1", "a0"]);
+    expect(reconcile([], stack("tools"), HIDDEN)).toEqual({ action: "pop", key: "a0" });
+    expect(reconcile(["tools", "permission"], [], HIDDEN)).toBeNull();
+  });
+
+  test("the drain does not wait for a transition", () => {
+    expect(reconcile([], stack("tools"), { hidden: true, transitioning: true })).toEqual({
+      action: "pop",
+      key: "a0",
+    });
+  });
+
+  test("after the drain the same sheets return in order, at once", () => {
+    let actual: SheetEntry[] = [];
+    const desired = desiredStack({ user: "tools", outbox: false, permission: true });
+    const pushed: SheetKind[] = [];
+    for (let i = 0; i < 10; i++) {
+      const step = reconcile(desired, actual, SHOWN);
+      if (step === null) break;
+      expect(step.action).toBe("push");
+      if (step.action !== "push") break;
+      pushed.push(step.kind);
+      actual = [...actual, { kind: step.kind, key: `r${i}` }];
+    }
+    expect(pushed).toEqual(["tools", "permission"]);
+  });
+
+  test("converges in at most (desired + actual) steps from any stack", () => {
+    const all: readonly SheetKind[] = ["commands", "tools", "info", "outbox", "permission"];
+    const desires: SheetKind[][] = [[], ...all.map((k) => [k]), ["commands", "permission"]];
+    const stacks: SheetEntry[][] = [[], ...all.map((k) => stack(k)), stack("commands", "tools")];
+    for (const desired of desires) {
+      for (const start of stacks) {
+        let actual = start;
+        let steps = 0;
+        while (steps < 20) {
+          const step = reconcile(desired, actual, SHOWN);
+          if (step === null) break;
+          steps++;
+          if (step.action === "pop") {
+            // top-only, always
+            const top = actual[actual.length - 1];
+            expect(top?.key).toBe(step.key);
+            actual = actual.slice(0, -1);
+          } else {
+            actual = [...actual, { kind: step.kind, key: `p${steps}` }];
+          }
+        }
+        expect(actual.map((e) => e.kind)).toEqual(desired);
+        expect(steps).toBeLessThanOrEqual(desired.length + start.length);
+      }
+    }
+  });
+});
+
+describe("dismissedNatively — a planned pop is not a swipe", () => {
+  test("a swiped key is reported", () => {
+    expect(dismissedNatively(stack("tools"), [], [])).toEqual(["tools"]);
+    expect(dismissedNatively(stack("tools", "permission"), stack("tools"), [])).toEqual([
+      "permission",
+    ]);
+  });
+
+  test("its own pop is ignored", () => {
+    expect(dismissedNatively(stack("tools"), [], ["a0"])).toEqual([]);
+    expect(dismissedNatively(stack("tools", "permission"), stack("tools"), ["a1"])).toEqual([]);
+  });
+
+  test("the routes a planned pop of a LOWER sheet also removed are ignored", () => {
+    // F4: popping the lower route removes both. The upper one must not run a close handler.
+    expect(dismissedNatively(stack("tools", "permission"), [], ["a0"])).toEqual([]);
+  });
+
+  test("a swipe above a planned pop is still reported", () => {
+    const prev = stack("tools", "permission", "outbox");
+    // planned pop of the bottom, the top two vanish with it — all collateral.
+    expect(dismissedNatively(prev, [], ["a0"])).toEqual([]);
+    // a real swipe of the top, nothing planned
+    expect(dismissedNatively(prev, stack("tools", "permission"), [])).toEqual(["outbox"]);
+  });
+
+  test("a push is not a dismissal", () => {
+    expect(dismissedNatively(stack("tools"), stack("tools", "permission"), [])).toEqual([]);
+  });
+
+  test("a kind is reported once", () => {
+    expect(dismissedNatively(stack("outbox", "outbox"), [], [])).toEqual(["outbox"]);
+  });
+});
+
+describe("detent memory — per identity, bounded", () => {
+  test("a remembered detent is returned for the same identity only", () => {
+    const memory = createDetentMemory();
+    expect(openingDetent(memory, "permission", "ask-1", CALM)).toBe(1);
+    rememberDetent(memory, "permission", "ask-1", 2);
+    expect(rememberedDetent(memory, "permission", "ask-1")).toBe(2);
+    expect(openingDetent(memory, "permission", "ask-1", CALM)).toBe(2);
+    // A DIFFERENT ask (Step 0b L3: the re-delivery on resume is the same id) is fresh.
+    expect(rememberedDetent(memory, "permission", "ask-2")).toBeNull();
+    expect(openingDetent(memory, "permission", "ask-2", CALM)).toBe(1);
+    // And a user sheet's identity is its kind, not the ask's.
+    rememberDetent(memory, "tools", null, 0);
+    expect(openingDetent(memory, "tools", null, CALM)).toBe(0);
+    expect(openingDetent(memory, "info", null, CALM)).toBe(1);
+  });
+
+  test("a remembered index is clamped to the spec", () => {
+    const memory = createDetentMemory();
+    rememberDetent(memory, "outbox", null, 8);
+    expect(rememberedDetent(memory, "outbox", null)).toBe(2);
+    rememberDetent(memory, "outbox", null, -3);
+    expect(rememberedDetent(memory, "outbox", null)).toBe(0);
+  });
+
+  test("re-remembering moves the identity to the newest, and the store is bounded", () => {
+    const memory: DetentMemory = createDetentMemory();
+    rememberDetent(memory, "permission", "ask-0", 2);
+    for (let i = 1; i <= DETENT_MEMORY_MAX; i++) {
+      rememberDetent(memory, "permission", `ask-${i}`, 1);
+    }
+    // ask-0 is the oldest and has been dropped; the newest survives.
+    expect(rememberedDetent(memory, "permission", "ask-0")).toBeNull();
+    expect(rememberedDetent(memory, "permission", `ask-${DETENT_MEMORY_MAX}`)).toBe(1);
+    // Touching an old one keeps it alive.
+    rememberDetent(memory, "permission", "ask-1", 2);
+    for (let i = DETENT_MEMORY_MAX + 1; i <= DETENT_MEMORY_MAX * 2; i++) {
+      rememberDetent(memory, "permission", `ask-${i}`, 1);
+    }
+    expect(rememberedDetent(memory, "permission", `ask-${DETENT_MEMORY_MAX * 2}`)).toBe(1);
+    expect(memory.seen.size).toBeLessThanOrEqual(DETENT_MEMORY_MAX);
+  });
+
+  test("with no memory the spec's detent opens", () => {
+    expect(openingDetent(null, "tools", null, CALM)).toBe(1);
+    expect(openingDetent(createDetentMemory(), "info", null, { ...CALM, reveal: true })).toBe(2);
+  });
+});
+
+describe("afterDismiss — intents that need the sheet gone first", () => {
+  test("each intent belongs to one sheet", () => {
+    expect(INTENT_SHEET.rename).toBe("commands");
+    expect(INTENT_SHEET.artifacts).toBe("info");
+  });
+
+  test("queueing is idempotent and ordered", () => {
+    let queue = queueAfterDismiss([], "rename");
+    expect(queue).toEqual(["rename"]);
+    queue = queueAfterDismiss(queue, "rename");
+    expect(queue).toEqual(["rename"]);
+    expect(queueAfterDismiss(queue, "artifacts")).toEqual(["rename", "artifacts"]);
+  });
+
+  test("nothing runs while a sheet is up or a transition is in flight", () => {
+    expect(readyIntents(["rename"], stack("commands"), { transitioning: false })).toEqual({
+      run: [],
+      rest: ["rename"],
+    });
+    expect(readyIntents(["rename"], [], { transitioning: true })).toEqual({
+      run: [],
+      rest: ["rename"],
+    });
+  });
+
+  test("runs once the stack is empty, or a close has finished", () => {
+    expect(readyIntents(["rename"], [], { transitioning: false })).toEqual({
+      run: ["rename"],
+      rest: [],
+    });
+    // The closed route can still be in the navigation state at transitionEnd.
+    expect(
+      readyIntents(["rename"], stack("commands"), { transitioning: false, closingDone: true }),
+    ).toEqual({ run: ["rename"], rest: [] });
+    expect(readyIntents([], [], { transitioning: false })).toEqual({ run: [], rest: [] });
+  });
+});
+
+describe("yieldForeign — no RN Modal while a sheet is up or coming", () => {
+  test("true with a sheet up or about to be pushed", () => {
+    expect(yieldForeign([], stack("tools"))).toBe(true);
+    expect(yieldForeign(["tools"], [])).toBe(true);
+    expect(yieldForeign(["tools"], stack("tools"))).toBe(true);
+  });
+
+  test("false with nothing up and nothing wanted", () => {
+    expect(yieldForeign([], [])).toBe(false);
+  });
+});
+
+describe("sessionInFront — this session is what the person sees", () => {
+  test("focused, or one of our sheets is up", () => {
+    expect(sessionInFront(true, [])).toBe(true);
+    expect(sessionInFront(false, stack("permission"))).toBe(true);
+    expect(sessionInFront(true, stack("tools"))).toBe(true);
+  });
+
+  test("blurred with no sheet up is behind", () => {
+    expect(sessionInFront(false, [])).toBe(false);
+  });
+});
+
+describe("sheetHidden — the drain's trigger, both legs", () => {
+  test("locked is hidden, whatever the app state", () => {
+    expect(sheetHidden(true, "active")).toBe(true);
+    expect(sheetHidden(true, "inactive")).toBe(true);
+    expect(sheetHidden(true, "background")).toBe(true);
+  });
+
+  test("any non-active app state is hidden (inactive is the load-bearing leg)", () => {
+    expect(sheetHidden(false, "inactive")).toBe(true);
+    expect(sheetHidden(false, "background")).toBe(true);
+    expect(sheetHidden(false, "unknown")).toBe(true);
+  });
+
+  test("unlocked and active is not", () => {
+    expect(sheetHidden(false, "active")).toBe(false);
+  });
+});
+
+describe("sheetGround — the route's colour token", () => {
+  test("the ask is the sheet surface, the rest the banded ground", () => {
+    expect(sheetGround("permission")).toBe("sheet");
+    for (const kind of SHEET_KINDS) {
+      if (kind === "permission") continue;
+      expect(sheetGround(kind)).toBe("bg");
+    }
+  });
+});

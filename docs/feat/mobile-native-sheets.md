@@ -478,6 +478,88 @@ Verdict: the drain (A) works for L1, L3, L4 and L5. **L2 cannot be proven on thi
 without one approval** (osascript → Simulator "App Switcher", then a screenshot) or a real
 device.
 
+### S1 — `sheet-plan.ts` + tests
+
+*— claude-opus-5-5 (executor), 2026-11-23*
+
+**Load-bearing check first (reproduced).** `.tentacle/tmp/mobile-native-sheets/s1-baseline.log`:
+`apps/mobile/src/sheet-plan.ts` and `apps/mobile/test/sheet-plan.test.ts` do not exist; grep for
+`sheetAllowedDetents|sheetInitialDetentIndex|sheetDetentChange` over `apps/mobile/src` and
+`App.tsx` → **no hit** (no detent option is used anywhere yet); grep for
+`SHEET_SPEC|desiredStack|dismissedNatively` → no hit. So the capability is genuinely missing:
+nothing in the app decides a detent or a sheet stack today.
+
+**As built** (only S1; no other slice touched):
+
+- `apps/mobile/src/sheet-plan.ts` (new, 431 lines, pure and React-free — the
+  `activity-panel.ts`/`reveal-report.ts` pattern): `SheetKind`/`SHEET_KINDS`, `SHEET_SPEC`
+  (0.3/0.5/1.0 ascending, initial 1, dimmed -1, grabber on, for all five — Owner Q1),
+  `clampDetent`, `initialDetent` (spec index; +1 step at `DENSE_FONT_SCALE`; largest for
+  `info` + reveal), `sheetOptions` (the NS option object: `presentation:"formSheet"`,
+  `headerShown:false`, `sheetExpandsWhenScrolledToEdge:true`, `gestureEnabled` per
+  `sheetGestureEnabled`), `sheetGestureEnabled` (false only for permission + asking, D5),
+  `sheetGround` (`bg` / `sheet`), `desiredStack`, `reconcile`, `dismissedNatively`,
+  `DetentMemory` (`createDetentMemory`/`rememberDetent`/`rememberedDetent`/`openingDetent`,
+  identity-keyed, bounded at `DETENT_MEMORY_MAX = 16`, oldest-out), `INTENT_SHEET`/
+  `queueAfterDismiss`/`readyIntents`, `yieldForeign`, `sessionInFront`, `sheetHidden`.
+- `apps/mobile/test/sheet-plan.test.ts` (new, 479 lines, 53 tests): every item the plan's *Tests* list
+  names for S1, plus `sheetOptions` acceptance, `clampDetent`, the memory's bound and eviction,
+  `readyIntents`, `sheetHidden` and `sheetGround`.
+- `changelog.d/mobile-native-sheets.changed.md` (the fragment the Implementation names).
+
+**Red before green.** The test file was written first; on the missing module it fails
+(`error: Cannot find module '../src/sheet-plan.ts' … 0 pass 1 fail`) — a compile-level red, so
+the mutation checks below carry the burden of proving each assertion holds (AGENTS §9).
+
+**Mutation checks** (`.tentacle/tmp/mobile-native-sheets/mutate-s1.sh`; each mutation applied
+to `src/sheet-plan.ts`, the narrow test file run, the file restored from a scratch copy — never
+`git checkout`; the restored source is byte-identical to the pre-mutation copy):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `DETENTS = [0.5, 0.3, 1.0]` (unsorted) | 46 pass **7 fail** |
+| M2 | `reconcile` pops `actual[i]` (a lower key) instead of the top | 50 **3 fail** |
+| M3 | `dismissedNatively` ignores `plannedPop` | 50 **3 fail** |
+| M4 | `reconcile` pushes while `hidden` | 52 **1 fail** |
+| M5 | the drain waits for `transitioning` | 52 **1 fail** |
+| M6 | `initialDetent` ignores `reveal` | 51 **2 fail** |
+| M7 | `initialDetent` ignores `DENSE_FONT_SCALE` | 51 **2 fail** |
+| M8 | `sheetGestureEnabled` held for every asking sheet | 51 **2 fail** |
+| M9 | `sessionInFront` drops the sheet leg | 52 **1 fail** |
+| M10 | `sheetHidden` drops the `inactive` leg | 52 **1 fail** |
+| M11 | detent memory keyed on the kind, not the identity | 51 **2 fail** |
+| M12 | `readyIntents` runs with a sheet still up | 52 **1 fail** |
+| M13 | `yieldForeign` ignores the about-to-push leg | 52 **1 fail** |
+| M14 | `desiredStack` puts the ask below the user sheet | 51 **2 fail** |
+
+All 14 mutations go red, and the restored file is 53/53 green (316 `expect()` calls).
+
+**Drift from the Implementation — two, both small and inside S1:**
+
+1. `sheetGround(kind)` returns the literal union `SheetGround = "bg" | "sheet"` instead of
+   `keyof Palette`. Same values, but `keyof Palette` would make the module import a type it never
+   uses at runtime and type the return wider than the two tokens the plan names. The route (S2)
+   reads `palette[sheetGround(kind)]`, which still typechecks.
+2. `reconcile` takes the plan's two gate flags as ONE `ReconcileGate` object (`{hidden,
+   transitioning}`), and `readyIntents` takes `{transitioning, closingDone?}` — the plan states
+   the rules, not the signatures. `closingDone` is the plan's `transitionEnd {closing:true}`
+   leg, made explicit.
+
+`DETENT_MEMORY_MAX = 16` is not in the plan; the plan asks for a "bounded" store without a
+number, so the bound is chosen here (an ask's id is used for at most a few resumes).
+
+**Verified.** `bun test apps/mobile/test/sheet-plan.test.ts` → 53 pass / 0 fail ·
+`bun test` on the neighbours the plan names (`permission-sheet`, `commands-sheet`,
+`tools-view`, `session-info`) → 129 pass / 0 fail · the source-scanning guard suites a new `src`
+module can trip (`bundle-node-free`, `node-builtins-guard`, `motion-literals`, `text-seam`,
+`theme`, `band-screens`, `pairing-guards`, `app-config`, `header-wiring`) → 245 pass / 0 fail ·
+`bun test scripts/test/changelog-guard.test.ts scripts/test/changelog.test.ts` → 21 pass ·
+`bunx tsc -p apps/mobile` clean · `bunx biome check` on the three changed files clean. The full
+`bun run check` gate is the orchestrator's.
+
+**Not done, by instruction:** S2–S6 (the route, the host bridge, the screen wiring, the sheet
+components' migration, e2e). Nothing outside S1's file list was touched; `TODO.md` untouched.
+
 ## Review
 
 ### Owner answers (2026-11-23 ~08:35)
