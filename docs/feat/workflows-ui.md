@@ -1833,3 +1833,26 @@ errors-array collapse, both in 5a. Reviewer is the same model family (Opus) as t
 executors; shared planner blind spots may survive.
 
 *— claude-opus-5-5, 2026-11-23*
+
+### Round 2
+
+**Verdict: APPROVE** (scope: `git diff HEAD~1`, commit `cfdaa323`, fixing round 1's two findings).
+
+- **#1 (one valid file blanked the catalogue) — FIXED.** `hosted-session.ts` `catalogueRow` judges
+  each row against `WorkflowDefRowSchema` on its own; a row the wire refuses becomes `ok:false` with
+  errors naming the step (`step "build" command: …`), the other rows stay, `unavailable` is not set.
+  Mutation: return the unchecked row → RED ("a VALID workflow the wire cannot carry is ONE ok:false
+  row…").
+- **#2 (errors joined and cut silently) — FIXED.** `prepareSource` returns `validation.errors` as an
+  array, `catalogue()` passes it through; `boundedWorkflowErrors` keeps each one on one line, ≤ 300
+  chars ending in `…` when cut, and past 20 puts `+k more` in the last slot. Mutations: `errors:
+  [prepared.reason]` → 3 RED (agent catalogue + 2 hosted); drop `+k more` (plain slice to 20) → RED.
+  Every mutation reverted from a scratch copy; `git status` clean after each.
+- **Regressions looked for in the diff:** the replacement row's `name`/`path` are one line and capped,
+  so it always parses; `capWithEllipsis` does not split a surrogate pair; `reason` (the start refusal
+  text) is unchanged. None found. Left as before (not part of round 1): a top-level `dir`/`elsewhere`
+  over 1024 chars still fails the whole answer, and the no-driver `dir: ""` (note (a)).
+- **Gate:** `bun test packages/daemon/test packages/agent/test` 2271 pass, 1 skip, 0 fail;
+  `bun run typecheck` clean; `bun run lint` clean (2336 files). Full `bun test` not re-run (merge gate).
+
+*— claude-opus-5-5, 2026-11-23*
