@@ -120,4 +120,28 @@ Gate: `bun run check` (typecheck, then lint against the clean baseline, then the
 
 ## Execution
 
+*— claude-sonnet-5-5 (executor), 2026-11-23*
+
+Load-bearing check re-run: `sse.ts` dropped non-`data:` lines and `parseChunk` had no `error` handling; confirmed on the current tree, and the red tests below show it.
+
+As built, in order:
+1. **Red first.** New `providers/test/openai-stream-error.test.ts` (a–f plus a no-message/capped case), `sse.test.ts` updated for `SseItem` plus an `error:` field test, `anthropic-provider.test.ts` asserting `ModelServerError` and `model server error: Overloaded`. On the old tree: 13 fail, and only control (f) passed. The failures are on the assertion (no `ModelServerError`, wrong message), not on imports, because the tests check `error.name`.
+2. **D1** `providers/src/sse.ts`: `SseItem` and the `error:` field, in the line loop and the tail flush.
+3. **D2/D3** `providers/src/openai-provider.ts`: `ModelServerError` (no `code` property), `inBandError`, `inBandErrorFromText` (new helper for a raw `error:` value, shared with Anthropic), `WireChunk.error`, and the loop checks (`error` item first; `inBandError(chunk)` before `usage` and `choices`).
+4. **D4** `providers/src/anthropic-provider.ts`: iterates `SseItem`; `case "error"` throws `inBandError(event) ?? ModelServerError`.
+5. **D5** `tui/src/model-error.ts`: `MODEL_FAILURE` became `REMOTE_CONFIG_FAILURE` (the plan's regex).
+6. TUI tests: `model-error.test.ts` positives (401/403/ECONN/unreachable/ENOTFOUND) and negatives (the owner's two strings, the server error, the output-limit cut, 400, 500, 503, which moved from the positive list). Red on the old tree: 2 fail on the assertion. App-level test in `truncated-reply-notice.test.tsx` (`model="remote"`): red on the old tree, the frame carried `— the daemon runs its own model: check its config…`. Mobile test in `apps/mobile/test/transcript.test.ts`: a parity pin, **green on both trees, not the red test**.
+7. Changelog fragment `changelog.d/model-stream-error.fixed.md`. No protocol change, so no `protocol.d/` note.
+
+Drift: the barrel (`index.ts`) needed no edit because it already does `export *`.
+
+Mutations:
+- `error:` branch in `sse.ts` disabled → fails (a), (c), (d), (e) and the sse `error:` test.
+- `inBandError(chunk)` check disabled → fails (b) and the no-message case.
+Both reverted; final state green.
+
+Evidence: `bun test` on `packages/providers/test`, `model-error.test.ts` and `truncated-reply-notice.test.tsx` gives 213 pass, 0 fail; `serve-model-notice` and the mobile `transcript` tests pass. `biome check` is clean on the touched dirs and `tsc -p packages/providers` is clean. The full gate (`bun run check`) is left to the orchestrator's script, per the owner's budget rule.
+
+Unverified: a real llama.cpp stream. The `error:` wire shape comes from the plan's reading of the llama.cpp server code and from the owner's log, not from a captured stream. Verify by reproducing the three-request overload against the `~/assistant` serve.
+
 ## Review

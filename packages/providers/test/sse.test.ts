@@ -15,8 +15,10 @@ function streamOf(chunks: readonly string[]): ReadableStream<Uint8Array> {
 
 async function collect(stream: ReadableStream<Uint8Array>): Promise<string[]> {
   const out: string[] = [];
-  for await (const data of parseSSE(stream)) {
-    out.push(data);
+  for await (const item of parseSSE(stream)) {
+    if (item.field === "data") {
+      out.push(item.value);
+    }
   }
   return out;
 }
@@ -45,5 +47,18 @@ describe("parseSSE", () => {
   test("flushes a trailing line without a final newline", async () => {
     const out = await collect(streamOf(["data: [DONE]"]));
     expect(out).toEqual(["[DONE]"]);
+  });
+
+  test("yields `error:` fields (body and trailing flush); event/id stay dropped", async () => {
+    const out: Array<{ field: string; value: string }> = [];
+    const body = ['event: x\nid: 1\nerror: {"a":1}\n\ndata: d\n\n', "error: tail"];
+    for await (const item of parseSSE(streamOf(body))) {
+      out.push(item);
+    }
+    expect(out).toEqual([
+      { field: "error", value: '{"a":1}' },
+      { field: "data", value: "d" },
+      { field: "error", value: "tail" },
+    ]);
   });
 });
