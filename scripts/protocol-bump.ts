@@ -2,7 +2,8 @@
  * `bun run protocol:bump` — assign `PROTOCOL_VERSION` at MERGE time, from the
  * per-task notes in `protocol.d/` (docs/feat/protocol-version-at-merge.md).
  *
- * Why: the number (`packages/protocol/src/version.ts:32`) is one shared line, so
+ * Why: the number (the `PROTOCOL_VERSION` line in `packages/protocol/src/version.ts`)
+ * is one shared line, so
  * two parallel tasks that each bump it conflict — in the reason prose, which is
  * hand-resolved every time. A task therefore records only WHY the wire breaks,
  * in its own file `protocol.d/<slug>.md`; the orchestrator runs this once after
@@ -11,8 +12,10 @@
  * A note is one file, one reason, named for the task slug — so two tasks never
  * write one path (the shape `changelog.d/` proved, scripts/changelog.ts).
  *
- * The rules are pure (`parseNotes` / `applyBump`); the shell (`runProtocolBump`)
- * does the disk, the deletion and the `schema:export` refresh. `schema:export`
+ * The rules are pure (`parseNotes` / `applyBump` / `applyPin`); the shell
+ * (`runProtocolBump`) does the disk — `version.ts` AND the one pin line in
+ * `version.test.ts`, which is why a bump cannot leave the tree red — the
+ * deletion and the `schema:export` refresh. `schema:export`
  * is not optional: `schema/protocol.json` carries `x-protocol-version`
  * (`:4383`) and `packages/protocol/test/json-schema.test.ts:39` fails on drift,
  * so a bump that skips it is red anyway — one command does both.
@@ -26,6 +29,16 @@ export const NOTE_DIR = "protocol.d";
 
 /** The file the number and its reason comments live in (repo-relative). */
 export const VERSION_PATH = "packages/protocol/src/version.ts";
+
+/**
+ * The ONE hand-maintained number in the tests (repo-relative). A version literal
+ * in a test is fine only while it is a fake; the pin must equal the live version,
+ * so a bump that skipped it left the merged tree red (docs/fix/protocol-bump-pin.md).
+ */
+export const PIN_PATH = "packages/protocol/test/version.test.ts";
+
+/** The pin: `expect(PROTOCOL_VERSION).toBe(<n>);`, exactly once. */
+const PIN_LINE = /^(\s*)expect\(PROTOCOL_VERSION\)\.toBe\((\d+)\);$/m;
 
 /** A task slug: lowercase letters, digits and dashes, not starting with a dash. */
 const SLUG = /^[a-z0-9][a-z0-9-]*$/;
@@ -150,6 +163,42 @@ export function readVersion(versionText: string): number {
 }
 
 /**
+ * Move the ONE pin (`PIN_PATH`) with the number. A bump that wrote `version.ts`
+ * and skipped the pin left the merged tree red and the number hand-edited at the
+ * merge (23/11, docs/fix/protocol-bump-pin.md); this is the hunk that was missing.
+ *
+ * It refuses rather than guesses, because each silent alternative destroys the
+ * pin's own job — catching a hand-bump of `version.ts`:
+ * - no pin line, or more than one: nothing says which number the build speaks,
+ *   so there is no line to move and the bump writes nothing;
+ * - a pin that is neither `from` (this run's before) nor `to` (the assigned
+ *   number) was edited by hand — it is reported, never overwritten.
+ *
+ * `pin === to` is a no-op, which is what makes the crash window converge: the
+ * write order is pin → `version.ts`, so a crash in between re-runs cleanly. The
+ * other order would strand the tree at from == to with a stale pin, refused forever.
+ */
+export function applyPin(pinText: string, from: number, to: number): string {
+  const hits = [...pinText.matchAll(new RegExp(PIN_LINE.source, "gm"))];
+  const only = hits[0];
+  if (hits.length !== 1 || only === undefined) {
+    throw new ReleaseError(
+      `${PIN_PATH}: expected exactly one "expect(PROTOCOL_VERSION).toBe(<n>);" line (found ${hits.length})`,
+    );
+  }
+  const pin = Number(only[2]);
+  if (pin === to) {
+    return pinText;
+  }
+  if (pin !== from) {
+    throw new ReleaseError(
+      `${PIN_PATH}: pins ${pin} but version.ts was ${from} — the pin was hand-edited; fix it to ${from} and re-run`,
+    );
+  }
+  return pinText.replace(PIN_LINE, `$1expect(PROTOCOL_VERSION).toBe(${to});`);
+}
+
+/**
  * Wrap a note's prose into `// ` continuation lines (Biome's 100-col width), so a
  * long reason is still one comment block, and each new number gets exactly one
  * `// <n>: ` first line (`readBumps` reads that).
@@ -265,11 +314,12 @@ export interface ProtocolBumpDeps {
   readonly exportSchema: () => Promise<boolean>;
   readonly write: (text: string) => void;
   /**
-   * The one disk write, injectable so a test can prove the ORDER: notes are
-   * deleted after this lands, never before (mutation: delete first → the note is
-   * gone and the number was never bumped, an unrecoverable silent loss).
+   * The one disk write, injectable so a test can prove the ORDER: the pin, then
+   * `version.ts`, and the notes are deleted only after both (mutation: delete
+   * first → the note is gone and the number was never bumped, an unrecoverable
+   * silent loss). Called for every write, so a spy records the path order.
    */
-  readonly writeVersion?: (path: string, text: string) => void;
+  readonly writeFile?: (path: string, text: string) => void;
 }
 
 /**
@@ -282,27 +332,39 @@ export interface ProtocolBumpDeps {
  */
 export async function runProtocolBump(deps: ProtocolBumpDeps): Promise<number> {
   const { root, write } = deps;
+  const put = deps.writeFile ?? writeFileSync;
   try {
     const files = readNoteDir(root);
     const notes = parseNotes(files);
     const path = join(root, VERSION_PATH);
+    const pinPath = join(root, PIN_PATH);
     const before = readFileSync(path, "utf8");
     const after = applyBump(before, notes);
+    // The pin is computed before the FIRST write too: a missing or malformed pin
+    // must leave the tree exactly as it was, like a malformed note.
+    const pinBefore = readFileSync(pinPath, "utf8");
+    const pinAfter = applyPin(pinBefore, readVersion(before), readVersion(after));
     const pending = pendingNotes(before, notes);
     if (after !== before) {
-      (deps.writeVersion ?? writeFileSync)(path, after);
       const version = readVersion(after);
+      // Pin FIRST: a crash before `version.ts` still converges (see applyPin).
+      if (pinAfter !== pinBefore) {
+        put(pinPath, pinAfter);
+      }
+      put(path, after);
       const first = version - pending.length + 1;
       const lines = pending.map((note, i) => `  ${NOTE_DIR}/${note.slug}.md → // ${first + i}`);
       write(
-        `${VERSION_PATH}: ${pending.length} note${pending.length === 1 ? "" : "s"} folded, PROTOCOL_VERSION is now ${version}\n${lines.join("\n")}\n`,
+        `${VERSION_PATH}: ${pending.length} note${pending.length === 1 ? "" : "s"} folded, PROTOCOL_VERSION is now ${version}; ${PIN_PATH} pinned to ${version}\n${lines.join("\n")}\n`,
       );
     } else {
+      // No pin write here, and none is possible: `after === before` means
+      // from == to, so `applyPin` already returned the pin unchanged or refused.
       write(
         `${VERSION_PATH}: no new ${NOTE_DIR}/ notes; PROTOCOL_VERSION stays ${readVersion(before)}\n`,
       );
     }
-    // Delete only AFTER the write landed: a crash in between leaves the note,
+    // Delete only AFTER the writes landed: a crash in between leaves the note,
     // and the re-run skips it (applyBump's idempotence) instead of doubling it.
     for (const note of notes) {
       rmSync(join(root, note.path), { force: true });
@@ -315,8 +377,8 @@ export async function runProtocolBump(deps: ProtocolBumpDeps): Promise<number> {
     }
     write(
       pending.length === 0
-        ? "done. Stage packages/protocol/schema/protocol.json if it changed (the generated file must never be hand-merged).\n"
-        : `done. Stage ${VERSION_PATH}, the ${NOTE_DIR}/ deletions and packages/protocol/schema/protocol.json.\n`,
+        ? `done. Stage ${VERSION_PATH}, ${PIN_PATH} if it changed, and packages/protocol/schema/protocol.json if it changed (the generated file must never be hand-merged).\n`
+        : `done. Stage ${VERSION_PATH}, ${PIN_PATH}, the ${NOTE_DIR}/ deletions and packages/protocol/schema/protocol.json.\n`,
     );
     return 0;
   } catch (error) {
