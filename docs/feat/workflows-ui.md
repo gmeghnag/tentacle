@@ -1328,6 +1328,13 @@ checkout`).**
 - **`local-runtime`'s controller guard.** `packages/cli/test/subagent-panel-controller.test.ts`
   pins the exact forwarded set; it went red on the new member (which is what it is for), so its
   list gained `workflowCatalogue` beside `workflow`/`workflowStep`.
+- **The fragment gained a SECOND bullet — gate-red, now merged into one.** `changelog.d/workflows-ui.added.md`
+  held 1a/1b's bullet; this slice APPENDED its own, so the file carried two `- ` bullets and
+  `scripts/test/changelog-guard.test.ts` I2 went red (`changelog.d/workflows-ui.added.md: one bullet
+  per file; split it into two fragments`). §10 allows one fragment per slug+category, so the two were
+  merged back into the single bullet the file must hold (the catalogue/hash/refusal sentence plus the
+  `workflow_step` sentence plus the shared client seam), not split into a second file — a second
+  `added` file would collide on the slug+category pair.
 - **`json-schema.test.ts` fixtures.** Adding a method without its params/result fixtures fails
   "every method … has a fixture" — the new fixtures carry the `hash`/`refusal` params and results
   as well as all four catalogue answers (rows, empty+hint, `unavailable`, `truncated`).
