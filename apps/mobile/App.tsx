@@ -47,6 +47,7 @@ import {
   AppState,
   Dimensions,
   Linking,
+  PixelRatio,
   Platform,
   Pressable,
   StyleSheet,
@@ -178,6 +179,7 @@ import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
 import { ArtifactGalleryScreen } from "./src/screens/ArtifactGallery.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { LockGate } from "./src/screens/LockGate.tsx";
+import { NativeSheetRoute } from "./src/screens/NativeSheetRoute.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
@@ -202,6 +204,7 @@ import {
   type SessionScreenController,
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
+import { sheetGround, sheetOptions } from "./src/sheet-plan.ts";
 import { SHELL_ROWS } from "./src/shell-rows-expo.ts";
 import type { ShellRowsSettings } from "./src/shell-rows-store.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
@@ -2815,6 +2818,31 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                   void shareCachedCopy(fileUri);
                 }}
                 onRenderError={(fields) => APP_LOG.log("error", "client-error", fields)}
+              />
+            )}
+          </Stack.Screen>
+          {/* The native sheets (docs/feat/mobile-native-sheets.md D1): ONE route,
+              five kinds, presented as an iOS `formSheet` with three detents. The
+              detents, the opening index, the undimmed index and the grabber are
+              `sheetOptions`' — never restated here — so RNS's dev asserts cannot
+              fire. Nothing carries the sheet's CONTENT in params: the session
+              screen publishes it on `SHEET_HOSTS` (D2). */}
+          <Stack.Screen
+            name="Sheet"
+            options={({ route }) => ({
+              ...sheetOptions(route.params.kind, { fontScale: PixelRatio.getFontScale() }),
+              contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] },
+            })}
+          >
+            {({ navigation, route }) => (
+              <NativeSheetRoute
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                kind={route.params.kind}
+                // A KEYED pop: this screen's navigation dispatches with
+                // `source: route.key`, so `pop` removes this sheet only. An
+                // unkeyed `goBack()` would pop Session itself.
+                onClose={() => navigation.pop()}
               />
             )}
           </Stack.Screen>

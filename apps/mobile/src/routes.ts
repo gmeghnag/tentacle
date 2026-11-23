@@ -4,6 +4,9 @@
  * rule is tested without a simulator. The stack's screens are `Pair` and
  * `Computers` → `Sessions` → `Session`.
  */
+import type { SheetKind } from "./sheet-plan.ts";
+
+export type { SheetKind };
 
 export interface ComputerRoute {
   readonly computerId: string;
@@ -75,6 +78,19 @@ export interface ArtifactGalleryRoute {
   readonly open?: string;
 }
 
+/**
+ * The native sheets' route (docs/feat/mobile-native-sheets.md D1): ONE route, five
+ * kinds. Its params carry only identity and the kind — never content, because the
+ * session screen publishes each sheet's element on `SHEET_HOSTS` (`sheet-host.ts`)
+ * and the route reads it back (`sheetRouteView`). `SheetKind` is re-exported from
+ * the pure module so the route table and `sheetOptions` cannot disagree.
+ */
+export interface SheetRouteParam {
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly kind: SheetKind;
+}
+
 /** The stack's route table (`@react-navigation/native-stack` params). */
 export type RootStackParams = {
   Pair: PairRouteParam | undefined;
@@ -85,6 +101,12 @@ export type RootStackParams = {
   Settings: undefined;
   /** The artifacts gallery (docs/feat/model-artifacts.md D9): a session's artifacts. */
   ArtifactGallery: ArtifactGalleryRoute;
+  /**
+   * A native sheet (docs/feat/mobile-native-sheets.md D1), presented as an iOS
+   * `formSheet` with three detents. Pushed with `push` (a second sheet must
+   * STACK, never replace params) and closed with a keyed `pop` of its own key.
+   */
+  Sheet: SheetRouteParam;
 };
 
 /**

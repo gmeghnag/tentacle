@@ -560,6 +560,86 @@ module can trip (`bundle-node-free`, `node-builtins-guard`, `motion-literals`, `
 **Not done, by instruction:** S2–S6 (the route, the host bridge, the screen wiring, the sheet
 components' migration, e2e). Nothing outside S1's file list was touched; `TODO.md` untouched.
 
+### S2 — `sheet-host.ts`, the route type, `NativeSheetRoute`, the `App.tsx` screen
+
+*— claude-opus-5-5 (executor), 2026-11-23*
+
+**Load-bearing check first (re-run, reproduced).** `.tentacle/tmp/mobile-native-sheets/s2-baseline.log`:
+`apps/mobile/src/sheet-host.ts`, `apps/mobile/test/sheet-host.test.ts` and
+`apps/mobile/test/native-sheets-wiring.test.ts` do not exist; `grep -rn 'sheet-host|NativeSheetRoute|name="Sheet"|SheetKind'`
+over `apps/mobile/src apps/mobile/App.tsx apps/mobile/test` hits **only** `sheet-plan.test.ts`/`sheet-plan.ts`
+(S1's own union) — no route, no `Sheet` screen, no bridge. So the capability S2 adds is genuinely
+missing: after S1 there is still no way for a sheet's content to reach a route.
+
+**Red first (AGENTS §9), both files, on the S1 tree:**
+- `bun test apps/mobile/test/sheet-host.test.ts` → `Cannot find module '../src/sheet-host.ts'` — 0 pass, 1 fail (`red-s2-host.log`).
+- `bun test apps/mobile/test/native-sheets-wiring.test.ts` → 5 pass / 5 fail, every `Sheet`-screen and
+  route assertion red on `indexOf` = −1 (`red-s2-wiring.log`); the 5 that passed are the assertions S1
+  already satisfies (the kind union, `SHEET_KINDS`).
+
+**As built (dependency order, the plan's File 2→5).**
+1. `apps/mobile/src/sheet-host.ts` — the `artifact-feed.ts` shape: `SHEET_HOSTS` (one registry for the
+   app), one `SheetHost` per `computerId`/`sessionId`, `publish(kind, content)` / `current` / `subscribe`
+   / `forget` / `orphaned`, plus the route's ONE branch `sheetRouteView(snapshot)` → `draw | wait | pop`.
+2. `apps/mobile/src/routes.ts` — `SheetRouteParam` + `Sheet: SheetRouteParam` in `RootStackParams`, and
+   `SheetKind` re-exported from `sheet-plan.ts` so the route table and `sheetOptions` cannot disagree.
+3. `apps/mobile/src/screens/NativeSheetRoute.tsx` — render only: `SHEET_HOSTS.host(...)`,
+   `useSyncExternalStore`, `sheetRouteView`, `null` for anything but `draw`, the keyed `onClose` handed
+   in by the navigator.
+4. `apps/mobile/App.tsx` — ONE `<Stack.Screen name="Sheet">`, options
+   `{...sheetOptions(route.params.kind, { fontScale: PixelRatio.getFontScale() })`, `contentStyle:
+   { backgroundColor: palette[sheetGround(route.params.kind)] }}`, `onClose={() => navigation.pop()}`
+   (the screen's own `navigation` dispatches with `source: route.key`, so the pop is keyed —
+   `StackRouter` `POP` at `routers/src/StackRouter.tsx:557-581`).
+5. Changelog: `changelog.d/mobile-native-sheets.changed.md` **already exists** (S1, the feature-level
+   bullet). S2 adds no user-visible change on its own — nothing pushes the route yet — so no second
+   fragment was written rather than duplicating the user-facing claim.
+
+**Drift from the Implementation — two, both small and inside S2's files:**
+
+1. **The snapshot is an object, not `host.current(kind)`.** D2 sketches
+   `useSyncExternalStore(host.subscribe, () => host.current(kind))`. That cannot express the orphan leg:
+   `current` is `undefined` both for "nothing published yet" (WAIT — a push and the publishing layout
+   effect are not ordered across two screens) and for "the screen is gone" (POP). So the host exposes
+   `snapshot(kind): { content, orphaned }`, **memoized per kind** and returned with a stable identity
+   until that kind's content or the orphan flag changes (React's `getSnapshot` contract: a fresh object
+   per call re-renders forever). `sync/store` test + mutation M3 pin it.
+2. **`sheetOptions` is called with `fontScale` only.** S1's signature accepts `asking` (D5's
+   `gestureEnabled`), but S2 has no permission route and no ask state on the navigator — `asking` is
+   S3/S5's to pass. The `perm-hold`/`perm-later` behaviour is therefore **not** landed here.
+
+Also chosen here, not in the plan: the host key separator is `\u0000` (`sheetHostKey`), so two sessions
+whose ids would collide in a plain `c1/s1` join stay apart (mutation M4).
+
+**Mutation checks (`sheet-host.test.ts` + `native-sheets-wiring.test.ts`, single-file mutations, restored
+byte-identical, script `.tentacle/tmp/mobile-native-sheets/mutate-s2.sh`):**
+
+| # | Mutation | Result |
+|---|---|---|
+| — | baseline | 11 pass / 10 pass, 0 fail |
+| M1 | `sheetRouteView` drops the orphan leg (a forgotten host keeps drawing) | 10 pass **1 fail** |
+| M2 | nothing published → `pop` instead of `wait` | 10 pass **1 fail** |
+| M3 | `snapshot` returns a fresh object every call | 10 pass **1 fail** |
+| M4 | `sheetHostKey` is a plain `${a}/${b}` join | 10 pass **1 fail** |
+| M5 | `forget` keeps the published content | 10 pass **1 fail** |
+| M6 | the navigator restates `presentation: "formSheet"` | 9 pass **1 fail** |
+| M7 | the sheet closes with an unkeyed `goBack()` | 9 pass **1 fail** |
+| M8 | the route reads another session's host | 9 pass **1 fail** |
+| M9 | the route decides locally instead of `sheetRouteView` | 9 pass **1 fail** |
+| — | restored | `identical` for all three files, 11 pass / 10 pass, 0 fail |
+
+**Verified.** `bun test` on `sheet-host`, `native-sheets-wiring`, `sheet-plan`, `routes`,
+`bundle-node-free` → 82 pass / 0 fail · every suite that reads `App.tsx` (31 files) → 459 pass / 0 fail ·
+the source-scanning guards a new `src` module or a new screen can trip (`text-seam`, `motion-literals`,
+`node-builtins-guard`, `theme`, `band-screens`, `app-config`, `drawer-nav`, `hub-artifacts-wiring`) →
+226 pass / 0 fail · `bun test scripts/test/changelog-guard.test.ts scripts/test/changelog.test.ts` → 21
+pass · `bunx tsc -p apps/mobile` clean · `bunx biome check` on the six changed files clean. No schema
+change, so `protocol.json` is untouched. The full `bun run check` gate is the orchestrator's.
+
+**Not done, by instruction:** S3–S6 — nothing pushes `Sheet` yet, `SessionScreen` does not publish to
+`SHEET_HOSTS` (so the route would `wait` forever if pushed), the five components keep their `<Modal>`,
+and no e2e/Validation run. `TODO.md` untouched.
+
 ## Review
 
 ### Owner answers (2026-11-23 ~08:35)
