@@ -761,6 +761,13 @@ export class SessionHost {
         `cannot store this device's push registration: ${written.reason}`,
       );
     }
+    // Fix C (docs/fix/mobile-push-not-registered.md): a successful registration
+    // was SILENT, so the whole class of bug — a phone that never registered, or
+    // registered a token APNs refuses — had to be inferred from a directory
+    // mtime. The env is in the line because IT was the defect: a sandbox token
+    // declared `production` is a silent `BadDeviceToken` → `gone` → deleted.
+    // Never a token, never a key (the id8 prefix is the device id).
+    this.opts.onAudit?.(`push-registered ${deviceId.slice(0, 8)} ${params.env}`);
     return { graceSeconds: push.graceSeconds, push: push.status() };
   }
 

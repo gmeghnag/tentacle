@@ -1,4 +1,5 @@
 import type { PushEnvironment } from "@tentacle/protocol";
+import { getIosPushNotificationServiceEnvironmentAsync } from "expo-application";
 import { getRandomBytes } from "expo-crypto";
 /**
  * `expo-notifications` behind the app's push seams (docs/feat/mobile-push.md
@@ -14,13 +15,18 @@ import { getRandomBytes } from "expo-crypto";
  *    reason `setAutoServerRegistrationEnabledAsync` is never called: importing
  *    the package installs that machinery's token LISTENER, which only acts once
  *    a registration is enabled — and it never is.
- *  - **The environment follows the build.** A development build is signed with a
- *    sandbox `aps-environment` entitlement and its tokens only work against
- *    `api.sandbox.push.apple.com`; a TestFlight/App Store build is `production`.
- *    Sending the wrong one is a silent `BadDeviceToken` at Apple, so this is a
- *    pure function with its own test rather than an inline ternary.
+ *  - **The environment follows the SIGNATURE, never the bundle.** A token is
+ *    valid only against the APNs host matching the running binary's signed
+ *    `aps-environment` entitlement. Reading the bundle mode instead — what this
+ *    did until `fix/mobile-push-not-registered` — declared `production` for a
+ *    sandbox-signed build (a Release archive exported `method: debugging`),
+ *    which APNs answers with `400 BadDeviceToken`; the relay reports that as
+ *    `gone` and the daemon DELETES the registration. The mapping is the pure
+ *    `pushEnvironmentOfAps` (`push-env.ts`), and a read that fails sends
+ *    NOTHING: a guessed environment is the bug itself.
  */
 import * as Notifications from "expo-notifications";
+import { pushEnvironmentOfAps } from "./push-env.ts";
 import { ensurePushKeypair } from "./push-key.ts";
 import type { PushFacts, PushPermission } from "./push-registration.ts";
 import { KEYCHAIN_ACCESSIBLE, pushKeychain } from "./secure-kv.ts";
@@ -29,13 +35,16 @@ import { KEYCHAIN_ACCESSIBLE, pushKeychain } from "./secure-kv.ts";
 export const PUSH_KEYCHAIN_ACCESSIBLE = KEYCHAIN_ACCESSIBLE;
 
 /**
- * Which APNs host this build's tokens belong to. A development build is signed
- * `aps-environment: development` → `sandbox`; a release (TestFlight/App Store)
- * build is `production`. Metro inlines `NODE_ENV`, so this is a build-time fact
- * and not a runtime guess.
+ * This build's signed APNs environment, as a wire value — `undefined` when it
+ * cannot be read at all (no native half: a simulator build of a non-Xcode
+ * workflow), which the caller reports as "no facts" rather than guessing.
  */
-export function pushEnvironmentOf(nodeEnv: string | undefined): PushEnvironment {
-  return nodeEnv === "production" ? "production" : "sandbox";
+async function signedPushEnvironment(): Promise<PushEnvironment | undefined> {
+  try {
+    return pushEnvironmentOfAps(await getIosPushNotificationServiceEnvironmentAsync());
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -104,6 +113,12 @@ export async function readPushFacts(): Promise<PushFacts | undefined> {
     random: (length) => getRandomBytes(length),
     keychainAccessible: PUSH_KEYCHAIN_ACCESSIBLE,
   });
+  // BEFORE the token: an environment this build cannot state is a registration
+  // that could only ever be refused, so nothing is sent (and no token read).
+  const env = await signedPushEnvironment();
+  if (env === undefined) {
+    return undefined;
+  }
   let token: string;
   try {
     const devicePushToken = await Notifications.getDevicePushTokenAsync();
@@ -118,5 +133,5 @@ export async function readPushFacts(): Promise<PushFacts | undefined> {
     // registration the daemon answers with `InvalidParams` (F26).
     return undefined;
   }
-  return { token, env: pushEnvironmentOf(process.env.NODE_ENV), key: keypair.publicKey };
+  return { token, env, key: keypair.publicKey };
 }

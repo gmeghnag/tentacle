@@ -121,9 +121,12 @@ describe("the push entitlements and plugin are in app.json (P9: a plist entry is
       (entry) => Array.isArray(entry) && entry[0] === "expo-notifications",
     ) as readonly [string, { readonly mode?: string }] | undefined;
     expect(plugin).toBeDefined();
-    // A development build is signed with the SANDBOX entitlement, which is what
-    // makes `pushEnvironmentOf("development") === "sandbox"` true at runtime
-    // (P0(d): the plugin defaults to `development`, but says so explicitly here).
+    // The plugin's `mode` is only what the BUILD REQUESTS. What the token
+    // actually needs is the RUNNING binary's `aps-environment`, which can differ
+    // (a Release archive exported `method: debugging` is `development`), so the
+    // app reads the signature at runtime — `push-expo.ts` via `push-env.ts` —
+    // and never infers it from the bundle mode
+    // (docs/fix/mobile-push-not-registered.md).
     expect(plugin?.[1].mode).toBe("development");
   });
 
