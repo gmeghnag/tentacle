@@ -2284,6 +2284,35 @@ push-rules + push-notifier, tools schedule, `packages/protocol` → **730 pass, 
   `fixtures/push-render-v1.json` vector, `swift test`. Until 10c the app shows its placeholder
   for `run_not_started` (the v1 kind enum refuses an unknown kind — by design).
 
+### Fix round 1 (slice 10a)
+
+*— claude-opus-5-5, 2026-11-23*
+
+**MEDIUM (stale `run_not_started` keyed on the wrong fire) — FIXED.** Root cause: `fireWorkflow`
+published the advanced row (`fires` +1) still carrying the previous fire's `last`, so the
+notifier's `<id>#<fires>` key was consumed by the old outcome. Fix:
+`packages/daemon/src/hosted-session.ts` `fireWorkflow` drops `last` from the advanced row before
+`persist()`/`publishSchedules()`; `settleWorkflowFire` sets it again when the driver answers. A
+crash in that window reloads the row without `last` (the fire is in flight; honest). The push
+key and notifier are unchanged.
+
+Test (`packages/daemon/test/schedule-workflow.test.ts`, "published frames never pair a fire's
+count with an earlier fire's outcome"): real `SessionHost`, the real `schedules` frames an
+attachment receives (not hand-built rows). A: fire 1 `changed`, file restored, fire 2 — the
+first frame offering an outcome for `fires=2` must say `started`. B: three `changed` — the first
+frame offering an outcome for `fires=3` must carry `· schedule removed`.
+
+Red (before the fix): `expected at 1794826800000, received 1794834000000` for `fires: 2` (first
+draft of the assertion, same property). Mutation (fix disabled: `row.id !== ""` → the old `last`
+kept; each scenario isolated, then restored):
+```
+A: Expected: "started"  Received: "changed"                          10 pass | 1 fail
+B: Expected to contain "schedule removed"  Received: "…changed since sc-1 was created…"  10 pass | 1 fail
+```
+Narrow run: daemon schedule-workflow + schedules + push-notifier + push-rules + persistence →
+**219 pass, 0 fail**; `biome check` on both files clean; `tsc -p packages/daemon` clean. Full
+gate: the orchestrator's script. LOW (`requestApproval` re-read window) not addressed (LOW).
+
 ## Review — slice 10a (fresh context, `git diff main...HEAD`)
 
 *— claude-opus-5-5, 2026-11-23* (same model as the slice-10 planner; executor deepseek)

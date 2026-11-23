@@ -217,6 +217,48 @@ describe("a scheduled workflow fire (slice 10)", () => {
     expect(r.audit).toContain("schedule: sc-1 not started · changed S");
   });
 
+  test("published frames never pair a fire's count with an earlier fire's outcome (push key = id#fires)", async () => {
+    // Review round 1 MEDIUM. Mutation: keep the previous `last` on the advanced
+    // row → a `fires=2` frame carries fire 1's `changed` (a false "not started"
+    // push for a run that DID start), and the `· schedule removed` frame arrives
+    // with a key an older outcome already consumed.
+    type Row = {
+      id: string;
+      fires: number;
+      last?: { at: number; outcome: string; reason?: string };
+    };
+    const watch = async () => {
+      const r = rig();
+      const seen: Row[] = [];
+      r.session().attach({
+        send: (u) => {
+          const update = (u as { update?: { type?: string; schedules?: Row[] } }).update;
+          if (update?.type === "schedules") {
+            for (const row of update.schedules ?? []) if (row.id === "sc-1") seen.push(row);
+          }
+        },
+      });
+      await create(r);
+      return { r, seen, original: r.files.text, edited: r.files.text.replace("plan it", "x") };
+    };
+    // The FIRST frame that offers an outcome for a fire count is what the push keys on.
+    const firstOutcome = (seen: Row[], fires: number) =>
+      seen.find((row) => row.fires === fires && row.last !== undefined)?.last;
+    // A: fire 1 `changed`, the file is restored, fire 2 starts.
+    const a = await watch();
+    a.r.files.text = a.edited;
+    await a.r.fire(2 * 60 * MIN);
+    a.r.files.text = a.original;
+    await a.r.fire(2 * 60 * MIN);
+    expect(firstOutcome(a.seen, 2)?.outcome).toBe("started");
+    // B: three `changed` in a row → the failure stop names itself on fire 3's key.
+    const b = await watch();
+    b.r.files.text = b.edited;
+    for (let i = 0; i < 3; i++) await b.r.fire(2 * 60 * MIN);
+    expect(firstOutcome(b.seen, 3)?.reason).toContain("schedule removed");
+    expect(b.r.session().scheduleLink()?.list()).toEqual([]);
+  });
+
   test("an unapproved hash at create: the job is created AND the approval is asked now", async () => {
     const r = rig({ approved: false });
     const frames: { type?: string; update?: { type?: string; tool?: string } }[] = [];

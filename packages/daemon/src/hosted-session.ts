@@ -3916,7 +3916,15 @@ export class HostedSession {
    * captured, published and audited when the driver answers.
    */
   private fireWorkflow(job: ScheduledJob, table: readonly ScheduledJob[]): void {
-    this.scheduleTable = table;
+    // The advanced row is a NEW fire (`fires` +1): it must not carry the
+    // previous fire's `last`, or a reader keyed on `<id>#<fires>` (the push
+    // rules) takes the old outcome for this fire. `last` is set again when the
+    // driver answers (`settleWorkflowFire`).
+    this.scheduleTable = table.map((row) => {
+      if (row.id !== job.id || row.last === undefined) return row;
+      const { last: _previous, ...fresh } = row;
+      return fresh;
+    });
     this.persist();
     this.publishSchedules();
     const target = job.target?.workflow;
