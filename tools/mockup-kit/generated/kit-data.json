@@ -3,7 +3,7 @@
     "apps/mobile/src/chat-header.ts": "9e509a71b3801a4486a838b353c31c96270fedcb",
     "apps/mobile/src/motion.ts": "cb710fd7643e02771a98beb41cf418b3a5364155",
     "apps/mobile/src/screens/ComputersScreen.tsx": "ac1fe5dee031bc713182ae3cee279af4ebed1daf",
-    "apps/mobile/src/screens/PermissionSheet.tsx": "7ad6485e5d63f6bc963fdcf2a84e809fa621cc08",
+    "apps/mobile/src/screens/PermissionSheet.tsx": "4df08bc4dc1f8b0ecca2fb9698f4b33d18ddc768",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "5cb64e4a707fb3ade80d489dc643e6bfac5cb60e",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "4acc16969f29573f6f292b0c1fdcc6ce6fa61efa",
     "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "04e443f0bac5ef63f0a9f936a12ec5b52ee2c7ae",
@@ -1608,16 +1608,9 @@
         },
         "sheet": {
           "paddingHorizontal": 20,
-          "paddingTop": 8,
+          "paddingTop": 16,
           "paddingBottom": 40,
           "gap": 16
-        },
-        "grabber": {
-          "alignSelf": "center",
-          "width": 36,
-          "height": 5,
-          "borderRadius": 2.5,
-          "marginBottom": 4
         },
         "head": {
           "flexDirection": "row",
@@ -1662,6 +1655,11 @@
           "borderRadius": 14,
           "padding": 14,
           "minHeight": 96
+        },
+        "later": {
+          "alignSelf": "center",
+          "paddingVertical": 10,
+          "paddingHorizontal": 16
         }
       },
       "consts": {
