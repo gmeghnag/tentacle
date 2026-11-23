@@ -155,6 +155,8 @@ import {
   type WatchResult,
   type WorkflowCatalogueResult,
   WorkflowCatalogueResultSchema,
+  type WorkflowDefRow,
+  WorkflowDefRowSchema,
   type WorkflowListRow,
   type WorkflowParams,
   type WorkflowResult,
@@ -642,6 +644,72 @@ function oneLineText(text: string): string {
     out += char;
   }
   return out;
+}
+
+/** The wire's caps on a catalogue row's `errors` (`WorkflowDefRowSchema`). */
+const WORKFLOW_ERRORS_MAX = 20;
+const WORKFLOW_ERROR_MAX_CHARS = 300;
+
+/** `text` within `max` UTF-16 units, ending in `…` when cut (never mid-surrogate). */
+function capWithEllipsis(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  let end = max - 1;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1;
+  }
+  return `${text.slice(0, end)}…`;
+}
+
+/**
+ * A row's errors within the wire's caps, none lost silently (review round 1
+ * #2): each is ONE line (the validator's text can hold a newline), an over-long
+ * one ends in `…`, and past 20 the last line says how many more there are.
+ */
+function boundedWorkflowErrors(errors: readonly string[]): string[] {
+  const lines = errors.map((e) => capWithEllipsis(oneLineText(e), WORKFLOW_ERROR_MAX_CHARS));
+  if (lines.length <= WORKFLOW_ERRORS_MAX) {
+    return lines;
+  }
+  const kept = lines.slice(0, WORKFLOW_ERRORS_MAX - 1);
+  return [...kept, `+${lines.length - kept.length} more`];
+}
+
+type DriverCatalogueRow = Awaited<ReturnType<WorkflowDriver["catalogue"]>>["workflows"][number];
+
+/**
+ * One catalogue row as the wire carries it. A row the wire schema refuses (a
+ * valid workflow whose `run:` exceeds the step-command cap, an over-long
+ * description, …) becomes an `ok:false` row whose errors name the field — by
+ * step id — so one file cannot fail the whole answer (review round 1 #1).
+ */
+function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
+  const candidate = {
+    ...row,
+    ...(row.errors !== undefined ? { errors: boundedWorkflowErrors(row.errors) } : {}),
+  };
+  const parsed = WorkflowDefRowSchema.safeParse(candidate);
+  if (parsed.success) {
+    return parsed.data;
+  }
+  const steps = row.steps ?? [];
+  const problems = parsed.error.issues.map((issue) => {
+    const [head, index, ...rest] = issue.path;
+    const at =
+      head === "steps" && typeof index === "number"
+        ? [`step "${steps[index]?.id ?? index}"`, ...rest].join(" ")
+        : issue.path.join(".");
+    return `${at === "" ? "row" : at}: ${issue.message} (the catalogue cannot carry it)`;
+  });
+  // Name and path are one-line and capped here, so the refusal row itself parses.
+  return {
+    name: capWithEllipsis(oneLineText(row.name), 64) || "?",
+    path: capWithEllipsis(oneLineText(row.path), 512) || "?",
+    ok: false,
+    errors: boundedWorkflowErrors(problems),
+  };
 }
 
 /**
@@ -2517,17 +2585,12 @@ export class HostedSession {
       };
     }
     const catalogue = await driver.catalogue();
+    // Each row is judged ON ITS OWN (review round 1 #1): a valid workflow the
+    // wire cannot carry becomes one `ok:false` row naming why — never a failed
+    // whole answer that hides every other workflow.
     const parsed = WorkflowCatalogueResultSchema.safeParse({
       ...catalogue,
-      workflows: catalogue.workflows.map((row) => ({
-        ...row,
-        // Each error is a bounded ONE line (the wire's own cap): the validator's
-        // text can hold a newline, and an over-long error would otherwise fail
-        // the whole answer — losing the rest of the catalogue for one bad file.
-        ...(row.errors !== undefined
-          ? { errors: row.errors.map((e) => oneLineText(e).slice(0, 300)) }
-          : {}),
-      })),
+      workflows: catalogue.workflows.map(catalogueRow),
     });
     if (!parsed.success) {
       return {

@@ -75,7 +75,7 @@ function driver(): WorkflowDriver {
  * A driver whose project folder holds one valid workflow and one broken file —
  * what a catalogue reads (slice 5a). `list` is the walk; `load` the one-name read.
  */
-function listingDriver(): WorkflowDriver {
+function listingDriver(extra: readonly WorkflowSource[] = []): WorkflowDriver {
   const task: WorkflowSource = {
     path: ".tentacle/workflows/task.yaml",
     text: YAML,
@@ -93,6 +93,11 @@ function listingDriver(): WorkflowDriver {
           name: "broken",
           source: { path: ".tentacle/workflows/broken.yaml", text: BROKEN, prompts: {} },
         },
+        ...extra.map((source) => ({
+          kind: "source" as const,
+          name: source.path.replace(/^.*\/|\.yaml$/g, ""),
+          source,
+        })),
       ],
     }),
     context: () => ({ models: [], agentTypes: ["general"] }),
@@ -297,7 +302,7 @@ describe("session/workflow_catalogue on a hosted session (slice 5a)", () => {
     expect(task?.approved).toBe(true);
     // An invalid row carries its error and nothing that could start it.
     const broken = answer.workflows[1];
-    expect(broken?.errors?.[0]).toContain("steps");
+    expect(broken?.errors?.some((e) => e.startsWith("steps"))).toBe(true);
     expect(broken?.hash).toBeUndefined();
   });
 
@@ -330,5 +335,56 @@ describe("session/workflow_catalogue on a hosted session (slice 5a)", () => {
     });
     expect(started).toEqual({ ok: true, runId: "wf-1" });
     await settle();
+  });
+
+  test("a VALID workflow the wire cannot carry is ONE ok:false row naming its step — the rest stay", async () => {
+    // Review round 1 #1: a 5005-char `run:` validates, but the wire caps a
+    // step's command at 4096 — the whole answer used to fail and the daemon
+    // said `unavailable`, hiding every other workflow.
+    const big = `schemaVersion: 1\nname: big\nversion: 1\nsteps:\n  - id: build\n    run: "${"x".repeat(5005)}"\n`;
+    const session = hosted();
+    session.attachWorkflows(
+      listingDriver([{ path: ".tentacle/workflows/big.yaml", text: big, prompts: {} }]),
+    );
+    const answer = await session.workflowCatalogue();
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.workflows.map((w) => [w.name, w.ok])).toEqual([
+      ["task", true],
+      ["broken", false],
+      ["big", false],
+    ]);
+    const row = answer.workflows[2];
+    expect(row?.path).toBe(".tentacle/workflows/big.yaml");
+    expect(row?.hash).toBeUndefined();
+    expect(row?.steps).toBeUndefined();
+    expect(row?.errors?.join("\n")).toContain('step "build"');
+    expect(row?.errors?.join("\n")).toContain("command");
+  });
+
+  test("every validation error is its own line; over 20 → `+k more`; an over-long one ends in …", async () => {
+    // Review round 1 #2: the errors were joined with "; " into ONE string and
+    // cut at 300 chars with no marker — the rest disappeared silently.
+    const steps = Array.from({ length: 25 }, (_, i) => `  - id: s${i}\n`).join("");
+    const many = `schemaVersion: 1\nname: many\nversion: 1\nsteps:\n${steps}`;
+    const long = `schemaVersion: 1\nname: long\nversion: 1\nsteps:\n  - id: a\n    run: make\n    next: ${"z".repeat(400)}\n`;
+    const session = hosted();
+    session.attachWorkflows(
+      listingDriver([
+        { path: ".tentacle/workflows/many.yaml", text: many, prompts: {} },
+        { path: ".tentacle/workflows/long.yaml", text: long, prompts: {} },
+      ]),
+    );
+    const answer = await session.workflowCatalogue();
+    expect(answer.unavailable).toBeUndefined();
+    const errors = answer.workflows[2]?.errors ?? [];
+    expect(errors).toHaveLength(20);
+    expect(errors[0]).toStartWith("steps[0]");
+    expect(errors[1]).toStartWith("steps[1]");
+    expect(errors[19]).toBe("+6 more");
+    const longErrors = answer.workflows[3]?.errors ?? [];
+    const cut = longErrors.find((e) => e.includes("zzz"));
+    expect(cut).toBeDefined();
+    expect(cut?.length).toBe(300);
+    expect(cut?.endsWith("…")).toBe(true);
   });
 });

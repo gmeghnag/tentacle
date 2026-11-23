@@ -585,7 +585,7 @@ export class WorkflowDriver {
           name: row.name,
           path: row.source.path,
           ok: false,
-          errors: [prepared.reason],
+          errors: prepared.errors,
         });
         continue;
       }
@@ -903,7 +903,7 @@ export class WorkflowDriver {
     source: WorkflowSource,
   ): Promise<
     | { ok: true; source: WorkflowSource; spec: WorkflowSpec; hash: string }
-    | { ok: false; reason: string; refusal: "invalid" }
+    | { ok: false; reason: string; refusal: "invalid"; errors: readonly string[] }
   > {
     const validation = validateWorkflow(source.text, {
       name,
@@ -915,6 +915,9 @@ export class WorkflowDriver {
         ok: false,
         refusal: "invalid",
         reason: `${source.path}: ${validation.errors.join("; ")}`,
+        // Each error on its own (it names its YAML path): a catalogue row lists
+        // them, never one joined string cut at the wire's cap (review round 1 #2).
+        errors: validation.errors,
       };
     }
     const files: WorkflowPromptFile[] = validation.spec.prompts.map((p) => ({

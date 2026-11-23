@@ -179,7 +179,9 @@ describe("catalogue (D6)", () => {
     expect(broken?.approved).toBeUndefined();
     // The error names its YAML path (the validator's own words), so a user
     // sees WHICH line is wrong — never a bare "invalid".
-    expect(broken?.errors?.[0]).toContain("steps");
+    // Each validator error is its OWN entry (review round 1 #2), not one joined string.
+    expect(broken?.errors?.[0]).toStartWith("version:");
+    expect(broken?.errors?.some((e) => e.startsWith("steps"))).toBe(true);
     expect(workflows.find((w) => w.name === "task")?.ok).toBe(true);
   });
 

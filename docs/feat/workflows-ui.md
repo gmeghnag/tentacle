@@ -1675,6 +1675,51 @@ decided that way: the line summarizes, `/workflow run <name>` acts), so no key s
 row yet; starting one from the panel means typing the command, which is exactly what the prefill
 hands back.
 
+### Fix round 1 (review round 1: findings #1, #2 — both MEDIUM)
+
+**#1 — one row the wire refuses blanked the catalogue → FIXED.** `hosted-session.ts`
+`workflowCatalogue` now maps each driver row through `catalogueRow` (new, module-level beside
+`oneLineText`), which runs `WorkflowDefRowSchema.safeParse` PER ROW. A refused row becomes
+`{name, path, ok:false, errors}`, each error naming the field by step id
+(`step "build" command: String must contain at most 4096 character(s) (the catalogue cannot carry
+it)`); name/path are one-lined and capped so that row itself parses. The whole-answer
+`unavailable` fallback stays only as a backstop (e.g. `dir` > 1024). Chosen over raising the wire
+cap: any other per-row overflow (description > 500, > 64 steps/inputs) is covered by the same path.
+
+**#2 — errors joined and cut silently → FIXED.** `workflow-driver.ts` `prepareSource`'s refusal
+now carries `errors: validation.errors` (the `reason` string is unchanged for `start`/`inspect`);
+`catalogue()` puts that array in the row. The daemon's `boundedWorkflowErrors` makes each error one
+line, cuts an over-long one to 300 ending in `…` (`capWithEllipsis`, never mid-surrogate), and
+past 20 keeps 19 + `+k more`. Drift: the row's errors no longer carry the `<path>: ` prefix — the
+row has `path` already, and each validator error names its own YAML path (`steps[3].run: …`).
+
+**Tests (red first, on the property).** `packages/daemon/test/workflow-hosted.test.ts`:
+- "a VALID workflow the wire cannot carry is ONE ok:false row naming its step — the rest stay"
+  — red before: `Received: "the catalogue could not be read: [ { "code": "too_big", "maximum": 4096 …`.
+- "every validation error is its own line; over 20 → `+k more`; an over-long one ends in …"
+  — red before: `Expected length: 20 / Received length: 1`.
+- Two existing assertions updated (`errors[0]` contained `steps` only because it was the joined
+  string): daemon "answers every row" → `some(e ⇒ startsWith("steps"))`; agent
+  `workflow-catalogue.test.ts` "an INVALID file…" → `errors[0]` starts `version:` + some starts
+  `steps` (red on the old joined string too).
+
+**Mutations (each applied by hand, run, reverted; `cmp` against a scratch backup = identical).**
+
+| Mutation | Red test |
+|---|---|
+| M1 `catalogueRow` returns the row unvalidated (no per-row fallback) | "a VALID workflow the wire cannot carry…" (1 fail) |
+| M2 `boundedWorkflowErrors` never caps at 20 | "every validation error is its own line…" (1 fail) |
+| M3 `capWithEllipsis` cuts without `…` | same test (`Expected: true / Received: false`) |
+| M4 driver back to `errors: [prepared.reason]` | 3 fail: agent "an INVALID file…", daemon "answers every row", "every validation error…" |
+
+**Narrow gate.** `bun test` on daemon `workflow-hosted`, agent `workflow-catalogue` +
+`workflow-driver`, protocol `workflow-wire`, client `workflows-client`: **98 pass, 0 fail**.
+`bunx biome check` on the 4 touched files: clean. `tsc --noEmit -p packages/daemon`: clean. Full
+gate: the orchestrator's script. Notes below the bar (a) `dir: ""` and (b) `resetCatalogue`
+were not touched (not HIGH/MEDIUM).
+
+*— claude-opus-5-5, 2026-11-23*
+
 ## Review
 
 ### Owner answers (2026-11-23)
