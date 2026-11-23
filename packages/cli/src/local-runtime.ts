@@ -384,6 +384,8 @@ export interface PersistingController extends SessionController {
   workflow?: RemoteSession["workflow"];
   /** `RemoteSession.workflowStep`: one step execution's prompt/report. */
   workflowStep?: RemoteSession["workflowStep"];
+  /** `RemoteSession.workflowCatalogue`: the project's workflows (slice 5a). */
+  workflowCatalogue?: RemoteSession["workflowCatalogue"];
   /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
   onSubagentNotify?: RemoteSession["onSubagentNotify"];
   /** `RemoteSession.messageSubagent`: the user's text into a running background child. */
@@ -982,6 +984,9 @@ export function persistingController(
     },
     workflowStep(runId, stepId, attempt) {
       return inner.workflowStep(runId, stepId, attempt);
+    },
+    workflowCatalogue() {
+      return inner.workflowCatalogue();
     },
     onSubagentNotify(listener) {
       return inner.onSubagentNotify(listener);

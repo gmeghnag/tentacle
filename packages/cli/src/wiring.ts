@@ -102,7 +102,7 @@ import {
   tunnelSubagentResolver,
 } from "./model-provider.ts";
 import { workflowApprovals } from "./workflow-approvals.ts";
-import { loadWorkflowSource } from "./workflow-files.ts";
+import { loadWorkflowSource, workflowListing } from "./workflow-files.ts";
 
 /**
  * Load user-defined agent types from `<configDir>/agents/*.md`, then from each
@@ -841,6 +841,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       const gate = (requester: PermissionRequester) => new PermissionGate(requester, hooks, grants);
       workflows = new WorkflowDriver({
         load: async (name) => loadWorkflowSource(config.cwd, name),
+        list: async () => workflowListing(config.cwd),
         context: () => ({
           models: Object.keys(config.models),
           agentTypes: types.map((t) => t.name),

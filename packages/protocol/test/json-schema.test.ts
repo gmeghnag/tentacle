@@ -311,6 +311,49 @@ const FIXTURES: Record<string, Json[]> = {
     { ok: true, scheduleId: "sc-3" },
     { ok: false, reason: "workflows run only on a laptop or serve session" },
   ],
+  // feat/workflows-ui slice 5a: the project's workflow files, for a start screen.
+  "methods/session~1workflow_catalogue/params": [{ sessionId: "s" }],
+  "methods/session~1workflow_catalogue/result": [
+    {
+      dir: "/proj/.tentacle/workflows",
+      workflows: [
+        {
+          name: "task",
+          path: ".tentacle/workflows/task.yaml",
+          ok: true,
+          version: 3,
+          description: "a demo",
+          hash: `${"a".repeat(64)}`,
+          approved: false,
+          inputs: [
+            { name: "slug", required: true },
+            { name: "note", required: false },
+          ],
+          steps: [
+            { id: "plan", kind: "agent", model: "opus", where: "local" },
+            { id: "build", kind: "run", where: "local", command: "make test" },
+            { id: "ship", kind: "approve", where: "local" },
+          ],
+        },
+        {
+          name: "broken",
+          path: ".tentacle/workflows/broken.yaml",
+          ok: false,
+          errors: ["steps[0].run: a run step needs a command"],
+        },
+      ],
+    },
+    // No workflow in the cwd's folder: the display-only hint, nothing loadable.
+    {
+      dir: "/proj/apps/mobile/.tentacle/workflows",
+      workflows: [],
+      elsewhere: { dir: "/proj/.tentacle/workflows", count: 3 },
+      gitIgnored: false,
+    },
+    // A session that cannot run workflows at all, and a folder over the walk's cap.
+    { dir: "/proj/.tentacle/workflows", workflows: [], unavailable: "not on this session" },
+    { dir: "/proj/.tentacle/workflows", workflows: [], truncated: true },
+  ],
   // feat/agent-workflows S3: the user drives a workflow run; the phone lists them.
   "methods/session~1workflow/params": [
     {
@@ -320,6 +363,13 @@ const FIXTURES: Record<string, Json[]> = {
       inputs: [{ name: "slug", value: "x" }],
       turnId: "t1",
     },
+    {
+      sessionId: "s",
+      action: "start",
+      name: "task",
+      hash: `${`${"a".repeat(64)}`}`,
+      turnId: "t4",
+    },
     { sessionId: "s", action: "stop", runId: "wf-1" },
     { sessionId: "s", action: "resume", runId: "wf-1", turnId: "t2" },
     { sessionId: "s", action: "rerun_step", runId: "wf-1", stepId: "gate", turnId: "t3" },
@@ -327,6 +377,8 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1workflow/result": [
     { ok: true, runId: "wf-1" },
     { ok: false, reason: "workflows run only on a laptop or serve session" },
+    { ok: false, refusal: "changed", reason: "workflows/task.yaml changed since you opened it" },
+    { ok: false, refusal: "running", reason: "another workflow started meanwhile", runId: "wf-2" },
   ],
   // feat/workflows-ui slice 1a: ONE step execution's detail (D1).
   "methods/session~1workflow_step/params": [

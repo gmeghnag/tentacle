@@ -5,7 +5,13 @@
  * from the history (#1), and a session without a driver (tunnelled) refuses.
  */
 import { describe, expect, test } from "bun:test";
-import { Agent, Session, WorkflowDriver, type WorkflowDriverDeps } from "@tentacle/agent";
+import {
+  Agent,
+  Session,
+  WorkflowDriver,
+  type WorkflowDriverDeps,
+  type WorkflowSource,
+} from "@tentacle/agent";
 import {
   type ChatMessage,
   type ExecutionEnvironment,
@@ -31,6 +37,9 @@ const YAML =
 const APPROVE_YAML =
   'schemaVersion: 1\nname: task\nversion: 1\nsteps:\n  - id: merge\n    approve: { title: "Merge it" }\n';
 
+/** A file that does not validate: the catalogue's `ok:false` row. */
+const BROKEN = "schemaVersion: 1\nname: task\nversion: 0\nsteps: []\n";
+
 function hosted(messages: ChatMessage[] = []): HostedSession {
   const agent = new Agent({
     model: {
@@ -50,6 +59,42 @@ function hosted(messages: ChatMessage[] = []): HostedSession {
 function driver(): WorkflowDriver {
   const deps: WorkflowDriverDeps = {
     load: async () => ({ path: ".tentacle/workflows/task.yaml", text: YAML, prompts: {} }),
+    context: () => ({ models: [], agentTypes: ["general"] }),
+    approvals: { has: async () => true, add: async () => {} },
+    request: async () => ({ allowed: false }),
+    runnerFor: () => async (_opts, controls) => {
+      const verdict = controls?.extraTools?.find((t) => t.name === "step_verdict");
+      await verdict?.execute({ verdict: "pass", reason: "planned" }, {} as ToolContext);
+      return { report: "ok", toolUses: 1, stopReason: "end_turn" };
+    },
+  };
+  return new WorkflowDriver(deps);
+}
+
+/**
+ * A driver whose project folder holds one valid workflow and one broken file —
+ * what a catalogue reads (slice 5a). `list` is the walk; `load` the one-name read.
+ */
+function listingDriver(): WorkflowDriver {
+  const task: WorkflowSource = {
+    path: ".tentacle/workflows/task.yaml",
+    text: YAML,
+    prompts: {},
+  };
+  const deps: WorkflowDriverDeps = {
+    load: async () => task,
+    list: async () => ({
+      dir: "/proj/.tentacle/workflows",
+      truncated: false,
+      rows: [
+        { kind: "source", name: "task", source: task },
+        {
+          kind: "source",
+          name: "broken",
+          source: { path: ".tentacle/workflows/broken.yaml", text: BROKEN, prompts: {} },
+        },
+      ],
+    }),
     context: () => ({ models: [], agentTypes: ["general"] }),
     approvals: { has: async () => true, add: async () => {} },
     request: async () => ({ allowed: false }),
@@ -227,5 +272,63 @@ describe("session/workflow on a hosted session", () => {
       turnId: "wake-1",
     });
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("session/workflow_catalogue on a hosted session (slice 5a)", () => {
+  test("a tunnelled session (no driver) says unavailable, never an empty folder", async () => {
+    const answer = await hosted().workflowCatalogue();
+    expect(answer.workflows).toEqual([]);
+    expect(answer.unavailable).toBe("workflows run only on a laptop or serve session");
+  });
+
+  test("a session with a driver answers every row, with its hash and approval", async () => {
+    const session = hosted();
+    session.attachWorkflows(listingDriver());
+    const answer = await session.workflowCatalogue();
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.dir).toBe("/proj/.tentacle/workflows");
+    expect(answer.workflows.map((w) => [w.name, w.ok])).toEqual([
+      ["task", true],
+      ["broken", false],
+    ]);
+    const task = answer.workflows[0];
+    expect(task?.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(task?.approved).toBe(true);
+    // An invalid row carries its error and nothing that could start it.
+    const broken = answer.workflows[1];
+    expect(broken?.errors?.[0]).toContain("steps");
+    expect(broken?.hash).toBeUndefined();
+  });
+
+  test("start{hash} reaches the driver: a stale hash is refused `changed`, nothing runs", async () => {
+    // The wire half of the property the phone's Start depends on: a hash the
+    // user saw is carried through `session/workflow`, and a mismatch is a
+    // REFUSAL the client can branch on — not a run of the edited file.
+    // Mutation: drop `hash` from the daemon's `driver.start(...)` → red.
+    const session = hosted();
+    session.attachWorkflows(listingDriver());
+    const answer = await session.workflowCatalogue();
+    const current = answer.workflows[0]?.hash;
+    if (current === undefined) throw new Error("no hash");
+    const stale = await session.workflow({
+      sessionId: "s1",
+      action: "start",
+      name: "task",
+      hash: "0".repeat(64),
+      turnId: "t-1",
+    });
+    expect(stale).toMatchObject({ ok: false, refusal: "changed" });
+    expect(session.snapshotPage().workflows ?? []).toEqual([]);
+    // And the hash the catalogue gave DOES start it (already approved here).
+    const started = await session.workflow({
+      sessionId: "s1",
+      action: "start",
+      name: "task",
+      hash: current,
+      turnId: "t-2",
+    });
+    expect(started).toEqual({ ok: true, runId: "wf-1" });
+    await settle();
   });
 });

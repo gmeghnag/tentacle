@@ -623,6 +623,10 @@ describe("createLocalRuntime (local over RPC)", () => {
         seen.push(`workflowStep:${runId}.${stepId}:${String(attempt)}`);
         return { detail: { attempt: 0, round: 0, live: false } };
       },
+      workflowCatalogue: async () => {
+        seen.push("workflowCatalogue");
+        return { workflows: [], dir: "/proj/.tentacle/workflows" };
+      },
       readBack: async () => null,
       onTitle: () => () => {},
     } as unknown as RemoteSession;
@@ -646,12 +650,20 @@ describe("createLocalRuntime (local over RPC)", () => {
       detail: { attempt: 0, round: 0, live: false },
     });
     await ctl.workflowStep?.("wf-1", "merge", 2);
+    // docs/feat/workflows-ui.md slice 5a: the TUI's `/workflow` reads the
+    // project's catalogue through the same controller. Mutation: drop this
+    // forward → the panel never lists a file.
+    expect(await ctl.workflowCatalogue?.()).toEqual({
+      workflows: [],
+      dir: "/proj/.tentacle/workflows",
+    });
     expect(seen).toEqual([
       "onWorkflows",
       "unsubscribe",
       "workflow:stop",
       "workflowStep:wf-1.merge:undefined",
       "workflowStep:wf-1.merge:2",
+      "workflowCatalogue",
     ]);
   });
 

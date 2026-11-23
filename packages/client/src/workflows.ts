@@ -25,6 +25,13 @@ export type WorkflowAction =
       readonly name: string;
       /** The file's `inputs`, already validated against it daemon-side. */
       readonly inputs?: WorkflowInputValue[];
+      /**
+       * The hash the user SAW (a catalogue row, docs/feat/workflows-ui.md slice
+       * 5a): the daemon refuses `changed` when the file no longer has it, so a
+       * start never runs an edit the user never reviewed. Omitted = the current
+       * file (a TUI `/workflow run`, the model's tool).
+       */
+      readonly hash?: string;
     }
   | { readonly action: "stop"; readonly runId: string }
   | { readonly action: "resume"; readonly runId: string }

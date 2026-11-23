@@ -412,6 +412,10 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "onWorkflows",
       "workflow",
       "workflowStep",
+      // The project's workflows (docs/feat/workflows-ui.md slice 5a): the TUI's
+      // `/workflow` lists them through this, so a dropped forward leaves a panel
+      // that can never offer a file. Forwarded in `persistingController`.
+      "workflowCatalogue",
       "onJobs",
       "jobOutput",
       "killJob",

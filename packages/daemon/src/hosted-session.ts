@@ -153,6 +153,8 @@ import {
   type WatchCategory,
   type WatchNextResult,
   type WatchResult,
+  type WorkflowCatalogueResult,
+  WorkflowCatalogueResultSchema,
   type WorkflowListRow,
   type WorkflowParams,
   type WorkflowResult,
@@ -2477,6 +2479,11 @@ export class HostedSession {
         return driver.start({
           name: params.name,
           inputs: Object.fromEntries(inputs),
+          // The hash the user SAW (the catalogue's row, slice 5a): a file edited
+          // since then is refused `changed`, so a start never runs an edit the
+          // user never reviewed. Absent (a TUI `/workflow run`, the model's
+          // tool) keeps the old behaviour: the current file.
+          ...(params.hash !== undefined ? { hash: params.hash } : {}),
           by: "user",
           turnId: params.turnId,
         });
@@ -2488,6 +2495,51 @@ export class HostedSession {
       case "rerun_step":
         return driver.rerun(params.runId, params.stepId, params.turnId);
     }
+  }
+
+  /**
+   * `session/workflow_catalogue` (docs/feat/workflows-ui.md slice 5a / D6): the
+   * project's workflow files, validated and hashed against THIS session's
+   * `models`/agent types, with whether each hash is approved. A read: no ask, no
+   * run, no write. A session without a driver (tunnelled: a pod's daemon) answers
+   * `unavailable` — never an empty list that would look like "no workflows".
+   *
+   * The answer is judged by the wire schema on the way out (a pod may have sent
+   * it, and a row's free text is painted on the laptop).
+   */
+  async workflowCatalogue(): Promise<WorkflowCatalogueResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return {
+        workflows: [],
+        dir: "",
+        unavailable: "workflows run only on a laptop or serve session",
+      };
+    }
+    const catalogue = await driver.catalogue();
+    const parsed = WorkflowCatalogueResultSchema.safeParse({
+      ...catalogue,
+      workflows: catalogue.workflows.map((row) => ({
+        ...row,
+        // Each error is a bounded ONE line (the wire's own cap): the validator's
+        // text can hold a newline, and an over-long error would otherwise fail
+        // the whole answer — losing the rest of the catalogue for one bad file.
+        ...(row.errors !== undefined
+          ? { errors: row.errors.map((e) => oneLineText(e).slice(0, 300)) }
+          : {}),
+      })),
+    });
+    if (!parsed.success) {
+      return {
+        workflows: [],
+        dir: catalogue.dir,
+        unavailable: oneLineText(`the catalogue could not be read: ${parsed.error.message}`).slice(
+          0,
+          200,
+        ),
+      };
+    }
+    return parsed.data;
   }
 
   /** This session's rows of `workflow/list` (D5): the hub's signal is `needsUser`. */

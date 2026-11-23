@@ -13,6 +13,7 @@ import type {
   DocumentContent,
   JobOutputResult,
   JobRow,
+  WorkflowCatalogueResult,
   WorkflowRow,
   WorkflowStepDetail,
 } from "@tentacle/protocol";
@@ -368,6 +369,13 @@ export interface SessionController {
     stepId: string,
     attempt?: number,
   ): Promise<{ detail?: WorkflowStepDetail } | { unsupported: true }>;
+  /**
+   * The project's workflows (`session/workflow_catalogue`, slice 5a / D6): the
+   * rows a start screen lists, each with its hash and inputs. A read — nothing is
+   * asked, nothing runs. Optional: absent on an older daemon, which answers
+   * `{unsupported: true}`.
+   */
+  workflowCatalogue?(): Promise<WorkflowCatalogueResult | { unsupported: true }>;
   /**
    * Subscribe to this session's running background SHELL jobs as the daemon
    * reports them (bounded by the client; `count` is the daemon's own number).

@@ -417,6 +417,83 @@ describe("the two reads: a MethodNotFound is `{unsupported:true}`, never a throw
   });
 });
 
+describe("session/workflow_catalogue (slice 5a): the three answers are distinct", () => {
+  const catalogue = {
+    dir: "/proj/.tentacle/workflows",
+    workflows: [
+      {
+        name: "task",
+        path: ".tentacle/workflows/task.yaml",
+        ok: true,
+        version: 1,
+        hash: "a".repeat(64),
+        approved: false,
+        inputs: [{ name: "slug", required: true }],
+        steps: [{ id: "build", kind: "run", where: "local", command: "make test" }],
+      },
+    ],
+  };
+
+  test("a daemon that answers gives the rows, and the request is session-scoped", async () => {
+    const d = fakeDaemon({ [Method.WorkflowCatalogue]: () => catalogue });
+    const { client, session } = await attach(d, { daemonWakes: true });
+    const answer = await session.workflowCatalogue();
+    expect("unsupported" in answer).toBe(false);
+    expect("workflows" in answer ? answer.workflows[0]?.name : "").toBe("task");
+    expect("dir" in answer ? answer.dir : "").toBe("/proj/.tentacle/workflows");
+    expect(d.sent.at(-1)).toEqual({
+      method: Method.WorkflowCatalogue,
+      params: { sessionId: "s1" },
+    });
+    client.close();
+  });
+
+  test('an OLDER daemon is `{unsupported:true}` — "update tentacle", not "no workflows"', async () => {
+    // Mutation: map MethodNotFound to an empty catalogue → the phone offers no
+    // Start and blames the folder, instead of telling the user to update.
+    const d = fakeDaemon();
+    const { client, session } = await attach(d, { daemonWakes: true });
+    expect(await session.workflowCatalogue()).toEqual({ unsupported: true });
+    client.close();
+  });
+
+  test("the trust bit off sends NOTHING and refuses locally", async () => {
+    const d = fakeDaemon({ [Method.WorkflowCatalogue]: () => catalogue });
+    const { client, session } = await attach(d);
+    const answer = await session.workflowCatalogue();
+    expect("unsupported" in answer).toBe(false);
+    expect("unavailable" in answer ? answer.unavailable : undefined).toBe(
+      WORKFLOW_UNTRUSTED_DAEMON,
+    );
+    expect(d.sent.some((s) => s.method === Method.WorkflowCatalogue)).toBe(false);
+    client.close();
+  });
+
+  test("a start carries the hash the user saw, and still mints its turn", async () => {
+    // Mutation: drop `hash` from the params → the daemon runs the CURRENT file,
+    // an edit the user never reviewed.
+    const d = fakeDaemon({ [Method.Workflow]: () => ({ ok: true, runId: "wf-1" }) });
+    const { client, session } = await attach(d, { daemonWakes: true });
+    const hash = "b".repeat(64);
+    await session.workflow({
+      action: "start",
+      name: "task",
+      hash,
+      inputs: [{ name: "slug", value: "x" }],
+    });
+    const params = d.sent.at(-1)?.params as {
+      hash: string;
+      name: string;
+      inputs: { name: string; value: string }[];
+      turnId: string;
+    };
+    expect(params.hash).toBe(hash);
+    expect(params.inputs).toEqual([{ name: "slug", value: "x" }]);
+    expect(session.ownsTurn(params.turnId)).toBe(true);
+    client.close();
+  });
+});
+
 describe("the reverse mapping: `workflows` is a listener's fact, not a turn event", () => {
   test("the session's listener gives the state at once when one was reported", async () => {
     const d = fakeDaemon();

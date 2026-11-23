@@ -1235,6 +1235,144 @@ phone's controller owns that container (`workflow-run-controller`, slice 3); the
 now so both surfaces share one rule, and slice 3 supplies the list. The TUI's `onWorkflows` subscriber
 in `useSessionLink` and the rail/panel are slice 2's, as the plan's files column says.
 
+### Slice 5a — Workflow catalogue + start-by-hash on the wire (D6)
+
+*— claude-sonnet-4-5 (executor), 2026-11-24*
+
+**Load-bearing check re-run first (PARTIAL rule):** PASSED. `RemoteSession.workflow` exists
+(`packages/client/src/remote-session.ts:1309`) and its `start` path mints a turn as 1b specified;
+the driver's `inspect` (`packages/agent/src/workflow-driver.ts:427`) and `prepare`
+(`:699`/`:900` after the refactor) are as D6 cites them — `prepare` loads, validates against the
+session's `models`/agent types and hashes, answering `{hash, spec}` with no run and no ask.
+
+**What changed, in dependency order.**
+
+1. **Wire (`packages/protocol/src/session.ts`, `methods.ts`).** `session/workflow_catalogue`
+   (params `{sessionId}`) and its result `WorkflowCatalogueResultSchema`
+   (`{workflows: WorkflowDefRow[], dir, truncated?, unavailable?, gitIgnored?, elsewhere?}`), with
+   `WorkflowDefRowSchema` (name/path/`ok`, `version`/`description`/`hash`/`approved`/`inputs`/
+   `steps`/`errors`, each capped as D6's table says) and `WorkflowStepSummarySchema`
+   (`{id, kind, model?, where, command?}` — `command` uncapped per row so the phone shows every
+   `run` command verbatim before an approval). `WorkflowParamsSchema.start` gains optional `hash`
+   (`WorkflowHashSchema`, the sha-256 hex already in `session-log.ts`); `WorkflowResultSchema`
+   gains optional `refusal` (`WorkflowWordSchema` — a bounded free word, never an enum, so a newer
+   daemon's word cannot poison an older client). All additive: **no `protocol.d/` note, no
+   `PROTOCOL_VERSION` edit** (§7), and `packages/protocol/schema/protocol.json` regenerated
+   (`bun run schema:export`, +192 lines).
+2. **Loader (`packages/cli/src/workflow-files.ts`).** `listWorkflowSources(cwd): Promise<
+   WorkflowListing>` — ONE async walk (`node:fs/promises`, so a big folder never blocks the `serve`
+   event loop, §7) of `<cwd>/${PROJECT_PATHS.workflows}`, through `resolveInside(…, "no-links")`
+   so a symlinked `.tentacle`, `workflows` or file is an `invalid` row with its path, never
+   followed. Every top-level `<stem>.yaml`; a bad stem / an oversize file is an `invalid` row with
+   its reason (never a silent skip); `> WORKFLOW_SOURCES_MAX` (64) sets `truncated`; a missing
+   folder is `[]`. Plus `workflowListing(cwd)`: the same walk plus the two display-only facts —
+   `elsewhere` (from slice 0's `workflowsAbove`, ONLY when the folder lists no workflow) and
+   `gitIgnored` (slice 0's `workflowsGitIgnored`, only asked when there is a source to protect).
+3. **Driver (`packages/agent/src/workflow-driver.ts`).** New dep `list?: () => Promise<
+   WorkflowListing>`, and `catalogue()`: for each row the SAME `prepare` path `inspect` uses
+   (extracted as `prepareSource(name, source)`, `prepare` now a two-line wrapper — no behaviour
+   change), plus `approvals.has`, plus the spec's own steps as summaries. Asks nothing, starts
+   nothing, writes nothing; a session with no `list` answers `unavailable`. `start` gains
+   `hash?`: present and ≠ the current hash → `{ok:false, refusal:"changed"}`, checked after
+   `prepare` and BEFORE the slot claim. Every existing refusal gets its word (`running` with the
+   run id, `invalid`, `inputs`, `unavailable`).
+4. **Daemon (`packages/daemon/src/connection.ts`, `hosted-session.ts`).**
+   `Method.WorkflowCatalogue` → `HostedSession.workflowCatalogue()`, which answers the driver's
+   catalogue (or the same `unavailable` a driverless session answers) and validates it through
+   the wire schema on the way out — each `errors[]` entry flattened to ONE bounded line (the
+   validator's text can hold a newline; an over-long one would fail the whole answer and lose
+   every other row). `workflow()` passes `params.hash` through to `driver.start`.
+5. **Client (`packages/client/src/{workflows,remote-client,remote-session}.ts`).**
+   `WorkflowAction.start` gains `hash?`; `RemoteClient.workflowCatalogue` maps `MethodNotFound`
+   to `{unsupported:true}` (never a throw); `RemoteSession.workflowCatalogue` is trust-gated on
+   `daemonWakes` exactly like `workflow()` — refused locally with `unavailable` and nothing sent
+   — and the three answers stay distinct on purpose: rows / `{unsupported:true}` ("update
+   tentacle") / `{unavailable}` ("workflows only on a laptop or serve session").
+6. **Pass-through (`packages/cli/src/{local-runtime,wiring}.ts`, `packages/tui/src/app-types.ts`).**
+   `persistingController` forwards `workflowCatalogue`; the driver is wired
+   `list: async () => workflowListing(config.cwd)` beside `load`; `app-types.ts` declares it
+   optional on the controller surface (its consumer is slice 2b's panel).
+
+**Mutations (each run against the real code, then reverted from a file copy — never `git
+checkout`).**
+
+| Mutation | Result |
+|---|---|
+| `start`: `if (false)` in place of the `hash` comparison | RED — "a STALE hash is refused `changed`" (`expected +0, received ok:true runId wf-1`) |
+| `catalogue()`: one `approvals.has` + a `deps.request` per row added | RED — 3 tests, incl. "it ASKS NOTHING and STARTS NOTHING: zero broker requests" |
+| `approveHash`: a private `async () => ({allowed:true})` in place of `stepRequester` | RED — "a CURRENT hash on an unapproved file asks exactly ONE hash approval" and the no-hash case |
+| loader: `truncated: false` always | RED — "more than WORKFLOW_SOURCES_MAX files: the first ones are kept, `truncated` says so" |
+| loader: `elsewhere` computed unconditionally | RED — "an EMPTY folder gets the hint; a folder WITH a workflow does not" |
+| daemon: `params.hash` not passed to `driver.start` | RED — "start{hash} reaches the driver: a stale hash is refused `changed`, nothing runs" |
+| client: `MethodNotFound` → an empty catalogue instead of `{unsupported:true}` | RED — "an OLDER daemon is `{unsupported:true}`" |
+| `RemoteSession.workflow`: `hash` dropped from the params | RED — "a start carries the hash the user saw, and still mints its turn" |
+
+**Drift from the Implementation (and why).**
+
+- **The loader's name and shape.** The plan says `listWorkflowSources(cwd): Promise<
+  WorkflowSource[]>`. The code needs three things that are not a source: the ABSOLUTE folder read
+  (the catalogue's `dir`, D7 v5), whether the walk was `truncated` (D6's own failure-mode row),
+  and the invalid rows a bad stem / oversize file produce (D6: "an `ok:false` row … never a
+  silent skip"). So `listWorkflowSources` answers a `WorkflowListing` (`{dir, rows, truncated}`,
+  rows being `source | invalid`) and `workflowListing` adds the two display-only facts. This is
+  the same seam, with the shape the design's own requirements force; noted here rather than
+  silently.
+- **`prepareSource` extraction.** D6 asks for "`prepare` refactored to take a source instead of a
+  name, no behaviour change". Taken literally that would have `start`/`rerun`/`inspect` read the
+  file too. I added `prepareSource(name, source)` and left `prepare(name)` as a two-line loader
+  wrapper, so the shared path is ONE implementation and no existing caller changes.
+- **`gitIgnored`/`elsewhere` are on the CLI's `WorkflowListing`, not on `@tentacle/agent`'s
+  structural copy.** The driver's `catalogue()` consumes `rows` + `dir` + `truncated` only; the
+  extra facts ride the same object at the CLI boundary, where they are produced. Additive and
+  structural, so no second type had to grow.
+- **`local-runtime`'s controller guard.** `packages/cli/test/subagent-panel-controller.test.ts`
+  pins the exact forwarded set; it went red on the new member (which is what it is for), so its
+  list gained `workflowCatalogue` beside `workflow`/`workflowStep`.
+- **`json-schema.test.ts` fixtures.** Adding a method without its params/result fixtures fails
+  "every method … has a fixture" — the new fixtures carry the `hash`/`refusal` params and results
+  as well as all four catalogue answers (rows, empty+hint, `unavailable`, `truncated`).
+
+**Tests (all listed failure modes; red before green).**
+
+- `packages/agent/test/workflow-catalogue.test.ts` (new, 13 tests): a valid row's hash IS
+  `workflowHash` of the same bytes, `approved` from the store, an invalid file's errors with their
+  YAML path; **asks nothing and starts nothing** (zero broker requests, no run, no row); a stale
+  `hash` → `refusal:"changed"`, zero asks, no row; a current `hash` on an unapproved file → exactly
+  ONE `workflow_approve` through the session's ONE requester; no `hash` → today's behaviour; no
+  `list` dep → `unavailable`; `running`/`inputs`/`invalid` words on the existing refusals.
+- `packages/cli/test/workflow-files.test.ts` (+8 tests): one walk lists every `*.yaml`; a
+  symlinked file and a symlinked `workflows/` are refused; a bad stem → an error row; missing dir
+  → `[]`; `> 64` → `truncated`; a folder WITH a workflow never gets the hint, an empty one does;
+  a parent's workflow is still not loadable from the child.
+- `packages/daemon/test/workflow-hosted.test.ts` (+3 tests): `session/workflow_catalogue` answered
+  on a session with a driver (rows, `dir`); a driverless (tunnelled) session answers `unavailable`,
+  never a list that looks like "no workflows"; `start{hash: stale}` refused `changed`, nothing run.
+- `packages/client/test/workflows-client.test.ts` (+4 tests): the rows and the session-scoped
+  request; `MethodNotFound` → `{unsupported:true}`; trust bit off → nothing sent, `unavailable`;
+  `start` carries `hash` and `inputs` and still mints its turn.
+- `packages/protocol/test/workflow-wire.test.ts` (+6 tests): the method is registered with its own
+  schemas; `start{hash}` accepts a sha-256 hex and refuses anything else; `refusal` is a bounded
+  word (a newer daemon's word parses); a catalogue row's caps (`errors` ≤ 20, `description` ≤ 500).
+- `packages/cli/test/local-runtime.test.ts` (+1): `workflowCatalogue` forwarded to `inner`.
+  `packages/protocol/test/json-schema.test.ts`: `zod ⇔ JSON Schema` green with the new fixtures.
+
+**Validation.** `bun test` on every affected file: **744 pass, 0 fail** across `packages/protocol/test`
+(whole), the agent's two workflow suites, the cli's 5, the daemon's 3, the client's 2 (66 files).
+Wider sweep `packages/{agent,daemon,client}/test` + `packages/cli/test/workflow-*` +
+`packages/tui/test/commands`: **3223 pass, 1 skip (opt-in), 0 fail**. `packages/tui/test` +
+`packages/cli/test`: 5772 pass, 2 skips, and the one guard failure this slice caused, fixed above.
+`bunx tsc --noEmit` (root) + `tsc -p apps/mobile` + `tsc -p apps/relay`: **0 errors**.
+`bunx biome check` on all changed files: clean. `bun run schema:export` regenerated
+`packages/protocol/schema/protocol.json`.
+
+**Not done in this slice (deliberately, and why):** nothing from 2/2b/3/4/5b. No TUI panel and no
+phone screen — 5a is the data path only; `app-types.ts` declares `workflowCatalogue` optional so
+2b's panel can call it, and 5b's start screen is where `hash`/`refusal` are consumed. The plan's
+"uncapped per row" (vs the 16 000-char approval SUMMARY) is honoured by one
+`WorkflowDefStepSchema` per step with its own bounds — `command` ≤ 4096, `where` ≤ 256, `id` ≤ 64,
+≤ 64 steps — so a full `run` command travels verbatim while the row still has a wire cap (a
+`line`-in-a-loop over 10 000 commands would be a different, unbounded shape).
+
 ## Review
 
 ### Owner answers (2026-11-23)

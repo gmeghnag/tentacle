@@ -9,7 +9,12 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROJECT_PATHS } from "@tentacle/core";
-import { loadWorkflowSource } from "../src/workflow-files.ts";
+import {
+  WORKFLOW_SOURCES_MAX,
+  listWorkflowSources,
+  loadWorkflowSource,
+  workflowListing,
+} from "../src/workflow-files.ts";
 
 const YAML = "schemaVersion: 1\nname: task\nversion: 1\nsteps:\n  - id: one\n    run: make test\n";
 
@@ -104,5 +109,111 @@ describe("loadWorkflowSource reads .tentacle/workflows", () => {
     expect(() => loadWorkflowSource(child, "task")).toThrow(
       `no workflow task: ${join(child, PROJECT_PATHS.workflows, "task.yaml")} does not exist`,
     );
+  });
+});
+
+describe("listWorkflowSources: ONE walk of the folder (slice 5a)", () => {
+  test("every *.yaml of the folder is a row, with the ABSOLUTE folder read", async () => {
+    const root = project(`${PROJECT_PATHS.workflows}/task.yaml`, YAML);
+    writeFileSync(join(root, PROJECT_PATHS.workflows, "beta.yaml"), YAML);
+    // Not a workflow: not a `*.yaml`, so not a row at all.
+    writeFileSync(join(root, PROJECT_PATHS.workflows, "notes.md"), "hi");
+    const listing = await listWorkflowSources(root);
+    expect(listing.dir).toBe(join(root, PROJECT_PATHS.workflows));
+    expect(listing.rows.map((r) => r.name)).toEqual(["beta", "task"]);
+    expect(listing.truncated).toBe(false);
+    const task = listing.rows.find((r) => r.name === "task");
+    // The row's source is what `loadWorkflowSource` returns for the same name:
+    // the same path and the same bytes, so the hash a listing shows is the hash
+    // a start compares against.
+    const loaded = loadWorkflowSource(root, "task");
+    if (task?.kind !== "source") throw new Error("no task row");
+    expect(task.source.path).toBe(loaded.path);
+    expect(task.source.text).toBe(loaded.text);
+  });
+
+  test("a missing folder is [], never a throw (nothing to list)", async () => {
+    const root = mkdtempSync(join(dir, "none-"));
+    expect(await listWorkflowSources(root)).toEqual({
+      dir: join(root, PROJECT_PATHS.workflows),
+      rows: [],
+      truncated: false,
+    });
+  });
+
+  test("a symlinked file is an invalid row: a link could point outside the project", async () => {
+    const real = mkdtempSync(join(dir, "target-"));
+    writeFileSync(join(real, "task.yaml"), YAML);
+    const root = project(`${PROJECT_PATHS.workflows}/other.yaml`, YAML);
+    symlinkSync(join(real, "task.yaml"), join(root, PROJECT_PATHS.workflows, "task.yaml"));
+    const listing = await listWorkflowSources(root);
+    const task = listing.rows.find((r) => r.name === "task");
+    expect(task?.kind).toBe("invalid");
+    if (task?.kind !== "invalid") throw new Error("not invalid");
+    expect(task.problem).toContain("symbolic link");
+  });
+
+  test("a symlinked workflows folder is refused with its path", async () => {
+    const real = mkdtempSync(join(dir, "wfdir-"));
+    writeFileSync(join(real, "task.yaml"), YAML);
+    const root = mkdtempSync(join(dir, "linked-folder-"));
+    mkdirSync(join(root, ".tentacle"));
+    symlinkSync(real, join(root, PROJECT_PATHS.workflows));
+    const listing = await listWorkflowSources(root);
+    expect(listing.rows.map((r) => r.kind)).toEqual(["invalid"]);
+    expect(listing.rows[0]?.kind === "invalid" ? listing.rows[0].problem : "").toContain(
+      "symbolic link",
+    );
+  });
+
+  test("a stem that is not a workflow name is a row with its reason, never a silent skip", async () => {
+    const root = project(`${PROJECT_PATHS.workflows}/Bad Name.yaml`, YAML);
+    const listing = await listWorkflowSources(root);
+    expect(listing.rows).toEqual([
+      {
+        kind: "invalid",
+        name: "Bad Name",
+        path: ".tentacle/workflows/Bad Name.yaml",
+        problem: 'not a workflow name (lowercase words joined by "-")',
+      },
+    ]);
+  });
+
+  test("more than WORKFLOW_SOURCES_MAX files: the first ones are kept, `truncated` says so", async () => {
+    // Mutation: drop the flag → a user sees 64 of 70 and believes that is all.
+    const root = mkdtempSync(join(dir, "many-"));
+    mkdirSync(join(root, PROJECT_PATHS.workflows), { recursive: true });
+    for (let i = 0; i < WORKFLOW_SOURCES_MAX + 3; i++) {
+      writeFileSync(
+        join(root, PROJECT_PATHS.workflows, `w${String(i).padStart(3, "0")}.yaml`),
+        YAML,
+      );
+    }
+    const listing = await listWorkflowSources(root);
+    expect(listing.rows).toHaveLength(WORKFLOW_SOURCES_MAX);
+    expect(listing.truncated).toBe(true);
+  });
+});
+
+describe("workflowListing: the display-only facts (slice 5a / D7 v5)", () => {
+  test("a project with workflows is not `gitIgnored` when .gitignore does not name it", async () => {
+    const root = project(`${PROJECT_PATHS.workflows}/task.yaml`, YAML);
+    const listing = await workflowListing(root);
+    expect(listing.rows).toHaveLength(1);
+    // Not a git repo at all: unknown is never claimed as either.
+    expect(listing.gitIgnored).toBeUndefined();
+    expect(listing.elsewhere).toBeUndefined();
+  });
+
+  test("an EMPTY folder gets the hint; a folder WITH a workflow does not", async () => {
+    // Mutation: look for the hint unconditionally → the second case gains an
+    // `elsewhere` and a user is told to go somewhere they need not.
+    const parent = project(`${PROJECT_PATHS.workflows}/task.yaml`, YAML);
+    const child = join(parent, "apps", "mobile");
+    mkdirSync(join(child, PROJECT_PATHS.workflows), { recursive: true });
+    const empty = await workflowListing(child);
+    expect(empty.elsewhere).toEqual({ dir: join(parent, PROJECT_PATHS.workflows), count: 1 });
+    writeFileSync(join(child, PROJECT_PATHS.workflows, "mine.yaml"), YAML);
+    expect((await workflowListing(child)).elsewhere).toBeUndefined();
   });
 });

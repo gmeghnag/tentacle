@@ -104,6 +104,8 @@ import {
   type UpdateSettingsResult,
   type VoiceTurn,
   type WireStreamEvent,
+  type WorkflowCatalogueParams,
+  type WorkflowCatalogueResult,
   type WorkflowListResult,
   type WorkflowParams,
   type WorkflowResult,
@@ -1647,6 +1649,29 @@ export class RemoteClient {
     return this.call(this.peer, Method.WorkflowList, {}).then(
       (result) => result as WorkflowListResult,
       (error: unknown): WorkflowListResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/workflow_catalogue` (docs/feat/workflows-ui.md slice 5a / D6): the
+   * project's workflow files, validated and hashed against THAT session's models,
+   * with whether each hash is approved. A read: nothing is asked, nothing runs.
+   * An older daemon's `MethodNotFound` is `{unsupported: true}` — never a throw,
+   * and never the `unavailable` a tunnelled session answers (they read
+   * differently on screen: "update tentacle" vs "workflows only on a laptop").
+   */
+  workflowCatalogue(
+    sessionId: string,
+    params: WorkflowCatalogueParams,
+  ): Promise<WorkflowCatalogueResult | { unsupported: true }> {
+    return this.sessionCall(sessionId, Method.WorkflowCatalogue, params, "once").then(
+      (result) => result as WorkflowCatalogueResult,
+      (error: unknown): WorkflowCatalogueResult | { unsupported: true } => {
         if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
           return { unsupported: true };
         }

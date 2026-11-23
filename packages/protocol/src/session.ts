@@ -887,6 +887,16 @@ export const WorkflowParamsSchema = z.discriminatedUnion("action", [
     name: WorkflowNameSchema,
     /** The daemon validates them against the file's `inputs`. */
     inputs: z.array(WorkflowInputValueSchema).max(64).optional(),
+    /**
+     * The content hash the caller SAW (the catalogue's row, D6): present and
+     * different from the file's hash now → refused `changed`, nothing asked,
+     * nothing run. Absent → the file is read afresh (the TUI's `/workflow run`,
+     * the model's tool).
+     */
+    hash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
     turnId: TurnIdSchema,
   }),
   z.object({
@@ -914,13 +924,30 @@ export const WorkflowParamsSchema = z.discriminatedUnion("action", [
 ]);
 export type WorkflowParams = z.infer<typeof WorkflowParamsSchema>;
 
+/**
+ * Why a `session/workflow` did nothing, as ONE word a UI branches on
+ * (docs/feat/workflows-ui.md D6): `changed` (the file moved since it was
+ * listed), `running` (a run is in flight — `runId` names it), `invalid` (the
+ * file does not validate), `inputs` (unknown / missing input), `unavailable`
+ * (this session cannot run workflows). A BOUNDED FREE WORD, never an enum: a
+ * newer daemon's word is carried to the UI as is, and the `reason` stays the
+ * text a human reads.
+ */
+export const WorkflowRefusalSchema = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(/^[a-z][a-z0-9_-]*$/);
+
 export const WorkflowResultSchema = z.object({
   /** `false` with a `reason` (one run already running, hash changed, not allowed here, …). */
   ok: z.boolean(),
-  /** The run started or acted on. */
+  /** The run started or acted on (also the run in flight, on a `running` refusal). */
   runId: z.string().max(32).optional(),
   /** Why nothing happened: shown to the user as a notice, never thrown at a UI. */
   reason: z.string().max(2000).optional(),
+  /** The machine-readable half of the refusal (`changed`, `running`, …). */
+  refusal: WorkflowRefusalSchema.optional(),
 });
 export type WorkflowResult = z.infer<typeof WorkflowResultSchema>;
 
@@ -951,6 +978,87 @@ export const WorkflowListResultSchema = z.object({
   runs: z.array(WorkflowListRowSchema),
 });
 export type WorkflowListResult = z.infer<typeof WorkflowListResultSchema>;
+
+// --- session/workflow_catalogue: what this project's workflows ARE (D6) ---
+// The phone's "start a workflow" reads it; `/workflow` and the TUI name the
+// folder from it. Session-scoped, because the rows are validated against THAT
+// session's `models`/agent types and the run starts in that session. Model-free
+// and deterministic: no LLM, no ask, no write, one directory walk. Additive: an
+// older daemon answers `MethodNotFound` ("update tentacle").
+
+/** A step of a definition, uncapped per row (the phone shows every `run` command BEFORE the approval). */
+export const WorkflowDefStepSchema = z.object({
+  id: line(64),
+  /** `agent` | `run` | `approve` today; free word. */
+  kind: line(16),
+  /** The step's `models` NAME only, never an id or URL (AGENTS §7). */
+  model: line(128).optional(),
+  /** `local` | `docker:<name>`. */
+  where: line(256),
+  /** A `run` step's command verbatim — the text an approval would show. */
+  command: z.string().max(4096).optional(),
+});
+export type WorkflowDefStep = z.infer<typeof WorkflowDefStepSchema>;
+
+/** One declared input of a definition. */
+export const WorkflowDefInputSchema = z.object({
+  name: z.string().min(1).max(WORKFLOW_INPUT_NAME_MAX_CHARS),
+  required: z.boolean(),
+  default: z.string().max(WORKFLOW_INPUTS_MAX_CHARS).optional(),
+});
+export type WorkflowDefInput = z.infer<typeof WorkflowDefInputSchema>;
+
+/**
+ * One workflow FILE of the project. `ok: false` carries `errors` (each naming
+ * its YAML path) and nothing else beyond `name`/`path`: it cannot be started,
+ * and the UI shows the errors verbatim instead of a form.
+ */
+export const WorkflowDefRowSchema = z.object({
+  /** The file stem — a workflow name. */
+  name: line(64),
+  /** Project-relative: `.tentacle/workflows/<name>.yaml`. */
+  path: line(512),
+  ok: z.boolean(),
+  version: z.number().int().nonnegative().optional(),
+  description: z.string().max(500).optional(),
+  /** The content hash `start{hash}` pins (sha-256 hex). */
+  hash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  /** Whether THAT hash is approved in this project's store (display only; the daemon decides). */
+  approved: z.boolean().optional(),
+  inputs: z.array(WorkflowDefInputSchema).max(64).optional(),
+  steps: z.array(WorkflowDefStepSchema).max(64).optional(),
+  errors: z.array(z.string().max(300)).max(20).optional(),
+});
+export type WorkflowDefRow = z.infer<typeof WorkflowDefRowSchema>;
+
+/**
+ * The catalogue of one project. `dir` is the ABSOLUTE folder read — a user in
+ * the wrong folder sees where tentacle looks. `elsewhere` is DISPLAY ONLY (D7
+ * v5): the nearest ancestor folder holding workflows, given only when this one
+ * has none. Nothing it names can be loaded, hashed, approved or started.
+ */
+export const WorkflowCatalogueResultSchema = z.object({
+  workflows: z.array(WorkflowDefRowSchema).max(64),
+  /** More than 64 YAML files in the folder: what is shown is not all of it. */
+  truncated: z.literal(true).optional(),
+  /** This session cannot run workflows at all (a pod's daemon) — NOT "the folder is empty". */
+  unavailable: line(200).optional(),
+  /** git ignores the folder: the "not versioned" notice (tentacle never edits a `.gitignore`). */
+  gitIgnored: z.boolean().optional(),
+  /** The absolute folder the catalogue read. */
+  dir: z.string().min(1).max(1024),
+  /** Present ONLY when `dir` listed no workflow: where they were found higher up. */
+  elsewhere: z
+    .object({ dir: z.string().min(1).max(1024), count: z.number().int().nonnegative() })
+    .optional(),
+});
+export type WorkflowCatalogueResult = z.infer<typeof WorkflowCatalogueResultSchema>;
+
+export const WorkflowCatalogueParamsSchema = z.object({ sessionId: SessionIdSchema });
+export type WorkflowCatalogueParams = z.infer<typeof WorkflowCatalogueParamsSchema>;
 
 // --- the session's background shell jobs (docs/feat/shell-jobs-panel.md) ---
 // The live list of the `shell{run_in_background}` jobs a session started: one

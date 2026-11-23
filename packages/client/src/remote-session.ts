@@ -34,6 +34,7 @@ import {
   type TurnEnd,
   type UpdateSettingsResult,
   type VoiceTurn,
+  type WorkflowCatalogueResult,
   type WorkflowResult,
   type WorkflowRow,
   type WorkflowStepResult,
@@ -1319,6 +1320,25 @@ export class RemoteSession implements SessionStreamListener {
     }
     const turnId = this.mintTurn();
     return this.client.workflow(sessionId, { ...params, sessionId, turnId });
+  }
+
+  /**
+   * `session/workflow_catalogue` (docs/feat/workflows-ui.md slice 5a / D6): the
+   * project's workflows, for a start screen. Three answers, kept distinct on
+   * purpose: the rows; `{unsupported:true}` (an older daemon — "update tentacle");
+   * and `{unavailable}` (this session cannot run workflows at all — a tunnelled
+   * pod session), never an empty list that looks like an empty folder. The trust
+   * bit refuses locally, like `workflow()`, and sends nothing (§7).
+   */
+  async workflowCatalogue(): Promise<WorkflowCatalogueResult | { unsupported: true }> {
+    const sessionId = this.id;
+    if (sessionId === null) {
+      return { workflows: [], dir: "", unavailable: "this session is not open yet" };
+    }
+    if (!this.daemonWakes) {
+      return { workflows: [], dir: "", unavailable: WORKFLOW_UNTRUSTED_DAEMON };
+    }
+    return this.client.workflowCatalogue(sessionId, { sessionId });
   }
 
   /**

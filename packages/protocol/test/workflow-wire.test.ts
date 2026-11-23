@@ -4,7 +4,10 @@ import {
   RequestSchemas,
   SnapshotResultSchema,
   UPDATE_CLASS,
+  WorkflowCatalogueParamsSchema,
+  WorkflowCatalogueResultSchema,
   WorkflowParamsSchema,
+  WorkflowResultSchema,
   WorkflowStepParamsSchema,
   WorkflowStepResultSchema,
   isKnownUpdateType,
@@ -134,5 +137,133 @@ describe("session/workflow_step", () => {
     // A free word stays a free word (a newer daemon's state is not refused).
     const newer = { ...detail, state: "paused-by-daemon" };
     expect(WorkflowStepResultSchema.safeParse({ detail: newer }).success).toBe(true);
+  });
+});
+
+// docs/feat/workflows-ui.md slice 5a (D6): the catalogue, plus the two ADDITIVE
+// fields on the existing start/result (`hash`, `refusal`) — neither moves
+// PROTOCOL_VERSION (an older peer drops an unknown field, and an older daemon
+// answers `MethodNotFound`).
+describe("session/workflow_catalogue + start{hash}", () => {
+  test("the catalogue is a registered request method with its own schemas", () => {
+    expect(Method.WorkflowCatalogue).toBe("session/workflow_catalogue");
+    expect(isMethodName("session/workflow_catalogue")).toBe(true);
+    expect(RequestSchemas[Method.WorkflowCatalogue].params).toBe(WorkflowCatalogueParamsSchema);
+    expect(RequestSchemas[Method.WorkflowCatalogue].result).toBe(WorkflowCatalogueResultSchema);
+    expect(WorkflowCatalogueParamsSchema.safeParse({ sessionId: "s" }).success).toBe(true);
+    expect(WorkflowCatalogueParamsSchema.safeParse({}).success).toBe(false);
+  });
+
+  test("a catalogue result round-trips: valid rows, an invalid row with its errors, the folder", () => {
+    const result = {
+      workflows: [
+        {
+          name: "task",
+          path: ".tentacle/workflows/task.yaml",
+          ok: true,
+          version: 3,
+          description: "does the thing",
+          hash: "a".repeat(64),
+          approved: false,
+          inputs: [
+            { name: "slug", required: true },
+            { name: "note", required: false, default: "x" },
+          ],
+          steps: [{ id: "build", kind: "run", where: "local", command: "make test" }],
+        },
+        {
+          name: "broken",
+          path: ".tentacle/workflows/broken.yaml",
+          ok: false,
+          errors: ["steps[0].run: is not a command"],
+        },
+      ],
+      dir: "/Users/me/proj/.tentacle/workflows",
+      gitIgnored: false,
+    };
+    const parsed = WorkflowCatalogueResultSchema.safeParse(result);
+    expect(parsed.success && parsed.data).toEqual(result);
+  });
+
+  test("the nullable-ish members: truncated is `true` only, `elsewhere` is display-only", () => {
+    // Mutation: `truncated: z.boolean()` → the `false` case goes green and an
+    // older client would show "truncated" beside a complete list.
+    expect(
+      WorkflowCatalogueResultSchema.safeParse({ workflows: [], dir: "/p", truncated: true })
+        .success,
+    ).toBe(true);
+    expect(
+      WorkflowCatalogueResultSchema.safeParse({ workflows: [], dir: "/p", truncated: false })
+        .success,
+    ).toBe(false);
+    const elsewhere = {
+      workflows: [],
+      dir: "/Users/me/proj/apps/mobile/.tentacle/workflows",
+      elsewhere: { dir: "/Users/me/proj/.tentacle/workflows", count: 3 },
+    };
+    const parsed = WorkflowCatalogueResultSchema.safeParse(elsewhere);
+    expect(parsed.success && parsed.data.elsewhere).toEqual(elsewhere.elsewhere);
+    // `unavailable` is a distinct answer from an empty folder, never a list.
+    const unavailable = WorkflowCatalogueResultSchema.safeParse({
+      workflows: [],
+      dir: "/POD",
+      unavailable: "workflows run only on a laptop or serve session",
+    });
+    expect(unavailable.success).toBe(true);
+  });
+
+  test("a row's caps hold (a pod-supplied label is cut daemon-side, not by the UI)", () => {
+    const row = (extra: Record<string, unknown>) =>
+      WorkflowCatalogueResultSchema.safeParse({
+        workflows: [{ name: "t", path: "p", ok: true, ...extra }],
+        dir: "/p",
+      });
+    expect(row({ errors: ["x".repeat(301)] }).success).toBe(false);
+    expect(
+      row({ steps: [{ id: "s", kind: "run", where: "local", command: "x".repeat(4097) }] }).success,
+    ).toBe(false);
+    expect(row({ hash: "not-a-hash" }).success).toBe(false);
+    expect(row({}).success).toBe(true);
+  });
+
+  test("start takes an optional sha-256 `hash`; absent stays absent (today's behaviour)", () => {
+    const start = (extra: Record<string, unknown>) =>
+      WorkflowParamsSchema.safeParse({
+        sessionId: "s",
+        action: "start",
+        name: "task",
+        turnId: "t1",
+        ...extra,
+      });
+    expect(start({ hash: "b".repeat(64) }).success).toBe(true);
+    expect(start({}).success).toBe(true);
+    expect(start({ hash: "short" }).success).toBe(false);
+    // Only `start` carries it: stop / resume / rerun_step never pin a hash.
+    expect(
+      WorkflowParamsSchema.safeParse({
+        sessionId: "s",
+        action: "stop",
+        runId: "wf-1",
+        hash: "b".repeat(64),
+      }).success,
+    ).toBe(true);
+  });
+
+  test("the result carries an optional free-word `refusal`, and the run id it names", () => {
+    const parsed = WorkflowResultSchema.safeParse({
+      ok: false,
+      refusal: "changed",
+      runId: "wf-2",
+      reason: "workflows/task.yaml changed since you opened it",
+    });
+    expect(parsed.success && parsed.data.refusal).toBe("changed");
+    // A newer daemon's word is carried as sent (never an enum the UI rejects).
+    const newer = WorkflowResultSchema.safeParse({ ok: false, refusal: "paused-by-policy" });
+    expect(newer.success && newer.data.refusal).toBe("paused-by-policy");
+    // …but it stays a bounded word: a sentence is not a refusal code.
+    expect(WorkflowResultSchema.safeParse({ ok: false, refusal: "it changed!" }).success).toBe(
+      false,
+    );
+    expect(WorkflowResultSchema.safeParse({ ok: true, runId: "wf-1" }).success).toBe(true);
   });
 });
