@@ -41,7 +41,10 @@ export {
 /**
  * `current`: the live session's id (the `/sessions` panel marks its row); null
  * when there is none. `caps`: the session's MCP/skill switches, read live
- * (absent: no switch column). The panel projects through its own kind's `view`.
+ * (absent: no switch column). `opened`: the session is open daemon-side (absent:
+ * taken as open) — what tells a lazy session "not started yet" from a runtime
+ * that genuinely cannot run workflows. The panel projects through its own kind's
+ * `view`.
  */
 export function panelView(
   panel: OpenPanel,
@@ -49,12 +52,14 @@ export function panelView(
   maxBody: number,
   current?: string | null,
   caps?: CapsPhase,
+  opened?: boolean,
 ): PanelView {
   const at: PanelAt = {
     width,
     maxBody,
     current: current ?? null,
     ...(caps === undefined ? {} : { caps }),
+    ...(opened === undefined ? {} : { opened }),
   };
   return kindOf(panel).view(panel, at);
 }

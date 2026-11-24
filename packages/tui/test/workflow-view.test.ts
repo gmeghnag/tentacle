@@ -13,7 +13,6 @@ import type {
   WorkflowRow,
   WorkflowStepRow,
 } from "@tentacle/protocol";
-import { cellWidth } from "../src/cells.ts";
 import { type OpenPanel, workflowPanel } from "../src/panel.ts";
 import { withWorkflowDetail, withWorkflowsData } from "../src/panels/workflow.ts";
 import {
@@ -25,16 +24,13 @@ import {
   WORKFLOW_DETAIL_UNSUPPORTED,
   WORKFLOW_RAIL_MAX_STEPS,
   WORKFLOW_USAGE,
-  catalogueLine,
   catalogueOrder,
   catalogueRefresh,
   catalogueRowFor,
-  catalogueRows,
   catalogueSection,
   catalogueState,
   currentRun,
   doneCount,
-  elsewhereLine,
   parseWorkflowCommand,
   railLines,
   railWindow,
@@ -47,7 +43,6 @@ import {
   workflowRailLines,
   workflowReplyNotice,
   workflowTarget,
-  workflowsLine,
 } from "../src/workflow-view.ts";
 
 const step = (over: Partial<WorkflowStepRow> = {}): WorkflowStepRow => ({
@@ -278,6 +273,40 @@ describe("the /workflow panel", () => {
     expect(empty.rows[0]?.text).toContain("No workflow run in this session");
   });
 
+  test("before the first message: no run YET, never `not supported` (S1)", () => {
+    // The session is simply not open: reporting a pod / older daemon was false
+    // (docs/fix/workflows-ux.md defect 5). `opened:false` is the only fact that
+    // tells the two apart, so the same absent rows get TWO different words.
+    const preOpen = workflowPanelView(
+      undefined,
+      undefined,
+      { cursor: 0 },
+      null,
+      80,
+      10,
+      undefined,
+      false,
+    );
+    expect(preOpen.rows[0]?.text).toContain("No workflow run in this session yet");
+    expect(preOpen.rows[0]?.text).not.toContain("not supported");
+    // An OPEN session with no feed keeps its own (true) refusal.
+    const open = workflowPanelView(
+      undefined,
+      undefined,
+      { cursor: 0 },
+      null,
+      80,
+      10,
+      undefined,
+      true,
+    );
+    expect(open.rows[0]?.text).toContain("not supported");
+    // No `opened` on the host (a host-less mount) is taken as open: never a
+    // wrong apology on a runtime that simply has no run.
+    const unknown = workflowPanelView(undefined, undefined, { cursor: 0 }, null, 80, 10);
+    expect(unknown.rows[0]?.text).toContain("not supported");
+  });
+
   test("no runId given: the run in flight (or the newest) is the one shown", () => {
     const older = run({ runId: "wf-1", name: "old", endedAt: 5_000, state: "ok", steps: STEPS });
     const live = run({ runId: "wf-2", name: "now", steps: STEPS });
@@ -434,15 +463,6 @@ describe("slice 2b: the project's workflows at rest (D8)", () => {
     dir: "/work/.tentacle/workflows",
     ...over,
   });
-  /** The line at `width`, failing loudly rather than returning null in an assertion. */
-  const line = (c: CatalogueView, width: number): string => {
-    const out = catalogueLine(c, width);
-    if (out === null) {
-      throw new Error("catalogueLine returned null");
-    }
-    return out;
-  };
-
   test("a row's state is a WORD from the wire's own facts, never a guess", () => {
     expect(catalogueState(def())).toBe("approved");
     expect(catalogueState(def({ approved: false }))).toBe("needs approval");
@@ -468,132 +488,6 @@ describe("slice 2b: the project's workflows at rest (D8)", () => {
       "zeta",
     ]);
     expect(catalogueOrder(undefined)).toEqual([]);
-  });
-
-  test("120 cols: names, versions and WORDS, the state that needs the user first", () => {
-    const c = cat({
-      workflows: [
-        def({ name: "task", version: 3, approved: true }),
-        def({ name: "nightly", version: 1, approved: false }),
-        invalid("broken", ["steps[0].run: missing"]),
-      ],
-    });
-    const text = line(c, 120);
-    expect(text).toBe(
-      "◇ workflows  nightly v1 ? needs approval · broken ✗ invalid · task v3 ✓ approved   /workflow",
-    );
-    // Every state carries its word (colour-blind rule): no glyph alone at this width.
-    expect(text).toContain("needs approval");
-    expect(text).toContain("invalid");
-    expect(text).toContain("approved");
-  });
-
-  test("tiers: the word survives, then names give way to counts — never a cut name", () => {
-    const rows = [
-      def({ name: "task", version: 3, approved: true }),
-      def({ name: "nightly", version: 1, approved: false }),
-      invalid("broken", ["steps[0].run: missing"]),
-      def({ name: "gate", version: 2, approved: true }),
-    ];
-    // 80 cols: words kept, the line is the same phrase, just narrower.
-    const wide = line(cat({ workflows: rows }), 80);
-    expect(wide).toContain("needs approval");
-    expect(wide.startsWith("◇ workflows  ")).toBe(true);
-    // 60 cols (below the names tier): counts only, and it still says the number
-    // and what needs a person.
-    const narrow = line(cat({ workflows: rows }), 60);
-    expect(narrow).toBe("◇ 4 workflows · 1 needs approval · 1 invalid · /workflow");
-    expect(cellWidth(narrow)).toBeLessThanOrEqual(60);
-    // Narrower than that: the counts stay, the `/workflow` hint is what goes.
-    const tiny = line(cat({ workflows: rows }), 45);
-    expect(tiny).toBe("◇ 4 workflows · 1 needs approval · 1 invalid");
-    expect(cellWidth(tiny)).toBeLessThanOrEqual(45);
-    // Nothing is a cut name: every painted entry is a whole row's name+version.
-    for (const w of [120, 100, 99, 80, 60]) {
-      const text = line(cat({ workflows: rows }), w);
-      expect(cellWidth(text)).toBeLessThanOrEqual(w);
-    }
-  });
-
-  test("+k is exact at the boundary: as many rows as fit, the rest counted", () => {
-    const many = Array.from({ length: 9 }, (_, i) =>
-      def({ name: `wf-${i}`, version: 1, approved: false }),
-    );
-    const text = line(cat({ workflows: many }), 120);
-    // The count of what is NOT shown is on the line, and it adds up.
-    const m = /\+(\d+)/.exec(text);
-    expect(m).not.toBeNull();
-    const shown = text.split(" · ").length - 1;
-    expect(shown + Number(m?.[1] ?? "0")).toBe(9);
-    expect(text).toContain("needs approval");
-    expect(cellWidth(text)).toBeLessThanOrEqual(120);
-  });
-
-  test("nothing to say → null: no answer, an older daemon, no workflows at all", () => {
-    expect(catalogueLine(undefined, 120)).toBeNull();
-    expect(catalogueLine({ unsupported: true }, 120)).toBeNull();
-    expect(
-      catalogueLine(cat({ unavailable: "workflows only on a laptop session" }), 120),
-    ).toBeNull();
-    // An empty project carries NO permanent hint (D8).
-    expect(catalogueLine(cat(), 120)).toBeNull();
-  });
-
-  test("git-ignored says `not versioned` on the widest tier only", () => {
-    const c = cat({ workflows: [def({ name: "task", approved: true })], gitIgnored: true });
-    expect(line(c, 120)).toContain("not versioned");
-    // 80 cols: the fact moves to the panel's full sentence, not the line.
-    expect(line(c, 80)).not.toContain("not versioned");
-    // Approved-only, no risk: `not versioned` is a fact about the folder.
-    expect(line(cat({ workflows: [def()] }), 120)).not.toContain("not versioned");
-  });
-
-  test("the elsewhere hint: one dim line, `~`-shortened, only when files live above", () => {
-    const hint = cat({
-      dir: "/home/me/deep/.tentacle/workflows",
-      elsewhere: { dir: "/home/me/tentacle/.tentacle/workflows", count: 3 },
-    });
-    expect(elsewhereLine(hint, 120, "/home/me")).toBe(
-      "◇ no workflows here — ~/tentacle/.tentacle/workflows has 3 (start tentacle in ~/tentacle)",
-    );
-    // A folder WITH a workflow never gets it; neither does one with no hint.
-    expect(
-      elsewhereLine(cat({ workflows: [def()], elsewhere: hint.elsewhere }), 120, "/x"),
-    ).toBeNull();
-    expect(elsewhereLine(cat(), 120, "/x")).toBeNull();
-    expect(elsewhereLine(undefined, 120, "/x")).toBeNull();
-    expect(elsewhereLine({ unsupported: true }, 120, "/x")).toBeNull();
-    // Long path, narrow terminal: cut in cells, never wrapped.
-    const long = elsewhereLine(
-      cat({
-        elsewhere: { dir: "/home/me/very/deeply/nested/project/.tentacle/workflows", count: 12 },
-      }),
-      40,
-      "/home/me",
-    );
-    expect(cellWidth(long ?? "")).toBeLessThanOrEqual(40);
-  });
-
-  test("the mounted line: null while a run is in flight, behind a panel, or too short", () => {
-    const c = cat({ workflows: [def({ name: "task", approved: true })] });
-    const grant = {
-      slotTaken: false,
-      runActive: false,
-      termRows: 40,
-      runningRows: 0,
-      inputBoxRows: 3,
-    };
-    expect(workflowsLine(c, 120, "/h", grant)?.text).toBe(line(c, 120));
-    expect(workflowsLine(c, 120, "/h", { ...grant, runActive: true })).toBeNull();
-    expect(workflowsLine(c, 120, "/h", { ...grant, slotTaken: true })).toBeNull();
-    // A terminal with no room beside the transcript's floor: the line is what yields.
-    expect(workflowsLine(c, 120, "/h", { ...grant, termRows: 8 })).toBeNull();
-    // The elsewhere hint is dim (a fact about another folder), the summary is not.
-    const hint = cat({ elsewhere: { dir: "/h2/.tentacle/workflows", count: 2 } });
-    expect(workflowsLine(hint, 120, "/h", grant)?.tone).toBe("dim");
-    expect(workflowsLine(c, 120, "/h", grant)?.tone).toBe("subtle");
-    expect(catalogueRows(null)).toBe(0);
-    expect(catalogueRows(workflowsLine(c, 120, "/h", grant))).toBe(1);
   });
 
   test("startCommandFor: start with the hash, prefill a required input, refuse an invalid file", () => {

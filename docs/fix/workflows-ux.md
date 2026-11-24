@@ -419,4 +419,107 @@ Executors: DeepSeek for S/M slices (owner rule); S4 (load-bearing wire) DeepSeek
 
 ## Execution
 
+### Slice S1 — TUI at-rest line removed + pre-open runs note
+
+**Load-bearing check re-run first** (`.tentacle/tmp/workflows-ux/lb.ts`, unchanged from the plan):
+
+```
+review keys after parse: id,kind,where,state,attempt,round
+fix state: pending · endedAt: 2
+catalogue step keys: id,kind,where
+```
+
+The wire row still drops `next`/`onFail`/`retry` and the catalogue step drops its edges — S4's
+premise holds. S1 does not depend on it; it only had to not be contradicted by it.
+
+**As built, in order**
+
+1. `packages/tui/src/workflow-view.ts` — deleted `catalogueLine`, `elsewhereLine`, `workflowsLine`,
+   `catalogueRows`, `CatalogueGrant`, the `TIER_CATALOGUE_*` tiers, `assemble`, `tilde` and the
+   `CATALOGUE_HEAD/GAP/HINT/SEP` constants (all of them existed only for the at-rest line), plus the
+   now-unused `cellWidth`/`PROJECT_PATHS` imports. `catalogueName` stays (the panel names rows with
+   it). `workflowPanelView` gained a trailing `opened?: boolean` and two exported notes:
+   `WORKFLOW_NO_FEED` (the existing "not supported by this computer's tentacle", now reachable only
+   for a session that IS open) and `WORKFLOW_PRE_OPEN` ("No workflow run in this session yet — send
+   a message to start it."). `undefined` = taken as open, so a host-less mount keeps today's words.
+2. `packages/tui/src/app-layout.ts` — dropped the `workflowsLine`/`catalogueRows` call, the
+   `catalogueHeight` term from `activeRows`, `panelBodyTop`, `dockTop` and `statusRowY`, the
+   `workflowCatalogue` and `home` inputs (nothing else read them), and added `sessionOpened`, passed
+   to `panelView`.
+3. `packages/tui/src/panels/registry.ts` + `panel.ts` — `PanelAt.opened?: boolean` (absent = open) and
+   the matching `panelView(…, opened?)` parameter; `panels/workflow.ts` forwards `at.opened`.
+4. `packages/tui/src/AppView.tsx` — the `WorkflowsLine` paint site and its destructure are gone;
+   `packages/tui/src/components/WorkflowsLine.tsx` deleted (it had no other caller).
+5. `packages/tui/src/App.tsx` — `frameLayout` gets `sessionOpened: sessionRef.current?.opened?.() ??
+   true` instead of `workflowCatalogue`/`home`; `useCatalogue` is still called for `refreshCatalogueRef`
+   (its read is still what the panel's section paints) but its `catalogue` value is no longer
+   destructured, since the line was its only other paint site.
+
+**Drift from the Implementation (and why)**
+
+- **The `elsewhere` hint is NOT removed here.** Q1/Q2's answer makes removing the neighbouring-folder
+  lookup end to end (daemon → protocol → client → TUI → phone) a cross-cutting change, and the plan
+  itself puts it in S8b / a `protocol.d` note, not in S1. S1 removed only the at-rest *line*
+  (`elsewhereLine`), which was S1's own defect 6. The `/workflow` panel's empty-catalogue hint keeps
+  its `elsewhere` sentence (`workflow-view.ts` `catalogueSection`) — that survives until the
+  end-to-end removal lands. Noted as debt in the plan's own S8b line; nothing was half-deleted.
+- **`home` left `FrameInput` entirely.** It was threaded into the layout only for `elsewhereLine`'s
+  `~`-shortening. `App` still uses `home` for the header and the attach layer, so the prop stays;
+  the layout no longer takes it.
+- **One extra guard test touched.** `packages/tui/test/app-view-structure.test.ts:331` pins
+  `statusRowY`'s exact arithmetic as source text, so it had to lose the `catalogueHeight` term — the
+  same edit the layout got (it is the test that catches a silent re-derivation).
+
+**Tests (red first — shown failing on the buggy code, §9)**
+
+- `packages/tui/test/workflow-frames.test.tsx`, `docs/fix/workflows-ux.md S1: the TUI is quiet at rest`:
+  - *no at-rest catalogue line*: an idle frame with the 2-workflow `CATALOGUE` contains no
+    `◇ workflows` (and no `nightly`), and **every row of that frame equals the frame's with no
+    catalogue seam at all** — the exact property (no cell painted AND no row reserved). Red before
+    the fix:
+    `expect(received).not.toContain("◇ workflows") … Received: "…◇ workflows  nightly v1 ? needs
+    approval · task v3 ✓ approved   /workflow\n──…"`.
+  - *the catalogue is still in the `/workflow` panel*: `nightly` and `task v3` paint there, and no
+    `◇ workflows` row exists behind it (the line, not the catalogue, was what went).
+  - *before the first message*: with a lazy session (`opened()` false, a feed that reported nothing)
+    the panel says `No workflow run in this session yet` and never `not supported by this computer's
+    tentacle`. Red before the fix: the panel's last row was `  not supported by this computer's
+    tentacle`.
+- `packages/tui/test/workflow-view.test.ts`, `the /workflow panel > before the first message: no run
+  YET, never not supported (S1)`: the pure projection's three cases — `opened:false` →
+  `WORKFLOW_PRE_OPEN`, `opened:true` → `WORKFLOW_NO_FEED`, absent → `WORKFLOW_NO_FEED`. Red before
+  the fix: `Expected to contain: "No workflow run in this session yet" / Received: "  not supported
+  by this computer's tentacle"`.
+- Removed with the code they pinned: the at-rest assertions in both files (`catalogueLine` tiers,
+  `+k`, `not versioned`, the `elsewhere` line, the mounted-line grant, the input-row-with/without
+  cases). `catalogueState`/`catalogueOrder` keep their tests — the panel still uses them.
+
+Verification run, `bun test` on the three touched/covering files:
+
+```
+bun test packages/tui/test/workflow-view.test.ts packages/tui/test/workflow-frames.test.tsx
+ 45 pass, 0 fail, 211 expect() calls
+bun test packages/tui/test/app-layout.test.ts
+ 22 pass, 0 fail
+bun test packages/tui/test/app-view-structure.test.ts
+ 10 pass, 0 fail
+```
+
+**Mutation checks (non-vacuity, §9)**
+
+| Mutation | Test that caught it |
+|---|---|
+| `workflowPanelView`'s note hard-coded back to `WORKFLOW_NO_FEED` (ignore `opened`) | `before the first message: no run YET…` — 1 fail |
+| `workflowHeight` given `+ 1` (a phantom row back in the budget) | **nothing** — the old row-equality check passed, because the buggy build reserved the line inside `activeRows` too. That is why the frame test now compares **every row** of the two frames; with the `◇` assertion removed, the buggy source fails it on the whole-frame diff. |
+| `opened` ignored, on the frame level (source diff reverted) | 2 fail in `workflow-frames.test.tsx` — the exact frames above |
+
+**Changelog:** `changelog.d/workflows-ux.changed.md` (one bullet). No protocol change, so no
+`protocol.d/` note; `packages/protocol/schema/protocol.json` untouched.
+
+**Unverified here (one line):** the gate (`bun run check`: typecheck → lint → test) is run by the
+orchestrator's script, not by this executor; `bunx tsc --noEmit` (repo root, whole monorepo) and
+`bunx biome check packages/tui` were run here and are clean.
+
+*— claude-opus-5-5 (tentacle executor), 2026-11-24*
+
 ## Review

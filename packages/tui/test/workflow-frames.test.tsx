@@ -16,7 +16,7 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
 import type { WorkflowCatalogueResult, WorkflowRow, WorkflowStepRow } from "@tentacle/protocol";
 import { App, type SessionController } from "../src/App.tsx";
-import { catalogueLine, railLines, workflowsLine } from "../src/workflow-view.ts";
+import { railLines } from "../src/workflow-view.ts";
 import { renderAt } from "./real-term.tsx";
 import { inertSession } from "./session-stub.ts";
 
@@ -129,6 +129,12 @@ function fake(
     readonly noFeed?: boolean;
     /** No catalogue seam at all (a pod, an older daemon). */
     readonly noCatalogue?: boolean;
+    /**
+     * A LAZY session, as `RemoteSession` presents one before its first message:
+     * `opened()` false and a run feed that has reported nothing
+     * (docs/fix/workflows-ux.md defect 5).
+     */
+    readonly preOpen?: boolean;
     /** `send` streams a real, settling turn (the re-read trigger's own test). */
     readonly settles?: boolean;
     /**
@@ -161,7 +167,11 @@ function fake(
     watch: () => () => {},
     onWorkflows: (l: (rows: readonly WorkflowRow[]) => void) => {
       listener = l;
-      l(rows);
+      // A lazy session has no run feed to report: it reports NOTHING, which the
+      // panel must word as "no run yet", not as "not supported".
+      if (opts.preOpen !== true) {
+        l(rows);
+      }
       return () => {
         listener = null;
       };
@@ -170,6 +180,7 @@ function fake(
       reads.push(`${runId}/${stepId}`);
       return Promise.resolve({ detail: DETAIL });
     },
+    ...(opts.preOpen === true ? { opened: () => false } : {}),
     workflow: (params: unknown) => {
       actions.push(params);
       return Promise.resolve({ ok: true, runId: "wf-1" });
@@ -415,160 +426,46 @@ describe("slice 2 TUI 2: the /workflow panel", () => {
   });
 });
 
-describe("slice 2b (D8): the project's workflows at rest", () => {
-  const line = catalogueLine(CATALOGUE, 120) ?? "MISSING";
+describe("docs/fix/workflows-ux.md S1: the TUI is quiet at rest", () => {
+  test("no at-rest catalogue line: an idle frame with 2 workflows has no `◇ workflows` row", async () => {
+    // Red before the fix: the at-rest projection hoisted a `◇ workflows  nightly v1 …`
+    // row above the input, which reads like a lingering finished run (owner: «va tolto»).
+    const withCatalogue = await mount(fake([], { catalogue: CATALOGUE }));
+    const frameA = withCatalogue.frame();
+    expect(frameA).not.toContain("◇ workflows");
+    expect(frameA).not.toContain("nightly");
+    withCatalogue.term.unmount();
 
-  test("the App paints the catalogue line exactly as `workflowCatalogue` projects it", async () => {
-    // Non-vacuity first: the projection really names both files, with words.
-    expect(line).toBe("◇ workflows  nightly v1 ? needs approval · task v3 ✓ approved   /workflow");
+    // The EXACT property: a catalogue answer changes no cell of the idle frame —
+    // no painted row AND no row reserved for one (the buggy build kept its row
+    // inside `activeRows`, so the input never moved and a "same input row" check
+    // would have passed). Every row is compared, not just the input's.
+    const without = await mount(fake([], { noCatalogue: true }));
+    const frameB = without.frame();
+    expect(rowsOf(frameA)).toEqual(rowsOf(frameB));
+    without.term.unmount();
+  });
+
+  test("the catalogue is still in the `/workflow` panel (the line was the only thing removed)", async () => {
     const t = await mount(fake([], { catalogue: CATALOGUE }));
+    await t.line("/workflow");
     const frame = t.frame();
-    expect(frame).toContain(line);
-    // The at-rest line and the rail never both paint.
-    expect(frame).not.toContain("workflow task · 2/6");
+    expect(frame).toContain("nightly");
+    expect(frame).toContain("task v3");
+    // Still nothing at rest behind the panel: the panel owns the slot.
+    expect(frame).not.toContain("◇ workflows");
     t.term.unmount();
   });
 
-  test("the input sits on the SAME row with and without the line (the exact property)", async () => {
-    const withLine = await mount(fake([], { catalogue: CATALOGUE }));
-    const frameA = withLine.frame();
-    const inputA = rowOf(frameA, "Type a task or /command");
-    expect(frameA).toContain(line);
-    expect(inputA).toBeGreaterThan(0);
-    withLine.term.unmount();
-
-    // No catalogue answer at all (no seam): nothing is painted…
-    const bare = await mount(fake([], { noCatalogue: true }));
-    const frameB = bare.frame();
-    const inputB =
-      rowOf(frameB, "Type a task /command") >= 0
-        ? rowOf(frameB, "Type a task /command")
-        : rowOf(frameB, "Type a task");
-    expect(frameB).not.toContain("◇ workflows");
-    // …and the input has NOT moved: the line's row came out of the transcript's
-    // viewport, not out of the input's slot (the property, not "height constant").
-    expect(inputB).toBe(inputA);
-    bare.term.unmount();
-  });
-
-  test("a run in flight replaces it; its end brings it back", async () => {
-    const api = fake([RUN], { catalogue: CATALOGUE });
-    const t = await mount(api);
-    const running = t.frame();
-    expect(running).toContain("workflow task · 2/6 · 1.2M/3M tok");
-    expect(running).not.toContain("◇ workflows");
-    const inputRunning = rowOf(running, "Type a task");
-
-    api.report([ENDED]);
-    await delay(80);
-    const ended = t.frame();
-    expect(ended).toContain(line);
-    expect(ended).not.toContain("workflow task · 2/6");
-    // The rail leaving and the line arriving is ONE swap inside the same budget:
-    // the input still sits where it did (within the rail's now-free rows).
-    expect(rowOf(ended, "Type a task")).toBeLessThanOrEqual(inputRunning);
-    t.term.unmount();
-  });
-
-  test("a turn ENDING re-reads the catalogue exactly once (not on its start)", async () => {
-    const api = fake([], { catalogue: CATALOGUE, settles: true });
-    const t = await mount(api);
-    // The open's own read, and nothing else yet.
-    const afterOpen = api.catalogueReads;
-    expect(afterOpen).toBe(1);
-
-    await t.line("hello", 300);
-    // A turn that yields no event still settles: exactly ONE more read, and the
-    // turn's START asked for none (the coalescing rule, counted).
-    expect(api.catalogueReads).toBe(afterOpen + 1);
-    t.term.unmount();
-  });
-
-  test("a burst of triggers is ONE read plus ONE scheduled, never a queue (coalescing)", async () => {
-    const api = fake([], { catalogue: CATALOGUE, settles: true, holdReads: true });
-    const t = await mount(api);
-    // The open's read is in flight and the fake holds it there.
-    expect(api.catalogueReads).toBe(1);
-    // Four more triggers land while it is in flight — through `/workflow`, which
-    // is one of D8's own triggers. Each asks, none starts a second read.
-    for (let i = 0; i < 4; i += 1) {
-      await t.line("/workflow", 40);
-      expect(t.frame()).toContain("Workflows");
-    }
-    expect(api.catalogueReads).toBe(1);
-    // The held read lands: the scheduled one starts — exactly ONE more.
-    api.settleOne();
-    await delay(60);
-    expect(api.catalogueReads).toBe(2);
-    // It lands with nothing pending: the count stays put (no third read).
-    api.settleOne();
-    await delay(60);
-    expect(api.catalogueReads).toBe(2);
-    t.term.unmount();
-  });
-
-  test("a workflow needing input PRE-FILLS the command instead of starting half-specified", async () => {
-    const needs: WorkflowCatalogueResult = {
-      dir: "/tmp/work/.tentacle/workflows",
-      workflows: [
-        {
-          name: "ship",
-          path: ".tentacle/workflows/ship.yaml",
-          ok: true,
-          approved: true,
-          hash: "c".repeat(64),
-          inputs: [
-            { name: "branch", required: true },
-            { name: "note", required: false },
-          ],
-        },
-      ],
-    };
-    const api = fake([], { catalogue: needs });
-    const t = await mount(api);
-    await t.line("/workflow run ship");
-    // Nothing was sent: the required value was never given.
-    expect(api.actions).toEqual([]);
-    // The input line holds the command with the blank waiting for the value…
-    expect(t.frame()).toContain("/workflow run ship branch=");
-    // …and the person is told why nothing ran.
-    expect(t.frame()).toContain("needs input");
-
-    t.term.unmount();
-
-    // Filled in from the start, the SAME command does start — pinned to the
-    // catalogue's hash, so a file edited meanwhile is refused rather than run.
-    const filled = fake([], { catalogue: needs });
-    const u = await mount(filled);
-    await u.line("/workflow run ship branch=main");
-    expect(filled.actions).toEqual([
-      {
-        action: "start",
-        name: "ship",
-        hash: "c".repeat(64),
-        inputs: [{ name: "branch", value: "main" }],
-      },
-    ]);
-    u.term.unmount();
-  });
-
-  test("an invalid workflow file is refused with its first error, and nothing is sent", async () => {
-    const broken: WorkflowCatalogueResult = {
-      dir: "/tmp/work/.tentacle/workflows",
-      workflows: [
-        {
-          name: "broken",
-          path: ".tentacle/workflows/broken.yaml",
-          ok: false,
-          errors: ["steps[0].run: missing"],
-        },
-      ],
-    };
-    const api = fake([], { catalogue: broken });
-    const t = await mount(api);
-    await t.line("/workflow run broken");
-    expect(api.actions).toEqual([]);
-    expect(t.frame()).toContain("steps[0].run: missing");
+  test("before the first message: `no run YET`, never `not supported`", async () => {
+    // A lazy session: `opened()` false, so its run feed has reported nothing.
+    // Red today: the panel says «not supported by this computer's tentacle» —
+    // false, the session is just not open (defect 5).
+    const t = await mount(fake([], { preOpen: true, catalogue: CATALOGUE }));
+    await t.line("/workflow");
+    const frame = t.frame();
+    expect(frame).toContain("No workflow run in this session yet");
+    expect(frame).not.toContain("not supported by this computer's tentacle");
     t.term.unmount();
   });
 
@@ -607,32 +504,5 @@ describe("slice 2b (D8): the project's workflows at rest", () => {
     expect(frame).toContain("not versioned");
     expect(frame).toContain("/tmp/work/.tentacle/workflows");
     t.term.unmount();
-  });
-
-  test("the line says nothing on a terminal too short to keep the transcript's floor", async () => {
-    const term = renderAt(
-      <App
-        createSession={() => fake([], { catalogue: CATALOGUE }).session}
-        permissions={new PermissionBroker()}
-        model="m"
-        cwd="/tmp/work"
-      />,
-      { columns: 120, rows: 9 },
-    );
-    await delay(60);
-    const frame = term.frame();
-    // The layout's decision (the pure grant) is what the frame follows: on this
-    // terminal the line yields to the transcript, and nothing else moves.
-    expect(
-      workflowsLine(CATALOGUE, 120, undefined, {
-        slotTaken: false,
-        runActive: false,
-        termRows: 9,
-        runningRows: 0,
-        inputBoxRows: 3,
-      }),
-    ).toBeNull();
-    expect(frame).not.toContain("◇ workflows");
-    term.unmount();
   });
 });

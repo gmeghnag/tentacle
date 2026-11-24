@@ -1,0 +1,1 @@
+- **TUI: quieter at rest, honest before the first message.** The `◇ workflows …` line above the input is gone — the project's workflow files now appear only in the `/workflow` panel — and before a session's first message that panel says "no workflow run in this session yet" instead of claiming the computer does not support workflows.
