@@ -126,3 +126,16 @@ describe("link machine (pure)", () => {
     ).toEqual({ kind: "dead" });
   });
 });
+
+describe("linkResumed (fix/mobile-connect-latency — T4)", () => {
+  test("up/dialing/stopped produce null, backoff with attempt 5 produces attempt 0 and dialInMs 0", () => {
+    const { linkResumed } = require("../src/link-machine.ts") as typeof import("../src/link-machine.ts");
+    expect(linkResumed({ kind: "up", attempt: 0, upSince: 1_000 })).toBeNull();
+    expect(linkResumed({ kind: "dialing", attempt: 3, upSince: 0 })).toBeNull();
+    expect(linkResumed({ kind: "stopped", attempt: 0, upSince: 0, reason: "unauthorized" })).toBeNull();
+    const step = linkResumed({ kind: "backoff", attempt: 5, upSince: 0 })!;
+    expect(step.state).toMatchObject({ kind: "backoff", attempt: 0 });
+    expect(step.dialInMs).toBe(0);
+    expect(step.status).toMatchObject({ state: "reconnecting", attempt: 0 });
+  });
+});

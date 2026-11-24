@@ -1132,6 +1132,12 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
    */
   let resyncOnUp = false;
 
+  function retryOnUp(status: SessionScreenState["status"]): boolean {
+    if (status.phase !== "failed") return false;
+    const f = status.failure ?? "link";
+    return f === "link" || f === "timeout" || f === "gone";
+  }
+
   /** The footer slot NOW (`compact-slot.ts` decides; the clock is the screen's). */
   function slot(): SlotView | null {
     return slotView({
@@ -1781,10 +1787,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     link(up) {
       feed.link(up);
       if (up && compose !== null && !disposed && status.phase === "open") {
-        // 13b's design: an outbox run happens at `up` (its `decide` reads the
-        // re-synced facts). Only the attach ran it, so an item written offline on
-        // this OPEN screen waited for a reopen (fix/mobile-e2e-reds, flow 17).
         void compose.runOutbox();
+      }
+      if (up && retryOnUp(status)) {
+        if (!disposed && !refreshing && !attaching) {
+          void attach(false);
+        }
+        return;
       }
       if (!up || !resyncOnUp) {
         return;
@@ -2132,27 +2141,43 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       }
       const before = transcript.rows.length;
       try {
-        // The owner's own recovery: leave, then re-attach. `attach` is the ONE
-        // path in (AGENTS §7), so a resync cannot diverge from a first mount.
-        await deps.controller.leave(deps.sessionId);
-        handle = null;
-        if (disposed) {
-          return;
+        let attachError: unknown;
+        try {
+          await attach(false);
+        } catch (error) {
+          attachError = error;
         }
-        await attach(false);
-        if (status.phase !== "open") {
-          // Offline / archived / gone: the re-attach failed typed. The rows are
-          // KEPT (never an empty transcript) and the failure is honest — the
-          // banner already shows its reason, so this only says why nothing moved.
-          notice = RESYNC_FAILED_NOTICE;
-          deps.trace?.({ kind: "resync", state: "failed" });
-        } else if (transcript.rows.length === before && before > 0) {
-          // The daemon answered with exactly what is shown: worth saying only
-          // when there was something to compare, so a fresh empty session is quiet.
-          notice = null;
-          deps.trace?.({ kind: "resync", state: "kept" });
+        if (attachError !== undefined) {
+          await deps.controller.leave(deps.sessionId);
+          handle = null;
+          if (disposed) {
+            return;
+          }
+          await attach(false);
         } else {
-          deps.trace?.({ kind: "resync", state: "done" });
+          try {
+            // Attach first, leave only after it succeeds: if the session's entry
+            // is `closing` the daemon rejects `session/open` with `gone`, so a
+            // leave-then-open loses the session until the next reopen. Keeping
+            // the old handle until the new attach succeeds preserves the rows.
+            await deps.controller.leave(deps.sessionId);
+            handle = null;
+            if (disposed) {
+              return;
+            }
+            // Already attached above; no second attach needed.
+          } catch {
+            // Leave failure does not invalidate the new attach.
+          }
+          if (status.phase !== "open") {
+            notice = RESYNC_FAILED_NOTICE;
+            deps.trace?.({ kind: "resync", state: "failed" });
+          } else if (transcript.rows.length === before && before > 0) {
+            notice = null;
+            deps.trace?.({ kind: "resync", state: "kept" });
+          } else {
+            deps.trace?.({ kind: "resync", state: "done" });
+          }
         }
       } finally {
         refreshing = false;

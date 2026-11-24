@@ -608,11 +608,12 @@ const LINKS = createLinkRegistry<ComputerLink>({
       random: phoneRandom,
       diagnosis: diagnoserFor(id),
       log: APP_LOG,
+      store: { setLastAddress: (cid, addr) => KEYCHAIN_STORE.setLastAddress(cid, addr) },
     });
     // A link dialled while the app is already in the background starts held:
     // iOS would suspend it anyway, and a socket opened now would be a ghost
     // attachment for the daemon (docs/feat/mobile-session-view.md 12a.4).
-    if (AppState.currentState !== "active") {
+    if (AppState.currentState === "background") {
       link.suspend();
     }
     LIVE_LINKS.add(link);
@@ -2253,11 +2254,8 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
       for (const link of LIVE_LINKS) {
-        if (state === "active") {
-          link.resume();
-        } else {
-          link.suspend();
-        }
+        if (state === "active") link.resume();
+        else if (state === "background") link.suspend();
       }
     });
     return () => subscription.remove();

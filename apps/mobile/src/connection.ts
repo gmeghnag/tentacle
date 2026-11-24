@@ -85,6 +85,7 @@ export interface OpenComputerDeps {
    */
   readonly diagnosis?: LinkDiagnoser;
   readonly onError?: (error: Error) => void;
+  readonly store?: Pick<import("./computer-store.ts").ComputerStore, "setLastAddress">;
   /**
    * Where the socket diagnostics go (docs/feat/mobile-lock.md D7). Omitted = a
    * module-private ring, so a link built without one still has a log and no call
@@ -285,9 +286,20 @@ export async function openComputer(
     closeCodes.set(url, code);
   });
   const factoryDeps: ChannelFactoryDeps = { WebSocket: Ctor };
-  const memory: DialMemory = { lastGood: undefined };
+  const memory: DialMemory = {
+    lastGood: (() => {
+      const idx = computer.addresses.indexOf(computer.lastAddress ?? "");
+      return idx >= 0 ? idx : undefined;
+    })(),
+  };
   const diagnosis = deps.diagnosis ?? createLinkDiagnoser();
   let current = computer.addresses[0] ?? "";
+  const dialStarted = Date.now();
+  const logOnce = (kind: string, fields: Record<string, number | boolean | string>): void => {
+    try {
+      log.log("info", kind as never, fields);
+    } catch {}
+  };
 
   /**
    * One address, in the two steps R6's race needs: OPEN the raw socket (that,
@@ -353,7 +365,13 @@ export async function openComputer(
    */
   const dial = async (): Promise<DuplexChannel> => {
     const channel = await firstAnswering(computer.addresses, steps, memory);
+    logOnce("dial", { ms: Date.now() - dialStarted, ok: true });
     diagnosis.ok();
+    if (deps.store !== undefined) {
+      const winner =
+        memory.lastGood !== undefined ? computer.addresses[memory.lastGood] : undefined;
+      if (winner !== undefined) void deps.store.setLastAddress(computer.id, winner);
+    }
     return channel;
   };
 
@@ -396,7 +414,9 @@ export async function openComputer(
     },
   });
   try {
+    const t0 = Date.now();
     const init = await client.initialize();
+    logOnce("dial", { ms: Date.now() - t0, ok: true });
     return {
       client,
       permissions: broker,
@@ -405,7 +425,11 @@ export async function openComputer(
       diagnosis,
       address: () => current,
       suspend: () => gate.suspend(),
-      resume: () => gate.resume(),
+      resume: () => {
+        const was = gate.isSuspended;
+        gate.resume();
+        if (was) client.redialNow();
+      },
       hold: (ms: number) => gate.hold(ms),
       // DETACH, never close (12a.2; see `leaveComputer`).
       close: () => leaveComputer(client),

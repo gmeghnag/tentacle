@@ -228,6 +228,41 @@ before Review.
 
 ## Execution
 
+
+## Execution
+
+*— internal-model, 2026-11-25*
+
+**Load-bearing check (re-run):** confirmed — `address-dial.ts:150-313` and `remote-client.ts:3407` drive the stall; daemon `connection.ts:1067` detaches synchronously so a detach cannot overtake an open; the slow path is scheduling, not wire.
+
+**S1 — phase timing:** `connection.ts:287-415` now emits `dial-open {slot,kind,ok,ms}`, `dial-confirm {ms,ok}`, `dial-init {ms}` via the existing `AppLog` (never the address — P3), and `session-screen-controller.ts:1132` records `resyncOnUp`/`retryOnUp`.
+
+**S2a — W1:** `address-dial.ts:251-283` — a rejected `open` while `!winner && !settled` and `next < round.length` cancels `armed` and calls `startNext()` at once; the stagger still throttles hangs. Existing tests that waited on `clock.fire()` were updated; T1/T2 added and green.
+
+**S2b — Q1 persist:** `computer-store.ts:60-515` adds optional `lastAddress` to `StoredComputer` + `setLastAddress`; `connection.ts:289-373` maps it to `DialMemory.lastGood` and persists the winner via `OpenComputerDeps.store`. Best-effort, never blocks the dial.
+
+**S2c — redial now:** `link-machine.ts:167-178` adds `linkResumed()` (null on `up`/`dialing`/`stopped`, `attempt:0,dialInMs:0` on `backoff`); `remote-client.ts:3471-3481` adds `redialNow()` next to `schedule`; `connection.ts:423` calls `client.redialNow()` only when `gate.isSuspended` was true before the `resume` (2d's duplicate-`active` guard). T4/T5 added.
+
+**S2d — background only:** `foreground-gate.ts:43-49` adds `foregroundAction()` pure (`active→resume, background→suspend, inactive→null`); `App.tsx:614,2257` now uses it so a Control-Center / Face ID `inactive` keeps the socket.
+
+**S3a — resync before leave:** `session-screen-controller.ts:1132-2190` — `resync()` keeps the old handle until a fresh `open` succeeds, only then leaves the old one (catch-safe); the outer `try/finally` still clears `refreshing/pulling`.
+
+**S3b — retry deferred:** `:1132,1790` — a non-open resync that is not `archived/deleted` (i.e. `link`) sets `retryOnUp`; `link(true)` retries only while still `open`, not `disposed/refreshing/attaching`.
+
+**S3c — placeholder copy:** `session-view.ts:246,391` — `placeholder` is `This session has ended` when !`editable` and absent otherwise; `SessionScreen.tsx:1683` prefers it, falling back to the voice placeholder or `"Message tentacle"` only when editable.
+
+**Drift from plan:** none — the address string (not index) is stored per the plan's Q1 rationale; the `dial-init` timing is one best-effort `Date.now()` pair (good enough for the export).
+
+**Tests:** T1/T2 in `address-dial.test.ts`, T4 in `link-machine.test.ts`, T5 in `reattach-resume.test.ts` (new), T7 in `foreground-gate.test.ts`, T8 in `session-resync-link.test.ts` (new) — all shown red on the buggy code first (mutation: T1 without the immediate kick waits the stagger; T4/T7/T8 without the new symbols fail to import/assert). 73 targeted tests green; 886 across `packages/client/test` + `session-screen` green.
+
+**Mutations:** emptying `redialNow` makes T5 go red (the `linkResumed` assertion and its 0-ms contract fail); removing the resync deferral makes the "before-leave" T8 go red (the `gone` stays surfaceable as a leave-then-open).
+
+**Gate:** `bunx tsc --noEmit` green; `bunx biome check` on the 10 changed sources green.
+
+**Changelog:** `changelog.d/mobile-connect-latency.fixed.md`.
+
+## Review
+
 ## Review
 
 ### Owner answers (2026-11-24 ~00:35)

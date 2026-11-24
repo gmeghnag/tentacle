@@ -40,6 +40,14 @@ function superseded(): ChannelError {
   return new ChannelError("unreachable", "this dial was superseded by a newer one");
 }
 
+export type ForegroundAction = "suspend" | "resume" | null;
+
+export function foregroundAction(state: string): ForegroundAction {
+  if (state === "active") return "resume";
+  if (state === "background") return "suspend";
+  return null;
+}
+
 export interface ForegroundGate {
   /**
    * The wrapped factory: the ONE the client dials with. Rejects/behaves exactly

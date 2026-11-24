@@ -232,6 +232,8 @@ export interface ComposerView {
   readonly sendNow: boolean;
   /** The notice beside a disabled queue (photos while a turn runs): null when none. */
   readonly photosNotice: string | null;
+  /** The field's hint; absent → the default (only a branch, never presentation) (§7). */
+  readonly placeholder?: string;
 }
 
 export interface SessionView {
@@ -378,6 +380,7 @@ export function sessionView(input: SessionViewInput): SessionView {
         retry: false,
         reopen: input.status.reopenRequested !== true,
         editable: false,
+        composer: { ...composer, placeholder: "Loading…" },
       };
     }
     return {
@@ -387,6 +390,7 @@ export function sessionView(input: SessionViewInput): SessionView {
       retry: false,
       reopen: false,
       editable: false,
+      composer: { ...composer, placeholder: "Loading…" },
     };
   }
   if (input.status.phase === "failed") {
@@ -401,6 +405,10 @@ export function sessionView(input: SessionViewInput): SessionView {
       // that just failed (that is what the failure text is for).
       reopen: failure === "archived" && input.status.reopenRequested !== true,
       editable: false,
+      composer: {
+        ...composer,
+        placeholder: retry ? "Not connected — tap Retry" : "Session closed",
+      },
     };
   }
   if (input.ended !== null) {
@@ -411,6 +419,7 @@ export function sessionView(input: SessionViewInput): SessionView {
       retry: false,
       reopen: false,
       editable: false,
+      composer: { ...composer, placeholder: "This session has ended" },
     };
   }
   if (input.link === "down") {

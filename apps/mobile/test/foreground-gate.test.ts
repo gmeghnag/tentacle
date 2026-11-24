@@ -267,3 +267,12 @@ describe("hold(ms): one dial through a background task", () => {
     h.gate.resume();
   });
 });
+
+describe("foregroundAction (fix/mobile-connect-latency — T7)", () => {
+  test('inactive does nothing, background suspends, active resumes', () => {
+    const { foregroundAction } = require("../src/foreground-gate.ts") as typeof import("../src/foreground-gate.ts");
+    expect(foregroundAction("inactive")).toBeNull();
+    expect(foregroundAction("background")).toBe("suspend");
+    expect(foregroundAction("active")).toBe("resume");
+  });
+});
