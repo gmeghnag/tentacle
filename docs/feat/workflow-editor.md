@@ -1724,3 +1724,136 @@ until slice 7a maps it onto `react-native-svg`, so the on-device look (label col
 type, a 64-step scroll) is first observable there, or in the e2e flow of 7c.
 
 *— claude-opus-5-5 (executor, slice 5), 2026-11-24*
+## Execution
+
+### Slice 6 — phone editor controller (D7) — DONE
+
+**PARTIAL check re-run FIRST** — `.tentacle/tmp/workflow-editor/lb6.sh` on the branch tip `7d7a0ed8`:
+
+```
+== 1. RemoteSession.workflowSave/Source (slice 4) ==
+1388:  async workflowSource(name: string): Promise<WorkflowSourceResult | { unsupported: true }> {
+1411:  async workflowSave(
+== 2. core insertStep + draft ops (slice 2) ==
+221:export function insertStep(    254:export function setFailTarget(
+289:export function setRetry(     308:export function setGotoMax(
+327:export function setNext(      348:export function moveStep(
+368:export function duplicateStep( 388:export function renameStep(
+441:export function deleteStep(   523:export function patchStep(
+608:export function setPrompt(   641:export function draftProblems(
+652:export function nextVersion(  667:export class EditHistory
+== 3. core templates ==  133:export const WORKFLOW_TEMPLATES
+== 4. core index exports == 49/50/51: workflow-yaml, workflow-draft, workflow-templates
+== 5. the controller file already exists? ==
+ls: apps/mobile/src/workflow-edit-controller.ts: No such file or directory
+ls: apps/mobile/test/workflow-edit-controller.test.ts: No such file or directory
+== 6. changelog fragment == changelog.d/workflow-editor.added.md
+== 7. protocol == 1151 WorkflowSaveParamsSchema … 1210 WorkflowSaveResult
+```
+
+The slice's precondition — "`RemoteSession.workflowSave` and `core`'s `insertStep` exist" — holds, and the
+module this slice adds is absent as the plan expects. **Not a PARTIAL.**
+
+**What this run built** (two new files; `git status --short` shows only these two, both untracked)
+
+1. `apps/mobile/src/workflow-edit-controller.ts` — D7's state machine as VALUES, injectable session,
+   React-free. `loading → editing(reviewing) → saving → saved` plus `broken` / `unreadable` /
+   `unsupported` / `unavailable` / `ended` / `failed`. Every `@tentacle/core` edit op is a method
+   (`insert`, `rename`, `remove`, `duplicate`, `move`, `setNext`, `setFail`, `setRetry`, `setGotoMax`,
+   `patch`, `prompt`) funnelled through ONE `apply()` that records the `EditHistory` state, bumps the
+   version on the first edit of a loaded file, and recomputes the bar. `edit(fn)` is the general door
+   and returns the `DraftEdit`, so the long-press menu reads `dangling` ("N links point here") without
+   computing it twice. Four pure helpers are exported for the screens and their tests:
+   `saveOffReason`, `reconnectOutcome`, `discardText`, `savedToast`, `existsNotice`.
+2. `apps/mobile/test/workflow-edit-controller.test.ts` — 51 tests over a fake session, with the plan's
+   own cases: Save off offline / invalid / clean each with its reason; review then confirm
+   (`dryRun:false` + `baseHash`); `changed` keeping the draft; the three reconnect hash outcomes;
+   `unsupported` / `unavailable` / `unreadable`; a template create sending `mode:"create"` and its
+   prompts; discard.
+
+**One plan contradiction, found by a probe, reconciled (drift 1 below).**
+
+**Drift from the Implementation (2, both reconciled against the code).**
+
+- **An invalid on-disk file gets a `broken` screen, not an editable draft.** D7 lists `unreadable` and
+  `unsupported` and `unavailable`, and treats everything else as editable; a file that is structurally a
+  workflow but fails the validator would then be offered for edit. It cannot be saved. Probe
+  (`.tentacle/tmp/workflow-editor/s6/broken-base.ts`, run on this branch): a `replace` save over an
+  invalid file answers `changed` **forever** —
+  `{"ok":false,"refusal":"changed","reason":".tentacle/workflows/demo.yaml changed since you opened it: steps[0].run: should not be empty"}`,
+  file untouched — because the writer's base check hashes the file on disk through
+  `prepareSourceSync`, and an invalid file has no hash (`cli/src/workflow-files.ts:504-517`), so
+  `workflowSource` returns no `hash` either (probe `s6/src-invalid.ts`: `draft: true | ok: false |
+  errors: ["steps[0].run: should not be empty"] | draft.version: 3`). D3's own comment says `hash` is
+  present *iff* the file validated, so a client that ignored this would draw an editor whose Save can
+  never land. The controller therefore refuses at `land()` when `baseHash === null`, and the screen says
+  the validator's first error plus `EDIT_FIX_ELSEWHERE`. This is the same conclusion the plan reaches for
+  hand-written files one line over (`unreadable` → "fix it on the computer or ask the model"); it just
+  needed applying to the invalid-but-parsable case, which is not a bug in the plan's design so much as a
+  state it did not name. **Slices 7a–7c must draw `broken`.**
+- **`create` probes the name to borrow the picker vocabulary, and ignores the rest of the answer.** D7
+  has `create(template, name, …)` build the draft from `WORKFLOW_TEMPLATES` and says nothing about where
+  `context.{models,agentTypes}` comes from on that path. The controller calls `workflowSource(name)`
+  once (the session's own read — no second path) purely to fill `context`, then keeps the template's
+  draft whatever came back: a file that already exists is NOT adopted, and the save answers `exists`
+  (the plan's own create rule). A `create` also sends **no `baseHash`** (there is no file to pin), which
+  is the wire's own reading of the field.
+
+**Red before green (§9).** For a new module a test file can only fail on the import, which proves
+nothing, so the plan's own target is a MUTATION and each row below is a real one on the finished code.
+Backup in `.tentacle/tmp/workflow-editor/mut-s6/controller.bak`, restored with `cp` after each; the final
+md5 of the module matches the pre-mutation file (`123f3317…` → `123f3317…`), and `git status` shows no
+other change.
+
+| # | Mutation | Result |
+|---|---|---|
+| A | a `changed` refusal RESETS the draft to the baseline (**the plan's own target**) | 2 red — "`changed` KEEPS the draft", and its Keep-editing pair |
+| B | `saveOffReason` ignores the offline flag | 3 red — the offline test and both gate tests |
+| C | `reconnectOutcome` always answers `"saved"` | 3 red — the base-hash, third-hash and rule-table tests |
+| D | confirm sends no `baseHash` (the silent-overwrite hole) | 1 red — "confirm sends … with the BASE hash" |
+| E | the `broken` screen removed (an invalid file opens as editable) | 1 red — the `broken` test |
+| F | every held prompt file is carried, not only the referenced ones | **SURVIVED at first** (see below), 1 red after the fix |
+| G | `{unsupported}` answered as an editable file | 1 red — the `unsupported` test |
+| H | the version never bumps on the first edit | 1 red — "the version bumps ONCE" |
+| I | a lost save is RE-SENT on reconnect | 2 red — "nothing is re-sent" and the landed case |
+| J | an ended session is shown as editable | 1 red — the ended test |
+| K | a borrowed session is left anyway (detaches another screen) | 1 red — the leave test |
+| L | Cancel on Review confirms the write instead | 1 red — the Cancel test |
+| M | the base hash is the PREVIEW's instead of the loaded one | 1 red — the confirm test |
+
+**Mutation F survived the first pass, and the fix was a test, not code.** The prompt-carrying test
+asserted that the request carries exactly the template's prompt files — which a "carry everything held"
+implementation also satisfies, because `plan-build-review-merge` references every file it ships. The
+property D7 actually states ("the prompt files the draft carries") only differs from "everything held"
+in a draft where a step reads a file another step no longer does, so a second test switches `exec` to an
+inline prompt and asserts `prompts/exec.md` is NOT carried while `prompts/plan.md` is. F then went red.
+This is §9's non-vacuity check catching a weak test, not a drift in the code.
+
+**Evidence**
+
+- `bun test apps/mobile/test/workflow-edit-controller.test.ts`: **51 pass, 0 fail**.
+- Neighbouring workflow files together (`workflow-edit-graph`, `workflow-start-controller`,
+  `workflow-runs-controller`, `workflow-run-controller`, `bundle-node-free`): **76 pass, 0 fail** — the
+  geometry, start, runs and run controllers this one sits beside are untouched, and
+  `bundle-node-free` (the Metro gate) stays green: the module imports `@tentacle/core` values only.
+- `bunx biome check` on both new files: clean.
+- `bunx tsc -p apps/mobile --noEmit`: clean.
+- Not run here, by the orchestrator's rule: the full `bun run check` (the gate script runs it after this
+  slice, plus the root project's typecheck).
+
+**No protocol schema change**, so no `protocol.json` regeneration and no `protocol.d/` note: this slice
+only consumes `WorkflowSourceResult` / `WorkflowSaveResult` and `WorkflowSaveRequest` as slice 3a/4 left
+them (`git diff --stat packages/protocol/` is empty).
+
+**No new changelog fragment, deliberately** — same reason as slices 3b, 4 and 5:
+`changelog.d/workflow-editor.added.md` already exists on the branch with this task's one user-visible
+sentence, and the plan assigns the fragment to 7c. A second fragment for the same slug+category is the
+collision the changelog rules forbid; a controller nothing renders yet is not user-visible on its own.
+
+**Unverified, two lines.** (1) The picker vocabulary is proven against a fake only: no test drives
+`workflowSource` through a real RPC round trip, so whether a real daemon's `context.models` reaches the
+bar is first observable in 7b's step sheet. (2) The `broken` screen is this slice's reading of the
+writer's behaviour; slices 7a–7c must render it, and an e2e flow with an invalid seeded file is where it
+is first seen on a device.
+
+*— claude-opus-5-5 (executor, slice 6), 2026-11-24*
