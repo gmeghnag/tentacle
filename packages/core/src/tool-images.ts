@@ -52,7 +52,7 @@ export interface ToolImageEntry {
 
 export interface ToolImagePut {
   readonly variants: { readonly high: ToolImageVariantInput; readonly low?: ToolImageVariantInput };
-  readonly mimeType: "image/png";
+  readonly mimeType: "image/png" | "image/jpeg";
   readonly label: string;
 }
 

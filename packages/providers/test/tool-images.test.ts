@@ -520,6 +520,55 @@ describe("image_view: one ref → exactly one image part (docs/feat/image-view.m
   });
 });
 
+describe("an image FILE's ref (docs/feat/image-files.md T5)", () => {
+  // The step-0 repro kept: a JPEG is a ref like any other, and both providers
+  // send it with its OWN media type — the tool-image path needs no JPEG case.
+  const shot = (): AttachmentRef =>
+    refFor("jpeg-bytes", { name: "shot.jpg", mimeType: "image/jpeg" });
+  const messages = (a: AttachmentRef): ChatMessage[] => [
+    { role: "user", content: "what is in this screenshot?" },
+    call("c1"),
+    tool("c1", "[image shot.jpg · 40×30 · JPEG · 900 B · ref a1b2c3d4e5f6 · high only]", [a]),
+  ];
+
+  test("Anthropic: exactly ONE image block with media_type image/jpeg", async () => {
+    const body = await anthropicBody({
+      messages: messages(shot()),
+      attachments: sourceOf(["jpeg-bytes"]),
+    });
+    const [result] = toolResults(body);
+    const images = blocksOf(result).filter((b) => b.type === "image");
+    expect(images).toHaveLength(1);
+    expect((images[0]?.source as Record<string, unknown>).media_type).toBe("image/jpeg");
+    expect(imageData([images[0] as Record<string, unknown>])).toEqual([b64("jpeg-bytes")]);
+  });
+
+  test("OpenAI-compatible: exactly ONE `data:image/jpeg;base64,` part", async () => {
+    const body = await openaiBody(
+      { messages: messages(shot()), attachments: sourceOf(["jpeg-bytes"]) },
+      { images: true },
+    );
+    const parts = body.messages.flatMap((m) =>
+      Array.isArray(m.content) ? (m.content as Record<string, unknown>[]) : [],
+    );
+    const urls = parts
+      .filter((p) => p.type === "image_url")
+      .map((p) => String((p.image_url as Record<string, unknown>).url));
+    expect(urls).toEqual([`data:image/jpeg;base64,${b64("jpeg-bytes")}`]);
+  });
+
+  test("an image file over the model's cap gets the ONE shared sentence (T2)", async () => {
+    const a = refFor("too-big", { name: "shot.jpg", mimeType: "image/jpeg" });
+    const body = await anthropicBody(
+      { messages: messages(a), attachments: sourceOf(["too-big"]) },
+      { maxImageBytes: 4 },
+    );
+    expect(textOf(toolResults(body)[0])).toContain(
+      "[image omitted: 7 B is over this model's 4 B limit — shot.jpg",
+    );
+  });
+});
+
 describe("imageTokenEstimate (docs/feat/image-view.md T11)", () => {
   test("anthropic 1600, openai-compatible 3200, a positive override wins", () => {
     expect(imageTokenEstimate("anthropic")).toBe(1600);
