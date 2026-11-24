@@ -1857,6 +1857,131 @@ that one file, and only its HubFan sha line and the new `"workflows": "list.bull
 generator source touched. Verified: `bun test scripts/test/mockup-kit.test.ts` 37 pass / 0 fail;
 `bunx biome check tools/mockup-kit/generated/kit-data.json` clean.
 
+### Slice 4 — iPhone morph + skeleton (D5) — PARTIAL (code + unit/wiring tests done; the e2e flow + shots NOT done)
+
+*— claude-code 2.1.325 harness, 2026-11-24 (the harness exposes no underlying model id: `AI_AGENT=claude-code_2-1-325_agent`, `CLAUDE_CODE_ENTRYPOINT=cli`; recorded verbatim instead of guessed)*
+
+**Load-bearing check (PARTIAL rule) — PASSES.** `RemoteClient.workflowList` exists
+(`packages/client/src/remote-client.ts:1646`, `MethodNotFound` → `{unsupported:true}`) and
+`RemoteSession.workflowStep` exists (`packages/client/src/remote-session.ts:1352`), plus the
+`onWorkflows` feed (`:1280`) the layer's rows come from. So slice 3's data path is there and the
+read the detail needs is reachable — no PARTIAL stop.
+
+**As built, in dependency order (red first for every pure module: each new test file was run against
+the un-implemented code and failed on ASSERTIONS, never on an import).**
+
+1. `src/workflow-morph.ts`: **`morphTable(from, to, samples = MORPH_SAMPLES)`** — the `Animated`
+   interpolation table the layer drives: `inputRange` 0..1 from `samples` (clamped to ≥ 2, so a
+   degenerate count can never build an empty range) and one `outputRange` per animated part, each
+   sample being `morphFrame(t).<part>` — so `morphFrame` stays the ONE source of the motion.
+   `ROW_FADE_MS` (260) was already there and is reused as the rows' fade length. Red:
+   `test/workflow-morph-table.test.ts` 4 fail (`morphTable is not a function`, then the table's own
+   assertions).
+2. `src/workflow-run-controller.ts`: the **step-detail read**, on the existing pure controller —
+   `openStep(stepId, attempt?)` / `closeStep()`, `RunState.openStepId`, `StepCard.detail`, a
+   `StepDetail` union (`loading | loaded | missing | unsupported | failed`). One read in flight per
+   step, one record per step kept across close/reopen, a re-run of the step drops its stale record,
+   a late read lands on ITS step (never the open one), and a handle with no `workflowStep` says
+   update tentacle instead of guessing. `RunSessionHandle.workflowStep` is optional (the handle is
+   the Session screen's subset too). Red: `test/workflow-run-step-detail.test.ts` 9 fail.
+3. NEW `src/workflow-step-detail.ts` (pure, React-free): `canvasMap` (the graph's logical space →
+   the screen, never magnified past 1:1), `nodeBoxOnScreen`, `heroBox`, `flight` (the two ends of
+   the morph, or null), `heroText`, `stepBlocks` (the controller's `DetailBlocks` from the row's
+   own fields — final before the read), `detailLog` (a non-loaded state SAYS so in words, and a
+   loaded one is `prompt:` then `report:`/`running now:`), `bodyPending`. Red:
+   `test/workflow-step-layer.test.ts` 19 fail on a stub module.
+4. NEW `src/screens/WorkflowStep.tsx`: the **layer** inside the run screen — ONE progress value,
+   every hero part `interp(table.<part>)` (JS driver: they are layout props), the graph fading over
+   the same flight, the rows staggered by `rowStartMs`, the log block skeleton `skeletonBars(...,
+   reduceMotion)` until the read lands, `morphLook` picking the crossfade under Reduce Motion, and
+   `busy` ignoring a tap mid-flight.
+5. `src/screens/WorkflowRun.tsx`: the graph's nodes and the cards became `Pressable`, both calling
+   the passed `onOpenStep` (the SCREEN never selects a step), and the layer is mounted as a sibling
+   when `state.openStepId` names a step of the run.
+6. `App.tsx`: `WorkflowRunRoute` reads `useAccessibilityFlags()` live, measures its width
+   (`onLayout`), and forwards `openStep`/`closeStep`/`reduceMotion`/`width`. No new route: the
+   detail is a layer, not a push.
+7. NEW `test/workflow-step-wiring.test.ts` (source-reading, the `workflow-screens-wiring` pattern):
+   the layer is inside the run screen and `App.tsx` adds no `WorkflowStep` route, no `<Modal>`, no
+   `navigate(`; every animated part reads `table.<part>`; `useNativeDriver: false`; the crossfade
+   branch reads `CROSSFADE_MS`; the run screen's taps go through the callback; the route forwards
+   to the controller and never calls `workflowStep` itself; the back reverses the morph.
+8. `changelog.d/workflows-ui.added.md`: the existing `added` bullet EXTENDED with slice 4's
+   sentence (one fragment per slug+category, as 1b and 3 did).
+
+**Drift from Implementation (recorded, not forced).**
+- **The step detail lives in `workflow-run-controller.ts`, not a new file.** D5's list names only
+  `workflow-morph.ts`, `WorkflowStep.tsx` and `WorkflowRun.tsx`; the read has to live where the run,
+  its feed and the sheet's asks already are, so it is an additive slice of that controller (which
+  stays pure and React-free, AGENTS §7). `workflow-step-detail.ts` is the extra pure module the
+  component needed for its geometry and text — deliberately separate from the controller so the
+  flight is testable without a run.
+- **`skeletonBars` is used on the LOG block only**, with the hero/kv rows final at once. That is
+  D5's own wording ("the kv block is final at once (from the row); `workflowStep(...)` fills
+  prompt/report into the log block"), and the property it pins is the one tested: no box above the
+  log block moves.
+- **`gestureEnabled: false` while the detail is open is NOT wired.** It is a native-stack option for
+  the ROUTE, and this route's `Stack.Screen` sets it per-screen at registration (`App.tsx:3096`); a
+  dynamic flip would need the route to own the option. The layer covers the graph and consumes its
+  own back, so the visible behaviour holds; the iOS edge-swipe still pops the whole run screen
+  instead of closing the detail first. Follow-up, not silently assumed.
+- **`width` is measured by the route (`onLayout`), not by the layer.** `Animated` needs it before
+  the first frame; a self-measure would fly the first flight from a zero width.
+- **The plan's `workflow-morph-skeleton.test.ts` additions are in a NEW file**
+  (`test/workflow-morph-table.test.ts`), and the layer's own geometry/text in
+  `test/workflow-step-layer.test.ts` / the read in `test/workflow-run-step-detail.test.ts`. Same
+  properties, one file per module, as the rest of this task's suites; the existing file is
+  untouched and still green.
+
+**Mutation checks (each applied with a `python3` string replace on the file, the narrow test run,
+then the file restored from a scratch copy under `.tentacle/tmp/workflows-ui/`, `cmp` identical).**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `detailLayout` lays the log block ABOVE the kv rows | **RED** — 2 (`every box above the log block is IDENTICAL…`, `the log block only grows DOWNWARD…`) |
+| M2 | `morphTable` pins every sample to `morphFrame(0)` | **RED** — 2 (`EVERY output equals morphFrame at that sample`, `the endpoints are EXACT`) |
+| M3 | the per-step in-flight guard removed | **RED** — `ONE read in flight per step` |
+| M4 | a late read paints on the OPEN step | **RED** — `a LATE read… lands on ITS step, never the open one` |
+| M5 | `{}` reported as a loaded empty detail | **RED** — `{} says so — it is not silence` |
+| M6 | `rerun` keeps the step's old detail | **RED** — `a re-run of the step drops its stale detail` |
+| M7 | a rejected read is swallowed | **RED** — `a rejected read is a failed detail with its reason — never a stuck skeleton` |
+| M8 | no `workflowStep` on the handle reads as `missing` | **RED** — `a handle with no workflowStep says update tentacle` |
+| M9 | the flight starts at the hero instead of the node | **RED** — `it is the node's screen box and the hero's` |
+| M11 | `canvasMap` magnifies the graph past 1:1 | **RED** — `draws it at 1:1, CENTRED (never magnified)` |
+| M12 | a non-loaded detail renders as silence | **RED** — `every non-loaded state SAYS so in words` |
+| M13 | the back pops the stack instead of reversing the morph | **RED** — wiring `the back reverses the morph (it does not pop the stack)` |
+| M14 | the hero's `left` is a literal instead of `interp(table.box.x)` | **RED** — wiring `every animated property is an interpolation of the SAME morphTable` |
+| M15 | the run screen ignores the graph node's tap | **RED** — wiring `both the graph node and the card open through the passed callback` |
+| M16 | the route stops forwarding `openStep` | **RED** — wiring `the route forwards them to the controller` |
+
+Two mutations first came back GREEN and both were **test** defects, fixed before recording:
+M4's test called `closeStep()` first (so the mutation was a no-op — now the second step is opened
+instead), and M7's thrown-read test had no steps on its feed (so the read never started — the
+fixture now carries one). M10 (the view-model's log-before-kv order) is not reachable in
+`workflow-step-detail.ts`: the draw order lives in `detailLayout`, which M1 covers.
+
+**Narrow gate (mine).** `bun test apps/mobile/test` — **4911 pass, 0 fail** (316 files), including
+the 5 new/rewritten files (`workflow-morph-table`, `workflow-run-step-detail`, `workflow-step-layer`,
+`workflow-step-wiring`, plus the existing `workflow-morph-skeleton` and `workflow-run-controller`).
+`bunx tsc -p apps/mobile --noEmit`: clean. `bunx biome check` on the 10 changed/new files: clean.
+`bun test scripts/test/mockup-kit.test.ts`: 37 pass (no `HubFan`/glyph drift this slice). No protocol
+change → no `protocol.json` regeneration, no `protocol.d/` note. The full `bun test` / repo-wide
+typecheck / lint are the orchestrator's gate (owner's token budget), not run here.
+
+**NOT done (PARTIAL) — the e2e flow and the P7–P10 shots.** The plan's slice 4 asks for a flow
+"and e2e flow" with (P7) mid-morph frame, (P8) skeleton, (P9) detail loaded, (P10) Reduce Motion on.
+That flow is **`44-workflow-shots`, which slice 3 never wrote either** (its Execution says so: the
+seed's `startWorkflow`, the flow file and its registration in `e2e/run.ts` — the flow list at
+`:1849` and the env-id map at `:1968` — are all missing). Slice 4's shots are frames INSIDE that
+same flow, so writing them means writing slice 3's missing half first: a different slice, a
+different red-first cycle, and its own acceptance. **Exact next step for whoever picks it up:**
+`seed.ts` gains `startWorkflow` (write `demo.yaml` under `<serveCwd>/${PROJECT_PATHS.workflows}`
+— an `agent` step on the mock model, a `run` step `echo ok`, an `approve` step — and start it
+through the seed's own `RemoteClient`), then `flows/44-workflow-shots.yaml` walks hub → Workflows →
+the run → graph node tap → (P7/P8/P9) → Reduce Motion on → tap again (P10), registered in both maps
+of `run.ts`. Unverified without a simulator, and stated as such: the mid-flight frame, the
+skeleton's own shimmer, and whether the native Permission sheet draws over this layer.
+
 ## Review
 
 ### Owner answers (2026-11-23)

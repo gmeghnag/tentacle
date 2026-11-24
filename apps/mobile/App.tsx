@@ -225,6 +225,7 @@ import { type Theme, themeFor } from "./src/theme-beta.ts";
 import { THEME_SETTINGS } from "./src/theme-settings-expo.ts";
 import type { ThemeSettings } from "./src/theme-settings-store.ts";
 import { type Palette, space } from "./src/theme.ts";
+import { useAccessibilityFlags } from "./src/ui/FloatingActivity.tsx";
 import { HeaderIcon } from "./src/ui/HeaderIcon.tsx";
 import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
 import { AppFontContext, Text } from "./src/ui/Text.tsx";
@@ -2070,6 +2071,10 @@ function WorkflowRunRoute({
   const [controller, setController] = useState<ReturnType<
     typeof createWorkflowRunController
   > | null>(null);
+  // D5: the flight needs the screen's width, and Reduce Motion replaces it with a
+  // crossfade — both read live (a toggle converges without a restart).
+  const [pageWidth, setPageWidth] = useState(0);
+  const flags = useAccessibilityFlags();
   useEffect(() => {
     let live = true;
     let created: ReturnType<typeof createWorkflowRunController> | null = null;
@@ -2129,18 +2134,28 @@ function WorkflowRunRoute({
     );
   }
   return (
-    <WorkflowRunScreen
-      palette={palette}
-      title={title}
-      state={state}
-      onBack={onBack}
-      onMode={(mode) => controller.setMode(mode)}
-      onAnswer={(stepId, optionId) => controller.answer(stepId, optionId)}
-      onStop={() => void controller.stop()}
-      onResume={() => void controller.resume()}
-      onRerun={(stepId) => void controller.rerun(stepId)}
-      onOpenSession={onOpenSession}
-    />
+    <View
+      testID="workflow-run"
+      style={[styles.screen, { backgroundColor: palette.page }]}
+      onLayout={(e) => setPageWidth(e.nativeEvent.layout.width)}
+    >
+      <WorkflowRunScreen
+        palette={palette}
+        title={title}
+        state={state}
+        onBack={onBack}
+        onMode={(mode) => controller.setMode(mode)}
+        onAnswer={(stepId, optionId) => controller.answer(stepId, optionId)}
+        onStop={() => void controller.stop()}
+        onResume={() => void controller.resume()}
+        onRerun={(stepId) => void controller.rerun(stepId)}
+        onOpenSession={onOpenSession}
+        onOpenStep={(stepId) => controller.openStep(stepId)}
+        onCloseStep={() => controller.closeStep()}
+        reduceMotion={flags.reduceMotion}
+        width={pageWidth}
+      />
+    </View>
   );
 }
 

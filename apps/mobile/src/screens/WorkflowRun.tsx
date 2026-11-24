@@ -18,7 +18,10 @@ import { PillButton } from "../ui/PillButton.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { Text } from "../ui/Text.tsx";
 import { graphGeometry } from "../workflow-graph.ts";
+import { stateLook } from "../workflow-list.ts";
 import type { CardAsk, RunMode, RunState, StepCard } from "../workflow-run-controller.ts";
+import { stepBlocks } from "../workflow-step-detail.ts";
+import { WorkflowStepLayer } from "./WorkflowStep.tsx";
 
 export interface WorkflowRunScreenProps {
   readonly palette: Palette;
@@ -32,6 +35,17 @@ export interface WorkflowRunScreenProps {
   readonly onRerun: (stepId: string) => void;
   /** The session's own screen (where an ask is answered when this screen cannot). */
   readonly onOpenSession: () => void;
+  /**
+   * Open a step's detail layer (D5): the tap on a graph node AND on a card. The
+   * screen does not decide what a tap means — the controller's `openStep` does.
+   */
+  readonly onOpenStep: (stepId: string) => void;
+  /** Close the detail layer (its back, or the backdrop). */
+  readonly onCloseStep: () => void;
+  /** Reduce Motion, read live by the route (a crossfade instead of the flight). */
+  readonly reduceMotion: boolean;
+  /** The width the layout is measured against (the layer's flight needs it). */
+  readonly width: number;
 }
 
 /** The approve block: the ask VERBATIM, then Allow once / Deny (a workflow ask has no "always"). */
@@ -86,6 +100,7 @@ function Card({
   onAnswer,
   onRerun,
   onOpenSession,
+  onOpenStep,
 }: {
   readonly palette: Palette;
   readonly card: StepCard;
@@ -93,6 +108,7 @@ function Card({
   readonly onAnswer: WorkflowRunScreenProps["onAnswer"];
   readonly onRerun: (stepId: string) => void;
   readonly onOpenSession: () => void;
+  readonly onOpenStep: (stepId: string) => void;
 }): JSX.Element {
   const { step, look, ask } = card;
   const waits = step.state === "needs-approval" || step.state === "waiting";
@@ -101,16 +117,24 @@ function Card({
       testID={`workflow-card-${step.id}`}
       style={[styles.card, { backgroundColor: palette.card, borderColor: palette.sep }]}
     >
-      <View style={styles.rowHead}>
-        <Text style={[styles.glyph, { color: palette.label }]}>{look.glyph}</Text>
-        <Text style={[styles.name, { color: palette.label }]} numberOfLines={1}>
-          {step.id}
+      <Pressable
+        testID={`workflow-card-open-${step.id}`}
+        accessibilityRole="button"
+        accessibilityLabel={`${step.id} · ${look.word}`}
+        onPress={() => onOpenStep(step.id)}
+        style={styles.cardHead}
+      >
+        <View style={styles.rowHead}>
+          <Text style={[styles.glyph, { color: palette.label }]}>{look.glyph}</Text>
+          <Text style={[styles.name, { color: palette.label }]} numberOfLines={1}>
+            {step.id}
+          </Text>
+          <Text style={[styles.meta, { color: palette.sec }]}>{look.word}</Text>
+        </View>
+        <Text style={[styles.meta, { color: palette.sec }]} numberOfLines={1}>
+          {stepLine(step)}
         </Text>
-        <Text style={[styles.meta, { color: palette.sec }]}>{look.word}</Text>
-      </View>
-      <Text style={[styles.meta, { color: palette.sec }]} numberOfLines={1}>
-        {stepLine(step)}
-      </Text>
+      </Pressable>
       {step.reason === undefined ? null : (
         <Text style={[styles.meta, { color: palette.sec }]}>{step.reason}</Text>
       )}
@@ -144,9 +168,11 @@ function Card({
 function Graph({
   palette,
   steps,
+  onOpenStep,
 }: {
   readonly palette: Palette;
   readonly steps: readonly StepCard[];
+  readonly onOpenStep: (stepId: string) => void;
 }): JSX.Element {
   const geometry = graphGeometry(steps.map((s) => s.step));
   const looks = new Map(steps.map((s) => [s.step.id, s.look]));
@@ -167,9 +193,12 @@ function Graph({
       {geometry.nodes.map((node) => {
         const look = looks.get(node.id);
         return (
-          <View
+          <Pressable
             key={node.id}
             testID={`workflow-node-${node.id}`}
+            accessibilityRole="button"
+            accessibilityLabel={`${node.id} · ${look?.word ?? node.state}`}
+            onPress={() => onOpenStep(node.id)}
             style={[
               styles.node,
               {
@@ -187,7 +216,7 @@ function Graph({
               {`${look?.glyph ?? "○"} ${node.id} · ${look?.word ?? node.state}`}
               {node.loopLabel === undefined ? "" : ` ${node.loopLabel}`}
             </Text>
-          </View>
+          </Pressable>
         );
       })}
     </View>
@@ -198,6 +227,9 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
   const { palette, state } = props;
   const run = state.run;
   const next: RunMode = state.mode === "graph" ? "cards" : "graph";
+  // The detail layer (D5): ONE flight at a time — the node tapped, or the card.
+  const openCard =
+    state.openStepId === null ? undefined : state.steps.find((c) => c.step.id === state.openStepId);
   return (
     <View testID="workflow-run" style={[styles.screen, { backgroundColor: palette.page }]}>
       <ScreenHeader
@@ -275,7 +307,7 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
                   />
                 ),
               )}
-              <Graph palette={palette} steps={state.steps} />
+              <Graph palette={palette} steps={state.steps} onOpenStep={props.onOpenStep} />
             </>
           ) : (
             state.steps.map((card) => (
@@ -287,6 +319,7 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
                 onAnswer={props.onAnswer}
                 onRerun={props.onRerun}
                 onOpenSession={props.onOpenSession}
+                onOpenStep={props.onOpenStep}
               />
             ))
           )}
@@ -309,6 +342,24 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
           ) : null}
         </ScrollView>
       )}
+      {openCard === undefined || run === null ? null : (
+        <WorkflowStepLayer
+          palette={palette}
+          step={openCard.step}
+          detail={openCard.detail}
+          steps={run.steps}
+          width={props.width}
+          reduceMotion={props.reduceMotion}
+          blocks={stepBlocks(
+            openCard.step,
+            openCard.detail,
+            (kind) => kind,
+            (s) => stateLook(s).word,
+            openCard.look.tone === "error" ? 1 : 0,
+          )}
+          onClose={props.onCloseStep}
+        />
+      )}
     </View>
   );
 }
@@ -318,6 +369,7 @@ const styles = StyleSheet.create({
   content: { padding: space.inset, gap: space.inset },
   notice: { ...typography.footnote, paddingHorizontal: space.inset },
   card: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 12, gap: 6 },
+  cardHead: { gap: 6 },
   rowHead: { flexDirection: "row", alignItems: "center", gap: 8 },
   glyph: { ...typography.body, width: 18, textAlign: "center" },
   name: { ...typography.body, flex: 1, fontWeight: "600" },

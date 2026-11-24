@@ -19,7 +19,13 @@
  *   notice with the daemon's reason.
  */
 import { type WorkflowAction, askForStep } from "@tentacle/client";
-import type { WorkflowResult, WorkflowRow, WorkflowStepRow } from "@tentacle/protocol";
+import type {
+  WorkflowResult,
+  WorkflowRow,
+  WorkflowStepDetail,
+  WorkflowStepResult,
+  WorkflowStepRow,
+} from "@tentacle/protocol";
 import type { SheetState } from "./permission-sheet.ts";
 import type { SessionOpenFailure } from "./session-controller.ts";
 import { type StateLook, stateLook } from "./workflow-list.ts";
@@ -30,6 +36,20 @@ export const SESSION_ENDED = "This session has ended";
 export const RUN_ASK_GONE = "That request is no longer waiting";
 
 export type RunMode = "graph" | "cards";
+
+/**
+ * A step's DETAIL, as this screen holds it (docs/feat/workflows-ui.md D5): absent
+ * = never asked. The four answers a read can give are kept apart on purpose —
+ * `missing` (never ran, or its entry left the retained log) is not the same thing
+ * as `unsupported` (an older daemon: "update tentacle"), and a failed read is its
+ * own state with the reason, never a skeleton left shimmering forever.
+ */
+export type StepDetail =
+  | { readonly kind: "loading" }
+  | { readonly kind: "loaded"; readonly detail: WorkflowStepDetail }
+  | { readonly kind: "missing" }
+  | { readonly kind: "unsupported" }
+  | { readonly kind: "failed"; readonly reason: string };
 
 /** The ask a card shows: its id, the asker's id (the pairing), and the text VERBATIM. */
 export interface CardAsk {
@@ -79,6 +99,16 @@ export function askSourceFromSheet(sheet: {
 export interface RunSessionHandle {
   onWorkflows(listener: (rows: readonly WorkflowRow[]) => void): () => void;
   workflow(action: WorkflowAction): Promise<WorkflowResult | { ok: false; reason: string }>;
+  /**
+   * One step execution's `prompt`/`report` (`session/workflow_step`, slice 1a).
+   * Optional because a handle is the Session screen's own subset too; absent =
+   * this build has no way to read a detail, and the card says so.
+   */
+  workflowStep?(
+    runId: string,
+    stepId: string,
+    attempt?: number,
+  ): Promise<WorkflowStepResult | { unsupported: true }>;
 }
 
 export interface WorkflowRunDeps {
@@ -104,6 +134,8 @@ export interface StepCard {
   readonly look: StateLook;
   /** The pending ask of this step, or null (none, settled, or no sheet here). */
   readonly ask: CardAsk | null;
+  /** This step's prompt/report, once asked for; absent = never asked. */
+  readonly detail?: StepDetail;
 }
 
 export interface RunState {
@@ -118,6 +150,8 @@ export interface RunState {
   readonly notice: string | null;
   /** Whether this screen can answer asks at all (a sheet exists for the session). */
   readonly canAnswer: boolean;
+  /** The step whose detail is open (the morph layer), or null. */
+  readonly openStepId: string | null;
 }
 
 const ENDED: readonly SessionOpenFailure[] = ["archived", "deleted", "gone"];
@@ -132,6 +166,10 @@ export interface WorkflowRunController {
   stop(): Promise<void>;
   resume(): Promise<void>;
   rerun(stepId: string): Promise<void>;
+  /** Open a step's detail, reading its prompt/report once (D5). */
+  openStep(stepId: string, attempt?: number): void;
+  /** Close the detail layer (its record stays, so a reopen paints at once). */
+  closeStep(): void;
 }
 
 export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunController {
@@ -143,6 +181,11 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
   let disposed = false;
   let unfeed: (() => void) | null = null;
   let unasks: (() => void) | null = null;
+  let openStepId: string | null = null;
+  /** One record per step, kept across close/reopen (the read is not repeated). */
+  const details = new Map<string, StepDetail>();
+  /** The steps whose read is in flight: one request per step, never a storm. */
+  const inflight = new Set<string>();
 
   const changed = () => deps.onChange?.();
 
@@ -161,11 +204,13 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
         step,
         look: stateLook(step.state),
         ask: askForStep(asks, deps.runId, step.id) ?? null,
+        ...(details.has(step.id) ? { detail: details.get(step.id) } : {}),
       })),
       runAsk: askForStep(asks, deps.runId, null) ?? null,
       mode: deps.mode.get(),
       notice,
       canAnswer: deps.asks !== null,
+      openStepId,
     };
   }
 
@@ -181,8 +226,64 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
     changed();
   }
 
+  /** One step's `prompt`/`report`: at most ONE read in flight, and never repeated once held. */
+  function readStep(stepId: string, attempt?: number): void {
+    const handle = session;
+    // Only a step of the run THIS screen follows: never a request for an id that
+    // is not on the feed (a stale tap, or another run's step).
+    const onRun = rows.find((r) => r.runId === deps.runId)?.steps.some((s) => s.id === stepId);
+    if (onRun !== true) {
+      return;
+    }
+    if (handle === null || handle.workflowStep === undefined) {
+      details.set(stepId, { kind: "unsupported" });
+      changed();
+      return;
+    }
+    if (inflight.has(stepId) || details.get(stepId)?.kind === "loaded") {
+      return;
+    }
+    inflight.add(stepId);
+    details.set(stepId, { kind: "loading" });
+    changed();
+    const finish = (next: StepDetail): void => {
+      inflight.delete(stepId);
+      if (disposed) {
+        return;
+      }
+      // The record lands on ITS step, whatever is open NOW: a late read for a step
+      // the person has since left must never paint under the open one.
+      details.set(stepId, next);
+      changed();
+    };
+    void handle
+      .workflowStep(deps.runId, stepId, attempt)
+      .then((result) => {
+        if ("unsupported" in result) {
+          finish({ kind: "unsupported" });
+          return;
+        }
+        finish(
+          result.detail === undefined
+            ? { kind: "missing" }
+            : { kind: "loaded", detail: result.detail },
+        );
+      })
+      .catch((err: unknown) => {
+        finish({ kind: "failed", reason: err instanceof Error ? err.message : "read failed" });
+      });
+  }
+
   return {
     state,
+    openStep(stepId, attempt) {
+      openStepId = stepId;
+      readStep(stepId, attempt);
+    },
+    closeStep() {
+      openStepId = null;
+      changed();
+    },
     start() {
       unasks = deps.asks?.subscribe(changed) ?? null;
       void deps.open(deps.sessionId).then((result) => {
@@ -235,6 +336,11 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
     },
     stop: () => act({ action: "stop", runId: deps.runId }),
     resume: () => act({ action: "resume", runId: deps.runId }),
-    rerun: (stepId) => act({ action: "rerun_step", runId: deps.runId, stepId }),
+    rerun: (stepId) => {
+      // The old attempt's prompt is not the new one's: drop it, so the next open
+      // reads afresh instead of painting a stale detail under a re-run step.
+      details.delete(stepId);
+      return act({ action: "rerun_step", runId: deps.runId, stepId });
+    },
   };
 }
