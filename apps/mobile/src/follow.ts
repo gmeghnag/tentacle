@@ -301,6 +301,22 @@ export function landingStep(
       step: bounded ? { state: initialFollow, scrollTo: endOffset(m), animated: false } : null,
     };
   }
+  if (state.settling && m.content !== state.last && rounds >= LANDING_ROUNDS) {
+    // The bound ends a HIDDEN opening landing (fix/mobile-open-at-bottom, review
+    // round 1, finding 1): reveal into the silent tail, not into nothing owed, or
+    // the next growth reaches `contentGrew` ANIMATED. The tail gets fresh rounds.
+    return {
+      state: {
+        settling: false,
+        silent: true,
+        revealed: true,
+        last: m.content,
+        rounds: 0,
+        awaiting: false,
+      },
+      step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
+    };
+  }
   const next: Landing = {
     settling:
       (state.settling || state.awaiting) && m.content !== state.last && rounds < LANDING_ROUNDS,

@@ -83,3 +83,10 @@ Mechanism proven: when the 120 ms reveal timer fires while the list is still ren
 No §7 invariant is touched (pure module, contained). **Executor:** honest about what is unverified, but it deviated from the approved H2-first repro without flagging the deviation as drift.
 
 *— claude-opus-5-5, 2026-11-24 (fresh context; a different model from the Sonnet executor but the same Claude family, so the two passes can share blind spots)*
+
+### Fix round 1
+
+- **Finding 1 (MEDIUM) — FIXED.** `apps/mobile/src/follow.ts` `landingStep`: when `LANDING_ROUNDS` ends a hidden (`settling`) opening landing with a still-changing height, it now enters the revealed silent tail (`silent`, `revealed`, fresh `rounds: 0`) instead of `settling:false, silent:false`, so the next growth stays owned and silent. Test: "the bound ending a hidden opening landing enters the silent tail" in `apps/mobile/test/follow.test.ts`. Red: with the new branch disabled (`if (false && …)`) it failed at `expect(landingPending(state)).toBe(true)` (received false); green with the branch: follow + wiring tests 78 pass / 0 fail; Biome clean on the two files.
+- **Finding 2 (MEDIUM) — PARTIAL.** Drift acknowledged: the approved H2-first list→session repro was not run; H2's skipped-flag variant is ruled out by the review (fresh `SessionScreen` per navigation). No simulator available to me, so the list→session trigger is still unshown. Verify: cold-open a 300+ row session from the session list on the simulator (take `sim.lock`).
+
+*— claude-sonnet-5-5, 2026-11-24*

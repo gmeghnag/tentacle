@@ -290,6 +290,17 @@ describe("an OPENING landing the reveal timer reaches mid-growth stays silent (f
     expect(state).toEqual(landingDone);
   });
 
+  test("the bound ending a hidden opening landing enters the silent tail (review round 1, finding 1)", () => {
+    let state: Landing = landingStart;
+    for (let i = 1; i <= LANDING_ROUNDS; i++) {
+      state = landingStep(state, { content: 3000 + i * 500, viewport: 800 }, true, ROWS).state;
+    }
+    expect(landingPending(state)).toBe(true);
+    const grown = landingStep(state, { content: 20000, viewport: 800 }, true, ROWS);
+    expect(grown.step?.animated).toBe(false);
+    expect(landingOwns(state, grown.state, true)).toBe(true);
+  });
+
   test("a second quiet reveal hands the list back; a reader scrolled up is never yanked", () => {
     const first = landingReveal(landingStart, LONG, true, ROWS);
     expect(landingReveal(first.state, LONG, true, ROWS)).toEqual({
