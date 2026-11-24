@@ -121,4 +121,59 @@ Each link, verified:
 
 ## Execution
 
-## Review
+*— claude-sonnet-4-5 (executor), 2026-11-25*
+
+**Step 0 (the load-bearing check) PASSED — no STOP, no plan fix needed.**
+
+Repro `.tentacle/tmp/image-old-on-demand/step0.ts` (a `Session` over a scripted model: turn 1 text, turn 2 with two tool rounds, a late steer, a recording model that stringifies every `ChatRequest.messages`):
+
+```
+(a) turn-2 requests: 3 prefix byte-identical: true
+(c) requests carrying the user ref: 4 of 4
+(b) stored messages carrying refs: 1
+    request message counts: 2,4,6,8
+$ rg -n "requestHistory\(" packages/ apps/
+agent.ts:1100 (definition) · 1127 maybePrune · 1595 the round ·
+1923 the forced final report · 2035 noteContextUsage · 2093 contextUsage
+```
+
+So the funnel is unique (five callers, as the plan said), the pre-`turnFrom` prefix is byte-stable inside a turn, and the stored history/log is never the request. Two notes from the harness, neither a plan error: (i) the scratch script needs the workspace's zod instance explicitly (`packages/tools/node_modules/zod/lib/index.mjs`) or `ToolRegistry.definitions()` throws in `zod-to-json-schema` — a scratch-only detail; tests get it right by construction. (ii) The history carries the system message at index 0, so a turn's `turnFrom` is its length **+1** from the caller's view; the tests use that.
+
+### As built (order followed)
+
+**Slice 1 — `packages/agent/src/old-images.ts` (new, pure) + `test/old-images.test.ts`.** `OLD_IMAGE_TURNS = 2`, `isAnswer`, `oldImagePlaceholder(ref)` (a pure function of the ref only, starting with `PRUNE_MARKER`), `projectOldImages(history, turnFrom)` (1:1 copies, the `attachments` **key** dropped, one line per ref prepended, `history` itself when nothing is aged, `turnFrom` clamped). **Not** re-exported from `packages/agent/src/index.ts`: `agent.ts` and the tests import it by path, like the other internal modules, and D4 says no file outside the package consumes it.
+
+**Slice 2 — `packages/agent/src/agent.ts`.** `requestHistory(messages, caps, turnFrom)` now composes `projectedHistory` → `projectOldImages` → `applyPrune` (in that order, so a prune entry keys on the ORIGINAL rows), behind `oldImagesOnDemand(caps)`: `config.toolImages !== undefined && tools.get(IMAGE_VIEW_TOOL_NAME) !== undefined && !isToolDisabled(...)`, decided on the capability snapshot so the forced final report sends the turn's bytes. `turnFrom` is captured ONCE per turn (`opts.newFrom ?? messages.length`, the same value that seeds `unseen`) and threaded to all five callers; `contextUsage` (out of turn) passes `messages.length`, which is what the next turn computes. `maybePrune`/`noteContextUsage` gained the parameter instead of recomputing it. `IMAGE_VIEW_TOOL_NAME` imported from `@tentacle/core` — it is **not** exported by `@tentacle/tools` (the plan's precondition list implies tool-side; the constant lives in core, `prune.ts:36` imports it the same way). No `protocol.d/` note: no wire, log or schema change (F13).
+
+**Slice 3 — `packages/tools/src/image-view.ts`.** `ctx` widened to `Pick<ToolContext,"images"|"history">`; after `store.resolve(prefix)` the tool scans `ctx.history` USER `attachments` for ids starting with the prefix (`userImage`): none/one/ambiguous (both kinds' labels), an id on both sides resolving to the tool entry, found-as-user → `store.holds(ref)` then `{content: "<label> · <KB> · attached by the user · sent as attached", image: ref}`, not held → `… is no longer held — ask the user to attach it again`, and a note only when `detail:"low"` was asked **explicitly** (the default is not a request for a variant that never existed). `REGENERATE` now names both regenerations. The description's new clause is composed from `PRUNE_SENTINEL` (`builtins.ts`) because the write tools refuse the literal in **source** too — a real finding, not a workaround: the new placeholder is covered by the existing guard by construction (T5).
+
+**Slice 4 — tests.** `test/old-images.test.ts` (T1, 12 cases) · `test/loop-old-images.test.ts` (T2 a-e, T6 ×2, T7, and a prune-composition case) · `test/old-images-guard.test.ts` (T5) · `packages/tools/test/image-view-user.test.ts` (T4) · `packages/providers/test/old-images-size.test.ts` (T3 + F11).
+
+**Slice 5 —** `changelog.d/image-old-on-demand.changed.md`.
+
+### Drift from the Implementation (and why)
+
+1. **T3 is written against `projectOldImages` rather than a scripted 3-turn loop.** The property T3 names ("turn 3's body has 0 image parts and is smaller by ≥ the base64") is about the WIRE, and it is decided entirely by the projected messages; the loop-level path that produces them is T2's. Building a third 3-turn fixture would have re-proved T2. The test still fails if the projection keeps the ref (mutation E).
+2. **T5 moved from `packages/tools/test/prune-guard.test.ts` to `packages/agent/test/old-images-guard.test.ts`.** `tools` must not import `agent` (`agent → tools` is the allowed direction); the test needs `oldImagePlaceholder`. Same assertions, legal direction.
+3. **T6 is asserted on a replaced history, not by driving `/compact`/`context_reset` end to end.** The mechanism those commands share is "the new history carries no refs" (`compact.ts:40-43`, `context-reset.ts:73`); the test installs exactly that and asserts the next request. T7 additionally proves the resume path byte-for-byte.
+4. **A prune-composition case was ADDED (not in the plan).** Without it, the plan's last mutation (projection after `applyPrune` with an identity-changing copy) was **not caught** — I found that by running it. The new case makes real stubs land in the same request as the placeholder, so identity loss would show. This is the one place where the plan's Tests list was insufficient.
+5. **No new `docs`-level API.** Nothing else changed: no provider, store, protocol, log, TUI or phone file (D4 holds).
+
+### Mutations run (all recorded, all reverted)
+
+| Mutation | Red |
+|---|---|
+| `OLD_IMAGE_TURNS` threshold `≥ 1` (unit + loop) | T1 ×2 (`one answer after it`, `a cancelled turn`) · T2a, T2c |
+| placeholder carries the age (`(>=2 turns ago)`) | T1 stability |
+| the projection keeps `attachments` (two shapes) | T1 ×2, **T3** OpenAI + Anthropic |
+| placeholder loses `PRUNE_MARKER` | T1 stability, **T5 ×3** |
+| `turnFrom` recomputed as `messages.length` each round | **T2c** (only the sharp fixture: a second answer that would age the picture mid-turn) |
+| gate forced `true` | **T2e ×3** (no store / switched off / not registered) |
+| projection AFTER `applyPrune` on fresh copies | **the added prune-composition case** (was uncaught before it) |
+| `projectOldImages` returns `history` always | T1 ×5, T3 |
+
+### Gate (run by the orchestrator)
+
+`bunx tsc --noEmit` → clean. `bunx biome check` on all 8 changed files → 0 errors, 0 warnings. Targeted suites: `packages/tools/test` **562 pass / 0 fail**; `packages/agent/test` + `packages/providers/test` **1022 pass / 0 fail**; the six new/changed files **52 pass / 0 fail**. Full `bun run check` is the script's, after this.
+
+Unverified here: the live acceptance (a worker and a `serve` session on the owner's Qwen, turn-3 `promptTokens` dropping by ≈3.1k) — it needs the owner's model and a real picture; the mechanism it would confirm is what T3 pins on the wire.
