@@ -2337,3 +2337,23 @@ with an id. Not a finding, noted: `openRow` carries a previous row's typed value
 same-named input of another workflow (visible, prefilled).
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 2
+
+**Verdict: PASS (code)** — #1 and #2 hold; #3 stays an orchestrator merge precondition (not code).
+
+- **#1 FIXED.** `heldFits` (`workflow-run-controller.ts`) re-reads a `live` or other-attempt/round
+  record. My repro `.tentacle/tmp/workflows-ui/live-stale.ts` now: reopen after end →
+  `{report:"FINAL", live:false}`, reads: 2. Mutations (mine, each reverted, `cmp` identical):
+  `return "final"` → RED (LIVE test); drop `&& held.round === row.round` → RED (goto ROUND test).
+- **#2 FIXED (test).** My original mutant `pending()[0]` → RED ("the sheet moved to an UNRELATED
+  ask"), 18 pass / 1 fail.
+- **#3 OPEN, by design.** P1/P5/S4 simulator shots (sheet over a pushed `WorkflowRun` /
+  `WorkflowStart`) are still required before merge; the executor cannot produce them.
+- **Regressions looked for:** only one read in flight still (the `inflight` check runs before
+  `heldFits`); an explicit held ended attempt not re-read (test); a live record stays painted during
+  the re-read, a failed re-read replaces it with `failed` + reason (loud, acceptable). None found.
+- **Gate:** `bun test apps/mobile/test` 4976 pass / 0 fail; `bun run typecheck` clean;
+  `bun run lint` clean (2371 files); `git status` clean after mutations (before this append).
+
+*— claude-opus-5-5, 2026-11-24*
