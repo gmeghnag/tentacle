@@ -7,18 +7,25 @@
  * does that, once, verified against the id.
  */
 import {
+  type AttachmentRef,
+  type ChatMessage,
   IMAGE_VIEW_TOOL_NAME,
   type ImageDetailSetting,
   TOOL_IMAGE_LOW_EDGE,
   type Tool,
   type ToolContext,
   type ToolImageEntry,
+  type ToolImageStore,
   type ToolImageVariant,
   type ToolResult,
+  attachmentLabel,
   formatBytes,
   imageRefPrefix,
 } from "@tentacle/core";
 import { z } from "zod";
+// The sentinel of the old-image placeholder (docs/feat/image-old-on-demand.md
+// D1), from the ONE constant: the literal never appears in source.
+import { PRUNE_SENTINEL } from "./builtins.ts";
 
 /** The ref a marker shows: hex, `sha256:` allowed — bounded, so an ask has nothing long to cut. */
 const refField = z
@@ -36,10 +43,9 @@ const detailField = z
 
 export type ImageViewInput = { readonly ref: string; readonly detail?: "low" | "high" };
 
-const DESCRIPTION =
-  "Look at ONE picture a read kept for you: pass the ref from an `[image p.N · W×H · ref <hex>]` marker (fs_read of a PDF) or from an `[image <name> · W×H · <format> · ref <hex> · high only]` marker (fs_read of a PNG/JPEG file). Use it when a picture matters to the answer (a diagram, a chart, a scanned page); skip logos and decorations. One image per call.";
+const DESCRIPTION = `Look at ONE picture a read kept for you: pass the ref from an \`[image p.N · W×H · ref <hex>]\` marker (fs_read of a PDF), from an \`[image <name> · W×H · <format> · ref <hex> · high only]\` marker (fs_read of a PNG/JPEG file), or from a \`${PRUNE_SENTINEL}: image …⟫\` line (a picture the user attached earlier). Use it when a picture matters to the answer (a diagram, a chart, a scanned page); skip logos and decorations. One image per call.`;
 
-const REGENERATE = "fs_read the file again to get a fresh ref";
+const REGENERATE = "fs_read the file again, or ask the user to attach it again";
 
 /**
  * The tool, its schema shaped by `model.imageDetail` (D6): `auto` offers
@@ -69,7 +75,42 @@ export function createImageViewTool(setting: ImageDetailSetting = "auto"): Tool<
   };
 }
 
-/** `low` is not available for this picture: it is served at `high`, said plainly. */
+/** `low` asks for a variant a user's own upload never had (docs/feat/image-old-on-demand.md D3). */
+const NO_LOW_VARIANT_NOTE = " · no low variant for a user image — sent as attached";
+
+/** A user message's ref, when `prefix` names exactly one of them in this conversation. */
+type UserImageHit =
+  | { readonly kind: "none" }
+  | { readonly kind: "one"; readonly ref: AttachmentRef }
+  | { readonly kind: "many"; readonly labels: readonly string[] };
+
+/**
+ * The conversation's OWN user images (docs/feat/image-old-on-demand.md D3): the
+ * refs on `ctx.history`'s user messages, found by id prefix. Read-only, and only
+ * over already-validated refs — a store upload this conversation never carried
+ * stays unreachable.
+ */
+function userImage(history: readonly ChatMessage[] | undefined, prefix: string): UserImageHit {
+  const hits = new Map<string, AttachmentRef>();
+  for (const message of history ?? []) {
+    if (message.role !== "user") {
+      continue;
+    }
+    for (const ref of message.attachments ?? []) {
+      if (ref.id.startsWith(prefix)) {
+        hits.set(ref.id, ref);
+      }
+    }
+  }
+  if (hits.size === 0) {
+    return { kind: "none" };
+  }
+  const [only] = [...hits.values()];
+  if (hits.size === 1 && only !== undefined) {
+    return { kind: "one", ref: only };
+  }
+  return { kind: "many", labels: [...hits.values()].map(attachmentLabel) };
+}
 const HIGH_ONLY_NOTE = " · low is not available for this image yet — sent at high";
 
 /**
@@ -85,10 +126,39 @@ function highOnly(entry: ToolImageEntry): boolean {
   );
 }
 
+/**
+ * A user's own picture (docs/feat/image-old-on-demand.md D3): no variant exists
+ * — user uploads are never downscaled — so `detail` is ignored with a note, and
+ * the ref is served as attached. Re-reads nothing: the provider inlines it.
+ */
+function viewUserImage(
+  prefix: string,
+  ref: AttachmentRef,
+  asked: "low" | "high" | undefined,
+  setting: ImageDetailSetting,
+  store: ToolImageStore,
+): ToolResult {
+  if (!store.holds(ref)) {
+    return {
+      content: `image ${prefix} (${attachmentLabel(ref)}) is no longer held — ask the user to attach it again`,
+      isError: true,
+    };
+  }
+  const forced = setting !== "auto";
+  // Only an EXPLICIT low asks for a variant a user image never had; the default
+  // (no `detail`) is not a request for one, and "sent as attached" already says
+  // what the caller gets.
+  const note = forced || asked === "low" ? NO_LOW_VARIANT_NOTE : "";
+  return {
+    content: `${attachmentLabel(ref)} · ${formatBytes(ref.size)} · attached by the user · sent as attached${note}`,
+    image: ref,
+  };
+}
+
 /** The tool's decision, pure over the store (exported for the tests). */
 export function viewImage(
   input: ImageViewInput,
-  ctx: Pick<ToolContext, "images">,
+  ctx: Pick<ToolContext, "images" | "history">,
   setting: ImageDetailSetting,
 ): ToolResult {
   const store = ctx.images;
@@ -99,15 +169,28 @@ export function viewImage(
   if ("refused" in parsed) {
     return { content: parsed.refused, isError: true };
   }
-  const found = store.resolve(parsed.prefix);
-  if (found.kind === "none") {
-    return { content: `no image ${parsed.prefix} in this session — ${REGENERATE}`, isError: true };
-  }
+  const { prefix } = parsed;
+  const found = store.resolve(prefix);
   if (found.kind === "ambiguous") {
     return {
-      content: `${parsed.prefix} names ${found.labels.length} images (${found.labels.join(", ")}) — pass more hex characters of the ref`,
+      content: `${prefix} names ${found.labels.length} images (${found.labels.join(", ")}) — pass more hex characters of the ref`,
       isError: true,
     };
+  }
+  if (found.kind === "none") {
+    // Not a picture a read kept: maybe the user's own, aged out of the request
+    // by the old-image projection — its placeholder carries this ref.
+    const user = userImage(ctx.history, prefix);
+    if (user.kind === "many") {
+      return {
+        content: `${prefix} names ${user.labels.length} images (${user.labels.join(", ")}) — pass more hex characters of the ref`,
+        isError: true,
+      };
+    }
+    if (user.kind === "one") {
+      return viewUserImage(prefix, user.ref, input.detail, setting, store);
+    }
+    return { content: `no image ${prefix} in this session — ${REGENERATE}`, isError: true };
   }
   const forced = setting !== "auto";
   const detail = forced ? setting : (input.detail ?? "low");
@@ -115,7 +198,7 @@ export function viewImage(
   const variant: ToolImageVariant = detail === "high" ? entry.high : entry.low;
   if (!store.holds(variant.ref)) {
     return {
-      content: `image ${parsed.prefix} (${entry.label}) is no longer held — ${REGENERATE}`,
+      content: `image ${prefix} (${entry.label}) is no longer held — ${REGENERATE}`,
       isError: true,
     };
   }
