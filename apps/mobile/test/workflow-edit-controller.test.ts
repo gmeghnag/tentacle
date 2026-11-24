@@ -77,7 +77,13 @@ function harness(
     borrowed?: boolean;
     name?: string | null;
     /** Each source read answers with the next of these (the last one repeats). */
-    reads?: readonly (WorkflowSourceResult | { unsupported: true } | Error)[];
+    /** A Promise entry is a read the test settles itself (an in-flight check). */
+    reads?: readonly (
+      | WorkflowSourceResult
+      | { unsupported: true }
+      | Error
+      | Promise<WorkflowSourceResult>
+    )[];
     /** Each save answers with the next of these (the last one repeats). */
     saves?: readonly (WorkflowSaveResult | { unsupported: true } | Error)[];
     /**
@@ -100,6 +106,9 @@ function harness(
       const next = reads.length > 1 ? reads.shift() : reads[0];
       if (next instanceof Error) {
         throw next;
+      }
+      if (next instanceof Promise) {
+        return await next;
       }
       return next ?? source();
     },
@@ -652,6 +661,64 @@ describe("a save whose answer was lost: the hash decides on reconnect", () => {
     expect(h.state().saved?.hash).toBe(PREVIEWED);
     expect(h.state().dirty).toBe(true);
     expect(h.controller.canSave()).toBe(true);
+  });
+
+  test("a link-up that lands DURING a check that then fails re-checks (Save never stuck)", async () => {
+    let failCheck: (err: Error) => void = () => {};
+    const inFlight = new Promise<WorkflowSourceResult>((_, reject) => {
+      failCheck = reject;
+    });
+    const h = harness({
+      confirmFails: "rpc error",
+      reads: [source(), inFlight, source({ hash: PREVIEWED, version: 3 })],
+    });
+    await opened(h);
+    touched(h);
+    h.controller.beginReview();
+    await h.flush();
+    h.controller.confirmSave();
+    await h.flush();
+    // The immediate check is in flight on a link that is already dead; the
+    // screen then sees it drop and come back while that read still hangs.
+    expect(h.readNames).toEqual(["demo", "demo"]);
+    h.controller.setLink(false);
+    h.controller.setLink(true);
+    await h.flush();
+    failCheck(new Error("socket closed"));
+    await h.flush();
+    // The up that arrived mid-check is not lost: the hash decides now.
+    expect(h.readNames).toEqual(["demo", "demo", "demo"]);
+    expect(h.state().kind).toBe("saved");
+    expect(h.state().saveOff).not.toBe(EDIT_SAVE_PENDING);
+  });
+
+  test("a check that fails while the link is DOWN waits for the next up (no retry loop)", async () => {
+    let failCheck: (err: Error) => void = () => {};
+    const inFlight = new Promise<WorkflowSourceResult>((_, reject) => {
+      failCheck = reject;
+    });
+    const h = harness({
+      confirmFails: "rpc error",
+      reads: [source(), inFlight, source({ hash: PREVIEWED, version: 3 })],
+    });
+    await opened(h);
+    touched(h);
+    h.controller.beginReview();
+    await h.flush();
+    h.controller.confirmSave();
+    await h.flush();
+    // An up mid-check that is gone again (down) when the read fails: nothing is
+    // re-read on a dead link; the decision stays pending until the next up.
+    h.controller.setLink(true);
+    h.controller.setLink(false);
+    failCheck(new Error("socket closed"));
+    await h.flush();
+    expect(h.readNames).toEqual(["demo", "demo"]);
+    expect(h.state().saveOff).toBe(EDIT_OFFLINE);
+    h.controller.setLink(true);
+    await h.flush();
+    expect(h.readNames).toEqual(["demo", "demo", "demo"]);
+    expect(h.state().kind).toBe("saved");
   });
 
   test("`saveOffReason`: a pending lost save turns Save off (after offline)", () => {

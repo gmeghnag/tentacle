@@ -1923,6 +1923,47 @@ mutation of it stays green, and that is expected.
 
 *— claude-opus-5-5 (executor, fix round 1 of slices 4–6), 2026-11-24*
 
+### Fix round 2
+
+Review round 2 had one new finding. It was fixed in `apps/mobile/src/workflow-edit-controller.ts`.
+Only that file and its test changed.
+
+**MEDIUM: a link-up during an in-flight check was swallowed. FIXED.** The case: the immediate check
+starts while the link is already dead, the link-up arrives while that read is still in flight, and
+then the read fails. Nothing re-armed the check, so Save stayed on "Checking whether the last save
+landed".
+- A `recheck` flag now records an up that `checkInterrupted` saw while `checking` (`:357`, `:995`).
+- Each new read clears it (`:1004`).
+- The read's `catch` checks again at once when `recheck && !offline` (`:1072`). Otherwise it waits
+  for the next link-up, as before, so a dead link never causes a retry loop.
+- A successful read decides the outcome and needs no recheck.
+
+**Red before green** (`bun test apps/mobile/test/workflow-edit-controller.test.ts`, before the fix):
+```
+(fail) … a link-up that lands DURING a check that then fails re-checks (Save never stuck)
+       expect(h.readNames).toEqual(["demo","demo","demo"])  — Received only 2 reads
+ 57 pass / 1 fail
+```
+After the fix: 58 pass / 0 fail. The reviewer's repro (`rev456/stuck.test.ts`, run as a copy)
+now ends `saved, reads: 3`. A second test pins the other side of the fix: an up mid-check that is
+down again when the read fails re-reads nothing, and the next up does. The test harness gained one
+seam: a `reads` entry may be a Promise the test settles itself.
+`bunx biome check` on both files is clean, and `tsc -p apps/mobile` is clean.
+
+**Mutations** (`.tentacle/tmp/workflow-editor/fix2/mutate.ts`, each applied alone and then
+restored; the file was byte-identical afterwards):
+```
+== M1 catch ignores the remembered up            → 1 fail (… DURING a check …)
+== M2 an up mid-check is not remembered          → 1 fail (… DURING a check …)
+== M3 catch re-checks without the offline guard  → 1 fail (… while the link is DOWN …)
+== M4 catch always re-checks (retry loop)        → 2 fail (Save is OFF …; … while the link is DOWN …)
+restored (byte-identical)
+```
+
+**Drift:** none. The fix is the one the review proposed.
+
+*— claude-opus-5-5 (executor, fix round 2 of slices 4–6), 2026-11-24*
+
 ## Review
 
 ### Slices 4 + 5 + 6 — REQUEST-CHANGES

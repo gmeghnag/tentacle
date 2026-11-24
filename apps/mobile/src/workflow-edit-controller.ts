@@ -353,6 +353,8 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
   } | null = null;
   /** A `checkInterrupted` read is in flight (one at a time). */
   let checking = false;
+  /** A link-up arrived while `checking`: if that read fails, check again. */
+  let recheck = false;
   let created = false;
   let session: EditSessionHandle | null = null;
   let opened = false;
@@ -986,6 +988,12 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
    */
   function checkInterrupted(): void {
     const lost = interrupted;
+    if (lost !== null && checking) {
+      // The read in flight may be on the link that just died: remember this
+      // up, so a failure of that read checks again instead of waiting for
+      // another link flap.
+      recheck = true;
+    }
     if (lost === null || checking || session === null || name === null) {
       refresh();
       changed();
@@ -993,6 +1001,7 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
     }
     // `interrupted` stays set (Save stays off) until the hash has decided.
     checking = true;
+    recheck = false;
     void session
       .workflowSource(name)
       .then((result) => {
@@ -1057,8 +1066,14 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
           return;
         }
         // The link is still not good enough: the decision stays pending (Save
-        // off) and the next link-up checks again.
+        // off) and the next link-up checks again — at once if one already
+        // arrived while this read was in flight (never a retry loop otherwise).
         notice = `Could not check the save (${err instanceof Error ? err.message : String(err)})`;
+        if (recheck && !offline) {
+          recheck = false;
+          checkInterrupted();
+          return;
+        }
         refresh();
         changed();
       });
