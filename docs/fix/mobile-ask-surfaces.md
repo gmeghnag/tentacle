@@ -486,3 +486,11 @@ frames A1–A7 before the iOS build.
 *Reviewed by claude-opus-5-5 in a fresh context. The planner and the fix-round executor are the same model, so shared blind spots are possible.*
 
 *— claude-opus-5-5, 2026-11-24*
+
+### S4 — phone pure modules (executor claude-sonnet-5-5, 2026-11-24)
+
+- **Load-bearing check re-run:** `apps/mobile/src/{command-preview,polpetto-glyph,ask-card}.ts` did not exist; `askOrigin`/`originWords` are exported from `@tentacle/client` (`index.ts:31`) and the mobile app already imports that package — holds.
+- **Red first:** the tests and modules were written in one step, so the red was the missing module (not an assertion). Non-vacuity is shown by the mutations below instead.
+- **Added:** `command-preview.ts` (wrap by `cols`, rows counted arithmetically, only `cap` rows built), `polpetto-glyph.ts` (`polpettoMask`), `ask-card.ts` (`askCard`, `askAge`, `glyphFor`); tests `command-preview`, `polpetto-glyph`, `ask-card` (16 pass / 0 fail). Biome clean on the 6 files; `tsc -p apps/mobile` clean.
+- **Drift (small, by design):** `askCard(state, ctx)` takes the `AskOrigin` in `ctx` (`{origin, cols, ageMs, hasAutoAccept}`), because `SheetState` carries only `agent`, not `workflow`. S5/S6 supply the origin. Menu items derive from the options the sheet offers (`allow_always` only when offered, so none for a `workflow_approve`), not from re-reading the suggestion. No existing file edited; no second changelog fragment (the S1a one covers it).
+- **Mutations (each reverted):** eyes filled (`ch !== "."`) → 2 fail; (the `more` off-by-one mutation was not run); `cap` removed from the row loop → 2 fail (1250 / 5000 rows built); `allow_always` item unconditional → the `workflow_approve` menu-null test fails.
