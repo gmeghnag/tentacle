@@ -503,31 +503,23 @@ describe("S5 — the ask is a route, and its dismissal is explicit (D5)", () => 
     expect(ask).toContain('testID="perm-sheet"');
   });
 
-  test("`Not now` is the ONLY way out of a blocked ask, and it withdraws", () => {
+  test("no `Not now`, no blocked-swipe footnote: the sheet is never blocking", () => {
     const ask = code(read("src", "screens", "PermissionSheet.tsx"));
-    const later = ask.slice(ask.indexOf('testID="perm-later"'));
-    // `dismiss()`: withdraw, send nothing (today's swipe semantics, made explicit).
-    expect(later.slice(0, 400)).toContain("sheet.dismiss()");
-    // The footnote the blocked swipe earns is drawn from the `held` prop.
-    expect(ask).toContain('testID="perm-hold"');
-    expect(ask).toContain("Answer to continue — or Not now");
-    expect(ask).toContain("held: boolean");
+    expect(ask).not.toContain("perm-later");
+    expect(ask).not.toContain("perm-hold");
+    // The peek detent draws the one-row form, the others the card (never buttons at the peek).
+    expect(ask).toContain('askSurface(detent) === "slim"');
+    expect(ask).toContain("<AskCard");
+    expect(ask).toContain("<AskSlim");
   });
 
-  test("the screen publishes the ask's element WITH `held`, and only while there is one", () => {
+  test("the screen publishes the ask's element with the detent, and only while there is one", () => {
     const screen = SCREEN.slice(SCREEN.indexOf('host.publish(\n      "permission"'));
     expect(screen).toBeTruthy();
-    const block = screen.slice(0, screen.indexOf(");"));
+    const block = screen.slice(0, screen.indexOf("/>"));
     expect(block).toContain('state.sheet.kind === "idle" ? undefined :');
-    expect(block).toContain("held={held}");
-    // Noted by the navigator, read by the screen: ONE store, through the ask's key.
-    expect(SCREEN).toContain("SHEET_HOLDS.sequence(holdsKey)");
-    // The note is forgotten under the ROUTE's id: a settled ask holds none.
-    expect(SCREEN).toContain("askRouteParams(navigation.getState().routes, owner)");
-    expect(SCREEN).toContain(
-      "SHEET_HOLDS.forget(holdKey(owner.computerId, owner.sessionId, settled.askId))",
-    );
-    expect(SCREEN).toContain("holdKey(owner.computerId, owner.sessionId, askId)");
+    expect(block).toContain("detent={askDetent}");
+    expect(SCREEN).not.toContain("SHEET_HOLDS");
   });
 
   test("the ask is pushed with its id and `asking`, and never re-pushed to settle", () => {
@@ -541,25 +533,37 @@ describe("S5 — the ask is a route, and its dismissal is explicit (D5)", () => 
     expect(ROUTE).not.toContain("setParams");
   });
 
-  test("`returned` keeps the ask up (it has words to read) — only idle does not", () => {
-    expect(SCREEN).toContain('permission: state.sheet.kind !== "idle"');
+  test("`returned` keeps the ask up (it has words to read); a parked or idle one does not", () => {
+    const at = SCREEN.indexOf("permission:\n      state.sheet.kind");
+    const block = SCREEN.slice(at, at + 400);
+    expect(block).toContain('state.sheet.kind === "returned" ||');
+    expect(block).toContain("askPresented({");
+    expect(block).toContain("drawerOpen,");
   });
 
-  test("a swipe of a RETURNED ask is a real dismissal (dismiss), never a silent drop", () => {
+  test("a swipe of an ASKING ask PARKS it (never dismiss); of a RETURNED one dismisses", () => {
     const gone = SCREEN.slice(SCREEN.indexOf("const gone = dismissedNatively("));
     const body = gone.slice(0, gone.indexOf("}, [actual"));
     expect(body).toContain('gone.includes("permission")');
-    expect(body).toContain("sheet.dismiss()");
+    const park = body.slice(body.indexOf("if (sheet.asking) {"));
+    const parkBranch = park.slice(0, park.indexOf("} else {"));
+    expect(parkBranch).toContain("sheet.park()");
+    expect(parkBranch).not.toContain("sheet.dismiss()");
+    expect(park.slice(park.indexOf("} else {"))).toContain("sheet.dismiss()");
   });
 
-  test("the navigator blocks the gesture while asking, and notes a blocked attempt", () => {
-    expect(APP).toContain("route.params.asking === true ? { asking: true } : {}");
-    const listeners = APP.slice(APP.indexOf("gestureCancel: () => {"));
-    const body = listeners.slice(0, listeners.indexOf("},\n            })}"));
-    expect(body).toContain('playHaptic("light")');
-    expect(body).toContain("SHEET_HOLDS.note(holdKey(");
-    // Keyed on the ask, not on the kind: the note belongs to ONE ask.
-    expect(APP).toContain("sheetIdentity(route.params.kind, route.params.askId ?? null)");
+  test("the banner renders from askBanner, a tap unparks, and the drawer parks", () => {
+    expect(SCREEN).toContain("askBanner(state.sheet, queued,");
+    expect(SCREEN).toContain('testID="ask-banner"');
+    expect(SCREEN).toContain("sheet.unpark()");
+    expect(SCREEN).toContain('if (drawerOpen && state.sheet.kind === "asking"');
+  });
+
+  test("the navigator no longer blocks the gesture; the detent reaches the content", () => {
+    expect(APP).not.toContain("gestureCancel");
+    expect(APP).not.toContain("SHEET_HOLDS");
+    expect(APP).toContain("ASK_DETENT.set(event.data.index)");
+    // Keyed on the ask, not on the kind.
     expect(
       APP.match(/sheetIdentity\(route\.params\.kind, route\.params\.askId \?\? null\)/g),
     ).toHaveLength(2);

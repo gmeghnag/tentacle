@@ -15,7 +15,6 @@ import {
   PEEK,
   PRESENTED_SHEET_KINDS,
   SHEET_DETENTS,
-  SHEET_HOLDS,
   SHEET_KINDS,
   SHEET_ROUTE,
   SHEET_SPEC,
@@ -26,11 +25,9 @@ import {
   askingParamUpdate,
   clampDetent,
   createDetentMemory,
-  createSheetHolds,
   desiredStack,
   dismissedNatively,
   drainPops,
-  holdKey,
   initialDetent,
   managedStack,
   openingDetent,
@@ -721,60 +718,6 @@ describe("recordDetent — only a STABLE change is remembered (S3)", () => {
     recordDetent(memory, "tools", null, { index: 2, stable: true });
     expect(recordDetent(memory, "tools", null, { index: 0, stable: false })).toBe(false);
     expect(rememberedDetent(memory, "tools", null)).toBe(2);
-  });
-});
-
-describe("SHEET_HOLDS — the blocked-dismissal note (D5)", () => {
-  test("one note per ask: the sequence is monotonic and the store notifies", () => {
-    // Mutation: `note` not notifying (or a key shared across asks) → red.
-    const holds = createSheetHolds();
-    let seen = 0;
-    const off = holds.subscribe(() => {
-      seen++;
-    });
-    const key = holdKey("c1", "s1", "ask-7");
-    expect(holds.sequence(key)).toBe(0);
-    holds.note(key);
-    expect(holds.sequence(key)).toBe(1);
-    holds.note(key);
-    expect(holds.sequence(key)).toBe(2);
-    expect(seen).toBe(2);
-    off();
-    holds.note(key);
-    expect(seen).toBe(2);
-  });
-
-  test("a new ask never inherits the previous one's note", () => {
-    const holds = createSheetHolds();
-    holds.note(holdKey("c1", "s1", "ask-7"));
-    expect(holds.sequence(holdKey("c1", "s1", "ask-7"))).toBe(1);
-    // The SAME ask on another session, and the next ask on this one: both clean.
-    expect(holds.sequence(holdKey("c1", "s2", "ask-7"))).toBe(0);
-    expect(holds.sequence(holdKey("c1", "s1", "ask-8"))).toBe(0);
-    expect(holds.sequence(holdKey("c2", "s1", "ask-7"))).toBe(0);
-  });
-
-  test("forget drops the note, and only notifies when there was one", () => {
-    const holds = createSheetHolds();
-    const key = holdKey("c1", "s1", "ask-7");
-    let seen = 0;
-    holds.subscribe(() => {
-      seen++;
-    });
-    holds.forget(key); // nothing there: no notification
-    expect(seen).toBe(0);
-    holds.note(key);
-    holds.forget(key);
-    expect(holds.sequence(key)).toBe(0);
-    expect(seen).toBe(2);
-  });
-
-  test("the app's ONE store is live (the navigator writes, the screen reads)", () => {
-    const key = holdKey("app", "one", "ask-1");
-    SHEET_HOLDS.note(key);
-    expect(SHEET_HOLDS.sequence(key)).toBe(1);
-    SHEET_HOLDS.forget(key);
-    expect(SHEET_HOLDS.sequence(key)).toBe(0);
   });
 });
 

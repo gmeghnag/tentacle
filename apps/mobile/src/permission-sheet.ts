@@ -1,4 +1,4 @@
-import type { AutoAcceptLink } from "@tentacle/client";
+import { type AskOrigin, type AutoAcceptLink, askOrigin } from "@tentacle/client";
 /**
  * The permission sheet (docs/feat/mobile-session-view.md 12c): the phone's
  * `PermissionRequester`. Pure and React-free (AGENTS §7) — the screen renders
@@ -93,6 +93,11 @@ export type SheetState =
        * otherwise. Display/pairing only.
        */
       readonly agentId: string | null;
+      /**
+       * Who asked, from the structured fields only (`askOrigin`: workflow beats
+       * agent; nothing parsed out of text). Display only — it feeds no decision.
+       */
+      readonly origin?: AskOrigin;
       /**
        * The OTHER devices this ask also reached (docs/feat/session-auto-accept.md
        * D7): each a bounded, sanitized label, this phone's own already dropped.
@@ -202,6 +207,8 @@ export interface PermissionSheet {
   clearReturned(): void;
   /** Whether an ask is on screen. */
   readonly asking: boolean;
+  /** Asks waiting behind the one on screen (the banner's «+1»). */
+  readonly queued: number;
   /**
    * The session's shared auto-accept, for the screen's switch (`null`: this
    * computer does not share it — the switch is disabled with a reason).
@@ -335,6 +342,10 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
             }
           : null,
       agentId: entry.options?.agent?.id ?? null,
+      origin: askOrigin({
+        ...(entry.options?.agent === undefined ? {} : { agent: entry.options.agent }),
+        ...(entry.options?.workflow === undefined ? {} : { workflow: entry.options.workflow }),
+      }),
       // The daemon's list of who else was asked, minus this phone's own label
       // (docs/feat/session-auto-accept.md D7). Display only, and the labels come
       // from a daemon that may be a pod: bounded and stripped, never trusted.
@@ -472,6 +483,9 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     requester,
     get asking() {
       return state.kind === "asking";
+    },
+    get queued() {
+      return queue.length;
     },
     get autoAccept() {
       return deps.autoAccept?.() ?? null;

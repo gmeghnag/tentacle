@@ -64,7 +64,12 @@ export type IconName =
   | "doc.text"
   | "doc.plaintext"
   | "chart.bar.xaxis"
-  | "doc";
+  | "doc"
+  /** A sub-agent asking (docs/fix/mobile-ask-surfaces.md). */
+  | "arrow.triangle.branch"
+  /** A workflow step asking. */
+  | "point.topleft.down.to.point.bottomright.curvepath"
+  | "chevron.up";
 
 export interface IconProps {
   readonly name: IconName;

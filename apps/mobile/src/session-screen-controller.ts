@@ -41,6 +41,7 @@ import {
   withLiveCards,
   withPhase,
 } from "./artifact-join.ts";
+import { ASK_PARKS, parkKey } from "./ask-park.ts";
 import {
   COMPACTED_SHOWN_MS,
   type OutcomeLine,
@@ -784,6 +785,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           // device it is shown on (D7). The name the person gave this phone at
           // pairing — the same one the computer lists it under.
           ownHost: () => deps.phoneName?.(),
+          // A re-delivered ask the person parked opens parked, never as a surprise
+          // sheet (docs/fix/mobile-ask-surfaces.md D3).
+          wasParked: (requestId) =>
+            ASK_PARKS.has(parkKey(deps.compose?.computerId ?? "", deps.sessionId, requestId)),
           // The age guard's release is a clock event: it re-renders through the
           // same `onChange` every other change uses (never a screen-side timer).
           schedule: (fn, ms) => {

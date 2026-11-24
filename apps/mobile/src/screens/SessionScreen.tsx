@@ -64,6 +64,7 @@ import { activityView, agentCardTarget } from "../activity.ts";
 import type { AppLogField } from "../app-log.ts";
 import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import { seenFor } from "../artifact-seen-store.ts";
+import { ASK_DETENT, ASK_PARKS, askBanner, askPresented, parkKey } from "../ask-park.ts";
 import { CHART_SETTINGS } from "../chart-settings-expo.ts";
 import type { ChartSettings } from "../chart-settings-store.ts";
 import { chatStatus, titleLabel } from "../chat-header.ts";
@@ -143,21 +144,20 @@ import { SHEET_HOSTS } from "../sheet-host.ts";
 import {
   type AfterDismissIntent,
   PRESENTED_SHEET_KINDS,
-  SHEET_HOLDS,
+  SHEET_DETENTS,
   type SheetEntry,
   type SheetRouteLike,
   appActivity,
   askRouteId,
-  askRouteParams,
   askingParamUpdate,
   desiredStack,
   dismissedNatively,
   drainPops,
-  holdKey,
   managedStack,
   queueAfterDismiss,
   readyIntents,
   reconcile,
+  rememberedDetent,
   sessionInFront,
   sheetEntriesOf,
   sheetHidden,
@@ -175,6 +175,7 @@ import { type ToolsSegmentId, toolsSummary, toolsView } from "../tools-view.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { ActivityBadge } from "../ui/ActivityBadge.tsx";
+import { AskSlim } from "../ui/AskSlim.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
 import { ContextRing } from "../ui/ContextRing.tsx";
@@ -1287,10 +1288,17 @@ export function SessionScreen({
   const desired = desiredStack({
     user: userSheet({ commands: commandsOpen, tools: toolsOpen, info: infoOpen }),
     outbox: decision !== null,
-    // The ask is on screen while the sheet holds ONE, answered or not: a
-    // `returned` reply still has words to read, and it is swipe-dismissible
-    // (D5). Only `idle` means "no ask to show" (today's `<Modal visible>`).
-    permission: state.sheet.kind !== "idle",
+    // The sheet is up while the ask is on screen and NOT parked (a swipe parks it:
+    // the banner shows instead) and the drawer is closed; a `returned` reply still
+    // has words to read, and is swipe-dismissible. `idle` → nothing to show.
+    permission:
+      state.sheet.kind === "returned" ||
+      askPresented({
+        asking: state.sheet.kind === "asking",
+        parked: state.sheet.kind === "asking" && state.sheet.parked,
+        drawerOpen,
+        presentable: true,
+      }),
   });
   // Only the kinds this build presents natively are pushed: the other three
   // still draw their own RN `Modal` (S4/S5 migrate them).
@@ -1305,16 +1313,46 @@ export function SessionScreen({
   // requester had none. Recomputed only when the presented ask changes.
   const askingSheet = state.sheet.kind === "asking" ? state.sheet : null;
   const askId = askingSheet === null ? null : askRouteId(askingSheet.requestId, askingSheet.seq);
-  // The blocked-dismissal note is STORED outside React (the navigator's
-  // `gestureCancel` listener writes it) and READ here, where the ask's element is
-  // built: one subscription, one `held` per ask. A new ask starts un-held.
-  const holdsKey =
-    askId === null || owner === null ? null : holdKey(owner.computerId, owner.sessionId, askId);
-  const subscribeHolds = useCallback((listener: () => void) => SHEET_HOLDS.subscribe(listener), []);
-  const heldNote = useSyncExternalStore(subscribeHolds, () =>
-    holdsKey === null ? 0 : SHEET_HOLDS.sequence(holdsKey),
-  );
-  const held = heldNote > 0;
+  // The detent the ask's sheet is at, fed by the route's `sheetDetentChange`
+  // (App.tsx): the content draws the one-row form at the peek, the card above it.
+  const askDetent = useSyncExternalStore(ASK_DETENT.subscribe, ASK_DETENT.get);
+  // A new ask opens at the detent the person left it at, else the card (1).
+  useEffect(() => {
+    if (askId !== null) {
+      ASK_DETENT.set(rememberedDetent(SHEET_DETENTS, "permission", askId) ?? 1);
+    }
+  }, [askId]);
+  // The park memory (D3): the ask's own id under this session. A swipe notes it,
+  // a settle forgets it (below), so a re-delivered parked ask opens parked.
+  const parkedKey =
+    owner === null || askingSheet === null || askingSheet.requestId === null
+      ? null
+      : parkKey(owner.computerId, owner.sessionId, askingSheet.requestId);
+  // The drawer opening over a presented ask parks it, so on return the banner
+  // shows instead of a surprise sheet (frame A5).
+  useEffect(() => {
+    if (drawerOpen && state.sheet.kind === "asking" && !state.sheet.parked) {
+      if (parkedKey !== null) {
+        ASK_PARKS.note(parkedKey);
+      }
+      sheet.park();
+    }
+  }, [drawerOpen, state.sheet, parkedKey, sheet]);
+  // Settled (answered or resolved elsewhere): the note is spent with the ask.
+  const parkedKeyRef = useRef<string | null>(null);
+  parkedKeyRef.current = parkedKey;
+  const lastParkedKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastParkedKey.current !== null && lastParkedKey.current !== parkedKey) {
+      ASK_PARKS.forget(lastParkedKey.current);
+    }
+    lastParkedKey.current = parkedKey;
+  }, [parkedKey]);
+  const queued = state.sheet.kind === "asking" ? sheet.queued : 0;
+  const banner_ask =
+    state.sheet.kind === "asking"
+      ? askBanner(state.sheet, queued, state.sheet.origin ?? { kind: "main" })
+      : null;
   // Publish what the routes draw (D2). A layout effect, so the element is in the
   // host before the reconciler below can push the route that reads it.
   useLayoutEffect(() => {
@@ -1413,7 +1451,12 @@ export function SessionScreen({
     host.publish(
       "permission",
       state.sheet.kind === "idle" ? undefined : (
-        <PermissionSheetView sheet={sheet} state={state.sheet} palette={palette} held={held} />
+        <PermissionSheetView
+          sheet={sheet}
+          state={state.sheet}
+          palette={palette}
+          detent={askDetent}
+        />
       ),
     );
   });
@@ -1453,10 +1496,18 @@ export function SessionScreen({
     if (gone.includes("info")) {
       closeInfoSheetOnly();
     }
-    // The ask (S5): a swipe while `returned` is free (D5), so it is a real
-    // dismissal — today's `onRequestClose`, which is what `dismiss()` did.
+    // The ask: a swipe while ASKING parks it (nothing answered, nothing withdrawn;
+    // the banner shows). A swipe while `returned` is a real dismissal, as before.
     if (gone.includes("permission")) {
-      sheet.dismiss();
+      const at = parkedKeyRef.current;
+      if (sheet.asking) {
+        if (at !== null) {
+          ASK_PARKS.note(at);
+        }
+        sheet.park();
+      } else {
+        sheet.dismiss();
+      }
     }
   }, [actual, closeToolsSheetOnly, closeInfoSheetOnly, sheet]);
   // The intents that need the sheet gone first (Commands → Rename is the only
@@ -1549,16 +1600,6 @@ export function SessionScreen({
       // A PATCH: `BaseRouter` merges it over the params the route holds, so the
       // identity it was pushed with (computer, session, kind, askId) stays.
       updateSheetParams(navigation, update.key, update.params);
-    }
-    // The ask's note is spent with the ask: read back from the ROUTE, because a
-    // settled sheet no longer holds an id (it is a `returned` reply) — a note left
-    // behind would be inherited by the next delivery of the same ask.
-    if (permissionAsking) {
-      return;
-    }
-    const settled = askRouteParams(navigation.getState().routes, owner);
-    if (settled?.askId != null) {
-      SHEET_HOLDS.forget(holdKey(owner.computerId, owner.sessionId, settled.askId));
     }
   }, [navigation, owner, permissionAsking, askId]);
   // An RN `Modal` must not be drawn while a native sheet is up or coming (F6):
@@ -1762,6 +1803,26 @@ export function SessionScreen({
             )
           }
         />
+        {banner_ask === null ? null : (
+          // The parked ask (docs/fix/mobile-ask-surfaces.md): the sheet is down, the
+          // ask is still pending. A tap brings it back (the person's intent).
+          <View style={styles.askBanner}>
+            <AskSlim
+              testID="ask-banner"
+              palette={palette}
+              title={banner_ask.title}
+              originShort={banner_ask.originShort}
+              more={banner_ask.more}
+              actionLabel="Review"
+              onPress={() => {
+                if (parkedKey !== null) {
+                  ASK_PARKS.forget(parkedKey);
+                }
+                sheet.unpark();
+              }}
+            />
+          </View>
+        )}
         {banner === null ? null : (
           <View testID={`banner-${banner.kind}`}>
             <Banner
@@ -2318,6 +2379,7 @@ export function SessionScreen({
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
+  askBanner: { paddingHorizontal: 12, paddingTop: 6 },
   /** Laid out (and scrolled) but not yet shown: the opening landing. */
   hidden: { flex: 1, opacity: 0 },
   list: { paddingTop: 8, paddingBottom: 16 },

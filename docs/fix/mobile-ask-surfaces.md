@@ -503,3 +503,15 @@ frames A1–A7 before the iOS build.
 - **Drift:** (1) `SHEET_HOLDS`/`holdKey` are NOT removed here: `App.tsx:215,3326` still imports/uses them and `App.tsx` is S6 (removing now breaks typecheck). S6 deletes them with `perm-hold`/`gestureCancel`; `ask-park.ts` has its own `parkKey` of the same shape. (2) `askBanner(state, queued, origin)`: no `parked` arg, since `parked` lives on the asking state; `origin` is passed for `originShort` (same reason as S4). (3) `wasParked` is an injected dep, so the sheet stays decoupled from the global `ASK_PARKS`; S6 wires `ASK_PARKS.has(parkKey(...))` and calls `note`/`forget`. (4) The "planned drain pop does not park" test only pins that nothing in the sheet parks by itself; the pop-not-park rule at `SessionScreen.tsx:1443-1449` is exercised in S6 wiring.
 - **Mutations (each reverted):** `sheetGestureEnabled` blocks permission+asking → 2 fail; `park()` calls `dismiss()` → 3 fail; `wasParked` inverted → 3 fail.
 - **Changelog:** none added; the S1a fragment `changelog.d/mobile-ask-surfaces.fixed.md` covers it.
+
+### S6 — phone render (executor claude-sonnet-5-5, 2026-11-24) — PARTIAL
+
+- **Load-bearing check re-run:** S5's `park()`/`askSurface`/`askPresented` exist and the route's `gestureEnabled` is true — holds.
+- **Added:** `ui/{AskCard,AskSlim,PolpettoGlyph}.tsx`; `ask-park.ts` `ASK_DETENT` feed (detent → content); `permission-sheet.ts` `origin` on the asking state + `queued`; `Icon.tsx` (+`arrow.triangle.branch`, curvepath, `chevron.up`).
+- **Rewritten/wired:** `screens/PermissionSheet.tsx` (slim at peek, card above, no `perm-later`/`perm-hold`); `SessionScreen.tsx` (banner `ask-banner`, swipe → `park()` while asking / `dismiss()` while returned, drawer open parks, `askPresented` into `desiredStack`, `ASK_PARKS` forget on settle); `session-screen-controller.ts` (`wasParked`); `App.tsx` (`gestureCancel` removed, `sheetDetentChange` → `ASK_DETENT`); `sheet-plan.ts` (`SHEET_HOLDS`/`holdKey` deleted, as S5 deferred).
+- **Tests/flows:** `native-sheets-wiring` and `sheet-plan` rewritten, `e2e-flows` updated; flow 08 now drives swipe → `ask-banner` → tap → Allow once; 08c reaches the reply through `perm-menu`. 311 pass / 0 fail over 7 touched/covering files; `tsc -p apps/mobile` and biome clean on changed files.
+- **Mutations (reverted):** swipe → `dismiss()` instead of `park()` → wiring test red; `ASK_DETENT.set` removed from App.tsx → wiring test red.
+- **NOT done (PARTIAL):** `e2e/flows/46-ask-park.yaml` (drawer leg) not written (a new flow needs run.ts/shard registration; 08 covers swipe → banner → tap). Simulator unverified: peek-row passthrough, flows 08/08c with `perm-menu`. `AskSlim` at the peek has a no-op `onPress` (the person drags up). The origin age is passed as null. Kit/S9 untouched.
+- **Changelog:** `changelog.d/mobile-ask-surfaces.changed.md` (the S1a `.fixed` fragment remains).
+
+*— claude-sonnet-5-5, 2026-11-24*

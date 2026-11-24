@@ -88,3 +88,36 @@ export function askPresented(input: AskPresentedInput): boolean {
 export function askSurface(detentIndex: number): "slim" | "card" {
   return detentIndex <= 0 ? "slim" : "card";
 }
+
+export interface AskDetentFeed {
+  /** The detent index the ask's sheet is at (0 = peek). */
+  get(): number;
+  set(index: number): void;
+  subscribe(listener: () => void): () => void;
+}
+
+/** The sheet's content learns its detent here (`sheetDetentChange` → `askSurface`). */
+export function createAskDetentFeed(initial = 1): AskDetentFeed {
+  let index = initial;
+  const listeners = new Set<() => void>();
+  return {
+    get: () => index,
+    set: (next) => {
+      if (next === index) {
+        return;
+      }
+      index = next;
+      for (const l of [...listeners]) {
+        l();
+      }
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+export const ASK_DETENT: AskDetentFeed = createAskDetentFeed();

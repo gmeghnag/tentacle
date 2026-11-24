@@ -72,6 +72,7 @@ import { ARTIFACT_CACHE, shareCachedCopy } from "./src/artifact-cache-expo.ts";
 import { ARTIFACT_FEEDS } from "./src/artifact-feed.ts";
 import { sessionKey } from "./src/artifact-seen-store.ts";
 import { artifactPreviewSource } from "./src/artifact-thumbnail.ts";
+import { ASK_DETENT } from "./src/ask-park.ts";
 import { CHART_SETTINGS } from "./src/chart-settings-expo.ts";
 import type { ChartSettings } from "./src/chart-settings-store.ts";
 import type { ComposeHandle, PickedPhoto } from "./src/compose-controller.ts";
@@ -123,7 +124,6 @@ import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
 import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { loadFigtree } from "./src/fonts-expo.ts";
 import { foregroundAction } from "./src/foreground-gate.ts";
-import { playHaptic } from "./src/haptics.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -212,8 +212,6 @@ import {
 } from "./src/session-screen-controller.ts";
 import {
   SHEET_DETENTS,
-  SHEET_HOLDS,
-  holdKey,
   recordDetent,
   sheetDetentContext,
   sheetGround,
@@ -3307,23 +3305,19 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
             listeners={({ route }) => ({
               // Only a STABLE change is remembered (`recordDetent`): a re-push
               // after the lock drain re-opens at it (Step 0b L3).
-              sheetDetentChange: (event) =>
+              sheetDetentChange: (event) => {
+                // The ask's content draws the one-row form at the peek and the
+                // card above it: it learns the detent here (every change, so the
+                // card appears as soon as the drag leaves the peek).
+                if (route.params.kind === "permission") {
+                  ASK_DETENT.set(event.data.index);
+                }
                 recordDetent(
                   SHEET_DETENTS,
                   route.params.kind,
                   sheetIdentity(route.params.kind, route.params.askId ?? null),
                   event.data,
-                ),
-              // A swipe/backdrop that the blocked `gestureEnabled:false` refused
-              // (D5): RNS reports it, so the attempt is not silent — the light
-              // haptic and the inline footnote under the ask's options.
-              gestureCancel: () => {
-                const askId = route.params.askId;
-                if (route.params.kind !== "permission" || askId === undefined) {
-                  return;
-                }
-                playHaptic("light");
-                SHEET_HOLDS.note(holdKey(route.params.computerId, route.params.sessionId, askId));
+                );
               },
             })}
           >

@@ -410,62 +410,6 @@ export function askRouteId(requestId: string | null, seq: number): string {
 }
 
 /**
- * What one ask's blocked-dismissal note is stored under: the ask's OWN id, so a
- * new ask never inherits the note the previous one earned (D5).
- */
-export function holdKey(computerId: string, sessionId: string, askId: string): string {
-  return `${computerId}\u0000${sessionId}\u0000${askId}`;
-}
-
-/** How many times a blocked dismissal was attempted for one ask. */
-export interface SheetHolds {
-  /**
-   * A blocked swipe/backdrop was attempted on this ask (`gestureCancel`): the
-   * ask plays the `light` haptic and shows the inline footnote under its options
-   * (D5). Monotonic per key: a second attempt is a NEW note, never a no-op.
-   */
-  note(key: string): void;
-  /** How many attempts this ask has had; 0 = none (the footnote is hidden). */
-  sequence(key: string): number;
-  /** The screen's `useSyncExternalStore` subscription. */
-  subscribe(listener: () => void): () => void;
-  /** The ask is settled, or the session is gone: drop its note. */
-  forget(key: string): void;
-}
-
-/**
- * The blocked-dismissal notes, held outside React like `SHEET_DETENTS`: the
- * navigator's `gestureCancel` listener observes an attempt on a route it does
- * not own the state of, and the session screen that publishes the ask's element
- * reads it back — the two are different screens (`sheet-host.ts`'s reason).
- */
-export function createSheetHolds(): SheetHolds {
-  const counts = new Map<string, number>();
-  const listeners = new Set<() => void>();
-  const notify = (): void => {
-    for (const listener of listeners) {
-      listener();
-    }
-  };
-  return {
-    note(key) {
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-      notify();
-    },
-    sequence: (key) => counts.get(key) ?? 0,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    forget(key) {
-      if (counts.delete(key)) {
-        notify();
-      }
-    },
-  };
-}
-
-/**
  * The opening context for a sheet's options: Dynamic Type, the detent the person
  * left this sheet at (D3), and whether Session info was opened with a reveal —
  * the one opening that scrolls inside the sheet, so it needs the room.
@@ -567,9 +511,6 @@ export function reconcile(
   const wanted = desired[i];
   return wanted === undefined ? null : { action: "push", kind: wanted };
 }
-
-/** The app's ONE note store (the navigator writes it, the session screen reads it). */
-export const SHEET_HOLDS: SheetHolds = createSheetHolds();
 
 /**
  * The route's params a screen may rewrite in place, by `SET_PARAMS` keyed on the

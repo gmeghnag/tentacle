@@ -35,28 +35,28 @@ appId: so.tentacle.app
     visible:
       id: "perm-sheet"
     timeout: 20000
-# What the daemon offered, drawn by the sheet: the three options and the reply one
-# (this daemon takes a reply with a refusal). A native `formSheet` opens at the
-# MIDDLE detent (0.5) since docs/feat/mobile-native-sheets.md S5, so the items low
-# in it are scrolled to, never assumed on screen.
+# What the card offers (docs/fix/mobile-ask-surfaces.md D4): Deny and Allow once,
+# outside any scroll, so they are on screen at any detent. The rare options
+# (Always allow, reply) sit behind the `…` menu, never beside them.
 - assertVisible:
     id: "perm-allow_once"
 - assertVisible:
+    id: "perm-reject_once"
+- assertNotVisible:
+    id: "perm-allow_always"
+- tapOn:
+    id: "perm-menu"
+- assertVisible:
     id: "perm-allow_always"
 - assertVisible:
-    id: "perm-reject_once"
-# No note before any attempt: at M its place (under the options) is on screen, so
-# the note asserted below is the swipe's, not something always drawn.
-- assertNotVisible:
-    id: "perm-hold"
-# D5: while the ask is unanswered the sheet cannot be swiped away — `gestureEnabled`
-# is false on the route — so a drag past the bottom edge is a BLOCKED attempt (RNS's
-# `presentationControllerShouldDismiss` refuses it and `gestureCancel` fires): the
-# hold note appears under the options and the ask is still unanswered. This is the
-# one property a unit test cannot check (a native gesture), so it is driven here.
-# Two hard drags, each from the sheet's top edge (the grabber at M ≈ 54 %, then at
-# S ≈ 74 %) past the bottom of the screen: the first lands the sheet at S (a drag
-# still moves between detents, Step 0 F3), the second is the attempt at S.
+    id: "perm-reply"
+- tapOn:
+    id: "perm-menu"
+# The sheet NEVER blocks: a swipe down PARKS the ask (nothing is answered, nothing
+# is withdrawn) and a banner under the header says it is still waiting. Two hard
+# drags from the sheet's top edge (the grabber at M ≈ 54 %, then at S ≈ 74 %)
+# past the bottom of the screen; a native gesture is the one thing a unit test
+# cannot prove, so it is driven here.
 - swipe:
     start: "50%, 54%"
     end: "50%, 99%"
@@ -67,31 +67,20 @@ appId: so.tentacle.app
     end: "50%, 99%"
     duration: 300
 - waitForAnimationToEnd
-# Still up, still unanswered: the first option is on screen even at S.
-- assertVisible:
+- extendedWaitUntil:
+    visible:
+      id: "ask-banner"
+    timeout: 10000
+# Parked, not answered: the card's buttons are gone with the sheet.
+- assertNotVisible:
     id: "perm-allow_once"
-# At S the note is below the sheet's fold, and Maestro's scroll starts at the
-# screen's centre — the backdrop at S — so the sheet is dragged back to L first
-# (the person's way to it). At L the whole ask fits.
-- runFlow: _sheet-expand.yaml
-- scrollUntilVisible:
-    element:
-      id: "perm-hold"
-    direction: DOWN
-- assertVisible:
-    id: "perm-allow_once"
-- scrollUntilVisible:
-    element:
-      id: "perm-reply"
-    direction: DOWN
-- scrollUntilVisible:
-    element:
-      id: "perm-later"
-    direction: DOWN
-- scrollUntilVisible:
-    element:
+# The banner brings the SAME ask back (a tap is the intent to answer it).
+- tapOn:
+    id: "ask-banner"
+- extendedWaitUntil:
+    visible:
       id: "perm-allow_once"
-    direction: UP
+    timeout: 10000
 - runFlow:
     file: _shot.yaml
     env:
