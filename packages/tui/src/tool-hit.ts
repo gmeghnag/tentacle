@@ -9,9 +9,10 @@
  * the same coordinate the selection uses), and this module resolves that row to
  * a call id.
  *
- * Only a call's HEADER row is a control: a row of the wrapped command, a row of
- * the tool body, or a blank separator row belongs to the text, and a click there
- * does nothing new (it stays a zero-length selection, as today).
+ * A call's HEADER row is a control, and so are a `shell` call's `$ cmd` rows
+ * (`LaidItem.toggleRows`); a row of the tool body or a blank separator row
+ * belongs to the text, and a click there does nothing new (it stays a
+ * zero-length selection, as today).
  *
  * A click only counts INSIDE the transcript viewport. The terminal reports a
  * cell for every row of the screen, and only the first `viewport` rows are the
@@ -57,9 +58,10 @@ export function toolCallAt(laid: readonly LaidItem[], absRow: number): string | 
   if (!item || item.id === "") {
     return null;
   }
-  // The header is row 0 of the item (`toolLines` opens with it); every other
-  // row of the item — a wrapped command continuation or a body row — is text.
-  return absRow === item.start ? item.id : null;
+  // The header is row 0 of the item (`toolLines` opens with it); a shell call's
+  // `$` rows follow it and toggle too (`toggleRows`). Every other row — output,
+  // body, blank — is text.
+  return absRow >= item.start && absRow < item.start + item.toggleRows ? item.id : null;
 }
 
 /**

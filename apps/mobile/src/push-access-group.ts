@@ -51,3 +51,13 @@ export const APP_ACCESS_GROUP = accessGroupFor(TEAM_ID, APP_GROUP);
 
 /** The shared notification group, as `kSecAttrAccessGroup` takes it. */
 export const PUSH_ACCESS_GROUP = accessGroupFor(TEAM_ID, PUSH_GROUP);
+
+/**
+ * The `keychainService` the app passes to `expo-secure-store` for the push items.
+ * The store composes `<service>:no-auth` (`SecureStoreModule.swift`); the library's
+ * default is `"app"`, which is what every item already on a phone was written
+ * under — pinning it keeps them readable (no key rotation) and makes it explicit
+ * on both sides. The extension's literal in `NotificationService.swift` must be
+ * `<this>:no-auth` (`test/push-keychain-service.test.ts`).
+ */
+export const PUSH_KEYCHAIN_SERVICE = "app";
