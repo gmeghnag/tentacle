@@ -177,3 +177,38 @@ So the funnel is unique (five callers, as the plan said), the pre-`turnFrom` pre
 `bunx tsc --noEmit` → clean. `bunx biome check` on all 8 changed files → 0 errors, 0 warnings. Targeted suites: `packages/tools/test` **562 pass / 0 fail**; `packages/agent/test` + `packages/providers/test` **1022 pass / 0 fail**; the six new/changed files **52 pass / 0 fail**. Full `bun run check` is the script's, after this.
 
 Unverified here: the live acceptance (a worker and a `serve` session on the owner's Qwen, turn-3 `promptTokens` dropping by ≈3.1k) — it needs the owner's model and a real picture; the mechanism it would confirm is what T3 pins on the wire.
+
+## Review
+
+*— claude-opus-5-5 (fresh-context adversarial reviewer), 2026-11-24*
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH or MEDIUM findings). The planner was the same model family (Opus) as this reviewer; the executor was Sonnet. So model diversity is partial.
+
+**Gate:** I ran the six touched or new test files: **52 pass / 0 fail** (195 expects). `bun run typecheck` is clean. `bun run lint` checked 2390 files, 0 errors and 0 warnings. I did not run the full `bun test`; the orchestrator runs it at merge.
+
+**Premises checked (all TRUE):**
+- `ToolContext.history` is the stored `messages` array, not the projected request (`agent.ts:1412`). So `image_view` finds an aged ref even though the request has dropped its `attachments`.
+- `toolImages` and `attachments` are the same `uploads` object on `serve` (`session-host.ts:1603,1696`). So `store.holds(userRef)` is meaningful, and the provider reads a tool-result user ref from that one source (`images.ts:396-430`).
+- User attachments can only be images (`core/attachments.ts:90`). So the "image …" placeholder never names a non-image.
+- `estimateUsed` matches its anchor by the identity of its last message (`context-awareness.ts:134`). Aged copies are rebuilt on each call, so at a turn boundary the estimate falls back to an over-estimate or a full count. That is F11's safe direction.
+- Compaction, `/clear` and `context_reset` rewrite history only between turns or with no refs (`session.ts:437,469`, `agent.ts:2783`).
+
+**Mutations** (each reverted; `git status` is clean afterwards):
+- (1) The round's `requestHistory` was given `messages.length` instead of `turnFrom`. T2c failed.
+- (2) `image_view`'s user-ref lookup was fed `undefined` history. All 5 T4 cases failed.
+- The executor's table covers the threshold, the age in the placeholder, the forced-true gate and the prune ordering.
+
+**Attacks tried:**
+- (a) A mid-turn rewrite of `[0, turnFrom)`: none found besides `context_reset`, which carries no refs.
+- (b) Forging an `image_view` reach into a store upload outside the history: the scan covers `ctx.history` user messages only.
+- (c) A placeholder written into a file: the `PRUNE_MARKER` prefix triggers the existing guard (T5). The description builds its text from `PRUNE_SENTINEL`, so the source holds no literal.
+- (d) The gate on a pod or sub-agent: there is no `toolImages` and no tool, so the gate is false (T2e).
+- (e) Wake, hook or steer turns with an extra answer: images age early, the safe direction, and this is documented.
+
+**Nits (non-blocking):**
+1. `image-view.ts:172-194`: T4's plan row "a tool entry + a user ref → ambiguous with both labels" was not built. A store `one` hit returns the tool image without scanning the history. With an ≥8-hex prefix of sha256 ids this is practically unreachable. Still, it is unrecorded drift.
+2. `image-view.ts:147-151`: when `model.imageDetail` forces `high`, the reply still says "no low variant for a user image". Harmless wording.
+3. No loop-level test has the model call `image_view` on an aged ref. It works by construction (see the first premise above) but is not pinned end to end.
+4. The forced final report's `turnFrom` (`agent.ts:1950`) has no mutation coverage.
+
+**How the executor behaved:** Step 0 was run and its output recorded. The drift is honest and justified, including the prune-composition case it added after one of its own mutations went uncaught. It made no out-of-scope file changes.
