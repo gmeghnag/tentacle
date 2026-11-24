@@ -448,7 +448,7 @@ export function bodyCommand(name: string, raw: string): readonly string[] {
   ];
 }
 
-/** The TUI's cut (`render-lines.ts`): over 8 lines → the first 6 + `… +N more lines`. */
+/** The cut: over 8 lines → the LAST 6 + `… N earlier lines` (owner 24/11: a log's tail). */
 const CUT_OVER = 8;
 const CUT_KEEP = 6;
 
@@ -470,7 +470,9 @@ export function outputView(
   if (opts.full || lines.length <= CUT_OVER) {
     return { lines, hidden: 0, error: opts.error };
   }
-  return { lines: lines.slice(0, CUT_KEEP), hidden: lines.length - CUT_KEEP, error: opts.error };
+  // The TAIL: a log's end is what a reader wants (owner 24/11); `hidden` counts
+  // the earlier lines held back.
+  return { lines: lines.slice(-CUT_KEEP), hidden: lines.length - CUT_KEEP, error: opts.error };
 }
 
 function unit(n: number, word: string): string {
