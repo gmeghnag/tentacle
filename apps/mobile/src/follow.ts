@@ -119,7 +119,7 @@ export const SETTLE_MS = 450;
  * gone quiet, a following list that is not at its true end is scrolled there.
  * Not following → never moved (the person is reading further up).
  */
-export function settleStep(state: Follow, m: ScrollMetrics): FollowStep | null {
+export function settleStep(state: Follow, m: ScrollMetrics, animated = true): FollowStep | null {
   if (!state.following) {
     return null;
   }
@@ -127,9 +127,20 @@ export function settleStep(state: Follow, m: ScrollMetrics): FollowStep | null {
   if (end === null || m.content <= m.viewport) {
     return null;
   }
-  return Math.abs(m.offset - end) > SETTLE_SLACK_PT
-    ? { state, scrollTo: end, animated: true }
-    : null;
+  return Math.abs(m.offset - end) > SETTLE_SLACK_PT ? { state, scrollTo: end, animated } : null;
+}
+
+/**
+ * A landing just ENDED (fix/mobile-open-long-session): it was pending, now it is
+ * not. A landing's last silent scroll can be issued against an end the native
+ * view had before the tail's cells were laid out (the same short landing as
+ * `settleStep`'s bug 5), and once the landing is over no size change is left to
+ * re-arm the settle check — a long history then rests above its real end. The
+ * screen arms ONE settle check at this moment, performed silently (`animated:
+ * false`): the list is already visible, and a visible scroll is the complaint.
+ */
+export function landingEnded(before: Landing, after: Landing): boolean {
+  return landingPending(before) && !landingPending(after);
 }
 
 /** The pill's tap: back to the end, following again. */

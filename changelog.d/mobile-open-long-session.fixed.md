@@ -1,0 +1,1 @@
+- **A long session opens at its real end.** Opening a session with a long history could leave the transcript resting a turn or so above the latest message, with the composer covering the last turn. The list now re-checks, once, where its opening landing came to rest and corrects it with a silent jump (never animated).

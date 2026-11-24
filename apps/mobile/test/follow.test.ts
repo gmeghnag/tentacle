@@ -18,6 +18,7 @@ import {
   jumped,
   landingAwaiting,
   landingDone,
+  landingEnded,
   landingOwns,
   landingPending,
   landingQuiet,
@@ -27,6 +28,7 @@ import {
   nearBottom,
   reattachLanding,
   scrolled,
+  settleStep,
   shown,
   viewportChanged,
 } from "../src/follow.ts";
@@ -713,5 +715,36 @@ describe("settleStep — following, but parked short of the true end", () => {
     const { settleStep } = await import("../src/follow.ts");
     expect(settleStep(initialFollow, { offset: 0, content: 0, viewport: 600 })).toBeNull();
     expect(settleStep(initialFollow, { offset: 0, content: 400, viewport: 600 })).toBeNull();
+  });
+});
+
+describe("a landing that ENDS re-checks where it came to rest (fix/mobile-open-long-session)", () => {
+  const at = (offset: number, content: number) => ({ offset, content, viewport: 800 });
+
+  test("landingEnded: only the pending -> not pending edge", () => {
+    expect(landingEnded(landingStart, landingStart)).toBe(false);
+    expect(landingEnded(landingStart, landingDone)).toBe(true);
+    expect(landingEnded(landingQuiet, landingDone)).toBe(true);
+    expect(landingEnded(landingDone, landingDone)).toBe(false);
+    // a hidden landing that hands over into the silent tail is still pending
+    const tail = landingReveal(landingStart, LONG, true, ROWS).state;
+    expect(landingEnded(landingStart, tail)).toBe(false);
+    expect(landingEnded(tail, landingDone)).toBe(true);
+  });
+
+  test("the landing's own last scroll came to rest SHORT of the end: the settle step fixes it, SILENTLY", () => {
+    // The scroll went to 5200 against a stale end; the cells then grew the content
+    // to 5770+800: the list rests ~570 pt above the true end, following, landing over.
+    const step = settleStep(initialFollow, at(5200, 6570), false);
+    expect(step).toEqual({ state: initialFollow, scrollTo: 5770, animated: false });
+  });
+
+  test("a list already at its end, or a reader scrolled up, is never moved", () => {
+    expect(settleStep(initialFollow, at(5770, 6570), false)).toBeNull();
+    expect(settleStep({ following: false, unseen: false }, at(100, 6570), false)).toBeNull();
+  });
+
+  test("the default stays animated (the ordinary settle check is unchanged)", () => {
+    expect(settleStep(initialFollow, at(5200, 6570))?.animated).toBe(true);
   });
 });
