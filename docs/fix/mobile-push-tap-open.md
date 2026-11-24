@@ -92,3 +92,42 @@ Owner «ok facciamoli partire» (24/11): execute **Design 1 + 2 now** (service p
 - **Design 3:** not in this round (waits owner C3 log line).
 - **Checks run:** the 5 touched/related mobile test files (45 pass), `biome check` on `apps/mobile/App.tsx` + `src` + the touched tests (clean), `tsc -p apps/mobile` (clean). Full gate is the script's.
 - **Unverified:** on-device banner text and cold-tap routing (simulator cannot prove the NSE/SpringBoard tap).
+
+## Review
+
+*— claude-opus-5-5 (fresh context, adversarial; a different model family from the Sonnet/DeepSeek executor), 2026-11-24*
+
+**Verdict: APPROVE-WITH-NITS (PASS).** No HIGH. Two MEDIUM, neither blocks the merge.
+
+**Gate (narrow, as asked):** `bun test` on route-queue + push-keychain-service + push-wiring-guards + deep-link: 34 pass / 0 fail. `bun run lint`: clean (2374 files). `bun run typecheck` (root + mobile + relay): clean. The full `bun test` was not re-run here.
+
+**Premises**
+| Premise | Result |
+|---|---|
+| expo-secure-store 58.0.3 composes `(keychainService ?? "app") + ":no-auth"`, account = generic = `Data(key.utf8)` (`node_modules/expo-secure-store/ios/SecureStoreModule.swift:186-198`); `set` always passes a non-nil `requireAuthentication` (`:98`), so the suffix is always added | TRUE |
+| The extension looked for `so.tentacle.app:no-auth` and the app wrote `app:no-auth`, so symptom 1 is a service mismatch | TRUE |
+| The app-side change does nothing at runtime: the explicit `"app"` equals the library default, so items already on a phone stay readable and no key rotates | TRUE |
+| A cold-start tap can arrive before the navigator is ready: `NavigationContainer` is not mounted while `computers === null` (`App.tsx:2909-2916`) | TRUE |
+| "One root cause for both symptoms: falsified" (Implementation) | **FALSE**, see M1 |
+
+**Findings**
+1. **M1 — false premise in the doc (Implementation, "Background tap (unexplained)").** On every path where it cannot render, the extension sets `userInfo = [:]` (`NotificationService.swift` `applyPlaceholder`). The tap therefore carries no `tp`, so `decideAction` refuses, and a `default` tap goes to `navigate("computers")` (`notification-dispatch.ts:82-88`). That is the landing screen, for background AND cold taps alike. So the keychain mismatch DOES explain symptom 2 too. Design 1 most likely fixes the background tap as well, and Design 3 probably isn't needed. C3 should now show `refused …` (missing envelope) on the old build and nothing on the new one. Fix: correct that bullet so the owner's device test checks the background tap with the new build before Design 3 is opened.
+2. **M2 — the App wiring test does not pin the property the fix depends on.** `test/notification-route-queue.test.ts` "App wiring" checks only that `routeQueue.route(` appears in `App.tsx`. Mutation `routeQueue.route(route, true)` (always "ready", which brings the cold-start drop back) still passes all 6 tests. Fix: one assertion, `toContain("routeQueue.route(route, navigationRef.isReady())")`.
+
+**Mutations (each reverted; the tree was byte-identical afterwards, `git status` clean)**
+- Queue `flush` not clearing the slot: 1 fail. Caught.
+- Swift literal back to `so.tentacle.app:no-auth`: 1 fail. Caught.
+- `keychainService` dropped from `delete`: 1 fail. Caught.
+- App `isReady()` replaced by `true`: 0 fail. **Not caught** (M2).
+
+**Attacks tried**
+- (a) Could the explicit service orphan items or rotate the key? No. It is the same value as the default.
+- (b) Does a parked route survive a `NavigationContainer` remount, or replay twice? It is one-shot, and a second `onReady` finds an empty slot.
+- (c) Is the tap lost while the lock is up? No. The container renders under `LockGate`'s modal, so `onReady` fires anyway.
+- (d) Can a pending pairing link and a parked route both replay? Yes, in order: link first, then route. Harmless.
+- (e) The guard test 3 on expo-secure-store returns early when `apps/mobile/node_modules` is missing, so it is vacuous in CI (`--filter '!@tentacle/mobile'`). Tests 1 and 2 still hold. Nit.
+- (f) No §7 invariant touched: no protocol, persistence, broker or terminal path.
+
+**Nits:** `PushCore/PushDirectory.swift:121` still says `"<group>:no-auth"`; the extension's String `kSecAttrAccount` matching the app's Data account is a pre-existing contract that only a device can prove.
+
+**Executor behaviour:** good. It ran C2 and stopped on the real fact. It took the zero-migration alternative and documented the drift. It showed red first and reported its mutations. It overstated the App-side pin (M2) and kept the Implementation's wrong "two causes" reading (M1). C1 was not run. On-device proof is still required.
