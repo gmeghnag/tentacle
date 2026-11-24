@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import { DEFAULT_PUSH_GRACE_SECONDS } from "@tentacle/config";
-import type { ArtifactSink, AttachmentSource, ScheduleLink } from "@tentacle/core";
+import type { ArtifactSink, AttachmentSource, ScheduleLink, ToolImageStore } from "@tentacle/core";
 import {
   type AgentReuse,
   Connection,
@@ -209,6 +209,8 @@ export function createServeAgent(
     readonly cwd: string;
     readonly attachments?: AttachmentSource;
     readonly artifacts?: ArtifactSink;
+    /** The session's tool-image store (docs/feat/image-view.md D1): `serve` forwards it. */
+    readonly toolImages?: ToolImageStore;
     /** The session's scheduled wakes (docs/feat/cron-tool.md D1): `serve` schedules. */
     readonly schedules?: () => ScheduleLink | null;
   },
@@ -227,6 +229,8 @@ export function createServeAgent(
       // The session's store, so the provider can read a ref's bytes
       // (docs/feat/attachments-prompt.md D4). Absent when images are off.
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      // The SAME store, write-capable, for fs_read/image_view (docs/feat/image-view.md D1).
+      ...(ctx.toolImages ? { toolImages: ctx.toolImages } : {}),
       // The session's artifact store: the model may `present` (model-artifacts D4).
       ...(ctx.artifacts ? { artifacts: ctx.artifacts } : {}),
       // `workload_shell` (docs/feat/workload-shell.md D3): a `serve` daemon runs

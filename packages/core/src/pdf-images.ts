@@ -294,6 +294,12 @@ export interface PdfImageLimits {
    * timeout: a 100-page scan otherwise spends ~18 s on images.
    */
   readonly maxMs: number;
+  /**
+   * With an id hasher (`createImageCollector`'s `sha256`): also keep a second,
+   * smaller variant whose long edge is at most this many px, for `image_view`'s
+   * `detail: "low"` (docs/feat/image-view.md D3). Absent = one variant, no ids.
+   */
+  readonly lowEdge?: number;
 }
 
 export const DEFAULT_PDF_IMAGE_LIMITS: PdfImageLimits = {
@@ -314,6 +320,14 @@ export interface PdfPageImage {
   readonly png?: Uint8Array;
   readonly width: number;
   readonly height: number;
+  /** The sha256 of `png` (docs/feat/image-view.md D3): set only when the read keeps refs. */
+  readonly id?: string;
+  /** The `detail: "low"` PNG; absent when the picture is already within `lowEdge` (low = high). */
+  readonly low?: Uint8Array;
+  /** The low variant's id (`id` itself when `low` is absent) and size. */
+  readonly lowId?: string;
+  readonly lowWidth?: number;
+  readonly lowHeight?: number;
 }
 
 /** What a read did with its images — the footer's numbers. */
@@ -325,6 +339,10 @@ export interface PdfImageSummary {
   readonly undecodable: number;
   /** Pages not examined for images: reached after `maxMs`. */
   readonly unexamined: number;
+  /** The read keeps its images for `image_view` (the footer says so instead of `sent`). */
+  readonly refs?: true;
+  /** Kept images the session store then refused (`fs_read` counts them). */
+  readonly refused?: number;
 }
 
 /** One image after the read: its page, its box and what it became. */
@@ -337,6 +355,23 @@ export interface PdfImageOutcome extends PdfPageImage {
 export function imageMarker(page: number, width: number, height: number, note?: string): string {
   const size = width > 0 && height > 0 ? ` · ${width}×${height}` : "";
   return `[image p.${page}${size}${note === undefined ? "" : ` · ${note}`}]`;
+}
+
+/** The dense-page hint (owner Q3): a paint box covering ≥ 50 % of the page box. */
+export const FULL_PAGE_HINT = 'full page — detail "high" for small text';
+
+/**
+ * Rewrite every marker naming `id` (its first 12 hex characters) from
+ * `ref <id12>` (and the dense-page hint after it) to `not kept: <reason>` —
+ * the store refused that picture (docs/feat/image-view.md D4).
+ */
+export function unkeepImageMarker(text: string, id: string, reason: string): string {
+  const id12 = id.slice(0, 12);
+  return text
+    .split(`ref ${id12} · ${FULL_PAGE_HINT}]`)
+    .join(`not kept: ${reason}]`)
+    .split(`ref ${id12}]`)
+    .join(`not kept: ${reason}]`);
 }
 
 const MARKER_LINE = /^\[image p\.\d+[^\n]*\]$/;
@@ -361,10 +396,14 @@ export function stripImageMarkers(text: string): string {
  */
 export function imageFooter(summary: PdfImageSummary): string {
   const { repeats, tiny, capped, undecodable, unexamined } = summary;
-  if (repeats + tiny + capped + undecodable + unexamined === 0) {
+  const refused = summary.refused ?? 0;
+  if (repeats + tiny + capped + undecodable + unexamined + refused === 0) {
     return "";
   }
-  const parts = [`${summary.sent} sent`];
+  const parts = [`${summary.sent} ${summary.refs === true ? "kept for image_view" : "sent"}`];
+  if (refused > 0) {
+    parts.push(`${refused} not kept (see the markers)`);
+  }
   if (summary.repeats > 0) {
     parts.push(`${summary.repeats} ${summary.repeats === 1 ? "repeat" : "repeats"}`);
   }
@@ -391,6 +430,8 @@ interface Occurrence {
   readonly key: string | null;
   readonly width: number;
   readonly height: number;
+  /** The paint covers ≥ 50 % of its page box (the dense-page hint). */
+  readonly fullPage: boolean;
 }
 
 interface FirstSeen {
@@ -399,14 +440,27 @@ interface FirstSeen {
   readonly width: number;
   readonly height: number;
   png: Uint8Array | undefined;
+  /** With refs (D3): the ids, and the low variant when it differs. */
+  id?: string;
+  low?: Uint8Array;
+  lowId?: string;
+  lowWidth?: number;
+  lowHeight?: number;
 }
 
 export interface PdfImageCollector {
   /**
    * One paint and its decoded object (`null` when it could not be decoded).
    * `cacheId` (the XObject id) skips re-hashing an object painted again.
+   * `pageArea` (the page box, PDF units²) enables the dense-page hint.
    */
-  add(page: number, paint: PdfImagePaint, image: PdfDecodedImage | null, cacheId?: string): void;
+  add(
+    page: number,
+    paint: PdfImagePaint,
+    image: PdfDecodedImage | null,
+    cacheId?: string,
+    pageArea?: number,
+  ): void;
   /** One page not examined for images (the read's `maxMs` ran out first). */
   skipPage(): void;
   /** Decide every image of the read: outcomes in paint order, and the summary. */
@@ -423,7 +477,11 @@ export interface PdfImageCollector {
 export function createImageCollector(
   deflate: Deflate,
   limits: PdfImageLimits = DEFAULT_PDF_IMAGE_LIMITS,
+  sha256?: (bytes: Uint8Array) => string,
 ): PdfImageCollector {
+  // docs/feat/image-view.md D3: injected, so core stays free of `node:` imports.
+  const hash = limits.lowEdge !== undefined ? sha256 : undefined;
+  const lowEdge = limits.lowEdge ?? limits.maxEdge;
   const occurrences: Occurrence[] = [];
   const first = new Map<string, FirstSeen>();
   const counts = new Map<string, number>();
@@ -435,9 +493,12 @@ export function createImageCollector(
   let full = false;
 
   return {
-    add(page, paint, image, cacheId) {
+    add(page, paint, image, cacheId, pageArea) {
+      const paintArea = (paint.right - paint.left) * (paint.top - paint.bottom);
+      const fullPage =
+        hash !== undefined && pageArea !== undefined && pageArea > 0 && paintArea >= pageArea / 2;
       if (image === null) {
-        occurrences.push({ page, paint, key: null, width: 0, height: 0 });
+        occurrences.push({ page, paint, key: null, width: 0, height: 0, fullPage });
         return;
       }
       const { width, height } = image;
@@ -458,7 +519,7 @@ export function createImageCollector(
         }
       }
       if (decoded === null) {
-        occurrences.push({ page, paint, key: null, width, height });
+        occurrences.push({ page, paint, key: null, width, height, fullPage });
         return;
       }
       const size = scaledSize(width, height, limits.maxEdge);
@@ -489,13 +550,35 @@ export function createImageCollector(
             seen.png = png;
             encodedBytes += png.length;
             encodedCount += 1;
+            if (hash !== undefined) {
+              // The low variant from the SAME decoded pixels, while they exist
+              // (they are dropped right after this `add`).
+              seen.id = hash(png);
+              const small = scaledSize(width, height, lowEdge);
+              if (small.width === size.width && small.height === size.height) {
+                seen.lowId = seen.id;
+              } else {
+                const lowPx = downscalePixels(
+                  decoded.pixels,
+                  width,
+                  height,
+                  channels,
+                  small.width,
+                  small.height,
+                );
+                seen.low = encodePng(small.width, small.height, lowPx, decoded.color, deflate);
+                seen.lowId = hash(seen.low);
+              }
+              seen.lowWidth = small.width;
+              seen.lowHeight = small.height;
+            }
           }
         } else {
           full = true;
         }
         first.set(key, seen);
       }
-      occurrences.push({ page, paint, key, width: size.width, height: size.height });
+      occurrences.push({ page, paint, key, width: size.width, height: size.height, fullPage });
     },
 
     skipPage() {
@@ -530,6 +613,21 @@ export function createImageCollector(
         }
         if (seen?.png !== undefined && sent < limits.maxSent) {
           sent += 1;
+          if (seen.id !== undefined && seen.lowId !== undefined) {
+            const hint = occ.fullPage ? ` · ${FULL_PAGE_HINT}` : "";
+            const note = `ref ${seen.id.slice(0, 12)}${hint}`;
+            images.push({
+              ...base,
+              marker: imageMarker(occ.page, occ.width, occ.height, note),
+              png: seen.png,
+              id: seen.id,
+              lowId: seen.lowId,
+              lowWidth: seen.lowWidth ?? occ.width,
+              lowHeight: seen.lowHeight ?? occ.height,
+              ...(seen.low !== undefined ? { low: seen.low } : {}),
+            });
+            return;
+          }
           images.push({
             ...base,
             marker: imageMarker(occ.page, occ.width, occ.height),
@@ -538,12 +636,11 @@ export function createImageCollector(
           return;
         }
         capped += 1;
-        images.push({
-          ...base,
-          marker: imageMarker(occ.page, occ.width, occ.height, "not sent: per-read cap"),
-        });
+        const cap = hash !== undefined ? "not kept: per-read cap" : "not sent: per-read cap";
+        images.push({ ...base, marker: imageMarker(occ.page, occ.width, occ.height, cap) });
       });
-      return { images, summary: { sent, repeats, tiny, capped, undecodable, unexamined } };
+      const summary: PdfImageSummary = { sent, repeats, tiny, capped, undecodable, unexamined };
+      return { images, summary: hash !== undefined ? { ...summary, refs: true } : summary };
     },
   };
 }

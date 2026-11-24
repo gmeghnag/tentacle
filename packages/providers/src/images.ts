@@ -295,6 +295,23 @@ export function imageLimits(
   };
 }
 
+/**
+ * What one image ref costs the heuristic counter, by provider
+ * (docs/feat/image-view.md D7). Anthropic keeps the flat 1600; an
+ * OpenAI-compatible endpoint (Qwen measured ≈3.1k per image) is charged 3200 —
+ * rounded UP, the counter's never-underestimate contract. `model.imageTokens`
+ * (`override`) wins.
+ */
+export function imageTokenEstimate(provider: VisionProvider, override?: number): number {
+  if (override !== undefined && Number.isInteger(override) && override > 0) {
+    return override;
+  }
+  return provider === "anthropic" ? ANTHROPIC_IMAGE_TOKENS : OPENAI_IMAGE_TOKENS;
+}
+
+export const ANTHROPIC_IMAGE_TOKENS = 1600;
+export const OPENAI_IMAGE_TOKENS = 3200;
+
 /** The tool-image budget of a provider config (`maxToolImages`, default `MAX_TOOL_IMAGES`). */
 export function toolImageBudget(maxToolImages: number | undefined): number {
   return Math.max(0, Math.floor(maxToolImages ?? MAX_TOOL_IMAGES));
@@ -518,7 +535,7 @@ export function toolResultImages(
     const text = placeholder(
       ref,
       { ...options, inlined: selected },
-      `only the newest ${keep} tool-result images are sent (read it again to see it)`,
+      `only the newest ${keep} tool-result images are sent (call image_view again to see it)`,
     );
     if (text !== "") {
       lines.push(text);

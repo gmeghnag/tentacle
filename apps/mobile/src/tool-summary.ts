@@ -65,6 +65,9 @@ export const SUMMARISED_TOOLS: readonly string[] = [
   // A diagram's row likewise names the diagram, never its Mermaid source
   // (docs/feat/model-diagrams.md D2) — the TUI's case, name for name.
   "diagram",
+  // The model looks at a kept picture: its ref, never the raw args
+  // (docs/feat/image-view.md D10).
+  "image_view",
 ];
 
 /** The TUI's `toolSubtitle`, case for case. */
@@ -117,6 +120,12 @@ function subtitleOf(name: string, raw: string): string {
     // (docs/feat/model-diagrams.md D2) — the TUI's case, mirrored.
     case "diagram":
       return str("title") ?? raw;
+    // `Image <ref>`, plus ` · high` for the costly detail
+    // (docs/feat/image-view.md D10) — the TUI's case, mirrored.
+    case "image_view": {
+      const ref = str("ref") ?? "";
+      return str("detail") === "high" ? `${ref} · high` : ref;
+    }
     default:
       return raw;
   }

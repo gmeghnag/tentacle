@@ -780,6 +780,12 @@ function toolSubtitle(
     // (docs/feat/model-diagrams.md D2).
     case "diagram":
       return str("title") ?? tool.args;
+    // `Image <ref>`, plus the detail when it is the costly one
+    // (docs/feat/image-view.md D10). The phone mirrors this case.
+    case "image_view": {
+      const ref = str("ref") ?? "";
+      return str("detail") === "high" ? `${ref} · high` : ref;
+    }
     // `present` names the artifact, never its JSON (the args carry the whole
     // HTML/Markdown `content`): its title, else its id, else the path
     // (docs/feat/tui-present-row.md). Never the raw args.

@@ -39,6 +39,7 @@ export * from "./artifact-card.ts";
 export * from "./artifact-csp.ts";
 export * from "./pdf-text.ts";
 export * from "./pdf-images.ts";
+export * from "./tool-images.ts";
 export * from "./png.ts";
 export * from "./voice/index.ts";
 export * from "./tool-groups.ts";

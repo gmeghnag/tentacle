@@ -16,9 +16,13 @@ import type {
   ExecutionEnvironment,
   ModelProvider,
   StreamEvent,
+  Tool,
+  ToolResult,
 } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
+import { z } from "zod";
 import { Agent, type AgentConfig } from "../src/agent.ts";
+import { redactSecrets } from "../src/redact.ts";
 import { Session } from "../src/session.ts";
 
 const env: ExecutionEnvironment = {
@@ -133,5 +137,76 @@ describe("the stored message keeps its refs through the loop", () => {
     // not rebuild that message field by field: the refs are still there.
     expect(stored?.contextUsage).toBeDefined();
     expect(stored?.attachments).toEqual([ref]);
+  });
+});
+
+describe("a tool result's ONE image (docs/feat/image-view.md T8)", () => {
+  const viewTool = (result: () => ToolResult): Tool<{ ref: string }> => ({
+    name: "image_view",
+    description: "v",
+    inputSchema: z.object({ ref: z.string() }),
+    permission: "none",
+    execute: async () => result(),
+  });
+  const call = (): StreamEvent[] => [
+    { type: "tool_call", toolCall: { id: "v1", name: "image_view", arguments: '{"ref":"aaaa"}' } },
+    { type: "done" },
+  ];
+  async function run(result: () => ToolResult, extra: Partial<AgentConfig> = {}) {
+    const tools = new ToolRegistry();
+    tools.register(viewTool(result));
+    const model = new Spy([call()]);
+    const session = new Session(agentWith(model, { tools, ...extra }), "s1");
+    await send(session, "look");
+    return { session, model, toolMsg: session.messages.find((m) => m.role === "tool") };
+  }
+
+  test("`image` → the role:tool message carries attachments:[ref], and the next request sends it", async () => {
+    const { toolMsg, model } = await run(() => ({
+      content: "doc.pdf p.1 · 9×9 · low",
+      image: ref,
+    }));
+    expect(toolMsg?.attachments).toEqual([ref]);
+    const next = model.requests[1]?.messages.find((m) => m.role === "tool");
+    expect(next?.attachments).toEqual([ref]);
+  });
+
+  test("redaction rewrites the content and KEEPS the image", async () => {
+    const { toolMsg } = await run(
+      () => ({ content: "key sk-ant-abcdefghijklmnopqrstuvwx", image: ref }),
+      {
+        resultTransforms: [redactSecrets()],
+      },
+    );
+    expect(toolMsg?.content).not.toContain("sk-ant-abcdefghijklmnopqrstuvwx");
+    expect(toolMsg?.attachments).toEqual([ref]);
+  });
+
+  test("a ref the wire would refuse → an error result naming why, no attachments, no thrown turn", async () => {
+    const bad = { ...ref, id: "not-a-sha" } as AttachmentRef;
+    const { toolMsg } = await run(() => ({ content: "x", image: bad }));
+    expect(toolMsg?.attachments).toBeUndefined();
+    expect(toolMsg?.isError).toBe(true);
+    expect(toolMsg?.content).toContain("[image not attached:");
+  });
+
+  test("toolImages reaches the tool as ctx.images", async () => {
+    let seen: unknown;
+    const store = {
+      putTool: async () => ({ refused: "x" }),
+      resolve: () => ({ kind: "none" as const }),
+      holds: () => false,
+    };
+    const tools = new ToolRegistry();
+    tools.register({
+      ...viewTool(() => ({ content: "" })),
+      execute: async (_input, ctx) => {
+        seen = ctx.images;
+        return { content: "" };
+      },
+    });
+    const session = new Session(agentWith(new Spy([call()]), { tools, toolImages: store }), "s1");
+    await send(session, "look");
+    expect(seen).toBe(store);
   });
 });

@@ -4,6 +4,7 @@
  * on the daemon's main thread: a hostile file can loop here for as long as it
  * likes, and only `worker.terminate()` stops it (docs/feat/pdf-read.md D2).
  */
+import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import {
   MAX_PAGES_PER_READ,
@@ -50,7 +51,18 @@ export interface PdfPageLike {
   getOperatorList?(): Promise<PdfOperatorListLike>;
   objs?: PdfObjectsLike;
   commonObjs?: PdfObjectsLike;
+  /** The page box `[x1, y1, x2, y2]` (pdf.js `PDFPageProxy.view`): the dense-page hint's denominator. */
+  view?: ArrayLike<number>;
   cleanup(): unknown;
+}
+
+/** The page box's area, or undefined when pdf.js gave none usable. */
+function pageArea(page: PdfPageLike): number | undefined {
+  const v = page.view;
+  if (v === undefined || v.length !== 4) return undefined;
+  const [x1, y1, x2, y2] = [v[0], v[1], v[2], v[3]] as number[];
+  const area = Math.abs(((x2 ?? 0) - (x1 ?? 0)) * ((y2 ?? 0) - (y1 ?? 0)));
+  return Number.isFinite(area) && area > 0 ? area : undefined;
 }
 
 /** How long one image object may take to arrive before it counts as undecodable. */
@@ -110,17 +122,29 @@ async function collectPageImages(
   if (page.getOperatorList === undefined) return false;
   const list = await page.getOperatorList();
   const paints = walkImagePaints(list.fnArray, list.argsArray, ops);
+  const area = pageArea(page);
   for (const paint of paints) {
     const image = await resolveImage(page, list, paint);
-    collector.add(n, paint, image, paint.objId ?? undefined);
+    collector.add(n, paint, image, paint.objId ?? undefined, area);
   }
   return paints.length > 0;
 }
 
 /** The page's image list as the answer carries it (PNG only when sent). */
 function pageImage(outcome: PdfImageOutcome): PdfPageImage {
-  const { marker, png, width, height } = outcome;
-  return png === undefined ? { marker, width, height } : { marker, png, width, height };
+  const { marker, png, width, height, id, low, lowId, lowWidth, lowHeight } = outcome;
+  const base = png === undefined ? { marker, width, height } : { marker, png, width, height };
+  // docs/feat/image-view.md D3: the ids and the low variant ride along when kept.
+  return id === undefined
+    ? base
+    : {
+        ...base,
+        id,
+        ...(lowId !== undefined ? { lowId } : {}),
+        ...(low !== undefined ? { low } : {}),
+        ...(lowWidth !== undefined ? { lowWidth } : {}),
+        ...(lowHeight !== undefined ? { lowHeight } : {}),
+      };
 }
 export interface PdfDocLike {
   numPages: number;
@@ -184,10 +208,15 @@ export async function runExtraction(
     const pages: PdfExtractedPage[] = [];
     const collector =
       req.images !== undefined && ops !== undefined
-        ? createImageCollector((bytes) => {
-            const z = deflateSync(bytes);
-            return new Uint8Array(z.buffer, z.byteOffset, z.byteLength);
-          }, req.images)
+        ? createImageCollector(
+            (bytes) => {
+              const z = deflateSync(bytes);
+              return new Uint8Array(z.buffer, z.byteOffset, z.byteLength);
+            },
+            req.images,
+            // Used only when `images.lowEdge` asks for refs (docs/feat/image-view.md D3).
+            (bytes) => createHash("sha256").update(bytes).digest("hex"),
+          )
         : undefined;
     // Text items of the pages that painted images: their markers can only be
     // placed once the whole read is decided (repeats, caps).

@@ -10,7 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { AttachmentRef, AttachmentSource, ChatMessage, ChatRequest } from "@tentacle/core";
-import { AnthropicProvider, OpenAIProvider } from "../src/index.ts";
+import { AnthropicProvider, OpenAIProvider, imageTokenEstimate } from "../src/index.ts";
 
 const bytesOf = (text: string): Uint8Array => new TextEncoder().encode(text);
 const b64 = (text: string): string => Buffer.from(bytesOf(text)).toString("base64");
@@ -467,5 +467,64 @@ describe("one request's image BYTES stay bounded (5 × the per-image cap)", () =
       user.map(b64),
     );
     expect(toolResults(body).flatMap((r) => imageData(blocksOf(r)))).toEqual([]);
+  });
+});
+
+describe("image_view: one ref → exactly one image part (docs/feat/image-view.md T4)", () => {
+  const view = (id: string): ChatMessage => ({
+    role: "assistant",
+    content: "",
+    toolCalls: [{ id, name: "image_view", arguments: '{"ref":"a1b2c3d4e5f6"}' }],
+  });
+  const viewed = (a: AttachmentRef): ChatMessage[] => [
+    { role: "user", content: "what does the chart show?" },
+    view("v1"),
+    tool("v1", "doc.pdf p.3 · 768×384 · low · 12 KB", [a]),
+  ];
+
+  test("Anthropic: one image block inside the tool_result", async () => {
+    const a = refFor("chart-low");
+    const body = await anthropicBody({ messages: viewed(a), attachments: sourceOf(["chart-low"]) });
+    expect(toolResults(body).flatMap((r) => imageData(blocksOf(r)))).toEqual([b64("chart-low")]);
+  });
+
+  test("OpenAI-compatible: one image_url part in the whole payload", async () => {
+    const a = refFor("chart-low");
+    const body = await openaiBody(
+      { messages: viewed(a), attachments: sourceOf(["chart-low"]) },
+      { images: true },
+    );
+    const parts = body.messages.flatMap((m) =>
+      Array.isArray(m.content) ? (m.content as Record<string, unknown>[]) : [],
+    );
+    expect(parts.filter((p) => p.type === "image_url")).toHaveLength(1);
+  });
+
+  test("an aged-out view names image_view, not a re-read", async () => {
+    const [va, vb] = ["v-a", "v-b"].map((t) => refFor(t));
+    if (va === undefined || vb === undefined) throw new Error("refs");
+    const body = await anthropicBody(
+      {
+        messages: [
+          { role: "user", content: "x" },
+          view("v1"),
+          tool("v1", "a", [va]),
+          view("v2"),
+          tool("v2", "b", [vb]),
+        ],
+        attachments: sourceOf(["v-a", "v-b"]),
+      },
+      { maxToolImages: 1 },
+    );
+    expect(JSON.stringify(body)).toContain("(call image_view again to see it)");
+  });
+});
+
+describe("imageTokenEstimate (docs/feat/image-view.md T11)", () => {
+  test("anthropic 1600, openai-compatible 3200, a positive override wins", () => {
+    expect(imageTokenEstimate("anthropic")).toBe(1600);
+    expect(imageTokenEstimate("openai")).toBe(3200);
+    expect(imageTokenEstimate("openai", 2500)).toBe(2500);
+    expect(imageTokenEstimate("anthropic", 0)).toBe(1600);
   });
 });
