@@ -526,3 +526,31 @@ frames A1–A7 before the iOS build.
 - **Changelog:** `changelog.d/mobile-ask-surfaces.added.md`.
 
 *— claude-sonnet-5-5, 2026-11-24*
+
+## Review
+
+### Group S4–S6 + S7b — Verdict: REQUEST-CHANGES
+
+Gate: 324 pass / 0 fail across the 12 touched mobile test files; `bun run lint` clean (2397 files); `bun run typecheck` clean. Only `git diff main...HEAD` for S4, S5, S6 and S7b was reviewed.
+
+1. **MEDIUM: a parked ask loses its park memory on every detach, so the replay shows it as a surprise sheet.** The forget effect at `apps/mobile/src/screens/SessionScreen.tsx:1344-1349` calls `ASK_PARKS.forget` whenever `parkedKey` moves from a key to anything else, including `null`. But the key also goes `null` when the ask is withdrawn rather than settled. On `connectionClosed`, `retainOnly` or `sessionClosed`, the router aborts the signal (`permission-router.ts:325-365`), the entry resolves `DISMISSED` and the sheet goes `idle`. The note is then erased before the re-attach replays the same `requestId`, so `wasParked` is false and the sheet opens presented. That breaks failure-mode row 3 and D3's stated purpose for `ASK_PARKS`. On a phone, backgrounding drops the socket all the time, so this is the common case.
+   - Repro (`.tentacle/tmp/mobile-ask-surfaces/repro-detach.test.ts`): real `createPermissionSheet` + `createAskParks`, the effect emulated line for line. Swipe → note + park; abort → `after abort: idle`; replay `r1` → `replayed parked = false` (expected true).
+   - Fix: forget only on a real settle (answered, or `permission_resolved`), not on a withdrawal, plus a test that is red today.
+2. **MEDIUM: the settle and re-delivery wiring has no test.** Deleting `ASK_PARKS.forget(lastParkedKey.current)` (mutation, reverted, tree byte-identical) leaves `native-sheets-wiring` and `ask-park` all green (68/68). The drawer→park→banner leg (flow `46-ask-park`) was never written. So the two §9 properties S6 hinges on (a re-delivered parked ask opens parked; the note is spent on settle) are pinned by nothing. Finding 1 slipped through because of this.
+3. **MEDIUM: the peek row's «Review» button does nothing.** `apps/mobile/src/screens/PermissionSheet.tsx:86` has `onPress={() => {}}`. A tap on the labelled action at the peek gives no feedback. That goes against the UI empty-action standard (dimmed + light haptic + inline label, never a silent no-op). Make it inert-looking (no capsule) or give it the haptic and a hint. `more={0}` there also hides the «+1» that the failure-mode table promises on the peek.
+
+Mutation: removing forget-on-settle → **survives** (finding 2). The executor's S4/S5/S6/S7b mutations were not re-run; their tests ran green.
+
+Attacks tried:
+- Planned drain pop treated as a park: no. `dismissedNatively` cuts at `plannedPop`, and `park()` is idempotent anyway.
+- `wasParked` key mismatch, `compose.computerId` vs `owner.computerId`: both come from the same `computerId` in `App.tsx:1922`. Holds.
+- `askCard` always offering `allow_once`/`reject_once`: `SheetOptionId` is a closed set. Holds.
+- Reply field now gated on `replyOpen` and reached via `perm-menu`: intended; 08c updated.
+- Origin glyph from text: it comes from `kind`. Holds.
+- Drawer local ask on non-current rows: no. Holds.
+
+Acknowledged partials, not counted as findings: `currentAsking` not wired in `App.tsx`; the S7a wire is absent; age passed as null; simulator unverified.
+
+*Reviewed by claude-opus-5-5 in a fresh context. The executor was claude-sonnet-5-5: same family, so blind spots may be shared.*
+
+*— claude-opus-5-5, 2026-11-24*
