@@ -12,6 +12,7 @@ import {
   EditHistory,
   WORKFLOW_MAX_GOTO,
   WORKFLOW_MAX_RETRY,
+  WORKFLOW_TEMPLATES,
   defaultPromptPath,
   deleteStep,
   draftProblems,
@@ -43,6 +44,13 @@ const stepOf = (draft: Draft, id: string): Draft => {
   return found;
 };
 const agentOf = (draft: Draft, id: string): Draft => stepOf(draft, id).agent as Draft;
+const loopTemplate = () => {
+  const t = WORKFLOW_TEMPLATES.find((x) => x.id === "plan-build-review-merge");
+  if (t === undefined) {
+    throw new Error("no plan-build-review-merge template");
+  }
+  return t;
+};
 
 /** Two steps, reached by fall-through: the shape `＋` on an edge inserts into. */
 const plain = (): Draft => ({
@@ -309,6 +317,47 @@ describe("renameStep", () => {
     expect(renameStep(loop(), "nope", "x").refused).toBe('no step "nope"');
   });
 
+  test("follows {{steps.<id>.…}} in prompt files, prompt_text, run and approve (review r1 #1)", () => {
+    const t = loopTemplate();
+    const d = t.draft("demo", "d", t.inputs);
+    expect(draftProblems(d, t.prompts)).toEqual([]);
+    for (const [oldId, newId] of [
+      ["review", "check"],
+      ["plan", "design"],
+    ] as const) {
+      const out = renameStep(d, oldId, newId, t.prompts);
+      expect(out.refused).toBeUndefined();
+      const prompts = out.prompts ?? {};
+      expect(draftProblems(out.draft, prompts)).toEqual([]);
+      expect(Object.values(prompts).join("\n")).not.toContain(`steps.${oldId}.`);
+    }
+    const inline: Draft = {
+      schemaVersion: 1,
+      name: "task",
+      version: 1,
+      steps: [
+        { id: "plan", run: "echo" },
+        { id: "a", agent: { prompt_text: "x {{ steps.plan.report }} {{steps.planner.report}}" } },
+        { id: "b", run: "echo '{{steps.plan.reason}}'" },
+        { id: "c", approve: { title: "t {{steps.plan.reason}}", detail: "{{steps.plan.report}}" } },
+      ],
+    };
+    const out = renameStep(inline, "plan", "design");
+    expect(agentOf(out.draft, "a").prompt_text).toBe(
+      "x {{ steps.design.report }} {{steps.planner.report}}",
+    );
+    expect(stepOf(out.draft, "b").run).toBe("echo '{{steps.design.reason}}'");
+    expect(stepOf(out.draft, "c").approve).toEqual({
+      title: "t {{steps.design.reason}}",
+      detail: "{{steps.design.report}}",
+    });
+    // A prompt file the draft does not read is not the rename's to touch.
+    const extra = renameStep(inline, "plan", "design", {
+      "prompts/other.md": "{{steps.plan.report}}",
+    });
+    expect(extra.prompts).toEqual({ "prompts/other.md": "{{steps.plan.report}}" });
+  });
+
   test("renaming a step to its own id is a no-op", () => {
     const draft = loop();
     const out = renameStep(draft, "fix", "fix");
@@ -337,6 +386,27 @@ describe("deleteStep", () => {
       ],
     };
     expect(deleteStep(draft, "gone").dangling).toEqual(["a", "b"]);
+  });
+
+  test("counts {{steps.<id>.…}} references as dangling, prompt files included (review r1 #1)", () => {
+    const t = loopTemplate();
+    const d = t.draft("demo", "d", t.inputs);
+    const out = deleteStep(d, "plan", t.prompts);
+    expect(out.dangling).toEqual(["exec", "review"]);
+    // Still never rewritten: the validator names each one.
+    expect(draftProblems(out.draft, t.prompts)).toHaveLength(2);
+    const inline: Draft = {
+      schemaVersion: 1,
+      name: "task",
+      version: 1,
+      steps: [
+        { id: "gone", run: "x" },
+        { id: "a", run: "echo {{steps.gone.reason}}" },
+        { id: "b", approve: { title: "t", detail: "{{ steps.gone.report }}" } },
+        { id: "c", agent: { prompt_text: "{{steps.gone-2.report}}" } },
+      ],
+    };
+    expect(deleteStep(inline, "gone").dangling).toEqual(["a", "b"]);
   });
 
   test("no dangling refs, an empty list; an unknown step is refused", () => {

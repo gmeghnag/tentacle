@@ -129,6 +129,40 @@ describe("workflowYaml", () => {
     }
   });
 
+  test("round-trips every control character, on one line and in a block (review r1 #2)", () => {
+    const controls = [
+      ...Array.from({ length: 0x20 }, (_v, i) => String.fromCharCode(i)),
+      "\u007f",
+      "\u0080",
+      "\u0085",
+      "\u009f",
+      " ",
+      " ",
+      "﻿",
+    ];
+    for (const c of controls) {
+      for (const text of [`a${c}b`, `l1\nb${c}`, `l1\n${c}b`, `${c}\nx`]) {
+        const draft = { ...BASE, description: text, inputs: { [`k${c}`]: { default: text } } };
+        const code = c.charCodeAt(0).toString(16);
+        expect({ code, text, parsed: roundTrip(draft) }).toEqual({ code, text, parsed: draft });
+      }
+    }
+  });
+
+  test("refuses a lone surrogate loudly — YAML cannot hold one (review r1 #2)", () => {
+    for (const bad of ["a\ud800b", "x\udc00", "l1\nb\ud83d"]) {
+      expect(() => workflowYaml({ ...BASE, description: bad })).toThrow(
+        "root.description: a lone UTF-16 surrogate cannot be written as YAML",
+      );
+      expect(() => workflowYaml({ ...BASE, inputs: { [bad]: { required: true } } })).toThrow(
+        "a lone UTF-16 surrogate cannot be written as YAML",
+      );
+    }
+    // A well-formed pair is a character like any other.
+    const draft = { ...BASE, description: "l1\n😀" };
+    expect(roundTrip(draft)).toEqual(draft);
+  });
+
   test("omits the budget defaults, so a default typed in is the same file", () => {
     const withDefaults = { ...BASE, budget: { wait: "12h", max_step_runs: 50 } };
     expect(workflowYaml(withDefaults)).toBe(workflowYaml(BASE));

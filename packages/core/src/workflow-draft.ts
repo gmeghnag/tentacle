@@ -41,6 +41,67 @@ export interface DraftEdit {
   readonly refused?: string;
   /** Steps that still reference the one a `deleteStep` removed. */
   readonly dangling?: readonly string[];
+  /** The prompt files after a `renameStep` (its `{{steps.<id>.…}}` rewritten). */
+  readonly prompts?: Readonly<Record<string, string>>;
+}
+
+/** The editor's prompt files, by path (`prompts/review.md` → its text). */
+export type DraftPrompts = Readonly<Record<string, string>>;
+
+/**
+ * `{{steps.<id>.reason|report}}`, blanks allowed inside the braces — exactly the
+ * shape the validator's `readRef` resolves after `templateRefs` trims it. Groups
+ * 1 and 2 are the text around the id, so a rename keeps the user's spacing.
+ */
+function stepRefPattern(id: string): RegExp {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+  return new RegExp(`(\\{\\{\\s*steps\\.)${escaped}(\\.(?:reason|report)\\s*\\}\\})`, "g");
+}
+
+/** A step's `prompt:` file, when it has one. */
+function promptPathOf(step: Step): string | undefined {
+  const agent = step.agent as Mapping | undefined;
+  return typeof agent?.prompt === "string" ? agent.prompt : undefined;
+}
+
+/**
+ * Every text the driver templates for a step (`workflow-machine.ts` `stepText`)
+ * or the validator checks: its command, inline prompt, prompt FILE, ask title and
+ * detail.
+ */
+function templatedTexts(step: Step, prompts: DraftPrompts): string[] {
+  const agent = step.agent as Mapping | undefined;
+  const approve = step.approve as Mapping | undefined;
+  const path = promptPathOf(step);
+  const file = path === undefined ? undefined : prompts[path];
+  return [step.run, agent?.prompt_text, file, approve?.title, approve?.detail].filter(
+    (text): text is string => typeof text === "string",
+  );
+}
+
+/** `step` with every templated reference to `oldId` pointing at `newId`. */
+function renameRefsIn(step: Step, oldId: string, newId: string): Step {
+  const swap = (text: unknown): unknown =>
+    typeof text === "string" ? text.replace(stepRefPattern(oldId), `$1${newId}$2`) : text;
+  const out: Step = { ...step };
+  if (typeof step.run === "string") {
+    out.run = swap(step.run);
+  }
+  const agent = step.agent as Mapping | undefined;
+  if (agent !== undefined && typeof agent.prompt_text === "string") {
+    out.agent = { ...agent, prompt_text: swap(agent.prompt_text) };
+  }
+  const approve = step.approve as Mapping | undefined;
+  if (approve !== undefined) {
+    const next: Mapping = { ...approve };
+    for (const key of ["title", "detail"] as const) {
+      if (typeof approve[key] === "string") {
+        next[key] = swap(approve[key]);
+      }
+    }
+    out.approve = next;
+  }
+  return out;
 }
 
 type Step = Record<string, unknown>;
@@ -319,9 +380,17 @@ export function duplicateStep(draft: WorkflowDraft, id: string): DraftEdit {
 
 /**
  * Rename a step and follow every reference to it — the user named the step, so
- * rewriting `next:`/`on_fail.goto:` is what they asked for (the one op that does).
+ * rewriting `next:`/`on_fail.goto:` AND every `{{steps.<id>.…}}` (in a command,
+ * an inline prompt, an ask, and the prompt files the draft's steps read) is what
+ * they asked for (the one op that does). The rewritten files come back in
+ * `prompts`; a file no step reads is returned as it was.
  */
-export function renameStep(draft: WorkflowDraft, oldId: string, newId: string): DraftEdit {
+export function renameStep(
+  draft: WorkflowDraft,
+  oldId: string,
+  newId: string,
+  prompts: DraftPrompts = {},
+): DraftEdit {
   const steps = stepsOf(draft);
   const at = steps.findIndex((step) => step.id === oldId);
   if (at === -1) {
@@ -332,13 +401,23 @@ export function renameStep(draft: WorkflowDraft, oldId: string, newId: string): 
     return refusal(draft, `"${newId}" is not a step id — ${why}`);
   }
   if (newId === oldId) {
-    return { draft };
+    return { draft, prompts: { ...prompts } };
   }
   if (idsOf(steps).includes(newId)) {
     return refusal(draft, `"${newId}" is already a step`);
   }
+  const read = new Set(steps.map(promptPathOf).filter((path) => path !== undefined));
+  const files = Object.fromEntries(
+    Object.entries(prompts).map(([path, text]) => [
+      path,
+      read.has(path) ? text.replace(stepRefPattern(oldId), `$1${newId}$2`) : text,
+    ]),
+  );
   const rename = (step: Step): Step => {
-    const out: Step = { ...step, id: step.id === oldId ? newId : step.id };
+    const out: Step = {
+      ...renameRefsIn(step, oldId, newId),
+      id: step.id === oldId ? newId : step.id,
+    };
     if (step.next === oldId) {
       out.next = newId;
     }
@@ -348,25 +427,40 @@ export function renameStep(draft: WorkflowDraft, oldId: string, newId: string): 
     }
     return out;
   };
-  return { draft: withSteps(draft, steps.map(rename)), id: newId };
+  return { draft: withSteps(draft, steps.map(rename)), id: newId, prompts: files };
 }
 
 /**
  * Delete a step. **Never rewrites a reference** (see the file's header): the
  * `next:`/`goto:` that named it stay, become validator errors, and are drawn as
- * a ghost pill. `dangling` lists the steps that still point at it, so the menu
- * can say "1 link points here" BEFORE the user confirms.
+ * a ghost pill. `dangling` lists the steps that still point at it — by an edge
+ * or by a `{{steps.<id>.…}}` in any text they template, their prompt file
+ * included (`prompts`) — so the menu can say "1 link points here" BEFORE the
+ * user confirms.
  */
-export function deleteStep(draft: WorkflowDraft, id: string): DraftEdit {
+export function deleteStep(
+  draft: WorkflowDraft,
+  id: string,
+  prompts: DraftPrompts = {},
+): DraftEdit {
   const steps = stepsOf(draft);
   const at = steps.findIndex((step) => step.id === id);
   if (at === -1) {
     return refusal(draft, noStep(id));
   }
+  const pattern = stepRefPattern(id);
+  const refersByText = (step: Step): boolean =>
+    templatedTexts(step, prompts).some((text) => {
+      pattern.lastIndex = 0;
+      return pattern.test(text);
+    });
   const dangling = steps
     .filter(
       (step) =>
-        step.id !== id && (step.next === id || (step.on_fail as Mapping | undefined)?.goto === id),
+        step.id !== id &&
+        (step.next === id ||
+          (step.on_fail as Mapping | undefined)?.goto === id ||
+          refersByText(step)),
     )
     .map((step) => String(step.id));
   return {

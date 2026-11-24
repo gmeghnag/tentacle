@@ -108,7 +108,9 @@ not a code fact → **Q4**.
   it is JSON-quoted (valid YAML 1.2). A multi-line string is a `|-` block only when every line is
   safe; otherwise JSON-quoted. Default budget values are omitted (mockup: "defaults never land in
   the file").
-  Round-trip property: `Bun.YAML.parse(workflowYaml(d))` deep-equals `d`.
+  Round-trip property: `Bun.YAML.parse(workflowYaml(d))` deep-equals `d`. The emitter is total
+  over what YAML can hold (a block refuses every C0 control except tab), and it THROWS, naming
+  the path, on a lone UTF-16 surrogate, which no YAML file can hold (fix round 1, review #2).
 - `isCanonical(text, draft)` = `workflowYaml(draft) === text` (BOM stripped). False means a save
   rewrites the file's layout or comments → **Q3**.
 
@@ -133,11 +135,14 @@ the parked TUI editor (eval/tui-workflow-editor) reuses them unchanged (parity).
   (`✗ ×n`). Out-of-range input is clamped to the validator's range (`WORKFLOW_MAX_RETRY`, `:286`).
 - **Other operations:** `setNext(draft, id, target | undefined)`, `moveStep(draft, id, ±1)` and
   `duplicateStep`.
-- **`renameStep(draft, old, new)` rewrites every `next` / `on_fail.goto` reference.** The user
-  named the step, so rewriting the references is what they asked for.
-- **`deleteStep(draft, id) → {draft, dangling: string[]}` NEVER rewrites references.** Fall-through
+- **`renameStep(draft, old, new, prompts) → {draft, prompts}` rewrites every `next` /
+  `on_fail.goto` reference and every `{{steps.<old>.reason|report}}`** in a step's `run`,
+  `agent.prompt_text`, `approve.title|detail` and the prompt files the draft's steps read (fix
+  round 1, review #1). The user named the step, so rewriting the references is what they asked for.
+- **`deleteStep(draft, id, prompts) → {draft, dangling: string[]}` NEVER rewrites references.** Fall-through
   reconnects by array order. `next`/`goto` references that named the deleted step stay as they
-  are and become validator errors, drawn as a ghost pill. `dangling` feeds the menu note
+  are and become validator errors, drawn as a ghost pill. `dangling` (which counts a
+  `{{steps.<id>.…}}` in the same texts, prompt files included) feeds the menu note
   "1 link points here" before the delete (mockup decision).
 - **Per-kind field edits:** `patchStep(draft, id, fields)`, typed per kind; it never touches
   another step.
@@ -201,6 +206,11 @@ the parked TUI editor (eval/tui-workflow-editor) reuses them unchanged (parity).
     `unchanged`.
   - **No-links on every path.** Every target goes through `resolveInside(cwd, rel, fs)`, so every
     component is no-links. `prompts/` is created only when absent and under a real directory.
+  - **Emitted bytes, not just the value (fix round 1, review #2).** Before any write, the
+    writer emits `workflowYaml(draft)` (a throw refuses `invalid` with its message) and asserts
+    that `Bun.YAML.parse` of those bytes deep-equals the draft, else it refuses `invalid`. So it
+    never writes or hashes a file that does not load back. Test: a stubbed emitter whose bytes
+    differ from the draft gets `invalid`, and nothing is written.
   - **Write order: prompts first, YAML last.** Each file is written to a temp name and renamed
     (`.<base>.<uuid>.tmp` in the same folder, removed on error, pattern
     `workflow-approvals.ts:56-66`, mode 0644). A temp name is not `*.yaml`, so the listing never
@@ -878,6 +888,84 @@ after a refactor, so it was re-applied against the current shape rather than rep
 — nothing in the app imports these modules until slice 5/6.
 
 *— claude-opus-5-5 (executor), 2026-11-24*
+
+### Fix round 1 — review of slices 0–2
+
+Fixes both findings of "Slices 0–2 — REQUEST-CHANGES". The plan is amended to match (D1 emitter
+note, D2 `renameStep`/`deleteStep` signatures, D4 save assertion for slice 3b).
+
+**#1 MEDIUM (templating references): FIXED.** `core/src/workflow-draft.ts`:
+- `stepRefPattern(id)` matches `{{ steps.<id>.reason|report }}`, blanks inside the braces allowed:
+  `readRef`'s shape after `templateRefs`' trim, `workflow-spec.ts:417-438`.
+- `templatedTexts` lists the texts the driver templates (`workflow-machine.ts:183-191`) plus the
+  ones the validator checks (`workflow-spec.ts:846-877`): `run`, `agent.prompt_text`, the
+  `agent.prompt` file, and `approve.title|detail`.
+- `renameStep(draft, old, new, prompts = {})` now also rewrites those references in the steps and
+  in every prompt file a step of the draft reads. It returns the files in `DraftEdit.prompts`. A
+  file no step reads is returned unchanged.
+- `deleteStep(draft, id, prompts = {})` counts a text reference in `dangling`, and it still never
+  rewrites one.
+- `DraftPrompts` is exported.
+
+Both new parameters are optional, so existing callers are unchanged: `rg` shows no caller outside
+core yet.
+
+Red, then green (`bun test packages/core/test/workflow-draft.test.ts`):
+- before the fix: `47 pass, 2 fail`. Both failures were assertion diffs: rename "follows
+  {{steps.<id>.…}}…" and delete "counts {{steps.<id>.…}} references…";
+- after the fix: `49 pass, 0 fail`.
+
+The tests run on the shipped `plan-build-review-merge` template:
+- `review→check` and `plan→design` each give 0 problems with the returned files;
+- `deleteStep(plan)` gives `dangling: ["exec","review"]`;
+- the inline cases cover `run`, `prompt_text`, `approve`, blanks inside the braces, and a
+  `steps.planner` near-miss that must not change.
+
+**#2 MEDIUM (emitter not total): FIXED.** `core/src/workflow-yaml.ts`:
+- `blockSafe` refuses every C0 control except tab and `\n` (`RAW_CONTROL`), as well as a lone
+  surrogate. Such a string is then JSON-quoted, and JSON escapes it.
+- The new `quoted(text, path)`, used for values and keys, THROWS
+  `<path>: a lone UTF-16 surrogate cannot be written as YAML`.
+
+Lone surrogates are refused at the emitter instead of being emitted: YAML has no escape for one,
+so no file can hold it, and the phone has no `Bun.YAML` to run a round-trip check of its own.
+
+The reviewer's preferred guard (the save asserts parse(bytes) deep-equals the draft) belongs to
+slice 3b, which is not built yet. It is now written into D4 as a requirement, with its test.
+
+Red, then green (`bun test packages/core/test/workflow-yaml.test.ts`):
+- before the fix: `19 pass, 2 fail`. "every control character" failed with `YAML Parse error:
+  Unexpected character`, which is the round trip itself failing; "lone surrogate" failed with
+  "did not throw";
+- after the fix: `21 pass, 0 fail`.
+
+The reviewer's `rev/emit.ts` repro now shows NUL-in-block OK and the surrogate refused by path.
+`-0 → 0` is unchanged: the review's attack table already judged it acceptable.
+
+**Mutations** (harness `.tentacle/tmp/workflow-editor/fix1/mut-{draft,yaml}.ts`: apply, run the
+file, restore; `restored: true` both times):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | rename: prompt files never rewritten | 1 fail (rename) |
+| M2 | rename: step texts never rewritten | 1 fail (rename) |
+| M3 | delete: text refs not counted | 1 fail (delete) |
+| M4 | pattern without blanks inside the braces | 2 fail |
+| M5 | rename rewrites files no step reads | 1 fail (rename) |
+| M6 | `blockSafe` back to CR-only | 1 fail (controls) |
+| M7 | `RAW_CONTROL` misses NUL | 1 fail (controls) |
+| M8 | `quoted()` never refuses | 1 fail (surrogate) |
+| M9 | `blockSafe` lets a lone surrogate into a block | 1 fail (surrogate) |
+| M10 | keys bypass `quoted()` | 1 fail (surrogate) |
+
+**Narrow gate:**
+- `workflow-{yaml,draft,templates,spec}.test.ts`: 131 pass, 0 fail;
+- `bunx biome check` on the 4 touched files: clean;
+- `tsc --noEmit -p packages/core`: clean.
+
+The full gate is the orchestrator's script.
+
+*— claude-opus-5-5 (executor, fix round 1), 2026-11-24*
 
 ## Review
 

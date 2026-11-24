@@ -84,17 +84,37 @@ function plainSafe(text: string): boolean {
   return true;
 }
 
+/** C0 controls but tab and newline: YAML refuses them raw (a block holds them raw). */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the controls are the point
+const RAW_CONTROL = /[\u0000-\u0008\u000b-\u001f]/;
+
+/** Half a UTF-16 pair: no YAML escape names it, so no file can hold it. */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
 /**
  * A string that survives a `|-` literal block: every line non-empty and free of
- * leading/trailing whitespace, no CR, and no trailing newline (`|-` strips it).
- * Anything less is JSON-quoted — ugly in a file, never wrong.
+ * leading/trailing whitespace, no CR or other C0 control (only tab), and no
+ * trailing newline (`|-` strips it). Anything less is JSON-quoted — ugly in a
+ * file, never wrong (JSON escapes every control).
  */
 function blockSafe(text: string): boolean {
-  if (!text.includes("\n") || text.includes("\r") || text.endsWith("\n")) return false;
+  if (!text.includes("\n") || RAW_CONTROL.test(text) || text.endsWith("\n")) return false;
+  if (LONE_SURROGATE.test(text)) return false;
   return text.split("\n").every((line) => line !== "" && line.trim() === line);
 }
 
-function scalarText(value: unknown): string {
+/**
+ * The emitter is total over what YAML can hold; a lone surrogate it cannot, so
+ * it throws (naming the path) rather than write bytes that never load back.
+ */
+function quoted(text: string, path: string): string {
+  if (LONE_SURROGATE.test(text)) {
+    throw new Error(`${path}: a lone UTF-16 surrogate cannot be written as YAML`);
+  }
+  return JSON.stringify(text);
+}
+
+function scalarText(value: unknown, path: string): string {
   if (value === null) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") {
@@ -103,7 +123,7 @@ function scalarText(value: unknown): string {
     if (value === Number.NEGATIVE_INFINITY) return "-.inf";
     return String(value);
   }
-  if (typeof value === "string") return plainSafe(value) ? value : JSON.stringify(value);
+  if (typeof value === "string") return plainSafe(value) ? value : quoted(value, path);
   // Not reachable from a parsed workflow; refuse rather than write a guess.
   throw new Error(`workflowYaml: cannot write a ${typeof value} as a scalar`);
 }
@@ -169,7 +189,7 @@ function emitPair(head: string, value: unknown, indent: number, path: string): s
     const pad = " ".repeat(indent + 2);
     return [`${head} |-`, ...value.split("\n").map((line) => `${pad}${line}`)];
   }
-  return [`${head} ${scalarText(value)}`];
+  return [`${head} ${scalarText(value, path)}`];
 }
 
 function emitMapping(
@@ -180,7 +200,7 @@ function emitMapping(
   const pad = " ".repeat(indent);
   const out: string[] = [];
   for (const [key, value] of entries) {
-    const keyText = plainSafe(key) ? key : JSON.stringify(key);
+    const keyText = plainSafe(key) ? key : quoted(key, `${path}.${key}`);
     out.push(...emitPair(`${pad}${keyText}:`, value, indent, `${path}.${key}`));
   }
   return out;
