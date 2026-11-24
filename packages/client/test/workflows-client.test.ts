@@ -28,7 +28,7 @@ import {
   type WorkflowRow,
   type WorkflowStepRow,
 } from "@tentacle/protocol";
-import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
+import { type DuplexChannel, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { RemoteClient } from "../src/remote-client.ts";
 import {
   MAX_WORKFLOW_RUNS,
@@ -76,8 +76,27 @@ function fakeDaemon(
 ) {
   const [daemonCh, clientCh] = createChannelPair();
   const sent: { method: string; params: unknown }[] = [];
+  /**
+   * Every request as the CLIENT wrote it, before the daemon's schema parsed it —
+   * the only place a field the schema would STRIP is still visible (a `turnId`
+   * smuggled into a save, say). `sent` above records the parsed params.
+   */
+  const raw: { method: string; params: unknown }[] = [];
+  const spy: DuplexChannel = {
+    send: (data) => daemonCh.send(data),
+    close: () => daemonCh.close(),
+    setOnMessage: (handler) =>
+      daemonCh.setOnMessage((data) => {
+        const frame = JSON.parse(data) as { method?: unknown; params?: unknown };
+        if (typeof frame.method === "string") {
+          raw.push({ method: frame.method, params: frame.params });
+        }
+        handler(data);
+      }),
+    setOnClose: (handler) => daemonCh.setOnClose(handler),
+  };
   let seq = 0;
-  const peer = new RpcPeer(daemonCh, {
+  const peer = new RpcPeer(spy, {
     onRequest: async (method: string, params: unknown) => {
       sent.push({ method, params });
       if (method === Method.Initialize) {
@@ -110,7 +129,7 @@ function fakeDaemon(
   const notify = (update: unknown): void => {
     peer.notify(Notification.SessionUpdate, { sessionId: "s1", seq: ++seq, update });
   };
-  return { peer, sent, notify, clientCh };
+  return { peer, sent, raw, notify, clientCh };
 }
 
 async function attach(d: ReturnType<typeof fakeDaemon>, opts: { daemonWakes?: boolean } = {}) {
@@ -490,6 +509,94 @@ describe("session/workflow_catalogue (slice 5a): the three answers are distinct"
     expect(params.hash).toBe(hash);
     expect(params.inputs).toEqual([{ name: "slug", value: "x" }]);
     expect(session.ownsTurn(params.turnId)).toBe(true);
+    client.close();
+  });
+});
+
+/**
+ * docs/feat/workflow-editor.md slice 4 (D5) — the EDITOR's two calls. Both are
+ * additive methods, so the same three rules as the catalogue apply: an older
+ * daemon is `{unsupported:true}` ("update tentacle"), the trust bit refuses
+ * locally and sends nothing (§7), and a save mints NO turn — it raises no ask,
+ * so there is no turn to attribute one to (unlike a `start`, above).
+ */
+describe("session/workflow_source + session/workflow_save (slice 4): the editor's two calls", () => {
+  const source = {
+    ok: false,
+    path: ".tentacle/workflows/task.yaml",
+    text: "name: task\n",
+    errors: ["steps: 0: a step needs a command"],
+  };
+  const write = {
+    name: "task",
+    mode: "replace" as const,
+    draft: '{"name":"task"}',
+    prompts: [{ path: ".tentacle/workflows/task-build.md", text: "make test" }],
+    baseHash: "d".repeat(64),
+    dryRun: false,
+  };
+  const saved = {
+    ok: true,
+    hash: "c".repeat(64),
+    version: 2,
+    path: ".tentacle/workflows/task.yaml",
+  };
+
+  test("source asks for ONE file, session-scoped", async () => {
+    const d = fakeDaemon({ [Method.WorkflowSource]: () => source });
+    const { client, session } = await attach(d, { daemonWakes: true });
+    expect(await session.workflowSource("task")).toEqual(source);
+    expect(d.sent.at(-1)).toEqual({
+      method: Method.WorkflowSource,
+      params: { sessionId: "s1", name: "task" },
+    });
+    client.close();
+  });
+
+  test("a save carries the draft, prompts, base hash and dryRun — and mints NO turn", async () => {
+    // Mutation: route the save through the `turnId` minting path (as a `start`
+    // does) → the raw-frame assertion below is red. It must be the RAW frame:
+    // `WorkflowSaveParamsSchema` strips an unknown `turnId`, so a daemon-side
+    // recording of the parsed params proves nothing here.
+    const d = fakeDaemon({ [Method.WorkflowSave]: () => saved });
+    const { client, session } = await attach(d, { daemonWakes: true });
+    expect(await session.workflowSave(write)).toEqual(saved);
+    expect(d.sent.at(-1)).toEqual({
+      method: Method.WorkflowSave,
+      params: { sessionId: "s1", ...write },
+    });
+    expect(d.raw.at(-1)).toEqual({
+      method: Method.WorkflowSave,
+      params: { sessionId: "s1", ...write },
+    });
+    expect(Object.keys(d.raw.at(-1)?.params as object).includes("turnId")).toBe(false);
+    client.close();
+  });
+
+  test('an OLDER daemon is `{unsupported:true}` for both — "update tentacle", not "no file"', async () => {
+    // Mutation: map MethodNotFound to `{ok:false}` / an empty draft → the phone
+    // blames the file instead of saying the computer is behind.
+    const d = fakeDaemon();
+    const { client, session } = await attach(d, { daemonWakes: true });
+    expect(await session.workflowSource("task")).toEqual({ unsupported: true });
+    expect(await session.workflowSave(write)).toEqual({ unsupported: true });
+    client.close();
+  });
+
+  test("the trust bit off sends NOTHING and refuses locally, for both", async () => {
+    const d = fakeDaemon({
+      [Method.WorkflowSource]: () => source,
+      [Method.WorkflowSave]: () => saved,
+    });
+    const { client, session } = await attach(d);
+    const read = await session.workflowSource("task");
+    const wrote = await session.workflowSave(write);
+    expect("unavailable" in read ? read.unavailable : undefined).toBe(WORKFLOW_UNTRUSTED_DAEMON);
+    expect("refusal" in wrote ? wrote.refusal : undefined).toBe("unavailable");
+    expect("reason" in wrote ? wrote.reason : undefined).toBe(WORKFLOW_UNTRUSTED_DAEMON);
+    expect(
+      d.sent.some((s) => s.method === Method.WorkflowSource || s.method === Method.WorkflowSave),
+    ).toBe(false);
     client.close();
   });
 });

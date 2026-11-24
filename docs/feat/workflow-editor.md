@@ -1501,3 +1501,112 @@ clean afterwards.
   still stands.
 
 *— claude-opus-5-5, 2026-11-24*
+
+## Execution
+
+### Slice 4 — client + pass-throughs (D5) — DONE
+
+**PARTIAL check re-run FIRST** — `.tentacle/tmp/workflow-editor/lb-slice4.ts` on the branch tip
+`83178d8d`:
+
+```
+connection.ts case Method.WorkflowSource: true
+connection.ts case Method.WorkflowSave: true
+hosted-session.ts workflowSource handler: true
+hosted-session.ts workflowSave handler: true
+
+== client side (must be ABSENT today) ==
+  remote-client: workflowSource=false workflowSave=false
+  remote-session: workflowSource=false workflowSave=false
+  workflows: workflowSource=false workflowSave=false
+  local-runtime: workflowSource=false workflowSave=false
+  app-types: workflowSource=false workflowSave=false
+```
+
+The slice's precondition ("the daemon answers both methods") holds, so the slice starts where the
+plan says. **Not a PARTIAL.**
+
+**What this run built**
+
+1. `client/src/remote-client.ts` — `workflowSource(sessionId, params)` and
+   `workflowSave(sessionId, params)`, both through `sessionCall(…, "once")` like
+   `workflowCatalogue`/`workflowStep`, both mapping `MethodNotFound` to `{unsupported: true}`
+   (never a throw at a screen, never an empty file that blames the folder).
+2. `client/src/remote-session.ts` — `workflowSource(name)` and `workflowSave(request)`. Both refuse
+   locally with the trust bit off (`daemonWakes`, AGENTS §7) and send nothing; the read answers
+   `{ok:false, unavailable}`, the write `{ok:false, refusal:"unavailable", reason}` — the same shape
+   a daemon-side refusal uses, so a screen paints one kind of answer. **No `turnId` is minted**: a
+   save raises no ask, so there is no turn for auto-accept to own.
+3. `client/src/workflows.ts` — `WorkflowSaveRequest = Omit<WorkflowSaveParams, "sessionId">`, the
+   same split as `WorkflowAction`: a caller cannot name another session's file, and a `dryRun`-less
+   request cannot be built (`dryRun` is required by the wire).
+4. `cli/src/local-runtime.ts` — both pass-throughs on `PersistingController` and its object literal,
+   beside `workflowCatalogue`.
+5. `tui/src/app-types.ts` — both methods optional on `SessionController` (the TUI ships no editor in
+   this task, per the plan's Mac/TUI parity section), plus `WorkflowSaveRequestView`, mirrored
+   structurally like `WorkflowActionView` (the TUI does not depend on `@tentacle/client`).
+
+**Tests (red first, §9).** `client/test/workflows-client.test.ts` (+4) and
+`cli/test/local-runtime.test.ts` (+1), plus the exact-set guard in
+`cli/test/subagent-panel-controller.test.ts` (+2 entries: the guard's whole purpose is to fail when a
+`SessionController` member a `RemoteSession` has is not forwarded, so the two new names are a
+deliberate entry, as its comment requires).
+
+- **Red before green.** On the branch's own state the 4 client tests failed with
+  `TypeError: session.workflowSource is not a function` / `workflowSave is not a function` (4 fail,
+  22 pass); the CLI test failed on `expect(received).toEqual(expected) … + undefined` (1 fail,
+  80 pass); the guard failed on `+ "workflowSource" + "workflowSave"`. All green after the code.
+
+**Drift from the Implementation (1, reconciled against the code).**
+
+- **The "no turn" assertion had to read the RAW frame.** The first version asserted on the params the
+  fake daemon *received*, and mutation B (routing the save through `mintTurn()`) **survived**: the
+  transport parses inbound params through `WorkflowSaveParamsSchema`, a strip schema, so an unknown
+  `turnId` is dropped before the handler ever sees it (`transport/src/peer.ts:340-345`). The fake now
+  records the client's own frames (`raw`) *before* handing them to the peer, and the mutation bites.
+  This is the §9 non-vacuity check doing its job, not a change to the plan.
+
+**Mutations (each restored with `cp` from `.tentacle/tmp/workflow-editor/mut-s4/`; a final `bun test`
++ `git diff --stat` confirms nothing survived).**
+
+| # | Mutation | Result |
+|---|---|---|
+| A | `workflowSource`: `MethodNotFound` → `{ok:false, unreadable}` | 1 red — the older-daemon test |
+| B | `workflowSave` mints a `turnId` and sends it | 1 red — the "mints NO turn" test (**survived** the first, parsed-params assertion; see drift) |
+| C | `workflowSave` ignores the trust bit and sends anyway | 1 red — the "trust bit off sends NOTHING" test |
+| D | both CLI forwards deleted from the controller literal | 1 red — the pass-through test (and only it) |
+| E | `workflowSave` client maps `MethodNotFound` → `{ok:false}` | 1 red — the older-daemon test (the save half) |
+
+Mutations A, B, C, E each turned **exactly one** test red, and it was the test written for that
+property. D turned exactly one red as well — the `subagent-panel-controller` guard stayed green,
+because that guard checks a member is *present* on the wrapper (it is: the type declares it), while
+the value-forwarding test is what actually exercises the forward — the two are complementary, and
+before this slice neither existed for these two methods.
+
+**Evidence**
+
+- `bun test` over the three touched files (`client/workflows-client`, `cli/local-runtime`,
+  `cli/subagent-panel-controller`): **111 pass, 0 fail.**
+- `bun test` over the neighbouring workflow files (`tui/workflow-frames`,
+  `client/workflow-mapping`, `client/workflow-permission`, `daemon/workflow-hosted`,
+  `cli/workflow-wiring`): **54 pass, 0 fail** — no regression in the catalogue/run path these calls
+  sit beside.
+- `bunx biome check` on all eight changed files: clean (one import sort and one formatting fix,
+  applied with `--write`).
+- `bunx tsc --noEmit` (root project) and `bunx tsc -p apps/mobile --noEmit`: clean.
+
+**No protocol schema change, so no `protocol.json` regeneration and no `protocol.d/` note.**
+`git diff --stat packages/protocol/` is empty: this slice only *consumes* the two methods' params and
+result types that slice 3a added.
+
+**No new changelog fragment, deliberately** — same reason as slice 3b:
+`changelog.d/workflow-editor.added.md` already exists on the branch, already carries this task's
+user-visible sentence, and the plan assigns the fragment to 7c. A second fragment for the same
+slug+category is the collision the changelog rules forbid.
+
+**Unverified, one line:** that a phone-side `RemoteSession.workflowSave` reaches a real
+`writeWorkflowFiles` on a real `serve` session end-to-end is proven here only by the fake peer plus
+the slice-3b wiring test — no test drives this client method through a real RPC round trip; slices
+6/7 and the e2e flow are where that path is first exercised.
+
+*— claude-opus-5-5 (executor, slice 4), 2026-11-24*

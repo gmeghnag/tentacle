@@ -15,6 +15,8 @@ import type {
   JobRow,
   WorkflowCatalogueResult,
   WorkflowRow,
+  WorkflowSaveResult,
+  WorkflowSourceResult,
   WorkflowStepDetail,
 } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
@@ -65,6 +67,25 @@ export type WorkflowActionView =
   | { readonly action: "stop"; readonly runId: string }
   | { readonly action: "resume"; readonly runId: string }
   | { readonly action: "rerun_step"; readonly runId: string; readonly stepId: string };
+
+/**
+ * What the workflow editor asks to write (`session/workflow_save`, docs/feat/
+ * workflow-editor.md D5), MIRRORED structurally for `WorkflowActionView`'s reason:
+ * the TUI does not depend on `@tentacle/client`, and `sessionId` is the client's
+ * own to fill. Every field the wire requires is here, so a caller can never build
+ * a request that forgets `dryRun` (Review) or the prompt files.
+ */
+export interface WorkflowSaveRequestView {
+  readonly name: string;
+  /** `create` refuses an existing file; `replace` requires `baseHash` to still be the file's. */
+  readonly mode: "create" | "replace";
+  /** The draft as JSON text (the phone and the TUI cannot parse YAML either). */
+  readonly draft: string;
+  readonly prompts: readonly { readonly path: string; readonly text: string }[];
+  readonly baseHash?: string;
+  /** Required, never defaulted: `true` IS Review, `false` writes. */
+  readonly dryRun: boolean;
+}
 
 /**
  * The conversation the App drives. Both the local agent `Session` and the
@@ -376,6 +397,24 @@ export interface SessionController {
    * `{unsupported: true}`.
    */
   workflowCatalogue?(): Promise<WorkflowCatalogueResult | { unsupported: true }>;
+  /**
+   * What the workflow editor opens for ONE file (`session/workflow_source`,
+   * docs/feat/workflow-editor.md D5): its bytes, its draft, its prompts, and
+   * either its hash or the validator's errors. A read — nothing is asked,
+   * nothing runs, nothing is written. Optional: absent on an older daemon, which
+   * answers `{unsupported: true}`.
+   */
+  workflowSource?(name: string): Promise<WorkflowSourceResult | { unsupported: true }>;
+  /**
+   * The editor's write (`session/workflow_save`): `dryRun: true` is Review (every
+   * check, nothing written), `false` writes and refuses `changed` unless
+   * `baseHash` is still the file's. A refusal is a RESULT (`refusal` + `reason`),
+   * never a throw; an older daemon answers `{unsupported: true}`. Optional: the
+   * TUI has no editor in this task.
+   */
+  workflowSave?(
+    request: WorkflowSaveRequestView,
+  ): Promise<WorkflowSaveResult | { unsupported: true }>;
   /**
    * Subscribe to this session's running background SHELL jobs as the daemon
    * reports them (bounded by the client; `count` is the daemon's own number).

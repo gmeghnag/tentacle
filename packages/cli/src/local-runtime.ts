@@ -386,6 +386,10 @@ export interface PersistingController extends SessionController {
   workflowStep?: RemoteSession["workflowStep"];
   /** `RemoteSession.workflowCatalogue`: the project's workflows (slice 5a). */
   workflowCatalogue?: RemoteSession["workflowCatalogue"];
+  /** `RemoteSession.workflowSource`: what the editor opens for one file (workflow-editor S4). */
+  workflowSource?: RemoteSession["workflowSource"];
+  /** `RemoteSession.workflowSave`: Review (dry run) and the write (workflow-editor S4). */
+  workflowSave?: RemoteSession["workflowSave"];
   /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
   onSubagentNotify?: RemoteSession["onSubagentNotify"];
   /** `RemoteSession.messageSubagent`: the user's text into a running background child. */
@@ -987,6 +991,14 @@ export function persistingController(
     },
     workflowCatalogue() {
       return inner.workflowCatalogue();
+    },
+    // docs/feat/workflow-editor.md D5: the editor's read and its write, both the
+    // daemon's (a save's hash is what the next start asks about — never a local echo).
+    workflowSource(name) {
+      return inner.workflowSource(name);
+    },
+    workflowSave(request) {
+      return inner.workflowSave(request);
     },
     onSubagentNotify(listener) {
       return inner.onSubagentNotify(listener);
