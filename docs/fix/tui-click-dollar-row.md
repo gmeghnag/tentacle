@@ -31,4 +31,12 @@ Owner 23/11 ~17:45: in the TUI only a tool row's HEADER (the intent sentence / t
 
 ## Execution
 
+- Load-bearing check re-run: red-first tests (before any src edit) failed on the property — App frame test (click on `$` row left the block closed) + 3 `tool-hit` tests; 13 pass / 4 fail.
+- As built: `LaidItem.toggleRows` (`render-lines.ts`), helper `toggleRowsOf` (1 for non-shell/queued/plain-collapsed, else `1 + dollarRows(...).length`), filled in `layoutTranscript`; `toolCallAt` tests `start <= absRow < start + toggleRows` (`tool-hit.ts`, doc comment updated). Tests: new App test + 4 `tool-hit` tests; `mouse-stream.test.ts` literals got `toggleRows: 1`.
+- Drift: the older `tool-hit.test.ts` test "an expanded call's command rows are text too" asserted the OLD behaviour; rewritten (`$` rows hit, output rows null). Helper name `toggleRowsOf` (not `shellToggleRows`), same semantics.
+- Mutations: (M1) `toggleRows: 1` → 5 fail; (M2) `<` → `<=` in `toolCallAt` → 7 fail; both reverted, 42/42 green on tool-hit + app-shell-row-collapsed + mouse-stream.
+- Not run (per budget): full suite, whole-repo typecheck/lint (script gate). Biome clean on the 5 touched files. No protocol change.
+
+*— claude-sonnet-5-5, 2026-11-24*
+
 ## Review

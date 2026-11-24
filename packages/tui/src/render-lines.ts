@@ -1102,6 +1102,25 @@ function shellIntentLines(
 }
 
 /**
+ * How many rows from a tool item's start toggle it on a click (docs/fix/
+ * tui-click-dollar-row): the header, plus — for a `shell` call — its `$`
+ * command rows (the continuation and exit-spill rows too), where one naturally
+ * clicks to see the whole command. Output/body rows stay plain text.
+ */
+function toggleRowsOf(tool: ToolItem, opts: RenderOptions): number {
+  if (tool.name !== "shell" || tool.status === "queued") {
+    return 1;
+  }
+  const cols = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
+  const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  // Plain (no sentence) collapsed: the `$` text rides the header already.
+  if (shellRowParts(tool.args, tool.status, false) === null && !expanded) {
+    return 1;
+  }
+  return 1 + dollarRows(shellRow(tool), cols, expanded).length;
+}
+
+/**
  * A `shell` call with NO sentence (docs/fix/tui-shell-row-collapsed, owner
  * variant B): the command rides the title collapsed — `● Bash <cmd cut>
  * exit=N <elapsed>`, the code before the duration, no body — and moves into the
@@ -1626,6 +1645,11 @@ export interface LaidItem {
    * none, so `sliceLaid` must not assume `start - 1` is one.
    */
   readonly gap: boolean;
+  /**
+   * How many rows from `start` toggle the call on a click: 1 (the header) for
+   * every tool but a `shell`, whose `$` rows count too (`tool-hit.ts`).
+   */
+  readonly toggleRows: number;
 }
 
 /**
@@ -1666,7 +1690,13 @@ export function layoutTranscript(
     if (gap) {
       cursor += 1; // blank separator row between items (matches transcriptLines)
     }
-    laid.push({ rows, start: cursor, id: item.kind === "tool" ? item.id : "", gap });
+    laid.push({
+      rows,
+      start: cursor,
+      id: item.kind === "tool" ? item.id : "",
+      gap,
+      toggleRows: item.kind === "tool" ? toggleRowsOf(item, opts) : 1,
+    });
     cursor += rows.length;
     prev = item;
   }
