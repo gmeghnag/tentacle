@@ -72,3 +72,9 @@ Old items under the old service (key regenerates ⇒ re-register or deaf: see De
 Gate: `bun test apps/mobile/test/<files>`, then `bun run check`. Device: install the new TestFlight/OTA build, send a turn_done: (1) banner shows the rendered title/text (NSE opened it) — if still the placeholder, re-run C1/C2; (2) force-quit the app, tap the banner ⇒ the session opens (cold); (3) background tap ⇒ the session opens; `notify` log line absent of `refused`. Simulator cannot prove the NSE or the SpringBoard tap (flow 22 quarantined) — keep that stated.
 
 Size: M · Blast: cross-module (Keychain contract + app navigation; not a §7 invariant) · Review: fresh-context recommended (Keychain key rotation).
+
+#### Orchestrator approval (2026-11-24)
+
+Owner «ok facciamoli partire» (24/11): execute **Design 1 + 2 now** (service pinned to ONE constant on both sides; cold-start/early tap parked until navigation is ready). FIRST run C1 and C2 yourself (unzip/strings on `.tentacle/tmp/mobile-ota/export/tentacle.ipa`, `rg 'no-auth'` in the installed expo-secure-store) and paste the output in Execution — if C2 shows the app's service is NOT `app:no-auth`, STOP and say so. **Design 3 is NOT in this round**: it waits the owner's C3 log line from the phone. Executor: Sonnet (owner: S/M → deepseek/sonnet).
+
+*— orchestrator (claude-opus-5-5), 2026-11-24*
