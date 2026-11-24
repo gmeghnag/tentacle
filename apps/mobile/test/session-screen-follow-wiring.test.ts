@@ -73,7 +73,9 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
   test("both measurements go through the landing first, and it owns the scroll while pending", () => {
     expect(src).toMatch(/onContentSize = useCallback\([\s\S]{0,400}if \(land\(\)\) \{/);
     expect(src).toMatch(/onListLayout = useCallback\([\s\S]{0,300}if \(land\(\)\) \{/);
-    expect(src).toMatch(/landingStep\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,?\s*\)/);
+    expect(src).toMatch(
+      /landingStep\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,\s*offset\.current,?\s*\)/,
+    );
     expect(src).toMatch(/const landing = useRef<Landing>\(landingStart\)/);
   });
 
@@ -105,9 +107,9 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
     // RN fires a content/layout event only on a CHANGE — so a short session never
     // repeated one and the list stayed invisible.
     expect(src).toMatch(
-      /landingReveal\(\s*landing\.current,\s*size\.current,\s*followRef\.current\.following,\s*hasRows\.current,?\s*\)/,
+      /landingReveal\(\s*landing\.current,\s*size\.current,\s*followRef\.current\.following,\s*hasRows\.current,\s*offset\.current,?\s*\)/,
     );
-    expect(src).toMatch(/setTimeout\(\(\) => \{[\s\S]{0,600}LANDING_REVEAL_MS\)/);
+    expect(src).toMatch(/setTimeout\(\(\) => \{[\s\S]{0,900}LANDING_REVEAL_MS\)/);
     // Every landing scroll re-arms it: the reveal waits for the measurements to
     // go quiet, so it never chops a landing loop in half.
     expect(src).toMatch(/armReveal\(\);[\s\S]{0,120}if \(changed\) \{/);
@@ -126,8 +128,12 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
       /hasRows\.current = state\.view\.rows\.length > 0 \|\| state\.status\.phase !== "opening"/,
     );
     // Both measurements pass it (the reveal is what settled the empty state).
-    expect(src).toMatch(/landingStep\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,?\s*\)/);
-    expect(src).toMatch(/landingReveal\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,?\s*\)/);
+    expect(src).toMatch(
+      /landingStep\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,\s*offset\.current,?\s*\)/,
+    );
+    expect(src).toMatch(
+      /landingReveal\(\s*landing\.current,[\s\S]{0,140}hasRows\.current,\s*offset\.current,?\s*\)/,
+    );
   });
 });
 
@@ -194,9 +200,13 @@ describe("the settle re-check (docs/fix/mobile-qa-1117.md, bug 5)", () => {
 
   test("it reads the list's real offset and lets `settleStep` decide; a drag skips it", () => {
     expect(src).toContain("offset.current = contentOffset.y;");
-    expect(src).toContain(
-      "settleStep(followRef.current, { offset: offset.current, ...size.current })",
+    expect(src).toMatch(
+      /settleStep\(\s*followRef\.current,\s*\{ offset: offset\.current, \.\.\.size\.current \},\s*!silent,?\s*\)/,
     );
+    // fix/mobile-open-long-session: a landing that ENDS arms ONE silent settle check,
+    // from both of its exits (a measurement and the reveal timer).
+    expect(src).toContain("armLandedSettle.current = () => armSettle(true);");
+    expect(src.match(/armLandedSettle\.current\(\)/g)?.length).toBe(2);
     expect(src).toMatch(/if \(dragging\.current\) \{\s*return;\s*\}\s*const step = settleStep/);
   });
 });
