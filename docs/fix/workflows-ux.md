@@ -867,3 +867,33 @@ corrected. One false claim: the S8b debt note (finding 1).
 Same model family as the executor (Opus): only the context is fresh, so blind spots we share can survive both passes.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 2
+
+**Verdict: PASS.** Both MEDIUM findings are fixed. The fix commits are `5554377e` and
+`1d3d1411`; the second only adds the `?.` that typecheck required.
+
+- **Finding 1 — fixed.** S8c now owns the removal of the `elsewhere` lookup, in both the Files
+  table and the Slices table, with a grep acceptance check. The false "noted in S8b" sentence is
+  struck through.
+- **Finding 2 — fixed.** `refreshCatalogue()` reuses the single-flight `readCatalogue()`. It is
+  called at each fan open, on a dimmed Workflows commit (which covers VoiceOver), and on a dimmed
+  fan tap. A failed re-read keeps the last answer.
+- **Mutations I ran myself, then reverted** (`git status --short` empty afterwards):
+  - `refreshCatalogue` clears `catalogue` before reading → 1 fail ("a re-read that FAILS keeps the
+    last answer").
+  - the re-read removed from the fan open → 1 fail (the wiring test "at each fan OPEN").
+- **Gate:**
+  - `bun run typecheck`: clean.
+  - `bun run lint`: clean (2385 files, 0 diagnostics).
+  - Mobile tests (catalogue, hub-workflows-wiring, hub-tools-wiring, hub-actions, hub-session,
+    workflow-runs-controller): 150 pass, 0 fail.
+- **Regressions checked:**
+  - The fan-open read adds one `emit()` re-render about one round trip after the open. `HubFan` is
+    `memo` and documented as never restarting its springs on a re-render (`ui/HubFan.tsx:84-91`),
+    so I judge this not a jank regression. It is not measured on a device.
+  - A dimmed tap during that same open still acts on the world seen at the open (M7,
+    `hubOpenAt`). The item un-dims at the next look, which matches the documented behaviour.
+  - With no handle (before the attach) the re-read resolves without sending anything.
+
+*— claude-opus-5-5, 2026-11-24*
