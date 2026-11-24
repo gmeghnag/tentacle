@@ -1355,6 +1355,51 @@ not re-run then.
 - `bun run lint` is clean (2325 files, 0/0).
 - The full root `bun test` was not run in this round: only `apps/mobile` changed.
 
+### Validation (simulator) — after fix round 2
+
+*— claude-opus-5-5 (validator), 2026-11-24*
+
+**Source.** The orchestrator's TARGETED gate (the sheet-related flows only; iOS 26 simulator,
+Release) on this branch after fix round 2:
+`.tentacle/tmp/orchestration/runs/e2e-gate-mobile-native-sheets.log`, results
+`.tentacle/tmp/e2e-mobile/1795479004434/`. The log's summary reads **GATE FAIL — 15 pass / 1 fail
+(of 16)**. That is not the exit 0 I was told about. The one fail is `34-hub-scheduled` (see the
+last row). The sheet flows `08`, `08b`, `08c`, `09`, `10`, `16`, `17`, `25`, `29`, `34-hub-{commands,info,tools}`,
+`42-native-sheets-shots` and `43-native-sheets-lock` PASS. There is no `FAILED`/`SKIPPED` step
+in the `commands.json` of `08`, `42` or `43`. No re-run: the shots that are missing below (Commands
+and Permission at S/L, `perm-hold`) are taken by NO flow, so a `--only` run could not produce them.
+Every PNG below was opened and looked at. The copies are in
+`docs/feat/mobile-native-sheets/validation/`, prefixed `gate2-` so the first validation's files
+(referenced above) are kept.
+
+| File (`gate2-…`) | What I saw |
+|---|---|
+| `commands-M-light` / `-dark` | Commands at **M**: top edge ≈ 52 %, grabber, × top right, title and subtitle pinned, list (Compact … Auto-accept) cut at the bottom edge. Both themes correct; the dimmed session is above. |
+| `tools-M-light` / `-dark` | Tools at **M**: same top edge. Title, MCP 2 / Skills 1 segment, search, `demo`/`broken` rows, footnote and Refresh all visible. Correct in both themes. |
+| `tools-L-list-drag-light` / `-dark` | Tools at **L**, reached by the LIST drag (owner A works): the sheet is just below the status bar, the session is hidden, the content is unscrolled with empty ground below Refresh. Correct in both themes. |
+| `tools-S-light` / `-dark` | Tools at **S**: top edge ≈ 70 %. Only the head, segment, search and the `demo` row show; Refresh is below the fold. Correct in both themes. |
+| `session-info-M-light` / `-dark` (flow 42) | Session info at **M**: MODEL and SESSION bands, Auto-accept at the bottom edge. Correct in both themes. |
+| `session-info-L-expanded-light` / `-dark` (flow 25) | Session info at **L** after `_sheet-expand`: SCHEDULED WAKES, MCP SERVERS (`demo` 1 tool, `broken` failed), SKILLS, Refresh. Correct in both themes. |
+| `permission-M-live-ask-light` / `-dark` | A live "Write a file" ask (`project/ns42.txt`) at **M**: all four options and Auto-accept on screen. The session row says `Write ns42.txt` 16–17 s and the title has the attention dot. Correct in both themes. |
+| `lock-cover-sheets-drained-light` | `43` while locked: the lock cover ("tentacle is locked", Unlock with Face ID, Use Passcode) with the simulator's Face ID HUD over it. **No sheet and no session behind it.** Light only (the flow shoots it once). |
+| `lock-after-unlock-tools-restored-M-light` / `-dark` | `43` after the unlock: Tools is back at **M** over the session (`desired` survived the drain). The Skills count has not loaded yet ("Skills" with no number); it is a re-fetch frame, not a defect I could pin. |
+| `flow34-fail-run-schedule-ask-unanswered-light` | `34-hub-scheduled`'s failing step (`turn-idle` not visible within 30 s): a "Run Schedule" permission ask for `schedule_create` is up and unanswered, so the turn never ends. **The flow did not reach a sheet assert.** The fix round's GATE PASS of `34` ran next to other flows. A plausible cause, not verified: in this targeted subset, some state the full ordering set up earlier (an allow rule) is missing. |
+
+**Against the plan's Validation (the three properties asked for).**
+- **Each sheet at its detents, light and dark: PARTIAL.** Tools: S, M, L × light/dark, all six
+  correct. Session info: M and L × light/dark (no S). Commands: M only. Permission: M only, live
+  ask. Outbox: not shot (S6 drift 4; flow 16's shots are the offline chat with the outbox bubble,
+  not the sheet). Petrol: not shot.
+- **Permission not swipe-dismissible: MET by assertion, no picture.** `08` PASSed:
+  `assertNotVisible perm-hold` before the swipe, two drags past the bottom edge, the ask still
+  unanswered, then `perm-hold` and `perm-later` visible (no failed step in `commands.json`). `08`
+  takes no screenshot of the note, so there is no frame of it.
+- **Lock drains the sheets: MET, with a picture.** `43` PASSed: `lock-screen` visible, then
+  `tools-sheet` and `session-view` NOT visible, both before the unlock. The cover frame shows it
+  (no sheet behind it). After the unlock Tools comes back at M.
+- **Not attempted, by instruction:** L2 (the owner's on-device app-switcher check), AX5, Reduce
+  Motion, landscape, Permission over Tools, the keyboard checks.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-23 (fresh context; same model family as the S1/S2/S4/S5 executor, so shared blind spots are possible)*
