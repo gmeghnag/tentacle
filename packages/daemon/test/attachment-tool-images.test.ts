@@ -6,8 +6,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ToolImageEntry } from "@tentacle/core";
 import { AttachmentStore, UploadBudget } from "../src/attachment-store.ts";
+import { LogSessionStore } from "../src/session-log-store.ts";
+import { SessionPersister } from "../src/session-persister.ts";
 
 const sha = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 const bytesOf = (size: number, seed: number): Uint8Array =>
@@ -122,5 +127,98 @@ describe("putTool (disk store, `serve`)", () => {
     expect(r).toEqual({ refused: "image could not be stored" });
     expect(s.resolve(sha(hi).slice(0, 12))).toEqual({ kind: "none" });
     expect(s.held).toBe(800);
+  });
+});
+
+describe("the tool sub-cap across a `serve` restart (review round 1)", () => {
+  /** One session's blob dir: the files and the tool marks survive a "restart" (a new store over it). */
+  function sharedDisk() {
+    const files = new Map<string, Uint8Array>();
+    const tool = new Set<string>();
+    return {
+      files,
+      open() {
+        return {
+          index: new Map([...files].map(([id, b]) => [id, b.length] as const)),
+          toolIds: new Set(tool),
+          async write(id: string, bytes: Uint8Array, opts?: { tool?: boolean }): Promise<void> {
+            if (opts?.tool === true) tool.add(id);
+            files.set(id, bytes);
+          },
+          async read(id: string): Promise<Uint8Array | null> {
+            return files.get(id) ?? null;
+          },
+        };
+      },
+    };
+  }
+  const caps = { maxBytes: 20_000, toolMaxBytes: 6_000 };
+
+  test("tool blobs reloaded from disk still count: new pictures past the sub-cap are refused", async () => {
+    const d = sharedDisk();
+    const first = new AttachmentStore(new UploadBudget(), { ...caps, disk: d.open() });
+    entryOf(await first.putTool(put(bytesOf(5000, 20))));
+    first.dispose();
+    const second = new AttachmentStore(new UploadBudget(), { ...caps, disk: d.open() });
+    expect(second.held).toBe(5000);
+    expect(await second.putTool(put(bytesOf(2000, 21)))).toEqual({ refused: "image store full" });
+  });
+
+  test("a reloaded USER blob is not charged to the tool sub-cap", async () => {
+    const d = sharedDisk();
+    const first = new AttachmentStore(new UploadBudget(), { ...caps, disk: d.open() });
+    const user = bytesOf(5000, 22);
+    await first.put({
+      id: sha(user),
+      size: user.length,
+      offset: 0,
+      data: Buffer.from(user).toString("base64"),
+    });
+    first.dispose();
+    const second = new AttachmentStore(new UploadBudget(), { ...caps, disk: d.open() });
+    entryOf(await second.putTool(put(bytesOf(5500, 23))));
+  });
+
+  test("a mark for a blob no longer on disk charges nothing", async () => {
+    const d = sharedDisk();
+    const first = new AttachmentStore(new UploadBudget(), { ...caps, disk: d.open() });
+    const e = entryOf(await first.putTool(put(bytesOf(5000, 24))));
+    first.dispose();
+    d.files.delete(e.high.ref.id);
+    const second = new AttachmentStore(new UploadBudget(), { ...caps, disk: d.open() });
+    entryOf(await second.putTool(put(bytesOf(5500, 25))));
+  });
+
+  test("real files: the persister's disk marks tool blobs, a restarted store reads them back", async () => {
+    const root = await mkdtemp(join(tmpdir(), "harness-tool-marks-"));
+    try {
+      const open = () => {
+        const persister = new SessionPersister({
+          store: new LogSessionStore(root),
+          cwd: "/w",
+          model: "m",
+          onError: () => {},
+        });
+        const disk = persister.blobs("s1");
+        if (disk === undefined) throw new Error("no disk");
+        return new AttachmentStore(new UploadBudget(), { ...caps, disk });
+      };
+      const first = open();
+      const user = bytesOf(4000, 26);
+      await first.put({
+        id: sha(user),
+        size: user.length,
+        offset: 0,
+        data: Buffer.from(user).toString("base64"),
+      });
+      entryOf(await first.putTool(put(bytesOf(5000, 27))));
+      first.dispose();
+      const second = open();
+      expect(second.held).toBe(9000);
+      expect(await second.putTool(put(bytesOf(2000, 28)))).toEqual({ refused: "image store full" });
+      entryOf(await second.putTool(put(bytesOf(1000, 29))));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

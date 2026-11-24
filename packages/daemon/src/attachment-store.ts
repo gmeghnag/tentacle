@@ -130,8 +130,18 @@ type Entry = Partial | Complete | Stored;
 export interface AttachmentDisk {
   /** The blobs already on disk (id → size), read once at construction. */
   readonly index: ReadonlyMap<BlobId, number>;
-  /** Make the verified `bytes` of `id` durable; rejects when it could not. */
-  write(id: BlobId, bytes: Uint8Array): Promise<void>;
+  /**
+   * The ids marked as TOOL pictures (`putTool`), read with `index`: on reload
+   * they are charged to the tool sub-cap again (docs/feat/image-view.md, fix
+   * round 1). Absent = none marked. A mark without its blob charges nothing.
+   */
+  readonly toolIds?: ReadonlySet<BlobId>;
+  /**
+   * Make the verified `bytes` of `id` durable; rejects when it could not.
+   * `tool` marks it a tool picture, durably BEFORE the blob lands (a crash
+   * between leaves a mark without a blob, never a tool blob uncounted).
+   */
+  write(id: BlobId, bytes: Uint8Array, opts?: { readonly tool?: boolean }): Promise<void>;
   /** The bytes on disk, or `null`. */
   read(id: BlobId): Promise<Uint8Array | null>;
 }
@@ -192,9 +202,15 @@ export class AttachmentStore implements AttachmentSource, ToolImageStore {
     this.now = opts.now ?? Date.now;
     this.disk = opts.disk;
     this.toolMaxBytes = opts.toolMaxBytes ?? TOOL_IMAGE_BYTES;
+    const toolIds = opts.disk?.toolIds;
     for (const [id, size] of opts.disk?.index ?? []) {
       this.entries.set(id, { kind: "stored", size });
       this.used += size;
+      // A tool picture kept before a restart still counts against the sub-cap (owner Q2).
+      if (toolIds?.has(id) === true) {
+        this.toolBytes.set(id, size);
+        this.toolUsed += size;
+      }
     }
   }
 
@@ -320,14 +336,14 @@ export class AttachmentStore implements AttachmentSource, ToolImageStore {
    * its memory reservation goes back to the daemon; failed → dropped (both
    * reservations released) and the ack rejects `store_failed`.
    */
-  private land(id: BlobId, bytes: Uint8Array): Promise<PutAck> {
+  private land(id: BlobId, bytes: Uint8Array, tool = false): Promise<PutAck> {
     const disk = this.disk;
     if (disk === undefined) throw new Error("land() without a disk");
     const size = bytes.length;
     const { promise, resolve, reject } = Promise.withResolvers<PutAck>();
     const entry: Complete = { kind: "complete", bytes, landing: promise };
     this.entries.set(id, entry);
-    disk.write(id, bytes).then(
+    disk.write(id, bytes, tool ? { tool } : undefined).then(
       () => {
         // Disposed meanwhile (or replaced): its reservations went with it.
         if (this.entries.get(id) === entry) {
@@ -510,7 +526,7 @@ export class AttachmentStore implements AttachmentSource, ToolImageStore {
       return Promise.resolve(index());
     }
     for (const f of fresh) {
-      waits.push(this.land(f.id, f.bytes));
+      waits.push(this.land(f.id, f.bytes, true));
     }
     const landed = Promise.all(waits)
       .then(

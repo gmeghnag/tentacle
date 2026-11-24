@@ -117,6 +117,20 @@ describe("SessionBlobs", () => {
     expect(same(got, a.bytes)).toBe(true);
   });
 
+  test("tool marks (docs/feat/image-view.md): write{tool} marks, index skips the marks file, link carries a mark", async () => {
+    const dir = await freshDir();
+    const blobs = new SessionBlobs(dir);
+    const t = blob("a tool picture");
+    const u = blob("a user upload");
+    await blobs.write("S", t.id, t.bytes, { tool: true });
+    await blobs.write("S", u.id, u.bytes);
+    expect([...blobs.toolIds("S")]).toEqual([t.id]);
+    expect([...blobs.index("S").keys()].sort()).toEqual([t.id, u.id].sort());
+    await blobs.link("S", "F", [t.id, u.id]);
+    expect([...blobs.toolIds("F")]).toEqual([t.id]);
+    expect(blobs.toolIds("nobody").size).toBe(0);
+  });
+
   test("link falls back to a copy when the file system cannot link (EXDEV)", async () => {
     const dir = await freshDir();
     const { io, calls } = spyIo({

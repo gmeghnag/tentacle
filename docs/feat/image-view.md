@@ -474,6 +474,60 @@ script (per the budget). No protocol schema change → `protocol.json` not regen
 - Parallel-branch overlap: all new imports are on their own lines (agent.ts, wiring.ts,
   core/index.ts); expected conflicts with `feat/workflows-ui` are import lines only.
 
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-24*
+
+**Review finding 1 (MEDIUM, tool sub-cap lost on `serve` restart) — FIXED.** Tool blobs
+are now marked on disk, and a reloaded store charges them to the sub-cap again.
+- `session-blobs.ts`: `TOOL_MARKS = "tool-ids"`, a file in `<uid>.attachments/` with one
+  blob id per line. `write(…, {tool})` appends the id (fsynced) BEFORE the blob lands, so
+  a crash between the two leaves a mark with no blob, which charges nothing. A crash never
+  leaves a tool blob uncounted. `toolIds(uid)` reads the file synchronously, like `index`,
+  and skips lines that are not ids. `link` (a `/clear` fork) carries a source mark with
+  its blob. `index` already skips non-id names, so an older build ignores the file, and
+  `removeAll` deletes it along with the dir.
+- `session-log-store.ts`: the queued `blob` op gets an optional `tool` flag, so the mark
+  is written in the session's queue/lock like the blob. Added `toolBlobIds(id)`.
+- `session-persister.ts`: `SessionStoreLike.putBlob(…, opts?)` / `toolBlobIds?`.
+  `blobs(id)` hands `toolIds` to the store and forwards `opts`.
+- `attachment-store.ts`: `AttachmentDisk.toolIds?` and `write(…, opts?: {tool})`. The
+  constructor charges `toolBytes`/`toolUsed` for each on-disk blob whose id is marked.
+  `putTool` lands its fresh variants with `tool: true`. A user `put` and a `putTool`
+  deduped onto an existing blob are never marked.
+
+**Red → green.** The new test `attachment-tool-images` "tool blobs reloaded from disk
+still count…" ran on the unfixed store and FAILED on the property: the second store's
+`putTool` returned an entry where `{ refused: "image store full" }` was expected. With
+the fix it passes. Added alongside it: a reloaded USER blob is not charged; a mark without
+its blob charges nothing; a real-files test through `LogSessionStore` + `SessionPersister`
+(user 4000 + tool 5000 → restart → `held` 9000, tool 2000 refused, tool 1000 fits under
+the 6000 cap); `session-blobs` "tool marks …" (write marks, index skips the file, link
+carries the mark).
+
+**Mutations (each reverted; a grep for the mutation text afterwards is empty):**
+| Mutation | Red |
+|---|---|
+| M1 constructor never charges marked blobs (`false &&`) | "tool blobs reloaded…", "real files…" |
+| M2 `putTool` lands without the mark (`land(…, false)`) | "tool blobs reloaded…", "real files…" |
+| M3 persister drops `toolIds` | "real files…" |
+| M4 `link` does not carry the mark | `session-blobs` "tool marks…" |
+
+**Narrow verification:** `attachment-tool-images`, `session-blobs`, `attachments-store`,
+`session-log-store`, `serve-log-store` → `94 pass, 0 fail`. `biome check` on the 6
+touched files is clean. `tsc --noEmit -p packages/daemon` is clean. Full gate: left to the
+orchestrator's script.
+
+**Not changed (reviewer's minor, non-blocking note):** the `.passthrough()` schema of
+`image_view`. It is the documented drift that lets a stale `detail` get its note. No HIGH
+or MEDIUM asked for a change.
+
+**Debt:** after a restart a marked blob still counts but cannot be reached by `image_view`,
+because the tool index (labels, dimensions) is memory-only (review F3). The model re-reads
+the PDF, and `putTool` dedupes onto the stored blobs: `existing` is `stored` at the same
+size, so nothing new is charged. This dedupe is from reading the code; no test pins it.
+No GC of tool blobs (unchanged from before).
+
 ## Review
 
 ### Owner answers (2026-11-23 ~22:00)

@@ -195,7 +195,12 @@ type Op =
   | { readonly kind: "aside"; readonly reason: string }
   | { readonly kind: "dropState" }
   | { readonly kind: "forget" }
-  | { readonly kind: "blob"; readonly blobId: string; readonly bytes: Uint8Array }
+  | {
+      readonly kind: "blob";
+      readonly blobId: string;
+      readonly bytes: Uint8Array;
+      readonly tool?: boolean;
+    }
   | { readonly kind: "dropBlobs" }
   | { readonly kind: "artifact"; readonly meta: ArtifactMeta; readonly bytes: Uint8Array }
   | { readonly kind: "sweepArtifacts" }
@@ -408,13 +413,24 @@ export class LogSessionStore {
    * Keep one verified image blob of the session on disk, `<uid>.attachments/<blobId>`
    * (docs/feat/attachments-durable.md D1), under its lock, in its queue — so a
    * `remove` queued after it leaves no orphan dir. The caller verified the
-   * bytes hash to `blobId`; resolves once the file is durable.
+   * bytes hash to `blobId`; resolves once the file is durable. `tool` marks
+   * it a tool picture (`SessionBlobs.toolIds`, docs/feat/image-view.md).
    */
-  putBlob(id: string, blobId: string, bytes: Uint8Array): Promise<void> {
+  putBlob(
+    id: string,
+    blobId: string,
+    bytes: Uint8Array,
+    opts?: { readonly tool?: boolean },
+  ): Promise<void> {
     if (!isValidSessionId(id)) {
       return Promise.reject(new Error(`invalid session id ${JSON.stringify(id)}`));
     }
-    return this.enqueue(id, { kind: "blob", blobId, bytes });
+    return this.enqueue(id, {
+      kind: "blob",
+      blobId,
+      bytes,
+      ...(opts?.tool === true ? { tool: true } : {}),
+    });
   }
 
   /** One blob of the session, or `null` (absent, unreadable, a bad id). Files are immutable once in: no lock. */
@@ -425,6 +441,11 @@ export class LogSessionStore {
   /** The session's blob ids on disk, with their sizes (synchronous: a store is built synchronously). */
   blobIndex(id: string): Map<string, number> {
     return this.blobs.index(id);
+  }
+
+  /** The session's blob ids marked as tool pictures (synchronous, like `blobIndex`). */
+  toolBlobIds(id: string): Set<string> {
+    return this.blobs.toolIds(id);
   }
 
   /** The session ids that have a blob dir but no `<uid>.jsonl` (`serve`'s start-up sweep, D3). */
@@ -604,8 +625,9 @@ export class LogSessionStore {
         else if (op.kind === "aside") await this.asideLocked(id, op.reason);
         else if (op.kind === "dropState") await rm(this.stateFile(id), { force: true });
         else if (op.kind === "forget") this.writers.delete(id);
-        else if (op.kind === "blob") await this.blobs.write(id, op.blobId, op.bytes);
-        else if (op.kind === "dropBlobs") await this.blobs.removeAll(id);
+        else if (op.kind === "blob") {
+          await this.blobs.write(id, op.blobId, op.bytes, op.tool === true ? { tool: true } : {});
+        } else if (op.kind === "dropBlobs") await this.blobs.removeAll(id);
         else if (op.kind === "artifact") {
           await this.artifactStore.append(id, op.meta, op.bytes);
         } else if (op.kind === "sweepArtifacts") {
