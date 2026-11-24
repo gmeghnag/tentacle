@@ -1,6 +1,6 @@
 # feat/image-files — `fs_read` of .png/.jpg/.jpeg gives the model the image (high only)
 
-> **Status:** context
+> **Status:** implementation (NOT approved — owner Q1–Q2)
 > **Branch:** `feat/image-files`
 > **Size:** S–M · **Blast:** load-bearing (tool-result shape, the session store's tool-image path) · **Suited:** Opus plan + exec, fresh-context Opus review
 > **Changelog:** `changelog.d/image-files.added.md`
@@ -16,6 +16,296 @@ Constraints: reuse image-view's seams (no second image path); model caps (`image
 *— orchestrator (claude-opus-5-5), 2026-11-24*
 
 ## Implementation
+
+*— claude-opus-5-5 (planner), 2026-11-24*
+
+**Status: NOT approved.** Two choices are visible to the owner (### Owner questions, Q1–Q2).
+Everything else follows from the Context, the image-view precedents, or a recommendation
+below that has no owner-visible trade-off.
+
+### Load-bearing assumption
+
+**An `fs_read` image file goes through image-view's tool-image path unchanged. The only
+edit on that path is to widen one TYPE literal: `ToolImagePut.mimeType` goes from
+`"image/png"` to `"image/png" | "image/jpeg"`.** Every link after `putTool` already
+ignores the MIME type, or already accepts JPEG:
+
+1. **Store.** `putTool` computes each id from the bytes (`withId`,
+   `daemon/src/attachment-store.ts:586-589`). It dedupes, reserves session cap + daemon
+   cap + tool sub-cap in one step, and refuses without eviction (`:464-500`). It copies
+   `input.mimeType` into the ref (`:505-512`). With no `low` variant, `low` IS `high`:
+   one id, one reservation (`:466,480`). `resolve` (`:549-565`) and `holds` (`:448-452`)
+   look only at ids and sizes, never at the MIME type.
+2. **Tool.** `viewImage` (`tools/src/image-view.ts:73-117`) picks `entry.high`/`entry.low`
+   and returns `image: variant.ref`. It never reads the MIME type or any bytes.
+3. **Agent.** `toolMessage` (`agent/src/agent.ts:285-300`) runs `imageCheck` on the ref.
+   That check accepts any member of `IMAGE_MIME_TYPES`
+   (`core/src/attachments.ts:92`; `protocol/src/attachment.ts:25`, which includes
+   `image/jpeg`).
+4. **Provider.** `sendable` (`providers/src/images.ts:259-260`) and `toolResultImages`
+   (`:527-529`) test `isKnownImageType(ref.mimeType)` and send `ref.mimeType` as it is.
+   The model's byte cap is checked before any read, and an image over it gets the
+   existing reason line (`:440-446`).
+5. **Persistence / wire.** The message is the same `role:"tool"` message with one ref
+   that image-view already writes. `AttachmentRef` accepts `image/jpeg`. No
+   `PROTOCOL_VERSION` change, no `protocol.d/` note, no log change.
+
+**Prove first (Execution step 0, before any production edit).** Write a repro in
+`.tentacle/tmp/image-files/step0.ts`:
+- a real `AttachmentStore`;
+- `putTool` of a real 1×1 baseline JPEG (cast past the literal type);
+- then `viewImage`, then `toolMessage`, then `AnthropicProvider` and `OpenAIProvider`
+  with a recording `fetch`.
+
+Assert exactly 1 image part, with `media_type: "image/jpeg"` on Anthropic and
+`data:image/jpeg;base64,` on OpenAI. Do the same for a PNG. If either fails, STOP and fix
+the plan (§8). Keep the repro as a test row (T5).
+
+### Preconditions (verified)
+
+- **What happens today.** `fs_read` first sniffs for a PDF (`builtins.ts:192-197`).
+  Anything else goes through `ctx.env.readFile`, a UTF-8 decode (`:137`). A PNG
+  therefore comes back as mojibake text, and the model never sees an image.
+- **When `fs_read` gets the store.** `ctx.images` is set only when wiring has a
+  `toolImages` handle AND `imageLimits(...).vision` (`cli/src/wiring.ts:1008-1014`).
+  Wiring then swaps in `createFsReadTool({images:true})` (`:1013`).
+- **Which sessions have a handle.** The worker and `serve` forward it. The pod factory
+  never does (image-view D1, Review "Pod path"). So without vision, in a pod, or in a
+  sub-agent (`agent/src/subagent.ts`, no `toolImages`), `ctx.images` is undefined and
+  today's behaviour holds by construction.
+- **Byte reads.** Only `exec/src/host-execution.ts:484` implements
+  `ExecutionEnvironment.readBytes`. `maxBytes` refuses before reading, with
+  `FileTooLargeError` (`core/src/execution.ts:44-75`).
+- **Header helpers that exist today.**
+  - `sniffImageType` (`core/src/image-sniff.ts:94`) picks the type from magic bytes and
+    never from the extension.
+  - `imageDimensions` (`core/src/artifact-kind.ts:134-151`) reads sizes but does not
+    validate. It does not check that the chunk at offset 12 is `IHDR`, does not check
+    for truncation, and does not look at the JPEG component count or SOF type. So
+    `fs_read` needs a stricter, separate check (D1).
+- **`crc32` exists** in `core/src/png.ts:43`.
+- **Store dedupe and concurrency.** A second `putTool` of the same bytes returns the
+  indexed entry or joins the pending one (`attachment-store.ts:467-474`). The tool
+  sub-cap survives a `serve` restart (image-view Fix round 1).
+- **`low` today.** `viewImage` labels `low === high` as "already ≤ 768 px"
+  (`image-view.ts:104-105`). For a large image file that label would be FALSE (D4
+  fixes it).
+- **Message text tied to PDFs.** The tool description says "(fs_read of a PDF)"
+  (`image-view.ts:37`). The regeneration hint says "(same pages)" (`:39`).
+
+### Design
+
+**D1 — `core/src/image-file.ts` (new, pure, unit-tested).**
+
+The main function is `inspectImageFile(bytes, {maxEdge})`. It returns either
+`{ok:true, mimeType:"image/png"|"image/jpeg", format:"PNG"|"JPEG", width, height}` or
+`{ok:false, reason}`. The reason is one sentence, and the file's name is not part of it.
+
+- **The type comes from the bytes** (`sniffImageType`), never from the extension. A
+  `.jpg` that is really a PNG is stored as `image/png`.
+- **PNG checks.** All of these must hold:
+  - the 8-byte signature;
+  - the first chunk has length 13 and type `IHDR`, and its CRC matches `crc32`;
+  - width and height are in 1..65535;
+  - bit depth and colour type are a legal pair (PNG spec table);
+  - the interlace byte is 0 or 1;
+  - an `IEND` chunk sits in the last 1 KiB.
+
+  A file without `IEND` counts as truncated: "the PNG is truncated or corrupt".
+- **JPEG checks.** Walk the marker segments (the same walk as `jpegSides`, but here it
+  returns the SOF marker, the precision and the component count):
+  - accepted SOF markers: `SOF0`, `SOF1`, `SOF2` (baseline, extended, progressive), with
+    precision 8 and 1 or 3 components;
+  - refused, each with its own sentence: arithmetic-coded `SOF9–15`, lossless or
+    hierarchical `SOF3/5/6/7`, 12-bit precision, and 4 components (CMYK/YCCK). Example:
+    "a CMYK JPEG — convert it to RGB first";
+  - an `SOS` must follow the SOF, and an `EOI` (`FF D9`) must come after the `SOS`. Stuffed
+    entropy data cannot contain an unstuffed `FF D9`, so this is reliable. Without `EOI`
+    the file counts as truncated.
+
+  Why refuse these: providers' decoders do not reliably accept these variants. A
+  provider 400 on an image stays in the history until `maxToolImages` ages it out, so
+  every following turn would fail too. Refusing the file up front costs one sentence.
+- **Size limit.** `max(width, height) > maxEdge` → "W×H is over the <maxEdge> px limit
+  for image files (no downscale yet)". `maxEdge` is set by Q1.
+- **One cap sentence.** Add `imageOverCapReason(size, max)` to `core`. It returns the
+  existing `<size> is over this model's <max> limit` sentence. Change
+  `providers/src/images.ts` `placeholder` (`:444-445`) to call it, so the sentence has one
+  source and the provider's output bytes stay identical (the existing provider tests pin
+  them).
+- **One marker builder.** `imageFileMarker(name, w, h, format, size, id)` returns
+  `[image <name> · W×H · <format> · <KB> · ref <id12> · high only]`. `id12` is the first
+  `TOOL_IMAGE_REF_CHARS` characters.
+
+**D2 — The `fs_read` image branch (`tools/src/image-file.ts` new, called from
+`builtins.ts:130-136`).**
+- **Where it runs.** After `readPdf` returns `undefined` and after the existing
+  "`pages` applies only to PDFs" refusal, and only when `ctx.images` and
+  `ctx.env.readBytes` are both set. Otherwise nothing changes, byte for byte.
+- **The head read** is `readLimitBytes: PDF_HEAD_BYTES` (1 KiB). This adds one small read
+  per non-PDF `fs_read` in vision sessions only. The PDF path is left alone, so the
+  image-view goldens hold.
+- **What the head decides.**
+  - `sniffImageType` says `image/png` or `image/jpeg` → the image path.
+  - It says gif, webp or heic → refuse with a sentence that names the type (Q2).
+  - The name ends in `.png`, `.jpg` or `.jpeg` (any case), the bytes are not an image,
+    and `!looksLikeTextBytes(head)` → refuse: "<name> is not a PNG or JPEG image (no
+    image signature)".
+  - Anything else → today's text path. A `.png` file that is really text is read as
+    text, the same rule as `notes.pdf` (pdf-read D3).
+- **Image path, in order:**
+  1. A range (`offset`/`limit` or `path:a:b`) → refuse: "<path> is an image: no line
+     ranges".
+  2. Read `bytes = readBytes(path, {maxBytes: min(maxImageBytes, MAX_IMAGE_BYTES)})`.
+     If it throws `FileTooLargeError`, return
+     `[image omitted: ${imageOverCapReason(size, max)} — <name>]` with `isError`.
+  3. `inspectImageFile(bytes, {maxEdge})`. On `{ok:false}`, return
+     `<name>: <reason>` with `isError`.
+  4. Call `putTool({variants:{high:{bytes,width,height}}, mimeType, label:
+     sanitizeAttachmentName(name)})`. No `low` variant is passed.
+  5. A `{refused}` answer → `[image <name> · W×H · not kept: <reason>]` with `isError`.
+  6. On success → `{content: marker + "\n" + one hint line}`. The hint line is "call
+     image_view with this ref to see it; only high detail is available for image files".
+     **0 refs**, the same as a PDF read.
+- **Limits come from wiring.** `maxImageBytes` and `maxEdge` reach the tool through
+  `createFsReadTool({images:true, maxImageBytes, maxEdge})`. `wiring.ts:1013` already
+  computes `imageLimits(config.provider, config)`. `ToolContext` is unchanged.
+
+**D3 — `ToolImagePut.mimeType` widened** to `"image/png" | "image/jpeg"`
+(`core/src/tool-images.ts`). This is a type change only (the load-bearing assumption).
+
+**D4 — `image_view` `low` on a file image: serve `high` with a plain note** (the Context
+leaves this to the plan; recommendation below).
+- **The rule.** In `viewImage`, when `detail === "low"`, `entry.low.ref.id ===
+  entry.high.ref.id`, and `max(w,h) > TOOL_IMAGE_LOW_EDGE`, add the note:
+  `· low is not available for this image yet — sent at high`.
+- **Fixes a false label.** "already ≤ 768 px" now appears only when that is true.
+- **Why this is pure.** The rule depends only on the entry's sizes, so it is also right
+  for PDF images: a PDF image has `low === high` only when it is ≤ 768 px.
+- **Why serve instead of refuse.** A refusal makes the model spend a round trip to ask
+  again with `high`, and it gets the same bytes. Anthropic downscales on its side, so
+  sending `high` costs no extra tokens there. The OpenAI-compatible case is decided by
+  Q1.
+- **Text edits.**
+  - The description becomes "(fs_read of a PDF or a PNG/JPEG file)".
+  - `REGENERATE` becomes "fs_read the file again to get a fresh ref". The same bytes
+    give the same id.
+
+**D5 — Mac/phone parity and session types (presentation unchanged).**
+- **Where `fs_read` runs.** Daemon-side, against the session's own store:
+  - **worker** (Mac TUI): yes.
+  - **`serve`** (the Mac or the phone attached, `connect`): yes, the same code. The
+    phone drives a `serve` session, so it gets the feature with no app change.
+  - **pods** (`run`/`attach`) and **sub-agents**: no handle, so today's behaviour.
+- **Rows.** The `fs_read` row and the existing `image_view` row (`Image <ref>[ · high]`)
+  render generically on both the Mac and the phone. No TUI or mobile file changes; the
+  existing parity test still applies.
+
+### Files (dependency order; no protocol file)
+
+1. `packages/core/src/image-file.ts` (new), `tool-images.ts` (D3), `index.ts` (exports)
+2. `packages/providers/src/images.ts` (`placeholder` calls `imageOverCapReason`; same bytes)
+3. `packages/tools/src/image-file.ts` (new), `builtins.ts` (branch + `createFsReadTool`
+   options + description sentence), `image-view.ts` (D4 note, description, `REGENERATE`)
+4. `packages/cli/src/wiring.ts:1013` (pass `maxImageBytes`, `maxEdge`)
+5. `changelog.d/image-files.added.md`
+
+No daemon change. `putTool` takes the widened type as it is.
+
+### Failure modes → convergence
+
+| # | Mode | Convergence |
+|---|---|---|
+| F1 | File over the model's byte cap | `readBytes` refuses before reading. Result: `[image omitted: <size> is over this model's <max> limit — <name>]` (the shared sentence), `isError`. Nothing stored. |
+| F2 | Tool sub-cap (48 MiB) or session store full | `putTool` refuses without reserving or evicting. Result: `[image … · not kept: image store full]`, `isError`. User uploads keep ≥ 52 MiB. |
+| F3 | Corrupt or truncated header (bad IHDR or CRC, no IEND, no SOF/SOS/EOI) | `inspectImageFile` refuses with one sentence. Nothing stored or sent. |
+| F4 | Huge dimensions (also when the bytes are under the cap) | Refused before storing, against `maxEdge` (Q1). This blocks a provider 400 that would stay in the history. |
+| F5 | CMYK, 12-bit, arithmetic or lossless JPEG | Refused with a sentence naming the variant. Progressive `SOF2` and extended `SOF1` (8-bit) are accepted. |
+| F6 | `.jpg` that is really PNG (or the reverse) | The MIME type comes from the bytes, so it is stored and sent as what it is. The marker shows the real format. |
+| F7 | `.png` that is text / that is unknown binary | Text → today's text path. Binary → "not a PNG or JPEG image". |
+| F8 | No vision / pod / sub-agent | No `ctx.images` → today's `readFile` path, byte for byte. |
+| F9 | A `serve` restart or worker resume loses the tool index | `image_view` errors with "fs_read the file again". The same bytes give the same id, and `putTool` dedupes onto the stored blob (image-view F3). |
+| F10 | `low` asked on a file image | `high` is served with the note (D4). |
+| F11 | Concurrent reads of one file | Dedupe or a join in `putTool` (`:467-474`). |
+| F12 | A pod or a hostile workspace | No handle in any pod (image-view D1/T7). This task adds no new laptop-side effect. |
+| F13 | Version skew | No wire change. A JPEG ref was always a valid `AttachmentRef`. |
+
+### Tests (red first, §9: each row is shown failing before its code)
+
+- **T1 core `image-file.test.ts`:**
+  - accepted with the right sizes: a valid PNG, a baseline JPEG, a progressive (`SOF2`)
+    JPEG;
+  - refused, each with its sentence: a PNG with a bad IHDR CRC, a PNG cut before `IEND`,
+    a JPEG cut before `EOI`, a JPEG with no SOF, a CMYK JPEG, a 12-bit JPEG, an
+    arithmetic JPEG, a file with `w > maxEdge`;
+  - refused at the boundary: an image exactly at `maxEdge` is accepted, one at
+    `maxEdge + 1` is refused.
+- **T2 core + providers:** `imageOverCapReason` gives the same text as today's
+  placeholder (the existing provider tests stay green unchanged).
+- **T3 tools `fs-read-image.test.ts`** (fake env with `readBytes`, spy `ToolImageStore`):
+  - PNG → a marker with `ref <id12>`, **0 refs**, `putTool` called once with
+    `image/png` and no `low`;
+  - JPEG → `image/jpeg`;
+  - `.jpg` holding PNG bytes → `image/png`;
+  - over the cap → the reason line, no `putTool`, no full read;
+  - a store refusal → `not kept: …`, `isError`;
+  - a range → refused;
+  - GIF/WebP → refused (Q2);
+  - a `.png` holding text → the text path;
+  - **without `ctx.images` → exactly the bytes `readFile` returns today** (golden);
+  - a PDF read is unchanged (one existing PDF golden runs again).
+- **T4 tools `image-view.test.ts`:**
+  - `low` on a 2000×1000 entry with `low === high` → high ref + the not-available note,
+    NOT "already ≤ 768 px";
+  - a 600×400 entry still says "already ≤ 768 px".
+- **T5 providers `tool-images.test.ts`:** a JPEG tool ref → exactly 1 image part, with
+  `image/jpeg` on Anthropic and on OpenAI (the step-0 repro, kept).
+- **T6 cli `image-view-wiring.test.ts`:**
+  - with vision, `fs_read` receives the model's `maxImageBytes` and Q1's `maxEdge`;
+  - the pod row stays absent.
+  - Mutation: hard-code `maxImageBytes = MAX_IMAGE_BYTES` → this test goes red.
+- **T7 daemon `attachment-tool-images.test.ts`:** `putTool` with `image/jpeg` → the ref
+  carries `image/jpeg`; a `serve` reload still counts it against the sub-cap.
+
+Mutations to run and record: drop the IEND or EOI check (T1 red); use the extension
+instead of the sniff for the MIME type (T3 `.jpg`-is-PNG red); drop the D4 size check
+(T4 red).
+
+### Owner questions
+
+1. **Largest side accepted for an image file (`maxEdge`).** `high` is the ORIGINAL file,
+   because nothing downscales yet.
+   - Anthropic accepts up to 8000 px and downscales on its side, so it costs at most
+     about 1600 tokens. A larger image makes it return 400.
+   - OpenAI-compatible servers (Qwen/vLLM) take the original. A 4032×3024 phone photo
+     can cost about 15k tokens there, while we estimate a flat 3200. The context limit
+     could then be crossed without warning.
+
+   Options:
+   - **(A)** 8000 px everywhere.
+   - **(B)** 1568 px everywhere until 3a/3b. This refuses most phone photos and Retina
+     screenshots.
+   - **(C)** 8000 px on Anthropic and 1568 px on OpenAI-compatible, decided in wiring
+     next to the byte cap.
+
+   **Recommendation: (C).** Claude gets the full value, and Qwen gets no surprise in
+   token count. Separately, Anthropic's 3.75 MiB byte cap will still refuse many
+   full-size phone JPEGs (F1) until a decoder exists.
+2. **GIF and WebP files.** Providers accept both, and the header helpers already read
+   their sizes. **Recommendation: not in this task.** Keep the scope to PNG/JPEG, and
+   refuse GIF/WebP/HEIC in vision sessions with a sentence that names the type ("GIF
+   files are not readable as images yet"), instead of today's mojibake. Adding them
+   later only adds two `inspectImageFile` cases.
+
+### Notes / debt
+
+- In sessions without vision or with no store, a PNG still reads as mojibake text,
+  because the Context requires today's behaviour there. A plain refusal would be better.
+  That is a separate decision.
+- `low` for files (a real downscale) arrives with 3a (PNG) and 3b (JPEG). D4's note then
+  disappears on its own, because `low` will differ from `high`.
+- The flat token estimate does not depend on pixel count. Q1 (C) bounds the risk; it does
+  not remove it.
 
 ## Execution
 
