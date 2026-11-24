@@ -1982,6 +1982,143 @@ the run → graph node tap → (P7/P8/P9) → Reduce Motion on → tap again (P1
 of `run.ts`. Unverified without a simulator, and stated as such: the mid-flight frame, the
 skeleton's own shimmer, and whether the native Permission sheet draws over this layer.
 
+### Slice 5b — iPhone "Start a workflow": catalogue + inputs form + start (D6) — PARTIAL (code + unit/wiring tests DONE; e2e flow + seed NOT done)
+
+*— deepseek-v4-pro (executor), 2026-11-24*
+
+**Load-bearing re-check — already RE-RUN and PASSED by the orchestrator (recorded, not redone).**
+`RemoteSession.workflowCatalogue` (`packages/client/src/remote-session.ts:1333`) and
+`RemoteClient.workflowCatalogue` (`remote-client.ts:1669`) exist; the driver refuses a stale hash
+`changed` (`packages/agent/src/workflow-driver.ts:498-506`); `WorkflowRefusalSchema` /
+`workflow.refusal` are on the wire (`packages/protocol/src/session.ts:936-951`, a bounded free word,
+never an enum). Wire shapes: `WorkflowDefRow = {name, path, ok, version?, description?, hash?,
+approved?, inputs?:[{name,required,default?}], steps?:[{id,kind,model?,where,command?}],
+errors?:string[]}` and `WorkflowCatalogueResult = {workflows, truncated?, unavailable?, gitIgnored?,
+dir, elsewhere?:{dir,count}}` (`session.ts:1000-1058`). `WORKFLOW_INPUTS_MAX_CHARS = 4*1024`
+(`:870`), `WORKFLOW_INPUT_NAME_MAX_CHARS = 64` (`:868`), both re-exported from `@tentacle/protocol`.
+The daemon applies a file's `default` itself when an input is OMITTED (`resolveInputs`,
+`packages/core/src/workflow-machine.ts:144-152`) and refuses unknown names / missing required ones
+(`inputsProblem`, `workflow-driver.ts:323-333`) — **so an empty optional input must be OMITTED,
+never sent as `""`** (that would override the default). That sentence is what the whole slice hangs
+on; mutation (a) below proves the test binds it.
+
+**As built, in dependency order (red first: each test file was run against a stub and failed on
+ASSERTIONS — 19 of 23, then 20 of 22, 11 of 12 — never an import error; the few incidental passes
+are listed with the mutation table because they were masked and had to be sharpened).**
+
+1. NEW `apps/mobile/src/workflow-start.ts` (pure, React-free, English labels): `CatalogueView`
+   (six `kind`s: loading/unsupported/unavailable/empty/ready, plus `dir`, `valid`, `invalid`,
+   `truncated`, `gitIgnored`, `elsewhere`, `reason`), `CatalogueEntry` (its `approval` is
+   glyph+word — `✓ Approved` / `? Needs approval`, never hue alone), `catalogueRows` (valid rows
+   sorted by name first, then invalid ones with their `errors` verbatim; `{unsupported:true}` →
+   `unsupported`; `unavailable` → `unavailable` with its reason; neither → `empty` with `dir` +
+   `elsewhere`), `openEntry`, `startHash`, `formFor` (one field per declared input, prefilled with
+   `default`, a typed value winning — which is what a `changed` reload keeps), `formProblems`
+   (required-and-empty, a value over `WORKFLOW_INPUTS_MAX_CHARS`, control characters, the whole
+   JSON over 4 KiB with `field: null` — a HINT only, the daemon decides), `startParams` (declared
+   names only, blank optional OMITTED, `inputs` absent when nothing is left, `hash` pinned, `null`
+   when the row has none), `afterRefusal` (`changed`→reload, `running`→openRun *only with an id*,
+   anything else→showReason). Untrusted file text goes through `oneLine` from `./activity.ts`; a
+   `run` step's `command` is deliberately NOT flattened or cut.
+2. NEW `apps/mobile/src/workflow-start-controller.ts` (pure, injected session — `workflow-run-controller.ts`'s
+   shape: `StartSessionHandle`, `StartState`, `createWorkflowStartController({sessionId, open, leave,
+   borrowed, onOpenRun, onChange})`). `start()` opens (never `reopen`) then reads; `pull()` re-reads;
+   `openRow` prefills from `formFor`; `setValue` recomputes the problems; `canStart()` = ready && row
+   ok && has hash && not starting && no problems; `beginStart()` → `startParams` →
+   `workflow({action:"start", …})`; `changed` → `reload()` (banner + `keepSurvivingValues`);
+   `running` → notice + `onOpenRun`; else the daemon's reason. One read and one start in flight (a
+   trigger during a read = one more read after it); a failed read KEEPS the last catalogue and says
+   so (never a spinner loop); nothing lands after `dispose`, which `leave()`s only when not
+   borrowed. `SESSION_ENDED` is imported from `workflow-run-controller.ts` (one string, two screens).
+3. `apps/mobile/src/routes.ts`: `WorkflowStartRoute {computerId, sessionId}` + its `RootStackParams`
+   entry beside `WorkflowRuns`/`WorkflowRun`. `routes.test.ts` needed no change (it does not
+   enumerate the map).
+4. NEW `apps/mobile/src/screens/WorkflowStart.tsx` (dumb renderer, AGENTS §7): header, the folder
+   line (`dir`, "not versioned" when `gitIgnored`, truncation, the `elsewhere` hint), valid rows
+   (`workflow-start-row-<name>`), broken rows with every error verbatim (`workflow-start-broken-`,
+   `workflow-start-errors-`) and NO Start, the detail (`workflow-start-detail`) with the description,
+   the FULL step list (each `run` command verbatim — no `numberOfLines`, no `ellipsizeMode`, pinned
+   by the wiring test), the inputs form (`workflow-start-input-<name>`, placeholder = the file's
+   default) and Start (`workflow-start-run`). Every id the plan named exists.
+5. `apps/mobile/src/screens/WorkflowRuns.tsx`: new optional `sessionId`/`onStart`, and a
+   `workflow-runs-start` "Start a workflow" entry rendered ONLY when both are present (and disabled
+   while the list is offline — a down link cannot start anything).
+6. `apps/mobile/App.tsx` (wiring only): `WorkflowRunsRoute` gains `sessionId?`/`onStart` and passes
+   them through only when the launch carried one; NEW `WorkflowStartRoute` mirrors
+   `WorkflowRunRoute` (same `LINKS.get` → `RUNTIMES.controller(link.client)` → `runtime.open(id)`,
+   `borrowed: runtime.follows(sessionId)`, `session as unknown as StartSessionHandle`,
+   `onOpenRun` → `navigation.navigate("WorkflowRun", …)`); NEW `Stack.Screen name="WorkflowStart"`
+   beside the other two (`headerShown: false`, plain push, no `<Modal>`).
+7. `changelog.d/workflows-ui.added.md`: the ONE existing bullet EXTENDED in place (no second `- `;
+   `scripts/test/changelog-guard.test.ts` 5 pass).
+
+**Drift from the plan.** (i) `catalogueRows` also flattens wire text with `oneLine`, which the plan
+only implied — a multi-line description or error would otherwise break the one-row-per-file grid.
+(ii) `formProblems` reports the 4 KiB *total* with `field: null` (as planned) but each per-field
+message names its field, so a person sees which one to shorten. (iii) `startParams` returning `null`
+is enforced TWICE (the controller's `canStart()` and again in `beginStart`), because the first
+attempt's fixture could not tell the two apart — mutation (e) survived until the no-hash fixture was
+given NO inputs. (iv) The runs screen disables the entry while offline; the plan did not say.
+
+**Mutation table (AGENTS §9) — each applied to the real file with a small `python3` replace, the
+narrow test run, then the file restored from `.tentacle/tmp/workflows-ui/backup/` and `cmp`-verified
+identical.**
+
+| # | Mutation | Narrow run | Result |
+|---|---|---|---|
+| a | optional blank sent as `""` (the omit branch deleted) | `workflow-start` | **RED** 2 fail — "an empty or whitespace-only OPTIONAL input is OMITTED", "nothing left to send → no `inputs` key at all" |
+| b | `changed` → `showReason` (no reload) | `workflow-start` | **RED** 1 fail — "`changed` → reload the catalogue and review again" |
+| c | reload drops the typed values (`formFor(def)` instead of `formFor(def, values)`) | `-controller` | **RED** 2 fail — "a start refused `changed` re-reads…", "a `changed` reload DROPS the value of an input the file no longer declares" |
+| d | `canStart` ignores `starting` | `-controller` | **RED** 1 fail — "a start in flight disables Start and a second tap sends NOTHING" |
+| e | `canStart` ignores the missing hash | `-controller` | first run **GREEN** (survived ⇒ masked by the fixture's required input); after giving the no-hash row `inputs: []`: **RED** 1 fail — "a broken row and a row with no hash can never start" |
+| f | a late catalogue read applied after `dispose` | `-controller` | **RED** 1 fail — "nothing lands after dispose: a late catalogue read paints nothing" |
+| g | `running` notices but never opens the run | `-controller` | **RED** 1 fail — "a start refused `running` shows the notice AND opens that run" |
+| h | a failed read re-enters `loading` (spinner loop) | `-controller` | **RED** 1 fail — "a failed read keeps the last catalogue and says so (never a spinner loop)" |
+| i | `dispose` leaves a borrowed session | `-controller` | **RED** 1 fail — "leaving detaches a session this screen opened — never one another screen follows" |
+| j | a typed value borrowed across fields | `workflow-start` | **RED** 1 fail — "a value over the wire's bound, and control characters, are caught" |
+| k | undeclared names also sent | `workflow-start` | **RED** 3 fail — "only declared names, pinned to the hash that was on screen" + the two omission cases |
+| l | a step's command line-capped (`numberOfLines={1}`) | `-wiring` | **RED** 1 fail — "a `run` step's command is drawn verbatim — never line-capped" |
+| m | the runs screen offers Start without a session | `-wiring` | **RED** 1 fail — "Start is offered only with a session (the catalogue is that session's)" |
+
+(e) is the one that proved something about the TEST rather than the code, and it is recorded as
+such: the sharpening is in `workflow-start-controller.test.ts` (the no-hash row now declares no
+inputs, so only the hash can block it). Every other mutation was caught by the test written for it.
+
+**Narrow gate (mine).** `bun test apps/mobile/test/workflow-start.test.ts
+apps/mobile/test/workflow-start-controller.test.ts apps/mobile/test/workflow-start-wiring.test.ts
+apps/mobile/test/workflow-screens-wiring.test.ts apps/mobile/test/workflow-runs-controller.test.ts
+apps/mobile/test/e2e-flows.test.ts` — **137 pass, 0 fail** (6 files). `bunx tsc -p apps/mobile
+--noEmit` — clean. `bunx biome check` on the 9 changed/new files — clean (6 reformatted by
+`--write`, then re-checked). `bun test scripts/test/changelog-guard.test.ts` — 5 pass. No protocol
+change → no `protocol.json` regeneration, no `protocol.d/` note. The full `bun test` / repo-wide
+typecheck / lint are the orchestrator's gate (token budget), not run here.
+
+**NOT done (PARTIAL) — the e2e flow and the S1–S6 shots.** The plan asks for
+`43-workflow-start.yaml`, but **43 is taken** (`43-native-sheets-lock`, in `FLOWS` and asserted by
+`e2e-flows.test.ts`), and slices 3/4 reserved **44** for the workflow shots — so this flow is
+**`45-workflow-start`**, and it is not written. It needs a seed hook that does not exist yet (the
+harness can read a file but not write one). **Exact next step for whoever picks it up:** (1)
+`e2e/seed.ts` gains `workflowFixture(cwd, step)` writing, under
+`join(cwd, PROJECT_PATHS.workflows)`, a `demo.yaml` (`schemaVersion: 1`, `name: demo`, `version: 1`,
+`inputs: {slug: {required: true}, note: {default: "hello"}}`, one `agent` step on the mock model and
+one `run` step `echo ok`) and a `broken.yaml` (an `on_fail.goto` naming a step that does not exist —
+the error then names its YAML path), and on `step=edit` rewrites `demo.yaml` with `version: 2` (a new
+hash); (2) `e2e/hooks.ts` routes a `workflow-fixture` hook (`?step=write|edit`) to it and `run.ts`
+passes it as `deps.actions.workflowFixture: (step) => workflowFixture(runDir, step)`; (3)
+`flows/45-workflow-start.yaml` walks `_pair` → computer → the seeded session →
+`_hub-fan`/`hub-item-workflows` → Workflows → `workflow-runs-start` → (S1) the catalogue with
+`workflow-start-row-demo` ("? Needs approval") and `workflow-start-broken-broken` → (S2) the broken
+row's `workflow-start-errors-broken` → (S3) the detail with the default prefilled and
+`workflow-start-run` disabled until `slug` is typed → tap Start → (S4) `perm-sheet` / `perm-allow-once`
+(the hash ask) → Allow once → (S5) `workflow-run` with the step running → `workflow-fixture?step=edit`
+via `runScript` → back to `workflow-start-detail`, tap `workflow-start-run` → (S6)
+`workflow-start-banner`; (4) register it in `run.ts`'s `FLOWS` (~:1752-1900) and
+`COMPOSE_SESSION_VARS` (~:1932-1975, its own `WORKFLOWSTART_ID`), and end it on a daemon-truth
+`runScript` (the `e2e-flows.test.ts` guards: pairs through `_pair`, >1 distinct asserted id, never
+ends on a bare container). **Unverified without a simulator, and stated as such:** whether XCUITest
+can type into `workflow-start-input-slug` under the keyboard, whether the hash-approval sheet really
+presents over this pushed screen, and the S6 banner's timing after the catalogue re-read.
+
 ## Review
 
 ### Owner answers (2026-11-23)

@@ -189,6 +189,7 @@ import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
 import { WorkflowRunScreen } from "./src/screens/WorkflowRun.tsx";
 import { WorkflowRunsScreen } from "./src/screens/WorkflowRuns.tsx";
+import { WorkflowStartScreen } from "./src/screens/WorkflowStart.tsx";
 import {
   KEYCHAIN_ACCESSIBLE,
   KEYCHAIN_STORE,
@@ -242,6 +243,11 @@ import {
   createWorkflowRunsController,
   workflowsHub,
 } from "./src/workflow-runs-controller.ts";
+import {
+  type StartSessionHandle,
+  type StartState,
+  createWorkflowStartController,
+} from "./src/workflow-start-controller.ts";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
 
@@ -2014,18 +2020,22 @@ function WorkflowRunsRoute({
   palette,
   computerId,
   name,
+  sessionId,
   onBack,
   onOpen,
+  onStart,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly name: string;
+  readonly sessionId?: string;
   readonly onBack: () => void;
   readonly onOpen: (run: {
     readonly runId: string;
     readonly sessionId: string;
     readonly name: string;
   }) => void;
+  readonly onStart: (sessionId: string) => void;
 }): JSX.Element {
   const { state, pull } = useWorkflowRuns(computerId);
   return (
@@ -2036,6 +2046,7 @@ function WorkflowRunsRoute({
       now={Date.now()}
       onBack={onBack}
       onPull={pull}
+      {...(sessionId === undefined ? {} : { sessionId, onStart: () => onStart(sessionId) })}
       onOpen={(run) => {
         if (run.sessionId !== undefined) {
           onOpen({ runId: run.runId, sessionId: run.sessionId, name: run.name });
@@ -2156,6 +2167,87 @@ function WorkflowRunRoute({
         width={pageWidth}
       />
     </View>
+  );
+}
+
+/**
+ * Start a workflow (docs/feat/workflows-ui.md D6, slice 5b): attaches through the
+ * SAME session runtime as the Session screen (never `reopen`), reads the
+ * catalogue through that session and sends the start through it too. Wiring only.
+ */
+function WorkflowStartRoute({
+  palette,
+  computerId,
+  sessionId,
+  onBack,
+  onOpenRun,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly onBack: () => void;
+  readonly onOpenRun: (runId: string, name: string) => void;
+}): JSX.Element {
+  const [state, setState] = useState<StartState | null>(null);
+  const [controller, setController] = useState<ReturnType<
+    typeof createWorkflowStartController
+  > | null>(null);
+  useEffect(() => {
+    let live = true;
+    let created: ReturnType<typeof createWorkflowStartController> | null = null;
+    void LINKS.get(computerId).then((link) => {
+      if (!live) {
+        return;
+      }
+      const runtime = RUNTIMES.controller(link.client);
+      created = createWorkflowStartController({
+        sessionId,
+        // The Session screen underneath follows it: never detach it from there.
+        borrowed: runtime.follows(sessionId),
+        open: async (id) => {
+          const result = await runtime.open(id);
+          // `newSession` hands back a `RemoteSession` (typed as the screen's subset).
+          return result.ok
+            ? { ok: true, session: result.session as unknown as StartSessionHandle }
+            : result;
+        },
+        leave: () => void runtime.leave(sessionId),
+        onOpenRun,
+        onChange: () => {
+          if (live && created !== null) {
+            setState(created.state());
+          }
+        },
+      });
+      setController(created);
+      setState(created.state());
+      created.start();
+    });
+    return () => {
+      live = false;
+      created?.dispose();
+    };
+  }, [computerId, sessionId, onOpenRun]);
+  if (controller === null || state === null) {
+    return (
+      <View testID="workflow-start" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ActivityIndicator color={palette.accent} />
+      </View>
+    );
+  }
+  return (
+    <WorkflowStartScreen
+      palette={palette}
+      computer={RECORDS.get(computerId)?.name ?? ""}
+      state={state}
+      canStart={controller.canStart()}
+      onBack={onBack}
+      onPull={() => controller.pull()}
+      onOpenRow={(key) => controller.openRow(key)}
+      onCloseRow={() => controller.closeRow()}
+      onValue={(name, value) => controller.setValue(name, value)}
+      onStart={() => void controller.beginStart()}
+    />
   );
 }
 
@@ -3109,7 +3201,16 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                 palette={palette}
                 computerId={route.params.computerId}
                 name={route.params.name}
+                {...(route.params.sessionId === undefined
+                  ? {}
+                  : { sessionId: route.params.sessionId })}
                 onBack={() => navigation.goBack()}
+                onStart={(sessionId) =>
+                  navigation.navigate("WorkflowStart", {
+                    computerId: route.params.computerId,
+                    sessionId,
+                  })
+                }
                 onOpen={(run) =>
                   navigation.navigate("WorkflowRun", {
                     computerId: route.params.computerId,
@@ -3140,6 +3241,27 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     title: route.params.title,
                     // From a live run: never the archived path (Owner Q4).
                     archived: false,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen
+            name="WorkflowStart"
+            options={{ title: "Start a workflow", headerShown: false }}
+          >
+            {({ navigation, route }) => (
+              <WorkflowStartRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                onBack={() => navigation.goBack()}
+                onOpenRun={(runId, name) =>
+                  navigation.navigate("WorkflowRun", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    runId,
+                    title: name,
                   })
                 }
               />

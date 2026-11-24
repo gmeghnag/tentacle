@@ -58,6 +58,16 @@ describe("the workflow routes (docs/feat/workflows-ui.md D4)", () => {
     };
     expect(run.runId).toBe("wf-1");
   });
+
+  test("WorkflowStart names the computer and the session the run starts in (slice 5b)", () => {
+    // A type pin, not a behaviour: the catalogue is validated against THAT
+    // session's models, so both params are required (`tsc` refuses a missing one).
+    const start: RootStackParams["WorkflowStart"] = {
+      computerId: "0123456789abcdef",
+      sessionId: "s1",
+    };
+    expect(start.sessionId).toBe("s1");
+  });
 });
 
 describe("the Settings route (docs/feat/mobile-lock.md D6)", () => {

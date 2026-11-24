@@ -11,6 +11,7 @@ import type { Palette } from "../theme.ts";
 import { space, typography } from "../theme.ts";
 import { EmptyState } from "../ui/EmptyState.tsx";
 import { Icon } from "../ui/Icon.tsx";
+import { PillButton } from "../ui/PillButton.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { Text } from "../ui/Text.tsx";
 import { type ElencoRow, type ElencoRun, elencoSections } from "../workflow-list.ts";
@@ -26,6 +27,14 @@ export interface WorkflowRunsScreenProps {
   readonly onBack: () => void;
   readonly onPull: () => void;
   readonly onOpen: (run: ElencoRun) => void;
+  /**
+   * The session this screen was opened from, when it was opened from one (D6,
+   * slice 5b). The catalogue is validated against THAT session's models and the
+   * run starts in it, so without one there is no Start entry at all.
+   */
+  readonly sessionId?: string;
+  /** Start a workflow — only ever passed together with `sessionId`. */
+  readonly onStart?: () => void;
 }
 
 function RunRow({
@@ -107,6 +116,21 @@ export function WorkflowRunsScreen(props: WorkflowRunsScreenProps): JSX.Element 
           {state.offline}
         </Text>
       )}
+      {/* Start a workflow (D6, slice 5b): only from a session — the catalogue is
+          validated against it — and never while the link is down. */}
+      {props.sessionId === undefined || props.onStart === undefined ? null : (
+        <View style={styles.startEntry}>
+          <PillButton
+            palette={palette}
+            testID="workflow-runs-start"
+            label="Start a workflow"
+            icon="bolt.fill"
+            kind="secondary"
+            disabled={state.offline !== null}
+            onPress={props.onStart}
+          />
+        </View>
+      )}
       <ScrollView
         contentContainerStyle={styles.content}
         refreshControl={<RefreshControl refreshing={false} onRefresh={props.onPull} />}
@@ -144,6 +168,7 @@ const styles = StyleSheet.create({
   screen: { flex: 1 },
   content: { padding: space.inset, gap: space.inset },
   offline: { ...typography.footnote, paddingHorizontal: space.inset },
+  startEntry: { paddingHorizontal: space.inset, paddingTop: space.inset },
   section: { gap: 8 },
   sectionTitle: { ...typography.footnote, textTransform: "uppercase" },
   row: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 12, gap: 4 },
