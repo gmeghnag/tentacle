@@ -2378,3 +2378,52 @@ because the controller has no `saved → editing` transition — adding one is a
 7c's plan.
 
 *— claude-opus-5-5, 2026-11-24*
+
+## Review
+
+### Slices 7a + 7b + 7c — REQUEST-CHANGES
+
+**Gate (narrow + static):** `bun test apps/mobile/test/workflow-edit-*.test.ts` 204 pass / 0 fail
+(6 files); `bun run lint` clean (2416 files); `bun run typecheck` clean. The full `bun test` was not
+re-run here (the orchestrator runs it at merge).
+
+**Findings**
+1. **MEDIUM. Review's confirm still sends a write while offline.** The Review screen enables "Save N
+   files" from `controller.canConfirm()` (`apps/mobile/App.tsx` `WorkflowEditRoute`,
+   `screens/WorkflowEditReview.tsx:136`), and `canConfirmNow` (`workflow-edit-controller.ts:591-599`)
+   does not check `offline`. Repro (a copy of the controller harness, run once, then deleted): open,
+   edit, `beginReview()`, `setLink(false)` → `canConfirm() === true`, and `confirmSave()` sends one
+   `dryRun:false` request. The failure-mode table says offline means "Save off … No deferred write". Here
+   the write goes out on a link the phone thinks is down, and it is decided later by the
+   lost-save path. The editor's header Save is gated correctly (`saveOff`), but the screen 7c adds
+   is not. Fix: gate `canConfirmNow` on `!offline` (and show the offline sentence on Review), plus a red-first
+   test.
+2. **MEDIUM. A failure-mode row was not built, and the doc does not say so.** Plan row "Older daemon →
+   `unsupported` → Edit/New hidden" (doc line 396). `WorkflowStart.tsx` offers Edit on every row and New
+   whenever the catalogue is `ready`, and `WorkflowRuns.tsx` offers New on any empty list with a
+   `sessionId`. None of them check whether the daemon supports saves (older daemon, pod or unavailable
+   session). This still fails loudly: the editor then says "Update tentacle" or "unavailable", and nothing
+   is written. But the drift is not recorded in Execution. Either hide the buttons, or record the drift
+   and test what the editor shows instead.
+
+**Mutation non-vacuity (spot check, reverted, `git status` clean afterwards):** Review's
+`onConfirm` → `beginReview()` was killed by the wiring test "the draft is never re-sent from here" (39
+pass / 1 fail). The executor's 7b/7c batteries (m1–m12) were not re-run.
+
+**Attacks tried:** (a) Single session path / leave (§7): the editor uses the same
+`RUNTIMES.controller(...).open/leave` as Start. `borrowed = runtime.follows(id)` means that an editor
+pushed over a Start that already attached never detaches it. Holds. (b) Run: `popTo("WorkflowStart",
+{saved})` → a `pull()` effect. Safety still rests on the daemon asking for the catalogue hash. Holds.
+The only cost is a double read when Start is pushed fresh from the runs list. (c) Create order: the sheet
+calls `create` and then `start`, and `newSheetCreate` gates on the name and template. Holds. (d) Offline
+Review confirm: this is finding 1. (e) Saved canvas: `pointerEvents="none"`, so no sheet opens over a
+controller that edits nothing. Holds.
+
+**Unverified:** the e2e flow 44 has never run (E4 and E9 are not covered, as Execution says).
+
+**Executor behaviour:** the Execution notes are honest. Drift is stated (the pure modules, Settings
+reached from the title, Run through `popTo`), and the e2e is marked PARTIAL rather than claimed. It
+missed finding 2. The reviewer is the same model family as the executor of 7a-resume, 7b and 7c, with
+only a fresh context, so they may share blind spots.
+
+*— claude-opus-5-5, 2026-11-24*
