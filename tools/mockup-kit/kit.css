@@ -590,10 +590,10 @@
   color: var(--c-label);
 }
 .k-sheet[data-permission] {
-  padding: var(--m-permission-sheet-sheet-padding-top)
-    var(--m-permission-sheet-sheet-padding-horizontal)
-    var(--m-permission-sheet-sheet-padding-bottom);
-  gap: var(--m-permission-sheet-sheet-gap);
+  padding: var(--m-permission-sheet-returned-padding-top)
+    var(--m-permission-sheet-returned-padding-horizontal)
+    var(--m-permission-sheet-returned-padding-bottom);
+  gap: var(--m-permission-sheet-returned-gap);
 }
 .k-grabber {
   align-self: center;
@@ -605,12 +605,12 @@
 .k-perm-head {
   display: flex;
   align-items: center;
-  gap: var(--m-permission-sheet-head-gap);
+  gap: var(--m-permission-sheet-auto-row-gap);
 }
 .k-perm-tile {
-  width: var(--m-permission-sheet-tile-width);
-  height: var(--m-permission-sheet-tile-height);
-  border-radius: var(--m-permission-sheet-tile-border-radius);
+  width: var(--m-permission-sheet-send-min-height);
+  height: var(--m-permission-sheet-send-min-height);
+  border-radius: var(--m-permission-sheet-detail-box-border-radius);
   background: var(--c-fill);
   display: flex;
   align-items: center;
@@ -627,17 +627,17 @@
 .k-perm-options {
   display: flex;
   flex-direction: column;
-  gap: var(--m-permission-sheet-options-gap);
+  gap: var(--m-permission-sheet-auto-row-gap);
 }
 .k-perm-pill {
-  min-height: var(--m-permission-sheet-pill-min-height);
-  border-radius: var(--m-permission-sheet-pill-border-radius);
-  padding: var(--m-permission-sheet-pill-padding-vertical)
-    var(--m-permission-sheet-pill-padding-horizontal);
+  min-height: var(--m-permission-sheet-send-min-height);
+  border-radius: var(--m-permission-sheet-send-border-radius);
+  padding: var(--m-permission-sheet-auto-row-gap)
+    var(--m-permission-sheet-returned-padding-horizontal);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--m-permission-sheet-pill-gap);
+  gap: var(--m-permission-sheet-slim-padding-top);
   box-sizing: border-box;
   background: var(--c-fill);
   color: var(--c-label);
