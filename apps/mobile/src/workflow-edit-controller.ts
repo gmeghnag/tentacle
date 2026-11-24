@@ -23,7 +23,9 @@
  *   re-sent automatically.
  * - **Disconnect mid-save is decided by the hash on reconnect** (`reconnectOutcome`),
  *   which is exact because the emitter is deterministic: the preview's hash IS
- *   the hash of the bytes a write produces.
+ *   the hash of the bytes a write produces. If it landed, the baseline is the
+ *   snapshot that was SENT (edits made since stay dirty); Save is off until it
+ *   is decided, and it is checked at once when the link is (still) up.
  * - Nothing lands after `dispose`, and `leave` runs only when this screen was the
  *   one that opened the session.
  */
@@ -71,6 +73,8 @@ export const EDIT_OFFLINE = "Offline — your draft stays on this phone";
 export const EDIT_CHANGED = "Changed on the computer";
 /** A save whose answer never arrived: the reconnect checks, it is never re-sent. */
 export const EDIT_SAVE_INTERRUPTED = "The save was interrupted — reconnecting will check";
+/** Save off while a lost save is undecided: a second write would race the first. */
+export const EDIT_SAVE_PENDING = "Checking whether the last save landed";
 /** Save off with nothing to save. */
 export const EDIT_NOTHING_TO_SAVE = "Nothing to save yet";
 /** The New sheet never chose a starting point (the editor's own first frame). */
@@ -278,9 +282,14 @@ export function saveOffReason(input: {
   readonly offline: boolean;
   readonly problems: readonly string[];
   readonly dirty: boolean;
+  /** A lost save is still undecided (the hash has not been read yet). */
+  readonly pending?: boolean;
 }): string | null {
   if (input.offline) {
     return EDIT_OFFLINE;
+  }
+  if (input.pending === true) {
+    return EDIT_SAVE_PENDING;
   }
   const first = input.problems[0];
   if (first !== undefined) {
@@ -332,8 +341,18 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
   let baseHash: string | null = null;
   /** Edits applied since it was opened / last saved (the "N changes" count). */
   let changes = 0;
-  /** A save whose answer never arrived: the reconnect decides, nothing is re-sent. */
-  let interrupted: { readonly previewHash: string } | null = null;
+  /**
+   * A save whose answer never arrived: the hash decides, nothing is re-sent.
+   * `sent` is the snapshot that write carried — the baseline if it landed — and
+   * `changesAtSend` the count then, so edits made since stay counted.
+   */
+  let interrupted: {
+    readonly previewHash: string;
+    readonly sent: Snapshot;
+    readonly changesAtSend: number;
+  } | null = null;
+  /** A `checkInterrupted` read is in flight (one at a time). */
+  let checking = false;
   let created = false;
   let session: EditSessionHandle | null = null;
   let opened = false;
@@ -403,7 +422,7 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
       ...(context?.models !== undefined ? { models: context.models } : {}),
       ...(context?.agentTypes !== undefined ? { agentTypes: context.agentTypes } : {}),
     });
-    saveOff = saveOffReason({ offline, problems, dirty: dirty() });
+    saveOff = saveOffReason({ offline, problems, dirty: dirty(), pending: interrupted !== null });
   }
 
   function commit(next: Snapshot): void {
@@ -597,6 +616,7 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
       ...(baseHash !== null ? { baseHash } : {}),
       dryRun,
     };
+    const changesAtSend = changes;
     writing = true;
     notice = null;
     if (!dryRun) {
@@ -626,13 +646,25 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
           return;
         }
         writing = false;
-        // A save whose answer never arrived is NEVER re-sent: the reconnect
-        // reads the file and the hash decides which of the three it was.
-        interrupted = { previewHash: preview?.hash ?? "" };
+        if (dryRun) {
+          // A lost PREVIEW (`dryRun`) wrote nothing: back to editing, Review again.
+          phase = "editing";
+          notice = `The review did not answer (${err instanceof Error ? err.message : String(err)})`;
+          refresh();
+          changed();
+          return;
+        }
+        // A save whose answer never arrived is NEVER re-sent: the file is read
+        // and the hash decides which of the three it was — at once when the
+        // link is (still) up, else when it comes back. Save is off till then.
+        interrupted = { previewHash: preview?.hash ?? "", sent: current, changesAtSend };
         phase = "editing";
         notice = `${EDIT_SAVE_INTERRUPTED} (${err instanceof Error ? err.message : String(err)})`;
         refresh();
         changed();
+        if (!offline) {
+          checkInterrupted();
+        }
       });
   }
 
@@ -853,7 +885,7 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
       changed();
     },
     beginReview() {
-      if (phase !== "editing" || saveOff !== null || writing) {
+      if (phase !== "editing" || saveOff !== null || writing || interrupted !== null) {
         return;
       }
       send(true);
@@ -879,6 +911,8 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
       changedOnDisk = false;
       history = null;
       baseline = null;
+      // A fresh read supersedes a lost save's question (its hash is the new base).
+      interrupted = null;
       preview = null;
       saved = null;
       changes = 0;
@@ -917,9 +951,11 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
       changed();
     },
     setLink(up) {
-      const wasDown = offline;
       offline = !up;
-      if (up && wasDown) {
+      // Any "up" re-checks a lost save still undecided — after a down, or a
+      // relay reconnect this screen never saw as down. An ordinary one re-reads
+      // nothing (`checkInterrupted` returns at once with no lost save).
+      if (up) {
         checkInterrupted();
         return;
       }
@@ -950,18 +986,22 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
    */
   function checkInterrupted(): void {
     const lost = interrupted;
-    if (lost === null || session === null || name === null) {
+    if (lost === null || checking || session === null || name === null) {
       refresh();
       changed();
       return;
     }
-    interrupted = null;
+    // `interrupted` stays set (Save stays off) until the hash has decided.
+    checking = true;
     void session
       .workflowSource(name)
       .then((result) => {
-        if (disposed) {
+        checking = false;
+        // Disposed, or a Reload superseded the question while this was in flight.
+        if (disposed || interrupted !== lost) {
           return;
         }
+        interrupted = null;
         if ("unsupported" in result) {
           phase = "unsupported";
           changed();
@@ -986,12 +1026,21 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
             version: result.version ?? versionOf(draft() ?? {}),
             path: result.path ?? `${name ?? ""}.yaml`,
           };
-          baseline = history?.current ?? null;
+          // The disk holds what was SENT — not edits made since (offline
+          // editing continues): those stay dirty against it.
+          baseline = lost.sent;
           baseHash = hash;
           mode = "replace";
-          changes = 0;
-          phase = "saved";
-          notice = null;
+          canonical = true;
+          if (dirty()) {
+            changes = Math.max(1, changes - lost.changesAtSend);
+            phase = "editing";
+            notice = "The save landed — your later edits are not saved yet";
+          } else {
+            changes = 0;
+            phase = "saved";
+            notice = null;
+          }
         } else if (outcome === "editing") {
           phase = "editing";
           notice = "It did not land — your draft is still here";
@@ -1003,11 +1052,12 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
         changed();
       })
       .catch((err: unknown) => {
-        if (disposed) {
+        checking = false;
+        if (disposed || interrupted !== lost) {
           return;
         }
-        // The link is still not good enough: keep the pending decision.
-        interrupted = lost;
+        // The link is still not good enough: the decision stays pending (Save
+        // off) and the next link-up checks again.
         notice = `Could not check the save (${err instanceof Error ? err.message : String(err)})`;
         refresh();
         changed();

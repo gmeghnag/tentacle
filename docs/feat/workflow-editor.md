@@ -1858,6 +1858,71 @@ is first seen on a device.
 
 *— claude-opus-5-5 (executor, slice 6), 2026-11-24*
 
+### Fix round 1 — review of slices 4–6
+
+Both findings were fixed in `apps/mobile/src/workflow-edit-controller.ts`. Only that file and its test
+changed.
+
+**HIGH 1: edits made after a lost save were marked saved. FIXED (option b).** `interrupted` now
+records the snapshot the write carried and the change count at send (`:660`). When the write landed,
+the baseline becomes that snapshot, not `current` (`:1031`). If the draft still differs from it, the
+phase stays `editing`, `changes` counts only the later edits, and the notice says "The save landed —
+your later edits are not saved yet". The next save carries `baseHash` = the landed hash.
+
+**MEDIUM 2: Save was offered while a lost save was undecided. FIXED.**
+- `saveOffReason` takes `pending`, and it ranks right after offline: `EDIT_SAVE_PENDING`
+  "Checking whether the last save landed" (`:77`).
+- `beginReview` also refuses while `interrupted !== null` (`:888`).
+- The check runs at once when the link is up at the rejection (`:666`).
+- Any `setLink(true)` re-checks, not only one after an observed down (`:958`). An ordinary reconnect
+  still reads nothing, because `checkInterrupted` returns at once when no save was lost.
+- `interrupted` stays set while the read is in flight, so Save stays off until the hash decides. A
+  `checking` flag allows one read at a time (`:995`).
+- A failed check keeps the decision pending. A Reload clears it, and a check that was in flight then
+  is ignored (`interrupted !== lost`).
+
+**Drift (and why).**
+- A lost PREVIEW (`dryRun: true`, `:638`) no longer counts as an interrupted save. It wrote nothing
+  (D4), and with the new Save gate it would have blocked Save behind a pointless read. It goes back
+  to `editing` with "The review did not answer (…)".
+- The old test "the preview's hash on disk → saved" now drops the link before the rejection lands,
+  as its comment describes. It used to drop it afterwards, and the immediate check now settles the
+  save first. It also asserts that nothing is read while the link is down.
+
+**Red before green** (`bun test apps/mobile/test/workflow-edit-controller.test.ts`, before the fix):
+```
+(fail) … edits made AFTER the lost save stay dirty when it landed (never marked saved)
+       Expected: "editing"  Received: "saved"
+(fail) … a lost save with the link still up is checked AT ONCE (no down→up needed)
+       expect(readNames).toEqual(["demo","demo"]) — one read only
+(fail) … Save is OFF while a lost save is undecided; a later link-up re-checks
+       saveOff was null (Save offered)
+```
+After the fix the file passes: 56 pass / 0 fail. Two more tests were added: the `pending` rule
+itself, and "a lost PREVIEW wrote nothing: no check, Save stays on". `bunx biome check` on both files
+is clean, and `tsc -p apps/mobile` is clean.
+
+**Mutations** (`.tentacle/tmp/workflow-editor/mutate.ts`, each applied alone and then restored; the
+file was byte-identical afterwards):
+```
+== M1 baseline = current (not the sent snapshot)        → 2 fail (edits AFTER…, Save is OFF…)
+== M2 saveOff ignores a pending lost save               → 1 fail (Save is OFF…)
+== M3 no immediate check when the link is up            → 2 fail (checked AT ONCE…, Save is OFF…)
+== M4 re-check only on a down→up edge                   → 1 fail (Save is OFF…)
+restored
+```
+The `interrupted !== null` guard in `beginReview` is a second guard behind `saveOff`. On its own, a
+mutation of it stays green, and that is expected.
+
+**Debt (not fixed).**
+- After a landed save with later edits, the draft carries the same `version` as the bytes that
+  landed. The version bump only happens on the first edit since the last save, so the next save
+  writes the same version number. This is cosmetic: the hash, not the version, guards the write.
+- There is no manual "check again" control. A check that keeps failing waits for the next
+  `setLink(true)`, and slice 7's screen must report link-ups, including a relay reconnect.
+
+*— claude-opus-5-5 (executor, fix round 1 of slices 4–6), 2026-11-24*
+
 ## Review
 
 ### Slices 4 + 5 + 6 — REQUEST-CHANGES

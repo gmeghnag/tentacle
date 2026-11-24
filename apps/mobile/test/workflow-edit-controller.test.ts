@@ -22,6 +22,7 @@ import {
   EDIT_FIX_ELSEWHERE,
   EDIT_NOTHING_TO_SAVE,
   EDIT_OFFLINE,
+  EDIT_SAVE_PENDING,
   EDIT_UPDATE_TENTACLE,
   type EditSessionHandle,
   type EditState,
@@ -76,7 +77,7 @@ function harness(
     borrowed?: boolean;
     name?: string | null;
     /** Each source read answers with the next of these (the last one repeats). */
-    reads?: readonly (WorkflowSourceResult | { unsupported: true })[];
+    reads?: readonly (WorkflowSourceResult | { unsupported: true } | Error)[];
     /** Each save answers with the next of these (the last one repeats). */
     saves?: readonly (WorkflowSaveResult | { unsupported: true } | Error)[];
     /**
@@ -97,6 +98,9 @@ function harness(
     async workflowSource(name: string) {
       readNames.push(name);
       const next = reads.length > 1 ? reads.shift() : reads[0];
+      if (next instanceof Error) {
+        throw next;
+      }
       return next ?? source();
     },
     workflowSave(request: WorkflowSaveRequest) {
@@ -506,10 +510,12 @@ describe("a save whose answer was lost: the hash decides on reconnect", () => {
     h.controller.beginReview();
     await h.flush();
     h.controller.confirmSave();
-    await h.flush();
     // The link drops mid-save; the answer never arrives.
     h.controller.setLink(false);
+    await h.flush();
     expect(h.state().kind).toBe("editing");
+    // Nothing is read while the link is down.
+    expect(h.readNames).toEqual(["demo"]);
     h.controller.setLink(true);
     await h.flush();
     expect(h.state().kind).toBe("saved");
@@ -569,6 +575,103 @@ describe("a save whose answer was lost: the hash decides on reconnect", () => {
     h.controller.setLink(true);
     await h.flush();
     expect(h.sent.length).toBe(sentBefore);
+  });
+
+  test("edits made AFTER the lost save stay dirty when it landed (never marked saved)", async () => {
+    const h = harness({
+      confirmFails: "the link dropped",
+      reads: [source(), source({ hash: PREVIEWED, version: 3 })],
+    });
+    await opened(h);
+    touched(h); // retry 2 — this is what the lost write carried
+    h.controller.beginReview();
+    await h.flush();
+    h.controller.confirmSave();
+    h.controller.setLink(false);
+    await h.flush();
+    // Offline editing continues: a later edit the disk never saw.
+    h.controller.setRetry("exec", 3);
+    expect(h.state().dirty).toBe(true);
+    h.controller.setLink(true);
+    await h.flush();
+    // The write landed (its hash is on disk), but `retry: 3` is NOT on disk.
+    expect(h.state().kind).toBe("editing");
+    expect(h.state().dirty).toBe(true);
+    expect(JSON.stringify(h.state().draft)).toContain('"retry":3');
+    expect(h.controller.discardPrompt()).not.toBeNull();
+    // The baseline is what LANDED: discarding goes back to `retry: 2`.
+    h.controller.discard();
+    expect(JSON.stringify(h.state().draft)).toContain('"retry":2');
+    expect(h.state().dirty).toBe(false);
+    // And the next save replaces the landed bytes.
+    h.controller.setRetry("exec", 4);
+    h.controller.beginReview();
+    await h.flush();
+    expect(h.sent.at(-1)?.baseHash).toBe(PREVIEWED);
+  });
+
+  test("a lost save with the link still up is checked AT ONCE (no down→up needed)", async () => {
+    const h = harness({
+      confirmFails: "rpc error",
+      reads: [source(), source({ hash: PREVIEWED, version: 3 })],
+    });
+    await opened(h);
+    touched(h);
+    h.controller.beginReview();
+    await h.flush();
+    h.controller.confirmSave();
+    await h.flush();
+    expect(h.readNames).toEqual(["demo", "demo"]);
+    expect(h.state().kind).toBe("saved");
+    expect(h.state().saved?.hash).toBe(PREVIEWED);
+  });
+
+  test("Save is OFF while a lost save is undecided; a later link-up re-checks", async () => {
+    const h = harness({
+      confirmFails: "rpc error",
+      reads: [source(), new Error("still flaky"), source({ hash: PREVIEWED, version: 3 })],
+    });
+    await opened(h);
+    touched(h);
+    h.controller.beginReview();
+    await h.flush();
+    h.controller.confirmSave();
+    await h.flush();
+    // The immediate check failed: the decision is still pending.
+    h.controller.setRetry("exec", 3);
+    expect(h.state().kind).toBe("editing");
+    expect(h.state().saveOff).toContain("last save");
+    expect(h.controller.canSave()).toBe(false);
+    const sentBefore = h.sent.length;
+    h.controller.beginReview();
+    await h.flush();
+    expect(h.sent.length).toBe(sentBefore);
+    // The link is reported up again (never seen down): the hash decides now.
+    h.controller.setLink(true);
+    await h.flush();
+    expect(h.state().saved?.hash).toBe(PREVIEWED);
+    expect(h.state().dirty).toBe(true);
+    expect(h.controller.canSave()).toBe(true);
+  });
+
+  test("`saveOffReason`: a pending lost save turns Save off (after offline)", () => {
+    expect(saveOffReason({ offline: false, problems: [], dirty: true, pending: true })).toBe(
+      EDIT_SAVE_PENDING,
+    );
+    expect(saveOffReason({ offline: true, problems: [], dirty: true, pending: true })).toBe(
+      EDIT_OFFLINE,
+    );
+  });
+
+  test("a lost PREVIEW wrote nothing: no check, Save stays on", async () => {
+    const h = harness({ saves: [new Error("rpc error")] });
+    await opened(h);
+    touched(h);
+    h.controller.beginReview();
+    await h.flush();
+    expect(h.state().kind).toBe("editing");
+    expect(h.controller.canSave()).toBe(true);
+    expect(h.readNames).toEqual(["demo"]);
   });
 
   test("`reconnectOutcome` is the rule itself, on all four inputs", () => {
