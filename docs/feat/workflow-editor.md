@@ -2472,3 +2472,22 @@ missed finding 2. The reviewer is the same model family as the executor of 7a-re
 only a fresh context, so they may share blind spots.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 2 — PASS
+
+Fix commit `39ebc041` (`git diff HEAD~1`).
+- **Finding 1: FIXED.** `canConfirmNow` now checks `!offline` (`workflow-edit-controller.ts:593`), and
+  Review puts `EDIT_OFFLINE` first among its notes. Mutation: removing `!offline` fails 1 test ("offline
+  on Review: confirm is off and sends nothing…"). Mutation: removing the offline note fails 1 test
+  ("offline: Review says so first…"). Both were reverted, and `git status` is clean. `setLink`
+  re-renders through `changed()`, so the button turns off live.
+- **Finding 2: ACCEPTED as recorded drift.** The failure-mode row and Fix round 1 now say that Edit
+  and New stay visible. Two characterization tests pin that New on an older daemon (`unsupported`)
+  and New on a pod session (`unavailable`) send nothing. The reason holds: no capability is known
+  before the read.
+- **Regressions:** the diff touches only the confirm gate, one optional `reviewModel` input and one
+  route argument. `bun test apps/mobile/test/workflow-edit-*.test.ts` gives 208 pass / 0 fail.
+  `bun run lint` is clean (2416 files) and `bun run typecheck` is clean. The e2e flow 44 is still
+  unrun (E4 and E9 are open debt).
+
+*— claude-opus-5-5, 2026-11-24*
