@@ -414,3 +414,21 @@ pre-existing `SharedAutoAccept`/`RoutingAutoAccept` errors that `main` reports t
 in `wiring.ts` or the wiring test).
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-24* (fresh context; same model family as the planner — shared blind spots possible)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM). Scope: `git diff main...HEAD` only.
+
+**Gate.** Touched files: `bun test` core/image-file, tools/fs-read-image, tools/image-view, providers/tool-images, cli/image-view-wiring, daemon/attachment-tool-images → **97 pass / 0 fail**. `bun run lint` clean (2375 files). `bun run typecheck` clean (all three projects — the 12 cli errors Execution mentions do not reproduce here). Full `bun test` not re-run (left to the merge gate).
+
+**Mutations (each red, reverted, `git status` clean after):** range refusal disabled → `a line range on an image is refused` red; `> maxEdge` → `>=` → `an image exactly at maxEdge is accepted` red; wiring `maxEdge` hard-coded 1568 → `anthropic takes 8000 px` red.
+
+**Premises checked.** `"image/png"` literal: no consumer downstream of `putTool` checks it (only `attachment-store.ts:509` copies `input.mimeType`); `readPdf` already does a `readBytes` head read (`builtins.ts:233`), so the image branch adds no new error shape for missing/unreadable paths; `FileTooLargeError.sizeBytes` exists (`core/src/execution.ts:63`). TRUE.
+
+**Attacks tried.** (1) §7 pod/untrusted: image path only when wiring passes `toolImages` AND vision; the shared `fsReadTool` stays text-only; a sub-agent reusing the image variant without `ctx.images` falls through (`builtins.ts` `ctx.images !== undefined` guard) — holds. (2) Real files E2E (`.tentacle/tmp/image-files/review-e2e.ts`, real `HostExecution` + the real `createFsReadTool`): a sips-made JPEG and two repo PNGs → correct markers, `putTool` with `image/jpeg`/`image/png`, `package.json` → today's text byte for byte — holds. (3) JPEG EOI search starts after SOS, so an EXIF thumbnail's `FF D9` (APP1, before SOF) cannot fake completeness; MPF trailing images after the main EOI are accepted — holds. (4) Persistence/wire: the stored ref is an ordinary `AttachmentRef` with `image/jpeg` (already in `IMAGE_MIME_TYPES`); no log/protocol change — holds.
+
+**Nits (not blocking).**
+1. `tools/src/image-view.ts` `highOnly` — D4 said "when `detail === "low"`"; as built the note also appears on an explicit `high` call ("low is not available … sent at high"). True but noisy; undeclared drift from D4.
+2. `core/src/image-file.ts` `hasIend` — a valid PNG with > 1 KiB of trailing data after `IEND` is refused as "truncated or corrupt" (rare; the plan chose this bound).
+
+**Executor behaviour.** Followed the plan order, recorded red-before-green and six mutations; one honest shape note (branch moved after `readPdf`). The `cli` typecheck caveat in Execution was stale.
