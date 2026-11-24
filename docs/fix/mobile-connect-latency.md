@@ -360,3 +360,29 @@ Q1 persist lastGood: yes · Q2 close the socket only on `background`: yes · Q3 
 **Attacks tried:** (a) resync ordering vs `controller.open` `live` short-circuit → finding 1; (b) mutation non-vacuity of T5/T8 → vacuous by construction (no call into code under test); (c) `inactive` no longer suspends (`App.tsx:616,2257`) → consistent with Q2, no issue found; (d) `setLastAddress` with address no longer listed → no-op, OK.
 
 **Executor behaviour:** Execution misreports the gate, the mutations and slice 1; tests written to pass rather than to pin the property (AGENTS §9).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-24* (fresh context; reviewing `git diff HEAD~1`, commit `f679979b`)
+
+**Verdict: APPROVE.**
+
+**Gate:** `bun test apps/mobile/test packages/client/test` → 5514 pass / 0 fail. `bun run lint` clean (2320 files). `bun run typecheck` green (root + mobile + relay).
+
+**Round-1 findings:**
+1. HIGH 1 (`resync` attach-then-leave detached the session): **fixed**. `session-screen-controller.ts:2144-2165` is back to main's leave → attach. The 10 resync tests that failed in round 1 now pass.
+2. HIGH 2 (T8 vacuous): **fixed as a real repro.** It runs a real `SessionHost`/`Connection`, the gate and `createSessionScreen`, and checks `attached === 2`. It passes with and without the fix, so the root cause is still **not reproduced**. Under the plan's two-strike rule, 3b is correctly not attempted and the question goes to the owner (Q3: one phone log export). Until then, the 3c retry is the only protection against a failed re-read.
+3. HIGH 3 (T5 and the rest untested): **fixed.** Each mutation below made its test fail; all were reverted and `git status` was clean afterwards:
+   - `redialNow` emptied → T5 fails 3/3 (`reattach-resume.test.ts`).
+   - `retryOnUp` forced to `false` → T9 fails (`session-screen.test.ts`).
+   - `onAnswered` call dropped (`connection.ts:395`) → T3 fails.
+   - `resume` no longer calling `redialNow` (`connection.ts:455`) → T6 fails.
+4. MEDIUM 4 (phase log): **fixed.** It now writes `dial-open {slot, kind, ok}`, `dial-confirm {ok}` and `dial-init` under the typed `"timing"` kind (`connection.ts:305-313`), with no address in the log.
+5. MEDIUM 5 (retry on reconnect unproven): **fixed.** `retryOnUp` is a pure function in `session-view.ts:322`, built from `failureBanner().retry`. T9 shows one re-attach per reconnect, bounded.
+
+**Regression attacks on this diff:**
+- (a) Wiring: `App.tsx` now passes `onAnswered → KEYCHAIN_STORE.setLastAddress(id, …)` and goes through `foregroundAction` at both call sites. Consistent; nothing found.
+- (b) A rejected `onAnswered` is swallowed (`Promise.resolve(...).catch`), and `answered` blocks a repeat write for the same address. Nothing found.
+- (c) A retry after the person asked for Reopen keeps `reopenRequested` (`:1794`). Nothing found.
+
+**Not done in this round:** a full `bun run check` (only the touched directories were run). The Execution text at lines 256/258 still carries round-1 claims that are now outdated; round 2's notes correct them.
