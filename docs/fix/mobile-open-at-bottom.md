@@ -33,3 +33,12 @@ Leads (unverified): the transcript list is `apps/mobile/src/screens/SessionScree
 ## Execution
 
 ## Review
+
+#### Owner answers (2026-11-24)
+
+1. **Only when opening a session FROM THE SESSION LIST** shows the visible scroll (not reopen, not return from background). Use this as the repro trigger: compare the list→session path with the paths that land cleanly (which state/flag does the list path skip or set differently? H2 first).
+2. Structural fix (`initialScrollIndex` / `inverted`) — orchestrator applies the recommendation: **no**, unless the repro proves the current hidden-landing mechanism cannot be fixed; then STOP and ask.
+
+**APPROVED** (orchestrator, with the owner's answers): executor Sonnet, red-first repro of the list→session path, Opus review.
+
+*— orchestrator (claude-opus-5-5), 2026-11-24*
