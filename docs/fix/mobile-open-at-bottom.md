@@ -32,6 +32,25 @@ Leads (unverified): the transcript list is `apps/mobile/src/screens/SessionScree
 
 ## Execution
 
+**Repro (H1, unit, `.tentacle/tmp/mobile-open-at-bottom/repro.ts`, unfixed code):**
+```
+m1 settling true animated false
+reveal -> {"settling":false,"silent":false,"revealed":false,...}   # landingDone
+growth after reveal: landing step = null
+then contentGrew = {"scrollTo":5200,"animated":true}
+```
+Mechanism proven: when the 120 ms reveal timer fires while the list is still rendering its tail, the OPENING landing hands back to the ordinary follow at once (`landingDone`). The growth its own silent scroll causes then goes to `contentGrew`, ANIMATED — the visible travel. The re-attach path already had the cure (`revealed` silent tail); the opening path did not.
+
+**As built:** `apps/mobile/src/follow.ts` `landingReveal` (opening branch): a hidden `settling` landing now returns the revealed-tail state (`silent`, `revealed`, `last`, `rounds`) instead of `landingDone`, reusing `landingStep`'s revealed branch (silent scrolls until a height repeats, bounded by `LANDING_ROUNDS`; a second quiet reveal hands back). `awaiting` keeps `landingDone` (an existing test pins it). No SessionScreen change: `armReveal`/`land` already re-arm while `landingPending`. Tests in `apps/mobile/test/follow.test.ts`: 3 new, 1 existing assertion updated (reveal state of a long history is now the revealed tail).
+
+**Red → green:** the new "growth after the reveal…" test failed on `grown.step` (null) before the fix. `follow.test.ts` + `session-screen-follow-wiring.test.ts`: 77 pass / 0 fail after. Biome on the two files: clean.
+
+**Mutation:** reverting the branch to `landingDone` makes that test fail (the red run). The other two new tests are boundary pins (bound, second reveal, not-following) and pass on old and new code too.
+
+**Unverified:** that the list→session path is where the quiet window passes mid-growth (busy JS during the navigation transition) was NOT shown — no simulator run. Verify: cold-open a 300+ row session from the session list on the simulator (take `sim.lock`) and watch for travel.
+
+*— claude-sonnet-5-5, 2026-11-24*
+
 ## Review
 
 #### Owner answers (2026-11-24)
