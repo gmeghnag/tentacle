@@ -421,6 +421,14 @@ frames A1–A7 before the iOS build.
 - **Nothing was edited** for S3.
 - **Decision needed (recommendation first):** move `ask-origin.ts` (pure, no deps) to `@tentacle/core` and re-export it from `client/src/index.ts` (the TUI already depends on core; S2's tests move with it). Alternative: add `@tentacle/client` to the TUI (breaks the stated invariant; not recommended). The TUI part is then: `permissionOriginLine(origin, agentId, columns)` replacing `permissionAgentLine` (`permission-ui.ts:117`), a `pendingWorkflow` beside `pendingAgent` (`:427,:607,:635`), `AppView.tsx:149`, and the row count in `app-layout.ts:450` (row present when agent OR workflow).
 
+### Fix round 1 (executor claude-opus-5-5, 2026-11-24)
+
+- **Finding 1 (MEDIUM, `workflow` never reaches a requester) — FIXED.** `packages/client/src/remote-client.ts:4880` now forwards `action.workflow` into the requester's `PermissionRequestOptions` (conditional spread, like `agent`/`requestId`). This corrects P3: the router builds the `RouterAction`, and `RemoteClient` builds the options.
+- **Red first:** new test `foreign-turns.test.ts` › "a workflow step's request reaches the requester with its workflow origin". It drives a fake daemon → real `RemoteClient` → ONE `PermissionBroker` → requester spy. On the unfixed code it failed on the assertion: `expect(seen[0]?.workflow).toEqual({...})`, received `undefined`. A companion test, "a request without a workflow hands the requester no workflow", asserts that the `workflow` key is absent.
+- **Green:** `foreign-turns.test.ts` + `permission-router.test.ts`: 65 pass / 0 fail. `tsc --noEmit -p packages/client`: clean. Biome is clean on both files.
+- **Mutations (reverted; diff shows only the fix + tests):** (a) no forward (the original code): the carry-through test fails. (b) Unconditional `workflow: action.workflow` (the key is present even when undefined): the absent-case test fails (1 pass / 1 fail).
+- **Drift:** none beyond the one-line forward. S3 remains STOPPED and waits for the owner's OK to move `ask-origin.ts` to `@tentacle/core` (Review (f)).
+
 ## Review
 
 ### Group S1a–S3 — Verdict: REQUEST-CHANGES
