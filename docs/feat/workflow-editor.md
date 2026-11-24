@@ -178,8 +178,16 @@ the parked TUI editor (eval/tui-workflow-editor) reuses them unchanged (parity).
   - `context` carries model NAMES only, never ids or URLs (§7, as the catalogue's `model`, `session.ts:994-995`).
     It feeds the phone's pickers, and its local `draftProblems` then equals the daemon's.
 - **`session/workflow_save {sessionId, name, mode: "create" | "replace", draft, prompts, baseHash?, dryRun: boolean}`**.
-  - **Payload bounds:** `draft` is a bounded JSON value (`z.record(z.unknown())`, refined to ≤ 512 KiB
-    serialized). `prompts` ≤ 32 entries, each ≤ 64 KiB.
+  - **Payload bounds:** `draft` is bounded JSON **TEXT** — `z.string().max(WORKFLOW_DRAFT_MAX_CHARS)`
+    (512 KiB), the mapping serialized. *Amended by slice 3a (drift, executor): the plan said
+    `z.record(z.unknown())` refined to ≤ 512 KiB, but the JSON-schema export represents neither a
+    `z.record` (the `WorkflowInputValueSchema` precedent) nor a `.refine()` (the `attachment.ts` /
+    `daemon.ts` precedents), and a `.refine`-only cap would be invisible to every non-zod client.
+    Text keeps the cap part of the contract; the daemon parses it into the same mapping the strict
+    validator reads, so an unknown draft field is still an ERROR, never a silent drop.*
+    `prompts` ≤ 32 entries, each ≤ 64 KiB. **Frame check (executor, as the plan asks):** the
+    transport's cap is `DEFAULT_MAX_FRAME_BYTES = 8 MiB` (`daemon/src/device-accept.ts:40`), so
+    512 KiB + 32 × 64 KiB + envelope ≈ 2.6 MiB fits one frame; no bound was lowered.
   - **Unknown draft fields are refused, not dropped.** The authority on the draft is the
     strict validator, so a newer client's unknown field becomes an ERROR, never a silent drop
     from a file the user saves.
@@ -195,8 +203,15 @@ the parked TUI editor (eval/tui-workflow-editor) reuses them unchanged (parity).
 - Method table rows for both. Regenerate `protocol.json` (`bun run schema:export`).
 
 **D4 — The writer (serve host only) and the driver.** (`cli/src/workflow-files.ts`, `cli/src/wiring.ts`, `agent/src/workflow-driver.ts`)
-- **`cli/src/workflow-files.ts`:** `writeWorkflowFiles(cwd, plan, currentHash)`.
+- **`cli/src/workflow-files.ts`:** `writeWorkflowFiles(cwd, plan, currentHash, hooks?)`.
   - **Synchronous.** No `await` between the base check and the last rename.
+  - **The plan carries the DRAFT, not bytes.** *Amended by slice 3a (drift, executor): the plan's
+    `plan` shape was not spelled out beyond `{mode, name, …}`; the writer therefore takes
+    `{mode, name, draft, prompts, baseHash?, basePrompts?}` and calls `workflowYaml` itself, so no
+    caller-supplied `text` can drift from the draft it validated. `workflowYaml` throwing (a lone
+    surrogate) is `invalid`, naming it — nothing written. `basePrompts` is the base read's
+    `Object.keys(source.prompts)`: a prompt path NOT in it, already on disk with other bytes, is
+    `exists`; absent covers none (fail closed).*
   - **Base check:** re-read the current YAML plus its prompts (the `loadWorkflowSource` path,
     `:53-74`). `currentHash(source)` is the driver's sync validate+hash (below). Then:
     - `replace`: a missing file, or `currentHash !== baseHash`, refuses `changed`;
@@ -966,6 +981,143 @@ file, restore; `restored: true` both times):
 The full gate is the orchestrator's script.
 
 *— claude-opus-5-5 (executor, fix round 1), 2026-11-24*
+
+### Slice 3a — protocol methods + sync writer (D3, D4 writer) — DONE
+
+**Load-bearing / PARTIAL check re-run FIRST** — `.tentacle/tmp/workflow-editor/lb-slice3a.ts` on the
+branch tip `088b5163`:
+
+```
+== approved lb.ts facts (must not differ) ==
+approvals.add( call sites: 2 lines 733,1020
+"WorkflowSource" in Method: false
+"WorkflowSave" in Method: false
+typeof validateWorkflowValue: function
+
+== slice 3a specifics ==
+validateWorkflowValue exported: true
+core exports workflowYaml: true
+writeWorkflowFiles in cli/src/workflow-files.ts: 0
+export function makeDiff in tools/src/builtins.ts: 0
+cli/test/workflow-files-write.test.ts exists: false
+```
+
+The 3a precondition (`validateWorkflowValue` exported) holds; both methods and the writer are
+absent, which is what the slice adds. **The slice starts where the plan says it does.**
+
+**Red first.** `protocol/test/workflow-save-wire.test.ts` and
+`cli/test/workflow-files-write.test.ts` were written against the plan's lists and run before the
+implementations: both red at import (`WORKFLOW_DRAFT_MAX_CHARS` / `workflowCurrentHash` not
+exported), then red on behaviour as each landed. The one assertion that was red on an ASSERTION
+rather than an import — the base-is-read-from-disk test — found a real bug (drift 3 below).
+
+**Drift from the Implementation (3, all recorded in the plan).**
+
+1. **The draft crosses the wire as JSON TEXT, not `z.record` + `.refine`.** The plan's D3 asked for
+   `z.record(z.unknown())` refined to ≤ 512 KiB. The JSON-schema export represents neither a
+   `z.record` (the `WorkflowInputValueSchema` precedent, `protocol/src/session.ts:873-875`) nor a
+   `.refine()` (`attachment.ts:68`, `daemon.ts:69`), and a `.refine`-only cap would be invisible to
+   every non-zod client. `draft` is `z.string().max(WORKFLOW_DRAFT_MAX_CHARS)`; the daemon parses
+   it into the same mapping the strict validator reads, so an unknown draft field stays an ERROR,
+   never a silent drop. **D3 amended in place.**
+2. **The writer's plan carries the DRAFT, not bytes**, plus `basePrompts`. D4 did not spell the
+   `plan` shape out; taking a `text` would be a second source of truth that could drift from the
+   draft. `writeWorkflowFiles` calls `workflowYaml` itself, and the emitter throwing (a lone
+   surrogate) is `invalid`, nothing written. `basePrompts` (the base read's prompt paths) is what
+   makes "a prompt the user loaded is theirs to rewrite" explicit instead of implied. **D4 amended
+   in place.**
+3. **The base hash is computed from `loadWorkflowSource(cwd, name)`, i.e. the file AS ON DISK**, not
+   from the prompts the save happens to write. My first version hashed only the written prompts,
+   which refused `changed` for a legal edit: switching a step from `prompt: prompts/gate.md` to
+   inline text leaves that file on disk, still referenced by the loaded YAML, so its hash differed
+   and the save was impossible. D4 already said "re-read the current YAML plus its prompts (the
+   `loadWorkflowSource` path)" — the code now does what that sentence says. Pinned by a test proved
+   red on the wrong version (mutation M10).
+
+**Protocol (`protocol/src/session.ts`, `methods.ts`, `schema/protocol.json`).**
+
+- `WorkflowSourceParams/ResultSchema`: the file's `text`, its `draft` (JSON text, present iff
+  `asDraft` read it), the prompt files its steps reference, `hash` (iff it validated), `version`,
+  `canonical`, `errors` (iff it did not), `unreadable`, `unavailable`, and a `context` of model
+  and agent-type NAMES only (never an id or a URL, §7).
+- `WorkflowSaveParamsSchema`: `{sessionId, name, mode, draft, prompts, baseHash?, dryRun}` —
+  `dryRun` is **required, never defaulted**, so a client that forgot it cannot write what it meant
+  to preview.
+- `WorkflowSaveResultSchema`: `{ok, refusal?, reason?, errors?, hash?, version?, path?, files?,
+  approved?, alsoChanges?, running?, schedules?}`, one `WorkflowWriteFile` per file with its
+  `status` and ≤ 64 KiB patch.
+- Both methods registered (`session/workflow_source`, `session/workflow_save`); **additive only, so
+  no `protocol.d/` note and no `PROTOCOL_VERSION` move** (§7). Bounds checked against the
+  transport's cap as the plan asked: `DEFAULT_MAX_FRAME_BYTES = 8 MiB`
+  (`daemon/src/device-accept.ts:40`) against ≈ 2.6 MiB worst case — nothing lowered.
+- One naming collision found and fixed: `WORKFLOW_PROMPT_MAX_CHARS` already exists in
+  `session-log.ts` for a different bound, so the prompt-file cap is `WORKFLOW_PROMPT_FILE_MAX_CHARS`.
+- `bun run schema:export` regenerated `protocol.json` (+267 lines); `json-schema.test.ts`'s
+  fixture-coverage test went red until both methods had fixtures, which were added.
+
+**`tools/src/builtins.ts`:** `unifiedDiff(path, before, after)` exported — the same patch and counts
+`makeDiff` already gives, without the `ToolDiffDetail` wrapper a non-tool caller cannot build.
+
+**`cli/src/workflow-files.ts`:** `writeWorkflowFiles(cwd, plan, currentHash, hooks?)` and the
+`WorkflowWritePlan` / `WorkflowWriteResult` / `WorkflowWriteRow` / `WriteHooks` types. Synchronous
+(no `await` between the base check and the last rename, §7); emits the bytes itself; resolves every
+path through `resolveInside` on all components (`.tentacle`, `workflows`, `prompts`, the file);
+`replace` requires the file to still hash to `baseHash`, `create` requires the YAML to be absent;
+a prompt path the base did not cover, already on disk with other bytes, is `exists`; prompts are
+written FIRST and the YAML LAST; each file is temp + rename with the temp removed on failure (a temp
+name is never `*.yaml`, so no listing can show one); **it never touches the approval store**.
+
+**Mutations (applied one at a time, each run, each restored from a copy under
+`.tentacle/tmp/workflow-editor/mut/` — no `git checkout`/`restore`/`stash`).**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | write the YAML before the prompts | 2 red (order + the loaded-hash test) |
+| M2 | drop the `baseHash` check | 2 red (stale base, no-temp-on-refusal) |
+| M3 | allow overwriting a prompt the base did not cover | 2 red (`exists`, base-prompts pair) |
+| M4 | skip the no-links walk (`resolveInside`) | 6 red (all 4 symlink cases + 2) |
+| M5 | write in place instead of temp + rename | 1 red (mid-write failure) |
+| M6 | let `workflowYaml` throw instead of `invalid` | 1 red (surrogate) |
+| M7 | drop the `baseHash` sha-256 regex | 1 red (params) |
+| M8 | make `dryRun` optional | 1 red (params) |
+| M9 | zero `unifiedDiff`'s counts | **survived** → 2 tests added, then red |
+| M10 | hash the base from the written prompts (the pre-fix code) | 1 red (disk base) |
+
+**M9 is the useful result**: the plan's test list never pinned the patch COUNTS, only the patch, so
+zeroing them passed. Two tests were added (`added`/`removed` per status, and a real patch's `-old`/
+`+new`), and M9 then failed. M6–M8 and M10 were run against the current tree.
+
+**Failure modes, as the plan lists them (`:363-385`), each pinned:**
+
+- a prompt shared by two workflows → Review's `alsoChanges` is **slice 3b's** (`deps.list`), not
+  this writer's; the writer writes only what it is given.
+- a stale / gone / newly-broken base file → `changed`, nothing written (mtime unchanged asserted).
+- a prompt that appeared since the load → `exists`, the user's bytes untouched.
+- a symlink at any component, including the file → `invalid`, naming the path.
+- an interrupted write → temp removed, the old YAML intact, nothing listed.
+- a draft the emitter refuses (lone surrogate) → `invalid`, naming it, no folder created.
+- an absolute / `..` / empty-segment prompt path → `invalid`, nothing created.
+- `.tentacle` present as a FILE → `failed`, never a silent skip.
+
+**Evidence:**
+
+- `bun test packages/cli/test/workflow-files-write.test.ts packages/cli/test/workflow-files.test.ts
+  packages/cli/test/workflow-wiring.test.ts packages/cli/test/workflow-gitignored.test.ts
+  packages/cli/test/workflow-approvals.test.ts packages/tools/test/ packages/protocol/test/`:
+  **1116 pass, 0 fail** (25 of them the new writer file, 13 the new wire file).
+- `bunx biome check` on the seven changed files: clean.
+- `bunx tsc --noEmit -p .`: clean.
+
+**No changelog fragment on this slice, deliberately.** The plan assigns the fragment to slice 7c and
+one already exists on the branch (`changelog.d/workflow-editor.added.md`, whole-feature wording); a
+second fragment for the same slug+category is the collision the changelog rules forbid, and a
+different slug would invent a task that does not exist.
+
+**Unverified, one line:** that an older client's `unsupported` mapping and the phone's screens
+consume these two methods is proven only when slice 4 (client) and 6/7 import them — today nothing
+outside the tests calls them; the wire shapes hold by construction and by the zod⇔Ajv agreement test.
+
+*— deepseek-ai/DeepSeek-V4.1-Flash-1017 (executor, slice 3a), 2026-11-24*
 
 ## Review
 

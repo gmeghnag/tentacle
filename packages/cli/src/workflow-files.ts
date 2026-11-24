@@ -7,17 +7,29 @@
  * project), so a run reads only regular files under
  * `<cwd>/.tentacle/workflows/`.
  */
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { lstat, readFile, readdir } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import type { WorkflowSource, WorkflowSourceRow } from "@tentacle/agent";
 import {
   PROJECT_PATHS,
   WORKFLOW_NAME_RE,
   type WorkflowsAboveHint,
+  promptPathProblem,
   resolveInside,
+  workflowYaml,
   workflowsAbove,
 } from "@tentacle/core";
+import { unifiedDiff } from "@tentacle/tools";
 import { nodeProjectFs } from "./project-fs.ts";
 
 /** A `git check-ignore` call behind the "not versioned" notice answers in this or not at all. */
@@ -276,4 +288,274 @@ export async function workflowListing(cwd: string): Promise<WorkflowListing> {
     ...(gitIgnored !== undefined ? { gitIgnored } : {}),
     ...(elsewhere !== undefined ? { elsewhere } : {}),
   };
+}
+
+// --- the WRITE path (docs/feat/workflow-editor.md D4, slice 3a) ---
+
+/** One file a save would write, as the Review screen lists it. */
+export interface WorkflowWriteRow {
+  /** Relative to `.tentacle/workflows/` (the YAML's own name for itself). */
+  readonly path: string;
+  /** `new` / `changed` / `unchanged` — the dry run's word for this file. */
+  readonly status: "new" | "changed" | "unchanged";
+  /** The unified patch (empty for a `new` file's review row and for `unchanged`). */
+  readonly patch?: string;
+  readonly added: number;
+  readonly removed: number;
+}
+
+/** What a save would do, and (on a commit) what it did. */
+export interface WorkflowWritePlan {
+  readonly mode: "create" | "replace";
+  readonly name: string;
+  /** The DRAFT: the writer emits the bytes itself, so no caller-supplied text can drift. */
+  readonly draft: Readonly<Record<string, unknown>>;
+  /** The prompt files to write, relative to `.tentacle/workflows/`. */
+  readonly prompts: Readonly<Record<string, string>>;
+  /** The hash the caller LOADED (absent for `create`): a different file now is `changed`. */
+  readonly baseHash?: string;
+  /**
+   * The prompt paths the loaded base covered (`Object.keys(source.prompts)`):
+   * those are the user's own to rewrite. A prompt path NOT in it, already on
+   * disk with other bytes, is someone else's file → `exists`. Absent (`create`,
+   * or a caller that loaded nothing) covers none of them: fail closed.
+   */
+  readonly basePrompts?: readonly string[];
+}
+
+export type WorkflowWriteResult =
+  | { readonly ok: true; readonly files: readonly WorkflowWriteRow[] }
+  | {
+      readonly ok: false;
+      readonly refusal: "changed" | "exists" | "invalid" | "failed";
+      readonly reason: string;
+      readonly files: readonly WorkflowWriteRow[];
+    };
+
+/** Injected so a test can watch the write order and fail one write mid-way. */
+export interface WriteHooks {
+  /**
+   * Called after each file's temp is written and BEFORE its rename: the order a
+   * crash would see, and the seam a test throws from to prove an interrupted
+   * write leaves no temp file and the old bytes.
+   */
+  readonly wrote?: (rel: string) => void;
+}
+
+/** `.task.yaml.<8 hex>.tmp` — never `*.yaml`, so no listing can show a half write. */
+function tempNameFor(name: string): string {
+  return `.${name}.${randomUUID().slice(0, 8)}.tmp`;
+}
+
+/** The absolute file a workflow-relative path names, refusing a bad path or a link. */
+type Inside = { readonly path: string } | { readonly reason: string };
+
+/**
+ * Resolve `rel` under the workflows folder with the reads' ONE no-links rule:
+ * every component of `<cwd>/.tentacle/workflows/<rel>` is walked through
+ * `resolveInside` (`core/src/project-paths.ts`), so a link at ANY level —
+ * `.tentacle`, `workflows`, a `prompts/` folder, the file itself — is refused
+ * loudly. The first component that does not exist yet ends the walk: the caller
+ * creates the rest under the real directory it just proved.
+ */
+function insideWorkflows(cwd: string, rel: string): Inside {
+  const problem = promptPathProblem(rel);
+  if (problem !== undefined) {
+    return { reason: `${rel} ${problem}` };
+  }
+  const fs = nodeProjectFs();
+  const parts = rel.split("/");
+  const checked = PROJECT_PATHS.workflows;
+  const prefixes = [
+    checked,
+    ...parts.map((_, i) => `${checked}/${parts.slice(0, i + 1).join("/")}`),
+  ];
+  for (const prefix of prefixes) {
+    const inside = resolveInside(cwd, prefix, fs);
+    if ("problem" in inside) {
+      return { reason: inside.problem };
+    }
+    if ("absent" in inside) {
+      return { path: join(cwd, PROJECT_PATHS.workflows, rel) };
+    }
+  }
+  return { path: join(cwd, PROJECT_PATHS.workflows, rel) };
+}
+
+/** The bytes already at `path`, or `undefined` when there is no file there. */
+function readIfPresent(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+/** One line of a patch, as the counts read it (`+++`/`---` headers excluded). */
+
+/**
+ * Write one file atomically: temp + rename, both inside the folder it belongs
+ * to, so a reader never sees a partial file and a crash leaves at most a `.tmp`
+ * (never a `*.yaml` a listing would trust). The temp is removed on any failure.
+ * `wrote` fires between the write and the rename, so a test can throw there.
+ */
+function writeAtomic(path: string, text: string, hooks: WriteHooks, rel: string): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  const temp = join(dir, tempNameFor(path.slice(dir.length + 1)));
+  try {
+    writeFileSync(temp, text);
+    hooks.wrote?.(rel);
+    renameSync(temp, path);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+}
+
+/**
+ * Write a workflow and its prompt files — the ONE writer (D4). It emits the
+ * bytes itself (`workflowYaml`), so what is written is what was validated and
+ * hashed: no caller can hand it a `text` that drifts from the draft.
+ *
+ * Order and invariants:
+ * 1. the draft emits (a lone surrogate is refused `invalid`, naming it);
+ * 2. every path is resolved with the no-links rule, so nothing outside
+ *    `.tentacle/workflows/` is reachable;
+ * 3. `replace` requires the file to still hash to `baseHash` (`changed`
+ *    otherwise, nothing written); `create` requires the YAML to be absent
+ *    (`exists` otherwise);
+ * 4. a prompt file whose bytes differ from what is there, and that `baseHash`
+ *    did not cover, is `exists` — an editor never overwrites a file the user
+ *    did not load;
+ * 5. the prompts are written FIRST and the YAML LAST, so a crash leaves a file
+ *    whose every reference resolves — never a YAML pointing at nothing.
+ *
+ * One synchronous block: no `await` between the base check and the last rename,
+ * so two saves through one daemon cannot interleave (peer not serialized, §7).
+ * NEVER touches the approval store: a save produces a new hash, which asks.
+ */
+export function writeWorkflowFiles(
+  cwd: string,
+  plan: WorkflowWritePlan,
+  currentHash: (source: WorkflowSource) => string,
+  hooks: WriteHooks = {},
+): WorkflowWriteResult {
+  let text: string;
+  try {
+    text = workflowYaml(plan.draft);
+  } catch (error) {
+    return { ok: false, refusal: "invalid", reason: (error as Error).message, files: [] };
+  }
+
+  const yamlRel = `${plan.name}.yaml`;
+  const targets: { rel: string; text: string }[] = [
+    ...Object.entries(plan.prompts).map(([rel, body]) => ({ rel, text: body })),
+    { rel: yamlRel, text },
+  ];
+
+  const resolved: { rel: string; text: string; path: string; before: string | undefined }[] = [];
+  for (const target of targets) {
+    const inside = insideWorkflows(cwd, target.rel);
+    if ("reason" in inside) {
+      return { ok: false, refusal: "invalid", reason: inside.reason, files: [] };
+    }
+    resolved.push({ ...target, path: inside.path, before: readIfPresent(inside.path) });
+  }
+
+  const yaml = resolved.find((file) => file.rel === yamlRel);
+  if (yaml === undefined) {
+    return { ok: false, refusal: "invalid", reason: `${yamlRel} is not writable`, files: [] };
+  }
+
+  // The base check: the file must be the one the caller loaded.
+  const basePrompts = new Set(plan.basePrompts ?? []);
+  if (plan.mode === "replace") {
+    if (yaml.before === undefined) {
+      return {
+        ok: false,
+        refusal: "changed",
+        reason: `${PROJECT_PATHS.workflows}/${yamlRel} is gone`,
+        files: [],
+      };
+    }
+    let actual: string;
+    try {
+      // The base is the file AS IT IS ON DISK, prompts included — the same
+      // `loadWorkflowSource` read the editor loaded it with. Hashing only the
+      // prompts this save writes would refuse `changed` for a legal edit (a step
+      // switched from `prompt:` to inline text leaves its file on disk, still
+      // referenced by the loaded YAML).
+      const base = loadWorkflowSource(cwd, plan.name);
+      actual = currentHash(base);
+    } catch (error) {
+      // The file on disk no longer validates, so it cannot be the one loaded.
+      return {
+        ok: false,
+        refusal: "changed",
+        reason: `${PROJECT_PATHS.workflows}/${yamlRel} changed since you opened it: ${(error as Error).message}`,
+        files: [],
+      };
+    }
+    if (actual !== plan.baseHash) {
+      return {
+        ok: false,
+        refusal: "changed",
+        reason: `${PROJECT_PATHS.workflows}/${yamlRel} changed since you opened it`,
+        files: [],
+      };
+    }
+  } else if (yaml.before !== undefined) {
+    return {
+      ok: false,
+      refusal: "exists",
+      reason: `${PROJECT_PATHS.workflows}/${yamlRel} already exists`,
+      files: [],
+    };
+  }
+
+  // A prompt the base did not cover is not ours to overwrite.
+  for (const file of resolved) {
+    if (file.rel === yamlRel || file.before === undefined || file.before === file.text) continue;
+    if (basePrompts.has(file.rel)) continue;
+    return {
+      ok: false,
+      refusal: "exists",
+      reason: `${PROJECT_PATHS.workflows}/${file.rel} already exists with different contents`,
+      files: [],
+    };
+  }
+
+  const files: WorkflowWriteRow[] = resolved.map((file) => {
+    const status: WorkflowWriteRow["status"] =
+      file.before === undefined ? "new" : file.before === file.text ? "unchanged" : "changed";
+    if (file.before === undefined || status === "unchanged") {
+      return { path: file.rel, status, added: 0, removed: 0 };
+    }
+    const diff = unifiedDiff(`${PROJECT_PATHS.workflows}/${file.rel}`, file.before, file.text);
+    return { path: file.rel, status, patch: diff.patch, added: diff.added, removed: diff.removed };
+  });
+
+  try {
+    for (const file of resolved) {
+      if (files.find((row) => row.path === file.rel)?.status === "unchanged") continue;
+      writeAtomic(file.path, file.text, hooks, file.rel);
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      refusal: "failed",
+      reason: `${PROJECT_PATHS.workflows}: ${(error as Error).message}`,
+      files,
+    };
+  }
+
+  // The hash the next catalogue row will report is the driver's own
+  // `prepareSourceSync` over the bytes just written (slice 3b), so the writer
+  // neither re-validates nor hashes: one implementation, one hash.
+  return { ok: true, files };
 }

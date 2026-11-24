@@ -354,6 +354,71 @@ const FIXTURES: Record<string, Json[]> = {
     { dir: "/proj/.tentacle/workflows", workflows: [], unavailable: "not on this session" },
     { dir: "/proj/.tentacle/workflows", workflows: [], truncated: true },
   ],
+  // feat/workflow-editor slice 3a (D3): read a workflow as a draft; preview/write it.
+  "methods/session~1workflow_source/params": [{ sessionId: "s", name: "task" }],
+  "methods/session~1workflow_source/result": [
+    {
+      ok: true,
+      path: ".tentacle/workflows/task.yaml",
+      text: "schemaVersion: 1\n",
+      draft: '{"schemaVersion":1,"name":"task","version":3,"steps":[]}',
+      prompts: [{ path: "prompts/gate.md", text: "review {{inputs.slug}}" }],
+      hash: "a".repeat(64),
+      version: 3,
+      canonical: false,
+      context: { models: ["gpt-5"], agentTypes: ["general"] },
+    },
+    // A file that cannot be opened as a graph: its YAML plus the reason, no draft.
+    {
+      ok: false,
+      path: ".tentacle/workflows/task.yaml",
+      text: "not: [a workflow",
+      unreadable: "a workflow must be a YAML mapping",
+    },
+    // A session with no workflow driver (a pod): no path, no draft, the reason.
+    { ok: false, unavailable: "workflows run only on a laptop or serve session" },
+  ],
+  "methods/session~1workflow_save/params": [
+    {
+      sessionId: "s",
+      name: "task",
+      mode: "create",
+      draft: '{"schemaVersion":1,"name":"task","version":1,"steps":[]}',
+      prompts: [{ path: "prompts/gate.md", text: "hi" }],
+      dryRun: true,
+    },
+    {
+      sessionId: "s",
+      name: "task",
+      mode: "replace",
+      draft: "{}",
+      prompts: [],
+      baseHash: "b".repeat(64),
+      dryRun: false,
+    },
+  ],
+  "methods/session~1workflow_save/result": [
+    {
+      ok: true,
+      path: ".tentacle/workflows/task.yaml",
+      hash: "a".repeat(64),
+      version: 4,
+      approved: false,
+      files: [
+        { path: "prompts/gate.md", status: "new", added: 3, removed: 0, patch: "@@ -0,0 +1,3 @@" },
+        { path: ".tentacle/workflows/task.yaml", status: "changed", added: 1, removed: 1 },
+      ],
+      alsoChanges: ["other"],
+      running: "wf-2",
+      schedules: ["sc-7"],
+    },
+    {
+      ok: false,
+      refusal: "changed",
+      reason: ".tentacle/workflows/task.yaml changed since you opened it",
+    },
+    { ok: false, refusal: "invalid", errors: ["steps[0].run: is not a command"] },
+  ],
   // feat/agent-workflows S3: the user drives a workflow run; the phone lists them.
   "methods/session~1workflow/params": [
     {
