@@ -350,6 +350,7 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
           steps={run.steps}
           width={props.width}
           reduceMotion={props.reduceMotion}
+          runName={run.name}
           blocks={stepBlocks(
             openCard.step,
             openCard.detail,

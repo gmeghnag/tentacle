@@ -15,12 +15,16 @@ import { GRAPH_WIDTH } from "../src/workflow-graph.ts";
 import { HERO_METRICS } from "../src/workflow-morph.ts";
 import {
   DETAIL_TEXT,
+  STEP_NAV,
   bodyPending,
   canvasMap,
   detailLog,
   flight,
   heroBox,
   heroText,
+  heroTop,
+  navBox,
+  navText,
   nodeBoxOnScreen,
   stepBlocks,
 } from "../src/workflow-step-detail.ts";
@@ -77,7 +81,7 @@ describe("nodeBoxOnScreen: the pill takes off from where the finger was", () => 
     const canvas = canvasMap(390, GRAPH_WIDTH);
     const box = nodeBoxOnScreen(STEPS, "review", canvas);
     expect(box).not.toBeNull();
-    const hero = heroBox(16, 390);
+    const hero = heroBox(heroTop(59), 16, 390);
     // It is a DIFFERENT box: a flight from the hero to the hero goes nowhere.
     expect(box).not.toEqual(hero);
     expect(box?.width ?? 0).toBeLessThan(hero.width);
@@ -99,12 +103,17 @@ describe("nodeBoxOnScreen: the pill takes off from where the finger was", () => 
 
 describe("heroBox / heroText: where it lands, and what it says", () => {
   test("the hero is the detail's header, inset on both sides, at the HERO's own height", () => {
-    const box = heroBox(16, 375);
-    expect(box).toEqual({ x: 16, y: 16, width: 375 - 32, height: HERO_METRICS.height });
+    const box = heroBox(heroTop(59), 16, 375);
+    expect(box).toEqual({
+      x: 16,
+      y: heroTop(59),
+      width: 375 - 32,
+      height: HERO_METRICS.height,
+    });
   });
 
   test("a narrow detail never gets a negative width", () => {
-    expect(heroBox(16, 20).width).toBe(0);
+    expect(heroBox(heroTop(59), 16, 20).width).toBe(0);
   });
 
   test("the hero's text is the pill's: its id, then `state word · where`", () => {
@@ -201,8 +210,8 @@ describe("stepBlocks: the kv list is final BEFORE the read lands", () => {
 describe("flight: the two ends of the morph, or nothing", () => {
   test("it is the node's screen box and the hero's — the pair the animation interpolates", () => {
     const canvas = canvasMap(375, GRAPH_WIDTH);
-    const pair = flight(STEPS, "review", canvas, 16, 375);
-    expect(pair?.to).toEqual(heroBox(16, 375));
+    const pair = flight(STEPS, "review", canvas, heroTop(59), 16, 375);
+    expect(pair?.to).toEqual(heroBox(heroTop(59), 16, 375));
     const node = nodeBoxOnScreen(STEPS, "review", canvas);
     if (node === null) {
       throw new Error("the fixture's step is in the graph");
@@ -211,6 +220,73 @@ describe("flight: the two ends of the morph, or nothing", () => {
   });
 
   test("a step the graph does not hold has no flight (the layer does not open)", () => {
-    expect(flight(STEPS, "gone", canvasMap(375), 16, 375)).toBeNull();
+    expect(flight(STEPS, "gone", canvasMap(375), heroTop(59), 16, 375)).toBeNull();
+  });
+});
+
+/**
+ * docs/fix/workflows-ux.md S3 (defect 3, screenshots 162fac2b / d1b5faaa): the
+ * detail's header overlapped the status bar and the back chevron, because the hero
+ * started at the sheet's own 16 pt inset and the back row was in flow at y = 0.
+ * The property: on any phone, the hero starts BELOW the status bar AND below the
+ * nav bar, and the nav bar is the thing that owns the safe area.
+ */
+describe("S3 · the detail's nav bar under the safe area, the hero below it", () => {
+  // The real insets: an iPhone 15/16's status bar, an iPad's 24, a notchless SE's 20.
+  const INSETS = [59, 62, 47, 24, 20, 0] as const;
+
+  test("the hero starts at or below insets.top + the nav bar's height — never at the inset", () => {
+    for (const inset of INSETS) {
+      const box = heroBox(heroTop(inset), 16, 390);
+      expect({ inset, ok: box.y >= inset + STEP_NAV.height }).toEqual({ inset, ok: true });
+    }
+  });
+
+  test("the flight LANDS there too (the morph cannot land under the clock)", () => {
+    const pair = flight(STEPS, "review", canvasMap(390), heroTop(59), 16, 390);
+    expect(pair?.to.y).toBe(heroTop(59));
+    expect(pair?.to.y).toBeGreaterThanOrEqual(59 + STEP_NAV.height);
+  });
+
+  test("the nav bar clears the status bar and sits above the hero (no overlap either way)", () => {
+    for (const inset of INSETS) {
+      const nav = navBox(inset, 390);
+      const hero = heroBox(heroTop(inset), 16, 390);
+      // The bar's CONTENT row is the full header height UNDER the inset — not the
+      // inset alone (a bar that only clears the clock has nowhere to draw `‹`).
+      expect({ inset, row: nav.height - inset }).toEqual({ inset, row: STEP_NAV.height });
+      // And the hero starts exactly one gap below the bar's bottom: the two boxes
+      // meet, so neither the clock nor the back chevron can be over the pill.
+      expect({ inset, apart: hero.y - (nav.y + nav.height) }).toEqual({
+        inset,
+        apart: STEP_NAV.gap,
+      });
+      expect({ inset, apart: nav.y + nav.height <= hero.y }).toEqual({ inset, apart: true });
+    }
+  });
+
+  test("a garbage inset (a rotating iPad's NaN, a negative) is 0, never a NaN box", () => {
+    for (const inset of [Number.NaN, -40, Number.POSITIVE_INFINITY]) {
+      expect(Number.isFinite(heroTop(inset))).toBe(true);
+      expect(Number.isFinite(navBox(inset, 390).height)).toBe(true);
+      expect(heroTop(inset)).toBeGreaterThan(0);
+    }
+  });
+
+  test("the nav bar's text: the run's name, and the step's place in FILE order", () => {
+    expect(navText(STEPS, "review", "demo-note")).toEqual({
+      back: "demo-note",
+      position: "step 2 of 3",
+    });
+    expect(navText(STEPS, "merge", "demo-note").position).toBe("step 3 of 3");
+  });
+
+  test("a step this run does not hold gets no position (never a made-up one)", () => {
+    expect(navText(STEPS, "gone", "demo-note").position).toBeNull();
+  });
+
+  test("an empty run name still reads as a button, and a multi-line name is flattened", () => {
+    expect(navText(STEPS, "review", "").back).toBe("Run");
+    expect(navText(STEPS, "review", "a\nb").back).toBe("a b");
   });
 });

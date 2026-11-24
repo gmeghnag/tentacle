@@ -18,16 +18,15 @@ import type { WorkflowStepRow } from "@tentacle/protocol";
  */
 import { type JSX, type ReactNode, useEffect, useMemo, useRef } from "react";
 import { Animated, Easing, Pressable, ScrollView, StyleSheet, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { Palette } from "../theme.ts";
 import { space, typography } from "../theme.ts";
-import { size as SIZE } from "../theme.ts";
 import { Icon } from "../ui/Icon.tsx";
 import { Text } from "../ui/Text.tsx";
 import type { StateLook } from "../workflow-list.ts";
 import { stateLook } from "../workflow-list.ts";
 import {
   CROSSFADE_MS,
-  HERO_METRICS,
   MORPH_EASING,
   type MorphTable,
   ROW_FADE_MS,
@@ -39,10 +38,14 @@ import type { StepDetail } from "../workflow-run-controller.ts";
 import { DETAIL, detailLayout, logLines, skeletonBars } from "../workflow-skeleton.ts";
 import {
   type HeroText,
+  STEP_NAV,
   bodyPending,
   canvasMap,
   flight,
+  heroBox,
   heroText,
+  heroTop,
+  navText,
 } from "../workflow-step-detail.ts";
 
 export interface WorkflowStepLayerProps {
@@ -55,6 +58,8 @@ export interface WorkflowStepLayerProps {
   readonly steps: readonly WorkflowStepRow[];
   readonly width: number;
   readonly reduceMotion: boolean;
+  /** The run's name, for the nav bar's back button (`‹ demo-note`). */
+  readonly runName: string;
   /** The rows the body holds, already decided (`stepBlocks`). */
   readonly blocks: ReturnType<typeof import("../workflow-step-detail.ts").stepBlocks>;
   readonly onClose: () => void;
@@ -72,10 +77,16 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
   const { palette, step, detail, steps, width, reduceMotion, blocks } = props;
   const look: StateLook = stateLook(step.state);
   const text: HeroText = heroText(step, look.word);
+  // The detail's nav bar lives UNDER the status bar and the hero lands BELOW it
+  // (docs/fix/workflows-ux.md S3): both numbers come from the pure module, and
+  // this layer only feeds them to the layout.
+  const insets = useSafeAreaInsets();
+  const top = heroTop(insets.top);
+  const nav = navText(steps, step.id, props.runName);
   const canvas = useMemo(() => canvasMap(width), [width]);
   const pair = useMemo(
-    () => flight(steps, step.id, canvas, DETAIL.inset, width),
-    [steps, step.id, canvas, width],
+    () => flight(steps, step.id, canvas, top, DETAIL.inset, width),
+    [steps, step.id, canvas, top, width],
   );
   const table: MorphTable | null = useMemo(
     () => (pair === null ? null : morphTable(pair.from, pair.to)),
@@ -141,6 +152,7 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
   const boxes = detailLayout(blocks, width);
   const bars = bodyPending(detail) ? skeletonBars(blocks, width, reduceMotion) : [];
   const logBoxes = boxes.filter((b) => b.section === "log");
+  const hero = heroBox(top, DETAIL.inset, width);
 
   return (
     <View testID="workflow-step-layer" style={[styles.root, { backgroundColor: palette.page }]}>
@@ -154,17 +166,26 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
         />
       </Animated.View>
       <ScrollView contentContainerStyle={{ paddingBottom: DETAIL.inset }}>
-        <Pressable
-          testID="workflow-step-back"
-          accessibilityRole="button"
-          accessibilityLabel="Back to the graph"
-          hitSlop={8}
-          onPress={close}
-          style={styles.back}
-        >
-          <Icon name="chevron.left" color={palette.label} size={18} />
-          <Text style={[styles.backText, { color: palette.label }]}>Graph</Text>
-        </Pressable>
+        <View style={[styles.nav, { paddingTop: insets.top }]}>
+          <Pressable
+            testID="workflow-step-back"
+            accessibilityRole="button"
+            accessibilityLabel="Back to the graph"
+            hitSlop={8}
+            onPress={close}
+            style={styles.back}
+          >
+            <Icon name="chevron.left" color={palette.label} size={18} />
+            <Text numberOfLines={1} style={[styles.backText, { color: palette.label }]}>
+              {nav.back}
+            </Text>
+          </Pressable>
+          {nav.position === null ? null : (
+            <Text testID="workflow-step-position" style={[styles.position, { color: palette.sec }]}>
+              {nav.position}
+            </Text>
+          )}
+        </View>
         {table === null ? null : (
           <Animated.View
             testID={`workflow-step-hero-${step.id}`}
@@ -228,9 +249,10 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
             </View>
           </Animated.View>
         )}
-        <View style={{ height: HERO_METRICS.height + DETAIL.heroGap + DETAIL.blockGap }}>
+        <View style={{ height: STEP_NAV.gap + hero.height + DETAIL.heroGap + DETAIL.blockGap }}>
           {/* The flight's box is absolutely positioned: this spacer keeps the body
-              BELOW the landed hero, so the rows never slide under it. */}
+              BELOW the landed hero (which itself starts below the nav bar), so the
+              rows never slide under it. */}
         </View>
         <View style={styles.body}>
           {blocks.kv.map(([label, value], i) => (
@@ -320,14 +342,21 @@ function FadeRow({
 
 const styles = StyleSheet.create({
   root: StyleSheet.absoluteFill,
+  nav: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: space.inset,
+  },
   back: {
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    paddingHorizontal: space.inset,
-    height: SIZE.headerChat,
+    flexShrink: 1,
+    height: STEP_NAV.height,
   },
-  backText: { ...typography.headline },
+  backText: { ...typography.headline, flexShrink: 1 },
+  position: { ...typography.footnote },
   hero: {
     position: "absolute",
     flexDirection: "row",

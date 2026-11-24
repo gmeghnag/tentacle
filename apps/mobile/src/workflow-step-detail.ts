@@ -18,10 +18,11 @@
  */
 import type { WorkflowStepDetail, WorkflowStepRow } from "@tentacle/protocol";
 import { oneLine } from "./activity.ts";
+import { size } from "./theme.ts";
 import { GRAPH_WIDTH, graphGeometry } from "./workflow-graph.ts";
 import { type Box, HERO_METRICS, NODE_METRICS } from "./workflow-morph.ts";
 import type { StepDetail } from "./workflow-run-controller.ts";
-import { type DetailBlocks, detailBlocks, logLines } from "./workflow-skeleton.ts";
+import { DETAIL, type DetailBlocks, detailBlocks, logLines } from "./workflow-skeleton.ts";
 
 /** What the body says for each state of the read (the plan's four answers, plus loading). */
 export const DETAIL_TEXT = {
@@ -72,13 +73,59 @@ export function nodeBoxOnScreen(
   };
 }
 
+/**
+ * The detail's NAV BAR (docs/fix/workflows-ux.md S3, defect 3): `‹ <run name>` on
+ * the left, `step N of M` on the right, UNDER the safe-area top. It exists because
+ * the hero used to start at the sheet's own 16 pt inset — above the clock, beside
+ * the back chevron (screenshots 162fac2b / d1b5faaa). The bar claims the status
+ * bar's height first, so nothing else in this layer can draw there.
+ */
+export const STEP_NAV = {
+  /** The bar's height UNDER the safe-area top (the chat header's own 50 pt). */
+  height: size.headerChat,
+  /** Between the bar and the hero: the sheet's side inset, so the pill never touches it. */
+  gap: DETAIL.inset,
+} as const;
+
+/** A safe-area inset that cannot be drawn with (a NaN from a rotating iPad) is 0, never NaN. */
+function safeInset(insetTop: number): number {
+  return Number.isFinite(insetTop) ? Math.max(0, insetTop) : 0;
+}
+
+/** The nav bar's box, in screen points: pinned to the layer's top, tall enough to clear the status bar. */
+export function navBox(insetTop: number, width: number): Box {
+  return { x: 0, y: 0, width: Math.max(0, width), height: safeInset(insetTop) + STEP_NAV.height };
+}
+
+/** The hero's TOP: always below the status bar AND below the nav bar (the bug's own property). */
+export function heroTop(insetTop: number): number {
+  return safeInset(insetTop) + STEP_NAV.height + STEP_NAV.gap;
+}
+
 /** The hero: where the pill lands — the detail's own header box, in screen points. */
-export function heroBox(inset: number, width: number): Box {
+export function heroBox(top: number, inset: number, width: number): Box {
   return {
     x: inset,
-    y: inset,
+    y: top,
     width: Math.max(0, width - inset * 2),
     height: HERO_METRICS.height,
+  };
+}
+
+/**
+ * What the nav bar SAYS: the run's name on the back button, and where this step
+ * sits in FILE order (`step 4 of 6`). A step the run does not hold (a stale tap)
+ * gets no position rather than a made-up one.
+ */
+export function navText(
+  steps: readonly WorkflowStepRow[],
+  stepId: string,
+  runName: string,
+): { readonly back: string; readonly position: string | null } {
+  const index = steps.findIndex((s) => s.id === stepId);
+  return {
+    back: oneLine(runName) || "Run",
+    position: index < 0 ? null : `step ${index + 1} of ${steps.length}`,
   };
 }
 
@@ -180,11 +227,12 @@ export function flight(
   steps: readonly WorkflowStepRow[],
   stepId: string,
   canvas: CanvasMap,
+  top: number,
   inset: number,
   width: number,
 ): { readonly from: Box; readonly to: Box } | null {
   const from = nodeBoxOnScreen(steps, stepId, canvas);
-  return from === null ? null : { from, to: heroBox(inset, width) };
+  return from === null ? null : { from, to: heroBox(top, inset, width) };
 }
 
 export { NODE_METRICS, HERO_METRICS };

@@ -138,3 +138,48 @@ describe("the tap → the controller's `openStep`, never a screen-local selectio
     expect(LAYER).not.toContain("goBack(");
   });
 });
+
+/**
+ * docs/fix/workflows-ux.md S3 (defect 3): the drawn layer must PUT the numbers the
+ * pure module computes. Screenshot d1b5faaa showed the hero at the sheet's inset —
+ * above the clock and behind the back chevron — so the properties here are that
+ * the layer reads the safe-area top, that the hero's `y` comes from `heroTop`, and
+ * that the nav bar is the box that owns the inset (nothing else draws at y = 0).
+ */
+describe("S3 · the layer draws the nav bar under the safe area and the hero below it", () => {
+  const body = between(LAYER, "export function WorkflowStepLayer", "\n}");
+
+  test("the layer reads the safe-area top, and the hero's top comes from the pure module", () => {
+    expect(LAYER).toContain("useSafeAreaInsets()");
+    expect(body).toContain("heroTop(insets.top)");
+    // The flight is given that top — NOT the sheet's inset, which was the bug.
+    expect(body).toContain("flight(steps, step.id, canvas, top, DETAIL.inset, width)");
+    expect(body).not.toContain("flight(steps, step.id, canvas, DETAIL.inset, width)");
+  });
+
+  test("the nav bar carries the inset, and the hero is one gap below the bar", () => {
+    expect(body).toContain("paddingTop: insets.top");
+    // The bar's content row is the pure module's own height (not a literal), and
+    // the gap between it and the pill is that module's gap.
+    expect(LAYER).toContain("height: STEP_NAV.height");
+    expect(body).toContain("STEP_NAV.gap + hero.height");
+    // The back row is INSIDE the bar (no second, un-inset row at y = 0).
+    expect(body.indexOf("styles.nav")).toBeLessThan(body.indexOf('testID="workflow-step-back"'));
+  });
+
+  test("the bar says the run's name and `step N of M` — both from `navText`", () => {
+    expect(body).toContain("navText(steps, step.id, props.runName)");
+    expect(body).toContain("{nav.back}");
+    expect(body).toContain("{nav.position}");
+    expect(body).toContain('testID="workflow-step-position"');
+  });
+
+  test("the body's spacer accounts for the bar's gap as well as the hero", () => {
+    // A spacer of the hero alone would let the first kv row slide under the pill.
+    expect(body).toContain("STEP_NAV.gap + hero.height");
+  });
+
+  test("the run screen gives it the run's name (the bar's back label)", () => {
+    expect(RUN).toContain("runName={run.name}");
+  });
+});

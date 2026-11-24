@@ -616,6 +616,101 @@ No protocol change (no `protocol.d/` note, `protocol.json` untouched).
 **Unverified here (one line):** the Maestro flows `33-hub` / `34-hub-workflows` were not run (they need
 the simulator) — verify with the mobile e2e gate on iOS 18 + 26 before merge.
 
+*— claude-opus-5-5 (executor), 2026-11-24*
+
+### Slice S3 — Step detail nav bar under the safe area
+
+**Load-bearing check re-run first** (`.tentacle/tmp/workflows-ux/s3-lb.ts`, written for this slice):
+`heroBox(DETAIL.inset = 16, 390)` → `{x:16, y:16, w:358, h:68}`, and the layer drew the back row
+in FLOW at `y = 0`. On the owner's iPhone (`insets.top = 59`) that puts the hero's top at 16 — 43 pt
+above the safe area, and 16 pt into the back row's own 50 pt band. Defect 3 (screenshots 162fac2b /
+d1b5faaa) reproduces as described; the plan's premise holds.
+
+**As built, in order**
+
+1. `apps/mobile/src/workflow-step-detail.ts` — the pure metrics. New `STEP_NAV = {height:
+   size.headerChat (50), gap: DETAIL.inset (16)}`; `safeInset(n)` (a NaN/negative/Infinity inset is
+   0, never a NaN box); `navBox(insetTop, width)` = the bar pinned at `y = 0` with height
+   `inset + STEP_NAV.height`; `heroTop(insetTop)` = `inset + STEP_NAV.height + STEP_NAV.gap`; and
+   `navText(steps, stepId, runName)` → `{back, position}` (`step i+1 of M` in FILE order, `back`
+   flattened through `oneLine`, `"Run"` when the run has no name). `heroBox` and `flight` take
+   `top` as their first argument instead of `inset` — the shape the plan pins in D5.
+2. `apps/mobile/src/screens/WorkflowStep.tsx` — the layer reads `useSafeAreaInsets()`, computes
+   `top = heroTop(insets.top)`, and draws a real nav bar (`styles.nav`, `paddingTop: insets.top`)
+   holding the back pressable (`‹ <run name>`, 50 pt tall) and the `workflow-step-position` label.
+   The un-inset back row that used to sit at `y = 0` is gone; the hero/spacer use `top`/`hero.height`
+   plus `STEP_NAV.gap`, so the body still cannot slide under the landed pill.
+3. `apps/mobile/src/screens/WorkflowRun.tsx` — passes `runName={run.name}` (the bar's back label).
+
+**Drift from the Implementation (and why)**
+
+- **The pure-module test lives in `apps/mobile/test/workflow-step-layer.test.ts`, not in
+  `workflow-run-step-detail.test.ts` as S3's Files row says.** That file is the *controller's* test
+  (reads, one-in-flight, four answers); `heroBox`/`flight`/`heroText` have always been pinned in
+  `workflow-step-layer.test.ts`, and the plan's own S3 test ("hero `y ≥ insets.top + NAV_H`") is a
+  property of those functions. Putting it in the controller test would have split one module's
+  tests across two files. The controller test is untouched.
+- **`navBox` was added though the plan only names `heroBox`.** The mutation pass showed why: with
+  the hero assertion alone, a nav bar that only claimed the *inset* (no 50 pt content row) stayed
+  green — the weak-inequality trap §2 warns about. `navBox` makes the bar's box an assertion
+  (`nav.height - inset === STEP_NAV.height`, and `hero.y - (nav.y + nav.height) === STEP_NAV.gap`),
+  and the wiring test pins that the layer draws it that way.
+- **`navText` is new, not in the plan.** The plan asks for `‹ demo-note · step 4 of 6`; the words
+  are a computation (file order, flattening, the no-name and stale-tap cases) so they belong in the
+  pure module (§7), not in the component. `step N of M` counts FILE order per the plan; the
+  mockup's `final-v3` later switches to visit order, which is S7's prev/next bar, not this one.
+- **The wiring test was extended** (`workflow-step-wiring.test.ts`, +43 lines): the layer is a
+  `.tsx` Bun cannot import, so the drawn facts (safe-area read, `heroTop` feeding the flight, the
+  bar's `paddingTop`, the position label, the spacer) are pinned from source — the established
+  pattern. Not in S3's Files row either; without it nothing would catch a component that reverts
+  to `DETAIL.inset`.
+- **The changelog bullet was folded into the existing `changelog.d/workflows-ux.fixed.md`** (S2's),
+  as S2's own note requires: one fragment = one bullet. Its headline now covers both fixes.
+- Kept `HERO_METRICS.height` off the spacer deliberately: it is `DETAIL.heroHeight` (68) either way,
+  so the only new term is `STEP_NAV.gap`.
+
+**Tests (red first)**
+
+Red-on-the-property was shown by mutation, from green (the new API does not exist at HEAD, so a
+literal "run it on HEAD" is a link error, not an assertion — the S2 precedent):
+
+| Mutation | Red |
+|---|---|
+| M1 `heroTop` back to HEAD's `y = inset` (`return safeInset(insetTop)`) | 4 fail: *the hero starts at or below insets.top + the nav bar's height*, *the flight LANDS there too*, *the nav bar clears the status bar and sits above the hero*, *a garbage inset … is 0* |
+| M2 `navBox` height = the inset alone (no `STEP_NAV.height` row) | 1 fail: *the nav bar clears the status bar and sits above the hero*. **First run of this mutation was GREEN** — the assertion was the weak `nav.height >= inset`; it was tightened to `nav.height - inset === STEP_NAV.height` and `hero.y - (nav.y + nav.height) === STEP_NAV.gap`, then M2 went red (§2/§9 non-vacuity) |
+| M3 `navText` position `step ${steps.length} of ${index+1}` (numbers swapped) | 1 fail: *the nav bar's text: the run's name, and the step's place in FILE order* |
+| M4 the layer's flight back on `DETAIL.inset` (HEAD's argument) | 1 fail (wiring): *the layer reads the safe-area top, and the hero's top comes from the pure module* |
+| M5 `workflow-step-position` label/testID removed from the bar | 1 fail (wiring): *the bar says the run's name and `step N of M` — both from `navText`* |
+
+All reverted (`rg MUTATION apps/mobile/src/screens/WorkflowStep.tsx apps/mobile/src/workflow-step-detail.ts`
+empty; the tree's other `MUTATION` hits are pre-existing test comments).
+
+Coverage of the enumerated failure modes that land in this slice: a garbage inset (NaN/negative/
+Infinity) yields a finite box; a stale step id gets no position; a nameless run still reads as a
+button; a multi-line name is flattened; the body cannot slide under the pill (spacer accounts for
+bar gap + hero).
+
+Verification (narrow, foreground):
+
+```
+bun test apps/mobile/test/workflow-step-layer.test.ts workflow-step-wiring.test.ts → 42 pass, 0 fail
+bun test apps/mobile/test/workflow-*.test.ts (13 files)                          → 221 pass, 0 fail
+bun test apps/mobile/test/{workflow-screens-wiring,session-screen-catalogue,hub-actions}.test.ts → 90 pass
+bun test scripts/test/mockup-kit.test.ts                                        → 37 pass, 0 fail
+bun test scripts/test/changelog-guard.test.ts scripts/test/changelog.test.ts     → 21 pass, 0 fail
+bunx biome check <5 changed files>                                              → No fixes applied
+bunx tsc -p apps/mobile                                                        → clean
+```
+
+No protocol change (`protocol.json` untouched, no `protocol.d/` note): S3 is presentation only. The
+mockup kit fingerprints neither `WorkflowStep.tsx` nor `workflow-step-detail.ts`, so no regen was
+needed — confirmed by its test staying green.
+
+**Unverified here (one line):** no simulator run — the visual result (`‹ demo-note` and `step N of
+M` under a 59 pt status bar, the pill landing below them) is verified by the pure-metrics and
+source-wiring tests only; confirm on device with the mobile e2e gate (or the S7 flow
+`45-workflow-run-view.yaml` once it exists).
+
 *— claude-opus-5-5 (tentacle executor), 2026-11-24*
 
 ### Gate fix — mockup-kit drift (post-exec)
