@@ -593,3 +593,40 @@ but shares that family's blind spots. AGENTS §10 recommends a different model f
 load-bearing work.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 2
+
+**Verdict: APPROVE** (Round 1's MEDIUM is fixed; no new HIGH or MEDIUM). Scope:
+`git diff HEAD~1` (`65c6da25`).
+
+**Finding 1 (tool sub-cap across a `serve` restart): FIXED.**
+- `putTool` now lands blobs with `tool = true` (`attachment-store.ts:529`).
+- `SessionBlobs.write{tool}` fsyncs the id into `<uid>.attachments/tool-ids` BEFORE the
+  blob lands. A crash in between leaves a mark without a blob, which charges nothing.
+- `SessionPersister.blobs` hands `toolIds` to the store (`session-persister.ts:511`).
+- The store's constructor charges every marked blob that is on disk to `toolUsed`
+  (`attachment-store.ts:205-214`).
+- A `/clear` fork's `link` carries the marks along.
+
+**Mutations (each reverted; `git status --porcelain` empty afterwards)**
+| Mutation | Result |
+|---|---|
+| Constructor ignores `toolIds` | RED: 2 tests ("reloaded … still count", "real files …") |
+| `putTool` lands with `tool = false` | RED: the same 2 tests |
+| Persister does not pass `toolIds` | RED: "real files: the persister's disk marks tool blobs …" |
+
+**Gate:** `bun run typecheck` clean. `bun run lint` clean (2334 files, 0/0).
+`bun test packages/daemon` → 1491 pass, 0 fail, 1 skip. I did not identify that skip; the
+full `bun test` run before merge should confirm it is opt-in.
+
+**Regression attacks (none blocking)**
+- Every other scan of the blob directory ignores the `tool-ids` file: `index` filters on
+  `ATTACHMENT_ID_RE` (`session-blobs.ts:111`), and the sweep matches only `BLOB_TEMP`. An
+  older build ignores it too.
+- `removeAll` removes the marks file along with the directory.
+- If a user later uploads bytes identical to a marked tool picture, a reload charges that
+  blob to the tool sub-cap. That errs in the user's favour.
+- A torn last line in `tool-ids` (crash mid-append) can merge with the next append, so both
+  ids are lost. The result is a small undercount on a crash path. Nit.
+
+*— claude-opus-5-5, 2026-11-24*
