@@ -152,8 +152,8 @@ describe("S4 stepMouseChunk: the SGR chunk state machine", () => {
 // --- the per-report dispatch ---------------------------------------------
 
 const LAID: readonly LaidItem[] = [
-  { rows: ["◼ tool: read"], start: 0, id: "call-1", gap: false },
-  { rows: ["a line", "another"], start: 2, id: "", gap: true },
+  { rows: ["◼ tool: read"], start: 0, id: "call-1", gap: false, toggleRows: 1 },
+  { rows: ["a line", "another"], start: 2, id: "", gap: true, toggleRows: 1 },
 ];
 const WIN = { start: 0, end: 3 };
 

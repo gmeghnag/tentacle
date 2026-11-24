@@ -108,4 +108,29 @@ describe("a described shell call in the App (docs/fix/tui-shell-row-collapsed)",
     expect(open.filter((r) => r.includes("exit=1"))).toHaveLength(1);
     app.unmount();
   });
+
+  test("a click on the `⎿ $ cmd` row toggles the block like the header; output rows do not", async () => {
+    const { app, rows } = await run();
+    const head = rows().findIndex((r) => r.includes(SENTENCE));
+    expect(head).toBeGreaterThanOrEqual(0);
+    const dollar = head + 1;
+    expect(rows()[dollar]).toBe(`⎿ $ ${COMMAND}  exit=1`);
+    app.stdin.write(press(5, dollar + 1));
+    app.stdin.write(release(5, dollar + 1));
+    await delay(100);
+    const open = rows();
+    expect(open.join("\n")).toContain("1 fail · 23 pass");
+    // A click on the OUTPUT row (first row after the `$` row) changes nothing.
+    const out = open.findIndex((r) => r.includes("1 fail · 23 pass"));
+    app.stdin.write(press(5, out + 1));
+    app.stdin.write(release(5, out + 1));
+    await delay(100);
+    expect(rows().join("\n")).toContain("1 fail · 23 pass");
+    // A second click on the `$` row collapses it again.
+    app.stdin.write(press(5, dollar + 1));
+    app.stdin.write(release(5, dollar + 1));
+    await delay(100);
+    expect(rows().join("\n")).not.toContain("1 fail · 23 pass");
+    app.unmount();
+  });
 });

@@ -3767,7 +3767,8 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     app.unmount();
   });
 
-  test("a click on a wrapped continuation row does not collapse the call", async () => {
+  test("a click on a row BELOW the `$` rows does not collapse the call", async () => {
+    // docs/fix/tui-click-dollar-row: the `$` rows now toggle; text under them stays text.
     const { app, frame } = await runLong();
     const y = headerRowOf(frame());
     app.stdin.write(press(3, y));
@@ -3775,8 +3776,8 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
     await delay(80);
     const first = cont(frame())[0] ?? "";
     expect(first).not.toBe("");
-    const contY = rowsOf(frame()).findIndex((r) => r.startsWith("⎿ $ ")) + 1;
-    app.stdin.write(press(6, contY)); // a cell INSIDE the command text
+    const contY = rowsOf(frame()).findIndex((r) => r.startsWith("⎿ $ ")) + 2; // first row after the `$` row
+    app.stdin.write(press(6, contY));
     app.stdin.write(release(6, contY));
     await delay(80);
     expect(cont(frame()).length).toBeGreaterThan(0); // still expanded
