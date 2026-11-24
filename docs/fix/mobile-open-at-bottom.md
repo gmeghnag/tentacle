@@ -61,3 +61,25 @@ Mechanism proven: when the 120 ms reveal timer fires while the list is still ren
 **APPROVED** (orchestrator, with the owner's answers): executor Sonnet, red-first repro of the list→session path, Opus review.
 
 *— orchestrator (claude-opus-5-5), 2026-11-24*
+
+## Review
+
+**Verdict: REQUEST-CHANGES**
+
+**Findings**
+1. **MEDIUM. Another path to the same animated travel is not covered** (`apps/mobile/src/follow.ts:306`). An opening landing that runs out of `LANDING_ROUNDS` while still settling switches to `{settling:false, silent:false}`. That reveals the list with nothing pending, so the next growth reaches `contentGrew` ANIMATED. The scratch trace `.tentacle/tmp/mobile-open-at-bottom/review-bound.ts` shows this: after 12 distinct heights `pending after bound: false`, the next growth gives `owns false` and then `contentGrew → {scrollTo:21200, animated:true}`. A long transcript (the 300+ row case, where FlatList batches give many distinct heights) is exactly where this happens. The plan's H1 named "rounds **or** quiet window too short"; the fix covers only the quiet window. When the bound ends a hidden opening landing, it should enter the same revealed tail (or the tail should be the hand-over), with a red-first test.
+2. **MEDIUM. The approved trigger was not reproduced.** Approval required "red-first repro of the list→session path (H2 first)". Execution delivers an H1 unit repro only, and its line 50 admits the list path is unshown. Checked here: both `navigation.navigate("Session")` and the drawer's `navigation.replace` mount a fresh `SessionScreen` (`App.tsx:3120-3135`), so `landing` starts at `landingStart` and no state leaks across sessions. H2's "skipped flag" variant is therefore FALSE. That makes H1 plausible, but it is not shown to be the owner's symptom. Finding 1 is a second H1 candidate on the same trigger.
+
+**Gate:** follow + wiring tests 77 pass / 0 fail. Full `bun test` 17744 pass / 5 skip / 0 fail (the skips are not in this diff). `bun run lint` clean. `bun run typecheck` clean.
+**Mutation:** opening branch forced to `landingDone` → 2 fail (the new "growth after the reveal…" test and the updated long-history assertion). Reverted, and `git status` is clean. The other two new tests pass on old code too, as Execution states. They are boundary pins only.
+**Premises:** settling hides the list (`SessionScreen.tsx:1754`): TRUE. `armReveal` re-fires while `landingPending` after a step (`:579`): TRUE, so the tail is handed back on the second quiet fire (bounded). The `awaiting` hand-back is unchanged: TRUE.
+**Attacks tried:**
+- (a) Reader scrolls up during the tail: `landingDone`, and `landingOwns` is false, so `unseen` is still set. Holds.
+- (b) Streamed row during the tail while following: scrolled silently, at most ~120 ms. Acceptable.
+- (c) A quiet tail that never ends: the second reveal ends it. Holds.
+- (d) Bound exhaustion: finding 1.
+- (e) Session-switch state leak (H2): none.
+
+No §7 invariant is touched (pure module, contained). **Executor:** honest about what is unverified, but it deviated from the approved H2-first repro without flagging the deviation as drift.
+
+*— claude-opus-5-5, 2026-11-24 (fresh context; a different model from the Sonnet executor but the same Claude family, so the two passes can share blind spots)*
