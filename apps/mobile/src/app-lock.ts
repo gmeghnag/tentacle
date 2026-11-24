@@ -316,17 +316,34 @@ export interface AppLock {
   state(): AppLockState;
   dispatch(event: AppLockEvent): LockView;
   view(): LockView;
+  /**
+   * Observe the lock: the listener runs after every `dispatch` (its own events,
+   * `LockGate`'s and the screen's), and gets the NEW view. The native sheets'
+   * drain reads `locked` from here, never from a render-time `view()` call: the
+   * app shell re-renders for its own reasons, so a value read at render is stale
+   * exactly when the lock changes without one (Step 0b's finding).
+   */
+  subscribe(listener: (view: LockView) => void): () => void;
 }
 
 /** The lock's ONE instance in the app: the store behind `LockGate` (D5). */
 export function createAppLock(deps: AppLockDeps): AppLock {
   let current = initialAppLock(deps.now);
+  const listeners = new Set<(view: LockView) => void>();
   return {
     state: () => current,
     dispatch(event: AppLockEvent): LockView {
       current = reduceAppLock(current, event, deps.now());
-      return lockView(current);
+      const view = lockView(current);
+      for (const listener of listeners) {
+        listener(view);
+      }
+      return view;
     },
     view: () => lockView(current),
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
   };
 }

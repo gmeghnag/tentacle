@@ -104,7 +104,7 @@ import {
 export type { RenameState };
 import type { ComposeBarView, OutboxRowView, SessionViewInput } from "./session-view.ts";
 
-import { type SessionStatus, type SessionView, sessionView } from "./session-view.ts";
+import { type SessionStatus, type SessionView, retryOnUp, sessionView } from "./session-view.ts";
 import {
   type ThumbnailDriver,
   type ThumbnailSource,
@@ -1785,6 +1785,15 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         // re-synced facts). Only the attach ran it, so an item written offline on
         // this OPEN screen waited for a reopen (fix/mobile-e2e-reds, flow 17).
         void compose.runOutbox();
+      }
+      if (up && retryOnUp(status)) {
+        // 3c, the net: a retryable failed attach is re-tried once per `up`
+        // (bounded by link-ups, never a loop) — what the Retry button does,
+        // including a Reopen the person asked for.
+        if (!disposed && !refreshing && !attaching) {
+          void attach(status.phase === "failed" && status.reopenRequested === true);
+        }
+        return;
       }
       if (!up || !resyncOnUp) {
         return;

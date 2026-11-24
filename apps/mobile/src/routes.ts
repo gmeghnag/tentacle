@@ -4,6 +4,9 @@
  * rule is tested without a simulator. The stack's screens are `Pair` and
  * `Computers` → `Sessions` → `Session`.
  */
+import type { SheetKind, SheetRouteLike } from "./sheet-plan.ts";
+
+export type { SheetKind };
 
 export interface ComputerRoute {
   readonly computerId: string;
@@ -75,6 +78,39 @@ export interface ArtifactGalleryRoute {
   readonly open?: string;
 }
 
+/**
+ * The native sheets' route (docs/feat/mobile-native-sheets.md D1): ONE route, five
+ * kinds. Its params carry only identity and the kind — never content, because the
+ * session screen publishes each sheet's element on `SHEET_HOSTS` (`sheet-host.ts`)
+ * and the route reads it back (`sheetRouteView`). `SheetKind` is re-exported from
+ * the pure module so the route table and `sheetOptions` cannot disagree.
+ */
+export interface SheetRouteParam {
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly kind: SheetKind;
+  /**
+   * Session info was opened with a section to land on (`openScheduled`), so the
+   * list scrolls inside the sheet: it opens at the LARGEST detent (`initialDetent`).
+   * Every other kind ignores it.
+   */
+  readonly reveal?: boolean;
+  /**
+   * The ask's own id (`PermissionRequestOptions.requestId`), on Permission only:
+   * the detent memory is keyed on it (`sheetIdentity`), so a re-delivery of the
+   * SAME ask keeps the detent the person left it at (D3, Step 0b L3).
+   */
+  readonly askId?: string;
+  /**
+   * The ask on this route is still UNANSWERED (D5). It rides the params because
+   * the navigator resolves a route's options before its screen mounts, and
+   * `gestureEnabled` is an option: the sheet must be un-swipeable from the very
+   * first frame, not one render later. The screen rewrites it in place with a
+   * keyed `SET_PARAMS` once the ask settles (`updateSheetParams`).
+   */
+  readonly asking?: boolean;
+}
+
 /** The stack's route table (`@react-navigation/native-stack` params). */
 export type RootStackParams = {
   Pair: PairRouteParam | undefined;
@@ -85,6 +121,12 @@ export type RootStackParams = {
   Settings: undefined;
   /** The artifacts gallery (docs/feat/model-artifacts.md D9): a session's artifacts. */
   ArtifactGallery: ArtifactGalleryRoute;
+  /**
+   * A native sheet (docs/feat/mobile-native-sheets.md D1), presented as an iOS
+   * `formSheet` with three detents. Pushed with `push` (a second sheet must
+   * STACK, never replace params) and closed with a keyed `pop` of its own key.
+   */
+  Sheet: SheetRouteParam;
 };
 
 /**
@@ -104,6 +146,97 @@ export function openArtifactGallery(
     archived: input.archived,
     from: input.from,
     ...(input.open === undefined ? {} : { open: input.open }),
+  });
+}
+
+/**
+ * The narrow navigation surface a sheet uses — never the whole router object.
+ * Mirrors `openArtifactGallery`: the screen's `useNavigation<SheetStackNavigation>()`
+ * is cast from a generic prop, so the sheet paths are pinned HERE (a router
+ * change that renamed `POP`'s `source` would break this file, not a screen).
+ */
+export interface SheetPopAction {
+  readonly type: "POP";
+  readonly payload: { readonly count: number };
+  /** The route being removed — `StackRouter` looks the key up by it. */
+  readonly source: string;
+  /** The stack that owns it. */
+  readonly target: string;
+}
+
+export interface SheetStackNavigation {
+  push(name: "Sheet", params: SheetRouteParam): void;
+  /** The two actions a sheet dispatches: a keyed `POP`, a keyed `SET_PARAMS`. */
+  dispatch(action: SheetPopAction | SheetSetParamsAction): void;
+  getState(): { readonly key: string; readonly routes: readonly SheetRouteLike[] };
+  setOptions(options: { gestureEnabled?: boolean }): void;
+}
+
+/** The one in-place params rewrite a sheet makes: `SET_PARAMS`, keyed on its route. */
+export interface SheetSetParamsAction {
+  readonly type: "SET_PARAMS";
+  /**
+   * A PATCH, not the whole params: `BaseRouter` merges it over what the route
+   * holds (`{ ...r.params, ...action.payload.params }`,
+   * `routers@7.6.5/src/BaseRouter.tsx:18-39`), so the identity a sheet was pushed
+   * with is never restated (and never silently dropped).
+   */
+  readonly payload: { readonly params: Partial<SheetRouteParam> };
+  /** The route whose params change — `BaseRouter` looks it up by it. */
+  readonly source: string;
+  /** The stack that owns it. */
+  readonly target: string;
+}
+
+/**
+ * Rewrite ONE sheet's params in place (D5's `asking`, from `askingParamUpdate`'s
+ * decision). Keyed on the route (`source`), like `popSheet`: an unkeyed one would
+ * hit the WRONG route — the top of the stack, which is not necessarily ours. The
+ * action is written out rather than taken from `StackActions`, so this module
+ * stays free of a react-navigation import (it is loaded by `bun test`, where RN
+ * does not).
+ */
+export function updateSheetParams(
+  nav: Pick<SheetStackNavigation, "dispatch" | "getState">,
+  key: string,
+  params: Partial<SheetRouteParam>,
+): void {
+  nav.dispatch({
+    type: "SET_PARAMS",
+    payload: { params },
+    source: key,
+    target: nav.getState().key,
+  });
+}
+
+/**
+ * Open a native sheet (D1): `push`, never `navigate` — a second sheet must
+ * STACK. `navigate` would reuse the one `Sheet` route and REPLACE its params,
+ * which silently drops the sheet underneath (Outbox under a permission ask).
+ */
+export function openSheet(nav: Pick<SheetStackNavigation, "push">, params: SheetRouteParam): void {
+  nav.push("Sheet", params);
+}
+
+/**
+ * Close ONE sheet: a `pop` keyed on that route (`source`) and targeted at the
+ * stack, which is what `StackRouter`'s `POP` needs to remove a single route
+ * (`routers/src/StackRouter.tsx:557-578`). An unkeyed `goBack()` would pop the
+ * route underneath — the Session itself when one sheet is up.
+ *
+ * The action is written out rather than taken from `StackActions.pop`, so this
+ * module stays free of a react-navigation import (it is imported by tests under
+ * `bun test`, where RN does not load).
+ */
+export function popSheet(
+  nav: Pick<SheetStackNavigation, "dispatch" | "getState">,
+  key: string,
+): void {
+  nav.dispatch({
+    type: "POP",
+    payload: { count: 1 },
+    source: key,
+    target: nav.getState().key,
   });
 }
 

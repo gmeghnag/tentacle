@@ -229,7 +229,6 @@ describe("`SessionInfoSheet` renders one block per note (S4 review finding 1)", 
     walk(
       h(sheet.SessionInfoSheet, {
         palette: theme.darkPalette,
-        visible: true,
         view: info.sessionInfoView(facts(over)),
         autoAcceptOn: false,
         autoAcceptError: null,

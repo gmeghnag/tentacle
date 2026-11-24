@@ -195,6 +195,27 @@ describe("the age guard (plan P10; mutation: ARM_MS = 0 → red)", () => {
   });
 });
 
+describe("the presented ask carries the daemon's id (S5 route param)", () => {
+  test("asking carries requestId, and null when the requester had none", async () => {
+    // Mutation: `requestId: entry.options?.requestId ?? null` → hardcoded null → red.
+    const { sheet, clock } = sheetAt();
+    const answer = sheet.requester(ask(), { requestId: "ask-7" });
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({ kind: "asking", requestId: "ask-7" });
+    clock.at += ARM_MS;
+    expect(sheet.answer("allow_once")).toBe("sent");
+    await answer;
+
+    const local = sheetAt();
+    const plain = local.sheet.requester(ask());
+    await Promise.resolve();
+    expect(local.sheet.view()).toMatchObject({ kind: "asking", requestId: null });
+    local.clock.at += ARM_MS;
+    expect(local.sheet.answer("allow_once")).toBe("sent");
+    await plain;
+  });
+});
+
 describe("the options are exactly what the daemon offered", () => {
   test("all three wherever a reply is offered", () => {
     expect(sheetOptions(ask()).map((o) => o.optionId)).toEqual([

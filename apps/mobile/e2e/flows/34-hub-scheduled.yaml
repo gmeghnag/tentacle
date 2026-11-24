@@ -41,6 +41,12 @@ appId: so.tentacle.app
     visible:
       id: "session-info-sheet"
     timeout: 10000
+# The reveal (S4) opens the sheet at its LARGEST detent and scrolls the Scheduled
+# section into view by ITSELF — the flow does not scroll: a scroll here would pass
+# on a sheet that never revealed anything (gate runs 1795466539487 and
+# 1795475314390: a Session info value pulled before the wake lacked the band, so
+# no reveal was asked and the sheet opened at M on its top band,
+# docs/feat/mobile-native-sheets.md, Fix round (simulator)).
 - extendedWaitUntil:
     visible:
       text: ".*WAKEPING hub.*"

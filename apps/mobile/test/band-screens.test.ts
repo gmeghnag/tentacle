@@ -24,6 +24,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { sheetGround } from "../src/sheet-plan";
 
 const APP = join(import.meta.dir, "..");
 const read = (...parts: string[]): string => readFileSync(join(APP, ...parts), "utf8");
@@ -39,6 +40,7 @@ const src = (name: string): string => read("src", "screens", `${name}.tsx`);
 const ROW = read("src", "ui", "Row.tsx");
 const BAND = read("src", "ui", "BandSection.tsx");
 const THEME = read("src", "theme.ts");
+const UI_SHEET = read("src", "ui", "Sheet.tsx");
 
 /**
  * The JSX opening tags of `name` in `source`. Arrow functions are flattened first,
@@ -283,12 +285,13 @@ describe("S4 · Session info · bands on a sheet, and the sheet's own close glyp
   test("the sheet's ground is the banded ground (`bg`), not `sheet`", () => {
     // `Sheet` re-grounds a full sheet to `bg` (S3, Design 4): a root still painting
     // `sheet` leaves a lighter strip above it, at the top safe-area inset.
-    const root = info.slice(
-      info.indexOf("<View style={[styles.root"),
-      info.indexOf("<View style={[styles.root") + 200,
+    // Since mobile-native-sheets the ground is the native route's `contentStyle`
+    // (`palette[sheetGround(kind)]`, App.tsx): the screen draws no root of its own.
+    expect(sheetGround("info")).toBe("bg");
+    expect(read("App.tsx")).toContain(
+      "contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] }",
     );
-    expect(root).toContain("palette.bg");
-    expect(root).not.toContain("palette.sheet");
+    expect(info).not.toContain("palette.sheet");
   });
 
   test("Auto-accept is the LAST ROW of the Session band (the mockup's `infoE2`)", () => {
@@ -364,7 +367,9 @@ describe("S4 · the band owns the section rhythm (no wrapper gap doubles it)", (
     expect([
       { screen: "SettingsScreen", gap: /body: \{ gap: 0 \}/.test(src("SettingsScreen")) },
       { screen: "SessionsScreen", gap: /sections: \{ gap: 0 \}/.test(src("SessionsScreen")) },
-      { screen: "SessionInfoSheet", gap: /content: \{ gap: 0 \}/.test(src("SessionInfoSheet")) },
+      // `styles.content` (gap: 0) moved onto `Sheet`'s own scroller with the ONE
+      // scroller (S4, D4/F8): the content gap lives where the scroller is.
+      { screen: "SessionInfoSheet", gap: /scrollContent: \{ gap: 0 \}/.test(UI_SHEET) },
     ]).toEqual([
       { screen: "SettingsScreen", gap: true },
       { screen: "SessionsScreen", gap: true },

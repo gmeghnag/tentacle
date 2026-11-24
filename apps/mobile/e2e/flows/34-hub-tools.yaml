@@ -33,8 +33,14 @@ appId: so.tentacle.app
       id: "tools-sheet"
     timeout: 10000
 # The server's band is one accessible element (`demo, Show demo to the model…`),
-# so it is waited for by its id (docs/fix/mobile-e2e-reds.md).
-- extendedWaitUntil:
-    visible:
+# so it is reached by its id (docs/fix/mobile-e2e-reds.md). Since docs/feat/
+# mobile-native-sheets.md S4 the sheet is a native `formSheet` opening at the
+# MIDDLE detent, so the first band may sit below the fold: the scroll IS the
+# assertion (and the sheet's ONE scroller is what reaches it, F8).
+- scrollUntilVisible:
+    element:
       id: "tools-mcp:demo"
+    direction: DOWN
     timeout: 15000
+- assertVisible:
+    id: "tools-mcp:demo"

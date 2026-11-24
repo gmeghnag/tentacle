@@ -1,19 +1,26 @@
 /**
  * The permission sheet (mockup `Approval`, docs/feat/mobile-session-view.md
- * 12c): a native `Modal` page sheet over the transcript — native presentation
- * and swipe-to-dismiss kept — drawn from `permission-sheet.ts`'s state. Every
- * decision (the age guard, the options, the reply, the returned words, each
- * option's style and its label's code runs) lives there (AGENTS §7).
+ * 12c): drawn from `permission-sheet.ts`'s state, inside the native `Sheet`
+ * route — the presentation (a `formSheet`, the native grabber, the detents) is
+ * the route's, never this component's (docs/feat/mobile-native-sheets.md D4).
+ * Every decision (the age guard, the options, the reply, the returned words,
+ * each option's style and its label's code runs) lives there (AGENTS §7).
  *
  * While the age guard holds, the options are drawn dimmed AND `disabled`, so a
  * stray tap does nothing whether it reaches JS or is swallowed by the platform.
  *
+ * Dismissal (D5): while the ask is unanswered the sheet cannot be swiped — the
+ * route's `gestureEnabled` is false — so "Not now" (`perm-later`) is the ONLY
+ * way out, and it runs today's swipe semantics (`sheet.dismiss()`: withdraw,
+ * send nothing). A blocked swipe is reported back as `held` and says so
+ * (`perm-hold`), instead of the person's gesture doing nothing at all.
+ *
  * testIDs (the flows' contract, unchanged): `perm-sheet`, `perm-<optionId>`,
- * `perm-reply-input`, `perm-reply-send`, `perm-arming`, `perm-returned`,
- * `perm-returned-dismiss`.
+ * `perm-later`, `perm-hold`, `perm-reply-input`, `perm-reply-send`,
+ * `perm-arming`, `perm-returned`, `perm-returned-dismiss`.
  */
 import { type ComponentRef, type JSX, useEffect, useRef } from "react";
-import { Keyboard, Modal, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
+import { Keyboard, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
 import {
   type OptionPill,
   type PermissionSheet,
@@ -30,6 +37,13 @@ export interface PermissionSheetViewProps {
   readonly sheet: PermissionSheet;
   readonly state: SheetState;
   readonly palette: Palette;
+  /**
+   * A swipe/backdrop dismissal was just BLOCKED on this ask (D5): the route's
+   * `gestureCancel` was noted in `SHEET_HOLDS` under this ask's key, and the
+   * sheet says why nothing happened (`perm-hold`) instead of the person's
+   * gesture silently doing nothing.
+   */
+  readonly held: boolean;
 }
 
 function pillColors(pill: OptionPill, palette: Palette): { bg: string; fg: string } {
@@ -103,6 +117,7 @@ export function PermissionSheetView({
   sheet,
   state,
   palette,
+  held,
 }: PermissionSheetViewProps): JSX.Element {
   // The age guard's release is the SHEET's own state change (it owns the clock and
   // the scheduler, `permission-sheet.ts`): the screen only draws `armed`. A timer
@@ -128,158 +143,168 @@ export function PermissionSheetView({
     return () => shown.remove();
   }, []);
   return (
-    <Modal
-      visible={asking !== null || returned !== null}
-      presentationStyle="pageSheet"
-      animationType="slide"
-      transparent={false}
-      onRequestClose={() => sheet.dismiss()}
+    <ScrollView
+      ref={scroll}
+      testID="perm-sheet"
+      automaticallyAdjustKeyboardInsets
+      style={{ backgroundColor: palette.sheet }}
+      contentContainerStyle={styles.sheet}
+      keyboardShouldPersistTaps="handled"
     >
-      <ScrollView
-        ref={scroll}
-        testID="perm-sheet"
-        automaticallyAdjustKeyboardInsets
-        style={{ backgroundColor: palette.sheet }}
-        contentContainerStyle={styles.sheet}
-        keyboardShouldPersistTaps="handled"
-      >
-        <View style={[styles.grabber, { backgroundColor: palette.sepSheet }]} />
-        {asking === null ? null : (
-          <>
-            <View style={styles.head}>
-              <View style={[styles.tile, { backgroundColor: palette.tint }]}>
-                <Icon name="hand.raised" color={palette.accent} size={22} />
-              </View>
-              <Text
-                accessibilityRole="header"
-                style={[typography.title2, styles.flex, { color: palette.label }]}
-              >
-                {asking.request.title}
+      {asking === null ? null : (
+        <>
+          <View style={styles.head}>
+            <View style={[styles.tile, { backgroundColor: palette.tint }]}>
+              <Icon name="hand.raised" color={palette.accent} size={22} />
+            </View>
+            <Text
+              accessibilityRole="header"
+              style={[typography.title2, styles.flex, { color: palette.label }]}
+            >
+              {asking.request.title}
+            </Text>
+          </View>
+          {asking.request.detail === undefined ? null : (
+            <View style={[styles.detailBox, { backgroundColor: palette.codeOnSheet }]}>
+              <Text style={[typography.monoInline, { color: palette.label }]}>
+                {asking.request.detail}
               </Text>
             </View>
-            {asking.request.detail === undefined ? null : (
-              <View style={[styles.detailBox, { backgroundColor: palette.codeOnSheet }]}>
-                <Text style={[typography.monoInline, { color: palette.label }]}>
-                  {asking.request.detail}
+          )}
+          {asking.agent === null ? null : (
+            <Text style={[typography.subhead, { color: palette.sec }]}>
+              {`Asked by ${asking.agent.type}: ${asking.agent.description}`}
+            </Text>
+          )}
+          {asking.alsoAsked.length === 0 ? null : (
+            <Text testID="perm-also-asked" style={[typography.footnote, { color: palette.sec }]}>
+              {asking.alsoAsked.length === 1
+                ? `Also asked on ${asking.alsoAsked[0]} · the first answer wins`
+                : `Also asked on ${asking.alsoAsked[0]} (+${asking.alsoAsked.length - 1}) · the first answer wins`}
+            </Text>
+          )}
+          <View style={styles.options}>
+            {asking.options.map((option) => {
+              const look = optionStyle(option.optionId);
+              return (
+                <AnswerPill
+                  key={option.optionId}
+                  testID={`perm-${option.optionId}`}
+                  palette={palette}
+                  label={option.label}
+                  pill={look.pill}
+                  icon={look.icon}
+                  // The age guard's own decision, read at the tap (never a render
+                  // snapshot): `answer` ignores what is too early (P10).
+                  disabled={!asking.armed}
+                  onPress={() => sheet.answer(option.optionId)}
+                />
+              );
+            })}
+          </View>
+          {held ? (
+            <Text
+              testID="perm-hold"
+              style={[typography.footnote, styles.center, { color: palette.sec }]}
+            >
+              Answer to continue — or Not now
+            </Text>
+          ) : null}
+          {link === null ? null : (
+            <View style={[styles.autoRow, { borderTopColor: palette.sepSheet }]}>
+              <View style={styles.flex}>
+                <Text style={[typography.subhead, { color: palette.label }]}>Auto-accept</Text>
+                <Text style={[typography.footnote, { color: palette.sec }]}>
+                  {link.shared()
+                    ? "This session, on every device"
+                    : "Not shared by this computer — update tentacle"}
                 </Text>
               </View>
-            )}
-            {asking.agent === null ? null : (
-              <Text style={[typography.subhead, { color: palette.sec }]}>
-                {`Asked by ${asking.agent.type}: ${asking.agent.description}`}
-              </Text>
-            )}
-            {asking.alsoAsked.length === 0 ? null : (
-              <Text testID="perm-also-asked" style={[typography.footnote, { color: palette.sec }]}>
-                {asking.alsoAsked.length === 1
-                  ? `Also asked on ${asking.alsoAsked[0]} · the first answer wins`
-                  : `Also asked on ${asking.alsoAsked[0]} (+${asking.alsoAsked.length - 1}) · the first answer wins`}
-              </Text>
-            )}
-            <View style={styles.options}>
-              {asking.options.map((option) => {
-                const look = optionStyle(option.optionId);
-                return (
-                  <AnswerPill
-                    key={option.optionId}
-                    testID={`perm-${option.optionId}`}
-                    palette={palette}
-                    label={option.label}
-                    pill={look.pill}
-                    icon={look.icon}
-                    // The age guard's own decision, read at the tap (never a render
-                    // snapshot): `answer` ignores what is too early (P10).
-                    disabled={!asking.armed}
-                    onPress={() => sheet.answer(option.optionId)}
-                  />
-                );
-              })}
-            </View>
-            {link === null ? null : (
-              <View style={[styles.autoRow, { borderTopColor: palette.sepSheet }]}>
-                <View style={styles.flex}>
-                  <Text style={[typography.subhead, { color: palette.label }]}>Auto-accept</Text>
-                  <Text style={[typography.footnote, { color: palette.sec }]}>
-                    {link.shared()
-                      ? "This session, on every device"
-                      : "Not shared by this computer — update tentacle"}
-                  </Text>
-                </View>
-                <Switch
-                  testID="perm-auto-accept"
-                  accessibilityLabel="Auto-accept for this session, on every device"
-                  value={link.current()}
-                  disabled={!link.shared()}
-                  // The session's link: every device follows, and it is never a
-                  // stored approval (each ask is answered `allow_once`).
-                  onValueChange={(on) => {
-                    void link.set(on)?.catch(() => {});
-                  }}
-                />
-              </View>
-            )}
-            {asking.replyText === "" && asking.request.reply === undefined ? null : (
-              <TextInput
-                testID="perm-reply-input"
-                style={[
-                  typography.body,
-                  styles.reply,
-                  { color: palette.label, backgroundColor: palette.fill },
-                ]}
-                placeholder="Tell it what to do instead"
-                placeholderTextColor={palette.sec}
-                value={asking.replyText}
-                onChangeText={(text) => sheet.setReplyText(text)}
-                multiline
+              <Switch
+                testID="perm-auto-accept"
+                accessibilityLabel="Auto-accept for this session, on every device"
+                value={link.current()}
+                disabled={!link.shared()}
+                // The session's link: every device follows, and it is never a
+                // stored approval (each ask is answered `allow_once`).
+                onValueChange={(on) => {
+                  void link.set(on)?.catch(() => {});
+                }}
               />
-            )}
-            {asking.request.reply === undefined ? null : (
-              <AnswerPill
-                testID="perm-reply-send"
-                palette={palette}
-                label="Send reply"
-                pill="secondary"
-                icon={null}
-                disabled={!asking.armed}
-                onPress={() => sheet.sendReply()}
-              />
-            )}
-            {asking.armed ? null : (
-              <Text
-                testID="perm-arming"
-                style={[typography.footnote, styles.center, { color: palette.sec }]}
-              >
-                Hold on…
-              </Text>
-            )}
-          </>
-        )}
-        {sheet.autoAccepted === null ? null : (
-          <Text testID="perm-auto-accepted" style={[typography.footnote, { color: palette.sec }]}>
-            {sheet.autoAccepted}
-          </Text>
-        )}
-        {returned === null ? null : (
-          <>
-            <Text testID="perm-returned" style={[typography.headline, { color: palette.red }]}>
-              {returned.notice}
-            </Text>
-            <View style={[styles.detailBox, { backgroundColor: palette.codeOnSheet }]}>
-              <Text style={[typography.body, { color: palette.label }]}>{returned.text}</Text>
             </View>
-            <AnswerPill
-              testID="perm-returned-dismiss"
-              palette={palette}
-              label="OK"
-              pill="neutral"
-              icon={null}
-              disabled={false}
-              onPress={() => sheet.clearReturned()}
+          )}
+          {asking.replyText === "" && asking.request.reply === undefined ? null : (
+            <TextInput
+              testID="perm-reply-input"
+              style={[
+                typography.body,
+                styles.reply,
+                { color: palette.label, backgroundColor: palette.fill },
+              ]}
+              placeholder="Tell it what to do instead"
+              placeholderTextColor={palette.sec}
+              value={asking.replyText}
+              onChangeText={(text) => sheet.setReplyText(text)}
+              multiline
             />
-          </>
-        )}
-      </ScrollView>
-    </Modal>
+          )}
+          {asking.request.reply === undefined ? null : (
+            <AnswerPill
+              testID="perm-reply-send"
+              palette={palette}
+              label="Send reply"
+              pill="secondary"
+              icon={null}
+              disabled={!asking.armed}
+              onPress={() => sheet.sendReply()}
+            />
+          )}
+          {asking.armed ? null : (
+            <Text
+              testID="perm-arming"
+              style={[typography.footnote, styles.center, { color: palette.sec }]}
+            >
+              Hold on…
+            </Text>
+          )}
+          {/* The ONE way out of a blocked sheet (D5): today's swipe
+                semantics made explicit — withdraw the ask, send nothing. */}
+          <Pressable
+            testID="perm-later"
+            accessibilityRole="button"
+            accessibilityLabel="Not now"
+            onPress={() => sheet.dismiss()}
+            style={({ pressed }) => [styles.later, pressed ? { opacity: 0.6 } : undefined]}
+          >
+            <Text style={[typography.subhead, { color: palette.accent }]}>Not now</Text>
+          </Pressable>
+        </>
+      )}
+      {sheet.autoAccepted === null ? null : (
+        <Text testID="perm-auto-accepted" style={[typography.footnote, { color: palette.sec }]}>
+          {sheet.autoAccepted}
+        </Text>
+      )}
+      {returned === null ? null : (
+        <>
+          <Text testID="perm-returned" style={[typography.headline, { color: palette.red }]}>
+            {returned.notice}
+          </Text>
+          <View style={[styles.detailBox, { backgroundColor: palette.codeOnSheet }]}>
+            <Text style={[typography.body, { color: palette.label }]}>{returned.text}</Text>
+          </View>
+          <AnswerPill
+            testID="perm-returned-dismiss"
+            palette={palette}
+            label="OK"
+            pill="neutral"
+            icon={null}
+            disabled={false}
+            onPress={() => sheet.clearReturned()}
+          />
+        </>
+      )}
+    </ScrollView>
   );
 }
 
@@ -302,14 +327,7 @@ const styles = StyleSheet.create({
   },
   flex: { flex: 1 },
   center: { textAlign: "center" },
-  sheet: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 40, gap: 16 },
-  grabber: {
-    alignSelf: "center",
-    width: size.grabberWidth,
-    height: size.grabberHeight,
-    borderRadius: size.grabberHeight / 2,
-    marginBottom: 4,
-  },
+  sheet: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 40, gap: 16 },
   head: { flexDirection: "row", alignItems: "center", gap: 12 },
   tile: {
     width: size.iconTileLarge,
@@ -334,4 +352,5 @@ const styles = StyleSheet.create({
   code: { fontFamily: MONO },
   dimmed: { opacity: 0.4 },
   reply: { borderRadius: radius.tile, padding: 14, minHeight: 96 },
+  later: { alignSelf: "center", paddingVertical: 10, paddingHorizontal: 16 },
 });
