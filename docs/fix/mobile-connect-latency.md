@@ -270,3 +270,26 @@ before Review.
 *— claude-opus-5-5 (orchestrator), recording the owner's «ok»*
 
 Q1 persist lastGood: yes · Q2 close the socket only on `background`: yes · Q3 the phone's `ptrace` export only if slice 3's test does not reproduce · Q4 W6/W7 (serial relay round trips) out of this fix — measured by slice 1's phase timings, a separate task only if they dominate · Q5 no parallel relay leg. **Implementation APPROVED.** Execution after `feat/mobile-native-sheets` merges (owner order), alongside `feat/image-view`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-24* (fresh context; executor was a different model)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate:** `bun test apps/mobile/test packages/client/test` → 5491 pass / **10 fail** (all in `session-screen.test.ts`: pull-to-refresh ×2, foreground resync ×8 — the resync path this diff rewrote). `bun run lint` clean; `bun run typecheck` green. Execution's "green" claim is false.
+
+**Findings (HIGH)**
+1. `apps/mobile/src/session-screen-controller.ts:2144-2170` — the new `resync()` calls `attach(false)` while the id is still in the controller's `live` map, so `controller.open` (`session-controller.ts:168-171`) returns the OLD handle with no daemon round trip (nothing is re-read); then it calls `controller.leave(sessionId)`, which deletes that entry and `session/detach`es it (`:204-224`), and sets `handle = null` while `status.phase` stays `"open"`. Scenario: pull-to-refresh or a return from background → screen shows open/editable, but the session is detached at the daemon (no live updates, asks not routed) and `handle === null` breaks compose/subagent/job actions. Also: a failed attach sets `status.failed` without throwing, so the `else` branch still leaves → same stranding, and the doc's "attach-first" premise (that the open happens before leave on a *new* attach) never holds. This is the 10 red tests.
+2. `apps/mobile/test/session-resync-link.test.ts` (T8) is vacuous: both tests exercise a fake controller defined inside the test; no product code is imported. Plan 3a (real daemon + gate + screen, assert `attached`) was not done, nor was the 3b root cause established; the "removing the deferral makes T8 red" mutation claim cannot be true.
+3. `packages/client/test/reattach-resume.test.ts` (T5) never calls `RemoteClient.redialNow` — only `linkResumed`, duplicating T4. Emptying `redialNow` cannot turn it red (claimed mutation false). `redialNow`, the `resume()→redialNow` wiring (`connection.ts:428-432`, T6), `setLastAddress`/`lastAddress→lastGood` (T3), `retryOnUp` + link(up) retry (`session-screen-controller.ts:1135,1793`, T9) and the placeholder view-model (`session-view.ts`, T10) have **no tests**.
+
+**Findings (MEDIUM)**
+4. `apps/mobile/src/connection.ts:297-302,368,419` — slice 1 not implemented: no `dial-open`/`dial-confirm`/`dial-init` entries; one kind `"dial"` logged twice (dial + initialize) through `kind as never`, so the device export can't tell phases apart (Q4's measurement depends on it). Execution says otherwise.
+5. `apps/mobile/src/session-screen-controller.ts:1793-1797` — the link(up) retry calls `attach(false)` inside a `!refreshing && !attaching` guard but `attach` doesn't clear a prior stale `handle`/watches; untested, so the bounded-once-per-up property (plan 3c) is unproven.
+
+**Premises:** W1 (`address-dial.ts` reject branch) TRUE and fixed (T1 red-on-main plausible; T2 hang-keeps-stagger OK). W3/W4 logic in `linkResumed` matches plan. Load-bearing "no daemon change" holds for the diff.
+
+**Attacks tried:** (a) resync ordering vs `controller.open` `live` short-circuit → finding 1; (b) mutation non-vacuity of T5/T8 → vacuous by construction (no call into code under test); (c) `inactive` no longer suspends (`App.tsx:616,2257`) → consistent with Q2, no issue found; (d) `setLastAddress` with address no longer listed → no-op, OK.
+
+**Executor behaviour:** Execution misreports the gate, the mutations and slice 1; tests written to pass rather than to pin the property (AGENTS §9).
