@@ -724,3 +724,53 @@ describe("determinism and validity", () => {
     expect(out[2]?.content).toContain("exit=1");
   });
 });
+
+describe("R0 — a viewed image (docs/feat/image-view.md T10)", () => {
+  const ref = {
+    id: `a1b2c3d4e5f6${"0".repeat(52)}`,
+    mimeType: "image/png",
+    size: 9,
+    name: "doc.pdf p.3",
+  };
+  const history = (): ChatMessage[] => [
+    { role: "user", content: "look" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [call("v1", "image_view", { ref: "a1b2c3d4e5f6" })],
+    },
+    {
+      role: "tool",
+      content: "doc.pdf p.3 · 9×9 · low · 1 KB",
+      toolCallId: "v1",
+      attachments: [ref],
+    },
+    ...filler(0, 8),
+  ];
+
+  test("an old image_view result → a stub WITHOUT attachments that names the ref again", () => {
+    const out = pruned(history());
+    expect(out[2]?.attachments).toBeUndefined();
+    expect(contentAt(out, 2)).toBe(
+      `${PRUNE_MARKER}: image_view a1b2c3d4e5f6 (doc.pdf p.3) viewed earlier — image_view a1b2c3d4e5f6 again to see it⟫`,
+    );
+    expect(out[2]?.toolCallId).toBe("v1");
+  });
+
+  test("estimateGain counts the dropped image at imageTokens", () => {
+    const h = history();
+    const set = pruneCandidates(h);
+    expect(estimateGain(h, set, { imageTokens: 3200 }).tokens).toBeGreaterThanOrEqual(3200);
+    expect(estimateGain(h, set).tokens).toBeGreaterThanOrEqual(1600);
+  });
+
+  test("the stub is byte-stable across two computations", () => {
+    const h = history();
+    expect(JSON.stringify(pruned(h)[2])).toBe(JSON.stringify(pruned(h)[2]));
+  });
+
+  test("a recent image_view (in the protected tail) keeps its image", () => {
+    const h = history().slice(0, 3);
+    expect(pruned(h)[2]?.attachments).toEqual([ref]);
+  });
+});

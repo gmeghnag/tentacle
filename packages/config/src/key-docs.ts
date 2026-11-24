@@ -304,6 +304,27 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Unset: the provider default (anthropic 3.75 MB, an OpenAI-compatible endpoint 5 MB). An image over it is never read or sent: the model sees a placeholder naming the image and the limit, so an over-limit image can never 400 every later turn of the session.",
     example: "3932160",
   },
+  "model.imageDetail": {
+    summary: "The detail image_view sends a PDF's picture at: auto, low or high.",
+    kind: "leaf",
+    type: "enum",
+    values: ["auto", "low", "high"],
+    scope: "both",
+    carried: "no",
+    details:
+      'Default "auto": the model chooses per call ("low" ≤ 768 px for a picture\'s overall content, "high" ≤ 1568 px for small text). "low" or "high" forces it and hides the choice.',
+    example: "low",
+  },
+  "model.imageTokens": {
+    summary: "Tokens one image costs the context estimate (prune and the meter).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    details:
+      "Unset: the provider's estimate (anthropic 1600, an OpenAI-compatible endpoint 3200, rounded up from a measured Qwen ≈3.1k). Raise it if a local model charges more per image.",
+    example: "3200",
+  },
   "model.images": {
     summary: "Whether this model takes images at all (an attached screenshot reaches it).",
     kind: "leaf",

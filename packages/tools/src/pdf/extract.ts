@@ -52,6 +52,9 @@ export interface ExtractPdfOptions {
   images?: PdfImageLimits;
 }
 
+const isHexId = (value: unknown): boolean =>
+  typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+
 function isPageImage(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
   const image = value as Partial<PdfPageImage>;
@@ -59,7 +62,13 @@ function isPageImage(value: unknown): boolean {
     typeof image.marker === "string" &&
     typeof image.width === "number" &&
     typeof image.height === "number" &&
-    (image.png === undefined || image.png instanceof Uint8Array)
+    (image.png === undefined || image.png instanceof Uint8Array) &&
+    // docs/feat/image-view.md D3: the ids and the low variant, typed when present.
+    (image.id === undefined || isHexId(image.id)) &&
+    (image.lowId === undefined || isHexId(image.lowId)) &&
+    (image.low === undefined || image.low instanceof Uint8Array) &&
+    (image.lowWidth === undefined || typeof image.lowWidth === "number") &&
+    (image.lowHeight === undefined || typeof image.lowHeight === "number")
   );
 }
 

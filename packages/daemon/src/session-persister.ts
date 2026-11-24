@@ -67,9 +67,16 @@ export interface DaemonStore {
   /** The log's header line and the state file's text (the log itself unread). */
   readState(id: string): Promise<RawSessionState>;
   /** A verified image blob made durable beside the log, in the session's queue (absent: no blobs kept). */
-  putBlob?(id: string, blobId: string, bytes: Uint8Array): Promise<void>;
+  putBlob?(
+    id: string,
+    blobId: string,
+    bytes: Uint8Array,
+    opts?: { readonly tool?: boolean },
+  ): Promise<void>;
   readBlob?(id: string, blobId: string): Promise<Uint8Array | null>;
   blobIndex?(id: string): Map<string, number>;
+  /** The blob ids marked as tool pictures (docs/feat/image-view.md; absent: none). */
+  toolBlobIds?(id: string): Set<string>;
 }
 
 /** What a session builds at each write; `after` = this persister's log cursor for it. */
@@ -501,9 +508,11 @@ export class SessionPersister {
     if (!store.putBlob || !store.readBlob || !store.blobIndex) return undefined;
     const putBlob = store.putBlob.bind(store);
     const readBlob = store.readBlob.bind(store);
+    const toolIds = store.toolBlobIds?.(id);
     return {
       index: store.blobIndex(id),
-      write: (blobId, bytes) => putBlob(id, blobId, bytes),
+      ...(toolIds !== undefined ? { toolIds } : {}),
+      write: (blobId, bytes, opts) => putBlob(id, blobId, bytes, opts),
       read: (blobId) => readBlob(id, blobId),
     };
   }

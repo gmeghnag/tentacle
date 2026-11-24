@@ -35,7 +35,7 @@ import {
   renderStored,
   resolveConfig,
 } from "@tentacle/config";
-import { imageLimits } from "@tentacle/providers";
+import { imageLimits, imageTokenEstimate } from "@tentacle/providers";
 import { DEFAULT_HIDE } from "./workspace-mount.ts";
 
 /** Where the effective value comes from. */
@@ -185,6 +185,10 @@ const EXTRA: Readonly<Record<string, Probe>> = {
   // The provider's own limits, from the ONE function the providers use.
   "model.images": (ctx) => imageOf(ctx).vision,
   "model.maxImageBytes": (ctx) => imageOf(ctx).maxBytes,
+  // docs/feat/image-view.md D6/D7: the per-provider estimate from the ONE
+  // function the agent's counter uses; `auto` when the detail is not forced.
+  "model.imageTokens": (ctx) => imageTokenEstimate(ctx.resolved.provider, ctx.resolved.imageTokens),
+  "model.imageDetail": (ctx) => ctx.resolved.imageDetail ?? "auto",
   // `model.maxTokens`: unset is "the server decides" for an OpenAI-compatible
   // endpoint, 64000 for anthropic (`ANTHROPIC_DEFAULT_MAX_TOKENS`) — the
   // registry keeps it as text, this is the value behind the text.
@@ -271,7 +275,12 @@ const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
  * this machine's default (`$TMPDIR` and `/tmp`, `defaultWritableDirs`).
  */
 function defaultNote(path: string, ctx: Ctx, segments: readonly string[]): string | undefined {
-  if (path === "model.images" || path === "model.maxImageBytes" || path === "model.baseURL") {
+  if (
+    path === "model.images" ||
+    path === "model.maxImageBytes" ||
+    path === "model.imageTokens" ||
+    path === "model.baseURL"
+  ) {
     return providerLabel(ctx.resolved.provider);
   }
   if (path === "model.maxTokens") {

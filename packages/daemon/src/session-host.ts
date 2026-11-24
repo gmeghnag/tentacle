@@ -25,6 +25,7 @@ import type {
   ModelProvider,
   PermissionBroker,
   ScheduleLink,
+  ToolImageStore,
 } from "@tentacle/core";
 import {
   type DaemonDiscovery,
@@ -130,6 +131,13 @@ export interface AgentContext {
    * the bytes itself (`"client"`, docs/feat/attachments-prompt.md D2/D6).
    */
   readonly attachments?: AttachmentSource;
+  /**
+   * The SAME store as `attachments`, under its write-capable type, for the
+   * `fs_read`/`image_view` pair (docs/feat/image-view.md D1). Set under the
+   * same `"store"` condition; a factory that does not forward it (the pod
+   * factory) leaves the feature off.
+   */
+  readonly toolImages?: ToolImageStore;
   /**
    * The session's artifact store (docs/feat/model-artifacts.md D4), on EVERY
    * session-hosting daemon: a factory that offers `present` hands it to the
@@ -1591,7 +1599,9 @@ export class SessionHost {
     } = this.opts.createAgent(this.opts.defaultCwd, {
       modelLink: () => bound.hosted?.modelLink() ?? null,
       ...(settings ? { settings } : {}),
-      ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
+      ...(this.opts.images?.source === "store"
+        ? { attachments: uploads, toolImages: uploads }
+        : {}),
       artifacts,
       // D8/D9: the client that CREATED this session can ask its owner about a
       // `move_session` proposal, so this factory may offer the tool. Unset →
@@ -1682,7 +1692,9 @@ export class SessionHost {
       settings,
       reuse,
       // A settings sync must not silently turn every image into a placeholder.
-      ...(this.opts.images?.source === "store" ? { attachments: hosted.uploads } : {}),
+      ...(this.opts.images?.source === "store"
+        ? { attachments: hosted.uploads, toolImages: hosted.uploads }
+        : {}),
       // The session's artifacts are its own, not the agent's: the same store.
       artifacts: hosted.artifacts,
       // A settings sync rebuilds the agent: the session's `hop` fact is its own

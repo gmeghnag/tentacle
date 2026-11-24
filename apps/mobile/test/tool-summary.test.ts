@@ -88,6 +88,13 @@ const CASES: readonly {
     subtitle: "Flusso di login",
   },
   { name: "diagram", args: '{"mermaid":"flowchart TD"}', subtitle: '{"mermaid":"flowchart TD"}' },
+  // docs/feat/image-view.md T12: the ref, and ` · high` only for the costly detail.
+  {
+    name: "image_view",
+    args: '{"ref":"a1b2c3d4e5f6","detail":"high"}',
+    subtitle: "a1b2c3d4e5f6 · high",
+  },
+  { name: "image_view", args: '{"ref":"a1b2c3d4e5f6"}', subtitle: "a1b2c3d4e5f6" },
   { name: "shell", args: "not json at all", subtitle: "" },
   { name: "mystery_tool", args: "raw args", subtitle: "raw args" },
 ];
