@@ -1316,6 +1316,45 @@ and `34-hub-info` were not re-run in this round, although `Sheet.tsx`'s close-gl
 changed under them (presentation only: the glyph is absolutely positioned, so no layout
 change). They should be checked in the next full gate.
 
+### Fix round 2 (owner A)
+
+*— claude-opus-5-5 (fix-round executor), 2026-11-24*
+
+**Owner decision A** on the open APP finding (Fix round, row 7): remove Tools' pull-to-refresh,
+so a drag on its list expands the sheet as Session info's and Permission's lists do
+(`sheetExpandsWhenScrolledToEdge`).
+
+**Self-refresh, verified before any edit.** Tools already refreshes by itself, and that did not
+change. `openTools` runs `void controller.openInfo()`, the pull on open. The publish layout effect
+(no deps array, so it runs on every render) rebuilds the element from the controller's `info.tools`,
+so every data change re-publishes it. The explicit way stays: the Refresh link and the Retry row
+(`onRefresh={refreshTools}` → `controller.refreshInfo()`). A guard pins all three; it was
+green before the change too, which is the verification, not the red.
+
+**Red first.** `native-sheets-wiring.test.ts` gains "no native sheet's scroller carries a
+RefreshControl (it takes the expand gesture)". It checks `ui/Sheet.tsx` (no `refreshControl` prop
+at all, so no native sheet can take one again) and the Tools, Session info, Commands and Permission
+sheets. On the old code: **57 pass / 1 fail**. After the change: green. The S4 guard "Tools' list
+is the sheet's scroller" asserted `refreshControl={` and now asserts its absence.
+
+**Change.**
+- `ToolsSheet.tsx`: the `RefreshControl` and the `refreshing` prop are removed.
+- `ui/Sheet.tsx`: the `refreshControl` prop is removed (the type import is pruned).
+- `SessionScreen.tsx`: the `toolsRefreshing` state is removed, and `refreshTools` is just `controller.refreshInfo()`.
+- `42`: M → L and S → L are drags on the LIST again (`_sheet-expand`). The L proof stays: a tap at (4 %, 30 %), which is the backdrop at M, must leave the sheet up.
+- Changelog fragment: one sentence (pull-to-refresh gone, self-refresh, Refresh link kept).
+
+**Simulator.** Rebuilt Release, then `--only 42-native-sheets-shots,34-hub-tools,34-hub-info,29-tool-rows`
+→ **GATE PASS 4/4** (run `1795478332405`). `42-tools-L-light.png` was looked at: Tools is at L,
+reached by the list drag. These four runs also cover the round-1 close-glyph reorder that was
+not re-run then.
+
+**Gate.**
+- `bun test apps/mobile/test` → **4797 pass / 0 fail**.
+- `bun run typecheck` (root + mobile + relay) is clean.
+- `bun run lint` is clean (2325 files, 0/0).
+- The full root `bun test` was not run in this round: only `apps/mobile` changed.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-23 (fresh context; same model family as the S1/S2/S4/S5 executor, so shared blind spots are possible)*

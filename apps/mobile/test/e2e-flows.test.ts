@@ -896,8 +896,9 @@ describe("native sheets S6: the sheet shots flow (Validation's evidence set)", (
   });
 
   test("it drags the sheet between detents (a shot of M alone says nothing about S/L)", () => {
-    // Fix round (simulator): slow COORDINATE drags on the pinned head (a `from: id`
-    // flick scrolled the list instead, and Tools' list does not expand the sheet).
+    // Fix round (simulator): slow COORDINATE drags — UP on the list (`_sheet-expand`,
+    // owner A: no pull-to-refresh to take it), DOWN on the pinned head (a
+    // `from: id` flick scrolled the list instead).
     const tools = body.slice(body.indexOf('SHOT: "42-tools-M"'), body.indexOf('SHOT: "42-info-M"'));
     const drags = [
       ...tools.matchAll(

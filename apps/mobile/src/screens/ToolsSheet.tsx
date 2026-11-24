@@ -13,7 +13,7 @@
  * instead of expanding the sheet (F8), and the head stays pinned above it (F0).
  */
 import type { JSX } from "react";
-import { Pressable, RefreshControl, StyleSheet, Switch, View } from "react-native";
+import { Pressable, StyleSheet, Switch, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DENSE_FONT_SCALE, type Palette, radius, size, space, typography } from "../theme.ts";
 import type { ToolsBand, ToolsSegmentId, ToolsView } from "../tools-view.ts";
@@ -35,9 +35,13 @@ export interface ToolsSheetProps {
   readonly onQuery: (query: string) => void;
   /** A band's chevron: its own `capabilityKey`, or null to collapse it. */
   readonly onToggle: (key: string, open: boolean) => void;
-  /** Pull-to-refresh, and the Retry row: both re-run the pulls. */
+  /**
+   * The Refresh link and the Retry row: both re-run the pulls. There is no
+   * pull-to-refresh (owner A, docs/feat/mobile-native-sheets.md Fix round 2): on
+   * a formSheet it took the drag that expands the sheet. The list refreshes by
+   * itself — the open pulls, and every controller change re-publishes it.
+   */
   readonly onRefresh: () => void;
-  readonly refreshing: boolean;
   readonly onClose: () => void;
 }
 
@@ -112,7 +116,6 @@ export function ToolsSheet({
   onQuery,
   onToggle,
   onRefresh,
-  refreshing,
   onClose,
 }: ToolsSheetProps): JSX.Element {
   const insets = useSafeAreaInsets();
@@ -132,9 +135,6 @@ export function ToolsSheet({
       onClose={onClose}
       closeTestID="tools-close"
       scrollTestID="tools-scroll"
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={palette.sec} />
-      }
     >
       <View style={[styles.segments, { backgroundColor: palette.fill }]}>
         {view.segments.map((segment) => {

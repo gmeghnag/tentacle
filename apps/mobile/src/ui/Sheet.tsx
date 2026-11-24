@@ -27,7 +27,7 @@
  *
  * Render only.
  */
-import type { ComponentRef, JSX, ReactElement, ReactNode } from "react";
+import type { ComponentRef, JSX, ReactNode } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
@@ -66,13 +66,14 @@ export interface SheetProps {
    */
   readonly closeTestID?: string;
   /**
-   * The `scroll` variant's ONE scroller: its testID (a flow's `…-scroll`), its
-   * ref (the reveal's target, H4a) and its `refreshControl` (Tools' pull). The
-   * scroller is this component's — the caller names it, never wraps it.
+   * The `scroll` variant's ONE scroller: its testID (a flow's `…-scroll`) and
+   * its ref (the reveal's target, H4a). The scroller is this component's — the
+   * caller names it, never wraps it. It takes no pull-to-refresh: on a formSheet
+   * the pull takes the drag that should expand the sheet (docs/feat/
+   * mobile-native-sheets.md, Fix round 2 (owner A)).
    */
   readonly scrollTestID?: string;
   readonly scrollRef?: (node: ComponentRef<typeof ScrollView> | null) => void;
-  readonly refreshControl?: ReactElement;
 }
 
 export function Sheet({
@@ -90,7 +91,6 @@ export function Sheet({
   closeTestID,
   scrollTestID,
   scrollRef,
-  refreshControl,
 }: SheetProps): JSX.Element {
   const insets = useSafeAreaInsets();
   const align = centred ? styles.centred : null;
@@ -161,7 +161,6 @@ export function Sheet({
       <ScrollView
         {...(scrollTestID === undefined ? {} : { testID: scrollTestID })}
         {...(scrollRef === undefined ? {} : { ref: scrollRef })}
-        {...(refreshControl === undefined ? {} : { refreshControl })}
         style={{ backgroundColor: ground }}
         contentContainerStyle={[container, styles.scrollContent]}
         keyboardShouldPersistTaps="handled"

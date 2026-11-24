@@ -81,18 +81,13 @@ appId: so.tentacle.app
 # At M the whole short list fits: its last control is on screen.
 - assertVisible:
     id: "tools-refresh"
-# Every drag below is a SLOW coordinate drag on the PINNED HEAD, just under the
-# grabber (Fix round (simulator)). A `swipe from: id` is a flick from the
-# element's centre, which the scroller takes as a scroll, so the sheet never left
-# M in the gate run; and Tools' LIST does not expand the sheet even with a slow
-# drag (run 1795476170131: the list scrolled, the sheet stayed at M — an open
-# finding, see the doc), so the head carries the detent changes here.
-# Medium → large (M's head ≈ 53–60 %, L's ≈ 7–14 % of the screen).
-- swipe:
-    start: "50%, 56%"
-    end: "50%, 8%"
-    duration: 900
-- waitForAnimationToEnd
+# Every drag below is a SLOW coordinate drag (Fix round (simulator)): a
+# `swipe from: id` is a flick from the element's centre, which the scroller takes
+# as a scroll. Medium → large is a drag on the LIST (`_sheet-expand`): with no
+# pull-to-refresh on it (owner A, Fix round 2) the list at its top hands the drag
+# to the sheet, like Session info's and Permission's (run 1795476170131, with the
+# pull still there: the list scrolled and the sheet stayed at M).
+- runFlow: _sheet-expand.yaml
 # THE L PROOF: (4 %, 30 %) is the dimmed backdrop at M — a tap there dismisses
 # the sheet — and the sheet's own empty side margin at L. So the sheet is still
 # up after it only if it really is at L.
@@ -106,8 +101,8 @@ appId: so.tentacle.app
     env:
       SHOT: "42-tools-L"
 # Large → medium → small: two slow drags DOWN, each starting on the pinned head
-# just under the grabber (L ≈ 7 %, M ≈ 53 % of the screen), so no scroller and no
-# refresh control takes them, each ending at the next detent's top edge.
+# just under the grabber (L ≈ 7 %, M ≈ 53 % of the screen), so the scroller does
+# not take them, each ending at the next detent's top edge.
 - swipe:
     start: "50%, 9%"
     end: "50%, 54%"
@@ -130,12 +125,8 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "42-tools-S"
-# Back up (small → large), the same slow drag on the head (S's ≈ 73–80 %).
-- swipe:
-    start: "50%, 75%"
-    end: "50%, 8%"
-    duration: 900
-- waitForAnimationToEnd
+# Back up (small → large), the same slow drag on the list.
+- runFlow: _sheet-expand.yaml
 - assertVisible:
     id: "tools-refresh"
 - tapOn:

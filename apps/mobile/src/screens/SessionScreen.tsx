@@ -1007,7 +1007,6 @@ export function SessionScreen({
   const [toolsSegment, setToolsSegment] = useState<ToolsSegmentId>("mcp");
   const [toolsQuery, setToolsQuery] = useState("");
   const [toolsExpanded, setToolsExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  const [toolsRefreshing, setToolsRefreshing] = useState(false);
   // A reveal in flight (docs/feat/mobile-hub.md H4a): the hub's Scheduled item
   // opens this sheet scrolled to SCHEDULED WAKES. The rule is `session-info.ts`'s
   // (`revealStart`/`revealStep`) and the fold is `reveal-report.ts`'s; the screen
@@ -1142,10 +1141,9 @@ export function SessionScreen({
   const openArtifactsFromInfo = () => {
     setAfterDismiss((queue) => queueAfterDismiss(queue, "artifacts"));
   };
-  /** A pull-to-refresh or a Retry: the same `refreshInfo` Session info uses. */
+  /** Tools' Refresh link or Retry: the same `refreshInfo` Session info uses. */
   const refreshTools = () => {
-    setToolsRefreshing(true);
-    void controller.refreshInfo().finally(() => setToolsRefreshing(false));
+    void controller.refreshInfo();
   };
   // The hub (docs/feat/mobile-hub.md H3): the attach chooser, shared with the
   // composer's photo button — one path, not two.
@@ -1340,7 +1338,6 @@ export function SessionScreen({
             })
           }
           onRefresh={refreshTools}
-          refreshing={toolsRefreshing}
           onClose={closeTools}
         />,
       );

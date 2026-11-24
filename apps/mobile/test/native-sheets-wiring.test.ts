@@ -312,6 +312,37 @@ describe("S4 — `Sheet`'s `native` variant (D4)", () => {
     expect(UI_SHEET).toContain("borderTopRightRadius: native ? 0 : radius.sheet");
   });
 
+  test("no native sheet's scroller carries a RefreshControl (it takes the expand gesture)", () => {
+    // Fix round 2 (owner A): with a RefreshControl on Tools' one scroller, a drag
+    // on the list scrolled the list and the sheet stayed at M (run 1795476170131),
+    // while Session info and Permission — no RefreshControl — expanded to L
+    // (`sheetExpandsWhenScrolledToEdge`). The pull is gone; `Sheet` cannot take one.
+    expect(UI_SHEET).not.toContain("refreshControl");
+    expect(UI_SHEET).not.toContain("RefreshControl");
+    for (const [name, src] of [
+      ["ToolsSheet", TOOLS],
+      ["SessionInfoSheet", INFO],
+      ["CommandsSheet", code(read("src", "screens", "CommandsSheet.tsx"))],
+      ["PermissionSheet", code(read("src", "screens", "PermissionSheet.tsx"))],
+    ] as const) {
+      expect({ name, pull: src.includes("RefreshControl") }).toEqual({ name, pull: false });
+    }
+  });
+
+  test("Tools refreshes by itself: a pull on open, and a re-publish on every data change", () => {
+    const screen = code(read("src", "screens", "SessionScreen.tsx"));
+    // Open → the controller's pull (the same one Session info uses).
+    expect(sliceOf(screen, "const openTools = () => {", "\n  };")).toContain(
+      "void controller.openInfo();",
+    );
+    // Data → the sheet: the element is rebuilt from the controller's `info.tools`
+    // in the publish effect that runs on every render (no deps array).
+    const publish = sliceOf(screen, 'host.publish(\n        "tools",', "/>,");
+    expect(publish).toContain("view={toolsView(info.tools, {");
+    // The explicit way stays: the sheet's Refresh link / Retry row.
+    expect(publish).toContain("onRefresh={refreshTools}");
+  });
+
   test("the close glyph is drawn LAST, above the title it shares a row with", () => {
     // Fix round (simulator): without the drawn grabber (native) the title moves up
     // onto the close glyph's row, and a full-width title drawn AFTER the glyph sits
@@ -390,9 +421,10 @@ describe("S4 — Tools and Session info hand their list to `Sheet`'s ONE scrolle
     // `Sheet`'s default (which is the flat sheet).
     expect(body).toMatch(/\n\s+scroll\n/);
     expect(body).toMatch(/\n\s+native\n/);
-    // The pull-to-refresh and the keyboard contract ride the ONE scroller now.
+    // The keyboard contract rides the ONE scroller; it takes NO pull-to-refresh
+    // (owner A, Fix round 2: the pull took the drag that expands the sheet).
     expect(body).toContain('scrollTestID="tools-scroll"');
-    expect(body).toContain("refreshControl={");
+    expect(body).not.toContain("refreshControl={");
     // The keyboard contract is the scroller's, and the scroller is `Sheet`'s.
     expect(UI_SHEET).toContain('keyboardShouldPersistTaps="handled"');
   });
