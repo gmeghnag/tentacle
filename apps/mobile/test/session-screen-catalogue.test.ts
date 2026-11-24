@@ -171,7 +171,7 @@ describe("the session screen's workflow catalogue", () => {
     await screen.open();
     await settle();
     const ready = { kind: "ready", runs: [], offline: null } as const;
-    expect(workflowsHub(ready, catalogueFigure(screen.state().catalogue)).empty).toBe(
+    expect(workflowsHub(ready, catalogueFigure(screen.state().catalogue))?.empty).toBe(
       "No workflows in this project",
     );
     h.next.answer = oneWorkflow;
