@@ -88,6 +88,13 @@ export interface WorkflowEditScreenProps {
   /** `changed` → Keep editing: the banner goes, the draft stays. */
   readonly onKeepEditing: () => void;
   readonly onOpenSession: () => void;
+  /**
+   * The title tapped: the workflow's Settings (D8, slice 7b: name, description,
+   * inputs, budget). The mockup's entry is "dal titolo", and the title carries no
+   * other meaning here — the file's name is not renamed from this screen (D8 has no
+   * rename), so the tap has nothing else it could be.
+   */
+  readonly onSettings: () => void;
 }
 
 /** Everything the screen may ask of the draft, and nothing more. */
@@ -459,6 +466,10 @@ export function WorkflowEditScreen(props: WorkflowEditScreenProps): JSX.Element 
           phase: state.kind,
           savedVersion: state.saved?.version ?? null,
         })}
+        titleTestID="workflow-edit-title"
+        onTitlePress={props.onSettings}
+        titlePressLabel="Settings"
+        titlePressHint="Opens the workflow's name, description, inputs and budget"
         left={
           <Pressable
             testID="workflow-edit-cancel"

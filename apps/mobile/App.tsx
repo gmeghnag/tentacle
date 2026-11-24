@@ -189,6 +189,7 @@ import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
 import { WorkflowEditScreen, type WorkflowEditScreenProps } from "./src/screens/WorkflowEdit.tsx";
+import { WorkflowEditSheets } from "./src/screens/WorkflowEditSheets.tsx";
 import { WorkflowRunScreen } from "./src/screens/WorkflowRun.tsx";
 import { WorkflowRunsScreen } from "./src/screens/WorkflowRuns.tsx";
 import { WorkflowStartScreen } from "./src/screens/WorkflowStart.tsx";
@@ -252,6 +253,21 @@ import {
   createWorkflowEditController,
 } from "./src/workflow-edit-controller.ts";
 import { editGeometry, validDropTargets } from "./src/workflow-edit-graph.ts";
+import {
+  type SheetAction,
+  type SheetActions,
+  type SheetModel,
+  type SheetRequest,
+  afterSheet,
+  applySheetAction,
+  choiceAction,
+  segmentAction,
+  sheetAfterAction,
+  sheetForIntent,
+  sheetModel,
+  stepperAction,
+  textAction,
+} from "./src/workflow-edit-sheets.ts";
 import {
   type RunMode,
   type RunState,
@@ -2315,6 +2331,13 @@ function WorkflowEditRoute({
   const [armed, setArmed] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [dropTargets, setDropTargets] = useState<readonly string[]>([]);
+  /**
+   * The sheet that is up (`null` = the graph). It is a `SheetRequest`, not a
+   * model: which sheet a gesture opens is `sheetForIntent`'s answer, and what it
+   * draws is re-derived from the draft on screen on every render, so a refusal or
+   * an edit can never leave a stale value behind (slice 7b).
+   */
+  const [sheet, setSheet] = useState<SheetRequest | null>(null);
   useEffect(() => {
     let live = true;
     let created: WorkflowEditController | null = null;
@@ -2370,17 +2393,53 @@ function WorkflowEditRoute({
   const geometry = editGeometry(state.draft ?? {}, state.problems);
 
   /**
+   * What the sheet on screen draws, or `null` when none is up (or there is no
+   * draft to draw it from): `sheetModel` of the draft on screen, never of an edit.
+   */
+  const sheetView =
+    sheet === null || state.draft === null
+      ? null
+      : sheetModel({
+          request: sheet,
+          draft: state.draft,
+          prompts: state.prompts,
+          ...(state.context?.models === undefined ? {} : { models: state.context.models }),
+          ...(state.context?.agentTypes === undefined
+            ? {}
+            : { agentTypes: state.context.agentTypes }),
+          notice: state.notice,
+        });
+
+  /**
+   * Everything a sheet may ask of the draft: the controller's own methods, mapped
+   * one for one, so a control's meaning stays in `workflow-edit-sheets.ts`.
+   */
+  const sheetActions: SheetActions = {
+    insert: (at, kind) => controller.insert(at, kind),
+    patch: (id, patch) => controller.patch(id, patch),
+    rename: (id, to) => controller.rename(id, to),
+    prompt: (id, prompt) => controller.prompt(id, prompt),
+    setRetry: (id, retry) => controller.setRetry(id, retry),
+    setFail: (id, target, max) => controller.setFail(id, target, max),
+    setGotoMax: (id, max) => controller.setGotoMax(id, max),
+    setNext: (id, target) => controller.setNext(id, target),
+    edit: (change) => void controller.edit(change),
+  };
+
+  /**
    * One door for every gesture and every menu row: `applyIntent` decides which
    * controller method an intent is, and a refusal lands on the bar by itself (the
-   * controller's `notice`), so nothing is branched here. `insert` and `open` need
-   * slice 7b's sheets, and are therefore absent — their intent is reported and
-   * dropped, never guessed at.
+   * controller's `notice`), so nothing is branched here. `insert` opens the kind
+   * picker and `open` the step (or its `✗` counter): both are STATES, set through
+   * `sheetForIntent`, so the same `applyIntent` carries every gesture.
    */
   const act = (result: GestureResult): void => {
     setArmed(result.armed);
     setDropTargets(result.armed === null ? [] : validDropTargets(geometry, result.armed));
     applyIntent(
       {
+        insert: (at) => setSheet(sheetForIntent({ kind: "insert", at })),
+        open: (id, which) => setSheet(sheetForIntent({ kind: "open", id, which })),
         duplicate: (id) => controller.duplicate(id),
         move: (id, by) => controller.move(id, by),
         remove: (id) => {
@@ -2415,47 +2474,77 @@ function WorkflowEditRoute({
     ]);
   };
 
+  /**
+   * A control pressed, turned into the ONE controller call it means: the action is
+   * `workflow-edit-sheets.ts`'s, `applySheetAction` carries it out, and
+   * `sheetAfterAction` says where the sheet goes (a refusal keeps it up). With no
+   * sheet up (or no draft) there is nothing to press, so nothing is applied.
+   */
+  const control = (action: (model: SheetModel) => SheetAction | null): void => {
+    if (sheet !== null && sheetView !== null) {
+      const decided = action(sheetView);
+      applySheetAction(sheetActions, decided);
+      setSheet(sheetAfterAction(sheet, decided));
+    }
+  };
+
   return (
-    <WorkflowEditScreen
-      palette={palette}
-      state={state}
-      title={name ?? "New workflow"}
-      canSave={controller.canSave()}
-      steps={drawnSteps(state.draft ?? {})}
-      geometry={state.draft === null ? null : geometry}
-      onCancel={cancel}
-      onSave={() => controller.beginReview()}
-      onReload={() => controller.reload()}
-      onKeepEditing={() => controller.keepEditing()}
-      onOpenSession={onBack}
-      actions={{
-        tap: (target) => act(tapIntent(armed, target)),
-        release: (portId, locationX, locationY) =>
-          act(portRelease(armed, geometry, portId, locationX, locationY)),
-        longPress: (id) => {
-          // The note under Delete is the CORE's own count (`deleteStep`'s
-          // `dangling`), read on a throwaway draft: the same words the operation
-          // will report, and the draft on screen is never touched.
-          setMenu(
-            state.draft === null
-              ? null
-              : { id, ...menuInputs({ draft: state.draft, prompts: state.prompts, id }) },
-          );
-          playHaptic("light");
-        },
-        menu: (intent) => act(menuGesture(intent)),
-        armed,
-        dropTargets,
-      }}
-      menu={menu}
-      onDismissMenu={() => setMenu(null)}
-      toast={toast}
-      onUndo={() => {
-        controller.undo();
-        setToast(null);
-      }}
-      onDismissToast={() => setToast(null)}
-    />
+    <>
+      <WorkflowEditScreen
+        palette={palette}
+        state={state}
+        title={name ?? "New workflow"}
+        canSave={controller.canSave()}
+        steps={drawnSteps(state.draft ?? {})}
+        geometry={state.draft === null ? null : geometry}
+        onCancel={cancel}
+        onSave={() => controller.beginReview()}
+        onReload={() => controller.reload()}
+        onKeepEditing={() => controller.keepEditing()}
+        onOpenSession={onBack}
+        onSettings={() => setSheet({ kind: "settings" })}
+        actions={{
+          tap: (target) => act(tapIntent(armed, target)),
+          release: (portId, locationX, locationY) =>
+            act(portRelease(armed, geometry, portId, locationX, locationY)),
+          longPress: (id) => {
+            // The note under Delete is the CORE's own count (`deleteStep`'s
+            // `dangling`), read on a throwaway draft: the same words the operation
+            // will report, and the draft on screen is never touched.
+            setMenu(
+              state.draft === null
+                ? null
+                : { id, ...menuInputs({ draft: state.draft, prompts: state.prompts, id }) },
+            );
+            playHaptic("light");
+          },
+          menu: (intent) => act(menuGesture(intent)),
+          armed,
+          dropTargets,
+        }}
+        menu={menu}
+        onDismissMenu={() => setMenu(null)}
+        toast={toast}
+        onUndo={() => {
+          controller.undo();
+          setToast(null);
+        }}
+        onDismissToast={() => setToast(null)}
+      />
+      <WorkflowEditSheets
+        palette={palette}
+        model={sheetView}
+        // A picker's close hands back the step it belongs to (`afterSheet`), so
+        // backing out of "go to" lands on the sheet that opened it, not the graph.
+        onClose={() => setSheet(sheet === null ? null : afterSheet(sheet))}
+        onDone={() => setSheet(sheet === null ? null : afterSheet(sheet))}
+        onText={(key, value) => control((model) => textAction(model, key, value))}
+        onStep={(key, delta) => control((model) => stepperAction(model, key, delta))}
+        onSegment={(key, option) => control((model) => segmentAction(model, key, option))}
+        onChoice={(key, value) => control((model) => choiceAction(model, key, value))}
+        onOpen={(next) => setSheet(next)}
+      />
+    </>
   );
 }
 

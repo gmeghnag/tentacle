@@ -31,6 +31,14 @@ export interface ScreenHeaderProps {
    * the screen's own name, not something a person names.
    */
   readonly onTitlePress?: () => void;
+  /**
+   * What VoiceOver calls the title's tap, and what the tap does. Defaulted to the
+   * chat's Rename: the editor's title opens the workflow's Settings instead
+   * (docs/feat/workflow-editor.md D8), and a header that said "Rename" over it
+   * would be a lie a screen reader cannot see past.
+   */
+  readonly titlePressLabel?: string;
+  readonly titlePressHint?: string;
   /** Compact only: drawn BEFORE the title (the chat's state dot). */
   readonly titleLead?: ReactNode;
   /** Compact only: the title in the secondary colour (an ended session). */
@@ -49,6 +57,8 @@ export function ScreenHeader({
   insetTop = true,
   titleTestID,
   onTitlePress,
+  titlePressLabel = "Rename",
+  titlePressHint = "Opens a field to rename this session",
   titleLead,
   titleDim = false,
   titleLabel,
@@ -104,8 +114,8 @@ export function ScreenHeader({
             <Pressable
               testID={`${titleTestID ?? "header-title"}-tap`}
               accessibilityRole="button"
-              accessibilityLabel={`${spoken}. Rename`}
-              accessibilityHint="Opens a field to rename this session"
+              accessibilityLabel={`${spoken}. ${titlePressLabel}`}
+              accessibilityHint={titlePressHint}
               onPress={onTitlePress}
             >
               {heading}

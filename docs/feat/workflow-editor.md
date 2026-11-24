@@ -2187,3 +2187,91 @@ second fragment. **No schema change** → `protocol.json` needs no regeneration.
 the `ScrollView` on a device (e2e E4, 7c).
 
 *— claude-opus-5-5 (executor, resume/finish of slice 7a), 2026-11-24*
+
+### Slice 7b — step / kind / goto / max / settings sheets (D8) — DONE
+
+**PARTIAL check re-run first:** `RemoteSession.workflowSave` at `packages/client/src/remote-session.ts:1411`,
+and `insertStep` at `packages/core/src/workflow-draft.ts:221`. Both present → not PARTIAL.
+
+**Files.**
+- New `apps/mobile/src/workflow-edit-sheets.ts` (pure, React-free): which sheet a gesture opens
+  (`sheetForIntent`, `sheetForLabel`), what it draws (`kindSheet`, `stepSheet`, `pickSheet`,
+  `maxSheet`, `settingsSheet`, `sheetModel`), what a control ends in (`textAction`, `stepperAction`,
+  `segmentAction`, `choiceAction`, `pickOpens`, `stepped`, `withInput`, `withDescription`), where the
+  sheet goes afterwards (`afterSheet`, `sheetAfterAction`), and the single door to the controller
+  (`applySheetAction`). Every value is read from the draft on screen, never from control state.
+  **Drift:** not in the Files table (`screens/WorkflowEditSheets.tsx` + "wiring test additions" only),
+  the same accepted drift as 7a's `workflow-edit-actions.ts`: AGENTS §7 keeps the branching out of the
+  `.tsx`, which is unimportable from Bun anyway.
+- New `apps/mobile/test/workflow-edit-sheets.test.ts`.
+- New `apps/mobile/src/screens/WorkflowEditSheets.tsx` (dumb renderer, a `Modal` overlay, detent as a
+  fraction of the window height; testIDs `workflow-sheet`, `…-cancel`, `…-title`, `…-done`, `…-note`,
+  `…-section-N`, `…-field-KEY`, `…-input-KEY`, `…-stepper-KEY`/`minus`/`plus`/`value`,
+  `…-seg-KEY`/`…-seg-KEY-OPTION`, `…-choice-KEY-VALUE` (`-default` for the empty value), `…-pick-KEY`).
+- `apps/mobile/App.tsx` (`WorkflowEditRoute`): a `SheetRequest | null` state, `sheetView` re-derived
+  from `state.draft` + `state.prompts` + `state.context` on every render, `sheetActions` mapped one for
+  one onto the controller, `act()` now supplies `insert`/`open` (they were absent, hence dropped), and
+  one `control()` helper that applies the action and then lets `sheetAfterAction` decide where the
+  sheet goes. No `!` assertion anywhere: the helper guards `sheet !== null && sheetView !== null`.
+- `apps/mobile/src/screens/WorkflowEdit.tsx`: an `onSettings` prop, passed to the header title.
+- `apps/mobile/src/ui/ScreenHeader.tsx`: `titlePressLabel`/`titlePressHint`, defaulted to the chat's
+  Rename, so the editor's title tap can be called "Settings" for VoiceOver instead of lying.
+
+**Where Settings is reached (drift, resolved).** D8 says Settings is "from the title"; the mockup opens
+it from the editor's title too (`.tentacle/mockups/workflow-editor/index.artifact.html:5754`, a sheet
+with `‹ Graph / Settings`). The header's existing `onTitlePress` seam was reused, and its hardcoded
+Rename label/hint were made parameters with the old values as defaults — so `SessionScreen`'s behaviour
+is byte-for-byte unchanged and 7a's header contract (Cancel / title + caption / Save dim-never-hidden)
+still holds: no new button, and no `<Modal>` in `WorkflowEdit.tsx`. The alternative (a long-press on the
+title) was rejected as undiscoverable and untestable from the source.
+
+**One rule found by its own test.** `sheetAfterAction` first dismissed every sheet after any control
+fired. The new test "a stepper press or a tick stays inside its own sheet" was red on it: the mockup's
+`− 2 +` is pressed repeatedly. The rule is now: a refusal (`null` action) keeps the sheet up; a picked
+KIND closes the picker (the step is on the graph); anything else stays in its sheet, except a picker's
+target, which hands back the step that opened it (`afterSheet`).
+
+**Red → green.** The sheets test file was written against the new module and its 33 tests were green on
+first run, so they are NOT the red evidence (the module did not exist before, which is the weaker
+"unimplemented" red). The real red-first evidence is the mutation battery below plus the one rule the
+battery's sibling test caught red: `sheetAfterAction`'s "stays in its sheet" rule (38 pass / 1 fail →
+39 pass / 0 fail). Wiring test: 22 → 32 tests, all green.
+
+**Mutations** (each applied, the suite run, then restored; `shasum` asserted byte-identity after every
+restore, and the backup was written ONCE before the first mutation). Script:
+`.tentacle/tmp/workflow-editor/s7b/battery.sh` (gitignored, so pasted here).
+
+| Mutation in `workflow-edit-sheets.ts` | Killed by (`workflow-edit-sheets.test.ts`) |
+|---|---|
+| m1 `sheetForLabel` sends a `fail` label to the step sheet | "a step opens its own sheet; its `✗` label opens the COUNTER" (1 fail) |
+| m2 `choiceAction` drops the whole offered/off guard | "the step itself cannot be picked: the DIM row writes nothing" (1 fail) |
+| m2b `choiceAction` drops only the `off` half | **survives** — see below (0 fail) |
+| m3 `stepperAction` drops `controlOf` | "every control ends in exactly ONE controller call", "a control the sheet does not have does nothing at all", "the steppers stop at the validator's own range" (3 fail) |
+| m4 `withInput` writes `{required:true, default:"x"}` | "an input is required OR has a default, never both (the validator's rule)" (1 fail) |
+| m5 `textAction`'s timeout accepts any string | "a timeout that is not a duration sends nothing" (1 fail) |
+
+**m2b is an honest gap, and it is provably redundant rather than untested.** The only choice drawn
+`off` is the step itself in the goto picker, and its `value` is `""`; `choiceAction`'s later
+`return value === "" ? null : …` refuses it anyway. So the `off` half of the guard cannot change the
+file through this API: dropping it is behaviour-preserving, and no test can distinguish it. The
+*whole* guard is what matters (a stale render's unknown value), and m2 kills that.
+
+**Checks run (narrow only; the orchestrator runs the gate after this slice):**
+- `bun test apps/mobile/test/workflow-edit-sheets.test.ts apps/mobile/test/workflow-edit-wiring.test.ts`:
+  71 pass / 0 fail;
+- `bun test apps/mobile/test/workflow-edit-*.test.ts`: 178 pass / 0 fail (5 files);
+- `bun test apps/mobile/test` (all 328 files): 5185 pass / 0 fail — run because the
+  `ScreenHeader` and `WorkflowEdit` edits are shared and source-read by other wiring tests;
+- `npx tsc --noEmit -p apps/mobile`: clean;
+- `bunx biome check` on the 6 changed/new files: clean.
+
+**Changelog:** `changelog.d/workflow-editor.added.md` already exists (commit 26a4aa6b) and covers the
+phone editor; 7b adds no user-visible capability of its own (the sheets are how the editor's existing
+"Edit a workflow" works), so no second fragment. **No schema change** → `protocol.json` untouched.
+
+**Left for 7c:** the Review screen (`beginReview()` still lands on the graph with "nothing written yet")
+and the New-workflow sheet — `settingsSheet` covers description/inputs/budget but the create flow's
+name-from-nothing screen, the templates picker and the e2e flow are 7c's. Also unverified here: the
+sheet's keyboard avoidance on a small device (a `text` field inside the `Modal`) — e2e E4 in 7c.
+
+*— claude-opus-5-5, 2026-11-24*

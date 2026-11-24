@@ -13,7 +13,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-
 const ROOT = join(import.meta.dir, "..");
 const read = (...p: string[]) => readFileSync(join(ROOT, ...p), "utf8");
 
@@ -27,6 +26,7 @@ const code = (src: string) =>
 const APP = code(read("App.tsx"));
 const ROUTES = code(read("src", "routes.ts"));
 const EDIT = code(read("src", "screens", "WorkflowEdit.tsx"));
+const SHEETS = code(read("src", "screens", "WorkflowEditSheets.tsx"));
 const RUNS = code(read("src", "screens", "WorkflowRuns.tsx"));
 const START = code(read("src", "screens", "WorkflowStart.tsx"));
 
@@ -246,5 +246,150 @@ describe("the entries into the editor", () => {
     // Identity only: the session and the file's name, never a draft.
     expect(APP).toContain("computerId: route.params.computerId");
     expect(APP).toContain("sessionId: route.params.sessionId");
+  });
+});
+
+/**
+ * Slice 7b: the sheets. The same rule as above, one layer further — the ROUTE holds
+ * the sheet (a state), the pure module decides which one and what a control means,
+ * and `WorkflowEditSheets.tsx` paints it. A `1` here is a rule in the wrong file.
+ */
+describe("the sheets are a state on the route, decided by the module (7b)", () => {
+  const route = between(APP, "function WorkflowEditRoute", "\nfunction ");
+
+  test("`insert` and `open` are no longer dropped: they open a sheet", () => {
+    // 7a reported them and lost them. The kind picker and the step sheet are the
+    // two gestures the graph is FOR, so the intent must reach them.
+    expect(route).toContain("insert: (at) => setSheet(sheetForIntent({");
+    expect(route).toContain("open: (id, which) => setSheet(sheetForIntent({");
+    // Both through the module's ONE answer, never a `{kind: …}` built here.
+    expect(route.split("sheetForIntent(").length - 1).toBe(2);
+  });
+
+  test("the sheet is re-derived from the draft on screen, never stored", () => {
+    // A stored model would keep a stepper value or a deleted step's title after
+    // the edit that changed it: `sheetModel` reads the draft each render.
+    expect(route).toContain("sheetModel({");
+    expect(route).toContain("draft: state.draft");
+    expect(route).toContain("prompts: state.prompts");
+    // The session's own vocabulary, optional: a session with no picker named sends
+    // no list, which the model reads as "this sheet has no model row".
+    expect(route).toContain("state.context?.models");
+    expect(route).toContain("state.context?.agentTypes");
+    // The controller's refusal is the sheet's note, verbatim.
+    expect(route).toContain("notice: state.notice");
+  });
+
+  test("a control ends in ONE controller call, through `applySheetAction`", () => {
+    for (const call of [
+      "applySheetAction(",
+      "textAction(",
+      "stepperAction(",
+      "segmentAction(",
+      "choiceAction(",
+      "sheetAfterAction(",
+    ]) {
+      expect(route).toContain(call);
+    }
+    // The mapping is one method for one action: no branch, no second meaning.
+    for (const method of [
+      "controller.insert(",
+      "controller.patch(",
+      "controller.rename(",
+      "controller.prompt(",
+      "controller.setRetry(",
+      "controller.setFail(",
+      "controller.setGotoMax(",
+      "controller.setNext(",
+      "controller.edit(",
+    ]) {
+      expect(route).toContain(method);
+    }
+  });
+
+  test("no `!` assertion anywhere in the sheet path: a missing model is a guard", () => {
+    // The repo's style, and here it is also the only safe shape: an assertion would
+    // reach a control's handler while `sheetModel` had just returned null (a step
+    // deleted under the sheet), and throw on the render thread.
+    for (const source of [route, SHEETS, code(read("src", "workflow-edit-sheets.ts"))]) {
+      expect(source).not.toMatch(/\bmodel!/);
+      expect(source).not.toMatch(/sheetView!/);
+      expect(source).not.toMatch(/\bmodel\)!/);
+    }
+    // What it does instead: a guard, and `null` is the module's own "do nothing".
+    expect(route).toContain("if (sheet !== null && sheetView !== null)");
+  });
+
+  test("Settings is reachable: the mockup's entry is the title", () => {
+    // D8 lists the workflow Settings (description, inputs, budget) and the mockup
+    // opens them "dal titolo". Nothing else on this screen could mean Settings, and
+    // the file's name is not renamed here.
+    expect(route).toContain('setSheet({ kind: "settings" })');
+    expect(EDIT).toContain("onTitlePress={props.onSettings}");
+    // The header keeps its Cancel / title / Save shape: Settings is the TITLE tap,
+    // not a third button (7a's header contract, asserted above).
+    expect(EDIT).toContain('titleTestID="workflow-edit-title"');
+  });
+});
+
+describe("the sheet screen is a dumb renderer (7b)", () => {
+  test("no effect, no wire call, no controller: every rule is the module's", () => {
+    expect(SHEETS).not.toContain("useEffect");
+    expect(SHEETS).not.toContain("workflowSave");
+    expect(SHEETS).not.toContain("workflowSource");
+    expect(SHEETS).not.toContain("controller.");
+    // Not one decision either: the model arrives decided.
+    for (const call of [
+      "textAction(",
+      "stepperAction(",
+      "segmentAction(",
+      "choiceAction(",
+      "sheetModel(",
+      "sheetForIntent(",
+      "applySheetAction(",
+    ]) {
+      expect(SHEETS).not.toContain(call);
+    }
+    // What it DOES read: the types and the detent table.
+    expect(SHEETS).toContain("SheetModel");
+    expect(SHEETS).toContain("SHEET_DETENT");
+  });
+
+  test("it is a Modal overlay, not a stack route: the graph stays underneath", () => {
+    expect(SHEETS).toContain("<Modal");
+    expect(SHEETS).not.toContain("navigate(");
+    // The detent is a fraction of the window, so "short" is short on every device.
+    expect(SHEETS).toContain("useWindowDimensions");
+    expect(SHEETS).toContain("SHEET_DETENT[detent]");
+  });
+
+  test("every control is named, so the e2e flow can press it (7c)", () => {
+    for (const id of [
+      "workflow-sheet",
+      "workflow-sheet-cancel",
+      "workflow-sheet-title",
+      "workflow-sheet-done",
+      "workflow-sheet-scroll",
+      "workflow-sheet-section-",
+      "workflow-sheet-field-",
+      "workflow-sheet-input-",
+      "workflow-sheet-stepper-",
+      "workflow-sheet-minus-",
+      "workflow-sheet-plus-",
+      "workflow-sheet-value-",
+      "workflow-sheet-seg-",
+      "workflow-sheet-choice-",
+      "workflow-sheet-pick-",
+    ]) {
+      expect(SHEETS).toContain(id);
+    }
+  });
+
+  test("a disabled row says why in the words it is disabled with", () => {
+    // The goto picker's `itself — use Retry instead` (the core's own sentence) is a
+    // `sub` on a row that cannot be pressed: dim AND explained, never just dim.
+    expect(SHEETS).toContain("choice.off ? styles.dim : null");
+    expect(SHEETS).toContain("disabled={choice.off}");
+    expect(SHEETS).toContain("choice.sub");
   });
 });
