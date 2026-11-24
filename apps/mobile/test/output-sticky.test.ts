@@ -15,6 +15,7 @@ const block = (key: string, top: number, bottom: number): StickyBlock => ({
   bodyTop: top + 40,
   lineH: 17,
   lines: Math.floor((bottom - top - 40) / 17),
+  lineOffset: 0,
 });
 
 describe("stickyState", () => {
@@ -95,5 +96,43 @@ describe("openOutputSteps: which rows can stick", () => {
     const rows = [row("a", lines(400))];
     expect(openOutputSteps(rows, [], [], new Map(), false).size).toBe(0);
     expect(openOutputSteps(rows, ["a"], ["a"], new Map(), false).get("a")?.total).toBe(400);
+  });
+});
+
+describe("cut output: «line X of N» counts the hidden head", () => {
+  const lines = (n: number): string => Array.from({ length: n }, (_, i) => `l${i + 1}`).join("\n");
+  test("openOutputSteps → stickyState with full=[] reports the real line", () => {
+    const rows: Row[] = [
+      {
+        kind: "tool",
+        key: "a",
+        id: "a",
+        name: "shell",
+        label: "Bash",
+        args: JSON.stringify({ command: "bun test" }),
+        status: "ok",
+        output: lines(400),
+      },
+    ];
+    const step = openOutputSteps(rows, ["a"], [], new Map(), false).get("a");
+    expect(step?.skipped).toBeGreaterThan(0);
+    const b: StickyBlock = {
+      key: "a",
+      top: 0,
+      bottom: 400,
+      headH: 40,
+      bodyTop: 40,
+      lineH: 17,
+      lines: step?.total ?? 0,
+      lineOffset: step?.skipped ?? 0,
+    };
+    // Screen top at the body start: the first DRAWN line is line skipped+1.
+    expect(stickyState(0, [b])?.line).toBe((step?.skipped ?? 0) + 1);
+    expect(stickyState(0, [b])?.total).toBe(400);
+  });
+
+  test("a short open output (2 lines) never sticks", () => {
+    const short: StickyBlock = { ...block("s", 0, 40 + 2 * 17 + 8), lines: 2 };
+    expect(stickyState(10, [short])).toBeNull();
   });
 });

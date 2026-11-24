@@ -45,8 +45,17 @@ describe("SessionScreen: the sticky overlay is a read-only tap-in", () => {
     const scroll = src.slice(src.indexOf("const onScroll = useCallback("));
     expect(scroll.slice(0, 400)).toContain("recomputeSticky.current()");
     expect(src).toContain("CellRendererComponent={MeasuredCell}");
-    expect(src).toContain("<StickyStep");
+    expect(src).toContain("<StickyHost");
     expect(src).toContain("cellActions.current.onToggle(key)");
+  });
+
+  test("the screen owns NO sticky state: a scroll redraws only the host", () => {
+    const src = read("screens", "SessionScreen.tsx");
+    expect(src).not.toContain("setSticky");
+    expect(src).not.toMatch(/const \[sticky,/);
+    const host = read("ui", "StickyStep.tsx");
+    expect(host).toContain("useState");
+    expect(host).toContain("useImperativeHandle");
   });
 });
 

@@ -4,9 +4,9 @@
  * the top of the transcript; `offsetY` slides it up while the block's end (or the
  * next block) pushes it away. Presentation only — `output-sticky.ts` decides.
  */
-import type { JSX } from "react";
+import { type JSX, forwardRef, useImperativeHandle, useRef, useState } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
-import type { StickyState } from "../output-sticky.ts";
+import { type StickyState, sameSticky } from "../output-sticky.ts";
 import { MONO, type Palette, typography } from "../theme.ts";
 import { Text } from "./Text.tsx";
 
@@ -53,6 +53,56 @@ export function StickyStep({ state, label, palette, onCollapse }: StickyStepProp
     </View>
   );
 }
+
+/** What the screen pushes into the host (it owns no sticky state itself). */
+export interface StickyHostHandle {
+  /** Show `state` (null hides). Re-renders ONLY the host, and only on a change. */
+  set(state: StickyState | null, label: string): void;
+  /** The key the overlay shows now, or null. */
+  key(): string | null;
+}
+
+export interface StickyHostProps {
+  readonly palette: Palette;
+  readonly onCollapse: () => void;
+}
+
+/**
+ * Owns the sticky state so a scroll redraws only this overlay, never the whole
+ * `SessionScreen` (review round 1, finding 2).
+ */
+export const StickyHost = forwardRef<StickyHostHandle, StickyHostProps>(function StickyHost(
+  { palette, onCollapse },
+  ref,
+): JSX.Element | null {
+  const [shown, setShown] = useState<{ state: StickyState; label: string } | null>(null);
+  const current = useRef<{ state: StickyState; label: string } | null>(null);
+  useImperativeHandle(
+    ref,
+    () => ({
+      set(state, label) {
+        const prev = current.current;
+        if (
+          state === null
+            ? prev === null
+            : prev !== null && prev.label === label && sameSticky(prev.state, state)
+        ) {
+          return;
+        }
+        current.current = state === null ? null : { state, label };
+        setShown(current.current);
+      },
+      key: () => current.current?.state.key ?? null,
+    }),
+    [],
+  );
+  if (shown === null) {
+    return null;
+  }
+  return (
+    <StickyStep state={shown.state} label={shown.label} palette={palette} onCollapse={onCollapse} />
+  );
+});
 
 const styles = StyleSheet.create({
   row: {

@@ -124,13 +124,7 @@ import { linkPrompt } from "../links.ts";
 import { showsScene } from "../mascot-scenes.ts";
 import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
 import { noticeLooks } from "../notice-group.ts";
-import {
-  type StickyBlock,
-  type StickyState,
-  openOutputSteps,
-  sameSticky,
-  stickyState,
-} from "../output-sticky.ts";
+import { type StickyBlock, openOutputSteps, stickyState } from "../output-sticky.ts";
 import { PERF } from "../perf-probe.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
 import {
@@ -192,7 +186,7 @@ import { Icon, type IconName } from "../ui/Icon.tsx";
 import { MascotSceneLayer } from "../ui/MascotScene.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
-import { STICKY_HEAD_H, StickyStep } from "../ui/StickyStep.tsx";
+import { STICKY_HEAD_H, StickyHost, type StickyHostHandle } from "../ui/StickyStep.tsx";
 import { Text } from "../ui/Text.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import { DiagramRenderer } from "../ui/diagram/DiagramRenderer.tsx";
@@ -515,7 +509,7 @@ export function SessionScreen({
   // The sticky step row's decision, re-run on every scroll event (assigned below,
   // once the rows and the open state exist) and the key it currently shows.
   const recomputeSticky = useRef<() => void>(() => undefined);
-  const stickyKey = useRef<string | null>(null);
+  const stickyHost = useRef<StickyHostHandle>(null);
   const followRef = useRef<Follow>(initialFollow);
   const [follow, setFollow] = useState<Follow>(initialFollow);
   const jumpText = jumpPillText(follow);
@@ -806,8 +800,6 @@ export function SessionScreen({
   );
   const cellRects = useRef(new Map<string, CellRect>());
   const MeasuredCell = useMemo(() => measuredCell(cellRects.current), []);
-  const [sticky, setSticky] = useState<StickyState | null>(null);
-  stickyKey.current = sticky?.key ?? null;
   recomputeSticky.current = () => {
     const blocks: StickyBlock[] = [];
     for (const [key, step] of outputSteps) {
@@ -821,11 +813,12 @@ export function SessionScreen({
           bodyTop: rect.top + STICKY_HEAD_H,
           lineH: 17,
           lines: step.total,
+          lineOffset: step.skipped,
         });
       }
     }
     const next = stickyState(offset.current, blocks);
-    setSticky((prev) => (sameSticky(prev, next) ? prev : next));
+    stickyHost.current?.set(next, next === null ? "" : (outputSteps.get(next.key)?.label ?? ""));
   };
   // A collapse / expand while still: re-decide against the same offset.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `outputSteps` is the trigger
@@ -833,7 +826,7 @@ export function SessionScreen({
   // Collapse from the sticky row: the step row lands where the overlay was
   // (best effort — owner 24/11: ship without the exact landing if it jitters).
   const collapseSticky = useCallback(() => {
-    const key = stickyKey.current;
+    const key = stickyHost.current?.key() ?? null;
     if (key === null) {
       return;
     }
@@ -2003,14 +1996,7 @@ export function SessionScreen({
                 </View>
               }
             />
-            {sticky === null ? null : (
-              <StickyStep
-                state={sticky}
-                label={outputSteps.get(sticky.key)?.label ?? ""}
-                palette={palette}
-                onCollapse={collapseSticky}
-              />
-            )}
+            <StickyHost ref={stickyHost} palette={palette} onCollapse={collapseSticky} />
           </View>
           {/* Polpetto's entrance (docs/feat/mobile-mascot-scenes.md): one scene per
               EMPTY session, drawn OVER the (transparent) empty transcript. The

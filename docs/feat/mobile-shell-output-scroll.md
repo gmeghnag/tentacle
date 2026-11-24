@@ -73,6 +73,16 @@ As built (red → green each slice, narrow files only):
 
 Gate (narrow): `tsc -p apps/mobile` clean; biome clean on touched files; 484 tests pass across session-screen / transcript / tool-* / output-* / step-rail files. Full gate left to the script.
 
+### Fix round 1
+
+1. **«line X of N» on a cut output — FIXED.** `OutputStep.skipped` (= `view.output.hidden`) feeds `StickyBlock.lineOffset`; `stickyState` adds it (`output-sticky.ts`; blocks in `SessionScreen.tsx`). Test crosses `openOutputSteps` → `stickyState` with `full=[]` (red first: `skipped` undefined).
+2. **Whole-screen re-render per scroll — FIXED.** New `StickyHost` (`ui/StickyStep.tsx`) owns the `useState`; the screen pushes `set(state, label)` through a ref (`recomputeSticky`) and reads `key()` for collapse. `sameSticky` dedupes inside the host. Render pin: no `setSticky` / `const [sticky,` in `SessionScreen.tsx`; host has `useState` + `useImperativeHandle` (red first).
+3. **Nit, short output sticking — FIXED.** A block sticks only if `bottom - top >= 3 * headH`; test with a 2-line output (red first).
+
+Mutations: `first + lineOffset` → `first`: line test fails; threshold `3*headH` → `<= headH`: short-output test fails; both restored. Narrow: output-sticky + output-block-render + session-screen 213 pass; `tsc -p apps/mobile` clean; biome clean on touched files. Not verified on device.
+
+*— claude-sonnet-5-5, 2026-11-24*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES** (2 MEDIUM, no HIGH).

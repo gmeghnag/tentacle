@@ -23,6 +23,8 @@ export interface StickyBlock {
   readonly lineH: number;
   /** The output's line count (the "of N"). */
   readonly lines: number;
+  /** Output lines cut off the top of the drawn text (the tail view). */
+  readonly lineOffset: number;
 }
 
 export interface StickyState {
@@ -36,15 +38,15 @@ export interface StickyState {
 
 export function stickyState(scrollY: number, blocks: readonly StickyBlock[]): StickyState | null {
   for (const b of blocks) {
-    // Never sticks if the block is no taller than its own row.
-    if (b.bottom - b.top <= b.headH || scrollY < b.top || scrollY >= b.bottom) {
+    // Never sticks unless the body is taller than two of its own rows (a short output).
+    if (b.bottom - b.top < 3 * b.headH || scrollY < b.top || scrollY >= b.bottom) {
       continue;
     }
     const first = Math.floor((scrollY + b.headH - b.bodyTop) / b.lineH) + 1;
     return {
       key: b.key,
       offsetY: Math.min(0, b.bottom - b.headH - scrollY),
-      line: Math.min(Math.max(first, 1), Math.max(b.lines, 1)),
+      line: Math.min(Math.max(first + b.lineOffset, 1), Math.max(b.lines, 1)),
       total: b.lines,
     };
   }
@@ -65,6 +67,8 @@ export interface OutputStep {
   readonly label: string;
   /** Every output line, the cut head included (the "of N"). */
   readonly total: number;
+  /** Head lines the cut hides (the drawn text starts at line `skipped + 1`). */
+  readonly skipped: number;
 }
 
 /**
@@ -99,6 +103,7 @@ export function openOutputSteps(
     out.set(row.key, {
       label: view.subline ?? view.subtitle,
       total: shown + view.output.hidden,
+      skipped: view.output.hidden,
     });
   }
   return out;
