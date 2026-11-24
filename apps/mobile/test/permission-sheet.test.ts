@@ -425,3 +425,59 @@ describe("labelRuns: a label's `code` spans (no literal backticks on screen, B3)
     expect(labelRuns("it`s fine")).toEqual([{ text: "it`s fine", code: false }]);
   });
 });
+
+describe("answerFor: a workflow card answers ONE named ask (docs/feat/workflows-ui.md D4)", () => {
+  test("the ask on screen carries its agent id, for the step pairing (`askForStep`)", async () => {
+    const { sheet } = sheetAt();
+    void sheet.requester(ask({ kind: "workflow_approve" }), {
+      requestId: "ask-1",
+      agent: { type: "workflow", description: "merge", id: "wf-1.merge" },
+    });
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({
+      kind: "asking",
+      requestId: "ask-1",
+      agentId: "wf-1.merge",
+    });
+    const plain = sheetAt();
+    void plain.sheet.requester(ask(), { requestId: "ask-2" });
+    await Promise.resolve();
+    expect(plain.sheet.view()).toMatchObject({ kind: "asking", agentId: null });
+  });
+
+  test("the named ask is settled through the SAME path as a tap on the sheet", async () => {
+    const { sheet, clock } = sheetAt();
+    const answer = sheet.requester(ask({ kind: "workflow_approve" }), { requestId: "ask-1" });
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    expect(sheet.answerFor("ask-1", "allow_once")).toBe("sent");
+    expect(await answer).toEqual({ allowed: true, scope: "once" });
+    expect(sheet.view().kind).toBe("idle");
+  });
+
+  test("a card for an ask that is no longer on screen answers NOTHING (stale card)", async () => {
+    // Mutation: answerFor ignores the id (calls `answer`) → the OTHER ask is allowed → red.
+    const { sheet, clock } = sheetAt();
+    let settled = false;
+    void sheet.requester(ask({ title: "other" }), { requestId: "ask-2" }).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    expect(sheet.answerFor("ask-1", "allow_once")).toBe("ignored");
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(sheet.view()).toMatchObject({ kind: "asking", requestId: "ask-2" });
+  });
+
+  test("the age guard holds for a card too, and the reply option is not a card answer", async () => {
+    const { sheet, clock } = sheetAt();
+    void sheet.requester(ask(), { requestId: "ask-1" });
+    await Promise.resolve();
+    expect(sheet.answerFor("ask-1", "reject_once")).toBe("ignored");
+    clock.at += ARM_MS;
+    expect(sheet.answerFor("ask-1", "reply")).toBe("ignored");
+    expect(sheet.view().kind).toBe("asking");
+    expect(sheet.answerFor("ask-1", "reject_once")).toBe("sent");
+  });
+});

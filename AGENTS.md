@@ -120,8 +120,10 @@ style suggestions.
   so a per-row `<Text>` list collapses blank rows and shifts content up.
   Render blank rows as `" "` (the output grid `trimEnd()`s it back to `""`).
 - **Repros run in `<repo root>/.tentacle/tmp/<slug>/`** — always, never `/tmp`
-  or elsewhere (one sub-folder per task: evals run in parallel). `.tentacle/`
-  is gitignored, so Biome skips it, and it is outside `tsconfig` `include` and
+  or elsewhere (one sub-folder per task: evals run in parallel). `.tentacle/*`
+  is gitignored **except `.tentacle/workflows/`** (the project's workflows are
+  versioned — docs/feat/workflows-ui.md D7 v5), so Biome skips it, and it is
+  outside `tsconfig` `include` and
   `bun test` discovery: a repro there can't dirty the tree or the gate. Because
   it is gitignored, the script itself does **not** survive — paste it (and its
   output) into the task doc's **Repro**. Workspace packages import directly

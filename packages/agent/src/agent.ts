@@ -36,6 +36,7 @@ import {
   type ModelStopReason,
   ModelStreamCutError,
   NOTE_KIND,
+  PROJECT_PATHS,
   type PermissionRequester,
   type TokenCounter,
   type Tool,
@@ -3021,7 +3022,7 @@ export class Agent {
     const safe = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 60);
     const scope = this.config.spillScope;
     const callId = this.spillId(extra.sessionId, scope, call);
-    const path = `.tentacle/tool-output/${scope !== undefined ? `${safe(scope)}-` : ""}${safe(call.name)}-${safe(callId)}.txt`;
+    const path = `${PROJECT_PATHS.toolOutput}/${scope !== undefined ? `${safe(scope)}-` : ""}${safe(call.name)}-${safe(callId)}.txt`;
     const sink = this.config.toolOutput;
     return applyResultTransforms(result, transforms, {
       toolName: call.name,

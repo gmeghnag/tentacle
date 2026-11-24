@@ -1,6 +1,7 @@
 /**
- * Workflow files (`workflows/<name>.yaml`) — the ONE reader, and the hash an
- * approval is bound to (docs/feat/agent-workflows.md D1/D2).
+ * Workflow files (`.tentacle/workflows/<name>.yaml`) — the ONE reader, and the
+ * hash an approval is bound to (docs/feat/agent-workflows.md D1/D2; the folder
+ * is `PROJECT_PATHS.workflows`, docs/feat/workflows-ui.md D7 v5).
  *
  * A workflow is a repo file the model writes and the user approves; the CODE
  * then executes the sequence (owner decision 2). So nothing here decides
@@ -18,6 +19,7 @@
  * the model's repair loop, and a small model fixes a sentence, not a zod dump.
  */
 import { z } from "zod";
+import { PROJECT_PATHS } from "./project-paths.ts";
 
 /** The on-disk format version. An unknown one is refused, the file untouched. */
 export const WORKFLOW_SCHEMA_VERSION = 1;
@@ -110,7 +112,7 @@ interface WorkflowStepBase {
 /** An agent step: one sub-agent run, verdict typed by the child's tool call. */
 export interface WorkflowAgentStep extends WorkflowStepBase {
   readonly kind: "agent";
-  /** As written in the file, relative to `workflows/`; absent for `prompt_text`. */
+  /** As written in the file, relative to `.tentacle/workflows/`; absent for `prompt_text`. */
   readonly promptPath?: string;
   /** The prompt text: the `prompt:` file's bytes, or the inline `prompt_text`. */
   readonly promptText?: string;
@@ -175,7 +177,7 @@ export interface WorkflowBudget {
 
 /** One prompt file the workflow references — part of what the hash covers. */
 export interface WorkflowPromptFile {
-  /** As written in the file, relative to `workflows/`. */
+  /** As written in the file, relative to `.tentacle/workflows/`. */
   readonly path: string;
   readonly text: string;
 }
@@ -202,7 +204,7 @@ export interface WorkflowContext {
   /** The agent types this session offers (the runner's `types`). */
   readonly agentTypes?: readonly string[];
   /**
-   * Text of a `prompt:` file, relative to `workflows/`. Absent → paths are
+   * Text of a `prompt:` file, relative to `.tentacle/workflows/`. Absent → paths are
    * checked but their bytes are left unresolved (`promptText` undefined).
    */
   readonly readPrompt?: (path: string) => string | undefined;
@@ -367,19 +369,19 @@ function idProblem(id: string): string | undefined {
 }
 
 /**
- * A `prompt:` path relative to `workflows/`: no absolute path, no `..` segment,
- * no empty segment. Returns the reason when it must be refused.
+ * A `prompt:` path relative to `.tentacle/workflows/`: no absolute path, no `..`
+ * segment, no empty segment. Returns the reason when it must be refused.
  */
 export function promptPathProblem(path: string): string | undefined {
   if (path.trim() === "") {
     return "should not be empty";
   }
   if (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) {
-    return "should be relative to workflows/, not an absolute path";
+    return `should be relative to ${PROJECT_PATHS.workflows}/, not an absolute path`;
   }
   const parts = path.split(/[\\/]/);
   if (parts.some((p) => p === "..")) {
-    return "should stay inside workflows/ — remove the ..";
+    return `should stay inside ${PROJECT_PATHS.workflows}/ — remove the ..`;
   }
   if (parts.some((p) => p === "" || p === ".")) {
     return "should be a plain relative path (no empty or . segments)";
@@ -816,7 +818,9 @@ export function validateWorkflow(text: string, ctx: WorkflowContext = {}): Workf
     if (step.promptPath !== undefined) {
       const read = ctx.readPrompt?.(step.promptPath);
       if (ctx.readPrompt !== undefined && read === undefined) {
-        errors.push(`${step.at}.agent.prompt: no file "${step.promptPath}" under workflows/`);
+        errors.push(
+          `${step.at}.agent.prompt: no file "${step.promptPath}" under ${PROJECT_PATHS.workflows}/`,
+        );
       } else if (read !== undefined) {
         prompts.set(step.promptPath, { path: step.promptPath, text: read });
         texts.push([`${step.at}.agent.prompt`, read]);

@@ -46,7 +46,12 @@ import {
   DevicePushUnregisterParamsSchema,
   DevicePushUnregisterResultSchema,
 } from "./push.ts";
-import { LogParamsSchema, LogResultSchema } from "./session-log.ts";
+import {
+  LogParamsSchema,
+  LogResultSchema,
+  WorkflowStepParamsSchema,
+  WorkflowStepResultSchema,
+} from "./session-log.ts";
 import {
   AgentKillParamsSchema,
   AgentKillResultSchema,
@@ -100,6 +105,8 @@ import {
   UnqueueResultSchema,
   UpdateSettingsParamsSchema,
   UpdateSettingsResultSchema,
+  WorkflowCatalogueParamsSchema,
+  WorkflowCatalogueResultSchema,
   WorkflowListParamsSchema,
   WorkflowListResultSchema,
   WorkflowParamsSchema,
@@ -171,6 +178,18 @@ export const Method = {
    * (docs/feat/agent-workflows.md D3). An older daemon answers `MethodNotFound`.
    */
   Workflow: "session/workflow",
+  /**
+   * ONE step execution's `prompt`/`report` (docs/feat/workflows-ui.md D1): the
+   * detail the `workflows` row does not carry. Read-only and synchronous
+   * daemon-side. An older daemon answers `MethodNotFound`.
+   */
+  WorkflowStep: "session/workflow_step",
+  /**
+   * The project's workflow FILES, validated against this session (D6): what the
+   * phone's "start a workflow" lists and `/workflow` names its folder from.
+   * Read-only, model-free, deterministic. An older daemon answers `MethodNotFound`.
+   */
+  WorkflowCatalogue: "session/workflow_catalogue",
   /** Every live session's workflow runs (serve only; the phone's run list, D5). */
   WorkflowList: "workflow/list",
   ModelStream: "model/stream",
@@ -318,6 +337,14 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: ScheduleCreateResultSchema,
   },
   [Method.Workflow]: { params: WorkflowParamsSchema, result: WorkflowResultSchema },
+  [Method.WorkflowStep]: {
+    params: WorkflowStepParamsSchema,
+    result: WorkflowStepResultSchema,
+  },
+  [Method.WorkflowCatalogue]: {
+    params: WorkflowCatalogueParamsSchema,
+    result: WorkflowCatalogueResultSchema,
+  },
   [Method.WorkflowList]: { params: WorkflowListParamsSchema, result: WorkflowListResultSchema },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {

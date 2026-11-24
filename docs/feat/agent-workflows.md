@@ -2358,3 +2358,17 @@ schedule-workflow, driver) 149 pass 0 fail; `bun run lint` and `bun run typechec
 Regression check: a crash between advance and settle now shows the row with no `last` (it was
 going to show an old one); acceptable and consistent with the plan's "crash between advance and
 start" row. No new findings.
+
+## Note — the workflow folder moved to `.tentacle/workflows/` (2026-11-23, `feat/workflows-ui` slice 0)
+
+*— claude-sonnet-4-5, 2026-11-23*
+
+This task's engine is unchanged, but the folder it reads is not the one written here: D1's
+`workflows/<name>.yaml` at the project root is now **`<cwd>/.tentacle/workflows/<name>.yaml`**
+(owner 23/11 ~10:30; designed in `docs/feat/workflows-ui.md` D7 v5, slice 0). The name lives in
+ONE place, `PROJECT_PATHS.workflows` (`packages/core/src/project-paths.ts`), and every component
+of the path — `.tentacle`, `workflows`, the file — is refused if it is a symlink
+(`resolveInside`). Recorded paths, the approval store's `path` key and the validator/tool texts
+all use it, so nothing else here changes: the hash, the asks, the log entries and the wire are
+as specified below. The `.tentacle/*` + `!.tentacle/workflows/` exception in this repo's
+`.gitignore` keeps the folder versioned.

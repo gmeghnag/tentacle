@@ -22,6 +22,8 @@ export type HubEntryId =
   // Clear, Rename, Retry, Auto-accept — one sheet, not five fan discs.
   | "commands"
   | "scheduled"
+  // The computer's workflow runs (docs/feat/workflows-ui.md D4): a push screen.
+  | "workflows"
   | "dictate"
   | "new";
 
@@ -98,6 +100,17 @@ export interface HubContext {
    * Stop is offered with no turn and cancels it. Absent = false.
    */
   readonly compacting?: boolean;
+  /**
+   * Workflow runs that wait on the person (docs/feat/workflows-ui.md D4): the
+   * item's count badge. Absent = 0.
+   */
+  readonly workflowsNeedYou?: number;
+  /**
+   * Why the Workflows item has nothing to open (no run, an older daemon), or
+   * null/absent when it does — or when the list is not known yet: an unknown
+   * list never dims the item whose tap reads it (the Tools D3 rule).
+   */
+  readonly workflowsEmpty?: string | null;
 }
 
 export interface HubActions {
@@ -120,6 +133,8 @@ export const NOTHING_RUNNING = "Nothing running";
 export const NO_ARTIFACTS = "No artifacts yet";
 /** The same rule for Tools: nothing to switch, so the sheet would be two empty lists. */
 export const NO_TOOLS = "No MCP servers or skills in this session";
+/** No workflow run on this computer (docs/feat/workflows-ui.md D4): the item is dimmed with it. */
+export const NO_WORKFLOW_RUNS = "No workflow runs";
 
 const LABELS: Readonly<Record<HubActionId, string>> = {
   stop: "Stop",
@@ -132,6 +147,7 @@ const LABELS: Readonly<Record<HubActionId, string>> = {
   tools: "Tools",
   commands: "Commands",
   scheduled: "Scheduled",
+  workflows: "Workflows",
   dictate: "Dictate (Beta)",
   new: "New session",
   more: "More",
@@ -154,6 +170,7 @@ const CANONICAL: readonly HubEntryId[] = [
   "sessions",
   "info",
   "scheduled",
+  "workflows",
   "dictate",
   "new",
 ];
@@ -189,6 +206,8 @@ function holds(id: HubEntryId, ctx: HubContext): boolean {
     case "info":
     // Tools is offered wherever Session info is: its own content decides.
     case "tools":
+    // Workflows is about the whole computer, not this session: its own list decides.
+    case "workflows":
     case "new":
       return true;
     // The commands sheet reuses what the screen already has (rename, auto-accept
@@ -205,6 +224,9 @@ function badgeOf(id: HubEntryId, ctx: HubContext): HubBadge | null {
   }
   if (id === "scheduled" && ctx.nextWakeInMs !== null && ctx.nextWakeInMs <= DUE_SOON_MS) {
     return { kind: "dot" };
+  }
+  if (id === "workflows" && (ctx.workflowsNeedYou ?? 0) > 0) {
+    return { kind: "count", n: ctx.workflowsNeedYou ?? 0 };
   }
   return null;
 }
@@ -244,6 +266,9 @@ function dimmedBecause(id: HubEntryId, ctx: HubContext): string | null {
   }
   if (id === "tools") {
     return ctx.toolsEmpty ? NO_TOOLS : null;
+  }
+  if (id === "workflows") {
+    return ctx.workflowsEmpty ?? null;
   }
   return null;
 }

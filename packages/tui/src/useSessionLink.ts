@@ -112,6 +112,8 @@ export interface SessionLinkHost {
   readonly jobsSubRef: MutableRefObject<(() => void) | null>;
   /** The session's armed scheduled wakes (`schedules`, cron-tool S5). */
   readonly schedulesSubRef: MutableRefObject<(() => void) | null>;
+  /** The session's workflow runs (`workflows`, docs/feat/workflows-ui.md D2). */
+  readonly workflowsSubRef: MutableRefObject<(() => void) | null>;
   readonly notifySubRef: MutableRefObject<(() => void) | null>;
   readonly dockMsgSubRef: MutableRefObject<(() => void) | null>;
   /** The session's MCP/skill switches (docs/feat/session-capabilities.md S4). */
@@ -178,6 +180,8 @@ export interface SessionLinkHost {
   readonly setJobs: DockLayer["setJobs"];
   /** The session's armed wake table (`useDock`'s `setSchedules`, cron-tool S5). */
   readonly setSchedules: DockLayer["setSchedules"];
+  /** The session's workflow runs (`useDock`'s `setWorkflows`, workflows-ui D3). */
+  readonly setWorkflows: DockLayer["setWorkflows"];
   readonly setDock: DockLayer["setDock"];
   readonly jobOutputRef: DockLayer["jobOutputRef"];
   /** An open `/sessions` panel re-read at the next render (`S7`). */
@@ -234,6 +238,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     agentsSubRef,
     jobsSubRef,
     schedulesSubRef,
+    workflowsSubRef,
     notifySubRef,
     dockMsgSubRef,
     capsSubRef,
@@ -272,6 +277,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     setAgents,
     setJobs,
     setSchedules,
+    setWorkflows,
     setDock,
     jobOutputRef,
     touchPanel,
@@ -446,6 +452,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       agentsSubRef.current?.();
       jobsSubRef.current?.();
       schedulesSubRef.current?.();
+      workflowsSubRef.current?.();
       notifySubRef.current?.();
       dockMsgSubRef.current?.();
       capsSubRef.current?.();
@@ -454,6 +461,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       setAgents(undefined);
       setJobs(undefined);
       setSchedules(undefined);
+      setWorkflows(undefined);
       jobOutputRef.current = {};
       // The dock belongs to a session: a switch starts it over (its drafts and
       // its `sent` are per session, docs/feat/subagent-panel.md).
@@ -473,6 +481,12 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       // table to report (a pod, an older daemon), never an empty claim.
       schedulesSubRef.current =
         session?.onSchedules?.((report) => setSchedules(report.rows)) ?? null;
+      // The session's workflow runs (docs/feat/workflows-ui.md D3): the SAME
+      // per-session feed the rail and `/workflow` paint. `undefined` when this
+      // session reports no runs at all (a pod, an older daemon), never an
+      // invented empty list — an empty rail would claim there is no run when
+      // the truth is that nobody here can know.
+      workflowsSubRef.current = session?.onWorkflows?.((rows) => setWorkflows(rows)) ?? null;
       // A RUNNING background child's message to the agent
       // (docs/feat/agent-message-two-way.md): the notice at once, and — when it
       // asks for one and this laptop allows two-way — the same wake an exit arms.
@@ -527,6 +541,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       jobOutputRef,
       jobsSubRef,
       schedulesSubRef,
+      workflowsSubRef,
       notifySubRef,
       onActivityRef,
       onCapsChange,
@@ -539,6 +554,7 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       setDock,
       setJobs,
       setSchedules,
+      setWorkflows,
       setScrollOffset,
       skillsSync,
       stateRef,

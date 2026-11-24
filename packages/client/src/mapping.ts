@@ -387,7 +387,8 @@ export function updateToEvent(
     // `capabilities` by the session's capability listeners (`RemoteClient`, likewise).
     case "capabilities":
     // `workflows` (a session's workflow runs, full state, not turn-scoped) by its
-    // own listeners, likewise (docs/feat/agent-workflows.md D5).
+    // own listeners — `RemoteClient.onSessionWorkflows`, fed by `workflowsChanged`
+    // — likewise (docs/feat/agent-workflows.md D5, docs/feat/workflows-ui.md D2).
     case "workflows":
     case "plan":
     case "turn_start":

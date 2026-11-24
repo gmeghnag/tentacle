@@ -90,6 +90,25 @@ export type KeyEffect =
   | { readonly kind: "answerArtifactConfirm"; readonly yes: boolean }
   /** Write the `/schedule` panel's own state (its arm/answer, cron-tool S5). */
   | { readonly kind: "setSchedulesState"; readonly state: SchedulesState }
+  /**
+   * `o` in `/workflow`: read ONE step execution's prompt/report from the log
+   * (docs/feat/workflows-ui.md D3/D1). The identity is the PANEL's decision and
+   * the generation is the one the key landed in — the answer is dropped when the
+   * panel closed or another opened meanwhile.
+   */
+  | {
+      readonly kind: "workflowDetail";
+      readonly runId: string;
+      readonly stepId: string;
+      readonly startedGen: number;
+    }
+  /** `r` in `/workflow`: re-run the selected step (`rerun_step`). */
+  | {
+      readonly kind: "workflowRerun";
+      readonly runId: string;
+      readonly stepId: string;
+      readonly startedGen: number;
+    }
   /** Switch to another session (the panel already closed). */
   | { readonly kind: "switchTo"; readonly id: string; readonly reopen: boolean }
   /** Delete a session, then refresh the panel if it is still the same one. */

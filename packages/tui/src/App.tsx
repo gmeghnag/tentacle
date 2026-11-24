@@ -6,7 +6,7 @@ import {
   initialWake,
   wakeStep,
 } from "@tentacle/core";
-import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactMeta, WorkflowRow } from "@tentacle/protocol";
 import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { AppView } from "./AppView.tsx";
@@ -82,6 +82,7 @@ import {
 } from "./permission-ui.ts";
 import type { ScheduleDockRow } from "./schedule-view.ts";
 import { useAttachments } from "./useAttachments.ts";
+import { useCatalogue } from "./useCatalogue.ts";
 import { useDock } from "./useDock.ts";
 import { useHop } from "./useHop.ts";
 import { useMouse } from "./useMouse.ts";
@@ -93,6 +94,7 @@ import { useVoice } from "./useVoice.ts";
 import { VOICE_DEFAULTS, dictationInsertion } from "./voice-session.ts";
 import { voiceGhost, voiceStripView } from "./voice-view.ts";
 import { tryWake } from "./wake-gate.ts";
+import { type CatalogueView, currentRun } from "./workflow-view.ts";
 
 export type { AutoAcceptFeed, AutoAcceptSharedFeed };
 
@@ -477,6 +479,8 @@ export function App({
   const jobsSubRef = useRef<(() => void) | null>(null);
   /** This session's armed wake feed (cron-tool S5), replaced with the session. */
   const schedulesSubRef = useRef<(() => void) | null>(null);
+  /** This session's workflow-run feed (workflows-ui D3), replaced with the session. */
+  const workflowsSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentNotify` subscription (replaced with it). */
   const notifySubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentMessage` subscription (replaced with it). */
@@ -596,6 +600,18 @@ export function App({
   const { jobRows, jobRowsRef, setJobs, dockLastJobRowsRef } = dockLayer;
   const { scheduleRows, schedulesRef, setSchedules, ownScheduleDeletesRef, deleteSchedule } =
     dockLayer;
+  const { workflowRows, workflowsRef, setWorkflows } = dockLayer;
+  // The project's workflows (docs/feat/workflows-ui.md D8 / slice 2b): the last
+  // catalogue answer, the ref a non-render caller reads, and the token `/workflow`
+  // and an answered approval bump to ask for a fresh read.
+  const [workflowCatalogue, setCatalogue] = useState<CatalogueView>(undefined);
+  const workflowCatalogueRef = useRef<CatalogueView>(undefined);
+  workflowCatalogueRef.current = workflowCatalogue;
+  const [workflowCatalogueToken, setCatalogueToken] = useState(0);
+  /** The `/workflow` panel's catalogue writer, set where `usePanels` declares it. */
+  const setCataloguePanelRef = useRef<(cat: CatalogueView) => void>(() => {});
+  /** The input's text writer, for a command that hands back a prepared line (D8). */
+  const fieldSetRef = useRef<(text: string) => void>(() => {});
   const { dockOutcomeRef, dockFinishedRef, dockStoppedRef } = dockLayer;
   const { jobOutputRef, setJobOutputGen, jobReadAtRef } = dockLayer;
   const { dock, dockRef, setDock, dockIds, dockVisible } = dockLayer;
@@ -943,6 +959,37 @@ export function App({
   const voicePhaseRef = useRef(voice.model.phase);
   voicePhaseRef.current = voice.model.phase;
 
+  /**
+   * The project's workflows at rest (docs/feat/workflows-ui.md D8 / slice 2b):
+   * ONE read, at the moments that can change it — no watcher, no polling. It is
+   * declared HERE because the line's ONE row is part of the layout's row budget
+   * (`app-layout.ts` counts it once), exactly as the rail's is. ONE write feeds
+   * both paint sites: the line (this state) and, if it is open, the panel.
+   */
+  const endedRunId = workflowRows?.find((run) => run.endedAt !== undefined)?.runId ?? null;
+  /**
+   * ONE answer, two paint sites: the at-rest line's state (a render) and, if it is
+   * open, the `/workflow` panel's section. The panel's writer is declared BELOW
+   * (with `usePanels`), so it travels through the ref every other late caller in
+   * this file already uses — a late binding, not a second source of truth.
+   */
+  const followCatalogue = useCallback((cat: CatalogueView) => {
+    setCatalogue(cat);
+    setCataloguePanelRef.current(cat);
+  }, []);
+  const { catalogue: catalogueNow, refreshCatalogueRef } = useCatalogue({
+    sessionRef,
+    sessionId: sessionRef.current?.sessionId ?? null,
+    running: st.running,
+    endedRunId,
+    commandToken: workflowCatalogueToken,
+    approvalPending: permission.pending?.kind === "workflow_approve",
+    catalogueRef: workflowCatalogueRef,
+    setCatalogue: followCatalogue,
+  });
+  /** The command port's re-read trigger: a STABLE callback over the live binding. */
+  const askCatalogue = useCallback(() => refreshCatalogueRef.current(), [refreshCatalogueRef]);
+
   const view = frameLayout({
     state: st,
     permission,
@@ -953,6 +1000,9 @@ export function App({
     jobRows,
     jobRowsRef,
     scheduleRows,
+    workflowRun: currentRun(workflowRows),
+    workflowCatalogue: catalogueNow,
+    home,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputRef.current,
@@ -1291,6 +1341,7 @@ export function App({
   warmErrorRef.current = (error: unknown) => pushNotice(warmFailureNotice(error));
 
   /** Put texts a send-now did not deliver back in the input field (after any draft), and say why. */
+  fieldSetRef.current = (text) => field.set(text);
   const restoreInput = useCallback(
     (text: string, why: string) => {
       if (text !== "") {
@@ -1412,6 +1463,10 @@ export function App({
     setSessionsState,
     setSchedulesState,
     setSchedulesData,
+    setWorkflowsData,
+    setCatalogueData,
+    fetchWorkflowStep,
+    rerunWorkflowStep,
     claimArtifactsPreview,
     setArtifactsPreview,
     deleteSchedule: deleteScheduleInPanel,
@@ -1430,6 +1485,8 @@ export function App({
     ownScheduleDeletesRef,
   });
 
+  setCataloguePanelRef.current = (cat: CatalogueView) => setCatalogueData(cat, Date.now());
+
   /**
    * The daemon's `schedules` report, for EVERY surface at once (cron-tool fix
    * round 1, finding 2): the dock's rows (its own `setSchedules`) and, if it is
@@ -1444,6 +1501,21 @@ export function App({
       setSchedulesData(rows, Date.now());
     },
     [setSchedules, setSchedulesData],
+  );
+
+  /**
+   * The daemon's `workflows` report, for every surface at once (workflows-ui D3):
+   * the rail's rows (the dock's `setWorkflows`) and, if it is open, the
+   * `/workflow` panel — which otherwise stayed the snapshot it opened on, its
+   * cursor on a step that is no longer where it was, and its fetched detail on
+   * an attempt the daemon has replaced. ONE feed, so both follow it.
+   */
+  const followWorkflows = useCallback(
+    (rows: readonly WorkflowRow[] | undefined) => {
+      setWorkflows(rows);
+      setWorkflowsData(rows, Date.now());
+    },
+    [setWorkflows, setWorkflowsData],
   );
 
   // `run "<prompt>"`: the first message, sent once at mount, like a typed one: a
@@ -1587,6 +1659,7 @@ export function App({
     agentsSubRef,
     jobsSubRef,
     schedulesSubRef,
+    workflowsSubRef,
     notifySubRef,
     dockMsgSubRef,
     capsSubRef,
@@ -1625,6 +1698,7 @@ export function App({
     setAgents,
     setJobs,
     setSchedules: followSchedules,
+    setWorkflows: followWorkflows,
     setDock,
     jobOutputRef,
     touchPanel,
@@ -1675,6 +1749,8 @@ export function App({
       agentsSubRef.current = null;
       jobsSubRef.current?.();
       jobsSubRef.current = null;
+      workflowsSubRef.current?.();
+      workflowsSubRef.current = null;
       schedulesSubRef.current?.();
       schedulesSubRef.current = null;
       notifySubRef.current?.();
@@ -1781,6 +1857,10 @@ export function App({
           draftRef,
           sessionRef,
           schedulesRef,
+          workflowsRef,
+          workflowCatalogueRef,
+          refreshCatalogue: askCatalogue,
+          prefill: (text) => fieldSetRef.current(text),
           stateRef,
           busyCompacting: () => compactingRef.current,
           syncingRef,
@@ -1814,6 +1894,7 @@ export function App({
       );
     },
     [
+      askCatalogue,
       askContext,
       attachCommand,
       clipboard,
@@ -1830,6 +1911,7 @@ export function App({
       run,
       saveFile,
       schedulesRef,
+      workflowsRef,
       sessions,
       shownModel,
       skills,
@@ -2111,6 +2193,8 @@ export function App({
       }
     },
     setSchedulesState,
+    workflowDetail: fetchWorkflowStep,
+    workflowRerun: rerunWorkflowStep,
     switchTo,
     sessionsDelete,
     // A wake's delete is the DOCK's when it comes from the dropdown, and the

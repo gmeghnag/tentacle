@@ -325,9 +325,12 @@ describe("S10: the view-model and the tree leave App.tsx", () => {
     expect(view).toMatch(/<StatusBar[\s\S]*?onPillRange=\{onPillRange\}/);
     // The view does not DERIVE the row (it paints what it is given): the row
     // arithmetic lives in the pure module, once, over the parts the tree lays out.
+    // The workflow rail (docs/feat/workflows-ui.md D3) is one of those parts: it
+    // paints ABOVE the queued/slot block, so its reserved rows sit between the
+    // spacer and the running rows — exactly as `activeRows`/`dockTop` count them.
     expect(layout).toContain("const statusRowY =");
     expect(layout).toMatch(
-      /const statusRowY = viewport \+ 1 \+ runningRows \+ dockHeight \+ inputBoxRows \+ 1;/,
+      /const statusRowY =\s*viewport \+ 1 \+ workflowHeight \+ catalogueHeight \+ runningRows \+ dockHeight \+ inputBoxRows \+ 1;/,
     );
     // …and the view never re-derives it.
     expect(code(view)).not.toContain("statusRowY");

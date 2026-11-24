@@ -1,3 +1,4 @@
+import type { WorkflowRow } from "@tentacle/protocol";
 /**
  * The dock's STATE and ACTIONS (docs/feat/app-decomposition.md S5): the
  * background sub-agents' and shell jobs' rows as last reported, the dock's own
@@ -95,6 +96,15 @@ export interface DockLayer {
    * which reaches the same method through another executor.
    */
   readonly ownScheduleDeletesRef: { current: Set<string> };
+  /**
+   * The session's WORKFLOW runs, as last reported (docs/feat/workflows-ui.md D2/D3):
+   * `undefined` = this session has no run feed to report (a pod, an older daemon,
+   * a client whose daemon is not trusted to run workflows). The rail and the
+   * `/workflow` panel both paint THESE rows: one feed, one truth.
+   */
+  readonly workflowRows: readonly WorkflowRow[] | undefined;
+  readonly workflowsRef: { current: readonly WorkflowRow[] | undefined };
+  readonly setWorkflows: (rows: readonly WorkflowRow[] | undefined) => void;
 
   // --- exits and output (written by App's ordered effects)
   readonly dockOutcomeRef: { current: Record<string, DockOutcome> };
@@ -240,6 +250,18 @@ export function useDock(host: DockHost): DockLayer {
     },
     [pushNotice],
   );
+  // The session's workflow runs, as last reported (`undefined`: this session has
+  // no run feed — a pod, an older daemon, a client whose daemon is not trusted
+  // to run workflows: docs/feat/workflows-ui.md D2/D3). ONE feed serves the rail
+  // and `/workflow`; no surface asks the daemon on its own.
+  const [workflowRows, setWorkflowRowsState] = useState<readonly WorkflowRow[] | undefined>(
+    undefined,
+  );
+  const workflowsRef = useRef<readonly WorkflowRow[] | undefined>(undefined);
+  const setWorkflows = useCallback((rows: readonly WorkflowRow[] | undefined) => {
+    workflowsRef.current = rows;
+    setWorkflowRowsState(rows);
+  }, []);
   /**
    * A child's exit as the transcript's notice already learns it, by id: the
    * `end_turn` that means "finished" (what a frozen drawer says).
@@ -558,6 +580,9 @@ export function useDock(host: DockHost): DockLayer {
     setSchedules,
     ownScheduleDeletesRef,
     deleteSchedule,
+    workflowRows,
+    workflowsRef,
+    setWorkflows,
     dockOutcomeRef,
     dockFinishedRef,
     dockStoppedRef,

@@ -111,6 +111,36 @@ export interface SheetRouteParam {
   readonly asking?: boolean;
 }
 
+/**
+ * The computer's workflow runs (docs/feat/workflows-ui.md D4): a native-stack PUSH
+ * (never a `Sheet`, never a `<Modal>`). `sessionId` is the session it was opened
+ * from (the hub), so that session's runs can be told apart; absent from elsewhere.
+ */
+export interface WorkflowRunsRoute {
+  readonly computerId: string;
+  readonly name: string;
+  readonly sessionId?: string;
+}
+
+/** One run, graph 2C ⇄ cards 2A (docs/feat/workflows-ui.md D4): a native-stack PUSH. */
+export interface WorkflowRunRoute {
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly title: string;
+}
+
+/**
+ * Start a workflow (docs/feat/workflows-ui.md D6, slice 5b): a native-stack PUSH
+ * from the runs screen, which is the only place that knows the `sessionId` the
+ * catalogue is validated against and the start runs in. It carries identity
+ * only — the catalogue and the form are the controller's.
+ */
+export interface WorkflowStartRoute {
+  readonly computerId: string;
+  readonly sessionId: string;
+}
+
 /** The stack's route table (`@react-navigation/native-stack` params). */
 export type RootStackParams = {
   Pair: PairRouteParam | undefined;
@@ -127,6 +157,12 @@ export type RootStackParams = {
    * STACK, never replace params) and closed with a keyed `pop` of its own key.
    */
   Sheet: SheetRouteParam;
+  /** The computer's workflow runs (docs/feat/workflows-ui.md D4). */
+  WorkflowRuns: WorkflowRunsRoute;
+  /** One workflow run (docs/feat/workflows-ui.md D4). */
+  WorkflowRun: WorkflowRunRoute;
+  /** Start a workflow from the project's catalogue (docs/feat/workflows-ui.md D6). */
+  WorkflowStart: WorkflowStartRoute;
 };
 
 /**

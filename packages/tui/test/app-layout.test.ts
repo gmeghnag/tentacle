@@ -284,9 +284,17 @@ describe("S10 app-layout: the frame's geometry, as the inline code computed it",
 
   test("the status bar's row is the sum of the parts the tree paints above it", () => {
     const at = frameLayout(base());
-    // viewport + spacer + running rows + dock height + input box + the bar's own.
+    // viewport + spacer + workflow rail + running rows + dock height + input box
+    // + the bar's own.
     expect(at.statusRowY).toBe(
-      at.viewport + 1 + at.runningRows + at.dockHeight + at.inputBoxRows + 1,
+      at.viewport +
+        1 +
+        at.workflowHeight +
+        at.catalogueHeight +
+        at.runningRows +
+        at.dockHeight +
+        at.inputBoxRows +
+        1,
     );
     // …and it is INVARIANT under the attach row, which is the whole point of
     // counting that row INSIDE the input box (P8): the viewport shrinks by one
