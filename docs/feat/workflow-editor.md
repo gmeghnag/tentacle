@@ -2051,3 +2051,139 @@ Scope: `git diff HEAD~1` (2d1f44f2). `bun test apps/mobile/test/workflow-edit-co
 - Slices 4–6 have no open findings.
 
 *— claude-opus-5-5, 2026-11-24*
+
+## Execution
+
+### Slice 7a — editor screen + route + entries (D8) — DONE
+
+**PARTIAL check re-run first:** `RemoteSession.workflowSave` at `packages/client/src/remote-session.ts:1411`, and `insertStep` at `packages/core/src/workflow-draft.ts:221`. Both are present.
+
+**Resumed from a stopped DeepSeek run** (the watchdog stopped it after 253 tool calls). Its working-tree edits were kept after review: the files matched its own pre-mutation backups, so no mutated file was left behind.
+- New `apps/mobile/src/workflow-edit-actions.ts`: a pure module for what each gesture means (`tapIntent`, `portRelease`/`dragIntent`, `editMenuModel`, `menuInputs`, `applyIntent`, `drawnSteps`, `draftCaption`, `barLine`), tested in `apps/mobile/test/workflow-edit-actions.test.ts`.
+  **Drift:** the Files table does not list this module. It exists so that `WorkflowEdit.tsx` stays a dumb renderer (AGENTS §7).
+- `WorkflowEditRoute` in `routes.ts`, and the `WorkflowEdit` stack screen + `WorkflowEditRoute` in `App.tsx`. The route attaches through `RUNTIMES.controller`→`open` and follows the borrowed/leave rule.
+- `screens/WorkflowEdit.tsx`.
+- Entries: runs empty state → `onNew`; catalogue rows (valid and broken) → `onEdit`.
+
+**Fixed on top (red first, each new assertion in `workflow-edit-wiring.test.ts` failed on DeepSeek's code):**
+1. **Canvas taps.** The ground `Pressable` (absoluteFill) was rendered after the pills/＋/✗/labels. React Native stacks later siblings on top, so the ground swallowed every tap meant for them. It is now drawn first, right after the `Svg`.
+2. **✗ drag.** The port used `Pressable.onPressOut`, which fires when the touch leaves the retention box. A drag therefore resolved at the port's edge, never where the finger lifts. It is now a `PanResponder`:
+   - lift point = grant location + `(dx, dy)`, passed to the same `portRelease`;
+   - `onPanResponderTerminationRequest: () => false`, so the ScrollView cannot steal the drag;
+   - one responder per port (`useRef`), with the latest `onDrop` read through a ref.
+3. **Catalogue "New workflow".** D8 lists this entry, but it was missing. Added `WorkflowStart` `onNew` → `testID="workflow-start-new"` (shown when ready and on the list view) → `navigate("WorkflowEdit", {computerId, sessionId})`.
+4. **Doc-comment fix.** The `WorkflowEditRoute` doc comment contained the word `reopen`, inside the span that `workflow-start-wiring.test.ts` scans for `WorkflowStartRoute`. That test was red. The comment is reworded.
+5. **Cosmetic.**
+   - `RootStackParams` is back in its original layout (the resumed edit had glued `*/ export type` onto one line).
+   - The toast dismiss icon is `xmark` (it was `chevron.left`).
+
+**Red → green:** `bun test apps/mobile/test/workflow-edit-wiring.test.ts` went from 18 pass / 4 fail to 22 pass / 0 fail. The 4 failures were ground order, `onPressOut`, `workflow-start-new`, and the push count < 3.
+
+**Mutations** (each reverted; the file was restored byte-equal from `.tentacle/tmp/workflow-editor/s7a/actions.ts.orig`). Each was killed by a distinct test, 4 fail in total:
+
+| Mutation in `workflow-edit-actions.ts` | Killed by (`workflow-edit-actions.test.ts`) |
+|---|---|
+| `tapIntent` armed+node → `open` | "a step tapped while a port is armed is the DROP" |
+| `portRelease` drops the `port.hit.x` offset | "ONE release handler: a touch inside … is the TAP" and "…a DRAG once the touch leaves that box" |
+| `drawnSteps` +1 | "the bar's count is the draft's `steps:`" |
+
+The two screen fixes (ground order, `onPressOut`) are pinned by the wiring tests shown red above on the unfixed code.
+
+**Checks run (narrow only):**
+- `bun test apps/mobile/test/`: 5117 pass / 0 fail (325 files);
+- `tsc -p apps/mobile`: clean;
+- `biome check` on the 8 changed files: clean.
+
+**Not in 7a (by design):**
+- Save calls `beginReview()`, but the Review screen is 7c's. Until then the `reviewing` state draws the canvas with "nothing written yet" and offers no confirm. Cancel still leaves.
+- `insert`/`open` intents are dropped until 7b's sheets.
+- The changelog fragment `changelog.d/workflow-editor.added.md` already exists (commit 26a4aa6b), so no second one was written.
+
+**Unverified:** the `PanResponder` drag inside the `ScrollView` on a device (iOS native scroll vs the JS responder). Verify with e2e E4 in 7c.
+
+*— claude-opus-5-5, 2026-11-24*
+
+#### Slice 7a — RESUME after an offline pause (fix round) — DONE
+
+The slice was already DONE (above). This round is the owner's RESUME: finish what the
+paused run left in the working tree. It was kept as-is, re-verified, mutation-checked,
+and one real defect found and fixed.
+
+**PARTIAL check re-run first (the slice's load-bearing check, §Slices):**
+`RemoteSession.workflowSave` present at `packages/client/src/remote-session.ts:1411`;
+`insertStep` present at `packages/core/src/workflow-draft.ts:221`. Both hold, so the
+slice is not PARTIAL.
+
+**Working tree kept, not partly re-done.** `git status` showed the paused run's edits:
+`M App.tsx, src/routes.ts, screens/{WorkflowRuns,WorkflowStart}.tsx, docs/…`;
+`?? screens/WorkflowEdit.tsx, src/workflow-edit-actions.ts, test/workflow-edit-{actions,wiring}.test.ts`.
+Reviewed against D8 and against the plan's Files table (one documented drift: the new
+`workflow-edit-actions.ts`, not in the table, exists so the screen stays a dumb
+renderer — AGENTS §7). Nothing needed rewriting; the two test files were 49/49 green and
+`tsc -p apps/mobile` clean on arrival.
+
+**Defect found by probing the code the slice owns (a repro, not a review finding).**
+`.tentacle/tmp/workflow-editor/s7a/repro-stale-arm.ts`:
+
+```
+after tapping the port, armed = gate
+deleteStep on gate -> [ "plan" ]
+next tap on plan -> {"kind":"saveFail","id":"gate","target":"plan"}
+bar says -> undefined          (the core: refused = no step "gate")
+```
+
+The route's menu path was `act({ armed, intent })`, so a menu row passed the arm through
+unchanged. `armed` is a STEP ID and "Delete" removes that step: after deleting the armed
+step, the next tap on ANY step is read as a drop onto the id that just went. The step
+never opens, and the bar shows `no step "gate"` instead of the step. The stale arm also
+survived Duplicate / Move / Open.
+
+**The fix, one rule in the pure module:** `menuGesture(intent)` →
+`{ armed: null, intent }` (`apps/mobile/src/workflow-edit-actions.ts:253`). The menu is
+not the canvas — its rows are commands, none of them a place to drop a `✗` — so the arm
+is put down. `App.tsx` calls `act(menuGesture(intent))`, so no intent reaches the
+controller without passing through it. The same repro after the fix:
+`armed after menu = null | next tap = {"kind":"open","id":"plan"}`.
+
+**Red → green (§9).**
+- `workflow-edit-wiring.test.ts` "a menu row DISARMS the port…" — **red** on the pre-fix
+  route: 22 pass / 1 fail; **green** after: 23 pass.
+- `workflow-edit-actions.test.ts` "a menu row DISARMS the port…" — asserts the rule AND
+  its consequence (`tapIntent(menuGesture(…).armed, {kind:"node"})` is `open`, never
+  `saveFail`).
+
+**Mutation battery** (`.tentacle/tmp/workflow-editor/s7a/mine/battery.sh`; every case
+asserts the mutation actually applied, then restores and asserts byte-identity — all
+seven printed `RESTORED`):
+
+| # | Mutation | Killed by |
+|---|---|---|
+| m1 | `tapIntent`: `armed === null` → `true` (an armed step tap opens) | "a step tapped while a port is armed is the DROP" |
+| m2 | `portRelease`: drop `port.hit.x` (the port's own offset) | "ONE release handler: a touch inside … is the TAP" + "… is a DRAG once it leaves" |
+| m3 | `drawnSteps` + 1 (a ghost pill counted as a step) | "the bar's count is the draft's `steps:`" |
+| m4 | the ground `Pressable` moved AFTER the pills (the real RN stacking bug) | "the canvas ground is UNDER the pills: drawn first" |
+| m5 | the port back on `Pressable.onPressOut` | "a ✗ drag resolves where the finger LIFTS" |
+| m6 | `onPanResponderTerminationRequest: () => true` (the ScrollView may steal) | same wiring test |
+| m7 | `menuGesture` keeps the arm (`armed: "gate"`) — the defect above | "a menu row DISARMS the port…" |
+
+**Repro-script incident, disclosed.** My first `m4.ts` appended a backup to itself, so
+the restore produced a doubled `WorkflowEdit.tsx` (1470 lines, two `WorkflowEditScreen`
+declarations). `tsc` caught it at once (TS2393/TS2323). Both halves were byte-identical
+to each other, so the file was rebuilt from the first half and is byte-equal to the
+pre-mutation file; typecheck and the tests then went clean. The battery script that
+replaced it never writes a backup file.
+
+**Checks run (narrow only; the orchestrator runs the gate after this run):**
+- `bun test` on the affected workflow test files: 130 pass / 0 fail;
+- `bun run typecheck` (root + mobile + relay): clean;
+- `bunx biome check` on the 8 changed files: clean.
+
+**Changelog:** `changelog.d/workflow-editor.added.md` already exists (commit 26a4aa6b) and
+covers the phone editor; this round adds no user-visible capability of its own, so no
+second fragment. **No schema change** → `protocol.json` needs no regeneration.
+
+**Not in 7a (unchanged):** Save calls `beginReview()`, but the Review screen is 7c's;
+`insert`/`open` intents are 7b's sheets. **Unverified:** the `PanResponder` drag inside
+the `ScrollView` on a device (e2e E4, 7c).
+
+*— claude-opus-5-5 (executor, resume/finish of slice 7a), 2026-11-24*

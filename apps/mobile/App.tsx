@@ -188,6 +188,7 @@ import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
+import { WorkflowEditScreen, type WorkflowEditScreenProps } from "./src/screens/WorkflowEdit.tsx";
 import { WorkflowRunScreen } from "./src/screens/WorkflowRun.tsx";
 import { WorkflowRunsScreen } from "./src/screens/WorkflowRuns.tsx";
 import { WorkflowStartScreen } from "./src/screens/WorkflowStart.tsx";
@@ -233,6 +234,24 @@ import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
 import { AppFontContext, Text } from "./src/ui/Text.tsx";
 import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
 import type { VoiceSettings } from "./src/voice-settings-store.ts";
+import {
+  type EditIntent,
+  type GestureResult,
+  applyIntent,
+  deletedToast,
+  drawnSteps,
+  menuGesture,
+  menuInputs,
+  portRelease,
+  tapIntent,
+} from "./src/workflow-edit-actions.ts";
+import {
+  type EditSessionHandle,
+  type EditState,
+  type WorkflowEditController,
+  createWorkflowEditController,
+} from "./src/workflow-edit-controller.ts";
+import { editGeometry, validDropTargets } from "./src/workflow-edit-graph.ts";
 import {
   type RunMode,
   type RunState,
@@ -2025,6 +2044,7 @@ function WorkflowRunsRoute({
   onBack,
   onOpen,
   onStart,
+  onNew,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -2037,6 +2057,8 @@ function WorkflowRunsRoute({
     readonly name: string;
   }) => void;
   readonly onStart: (sessionId: string) => void;
+  /** The empty state's "New workflow": the editor, in create mode. */
+  readonly onNew: (sessionId: string) => void;
 }): JSX.Element {
   const { state, pull } = useWorkflowRuns(computerId);
   return (
@@ -2047,7 +2069,9 @@ function WorkflowRunsRoute({
       now={Date.now()}
       onBack={onBack}
       onPull={pull}
-      {...(sessionId === undefined ? {} : { sessionId, onStart: () => onStart(sessionId) })}
+      {...(sessionId === undefined
+        ? {}
+        : { sessionId, onStart: () => onStart(sessionId), onNew: () => onNew(sessionId) })}
       onOpen={(run) => {
         if (run.sessionId !== undefined) {
           onOpen({ runId: run.runId, sessionId: run.sessionId, name: run.name });
@@ -2182,12 +2206,18 @@ function WorkflowStartRoute({
   sessionId,
   onBack,
   onOpenRun,
+  onEdit,
+  onNew,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly sessionId: string;
   readonly onBack: () => void;
   readonly onOpenRun: (runId: string, name: string) => void;
+  /** A catalogue row's Edit: the editor, on that file (a broken one opens as a draft). */
+  readonly onEdit: (name: string) => void;
+  /** The catalogue's New workflow: the editor, in create mode. */
+  readonly onNew: () => void;
 }): JSX.Element {
   const [state, setState] = useState<StartState | null>(null);
   const [controller, setController] = useState<ReturnType<
@@ -2248,6 +2278,183 @@ function WorkflowStartRoute({
       onCloseRow={() => controller.closeRow()}
       onValue={(name, value) => controller.setValue(name, value)}
       onStart={() => void controller.beginStart()}
+      onEdit={onEdit}
+      onNew={onNew}
+    />
+  );
+}
+
+/**
+ * The graph editor (docs/feat/workflow-editor.md D8, slice 7a): a native-stack
+ * PUSH beside `WorkflowStart`, never a `<Modal>`. Wiring only — the draft, the
+ * bar, the Save gate and every refusal are `workflow-edit-controller.ts`'s, the
+ * drawing and the hit priority are `workflow-edit-graph.ts`'s, and what a tap, a
+ * drag or a menu item MEANS is `workflow-edit-actions.ts`'s.
+ *
+ * It attaches through the SAME session runtime as every other screen (an archived
+ * session is never revived from here, §7) and answers nothing on the broker: the editor makes
+ * no ask of its own, and a save's approval ask arrives later, on the run screen.
+ */
+function WorkflowEditRoute({
+  palette,
+  computerId,
+  sessionId,
+  name,
+  onBack,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  /** The file to edit; ABSENT is the create flow (the New sheet names it). */
+  readonly name?: string;
+  readonly onBack: () => void;
+}): JSX.Element {
+  const [state, setState] = useState<EditState | null>(null);
+  const [controller, setController] = useState<WorkflowEditController | null>(null);
+  const [menu, setMenu] = useState<WorkflowEditScreenProps["menu"]>(null);
+  const [armed, setArmed] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [dropTargets, setDropTargets] = useState<readonly string[]>([]);
+  useEffect(() => {
+    let live = true;
+    let created: WorkflowEditController | null = null;
+    let unsubscribe: (() => void) | undefined;
+    void LINKS.get(computerId).then((link) => {
+      if (!live) {
+        return;
+      }
+      const runtime = RUNTIMES.controller(link.client);
+      created = createWorkflowEditController({
+        sessionId,
+        // The Session screen underneath follows it: never detach it from there.
+        borrowed: runtime.follows(sessionId),
+        open: async (id) => {
+          const result = await runtime.open(id);
+          // `newSession` hands back a `RemoteSession` (typed as the screen's subset).
+          return result.ok
+            ? { ok: true, session: result.session as unknown as EditSessionHandle }
+            : result;
+        },
+        leave: () => void runtime.leave(sessionId),
+        ...(name === undefined ? {} : { name }),
+        onChange: () => {
+          if (live && created !== null) {
+            setState(created.state());
+          }
+        },
+      });
+      // The link's own status: the bar says "Offline — your draft stays on this
+      // phone" and Save goes off, and coming back re-checks a lost save (D7).
+      unsubscribe = link.onStatus((status) => created?.setLink(status.state === "up"));
+      setController(created);
+      setState(created.state());
+      created.start();
+    });
+    return () => {
+      live = false;
+      unsubscribe?.();
+      created?.dispose();
+    };
+    // `name` is a route param like `title`: fixed for the route's life.
+  }, [computerId, sessionId, name]);
+
+  if (controller === null || state === null) {
+    return (
+      <View testID="workflow-edit" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ActivityIndicator color={palette.accent} />
+      </View>
+    );
+  }
+
+  /** The one drawing the gestures read: `editGeometry` of the draft on screen. */
+  const geometry = editGeometry(state.draft ?? {}, state.problems);
+
+  /**
+   * One door for every gesture and every menu row: `applyIntent` decides which
+   * controller method an intent is, and a refusal lands on the bar by itself (the
+   * controller's `notice`), so nothing is branched here. `insert` and `open` need
+   * slice 7b's sheets, and are therefore absent — their intent is reported and
+   * dropped, never guessed at.
+   */
+  const act = (result: GestureResult): void => {
+    setArmed(result.armed);
+    setDropTargets(result.armed === null ? [] : validDropTargets(geometry, result.armed));
+    applyIntent(
+      {
+        duplicate: (id) => controller.duplicate(id),
+        move: (id, by) => controller.move(id, by),
+        remove: (id) => {
+          controller.remove(id);
+          // The undo toast is the ONE way back: `EditHistory` holds the draft.
+          setToast(deletedToast(id));
+        },
+        setFail: (id, target) => controller.setFail(id, target),
+      },
+      result.intent,
+    );
+    setMenu(null);
+  };
+
+  /** Cancel: a dirty draft is confirmed first (`discardPrompt`), never silently lost. */
+  const cancel = (): void => {
+    const prompt = controller.discardPrompt();
+    if (prompt === null) {
+      onBack();
+      return;
+    }
+    Alert.alert(prompt, undefined, [
+      { text: "Keep editing", style: "cancel" },
+      {
+        text: "Discard",
+        style: "destructive",
+        onPress: () => {
+          controller.discard();
+          onBack();
+        },
+      },
+    ]);
+  };
+
+  return (
+    <WorkflowEditScreen
+      palette={palette}
+      state={state}
+      title={name ?? "New workflow"}
+      canSave={controller.canSave()}
+      steps={drawnSteps(state.draft ?? {})}
+      geometry={state.draft === null ? null : geometry}
+      onCancel={cancel}
+      onSave={() => controller.beginReview()}
+      onReload={() => controller.reload()}
+      onKeepEditing={() => controller.keepEditing()}
+      onOpenSession={onBack}
+      actions={{
+        tap: (target) => act(tapIntent(armed, target)),
+        release: (portId, locationX, locationY) =>
+          act(portRelease(armed, geometry, portId, locationX, locationY)),
+        longPress: (id) => {
+          // The note under Delete is the CORE's own count (`deleteStep`'s
+          // `dangling`), read on a throwaway draft: the same words the operation
+          // will report, and the draft on screen is never touched.
+          setMenu(
+            state.draft === null
+              ? null
+              : { id, ...menuInputs({ draft: state.draft, prompts: state.prompts, id }) },
+          );
+          playHaptic("light");
+        },
+        menu: (intent) => act(menuGesture(intent)),
+        armed,
+        dropTargets,
+      }}
+      menu={menu}
+      onDismissMenu={() => setMenu(null)}
+      toast={toast}
+      onUndo={() => {
+        controller.undo();
+        setToast(null);
+      }}
+      onDismissToast={() => setToast(null)}
     />
   );
 }
@@ -3218,6 +3425,12 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     sessionId,
                   })
                 }
+                onNew={(sessionId) =>
+                  navigation.navigate("WorkflowEdit", {
+                    computerId: route.params.computerId,
+                    sessionId,
+                  })
+                }
                 onOpen={(run) =>
                   navigation.navigate("WorkflowRun", {
                     computerId: route.params.computerId,
@@ -3271,6 +3484,37 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     title: name,
                   })
                 }
+                onEdit={(name) =>
+                  navigation.navigate("WorkflowEdit", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    name,
+                  })
+                }
+                onNew={() =>
+                  navigation.navigate("WorkflowEdit", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          {/* Create or edit a workflow (docs/feat/workflow-editor.md D8): a plain
+              PUSH beside `WorkflowStart` — never the `Sheet` route, never a
+              `<Modal>`. Identity only in the params: the draft, the problems and
+              every refusal belong to the editor's own controller. */}
+          <Stack.Screen
+            name="WorkflowEdit"
+            options={{ title: "Edit workflow", headerShown: false }}
+          >
+            {({ navigation, route }) => (
+              <WorkflowEditRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                {...(route.params.name === undefined ? {} : { name: route.params.name })}
+                onBack={() => navigation.goBack()}
               />
             )}
           </Stack.Screen>

@@ -141,6 +141,20 @@ export interface WorkflowStartRoute {
   readonly sessionId: string;
 }
 
+/**
+ * Create or edit a workflow on the graph (docs/feat/workflow-editor.md D8, slice
+ * 7a): a native-stack PUSH beside `WorkflowStart`, never the `Sheet` route and
+ * never a `<Modal>`. `name` absent means CREATE — the file is named on the New
+ * sheet (slice 7c) or by the template. Identity only: the draft, the problems and
+ * every refusal are `workflow-edit-controller.ts`'s.
+ */
+export interface WorkflowEditRoute {
+  readonly computerId: string;
+  readonly sessionId: string;
+  /** The file stem to edit; ABSENT opens the create flow. */
+  readonly name?: string;
+}
+
 /** The stack's route table (`@react-navigation/native-stack` params). */
 export type RootStackParams = {
   Pair: PairRouteParam | undefined;
@@ -163,6 +177,8 @@ export type RootStackParams = {
   WorkflowRun: WorkflowRunRoute;
   /** Start a workflow from the project's catalogue (docs/feat/workflows-ui.md D6). */
   WorkflowStart: WorkflowStartRoute;
+  /** Create or edit a workflow on the graph (docs/feat/workflow-editor.md D8). */
+  WorkflowEdit: WorkflowEditRoute;
 };
 
 /**
