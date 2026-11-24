@@ -12,6 +12,7 @@ import {
   TOOL_IMAGE_LOW_EDGE,
   type Tool,
   type ToolContext,
+  type ToolImageEntry,
   type ToolImageVariant,
   type ToolResult,
   formatBytes,
@@ -36,9 +37,9 @@ const detailField = z
 export type ImageViewInput = { readonly ref: string; readonly detail?: "low" | "high" };
 
 const DESCRIPTION =
-  "Look at ONE picture a read kept for you: pass the ref from an `[image p.N · W×H · ref <hex>]` marker (fs_read of a PDF). Use it when a picture matters to the answer (a diagram, a chart, a scanned page); skip logos and decorations. One image per call.";
+  "Look at ONE picture a read kept for you: pass the ref from an `[image p.N · W×H · ref <hex>]` marker (fs_read of a PDF) or from an `[image <name> · W×H · <format> · ref <hex> · high only]` marker (fs_read of a PNG/JPEG file). Use it when a picture matters to the answer (a diagram, a chart, a scanned page); skip logos and decorations. One image per call.";
 
-const REGENERATE = "fs_read the file again (same pages) to get a fresh ref";
+const REGENERATE = "fs_read the file again to get a fresh ref";
 
 /**
  * The tool, its schema shaped by `model.imageDetail` (D6): `auto` offers
@@ -66,6 +67,22 @@ export function createImageViewTool(setting: ImageDetailSetting = "auto"): Tool<
       return viewImage(input, ctx, setting);
     },
   };
+}
+
+/** `low` is not available for this picture: it is served at `high`, said plainly. */
+const HIGH_ONLY_NOTE = " · low is not available for this image yet — sent at high";
+
+/**
+ * What to say about the variant choice (docs/feat/image-files.md D4). A picture
+ * with `low === high` is either genuinely ≤ `TOOL_IMAGE_LOW_EDGE` (the label
+ * "already ≤ 768 px" is then TRUE) or an image file read at `high` only — and
+ * calling THAT "already ≤ 768 px" would be a lie.
+ */
+function highOnly(entry: ToolImageEntry): boolean {
+  return (
+    entry.low.ref.id === entry.high.ref.id &&
+    Math.max(entry.high.width, entry.high.height) > TOOL_IMAGE_LOW_EDGE
+  );
 }
 
 /** The tool's decision, pure over the store (exported for the tests). */
@@ -102,8 +119,11 @@ export function viewImage(
       isError: true,
     };
   }
-  const same =
-    entry.low.ref.id === entry.high.ref.id ? ` · already ≤ ${TOOL_IMAGE_LOW_EDGE} px` : "";
+  const same = highOnly(entry)
+    ? HIGH_ONLY_NOTE
+    : entry.low.ref.id === entry.high.ref.id
+      ? ` · already ≤ ${TOOL_IMAGE_LOW_EDGE} px`
+      : "";
   const stale: unknown = input.detail;
   const note =
     forced && stale !== undefined && stale !== setting

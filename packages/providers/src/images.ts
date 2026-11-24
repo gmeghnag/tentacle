@@ -19,7 +19,7 @@
  */
 import { createHash } from "node:crypto";
 import type { AttachmentRef, ChatMessage, ChatRequest } from "@tentacle/core";
-import { attachmentLabel, formatBytes } from "@tentacle/core";
+import { attachmentLabel, imageOverCapReason } from "@tentacle/core";
 import { MAX_IMAGE_BYTES, isKnownImageType } from "@tentacle/protocol";
 
 /** How many images one request may inline: the last K distinct refs (owner Q4). */
@@ -296,6 +296,20 @@ export function imageLimits(
 }
 
 /**
+ * The largest SIDE an image FILE may have (owner Q1 (C), docs/feat/image-files.md):
+ * `high` is the original bytes (nothing downscales yet), so this is the one
+ * bound that keeps a phone photo from either a provider 400 (Anthropic accepts
+ * 8000 px) or an unbounded token bill on an OpenAI-compatible endpoint (1568 px).
+ * It sits HERE, next to the byte cap, so the two can never disagree.
+ */
+export function imageFileMaxEdge(provider: VisionProvider): number {
+  return provider === "anthropic" ? ANTHROPIC_MAX_IMAGE_EDGE : OPENAI_MAX_IMAGE_EDGE;
+}
+
+export const ANTHROPIC_MAX_IMAGE_EDGE = 8000;
+export const OPENAI_MAX_IMAGE_EDGE = 1568;
+
+/**
  * What one image ref costs the heuristic counter, by provider
  * (docs/feat/image-view.md D7). Anthropic keeps the flat 1600; an
  * OpenAI-compatible endpoint (Qwen measured ≈3.1k per image) is charged 3200 —
@@ -439,11 +453,9 @@ function placeholder(
   }
   const max = effectiveMaxImageBytes(options.maxImageBytes);
   if (ref.size > max) {
-    // The MODEL's cap when it is the binding one (the entry point already
-    // refused anything over `MAX_IMAGE_BYTES`, but a request may be built from
-    // history a bigger build wrote), named as such so the fix is obvious.
-    const which = max < MAX_IMAGE_BYTES ? "this model's" : "the";
-    return `[image omitted: ${formatBytes(ref.size)} is over ${which} ${formatBytes(max)} limit — ${label}]`;
+    // The ONE cap sentence, shared with `fs_read`'s own refusal (docs/feat/
+    // image-files.md D1), so the same limit reads the same way everywhere.
+    return `[image omitted: ${imageOverCapReason(ref.size, max)} — ${label}]`;
   }
   if (!options.inlined.has(ref.id) && options.overBudget?.has(ref.id) === true) {
     return `[image omitted: over this request's image budget (newer images go first) — ${label}]`;

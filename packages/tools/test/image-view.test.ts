@@ -198,9 +198,25 @@ describe("image_view (T5, T9)", () => {
     expect(high.image).toEqual(e.high.ref);
   });
 
-  test("low === high says it is already small", () => {
+  test("low === high on a large picture: served at high with a plain note, never a false label", () => {
+    // docs/feat/image-files.md D4: an image FILE is kept at `high` only, so
+    // `low === high` on a 1568×784 picture is NOT "already ≤ 768 px".
     const r = viewImage({ ref: "a1b2c3d4e5f6" }, { images: spy(entry(true)) }, "auto");
+    expect(r.image).toEqual(entry(true).high.ref);
+    expect(r.content).toContain("low is not available for this image yet — sent at high");
+    expect(r.content).not.toContain("already ≤ 768 px");
+  });
+
+  test("low === high on a genuinely small picture still says it is already ≤ 768 px", () => {
+    const small = entry(true);
+    const tiny: ToolImageEntry = {
+      label: "doc.pdf p.3",
+      high: { ...small.high, width: 600, height: 400 },
+      low: { ...small.high, width: 600, height: 400 },
+    };
+    const r = viewImage({ ref: "a1b2c3d4e5f6" }, { images: spy(tiny) }, "auto");
     expect(r.content).toContain("already ≤ 768 px");
+    expect(r.content).not.toContain("low is not available");
   });
 
   test("a forced imageDetail hides `detail` from the schema and ignores a stale one with a note", () => {
@@ -228,6 +244,7 @@ describe("image_view (T5, T9)", () => {
       expect(r.image).toBeUndefined();
     }
     expect(cases[0]?.content).toContain("fs_read the file again");
+    expect(cases[0]?.content).not.toContain("same pages");
     expect(cases[1]?.content).toContain("a p.1, b p.2");
   });
 

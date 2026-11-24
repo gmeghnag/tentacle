@@ -319,4 +319,98 @@ instead of the sniff for the MIME type (T3 `.jpg`-is-PNG red); drop the D4 size 
 
 ## Execution
 
+*— Claude (Claude Code executor; exact model id not exposed in this environment), 2026-11-24*
+
+Branch `feat/image-files` (worktree `.tentacle/worktrees/image-files`). Implemented in the
+Implementation's dependency order; every test row was run RED before its code (records
+below), and all three of the plan's mutations plus two of my own were run and reverted.
+
+### Step 0 — the load-bearing assumption, PROVED (repro kept as T5)
+
+`.tentacle/tmp/image-files/step0.ts` (a real `AttachmentStore` → `putTool` with
+`mimeType: "image/jpeg"` cast past the old literal → `viewImage` → `checkAttachmentRefs`
+→ `AnthropicProvider` and `OpenAIProvider` with a recording `fetch`):
+
+```
+png1x1:  OK ref=36d9c02b8b4d id-matches-bytes=true anthropic=[image/png]  openai=[data:image/png;base64,iVBORw0KGg]
+jpeg1x1: OK ref=5f9f01ecb3a4 id-matches-bytes=true anthropic=[image/jpeg] openai=[data:image/jpeg;base64,/9j/4AAQS]
+```
+
+Both formats reach both providers as EXACTLY one image part with their own MIME type: the
+only edit the plan makes on image-view's path (widening `ToolImagePut.mimeType`) is
+enough, and no daemon code changed. Kept as T5 in `providers/test/tool-images.test.ts`.
+
+### As built, per slice
+
+1. **`core/src/image-file.ts` (new)** — `inspectImageFile(bytes, {maxEdge})`, the PNG
+   checks (signature, a 13-byte `IHDR` with a matching `crc32`, 1..65535 sides, the legal
+   depth/colour table, interlace 0|1, an `IEND` in the last 1 KiB), the JPEG walk (frame
+   header → `SOS` → `EOI`, with CMYK / non-8-bit / arithmetic / lossless-hierarchical
+   each refused by its own sentence), the `maxEdge` bound, plus `imageOverCapReason`,
+   `imageFileMarker`, `ImageFileLimits` and `DEFAULT_IMAGE_FILE_MAX_EDGE`.
+   `tool-images.ts`: `ToolImagePut.mimeType` widened to `"image/png" | "image/jpeg"` (D3,
+   the load-bearing edit). Exported from `core/src/index.ts`.
+2. **`providers/src/images.ts`** — `placeholder` calls `imageOverCapReason` (one source
+   for the sentence; the provider tests pin the bytes and stayed green unchanged), and
+   `imageFileMaxEdge(provider)` (8000 / 1568) sits beside the byte cap (Q1 C).
+3. **`tools/src/image-file.ts` (new) + `builtins.ts`** — the branch runs inside the read,
+   AFTER the PDF branch and after the "`pages` applies only to PDFs" refusal, and only
+   with `ctx.images` + `ctx.env.readBytes`, so every other session is byte-for-byte
+   today's. The head decides: PNG/JPEG → the image path; gif/webp/heic → a sentence naming
+   the type (Q2); an image extension with non-image, non-text bytes → "not a PNG or JPEG
+   image"; anything else → the text path. Then: a range refused, a `readBytes` cap
+   refusal → the shared reason line, `inspectImageFile`, `putTool` with `high` only and
+   **0 refs**. `createFsReadTool` takes `{maxImageBytes, maxEdge}`. `image-view.ts` D4:
+   the `low === high` note now distinguishes a genuinely small picture from an image file
+   read at `high` only, and the description/`REGENERATE` text follow.
+4. **`cli/src/wiring.ts`** — passes `imageLimits(...).maxBytes` and
+   `imageFileMaxEdge(config.provider)`.
+5. **`changelog.d/image-files.added.md`**.
+
+**No drift from the Design**, with one shape note: D2 says the head read is
+`readLimitBytes: PDF_HEAD_BYTES` on the non-PDF path. My first cut took that head BEFORE
+`readPdf`, which made a PDF pay a second read; I moved the branch inside the read (its own
+head read, after `readPdf` returned `undefined`), which is what D2's "after `readPdf`
+returns `undefined`" says. No protocol file, no `PROTOCOL_VERSION` change, no daemon
+change.
+
+### Red-before-green (the exact rows)
+
+- `core/test/image-file.test.ts` — 9 red before the JPEG `SOS`/`EOI` logic and the marker
+  landed ("the JPEG is truncated or corrupt" for every accepted case; `2.0 KB` vs
+  the real `formatBytes` `2 KB`), green after.
+- `tools/test/fs-read-image.test.ts` — the whole file red before the branch (ReferenceError
+  on the missing option, then `WEBP`/mojibake assertions), green after.
+- `tools/test/image-view.test.ts` — the D4 rows red before `highOnly` existed (a large
+  `low === high` entry still said "already ≤ 768 px"), green after.
+
+### Mutations run (production code edited, target test shown red, reverted)
+
+| Mutation | Red |
+|---|---|
+| drop the PNG `IEND` check | `inspectImageFile: PNG > a PNG cut before IEND counts as truncated` |
+| drop the JPEG `EOI` check | `inspectImageFile: JPEG > a JPEG cut before EOI counts as truncated` |
+| the extension decides the MIME type | `fs_read … a .jpg holding PNG bytes is stored as image/png` |
+| drop D4's size check in `highOnly` | `image_view … a genuinely small picture still says it is already ≤ 768 px` |
+| `imageFileMaxEdge` → 8000 everywhere | `an OpenAI-compatible endpoint takes 1568 px: the same file is refused` |
+| hard-code `maxImageBytes` in wiring | `the model's own maxImageBytes reaches the read` |
+
+All five touched files were green again after each revert (`598 pass / 0 fail` across the
+32 test files of core/tools/providers-images/cli-wiring/daemon).
+
+### Coverage vs the plan's tests
+
+T1 (`core/image-file.test.ts`, 28 rows: accepted PNG / baseline / SOF1 / SOF2 / greyscale,
+every refusal, and the `maxEdge` / `maxEdge + 1` boundary), T2 (in the same file, plus the
+providers' unchanged goldens), T3 (`tools/fs-read-image.test.ts`, 13 rows: PNG, JPEG,
+`.jpg`-is-PNG, over-cap with no full read, store refusal, a range, GIF/WebP, `.png`-is-text,
+`.png`-is-binary, the no-store golden, and `images: false` returning the shared constant),
+T4 (2 rows in `image-view.test.ts`), T5 (2 rows in `providers/tool-images.test.ts`),
+T6 (3 rows in `cli/image-view-wiring.test.ts`), T7 (2 rows in
+`daemon/attachment-tool-images.test.ts`). Unverified in this environment: the full
+`bun run check` — the orchestrator's script runs it; locally `packages/{core,tools,
+providers,daemon}` typecheck clean, and `packages/cli`'s typecheck reports only the 12
+pre-existing `SharedAutoAccept`/`RoutingAutoAccept` errors that `main` reports too (none
+in `wiring.ts` or the wiring test).
+
 ## Review
