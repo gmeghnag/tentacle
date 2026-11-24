@@ -66,7 +66,7 @@ import {
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
 import { HooksTrustParamsSchema } from "@tentacle/protocol";
-import { imageLimits, imageTokenEstimate } from "@tentacle/providers";
+import { imageFileMaxEdge, imageLimits, imageTokenEstimate } from "@tentacle/providers";
 import {
   NOTICES,
   type RunOutcome,
@@ -1005,12 +1005,20 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // `image_view` (docs/feat/image-view.md D1/D5): the session's write handle AND
   // a model that takes images. `fs_read` becomes its image variant (one more
   // sentence; it keeps pictures only when its context carries the store).
+  const imageLimitValues = imageLimits(config.provider, config);
   const toolImages =
-    options.toolImages !== undefined && imageLimits(config.provider, config).vision
-      ? options.toolImages
-      : undefined;
+    options.toolImages !== undefined && imageLimitValues.vision ? options.toolImages : undefined;
   if (toolImages !== undefined) {
-    tools.replace("fs_read", createFsReadTool({ images: true }));
+    // An image FILE read (docs/feat/image-files.md D2): the model's own byte cap
+    // and Q1's side bound, both from the same two places the providers use.
+    tools.replace(
+      "fs_read",
+      createFsReadTool({
+        images: true,
+        maxImageBytes: imageLimitValues.maxBytes,
+        maxEdge: imageFileMaxEdge(config.provider),
+      }),
+    );
     tools.register(createImageViewTool(config.imageDetail ?? "auto"));
   }
   // `workload_shell` (docs/feat/workload-shell.md D3): a stateful, non-interactive

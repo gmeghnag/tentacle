@@ -14,9 +14,12 @@ import type {
   ToolContext,
   ToolDiffDetail,
   ToolImageStore,
+  ToolResult,
 } from "@tentacle/core";
 import {
+  DEFAULT_IMAGE_FILE_MAX_EDGE,
   DEFAULT_PDF_IMAGE_LIMITS,
+  MAX_IMAGE_BYTES,
   MAX_PDF_BYTES,
   PDF_HEAD_BYTES,
   formatPdfText,
@@ -34,6 +37,7 @@ import { createTwoFilesPatch } from "diff";
 import { z } from "zod";
 import { shellKillTool, shellOutputTool } from "./background.ts";
 import { pathConcurrency } from "./concurrency.ts";
+import { type ImageFileOptions, readImageFile } from "./image-file.ts";
 import { type PdfExtractedPage, extractPdf } from "./pdf/extract.ts";
 
 /** Build a unified-diff detail and count changed lines. */
@@ -115,38 +119,60 @@ export const fsReadTool: Tool<z.infer<typeof fsReadInput>> = {
   permission: "none",
   concurrency: pathConcurrency("read", (path) => parsePathRange(path).path),
   async execute(input, ctx) {
-    // A range may come from explicit offset/limit, or a `path:start:end` suffix.
-    const fromPath =
-      input.offset === undefined && input.limit === undefined
-        ? parsePathRange(input.path)
-        : { path: input.path, offset: input.offset, limit: input.limit };
-    const path = fromPath.path;
-    const offset = fromPath.offset;
-    const limit = fromPath.limit;
-
-    // A PDF is decided by its BYTES, never its name (D3): `notes.pdf` that is
-    // text stays text, a `download` that is a PDF is parsed.
-    const pdf = await readPdf(path, input.pages, { offset, limit }, ctx);
-    if (pdf !== undefined) {
-      return pdf;
-    }
-    if (input.pages !== undefined) {
-      throw new Error(`\`pages\` applies only to PDFs: ${path} is not a PDF`);
-    }
-
-    const content = await ctx.env.readFile(path);
-    if (offset === undefined && limit === undefined) {
-      return { content };
-    }
-    const lines = content.split("\n");
-    const start = Math.max(1, offset ?? 1);
-    const count = limit ?? lines.length - (start - 1);
-    const slice = lines.slice(start - 1, start - 1 + count);
-    const endLine = start - 1 + slice.length;
-    const header = `[${path} lines ${start}-${endLine} of ${lines.length}]`;
-    return { content: `${header}\n${slice.join("\n")}` };
+    return readFileOrImage(input, ctx);
   },
 };
+
+/**
+ * The read itself, in today's order: a PDF by its bytes, then an image FILE
+ * (docs/feat/image-files.md D2 — only where the session's store and its limits
+ * are given), then the text path. ONE function for both tool shapes, so the PDF
+ * sniff happens once and a session without vision cannot pay for it.
+ */
+async function readFileOrImage(
+  input: z.infer<typeof fsReadInput>,
+  ctx: ToolContext,
+  imageOptions?: ImageFileOptions,
+): Promise<ToolResult> {
+  // A range may come from explicit offset/limit, or a `path:start:end` suffix.
+  const fromPath =
+    input.offset === undefined && input.limit === undefined
+      ? parsePathRange(input.path)
+      : { path: input.path, offset: input.offset, limit: input.limit };
+  const path = fromPath.path;
+  const offset = fromPath.offset;
+  const limit = fromPath.limit;
+
+  // A PDF is decided by its BYTES, never its name (D3): `notes.pdf` that is
+  // text stays text, a `download` that is a PDF is parsed.
+  const pdf = await readPdf(path, input.pages, { offset, limit }, ctx);
+  if (pdf !== undefined) {
+    return pdf;
+  }
+  if (input.pages !== undefined) {
+    throw new Error(`\`pages\` applies only to PDFs: ${path} is not a PDF`);
+  }
+
+  // An image FILE, after the PDF branch, so the PDF path keeps its own read.
+  if (imageOptions !== undefined && ctx.images !== undefined) {
+    const image = await readImageFile(path, { offset, limit }, ctx, imageOptions);
+    if (image !== undefined) {
+      return image;
+    }
+  }
+
+  const content = await ctx.env.readFile(path);
+  if (offset === undefined && limit === undefined) {
+    return { content };
+  }
+  const lines = content.split("\n");
+  const start = Math.max(1, offset ?? 1);
+  const count = limit ?? lines.length - (start - 1);
+  const slice = lines.slice(start - 1, start - 1 + count);
+  const endLine = start - 1 + slice.length;
+  const header = `[${path} lines ${start}-${endLine} of ${lines.length}]`;
+  return { content: `${header}\n${slice.join("\n")}` };
+}
 
 /**
  * `fs_read`, optionally in its image variant (docs/feat/image-view.md D4): the
@@ -154,15 +180,28 @@ export const fsReadTool: Tool<z.infer<typeof fsReadInput>> = {
  * session's store), plus one sentence pointing the model at `image_view`. A
  * NEW object: the shared `fsReadTool` is never mutated.
  */
-export function createFsReadTool(opts: { readonly images: boolean }): Tool<
-  z.infer<typeof fsReadInput>
-> {
+export function createFsReadTool(opts: {
+  readonly images: boolean;
+  /** This model's per-image cap and Q1's largest side (docs/feat/image-files.md D2). */
+  readonly maxImageBytes?: number;
+  readonly maxEdge?: number;
+}): Tool<z.infer<typeof fsReadInput>> {
   if (!opts.images) {
     return fsReadTool;
   }
+  const imageOptions: ImageFileOptions = {
+    maxImageBytes: opts.maxImageBytes ?? MAX_IMAGE_BYTES,
+    maxEdge: opts.maxEdge ?? DEFAULT_IMAGE_FILE_MAX_EDGE,
+  };
   return {
     ...fsReadTool,
-    description: `${fsReadTool.description} With image_view available, a kept picture's marker carries a ref (\`[image p.N · W×H · ref <hex>]\`): call \`image_view\` with a marker's ref when a picture matters to the answer (diagrams, charts, scanned pages); skip logos.`,
+    description: `${fsReadTool.description} With image_view available, a kept picture's marker carries a ref (\`[image p.N · W×H · ref <hex>]\`): call \`image_view\` with a marker's ref when a picture matters to the answer (diagrams, charts, scanned pages); skip logos. A PNG or JPEG file (read by its bytes) is kept the same way: its marker is \`[image <name> · W×H · <format> · <size> · ref <hex> · high only]\`, and only high detail is available for it.`,
+    // The image branch of the read: the same range parsing and PDF-first order,
+    // then the file's own limits, so the model's cap and Q1's side bound are the
+    // session's (docs/feat/image-files.md D2).
+    async execute(input, ctx) {
+      return readFileOrImage(input, ctx, imageOptions);
+    },
   };
 }
 

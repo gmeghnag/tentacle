@@ -19,8 +19,10 @@ import UserNotifications
 
 final class NotificationService: UNNotificationServiceExtension {
     /// `expo-secure-store`'s service name for a no-auth generic password
-    /// (`SecureStoreModule.swift`): the extension reads the items the app wrote.
-    private static let keychainService = "so.tentacle.app:no-auth"
+    /// (`SecureStoreModule.swift`): `<keychainService>:no-auth`, where the app
+    /// passes `PUSH_KEYCHAIN_SERVICE` ("app", `src/push-access-group.ts`). Pinned
+    /// by `test/push-keychain-service.test.ts` — change both or neither.
+    private static let keychainService = "app:no-auth"
 
     private var contentHandler: ((UNNotificationContent) -> Void)?
     private var original: UNMutableNotificationContent?

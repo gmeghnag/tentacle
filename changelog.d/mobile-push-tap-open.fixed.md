@@ -1,0 +1,1 @@
+- **Push banners show the rendered text, and tapping one opens the session.** The notification extension now reads the same Keychain service the app writes (it looked under a different name and always fell back to the placeholder), and a tap that launches the app is held until the app is ready instead of being dropped on the home screen.
