@@ -1979,3 +1979,20 @@ model names only. Slices 5 and 6 are pure, React-free modules.
 fresh context only), so blind spots they share may survive both passes.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 2 — REQUEST-CHANGES
+
+Scope: `git diff HEAD~1` (d4eb0097). `bun test apps/mobile/test/workflow-edit-controller.test.ts`: 56 pass / 0 fail. `bun run lint` clean; `bun run typecheck` clean.
+
+- **Finding 1 (HIGH): FIXED.** My round-1 repro (`.tentacle/tmp/workflow-editor/rev456/lost-edits.test.ts`, link down before the write rejects) now ends `editing, dirty: true, "Discard 1 change?"`, with the offline edit kept. Mutation: `baseline = history.current` → 2 controller tests red; reverted.
+- **Finding 2 (MEDIUM): mostly fixed, and the fix opens a new hole.** Save is now off while a save is undecided (mutation `pending: false` → red), and the check runs at once with the link up (mutation: drop the immediate `checkInterrupted` → 2 red). Both reverted; `git status` clean.
+  - **New MEDIUM, `apps/mobile/src/workflow-edit-controller.ts:989` + `:1055-1064`.** The immediate check fires while the link is already dead but not yet reported down. If the link-up arrives while that check is in flight, `checking` swallows it (`:989`). When the check then rejects, nothing re-arms it.
+  - Result: Save is stuck on "Checking whether the last save landed" until another link flap, or a Reload that discards the edits.
+  - Repro: `.tentacle/tmp/workflow-editor/rev456/stuck.test.ts`, red: `saveOff: Checking whether the last save landed`, `reads: 2`.
+  - Fix: remember an up that arrives while `checking` (a `recheck` flag), and re-run `checkInterrupted` from the catch when `!offline`. Pin it with this race as a red test.
+- **Regressions checked, none found:**
+  - a lost PREVIEW (`dryRun`) no longer arms `interrupted`;
+  - `reload` clears it, and an in-flight check is ignored through `interrupted !== lost`;
+  - `setLink(up)` with nothing pending only refreshes, as before.
+
+*— claude-opus-5-5, 2026-11-24*
