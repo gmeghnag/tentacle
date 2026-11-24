@@ -99,6 +99,11 @@ export type SheetState =
        * Empty when nobody else was asked. Display only; the first answer wins.
        */
       readonly alsoAsked: readonly string[];
+      /**
+       * The person swiped the sheet away (docs/fix/mobile-ask-surfaces.md): the ask
+       * is still pending and answerable, only its sheet is down (a banner shows).
+       */
+      readonly parked: boolean;
     }
   | {
       /**
@@ -151,6 +156,12 @@ export interface PermissionSheetDeps {
    * device, and the terminal's is the stricter one).
    */
   readonly autoAcceptsTurn?: (turnId: string) => boolean;
+  /**
+   * Was this daemon ask PARKED by the person before (a re-delivery after a
+   * detach, a session switch)? True → it opens parked, never as a surprise sheet
+   * (`ask-park.ts`'s `ASK_PARKS.has`). Absent → every ask opens presented.
+   */
+  readonly wasParked?: (requestId: string) => boolean;
 }
 
 /**
@@ -178,6 +189,13 @@ export interface PermissionSheet {
   setReplyText(text: string): void;
   /** Send the refusal with the person's words (`reject_once` + `message`). */
   sendReply(now?: number): "sent" | "ignored";
+  /**
+   * The person swiped the ask down: it stays pending (nothing resolved, nothing
+   * sent) and only its sheet goes. No-op unless an ask is on screen.
+   */
+  park(): void;
+  /** Bring a parked ask back (the banner was tapped). */
+  unpark(): void;
   /** The screen went away: withdraw the ask, send nothing (`reset()` on the broker). */
   dismiss(): void;
   /** Clear a returned reply (its notice was read and its text reused or dropped). */
@@ -323,6 +341,9 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
       alsoAsked: otherDevicesAsked(entry.options?.askedOn, deps.ownHost?.()).map((label) =>
         stripAnsi(label).replace(/\s+/g, " ").trim().slice(0, 40),
       ),
+      parked:
+        entry.options?.requestId !== undefined &&
+        deps.wasParked?.(entry.options.requestId) === true,
     });
     if (armMs > 0 && entry === current) {
       // The window's END is a state change, not a guess: the sheet says so once,
@@ -537,6 +558,16 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
       // The person's words come back if they never reach the agent.
       settle({ ...response, onAnswerLost: returnReply });
       return "sent";
+    },
+    park() {
+      if (state.kind === "asking" && !state.parked) {
+        commit({ ...state, parked: true });
+      }
+    },
+    unpark() {
+      if (state.kind === "asking" && state.parked) {
+        commit({ ...state, parked: false });
+      }
     },
     dismiss() {
       // Everything the sheet holds is withdrawn: the ask on screen AND the ones

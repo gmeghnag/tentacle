@@ -61,11 +61,19 @@ const DETENTS: readonly number[] = [0.3, 0.5, 1.0];
 const MIDDLE = 1;
 
 /**
+ * The ask's peek detent (docs/fix/mobile-ask-surfaces.md D3): it must hold the
+ * one-row `AskSlim` (≈ 76 pt) on the smallest phone (667 pt), pinned by a test.
+ */
+export const PEEK = 0.12;
+const PERMISSION_DETENTS: readonly number[] = [PEEK, 0.5, 1.0];
+
+/**
  * The per-sheet table. Outbox opens at M, not S: its title, quote and five pills
  * (≈ 420 pt) do not fit 0.3 (Owner Q1).
  */
 export const SHEET_SPEC: Record<SheetKind, SheetSpec> = {
-  permission: { detents: DETENTS, initial: MIDDLE, dimmed: -1, grabber: true },
+  // dimmed 0: behind the peek row the screen is live (an ask never blocks).
+  permission: { detents: PERMISSION_DETENTS, initial: MIDDLE, dimmed: 0, grabber: true },
   outbox: { detents: DETENTS, initial: MIDDLE, dimmed: -1, grabber: true },
   commands: { detents: DETENTS, initial: MIDDLE, dimmed: -1, grabber: true },
   tools: { detents: DETENTS, initial: MIDDLE, dimmed: -1, grabber: true },
@@ -116,13 +124,12 @@ export function initialDetent(kind: SheetKind, ctx: DetentContext): number {
 }
 
 /**
- * Whether the native sheet can be swiped/backdrop-dismissed. Only a permission
- * ask IN PROGRESS is held (D5, Owner Q2): its dismissal semantics are "withdraw
- * and send nothing", which needs an explicit "Not now" button, not a gesture the
- * person may make by accident. `returned` is free again.
+ * Whether the native sheet can be swiped/backdrop-dismissed: always. An ask is
+ * never blocking (docs/fix/mobile-ask-surfaces.md): a swipe PARKS it
+ * (`ask-park.ts`), it never withdraws it.
  */
-export function sheetGestureEnabled(kind: SheetKind, asking: boolean): boolean {
-  return !(kind === "permission" && asking);
+export function sheetGestureEnabled(_kind: SheetKind, _asking: boolean): boolean {
+  return true;
 }
 
 /**

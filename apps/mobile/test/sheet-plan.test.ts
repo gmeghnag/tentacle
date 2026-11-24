@@ -12,6 +12,7 @@ import {
   DETENT_MEMORY_MAX,
   type DetentMemory,
   INTENT_SHEET,
+  PEEK,
   PRESENTED_SHEET_KINDS,
   SHEET_DETENTS,
   SHEET_HOLDS,
@@ -82,10 +83,10 @@ describe("SHEET_SPEC — the RNS dev asserts must be unreachable", () => {
     });
   }
 
-  test("every sheet opens at the middle detent and is dimmed throughout", () => {
+  test("every sheet opens at the middle detent; all but the ask are dimmed throughout", () => {
     for (const kind of SHEET_KINDS) {
       expect(initialDetent(kind, CALM)).toBe(1);
-      expect(SHEET_SPEC[kind].dimmed).toBe(-1);
+      expect(SHEET_SPEC[kind].dimmed).toBe(kind === "permission" ? 0 : -1);
       expect(SHEET_SPEC[kind].grabber).toBe(true);
     }
   });
@@ -153,24 +154,25 @@ describe("sheetOptions — always accepted by RNS", () => {
   });
 });
 
-describe("sheetGestureEnabled — blocked only for an ask in progress", () => {
-  test("permission while asking is held; permission returned is free", () => {
-    expect(sheetGestureEnabled("permission", true)).toBe(false);
-    expect(sheetGestureEnabled("permission", false)).toBe(true);
-  });
-
-  test("every other sheet is always dismissible", () => {
+describe("sheetGestureEnabled — an ask never blocks (a swipe parks it)", () => {
+  test("every sheet is always dismissible, asking or not", () => {
     for (const kind of SHEET_KINDS) {
-      if (kind === "permission") continue;
       expect(sheetGestureEnabled(kind, true)).toBe(true);
       expect(sheetGestureEnabled(kind, false)).toBe(true);
     }
   });
 
   test("reaching sheetOptions", () => {
-    expect(sheetOptions("permission", { ...CALM, asking: true }).gestureEnabled).toBe(false);
+    expect(sheetOptions("permission", { ...CALM, asking: true }).gestureEnabled).toBe(true);
     expect(sheetOptions("permission", CALM).gestureEnabled).toBe(true);
     expect(sheetOptions("tools", { ...CALM, asking: true }).gestureEnabled).toBe(true);
+  });
+
+  test("behind the peek row the screen is live (dimmed 0), and the peek holds the slim row", () => {
+    expect(sheetOptions("permission", CALM).sheetLargestUndimmedDetentIndex).toBe(0);
+    expect(SHEET_SPEC.permission.dimmed).toBe(0);
+    expect(SHEET_SPEC.permission.detents[0]).toBe(PEEK);
+    expect(PEEK * 667).toBeGreaterThanOrEqual(76);
   });
 });
 

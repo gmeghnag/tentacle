@@ -1,0 +1,90 @@
+/**
+ * The parked ask (docs/fix/mobile-ask-surfaces.md D3): a swipe-down PARKS an ask,
+ * it never withdraws it. Pure and React-free (AGENTS §7). Three small rules:
+ *
+ * - `ASK_PARKS` remembers which asks the person parked, keyed
+ *   `computerId/sessionId/requestId`, so a re-delivered ask (a detach and
+ *   re-attach, a session switch, the lock drain's `idle → asking`) comes back
+ *   parked, never as a surprise sheet. `forget` on settle.
+ * - `askBanner` is what the parked ask shows under the header.
+ * - `askPresented` / `askSurface` decide whether the sheet is up and which form
+ *   it draws (the peek detent never draws buttons).
+ */
+import type { AskOrigin } from "@tentacle/client";
+import { originWords } from "@tentacle/client";
+import type { SheetState } from "./permission-sheet.ts";
+
+/** What one parked ask is stored under: its own id, so a new ask never inherits it. */
+export function parkKey(computerId: string, sessionId: string, requestId: string): string {
+  return `${computerId}\u0000${sessionId}\u0000${requestId}`;
+}
+
+export interface AskParks {
+  /** The person parked this ask. */
+  note(key: string): void;
+  /** Was it parked (a re-delivery opens parked)? */
+  has(key: string): boolean;
+  /** The ask is settled, or the session is gone. */
+  forget(key: string): void;
+}
+
+export function createAskParks(): AskParks {
+  const parked = new Set<string>();
+  return {
+    note: (key) => {
+      parked.add(key);
+    },
+    has: (key) => parked.has(key),
+    forget: (key) => {
+      parked.delete(key);
+    },
+  };
+}
+
+/** The app's ONE parked memory, held outside React like `SHEET_DETENTS`. */
+export const ASK_PARKS: AskParks = createAskParks();
+
+export interface AskBannerView {
+  readonly title: string;
+  /** The origin's lead (`Main agent`, `Sub-agent explore`, the workflow's name). */
+  readonly originShort: string;
+  /** Asks queued behind this one (the «+1»); 0 = none. */
+  readonly more: number;
+}
+
+/**
+ * The banner under the header: only while an ask is on screen AND parked.
+ * `queued` = asks waiting behind the shown one.
+ */
+export function askBanner(
+  state: SheetState,
+  queued: number,
+  origin: AskOrigin,
+): AskBannerView | null {
+  if (state.kind !== "asking" || !state.parked) {
+    return null;
+  }
+  return {
+    title: state.request.title,
+    originShort: originWords(origin).lead,
+    more: Math.max(0, Math.floor(queued)),
+  };
+}
+
+export interface AskPresentedInput {
+  readonly asking: boolean;
+  readonly parked: boolean;
+  readonly drawerOpen: boolean;
+  /** The screen in front may present it (S8 narrows this for a run screen). */
+  readonly presentable: boolean;
+}
+
+/** What `desiredStack` gets as `permission`. */
+export function askPresented(input: AskPresentedInput): boolean {
+  return input.asking && !input.parked && !input.drawerOpen && input.presentable;
+}
+
+/** The peek detent (index 0) draws the one-row form — never buttons. */
+export function askSurface(detentIndex: number): "slim" | "card" {
+  return detentIndex <= 0 ? "slim" : "card";
+}
