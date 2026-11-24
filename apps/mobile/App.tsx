@@ -131,6 +131,7 @@ import { tapLink } from "./src/links.ts";
 import { authenticate, biometry, capability } from "./src/lock-auth.ts";
 import { LOCK_SETTING_STORE } from "./src/lock-settings-expo.ts";
 import { MemoryAnswers } from "./src/notification-dispatch.ts";
+import { createRouteQueue } from "./src/notification-route-queue.ts";
 import { createDraftStore } from "./src/outbox-drafts.ts";
 import { createOutboxDriver } from "./src/outbox-driver.ts";
 import { createExpoOutboxFs, outboxRoot } from "./src/outbox-fs-expo.ts";
@@ -2357,6 +2358,20 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   // The navigation ref exists only to route an incoming link: a `Linking` event
   // arrives outside the navigator's tree (11b.2, Owner Q6).
   const navigationRef = useNavigationContainerRef<RootStackParams>();
+  const routeQueue = useMemo(
+    () =>
+      createRouteQueue<unknown>((route) => {
+        if (route === "computers") {
+          navigationRef.navigate("Computers");
+          return;
+        }
+        navigationRef.navigate(
+          "Session",
+          route as { computerId: string; sessionId: string; title: string; archived: boolean },
+        );
+      }),
+    [navigationRef],
+  );
   // The lock's setting, read once at launch (D3). `loading` until the Keychain
   // answers: the lock screen covers the first frame in the meantime (F10).
   const [lockSetting, setLockSetting] = useState<LockDelay | "loading">("loading");
@@ -2597,6 +2612,11 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   useEffect(() => {
     replayPendingLink();
   }, [replayPendingLink]);
+  // `onReady`: the link replay AND the parked notification route.
+  const onNavigatorReady = useCallback(() => {
+    replayPendingLink();
+    routeQueue.flush(navigationRef.isReady());
+  }, [replayPendingLink, routeQueue, navigationRef]);
 
   // The app's unmount closes every live client: no socket, no listener left.
   useEffect(() => {
@@ -2647,22 +2667,9 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
         unlockApp: () => lock.current?.dispatch({ type: "authResult", result: "success" }),
         inForeground: () => AppState.currentState === "active",
         computerName: (computerId: string) => RECORDS.get(computerId)?.name ?? "your computer",
-        navigate: (route: unknown) => {
-          if (route === "computers") {
-            navigationRef.navigate("Computers");
-            return;
-          }
-          const to = route as {
-            computerId: string;
-            sessionId: string;
-            title: string;
-            archived: boolean;
-          };
-          if (!navigationRef.isReady()) {
-            return;
-          }
-          navigationRef.navigate("Session", to);
-        },
+        // Parked until the navigator is up (a tap that launched the app arrives
+        // before it mounts); `onNavigatorReady` replays it.
+        navigate: (route: unknown) => routeQueue.route(route, navigationRef.isReady()),
         refuse: (why: string) => {
           // One line, never the notification's text (decision 19 / task 14).
           APP_LOG.log("warn", "notify", { line: `refused ${why}` });
@@ -2725,7 +2732,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
       }
       started?.stop();
     };
-  }, [navigationRef]);
+  }, [navigationRef, routeQueue]);
 
   // The lock's ONE instance, created lazily on this render (a `useRef` initial
   // value would run on every render — `createAppLock` is cheap but its state is
@@ -2911,7 +2918,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
 
   return (
     <LockGate {...lockGateDeps} palette={palette}>
-      <NavigationContainer ref={navigationRef} onReady={replayPendingLink}>
+      <NavigationContainer ref={navigationRef} onReady={onNavigatorReady}>
         <Stack.Navigator
           initialRouteName={initialRoute(computers)}
           screenOptions={{

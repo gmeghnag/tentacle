@@ -78,3 +78,17 @@ Size: M · Blast: cross-module (Keychain contract + app navigation; not a §7 in
 Owner «ok facciamoli partire» (24/11): execute **Design 1 + 2 now** (service pinned to ONE constant on both sides; cold-start/early tap parked until navigation is ready). FIRST run C1 and C2 yourself (unzip/strings on `.tentacle/tmp/mobile-ota/export/tentacle.ipa`, `rg 'no-auth'` in the installed expo-secure-store) and paste the output in Execution — if C2 shows the app's service is NOT `app:no-auth`, STOP and say so. **Design 3 is NOT in this round**: it waits the owner's C3 log line from the phone. Executor: Sonnet (owner: S/M → deepseek/sonnet).
 
 *— orchestrator (claude-opus-5-5), 2026-11-24*
+
+## Execution
+
+*— claude-sonnet-5-5, 2026-11-24*
+
+- **C2 (done):** `apps/mobile/node_modules/expo-secure-store/ios/SecureStoreModule.swift:187-189`: `service = options.keychainService ?? "app"`, then `":no-auth"` appended. The app never passed `keychainService`, so it writes `app:no-auth`; the extension read `so.tentacle.app:no-auth` ⇒ load-bearing assumption confirmed broken.
+- **C1 (NOT run):** `unzip -p` on the ipa needs approval in this session; still for the orchestrator (keychain-access-groups of app + appex profiles; appex `NSExtensionPointIdentifier`). Not blocking the code change.
+- **Drift (Design 1):** re-registration after key rotation is not verified (`ensurePushKeypair` returns an existing key and never re-registers; the directory would be orphaned too), so I took the plan's zero-migration alternative: `PUSH_KEYCHAIN_SERVICE = "app"` (`src/push-access-group.ts`) passed explicitly on get/set/delete in `pushKeychain` (`src/secure-kv.ts`), and the Swift literal is now `"app:no-auth"` (`NotificationService.swift`). Existing items stay readable; no rotation. There is no `TentaclePushKeychainService` Info.plist key (the plan's Info.plist pattern does not exist: `TentaclePushAccessGroup` is only in a stale comment) — the test pins the Swift literal instead.
+- **Design 2:** new `src/notification-route-queue.ts` (`createRouteQueue`: one slot, last wins, one-shot flush). `App.tsx`: `routeQueue` (useMemo after `navigationRef`), notification `navigate` → `routeQueue.route(route, navigationRef.isReady())`, `onNavigatorReady` (link replay + `routeQueue.flush`) on `NavigationContainer onReady`; effect deps gained `routeQueue`.
+- **Tests:** `test/push-keychain-service.test.ts` (new), `test/notification-route-queue.test.ts` (new); `push-wiring-guards.test.ts` regexes loosened for the reformatted `pushKeychain` calls. Red shown: keychain test failed on the Swift literal (`Expected "app:no-auth", Received "so.tentacle.app:no-auth"`) and on missing `keychainService` in `secure-kv.ts` (before the fix). The queue tests were red only by missing module (no pre-existing seam to run against); the App wiring test pins the `App.tsx` side.
+- **Mutations (all red, reverted):** Swift literal → `so.tentacle.app:no-auth`: 1 fail; queue `route()` not parking (`go` instead of `parked =`): 3 fail; drop `routeQueue.flush` from `onNavigatorReady`: 1 fail.
+- **Design 3:** not in this round (waits owner C3 log line).
+- **Checks run:** the 5 touched/related mobile test files (45 pass), `biome check` on `apps/mobile/App.tsx` + `src` + the touched tests (clean), `tsc -p apps/mobile` (clean). Full gate is the script's.
+- **Unverified:** on-device banner text and cold-tap routing (simulator cannot prove the NSE/SpringBoard tap).

@@ -95,8 +95,8 @@ describe("ONE Keychain seam for the app", () => {
 
   test("the shared access group travels on all three Keychain calls (iOS keys an item BY it)", () => {
     const surface = secureKv.slice(secureKv.indexOf("export const pushKeychain"));
-    expect(surface).toContain("SecureStore.getItemAsync(key, { accessGroup");
+    expect(surface).toMatch(/SecureStore\.getItemAsync\(key, \{\s*accessGroup/);
     expect(surface).toContain("SecureStore.setItemAsync(key, value, {");
-    expect(surface).toContain("SecureStore.deleteItemAsync(key, { accessGroup");
+    expect(surface).toMatch(/SecureStore\.deleteItemAsync\(key, \{\s*accessGroup/);
   });
 });
