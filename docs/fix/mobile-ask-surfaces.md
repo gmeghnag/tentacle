@@ -603,3 +603,27 @@ Acknowledged partials, not counted as findings: `currentAsking` not wired in `Ap
 *Reviewed by claude-opus-5-5 in a fresh context. The executor was claude-sonnet-5-5: same family, so blind spots may be shared.*
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 2
+
+**Verdict: PASS.** All three round-1 findings are fixed. Reviewed `git diff 93bd7b14..HEAD`, which is fix commit `7a01af4d` plus the generated-kit gate commit `ffbc9a64`.
+
+Gate: `bun test apps/mobile/test/` 5043 pass / 0 fail (327 files); `bun run lint` clean (2397 files); `bun run typecheck` clean.
+
+1. **Finding 1 (a detach erased the park memory): fixed.** The screen-side forget effect is gone. The note is now spent only through the sheet's `onSettled` (`permission-sheet.ts:389-392`, called from `settle`), which only fires when the ask is answered here. A withdrawal (the abort path) and `dismiss()` never call it. A `computerId/sessionId/requestId` key left behind by an ask answered on another device is inert, and `ASK_PARKS_CAP` (256, oldest evicted first) bounds them.
+2. **Finding 2 (no test): fixed, and every new test fails under mutation.** Each mutation below was reverted, and the tree is byte-identical afterwards (`git status` clean).
+   - Drop the `onSettled` call → 2 fail (`ask-park` settle test; `session-screen` "an answered ask spends its note").
+   - Call `onSettled` on the abort → 2 fail (`ask-park` withdrawal test; `session-screen` "withdrawn by a detach opens PARKED on its replay", which runs through the controller's real sheet and broker).
+   - Put a screen-side `ASK_PARKS.forget` back in `SessionScreen.tsx` → 1 fail (wiring: exactly one `forget` call in the screen).
+3. **Finding 3 (dead button on the peek row): fixed.** `AskSlim` with no `onPress` now draws a plain `View` with a dimmed «Drag up» hint, so there is no dead tap. `more={sheet.queued}` makes the «+1» live. A queue push or a withdrawal behind the shown ask now calls `commit(state)` so the count re-renders; covered by 2 tests.
+
+Regressions looked for, none found:
+- The extra `commit(state)` passes the same `state.sheet` reference, so the drawer-park effect, which depends on `state.sheet`, does not fire again.
+- `onSettled` runs only when the ask has a `requestId`.
+- An answer that is sent but lost (`returnReply`) spends the note. That is acceptable: the person had already brought the ask back to answer it.
+
+Still open from round 1 (acknowledged partials, not findings): `currentAsking` is not wired in `App.tsx`; the `46-ask-park` e2e flow; simulator QA.
+
+*Reviewed by claude-opus-5-5 in a fresh context. The executor was DeepSeek, a different model family.*
+
+*— claude-opus-5-5, 2026-11-24*
