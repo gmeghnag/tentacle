@@ -47,6 +47,7 @@ import {
 } from "../thinking-motion.ts";
 import { type StepDot, type ThreadPos, thinkingA11yLabel } from "../tool-steps.ts";
 import { type ToolNameParts, liveElapsed } from "../tool-summary.ts";
+import { OutputBlock } from "./OutputBlock.tsx";
 import { Text } from "./Text.tsx";
 import { animateNextLayout } from "./animate.ts";
 import { AppFontContext } from "./app-font.ts";
@@ -594,7 +595,6 @@ export interface StepBodyProps {
   readonly output: {
     readonly text: string;
     readonly hidden: number;
-    readonly error: boolean;
   } | null;
   readonly outputTestID?: string;
   readonly onShowAll?: () => void;
@@ -635,21 +635,13 @@ export function StepBody({
         <Text style={[styles.code, { color: palette.label }]}>{command.join("\n")}</Text>
       )}
       {output === null ? null : (
-        <Pressable
-          testID={outputTestID}
-          accessibilityRole="button"
-          disabled={output.hidden === 0}
-          onPress={onShowAll}
-        >
-          <Text style={[styles.code, { color: output.error ? palette.red : palette.sec }]}>
-            {output.text}
-          </Text>
-          {output.hidden === 0 ? null : (
-            <Text style={[typography.footnote, { color: palette.accent }]}>
-              {`… +${output.hidden} more lines`}
-            </Text>
-          )}
-        </Pressable>
+        <OutputBlock
+          text={output.text}
+          hidden={output.hidden}
+          palette={palette}
+          {...(outputTestID === undefined ? {} : { testID: outputTestID })}
+          {...(onShowAll === undefined ? {} : { onShowAll })}
+        />
       )}
       {diff}
       {reply === undefined ? null : (

@@ -59,4 +59,18 @@ Order (orchestrator, owner «se necessita falli lavorare sequenziali»): EXEC on
 
 ## Execution
 
+Load-bearing check re-run: holds (`StepNode.tsx` output = one `Text` in a `Pressable`; `outputView` head-only cut; no `stickyHeaderIndices`).
+
+As built (red → green each slice, narrow files only):
+1. **Tail cut** — `tool-summary.ts` `outputView` keeps `slice(-CUT_KEEP)`, `hidden` = earlier lines. Red: 2 tests in `tool-summary.test.ts` (tail, 400-line log). `tool-step-view.test.ts` updated (tail text; output has no `error`).
+2. **Terminal block** — new `ui/OutputBlock.tsx` (horizontal `ScrollView`, one selectable `Text`, `palette.sec`, fade, footer «… N earlier lines» as the only tap). `StepBody` uses it; `output.error` dropped from `StepRowView.output` / `StepBodyProps`. Render pins in `test/output-block-render.test.ts` (red first: file absent).
+3. **Pure sticky** — `src/output-sticky.ts`: `stickyState`, `sameSticky`, `openOutputSteps`; `test/output-sticky.test.ts` (stick, leave at start/end, push, handover, short block, line X of N, collapsed, empty, candidates).
+4. **Wiring** — `ui/StickyStep.tsx` (overlay), `screens/transcript/measured-cell.tsx` (`CellRendererComponent` recording each cell's content-y/height), `SessionScreen.tsx`: refs + `recomputeSticky.current()` as one line in `onScroll`, `outputSteps` memo, overlay after the FlatList, `collapseSticky` = `onToggle` + one `scrollToOffset(top)`. `follow.ts` untouched.
+
+**Drift:** (a) `TranscriptRow.tsx` is not changed — cell measuring is done by `CellRendererComponent` instead of `onLayout` in the row (a row's own `onLayout.y` is relative to its cell, not the list). (b) `headH` is the overlay's fixed 44 pt (`STICKY_HEAD_H`), `bodyTop = top + 44`, `lineH = 17`: «line X» is approximate by a row or so. (c) Rects are read at scroll time; a layout change while still re-decides only on the next scroll / open-state change. (d) Verified only by tests and typecheck — NOT on device/simulator (scroll feel, overlay landing on collapse, handover): verify on the iPhone; the exact landing may be shipped without per owner answer 1.
+
+**Mutations:** push formula `Math.min(0, bottom-headH-scrollY)` → `0`: 2 tests fail (push, handover), restored. `OutputBlock` colour `sec` → `red`: render pin fails, restored. Tail cut reverted to head (pre-fix code): 2 tests red (above).
+
+Gate (narrow): `tsc -p apps/mobile` clean; biome clean on touched files; 484 tests pass across session-screen / transcript / tool-* / output-* / step-rail files. Full gate left to the script.
+
 ## Review
