@@ -152,12 +152,16 @@ the parked TUI editor (eval/tui-workflow-editor) reuses them unchanged (parity).
 - **Version:** `nextVersion(base)`, applied once at the first edit of a loaded file (mockup: "the
   version goes up by itself").
 - **Templates:** `WORKFLOW_TEMPLATES` = `blank` (one empty step) and `plan-build-review-merge`
-  (the mockup's 6 steps). Each is `{id, label, sub, draft(name, description, inputs), prompts:
-  Record<"prompts/<x>.md", text>}`.
+  (the mockup's 6 steps). Each is `{id, label, sub, inputs, draft(name, description, inputs),
+  prompts: Record<"prompts/<x>.md", text>}` — `inputs` are the ones the sheet opens with, and the
+  ones its prompts interpolate.
   - The template's prompt files are referenced by its steps, so they are inside its hash (owner
     decision, 22/11 ~23:00).
-  - Test: every template, once named, passes `draftProblems` with 0 errors, and every one of its
-    prompt paths is referenced by a step.
+  - Test: every template that carries a graph, once named, passes `draftProblems` with 0 errors, and
+    every one of its prompt paths is referenced by a step. **`blank` is the one exception and it is
+    deliberate**: it IS one of D2's own empty bodies, so it reports `steps[0].run: should not be
+    empty` until the user fills it in (a 0-errors template would have to smuggle in a placeholder,
+    which D2 forbids two bullets above).
 
 **D3 — Protocol: two methods, additive.** (`protocol/src/session.ts`, `methods.ts`)
 - **`session/workflow_source {sessionId, name}`** returns `{ok, path, text?: ≤ WORKFLOW_FILE_MAX_BYTES,
@@ -395,8 +399,9 @@ the parked TUI editor (eval/tui-workflow-editor) reuses them unchanged (parity).
   - `draftProblems` text equals `validateWorkflow`'s on the emitted YAML;
   - `EditHistory` undo/redo.
 
-  `core/test/workflow-templates.test.ts`: every template validates with 0 errors and references
-  every prompt it carries. Mutation: an extra unreferenced prompt → red.
+  `core/test/workflow-templates.test.ts`: every template that carries a graph validates with 0
+  errors and references every prompt it carries; `blank` reports its one empty-step problem.
+  Mutation: an extra unreferenced prompt → red.
 - **3a** `cli/test/workflow-files-write.test.ts` (temp dir):
   - replace with the current hash writes prompts then YAML (order observed via an injected fs
     spy);
@@ -739,6 +744,138 @@ forbids checkout/restore). Nothing was lost to another task — the edits were r
 **Unverified, one line:** the phone-side reuse (that `@tentacle/core` bundles `workflow-yaml.ts`
 unchanged into the RN app) is proven only when slice 5/6 imports it — today nothing does; it holds
 by construction (no `node:`, no `Bun`, no React in the new module).
+
+*— claude-opus-5-5 (executor), 2026-11-24*
+
+### Slice 2 — draft edit operations + templates (D2) — DONE
+
+**Load-bearing check re-run first** (`.tentacle/tmp/workflow-editor/lb-slice2.ts`, Bun, from the
+worktree): slice 1's exports are present (`validateWorkflow`, `validateWorkflowValue`,
+`workflowYaml`, `asDraft`, `isCanonical` all `true` in `@tentacle/core`), `WORKFLOW_MAX_RETRY` is
+`5` as D2 claims (at `workflow-spec.ts:36`; the plan's `:134`/`:286` citations are stale — it moved when D1 split the file), and every slice-2 symbol is absent (`false` ×11) with neither
+`workflow-draft.ts` nor `workflow-templates.ts` on disk. The slice starts where the plan says it
+does.
+
+**As-built, in order.**
+
+1. `packages/core/src/workflow-draft.ts` (new, 630 lines): `StepKind`, `InsertAt`, `DraftEdit`
+   (`{draft}` | `{refused}`), then D2's operations in the plan's order — `stepIdFor`,
+   `insertStep`, `setFailTarget`, `setRetry`, `setGotoMax`, `setNext`, `moveStep`,
+   `duplicateStep`, `renameStep`, `deleteStep`, `patchStep`, `setPrompt`, `draftProblems`,
+   `nextVersion`, `EditHistory` (+ `EDIT_HISTORY_LIMIT`). One private `withSteps` is the only
+   write path, so every op is a shallow copy per step and the draft handed in is never touched
+   (mutation M10).
+2. `packages/core/src/workflow-templates.ts` (new, 151 lines): `WorkflowTemplate`
+   (`{id, label, sub, inputs, draft(), prompts}`) and `WORKFLOW_TEMPLATES` =
+   `blank` + `plan-build-review-merge`, the mockup's 6 steps (`plan`, `exec`, `review ⇄ fix`,
+   `gate`, `merge`), its four `prompts/*.md` files, and `inputs: {slug, doc}` — the two the
+   mockup's prompts interpolate.
+3. `packages/core/src/index.ts:49-50`: the two new modules exported beside `workflow-yaml.ts`.
+4. `packages/core/test/workflow-draft.test.ts` (new, 47 tests) and
+   `packages/core/test/workflow-templates.test.ts` (new, 9 tests).
+
+**Drift from the Implementation, and why.**
+
+- **`WORKFLOW_TEMPLATES`'s shape gained `inputs`**, and `draft(name, description, inputs)` takes
+  the inputs unchanged. The plan's D2 field list omits them, but D5's `create(template, name,
+  description, inputs)` (slice 3) and the template's own `{{inputs.slug}}`/`{{inputs.doc}}` mean
+  the sheet needs a default set to open with; deriving it by scraping the prompt texts would be a
+  second reader of the templating grammar. Pinned by "a template's prompts interpolate only inputs
+  the workflow declares" (mutation M13).
+- **`blank` is the ONE template that reports a problem** — exactly one, `steps[0].run: should not
+  be empty`. The plan's test at `:160` said "every template … passes `draftProblems` with 0
+  errors", which contradicts D2 two bullets earlier: a template of "one empty step" whose bodies
+  "fail validation until filled in: they are visible problems, never a silent placeholder". A
+  clean-`blank` template would need a placeholder body, which is the thing D2 forbids. **I fixed
+  the plan rather than the code**: `:156-165` and the tests bullet at `:402` now say "every
+  template that carries a graph" and name `blank`'s single empty-step problem as deliberate. The
+  test asserts the exception explicitly (id `blank` ⇒ `["steps[0].run: should not be empty"]`;
+  every other template ⇒ `[]`), so a fresh placeholder creeping in still fails.
+- **`draftProblems` returns `readonly string[]`**, not a `{ok, errors}` object as the plan's
+  prose might suggest: the bar shows the first and the sheet the rest, and `validateWorkflowValue`
+  already owns the union. It is `result.ok ? [] : result.errors` verbatim, so the sentences are the
+  daemon's own — the "word for word" test compares them against `validateWorkflow` over the
+  emitted YAML, the strictest form of that claim.
+- **`defaultPromptPath(id)` added** (`prompts/<id>.md`): D2 says `setPrompt`'s path defaults to
+  `prompts/<stem>.md`, and the mockup's agent sheet opens the field pre-filled. It is a pure
+  one-liner in the same module, tested against `setPrompt` so the default the sheet shows is one
+  the validator accepts (mutation M17: making it `.txt` turns that test red).
+- Two helpers written during the first pass (`draftSpec`, `freshDraft`) were **removed before
+  the gate**: D2 names neither, and `draftSpec` would have been a second way to ask
+  `validateWorkflowValue`. Slice 3's `create` overlays a template onto a draft itself.
+- **No changelog fragment and no `protocol.d/` note**: same reasoning as slice 1 (`:695-703`) —
+  nothing calls these modules yet, no wire, no schema, no persisted format. `changelog.d/
+  workflow-editor.added.md` stays slice 7c's, already present on the branch; overwriting it would
+  replace the editor's user-visible text with a false one.
+
+**Failure modes, as the plan lists them (`:353-371`), each pinned by a test:**
+
+| Mode | How it converges | Test |
+|---|---|---|
+| Insert on a fall-through edge | no `next:` is written anywhere (array order carries it) | "inserts on a fall-through edge without writing a next anywhere" |
+| Insert on an explicit `next` edge | `A.next = S`, `S.next = B` — the edge splits, nothing dangles | "splits an explicit next edge" + the redundant-adjacent case |
+| Insert when the anchor is gone | `{refused}`, draft unchanged | "refuses an anchor that is not a step" |
+| Id collision | `stepIdFor` suffixes `-2`, `-3` (and falls back to the kind when the seed slugs to nothing) | "the new id never collides", "falls back to the kind, and is unique" |
+| ✗ port on itself | refused with the mockup's words `itself — use Retry` | "refuses the step itself, with the mockup's words" |
+| ✗ port dropped as "stop" | the key is removed, so the default never lands in the file | `"stop" drops the key` |
+| `✗ ×n` with no goto | refused — a max with no target is unwritable | M16 |
+| Out-of-range retry / goto max | clamped to `WORKFLOW_MAX_RETRY`/`WORKFLOW_MAX_GOTO`, and `retry: 0` drops the key | "retry clamps…", "goto max clamps…" |
+| `moveStep` past either end | `{refused}`, nothing moves | "moves by ±1 and stops at the ends" |
+| Delete | references are LEFT dangling and REPORTED (`dangling`), never rewritten — the ghost pill + the validator's sentence | "leaves the references dangling and reports them — never rewrites them" |
+| Rename | every `next`/`goto` is rewritten (the user named it); a rename onto an existing id or a bad id is refused | "rewrites every next / on_fail.goto reference" |
+| `patchStep` kind mismatch | refused with the mockup's `"gate" is not an agent step`; no other step is touched | "a kind mismatch is refused, and no other step is touched" |
+| Prompt path absolute / `..` / not `.md` | refused by `promptPathProblem` or the `.md` rule | "refuses a path that is absolute, has .., or is not markdown" |
+| A dangling ref while editing | `draftProblems` reports it (the file still opens, nothing is rewritten) | "a deleted step's dangling refs are problems, not refusals — the file still opens" |
+| Edit purity | no op mutates the draft it was handed | "no operation mutates the draft it was handed" |
+
+**Mutation checks (each reverted from the `.tentacle/tmp/workflow-editor/backup/` copy; the suite
+was green again after every one — no `git checkout`/`restore`/`stash` this time).**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `deleteStep` rewrites the refs instead of reporting them | **1 fail** |
+| M2 | `insertStep` ignores the anchor's explicit `next` | **2 fail** |
+| M3 | ✗ port accepted on the step itself | **1 fail** |
+| M4 | `renameStep` leaves the references | **1 fail** |
+| M5 | `stepIdFor` not unique | **3 fail** |
+| M6 | `EditHistory` keeps the redo tail on push | **1 fail** (after a test fix — see below) |
+| M7 | `nextVersion` = `version + 1` (no floor at 1) | **1 fail** |
+| M8 | `setRetry` does not clamp | **1 fail** |
+| M9 | `draftProblems` drops every error | **4 fail** |
+| M10 | ops mutate the input draft in place | **2 fail** |
+| M11 | `setFailTarget` ignores `"stop"` | **1 fail** |
+| M12 | a template carries an unreferenced prompt | **1 fail** |
+| M13 | the template loses its `inputs` | **3 fail** |
+| M14 | `patchStep` allows a kind mismatch | **1 fail** |
+| M15 | `setPrompt` drops the `.md` rule | **1 fail** |
+| M16 | `setGotoMax` works with no goto | **1 fail** |
+| M17 | `defaultPromptPath` returns a `.txt` | **1 fail** |
+| M18 | `deleteStep` rewrites the dangling refs to keep them valid | **1 fail** |
+
+**M6 survived the first pass and that is the useful result.** "redo is dropped by a new push" only
+asserted `canRedo === false`, which is true whether the tail was spliced away or merely
+unreachable — a weaker correlate of the property. Adding `expect(history.undo()).toBe("b")` (with
+the tail kept, `undo` walks back into the *undone* `c`) made M6 red. Two further harness faults,
+stated for the record: the first mutation run captured only `stdout` while Bun prints its summary
+to `stderr` (so every row read `0 fail` — re-run with `stderr=STDOUT`), and M1's pattern went stale
+after a refactor, so it was re-applied against the current shape rather than reported as a pass.
+
+**Evidence:**
+
+- `bun test packages/core/test/workflow-draft.test.ts packages/core/test/workflow-templates.test.ts`:
+  **56 pass, 0 fail**, 188 assertions.
+- `bun test packages/core/test/` (all 64 core files): **975 pass, 0 fail**.
+- `bun test packages/core/test/workflow-{draft,templates,yaml,spec}.test.ts`: **127 pass,
+  0 fail** (slice 1 + slice 2 together, both directions of the D1/D2 seam).
+- `bunx biome check` on the four changed files + `index.ts`: clean, 0 errors, 0 warnings.
+- `bunx tsc --noEmit -p packages/core/tsconfig.json`: clean (`--listFiles` shows it covers both new
+  modules and both new tests).
+- Bundling guard: `grep -nE "node:|Bun\.|from \"react|require\("` over both new modules → nothing.
+  The phone can bundle them as-is.
+- The gate (`bun run check`) is the orchestrator's to run, per the execution brief.
+
+**Unverified, one line:** the phone-side reuse is still only by construction (no `node:`/`Bun`/React)
+— nothing in the app imports these modules until slice 5/6.
 
 *— claude-opus-5-5 (executor), 2026-11-24*
 
