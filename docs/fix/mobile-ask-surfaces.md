@@ -456,3 +456,33 @@ frames A1–A7 before the iOS build.
 *Reviewed by claude-opus-5-5 in a fresh context. The planner is the same model, so shared blind spots are possible; the executor was a different model.*
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Group S1a–S3, round 2 (after fix round 1) — Verdict: APPROVE
+
+**Scope:** `git diff main...HEAD`, slices S1a, S2 and S3. S3 is still STOPPED. Nothing was edited for it, so there is nothing to review there; it waits for the owner's OK on moving `ask-origin.ts` to `@tentacle/core`.
+
+**Findings (HIGH/MEDIUM):** none.
+
+**Round-1 finding 1 is closed.** `remote-client.ts:4880` forwards `action.workflow`. It is the only site that turns a router `prompt` into requester options: a grep for `action.agent` / `kind === "prompt"` finds no other. `next()` in `permission-router.ts` is the one builder for both the current and the queued prompts, so a queued ask keeps its `workflow`.
+
+**Gate:**
+- Touched tests (`ask-origin`, `permission-router`, `foreign-turns`, `protocol/permission`, `json-schema`): 109 pass / 0 fail.
+- `bun run lint`: clean (2386 files).
+- `bun run typecheck`: clean, including mobile and relay.
+- The full `bun test` was not run (scope).
+
+**Mutations (each reverted; `git status` clean afterwards):**
+- The `workflow` forward removed from RemoteClient → `foreign-turns` › "a workflow step's request reaches the requester…" fails (1 pass / 1 fail).
+- `askOrigin` without `count > MAX_STEPS` → "N of M is dropped on a bad position" fails.
+
+**Attacks tried:**
+- (a) Another requester-options builder dropping `workflow` (TUI, mobile, relay): none client-side. The other `permission_request` builders are daemon-side, in S1b scope.
+- (b) A queued (second) ask losing `workflow`: no, the prompt is built in `next()` from `entry.update`.
+- (c) `workflow: {}` / `name: 5` from a hostile pod makes the blocking update unparseable. Same exposure as `agent`'s required strings, and a pod can already corrupt any required field. Not widened.
+- (d) Bidi/format characters in `name`: `progressText` strips only C0/C1 controls, the same as `agent` today. This is a display-only spoof (P6) with prior art. A nit, not a finding.
+
+**Executor behaviour (fix round 1):** red-first is recorded, two mutations are given, and the diff is minimal. P3 is corrected in Execution, but the Implementation's P3 text still states it the old way (a doc nit).
+
+*Reviewed by claude-opus-5-5 in a fresh context. The planner and the fix-round executor are the same model, so shared blind spots are possible.*
+
+*— claude-opus-5-5, 2026-11-24*
