@@ -486,3 +486,56 @@ script (per the budget). No protocol schema change → `protocol.json` not regen
 4. Scanned PDFs return their page images (verdict text first) when a store and vision exist.
 
 Size: L (by files). **Implementation APPROVED.** Execution after `feat/mobile-native-sheets` merges (owner order).
+
+### Adversarial review (fresh context)
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM; no HIGH). Scope: `git diff main...HEAD` only.
+
+**Gate (re-run):** `bun run typecheck` clean; `bun run lint` clean (2334 files, 0/0); the 13
+touched test files → `370 pass, 0 fail`. Full `bun test` not re-run here (asked: touched files).
+
+**Findings**
+1. **MEDIUM — the tool sub-cap (Owner Q2) does not survive a `serve` restart.**
+   `packages/daemon/src/attachment-store.ts:195-198` reloads every on-disk blob into `used`,
+   but `toolUsed`/`toolBytes` (`:181-182`) start at 0, and nothing deletes blobs (no GC in
+   `session-persister.ts:497-508`/`session-log-store.ts:426`). Scenario: a `serve` session
+   reads PDFs until the 48 MiB sub-cap is reached. The daemon restarts, and the session reads
+   *different* PDFs: another 48 MiB fits (`:481`), because the check sees `toolUsed = 0`.
+   After a second restart the session holds about 96 MiB of tool images in its 100 MiB cap,
+   and user `attachment/put` is refused. That breaks the binding promise that "user uploads
+   always keep ≥ 52 MiB". The orphaned blobs cannot be reached after a reload either (the
+   index is gone, F3). Fix options: persist which blobs are tool blobs (e.g. a sidecar list)
+   and charge them on reload, or have the owner record this as accepted debt.
+
+**Mutations (each reverted; `git status --porcelain` empty afterwards)**
+| Mutation | Result |
+|---|---|
+| `session-host.ts:1603` stops forwarding `toolImages` | RED: `image-view-wiring` "worker host with vision → offered" |
+| `image-view.ts:99` `holds` check disabled | RED: `image-view` "…not-held… → isError" |
+The executor's 8 mutations are in Execution. I did not repeat them.
+
+**Attacks tried**
+- Pod path (§7 "pod is not trusted"): `serve.ts:1342` destructures only its own fields, so
+  `toolImages` never reaches a pod. Holds; T7 pins it.
+- Provider write capability: `ChatRequest.attachments` stays `AttachmentSource`, and
+  `ToolImageStore` is reached only via `ToolContext`. Holds.
+- More than 1 ref per message / protocol: `ToolResult.image` is singular, and `fs_read`
+  returns no refs. The log entry is an ordinary `media_message`. No `PROTOCOL_VERSION`
+  move is needed. Holds.
+- Disk land failure / dispose race in `putTool`: `land` → `drop` releases `toolBytes`.
+  After dispose → `{refused}`. Holds.
+- Prune: the `viewed_image` stub drops `attachments`, and `estimateGain` counts images.
+  Holds (the executor's mutations went red).
+- Session-host forwarding: covered end to end (mutation above).
+
+**Executor behaviour:** It said honestly that most tests were not run red first (a §9
+deviation) and showed non-vacuity by mutation instead. Its documented drift is accurate.
+It missed the restart accounting gap. Minor, not blocking: the forced-detail
+`.passthrough()` schema (`image-view.ts:54`) lets extra fields reach a hook-forced ask.
+That weakens Load-bearing §5's claim that "nothing long to cut".
+
+**Same model family as the executor and planner (Opus):** this review has fresh context
+but shares that family's blind spots. AGENTS §10 recommends a different model for
+load-bearing work.
+
+*— claude-opus-5-5, 2026-11-24*
