@@ -32,7 +32,7 @@ Owner 24/11, two iPhone screenshots (`.tentacle/tmp/mobile-ask-surfaces/owner-13
 
 ## Implementation
 
-> **Status: NOT approved — owner questions pending (Q1, Q2 below).**
+> **Status: APPROVED** — owner 2026-11-24 «ok»: Q1 only the slim row for a foreign ask on the run screen; Q2 yes, TUI shows the same origin (S3). Order as in ### Slices (S1b/S7a/S9 after feat/workflow-editor merges; S8 after fix/workflows-ux). Executors: DeepSeek/Sonnet (owner: S/M); Opus review per group.
 
 ### Load-bearing assumption (two facts, proved against the source)
 
