@@ -1,0 +1,216 @@
+/**
+ * The step detail's view-model (docs/feat/workflows-ui.md D5, slice 4):
+ * `workflow-step-detail.ts` — the flight's two boxes (the tapped node, in SCREEN
+ * points, and the hero it lands on), the hero's own text, and the body's blocks
+ * for each state of the read.
+ *
+ * The property that matters here is the one the screen must not get wrong: the
+ * pill takes off from where the finger was. A node's box lives in the graph's
+ * LOGICAL space (318 pt), the detail's in screen points, so the mapping is a
+ * function with a test, never an arithmetic detail buried in a component.
+ */
+import { describe, expect, test } from "bun:test";
+import type { WorkflowStepRow } from "@tentacle/protocol";
+import { GRAPH_WIDTH } from "../src/workflow-graph.ts";
+import { HERO_METRICS } from "../src/workflow-morph.ts";
+import {
+  DETAIL_TEXT,
+  bodyPending,
+  canvasMap,
+  detailLog,
+  flight,
+  heroBox,
+  heroText,
+  nodeBoxOnScreen,
+  stepBlocks,
+} from "../src/workflow-step-detail.ts";
+
+const step = (id: string, over: Partial<WorkflowStepRow> = {}): WorkflowStepRow => ({
+  id,
+  kind: "agent",
+  where: "local",
+  state: "ok",
+  attempt: 0,
+  round: 0,
+  ...over,
+});
+
+const STEPS = [step("build"), step("review", { state: "error" }), step("merge")];
+
+const detail = (over: Record<string, unknown> = {}) => ({
+  attempt: 0,
+  round: 0,
+  live: false,
+  prompt: "the resolved prompt",
+  report: "9 files changed\nscript gate green",
+  ...over,
+});
+
+describe("canvasMap: the graph's logical space → the screen", () => {
+  test("a phone wider than the graph draws it at 1:1, CENTRED (never magnified)", () => {
+    const map = canvasMap(390, GRAPH_WIDTH);
+    expect(map.scale).toBe(1);
+    expect(map.offsetX).toBe((390 - GRAPH_WIDTH) / 2);
+    expect(map.offsetX).toBeGreaterThan(0);
+    expect(map.offsetY).toBe(0);
+  });
+
+  test("a narrower phone scales the graph DOWN so every node stays reachable", () => {
+    const map = canvasMap(300, GRAPH_WIDTH);
+    expect(map.scale).toBeCloseTo(300 / GRAPH_WIDTH, 6);
+    expect(map.scale).toBeLessThan(1);
+    expect(map.offsetX).toBe(0);
+  });
+
+  test("a zero/garbage width never yields a NaN scale (a NaN box draws nothing)", () => {
+    for (const width of [0, -40, Number.NaN]) {
+      const map = canvasMap(Number.isFinite(width) ? width : 0, GRAPH_WIDTH);
+      expect(Number.isFinite(map.scale)).toBe(true);
+      expect(Number.isFinite(map.offsetX)).toBe(true);
+      expect(map.scale).toBeGreaterThanOrEqual(0);
+    }
+  });
+});
+
+describe("nodeBoxOnScreen: the pill takes off from where the finger was", () => {
+  test("the mapped box is the node's own box, scaled and offset (NOT the hero's)", () => {
+    const canvas = canvasMap(390, GRAPH_WIDTH);
+    const box = nodeBoxOnScreen(STEPS, "review", canvas);
+    expect(box).not.toBeNull();
+    const hero = heroBox(16, 390);
+    // It is a DIFFERENT box: a flight from the hero to the hero goes nowhere.
+    expect(box).not.toEqual(hero);
+    expect(box?.width ?? 0).toBeLessThan(hero.width);
+    expect(box?.height ?? 0).toBeLessThan(hero.height);
+  });
+
+  test("an id the geometry does not hold is null, never a box flown in from nowhere", () => {
+    expect(nodeBoxOnScreen(STEPS, "nope", canvasMap(390))).toBeNull();
+  });
+
+  test("the node sits at the geometry's own y, and the LAST node is further down", () => {
+    const canvas = canvasMap(GRAPH_WIDTH, GRAPH_WIDTH);
+    const first = nodeBoxOnScreen(STEPS, "build", canvas);
+    const last = nodeBoxOnScreen(STEPS, "merge", canvas);
+    expect(first?.y).toBeLessThan(last?.y ?? 0);
+    expect(first?.height).toBe(44);
+  });
+});
+
+describe("heroBox / heroText: where it lands, and what it says", () => {
+  test("the hero is the detail's header, inset on both sides, at the HERO's own height", () => {
+    const box = heroBox(16, 375);
+    expect(box).toEqual({ x: 16, y: 16, width: 375 - 32, height: HERO_METRICS.height });
+  });
+
+  test("a narrow detail never gets a negative width", () => {
+    expect(heroBox(16, 20).width).toBe(0);
+  });
+
+  test("the hero's text is the pill's: its id, then `state word · where`", () => {
+    expect(heroText(step("review", { where: "docker:box" }), "error")).toEqual({
+      id: "review",
+      subtitle: "error · docker:box",
+    });
+  });
+
+  test("an absent `where` reads `local`, and a pod's text is flattened to one line (§7)", () => {
+    expect(heroText(step("a", { where: "" }), "done").subtitle).toBe("done · local");
+    expect(heroText(step("a\nb"), "done").id).toBe("a b");
+  });
+});
+
+describe("stepBlocks: the kv list is final BEFORE the read lands", () => {
+  const kindWord = (k: string) => (k === "agent" ? "agent" : k);
+  const stateWord = (s: string) => (s === "error" ? "error" : "done");
+
+  test("the kv rows are identical with no read, a loading read and a loaded read", () => {
+    // This is the property the whole skeleton rests on: the boxes ABOVE the log
+    // block cannot move when the data arrives, because they never depended on it.
+    const none = stepBlocks(step("review"), undefined, kindWord, stateWord, 2).kv;
+    const loading = stepBlocks(step("review"), { kind: "loading" }, kindWord, stateWord, 2).kv;
+    const loaded = stepBlocks(
+      step("review"),
+      { kind: "loaded", detail: detail() },
+      kindWord,
+      stateWord,
+      2,
+    ).kv;
+    expect(loading).toEqual(none);
+    expect(loaded).toEqual(none);
+    expect(none.length).toBeGreaterThan(1);
+  });
+
+  test("the log block is empty until a read gives something", () => {
+    expect(stepBlocks(step("review"), undefined, kindWord, stateWord, 0).log).toEqual([]);
+  });
+
+  test("a loaded detail reads `prompt:` / `report:`, in that order (asked, then answered)", () => {
+    const log = stepBlocks(
+      step("review"),
+      { kind: "loaded", detail: detail() },
+      kindWord,
+      stateWord,
+      0,
+    ).log;
+    expect(log).toEqual([
+      "prompt:",
+      "the resolved prompt",
+      "report:",
+      "9 files changed",
+      "script gate green",
+    ]);
+    expect(log.indexOf("prompt:")).toBeLessThan(log.indexOf("report:"));
+  });
+
+  test("a LIVE read says `running now:` instead of `report:` (it has not finished)", () => {
+    const log = detailLog({ kind: "loaded", detail: detail({ live: true, report: "▸ editing" }) });
+    expect(log).toEqual(["prompt:", "the resolved prompt", "running now:", "▸ editing"]);
+  });
+
+  test("every non-loaded state SAYS so in words, in the same block (never a silent collapse)", () => {
+    expect(detailLog({ kind: "loading" })).toEqual([DETAIL_TEXT.loading]);
+    expect(detailLog({ kind: "missing" })).toEqual([DETAIL_TEXT.missing]);
+    expect(detailLog({ kind: "unsupported" })).toEqual([DETAIL_TEXT.unsupported]);
+    expect(detailLog({ kind: "failed", reason: "link down" })).toEqual(["link down"]);
+    // A loaded detail with neither prompt nor report is `missing`, not a blank box.
+    expect(detailLog({ kind: "loaded", detail: detail({ prompt: "", report: "" }) })).toEqual([
+      DETAIL_TEXT.missing,
+    ]);
+  });
+
+  test("a pod's multi-line report is kept as LINES (the block wraps), never one long line", () => {
+    expect(detailLog({ kind: "loaded", detail: detail({ report: "a\nb" }) })).toContain("a");
+    expect(detailLog({ kind: "loaded", detail: detail({ report: "a\nb" }) })).toContain("b");
+  });
+
+  test("`bodyPending` covers exactly the states that shimmer (never a failed one)", () => {
+    expect(bodyPending(undefined)).toBe(true);
+    expect(bodyPending({ kind: "loading" })).toBe(true);
+    for (const done of [
+      { kind: "loaded", detail: detail() },
+      { kind: "missing" },
+      { kind: "unsupported" },
+      { kind: "failed", reason: "x" },
+    ] as const) {
+      expect(bodyPending(done)).toBe(false);
+    }
+  });
+});
+
+describe("flight: the two ends of the morph, or nothing", () => {
+  test("it is the node's screen box and the hero's — the pair the animation interpolates", () => {
+    const canvas = canvasMap(375, GRAPH_WIDTH);
+    const pair = flight(STEPS, "review", canvas, 16, 375);
+    expect(pair?.to).toEqual(heroBox(16, 375));
+    const node = nodeBoxOnScreen(STEPS, "review", canvas);
+    if (node === null) {
+      throw new Error("the fixture's step is in the graph");
+    }
+    expect(pair?.from).toEqual(node);
+  });
+
+  test("a step the graph does not hold has no flight (the layer does not open)", () => {
+    expect(flight(STEPS, "gone", canvasMap(375), 16, 375)).toBeNull();
+  });
+});

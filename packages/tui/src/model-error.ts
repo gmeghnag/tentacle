@@ -14,9 +14,15 @@
  */
 import { oneLine } from "./commands.ts";
 
-/** "The model itself failed" — never "the session" or "the link". */
-const MODEL_FAILURE =
-  /\bmodel\b|\bendpoint\b|\bprovider\b|\bapi[-_ ]?key\b|\bhttp\b|status\s*\d{3}|\bECONN[A-Z]+\b|\bETIMEDOUT\b|\bEPIPE\b|\bunreachable\b/i;
+/**
+ * "Something to fix in the daemon host's model config": a key (401/403), a wrong
+ * URL or model (404), a proxy (407), or a connect / DNS / timeout failure.
+ * A server-side generation error, a 400/5xx answer, or an output-limit or
+ * stream cut is NOT that: it gets its own text only (docs/fix/
+ * model-stream-error.md, decision (c)).
+ */
+const REMOTE_CONFIG_FAILURE =
+  /status\s*(?:401|403|404|407)\b|\bECONN[A-Z]+\b|\bETIMEDOUT\b|\bEPIPE\b|\bENOTFOUND\b|\bEAI_AGAIN\b|\bE(?:HOST|NET)UNREACH\b|\bunreachable\b|could not connect|\bapi[-_ ]?key\b|\bunauthori[sz]ed\b|\bauthentication\b/i;
 
 /** The most of a failed turn's own words the transcript shows. */
 export const MODEL_ERROR_MAX = 600;
@@ -42,5 +48,5 @@ export function modelErrorNotice(error: unknown, remote: boolean): string {
   }
   const shown =
     message.length > MODEL_ERROR_MAX ? `${message.slice(0, MODEL_ERROR_MAX - 1)}…` : message;
-  return MODEL_FAILURE.test(shown) ? `${shown} — ${REMOTE_MODEL_HINT}` : shown;
+  return REMOTE_CONFIG_FAILURE.test(shown) ? `${shown} — ${REMOTE_MODEL_HINT}` : shown;
 }

@@ -155,8 +155,8 @@ function assistantLines(text: string): string[] {
   }
   const rendered = renderMarkdown(text).replace(/\n+$/, "");
   const [first = "", ...rest] = rendered.split("\n");
-  // A brand-accent bullet marks the reply; continuation lines hang under it.
-  return [`${theme.accent(BULLET)} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
+  // The reply's bullet has the reply text's colour (owner 2026-11-23); continuation lines hang under it.
+  return [`${BULLET} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
 }
 
 /**
@@ -701,7 +701,7 @@ function shellBodyText(text: string): string {
 /** A status-coloured bullet that opens a tool call. */
 function bullet(tool: ToolItem): string {
   if (tool.status === "running") {
-    return theme.accent(BULLET);
+    return theme.subtle(BULLET); // grey like the command it runs (owner 2026-11-23); blinks while running
   }
   if (tool.status === "queued") {
     return theme.subtle(BULLET); // unreachable: a queued row has its own header (`toolLines`)
@@ -780,6 +780,12 @@ function toolSubtitle(
     // (docs/feat/model-diagrams.md D2).
     case "diagram":
       return str("title") ?? tool.args;
+    // `Image <ref>`, plus the detail when it is the costly one
+    // (docs/feat/image-view.md D10). The phone mirrors this case.
+    case "image_view": {
+      const ref = str("ref") ?? "";
+      return str("detail") === "high" ? `${ref} · high` : ref;
+    }
     // `present` names the artifact, never its JSON (the args carry the whole
     // HTML/Markdown `content`): its title, else its id, else the path
     // (docs/feat/tui-present-row.md). Never the raw args.
@@ -803,6 +809,19 @@ function toolSubtitle(
  * wrapping is width-derived. Rows are folded here, not by the transcript's
  * `wrapLines`, because the prefix must repeat on each of them.
  */
+/** An expanded call's target as the first rows of its `⎿` block: wrapped, subtle, continuation at the indent. */
+function targetRows(subtitle: string, cols: number): string[] {
+  const room = Math.max(1, cols - stringWidth(INDENT));
+  const rows: string[] = [];
+  for (const line of expandTabs(subtitle).split(/\r?\n/)) {
+    const trimmed = line.replace(/\s+$/, "");
+    for (const row of trimmed === "" ? [""] : wrapLines([trimmed], room)) {
+      rows.push((rows.length === 0 ? connector() : INDENT) + theme.subtle(row));
+    }
+  }
+  return rows;
+}
+
 function commandRows(subtitle: string, cols: number): string[] {
   const room = Math.max(1, cols - stringWidth(COMMAND_PREFIX));
   const rows: string[] = [];
@@ -995,8 +1014,14 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const budget = cols - (stringWidth(BULLET) + 1 + stringWidth(label)) - stringWidth(elapsed) - 1;
   const fitted = expanded || subtitle === "" ? "" : fitSubtitle(subtitle, budget);
   const header = `${head}${fitted === "" ? "" : ` ${theme.subtle(fitted)}`}${theme.subtle(elapsed)}`;
-  const command = expanded && subtitle !== "" ? commandRows(subtitle, cols) : [];
-  return [header, ...command, ...toolBodyRows(tool, cols, opts)];
+  if (expanded && subtitle !== "") {
+    // One shape for every expanded tool row (owner 2026-11-24), like a shell
+    // row's `⎿ $ cmd`: the whole target (path, pattern, description…) opens the
+    // `⎿` block, wrapped at the width; the body hangs under it at the indent.
+    const target = targetRows(subtitle, cols);
+    return [header, ...target, ...toolBodyLines(tool, cols, opts).map((l) => INDENT + l)];
+  }
+  return [header, ...toolBodyRows(tool, cols, opts)];
 }
 
 /** A tool's body under its header: cut, the first line on the `⎿` connector. */

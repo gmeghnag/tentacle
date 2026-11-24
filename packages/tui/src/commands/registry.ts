@@ -31,6 +31,7 @@ import { command as settings } from "./settings.ts";
 import { command as skills } from "./skills.ts";
 import { command as tokens } from "./tokens.ts";
 import { command as tools } from "./tools.ts";
+import { command as workflow } from "./workflow.ts";
 
 /** One built-in: the words the palette shows, and the executor that runs it. */
 export interface Command {
@@ -67,6 +68,7 @@ export const BUILT_INS: readonly Command[] = [
   tools,
   artifacts,
   schedule,
+  workflow,
   agents,
   settings,
   exit,
@@ -76,6 +78,7 @@ export const BUILT_INS: readonly Command[] = [
 export const ALIASES: Readonly<Record<string, string>> = {
   "/quit": "/exit",
   "/schedules": "/schedule",
+  "/workflows": "/workflow",
 };
 
 /** `name` resolved through the aliases (what a lookup should find). */

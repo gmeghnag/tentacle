@@ -16,7 +16,7 @@
  * `messagePortChannel` ignores non-string frames, so they don't reach the RPC.
  */
 import type { TentacleConfig } from "@tentacle/config";
-import type { ArtifactSink, AttachmentSource, ScheduleLink } from "@tentacle/core";
+import type { ArtifactSink, AttachmentSource, ScheduleLink, ToolImageStore } from "@tentacle/core";
 import {
   Connection,
   LogSessionStore,
@@ -77,6 +77,8 @@ export function workerAgentFactory(
   ctx: {
     readonly attachments?: AttachmentSource;
     readonly artifacts?: ArtifactSink;
+    /** The session's tool-image store (docs/feat/image-view.md D1): the worker forwards it. */
+    readonly toolImages?: ToolImageStore;
     /** The session's scheduled wakes (docs/feat/cron-tool.md D1): the worker schedules. */
     readonly schedules?: () => ScheduleLink | null;
   },
@@ -93,6 +95,8 @@ export function workerAgentFactory(
       // The session's store: this host runs the laptop's own model in this
       // process, so it holds an image's bytes (docs/feat/attachments-prompt.md D4).
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      // The SAME store, write-capable, for fs_read/image_view (docs/feat/image-view.md D1).
+      ...(ctx.toolImages ? { toolImages: ctx.toolImages } : {}),
       // The session's artifact store: the model may `present` (model-artifacts D4).
       ...(ctx.artifacts ? { artifacts: ctx.artifacts } : {}),
       // A worker session may hop (docs/feat/session-hop.md D8/D9): this is one of

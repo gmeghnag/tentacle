@@ -681,6 +681,18 @@ describe("childToolLabel", () => {
     expect(childToolLabel("fs_edit", '{"path":"a.ts"}')).toBe("Edit a.ts");
   });
 
+  test("a described shell call shows its intent sentence, not the command (owner 2026-11-23)", () => {
+    expect(
+      childToolLabel(
+        "shell",
+        '{"command":"grep -n x a.txt | head","description":"Cerca x nel 10-K"}',
+      ),
+    ).toBe("Cerca x nel 10-K");
+    // No sentence (absent, blank, not a string) → the command, as before.
+    expect(childToolLabel("shell", '{"command":"ls -la","description":"  "}')).toBe("$ ls -la");
+    expect(childToolLabel("shell", '{"command":"ls -la","description":7}')).toBe("$ ls -la");
+  });
+
   test("a `search` row names the query and where it looked (T-S7)", () => {
     expect(childToolLabel("search", '{"pattern":"needle","path":"src"}')).toBe(
       "Search needle in src",

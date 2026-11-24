@@ -26,9 +26,24 @@ describe("modelErrorNotice", () => {
     for (const message of [
       "could not connect to the model endpoint (ECONNREFUSED), gave up after 3 attempt(s)",
       "model unreachable: 127.0.0.1:8080 did not answer in 15s",
-      "HTTP 503 from the provider",
+      "model request failed with status 403: forbidden",
+      "getaddrinfo ENOTFOUND gpu-box",
     ]) {
       expect(modelErrorNotice(message, true)).toContain(REMOTE_MODEL_HINT);
+    }
+  });
+
+  test("a server-side error or a cut gets the text only (decision (c))", () => {
+    for (const message of [
+      "the model's stream was cut before it produced a reply (no stop reason)",
+      "the model's stream was cut before it produced anything",
+      "model server error: Context size has been exceeded.",
+      "the reply was cut at the model's output limit — this answer is incomplete",
+      'model request failed with status 400: {"error":"x"}',
+      "model request failed with status 500: x",
+      "HTTP 503 from the provider",
+    ]) {
+      expect(modelErrorNotice(message, true)).toBe(message);
     }
   });
 

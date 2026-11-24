@@ -1,6 +1,6 @@
 /**
  * `workflow` (docs/feat/agent-workflows.md D3): the model's ONE handle on the
- * session's workflow driver — `run` a repo workflow, read its `status`, or
+ * session's workflow driver — `run` a project workflow, read its `status`, or
  * `stop` it. Registered only beside a driver (never on a tunnelled session,
  * never to a child). A run started here is asked like any other: its hash
  * approval and its approve steps are `workflow_approve` asks, never
@@ -9,7 +9,7 @@
  * One flat object, like `agent_control`: which field an action needs is
  * checked in `execute`, so the repair is our own sentence.
  */
-import type { Tool } from "@tentacle/core";
+import { PROJECT_PATHS, type Tool } from "@tentacle/core";
 import { z } from "zod";
 
 export const WORKFLOW_TOOL_NAME = "workflow";
@@ -49,8 +49,7 @@ const workflowInput = z.object({
   run_id: z.string().max(32).optional(),
 });
 
-const DESCRIPTION =
-  'Run a repo workflow (workflows/<name>.yaml): "run" (name, inputs) starts it and returns at once — the user approves it, its result arrives as a [workflow] note that wakes you; "status": the runs and their steps (read-only, never a way to wait); "stop" (run_id).';
+const DESCRIPTION = `Run a project workflow (${PROJECT_PATHS.workflows}/<name>.yaml): "run" (name, inputs) starts it and returns at once — the user approves it, its result arrives as a [workflow] note that wakes you; "status": the runs and their steps (read-only, never a way to wait); "stop" (run_id).`;
 
 export function createWorkflowTool(
   driver: WorkflowToolDriver,

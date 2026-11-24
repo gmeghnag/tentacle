@@ -185,6 +185,65 @@ export function morphFrame(
   };
 }
 
+/** How many samples a `morphTable` holds by default (a 0..1 range in tenths). */
+export const MORPH_SAMPLES = 11;
+
+/**
+ * A `morphTable`: one `inputRange` (0..1) and, per animated property, the same
+ * number of outputs — exactly React Native `Animated.Value.interpolate`'s shape.
+ * Layout properties (`width`, `height`, `radius`, font sizes) cannot run on the
+ * NATIVE driver, so the caller keeps `useNativeDriver: false` on the flight value
+ * and true on the fade/scale ones; the table is why it is one value, not a dozen.
+ */
+export interface MorphTable {
+  readonly inputRange: readonly number[];
+  readonly box: {
+    readonly x: readonly number[];
+    readonly y: readonly number[];
+    readonly width: readonly number[];
+    readonly height: readonly number[];
+  };
+  readonly radius: readonly number[];
+  readonly padLeft: readonly number[];
+  readonly padRight: readonly number[];
+  readonly gap: readonly number[];
+  readonly badge: readonly number[];
+  readonly glyphSize: readonly number[];
+  readonly titleSize: readonly number[];
+  readonly subtitleSize: readonly number[];
+}
+
+/**
+ * The table `Animated` interpolates: `samples` points across 0..1, each one a
+ * `morphFrame` — so `workflow-morph.ts` stays the ONLY source of the motion and a
+ * test compares the table against the frames it was built from. The sample count
+ * is clamped to at least two: `interpolate` throws on a one-point range, and a
+ * NaN/interrupted driver hands back a progress the table must still answer for.
+ */
+export function morphTable(from: Box, to: Box, samples: number = MORPH_SAMPLES): MorphTable {
+  const count = Number.isFinite(samples) ? Math.max(2, Math.round(samples)) : MORPH_SAMPLES;
+  const inputRange = Array.from({ length: count }, (_v, i) => i / (count - 1));
+  const frames = inputRange.map((t) => morphFrame(t, from, to));
+  const each = (pick: (frame: MorphFrame) => number): number[] => frames.map(pick);
+  return {
+    inputRange,
+    box: {
+      x: each((f) => f.box.x),
+      y: each((f) => f.box.y),
+      width: each((f) => f.box.width),
+      height: each((f) => f.box.height),
+    },
+    radius: each((f) => f.radius),
+    padLeft: each((f) => f.padLeft),
+    padRight: each((f) => f.padRight),
+    gap: each((f) => f.gap),
+    badge: each((f) => f.badge),
+    glyphSize: each((f) => f.glyphSize),
+    titleSize: each((f) => f.titleSize),
+    subtitleSize: each((f) => f.subtitleSize),
+  };
+}
+
 /** What the transition DOES on this device: the morph, or (Reduce Motion) a crossfade. */
 export type MorphLook =
   | { readonly kind: "morph"; readonly flightMs: number; readonly closeMs: number }

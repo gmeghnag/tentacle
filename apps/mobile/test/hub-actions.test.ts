@@ -19,6 +19,7 @@ import {
   NO_ARTIFACTS,
   NO_CONNECTION,
   NO_TOOLS,
+  NO_WORKFLOW_RUNS,
   PULSE_START,
   type PulseInput,
   type PulseState,
@@ -32,7 +33,7 @@ import {
   resolveCommit,
 } from "../src/hub-actions.ts";
 import { fanItemLook } from "../src/hub-fan.ts";
-import { commitPlan, hubContextOf } from "../src/hub-session.ts";
+import { commitPlan, hubA11yRoute, hubContextOf } from "../src/hub-session.ts";
 import { type SwitchFacts, toolsSummary } from "../src/tools-view.ts";
 
 const noop = (): void => undefined;
@@ -853,5 +854,62 @@ describe("emptyLabel: a dimmed item carries WHY it is dimmed (owner Q3 A)", () =
     // Today's bug: the generic "nothing running" was spoken for Tools too.
     expect(at("tools")).toBe(`Tools, ${NO_TOOLS}`);
     expect(at("tools")).not.toContain("nothing running");
+  });
+});
+
+describe("the Workflows item (docs/feat/workflows-ui.md D4)", () => {
+  const WF: HubEntries = { ...MAIN, workflows: noop };
+  const wf = (ctx: HubContext) => hubActions(ctx, WF).all.find((i) => i.id === "workflows");
+
+  test("offered only with its callback (P6), labelled Workflows, unbadged when nothing waits", () => {
+    expect(wf(IDLE_CTX)).toMatchObject({ label: "Workflows", badge: null, dimmed: false });
+    expect(hubActions(IDLE_CTX, MAIN).all.some((i) => i.id === "workflows")).toBe(false);
+  });
+
+  test("the runs that need the person are a COUNT badge (the rim arc), and it is promoted", () => {
+    const ctx = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      workflows: { needYou: 2, empty: null },
+    });
+    expect(wf(ctx)?.badge).toEqual({ kind: "count", n: 2 });
+    // Promotion: the badged item moves into the fan ahead of the unbadged ones.
+    expect(ids(hubActions(ctx, WF).fan)[0]).toBe("workflows");
+    expect(itemA11yLabel(wf(ctx) as HubItem)).toBe("Workflows, 2 new");
+  });
+
+  test("no run (or an older daemon) dims it with its reason; the commit says it, nothing opens", () => {
+    const ctx = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+      workflows: { needYou: 0, empty: NO_WORKFLOW_RUNS },
+    });
+    expect(NO_WORKFLOW_RUNS).toBe("No workflow runs");
+    expect(wf(ctx)).toMatchObject({ dimmed: true, emptyLabel: NO_WORKFLOW_RUNS });
+    expect(resolveCommit("workflows", ctx, WF, hubOpen(ctx))).toEqual({
+      kind: "noop",
+      notice: NO_WORKFLOW_RUNS,
+    });
+  });
+
+  test("UNKNOWN (the list not read yet) is never dimmed — its tap is what reads it", () => {
+    const ctx = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+      editable: true,
+      dictation: false,
+    });
+    expect(wf(ctx)).toMatchObject({ dimmed: false, badge: null });
+  });
+
+  test("VoiceOver reaches it by its action name", () => {
+    expect(hubA11yRoute("hub-workflows")).toEqual({ kind: "commit", id: "workflows" });
   });
 });

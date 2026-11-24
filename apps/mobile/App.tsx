@@ -47,6 +47,7 @@ import {
   AppState,
   Dimensions,
   Linking,
+  PixelRatio,
   Platform,
   Pressable,
   StyleSheet,
@@ -121,6 +122,8 @@ import { createDrawerRename } from "./src/drawer-rename.ts";
 import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
 import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { loadFigtree } from "./src/fonts-expo.ts";
+import { foregroundAction } from "./src/foreground-gate.ts";
+import { playHaptic } from "./src/haptics.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -178,11 +181,15 @@ import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
 import { ArtifactGalleryScreen } from "./src/screens/ArtifactGallery.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { LockGate } from "./src/screens/LockGate.tsx";
+import { NativeSheetRoute } from "./src/screens/NativeSheetRoute.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
+import { WorkflowRunScreen } from "./src/screens/WorkflowRun.tsx";
+import { WorkflowRunsScreen } from "./src/screens/WorkflowRuns.tsx";
+import { WorkflowStartScreen } from "./src/screens/WorkflowStart.tsx";
 import {
   KEYCHAIN_ACCESSIBLE,
   KEYCHAIN_STORE,
@@ -202,6 +209,16 @@ import {
   type SessionScreenController,
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
+import {
+  SHEET_DETENTS,
+  SHEET_HOLDS,
+  holdKey,
+  recordDetent,
+  sheetDetentContext,
+  sheetGround,
+  sheetIdentity,
+  sheetOptions,
+} from "./src/sheet-plan.ts";
 import { SHELL_ROWS } from "./src/shell-rows-expo.ts";
 import type { ShellRowsSettings } from "./src/shell-rows-store.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
@@ -209,11 +226,28 @@ import { type Theme, themeFor } from "./src/theme-beta.ts";
 import { THEME_SETTINGS } from "./src/theme-settings-expo.ts";
 import type { ThemeSettings } from "./src/theme-settings-store.ts";
 import { type Palette, space } from "./src/theme.ts";
+import { useAccessibilityFlags } from "./src/ui/FloatingActivity.tsx";
 import { HeaderIcon } from "./src/ui/HeaderIcon.tsx";
 import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
 import { AppFontContext, Text } from "./src/ui/Text.tsx";
 import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
 import type { VoiceSettings } from "./src/voice-settings-store.ts";
+import {
+  type RunMode,
+  type RunState,
+  askSourceFromSheet,
+  createWorkflowRunController,
+} from "./src/workflow-run-controller.ts";
+import {
+  type RunsState,
+  createWorkflowRunsController,
+  workflowsHub,
+} from "./src/workflow-runs-controller.ts";
+import {
+  type StartSessionHandle,
+  type StartState,
+  createWorkflowStartController,
+} from "./src/workflow-start-controller.ts";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
 
@@ -333,6 +367,62 @@ const RUNTIMES = createSessionRuntimes<RemoteClient, SendableHandle>({
         }) as SendableHandle,
     }),
 });
+
+/**
+ * The Session screens that are up, by `sessionKey` (docs/feat/workflows-ui.md D4):
+ * a workflow run screen answers its approve asks through THAT screen's permission
+ * sheet (`answerFor`) — the one requester on the client's one broker — never a
+ * second one. Absent → the run screen has no buttons and offers the session.
+ */
+const SESSION_SCREENS = new Map<string, SessionScreenController>();
+
+/** The run screen's graph ⇄ cards choice, kept for the app's life (D4). */
+let WORKFLOW_RUN_MODE: RunMode = "graph";
+
+/**
+ * The computer's workflow runs (`workflow-runs-controller.ts`), read while the
+ * calling screen is mounted. Wiring only: every rule is the controller's.
+ */
+function useWorkflowRuns(computerId: string): { state: RunsState; pull: () => void } {
+  const [state, setState] = useState<RunsState>({ kind: "loading", runs: [], offline: null });
+  const pullRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    let live = true;
+    let controller: ReturnType<typeof createWorkflowRunsController> | null = null;
+    void LINKS.get(computerId).then(
+      (link) => {
+        if (!live) {
+          return;
+        }
+        controller = createWorkflowRunsController({
+          load: () => link.client.workflowList(),
+          onNotice: (listener) => link.client.onSessionWorkflows(() => listener()),
+          schedule: (fn, ms) => {
+            const timer = setTimeout(fn, ms);
+            return { cancel: () => clearTimeout(timer) };
+          },
+          onChange: (next) => {
+            if (live) {
+              setState(next);
+            }
+          },
+        });
+        pullRef.current = () => controller?.pull();
+        controller.focus();
+      },
+      (caught: unknown) => {
+        if (live) {
+          setState({ kind: "error", runs: [], offline: null, error: errorText(caught) });
+        }
+      },
+    );
+    return () => {
+      live = false;
+      controller?.dispose();
+    };
+  }, [computerId]);
+  return { state, pull: () => pullRef.current() };
+}
 
 /**
  * One outbox per COMPUTER (13d): its file, its driver and its drafts, kept for
@@ -608,11 +698,12 @@ const LINKS = createLinkRegistry<ComputerLink>({
       random: phoneRandom,
       diagnosis: diagnoserFor(id),
       log: APP_LOG,
+      onAnswered: (address) => KEYCHAIN_STORE.setLastAddress(id, address),
     });
     // A link dialled while the app is already in the background starts held:
     // iOS would suspend it anyway, and a socket opened now would be a ghost
     // attachment for the daemon (docs/feat/mobile-session-view.md 12a.4).
-    if (AppState.currentState !== "active") {
+    if (foregroundAction(AppState.currentState) === "suspend") {
       link.suspend();
     }
     LIVE_LINKS.add(link);
@@ -1741,8 +1832,10 @@ function SessionRoute({
   cwd,
   onOpenDrawer,
   drawerOpen,
+  locked,
   onOpenArtifacts,
   onNewSession,
+  onOpenWorkflows,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -1750,6 +1843,8 @@ function SessionRoute({
   readonly title: string;
   readonly archived: boolean;
   readonly focus: boolean;
+  /** The hub's Workflows item: the computer's run list (docs/feat/workflows-ui.md D4). */
+  readonly onOpenWorkflows: () => void;
   /** The tapped row's working folder (`SessionRoute.cwd`), for the header. */
   readonly cwd: string | undefined;
   readonly onOpenDrawer: () => void;
@@ -1758,10 +1853,32 @@ function SessionRoute({
   readonly onOpenArtifacts: (from: ArtifactGalleryRoute["from"], open?: string) => void;
   /** The drawer's New session, reached from the hub too (docs/feat/mobile-hub.md H3). */
   readonly onNewSession: () => void;
+  /**
+   * The lock's own current value, subscribed in `AppShell` (never a render-time
+   * read): the native sheets' drain is gated on it (docs/feat/mobile-native-sheets.md
+   * D3, Owner decision A).
+   */
+  readonly locked: boolean;
 }): JSX.Element {
   const shellRows = useShellRows();
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
+  // The hub's Workflows figure: the computer's runs (D4), read while this screen is up.
+  const workflowRuns = useWorkflowRuns(computerId);
+  const workflowsFigure = workflowsHub(workflowRuns.state);
+  // A run screen answers asks through THIS screen's sheet (`SESSION_SCREENS`).
+  useEffect(() => {
+    if (controller === null) {
+      return;
+    }
+    const key = sessionKey(computerId, sessionId);
+    SESSION_SCREENS.set(key, controller);
+    return () => {
+      if (SESSION_SCREENS.get(key) === controller) {
+        SESSION_SCREENS.delete(key);
+      }
+    };
+  }, [controller, computerId, sessionId]);
 
   useEffect(() => {
     let live = true;
@@ -1886,9 +2003,250 @@ function SessionRoute({
       drawerOpen={drawerOpen}
       onOpenArtifacts={onOpenArtifacts}
       onNewSession={onNewSession}
+      computerId={computerId}
+      sessionId={sessionId}
+      locked={locked}
       artifactsSeenKey={sessionKey(computerId, sessionId)}
       onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
       compactShell={shellRows.settings.compactShell}
+      onOpenWorkflows={onOpenWorkflows}
+      {...(workflowsFigure === undefined ? {} : { workflowsHub: workflowsFigure })}
+    />
+  );
+}
+
+/** The computer's workflow runs (docs/feat/workflows-ui.md D4): wiring only. */
+function WorkflowRunsRoute({
+  palette,
+  computerId,
+  name,
+  sessionId,
+  onBack,
+  onOpen,
+  onStart,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly name: string;
+  readonly sessionId?: string;
+  readonly onBack: () => void;
+  readonly onOpen: (run: {
+    readonly runId: string;
+    readonly sessionId: string;
+    readonly name: string;
+  }) => void;
+  readonly onStart: (sessionId: string) => void;
+}): JSX.Element {
+  const { state, pull } = useWorkflowRuns(computerId);
+  return (
+    <WorkflowRunsScreen
+      palette={palette}
+      computer={name}
+      state={state}
+      now={Date.now()}
+      onBack={onBack}
+      onPull={pull}
+      {...(sessionId === undefined ? {} : { sessionId, onStart: () => onStart(sessionId) })}
+      onOpen={(run) => {
+        if (run.sessionId !== undefined) {
+          onOpen({ runId: run.runId, sessionId: run.sessionId, name: run.name });
+        }
+      }}
+    />
+  );
+}
+
+/**
+ * One workflow run (docs/feat/workflows-ui.md D4): attaches through the SAME
+ * session runtime as the Session screen (never `reopen`), and answers asks only
+ * through the Session screen's own sheet when that screen is up. Wiring only.
+ */
+function WorkflowRunRoute({
+  palette,
+  computerId,
+  sessionId,
+  runId,
+  title,
+  onBack,
+  onOpenSession,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly title: string;
+  readonly onBack: () => void;
+  readonly onOpenSession: () => void;
+}): JSX.Element {
+  const [state, setState] = useState<RunState | null>(null);
+  const [controller, setController] = useState<ReturnType<
+    typeof createWorkflowRunController
+  > | null>(null);
+  // D5: the flight needs the screen's width, and Reduce Motion replaces it with a
+  // crossfade — both read live (a toggle converges without a restart).
+  const [pageWidth, setPageWidth] = useState(0);
+  const flags = useAccessibilityFlags();
+  useEffect(() => {
+    let live = true;
+    let created: ReturnType<typeof createWorkflowRunController> | null = null;
+    void LINKS.get(computerId).then((link) => {
+      if (!live) {
+        return;
+      }
+      const runtime = RUNTIMES.controller(link.client);
+      const screen = SESSION_SCREENS.get(sessionKey(computerId, sessionId));
+      created = createWorkflowRunController({
+        runId,
+        sessionId,
+        // The Session screen underneath follows it: never detach it from there.
+        borrowed: runtime.follows(sessionId),
+        open: async (id) => {
+          const result = await runtime.open(id);
+          // `newSession` hands back a `RemoteSession` (typed as the screen's subset).
+          return result.ok
+            ? { ok: true, session: result.session as unknown as RemoteSession }
+            : result;
+        },
+        leave: () => void runtime.leave(sessionId),
+        asks:
+          screen === undefined
+            ? null
+            : askSourceFromSheet({
+                view: () => screen.sheet().view(),
+                answerFor: (requestId, optionId) => screen.sheet().answerFor(requestId, optionId),
+                subscribe: (listener) => screen.subscribe(() => listener()),
+              }),
+        mode: {
+          get: () => WORKFLOW_RUN_MODE,
+          set: (mode) => {
+            WORKFLOW_RUN_MODE = mode;
+          },
+        },
+        onChange: () => {
+          if (live && created !== null) {
+            setState(created.state());
+          }
+        },
+      });
+      setController(created);
+      setState(created.state());
+      created.start();
+    });
+    return () => {
+      live = false;
+      created?.dispose();
+    };
+  }, [computerId, sessionId, runId]);
+  if (controller === null || state === null) {
+    return (
+      <View testID="workflow-run" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ActivityIndicator color={palette.accent} />
+      </View>
+    );
+  }
+  return (
+    <View
+      testID="workflow-run"
+      style={[styles.screen, { backgroundColor: palette.page }]}
+      onLayout={(e) => setPageWidth(e.nativeEvent.layout.width)}
+    >
+      <WorkflowRunScreen
+        palette={palette}
+        title={title}
+        state={state}
+        onBack={onBack}
+        onMode={(mode) => controller.setMode(mode)}
+        onAnswer={(stepId, optionId) => controller.answer(stepId, optionId)}
+        onStop={() => void controller.stop()}
+        onResume={() => void controller.resume()}
+        onRerun={(stepId) => void controller.rerun(stepId)}
+        onOpenSession={onOpenSession}
+        onOpenStep={(stepId) => controller.openStep(stepId)}
+        onCloseStep={() => controller.closeStep()}
+        reduceMotion={flags.reduceMotion}
+        width={pageWidth}
+      />
+    </View>
+  );
+}
+
+/**
+ * Start a workflow (docs/feat/workflows-ui.md D6, slice 5b): attaches through the
+ * SAME session runtime as the Session screen (never `reopen`), reads the
+ * catalogue through that session and sends the start through it too. Wiring only.
+ */
+function WorkflowStartRoute({
+  palette,
+  computerId,
+  sessionId,
+  onBack,
+  onOpenRun,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly onBack: () => void;
+  readonly onOpenRun: (runId: string, name: string) => void;
+}): JSX.Element {
+  const [state, setState] = useState<StartState | null>(null);
+  const [controller, setController] = useState<ReturnType<
+    typeof createWorkflowStartController
+  > | null>(null);
+  useEffect(() => {
+    let live = true;
+    let created: ReturnType<typeof createWorkflowStartController> | null = null;
+    void LINKS.get(computerId).then((link) => {
+      if (!live) {
+        return;
+      }
+      const runtime = RUNTIMES.controller(link.client);
+      created = createWorkflowStartController({
+        sessionId,
+        // The Session screen underneath follows it: never detach it from there.
+        borrowed: runtime.follows(sessionId),
+        open: async (id) => {
+          const result = await runtime.open(id);
+          // `newSession` hands back a `RemoteSession` (typed as the screen's subset).
+          return result.ok
+            ? { ok: true, session: result.session as unknown as StartSessionHandle }
+            : result;
+        },
+        leave: () => void runtime.leave(sessionId),
+        onOpenRun,
+        onChange: () => {
+          if (live && created !== null) {
+            setState(created.state());
+          }
+        },
+      });
+      setController(created);
+      setState(created.state());
+      created.start();
+    });
+    return () => {
+      live = false;
+      created?.dispose();
+    };
+  }, [computerId, sessionId, onOpenRun]);
+  if (controller === null || state === null) {
+    return (
+      <View testID="workflow-start" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ActivityIndicator color={palette.accent} />
+      </View>
+    );
+  }
+  return (
+    <WorkflowStartScreen
+      palette={palette}
+      computer={RECORDS.get(computerId)?.name ?? ""}
+      state={state}
+      canStart={controller.canStart()}
+      onBack={onBack}
+      onPull={() => controller.pull()}
+      onOpenRow={(key) => controller.openRow(key)}
+      onCloseRow={() => controller.closeRow()}
+      onValue={(name, value) => controller.setValue(name, value)}
+      onStart={() => void controller.beginStart()}
     />
   );
 }
@@ -2252,12 +2610,12 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   // decision is `foreground-gate.ts`'s; this is the `AppState` wiring.
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
+      // Only `background` suspends (2d): `inactive` (Face ID, Control Center, a
+      // call banner) keeps the socket.
+      const action = foregroundAction(state);
       for (const link of LIVE_LINKS) {
-        if (state === "active") {
-          link.resume();
-        } else {
-          link.suspend();
-        }
+        if (action === "resume") link.resume();
+        else if (action === "suspend") link.suspend();
       }
     });
     return () => subscription.remove();
@@ -2377,6 +2735,15 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   }
   const lockInstance = lock.current;
   const lockView = lockInstance.view();
+  /**
+   * The sheets' drain reads `locked` from the LOCK, not from this render
+   * (docs/feat/mobile-native-sheets.md D3, Step 0b): `AppShell` re-renders for its
+   * own reasons, so `lockView` above is stale exactly when the lock changes
+   * without one. `LockGate`'s own dispatch is what notifies (`app-lock.ts`'s
+   * `subscribe`), and this subscription only mirrors the flag the sheets need.
+   */
+  const [sheetLocked, setSheetLocked] = useState(() => lockInstance.view().locked);
+  useEffect(() => lockInstance.subscribe((view) => setSheetLocked(view.locked)), [lockInstance]);
   const lockGateDeps = {
     lock: lockInstance,
     authenticate,
@@ -2769,6 +3136,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     palette={palette}
                     onOpenDrawer={openDrawer}
                     drawerOpen={drawerOpen}
+                    locked={sheetLocked}
                     onNewSession={newSession}
                     computerId={route.params.computerId}
                     sessionId={route.params.sessionId}
@@ -2776,6 +3144,13 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     archived={route.params.archived}
                     focus={route.params.focus === true}
                     cwd={route.params.cwd}
+                    onOpenWorkflows={() =>
+                      navigation.navigate("WorkflowRuns", {
+                        computerId: route.params.computerId,
+                        name: RECORDS.get(route.params.computerId)?.name ?? "",
+                        sessionId: route.params.sessionId,
+                      })
+                    }
                     onOpenArtifacts={(from, open) =>
                       openArtifactGallery(navigation, {
                         computerId: route.params.computerId,
@@ -2815,6 +3190,145 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                   void shareCachedCopy(fileUri);
                 }}
                 onRenderError={(fields) => APP_LOG.log("error", "client-error", fields)}
+              />
+            )}
+          </Stack.Screen>
+          {/* Workflow runs (docs/feat/workflows-ui.md D4): two plain PUSH screens —
+              never the `Sheet` route, never a `<Modal>`. */}
+          <Stack.Screen name="WorkflowRuns" options={{ title: "Workflows", headerShown: false }}>
+            {({ navigation, route }) => (
+              <WorkflowRunsRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                name={route.params.name}
+                {...(route.params.sessionId === undefined
+                  ? {}
+                  : { sessionId: route.params.sessionId })}
+                onBack={() => navigation.goBack()}
+                onStart={(sessionId) =>
+                  navigation.navigate("WorkflowStart", {
+                    computerId: route.params.computerId,
+                    sessionId,
+                  })
+                }
+                onOpen={(run) =>
+                  navigation.navigate("WorkflowRun", {
+                    computerId: route.params.computerId,
+                    sessionId: run.sessionId,
+                    runId: run.runId,
+                    title: run.name,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen
+            name="WorkflowRun"
+            options={({ route }) => ({ title: route.params.title, headerShown: false })}
+          >
+            {({ navigation, route }) => (
+              <WorkflowRunRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                runId={route.params.runId}
+                title={route.params.title}
+                onBack={() => navigation.goBack()}
+                onOpenSession={() =>
+                  navigation.navigate("Session", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    title: route.params.title,
+                    // From a live run: never the archived path (Owner Q4).
+                    archived: false,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen
+            name="WorkflowStart"
+            options={{ title: "Start a workflow", headerShown: false }}
+          >
+            {({ navigation, route }) => (
+              <WorkflowStartRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                onBack={() => navigation.goBack()}
+                onOpenRun={(runId, name) =>
+                  navigation.navigate("WorkflowRun", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    runId,
+                    title: name,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          {/* The native sheets (docs/feat/mobile-native-sheets.md D1): ONE route,
+              five kinds, presented as an iOS `formSheet` with three detents. The
+              detents, the opening index, the undimmed index and the grabber are
+              `sheetOptions`' — never restated here — so RNS's dev asserts cannot
+              fire. Nothing carries the sheet's CONTENT in params: the session
+              screen publishes it on `SHEET_HOSTS` (D2). */}
+          <Stack.Screen
+            name="Sheet"
+            options={({ route }) => ({
+              // The opening detent is the one the person left this sheet at, if
+              // any (D3 detent memory); the identity is the kind for the user
+              // sheets, the ask's own id for Permission (S5) — so a re-delivery
+              // of the SAME ask opens where the person left it.
+              ...sheetOptions(route.params.kind, {
+                ...sheetDetentContext(
+                  route.params.kind,
+                  sheetIdentity(route.params.kind, route.params.askId ?? null),
+                  PixelRatio.getFontScale(),
+                  // Session info opened on a section (`openScheduled`) scrolls
+                  // inside the sheet, so it opens at L (D3).
+                  route.params.reveal === true,
+                ),
+                // D5: an unanswered ask cannot be swiped away — it rides the
+                // params because options resolve before the screen mounts, so
+                // the sheet is un-swipeable from its first frame. The screen
+                // rewrites it in place once the ask settles (S5).
+                ...(route.params.asking === true ? { asking: true } : {}),
+              }),
+              contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] },
+            })}
+            listeners={({ route }) => ({
+              // Only a STABLE change is remembered (`recordDetent`): a re-push
+              // after the lock drain re-opens at it (Step 0b L3).
+              sheetDetentChange: (event) =>
+                recordDetent(
+                  SHEET_DETENTS,
+                  route.params.kind,
+                  sheetIdentity(route.params.kind, route.params.askId ?? null),
+                  event.data,
+                ),
+              // A swipe/backdrop that the blocked `gestureEnabled:false` refused
+              // (D5): RNS reports it, so the attempt is not silent — the light
+              // haptic and the inline footnote under the ask's options.
+              gestureCancel: () => {
+                const askId = route.params.askId;
+                if (route.params.kind !== "permission" || askId === undefined) {
+                  return;
+                }
+                playHaptic("light");
+                SHEET_HOLDS.note(holdKey(route.params.computerId, route.params.sessionId, askId));
+              },
+            })}
+          >
+            {({ navigation, route }) => (
+              <NativeSheetRoute
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                kind={route.params.kind}
+                // A KEYED pop: this screen's navigation dispatches with
+                // `source: route.key`, so `pop` removes this sheet only. An
+                // unkeyed `goBack()` would pop Session itself.
+                onClose={() => navigation.pop()}
               />
             )}
           </Stack.Screen>

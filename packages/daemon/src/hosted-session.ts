@@ -153,11 +153,17 @@ import {
   type WatchCategory,
   type WatchNextResult,
   type WatchResult,
+  type WorkflowCatalogueResult,
+  WorkflowCatalogueResultSchema,
+  type WorkflowDefRow,
+  WorkflowDefRowSchema,
   type WorkflowListRow,
   type WorkflowParams,
   type WorkflowResult,
   type WorkflowRow,
   WorkflowRowSchema,
+  type WorkflowStepParams,
+  type WorkflowStepResult,
   clientSupportsUpdate,
   watchAccepts,
 } from "@tentacle/protocol";
@@ -638,6 +644,72 @@ function oneLineText(text: string): string {
     out += char;
   }
   return out;
+}
+
+/** The wire's caps on a catalogue row's `errors` (`WorkflowDefRowSchema`). */
+const WORKFLOW_ERRORS_MAX = 20;
+const WORKFLOW_ERROR_MAX_CHARS = 300;
+
+/** `text` within `max` UTF-16 units, ending in `…` when cut (never mid-surrogate). */
+function capWithEllipsis(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  let end = max - 1;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1;
+  }
+  return `${text.slice(0, end)}…`;
+}
+
+/**
+ * A row's errors within the wire's caps, none lost silently (review round 1
+ * #2): each is ONE line (the validator's text can hold a newline), an over-long
+ * one ends in `…`, and past 20 the last line says how many more there are.
+ */
+function boundedWorkflowErrors(errors: readonly string[]): string[] {
+  const lines = errors.map((e) => capWithEllipsis(oneLineText(e), WORKFLOW_ERROR_MAX_CHARS));
+  if (lines.length <= WORKFLOW_ERRORS_MAX) {
+    return lines;
+  }
+  const kept = lines.slice(0, WORKFLOW_ERRORS_MAX - 1);
+  return [...kept, `+${lines.length - kept.length} more`];
+}
+
+type DriverCatalogueRow = Awaited<ReturnType<WorkflowDriver["catalogue"]>>["workflows"][number];
+
+/**
+ * One catalogue row as the wire carries it. A row the wire schema refuses (a
+ * valid workflow whose `run:` exceeds the step-command cap, an over-long
+ * description, …) becomes an `ok:false` row whose errors name the field — by
+ * step id — so one file cannot fail the whole answer (review round 1 #1).
+ */
+function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
+  const candidate = {
+    ...row,
+    ...(row.errors !== undefined ? { errors: boundedWorkflowErrors(row.errors) } : {}),
+  };
+  const parsed = WorkflowDefRowSchema.safeParse(candidate);
+  if (parsed.success) {
+    return parsed.data;
+  }
+  const steps = row.steps ?? [];
+  const problems = parsed.error.issues.map((issue) => {
+    const [head, index, ...rest] = issue.path;
+    const at =
+      head === "steps" && typeof index === "number"
+        ? [`step "${steps[index]?.id ?? index}"`, ...rest].join(" ")
+        : issue.path.join(".");
+    return `${at === "" ? "row" : at}: ${issue.message} (the catalogue cannot carry it)`;
+  });
+  // Name and path are one-line and capped here, so the refusal row itself parses.
+  return {
+    name: capWithEllipsis(oneLineText(row.name), 64) || "?",
+    path: capWithEllipsis(oneLineText(row.path), 512) || "?",
+    ok: false,
+    errors: boundedWorkflowErrors(problems),
+  };
 }
 
 /**
@@ -2475,6 +2547,11 @@ export class HostedSession {
         return driver.start({
           name: params.name,
           inputs: Object.fromEntries(inputs),
+          // The hash the user SAW (the catalogue's row, slice 5a): a file edited
+          // since then is refused `changed`, so a start never runs an edit the
+          // user never reviewed. Absent (a TUI `/workflow run`, the model's
+          // tool) keeps the old behaviour: the current file.
+          ...(params.hash !== undefined ? { hash: params.hash } : {}),
           by: "user",
           turnId: params.turnId,
         });
@@ -2486,6 +2563,46 @@ export class HostedSession {
       case "rerun_step":
         return driver.rerun(params.runId, params.stepId, params.turnId);
     }
+  }
+
+  /**
+   * `session/workflow_catalogue` (docs/feat/workflows-ui.md slice 5a / D6): the
+   * project's workflow files, validated and hashed against THIS session's
+   * `models`/agent types, with whether each hash is approved. A read: no ask, no
+   * run, no write. A session without a driver (tunnelled: a pod's daemon) answers
+   * `unavailable` — never an empty list that would look like "no workflows".
+   *
+   * The answer is judged by the wire schema on the way out (a pod may have sent
+   * it, and a row's free text is painted on the laptop).
+   */
+  async workflowCatalogue(): Promise<WorkflowCatalogueResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return {
+        workflows: [],
+        dir: "",
+        unavailable: "workflows run only on a laptop or serve session",
+      };
+    }
+    const catalogue = await driver.catalogue();
+    // Each row is judged ON ITS OWN (review round 1 #1): a valid workflow the
+    // wire cannot carry becomes one `ok:false` row naming why — never a failed
+    // whole answer that hides every other workflow.
+    const parsed = WorkflowCatalogueResultSchema.safeParse({
+      ...catalogue,
+      workflows: catalogue.workflows.map(catalogueRow),
+    });
+    if (!parsed.success) {
+      return {
+        workflows: [],
+        dir: catalogue.dir,
+        unavailable: oneLineText(`the catalogue could not be read: ${parsed.error.message}`).slice(
+          0,
+          200,
+        ),
+      };
+    }
+    return parsed.data;
   }
 
   /** This session's rows of `workflow/list` (D5): the hub's signal is `needsUser`. */
@@ -2510,6 +2627,63 @@ export class HostedSession {
         ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
       };
     });
+  }
+
+  /**
+   * `session/workflow_step` (docs/feat/workflows-ui.md D1): ONE step execution's
+   * `prompt`/`report`, which the `workflows` row deliberately does not carry.
+   * Synchronous from the retained log, so it holds no lock and never serializes
+   * the peer (AGENTS §7).
+   *
+   * The durable entry wins: it is the execution that ENDED. A step still running
+   * has none yet, so the driver's in-flight record answers instead — `live: true`
+   * and the row's live text, no report. Nothing available (a step that never ran,
+   * or one whose entry a compaction left behind) is `{}`: the UI says so, it
+   * never paints another step's text.
+   */
+  workflowStep(params: WorkflowStepParams): WorkflowStepResult {
+    const entry = this.log.workflowStepDetail({
+      runId: params.runId,
+      stepId: params.stepId,
+      ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
+      ...(params.round !== undefined ? { round: params.round } : {}),
+    });
+    if (entry !== undefined) {
+      return {
+        detail: {
+          attempt: entry.attempt,
+          round: entry.round,
+          live: false,
+          state: entry.state,
+          ...(entry.verdict !== undefined ? { verdict: entry.verdict } : {}),
+          reason: entry.reason,
+          ...(entry.prompt !== undefined ? { prompt: entry.prompt } : {}),
+          ...(entry.report !== undefined ? { report: entry.report } : {}),
+          tokens: entry.tokens,
+          durationMs: entry.durationMs,
+        },
+      };
+    }
+    // No entry: the step is either running now or its record is gone.
+    const live = this.workflows?.liveStep(params.runId);
+    if (
+      live !== undefined &&
+      live.stepId === params.stepId &&
+      (params.attempt === undefined || params.attempt === live.attempt) &&
+      (params.round === undefined || params.round === live.round)
+    ) {
+      return {
+        detail: {
+          attempt: live.attempt,
+          round: live.round,
+          live: true,
+          state: "running",
+          prompt: live.prompt,
+          ...(live.live !== undefined ? { reason: live.live } : {}),
+        },
+      };
+    }
+    return {};
   }
 
   /**

@@ -378,6 +378,14 @@ export interface PersistingController extends SessionController {
   onSchedules?: RemoteSession["onSchedules"];
   /** `RemoteSession.deleteSchedule`: drop one armed wake. */
   deleteSchedule?: RemoteSession["deleteSchedule"];
+  /** `RemoteSession.onWorkflows`: this session's workflow runs (docs/feat/workflows-ui.md D2). */
+  onWorkflows?: RemoteSession["onWorkflows"];
+  /** `RemoteSession.workflow`: start / stop / resume a run, or re-run one step. */
+  workflow?: RemoteSession["workflow"];
+  /** `RemoteSession.workflowStep`: one step execution's prompt/report. */
+  workflowStep?: RemoteSession["workflowStep"];
+  /** `RemoteSession.workflowCatalogue`: the project's workflows (slice 5a). */
+  workflowCatalogue?: RemoteSession["workflowCatalogue"];
   /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
   onSubagentNotify?: RemoteSession["onSubagentNotify"];
   /** `RemoteSession.messageSubagent`: the user's text into a running background child. */
@@ -964,6 +972,21 @@ export function persistingController(
     },
     deleteSchedule(scheduleId) {
       return inner.deleteSchedule(scheduleId);
+    },
+    // docs/feat/workflows-ui.md D2: the rail, the panel and `/workflow` all read
+    // this ONE per-session feed, and every action is the daemon's (its
+    // `workflows` frame is what repaints the rail — never a local echo).
+    onWorkflows(listener) {
+      return inner.onWorkflows(listener);
+    },
+    workflow(params) {
+      return inner.workflow(params);
+    },
+    workflowStep(runId, stepId, attempt) {
+      return inner.workflowStep(runId, stepId, attempt);
+    },
+    workflowCatalogue() {
+      return inner.workflowCatalogue();
     },
     onSubagentNotify(listener) {
       return inner.onSubagentNotify(listener);

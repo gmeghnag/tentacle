@@ -805,3 +805,17 @@ describe("local_notice (docs/feat/mobile-hub-commands.md C2 item 12)", () => {
     expect(s.turn).toBeNull();
   });
 });
+
+describe("a server-side model error (docs/fix/model-stream-error.md)", () => {
+  // Parity pin with the Mac TUI: green on both trees, not the red test.
+  test("the failed turn's message is the notice, word for word", () => {
+    const message = "model server error: Context size has been exceeded.";
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "turn_ended", outcome: "failed", message },
+    ]);
+    const last = state.rows.at(-1);
+    expect(last?.kind === "notice" ? last.text : undefined).toBe(message);
+    expect(last?.kind === "notice" ? last.level : undefined).toBe("warn");
+  });
+});

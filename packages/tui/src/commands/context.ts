@@ -16,12 +16,14 @@
  *
  * Nothing here is React, and nothing here is a snapshot of a render.
  */
+import type { WorkflowRow } from "@tentacle/protocol";
 import type { AppProps, SessionController } from "../app-types.ts";
 import type { SlashSkill } from "../commands.ts";
 import type { OpenPanel } from "../panel.ts";
 import type { ScheduleDockRow } from "../schedule-view.ts";
 import type { SkillsSync } from "../skills-sync.ts";
 import type { DisplayState } from "../state.ts";
+import type { CatalogueView } from "../workflow-view.ts";
 
 /** A ref, read when the command runs (never a value captured at render). */
 export interface Live<T> {
@@ -46,6 +48,28 @@ export interface CommandContext {
    * delete is the daemon's echo, never a local edit.
    */
   readonly schedulesRef: Live<readonly ScheduleDockRow[] | undefined>;
+  /**
+   * The session's workflow runs, as this TUI last reported them
+   * (docs/feat/workflows-ui.md D3): `/workflow` opens on them and picks the run
+   * `stop`/`resume` act on. `undefined` = no run feed (never "no run").
+   */
+  readonly workflowsRef: Live<readonly WorkflowRow[] | undefined>;
+  /**
+   * The project's workflows as the last catalogue read answered (slice 2b / D8):
+   * `/workflow` paints them, `run <name>` takes the hash the user saw, and the
+   * section's own facts (the folder, the `not versioned` sentence) come from it.
+   */
+  readonly workflowCatalogueRef: Live<CatalogueView>;
+  /**
+   * Ask for a fresh catalogue read (coalesced). `/workflow` calls it: an editor
+   * outside tentacle is seen at the next of D8's moments, and this is one.
+   */
+  readonly refreshCatalogue: () => void;
+  /**
+   * Put a prepared command in the input (a catalogue row that needs inputs, D8):
+   * `/workflow run <name> <req>=` filled in, with the panel closed.
+   */
+  readonly prefill: (text: string) => void;
   /** The display state (`running`, the transcript rows, the token totals). */
   readonly stateRef: Live<DisplayState>;
   /**

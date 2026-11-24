@@ -3,7 +3,7 @@
     "apps/mobile/src/chat-header.ts": "9e509a71b3801a4486a838b353c31c96270fedcb",
     "apps/mobile/src/motion.ts": "cb710fd7643e02771a98beb41cf418b3a5364155",
     "apps/mobile/src/screens/ComputersScreen.tsx": "ac1fe5dee031bc713182ae3cee279af4ebed1daf",
-    "apps/mobile/src/screens/PermissionSheet.tsx": "7ad6485e5d63f6bc963fdcf2a84e809fa621cc08",
+    "apps/mobile/src/screens/PermissionSheet.tsx": "4df08bc4dc1f8b0ecca2fb9698f4b33d18ddc768",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "5cb64e4a707fb3ade80d489dc643e6bfac5cb60e",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "4acc16969f29573f6f292b0c1fdcc6ce6fa61efa",
     "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "04e443f0bac5ef63f0a9f936a12ec5b52ee2c7ae",
@@ -18,10 +18,10 @@
     "apps/mobile/src/ui/FloatingActivity.tsx": "cc8ae250d2303f88efe4261ad4e66168425d31b0",
     "apps/mobile/src/ui/GlassButton.tsx": "a595e5654c4b6167edfd83387e3322c5b1dc611c",
     "apps/mobile/src/ui/HeaderDot.tsx": "1d49445123ec6a8eabd55ef377e30c8ff4bee94d",
-    "apps/mobile/src/ui/HubFan.tsx": "4826433ccc23d36237be9f6029cc80e6a827ee13",
+    "apps/mobile/src/ui/HubFan.tsx": "cc651f77f09644df69d99191ed2b5335bc3a691f",
     "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
     "apps/mobile/src/ui/ScreenHeader.tsx": "5056826ce4b0caed05dfa83cb777dc1e26ea1ba0",
-    "apps/mobile/src/ui/Sheet.tsx": "3c6c0d8b0f8f8b450821ccc12f737b8e893258d7",
+    "apps/mobile/src/ui/Sheet.tsx": "511816016f43feef1b11ce7d5d29def68fad8e22",
     "apps/mobile/src/ui/StepNode.tsx": "1ecdb5ef3a4b4e5d35d5affd320351564fb4cde1",
     "packages/tui/src/blink.ts": "29c9f101f7942a0942e48c977a13e3759820c8e3",
     "packages/tui/src/components/Thinking.tsx": "c9f80123d32ad706b7c96d858b822d9336d15d2d",
@@ -956,14 +956,22 @@
       "file": "apps/mobile/src/ui/Sheet.tsx",
       "styles": {
         "sheet": {
-          "borderTopLeftRadius": 14,
-          "borderTopRightRadius": 14,
           "paddingHorizontal": 20,
           "paddingTop": 8,
           "gap": 12
         },
+        "head": {
+          "paddingHorizontal": 20,
+          "paddingTop": 8,
+          "paddingBottom": 12,
+          "gap": 12
+        },
         "scrollBody": {
-          "flex": 1
+          "flex": 1,
+          "gap": 0
+        },
+        "scrollContent": {
+          "gap": 0
         },
         "floating": {
           "marginHorizontal": 8,
@@ -1032,6 +1040,7 @@
           "tools": "powerplug",
           "commands": "terminal",
           "scheduled": "clock",
+          "workflows": "list.bullet",
           "dictate": "mic",
           "new": "square.and.pencil",
           "more": "ellipsis"
@@ -1600,16 +1609,9 @@
         },
         "sheet": {
           "paddingHorizontal": 20,
-          "paddingTop": 8,
+          "paddingTop": 16,
           "paddingBottom": 40,
           "gap": 16
-        },
-        "grabber": {
-          "alignSelf": "center",
-          "width": 36,
-          "height": 5,
-          "borderRadius": 2.5,
-          "marginBottom": 4
         },
         "head": {
           "flexDirection": "row",
@@ -1654,6 +1656,11 @@
           "borderRadius": 14,
           "padding": 14,
           "minHeight": 96
+        },
+        "later": {
+          "alignSelf": "center",
+          "paddingVertical": 10,
+          "paddingHorizontal": 16
         }
       },
       "consts": {
@@ -1968,6 +1975,599 @@
     "hubButton": {
       "size": 54
     },
+    "mascot": {
+      "palette": "mint",
+      "homeInset": 76,
+      "sprite": 54,
+      "still": [
+        {
+          "x": 12,
+          "y": 0,
+          "w": 30,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 6,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 36,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 12,
+          "y": 6,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 18,
+          "y": 6,
+          "w": 18,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 18,
+          "y": 18,
+          "w": 18,
+          "h": 12,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 6,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 42,
+          "y": 6,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 42,
+          "y": 36,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 0,
+          "y": 12,
+          "w": 6,
+          "h": 24,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 0,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 12,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 12,
+          "y": 12,
+          "w": 30,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 12,
+          "y": 36,
+          "w": 30,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 42,
+          "y": 12,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 48,
+          "y": 12,
+          "w": 6,
+          "h": 24,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 48,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 18,
+          "w": 6,
+          "h": 12,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 12,
+          "y": 18,
+          "w": 6,
+          "h": 12,
+          "color": "#163D24",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 18,
+          "w": 6,
+          "h": 12,
+          "color": "#163D24",
+          "alpha": 1
+        },
+        {
+          "x": 42,
+          "y": 18,
+          "w": 6,
+          "h": 12,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 30,
+          "w": 12,
+          "h": 6,
+          "color": "#CFF5D9",
+          "alpha": 1
+        },
+        {
+          "x": 18,
+          "y": 30,
+          "w": 6,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 24,
+          "y": 30,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 24,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 30,
+          "y": 30,
+          "w": 6,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 30,
+          "w": 12,
+          "h": 6,
+          "color": "#CFF5D9",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 42,
+          "w": 12,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 18,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 30,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 42,
+          "w": 12,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 48,
+          "w": 12,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 24,
+          "y": 48,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 48,
+          "w": 12,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        }
+      ],
+      "skate": [
+        {
+          "x": -6,
+          "y": 48,
+          "w": 6,
+          "h": 6,
+          "color": "#B98B5B",
+          "alpha": 1
+        },
+        {
+          "x": 54,
+          "y": 48,
+          "w": 6,
+          "h": 6,
+          "color": "#B98B5B",
+          "alpha": 1
+        },
+        {
+          "x": 0,
+          "y": 54,
+          "w": 54,
+          "h": 6,
+          "color": "#B98B5B",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 60,
+          "w": 6,
+          "h": 6,
+          "color": "#E8EAED",
+          "alpha": 1
+        },
+        {
+          "x": 42,
+          "y": 60,
+          "w": 6,
+          "h": 6,
+          "color": "#E8EAED",
+          "alpha": 1
+        },
+        {
+          "x": 12,
+          "y": 0,
+          "w": 30,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 6,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 36,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 12,
+          "y": 6,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 18,
+          "y": 6,
+          "w": 18,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 18,
+          "y": 18,
+          "w": 18,
+          "h": 12,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 6,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 42,
+          "y": 6,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 42,
+          "y": 36,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 0,
+          "y": 12,
+          "w": 6,
+          "h": 24,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 0,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 12,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 12,
+          "y": 12,
+          "w": 30,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 12,
+          "y": 36,
+          "w": 30,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 42,
+          "y": 12,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 48,
+          "y": 12,
+          "w": 6,
+          "h": 24,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 48,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 18,
+          "w": 6,
+          "h": 12,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 12,
+          "y": 18,
+          "w": 6,
+          "h": 12,
+          "color": "#163D24",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 18,
+          "w": 6,
+          "h": 12,
+          "color": "#163D24",
+          "alpha": 1
+        },
+        {
+          "x": 42,
+          "y": 18,
+          "w": 6,
+          "h": 12,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 30,
+          "w": 12,
+          "h": 6,
+          "color": "#CFF5D9",
+          "alpha": 1
+        },
+        {
+          "x": 18,
+          "y": 30,
+          "w": 6,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 24,
+          "y": 30,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 24,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 30,
+          "y": 30,
+          "w": 6,
+          "h": 6,
+          "color": "#8FE0A6",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 30,
+          "w": 12,
+          "h": 6,
+          "color": "#CFF5D9",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 42,
+          "w": 12,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 18,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 30,
+          "y": 42,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 42,
+          "w": 12,
+          "h": 6,
+          "color": "#73D28E",
+          "alpha": 1
+        },
+        {
+          "x": 6,
+          "y": 48,
+          "w": 12,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 24,
+          "y": 48,
+          "w": 6,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        },
+        {
+          "x": 36,
+          "y": 48,
+          "w": 12,
+          "h": 6,
+          "color": "#3C9A5C",
+          "alpha": 1
+        }
+      ]
+    },
     "tui": {
       "width": 60,
       "rows": {
@@ -1976,13 +2576,13 @@
             "\u001b[48;2;55;55;55m\u001b[38;2;6;182;212m\u001b[1m› \u001b[22m\u001b[39mWhy does the build fail on CI?                            \u001b[49m"
           ],
           "assistant": [
-            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[0mThe lockfile is stale: run \u001b[33mbun install\u001b[39m and commit it.\u001b[0m"
+            "● \u001b[0mThe lockfile is stale: run \u001b[33mbun install\u001b[39m and commit it.\u001b[0m"
           ],
           "toolRunning": [
-            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m"
+            "\u001b[38;2;140;140;140m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m"
           ],
           "toolRunningOff": [
-            "\u001b[38;2;6;182;212m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m"
+            "\u001b[38;2;140;140;140m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mbun test\u001b[39m"
           ],
           "toolOk": [
             "\u001b[38;2;78;201;116m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;140;140;140mls\u001b[39m\u001b[38;2;140;140;140m 1.2s\u001b[39m",
@@ -1999,13 +2599,13 @@
             "\u001b[48;2;238;238;238m\u001b[38;2;14;116;144m\u001b[1m› \u001b[22m\u001b[39mWhy does the build fail on CI?                            \u001b[49m"
           ],
           "assistant": [
-            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[0mThe lockfile is stale: run \u001b[38;2;149;56;0mbun install\u001b[39m and commit it.\u001b[0m"
+            "● \u001b[0mThe lockfile is stale: run \u001b[38;2;149;56;0mbun install\u001b[39m and commit it.\u001b[0m"
           ],
           "toolRunning": [
-            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m"
+            "\u001b[38;2;107;107;107m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m"
           ],
           "toolRunningOff": [
-            "\u001b[38;2;14;116;144m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m"
+            "\u001b[38;2;107;107;107m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mbun test\u001b[39m"
           ],
           "toolOk": [
             "\u001b[38;2;8;71;24m●\u001b[39m \u001b[1mBash\u001b[22m \u001b[38;2;107;107;107mls\u001b[39m\u001b[38;2;107;107;107m 1.2s\u001b[39m",

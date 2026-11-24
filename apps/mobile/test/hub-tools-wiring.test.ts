@@ -62,7 +62,7 @@ describe("the commit opens the sheet and asks the controller", () => {
   });
 
   test("closing clears the flag and tells the controller (F5: no stale answer)", () => {
-    const close = slice("const closeTools = () => {", "};");
+    const close = slice("const closeTools = useCallback(() => {", "}, [controller]);");
     expect(close).toContain("setToolsOpen(false)");
     expect(close).toContain("controller.closeInfo()");
   });

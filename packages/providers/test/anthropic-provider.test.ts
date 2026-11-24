@@ -463,8 +463,8 @@ describe("AnthropicProvider.stream", () => {
       }
     };
     const err = await run().catch((e) => e);
-    expect(err).toBeInstanceOf(ModelRequestError);
-    expect((err as Error).message).toContain("Overloaded");
+    expect((err as Error).name).toBe("ModelServerError");
+    expect((err as Error).message).toBe("model server error: Overloaded");
   });
 
   test("sends the x-api-key and anthropic-version headers and a valid body", async () => {

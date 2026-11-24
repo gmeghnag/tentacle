@@ -25,7 +25,11 @@ coverage/
 *.log
 
 # Agent workspace artifacts (tool-output spills, sessions)
-.tentacle/
+# `/*` + the exception, because git cannot re-include a child of an excluded
+# DIRECTORY: the project's workflows (`.tentacle/workflows/`) ARE versioned
+# (docs/feat/workflows-ui.md D7 v5), everything else under `.tentacle/` is not.
+.tentacle/*
+!.tentacle/workflows/
 .harness/
 
 

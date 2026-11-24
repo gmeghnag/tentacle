@@ -34,6 +34,42 @@ describe("the Pair route's params (11b.1)", () => {
   });
 });
 
+describe("the workflow routes (docs/feat/workflows-ui.md D4)", () => {
+  test("WorkflowRuns names the computer; the session it came from is optional", () => {
+    const fromHub: RootStackParams["WorkflowRuns"] = {
+      computerId: "0123456789abcdef",
+      name: "MacBook",
+      sessionId: "s1",
+    };
+    const bare: RootStackParams["WorkflowRuns"] = {
+      computerId: "0123456789abcdef",
+      name: "MacBook",
+    };
+    expect(fromHub.sessionId).toBe("s1");
+    expect(bare.sessionId).toBeUndefined();
+  });
+
+  test("WorkflowRun names the run and the session that owns it", () => {
+    const run: RootStackParams["WorkflowRun"] = {
+      computerId: "0123456789abcdef",
+      sessionId: "s1",
+      runId: "wf-1",
+      title: "task",
+    };
+    expect(run.runId).toBe("wf-1");
+  });
+
+  test("WorkflowStart names the computer and the session the run starts in (slice 5b)", () => {
+    // A type pin, not a behaviour: the catalogue is validated against THAT
+    // session's models, so both params are required (`tsc` refuses a missing one).
+    const start: RootStackParams["WorkflowStart"] = {
+      computerId: "0123456789abcdef",
+      sessionId: "s1",
+    };
+    expect(start.sessionId).toBe("s1");
+  });
+});
+
 describe("the Settings route (docs/feat/mobile-lock.md D6)", () => {
   test("it takes no params", () => {
     // The type is the contract: `Settings` is `undefined`, like `Computers`.

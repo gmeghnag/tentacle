@@ -62,6 +62,13 @@ export type SheetState =
       readonly kind: "asking";
       /** A monotonic id per presented ask: React keys, and the "the ask CHANGED" arm test. */
       readonly seq: number;
+      /**
+       * The daemon's id for this ask (`PermissionRequestOptions.requestId`),
+       * when the requester had one: the sheet's route param keys the presented
+       * sheet on it, so one ask is told from the next
+       * (docs/feat/mobile-native-sheets.md D5). Null: a local ask, no id.
+       */
+      readonly requestId: string | null;
       readonly request: PermissionRequest;
       readonly options: readonly SheetOption[];
       /** The words the person is typing into the refusal field ("" until they do). */
@@ -79,6 +86,13 @@ export type SheetState =
       readonly armedInMs: number;
       /** The sub-agent that asked, when the daemon said so (display only). */
       readonly agent: { readonly type: string; readonly description: string } | null;
+      /**
+       * The asker's own id when the daemon gave one (a workflow step's ask is
+       * `"<runId>.<stepId>"`, the run's hash approval `"<runId>"`): what a workflow
+       * card pairs the ask with (`askForStep`, docs/feat/workflows-ui.md D4). Null
+       * otherwise. Display/pairing only.
+       */
+      readonly agentId: string | null;
       /**
        * The OTHER devices this ask also reached (docs/feat/session-auto-accept.md
        * D7): each a bounded, sanitized label, this phone's own already dropped.
@@ -152,6 +166,14 @@ export interface PermissionSheet {
   view(now?: number): SheetState;
   /** A tap on one of the options. `ignored` while the age guard holds. */
   answer(optionId: SheetOptionId, now?: number): "sent" | "typing" | "ignored";
+  /**
+   * A workflow card's answer (docs/feat/workflows-ui.md D4): `answer`, but only
+   * when the ask on screen IS `requestId` — a card left over from an ask that
+   * was settled elsewhere must never answer the one that replaced it. The same
+   * settle path as a tap (never a second resolve path) and the same age guard;
+   * the reply option is the sheet's own (its text field lives there).
+   */
+  answerFor(requestId: string, optionId: SheetOptionId, now?: number): "sent" | "ignored";
   /** The refusal field's text (only while the reply option is open). */
   setReplyText(text: string): void;
   /** Send the refusal with the person's words (`reject_once` + `message`). */
@@ -280,6 +302,7 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     commit({
       kind: "asking",
       seq,
+      requestId: entry.options?.requestId ?? null,
       request: entry.req,
       options: sheetOptions(entry.req),
       replyText: "",
@@ -293,6 +316,7 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
               description: entry.options.agent.description,
             }
           : null,
+      agentId: entry.options?.agent?.id ?? null,
       // The daemon's list of who else was asked, minus this phone's own label
       // (docs/feat/session-auto-accept.md D7). Display only, and the labels come
       // from a daemon that may be a pod: bounded and stripped, never trusted.
@@ -468,6 +492,22 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
         return "typing";
       }
       const response = responseFor(optionId, "");
+      if (response === null) {
+        return "ignored";
+      }
+      settle(response);
+      return "sent";
+    },
+    answerFor(requestId, optionId, at) {
+      if (state.kind !== "asking" || state.requestId !== requestId || optionId === "reply") {
+        return "ignored";
+      }
+      const entry = current;
+      if (entry === null || !armed(now(at))) {
+        return "ignored";
+      }
+      const offered = sheetOptions(entry.req).some((o) => o.optionId === optionId);
+      const response = offered ? responseFor(optionId, "") : null;
       if (response === null) {
         return "ignored";
       }

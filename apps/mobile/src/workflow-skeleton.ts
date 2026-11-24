@@ -248,23 +248,23 @@ export function detailBlocks(
   actionCount: number,
 ): DetailBlocks {
   const kv: (readonly [string, string])[] = [
-    ["Stato", stateWord(step.state)],
-    ["Tipo", kindWord(step.kind)],
+    ["State", stateWord(step.state)],
+    ["Kind", kindWord(step.kind)],
   ];
   if (step.model !== undefined) {
-    kv.push(["Modello", oneLine(step.model)]);
+    kv.push(["Model", oneLine(step.model)]);
   }
   if (step.where !== "") {
-    kv.push(["Dove", oneLine(step.where)]);
+    kv.push(["Where", oneLine(step.where)]);
   }
   if (step.attempt > 0) {
-    kv.push(["Tentativi", `${step.attempt + 1}`]);
+    kv.push(["Attempts", `${step.attempt + 1}`]);
   }
   if (step.maxRound !== undefined) {
-    kv.push(["Giro", `${Math.max(1, step.round)} di ${step.maxRound}`]);
+    kv.push(["Round", `${Math.max(1, step.round)} of ${step.maxRound}`]);
   }
   if (step.durationMs !== undefined) {
-    kv.push(["Durata", `${Math.round(step.durationMs / 100) / 10}s`]);
+    kv.push(["Duration", `${Math.round(step.durationMs / 100) / 10}s`]);
   }
   return { kv, log: logLines(step.reason), actions: actionCount };
 }

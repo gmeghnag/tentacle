@@ -267,7 +267,13 @@ function raceOnce<TOpened, TAnswer>(
           }
           steps.failed?.({ address: candidate.address, error });
           lastError = error;
-          if (next >= round.length && inFlight === 0) {
+          if (next < round.length) {
+            armed?.cancel();
+            armed = undefined;
+            startNext();
+            return;
+          }
+          if (inFlight === 0) {
             finish({ kind: "failed", error: lastError, at: undefined });
           }
         },

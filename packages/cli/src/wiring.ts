@@ -61,10 +61,12 @@ import {
   PermissionBroker,
   type PermissionRequester,
   type ScheduleLimits,
+  type ToolImageStore,
 } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
 import { HooksTrustParamsSchema } from "@tentacle/protocol";
+import { imageLimits, imageTokenEstimate } from "@tentacle/providers";
 import {
   NOTICES,
   type RunOutcome,
@@ -79,6 +81,8 @@ import {
   chartTool,
   createAgentControlTool,
   createContextResetTool,
+  createFsReadTool,
+  createImageViewTool,
   createMoveSessionTool,
   createScheduleControlTool,
   createScheduleCreateTool,
@@ -102,7 +106,7 @@ import {
   tunnelSubagentResolver,
 } from "./model-provider.ts";
 import { workflowApprovals } from "./workflow-approvals.ts";
-import { loadWorkflowSource } from "./workflow-files.ts";
+import { loadWorkflowSource, workflowListing } from "./workflow-files.ts";
 
 /**
  * Load user-defined agent types from `<configDir>/agents/*.md`, then from each
@@ -431,6 +435,14 @@ export interface BuildAgentOptions {
    * branches); a one-shot or a child agent never does, so they never offer it.
    */
   readonly artifacts?: ArtifactSink;
+  /**
+   * The session's tool-image store (docs/feat/image-view.md D1): the SAME object
+   * as `attachments`, under its write-capable type. Set (and the model has
+   * vision) ⇒ `fs_read` keeps a PDF's pictures and `image_view` is offered.
+   * Only the worker and `serve` forward it — never a pod daemon, a one-shot or
+   * a child: a forgotten hop turns the feature off, never opens a hole.
+   */
+  readonly toolImages?: ToolImageStore;
   /**
    * Offer this agent `move_session` (docs/feat/session-hop.md D9): the model may
    * PROPOSE moving its session, and nothing more — the laptop asks the owner at
@@ -841,6 +853,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       const gate = (requester: PermissionRequester) => new PermissionGate(requester, hooks, grants);
       workflows = new WorkflowDriver({
         load: async (name) => loadWorkflowSource(config.cwd, name),
+        list: async () => workflowListing(config.cwd),
         context: () => ({
           models: Object.keys(config.models),
           agentTypes: types.map((t) => t.name),
@@ -989,6 +1002,17 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (options.artifacts) {
     tools.register(presentTool);
   }
+  // `image_view` (docs/feat/image-view.md D1/D5): the session's write handle AND
+  // a model that takes images. `fs_read` becomes its image variant (one more
+  // sentence; it keeps pictures only when its context carries the store).
+  const toolImages =
+    options.toolImages !== undefined && imageLimits(config.provider, config).vision
+      ? options.toolImages
+      : undefined;
+  if (toolImages !== undefined) {
+    tools.replace("fs_read", createFsReadTool({ images: true }));
+    tools.register(createImageViewTool(config.imageDetail ?? "auto"));
+  }
   // `workload_shell` (docs/feat/workload-shell.md D3): a stateful, non-interactive
   // `sh` reached through the LAPTOP's engine credentials. Offered only when the
   // caller passes a backend — the local worker and `serve`; never a pod daemon
@@ -1021,6 +1045,9 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     // The session's bytes, where this side holds them (docs/feat/attachments-prompt.md D4).
     ...(options.attachments ? { attachments: options.attachments } : {}),
     ...(options.artifacts ? { artifacts: options.artifacts } : {}),
+    ...(toolImages !== undefined ? { toolImages } : {}),
+    // The per-provider image cost of the loop's own counter (docs/feat/image-view.md D7).
+    imageTokens: imageTokenEstimate(config.provider, config.imageTokens),
     resultTransforms,
     toolOutput,
     systemPrompt: config.systemPrompt,

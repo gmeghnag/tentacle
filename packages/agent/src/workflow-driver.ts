@@ -38,10 +38,12 @@ import {
   shortHash,
   start as startMachine,
   validateWorkflow,
+  workflowApprovalSummary,
   workflowEndBody,
   workflowHash,
   workflowStartBody,
   workflowStepBody,
+  workflowWhereLabel,
 } from "@tentacle/core";
 import type { SubagentRunner } from "./subagent.ts";
 import { createStepVerdict } from "./workflow-verdict.ts";
@@ -83,10 +85,10 @@ export interface WorkflowRow {
 
 /** A workflow file as read from disk: the YAML and every prompt file it names. */
 export interface WorkflowSource {
-  /** `workflows/<name>.yaml`, repo-relative (recorded, and keyed in the approval store). */
+  /** `.tentacle/workflows/<name>.yaml`, project-relative (recorded, and keyed in the approval store). */
   readonly path: string;
   readonly text: string;
-  /** Prompt files by their path relative to `workflows/`; absent → validation names it. */
+  /** Prompt files by their path relative to `.tentacle/workflows/`; absent → validation names it. */
   readonly prompts: Readonly<Record<string, string>>;
 }
 
@@ -94,6 +96,79 @@ export interface WorkflowSource {
 export interface WorkflowApprovals {
   has(path: string, hash: string): Promise<boolean>;
   add(path: string, hash: string): Promise<void>;
+}
+
+/**
+ * One file of the project's workflow folder, as the walk found it
+ * (docs/feat/workflows-ui.md D6): a readable source, or the reason it cannot be
+ * one. A file that cannot be a workflow is a ROW with its reason, never a silent
+ * skip — a user who can see it in the folder must see why tentacle will not run
+ * it.
+ */
+export type WorkflowSourceRow =
+  | { readonly kind: "source"; readonly name: string; readonly source: WorkflowSource }
+  | {
+      readonly kind: "invalid";
+      readonly name: string;
+      readonly path: string;
+      readonly problem: string;
+    };
+
+/** One walk of the project's workflow folder. */
+export interface WorkflowListing {
+  /** The ABSOLUTE folder read: a user in the wrong folder sees where tentacle looks. */
+  readonly dir: string;
+  readonly rows: readonly WorkflowSourceRow[];
+  /** More YAML files than the walk keeps: what a catalogue shows is not all of it. */
+  readonly truncated: boolean;
+  /** git ignores the folder (the "not versioned" notice); absent = unknown, never claimed. */
+  readonly gitIgnored?: boolean;
+  /**
+   * Where workflows WERE found higher up, given only when `dir` listed none
+   * (docs/feat/workflows-ui.md D7 v5). DISPLAY ONLY: nothing it names can be
+   * loaded, hashed, approved or started.
+   */
+  readonly elsewhere?: { readonly dir: string; readonly count: number };
+}
+
+/**
+ * One row of `session/workflow_catalogue` (D6), structurally the wire's
+ * `WorkflowDefRow` (this package does not depend on `@tentacle/protocol`: the
+ * daemon's schema judges it on the way out). `ok:false` carries `errors` and
+ * nothing else beyond `name`/`path`.
+ */
+export interface WorkflowDef {
+  readonly name: string;
+  readonly path: string;
+  readonly ok: boolean;
+  readonly version?: number;
+  readonly description?: string;
+  readonly hash?: string;
+  readonly approved?: boolean;
+  readonly inputs?: readonly {
+    readonly name: string;
+    readonly required: boolean;
+    readonly default?: string;
+  }[];
+  readonly steps?: readonly {
+    readonly id: string;
+    readonly kind: string;
+    readonly model?: string;
+    readonly where: string;
+    readonly command?: string;
+  }[];
+  readonly errors?: readonly string[];
+}
+
+/** The whole catalogue of one project: the wire's `WorkflowCatalogueResult`. */
+export interface WorkflowCatalogue {
+  readonly workflows: readonly WorkflowDef[];
+  readonly truncated?: true;
+  /** This session cannot run workflows at all — NOT "the folder is empty". */
+  readonly unavailable?: string;
+  readonly gitIgnored?: boolean;
+  readonly dir: string;
+  readonly elsewhere?: { readonly dir: string; readonly count: number };
 }
 
 /**
@@ -196,6 +271,13 @@ export interface WorkflowHost {
 
 export interface WorkflowDriverDeps {
   readonly load: (name: string) => Promise<WorkflowSource>;
+  /**
+   * Every workflow FILE of the project, or why one cannot be one
+   * (docs/feat/workflows-ui.md D6): the catalogue's one walk. Absent → this
+   * session has no catalogue (`workflow_catalogue` says `unavailable`); a start
+   * and a run are unaffected.
+   */
+  readonly list?: () => Promise<WorkflowListing>;
   /** The session's `models` names and agent types (validated at start). */
   readonly context: () => Pick<WorkflowContext, "models" | "agentTypes">;
   readonly approvals: WorkflowApprovals;
@@ -213,7 +295,14 @@ export interface WorkflowDriverDeps {
 
 export type WorkflowStartResult =
   | { readonly ok: true; readonly runId: string }
-  | { readonly ok: false; readonly reason: string };
+  | {
+      readonly ok: false;
+      readonly reason: string;
+      /** The machine-readable half (D6): `changed` | `running` | `invalid` | `inputs` | `unavailable`. */
+      readonly refusal?: string;
+      /** The run that is in flight, on a `running` refusal. */
+      readonly runId?: string;
+    };
 
 /** Who started a run (the `workflow_start` `by` word). */
 export type WorkflowStartedBy = "user" | "model" | "schedule";
@@ -243,17 +332,6 @@ function inputsProblem(
   return missing.length > 0 ? `missing required input(s): ${missing.join(", ")}` : undefined;
 }
 
-/** One line per step: what a hash approval shows. */
-function stepsSummary(spec: WorkflowSpec): string[] {
-  return spec.steps.map((s) =>
-    s.kind === "run"
-      ? `${s.id}: run \`${s.command}\` (${whereLabel(s)})`
-      : s.kind === "agent"
-        ? `${s.id}: agent${s.model !== undefined ? ` ${s.model}` : ""}`
-        : `${s.id}: approve`,
-  );
-}
-
 /** The runs kept on the wire beside the current one. */
 export const WORKFLOW_RECENT_RUNS = 5;
 
@@ -277,6 +355,18 @@ interface Run {
   stepAbort?: AbortController;
   /** The `workflow_start` it logged (once approved): re-logged at a new segment. */
   startBody?: WorkflowStartBody;
+  /**
+   * The step execution in flight, for `session/workflow_step`
+   * (docs/feat/workflows-ui.md D1): its resolved prompt and the row's `live`
+   * text. Only the LIVE half is here — the ledger's entry is the durable one.
+   */
+  liveStep?: {
+    readonly id: string;
+    readonly attempt: number;
+    readonly round: number;
+    readonly prompt: string;
+    live: string | undefined;
+  };
 }
 
 const systemClock: WorkflowClock = {
@@ -284,13 +374,6 @@ const systemClock: WorkflowClock = {
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
-
-function whereLabel(step: WorkflowStep): string {
-  if (step.kind !== "run" || step.where.engine === "local") {
-    return "local";
-  }
-  return `docker:${step.where.name}`;
-}
 
 /** A label for a `line()`-bounded wire field: whitespace runs (newlines too) collapsed. */
 function oneLine(text: string, max: number): string {
@@ -346,17 +429,58 @@ export class WorkflowDriver {
   }
 
   /**
+   * The step execution running NOW, if any (docs/feat/workflows-ui.md D1): what
+   * `session/workflow_step` adds to a run whose step has no entry yet. `runId`
+   * narrows it to that run; without one, the single run in flight is used (a
+   * session runs one at a time), and a run that already ended has none.
+   */
+  liveStep(runId?: string):
+    | {
+        readonly runId: string;
+        readonly stepId: string;
+        readonly attempt: number;
+        readonly round: number;
+        readonly prompt: string;
+        readonly live?: string;
+      }
+    | undefined {
+    for (const run of this.runs.values()) {
+      if (run.done || (runId !== undefined && run.runId !== runId)) {
+        continue;
+      }
+      const step = run.liveStep;
+      if (step !== undefined) {
+        return {
+          runId: run.runId,
+          stepId: step.id,
+          attempt: step.attempt,
+          round: step.round,
+          prompt: step.prompt,
+          ...(step.live !== undefined ? { live: step.live } : {}),
+        };
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Validate and start `name`. Resolves once the run is under way (its hash
    * approval, when needed, is the run's first wait — never this call's).
+   *
+   * `hash` is what the caller SAW (the catalogue's row, D6): present and
+   * different from the file's hash now → refused `changed` — nothing asked,
+   * nothing run, no row — before the slot is claimed. Absent → the file is read
+   * afresh as before (the TUI's `/workflow run`, the model's tool).
    */
   async start(request: {
     readonly name: string;
     readonly inputs?: Readonly<Record<string, string>>;
+    readonly hash?: string;
     readonly by: "user" | "model";
     readonly turnId?: string;
   }): Promise<WorkflowStartResult> {
     if (this.disposed) {
-      return { ok: false, reason: "the session is closing" };
+      return { ok: false, reason: "the session is closing", refusal: "unavailable" };
     }
     const running = this.current();
     if (running !== undefined) {
@@ -364,20 +488,35 @@ export class WorkflowDriver {
       return {
         ok: false,
         reason: `workflow ${run?.spec.name ?? ""} (${running}) is already running: stop it first`,
+        refusal: "running",
+        runId: running,
       };
     }
     const prepared = await this.prepare(request.name);
     if (!prepared.ok) {
       return prepared;
     }
+    if (request.hash !== undefined && request.hash !== prepared.hash) {
+      return {
+        ok: false,
+        refusal: "changed",
+        reason: `${prepared.source.path} changed since you opened it: review it and start again`,
+      };
+    }
     const given = request.inputs ?? {};
     const bad = inputsProblem(prepared.spec, given);
     if (bad !== undefined) {
-      return { ok: false, reason: bad };
+      return { ok: false, reason: bad, refusal: "inputs" };
     }
     // Claimed synchronously after the last await: two starts cannot both pass.
-    if (this.current() !== undefined || this.disposed) {
-      return { ok: false, reason: "another workflow started meanwhile" };
+    const raced = this.current();
+    if (raced !== undefined || this.disposed) {
+      return {
+        ok: false,
+        reason: "another workflow started meanwhile",
+        refusal: "running",
+        ...(raced !== undefined ? { runId: raced } : {}),
+      };
     }
     return {
       ok: true,
@@ -410,6 +549,76 @@ export class WorkflowDriver {
     }
     const approved = await this.deps.approvals.has(prepared.source.path, prepared.hash);
     return { ok: true, hash: prepared.hash, approved };
+  }
+
+  /**
+   * The project's workflows, for `session/workflow_catalogue` (D6): ONE walk
+   * (`deps.list`), then for each readable file the SAME validation and hash an
+   * `inspect` does, plus whether that hash is approved. Model-free and
+   * deterministic — no LLM, no ask, no write, no run: a listing must never park
+   * on a permission prompt or start anything.
+   *
+   * A file that cannot be a workflow, or does not validate, is a row with its
+   * errors (each naming its YAML path) — never a silent skip and never a throw,
+   * so one bad file cannot hide the rest. A session with no `list` (a pod's
+   * daemon) answers `unavailable`: distinct from "this folder has none".
+   */
+  async catalogue(): Promise<WorkflowCatalogue> {
+    const list = this.deps.list;
+    if (list === undefined) {
+      return {
+        workflows: [],
+        dir: "",
+        unavailable: "workflows run only on a laptop or serve session",
+      };
+    }
+    const listing = await list();
+    const workflows: WorkflowDef[] = [];
+    for (const row of listing.rows) {
+      if (row.kind === "invalid") {
+        workflows.push({ name: row.name, path: row.path, ok: false, errors: [row.problem] });
+        continue;
+      }
+      const prepared = await this.prepareSource(row.name, row.source);
+      if (!prepared.ok) {
+        workflows.push({
+          name: row.name,
+          path: row.source.path,
+          ok: false,
+          errors: prepared.errors,
+        });
+        continue;
+      }
+      const { spec, hash } = prepared;
+      workflows.push({
+        name: spec.name,
+        path: row.source.path,
+        ok: true,
+        version: spec.version,
+        ...(spec.description !== undefined ? { description: spec.description } : {}),
+        hash,
+        approved: await this.deps.approvals.has(row.source.path, hash),
+        inputs: Object.entries(spec.inputs).map(([name, input]) => ({
+          name,
+          required: input.required,
+          ...(input.default !== undefined ? { default: input.default } : {}),
+        })),
+        steps: spec.steps.map((step) => ({
+          id: step.id,
+          kind: step.kind,
+          ...(step.kind === "agent" && step.model !== undefined ? { model: step.model } : {}),
+          where: workflowWhereLabel(step),
+          ...(step.kind === "run" ? { command: step.command } : {}),
+        })),
+      });
+    }
+    return {
+      workflows,
+      ...(listing.truncated ? { truncated: true as const } : {}),
+      ...(listing.gitIgnored !== undefined ? { gitIgnored: listing.gitIgnored } : {}),
+      dir: listing.dir,
+      ...(listing.elsewhere !== undefined ? { elsewhere: listing.elsewhere } : {}),
+    };
   }
 
   /**
@@ -509,7 +718,7 @@ export class WorkflowDriver {
             `Approve workflow ${spec.name} v${spec.version} (hash ${shortHash(hash)}) for its schedule`,
             200,
           ),
-          detail: capWorkflowText(stepsSummary(spec).join("\n"), 2000),
+          detail: workflowApprovalSummary(spec.steps),
           input: {},
         },
         {
@@ -669,21 +878,47 @@ export class WorkflowDriver {
     name: string,
   ): Promise<
     | { ok: true; source: WorkflowSource; spec: WorkflowSpec; hash: string }
-    | { ok: false; reason: string }
+    | { ok: false; reason: string; refusal: "invalid" }
   > {
     let source: WorkflowSource;
     try {
       source = await this.deps.load(name);
     } catch (error) {
-      return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      return {
+        ok: false,
+        refusal: "invalid",
+        reason: error instanceof Error ? error.message : String(error),
+      };
     }
+    return this.prepareSource(name, source);
+  }
+
+  /**
+   * The SAME validation and hash as `prepare`, over a source the caller already
+   * read (a catalogue row): one implementation, so a row's `hash` is exactly the
+   * hash `start{hash}` compares against.
+   */
+  private async prepareSource(
+    name: string,
+    source: WorkflowSource,
+  ): Promise<
+    | { ok: true; source: WorkflowSource; spec: WorkflowSpec; hash: string }
+    | { ok: false; reason: string; refusal: "invalid"; errors: readonly string[] }
+  > {
     const validation = validateWorkflow(source.text, {
       name,
       ...this.deps.context(),
       readPrompt: (path) => source.prompts[path],
     });
     if (!validation.ok) {
-      return { ok: false, reason: `${source.path}: ${validation.errors.join("; ")}` };
+      return {
+        ok: false,
+        refusal: "invalid",
+        reason: `${source.path}: ${validation.errors.join("; ")}`,
+        // Each error on its own (it names its YAML path): a catalogue row lists
+        // them, never one joined string cut at the wire's cap (review round 1 #2).
+        errors: validation.errors,
+      };
     }
     const files: WorkflowPromptFile[] = validation.spec.prompts.map((p) => ({
       path: p.path,
@@ -698,7 +933,7 @@ export class WorkflowDriver {
       id: step.id,
       kind: step.kind,
       ...(step.kind === "agent" && step.model !== undefined ? { model: step.model } : {}),
-      where: whereLabel(step),
+      where: workflowWhereLabel(step),
       state: "pending",
       attempt: 0,
       round: 0,
@@ -710,6 +945,10 @@ export class WorkflowDriver {
   }
 
   private setStep(run: Run, id: string, patch: Partial<WorkflowStepRow>): void {
+    // The live half of `session/workflow_step` follows the row it mirrors.
+    if (run.liveStep !== undefined && run.liveStep.id === id) {
+      run.liveStep.live = patch.live;
+    }
     run.row = {
       ...run.row,
       steps: run.row.steps.map((s) => {
@@ -762,7 +1001,7 @@ export class WorkflowDriver {
     if (await this.deps.approvals.has(run.source.path, run.hash)) {
       return true;
     }
-    const steps = stepsSummary(run.spec);
+    const steps = workflowApprovalSummary(run.spec.steps);
     const answer = await this.stepRequester(run, null)(
       {
         kind: "workflow_approve",
@@ -772,7 +1011,7 @@ export class WorkflowDriver {
           `Run workflow ${run.spec.name} v${run.spec.version} (hash ${shortHash(run.hash)})`,
           200,
         ),
-        detail: capWorkflowText(steps.join("\n"), 2000),
+        detail: steps,
         input: {},
       },
       { toolCallId: run.runId },
@@ -822,6 +1061,15 @@ export class WorkflowDriver {
       });
       run.row = { ...run.row, state: "running" };
       this.publish();
+      // What `session/workflow_step` answers while this execution has no entry
+      // yet: the prompt it was run with, and the row's live text as it changes.
+      run.liveStep = {
+        id: step.id,
+        attempt: action.attempt,
+        round: action.round,
+        prompt: action.text,
+        live: undefined,
+      };
       const outcome = await this.runStep(run, step, action);
       const durationMs = Math.max(0, this.clock.now() - startedAt);
       const logState =
@@ -840,7 +1088,7 @@ export class WorkflowDriver {
           ...(outcome.event.kind === "step_result" ? { verdict: outcome.event.verdict } : {}),
           reason: outcome.reason,
           ...(step.kind === "agent" && step.model !== undefined ? { model: step.model } : {}),
-          where: whereLabel(step),
+          where: workflowWhereLabel(step),
           tokens: outcome.tokens,
           durationMs,
           prompt: action.text,
@@ -853,6 +1101,8 @@ export class WorkflowDriver {
         live: undefined,
         durationMs,
       });
+      // Its `workflow_step` entry IS the detail now: nothing live is left to add.
+      run.liveStep = undefined;
       const advanced = nextAction(run.state, outcome.event);
       run.state = advanced.state;
       run.row = { ...run.row, tokens: run.state.tokens };
@@ -873,6 +1123,7 @@ export class WorkflowDriver {
       return;
     }
     run.done = true;
+    run.liveStep = undefined;
     const status = instead?.status ?? (run.state.status === "running" ? "error" : run.state.status);
     const stopReason = instead !== undefined ? instead.stopReason : run.state.stopReason;
     const reason = instead?.reason ?? endReason(run.state);
@@ -1161,7 +1412,9 @@ export class WorkflowDriver {
     // A container step needs the seam that reaches one; without it the step fails
     // saying what is missing rather than running the command on the LAPTOP.
     if (step.where.engine !== "local" && commands.execOn === undefined) {
-      return fail(`where: ${whereLabel(step)} is not available in this session (no workload seam)`);
+      return fail(
+        `where: ${workflowWhereLabel(step)} is not available in this session (no workload seam)`,
+      );
     }
     const requestedTarget: WorkflowContainerTarget | undefined =
       step.where.engine === "local"
@@ -1242,7 +1495,7 @@ export class WorkflowDriver {
         tool: WORKFLOW_APPROVE_TOOL,
         level: "ask",
         title: oneLine(action.text, 200),
-        ...(step.detail !== undefined ? { detail: capWorkflowText(step.detail, 2000) } : {}),
+        ...(step.detail !== undefined ? { detail: step.detail } : {}),
         input: {},
         reply: { maxChars: 2000 },
       },

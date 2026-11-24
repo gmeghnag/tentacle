@@ -1,6 +1,7 @@
 /**
- * Workflow files (`workflows/<name>.yaml`) — the ONE reader, and the hash an
- * approval is bound to (docs/feat/agent-workflows.md D1/D2).
+ * Workflow files (`.tentacle/workflows/<name>.yaml`) — the ONE reader, and the
+ * hash an approval is bound to (docs/feat/agent-workflows.md D1/D2; the folder
+ * is `PROJECT_PATHS.workflows`, docs/feat/workflows-ui.md D7 v5).
  *
  * A workflow is a repo file the model writes and the user approves; the CODE
  * then executes the sequence (owner decision 2). So nothing here decides
@@ -18,6 +19,7 @@
  * the model's repair loop, and a small model fixes a sentence, not a zod dump.
  */
 import { z } from "zod";
+import { PROJECT_PATHS } from "./project-paths.ts";
 
 /** The on-disk format version. An unknown one is refused, the file untouched. */
 export const WORKFLOW_SCHEMA_VERSION = 1;
@@ -44,6 +46,13 @@ export const WORKFLOW_MAX_TIMEOUT_MS = 24 * 3_600_000;
 export const WORKFLOW_MAX_WAIT_MS = 7 * 24 * 3_600_000;
 export const WORKFLOW_MAX_APPROVE_TITLE = 200;
 export const WORKFLOW_MAX_APPROVE_DETAIL = 2000;
+/**
+ * The longest step list an approval may SHOW (docs/fix/workflow-approve-detail.md
+ * D1): the hash ask's `detail` is never cut, so a workflow whose list would not
+ * fit here is refused at validation — never asked with a command missing. About
+ * 64 steps of 250 characters, ~200 rows at 80 columns: a list a human can read.
+ */
+export const WORKFLOW_MAX_APPROVE_SUMMARY = 16_000;
 /** A step's reason (the verdict's justification) as the log and the views carry it. */
 export const WORKFLOW_MAX_REASON = 2000;
 /** A run's `inputs` — strings only in v1. */
@@ -103,7 +112,7 @@ interface WorkflowStepBase {
 /** An agent step: one sub-agent run, verdict typed by the child's tool call. */
 export interface WorkflowAgentStep extends WorkflowStepBase {
   readonly kind: "agent";
-  /** As written in the file, relative to `workflows/`; absent for `prompt_text`. */
+  /** As written in the file, relative to `.tentacle/workflows/`; absent for `prompt_text`. */
   readonly promptPath?: string;
   /** The prompt text: the `prompt:` file's bytes, or the inline `prompt_text`. */
   readonly promptText?: string;
@@ -130,6 +139,32 @@ export interface WorkflowApproveStep extends WorkflowStepBase {
 
 export type WorkflowStep = WorkflowAgentStep | WorkflowRunStep | WorkflowApproveStep;
 
+/** A run step's target as an approval line names it: `local`, or `docker:<name>`. */
+export function workflowWhereLabel(step: WorkflowStep): string {
+  if (step.kind !== "run" || step.where.engine === "local") {
+    return "local";
+  }
+  return `docker:${step.where.name}`;
+}
+
+/**
+ * One line per step — what a hash approval SHOWS (and what the validator bounds):
+ * a `run` step's command verbatim, in backticks, with its target. The ONE reader
+ * of this shape, so the driver can never disagree with the validator about how
+ * long an approval list is (docs/fix/workflow-approve-detail.md D1).
+ */
+export function workflowApprovalSummary(steps: readonly WorkflowStep[]): string {
+  return steps
+    .map((s) =>
+      s.kind === "run"
+        ? `${s.id}: run \`${s.command}\` (${workflowWhereLabel(s)})`
+        : s.kind === "agent"
+          ? `${s.id}: agent${s.model !== undefined ? ` ${s.model}` : ""}`
+          : `${s.id}: approve`,
+    )
+    .join("\n");
+}
+
 /** The run-wide caps, defaults resolved. */
 export interface WorkflowBudget {
   /** The run's token sum; reaching it stops the run before the next step. */
@@ -142,7 +177,7 @@ export interface WorkflowBudget {
 
 /** One prompt file the workflow references — part of what the hash covers. */
 export interface WorkflowPromptFile {
-  /** As written in the file, relative to `workflows/`. */
+  /** As written in the file, relative to `.tentacle/workflows/`. */
   readonly path: string;
   readonly text: string;
 }
@@ -169,7 +204,7 @@ export interface WorkflowContext {
   /** The agent types this session offers (the runner's `types`). */
   readonly agentTypes?: readonly string[];
   /**
-   * Text of a `prompt:` file, relative to `workflows/`. Absent → paths are
+   * Text of a `prompt:` file, relative to `.tentacle/workflows/`. Absent → paths are
    * checked but their bytes are left unresolved (`promptText` undefined).
    */
   readonly readPrompt?: (path: string) => string | undefined;
@@ -334,19 +369,19 @@ function idProblem(id: string): string | undefined {
 }
 
 /**
- * A `prompt:` path relative to `workflows/`: no absolute path, no `..` segment,
- * no empty segment. Returns the reason when it must be refused.
+ * A `prompt:` path relative to `.tentacle/workflows/`: no absolute path, no `..`
+ * segment, no empty segment. Returns the reason when it must be refused.
  */
 export function promptPathProblem(path: string): string | undefined {
   if (path.trim() === "") {
     return "should not be empty";
   }
   if (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) {
-    return "should be relative to workflows/, not an absolute path";
+    return `should be relative to ${PROJECT_PATHS.workflows}/, not an absolute path`;
   }
   const parts = path.split(/[\\/]/);
   if (parts.some((p) => p === "..")) {
-    return "should stay inside workflows/ — remove the ..";
+    return `should stay inside ${PROJECT_PATHS.workflows}/ — remove the ..`;
   }
   if (parts.some((p) => p === "" || p === ".")) {
     return "should be a plain relative path (no empty or . segments)";
@@ -762,6 +797,15 @@ export function validateWorkflow(text: string, ctx: WorkflowContext = {}): Workf
         `steps: ${cycle} is a pass loop with no counter — give a step in the loop an on_fail: {goto: …, max: n}, or a next: that leaves it`,
       );
     }
+    // The hash approval shows every step's line, uncut (D1): a list too long to
+    // show is refused here, where every path to an ask passes, so no approval is
+    // ever granted against a list with a command missing.
+    const summary = workflowApprovalSummary(steps).length;
+    if (summary > WORKFLOW_MAX_APPROVE_SUMMARY) {
+      errors.push(
+        `steps: the step list an approval shows is ${summary} characters, over ${WORKFLOW_MAX_APPROVE_SUMMARY} — move long commands into a script and run that`,
+      );
+    }
   }
 
   // --- prompt references and the files the hash covers --------------------
@@ -774,7 +818,9 @@ export function validateWorkflow(text: string, ctx: WorkflowContext = {}): Workf
     if (step.promptPath !== undefined) {
       const read = ctx.readPrompt?.(step.promptPath);
       if (ctx.readPrompt !== undefined && read === undefined) {
-        errors.push(`${step.at}.agent.prompt: no file "${step.promptPath}" under workflows/`);
+        errors.push(
+          `${step.at}.agent.prompt: no file "${step.promptPath}" under ${PROJECT_PATHS.workflows}/`,
+        );
       } else if (read !== undefined) {
         prompts.set(step.promptPath, { path: step.promptPath, text: read });
         texts.push([`${step.at}.agent.prompt`, read]);

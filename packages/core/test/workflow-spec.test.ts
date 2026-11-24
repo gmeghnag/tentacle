@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   WORKFLOW_DEFAULT_MAX_STEP_RUNS,
   WORKFLOW_DEFAULT_WAIT_MS,
+  WORKFLOW_MAX_APPROVE_SUMMARY,
   WORKFLOW_SCHEMA_VERSION,
   type WorkflowSpec,
   parseWorkflowDuration,
@@ -10,6 +11,7 @@ import {
   runtimeHasher,
   shortHash,
   validateWorkflow,
+  workflowApprovalSummary,
   workflowHash,
 } from "../src/index.ts";
 
@@ -291,12 +293,12 @@ describe("validateWorkflow — every refusal names its YAML path", () => {
     ).toContain("steps[3].agent: needs exactly ONE of prompt: (a file) or prompt_text: (inline)");
   });
 
-  test("a prompt path that leaves workflows/ is refused", () => {
+  test("a prompt path that leaves .tentacle/workflows/ is refused", () => {
     expect(
       errorsOf(
         variant('    agent: { prompt_text: "fix it" }', "    agent: { prompt: ../secrets/fix.md }"),
       ),
-    ).toContain("steps[3].agent.prompt: should stay inside workflows/ — remove the ..");
+    ).toContain("steps[3].agent.prompt: should stay inside .tentacle/workflows/ — remove the ..");
   });
 
   test("a prompt file that does not exist is refused", () => {
@@ -307,7 +309,7 @@ describe("validateWorkflow — every refusal names its YAML path", () => {
           readPrompt: () => undefined,
         },
       ),
-    ).toContain('steps[3].agent.prompt: no file "prompts/fix.md" under workflows/');
+    ).toContain('steps[3].agent.prompt: no file "prompts/fix.md" under .tentacle/workflows/');
   });
 
   test("an unknown model names the session's models", () => {
@@ -497,6 +499,88 @@ describe("workflowHash — an approval is bound to the exact bytes", () => {
 
   test("shortHash is the first 8 characters", () => {
     expect(shortHash(`${"3f2a1b9c"}${"0".repeat(56)}`)).toBe("3f2a1b9c");
+  });
+});
+
+describe("the approval list (docs/fix/workflow-approve-detail.md D1)", () => {
+  test("workflowApprovalSummary keeps the line format of every step kind", () => {
+    const spec = accept(EXAMPLE, { name: "task" });
+    expect(workflowApprovalSummary(spec.steps).split("\n")).toEqual([
+      "plan: agent opus",
+      "exec: agent deepseek",
+      "review: agent",
+      "fix: agent",
+      "gate: run `bun run check` (docker:tentacle-ci)",
+      "merge: approve",
+      "ios: run `bun run e2e` (local)",
+    ]);
+  });
+
+  test("a list of exactly WORKFLOW_MAX_APPROVE_SUMMARY characters loads", () => {
+    // Mutation: `>` → `>=` in the validator, or no bound at all → this refuses.
+    const one = accept(
+      `schemaVersion: 1
+name: exact
+version: 1
+steps:
+  - id: s
+    run: R
+`,
+    );
+    const fixed = workflowApprovalSummary(one.steps).length - 1;
+    const pad = WORKFLOW_MAX_APPROVE_SUMMARY - fixed;
+    const exact = accept(
+      `schemaVersion: 1
+name: exact
+version: 1
+steps:
+  - id: s
+    run: ${"R".repeat(pad)}
+`,
+    );
+    expect(workflowApprovalSummary(exact.steps).length).toBe(WORKFLOW_MAX_APPROVE_SUMMARY);
+  });
+
+  test("one character more is refused, naming the size and the way out", () => {
+    // Mutation: drop the validator check → the ask would carry a CUT list.
+    const one = accept(
+      `schemaVersion: 1
+name: over
+version: 1
+steps:
+  - id: s
+    run: R
+`,
+    );
+    const fixed = workflowApprovalSummary(one.steps).length - 1;
+    const pad = WORKFLOW_MAX_APPROVE_SUMMARY - fixed + 1;
+    const errors = errorsOf(
+      `schemaVersion: 1
+name: over
+version: 1
+steps:
+  - id: s
+    run: ${"R".repeat(pad)}
+`,
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toStartWith("steps: the step list an approval shows is ");
+    expect(errors[0]).toContain(`over ${WORKFLOW_MAX_APPROVE_SUMMARY}`);
+    expect(errors[0]).toContain("move long commands into a script");
+  });
+
+  test("a multi-line `run: |` counts its newlines, and is shown as written", () => {
+    const text = `schemaVersion: 1
+name: multi
+version: 1
+steps:
+  - id: s
+    run: |
+      echo one
+      echo two
+`;
+    const spec = accept(text);
+    expect(workflowApprovalSummary(spec.steps)).toBe("s: run `echo one\necho two\n` (local)");
   });
 });
 

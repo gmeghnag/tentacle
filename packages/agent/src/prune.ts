@@ -30,7 +30,12 @@
  * a set never fires on a different history that reuses its indices (the history
  * is replaced IN PLACE by `/compact`, `/clear` and `context_reset`).
  */
-import type { ChatMessage, ToolCall } from "@tentacle/core";
+import {
+  type ChatMessage,
+  IMAGE_TOKEN_ESTIMATE,
+  IMAGE_VIEW_TOOL_NAME,
+  type ToolCall,
+} from "@tentacle/core";
 import { CONTEXT_RESET_TOOL_NAME, PRUNE_SENTINEL, SKILL_TOOL_NAME } from "@tentacle/tools";
 
 /**
@@ -47,7 +52,8 @@ export type PruneRule =
   | "call_payload"
   | "long_output"
   | "spill_preview"
-  | "duplicate";
+  | "duplicate"
+  | "viewed_image";
 
 /** One pruned message: the replacement, why, and what it saves. */
 export interface PruneEntry {
@@ -63,8 +69,13 @@ export interface PruneEntry {
   readonly original: ChatMessage;
   /** The message that replaces the stored one at this index (always a new object). */
   readonly message: ChatMessage;
-  /** Characters the request no longer carries (>= 1). */
+  /**
+   * Characters the request no longer carries (>= 1, except a `viewed_image`
+   * stub, whose gain is its image: it may be a little LONGER than the line it replaces).
+   */
   readonly savedChars: number;
+  /** Image refs the stub drops (`viewed_image`): counted by `estimateGain` at `imageTokens` each. */
+  readonly savedImages?: number;
 }
 
 /** Message index in the stored history → its pruned replacement. */
@@ -79,6 +90,8 @@ export interface PruneOptions {
   readonly headLines?: number;
   /** R3 keeps this many trailing lines (default 30). */
   readonly tailLines?: number;
+  /** What one dropped image ref saves, in tokens (`estimateGain`; default 1600). */
+  readonly imageTokens?: number;
 }
 
 /** The defaults the plan fixes; S2/S3 retune them through config. */
@@ -118,6 +131,9 @@ export interface StubAbout {
   readonly omittedLines?: number;
   /** R4: where the full output lives. */
   readonly spillPath?: string;
+  /** `viewed_image`: the viewed image's id (its first 12 hex are shown) and label. */
+  readonly imageId?: string;
+  readonly imageLabel?: string;
 }
 
 /** `12,345` → `12.3k`, for a stub's size note. */
@@ -176,6 +192,16 @@ export function stubFor(about: StubAbout): ChatMessage {
         role: "tool",
         content:
           `${PRUNE_MARKER}: ${about.toolName ?? "tool"} output (${size}) — preview dropped; ${where}⟫\n${header}`.trimEnd(),
+      };
+    }
+    case "viewed_image": {
+      // docs/feat/image-view.md D8: the stub carries NO attachments (the image
+      // leaves the request); the ref text lets the model look again.
+      const id12 = (about.imageId ?? "").slice(0, 12);
+      const label = about.imageLabel === undefined ? "" : ` (${about.imageLabel})`;
+      return {
+        role: "tool",
+        content: `${PRUNE_MARKER}: image_view ${id12}${label} viewed earlier — image_view ${id12} again to see it⟫`,
       };
     }
     case "call_payload":
@@ -576,6 +602,26 @@ function ruleFor(message: ChatMessage, site: CallSite, ctx: ResultContext): Prun
     };
   };
 
+  // R0 — an earlier `image_view`: drop its image, keep a line to look again
+  // (docs/feat/image-view.md D8). Without it a stub would KEEP the ref (a
+  // stub spreads every field but `content`) and the image would still be sent.
+  const viewed = message.attachments?.[0];
+  if (toolName === IMAGE_VIEW_TOOL_NAME && viewed !== undefined) {
+    const built = stubFor({
+      rule: "viewed_image",
+      imageId: viewed.id,
+      ...(viewed.name !== undefined ? { imageLabel: viewed.name } : {}),
+    });
+    const { attachments, ...rest } = message;
+    return {
+      rule: "viewed_image",
+      original: message,
+      message: { ...rest, content: built.content },
+      savedChars: Math.max(0, content.length - built.content.length),
+      savedImages: attachments?.length ?? 0,
+    };
+  }
+
   // R1 — an earlier read a later read or a successful write of the same path
   // superseded. Tried first: it points at the file, the truth.
   if (toolName === "fs_read" && site.path !== undefined && succeeded(toolName, content)) {
@@ -675,14 +721,23 @@ export interface PruneGain {
 const CHARS_PER_TOKEN = 4;
 
 /** What `set` saves over `history` — the trigger's `minGainPercent` input. */
-export function estimateGain(history: readonly ChatMessage[], set: PruneSet): PruneGain {
+export function estimateGain(
+  history: readonly ChatMessage[],
+  set: PruneSet,
+  options: Pick<PruneOptions, "imageTokens"> = {},
+): PruneGain {
   let chars = 0;
+  let images = 0;
   for (const [index, entry] of set) {
     if (history[index] !== entry.original) {
       // Stale (see `applyPrune`): it would save nothing, so it must not count.
       continue;
     }
     chars += entry.savedChars;
+    images += entry.savedImages ?? 0;
   }
-  return { chars, tokens: Math.ceil(chars / CHARS_PER_TOKEN) };
+  // An image is not text: without its cost a viewed-image stub (~0 chars
+  // saved) would never reach the trigger's minimum gain.
+  const perImage = options.imageTokens ?? IMAGE_TOKEN_ESTIMATE;
+  return { chars, tokens: Math.ceil(chars / CHARS_PER_TOKEN) + images * perImage };
 }

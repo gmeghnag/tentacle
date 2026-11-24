@@ -95,7 +95,9 @@ import {
   type WatchParams,
   type WatchResult,
   type WireChatRequest,
+  type WorkflowCatalogueParams,
   type WorkflowParams,
+  type WorkflowStepParams,
   isWakeTurnId,
 } from "@tentacle/protocol";
 import {
@@ -453,6 +455,19 @@ export class Connection {
       // Daemon-wide read: attaches this connection to nothing.
       case Method.WorkflowList:
         return this.host.workflowList();
+      // Likewise synchronous from the retained log (AGENTS §7): one step's
+      // detail, never a turn awaited (docs/feat/workflows-ui.md D1).
+      case Method.WorkflowStep: {
+        const step = params as WorkflowStepParams;
+        return this.lookup(step.sessionId).workflowStep(step);
+      }
+      // Likewise a READ (docs/feat/workflows-ui.md slice 5a): one walk of the
+      // project's workflow folder, no ask, no run (AGENTS §7 — it never awaits a
+      // turn, though the walk itself is async off the event loop).
+      case Method.WorkflowCatalogue: {
+        const catalogue = params as WorkflowCatalogueParams;
+        return this.lookup(catalogue.sessionId).workflowCatalogue();
+      }
       case Method.AgentKill: {
         const { sessionId, agentId } = params as AgentKillParams;
         return this.lookup(sessionId).killSubagent(agentId);

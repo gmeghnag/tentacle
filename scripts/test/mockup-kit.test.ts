@@ -12,6 +12,7 @@ import { extractStyles } from "../mockup-kit/extract-styles.ts";
 import { formatAll } from "../mockup-kit/format.ts";
 import { inlineHtml } from "../mockup-kit/inline.ts";
 import {
+  APPROXIMATIONS,
   dataRefs,
   definedVars,
   literalViolations,
@@ -313,6 +314,36 @@ describe("no hand-copied value in kit.css / tui.css", () => {
   test("a comment may name a value (it is prose, not a style)", () => {
     expect(literalViolations("/* was 480ms and #fff */ .x { color: var(--c-red); }")).toEqual([]);
   });
+
+  test("a hand-picked size dressed as a hairline, calc(N * 1px), is a literal too", () => {
+    // The evasion this rule must not allow: `1px` is exempt, so `12 * 1px`
+    // smuggles a chosen number past it.
+    expect(literalViolations(".x { backdrop-filter: blur(calc(12 * 1px)); }")).toEqual([
+      "1: calc(12 * 1px)",
+    ]);
+    expect(literalViolations(".x { width: calc(13.5 * 1px); }")).toEqual(["1: calc(13.5 * 1px)"]);
+    // A TOKEN times 1px is the kit's normal unit conversion (`--m-…-size: 6` → 6px).
+    expect(literalViolations(".x { width: calc(var(--m-x) * 1px); }")).toEqual([]);
+  });
+
+  test("the kit's approximations are named, narrow, and each is in the CSS", () => {
+    // The exemption is a published list, not an inline "it's fine" comment.
+    for (const a of APPROXIMATIONS) {
+      expect(a.why.length).toBeGreaterThan(0);
+      expect(kit["kit.css"]).toContain(`${a.declaration};`);
+    }
+    // Narrow: the same declaration with a different number is NOT exempt (a
+    // prefix/loose match would let the next agent pick any blur).
+    expect(literalViolations("  backdrop-filter: blur(calc(14 * 1px)) saturate(1.4);")).toEqual([
+      "1: calc(14 * 1px)",
+    ]);
+    expect(literalViolations("  backdrop-filter: blur(calc(12 * 1px));")).toEqual([
+      "1: calc(12 * 1px)",
+    ]);
+    // And an unused entry is dead weight, so the list stays honest.
+    const css = kit["kit.css"];
+    expect(APPROXIMATIONS.filter((a) => !css.includes(`${a.declaration};`))).toEqual([]);
+  });
 });
 
 describe("drift: committed tools/mockup-kit/generated/* === regenerated from source", () => {
@@ -354,6 +385,136 @@ describe("inline: a self-contained, stamped snapshot", () => {
     expect(() =>
       inlineHtml('<link rel="stylesheet" href="nope.css">', KIT_DIR, read, "x"),
     ).toThrow();
+  });
+});
+
+describe("the composer's faces: circles, not bare glyphs (owner 23/11)", () => {
+  type Composer = (p?: Record<string, unknown>) => { html: string };
+  const row = (html: string): string => html.slice(html.indexOf('<div class="k-composer-row">'));
+
+  test("+ and the mic are filled `k-circle`s holding the SF Symbols", async () => {
+    const { K } = await import("../../tools/mockup-kit/kit.js");
+    const html = row((K.composer as Composer)({ state: "empty" }).html);
+    // The defect was exactly this: `<span class="k-hit">+</span>` and a 🎙︎ emoji.
+    expect(html).not.toContain("🎙");
+    expect(html).toMatch(/<span class="k-hit"><span class="k-circle"><svg class="k-sym"/);
+    expect(html.match(/class="k-circle"/g)?.length).toBe(2);
+    expect(html).toContain('<path d="M10 2.6v14.8M2.6 10h14.8"'); // plus
+    expect(html).toContain('rx="3"'); // the mic capsule
+  });
+
+  test("the four slot faces differ: ready, up-dim, stop, clock", async () => {
+    const { K } = await import("../../tools/mockup-kit/kit.js");
+    const composer = K.composer as Composer;
+    const face = (p: Record<string, unknown>): string =>
+      row(composer(p).html).slice(row(composer(p).html).indexOf('<span class="k-slot"'));
+    // ready: the ↑ alone in a soft-strong circle (its `k-slot` carries no data-*).
+    expect(face({ state: "ready" })).toMatch(/^<span class="k-slot"><svg class="k-sym" width="18"/);
+    // up-dim (empty): the ↑ wrapped in a dimmed `k-dim`, no circle painted.
+    expect(face({ state: "empty" })).toContain(
+      '<span class="k-slot" data-dim><span class="k-dim">',
+    );
+    // stop: a square in the slot's own circle.
+    expect(face({ state: "draft", slot: "stop" })).toContain('<span class="k-slot" data-stop>');
+    // clock (send later): the clock symbol, 17 pt.
+    expect(face({ state: "draft", slot: "later" })).toContain('<span class="k-slot" data-clock>');
+    expect(face({ state: "draft", slot: "later" })).toMatch(/width="17"/);
+  });
+
+  test("listening is a strong circle with a ■, finalizing an arc — no filled disc of text", async () => {
+    const { K } = await import("../../tools/mockup-kit/kit.js");
+    const html = (K.composer as Composer)({ state: "dictating" }).html;
+    expect(html).toContain('<span class="k-circle" data-strong>');
+    expect(html).toContain('<span class="k-rec-square"></span>');
+    expect((K.composer as Composer)({ state: "transcribing" }).html).toContain("k-arc");
+  });
+
+  test("the circle is painted `accentSoft`, the symbol `accent` (Composer.tsx:257)", async () => {
+    // The markup alone is not the fix: a `k-circle` with no fill is still a bare
+    // glyph in a box. The look has to say it too.
+    const circle = kit["kit.css"].slice(kit["kit.css"].indexOf(".k-circle {"));
+    const body = circle.slice(0, circle.indexOf("}"));
+    expect(body).toContain("background: var(--c-accent-soft)");
+    expect(body).toContain("color: var(--c-accent)");
+    expect(kit["kit.css"]).toContain(
+      ".k-circle[data-strong] {\n  background: var(--c-accent-soft-strong);",
+    );
+    // Both are real tokens (the defined-vars test covers the rest).
+    const tokens = committed["tokens.css"];
+    expect(tokens).toContain("--c-accent-soft:");
+    expect(tokens).toContain("--c-accent-soft-strong:");
+  });
+
+  test("`caption` and `K.composerParts` reuse the same markup, and an unknown symbol throws", async () => {
+    const { K } = await import("../../tools/mockup-kit/kit.js");
+    const composer = K.composer as Composer;
+    const captioned = composer({ state: "dictating", caption: "0:03" }).html;
+    expect(captioned).toContain('<span class="k-mic-caption">0:03</span>');
+    const parts = K.composerParts as { plus: string; mic: Record<string, string> };
+    expect(parts.plus).toContain('class="k-circle"');
+    expect(parts.mic.idle).toContain('class="k-circle"');
+    expect(() => (K.icon as (n: string) => unknown)("bogus")).toThrow('K.icon: no symbol "bogus"');
+  });
+});
+
+describe("Polpetto is the app's own frame, not a redrawing", () => {
+  type Polpetto = (p?: { frame?: string; inset?: number }) => { html: string };
+  const rectsIn = (html: string) =>
+    [
+      ...html.matchAll(
+        /<rect x="([\d.-]+)" y="([\d.-]+)" width="([\d.-]+)" height="([\d.-]+)" fill="([^"]+)" opacity="([\d.]+)"/g,
+      ),
+    ].map((m) => ({
+      x: Number(m[1]),
+      y: Number(m[2]),
+      w: Number(m[3]),
+      h: Number(m[4]),
+      color: m[5],
+      alpha: Number(m[6]),
+    }));
+
+  test("the still frame's rects are `pixels(stillFrame())` in the `mint` palette", async () => {
+    const { K } = await import("../../tools/mockup-kit/kit.js");
+    const { HOME_INSET_PT, SPRITE_PT, colorsFor, pixels, stillFrame } = await import(
+      "../../apps/mobile/src/mascot-scenes.ts"
+    );
+    const geometry = { width: SPRITE_PT, height: SPRITE_PT + HOME_INSET_PT };
+    const app = pixels(stillFrame(), geometry, colorsFor("mint"));
+    const kit = rectsIn((K.polpetto as Polpetto)({ frame: "still" }).html);
+    // Same rects, same order, same colours: `K.polpetto` only shifts x by the
+    // frame's own left overhang (the geometry's home is (0, 0), so x0 is 0 here).
+    expect(kit).toEqual(app.map((r) => ({ ...r })));
+    expect(kit.length).toBe(34);
+  });
+
+  test("every frame sits `HOME_INSET_PT` above the band's bottom, nothing clipped", async () => {
+    const { K } = await import("../../tools/mockup-kit/kit.js");
+    const { HOME_INSET_PT, SPRITE_PT } = await import("../../apps/mobile/src/mascot-scenes.ts");
+    for (const frame of ["still", "skate"]) {
+      const html = (K.polpetto as Polpetto)({ frame }).html;
+      const [, w, h] = /<svg width="([\d.]+)" height="([\d.]+)"/.exec(html) ?? [];
+      const rects = rectsIn(html);
+      expect(rects.length).toBeGreaterThan(0);
+      // Nothing is cut off: each rect lies inside the box the svg declares.
+      for (const r of rects) {
+        expect(r.x).toBeGreaterThanOrEqual(0);
+        expect(r.y).toBeGreaterThanOrEqual(0);
+        expect(r.x + r.w).toBeLessThanOrEqual(Number(w));
+        expect(r.y + r.h).toBeLessThanOrEqual(Number(h));
+      }
+      // A sprite taller than the box (a prop above the head) is lifted by exactly
+      // its overhang, so the sprite's own bottom stays on the inset.
+      expect(Number(h)).toBeGreaterThanOrEqual(SPRITE_PT);
+      const bottom = Number(/bottom:([\d.-]+)px/.exec(html)?.[1]);
+      expect(bottom + (Number(h) - SPRITE_PT)).toBe(HOME_INSET_PT);
+    }
+  });
+
+  test("an unknown frame throws, naming the two that exist", async () => {
+    const { K } = await import("../../tools/mockup-kit/kit.js");
+    expect(() => (K.polpetto as Polpetto)({ frame: "swim" })).toThrow(
+      'K.polpetto: no frame "swim" (still | skate)',
+    );
   });
 });
 

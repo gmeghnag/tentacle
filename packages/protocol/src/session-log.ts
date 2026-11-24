@@ -408,6 +408,65 @@ export type LogWorkflowStepEntry = z.infer<typeof LogWorkflowStepEntrySchema>;
 export type LogWorkflowEndEntry = z.infer<typeof LogWorkflowEndEntrySchema>;
 
 /**
+ * `session/workflow_step` (docs/feat/workflows-ui.md D1): ONE step execution's
+ * `prompt`/`report` — what a `workflow_step` entry carries and the `workflows`
+ * update deliberately does not (that is a live row, not history). Additive: an
+ * older daemon answers `MethodNotFound` and the client says "update tentacle".
+ *
+ * It lives HERE, beside the entry it reads, because it is bounded by the entry's
+ * own constants and shares its `WorkflowWordSchema`; `session.ts` cannot host it
+ * without a `session.ts ⇄ session-log.ts` import cycle (which breaks module init
+ * at `TurnIdSchema`). The task doc lists `session.ts` — that is the drift.
+ *
+ * `attempt`/`round` pick WHICH execution when a step ran more than once (a
+ * `retry`, a `goto` round); omitted means the newest. The daemon answers from
+ * its retained log (the current segment and the previous one), so a step whose
+ * entry compaction dropped is `detail` absent — "no longer available", never a
+ * throw and never another step's text.
+ */
+export const WorkflowStepParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  runId: WorkflowRunIdSchema,
+  stepId: WorkflowStepIdSchema,
+  /** 0 for the first attempt, 1.. after a retry. Omitted: the newest. */
+  attempt: z.number().int().nonnegative().optional(),
+  /** The `goto` round it ran in. Omitted: the newest. */
+  round: z.number().int().nonnegative().optional(),
+});
+export type WorkflowStepParams = z.infer<typeof WorkflowStepParamsSchema>;
+
+/**
+ * One step execution as the ledger recorded it, capped exactly as the entry is
+ * (`reason` 2 KiB, `prompt` 16 KiB, `report` 64 KiB): the reader on the other
+ * side of the wire paints it, and a UI row is never unbounded free text.
+ */
+export const WorkflowStepDetailSchema = z.object({
+  attempt: z.number().int().nonnegative(),
+  round: z.number().int().nonnegative(),
+  /** The step is running NOW and was asked: its live text stands in for the report. */
+  live: z.boolean(),
+  state: WorkflowWordSchema.optional(),
+  verdict: WorkflowWordSchema.optional(),
+  reason: z.string().max(WORKFLOW_REASON_MAX_CHARS).optional(),
+  /** An agent step's resolved prompt, a run step's command, an approve step's title. */
+  prompt: z.string().max(WORKFLOW_PROMPT_MAX_CHARS).optional(),
+  report: z.string().max(SUBAGENT_REPORT_MAX_CHARS).optional(),
+  tokens: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+});
+export type WorkflowStepDetail = z.infer<typeof WorkflowStepDetailSchema>;
+
+export const WorkflowStepResultSchema = z.object({
+  /**
+   * ABSENT means "not available": the step never ran, or its entry left the
+   * retained log (compaction, a `serve` reload). The UI says so; it never
+   * substitutes another step's text.
+   */
+  detail: WorkflowStepDetailSchema.optional(),
+});
+export type WorkflowStepResult = z.infer<typeof WorkflowStepResultSchema>;
+
+/**
  * The emitter's own guard: the `usage` fields its schema ACCEPTS, from a body
  * that may carry anything (a provider's raw JSON), or `null` when nothing
  * measurable is left.

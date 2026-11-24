@@ -1843,6 +1843,10 @@ export const FLOWS: readonly string[] = [
   // docs/feat/mobile-file-view.md: the coloured file bodies (Write, Read of an
   // html, Edit, MultiEdit), collapsed and open, light + dark (visual).
   "41-file-view-shots",
+  // docs/feat/mobile-native-sheets.md S6: the five native sheets' detents, light +
+  // dark — each opens at M, and Tools is dragged M → L → S (its ONE scroller is
+  // what a drag expands). Its own session.
+  "42-native-sheets-shots",
   "35-gallery-shots",
   // docs/feat/mobile-theme-beta.md: the Figtree try-out, OFF vs ON, light + dark.
   "36-theme-beta-shots",
@@ -1865,6 +1869,11 @@ export const FLOWS: readonly string[] = [
   "18-lock-cold-start",
   "19-lock-unlock-button",
   "20-lock-immediately",
+  // docs/feat/mobile-native-sheets.md S3's L1, driven in S6: a native sheet up, the
+  // app leaves the screen, and the lock cover STILL wins (the drain pops the sheet,
+  // and it is back after the unlock). Here, with the other lock flows, because it
+  // changes the lock setting too.
+  "43-native-sheets-lock",
   "21-export-logs",
   // docs/feat/mobile-relay.md R6: the relay-only pairing + session. LAST of all,
   // because it is the only flow that pairs over a record with no direct address
@@ -1954,6 +1963,10 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "34-hub-new": "HUBITEM_ID",
   "40-mascot-shots": "HUBITEM_ID",
   "41-file-view-shots": "FILEVIEW_ID",
+  // docs/feat/mobile-native-sheets.md S6: the native sheets' shots + the lock drain,
+  // one session each, created just before the flow runs.
+  "42-native-sheets-shots": "NATIVESHEETS_ID",
+  "43-native-sheets-lock": "SHEETLOCK_ID",
   // docs/feat/mobile-gallery-polish.md: the gallery's six chart kinds + a page.
   "35-gallery-shots": "GALLERY_ID",
   // docs/feat/mobile-theme-beta.md: the try-out's chat + gallery.

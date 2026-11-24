@@ -273,9 +273,9 @@ describe("firstAnswering: the staggered race (R6)", () => {
     await settle();
     h.fail(0, new ChannelError("unreachable", "no route"));
     await settle();
-    // Reported, and the ring carries on with the stagger.
+    // Reported, and the ring carries on immediately on a fail (the stagger only throttles hangs).
     expect(reported).toEqual([A]);
-    clock.fire();
+    // B started immediately, no clock.fire() — that is W1 (T1 proves it; a hang still keeps the stagger, T2).
     await settle();
     h.open(1, "raw-B");
     await settle();
@@ -295,12 +295,10 @@ describe("firstAnswering: the staggered race (R6)", () => {
     await settle();
     h.fail(0, failures[0]);
     await settle();
-    clock.fire(); // B
-    await settle();
+    // With fast fails, B is already started — no clock.fire() (W1).
     h.fail(1, failures[1]);
     await settle();
-    clock.fire(); // C
-    await settle();
+    // Likewise C is already started from B's immediate kick.
     h.fail(2, failures[2]);
     const caught = await answering.catch((error: unknown) => error);
     // Unchanged: the link machine and `describeError` classify an error by its
@@ -351,9 +349,7 @@ describe("firstAnswering: the staggered race (R6)", () => {
     expect(h.started).toEqual([C]);
     h.fail(0, new ChannelError("unreachable", "no route"));
     await settle();
-    clock.fire();
-    await settle();
-    // After the remembered one comes the ring's next, i.e. A.
+    // A fail starts the next immediately (no stagger wait) — W1.
     expect(h.started).toEqual([C, A]);
     h.open(1, "raw-A");
     await settle();
@@ -372,6 +368,40 @@ describe("firstAnswering: the staggered race (R6)", () => {
     await settle();
     h.confirm(0, "answer-A");
     await expect(answering).resolves.toBe("answer-A");
+  });
+
+  describe("fix/mobile-connect-latency — T1/T2 (W1)", () => {
+    test("T1: a fast-failing address starts the next one before any stagger fires", async () => {
+      const clock = manualTimer();
+      const h = harness();
+      const answering = firstAnswering([A, B, C], h.steps, memory(), { timer: clock.timer });
+      await settle();
+      expect(h.started).toEqual([A]);
+      h.fail(0, new ChannelError("unreachable", "no route"));
+      await settle();
+      // With two fast fails, C must already be started — no clock.fire().
+      expect(h.started).toEqual([A, B]);
+      h.fail(1, new ChannelError("unreachable", "no route"));
+      await settle();
+      expect(h.started).toEqual([A, B, C]);
+      h.open(2, "raw-C");
+      await settle();
+      h.confirm(0, "answer-C");
+      await expect(answering).resolves.toBe("answer-C");
+    });
+    test("T2: a hanging open keeps the stagger — the next one does NOT start until clock.fire()", async () => {
+      const clock = manualTimer();
+      const h = harness();
+      firstAnswering([A, B], h.steps, memory(), { timer: clock.timer });
+      await settle();
+      expect(h.started).toEqual([A]);
+      // A hangs — no fail: B must still wait for the stagger.
+      expect(h.started).toEqual([A]);
+      expect(clock.delays()).toEqual([STAGGER_MS]);
+      clock.fire();
+      await settle();
+      expect(h.started).toEqual([A, B]);
+    });
   });
 
   test("no addresses at all is a failure, not a hang", async () => {

@@ -158,6 +158,10 @@ export interface ResolvedConfig {
    * (docs/feat/attachments-prompt.md D4). Unset → the provider's default.
    */
   readonly images?: boolean;
+  /** `model.imageDetail` (docs/feat/image-view.md D6). Unset → `auto`. */
+  readonly imageDetail?: "auto" | "low" | "high";
+  /** `model.imageTokens` (docs/feat/image-view.md D7). Unset → the provider's estimate. */
+  readonly imageTokens?: number;
   readonly systemPrompt: string;
   /** The identity part of `systemPrompt`, before AGENTS.md and the skills catalog. */
   readonly promptIdentity: string;
@@ -552,6 +556,9 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   // File-only, like `maxImageBytes`: whether this model takes images at all.
   // The effective value (with the provider's default) is `imageLimits()`.
   const images = model.images;
+  // File-only too (docs/feat/image-view.md D6/D7).
+  const imageDetail = model.imageDetail;
+  const imageTokens = model.imageTokens;
   // System prompt = identity (env | PROMPT.md | default). AGENTS.md, when
   // auto-loaded, is appended AFTER it as repo rules — additive, never replacing
   // the identity. Disable via env TENTACLE_NO_AGENTS_MD (truthy, wins) or file
@@ -806,6 +813,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     ...(maxImageBytes !== undefined ? { maxImageBytes } : {}),
     ...(images !== undefined ? { images } : {}),
+    ...(imageDetail !== undefined ? { imageDetail } : {}),
+    ...(imageTokens !== undefined ? { imageTokens } : {}),
     systemPrompt: systemPromptValue,
     promptIdentity: systemPrompt.value,
     agentsMdLoaded,

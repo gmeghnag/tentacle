@@ -103,6 +103,12 @@ export function hubContextOf(input: {
   };
   /** THIS phone's compaction is in flight: Stop cancels it (mobile-hub-commands C2). */
   readonly compacting?: boolean;
+  /**
+   * The computer's workflow runs as the hub needs them (docs/feat/workflows-ui.md
+   * D4, `workflowsHub`): how many wait on the person, and why there is nothing to
+   * open (or null). Absent: not read yet — unknown, never empty.
+   */
+  readonly workflows?: { readonly needYou: number; readonly empty: string | null };
 }): HubContext {
   const wakes = wakeContext(input.schedules?.rows, input.schedules?.now ?? 0);
   return {
@@ -126,6 +132,8 @@ export function hubContextOf(input: {
     toolsEmpty: input.tools?.known === true && input.tools.total === 0,
     toolsRim: input.tools === undefined ? null : toolsRim(input.tools),
     compacting: input.compacting === true,
+    workflowsNeedYou: input.workflows?.needYou ?? 0,
+    workflowsEmpty: input.workflows?.empty ?? null,
   };
 }
 
@@ -245,6 +253,7 @@ const ENTRY_IDS: readonly string[] = [
   "info",
   "tools",
   "scheduled",
+  "workflows",
   "dictate",
   "new",
 ] satisfies readonly HubEntryId[];

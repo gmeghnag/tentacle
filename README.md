@@ -405,6 +405,8 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `model.autoTitle` | — | false | Ask a model to name each session after its first exchange. |
 | `model.baseURL` | `TENTACLE_MODEL_BASE_URL` | `http://localhost:8080/v1` (openai) or `https://api.anthropic.com/v1` (anthropic) | The endpoint, including its API version. |
 | `model.contextWindow` | `TENTACLE_CONTEXT_WINDOW` | 128000 | The context window in tokens: the fill meter and the model's context line. |
+| `model.imageDetail` | — | — | The detail image_view sends a PDF's picture at: auto, low or high. |
+| `model.imageTokens` | — | — | Tokens one image costs the context estimate (prune and the meter). |
 | `model.images` | — | — | Whether this model takes images at all (an attached screenshot reaches it). |
 | `model.maxImageBytes` | — | — | Raw bytes one image may have on this model's wire (its own limit). |
 | `model.maxTokens` | `TENTACLE_MAX_TOKENS` | omitted for openai (the server decides); `64000` for anthropic | Max output tokens per response (`max_tokens` on the wire). |

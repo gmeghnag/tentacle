@@ -1,8 +1,11 @@
 /*
  * The mockup kit's look (docs/feat/mobile-mockup-kit.md Slice 2). Layout only:
  * EVERY size, colour and timing is a var() from generated/tokens.css (read from
- * apps/mobile/src). A literal hex / px (other than 0 and 1px) / ms here fails
- * scripts/test/mockup-kit.test.ts. Device-only values live in frame.css.
+ * apps/mobile/src). A literal hex / px (other than 0 and 1px) / ms, or a chosen
+ * number dressed as one (`calc(12 * 1px)`), fails
+ * scripts/test/mockup-kit.test.ts — unless it is a NAMED approximation in
+ * `APPROXIMATIONS` (scripts/mockup-kit/kit-rules.ts). Device-only values live in
+ * frame.css.
  */
 
 /* ── text styles ─────────────────────────────────────────────────────────── */
@@ -403,12 +406,13 @@
 .k-composer[data-home] {
   padding-bottom: var(--frame-safe-bottom);
 }
+/* Composer.tsx field: `fill`, a `sep` border (recording included, owner 20/11). */
 .k-field {
-  border: var(--m-composer-field-border-width) solid var(--c-glass-border);
+  border: var(--m-composer-field-border-width) solid var(--c-sep);
   border-radius: var(--m-composer-field-border-radius);
   padding: var(--m-composer-field-padding-top) var(--m-composer-field-padding-horizontal)
     var(--m-composer-field-padding-bottom);
-  background: var(--c-card);
+  background: var(--c-fill);
   box-shadow: var(--shadow-glass);
 }
 .k-input {
@@ -439,6 +443,10 @@
   position: relative;
   color: var(--c-label);
 }
+.k-flex {
+  flex: var(--m-composer-flex-flex);
+}
+/* + and the mic: a 32 pt `accentSoft` circle, the symbol in accent (listening: strong). */
 .k-circle {
   width: var(--m-composer-circle-width);
   height: var(--m-composer-circle-height);
@@ -446,6 +454,29 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  position: relative;
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+}
+.k-circle[data-strong] {
+  background: var(--c-accent-soft-strong);
+}
+.k-rec-square {
+  width: var(--m-composer-rec-square-width);
+  height: var(--m-composer-rec-square-height);
+  border-radius: var(--m-composer-rec-square-border-radius);
+  background: var(--c-accent);
+  position: relative;
+}
+.k-mic-caption {
+  min-width: var(--m-composer-caption-min-width);
+  text-align: right;
+  font: var(--t-caption-size) / var(--t-caption-lh) var(--t-caption-family);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-sec);
+}
+.k-sym {
+  display: block;
 }
 .k-halo {
   position: absolute;
@@ -471,7 +502,7 @@
   width: var(--m-composer-arc-width);
   height: var(--m-composer-arc-height);
   border-radius: var(--m-composer-arc-border-radius);
-  border: var(--m-composer-arc-border-width) solid var(--c-accent);
+  border: var(--m-composer-arc-border-width) solid var(--c-sec);
   border-left-color: var(--m-composer-arc-border-left-color);
   box-sizing: border-box;
   animation: k-turn var(--ms-composer-transcribe-turn) linear infinite;
@@ -483,10 +514,22 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--c-accent-fill);
-  color: var(--c-on-accent);
+  background: var(--c-accent-soft-strong);
+  color: var(--c-accent);
 }
 .k-slot[data-dim] {
+  background: transparent;
+  color: var(--c-sec);
+}
+.k-slot[data-stop] {
+  background: var(--c-label);
+  color: var(--c-page);
+}
+.k-slot[data-clock] {
+  background: var(--c-fill);
+  color: var(--c-label);
+}
+.k-dim {
   opacity: var(--m-composer-dim-opacity);
 }
 .k-stop-square {
@@ -534,8 +577,11 @@
 }
 .k-sheet {
   background: var(--c-sheet);
-  border-radius: var(--m-sheet-sheet-border-top-left-radius)
-    var(--m-sheet-sheet-border-top-right-radius) 0 0;
+  /* The sheet's corners come from the THEME (`radius.sheet`), not from
+     `Sheet.tsx`'s `StyleSheet.create`: the top pair is inline there
+     (`native ? 0 : radius.sheet`, D4 — UIKit draws the native corner), so no
+     `--m-sheet-sheet-border-top-*-radius` is extracted. */
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
   padding: var(--m-sheet-sheet-padding-top) var(--m-sheet-sheet-padding-horizontal)
     var(--frame-safe-bottom);
   display: flex;
@@ -646,6 +692,12 @@
   border: var(--m-hub-button-body-border-width) solid var(--c-glass-border);
   background: var(--c-glass);
   box-shadow: var(--shadow-glass);
+  /* FloatingActivity.tsx:563 BlurView intensity 60, systemUltraThinMaterial: an
+     inline JSX prop (nothing to extract), hand-mapped to a CSS blur. The number
+     is a NAMED approximation — `APPROXIMATIONS` in scripts/mockup-kit/kit-rules.ts,
+     which is what exempts this one line from the no-literal rule; calibration is
+     its net. A second hand-picked number needs its own entry there. */
+  backdrop-filter: blur(calc(12 * 1px)) saturate(1.4);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -662,7 +714,7 @@
   width: var(--m-hub-button-dot-width);
   height: var(--m-hub-button-dot-height);
   border-radius: var(--m-hub-button-dot-border-radius);
-  background: var(--c-label);
+  background: var(--c-accent);
 }
 .k-hub-arc {
   position: absolute;
@@ -676,26 +728,31 @@
   box-sizing: border-box;
   animation: k-turn var(--ms-floating-arc-turn) linear infinite;
 }
+/* HubFan.tsx `fanItemLook` (hub-fan.ts:329): a solid `card` disc, the glyph in accent. */
 .k-hub-item {
   position: absolute;
   width: var(--m-hub-fan-item-width);
   height: var(--m-hub-fan-item-height);
   border-radius: var(--m-hub-fan-item-border-radius);
   border: var(--m-hub-fan-item-border-width) solid var(--c-glass-border);
-  background: var(--c-glass);
+  background: var(--c-card);
   box-shadow: var(--shadow-glass);
   display: flex;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  color: var(--c-label);
+  color: var(--c-accent);
+}
+.k-hub-item[data-lit] {
+  background: var(--c-accent-fill);
+  color: var(--c-on-accent);
 }
 .k-hub-label {
   position: absolute;
   padding: var(--m-hub-fan-label-padding-vertical) var(--m-hub-fan-label-padding-horizontal);
   border-radius: var(--m-hub-fan-label-border-radius);
   border: var(--m-hub-fan-label-border-width) solid var(--c-glass-border);
-  background: var(--c-glass);
+  background: var(--c-card);
   white-space: nowrap;
   font: var(--t-footnote-size) / var(--t-footnote-lh) var(--t-footnote-family);
 }
@@ -861,4 +918,12 @@
 [data-reduce-motion] .k-halo {
   opacity: 0.18;
   transform: scale(1.2);
+}
+
+/* ── Polpetto (MascotScene.tsx): centred in the band, `homeAt`'s inset ─────── */
+.k-mascot {
+  position: absolute;
+  left: 50%;
+  line-height: 0;
+  pointer-events: none;
 }

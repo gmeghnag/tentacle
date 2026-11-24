@@ -11,6 +11,7 @@
  * confirmed before Ink mounts, and a post-start probe proves the masks hold.
  * Every path is compared as a realpath, so a symlink cannot bypass a mask.
  */
+import { PROJECT_PATHS } from "@tentacle/core";
 import type { EngineInfo } from "@tentacle/docker";
 import type { EngineKind } from "./engine-host.ts";
 import { untrustedText } from "./untrusted-text.ts";
@@ -249,7 +250,7 @@ export const HIDE_CAP = 200;
 export const HIDE_SCAN_CAP = 500_000;
 
 /** The label of every path that came from the file. */
-export const HIDE_FILE_LABEL = ".tentacle/hide";
+export const HIDE_FILE_LABEL = PROJECT_PATHS.hide;
 
 /** The directory walk, injectable (the real one is `engine-select.ts`). */
 export interface HideFs {
@@ -284,7 +285,7 @@ export function loadHideFile(
   source: string,
   fs: HideFileFs,
 ): { readonly text?: string; readonly problem?: string } {
-  const path = `${source === "/" ? "" : source}/.tentacle/hide`;
+  const path = `${source === "/" ? "" : source}/${HIDE_FILE_LABEL}`;
   const refuse = (why: string) => ({
     problem: `${HIDE_FILE_LABEL} ${why} — fix or remove ${path}; nothing was created`,
   });

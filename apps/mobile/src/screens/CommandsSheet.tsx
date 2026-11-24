@@ -6,7 +6,10 @@
  * placement.
  *
  * The grammar is Session info's / Tools' (docs/feat/mobile-chrome.md Design 4):
- * the E2 band of 44 pt `Row`s inside a native `pageSheet`, everything `onSheet`.
+ * the E2 band of 44 pt `Row`s, everything `onSheet`. Since
+ * docs/feat/mobile-native-sheets.md the PRESENTATION is the stack's (`Sheet`
+ * route, a native `formSheet`), so there is no `Modal` here and no `visible`
+ * prop: this file is drawn only while it is on screen.
  *  - the state is the row's TRAILING edge, never a second line of the title: the
  *    spinner + `Stop` while this phone's compaction runs, `Compacted ✓`, the
  *    notice grammar's `▲` + `Retry` on a failure, the reason on a dimmed row, the
@@ -18,7 +21,7 @@
  *    closes the footer slot is the only state (C2 item 10).
  */
 import type { JSX } from "react";
-import { ActivityIndicator, Modal, Pressable, StyleSheet, Switch, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Switch, View } from "react-native";
 import { CLEARING, COMPACTING, type CommandRow, commandEdge } from "../session-commands.ts";
 import { DENSE_FONT_SCALE, type Palette, space, typography } from "../theme.ts";
 import { BandSection } from "../ui/BandSection.tsx";
@@ -28,7 +31,6 @@ import { Text } from "../ui/Text.tsx";
 
 export interface CommandsSheetProps {
   readonly palette: Palette;
-  readonly visible: boolean;
   /** `session-commands.ts`'s view-model (`state.commands`): the sheet draws these. */
   readonly rows: readonly CommandRow[];
   readonly onCompact: () => void;
@@ -286,30 +288,23 @@ function Command({
 }
 
 export function CommandsSheet(props: CommandsSheetProps): JSX.Element {
-  const { palette, visible, rows, onClose } = props;
+  const { palette, rows, onClose } = props;
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={onClose}
-    >
-      <View style={[styles.root, { backgroundColor: palette.bg }]}>
-        <Sheet
-          palette={palette}
-          title="Commands"
-          subtitle="What this session can do"
-          testID="commands-sheet"
-          onClose={onClose}
-        >
-          <BandSection palette={palette} onSheet testID="commands-bands">
-            {rows.map((row, index) => (
-              <Command key={row.id} row={row} first={index === 0} props={props} />
-            ))}
-          </BandSection>
-        </Sheet>
-      </View>
-    </Modal>
+    <View style={[styles.root, { backgroundColor: palette.bg }]}>
+      <Sheet
+        palette={palette}
+        title="Commands"
+        subtitle="What this session can do"
+        testID="commands-sheet"
+        onClose={onClose}
+      >
+        <BandSection palette={palette} onSheet testID="commands-bands">
+          {rows.map((row, index) => (
+            <Command key={row.id} row={row} first={index === 0} props={props} />
+          ))}
+        </BandSection>
+      </Sheet>
+    </View>
   );
 }
 

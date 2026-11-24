@@ -90,6 +90,64 @@ export class ModelRequestError extends Error {
   }
 }
 
+/**
+ * An error the server sent INSIDE a 200 stream (llama.cpp `error:` field,
+ * OpenAI-style `{error}` object, Anthropic `type:"error"`). It has NO `code`
+ * property on purpose: `retry.ts` reads `error.code` and must never take this
+ * for a transient connection error (docs/fix/model-stream-error.md).
+ */
+export class ModelServerError extends Error {
+  constructor(
+    readonly serverMessage: string,
+    readonly serverType?: string,
+    readonly serverCode?: number | string,
+  ) {
+    const one = serverMessage.replace(/\s+/g, " ").trim();
+    const text = `model server error: ${one}`;
+    super(text.length > 300 ? `${text.slice(0, 299)}…` : text);
+    this.name = "ModelServerError";
+  }
+}
+
+/** The in-band error a parsed payload carries, if it is one of the known shapes. */
+export function inBandError(payload: unknown): ModelServerError | undefined {
+  if (typeof payload !== "object" || payload === null) {
+    return undefined;
+  }
+  const record = payload as Record<string, unknown>;
+  const inner = record.error;
+  if (typeof inner === "string") {
+    return new ModelServerError(inner);
+  }
+  let body: Record<string, unknown>;
+  if (typeof inner === "object" && inner !== null) {
+    body = inner as Record<string, unknown>;
+  } else if (typeof record.message === "string") {
+    body = record;
+  } else {
+    return undefined;
+  }
+  const message =
+    typeof body.message === "string" ? body.message : JSON.stringify(body).slice(0, 200);
+  const code = body.code;
+  return new ModelServerError(
+    message,
+    typeof body.type === "string" ? body.type : undefined,
+    typeof code === "number" || typeof code === "string" ? code : undefined,
+  );
+}
+
+/** The error of a raw `error:` field value: JSON when it parses, else the text itself. */
+export function inBandErrorFromText(raw: string): ModelServerError {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return new ModelServerError(raw);
+  }
+  return inBandError(parsed) ?? new ModelServerError(raw.slice(0, 200));
+}
+
 /** A `retry-after` header (delta-seconds or HTTP-date) in ms; `undefined` if absent or unusable. */
 export function parseRetryAfter(
   headers: { get(name: string): string | null },
@@ -109,6 +167,7 @@ export function parseRetryAfter(
 }
 
 interface WireChunk {
+  readonly error?: unknown;
   readonly choices?: ReadonlyArray<{
     readonly delta?: {
       readonly content?: string | null;
@@ -267,7 +326,11 @@ export class OpenAIProvider implements ModelProvider {
      */
     let finishReason: ModelStopReason | undefined;
 
-    for await (const data of parseSSE(res.body, request.signal)) {
+    for await (const item of parseSSE(res.body, request.signal)) {
+      if (item.field === "error") {
+        throw inBandErrorFromText(item.value);
+      }
+      const data = item.value;
       if (data === "[DONE]" || data.length === 0) {
         if (data === "[DONE]") {
           break;
@@ -278,6 +341,10 @@ export class OpenAIProvider implements ModelProvider {
       const chunk = parseChunk(data);
       if (!chunk) {
         continue;
+      }
+      const failure = inBandError(chunk);
+      if (failure) {
+        throw failure;
       }
 
       if (chunk.usage) {

@@ -164,6 +164,17 @@ export function linkUp(state: LinkState, now: number): LinkStep {
   return { state: { ...state, kind: "up", upSince: now }, status: { state: "up" } };
 }
 
+export function linkResumed(state: LinkState): LinkStep | null {
+  if (state.kind === "up" || state.kind === "dialing" || state.kind === "stopped") {
+    return null;
+  }
+  return {
+    state: { ...state, kind: "backoff", attempt: 0 },
+    dialInMs: 0,
+    status: { state: "reconnecting", attempt: 0, nextAtMs: 0 },
+  };
+}
+
 export function stopped(state: LinkState, reason: string): LinkStep {
   return { state: { ...state, kind: "stopped", reason }, status: { state: "stopped", reason } };
 }

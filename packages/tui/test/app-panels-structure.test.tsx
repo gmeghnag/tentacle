@@ -88,10 +88,19 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
       registry,
     )?.[1];
     expect(list).toBeDefined();
-    for (const kind of ["sessions", "mcp", "skills", "tools", "artifacts", "schedule"]) {
+    // …and `/workflow` (docs/feat/workflows-ui.md D3).
+    for (const kind of [
+      "sessions",
+      "mcp",
+      "skills",
+      "tools",
+      "artifacts",
+      "schedule",
+      "workflow",
+    ]) {
       expect((list ?? "").match(new RegExp(`${kind}Kind`, "g"))).toHaveLength(1);
     }
-    expect((list ?? "").split(",").filter((s) => s.trim() !== "")).toHaveLength(6);
+    expect((list ?? "").split(",").filter((s) => s.trim() !== "")).toHaveLength(7);
     // The two panel key layers are the registry's decision too, not their own.
     const layers = readSrc(join("keys", "layer-panels.ts"));
     expect(layers).not.toContain("sessionsKey");

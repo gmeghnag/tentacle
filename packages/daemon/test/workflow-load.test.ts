@@ -148,7 +148,7 @@ function emitted(messages: readonly ChatMessage[]): KnownLogEntry[] {
       name: "task",
       version: 1,
       hash: "b".repeat(64),
-      path: "workflows/task.yaml",
+      path: ".tentacle/workflows/task.yaml",
       inputs: { slug: "x" },
       by: "model",
     }),
