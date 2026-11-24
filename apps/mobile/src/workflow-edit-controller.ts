@@ -587,9 +587,10 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
       });
   }
 
-  /** The write, `dryRun` true or false: one path, one set of refusal branches. */
+  /** Review's confirm: an accepted preview, no write in flight, and a link that is up. */
   function canConfirmNow(): boolean {
     return (
+      !offline &&
       phase === "reviewing" &&
       preview !== null &&
       preview.ok &&
@@ -598,6 +599,7 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
     );
   }
 
+  /** The write, `dryRun` true or false: one path, one set of refusal branches. */
   function send(dryRun: boolean): void {
     const current = history?.current;
     if (session === null || current === undefined || name === null || writing) {

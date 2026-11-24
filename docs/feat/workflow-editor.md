@@ -393,9 +393,9 @@ the parked TUI editor (eval/tui-workflow-editor) reuses them unchanged (parity).
 | Hand-written file (comments, own layout) | `canonical:false` → Review warns and shows the full patch (Q3). |
 | Oversize draft / too many prompts | Protocol bounds refuse at parse (clean error). The editor counts files and shows "too many prompt files" before Review. |
 | A newer client sends an unknown draft field | Strict validator → `invalid` naming the field. Never silently dropped from a saved file. |
-| Older daemon | `MethodNotFound` → `unsupported` → Edit/New hidden, "Update tentacle on this computer". |
+| Older daemon | `MethodNotFound` → `unsupported` → the editor's own screen, "Update tentacle on this computer", nothing written. (As built, Edit/New stay visible: no capability signal before the read. See Execution, Fix round 1.) |
 | Pod session / tunnelled | No driver → `unavailable`. Client trust bit → refused locally, nothing sent. |
-| Offline while editing | Editing continues. Save off, with "Offline — your draft stays on this phone". No deferred write (mockup decision). |
+| Offline while editing | Editing continues. Save off, and Review's confirm off, with "Offline — your draft stays on this phone". No deferred write (mockup decision). |
 | App killed with a dirty draft | Lost (no on-device draft store in this task, see Notes). The file on disk is unchanged. |
 
 ### Tests (red first; the property each kills)
@@ -2376,6 +2376,51 @@ collision the rule forbids. **No schema change** → `protocol.json` untouched.
 **Left (debt):** E4/E9 e2e (above); after a save the editor is read-only (Run, or Cancel and Edit again)
 because the controller has no `saved → editing` transition — adding one is a controller change outside
 7c's plan.
+
+*— claude-opus-5-5, 2026-11-24*
+
+### Fix round 1 — review of slices 7a + 7b + 7c
+
+**Finding 1 (MEDIUM, Review confirms offline) — FIXED.**
+- `apps/mobile/src/workflow-edit-controller.ts` `canConfirmNow`: `!offline &&` added. So
+  `canConfirm()` is false and `confirmSave()` sends nothing while the link is down. When the link
+  comes back, confirm is on again. The doc comment that sat above `canConfirmNow` described `send`,
+  so it was moved back above `send`.
+- `apps/mobile/src/workflow-edit-review.ts` `reviewModel`: new optional input `offline`. When it is
+  true, `EDIT_OFFLINE` ("Offline — your draft stays on this phone") becomes the FIRST note, so
+  Review says why the button is off. `App.tsx` `WorkflowEditRoute` passes `offline: state.offline`.
+- Red first: the new controller test "offline on Review: confirm is off and sends nothing; back up,
+  it is on again" failed on the old code at `expect(canConfirm()).toBe(false)` (received `true`).
+  The new review test "offline: Review says so first…" and the updated wiring assertion (the
+  route passes `offline: state.offline`) were red (57 pass / 2 fail) before the change.
+
+**Finding 2 (MEDIUM, "older daemon → Edit/New hidden" not built) — FIXED as recorded drift
+(the reviewer's second option).** There is no capability signal before the editor opens.
+`WorkflowStart` / `WorkflowRuns` only have the catalogue, and an older daemon is known to be one
+only when `session/workflow_source` answers `{unsupported:true}`. Hiding the buttons would need a
+new probe, which is a design change outside the approved Implementation. **Drift from failure-mode
+row "Older daemon → `unsupported` → Edit/New hidden":** Edit and New stay visible. The editor then
+shows its own screen and writes nothing: `unsupported` ("Update tentacle on this computer") for an
+older daemon, `unavailable` for a pod's session. The Edit path was already pinned (the
+`unsupported` / `unavailable` screen tests, on a read and mid-save). The New path was not, and is
+now pinned by two controller tests: "New on an older daemon: its own screen, and nothing is sent"
+and "New on a pod's session: `unavailable`, and nothing is sent". These are characterization tests
+(no code changed for this finding), so they show non-vacuity by mutation (M4/M5), not by red-first.
+
+**Mutations** (`.tentacle/tmp/workflow-editor/fix-r1/battery.ts`). Each mutation is applied once,
+the 3 test files run, then the file is restored and its bytes compared to the original:
+```
+M1 canConfirm ignores offline: KILLED by 1  (offline on Review: confirm is off and sends nothing…)
+M2 Review has no offline note: KILLED by 1  (offline: Review says so first…)
+M3 App does not pass offline: KILLED by 1   (Review replaces the graph while an accepted preview is up…)
+M4 probe unsupported → editing: KILLED by 2 (`unsupported` is an older daemon's own screen; New on an older daemon…)
+M5 probe unavailable → editing: KILLED by 2 (`unavailable` is a pod's session…; New on a pod's session…)
+```
+`git status` afterwards showed only the 6 intended files.
+
+**Checks (narrow only):** `bun test apps/mobile/test/workflow-edit-*.test.ts` gave 208 pass / 0 fail.
+`bunx tsc --noEmit -p apps/mobile` is clean. `bunx biome check` on the 6 changed files is clean. The
+full gate is left to the orchestrator.
 
 *— claude-opus-5-5, 2026-11-24*
 

@@ -357,6 +357,25 @@ describe("review then confirm", () => {
     expect(previewHash ?? "").toBe(h.state().saved?.hash ?? "");
   });
 
+  test("offline on Review: confirm is off and sends nothing; back up, it is on again", async () => {
+    const h = harness();
+    await opened(h);
+    touched(h);
+    h.controller.beginReview();
+    await h.flush();
+    expect(h.controller.canConfirm()).toBe(true);
+    h.controller.setLink(false);
+    expect(h.controller.canConfirm()).toBe(false);
+    h.controller.confirmSave();
+    await h.flush();
+    // Only the dry run went out: no deferred write on a link that is down.
+    expect(h.sent.map((r) => r.dryRun)).toEqual([true]);
+    expect(h.state().kind).toBe("reviewing");
+    h.controller.setLink(true);
+    await h.flush();
+    expect(h.controller.canConfirm()).toBe(true);
+  });
+
   test("the request carries only the prompt files the steps read", async () => {
     const h = harness();
     await opened(h);
@@ -826,6 +845,34 @@ describe("create from a template", () => {
     h.controller.beginReview();
     await h.flush();
     expect(h.sent[0]?.prompts).toEqual([]);
+  });
+
+  // Edit/New are offered without a capability check (doc: Fix round 1 drift):
+  // on an older daemon or a pod's session the editor says so and writes nothing.
+  test("New on an older daemon: its own screen, and nothing is sent", async () => {
+    const h = harness({ name: null, reads: [{ unsupported: true }] });
+    h.controller.create("plan-build-review-merge", "new-one", "", { slug: { required: true } });
+    h.controller.start();
+    await h.flush();
+    expect(h.state().kind).toBe("unsupported");
+    expect(h.controller.canSave()).toBe(false);
+    h.controller.beginReview();
+    await h.flush();
+    expect(h.sent).toEqual([]);
+  });
+
+  test("New on a pod's session: `unavailable`, and nothing is sent", async () => {
+    const h = harness({
+      name: null,
+      reads: [source({ ok: false, draft: undefined, unavailable: "not here" })],
+    });
+    h.controller.create("blank", "fresh");
+    h.controller.start();
+    await h.flush();
+    expect(h.state().kind).toBe("unavailable");
+    h.controller.beginReview();
+    await h.flush();
+    expect(h.sent).toEqual([]);
   });
 
   test("an unknown template is refused on the bar, not thrown", () => {

@@ -18,6 +18,7 @@ import { WORKFLOW_TEMPLATES, type WorkflowInput } from "@tentacle/core";
 import type { WorkflowSaveResult, WorkflowWriteFile } from "@tentacle/protocol";
 import { type DiffView, diffView } from "./diff-view.ts";
 import {
+  EDIT_OFFLINE,
   type EditState,
   existsNotice,
   nameProblem,
@@ -162,6 +163,8 @@ const list = (names: readonly string[]): string => names.join(", ");
 export function reviewModel(input: {
   readonly preview: WorkflowSaveResult | null;
   readonly canonical: boolean | null;
+  /** The link is down: confirm is off (the controller's `canConfirm`), and Review says why. */
+  readonly offline?: boolean;
 }): ReviewModel | null {
   const preview = input.preview;
   if (preview === null || !preview.ok || preview.hash === undefined) {
@@ -169,6 +172,9 @@ export function reviewModel(input: {
   }
   const files = preview.files ?? [];
   const notes: string[] = [];
+  if (input.offline === true) {
+    notes.push(EDIT_OFFLINE);
+  }
   if (input.canonical === false) {
     notes.push(REVIEW_REWRITES);
   }

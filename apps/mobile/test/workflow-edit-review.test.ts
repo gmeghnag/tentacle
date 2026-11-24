@@ -10,7 +10,12 @@
 import { describe, expect, test } from "bun:test";
 import { WORKFLOW_TEMPLATES } from "@tentacle/core";
 import type { WorkflowSaveResult } from "@tentacle/protocol";
-import { EDIT_NAME_RULE, type EditState, existsNotice } from "../src/workflow-edit-controller.ts";
+import {
+  EDIT_NAME_RULE,
+  EDIT_OFFLINE,
+  type EditState,
+  existsNotice,
+} from "../src/workflow-edit-controller.ts";
 import {
   NEW_DEFAULT_TEMPLATE,
   REVIEW_HASH_APPROVED,
@@ -208,6 +213,14 @@ describe("Review", () => {
     expect(reviewModel({ preview: preview(), canonical: true })?.notes).toEqual([]);
     // A create (`canonical` unknown) is not a rewrite either.
     expect(reviewModel({ preview: preview(), canonical: null })?.notes).toEqual([]);
+  });
+
+  test("offline: Review says so first, and online it says nothing about the link", () => {
+    expect(reviewModel({ preview: preview(), canonical: false, offline: true })?.notes).toEqual([
+      EDIT_OFFLINE,
+      REVIEW_REWRITES,
+    ]);
+    expect(reviewModel({ preview: preview(), canonical: true, offline: false })?.notes).toEqual([]);
   });
 
   test("Q3: a hand-written file warns that saving rewrites its layout", () => {

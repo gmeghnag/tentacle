@@ -443,7 +443,9 @@ describe("New, Review and Run (7c)", () => {
 
   test("Review replaces the graph while an accepted preview is up, and Edit sends nothing", () => {
     expect(route).toContain("showsReview(state)");
-    expect(route).toContain("reviewModel({ preview: state.preview, canonical: state.canonical })");
+    expect(route).toContain(
+      "reviewModel({ preview: state.preview, canonical: state.canonical, offline: state.offline })",
+    );
     expect(route).toContain("onBack={() => controller.cancelReview()}");
     expect(route).toContain("canConfirm={controller.canConfirm()}");
   });

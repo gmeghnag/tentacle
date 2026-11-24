@@ -2547,7 +2547,7 @@ function WorkflowEditRoute({
 
   /** What Review draws, or null: the `dryRun:true` answer, never recomputed here. */
   const review = showsReview(state)
-    ? reviewModel({ preview: state.preview, canonical: state.canonical })
+    ? reviewModel({ preview: state.preview, canonical: state.canonical, offline: state.offline })
     : null;
 
   /** The New sheet (a create, before the file is named): `newSheetModel` of its fields. */
