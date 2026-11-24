@@ -40,3 +40,21 @@ Owner 23/11 ~17:45: in the TUI only a tool row's HEADER (the intent sentence / t
 *— claude-sonnet-5-5, 2026-11-24*
 
 ## Review
+
+**Verdict: REQUEST-CHANGES** (1 HIGH).
+
+**H1 — per-frame layout regression (`render-lines.ts:1698`, helper `:1110`).** `layoutTranscript` runs on every App render (`App.tsx:1071`: stream deltas, blink ticks) and is documented as O(items) cache lookups (`render-lines.ts:~1660`, `App.tsx:1066`). The new `toggleRowsOf` is NOT cached: per `shell` item per frame it re-parses the args JSON (`shellRowParts` + `shellRow`) and re-runs `cutCommand` / `wrapLines` via `dollarRows`. Measured (`.tentacle/tmp/tui-click-dollar-row/bench.ts`, warm cache, width 100, ~330-char commands): 300 shell calls → **25 ms/layout collapsed, 64 ms expanded**; 2000 → 181 / 440 ms. Same bench with `toggleRows: 1` (≈ main) → 0.04 ms. A long agent session janks on every token. Fix: memoise the count next to the rows (the `rowCache` slot in `itemRows`, same key) or compute it lazily only on a click (`toolCallAt`), and add a test that pins the cache hit (e.g. a spy/identity check, as the row cache tests do).
+
+**Gate (touched files):** `tool-hit`, `app-shell-row-collapsed`, `mouse-stream`, `app.test.tsx` → 165 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean. Full `bun test` not re-run (narrow scope).
+
+**Mutations (reverted, `git status` clean afterwards):** M1 `toggleRows: 1` → 5 fail (App frame test + 4 tool-hit); M2 over-count (`2 + dollarRows`) → 4 fail (output-row boundary held). Tests are non-vacuous.
+
+**Premises:** `toolCallAt` was `absRow === item.start` — TRUE; `dollarRows` is the only source of `$`/continuation/exit-spill rows and output follows it (`shellBlock`) — TRUE; collapsed plain shell has no `$` rows (`showDollar=false`) — TRUE, matched by the `shellRowParts === null && !expanded` branch; `hangRows` only touches notices, so no re-flow — TRUE.
+
+**Attacks tried:** (1) drag-select starting on the `$` row — still a selection (`mouse-stream.ts:314`: click = press+release same cell, no motion) — holds. (2) `expandAll` on — toggle gated off (`:328`) — holds. (3) queued described shell — returns 1 (its `$` row is not a target): conservative, not a bug. (4) per-frame cost — H1. (5) §7: no protocol/persistence/terminal-IO touched; logic stays in pure modules — holds.
+
+**Nit (not blocking):** `mouse-stream.ts:326` comment still says "Only a tool call's HEADER row is a control".
+
+**Executor:** followed red-first and mutation discipline honestly; it missed the cost contract of `layoutTranscript`. Reviewer is Opus, executor Sonnet/DeepSeek: different model, fresh context.
+
+*— claude-opus-5-5, 2026-11-24*
