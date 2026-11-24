@@ -33,6 +33,376 @@ Owner 24/11, after running a real workflow (`~/assistant/.tentacle/workflows/dem
 
 ## Implementation
 
+> **Status: NOT approved — owner questions pending (Q1–Q5 below).**
+
+### Load-bearing assumption (named first, proved against the source)
+
+**The run read carries each step's LAST state only — no definition edge (`next`, `on_fail{goto,max}`,
+`retry`), no goto counter, no history — so every loop/branch the phone draws today is guessed. The
+daemon HAS all of it in memory for every run (its frozen `run.spec` and `run.state.counters`), so the
+fix is to put it on the wire from the driver, not to re-derive it on the client.**
+
+Proof (static; the executor re-runs it empirically first — see PARTIAL rule):
+- Wire step row = `id, kind, model?, where, state, attempt, round, maxRound?, reason?, live?,
+  durationMs?` (`packages/protocol/src/session.ts:808-826`); run row has no history
+  (`:830-848`). Both are strip schemas (§7): a `next`/`onFail` a daemon sent would be DROPPED on
+  parse. The catalogue's step has no edges either (`:990-1000`) — and the catalogue is the file
+  NOW, not the run's snapshot, so it is the wrong source anyway.
+- The phone therefore guesses: `isLoopTarget = maxRound !== undefined` (`apps/mobile/src/workflow-graph.ts:124-126`),
+  and `maxRound` is set only once a goto FIRED (`packages/agent/src/workflow-driver.ts:1054-1061`);
+  the graph is the file order with an edge between neighbours (`workflow-graph.ts:170-197`). Run ①
+  (review passes first time) ⇒ `fix` sits in the chain between review and confirm, no back edge —
+  exactly d1b5faaa.
+- `fix · waiting`: the never-run step stays `pending` after the end (`finish` only maps
+  running/waiting/needs-approval → stopped, `workflow-driver.ts:1146-1150`) and the phone words
+  `pending` as "waiting" (`apps/mobile/src/workflow-list.ts:42,59`); its detail read finds no entry →
+  `missing` → "no longer available" (`workflow-step-detail.ts:29,146-148`) — defect 2.
+- The data exists daemon-side: rows are built from the run's own spec at start
+  (`workflow-driver.ts:772`, `pendingRow(step: WorkflowStep)` `:931-941`), a resume reuses `run.spec`
+  (`:838-853`); `WorkflowStep` has `retry`, `onFail{kind,id,max}`, `next?` (`core/src/workflow-spec.ts:98-110`);
+  the pass target is `step.next ?? steps[i+1]` (`core/src/workflow-spec.ts:483-487`, `passTarget`
+  in `core/src/workflow-machine.ts:358`); goto counters are `state.counters[edgeKey(from,to)]`
+  (`workflow-machine.ts:111-115,382-397`); every execution passes through `drive` (`workflow-driver.ts:1043-1110`),
+  where `setStep` overwrites the row (`:947-968`) — the history is lost there, so it is recorded there.
+- Rows are in-memory only (`rows()` `workflow-driver.ts:410-415`; no ledger rebuild): no persisted
+  format changes.
+- Repro script (run it first): `.tentacle/tmp/workflows-ux/lb.ts` parses a row carrying
+  `next`/`onFail`/`retry` through `WorkflowRowSchema` and a catalogue row through
+  `WorkflowCatalogueResultSchema`; expected today: the keys are absent after parse. (Not run by the
+  planner: `bun` needed approval in this session.)
+
+### Preconditions (verified)
+
+- P1 Strip schemas, a new required field = breaking ⇒ `protocol.d/<slug>.md`, never an edit of
+  `PROTOCOL_VERSION` (AGENTS §7). App unpublished ⇒ clean break preferred over optional-field
+  fallbacks (owner memory 20/11): an older daemon fails at `initialize` with `VersionMismatch`, so no
+  "edges absent" rendering path is written.
+- P2 One run's definition is frozen for its life (`workflow-driver.ts:772,838-842`) ⇒ "the file changed
+  since the run started" cannot skew the graph: the edges come from that run's snapshot.
+- P3 Phone imports `@tentacle/client` and `@tentacle/core` (`apps/mobile/package.json:10-11`); the TUI
+  imports `@tentacle/client` ⇒ one shared projection lives in `client`.
+- P4 SF Symbols (sf-symbols-typescript 2.2.0, `IconName` checked against it, `Icon.tsx:1-6`;
+  deployment target iOS 18, `apps/mobile/app.json:36`): `checkmark` (1.0), `multiply` (1.0),
+  `play.fill` (1.0), `questionmark` (1.0), `stop.fill` (1.0), `arrow.clockwise` (1.0),
+  `list.bullet` (1.0), `chevron.left` (1.0), `chevron.forward.2` (2.0, index.d.ts:2001),
+  `point.topleft.down.to.point.bottomright.curvepath` (5.0, index.d.ts:6002) — all present, all ≤ iOS 18.
+- P5 Sessionless reads have a precedent: `session/skills`/`session/tools` with no `sessionId` = "what a
+  session created now would have" (`daemon/src/connection.ts:694-712`, `session-host.ts:626-653`).
+- P6 Hub order is already a pure module (`hub-actions.ts:164-176,284-301`); the dim reason is
+  `dimmedBecause` (`:260-274`) fed by `workflowsHub` (`workflow-runs-controller.ts:175-188`).
+
+### Design
+
+**D1 — Wire (protocol + driver).** `WorkflowStepRowSchema` gains, all REQUIRED (P1):
+- `next: line(64) | null` — the RESOLVED pass target (`passTarget`), `null` = the run ends after it.
+- `onFail: { goto: line(64), max: int 1..10, taken: int ≥ 0 } | null` — `null` = stop;
+  `taken` = `state.counters[edgeKey(id, goto)]`.
+- `retry: int 0..5`.
+
+`WorkflowRowSchema` gains `history: { step, attempt, round, state, durationMs? }[] ≤ 64` (finished
+executions in order, the LATEST 64) + `historyDropped: int ≥ 0`. ~5 KB worst case per published row.
+Driver: `pendingRow` fills `next/onFail(taken 0)/retry` from the run's spec; after each `nextAction`
+(`:1106`) the source step's `onFail.taken` is refreshed from `run.state.counters`, and the finished
+execution is appended to `history` (cap + dropped count). Nothing else in the driver changes.
+`protocol.d/workflows-ux.md`: required fields added to the `workflows` row (+ D7's `sessionId`
+relaxation if Q1 = A).
+
+**D2 — Shared projection (pure, `packages/client/src/workflow-run-graph.ts`, new).** `runProjection(row)` →
+- per step a **phase**: `ok | error | running | ask | later | skipped | stopped | unknown`.
+  - wire `ok/error/running/stopped` as is; `needs-approval`/`waiting` → `ask` (the word keeps them
+    apart: "needs approval" / "waiting on you").
+  - `pending` → **not yet** (`later`) iff the run is live AND the step is reachable from the current
+    step. Reachable = BFS over `next`, over `onFail.goto` while `taken < max`, and over the retry
+    self-loop.
+  - `pending` → **not run** (`skipped`) otherwise (ended run, or unreachable).
+  - an unknown wire word → `unknown`, printed verbatim.
+- per edge (`next`, `fail`, `retry`) a **trace**: `taken` (in `history` as consecutive A→B, or
+  `taken > 0` / `attempt > 0`), `go` (taken, and its target is the current running/ask step), `later`
+  (live and still possible), `never`. Chips: `✗ taken/max` on the goto edge, `↻ attempt/retry` on retry.
+- `notRunWhy(stepId)` → `{ text, small? }`, e.g. "Not run — review passed on its first try, so its
+  on-fail route never fired." + "It runs only when review fails (up to 2 times).". Cases, in order:
+  - only entered by a goto whose source never failed;
+  - the run stopped/failed before it (`the run ended at <step>`);
+  - the path went elsewhere (fallback).
+- `timeline(row)` (view B):
+  - `history` rows, then the current step;
+  - then `next[]` (reachable, live only, with "round N" for a re-entry);
+  - then `notRun[]` (with the why);
+  - plus an "N earlier steps not shown" line when `historyDropped > 0`.
+- `summary(row, now)` (the top strip):
+  - outcome word + phase: `Done | Failed | Stopped · <stopReason> | Running | Needs approval | Waiting on you`;
+  - total time (`endedAt ?? now` − `startedAt`);
+  - `tokens of budget`;
+  - `N of M steps ran`, `· K loops`, or for a live run `so far · step i of M`.
+
+Used by the phone (D3–D5) AND the TUI (D7): one truth for "not yet / not run" on both.
+
+**D3 — Phone graph A (pure layout + dumb render).** New `apps/mobile/src/workflow-run-layout.ts`:
+- **Placement from the definition**, never from rounds:
+  - spine = the `next` walk from `steps[0]` (cycle-guarded);
+  - every off-spine step goes in the side column;
+  - its row is ≥ its first entering source's row + 1, strictly increasing within the column.
+  - Result: two pills can never overlap in either column, for any 64-step file.
+- **Edges:**
+  - spine `next` = vertical;
+  - goto = from the source's right edge into the side pill's top;
+  - side `next` back into its target's right edge;
+  - retry = self-arc on the right edge;
+  - a goto/`next` to an earlier spine step = a back arc on a side lane, one lane per arc so arcs do
+    not coincide.
+- **Chips** sit at the arc midpoints and are pushed out of pill boxes.
+- Authored in the mockup's 402-pt space (spine x16 w200, side x244 w142, pitch 72, pill 44), scaled
+  by the existing `canvasMap` (`workflow-step-detail.ts:45-51`, never upscaled).
+- `nodeAt` hit test moves here.
+- **Shared with the editor:** if `feat/workflow-editor` slice 5 has landed, the spine/side placement
+  is ONE function both `workflow-edit-graph.ts` and this module call (its D6 rule "reached only by
+  goto/next from below ⇒ side column" is the same rule). `workflow-graph.ts`'s constants that it
+  imports keep their names.
+
+`WorkflowRun.tsx` draws it:
+- pills with the D4 markers;
+- edge strokes per trace (taken = solid `label`, later = dashed dim, never = dotted dim `--wr-dot`,
+  go = dashed accent animated unless Reduce Motion; a fail edge is always dashed by kind);
+- the summary strip under the header;
+- the approve bar pinned at the bottom (today's `AskBlock`, moved; "Open the session to answer it"
+  when `!canAnswer`).
+
+**D4 — Markers (pure mapping + tokens).** New `apps/mobile/src/workflow-marker.ts`:
+`phase → { symbol: IconName | null, soft, ink, ring?: "dotted", word }`. Style (ii) tinta: a soft
+disc with the glyph in ink, the glyph at ~½ of the disc.
+
+| phase | SF Symbol | body | word |
+|---|---|---|---|
+| ok | `checkmark` | `wr-ok-soft` / ink | done · approved (approve step) · passed (when a verdict passed) |
+| error | `multiply` | `wr-fail-soft` / ink | failed · denied (approve step) |
+| running | `play.fill` (blinks; static under Reduce Motion) | `wr-run-soft` / ink | running |
+| ask | `questionmark` | `wr-ask-soft` / ink | needs approval / waiting on you |
+| later | — (**no glyph**, owner) | `wr-wait-soft` disc | not yet |
+| skipped | `chevron.forward.2` | no body, dotted ring `wr-skip-ink` | not run |
+| stopped | `stop.fill` (Q5) | `wr-wait-soft` / ink | stopped |
+| unknown | — | `wr-wait-soft` | the wire word, verbatim |
+
+- Colour-blind check: every row differs by glyph or by body/ring shape, plus the word and the pill
+  border (later = dashed pill, skipped = dotted pill).
+- Tokens `wr{Ok,Fail,Run,Ask,Wait}{Soft,Ink}` + `wrSkipInk` join `Palette` (`theme.ts:13`) for
+  light/dark/petrol, with the values in `markers-v2.html:159-174` (petrol = dark).
+- Then `bun run mockup-kit` regenerates the kit tokens.
+- The summary strip and the B rail use the same marker: 26 pt in a pill, 18 pt in the rail, 32 pt
+  in the detail hero.
+
+**D5 — Phone list B + step detail.**
+- The header's right button toggles graph ⇄ list (`list.bullet` / `square.grid.2x2`, as today,
+  `WorkflowRun.tsx:251-265`). `RunMode` `"cards"` becomes `"list"`.
+- The list = `timeline()` rendered on the chat step-rail look, with «Next» / «Not run» sections.
+  The cards and their inline actions go.
+- Step detail (`WorkflowStep.tsx`):
+  - a real nav bar UNDER the safe area: `‹ <run name>` back, `step N of M` (file order);
+  - `heroBox(top, inset, width)` with `top = insets.top + NAV_H + gap` (today `y = inset`,
+    `workflow-step-detail.ts:76-83`), so the morph lands below the bar;
+  - hero = the pill (A), Q3.
+- Never-run step:
+  - no `session/workflow_step` read is sent;
+  - the body is `notRunWhy` + bands State/Kind/Where.
+- Approve step: bands «Asked» (detail `prompt` = the question, `session-log.ts:451`), «Answer»
+  (Outcome Allowed/Denied from state + reason, Waited = `durationMs`).
+  - No who/when: not decided, not drawn as required.
+- Re-run step → the failed step's detail (Q4).
+- Stop/Resume stay at the run screen's foot.
+
+**D6 — Hub.**
+- `CANONICAL` = `workflows, activity, artifacts, tools, commands, sessions, info, scheduled,
+  dictate, new` (`hub-actions.ts:164-176`).
+- `attach` is deleted from the hub: `HubEntryId`, `LABELS`, `holds`, `ENTRY_IDS`
+  (`hub-session.ts:246-259`), `GLYPH` (`HubFan.tsx:36`), the entry (`SessionScreen.tsx:1199`) and
+  e2e `34-hub-attach.yaml`. The composer `+` is untouched.
+- Workflows glyph = `point.topleft.down.to.point.bottomright.curvepath` (added to `IconName`).
+- Dim rule, `workflowsHub(runs, catalogue)`:
+  - not dimmed when a run exists OR the catalogue lists ≥ 1 workflow;
+  - dimmed "No workflows in this project" when there are no runs AND the catalogue is known with
+    no workflow;
+  - dimmed with the catalogue's text when `unavailable`;
+  - unknown (not read, failed, offline) → never dimmed (the Tools D3 rule).
+- The catalogue is read ONCE when the session attaches — beside the session-info read that feeds
+  Tools (`SessionScreen.tsx:1186`) — never on render.
+- `catalogueFigure(answer)` is pure, in `workflow-runs-controller.ts`.
+
+**D7 — TUI.**
+- Remove the at-rest line: `workflowsLine`/`catalogueLine`/`elsewhereLine`/`catalogueRows`
+  (`workflow-view.ts:793-930`), its slot in `app-layout.ts:326-340` and `AppView.tsx:167`,
+  `components/WorkflowsLine.tsx`. The `/workflow` panel's catalogue section stays (`:988-1003`).
+- Before the first message (`session.opened()` false):
+  - the runs note becomes "No workflow run in this session yet." instead of "not supported…"
+    (`workflow-view.ts:516-529`);
+  - the catalogue: Q1.
+- Parity: the rail/panel words come from D2 (`not yet` dim `○`, `not run` dim `–`). The panel's
+  detail column lists `next → X`, `on fail → Y (taken/max)`, `retry n` from D1.
+
+### Files (dependency order)
+
+| Slice | Files |
+|---|---|
+| S1 TUI quiet | `packages/tui/src/{workflow-view.ts,app-layout.ts,AppView.tsx}`, delete `components/WorkflowsLine.tsx`, `packages/tui/test/{workflow-view.test.ts,workflow-frames.test.tsx}` |
+| S2 hub | `apps/mobile/src/{hub-actions.ts,hub-session.ts,workflow-runs-controller.ts,ui/HubFan.tsx,ui/Icon.tsx,screens/SessionScreen.tsx}`, `apps/mobile/test/{hub-actions,hub-session,workflow-runs-controller}.test.ts`, `apps/mobile/e2e/flows/34-hub-attach.yaml` → `34-hub-workflows.yaml`, `changelog.d/workflows-ux.changed.md` |
+| S3 detail header | `apps/mobile/src/{workflow-step-detail.ts,screens/WorkflowStep.tsx}`, `apps/mobile/test/workflow-run-step-detail.test.ts` |
+| S4 wire | `packages/protocol/src/session.ts` (`:808-848` only), `protocol/schema/protocol.json` (regen), `protocol.d/workflows-ux.md`, `packages/agent/src/workflow-driver.ts` (`pendingRow`, `drive`), `packages/core/src/workflow-machine.ts` (export `passTarget`/`edgeKey` if not), `packages/protocol/test/workflow-wire.test.ts`, `packages/agent/test/workflow-driver.test.ts`, fixtures that build rows (`rg "attempt: 0, round: 0"`) |
+| S5 projection | `packages/client/src/workflow-run-graph.ts` (new), `client/src/index.ts`, `packages/client/test/workflow-run-graph.test.ts` (new) |
+| S6a layout + markers | `apps/mobile/src/{workflow-run-layout.ts,workflow-marker.ts}` (new), `theme.ts`, `ui/Icon.tsx`, `tools/mockup-kit/generated/*` (regen), tests `workflow-run-layout.test.ts`, `workflow-marker.test.ts` (new) |
+| S6b graph render | `apps/mobile/src/screens/WorkflowRun.tsx`, `workflow-run-controller.ts` (`RunMode`), `workflow-step-detail.ts` (`nodeBoxOnScreen` → new layout), retire `workflow-graph.ts`'s guess (keep exported constants the editor imports), `apps/mobile/test/{workflow-list-graph,workflow-screens-wiring}.test.ts` |
+| S7 list B + detail | `apps/mobile/src/screens/{WorkflowRun.tsx,WorkflowStep.tsx}`, `workflow-step-detail.ts`, `workflow-run-controller.ts` (no read for a not-run step), `workflow-list.ts` (`pending` word), tests + e2e `45-workflow-run-view.yaml` (new) + `e2e/seed.ts` (seeded runs ① ②), `changelog.d/workflows-ux.fixed.md` |
+| S8a TUI parity | `packages/tui/src/workflow-view.ts` (`STEP_LOOK`, panel detail), `packages/tui/test/workflow-view.test.ts` |
+| S8b catalogue pre-open (if Q1 = A) | `protocol/src/session.ts` (`WorkflowCatalogueParams.sessionId` optional), `daemon/src/{connection.ts,session-host.ts}` (`newSessionWorkflowCatalogue`, throwaway like `newSessionTools`), `client/src/remote-session.ts` (`workflowCatalogue` pre-open asks without id; `workflow({start})` pre-open goes through `createOrAttach()`), tests in `daemon/test/workflow-hosted.test.ts`, `client/test/workflows-client.test.ts`, `tui/test/workflow-frames.test.tsx` |
+
+### Failure modes (how each converges)
+
+| Failure | Converges to |
+|---|---|
+| **Run still live** | Every `workflows` update re-projects (pure, O(steps+edges)). `later` vs `skipped` comes from reachability at each update, so a step flips `not yet` → `not run` the moment its last entry closes (review passes). The `go` edge is animated; static under Reduce Motion. |
+| **Definition changed since the run started** | Edges come from the run's own snapshot (P2). The graph is the run as it RAN, never the file now. The resume refusal `changed` is unchanged. |
+| **Older daemon / older app** | `PROTOCOL_VERSION` bump (P1) → `VersionMismatch` at `initialize`, the existing "update tentacle" path on both ends. No half-drawn graph. |
+| **A goto taken max times** | Chip `✗ 2/2`, the fail edge `taken`, the source `failed`, the run `Failed` with the driver's reason ("…already ran 2/2 times", `workflow-machine.ts:385-388`) in the strip. The target keeps its last state. |
+| **Retry exhausted** | `↻ 1/1`, the step `failed`, then its `on_fail` (goto edge `taken`) or the run `Failed`. Each try is its own B row (`history`). |
+| **Cancelled / timeout / budget / interrupted** | Run `Stopped · <reason>`. The cut step is `stopped` (`stop.fill`). Unvisited steps are `not run` ("the run was stopped before it got here"). Resume stays as today. |
+| **Huge workflow** (64 steps, many gotos) | Placement is strictly increasing per column (test with 64 steps and nested gotos: no pill overlap). Back arcs get distinct lanes. The canvas scrolls. `history` is capped at 64 with "N earlier steps not shown". Rows stay ~5 KB. |
+| **A step with no file order neighbour** (a `next` cycle with a counter) | The spine walk is cycle-guarded; the revisit is an arc, not a second pill. |
+| **Hub: catalogue read fails / offline / pod session** | Unknown → not dimmed; `unavailable` → dimmed with its text. The runs list keeps its own rules. |
+| **TUI pre-open** | Runs: "no run yet" (never "not supported"). Catalogue: Q1. A `/workflow run` before the open: Q1 = A makes it open the session through the ONE `createOrAttach()`; Q1 = B keeps today's honest refusal. |
+
+### Tests (red first; the property each kills)
+
+- **S1**
+  - `workflow-frames.test.tsx`: an idle frame with a 2-workflow catalogue has NO `◇ workflows` row
+    and the input row index is unchanged. Red today: the row is painted, `app-layout.ts:333`.
+  - `workflowPanelView` with `opened:false` says "no run yet". Red: "not supported".
+- **S2** `hub-actions.test.ts`
+  - The idle fan is `[workflows, activity, artifacts, tools, commands, more]`, and `attach` is in no
+    list. Red today, `:111`.
+  - `workflowsHub(runs: [], catalogue: 1 ok)` → not dimmed. Red today: `NO_WORKFLOW_RUNS`.
+  - Catalogue known-empty → dimmed "No workflows in this project".
+  - Unknown → not dimmed.
+  - Mutation: drop the catalogue term → red.
+- **S3**: hero `y ≥ insets.top + NAV_H` for `insets.top` 59. Red: `y = inset`. Mutation: back to
+  `inset` → red.
+- **S4**
+  - Wire: a row without `next/onFail/retry/history` fails to parse; with them it round-trips, keys
+    kept.
+  - Driver (`workflow-driver.test.ts` fakes), the demo-note shape:
+    - review passes first → `review.onFail = {goto:"fix",max:2,taken:0}`, `fix.next = "review"`,
+      `history` = 5 entries, and `fix` is never in it;
+    - review fails once → `taken: 1`, `history` holds review(error) → fix(ok) → review(ok);
+    - draft retried → two draft entries with attempt 0/1;
+    - more than 64 executions → length 64 + `historyDropped`.
+  - Mutation: append history before `nextAction` → the order test is red.
+- **S5** `workflow-run-graph.test.ts`
+  - The four mockup scenarios as fixtures: phases, traces, chips and `notRunWhy` text exactly as
+    drawn (① fix `skipped` + the sentence; ③ archive `later`, fix `skipped`; ④ review→fix `go`,
+    confirm `later`).
+  - Ended-run `pending` → `skipped`, never `later` (kills the d1b5faaa bug at its root).
+  - Unknown word kept verbatim.
+  - Exhausted goto; cancelled run; a 64-step chain.
+  - Mutation: drop the `taken < max` term in reachability → ② after 2/2 shows `fix` "not yet" → red.
+- **S6a**
+  - Layout: no pill overlap for random + 64-step definitions. `fix` lands in the side column for
+    demo-note.
+  - Every edge starts and ends on its nodes' boxes.
+  - Chips are outside the pills.
+  - Mutation: place by file index → `fix` on the spine → red.
+  - Markers: every phase pair differs in (symbol, ring) or the word. `later` has `symbol: null`. All
+    names typecheck as `IconName`.
+- **S6b / S7**
+  - Source-reading wiring tests (the `workflow-screens-wiring.test.ts` pattern): screens import the
+    projection/layout/marker and hold no branching beyond mapping.
+  - A not-run step sends no `workflowStep` read (controller test with a fake handle). Red today:
+    the read is sent.
+  - e2e `45-workflow-run-view.yaml` on iOS 18 + 26: ① graph, "Not run — review passed…", the
+    header below the status bar, the list toggle.
+- **S8a**: an ended run's pending step reads `– not run` in the panel. Red: `○ pending`.
+- **S8b**
+  - Pre-open `workflowCatalogue()` sends ONE frame with no `sessionId` and returns rows. Red: the
+    local `unavailable`.
+  - A daemon test with a fake host.
+  - A pre-open start opens once, then starts. The fake peer sees `session/open` before
+    `session/workflow`.
+
+### Slices (each S or M; one executor at a time)
+
+| # | Slice | Size · Blast | Depends on | When |
+|---|---|---|---|---|
+| S1 | TUI at-rest line removed + pre-open runs note | S · contained | — | now (disjoint from the editor) |
+| S2 | Hub: Workflows in Attach's slot, Attach gone, dim by catalogue | M · cross-module (mobile only) | — | now |
+| S3 | Step detail nav bar under the safe area | S · contained | — | now |
+| S4 | Wire edges + counters + history (protocol.d note) | M · **load-bearing** (wire): stronger executor per §10 (owner's call), fresh-context review | — | after the editor merges |
+| S5 | Shared run projection in `client` | M · contained (new pure module) | S4 | after S4 |
+| S6a | Phone layout + markers + tokens | M · contained | S5 | after the editor's slice 5 is on `main` |
+| S6b | Phone graph A render + summary strip + ask bar | M · contained | S6a | — |
+| S7 | Phone list B + never-run/approve detail + e2e + changelog | M · contained | S6b, S3 | — |
+| S8a | TUI not-yet/not-run + edge lines | S · contained | S5 | — |
+| S8b | Catalogue before the first message (Q1 = A) | M · cross-module | S4 (same protocol.d note) | — |
+
+Review: one Opus review for S1–S3, a mandatory fresh-context one for S4, then one for S5–S8.
+
+**PARTIAL rule:** before each slice, re-run its checks:
+- S4: `lb.ts` still shows the keys stripped, and `passTarget`/`edgeKey` exist;
+- S5+: `WorkflowStepRow` has `onFail`;
+- S6a: `workflow-edit-graph.ts` exists on `main` (else STOP and ask: build the layout alone, with an
+  unify-later note).
+
+If one fails, write `### Slice N — PARTIAL` with the failing line and STOP.
+
+### Overlap with `feat/workflow-editor` (verified: `git diff main...feat/workflow-editor --stat` + its Files table)
+
+| File | Editor slice | This task | Risk |
+|---|---|---|---|
+| `protocol/src/session.ts` | 3a (done: appends after `:1060`) | S4 (`:808-848`), S8b (`:1060`) | Separate hunks for S4. S8b touches the very line the editor appends after → run S8b after the merge. |
+| `protocol/schema/protocol.json` | 3a | S4, S8b | Always regenerated (`protocol:bump`, `-merge`). |
+| `agent/src/workflow-driver.ts` | 3b (`source`/`save`, in exec now) | S4 (`pendingRow`, `drive`) | Separate methods, same file → after the merge. |
+| `daemon/src/{connection,hosted-session}.ts` | 3b | S8b (`connection.ts`, `session-host.ts`) | After the merge. |
+| `client/src/remote-session.ts` | 4 | S8b | After the merge. |
+| `apps/mobile/src/workflow-graph.ts` | 5 imports `MAIN`, `LOOP_*`, `PITCH`, `curve` (`:33-63`) | S6b retires its guess | **Contract**: keep the constants; share the placement (D3). After editor 5. |
+| `apps/mobile/src/ui/Icon.tsx` | 7a–c likely add names | S2, S6a | Union lines. Trivial rebase. |
+| `apps/mobile/e2e/seed.ts` | 7c | S7 | Append-only seeds. After the merge. |
+| `apps/mobile/src/screens/WorkflowRuns.tsx`, `App.tsx`, `routes.ts` | 7a | none (S2 reads the catalogue in `SessionScreen`) | — |
+| `core/src/workflow-spec.ts` | 1 (split, done) | read-only import | Import path may move: use the barrel. |
+
+**Recommended order:**
+1. S1, S2, S3 now, on this branch (file sets disjoint from every remaining editor slice; owner
+   memory allows 2 code tasks with disjoint files).
+2. Pause.
+3. After `feat/workflow-editor` merges: rebase, then S4 → S5 → S6a → S6b → S7 → S8a → S8b.
+
+Alternative: hold the whole task until the editor merges. That gives one rebase and no pause, but
+defects 3–6 ship later.
+
+### Mac / TUI parity
+
+- The Mac is the TUI today. The data (D1) and the projection (D2) are one implementation for both.
+- The phone draws the graph. The TUI shows the same facts as words: the rail and panel read `not
+  yet`/`not run` from D2, and the panel detail lists next / on fail (taken/max) / retry.
+- The phone's `Not run — …` sentence and the TUI's are the same string.
+- Pre-open, both ends read the same catalogue (Q1). A phone session is open at the tap, so only the
+  TUI needed the fix.
+- Glyphs differ by medium: SF Symbols on the phone; text glyphs (`✓ ✗ ▸ ? ○ –`) in the TUI, where
+  `○` stays because a terminal needs a character. The phone's no-glyph `not yet` disc is phone-only.
+
+### Owner questions (each with a recommendation)
+
+1. **Q1 — Catalogue before the first message (TUI).**
+   - A: read it without a session (the `session/skills`/`tools` precedent); a start from the panel
+     opens the session first (+S8b, M).
+   - B: an honest "Send a message first to list this project's workflows" (inside S1, no protocol).
+   - **Rec. A.**
+2. **Q2 — The `elsewhere` hint** (`◇ no workflows here — ~/x has 3 (start tentacle in ~/x)`) is
+   the same at-rest slot.
+   - **Rec.: remove it with the line.** The `/workflow` panel keeps it (`workflow-view.ts:1001-1003`).
+3. **Q3 — Step-detail hero: A (pill, the graph's morph lands on it) or B (flat title)** — the
+   mockup drew both.
+   - **Rec. A** (the morph exists: `workflow-morph.ts`).
+4. **Q4 — "Re-run step"** lived on the cards that view B replaces.
+   - **Rec.: in the failed step's detail**, under the bands (same condition: state `error`).
+5. **Q5 — `stopped` step marker** (not drawn).
+   - **Rec.: `stop.fill` on the grey tint, word "stopped"** (the hub's Stop uses the same glyph).
+
+*— claude-opus-5-5, 2026-11-24*
+
 ## Execution
 
 ## Review
