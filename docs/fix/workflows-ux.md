@@ -33,7 +33,7 @@ Owner 24/11, after running a real workflow (`~/assistant/.tentacle/workflows/dem
 
 ## Implementation
 
-> **Status: NOT approved — owner questions pending (Q1–Q5 below).**
+> **Status: APPROVED** — owner 2026-11-24 (#### Owner answers, after Owner questions). Execution order: S1–S3 now; S4→ after feat/workflow-editor merges.
 
 ### Load-bearing assumption (named first, proved against the source)
 
@@ -402,6 +402,20 @@ defects 3–6 ship later.
    - **Rec.: `stop.fill` on the grey tint, word "stopped"** (the hub's Stop uses the same glyph).
 
 *— claude-opus-5-5, 2026-11-24*
+
+#### Owner answers (2026-11-24, binding)
+
+1. **Q1 = A** — the catalogue reads without a session; a start from the panel opens the session first (S8b).
+2. **Q2 — remove the "elsewhere" search ENTIRELY** (owner: «togliamo proprio sta cosa della ricerca in cartelle vicine»): no `~/x has N` hint anywhere (not at rest, not in the `/workflow` panel), and delete the neighbouring-folder lookup code end to end (daemon/protocol/client/TUI/phone, whatever carries it; a protocol field removal goes in the S4 `protocol.d` note or its own).
+3. **Q3 = A** — pill hero on the step detail (the graph morph lands on it).
+4. **Q4** — «Re-run step» moves to the failed step's detail (state `error`).
+5. **Q5** — stopped = `stop.fill` on the grey tint, word «stopped».
+
+Marker glyph change (owner, after Q5): **needs approval = SF `hand.raised` (outline, not fill)** — replaces `questionmark` everywhere a workflow step/run waits on the person (graph, list B, detail, TUI parity where it has a glyph). Pending/not-yet = grey disc with `circle.dashed`; failed `multiply`; running `play.fill`; done `checkmark`. Visual base for S6/S7: `.tentacle/mockups/workflow-run-view/final-v3.inline.html` (v2 look; its metrics table is what the app changes to). Still open with the owner (do NOT build yet): prev/next in step detail (v3d, rec. (c)), and whether taken goto/retry edges stay dashed.
+
+Executors: DeepSeek for S/M slices (owner rule); S4 (load-bearing wire) DeepSeek too + mandatory fresh-context Opus review.
+
+*— orchestrator (claude-opus-5-5), 2026-11-24*
 
 ## Execution
 
