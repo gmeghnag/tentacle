@@ -312,11 +312,12 @@ function referencedPrompts(draft: WorkflowDraft): string[] {
   return paths;
 }
 
+/** Why a file name is refused: the ONE sentence the New sheet and a rename both show. */
+export const EDIT_NAME_RULE = "Use lowercase letters, digits and single hyphens (at most 64)";
+
 /** A name the wire accepts (`WorkflowNameSchema`), checked here so Save can say why. */
-function nameProblem(name: string): string | null {
-  return WorkflowNameSchema.safeParse(name).success
-    ? null
-    : "Use lowercase letters, digits and single hyphens (at most 64)";
+export function nameProblem(name: string): string | null {
+  return WorkflowNameSchema.safeParse(name).success ? null : EDIT_NAME_RULE;
 }
 
 export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEditController {

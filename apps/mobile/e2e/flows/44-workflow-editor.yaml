@@ -1,0 +1,154 @@
+appId: so.tentacle.app
+---
+# 44-workflow-editor (docs/feat/workflow-editor.md D8, slice 7c): create a
+# workflow on the phone from a template, edit it, review exactly what will be
+# written, save it through `serve`, and Run it into the normal hash approval.
+#
+# Covered: E1 (empty list → New), E2 (the template's graph), E3 (＋ → kind
+# picker), E5 (delete → ghost + Undo), E6 (Review: hash + 5 files), E7 (saved
+# toast), E8 (Run → the hash approval, Allow once / Deny — denied, so no agent
+# step runs on the mock model). NOT here (see the task doc's 7c Execution): E4
+# (the ✗ drag) and E9 (the file edited meanwhile → `changed`, which needs a
+# harness hook that writes the file mid-flow).
+#
+# Its own session (`COMPOSE_SESSION_VARS`), created just before it runs, and the
+# harness project has no `.tentacle/workflows/` yet, so the runs list is EMPTY.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${WFEDIT_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${WFEDIT_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "workflows"
+- tapOn:
+    id: "hub-item-workflows"
+# E1: no workflow yet — one line, one action.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-runs-new"
+    timeout: 15000
+- tapOn:
+    id: "workflow-runs-new"
+# The New sheet: the name is checked live, Create is off until it is valid.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-new"
+    timeout: 10000
+- tapOn:
+    id: "workflow-new-name"
+- inputText: "Bad Name"
+- assertVisible:
+    id: "workflow-new-name-problem"
+- eraseText: 20
+- inputText: "wfedit"
+- assertVisible:
+    id: "workflow-new-saved-as"
+- assertVisible:
+    id: "workflow-new-template-plan-build-review-merge"
+- assertVisible:
+    id: "workflow-new-input-slug"
+- tapOn:
+    id: "workflow-new-create"
+# E2: the template lands as a graph, valid, 6 steps.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-edit-node-plan"
+    timeout: 15000
+- assertVisible:
+    id: "workflow-edit-node-merge"
+- assertVisible:
+    text: "Valid · 6 steps"
+# E3: a ＋ on an edge opens the kind picker; Cancel leaves the graph unchanged.
+- tapOn:
+    id: "workflow-edit-plus-exec"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-sheet"
+    timeout: 5000
+- tapOn:
+    id: "workflow-sheet-cancel"
+- assertNotVisible:
+    id: "workflow-sheet"
+# E5: delete `gate` → its incoming link dangles (a ghost, Save off with the
+# problem verbatim), and Undo brings it back.
+- longPressOn:
+    id: "workflow-edit-node-gate"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-edit-menu"
+    timeout: 5000
+- tapOn:
+    id: "workflow-edit-menu-delete"
+- assertVisible:
+    id: "workflow-edit-toast"
+- assertVisible:
+    text: ".*no step \"gate\".*"
+- tapOn:
+    id: "workflow-edit-undo"
+- assertVisible:
+    text: "Valid · 6 steps"
+# E6: Save → Review: the YAML + its 4 prompt files, the hash, nothing written yet.
+- tapOn:
+    id: "workflow-edit-save"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-review"
+    timeout: 15000
+- assertVisible:
+    text: "nothing written yet"
+- assertVisible:
+    id: "workflow-review-hash"
+- assertVisible:
+    id: "workflow-review-file-4"
+- assertVisible:
+    text: "Save 5 files"
+- tapOn:
+    id: "workflow-review-confirm"
+# E7: the saved toast, and Save became Run.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-edit-saved"
+    timeout: 15000
+- assertVisible:
+    text: "Saved .*wfedit.yaml · v1 · .*"
+- assertVisible:
+    text: "Run"
+# E8: Run → the existing start path → the hash approval (Allow once / Deny).
+- tapOn:
+    id: "workflow-edit-save"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-start-row-wfedit"
+    timeout: 15000
+- tapOn:
+    id: "workflow-start-row-wfedit"
+- tapOn:
+    id: "workflow-start-input-slug"
+- inputText: "e2e"
+- tapOn:
+    id: "workflow-start-run"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- assertVisible:
+    id: "perm-allow_once"
+- tapOn:
+    id: "perm-reject_once"
+# Daemon truth: the file the Review listed is on the daemon's disk.
+- runScript:
+    file: "44-workflow-editor.js"

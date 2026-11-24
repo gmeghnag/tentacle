@@ -139,6 +139,12 @@ export interface WorkflowRunRoute {
 export interface WorkflowStartRoute {
   readonly computerId: string;
   readonly sessionId: string;
+  /**
+   * The hash the editor just wrote (docs/feat/workflow-editor.md D7, slice 7c's
+   * Run): a start screen already in the stack read its catalogue BEFORE the save,
+   * so a new value here re-reads it (`pull`), and its row pins the new hash.
+   */
+  readonly saved?: string;
 }
 
 /**

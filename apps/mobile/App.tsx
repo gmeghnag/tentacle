@@ -189,7 +189,9 @@ import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
 import { WorkflowEditScreen, type WorkflowEditScreenProps } from "./src/screens/WorkflowEdit.tsx";
+import { WorkflowEditReview } from "./src/screens/WorkflowEditReview.tsx";
 import { WorkflowEditSheets } from "./src/screens/WorkflowEditSheets.tsx";
+import { WorkflowNew } from "./src/screens/WorkflowNew.tsx";
 import { WorkflowRunScreen } from "./src/screens/WorkflowRun.tsx";
 import { WorkflowRunsScreen } from "./src/screens/WorkflowRuns.tsx";
 import { WorkflowStartScreen } from "./src/screens/WorkflowStart.tsx";
@@ -247,12 +249,25 @@ import {
   tapIntent,
 } from "./src/workflow-edit-actions.ts";
 import {
+  EDIT_NAME_RULE,
   type EditSessionHandle,
   type EditState,
   type WorkflowEditController,
   createWorkflowEditController,
 } from "./src/workflow-edit-controller.ts";
 import { editGeometry, validDropTargets } from "./src/workflow-edit-graph.ts";
+import {
+  NEW_DEFAULT_TEMPLATE,
+  type NewSheetInput,
+  headerAction,
+  newSheetCreate,
+  newSheetModel,
+  newSheetUp,
+  renameOffered,
+  reviewModel,
+  savedLine,
+  showsReview,
+} from "./src/workflow-edit-review.ts";
 import {
   type SheetAction,
   type SheetActions,
@@ -2224,10 +2239,13 @@ function WorkflowStartRoute({
   onOpenRun,
   onEdit,
   onNew,
+  saved,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly sessionId: string;
+  /** The editor's Run came back here with the hash it wrote: the catalogue is re-read. */
+  readonly saved?: string;
   readonly onBack: () => void;
   readonly onOpenRun: (runId: string, name: string) => void;
   /** A catalogue row's Edit: the editor, on that file (a broken one opens as a draft). */
@@ -2275,6 +2293,13 @@ function WorkflowStartRoute({
       created?.dispose();
     };
   }, [computerId, sessionId, onOpenRun]);
+  // A save from the editor landed: this screen's catalogue predates it, so it is
+  // read again (ONE more read, the controller's own `pull` rule).
+  useEffect(() => {
+    if (saved !== undefined) {
+      controller?.pull();
+    }
+  }, [saved, controller]);
   if (controller === null || state === null) {
     return (
       <View testID="workflow-start" style={[styles.screen, { backgroundColor: palette.page }]}>
@@ -2317,6 +2342,7 @@ function WorkflowEditRoute({
   sessionId,
   name,
   onBack,
+  onRun,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -2324,6 +2350,12 @@ function WorkflowEditRoute({
   /** The file to edit; ABSENT is the create flow (the New sheet names it). */
   readonly name?: string;
   readonly onBack: () => void;
+  /**
+   * Run, once a write landed: the EXISTING start path (workflows-ui D6), whose
+   * start pins the catalogue's hash, so the approval ask is the normal sheet.
+   * `hash` is what the write landed: the start screen re-reads its catalogue.
+   */
+  readonly onRun: (hash: string) => void;
 }): JSX.Element {
   const [state, setState] = useState<EditState | null>(null);
   const [controller, setController] = useState<WorkflowEditController | null>(null);
@@ -2338,6 +2370,12 @@ function WorkflowEditRoute({
    * an edit can never leave a stale value behind (slice 7b).
    */
   const [sheet, setSheet] = useState<SheetRequest | null>(null);
+  /** The New sheet's fields while it is up (slice 7c); what they mean is `newSheetModel`'s. */
+  const [newInput, setNewInput] = useState<NewSheetInput>({
+    name: "",
+    description: "",
+    template: NEW_DEFAULT_TEMPLATE,
+  });
   useEffect(() => {
     let live = true;
     let created: WorkflowEditController | null = null;
@@ -2371,7 +2409,12 @@ function WorkflowEditRoute({
       unsubscribe = link.onStatus((status) => created?.setLink(status.state === "up"));
       setController(created);
       setState(created.state());
-      created.start();
+      // A CREATE starts when the New sheet's Create names the file (`create`
+      // then `start`): the first read is then the picker-vocabulary probe, and
+      // a sheet that is cancelled never attached anything.
+      if (name !== undefined) {
+        created.start();
+      }
     });
     return () => {
       live = false;
@@ -2488,17 +2531,72 @@ function WorkflowEditRoute({
     }
   };
 
+  /**
+   * A create refused `exists`: the file is renamed (`renameFile` judges the name,
+   * and a refusal lands on the bar). iOS's own text prompt, never a new screen.
+   */
+  const rename = (): void => {
+    Alert.prompt(
+      "Rename the file",
+      EDIT_NAME_RULE,
+      (text) => controller.renameFile(text.trim()),
+      "plain-text",
+      state.name ?? "",
+    );
+  };
+
+  /** What Review draws, or null: the `dryRun:true` answer, never recomputed here. */
+  const review = showsReview(state)
+    ? reviewModel({ preview: state.preview, canonical: state.canonical })
+    : null;
+
+  /** The New sheet (a create, before the file is named): `newSheetModel` of its fields. */
+  const newSheet = newSheetUp({ routeName: name, state }) ? newSheetModel(newInput) : null;
+
+  /** The New sheet's Create: `create` from the template, THEN `start` (the probe). */
+  const createFromSheet = (): void => {
+    const made = newSheetCreate(newInput);
+    if (made !== null) {
+      controller.create(made.templateId, made.name, made.description, made.inputs);
+      controller.start();
+      playHaptic("light");
+    }
+  };
+
+  /** The header's right button: Save (the review) or, once written, Run. */
+  const action = headerAction({ canSave: controller.canSave(), canRun: controller.canRun() });
+
+  if (review !== null) {
+    return (
+      <WorkflowEditReview
+        palette={palette}
+        model={review}
+        canConfirm={controller.canConfirm()}
+        saving={state.kind === "saving"}
+        notice={state.notice}
+        onBack={() => controller.cancelReview()}
+        onConfirm={() => controller.confirmSave()}
+      />
+    );
+  }
+
   return (
     <>
       <WorkflowEditScreen
         palette={palette}
         state={state}
-        title={name ?? "New workflow"}
-        canSave={controller.canSave()}
+        title={state.name ?? "New workflow"}
+        action={action}
+        saved={savedLine(state)}
+        onRename={renameOffered(state) ? rename : null}
         steps={drawnSteps(state.draft ?? {})}
         geometry={state.draft === null ? null : geometry}
         onCancel={cancel}
-        onSave={() => controller.beginReview()}
+        onSave={() =>
+          action.label === "Run" && state.saved !== null
+            ? onRun(state.saved.hash)
+            : controller.beginReview()
+        }
         onReload={() => controller.reload()}
         onKeepEditing={() => controller.keepEditing()}
         onOpenSession={onBack}
@@ -2543,6 +2641,17 @@ function WorkflowEditRoute({
         onSegment={(key, option) => control((model) => segmentAction(model, key, option))}
         onChoice={(key, value) => control((model) => choiceAction(model, key, value))}
         onOpen={(next) => setSheet(next)}
+      />
+      <WorkflowNew
+        palette={palette}
+        model={newSheet}
+        input={newInput}
+        onName={(next) => setNewInput((was) => ({ ...was, name: next }))}
+        onDescription={(next) => setNewInput((was) => ({ ...was, description: next }))}
+        onTemplate={(id) => setNewInput((was) => ({ ...was, template: id }))}
+        // Nothing was attached or written: leaving is the whole of Cancel.
+        onCancel={onBack}
+        onCreate={createFromSheet}
       />
     </>
   );
@@ -3564,6 +3673,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                 palette={palette}
                 computerId={route.params.computerId}
                 sessionId={route.params.sessionId}
+                {...(route.params.saved === undefined ? {} : { saved: route.params.saved })}
                 onBack={() => navigation.goBack()}
                 onOpenRun={(runId, name) =>
                   navigation.navigate("WorkflowRun", {
@@ -3604,6 +3714,15 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                 sessionId={route.params.sessionId}
                 {...(route.params.name === undefined ? {} : { name: route.params.name })}
                 onBack={() => navigation.goBack()}
+                // The existing start screen: back to it when the editor was pushed
+                // from there, else in the editor's place (`popTo`), never a second one.
+                onRun={(hash) =>
+                  navigation.popTo("WorkflowStart", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    saved: hash,
+                  })
+                }
               />
             )}
           </Stack.Screen>

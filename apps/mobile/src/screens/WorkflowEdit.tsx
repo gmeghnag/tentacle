@@ -14,10 +14,9 @@
  *   colour-blind: never meaning by hue alone), and a dangling reference is a
  *   GHOST pill — the break is shown, never hidden.
  *
- * The sheets (kind picker, step, goto, max, settings) are slice 7b's; Review and
- * the New sheet are 7c's. Until then `insert` and `open` arrive as callbacks the
- * route leaves out, and the canvas still arms ports, drops them and opens the
- * long-press menu.
+ * The sheets (kind picker, step, goto, max, settings) are `WorkflowEditSheets.tsx`
+ * (7b); Review (`WorkflowEditReview.tsx`) and the New sheet (`WorkflowNew.tsx`) are
+ * 7c's, and the route draws them instead of / over this screen.
  */
 import { type JSX, useRef } from "react";
 import { PanResponder, Pressable, ScrollView, StyleSheet, View } from "react-native";
@@ -49,6 +48,7 @@ import type {
   EditPort,
   EditTarget,
 } from "../workflow-edit-graph.ts";
+import { canvasMode } from "../workflow-edit-review.ts";
 
 export interface WorkflowEditScreenProps {
   readonly palette: Palette;
@@ -57,13 +57,20 @@ export interface WorkflowEditScreenProps {
   readonly geometry: EditGeometry | null;
   /** How many steps the file holds (`drawnSteps`): the bar's count, never a ghost. */
   readonly steps: number;
-  /** `canSave()` — the controller's own gate; the screen never re-derives it. */
-  readonly canSave: boolean;
+  /**
+   * The header's right button (`headerAction`): Save, gated by the controller's
+   * own `canSave()`, or Run once a write landed (`canRun()`). Never re-derived here.
+   */
+  readonly action: { readonly label: "Save" | "Run"; readonly on: boolean };
+  /** `savedLine` — "Saved <path> · v<n> · <hash8>" after a write landed, else null. */
+  readonly saved: string | null;
+  /** A create refused `exists` (`renameOffered`): the file's Rename, else null. */
+  readonly onRename: (() => void) | null;
   /** The title: the file's name, or "New workflow" before one is chosen. */
   readonly title: string;
   /** Cancel — the route confirms a dirty draft first (D7's `discardPrompt`). */
   readonly onCancel: () => void;
-  /** Save: the `dryRun:true` preview (Review is slice 7c's). */
+  /** The right button: Save's `dryRun:true` preview, or Run (the route decides which). */
   readonly onSave: () => void;
   /** `editGraph` — the whole tap → menu → controller path, made by the route. */
   readonly actions: WorkflowEditActions;
@@ -452,9 +459,9 @@ function NoEditor({
 
 export function WorkflowEditScreen(props: WorkflowEditScreenProps): JSX.Element {
   const { palette, state, geometry } = props;
-  const editable =
-    geometry !== null &&
-    (state.kind === "editing" || state.kind === "reviewing" || state.kind === "saving");
+  // `edit` | `view` (saved: drawn, not touchable) | null — the module's answer.
+  const mode = canvasMode(state.kind);
+  const editable = geometry !== null && mode !== null;
   const menu = props.menu;
   return (
     <View testID="workflow-edit" style={[styles.screen, { backgroundColor: palette.page }]}>
@@ -485,18 +492,19 @@ export function WorkflowEditScreen(props: WorkflowEditScreenProps): JSX.Element 
           <Pressable
             testID="workflow-edit-save"
             accessibilityRole="button"
-            accessibilityState={{ disabled: !props.canSave }}
-            disabled={!props.canSave}
+            accessibilityLabel={props.action.label}
+            accessibilityState={{ disabled: !props.action.on }}
+            disabled={!props.action.on}
             hitSlop={8}
             onPress={props.onSave}
           >
             <Text
               style={[
                 typography.body,
-                { color: props.canSave ? palette.accent : palette.sec, fontWeight: "600" },
+                { color: props.action.on ? palette.accent : palette.sec, fontWeight: "600" },
               ]}
             >
-              Save
+              {props.action.label}
             </Text>
           </Pressable>
         }
@@ -505,6 +513,17 @@ export function WorkflowEditScreen(props: WorkflowEditScreenProps): JSX.Element 
         <Text testID="workflow-edit-notice" style={[styles.notice, { color: palette.sec }]}>
           {state.notice}
         </Text>
+      )}
+      {props.onRename === null ? null : (
+        <View style={styles.changedRow}>
+          <PillButton
+            palette={palette}
+            testID="workflow-edit-rename"
+            kind="secondary"
+            label="Rename"
+            onPress={props.onRename}
+          />
+        </View>
       )}
       {/* "Changed on the computer": the draft is KEPT, and neither reloading nor
           editing is assumed — the person chooses (D7). */}
@@ -533,13 +552,20 @@ export function WorkflowEditScreen(props: WorkflowEditScreenProps): JSX.Element 
       ) : null}
       {geometry === null ? null : editable ? (
         <ScrollView contentContainerStyle={styles.content}>
-          <Canvas
-            palette={palette}
-            geometry={geometry}
-            armed={props.actions.armed}
-            dropTargets={props.actions.dropTargets}
-            actions={props.actions}
-          />
+          {/* Saved: the graph stays drawn under Run and still scrolls, but its
+              pills take no touch (the controller edits nothing in `saved`). */}
+          <View
+            testID="workflow-edit-canvas-wrap"
+            pointerEvents={mode === "view" ? "none" : "auto"}
+          >
+            <Canvas
+              palette={palette}
+              geometry={geometry}
+              armed={props.actions.armed}
+              dropTargets={props.actions.dropTargets}
+              actions={props.actions}
+            />
+          </View>
         </ScrollView>
       ) : null}
       {state.kind === "loading" || state.kind === "opening" ? (
@@ -638,6 +664,15 @@ export function WorkflowEditScreen(props: WorkflowEditScreenProps): JSX.Element 
           onPick={(intent) => props.actions.menu(intent)}
           onDismiss={props.onDismissMenu}
         />
+      )}
+      {/* The saved toast: no Undo (a write is not undone from here; git keeps the old text). */}
+      {props.saved === null ? null : (
+        <View
+          testID="workflow-edit-saved"
+          style={[styles.toast, { backgroundColor: palette.glass }]}
+        >
+          <Text style={[typography.footnote, { color: palette.label }]}>{props.saved}</Text>
+        </View>
       )}
       {props.toast === null ? null : (
         <View

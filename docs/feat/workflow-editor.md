@@ -2275,3 +2275,106 @@ name-from-nothing screen, the templates picker and the e2e flow are 7c's. Also u
 sheet's keyboard avoidance on a small device (a `text` field inside the `Modal`) — e2e E4 in 7c.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Slice 7c — New sheet + Review + save→Run + e2e (D8) — DONE (code) · e2e PARTIAL
+
+**PARTIAL check re-run first:** `RemoteSession.workflowSave` at `packages/client/src/remote-session.ts:1411`,
+`insertStep` at `packages/core/src/workflow-draft.ts:221`. Both present → not PARTIAL. The working
+tree was clean at start (the watchdog-stopped run had left no 7c edits), so 7c was done from scratch.
+
+**Files.**
+- New `apps/mobile/src/workflow-edit-review.ts` (pure, React-free): `newSheetModel` / `newSheetCreate`
+  / `newSheetUp` (the New sheet: live name check, template rows, inputs, Create's gate, when it is up),
+  `reviewModel` / `showsReview` (Review: rows, patches parsed by the transcript's `diffView`, hash8,
+  version, hash foot, notes for Q3 `canonical:false`, `running`, `schedules`, `alsoChanges`, and
+  "Save N files" counting only files that change), `canvasMode`, `headerAction` (Save → Run),
+  `savedLine` (the controller's `savedToast`), `renameOffered` (a create refused `exists`).
+  **Drift:** not in the Files table — same accepted drift as 7a's `workflow-edit-actions.ts` and 7b's
+  `workflow-edit-sheets.ts` (AGENTS §7: no branching in a `.tsx`).
+- New `apps/mobile/test/workflow-edit-review.test.ts` (18 tests).
+- New `apps/mobile/src/screens/WorkflowNew.tsx` (a `Modal` sheet like 7b's; name / description /
+  Start from Blank · Plan·build·review·merge / the template's inputs, read-only — "edit later in
+  Settings", as the mockup's foot says). No "Describe it to the model" (owner Q2).
+- New `apps/mobile/src/screens/WorkflowEditReview.tsx`: "Will be written" rows, notes, the patches
+  through `screens/transcript/DiffView.tsx` (the first one open), Hash / Version + foot, "Save N files"
+  (`PillButton`, `disabled={!canConfirm}`, busy while `saving`). Header `‹ Edit` (`cancelReview`, sends
+  nothing) / Review / "nothing written yet".
+- `apps/mobile/src/workflow-edit-controller.ts`: `nameProblem` exported and its sentence lifted to
+  `EDIT_NAME_RULE` (no behaviour change; the New sheet and the Rename prompt use the ONE sentence).
+- `apps/mobile/src/screens/WorkflowEdit.tsx`: `canSave` → `action` (`headerAction`: label + on, testID
+  `workflow-edit-save` kept for both); `saved` toast (`workflow-edit-saved`, no Undo); `onRename`
+  (`workflow-edit-rename`); the canvas is drawn in `saved` too, wrapped in a `pointerEvents="none"`
+  view (still scrolls), because the controller edits nothing in `saved` and a tap would otherwise open a
+  sheet whose controls silently do nothing.
+- `apps/mobile/App.tsx` (`WorkflowEditRoute`): a CREATE route no longer calls `start()` on mount — the
+  New sheet's Create does `controller.create(…)` THEN `controller.start()` (the controller's tested
+  order: the first read is then the picker-vocabulary probe; a cancelled sheet attached nothing).
+  Review replaces the editor while `showsReview`; `onConfirm={() => controller.confirmSave()}` is the
+  ONLY send. Rename = `Alert.prompt` → `controller.renameFile`. Title = `state.name ?? "New workflow"`.
+- **Run (drift, resolved):** D7 says the header becomes Run "the existing start path, with `hash`
+  pinned". The start path pins the CATALOGUE row's hash, and a `WorkflowStart` already under the editor
+  read its catalogue before the save. So Run is `navigation.popTo("WorkflowStart", {…, saved: hash})`
+  (back to that screen, or in the editor's place when it came from the runs list), and a new optional
+  `WorkflowStartRoute.saved` (`routes.ts`) makes `WorkflowStartRoute` re-read through the controller's
+  own `pull()`. No preselection of the row (it would need the start controller to open a row by name;
+  its key is the path) — the person taps the row, as for any workflow. Safety is unchanged: whatever
+  hash the start pins, the daemon asks for it.
+- `apps/mobile/test/workflow-edit-wiring.test.ts`: 7a's "route never contains `confirmSave`" was the
+  pre-Review placeholder of the real property; it is now "exactly one `confirmSave`, as Review's
+  `onConfirm`" (no effect, no auto-resend). +8 tests for 7c (dumb screens, create-then-start order,
+  Review swap, Run path + `saved` re-read, Rename, saved canvas/toast, named controls).
+- e2e: new `apps/mobile/e2e/flows/44-workflow-editor.yaml` + `44-workflow-editor.js` (ends on daemon
+  truth: the existing `file-exists` hook sees `.tentacle/workflows/wfedit.yaml`), registered in
+  `run.ts`'s flow list and `COMPOSE_SESSION_VARS` (`WFEDIT_ID`, a fresh session).
+
+**e2e — PARTIAL, and not run here.** Covered: E1, E2, E3, E5, E6, E7, E8 (denied, so no agent step runs
+on the mock model). **Not covered:** E4 (the `✗` drag: Maestro has no drag-to-element, a coordinate
+swipe would be device-specific) and E9 (`changed` banner: needs a NEW harness hook that writes the
+workflow file mid-flow — `hooks.ts` + `run.ts` + `seed.ts`; `seed.ts` is therefore untouched). The flow
+was written against the testIDs in the sources, and the e2e structural guards pass
+(`e2e-flows.test.ts` + `e2e-shard.test.ts`: 120 pass), but it has NOT been run on a simulator: the
+orchestrator's `scripts/e2e-gate.sh` is its first run. Unverified there: that the approval ask surfaces as
+`perm-sheet` while the start/run screen is up (E8), and the New sheet's keyboard on a small device.
+
+**Red → green.** The new module's tests were written after the module (the weaker "unimplemented" red),
+so the real non-vacuity evidence is the mutation battery. One red-first finding from it: m8 SURVIVED
+the first run (the fixture's `unchanged` file had no patch); a test with a stray patch on an
+`unchanged` file was added, and m8 is now killed. The 7a wiring test went red on the real change
+(31 pass / 1 fail: "the draft is never re-sent from here") before it was rewritten to the exact property.
+
+**Mutations** (script `.tentacle/tmp/workflow-editor/s7c/battery.ts`; each applied once, the two test
+files run, the file restored and its bytes compared to the original — the script throws otherwise):
+
+| Mutation | Killed by |
+|---|---|
+| m1 `canCreate` ignores the name problem | "the name is checked live by the wire's rule, and Create follows it" |
+| m2 button counts `unchanged` files | "the button counts the files that CHANGE" |
+| m3 no Q3 rewrite warning | "Q3: a hand-written file warns that saving rewrites its layout" |
+| m4 `showsReview` ignores the preview | "Review replaces the graph only while an accepted preview is up" |
+| m5 header never says Run | "the header's Save becomes Run only once a write landed" |
+| m6 `renameOffered` ignores the mode | "Rename is offered only for a CREATE refused `exists`" |
+| m7 `newSheetUp` ignores the route name | "it is up only on a create route whose controller has no draft…" |
+| m8 an `unchanged` file gets a patch | "patches are the daemon's verbatim, and an unchanged file has none" (after the added case) |
+| m9 a refused preview is drawn | "draws nothing without an ACCEPTED preview" |
+| m10 (App) a create starts on mount | wiring "a CREATE starts only from the New sheet's Create" |
+| m11 (App) Run goes back without the hash | wiring "Save becomes Run, and Run is the EXISTING start path…" |
+| m12 (App) the start screen does not re-read | same wiring test |
+
+**Checks run (narrow only; the orchestrator runs the gate):**
+- `bun test apps/mobile/test/workflow-edit-review.test.ts apps/mobile/test/workflow-edit-wiring.test.ts
+  apps/mobile/test/workflow-edit-controller.test.ts`: 116 pass / 0 fail;
+- `bun test apps/mobile/test` (329 files — many source-read `App.tsx` / `routes.ts`): 5211 pass / 0 fail;
+- `bun test apps/mobile/test/e2e-flows.test.ts apps/mobile/test/e2e-shard.test.ts`: 120 pass / 0 fail;
+- `bunx tsc --noEmit -p apps/mobile`: clean;
+- `bunx biome check` on the 11 changed/new TS/JS files: clean.
+
+**Changelog:** `changelog.d/workflow-editor.added.md` already exists (commit 26a4aa6b) and already says
+what 7c delivers (template create, Review of files/patches/hash/version/other workflows, write through
+`serve`, approval on the next run) — kept as is; a second fragment for the same slug+category would be the
+collision the rule forbids. **No schema change** → `protocol.json` untouched.
+
+**Left (debt):** E4/E9 e2e (above); after a save the editor is read-only (Run, or Cancel and Edit again)
+because the controller has no `saved → editing` transition — adding one is a controller change outside
+7c's plan.
+
+*— claude-opus-5-5, 2026-11-24*

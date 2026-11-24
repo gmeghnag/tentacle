@@ -89,7 +89,10 @@ describe("the route reuses the ONE session path (§7)", () => {
 
   test("the controller is disposed on unmount, and the draft is never re-sent from here", () => {
     expect(route).toContain("dispose()");
-    expect(route).not.toContain("confirmSave");
+    // 7c: the write is sent ONLY by Review's button — once in the source, as a
+    // tap's callback, never from an effect or a status callback (no auto-resend).
+    expect(route.split("confirmSave").length - 1).toBe(1);
+    expect(route).toContain("onConfirm={() => controller.confirmSave()}");
   });
 });
 
@@ -391,5 +394,111 @@ describe("the sheet screen is a dumb renderer (7b)", () => {
     expect(SHEETS).toContain("choice.off ? styles.dim : null");
     expect(SHEETS).toContain("disabled={choice.off}");
     expect(SHEETS).toContain("choice.sub");
+  });
+});
+
+describe("New, Review and Run (7c)", () => {
+  const NEW = code(read("src", "screens", "WorkflowNew.tsx"));
+  const REVIEW = code(read("src", "screens", "WorkflowEditReview.tsx"));
+  const route = between(APP, "function WorkflowEditRoute", "\nfunction ");
+  const startRoute = between(APP, "function WorkflowStartRoute", "\nfunction ");
+
+  test("both screens are dumb renderers: no effect, no wire call, no rule of their own", () => {
+    for (const src of [NEW, REVIEW]) {
+      expect(src).not.toContain("useEffect");
+      expect(src).not.toContain("workflowSave");
+      expect(src).not.toContain("workflowSource");
+      expect(src).not.toContain("controller.");
+    }
+    // The name rule and the templates are the module's: no second copy here.
+    expect(NEW).not.toContain("WorkflowNameSchema");
+    expect(NEW).not.toContain("WORKFLOW_NAME_RE");
+    expect(NEW).not.toContain("WORKFLOW_TEMPLATES");
+    // Create's gate is the model's.
+    expect(NEW).toContain("disabled={!model.canCreate}");
+    // The patches are parsed by the module (`diffView`), drawn by the transcript's
+    // own renderer — never re-parsed or recounted on screen.
+    expect(REVIEW).toContain('from "./transcript/DiffView.tsx"');
+    expect(REVIEW).not.toContain("diffView(");
+    expect(REVIEW).not.toContain("countDiff");
+    expect(REVIEW).toContain("disabled={!props.canConfirm}");
+  });
+
+  test("Q2: the New sheet does not offer «Describe it to the model»", () => {
+    expect(NEW).not.toContain("Describe it to the model");
+  });
+
+  test("a CREATE starts only from the New sheet's Create: `create`, THEN `start`", () => {
+    expect(route).toContain("if (name !== undefined) {\n        created.start();");
+    const made = between(route, "const createFromSheet", "\n  };");
+    expect(made).toContain("newSheetCreate(newInput)");
+    const create = made.indexOf("controller.create(");
+    const start = made.indexOf("controller.start()");
+    expect(create).toBeGreaterThan(-1);
+    expect(start).toBeGreaterThan(create);
+    // Cancel on the sheet attached nothing: it only leaves.
+    expect(route).toContain("onCancel={onBack}");
+    expect(route).toContain("newSheetUp({ routeName: name, state })");
+  });
+
+  test("Review replaces the graph while an accepted preview is up, and Edit sends nothing", () => {
+    expect(route).toContain("showsReview(state)");
+    expect(route).toContain("reviewModel({ preview: state.preview, canonical: state.canonical })");
+    expect(route).toContain("onBack={() => controller.cancelReview()}");
+    expect(route).toContain("canConfirm={controller.canConfirm()}");
+  });
+
+  test("Save becomes Run, and Run is the EXISTING start path with the written hash", () => {
+    expect(route).toContain(
+      "headerAction({ canSave: controller.canSave(), canRun: controller.canRun() })",
+    );
+    expect(route).toContain("onRun(state.saved.hash)");
+    expect(route).toContain("savedLine(state)");
+    const screen = between(APP, 'name="WorkflowEdit"', "</Stack.Screen>");
+    expect(screen).toContain('navigation.popTo("WorkflowStart"');
+    expect(screen).toContain("saved: hash");
+    // The start screen re-reads its (pre-save) catalogue when that hash arrives.
+    expect(startRoute).toContain("controller?.pull()");
+    expect(startRoute).toContain("[saved, controller]");
+    const params = between(ROUTES, "export interface WorkflowStartRoute", "\n}");
+    expect(params).toContain("saved?: string");
+  });
+
+  test("an `exists` on a create offers Rename, judged by the controller's renameFile", () => {
+    expect(route).toContain("onRename={renameOffered(state) ? rename : null}");
+    expect(route).toContain("controller.renameFile(");
+    expect(EDIT).toContain('testID="workflow-edit-rename"');
+  });
+
+  test("saved: the graph stays drawn but takes no touch; the toast has no Undo", () => {
+    expect(EDIT).toContain("canvasMode(state.kind)");
+    expect(EDIT).toContain('pointerEvents={mode === "view" ? "none" : "auto"}');
+    const saved = between(EDIT, 'testID="workflow-edit-saved"', "</View>");
+    expect(saved).not.toContain("Undo");
+  });
+
+  test("every 7c control is named, so the e2e flow can press it", () => {
+    for (const id of [
+      "workflow-new",
+      "workflow-new-cancel",
+      "workflow-new-create",
+      "workflow-new-name",
+      "workflow-new-description",
+      "workflow-new-template-",
+      "workflow-new-input-",
+    ]) {
+      expect(NEW).toContain(id);
+    }
+    for (const id of [
+      "workflow-review",
+      "workflow-review-back",
+      "workflow-review-file-",
+      "workflow-review-note-",
+      "workflow-review-hash",
+      "workflow-review-version",
+      "workflow-review-confirm",
+    ]) {
+      expect(REVIEW).toContain(id);
+    }
   });
 });
