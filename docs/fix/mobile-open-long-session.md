@@ -1,6 +1,6 @@
 # fix/mobile-open-long-session — a long session opens ~1.3 turns above its real end
 
-> **Status:** execution
+> **Status:** execution (fix round 1 applied)
 > **Branch:** `fix/mobile-open-long-session`
 > **Size:** S · **Blast:** contained (mobile transcript list) · **Suited:** weaker model executes, standard Review
 > **Changelog:** `changelog.d/mobile-open-long-session.fixed.md`
@@ -46,6 +46,19 @@ Not reproduced on the simulator after two attempts; the pre-build QA re-run is t
 *— claude-sonnet-5-5, 2026-11-24*
 
 **Simulator, patched tree (`run.ts --hold`, built from this worktree):** alpha (~60 short rows + 100 QA-style 4-line turns) opens from the list with turn 200 + its answer fully above the composer (`.tentacle/tmp/mobile-open-long-session/after-alpha.png`); charlie (short) still right (`after-charlie.png`). "Before" = `qa1.png` and the earlier `before.png`/`r2.png`/`r3.png`/`load.png` (also correct: the bug did not reproduce, so before/after is a no-regression check, not a fix proof).
+
+*— claude-sonnet-5-5, 2026-11-24*
+
+### Fix round 1
+
+Review round 1 (HIGH ×2, MEDIUM ×1, LOW, NIT):
+- **Finding 3 (MEDIUM, contract) + 2 (HIGH, no behavioural test):** the offset check now happens INSIDE the landing, while the list is still hidden. `follow.ts`: `restsShort(m, offset)`; `landingStep` and `landingReveal` take an optional `offset` (null = unknown, behaviour unchanged). A hidden opening landing that came to rest short (>2 pt) does one more silent scroll and stays hidden (the screen re-arms the quiet timer), bounded by `LANDING_ROUNDS`; the revealed list is then at its end. `SessionScreen.tsx` passes `offset.current` to both (the ref moved above `armReveal`). The post-landing silent settle (`armLandedSettle`) stays as a backup for a landing that ends short after the reveal.
+- **Red → green:** the 3 behavioural tests (`restsShort`; "a repeated height does not reveal a list that rests short"; "the quiet timer re-scrolls silently and stays hidden while short") FAIL on the pre-round logic (3 fail / 62 pass) and pass after; bound + reader-scrolled-up + unknown-offset tests pin the edges. `follow.test.ts` + wiring: 87 pass / 0 fail; tsc -p apps/mobile clean; biome clean. Wiring regexes updated for the new `offset.current` argument.
+- **Mutation:** `restsShort` → false: 3 fail; reveal branch removed: 1 fail; bound removed: 1 fail; `landingStep` ignoring `restsShort`: 1 fail. Restored; 65 pass.
+- **Finding 4 (LOW):** the QA gap is 2 turns ≈ 323 pt (968 px at 3×), not 570 pt; fixtures/comments now use 5447 → 5770.
+- **Finding 1 (HIGH, mechanism unproven):** NOT resolvable without a repro: mechanisms (b) `following:false` at rest and (c) native metrics already "at end" are not covered and remain open. This fix covers only (a) (landing rests short with following true). The changelog line no longer claims a fix of the QA case. Owner decision stands: the pre-build QA re-run of the 56-turn alpha is the end-to-end check, and a dev log of `{landing, following, offset, size}` at the settle timer there would tell (a)/(b)/(c) apart.
+- **Finding 5 (NIT):** wiring window stays 900; status line updated.
+- **Simulator (patched tree, lock held and released):** alpha (~100 QA-style turns) opens with turn 190 + answer fully above the composer (`.tentacle/tmp/mobile-open-long-session/fix1-alpha.png`); charlie right (`fix2-charlie.png`). Still a no-regression check; the bug never reproduced.
 
 *— claude-sonnet-5-5, 2026-11-24*
 

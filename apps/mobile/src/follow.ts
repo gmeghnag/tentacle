@@ -249,6 +249,17 @@ export const landingAwaiting: Landing = {
 export const LANDING_ROUNDS = 12;
 
 /**
+ * Whether the list RESTS short of its true end (fix/mobile-open-long-session): a
+ * known `offset` more than `SETTLE_SLACK_PT` from `endOffset`. `null` (unknown) and
+ * a list shorter than its viewport are never short.
+ */
+export function restsShort(m: ListSize, offset: number | null): boolean {
+  return (
+    offset !== null && m.content > m.viewport && Math.abs(offset - endOffset(m)) > SETTLE_SLACK_PT
+  );
+}
+
+/**
  * One measurement while a landing is pending: the next landing state and the
  * (never animated) scroll to the end, or `step: null` when there is nothing to
  * land (already done, sizes unknown, or the person is reading further up —
@@ -268,6 +279,7 @@ export function landingStep(
   m: ListSize,
   following: boolean,
   hasRows: boolean,
+  offset: number | null = null,
 ): { readonly state: Landing; readonly step: FollowStep | null } {
   if (!state.settling && !state.silent) {
     return { state, step: null };
@@ -328,9 +340,15 @@ export function landingStep(
       step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
     };
   }
+  // A repeated height is not enough to reveal: the list must also REST at its end
+  // (fix/mobile-open-long-session) — a landing whose last scroll came to rest short
+  // stays hidden for one more silent scroll (the reveal timer, which has the fresh
+  // offset), bounded by `LANDING_ROUNDS`.
   const next: Landing = {
     settling:
-      (state.settling || state.awaiting) && m.content !== state.last && rounds < LANDING_ROUNDS,
+      (state.settling || state.awaiting) &&
+      (m.content !== state.last || restsShort(m, offset)) &&
+      rounds < LANDING_ROUNDS,
     silent: false,
     revealed: false,
     last: m.content,
@@ -406,6 +424,7 @@ export function landingReveal(
   m: ListSize,
   following: boolean,
   hasRows: boolean,
+  offset: number | null = null,
 ): { readonly state: Landing; readonly step: FollowStep | null } {
   if (!state.settling && !state.silent) {
     return { state, step: null };
@@ -431,6 +450,16 @@ export function landingReveal(
           state: { ...state, revealed: true, last: m.content, awaiting: false },
           step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
         };
+  }
+  if (state.settling && restsShort(m, offset) && state.rounds + 1 < LANDING_ROUNDS) {
+    // A hidden OPENING landing that came to rest SHORT of its end
+    // (fix/mobile-open-long-session): one more silent scroll, and it stays hidden —
+    // the first visible frame must already be the end. The screen re-arms the timer
+    // (a step while still pending), so the next fire checks the fresh offset.
+    return {
+      state: { ...state, last: m.content, rounds: state.rounds + 1 },
+      step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
+    };
   }
   // A hidden OPENING landing: one silent scroll to the end. A re-attach's replace
   // re-keys every row, so the height it settles on may never REPEAT the one

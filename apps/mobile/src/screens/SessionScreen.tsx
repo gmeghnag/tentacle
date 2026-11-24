@@ -564,6 +564,7 @@ export function SessionScreen({
   }, []);
   // The settle check armed when a landing ENDS (declared here, assigned with
   // `armSettle` below: the landing callbacks are created before it).
+  const offset = useRef(0);
   const armLandedSettle = useRef<() => void>(() => {});
   const armReveal = useCallback(() => {
     disarmReveal();
@@ -581,6 +582,7 @@ export function SessionScreen({
           size.current,
           followRef.current.following,
           hasRows.current,
+          offset.current,
         );
         const changed = next.state.settling !== landing.current.settling;
         const ended = landingEnded(landing.current, next.state);
@@ -621,6 +623,7 @@ export function SessionScreen({
       size.current,
       followRef.current.following,
       hasRows.current,
+      offset.current,
     );
     const changed = next.state.settling !== landing.current.settling;
     landing.current = next.state;
@@ -644,7 +647,6 @@ export function SessionScreen({
   }, [perform, armReveal]);
   // Bug 5 (docs/fix/mobile-qa-1117.md): where the list really is, and the settle
   // re-check armed by every size change — `follow.ts`'s `settleStep` decides.
-  const offset = useRef(0);
   const settle = useRef<ReturnType<typeof setTimeout> | null>(null);
   const armSettle = useCallback(
     (silent = false) => {

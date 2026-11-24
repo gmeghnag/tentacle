@@ -27,6 +27,7 @@ import {
   landingStep,
   nearBottom,
   reattachLanding,
+  restsShort,
   scrolled,
   settleStep,
   shown,
@@ -733,9 +734,9 @@ describe("a landing that ENDS re-checks where it came to rest (fix/mobile-open-l
   });
 
   test("the landing's own last scroll came to rest SHORT of the end: the settle step fixes it, SILENTLY", () => {
-    // The scroll went to 5200 against a stale end; the cells then grew the content
-    // to 5770+800: the list rests ~570 pt above the true end, following, landing over.
-    const step = settleStep(initialFollow, at(5200, 6570), false);
+    // The scroll went to 5447 against a stale end; the cells then grew the content
+    // to 5770+800: the list rests 323 pt (the QA's 2 turns) above the true end.
+    const step = settleStep(initialFollow, at(5447, 6570), false);
     expect(step).toEqual({ state: initialFollow, scrollTo: 5770, animated: false });
   });
 
@@ -745,6 +746,58 @@ describe("a landing that ENDS re-checks where it came to rest (fix/mobile-open-l
   });
 
   test("the default stays animated (the ordinary settle check is unchanged)", () => {
-    expect(settleStep(initialFollow, at(5200, 6570))?.animated).toBe(true);
+    expect(settleStep(initialFollow, at(5447, 6570))?.animated).toBe(true);
+  });
+});
+
+describe("the landing stays HIDDEN until the list rests at its end (fix/mobile-open-long-session)", () => {
+  const M = { content: 6570, viewport: 800 }; // true end 5770
+  const SHORT = 5447; // 323 pt short: the QA's two turns
+
+  test("restsShort: unknown offset, short list and slack are never short", () => {
+    expect(restsShort(M, null)).toBe(false);
+    expect(restsShort(M, 5770)).toBe(false);
+    expect(restsShort(M, 5769)).toBe(false);
+    expect(restsShort(M, SHORT)).toBe(true);
+    expect(restsShort({ content: 500, viewport: 800 }, 0)).toBe(false);
+  });
+
+  test("a repeated height does not reveal a list that rests short: one more hidden round", () => {
+    const first = landingStep(landingStart, M, true, ROWS, 0);
+    const repeated = landingStep(first.state, M, true, ROWS, SHORT);
+    expect(repeated.state.settling).toBe(true);
+    expect(repeated.step).toEqual({ state: initialFollow, scrollTo: 5770, animated: false });
+    // at its end, the same repeat reveals (as before)
+    const done = landingStep(first.state, M, true, ROWS, 5770);
+    expect(done.state.settling).toBe(false);
+  });
+
+  test("the quiet timer re-scrolls silently and stays hidden while short, reveals once at the end", () => {
+    const hidden = landingStep(landingStart, M, true, ROWS, 0).state;
+    const again = landingReveal(hidden, M, true, ROWS, SHORT);
+    expect(again.state.settling).toBe(true);
+    expect(again.step).toEqual({ state: initialFollow, scrollTo: 5770, animated: false });
+    expect(landingPending(again.state)).toBe(true);
+    const shown = landingReveal(again.state, M, true, ROWS, 5770);
+    expect(shown.state.settling).toBe(false);
+  });
+
+  test("it is BOUNDED: a list that never reaches its end is still revealed", () => {
+    let state: Landing = landingStep(landingStart, M, true, ROWS, 0).state;
+    let rounds = 0;
+    while (state.settling && rounds++ < LANDING_ROUNDS * 2) {
+      state = landingReveal(state, M, true, ROWS, SHORT).state;
+    }
+    expect(state.settling).toBe(false);
+    expect(rounds).toBeLessThanOrEqual(LANDING_ROUNDS);
+  });
+
+  test("a reader scrolled up is never re-scrolled, and an unknown offset changes nothing", () => {
+    const hidden = landingStep(landingStart, M, true, ROWS, 0).state;
+    expect(landingReveal(hidden, M, false, ROWS, SHORT)).toEqual({
+      state: landingDone,
+      step: null,
+    });
+    expect(landingReveal(hidden, M, true, ROWS).state.settling).toBe(false);
   });
 });
