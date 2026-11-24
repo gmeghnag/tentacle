@@ -1610,3 +1610,117 @@ the slice-3b wiring test — no test drives this client method through a real RP
 6/7 and the e2e flow are where that path is first exercised.
 
 *— claude-opus-5-5 (executor, slice 4), 2026-11-24*
+
+## Execution
+
+### Slice 5 — phone editor geometry + hit-testing (D6) — DONE
+
+**PARTIAL check re-run FIRST** — `.tentacle/tmp/workflow-editor/lb5.sh` on the branch tip `523c5dc8`:
+
+```
+== 1. core exports insertStep + draft opts (slice 2) ==
+221:export function insertStep(
+254:export function setFailTarget(
+441:export function deleteStep(
+641:export function draftProblems(
+== 2. WorkflowDraft + workflowYaml (slice 1) ==
+packages/core/src/workflow-spec.ts:341:export function workflowStructureProblem(raw: unknown): string | undefined
+packages/core/src/workflow-yaml.ts:35:export type WorkflowDraft = Readonly<Record<string, unknown>>;
+packages/core/src/workflow-yaml.ts:250:export function workflowYaml(draft: WorkflowDraft): string {
+== 3. RemoteSession.workflowSave (slice 4) ==
+1388:  async workflowSource(name: string): Promise<WorkflowSourceResult | { unsupported: true }> {
+1411:  async workflowSave(
+== 4. the 2C constants slice 5 reuses ==
+33:GRAPH_WIDTH 36:PILL_H 45:PITCH 48:TOP_PAD 51:BOTTOM_PAD 58:MAIN 59:LOOP_SOURCE 60:LOOP_TARGET
+== 5. does a workflow-edit-graph module already exist? ==
+ls: apps/mobile/src/workflow-edit-graph.ts: No such file or directory
+== 6. mobile imports @tentacle/core? ==
+apps/mobile/package.json:11:    "@tentacle/core": "workspace:*",
+```
+
+The slice's precondition per the Slices table — "`RemoteSession.workflowSave` and `core`'s `insertStep`
+exist" — holds (`remote-session.ts:1411`, `workflow-draft.ts:221`), and the module this slice adds is
+absent as the plan expects. **Not a PARTIAL.**
+
+**What this run built** (two new files, nothing else touched: `git status --short` shows only these)
+
+1. `apps/mobile/src/workflow-edit-graph.ts` (634 lines) — the editor's drawing as VALUES.
+   `editGeometry(draft, problems)` → `{nodes, edges, labels, ports, pluses, problems, width, height}`;
+   `editTargetAt(geom,x,y)` = the tap in the priority order label > port > plus > node;
+   `dropTargetAt(geom, portId, x, y)` = `id | "self" | null` for the drag; plus
+   `validDropTargets(geom, portId)` (D6's view-model flag for the drag highlight and the haptic tick,
+   kept to exactly the set `dropTargetAt` accepts, so a highlight can never promise a refused drop);
+   `padHit`/`hitContains`, `KIND_GLYPH`, `PORT_SIZE`/`PLUS_SIZE`, `EDIT_MIN_HIT`.
+   Reuses the 2C constants and `curve` from `workflow-graph.ts` (one source of truth for the pitch and
+   the column widths) and `size.touch` from `theme.ts`. Imports only types from `@tentacle/core`
+   (`WorkflowDraft`, `StepKind`, `InsertAt`), so the module is React-free and adds no runtime
+   dependency to the phone bundle.
+2. `apps/mobile/test/workflow-edit-graph.test.ts` (435 lines, 21 tests) — over the real template
+   (`WORKFLOW_TEMPLATES.plan-build-review-merge`, its own four prompts) plus purpose-built drafts:
+   y strictly increasing over 64 steps; the derived side column; the ＋ count and its `insertAt`;
+   the `fail`/`retry` kinds and labels; ghost pills after a real `deleteStep`; the four-way priority;
+   every hit box ≥ 44 pt; `dropTargetAt` self/ghost/nowhere; purity.
+
+**Red before green (§9).** This slice is a NEW module, so a test file importing it can only fail on the
+import — which proves nothing. The plan's own red criterion for D6 is therefore the one used, and each
+row below is a real mutation on the finished code (backup in
+`.tentacle/tmp/workflow-editor/mut-s5/`, restored with `cp`; final md5 of the module matches the
+pre-mutation file):
+
+| # | Mutation | Result |
+|---|---|---|
+| A | `padHit` → hit boxes at DRAWN size (no 44 pt floor) | 2 red (the ≥44 pt test, the priority test) |
+| B | `editTargetAt` tests the node FIRST | 3 red — the port-over-pill, ＋-over-pill and ranking tests |
+| C | dangling refs dropped instead of ghosted | 2 red — the ghost test and the ghost-is-not-a-drop-target test |
+| D | the end ＋ placed a pitch INSIDE the last pill | 1 red — "the end ＋ sits below the last pill" |
+| E | side column hard-coded to `id === "fix"` | **SURVIVED at first** (see the note below), 1 red after the fix |
+| F | a ＋ on every pass edge, the loop's back edge included | 2 red — the ＋ count and "no ＋ on a back edge" |
+| G | `validDropTargets` forgets to exclude the port's own step | 1 red — "the valid targets are exactly what a drop accepts" |
+| H | `dropTargetAt` accepts a ghost pill | 1 red — "a ghost pill is not a drop target" |
+
+**Mutation E survived the first pass, and the fix was a test, not code.** The original side-column test
+only asserted `fix.side === true` on the mockup's own template, which a hard-coded `id === "fix"` also
+satisfies — the property D6 actually states ("placement comes from the draft's STRUCTURE") was not
+proven. A second test now draws a draft whose loop closes on a step called `repair` while a plain
+step is called `fix`, so the derived rule and the hard-coded id disagree; E then went red. This is §9's
+non-vacuity check catching a weak test, not a drift in the plan.
+
+**Drift from the Implementation (2, both reconciled against the code).**
+
+- **`LOOP_SOURCE` is not used.** The plan lists `MAIN`, `LOOP_SOURCE/TARGET` among the constants slice 5
+  reuses, but D6's own placement rule has only two outcomes for a draft: main (wide, left) or the side
+  column (narrow, right). The run view's narrow LEFT column exists because a live run marks the goto's
+  SOURCE as narrow so the dashed back edge has somewhere to go — in an editor that pair is the side
+  column itself, and narrowing the source too would spend 150 pt of a 318 pt canvas on a pill that no
+  affordance needs. Using it would also contradict D6's "one row per node" uniformity. So: main or side,
+  `LOOP_TARGET` only.
+- **Ghosts are inserted as ROWS, not appended.** D6 says a dangling target becomes a dashed ghost pill
+  but not where; `rowsOf` puts it directly BELOW the step that names it (`next` first, then the fail
+  edge), so the break reads where it happens, and one ghost is drawn however many edges name it. The
+  `＋` at the end is placed under the LAST drawn row (ghost included) so it can never sit inside a pill
+  — mutation D pins that.
+
+**Evidence**
+
+- `bun test apps/mobile/test/workflow-edit-graph.test.ts`: **21 pass, 0 fail** (476 assertions).
+- Neighbouring workflow tests (`apps/mobile/test/workflow-{list-graph,screens-wiring}.test.ts`):
+  **51 pass, 0 fail** together with the new file — the run view's own geometry is untouched.
+- `bunx biome check` on both new files: clean (formatting applied with `--write`).
+- `bunx tsc -p apps/mobile --noEmit`: clean.
+- Not run here, by the orchestrator's rule: the full `bun run check` (the gate script runs it after this
+  slice, along with the root project's typecheck).
+
+**No protocol schema change**, so no `protocol.json` regeneration and no `protocol.d/` note: this slice
+only reads `WorkflowDraft` values the phone already holds.
+
+**No new changelog fragment, deliberately** — same reason as slices 3b and 4:
+`changelog.d/workflow-editor.added.md` already exists on the branch with this task's one
+user-visible sentence, and the plan assigns that fragment to 7c. A second fragment for the same
+slug+category is the collision the changelog rules forbid, and pure geometry is not user-visible on its
+own (nothing renders it until 7a).
+
+**Unverified, one line:** the drawing is proven in the LOGICAL space only — no renderer consumes it
+until slice 7a maps it onto `react-native-svg`, so the on-device look (label collisions at a wide dynamic
+type, a 64-step scroll) is first observable there, or in the e2e flow of 7c.
+
+*— claude-opus-5-5 (executor, slice 5), 2026-11-24*
