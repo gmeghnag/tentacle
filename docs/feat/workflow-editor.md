@@ -880,3 +880,50 @@ after a refactor, so it was re-applied against the current shape rather than rep
 *— claude-opus-5-5 (executor), 2026-11-24*
 
 ## Review
+
+### Slices 0–2 — REQUEST-CHANGES
+
+Scope: `git diff main...HEAD`, slices 0, 1 and 2 only.
+
+**Gate (narrow):** the touched tests (`workflow-{yaml,draft,templates,spec}.test.ts`, `mockup-kit-components.test.ts`) give **140 pass, 0 fail**. `bun run lint` is clean (2378 files). `bun run typecheck` is clean. `workflow-spec.test.ts` is unedited on the branch and green.
+
+**Findings**
+
+1. **MEDIUM — `renameStep` and `deleteStep` ignore `{{steps.<id>.…}}` references** (`core/src/workflow-draft.ts:324-352`, `:366-371`). The validator treats a templating reference as a step reference (`workflow-spec.ts:441-470`). The shipped template uses three of them (`workflow-templates.ts:110,117,122`). Repro (`.tentacle/tmp/workflow-editor/rev/rename.ts`), on `plan-build-review-merge` (0 problems before):
+   - `renameStep(review→check)` gives `steps[3].agent.prompt: no step "review"`;
+   - `renameStep(plan→design)` gives 2 errors;
+   - `deleteStep(plan)` returns `dangling: []` but leaves 2 errors. The menu's "N links point here" note says 0 before the delete.
+
+   The references sit in prompt FILES, which the op cannot see (it has no `prompts` argument). So on the phone, renaming a template step breaks it, and the user can only repair it by editing a prompt file. This is a gap in D2 itself, not executor drift.
+   - **Fix:** `renameStep` takes `prompts` and rewrites `{{steps.<old>.` in `run`, `prompt_text`, `approve.*` and the referenced prompt files. `deleteStep`'s `dangling` counts templating references too.
+   - **Tests:** pin both cases on the template.
+2. **MEDIUM — the emitter is not total, so the round trip D1 and D7 rely on fails** (`core/src/workflow-yaml.ts:92-95`, `:106`). Repro (`rev/emit.ts`):
+   - a multi-line string containing NUL (`"l1\nb\u0000"`) passes `blockSafe` and is emitted raw in a `|-` block, and `Bun.YAML.parse` throws;
+   - a lone surrogate (`"a\ud800b"`) is JSON-escaped, and Bun refuses the escape.
+
+   Slice 3b's save validates the draft VALUE (D4 step 1), not the emitted bytes. So it could write and hash a file that then fails to load.
+   - **Fix:** `blockSafe` refuses C0 controls other than tab. Either refuse lone surrogates in a draft string, or have the save assert `parse(workflowYaml(d))` deep-equals `d` before writing (preferred: it fails loudly).
+
+**Attacks tried**
+
+| Attack | Result |
+|---|---|
+| Hostile strings: DEL, C1, U+0085, U+2028, BOM, `---`/`...` lines, ANSI escapes, `-0`, `1e21` | All round-trip, except NUL-in-block and lone surrogates (finding 2) |
+| Templating references across rename, delete and template | Finding 1 |
+| `patchStep` dropping unknown agent/approve fields | Holds: the strict schema covers exactly `prompt, prompt_text, model, type, tokens` (`workflow-spec.ts:243-247`) |
+| `stepIdFor` producing an id the validator rejects | Holds: the slug always matches `idProblem`'s regex |
+| Insert on a `next` edge leaving the old fall-through successor reachable | Holds: the new step carries the `next`, so array order is unchanged for the others |
+
+**Mutation (own, restored with `cp` from `.tentacle/tmp/workflow-editor/rev/*.bak`; `git status` is empty after):**
+- `insertStep` dropping `next: oldNext` turns 2 tests red;
+- `blockSafe` returning `true` turns 1 test red.
+
+The executor's M1–M18 tables look credible. I sampled them and did not re-run them all.
+
+**§7:** slices 0–2 touch no wire, persistence or broker. These are pure core and kit modules, so no invariant is at stake yet. The load-bearing pair is slice 3b's.
+
+**Executor behaviour:** disciplined. It recorded red-first runs, added tests when a mutation survived, and reported its own process fault (`git checkout` during slice 1) honestly. One discrepancy: the Execution sections are signed `claude-opus-5-5 (executor)`, but the three commits say `exec (deepseek)`. The owner should confirm which model executed, because §10 signatures exist to track exactly that.
+
+Reviewer: same model family as the signed executor; only the context is fresh. Shared blind spots are possible.
+
+*— claude-opus-5-5, 2026-11-24*
