@@ -283,6 +283,48 @@ describe("PermissionRouter — the sub-agent a request comes from", () => {
   });
 });
 
+// docs/fix/mobile-ask-surfaces.md D2: the workflow origin rides to the requester,
+// bounded (a pod could forge it), display only.
+describe("PermissionRouter — the workflow an ask belongs to", () => {
+  test("the prompt carries the update's workflow, bounded and stripped", () => {
+    const r = new PermissionRouter();
+    const workflow = {
+      name: `wf\u001b[2J${"x".repeat(500)}`,
+      runId: "wf-1",
+      stepId: "gen\nerate",
+      index: 1,
+      count: 5,
+    };
+    const [prompt] = r.request("S", req("r1", { workflow }), "X");
+    const seen = prompt?.kind === "prompt" ? prompt.workflow : undefined;
+    expect(seen?.name.startsWith("wf [2J")).toBe(true);
+    expect(seen?.name.length).toBe(200);
+    expect(seen?.runId).toBe("wf-1");
+    expect(seen?.stepId).toBe("gen erate");
+    expect(seen?.index).toBe(1);
+    expect(seen?.count).toBe(5);
+  });
+
+  test("absent stays absent; a name-only workflow carries no step fields", () => {
+    const r = new PermissionRouter();
+    const [a] = r.request("S", req("r1"), "X");
+    expect(a?.kind === "prompt" && "workflow" in a).toBe(false);
+    r.answered("S", "r1", { allowed: true });
+    const [b] = r.request("S", req("r2", { workflow: { name: "wf" } }), "X");
+    expect(b?.kind === "prompt" && b.workflow).toEqual({ name: "wf" });
+  });
+
+  test("a non-finite index/count from a pod is dropped, not forwarded", () => {
+    const r = new PermissionRouter();
+    const [p] = r.request(
+      "S",
+      req("r1", { workflow: { name: "wf", index: Number.NaN, count: Number.POSITIVE_INFINITY } }),
+      "X",
+    );
+    expect(p?.kind === "prompt" && p.workflow).toEqual({ name: "wf" });
+  });
+});
+
 // docs/feat/mobile-notifications.md Design 5: an answer given OUTSIDE the prompt
 // (an iPhone notification's Approve / Deny / Reply) settles a request BY ID.
 // `answered` cannot serve it: it accepts only the request that is `current`, and

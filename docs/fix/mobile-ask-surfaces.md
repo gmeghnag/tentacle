@@ -406,4 +406,13 @@ frames A1–A7 before the iOS build.
 - **Mutations (both reverted):** `index: z.number().int()` → hostile-value test fails (12 pass / 1 fail); `name: z.string().max(100)` → same test fails (12 / 1).
 - **Drift:** none. No `protocol.d/` note (additive display field, P1).
 
+### S2 — `ask-origin` + router mapping (executor claude-sonnet-5-5, 2026-11-24)
+
+- **Load-bearing check re-run:** the router's `prompt` action had no `workflow`, and `client/src/ask-origin.ts` did not exist — holds. S1a's wire field is present.
+- **Red first:** `ask-origin.test.ts` fails on the missing module. The new router tests fail on the assertions (`workflow` not on the prompt): 4 fail / 1 error before.
+- **Changed:** `client/src/ask-origin.ts` (new: `askOrigin`, `originWords`; position only for integer `0 ≤ index < count ≤ 64`; strings cut name/step 64, task 120; `workflow` beats `agent`; kind never read from text); `client/src/permission-router.ts` (`prompt.workflow` typed + mapped, `progressText` on strings, non-finite `index`/`count` dropped); `client/src/index.ts` (export); tests `client/test/ask-origin.test.ts` (new), `client/test/permission-router.test.ts` (+3).
+- **Green:** both files 39 pass / 0 fail; biome clean on the 5 files; `tsc --noEmit -p packages/client` clean.
+- **Mutations (all reverted, files restored):** `askOrigin` ignoring `workflow` → 7 fail; `index >= count` → `index > count` → 1 fail; router `name` without `progressText` → 1 fail.
+- **Drift:** none. Changelog: the S1a fragment `changelog.d/mobile-ask-surfaces.fixed.md` already covers the feature; no second fragment.
+
 ## Review

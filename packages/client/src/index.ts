@@ -28,3 +28,4 @@ export * from "./restore-images.ts";
 export * from "./discovery.ts";
 export * from "./schedules.ts";
 export * from "./pending-capabilities.ts";
+export * from "./ask-origin.ts";
