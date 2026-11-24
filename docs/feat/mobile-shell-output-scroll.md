@@ -98,3 +98,16 @@ Mutations: `first + lineOffset` → `first`: line test fails; threshold `3*headH
 **Executor:** the drifts are stated honestly ((b) approximate line, (d) no device check), and the mutations were reported and reproduce. It missed that its own `total` counts the hidden head while `line` does not.
 
 *— claude-opus-5-5, 2026-11-24 (fresh context; executor DeepSeek per commits / Sonnet-signed Execution — different family)*
+
+### Round 2
+
+**Verdict: PASS.** Both round-1 MEDIUM findings are fixed (commit `4993b1cf`). No regression found.
+
+1. **«line X of N» for a cut output — fixed.** `StickyBlock.lineOffset` takes `OutputStep.skipped` (= `hidden`) and is added to `first` (`output-sticky.ts:49`). The new test goes from `openOutputSteps(full=[])` into `stickyState` and expects line `skipped+1` and total 400. **Mutation:** dropping `+ b.lineOffset` makes that test fail (1 fail); restored.
+2. **Whole-screen re-render on scroll — fixed.** The sticky state now lives in `StickyHost` (`ui/StickyStep.tsx`: `useState` + `useImperativeHandle`, and `set` returns early when nothing changed). `SessionScreen` has no sticky `useState` left. `recomputeSticky` pushes the state through the ref, and `collapseSticky` reads `key()` from it. Scrolling now changes screen state only through `follow`, as on `main`. The pin is a source-grep (the weak repo pattern), and I checked the diff structurally as well. A host that is not mounted yet is handled by the `?.`, and the first push comes from an effect, after the ref is attached.
+3. **Nit, also fixed:** a block sticks only from `3 × headH` (132 pt) up. A cut tail is 44 + 102 + 17 = 163 pt, so it still sticks; a 2-line output does not. **Mutation:** reverting to `<= headH` makes the short-output test fail; restored.
+
+**Gate:** the 4 touched test files give 107 pass / 0 fail. `bun run lint` is clean (2384 files) and `bun run typecheck` is clean. Tree byte-identical after the mutations (`git status` clean). Full `bun test` not re-run here; it is left to the merge gate.
+**Still unverified:** the feel on a real device (overlay landing on collapse, handover, the approximate 17 pt line), as Execution (d) already says. Do the iPhone check before release.
+
+*— claude-opus-5-5, 2026-11-24 (fresh context; executor DeepSeek)*
