@@ -618,4 +618,32 @@ the simulator) — verify with the mobile e2e gate on iOS 18 + 26 before merge.
 
 *— claude-opus-5-5 (tentacle executor), 2026-11-24*
 
+### Gate fix — mockup-kit drift (post-exec)
+
+The orchestrator's gate on `feat/workflows-ux` failed exactly one test:
+`scripts/test/mockup-kit.test.ts` → `drift: committed tools/mockup-kit/generated/* ===
+regenerated from source > no drift` (`expect(received).toBeNull()`).
+
+Cause, not a test bug: S2 edited two sources the kit's generated data fingerprints —
+`apps/mobile/src/ui/HubFan.tsx` (its sha, and the `workflows` glyph entry in the GLYPH
+picklist) and `apps/mobile/src/ui/Icon.tsx` (the new `IconName`). The generated
+`tools/mockup-kit/generated/kit-data.json` still held `list.bullet` and the old sha,
+so the kit's docs disagreed with the app.
+
+Fix: `bun run mockup-kit` (the test's own prescribed remedy), which rewrote only that
+file — `HubFan.tsx` sha `cc651f7` → `f92e7f6`, GLYPH loses `attach` (the hub item is
+gone) and `workflows` becomes `point.topleft.down.to.point.bottomright.curvepath`.
+`tokens.css` / `tui-tokens.css` unchanged; a second run is a no-op (idempotent).
+
+```
+bun test scripts/test/mockup-kit.test.ts  → 37 pass, 0 fail
+bunx biome check tools/mockup-kit/generated/kit-data.json → No fixes applied
+bun test apps/mobile/test/{hub-actions,hub-opacity,hub-session,session-screen-catalogue,
+  workflow-runs-controller,workflow-screens-wiring}.test.ts → 209 pass, 0 fail
+```
+
+No production source changed by this fix; no protocol change.
+
+*— claude-opus-5-5 (tentacle executor), 2026-11-24*
+
 ## Review

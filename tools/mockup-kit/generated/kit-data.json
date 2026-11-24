@@ -18,7 +18,7 @@
     "apps/mobile/src/ui/FloatingActivity.tsx": "cc8ae250d2303f88efe4261ad4e66168425d31b0",
     "apps/mobile/src/ui/GlassButton.tsx": "a595e5654c4b6167edfd83387e3322c5b1dc611c",
     "apps/mobile/src/ui/HeaderDot.tsx": "1d49445123ec6a8eabd55ef377e30c8ff4bee94d",
-    "apps/mobile/src/ui/HubFan.tsx": "cc651f77f09644df69d99191ed2b5335bc3a691f",
+    "apps/mobile/src/ui/HubFan.tsx": "f92e7f6e0ec2f0d350f01813c5df1003f455defb",
     "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
     "apps/mobile/src/ui/ScreenHeader.tsx": "5056826ce4b0caed05dfa83cb777dc1e26ea1ba0",
     "apps/mobile/src/ui/Sheet.tsx": "511816016f43feef1b11ce7d5d29def68fad8e22",
@@ -1032,7 +1032,6 @@
         "GLYPH": {
           "stop": "stop.fill",
           "steer": "bubble.left",
-          "attach": "photo",
           "activity": "bolt.fill",
           "artifacts": "doc.on.doc",
           "sessions": "folder",
@@ -1040,7 +1039,7 @@
           "tools": "powerplug",
           "commands": "terminal",
           "scheduled": "clock",
-          "workflows": "list.bullet",
+          "workflows": "point.topleft.down.to.point.bottomright.curvepath",
           "dictate": "mic",
           "new": "square.and.pencil",
           "more": "ellipsis"
