@@ -563,6 +563,112 @@ describe("session/workflow_source + workflow_save on a hosted session (slice 3b)
     expect(disk.get("task.yaml")).toBe(YAML);
   });
 
+  test("60 validator errors: both answer them capped (20 lines, `+k more`), never `unavailable`", async () => {
+    // Review of 3a+3b #1: the validator does not bound its list; the wire does.
+    const steps = Array.from({ length: 60 }, (_, i) => ({ id: `s${i}`, run: "" }));
+    const broken = { schemaVersion: 1, name: "task", version: 1, steps };
+    const { driver, disk } = editableDriver({ count: 0 });
+    const session = hosted();
+    session.attachWorkflows(driver);
+    const saved = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "replace",
+      draft: JSON.stringify(broken),
+      prompts: [],
+      dryRun: true,
+    });
+    expect(saved.ok).toBe(false);
+    expect(saved.refusal).toBe("invalid");
+    expect(saved.errors).toHaveLength(20);
+    expect(saved.errors?.[19]).toBe("+41 more");
+    expect(saved.reason?.length ?? 0).toBeLessThanOrEqual(2000);
+    expect(saved.reason).toContain("steps[0].run");
+    expect(saved.reason?.endsWith("…")).toBe(true);
+    // The same file hand-written on disk: it OPENS, with its errors.
+    disk.set(
+      "task.yaml",
+      `schemaVersion: 1\nname: task\nversion: 1\nsteps:\n${steps.map((s) => `  - id: ${s.id}\n    run: ""\n`).join("")}`,
+    );
+    const source = await session.workflowSource({ sessionId: "s1", name: "task" });
+    expect(source.unavailable).toBeUndefined();
+    expect(source.ok).toBe(true);
+    expect(source.hash).toBeUndefined();
+    expect(source.errors).toHaveLength(20);
+    expect(source.errors?.[19]).toBe("+41 more");
+    expect(JSON.parse(source.draft ?? "null")).toMatchObject({ name: "task" });
+  });
+
+  test("a source the wire cannot carry is `unreadable` by its path, never `unavailable`", async () => {
+    const { driver } = editableDriver({ count: 0 });
+    const session = hosted();
+    session.attachWorkflows(driver);
+    driver.source = async () => ({
+      ok: true,
+      path: ".tentacle/workflows/task.yaml",
+      text: "x".repeat(256 * 1024 + 1),
+    });
+    const source = await session.workflowSource({ sessionId: "s1", name: "task" });
+    expect(source.unavailable).toBeUndefined();
+    expect(source.ok).toBe(false);
+    expect(source.path).toBe(".tentacle/workflows/task.yaml");
+    expect(source.unreadable).toContain("could not be reported");
+  });
+
+  test("a write that LANDED is never reported `unavailable`: the hash survives an unreportable rest", async () => {
+    const { driver } = editableDriver({ count: 0 });
+    const session = hosted();
+    session.attachWorkflows(driver);
+    const hash = "a".repeat(64);
+    const row = { status: "changed" as const, added: 1, removed: 0 };
+    // 70 other workflows read the rewritten prompt (wire: ≤ 64), and 40 file rows (wire: ≤ 33).
+    driver.save = async () => ({
+      ok: true,
+      hash,
+      version: 2,
+      path: ".tentacle/workflows/task.yaml",
+      files: Array.from({ length: 40 }, (_, i) => ({ ...row, path: `p${i}.md` })),
+      approved: false,
+      alsoChanges: Array.from({ length: 70 }, (_, i) => `w${i}`),
+    });
+    const saved = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "create",
+      draft: JSON.stringify(EDITED),
+      prompts: [],
+      dryRun: false,
+    });
+    expect(saved.ok).toBe(true);
+    expect(saved.refusal).toBeUndefined();
+    expect(saved.hash).toBe(hash);
+    expect(saved.version).toBe(2);
+    expect(saved.approved).toBe(false);
+    expect(saved.reason).toContain("could not be reported");
+    // Only alsoChanges over: it is cut to the wire's 64, and the reason says how many.
+    driver.save = async () => ({
+      ok: true,
+      hash,
+      version: 2,
+      path: ".tentacle/workflows/task.yaml",
+      files: [{ ...row, path: "task.yaml" }],
+      approved: false,
+      alsoChanges: Array.from({ length: 70 }, (_, i) => `w${i}`),
+    });
+    const cut = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "create",
+      draft: JSON.stringify(EDITED),
+      prompts: [],
+      dryRun: false,
+    });
+    expect(cut.ok).toBe(true);
+    expect(cut.alsoChanges).toHaveLength(64);
+    expect(cut.files).toHaveLength(1);
+    expect(cut.reason).toContain("70");
+  });
+
   test("`schedules` lists a job pinned to the OLD hash (the preview already says it)", async () => {
     const { driver } = editableDriver({ count: 0 });
     const session = schedulingHosted();

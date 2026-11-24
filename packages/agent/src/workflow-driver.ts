@@ -19,6 +19,7 @@ import {
   type PermissionResponse,
   SubagentFailure,
   WORKFLOW_APPROVE_TOOL,
+  WORKFLOW_FILE_MAX_BYTES,
   type WorkflowAction,
   type WorkflowContext,
   type WorkflowEndBody,
@@ -427,6 +428,14 @@ export function checkedWorkflowBytes(
     text = emit(draft);
   } catch (error) {
     return { reason: error instanceof Error ? error.message : String(error) };
+  }
+  // The loader lists a file over its cap `too-large` and never reads it: such
+  // bytes would save "ok" under a hash no catalogue ever reports (review #2).
+  const size = new TextEncoder().encode(text).length;
+  if (size > WORKFLOW_FILE_MAX_BYTES) {
+    return {
+      reason: `the YAML would be ${size} bytes, over the ${WORKFLOW_FILE_MAX_BYTES} a workflow file can be: nothing was written`,
+    };
   }
   if (parse === undefined) {
     return { reason: "cannot read YAML here — workflows are saved on the laptop" };

@@ -1305,6 +1305,79 @@ slice 4/6/7.
 
 *— claude-sonnet-4-5-20250929 (executor, slice 3b), 2026-11-25*
 
+### Fix round 1 — review of slices 3a + 3b
+
+Both MEDIUM findings fixed. Each fix has a test that was red on the assertion of the property first,
+and a mutation check.
+
+**#1 — errors/reason not capped → `unavailable` (FIXED).**
+- `daemon/src/hosted-session.ts` `workflowSource`: `errors` goes through the catalogue's
+  `boundedWorkflowErrors` (20 lines, `+k more`). `unreadable` is one line, cut to 300.
+  If the answer still fails its schema, it is `{ok:false, path, unreadable}` and never
+  `unavailable`, which keeps its one meaning.
+- `workflowSave`:
+  - `errors` is bounded the same way.
+  - `reason` is cut to 2000, ending in `…`.
+  - `alsoChanges` is cut to the wire's 64. When cut, the reason counts the rest
+    (`N other workflows also change; the first 64 are listed`).
+  - If the answer still fails its schema:
+    - a write that **landed** answers `ok:true` with its `hash`/`version`/`path`/`approved`
+      and a reason `the rest of the save could not be reported: …`;
+    - a refusal keeps its own word (`invalid`/`changed`/…).
+  - It is never `unavailable`.
+- Red first (`daemon/test/workflow-hosted.test.ts`, 2 new tests):
+  - 60 steps with `run: ""` (the validator caps steps at 64, so the review's 25 became 60 here to
+    also push the joined reason over 2000): `Expected "invalid" / Received "unavailable"`.
+  - A landed write with 40 file rows and 70 `alsoChanges`: `Expected true / Received false`.
+
+**#2 — the YAML is not bounded by the loader's cap (FIXED).**
+- `WORKFLOW_FILE_MAX_BYTES` moved to `core/src/workflow-yaml.ts`. Both the driver (agent) and the
+  writer (cli) need it, and agent cannot import cli. `cli/src/workflow-files.ts` imports it and
+  re-exports it under the same name.
+- `agent/src/workflow-driver.ts` `checkedWorkflowBytes`: refuses emitted bytes over the cap, in
+  UTF-8 **bytes** (the loader's `stat.size`), before the hash or any write. So `save` answers
+  `invalid`, for a dry run too.
+- `cli/src/workflow-files.ts` `writeWorkflowFiles`: refuses ANY target over the cap (the YAML or a
+  prompt file) before resolving or writing anything. This is defence in depth: the wire's 64 K-char
+  prompt is ≤ 192 KiB, but the writer is not tied to the wire.
+- Red first:
+  - `agent/test/workflow-save.test.ts`: a ~300 KB YAML: `Expected "invalid" / Received undefined`.
+  - `cli/test/workflow-files-write.test.ts`: `Expected false / Received true`.
+
+**Mutations (each reverted, then `rg` confirmed none survived in `src`).**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | save `errors: [...outcome.errors]` (no capper) | 1 red — the 60-errors test |
+| M2 | source `errors: [...view.errors]` | 1 red — the 60-errors test (`source.ok` false) |
+| M3 | save `reason` uncut | 1 red — the 60-errors test |
+| M4 | landed-write fallback forced to the refusal branch | 1 red — the landed-write test |
+| M5 | `alsoChanges` not cut to 64 | 1 red — the landed-write test |
+| M7 | driver measures `text.length`, not UTF-8 bytes | 1 red — the `é` boundary assertion |
+| M8 | driver `>=` instead of `>` | 1 red — the exactly-at-cap assertion |
+| M9 | writer cap check disabled | 1 red — the writer cap test |
+| M10 | writer checks only the YAML, not prompts | 1 red — the prompt-file half of that test |
+| M11 | source's schema-failure fallback also sets `unavailable` | 1 red — the source-fallback test |
+
+There is no M6 (the plain "drop the driver check" mutation). The red-first run above is that
+mutation.
+
+**Evidence.**
+- `bun test` over 10 files (`agent/workflow-save`, `agent/workflow-driver`,
+  `daemon/workflow-hosted`, `daemon/workflow-step-detail`, `cli/workflow-wiring`,
+  `cli/workflow-files-write`, `cli/workflow-files`, `core/workflow-yaml`,
+  `protocol/workflow-save-wire`, `protocol/json-schema`): **199 pass, 0 fail**.
+- `bunx biome check` on the 7 changed files: clean after `--write` (one formatting fix).
+- `bunx tsc --noEmit`: clean.
+- No wire change, so there is no `protocol.d/` note and no new changelog fragment.
+
+**The source fallback has its own test.** With the caps in place, no real input reaches
+`workflowSource`'s schema-failure fallback. A third hosted test stubs `driver.source` with a `text`
+over 256 K chars and checks the answer is `{ok:false, path, unreadable}` with no `unavailable`
+(mutation M11). The hosted file is now **20 pass, 0 fail**, so the 10-file run would be 200.
+
+*— claude-opus-5-5 (executor, fix round 1), 2026-11-24*
+
 ## Review
 
 ### Slices 3a + 3b — REQUEST-CHANGES

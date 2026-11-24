@@ -15,6 +15,7 @@ import {
   type PermissionRequester,
   type PermissionResponse,
   type ToolContext,
+  WORKFLOW_FILE_MAX_BYTES,
   WORKFLOW_SCHEMA_VERSION,
   workflowYaml,
 } from "@tentacle/core";
@@ -310,6 +311,41 @@ describe("what a save refuses, writing nothing", () => {
     expect(result.refusal).toBe("invalid");
     expect(result.reason).toContain("surrogate");
     expect(saves).toEqual([]);
+  });
+
+  test("YAML over the loader's file cap is `invalid`, nothing written (it would never load back)", async () => {
+    const { driver, saves } = setup({});
+    // Valid, and under the wire's 512 KiB draft cap — but its YAML is ~300 KB.
+    const big = {
+      ...DRAFT,
+      steps: [{ id: "plan", agent: { prompt_text: "word ".repeat(60_000) } }],
+    };
+    expect(Buffer.byteLength(workflowYaml(big))).toBeGreaterThan(WORKFLOW_FILE_MAX_BYTES);
+    for (const dryRun of [true, false]) {
+      const result = await driver.save({
+        name: "task",
+        mode: "create",
+        draft: big,
+        prompts: {},
+        dryRun,
+      });
+      expect(result.refusal).toBe("invalid");
+      expect(result.hash).toBeUndefined();
+      expect(result.reason).toContain(`${WORKFLOW_FILE_MAX_BYTES}`);
+    }
+    expect(saves).toEqual([]);
+    // The bound is the loader's `size <= max`, in UTF-8 BYTES (not UTF-16 units).
+    const back = () => DRAFT;
+    const at = checkedWorkflowBytes(DRAFT, () => "x".repeat(WORKFLOW_FILE_MAX_BYTES), back);
+    expect("text" in at).toBe(true);
+    const over = checkedWorkflowBytes(DRAFT, () => "x".repeat(WORKFLOW_FILE_MAX_BYTES + 1), back);
+    expect("reason" in over).toBe(true);
+    const wide = checkedWorkflowBytes(
+      DRAFT,
+      () => "é".repeat(WORKFLOW_FILE_MAX_BYTES / 2 + 1),
+      back,
+    );
+    expect("reason" in wide).toBe(true);
   });
 
   test("bytes that do not read back as the draft are `invalid` (a stubbed emitter)", () => {

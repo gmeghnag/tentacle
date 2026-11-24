@@ -25,6 +25,7 @@ import { join } from "node:path";
 import type { WorkflowSource } from "@tentacle/agent";
 import {
   PROJECT_PATHS,
+  WORKFLOW_FILE_MAX_BYTES,
   WORKFLOW_SCHEMA_VERSION,
   asDraft,
   runtimeHasher,
@@ -503,6 +504,38 @@ describe("the emitted bytes, not just the value (D4, review round 1 #2)", () => 
       expect(result.refusal).toBe("invalid");
       expect(result.reason).toContain("surrogate");
     }
+    expect(existsSync(join(root, PROJECT_PATHS.workflows))).toBe(false);
+  });
+
+  test("a file over the loader's cap is `invalid`, and NOTHING is written (it would not load)", () => {
+    // The listing marks a file over `WORKFLOW_FILE_MAX_BYTES` `too-large` and
+    // never reads it: writing one would answer ok for a hash no catalogue reports.
+    const root = project();
+    const draft = { ...DRAFT, description: "word ".repeat(60_000) };
+    expect(Buffer.byteLength(workflowYaml(draft))).toBeGreaterThan(WORKFLOW_FILE_MAX_BYTES);
+    const result = writeWorkflowFiles(
+      root,
+      { mode: "create", name: "task", draft, prompts: {} },
+      currentHash,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.refusal).toBe("invalid");
+      expect(result.reason).toContain(`${WORKFLOW_FILE_MAX_BYTES}`);
+    }
+    expect(existsSync(join(root, PROJECT_PATHS.workflows))).toBe(false);
+    // A prompt file over it is refused the same way (the loader reads prompts too).
+    const prompted = writeWorkflowFiles(
+      root,
+      {
+        mode: "create",
+        name: "task",
+        draft: { ...DRAFT, steps: [{ id: "a", agent: { prompt: "prompts/big.md" } }] },
+        prompts: { "prompts/big.md": "é".repeat(WORKFLOW_FILE_MAX_BYTES / 2 + 1) },
+      },
+      currentHash,
+    );
+    expect(prompted.ok).toBe(false);
     expect(existsSync(join(root, PROJECT_PATHS.workflows))).toBe(false);
   });
 

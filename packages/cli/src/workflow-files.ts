@@ -22,6 +22,7 @@ import { dirname, join, relative } from "node:path";
 import type { WorkflowSource, WorkflowSourceRow } from "@tentacle/agent";
 import {
   PROJECT_PATHS,
+  WORKFLOW_FILE_MAX_BYTES,
   WORKFLOW_NAME_RE,
   type WorkflowsAboveHint,
   promptPathProblem,
@@ -37,7 +38,8 @@ const GIT_CHECK_TIMEOUT_MS = 2000;
 
 /** Caps: a prompt set that big is a mistake, not a workflow. */
 export const WORKFLOW_FILES_MAX = 200;
-export const WORKFLOW_FILE_MAX_BYTES = 256 * 1024;
+/** The per-file cap lives in core: a save (the driver and the writer) refuses over it. */
+export { WORKFLOW_FILE_MAX_BYTES };
 
 function collect(root: string, dir: string, out: Record<string, string>): void {
   for (const entry of readdirSync(dir)) {
@@ -466,6 +468,12 @@ export function writeWorkflowFiles(
 
   const resolved: { rel: string; text: string; path: string; before: string | undefined }[] = [];
   for (const target of targets) {
+    // The listing never reads a file over the cap (`too-large`): never write one.
+    const size = Buffer.byteLength(target.text, "utf8");
+    if (size > WORKFLOW_FILE_MAX_BYTES) {
+      const reason = `${PROJECT_PATHS.workflows}/${target.rel} would be ${size} bytes, over the ${WORKFLOW_FILE_MAX_BYTES} a workflow file can be`;
+      return { ok: false, refusal: "invalid", reason, files: [] };
+    }
     const inside = insideWorkflows(cwd, target.rel);
     if ("reason" in inside) {
       return { ok: false, refusal: "invalid", reason: inside.reason, files: [] };

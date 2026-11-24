@@ -24,6 +24,13 @@ import {
   workflowStructureProblem,
 } from "./workflow-spec.ts";
 
+/**
+ * The loader's per-file cap, in UTF-8 bytes: a workflow (or prompt) file over it
+ * is listed `too-large` and never read. A save refuses bytes over it, so it never
+ * writes a file that would not load back (review of slices 3a+3b #2).
+ */
+export const WORKFLOW_FILE_MAX_BYTES = 256 * 1024;
+
 /** What an editor holds: the parsed workflow mapping, as YAML gave it. */
 export type WorkflowDraft = Readonly<Record<string, unknown>>;
 

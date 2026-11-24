@@ -660,6 +660,9 @@ const WORKFLOW_ERROR_MAX_CHARS = 300;
 
 /** A Review row's diff cap (`WorkflowWriteFileSchema`). */
 const WORKFLOW_PATCH_MAX_CHARS = 64 * 1024;
+/** A save answer's `reason` and `alsoChanges` caps (`WorkflowSaveResultSchema`). */
+const WORKFLOW_REASON_MAX = 2000;
+const WORKFLOW_ALSO_CHANGES_MAX = 64;
 
 /** `text` within `max` UTF-16 units, ending in `…` when cut (never mid-surrogate). */
 function capWithEllipsis(text: string, max: number): string {
@@ -2706,17 +2709,23 @@ export class HostedSession {
       ...(view.hash !== undefined ? { hash: view.hash } : {}),
       ...(view.version !== undefined ? { version: view.version } : {}),
       ...(view.canonical !== undefined ? { canonical: view.canonical } : {}),
-      ...(view.errors !== undefined ? { errors: [...view.errors] } : {}),
-      ...(view.unreadable !== undefined ? { unreadable: view.unreadable } : {}),
+      // The validator does not bound its list; the wire does (the catalogue's capper).
+      ...(view.errors !== undefined ? { errors: boundedWorkflowErrors(view.errors) } : {}),
+      ...(view.unreadable !== undefined
+        ? { unreadable: capWithEllipsis(oneLineText(view.unreadable), 300) }
+        : {}),
       ...(view.context !== undefined ? { context: view.context } : {}),
       ...(view.unavailable !== undefined ? { unavailable: view.unavailable } : {}),
     });
     if (!parsed.success) {
+      // `unavailable` means "this session cannot edit workflows" and nothing
+      // else: a file this answer cannot carry is UNREADABLE, by its path.
       return {
         ok: false,
-        unavailable: oneLineText(`the file could not be read: ${parsed.error.message}`).slice(
-          0,
-          200,
+        path: `${PROJECT_PATHS.workflows}/${params.name}.yaml`,
+        unreadable: capWithEllipsis(
+          oneLineText(`the file could not be reported: ${parsed.error.message}`),
+          300,
         ),
       };
     }
@@ -2774,31 +2783,56 @@ export class HostedSession {
       params.baseHash,
       outcome.hash,
     );
+    // The wire's caps, applied here, none lost silently: the validator's list
+    // (the catalogue's capper), the joined reason, and `alsoChanges` past 64
+    // (counted in the reason when the driver gave none).
+    const also = outcome.alsoChanges ?? [];
+    const alsoCut =
+      also.length > WORKFLOW_ALSO_CHANGES_MAX
+        ? `${also.length} other workflows also change; the first ${WORKFLOW_ALSO_CHANGES_MAX} are listed`
+        : undefined;
+    const reason = outcome.reason ?? alsoCut;
     const parsed = WorkflowSaveResultSchema.safeParse({
       ok: outcome.ok,
       ...(outcome.refusal !== undefined ? { refusal: outcome.refusal } : {}),
-      ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
-      ...(outcome.errors !== undefined ? { errors: [...outcome.errors] } : {}),
+      ...(reason !== undefined ? { reason: capWithEllipsis(reason, WORKFLOW_REASON_MAX) } : {}),
+      ...(outcome.errors !== undefined ? { errors: boundedWorkflowErrors(outcome.errors) } : {}),
       ...(outcome.hash !== undefined ? { hash: outcome.hash } : {}),
       ...(outcome.version !== undefined ? { version: outcome.version } : {}),
       ...(outcome.path !== undefined ? { path: outcome.path } : {}),
       ...(outcome.files !== undefined ? { files: outcome.files.map(writeFileRow) } : {}),
       ...(outcome.approved !== undefined ? { approved: outcome.approved } : {}),
-      ...(outcome.alsoChanges !== undefined ? { alsoChanges: [...outcome.alsoChanges] } : {}),
+      ...(outcome.alsoChanges !== undefined
+        ? { alsoChanges: also.slice(0, WORKFLOW_ALSO_CHANGES_MAX) }
+        : {}),
       ...(outcome.running !== undefined ? { running: outcome.running } : {}),
       ...(schedules.length > 0 ? { schedules } : {}),
     });
-    if (!parsed.success) {
-      return {
-        ok: false,
-        refusal: "unavailable",
-        reason: oneLineText(`the save could not be reported: ${parsed.error.message}`).slice(
-          0,
-          200,
-        ),
-      };
+    if (parsed.success) {
+      return parsed.data;
     }
-    return parsed.data;
+    const why = capWithEllipsis(
+      oneLineText(`the rest of the save could not be reported: ${parsed.error.message}`),
+      WORKFLOW_REASON_MAX,
+    );
+    // `unavailable` means "this session cannot edit workflows" and nothing else.
+    // A write that LANDED keeps its answer (the hash the next start asks about);
+    // a refusal keeps its own word.
+    const fallback = WorkflowSaveResultSchema.safeParse(
+      outcome.ok
+        ? {
+            ok: true,
+            reason: why,
+            ...(outcome.hash !== undefined ? { hash: outcome.hash } : {}),
+            ...(outcome.version !== undefined ? { version: outcome.version } : {}),
+            ...(outcome.path !== undefined ? { path: outcome.path } : {}),
+            ...(outcome.approved !== undefined ? { approved: outcome.approved } : {}),
+          }
+        : { ok: false, refusal: outcome.refusal ?? "invalid", reason: why },
+    );
+    return fallback.success
+      ? fallback.data
+      : { ok: outcome.ok, ...(outcome.ok ? {} : { refusal: "invalid" }), reason: why };
   }
 
   /** This session's rows of `workflow/list` (D5): the hub's signal is `needsUser`. */
