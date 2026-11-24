@@ -256,6 +256,37 @@ describe("ask ↔ step pairing and the answer", () => {
     expect(h.controller.state().notice).toBe(RUN_ASK_GONE);
   });
 
+  test("the sheet moved to an UNRELATED ask: a card's tap answers nothing (never that ask)", async () => {
+    // review round 2, #2: the controller must pass the id of ITS step's ask, never
+    // whatever is on the sheet — another step, the run's hash, a plain shell ask.
+    const others: CardAsk[] = [
+      { ...MERGE_ASK, requestId: "ask-other-step", agent: { id: "wf-1.build" } },
+      { ...MERGE_ASK, requestId: "ask-hash", agent: { id: "wf-1" } },
+      { ...MERGE_ASK, requestId: "ask-shell", agent: { id: "wf-11.merge" } },
+      { requestId: "ask-plain", title: "Run command", detail: "rm -rf build" },
+    ];
+    for (const other of others) {
+      const h = harness();
+      h.controller.start();
+      await h.flush();
+      h.push([run()]);
+      h.ask(MERGE_ASK);
+      h.ask(other); // the card was drawn for merge's ask; the sheet moved on
+      h.controller.answer("merge", "allow_once");
+      expect(h.answered).toEqual([]);
+      expect(h.controller.state().notice).toBe(RUN_ASK_GONE);
+    }
+    // And the run's own buttons never answer a step's ask.
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask(MERGE_ASK);
+    h.controller.answer(null, "allow_once");
+    expect(h.answered).toEqual([]);
+    expect(h.controller.state().notice).toBe(RUN_ASK_GONE);
+  });
+
   test("no ask source (the session's screen is not up): no buttons, ever", async () => {
     const h = harness({ asks: false });
     h.controller.start();

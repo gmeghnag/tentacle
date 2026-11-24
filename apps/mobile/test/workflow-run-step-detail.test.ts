@@ -116,6 +116,9 @@ function harness(
       for (const fn of feed) fn(rows);
     },
     stepCalls,
+    reply: (next: WorkflowStepResult | { unsupported: true }) => {
+      opts.stepReply = next;
+    },
     hold: () => {
       held = true;
     },
@@ -174,6 +177,67 @@ describe("a step's detail: read on demand, held per step", () => {
     h.controller.openStep("review");
     await h.flush();
     h.controller.openStep("review");
+    await h.flush();
+    expect(h.stepCalls).toHaveLength(1);
+  });
+
+  test("a LIVE detail is not final: reopened after the step ended, it is read again", async () => {
+    // review round 2, #1: a `live:true` record was cached forever ("running now:").
+    const h = harness({ stepReply: { detail: detail({ live: true, report: "partial" }) } });
+    h.controller.start();
+    await h.flush();
+    h.push([run({ state: "running", steps: [step("a", "running")] })]);
+    h.controller.openStep("a");
+    await h.flush();
+    h.controller.closeStep();
+    h.push([run({ steps: [step("a", "ok")] })]);
+    h.reply({ detail: detail({ report: "final" }) });
+    h.controller.openStep("a");
+    // The held live text stays on screen while the fresh read flies (no skeleton flash).
+    expect(detailOf(h, "a")).toEqual({
+      kind: "loaded",
+      detail: detail({ live: true, report: "partial" }),
+    });
+    await h.flush();
+    expect(h.stepCalls).toHaveLength(2);
+    expect(detailOf(h, "a")).toEqual({ kind: "loaded", detail: detail({ report: "final" }) });
+  });
+
+  test("a held detail of an OLDER attempt is read again (a rerun started elsewhere)", async () => {
+    const h = harness();
+    await ready(h);
+    h.controller.openStep("review");
+    await h.flush();
+    h.push([run({ steps: [step("review", "error", { attempt: 1 })] })]);
+    h.reply({ detail: detail({ attempt: 1, report: "second" }) });
+    h.controller.openStep("review");
+    await h.flush();
+    expect(h.stepCalls).toHaveLength(2);
+    expect(detailOf(h, "review")).toEqual({
+      kind: "loaded",
+      detail: detail({ attempt: 1, report: "second" }),
+    });
+  });
+
+  test("a held detail of an older goto ROUND is read again", async () => {
+    const h = harness();
+    await ready(h);
+    h.controller.openStep("review");
+    await h.flush();
+    h.push([run({ steps: [step("review", "error", { round: 1 })] })]);
+    h.controller.openStep("review");
+    await h.flush();
+    expect(h.stepCalls).toHaveLength(2);
+  });
+
+  test("an explicit attempt already held (ended) is not re-read", async () => {
+    const h = harness({ stepReply: { detail: detail({ attempt: 0 }) } });
+    h.controller.start();
+    await h.flush();
+    h.push([run({ steps: [step("review", "error", { attempt: 1 })] })]);
+    h.controller.openStep("review", 0);
+    await h.flush();
+    h.controller.openStep("review", 0);
     await h.flush();
     expect(h.stepCalls).toHaveLength(1);
   });

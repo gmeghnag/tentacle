@@ -2119,6 +2119,44 @@ ends on a bare container). **Unverified without a simulator, and stated as such:
 can type into `workflow-start-input-slug` under the keyboard, whether the hash-approval sheet really
 presents over this pushed screen, and the S6 banner's timing after the catalogue re-read.
 
+### Fix round 1 (adversarial review of slices 3, 4, 5b: findings #1, #2, #3)
+
+1. **#1 FIXED — a `live` step detail was cached forever.** `apps/mobile/src/workflow-run-controller.ts`:
+   new pure `heldFits(held, row, attempt)` (above `WorkflowRunController`) classifies a held
+   `loaded` record as `final` (ended read of the same attempt — and, with no explicit attempt, the
+   same goto round — as the step's row now), `live` (same execution, read while running) or `no`
+   (another attempt/round: a rerun started anywhere). `readStep` re-reads unless `final`; a `live`
+   record stays painted while the fresh read flies (no skeleton flash), a `no` record shows the
+   skeleton (never another attempt's prompt). Still ONE read in flight per step. Tests
+   (`apps/mobile/test/workflow-run-step-detail.test.ts`, harness gains `reply()`): live → ended →
+   reopen re-reads and paints `final`; older attempt (rerun elsewhere) re-read; older goto round
+   re-read; an explicit, held, ended attempt is NOT re-read. **Red** on the old code: 3 fail
+   (`Expected length: 2 / Received length: 1` — live, attempt, round), 15 pass.
+2. **#2 FIXED (test-only; the code was already correct).** `apps/mobile/test/workflow-run-controller.test.ts`
+   "the sheet moved to an UNRELATED ask…": the card was drawn for `wf-1.merge`'s ask, the sheet
+   then holds another step's ask / the run's hash ask / `wf-11.merge` / a plain ask with no asker →
+   `answer("merge", …)` sends nothing and says `RUN_ASK_GONE`; and `answer(null, …)` never answers a
+   step's ask. Red is shown on the reviewer's mutation (below), since the code is correct.
+3. **#3 NOT FIXED here (merge gate, out of an executor's reach).** It needs the orchestrator's P1/P5/S4
+   simulator shots (or a recorded manual simulator run) — no simulator in this context; no code
+   change can verify that the native Permission sheet presents over a pushed `WorkflowRun` /
+   `WorkflowStart` route. Remains the merge blocker as the review states.
+
+**Mutations (each applied by hand, run, reverted; `git status` shows only the 3 intended files):**
+
+| Mutation | Result |
+|---|---|
+| `heldFits`: `return held.live ? "live" : "final"` → `return "final"` | 1 fail (LIVE detail is not final), 17 pass |
+| `heldFits`: `if (!same)` → `if (false && !same)` | 2 fail (OLDER attempt, older goto ROUND), 16 pass |
+| `readStep`: `if (fit !== "live")` → `if (true)` (always skeleton) | 1 fail (LIVE…: the held live text stays painted), 17 pass |
+| `answer`: `askForStep(pending(), deps.runId, stepId)` → `pending()[0]` (the reviewer's) | 1 fail (UNRELATED ask), 18 pass |
+
+**Narrow gate (mine):** `workflow-run-controller`, `workflow-run-step-detail`, `workflow-step-layer`,
+`workflow-step-wiring`, `workflow-screens-wiring` 74 pass / 0 fail; `tsc -p apps/mobile` clean;
+`biome check` on the 3 files clean. Full gate: the orchestrator's script.
+
+*— claude-opus-5-5, 2026-11-24*
+
 ## Review
 
 ### Owner answers (2026-11-23)

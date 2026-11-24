@@ -156,6 +156,27 @@ export interface RunState {
 
 const ENDED: readonly SessionOpenFailure[] = ["archived", "deleted", "gone"];
 
+/**
+ * Whether a held detail still answers an open of `row` (asked for `attempt`, or the
+ * row's current one): `final` = an ENDED read of that very execution (never re-read);
+ * `live` = that execution, but read while it ran (its text is a snapshot: re-read);
+ * `no` = another attempt or goto round (a rerun started anywhere: re-read).
+ */
+function heldFits(
+  held: WorkflowStepDetail,
+  row: WorkflowStepRow,
+  attempt: number | undefined,
+): "final" | "live" | "no" {
+  const same =
+    attempt === undefined
+      ? held.attempt === row.attempt && held.round === row.round
+      : held.attempt === attempt;
+  if (!same) {
+    return "no";
+  }
+  return held.live ? "live" : "final";
+}
+
 export interface WorkflowRunController {
   state(): RunState;
   start(): void;
@@ -226,13 +247,16 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
     changed();
   }
 
-  /** One step's `prompt`/`report`: at most ONE read in flight, and never repeated once held. */
+  /**
+   * One step's `prompt`/`report`: at most ONE read in flight, and never repeated once
+   * an ended read of the same attempt/round is held (`heldFits`).
+   */
   function readStep(stepId: string, attempt?: number): void {
     const handle = session;
     // Only a step of the run THIS screen follows: never a request for an id that
     // is not on the feed (a stale tap, or another run's step).
-    const onRun = rows.find((r) => r.runId === deps.runId)?.steps.some((s) => s.id === stepId);
-    if (onRun !== true) {
+    const row = rows.find((r) => r.runId === deps.runId)?.steps.find((s) => s.id === stepId);
+    if (row === undefined) {
       return;
     }
     if (handle === null || handle.workflowStep === undefined) {
@@ -240,11 +264,20 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
       changed();
       return;
     }
-    if (inflight.has(stepId) || details.get(stepId)?.kind === "loaded") {
+    if (inflight.has(stepId)) {
+      return;
+    }
+    const held = details.get(stepId);
+    const fit = held?.kind === "loaded" ? heldFits(held.detail, row, attempt) : "no";
+    if (fit === "final") {
       return;
     }
     inflight.add(stepId);
-    details.set(stepId, { kind: "loading" });
+    // A live record of the SAME execution stays painted while the fresh read flies;
+    // anything else (never read, another attempt/round) shows the skeleton.
+    if (fit !== "live") {
+      details.set(stepId, { kind: "loading" });
+    }
     changed();
     const finish = (next: StepDetail): void => {
       inflight.delete(stepId);
