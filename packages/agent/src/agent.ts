@@ -20,6 +20,7 @@ import {
   type AgentJobs,
   type AgentNotify,
   type ArtifactSink,
+  type AttachmentRef,
   type AttachmentSource,
   type BackgroundJob,
   COUNT_TOKENS_CAP_MS,
@@ -41,6 +42,7 @@ import {
   type ToolCall,
   type ToolContext,
   type ToolDefinition,
+  type ToolImageStore,
   type ToolProgressEvent,
   type ToolResult,
   type Usage,
@@ -48,6 +50,7 @@ import {
   type VoiceTurn,
   allowAll,
   answerOutstandingCalls,
+  checkAttachmentRefs,
   countTokensBounded,
   subagentReportNote,
   voiceReasoning,
@@ -278,9 +281,26 @@ const TURN_STOPPED_INTERRUPTED_NOTE =
  * and a failed result's error flag (docs/fix/mobile-qa-1117.md).
  */
 function toolMessage(callId: string, result: ToolResult, durationMs?: number): ChatMessage {
+  // `image_view`'s ONE image (docs/feat/image-view.md D9): a ref that fails the
+  // wire's own check becomes an error result naming why — never a thrown turn,
+  // never a message the log would refuse.
+  const image = result.image === undefined ? undefined : imageCheck(result.image);
+  if (image !== undefined && "error" in image) {
+    const { image: _dropped, ...rest } = result;
+    return toolMessage(
+      callId,
+      {
+        ...rest,
+        content: `${result.content}\n[image not attached: ${image.error}]`,
+        isError: true,
+      },
+      durationMs,
+    );
+  }
   return {
     role: "tool",
     content: result.content,
+    ...(image !== undefined ? { attachments: [image.ref] } : {}),
     toolCallId: callId,
     ...(result.spill ? { spill: result.spill } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
@@ -289,6 +309,15 @@ function toolMessage(callId: string, result: ToolResult, durationMs?: number): C
     // as live did (docs/fix/mobile-qa-1117.md, bug 2). Display only.
     ...(result.isError === true ? { isError: true as const } : {}),
   };
+}
+
+function imageCheck(ref: AttachmentRef): { ref: AttachmentRef } | { error: string } {
+  try {
+    checkAttachmentRefs([ref]);
+    return { ref };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /** A tool run's outcome: `durationMs` is set iff the tool (or the skill read) actually ran. */
@@ -610,6 +639,17 @@ export interface AgentConfig {
    */
   readonly attachments?: AttachmentSource;
   /**
+   * The session's tool-image store (docs/feat/image-view.md D1/D9): handed to
+   * every tool call as `ctx.images` (`fs_read` keeps a PDF's pictures in it,
+   * `image_view` picks one). The SAME object as `attachments`; absent = off.
+   */
+  readonly toolImages?: ToolImageStore;
+  /**
+   * Tokens one image ref costs the loop's default counter (docs/feat/image-view.md
+   * D7: the provider's estimate or `model.imageTokens`). Absent = 1600.
+   */
+  readonly imageTokens?: number;
+  /**
    * The session's artifact store (docs/feat/model-artifacts.md D4): handed to
    * every tool call's context for `present`. A sub-agent is built without one,
    * so it cannot present.
@@ -802,6 +842,8 @@ export interface SessionSkills {
 
 export class Agent {
   private readonly config: AgentConfig;
+  /** The loop's own default counter: per-provider image cost (docs/feat/image-view.md D7). */
+  private readonly counter: HeuristicTokenCounter;
   private readonly gate: PermissionGate;
   /**
    * The activator behind every skill activation: `config.skills` at the start,
@@ -875,6 +917,10 @@ export class Agent {
 
   constructor(config: AgentConfig) {
     this.config = config;
+    this.counter =
+      config.imageTokens === undefined
+        ? DEFAULT_COUNTER
+        : new HeuristicTokenCounter({ imageTokens: config.imageTokens });
     this.activator = config.skills;
     this.listing = config.skillListing ?? EMPTY_SKILL_LISTING;
     const initial = config.capabilities ?? NO_CAPABILITIES;
@@ -1080,7 +1126,7 @@ export class Agent {
       this.requestHistory(messages, caps),
       tools,
       this.anchors.get(messages),
-      prune.counter ?? DEFAULT_COUNTER,
+      prune.counter ?? this.counter,
     );
     if (used * 100 < prune.window * prune.pruneAtPercent) {
       return;
@@ -1095,7 +1141,11 @@ export class Agent {
         fresh.set(index, entry);
       }
     }
-    if (estimateGain(messages, fresh).tokens * 100 < prune.window * prune.minGainPercent) {
+    const imageTokens = this.counter.imageTokens;
+    if (
+      estimateGain(messages, fresh, { imageTokens }).tokens * 100 <
+      prune.window * prune.minGainPercent
+    ) {
       return;
     }
     const next = new Map<number, PruneEntry>();
@@ -1335,6 +1385,7 @@ export class Agent {
       env: this.config.env,
       ...(this.config.jobs ? { jobs: this.config.jobs } : {}),
       ...(this.config.artifacts ? { artifacts: this.config.artifacts } : {}),
+      ...(this.config.toolImages ? { images: this.config.toolImages } : {}),
       history: messages,
     };
 
@@ -1983,7 +2034,7 @@ export class Agent {
         this.requestHistory(messages, caps),
         tools,
         this.anchors.get(messages),
-        awareness.counter ?? DEFAULT_COUNTER,
+        awareness.counter ?? this.counter,
       ),
       window: awareness.window,
     };
@@ -2057,7 +2108,7 @@ export class Agent {
     return {
       // `sent` keeps every stored message but the system one by identity, so
       // the anchor (keyed by the stored array) still matches past index 0.
-      used: estimateUsed(sent, tools, this.anchors.get(messages), DEFAULT_COUNTER),
+      used: estimateUsed(sent, tools, this.anchors.get(messages), this.counter),
       exact: false,
     };
   }

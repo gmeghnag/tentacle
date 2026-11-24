@@ -378,6 +378,102 @@ farmaquiz acceptance (F1) on a worker session, and once on `serve`.
 
 ## Execution
 
+*— claude-opus-5-5 (executor), 2026-11-24*
+
+**Step 0 (load-bearing check) — HOLDS.** `.tentacle/tmp/image-view/step0.ts`: a real
+`AttachmentStore`, a 4×4 PNG `put` into it, a `role:"tool"` message with that single ref,
+streamed through `AnthropicProvider` / `OpenAIProvider` (`images: true`) with a recording
+`fetch`. Output:
+```
+anthropic image parts: 1 OK
+openai image parts: 1 OK
+```
+Kept as a test: T4 in `providers/test/tool-images.test.ts` (fake source; providers may not
+import the daemon).
+
+**As built, in plan order** (all slices DONE):
+1. core — `tool-images.ts` (new: `ToolImageStore`, `imageRefPrefix`, `toolImageLabel`,
+   `toolImageLimits`, `IMAGE_VIEW_TOOL_NAME`, `TOOL_IMAGE_LOW_EDGE`); `pdf-images.ts`
+   (`lowEdge`, injected `sha256`, `id/low/lowId/lowWidth/lowHeight`, `ref <id12>` marker,
+   `not kept: per-read cap`, `FULL_PAGE_HINT`, `unkeepImageMarker`, summary `refs`/`refused`,
+   footer `kept for image_view`); `tool.ts` (`ToolResult.image`, `ToolContext.images`);
+   `token-counter.ts` (`imageTokens`); `tool-labels.ts` (`image_view: "Image"`).
+2. providers — `imageTokenEstimate` (1600 / 3200 / override); the aged-out line now says
+   "(call image_view again to see it)".
+3. daemon — `AttachmentStore.putTool` / `resolve` + `TOOL_IMAGE_BYTES` (48 MiB, option
+   `toolMaxBytes`), tool index on the store, joined concurrent puts; `session-host.ts`
+   sets `toolImages: uploads` at both `"store"` sites.
+4. agent — `toolMessage` → `attachments: [image]` (a ref failing `checkAttachmentRefs` →
+   error result); `toolContext.images`; `AgentConfig.toolImages` / `imageTokens` (a
+   per-agent `counter` replaces `DEFAULT_COUNTER` at the 3 sites); prune rule
+   `viewed_image` (stub without `attachments`, `savedImages`, `estimateGain(…,{imageTokens})`);
+   `subagent.ts` excludes `image_view`.
+5. tools — `image-view.ts` (new); `fs_read` keeps pictures via `ctx.images`
+   (`keepPdfImages`), scan-with-store returns verdict + markers; `createFsReadTool`;
+   `pdf/run.ts` (hasher, `page.view` → page area), `pdf/extract.ts` (typed new fields).
+6. config — `model.imageDetail`, `model.imageTokens` (schema, resolve, load, key-docs);
+   `config-effective.ts` probes.
+7. cli — `wiring.ts` (`BuildAgentOptions.toolImages`; with vision: `fs_read` replaced by
+   its image variant, `image_view` registered, `toolImages` + `imageTokens` to the agent);
+   `worker.ts` and `serve.ts`'s `createServeAgent` forward `ctx.toolImages`;
+   `podSessionHost` untouched (destructures only its fields → never forwards).
+8. TUI `toolSubtitle` + phone `subtitleOf`/`SUMMARISED_TOOLS`: `image_view` → `<ref>[ · high]`.
+9. `changelog.d/image-view.added.md`.
+
+**Drift from Implementation (and why):**
+- `ToolImageEntry.high/low` are `ToolImageVariant {ref, width, height}`, and `putTool`'s
+  variants are `{bytes, width, height}`: an `AttachmentRef` has no pixel size, and
+  `image_view`'s line needs `<w>×<h>`.
+- No `refs: true` request flag: `images.lowEdge` is the only switch (the worker always
+  injects the hasher; the collector uses it only with `lowEdge`). Fewer moving parts, same
+  "no `lowEdge` ⇒ today's bytes" property (golden test).
+- D3 STOP-check: `PdfPageLike` did not expose `view`, but pdf.js does
+  (`PDFPageProxy.view`, `pdfjs-dist/types/src/display/api.d.ts:1505`, `[x1,y1,x2,y2]`), so
+  it was added as an optional structural field — verified, not guessed.
+- Footer: `kept for image_view` replaces `sent` whenever the footer prints; it still prints
+  only when something needs explaining (unchanged rule). Refusals add `N not kept (see the
+  markers)` (`summary.refused`).
+- `models.*` entries `omit` `imageDetail`/`imageTokens` (the key-docs mirror would demand
+  docs for keys the Notes say are not added); `mainModel` untouched.
+- Forced `imageDetail`: the schema is `z.object({ref}).passthrough()` so a stale `detail`
+  reaches `execute` and gets the note (a strip schema would silently drop it).
+- `putTool` never evicts stale user partials (owner Q2 "refused without eviction").
+- T9 forced ask is asserted at `describeToolCall` (what the gate hands the broker on
+  `force: "ask"`), not through a hook process. T8's `serve` log is covered by the shared
+  `SessionLog` entry + `KnownLogEntrySchema` parse (same format); no file-level serve test.
+- Red-before-green (honest): most tests were written alongside their code, not run red
+  first. Non-vacuity was shown by mutation instead (below); the provider "older" text test
+  and the T7 pod row are red on the pre-change code by construction.
+
+**Mutations (each reverted; `git diff --stat` unchanged after):**
+| Mutation | Test that went red |
+|---|---|
+| T7: pod factory forwards `toolImages` | `image-view-wiring` "a pod daemon running its OWN model … never offered" |
+| T1: low variant never computed (`if (true)`) | core `tool-images` "2000×1000 → high…, low…, two ids" |
+| T2: tool sub-cap check removed | daemon `attachment-tool-images` "sub-cap refuses WITHOUT reserving" |
+| T10: prune stub keeps `attachments` | agent `prune` "stub WITHOUT attachments" |
+| T10: `estimateGain` ignores images | agent `prune` "estimateGain counts the dropped image" |
+| D9: sub-agent filter lets `image_view` through | agent `subagent-image-view` "general child … does not get it" |
+| T8: `toolMessage` drops the image | agent `loop-attachments` (2 rows) |
+| T3: refused marker not rewritten | tools `image-view` "a store refusal rewrites only that marker" |
+
+**Narrow verification:** the 26 touched/covering test files → `591 pass, 0 fail`;
+`biome check` on every touched tree → clean. Per-package `tsc -p` (core, providers,
+config, agent, tools, daemon, apps/mobile): no error in a touched file;
+`tsc -p packages/cli` shows only pre-existing errors (that tsconfig lacks
+`@tentacle/protocol`/tui paths), none introduced. Full gate: left to the orchestrator's
+script (per the budget). No protocol schema change → `protocol.json` not regenerated, no
+`protocol.d/` note.
+
+**Debt / unverified:**
+- A sub-agent inherits the parent's image-variant `fs_read` description (it names
+  `image_view`, which the child lacks); its context has no store, so its markers carry no
+  ref. Cosmetic; a swap in `subagent.ts` would fix it.
+- The owner's Qwen farmaquiz acceptance (F1) is not run: verify on a worker session and once
+  on `serve`.
+- Parallel-branch overlap: all new imports are on their own lines (agent.ts, wiring.ts,
+  core/index.ts); expected conflicts with `feat/workflows-ui` are import lines only.
+
 ## Review
 
 ### Owner answers (2026-11-23 ~22:00)

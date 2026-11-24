@@ -15,6 +15,7 @@ import {
   type AgentInbox,
   type AgentNotifyResult,
   type ExecutionEnvironment,
+  IMAGE_VIEW_TOOL_NAME,
   type ModelProvider,
   type PermissionRequest,
   type PermissionRequestOptions,
@@ -428,6 +429,9 @@ export function createSubagentRunner(deps: SubagentDeps): {
         tool.name === CHART_TOOL_NAME ||
         // A diagram likewise (docs/feat/model-diagrams.md D2, P6).
         tool.name === DIAGRAM_TOOL_NAME ||
+        // A child has no tool-image store (it is built without `attachments`),
+        // so its markers carry no ref to view (docs/feat/image-view.md D9).
+        tool.name === IMAGE_VIEW_TOOL_NAME ||
         // The schedule table is the SESSION's, and a fire starts a MAIN-agent
         // turn (docs/feat/cron-tool.md P4): a child may neither arm nor drop one.
         tool.name === SCHEDULE_CREATE_TOOL_NAME ||

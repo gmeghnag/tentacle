@@ -27,7 +27,16 @@
  * the synchronous prefix above is unchanged).
  */
 import { createHash } from "node:crypto";
-import type { AttachmentRef, AttachmentSource } from "@tentacle/core";
+import type {
+  AttachmentRef,
+  AttachmentSource,
+  ToolImageEntry,
+  ToolImagePut,
+  ToolImageResolve,
+  ToolImageStore,
+  ToolImageVariant,
+  ToolImageVariantInput,
+} from "@tentacle/core";
 import { DomainErrorCode, MAX_IMAGE_BYTES } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 
@@ -36,6 +45,13 @@ export const SESSION_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 /** Per daemon process (owner Q1), shared by every session's store. */
 export const DAEMON_UPLOAD_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Per session, the most the TOOL images (`putTool`, docs/feat/image-view.md
+ * D2) may take of `SESSION_UPLOAD_BYTES` (owner Q2): refused past it, never
+ * evicting, so user uploads always keep ≥ 52 MiB.
+ */
+export const TOOL_IMAGE_BYTES = 48 * 1024 * 1024;
 
 /** A partial with no touch for this long is a candidate for eviction (owner Q3). */
 export const PARTIAL_IDLE_MS = 10 * 60 * 1000;
@@ -129,6 +145,8 @@ export interface AttachmentStoreOptions {
   readonly partialIdleMs?: number;
   /** The clock, injected so idle eviction is testable. */
   readonly now?: () => number;
+  /** The share of the session cap tool images may take (default `TOOL_IMAGE_BYTES`). */
+  readonly toolMaxBytes?: number;
 }
 
 /** One `attachment/put`'s payload, minus the session id the connection resolved. */
@@ -143,7 +161,7 @@ export interface PutChunk {
 const refuse = (reason: string, message: string): RpcError =>
   new RpcError(DomainErrorCode.AttachmentRefused, message, { reason });
 
-export class AttachmentStore implements AttachmentSource {
+export class AttachmentStore implements AttachmentSource, ToolImageStore {
   private readonly entries = new Map<BlobId, Entry>();
   private readonly budget: UploadBudget;
   private readonly maxBytes: number;
@@ -157,6 +175,15 @@ export class AttachmentStore implements AttachmentSource {
    */
   private used = 0;
   private disposed = false;
+  /** The tool sub-cap (docs/feat/image-view.md D2, owner Q2). */
+  private readonly toolMaxBytes: number;
+  /** Bytes reserved under the tool sub-cap, per blob (released when the blob is dropped). */
+  private readonly toolBytes = new Map<BlobId, number>();
+  private toolUsed = 0;
+  /** BOTH variant ids of each tool picture → its entry. User uploads never enter it. */
+  private readonly toolIndex = new Map<BlobId, ToolImageEntry>();
+  /** A `putTool` still landing, by high id: a concurrent put of the same picture joins it. */
+  private readonly toolPending = new Map<BlobId, Promise<ToolImageEntry | { refused: string }>>();
 
   constructor(budget: UploadBudget, opts: AttachmentStoreOptions = {}) {
     this.budget = budget;
@@ -164,6 +191,7 @@ export class AttachmentStore implements AttachmentSource {
     this.partialIdleMs = opts.partialIdleMs ?? PARTIAL_IDLE_MS;
     this.now = opts.now ?? Date.now;
     this.disk = opts.disk;
+    this.toolMaxBytes = opts.toolMaxBytes ?? TOOL_IMAGE_BYTES;
     for (const [id, size] of opts.disk?.index ?? []) {
       this.entries.set(id, { kind: "stored", size });
       this.used += size;
@@ -362,6 +390,11 @@ export class AttachmentStore implements AttachmentSource {
     this.entries.delete(id);
     const size = sizeOf(entry);
     this.used = Math.max(0, this.used - size);
+    const tool = this.toolBytes.get(id);
+    if (tool !== undefined) {
+      this.toolBytes.delete(id);
+      this.toolUsed = Math.max(0, this.toolUsed - tool);
+    }
     // A blob on disk holds no memory: its daemon reservation went when it landed.
     if (entry.kind !== "stored") {
       this.budget.release(size);
@@ -402,18 +435,142 @@ export class AttachmentStore implements AttachmentSource {
     return entry?.kind === "complete" && entry.landing === null && entry.bytes.length === ref.size;
   }
 
+  /**
+   * Keep a tool picture's variants (docs/feat/image-view.md D2) — the ONLY
+   * write path besides `put`. Synchronous up to the reservation, like `put`:
+   * each variant's id is its sha256 (computed here, never trusted), a picture
+   * already held is deduped, and the fresh bytes are reserved in the session
+   * cap, the daemon cap AND the tool sub-cap at once — or nothing is reserved
+   * and it answers `{refused}` (never throws, never evicts). With a disk it
+   * resolves only once every variant landed, so a recorded ref names durable
+   * bytes. Both variant ids then resolve to the entry (`resolve`).
+   */
+  putTool(input: ToolImagePut): Promise<ToolImageEntry | { refused: string }> {
+    const high = withId(input.variants.high);
+    const low = input.variants.low === undefined ? high : withId(input.variants.low);
+    const known = this.toolIndex.get(high.id);
+    if (known !== undefined && this.holds(known.high.ref) && this.holds(known.low.ref)) {
+      return Promise.resolve(known);
+    }
+    const pending = this.toolPending.get(high.id);
+    if (pending !== undefined) {
+      return pending;
+    }
+    if (this.disposed) {
+      return Promise.resolve({ refused: "image could not be stored" });
+    }
+    const fresh: { id: BlobId; bytes: Uint8Array }[] = [];
+    const waits: Promise<PutAck>[] = [];
+    for (const v of high.id === low.id ? [high] : [high, low]) {
+      const size = v.input.bytes.length;
+      if (size <= 0 || size > MAX_IMAGE_BYTES) {
+        return Promise.resolve({ refused: "image too large to keep" });
+      }
+      const existing = this.entries.get(v.id);
+      if (existing === undefined) {
+        fresh.push({ id: v.id, bytes: v.input.bytes });
+      } else if (existing.kind === "partial" || sizeOf(existing) !== size) {
+        return Promise.resolve({ refused: "image could not be stored" });
+      } else if (existing.kind === "complete" && existing.landing !== null) {
+        waits.push(existing.landing);
+      }
+    }
+    const need = fresh.reduce((n, f) => n + f.bytes.length, 0);
+    if (need > 0) {
+      // No eviction (owner Q2): a stale user partial is the user's, not ours to drop.
+      if (this.toolUsed + need > this.toolMaxBytes || !this.fits(need) || !this.take(need)) {
+        return Promise.resolve({ refused: "image store full" });
+      }
+      this.toolUsed += need;
+      for (const f of fresh) {
+        this.toolBytes.set(f.id, f.bytes.length);
+      }
+    }
+    const label = input.label;
+    const variant = (v: Variant): ToolImageVariant => ({
+      ref: {
+        id: v.id,
+        mimeType: input.mimeType,
+        size: v.input.bytes.length,
+        ...(label !== "" ? { name: label } : {}),
+      },
+      width: v.input.width,
+      height: v.input.height,
+    });
+    const entry: ToolImageEntry = { high: variant(high), low: variant(low), label };
+    const index = (): ToolImageEntry => {
+      this.toolIndex.set(high.id, entry);
+      this.toolIndex.set(low.id, entry);
+      return entry;
+    };
+    if (this.disk === undefined) {
+      for (const f of fresh) {
+        this.entries.set(f.id, { kind: "complete", bytes: f.bytes, landing: null });
+      }
+      return Promise.resolve(index());
+    }
+    for (const f of fresh) {
+      waits.push(this.land(f.id, f.bytes));
+    }
+    const landed = Promise.all(waits)
+      .then(
+        () =>
+          this.disposed || !this.holds(entry.high.ref) || !this.holds(entry.low.ref)
+            ? { refused: "image could not be stored" }
+            : index(),
+        () => ({ refused: "image could not be stored" }),
+      )
+      .finally(() => this.toolPending.delete(high.id));
+    this.toolPending.set(high.id, landed);
+    return landed;
+  }
+
+  /**
+   * The tool picture an id PREFIX names (either variant's id): none, exactly
+   * one, or several (ambiguous, with their labels). User uploads are never in
+   * the index, so `image_view` cannot reach one.
+   */
+  resolve(prefix: string): ToolImageResolve {
+    const found = new Set<ToolImageEntry>();
+    for (const [id, entry] of this.toolIndex) {
+      if (id.startsWith(prefix)) {
+        found.add(entry);
+      }
+    }
+    const [only] = found;
+    if (only === undefined) {
+      return { kind: "none" };
+    }
+    if (found.size === 1) {
+      return { kind: "found", entry: only };
+    }
+    return { kind: "ambiguous", labels: [...found].map((e) => e.label) };
+  }
+
   /** Release every MEMORY reservation (never touches the disk). Idempotent: `close()` may run twice. */
   dispose(): void {
     if (this.disposed) {
       return;
     }
     this.disposed = true;
+    this.toolIndex.clear();
     for (const id of [...this.entries.keys()]) {
       this.drop(id);
     }
     this.entries.clear();
   }
 }
+
+interface Variant {
+  readonly id: BlobId;
+  readonly input: ToolImageVariantInput;
+}
+
+/** A variant and its content address, computed from its bytes (never taken on trust). */
+const withId = (input: ToolImageVariantInput): Variant => ({
+  id: createHash("sha256").update(input.bytes).digest("hex"),
+  input,
+});
 
 const touched = (entry: Entry): number => (entry.kind === "partial" ? entry.touchedAt : 0);
 

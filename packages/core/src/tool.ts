@@ -5,12 +5,13 @@
  * with a typed handler. The registry validates arguments against `inputSchema`
  * before `execute` is ever called, so handlers receive already-valid input.
  */
-import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactMeta, AttachmentRef } from "@tentacle/protocol";
 import type { z } from "zod";
 import type { ExecutionEnvironment } from "./execution.ts";
 import type { JobController } from "./jobs.ts";
 import type { ChatMessage } from "./model.ts";
 import type { PathLocks } from "./path-locks.ts";
+import type { ToolImageStore } from "./tool-images.ts";
 
 /** Whether a tool call needs user approval before running. */
 export type PermissionLevel = "none" | "ask" | "deny";
@@ -113,6 +114,12 @@ export interface ToolResult {
    * (a transform that rewrote it drops this copy).
    */
   readonly denialReply?: string;
+  /**
+   * ONE image this result puts on the wire (`image_view`, docs/feat/image-view.md
+   * D5): singular by type, so no message this feature writes can carry more than
+   * one ref. The agent turns it into the tool message's `attachments: [image]`.
+   */
+  readonly image?: AttachmentRef;
 }
 
 /**
@@ -173,6 +180,12 @@ export interface ToolContext {
    * D4). Absent for sub-agents and builds without one: `present` then errors.
    */
   readonly artifacts?: ArtifactSink;
+  /**
+   * The session's tool-image store (docs/feat/image-view.md D1): `fs_read`
+   * keeps a PDF's pictures in it, `image_view` picks one. Absent in a pod, a
+   * sub-agent and a build without vision.
+   */
+  readonly images?: ToolImageStore;
   /**
    * The conversation so far (read-only view of the live history), for a tool
    * whose answer depends on what is already in context — e.g. `skill` does

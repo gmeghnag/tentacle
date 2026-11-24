@@ -1341,6 +1341,17 @@ describe("toolTitle labels", () => {
     expect(toolTitle(tool("diagram", '{"mermaid":"x"}')).subtitle).toBe('{"mermaid":"x"}');
   });
 
+  // docs/feat/image-view.md T12: `Image <ref>`, ` · high` only for the costly detail.
+  test("image_view shows its ref, and the detail when high", () => {
+    expect(toolTitle(tool("image_view", '{"ref":"a1b2c3d4e5f6","detail":"high"}'))).toEqual({
+      label: "Image",
+      subtitle: "a1b2c3d4e5f6 · high",
+    });
+    expect(toolTitle(tool("image_view", '{"ref":"a1b2c3d4e5f6","detail":"low"}')).subtitle).toBe(
+      "a1b2c3d4e5f6",
+    );
+  });
+
   test("an unlabelled (MCP) tool keeps its name and raw args", () => {
     expect(toolTitle(tool("mcp__x__y", '{"q":1}'))).toEqual({
       label: "mcp__x__y",

@@ -78,6 +78,16 @@ export const ModelConfigSchema = z
      * anthropic refuse image prompts. The one truth is `imageLimits()`.
      */
     images: z.boolean().optional(),
+    /**
+     * The detail `image_view` sends a picture at (docs/feat/image-view.md D6):
+     * `auto` (default) lets the model choose per call; `low`/`high` force it.
+     */
+    imageDetail: z.enum(["auto", "low", "high"]).optional(),
+    /**
+     * Tokens one image costs the context estimate (docs/feat/image-view.md D7).
+     * Unset: the provider's estimate (anthropic 1600, openai-compatible 3200).
+     */
+    imageTokens: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -88,7 +98,12 @@ export type ModelConfig = z.infer<typeof ModelConfigSchema>;
  * `autoTitle`/`titleModel` are accepted and have no effect (owner Q3) — plus a
  * `description` the agent reads when the entry is selectable.
  */
-export const ModelEntrySchema = ModelConfigSchema.extend({
+// `imageDetail`/`imageTokens` are the MAIN model's only (docs/feat/image-view.md
+// Notes): the agent's counter and `image_view` are built once, from `model`.
+export const ModelEntrySchema = ModelConfigSchema.omit({
+  imageDetail: true,
+  imageTokens: true,
+}).extend({
   description: z.string().min(1).max(300).optional(),
 });
 

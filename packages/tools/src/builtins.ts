@@ -8,7 +8,13 @@
  * so a rich frontend can render a git-style diff. Mutating tools default to
  * `permission: "ask"`.
  */
-import type { ExecOptions, Tool, ToolContext, ToolDiffDetail } from "@tentacle/core";
+import type {
+  ExecOptions,
+  Tool,
+  ToolContext,
+  ToolDiffDetail,
+  ToolImageStore,
+} from "@tentacle/core";
 import {
   DEFAULT_PDF_IMAGE_LIMITS,
   MAX_PDF_BYTES,
@@ -20,12 +26,15 @@ import {
   pathLocksFor,
   pdfVerdict,
   stripImageMarkers,
+  toolImageLabel,
+  toolImageLimits,
+  unkeepImageMarker,
 } from "@tentacle/core";
 import { createTwoFilesPatch } from "diff";
 import { z } from "zod";
 import { shellKillTool, shellOutputTool } from "./background.ts";
 import { pathConcurrency } from "./concurrency.ts";
-import { extractPdf } from "./pdf/extract.ts";
+import { type PdfExtractedPage, extractPdf } from "./pdf/extract.ts";
 
 /** Build a unified-diff detail and count changed lines. */
 function makeDiff(path: string, before: string, after: string): ToolDiffDetail {
@@ -140,6 +149,24 @@ export const fsReadTool: Tool<z.infer<typeof fsReadInput>> = {
 };
 
 /**
+ * `fs_read`, optionally in its image variant (docs/feat/image-view.md D4): the
+ * same behaviour (a read keeps pictures only when its context carries the
+ * session's store), plus one sentence pointing the model at `image_view`. A
+ * NEW object: the shared `fsReadTool` is never mutated.
+ */
+export function createFsReadTool(opts: { readonly images: boolean }): Tool<
+  z.infer<typeof fsReadInput>
+> {
+  if (!opts.images) {
+    return fsReadTool;
+  }
+  return {
+    ...fsReadTool,
+    description: `${fsReadTool.description} With image_view available, a kept picture's marker carries a ref (\`[image p.N · W×H · ref <hex>]\`): call \`image_view\` with a marker's ref when a picture matters to the answer (diagrams, charts, scanned pages); skip logos.`,
+  };
+}
+
+/**
  * The PDF branch of `fs_read` (D3): `undefined` when the file is not a PDF —
  * the caller then runs today's text path unchanged. Throws a tool error for
  * every failure (encrypted, corrupt, too large, scanned, a bad range), so the
@@ -176,9 +203,12 @@ async function readPdf(
     throw new Error(`${path} is a PDF: use pages (e.g. "1-5"), not line ranges`);
   }
   const bytes = await readBytes(path, { maxBytes: MAX_PDF_BYTES });
+  // With the session's tool-image store (docs/feat/image-view.md D4) the read
+  // keeps its pictures for `image_view`: both variants and their ids.
+  const sink = ctx.images;
   const extraction = await extractPdf(bytes, {
     ...(pages !== undefined ? { pages } : {}),
-    images: DEFAULT_PDF_IMAGE_LIMITS,
+    images: sink !== undefined ? toolImageLimits() : DEFAULT_PDF_IMAGE_LIMITS,
     signal: ctx.signal,
   });
   if (!extraction.ok) {
@@ -202,19 +232,89 @@ async function readPdf(
     // Judged on the document's own text: an image marker is not text.
     pages: extraction.pages.map((page) => ({ n: page.n, text: stripImageMarkers(page.text) })),
   });
-  if (verdict.kind === "no-text") {
+  const kept = sink === undefined ? undefined : await keepPdfImages(sink, name, extraction.pages);
+  // A scan with pictures kept for `image_view` (owner Q4) is not a refusal: the
+  // verdict comes first, so the model still knows there is no text layer.
+  if (verdict.kind === "no-text" && (kept === undefined || kept.held === 0)) {
     throw new Error(verdict.message);
   }
-  // The pages' text already carries the image markers. Their PNGs stop here
-  // (docs/feat/pdf-images.md S2): the model gets the markers only, until the
-  // tool has a sink for the bytes (S3).
+  // The pages' text already carries the image markers. Without a store their
+  // PNGs stop here (docs/feat/pdf-images.md S2): the model gets the markers only.
+  const summary =
+    extraction.images === undefined || kept === undefined
+      ? extraction.images
+      : {
+          ...extraction.images,
+          sent: extraction.images.sent - kept.refused,
+          refused: kept.refused,
+        };
   const text = formatPdfText({
-    pages: extraction.pages.map((page) => ({ n: page.n, text: page.text })),
+    pages: kept?.pages ?? extraction.pages.map((page) => ({ n: page.n, text: page.text })),
     numPages: extraction.numPages,
     name,
-    ...(extraction.images !== undefined ? { imageFooter: imageFooter(extraction.images) } : {}),
+    ...(summary !== undefined ? { imageFooter: imageFooter(summary) } : {}),
   });
+  if (verdict.kind === "no-text") {
+    return { content: `${verdict.message}\n${text}` };
+  }
   return { content: verdict.kind === "partial" ? `${text}\n${verdict.message}` : text };
+}
+
+/**
+ * Put each kept picture of a read into the session's store, once per id
+ * (docs/feat/image-view.md D4), and rewrite the marker of every picture the
+ * store refused to `not kept: <reason>`. The result carries no ref: the refs
+ * are text in the markers, so no message this read writes can exceed one.
+ */
+async function keepPdfImages(
+  sink: ToolImageStore,
+  name: string,
+  pages: readonly PdfExtractedPage[],
+): Promise<{ pages: { n: number; text: string }[]; held: number; refused: number }> {
+  const outcome = new Map<string, string | null>(); // id → refusal reason, or null = held
+  for (const page of pages) {
+    for (const image of page.images ?? []) {
+      if (image.id === undefined || image.png === undefined || outcome.has(image.id)) {
+        continue;
+      }
+      const result = await sink.putTool({
+        variants: {
+          high: { bytes: image.png, width: image.width, height: image.height },
+          ...(image.low !== undefined
+            ? {
+                low: {
+                  bytes: image.low,
+                  width: image.lowWidth ?? image.width,
+                  height: image.lowHeight ?? image.height,
+                },
+              }
+            : {}),
+        },
+        mimeType: "image/png",
+        label: toolImageLabel(name, page.n),
+      });
+      outcome.set(image.id, "refused" in result ? result.refused : null);
+    }
+  }
+  let held = 0;
+  let refused = 0;
+  const reasons: [string, string][] = [];
+  for (const [id, reason] of outcome) {
+    if (reason === null) {
+      held += 1;
+    } else {
+      refused += 1;
+      reasons.push([id, reason]);
+    }
+  }
+  return {
+    pages: pages.map((page) => ({
+      n: page.n,
+      text: reasons.reduce((text, [id, why]) => unkeepImageMarker(text, id, why), page.text),
+    })),
+    held,
+    refused,
+  };
 }
 
 /**
