@@ -1845,6 +1845,18 @@ is consistent either way, but the visual must be checked in that run).
 reads "That request is no longer waiting" (the sheet returns one `ignored` for both); the screen
 could dim the buttons while `armedInMs > 0`.
 
+### Fix round 3 (orchestrator gate after exec: mockup-kit drift)
+
+The gate's one failure: `scripts/test/mockup-kit.test.ts` → "drift: committed
+`tools/mockup-kit/generated/*` === regenerated from source" RED, `kit-data.json:21: committed
+«HubFan.tsx 4826433c…» ≠ source «cc651f77…»`. Root cause: Slice 3 added the `workflows:
+"list.bullet"` glyph to `apps/mobile/src/ui/HubFan.tsx` (D4), and the kit's `kit-data.json` carries
+each source file's sha + the folded `GLYPH` map, so both entries drifted — the generated file was
+never regenerated. Fix: `bun run mockup-kit` (= `bun scripts/mockup-kit.ts gen`), which rewrites only
+that one file, and only its HubFan sha line and the new `"workflows": "list.bullet"` entry. No
+generator source touched. Verified: `bun test scripts/test/mockup-kit.test.ts` 37 pass / 0 fail;
+`bunx biome check tools/mockup-kit/generated/kit-data.json` clean.
+
 ## Review
 
 ### Owner answers (2026-11-23)
