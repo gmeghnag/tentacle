@@ -1113,6 +1113,23 @@ function toggleRowsOf(tool: ToolItem, opts: RenderOptions): number {
   }
   const cols = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
   const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  // `layoutTranscript` runs every frame: memoise on the item + width + expanded
+  // (like `rowCache`) so a frame is O(1) per call, not a re-parse + re-wrap.
+  const hit = toggleRowsCache.get(tool);
+  if (hit && hit.width === cols && hit.expanded === expanded) {
+    return hit.rows;
+  }
+  const rows = computeToggleRows(tool, cols, expanded);
+  toggleRowsCache.set(tool, { width: cols, expanded, rows });
+  return rows;
+}
+
+const toggleRowsCache = new WeakMap<
+  ToolItem,
+  { readonly width: number; readonly expanded: boolean; readonly rows: number }
+>();
+
+function computeToggleRows(tool: ToolItem, cols: number, expanded: boolean): number {
   // Plain (no sentence) collapsed: the `$` text rides the header already.
   if (shellRowParts(tool.args, tool.status, false) === null && !expanded) {
     return 1;

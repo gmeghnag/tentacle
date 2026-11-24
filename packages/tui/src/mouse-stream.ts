@@ -324,7 +324,7 @@ export function dispatchMouse(
     if (artifact !== undefined) {
       return { state: { click, selection: null }, effects: [{ kind: "openArtifact", artifact }] };
     }
-    // Only a tool call's HEADER row is a control; anywhere else the click stays
+    // Only a tool call's header (and a shell's `$` rows) is a control; elsewhere the click stays
     // what it is today (a zero-length selection, i.e. nothing).
     if (id !== null && !snapshot.expandAll) {
       return { state: { click, selection: null }, effects: [{ kind: "toggleTool", id }] };

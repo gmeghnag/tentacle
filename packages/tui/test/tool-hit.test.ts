@@ -230,3 +230,20 @@ describe("toolCallAt: a shell call's `$` rows toggle too (docs/fix/tui-click-dol
     expect(toolCallAt(e, el.start + 1)).toBe("p1");
   });
 });
+
+describe("toggleRows is memoised per item (layoutTranscript runs every frame)", () => {
+  test("a second layout of the SAME item reuses the count; a new width recomputes", () => {
+    const t = tool("m1", "echo a && echo b && echo c && echo d && echo e && echo f");
+    const o2 = { expandAll: true, width: 20 };
+    const first = layoutTranscript([t], o2).laid[0]?.toggleRows ?? 0;
+    expect(first).toBeGreaterThan(1);
+    // Same object, mutated args: a recompute would see the short command; a
+    // cache hit keeps the memoised count (the item is immutable in real use).
+    (t as { args: string }).args = JSON.stringify({ command: "x" });
+    expect(layoutTranscript([t], o2).laid[0]?.toggleRows).toBe(first);
+    // A different width is a different key → recomputed from the mutated args.
+    expect(layoutTranscript([t], { expandAll: true, width: 21 }).laid[0]?.toggleRows).not.toBe(
+      first,
+    );
+  });
+});

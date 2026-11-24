@@ -39,6 +39,14 @@ Owner 23/11 ~17:45: in the TUI only a tool row's HEADER (the intent sentence / t
 
 *— claude-sonnet-5-5, 2026-11-24*
 
+### Fix round 1
+
+- H1 (per-frame cost): `toggleRowsOf` now memoises in `toggleRowsCache` (WeakMap on the item, keyed width + expanded; `render-lines.ts` ~1110); the count itself moved to `computeToggleRows`. Nit fixed: `mouse-stream.ts:326` comment.
+- Test: `tool-hit.test.ts` "toggleRows is memoised per item": same item, args mutated after the first layout → count stays (cache hit); other width → recomputed. RED with the cache check disabled (`false &&`: expected 5, received 2), green restored. That disable is the mutation.
+- Gate (touched files): tool-hit + app-shell-row-collapsed + mouse-stream 43 pass; biome clean on 3 files. Full gate left to the script.
+
+*— claude-sonnet-5-5, 2026-11-24*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES** (1 HIGH).
