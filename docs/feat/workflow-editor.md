@@ -2037,3 +2037,17 @@ Scope: `git diff HEAD~1` (d4eb0097). `bun test apps/mobile/test/workflow-edit-co
   - `setLink(up)` with nothing pending only refreshes, as before.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 3 — PASS
+
+Scope: `git diff HEAD~1` (2d1f44f2). `bun test apps/mobile/test/workflow-edit-controller.test.ts`: 58 pass / 0 fail. `bun run lint` clean (2392 files); `bun run typecheck` clean.
+
+- **Round 2's new MEDIUM (Save stuck while the hash check is pending): FIXED.** My round-2 repro now ends `saved`, with `reads: 3`: the link-up that came during the failed check re-checked (`.tentacle/tmp/workflow-editor/rev456/stuck.test.ts`). Mutation: `recheck = false` at `apps/mobile/src/workflow-edit-controller.ts:995` → the new test "a link-up that lands DURING a check that then fails re-checks" goes red. Reverted; `git status` clean.
+- **Regressions checked, none found:**
+  - No retry loop: `recheck` is set only by an external link-up, and is cleared both when a check starts and before the catch re-runs one.
+  - A `recheck` left over after a successful or superseded check is harmless: the next check clears it.
+  - The superseded/disposed early return in the catch still comes before the re-check.
+  - Round 1's repro still passes (`lost-edits.test.ts`: `editing, dirty: true`).
+- Slices 4–6 have no open findings.
+
+*— claude-opus-5-5, 2026-11-24*
