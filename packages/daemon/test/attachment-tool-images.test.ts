@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { checkAttachmentRefs } from "@tentacle/core";
 import type { ToolImageEntry } from "@tentacle/core";
 import { AttachmentStore, UploadBudget } from "../src/attachment-store.ts";
 import { LogSessionStore } from "../src/session-log-store.ts";
@@ -220,5 +221,55 @@ describe("the tool sub-cap across a `serve` restart (review round 1)", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * docs/feat/image-files.md T7: a JPEG image FILE goes through `putTool`
+ * unchanged — the ONE thing this task widens there is the put's `mimeType`
+ * literal, so the ref actually names `image/jpeg` on the wire.
+ */
+describe("putTool of a JPEG image file (T7)", () => {
+  const jpegPut = (bytes: Uint8Array, label = "photo.jpg") => ({
+    variants: { high: { bytes, width: 4032, height: 3024 } },
+    mimeType: "image/jpeg" as const,
+    label,
+  });
+
+  test("the ref carries image/jpeg; low IS high (one blob, one reservation)", async () => {
+    const s = new AttachmentStore(new UploadBudget());
+    const e = entryOf(await s.putTool(jpegPut(bytesOf(5000, 30))));
+    expect(e.high.ref.mimeType).toBe("image/jpeg");
+    expect(e.low.ref.mimeType).toBe("image/jpeg");
+    expect(e.low.ref.id).toBe(e.high.ref.id);
+    expect(s.held).toBe(5000);
+    expect(s.holds(e.high.ref)).toBe(true);
+    // An `AttachmentRef` always accepted image/jpeg: no wire change (F13).
+    expect(() => checkAttachmentRefs([e.high.ref])).not.toThrow();
+  });
+
+  test("a `serve` reload still counts a JPEG file against the tool sub-cap", async () => {
+    const files = new Map<string, Uint8Array>();
+    const tool = new Set<string>();
+    const open = () => ({
+      index: new Map([...files].map(([id, b]) => [id, b.length] as const)),
+      toolIds: new Set(tool),
+      async write(id: string, bytes: Uint8Array, opts?: { tool?: boolean }): Promise<void> {
+        if (opts?.tool === true) tool.add(id);
+        files.set(id, bytes);
+      },
+      async read(id: string): Promise<Uint8Array | null> {
+        return files.get(id) ?? null;
+      },
+    });
+    const caps = { maxBytes: 20_000, toolMaxBytes: 6_000 };
+    const first = new AttachmentStore(new UploadBudget(), { ...caps, disk: open() });
+    entryOf(await first.putTool(jpegPut(bytesOf(5000, 31))));
+    first.dispose();
+    const second = new AttachmentStore(new UploadBudget(), { ...caps, disk: open() });
+    expect(second.held).toBe(5000);
+    expect(await second.putTool(jpegPut(bytesOf(2000, 32)))).toEqual({
+      refused: "image store full",
+    });
   });
 });
