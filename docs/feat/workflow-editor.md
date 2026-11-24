@@ -1461,3 +1461,43 @@ executor's mutations A–G are recorded above. I did not re-run them.
 - Reviewer: same family as the planner, in a fresh context. Shared blind spots are possible.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 2
+
+**Verdict: PASS.** Both round-1 MEDIUM findings are fixed. Each fix is pinned by a test that bites:
+I ran the four mutations below, each test went red, and I reverted with `cp`. `git status` was
+clean afterwards.
+
+**Gate.**
+- 9 touched test files (the 8 from round 1 plus `core/workflow-yaml`): **183 pass, 0 fail**.
+- `bun run lint`: clean (2381 files).
+- `bun run typecheck`: clean.
+
+**Finding #1 — fixed.**
+- `hosted-session.ts` now passes both `errors` lists through the catalogue's
+  `boundedWorkflowErrors` and caps `reason` at 2000. `alsoChanges` is cut to 64, and the reason
+  gives the full count.
+- A `workflow_source` answer that does not fit the wire becomes `unreadable` with its path, not
+  `unavailable`.
+- A save that does not fit the wire keeps its own refusal word. A save that landed keeps
+  `ok:true`, its hash and its version.
+- Mutation: uncapped `errors` → the 60-error test fails.
+- Mutation: a bad `hash` in the landed fallback → the "LANDED is never `unavailable`" test fails.
+
+**Finding #2 — fixed.**
+- `WORKFLOW_FILE_MAX_BYTES` moved to core; the CLI re-exports it, so there is still one value.
+- The size check runs twice, both counting UTF-8 bytes, so they agree with the loader's
+  `size <= max`: in `checkedWorkflowBytes`, which the driver uses for both preview and write, and
+  in the writer for every target, prompts included.
+- Mutation: a 100× cap in the driver → the driver's size test fails.
+- Mutation: a 100× cap in the writer → the writer's size test fails.
+
+**Regressions looked for, none found.**
+- The landed fallback drops `files` and `alsoChanges`, but says so in `reason`. That is honest and
+  never a silent `ok:false`.
+- The size refusal runs before the base check, so an oversize `replace` is `invalid` even when it
+  is also stale. That order is harmless: nothing is written either way.
+- The diff does not touch `approvals`, the broker or the wiring, so the round-1 invariant result
+  still stands.
+
+*— claude-opus-5-5, 2026-11-24*
