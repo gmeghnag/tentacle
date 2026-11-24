@@ -296,12 +296,42 @@ export function sheet({ children = [], permission = false } = {}) {
   );
 }
 
-/** The approval sheet (`PermissionSheet`): tool, its detail (or a diff), the options. */
+/** The permission sheet's default answers: the daemon's `permissionOptions` order. */
+const PERMISSION_OPTIONS = [
+  { label: "Allow once", primary: true },
+  { label: "Always allow" },
+  { label: "Deny" },
+];
+
+/**
+ * The answer pills: `[{label, primary?}]`, validated — a malformed or empty list
+ * is a sheet with no answer, so it throws instead of drawing one.
+ */
+function permOptions(options) {
+  if (!Array.isArray(options) || options.length === 0)
+    throw new Error("K.permissionSheet: options must be a non-empty array of {label, primary?}");
+  return options
+    .map((o) => {
+      if (typeof o?.label !== "string" || o.label === "")
+        throw new Error(
+          "K.permissionSheet: options must be a non-empty array of {label, primary?}",
+        );
+      return `<div class="k-perm-pill"${o.primary ? " data-primary" : ""}>${esc(o.label)}</div>`;
+    })
+    .join("");
+}
+
+/**
+ * The approval sheet (`PermissionSheet`): tool, its detail (or a diff), the
+ * options. `options` is a parameter because the answers are not always the
+ * permission ones: `workflow_approve` offers allow-once / deny only.
+ */
 export function permissionSheet({
   title = "Run a command?",
   tool = "shell",
   detail = "",
   diff = null,
+  options = PERMISSION_OPTIONS,
 } = {}) {
   const box = diff
     ? stepBody({ lines: diff }).html
@@ -311,14 +341,19 @@ export function permissionSheet({
     children: [
       `<div class="k-perm-head"><span class="k-perm-tile">⌘</span><div><div class="k-t-headline">${esc(title)}</div><div class="k-t-footnote k-sec">${esc(tool)}</div></div></div>`,
       box,
-      '<div class="k-perm-options"><div class="k-perm-pill" data-primary>Allow once</div><div class="k-perm-pill">Always allow</div><div class="k-perm-pill">Deny</div></div>',
+      `<div class="k-perm-options">${permOptions(options)}</div>`,
     ],
   });
 }
 
 export const pill = ({ text, dot = false }) =>
   out(`<span class="k-pill">${dot ? headerDot("running").html : ""}${esc(text)}</span>`, text);
-export const toast = ({ text }) => out(`<div class="k-toast">${esc(text)}</div>`, text);
+/** A toast: one line, plus an optional action (`Undo`) on the same row. */
+export const toast = ({ text, action = "" }) =>
+  out(
+    `<div class="k-toast">${esc(text)}${action ? `<span class="k-toast-action">${esc(action)}</span>` : ""}</div>`,
+    text,
+  );
 export const banner = ({ text }) => out(`<div class="k-banner">${esc(text)}</div>`, text);
 
 /** The floating hub button: `running` adds the turning arc; `opacity` = its rest level. */
@@ -379,11 +414,28 @@ export function emptyAction({ text = "Nothing running", action = "" } = {}) {
   );
 }
 
-/** An E2 row: icon tile, title, subtitle, value. */
-export function row({ title, subtitle = "", value = "", icon = "" }) {
+/**
+ * An E2 row: icon tile, title, subtitle, value, and — for a settings row — a
+ * `control` SLOT (raw HTML: stepper, segmented, switch, chevron) and `mono` for
+ * a value that is code (a command, a hash).
+ */
+export function row({ title, subtitle = "", value = "", icon = "", control = "", mono = false }) {
   return out(
-    `<div class="k-list-row">${icon ? `<span class="k-tile">${esc(icon)}</span>` : ""}<div class="k-row-text"><span class="k-t-body">${esc(title)}</span>${subtitle ? `<span class="k-t-footnote k-sec">${esc(subtitle)}</span>` : ""}</div>${value ? `<span class="k-row-value k-t-body">${esc(value)}</span>` : ""}</div>`,
+    `<div class="k-list-row">${icon ? `<span class="k-tile">${esc(icon)}</span>` : ""}<div class="k-row-text"><span class="k-t-body">${esc(title)}</span>${subtitle ? `<span class="k-t-footnote k-sec">${esc(subtitle)}</span>` : ""}</div>${value ? `<span class="k-row-value k-t-body"${mono ? " data-mono" : ""}>${esc(value)}</span>` : ""}${control}</div>`,
     title,
+  );
+}
+
+/**
+ * The filled primary action (`--s-big-button`), e.g. "Save 5 files". `tone` ∈
+ * accent | warn; `disabled` dims it AND says so to a reader.
+ */
+export function bigButton({ text = "", tone = "accent", disabled = false } = {}) {
+  if (tone !== "accent" && tone !== "warn")
+    throw new Error(`K.bigButton: unknown tone "${tone}" (accent | warn)`);
+  return out(
+    `<div class="k-big-button" data-tone="${esc(tone)}"${disabled ? ' data-disabled aria-disabled="true"' : ""}>${esc(text)}</div>`,
+    disabled ? `${text}, unavailable` : text,
   );
 }
 
@@ -612,6 +664,7 @@ export const K = {
   permissionSheet,
   pill,
   toast,
+  bigButton,
   banner,
   hubButton,
   hubFan,

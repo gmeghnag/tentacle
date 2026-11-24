@@ -545,4 +545,89 @@ Executor routing (orchestrator, per AGENTS §10 + model-routing): slices 0–2, 
 
 ## Execution
 
+### Slice 0 — kit gaps (D9) — DONE
+
+**Load-bearing check re-run first** — `.tentacle/tmp/workflow-editor/lb.ts` on the branch tip:
+
+```
+== slice 0 precondition (D9's sites) ==
+permissionSheet builder: FOUND at kit.js:300
+permissionSheet default title (:300-317): FOUND at kit.js:301
+permissionSheet takes an options prop: true      <- true only because the setter `options` is not there yet; the pills are 3 literals
+three default pills: true
+toast ({text}) — no action (:321): FOUND at kit.js:321
+row — no control/mono (:383-395): FOUND at kit.js:383
+extend (:431-439): FOUND at kit.js:431
+extend wrapper is display:contents: false
+bigButton exists: false
+```
+
+All four gaps reproduce: `permissionSheet` had three hard-coded pills, `toast` no action span, `row`
+no `control`/`mono`, `K.bigButton` absent, and `.k-nuovo` was an `outline`d box. (The D9 line citations
+`:300-317 / :321 / :383-395 / :431-439` are exactly right for this tree — the plan's re-verified
+numbers, not the Context's original `:271/:278/:316/:369`.)
+
+**Red first:** `scripts/test/mockup-kit-components.test.ts` (13 tests) — `10 fail / 3 pass` before any
+kit edit (`K.bigButton is not a function`; `expect(received).toContain` on the pill count, the
+`k-toast-action`, `data-mono`, `display: contents`).
+
+**As built** (all in dependency order, kit → CSS → types → README):
+- `tools/mockup-kit/kit.js`
+  - `PERMISSION_OPTIONS` (the three current pills, in the daemon's order) + a private `permOptions()`
+    validator: a non-array, an empty list, or an entry without a non-empty `label` **throws** — a sheet
+    with no answer is not drawable. `permissionSheet({options})` defaults to `PERMISSION_OPTIONS`, so
+    every existing mockup renders byte-identically.
+  - `toast({text, action})`: the action is `<span class="k-toast-action">`, escaped, on the same row.
+  - `row({…, control, mono})`: `control` is a **raw HTML slot** appended after the value (never a
+    template built here — the stepper / segmented / switch / chevron belongs to the mockup), and `mono`
+    marks the value `data-mono`. `band` needed no change: it maps `row` over its `rows`, so a control
+    passes through.
+  - `bigButton({text, tone, disabled})`: `data-tone` ∈ `accent|warn` (an unknown tone throws, per the
+    kit's unknown-state convention), `data-disabled` + `aria-disabled`, and `a11y` says ", unavailable".
+  - `if (tone !== "accent" && tone !== "warn") throw` — an unknown tone fails like the kit's other
+    unknown states (`stepNode`, `polpetto`, `tui.slot`), never a silent accent. The repo's
+    `noAssignInExpressions` style is respected (`toast`'s `action` is a parameter, not an
+    assignment-in-arrow).
+  - the `K` export block gained `bigButton`.
+- `tools/mockup-kit/kit.css`
+  - `.k-toast` became a flex row with `--m-step-line-gap` and `.k-toast-action { color: var(--c-accent) }`.
+  - `.k-big-button` (min-height `--s-big-button`, `--r-pill`, `--c-accent-fill`/`--c-on-accent`), its
+    `[data-tone="warn"]` and `[data-disabled]` (`--m-composer-dim-opacity`) variants.
+  - `.k-row-value[data-mono]` uses `--t-mono-*`.
+  - `.k-nuovo { display: contents }`; the outline + «nuovo» badge moved to
+    `[data-nuovo-mode] .k-nuovo > *` / `> *::after`, so the wrapper paints no box and an extension that
+    is a direct child of the screen's flex column keeps `margin-top:auto` / `flex:1` (that is the
+    `:has()` patch the plan said this drops). The badge is the fixed word `«nuovo»`, because `attr()`
+    in a child's `::after` cannot read the wrapper's `data-nuovo` — the component's name stays on the
+    wrapper's attribute, which is what a test asserts it is not asked for.
+  - Every value is a token; `literalViolations(kit.css)` is asserted empty in the test.
+- `tools/mockup-kit/kit.d.ts`: `SheetOption`, `RowProps`, and explicit `permissionSheet`/`toast`/
+  `bigButton`/`row`/`band` signatures (it stays a loose `[component: string]: unknown` index signature).
+- `tools/mockup-kit/README.md`: the `kit.js` row now names the four new parameter shapes.
+
+**Mutation checks** (each applied, observed, reverted):
+| Mutation | Test that goes red |
+|---|---|
+| `permOptions(PERMISSION_OPTIONS)` instead of `permOptions(options)` | 2 fail: "options renders exactly those pills", "a label is escaped, and a malformed list throws" |
+| `.k-nuovo { display: block }` (the old boxed wrapper) | 1 fail: "the base wrapper paints no box" |
+| `[data-mono]` emitted `--t-body-*` instead of `--t-mono-*` | 1 fail: "mono marks the value" |
+| `content: "«nuovo» " attr(data-nuovo)` on the CHILD's `::after` | 1 fail: "«nuovo» is drawn on the extension's own children" |
+
+**Drift from the Implementation:** none in substance. Two decisions the plan left open, both inside
+D9's wording: (a) `band` was not edited — it already forwards `row`'s props, so a control reaches it
+(covered by a test rather than a code change); (b) `bigButton` **throws** on an unknown `tone`, matching
+the kit's existing "unknown state throws" rule (`stepNode`, `polpetto`, `tui.slot`) rather than falling
+back to accent.
+
+**Not verified:** how the styles land visually on a device — no Chrome and no e2e run in this
+worktree, so `mockup-kit calibrate` reported "Chrome not found" (the two PNG/calibration tests
+skip their Chrome half and pass). Verify with `bun scripts/mockup-kit.ts inline tools/mockup-kit/index.html`
+and, for the real screen, `scripts/e2e-gate.sh` + `bun scripts/mockup-kit.ts calibrate` after slice 7c.
+
+**Changelog:** `changelog.d/workflow-editor.added.md` (user-visible: the editor itself). No
+`protocol.d/` note — slice 0 touches no wire. `packages/protocol/schema/protocol.json` needs no
+regeneration (no schema changed in this slice).
+
+*— claude-opus-5-5 (executor), 2026-11-24*
+
 ## Review
