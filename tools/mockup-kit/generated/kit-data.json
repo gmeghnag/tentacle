@@ -3,7 +3,7 @@
     "apps/mobile/src/chat-header.ts": "9e509a71b3801a4486a838b353c31c96270fedcb",
     "apps/mobile/src/motion.ts": "cb710fd7643e02771a98beb41cf418b3a5364155",
     "apps/mobile/src/screens/ComputersScreen.tsx": "ac1fe5dee031bc713182ae3cee279af4ebed1daf",
-    "apps/mobile/src/screens/PermissionSheet.tsx": "59cf106fa68bb8eea4cb9c60206cb5c5c833c95a",
+    "apps/mobile/src/screens/PermissionSheet.tsx": "a644f9409c98161104be1ec2b42afc40004f0585",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "32084b81ebf112ae65e1d2c347ed4feeb04e0296",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "4acc16969f29573f6f292b0c1fdcc6ce6fa61efa",
     "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "04e443f0bac5ef63f0a9f936a12ec5b52ee2c7ae",
