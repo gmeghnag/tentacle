@@ -1015,3 +1015,25 @@ The executor's M1–M18 tables look credible. I sampled them and did not re-run 
 Reviewer: same model family as the signed executor; only the context is fresh. Shared blind spots are possible.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 2 — PASS
+
+Scope: `git diff HEAD~1` (`cc85cee5`).
+
+- **Finding 1 is fixed.**
+  - `renameStep(…, prompts)` rewrites `{{steps.<id>.…}}` in `run`, `prompt_text`, `approve.title/detail` and the prompt files the steps read, and returns the rewritten files in `prompts`. `deleteStep(…, prompts)` counts templating references in `dangling`.
+  - Its pattern matches the validator's grammar exactly (`workflow-spec.ts:418`, `:431`: whitespace only inside the braces, and a `.` after the id, so `plan` does not match `plan-2`).
+  - Probe `rev/rename2.ts` on `plan-build-review-merge`:
+    - `review→check`, `plan→design` and `fix→repair` each leave **0** problems;
+    - the input prompts are not mutated;
+    - `deleteStep(plan)` gives `dangling: [exec, review]`, matching its 2 errors.
+- **Finding 2 is fixed.** `blockSafe` refuses C0 controls other than tab and newline, and lone surrogates. A lone surrogate now throws, naming its YAML path, instead of writing bytes that cannot be read back. `rev/emit.ts` now has no failing case. The NUL-in-block case round-trips through JSON quoting. The `-0` case is benign (the value `0` is unchanged).
+- **Mutations** (applied together, restored with `cp`, `git status` empty after) each turned their named test red, 4 fail in total:
+  - the prompt-file rewrite disabled;
+  - `refersByText` dropped;
+  - `RAW_CONTROL` dropped;
+  - the lone-surrogate check in `quoted` dropped.
+- **Gate:** `bun test packages/core/test/ scripts/test/mockup-kit-components.test.ts` gives **992 pass, 0 fail**. `bun run lint` and `bun run typecheck` are clean.
+- **Note (not a finding):** `prompts` defaults to `{}`. A caller that omits it gets the round-1 behaviour, which is loud (validator errors), not silent. Slices 6 and 7 must pass the editor's prompt files.
+
+*— claude-opus-5-5, 2026-11-24*
