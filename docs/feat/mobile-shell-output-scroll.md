@@ -44,7 +44,16 @@ Owner decisions 24/11 (mockups `.tentacle/mockups/mobile-shell-output-scroll/ind
 1. The overlay needs a one-shot scroll correction on collapse to "land exactly". If it jitters on device, OK to ship collapse without the exact landing? Rec: yes, device-test first.
 2. With the tail shown, "show all" reveals the head above. OK that the footer reads «… N earlier lines»? Rec: yes.
 
-**NOT approved** (M; the sticky overlay is new scroll machinery in a file shared with open-at-bottom).
+**APPROVED** (owner 2026-11-24, #### Owner answers) — was: NOT approved (M; the sticky overlay is new scroll machinery in a file shared with open-at-bottom).
+
+#### Owner answers (2026-11-24, binding)
+
+1. Yes — if the exact landing on collapse jitters on the device, ship collapse without it (device-test first).
+2. Yes — the footer reads «… N earlier lines».
+
+Order (orchestrator, owner «se necessita falli lavorare sequenziali»): EXEC only after `fix/mobile-open-at-bottom` is merged on main; this branch merges main first. Executor Sonnet, Opus review.
+
+*— orchestrator (claude-opus-5-5), 2026-11-24*
 
 *— claude-sonnet-5-5, 2026-11-24*
 
