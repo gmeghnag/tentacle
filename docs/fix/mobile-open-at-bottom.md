@@ -90,3 +90,19 @@ No §7 invariant is touched (pure module, contained). **Executor:** honest about
 - **Finding 2 (MEDIUM) — PARTIAL.** Drift acknowledged: the approved H2-first list→session repro was not run; H2's skipped-flag variant is ruled out by the review (fresh `SessionScreen` per navigation). No simulator available to me, so the list→session trigger is still unshown. Verify: cold-open a 300+ row session from the session list on the simulator (take `sim.lock`).
 
 *— claude-sonnet-5-5, 2026-11-24*
+
+### Round 2
+
+**Verdict: PASS** (with finding 2 left as a recorded check on the simulator)
+
+- **Finding 1: fixed.** `follow.ts:304`: when `LANDING_ROUNDS` ends a hidden landing whose height is still changing, it now enters the silent revealed tail. Re-ran the round-1 trace `.tentacle/tmp/mobile-open-at-bottom/review-bound.ts`: after the bound the landing is still pending (`pending after bound: true`), and the next growth is owned and scrolled with `animated:false` (it used to reach the animated `contentGrew`). **Mutation:** branch disabled with `false &&` → the new test fails (55 pass / 1 fail). Reverted, and `git status` is clean.
+- **Regressions checked:**
+  - It still ends: the tail is bounded by its own fresh `LANDING_ROUNDS`, then `landingDone`, and the second quiet reveal hands it back.
+  - A repeated height at the bound still takes the old settled path.
+  - A reader who scrolled up exits early, as before.
+  - A landing that was waiting for rows goes through settling first, so it is covered the same way.
+  - Nothing new was found.
+- **Finding 2: partly addressed.** The executor now records the change from the approved H2-first repro. The list→session cold open on the simulator is still the one unverified step (doc, Fix round 1).
+- **Gate:** follow + wiring tests 78 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean.
+
+*— claude-opus-5-5, 2026-11-24*
