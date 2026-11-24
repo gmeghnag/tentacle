@@ -48,3 +48,55 @@ Not reproduced on the simulator after two attempts; the pre-build QA re-run is t
 **Simulator, patched tree (`run.ts --hold`, built from this worktree):** alpha (~60 short rows + 100 QA-style 4-line turns) opens from the list with turn 200 + its answer fully above the composer (`.tentacle/tmp/mobile-open-long-session/after-alpha.png`); charlie (short) still right (`after-charlie.png`). "Before" = `qa1.png` and the earlier `before.png`/`r2.png`/`r3.png`/`load.png` (also correct: the bug did not reproduce, so before/after is a no-regression check, not a fix proof).
 
 *— claude-sonnet-5-5, 2026-11-24*
+
+## Review (Round 1)
+
+**Verdict: REQUEST-CHANGES.** The code is safe (silent, following-only, one scroll, logic in `follow.ts`), the gate is green and the tests are non-vacuous. But the bug is not reproduced, and the proposed mechanism has not been shown to produce the QA state. No test exercises the behaviour the fix exists for. Under AGENTS §0/§1/§9, that decision belongs to the owner. It should not be merged on a changelog line that says "A long session opens at its real end".
+
+**Findings**
+1. **HIGH: the root cause does not account for the measured gap; it is an untested hypothesis.** The doc admits it ("whether this is the QA's mechanism is a hypothesis, not shown"). The QA state was settled, stable for more than 10 s and idle. That fits at least three mechanisms: (a) a landing that ended short with `following: true` and no later size change, which this fix covers; (b) `following: false` at rest, where `settleStep` returns null and nothing changes (`landingReveal` `follow.ts:413` also returns `landingDone` with no scroll when `!following`); (c) native metrics that already say "at end", e.g. a stale content height or padding, where `settleStep` sees `offset == end` and returns null. Nothing in the branch tells these apart. The cheapest test that would decide it: a dev-only log line of `{landing, following, offset.current, size.current}` when the settle timer fires, captured on the next QA re-run of the 56-turn alpha. After two failed simulator repros, §0 says to escalate with that decision rather than ship a guess.
+2. **HIGH: the regression test is not red on the bug.** On `main`, `follow.test.ts` fails only because the module does not load (`landingEnded` is missing). The executor also calls this a weak red. `settleStep` already corrected a short offset on `main`; the only new behaviour is `animated: false`. The wiring test is a source regex. No test drives "a landing ends with the list short of its end → corrected", so the property that would fix the bug is not pinned anywhere.
+3. **MEDIUM: if the hypothesis is right, the contract stays broken.** The contract (`mobile-open-at-end`) is that the first visible frame is already the end. The correction runs `SETTLE_MS` (450 ms) after the landing ends, and the list is visible by then because `settling` is false. A long session would show the tail rows and then jump about 2 turns (≈320 pt) with no animation. That beats resting short, but it is still visible. A design that keeps the contract: put the offset check inside the landing, before it hands back (`landingReveal`/`landingStep` take `offset`; if the list is short, do one more silent scroll while it is still hidden). That is still pure and still in `follow.ts`.
+4. **LOW: the magnitude was not characterised (§1).** "~570 px" in the QA report is screenshot pixels at 3× (iPhone 17 Pro Max, 1320×2868), not points. Comparing `qa-2411/shots/1-opened-settled.png` (turn 51 at the top) with `1-swipe2.png` (turn 53 at the top, real end) gives a gap of exactly **2 turns**: ≈968 px, or ≈323 pt. The test fixture (`follow.test.ts`, 5200 → 5770) and its comment say "570 pt". That does not change the pure test, but a gap of exactly whole turns is a clue about the mechanism that the doc never used.
+5. **NIT:** the wiring regex window was widened from `{0,600}` to `{0,900}` (`session-screen-follow-wiring.test.ts:110`). That is fine, but it weakens that assertion a little. The doc header still says `Status: execution`.
+
+**Gate (run by me on this worktree):** `bun run typecheck` exit 0. `bun run lint` exit 0 ("Checked 2390 files… No fixes applied"). `bun test`: **17871 pass, 5 skip, 0 fail** (17876 tests, 1253 files). The diff adds no `.skip`.
+
+**Mutation (scratch copy in `.tentacle/tmp/mobile-open-long-session-review/`, never `git checkout`; the worktree is byte-identical afterwards, `git status` clean):**
+
+| Mutation | Result |
+|---|---|
+| M1: `follow.ts` from `main` | RED (load failure, missing export) |
+| M2: `settleStep` ignores `animated` | RED (silent test) |
+| M3: `SessionScreen.tsx` from `main` | RED (wiring) |
+| M4: drop the reveal-timer exit | RED (count 2) |
+| M5: `armSettle(false)` | RED |
+| M6: `landingEnded` always true | RED |
+| M7: pass `silent` instead of `!silent` | RED |
+
+Every mutation is caught. These tests are non-vacuous for the code they pin, but they do not cover the bug itself (finding 2).
+
+**Premise table**
+
+| Premise | Verdict |
+|---|---|
+| QA symptom: long session rests short, short session OK (`qa-2411/REPORT.md` §1) | TRUE, but the magnitude is 2 turns ≈ 323 pt, not 570 pt |
+| `armSettle` is armed only on the non-landing path (`SessionScreen.tsx` `onContentSize`/`onListLayout`, `if (land()) return;`) | TRUE |
+| `settleStep` returns null when not following or when content ≤ viewport; slack 2 pt | TRUE (`follow.ts:122`) |
+| "Once a landing is over, no later size change exists to arm it" | TRUE only if nothing changes afterwards. Any later size change already armed the (animated) settle on `main` |
+| The QA state was mechanism (a) | NOT SHOWN |
+
+**Attacks tried**
+- *Very long session:* one silent scroll after 450 ms, and only on the pending→done edge. No loop: `landingEnded` is edge-only (M6 is red). Holds.
+- *Content growing while opening:* a later non-landing size change calls `armSettle()`, which clears the silent timer and runs the existing animated settle. Same as `main`, so no new animated travel. Holds.
+- *Short session:* content ≤ viewport → null. Holds.
+- *Re-open / pull-to-refresh re-attach:* the person has scrolled up or is dragging, so `following` is false or `dragging.current` is set → no move. Holds.
+- *Rotation, keyboard or composer inset:* `onListLayout` → `viewportChanged` plus the ordinary `armSettle()` replaces the silent one. Unchanged. Holds.
+- *A stale `armLandedSettle` closure:* the ref is reassigned on every render and `armSettle` is stable (`[perform]`). Holds.
+- *Does the fix cover mechanisms (b) and (c)?* No (finding 1).
+
+**What holds:** the logic is in a pure module; no new animated scroll; a reader who has scrolled up is never moved; the change is contained and the gate is green.
+
+**How the executor behaved:** honest. It flagged the missing repro, the weak red and the unverified mechanism itself, and it did not overclaim in the doc. But after two failed repro attempts it shipped a speculative fix instead of escalating (§0), and the changelog states the fix as fact.
+
+*— claude-opus-5-5, 2026-11-24 (fresh context; executor was claude-sonnet-5-5, a different model, same family)*
