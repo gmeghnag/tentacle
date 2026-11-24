@@ -171,8 +171,13 @@ the orchestrator's `protocol:bump` at merge regenerates it again either way.
   `App.tsx` beside `:2714-2820`. Names chosen not to touch `feat/mobile-native-sheets`'s `Sheet`
   route; no `<Modal>` used.
 - Hub entry `workflows` in `hub-actions.ts:12-27` (label "Workflows"; badge = `needsUserCount`
-  in the current hub idiom: rim arc, no dot); dimmed with `emptyLabel` "No workflow runs" when
-  `workflow/list` returned none.
+  in the current hub idiom: rim arc, no dot); ~~dimmed with `emptyLabel` "No workflow runs" when
+  `workflow/list` returned none~~ — **superseded (24/11, flow 44's e2e fix round): an EMPTY list no
+  longer dims it, only an older daemon does.** `docs/feat/workflow-editor.md` D8/"Entries" + E1
+  make the runs screen's empty state the place the FIRST workflow is created ("New workflow"), and
+  this item is that screen's only door (`App.tsx`'s `onOpenWorkflows`) — dimming it left the first
+  workflow unreachable from the phone. `workflowsHub` returns `empty: null` for `ready` with zero
+  runs; `NO_WORKFLOW_RUNS` is gone.
 - NEW `apps/mobile/src/workflow-runs-controller.ts` (pure, injected client): loads
   `workflowList()` on focus, on pull, and on any `onSessionWorkflows` notice (debounced 500 ms);
   `unsupported` → "Update tentacle on this computer"; link down → keeps the last list + an offline

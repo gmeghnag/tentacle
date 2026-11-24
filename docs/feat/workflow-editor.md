@@ -2491,3 +2491,80 @@ Fix commit `39ebc041` (`git diff HEAD~1`).
   unrun (E4 and E9 are open debt).
 
 *— claude-opus-5-5, 2026-11-24*
+
+### e2e fix round (44-workflow-editor)
+
+*— claude-code 2.1.325 harness, 2026-11-24 (the harness exposes no underlying model id: `AI_AGENT=claude-code_2-1-325_agent`, `CLAUDE_CODE_ENTRYPOINT=cli`; recorded verbatim instead of guessed, as slice 4 did)*
+
+**Symptom, from the device evidence.** `scripts/e2e-gate.sh` failed flow 44 twice in a row (not flaky)
+with `Assertion is false: id: hub-item-workflows is visible`, in `_hub-fan.yaml`'s
+`extendedWaitUntil` (`.tentacle/tmp/e2e-mobile/1795553751152/ios26/44-workflow-editor`: `maestro.log`,
+`screen-hierarchy/step-038-…json`). The captured hierarchy settles it: the open fan holds exactly six
+discs — `hub-item-attach`, `-activity`, `-artifacts`, `-tools`, `-commands`, `-more` — and no
+`hub-item-workflows`, which matches the screenshot's six glyphs. Nothing was broken in the render: the
+item was never in that fan.
+
+**Root cause — two independent gates, both real; one was the product, one the flow.**
+
+1. **The flow used the wrong hub helper (product right, flow wrong).** `hubActions` caps the fan at
+   `FAN_MAX = 6` (`hub-actions.ts:125`) and `workflows` is 9th in `CANONICAL` (`:169-171`), carrying no
+   count badge with zero runs, so it lands in `more` — never on the fan. The design says so twice and
+   never changed: `docs/feat/mobile-hub-commands.md:22` pins the idle fan as
+   "Attach · Activity · Artifacts · Tools · Commands · More", and `docs/feat/workflows-ui.md:1754`
+   adds Workflows "after Scheduled in the canonical order — **the idle fan O1 is unchanged**".
+   Flow 44 asked `_hub-fan` (which waits for `hub-item-${ITEM}`) for an entry only `_hub-more`
+   (`hub-menu-${ITEM}`) can reach. Fix: `_hub-more` + `tapOn: hub-menu-workflows`, the helper the six
+   other off-fan entries already use (`34-hub-sessions`, `-new`, `-scheduled`, `-dictate`, …).
+2. **An EMPTY run list dimmed the item, making the first workflow unreachable (product wrong).**
+   `workflowsHub` returned `empty: NO_WORKFLOW_RUNS` whenever `ready` held zero runs
+   (`workflow-runs-controller.ts`), and a dimmed commit is `resolveCommit`'s no-op — it opens nothing.
+   But `WorkflowRuns`'s empty state is precisely the "New workflow" button (`D8` "Entries",
+   `docs/feat/workflow-editor.md:328`) and E1 is "empty list → New" (`:482`), and the hub item is that
+   screen's ONLY door (`App.tsx:3560` `onOpenWorkflows` → `WorkflowRuns`; no other `navigate("WorkflowRuns")`
+   exists). So with zero runs the phone could not create its first workflow — a dead end that the
+   corrected flow would have hit one step later, at `workflow-runs-new`. Fix: `workflowsHub` returns
+   `empty: null` for `ready`; only `unsupported` (an older daemon, where there is no usable screen
+   behind the item) still dims, and `NO_WORKFLOW_RUNS` is gone. `docs/feat/workflows-ui.md:174`'s
+   "dimmed … when `workflow/list` returned none" is marked superseded in place, with the reason.
+
+**Red → green.** Both tests were written first and run against the untouched code.
+
+- `test/workflow-runs-controller.test.ts` — "an EMPTY list does not dim the item…": **RED**
+  (`- "empty": null` / `+ "empty": "No workflow runs"`, 12 pass / 1 fail).
+- `test/e2e-flows.test.ts` — new "a flow reaches a hub item through the helper that can actually hold
+  it": **RED** with `44-workflow-editor.yaml: _hub-fan ITEM=workflows`. Its companion test models flow
+  44's own setup (`needYou: 0`, empty list, idle) through the real `hubActions`, and asserts `more`
+  holds `workflows` while `fan` does not — the property that decides the helper, not a correlate.
+  Writing it caught a modelling error worth recording: a first version unioned several contexts, and
+  badge promotion (`scheduled` with a due wake, `workflows` with `needYou > 0`) legitimately moves an
+  item between fan and More, so the guard now pins the flow-44 context exactly.
+- `test/hub-actions.test.ts` — the old "no run (or an older daemon) dims it" test was split: the
+  older-daemon dim is kept (`WORKFLOWS_UPDATE_TENTACLE`), and a new case pins that an EMPTY list
+  commits as `{kind:"run", id:"workflows"}`.
+
+**Non-vacuity (§9), both mutations applied once and reverted.**
+- Product: restoring `empty: state.runs.length === 0 ? "No workflow runs" : null` → 1 fail
+  ("an EMPTY list does not dim the item…"), 87 pass. Reverted; `grep` confirms `empty: null`.
+- Flow: restoring `file: _hub-fan.yaml` → 1 fail ("flow 44 reaches Workflows through More…"), 62 pass.
+  Reverted; line 40 is `_hub-more.yaml` again.
+
+**Gate (narrow, per the orchestrator's rule — the e2e run and the simulator are theirs).**
+- `bun test apps/mobile/test` — **5219 pass / 0 fail** (329 files), the whole mobile suite, because
+  `hub-actions.ts` lost an export and `workflow-runs-controller.ts` lost an import.
+- `bun test scripts/test/mockup-kit.test.ts` — 37 pass / 0 fail: no generated-file drift (the earlier
+  `HubFan` `list.bullet` entry is untouched).
+- `bunx tsc -p apps/mobile --noEmit` — clean.
+- `bunx biome check` on all five changed source/test files — clean.
+- `bun test apps/mobile/test/{e2e-flows,hub-actions,hub-session,workflow-runs-controller,workflow-runs-wiring,bundle-node-free}.test.ts`
+  — 187 pass / 0 fail; `bundle-node-free` stays green (no new node-only import in the app graph).
+
+**Unverified, and stated as such.** The corrected flow has not been run: the orchestrator's gate is its
+first execution. What the fix does NOT prove is E8's open question from 7c (whether the hash-approval
+`perm-sheet` really presents over the pushed `WorkflowStart` screen) and the New sheet's keyboard on a
+small device — both still first observable on a device, as 7c recorded. Also unrun here: the root
+`bun test` and `bun run check` (the gate script runs them after this round).
+
+**Docs.** `docs/feat/workflows-ui.md:174` superseded in place (dated, with the D8/E1 reason). No
+changelog fragment: this round fixes an e2e flow and an unreachable-item dead end that
+`changelog.d/workflow-editor.added.md` already covers under this task's one user-visible sentence — a
+second fragment for the same slug+category is the collision the changelog rules forbid.
