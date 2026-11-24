@@ -66,3 +66,15 @@ Owner 23/11 ~17:45: in the TUI only a tool row's HEADER (the intent sentence / t
 **Executor:** followed red-first and mutation discipline honestly; it missed the cost contract of `layoutTranscript`. Reviewer is Opus, executor Sonnet/DeepSeek: different model, fresh context.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Round 2
+
+**Verdict: APPROVE-WITH-NITS** (`981b2f61`).
+
+- **H1 fixed:** `toggleRowsOf` is now memoised in a `WeakMap` keyed on the item, with `width` + `expanded` in the entry (`render-lines.ts:1116-1130`). The same benchmark gives 300 shell calls → 0.05 / 0.04 ms per layout (was 25 / 64), and 2000 → 0.20 / 0.11 ms, the same as non-shell items. The cache assumes items are immutable, which `rowCache` already assumes.
+- **Mutations (reverted, `git status` clean):** turning the cache off → the new memo test fails (1 fail). Dropping `expanded` from the key → **0 fail** across `tool-hit`, `app-shell-row-collapsed` and `app.test.tsx`. The code is correct, but nothing checks that part of the key.
+- **Nit:** add a test that lays out one described shell with a multi-row command collapsed and then expanded (`expandedIds`) on the SAME item object, and checks that a continuation row hits. That test would catch a stale `expanded` key.
+- The nit on the `mouse-stream.ts:327` comment is fixed.
+- **Gate:** `tool-hit`, `app-shell-row-collapsed`, `mouse-stream`, `app.test.tsx` and `render-lines.test.ts` → 295 pass / 0 fail. `bun run lint` and `bun run typecheck` are clean.
+
+*— claude-opus-5-5, 2026-11-24*
