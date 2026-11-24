@@ -2568,3 +2568,108 @@ small device — both still first observable on a device, as 7c recorded. Also u
 changelog fragment: this round fixes an e2e flow and an unreachable-item dead end that
 `changelog.d/workflow-editor.added.md` already covers under this task's one user-visible sentence — a
 second fragment for the same slug+category is the collision the changelog rules forbid.
+
+### e2e fix round 2 (44-workflow-editor E6)
+
+*— claude-code 2.1.325 harness, 2026-11-24 (the harness exposes no underlying model id: `AI_AGENT=claude-code_2-1-325_agent`, `CLAUDE_CODE_ENTRYPOINT=cli`; recorded verbatim rather than guessed, as round 1 and slice 4 did)*
+
+**Symptom, from the device evidence.** Round 1 made the hub step pass; `scripts/e2e-gate.sh` then failed
+flow 44 twice with `Assertion is false: "nothing written yet" is visible`, at E6
+(`.tentacle/tmp/e2e-mobile/1795556333913/ios26/44-workflow-editor/…/maestro.log`,
+`screen-hierarchy/step-074-assertCondition-nothing_written_yet.json`). The captured hierarchy settles it
+and shows TWO independent defects:
+
+1. `workflow-review-title` is present ("Review") and **no node anywhere carries the caption** — not a
+   hidden one, not an unexposed one: the status line was never drawn. The screenshot's header band has
+   ink only on the title's row.
+2. Every one of the five rows reads **`new · 0 lines`** — for a 35-line YAML and four prompts of 3/5/5/3.
+
+**Root causes (two, one product bug each; the flow was right).**
+
+1. **`0 lines` — the writer threw away the count of every `new` file.** `writeWorkflowFiles` returned
+   `{added: 0, removed: 0}` for `any` file with no `before` (`packages/cli/src/workflow-files.ts`), so
+   the dry run told the daemon — and Review — that a file it is about to create holds zero lines. `0`
+   was chosen to mean "no diff to show", but `added` is the ROW's count and Review renders it as
+   `new · N lines` (`apps/mobile/src/workflow-edit-review.ts:152`); the PATCH is the only thing a `new`
+   file must not carry. The design never asked for a zero count: D3's row is
+   `{path, status, patch, added, removed}` (`docs/feat/workflow-editor.md:196-198`) and the mockup's own
+   row is **`workflows/task.yaml · new · 38 lines`**
+   (`.tentacle/mockups/workflow-editor/index.html`, `reviewScreen`) — a number, never a zero. The old
+   test pinned the wrong contract (`a `new` and an `unchanged` row carry NO patch and 0 counts`), which
+   is why nothing caught it; §9's M9 note had already flagged that this suite's counts were weak.
+2. **The caption — `ScreenHeader` rendered a raw string in a `View`.** `subtitle` is a `ReactNode` slot,
+   and all three callers that pass a plain STRING (`WorkflowEdit`'s `draftCaption`, `WorkflowEditReview`'s
+   "nothing written yet", `WorkflowRuns`/`WorkflowStart`'s computer name, `WorkflowRun`'s version line,
+   `ArtifactGallery`'s title) got an `RCTRawText` with no `<Text>` around it — which React Native draws as
+   **nothing** (it only `console.error`s "Text strings must be rendered within a <Text> component", and
+   the enclosing JSX swallowed it). The compact branch put `{subtitle}` straight into a `View`
+   (`ScreenHeader.tsx:153`); the large branch did the same inside `largeSubtitle`. `Sheet` never had the
+   bug because it wraps (`Sheet.tsx:153`, `:199`) — which is exactly why the two strings the sweep found
+   on `Sheet` call sites work. So every screen's caption of that shape has been invisible on the device
+   since it shipped, while every unit test passed on the STRING.
+
+**Which answer the docs give (the round's two questions).**
+- (1) `0 lines` is a **product bug**, not a stale flow: the writer zeroed it (above), against D3's row
+  shape and the mockup's `new · 38 lines`.
+- (2) `nothing written yet` is **required by the product**: D8 pins it twice — `"Nothing written yet" in
+  the header caption until confirmed` (`docs/feat/workflow-editor.md:341-342`) and the mockup's
+  `editorHeader({title:"Review", caption:"nothing written yet"})` (`:624`). The flow asserts what the
+  approved design owes the person, so the SCREEN was fixed and the flow kept.
+
+**Files.**
+- `packages/cli/src/workflow-files.ts` — a `new` row now counts against an EMPTY base
+  (`unifiedDiff(path, file.before ?? "", file.text)`) and keeps no patch; `unchanged` keeps
+  `0/0`; `changed` is untouched.
+- `apps/mobile/src/ui/ScreenHeader.tsx` — `subtitleNode()`: a string `subtitle` is wrapped in a `Text`
+  (caption type, `sec`), both branches go through it. The slot keeps accepting both shapes, so no screen
+  has to remember the rule.
+- `apps/mobile/e2e/flows/44-workflow-editor.yaml` — E6 also asserts `new · 35 lines` (the template's real
+  YAML count: 35, prompts 3/5/5/3, computed from `WORKFLOW_TEMPLATES`), and the comment now cites the
+  design lines instead of restating the symptom.
+- `packages/cli/test/workflow-files-write.test.ts` — the wrong test is replaced: `a `new` row carries NO
+  patch but DOES carry its line count`, plus a separate `an `unchanged` row carries NO patch and 0
+  counts`.
+- `apps/mobile/test/workflow-review-header.test.ts` (new, 4 tests) — renders `WorkflowEditReview` through
+  the `row-a11y.test.ts` host-stub walker and asserts the caption is a `Text` (and sweeps the whole tree
+  for any string rendered outside one), plus the two source guards (ScreenHeader has exactly two
+  `subtitleNode` call sites and one wrapper-owned `{subtitle}`; `Sheet` still wraps its two).
+- `tools/mockup-kit/generated/kit-data.json` — regenerated (`bun run mockup-kit`): the kit hashes
+  `ScreenHeader.tsx`, so the committed hash moved with it (one line; `mockup-kit.test.ts` red otherwise).
+
+**Red → green (each test shown failing on the buggy code first).**
+- Line counts: `expect(fresh?.added).toBe(9)` → **received 0** (`Expected: 9 / Received: 0`), 29 pass /
+  1 fail; after the fix **30 pass / 0 fail**.
+- Caption: `textsSaying(nodes, "nothing written yet").length` → **received 0**, and the tree sweep
+  reported `["nothing written yet"]` as a string outside a `Text`: 0 pass / 2 fail; after the fix
+  **2 pass**.
+- **Non-vacuity by mutation (§9):** restoring the pre-fix `{subtitle}` in both branches (the raw form)
+  turned **3 of the 4** header tests red; restored byte-for-byte from a copy, back to 4 pass.
+
+**Gate (narrow first, as the orchestrator asked — the e2e run and the simulator are theirs).**
+- `bun test packages/cli/test/workflow-files-write.test.ts` — 30 pass / 0 fail.
+- `bun test apps/mobile/test/workflow-review-header.test.ts` — 4 pass / 0 fail.
+- `bun test apps/mobile/test` — **5223 pass / 0 fail** (330 files).
+- `bun test apps/mobile/test/e2e-flows.test.ts apps/mobile/test/e2e-shard.test.ts` — 122 pass / 0 fail
+  (the flow's structural guards accept the two added assertions).
+- `bun test packages/cli/test/workflow-files{,-write}.test.ts packages/agent/test/workflow-save.test.ts
+  packages/daemon/test/workflow-hosted.test.ts` — 84 pass / 0 fail.
+- Then the full gate: `bun run typecheck` clean (root + mobile + relay), `bun run lint` clean (2417
+  files), `bun test` **18250 pass / 5 skip / 0 fail** (the 5 skips are the opt-in live-k8s, live-docker,
+  real-socket and the two mockup-kit calibrations that need Chrome / an e2e run).
+
+**What the same cause would have broken further down flow 44, and did not need changing.** E7's
+`Saved …` toast and the Save→Run label are `WorkflowEdit`'s own body values, not header slots; E8 drives
+the existing `WorkflowStart` path and the permission sheet, neither of which reads a caption. The
+`ArtifactGallery`/`WorkflowRun`/`WorkflowRuns`/`WorkflowStart` captions had the same latent invisibility
+and are fixed by the one `ScreenHeader` change (no call-site edits were kept: the fix is in the seam, so
+the diff stays small).
+
+**Unverified, stated plainly.** The flow has not been run: the orchestrator's `scripts/e2e-gate.sh` is its
+first execution. So still first-observable on a device: (a) that the caption now appears (the mechanism is
+proven by the render test + the mutation, not by a device); (b) `new · 35 lines` on the real template;
+(c) 7c's open questions from round 1 (E8's permission sheet over the pushed `WorkflowStart`, the New
+sheet's keyboard on a small device).
+
+**Docs.** No changelog fragment: `changelog.d/workflow-editor.added.md` already carries this task's one
+user-visible sentence, and a second fragment for the same slug would be the collision the changelog rules
+forbid (round 1's reasoning, unchanged).

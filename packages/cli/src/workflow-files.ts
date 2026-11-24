@@ -547,10 +547,21 @@ export function writeWorkflowFiles(
   const files: WorkflowWriteRow[] = resolved.map((file) => {
     const status: WorkflowWriteRow["status"] =
       file.before === undefined ? "new" : file.before === file.text ? "unchanged" : "changed";
-    if (file.before === undefined || status === "unchanged") {
+    if (status === "unchanged") {
+      // Nothing is written: no patch, and "0 lines" is the truth.
       return { path: file.rel, status, added: 0, removed: 0 };
     }
-    const diff = unifiedDiff(`${PROJECT_PATHS.workflows}/${file.rel}`, file.before, file.text);
+    // A `new` file counts against an EMPTY base: `added` is how many lines the
+    // write puts there, which is what Review's "new · N lines" says. Only the
+    // PATCH is absent for it (there is no old text to show a diff against).
+    const diff = unifiedDiff(
+      `${PROJECT_PATHS.workflows}/${file.rel}`,
+      file.before ?? "",
+      file.text,
+    );
+    if (status === "new") {
+      return { path: file.rel, status, added: diff.added, removed: 0 };
+    }
     return { path: file.rel, status, patch: diff.patch, added: diff.added, removed: diff.removed };
   });
 

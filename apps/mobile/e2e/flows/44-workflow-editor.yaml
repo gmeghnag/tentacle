@@ -108,6 +108,12 @@ appId: so.tentacle.app
 - assertVisible:
     text: "Valid · 6 steps"
 # E6: Save → Review: the YAML + its 4 prompt files, the hash, nothing written yet.
+# "nothing written yet" is D8's own caption (docs/feat/workflow-editor.md:339-340,
+# the mockup's `editorHeader({title:"Review", caption:"nothing written yet"})`):
+# it is asserted because the SCREEN owes it, and it went missing on the device
+# when `ScreenHeader` rendered a raw string (e2e fix round 2). The rows carry
+# their real counts now too (`new · 35 lines`), so the file list is a fact, not
+# five zeroes.
 - tapOn:
     id: "workflow-edit-save"
 - extendedWaitUntil:
@@ -120,6 +126,10 @@ appId: so.tentacle.app
     id: "workflow-review-hash"
 - assertVisible:
     id: "workflow-review-file-4"
+# The template's YAML is 35 lines and its four prompts 3/5/5/3 — never
+# "0 lines" (e2e fix round 2: the writer reported 0 for every `new` file).
+- assertVisible:
+    text: "new · 35 lines"
 - assertVisible:
     text: "Save 5 files"
 - tapOn:

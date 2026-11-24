@@ -609,8 +609,11 @@ describe("the patch the Review screen shows", () => {
     expect(yamlRow?.patch).toContain("+version: 3");
   });
 
-  test("a `new` and an `unchanged` row carry NO patch and 0 counts", () => {
-    // Mutation: emit a patch for every status (or counts) → red.
+  test("a `new` row carries NO patch but DOES carry its line count", () => {
+    // Mutation: report `added: 0` for a `new` file (or emit a patch for it) → red.
+    // Review's row is "new · N lines": N is how many lines the write puts there,
+    // the diff against an empty base — a `0` claims the file would be empty
+    // (e2e fix round 2: 5 template files all read "new · 0 lines" on the phone).
     const root = project();
     const result = writeWorkflowFiles(
       root,
@@ -621,9 +624,17 @@ describe("the patch the Review screen shows", () => {
     if (!result.ok) return;
     const fresh = result.files.find((f) => f.path === "task.yaml");
     expect(fresh?.status).toBe("new");
+    // The V1 of a `new` file's row is still no patch (D4: a new file's row has none).
     expect(fresh?.patch).toBeUndefined();
-    expect(fresh?.added).toBe(0);
+    // The bytes the write lands: `workflowYaml(WITH_PROMPT)`, one line per line.
+    const emitted = workflowYaml(WITH_PROMPT);
+    expect(fresh?.added).toBe(emitted.split("\n").length - 1);
     expect(fresh?.removed).toBe(0);
+    // A prompt the same save creates carries ITS count too (one line, no newline).
+    const promptRow = result.files.find((f) => f.path === "prompts/gate.md");
+    expect(promptRow?.status).toBe("new");
+    expect(promptRow?.added).toBe(1);
+    expect(promptRow?.removed).toBe(0);
     // A second save of the same draft: every row is `unchanged`, nothing rewritten.
     const again = writeWorkflowFiles(
       root,
@@ -633,6 +644,32 @@ describe("the patch the Review screen shows", () => {
     expect(again.ok).toBe(true);
     if (!again.ok) return;
     expect(again.files.every((f) => f.status === "new" && f.patch === undefined)).toBe(true);
+  });
+
+  test("an `unchanged` row carries NO patch and 0 counts", () => {
+    // Mutation: report a count for a file whose bytes are already on disk → red.
+    // Nothing is written, so "0 lines" is the truth there (and Review draws
+    // `unchanged`, never a line count).
+    const root = project();
+    const first = writeWorkflowFiles(
+      root,
+      { mode: "create", name: "task", draft: DRAFT, prompts: {} },
+      currentHash,
+    );
+    expect(first.ok).toBe(true);
+    const baseHash = first.ok ? hashOf(DRAFT) : "";
+    const same = writeWorkflowFiles(
+      root,
+      { mode: "replace", name: "task", draft: DRAFT, prompts: {}, baseHash },
+      currentHash,
+    );
+    expect(same.ok).toBe(true);
+    if (!same.ok) return;
+    const row = same.files.find((f) => f.path === "task.yaml");
+    expect(row?.status).toBe("unchanged");
+    expect(row?.patch).toBeUndefined();
+    expect(row?.added).toBe(0);
+    expect(row?.removed).toBe(0);
   });
 });
 

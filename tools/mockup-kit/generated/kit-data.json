@@ -20,7 +20,7 @@
     "apps/mobile/src/ui/HeaderDot.tsx": "1d49445123ec6a8eabd55ef377e30c8ff4bee94d",
     "apps/mobile/src/ui/HubFan.tsx": "cc651f77f09644df69d99191ed2b5335bc3a691f",
     "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
-    "apps/mobile/src/ui/ScreenHeader.tsx": "236d1ab9ecea77f2beda56459d4dbecb9e2fa338",
+    "apps/mobile/src/ui/ScreenHeader.tsx": "7b42b610beaf4124fe240a609a39c4480b3f203e",
     "apps/mobile/src/ui/Sheet.tsx": "511816016f43feef1b11ce7d5d29def68fad8e22",
     "apps/mobile/src/ui/StepNode.tsx": "2c4f506264b6aacf0e809e85cea6017bc2a9c87d",
     "packages/tui/src/blink.ts": "29c9f101f7942a0942e48c977a13e3759820c8e3",

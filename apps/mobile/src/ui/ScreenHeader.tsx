@@ -18,7 +18,15 @@ export interface ScreenHeaderProps {
   readonly title: string;
   /** `large`: list screens (34 pt title below the buttons); `compact`: chat. */
   readonly variant?: "large" | "compact";
-  /** Under a large title (mono path) or a compact one (status line). */
+  /**
+   * Under a large title (mono path) or a compact one (status line).
+   *
+   * A screen may pass an ELEMENT or a plain STRING: a string is wrapped in a
+   * `Text` here, because React Native draws a raw string with no `<Text>` around
+   * it as nothing at all (e2e fix round 2 — `"nothing written yet"` was
+   * invisible on the Review screen for exactly this). Do not render `{subtitle}`
+   * directly; go through `subtitleNode` below.
+   */
   readonly subtitle?: ReactNode;
   readonly left?: ReactNode;
   readonly right?: ReactNode;
@@ -45,6 +53,29 @@ export interface ScreenHeaderProps {
   readonly titleDim?: boolean;
   /** Compact only: what VoiceOver reads for the title (the dot is visual only). */
   readonly titleLabel?: string;
+}
+
+/** The compact caption's look: the mockup's `wf-hsub` (caption type, secondary). */
+const captionStyle = (palette: Palette) => [typography.caption, { color: palette.sec }];
+
+/**
+ * A caption as an ELEMENT, whichever way a screen passed it.
+ *
+ * A `subtitle` is a `ReactNode` slot, so a screen may hand it a string — and
+ * React Native draws a raw string with no `<Text>` around it as NOTHING (an
+ * `RCTRawText`; the JSX around it swallows the warning). That is how Review's
+ * "nothing written yet" reached the device invisible while every unit test
+ * passed on the string (e2e fix round 2, docs/feat/workflow-editor.md). The
+ * slot accepts both shapes, so the header wraps: no screen has to remember.
+ */
+function subtitleNode(subtitle: ReactNode, palette: Palette): ReactNode {
+  return typeof subtitle === "string" ? (
+    <Text maxFontSizeMultiplier={DENSE_FONT_SCALE} numberOfLines={1} style={captionStyle(palette)}>
+      {subtitle}
+    </Text>
+  ) : (
+    subtitle
+  );
 }
 
 export function ScreenHeader({
@@ -121,7 +152,7 @@ export function ScreenHeader({
               {heading}
             </Pressable>
           )}
-          {subtitle}
+          {subtitleNode(subtitle, palette)}
         </View>
         <View style={[styles.side, styles.sideRight]}>{right}</View>
       </View>
@@ -142,7 +173,9 @@ export function ScreenHeader({
       >
         {title}
       </Text>
-      {subtitle === undefined ? null : <View style={styles.largeSubtitle}>{subtitle}</View>}
+      {subtitle === undefined ? null : (
+        <View style={styles.largeSubtitle}>{subtitleNode(subtitle, palette)}</View>
+      )}
     </View>
   );
 }
