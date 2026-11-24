@@ -397,4 +397,13 @@ frames A1–A7 before the iOS build.
 
 ## Execution
 
+### S1a — `workflow` field on the wire (executor claude-sonnet-5-5, 2026-11-24)
+
+- **Load-bearing check re-run:** `PermissionRequestUpdateSchema` had no `workflow` (and `PermissionRequestOptions` none) — holds.
+- **Red first:** the new `permission_request workflow origin` tests failed on the unchanged schema (strip dropped `workflow`: `r.data.workflow` undefined) — 2 fail / 11 pass.
+- **Changed:** `protocol/src/permission.ts` (`workflow?: {name, runId?, stepId?, index?, count?}`, no `.max()`/`.int()`, P1); `core/src/permission.ts` (`PermissionRequestOptions.workflow`, same shape); `protocol/schema/protocol.json` regenerated (`bun run schema:export`); tests in `protocol/test/permission.test.ts` (carry-through, name-only, hostile values stay parseable, absent stays absent); `changelog.d/mobile-ask-surfaces.fixed.md`.
+- **Green:** `permission.test.ts` + `json-schema.test.ts` 35 pass; biome clean on the 4 files.
+- **Mutations (both reverted):** `index: z.number().int()` → hostile-value test fails (12 pass / 1 fail); `name: z.string().max(100)` → same test fails (12 / 1).
+- **Drift:** none. No `protocol.d/` note (additive display field, P1).
+
 ## Review

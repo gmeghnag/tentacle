@@ -114,3 +114,34 @@ describe("session/resolve_permission", () => {
     expect(DomainErrorCode.PermissionNotPending).toBe(-32013);
   });
 });
+
+describe("permission_request workflow origin (display only, blocking-safe)", () => {
+  const wf = { name: "rassegna", runId: "wf-1", stepId: "generate", index: 1, count: 5 };
+
+  test("carries the workflow origin through the parse", () => {
+    const r = PermissionRequestUpdateSchema.safeParse({ ...request, workflow: wf });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.workflow).toEqual(wf);
+  });
+
+  test("name alone is enough (a schedule approval has no run or step)", () => {
+    const r = PermissionRequestUpdateSchema.safeParse({ ...request, workflow: { name: "w" } });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.workflow).toEqual({ name: "w" });
+  });
+
+  test("a hostile value never makes the blocking update unparseable", () => {
+    for (const workflow of [
+      { ...wf, index: 1.5 },
+      { ...wf, index: -3, count: Number.MAX_SAFE_INTEGER },
+      { ...wf, name: "x".repeat(10_000) },
+    ]) {
+      expect(PermissionRequestUpdateSchema.safeParse({ ...request, workflow }).success).toBe(true);
+    }
+  });
+
+  test("absent stays absent (older daemon)", () => {
+    const r = PermissionRequestUpdateSchema.safeParse(request);
+    expect(r.success && r.data.workflow).toBeUndefined();
+  });
+});

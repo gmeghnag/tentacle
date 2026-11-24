@@ -1,0 +1,1 @@
+- **Mobile: one standard permission ask that says who is asking.** A permission ask now carries an optional structured `workflow` origin (workflow name, run, step and N of M) instead of making the phone parse it out of the sub-agent label, so the ask can name its workflow step, stays readable when the command is long, and no longer blocks switching session.
