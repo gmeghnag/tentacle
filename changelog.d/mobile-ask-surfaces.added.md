@@ -1,0 +1,1 @@
+- **Mobile: the drawer shows which sessions need you.** A session row carries a small glyph for a pending ask (hand), a live workflow run (curve path) and an armed wake (clock); no glyph when the daemon reports none.

@@ -559,6 +559,18 @@ function SessionRowView(props: SessionsDrawerProps & { readonly row: DrawerRow }
           </Text>
         )}
       </View>
+      {row.marks.ask ? (
+        <Icon name="hand.raised" color={palette.sec} size={12} weight="light" />
+      ) : null}
+      {row.marks.workflow ? (
+        <Icon
+          name="point.topleft.down.to.point.bottomright.curvepath"
+          color={palette.sec}
+          size={12}
+          weight="light"
+        />
+      ) : null}
+      {row.marks.wake ? <Icon name="clock" color={palette.sec} size={12} weight="light" /> : null}
       {row.pinned ? <Icon name="pin" color={palette.sec} size={11} weight="light" /> : null}
       {row.meta === "" ? null : (
         <Text

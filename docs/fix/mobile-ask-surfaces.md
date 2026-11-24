@@ -515,3 +515,14 @@ frames A1–A7 before the iOS build.
 - **Changelog:** `changelog.d/mobile-ask-surfaces.changed.md` (the S1a `.fixed` fragment remains).
 
 *— claude-sonnet-5-5, 2026-11-24*
+
+### S7b — drawer phone (executor claude-sonnet-5-5, 2026-11-24)
+
+- **Load-bearing check re-run:** `rowMarks` did not exist; `SessionListEntry` has `schedules` but not `asks`/`workflows` (S7a not on this branch) — as the plan says, tests use fixtures. Holds.
+- **Added:** `drawer-list.ts` `rowMarks(row, localAsk)` → `{ask, workflow, wake}`, `DrawerRow.marks`, option `currentAsking` (applies to the current row only); `session-list.ts` `SessionRow.asks/workflows` (0 when absent; read through a local optional `WithFlags` cast, since the schema fields land with S7a); `SessionsDrawer.tsx` draws `hand.raised`, curvepath, `clock` (glyphs only). Tests in `drawer-list.test.ts` (5 new) + fixtures updated (`drawer-items`, `session-groups`). 60 pass / 0 fail; `tsc -p apps/mobile` and biome clean on the 6 files.
+- **Red first:** modules and tests written together; red is shown by mutation.
+- **Mutations (each reverted):** drop `|| localAsk` → 2 fail; local ask applied to every row (not only current) → 1 fail; `wake` reads `workflows` → 1 fail.
+- **NOT done (PARTIAL):** `App.tsx:1698` does not yet pass `currentAsking` to `drawerList` (the open session's sheet state is not read there; one line once the host exposes it). Until S7a lands the real list carries no `asks`/`workflows`, so only the wake glyph is live. Simulator unverified.
+- **Changelog:** `changelog.d/mobile-ask-surfaces.added.md`.
+
+*— claude-sonnet-5-5, 2026-11-24*

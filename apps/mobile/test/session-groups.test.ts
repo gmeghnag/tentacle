@@ -14,6 +14,8 @@ const row = (over: Partial<SessionRow> & { sessionId: string }): SessionRow => (
   subtitle: "5m ago",
   badges: [],
   wakes: 0,
+  asks: 0,
+  workflows: 0,
   archived: false,
   running: false,
   attached: 0,
