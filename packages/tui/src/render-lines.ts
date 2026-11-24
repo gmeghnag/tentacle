@@ -803,6 +803,19 @@ function toolSubtitle(
  * wrapping is width-derived. Rows are folded here, not by the transcript's
  * `wrapLines`, because the prefix must repeat on each of them.
  */
+/** An expanded call's target as the first rows of its `⎿` block: wrapped, subtle, continuation at the indent. */
+function targetRows(subtitle: string, cols: number): string[] {
+  const room = Math.max(1, cols - stringWidth(INDENT));
+  const rows: string[] = [];
+  for (const line of expandTabs(subtitle).split(/\r?\n/)) {
+    const trimmed = line.replace(/\s+$/, "");
+    for (const row of trimmed === "" ? [""] : wrapLines([trimmed], room)) {
+      rows.push((rows.length === 0 ? connector() : INDENT) + theme.subtle(row));
+    }
+  }
+  return rows;
+}
+
 function commandRows(subtitle: string, cols: number): string[] {
   const room = Math.max(1, cols - stringWidth(COMMAND_PREFIX));
   const rows: string[] = [];
@@ -995,8 +1008,14 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const budget = cols - (stringWidth(BULLET) + 1 + stringWidth(label)) - stringWidth(elapsed) - 1;
   const fitted = expanded || subtitle === "" ? "" : fitSubtitle(subtitle, budget);
   const header = `${head}${fitted === "" ? "" : ` ${theme.subtle(fitted)}`}${theme.subtle(elapsed)}`;
-  const command = expanded && subtitle !== "" ? commandRows(subtitle, cols) : [];
-  return [header, ...command, ...toolBodyRows(tool, cols, opts)];
+  if (expanded && subtitle !== "") {
+    // One shape for every expanded tool row (owner 2026-11-24), like a shell
+    // row's `⎿ $ cmd`: the whole target (path, pattern, description…) opens the
+    // `⎿` block, wrapped at the width; the body hangs under it at the indent.
+    const target = targetRows(subtitle, cols);
+    return [header, ...target, ...toolBodyLines(tool, cols, opts).map((l) => INDENT + l)];
+  }
+  return [header, ...toolBodyRows(tool, cols, opts)];
 }
 
 /** A tool's body under its header: cut, the first line on the `⎿` connector. */
