@@ -415,4 +415,10 @@ frames A1–A7 before the iOS build.
 - **Mutations (all reverted, files restored):** `askOrigin` ignoring `workflow` → 7 fail; `index >= count` → `index > count` → 1 fail; router `name` without `progressText` → 1 fail.
 - **Drift:** none. Changelog: the S1a fragment `changelog.d/mobile-ask-surfaces.fixed.md` already covers the feature; no second fragment.
 
+### S3 — TUI origin line (executor claude-sonnet-5-5, 2026-11-24) — STOPPED, plan contradicts the code
+
+- **Load-bearing check FAILED:** the plan has the TUI read the same `askOrigin`/`originWords` as the phone (D2, Mac/TUI parity), and `ask-origin.ts` lives in `packages/client`. But `packages/tui/package.json` depends only on `agent`, `core`, `tools` — NOT `@tentacle/client` — and `app-types.ts:55` states it on purpose ("the TUI does not depend on `@tentacle/client`"). The TUI cannot import it without a new package edge.
+- **Nothing was edited** for S3.
+- **Decision needed (recommendation first):** move `ask-origin.ts` (pure, no deps) to `@tentacle/core` and re-export it from `client/src/index.ts` (the TUI already depends on core; S2's tests move with it). Alternative: add `@tentacle/client` to the TUI (breaks the stated invariant; not recommended). The TUI part is then: `permissionOriginLine(origin, agentId, columns)` replacing `permissionAgentLine` (`permission-ui.ts:117`), a `pendingWorkflow` beside `pendingAgent` (`:427,:607,:635`), `AppView.tsx:149`, and the row count in `app-layout.ts:450` (row present when agent OR workflow).
+
 ## Review
