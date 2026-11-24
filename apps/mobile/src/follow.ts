@@ -301,6 +301,22 @@ export function landingStep(
       step: bounded ? { state: initialFollow, scrollTo: endOffset(m), animated: false } : null,
     };
   }
+  if (state.settling && m.content !== state.last && rounds >= LANDING_ROUNDS) {
+    // The bound ends a HIDDEN opening landing (fix/mobile-open-at-bottom, review
+    // round 1, finding 1): reveal into the silent tail, not into nothing owed, or
+    // the next growth reaches `contentGrew` ANIMATED. The tail gets fresh rounds.
+    return {
+      state: {
+        settling: false,
+        silent: true,
+        revealed: true,
+        last: m.content,
+        rounds: 0,
+        awaiting: false,
+      },
+      step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
+    };
+  }
   const next: Landing = {
     settling:
       (state.settling || state.awaiting) && m.content !== state.last && rounds < LANDING_ROUNDS,
@@ -411,8 +427,26 @@ export function landingReveal(
   // the ordinary follow rules resume with it (bug 4: a one-shot `silent` flag let
   // the rest through ANIMATED, and a re-attach issues several measurements in a
   // row — the owner's scroll loop).
+  //
+  // It is NOT handed back to the ordinary follow yet (fix/mobile-open-at-bottom):
+  // the quiet window can pass while the list is still rendering its tail (a busy
+  // JS thread, as when opening from the session list), and the growth that
+  // scroll causes would then reach `contentGrew` ANIMATED — the visible travel.
+  // It stays owed as the re-attach's revealed tail: silent scrolls until a height
+  // repeats or `LANDING_ROUNDS` runs out; the next quiet reveal hands it back.
+  // (An `awaiting` landing keeps the one-shot hand-back: its rows were not hidden
+  // by a landing of their own, and a silent tail would swallow a streamed row.)
   return {
-    state: landingDone,
+    state: state.settling
+      ? {
+          settling: false,
+          silent: true,
+          revealed: true,
+          last: m.content,
+          rounds: state.rounds,
+          awaiting: false,
+        }
+      : landingDone,
     step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
   };
 }
