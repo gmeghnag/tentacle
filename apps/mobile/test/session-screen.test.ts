@@ -1036,6 +1036,57 @@ describe("foreground resync (docs/fix/mobile-open-at-end.md, item 2)", () => {
     expect(h.opens()).toBe(2);
   });
 
+  test("fix/mobile-connect-latency T9: a FAILED re-read (link) re-attaches once per link up — bounded, then open (mutation: drop the retryOnUp branch in `link` → red, opens stays 2)", async () => {
+    const h = countingHarness();
+    h.setHistory(["first"]);
+    await h.screen.open();
+    await settle();
+    expect(h.opens()).toBe(1);
+    // The re-read fails over a dead link: the screen is stranded `failed`.
+    h.goOffline();
+    await h.screen.resync();
+    await settle();
+    expect(h.opens()).toBe(2);
+    expect(h.screen.state().status).toMatchObject({ phase: "failed", failure: "link" });
+    // Each `up` retries ONCE while it still fails: two ups → two opens, not more.
+    h.screen.link(false);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(3);
+    h.screen.link(false);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(4);
+    await settle();
+    expect(h.opens()).toBe(4);
+    // The link is back for real: the next `up` re-attaches and the screen is open.
+    h.goOnline();
+    h.screen.link(false);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(5);
+    expect(h.screen.state().status.phase).toBe("open");
+    expect(h.screen.state().view.editable).toBe(true);
+    // Open now: a later blip re-attaches nothing (the net is for `failed` only).
+    h.screen.link(false);
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(5);
+  });
+
+  test("fix/mobile-connect-latency T9: a disposed failed screen is not re-attached at link up", async () => {
+    const h = countingHarness();
+    h.goOffline();
+    await h.screen.open();
+    await settle();
+    expect(h.screen.state().status.phase).toBe("failed");
+    const before = h.opens();
+    h.screen.dispose();
+    h.screen.link(true);
+    await settle();
+    expect(h.opens()).toBe(before);
+  });
+
   test("a link blip with NO return in between never resyncs (the redial owns it)", async () => {
     const h = countingHarness();
     h.setHistory(["first"]);

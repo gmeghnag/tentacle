@@ -910,3 +910,132 @@ describe("scheduled wakes over the app's own link (cron-tool S6)", () => {
     });
   });
 });
+
+describe("fix/mobile-connect-latency: the persisted winner, the phase timings, resume → redialNow", () => {
+  const phases = (log: ReturnType<typeof createAppLog>) =>
+    log
+      .entries()
+      .filter((entry) => entry.kind === "timing")
+      .map((entry) => entry.fields);
+
+  test("T3 lastAddress starts the race there: the refused first address is never opened, and an unchanged winner is not re-persisted (mutation: lastGood undefined → red)", async () => {
+    await withDaemon(async (d) => {
+      const real = d.computer.addresses[0] ?? "";
+      const log = createAppLog({ now: () => 1, capacity: 200 });
+      const answered: string[] = [];
+      const link = await openComputer(
+        { ...d.computer, addresses: [freeLoopbackAddress(), real], lastAddress: real },
+        {
+          WebSocket: RNShapedWebSocket,
+          random: systemRandomBytes,
+          log,
+          onAnswered: (address) => {
+            answered.push(address);
+          },
+        },
+      );
+      try {
+        const opens = phases(log)
+          .filter((f) => f.phase === "dial-open")
+          .map((f) => [f.slot, f.kind, f.ok]);
+        expect(opens).toEqual([[1, "direct", true]]);
+        expect(answered).toEqual([]);
+      } finally {
+        await link.close();
+      }
+    });
+  });
+
+  test("T3 a lastAddress no longer listed starts at 0; a winner that differs is handed to onAnswered ONCE (mutation: drop the call → red)", async () => {
+    await withDaemon(async (d) => {
+      const real = d.computer.addresses[0] ?? "";
+      const log = createAppLog({ now: () => 1, capacity: 200 });
+      const answered: string[] = [];
+      const link = await openComputer(
+        { ...d.computer, addresses: [freeLoopbackAddress(), real], lastAddress: "ws://gone:1/e2e" },
+        {
+          WebSocket: RNShapedWebSocket,
+          random: systemRandomBytes,
+          log,
+          onAnswered: (address) => {
+            answered.push(address);
+          },
+        },
+      );
+      try {
+        const opens = phases(log)
+          .filter((f) => f.phase === "dial-open")
+          .map((f) => [f.slot, f.ok]);
+        expect(opens).toEqual([
+          [0, false],
+          [1, true],
+        ]);
+        expect(answered).toEqual([real]);
+      } finally {
+        await link.close();
+      }
+    });
+  });
+
+  test("T3 a throwing / rejecting onAnswered never fails the dial", async () => {
+    await withDaemon(async (d) => {
+      const throwing = (): void => {
+        throw new Error("keychain");
+      };
+      const rejecting = (): Promise<void> => Promise.reject(new Error("keychain"));
+      for (const onAnswered of [throwing, rejecting]) {
+        const link = await openComputer(
+          { ...d.computer, addresses: [freeLoopbackAddress(), d.computer.addresses[0] ?? ""] },
+          { WebSocket: RNShapedWebSocket, random: systemRandomBytes, onAnswered },
+        );
+        expect(await link.client.sessionList()).toBeDefined();
+        await link.close();
+      }
+    });
+  });
+
+  test("slice 1: one timing entry per phase (dial-open, dial-confirm, dial-init) with ms, the slot and relay-or-direct — never the address (mutation: drop a phase → red)", async () => {
+    await withDaemon(async (d) => {
+      const log = createAppLog({ now: () => 1, capacity: 200 });
+      const link = await open(d, log);
+      try {
+        const got = phases(log);
+        expect(got.map((f) => f.phase)).toEqual(["dial-open", "dial-confirm", "dial-init"]);
+        for (const f of got) {
+          expect(typeof f.ms).toBe("number");
+        }
+        expect(got[0]).toMatchObject({ slot: 0, kind: "direct", ok: true });
+        expect(got[1]).toMatchObject({ ok: true });
+        const text = JSON.stringify(got);
+        expect(text).not.toContain("127.0.0.1");
+        expect(text).not.toContain("ws://");
+      } finally {
+        await link.close();
+      }
+    });
+  });
+
+  test("T6 resume after a REAL suspend calls client.redialNow once; a duplicate resume or one with no suspend does not (mutation: call it unconditionally → red)", async () => {
+    await withDaemon(async (d) => {
+      const link = await open(d);
+      let redials = 0;
+      const client = link.client as unknown as { redialNow: () => void };
+      const original = client.redialNow.bind(client);
+      client.redialNow = () => {
+        redials += 1;
+        original();
+      };
+      try {
+        link.resume(); // never suspended
+        expect(redials).toBe(0);
+        link.suspend();
+        link.resume();
+        expect(redials).toBe(1);
+        link.resume(); // a duplicate `active`
+        expect(redials).toBe(1);
+      } finally {
+        await link.close();
+      }
+    });
+  });
+});

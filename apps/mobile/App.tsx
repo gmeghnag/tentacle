@@ -121,6 +121,7 @@ import { createDrawerRename } from "./src/drawer-rename.ts";
 import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
 import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { loadFigtree } from "./src/fonts-expo.ts";
+import { foregroundAction } from "./src/foreground-gate.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -608,11 +609,12 @@ const LINKS = createLinkRegistry<ComputerLink>({
       random: phoneRandom,
       diagnosis: diagnoserFor(id),
       log: APP_LOG,
+      onAnswered: (address) => KEYCHAIN_STORE.setLastAddress(id, address),
     });
     // A link dialled while the app is already in the background starts held:
     // iOS would suspend it anyway, and a socket opened now would be a ghost
     // attachment for the daemon (docs/feat/mobile-session-view.md 12a.4).
-    if (AppState.currentState !== "active") {
+    if (foregroundAction(AppState.currentState) === "suspend") {
       link.suspend();
     }
     LIVE_LINKS.add(link);
@@ -2252,12 +2254,12 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   // decision is `foreground-gate.ts`'s; this is the `AppState` wiring.
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
+      // Only `background` suspends (2d): `inactive` (Face ID, Control Center, a
+      // call banner) keeps the socket.
+      const action = foregroundAction(state);
       for (const link of LIVE_LINKS) {
-        if (state === "active") {
-          link.resume();
-        } else {
-          link.suspend();
-        }
+        if (action === "resume") link.resume();
+        else if (action === "suspend") link.suspend();
       }
     });
     return () => subscription.remove();
