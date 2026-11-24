@@ -113,3 +113,48 @@ Every mutation is caught. These tests are non-vacuous for the code they pin, but
 **How the executor behaved:** honest. It flagged the missing repro, the weak red and the unverified mechanism itself, and it did not overclaim in the doc. But after two failed repro attempts it shipped a speculative fix instead of escalating (§0), and the changelog states the fix as fact.
 
 *— claude-opus-5-5, 2026-11-24 (fresh context; executor was claude-sonnet-5-5, a different model, same family)*
+
+### Round 2
+
+**Verdict: PASS (APPROVE-WITH-NITS).** Round 1's MEDIUM (the contract) and HIGH-2 (no behavioural test) are fixed, and I confirmed both by mutation. HIGH-1 cannot be closed without a reproduction. The executor now says so honestly in the doc and in the changelog, and the 56-turn QA re-run is named as the end-to-end check. That is a scoping decision, not a defect in the code. What stays open: mechanisms (b) `following:false` and (c) native metrics that already say "at end" are not covered.
+
+**Round 1 findings, rechecked**
+1. **HIGH-1 (mechanism unproven): accepted as a declared limitation.** The doc says only (a) is covered. The changelog no longer claims the QA case is fixed. Recommendation, not a blocker: the QA build is Release, so a `__DEV__` log would not show. To tell (a), (b) and (c) apart on the re-run, the log of `{landing, following, offset, size}` needs a Release-visible channel, such as the e2e hook.
+2. **HIGH-2 (no behavioural red): fixed.** I ran round 1's `follow.ts` (with a `restsShort` stub so the file loads) against the new tests. 2 behavioural tests go RED: "a repeated height does not reveal a list that rests short" and "the quiet timer re-scrolls silently and stays hidden while short". That is a red on behaviour, not a load failure.
+3. **MEDIUM (contract): fixed for mechanism (a).** The check now runs inside the hidden landing. `landingStep` stays hidden when the height repeats but the list rests short (`follow.ts:347-351`). `landingReveal` re-scrolls silently and stays pending (`follow.ts:454-463`), so the first visible frame is the end. `armLandedSettle` remains only as a backup after the reveal.
+4. **LOW (magnitude): fixed.** The fixtures now use 5447 → 5770, which is 323 pt (2 turns).
+5. **NIT: acknowledged.**
+
+**Mutation** (scratch copy in `.tentacle/tmp/mobile-open-long-session-review/`, no `git checkout`; the worktree is byte-identical and `git status` is clean). Every RED below is relative to the scratch baseline of 82 pass / 3 fail. Those 3 fails come from wiring tests that read files I did not copy; they are not real.
+
+| Mutation | Result |
+|---|---|
+| R0: round-1 `follow.ts` | RED (2) |
+| R1: `restsShort` → false | RED (3) |
+| R2: no short branch in `landingReveal` | RED (1) |
+| R3: `landingStep` ignores `restsShort` | RED (1) |
+| R4: no `LANDING_ROUNDS` bound in the reveal branch | RED (the "BOUNDED" test) |
+| R5: `landingReveal` gets no `offset.current` | RED (2 wiring tests) |
+| **R6: drop the `state.settling &&` guard on the reveal short branch** | **GREEN, survives** → N1 |
+
+**Gate (my run):** `bun run typecheck` exit 0. `bun run lint` exit 0 (2390 files, no fixes). `bun test`: **17876 pass, 5 skip, 0 fail** (17881 tests). That is +5 tests on Round 1 and the same skip count.
+
+**New findings (none HIGH or MEDIUM)**
+- **N1 (LOW, test gap):** the `state.settling` guard on the reveal short branch (`follow.ts:454`) is unpinned (R6 survives). Without it, an `awaiting` landing reaches that branch. That list is already visible. If it rested short, it would be re-scrolled silently on every 120 ms fire, up to the bound: visible jumps. Add one test that an `awaiting` landing resting short is not re-scrolled by `landingReveal`.
+- **N2 (LOW, "unknown" offset never reaches the code):** `offset` is `useRef(0)`, so the screen never passes `null`. Before the first `onScroll`, a long list reads as "0, short". Every path I traced still converges. The opening measurements change the height anyway. If a repeated height arrives before its `onScroll`, that costs one extra no-op silent scroll plus one 120 ms reveal fire. RN iOS force-dispatches `onScroll` after a programmatic `scrollToOffset`, which I recalled from RN source and did not run. The worst case is bounded by `LANDING_ROUNDS` (≈12 × 120 ms ≈ 1.4 s hidden). The doc's "null = unknown" is a test-only state.
+
+**Attacks tried**
+- *Very long session:* the extra rounds are bounded. R4 confirms the bound is load-bearing and pinned.
+- *Content growing while opening:* a changed height still keeps the landing hidden, as before. No new animated path: every new step is `animated: false`.
+- *Short session:* content ≤ viewport means `restsShort` is false and the behaviour is unchanged.
+- *Re-attach / re-open:* the re-attach branch (`silent && !settling && !awaiting`) runs before the short branch and is untouched. The `awaiting` case is guarded, but by an unpinned guard (N1).
+- *Reader scrolled up:* both functions return `landingDone` with no step before the new code runs (tested).
+- *Rotation, keyboard or composer inset:* the `onListLayout` → `land()` path gets the same offset argument. Nothing else changed.
+- *Stale offset:* covered under N2 above.
+- *Pure module:* all the new branching is in `follow.ts`. `SessionScreen.tsx` only moves a ref and passes an argument.
+
+**Unverified by me:** the executor's simulator no-regression shots (`fix1-alpha.png`, `fix2-charlie.png`), and the real-device effect on the QA case.
+
+**How the executor behaved:** it took on every finding, moved the check to the contract-preserving place I suggested, wrote real behavioural reds and ran its own mutations (which match mine). It also reported the remaining uncertainty without overclaiming.
+
+*— claude-opus-5-5, 2026-11-24 (fresh context; executor claude-sonnet-5-5, same family)*
