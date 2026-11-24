@@ -1857,3 +1857,60 @@ writer's behaviour; slices 7a–7c must render it, and an e2e flow with an inval
 is first seen on a device.
 
 *— claude-opus-5-5 (executor, slice 6), 2026-11-24*
+
+## Review
+
+### Slices 4 + 5 + 6 — REQUEST-CHANGES
+
+Scope: `git diff main...HEAD`, slices 4, 5 and 6 only (fresh context).
+
+**Gate (narrow):** the 5 touched test files: 183 pass / 0 fail. `bun run lint`: clean (2392 files).
+`bun run typecheck` (root + mobile + relay): clean.
+
+**Findings**
+
+1. **HIGH: edits made after a lost save are marked saved and then dropped without a prompt.**
+   `apps/mobile/src/workflow-edit-controller.ts:631-635` sets `phase = "editing"` after a write whose
+   answer was lost, so editing continues (offline editing is a planned state). On reconnect,
+   `checkInterrupted` (`:982-994`) takes the `saved` outcome and sets `baseline = history.current`
+   and `changes = 0`. That `current` includes every edit made AFTER the interrupted write, but the
+   disk holds only the previewed bytes. Repro:
+   `.tentacle/tmp/workflow-editor/rev456/lost-edits.test.ts`. Load, edit, Review, confirm (the write
+   rejects), `setLink(false)`, `setRetry(plan, 3)` (`dirty: true`), `setLink(true)`. The result is
+   `kind: saved, dirty: false, discardPrompt: null`, while the draft still shows `retry: 3`. The
+   edit is not on disk, and leaving the screen loses it silently. The fix should either (a) freeze
+   editing while `interrupted !== null`, or (b) set the baseline to the snapshot that was SENT
+   (keep it in `interrupted`), not to `current`. Add a red test for this case.
+2. **MEDIUM: Save is offered while a lost save is still undecided, and the only re-check is a
+   link down→up edge.** `beginReview` (`:855`) does not check `interrupted`. `checkInterrupted`
+   runs only from `setLink(up)` after a recorded `down` (`:919-925`). A rejection without an
+   observed link drop leaves `interrupted` pending indefinitely, with the notice "reconnecting will
+   check" and nothing to trigger it. Examples: a quick relay reconnect the screen never saw as
+   down, or an RPC error. A second Save then writes against the stale `baseHash`. If the first
+   write had landed, the user gets "Changed on the computer" for their own write, and Reload
+   discards any edits made since. The failure is loud, not an overwrite, but D7's "the hash
+   decides" never runs. Gate Save on `interrupted`, and re-check at once when the link is already
+   up.
+
+**Mutations (all red, then reverted; `git status` clean afterwards):**
+- trust bit removed in `RemoteSession.workflowSave` → `workflows-client` "sends NOTHING" fails;
+- `padHit` uses the drawn size → 2 graph tests fail (≥ 44 pt, ＋ over pill);
+- `reconnectOutcome` drops the preview→saved branch → 2 controller tests fail.
+
+**Attacks that found nothing:**
+- Slice 4: MethodNotFound → `unsupported`, and other errors rethrow.
+- Slice 4: `"once"` means no resend.
+- Slice 4: `sessionId` cannot be overridden (`Omit` plus the spread order puts the session's id first,
+  and the wire carries it twice). No turn is minted.
+- Slice 5: the hit priority holds, and the ＋ never targets a side-column pill.
+- Slice 5: ghosts are deduplicated.
+- Slice 6: a `changed` refusal keeps the draft. Review blocks edits (`apply` requires `editing`).
+  Confirm sends the previewed draft with `baseHash`.
+
+**§7:** the slice-4 trust bit refuses locally, sends nothing, and is pinned. The phone carries
+model names only. Slices 5 and 6 are pure, React-free modules.
+
+**Executor:** disciplined and honest in Execution. The same model family reviewed it (Opus,
+fresh context only), so blind spots they share may survive both passes.
+
+*— claude-opus-5-5, 2026-11-24*
