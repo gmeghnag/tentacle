@@ -1338,16 +1338,11 @@ export function SessionScreen({
       sheet.park();
     }
   }, [drawerOpen, state.sheet, parkedKey, sheet]);
-  // Settled (answered or resolved elsewhere): the note is spent with the ask.
+  // The note is spent by the sheet's own settle (`onSettled`, the controller),
+  // never here: the key also goes null on a WITHDRAWAL (a detach), whose replay
+  // must still open parked (Review S4–S7b, finding 1).
   const parkedKeyRef = useRef<string | null>(null);
   parkedKeyRef.current = parkedKey;
-  const lastParkedKey = useRef<string | null>(null);
-  useEffect(() => {
-    if (lastParkedKey.current !== null && lastParkedKey.current !== parkedKey) {
-      ASK_PARKS.forget(lastParkedKey.current);
-    }
-    lastParkedKey.current = parkedKey;
-  }, [parkedKey]);
   const queued = state.sheet.kind === "asking" ? sheet.queued : 0;
   const banner_ask =
     state.sheet.kind === "asking"

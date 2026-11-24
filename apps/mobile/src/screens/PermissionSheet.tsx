@@ -81,9 +81,10 @@ export function PermissionSheetView({
           palette={palette}
           title={view.title}
           originShort={view.origin.lead}
-          more={0}
-          actionLabel="Review"
-          onPress={() => {}}
+          more={sheet.queued}
+          // Not a button: the sheet cannot be raised from code, so the row says
+          // how (a dimmed hint), never a tap that does nothing (finding 3).
+          actionLabel="Drag up"
         />
       </View>
     );

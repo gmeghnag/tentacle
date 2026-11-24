@@ -5,7 +5,8 @@
  * - `ASK_PARKS` remembers which asks the person parked, keyed
  *   `computerId/sessionId/requestId`, so a re-delivered ask (a detach and
  *   re-attach, a session switch, the lock drain's `idle → asking`) comes back
- *   parked, never as a surprise sheet. `forget` on settle.
+ *   parked, never as a surprise sheet. `forget` when answered here (the sheet's
+ *   `onSettled`), never on a withdrawal: the replay needs the note.
  * - `askBanner` is what the parked ask shows under the header.
  * - `askPresented` / `askSurface` decide whether the sheet is up and which form
  *   it draws (the peek detent never draws buttons).
@@ -24,15 +25,29 @@ export interface AskParks {
   note(key: string): void;
   /** Was it parked (a re-delivery opens parked)? */
   has(key: string): boolean;
-  /** The ask is settled, or the session is gone. */
+  /** The ask was answered here, or the banner brought it back. Never on a withdrawal. */
   forget(key: string): void;
 }
 
-export function createAskParks(): AskParks {
-  const parked = new Set<string>();
+/**
+ * How many notes are kept. A note is spent when the ask is answered HERE; one
+ * answered on another device (a withdrawal, like a detach) keeps its note, inert
+ * because a settled id is never re-delivered. The cap bounds those leftovers.
+ */
+export const ASK_PARKS_CAP = 256;
+
+export function createAskParks(cap = ASK_PARKS_CAP): AskParks {
+  const parked = new Set<string>(); // insertion order = age
   return {
     note: (key) => {
+      parked.delete(key);
       parked.add(key);
+      for (const oldest of parked) {
+        if (parked.size <= cap) {
+          break;
+        }
+        parked.delete(oldest);
+      }
     },
     has: (key) => parked.has(key),
     forget: (key) => {

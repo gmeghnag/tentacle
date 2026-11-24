@@ -527,6 +527,55 @@ frames A1–A7 before the iOS build.
 
 *— claude-sonnet-5-5, 2026-11-24*
 
+### Fix round 1 — group S4–S6 + S7b (executor claude-opus-5-5, 2026-11-24)
+
+Fixes the three MEDIUM findings of Review "Group S4–S6 + S7b".
+
+- **Finding 1 (park note erased on detach): FIXED.** The decision moved out of the component and into the pure sheet. `permission-sheet.ts` has a new dep, `onSettled(requestId)`. `settle()` calls it, and `settle()` is the only path for `answer`, `answerFor` and `sendReply`. The abort path (`onAbort`) and `dismiss()` never call it. `session-screen-controller.ts` wires `onSettled` → `ASK_PARKS.forget(parkKey(...))`, next to `wasParked`. The `SessionScreen.tsx` forget effect (`lastParkedKey`) is deleted. The only other forget left in the screen is the banner tap.
+  - **Drift from failure-mode row 274:** an ask resolved ELSEWHERE is a withdrawal to this phone. The router's `abort` carries no reason (`permission-router.ts:171-182`; `remote-client.ts:4900`). So its note is no longer forgotten. It is inert, because a settled id is never re-delivered. To keep such leftovers from growing for ever, `createAskParks(cap = ASK_PARKS_CAP = 256)` evicts the oldest note first. Telling "resolved elsewhere" apart from a detach would need a reason on the client's abort, which is outside this plan's files.
+- **Finding 2 (settle/re-delivery wiring untested): FIXED.** New tests:
+  - `session-screen.test.ts`, which uses the real controller, the real sheet and the real `ASK_PARKS` through the app's broker:
+    - a parked ask withdrawn by abort keeps its note and opens **parked** on the replay of the same id;
+    - an answered ask spends its note.
+  - `ask-park.test.ts`:
+    - `onSettled` fires for answer, `answerFor` and a sent reply;
+    - it does not fire for an abort or a dismiss;
+    - the cap evicts the oldest note.
+  - `native-sheets-wiring.test.ts`: the screen has exactly one `ASK_PARKS.forget(`, the banner tap's; the controller's `onSettled` forgets.
+  - Flow `46-ask-park.yaml` (the drawer leg on the simulator) is still not written. Pixels and the simulator are unverified.
+- **Finding 3 (peek «Review» no-op): FIXED.** `AskSlim.onPress` is now optional. Without it the row is a plain `View`: no button role, and the action word and chevron are drawn in `palette.sec`, so they read as a hint. The peek passes no `onPress` and shows `actionLabel="Drag up"`, because the native sheet cannot be raised from code (only `sheetDetentChange` is read). It also passes `more={sheet.queued}`. Before this, `queued` changed without an `onChange`, so the «+1» (banner and peek) would have gone stale. `permission-sheet.ts` now `commit`s when an ask queues behind the shown one, and when a queued ask is withdrawn.
+- **Red first** (before any production edit): 7 fail across the 3 files, each on an assertion:
+  - cap;
+  - `onSettled` reported;
+  - queue-push emit;
+  - queued-abort emit;
+  - answered spends the note (controller);
+  - one-forget pin;
+  - peek pin.
+
+  The controller-level "withdrawal → replay parked" test was green on the old code, because the bug lived in the `.tsx` effect, which Bun cannot import. That leg is pinned red by the wiring test (M3) and by the pure-module mutation (M4).
+- **Mutations (each reverted, `grep` confirmed the restore):**
+
+  | # | Mutation | Result | Failing test(s) |
+  |---|---|---|---|
+  | M1 | `settle` never calls `onSettled` | 2 fail | "answer, answerFor and a sent reply each report"; "an answered ask spends its note" |
+  | M2 | controller `onSettled` key renamed (wiring dropped) | 2 fail | "an answered ask spends its note"; the one-forget wiring pin |
+  | M3 | the reviewer's original `lastParkedKey` forget effect re-inserted in `SessionScreen.tsx` | 1 fail | the one-forget wiring pin |
+  | M4 | `onAbort` calls `onSettled` (a withdrawal spends the note) | 2 fail | "a withdrawal … report nothing"; "a parked ask withdrawn by a detach opens PARKED on its replay" |
+  | M5+M6 | both queue `commit`s removed | 2 fail | the two «+1» announce tests |
+  | M7 | cap disabled | 1 fail | the bounded test |
+  | M8 | peek `more={0}` | 1 fail | the peek pin |
+
+- **Narrow gate:**
+  - `ask-park` + `session-screen` + `native-sheets-wiring` + `permission-sheet`: 149 pass / 0 fail.
+  - With `e2e-flows` + `ask-card` added: 217 pass / 0 fail.
+  - `bunx biome check` on the 9 changed files: clean.
+  - `tsc -p apps/mobile`: clean.
+  - The full gate is the orchestrator's script.
+- The reviewer's scratch repro (`repro-detach.test.ts`) imitates the deleted effect line for line, so it no longer describes the code. Its replacement is the controller-level replay test above.
+
+*— claude-opus-5-5, 2026-11-24*
+
 ## Review
 
 ### Group S4–S6 + S7b — Verdict: REQUEST-CHANGES

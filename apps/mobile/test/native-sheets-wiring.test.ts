@@ -559,6 +559,27 @@ describe("S5 — the ask is a route, and its dismissal is explicit (D5)", () => 
     expect(SCREEN).toContain('if (drawerOpen && state.sheet.kind === "asking"');
   });
 
+  test("the screen never forgets a park on a withdrawal: only the sheet's settle and the banner tap do", () => {
+    // Review S4–S7b, finding 1: an effect that forgot whenever the ask left the
+    // screen erased the note on every detach, so the replay opened unparked.
+    expect(SCREEN.match(/ASK_PARKS\.forget\(/g)).toHaveLength(1);
+    const tap = sliceOf(SCREEN, 'testID="ask-banner"', "sheet.unpark()");
+    expect(tap).toContain("ASK_PARKS.forget(parkedKey)");
+    const CONTROLLER = code(read("src", "session-screen-controller.ts"));
+    const settled = sliceOf(CONTROLLER, "onSettled: (requestId) =>", ")),");
+    expect(settled).toContain("ASK_PARKS.forget(parkKey(");
+  });
+
+  test("the peek row is not a button: no action, the «+1» is live (finding 3)", () => {
+    const PERM = code(read("src", "screens", "PermissionSheet.tsx"));
+    const slim = sliceOf(PERM, 'testID="perm-slim"', "/>");
+    expect(slim).not.toContain("onPress");
+    expect(slim).toContain("more={sheet.queued}");
+    const SLIM = code(read("src", "ui", "AskSlim.tsx"));
+    expect(SLIM).toContain("readonly onPress?: () => void;");
+    expect(SLIM).toContain("onPress === undefined");
+  });
+
   test("the navigator no longer blocks the gesture; the detent reaches the content", () => {
     expect(APP).not.toContain("gestureCancel");
     expect(APP).not.toContain("SHEET_HOLDS");

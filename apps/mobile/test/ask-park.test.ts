@@ -95,6 +95,93 @@ describe("ASK_PARKS", () => {
     expect(ASK_PARKS.has(key)).toBe(true);
     ASK_PARKS.forget(key);
   });
+
+  test("bounded: a note never spent (the ask settled elsewhere) is evicted oldest-first", () => {
+    // Review S4–S7b, finding 1: a withdrawal keeps its note (the replay needs it),
+    // so an ask answered on ANOTHER device leaves one behind — inert (a settled
+    // id is never re-delivered) but it must not grow for ever.
+    const parks = createAskParks(3);
+    for (const id of ["r1", "r2", "r3", "r4"]) {
+      parks.note(parkKey("c", "s", id));
+    }
+    expect(parks.has(parkKey("c", "s", "r1"))).toBe(false);
+    for (const id of ["r2", "r3", "r4"]) {
+      expect(parks.has(parkKey("c", "s", id))).toBe(true);
+    }
+  });
+});
+
+describe("the note is spent on a SETTLE, kept on a WITHDRAWAL (Review S4–S7b, finding 1)", () => {
+  function sheetWith(settled: string[]) {
+    return createPermissionSheet({
+      now: () => 0,
+      armMs: 0,
+      onSettled: (id) => settled.push(id),
+    });
+  }
+
+  test("answer, answerFor and a sent reply each report the settled id", () => {
+    const settled: string[] = [];
+    const sheet = sheetWith(settled);
+    void sheet.requester(req, opts("r1"));
+    sheet.answer("allow_once");
+    void sheet.requester(req, opts("r2"));
+    sheet.answerFor("r2", "reject_once");
+    void sheet.requester({ ...req, reply: { maxChars: 100 } }, opts("r3"));
+    sheet.answer("reply");
+    sheet.setReplyText("no");
+    sheet.sendReply();
+    expect(settled).toEqual(["r1", "r2", "r3"]);
+  });
+
+  test("a withdrawal (detach, resolved elsewhere) and a dismiss report nothing", async () => {
+    const settled: string[] = [];
+    const sheet = sheetWith(settled);
+    const ac = new AbortController();
+    void sheet.requester(req, { requestId: "r1", signal: ac.signal });
+    sheet.park();
+    ac.abort();
+    await Promise.resolve();
+    expect(sheet.view().kind).toBe("idle");
+    void sheet.requester(req, opts("r2"));
+    sheet.dismiss();
+    expect(settled).toEqual([]);
+  });
+
+  test("an ask queued behind the shown one is announced (the «+1» updates)", () => {
+    let changes = 0;
+    const sheet = createPermissionSheet({
+      now: () => 0,
+      armMs: 0,
+      onChange: () => {
+        changes += 1;
+      },
+    });
+    void sheet.requester(req, opts("r1"));
+    const before = changes;
+    void sheet.requester(req, opts("r2"));
+    expect(sheet.queued).toBe(1);
+    expect(changes).toBeGreaterThan(before);
+  });
+
+  test("a queued ask withdrawn behind the shown one is announced too", async () => {
+    let changes = 0;
+    const sheet = createPermissionSheet({
+      now: () => 0,
+      armMs: 0,
+      onChange: () => {
+        changes += 1;
+      },
+    });
+    void sheet.requester(req, opts("r1"));
+    const ac = new AbortController();
+    void sheet.requester(req, { requestId: "r2", signal: ac.signal });
+    const before = changes;
+    ac.abort();
+    await Promise.resolve();
+    expect(sheet.queued).toBe(0);
+    expect(changes).toBeGreaterThan(before);
+  });
 });
 
 describe("askBanner / askPresented / askSurface", () => {

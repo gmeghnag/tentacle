@@ -15,9 +15,13 @@ export interface AskSlimProps {
   readonly originShort: string;
   /** Asks queued behind this one (0: none). */
   readonly more: number;
-  /** The row's action word (`Review`, `Open`). */
+  /** The row's action word (`Review`), or the dimmed hint when it has no action. */
   readonly actionLabel: string;
-  readonly onPress: () => void;
+  /**
+   * Absent: the row is NOT a button (the peek detent: the person drags the sheet
+   * up). It draws as a hint, never a silent no-op tap (Review S4–S7b, finding 3).
+   */
+  readonly onPress?: () => void;
   readonly testID: string;
 }
 
@@ -30,14 +34,9 @@ export function AskSlim({
   onPress,
   testID,
 }: AskSlimProps): JSX.Element {
-  return (
-    <Pressable
-      testID={testID}
-      accessibilityRole="button"
-      accessibilityLabel={`${title}. ${originShort}. ${actionLabel}`}
-      onPress={onPress}
-      style={[styles.row, { backgroundColor: palette.tint }]}
-    >
+  const actionColor = onPress === undefined ? palette.sec : palette.accent;
+  const body = (
+    <>
       <Icon name="hand.raised" color={palette.accent} size={18} />
       <View style={styles.text}>
         <Text numberOfLines={1} style={[typography.subhead, { color: palette.label }]}>
@@ -47,8 +46,31 @@ export function AskSlim({
           {more > 0 ? `${originShort} · +${more}` : originShort}
         </Text>
       </View>
-      <Text style={[typography.subhead, { color: palette.accent }]}>{actionLabel}</Text>
-      <Icon name="chevron.up" color={palette.accent} size={12} />
+      <Text style={[typography.subhead, { color: actionColor }]}>{actionLabel}</Text>
+      <Icon name="chevron.up" color={actionColor} size={12} />
+    </>
+  );
+  const label = `${title}. ${originShort}. ${actionLabel}`;
+  if (onPress === undefined) {
+    return (
+      <View
+        testID={testID}
+        accessibilityLabel={label}
+        style={[styles.row, { backgroundColor: palette.tint }]}
+      >
+        {body}
+      </View>
+    );
+  }
+  return (
+    <Pressable
+      testID={testID}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={onPress}
+      style={[styles.row, { backgroundColor: palette.tint }]}
+    >
+      {body}
     </Pressable>
   );
 }

@@ -167,6 +167,13 @@ export interface PermissionSheetDeps {
    * (`ask-park.ts`'s `ASK_PARKS.has`). Absent → every ask opens presented.
    */
   readonly wasParked?: (requestId: string) => boolean;
+  /**
+   * A daemon ask was ANSWERED here (a tap, a card, a sent reply): its park note is
+   * spent. Never called on a withdrawal (a detach, `permission_resolved`, a
+   * dismiss) — a detach's replay must still find the note
+   * (docs/fix/mobile-ask-surfaces.md, Review S4–S7b finding 1).
+   */
+  readonly onSettled?: (requestId: string) => void;
 }
 
 /**
@@ -379,6 +386,10 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     detach(entry);
     const next = queue.shift() ?? null;
     present(next);
+    const id = entry?.options?.requestId;
+    if (id !== undefined) {
+      deps.onSettled?.(id);
+    }
     entry?.resolve(response);
   }
 
@@ -423,6 +434,8 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
         if (wasCurrent) {
           const next = queue.shift() ?? null;
           present(next);
+        } else if (at >= 0) {
+          commit(state); // the queue shrank: the «+1» is re-read
         }
         resolve(DISMISSED);
       }
@@ -431,6 +444,7 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
         present(entry);
       } else {
         queue.push(entry);
+        commit(state); // the queue grew: the «+1» is re-read
       }
     });
 

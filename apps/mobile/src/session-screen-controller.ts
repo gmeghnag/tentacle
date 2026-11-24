@@ -789,6 +789,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
           // sheet (docs/fix/mobile-ask-surfaces.md D3).
           wasParked: (requestId) =>
             ASK_PARKS.has(parkKey(deps.compose?.computerId ?? "", deps.sessionId, requestId)),
+          // Answered here: the note is spent. A withdrawal (a detach) keeps it, so
+          // the replay of the same id opens parked (Review S4–S7b, finding 1).
+          onSettled: (requestId) =>
+            ASK_PARKS.forget(parkKey(deps.compose?.computerId ?? "", deps.sessionId, requestId)),
           // The age guard's release is a clock event: it re-renders through the
           // same `onChange` every other change uses (never a screen-side timer).
           schedule: (fn, ms) => {
