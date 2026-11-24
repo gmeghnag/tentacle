@@ -17,6 +17,19 @@ Leads (unverified): the transcript list is `apps/mobile/src/screens/SessionScree
 
 ## Implementation
 
+> **Status:** NOT approved — a fix for this already exists; the residual symptom is not yet characterised.
+
+### Triage (AGENTS §1)
+- **Known:** this is a residual of `docs/fix/mobile-open-at-end.md` item 1. The mechanism is already in place: `landingStart` (`follow.ts`, `settling: true`), list at `opacity: 0` while `settling` (`SessionScreen.tsx:1754`, style `:2266`), silent non-animated re-scrolls (`landingStep`, `land()` `:597`), reveal timer `LANDING_REVEAL_MS` (`armReveal` `:555`), bounded by `LANDING_ROUNDS = 12` (`follow.ts:238`). The list sets no `initialNumToRender`/`getItemLayout`/`windowSize` (grep), so a FlatList renders the first cells only and the end keeps moving.
+- **Unknown:** trigger (cold open vs reopen vs background resync) and magnitude (length-dependent?). Two falsifiable candidates: (H1) the reveal fires before the end stops moving on long transcripts (rounds or quiet window too short) → unit repro in `apps/mobile/test/follow.test.ts`: feed `landingStep`/`landingReveal` a growing height sequence and assert `settling` stays true until a height repeats; (H2) a path bypasses the hidden state (reopen of a mounted screen, `awaiting`, or `landingQuiet` re-attach) → simulator frame capture (take `sim.lock`).
+- **Next cheapest test:** H1 unit repro; if green, simulator frames of a cold open of a 300+ row session.
+
+### Owner questions
+1. Which trigger shows the travel: cold open from the list, reopening the last session, or return from background? Recommendation: the one you see most; I reproduce that first.
+2. If H1/H2 are not the cause, accept a structural fix (render the tail first via `initialScrollIndex` + `getItemLayout`, or `inverted`)? Recommendation: NO until the repro says so — it is L / load-bearing for the follow logic.
+
+*— claude-sonnet-5-5, 2026-11-24*
+
 ## Execution
 
 ## Review
