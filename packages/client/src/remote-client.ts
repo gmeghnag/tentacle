@@ -4730,6 +4730,7 @@ export class RemoteClient {
             signal: controller.signal,
             ...(action.turnId !== undefined ? { turnId: action.turnId } : {}),
             ...(action.agent !== undefined ? { agent: action.agent } : {}),
+            ...(action.requestId !== undefined ? { requestId: action.requestId } : {}),
           })
           .then(answered, (error: unknown) => {
             this.onError?.(error instanceof Error ? error : new Error(String(error)));

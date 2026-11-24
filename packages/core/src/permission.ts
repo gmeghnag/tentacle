@@ -174,6 +174,14 @@ export interface PermissionRequestOptions {
   readonly groupStart?: string;
   /** Which sub-agent asked (display only; set with `origin: "subagent"`). */
   readonly agent?: { readonly type: string; readonly description: string; readonly id?: string };
+  /**
+   * The daemon's id for this ask (process-internal, never on the wire — the
+   * requester is handed it with the update it came from). A surface that
+   * carries the prompt across a navigation uses it to tell one ask from the
+   * next (mobile: the sheet's route param, docs/feat/mobile-native-sheets.md).
+   * Absent: the requester did not say (a local request).
+   */
+  readonly requestId?: string;
 }
 
 export type PermissionRequester = (

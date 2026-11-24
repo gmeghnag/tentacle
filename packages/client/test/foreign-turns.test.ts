@@ -777,6 +777,60 @@ describe("permission attribution at the laptop requester", () => {
     expect(seen[0]?.origin).toBeUndefined();
     client.close();
   });
+
+  test("the requester is handed the ask's requestId (mobile carries it across a route)", async () => {
+    // Mutation: drop `requestId` from the router's prompt options → red.
+    const [daemonCh, clientCh] = createChannelPair();
+    let seq = 0;
+    const notify = (update: unknown): void =>
+      daemon.notify(Notification.SessionUpdate, {
+        sessionId: "s1",
+        seq: ++seq,
+        mandatory: true,
+        update,
+      });
+    const daemon: RpcPeer = new RpcPeer(daemonCh, {
+      onRequest: async (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.Open) {
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
+        }
+        if (method === Method.Prompt) {
+          notify({ type: "turn_start", turnId: "T", prompt: "go" });
+          notify({
+            type: "permission_request",
+            requestId: "ask-7",
+            toolCallId: "t1",
+            tool: "shell",
+            title: "Run a shell command",
+            options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
+          });
+          return new Promise(() => {});
+        }
+        if (method === Method.ResolvePermission) {
+          return {};
+        }
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
+      },
+    });
+    const seen: PermissionRequestOptions[] = [];
+    const broker = new PermissionBroker(async (_req, options) => {
+      if (options) seen.push(options);
+      return { allowed: true, scope: "once" };
+    });
+    const client = new RemoteClient(clientCh, broker);
+    await client.initialize();
+    const session = client.newSession(undefined, "s1");
+    void drain(session.send("go"), []);
+    await until(() => seen.length === 1);
+    expect(seen[0]?.requestId).toBe("ask-7");
+    client.close();
+  });
 });
 
 describe("the bracket property, pinned (T-B0)", () => {

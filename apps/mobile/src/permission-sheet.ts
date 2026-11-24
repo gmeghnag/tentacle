@@ -62,6 +62,13 @@ export type SheetState =
       readonly kind: "asking";
       /** A monotonic id per presented ask: React keys, and the "the ask CHANGED" arm test. */
       readonly seq: number;
+      /**
+       * The daemon's id for this ask (`PermissionRequestOptions.requestId`),
+       * when the requester had one: the sheet's route param keys the presented
+       * sheet on it, so one ask is told from the next
+       * (docs/feat/mobile-native-sheets.md D5). Null: a local ask, no id.
+       */
+      readonly requestId: string | null;
       readonly request: PermissionRequest;
       readonly options: readonly SheetOption[];
       /** The words the person is typing into the refusal field ("" until they do). */
@@ -280,6 +287,7 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     commit({
       kind: "asking",
       seq,
+      requestId: entry.options?.requestId ?? null,
       request: entry.req,
       options: sheetOptions(entry.req),
       replyText: "",

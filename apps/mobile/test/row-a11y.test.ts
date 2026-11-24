@@ -111,7 +111,6 @@ describe("a row's trailing element decides whether the row is ONE element", () =
     walk(
       commands.CommandsSheet({
         palette: theme.lightPalette,
-        visible: true,
         rows: [command],
         onCompact: () => {},
         onStopCompact: () => {},
@@ -182,7 +181,6 @@ describe("a row's trailing element decides whether the row is ONE element", () =
     const nodes = walk(
       commands.CommandsSheet({
         palette: theme.lightPalette,
-        visible: true,
         rows: [{ id: "compact", label: "Compact", explain: "x", state: { kind: "ready" } }],
         onCompact: () => {
           tapped += 1;
@@ -245,7 +243,6 @@ describe("a row's trailing element decides whether the row is ONE element", () =
       walk(
         h(sheet.SessionInfoSheet, {
           palette: theme.lightPalette,
-          visible: true,
           view: {
             subtitle: "Fix the flaky test",
             sections: [{ id: "model", title: "Model", phase: "ready", rows }],
