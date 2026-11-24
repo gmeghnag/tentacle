@@ -97,6 +97,8 @@ import {
   type WireChatRequest,
   type WorkflowCatalogueParams,
   type WorkflowParams,
+  type WorkflowSaveParams,
+  type WorkflowSourceParams,
   type WorkflowStepParams,
   isWakeTurnId,
 } from "@tentacle/protocol";
@@ -467,6 +469,18 @@ export class Connection {
       case Method.WorkflowCatalogue: {
         const catalogue = params as WorkflowCatalogueParams;
         return this.lookup(catalogue.sessionId).workflowCatalogue();
+      }
+      // An EDITOR's read and write (docs/feat/workflow-editor.md D3/D4): the read
+      // never awaits a turn; the write is the writer's one synchronous block, so
+      // two saves through this daemon cannot interleave (the second gets
+      // `changed`). No lock on either (AGENTS §7).
+      case Method.WorkflowSource: {
+        const source = params as WorkflowSourceParams;
+        return this.lookup(source.sessionId).workflowSource(source);
+      }
+      case Method.WorkflowSave: {
+        const save = params as WorkflowSaveParams;
+        return this.lookup(save.sessionId).workflowSave(save);
       }
       case Method.AgentKill: {
         const { sessionId, agentId } = params as AgentKillParams;

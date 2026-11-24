@@ -1189,3 +1189,118 @@ Scope: `git diff HEAD~1` (`cc85cee5`).
 - **Note (not a finding):** `prompts` defaults to `{}`. A caller that omits it gets the round-1 behaviour, which is loud (validator errors), not silent. Slices 6 and 7 must pass the editor's prompt files.
 
 *— claude-opus-5-5, 2026-11-24*
+
+## Execution
+
+### Slice 3b — driver `source`/`save` + daemon wiring (D4) — DONE
+
+**Load-bearing / PARTIAL check re-run FIRST** — `.tentacle/tmp/workflow-editor/lb3b.ts` on the
+branch tip `4c2208cb`:
+
+```
+WorkflowSave in Method: true
+WorkflowSource in Method: true
+writeWorkflowFiles: function
+```
+
+The slice's precondition (`"WorkflowSave" in Method` **and** `writeWorkflowFiles` exists) holds, so
+the slice starts where the plan says. **Not a PARTIAL.**
+
+**Inherited state.** A previous run of this slice was cut by a usage limit with its edits
+uncommitted in the worktree: `workflow-driver.ts` (`prepareSourceSync`, `source`, `save`,
+`checkedWorkflowBytes`, the dep types, +406 lines), `workflow-files.ts` (+`dryRun`), their tests,
+and `daemon/test/workflow-hosted.test.ts`. It did **not** do `cli/src/wiring.ts`,
+`daemon/src/hosted-session.ts`, `daemon/src/connection.ts` or `cli/test/workflow-wiring.test.ts` —
+the daemon tests were red at `session.workflowSource is not a function` (4 fail), which is exactly
+the daemon wiring this run added. The inherited driver work was kept and verified, not rewritten:
+`agent/test/workflow-save.test.ts` already held every failure-mode test the plan lists for it (the
+(a)/(b) load-bearing pair, preview-hash identity, dry run, unreferenced prompt, unknown draft field,
+`running`, `alsoChanges`, `changed`, `unavailable`, `source`'s own cases) and passed 16/16.
+
+**What this run built**
+
+1. `daemon/src/hosted-session.ts` — `workflowSource` and `workflowSave`, both beside
+   `workflowCatalogue`. No driver → `unavailable`, never an empty read. Both answers are judged by
+   the wire schema on the way out (the `workflowCatalogue` pattern).
+   - `workflowSave` decodes the draft text and the prompt list **here**, so a non-JSON draft or a
+     path given twice is `invalid` before the driver — nothing is validated against a half-read
+     request.
+   - `schedules` is added here (the session's own job table), not by the driver.
+   - Two helpers: `writeFileRow` (a Review row in the wire's shape, its patch cut to
+     `WORKFLOW_PATCH_MAX_CHARS`) and `pinnedToOldHash`.
+2. `daemon/src/connection.ts` — `case Method.WorkflowSource` / `Method.WorkflowSave` via
+   `this.lookup(...)`, beside `WorkflowCatalogue`, no lock (§7).
+3. `cli/src/wiring.ts` — `save: (plan, currentHash) => writeWorkflowFiles(config.cwd, plan,
+   currentHash)` **inside** the existing `if (options.workflows === true && !tunnelled)` block, and
+   nowhere else.
+4. Tests: `cli/test/workflow-wiring.test.ts` (+1), `daemon/test/workflow-hosted.test.ts` (+3, and
+   one missing `workflowYaml` import fixed), `daemon/test/workflow-step-detail.test.ts` (+1, the
+   dispatch case), and type-level fixes in the inherited `agent/test/workflow-save.test.ts`.
+
+**Drift from the Implementation (2, both reconciled against the code).**
+
+1. **`schedules` means "the job THIS save breaks", not "every job whose hash differs".** D4 says
+   "the session's schedule jobs whose `target.workflow` names this file with the OLD hash". Read
+   literally against `target.workflow.name` (a NAME, `core/src/schedule.ts:91-95` — not a path),
+   "the old hash" is ambiguous, and the naive reading re-reports a broken job on **every** later
+   save forever. The test at `workflow-hosted.test.ts` pins the correct reading: a job is reported
+   iff it is pinned to the hash this save **replaces** (`baseHash`) and the new hash differs —
+   i.e. the save that breaks a pin reports it once. A job pinned to an even older hash was already
+   reported by the save that broke it, and a job pinned to the very hash being rewritten unchanged
+   is not broken. Both guards are individually pinned by their own test (mutations E and E′).
+2. **`prompts` is present iff `draft` is, even when empty.** The wire schema makes it optional, and
+   the hosted test pins `prompts: []` for a draft with no prompt files: "every step's prompts" must
+   be answerable as the empty list, so a client never has to tell "none" from "not asked".
+
+**Red before green.** The daemon tests were shown red first on the branch's own partial state —
+`TypeError: session.workflowSource is not a function` / `session.workflowSave is not a function`,
+4 fail — and green (17 pass) once the two handlers and the dispatch landed.
+
+**Mutations (each restored with `cp`; `git status` + a `MUTATION` grep confirm nothing survived).**
+
+| # | Mutation | Result |
+|---|---|---|
+| A | drop `!tunnelled` from the driver's wiring guard | 2 red (the pre-existing tunnelled test **and** the new wiring test) |
+| B | remove only the `save:` dep line | 1 red — **only** the new wiring test (`save?.ok` was `false`) |
+| C | `approvals.add` inside `save` | 2 red — **(a) and (b)**, the plan's named target |
+| D | a save raising its own `workflow_approve` ask | 2 red — (a) sees 1 ask, (b) sees 2 asks |
+| E | `pinnedToOldHash`: drop `target.hash !== oldHash` | 1 red — the older-pin test |
+| E′ | `pinnedToOldHash`: drop `oldHash === newHash` | 1 red — the unchanged re-save test |
+| F | lenient decode + last-wins prompts | 1 red — the non-JSON/twice-given test |
+| G | remove both `connection.ts` cases | 1 red — the dispatch test (`MethodNotFound`) |
+
+Mutations B, E, E′ and G each turned **exactly one** test red, and it was the test written for
+that property — the non-vacuity check §9 asks for. Two of them **initially survived** and were the
+reason tests were added: E survived until the "an older pin is not re-reported" test existed, and
+E′ survived until the "spares a job pinned to the very hash being re-written unchanged" test did.
+Mutation F also first survived against an assertion that only checked `refusal === "invalid"` — the
+same verdict the *driver* gives — so the test was strengthened to name each cause
+(`"the draft is not JSON"`, `"given twice"`) before it bit.
+
+**Evidence**
+
+- `bun test` over the six slice-3b files (`agent/test/workflow-save`, `daemon/test/workflow-hosted`,
+  `daemon/test/workflow-step-detail`, `cli/test/workflow-wiring`, `cli/test/workflow-files-write`,
+  `agent/test/workflow-driver`): **122 pass, 0 fail.**
+- `bun test packages/protocol/test/{workflow-wire,workflow-save-wire,json-schema}.test.ts`:
+  **49 pass, 0 fail** — the wire shapes and the zod⇔Ajv agreement still hold.
+- `bunx biome check` on all eight changed files: clean.
+- `bunx tsc --noEmit`: clean (whole root project).
+
+**No protocol schema change, so no `protocol.json` regeneration on this slice.** `git status` shows
+no diff under `packages/protocol/`; slice 3a already added both methods and regenerated the schema,
+and this slice only *consumes* `WorkflowSourceResultSchema` / `WorkflowSaveResultSchema` /
+`WorkflowSourceParams` / `WorkflowSaveParams`. Nothing breaks the wire, so no `protocol.d/` note.
+
+**No new changelog fragment on this slice, deliberately.** `changelog.d/workflow-editor.added.md`
+already exists on the branch and already carries this slice's user-visible sentence ("the saved file
+is a brand-new hash, so the next run asks for approval as any hand-edited workflow does"); the plan
+assigns the fragment to 7c, and a second fragment for the same slug+category is the collision the
+changelog rules forbid.
+
+**Unverified, one line:** that a **real** `writeWorkflowFiles` on a real `serve` session lands the
+bytes end-to-end is proven only by the two fakes plus the wiring test's on-disk assertion — no test
+drives `wiring.ts` → `save` → a real file through RPC; that path is exercised for the first time by
+slice 4/6/7.
+
+*— claude-sonnet-4-5-20250929 (executor, slice 3b), 2026-11-25*

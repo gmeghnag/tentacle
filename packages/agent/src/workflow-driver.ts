@@ -12,6 +12,7 @@
  */
 import {
   type ExecResult,
+  PROJECT_PATHS,
   type PermissionRequest,
   type PermissionRequestOptions,
   type PermissionRequester,
@@ -30,20 +31,24 @@ import {
   type WorkflowStep,
   type WorkflowStepBody,
   anySignal,
+  asDraft,
   capWorkflowText,
   endReason,
+  isCanonical,
   missingInputs,
   next as nextAction,
   rerunAt,
   shortHash,
   start as startMachine,
   validateWorkflow,
+  validateWorkflowValue,
   workflowApprovalSummary,
   workflowEndBody,
   workflowHash,
   workflowStartBody,
   workflowStepBody,
   workflowWhereLabel,
+  workflowYaml,
 } from "@tentacle/core";
 import type { SubagentRunner } from "./subagent.ts";
 import { createStepVerdict } from "./workflow-verdict.ts";
@@ -291,6 +296,201 @@ export interface WorkflowDriverDeps {
   readonly hasher?: WorkflowHasher;
   /** How long to wait before retrying a full sub-agent cap. */
   readonly slotRetryMs?: number;
+  /**
+   * The ONE workflow writer (`writeWorkflowFiles`, docs/feat/workflow-editor.md
+   * D4), wired beside `load`/`list` and nowhere else: absent → this session
+   * cannot edit workflows (`source`/`save` answer `unavailable`). Synchronous,
+   * so its base check and its last rename are one block. It WRITES and nothing
+   * else: it never reaches the approval store.
+   */
+  readonly save?: (
+    plan: WorkflowSaveWritePlan,
+    currentHash: (source: WorkflowSource) => string,
+  ) => WorkflowSaveWriteResult;
+}
+
+/** What the driver hands the writer: structurally the writer's `WorkflowWritePlan`. */
+export interface WorkflowSaveWritePlan {
+  readonly mode: "create" | "replace";
+  readonly name: string;
+  readonly draft: Readonly<Record<string, unknown>>;
+  /** Relative to `.tentacle/workflows/`. */
+  readonly prompts: Readonly<Record<string, string>>;
+  readonly baseHash?: string;
+  /** The prompt paths the loaded base's steps read: the user's own to rewrite. */
+  readonly basePrompts?: readonly string[];
+  readonly dryRun: boolean;
+}
+
+/** One file the writer wrote (or would): structurally its `WorkflowWriteRow`. */
+export interface WorkflowSaveFileRow {
+  readonly path: string;
+  readonly status: "new" | "changed" | "unchanged";
+  readonly patch?: string;
+  readonly added: number;
+  readonly removed: number;
+}
+
+/** The writer's answer: structurally its `WorkflowWriteResult`. */
+export type WorkflowSaveWriteResult =
+  | { readonly ok: true; readonly files: readonly WorkflowSaveFileRow[] }
+  | {
+      readonly ok: false;
+      readonly refusal: string;
+      readonly reason: string;
+      readonly files: readonly WorkflowSaveFileRow[];
+    };
+
+/** A `session/workflow_save`, decoded (the draft is already a value, not JSON text). */
+export interface WorkflowSaveRequest {
+  readonly name: string;
+  readonly mode: "create" | "replace";
+  readonly draft: unknown;
+  readonly prompts: Readonly<Record<string, string>>;
+  readonly baseHash?: string;
+  readonly dryRun: boolean;
+}
+
+/**
+ * The save's answer, structurally the wire's `WorkflowSaveResult` minus
+ * `schedules` (the session's, added by the daemon). `files[].path` is
+ * project-relative. `approved` is display only: the save never approves.
+ */
+export interface WorkflowSaveOutcome {
+  readonly ok: boolean;
+  readonly refusal?: string;
+  readonly reason?: string;
+  readonly errors?: readonly string[];
+  readonly hash?: string;
+  readonly version?: number;
+  readonly path?: string;
+  readonly files?: readonly WorkflowSaveFileRow[];
+  readonly approved?: boolean;
+  readonly alsoChanges?: readonly string[];
+  readonly running?: string;
+}
+
+/**
+ * What an editor opens, structurally the wire's `WorkflowSourceResult` with the
+ * draft as a value and the prompts as a record (the daemon encodes both).
+ */
+export interface WorkflowSourceView {
+  readonly ok: boolean;
+  readonly path?: string;
+  readonly text?: string;
+  readonly draft?: Readonly<Record<string, unknown>>;
+  /** Only the files the draft's steps read. */
+  readonly prompts?: Readonly<Record<string, string>>;
+  readonly hash?: string;
+  readonly version?: number;
+  readonly canonical?: boolean;
+  readonly errors?: readonly string[];
+  readonly unreadable?: string;
+  readonly context?: Pick<WorkflowContext, "models" | "agentTypes">;
+  readonly unavailable?: string;
+}
+
+const NOT_EDITABLE_HERE = "workflows can be edited only on a laptop or serve session";
+
+/** `Bun.YAML.parse`, or undefined off-Bun (the daemon always has it). */
+function yamlParser(): ((text: string) => unknown) | undefined {
+  const runtime = (globalThis as { Bun?: { YAML?: { parse(text: string): unknown } } }).Bun?.YAML;
+  return runtime === undefined ? undefined : (text) => runtime.parse(text);
+}
+
+/** Structural equality of two parsed YAML/JSON values (`-0` equals `0`, as YAML reads it). */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  const ra = a as Record<string, unknown>;
+  const rb = b as Record<string, unknown>;
+  return ka.every((k) => Object.hasOwn(rb, k) && sameValue(ra[k], rb[k]));
+}
+
+/**
+ * The bytes a save writes, PROVED to read back as the draft (docs/feat/
+ * workflow-editor.md D4, review round 1 #2): the emitter refusing (a lone
+ * surrogate) or bytes that parse to anything else are a reason, never a file
+ * that cannot load. `emit` / `parse` are seams for that proof's test.
+ */
+export function checkedWorkflowBytes(
+  draft: Readonly<Record<string, unknown>>,
+  emit: (draft: Readonly<Record<string, unknown>>) => string = workflowYaml,
+  parse: ((text: string) => unknown) | undefined = yamlParser(),
+): { readonly text: string } | { readonly reason: string } {
+  let text: string;
+  try {
+    text = emit(draft);
+  } catch (error) {
+    return { reason: error instanceof Error ? error.message : String(error) };
+  }
+  if (parse === undefined) {
+    return { reason: "cannot read YAML here — workflows are saved on the laptop" };
+  }
+  let back: unknown;
+  try {
+    back = parse(text);
+  } catch (error) {
+    return { reason: `the emitted YAML does not parse: ${String(error).split("\n")[0]}` };
+  }
+  return sameValue(back, draft)
+    ? { text }
+    : { reason: "the emitted YAML does not read back as this draft: nothing was written" };
+}
+
+/** The prompt files a draft's steps name (`agent.prompt`), in step order, once each. */
+function draftPromptPaths(draft: Readonly<Record<string, unknown>>): string[] {
+  const steps = Array.isArray(draft.steps) ? draft.steps : [];
+  const paths: string[] = [];
+  for (const step of steps) {
+    const agent = (step as { agent?: unknown } | null)?.agent;
+    const prompt = (agent as { prompt?: unknown } | null | undefined)?.prompt;
+    if (typeof prompt === "string" && !paths.includes(prompt)) paths.push(prompt);
+  }
+  return paths;
+}
+
+/** A file's text as an editor's draft (`asDraft`), or why it cannot be one. */
+function draftOf(
+  text: string,
+): { draft: Readonly<Record<string, unknown>> } | { unreadable: string } {
+  const parse = yamlParser();
+  if (parse === undefined) {
+    return { unreadable: "cannot read YAML here — workflows load on the laptop" };
+  }
+  let raw: unknown;
+  try {
+    raw = parse(text.startsWith("﻿") ? text.slice(1) : text);
+  } catch (error) {
+    return { unreadable: `not valid YAML: ${String(error).split("\n")[0]}` };
+  }
+  return asDraft(raw);
+}
+
+/** The entries of `from` named by `paths` that exist there (own keys only). */
+function pick(
+  from: Readonly<Record<string, string>>,
+  paths: readonly string[],
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const p of paths) {
+    const text = Object.hasOwn(from, p) ? from[p] : undefined;
+    if (text !== undefined) out[p] = text;
+  }
+  return out;
+}
+
+/** Whether `text` is the emitter's own bytes; a draft it cannot emit is not. */
+function canonical(text: string, draft: Readonly<Record<string, unknown>>): boolean {
+  try {
+    return isCanonical(text, draft);
+  } catch {
+    return false;
+  }
 }
 
 export type WorkflowStartResult =
@@ -622,6 +822,197 @@ export class WorkflowDriver {
   }
 
   /**
+   * What an editor opens (docs/feat/workflow-editor.md D3/D4): the file's
+   * bytes, its draft (present iff the mapping is STRUCTURALLY a workflow, so a
+   * file with a dangling `next` still opens and shows it), only the prompt files
+   * its steps read, its hash (iff it validates — the SAME `prepareSourceSync` a
+   * catalogue row and a start use) or its errors, and the session's picker
+   * vocabulary. A read: no ask, no write, no store write.
+   */
+  async source(name: string): Promise<WorkflowSourceView> {
+    if (this.deps.save === undefined || this.disposed) {
+      return { ok: false, unavailable: NOT_EDITABLE_HERE };
+    }
+    const path = `${PROJECT_PATHS.workflows}/${name}.yaml`;
+    const context = this.deps.context();
+    let source: WorkflowSource;
+    try {
+      source = await this.deps.load(name);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, path, unreadable: reason, context };
+    }
+    const opened = draftOf(source.text);
+    const prepared = this.prepareSourceSync(name, source);
+    const draft = "draft" in opened ? opened.draft : undefined;
+    const version = prepared.ok ? prepared.spec.version : draft?.version;
+    return {
+      ok: true,
+      path: source.path,
+      text: source.text,
+      ...(draft !== undefined
+        ? {
+            draft,
+            prompts: pick(source.prompts, draftPromptPaths(draft)),
+            canonical: canonical(source.text, draft),
+          }
+        : { unreadable: "unreadable" in opened ? opened.unreadable : "" }),
+      ...(prepared.ok ? { hash: prepared.hash } : { errors: prepared.errors }),
+      ...(typeof version === "number" && Number.isSafeInteger(version) && version >= 0
+        ? { version }
+        : {}),
+      context,
+    };
+  }
+
+  /**
+   * Save a draft (docs/feat/workflow-editor.md D4). `dryRun: true` is the Review
+   * screen: every check, every row, nothing written; `false` re-does every check
+   * and writes through `deps.save`.
+   *
+   * 1. the STRICT validator judges the draft VALUE (an unknown field is an error,
+   *    never dropped), reading prompts from the request, then from disk;
+   * 2. every prompt the request carries must be read by a step: nothing written
+   *    can sit outside the hash;
+   * 3. the bytes are emitted and proved to read back as the draft;
+   * 4. the hash is `prepareSourceSync` over those bytes — the catalogue's own;
+   * 5. the writer re-checks the base (`changed` / `exists`) in its one
+   *    synchronous block, with `prepareSourceSync` as its hash.
+   *
+   * NEVER calls `approvals.add` and never asks: a saved hash is new, so the next
+   * start asks `workflow_approve` through the session's ONE broker.
+   */
+  async save(request: WorkflowSaveRequest): Promise<WorkflowSaveOutcome> {
+    const write = this.deps.save;
+    if (write === undefined || this.disposed) {
+      return { ok: false, refusal: "unavailable", reason: NOT_EDITABLE_HERE };
+    }
+    const { name } = request;
+    const path = `${PROJECT_PATHS.workflows}/${name}.yaml`;
+    const invalid = (reason: string, errors?: readonly string[]): WorkflowSaveOutcome => ({
+      ok: false,
+      refusal: "invalid",
+      reason,
+      path,
+      ...(errors !== undefined ? { errors } : {}),
+    });
+    let base: WorkflowSource | undefined;
+    try {
+      base = await this.deps.load(name);
+    } catch {
+      base = undefined; // a `create`, or a file gone: the writer decides
+    }
+    const disk = base?.prompts ?? {};
+    const prompts = request.prompts;
+    const readPrompt = (p: string): string | undefined =>
+      Object.hasOwn(prompts, p) ? prompts[p] : Object.hasOwn(disk, p) ? disk[p] : undefined;
+    const validation = validateWorkflowValue(request.draft, {
+      name,
+      ...this.deps.context(),
+      readPrompt,
+    });
+    if (!validation.ok) {
+      return invalid(`${path}: ${validation.errors.join("; ")}`, validation.errors);
+    }
+    const draft = request.draft as Readonly<Record<string, unknown>>;
+    const used = new Set(validation.spec.prompts.map((p) => p.path));
+    const stray = Object.keys(prompts).filter((p) => !used.has(p));
+    if (stray.length > 0) {
+      return invalid(stray.map((p) => `${p} is not used by any step`).join("; "));
+    }
+    const bytes = checkedWorkflowBytes(draft);
+    if ("reason" in bytes) {
+      return invalid(`${path}: ${bytes.reason}`);
+    }
+    const merged: Record<string, string> = {};
+    for (const p of used) {
+      const text = readPrompt(p);
+      if (text !== undefined) merged[p] = text;
+    }
+    const prepared = this.prepareSourceSync(name, { path, text: bytes.text, prompts: merged });
+    if (!prepared.ok) {
+      return invalid(prepared.reason, prepared.errors);
+    }
+    const hash = prepared.hash;
+    const basePrompts =
+      request.mode === "replace" && base !== undefined ? this.promptsRead(name, base) : undefined;
+    const listing = this.deps.list !== undefined ? await this.deps.list() : undefined;
+    const approved = await this.deps.approvals.has(path, hash);
+    if (this.disposed) {
+      return { ok: false, refusal: "unavailable", reason: "the session is closing" };
+    }
+    // The write: one synchronous block in the writer, its base hashed by the
+    // SAME `prepareSourceSync` (no await between that check and the last rename).
+    const written = write(
+      {
+        mode: request.mode,
+        name,
+        draft,
+        prompts,
+        ...(request.baseHash !== undefined ? { baseHash: request.baseHash } : {}),
+        ...(basePrompts !== undefined ? { basePrompts } : {}),
+        dryRun: request.dryRun,
+      },
+      (source) => {
+        const current = this.prepareSourceSync(name, source);
+        if (!current.ok) throw new Error(current.errors.join("; "));
+        return current.hash;
+      },
+    );
+    const files = written.files.map((f) => ({
+      ...f,
+      path: `${PROJECT_PATHS.workflows}/${f.path}`,
+    }));
+    if (!written.ok) {
+      return {
+        ok: false,
+        refusal: written.refusal,
+        reason: written.reason,
+        path,
+        ...(files.length > 0 ? { files } : {}),
+      };
+    }
+    const touched = new Set(
+      written.files
+        .filter((f) => f.path !== `${name}.yaml` && f.status !== "unchanged")
+        .map((f) => f.path),
+    );
+    const alsoChanges: string[] = [];
+    for (const row of listing?.rows ?? []) {
+      if (row.kind !== "source" || row.name === name || touched.size === 0) continue;
+      if (this.promptsRead(row.name, row.source).some((p) => touched.has(p))) {
+        alsoChanges.push(row.name);
+      }
+    }
+    const running = this.current();
+    const runningHere =
+      running !== undefined && this.runs.get(running)?.spec.name === name ? running : undefined;
+    return {
+      ok: true,
+      hash,
+      version: prepared.spec.version,
+      path,
+      files,
+      approved,
+      ...(alsoChanges.length > 0 ? { alsoChanges } : {}),
+      ...(runningHere !== undefined ? { running: runningHere } : {}),
+    };
+  }
+
+  /**
+   * The prompt files `source`'s steps read: from its validated spec, else (a
+   * file that does not validate) from its draft — never every file of the folder.
+   */
+  private promptsRead(name: string, source: WorkflowSource): string[] {
+    const prepared = this.prepareSourceSync(name, source);
+    if (prepared.ok) {
+      return prepared.spec.prompts.map((p) => p.path);
+    }
+    const opened = draftOf(source.text);
+    return "draft" in opened ? draftPromptPaths(opened.draft) : [];
+  }
+
+  /**
    * A SCHEDULED start (slice 10 S10-3): deterministic, never asks. It refuses —
    * with no run and no row — when a run is in flight (`skipped`, never queued),
    * the file or inputs are bad (`invalid`), the file's hash is not the one the
@@ -905,6 +1296,21 @@ export class WorkflowDriver {
     | { ok: true; source: WorkflowSource; spec: WorkflowSpec; hash: string }
     | { ok: false; reason: string; refusal: "invalid"; errors: readonly string[] }
   > {
+    return this.prepareSourceSync(name, source);
+  }
+
+  /**
+   * The ONE validate+hash (docs/feat/workflow-editor.md D4): `prepareSource`
+   * (catalogue, start, inspect), a save's preview hash and the writer's base
+   * check all run this, so a hash is the same number on every path. Synchronous,
+   * so the writer can call it inside its one block.
+   */
+  prepareSourceSync(
+    name: string,
+    source: WorkflowSource,
+  ):
+    | { ok: true; source: WorkflowSource; spec: WorkflowSpec; hash: string }
+    | { ok: false; reason: string; refusal: "invalid"; errors: readonly string[] } {
     const validation = validateWorkflow(source.text, {
       name,
       ...this.deps.context(),

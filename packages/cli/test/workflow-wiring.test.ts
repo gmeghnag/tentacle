@@ -5,7 +5,7 @@
  * not the laptop's to keep, AGENTS §7); never offered to a child.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkflowRow } from "@tentacle/agent";
@@ -64,6 +64,40 @@ describe("workflow wiring", () => {
     });
     expect(wired.workflows).toBeUndefined();
     expect(offers(wired)).toBe(false);
+  });
+
+  /**
+   * Slice 3b: the writer is wired INSIDE the same `workflows && !tunnelled` block
+   * and nowhere else. Observable through its one effect on a session — a save
+   * writes a file — so this proves the DEP, not that a function exists.
+   */
+  test("the save dep is present only where editing is: opted in and not tunnelled", async () => {
+    const draft = {
+      schemaVersion: 1,
+      name: "wired",
+      version: 1,
+      steps: [{ id: "plan", agent: { prompt_text: "plan it" } }],
+    };
+    const saved = await buildAgent(config, { workflows: true }).workflows?.save({
+      name: "wired",
+      mode: "create",
+      draft,
+      prompts: {},
+      dryRun: false,
+    });
+    expect(saved?.ok).toBe(true);
+    // The REAL writer is wired, not a stub: the file is on disk, at the
+    // project's own path.
+    const onDisk = await readFile(join(dir, PROJECT_PATHS.workflows, "wired.yaml"), "utf8");
+    expect(onDisk).toContain("name: wired");
+    // A tunnelled session has no driver at all, so `save` never answers `ok`.
+    const pod = buildAgent(config, {
+      workflows: true,
+      modelOverride: {} as ModelProvider,
+    }).workflows;
+    expect(pod).toBeUndefined();
+    // Not opted in: likewise nothing to edit with.
+    expect(buildAgent(config).workflows).toBeUndefined();
   });
 
   test("a missing workflow file is refused before any ask, naming the path", async () => {

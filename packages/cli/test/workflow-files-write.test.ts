@@ -681,3 +681,71 @@ describe("`create` makes the folders it needs, under real directories only", () 
     expect(existsSync(join(root, PROJECT_PATHS.workflows))).toBe(false);
   });
 });
+
+describe("`dryRun` is the Review screen: every check, every row, NO write (slice 3b)", () => {
+  test("a dry replace reports the rows a write would, and leaves every byte and folder", () => {
+    const root = withFiles({ [`${PROJECT_PATHS.workflows}/task.yaml`]: workflowYaml(DRAFT) });
+    const yamlPath = join(root, PROJECT_PATHS.workflows, "task.yaml");
+    const before = statSync(yamlPath).mtimeMs;
+    const plan: WorkflowWritePlan = {
+      mode: "replace",
+      name: "task",
+      draft: WITH_PROMPT,
+      prompts: PROMPT,
+      baseHash: hashOf(DRAFT),
+      dryRun: true,
+    };
+    const dry = writeWorkflowFiles(root, plan, currentHash);
+    expect(dry.ok).toBe(true);
+    expect(readFileSync(yamlPath, "utf8")).toBe(workflowYaml(DRAFT));
+    expect(statSync(yamlPath).mtimeMs).toBe(before);
+    expect(existsSync(join(root, PROJECT_PATHS.workflows, "prompts"))).toBe(false);
+    // The write that follows lists exactly what the preview listed.
+    const wet = writeWorkflowFiles(root, { ...plan, dryRun: false }, currentHash);
+    expect(wet.ok && dry.ok ? wet.files : "refused").toEqual(dry.ok ? dry.files : "refused");
+  });
+
+  test("a dry run still refuses: a stale base is `changed`, a foreign prompt `exists`", () => {
+    const root = withFiles({
+      [`${PROJECT_PATHS.workflows}/task.yaml`]: workflowYaml(DRAFT),
+      [`${PROJECT_PATHS.workflows}/prompts/gate.md`]: "someone else's",
+    });
+    const stale = writeWorkflowFiles(
+      root,
+      {
+        mode: "replace",
+        name: "task",
+        draft: DRAFT,
+        prompts: {},
+        baseHash: "0".repeat(64),
+        dryRun: true,
+      },
+      currentHash,
+    );
+    expect(stale.ok ? "ok" : stale.refusal).toBe("changed");
+    const foreign = writeWorkflowFiles(
+      root,
+      {
+        mode: "replace",
+        name: "task",
+        draft: WITH_PROMPT,
+        prompts: PROMPT,
+        baseHash: hashOf(DRAFT),
+        dryRun: true,
+      },
+      currentHash,
+    );
+    expect(foreign.ok ? "ok" : foreign.refusal).toBe("exists");
+  });
+
+  test("a dry create in a fresh project creates no folder", () => {
+    const root = project();
+    const dry = writeWorkflowFiles(
+      root,
+      { mode: "create", name: "task", draft: WITH_PROMPT, prompts: PROMPT, dryRun: true },
+      currentHash,
+    );
+    expect(dry.ok && dry.files.map((f) => f.status)).toEqual(["new", "new"]);
+    expect(existsSync(join(root, ".tentacle"))).toBe(false);
+  });
+});

@@ -321,6 +321,12 @@ export interface WorkflowWritePlan {
    * or a caller that loaded nothing) covers none of them: fail closed.
    */
   readonly basePrompts?: readonly string[];
+  /**
+   * The Review screen (D3 `dryRun`, slice 3b): every check above runs and the
+   * rows are what a write would report, but nothing — no file, no folder — is
+   * touched. Absent = write.
+   */
+  readonly dryRun?: boolean;
 }
 
 export type WorkflowWriteResult =
@@ -539,6 +545,10 @@ export function writeWorkflowFiles(
     const diff = unifiedDiff(`${PROJECT_PATHS.workflows}/${file.rel}`, file.before, file.text);
     return { path: file.rel, status, patch: diff.patch, added: diff.added, removed: diff.removed };
   });
+
+  if (plan.dryRun === true) {
+    return { ok: true, files };
+  }
 
   try {
     for (const file of resolved) {

@@ -51,6 +51,7 @@ import type {
   SessionCapabilities,
   SessionGrants,
   WorkflowDriver,
+  WorkflowSaveFileRow,
 } from "@tentacle/agent";
 import {
   CapabilityRefusal,
@@ -71,6 +72,7 @@ import {
   type MessageMedia,
   type ModelProvider,
   NOTE_KIND,
+  PROJECT_PATHS,
   type PermissionBroker,
   type PermissionRequest,
   type PermissionRequestOptions,
@@ -162,6 +164,12 @@ import {
   type WorkflowResult,
   type WorkflowRow,
   WorkflowRowSchema,
+  type WorkflowSaveParams,
+  type WorkflowSaveResult,
+  WorkflowSaveResultSchema,
+  type WorkflowSourceParams,
+  type WorkflowSourceResult,
+  WorkflowSourceResultSchema,
   type WorkflowStepParams,
   type WorkflowStepResult,
   clientSupportsUpdate,
@@ -650,6 +658,9 @@ function oneLineText(text: string): string {
 const WORKFLOW_ERRORS_MAX = 20;
 const WORKFLOW_ERROR_MAX_CHARS = 300;
 
+/** A Review row's diff cap (`WorkflowWriteFileSchema`). */
+const WORKFLOW_PATCH_MAX_CHARS = 64 * 1024;
+
 /** `text` within `max` UTF-16 units, ending in `…` when cut (never mid-surrogate). */
 function capWithEllipsis(text: string, max: number): string {
   if (text.length <= max) {
@@ -710,6 +721,65 @@ function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
     ok: false,
     errors: boundedWorkflowErrors(problems),
   };
+}
+
+/**
+ * One file a save wrote (or would), in the WIRE's shape (docs/feat/
+ * workflow-editor.md D3/D4): the patch is cut to its cap here, so a big file is
+ * a Review row whose diff ends in `…`, never a save whose answer fails to parse.
+ */
+function writeFileRow(file: WorkflowSaveFileRow): {
+  path: string;
+  status: "new" | "changed" | "unchanged";
+  added: number;
+  removed: number;
+  patch?: string;
+} {
+  const patch = file.patch;
+  return {
+    path: capWithEllipsis(oneLineText(file.path), 512),
+    status: file.status,
+    added: file.added,
+    removed: file.removed,
+    ...(patch !== undefined && patch !== ""
+      ? {
+          patch:
+            patch.length > WORKFLOW_PATCH_MAX_CHARS
+              ? `${patch.slice(0, WORKFLOW_PATCH_MAX_CHARS - 1)}…`
+              : patch,
+        }
+      : {}),
+  };
+}
+
+/**
+ * The schedules THIS save invalidates: its jobs name this workflow and are
+ * pinned to the hash the save replaces (`oldHash`), with new bytes under a
+ * different hash — so they skip `changed` at fire time until they are
+ * re-created (docs/feat/workflow-editor.md, failure modes). A job pinned to an
+ * older hash was already reported by the save that broke it, and one pinned to
+ * the hash being written breaks nothing: neither is this save's news.
+ */
+function pinnedToOldHash(
+  jobs: readonly ScheduledJob[],
+  name: string,
+  oldHash: string | undefined,
+  newHash: string | undefined,
+): string[] {
+  const ids: string[] = [];
+  if (oldHash === undefined || newHash === undefined || oldHash === newHash) {
+    return ids;
+  }
+  for (const job of jobs) {
+    const target = job.target?.workflow;
+    if (target === undefined) continue;
+    // `target.workflow.name` is the workflow's NAME (as `ScheduleWorkflowTarget`
+    // carries it), never its path.
+    if (target.name !== name) continue;
+    if (target.hash !== oldHash) continue;
+    ids.push(job.id);
+  }
+  return ids;
 }
 
 /**
@@ -2597,6 +2667,132 @@ export class HostedSession {
         workflows: [],
         dir: catalogue.dir,
         unavailable: oneLineText(`the catalogue could not be read: ${parsed.error.message}`).slice(
+          0,
+          200,
+        ),
+      };
+    }
+    return parsed.data;
+  }
+
+  /**
+   * `session/workflow_source` (docs/feat/workflow-editor.md D3/D4): what an
+   * editor opens — the bytes, the draft, the prompts its steps read, the hash or
+   * the errors. A read: no ask, no run, no write. A session without a driver
+   * (tunnelled: a pod's daemon) answers `unavailable`, never a read that would
+   * look like an empty file.
+   *
+   * The answer is judged by the wire schema on the way out (the `:2591` pattern):
+   * a row's free text is painted on the laptop.
+   */
+  async workflowSource(params: WorkflowSourceParams): Promise<WorkflowSourceResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return {
+        ok: false,
+        unavailable: "workflows can be edited only on a laptop or serve session",
+      };
+    }
+    const view = await driver.source(params.name);
+    const prompts = Object.entries(view.prompts ?? {}).map(([path, text]) => ({ path, text }));
+    const parsed = WorkflowSourceResultSchema.safeParse({
+      ok: view.ok,
+      ...(view.path !== undefined ? { path: view.path } : {}),
+      ...(view.text !== undefined ? { text: view.text } : {}),
+      ...(view.draft !== undefined ? { draft: JSON.stringify(view.draft) } : {}),
+      // Present iff the draft is: "every step's prompts" is an answer, an empty
+      // list included — a client never has to tell it from "not asked".
+      ...(view.draft !== undefined ? { prompts } : {}),
+      ...(view.hash !== undefined ? { hash: view.hash } : {}),
+      ...(view.version !== undefined ? { version: view.version } : {}),
+      ...(view.canonical !== undefined ? { canonical: view.canonical } : {}),
+      ...(view.errors !== undefined ? { errors: [...view.errors] } : {}),
+      ...(view.unreadable !== undefined ? { unreadable: view.unreadable } : {}),
+      ...(view.context !== undefined ? { context: view.context } : {}),
+      ...(view.unavailable !== undefined ? { unavailable: view.unavailable } : {}),
+    });
+    if (!parsed.success) {
+      return {
+        ok: false,
+        unavailable: oneLineText(`the file could not be read: ${parsed.error.message}`).slice(
+          0,
+          200,
+        ),
+      };
+    }
+    return parsed.data;
+  }
+
+  /**
+   * `session/workflow_save` (docs/feat/workflow-editor.md D4): `dryRun: true` is
+   * the Review screen, `false` writes through the driver's writer. The draft and
+   * the prompts are decoded HERE — a draft that is not JSON, or one prompt path
+   * given twice, is `invalid` before the driver, so nothing is validated against
+   * a half-read request. The answer is judged by the wire schema on the way out.
+   *
+   * The one fact the session adds is `schedules`: the jobs pinned to the OLD
+   * hash, which skip `changed` at fire time until they are re-created.
+   */
+  async workflowSave(params: WorkflowSaveParams): Promise<WorkflowSaveResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return {
+        ok: false,
+        refusal: "unavailable",
+        reason: "workflows can be edited only on a laptop or serve session",
+      };
+    }
+    const invalid = (reason: string): WorkflowSaveResult => ({
+      ok: false,
+      refusal: "invalid",
+      reason,
+    });
+    let draft: unknown;
+    try {
+      draft = JSON.parse(params.draft);
+    } catch (error) {
+      return invalid(`the draft is not JSON: ${oneLineText(String(error)).slice(0, 200)}`);
+    }
+    const prompts: Record<string, string> = {};
+    for (const { path, text } of params.prompts) {
+      if (Object.hasOwn(prompts, path)) {
+        return invalid(`${path} is given twice`);
+      }
+      prompts[path] = text;
+    }
+    const outcome = await driver.save({
+      name: params.name,
+      mode: params.mode,
+      draft,
+      prompts,
+      ...(params.baseHash !== undefined ? { baseHash: params.baseHash } : {}),
+      dryRun: params.dryRun,
+    });
+    const schedules = pinnedToOldHash(
+      this.scheduleTable,
+      params.name,
+      params.baseHash,
+      outcome.hash,
+    );
+    const parsed = WorkflowSaveResultSchema.safeParse({
+      ok: outcome.ok,
+      ...(outcome.refusal !== undefined ? { refusal: outcome.refusal } : {}),
+      ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+      ...(outcome.errors !== undefined ? { errors: [...outcome.errors] } : {}),
+      ...(outcome.hash !== undefined ? { hash: outcome.hash } : {}),
+      ...(outcome.version !== undefined ? { version: outcome.version } : {}),
+      ...(outcome.path !== undefined ? { path: outcome.path } : {}),
+      ...(outcome.files !== undefined ? { files: outcome.files.map(writeFileRow) } : {}),
+      ...(outcome.approved !== undefined ? { approved: outcome.approved } : {}),
+      ...(outcome.alsoChanges !== undefined ? { alsoChanges: [...outcome.alsoChanges] } : {}),
+      ...(outcome.running !== undefined ? { running: outcome.running } : {}),
+      ...(schedules.length > 0 ? { schedules } : {}),
+    });
+    if (!parsed.success) {
+      return {
+        ok: false,
+        refusal: "unavailable",
+        reason: oneLineText(`the save could not be reported: ${parsed.error.message}`).slice(
           0,
           200,
         ),
