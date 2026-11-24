@@ -31,6 +31,7 @@ import {
   DsmlToolCallLeakError,
   type ExecutionEnvironment,
   HeuristicTokenCounter,
+  IMAGE_VIEW_TOOL_NAME,
   type JobController,
   type ModelProvider,
   type ModelStopReason,
@@ -95,6 +96,7 @@ import {
 } from "./context-reset.ts";
 import { EventQueue } from "./event-queue.ts";
 import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
+import { projectOldImages } from "./old-images.ts";
 import { type GateOutcome, PermissionGate } from "./permission-gate.ts";
 import {
   type PruneEntry,
@@ -1093,17 +1095,36 @@ export class Agent {
   }
 
   /**
-   * What a request built under `caps` sends: the projection with the
-   * conversation's prune set applied. A copy when anything is stubbed; every
-   * other message keeps its identity (a context anchor still matches it).
+   * What a request built under `caps` sends: the projection, the user's images
+   * past `OLD_IMAGE_TURNS` answered turns replaced by their `image_view` line
+   * (docs/feat/image-old-on-demand.md D2), then the conversation's prune set.
+   * A copy when anything changes; every other message keeps its identity (a
+   * context anchor still matches it).
    */
   private requestHistory(
     messages: ChatMessage[],
     caps: SessionCapabilities,
+    turnFrom: number,
   ): readonly ChatMessage[] {
     const projected = this.projectedHistory(messages, caps);
+    const images = this.oldImagesOnDemand(caps) ? projectOldImages(projected, turnFrom) : projected;
     const set = this.pruneState.get(messages);
-    return set === undefined ? projected : applyPrune(projected, set);
+    return set === undefined ? images : applyPrune(images, set);
+  }
+
+  /**
+   * Whether old user images are projected out of the request: only when the
+   * placeholder names a tool the model can actually call — the store is wired
+   * AND `image_view` is registered AND not switched off in `caps`. Decided on
+   * the capability snapshot (not the request's tool list), so the forced final
+   * report sends the same bytes as the turn's other rounds (F5/F6/F7).
+   */
+  private oldImagesOnDemand(caps: SessionCapabilities): boolean {
+    return (
+      this.config.toolImages !== undefined &&
+      this.config.tools.get(IMAGE_VIEW_TOOL_NAME) !== undefined &&
+      !isToolDisabled(IMAGE_VIEW_TOOL_NAME, caps)
+    );
   }
 
   /**
@@ -1118,13 +1139,14 @@ export class Agent {
     messages: ChatMessage[],
     tools: readonly ToolDefinition[],
     caps: SessionCapabilities,
+    turnFrom: number,
   ): void {
     const prune = this.config.contextPrune;
     if (prune === undefined || !(prune.window > 0)) {
       return;
     }
     const used = estimateUsed(
-      this.requestHistory(messages, caps),
+      this.requestHistory(messages, caps, turnFrom),
       tools,
       this.anchors.get(messages),
       prune.counter ?? this.counter,
@@ -1395,6 +1417,11 @@ export class Agent {
     // From here on, the messages the model has not seen yet: the only ones a
     // context line may ride on (moves past each request as it is sent).
     let unseen = Math.min(opts.newFrom ?? messages.length, messages.length);
+    // Where THIS turn began, captured once: the old-image projection reads only
+    // `messages[0, turnFrom)`, so every round of the turn sends those bytes
+    // identically and the prompt-cache prefix holds
+    // (docs/feat/image-old-on-demand.md D2/F1).
+    const turnFrom = unseen;
 
     // Project hooks run only once trusted: decided before a fresh turn runs
     // any hook or tool (never on a resumed turn, which already started).
@@ -1587,12 +1614,12 @@ export class Agent {
       const tools = this.projectedTools(caps);
       // A prune batch first (it changes what is sent), so the context line
       // below reports the request the model actually gets.
-      this.maybePrune(messages, tools, caps);
-      this.noteContextUsage(messages, unseen, tools, caps);
+      this.maybePrune(messages, tools, caps, turnFrom);
+      this.noteContextUsage(messages, unseen, tools, caps, turnFrom);
       // The model's copy: stored context lines rendered into `content`, always
       // (enabled or not), so every request repeats the same bytes for a
       // message an earlier one sent — the provider's prompt cache holds.
-      const view = modelView(this.requestHistory(messages, caps));
+      const view = modelView(this.requestHistory(messages, caps, turnFrom));
       const voiceTurn = voiceRequest(view.messages);
       const request: ChatRequest = {
         messages: voiceTurn.messages,
@@ -1920,7 +1947,7 @@ export class Agent {
       markVoice();
       try {
         // No tools are sent, but the system prompt is: its catalog is projected.
-        const view = modelView(this.requestHistory(messages, this.capabilities()));
+        const view = modelView(this.requestHistory(messages, this.capabilities(), turnFrom));
         if (view.repairs !== null) {
           yield { type: "history_repaired", ...view.repairs };
         }
@@ -2013,6 +2040,7 @@ export class Agent {
     unseen: number,
     tools: NonNullable<ChatRequest["tools"]>,
     caps: SessionCapabilities,
+    turnFrom: number,
   ): void {
     const awareness = this.config.contextAwareness;
     if (!awareness) {
@@ -2032,7 +2060,7 @@ export class Agent {
     }
     const current: ContextUsage = {
       used: estimateUsed(
-        this.requestHistory(messages, caps),
+        this.requestHistory(messages, caps, turnFrom),
         tools,
         this.anchors.get(messages),
         awareness.counter ?? this.counter,
@@ -2088,9 +2116,11 @@ export class Agent {
     timeoutMs: number = CONTEXT_COUNT_TIMEOUT_MS,
   ): Promise<{ readonly used: number; readonly exact: boolean }> {
     // What the next request would really send: the same projection as a round.
+    // Between turns, `turnFrom` is the history's length — what the next turn
+    // computes, since a turn's opener is a user message (no answer).
     const caps = this.capabilities();
     const tools = this.projectedTools(caps);
-    const sent = this.requestHistory(messages, caps);
+    const sent = this.requestHistory(messages, caps, messages.length);
     // Bounded and silent (`countTokensBounded`): a count that cannot, fails or
     // is slow falls through to the estimate.
     const exact = await countTokensBounded(
