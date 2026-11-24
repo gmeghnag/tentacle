@@ -1582,6 +1582,9 @@ export function SessionScreen({
     hubFanOpen.current = open;
     if (open) {
       hubOpenAt.current = hubOpen(hubCtx);
+      // The Workflows item is dimmed by the catalogue it last SAW (fix/workflows-ux
+      // fix round 1): re-read it at each open, so a file added since un-dims it.
+      void controller.refreshCatalogue();
     }
     // M2: no native back-swipe under the scrim; restored on every close path.
     navigation.setOptions({ gestureEnabled: !open });
@@ -1602,6 +1605,10 @@ export function SessionScreen({
     if (id === "tools" && plan.kind === "notice") {
       void controller.pullTools();
     }
+    // Same for a dimmed Workflows (VoiceOver reaches it without the fan's open).
+    if (id === "workflows" && plan.kind === "notice") {
+      void controller.refreshCatalogue();
+    }
   };
   /**
    * A dimmed item was tapped in the FAN: its own pill says why (`hub-flash.ts`),
@@ -1613,6 +1620,9 @@ export function SessionScreen({
   const flashHub = (id: HubActionId) => {
     if (id === "tools") {
       void controller.pullTools();
+    }
+    if (id === "workflows") {
+      void controller.refreshCatalogue();
     }
   };
   const hubMenuItems = hubMenu === "more" ? hub.more : hubMenu === "all" ? hub.all : [];

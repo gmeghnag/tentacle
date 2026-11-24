@@ -246,7 +246,7 @@ export interface SendableHandle extends SessionHandle, ActivityHandle, WakeHandl
   ): Promise<Uint8Array>;
   /**
    * The project's workflow files (`RemoteSession.workflowCatalogue`, docs/feat/
-   * workflows-ui.md D6). Read ONCE per screen, at the attach, so the hub's
+   * workflows-ui.md D6). Read at the attach and again at the hub's open, so the hub's
    * Workflows item knows whether this project has anything to start (docs/fix/
    * workflows-ux.md D6). Absent on a fake handle; `{unsupported:true}` from an
    * older daemon — neither dims the item, which is UNKNOWN, not empty.
@@ -308,8 +308,9 @@ export interface SessionScreenState {
   readonly refreshing: boolean;
   /**
    * The project's workflow files as the daemon answered (docs/fix/workflows-ux
-   * D6): read ONCE at the attach, `null` until it answers (and when the read
-   * failed, which is UNKNOWN — never empty). Folded by `catalogueFigure`.
+   * D6): read at the attach and re-read at the hub's open / a dimmed tap, `null`
+   * until it answers (a failed FIRST read is UNKNOWN — never empty; a failed
+   * re-read keeps the last answer). Folded by `catalogueFigure`.
    */
   readonly catalogue: WorkflowCatalogueResult | { unsupported: true } | null;
   /**
@@ -513,6 +514,14 @@ export interface SessionScreenController {
    * ONE call. Resolves when it settled (never rejects).
    */
   refreshArtifacts(): Promise<void>;
+  /**
+   * Re-read the workflow catalogue (docs/fix/workflows-ux.md fix round 1): the
+   * hub's Workflows item is dimmed by the catalogue it last SAW, and nothing else
+   * re-reads it — a file added after the attach would keep it dimmed until a
+   * re-attach. The hub's open and a dimmed Workflows tap call it. Single-flight
+   * with the attach's read; resolves when settled (never rejects).
+   */
+  refreshCatalogue(): Promise<void>;
   /** The auto-accept switch (Owner Q3, F11). */
   setAutoAccept(on: boolean): Promise<void>;
   /** The switch's value NOW (the session's shared link: a flip elsewhere is here). */
@@ -664,7 +673,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let joinPending: Promise<void> | null = null;
   /**
    * The project's workflow files, as the daemon last answered (docs/fix/
-   * workflows-ux D6): read ONCE at each attach, beside the artifacts read, so
+   * workflows-ux D6): read at each attach, beside the artifacts read, and
+   * re-read by `refreshCatalogue` (the hub's open, a dimmed tap), so
    * the hub's Workflows item is never dimmed as "no workflows" over a project
    * that has one. `null` = UNKNOWN (not read yet, or the read failed) — which is
    * never the same as an empty folder (that is an answer with zero rows).
@@ -1363,12 +1373,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   }
 
   /**
-   * Read the project's workflow files ONCE per screen (docs/fix/workflows-ux
+   * Read the project's workflow files (docs/fix/workflows-ux
    * D6): the hub's Workflows item must not be dimmed as "no workflow runs" over
    * a project that has workflows to start (defect 4). Single-flight, like the
    * artifacts read, and asked at EVERY attach (a re-attach may land on a daemon
-   * whose project changed). A failure is UNKNOWN, never empty: `null` leaves the
-   * item alone instead of claiming there is nothing to start.
+   * whose project changed) and at the hub's open / a dimmed Workflows tap (a
+   * file added since must un-dim it). A failure is UNKNOWN, never empty: `null`
+   * leaves the item alone instead of claiming there is nothing to start.
    */
   function readCatalogue(): Promise<void> {
     if (cataloguePending !== null) {
@@ -1917,6 +1928,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     async refreshArtifacts() {
       await refreshArtifacts();
+    },
+    async refreshCatalogue() {
+      await readCatalogue();
     },
     async setAutoAccept(on) {
       await info?.setAutoAccept(on);

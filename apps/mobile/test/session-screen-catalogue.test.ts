@@ -49,6 +49,10 @@ function harness(
   } = {},
 ) {
   const calls = { catalogue: 0 };
+  /** What the NEXT read answers; a test swaps it to model the project changing. */
+  const next: { answer: WorkflowCatalogueResult | { unsupported: true } | Error } = {
+    answer: options.answer ?? oneWorkflow,
+  };
   const emitted: SessionScreenState[] = [];
   const handle: SendableHandle = {
     open: () => Promise.resolve(),
@@ -62,7 +66,7 @@ function harness(
       : {
           workflowCatalogue: () => {
             calls.catalogue += 1;
-            const answer = options.answer ?? oneWorkflow;
+            const answer = next.answer;
             return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
           },
         }),
@@ -81,6 +85,7 @@ function harness(
   return {
     screen,
     calls,
+    next,
     last: (): SessionScreenState => emitted[emitted.length - 1] as SessionScreenState,
   };
 }
@@ -155,5 +160,51 @@ describe("the session screen's workflow catalogue", () => {
     await settle();
     expect(h.calls.catalogue).toBe(0);
     expect(screen.state().catalogue).toBeNull();
+  });
+
+  // Review round 1 finding 2: the catalogue was read once per attach and nothing
+  // re-read it, so a project dimmed "No workflows" kept the item dimmed (and the
+  // run list + its Start unreachable from the hub) after a file was added.
+  test("a file added after the attach UN-dims the item on the next re-read", async () => {
+    const h = harness({ answer: catalogue() });
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    const ready = { kind: "ready", runs: [], offline: null } as const;
+    expect(workflowsHub(ready, catalogueFigure(screen.state().catalogue)).empty).toBe(
+      "No workflows in this project",
+    );
+    h.next.answer = oneWorkflow;
+    await screen.refreshCatalogue();
+    await settle();
+    expect(h.calls.catalogue).toBe(2);
+    expect(screen.state().catalogue).toEqual(oneWorkflow);
+    expect(h.last().catalogue).toEqual(oneWorkflow);
+    expect(workflowsHub(ready, catalogueFigure(screen.state().catalogue))).toEqual({
+      needYou: 0,
+      empty: null,
+    });
+  });
+
+  test("a re-read that FAILS keeps the last answer (unknown never overwrites known)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    h.next.answer = new Error("link down");
+    await screen.refreshCatalogue();
+    await settle();
+    expect(h.calls.catalogue).toBe(2);
+    expect(screen.state().catalogue).toEqual(oneWorkflow);
+  });
+
+  test("re-reads at the same moment cost ONE call (single-flight)", async () => {
+    const h = harness();
+    const screen = h.screen();
+    await screen.open();
+    await settle();
+    await Promise.all([screen.refreshCatalogue(), screen.refreshCatalogue()]);
+    await settle();
+    expect(h.calls.catalogue).toBe(2);
   });
 });

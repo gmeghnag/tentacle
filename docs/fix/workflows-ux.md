@@ -251,6 +251,7 @@ disc with the glyph in ink, the glyph at ~½ of the disc.
 | S7 list B + detail | `apps/mobile/src/screens/{WorkflowRun.tsx,WorkflowStep.tsx}`, `workflow-step-detail.ts`, `workflow-run-controller.ts` (no read for a not-run step), `workflow-list.ts` (`pending` word), tests + e2e `45-workflow-run-view.yaml` (new) + `e2e/seed.ts` (seeded runs ① ②), `changelog.d/workflows-ux.fixed.md` |
 | S8a TUI parity | `packages/tui/src/workflow-view.ts` (`STEP_LOOK`, panel detail), `packages/tui/test/workflow-view.test.ts` |
 | S8b catalogue pre-open (if Q1 = A) | `protocol/src/session.ts` (`WorkflowCatalogueParams.sessionId` optional), `daemon/src/{connection.ts,session-host.ts}` (`newSessionWorkflowCatalogue`, throwaway like `newSessionTools`), `client/src/remote-session.ts` (`workflowCatalogue` pre-open asks without id; `workflow({start})` pre-open goes through `createOrAttach()`), tests in `daemon/test/workflow-hosted.test.ts`, `client/test/workflows-client.test.ts`, `tui/test/workflow-frames.test.tsx` |
+| S8c `elsewhere` lookup removed (Q2) | `packages/core/src/project-paths.ts` (`workflowsAbove`, `WorkflowsAboveHint`, its depth const `:55-151`), `packages/cli/src/{workflow-files.ts,project-fs.ts}` (`:112`, `:252-277`), `packages/agent/src/workflow-driver.ts` (`:131`, `:171`, `:620`), `packages/protocol/src/session.ts` (`elsewhere`, `:1039-1060`; the field removal goes into the S4 `protocol.d/workflows-ux.md` note), `protocol/schema/protocol.json` (regen), `packages/tui/src/workflow-view.ts` (`catalogueSection` hint, `:833-839`), `apps/mobile/src/{workflow-start.ts,screens/WorkflowStart.tsx}` (the `elsewhere` view field and its row), tests `core/test/project-paths.test.ts`, `cli/test/{workflow-files,workflow-wiring}.test.ts`, `agent/test/workflow-catalogue.test.ts`, `protocol/test/workflow-wire.test.ts`, `tui/test/workflow-view.test.ts`, `apps/mobile/test/workflow-start.test.ts`. Acceptance: `rg -n "workflowsAbove\|WorkflowsAboveHint" packages apps` is empty and no workflow type carries `elsewhere` |
 
 ### Failure modes (how each converges)
 
@@ -265,6 +266,7 @@ disc with the glyph in ink, the glyph at ~½ of the disc.
 | **Huge workflow** (64 steps, many gotos) | Placement is strictly increasing per column (test with 64 steps and nested gotos: no pill overlap). Back arcs get distinct lanes. The canvas scrolls. `history` is capped at 64 with "N earlier steps not shown". Rows stay ~5 KB. |
 | **A step with no file order neighbour** (a `next` cycle with a counter) | The spine walk is cycle-guarded; the revisit is an arc, not a second pill. |
 | **Hub: catalogue read fails / offline / pod session** | Unknown → not dimmed; `unavailable` → dimmed with its text. The runs list keeps its own rules. |
+| **Hub: catalogue changes after the attach** (a file added from the TUI, `git pull`, the editor) | Re-read (single-flight with the attach's) at each fan open and on a dimmed Workflows tap (fan flash + the commit's notice path, so VoiceOver too): the item un-dims on the next look. A failed re-read keeps the last answer. (Fix round 1.) |
 | **TUI pre-open** | Runs: "no run yet" (never "not supported"). Catalogue: Q1. A `/workflow run` before the open: Q1 = A makes it open the session through the ONE `createOrAttach()`; Q1 = B keeps today's honest refusal. |
 
 ### Tests (red first; the property each kills)
@@ -337,6 +339,7 @@ disc with the glyph in ink, the glyph at ~½ of the disc.
 | S7 | Phone list B + never-run/approve detail + e2e + changelog | M · contained | S6b, S3 | — |
 | S8a | TUI not-yet/not-run + edge lines | S · contained | S5 | — |
 | S8b | Catalogue before the first message (Q1 = A) | M · cross-module | S4 (same protocol.d note) | — |
+| S8c | `elsewhere` neighbouring-folder lookup removed end to end (owner Q2) | M · cross-module (wire field removal) | S4 (same protocol.d note) | — |
 
 Review: one Opus review for S1–S3, a mandatory fresh-context one for S4, then one for S5–S8.
 
@@ -462,7 +465,8 @@ premise holds. S1 does not depend on it; it only had to not be contradicted by i
   itself puts it in S8b / a `protocol.d` note, not in S1. S1 removed only the at-rest *line*
   (`elsewhereLine`), which was S1's own defect 6. The `/workflow` panel's empty-catalogue hint keeps
   its `elsewhere` sentence (`workflow-view.ts` `catalogueSection`) — that survives until the
-  end-to-end removal lands. Noted as debt in the plan's own S8b line; nothing was half-deleted.
+  end-to-end removal lands. ~~Noted as debt in the plan's own S8b line~~ — false (S8b never covered
+  it, Review finding 1); fix round 1 gave it its own slice, **S8c**. Nothing was half-deleted.
 - **`home` left `FrameInput` entirely.** It was threaded into the layout only for `elsewhereLine`'s
   `~`-shortening. `App` still uses `home` for the header and the attach layer, so the prop stays;
   the layout no longer takes it.
@@ -740,6 +744,67 @@ bun test apps/mobile/test/{hub-actions,hub-opacity,hub-session,session-screen-ca
 No production source changed by this fix; no protocol change.
 
 *— claude-opus-5-5 (tentacle executor), 2026-11-24*
+
+### Fix round 1
+
+Answers Review "S1, S2, S3" (two MEDIUM findings; no HIGH).
+
+**Finding 1 (MEDIUM, owner Q2 had no owning slice) — FIXED (plan).** Added slice **S8c**
+("`elsewhere` lookup removed end to end") to both the Files table (every carrier found by
+`rg`: `core/src/project-paths.ts` `workflowsAbove`/`WorkflowsAboveHint`, `cli/src/workflow-files.ts`
+`:112,:252-277`, `agent/src/workflow-driver.ts` `:131,:171,:620`, `protocol/src/session.ts`
+`elsewhere` `:1039-1060` (its removal joins the S4 `protocol.d` note), the TUI
+`catalogueSection` hint, the phone's `workflow-start.ts`/`WorkflowStart.tsx` row, and their
+tests, plus a grep acceptance check) and the Slices table (M · cross-module, after S4). The S1
+Execution's false "noted as debt in S8b" sentence is struck through and corrected. No code:
+the removal is a wire-field change and belongs after S4, as the owner's answer says.
+
+**Finding 2 (MEDIUM, the hub stayed dimmed after the catalogue changed) — FIXED.**
+- `apps/mobile/src/session-screen-controller.ts`: new `refreshCatalogue()` on the screen
+  controller = the existing single-flight `readCatalogue()`. The "read ONCE" doc comments
+  are updated. A failed re-read keeps the last answer (the existing `catch` leaves
+  `catalogue` alone).
+- `apps/mobile/src/screens/SessionScreen.tsx`: called at each fan open (`onHubFan`, open
+  branch), on a dimmed Workflows commit (`commitHub` notice path, so VoiceOver gets it too),
+  and on a dimmed Workflows tap in the fan (`flashHub`). These are the same three seams the
+  Tools re-pull uses (hub-tools D4).
+- Failure-mode table: new row "Hub: catalogue changes after the attach".
+
+Red (with `refreshCatalogue` a no-op stub, so the failures are on assertions, not on a
+missing method):
+```
+(fail) … a file added after the attach UN-dims the item on the next re-read      Expected: 2 Received: 1
+(fail) … a re-read that FAILS keeps the last answer (unknown never overwrites known)
+(fail) … re-reads at the same moment cost ONE call (single-flight)
+ 6 pass / 3 fail
+```
+Green: `bun test test/session-screen-catalogue.test.ts test/hub-workflows-wiring.test.ts
+test/hub-tools-wiring.test.ts` (in `apps/mobile`) → 21 pass, 0 fail.
+`bunx biome check` on the 4 changed files → clean.
+
+Mutations (script `.tentacle/tmp/workflows-ux/fr1/mut.ts`: apply, run both test files,
+restore; both sources byte-identical afterwards):
+
+| # | Mutation | Caught by |
+|---|---|---|
+| M1 | `refreshCatalogue` a no-op | 3 fail (all three controller tests) |
+| M2 | single-flight guard removed | 1 fail — "re-reads at the same moment cost ONE call" |
+| M3 | a failed re-read sets `catalogue = null` | 1 fail — "a re-read that FAILS keeps the last answer" |
+| M4 | no re-read at the fan open | 1 fail — wiring "at each fan OPEN" |
+| M5 | no re-read on the dimmed commit | 1 fail — wiring "on a dimmed Workflows commit" |
+| M6 | no re-read on the fan flash | 1 fail — wiring "on a dimmed Workflows tap in the fan" |
+
+**Drift:** none from the Review's suggested fix ("re-read, single-flight, when the hub opens
+or the dimmed item is tapped"). New test file `apps/mobile/test/hub-workflows-wiring.test.ts`
+(source-text wiring, the `hub-tools-wiring.test.ts` pattern, since `SessionScreen.tsx` is not
+importable from Bun). No protocol change, no changelog change: the S2 fragment already covers
+the hub's Workflows item.
+
+**Not verified:** the full gate (left to the orchestrator's script, per the token budget),
+`tsc -p apps/mobile` included. On device: the fan-open re-read lands one RPC after the open,
+so the item un-dims while the fan is up, not before it is drawn. Not run on the simulator.
+
+*— claude-opus-5-5 (tentacle executor, fix round 1), 2026-11-24*
 
 ## Review
 
