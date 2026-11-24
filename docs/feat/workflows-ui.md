@@ -2255,3 +2255,47 @@ executors; shared planner blind spots may survive.
   `bun run typecheck` clean; `bun run lint` clean (2336 files). Full `bun test` not re-run (merge gate).
 
 *— claude-opus-5-5, 2026-11-23*
+
+### Adversarial review — slices 3, 4, 5b (fresh context)
+
+**Verdict: REQUEST-CHANGES** (two MEDIUM; no HIGH). Same model family as the slice-3 executor
+(fresh context only) — shared blind spots possible.
+
+**Gate (mine):** touched mobile suites (`workflow-*`, `hub-actions`, `hub-session`,
+`permission-sheet`, `routes`, `e2e-flows`) 405 pass / 0 fail; `bun test apps/mobile/test` 4971 pass /
+0 fail; `bun run typecheck` clean; `bun run lint` clean (2371 files). Full `bun test` not re-run.
+
+1. **MEDIUM — a `live` step detail is cached forever (stale "running now:").**
+   `apps/mobile/src/workflow-run-controller.ts:243` returns early when the step's record is `loaded`,
+   regardless of `detail.live`; only a rerun from THIS screen drops it (`:342`). Repro
+   (`.tentacle/tmp/workflows-ui/live-stale.ts`): open step `a` while running → `{live:true,
+   report:"partial"}`; the feed then says `a` = `ok`; reopen → still `{live:true,
+   report:"partial"}`, reads: 1. Same for a rerun started elsewhere (TUI, model: new attempt, old
+   detail kept). Contradicts the plan's own failure row (1a: "re-asked when the row says ended") —
+   a silent wrong state. Fix: don't treat a `live:true` record as final (or key the record on
+   step state/attempt), plus a red-first test.
+2. **MEDIUM — the step↔ask pairing on ANSWER is untested (vacuous for the security property).**
+   Mutation `workflow-run-controller.ts:329` `askForStep(pending(), runId, stepId)` →
+   `pending()[0]` (a card answers WHATEVER ask is on the sheet): `bun test apps/mobile/test` stays
+   4971 pass / 0 fail. In the field: the card's buttons were rendered for step X's ask, the sheet
+   meanwhile moved to another ask (another step, the run's hash, or a plain shell-command ask);
+   the tap would `allow_once` that unrelated ask. The code is correct today; nothing pins it (M1
+   pins only the sheet's `answerFor`, not which id the controller passes). Needs a test: sheet
+   holds a non-matching ask → `answer("x")` sends nothing + `RUN_ASK_GONE`. Reverted; `cmp`
+   identical, `git status` clean.
+3. **MEDIUM (merge gate) — the missing e2e flows 44/45 block merge as-is.** Screens are only
+   source-read from Bun; the property the approve card AND 5b's Start both depend on — the
+   Session screen's native Permission sheet presents over a pushed `WorkflowRun`/`WorkflowStart`
+   route — is unverified by anyone (slices 3/4/5b Execution say so). If it does not present, a
+   phone Start waits on a hash approval nobody can see. Minimum before merge: the orchestrator's
+   P1/P5/S4 shots (or a recorded manual simulator run of those three); the rest of 44/45 may be a
+   follow-up TODO.
+
+**Attacks tried, nothing found:** `open` never with `reopen` (run + start routes, App wiring);
+borrowed-session `leave` (dispose before/after open); late reads after `dispose`; `answerFor`
+requestId/age guard/`reply` excluded; no `allow_always` on cards; blank optional input omitted
+(not `""`), `changed` reload keeps only still-declared values; `running` refusal opens the run only
+with an id. Not a finding, noted: `openRow` carries a previous row's typed value into a
+same-named input of another workflow (visible, prefilled).
+
+*— claude-opus-5-5, 2026-11-24*
