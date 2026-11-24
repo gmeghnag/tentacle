@@ -422,3 +422,29 @@ frames A1–A7 before the iOS build.
 - **Decision needed (recommendation first):** move `ask-origin.ts` (pure, no deps) to `@tentacle/core` and re-export it from `client/src/index.ts` (the TUI already depends on core; S2's tests move with it). Alternative: add `@tentacle/client` to the TUI (breaks the stated invariant; not recommended). The TUI part is then: `permissionOriginLine(origin, agentId, columns)` replacing `permissionAgentLine` (`permission-ui.ts:117`), a `pendingWorkflow` beside `pendingAgent` (`:427,:607,:635`), `AppView.tsx:149`, and the row count in `app-layout.ts:450` (row present when agent OR workflow).
 
 ## Review
+
+### Group S1a–S3 — Verdict: REQUEST-CHANGES
+
+**Findings**
+1. **MEDIUM — `workflow` never reaches a requester.** `packages/client/src/remote-client.ts:4876-4881` builds the requester's `PermissionRequestOptions` from the router's `prompt` action field by field (`signal, turnId, agent, requestId`). It does not forward `action.workflow`. So S2's mapping (`permission-router.ts:395-414`) is a dead end: the TUI and the phone (both go through `RemoteClient`, §7) get `options.workflow === undefined` even once S1b sends it. They keep showing «Sub-agent general · wf/generate». The broker passes options through unchanged (`core/permission.ts:254,275`), so this is the only drop. Premise **P3 is FALSE as stated**: the router builds a `RouterAction`, and `RemoteClient` builds the options. Fix: forward `workflow` there, plus a RemoteClient-level test showing a requester spy receiving `options.workflow`. Make it red first. This is the property S4–S6 rely on; their tests feed `options.workflow` directly and would stay green over the gap.
+
+**Gate (touched files):** `ask-origin`, `permission-router`, `protocol/permission`, `json-schema`: 74 pass / 0 fail. `bun run lint`: clean (2386 files). `bun run typecheck`: clean. The full `bun test` was not run (scope: the touched files only).
+
+**Mutations (reverted; `git status` clean afterwards):**
+- Router `Number.isFinite(index)` → `!== undefined`: the non-finite test fails.
+- `askOrigin` without `index < 0`: the bad-position test fails.
+- The executor's own mutations (S1a: `.int()`/`.max()`; S2: three) are consistent with these.
+
+**Attacks tried**
+- (a) Hostile numbers or a 10 KB name on the blocking update: still parses. Holds.
+- (b) Control chars and length in the strings: `progressText` strips them and caps at 200, and `ask-origin` cuts again to 64/120. Holds.
+- (c) A workflow named «Main agent»: `kind` still comes from the structure. Holds.
+- (d) End-to-end path update → router → RemoteClient → broker → requester: **breaks at RemoteClient (finding 1)**.
+- (e) Single broker and options feeding a decision: untouched, display only. Holds.
+- (f) S3: the executor stopped correctly. The TUI has no `@tentacle/client` edge (`tui/package.json`, `app-types.ts:55`). Moving `ask-origin.ts` to `@tentacle/core` is the right call, but it needs the owner's OK before S3 resumes.
+
+**Executor behaviour:** red-first and mutations are recorded honestly. S3 was halted on a contradicted plan instead of forcing it (good). S2 inherited the plan's wrong P3 and did not trace past the router.
+
+*Reviewed by claude-opus-5-5 in a fresh context. The planner is the same model, so shared blind spots are possible; the executor was a different model.*
+
+*— claude-opus-5-5, 2026-11-24*
