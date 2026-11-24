@@ -1,6 +1,6 @@
 # feat/workflow-editor — Create and edit a workflow on the iPhone graph view
 
-> **Status:** plan — **NOT approved — owner questions pending** (see Implementation › Owner questions)
+> **Status:** implementation — **APPROVED** (owner 2026-11-24, all four recommendations)
 > **Branch:** `feat/workflow-editor`
 > **Size:** L · **Blast:** cross-module (app + serve write path + approval) · **Suited:** Opus plan; DeepSeek exec per slice; Opus review per slice group (mandatory fresh-context: L)
 > **Changelog:** `changelog.d/workflow-editor.added.md`
@@ -21,8 +21,7 @@ Owner decisions (binding):
 
 ## Implementation
 
-> **NOT approved — owner questions pending** (§ Owner questions, Q1–Q4). Nothing below runs until the
-> owner answers; an answer that differs from a recommendation is folded in as a dated revision.
+> **APPROVED** — owner «ok» 2026-11-24 to all four recommendations (#### Owner answers below).
 
 ### Load-bearing assumption (named first, proved against the source)
 
@@ -520,6 +519,17 @@ If one is missing, write `### Slice N — PARTIAL` with the failing line and STO
    Requiring the Mac would make the editor unusable away from it. If you want a Mac-only rule for
    phone-written hashes, it is a store field `writtenBy` plus a check in `approveHash`: one extra
    slice, load-bearing.
+
+#### Owner answers (2026-11-24, binding)
+
+1. Yes — Save writes through `serve` with the dry-run diff shown first.
+2. Not in this task — «Describe it to the model» is a follow-up.
+3. Allow — with the Review warning and the full patch.
+4. Yes — keep today's rule (the phone may approve a hash it wrote; save never approves).
+
+Executor routing (orchestrator, per AGENTS §10 + model-routing): slices 0–2, 3a, 4–7c DeepSeek; **3b Opus** (load-bearing → strong model), fresh-context Opus review per slice group.
+
+*— orchestrator (claude-opus-5-5), 2026-11-24*
 
 ### Notes / debt
 
