@@ -742,3 +742,63 @@ No production source changed by this fix; no protocol change.
 *— claude-opus-5-5 (tentacle executor), 2026-11-24*
 
 ## Review
+
+### Review — S1, S2, S3 (fresh context)
+
+**Verdict: REQUEST-CHANGES** (code and gate are sound; two MEDIUM findings, both small).
+
+Gate (scope S1–S3): `bun run typecheck` clean; `bun run lint` clean (2384 files, 0 diagnostics);
+touched tests — TUI 4 files 77 pass / 0 fail, mobile 8 files 232 pass / 0 fail. The full `bun test`
+was not re-run here.
+
+**Findings**
+
+1. **MEDIUM — the owner's binding Q2 has no owning slice, and Execution says it does.**
+   `docs/fix/workflows-ux.md:460-465` says the end-to-end removal of the `elsewhere` lookup is
+   "noted as debt in the plan's own S8b line". It is not: S8b's Files row (`:253`) and its Slices
+   row (`:339`) cover only the pre-open catalogue. The panel still paints the hint
+   (`packages/tui/src/workflow-view.ts`, `catalogueSection`, comment "the `elsewhere` hint stays
+   HERE"). What goes wrong: S4–S8 run from their Files rows, no slice deletes the
+   daemon/protocol/client lookup, and the branch merges with a decision the owner made still not done.
+   Fix: give Q2 a slice row and Files (or fold it into S8b's row and S4's `protocol.d` note).
+2. **MEDIUM — the hub can stay dimmed after the catalogue changes.**
+   `apps/mobile/src/session-screen-controller.ts:1574` reads the catalogue once per attach, and
+   nothing re-reads it (not when the hub opens, not when the run list is left). What goes wrong:
+   a project with no workflow file at attach is dimmed "No workflows in this project". A file is then
+   added (from the TUI, `git pull`, or later the phone editor in `feat/workflow-editor`). The hub
+   item stays dimmed, so the run list and its Start, the only way into it from the hub, are blocked
+   until a re-attach. The plan's failure-mode table (`:255-268`) does not list this. Fix: re-read
+   (single-flight) when the hub opens or the dimmed item is tapped, or never dim a known-empty
+   catalogue. Pin it with a controller test.
+
+**Mutation (non-vacuity), own run:** `catalogueFigure` returning `known:true` for
+null / `{unsupported}` (an unknown catalogue taken as empty) → 3 fail
+(`workflow-runs-controller.test.ts` + `session-screen-catalogue.test.ts`). Reverted;
+`git status --short` was empty afterwards. I re-read the executor's tables for S1 (M: `opened` ignored),
+S2 (M1–M5) and S3 (M1–M5). Their mutations match the tests' assertions; I did not re-run them.
+
+**Attacks tried**
+- §7 "logic in pure modules": the dim rule (`workflowsHub`/`catalogueFigure`), `navText` and
+  `heroTop`/`navBox` are pure and tested. The screen only folds them. Holds.
+- §7 pod trust: on mobile `daemonWakes: true` (`apps/mobile/src/connection.ts:73`). A pod session's
+  `unavailable` dims with its own text and sends nothing. Holds.
+- Unknown ≠ empty: a failed read, `{unsupported}`, and a handle with no `workflowCatalogue` all leave
+  the item un-dimmed. Holds (tested, and mutated above).
+- Pre-open phone handle: `RemoteSession.workflowCatalogue` returns `unavailable: "this session is
+  not open yet"` when `id === null` (`packages/client/src/remote-session.ts:1335`). That would dim
+  the item. But `readCatalogue` runs only after a successful attach (`handle = result.session`), so I
+  found no path that reaches it on the phone today.
+- S1 row budget: `catalogueHeight` is removed from `activeRows`, `panelBodyTop`, `dockTop` and
+  `statusRowY` together. The frame test compares every row against a frame with no catalogue seam.
+  Holds.
+- S3: a NaN or negative inset becomes 0. The flight lands at `heroTop`. Holds.
+- e2e `34-hub-workflows.yaml` starts no run, so it leaves no state for later flows. Not run (needs
+  the simulator), as Execution states.
+
+**Executor behaviour:** honest. Each drift is stated with its reason, including the extra files and
+the weak `navBox` assertion its own mutation caught. The DeepSeek draft's errors were found and
+corrected. One false claim: the S8b debt note (finding 1).
+
+Same model family as the executor (Opus): only the context is fresh, so blind spots we share can survive both passes.
+
+*— claude-opus-5-5, 2026-11-24*
