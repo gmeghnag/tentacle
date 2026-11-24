@@ -329,6 +329,26 @@ function formatIssues(error: z.ZodError): string[] {
   });
 }
 
+/**
+ * The STRUCTURAL check only: the `zWorkflow` shape (types, required keys, no
+ * unknown field), none of the semantic rules. An editor opens a file on this, so
+ * a workflow the model wrote with a dangling `next:` or an empty command still
+ * opens and shows those as problems to repair, while a non-mapping or a
+ * wrong-typed field does not (there would be nothing to edit).
+ *
+ * `undefined` = structurally a workflow.
+ */
+export function workflowStructureProblem(raw: unknown): string | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return "a workflow must be a YAML mapping — start with schemaVersion, name and steps";
+  }
+  const parsed = zWorkflow.safeParse(raw);
+  if (parsed.success) {
+    return undefined;
+  }
+  return formatIssues(parsed.error)[0] ?? "is not a workflow";
+}
+
 /** Edit distance, for a "did you mean" on a mistyped step id. */
 function distance(a: string, b: string): number {
   const prev: number[] = Array.from({ length: b.length + 1 }, (_, i) => i);
@@ -599,9 +619,13 @@ function readOnFail(
 }
 
 /**
- * Read and CHECK a workflow file. `text` is the YAML; prompt files come from
- * `ctx.readPrompt`. Every problem is returned at once, so one repair round fixes
- * the file instead of one per mistake.
+ * Read and CHECK a workflow file. `text` is the YAML (a BOM is dropped); prompt
+ * files come from `ctx.readPrompt`. Every problem is returned at once, so one
+ * repair round fixes the file instead of one per mistake.
+ *
+ * This is the YAML parse only: the checks themselves are
+ * `validateWorkflowValue`, so an editor that holds the parsed mapping (the
+ * phone, which cannot read YAML) gets the SAME sentences (workflow-editor D1).
  */
 export function validateWorkflow(text: string, ctx: WorkflowContext = {}): WorkflowValidation {
   const yamlText = text.startsWith("\ufeff") ? text.slice(1) : text;
@@ -616,6 +640,15 @@ export function validateWorkflow(text: string, ctx: WorkflowContext = {}): Workf
     const detail = err instanceof Error ? err.message.split("\n")[0] : String(err);
     return { ok: false, errors: [`not valid YAML: ${detail}`] };
   }
+  return validateWorkflowValue(raw, ctx);
+}
+
+/**
+ * The checks, on an already-parsed workflow mapping. The ONE reader the text
+ * form, the daemon's catalogue and the editor all share: same schema, same
+ * sentences, same spec.
+ */
+export function validateWorkflowValue(raw: unknown, ctx: WorkflowContext = {}): WorkflowValidation {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return {
       ok: false,

@@ -630,4 +630,116 @@ regeneration (no schema changed in this slice).
 
 *— claude-opus-5-5 (executor), 2026-11-24*
 
+### Slice 1 — validator split + canonical emitter (D1) — DONE
+
+**Load-bearing check re-run FIRST** — `.tentacle/tmp/workflow-editor/lb-slice1.ts` (slice 1's
+`PARTIAL` check: `lb.ts`'s facts + the split's own) on the branch tip `26a4aa6b`:
+
+```
+== approved lb.ts facts (must not differ) ==
+validateWorkflowValue exported: false
+Bun.YAML present: false
+approvals.add( call sites: 2 lines 733,1020
+"WorkflowSource" in Method: false
+typeof validateWorkflowValue: undefined
+
+== slice 1 specifics ==
+validateWorkflow at :606
+YAML parse site: false
+workflow-yaml.ts exists today: false
+core exports workflowYaml: false
+```
+
+Every value matches the plan's table (`approvals.add` = exactly the two driver lines; both methods
+absent; no `validateWorkflowValue`). The one wording drift, not a code drift: the plan says
+"`validateWorkflow` uses `Bun.YAML`" (`:607-611`), and the source reaches it as
+`(globalThis as {Bun?: …}).Bun?.YAML` — same runtime, no literal `Bun.YAML`. The split keeps that
+lookup verbatim, so the phone (no `Bun`) still gets "cannot read YAML here".
+
+**As built, in order:**
+
+1. **Red first.** `core/test/workflow-yaml.test.ts` written against the plan's list, ran it: red on
+   the import (`Export named 'validateWorkflowValue' not found`) — an import error, not the
+   assertion, so per §9 the *behaviour-preserving split* was done next and the emitter tests were
+   then shown red **on assertions** (round trip, quote-safety, `isCanonical`, `asDraft`).
+2. **The split** (`core/src/workflow-spec.ts:630-667`): `validateWorkflow` keeps the BOM strip and
+   the YAML parse, then returns `validateWorkflowValue(raw, ctx)`; `validateWorkflowValue` is
+   today's body from the mapping check onward, unchanged. **`core/test/workflow-spec.test.ts` was
+   not edited and stayed green (52 pass)** — the plan's proof of no behaviour change. The driver's
+   own suite too (`agent/test/workflow-driver.test.ts`, 38 pass).
+3. **`workflowStructureProblem(raw)`** (`workflow-spec.ts:333-354`): the `zWorkflow` shape check
+   alone, `undefined` = structurally a workflow. It lives beside `zWorkflow` because that is the
+   only owner of the schema; `asDraft` is its only caller.
+4. **`core/src/workflow-yaml.ts` (new, 258 lines):** `WorkflowDraft`, the fixed key orders (root,
+   step, agent, approve, on_fail, where, input, budget — the `zWorkflow` order), `plainSafe` /
+   block-safety, `scalarText` (JSON-quote anything not proven plain; JSON is a YAML 1.2
+   double-quoted scalar), `workflowYaml`, `isCanonical` (BOM aside, not CRLF), `asDraft`.
+   Defaults omitted: `budget.wait` = 12h and `budget.max_step_runs` = 50, and a mapping whose every
+   key was a default is dropped **with its key** (so a file that spelled the defaults out
+   canonicalises to a file that did not).
+5. **`core/src/index.ts:49`** exports `./workflow-yaml.ts`. No other package touched.
+
+**Drift from Implementation (and why):**
+
+- **`asDraft` also drops an all-default `budget:`** (`workflow-yaml.ts:242-255`) — not in D1's
+  literal text, but D1's own rule ("defaults never land in the file") plus `isCanonical` would
+  otherwise say a file with `budget: {wait: 12h}` is non-canonical *forever*: every open→save would
+  report a rewrite of a file it rewrites to identical bytes. The test "opening and saving is a
+  no-op" pins it.
+- **`workflowStructureProblem` is a new exported symbol** in `workflow-spec.ts` rather than a
+  private helper in `workflow-yaml.ts`: it needs `zWorkflow`, `formatIssues` and the mapping
+  sentence, and duplicating those in a second module is the "two readers" bug this split exists to
+  prevent.
+- **No changelog fragment on this slice, deliberately.** The plan assigns
+  `changelog.d/workflow-editor.added.md` to **slice 7c** with the editor's user-visible text; slice 1
+  is a behaviour-preserving split plus a module nothing calls yet, and AGENTS §10 says internal
+  work adds no fragment. Writing that filename now would be wrong content *and* would collide with
+  7c. 7c still owns it. (Orchestrator: say so if you want a `changed` fragment for the split.)
+- No `protocol.d/` note and no `protocol.json` regeneration: no schema, no wire, no number moved.
+
+**Mutation checks (each reverted; suite green again after every one):**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | every string emitted plain (`return value;`) | **2 fail** — round trip + hostile strings |
+| M2 | drop the RESERVED guard (`yes`/`no`/`null`/`~`/`=`) | **1 fail** |
+| M3 | drop the NUMERIC/DATE-LIKE guard (`1.0`, `0x1f`, `1e3`, timestamps) | **1 fail** |
+| M4 | drop the `": "`/` #`/trailing-`:` guard | **1 fail** |
+| M5 | `isCanonical` always `true` (trust the parsed draft, not the bytes) | **1 fail** |
+| M6 | `workflowStructureProblem` = the full validator | **2 fail** — a dangling `next` would refuse to open |
+| M7 | `validateWorkflow` stops delegating (a second, divergent reader) | **1 fail** — the equality test |
+| M8 | keys sorted, not in schema order | **1 fail** (after the order test was added — see below) |
+| M9 | block-scalar safety unchecked | **1 fail** (after the unsafe-line cases were added) |
+| M10 | never emit a `|-` block | **1 fail** (after the block test was added) |
+| M11 | `asDraft` keeps an all-default `budget:` | **1 fail** |
+
+M8–M10 **survived the first pass** and that is the useful result: the plan's list did not pin the
+key order, nor a multi-line string whose lines are not all block-safe (`a\n\nb`, `a\n b`, `\na`),
+nor that a safe one *is* a block. Three tests were added and each of M8/M9/M10 then failed. M6 and
+M7 were re-run after the mutation harness (below) had reverted `workflow-spec.ts`.
+
+**One process fault, stated for the record:** during M6 I ran `git checkout --` on
+`packages/core/src/workflow-spec.ts`, which reverted the two edits in it (a standing instruction
+forbids checkout/restore). Nothing was lost to another task — the edits were re-applied by hand,
+`git diff` re-checked (`+37 −3`), and M6 re-run against the restored tip. No `git checkout`,
+`restore` or `stash` was used afterwards; mutations are now reverted from a copy under
+`.tentacle/tmp/workflow-editor/`.
+
+**Evidence:**
+
+- `bun test packages/core/test/` (all 62 core files): **919 pass, 0 fail**.
+- `bun test packages/core/test/workflow-yaml.test.ts packages/core/test/workflow-spec.test.ts`:
+  **71 pass, 0 fail** (19 of them the new file).
+- `bunx biome check` on the four changed files: clean.
+- `bunx tsc --noEmit -p .`: clean (one `Object is possibly 'undefined'` found and fixed in
+  `emitSequence`, `workflow-yaml.ts:196-203`).
+- The gate itself (`bun run check`) is the orchestrator's to run: a stale snapshot of this worktree
+  is unrelated to it.
+
+**Unverified, one line:** the phone-side reuse (that `@tentacle/core` bundles `workflow-yaml.ts`
+unchanged into the RN app) is proven only when slice 5/6 imports it — today nothing does; it holds
+by construction (no `node:`, no `Bun`, no React in the new module).
+
+*— claude-opus-5-5 (executor), 2026-11-24*
+
 ## Review
