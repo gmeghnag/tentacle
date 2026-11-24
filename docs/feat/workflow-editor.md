@@ -1304,3 +1304,87 @@ drives `wiring.ts` → `save` → a real file through RPC; that path is exercise
 slice 4/6/7.
 
 *— claude-sonnet-4-5-20250929 (executor, slice 3b), 2026-11-25*
+
+## Review
+
+### Slices 3a + 3b — REQUEST-CHANGES
+
+The load-bearing invariant **holds**: a save never approves, and it never asks. 2 MEDIUM findings
+are wire/size contract bugs. Neither one is an approval bypass.
+
+**Gate (narrow, as asked).** 8 touched test files (`agent/workflow-save`, `agent/workflow-driver`,
+`daemon/workflow-hosted`, `daemon/workflow-step-detail`, `cli/workflow-wiring`,
+`cli/workflow-files-write`, `protocol/workflow-save-wire`, `protocol/json-schema`): **157 pass,
+0 fail**. `bun run lint` is clean (2381 files). `bun run typecheck` is clean.
+
+**Findings**
+
+1. **MEDIUM — the save and source answers do not cap the validator's output, so a long error list
+   is reported as `unavailable`.**
+   - Where: `daemon/src/hosted-session.ts:2709` (`errors: [...view.errors]`) and `:2781`
+     (`errors: [...outcome.errors]`), plus the driver's joined `reason`
+     (`agent/src/workflow-driver.ts` `invalid(...)`).
+   - Cause: the validator does not bound its error list. The wire allows `errors` ≤ 20 × 300 and
+     `reason` ≤ 2000. The catalogue already caps through the helper at `hosted-session.ts:683`;
+     these two methods do not use it.
+   - Repro (`.tentacle/tmp/workflow-editor/rv3b/errcap.ts`): a draft with 25 steps, each
+     `run: ""`. The driver returns `invalid` with 25 errors, and
+     `WorkflowSaveResultSchema.safeParse` fails (`too_big`).
+   - Effect: the save answers `{refusal:"unavailable", reason:"the save could not be reported…"}`.
+     `workflow_source` on a hand-written file with more than 20 errors answers `unavailable`.
+   - The plan gives `unavailable` one meaning: "this session cannot edit workflows". So the phone
+     shows the wrong screen instead of the errors, and the user cannot fix the file.
+   - The same fall-through on a write that already landed (for example `alsoChanges` over 64)
+     reports `ok:false` after the bytes are on disk.
+   - Fix: run both through the catalogue's capper. A schema failure after a landed write should
+     not be reported as `unavailable`.
+
+2. **MEDIUM — the write path does not bound the emitted YAML by the loader's
+   `WORKFLOW_FILE_MAX_BYTES` (256 KiB), while the wire allows a 512 KiB draft.**
+   - Where: `cli/src/workflow-files.ts:456`; `agent/src/workflow-driver.ts:923`.
+   - Repro (`rv3b/big.ts`): one step with an 80 000 × `"word "` `prompt_text` validates, and its
+     YAML is 400 089 bytes.
+   - Effect: the save answers `ok:true` with a hash. Then the listing marks the file `too-large`,
+     so the catalogue never reports that hash and cannot start the workflow.
+   - `workflow_source` returns text over `WORKFLOW_SOURCE_TEXT_MAX_CHARS`, so the answer fails its
+     schema and is reported as `unavailable`. The editor cannot reopen its own file.
+   - This contradicts D4 twice: "never writes … a file that does not load back" and "the preview
+     hash equals the next catalogue hash".
+   - Fix: refuse `invalid` when the emitted bytes are over the cap, before any write.
+
+**Red-team of the §7 / hash-approval invariant (all hold)**
+- `rg "approvals.add("` finds exactly the two driver sites (`requestApproval`, `approveHash`),
+  and neither is reachable from `source` or `save`.
+- `new WorkflowDriver(` has ONE construction site (`cli/src/wiring.ts:854`), and
+  `writeWorkflowFiles` has ONE caller (`:861`), inside `workflows && !tunnelled`. A pod daemon has
+  no writer: `source` and `save` answer `unavailable`.
+- The approval store is `<configDir>/workflow-approvals.json`, outside `.tentacle/workflows/`. A
+  prompt path is limited by `promptPathProblem` (no `..`, no absolute path) and by `resolveInside`
+  (no links), so no save can reach the store.
+- `draft.name` must equal the file stem (`workflow-spec.ts:681`), and `name` is
+  `WorkflowNameSchema` on the wire, so a save cannot write to another workflow's path.
+- A saved file is new bytes, so its hash is new and the next start asks. Re-saving bytes whose
+  hash is already approved is approved, which is correct: they are the bytes that were reviewed.
+- Two concurrent saves: the writer re-checks the base inside one synchronous block, so the second
+  gets `changed` (or `exists`). No lock was added, so the peer is still not serialized.
+
+**Mutation (mine).** I added `approvals.add(path, hash)` inside `save` on a write. Both (a) and (b)
+went red (2 fail, 14 pass). I reverted with `cp` and checked that `git status` was clean. The
+executor's mutations A–G are recorded above. I did not re-run them.
+
+**Attacks that found nothing.**
+- A prompt path naming another workflow's YAML: it is refused `exists` (not in `basePrompts`).
+  Creating a new file through it gives an unapproved hash, which asks.
+- A `replace` with no `baseHash`: refused `changed`.
+- An unknown draft field: `invalid`.
+- `dryRun`: writes nothing.
+
+**Executor behaviour.**
+- Faithful to the plan, with honest drift notes (the meaning of `schedules`, `prompts` always
+  present) and a real mutation table.
+- It missed reusing the catalogue's capper and the size cap.
+- Its signature says `claude-sonnet-4-5`, dated 2026-11-25, while the routing named Opus for 3b.
+  The orchestrator should check that.
+- Reviewer: same family as the planner, in a fresh context. Shared blind spots are possible.
+
+*— claude-opus-5-5, 2026-11-24*
