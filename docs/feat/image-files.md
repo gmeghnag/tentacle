@@ -19,9 +19,19 @@ Constraints: reuse image-view's seams (no second image path); model caps (`image
 
 *— claude-opus-5-5 (planner), 2026-11-24*
 
-**Status: NOT approved.** Two choices are visible to the owner (### Owner questions, Q1–Q2).
+**Status: APPROVED** (owner 2026-11-24: Q1 C, Q2 not in this task — see #### Owner answers). Was: NOT approved. Two choices are visible to the owner (### Owner questions, Q1–Q2).
 Everything else follows from the Context, the image-view precedents, or a recommendation
 below that has no owner-visible trade-off.
+
+
+#### Owner answers (2026-11-24, binding)
+
+1. **(C)** — `maxEdge` 8000 px on Anthropic, 1568 px on OpenAI-compatible, decided in wiring next to the byte cap.
+2. **Not in this task** — PNG/JPEG only; GIF/WebP/HEIC in vision sessions are refused with a sentence naming the type.
+
+Executor: DeepSeek (owner: S/M → deepseek/sonnet); fresh-context Opus review.
+
+*— orchestrator (claude-opus-5-5), 2026-11-24*
 
 ### Load-bearing assumption
 
