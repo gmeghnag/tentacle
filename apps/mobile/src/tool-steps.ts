@@ -319,12 +319,12 @@ export interface StepRowView {
   readonly command: readonly string[];
   /**
    * The result, one line per row, at the text column (no `⎿`, no indent —
-   * decision 5). `hidden` lines wait for "show all". Null: no result.
+   * decision 5). The TAIL of a long log: `hidden` EARLIER lines wait for "show
+   * all". Drawn neutral (the failure is `exitSuffix`). Null: no result.
    */
   readonly output: {
     readonly text: string;
     readonly hidden: number;
-    readonly error: boolean;
   } | null;
   /**
    * A FILE tool's coloured content (docs/feat/mobile-file-view.md part 1), or
@@ -384,7 +384,6 @@ export function stepRowView(
       : {
           text: cut.lines.join("\n"),
           hidden: cut.hidden,
-          error: cut.error,
         };
   // A file tool's content REPLACES the plain body (docs/feat/mobile-file-view.md):
   // the tool's own result line (`edited … with 2 edits (+78 -30)`, the raw

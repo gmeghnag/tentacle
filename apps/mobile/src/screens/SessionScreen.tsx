@@ -124,6 +124,7 @@ import { linkPrompt } from "../links.ts";
 import { showsScene } from "../mascot-scenes.ts";
 import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
 import { noticeLooks } from "../notice-group.ts";
+import { type StickyBlock, openOutputSteps, stickyState } from "../output-sticky.ts";
 import { PERF } from "../perf-probe.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
 import {
@@ -185,6 +186,7 @@ import { Icon, type IconName } from "../ui/Icon.tsx";
 import { MascotSceneLayer } from "../ui/MascotScene.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
+import { STICKY_HEAD_H, StickyHost, type StickyHostHandle } from "../ui/StickyStep.tsx";
 import { Text } from "../ui/Text.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import { DiagramRenderer } from "../ui/diagram/DiagramRenderer.tsx";
@@ -206,6 +208,7 @@ import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.ts
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
 import { PendingBubbles } from "./compose/PendingBubble.tsx";
 import { type CellActions, TranscriptCell } from "./transcript/TranscriptCell.tsx";
+import { type CellRect, measuredCell } from "./transcript/measured-cell.tsx";
 
 export interface SessionScreenProps {
   readonly palette: Palette;
@@ -503,6 +506,10 @@ export function SessionScreen({
   // end, padding included — bug 3); the screen only reports the list's native
   // sizes and scroll metrics (a DRAG is the person's) and performs the scroll.
   const list = useRef<FlatList<Row>>(null);
+  // The sticky step row's decision, re-run on every scroll event (assigned below,
+  // once the rows and the open state exist) and the key it currently shows.
+  const recomputeSticky = useRef<() => void>(() => undefined);
+  const stickyHost = useRef<StickyHostHandle>(null);
   const followRef = useRef<Follow>(initialFollow);
   const [follow, setFollow] = useState<Follow>(initialFollow);
   const jumpText = jumpPillText(follow);
@@ -656,6 +663,7 @@ export function SessionScreen({
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
       size.current = { content: contentSize.height, viewport: layoutMeasurement.height };
       offset.current = contentOffset.y;
+      recomputeSticky.current();
       setFollowState(
         scrolled(
           followRef.current,
@@ -782,6 +790,52 @@ export function SessionScreen({
   // own state would die with it.
   const [openSteps, setOpenSteps] = useState<readonly string[]>([]);
   const [fullSteps, setFullSteps] = useState<readonly string[]>([]);
+  // The sticky step row over an open long output (docs/feat/mobile-shell-output-scroll.md).
+  // `output-sticky.ts` decides; this only measures the cells, feeds the scroll
+  // offset and draws the overlay. State changes only when the row's key / line /
+  // push changes, never per frame; `follow.ts` is untouched (read-only tap-in).
+  const outputSteps = useMemo(
+    () => openOutputSteps(rows, openSteps, fullSteps, layout.cells, compactShell),
+    [rows, openSteps, fullSteps, layout, compactShell],
+  );
+  const cellRects = useRef(new Map<string, CellRect>());
+  const MeasuredCell = useMemo(() => measuredCell(cellRects.current), []);
+  recomputeSticky.current = () => {
+    const blocks: StickyBlock[] = [];
+    for (const [key, step] of outputSteps) {
+      const rect = cellRects.current.get(key);
+      if (rect !== undefined) {
+        blocks.push({
+          key,
+          top: rect.top,
+          bottom: rect.top + rect.height,
+          headH: STICKY_HEAD_H,
+          bodyTop: rect.top + STICKY_HEAD_H,
+          lineH: 17,
+          lines: step.total,
+          lineOffset: step.skipped,
+        });
+      }
+    }
+    const next = stickyState(offset.current, blocks);
+    stickyHost.current?.set(next, next === null ? "" : (outputSteps.get(next.key)?.label ?? ""));
+  };
+  // A collapse / expand while still: re-decide against the same offset.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `outputSteps` is the trigger
+  useEffect(() => recomputeSticky.current(), [outputSteps]);
+  // Collapse from the sticky row: the step row lands where the overlay was
+  // (best effort — owner 24/11: ship without the exact landing if it jitters).
+  const collapseSticky = useCallback(() => {
+    const key = stickyHost.current?.key() ?? null;
+    if (key === null) {
+      return;
+    }
+    const top = cellRects.current.get(key)?.top;
+    cellActions.current.onToggle(key);
+    if (top !== undefined) {
+      list.current?.scrollToOffset({ offset: top, animated: false });
+    }
+  }, []);
   // `Date.now()` is the voice controller's own clock (`now` above); while it
   // records, its 250 ms tick emits a new state, so the timer re-renders.
   const voiceView = voiceComposerView(
@@ -1754,6 +1808,7 @@ export function SessionScreen({
           <View style={settling ? styles.hidden : styles.screen}>
             <FlatList
               ref={list}
+              CellRendererComponent={MeasuredCell}
               testID="transcript"
               data={rows}
               keyExtractor={(row: Row) => row.key}
@@ -1941,6 +1996,7 @@ export function SessionScreen({
                 </View>
               }
             />
+            <StickyHost ref={stickyHost} palette={palette} onCollapse={collapseSticky} />
           </View>
           {/* Polpetto's entrance (docs/feat/mobile-mascot-scenes.md): one scene per
               EMPTY session, drawn OVER the (transparent) empty transcript. The

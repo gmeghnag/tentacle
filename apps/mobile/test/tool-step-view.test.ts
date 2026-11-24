@@ -131,9 +131,8 @@ describe("stepRowView: one step's line and body", () => {
     expect(v.subtitle).toBe("ls -la polpo-page.png");
     expect(v.command).toEqual([]);
     expect(v.output).toEqual({
-      text: ["line 1", "line 2", "line 3", "line 4", "line 5", "line 6"].join("\n"),
+      text: ["line 4", "line 5", "line 6", "line 7", "line 8", "line 9"].join("\n"),
       hidden: 3,
-      error: false,
     });
     expect(v.tappable).toBe(true);
     expect(v.a11yLabel).toBe(
@@ -141,13 +140,13 @@ describe("stepRowView: one step's line and body", () => {
     );
   });
 
-  test("`full` shows every line; an error is red on the dot, the trailing text and the result", () => {
+  test("`full` shows every line; an error is red on the dot and the trailing text, NOT the result", () => {
     const out = Array.from({ length: 9 }, (_, i) => `e${i}`).join("\n");
     const v = stepRowView(tool("t", "error", { output: out, durationMs: 1300 }), null, true);
     expect(v.dot).toBe("error");
     expect(v.trailingRed).toBe(true);
     expect(v.output?.hidden).toBe(0);
-    expect(v.output?.error).toBe(true);
+    expect(v.output).not.toHaveProperty("error");
     expect(v.output?.text.split("\n")).toHaveLength(9);
   });
 
