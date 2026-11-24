@@ -1720,6 +1720,131 @@ were not touched (not HIGH/MEDIUM).
 
 *— claude-opus-5-5, 2026-11-23*
 
+### Slice 3 — iPhone list + graph ⇄ cards + approve (D4) — PARTIAL (code + unit/wiring tests DONE; e2e flow + seed NOT done)
+
+*— claude-opus-5-5, 2026-11-24*
+
+**Resume note.** The brief said DeepSeek's partial edits were in the working tree; `git status`
+was clean at start, so nothing was inherited — the slice was done from scratch.
+
+**Load-bearing check (PARTIAL rule) — PASSES.** `RemoteClient.workflowList` exists
+(`packages/client/src/remote-client.ts:1646`, `MethodNotFound` → `{unsupported:true}`) and
+`RemoteSession.workflowStep` exists (`remote-session.ts:1352`); also used: `onWorkflows` (`:1280`),
+`workflow(action)` (mints for start/resume/rerun), `onSessionWorkflows` (`remote-client.ts:1610`).
+
+**As built, in dependency order (red first for every pure module: each test file was run against
+a stub/old code and failed on ASSERTIONS before the implementation).**
+
+1. `src/workflow-skeleton.ts` `detailBlocks`: labels English (`State, Kind, Model, Where, Attempts,
+   Round "n of m", Duration`). Red: `workflow-morph-skeleton.test.ts` 2 fail on the old Italian.
+   `workflow-list.ts` needed NO change — its user-facing words were already English (only comments
+   name the mockup's Italian); the plan's "list words carry Italian" was stale.
+2. `src/permission-sheet.ts`: the `asking` state carries `agentId` (the asker's `agent.id`, for
+   `askForStep`), and NEW `answerFor(requestId, optionId, now?)` — answers only when the ask on
+   screen IS that id, same `settle` path and age guard as a tap, never `reply`. Red: 4 fail
+   (`answerFor is not a function`, `agentId` missing). The sheet only ever holds ONE presented ask
+   (the router serialises; `queue` is a guard), so "answer a non-head ask" is not needed: a card
+   whose ask was replaced answers nothing.
+3. `src/hub-actions.ts` + `src/hub-session.ts`: entry `workflows` ("Workflows", after Scheduled in
+   the canonical order — the idle fan O1 is unchanged), count badge = `workflowsNeedYou` (promoted
+   like any badge; the rim arc idiom), dimmed by `workflowsEmpty` (`NO_WORKFLOW_RUNS` /
+   older-daemon text), unknown never dimmed; `hubContextOf({workflows?})`; VoiceOver action
+   `hub-workflows`. `src/ui/HubFan.tsx`: one icon line (`list.bullet`) — required by the
+   `Record<HubActionId, IconName>` (drift: file not in the plan's list; presentation only).
+   Red: 4 fail on assertions (after adding only the constant, so the red was not an import error).
+4. `src/routes.ts`: `WorkflowRunsRoute {computerId, name, sessionId?}`, `WorkflowRunRoute
+   {computerId, sessionId, runId, title}`, two `RootStackParams` entries (type tests in
+   `routes.test.ts`).
+5. NEW `src/workflow-runs-controller.ts` (pure): reads `workflowList()` on focus / pull / any
+   `onSessionWorkflows` notice debounced `RUNS_DEBOUNCE_MS = 500`; one read in flight (a trigger
+   during a read = one more read after it); `unsupported` → its own state ("Update tentacle on
+   this computer"); a failed read keeps the last list + `WORKFLOWS_OFFLINE` (first read failing →
+   `error` with the reason, no spinner loop); `blur`/`dispose` stop listening, nothing lands after
+   dispose; `workflowsHub(state)` = the hub figure (undefined while unknown). Red: 11 of 12 fail on
+   a stub (the dispose case is green on a no-op stub by construction — its non-vacuity is M8).
+6. NEW `src/workflow-run-controller.ts` (pure): `open(sessionId)` — never `reopen`; archived /
+   deleted / gone → `ended` + "This session has ended"; other failures → `failed`; a session another
+   screen already follows is **borrowed** and never `leave`d (`createSessionController` keeps one
+   handle per id with no refcount — leaving would detach the Session screen underneath); the run by
+   `runId` from `onWorkflows`; mode via an injected store; ask ↔ step via `askForStep` (exact
+   `<runId>.<stepId>`, the run's own `<runId>` is `runAsk`); `answer` → `asks.answerFor(thatRequestId)`
+   or the notice `RUN_ASK_GONE`; stop / resume / rerun → `session.workflow(...)`, a refusal is a
+   notice. Plus `askSourceFromSheet` (the sheet's `asking` state → a card ask, title/detail verbatim,
+   only with a daemon `requestId`). Red: 14 of 15 fail on a stub; `askSourceFromSheet`'s 3 tests were
+   written with it (non-vacuity: M2).
+7. Screens `src/screens/WorkflowRuns.tsx`, `src/screens/WorkflowRun.tsx` (dumb renderers; graph via
+   `graphGeometry` + `react-native-svg`, already a dependency `package.json:39`; approve block =
+   title + detail in a `ScrollView`, no `numberOfLines`, Allow once / Deny; in graph mode the step
+   asks are drawn above the graph so they stay answerable).
+8. `App.tsx`: `SESSION_SCREENS` (the Session screens that are up, by `sessionKey`) so a run screen
+   answers through THAT screen's sheet — no second requester on the broker; `useWorkflowRuns`
+   (wiring for the runs controller); `SessionRoute` feeds `workflowsHub` + `onOpenWorkflows`;
+   `WorkflowRunsRoute` / `WorkflowRunRoute`; two `Stack.Screen`s (plain pushes). `SessionScreen.tsx`:
+   two optional props → `hubContextOf({workflows})` and `hubEntries.workflows` only.
+9. NEW `test/workflow-screens-wiring.test.ts` (source-reading, the `hub-tools-wiring` pattern): both
+   routes exist, no `<Modal>`, the detail is never line-capped and is scrollable, no `allow_always`,
+   the run route attaches via `RUNTIMES` without `reopen`, answers only via `screen.sheet().answerFor`,
+   borrows a followed session, and the Session screen wires the item.
+10. `changelog.d/workflows-ui.added.md`: the one existing `added` bullet EXTENDED with the iPhone
+    sentence (one fragment per slug+category, as 1b did).
+
+**Drift from Implementation (recorded, not forced):**
+- **No ask for a session whose screen is not up.** The plan says the run controller answers
+  "through the phone's existing sheet path". That sheet is the Session screen's (its requester is
+  the client's ONE broker requester); a run reached from the list for ANOTHER session has no sheet,
+  and building one would be a second requester. So such a card shows "Open the session to answer
+  it" (→ that Session, where the native sheet answers it verbatim) and no buttons. From the hub of
+  the run's own session (the plan's entry point) the buttons work.
+- **Mode memory is per app run (in memory), not persisted to disk.** "persisted per app" would need
+  a new storage key and store; the module-level `WORKFLOW_RUN_MODE` keeps it for the app's life.
+  Follow-up if the owner wants it across launches.
+- **The hub figure comes from `workflow/list` read per mounted Session screen** (`useWorkflowRuns`
+  in `SessionRoute`), so the badge refreshes on focus and on any run notice (debounced). The run list
+  screen has its own controller instance (two reads at most; no shared cache added).
+- `HubFan.tsx` touched (one icon), as above.
+
+**Mutation checks (each applied with `sed` on the file, run, restored from a scratch copy; `cmp`
+identical after each):**
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | `answerFor` ignores the `requestId` | **RED** — "a card for an ask that is no longer on screen answers NOTHING" |
+| M2 | `askSourceFromSheet` drops the agent id | **RED** — "the ask on the sheet, title and detail VERBATIM" |
+| M3 | run controller `leave`s a borrowed session | **RED** — "leaving detaches a session this screen opened — never one another screen follows" |
+| M4 | archived/gone/deleted reported as `failed` | **RED** — "a session that ended between list and tap…" |
+| M5 | run controller opens with `{reopen:true}` | **RED** — "opens the session WITHOUT reopen" |
+| M6 | runs controller reads on every notice (no debounce) | **RED** — 2 (debounce; blur) |
+| M7 | a failed read drops the kept list | **RED** — "link down: the LAST list stays…" |
+| M8 | a read lands after `dispose` | **RED** — "a read that lands after dispose changes nothing" |
+| M9 | `workflowsHub` dims a still-loading list | **RED** — "unknown (loading, error) is undefined" |
+| M10 | the hub never dims Workflows | **RED** — "no run (or an older daemon) dims it…" |
+| M11 | the ask detail gets `numberOfLines={3}` | **RED** — wiring "the ask's detail is never cut to a line count" |
+| M12 | `App.tsx` run route opens with `{reopen:true}` | **RED** — wiring "it attaches through RUNTIMES, never with `reopen`" |
+
+**Narrow gate (mine).** `bun test` on the touched files (`hub-actions`, `hub-session`,
+`permission-sheet`, `routes`, `workflow-morph-skeleton`, `workflow-runs-controller`,
+`workflow-run-controller`, `workflow-screens-wiring`, `workflow-list-graph`): **233 pass, 0 fail**;
+plus 22 existing source-reading guard files over `App.tsx`/screens/hub (`hub-*-wiring`,
+`native-sheets-wiring`, `session-screen`, `sheet-plan`, `motion-literals`, `e2e-shard`, …): **592 pass,
+0 fail**. `tsc -p apps/mobile --noEmit`: clean. `bunx biome check` on the 20 changed/new files: clean.
+No protocol change → no `protocol.json` regeneration, no `protocol.d/` note.
+
+**NOT done (PARTIAL) — the e2e flow + seed (P1–P6 shots).** Not started: `e2e/seed.ts`
+`startWorkflow` (write `demo.yaml` under `<serveCwd>/${PROJECT_PATHS.workflows}` with an `agent`
+step on the mock model, a `run` step `echo ok`, an `approve` step; start it through the seed's own
+`RemoteClient`), a flow file, and its registration in `e2e/run.ts` (the flow list at `:1849` and
+the env-id map at `:1968`). **Number drift:** the plan's `42-workflow-shots` is taken
+(`42-native-sheets-*`, `43-native-sheets-lock`): use `44-workflow-shots`. Exact next step: read
+`e2e/run.ts` around `:1840-1980` for how `42-native-sheets-shots` gets its seeded id, add
+`startWorkflow` to `seed.ts`, then the flow (hub → Workflows → run → cards → approve card → Allow
+once). Also unverified without the simulator: whether the Session screen's native Permission sheet
+is pushed over a `WorkflowRun` route on top of it (both answer through the same sheet, so the result
+is consistent either way, but the visual must be checked in that run).
+
+**Known limits (below the bar).** A card tap inside the sheet's 400 ms age guard is ignored and
+reads "That request is no longer waiting" (the sheet returns one `ignored` for both); the screen
+could dim the buttons while `armedInMs > 0`.
+
 ## Review
 
 ### Owner answers (2026-11-23)

@@ -43,6 +43,8 @@ const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   // for it that is not a framed window (owner Q1: glyph A, a bare `>_`).
   commands: "terminal",
   scheduled: "clock",
+  // The computer's workflow runs (docs/feat/workflows-ui.md D4).
+  workflows: "list.bullet",
   dictate: "mic",
   new: "square.and.pencil",
   more: "ellipsis",

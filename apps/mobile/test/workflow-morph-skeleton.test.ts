@@ -265,14 +265,16 @@ describe("the skeleton holds the LOADED layout (`no reflow`)", () => {
     // The one place the rows are decided: `detailBlocks`. A skeleton that guessed
     // its own count would show five bars for a six-row detail and reflow on load.
     expect(view.kv.map(([k]) => k)).toEqual([
-      "Stato",
-      "Tipo",
-      "Modello",
-      "Dove",
-      "Tentativi",
-      "Giro",
-      "Durata",
+      "State",
+      "Kind",
+      "Model",
+      "Where",
+      "Attempts",
+      "Round",
+      "Duration",
     ]);
+    // English, like the rest of the app (owner, docs/feat/workflows-ui.md Q3).
+    expect(view.kv.find(([k]) => k === "Round")?.[1]).toMatch(/^\d+ of \d+$/);
     expect(
       skeletonBars(view, width, false).filter((b) => b.key.startsWith("bar-kv-")),
     ).toHaveLength(7);
@@ -287,7 +289,7 @@ describe("the skeleton holds the LOADED layout (`no reflow`)", () => {
     );
     // No model, no round, no duration, no attempt, no reason, no actions — but
     // WHERE it runs is always known and always worth a row.
-    expect(bare.kv.map(([k]) => k)).toEqual(["Stato", "Tipo", "Dove"]);
+    expect(bare.kv.map(([k]) => k)).toEqual(["State", "Kind", "Where"]);
     expect(bare.log).toHaveLength(0);
     expect(bare.actions).toBe(0);
     // And no action row is drawn for it.

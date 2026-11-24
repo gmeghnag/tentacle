@@ -259,6 +259,13 @@ export interface SessionScreenProps {
    * unrelated render, which Step 0b proved stale.
    */
   readonly locked?: boolean;
+  /**
+   * The hub's Workflows item (docs/feat/workflows-ui.md D4): opens the computer's
+   * run list. Absent: no item (P6).
+   */
+  readonly onOpenWorkflows?: () => void;
+  /** Its badge / dim reason (`workflowsHub`); absent while the list is unknown. */
+  readonly workflowsHub?: { readonly needYou: number; readonly empty: string | null };
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -298,6 +305,8 @@ export function SessionScreen({
   computerId,
   sessionId,
   locked = false,
+  onOpenWorkflows,
+  workflowsHub,
 }: SessionScreenProps): JSX.Element {
   // The perf trace (docs/fix/mobile-fan-jank-device.md): render start → commit.
   const renderStart = PERF.now();
@@ -1170,6 +1179,7 @@ export function SessionScreen({
     activityEmpty: activityVm.nothingRunning,
     // My compaction runs: the hub's Stop cancels it (mobile-hub-commands C2 14).
     compacting: state.slot?.kind === "compacting",
+    ...(workflowsHub === undefined ? {} : { workflows: workflowsHub }),
     schedules: { rows: state.schedules, now: activityNow },
     // The Tools item's own figures, from the sheet's OWN summary (one source,
     // D1/D3): unknown until the controller has pulled both lists.
@@ -1193,6 +1203,7 @@ export function SessionScreen({
     ...(info === null ? {} : { tools: openTools }),
     commands: openCommands,
     scheduled: openScheduled,
+    ...(onOpenWorkflows === undefined ? {} : { workflows: onOpenWorkflows }),
     ...(onOpenDrawer === undefined ? {} : { sessions: onOpenDrawer }),
     ...(onNewSession === undefined ? {} : { new: onNewSession }),
     ...(onOpenArtifacts === undefined ? {} : { artifacts: () => onOpenArtifacts("hub") }),

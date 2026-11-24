@@ -187,6 +187,8 @@ import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
+import { WorkflowRunScreen } from "./src/screens/WorkflowRun.tsx";
+import { WorkflowRunsScreen } from "./src/screens/WorkflowRuns.tsx";
 import {
   KEYCHAIN_ACCESSIBLE,
   KEYCHAIN_STORE,
@@ -228,6 +230,17 @@ import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
 import { AppFontContext, Text } from "./src/ui/Text.tsx";
 import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
 import type { VoiceSettings } from "./src/voice-settings-store.ts";
+import {
+  type RunMode,
+  type RunState,
+  askSourceFromSheet,
+  createWorkflowRunController,
+} from "./src/workflow-run-controller.ts";
+import {
+  type RunsState,
+  createWorkflowRunsController,
+  workflowsHub,
+} from "./src/workflow-runs-controller.ts";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
 
@@ -347,6 +360,62 @@ const RUNTIMES = createSessionRuntimes<RemoteClient, SendableHandle>({
         }) as SendableHandle,
     }),
 });
+
+/**
+ * The Session screens that are up, by `sessionKey` (docs/feat/workflows-ui.md D4):
+ * a workflow run screen answers its approve asks through THAT screen's permission
+ * sheet (`answerFor`) — the one requester on the client's one broker — never a
+ * second one. Absent → the run screen has no buttons and offers the session.
+ */
+const SESSION_SCREENS = new Map<string, SessionScreenController>();
+
+/** The run screen's graph ⇄ cards choice, kept for the app's life (D4). */
+let WORKFLOW_RUN_MODE: RunMode = "graph";
+
+/**
+ * The computer's workflow runs (`workflow-runs-controller.ts`), read while the
+ * calling screen is mounted. Wiring only: every rule is the controller's.
+ */
+function useWorkflowRuns(computerId: string): { state: RunsState; pull: () => void } {
+  const [state, setState] = useState<RunsState>({ kind: "loading", runs: [], offline: null });
+  const pullRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    let live = true;
+    let controller: ReturnType<typeof createWorkflowRunsController> | null = null;
+    void LINKS.get(computerId).then(
+      (link) => {
+        if (!live) {
+          return;
+        }
+        controller = createWorkflowRunsController({
+          load: () => link.client.workflowList(),
+          onNotice: (listener) => link.client.onSessionWorkflows(() => listener()),
+          schedule: (fn, ms) => {
+            const timer = setTimeout(fn, ms);
+            return { cancel: () => clearTimeout(timer) };
+          },
+          onChange: (next) => {
+            if (live) {
+              setState(next);
+            }
+          },
+        });
+        pullRef.current = () => controller?.pull();
+        controller.focus();
+      },
+      (caught: unknown) => {
+        if (live) {
+          setState({ kind: "error", runs: [], offline: null, error: errorText(caught) });
+        }
+      },
+    );
+    return () => {
+      live = false;
+      controller?.dispose();
+    };
+  }, [computerId]);
+  return { state, pull: () => pullRef.current() };
+}
 
 /**
  * One outbox per COMPUTER (13d): its file, its driver and its drafts, kept for
@@ -1759,6 +1828,7 @@ function SessionRoute({
   locked,
   onOpenArtifacts,
   onNewSession,
+  onOpenWorkflows,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -1766,6 +1836,8 @@ function SessionRoute({
   readonly title: string;
   readonly archived: boolean;
   readonly focus: boolean;
+  /** The hub's Workflows item: the computer's run list (docs/feat/workflows-ui.md D4). */
+  readonly onOpenWorkflows: () => void;
   /** The tapped row's working folder (`SessionRoute.cwd`), for the header. */
   readonly cwd: string | undefined;
   readonly onOpenDrawer: () => void;
@@ -1784,6 +1856,22 @@ function SessionRoute({
   const shellRows = useShellRows();
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
+  // The hub's Workflows figure: the computer's runs (D4), read while this screen is up.
+  const workflowRuns = useWorkflowRuns(computerId);
+  const workflowsFigure = workflowsHub(workflowRuns.state);
+  // A run screen answers asks through THIS screen's sheet (`SESSION_SCREENS`).
+  useEffect(() => {
+    if (controller === null) {
+      return;
+    }
+    const key = sessionKey(computerId, sessionId);
+    SESSION_SCREENS.set(key, controller);
+    return () => {
+      if (SESSION_SCREENS.get(key) === controller) {
+        SESSION_SCREENS.delete(key);
+      }
+    };
+  }, [controller, computerId, sessionId]);
 
   useEffect(() => {
     let live = true;
@@ -1914,6 +2002,144 @@ function SessionRoute({
       artifactsSeenKey={sessionKey(computerId, sessionId)}
       onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
       compactShell={shellRows.settings.compactShell}
+      onOpenWorkflows={onOpenWorkflows}
+      {...(workflowsFigure === undefined ? {} : { workflowsHub: workflowsFigure })}
+    />
+  );
+}
+
+/** The computer's workflow runs (docs/feat/workflows-ui.md D4): wiring only. */
+function WorkflowRunsRoute({
+  palette,
+  computerId,
+  name,
+  onBack,
+  onOpen,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly name: string;
+  readonly onBack: () => void;
+  readonly onOpen: (run: {
+    readonly runId: string;
+    readonly sessionId: string;
+    readonly name: string;
+  }) => void;
+}): JSX.Element {
+  const { state, pull } = useWorkflowRuns(computerId);
+  return (
+    <WorkflowRunsScreen
+      palette={palette}
+      computer={name}
+      state={state}
+      now={Date.now()}
+      onBack={onBack}
+      onPull={pull}
+      onOpen={(run) => {
+        if (run.sessionId !== undefined) {
+          onOpen({ runId: run.runId, sessionId: run.sessionId, name: run.name });
+        }
+      }}
+    />
+  );
+}
+
+/**
+ * One workflow run (docs/feat/workflows-ui.md D4): attaches through the SAME
+ * session runtime as the Session screen (never `reopen`), and answers asks only
+ * through the Session screen's own sheet when that screen is up. Wiring only.
+ */
+function WorkflowRunRoute({
+  palette,
+  computerId,
+  sessionId,
+  runId,
+  title,
+  onBack,
+  onOpenSession,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly title: string;
+  readonly onBack: () => void;
+  readonly onOpenSession: () => void;
+}): JSX.Element {
+  const [state, setState] = useState<RunState | null>(null);
+  const [controller, setController] = useState<ReturnType<
+    typeof createWorkflowRunController
+  > | null>(null);
+  useEffect(() => {
+    let live = true;
+    let created: ReturnType<typeof createWorkflowRunController> | null = null;
+    void LINKS.get(computerId).then((link) => {
+      if (!live) {
+        return;
+      }
+      const runtime = RUNTIMES.controller(link.client);
+      const screen = SESSION_SCREENS.get(sessionKey(computerId, sessionId));
+      created = createWorkflowRunController({
+        runId,
+        sessionId,
+        // The Session screen underneath follows it: never detach it from there.
+        borrowed: runtime.follows(sessionId),
+        open: async (id) => {
+          const result = await runtime.open(id);
+          // `newSession` hands back a `RemoteSession` (typed as the screen's subset).
+          return result.ok
+            ? { ok: true, session: result.session as unknown as RemoteSession }
+            : result;
+        },
+        leave: () => void runtime.leave(sessionId),
+        asks:
+          screen === undefined
+            ? null
+            : askSourceFromSheet({
+                view: () => screen.sheet().view(),
+                answerFor: (requestId, optionId) => screen.sheet().answerFor(requestId, optionId),
+                subscribe: (listener) => screen.subscribe(() => listener()),
+              }),
+        mode: {
+          get: () => WORKFLOW_RUN_MODE,
+          set: (mode) => {
+            WORKFLOW_RUN_MODE = mode;
+          },
+        },
+        onChange: () => {
+          if (live && created !== null) {
+            setState(created.state());
+          }
+        },
+      });
+      setController(created);
+      setState(created.state());
+      created.start();
+    });
+    return () => {
+      live = false;
+      created?.dispose();
+    };
+  }, [computerId, sessionId, runId]);
+  if (controller === null || state === null) {
+    return (
+      <View testID="workflow-run" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ActivityIndicator color={palette.accent} />
+      </View>
+    );
+  }
+  return (
+    <WorkflowRunScreen
+      palette={palette}
+      title={title}
+      state={state}
+      onBack={onBack}
+      onMode={(mode) => controller.setMode(mode)}
+      onAnswer={(stepId, optionId) => controller.answer(stepId, optionId)}
+      onStop={() => void controller.stop()}
+      onResume={() => void controller.resume()}
+      onRerun={(stepId) => void controller.rerun(stepId)}
+      onOpenSession={onOpenSession}
     />
   );
 }
@@ -2811,6 +3037,13 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     archived={route.params.archived}
                     focus={route.params.focus === true}
                     cwd={route.params.cwd}
+                    onOpenWorkflows={() =>
+                      navigation.navigate("WorkflowRuns", {
+                        computerId: route.params.computerId,
+                        name: RECORDS.get(route.params.computerId)?.name ?? "",
+                        sessionId: route.params.sessionId,
+                      })
+                    }
                     onOpenArtifacts={(from, open) =>
                       openArtifactGallery(navigation, {
                         computerId: route.params.computerId,
@@ -2850,6 +3083,50 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                   void shareCachedCopy(fileUri);
                 }}
                 onRenderError={(fields) => APP_LOG.log("error", "client-error", fields)}
+              />
+            )}
+          </Stack.Screen>
+          {/* Workflow runs (docs/feat/workflows-ui.md D4): two plain PUSH screens —
+              never the `Sheet` route, never a `<Modal>`. */}
+          <Stack.Screen name="WorkflowRuns" options={{ title: "Workflows", headerShown: false }}>
+            {({ navigation, route }) => (
+              <WorkflowRunsRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                name={route.params.name}
+                onBack={() => navigation.goBack()}
+                onOpen={(run) =>
+                  navigation.navigate("WorkflowRun", {
+                    computerId: route.params.computerId,
+                    sessionId: run.sessionId,
+                    runId: run.runId,
+                    title: run.name,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen
+            name="WorkflowRun"
+            options={({ route }) => ({ title: route.params.title, headerShown: false })}
+          >
+            {({ navigation, route }) => (
+              <WorkflowRunRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                runId={route.params.runId}
+                title={route.params.title}
+                onBack={() => navigation.goBack()}
+                onOpenSession={() =>
+                  navigation.navigate("Session", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    title: route.params.title,
+                    // From a live run: never the archived path (Owner Q4).
+                    archived: false,
+                  })
+                }
               />
             )}
           </Stack.Screen>
