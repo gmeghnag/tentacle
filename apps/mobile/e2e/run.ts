@@ -511,6 +511,11 @@ async function main(): Promise<number> {
     await writeFile(join(runDir, "project", "q3-report.pdf"), reportPdf());
     await writeFile(join(runDir, "project", "hero.png"), pngFixture(1280, 720));
   }
+  await mkdir(join(runDir, ".tentacle", "workflows"), { recursive: true });
+  await writeFile(
+    join(runDir, ".tentacle", "workflows", "demo-note.yaml"),
+    await readFile(join(REPO, "apps", "mobile", "e2e", "fixtures", "demo-note.yaml"), "utf8"),
+  );
   // The mock model runs in THIS process: no extra children to reap.
   const { startMockModel } = await import("./mock-model.ts");
   const mock = startMockModel({ holdMs: 120_000 });
@@ -1828,7 +1833,7 @@ export const FLOWS: readonly string[] = [
   "33-hub",
   // docs/feat/mobile-e2e-gate.md: one flow per hub item (fan + More), each
   // asserting the item opens what it names — on a session of its own.
-  "34-hub-attach",
+  "34-hub-workflows",
   "34-hub-activity",
   "34-hub-artifacts",
   "34-hub-tools",
@@ -1951,7 +1956,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "32-chart-interact": "CHART2_ID",
   "33-hub": "HUB_ID",
   // docs/feat/mobile-e2e-gate.md: ONE variable, a fresh session per flow.
-  "34-hub-attach": "HUBITEM_ID",
+  "34-hub-workflows": "HUBITEM_ID",
   "34-hub-activity": "HUBITEM_ID",
   "34-hub-artifacts": "HUBITEM_ID",
   "34-hub-tools": "HUBITEM_ID",

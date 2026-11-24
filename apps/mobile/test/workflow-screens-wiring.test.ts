@@ -23,6 +23,7 @@ const APP = code(read("App.tsx"));
 const RUN = code(read("src", "screens", "WorkflowRun.tsx"));
 const RUNS = code(read("src", "screens", "WorkflowRuns.tsx"));
 const SESSION = code(read("src", "screens", "SessionScreen.tsx"));
+const CONTROLLER = code(read("src", "session-screen-controller.ts"));
 
 /** `src` from `from` to the first `to` after it. */
 const between = (src: string, from: string, to: string): string => {
@@ -83,6 +84,23 @@ describe("the run route reuses the ONE session path and the ONE sheet", () => {
 describe("the hub entry", () => {
   test("the Session screen offers Workflows only with its callback (P6) and feeds its figure", () => {
     expect(SESSION).toContain("workflows: onOpenWorkflows");
-    expect(SESSION).toContain("workflows: workflowsHub");
+    expect(SESSION).toContain("workflows: workflowsFigure");
+  });
+
+  test("the figure is the runs AND the catalogue, folded by ONE pure function (fix D6)", () => {
+    const fold = between(SESSION, "const workflowsFigure = workflowsHub(", ");");
+    expect(fold).toContain("catalogueFigure(state.catalogue)");
+    expect(fold).toContain("workflowsRuns");
+    // The catalogue is the CONTROLLER's read, not a second one on the render path.
+    expect(SESSION).not.toContain("workflowCatalogue()");
+    expect(CONTROLLER).toContain("session?.workflowCatalogue?.bind(session)");
+    // Asked ONCE per attach, beside the artifacts read (never on render).
+    expect(CONTROLLER).toContain("void readCatalogue();");
+  });
+
+  test("the hub no longer offers Attach: the composer's `+` is the one chooser", () => {
+    expect(SESSION).not.toContain("attach: openAttach");
+    // …and `openAttach` is still the composer's photo button.
+    expect(SESSION).toContain("onPhoto={openAttach}");
   });
 });

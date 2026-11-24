@@ -522,4 +522,100 @@ orchestrator's script, not by this executor; `bunx tsc --noEmit` (repo root, who
 
 *— claude-opus-5-5 (tentacle executor), 2026-11-24*
 
+### Slice S2 — Hub: Workflows in Attach's slot, Attach gone, dim by catalogue
+
+Started by DeepSeek (stopped by the watchdog at 252 tool calls, edits left in the tree); checked,
+corrected and finished by claude-opus-5-5. Everything below is the final tree.
+
+**Load-bearing check re-run first** (`lb.ts`, unchanged): `review keys after parse:
+id,kind,where,state,attempt,round` · `catalogue step keys: id,kind,where` — S4's premise still holds;
+S2 does not depend on it. S2's own premise (P6, defect 4) re-checked on the HEAD source
+(`.tentacle/tmp/workflows-ux/s2-lb.ts`): `workflowsHub` took only the runs (arity 1) and dimmed
+`No workflow runs` with 0 runs whatever the project held; the idle fan started with `attach`.
+
+**As built, in order**
+
+1. `apps/mobile/src/hub-actions.ts` — `attach` removed from `HubEntryId`, `LABELS`, `holds`, and
+   `HubContext.editable` (its only reader); `CANONICAL` starts with `workflows`;
+   `NO_WORKFLOW_RUNS` → `NO_WORKFLOWS_HERE = "No workflows in this project"`.
+2. `hub-session.ts` — `attach` out of `ENTRY_IDS`, `editable` out of `hubContextOf`.
+3. `workflow-runs-controller.ts` — pure `catalogueFigure(answer)` → `{known, count, unavailable}`
+   (`null`/`{unsupported}` = unknown; count = every listed row) and `workflowsHub(runs, catalogue)`
+   with the D6 rule: a run → open; `unavailable` → dimmed with its text; known-empty → dimmed
+   `No workflows in this project`; unknown → never dimmed. `unsupported` runs keep `Update tentacle`.
+4. `ui/Icon.tsx` + `ui/HubFan.tsx` — `point.topleft.down.to.point.bottomright.curvepath` added and
+   used as the Workflows glyph; `attach`'s glyph gone.
+5. `session-screen-controller.ts` — `SendableHandle.workflowCatalogue?()` and
+   `SessionScreenState.catalogue` (raw answer, `null` = unknown); `readCatalogue()` single-flight,
+   called once per attach beside `refreshArtifacts()`; a failed read leaves `null`.
+6. `screens/SessionScreen.tsx` — folds `workflowsHub(workflowsRuns, catalogueFigure(state.catalogue))`
+   into `hubContextOf`; the hub's `attach: openAttach` entry is gone (the composer's `onPhoto` keeps
+   `openAttach`).
+7. `App.tsx` — passes `workflowsRuns={workflowRuns.state}` instead of the folded figure.
+8. e2e: `34-hub-attach.yaml` deleted → `34-hub-workflows.yaml` (fan has Workflows, no Attach; tap →
+   run list with its empty state → Start → `workflow-start`); `33-hub.yaml`'s Attach step now checks
+   Workflows is in the fan and closes on the scrim; `run.ts` seeds
+   `<runDir>/.tentacle/workflows/demo-note.yaml` (the serve cwd = the session cwd, `run.ts:561-588`)
+   from the new fixture `e2e/fixtures/demo-note.yaml` (validated: `validateWorkflow` → `ok:true`).
+
+**Drift from the Implementation (and why)**
+
+- **The catalogue read lives in `session-screen-controller.ts`, not in `SessionScreen.tsx`.** D6 says
+  "beside the session-info read (`SessionScreen.tsx:1186`)"; that read is the controller's
+  (`controller.refreshInfo()`), and §7 keeps I/O and branching out of components. The screen only
+  folds two facts through the pure functions. Hence two files not in S2's list: the controller and
+  a new test, `apps/mobile/test/session-screen-catalogue.test.ts`.
+- **`App.tsx` and `e2e/run.ts` + `e2e/fixtures/demo-note.yaml` touched** (not in the Files row).
+  App: the fold needs runs AND catalogue in one place, and the catalogue is the screen's, so the runs
+  go down as a prop. run.ts/fixture: without a workflow file in the e2e project, the new flow's
+  item would be dimmed and its tap a no-op.
+- **`HubContext.editable` removed** — Attach was its only reader (dead field otherwise).
+- **Corrected from DeepSeek's draft:** (a) `catalogueFigure` counted only `ok` rows; the plan says
+  "lists ≥ 1 workflow", and a project holding only a broken YAML would be dimmed "No workflows in
+  this project" — false, the start screen is where its errors show. Now every row counts (test
+  updated, mutation below). (b) `34-hub-workflows.yaml` asserted `workflow-runs-empty` NOT visible
+  — wrong: with no run the list shows exactly that empty state (`WorkflowRuns.tsx:156-158`); now
+  asserted visible.
+- **Changelog is `changelog.d/workflows-ux.fixed.md`, not `.changed.md`**: S1 already holds
+  `.changed.md`, and a fragment is one file = one bullet (`docs/feat/changelog-fragments.md:139`).
+  S2 fixes defect 4, so `fixed` fits. **S7 plans `.fixed.md` too** — it must fold its bullet into
+  this one (one bullet), not add a second.
+
+**Tests (red first)**
+
+The HEAD source cannot run the new test files at all (their imports `NO_WORKFLOWS_HERE`,
+`catalogueFigure` do not exist there — a link error, not an assertion), so red-on-the-property is
+shown by putting HEAD's exact logic back into the new code (M1 = HEAD's order, M2 = HEAD's dim rule):
+
+| Mutation | Red |
+|---|---|
+| M1 `workflows` back after `scheduled` in `CANONICAL` (HEAD's order) | `hub-actions.test.ts`: *with every entry the idle fan is Workflows · Activity · Artifacts · Tools · Commands · More* (added here — the plan's exact S2 test) and *it holds the fan's first slot* — 2 fail |
+| M2 `workflowsHub` dims every 0-run case (HEAD's rule, the plan's "drop the catalogue term") | 4 fail: *no run but a workflow FILE → NOT dimmed*, *an UNKNOWN catalogue never dims*, and in `session-screen-catalogue.test.ts` *the hub's item is then NOT dimmed…*, *a FAILED read stays UNKNOWN* |
+| M3 dim on `count === 0` without `known` | 2 fail (the two UNKNOWN tests) |
+| M4 `readCatalogue()` not called at attach | 2 fail in `session-screen-catalogue.test.ts` (*the attach reads it ONCE…*, *a project with no workflow file IS dimmed*) |
+| M5 count only `ok` rows (DeepSeek's draft) | 1 fail: *every listed file counts — a broken one too* |
+
+All reverted (`rg MUTATION apps/mobile/src` empty). Attach's absence: `hub-actions.test.ts`
+*Attach is gone from the hub* passes an `attach` entry in and asserts it is never offered; the
+wiring test asserts `attach: openAttach` is gone from `SessionScreen` and `onPhoto={openAttach}` stays.
+
+Verification (narrow, foreground):
+
+```
+bun test (apps/mobile) hub-actions hub-session hub-opacity workflow-runs-controller
+  workflow-screens-wiring session-screen-catalogue   → 190 pass, 0 fail
+bun test (apps/mobile) e2e-flows e2e-gate e2e-shard e2e-preflight e2e-escape-probes
+  session-info-reveal drawer-new-session              → 222 pass, 0 fail
+bun test scripts/test/changelog-guard.test.ts scripts/test/changelog.test.ts → 21 pass
+bunx biome check <15 changed files>                   → No fixes applied
+bunx tsc -p apps/mobile                               → clean
+```
+
+No protocol change (no `protocol.d/` note, `protocol.json` untouched).
+
+**Unverified here (one line):** the Maestro flows `33-hub` / `34-hub-workflows` were not run (they need
+the simulator) — verify with the mobile e2e gate on iOS 18 + 26 before merge.
+
+*— claude-opus-5-5 (tentacle executor), 2026-11-24*
+
 ## Review

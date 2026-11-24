@@ -4,12 +4,20 @@
  * leave on screen, and the figure the hub badges. Pure, fake client and clock.
  */
 import { describe, expect, test } from "bun:test";
-import type { WorkflowListResult, WorkflowListRow } from "@tentacle/protocol";
-import { NO_WORKFLOW_RUNS } from "../src/hub-actions.ts";
+import type {
+  WorkflowCatalogueResult,
+  WorkflowDefRow,
+  WorkflowListResult,
+  WorkflowListRow,
+} from "@tentacle/protocol";
+import { NO_WORKFLOWS_HERE } from "../src/hub-actions.ts";
 import {
+  type CatalogueFigure,
   RUNS_DEBOUNCE_MS,
+  type RunsState,
   WORKFLOWS_OFFLINE,
   WORKFLOWS_UPDATE_TENTACLE,
+  catalogueFigure,
   createWorkflowRunsController,
   workflowsHub,
 } from "../src/workflow-runs-controller.ts";
@@ -202,20 +210,58 @@ describe("what a failure leaves on screen", () => {
   });
 });
 
-describe("workflowsHub: the hub's figure (D4)", () => {
+describe("workflowsHub: the hub's figure (D4, D6)", () => {
+  const READY_EMPTY: RunsState = { kind: "ready", runs: [], offline: null };
+  const ONE_FILE: CatalogueFigure = { known: true, count: 1, unavailable: null };
+  const NO_FILE: CatalogueFigure = { known: true, count: 0, unavailable: null };
+  const UNKNOWN: CatalogueFigure = { known: false, count: 0, unavailable: null };
+
   test("unknown (loading, error) is undefined — the item is neither dimmed nor badged", () => {
     expect(workflowsHub({ kind: "loading", runs: [], offline: null })).toBeUndefined();
     expect(workflowsHub({ kind: "error", runs: [], offline: null, error: "x" })).toBeUndefined();
   });
 
-  test("no run → dimmed `No workflow runs`; an older daemon → dimmed `Update tentacle`", () => {
-    expect(workflowsHub({ kind: "ready", runs: [], offline: null })).toEqual({
-      needYou: 0,
-      empty: NO_WORKFLOW_RUNS,
-    });
+  test("an older daemon → dimmed `Update tentacle` (a version is not an empty project)", () => {
     expect(workflowsHub({ kind: "unsupported", runs: [], offline: null })).toEqual({
       needYou: 0,
       empty: WORKFLOWS_UPDATE_TENTACLE,
+    });
+    // The catalogue cannot rescue it: a daemon that has no run list cannot start one.
+    expect(workflowsHub({ kind: "unsupported", runs: [], offline: null }, ONE_FILE)).toEqual({
+      needYou: 0,
+      empty: WORKFLOWS_UPDATE_TENTACLE,
+    });
+  });
+
+  test("no run but a workflow FILE → NOT dimmed (defect 4: the first start starts here)", () => {
+    expect(workflowsHub(READY_EMPTY, ONE_FILE)).toEqual({ needYou: 0, empty: null });
+  });
+
+  test("no run and a catalogue known to be EMPTY → dimmed `No workflows in this project`", () => {
+    expect(NO_WORKFLOWS_HERE).toBe("No workflows in this project");
+    expect(workflowsHub(READY_EMPTY, NO_FILE)).toEqual({ needYou: 0, empty: NO_WORKFLOWS_HERE });
+  });
+
+  test("an UNKNOWN catalogue never dims (not read, older daemon, a failed read)", () => {
+    expect(workflowsHub(READY_EMPTY, UNKNOWN)).toEqual({ needYou: 0, empty: null });
+    // The screen before its first attach: no catalogue at all.
+    expect(workflowsHub(READY_EMPTY)).toEqual({ needYou: 0, empty: null });
+  });
+
+  test("a catalogue this session cannot run says so (`unavailable`, a pod's daemon)", () => {
+    const pod: CatalogueFigure = {
+      known: true,
+      count: 0,
+      unavailable: WORKFLOWS_OFFLINE,
+    };
+    expect(workflowsHub(READY_EMPTY, pod)).toEqual({ needYou: 0, empty: WORKFLOWS_OFFLINE });
+  });
+
+  test("a run is something to open whatever the catalogue says", () => {
+    const h = harness([{ runs: [row()] }]);
+    h.controller.focus();
+    return h.settle().then(() => {
+      expect(workflowsHub(h.controller.state(), NO_FILE)).toEqual({ needYou: 0, empty: null });
     });
   });
 
@@ -231,6 +277,53 @@ describe("workflowsHub: the hub's figure (D4)", () => {
     ]);
     h.controller.focus();
     await h.settle();
-    expect(workflowsHub(h.controller.state())).toEqual({ needYou: 1, empty: null });
+    expect(workflowsHub(h.controller.state(), NO_FILE)).toEqual({ needYou: 1, empty: null });
+  });
+});
+
+describe("catalogueFigure: the catalogue as the hub's fact (D6)", () => {
+  const answer = (over: Partial<WorkflowCatalogueResult> = {}): WorkflowCatalogueResult => ({
+    workflows: [],
+    dir: "/p",
+    ...over,
+  });
+  const def = (name: string, ok: boolean): WorkflowDefRow => ({
+    name,
+    path: `.tentacle/workflows/${name}.yaml`,
+    ok,
+    ...(ok ? { hash: "a".repeat(64) } : { errors: ["bad yaml"] }),
+  });
+
+  test("not read, an older daemon and a failed read are all UNKNOWN", () => {
+    expect(catalogueFigure(null)).toEqual({ known: false, count: 0, unavailable: null });
+    expect(catalogueFigure({ unsupported: true })).toEqual({
+      known: false,
+      count: 0,
+      unavailable: null,
+    });
+  });
+
+  test("a read folder is KNOWN, and every listed file counts — a broken one too", () => {
+    expect(catalogueFigure(answer())).toEqual({ known: true, count: 0, unavailable: null });
+    expect(catalogueFigure(answer({ workflows: [def("demo-note", true)] }))).toMatchObject({
+      known: true,
+      count: 1,
+    });
+    // A broken YAML is still a workflow in this project: the start screen shows
+    // its errors, so the item must open — never "No workflows in this project".
+    const broken = catalogueFigure(answer({ workflows: [def("a", false), def("b", false)] }));
+    expect(broken).toEqual({ known: true, count: 2, unavailable: null });
+    expect(workflowsHub({ kind: "ready", runs: [], offline: null }, broken)).toEqual({
+      needYou: 0,
+      empty: null,
+    });
+  });
+
+  test("`unavailable` keeps its own text (a pod's daemon), never `no workflows`", () => {
+    expect(catalogueFigure(answer({ unavailable: "workflows run only on a laptop" }))).toEqual({
+      known: true,
+      count: 0,
+      unavailable: "workflows run only on a laptop",
+    });
   });
 });

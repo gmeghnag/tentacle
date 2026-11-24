@@ -64,6 +64,8 @@ export type IconName =
   | "doc.text"
   | "doc.plaintext"
   | "chart.bar.xaxis"
+  /** The hub's Workflows item (docs/fix/workflows-ux.md D6): owner, 2026-11-24. */
+  | "point.topleft.down.to.point.bottomright.curvepath"
   | "doc";
 
 export interface IconProps {

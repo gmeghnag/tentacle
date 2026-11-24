@@ -16,8 +16,8 @@
  * - Nothing is read while the screen is away (`blur`), and nothing lands after
  *   `dispose`.
  */
-import type { WorkflowListResult } from "@tentacle/protocol";
-import { NO_WORKFLOW_RUNS } from "./hub-actions.ts";
+import type { WorkflowCatalogueResult, WorkflowListResult } from "@tentacle/protocol";
+import { NO_WORKFLOWS_HERE } from "./hub-actions.ts";
 import { type ElencoRun, fromListRow, needsUserCount } from "./workflow-list.ts";
 
 /** A burst of `workflows` frames is one read, this long after the last. */
@@ -167,13 +167,53 @@ export function createWorkflowRunsController(deps: WorkflowRunsDeps): WorkflowRu
 }
 
 /**
- * The hub's Workflows figure (D4): how many live runs wait on the person, and
- * why there is nothing to open. `undefined` while the list is not known (still
+ * The project's workflow files, as the hub's dim rule needs them
+ * (docs/fix/workflows-ux.md D6): how many it can start, and the reason the
+ * session cannot run workflows at all. `known:false` — not read yet, an older
+ * daemon, a failed read — is UNKNOWN, which never dims the item whose tap is
+ * what reads the list (the Tools D3 rule).
+ */
+export interface CatalogueFigure {
+  readonly known: boolean;
+  /**
+   * Every listed file, broken ones included (plan D6: "the catalogue lists ≥ 1
+   * workflow"): a broken YAML is still a workflow in this project, and the start
+   * screen is where its errors are read — "No workflows in this project" would lie.
+   */
+  readonly count: number;
+  /** `unavailable`'s own text (a pod's daemon), else null. */
+  readonly unavailable: string | null;
+}
+
+/** The catalogue answer as the hub's fact, folded once so the rule never re-derives it. */
+export function catalogueFigure(
+  answer: WorkflowCatalogueResult | { unsupported: true } | null,
+): CatalogueFigure {
+  // An older daemon is UNKNOWN, not empty: `Update tentacle` is the run list's
+  // own line (`workflowsHub`), and a project it cannot read must not be called
+  // empty because of a version.
+  if (answer === null || "unsupported" in answer) {
+    return { known: false, count: 0, unavailable: null };
+  }
+  if (answer.unavailable !== undefined) {
+    return { known: true, count: 0, unavailable: answer.unavailable };
+  }
+  return { known: true, count: answer.workflows.length, unavailable: null };
+}
+
+/**
+ * The hub's Workflows figure (D4, D6): how many live runs wait on the person, and
+ * why there is nothing to open. `undefined` while the run list is not known (still
  * loading, or the first read failed): an unknown list never dims the item whose
  * tap is what reads it.
+ *
+ * The dim rule is the pair's, never the run list's alone (fix D6): a project with
+ * a workflow FILE has something to open even with no run — that screen is where
+ * starting one lives — so only "no run AND no workflow" dims the item.
  */
 export function workflowsHub(
   state: RunsState,
+  catalogue: CatalogueFigure | null = null,
 ): { readonly needYou: number; readonly empty: string | null } | undefined {
   if (state.kind === "unsupported") {
     return { needYou: 0, empty: WORKFLOWS_UPDATE_TENTACLE };
@@ -181,8 +221,16 @@ export function workflowsHub(
   if (state.kind !== "ready") {
     return undefined;
   }
-  return {
-    needYou: needsUserCount(state.runs),
-    empty: state.runs.length === 0 ? NO_WORKFLOW_RUNS : null,
-  };
+  const needYou = needsUserCount(state.runs);
+  if (state.runs.length > 0) {
+    return { needYou, empty: null };
+  }
+  if (catalogue?.unavailable != null) {
+    return { needYou, empty: catalogue.unavailable };
+  }
+  if (catalogue?.known === true && catalogue.count === 0) {
+    return { needYou, empty: NO_WORKFLOWS_HERE };
+  }
+  // A workflow file to start, or a catalogue nobody has read: offered, never dimmed.
+  return { needYou, empty: null };
 }

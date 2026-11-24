@@ -196,6 +196,7 @@ import {
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
 import type { VoiceSettings } from "../voice-settings-store.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
+import { type RunsState, catalogueFigure, workflowsHub } from "../workflow-runs-controller.ts";
 import { ActivitySheet } from "./ActivitySheet.tsx";
 import { CommandsSheet } from "./CommandsSheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
@@ -264,8 +265,13 @@ export interface SessionScreenProps {
    * run list. Absent: no item (P6).
    */
   readonly onOpenWorkflows?: () => void;
-  /** Its badge / dim reason (`workflowsHub`); absent while the list is unknown. */
-  readonly workflowsHub?: { readonly needYou: number; readonly empty: string | null };
+  /**
+   * The computer's workflow runs (`RunsState`, docs/feat/workflows-ui.md D4), or
+   * absent while the screen has none. The screen folds it WITH the project's
+   * catalogue (fix/workflows-ux D6) — both facts live here, and the fold is one
+   * pure function (`workflowsHub`).
+   */
+  readonly workflowsRuns?: RunsState;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -306,7 +312,7 @@ export function SessionScreen({
   sessionId,
   locked = false,
   onOpenWorkflows,
-  workflowsHub,
+  workflowsRuns,
 }: SessionScreenProps): JSX.Element {
   // The perf trace (docs/fix/mobile-fan-jank-device.md): render start → commit.
   const renderStart = PERF.now();
@@ -1155,7 +1161,9 @@ export function SessionScreen({
     void controller.refreshInfo();
   };
   // The hub (docs/feat/mobile-hub.md H3): the attach chooser, shared with the
-  // composer's photo button — one path, not two.
+  // composer's photo button — one path, not two. The hub's fan no longer offers
+  // it (docs/fix/workflows-ux.md D6: the composer `+` already does), so this is
+  // the composer's handler alone now.
   const openAttach = () =>
     Alert.alert("Add an attachment", state.compose.attach.reason ?? undefined, [
       { text: "Cancel", style: "cancel" },
@@ -1170,16 +1178,22 @@ export function SessionScreen({
     ]);
   // What the hub offers is `hub-actions.ts`'s; a missing callback is a missing
   // item (P6). The context is read NOW for the items, and again at a commit.
+  const workflowsFigure = workflowsHub(
+    workflowsRuns ?? { kind: "loading", runs: [], offline: null },
+    catalogueFigure(state.catalogue),
+  );
   const hubCtx = hubContextOf({
     link: state.transcript.link,
     turn: state.transcript.turn,
     ended: state.transcript.closed,
-    editable: state.view.editable,
     dictation: voiceSettings.dictation,
     activityEmpty: activityVm.nothingRunning,
     // My compaction runs: the hub's Stop cancels it (mobile-hub-commands C2 14).
     compacting: state.slot?.kind === "compacting",
-    ...(workflowsHub === undefined ? {} : { workflows: workflowsHub }),
+    // The runs AND the project's catalogue, folded by ONE pure function (fix/
+    // workflows-ux D6). Both are this screen's facts: the controller reads the
+    // catalogue at the attach, `workflowsRuns` comes from the app's own hook.
+    ...(workflowsFigure === undefined ? {} : { workflows: workflowsFigure }),
     schedules: { rows: state.schedules, now: activityNow },
     // The Tools item's own figures, from the sheet's OWN summary (one source,
     // D1/D3): unknown until the controller has pulled both lists.
@@ -1196,7 +1210,6 @@ export function SessionScreen({
   const hubEntries: HubEntries = {
     stop: () => controller.stopTurn(),
     steer: () => setSteerFocus((n) => n + 1),
-    attach: openAttach,
     activity: () => openActivity(),
     info: () => openInfo(),
     // No info port, no Tools: a missing callback is a missing item (P6).

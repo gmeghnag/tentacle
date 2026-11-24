@@ -239,11 +239,7 @@ import {
   askSourceFromSheet,
   createWorkflowRunController,
 } from "./src/workflow-run-controller.ts";
-import {
-  type RunsState,
-  createWorkflowRunsController,
-  workflowsHub,
-} from "./src/workflow-runs-controller.ts";
+import { type RunsState, createWorkflowRunsController } from "./src/workflow-runs-controller.ts";
 import {
   type StartSessionHandle,
   type StartState,
@@ -1866,7 +1862,6 @@ function SessionRoute({
   const [error, setError] = useState<string | undefined>(undefined);
   // The hub's Workflows figure: the computer's runs (D4), read while this screen is up.
   const workflowRuns = useWorkflowRuns(computerId);
-  const workflowsFigure = workflowsHub(workflowRuns.state);
   // A run screen answers asks through THIS screen's sheet (`SESSION_SCREENS`).
   useEffect(() => {
     if (controller === null) {
@@ -2011,7 +2006,7 @@ function SessionRoute({
       onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
       compactShell={shellRows.settings.compactShell}
       onOpenWorkflows={onOpenWorkflows}
-      {...(workflowsFigure === undefined ? {} : { workflowsHub: workflowsFigure })}
+      workflowsRuns={workflowRuns.state}
     />
   );
 }

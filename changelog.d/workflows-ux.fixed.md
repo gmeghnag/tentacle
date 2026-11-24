@@ -1,0 +1,1 @@
+- **Phone hub: Workflows is always reachable, and Attach left the fan.** Workflows takes the disc Attach held (the composer's `+` already opened the same sheet) and is no longer dimmed as "no workflow runs" when the project has a workflow to start — it is dimmed only when there is neither a run nor a workflow file, or when the session genuinely cannot run workflows.

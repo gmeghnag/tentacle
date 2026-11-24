@@ -26,6 +26,7 @@ import type {
   SessionContextResult,
   SessionSkillsResult,
   SubagentRow,
+  WorkflowCatalogueResult,
 } from "@tentacle/protocol";
 import { DomainErrorCode } from "@tentacle/transport";
 import { RpcError } from "@tentacle/transport";
@@ -243,6 +244,14 @@ export interface SendableHandle extends SessionHandle, ActivityHandle, WakeHandl
     meta: ArtifactMeta,
     options?: { readonly signal?: AbortSignal },
   ): Promise<Uint8Array>;
+  /**
+   * The project's workflow files (`RemoteSession.workflowCatalogue`, docs/feat/
+   * workflows-ui.md D6). Read ONCE per screen, at the attach, so the hub's
+   * Workflows item knows whether this project has anything to start (docs/fix/
+   * workflows-ux.md D6). Absent on a fake handle; `{unsupported:true}` from an
+   * older daemon — neither dims the item, which is UNKNOWN, not empty.
+   */
+  workflowCatalogue?(): Promise<WorkflowCatalogueResult | { unsupported: true }>;
 }
 
 /**
@@ -297,6 +306,12 @@ export interface SessionScreenState {
    * until the re-attach settles, so the gesture never looks ignored.
    */
   readonly refreshing: boolean;
+  /**
+   * The project's workflow files as the daemon answered (docs/fix/workflows-ux
+   * D6): read ONCE at the attach, `null` until it answers (and when the read
+   * failed, which is UNKNOWN — never empty). Folded by `catalogueFigure`.
+   */
+  readonly catalogue: WorkflowCatalogueResult | { unsupported: true } | null;
   /**
    * The session's artifacts (docs/feat/model-artifacts.md D9): the list the
    * gallery reads, the per-call join its rows carry, and the phase a screen says
@@ -647,6 +662,16 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let join: ArtifactJoin = EMPTY_JOIN;
   /** The `artifact/list` call in flight: one at a time (a gallery mount + a resync). */
   let joinPending: Promise<void> | null = null;
+  /**
+   * The project's workflow files, as the daemon last answered (docs/fix/
+   * workflows-ux D6): read ONCE at each attach, beside the artifacts read, so
+   * the hub's Workflows item is never dimmed as "no workflows" over a project
+   * that has one. `null` = UNKNOWN (not read yet, or the read failed) — which is
+   * never the same as an empty folder (that is an answer with zero rows).
+   */
+  let catalogue: WorkflowCatalogueResult | { unsupported: true } | null = null;
+  /** The catalogue read in flight: one at a time (a re-attach while it waits). */
+  let cataloguePending: Promise<void> | null = null;
   let draft = "";
   /**
    * The outbox's upload percentages, by item id (feat/mobile-thinking-images S4):
@@ -1196,6 +1221,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       schedules,
       refreshing: pulling,
       artifacts: join,
+      catalogue,
     };
   }
 
@@ -1334,6 +1360,42 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       }
       return read(meta, options);
     });
+  }
+
+  /**
+   * Read the project's workflow files ONCE per screen (docs/fix/workflows-ux
+   * D6): the hub's Workflows item must not be dimmed as "no workflow runs" over
+   * a project that has workflows to start (defect 4). Single-flight, like the
+   * artifacts read, and asked at EVERY attach (a re-attach may land on a daemon
+   * whose project changed). A failure is UNKNOWN, never empty: `null` leaves the
+   * item alone instead of claiming there is nothing to start.
+   */
+  function readCatalogue(): Promise<void> {
+    if (cataloguePending !== null) {
+      return cataloguePending;
+    }
+    const session = handle;
+    const read = session?.workflowCatalogue?.bind(session);
+    if (read === undefined) {
+      return Promise.resolve();
+    }
+    const run = (async () => {
+      try {
+        const answer = await read();
+        if (disposed) {
+          return;
+        }
+        catalogue = answer;
+      } catch {
+        // A dropped link or a refusal: UNKNOWN. The item keeps what it had
+        // (nothing, the first time), which is never a dimmed "no workflows".
+      } finally {
+        cataloguePending = null;
+      }
+      emit();
+    })();
+    cataloguePending = run;
+    return run;
   }
 
   /**
@@ -1507,6 +1569,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     // source. Asked at every attach — a live turn's card arrives by itself.
     publishReader();
     void refreshArtifacts();
+    // The hub's Workflows item (docs/fix/workflows-ux D6): ONE read per attach,
+    // beside the artifacts one, so a project with workflows is never dimmed.
+    void readCatalogue();
     // Asks reach the person from now on. Set AFTER the attach, so a replayed ask
     // is queued by the broker until the sheet is up and then delivered in order
     // (F1) — never to a half-built screen.
