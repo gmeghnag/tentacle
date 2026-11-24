@@ -577,8 +577,11 @@
 }
 .k-sheet {
   background: var(--c-sheet);
-  border-radius: var(--m-sheet-sheet-border-top-left-radius)
-    var(--m-sheet-sheet-border-top-right-radius) 0 0;
+  /* The sheet's corners come from the THEME (`radius.sheet`), not from
+     `Sheet.tsx`'s `StyleSheet.create`: the top pair is inline there
+     (`native ? 0 : radius.sheet`, D4 — UIKit draws the native corner), so no
+     `--m-sheet-sheet-border-top-*-radius` is extracted. */
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
   padding: var(--m-sheet-sheet-padding-top) var(--m-sheet-sheet-padding-horizontal)
     var(--frame-safe-bottom);
   display: flex;

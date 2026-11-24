@@ -60,16 +60,31 @@ function facts(over: Partial<InfoFacts> = {}): InfoFacts {
 describe("scheduledSection: where the hub's Scheduled item lands", () => {
   test("the wakes section, when the sheet draws it", () => {
     const view = sessionInfoView(facts({ schedules: { rows: [wake()], error: null } }));
-    expect(scheduledSection(view)).toBe("schedules");
+    expect(scheduledSection(view, 1)).toBe("schedules");
   });
 
   test("a sheet that does NOT draw the band asks for nothing (never a scroll to empty air)", () => {
     // No feed at all: `sessionInfoView` omits the section (a port without it).
     const view = sessionInfoView(facts());
     expect(view.sections.map((s) => s.id)).not.toContain("schedules");
-    expect(scheduledSection(view)).toBeNull();
-    // The sheet has no value yet (the first open, before any read answered).
-    expect(scheduledSection(null)).toBeNull();
+    expect(scheduledSection(view, 0)).toBeNull();
+    // The sheet has no value yet and the session knows of no wake: nothing to land on.
+    expect(scheduledSection(null, 0)).toBeNull();
+  });
+
+  test("the wakes the session KNOWS OF win over a sheet value pulled before them", () => {
+    // docs/feat/mobile-native-sheets.md, Fix round (simulator): the hub's Scheduled
+    // item exists only when the session has wakes, but the sheet's value can be
+    // older than the wake (pulled before it was created) and lack the band. The
+    // app log at the tap read `T=null`, sections `model,session,mcp,skills`, and 1
+    // wake (gate run 1795475314390, flow 34-hub-scheduled): no reveal, so the native
+    // sheet opened at M on the top band. The open re-pulls the facts, and
+    // `revealStep` scrolls only once the band reports its y — never to empty air.
+    const stale = sessionInfoView(facts());
+    expect(stale.sections.map((s) => s.id)).not.toContain("schedules");
+    expect(scheduledSection(stale, 1)).toBe("schedules");
+    // No value at all yet (the first open): the same.
+    expect(scheduledSection(null, 1)).toBe("schedules");
   });
 });
 

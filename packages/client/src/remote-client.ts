@@ -142,6 +142,7 @@ import {
   dialFailed,
   initialLink,
   linkDropped,
+  linkResumed,
   linkUp,
   liveness,
   stopped,
@@ -3591,6 +3592,17 @@ export class RemoteClient {
     this.kick();
   }
 
+  redialNow(): void {
+    if (this.disposed || this.stopError !== null || !this.channelFactory) return;
+    const step = linkResumed(this.link);
+    if (step === null) return;
+    if (this.dialTimer !== null) {
+      this.clock.clearTimeout(this.dialTimer as ReturnType<typeof setTimeout>);
+      this.dialTimer = null;
+    }
+    this.schedule(step);
+  }
+
   private redial(error: unknown): void {
     if (this.disposed || this.stopError) return;
     this.schedule(dialFailed(this.link, error, this.clock.now(), this.random));
@@ -4865,6 +4877,7 @@ export class RemoteClient {
             signal: controller.signal,
             ...(action.turnId !== undefined ? { turnId: action.turnId } : {}),
             ...(action.agent !== undefined ? { agent: action.agent } : {}),
+            ...(action.requestId !== undefined ? { requestId: action.requestId } : {}),
           })
           .then(answered, (error: unknown) => {
             this.onError?.(error instanceof Error ? error : new Error(String(error)));

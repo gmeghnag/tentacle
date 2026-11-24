@@ -4,9 +4,12 @@
  * **Send** (the same key: exactly once even if it did run), **Queue as steer**
  * (only while a turn runs), **Discard**, **Edit**.
  *
- * A native page sheet (`Modal`, `pageSheet`: native slide and swipe-to-dismiss),
- * like 12c's permission sheet; its content is the shared `Sheet` with 50 pt pill
- * answers (mockup `Offline` → `Sheet`, docs/feat/mobile-ui-polish.md Slice 5).
+ * A native page sheet, like 12c's permission sheet; since
+ * docs/feat/mobile-native-sheets.md the presentation is the stack's own (the
+ * `Sheet` route, a native `formSheet` with three detents), so this file has no
+ * `Modal` and no `visible`: it is drawn only while it is on screen. Its content
+ * is the shared `Sheet` with 50 pt pill answers (mockup `Offline` → `Sheet`,
+ * docs/feat/mobile-ui-polish.md Slice 5).
  * What each answer DOES is the controller's (`compose-controller.ts`) — this
  * file only offers them.
  *
@@ -14,7 +17,7 @@
  * `outbox-edit`, `outbox-close`.
  */
 import type { JSX } from "react";
-import { Modal, StyleSheet, View } from "react-native";
+import { StyleSheet, View } from "react-native";
 import { type Palette, radius, typography } from "../../theme.ts";
 import { PillButton } from "../../ui/PillButton.tsx";
 import { Sheet } from "../../ui/Sheet.tsx";
@@ -46,73 +49,65 @@ export function OutboxDecisionSheet({
   onEdit,
   onClose,
 }: OutboxDecisionProps): JSX.Element {
-  const open = item !== null;
   return (
-    <Modal
-      visible={open}
-      presentationStyle="pageSheet"
-      animationType="slide"
-      onRequestClose={onClose}
+    <Sheet
+      testID="outbox-decision"
+      palette={palette}
+      title="This message did not go out"
+      subtitle={why}
+      scroll
     >
-      <Sheet
-        testID="outbox-decision"
-        palette={palette}
-        title="This message did not go out"
-        subtitle={why}
-        scroll
-      >
-        {item === null ? null : (
-          <View style={[styles.quote, { borderColor: palette.dash }]}>
-            <Text style={[typography.bubble, { color: palette.label }]} numberOfLines={6}>
-              {item.text}
-            </Text>
-          </View>
-        )}
-        <View style={styles.answers}>
-          <PillButton
-            testID="outbox-send"
-            label="Send"
-            icon="arrow.up"
-            kind="primary"
-            palette={palette}
-            onPress={onSend}
-          />
-          {steerable ? (
-            <PillButton
-              testID="outbox-steer"
-              label="Queue as steer"
-              icon="clock"
-              kind="secondary"
-              palette={palette}
-              onPress={onSteer}
-            />
-          ) : null}
-          <PillButton
-            testID="outbox-edit"
-            label="Edit"
-            icon="square.and.pencil"
-            kind="neutral"
-            palette={palette}
-            onPress={onEdit}
-          />
-          <PillButton
-            testID="outbox-discard"
-            label="Discard"
-            icon="trash"
-            kind="destructive"
-            palette={palette}
-            onPress={onDiscard}
-          />
-          <PillButton
-            testID="outbox-close"
-            label="Not now"
-            kind="neutral"
-            palette={palette}
-            onPress={onClose}
-          />
+      {item === null ? null : (
+        <View style={[styles.quote, { borderColor: palette.dash }]}>
+          <Text style={[typography.bubble, { color: palette.label }]} numberOfLines={6}>
+            {item.text}
+          </Text>
         </View>
-      </Sheet>
-    </Modal>
+      )}
+      <View style={styles.answers}>
+        <PillButton
+          testID="outbox-send"
+          label="Send"
+          icon="arrow.up"
+          kind="primary"
+          palette={palette}
+          onPress={onSend}
+        />
+        {steerable ? (
+          <PillButton
+            testID="outbox-steer"
+            label="Queue as steer"
+            icon="clock"
+            kind="secondary"
+            palette={palette}
+            onPress={onSteer}
+          />
+        ) : null}
+        <PillButton
+          testID="outbox-edit"
+          label="Edit"
+          icon="square.and.pencil"
+          kind="neutral"
+          palette={palette}
+          onPress={onEdit}
+        />
+        <PillButton
+          testID="outbox-discard"
+          label="Discard"
+          icon="trash"
+          kind="destructive"
+          palette={palette}
+          onPress={onDiscard}
+        />
+        <PillButton
+          testID="outbox-close"
+          label="Not now"
+          kind="neutral"
+          palette={palette}
+          onPress={onClose}
+        />
+      </View>
+    </Sheet>
   );
 }
 

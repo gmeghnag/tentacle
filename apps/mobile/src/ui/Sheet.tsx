@@ -1,9 +1,11 @@
 /**
  * A sheet's CONTENT (docs/feat/mobile-ui-polish.md Design 2, restyled by
- * docs/feat/mobile-chrome.md Design 4): the 36×5 grabber, an optional 22 pt
- * title + subtitle, an optional 18 pt close glyph, and the `scroll`/`floating`
- * variants. The presentation stays native — a `Modal` (`pageSheet`) or an
- * overlay owns the slide and swipe-to-dismiss; this only draws what is inside.
+ * docs/feat/mobile-chrome.md Design 4): an optional 22 pt title + subtitle, an
+ * optional 18 pt close glyph, and the `scroll`/`floating` variants. The
+ * presentation is native — since docs/feat/mobile-native-sheets.md a stack
+ * `formSheet` route (`Sheet native`), or a `Modal`/overlay for the two surfaces
+ * still drawn in JS — and it owns the slide and the swipe-to-dismiss; this only
+ * draws what is inside.
  *
  * Two surfaces, from the mockups (`.tentacle/tmp/mobile-chrome/mockups/index.html`):
  *  - a FULL sheet is the ground a section band sits on (`infoE2`, line 390: the
@@ -14,9 +16,18 @@
  *  - a FLOATING sheet is a card over a scrim (the `Pair` compare sheet, line 348),
  *    so it keeps its own `sheet` surface: it is not a band's ground.
  *
+ * `native` (D4) is the formSheet variant: UIKit draws the grabber and the corner
+ * radius, so the content draws neither, and — the load-bearing part — the route
+ * root must be exactly TWO direct children, a head View with
+ * `collapsable={false}` and ONE `ScrollView`. RNS resizes a formSheet's
+ * ScrollView to the whole sheet unless it finds that shape, and the list is then
+ * drawn OVER the head (the spike's F0, Step 0). One scroller is also what makes a
+ * scroll reach the sheet's edge and expand medium → large (F8): a nested pair
+ * scrolls the inner list instead and the sheet stays put.
+ *
  * Render only.
  */
-import type { JSX, ReactNode } from "react";
+import type { ComponentRef, JSX, ReactNode } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
@@ -35,6 +46,11 @@ export interface SheetProps {
   /** Scroll the content (a sheet with a text field stays usable above the keyboard). */
   readonly scroll?: boolean;
   /**
+   * Drawn by UIKit instead: no drawn grabber and no drawn top radius (D4). The
+   * `scroll` variant then renders the two children an RNS formSheet requires.
+   */
+  readonly native?: boolean;
+  /**
    * The mockups' floating card (`Pair`): 8 pt from the sides and the bottom,
    * every corner `radius.sheet`, 30 pt under the content. The scrim is the
    * screen's, and the surface stays `sheet` (a card, not a band's ground).
@@ -49,6 +65,15 @@ export interface SheetProps {
    * already ships a flow tapping its close control keeps that id.
    */
   readonly closeTestID?: string;
+  /**
+   * The `scroll` variant's ONE scroller: its testID (a flow's `…-scroll`) and
+   * its ref (the reveal's target, H4a). The scroller is this component's — the
+   * caller names it, never wraps it. It takes no pull-to-refresh: on a formSheet
+   * the pull takes the drag that should expand the sheet (docs/feat/
+   * mobile-native-sheets.md, Fix round 2 (owner A)).
+   */
+  readonly scrollTestID?: string;
+  readonly scrollRef?: (node: ComponentRef<typeof ScrollView> | null) => void;
 }
 
 export function Sheet({
@@ -59,17 +84,20 @@ export function Sheet({
   testID,
   insetBottom = true,
   scroll = false,
+  native = false,
   floating = false,
   centred = false,
   onClose,
   closeTestID,
+  scrollTestID,
+  scrollRef,
 }: SheetProps): JSX.Element {
   const insets = useSafeAreaInsets();
   const align = centred ? styles.centred : null;
   // A full sheet is the banded ground; a floating card keeps its own surface.
   const ground = floating ? palette.sheet : palette.bg;
   // The close glyph, drawn in the corner. In the SCROLL variant it is hoisted out
-  // of the scroller (`fixedClose` below): a sheet long enough to scroll (Session
+  // of the scroller (the `head` below): a sheet long enough to scroll (Session
   // info) must never scroll its own way out of reach.
   const closeGlyph =
     onClose === undefined ? null : (
@@ -84,10 +112,81 @@ export function Sheet({
         <Icon name="xmark" color={palette.sec} size={18} />
       </Pressable>
     );
-  const head = (
-    <>
-      <View style={[styles.grabber, { backgroundColor: palette.sepSheet }]} />
-      {scroll ? null : closeGlyph}
+  // UIKit draws the formSheet's grabber (`sheetGrabberVisible`): a second one,
+  // drawn by the content, is two grabbers on one sheet (D4).
+  const grabber = native ? null : (
+    <View style={[styles.grabber, { backgroundColor: palette.sepSheet }]} />
+  );
+  const container = [
+    styles.sheet,
+    floating ? styles.floating : null,
+    {
+      backgroundColor: ground,
+      // UIKit's corner is the sheet's own: a drawn one leaves a seam (D4).
+      borderTopLeftRadius: native ? 0 : radius.sheet,
+      borderTopRightRadius: native ? 0 : radius.sheet,
+      paddingBottom: floating ? 30 : (insetBottom ? insets.bottom : 0) + 20,
+    },
+  ];
+  if (scroll) {
+    // The head (grabber, close, title, subtitle) is OUTSIDE the scroller and the
+    // content is inside it: one scroller (F8), and the person's title never
+    // scrolls away while they read the list under it.
+    const head = (
+      <View
+        testID={testID}
+        // F0: RNS only leaves the ScrollView alone when this head is a
+        // non-collapsed direct child of the route root.
+        {...(native ? { collapsable: false } : {})}
+        style={[styles.head, { backgroundColor: ground }]}
+      >
+        {grabber}
+        {title === undefined ? null : (
+          <Text
+            accessibilityRole="header"
+            style={[typography.title2, align, { color: palette.label }]}
+          >
+            {title}
+          </Text>
+        )}
+        {subtitle === undefined ? null : (
+          <Text style={[typography.subhead, align, { color: palette.sec }]}>{subtitle}</Text>
+        )}
+        {/* LAST, so it is on top: without the drawn grabber (native) the title
+            shares its row, and a title drawn after it took the touch. */}
+        {closeGlyph}
+      </View>
+    );
+    const scroller = (
+      <ScrollView
+        {...(scrollTestID === undefined ? {} : { testID: scrollTestID })}
+        {...(scrollRef === undefined ? {} : { ref: scrollRef })}
+        style={{ backgroundColor: ground }}
+        contentContainerStyle={[container, styles.scrollContent]}
+        keyboardShouldPersistTaps="handled"
+      >
+        {children}
+      </ScrollView>
+    );
+    if (native) {
+      // Exactly two direct children (F0): the pinned head and the ONE scroller.
+      return (
+        <>
+          {head}
+          {scroller}
+        </>
+      );
+    }
+    return (
+      <View style={[styles.scrollBody, { backgroundColor: ground }]}>
+        {head}
+        {scroller}
+      </View>
+    );
+  }
+  return (
+    <View testID={testID} style={container}>
+      {grabber}
       {title === undefined ? null : (
         <Text
           accessibilityRole="header"
@@ -99,54 +198,35 @@ export function Sheet({
       {subtitle === undefined ? null : (
         <Text style={[typography.subhead, align, { color: palette.sec }]}>{subtitle}</Text>
       )}
+      {/* Above the title (the same rule as the scroll variant's head). */}
+      {closeGlyph}
       {children}
-    </>
-  );
-  const container = [
-    styles.sheet,
-    floating ? styles.floating : null,
-    {
-      backgroundColor: ground,
-      paddingBottom: floating ? 30 : (insetBottom ? insets.bottom : 0) + 20,
-    },
-  ];
-  if (scroll) {
-    return (
-      <View style={[styles.scrollBody, { backgroundColor: ground }]}>
-        <ScrollView
-          testID={testID}
-          style={{
-            backgroundColor: ground,
-            borderTopLeftRadius: radius.sheet,
-            borderTopRightRadius: radius.sheet,
-          }}
-          contentContainerStyle={container}
-          keyboardShouldPersistTaps="handled"
-        >
-          {head}
-        </ScrollView>
-        {closeGlyph}
-      </View>
-    );
-  }
-  return (
-    <View testID={testID} style={container}>
-      {head}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   sheet: {
-    borderTopLeftRadius: radius.sheet,
-    borderTopRightRadius: radius.sheet,
     paddingHorizontal: space.inset + 4,
     paddingTop: 8,
     gap: 12,
   },
-  // The scroll variant's frame: the sheet IS the ground, and the close glyph is
-  // pinned to it rather than to the content that scrolls.
-  scrollBody: { flex: 1 },
+  // The scroll variant's pinned head: the grabber, the close glyph, the title and
+  // the subtitle, above the one scroller (never inside it).
+  head: {
+    paddingHorizontal: space.inset + 4,
+    paddingTop: 8,
+    paddingBottom: 12,
+    gap: 12,
+  },
+  // The scroll variant's frame (the NATIVE shape is two direct children, F0, so
+  // it draws no wrapper at all). `gap: 0` because the head carries its own
+  // bottom inset: a gap here appends a second section rhythm over the sheet's.
+  scrollBody: { flex: 1, gap: 0 },
+  // The ONE scroller's content (F8) adds no gap of its own: what scrolls here is
+  // a BAND list, and `BandSection` brings `space.sectionTop` above every section
+  // — a wrapper gap would double that rhythm, differently per screen.
+  scrollContent: { gap: 0 },
   floating: {
     marginHorizontal: 8,
     marginBottom: 8,

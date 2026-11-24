@@ -434,3 +434,43 @@ describe("per-project records (docs/feat/mobile-projects.md §6)", () => {
     expect(kv.writes()).toEqual([]);
   });
 });
+
+describe("fix/mobile-connect-latency T3: the persisted winning address (Owner Q1)", () => {
+  const TWO = ["ws://192.168.1.8:4000/e2e", "wss://relay.example/d/x/e2e"];
+
+  test("setLastAddress round-trips through get() and keeps every other field (mutation: drop it from storedComputerOf → red)", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a", { addresses: TWO }), "priv-a");
+    await s.setLastAddress("a", TWO[1] ?? "");
+    const read = await s.get("a");
+    expect(read?.lastAddress).toBe("wss://relay.example/d/x/e2e");
+    expect(read?.deviceKey).toBe("priv-a");
+    expect(read?.addresses).toEqual(TWO);
+  });
+
+  test("an address the record does not list, an unchanged one, or an unlisted id writes NOTHING", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a", { addresses: TWO }), "priv-a");
+    await s.setLastAddress("a", TWO[0] ?? "");
+    const writes = kv.writes().length;
+    await s.setLastAddress("a", "ws://elsewhere:1/e2e");
+    await s.setLastAddress("a", TWO[0] ?? "");
+    await s.setLastAddress("ghost", TWO[0] ?? "");
+    expect(kv.writes().length).toBe(writes);
+    expect(kv.items.get(computerKeyOf("ghost"))).toBeUndefined();
+  });
+
+  test("a record an older build wrote (no lastAddress) loads without one; a malformed one is dropped", async () => {
+    const kv = fakeKV();
+    const s = store(kv);
+    await s.add(computer("a"), "priv-a");
+    expect((await s.get("a"))?.lastAddress).toBeUndefined();
+    const raw = JSON.parse(kv.items.get(computerKeyOf("a")) ?? "{}") as Record<string, unknown>;
+    kv.items.set(computerKeyOf("a"), JSON.stringify({ ...raw, lastAddress: 42 }));
+    const read = await s.get("a");
+    expect(read?.lastAddress).toBeUndefined();
+    expect(read?.deviceKey).toBe("priv-a");
+  });
+});

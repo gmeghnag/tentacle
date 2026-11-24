@@ -47,6 +47,7 @@ import {
   AppState,
   Dimensions,
   Linking,
+  PixelRatio,
   Platform,
   Pressable,
   StyleSheet,
@@ -121,6 +122,8 @@ import { createDrawerRename } from "./src/drawer-rename.ts";
 import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
 import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { loadFigtree } from "./src/fonts-expo.ts";
+import { foregroundAction } from "./src/foreground-gate.ts";
+import { playHaptic } from "./src/haptics.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -178,6 +181,7 @@ import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
 import { ArtifactGalleryScreen } from "./src/screens/ArtifactGallery.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { LockGate } from "./src/screens/LockGate.tsx";
+import { NativeSheetRoute } from "./src/screens/NativeSheetRoute.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
@@ -202,6 +206,16 @@ import {
   type SessionScreenController,
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
+import {
+  SHEET_DETENTS,
+  SHEET_HOLDS,
+  holdKey,
+  recordDetent,
+  sheetDetentContext,
+  sheetGround,
+  sheetIdentity,
+  sheetOptions,
+} from "./src/sheet-plan.ts";
 import { SHELL_ROWS } from "./src/shell-rows-expo.ts";
 import type { ShellRowsSettings } from "./src/shell-rows-store.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
@@ -608,11 +622,12 @@ const LINKS = createLinkRegistry<ComputerLink>({
       random: phoneRandom,
       diagnosis: diagnoserFor(id),
       log: APP_LOG,
+      onAnswered: (address) => KEYCHAIN_STORE.setLastAddress(id, address),
     });
     // A link dialled while the app is already in the background starts held:
     // iOS would suspend it anyway, and a socket opened now would be a ghost
     // attachment for the daemon (docs/feat/mobile-session-view.md 12a.4).
-    if (AppState.currentState !== "active") {
+    if (foregroundAction(AppState.currentState) === "suspend") {
       link.suspend();
     }
     LIVE_LINKS.add(link);
@@ -1741,6 +1756,7 @@ function SessionRoute({
   cwd,
   onOpenDrawer,
   drawerOpen,
+  locked,
   onOpenArtifacts,
   onNewSession,
 }: {
@@ -1758,6 +1774,12 @@ function SessionRoute({
   readonly onOpenArtifacts: (from: ArtifactGalleryRoute["from"], open?: string) => void;
   /** The drawer's New session, reached from the hub too (docs/feat/mobile-hub.md H3). */
   readonly onNewSession: () => void;
+  /**
+   * The lock's own current value, subscribed in `AppShell` (never a render-time
+   * read): the native sheets' drain is gated on it (docs/feat/mobile-native-sheets.md
+   * D3, Owner decision A).
+   */
+  readonly locked: boolean;
 }): JSX.Element {
   const shellRows = useShellRows();
   const [controller, setController] = useState<SessionScreenController | null>(null);
@@ -1886,6 +1908,9 @@ function SessionRoute({
       drawerOpen={drawerOpen}
       onOpenArtifacts={onOpenArtifacts}
       onNewSession={onNewSession}
+      computerId={computerId}
+      sessionId={sessionId}
+      locked={locked}
       artifactsSeenKey={sessionKey(computerId, sessionId)}
       onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
       compactShell={shellRows.settings.compactShell}
@@ -2252,12 +2277,12 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   // decision is `foreground-gate.ts`'s; this is the `AppState` wiring.
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
+      // Only `background` suspends (2d): `inactive` (Face ID, Control Center, a
+      // call banner) keeps the socket.
+      const action = foregroundAction(state);
       for (const link of LIVE_LINKS) {
-        if (state === "active") {
-          link.resume();
-        } else {
-          link.suspend();
-        }
+        if (action === "resume") link.resume();
+        else if (action === "suspend") link.suspend();
       }
     });
     return () => subscription.remove();
@@ -2377,6 +2402,15 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   }
   const lockInstance = lock.current;
   const lockView = lockInstance.view();
+  /**
+   * The sheets' drain reads `locked` from the LOCK, not from this render
+   * (docs/feat/mobile-native-sheets.md D3, Step 0b): `AppShell` re-renders for its
+   * own reasons, so `lockView` above is stale exactly when the lock changes
+   * without one. `LockGate`'s own dispatch is what notifies (`app-lock.ts`'s
+   * `subscribe`), and this subscription only mirrors the flag the sheets need.
+   */
+  const [sheetLocked, setSheetLocked] = useState(() => lockInstance.view().locked);
+  useEffect(() => lockInstance.subscribe((view) => setSheetLocked(view.locked)), [lockInstance]);
   const lockGateDeps = {
     lock: lockInstance,
     authenticate,
@@ -2769,6 +2803,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     palette={palette}
                     onOpenDrawer={openDrawer}
                     drawerOpen={drawerOpen}
+                    locked={sheetLocked}
                     onNewSession={newSession}
                     computerId={route.params.computerId}
                     sessionId={route.params.sessionId}
@@ -2815,6 +2850,71 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                   void shareCachedCopy(fileUri);
                 }}
                 onRenderError={(fields) => APP_LOG.log("error", "client-error", fields)}
+              />
+            )}
+          </Stack.Screen>
+          {/* The native sheets (docs/feat/mobile-native-sheets.md D1): ONE route,
+              five kinds, presented as an iOS `formSheet` with three detents. The
+              detents, the opening index, the undimmed index and the grabber are
+              `sheetOptions`' — never restated here — so RNS's dev asserts cannot
+              fire. Nothing carries the sheet's CONTENT in params: the session
+              screen publishes it on `SHEET_HOSTS` (D2). */}
+          <Stack.Screen
+            name="Sheet"
+            options={({ route }) => ({
+              // The opening detent is the one the person left this sheet at, if
+              // any (D3 detent memory); the identity is the kind for the user
+              // sheets, the ask's own id for Permission (S5) — so a re-delivery
+              // of the SAME ask opens where the person left it.
+              ...sheetOptions(route.params.kind, {
+                ...sheetDetentContext(
+                  route.params.kind,
+                  sheetIdentity(route.params.kind, route.params.askId ?? null),
+                  PixelRatio.getFontScale(),
+                  // Session info opened on a section (`openScheduled`) scrolls
+                  // inside the sheet, so it opens at L (D3).
+                  route.params.reveal === true,
+                ),
+                // D5: an unanswered ask cannot be swiped away — it rides the
+                // params because options resolve before the screen mounts, so
+                // the sheet is un-swipeable from its first frame. The screen
+                // rewrites it in place once the ask settles (S5).
+                ...(route.params.asking === true ? { asking: true } : {}),
+              }),
+              contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] },
+            })}
+            listeners={({ route }) => ({
+              // Only a STABLE change is remembered (`recordDetent`): a re-push
+              // after the lock drain re-opens at it (Step 0b L3).
+              sheetDetentChange: (event) =>
+                recordDetent(
+                  SHEET_DETENTS,
+                  route.params.kind,
+                  sheetIdentity(route.params.kind, route.params.askId ?? null),
+                  event.data,
+                ),
+              // A swipe/backdrop that the blocked `gestureEnabled:false` refused
+              // (D5): RNS reports it, so the attempt is not silent — the light
+              // haptic and the inline footnote under the ask's options.
+              gestureCancel: () => {
+                const askId = route.params.askId;
+                if (route.params.kind !== "permission" || askId === undefined) {
+                  return;
+                }
+                playHaptic("light");
+                SHEET_HOLDS.note(holdKey(route.params.computerId, route.params.sessionId, askId));
+              },
+            })}
+          >
+            {({ navigation, route }) => (
+              <NativeSheetRoute
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                kind={route.params.kind}
+                // A KEYED pop: this screen's navigation dispatches with
+                // `source: route.key`, so `pop` removes this sheet only. An
+                // unkeyed `goBack()` would pop Session itself.
+                onClose={() => navigation.pop()}
               />
             )}
           </Stack.Screen>
