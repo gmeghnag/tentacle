@@ -2102,9 +2102,10 @@ export function SessionScreen({
           draft={state.draft}
           editable={state.view.editable}
           placeholder={
-            !state.view.editable
-              ? "This session has ended"
-              : (voiceView.placeholder ?? "Message tentacle")
+            state.view.composer.placeholder ??
+            (state.view.editable
+              ? (voiceView.placeholder ?? "Message tentacle")
+              : "This session has ended")
           }
           button={state.view.composer.button}
           slot={state.view.composer.slot}

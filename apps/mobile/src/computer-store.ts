@@ -57,6 +57,8 @@ export interface PairedComputer {
    * and only the sibling name on an ask is lost.
    */
   readonly thisDeviceName?: string;
+  /** The address the last successful dial opened (persisted lastGood · Q1). */
+  readonly lastAddress?: string;
   readonly pairedAt: number;
   /**
    * The computer's own id (`result.computer.id`) when this record is ONE PROJECT
@@ -187,6 +189,8 @@ export interface ComputerStore {
   setProject(id: string, project: RecordProject): Promise<void>;
   /** Replace a record's addresses (the `daemon/discover` refresh, §6 F2); same rules as `setProject`. */
   setAddresses(id: string, addresses: readonly string[]): Promise<void>;
+  /** Remember the address whose dial succeeded (Q1); preserves `lastAddress` when overwritten later. */
+  setLastAddress(id: string, lastAddress: string): Promise<void>;
   /** Forget it on this phone (Owner Q5: local only). */
   remove(id: string): Promise<void>;
 }
@@ -240,6 +244,7 @@ function storedComputerOf(id: string, item: unknown): StoredComputer | undefined
   // Present only from the build that started naming this phone: a record an
   // older one wrote has none and still loads (F-K3).
   const thisDeviceName = record.thisDeviceName;
+  const lastAddress = lastAddressOf(record as { lastAddress?: unknown });
   return {
     id: record.id,
     name: record.name,
@@ -247,6 +252,7 @@ function storedComputerOf(id: string, item: unknown): StoredComputer | undefined
     addresses: record.addresses as readonly string[],
     deviceName: record.deviceName,
     ...(typeof thisDeviceName === "string" ? { thisDeviceName } : {}),
+    ...(lastAddress === undefined ? {} : { lastAddress }),
     pairedAt: record.pairedAt,
     ...projectFieldsOf(record),
     deviceKey: record.deviceKey,
@@ -261,6 +267,10 @@ function storedComputerOf(id: string, item: unknown): StoredComputer | undefined
  * is what this build writes: a malformed one is dropped (the record then reads as
  * legacy, still dialable), never a reason to lose the key.
  */
+function lastAddressOf(record: { readonly lastAddress?: unknown }): string | undefined {
+  return typeof record.lastAddress === "string" ? record.lastAddress : undefined;
+}
+
 function projectFieldsOf(record: {
   readonly computerId?: unknown;
   readonly project?: unknown;
@@ -490,6 +500,19 @@ export function createComputerStore(deps: ComputerStoreDeps): ComputerStore {
           return;
         }
         const next = { ...stored, addresses: [...addresses] };
+        await write(computerKeyOf(id), JSON.stringify({ v: STORE_VERSION, ...next }));
+      });
+    },
+
+    setLastAddress(id: string, lastAddress: string): Promise<void> {
+      return serialise(async () => {
+        const ids = await readIndex();
+        if (!ids.includes(id)) return;
+        const stored = await read(id);
+        if (stored === undefined) return;
+        if (!stored.addresses.includes(lastAddress)) return;
+        if (stored.lastAddress === lastAddress) return;
+        const next = { ...stored, lastAddress };
         await write(computerKeyOf(id), JSON.stringify({ v: STORE_VERSION, ...next }));
       });
     },

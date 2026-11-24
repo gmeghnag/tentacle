@@ -232,6 +232,8 @@ export interface ComposerView {
   readonly sendNow: boolean;
   /** The notice beside a disabled queue (photos while a turn runs): null when none. */
   readonly photosNotice: string | null;
+  /** The field's hint; absent → the default (only a branch, never presentation) (§7). */
+  readonly placeholder?: string;
 }
 
 export interface SessionView {
@@ -311,6 +313,16 @@ function failureBanner(failure: SessionOpenFailure): { banner: Banner; retry: bo
   }
 }
 
+/**
+ * Whether a link `up` re-attaches this screen (fix/mobile-connect-latency 3c):
+ * only a FAILED attach whose banner offers Retry (`link` / `timeout` / `gone`),
+ * never `archived` / `deleted` / `too-many` (a person's decision). The caller
+ * runs it once per `up`, so it is bounded by link-ups, never a loop.
+ */
+export function retryOnUp(status: SessionStatus): boolean {
+  return status.phase === "failed" && failureBanner(status.failure ?? "link").retry;
+}
+
 /** The banner for a session the DAEMON ended while this client was on it. */
 function endedBanner(reason: EndReason): Banner {
   switch (reason) {
@@ -378,6 +390,7 @@ export function sessionView(input: SessionViewInput): SessionView {
         retry: false,
         reopen: input.status.reopenRequested !== true,
         editable: false,
+        composer: { ...composer, placeholder: "Loading…" },
       };
     }
     return {
@@ -387,6 +400,7 @@ export function sessionView(input: SessionViewInput): SessionView {
       retry: false,
       reopen: false,
       editable: false,
+      composer: { ...composer, placeholder: "Loading…" },
     };
   }
   if (input.status.phase === "failed") {
@@ -401,6 +415,10 @@ export function sessionView(input: SessionViewInput): SessionView {
       // that just failed (that is what the failure text is for).
       reopen: failure === "archived" && input.status.reopenRequested !== true,
       editable: false,
+      composer: {
+        ...composer,
+        placeholder: retry ? "Not connected — tap Retry" : "Session closed",
+      },
     };
   }
   if (input.ended !== null) {
@@ -411,6 +429,7 @@ export function sessionView(input: SessionViewInput): SessionView {
       retry: false,
       reopen: false,
       editable: false,
+      composer: { ...composer, placeholder: "This session has ended" },
     };
   }
   if (input.link === "down") {
