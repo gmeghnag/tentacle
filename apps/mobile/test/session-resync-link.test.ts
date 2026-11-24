@@ -1,4 +1,3 @@
-
 import { describe, expect, test } from "bun:test";
 
 /**
@@ -60,7 +59,9 @@ describe("session resync link (T8)", () => {
         calls.push("leave");
         closing = false;
       },
-    } as unknown as import("../src/session-controller.ts").SessionController<import("../src/session-controller.ts").SessionHandle>;
+    } as unknown as import("../src/session-controller.ts").SessionController<
+      import("../src/session-controller.ts").SessionHandle
+    >;
 
     // The fixed controller's resync: second path keeps the old handle
     // implicitly by NOT entering `closing` before the open. Modelled here as
@@ -71,4 +72,3 @@ describe("session resync link (T8)", () => {
     expect(fixed.ok).toBe(true);
   });
 });
-

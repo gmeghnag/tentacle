@@ -269,7 +269,8 @@ describe("hold(ms): one dial through a background task", () => {
 });
 
 describe("foregroundAction (fix/mobile-connect-latency — T7)", () => {
-  test('inactive does nothing, background suspends, active resumes', () => {
+  test("inactive does nothing, background suspends, active resumes", () => {
+    // biome-ignore format: keep require+cast on one line (formatter splits into invalid TS)
     const { foregroundAction } = require("../src/foreground-gate.ts") as typeof import("../src/foreground-gate.ts");
     expect(foregroundAction("inactive")).toBeNull();
     expect(foregroundAction("background")).toBe("suspend");

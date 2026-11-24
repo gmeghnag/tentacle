@@ -404,7 +404,7 @@ describe("firstAnswering: the staggered race (R6)", () => {
     });
   });
 
-    test("no addresses at all is a failure, not a hang", async () => {
+  test("no addresses at all is a failure, not a hang", async () => {
     const h = harness();
     const caught = await firstAnswering([], h.steps, memory()).catch((error: unknown) => error);
     expect(caught).toBeInstanceOf(ChannelError);
