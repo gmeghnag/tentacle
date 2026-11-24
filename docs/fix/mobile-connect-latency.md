@@ -261,6 +261,73 @@ before Review.
 
 **Changelog:** `changelog.d/mobile-connect-latency.fixed.md`.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-24* (fixes Review round 1; the round above overstated its gate and mutations — see Review)
+
+- **HIGH 1 — resync stranding: FIXED by revert.** `session-screen-controller.ts` `resync()` is back to `main`'s
+  leave-then-attach body (the attach-first rewrite re-used the live handle via `controller.open`'s `live` short-circuit,
+  then detached it). The 10 red `session-screen*.test.ts` cases are green (194/194 across the 11 files).
+- **HIGH 2 — T8 vacuous: FIXED (real repro), root cause NOT reproduced.** `apps/mobile/test/session-resync-link.test.ts`
+  now drives a REAL daemon (`SessionHost` + `Connection` + `createChannelPair`, server end closing its `Connection`)
+  through the app's `createForegroundGate`, mounts `createSessionScreen` on a real client and subscribes it to
+  `onLinkStatus` synchronously as `App.tsx:1835`. Script: open → `background` + `suspend` → `active` (owed) → `resume`
+  → up. Variant 2 adds a concurrent `controller.open` of the same id at `up`. **Both GREEN on the reverted (= `main`)
+  resync**, trace `attach start → ok → link down → link up → resync start → attach start → ok → resync kept`, no
+  `attach fail`, daemon `attached === 2`. §0 two-strike: **3b is not done** (no root cause to fix) — the decision is
+  Owner Q3 (one phone export, `grep ptrace` → the `attach fail` `reason`). T8 stays as a regression pin (green both sides
+  by construction; it is not a red-first test).
+- **HIGH 3 — untested pieces: FIXED.**
+  - T5 rewritten (`packages/client/test/reattach-resume.test.ts`): a real `RemoteClient` over an in-process daemon,
+    manual clock, `random 0.999`; up 11 s, drop, 4 failed dials (backoff > 4 s armed) → `redialNow()` dials with
+    `advance(0)`, status `reconnecting attempt 0`, link up, the superseded timer dials nothing over 60 s; second
+    `redialNow` while a held dial is in flight → no second dial; after `unauthorized` stop → none; closed → none.
+  - T6 (`connection.test.ts`): `link.resume()` calls `client.redialNow` once after a real `suspend`, not with no
+    suspend, not on a duplicate `active`.
+  - T3: `computer-store.test.ts` (round-trip, unlisted address / unchanged / unknown id write nothing, older + malformed
+    record) and `connection.test.ts` (`lastAddress` listed → the refused slot 0 is never opened, `onAnswered` not
+    called; `lastAddress` unlisted → slot 0 then 1, `onAnswered([winner])` once; a throwing / rejecting `onAnswered`
+    never fails the dial).
+  - T9: `session-screen.test.ts` (`countingHarness`): failed re-read (`link`) → one re-open per `up` (2 ups → 2 opens),
+    open once online, no re-open when open; disposed failed screen → none. `session-view.test.ts`: `retryOnUp` table
+    (link/timeout/gone/unspecified yes; archived/deleted/too-many/open/opening no) and agreement with the banner's
+    `retry` for every reason.
+  - T10: `session-view.test.ts` placeholder per phase.
+- **MEDIUM 4 — slice 1 missing: FIXED.** `connection.ts` logs through the existing `"timing"` kind (no new
+  `AppLogKind`): `{phase:"dial-open", ms, slot, kind:"direct"|"relay", ok}` per address (ok on success AND failure),
+  `{phase:"dial-confirm", ms, ok}`, `{phase:"dial-init", ms}` (first `initialize`); `ms` since the current dial began
+  (reset each `dial()`), relay detected by `isRelayDeviceAddress`; never the address. The `kind as never` double
+  `"dial"` entries are gone. **Not done:** the plan's `ms` on the screen's `attach ok/fail` trace (left out to keep the
+  `QueueTrace` shape untouched — a follow-up if the export needs it).
+- **MEDIUM 5 — retry guard: FIXED.** `retryOnUp` is now ONE pure function in `session-view.ts`, derived from
+  `failureBanner(...).retry` (no second list); the controller's `link(up)` calls it with the same guards as before and
+  re-attaches as the Retry button does (`reopenRequested` → `attach(true)`). In `failed` the handle is already `null`
+  (resync nulls it before attaching; the first mount never set one) and a successful attach replaces both watches, so
+  no stale state is reused. Bounded-once-per-up is pinned by T9.
+- **Drift:** 2b's hook is `OpenComputerDeps.onAnswered(address)` as the plan says (round 0 had passed a `store` Pick);
+  it fires only when the winner differs from the last persisted/answered address; `App.tsx` wires it to
+  `KEYCHAIN_STORE.setLastAddress(id, address)`. `App.tsx` now calls the pure `foregroundAction` at both sites (round 0
+  had inlined the branch); `foregroundAction` accepts `string | null | undefined` (`AppState.currentState`'s type).
+
+**Mutations (each red, then restored):**
+| Mutation | Red test |
+|---|---|
+| `link(up)`: `if (false && up && retryOnUp(status))` | T9 «re-attaches once per link up» (Expected 3, Received 2) |
+| `link(up)`: drop `!disposed` | T9 «disposed … not re-attached» (Expected 1, Received 2) |
+| `retryOnUp` → `status.phase === "failed"`; failed placeholder → always «Session closed» | T9 `retryOnUp` table, T10 |
+| `redialNow(): void { return; …` | T5 ×3 (5 vs 4 dials; 2 vs 1; stopped never reached) |
+| `redialNow` without `clearTimeout(dialTimer)` | T5 «no clock time passing» (Expected 5, Received 6) |
+| `memory.lastGood = undefined` | T3 «lastAddress starts the race there» |
+| drop the `onAnswered` call | T3 «unlisted … onAnswered ONCE» |
+| drop `phase("dial-init")` | slice 1 test |
+| `resume`: `client.redialNow()` unconditionally | T6 |
+| drop `lastAddress` from `storedComputerOf` | T3 store round-trip ×2 |
+
+**Narrow runs:** 24 files (`session-resync-link`, `session-screen*`, `session-view*`, `connection`, `computer-store`,
+`foreground-gate`, `session-link`, `outbox-link`, client `reattach-resume`, `reattach`, `link-machine`,
+`address-dial`) → 422 pass / 0 fail. `tsc -p apps/mobile` clean; `bunx biome check` on the 13 changed files clean. Full
+gate: left to the orchestrator's script.
+
 ## Review
 
 ## Review

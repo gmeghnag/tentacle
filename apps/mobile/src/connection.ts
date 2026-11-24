@@ -33,6 +33,7 @@ import {
   type InitializeResult,
   RELAY_CLOSE_UNREGISTERED,
   decodeBase64Url,
+  isRelayDeviceAddress,
 } from "@tentacle/protocol";
 import type { ByteCarrier, DuplexChannel } from "@tentacle/transport";
 import type { Random } from "@tentacle/transport/noise";
@@ -85,7 +86,13 @@ export interface OpenComputerDeps {
    */
   readonly diagnosis?: LinkDiagnoser;
   readonly onError?: (error: Error) => void;
-  readonly store?: Pick<import("./computer-store.ts").ComputerStore, "setLastAddress">;
+  /**
+   * The dial won on an address other than the record's `lastAddress`
+   * (fix/mobile-connect-latency 2b, Owner Q1): the app persists it so the next
+   * COLD start begins there. Best effort — a throw or a rejection is swallowed,
+   * never a reason to fail or delay the dial.
+   */
+  readonly onAnswered?: (address: string) => void | Promise<void>;
   /**
    * Where the socket diagnostics go (docs/feat/mobile-lock.md D7). Omitted = a
    * module-private ring, so a link built without one still has a log and no call
@@ -286,20 +293,24 @@ export async function openComputer(
     closeCodes.set(url, code);
   });
   const factoryDeps: ChannelFactoryDeps = { WebSocket: Ctor };
-  const memory: DialMemory = {
-    lastGood: (() => {
-      const idx = computer.addresses.indexOf(computer.lastAddress ?? "");
-      return idx >= 0 ? idx : undefined;
-    })(),
-  };
+  // The persisted winner (2b): an address no longer listed (a discover refresh
+  // replaced the list) starts the race at 0, as before.
+  const persisted =
+    computer.lastAddress === undefined ? -1 : computer.addresses.indexOf(computer.lastAddress);
+  const memory: DialMemory = { lastGood: persisted >= 0 ? persisted : undefined };
+  let answered = computer.lastAddress;
   const diagnosis = deps.diagnosis ?? createLinkDiagnoser();
   let current = computer.addresses[0] ?? "";
-  const dialStarted = Date.now();
-  const logOnce = (kind: string, fields: Record<string, number | boolean | string>): void => {
-    try {
-      log.log("info", kind as never, fields);
-    } catch {}
+  // Slice 1's phase timings, `ms` since the CURRENT dial began: the slot and
+  // whether it is the relay, never the address (it leaves the phone, P3).
+  let dialStartedAt = Date.now();
+  const phase = (name: string, fields: Readonly<Record<string, AppLogField>>): void => {
+    log.log("info", "timing", { phase: name, ms: Date.now() - dialStartedAt, ...fields });
   };
+  const slotOf = (address: string): Record<string, AppLogField> => ({
+    slot: computer.addresses.indexOf(address),
+    kind: isRelayDeviceAddress(address) ? "relay" : "direct",
+  });
 
   /**
    * One address, in the two steps R6's race needs: OPEN the raw socket (that,
@@ -319,7 +330,14 @@ export async function openComputer(
       // race's call (`failed` below), because only the race knows if it had
       // already been decided when the rejection arrived.
       // The raw byte carrier (E2E v2: binary frames, docs/feat/noise-binary-carrier.md).
-      const channel = await webSocketCarrierFactory(address, {}, factoryDeps)();
+      let channel: ByteCarrier;
+      try {
+        channel = await webSocketCarrierFactory(address, {}, factoryDeps)();
+      } catch (error) {
+        phase("dial-open", { ...slotOf(address), ok: false });
+        throw error;
+      }
+      phase("dial-open", { ...slotOf(address), ok: true });
       addressOf.set(channel, address);
       return channel;
     },
@@ -342,12 +360,15 @@ export async function openComputer(
       try {
         // `secureChannelFactory` maps a failed handshake itself (`denied` →
         // `unauthorized`, the authenticated verdict the diagnosis reads).
-        return await secureChannelFactory(async () => channel, {
+        const secure = await secureChannelFactory(async () => channel, {
           staticKey: deviceKey,
           remoteStatic,
           random: deps.random,
         })();
+        phase("dial-confirm", { ok: true });
+        return secure;
       } catch (error) {
+        phase("dial-confirm", { ok: false });
         // The relay's `4404` (no daemon registered for that id): the socket's
         // close listener ran before the channel's, so the code is already here.
         const address = addressOf.get(channel);
@@ -364,13 +385,17 @@ export async function openComputer(
    * (R6), starting at the remembered good one.
    */
   const dial = async (): Promise<DuplexChannel> => {
+    dialStartedAt = Date.now();
     const channel = await firstAnswering(computer.addresses, steps, memory);
-    logOnce("dial", { ms: Date.now() - dialStarted, ok: true });
     diagnosis.ok();
-    if (deps.store !== undefined) {
-      const winner =
-        memory.lastGood !== undefined ? computer.addresses[memory.lastGood] : undefined;
-      if (winner !== undefined) void deps.store.setLastAddress(computer.id, winner);
+    const winner = memory.lastGood === undefined ? undefined : computer.addresses[memory.lastGood];
+    if (winner !== undefined && winner !== answered) {
+      answered = winner;
+      try {
+        void Promise.resolve(deps.onAnswered?.(winner)).catch(() => {});
+      } catch {
+        // best effort (2b): never fails the dial
+      }
     }
     return channel;
   };
@@ -414,9 +439,8 @@ export async function openComputer(
     },
   });
   try {
-    const t0 = Date.now();
     const init = await client.initialize();
-    logOnce("dial", { ms: Date.now() - t0, ok: true });
+    phase("dial-init", {});
     return {
       client,
       permissions: broker,

@@ -313,6 +313,16 @@ function failureBanner(failure: SessionOpenFailure): { banner: Banner; retry: bo
   }
 }
 
+/**
+ * Whether a link `up` re-attaches this screen (fix/mobile-connect-latency 3c):
+ * only a FAILED attach whose banner offers Retry (`link` / `timeout` / `gone`),
+ * never `archived` / `deleted` / `too-many` (a person's decision). The caller
+ * runs it once per `up`, so it is bounded by link-ups, never a loop.
+ */
+export function retryOnUp(status: SessionStatus): boolean {
+  return status.phase === "failed" && failureBanner(status.failure ?? "link").retry;
+}
+
 /** The banner for a session the DAEMON ended while this client was on it. */
 function endedBanner(reason: EndReason): Banner {
   switch (reason) {

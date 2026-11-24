@@ -42,7 +42,7 @@ function superseded(): ChannelError {
 
 export type ForegroundAction = "suspend" | "resume" | null;
 
-export function foregroundAction(state: string): ForegroundAction {
+export function foregroundAction(state: string | null | undefined): ForegroundAction {
   if (state === "active") return "resume";
   if (state === "background") return "suspend";
   return null;
