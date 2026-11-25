@@ -18,7 +18,7 @@
  * result whose `chunks` does not match what was received throws (after
  * draining what was queued), so a reply is never silently truncated.
  */
-import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
+import type { ChatRequest, ModelProvider, ReasoningRecord, StreamEvent } from "@tentacle/core";
 import { JsonRpcErrorCode, ModelStreamProgressValueSchema } from "@tentacle/protocol";
 import type {
   ModelCountTokensResult,
@@ -29,6 +29,8 @@ import type {
 import { cancelledError } from "@tentacle/transport";
 
 /** Sends a `model/stream` request to the client and resolves with its events. */
+type WireReasoning = NonNullable<WireChatRequest["messages"][number]["reasoning"]>;
+
 export type ModelStreamSender = (request: WireChatRequest) => Promise<ModelStreamResult>;
 
 /**
@@ -53,6 +55,15 @@ export type ModelCountTokensSender = (
   request: WireChatRequest,
   signal?: AbortSignal,
 ) => Promise<ModelCountTokensResult>;
+
+/** The record as the wire types it: the same values, the blocks array copied (core's is readonly). */
+function toWireReasoning(record: ReasoningRecord): WireReasoning {
+  const { body } = record;
+  return {
+    source: record.source,
+    body: body.format === "anthropic" ? { ...body, blocks: [...body.blocks] } : { ...body },
+  };
+}
 
 function toWireRequest(request: ChatRequest): WireChatRequest {
   return {
@@ -81,6 +92,10 @@ function toWireRequest(request: ChatRequest): WireChatRequest {
           }
         : {}),
       ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
+      // The model's own reasoning, opaque here: the LAPTOP's provider produced
+      // it and alone decides whether to echo it (docs/fix/reasoning-echo.md P3,
+      // D5). Copied by hand like every field: dropped here, it never echoes.
+      ...(m.reasoning ? { reasoning: toWireReasoning(m.reasoning) } : {}),
     })),
     ...(request.tools && request.tools.length > 0
       ? {

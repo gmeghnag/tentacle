@@ -18,7 +18,7 @@ import {
   MAX_ATTACHMENTS_PER_MESSAGE,
 } from "./attachment.ts";
 import { ContentBlockSchema, PromptContentBlockSchema } from "./content.ts";
-import { ModelNameSchema } from "./model.ts";
+import { ModelNameSchema, ReasoningRecordSchema } from "./model.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { ToolResultSpillSchema } from "./spill.ts";
 import { line } from "./text-line.ts";
@@ -197,6 +197,15 @@ const chatMessageShape = () => ({
     .object({ ms: z.number().int().nonnegative().max(86_400_000) })
     .optional()
     .catch(undefined),
+  /**
+   * ONLY on an assistant message: the model's own reasoning, as its provider
+   * must get it back (NOT display-only — echoed to the model; persisted, owner
+   * Q1 A; docs/fix/reasoning-echo.md D8). The display stays `thought`. FAIL-SOFT
+   * like `thought`: a malformed or over-bound value is DROPPED whole (never
+   * cut; the message still loads, that round is just not echoed), never a
+   * refusal of the CRITICAL entry.
+   */
+  reasoning: ReasoningRecordSchema.optional().catch(undefined),
   /**
    * On a USER message: image refs to send with it (docs/feat/attachments-core.md).
    * Refs, never bytes — the bytes live behind an `AttachmentSource` on the side

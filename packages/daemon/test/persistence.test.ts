@@ -2828,6 +2828,45 @@ describe("the v8 record: a refused call's reply and the installed head (docs/fea
     expect(reply?.thought).toEqual({ ms: 12_400 });
   });
 
+  test("an assistant's reasoning record survives a restart byte-identical (docs/fix/reasoning-echo.md T4)", () => {
+    const openai = {
+      source: "openai:m",
+      body: { format: "openai", field: "reasoning_content", text: "list the dir first" },
+    } as const;
+    const anthropic = {
+      source: "anthropic:m",
+      body: {
+        format: "anthropic",
+        blocks: [
+          { type: "thinking", thinking: "", signature: "sig==" },
+          { type: "redacted_thinking", data: "opaque" },
+        ],
+      },
+    } as const;
+    const messages: ChatMessage[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "c1", name: "shell", arguments: "{}" }],
+        reasoning: openai,
+      },
+      { role: "tool", content: "ok", toolCallId: "c1" },
+      { role: "assistant", content: "done", reasoning: anthropic },
+    ];
+    const bytes = JSON.parse(
+      JSON.stringify(
+        record({ messages, turns: [{ turnId: "t1", end: { stopReason: "end_turn" } }] }),
+      ),
+    );
+    const restored = rig([], () => []).host.restore(parsed(bytes));
+    const replies = restored.snapshotPage().messages.filter((m) => m.role === "assistant");
+    expect(replies.map((m) => JSON.stringify(m.reasoning))).toEqual([
+      JSON.stringify(openai),
+      JSON.stringify(anthropic),
+    ]);
+  });
+
   test("V8-3 `head` must name a user message of the history", () => {
     expect(parse(record({ head: 1 })).ok).toBe(true);
     for (const head of [0, 2, -1, 1.5, "1", null]) {

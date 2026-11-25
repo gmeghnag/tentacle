@@ -100,6 +100,7 @@ import {
   parseArgs,
   parseServeLimits,
   resolveA2AToken,
+  resolveMcpToken,
   resolveRunPrompt,
   resolveTls,
   resolveToken,
@@ -157,6 +158,7 @@ import {
 } from "./run-state.ts";
 import { localAutoAccept, styleInfo } from "./run-ui.ts";
 import { type ServeA2AOptions, describeA2A, parseA2AAsks } from "./serve-a2a.ts";
+import { type ServeMcpOptions, describeMcp, mcpAddHint, parseMcpAsks } from "./serve-mcp-server.ts";
 import { serveModelNotice } from "./serve-model-notice.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { autoAcceptOf, routingAutoAccept, seedAutoAcceptOf } from "./session-auto-accept.ts";
@@ -425,10 +427,15 @@ Remote control:
                       [--push-grace 30]
                       [--a2a-token T|--a2a-token-command CMD [--a2a-asks owner|both]
                        [--a2a-workflows]]
+                      [--mcp-token T|--mcp-token-command CMD [--mcp-asks owner|both]]
   --a2a-token turns on A2A (POST /a2a + the public /.well-known/agent-card.json) with
   its OWN bearer token, never --token. --a2a-asks both lets the caller answer
   its tasks' tool asks (the owner still can; file approvals stay owner-only);
   --a2a-workflows lets it start workflow runs (default off).
+  --mcp-token turns on an MCP server (POST /mcp: session_start/send/status/cancel/
+  answer/list, and MCP tasks) with its OWN bearer token, never --token or the A2A
+  one. --mcp-asks both lets the caller answer its sessions' tool asks (file
+  approvals stay owner-only). Add it to Claude Code with the line serve prints.
   --push-grace <seconds> is how long a permission request waits for a phone
   before it is pushed to it (0 = at once; default push.graceSeconds, 30).
   With paired devices, serve dials OUT to the mobile relay (relay.tentacle.so by
@@ -1192,6 +1199,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     let token: string | undefined;
     let limits: ServeLimits;
     let a2a: ServeA2AOptions | undefined;
+    let mcp: ServeMcpOptions | undefined;
     try {
       limits = parseServeLimits({ flags, bools });
       token = await resolveToken(flags);
@@ -1203,6 +1211,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         }
       } else {
         a2a = { token: a2aToken, asks: a2aAsks, workflows: bools.has("a2a-workflows") };
+      }
+      const mcpToken = await resolveMcpToken(flags);
+      const mcpAsks = parseMcpAsks(flags.get("mcp-asks"));
+      if (mcpToken === undefined) {
+        if (flags.has("mcp-asks")) {
+          throw new Error("--mcp-asks needs --mcp-token or --mcp-token-command");
+        }
+      } else {
+        mcp = { token: mcpToken, asks: mcpAsks };
       }
     } catch (error) {
       err(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);
@@ -1230,6 +1247,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         },
         ...(token ? { token } : {}),
         ...(a2a ? { a2a } : {}),
+        ...(mcp ? { mcp } : {}),
         ...(tls ? { tls } : {}),
         onAudit: (line) => err(`[daemon] ${line}\n`),
         onError: (error) => err(`[daemon] error: ${error.message}\n`),
@@ -1240,6 +1258,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         err(
           `A2A on ${server.url.replace(/^ws/, "http").replace(/\/+$/, "")}/a2a (${describeA2A(a2a)})\n`,
         );
+      }
+      if (mcp) {
+        const httpUrl = server.url.replace(/^ws/, "http").replace(/\/+$/, "");
+        err(`MCP on ${httpUrl}/mcp (${describeMcp(mcp)})\n  ${mcpAddHint(httpUrl)}\n`);
       }
       // `serve`'s own config decides its titles; no Ink here, so its log line.
       const titleNotice = titleConfigNotice(config);

@@ -58,6 +58,9 @@ function say(text: string): Response {
 function endpoint(answers: Answer[]) {
   const calls: string[] = [];
   const server = Bun.serve({
+    // Loopback only: a dual-stack port-0 server loses its IPv4 traffic to another
+    // worker's explicit `127.0.0.1:P` bind on macOS (AGENTS.md §9) → a stray 404.
+    hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
       calls.push(String(req.url));
@@ -291,6 +294,9 @@ test("(2) a carried contextWindow never moves a serve daemon's own window", asyn
   // from the request the daemon sends.
   const bodies: string[] = [];
   const server = Bun.serve({
+    // Loopback only: a dual-stack port-0 server loses its IPv4 traffic to another
+    // worker's explicit `127.0.0.1:P` bind on macOS (AGENTS.md §9) → a stray 404.
+    hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
       bodies.push(await req.text());
@@ -327,6 +333,9 @@ test("(2) a carried contextWindow never moves a serve daemon's own window", asyn
 test("(R5) a restarted daemon: the client re-opens the same session and sends", async () => {
   const bodies: string[] = [];
   const server = Bun.serve({
+    // Loopback only: a dual-stack port-0 server loses its IPv4 traffic to another
+    // worker's explicit `127.0.0.1:P` bind on macOS (AGENTS.md §9) → a stray 404.
+    hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
       bodies.push(await req.text());
