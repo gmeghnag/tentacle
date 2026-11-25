@@ -22,7 +22,7 @@ Live test T1.9 (`.tentacle/tmp/anthropic-tests/RESULTS.md`): tentacle sent no `c
 - **Design:** pure module `packages/providers/src/anthropic-cache.ts` (`applyCacheControl`) applied in `stream()` only after `buildPayload`: breakpoint 1 = the end of `system` (string → one text block; with no system, the last tool), covering tools+system; breakpoint 2 = last block of the last message (string content → text block), so round N+1 reads round N's prefix. 2 of 4 breakpoints used. `buildPayload` and `count_tokens` are unchanged; the OpenAI provider is untouched.
 - **Minimum cacheable prefix:** a prefix below the model's minimum is silently not cached by the server (no error, no surcharge); the real prefix is ~20k, far above it.
 - **Compaction / `context_reset`:** they rewrite the history, so the message breakpoint misses once (a cache write of the shorter history); the tools+system breakpoint still hits.
-- **Failure modes:** empty messages/content → no breakpoint, no crash; no system and no tools → only the message breakpoint; content > 20 blocks between breakpoints is not an issue (a round adds ≤ a few messages).
+- **Failure modes:** empty messages/content → no breakpoint, no crash; no system and no tools → only the message breakpoint; the API looks back ~20 content BLOCKS from a breakpoint, and a wide parallel round adds more (text + N tool_use + N tool_result) — superseded by Fix round 1 (third breakpoint on the previous user message).
 - **Files:** `packages/providers/src/anthropic-cache.ts` (new), `anthropic-provider.ts` (call in `stream`), `packages/providers/test/anthropic-cache.test.ts`.
 - **Tests:** exact request shape (system block, last block only, no-system case, empty), body through `AnthropicProvider.stream` with injected `fetch` (2 breakpoints; tools+system byte-identical across rounds; `buildPayload` stays clean).
 
@@ -41,6 +41,15 @@ Done as planned, no drift. Red: with the `applyCacheControl` call commented out 
 | 3 | 2 | 69 | 20830 | 0.000253 |
 
 Before: every request ≈ 20.7k uncached ≈ $0.00208+ (T1.10 rows). Measured saving per follow-up request ≈ **88%** (0.00208 → 0.00025); round 1 pays a one-time 1.25× write surcharge (+$0.0005). Fix cost $0.0031, ledger rows in `LEDGER.md` (cap $0.30).
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+- **M1 (one-shot writes never read):** `applyCacheControl` skips the message breakpoint when the payload has a single message (compaction summary, tool-output summary, title); tools+system keep theirs.
+- **M2 (20-block lookback):** a third breakpoint on the last block of the previous user message (= the previous request's last message), so round N+1 hits round N's entry whatever the round's width. Now up to 3 of 4 breakpoints.
+- **LOW 3 (documented):** besides compaction/`context_reset`, these also rewrite the prefix, each a one-time miss by design: `contextPrune`, old-image projection at turn boundaries, capability toggles (`projectTools`), and the voice spoken line (joins into `system`, so a voice↔text switch also misses tools+system; no tools-only breakpoint was added).
+- **Tests (`anthropic-cache.test.ts`, 7 pass):** one-shot → system only; 12 parallel calls → exactly one breakpoint on the previous user message's last block; stream test now expects 1 breakpoint (single message) then 3. Red/mutation: `messages.length < 1` (M1 reverted) → 2 fail; previous-user `mark` removed (M2 reverted) → 4 fail; restored byte-identical (`cmp`). `bun test packages/providers`: 225 pass; typecheck and biome clean. Not re-verified live (the 3rd breakpoint adds no cost on a 3-round run; the ~20-block lookback is the API's documented behaviour).
 
 ## Review (Round 1)
 

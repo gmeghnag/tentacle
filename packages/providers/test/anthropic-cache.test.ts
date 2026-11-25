@@ -13,13 +13,58 @@ describe("applyCacheControl", () => {
   test("system becomes one cached block; last user string message is cached", () => {
     const p: Record<string, unknown> = {
       system: "SYS",
-      messages: [{ role: "user", content: "hi" }],
+      messages: [
+        { role: "user", content: "q" },
+        { role: "assistant", content: "a" },
+        { role: "user", content: "hi" },
+      ],
     };
     applyCacheControl(p);
     expect(p.system).toEqual([{ type: "text", text: "SYS", cache_control: EPH }]);
-    expect(p.messages).toEqual([
-      { role: "user", content: [{ type: "text", text: "hi", cache_control: EPH }] },
-    ]);
+    const m = p.messages as { content: unknown }[];
+    expect(m[2]?.content).toEqual([{ type: "text", text: "hi", cache_control: EPH }]);
+    expect(count(m[1])).toBe(0);
+    expect(count(m[0])).toBe(1); // the previous user message
+  });
+
+  test("a one-shot (single message) request gets the system breakpoint only", () => {
+    const p: Record<string, unknown> = {
+      system: "S",
+      messages: [{ role: "user", content: "big" }],
+    };
+    applyCacheControl(p);
+    expect(count(p.messages)).toBe(0);
+    expect(count(p.system)).toBe(1);
+  });
+
+  test("the previous user message is a breakpoint too: a 12-call round stays within reach", () => {
+    const calls = Array.from({ length: 12 }, (_, i) => `t${i}`);
+    const p: Record<string, unknown> = {
+      system: "S",
+      messages: [
+        { role: "user", content: "q" },
+        {
+          role: "assistant",
+          content: calls.map((id) => ({ type: "tool_use", id, name: "t", input: {} })),
+        },
+        {
+          role: "user",
+          content: calls.map((id) => ({ type: "tool_result", tool_use_id: id, content: "r" })),
+        },
+        { role: "assistant", content: "x" },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "z", content: "r" }] },
+      ],
+    };
+    applyCacheControl(p);
+    const m = p.messages as { content: Record<string, unknown>[] | string }[];
+    expect(count(m[0])).toBe(0);
+    expect(count(m[1])).toBe(0);
+    const prev = m[2]?.content as Record<string, unknown>[];
+    expect(prev[11]?.cache_control).toEqual(EPH);
+    expect(count(prev)).toBe(1);
+    expect(count(m[3])).toBe(0);
+    expect(count(m[4])).toBe(1);
+    expect(count(p)).toBeLessThanOrEqual(4);
   });
 
   test("last block of the last message (tool_result) gets the breakpoint, earlier ones not", () => {
@@ -39,7 +84,7 @@ describe("applyCacheControl", () => {
     };
     applyCacheControl(p);
     const msgs = p.messages as { content: unknown }[];
-    expect(count(msgs[0])).toBe(0);
+    expect(count(msgs[0])).toBe(1); // the previous user message (previous request's last)
     expect(count(msgs[1])).toBe(0);
     const last = msgs[2]?.content as Record<string, unknown>[];
     expect(last[0]?.cache_control).toBeUndefined();
@@ -102,8 +147,8 @@ describe("AnthropicProvider.stream request body", () => {
       }
     }
     expect(bodies[0]?.system).toEqual([{ type: "text", text: "SYS", cache_control: EPH }]);
-    expect(count(bodies[0])).toBe(2);
-    expect(count(bodies[1])).toBe(2);
+    expect(count(bodies[0])).toBe(1); // one message: system only
+    expect(count(bodies[1])).toBe(3); // system + last + previous user
     // The cached prefix (tools + system) is identical between rounds.
     expect(JSON.stringify([bodies[0]?.tools, bodies[0]?.system])).toBe(
       JSON.stringify([bodies[1]?.tools, bodies[1]?.system]),
