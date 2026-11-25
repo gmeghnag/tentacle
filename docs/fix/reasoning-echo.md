@@ -651,6 +651,61 @@ arrays vs protocol's inferred mutable ones — the core↔wire seams already cas
 
 **Status: s1 DONE.** s2–s5 untouched.
 
+### s2 — OpenAI provider decode / encode / D9 + T2
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+**Load-bearing check, re-run first:** the s2 links (`openai-provider.ts`
+decode keeps nothing; `toWireMessage` writes role/content/tool_calls/
+tool_call_id only) were read in the worktree sources as the plan states. Red
+confirmed by the new test file below (5 of 9 fail on the buggy code, on the
+assertions: no `done.reasoning`, no echoed field, no retry).
+
+**As built (red first, then green):**
+1. `packages/providers/test/reasoning-echo-openai.test.ts` (new, T2): decode
+   (accumulate across deltas, field kept, none → no record); encode (both
+   fields echoed, other `source` not sent and not deleted, anthropic-format
+   record not sent); D9 (one retry without the field and latched only after
+   success; a 400 for another cause fails both and is NOT latched; no echoed
+   reasoning → no retry).
+2. `packages/providers/src/openai-provider.ts`: `done` carries
+   `reasoning` (`doneEvent` takes it; text accumulated, FIRST field name kept,
+   attached only if non-empty); `ownOpenAIReasoning` (D5: assistant message,
+   `source === this.id`, `format: "openai"`); `buildPayload`/`wireMessages`/
+   `toWireMessage` take an `echoSource` and write `wire[field] = text`;
+   `post` takes `echo`; `stream` computes `echoing` (own record present and
+   not latched) and, on a 400 with `echoing`, retries once without it and
+   sets `reasoningEchoRefused = res.ok` (per instance, F9 pattern).
+3. The `/apply-template` token-count path (`countTokens`) builds its payload
+   WITH the echo (unless latched), so the measured prompt matches what is sent.
+4. `test/openai-provider.test.ts`: the existing `done` expectation now
+   includes the `reasoning` record (the stream there does emit reasoning).
+
+**Drift:** none from D2/D3/D5/D9. Note: the echo retry also drops the
+"do not reason" switches if F9 latched in the same request (`off = wantOff &&
+!reasoningSwitchesRefused`), so the two fallbacks compose.
+
+**Mutations (each reverted, `rg MUTATION` clean; script
+`.tentacle/tmp/reasoning-echo/mutate.ts`):**
+
+| mutation | tests failing |
+|---|---|
+| M1 no echo write in `toWireMessage` | 3 (echoed same field; both D9 tests) |
+| M2 no `source` check | 1 (other source not sent) |
+| M3 latch always (`= true`) | 1 (400 other cause not latched) |
+| M4 no echo retry | 2 (both D9 tests) |
+| M5 field name not kept | 1 (`reasoning` remembered) |
+| M6 no record on `done` | 2 (both decode tests) |
+
+**Verification:** `bun test packages/providers` → 234 pass, 0 fail; `bunx biome
+check` on the 3 touched files → clean; `tsc --noEmit` shows only the
+pre-existing `serve-mcp-e2e.test.ts` missing-module errors (the
+`@modelcontextprotocol/*` deps are not installed in this worktree), none in
+providers. Changelog fragment `changelog.d/reasoning-echo.fixed.md` already
+written in s1 (unchanged). Whole-repo gate: the orchestrator's.
+
+**Status: s2 DONE.** s3–s5 untouched.
+
 ## Review
 
 *(empty until Execution)*
