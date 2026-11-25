@@ -424,7 +424,14 @@ export function createSubagentRunner(deps: SubagentDeps): {
         ...(model !== undefined ? { model } : {}),
       });
       // D4: its asks go through the same gate inputs a tentacle child's would.
-      return runHarnessChild(type, opts, controls, deps.harness, {
+      // A remote question's `parent` route reaches the parent through the
+      // session's `notify` (docs/feat/a2a-client.md C6), the same seam as
+      // `agent_notify`; absent (`subagents.twoWay` off) → no parent route.
+      const harnessDeps =
+        deps.harness !== undefined && deps.notify !== undefined && deps.harness.notify === undefined
+          ? { ...deps.harness, notify: deps.notify }
+          : deps.harness;
+      return runHarnessChild(type, opts, controls, harnessDeps, {
         requester: childRequester ?? denyAll,
         ...(deps.hooks
           ? {

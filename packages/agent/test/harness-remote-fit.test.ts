@@ -4,7 +4,7 @@
  * (docs/feat/subagent-harness-runners.md, slice shr-4).
  */
 import { describe, expect, test } from "bun:test";
-import { SubagentFailure, type ToolProgressEvent } from "@tentacle/core";
+import { AgentInbox, SubagentFailure, type ToolProgressEvent } from "@tentacle/core";
 import type { ModelProvider } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import { type HarnessDeps, harnessModeIssue } from "../src/harness/child.ts";
@@ -134,7 +134,26 @@ function runner(adapter: HarnessAdapter, extra: Extra = {}, type = REMOTE_TYPE) 
     tools: new ToolRegistry(),
     types: [type],
     harness,
+    // The consent ask (a2c-3, C3) is answered yes: these tests pin the paths after it.
+    requestPermission: async () => ({ allowed: true }),
   });
+}
+
+/** A background child's inbox + the parent's `notify` (C6 `parent` route). */
+function parentRoute(reply: string | undefined) {
+  const inbox = new AgentInbox();
+  const notes: string[] = [];
+  return {
+    inbox,
+    notes,
+    notify: (id: string, text: string) => {
+      notes.push(`${id}:${text}`);
+      if (reply !== undefined) {
+        inbox.push(`[message from the parent agent] ${reply}`, "agent", reply);
+      }
+      return { ok: true as const, wakes: true };
+    },
+  };
 }
 
 async function failureOf(p: Promise<unknown>): Promise<SubagentFailure> {
@@ -193,18 +212,18 @@ describe("remote fit: INPUT_REQUIRED routing (Owner A9)", () => {
     if (d.allow) run.push({ kind: "end", status: "completed", text: `used ${String(d.input)}` });
   };
 
-  test("parent: the background child's question goes to askParent; its reply is answered", async () => {
+  test("parent: the background child's question reaches the parent; its RAW reply is answered", async () => {
     const run = new ScriptRun("confirmed", answering);
     run.push(ask);
-    const seen: string[] = [];
+    const route = parentRoute("main");
     const result = await runner(remoteAdapter([run]), {
       instance: { inputFrom: "parent" },
-      askParent: async (id, q) => {
-        seen.push(`${id}:${q}`);
-        return "main";
-      },
-    }).run(OPTS, { agentId: "sa-3", signal: new AbortController().signal });
-    expect(seen).toEqual(["sa-3:Which branch?"]);
+      notify: route.notify,
+    }).run(OPTS, { agentId: "sa-3", signal: new AbortController().signal, inbox: route.inbox });
+    expect(route.notes).toHaveLength(1);
+    expect(route.notes[0]).toContain("sa-3:Remote question from a2a:acme");
+    expect(route.notes[0]).toContain("Which branch?");
+    // The sender's words, never the «[message from the parent agent] …» wrapping.
     expect(run.answers).toEqual([{ askId: "q1", decision: { allow: true, input: "main" } }]);
     expect(result.report).toContain("used main");
   });
@@ -212,37 +231,40 @@ describe("remote fit: INPUT_REQUIRED routing (Owner A9)", () => {
   test("user: the question goes to askUser", async () => {
     const run = new ScriptRun("confirmed", answering);
     run.push(ask);
+    const route = parentRoute("WRONG");
     const result = await runner(remoteAdapter([run]), {
       instance: { inputFrom: "user" },
       askUser: async () => "dev",
-      askParent: async () => "WRONG",
-    }).run(OPTS, { agentId: "sa-1" });
+      notify: route.notify,
+    }).run(OPTS, { agentId: "sa-1", inbox: route.inbox });
+    expect(route.notes).toEqual([]);
     expect(result.report).toContain("used dev");
   });
 
-  test("both: the first answer wins and the loser is withdrawn", async () => {
+  test("both: the first answer wins and the loser (the inbox wait) is withdrawn", async () => {
     const run = new ScriptRun("confirmed", answering);
     run.push(ask);
-    let parentSignal: AbortSignal | undefined;
+    const route = parentRoute(undefined);
     const result = await runner(remoteAdapter([run]), {
       instance: { inputFrom: "both" },
       askUser: async () => "from-user",
-      askParent: (_id, _q, signal) => {
-        parentSignal = signal;
-        return new Promise<string>(() => {});
-      },
-    }).run(OPTS, { agentId: "sa-2" });
+      notify: route.notify,
+    }).run(OPTS, { agentId: "sa-2", inbox: route.inbox });
     expect(result.report).toContain("used from-user");
-    expect(parentSignal?.aborted).toBe(true);
+    expect(route.notes).toHaveLength(1);
+    expect(run.answers).toHaveLength(1);
+    // Withdrawn: a later text is queued (reported unread), not taken as an answer.
+    route.inbox.push("late");
     expect(run.answers).toHaveLength(1);
   });
 
   test("no route (foreground, parent only) → the child ends with the question, never waits", async () => {
     const run = new ScriptRun();
     run.push({ kind: "started", handle: HANDLE, detail: {} }, ask);
+    const route = parentRoute("never");
     const result = await runner(remoteAdapter([run]), {
       instance: { inputFrom: "parent" },
-      askParent: async () => "never",
+      notify: route.notify,
     }).run(OPTS);
     expect(result.report).toContain("needs input to continue: Which branch?");
     expect(result.report).toContain("task-77");

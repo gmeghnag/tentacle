@@ -324,7 +324,7 @@ export function claudeHarness(
   options: NonNullable<BuildAgentOptions["harnesses"]>,
 ): { readonly deps: HarnessDeps; readonly type: AgentType; readonly note: string } | undefined {
   const h = config.harnesses[CLAUDE_CODE_ID];
-  if (h === undefined || !h.enabled) {
+  if (h === undefined || h.adapter !== "claude-code" || !h.enabled) {
     return undefined;
   }
   const path = (options.which ?? ((command: string) => Bun.which(command)))(h.command);

@@ -744,6 +744,12 @@ and `a2c-6` may run in parallel after `a2c-4` (disjoint files).
 | 7 | `a2c-7-proposed-agents` | `a2a_add_agent` tool, per-session registry, SSRF wiring, `/clear` drop | M · load-bearing (outbound to model-chosen URLs) | opus |
 | 8 | `a2c-8-e2e` | tentacle → tentacle e2e on loopback, README, TODO follow-ups | S · contained | sonnet |
 
+**Plan fix (a2c-3 execution, 2026-11-25):** Files #7's `a2aHarnesses` wiring
+(instances + `a2a:<name>` types, card blurbs at build, `model` refused for
+`a2a:`) and its three wiring tests need a2c-1's `cardBlurb` and a2c-2's adapter,
+neither of which exists; they move to the end of `a2c-2-transport` (or a
+`a2c-3b-wiring` run right after it). a2c-3 shipped everything else.
+
 SLICES: a2c-1-mapping=sonnet a2c-2-transport=opus a2c-3-seam=opus a2c-4-question-protocol=opus a2c-5-question-tui=sonnet a2c-6-question-mobile=sonnet a2c-7-proposed-agents=opus a2c-8-e2e=sonnet
 
 ## Execution
@@ -770,3 +776,98 @@ SLICES: a2c-1-mapping=sonnet a2c-2-transport=opus a2c-3-seam=opus a2c-4-question
   its tests, per Tests a2c-1), then a2c-2; or authorise a2c-2 to absorb
   a2c-1's module. Also note `packages/agent/smoke-a2a.ts` sits in the package
   root, not a scratch dir — a2c-1 should decide whether it stays.
+
+### a2c-3-seam — PARTIAL (wiring step blocked on a2c-1/a2c-2)
+
+*— claude-opus-5-5, 2026-11-25*
+
+- **Load-bearing check, runner half — holds:** `bun test
+  packages/agent/test/harness-remote-fit.test.ts` → 13 pass / 0 fail (before
+  any edit). The client half still rests on the Context's spike: a2c-1's
+  `a2a-map.ts` and a2c-2's `a2a.ts` / `fake-a2a.ts` do not exist on the branch
+  (`rg -l "a2a-map|cardBlurb|fake-a2a" packages apps` → only
+  `packages/agent/smoke-a2a.ts`).
+- **Done, in dependency order:**
+  1. `packages/core/src/agent-inbox.ts:168` — `push(text, from, raw = text)`
+     keeps the sender's own words; `next(signal)` takes the oldest text or
+     waits for the next push (handed over in the same synchronous stretch and
+     counted read, so the "accepted ⇒ read or handed back" property holds);
+     `close`/`closeIfEmpty`/abort release a waiter with `undefined`.
+     `agent-jobs.ts` `message` passes `text` as `raw`.
+  2. `packages/agent/src/harness/permissions.ts:204` `authorizeRemoteSend` —
+     C3/C4: `redactText` ALWAYS, then the session's `PermissionGate` on a stub
+     tool named `adapter.id` (`a2a:<name>`; a session answer = a whole-tool
+     grant on that agent), the child's requester (`subagentRequester` → the ONE
+     broker) with title «Send a task to `<name>`» and detail «`<origin>` ·
+     <redacted text, first 2000 + (+N chars)>»; a hook's rewrite is what leaves,
+     redacted again.
+  3. `packages/agent/src/harness/child.ts` — consent before `adapter.start`
+     (`:274`) and before every `run.answer` to an `input` question (`:411`)
+     for `kind: "remote"`; refused → `SubagentFailure("<type>: not sent: …")` /
+     `"reply not sent: …"` (the remote cancelled). `HarnessInstance.origin`
+     (`:57`) carries the pinned origin into the ask. `HarnessDeps.askParent`
+     replaced by `notify` (`:80`): the `parent` route (`routeInput`, `:557`)
+     notifies the parent with the question marked remote and waits on
+     `controls.inbox.next` — the RAW reply is what is answered. C7: the reattach
+     backoff `delay` takes the run's signal; a stop during it ends the run
+     `cancelled` with «may still be running (task …)», no further reattach.
+  4. `packages/agent/src/subagent.ts:430` — the session's `notify` flows into
+     the harness deps.
+  5. Config (C1): `schema.ts:118-135` (`A2A_INSTANCE_NAME`, `cardUrlOk`:
+     https, http only for loopback, no userinfo) and a `harnesses` union
+     (`claude-code` shape | `adapter: "a2a"` shape, both `.strict()` — no
+     `token` field exists); `resolve.ts:479` `ResolvedA2AHarness` (defaults
+     `DEFAULT_HARNESS_A2A`: on, `inputFrom: "user"`, 30 min); `key-docs.ts`
+     (`card`, `tokenCommand`, `description`, `inputFrom`, adapter enum) and
+     README's table regenerated (`bun run docs:config`). `wiring.ts`
+     `claudeHarness` narrows on `adapter === "claude-code"` (type fix only).
+  6. `changelog.d/a2a-client.added.md` (describes the feature as merged with
+     the whole branch).
+- **Tests:** `packages/agent/test/harness-a2a-seam.test.ts` (new, 13: consent
+  attributed to the call/`origin: "subagent"` before any start; auto mode via
+  the broker's `autoApproves`; "always" covers the same agent, not another;
+  refused / no broker → nothing started; secret redacted in ask AND sent text;
+  hook rewrite / hook block; detail cap; parent route RAW reply after a second
+  consent; refused reply never answered; abortable backoff);
+  `harness-remote-fit.test.ts` updated (an approving requester — the gate is
+  new — and the `parent` tests now go through a real `AgentInbox` + `notify`);
+  `core/test/agent-inbox.test.ts` +5 (`next`); `config/test/harness-keys.test.ts`
+  +5. Narrow runs: 618 pass / 0 fail (config, harness, inbox, agent-jobs) and
+  38 / 0 (agent-message / agent-control / notify). Biome on the changed files:
+  clean.
+- **Mutations (each applied alone, test red, reverted; files diffed identical
+  to a backup afterwards):**
+  | mutation | result |
+  |---|---|
+  | M1 no consent before `start` | seam: 12 fail / 1 pass |
+  | M2 a reply skips the gate | seam: 2 fail (parent RAW, «reply not sent») |
+  | M3 parent route answers the wrapped `text` | seam 1 fail + fit 1 fail |
+  | M4 outbound not redacted (`authorizeRemoteSend`) | seam: 1 fail (masked test) |
+  | M5 backoff ignores the signal | seam `-t backoff`: timed out (red) |
+  | M6 a push to a waiting `next` is queued | inbox: 1 fail (timeout) |
+  | M7 a2a shape `.passthrough()` | config: literal `token` test red |
+  | M8 `http:` allowed for any host | config: card-URL test red |
+  Red-before-green was shown by mutation, not by test-first order: the code
+  and the seam tests were written in the same step.
+- **Drift from Implementation:**
+  - **BLOCKED — Files #7 wiring** (`a2aHarnesses`, card blurbs at build with
+    the 2 s budget, `model` refused for `a2a:`) and its tests (pod build offers
+    no `a2a:` type; blurb frozen; «not loaded») — they need a2c-1's
+    `cardBlurb` and a2c-2's adapter. Moved (plan fix under Slices). So an
+    `a2a` entry now PARSES but offers no type yet.
+  - C4 redaction lives in the runner's consent step (`authorizeRemoteSend`),
+    so it holds for any remote adapter; a2c-1's outbound builder may still
+    redact (idempotent), it is no longer the only place.
+  - Seam tests use a scripted remote adapter, not `fake-a2a.ts` (absent).
+  - Not specified by the plan, chosen here: a refused reply ends the run as a
+    failure «reply not sent» (remote cancelled); an abort while the consent ask
+    is open ends as «not sent» (failure), not `cancelled`.
+  - The `parent` route takes the inbox's NEXT text from either sender (the
+    parent's `agent_control message` or the user's panel), and a text already
+    queued before the question answers it. Debt: say so in the notice, or mark
+    the inbox position at ask time.
+  - One unrelated flake seen once: `harness-permissions.test.ts` «outside, `..`,
+    through a symlink…» timed out at 5 s when run together with two other
+    files; 17/17 alone.
+- **Gate:** not run here (the orchestrator's script runs it). Per-package
+  `tsc --noEmit -p packages/{config,agent,core}`: clean.

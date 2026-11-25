@@ -400,10 +400,14 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `detach.keepAwake` | — | true | Hold a macOS sleep assertion while a turn of a detached run runs. |
 | `engine` | `TENTACLE_ENGINE` | "kubernetes" | Default engine of `run`/`attach`: kubernetes, docker or podman; `--engine` wins, unknown refused. |
 | `harnesses.*.adapter` | — | — | Which adapter the instance runs on; defaults to the instance name. |
+| `harnesses.*.card` | — | — | An `a2a` agent's card URL (`https:`; `http:` only for localhost). |
 | `harnesses.*.command` | — | — | The executable to run (unset: `claude`). |
+| `harnesses.*.description` | — | — | Your description of an `a2a` agent, shown to the model first. |
 | `harnesses.*.enabled` | — | — | Offer this harness's sub-agent type (default on). |
-| `harnesses.*.idleMinutes` | — | — | Hang guard: a run with no output for this many minutes is stopped (unset: 15). |
+| `harnesses.*.idleMinutes` | — | — | Hang guard: a run with no output for this many minutes is stopped (unset: 15; `a2a`: 30). |
+| `harnesses.*.inputFrom` | — | — | Who answers an `a2a` agent's questions: `user` (default), `parent` or `both`. |
 | `harnesses.*.model` | — | — | The model when an `agent_task` call names none (unset: `opus`). |
+| `harnesses.*.tokenCommand` | — | — | A command printing an `a2a` agent's bearer token (never the token itself). |
 | `hooks` | — | — | Shell commands run on agent events, with a JSON input on stdin. |
 | `liveActivity.enabled` | — | `true` | Whether a `serve` starts a live activity at all. |
 | `liveActivity.startAfterSeconds` | — | `20` | How long a turn must run before a phone that is not watching it gets an activity. |
