@@ -622,10 +622,24 @@ export function replaceEntryType(m: object): "replace" | "media_replace" {
   return hasAttachments(m) ? "media_replace" : "replace";
 }
 
+type WireReasoningBody = NonNullable<WireChatMessage["reasoning"]>["body"];
+type AnthropicReasoningBody = Extract<WireReasoningBody, { format: "anthropic" }>;
+/** A reasoning record as both ends hold it: core's readonly one, or the wire's parsed one. */
+type HeldReasoningRecord = {
+  readonly source: string;
+  readonly body:
+    | Readonly<Extract<WireReasoningBody, { format: "openai" }>>
+    | {
+        readonly format: "anthropic";
+        readonly blocks: ReadonlyArray<Readonly<AnthropicReasoningBody["blocks"][number]>>;
+      };
+};
+
 /** A message as an emitter holds it: core's readonly one, or the wire's parsed one. */
 export type AppendableMessage = Readonly<
-  Omit<WireChatMessage, "attachments" | "toolCalls" | "media">
+  Omit<WireChatMessage, "attachments" | "toolCalls" | "media" | "reasoning">
 > & {
+  readonly reasoning?: HeldReasoningRecord;
   readonly media?: ReadonlyArray<Readonly<NonNullable<WireChatMessage["media"]>[number]>>;
   readonly toolCalls?: ReadonlyArray<{
     readonly id: string;
@@ -759,8 +773,10 @@ export type Sha256 = (text: string) => string;
 
 /** A message as both ends hold it (the wire's parsed object, or core's readonly one). */
 export type DigestibleMessage = Readonly<
-  Omit<WireChatMessage, "toolCalls" | "attachments" | "media">
+  Omit<WireChatMessage, "toolCalls" | "attachments" | "media" | "reasoning">
 > & {
+  /** Never hashed (like `media`): core's readonly record is accepted. */
+  readonly reasoning?: HeldReasoningRecord;
   /** Display only, never hashed (like `note`): core's readonly array is accepted. */
   readonly media?: ReadonlyArray<Readonly<NonNullable<WireChatMessage["media"]>[number]>>;
   readonly toolCalls?: readonly {

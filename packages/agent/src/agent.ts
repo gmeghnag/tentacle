@@ -39,6 +39,7 @@ import {
   NOTE_KIND,
   PROJECT_PATHS,
   type PermissionRequester,
+  type ReasoningRecord,
   type TokenCounter,
   type Tool,
   type ToolCall,
@@ -1680,6 +1681,12 @@ export class Agent {
       const toolCalls: ToolCall[] = [];
       /** Why the provider's stream ended; `undefined` from a provider that does not say. */
       let stopReason: ModelStopReason | undefined;
+      /**
+       * The model's own reasoning for this round, as its provider must get it
+       * back (docs/fix/reasoning-echo.md D4). Opaque here: only stored on the
+       * assistant message; the provider that produced it decides the echo.
+       */
+      let reasoning: ReasoningRecord | undefined;
       /** How long this round thought: a placeholder kept with its message (thought-placeholder). */
       const thinking = new ThinkingClock(this.config.now ?? (() => performance.now()));
       this.notifyModelRequest(sessionId, iteration, request);
@@ -1699,6 +1706,7 @@ export class Agent {
               break;
             case "done":
               stopReason = event.stopReason;
+              reasoning = event.reasoning;
               if (event.usage) {
                 this.anchorContext(messages, sent, event.usage);
                 this.addSpend(messages, event.usage);
@@ -1803,10 +1811,13 @@ export class Agent {
         };
       }
 
+      // Only a round that reached a normal end stores its reasoning: the throw
+      // paths above (a failed or cut stream) never do (D4).
+      const echo = reasoning ? { reasoning } : {};
       messages.push(
         toolCalls.length > 0
-          ? { role: "assistant", content: text, toolCalls, ...thinking.fact() }
-          : { role: "assistant", content: text, ...thinking.fact() },
+          ? { role: "assistant", content: text, toolCalls, ...thinking.fact(), ...echo }
+          : { role: "assistant", content: text, ...thinking.fact(), ...echo },
       );
 
       // Any real progress (text or a tool call) resets the stall counter.
@@ -2017,8 +2028,13 @@ export class Agent {
         };
         this.notifyModelRequest(sessionId, "final", finalRequest);
         const finalThinking = new ThinkingClock(this.config.now ?? (() => performance.now()));
+        /** The report's own reasoning, stored with it (D4). */
+        let finalReasoning: ReasoningRecord | undefined;
         for await (const event of this.config.model.stream(finalRequest)) {
           finalThinking.see(event);
+          if (event.type === "done") {
+            finalReasoning = event.reasoning;
+          }
           if (event.type === "text") {
             finalText += event.delta;
             yield { type: "text", delta: event.delta };
@@ -2049,7 +2065,12 @@ export class Agent {
         }
         // Persist only the summary (not the synthetic nudge), so history stays clean.
         if (finalText.trim() !== "") {
-          messages.push({ role: "assistant", content: finalText, ...finalThinking.fact() });
+          messages.push({
+            role: "assistant",
+            content: finalText,
+            ...finalThinking.fact(),
+            ...(finalReasoning ? { reasoning: finalReasoning } : {}),
+          });
         }
       } catch (error) {
         if (signal?.aborted) {

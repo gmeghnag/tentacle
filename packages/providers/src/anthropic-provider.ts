@@ -1,8 +1,10 @@
 import type {
+  AnthropicReasoningBlock,
   ChatMessage,
   ChatRequest,
   ModelProvider,
   ModelStopReason,
+  ReasoningRecord,
   StreamEvent,
   ToolCall,
   ToolDefinition,
@@ -29,7 +31,9 @@ import {
  * the Messages wire format behind the core `StreamEvent` contract, mirroring
  * `openai-provider.ts`:
  *   - `text_delta`            → `text`
- *   - `thinking_delta`        → `reasoning`
+ *   - `thinking_delta`        → `reasoning`; the closed, signed `thinking` and
+ *     `redacted_thinking` blocks → `done.reasoning`, sent back first on that
+ *     assistant message (docs/fix/reasoning-echo.md D2/D3)
  *   - `tool_use` blocks (id/name from `content_block_start`, `input` JSON
  *     accumulated from `input_json_delta`) → one `tool_call` per block, emitted
  *     once the message completes — never for a call cut short (`max_tokens`,
@@ -104,6 +108,12 @@ interface OpenBlock {
   readonly name: string;
   /** tool_use only: accumulated `input_json_delta` partials. */
   args: string;
+  /** thinking only: the accumulated `thinking_delta` text (docs/fix/reasoning-echo.md D2). */
+  thinking: string;
+  /** thinking only: its `signature` (from `signature_delta`); unsigned ⇒ never echoed. */
+  signature: string;
+  /** redacted_thinking only: its opaque `data`. */
+  readonly data: string;
 }
 
 export class AnthropicProvider implements ModelProvider {
@@ -137,7 +147,7 @@ export class AnthropicProvider implements ModelProvider {
       stream: _s,
       temperature: _t,
       ...body
-    } = buildPayload(this.config.model, request, this.config.maxTokens, options);
+    } = buildPayload(this.config.model, request, this.config.maxTokens, options, this.id);
     const init: RequestInit = { method: "POST", headers, body: JSON.stringify(body) };
     if (request.signal) {
       init.signal = request.signal;
@@ -180,6 +190,7 @@ export class AnthropicProvider implements ModelProvider {
       request,
       this.config.maxTokens,
       await this.imageOptions(request),
+      this.id,
     );
     applyCacheControl(payload);
     const init: RequestInit = { method: "POST", headers, body: JSON.stringify(payload) };
@@ -199,6 +210,9 @@ export class AnthropicProvider implements ModelProvider {
     }
 
     const blocks = new Map<number, OpenBlock>();
+    // The response's reasoning blocks, closed and complete, in stream order:
+    // handed to the loop on `done` so they can be sent back (D2).
+    const reasoning: AnthropicReasoningBlock[] = [];
     // Completed tool calls are held until the message's stop reason is known:
     // a call cut by `max_tokens` must never reach the agent loop as if whole.
     const toolCalls: StreamEvent[] = [];
@@ -257,6 +271,9 @@ export class AnthropicProvider implements ModelProvider {
               id: block?.id ?? "",
               name: block?.name ?? "",
               args: "",
+              thinking: stringOr(block?.thinking),
+              signature: stringOr(block?.signature),
+              data: stringOr(block?.data),
             });
           } else if (event.type === "content_block_delta") {
             const block = blocks.get(index);
@@ -272,6 +289,7 @@ export class AnthropicProvider implements ModelProvider {
                 break;
               case "thinking_delta":
                 if (delta.thinking) {
+                  block.thinking += delta.thinking;
                   yield { type: "reasoning", delta: delta.thinking };
                 }
                 break;
@@ -280,7 +298,13 @@ export class AnthropicProvider implements ModelProvider {
                   block.args += delta.partial_json;
                 }
                 break;
-              // `signature_delta` (thinking integrity) is not surfaced to the harness.
+              // The thinking block's integrity signature: not shown, but it must
+              // go back with the block (an unsigned thinking block is a 400).
+              case "signature_delta":
+                if (typeof delta.signature === "string") {
+                  block.signature = delta.signature;
+                }
+                break;
               default:
                 break;
             }
@@ -289,6 +313,11 @@ export class AnthropicProvider implements ModelProvider {
             blocks.delete(index);
             if (block?.type === "tool_use") {
               toolCalls.push(toolCallEvent(block));
+            } else if (block) {
+              const kept = reasoningBlock(block);
+              if (kept) {
+                reasoning.push(kept);
+              }
             }
           }
           break;
@@ -358,8 +387,34 @@ export class AnthropicProvider implements ModelProvider {
     // the agent loop re-asks once and shows the notice
     // (docs/fix/truncated-reply-silent.md). No `stop_reason` at all means the
     // body was cut mid-stream, which the loop fails the turn on.
-    yield doneEvent(usage, stopReason === undefined ? "other" : normalizeStopReason(stopReason));
+    yield doneEvent(
+      usage,
+      stopReason === undefined ? "other" : normalizeStopReason(stopReason),
+      reasoning.length > 0
+        ? { source: this.id, body: { format: "anthropic", blocks: reasoning } }
+        : undefined,
+    );
   }
+}
+
+/**
+ * A closed block as the API wants it back, or undefined (D2): a `thinking`
+ * block only with its signature (empty text is fine — `display: "omitted"`;
+ * no signature means a cut stream, and echoing it would 400), a
+ * `redacted_thinking` block only with its data. Anything else is not reasoning.
+ */
+function reasoningBlock(block: OpenBlock): AnthropicReasoningBlock | undefined {
+  if (block.type === "thinking" && block.signature !== "") {
+    return { type: "thinking", thinking: block.thinking, signature: block.signature };
+  }
+  if (block.type === "redacted_thinking" && block.data !== "") {
+    return { type: "redacted_thinking", data: block.data };
+  }
+  return undefined;
+}
+
+function stringOr(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 /**
@@ -375,8 +430,17 @@ function normalizeStopReason(reason: string): ModelStopReason {
 }
 
 /** `done` with its optional fields only when they were measured. */
-function doneEvent(usage: Usage | undefined, stopReason: ModelStopReason): StreamEvent {
-  return usage ? { type: "done", usage, stopReason } : { type: "done", stopReason };
+function doneEvent(
+  usage: Usage | undefined,
+  stopReason: ModelStopReason,
+  reasoning: ReasoningRecord | undefined,
+): StreamEvent {
+  return {
+    type: "done",
+    ...(usage ? { usage } : {}),
+    stopReason,
+    ...(reasoning ? { reasoning } : {}),
+  };
 }
 
 /** A complete `tool_call` event from an accumulated (or flushed) tool_use block. */
@@ -406,12 +470,16 @@ interface AnthropicEvent {
     readonly type?: string;
     readonly id?: string;
     readonly name?: string;
+    readonly thinking?: unknown;
+    readonly signature?: unknown;
+    readonly data?: unknown;
   };
   readonly delta?: {
     readonly type?: string;
     readonly stop_reason?: string;
     readonly text?: string;
     readonly thinking?: string;
+    readonly signature?: unknown;
     readonly partial_json?: string;
   };
   readonly usage?: { readonly output_tokens?: number };
@@ -475,6 +543,8 @@ export function buildPayload(
   req: ChatRequest,
   defaultMaxTokens?: number,
   options: ImageBuildOptions = NO_IMAGES,
+  /** The provider's `id`: only reasoning it produced is sent back (D5). None ⇒ none sent. */
+  echoSource?: string,
 ): Record<string, unknown> {
   const systems: string[] = [];
   const messages: Record<string, unknown>[] = [];
@@ -526,20 +596,31 @@ export function buildPayload(
       continue;
     }
     // user / assistant. Plain text stays a string (the simplest valid form);
-    // only a tool-bearing assistant turn needs content blocks (text + tool_use).
+    // only an assistant turn with tool calls or its own reasoning needs content
+    // blocks (reasoning, text, tool_use).
     const stray = strayRefsText(message, options);
     const calls = message.toolCalls ?? [];
+    const reasoning = echoSource === undefined ? [] : ownReasoningBlocks(message, echoSource);
     if (calls.length === 0) {
       // The API rejects empty content; the loop can persist an empty assistant
       // turn (a stalled round). Dropping it is safe: consecutive same-role
-      // turns are merged by the API.
+      // turns are merged by the API. A reasoning-only turn is dropped too: the
+      // API rejects an assistant turn whose only content is thinking (D3).
       if (message.content === "" && stray === "") {
         continue;
       }
-      messages.push({ role: message.role, content: `${message.content}${stray}` });
-      continue;
+      if (reasoning.length === 0) {
+        messages.push({ role: message.role, content: `${message.content}${stray}` });
+        continue;
+      }
     }
-    const content: Record<string, unknown>[] = [];
+    // Reasoning FIRST, verbatim and in stream order (D3); never last, so a
+    // cache breakpoint never lands on it (anthropic-cache.ts `mark`, P8).
+    const content: Record<string, unknown>[] = reasoning.map((block) =>
+      block.type === "thinking"
+        ? { type: "thinking", thinking: block.thinking, signature: block.signature }
+        : { type: "redacted_thinking", data: block.data },
+    );
     if (message.content !== "" || stray !== "") {
       content.push({ type: "text", text: `${message.content}${stray}` });
     }
@@ -565,6 +646,22 @@ export function buildPayload(
     payload.temperature = req.temperature;
   }
   return payload;
+}
+
+/**
+ * The reasoning blocks to send back on this message: only an assistant
+ * message's own Anthropic-format record, produced by THIS provider (D5 — a
+ * record of another model or format stays in the history, never on this wire).
+ */
+function ownReasoningBlocks(
+  message: ChatMessage,
+  source: string,
+): readonly AnthropicReasoningBlock[] {
+  const record = message.reasoning;
+  if (message.role !== "assistant" || !record || record.source !== source) {
+    return [];
+  }
+  return record.body.format === "anthropic" ? record.body.blocks : [];
 }
 
 function payloadMaxTokens(req: ChatRequest, defaultMaxTokens?: number): number {

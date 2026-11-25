@@ -1011,7 +1011,9 @@ describe("tagged-union shape (what codegen needs)", () => {
     //     same `*Schema`/tagged-union shape, so codegen sees them too.
     // +1: `DocumentSource` (an attached document's ref | text, docs/feat/pdf-read.md D4).
     // +1: `WorkflowParams` (session/workflow by `action`, docs/feat/agent-workflows.md D3).
-    expect(unions).toBe(12);
+    // +2: `AnthropicReasoningBlock` and `ReasoningBody` (an assistant message's
+    //     reasoning record, docs/fix/reasoning-echo.md D8).
+    expect(unions).toBe(14);
   });
 
   test("every $ref names a $def", () => {
