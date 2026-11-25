@@ -37,18 +37,4 @@ describe("nodeProjectFs", () => {
     // A component that is a file: ENOTDIR, the same "nothing there".
     expect(fs.lstat(join(dir, "file.txt", "deeper"))).toBeUndefined();
   });
-
-  test("list returns names with their kinds, one level only", () => {
-    const fs = nodeProjectFs();
-    const entries = fs.list(dir);
-    expect(entries?.find((e) => e.name === "file.txt")?.kind).toBe("file");
-    expect(entries?.find((e) => e.name === "folder")?.kind).toBe("dir");
-    expect(entries?.find((e) => e.name === "link")?.kind).toBe("link");
-  });
-
-  test("list of something that is not a readable directory is `undefined`", () => {
-    const fs = nodeProjectFs();
-    expect(fs.list(join(dir, "nope"))).toBeUndefined();
-    expect(fs.list(join(dir, "file.txt"))).toBeUndefined();
-  });
 });

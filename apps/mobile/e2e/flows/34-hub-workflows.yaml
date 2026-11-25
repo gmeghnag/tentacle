@@ -1,0 +1,62 @@
+appId: so.tentacle.app
+---
+# 34-hub-workflows (docs/fix/workflows-ux.md D6, defect 4): Workflows holds the
+# fan slot Attach used to, and — the whole point of the slice — a project WITH a
+# workflow file reaches the run screen with NO run at all, so the first workflow
+# can be started from the phone.
+#
+# The project the harness runs in carries one workflow, seeded by the run's own
+# setup (`e2e/run.ts`, `.tentacle/workflows/demo-note.yaml`): the hub folds the
+# catalogue with the runs (`workflowsHub`), so the disc is offered rather than
+# dimmed "No workflows in this project".
+#
+# Attach is GONE from the fan (owner 2026-11-24): the composer's `+` is the one
+# chooser, so this flow asserts its absence instead of its chooser.
+# The shared prefix: pair, open this flow's own session, wait for the hub.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+# Scrolled to first: earlier flows' sessions sit above it (newest first),
+# so in the full suite it can be below the fold (docs/fix/mobile-e2e-reds.md).
+- scrollUntilVisible:
+    element:
+      id: "session-${HUBITEM_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${HUBITEM_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "workflows"
+# The fan's original Attach disc is not there any more.
+- assertNotVisible:
+    id: "hub-item-attach"
+- tapOn:
+    id: "hub-item-workflows"
+# The run list opens even with no run (its "No workflow runs" empty state is
+# shown), and its Start entry leads to the catalogue — the way to the FIRST
+# workflow from the phone.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-runs"
+    timeout: 10000
+- assertVisible:
+    id: "workflow-runs-empty"
+- tapOn:
+    id: "workflow-runs-start"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-start"
+    timeout: 10000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "34-hub-workflows-catalogue"

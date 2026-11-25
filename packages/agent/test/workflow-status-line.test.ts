@@ -15,6 +15,9 @@ const step = (id: string, state: string, more: Partial<WorkflowStepRow> = {}): W
   state,
   attempt: 0,
   round: 0,
+  next: null,
+  onFail: null,
+  retry: 0,
   ...more,
 });
 
@@ -30,6 +33,8 @@ const row = (
   state,
   tokens: 4100,
   startedAt: 1,
+  history: [],
+  historyDropped: 0,
   steps,
   ...more,
 });

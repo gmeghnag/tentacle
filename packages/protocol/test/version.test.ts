@@ -29,7 +29,7 @@ describe("the wire version", () => {
     // from `protocol.d/` notes (scripts/protocol-bump.ts `applyPin`); nothing
     // else in the tree spells the number out (scripts/test/protocol-version-literals.test.ts).
     // Mutation: change the number line in `version.ts` alone → red.
-    expect(PROTOCOL_VERSION).toBe(26);
+    expect(PROTOCOL_VERSION).toBe(27);
   });
 
   test("the newest reason comment names the number the file exports", () => {

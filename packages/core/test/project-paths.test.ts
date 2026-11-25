@@ -1,42 +1,62 @@
 /**
  * `packages/core/src/project-paths.ts` (docs/feat/workflows-ui.md D7 v5): the
- * `.tentacle/` names, the ONE no-links check for the files a run reads, and the
- * bounded display-only "workflows higher up" hint.
+ * `.tentacle/` names and the ONE no-links check for the files a run reads.
  *
- * Every case drives an injected `ProjectFs`, so no real filesystem and no
- * `node:fs` is involved (core has none) — and the fake deliberately has no
- * `read` method: a lookup that opened a file would not type-check.
+ * docs/fix/workflows-ux.md S8c removed the neighbouring-folder lookup from it
+ * (`workflowsAbove`, `WorkflowsAboveHint`, their bounds and the `list` read that
+ * existed only to feed them): owner Q2, no "workflows higher up" hint anywhere.
+ * The cases below hold that removal, so it cannot come back by accident.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import * as core from "../src/index.ts";
 import {
   PROJECT_PATHS,
   type ProjectEntryKind,
   type ProjectFs,
   TENTACLE_DIR,
-  WORKFLOWS_ABOVE_DEPTH,
-  WORKFLOWS_ABOVE_MAX_COUNT,
   WORKFLOW_NAME_RE,
   resolveInside,
-  workflowsAbove,
 } from "../src/index.ts";
 
-/** A fake tree: `path` → kind, plus directory listings; no read method, by design. */
-function fakeFs(tree: Record<string, ProjectEntryKind>, dirs: Record<string, string[]> = {}) {
+/** A fake tree: `path` → kind; no listing and no read method, by design. */
+function fakeFs(tree: Record<string, ProjectEntryKind>) {
   const reads: string[] = [];
   const fs: ProjectFs = {
     lstat: (path) => {
       reads.push(`lstat ${path}`);
       return tree[path];
     },
-    list: (dir) => {
-      reads.push(`list ${dir}`);
-      const names = dirs[dir];
-      return names === undefined
-        ? undefined
-        : names.map((name) => ({ name, kind: tree[`${dir}/${name}`] ?? "other" }));
-    },
   };
   return { fs, reads };
+}
+
+const REPO = join(import.meta.dir, "..", "..", "..");
+
+/** Every `.ts`/`.tsx` under `dir`, recursively (never `node_modules`). */
+function sources(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    if (entry === "node_modules") {
+      continue;
+    }
+    const path = join(dir, entry);
+    if (statSync(path).isDirectory()) {
+      out.push(...sources(path));
+    } else if (/\.tsx?$/.test(entry)) {
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+/** A source with its comment lines removed: prose names things the code must not do. */
+function code(src: string): string {
+  return src
+    .split("\n")
+    .filter((line) => !/^\s*(\/?\*|\/\/)/.test(line))
+    .join("\n");
 }
 
 describe("PROJECT_PATHS: the one place the .tentacle/ names are spelled", () => {
@@ -145,116 +165,59 @@ describe("resolveInside: no symbolic link at ANY component (D7 v5)", () => {
   });
 });
 
-describe("workflowsAbove: the bounded, display-only hint", () => {
-  const HOME = "/Users/me";
-  /** A fake tree with a workflows folder holding `names` at `where`. */
-  function withWorkflows(where: string, names: readonly string[]) {
-    const tree: Record<string, ProjectEntryKind> = {
-      [`${where}/${TENTACLE_DIR}`]: "dir",
-      [`${where}/${PROJECT_PATHS.workflows}`]: "dir",
-    };
-    for (const name of names) {
-      tree[`${where}/${PROJECT_PATHS.workflows}/${name}`] = "file";
+describe("S8c: the neighbouring-folder lookup is GONE (owner Q2)", () => {
+  test("core exports no `workflowsAbove` and no bound of it", () => {
+    // Mutation: put `workflowsAbove` (or its depth/count consts) back → red.
+    expect("workflowsAbove" in core).toBe(false);
+    expect("WORKFLOWS_ABOVE_DEPTH" in core).toBe(false);
+    expect("WORKFLOWS_ABOVE_MAX_COUNT" in core).toBe(false);
+  });
+
+  test("`ProjectFs` no longer offers a listing: nothing left needs one", () => {
+    // The only reader of `.tentacle/workflows` above the cwd was the hint. A
+    // seam kept for a deleted feature is the feature, half-removed.
+    const { fs } = fakeFs({});
+    expect("list" in fs).toBe(false);
+  });
+
+  test("no source in the repo spells the lookup or carries the wire field", () => {
+    // The plan's acceptance check, executable. The lookup is gone from every
+    // package and the phone; the FIELD is gone from each workflow carrier (an
+    // unrelated `run.elsewhere` — a detached run held elsewhere — is not this
+    // feature and is left alone). Mutation: add either back → this names the file.
+    const roots = [
+      ...readdirSync(join(REPO, "packages"))
+        .filter((pkg) => statSync(join(REPO, "packages", pkg)).isDirectory())
+        .map((pkg) => join(REPO, "packages", pkg, "src")),
+      join(REPO, "apps", "mobile", "src"),
+    ];
+    const found: string[] = [];
+    for (const root of roots) {
+      for (const file of sources(root)) {
+        const text = readFileSync(file, "utf8");
+        if (/workflowsAbove|WorkflowsAboveHint|WORKFLOWS_ABOVE/.test(text)) {
+          found.push(`workflowsAbove: ${file.slice(REPO.length + 1)}`);
+        }
+      }
     }
-    return fakeFs(tree, { [`${where}/${PROJECT_PATHS.workflows}`]: [...names] });
-  }
-
-  test("found one level up", () => {
-    const { fs } = withWorkflows("/repo", ["ship.yaml", "nightly.yaml"]);
-    expect(workflowsAbove("/repo/apps", fs, { home: HOME })).toEqual({
-      dir: "/repo/.tentacle/workflows",
-      count: 2,
-    });
+    expect(found).toEqual([]);
   });
 
-  test("found at depth 4 (a source folder still finds its project)", () => {
-    const { fs } = withWorkflows("/repo", ["ship.yaml"]);
-    expect(workflowsAbove("/repo/apps/mobile/src/screens", fs, { home: HOME })).toEqual({
-      dir: "/repo/.tentacle/workflows",
-      count: 1,
-    });
-  });
-
-  test("NOT found at depth 5: the walk is bounded", () => {
-    const { fs } = withWorkflows("/repo", ["ship.yaml"]);
-    expect(WORKFLOWS_ABOVE_DEPTH).toBe(4);
-    expect(workflowsAbove("/repo/a/b/c/d/e", fs, { home: HOME })).toBeUndefined();
-  });
-
-  test("never at $HOME nor at / (a dotfiles ~/.tentacle claims no folder)", () => {
-    const atHome = withWorkflows(HOME, ["ship.yaml"]);
-    expect(workflowsAbove(`${HOME}/notes/deep`, atHome.fs, { home: HOME })).toBeUndefined();
-    const atRoot = withWorkflows("", ["ship.yaml"]);
-    expect(workflowsAbove("/repo", atRoot.fs, { home: HOME })).toBeUndefined();
-  });
-
-  test("a symlinked .tentacle or workflows is skipped, never followed", () => {
-    const linked = fakeFs(
-      {
-        "/repo/.tentacle": "link",
-        "/repo/.tentacle/workflows": "dir",
-        "/repo/.tentacle/workflows/ship.yaml": "file",
-      },
-      { "/repo/.tentacle/workflows": ["ship.yaml"] },
+  test("no workflow carrier carries an `elsewhere` field", () => {
+    // Code only: prose elsewhere in these files is about other things. Mutation:
+    // put `elsewhere` back on `WorkflowCatalogueResult` → this names the file.
+    const carriers = [
+      "packages/protocol/src/session.ts",
+      "packages/agent/src/workflow-driver.ts",
+      "packages/cli/src/workflow-files.ts",
+      "packages/daemon/src/hosted-session.ts",
+      "packages/tui/src/workflow-view.ts",
+      "apps/mobile/src/workflow-start.ts",
+      "apps/mobile/src/screens/WorkflowStart.tsx",
+    ];
+    const found = carriers.filter((path) =>
+      code(readFileSync(join(REPO, path), "utf8")).includes("elsewhere"),
     );
-    expect(workflowsAbove("/repo/apps", linked.fs, { home: HOME })).toBeUndefined();
-    const linkedChild = fakeFs(
-      {
-        "/repo/.tentacle": "dir",
-        "/repo/.tentacle/workflows": "link",
-      },
-      { "/repo/.tentacle/workflows": ["ship.yaml"] },
-    );
-    expect(workflowsAbove("/repo/apps", linkedChild.fs, { home: HOME })).toBeUndefined();
-  });
-
-  test("counts only valid *.yaml regular files (a dir, a link and a bad stem do not count)", () => {
-    const mixed = fakeFs(
-      {
-        "/repo/.tentacle": "dir",
-        "/repo/.tentacle/workflows": "dir",
-        "/repo/.tentacle/workflows/ship.yaml": "file",
-        "/repo/.tentacle/workflows/Bad.yaml": "file",
-        "/repo/.tentacle/workflows/notes.txt": "file",
-        "/repo/.tentacle/workflows/linked.yaml": "link",
-        "/repo/.tentacle/workflows/nested.yaml": "dir",
-      },
-      {
-        "/repo/.tentacle/workflows": [
-          "ship.yaml",
-          "Bad.yaml",
-          "notes.txt",
-          "linked.yaml",
-          "nested.yaml",
-        ],
-      },
-    );
-    expect(workflowsAbove("/repo/apps", mixed.fs, { home: HOME })).toEqual({
-      dir: "/repo/.tentacle/workflows",
-      count: 1,
-    });
-  });
-
-  test("an empty workflows folder is not a match; the nearest match further up wins", () => {
-    const both = fakeFs(
-      {
-        "/repo/a/.tentacle": "dir",
-        "/repo/a/.tentacle/workflows": "dir",
-        "/repo/.tentacle": "dir",
-        "/repo/.tentacle/workflows": "dir",
-        "/repo/.tentacle/workflows/x.yaml": "file",
-      },
-      { "/repo/a/.tentacle/workflows": [], "/repo/.tentacle/workflows": ["x.yaml"] },
-    );
-    expect(workflowsAbove("/repo/a/b", both.fs, { home: HOME })).toEqual({
-      dir: "/repo/.tentacle/workflows",
-      count: 1,
-    });
-  });
-
-  test("the count is capped, so a huge folder is not walked for a hint", () => {
-    const names = Array.from({ length: WORKFLOWS_ABOVE_MAX_COUNT + 5 }, (_, i) => `w${i}.yaml`);
-    const { fs } = withWorkflows("/repo", names);
-    expect(workflowsAbove("/repo/apps", fs, { home: HOME })?.count).toBe(WORKFLOWS_ABOVE_MAX_COUNT);
+    expect(found).toEqual([]);
   });
 });

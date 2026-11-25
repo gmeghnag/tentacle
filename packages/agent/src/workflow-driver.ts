@@ -34,10 +34,12 @@ import {
   anySignal,
   asDraft,
   capWorkflowText,
+  edgeKey,
   endReason,
   isCanonical,
   missingInputs,
   next as nextAction,
+  passTarget,
   rerunAt,
   shortHash,
   start as startMachine,
@@ -71,7 +73,25 @@ export interface WorkflowStepRow {
   readonly reason?: string;
   readonly live?: string;
   readonly durationMs?: number;
+  /** The RESOLVED pass target (`passTarget` over the run's frozen spec); `null` = the run ends here. */
+  readonly next: string | null;
+  /** Its `on_fail` with the counter as it stands; `null` = a failure stops the run. */
+  readonly onFail: { readonly goto: string; readonly max: number; readonly taken: number } | null;
+  /** Re-runs of this step after a `fail` (`0..5`). */
+  readonly retry: number;
 }
+
+/** One finished execution, as the run row's `history` carries it (latest 64). */
+export interface WorkflowHistoryRow {
+  readonly step: string;
+  readonly attempt: number;
+  readonly round: number;
+  readonly state: string;
+  readonly durationMs?: number;
+}
+
+/** How many finished executions a row's `history` keeps — the protocol's own cap. */
+export const WORKFLOW_HISTORY_MAX = 64;
 
 /** One run as the wire's `WorkflowRow` carries it. */
 export interface WorkflowRow {
@@ -86,6 +106,10 @@ export interface WorkflowRow {
   readonly budget?: number;
   readonly startedAt: number;
   readonly endedAt?: number;
+  /** Every FINISHED execution, in order — the latest `WORKFLOW_HISTORY_MAX`. */
+  readonly history: readonly WorkflowHistoryRow[];
+  /** How many earlier executions the cap dropped. */
+  readonly historyDropped: number;
   readonly steps: readonly WorkflowStepRow[];
 }
 
@@ -129,12 +153,6 @@ export interface WorkflowListing {
   readonly truncated: boolean;
   /** git ignores the folder (the "not versioned" notice); absent = unknown, never claimed. */
   readonly gitIgnored?: boolean;
-  /**
-   * Where workflows WERE found higher up, given only when `dir` listed none
-   * (docs/feat/workflows-ui.md D7 v5). DISPLAY ONLY: nothing it names can be
-   * loaded, hashed, approved or started.
-   */
-  readonly elsewhere?: { readonly dir: string; readonly count: number };
 }
 
 /**
@@ -174,7 +192,6 @@ export interface WorkflowCatalogue {
   readonly unavailable?: string;
   readonly gitIgnored?: boolean;
   readonly dir: string;
-  readonly elsewhere?: { readonly dir: string; readonly count: number };
 }
 
 /**
@@ -836,7 +853,6 @@ export class WorkflowDriver {
       ...(listing.truncated ? { truncated: true as const } : {}),
       ...(listing.gitIgnored !== undefined ? { gitIgnored: listing.gitIgnored } : {}),
       dir: listing.dir,
-      ...(listing.elsewhere !== undefined ? { elsewhere: listing.elsewhere } : {}),
     };
   }
 
@@ -1179,7 +1195,9 @@ export class WorkflowDriver {
         tokens: 0,
         ...(spec.budget.tokens !== undefined ? { budget: spec.budget.tokens } : {}),
         startedAt: this.clock.now(),
-        steps: spec.steps.map((step) => this.pendingRow(step)),
+        history: [],
+        historyDropped: 0,
+        steps: spec.steps.map((step) => this.pendingRow(spec, step)),
       },
       controller: new AbortController(),
       timedOut: false,
@@ -1353,7 +1371,7 @@ export class WorkflowDriver {
     return { ok: true, source, spec: validation.spec, hash };
   }
 
-  private pendingRow(step: WorkflowStep): WorkflowStepRow {
+  private pendingRow(spec: WorkflowSpec, step: WorkflowStep): WorkflowStepRow {
     return {
       id: step.id,
       kind: step.kind,
@@ -1362,6 +1380,12 @@ export class WorkflowDriver {
       state: "pending",
       attempt: 0,
       round: 0,
+      next: passTarget(spec, step) ?? null,
+      onFail:
+        step.onFail.kind === "goto"
+          ? { goto: step.onFail.id, max: step.onFail.max, taken: 0 }
+          : null,
+      retry: step.retry,
     };
   }
 
@@ -1390,6 +1414,21 @@ export class WorkflowDriver {
         return merged as unknown as WorkflowStepRow;
       }),
     };
+  }
+
+  /**
+   * Report the goto edge's counter as it stands (D1): `on_fail.goto` may have
+   * been taken by the outcome that just ended. Read from the machine's own
+   * `state.counters`, so the row can never disagree with the decision it shows.
+   */
+  private refreshTaken(run: Run, step: WorkflowStep): void {
+    if (step.onFail.kind !== "goto") {
+      return;
+    }
+    const { id, max } = step.onFail;
+    this.setStep(run, step.id, {
+      onFail: { goto: id, max, taken: run.state.counters[edgeKey(step.id, id)] ?? 0 },
+    });
   }
 
   /** The hash approval (D2), then the steps. */
@@ -1530,7 +1569,27 @@ export class WorkflowDriver {
       run.liveStep = undefined;
       const advanced = nextAction(run.state, outcome.event);
       run.state = advanced.state;
-      run.row = { ...run.row, tokens: run.state.tokens };
+      const entry: WorkflowHistoryRow = {
+        step: step.id,
+        attempt: action.attempt,
+        round: action.round,
+        state: logState,
+        durationMs,
+      };
+      // The finished execution, recorded HERE (D1): the step row keeps only a
+      // step's LAST state, so a loop or a retry leaves no trace in `steps`. The
+      // latest `WORKFLOW_HISTORY_MAX` are kept; the rest is counted, never lost
+      // silently.
+      const appended = [...run.row.history, entry];
+      const history = appended.slice(-WORKFLOW_HISTORY_MAX);
+      run.row = {
+        ...run.row,
+        tokens: run.state.tokens,
+        history,
+        historyDropped: run.row.historyDropped + appended.length - history.length,
+      };
+      // AFTER `nextAction`: the goto counter it just moved is the one to report.
+      this.refreshTaken(run, step);
       action = advanced.action;
     }
     this.finish(run, undefined, true);

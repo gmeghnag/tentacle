@@ -969,7 +969,7 @@ describe("a flow reaches a hub item through the helper that can actually hold it
   // Hence the general rule below only asks "does the hub offer it at all"; the
   // rule that pins THIS bug is the flow-specific one after it.
   const base = (): HubContext =>
-    hubContextOf({ link: "up", turn: null, ended: null, editable: true, dictation: true });
+    hubContextOf({ link: "up", turn: null, ended: null, dictation: true });
   const shapes = [
     base(),
     { ...base(), schedules: 2, nextWakeInMs: 60_000 },
@@ -978,7 +978,7 @@ describe("a flow reaches a hub item through the helper that can actually hold it
       link: "up",
       turn: { kind: "turn", key: "t", turnId: "t", own: true },
       ended: null,
-      editable: true,
+
       dictation: true,
     }),
   ].map(entitled);
@@ -1015,30 +1015,28 @@ describe("a flow reaches a hub item through the helper that can actually hold it
     expect(wrong).toEqual([]);
   });
 
-  test("flow 44 reaches Workflows through More — its own setup puts it there", () => {
-    // Flow 44's setup (its header: no `.tentacle/workflows/`, so the runs list is
-    // EMPTY; the session is idle): `workflows` carries no count badge, so it
-    // keeps its CANONICAL slot — 9th — and `FAN_MAX` is 6. It is in More and
-    // nowhere else. Asking `_hub-fan` for it (what the flow did) waits 5 s for a
-    // disc that is never on screen: the two device failures, verbatim.
+  test("flow 44 reaches Workflows on the fan — it holds the first slot (workflows-ux D6)", () => {
+    // Flow 44's setup (no `.tentacle/workflows/`, so the runs list is EMPTY; the
+    // session idle): Workflows is FIRST in CANONICAL, so it is on the fan, and an
+    // empty list does not dim it (workflow-editor D8/E1). `_hub-more` would wait
+    // for a menu row that is not there.
     const flow44 = entitled(
       hubContextOf({
         link: "up",
         turn: null,
         ended: null,
-        editable: true,
         dictation: false,
         workflows: { needYou: 0, empty: null },
       }),
     );
-    expect(flow44.more).toContain("workflows");
-    expect(flow44.fan).not.toContain("workflows");
+    expect(flow44.fan).toContain("workflows");
+    expect(flow44.more).not.toContain("workflows");
     expect(helperCalls("44-workflow-editor.yaml")).toContainEqual({
-      file: "_hub-more",
+      file: "_hub-fan",
       item: "workflows",
     });
     expect(helperCalls("44-workflow-editor.yaml")).not.toContainEqual({
-      file: "_hub-fan",
+      file: "_hub-more",
       item: "workflows",
     });
   });
@@ -1077,6 +1075,64 @@ describe("flow 44 proves a step sheet can be CLOSED (validation round 3, P1)", (
     const done = body.indexOf('tapOn:\n    id: "workflow-sheet-done"');
     expect(keyboard).toBeGreaterThan(typed);
     expect(keyboard).toBeLessThan(done);
+  });
+});
+
+describe("flow 45's seeder speaks the trust bit workflows hang on (the gate's red)", () => {
+  // `45-workflow-run-view` failed its SETUP, not its assertions:
+  // "workflow run-view-pass did not start: this client does not trust its daemon
+  // to run workflows". `RemoteSession.workflow()` refuses `start` locally when
+  // `daemonWakes` is off — and `RemoteClient` drops every `workflows` update on
+  // the same bit, so the end-wait could never have fired either. The phone's own
+  // client carries it (`connection.ts` `APP_CLIENT_OPTIONS`); the seeder dials
+  // the same `serve` on this host and must too.
+  const seed = readFileSync(join(import.meta.dir, "..", "e2e", "seed.ts"), "utf8");
+
+  /** One function's body, from its name to the next top-level function. */
+  function fnBody(name: string): string {
+    const start = seed.indexOf(`async function ${name}(`);
+    if (start === -1) {
+      return "";
+    }
+    const end = seed.indexOf("async function ", start + 1);
+    return seed.slice(start, end === -1 ? undefined : end);
+  }
+
+  /** The one options object this client is built with (its `new RemoteClient(…, {…})`). */
+  function optionsOf(name: string): string {
+    const body = fnBody(name);
+    const start = body.indexOf("new RemoteClient(");
+    if (start === -1) {
+      return "";
+    }
+    return body.slice(start, body.indexOf("await live.initialize()"));
+  }
+
+  test("the seeder's own client is built with daemonWakes: true", () => {
+    // Mutation: drop the bit → red, and the flow's setup fails with
+    // WORKFLOW_UNTRUSTED_DAEMON (exactly the gate's message).
+    const options = optionsOf("workflowRunsOf");
+    expect(options).toContain("channelFactory: factory");
+    expect(options).toContain("daemonWakes: true");
+  });
+
+  test("no OTHER harness client claims the trust bit (it fails closed, §7)", () => {
+    // The bit says "this daemon is a trusted `serve` that starts its own turns".
+    // Only the seeder, which runs a workflow on this host, may say it; a
+    // copy-paste into the plain attach/laptop links would widen what a pod's
+    // frames can make the harness act on.
+    for (const name of ["attach", "laptopLink"]) {
+      expect(fnBody(name)).not.toContain("daemonWakes");
+    }
+  });
+
+  test("the flow taps the run row by its LABEL, not its bare name", () => {
+    // The second half of the same red: run rows carry `name, status, position`
+    // (`WorkflowRuns.tsx` `RunRow`), and Maestro's `text` is a FULL match, so
+    // `text: "run-view-pass"` matches nothing and the flow dies on that tap.
+    const flow = readFileSync(join(FLOWS_DIR, "45-workflow-run-view.yaml"), "utf8");
+    expect(flow).toContain('text: "run-view-pass,.*"');
+    expect(flow).not.toContain('text: "run-view-pass"\n');
   });
 });
 

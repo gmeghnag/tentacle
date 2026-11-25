@@ -12,7 +12,6 @@ import type { TurnRow } from "./transcript-rows.ts";
 export type HubEntryId =
   | "stop"
   | "steer"
-  | "attach"
   | "activity"
   | "artifacts"
   | "sessions"
@@ -68,8 +67,6 @@ export interface HubContext {
   /** The running turn (own or another device's), null when idle. */
   readonly turn: TurnRow | null;
   readonly ended: EndReason | null;
-  /** `state.view.editable`: Attach only where a prompt can carry photos. */
-  readonly editable: boolean;
   /** `settings.dictation` (feat/mobile-voice-hidden). */
   readonly dictation: boolean;
   /** How many scheduled wakes the daemon reported (0 when it never sends `schedules`). */
@@ -106,9 +103,9 @@ export interface HubContext {
    */
   readonly workflowsNeedYou?: number;
   /**
-   * Why the Workflows item has nothing to open (no run, an older daemon), or
-   * null/absent when it does — or when the list is not known yet: an unknown
-   * list never dims the item whose tap reads it (the Tools D3 rule).
+   * Why the Workflows item has nothing to open (no run AND no workflow file in
+   * the project), or null/absent when it does — or when either list is not known
+   * yet: an unknown list never dims the item whose tap reads it (Tools D3).
    */
   readonly workflowsEmpty?: string | null;
 }
@@ -136,7 +133,6 @@ export const NO_TOOLS = "No MCP servers or skills in this session";
 const LABELS: Readonly<Record<HubActionId, string>> = {
   stop: "Stop",
   steer: "Steer",
-  attach: "Attach",
   activity: "Activity",
   artifacts: "Artifacts",
   sessions: "Sessions",
@@ -159,7 +155,10 @@ const TURN_PAIR: readonly HubEntryId[] = ["stop", "steer"];
  * Sessions.
  */
 const CANONICAL: readonly HubEntryId[] = [
-  "attach",
+  // Workflows takes the slot the fan's Attach had (docs/fix/workflows-ux.md D6,
+  // owner 2026-11-24): the composer's `+` already adds a photo, so the disc was a
+  // duplicate — and Workflows is now FIRST, so a badge never reorders the fan.
+  "workflows",
   "activity",
   "artifacts",
   "tools",
@@ -167,7 +166,6 @@ const CANONICAL: readonly HubEntryId[] = [
   "sessions",
   "info",
   "scheduled",
-  "workflows",
   "dictate",
   "new",
 ];
@@ -191,8 +189,6 @@ function holds(id: HubEntryId, ctx: HubContext): boolean {
       return turnStoppable(ctx) || (ctx.compacting === true && ctx.link === "up");
     case "steer":
       return turnStoppable(ctx);
-    case "attach":
-      return ctx.editable && ctx.ended === null;
     case "scheduled":
       return ctx.schedules > 0;
     case "dictate":

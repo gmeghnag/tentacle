@@ -96,6 +96,7 @@ import {
   type WatchResult,
   type WireChatRequest,
   type WorkflowCatalogueParams,
+  type WorkflowCatalogueResult,
   type WorkflowParams,
   type WorkflowSaveParams,
   type WorkflowSourceParams,
@@ -465,10 +466,12 @@ export class Connection {
       }
       // Likewise a READ (docs/feat/workflows-ui.md slice 5a): one walk of the
       // project's workflow folder, no ask, no run (AGENTS §7 — it never awaits a
-      // turn, though the walk itself is async off the event loop).
+      // turn, though the walk itself is async off the event loop). No session id
+      // → the catalogue a session created now would read (`session/skills`'s
+      // precedent): a client opens its session lazily, at the first prompt.
       case Method.WorkflowCatalogue: {
         const catalogue = params as WorkflowCatalogueParams;
-        return this.lookup(catalogue.sessionId).workflowCatalogue();
+        return this.workflowCatalogue(catalogue.sessionId);
       }
       // An EDITOR's read and write (docs/feat/workflow-editor.md D3/D4): the read
       // never awaits a turn; the write is the writer's one synchronous block, so
@@ -723,6 +726,17 @@ export class Connection {
       return this.host.newSessionTools(this.servesModel ? this : null, params.settings);
     }
     return this.lookup(params.sessionId).tools();
+  }
+
+  // No lock (AGENTS §7). A session id must be one this connection opened; none
+  // → the project's catalogue a session created now would read (the
+  // `session/skills`/`session/tools` precedent, docs/fix/workflows-ux.md S8b):
+  // the TUI's `/workflow` panel is asked before the first message creates one.
+  private async workflowCatalogue(sessionId: string | undefined): Promise<WorkflowCatalogueResult> {
+    if (sessionId === undefined) {
+      return this.host.newSessionWorkflowCatalogue(this.servesModel ? this : null);
+    }
+    return this.lookup(sessionId).workflowCatalogue();
   }
 
   private snapshot(params: SnapshotParams): SnapshotResult {

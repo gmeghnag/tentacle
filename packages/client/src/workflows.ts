@@ -10,11 +10,13 @@
  *
  * Pure: no React, no I/O.
  */
-import type {
-  WorkflowInputValue,
-  WorkflowRow,
-  WorkflowSaveParams,
-  WorkflowStepRow,
+import {
+  WORKFLOW_HISTORY_MAX,
+  type WorkflowHistoryRow,
+  type WorkflowInputValue,
+  type WorkflowRow,
+  type WorkflowSaveParams,
+  type WorkflowStepRow,
 } from "@tentacle/protocol";
 import { progressText } from "./mapping.ts";
 
@@ -119,6 +121,30 @@ function boundStep(step: WorkflowStepRow): WorkflowStepRow {
       ? {}
       : { live: sanitizeWorkflowText(step.live, WORKFLOW_LIVE_CLIENT_MAX) }),
     ...(step.durationMs === undefined ? {} : { durationMs: step.durationMs }),
+    // The run's own definition edges (docs/fix/workflows-ux.md D1): step ids are
+    // labels like `id`, the numbers as sent.
+    next: step.next === null ? null : progressText(step.next).trim(),
+    onFail:
+      step.onFail === null
+        ? null
+        : {
+            goto: progressText(step.onFail.goto).trim(),
+            max: step.onFail.max,
+            taken: step.onFail.taken,
+          },
+    retry: step.retry,
+  };
+}
+
+/** One finished execution, safe to render: the step id a label, the numbers as sent. */
+function boundHistory(entry: WorkflowHistoryRow): WorkflowHistoryRow {
+  return {
+    step: progressText(entry.step).trim(),
+    attempt: entry.attempt,
+    round: entry.round,
+    // A free word, like a step's state.
+    state: progressText(entry.state).trim(),
+    ...(entry.durationMs === undefined ? {} : { durationMs: entry.durationMs }),
   };
 }
 
@@ -140,6 +166,9 @@ function boundRun(run: WorkflowRow): WorkflowRow {
     ...(run.budget === undefined ? {} : { budget: run.budget }),
     startedAt: run.startedAt,
     ...(run.endedAt === undefined ? {} : { endedAt: run.endedAt }),
+    // ≤ 64 by schema (`WORKFLOW_HISTORY_MAX`); the LATEST are the ones kept.
+    history: run.history.slice(-WORKFLOW_HISTORY_MAX).map(boundHistory),
+    historyDropped: run.historyDropped,
     // Already ≤ 64 by schema (`WorkflowRowSchema`): the cap is a slice, not a map
     // of a hostile 10 000, and it keeps the FIRST steps — the run's order.
     steps: run.steps.slice(0, 64).map(boundStep),

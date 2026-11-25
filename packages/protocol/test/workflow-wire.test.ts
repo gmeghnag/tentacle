@@ -8,6 +8,7 @@ import {
   WorkflowCatalogueResultSchema,
   WorkflowParamsSchema,
   WorkflowResultSchema,
+  WorkflowRowSchema,
   WorkflowStepParamsSchema,
   WorkflowStepResultSchema,
   isKnownUpdateType,
@@ -28,7 +29,21 @@ const row = {
   tokens: 0,
   startedAt: 5,
   endedAt: 9,
-  steps: [{ id: "merge", kind: "approve", where: "local", state: "stopped", attempt: 0, round: 0 }],
+  history: [],
+  historyDropped: 0,
+  steps: [
+    {
+      id: "merge",
+      kind: "approve",
+      where: "local",
+      state: "stopped",
+      attempt: 0,
+      round: 0,
+      next: null,
+      onFail: null,
+      retry: 0,
+    },
+  ],
 };
 
 describe("workflow wire", () => {
@@ -151,7 +166,11 @@ describe("session/workflow_catalogue + start{hash}", () => {
     expect(RequestSchemas[Method.WorkflowCatalogue].params).toBe(WorkflowCatalogueParamsSchema);
     expect(RequestSchemas[Method.WorkflowCatalogue].result).toBe(WorkflowCatalogueResultSchema);
     expect(WorkflowCatalogueParamsSchema.safeParse({ sessionId: "s" }).success).toBe(true);
-    expect(WorkflowCatalogueParamsSchema.safeParse({}).success).toBe(false);
+    // S8b (docs/fix/workflows-ux.md): `sessionId` is OPTIONAL, the
+    // `session/skills`/`session/tools` precedent — a client opens its session at
+    // its first prompt, so the TUI asks the catalogue before one exists. An
+    // absent id = "the catalogue a session the daemon creates now would read".
+    expect(WorkflowCatalogueParamsSchema.safeParse({}).success).toBe(true);
   });
 
   test("a catalogue result round-trips: valid rows, an invalid row with its errors, the folder", () => {
@@ -185,7 +204,7 @@ describe("session/workflow_catalogue + start{hash}", () => {
     expect(parsed.success && parsed.data).toEqual(result);
   });
 
-  test("the nullable-ish members: truncated is `true` only, `elsewhere` is display-only", () => {
+  test("the nullable-ish members: `truncated` is `true` only, and no `elsewhere` rides the wire", () => {
     // Mutation: `truncated: z.boolean()` → the `false` case goes green and an
     // older client would show "truncated" beside a complete list.
     expect(
@@ -196,13 +215,14 @@ describe("session/workflow_catalogue + start{hash}", () => {
       WorkflowCatalogueResultSchema.safeParse({ workflows: [], dir: "/p", truncated: false })
         .success,
     ).toBe(false);
-    const elsewhere = {
+    // A neighbouring-folder hint is GONE (docs/fix/workflows-ux.md S8c, owner Q2):
+    // a frame still carrying one parses, and the field is dropped.
+    const parsed = WorkflowCatalogueResultSchema.safeParse({
       workflows: [],
       dir: "/Users/me/proj/apps/mobile/.tentacle/workflows",
       elsewhere: { dir: "/Users/me/proj/.tentacle/workflows", count: 3 },
-    };
-    const parsed = WorkflowCatalogueResultSchema.safeParse(elsewhere);
-    expect(parsed.success && parsed.data.elsewhere).toEqual(elsewhere.elsewhere);
+    });
+    expect(parsed.success && "elsewhere" in parsed.data).toBe(false);
     // `unavailable` is a distinct answer from an empty folder, never a list.
     const unavailable = WorkflowCatalogueResultSchema.safeParse({
       workflows: [],
@@ -265,5 +285,152 @@ describe("session/workflow_catalogue + start{hash}", () => {
       false,
     );
     expect(WorkflowResultSchema.safeParse({ ok: true, runId: "wf-1" }).success).toBe(true);
+  });
+});
+
+// docs/fix/workflows-ux.md S4 (D1): a run row carries its DEFINITION edges and
+// its execution history, so no client has to re-derive the graph from rounds.
+// Required, so a daemon that predates them fails at `initialize` (P1).
+describe("workflow run rows carry the run's edges and history", () => {
+  const step = (extra: Record<string, unknown>) => ({
+    id: "review",
+    kind: "agent",
+    where: "local",
+    state: "ok",
+    attempt: 0,
+    round: 0,
+    ...extra,
+  });
+  const runRow = (steps: unknown[]) => ({
+    runId: "wf-1",
+    name: "demo-note",
+    version: 1,
+    hash: "a".repeat(64),
+    state: "ok",
+    tokens: 21_400,
+    startedAt: 1,
+    endedAt: 2,
+    history: [],
+    historyDropped: 0,
+    steps,
+  });
+  const edges = { next: "confirm", onFail: { goto: "fix", max: 2, taken: 0 }, retry: 0 };
+
+  test("a step with no `next`/`onFail`/`retry` is REFUSED (the fields are required)", () => {
+    // Mutation: make any of the three `.optional()` → the matching case goes green,
+    // and an older daemon's row would parse with the graph unknowable.
+    expect(WorkflowRowSchema.safeParse(runRow([step({})])).success).toBe(false);
+    expect(WorkflowRowSchema.safeParse(runRow([step({ next: null, retry: 0 })])).success).toBe(
+      false,
+    );
+    expect(WorkflowRowSchema.safeParse(runRow([step({ next: null, onFail: null })])).success).toBe(
+      false,
+    );
+    expect(WorkflowRowSchema.safeParse(runRow([step({ onFail: null, retry: 0 })])).success).toBe(
+      false,
+    );
+    // The three together parse: each refusal above is the missing field's.
+    expect(
+      WorkflowRowSchema.safeParse(runRow([step({ next: null, onFail: null, retry: 0 })])).success,
+    ).toBe(true);
+  });
+
+  test("the edges round-trip: `next` null = the run ends after it, `onFail` null = stop", () => {
+    const parsed = WorkflowRowSchema.safeParse(
+      runRow([
+        step(edges),
+        step({ id: "fix", next: "review", onFail: null, retry: 2, attempt: 1 }),
+        step({ id: "confirm", next: null, onFail: { goto: "fix", max: 2, taken: 1 }, retry: 0 }),
+      ]),
+    );
+    expect(parsed.success && parsed.data.steps.map((s) => s.next)).toEqual([
+      "confirm",
+      "review",
+      null,
+    ]);
+    expect(parsed.success && parsed.data.steps[0]?.onFail).toEqual({
+      goto: "fix",
+      max: 2,
+      taken: 0,
+    });
+    expect(parsed.success && parsed.data.steps[1]?.onFail).toBeNull();
+    expect(parsed.success && parsed.data.steps[2]?.onFail).toEqual({
+      goto: "fix",
+      max: 2,
+      taken: 1,
+    });
+    expect(parsed.success && parsed.data.steps[1]?.retry).toBe(2);
+  });
+
+  test("the bounds hold: `max` 1..10, `retry` 0..5, and the counters never negative", () => {
+    expect(WorkflowRowSchema.safeParse(runRow([step({ ...edges, retry: 6 })])).success).toBe(false);
+    expect(WorkflowRowSchema.safeParse(runRow([step({ ...edges, retry: -1 })])).success).toBe(
+      false,
+    );
+    expect(
+      WorkflowRowSchema.safeParse(
+        runRow([step({ ...edges, onFail: { goto: "fix", max: 11, taken: 0 } })]),
+      ).success,
+    ).toBe(false);
+    expect(
+      WorkflowRowSchema.safeParse(
+        runRow([step({ ...edges, onFail: { goto: "fix", max: 0, taken: 0 } })]),
+      ).success,
+    ).toBe(false);
+    expect(
+      WorkflowRowSchema.safeParse(
+        runRow([step({ ...edges, onFail: { goto: "fix", max: 2, taken: -1 } })]),
+      ).success,
+    ).toBe(false);
+  });
+
+  test("the history round-trips in order, and `durationMs` stays optional", () => {
+    const history = [
+      { step: "collect", attempt: 0, round: 0, state: "ok", durationMs: 1_200 },
+      { step: "draft", attempt: 0, round: 0, state: "ok" },
+      { step: "review", attempt: 0, round: 0, state: "error", durationMs: 900 },
+    ];
+    const parsed = WorkflowRowSchema.safeParse({
+      ...runRow([step(edges)]),
+      history,
+      historyDropped: 7,
+    });
+    expect(parsed.success && parsed.data.history).toEqual(history);
+    expect(parsed.success && parsed.data.historyDropped).toBe(7);
+  });
+
+  test("the history is bounded at 64 entries and refuses a bad word/shape", () => {
+    const one = { step: "a", attempt: 0, round: 0, state: "ok" };
+    const cap = (n: number) =>
+      WorkflowRowSchema.safeParse({
+        ...runRow([step(edges)]),
+        history: Array.from({ length: n }, () => one),
+        historyDropped: 0,
+      }).success;
+    expect(cap(64)).toBe(true);
+    expect(cap(65)).toBe(false);
+    const withHistory = (extra: Record<string, unknown>) =>
+      WorkflowRowSchema.safeParse({
+        ...runRow([step(edges)]),
+        history: [{ ...one, ...extra }],
+        historyDropped: 0,
+      }).success;
+    expect(withHistory({ step: "" })).toBe(false);
+    expect(withHistory({ attempt: -1 })).toBe(false);
+    expect(withHistory({ durationMs: -1 })).toBe(false);
+    expect(withHistory({ state: "paused-by-daemon" })).toBe(true);
+  });
+
+  test("`history`/`historyDropped` are required on the RUN row too", () => {
+    // Mutation: make either `.optional()` (or drop it) → red; a client could
+    // not tell a truncated history from a complete one.
+    const noHistory = runRow([step(edges)]) as Record<string, unknown>;
+    const historyKey = "history";
+    delete noHistory[historyKey];
+    expect(WorkflowRowSchema.safeParse(noHistory).success).toBe(false);
+    const noDropped = runRow([step(edges)]) as Record<string, unknown>;
+    const droppedKey = "historyDropped";
+    delete noDropped[droppedKey];
+    expect(WorkflowRowSchema.safeParse(noDropped).success).toBe(false);
   });
 });

@@ -13,7 +13,7 @@
  * an unknown state (a newer daemon's) is painted as its own word with a neutral
  * glyph, never coerced into one this build happens to know.
  */
-import { PROJECT_PATHS } from "@tentacle/core";
+import { type WorkflowStepView, runProjection } from "@tentacle/client";
 import type {
   WorkflowCatalogueResult,
   WorkflowDefRow,
@@ -22,7 +22,7 @@ import type {
   WorkflowStepRow,
 } from "@tentacle/protocol";
 import type { DockTone } from "./background-list.ts";
-import { cellWidth, truncateCells } from "./cells.ts";
+import { truncateCells } from "./cells.ts";
 import { oneLine, paletteWindow } from "./commands.ts";
 import { formatDurationMs, formatTokens } from "./format.ts";
 import {
@@ -79,8 +79,33 @@ const STATES: Readonly<Record<string, StateLook>> = {
   waiting: { glyph: "⧗", word: "waiting", tone: "subtle" },
   "needs-approval": { glyph: "?", word: "needs approval", tone: "warn" },
   stopped: { glyph: "‖", word: "stopped", tone: "warn" },
+  // The wire's word for a step the daemon has not started. It is honest about the
+  // DAEMON and useless to a reader (`stepLook` words it `not yet` / `not run`), so
+  // it stays only as the fallback for a caller that holds no projection.
   pending: { glyph: "○", word: "pending", tone: "dim" },
 };
+
+/**
+ * A STEP as this TUI reads it, from the one shared projection (D2, S8a): the
+ * wire's `pending` says only "the daemon has not started it", so on its own it
+ * reads as if the step still had to come — even on a run that ENDED a minute ago
+ * (the phone's d1b5faaa bug, on the terminal side). The projection already
+ * decided: `not yet` (live, and it can still be reached) or `not run` (ended, or
+ * no route opens on it). Every other state keeps this TUI's own word, so a
+ * screenshot from before this change still reads the same way.
+ *
+ * Paint a step through THIS, never through `stateLook(step.state)`: `stateLook`
+ * only knows the wire's vocabulary.
+ */
+export function stepLook(view: WorkflowStepView): StateLook {
+  if (view.phase === "later") {
+    return { glyph: "○", word: "not yet", tone: "dim" };
+  }
+  if (view.phase === "skipped") {
+    return { glyph: "–", word: "not run", tone: "dim" };
+  }
+  return stateLook(view.state);
+}
 
 /**
  * `state` as this TUI reads it. An UNKNOWN state is `· <word>`: the daemon's own
@@ -217,8 +242,8 @@ interface RailColumns {
   readonly where: boolean;
 }
 
-function stepRow(step: WorkflowStepRow, cols: RailColumns): string {
-  const look = stateLook(step.state);
+function stepRow(step: WorkflowStepRow, view: WorkflowStepView, cols: RailColumns): string {
+  const look = stepLook(view);
   const cells: string[] = [
     pad(look.glyph, GLYPH_COLS),
     pad(oneLine(step.id), cols.id),
@@ -270,6 +295,9 @@ export function railLines(run: WorkflowRow, width: number, _now: number): RailLi
   const active = activeIndex(run);
   const win = railWindow(total, active);
   const visible = run.steps.slice(win.start, win.end);
+  // ONE projection for the whole rail (`stepLook` needs it): `pending` is `not
+  // yet` or `not run` per the RUN, which no single step's state can say.
+  const projection = runProjection(run);
   // The id column follows the rows actually painted, capped: `merge` does not
   // need eight cells at 60 columns.
   const cols: RailColumns = {
@@ -289,8 +317,12 @@ export function railLines(run: WorkflowRow, width: number, _now: number): RailLi
     if (step === undefined) {
       continue;
     }
-    const look = stateLook(step.state);
-    lines.push({ text: truncateCells(stepRow(step, cols), width), tone: look.tone });
+    const view = projection.steps[i];
+    if (view === undefined) {
+      continue;
+    }
+    const look = stepLook(view);
+    lines.push({ text: truncateCells(stepRow(step, view, cols), width), tone: look.tone });
     if (step.state === "running" && step.live !== undefined && step.live !== "") {
       const tail = liveRow(step);
       lines.push({ ...tail, text: truncateCells(tail.text, width) });
@@ -432,8 +464,9 @@ function detailColumn(
   step: WorkflowStepRow,
   detail: WorkflowDetailState | null | undefined,
   width: number,
+  view: WorkflowStepView | undefined,
 ): string[] {
-  const look = stateLook(step.state);
+  const look = view === undefined ? stateLook(step.state) : stepLook(view);
   const head = [
     `${look.glyph} ${look.word}`,
     step.model === undefined || step.model === "" ? "" : oneLine(step.model),
@@ -443,6 +476,17 @@ function detailColumn(
     .filter((part) => part !== "")
     .join(" · ");
   const lines: string[] = [head];
+  // D7: the run's own frozen edges, so the panel says where the run can go from
+  // here — the graph the phone draws, in words. Absent edges say nothing.
+  if (step.next !== null) {
+    lines.push(`next → ${oneLine(step.next)}`);
+  }
+  if (step.onFail !== null) {
+    lines.push(`on fail → ${oneLine(step.onFail.goto)} (${step.onFail.taken}/${step.onFail.max})`);
+  }
+  if (step.retry > 0) {
+    lines.push(`retry ${step.attempt}/${step.retry}`);
+  }
   const round = roundOf(step);
   if (round !== "") {
     lines.push(round);
@@ -500,6 +544,18 @@ function detailColumn(
  * and an empty list are DIFFERENT states: only a report may claim there is no
  * run.
  */
+/**
+ * What the panel says where this session has no run at all. `undefined` rows mean
+ * one of two very different things, and only `opened` tells them apart: before the
+ * first message the session simply has not started (an honest "send a message
+ * first"), while an OPEN session with no feed really is a daemon, pod or runtime
+ * that cannot run workflows — the two used to be one false claim.
+ */
+export const WORKFLOW_NO_FEED = "  not supported by this computer's tentacle";
+/** The same slot before the session is open: nothing is wrong, it just has not started. */
+export const WORKFLOW_PRE_OPEN =
+  "  No workflow run in this session yet — send a message to start it.";
+
 export function workflowPanelView(
   data: readonly WorkflowRow[] | undefined,
   runId: string | undefined,
@@ -508,6 +564,7 @@ export function workflowPanelView(
   width: number,
   maxBody: number,
   catalogue?: CatalogueView,
+  opened?: boolean,
 ): PanelView {
   // The "Workflows" section (slice 2b / D8) sits ABOVE the runs on every answer —
   // including the two that have no run: what the project HAS is the first thing
@@ -519,7 +576,9 @@ export function workflowPanelView(
       rows: [
         ...section,
         {
-          text: fit("  not supported by this computer's tentacle", width),
+          // Only an OPEN session may claim its runtime cannot run workflows: before
+          // the first message nothing has been asked, so "not supported" was false.
+          text: fit(opened === false ? WORKFLOW_PRE_OPEN : WORKFLOW_NO_FEED, width),
           kind: "note",
           selected: false,
         },
@@ -550,12 +609,16 @@ export function workflowPanelView(
   const steps = run.steps;
   const cursor = steps.length === 0 ? 0 : Math.min(Math.max(0, state.cursor), steps.length - 1);
   const step = steps[cursor];
+  // ONE projection for the panel (S8a): the left column's words AND the right
+  // column's edge lines come from it, so the panel and the rail cannot disagree.
+  const projection = runProjection(run);
   const right =
     step === undefined
       ? ["this run has no steps"]
-      : detailColumn(step, detail, width - LEFT_COLS - 3);
+      : detailColumn(step, detail, width - LEFT_COLS - 3, projection.steps[cursor]);
   const left = steps.map((s, i) => {
-    const look = stateLook(s.state);
+    const view = projection.steps[i];
+    const look = view === undefined ? stateLook(s.state) : stepLook(view);
     return `${i === cursor ? "›" : " "}${look.glyph} ${fit(look.word, WORD_COLS).padEnd(WORD_COLS)} ${fit(oneLine(s.id), 12)}`;
   });
   const height = Math.max(left.length, right.length);
@@ -744,190 +807,9 @@ export function catalogueOrder(
   });
 }
 
-/** The width at which the line drops the words and keeps glyphs (tiers, D8). */
-export const TIER_CATALOGUE_WORDS = 100;
-/** At or below this width it drops the names too and counts instead (60: no names fit). */
-export const TIER_CATALOGUE_NAMES = 60;
-
-/** One row as the line names it: `task v3` (the version only when it has one). */
+/** One row as the panel names it: `task v3` (the version only when it has one). */
 const catalogueName = (row: WorkflowDefRow): string =>
   row.version === undefined ? row.name : `${row.name} v${row.version}`;
-
-/** The line's fixed head: the glyph says "these are workflow files", not a run. */
-const CATALOGUE_HEAD = "◇ workflows";
-/** Two spaces after the head when names follow it (the mockup's own spacing). */
-const CATALOGUE_HEAD_GAP = "  ";
-/** Where `/workflow` is offered, on the tiers that have room for it. */
-const CATALOGUE_HINT = "   /workflow";
-const CATALOGUE_SEP = " · ";
-
-/**
- * `head + items + (+k)`, in the widest form that fits `width` cells — the full
- * list WITH the hint first, then without it, then with entries dropped and `+k`
- * counting them. Never a cut mid-name: a truncated row would name a workflow that
- * may not exist.
- */
-function assemble(
-  head: string,
-  gap: string,
-  items: readonly string[],
-  width: number,
-  hint: string,
-  sep: string,
-): string {
-  for (let shown = items.length; shown >= 0; shown -= 1) {
-    const kept = items.slice(0, shown).join(sep);
-    const more = shown === items.length ? "" : `${sep}+${items.length - shown}`;
-    const body = shown === 0 ? head : `${head}${gap}${kept}`;
-    const full = `${body}${more}`;
-    for (const candidate of [full + hint, full]) {
-      if (cellWidth(candidate) <= width) {
-        return candidate;
-      }
-    }
-  }
-  // Narrower than the head itself: the head, cut (it is a fixed phrase).
-  return truncateCells(head, width);
-}
-
-/**
- * The at-rest line (D8, mockup TUI 1): the project's workflows as ONE summary.
- * `null` when there is nothing to say — no answer, an older daemon, a session
- * that cannot run workflows, or NO workflow files (an empty project carries no
- * permanent hint; the `elsewhere` hint is `elsewhereLine`'s job).
- *
- * Tiers, widest first: `◇ workflows  task v3 approved · nightly v1 needs
- * approval` → glyphs after the first row's word (`task v3 ✓ approved · nightly
- * v1 ?`) → counts only (`◇ 9 workflows · 1 needs approval · /workflow`). Ignored
- * by git: `· not versioned`, on the widest tier only (the panel says it in full).
- */
-export function catalogueLine(cat: CatalogueView, width: number): string | null {
-  if (cat === undefined || "unsupported" in cat || cat.unavailable !== undefined) {
-    return null;
-  }
-  const rows = catalogueOrder(cat.workflows);
-  if (rows.length === 0) {
-    return null;
-  }
-  if (width <= TIER_CATALOGUE_NAMES) {
-    const need = rows.filter((r) => catalogueState(r) === "needs approval").length;
-    const bad = rows.filter((r) => catalogueState(r) === "invalid").length;
-    const head = `◇ ${rows.length} ${rows.length === 1 ? "workflow" : "workflows"}`;
-    const items: string[] = [];
-    if (need > 0) {
-      items.push(`${need} ${need === 1 ? "needs" : "need"} approval`);
-    }
-    if (bad > 0) {
-      items.push(`${bad} invalid`);
-    }
-    return assemble(
-      head,
-      CATALOGUE_SEP,
-      items,
-      width,
-      `${CATALOGUE_SEP.trimEnd()} /workflow`,
-      CATALOGUE_SEP,
-    );
-  }
-  const words = width >= TIER_CATALOGUE_WORDS;
-  const items = rows.map((row, i) => {
-    const state = catalogueState(row);
-    // Below the words tier only the FIRST row keeps its word: it is the one that
-    // needs the user (the order puts it there), and a glyph alone is unreadable
-    // for the rest at that width.
-    const glyph = CATALOGUE_GLYPH[state];
-    const tail = words || i === 0 ? ` ${glyph} ${state}` : ` ${glyph}`;
-    return `${catalogueName(row)}${tail}`;
-  });
-  const ignored = cat.gitIgnored === true && words ? "  · not versioned" : "";
-  return assemble(
-    CATALOGUE_HEAD,
-    CATALOGUE_HEAD_GAP,
-    items,
-    width,
-    `${ignored}${CATALOGUE_HINT}`,
-    CATALOGUE_SEP,
-  );
-}
-
-/** `~`-shortened for display (a home the host cannot name stays as it is). */
-function tilde(text: string, home: string | undefined): string {
-  if (home === undefined || home === "" || !text.startsWith(`${home}/`)) {
-    return text;
-  }
-  return `~${text.slice(home.length)}`;
-}
-
-/**
- * The ONE line an empty catalogue earns when the workflows live HIGHER UP (D8 v5):
- * `◇ no workflows here — ~/tentacle/.tentacle/workflows has 3 (start tentacle in
- * ~/tentacle)`. Never actionable (Enter and `/workflow` cannot start anything
- * from it) and never invented: it exists only when the read found files above.
- */
-export function elsewhereLine(
-  cat: CatalogueView,
-  width: number,
-  home: string | undefined,
-): string | null {
-  if (cat === undefined || "unsupported" in cat || cat.unavailable !== undefined) {
-    return null;
-  }
-  if (cat.workflows.length > 0 || cat.elsewhere === undefined) {
-    return null;
-  }
-  const dir = tilde(cat.elsewhere.dir, home);
-  // The project root is that folder's own parent-of-parent (`<root>/.tentacle/workflows`).
-  const at = cat.elsewhere.dir.lastIndexOf(`/${PROJECT_PATHS.workflows}`);
-  const root = at > 0 ? tilde(cat.elsewhere.dir.slice(0, at), home) : dir;
-  const text = `◇ no workflows here — ${dir} has ${cat.elsewhere.count} (start tentacle in ${root})`;
-  return truncateCells(text, width);
-}
-
-/** What the frame must know before it can hoist the at-rest line into its budget. */
-export interface CatalogueGrant {
-  /** Something else owns the live area's slot (a panel, the palette, a dialog). */
-  readonly slotTaken: boolean;
-  /** A run is IN FLIGHT: the rail speaks for it, and the line would contradict it. */
-  readonly runActive: boolean;
-  /** The terminal's rows, and the rows already taken above the input. */
-  readonly termRows: number;
-  readonly runningRows: number;
-  readonly inputBoxRows: number;
-}
-
-/** Rows reserved below the transcript viewport (`app-layout.ts`'s own sum). */
-const CATALOGUE_RESERVED_ROWS = 4;
-
-/**
- * The line the frame mounts: the catalogue's summary, or the `elsewhere` hint, or
- * `null` when it must not paint. A run in flight, a taken slot, or a terminal too
- * short to keep the transcript's floor all answer `null` — the frame's row
- * arithmetic then reserves nothing and the input never moves.
- */
-export function workflowsLine(
-  cat: CatalogueView,
-  width: number,
-  home: string | undefined,
-  grant: CatalogueGrant,
-): RailLine | null {
-  if (grant.slotTaken || grant.runActive) {
-    return null;
-  }
-  const text = catalogueLine(cat, width) ?? elsewhereLine(cat, width, home);
-  if (text === null) {
-    return null;
-  }
-  const room =
-    grant.termRows - (CATALOGUE_RESERVED_ROWS - 1 + grant.runningRows + grant.inputBoxRows);
-  if (1 + TRANSCRIPT_FLOOR > room) {
-    return null;
-  }
-  // The `elsewhere` hint is a fact about ANOTHER folder: dim, never a run's tone.
-  return { text, tone: catalogueLine(cat, width) === null ? "dim" : "subtle" };
-}
-
-/** The rows the at-rest line takes in the live area (`0` when it paints nothing). */
-export const catalogueRows = (line: RailLine | null): number => (line === null ? 0 : 1);
 
 // --- starting one from the catalogue (D8) ---------------------------------------
 
@@ -997,11 +879,9 @@ export function catalogueSection(cat: CatalogueView, width: number): PanelViewRo
   }
   const rows = catalogueOrder(cat.workflows);
   if (rows.length === 0) {
-    const hint =
-      cat.elsewhere === undefined
-        ? `  no workflow files in ${oneLine(cat.dir)}`
-        : `  no workflow files here — ${oneLine(cat.elsewhere.dir)} has ${cat.elsewhere.count}`;
-    return [noteRow(hint, width)];
+    // The folder it read, and nothing about any other folder (docs/fix/workflows-ux.md
+    // S8c, owner Q2): nothing looks above the cwd.
+    return [noteRow(`  no workflow files in ${oneLine(cat.dir)}`, width)];
   }
   const out: PanelViewRow[] = [];
   const shown = rows.slice(0, CATALOGUE_SECTION_MAX);

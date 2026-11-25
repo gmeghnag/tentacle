@@ -99,10 +99,10 @@ describe("loadWorkflowSource reads .tentacle/workflows", () => {
     );
   });
 
-  test("a parent's workflow is NOT loadable from the child (the hint never feeds a run)", () => {
-    // The "cannot change behaviour" property of `workflowsAbove`: it may SAY a
-    // parent has workflows, but the loader takes the cwd and nothing else — so
-    // starting `task` in the child fails and names the CHILD's folder.
+  test("a parent's workflow is NOT loadable from the child (the loader reads the cwd only)", () => {
+    // The loader takes the cwd and nothing else — nothing looks above it (S8c
+    // removed the neighbouring-folder lookup), so starting `task` in the child
+    // fails and names the CHILD's folder.
     const root = project(`${PROJECT_PATHS.workflows}/task.yaml`, YAML);
     const child = join(root, "apps", "mobile");
     mkdirSync(child, { recursive: true });
@@ -213,18 +213,18 @@ describe("workflowListing: the display-only facts (slice 5a / D7 v5)", () => {
     expect(listing.rows).toHaveLength(1);
     // Not a git repo at all: unknown is never claimed as either.
     expect(listing.gitIgnored).toBeUndefined();
-    expect(listing.elsewhere).toBeUndefined();
   });
 
-  test("an EMPTY folder gets the hint; a folder WITH a workflow does not", async () => {
-    // Mutation: look for the hint unconditionally → the second case gains an
-    // `elsewhere` and a user is told to go somewhere they need not.
+  test("an EMPTY folder reads as empty and NOTHING is looked at above it (S8c, owner Q2)", async () => {
+    // The neighbouring-folder lookup is gone: a child with an empty workflows
+    // folder offers no route out of it, only its own folder's path.
     const parent = project(`${PROJECT_PATHS.workflows}/task.yaml`, YAML);
     const child = join(parent, "apps", "mobile");
     mkdirSync(join(child, PROJECT_PATHS.workflows), { recursive: true });
     const empty = await workflowListing(child);
-    expect(empty.elsewhere).toEqual({ dir: join(parent, PROJECT_PATHS.workflows), count: 1 });
-    writeFileSync(join(child, PROJECT_PATHS.workflows, "mine.yaml"), YAML);
-    expect((await workflowListing(child)).elsewhere).toBeUndefined();
+    expect(empty.rows).toEqual([]);
+    expect(empty.dir).toBe(join(child, PROJECT_PATHS.workflows));
+    // Nothing in the answer names the PARENT's folder, so no screen could offer it.
+    expect(JSON.stringify(empty)).not.toContain(join(parent, PROJECT_PATHS.workflows));
   });
 });

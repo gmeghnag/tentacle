@@ -80,11 +80,6 @@ function FolderLine({
           Not all of it: this folder lists more workflows than tentacle shows
         </Text>
       ) : null}
-      {view.elsewhere === null ? null : (
-        <Text style={[typography.footnote, { color: palette.sec }]}>
-          {`${view.elsewhere.count} workflow${view.elsewhere.count === 1 ? "" : "s"} found in ${view.elsewhere.dir} — tentacle reads this folder only`}
-        </Text>
-      )}
     </View>
   );
 }
