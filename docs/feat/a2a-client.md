@@ -1046,3 +1046,106 @@ step). Facts for the re-run:
 - Gate: not run here.
 
 *— claude-sonnet-5-5, 2026-11-25*
+
+### a2c-2-transport — DONE (re-run)
+
+*— claude-opus-5-5, 2026-11-25*
+
+- **Load-bearing check — holds.** Runner half: `harness-remote-fit` +
+  `harness-a2a-map` + `harness-a2a-seam` → 84 pass / 0 fail before any edit.
+  Client half, now by tests instead of the spike: the real adapter over the
+  SDK's real server (in-memory `fetch`) streams, answers on the same task,
+  surfaces AUTH_REQUIRED on an open stream, cancels, reattaches — and one test
+  drives it through the unmodified `runHarnessChild` (report `done: 42` + the
+  `task <id>` footer). Capability missing before: no `harness/a2a.ts`.
+- **Done:**
+  1. `packages/agent/src/harness/a2a.ts` (new). `pinnedFetch` (`:121`) is the
+     whole outbound policy: a request to any origin but the pinned one is
+     refused before the network (`A2APolicyError`); a caller-supplied
+     `Authorization` is dropped and the bearer set only by us; `redirect:
+     "error"` plus a 3xx/opaque-redirect refused; a `proposed` agent passes
+     `proposedUrlRefusal` + a DNS lookup (`addressRefusal`, any bad record
+     refuses) on EVERY request. `createA2AAdapter` (`:449`): `probe` reads the
+     card WITHOUT the token, runs `checkCard`, then the token command (lazy,
+     once, 10 s bound, output trimmed and held in memory; a failure never
+     carries the command's output or error text); `start` sends ONE redacted
+     text part with a new `contextId`, and throws «unreachable … a task may
+     have been created remotely» on an error before the first frame (a refused
+     destination throws its reason); `answer` opens the follow-up on the same
+     task/context with `answerOutstanding` set (F-b), `{allow:false}` →
+     cancel; `cancel` = `CancelTask` bounded 5 s → `confirmed` + `end
+     cancelled`, else `unconfirmed` and the events end; `reattach` =
+     `resubscribeTask`, or for a task that already ended, one `getTask` → its
+     artifacts + `end`. 401/403 seen by the run's own fetch → `ask{auth}`.
+     Every error text emitted is scrubbed (token removed, `redactText`,
+     one line ≤ 300).
+  2. `packages/agent/test/support/fake-a2a.ts` (new): the Repro as a helper —
+     SDK `DefaultRequestHandler` + `InMemoryTaskStore` +
+     `JsonRpcTransportHandler`, a scripted executor (`work`/`ask`/`auth`/`hang`),
+     and a `fetch` that FOLLOWS a 3xx with every header unless
+     `redirect:"error"` (the worst case) and errors a body on abort or
+     `dropStreams()`.
+  3. `packages/agent/test/harness-a2a.test.ts` (new, 23 tests).
+- **Drift from Implementation (all stricter or forced by the SDK):**
+  - The card fetch carries NO token (plan: the token goes to the pinned
+    origin); and every request — not only the token — is locked to the pinned
+    origin.
+  - **The SDK picks the LAST `1.0` interface per binding**
+    (`createFromNormalizedAgentCard`, `@a2a-js/sdk/dist/client/index.js:6515`),
+    not the one `checkCard` accepted: a card `[ours, evil]` would have sent the
+    task to `evil` (the origin lock would have refused it, but the task would
+    not have run). The client is built from a card copy holding only the
+    accepted interface. Pinned by a test (M9).
+  - A destination refused MID-run (a proposed host that turned private before
+    the reply's request) ends the run `failed` with the reason, not
+    `disconnected` — the runner would otherwise reattach against it.
+  - `A2A-Version` is set by the SDK transport itself, not by our fetch.
+  - `reattach` → `getTask` drops artifacts already shown IN FULL; an artifact
+    shown only in part is repeated whole (debt, rare: needs a drop mid-artifact
+    and a task that then ended).
+  - A default `sh -c` token runner lives in `a2a.ts` (stderr ignored, exit
+    code only); the wiring may inject the config's runner (`runCommand`).
+  - **Not done here — Files #7 wiring** (`a2aHarnesses`, card blurbs at build,
+    `model` refused for `a2a:`) and its three tests: the plan fix allowed it
+    "at the end of a2c-2 or a2c-3b"; the orchestrator note assigns it to the
+    a2c-3 re-run, and this run's mandate was the transport only. The adapter
+    is therefore not yet reachable from a session (no changelog change: the
+    branch's single fragment already describes the merged feature).
+- **Tests → failure modes:** stream mapping; redacted outbound + new context
+  per call; INPUT_REQUIRED → late answer → same task, one ask only; AUTH on
+  an open stream; steer refused; cancel confirmed / unconfirmed (bounded) /
+  by the run's signal; drop → reattach; reattach on an ended task; redirect
+  not followed; foreign origin refused + injected credential dropped; card
+  interface on another origin refused; the accepted interface used; 401 →
+  `ask{auth}` with no token anywhere; an error body echoing the bearer
+  scrubbed; token command lazy/once, failing/empty/slow; proposed: private /
+  mixed / mapped-metadata records refused with zero requests, re-checked per
+  request, refused mid-run → `failed`, http / literal IP / token refused;
+  through `runHarnessChild`.
+- **Mutations** (scratch runner `.tentacle/tmp/a2a-client/mutate-a2c2.ts`:
+  apply one, run the named test, restore; file byte-identical afterwards):
+  | mutation | result |
+  |---|---|
+  | M1 no origin lock in `pinnedFetch` | red |
+  | M2 no `redirect: "error"` | red (the fake follows to evil with the bearer) |
+  | M3 caller's `Authorization` forwarded | red |
+  | M4 act on stream close (frames buffered until the end) — F-a | red (timeout) |
+  | M5 no scrub of error text | red |
+  | M6 proposed: check only the first request per host | red |
+  | M7 `answer` does not mark the answer outstanding — F-b | red (second ask) |
+  | M8 an input ask's stream close treated as a disconnect | red |
+  | M9 the SDK given the whole card | red |
+  | M10 `CancelTask` not bounded | red (timeout) |
+  | M11 a mid-run refusal → `disconnected` | red |
+  M8 first survived: the answer always beat the client's view of the close.
+  The test now answers like a person — after the fake closed the stream plus
+  a 50 ms pause — which the assertion does not depend on (it only lets the
+  mutation show). Red-before-green by mutation: the tests were written after
+  the code.
+- **Narrow runs:** `harness-a2a` 23/0 (`--rerun-each 3`: 69/0); with
+  `harness-a2a-map`, `-seam`, `remote-fit`, `subagent-harness`: 127/0. Biome on
+  the 3 files: clean. `tsc -p packages/agent`: no error in these files.
+- **Unverified:** Bun's own `fetch` behaviour on a cross-origin redirect
+  (moot with `redirect: "error"`, which the fake honours like a real fetch);
+  verify in a2c-8's loopback e2e.
+- **Gate:** not run here (the orchestrator's script runs it).
