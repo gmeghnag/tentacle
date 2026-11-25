@@ -6,7 +6,7 @@
     "apps/mobile/src/screens/PermissionSheet.tsx": "a644f9409c98161104be1ec2b42afc40004f0585",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "32084b81ebf112ae65e1d2c347ed4feeb04e0296",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "4acc16969f29573f6f292b0c1fdcc6ce6fa61efa",
-    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "9b699f60e963df28386e07a6dcf40811af9a8646",
+    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "e908e4b44a9f3a6b14b3c80924c32c7b1944e6bf",
     "apps/mobile/src/step-rail.ts": "83bd11f3b10e19be6edd27a835ef90252f69f46e",
     "apps/mobile/src/theme-beta.ts": "2359c83e90604bd9bd7625702ae21337499290d2",
     "apps/mobile/src/theme.ts": "77bfa592e2bb2bee950a9936e2ce566002976edf",
@@ -1532,7 +1532,8 @@
         "LONE": {
           "up": false,
           "down": false
-        }
+        },
+        "LONG_PRESS_MS": 400
       }
     },
     "markdown": {

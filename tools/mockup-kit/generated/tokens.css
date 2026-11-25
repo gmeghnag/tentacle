@@ -677,6 +677,7 @@
   --m-transcript-row-context-body-padding-top: 2px;
   --m-transcript-row-context-body-padding-bottom: 7px;
   --m-transcript-row-context-more-padding-top: 2px;
+  --m-transcript-row-k-long-press-ms: 400;
   --m-markdown-paragraph-font-size: 16px;
   --m-markdown-paragraph-line-height: 23px;
   --m-markdown-bold-font-weight: 700;

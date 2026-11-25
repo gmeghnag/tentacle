@@ -125,6 +125,17 @@ import {
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
 import { showsScene } from "../mascot-scenes.ts";
+import {
+  COPY_FAILED,
+  COPY_FLASH_MS,
+  type CopyFlashState,
+  type CopySource,
+  type CopyVia,
+  copyFlashFor,
+  copyFlashShown,
+  flashReleased,
+  messageCopy,
+} from "../message-copy.ts";
 import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
 import { noticeLooks } from "../notice-group.ts";
 import { type StickyBlock, openOutputSteps, stickyState } from "../output-sticky.ts";
@@ -183,6 +194,7 @@ import { AskSlim } from "../ui/AskSlim.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
 import { ContextRing } from "../ui/ContextRing.tsx";
+import { CopyFlash } from "../ui/CopyFlash.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
 import { FloatingActivity, useAccessibilityFlags } from "../ui/FloatingActivity.tsx";
 import { HeaderDot } from "../ui/HeaderDot.tsx";
@@ -208,6 +220,7 @@ import { ActivitySheet } from "./ActivitySheet.tsx";
 import { CommandsSheet } from "./CommandsSheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
+import { SelectTextSheet } from "./SelectTextSheet.tsx";
 import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
 import { ToolsSheet } from "./ToolsSheet.tsx";
 import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
@@ -801,7 +814,85 @@ export function SessionScreen({
   // refreshed every render, so a skipped cell's tap still sees the latest state
   // (`TranscriptCell.tsx`).
   const cellActions = useRef<CellActions>(null as unknown as CellActions);
+  // Copying a message (docs/feat/mobile-copy-text.md D2/D3/D4): the pill's last
+  // outcome and when it appeared, and the text the "Select text" sheet shows.
+  // In the SCREEN, keyed by nothing but its own arrival, so a cell that scrolls
+  // out of the window and unmounts cannot take a pending copy with it.
+  const [copyFlash, setCopyFlash] = useState<CopyFlashState | null>(null);
+  /** Has the press that is copying already ended? (D3 re-anchors the pill ONCE.) */
+  const released = useRef(false);
+  const [selectText, setSelectText] = useState<string | null>(null);
+  /**
+   * The ONE copy path (the long-press and the sheet's "Copy all"): a light
+   * haptic, the clipboard, then a pill — `Copied`, or `Couldn't copy` when the
+   * clipboard itself refuses (never a false `Copied`: no silent drop).
+   */
+  const copyText = (text: string, source: CopySource) => {
+    playHaptic("light");
+    // A release that arrived before the clipboard answered (a fast long press)
+    // cannot await it: `released` is read when the pill lands (`copyFlashFor`).
+    void Clipboard.setStringAsync(text).then(
+      () =>
+        setCopyFlash(
+          copyFlashFor(
+            { kind: "copy", text, label: "Copied" },
+            Date.now(),
+            source,
+            released.current,
+          ),
+        ),
+      () => setCopyFlash(copyFlashFor(COPY_FAILED, Date.now(), source, released.current)),
+    );
+  };
+  /**
+   * A long-press on a message: the pure `messageCopy` decides. An action with
+   * nothing to give still answers — a light haptic (the owner's standard) and a
+   * pill saying why — while a row that is not a message does nothing at all.
+   */
+  const copyMessage = (row: Row, via: CopyVia) => {
+    const outcome = messageCopy(row, Date.now());
+    if (outcome === null) {
+      return;
+    }
+    released.current = false;
+    if (outcome.kind === "copy") {
+      copyText(outcome.text, via);
+      return;
+    }
+    playHaptic("light");
+    setCopyFlash(copyFlashFor(outcome, Date.now(), via, false));
+  };
+  /**
+   * The finger left the message (D3): the pill's window starts now, once. A long
+   * press copies at 400 ms under the finger, so counting from the copy itself
+   * would spend the window before the person could read it.
+   */
+  const copyRelease = () => {
+    released.current = true;
+    setCopyFlash((flash) => flashReleased(flash, Date.now()));
+  };
+  // One timer per pill: a second copy REPLACES it (a new `at`, a new window). No
+  // countdown while the press is still down — the release re-anchors it (`D3`).
+  useEffect(() => {
+    if (copyFlash === null || copyFlash.pressing) {
+      return undefined;
+    }
+    const timer = setTimeout(() => setCopyFlash(null), COPY_FLASH_MS);
+    return () => clearTimeout(timer);
+  }, [copyFlash]);
+  // Another session never inherits this one's pill or open sheet (`owner` is the
+  // memoized session identity above, so this fires on a session change only).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `owner` IS the session identity; the body resets state, so the linter cannot see it.
+  useEffect(() => {
+    setCopyFlash(null);
+    setSelectText(null);
+  }, [owner]);
+  /** The text the "Select text" sheet opens with (only a real copy has one). */
+  const flashText =
+    copyFlash !== null && copyFlash.outcome.kind === "copy" ? copyFlash.outcome.text : null;
   cellActions.current = {
+    onCopy: copyMessage,
+    onCopyRelease: copyRelease,
     onLink,
     onToggle: (key) => {
       animateNextLayout(a11yFlags.reduceMotion);
@@ -2234,6 +2325,18 @@ export function SessionScreen({
             </Pressable>
           </View>
         )}
+        {/* The copy confirmation (docs/feat/mobile-copy-text.md D3): absolutely
+            positioned, so the transcript's layout (and `follow.ts` `contentGrew`)
+            never changes because somebody copied a message. */}
+        {copyFlash === null || !copyFlashShown(copyFlash, Date.now()) ? null : (
+          <CopyFlash
+            outcome={copyFlash.outcome}
+            palette={palette}
+            {...(copyFlash.outcome.kind === "copy"
+              ? { onSelect: () => setSelectText(flashText) }
+              : {})}
+          />
+        )}
         <OutboxRows
           rows={compose.outbox}
           palette={palette}
@@ -2350,6 +2453,12 @@ export function SessionScreen({
             },
           }))}
           onCancel={() => setHubMenu(null)}
+        />
+        <SelectTextSheet
+          palette={palette}
+          text={yields ? null : selectText}
+          onClose={() => setSelectText(null)}
+          onCopyAll={(text) => copyText(text, "sheet")}
         />
         <ActionSheet
           palette={palette}
