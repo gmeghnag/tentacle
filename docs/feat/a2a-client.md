@@ -1263,3 +1263,27 @@ step). Facts for the re-run:
   describes the type and the remote-marked report; unchanged (it claims no
   card text).
 - **Gate:** not run here (the orchestrator's script runs it).
+
+### a2c-5-question-tui — DONE
+*— claude-sonnet-5-5, 2026-11-25*
+
+- **Load-bearing check:** the reply field hard-coded `{allowed:false, message}`
+  (`permission-reply.ts` `stepField` submit) — a question needs `allowed:true`.
+  Confirmed; fixed by deriving it from the menu's reply choice.
+- **As built:** `permission-ui.ts` `buildPermissionChoices`: `question` →
+  «Answer…» (reply row, `allowed:true`; only when `req.reply`) · «Skip»;
+  `agent_add` → «Yes, for this session» (once) · «No» · «No, let's talk about
+  it» (no «always»). `permission-reply.ts`: field submit sends
+  `allowed:true+message` when the reply choice is an allow (blank → `{allowed:false}`);
+  `y` opens the field and `a` is inert for a question (a bare allow would be an
+  empty answer — the daemon would send it as a skip).
+- **Drift:** the detail prefix «Remote question (<origin>):» is already built
+  agent-side (`harness/permissions.ts:301`), so the TUI adds none.
+- **Tests:** `tui/test/permission-question.test.ts` (9, pure; red on the old
+  code: 8 fail) and `permission-question-app.test.tsx` (2 App frames). The App
+  asserts fields, not `toEqual` (the response carries `onAnswerLost`).
+- **Mutations (all red):** M1 field sends `allowed:false` → 1 fail; M2 `y`/`a`
+  as bare allow → 1 fail; M3 `agent_add` scope `session` (an «always») → 1 fail.
+  All reverted; 38 pass over the 4 permission test files.
+- **Changelog:** sentence appended to `changelog.d/a2a-client.added.md`.
+- **Gate:** not run here (the script runs it). No schema change.
