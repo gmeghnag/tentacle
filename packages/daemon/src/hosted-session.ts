@@ -214,7 +214,7 @@ import {
 } from "./schedules-view.ts";
 import { forkableMessages } from "./session-fork.ts";
 import type { ImagePolicy, WorkloadShellsLike } from "./session-host.ts";
-import type { SessionSummary } from "./session-list.ts";
+import { type SessionSummary, liveRunCount } from "./session-list.ts";
 import { type LogBase, SessionLog, replayFromBase } from "./session-log.ts";
 import type { SessionPersister } from "./session-persister.ts";
 import type { SessionLiveness } from "./session-reaper.ts";
@@ -2232,6 +2232,11 @@ export class HostedSession {
         (this.agentRuntime?.list().length ?? 0),
       // A count, only where the session schedules (docs/feat/cron-tool.md D5).
       ...(this.scheduling ? { schedules: this.scheduleTable.length } : {}),
+      // Unanswered asks right now (docs/fix/mobile-ask-surfaces.md D5): the
+      // drawer's `hand.raised`. Always a number on a live session — 0 is a fact.
+      asks: this.asks.size,
+      // Runs live or waiting on the user; absent where this host runs none.
+      ...(this.workflows ? { workflows: liveRunCount(this.lastWorkflows) } : {}),
       ...(this.pinnedAt !== undefined ? { pinnedAt: this.pinnedAt } : {}),
     };
   }

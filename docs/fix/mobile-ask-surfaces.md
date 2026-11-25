@@ -665,3 +665,81 @@ Still open from round 1 (acknowledged partials, not findings): `currentAsking` i
 *Reviewed by claude-opus-5-5 in a fresh context. The executor was DeepSeek, a different model family.*
 
 *— claude-opus-5-5, 2026-11-24*
+
+## Execution
+
+### S7a — `session/list` `asks`/`workflows` (executor claude-opus-5-5, 2026-11-25) — DONE
+
+**Load-bearing check re-run first (the plan's preconditions):** holds.
+- `SessionListEntrySchema` (`protocol/src/session.ts:2114-2136`) had `jobs`/`schedules` but neither
+  `asks` nor `workflows`; `SessionSummary` (`daemon/src/session-list.ts:26-54`) likewise, and
+  `toSessionList` (`:105-140`) passed neither through.
+- The daemon does hold both: `asks` map (`hosted-session.ts:982`) and the driver's live rows
+  (`agent/src/workflow-driver.ts:619` `rows()`, `done` filtering at `:621`; the host keeps the last
+  emitted list in `lastWorkflows`, `hosted-session.ts:1113`). `summary()` is the single place
+  `session/list` reads a live session (`session-host.ts:939`).
+
+**Changed**
+- `protocol/src/session.ts:2134-2137` — `asks?: int ≥ 0`, `workflows?: int ≥ 0` (optional, additive,
+  strip schema; `session/list` is a response, not blocking, so bounded normally — D5).
+- `daemon/src/session-list.ts` — `SessionSummary.asks?/workflows?` (`:44-54`), `liveRunCount` exported
+  (`:80-90`: a run is over iff its state is `ok`/`error`/`stopped`; an unknown state counts as live,
+  so a run this build cannot judge never looks finished), and both fields passed through
+  (`:131-132`) only when present — absence is not the same claim as 0.
+- `daemon/src/hosted-session.ts:2235-2239` — `summary()` emits `asks: this.asks.size` always on a
+  live session (0 is a fact the drawer reads) and `workflows: liveRunCount(this.lastWorkflows)` ONLY
+  where a driver is bound (`this.workflows`), so a pod/tunnelled session makes no claim.
+- Archived entries (`session-host.ts:940-951`) are untouched: no ask is loaded on one, and no run is
+  live — the plan implies exactly that, and the two existing archived-entry assertions stayed green.
+- `packages/protocol/schema/protocol.json` regenerated (`bun run schema:export`): +8 lines, the two
+  new optional integers. No `PROTOCOL_VERSION` note — fields are free, display data, additive (§7).
+- Changelog: `changelog.d/mobile-ask-surfaces.added.md` extended (S7b's ONE fragment, same bullet) —
+  the drawer's glyphs now read the counts from the list itself. No second fragment.
+
+**Drift from the plan:** none in shape. Two clarifications found while implementing:
+- the plan says `workflows` = "runs whose state is not ok/error/stopped"; implemented as an exported
+  pure `liveRunCount` over the host's `lastWorkflows` (not `driver.rows()`), because `summary()` is a
+  pure read with no I/O and `lastWorkflows` is the daemon's own judged copy (schema-validated at
+  `:2584/:2599`).
+- `asks` is emitted as a live `0` while `workflows` is absent without a driver. Both follow D5's
+  "absent → no glyph" but differ in kind: every live session holds an ask map, not every session
+  runs workflows.
+
+**Tests (red first; the property each kills)** — `daemon/test/session-list.test.ts`:
+- `L-asks`: pass-through, absent stays absent, a `0` stays a `0`, paging untouched, and a
+  `SessionListResultSchema.parse` round-trip (a STRIP schema drops an unknown field, so this is what
+  kills a missing protocol field). RED first: `Expected -2 / Received +2` on the pass-through, then
+  `error: expect(received).toBe(expected) Expected: 0 Received: undefined` on the host path.
+- `L-live`: `liveRunCount` over the six documented states → 3, `[]` → 0, an unknown state → 1.
+  RED first: `Expected: 3 / Received: 6` against a row-counting skeleton.
+- `H-asks`: a real pending ask raised through the session's broker during a live turn reaches
+  `summary()` and `session/list` as `1`, and `workflows` is absent without a driver.
+- `H-runs`: with a fake driver attached (`attachWorkflows`, the existing seam), 4 rows → `2`, and
+  the count reaches the wire.
+- Three pre-existing whole-entry `toEqual` tests (H1, H3, and the archived-entry one) gained
+  `asks: 0` — the intended additive field, not a behaviour change.
+
+**Mutations (each applied, run, reverted by restoring the file from `.tentacle/tmp/mobile-ask-surfaces/`):**
+| Mutation | Result |
+|---|---|
+| `asks: 0` hard-coded in `summary()` | 1 fail (H-asks) |
+| drop the `this.workflows ?` guard (always emit) | 4 fail (H-asks, H-runs, H1, H3) |
+| `liveRunCount` counts every row | 2 fail (L-live, H-runs) |
+| neither field passed into the entry | 5 fail (L-asks + the four host tests) |
+| absent becomes `0` (`: { asks: 0 }`) | 5 fail (L2, L-asks, H-asks, H1, H3) |
+| drop `asks` from `SessionListEntrySchema` | 4 fail (L-asks, H-asks, H1, H3) |
+
+**Verification (touched files only, per the executor budget):** `bun test
+packages/daemon/test/session-list.test.ts` 27 pass / 0 fail; the neighbouring `session/list`
+consumers (`session-pin`, `persistence`, `watch-hosted`, `connect-sessions-view`,
+`client/session-list`, `protocol/session-pin`, `session-titles`, `watch-connection`,
+`ws-device-route`, `relay-link`, `client/pairing`, `connect-resume`, `protocol/json-schema`,
+`apps/mobile/session-list`, `apps/mobile/drawer-items`) 329 pass / 0 fail combined; `bunx tsc -p
+packages/daemon --noEmit` and `-p apps/mobile --noEmit` clean; `bunx biome check` on the four
+changed files clean. The full gate is the orchestrator's.
+
+**Not in this slice:** S7b's `App.tsx` `currentAsking` wiring (still open) and the rest of the plan's
+slices. `apps/mobile/src/session-list.ts:183`'s local `WithFlags` cast is now redundant but harmless —
+left alone, since S7b owns that file.
+
+*— claude-opus-5-5, 2026-11-25*

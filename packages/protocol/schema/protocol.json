@@ -5015,6 +5015,10 @@
         "archived": {
           "type": "boolean"
         },
+        "asks": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "attached": {
           "minimum": 0,
           "type": "integer"
@@ -5054,6 +5058,10 @@
           "type": "string"
         },
         "updatedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workflows": {
           "minimum": 0,
           "type": "integer"
         }
