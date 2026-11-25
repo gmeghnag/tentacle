@@ -1043,3 +1043,32 @@ Same model family as the executor (Opus): only the context is fresh, so blind sp
   - With no handle (before the attach) the re-read resolves without sending anything.
 
 *— claude-opus-5-5, 2026-11-24*
+
+### Gate fix 2 (post-exec): one bullet per fragment, a complete row fixture
+
+The orchestrator's gate on `feat/workflows-ux` failed two tests. Neither is a test bug.
+
+1. `scripts/test/changelog-guard.test.ts` → `I2: every entry in changelog.d/ is a
+   well-formed fragment > the directory on disk parses`: `ReleaseError:
+   changelog.d/workflows-ux.changed.md: one bullet per file; split it into two
+   fragments`. S5's Execution (drift 3) folded a second bullet into the task's
+   existing `.changed.md`; `parseFragments` (`scripts/changelog.ts:125`) refuses a
+   second `- ` line, and the fragment rule is one file, one bullet
+   (`docs/feat/changelog-fragments.md:139`). The two bullets are merged into ONE
+   bullet with two sentences under one headline — one change, one entry — rather
+   than split into two files of the same slug+category (which would be one path).
+2. `packages/daemon/test/push-hook.test.ts` → `a workflows update reaches the hook
+   (slice 9: a run's end is pushable)`: the fixture row was hand-written before S4
+   added `history`, `historyDropped`, the step's `next`/`onFail`/`retry` to
+   `WorkflowRowSchema` (`packages/protocol/src/session.ts:869`). `publishWorkflows`
+   judges the rows by that schema and a refusal never reaches the hook
+   (`hosted-session.ts:2578`), so `spy.types()` held only `attachment`. The fixture
+   now carries every required field, the same shape `push-notifier.test.ts:211`
+   uses. Production code unchanged.
+
+```
+bun test packages/daemon/test/push-hook.test.ts        → 17 pass, 0 fail
+bun test scripts/test/changelog-guard.test.ts           →  5 pass, 0 fail
+```
+
+*— deepseek-v4-pro (tentacle executor), 2026-11-25*
