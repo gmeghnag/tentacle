@@ -745,3 +745,28 @@ and `a2c-6` may run in parallel after `a2c-4` (disjoint files).
 | 8 | `a2c-8-e2e` | tentacle → tentacle e2e on loopback, README, TODO follow-ups | S · contained | sonnet |
 
 SLICES: a2c-1-mapping=sonnet a2c-2-transport=opus a2c-3-seam=opus a2c-4-question-protocol=opus a2c-5-question-tui=sonnet a2c-6-question-mobile=sonnet a2c-7-proposed-agents=opus a2c-8-e2e=sonnet
+
+## Execution
+
+*— claude-opus-5-5, 2026-11-25*
+
+### a2c-2-transport — STOPPED before any code (dependency missing)
+
+- **Load-bearing check, runner half — holds:** `bun test
+  packages/agent/test/harness-remote-fit.test.ts` → 13 pass / 0 fail.
+- **Blocker — slice a2c-1 did not land.** The a2c-1 commits (`acac5877`,
+  `7327d6bd`) add only the `@a2a-js/sdk` dep (`packages/agent/package.json`,
+  `bun.lock`) and a compile smoke (`packages/agent/smoke-a2a.ts`). The pure
+  module the plan puts in a2c-1 (Files #2) is absent: no
+  `packages/agent/src/harness/a2a-map.ts`, no `harness-a2a-map.test.ts`
+  (`rg -l "a2a-map|cardBlurb" packages apps` → nothing), and no a2c-1
+  Execution note. a2c-2's adapter is specified to call it for the card check,
+  the `StreamResponse` → `HarnessEvent` mapping (F-a/F-b), the outbound builder
+  (`redactText`), the sanitiser/caps and the address classifier that the
+  `proposed` network policy needs (C2, C11). Writing a2c-2 now would mean
+  writing a2c-1 inside it, outside this slice's mandate.
+- Nothing changed in code; no changelog fragment (no user-visible change yet).
+- **Decision needed (orchestrator):** re-run `a2c-1-mapping` (a2a-map.ts +
+  its tests, per Tests a2c-1), then a2c-2; or authorise a2c-2 to absorb
+  a2c-1's module. Also note `packages/agent/smoke-a2a.ts` sits in the package
+  root, not a scratch dir — a2c-1 should decide whether it stays.
