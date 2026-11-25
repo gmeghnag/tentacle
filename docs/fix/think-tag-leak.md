@@ -305,3 +305,15 @@ Executor's "floor = 0 always" mutation table is consistent with these.
 **Attacks tried:** (a) index drift between `echoing` scan and wire (tool messages take the other branch of `wireMessages`) — none, `entries()` index matches; (b) §7 persistence / protocol — untouched, `ChatMessage.reasoning` stays (asserted); (c) pod path — `ProxyModelProvider` hands the same messages to the laptop provider, one cut; (d) synthetic mid-turn `user` messages — found finding 1; (e) no-tools requests (compaction/title/forced report) — floor 0 = pre-fix bytes, safe by the 0/32 control.
 
 **Executor behaviour:** honest and disciplined — two plan fixes forced by the code were recorded with evidence, red-before-green and a mutation table given, the un-run live GPU check stated plainly. Missed the status-line path (another route to the steer shape).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-25* (fresh-context reviewer, same as round 1; executor commit `096c9855`)
+
+**Verdict: PASS.**
+
+- **Finding 1 — FIXED.** `echoFloor` (`packages/providers/src/openai-provider.ts:532-549`) now returns the start of the last run of `user` messages whose predecessor is not a `tool` result. The workflow status line, steers and post-tool loop notes no longer move the floor; the `echoing` scan shares the helper, so D9 stays armed. The test `a live workflow's status line at the tail keeps the turn's echo` pins the exact `withStatusLine` shape (floor = opener, current round echoed, previous turn's not).
+- **Mutations (mine, reverted, `git status` clean):** removing the `tool` check makes 4 tests fail (steer, status line, `user` run, residual); removing the `user` run-start check makes 1 fail (consecutive `user` run). Both match the executor's table.
+- **Regressions attacked:** (a) the 6/12 repro shape and a turn-1 tool loop ending in an answer → the next prompt follows an assistant → still cut (tests green); (b) a forced-report / `turn_end`-hook note after an assistant answer → moves the floor, which only drops echo; (c) the cancelled-mid-tool residual (and, by the same shape, a session cut mid-turn and repaired on load) → one turn's tool-round reasoning is echoed into the next turn only. It is documented, pinned by a test and left for the owner to veto, so it is not a blocker.
+- **Gate:** the three touched or related test files (providers reasoning-echo-openai, agent reasoning-echo, agent status-line-request) → 38 pass / 0 fail; `bun run lint` clean (2536 files); `bun run typecheck` clean. I did not run the full `bun run check`.
+- **Executor behaviour:** took the suggested option, showed red before green, ran its own mutations and declared the residual honestly instead of hiding it.
