@@ -1545,7 +1545,7 @@ step). Facts for the re-run:
     (`local-runtime.ts`), which is more than the 2 s budget. MCP connection
     in the worker now starts after the card read, which only delays it when
     an `a2a` instance is configured.
-  - **Owner-deferred:** `/a2a` reload command → `TODO.md` (feat/a2a-card-reload).
+  - **Owner-deferred:** `/a2a` reload command → `TODO.md` (feat/a2a-reload).
   - Tests: `packages/cli/test/a2a-card-hosts.test.ts` (8): the worker build
     reads the card text; refresh after each build means the next build reads
     v2; `serve` (real `startDaemon`, a loopback card server, a turn through
@@ -1579,6 +1579,51 @@ step). Facts for the re-run:
 - **Changelog:** `changelog.d/a2a-client.added.md` now states the card text
   and the start-up wait of up to 2 s, which users will notice.
 - **Gate:** not run here (the orchestrator's script runs it).
+
+#### Merge with main (2026-11-26)
+
+`git merge main` (mobile-ask-surfaces, serve-mcp-polish, think-tag-leak and
+TODO entries landed on main since the last merge). Merge commit `a3758bb8`.
+
+- **`TODO.md`:** both sides added the same owner-deferred item (finding 2's
+  `/a2a` reload): ours as `feat/a2a-card-reload`, main's as `feat/a2a-reload`.
+  Kept ONE item, under main's slug (already on main), with our detail folded in
+  (`startA2ACards`, `packages/cli/src/wiring.ts`, «one build late»). Every
+  other main item (workflow-edit-segments, workflow-no-verdict, run-network)
+  kept. This doc's two references now name `feat/a2a-reload`.
+- **`apps/mobile/src/screens/PermissionSheet.tsx`:** main rewrote the sheet
+  around `AskCard`/`AskSlim` (docs/fix/mobile-ask-surfaces.md); ours only
+  changed the reply copy. Took main's file and re-applied `replyCopy` to the
+  field's placeholder, the Send label and its accessibility label.
+- **Semantic follow-up (no textual conflict), `ask-card.ts` + `ui/AskCard.tsx`:**
+  main's card always drew `Deny · Allow once`, so a remote `question` (options
+  `reply` + `reject_once`, C10) showed a dead «Allow once» (the sheet ignores an
+  option not offered) and hid «Answer…» behind `…`. A question now draws
+  `Skip · Answer…` (Answer… is the primary look; without a reply bound, Skip
+  alone) and nothing in `…`; every other kind is unchanged (`agent_add` keeps
+  `No · Yes, for this session`). Red first: 2 of the 3 new tests in
+  `apps/mobile/test/ask-card.test.ts` failed on the merged code before the fix.
+  Simulator screenshots still owed (as for a2c-6).
+- **`packages/daemon/src/hosted-session.ts`:** main added the `workflow`
+  attribution to `toPermissionRequestUpdate` and `askedOn()` lost nothing ours
+  needs; ours routes every ask through `toAskUpdate` and `askedOn(askType)`.
+  Kept ours and gave `toAskUpdate` (`permission-map.ts`) a `workflow` parameter
+  passed to permission requests only (`question_request` has no such field).
+- **Semantic follow-up, `packages/client/src/permission-router.ts`:** main's
+  auto-merged prompt read `entry.update.workflow` off an `AskUpdate`, which is a
+  type error for a `question_request`; it now reads it only off a
+  `permission_request`.
+- **`packages/protocol/schema/protocol.json`, `tools/mockup-kit/generated/kit-data.json`:**
+  generated, not hand-merged: `bun run schema:export` and `bun run mockup-kit`.
+- **Verification:** `bun run typecheck` clean; `bun run lint` clean (2574
+  files); narrow `bun test --parallel packages/daemon packages/protocol
+  packages/client apps/mobile/test` → 8772 pass / 1 skip / 0 fail; full
+  `bun run test` → 19467 pass / 5 skip (opt-in) / 0 fail (a first run under
+  load had 4 fails + 2 errors in `packages/cli/test/main.test.ts` and
+  `attach-run.test.ts` (a 5 s timeout); both files alone: 181 pass / 0 fail, and
+  the full rerun was green).
+
+*— claude-opus-5-5, 2026-11-26*
 
 ## Review
 
@@ -1734,7 +1779,7 @@ still fixed (Round 2). No new HIGH or MEDIUM.
   - `bun run typecheck` clean; `bun run lint` clean (2557 files).
 - **Changelog / TODO:** the fragment now says the card text is read at
   start-up (≤ 2 s) and refreshed for the next session, which is accurate. The
-  deferred `/a2a` reload is `TODO.md` `feat/a2a-card-reload`.
+  deferred `/a2a` reload is `TODO.md` `feat/a2a-reload`.
 - **Not run here:** the full parallel `bun run test` (the merge gate's), and
   the simulator screenshots from a2c-6, which are still owed before any iOS
   build.
