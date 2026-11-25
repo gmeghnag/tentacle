@@ -44,3 +44,5 @@ export * from "./a2a/task-projection.ts";
 export { A2A_PROTOCOL, buildAgentCard } from "./a2a/mapping.ts";
 export * from "./external/route.ts";
 export type { AskMode } from "./external/asks.ts";
+export { MCP_PATH, type McpHttpOptions, createMcpRoute } from "./mcp/http.ts";
+export { MCP_PROTOCOL, McpTools, type McpToolsOptions } from "./mcp/tools.ts";
