@@ -1270,3 +1270,57 @@ own test. No schema changed, so `protocol.json` needs no regeneration and no `pr
 changelog fragment is `changelog.d/workflows-ux-graph-render.fixed.md`.
 
 *— deepseek-chat (tentacle executor), 2026-11-25*
+
+## Review
+
+### Review — S4, S5, S6a, S6b (fresh context)
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff main...HEAD`, slices S4–S6b only.
+
+**Gate (narrow, §4):** the 13 touched test files → 248 pass / 0 fail. `bun run typecheck` clean;
+`bun run lint` clean (2433 files). Full `bun run check` not run by this review.
+
+**Mutation (§9), each reverted, `git status` clean after:**
+- S4: drop `this.refreshTaken(run, step)` (`workflow-driver.ts:1590`) → red (`review fails once: taken becomes 1…`).
+- S5: drop `taken < max` in `reachableFrom` (`workflow-run-graph.ts:225`) → red (`a LIVE run whose goto is spent…`).
+
+**Findings**
+1. **MEDIUM — every edge into the current step is drawn `go`/`taken`, walked or not**
+   (`packages/client/src/workflow-run-graph.ts:302-306`). `traceOf` returns `go` (running) or `taken`
+   (ask) for ANY edge whose `to === current`, before it checks the history. Repro
+   (`.tentacle/tmp/workflows-ux/trace.ts`): demo-note, `draft` ok, `review` running for the first time
+   → `next fix -> review go` (fix is `later`, it never ran) and `retry review -> review go ↻ 0/1`
+   (attempt 0, no retry happened). On an `ask` step the same edges come out `taken`, i.e. the graph
+   claims a loop that never ran. Fix: only the edge `lastVisited → current` (and the retry edge when
+   `attempt > 0`) is `go`/`taken`; other edges into `current` fall through to the normal rules. Add a
+   test: first pass of review ⇒ `fix→review` is `later`, retry is `later`.
+2. **MEDIUM — edges cross side pills** (`apps/mobile/src/workflow-run-layout.ts:154-160`, `:458-467`).
+   Placement keeps pills apart, but no edge avoids an intermediate side pill. Repro
+   (`.tentacle/tmp/workflows-ux/layout.ts`): `a→b→c→d`, `b` goto `x`, `c` goto `y`, `x.next = d` →
+   `fail c y` runs at x≈338 from y 176 to 234 straight through pill `x` (y 162–206), and
+   `next x d` (a FORWARD side→spine edge that drops into the "back up the spine" arm) runs
+   horizontally at y 256 through pill `y` (244–386 × 234–278). D3's "no arc ever crosses the side
+   column" does not hold. The tests check only edge endpoints. Fix: route a goto past an occupied
+   side row (or enter the target's top-left past the pills), add a forward side→spine case, and a
+   test that no edge segment's sampled points fall inside a non-endpoint pill.
+
+**Attacks tried that found nothing:** history order vs `nextAction` (the entry and `refreshTaken`
+come after `nextAction`; the counter matches `edgeKey`); resume (`rest` carries `history` and the
+`taken` counters, `rerunAt` keeps `state.counters`, so they agree); persistence (the row is in
+memory only: no on-disk record gains or needs the fields); client bounding (`boundRun` slices to the
+LATEST 64, sanitizes step ids in `next`/`onFail`/`history`); ended-run `pending` → always `skipped`
+(no reachability on `!live`); `protocol.d/workflows-ux.md` present, `PROTOCOL_VERSION` not edited;
+Reduce Motion gates both the `go` dash animation and the running blink (`WorkflowRun.tsx:205,321`).
+
+**Out of scope, noted:** the merge `6991e1df` committed two `sed` backups,
+`apps/mobile/test/e2e-flows.test.ts-E` and `apps/mobile/test/hub-actions.test.ts-E` (~2000 lines).
+They should be deleted.
+
+**Executor behaviour:** the doc is careful and honest about drift (e.g. it keeps `workflow-graph.ts`
+and says why, it names the unverified simulator render). The two defects are in cases the tests do
+not reach: the tests pin the four mockup scenarios, not the edges around them.
+
+Reviewer: fresh context, a different model family from the S5–S6b executor (deepseek) and the same
+family as the S4 executor (claude-opus-5-5), so S4 blind spots may be shared.
+
+*— claude-opus-5-5, 2026-11-25*
