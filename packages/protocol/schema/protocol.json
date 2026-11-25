@@ -7146,6 +7146,23 @@
       "required": ["action", "runId", "sessionId"],
       "type": "object"
     },
+    "WorkflowPromptText": {
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 65536,
+          "type": "string"
+        }
+      },
+      "required": ["path", "text"],
+      "type": "object"
+    },
     "WorkflowRefusal": {
       "maxLength": 32,
       "minLength": 1,
@@ -7248,6 +7265,211 @@
       "maxLength": 32,
       "pattern": "^wf-[1-9][0-9]*$",
       "type": "string"
+    },
+    "WorkflowSaveParams": {
+      "additionalProperties": true,
+      "properties": {
+        "baseHash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "draft": {
+          "maxLength": 524288,
+          "type": "string"
+        },
+        "dryRun": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": ["create", "replace"],
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/WorkflowName"
+        },
+        "prompts": {
+          "items": {
+            "$ref": "#/$defs/WorkflowPromptText"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["draft", "dryRun", "mode", "name", "prompts", "sessionId"],
+      "type": "object"
+    },
+    "WorkflowSaveResult": {
+      "additionalProperties": true,
+      "properties": {
+        "alsoChanges": {
+          "items": {
+            "$ref": "#/$defs/WorkflowName"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "errors": {
+          "items": {
+            "maxLength": 300,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/WorkflowWriteFile"
+          },
+          "maxItems": 33,
+          "type": "array"
+        },
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "refusal": {
+          "$ref": "#/$defs/WorkflowRefusal"
+        },
+        "running": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        },
+        "schedules": {
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "version": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
+    "WorkflowSourceParams": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/WorkflowName"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["name", "sessionId"],
+      "type": "object"
+    },
+    "WorkflowSourceResult": {
+      "additionalProperties": true,
+      "properties": {
+        "canonical": {
+          "type": "boolean"
+        },
+        "context": {
+          "additionalProperties": true,
+          "properties": {
+            "agentTypes": {
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "models": {
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "draft": {
+          "maxLength": 524288,
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "maxLength": 300,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "prompts": {
+          "items": {
+            "$ref": "#/$defs/WorkflowPromptText"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "text": {
+          "maxLength": 262144,
+          "type": "string"
+        },
+        "unavailable": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "unreadable": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
     },
     "WorkflowStepDetail": {
       "additionalProperties": true,
@@ -7398,6 +7620,35 @@
       "minLength": 1,
       "pattern": "^[a-z][a-z0-9_-]*$",
       "type": "string"
+    },
+    "WorkflowWriteFile": {
+      "additionalProperties": true,
+      "properties": {
+        "added": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "maxLength": 65536,
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "removed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "enum": ["new", "changed", "unchanged"],
+          "type": "string"
+        }
+      },
+      "required": ["added", "path", "removed", "status"],
+      "type": "object"
     },
     "WorkflowsUpdate": {
       "additionalProperties": true,
@@ -7853,6 +8104,22 @@
       },
       "result": {
         "$ref": "#/$defs/WorkflowCatalogueResult"
+      }
+    },
+    "session/workflow_save": {
+      "params": {
+        "$ref": "#/$defs/WorkflowSaveParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowSaveResult"
+      }
+    },
+    "session/workflow_source": {
+      "params": {
+        "$ref": "#/$defs/WorkflowSourceParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowSourceResult"
       }
     },
     "session/workflow_step": {

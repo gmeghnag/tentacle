@@ -120,3 +120,21 @@ export async function poll(pred: () => boolean, ms = 3000): Promise<boolean> {
   }
   return true;
 }
+
+/**
+ * `until` for an ASYNC condition (a store read, a `loadAll()`), same contract:
+ * THROWS on a timeout, so a wait whose result is ignored can never let a test
+ * pass vacuously. Use it instead of a fixed sleep before an assertion on
+ * something another task produces (AGENTS §9): a sleep long enough on an idle
+ * machine is not long enough under the CPU contention of a parallel gate.
+ */
+export async function untilAsync(pred: () => Promise<boolean>, ms = 3000): Promise<true> {
+  const start = Date.now();
+  while (!(await pred())) {
+    if (Date.now() - start > ms) {
+      throw new Error(`untilAsync: timed out after ${ms} ms waiting for ${String(pred)}`);
+    }
+    await tick();
+  }
+  return true;
+}

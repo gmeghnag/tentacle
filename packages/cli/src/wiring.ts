@@ -106,7 +106,7 @@ import {
   tunnelSubagentResolver,
 } from "./model-provider.ts";
 import { workflowApprovals } from "./workflow-approvals.ts";
-import { loadWorkflowSource, workflowListing } from "./workflow-files.ts";
+import { loadWorkflowSource, workflowListing, writeWorkflowFiles } from "./workflow-files.ts";
 
 /**
  * Load user-defined agent types from `<configDir>/agents/*.md`, then from each
@@ -854,6 +854,11 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       workflows = new WorkflowDriver({
         load: async (name) => loadWorkflowSource(config.cwd, name),
         list: async () => workflowListing(config.cwd),
+        // The ONE writer (docs/feat/workflow-editor.md D4), inside this block and
+        // nowhere else: a `serve`/worker session can edit its own files, a pod
+        // session (`tunnelled`) never gets it and answers `unavailable`. It
+        // writes and nothing more — it never reaches the approval store.
+        save: (plan, currentHash) => writeWorkflowFiles(config.cwd, plan, currentHash),
         context: () => ({
           models: Object.keys(config.models),
           agentTypes: types.map((t) => t.name),

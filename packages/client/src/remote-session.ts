@@ -37,6 +37,8 @@ import {
   type WorkflowCatalogueResult,
   type WorkflowResult,
   type WorkflowRow,
+  type WorkflowSaveResult,
+  type WorkflowSourceResult,
   type WorkflowStepResult,
   isWakeTurnId,
 } from "@tentacle/protocol";
@@ -77,7 +79,11 @@ import {
 import { SCHEDULE_UNTRUSTED_DAEMON, firedScheduleRef } from "./schedules.ts";
 import type { StreamOutput } from "./session-reducer.ts";
 import type { SubagentNotify } from "./subagents.ts";
-import { WORKFLOW_UNTRUSTED_DAEMON, type WorkflowAction } from "./workflows.ts";
+import {
+  WORKFLOW_UNTRUSTED_DAEMON,
+  type WorkflowAction,
+  type WorkflowSaveRequest,
+} from "./workflows.ts";
 
 /** Own turns remembered by `ownsTurn` after they end (the oldest fall off). */
 const MINTED_TURNS_MAX = 256;
@@ -1364,6 +1370,55 @@ export class RemoteSession implements SessionStreamListener {
       stepId,
       ...(attempt === undefined ? {} : { attempt }),
     });
+  }
+
+  /**
+   * `session/workflow_source` (docs/feat/workflow-editor.md D5/D3): what the
+   * editor opens for ONE file — its bytes, its draft (JSON text, because the
+   * phone cannot parse YAML), the prompts its steps read, and either its hash or
+   * the validator's errors. A READ: no ask, no run, no write, so it needs no
+   * turn id.
+   *
+   * Three answers, kept distinct on purpose like `workflowCatalogue`'s:
+   * `{unsupported:true}` (an older daemon — "update tentacle on this computer"),
+   * `{unavailable}` (this session cannot edit workflows at all — a tunnelled
+   * pod session), and the file. The trust bit refuses locally and sends nothing
+   * (§7): a pod-originated draft would be pod-supplied history.
+   */
+  async workflowSource(name: string): Promise<WorkflowSourceResult | { unsupported: true }> {
+    const sessionId = this.id;
+    if (sessionId === null) {
+      return { ok: false, unavailable: "this session is not open yet" };
+    }
+    if (!this.daemonWakes) {
+      return { ok: false, unavailable: WORKFLOW_UNTRUSTED_DAEMON };
+    }
+    return this.client.workflowSource(sessionId, { sessionId, name });
+  }
+
+  /**
+   * `session/workflow_save` (docs/feat/workflow-editor.md D5/D7): `dryRun: true`
+   * is the Review screen — every check, nothing written — and `false` writes,
+   * refusing `changed` unless `baseHash` is still the file's.
+   *
+   * **It mints NO turn.** A save raises no ask (unlike a `start`, which is a run
+   * whose hash approval must be attributable to this device's turn), so there is
+   * nothing for auto-accept to own and a `turnId` here would be a lie.
+   *
+   * The trust bit refuses locally and sends nothing, with the refusal shape a
+   * write uses (`refusal` + `reason`), so a screen paints one kind of answer.
+   */
+  async workflowSave(
+    request: WorkflowSaveRequest,
+  ): Promise<WorkflowSaveResult | { unsupported: true }> {
+    const sessionId = this.id;
+    if (sessionId === null) {
+      return { ok: false, refusal: "unavailable", reason: "this session is not open yet" };
+    }
+    if (!this.daemonWakes) {
+      return { ok: false, refusal: "unavailable", reason: WORKFLOW_UNTRUSTED_DAEMON };
+    }
+    return this.client.workflowSave(sessionId, { sessionId, ...request });
   }
 
   /**

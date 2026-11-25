@@ -110,6 +110,10 @@ import {
   type WorkflowParams,
   type WorkflowResult,
   type WorkflowRow,
+  type WorkflowSaveParams,
+  type WorkflowSaveResult,
+  type WorkflowSourceParams,
+  type WorkflowSourceResult,
   type WorkflowStepParams,
   type WorkflowStepResult,
   text,
@@ -1695,6 +1699,54 @@ export class RemoteClient {
     return this.sessionCall(sessionId, Method.WorkflowStep, params, "once").then(
       (result) => result as WorkflowStepResult,
       (error: unknown): WorkflowStepResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/workflow_source` (docs/feat/workflow-editor.md D5/D3): what the
+   * editor opens — the file's bytes, its draft, its prompts, the hash or the
+   * errors. A READ: it raises no ask and writes nothing. An older daemon's
+   * `MethodNotFound` is `{unsupported: true}` — the phone then hides Edit/New
+   * and says "update tentacle on this computer"; never a throw at a screen, and
+   * never an empty file that blames the folder.
+   */
+  workflowSource(
+    sessionId: string,
+    params: WorkflowSourceParams,
+  ): Promise<WorkflowSourceResult | { unsupported: true }> {
+    return this.sessionCall(sessionId, Method.WorkflowSource, params, "once").then(
+      (result) => result as WorkflowSourceResult,
+      (error: unknown): WorkflowSourceResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/workflow_save` (docs/feat/workflow-editor.md D5/D3): `dryRun: true`
+   * IS the Review screen (every check, nothing written); `false` re-does them and
+   * writes, refusing `changed` unless `baseHash` is still the file's.
+   *
+   * Not re-sent after a drop (`"once"`): a write is not idempotent from here —
+   * the caller re-reads the file (`workflowSource`) and decides from its hash
+   * (D7). A refusal is a RESULT with a `refusal` word and a `reason`, never a
+   * throw; an older daemon is `{unsupported: true}`.
+   */
+  workflowSave(
+    sessionId: string,
+    params: WorkflowSaveParams,
+  ): Promise<WorkflowSaveResult | { unsupported: true }> {
+    return this.sessionCall(sessionId, Method.WorkflowSave, params, "once").then(
+      (result) => result as WorkflowSaveResult,
+      (error: unknown): WorkflowSaveResult | { unsupported: true } => {
         if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
           return { unsupported: true };
         }

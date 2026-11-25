@@ -79,6 +79,36 @@ describe("webSocketChannelFactory over a real socket", () => {
   });
 });
 
+/**
+ * A loopback port OUTSIDE the ephemeral range (macOS 49152–65535, Linux
+ * 32768–60999), for a server that must be restarted on the same one: port-0
+ * allocation can never hand it out, so a concurrent shard cannot steal the
+ * re-bind (an explicit `127.0.0.1:P` bind takes IPv4 traffic from a dual-stack
+ * `*:P` port-0 server on macOS — AGENTS §9). It is NOT probed then released:
+ * `startOn` binds the candidate for real and retries a new one on `EADDRINUSE`,
+ * so two picks of the same number collide loudly, never silently.
+ */
+function restartPort(): number {
+  return 20_000 + Math.floor(Math.random() * 10_000);
+}
+
+/** Start the daemon on a port outside the ephemeral range, retrying a taken one. */
+function startOn(host: SessionHost) {
+  for (let i = 0; i < 50; i++) {
+    try {
+      return startWsServer({
+        host: "127.0.0.1",
+        port: restartPort(),
+        sessionHost: host,
+        token: "good",
+      });
+    } catch {
+      // EADDRINUSE: another test picked this number. Pick again.
+    }
+  }
+  throw new Error("no free port outside the ephemeral range");
+}
+
 describe("connect's client re-attaches over a real WebSocket", () => {
   test("the daemon goes away mid-turn and comes back: the turn completes, status reconnecting → up", async () => {
     const model = new GatedModel([[t("a"), { kind: "gate" }, t("b"), done]]);
@@ -100,7 +130,7 @@ describe("connect's client re-attaches over a real WebSocket", () => {
         return { agent, permissions };
       },
     });
-    let server = startWsServer({ host: "127.0.0.1", port: 0, sessionHost: host, token: "good" });
+    let server = startOn(host);
     const port = server.port;
     const factory = webSocketChannelFactory(server.url, { token: "good" });
     const client = new RemoteClient(await factory(), new PermissionBroker(), undefined, {

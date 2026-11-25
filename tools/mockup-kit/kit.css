@@ -662,12 +662,43 @@
 }
 .k-toast {
   align-self: center;
+  display: flex;
+  align-items: center;
+  gap: var(--m-step-line-gap);
   border-radius: var(--r-pill);
   padding: var(--m-composer-field-padding-top) var(--m-composer-send-now-padding-horizontal);
   background: var(--c-glass);
   border: var(--m-composer-field-border-width) solid var(--c-glass-border);
   box-shadow: var(--shadow-glass);
   font: var(--t-footnote-size) / var(--t-footnote-lh) var(--t-footnote-family);
+}
+.k-toast-action {
+  color: var(--c-accent);
+  font-weight: var(--t-subhead-strong-weight);
+}
+/* The filled primary action (`bigButton`): the 50 pt control, full width. */
+.k-big-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--s-big-button);
+  margin: 0 var(--sp-inset);
+  border-radius: var(--r-pill);
+  box-sizing: border-box;
+  background: var(--c-accent-fill);
+  color: var(--c-on-accent);
+  font: var(--t-headline-weight) var(--t-headline-size) / var(--t-headline-lh)
+    var(--t-headline-family);
+}
+.k-big-button[data-tone="warn"] {
+  background: var(--c-orange);
+  color: var(--c-page);
+}
+.k-big-button[data-disabled] {
+  opacity: var(--m-composer-dim-opacity);
+}
+.k-row-value[data-mono] {
+  font: var(--t-mono-size) / var(--t-mono-lh) var(--t-mono-family);
 }
 .k-banner {
   margin: 0 var(--sp-inset);
@@ -896,12 +927,22 @@
 }
 
 /* ── «nuovo» (K.extend) ──────────────────────────────────────────────────── */
-[data-nuovo-mode] .k-nuovo {
+/* `display: contents`: the wrapper paints no box, so an extension that is a
+   direct child of the screen's flex column keeps `margin-top: auto` / `flex: 1`
+   (with a box of its own, `margin-top:auto` on the CHILD did nothing and a
+   mockup needed a `:has()` patch). The «nuovo» mark moves to the children — the
+   only boxes there are: a contents box cannot carry an outline, and `attr()` on
+   a child cannot see the wrapper's `data-nuovo`, so the badge is the fixed word
+   and the component's name stays on the wrapper's attribute for inspection. */
+.k-nuovo {
+  display: contents;
+}
+[data-nuovo-mode] .k-nuovo > * {
   outline: 1px dashed var(--c-orange);
   position: relative;
 }
-[data-nuovo-mode] .k-nuovo::after {
-  content: "«nuovo» " attr(data-nuovo);
+[data-nuovo-mode] .k-nuovo > *::after {
+  content: "«nuovo»";
   position: absolute;
   top: 0;
   right: 0;

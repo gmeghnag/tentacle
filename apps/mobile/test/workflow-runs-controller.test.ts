@@ -5,7 +5,6 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { WorkflowListResult, WorkflowListRow } from "@tentacle/protocol";
-import { NO_WORKFLOW_RUNS } from "../src/hub-actions.ts";
 import {
   RUNS_DEBOUNCE_MS,
   WORKFLOWS_OFFLINE,
@@ -208,11 +207,24 @@ describe("workflowsHub: the hub's figure (D4)", () => {
     expect(workflowsHub({ kind: "error", runs: [], offline: null, error: "x" })).toBeUndefined();
   });
 
-  test("no run → dimmed `No workflow runs`; an older daemon → dimmed `Update tentacle`", () => {
+  /**
+   * docs/feat/workflow-editor.md D8 "Entries" (`WorkflowRuns` empty state "New
+   * workflow") + E1 ("empty list → New"): with zero runs the runs list IS the
+   * only way to create the first workflow, and the hub item is its only door
+   * (`App.tsx`'s `onOpenWorkflows` → `WorkflowRuns`). So an EMPTY list must
+   * still open: dimming it — docs/feat/workflows-ui.md D4's earlier rule, from
+   * before the phone could create one — makes the first workflow unreachable,
+   * which is also what broke flow 44. An older daemon keeps its dim: there is
+   * no runs screen to open there.
+   */
+  test("an EMPTY list does not dim the item — its tap is how the first workflow is created", () => {
     expect(workflowsHub({ kind: "ready", runs: [], offline: null })).toEqual({
       needYou: 0,
-      empty: NO_WORKFLOW_RUNS,
+      empty: null,
     });
+  });
+
+  test("an older daemon → dimmed `Update tentacle`", () => {
     expect(workflowsHub({ kind: "unsupported", runs: [], offline: null })).toEqual({
       needYou: 0,
       empty: WORKFLOWS_UPDATE_TENTACLE,

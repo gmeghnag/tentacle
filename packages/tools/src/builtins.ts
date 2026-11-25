@@ -55,6 +55,23 @@ function makeDiff(path: string, before: string, after: string): ToolDiffDetail {
   return { kind: "diff", path, patch, added, removed };
 }
 
+/**
+ * One path's unified patch and its line counts, without the tool-result wrapper
+ * (`makeDiff` above): what shows a write BEFORE it happens
+ * (docs/feat/workflow-editor.md D4 — the editor's Review screen shows exactly
+ * the patch it is about to write). A caller that is not a tool cannot build a
+ * `ToolDiffDetail` (`kind: "diff"` is the tool protocol's), so this is the same
+ * patch in the shape such a caller needs.
+ */
+export function unifiedDiff(
+  path: string,
+  before: string,
+  after: string,
+): { readonly patch: string; readonly added: number; readonly removed: number } {
+  const { patch, added, removed } = makeDiff(path, before, after);
+  return { patch, added, removed };
+}
+
 /** Hold `path`'s lock across a read-modify-write (the ctx's, else the env's shared one). */
 function lockPath<T>(ctx: ToolContext, path: string, fn: () => Promise<T>): Promise<T> {
   return (ctx.pathLocks ?? pathLocksFor(ctx.env)).withLock(path, fn);
