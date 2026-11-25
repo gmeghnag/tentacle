@@ -119,6 +119,8 @@ export const HubOp = z.discriminatedUnion("op", [
     tab: TabId,
     cursor: z.number().int().nonnegative().optional(),
   }),
+  /** Close an own tab; a handed-over one is released back to the user, never closed (B5). */
+  z.object({ op: z.literal("close"), sessionUid: z.string(), tab: TabId }),
   z.object({
     op: z.literal("type"),
     sessionUid: z.string(),

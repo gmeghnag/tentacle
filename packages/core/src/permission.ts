@@ -29,6 +29,14 @@ export function isPermissionReplyText(value: unknown): value is string {
  */
 export const WORKFLOW_APPROVE_TOOL = "workflow_approve";
 
+/**
+ * The wire `tool` of a browser action ask (docs/feat/browser-inspect.md B5 §5):
+ * a `browser_*` tool raises it from inside its call, after the extension
+ * reported what the click / typing / navigation would do; the client maps it
+ * back to `kind: "browser_action"`.
+ */
+export const BROWSER_ACTION_TOOL = "browser_action";
+
 export interface PermissionRequest {
   /**
    * What is asked (laptop-internal, never on the wire): a tool call (absent =
@@ -38,9 +46,10 @@ export interface PermissionRequest {
    * `hooks_trust` is never answered by auto-accept. A `session_hop` is answered
    * ONLY when `hopAuto` is set (docs/feat/session-hop-ux OD4). A
    * `workflow_approve` (a workflow's hash approval, or its `approve` step —
-   * docs/feat/agent-workflows.md D2/D3) is NEVER answered by auto-accept.
+   * docs/feat/agent-workflows.md D2/D3) is NEVER answered by auto-accept,
+   * nor is a `browser_action` (acting AS the user on the web, browser-inspect Q3).
    */
-  readonly kind?: "tool" | "hooks_trust" | "session_hop" | "workflow_approve";
+  readonly kind?: "tool" | "hooks_trust" | "session_hop" | "workflow_approve" | "browser_action";
   /**
    * Slack (laptop-internal, never on the wire): this `session_hop` is one
    * auto-accept MAY answer, because the LAPTOP's own rule said so
@@ -314,8 +323,21 @@ export function autoApproves(req: PermissionRequest, own = true): boolean {
     // A workflow's hash approval authorises a whole sequence, and its approve
     // step is a merge/push: a human decision (docs/feat/agent-workflows.md D3).
     req.kind !== "workflow_approve" &&
+    // A browser action acts AS the user on the web: its own switch, never the
+    // session's auto-accept (docs/feat/browser-inspect.md Q3).
+    req.kind !== "browser_action" &&
     (req.kind !== "session_hop" || req.hopAuto === true)
   );
+}
+
+/**
+ * An ask answered allow-once or deny only, on every surface: a workflow's
+ * approval (a merge) and a browser action (acting as the user on the web) are
+ * each one human decision. The daemon offers exactly these options
+ * (`permissionOptions`), so a surface offering "always" would be refused.
+ */
+export function onceOnlyAsk(req: PermissionRequest): boolean {
+  return req.kind === "workflow_approve" || req.kind === "browser_action";
 }
 
 /**
