@@ -354,3 +354,40 @@ rule: fix it here if it is class A/B, otherwise STOP and report.
 *— claude-opus-5-5, 2026-11-25 (executor, resuming DeepSeek's partial pass)*
 
 ## Review
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM finding). Scope: `git diff main...HEAD` only.
+
+**Gate (re-run by the reviewer, this worktree at `90cf666c`).** `bun run lint` → clean (2395 files).
+`bun run typecheck` → clean. The 11 touched test files → `315 pass · 0 fail`. `bun run test` (parallel) →
+`17879 pass · 5 skip · 0 fail · 17884 tests · 1254 files · 47.4 s wall` (= 17881 + 3 T1 tests; the 5 skips
+are the opt-in groups). `git status` clean afterwards. The 5-run flake series (Validation 2) was NOT run here.
+
+**Mutation (§9).** `test` script changed to `bun test --timings=scripts/test-timings.json` (serial, but
+not the literal `"bun test"`, so the string check passes) → T1 `2 pass · 1 fail` (`Expected: not 0`): the
+behavioural case catches a serial runner on its own, not just the string guard. Reverted; tree byte-identical
+(`git status` empty). Class A mutations: taken from Execution (not re-run).
+
+**Attacks tried.**
+1. `connect-model-error` `startOnFreePort` retries `startDaemon` up to 50×: would a failed bind leave the
+   store lock held, so every retry fails? No — `packages/cli/src/serve.ts:554` acquires it and the `catch`
+   releases it (`serve.ts:~658`). Holds.
+2. `output-streams` `settled` flips in a microtask queued INSIDE `startDaemon`, i.e. before `main` installs
+   its SIGINT handler (`main.ts:1212`). Not a race: everything between `await startDaemon` and
+   `process.on("SIGINT")` is synchronous, and `until` re-checks only after a 5 ms timer, so all microtasks
+   have drained by then. Holds (weak in theory, sound in practice).
+3. `scripts/test-timings.json` keys: all repo-relative (no `/Users/…`), so it is not tied to one machine. Holds.
+4. Restart-port picker (20000–29999): outside both ephemeral ranges; a second `127.0.0.1:P` bind fails
+   `EADDRINUSE` (no `reusePort`), so a collision is loud. Holds.
+
+**Nits (non-blocking).**
+- `ws-factory.test.ts:~458` / `connect-model-error.test.ts:~144`: `catch {}` swallows every error, not only
+  `EADDRINUSE`; a real startup bug would surface only as "no free port outside the ephemeral range" after 50
+  tries. Re-throw when the error is not `EADDRINUSE`.
+- `changelog.d/parallel-unit-tests.changed.md` conflicts with AGENTS §10 ("internal/dev/test-only work adds
+  no fragment") and with the doc header ("Changelog: none"). The orchestrator decides whether to keep it.
+
+**Executor behaviour.** The drift was disclosed honestly (Text-seam mock instead of the react-native mock;
+the changelog fragment; T3 burner counts replaced by mutations; Validation 1–3 left to the gate). Claims
+checked match the code. Reviewer is the same model family as the planner/finisher (Opus), but a fresh context.
+
+*— claude-opus-5-5, 2026-11-25*
