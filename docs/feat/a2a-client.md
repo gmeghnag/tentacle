@@ -1014,3 +1014,35 @@ step). Facts for the re-run:
   only; keep what is built) → a2c-5 … a2c-8 → review. a2c-4 is DONE.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-25*
+
+### a2c-1-mapping — DONE (re-run)
+
+- Load-bearing check (compile smoke) passed per the orchestrator note; the dep
+  pin `@a2a-js/sdk 1.3.0` was already in `packages/agent/package.json`.
+  `packages/agent/smoke-a2a.ts` deleted.
+- `packages/agent/src/harness/a2a-map.ts` (new, pure): `checkCard`, `mapStreamResponse`
+  + `MapState` (F-a: AUTH_REQUIRED statusUpdate asks at once; F-b: a `task`
+  snapshot asks only if `!state.answerOutstanding`, cleared by any later
+  status/artifact update), `buildOutboundText` (`redactText`), `sanitizeRemote`/
+  `oneLine`, 64 KiB cap + note, `cardBlurb`, `reportHeader`, `classifyAddress`/
+  `addressRefusal`/`proposedUrlRefusal` (v4, v6, mapped, compat, NAT64, 6to4).
+- Drift: `HarnessEvent.output` gained optional `replace?: boolean`
+  (`types.ts`) so `append:false` is expressible; `MapState.answerOutstanding`
+  is set by the adapter (a2c-2) when it sends an answer. No schema change, no
+  protocol.json regeneration. The changelog fragment `a2a-client.added.md`
+  already exists (written by a2c-3/4).
+- Tests: `packages/agent/test/harness-a2a-map.test.ts` — 53 pass; biome clean on
+  the 3 touched files; tsc shows no error in them. Written after the module
+  (not red-first); non-vacuity shown by mutation instead:
+
+  | mutation | result |
+  |---|---|
+  | ask on every interrupted snapshot (F-b) | red — 1 fail |
+  | skip `redactText` | red — 1 fail |
+  | `oneLine` keeps newlines | red — 2 fail |
+  | drop 169.254/16 | red — 2 fail |
+  | interface origin check removed | red — 1 fail |
+  | streaming check removed | red — 1 fail |
+- Gate: not run here.
+
+*— claude-sonnet-5-5, 2026-11-25*
