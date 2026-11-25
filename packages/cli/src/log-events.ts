@@ -369,6 +369,19 @@ export function updateEvents(update: SessionUpdate, session: string, ts: number)
           options: update.options.map((option) => option.name),
         },
       ];
+    // A remote agent's question (docs/feat/a2a-client.md C6): an ask answered
+    // with text (`session/answer_question`) or skipped.
+    case "question_request":
+      return [
+        {
+          ...base,
+          type: "ask",
+          requestId: update.requestId,
+          tool: update.agent?.type ?? "question",
+          title: update.title,
+          options: ["Answer…", "Skip"],
+        },
+      ];
     case "permission_resolved":
       return [
         {

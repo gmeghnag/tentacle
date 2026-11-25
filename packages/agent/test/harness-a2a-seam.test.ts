@@ -351,15 +351,20 @@ describe("C3 + C6: a reply to a remote question passes the same gate", () => {
     expect(result.report).toContain("got main");
   });
 
-  test("a refused reply is never answered", async () => {
+  test("a skipped question is never answered", async () => {
     const broker = new SpyBroker();
     const acme = remote("a2a:acme", () => [question]);
     const p = runner([acme], broker, { inputFrom: "user" });
     const run = p.run(opts("a2a:acme"));
     await until(() => broker.asks.length === 1);
     broker.asks[0]?.answer({ allowed: true });
-    // No user route wired yet (a2c-4): the question ends the run, nothing answered.
+    // The user route (a2c-4): the question reaches the broker; a skip ends the
+    // run with the question, nothing answered and no reply consent asked.
+    await until(() => broker.asks.length === 2);
+    expect(broker.asks[1]?.req.kind).toBe("question");
+    broker.asks[1]?.answer({ allowed: false });
     const result = await run;
+    expect(broker.asks).toHaveLength(2);
     expect(result.report).toContain("needs input to continue: Which branch?");
     expect(acme.runs[0]?.answers).toEqual([]);
   });
@@ -375,15 +380,18 @@ describe("C3 + C6: a reply to a remote question passes the same gate", () => {
       harness: {
         instances: new Map([[acme.id, { adapter: acme, idleMinutes: 1, inputFrom: "user" }]]),
         cwd: "/nowhere",
-        askUser: async () => "leak?",
       },
       requestPermission: broker.request,
     });
     const p = harnessRunner.run(opts("a2a:acme"));
     await until(() => broker.asks.length === 1);
     broker.asks[0]?.answer({ allowed: true });
+    // The question (a2c-4, C6) reaches the same broker; its answer is then the reply.
     await until(() => broker.asks.length === 2);
-    broker.asks[1]?.answer({ allowed: false });
+    expect(broker.asks[1]?.req.kind).toBe("question");
+    broker.asks[1]?.answer({ allowed: true, message: "leak?" });
+    await until(() => broker.asks.length === 3);
+    broker.asks[2]?.answer({ allowed: false });
     const err = await failureOf(p);
     expect(err.message).toContain("reply not sent");
     expect(acme.runs[0]?.answers).toEqual([]);

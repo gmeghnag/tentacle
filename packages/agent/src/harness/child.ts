@@ -27,6 +27,7 @@ import { STEP_VERDICT_TOOL_NAME } from "../workflow-verdict.ts";
 import { isModelShape } from "./claude-code.ts";
 import {
   type HarnessPermissions,
+  askRemoteQuestion,
   authorizeHarnessAsk,
   authorizeRemoteSend,
 } from "./permissions.ts";
@@ -78,8 +79,6 @@ export interface HarnessDeps {
    * parent route.
    */
   readonly notify?: (agentId: string, text: string) => AgentNotifyResult;
-  /** D10 `input` → the user, through the broker; filled by a2c-4 (C6). */
-  readonly askUser?: (question: string, signal: AbortSignal) => Promise<string>;
   /** `disconnected` → `reattach`, bounded. Default 3 attempts, 1 s doubling. */
   readonly reattach?: { readonly attempts: number; readonly backoffMs: number };
   /** The run / worktree id. */
@@ -396,7 +395,14 @@ export async function runHarnessChild(
               `${name} needs authentication: ${ev.ask.explanation} — configure credentials for ${adapter.id}`,
             );
           } else {
-            const answer = await routeInput(ev.ask.question, instance, deps, controls, own.signal);
+            const answer = await routeInput(
+              ev.ask.question,
+              instance,
+              deps,
+              controls,
+              permissions,
+              own.signal,
+            );
             if (answer === undefined) {
               // No route (or nobody answered): end with the question, never wait forever.
               await run.cancel().catch(() => "unconfirmed" as const);
@@ -559,6 +565,7 @@ async function routeInput(
   instance: HarnessInstance,
   deps: HarnessDeps,
   controls: SubagentRunControls | undefined,
+  permissions: HarnessPermissions | undefined,
   signal: AbortSignal,
 ): Promise<string | undefined> {
   const from = instance.inputFrom ?? "parent";
@@ -585,8 +592,21 @@ async function routeInput(
       );
     }
   }
-  if ((from === "user" || from === "both") && deps.askUser) {
-    routes.push(deps.askUser(question, withdraw.signal));
+  if ((from === "user" || from === "both") && permissions !== undefined) {
+    // C6 `user` (foreground or background): a pop-up through the ONE broker —
+    // TUI prompt, phone sheet, push — as a `question` auto-accept never answers.
+    // A skip / refusal / no client able to show it is no answer: the race goes on.
+    routes.push(
+      askRemoteQuestion(permissions, {
+        agent: instance.adapter.id,
+        ...(instance.origin !== undefined ? { origin: instance.origin } : {}),
+        question,
+        signal: withdraw.signal,
+      }).then((a) => {
+        if (a === undefined) throw new Error("no answer");
+        return a;
+      }),
+    );
   }
   try {
     return routes.length === 0 ? undefined : await Promise.any(routes);

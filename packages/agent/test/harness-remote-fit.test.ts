@@ -4,7 +4,16 @@
  * (docs/feat/subagent-harness-runners.md, slice shr-4).
  */
 import { describe, expect, test } from "bun:test";
-import { AgentInbox, SubagentFailure, type ToolProgressEvent } from "@tentacle/core";
+import {
+  AgentInbox,
+  DISMISSED,
+  type PermissionRequest,
+  type PermissionRequestOptions,
+  type PermissionRequester,
+  type PermissionResponse,
+  SubagentFailure,
+  type ToolProgressEvent,
+} from "@tentacle/core";
 import type { ModelProvider } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import { type HarnessDeps, harnessModeIssue } from "../src/harness/child.ts";
@@ -15,7 +24,7 @@ import type {
   HarnessEvent,
   HarnessRun,
 } from "../src/harness/types.ts";
-import { type AgentType, createSubagentRunner } from "../src/subagent.ts";
+import { type AgentType, createSubagentRunner, subagentRequester } from "../src/subagent.ts";
 
 const REMOTE_CAPS: HarnessCaps = {
   permissionAsks: false,
@@ -120,13 +129,18 @@ const REMOTE_TYPE: AgentType = {
   harness: { adapter: "a2a:acme", mode: "remote" },
 };
 
-type Extra = Partial<HarnessDeps> & { instance?: Record<string, unknown> };
+type Extra = Partial<HarnessDeps> & {
+  instance?: Record<string, unknown>;
+  /** The ONE broker's requester (default: yes to the consent, no answer to a question). */
+  requestPermission?: PermissionRequester;
+};
 function runner(adapter: HarnessAdapter, extra: Extra = {}, type = REMOTE_TYPE) {
+  const { requestPermission, ...rest } = extra;
   const harness: HarnessDeps = {
     instances: new Map([[adapter.id, { adapter, idleMinutes: 1, ...extra.instance }]]),
     cwd: "/nowhere",
     reattach: { attempts: 3, backoffMs: 0 },
-    ...extra,
+    ...rest,
   };
   return createSubagentRunner({
     model: {} as ModelProvider,
@@ -135,8 +149,32 @@ function runner(adapter: HarnessAdapter, extra: Extra = {}, type = REMOTE_TYPE) 
     types: [type],
     harness,
     // The consent ask (a2c-3, C3) is answered yes: these tests pin the paths after it.
-    requestPermission: async () => ({ allowed: true }),
+    requestPermission: requestPermission ?? (async () => ({ allowed: true })),
   });
+}
+
+/**
+ * The broker as the user route sees it (a2c-4, C6): yes to every consent ask;
+ * a `question` is recorded and answered by `answer` (its text, or `undefined` =
+ * skip), or left open until withdrawn (`answer` returns a never-settling promise).
+ */
+function userBroker(answer: () => Promise<string | undefined>) {
+  const questions: { req: PermissionRequest; options: PermissionRequestOptions | undefined }[] = [];
+  const requester: PermissionRequester = async (req, options) => {
+    if (req.kind !== "question") return { allowed: true };
+    questions.push({ req, options });
+    const withdrawn = new Promise<PermissionResponse>((resolve) => {
+      for (const s of [options?.signal, options?.withdraw]) {
+        s?.addEventListener("abort", () => resolve(DISMISSED), { once: true });
+      }
+    });
+    const answered = answer().then(
+      (text): PermissionResponse =>
+        text === undefined ? { allowed: false } : { allowed: true, message: text },
+    );
+    return Promise.race([answered, withdrawn]);
+  };
+  return { requester, questions };
 }
 
 /** A background child's inbox + the parent's `notify` (C6 `parent` route). */
@@ -228,34 +266,108 @@ describe("remote fit: INPUT_REQUIRED routing (Owner A9)", () => {
     expect(result.report).toContain("used main");
   });
 
-  test("user: the question goes to askUser", async () => {
+  test("user (background): a `question` ask to the ONE broker, attributed to sa-N; never the parent", async () => {
     const run = new ScriptRun("confirmed", answering);
     run.push(ask);
     const route = parentRoute("WRONG");
+    const broker = userBroker(async () => "dev");
     const result = await runner(remoteAdapter([run]), {
-      instance: { inputFrom: "user" },
-      askUser: async () => "dev",
+      instance: { inputFrom: "user", origin: "https://agents.acme.dev" },
       notify: route.notify,
-    }).run(OPTS, { agentId: "sa-1", inbox: route.inbox });
+      requestPermission: broker.requester,
+    }).run(OPTS, { agentId: "sa-1", signal: new AbortController().signal, inbox: route.inbox });
     expect(route.notes).toEqual([]);
     expect(result.report).toContain("used dev");
+    expect(broker.questions).toHaveLength(1);
+    const q = broker.questions[0];
+    expect(q?.req.kind).toBe("question");
+    expect(q?.req.tool).toBe("a2a:acme");
+    expect(q?.req.title).toBe("acme asks");
+    expect(q?.req.detail).toBe("Remote question (https://agents.acme.dev): Which branch?");
+    expect(q?.req.reply).toEqual({ maxChars: 4000 });
+    expect(q?.options?.origin).toBe("subagent");
+    expect(q?.options?.agent?.id).toBe("sa-1");
+    // The asker's own withdrawal rides with the child's signal (background path).
+    expect(q?.options?.withdraw).toBeDefined();
   });
 
-  test("both: the first answer wins and the loser (the inbox wait) is withdrawn", async () => {
+  test("user (foreground): the same question, no sa-N; the answer is what the remote gets", async () => {
+    const run = new ScriptRun("confirmed", answering);
+    run.push(ask);
+    const broker = userBroker(async () => "  release-1  ");
+    const result = await runner(remoteAdapter([run]), {
+      instance: { inputFrom: "user" },
+      requestPermission: broker.requester,
+    }).run(OPTS);
+    expect(broker.questions[0]?.req.kind).toBe("question");
+    expect(broker.questions[0]?.options?.agent?.id).toBeUndefined();
+    expect(run.answers).toEqual([{ askId: "q1", decision: { allow: true, input: "release-1" } }]);
+    expect(result.report).toContain("used release-1");
+  });
+
+  test("user: a skip → the child ends with the question (remote cancelled), never answers", async () => {
+    const run = new ScriptRun();
+    run.push({ kind: "started", handle: HANDLE, detail: {} }, ask);
+    const broker = userBroker(async () => undefined);
+    const result = await runner(remoteAdapter([run]), {
+      instance: { inputFrom: "user" },
+      requestPermission: broker.requester,
+    }).run(OPTS);
+    expect(broker.questions).toHaveLength(1);
+    expect(result.report).toContain("needs input to continue: Which branch?");
+    expect(run.answers).toEqual([]);
+  });
+
+  test("a question's remote text is sanitised (no ESC / bidi) and capped in the ask", async () => {
+    const run = new ScriptRun();
+    const long = `\u001b[2J‮Pick${"x".repeat(2100)}`;
+    run.push({ kind: "ask", askId: "q2", ask: { type: "input", question: long } });
+    const broker = userBroker(async () => undefined);
+    await runner(remoteAdapter([run]), {
+      instance: { inputFrom: "user" },
+      requestPermission: broker.requester,
+    }).run(OPTS);
+    const detail = broker.questions[0]?.req.detail ?? "";
+    expect(detail).not.toContain("\u001b");
+    expect(detail).not.toContain("‮");
+    expect(detail).toContain("Remote question: [2JPick");
+    expect(detail).toContain("(+");
+  });
+
+  test("both: the user answers first → the loser (the inbox wait) is withdrawn", async () => {
     const run = new ScriptRun("confirmed", answering);
     run.push(ask);
     const route = parentRoute(undefined);
+    const broker = userBroker(async () => "from-user");
     const result = await runner(remoteAdapter([run]), {
       instance: { inputFrom: "both" },
-      askUser: async () => "from-user",
       notify: route.notify,
-    }).run(OPTS, { agentId: "sa-2", inbox: route.inbox });
+      requestPermission: broker.requester,
+    }).run(OPTS, { agentId: "sa-2", signal: new AbortController().signal, inbox: route.inbox });
     expect(result.report).toContain("used from-user");
     expect(route.notes).toHaveLength(1);
     expect(run.answers).toHaveLength(1);
     // Withdrawn: a later text is queued (reported unread), not taken as an answer.
     route.inbox.push("late");
     expect(run.answers).toHaveLength(1);
+  });
+
+  test("both: the parent answers first → the user's question is withdrawn from the broker", async () => {
+    const run = new ScriptRun("confirmed", answering);
+    run.push(ask);
+    const route = parentRoute("from-parent");
+    const broker = userBroker(() => new Promise<string | undefined>(() => {}));
+    const result = await runner(remoteAdapter([run]), {
+      instance: { inputFrom: "both" },
+      notify: route.notify,
+      requestPermission: broker.requester,
+    }).run(OPTS, { agentId: "sa-4", signal: new AbortController().signal, inbox: route.inbox });
+    expect(result.report).toContain("used from-parent");
+    expect(broker.questions).toHaveLength(1);
+    // The question is withdrawn by the ASKER's own signal (`withdraw`), the
+    // child's (`signal`) still live: what makes the daemon settle it at once.
+    expect(broker.questions[0]?.options?.withdraw?.aborted).toBe(true);
+    expect(broker.questions[0]?.options?.signal?.aborted).toBe(false);
   });
 
   test("no route (foreground, parent only) → the child ends with the question, never waits", async () => {
@@ -276,7 +388,9 @@ describe("remote fit: INPUT_REQUIRED routing (Owner A9)", () => {
     run.push(ask);
     const result = await runner(remoteAdapter([run]), {
       instance: { inputFrom: "user", idleMinutes: 30 / 60_000 },
-      askUser: () => new Promise<string>((r) => setTimeout(() => r("late"), 120)),
+      requestPermission: userBroker(
+        () => new Promise<string | undefined>((r) => setTimeout(() => r("late"), 120)),
+      ).requester,
     }).run(OPTS);
     expect(result.report).toContain("used late");
   });
@@ -339,5 +453,35 @@ describe("remote fit: auth, cancel, rejected, outputs, mode", () => {
 
   test("readOnlyType: a remote harness type is read-only", () => {
     expect(runner(remoteAdapter([])).readOnlyType("acme")).toBe(true);
+  });
+});
+
+describe("C6: the asker's own withdrawal survives subagentRequester", () => {
+  test("a foreground child that can move: either the move or the asker withdraws the ask", async () => {
+    // Mutation: let the move's `withdrawn` REPLACE the asker's `withdraw` → a
+    // question that lost a `both` race stays on every surface → red.
+    const seen: (PermissionRequestOptions | undefined)[] = [];
+    const base: PermissionRequester = (_req, options) => {
+      seen.push(options);
+      return new Promise((resolve) =>
+        options?.withdraw?.addEventListener("abort", () => resolve(DISMISSED), { once: true }),
+      );
+    };
+    const moved = new AbortController();
+    const wrapped = subagentRequester(
+      base,
+      "call-1",
+      { type: "a2a:acme", description: "review" },
+      { move: { withdrawn: moved.signal, background: () => undefined } },
+    );
+    const mine = new AbortController();
+    const pending = wrapped(
+      { kind: "question", tool: "a2a:acme", level: "ask", title: "acme asks", input: {} },
+      { signal: mine.signal, withdraw: mine.signal },
+    );
+    mine.abort();
+    expect(await pending).toEqual(DISMISSED);
+    expect(seen[0]?.withdraw?.aborted).toBe(true);
+    expect(moved.signal.aborted).toBe(false);
   });
 });

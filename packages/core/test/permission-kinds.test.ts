@@ -2,9 +2,20 @@
  * docs/feat/a2a.md slice S5: which ask kinds an external caller (A2A / MCP)
  * may ever answer. Mutation: mark `workflow_approve` (or any lasting kind)
  * `once` → red.
+ *
+ * docs/feat/a2a-client.md C6/C11 (a2c-4): a remote agent's `question` and a
+ * model-proposed `agent_add` are owner-only and NEVER auto-accepted.
+ * Mutation: let auto-accept answer `question` (or `agent_add`) → red.
  */
 import { describe, expect, test } from "bun:test";
-import { EXTERNAL_ANSWER, type PermissionKind, externalMayAnswer } from "../src/permission.ts";
+import {
+  EXTERNAL_ANSWER,
+  type PermissionKind,
+  type PermissionRequest,
+  autoApproves,
+  externalMayAnswer,
+  onceOnlyAsk,
+} from "../src/permission.ts";
 
 describe("external answer table", () => {
   test("only a tool ask is caller-answerable; every lasting kind is owner-only", () => {
@@ -14,6 +25,8 @@ describe("external answer table", () => {
       session_hop: "owner-only",
       workflow_approve: "owner-only",
       browser_action: "owner-only",
+      question: "owner-only",
+      agent_add: "owner-only",
     });
     const kinds = Object.keys(EXTERNAL_ANSWER) as PermissionKind[];
     expect(kinds.filter((k) => externalMayAnswer(k))).toEqual(["tool"]);
@@ -21,5 +34,27 @@ describe("external answer table", () => {
 
   test("an unknown (unmapped) kind is never answerable", () => {
     expect(externalMayAnswer(undefined)).toBe(false);
+  });
+});
+
+const req = (kind: PermissionKind): PermissionRequest => ({
+  kind,
+  tool: "a2a:acme",
+  level: "ask",
+  title: "acme asks",
+  input: {},
+});
+
+describe("a2a-client kinds (C6/C11)", () => {
+  test("auto-accept never answers a remote question or a proposed agent, even on its own turn", () => {
+    expect(autoApproves(req("question"), true)).toBe(false);
+    expect(autoApproves(req("agent_add"), true)).toBe(false);
+    // The consent to SEND (C3) is an ordinary tool ask: auto mode answers it (A10).
+    expect(autoApproves(req("tool"), true)).toBe(true);
+  });
+
+  test("agent_add is once-only (no «always»); a question is not a permission menu", () => {
+    expect(onceOnlyAsk(req("agent_add"))).toBe(true);
+    expect(onceOnlyAsk(req("question"))).toBe(false);
   });
 });

@@ -16,7 +16,11 @@ import {
   decodeBase64Url,
   encodeBase64Url,
 } from "@tentacle/protocol";
-import type { PermissionRequestUpdate, WorkflowRow } from "@tentacle/protocol";
+import type {
+  PermissionRequestUpdate,
+  QuestionRequestUpdate,
+  WorkflowRow,
+} from "@tentacle/protocol";
 import { openPush, publicKeyOf } from "@tentacle/transport/push";
 import type { PushWatchedUpdate } from "../src/hosted-session.ts";
 import {
@@ -1014,6 +1018,41 @@ describe("the store's own clear still works (a regression guard for P7's writer)
     expect(readPushRegistrations(r.configDir).registrations.size).toBe(2);
     expect(clearPushRegistrations(r.configDir)).toBe(2);
     expect(readPushRegistrations(r.configDir).registrations.size).toBe(0);
+    r.notifier.stop();
+  });
+});
+
+describe("a remote agent's question (docs/feat/a2a-client.md C6)", () => {
+  test("a held question_request pushes an ask in question mode: first line as preview, only Skip", async () => {
+    // Mutation: drop the `question_request` branch in `buildMessage` → the push
+    // goes out as an empty ask with no `question` → red.
+    const r = rig({ graceMs: 30_000, registrations: [DEVICE_A] });
+    r.allow(DEVICE_A);
+    const update: QuestionRequestUpdate = {
+      type: "question_request",
+      requestId: "q1",
+      toolCallId: "c1",
+      title: "acme asks",
+      question: "Remote question (https://agents.acme.dev): Which branch?\nmain or dev",
+      agent: { type: "a2a:acme", description: "review" },
+      maxChars: 4000,
+    };
+    r.notifier.onPushEvent("S", { type: "update", update }, NOBODY);
+    r.clock.advance(30_000);
+    r.timers.fire();
+    await settled();
+    const delivery = r.deliveries[0];
+    if (delivery === undefined) throw new Error("no delivery");
+    const message = open(delivery);
+    expect(message.kind).toBe("ask");
+    expect(message.ask).toMatchObject({
+      requestId: "q1",
+      tool: "a2a:acme",
+      title: "acme asks",
+      preview: "Remote question (https://agents.acme.dev): Which branch?",
+      options: [{ optionId: "skip", kind: "reject_once", name: "Skip" }],
+      question: { maxChars: 4000 },
+    });
     r.notifier.stop();
   });
 });

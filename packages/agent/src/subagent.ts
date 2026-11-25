@@ -24,6 +24,7 @@ import {
   SubagentFailure,
   type Tool,
   type ToolProgressEvent,
+  anySignal,
   denyAll,
   shellIntent,
   toolLabel,
@@ -239,13 +240,19 @@ export function subagentRequester(
   ): Promise<PermissionResponse> => {
     // A child's call ids are unknown to the parent history: never forwarded.
     const { toolCallId: _childCallId, groupStart: _childGroup, ...rest } = options ?? {};
+    // The asker's own withdrawal (a remote question losing a `both` race,
+    // docs/feat/a2a-client.md C6) survives the move's: either withdraws it.
+    const withdrawn =
+      withdraw !== undefined && rest.withdraw !== undefined
+        ? anySignal([withdraw, rest.withdraw])
+        : (withdraw ?? rest.withdraw);
     return requester(req, {
       ...rest,
       ...(parentCallId !== undefined ? { toolCallId: parentCallId } : {}),
       origin: "subagent",
       agent: owner ? { ...agent, id: owner.id } : agent,
       ...(owner ? { signal: owner.signal } : {}),
-      ...(withdraw !== undefined ? { withdraw } : {}),
+      ...(withdrawn !== undefined ? { withdraw: withdrawn } : {}),
     });
   };
   return async (req, options) => {

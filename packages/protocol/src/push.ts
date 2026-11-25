@@ -189,6 +189,13 @@ export const PushAskSchema = z.object({
   options: z.array(PushAskOptionSchema).min(1).max(PUSH_OPTIONS_MAX),
   /** The daemon accepts a refusal with a reply, up to `maxChars` (as the update says). */
   reply: z.object({ maxChars: z.number().int().min(1).max(100_000) }).optional(),
+  /**
+   * The ask is a remote agent's QUESTION (docs/feat/a2a-client.md C6): opened
+   * in question mode, answered by `session/answer_question` up to `maxChars`.
+   * Its `options` hold only a `skip` (an older app shows a sheet it cannot
+   * answer — the `PROTOCOL_VERSION` bump at merge is what stops that pair).
+   */
+  question: z.object({ maxChars: z.number().int().min(1).max(100_000) }).optional(),
   /** "+N more waiting": asks folded into this one by the rate cap (Design 1). */
   more: z.number().int().min(0).max(999).optional(),
 });

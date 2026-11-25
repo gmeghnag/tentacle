@@ -871,3 +871,130 @@ SLICES: a2c-1-mapping=sonnet a2c-2-transport=opus a2c-3-seam=opus a2c-4-question
     files; 17/17 alone.
 - **Gate:** not run here (the orchestrator's script runs it). Per-package
   `tsc --noEmit -p packages/{config,agent,core}`: clean.
+
+### a2c-4-question-protocol — DONE
+
+*— claude-opus-5-5, 2026-11-25*
+
+- **Load-bearing check — holds:** `bun test packages/agent/test/harness-remote-fit.test.ts
+  packages/agent/test/harness-a2a-seam.test.ts` → 26 pass / 0 fail before any
+  edit. Slice precondition («a second blocking type is a parameter, not a
+  second machine») confirmed in `hosted-session.ts`: `registerAsk` / `settle` /
+  replay / `askedOn` are type-agnostic; `blockingUnsupported` already took the
+  type; only the three call sites hard-coded `"permission_request"`.
+- **Done, in dependency order:**
+  1. Protocol: `packages/protocol/src/question.ts` (new) —
+     `QuestionRequestUpdateSchema`, `AnswerQuestionParams/ResultSchema`,
+     `QuestionAnswerTextSchema` (1..`MAX_QUESTION_ANSWER_CHARS` = 4000, no
+     controls but `\n`/`\t`, not blank), internal option ids `answer`/`skip`.
+     `updates.ts`: union member + `UPDATE_CLASS.question_request = "blocking"`.
+     `methods.ts`: `Method.AnswerQuestion` = `session/answer_question`.
+     `push.ts`: `PushAsk.question?: {maxChars}`. `watch.ts`: `state.pending`
+     is a union of both ask updates; `question_request` → category `ask`.
+     `protocol.json` regenerated (`bun run schema:export`).
+     `protocol.d/a2a-client.md` written (the plan's text).
+  2. Core (`permission.ts`): kinds `question`, `agent_add`; both `owner-only`
+     in `EXTERNAL_ANSWER`; both excluded by `autoApproves`; `agent_add` in
+     `onceOnlyAsk`; `A2A_ADD_AGENT_TOOL`.
+  3. Daemon: `permission-map.ts` `toQuestionRequestUpdate` / `toAskUpdate`,
+     `outcomeToResponse("answer")` → allowed. `hosted-session.ts`: `AskUpdate`
+     union in `PendingAsk`; `askTypeOf(req)` used at raise and at show (both
+     paths) and per ask in `recheckAsks`; `askedOn(type)`; a question is never
+     `resumable`; its `offered` = `answer`/`skip`, `replyable` = `answer`;
+     `resolvePermission` refuses a question (`InvalidParams`, stays pending);
+     new `answerQuestion(requestId, answer?)` (same first-wins / repeat /
+     `PermissionNotPending` rules). `connection.ts` dispatches the method.
+     `push-notifier.ts`: a held `question_request` → `PushAsk` with `question`,
+     preview = the question's first line, one `skip` option.
+     `watch-queue.ts`: flush-now. `external/asks.ts`: `a2a_add_agent` →
+     `agent_add` (owner-only for an inbound caller). `PushWatchedUpdate` /
+     `offerPush` take `question_request`.
+  4. Client: `permission-router.ts` holds both ask types in ONE queue;
+     `toPermissionRequest(question)` → `{kind:"question", detail, reply}`,
+     `a2a_add_agent` → `kind: "agent_add"`; `decide` maps an `allowed` + text
+     → `send{optionId:"answer", message, question:true}`, anything else → a
+     skip; `normalizeQuestionAnswer` (clamped to 4000). `remote-client.ts`
+     routes the update to the router and sends `session/answer_question`
+     (keyed), words handed back via `onAnswerLost` as for a reply.
+     `session-reducer.ts` (resync `keepRequests`), `remote-session.ts`,
+     `mapping.ts`: the type is owned by the router. `cli/log-events.ts`:
+     `logs -f` prints a question as an `ask` (the watch state can now hold one).
+  5. Agent: `harness/permissions.ts` `askRemoteQuestion` — the `user` route,
+     a `kind:"question"` request to the child's requester (→ ONE broker), title
+     «`<name>` asks», detail «Remote question (`<origin>`): <question>»
+     (ESC/C0/C1/bidi stripped, 2000-char cap), `reply.maxChars` 4000.
+     `child.ts` `routeInput` uses it (the `askUser` seam is gone).
+  6. `changelog.d/a2a-client.added.md`: one sentence added to the branch's
+     single bullet (the question pop-up).
+- **Drift from Implementation:**
+  - **Withdraw of a losing `user` route (C6 «the other is withdrawn … by its
+    `withdraw` signal, as today») did NOT hold as written:**
+    `subagentRequester` replaces a background child's `signal` with the
+    child's own, and `awaitBackgroundDecision` ignored `withdraw`, so a
+    question that lost a `both` race to the parent would have stayed on every
+    surface until the child ended. Fixed at both seams: `subagent.ts`
+    `subagentRequester` combines the asker's `withdraw` with the move's
+    (`anySignal`), and `hosted-session.ts` `awaitBackgroundDecision` settles on
+    `signal ∪ withdraw` (a withdrawn ask → `DISMISSED`). No other asker passes
+    `withdraw` into a child requester today, so existing asks are unchanged.
+  - The fallback reason is the generic blocking one («client does not support
+    question_request; update tentacle»), not the plan's «no attached client can
+    show a question».
+  - `PushAsk.options` keeps `.min(1)`: a question push carries one `skip`
+    option (an older app shows a sheet it cannot answer — the stated gap in the
+    `protocol.d` note).
+  - Not in the plan's file list but needed for the type: `watch.ts`,
+    `watch-queue.ts`, `cli/log-events.ts`, `client/session-reducer.ts`,
+    `remote-session.ts`, `mapping.ts`, `external/asks.ts`.
+  - Interim until a2c-5 / a2c-6: the TUI and the phone sheet show a question
+    with the generic permission menu; an «Allow» with no text is sent as a
+    SKIP (never an empty answer). The app declares every known type, so a
+    question reaches its sheet (no fallback) — a2c-6 must land before a build.
+- **Tests (new / changed):** `protocol/test/question.test.ts` (7, new);
+  `core/test/permission-kinds.test.ts` (+2, table updated);
+  `daemon/test/question-ask.test.ts` (10, new: emitted as `question_request`,
+  never `permission_request`; `resolve_permission` on it → `InvalidParams`;
+  answered → `permission_resolved{answer}` + `{allowed, message}`; second
+  answer → `PermissionNotPending`; skip; replay on attach; background held
+  apart; background withdrawn by the asker's `withdraw` → `DISMISSED` +
+  resolved; fallback at raise and on detach; nobody attached → waits; serve
+  auto-accept ON never answers; external `askOf(a2a_add_agent)` owner-only);
+  `daemon/test/push-notifier.test.ts` (+1); `client/test/question-map.test.ts`
+  (10, new: both directions, router + a `RemoteClient` over a fake daemon);
+  `agent/test/harness-remote-fit.test.ts` (user route via a broker requester:
+  background attribution `sa-N` + `withdraw`, foreground, skip → ends with the
+  question, sanitised/capped detail, `both` either way, `subagentRequester`
+  keeps the asker's withdraw under a move); `harness-a2a-seam.test.ts` (the
+  two user-route tests now answer the broker's question). Updated pins:
+  `forward-compat` (the blocking set), `json-schema` fixtures, daemon
+  `mapping.test.ts` samples + mandatory set.
+- **Narrow runs:** protocol 564/0; client 927/0; daemon (parallel) 1651/0
+  after the `mapping.test.ts` pin update; agent + core + cli logs 2144/0; the
+  final touched set 157/0. Biome on every changed file: clean. Per-package
+  `tsc` clean for protocol, core, daemon, client, agent; `-p packages/cli` /
+  `-p packages/tui` report errors in files this slice did not touch
+  (`SharedAutoAccept.current`, unresolved `@tentacle/protocol` from tui) — a
+  per-package resolution artefact; the gate's root `tsc` decides.
+- **Red-before-green:** the code and the tests were written in the same
+  step; non-vacuity shown by mutation (scratch runner
+  `.tentacle/tmp/a2a-client/mutate-a2c4.ts`: apply, run the named tests,
+  restore, verify byte-identical; tree unchanged afterwards):
+  | mutation | result |
+  |---|---|
+  | M1 `autoApproves` answers `question` | red — 1 fail (core) |
+  | M2 `autoApproves` answers `agent_add` | red — 2 fail (core + client) |
+  | M3 raise checks `permission_request` only | red — 1 fail (daemon, at raise) |
+  | M4 `recheckAsks` checks `permission_request` only | red — 1 fail (daemon, on detach) |
+  | M5 emitted as `permission_request` | red — 8 fail |
+  | M6 background path ignores `withdraw` | red — 1 fail |
+  | M7 router does not map `a2a_add_agent` | red — 1 fail |
+  | M8 external `askOf` does not map `a2a_add_agent` | red — 1 fail |
+  | M9 answer sent via `resolve_permission` | red — 3 fail |
+  | M10 push without the question branch | red — 1 fail |
+  | M11 `askRemoteQuestion` drops `withdraw` | red — 2 fail |
+  | M12 the move's `withdrawn` replaces the asker's | red — 1 fail |
+  | M13 user route not wired | red — 9 fail |
+  | M14 `UPDATE_CLASS.question_request = "display"` | red — 3 fail |
+  M1 is red only in core: daemon-side the question offers no `allow_once`, so
+  `autoAnswer` cannot answer it even with the rule broken (defence in depth).
+- **Gate:** not run here (the orchestrator's script runs it).

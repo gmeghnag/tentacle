@@ -256,6 +256,62 @@ export async function authorizeRemoteSend(
   return { allow: false, message: outcome.message ?? "refused" };
 }
 
+/** The longest answer a remote question asks for (the wire's `MAX_QUESTION_ANSWER_CHARS`). */
+export const REMOTE_QUESTION_ANSWER_CHARS = 4000;
+/** The longest question shown in the pop-up (remote text, bounded). */
+export const REMOTE_QUESTION_DETAIL_CAP = 2000;
+
+// C0/C1 controls but `\n`/`\t`, and the bidi overrides/isolates: remote text
+// must not repaint the prompt or reorder what the person reads.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+const UNSAFE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f‪-‮⁦-⁩]/g;
+
+/**
+ * C6 `user` route (docs/feat/a2a-client.md): a remote agent's question goes to
+ * the PERSON through the child's requester — the ONE broker, attributed to the
+ * `agent_task` call / `sa-N` by `subagentRequester` — as a `kind: "question"`
+ * ask, which auto-accept never answers. Resolves with the person's answer, or
+ * `undefined`: skipped, refused, nobody could be asked (the blocking fallback's
+ * `reason`) or withdrawn (`signal`). No gate, no grant: an answer is text,
+ * never an approval; it still passes C3's consent before it leaves.
+ */
+export async function askRemoteQuestion(
+  perms: HarnessPermissions | undefined,
+  ask: {
+    /** `a2a:<name>`. */
+    readonly agent: string;
+    readonly origin?: string;
+    readonly question: string;
+    readonly signal: AbortSignal;
+  },
+): Promise<string | undefined> {
+  if (perms === undefined || ask.signal.aborted) return undefined;
+  const name = ask.agent.startsWith("a2a:") ? ask.agent.slice(4) : ask.agent;
+  const clean = ask.question.replace(/\r\n?/g, "\n").replace(UNSAFE, "").trim();
+  const shown =
+    clean.length > REMOTE_QUESTION_DETAIL_CAP
+      ? `${clean.slice(0, REMOTE_QUESTION_DETAIL_CAP)} (+${clean.length - REMOTE_QUESTION_DETAIL_CAP} chars)`
+      : clean;
+  const response = await perms.requester(
+    {
+      kind: "question",
+      tool: ask.agent,
+      level: "ask",
+      title: `${name} asks`,
+      detail: `Remote question${ask.origin !== undefined ? ` (${ask.origin})` : ""}: ${shown}`,
+      input: { question: clean },
+      reply: { maxChars: REMOTE_QUESTION_ANSWER_CHARS },
+    },
+    // `withdraw` too: for a background child `subagentRequester` replaces the
+    // signal with the child's own, and a `both` race's loser must still be
+    // withdrawn from every surface at once.
+    { signal: ask.signal, withdraw: ask.signal },
+  );
+  if (!response.allowed || response.dismissed || response.message === undefined) return undefined;
+  const answer = response.message.trim();
+  return answer === "" ? undefined : answer;
+}
+
 /**
  * Decide one harness ask. `worktreeRoot`: the run's worktree (a write run) —
  * the in-worktree rule applies only with one. `signal`: the run's; aborting it
