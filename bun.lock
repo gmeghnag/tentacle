@@ -80,6 +80,13 @@
         "zod": "3.23.8",
       },
     },
+    "packages/browser": {
+      "name": "@tentacle/browser",
+      "version": "0.7.1",
+      "dependencies": {
+        "zod": "3.23.8",
+      },
+    },
     "packages/cli": {
       "name": "@tentacle/cli",
       "version": "0.7.1",
@@ -618,6 +625,8 @@
     "@sindresorhus/is": ["@sindresorhus/is@4.6.0", "", {}, "sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw=="],
 
     "@tentacle/agent": ["@tentacle/agent@workspace:packages/agent"],
+
+    "@tentacle/browser": ["@tentacle/browser@workspace:packages/browser"],
 
     "@tentacle/cli": ["@tentacle/cli@workspace:packages/cli"],
 

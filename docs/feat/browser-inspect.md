@@ -450,7 +450,16 @@ and here the effect is acting AS the user on the web. v1: **pod sessions get no
 
 ## Execution
 
-*(empty — an eval carries no code; filled only if promoted)*
+### B1 — `@tentacle/browser` pure core (as built)
+
+- **Load-bearing check**: the assumption (native-messaging port + `chrome.debugger` on the default profile) was proven by spike B0 (results above); B1 is pure and does not depend on it further. Holds.
+- New package `packages/browser` (`package.json`, `tsconfig.json`; no `bunfig.toml` — root preload applies; `bun install` linked `zod`, `bun.lock` gained the workspace entry). Root `tsconfig.json` path added; AGENTS §6 package count 15 → 16.
+- `src/link-schema.ts` (`BROWSER_LINK_VERSION`, hub ops/events zod, element facts, byte caps), `redact.ts` (`createRedactor`: headers, cookie / set-cookie, URL params, JSON / form / multipart bodies; per-redactor random HMAC tag), `classify.ts` (`classifyAction`, `registrableDomain`, EN+IT lexicon, `hard` for payment / password-card typing), `ownership.ts` (lease, tab check, handover flag), `net-ring.ts` (message + byte cap, cursor paging, `dropped`).
+- Tests: `packages/browser/test/{redact,classify,ownership-ring}.test.ts` — 35 pass. `tsc -p packages/browser` and `biome check packages/browser` clean. No protocol change (no `protocol.d` note, `protocol.json` untouched). Fragment `changelog.d/browser-inspect.added.md`.
+- **Drift**: red-before-green was not shown stepwise (new modules, tests written after the source in the same slice); non-vacuity is shown by mutation instead. The ring's `get(seq)` and ownership `reclaimed` flag were added beyond the plan's sketch. Deferred to later slices: redaction of DOM password fields (extension, B3) and the `redactText` net (wired by the tools, B4).
+- **Mutations** (each made the suite fail, then reverted): name rule off → 8 fail; HMAC tag ignores value → 1 fail; ring `dropped` forced 0 → 1 fail; ownership cross-session check off → 1 fail; classifier cross-domain check off → 2 fail; payment `hard` forced false → 1 fail.
+
+*— claude-sonnet-5-5, 2026-11-25*
 
 ## Review
 
