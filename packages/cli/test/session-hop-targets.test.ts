@@ -80,6 +80,7 @@ class Reply implements ModelProvider {
 
 let dir: string;
 let savedBin: string | undefined;
+let savedNetwork: string | undefined;
 let restoreTerminal: () => void = () => {};
 
 beforeEach(async () => {
@@ -90,6 +91,11 @@ beforeEach(async () => {
   savedBin = process.env.TENTACLE_POD_BIN;
   process.env.TENTACLE_POD_BIN = join(dir, "fake-tentacle");
   await Bun.write(process.env.TENTACLE_POD_BIN, "01234567");
+  // The hop now reads `TENTACLE_NETWORK` (feat/run-network): cleared for every
+  // row, so an ambient value can never leak into the unset-path assertion and a
+  // row that sets it cannot leak out.
+  savedNetwork = process.env.TENTACLE_NETWORK;
+  Reflect.deleteProperty(process.env, "TENTACLE_NETWORK");
 });
 
 afterEach(async () => {
@@ -98,6 +104,11 @@ afterEach(async () => {
     Reflect.deleteProperty(process.env, "TENTACLE_POD_BIN");
   } else {
     process.env.TENTACLE_POD_BIN = savedBin;
+  }
+  if (savedNetwork === undefined) {
+    Reflect.deleteProperty(process.env, "TENTACLE_NETWORK");
+  } else {
+    process.env.TENTACLE_NETWORK = savedNetwork;
   }
   await rm(dir, { recursive: true, force: true });
 });
@@ -361,6 +372,8 @@ function rig(
     detachedRun?: boolean;
     /** A worker that cannot start: the local target's failure path (T6). */
     failWorker?: boolean;
+    /** `network:` in the config the hop is handed (feat/run-network). */
+    network?: string;
   } = {},
 ) {
   const host = fakeHost(log);
@@ -368,15 +381,18 @@ function rig(
   const statuses: string[] = [];
   const notices: string[] = [];
   const images: Array<Record<string, string>> = [];
+  /** The options the engine was handed at create (the network rides here). */
+  const createOptions: Array<EngineCreateOptions | undefined> = [];
   /** What D7(a) was asked, so a row can prove it was consulted before any dial. */
   const detachedAsks: string[] = [];
   const create = host.create.bind(host);
   host.create = (n, i, o) => {
     images.push({ ...(o?.annotations ?? {}), ...(o?.labels ?? {}) });
+    createOptions.push(o);
     return create(n, i, o);
   };
   const build = createHopTargets({
-    config: config(opts.cwd ?? dir),
+    config: config(opts.cwd ?? dir, opts.network === undefined ? {} : { network: opts.network }),
     shared: pair,
     status: (line) => statuses.push(line),
     notify: (text) => notices.push(text),
@@ -399,7 +415,7 @@ function rig(
     }),
     defaultImage: () => "img:latest",
   });
-  return { build, host, pair, statuses, notices, images, detachedAsks };
+  return { build, host, pair, statuses, notices, images, createOptions, detachedAsks };
 }
 
 describe("H4 a hop container is created KEPT, and its rollback deletes only through the verified delete", () => {
@@ -470,6 +486,60 @@ describe("H4 a hop container is created KEPT, and its rollback deletes only thro
     await built.built.rollback();
     expect(log.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
     expect(log.calls).not.toContain("describe");
+  });
+});
+
+describe("feat/run-network fix round 1: the hop honours the configured network (review finding 1)", () => {
+  /**
+   * `/move container` is the SECOND docker/podman creator (the first is `run`),
+   * and it built its container on the engine default whatever `network` said —
+   * a silently dropped `network: none` is a sandbox the owner believes in.
+   */
+  test("a configured `network: none` reaches the hop's create body", async () => {
+    // Mutation: drop the `network` spread at `startEngineRuntime` → `undefined`
+    // here, i.e. the container comes up on `bridge` with full egress.
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { mount: false, network: "none" });
+    const built = await r.build({ target: "container", keep: true }, "uid-1");
+    if (built.kind !== "built") {
+      throw new Error(`expected a build, got ${built.notice}`);
+    }
+    expect(r.createOptions).toHaveLength(1);
+    expect(r.createOptions[0]?.network).toBe("none");
+  });
+
+  test("`TENTACLE_NETWORK` reaches it too, and beats the config (`run`'s precedence)", async () => {
+    // Mutation: read `config.network` only → the config's `none` would win.
+    process.env.TENTACLE_NETWORK = "host";
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { mount: false, network: "none" });
+    const built = await r.build({ target: "container", keep: true }, "uid-1");
+    expect(built.kind).toBe("built");
+    expect(r.createOptions[0]?.network).toBe("host");
+  });
+
+  test("unset: the create body carries no `network` at all (the engine's default)", async () => {
+    // Non-vacuity for the two rows above: the key is spread on a RESOLVED value,
+    // so an unconfigured hop is byte-identical to before the feature.
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { mount: false });
+    const built = await r.build({ target: "container", keep: true }, "uid-1");
+    expect(built.kind).toBe("built");
+    expect(r.createOptions[0] === undefined ? {} : r.createOptions[0]).not.toHaveProperty(
+      "network",
+    );
+  });
+
+  test("a malformed network refuses the move BEFORE anything is created or asked", async () => {
+    // Mutation: drop the `networkValueProblem` check → the value reaches the
+    // engine verbatim (and the row creates a container).
+    const log: FakeHostLog = { calls: [] };
+    const r = rig(log, { mount: false, network: "a/b" });
+    const built = await r.build({ target: "container", keep: true }, "uid-1");
+    expect(built.kind).toBe("failed");
+    expect(built.kind === "failed" ? built.notice : "").toContain("invalid network");
+    expect(log.calls).toEqual([]);
+    expect(r.pair.broker.requests).toHaveLength(0);
   });
 });
 

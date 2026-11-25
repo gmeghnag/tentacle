@@ -357,10 +357,6 @@ Validation: `bun test <file>` per slice, then `bun run check` green
 
 *— claude (claude-code 2.1.332 agent), 2026-11-26*
 
-## Review
-
-*— pending (Opus, in-context; re-read the create-error path)*
-
 **Load-bearing check, re-run first.** The Context repro was re-run on
 `feat/run-network` before any edit and reproduced byte-for-byte (`[error]
 unknown option --network` + the same usage line, refused by `flags.ts` before
@@ -444,6 +440,72 @@ reverted immediately:
 **Gate.** Not run here by design (the orchestrator's script runs
 `bun run check`); the narrow per-slice runs above are green. No protocol schema
 changed, so `packages/protocol/schema/protocol.json` needed no regeneration.
+
+### Fix round 1
+
+*— claude (claude-code agent), 2026-11-26*
+
+Answers the round-1 `## Review` below: **finding 1 (MEDIUM) FIXED, finding 2
+DONE.**
+
+**Finding 1 — the hop dropped a configured network.** Root cause: the
+Implementation audited callers of `host.create` (one) and of the `run` path, but
+`startEngineRuntime` has a SECOND caller — `containerTarget`
+(`hop-targets.ts:358`), `/move container` — which builds the same "run shape"
+docker/podman container with `config` in hand and passed no `network`, so a
+`network: none` in the config/env/preset produced a `bridge` container with full
+egress and no notice.
+
+- `packages/cli/src/hop-targets.ts` — `containerTarget` now resolves
+  `chooseNetwork({ env: process.env.TENTACLE_NETWORK, configured: config.network })`
+  right after the engine check (a hop has no `--network` flag, D2: the network is
+  fixed at create) and refuses a malformed one with `not moved: invalid network …`
+  **before** the mount gate asks and before anything is dialled, then spreads
+  `...(network !== undefined ? { network } : {})` into `startEngineRuntime` →
+  `provisionNamed` → `host.create` (the same option `run` threads, `main.ts:1744`).
+  No kubernetes case: `containerEngine` returns only docker/podman, and `run`
+  already refuses a network there.
+- Unset stays byte-identical: the key is spread on a RESOLVED value, so a hop with
+  no network configured sends the same create body as before the feature.
+- `changelog.d/run-network.added.md`: one added clause — `/move container` honours
+  the same configured network.
+
+Drift from the Implementation: its **Files** list did not include
+`hop-targets.ts` (the second creator); it is now part of the change. No other
+line moved.
+
+**Finding 2 — doc structure.** The as-built above now sits under `## Execution`
+(the stray second `## Review` + its `pending` stub are gone); the reviewer's
+round stays as the `## Review` that follows.
+
+**Tests** (`packages/cli/test/session-hop-targets.test.ts`, a new describe; the
+rig now records the create options and `TENTACLE_NETWORK` is cleared in
+`beforeEach`/restored in `afterEach`, like `TENTACLE_POD_BIN`):
+
+1. a configured `network: none` reaches the hop's create body;
+2. `TENTACLE_NETWORK` reaches it too and beats the config;
+3. unset → the create body carries no `network` key at all (non-vacuity for 1–2);
+4. a malformed network (`a/b`) refuses with `not moved: invalid network …`, with
+   **zero** engine calls and zero broker requests.
+
+**RED first**, on the un-fixed `containerTarget`: 3 fail / 34 pass — rows 1, 2 and
+4 fail on their assertion (`expected undefined to be "none"` / `"host"`; the
+malformed row creates a container), row 3 passes on both by design. Green after
+the fix: `37 pass / 0 fail` in that file.
+
+**Mutation (non-vacuity, each reverted; the file was byte-identical after, checked
+with `diff` against a copy):**
+
+| Mutation | Result |
+| --- | --- |
+| `network` spread removed from `startEngineRuntime` | 2 fail (rows 1, 2) |
+| `networkValueProblem` check disabled | 1 fail (row 4 — the container is created) |
+| `env: process.env.TENTACLE_NETWORK` → `undefined` | 1 fail (row 2 — config wins) |
+
+**Gate.** Not run here by design (the orchestrator's script runs `bun run check`);
+`bunx biome check` is clean on the three files touched, and the narrow test file
+is green. Unchanged from the executor: whether podman's compat API honours
+`NetworkMode: "none"` on a real socket (needs the opt-in live test).
 
 ## Review
 
