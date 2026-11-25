@@ -218,6 +218,15 @@ export function positionOf(run: ElencoRun): string {
   return `${run.done} of ${run.total}`;
 }
 
+/**
+ * A run's identity in the list. `runId` is a counter PER SESSION (`wf-1`, `wf-2`),
+ * and the list is per computer, so two sessions each hold a `wf-1`: the key is
+ * the pair (a bare `runId` made a tap open another session's run).
+ */
+export function runKey(run: ElencoRun): string {
+  return run.sessionId === undefined ? run.runId : `${run.sessionId}/${run.runId}`;
+}
+
 /** A run's row. `now` is injected: no clock read here (a test drives time). */
 export function elencoRow(run: ElencoRun, now: number): ElencoRow {
   const live = run.endedAt === undefined;
@@ -232,7 +241,7 @@ export function elencoRow(run: ElencoRun, now: number): ElencoRow {
           ...(run.hash === undefined ? [] : [run.hash.slice(0, SHORT_HASH)]),
         ].join(" · ");
   return {
-    key: run.runId,
+    key: runKey(run),
     name: oneLine(run.name),
     when,
     status: stateLook(run.state),
@@ -243,7 +252,7 @@ export function elencoRow(run: ElencoRun, now: number): ElencoRow {
         : run.steps.map((s, i) => {
             const look = stateLook(s.state);
             return {
-              key: `${run.runId}-${s.id}-${i}`,
+              key: `${runKey(run)}-${s.id}-${i}`,
               glyph: look.glyph,
               tone: look.tone,
               live: look.live,

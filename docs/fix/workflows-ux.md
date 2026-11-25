@@ -1887,3 +1887,29 @@ mutation evidence that I could reproduce. The S7 round debt (finding 1) was decl
 the doc. Reviewer is the same model family (Opus) as the S7/S8c executors — shared blind spots possible.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Validation blocker fix
+
+**Cause — an APP defect (b), not test isolation.** Flow 45 failed deterministically after 44 (it opened
+`wfedit`, not `run-view-pass`). Evidence: the Maestro `tapOn text "run-view-pass,.*"` COMPLETED, and the
+failing hierarchy/screenshot show the `wfedit` run (`v1 · 8004e7d`, "0 of 6 steps ran"). A settle-then-tap
+variant (wait for the `run-view-loop` row + animation end) failed the same way, ruling out a layout race.
+The daemon's journals hold `"runId":"wf-1"` / `"wf-2"`: `runId` is a counter PER SESSION, while the runs list
+is per computer, so 44's session and 45's session each own a `wf-1`. `elencoRow.key` and the screen's
+`byKey` map were keyed by the bare `runId` → the two rows collided and the tap opened the other session's run
+(also a duplicate React key). Alone, 45 has no second `wf-1`, so it passed.
+
+**Change.** `workflow-list.ts`: new pure `runKey(run)` = `${sessionId}/${runId}` (bare `runId` with no
+session); `elencoRow.key` and the step-strip keys use it; `screens/WorkflowRuns.tsx`'s `byKey` uses it.
+No flow edit, no reorder, no assertion removed.
+
+**Test (red → green).** `apps/mobile/test/workflow-list-graph.test.ts`, "a run's identity across sessions":
+same `runId` in two sessions → different row keys (red on the bare-`runId` key, green after); a `byKey` built
+with `runKey` finds the run the row drew, collision order reversed.
+
+**Runs** (simulator 0B43D716…): `--only 44-workflow-editor,45-workflow-run-view` ×2 → PASS both times
+(154 s, 156 s); `--only 45-workflow-run-view` → PASS (60 s). Before: the same pair FAIL ×3. `bun run
+typecheck` and `biome check apps/mobile` clean; `workflow-list-graph.test.ts` 16 pass. Full `bun run check`
+not re-run.
+
+*— claude-sonnet-5-5, 2026-11-25*

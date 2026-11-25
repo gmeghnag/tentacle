@@ -14,7 +14,7 @@ import { Icon } from "../ui/Icon.tsx";
 import { PillButton } from "../ui/PillButton.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { Text } from "../ui/Text.tsx";
-import { type ElencoRow, type ElencoRun, elencoSections } from "../workflow-list.ts";
+import { type ElencoRow, type ElencoRun, elencoSections, runKey } from "../workflow-list.ts";
 import { type RunsState, WORKFLOWS_UPDATE_TENTACLE } from "../workflow-runs-controller.ts";
 
 export interface WorkflowRunsScreenProps {
@@ -82,7 +82,7 @@ export function WorkflowRunsScreen(props: WorkflowRunsScreenProps): JSX.Element 
   const sections = elencoSections(state.runs, props.now);
   const needYou = sections.live.filter((r) => r.needsUser);
   const others = sections.live.filter((r) => !r.needsUser);
-  const byKey = new Map(state.runs.map((r) => [r.runId, r]));
+  const byKey = new Map(state.runs.map((r) => [runKey(r), r]));
   const open = (row: ElencoRow) => {
     const run = byKey.get(row.key);
     if (run !== undefined) {

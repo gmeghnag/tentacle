@@ -27,6 +27,7 @@ import {
   fromSessionRun,
   needsUserCount,
   positionOf,
+  runKey,
   stateLook,
 } from "../src/workflow-list.ts";
 
@@ -324,5 +325,37 @@ describe("the metrics both graphs share", () => {
     }
     expect(LOOP_SOURCE.w).toBeLessThan(MAIN.w);
     expect(LOOP_TARGET.w).toBeLessThan(MAIN.w);
+  });
+});
+
+describe("a run's identity across sessions (docs/fix/workflows-ux.md, validation blocker)", () => {
+  // `runId` is a PER-SESSION counter (`wf-1`, `wf-2`), and the list is per computer:
+  // two sessions each hold a `wf-1`. The row key (React key, testID, the screen's
+  // lookup of the run to open) must be the pair, or tapping one opens the other.
+  const run = (runId: string, sessionId: string, name: string): ElencoRun => ({
+    runId,
+    name,
+    state: "ok",
+    done: 1,
+    total: 1,
+    needsUser: false,
+    startedAt: 0,
+    endedAt: 1,
+    sessionId,
+  });
+
+  test("the same runId in two sessions gives two different row keys", () => {
+    const a = run("wf-1", "session-a", "wfedit");
+    const b = run("wf-1", "session-b", "run-view-pass");
+    expect(elencoRow(a, 0).key).not.toBe(elencoRow(b, 0).key);
+  });
+
+  test("the row key is the run's runKey, so the screen can find the run it drew", () => {
+    const b = run("wf-1", "session-b", "run-view-pass");
+    expect(elencoRow(b, 0).key).toBe(runKey(b));
+    const byKey = new Map(
+      [b, run("wf-1", "session-a", "wfedit")].map((r) => [runKey(r), r] as const),
+    );
+    expect(byKey.get(elencoRow(b, 0).key)?.name).toBe("run-view-pass");
   });
 });
