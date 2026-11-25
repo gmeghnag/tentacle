@@ -76,7 +76,13 @@ function appShapes(state: State): readonly Shape[] {
           ? { kind: "assistant", text: row.text }
           : row.kind === "notice"
             ? { kind: "notice", text: row.text }
-            : { kind: "tool", text: row.output ?? "", tool: `${row.label}:${row.status}` };
+            : row.kind === "context"
+              ? // The one DELIBERATE divergence (owner, docs/feat/mobile-reset-in-timeline:
+                // "mobile only"): the app draws a reset/compaction as ONE rail step
+                // where the TUI keeps its separator + restart row. No fixture here
+                // carries a reset, so this arm keeps the mapping honest and total.
+                { kind: `context:${row.event}`, text: row.body }
+              : { kind: "tool", text: row.output ?? "", tool: `${row.label}:${row.status}` };
     const prev = shapes[shapes.length - 1];
     if (sawReasoning && shape.kind === "assistant" && prev?.kind === "assistant") {
       shapes[shapes.length - 1] = { kind: "assistant", text: prev.text + shape.text };

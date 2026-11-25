@@ -8,8 +8,20 @@
  * pinned to the real function by `test/transcript-parity.test.ts`.
  */
 import type { ChatMessage } from "@tentacle/core";
-import { compactionOf, compactionSeparatorText, splitFileBlocks, toolLabel } from "@tentacle/core";
-import { type ImageRef, type Row, imageRef, mediaRowText } from "./transcript-rows.ts";
+import {
+  COMPACTION_SUMMARY_HEAD,
+  compactionOf,
+  compactionSeparatorText,
+  splitFileBlocks,
+  toolLabel,
+} from "@tentacle/core";
+import {
+  type ContextRow,
+  type ImageRef,
+  type Row,
+  imageRef,
+  mediaRowText,
+} from "./transcript-rows.ts";
 
 /** The context reset's header (mirrors `agent/src/context-reset.ts`; pinned by a test). */
 export const CONTEXT_RESET_HEADER =
@@ -17,9 +29,6 @@ export const CONTEXT_RESET_HEADER =
 
 const OPEN = "\n<restart_prompt>\n";
 const CLOSE = "\n</restart_prompt>";
-
-/** The separator a context reset draws before its restart prompt (decision 9). */
-export const CONTEXT_RESET_SEPARATOR = "↻ context reset by the model";
 
 /**
  * The restart prompt a context reset's first user message carries, or null for
@@ -35,17 +44,36 @@ export function restartPromptOf(content: string): string | null {
 }
 
 /**
- * A compaction as ONE separator (docs/fix/mobile-qa-1117.md, bug 4; the TUI's
- * `compactionItem`, docs/feat/harness-notices.md S3.4): `compacted · ctx A → B`
- * from the summary's `compacted` figures, `compacted` alone for a legacy one.
- * The SAME row whether the compaction is seen live from another device or after
- * a reopen. The brief is NOT shown: it is the model's note to itself, which the
- * TUI keeps behind Ctrl+O — and a phone notice has no expand.
+ * A compaction as ONE timeline STEP (1A of docs/feat/mobile-reset-in-timeline.md),
+ * whatever device made it and whenever it is seen — live from another device or
+ * after a reopen — replacing the old `compacted · ctx A → B` separator notice.
+ * `figures` is the separator's own wording minus the word (`ctx 182k → ~9k`),
+ * and absent when the summary carries none (a legacy one): never a faked number.
  */
-export function compactionSeparatorRow(key: string, messages: readonly ChatMessage[]): Row {
+export function compactionRow(key: string, messages: readonly ChatMessage[]): ContextRow {
   const summary = messages.find((m) => compactionOf(m) !== null);
   const view = summary === undefined ? {} : (compactionOf(summary) ?? {});
-  return { kind: "notice", key, text: compactionSeparatorText(view), separator: true };
+  const figures = compactionSeparatorText(view).replace(/^compacted · /, "");
+  return {
+    kind: "context",
+    key,
+    event: "compact",
+    body: summary === undefined ? "" : summaryBody(summary.content),
+    ...(figures === "compacted" ? {} : { figures }),
+  };
+}
+
+/**
+ * A compaction summary's body: the message's content WITHOUT its head line —
+ * the running-jobs and skills notes stay, because they are part of what the
+ * model continues from (`packages/agent/src/compact.ts:342`). A message whose
+ * content does not open with the head (a newer daemon's shape) is shown whole:
+ * honest, never a guess at what to cut.
+ */
+function summaryBody(content: string): string {
+  return content.startsWith(COMPACTION_SUMMARY_HEAD)
+    ? content.slice(COMPACTION_SUMMARY_HEAD.length).replace(/^\n+/, "")
+    : content;
 }
 
 /** A tentacle-written note (a job's exit, a sub-agent's report): a notice, never a user row. */
@@ -109,22 +137,11 @@ export function historyRows(
     if (m.role === "user") {
       const restart = restartPromptOf(m.content);
       if (restart !== null) {
-        rows.push({
-          kind: "notice",
-          key: nextKey(),
-          text: CONTEXT_RESET_SEPARATOR,
-          separator: true,
-        });
-        rows.push({
-          kind: "user",
-          key: nextKey(),
-          text: restart,
-          images: [],
-          restart: true,
-          ...at,
-        });
+        // A context reset is ONE step holding the restart prompt (1A): the old
+        // divider notice plus a user-shaped bubble are both gone.
+        rows.push({ kind: "context", key: nextKey(), event: "reset", body: restart, ...at });
       } else if (compactionOf(m) !== null) {
-        rows.push(compactionSeparatorRow(nextKey(), [m]));
+        rows.push({ ...compactionRow(nextKey(), [m]), ...at });
       } else if (m.note !== undefined) {
         rows.push(noteRow(nextKey(), m));
       } else {

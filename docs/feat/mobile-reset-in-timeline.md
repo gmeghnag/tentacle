@@ -322,7 +322,81 @@ React), and one render test for the cell.
 
 ## Execution
 
-*— (empty until the plan is approved)*
+*— deepseek-v3.2 (executor), 2026-11-25 · **Slice 1 only***
+
+**Load-bearing check, re-run before any edit** (branch tip `c33b9139`): `bun test
+apps/mobile/test/{transcript,transcript-reload,row-times,notice-row}.test.ts` →
+**83 pass / 0 fail**, and it pins exactly the old shape the plan cites (2 rows per
+reset, a `separator` notice per compaction). The assumption holds; nothing was
+blocked.
+
+**As built, in the plan's order:**
+
+1. `transcript-rows.ts` — `ContextRow` added as designed (`kind/key/event/body/
+   figures?/at?`), `Row` gains `| ContextRow`, `UserRow.restart` removed. The
+   `NoticeRow.separator` field went too: `rg` confirmed no producer left in the
+   app (both producers became context rows), so it was dead — the plan's own
+   condition ("the executor deletes it if `rg` confirms").
+2. `transcript-history.ts` — the restart message maps to ONE `context{event:
+   "reset", body: restart, ...at}`; the summary to `compactionRow(key, messages)`
+   (`body` = content after `COMPACTION_SUMMARY_HEAD`, leading blanks trimmed; the
+   running-jobs/skills notes kept), `figures` = `compactionSeparatorText` minus
+   `compacted · `, absent for a legacy summary. `CONTEXT_RESET_SEPARATOR` deleted;
+   `restartPromptOf` untouched (parity stays green).
+3. `transcript.ts` — `applyHistory`'s `compact` branch pushes `compactionRow` for
+   ANY device including `own` (Q4-A): the old `own === true ? state` term is gone.
+   `sameSlot` gains the `context` arm (`event` + `body`). `isRestartPrompt`
+   unchanged.
+4. Tests: the six files the slice names, plus `media-layout.test.ts` (its
+   `restart: true` case) and `transcript-parity.test.ts` (its `appShapes` mapping
+   needed a `context` branch for the new union member).
+
+**Drift from the Implementation, and why:**
+
+- **Two Slice-3 edits came forward, forced by the compiler.** `UserRow.restart`
+  is used by `TranscriptRow.tsx`'s caption (`:367-369`) and by
+  `media-layout.ts:244`; removing the field makes both fail to typecheck, so Slice
+  1 cannot be green without them. They are exactly the two deletions Slice 3
+  lists ("the `restart prompt` caption and its `media-layout.ts:244` term"), no
+  more: the `ContextRowView`, the `NodeKind`s and the show-all body all stay in
+  Slice 3. The now-dead `separator` branch (`TranscriptRow.tsx:884-901`) and
+  `styles.rule` went with the field, since nothing could reach them.
+- **`transcript-parity.test.ts` is not in the slice's file list** but its
+  `appShapes` switch is exhaustive over `Row`: the new union member needed an arm
+  (`context` → a kind/text shape). No fixture exercises a reset or a compaction,
+  so behaviour is unchanged; the arm only keeps the test compiling honestly.
+- **A duplicate-delivery finding, reported not fixed** (as the plan asks): on
+  `main` today, a `context_reset` stream event AND the follow-up
+  `history{reason:"context_reset"}` of the SAME reset both append via
+  `historyRows`, so the phone shows TWO rows. I pinned that in
+  `"a reset delivered TWICE shows TWO steps (main's behaviour, reported not
+  fixed)"` (`toHaveLength(2)`), which asserts the real behaviour rather than a
+  wish — the plan says report, not fix, and `session-feed.ts` raises both from one
+  client activity. Pre-existing on `main`; it belongs to a follow-up task.
+
+**Mutations (each reverted immediately; the failing assertion named):**
+
+- `applyHistory` back to `own === true ? state` → `this client's OWN compaction
+  leaves the step too (Q4-A)` FAILS. (Proves the Q4-A term is load-bearing.)
+- `sameSlot`'s `context` arm removed → after adding the changed-body case,
+  `a resync keeps the context step's KEY` FAILS. **The first version of that test
+  was vacuous** (`default` also matched by kind, so it passed with the arm gone);
+  the discriminating half — a CHANGED body must mint a new key — was added while
+  the mutation was in place, then it went red. This is the §9 non-vacuity check
+  earning its keep.
+- `figures` forced to `""` → 4 failures across `transcript-reload`'s four
+  compaction tests (reopen, body-without-head, legacy, live-other-device).
+- `...at` dropped from the reset row → `the reset step keeps the reset message's
+  time` (`row-times`) FAILS.
+- `compactionOf(m) !== null` guarded by `restart !== null` → the 3 reopen-side
+  summary tests FAIL.
+
+**Gate:** the slice's own files only, as instructed — 159 pass / 0 fail across the
+8 touched test files; `bunx tsc -p apps/mobile --noEmit` clean; `bunx biome check`
+clean on all 13 changed files. The full `bun run check` is the orchestrator's.
+No `packages/protocol` file was touched, so `protocol.json` needs no
+regeneration. Changelog: `changelog.d/mobile-reset-in-timeline.changed.md`
+(one bullet). `TODO.md` untouched.
 
 ## Review
 
