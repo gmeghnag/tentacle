@@ -58,6 +58,11 @@ export interface HarnessInstance {
   readonly origin?: string;
   /** The footer's resume hint for a handle (`claude --resume <id>`). */
   readonly resumeHint?: (handle: HarnessHandle) => string;
+  /**
+   * A remote instance's report frame (C5): read when the report is assembled,
+   * put before a non-empty report (the remote text is data, not instructions).
+   */
+  readonly reportHeader?: () => string;
 }
 
 export interface HarnessWorktrees {
@@ -247,9 +252,11 @@ export async function runHarnessChild(
     }
     return `\n\n${parts.join(" · ")}`;
   };
+  const framed = (text: string): string =>
+    instance.reportHeader && text.trim() !== "" ? `${instance.reportHeader()}\n\n${text}` : text;
   const failRun = async (message: string, cause?: unknown): Promise<never> => {
     await closeWorktree().catch(() => {});
-    report = `${report}${worktreeNote}${footer()}`.trim();
+    report = `${framed(report.trim())}${worktreeNote}${footer()}`.trim();
     return fail(message, cause);
   };
 
@@ -408,7 +415,7 @@ export async function runHarnessChild(
               await run.cancel().catch(() => "unconfirmed" as const);
               await closeWorktree().catch(() => {});
               const unread = controls?.inbox?.close() ?? [];
-              report = `${name} needs input to continue: ${ev.ask.question}${worktreeNote}${footer()}`;
+              report = `${framed(`${name} needs input to continue: ${ev.ask.question}`)}${worktreeNote}${footer()}`;
               if (unread.length > 0) report += unreadNote(unread.length);
               onEvent({ kind: "subagent_end", toolUses, stopReason: "end_turn" });
               return { report, toolUses, stopReason: "end_turn" };
@@ -515,7 +522,7 @@ export async function runHarnessChild(
     const trimmed = report.trim();
     const body =
       trimmed !== ""
-        ? trimmed
+        ? framed(trimmed)
         : `(The ${name} sub-agent finished (${stopReason}) after ${toolUses} tool use(s) without producing a report.)`;
     const budgetNote =
       stopReason === "max_token_budget" && maxTokens !== undefined && maxTokens > 0

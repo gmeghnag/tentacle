@@ -420,6 +420,31 @@ class A2ARun implements HarnessRun {
 
 // ── the adapter ─────────────────────────────────────────────────────
 
+export type { AgentCard as A2AAgentCard };
+
+/**
+ * Read an agent card through the same pinned-origin `fetch` the adapter uses
+ * (never a token, never a redirect, a `proposed` agent's address rules). The
+ * wiring reads the cards' text for the model with it (C5); the probe, the
+ * security checks (C2).
+ */
+export async function fetchA2ACard(o: {
+  readonly cardUrl: string;
+  readonly policy?: A2ANetworkPolicy;
+  readonly fetch?: typeof fetch;
+  readonly lookup?: A2ALookup;
+  readonly signal: AbortSignal;
+}): Promise<AgentCard> {
+  const cardFetch = pinnedFetch({
+    origin: new URL(o.cardUrl).origin,
+    policy: o.policy ?? "configured",
+    lookup: o.lookup ?? defaultLookup,
+    base: o.fetch ?? ((input, init) => fetch(input, init)),
+    signal: o.signal,
+  });
+  return new DefaultAgentCardResolver({ fetchImpl: cardFetch }).resolve(o.cardUrl, "");
+}
+
 export interface A2AAdapterOptions {
   /** The instance name (`harnesses.<name>`); the adapter id is `a2a:<name>`. */
   readonly name: string;
@@ -511,10 +536,9 @@ export function createA2AAdapter(o: A2AAdapterOptions): A2AAdapter {
 
   const probe = async (signal: AbortSignal): Promise<HarnessProbe> => {
     // The card is public metadata: fetched WITHOUT the token.
-    const cardFetch = pinnedFetch({ origin, policy, lookup, base, signal });
     let card: AgentCard;
     try {
-      card = await new DefaultAgentCardResolver({ fetchImpl: cardFetch }).resolve(o.cardUrl, "");
+      card = await fetchA2ACard({ cardUrl: o.cardUrl, policy, lookup, fetch: base, signal });
     } catch (err) {
       return { ok: false, reason: `${id}: card not readable (${scrub(err)})` };
     }

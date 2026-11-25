@@ -112,6 +112,11 @@ export interface TaskToolOptions {
     readonly note: string;
     readonly isModel: (model: string) => boolean;
   };
+  /**
+   * Types run by a REMOTE agent (docs/feat/a2a-client.md C5): a `model`
+   * argument for one is refused — the remote agent chooses its own model.
+   */
+  readonly remoteTypes?: readonly string[];
 }
 
 const NEUTRAL_DESCRIPTION =
@@ -392,6 +397,12 @@ export function createTaskTool(
       const args = input as z.infer<typeof baseSchema> & { model?: string; background?: boolean };
       const type = resolveType(args.subagent_type);
       const model = offerModel ? args.model : undefined;
+      if (model !== undefined && options.remoteTypes?.includes(type)) {
+        return {
+          content: `model is not accepted for ${type} — a remote agent chooses its own model; omit model`,
+          isError: true,
+        };
+      }
       if (model !== undefined && harnessTypes.includes(type)) {
         // A harness's own model string (D3): one argv element, never a flag.
         if (!harness?.isModel(model)) {

@@ -750,6 +750,34 @@ and `a2c-6` may run in parallel after `a2c-4` (disjoint files).
 neither of which exists; they move to the end of `a2c-2-transport` (or a
 `a2c-3b-wiring` run right after it). a2c-3 shipped everything else.
 
+**Plan fix (a2c-3 wiring re-run, 2026-11-25) — C5 «waits at most 2 s at
+session build» contradicts the code.** A session build is synchronous end to
+end: `SessionHost` calls `this.opts.createAgent(…)` with no `await` at five
+sites (`packages/daemon/src/session-host.ts:652`, `:678`, `:714`, `:1686`,
+`:1780`; `AgentFactory`, `:267`), and `buildAgent` returns a `WiredAgent`, not
+a promise (`packages/cli/src/wiring.ts`, the `worker.ts:95` / `serve.ts:237`
+builders are sync too). Freezing the text lazily at the first read of the tool
+list does not work either: `session-host.ts:658` reads every tool description
+(`builtinTools()`) at session open. So the step is split:
+- **Shipped:** `prefetchA2ACards(config, {fetch, lookup, budgetMs})` (async,
+  all cards in parallel, ≤ 2 s total, a snapshot taken at the deadline) and
+  `buildAgent({harnesses: {a2aCards}})`, which freezes that snapshot into the
+  type text at build. With no `a2aCards` the type reads «(remote card not
+  loaded)» and works.
+- **Open — decision needed (who awaits the prefetch):** (a) `SessionHost`
+  gains an async pre-build hook awaited before each `createAgent` — exactly
+  C5 (re-read at every build), but a daemon change and up to 2 s on every
+  open / `/clear` when a card is slow; (b) worker / `serve` keep a host-level
+  snapshot, refreshed in the background after each build — no delay, but a
+  fresh worker's first session likely shows «not loaded» and the text lags one
+  build; (c) **recommended:** worker / `serve` await `prefetchA2ACards` ONCE
+  before their `SessionHost` (≤ 2 s at start-up, only when an `a2a` instance
+  is configured), pass the snapshot into every build, and refresh it in the
+  background after each build (the next build sees the new text — C5's
+  «between sessions» rule, one build late). No daemon change. Until decided,
+  no caller passes `a2aCards`: every `a2a:` type says «(remote card not
+  loaded)».
+
 SLICES: a2c-1-mapping=sonnet a2c-2-transport=opus a2c-3-seam=opus a2c-4-question-protocol=opus a2c-5-question-tui=sonnet a2c-6-question-mobile=sonnet a2c-7-proposed-agents=opus a2c-8-e2e=sonnet
 
 ## Execution
@@ -1148,4 +1176,90 @@ step). Facts for the re-run:
 - **Unverified:** Bun's own `fetch` behaviour on a cross-origin redirect
   (moot with `redirect: "error"`, which the fake honours like a real fetch);
   verify in a2c-8's loopback e2e.
+- **Gate:** not run here (the orchestrator's script runs it).
+
+### a2c-3-seam (wiring step, re-run) — PARTIAL (who awaits the card prefetch: owner decision)
+
+*— claude-opus-5-5, 2026-11-25*
+
+- **Load-bearing check — holds:** `harness-remote-fit` + `harness-a2a` +
+  `harness-a2a-seam` → 54 pass / 0 fail before any edit. Capability missing
+  before: an `adapter: "a2a"` entry parsed but offered no type (no
+  `a2aHarnesses`, no `a2a:` in the `agent_task` text).
+- **STOPPED one step — C5 «waits ≤ 2 s at session build»:** the build is
+  synchronous (`AgentFactory`, five un-awaited `createAgent` sites in
+  `session-host.ts`) and the tool texts are read at session open
+  (`session-host.ts:658`), so neither an awaited fetch nor a lazy freeze fits.
+  Plan fixed under **Slices** (the second «Plan fix»): the async prefetch and
+  the freeze are shipped; which caller awaits it is options (a)/(b)/(c),
+  recommended (c). Until then no caller passes cards and every `a2a:` type
+  reads «(remote card not loaded)» — the call itself works.
+- **Done, in dependency order:**
+  1. `packages/agent/src/harness/a2a.ts:431` `fetchA2ACard` — the card read
+     through the adapter's own `pinnedFetch` (pinned origin, no token, no
+     redirect, the `proposed` rules); the probe now calls it (one code path).
+     `A2AAgentCard` type re-exported. `packages/agent/src/index.ts`: exports
+     `createA2AAdapter`, `fetchA2ACard`, the types, `cardBlurb`, `reportHeader`.
+  2. `packages/agent/src/harness/child.ts:65` `HarnessInstance.reportHeader`
+     — read when the report is assembled and put before a non-empty report
+     (`framed`, `:256`): success (`:525`), failure (`:259`) and the «needs
+     input» end (`:418`). C5's frame.
+  3. `packages/tools/src/task.ts:119` `remoteTypes` — a `model` for one is
+     refused (`:400`) «a remote agent chooses its own model» before any ask.
+  4. `packages/cli/src/wiring.ts`: `prefetchA2ACards` (`:397`, all cards in
+     parallel, 2 s budget enforced twice — abort AND a race —, a snapshot at
+     the deadline); `a2aHarnesses` (`:443`): one `createA2AAdapter` per enabled
+     instance (config `fetch`/`lookup`/`runCommand` injectable), type
+     `a2a:<name>` `{mode: "remote"}`, its text = `cardBlurb` of the build's
+     snapshot, FROZEN; the instance's `reportHeader` adds «(the remote card
+     changed since this session started)» when the LIVE card (the probe's)
+     gives another blurb than the frozen one — only if a card was frozen.
+     `buildAgent` (`:996`): built only `!tunnelled && options.harnesses`, ONE
+     `instances` map with `claude`'s; `remoteTypes` to the task tool (`:1092`).
+- **Drift from Implementation:**
+  - The card prefetch is a separate async function, not a wait inside the
+    build (above; plan fixed).
+  - Remote types are left out of `harnessModels` AND of the workflow
+    context's `harnessTypes` (both mean «the model string is the harness's own,
+    free»), which a remote type is not.
+  - Wiring tests live in `packages/cli/test/a2a-wiring.test.ts` (the wiring is
+    cli's), not in `harness-a2a-seam.test.ts`; they drive the real
+    `agent_task` → `runHarnessChild` → adapter → `fake-a2a.ts`.
+  - An invalid `card` URL that reached the build (the schema already refuses
+    one) → a `notice` and no type, never a throw.
+- **Tests:** `packages/cli/test/a2a-wiring.test.ts` (7): opted in → the exact
+  type line (owner text first, card marked remote) and no transport request
+  at build; not opted in → no type; tunnelled → no type + the pod notice;
+  frozen — the live card changes, the `agent_task` text is byte-identical, the
+  probe re-reads the card, the report starts with the frame + «changed», one
+  consent ask through the ONE broker before the send; unchanged card → frame
+  only; a card past the budget → prefetch returns < 1 s with no card, «not
+  loaded», the call still completes, no «changed»; `model` on `a2a:acme` →
+  refused, no ask, no request.
+  Narrow runs: that file 7/0; with `harness-wiring`, `harness-remote-fit`,
+  `harness-a2a`, `-a2a-seam`, `-a2a-map`, `subagent-harness` 139/0;
+  `tools` task tests + `cli/wiring.test.ts` 97/0. Biome on the 6 changed
+  files: clean (after `--write` formatting). `tsc -p packages/{agent,cli}`:
+  no error in the changed files (one in `a2a-map.ts:479`, `URL` lib types, a
+  per-package artefact in a file this run did not touch — the gate's root
+  `tsc` decides).
+- **Mutations** (scratch `.tentacle/tmp/a2a-client/mutate-a2c3b.ts`: apply
+  one, run the wiring file, restore; byte-identical after each, `git diff
+  --stat` unchanged):
+  | mutation | result |
+  |---|---|
+  | M1 `a2a` types built without `!tunnelled` | red — 1 fail |
+  | M2 no report frame (`child.ts`) | red — 2 fail |
+  | M3 no «card changed» note | red — 1 fail |
+  | M4 «changed» also when no card was frozen | red — 1 fail |
+  | M5 budget ignored (60 s deadline) | red — 1 fail (timeout) |
+  | M6 `model` not refused for a remote type | red — 1 fail |
+  | M7 owner description dropped | red — 2 fail |
+  A first M5 («no race, `Promise.all` only») stayed green: the deadline's
+  abort alone already ends a hanging read — the budget is held twice; the
+  mutation that removes it (M5 above) is red. Red-before-green by mutation:
+  the tests were written after the code.
+- **Changelog:** the branch's `changelog.d/a2a-client.added.md` already
+  describes the type and the remote-marked report; unchanged (it claims no
+  card text).
 - **Gate:** not run here (the orchestrator's script runs it).
