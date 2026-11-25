@@ -874,4 +874,60 @@ change, so `protocol.json` is untouched. No changelog change (S0's fragment
 covers the task). Full `bun run check` NOT run (the orchestrator's script
 runs it).
 
+### S3-a2a-mapping — PARTIAL (compile smoke not run)
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+**Load-bearing check re-run first** (`bun .tentacle/tmp/a2a/seam.ts`): HOLDS,
+the same five lines as above.
+
+**As built:**
+- `@a2a-js/sdk` pinned `1.3.0` in `packages/daemon/package.json` + `bun.lock`.
+- `packages/daemon/src/a2a/mapping.ts` (new, pure): `a2aSessionId` /
+  `a2aCallerPrefix` / `contextIdOf` / `a2aTitle`; `inboundParts` (text join,
+  `tentacle/workflow`, `tentacle/permission`, fenced other-data, `raw`/`url`
+  refused); `callerMayAnswer`, `onceOption`, `callerOptions`, `parseTextAnswer`,
+  `askMessage`; `projectStatus` (WorkUnit → `TaskState` + message),
+  `responseText`, `chunkAppend` (round replace), `buildAgentCard`.
+- `packages/daemon/test/a2a-mapping.test.ts` (24 tests).
+- No schema change: `protocol.json` untouched. No new changelog fragment: S0's
+  `changelog.d/a2a.added.md` is the task's one (S10 rewrites it).
+
+**Drift from Implementation:**
+- **`bun build --compile` smoke NOT run**: the sandbox refused the command
+  (approval needed, non-interactive). To verify: a file importing
+  `@a2a-js/sdk/server` + `mapping.ts`, `bun build --compile`, run the binary.
+  The SDK's Node-only entry points (`server/express`) are not imported by S3.
+- SDK 1.3.0 is the A2A 1.0 protobuf-shaped API (`TaskState.TASK_STATE_*`,
+  `Part.content.$case`), so mapping uses those types, not the plan's
+  `WORKING`/`INPUT_REQUIRED` names.
+- Caller names are restricted to `[A-Za-z0-9_]{1,32}` (no `-`) so the
+  `a2a-<caller>-<ctx>` prefix is exact (caller `a` never matches `a2a-ab-…`);
+  contextId `[A-Za-z0-9_.:-]{1,128}`; anything else → null (InvalidParams).
+  S4/S10 must reject token names outside that set.
+- The ask-kind table lives in core in S5; here `callerMayAnswer` is
+  `mode === "both" && kind === "tool"` (unmapped = owner-only). S5 should make
+  it read the core table.
+- `PendingAsk.kind` is an input (S4/S5 get it from `client/permission-map`).
+
+**Red before green:** the module did not exist before; the mutations below are
+the non-vacuity proof (each turns assertions red, not an import error).
+
+**Mutations** (`.tentacle/tmp/a2a/mutate-s3.ts`, original restored; 24/24 after):
+
+| Mutation | Fails |
+|---|---|
+| M1 any ask kind answerable in `both` | 3 |
+| M2 answer decision defaults to allow | 1 |
+| M3 `callerOptions` shows `*_always` | 2 |
+| M4 `raw` part accepted | 1 |
+| M5 round replace ignores a tool call | 1 |
+| M6 caller prefix without the `-` delimiter | 1 |
+| M7 approval wait falls through to the ask path | 1 |
+| M8 text answer with several asks pending | 1 |
+
+**Gate (narrow):** `bun test packages/daemon/test/a2a-mapping.test.ts` 24 pass /
+0 fail; `biome check --write` on the 2 files clean; `tsc` limited to the 2 files
+(`.tentacle/tmp/a2a/tsconfig.s3.json`) clean. Full `bun run check` NOT run.
+
 ## Review
