@@ -36,6 +36,9 @@ const step = (id: string, over: Partial<WorkflowStepRow> = {}): WorkflowStepRow 
   state: "ok",
   attempt: 0,
   round: 0,
+  next: null,
+  onFail: null,
+  retry: 0,
   ...over,
 });
 

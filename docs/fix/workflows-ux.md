@@ -817,6 +817,61 @@ so the item un-dims while the fan is up, not before it is drawn. Not run on the 
 
 *— claude-sonnet-5-5, 2026-11-25*
 
+### Slice S4 — Wire edges + counters + history
+
+Resumed after DeepSeek was stopped by the watchdog. Its protocol/driver/core edits were right and are kept. I fixed its failing tests and finished the slice.
+
+**Load-bearing re-check (PARTIAL rule):**
+- HEAD's `WorkflowStepRow`/`WorkflowRow` (`git show HEAD:packages/protocol/src/session.ts`, `:807-850`) has 0 matches for `onFail|history|retry|next:`. Strip schemas, so a daemon's edges were dropped.
+- `edgeKey` was already exported. `passTarget` was module-private and is now exported (`core/src/workflow-machine.ts:142`).
+- `lb.ts` now THROWS on the old row (the fields are required). That is the inverse of "stripped", as intended.
+
+**As built:**
+- `protocol/src/session.ts:807-824`: `WORKFLOW_HISTORY_MAX = 64` and `WorkflowHistoryRowSchema` (`step, attempt, round, state, durationMs?`).
+- `WorkflowStepRowSchema` gains required `next: line(64)|null`, `onFail: {goto, max 1..10, taken ≥0}|null` and `retry 0..5`.
+- `WorkflowRowSchema` gains required `history ≤64` and `historyDropped`.
+- `protocol.json` is regenerated (`bun run schema:export`). `json-schema.test.ts` adds the two new null sites, with the reason (null = "no edge", a fact).
+- `agent/src/workflow-driver.ts`:
+  - `pendingRow(spec, step)` fills `next = passTarget(...) ?? null`, `onFail` (taken 0) and `retry`.
+  - In `drive`, AFTER `nextAction`, the finished execution goes into `history` (`slice(-64)` + `historyDropped`). `refreshTaken` then reads `run.state.counters[edgeKey(id, goto)]`.
+  - The agent package does not depend on protocol, so it keeps its own `WORKFLOW_HISTORY_MAX` (same value).
+- `protocol.d/workflows-ux.md`: the breaking note. S8b/S8c append to it.
+
+**Drift from Implementation:**
+1. **`packages/client/src/workflows.ts` (`boundStep`/`boundRun` + new `boundHistory`), not in the S4 Files list.**
+   - The client re-builds every row field by field, so without this edit it would silently strip all four new fields for every UI. That defeats D1 and breaks typecheck.
+   - Ids pass through `progressText` like `id`; numbers are passed as sent; history is `slice(-64)`.
+   - Test: `workflows-client.test.ts` "the run's edges and history survive the bounding".
+2. Fixtures typed as rows were updated (`next:null, onFail:null, retry:0`; `history:[], historyDropped:0`):
+   - client `workflows-client`, `workflow-mapping` (also exercises non-null edges + one history entry);
+   - tui `workflow-frames`, `workflow-view`;
+   - daemon `push-notifier`;
+   - mobile `workflow-list-graph`, `workflow-run-controller`, `workflow-run-step-detail`, `workflow-step-layer`.
+3. Driver test fixes:
+   - DeepSeek's `settle` exited at once (`current()` is undefined before `start` registers the run). It now polls "last row ended" and throws on timeout (§9).
+   - The `round` expectation was corrected to the machine's own: the `next` back into review is round 0, not 1, and `confirm` follows.
+   - The 64-cap test used 70 steps, but the spec caps a file at 64 (`WORKFLOW_MAX_STEPS`). It is now 12 `run` steps × `retry: 5` (5 fails then a pass) = 72 executions.
+4. **Changelog: no fragment added.** S4 changes no visible behaviour (the graph that uses these fields is S5–S7), and `workflows-ux.{fixed,changed}.md` already exist for the visible slices.
+
+**Red/green + mutations** (each one reverted after):
+- M1 `refreshTaken` moved before `nextAction`: first SURVIVED, because the final row is refreshed by review's second pass. I added an assertion on the row published while `fix` runs (`taken` must already be 1). M1 is now killed: 1 fail, "review fails once".
+- M2 history entry built from the NEXT action's step: killed, 3 fails (passes-first, fails-once, retry).
+- M3 no `slice(-64)`: killed, 1 fail (the 64 cap).
+- W1 `next` `.optional()` in the schema: first SURVIVED, because no case omitted only `next`. I added that case plus the all-three-present control. W1 is now killed: 1 fail.
+- C1 `boundRun` drops `history`: killed, 1 fail (survive-the-bounding).
+
+**Narrow verification:**
+- `bun test` over packages/protocol/test, agent/test, client `workflows-client`/`workflow-mapping`, tui `workflow-frames`/`workflow-view`, daemon `push-notifier`/`workflow-*`/`schedule-workflow`, cli `local-runtime`/`workflow-wiring`, core `workflow-machine`: 1655 pass, 0 fail.
+- After the last edits: protocol + driver + client, 628 pass, 0 fail.
+- Mobile workflow tests: 110 pass, 0 fail.
+- `tsc -p apps/mobile`: clean.
+- Narrow `tsc` over the row-fixture files: clean, except `marked-terminal` types, an artefact of the ad-hoc config, not this change.
+- `biome check` on the 17 changed files: clean.
+
+**Not verified:** the full gate (`bun run check`, left to the orchestrator's script). `protocol:bump` runs at merge.
+
+*— claude-opus-5-5 (S4 executor, resumed), 2026-11-25*
+
 ## Review
 
 ### Review — S1, S2, S3 (fresh context)

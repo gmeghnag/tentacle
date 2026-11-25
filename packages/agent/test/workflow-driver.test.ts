@@ -1036,6 +1036,180 @@ describe("the approval shows every command, verbatim (docs/fix/workflow-approve-
   });
 });
 
+// docs/fix/workflows-ux.md S4 (D1): the run row carries its definition edges
+// and a history, so a client never has to re-derive the graph from counters.
+describe("rows carry the run's edges and history (S4)", () => {
+  // The demo-note shape the plan names: a review that may fail into `fix`, and
+  // `fix` jumping back to `review`. Run ① passes review first time.
+  const DEMO = YAML(
+    [
+      "  - id: collect",
+      "    agent: { prompt_text: collect it }",
+      "  - id: draft",
+      "    agent: { prompt_text: draft it }",
+      "    retry: 1",
+      "  - id: review",
+      "    agent: { prompt_text: review it }",
+      '    next: "confirm"',
+      '    on_fail: { goto: "fix", max: 2 }',
+      "  - id: fix",
+      "    agent: { prompt_text: fix it }",
+      '    next: "review"',
+      "  - id: confirm",
+      "    approve: { title: Confirm }",
+      "",
+    ].join("\n"),
+  );
+  const runRows = (text = DEMO) => {
+    const t = setup({ approved: true, text });
+    const rows: WorkflowRow[][] = [];
+    t.driver.bind({ ...noopHost(), publish: (r) => rows.push([...r]) });
+    return { ...t, rows };
+  };
+  // `flush()` is 20 microtask ticks — enough for a 2-step run; the demo shape is
+  // longer, so settle by polling the very condition the asserts read (the last
+  // row ended), and THROW if it never does (AGENTS §9: no fixed wait).
+  const settle = async (rows: WorkflowRow[][]): Promise<void> => {
+    for (let i = 0; i < 400; i++) {
+      if (last(rows)?.endedAt !== undefined) {
+        return;
+      }
+      await flush();
+    }
+    throw new Error(`run never ended: ${JSON.stringify(last(rows)?.steps.map((s) => s.state))}`);
+  };
+  const stepOf = (row: WorkflowRow | undefined, id: string) => row?.steps.find((s) => s.id === id);
+
+  test("every step carries its edges from the RUN's spec: `next`, `onFail`, `retry`", async () => {
+    const t = runRows();
+    void t.driver.start({ name: "task", by: "user" });
+    await settle(t.rows);
+    const row = last(t.rows);
+    // `next` is the RESOLVED pass target: `next`, else the step after it.
+    expect(stepOf(row, "collect")?.next).toBe("draft");
+    expect(stepOf(row, "draft")?.next).toBe("review");
+    expect(stepOf(row, "draft")?.retry).toBe(1);
+    // `fix` declares `next: review`, so the spine goes back.
+    expect(stepOf(row, "fix")?.next).toBe("review");
+    // The last file step: the run ends after it.
+    expect(stepOf(row, "confirm")?.next).toBeNull();
+    expect(stepOf(row, "review")?.onFail).toEqual({ goto: "fix", max: 2, taken: 0 });
+    expect(stepOf(row, "collect")?.onFail).toBeNull();
+  });
+
+  test("review passes first time: `taken` stays 0 and `fix` is never in the history", async () => {
+    // Mutation: append the finished execution from the ACTION (the next step)
+    // instead of the one that ended → `fix` appears, or `review` does not.
+    const t = runRows();
+    void t.driver.start({ name: "task", by: "user" });
+    await settle(t.rows);
+    const row = last(t.rows);
+    expect(stepOf(row, "review")?.onFail).toEqual({ goto: "fix", max: 2, taken: 0 });
+    expect(row?.history.map((h) => h.step)).toEqual(["collect", "draft", "review", "confirm"]);
+    expect(row?.history.some((h) => h.step === "fix")).toBe(false);
+    expect(row?.historyDropped).toBe(0);
+    // A history entry records the state it ENDED in, and is not the live step.
+    expect(row?.history.every((h) => h.state === "ok")).toBe(true);
+    expect(row?.history[2]).toMatchObject({ step: "review", attempt: 0, round: 0, state: "ok" });
+  });
+
+  test("review fails once: `taken` becomes 1 and the history is review→fix→review", async () => {
+    const fails = [true];
+    const t = runRows();
+    const driver = new WorkflowDriver({
+      ...t.deps,
+      runnerFor: (requester) => (opts, controls) => {
+        const id = opts.description.split("/")[1] ?? "";
+        if (id === "review" && fails.shift() === true) {
+          return says("fail", "red")(opts, controls, requester);
+        }
+        return says("pass")(opts, controls, requester);
+      },
+    });
+    const rows: WorkflowRow[][] = [];
+    driver.bind({ ...noopHost(), publish: (r) => rows.push([...r]) });
+    void driver.start({ name: "task", by: "user" });
+    await settle(rows);
+    const row = last(rows);
+    expect(stepOf(row, "review")?.onFail).toEqual({ goto: "fix", max: 2, taken: 1 });
+    // While `fix` runs, the row ALREADY says the goto was taken once: the counter
+    // is read after `nextAction` moved it (the final row alone cannot tell,
+    // review's second pass would refresh it anyway).
+    const duringFix = rows.map((r) => r.at(-1)).find((r) => stepOf(r, "fix")?.state === "running");
+    expect(stepOf(duringFix, "review")?.onFail?.taken).toBe(1);
+    expect(duringFix?.history.map((h) => h.step)).toEqual(["collect", "draft", "review"]);
+    // `round` is the machine's own: the goto TARGET's re-entry is round 1; the
+    // `next` back into review is a pass edge (round 0).
+    expect(row?.history.map((h) => `${h.step}:${h.state}:${h.round}`)).toEqual([
+      "collect:ok:0",
+      "draft:ok:0",
+      "review:error:0",
+      "fix:ok:1",
+      "review:ok:0",
+      "confirm:ok:0",
+    ]);
+    expect(row?.state).toBe("ok");
+  });
+
+  test("a retried step is one history entry per try, attempt 0 then 1", async () => {
+    const tries = [true];
+    const t = runRows();
+    const driver = new WorkflowDriver({
+      ...t.deps,
+      runnerFor: (requester) => (opts, controls) => {
+        const id = opts.description.split("/")[1] ?? "";
+        if (id === "draft" && tries.shift() === true) {
+          return says("fail", "red")(opts, controls, requester);
+        }
+        return says("pass")(opts, controls, requester);
+      },
+    });
+    const rows: WorkflowRow[][] = [];
+    driver.bind({ ...noopHost(), publish: (r) => rows.push([...r]) });
+    void driver.start({ name: "task", by: "user" });
+    await settle(rows);
+    const draft = last(rows)?.history.filter((h) => h.step === "draft") ?? [];
+    expect(draft.map((h) => `${h.attempt}:${h.state}`)).toEqual(["0:error", "1:ok"]);
+    expect(last(rows)?.state).toBe("ok");
+  });
+
+  test("past 64 executions the history keeps the LATEST 64 and counts the dropped", async () => {
+    // A file holds ≤ 64 steps, so executions pile up through retries: 12 steps
+    // × 6 tries (`retry: 5`, the first 5 fail) = 72 executions. The
+    // `max_step_runs` belt (default 50) is raised: the cap under test is the row's.
+    const steps = 12;
+    const total = steps * 6;
+    const longText = `schemaVersion: 1\nname: task\nversion: 3\nbudget: { wait: 1m, max_step_runs: 100 }\nsteps:\n${Array.from(
+      { length: steps },
+      (_, i) => `  - id: s${i}\n    run: c${i}\n    retry: 5\n`,
+    ).join("")}`;
+    const t2 = setup({ approved: true, text: longText });
+    const rows2: WorkflowRow[][] = [];
+    const calls = new Map<string, number>();
+    const driver2 = new WorkflowDriver({
+      ...t2.deps,
+      commands: {
+        authorize: async (command) => ({ allowed: true, command }),
+        exec: async (command: string) => {
+          const n = (calls.get(command) ?? 0) + 1;
+          calls.set(command, n);
+          return { stdout: "", stderr: "", exitCode: n <= 5 ? 1 : 0 };
+        },
+      },
+    });
+    driver2.bind({ ...noopHost(), publish: (r) => rows2.push([...r]) });
+    void driver2.start({ name: "task", by: "user" });
+    await settle(rows2);
+    const longRow = last(rows2);
+    expect(longRow?.state).toBe("ok");
+    expect(longRow?.history).toHaveLength(64);
+    expect(longRow?.historyDropped).toBe(total - 64);
+    // The LATEST 64 are kept: s0 and two tries of s1 fell off; the last is s11's pass.
+    expect(longRow?.history.at(0)).toMatchObject({ step: "s1", attempt: 2 });
+    expect(longRow?.history.at(-1)).toMatchObject({ step: "s11", attempt: 5, state: "ok" });
+  });
+});
+
 function noopHost(): WorkflowHost {
   return {
     logStart: () => {},

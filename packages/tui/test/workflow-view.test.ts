@@ -52,6 +52,9 @@ const step = (over: Partial<WorkflowStepRow> = {}): WorkflowStepRow => ({
   state: "ok",
   attempt: 0,
   round: 0,
+  next: null,
+  onFail: null,
+  retry: 0,
   ...over,
 });
 
@@ -64,6 +67,8 @@ const run = (over: Partial<WorkflowRow> = {}): WorkflowRow => ({
   tokens: 1_200_000,
   budget: 3_000_000,
   startedAt: 1_000,
+  history: [],
+  historyDropped: 0,
   steps: [],
   ...over,
 });

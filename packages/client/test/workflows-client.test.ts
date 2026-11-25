@@ -53,6 +53,9 @@ const stepRow = (id: string, extra: Partial<WorkflowStepRow> = {}): WorkflowStep
   state: "pending",
   attempt: 0,
   round: 0,
+  next: null,
+  onFail: null,
+  retry: 0,
   ...extra,
 });
 
@@ -64,6 +67,8 @@ const run = (n: number, extra: Partial<WorkflowRow> = {}): WorkflowRow => ({
   state: "running",
   tokens: n,
   startedAt: n,
+  history: [],
+  historyDropped: 0,
   steps: [stepRow("merge")],
   ...extra,
 });
@@ -160,6 +165,34 @@ describe("boundWorkflows: the rows are the client's (≤ 8 runs, ≤ 64 steps, o
     expect(boundWorkflows(Array.from({ length: 10_000 }, (_, i) => run(i + 1)))).toHaveLength(
       MAX_WORKFLOW_RUNS,
     );
+  });
+
+  // docs/fix/workflows-ux.md S4 (D1): the bounding is the client's own copy, so
+  // a field it does not carry is lost for every UI — the edges and the history
+  // must survive it, their ids cleaned like `id`.
+  test("the run's edges and history survive the bounding, ids escape-free", () => {
+    const history = [
+      { step: "review", attempt: 0, round: 0, state: "error", durationMs: 900 },
+      { step: "fix\u001b[2J", attempt: 0, round: 1, state: "ok" },
+    ];
+    const [row] = boundWorkflows([
+      run(1, {
+        history,
+        historyDropped: 3,
+        steps: [
+          stepRow("review", { next: "confirm", onFail: { goto: "fix", max: 2, taken: 1 } }),
+          stepRow("fix", { next: "review\u0007", retry: 2 }),
+        ],
+      }),
+    ]);
+    expect(row?.steps[0]?.next).toBe("confirm");
+    expect(row?.steps[0]?.onFail).toEqual({ goto: "fix", max: 2, taken: 1 });
+    expect(row?.steps[1]?.onFail).toBeNull();
+    expect(row?.steps[1]?.retry).toBe(2);
+    expect(CONTROL.test(row?.steps[1]?.next ?? "")).toBe(false);
+    expect(row?.historyDropped).toBe(3);
+    expect(row?.history.map((h) => h.step)).toEqual(["review", "fix [2J"]);
+    expect(row?.history[0]).toEqual(history[0]);
   });
 
   test("every label is one line and escape-free; the numbers as sent", () => {
