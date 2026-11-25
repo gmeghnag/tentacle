@@ -28,6 +28,9 @@ import type { McpServerStatus } from "@tentacle/mcp";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
 import "./pdf-worker-url.ts";
+import { randomUUID } from "node:crypto";
+import type { BrowserToolset } from "@tentacle/tools";
+import { browserToolsetOf, createBrowserLink } from "./browser-link.ts";
 import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
 import { laptopArtifactSeed } from "./laptop-artifacts.ts";
 import { createMcpHub } from "./mcp-hub.ts";
@@ -82,7 +85,12 @@ export function workerAgentFactory(
     /** The session's scheduled wakes (docs/feat/cron-tool.md D1): the worker schedules. */
     readonly schedules?: () => ScheduleLink | null;
   },
-  options: { readonly skillScan?: SkillScan; readonly createProvider?: ProviderFactory } = {},
+  options: {
+    readonly skillScan?: SkillScan;
+    readonly createProvider?: ProviderFactory;
+    /** The browser tools (B4): only the laptop's own hosts pass them, never a pod. */
+    readonly browser?: BrowserToolset;
+  } = {},
 ): WiredAgent {
   return buildAgent(
     config,
@@ -113,6 +121,8 @@ export function workerAgentFactory(
       // Workflows (docs/feat/agent-workflows.md D3): the laptop runs them; a run
       // lives as long as this worker (a TUI quit cuts it, closed at next load).
       workflows: true,
+      // The laptop's own Chrome (browser-inspect B4); a pod daemon never passes this.
+      ...(options.browser ? { browser: options.browser } : {}),
     },
   );
 }
@@ -145,6 +155,8 @@ export function workerSessionHost(
      * pod daemon never passes one: AGENTS §7).
      */
     readonly artifactSeed?: SessionHostOptions["artifactSeed"];
+    /** The worker's browser toolset (docs/feat/browser-inspect.md B4): the laptop's own Chrome. */
+    readonly browser?: BrowserToolset;
   },
 ): SessionHost {
   const skillScan = deps.skillScan ?? createSkillScan(config);
@@ -186,6 +198,7 @@ export function workerSessionHost(
       const wired = workerAgentFactory(config, ctx, {
         skillScan,
         ...(deps.createProvider ? { createProvider: deps.createProvider } : {}),
+        ...(deps.browser ? { browser: deps.browser } : {}),
       });
       deps.onBuilt?.(wired);
       // One mapping, so `grants` (emptied by `/clear`) cannot be dropped again.
@@ -232,6 +245,12 @@ port.addEventListener("message", (event: { data: unknown }) => {
     onErrors: (errors) => postObject({ type: "mcp-errors", errors }),
   });
   hub.start();
+  // The per-daemon browser link (docs/feat/browser-inspect.md §1): lazy — it
+  // dials the Chrome host's hub only when a B4 tool calls it. The worker dies
+  // with its process, which closes the socket and releases its leases.
+  const browser = browserToolsetOf(
+    createBrowserLink({ configDir: config.configDir, daemonId: randomUUID() }),
+  );
 
   // One skill scan for every session and for the `/name` list of a session
   // not created yet (docs/feat/skills-hot-reload.md).
@@ -243,6 +262,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
     mcpStatus: () => hub.status(),
     toolsReady: () => hub.ready(),
     onBuilt: (wired) => hub.onBuilt(wired.tools),
+    browser,
     // D11: a RESUMED session's gallery, from the copy the MAIN thread keeps
     // beside the log. READ ONLY here — the main thread owns that dir (§7).
     ...(artifactsDir ? { artifactSeed: laptopSeedFrom(artifactsDir) } : {}),

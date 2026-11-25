@@ -9,6 +9,7 @@
     "./pdf-worker": "./src/pdf/pdf-worker.ts"
   },
   "dependencies": {
+    "@tentacle/browser": "workspace:*",
     "@tentacle/core": "workspace:*",
     "diff": "5.2.0",
     "linkedom": "0.18.15",

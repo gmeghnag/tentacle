@@ -239,6 +239,8 @@ export const ARGS = {
   // The verb is the only word (plus `--yes` for setup), so a stray one is refused
   // here rather than guessed at.
   voice: { bools: { yes: { short: "y" } }, positional: { min: 1, max: 2 } },
+  // `tentacle browser install|status|uninstall` (docs/feat/browser-inspect.md B2).
+  browser: { positional: { min: 1, max: 1 } },
   // `tentacle logs [<uid>] [--tail N] [--only …] [--json] [--summary] [-f]`
   // (docs/feat/logs-cmd.md). `-f` is `--follow`'s alias, as in `tail -f`; the
   // uid is the only word, so a second one is refused here, not guessed at.
@@ -765,6 +767,7 @@ export type CliMode =
   | "pair"
   | "devices"
   | "voice"
+  | "browser"
   | "logs"
   | "plain"
   | "tui"
@@ -802,6 +805,8 @@ const USES_MODEL: Readonly<Record<CliMode, boolean>> = {
   logs: false,
   // `voice` runs the local helper only: no daemon, no model, no session.
   voice: false,
+  // `browser` writes the native-messaging host manifest only: no model.
+  browser: false,
   // Everything that builds an agent or proxies to a model.
   serve: true,
   run: true,
@@ -844,6 +849,7 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "pair" ||
     first === "devices" ||
     first === "voice" ||
+    first === "browser" ||
     first === "logs"
   ) {
     return first;
@@ -878,6 +884,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   devices:
     "tentacle devices | revoke <name|id-prefix> [--project <dir> | --all-projects] | reset [--yes]",
   voice: "tentacle voice setup [--yes] | status",
+  browser: "tentacle browser install | status | uninstall",
   logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [--usage] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
 };
