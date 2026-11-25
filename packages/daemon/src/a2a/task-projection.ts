@@ -18,7 +18,11 @@
  * A projected task is fail-closed on asks: it never reads INPUT_REQUIRED (only a
  * live watcher knows an ask's options), a pending ask reads WORKING + "waiting".
  * Its `history` is empty (allowed by the spec): the caller's own messages are
- * not re-read from the session log. Archived contexts are slice S7's.
+ * not re-read from the session log.
+ *
+ * Archived contexts (S7) are read read-only through `external/archived-units.ts`
+ * (never reopened, never written), after the live sessions: an id is live,
+ * archived or deleted, never two.
  */
 import {
   type ListTasksRequest,
@@ -29,6 +33,7 @@ import {
 } from "@a2a-js/sdk";
 import { RequestMalformedError } from "@a2a-js/sdk/errors";
 import type { ServerCallContext, TaskStore } from "@a2a-js/sdk/server";
+import { ArchivedUnitIndex, type ArchivedUnitSource } from "../external/archived-units.ts";
 import type { AskMode } from "../external/asks.ts";
 import {
   type CallerUnit,
@@ -42,6 +47,10 @@ import { A2A_PROTOCOL, responseArtifact, responseText, textPart, unitStatus } fr
 export interface A2ATaskStoreOptions {
   /** The live sessions (`SessionHost`). */
   readonly host: UnitSource;
+  /** The archived sessions, read read-only (`SessionHost`; absent: none read). */
+  readonly archived?: ArchivedUnitSource;
+  /** An archived session could not be read: the audit line (once per version). */
+  readonly onArchivedUnreadable?: (id: string, reason: string) => void;
   /** The executor is driving this task now (`A2AExecutor.isDriving`). */
   readonly isDriving: (taskId: string) => boolean;
   /** Per caller, as the executor's; absent = `owner`. */
@@ -152,9 +161,20 @@ export class A2ATaskStore implements TaskStore {
   private readonly opts: A2ATaskStoreOptions;
   /** In-flight tasks only, by caller then taskId. Never written anywhere. */
   private readonly inFlight = new Map<string, Map<string, Task>>();
+  /** The archived side's in-memory index + LRU (never persisted). */
+  private readonly archived: ArchivedUnitIndex | undefined;
 
   constructor(opts: A2ATaskStoreOptions) {
     this.opts = opts;
+    this.archived =
+      opts.archived === undefined
+        ? undefined
+        : new ArchivedUnitIndex(
+            opts.archived,
+            opts.onArchivedUnreadable !== undefined
+              ? { onUnreadable: opts.onArchivedUnreadable }
+              : {},
+          );
   }
 
   /** How many in-flight copies are held (tests: a terminal task leaves memory). */
@@ -187,7 +207,9 @@ export class A2ATaskStore implements TaskStore {
     if (owner === null) {
       return undefined;
     }
-    const found = findCallerUnit(this.opts.host, A2A_PROTOCOL, owner, taskId);
+    const found =
+      findCallerUnit(this.opts.host, A2A_PROTOCOL, owner, taskId) ??
+      (await this.archived?.find(A2A_PROTOCOL, owner, taskId));
     const projected = found === undefined ? undefined : this.project(owner, found);
     const live = this.current(owner, taskId, projected);
     return live !== undefined ? structuredClone(live) : projected;
@@ -203,6 +225,16 @@ export class A2ATaskStore implements TaskStore {
     const context_ = params.contextId === "" ? undefined : params.contextId;
     for (const cu of callerUnits(this.opts.host, A2A_PROTOCOL, owner, context_)) {
       byId.set(cu.taskId, this.project(owner, cu));
+    }
+    // Archived contexts: their results only when the list returns artifacts.
+    const archived = await this.archived?.units(A2A_PROTOCOL, owner, {
+      ...(context_ !== undefined ? { contextId: context_ } : {}),
+      results: params.includeArtifacts === true,
+    });
+    for (const cu of archived ?? []) {
+      if (!byId.has(cu.taskId)) {
+        byId.set(cu.taskId, this.project(owner, cu));
+      }
     }
     for (const id of [...(this.inFlight.get(owner)?.keys() ?? [])]) {
       const live = this.current(owner, id, byId.get(id));

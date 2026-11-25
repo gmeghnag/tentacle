@@ -89,6 +89,7 @@ import {
   type ScheduleRequest,
   type ScheduledFire,
   type ScheduledJob,
+  type SegmentUnits,
   type SubagentBackgroundBody,
   type SubagentEndBody,
   type WorkUnit,
@@ -2550,12 +2551,17 @@ export class HostedSession {
    * end is logged. Synchronous, O(segment): never at a turn's every round.
    */
   private refreshUnits(): void {
+    this.endedUnits = this.segmentUnits().ended;
+  }
+
+  /** `unitsFromSegment` over the current segment (the derivation a load of it runs). */
+  private segmentUnits(): SegmentUnits {
     const entries: KnownLogEntry[] = [];
     for (const slot of this.log.since().slots) {
       // A lazy slot is a checkpoint: it states no unit.
       if (slot.entry !== null) entries.push(slot.entry);
     }
-    this.endedUnits = unitsFromSegment(entries).ended;
+    return unitsFromSegment(entries);
   }
 
   /**
@@ -5186,6 +5192,9 @@ export class HostedSession {
    */
   archive(after?: LogCursor): DaemonSessionState {
     const before = this.persistedState(after);
+    // The units of the log part written below (before the close), as a load
+    // of the file derives them: the resident record's table (S7).
+    const units = this.segmentUnits();
     this.close("closed");
     // The log part is the one BEFORE the close (docs/feat/session-log-serve-store.md
     // §2): an archived session's log is the shape a crash leaves — no
@@ -5195,6 +5204,7 @@ export class HostedSession {
       ...closed,
       ...(before.log ? { log: before.log } : {}),
       ...(before.turn ? { turn: { ...before.turn, steering: [], steeringIds: [] } } : {}),
+      units,
     };
   }
 }

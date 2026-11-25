@@ -405,6 +405,18 @@ it.
   sidecar + first line only) are projected once (through the LRU) and indexed;
   a session's archive moves its units to the archived side of the index;
   a deleted (tombstoned) session is absent from `list()` → `TaskNotFound`.
+  *(S7 correction: `store.list()` is NOT header + sidecar only — it runs
+  `summarize` on every file, "the same walk as `load`"
+  (`session-log-store.ts:1305-1306`), i.e. every archived history read in
+  full. The header + sidecar index already exists: the HOST's archived index
+  (`SessionHost.archived`, filled at start by `persister.loadState` →
+  `addArchived`, `serve.ts:886-901`). So the archived source is the host:
+  `SessionHost.archivedSessions()` (that index) + `readArchivedUnits(id)` =
+  the resident record, else `persister.load(id)` (flush, `readRaw`, the
+  loader's parse + `rebuild`; nothing written, `session-persister.ts:392-427`)
+  → `archivedUnitsOf` (reconcile + `endedUnitsAtLoad` at `archivedAt`). The
+  LRU's version is the index's `updatedAt` + `archivedAt`, not the file's
+  size + mtime (no `stat`). No store handle is wired in `serve.ts`.)*
 
 **What this buys:** a workflow started via A2A is an A2A task with no
 workflow-specific A2A code; every unit in a caller's context is pollable by
@@ -1372,6 +1384,148 @@ executor and mapping test files; each restored, `restored true` ×15):
   `a2a-mapping` and `external-asks` → 162 pass / 0 fail (54 tests).
 - `biome check` on the 10 changed or new files is clean.
 - `tsc` limited to them (`.tentacle/tmp/a2a/tsconfig.s6.json`) is clean.
+- Full `bun run check` NOT run (the orchestrator's script runs it).
+
+### S7-archived-tasks — DONE
+
+*— claude-opus-5-5, 2026-11-25*
+
+**Load-bearing check re-run first** (`.tentacle/tmp/a2a/s7/seam.ts`, copied
+from S6's): HOLDS, the same five lines (`1. a2a open → a2a-ctx-1 created true`
+… `5. … turn_end:end_turn turn_start turn_end:cancelled`).
+
+**S7's own premise, checked before coding — it FAILED in part; the plan is
+corrected inline (Unification §4, "S7 correction").**
+- `store.readRaw` → the loader's parse holds, and it is exactly
+  `SessionPersister.load` (`session-persister.ts:392-427`): flush, read, parse,
+  `rebuild`, nothing written.
+- `store.list()` is NOT "sidecar + first line only". It calls `summarize`, "the
+  same walk as `load`" (`session-log-store.ts:1305-1306`), so it would read
+  every history in full on an index miss.
+- The header + sidecar index already exists in the HOST (`SessionHost.archived`,
+  filled at start through `loadState` → `addArchived`). It also knows the
+  resident record and the tombstones. So the archived source is the host, and
+  no store handle is wired.
+
+**Repro (red before any code):**
+- `a2a-archived-tasks.test.ts` against a stub module: 6 fail. The capability
+  is missing: an archived context's task → `TaskNotFound`.
+- The S4-drift-5 test (reopen before the archive write lands, so the RESIDENT
+  record is restored) failed on its assertion: the reopened session's units
+  lack the earlier task (`- "eb521f5e-…"`, Expected 1 / Received 0). With the
+  write landed first, it passed: that path reads from disk. That is why the
+  test does not `flush`.
+
+**As built (dependency order):**
+1. `persisted-session.ts`:
+   - `DaemonSessionState.units?: SegmentUnits` (archive's capture only, never
+     written to disk);
+   - `archivedUnitsOf(record)`, pure: `reconcileOnReload` (an archive resumes
+     nothing) + `endedUnitsAtLoad` at `archivedAt ?? updatedAt`, so two reads
+     of one record are equal;
+   - the `ArchivedUnitsRead` type.
+2. `hosted-session.ts`:
+   - `segmentUnits()` extracted from `refreshUnits` (one derivation);
+   - `archive()` captures it BEFORE the close, i.e. the units of the log part
+     it writes, as a load of that file derives them.
+3. `session-persister.ts` `toRecord`: carries `state.units`. This fixes S4
+   drift 5: the resident record keeps the ended-units table.
+4. `session-host.ts` (additive, read-only):
+   - `ArchivedEntry.archivedAt`;
+   - `archivedSessions()`: the archived index, metadata only;
+   - `readArchivedUnits(id)`: resident record, else `persister.load`, then
+     `archivedUnitsOf`. A failure returns `unreadable` and never drops or
+     blocks the entry (a failed REOPEN does).
+5. `external/archived-units.ts` (new, protocol-neutral): `ArchivedUnitIndex`.
+   - The index, per archived session: its version (`updatedAt:archivedAt`),
+     its context and its addressable units WITHOUT results. Only the
+     caller's `<protocol>-<caller>-*` sessions are read; a new or changed one
+     is read once at the next lookup; a gone one leaves the index and the LRU.
+   - An LRU of the full units, 8 sessions (`ARCHIVED_LRU_CAPACITY`).
+   - `find` (GetTask) and `units({contextId, results})` (ListTasks). Results
+     are read through the LRU only when the list returns artifacts.
+   - Unreadable → no task + `onUnreadable` once per version.
+6. `a2a/task-projection.ts`:
+   - options `archived?: ArchivedUnitSource` and
+     `onArchivedUnreadable?(id, reason)` (S9/S10 wire `archived: host`
+     and the audit line);
+   - `load`: live, then archived;
+   - `list`: live, then archived ids not already live, then in-flight copies.
+
+**Drift from Implementation (and why):**
+1. The archived source is the host, not the store, and no store handle is
+   wired in `serve.ts` (the premise failure above). `session-host.ts`,
+   `persisted-session.ts`, `hosted-session.ts` and `session-persister.ts` are
+   touched although Files lists only `task-projection.ts` for S7. Two reasons:
+   the host owns the only header-only index, and S4 drift 5 / S6 drift 6
+   assigned the resident-record fix to S7.
+2. The LRU version is the index's `updatedAt` + `archivedAt`, not the file's
+   size + mtime: no `stat`, and a write that changes no unit (rename, pin,
+   reclaim) does not invalidate.
+3. The index and LRU live in `external/` (owner decision Q1, protocol-neutral),
+   not in `a2a/task-projection.ts`.
+4. The tests are in a new file, `a2a-archived-tasks.test.ts`, not in
+   `a2a-task-projection.test.ts` (that file stays S6's; the rig is
+   duplicated, small).
+5. Known, not fixed: a cut unit's `endedAt` is `archivedAt` on an archived
+   read but `now` on the reopen (`restore` passes `now`, unchanged here). So
+   a task cut by the archive changes its status timestamp once, when its
+   context is reopened. The state is the same (CANCELED).
+6. No schema change, so no `protocol.d/` note and `protocol.json` is untouched.
+   `changelog.d/a2a.added.md` is unchanged: S7 is invisible until S9's route,
+   and S10 rewrites it.
+
+**Failure modes covered** (`a2a-archived-tasks.test.ts`, 9 tests):
+- archive, then a quick reopen from the RESIDENT record → the earlier task
+  stays in `workUnits()` and in `GetTask`;
+- archived `GetTask`/`ListTasks`, resident and from disk on a fresh host
+  (indexed as `serve` does at start) → a task identical to the pre-archive
+  one; the session stays archived (`get` undefined, `archivedCount` 1); every
+  store file is byte-identical before and after (a writer's transient
+  `.lock` aside);
+- archived mid-turn (waiting on an ask) → CANCELED, identical resident and
+  from disk;
+- owner scoping (another caller reads nothing); an archived session deleted →
+  `TaskNotFound`;
+- a future `schemaVersion` and a garbage log → `TaskNotFound` twice, one audit
+  line, the entry kept, the files untouched;
+- index + LRU (pure, fake source):
+  - built once per caller; hits come from the LRU; eviction past 8;
+  - another caller's prefix reads nothing;
+  - a changed session is re-read; a gone one leaves both caches;
+  - an artifact-less list reads the index only, and results are stripped from
+    it;
+  - unreadable: reported once per version, also on the LRU-miss path.
+
+**Mutations** (`.tentacle/tmp/a2a/mutate-s7.ts`, run on the archived and
+projection test files; each restored, `restored true` ×17):
+
+| Mutation | Fails |
+|---|---|
+| R1 `toRecord` drops the captured units (S4 drift 5) | 2 |
+| R2 the archive capture carries no units | 2 |
+| R3 the read REOPENS the session (`restore`) | 1 |
+| R4 a failed read drops and blocks the entry (as a reopen) | 1 |
+| R5 the store never reads archived (`load`) | 2 |
+| R6 the store never lists archived | 1 |
+| R7 the index ignores the version | 1 |
+| R8 no LRU (every hit re-reads) | 3 |
+| R9 a gone session stays indexed | 1 (survived at first: lookups never iterate it, memory only; `cachedCount` assertion added) |
+| R9b a gone session stays in the LRU | 1 |
+| R10 the index keeps results | 1 |
+| R11 the list reads full units always | 1 |
+| R12 unreadable reported on every read | 1 (survived at first: the index already avoids re-reads; the LRU-miss case was added) |
+| R13 cut units closed at the read's clock | 1 |
+| R14 no index (scan every session on each lookup) | 4 |
+| M6 `contextIdOf` ignores the caller | 3 (archived + live) |
+
+**Gate (narrow):**
+- `a2a-archived-tasks`, `a2a-task-projection`, `a2a-executor`, `work-units`
+  and `persistence` → 163 pass / 0 fail.
+- The 14 existing files that exercise archive/reopen/close (daemon, client,
+  cli) → 337 pass / 0 fail.
+- `biome check` on the 7 changed or new files is clean.
+- `tsc` scoped to them (`.tentacle/tmp/a2a/tsconfig.s7.json`) is clean.
 - Full `bun run check` NOT run (the orchestrator's script runs it).
 
 ## Review
