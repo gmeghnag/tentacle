@@ -34,6 +34,7 @@ import {
   AGENT_MESSAGE_TOOL_NAME,
   AGENT_NOTIFY_TOOL_NAME,
   AGENT_STATUS_TOOL_NAME,
+  BROWSER_TOOL_NAMES,
   CHART_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   DIAGRAM_TOOL_NAME,
@@ -494,6 +495,10 @@ export function createSubagentRunner(deps: SubagentDeps): {
         // A workflow run is the SESSION's (one per session): a child (a step's
         // own child included) may neither start nor stop one.
         tool.name === WORKFLOW_TOOL_NAME ||
+        // The browser tabs are the SESSION's (one lease, one tab group, its own
+        // masking key) and a child has no image store for a shot
+        // (docs/feat/browser-inspect.md B4): the parent browses and delegates text.
+        BROWSER_TOOL_NAMES.includes(tool.name) ||
         tool.name === AGENT_CONTROL_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
         tool.name === AGENT_MESSAGE_TOOL_NAME ||

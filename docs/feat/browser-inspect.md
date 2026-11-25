@@ -450,7 +450,72 @@ and here the effect is acting AS the user on the web. v1: **pod sessions get no
 
 ## Execution
 
-*(empty — an eval carries no code; filled only if promoted)*
+### B1 — `@tentacle/browser` pure core (as built)
+
+- **Load-bearing check**: the assumption (native-messaging port + `chrome.debugger` on the default profile) was proven by spike B0 (results above); B1 is pure and does not depend on it further. Holds.
+- New package `packages/browser` (`package.json`, `tsconfig.json`; no `bunfig.toml` — root preload applies; `bun install` linked `zod`, `bun.lock` gained the workspace entry). Root `tsconfig.json` path added; AGENTS §6 package count 15 → 16.
+- `src/link-schema.ts` (`BROWSER_LINK_VERSION`, hub ops/events zod, element facts, byte caps), `redact.ts` (`createRedactor`: headers, cookie / set-cookie, URL params, JSON / form / multipart bodies; per-redactor random HMAC tag), `classify.ts` (`classifyAction`, `registrableDomain`, EN+IT lexicon, `hard` for payment / password-card typing), `ownership.ts` (lease, tab check, handover flag), `net-ring.ts` (message + byte cap, cursor paging, `dropped`).
+- Tests: `packages/browser/test/{redact,classify,ownership-ring}.test.ts` — 35 pass. `tsc -p packages/browser` and `biome check packages/browser` clean. No protocol change (no `protocol.d` note, `protocol.json` untouched). Fragment `changelog.d/browser-inspect.added.md`.
+- **Drift**: red-before-green was not shown stepwise (new modules, tests written after the source in the same slice); non-vacuity is shown by mutation instead. The ring's `get(seq)` and ownership `reclaimed` flag were added beyond the plan's sketch. Deferred to later slices: redaction of DOM password fields (extension, B3) and the `redactText` net (wired by the tools, B4).
+- **Mutations** (each made the suite fail, then reverted): name rule off → 8 fail; HMAC tag ignores value → 1 fail; ring `dropped` forced 0 → 1 fail; ownership cross-session check off → 1 fail; classifier cross-domain check off → 2 fail; payment `hard` forced false → 1 fail.
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+### B2 — host + hub + install CLI (as built)
+
+- **Load-bearing check**: B0 proved native-messaging port + `chrome.debugger`; B2 depends only on F3/F4 framing + F5 (host = hub), both exercised by the tests below. Holds. (There is no separate "B2" section in the plan: scope taken from the Slices table + Design §1/§6 + failure-mode rows.)
+- `packages/browser/src/native-frame.ts` (new, pure): `encodeNative` (native-endian u32 + JSON, refuses > 1 MB) / `NativeDecoder` (64 MiB cap, dead after a violation). `link-schema.ts`: `BROWSER_HOST_NAME`, `BROWSER_HOST_SUBCOMMAND`, `BROWSER_EXTENSION_ID`. `ownership.ts`: `holds()`.
+- `packages/cli/src/browser-host.ts`: `createHub` (hub.sock 0600 in a 0700 dir, stale-socket probe, live hub → second host exits, ownership checked HERE before forwarding, `release` sent to Chrome when a daemon's connection closes, `handover` / `tab_closed` events applied, Chrome EOF → pending ops fail with «Chrome closed during the action…» + `chrome_closed` broadcast + socket removed, per-op timeout, version-skew hello → «run `tentacle browser install`»), `originAllowed`, `browserHostMain`.
+- `browser-link.ts`: `createBrowserLink` per daemon (lazy dial, re-dial, `status()`, `onEvent`). Wired in `serve.ts` (disposed with the daemon, like `mcpHub`) and `worker.ts` (lazy, nothing calls it until B4).
+- `browser-install.ts` + `flags.ts` (`browser` mode) + `main.ts`: `tentacle browser install|status|uninstall`; wrapper `<configDir>/browser/host` (pins `TENTACLE_CONFIG_DIR`, since Chrome starts the host with no tentacle env), manifest at F1's per-user path with the single pinned origin; `status` reports host/link state and an org-managed Chrome. `main.ts` dispatches `__browser-host` before config.
+- Tests: `packages/browser/test/native-frame.test.ts` (6), `packages/cli/test/browser-host.test.ts` (13, fake extension over the framing, real unix sockets), `browser-install.test.ts` (6, incl. the `main` dispatch pin). Lint on changed files clean; root `tsc --noEmit` clean. No wire/protocol change (hub protocol is `BROWSER_LINK_VERSION`, not `PROTOCOL_VERSION`). Fragment appended to `changelog.d/browser-inspect.added.md`.
+- **Drift**: (1) red-before-green not shown stepwise (new modules; non-vacuity by mutation below). (2) `BROWSER_EXTENSION_ID` is a placeholder (`a`×32): the key-pinned id exists only once B3 ships the extension — B3 must replace it. (3) `install` writes only the host side; copying the unpacked extension is B3. (4) `browser_open` launching Chrome (Q6) is a tool concern → B4. (5) The hub forwards the daemon's op fields as-is plus an `id`; the extension-side reply shape `{id, ok, result|error}` and events are defined by this slice and are B3's contract.
+- **Mutations** (each failed the suite, then reverted; baseline 25 pass): session-lease check off → 1 fail; tab-ownership check off → 2 fail; stale-socket live probe off → 1 fail; Chrome-closed message changed → 1 fail; origin check loosened → 2 fail; `releaseDaemon` dropped → 1 fail; 1 MB host cap off → 2 fail; wildcard origin in manifest → 2 fail.
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+### B3 — extension (as built)
+
+- **Load-bearing check**: B0 proved port + `chrome.debugger` on the real profile and the worker-start / cross-site-detach behaviours; B3 encodes them (port opened in `onStartup`/`onInstalled`/top level + reconnect with backoff; `target_closed` re-attaches while traced; `canceled_by_user` is a revocation). Holds. (No separate B3 plan section: scope from the Slices table + «Debugger only when needed» + §5/§6.)
+- New app `apps/browser-extension/` (plain ESM/JS, no build step; own `package.json`): `manifest.json` (MV3, pinned `key`, `<all_urls>`, `debugger`, `webRequest`), `src/background.js` (wiring only), `src/ops.js` (all logic over an injected `chrome`/`send`: claim/release/tabs/open/read/click/type/net; one tab group per session `tentacle · <title>`; refuses non-http(s) pages incl. `chrome-extension://`; debugger on demand, 10-min idle detach re-armed by use; headers-tier `webRequest` feed; handover event), `src/page.js` (content script: outline with stable `eN` refs, text/html read with DOM password values stripped, click/type with `probe` = facts without acting, password echo as dots), `src/popup.{html,js}` (handover).
+- `packages/browser/src/link-schema.ts`: `BROWSER_EXTENSION_ID` replaced by the id its manifest key yields (pinned by `apps/browser-extension/test/manifest.test.ts`); additive: op `net {start|stop}`, event `net {tab, tier, entry}`, `probe?` on `click`/`type`. `packages/cli/src/browser-install.ts`: install copies the extension to `<configDir>/browser/extension` and prints the «Load unpacked» step; uninstall removes it.
+- Tests: `apps/browser-extension/test/{ops,page,manifest}.test.ts` (16, fake chrome / fake DOM), two in `browser-install.test.ts`; 78 pass across the touched files. Biome clean on touched files. No `PROTOCOL_VERSION` change (hub protocol only). Fragment appended to `changelog.d/browser-inspect.added.md`.
+- **Drift**: (1) red-before-green not stepwise; non-vacuity by mutation. (2) JS, not TS, with no own `tsc -p` (no build step; a typed build is debt). (3) `browser_console` hooks (main-world script) deferred to B4 where the tool lands; the `net` events are sent but the hub does not yet ring them (B4). (4) Headers tier sends only url/method/status/type from `webRequest.onCompleted`. (5) Real-Chrome smoke (`TENTACLE_BROWSER_TESTS=1`) not written; unverified in a live Chrome — verify by `tentacle browser install`, loading the folder, then `tentacle browser status`.
+- **Mutations** (each failed the suite, then reverted; baseline 16 pass): `isTouchable` accepts any string → 2 fail; `canceled_by_user` branch disabled → 1 fail; password echo disabled → 1 fail; html password-strip disabled → 1 fail. (The probe-acts and idle-re-arm mutations were not run.)
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+### B4 — read-only tools (as built)
+
+- **Load-bearing check** (no separate B4 plan section: scope from the Slices table + «Debugger only when needed» + §2–§4, §8). B4 stands on: the tools are ordinary daemon-side `Tool`s that only the laptop's own hosts register. Re-verified: `buildAgent`'s `workloadShell` option is passed only by `workerAgentFactory` / `createServeAgent` and never by `tunnelledAgent` / `podSessionHost` (`cli/src/serve.ts`, `cli/src/worker.ts`); `ToolContext.images` is absent in a pod and a sub-agent (`core/src/tool.ts:183-188`); B0 proved the Chrome side. Holds. Repro (capability missing, before B4): `rg -n 'browser_' packages/tools/src` → no hit.
+- **Hub** (`cli/src/browser-host.ts`): `net` events are now kept in a per-tab `NetRing` (2 000 / 8 MiB) and answered by `net list|get` after the ownership check; they are **never broadcast**. B2/B3 broadcast every traced request (URLs, cookies) to EVERY connected daemon, a D1 leak. Red first: the new test failed on `not.toContain("SECRET")` before the fix. A closed tab's ring is dropped; Chrome closing clears them all.
+- **Schema** (`browser/src/link-schema.ts`): `net` action gains `list|get` (+ `cursor`, `limit` ≤ 500, `seq`); new ops `body`, `shot {maxEdge}`, `console {cursor}`; `NetEvent` split out of `HubEvent` (so a daemon never parses page data from the event stream); `NO_EXTENSION_MESSAGE` moved here (re-exported by `browser-host.ts`). `BROWSER_LINK_VERSION` unchanged: additive, nothing shipped yet.
+- **Extension**: `ops.js` `shot` (active tab → `captureVisibleTab`, no infobar; background tab → debugger on demand, `Page.captureScreenshot`, idle detach armed), downscaled to `maxEdge` in the worker (`scaleJpeg`, OffscreenCanvas); `console` (injects `src/console-hook.js` in the MAIN world, only into owned tabs, at `open` and on every `loading` of an owned tab); `body` (needs full tracing; binary → size + sha256, text ≤ 1 MiB). `page.js` keeps a console ring (300 entries, text 2 000 / stack 4 000 chars) fed by the hook (a string `CustomEvent`, never `postMessage`) or, until the hook speaks, by its own `error` / `unhandledrejection` listeners. `background.js` wires `tabs.onUpdated`.
+- **Pure core** (`browser/src/net-view.ts`): `netLine` (one masked line per request / response / failure / WS open, frame, close / SSE; bookkeeping events hidden from `list`), `netMatches` (url regex, method, status, type incl. ws/sse), `maskEntry` (headers by name, `associatedCookies` / `blockedCookies` name kept and value masked, `postData` / WS / SSE through the body rules, secret-named keys at any depth, every URL), `originOf`, `untrustedFrame`.
+- **Tools** (`tools/src/browser.ts`): `createBrowserToolset({backend, textNet})` → `browser_tabs/open/read/shot/net/console`, ONE per daemon (`browserToolsetOf(link)` in `cli/src/browser-link.ts`) so the per-session redactor key (HMAC tags) and leases survive an agent rebuild. Each op claims the session's lease first, re-claims once on «does not hold the browser» (hub restarted). Page text: redactor URL masking, then the injected `redactText` net, then a 64 KiB cap; every page-derived result starts with `untrustedFrame`. `browser_shot` stores the picture in `ctx.images` (the `image_view` store) and returns it as the result's `image`; low → ≤ 768 px, high → the model's `imageFileMaxEdge`; refused without a store or over `maxImageBytes`. Q6: `browser_open` alone launches Chrome (`open -g -a "Google Chrome"`, darwin) and polls ≤ 10 s. Per-tab concurrency keys `browser:tab:<id>`.
+- **Switch / wiring**: `browser` group in `core/src/tool-groups.ts` + `browserDefaultOff` (every member off unless `tools.enabled` names the group or the tool); `buildAgent({browser})` registers the six with this model's image limits and seeds them into `disabledTools` (`cli/src/wiring.ts`). Passed by the worker (`workerSessionHost` → `workerAgentFactory`) and `serve` (`reloadedHost` → `createServeAgent`); never by a pod. Sub-agents excluded by name (`agent/src/subagent.ts`).
+- **Tests**: `browser/test/net-view.test.ts` (7), `tools/test/browser.test.ts` (17), `cli/test/browser-tools-wiring.test.ts` (5), `agent/test/subagent-browser.test.ts` (1), +2 hub ring tests in `cli/test/browser-host.test.ts`, +6 ops / +2 page tests in `apps/browser-extension/test/`. All touched browser test files: 118 pass. `biome check` on the touched files: clean. `tsc -p packages/tools` and `-p packages/browser`: clean; the `-p packages/cli` / `-p packages/agent` runs show no error in a touched file (only the known per-package TUI resolution noise). No `@tentacle/protocol` change: no `protocol.d` note, `protocol.json` untouched. Fragment `changelog.d/browser-inspect-tools.added.md` (one bullet per file, so a new slug as B2/B3 did).
+- **Drift**: (1) The per-session switch is the existing `browser` tool group in the `capabilities` entry's `disabledTools` (`/tools`, `session/set_capability`, already on TUI and phone), not a new `capabilities.browser{enabled}` field (Files #3): it reuses the seam and needs no protocol change; `secrets` / `actions` belong to B5. (2) The tab group title is `tentacle · <first 8 chars of the session uid>`: `ToolContext` carries no session title (B6 may retitle). (3) `browser_open` is `permission: "ask"` on EVERY open, through the ordinary ask path (so the session's auto-accept answers it) until B5's `browser_action` kind + structural cross-domain gate. (4) The untrusted-content statement is in every tool's description, not a separate system-prompt line. (5) `redactText` is injected by the host (`@tentacle/tools` cannot import `@tentacle/agent`). (6) `page.js` passively buffers uncaught errors on every http(s) page in memory (nothing leaves unless an owned tab's `console` op reads it); the console.* hook itself runs only in owned tabs. (7) A session's lease ends only when its daemon's link closes, not at `session/close` (debt). (8) One stored variant per shot (downscaled by the extension), no separate `low`. (9) `bun.lock` also gained the `apps/browser-extension` workspace entry B3 left out. (10) Red-before-green was shown for the hub leak; the new modules' tests were written alongside, non-vacuity by mutation below. (11) Process slip: the root `tsc --noEmit` was run once early (it caught a scope error in `serve.ts`), against the budget's "no whole-repo typecheck".
+- **Mutations** (each reverted; failures counted on the named file): hub broadcasts `net` frames → 1 fail (the first version of that test watched the parsed link events and stayed GREEN under this mutation; rewritten to read another daemon's raw socket bytes, now red); hub keeps a closed tab's ring → 1 fail; no URL masking in the tools' `clean()` → 4 fail; injected text net ignored → 2 fail (tools + wiring); response body not masked → 1 fail; lease not re-claimed → 1 fail; `browserDefaultOff` not seeded → 2 fail; sub-agent filter dropped → 1 fail; shot of the active tab through the debugger → 1 fail; console hook on any tab → 1 fail; cookie value unmasked in `maskEntry` → 1 fail.
+- **Unverified**: nothing ran in a real Chrome (`TENTACLE_BROWSER_TESTS=1` smoke not written): `captureVisibleTab`, the OffscreenCanvas downscale, the MAIN-world hook on live pages and `Network.getResponseBody`. Verify: `tentacle browser install`, load the unpacked extension, `/tools browser on`, then open a page, `browser_shot`, `browser_net start` + `list`/`get`, `browser_console`.
+
+*— claude-opus-5-5, 2026-11-25*
+
+### Fix round 1 (Code review B1–B4: 2 HIGH, 2 MEDIUM)
+
+- **#1 HIGH `postDataEntries` — FIXED.** `packages/browser/src/net-view.ts` `postDataEntries()`: each `bytes` is base64-decoded; UTF-8 text → `{text: <masked body>}`, binary → `{binary: "<n> B"}`, undecodable → a length stub. The raw base64 is never echoed. The body is masked with the request's own `Content-Type` (from the sibling `headers`, `contentTypeOf`). With no Content-Type, an `a=1&b=2` body is sniffed as a form (`FORM`), so its FIRST field is masked too. This also applies to `postData`, which previously relied on the agent's `redactText` net for the first field.
+- **#2 HIGH raw header text — FIXED.** `headersText()`: `headersText` / `requestHeadersText` are masked line by line. Each `Name: value` line goes through `Redactor.headers`, so `Cookie` / `Set-Cookie` / `Authorization` / secret-named headers are masked with names and attributes kept. The request or status line goes through the URL rules.
+- **Red first:** 3 new tests in `packages/browser/test/net-view.test.ts` (3 fail → 10 pass). The reviewer's `review-mask.ts` repro now shows no `SESSIONvalue42`, `hunter2xyz` or base64 body. Cosmetic, not a leak: the agent's `redactText` net then rewrites `password=‹masked…` as `password=[REDACTED] field…`.
+- **#3 MEDIUM off-by-default on a `serve` reload — FIXED.** `packages/core/src/tool-groups.ts` `isDefaultOffTool` (the browser group). `packages/daemon/src/hosted-session.ts` reload branch: the restored record is UNIONED with the default-off tools the restarted host built off (off wins, like a resume's seed). A record cannot tell "turned on by the person" from "written before B4" (all-on logs nothing), and off is the safe reading of both. **Behaviour change (stated):** a person who turned the browser on with `/tools` in a `serve` session must turn it on again after a daemon restart, unless `tools.enabled.browser` is set in the config. Q4 is unchanged for every other tool.
+- **Red first:** a new test in `packages/daemon/test/tool-toggles.test.ts`. It covers a record with an entry, a record with none, a host with the browser on, and a non-browser config-off tool that must stay on; it also checks that the model is not offered the tool. 1 fail → 10 pass.
+- **#4 MEDIUM handover / take-back — FIXED.** `apps/browser-extension/src/ops.js`: `handover` is now async. It puts the tab into the session's group first (`group()`) and refuses the handover when Chrome will not group the tab. `onTabUpdated` treats a `groupId` change that takes an owned tab out of its session's group (ungrouped `-1`, or another group) as the user taking it back. Through `takeBack` (shared with `onTabRemoved`) the tab is dropped, the debugger detached, tracing stopped and `tab_closed` sent, so the hub drops ownership and the ring. `background.js` replies to the popup asynchronously (`return true`).
+- **Red first:** 2 new tests in `apps/browser-extension/test/ops.test.ts` (2 fail → 17 pass). The drag-out test also pins "headers feed only for owned tabs", which closes the reviewer's 0-fail mutation gap.
+- **Mutations (each reverted; failures on the named file):** `headersText` branch off → 1 fail; `postDataEntries` branch off → 1 fail; form sniff off → 2 fail; binary entry echoed raw → 1 fail; reload union dropped → 1 fail; union of EVERY built-off tool (not only default-off) → 3 fail (the Q4 tests hold the scope); handover does not group → 1 fail; drag-out ignored → 1 fail; `onWebRequest` owned-tab filter removed → 1 fail (was 0 in the review).
+- **Gate (narrow):** the touched/covering files (`apps/browser-extension/test/`, `packages/browser/test/`, `tool-toggles`, `browser-host`, `browser-tools-wiring`, `tools/browser`) → 124 pass / 0 fail. `biome check` on the 8 changed files is clean. `tsc -p packages/browser`, `-p packages/core` and `-p packages/daemon` show no error in a touched file. The full gate is left to the orchestrator's script.
+- **Drift / not done:** the hub still answers a taken-back tab with «not one of this session's tabs (or the user closed it)»; the wording does not mention a drag-out. The reviewer's low note (e), hub/extension divergence after a daemon `release`, is untouched. Neither of these was rated HIGH or MEDIUM.
+- **Unverified:** that real Chrome fires `tabs.onUpdated` with `changeInfo.groupId` on a drag-out. That is the documented API, but it has not been run here. To verify, drag a session tab out of its group, then `browser_read` it → refused.
+
+*— claude-opus-5-5, 2026-11-25*
 
 ## Review
 
@@ -588,3 +653,95 @@ The infobar cannot be hidden from an extension (Chrome's own guard; the `--silen
 Chrome facts by fetching the cited primary pages on 2026-11-24 (the CDP
 `Network.pdl` from the protocol repo because the rendered site is JS-only);
 everything not found on those pages is listed U1–U7 instead of assumed.
+
+## Review
+
+### Code review B1–B4 (fresh context, `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (2 HIGH, 2 MEDIUM).
+
+**Gate (re-run):** the 13 touched test files → 118 pass / 0 fail; `bun run lint` clean
+(2464 files); `bun run typecheck` clean. Full `bun run test` was not re-run (scope: touched files).
+
+**Findings**
+
+1. **HIGH — masking leak: `postDataEntries` (base64 request body).** `packages/browser/src/net-view.ts:160-192`
+   `maskEntry` masks `postData` but walks `request.postDataEntries[].bytes` as a plain
+   string (`r.url`), so a login POST traced in full shows the body base64-encoded, which
+   the model can decode. Repro (`.tentacle/tmp/browser-inspect/review-mask.ts`, with
+   the real `redactText` net): `postDataEntries:[{bytes: b64("user=bob&password=hunter2xyz")}]`
+   → output `"bytes": "dXNlcj1ib2ImcGFzc3dvcmQ9aHVudGVyMnh5eg=="`, unmasked. This text reaches the
+   `ToolResult` and the session log (D2).
+2. **HIGH — masking leak: raw header text.** Same function: `headersText` (`Network.responseReceivedExtraInfo`,
+   present on HTTP/1.x) and `response.requestHeadersText` / `response.headersText` are strings
+   routed to `r.url`, so `Set-Cookie: sid=…` and `Cookie: sid=…` lines pass through unmasked, and
+   `redactText` does not catch them either (same repro, cases A and A2). The plan's U5 row says the raw `Cookie` /
+   `Set-Cookie` lines must be masked. Fix shape: mask `*HeadersText` line by line through `headers()`, and
+   decode → `body()` → re-encode (or drop) `postDataEntries`. Add a table test for each.
+3. **MEDIUM — "off by default" does not hold on a `serve` restart.** `packages/daemon/src/hosted-session.ts:1243-1245`:
+   on reload the record wins and a missing entry means everything on. `browserDefaultOff` is applied only in
+   `buildAgent` (`packages/cli/src/wiring.ts:1060-1068`). So every `serve` session persisted before B4, and every
+   one whose caps record predates B4, comes back after a daemon restart with the six `browser_*`
+   tools ON. That includes `browser_open`, which in an auto-accept session is answered without a prompt
+   (Execution drift 3, against owner Q3). The `serve` daemon is the owner's daily driver. The wiring test covers only a
+   CREATE. Needs a reload-path seed (union the default-off set for tools the record never mentioned) plus a test.
+4. **MEDIUM — the user cannot see or revoke a handed-over tab (D1 / §6).** In `apps/browser-extension/src/ops.js:339-344`,
+   `handover` never calls `group()`, so the tab does not join the session's group. Nothing handles a
+   tab dragged out of the group either: `onTabUpdated` (`:139`) looks only at `status`, and no `groupId` change
+   leads to `tab_closed` or `dropTab`. As a result, the only way to take back a tab is to close it, which contradicts §6
+   («dragging a tab out of the group = taking it back») and `ownership.ts:87`'s own comment.
+
+**Premise table (spot-checked):** a pod never passes `browser` (`serve.ts` `createServeAgent` only,
+`tunnelledAgent` untouched): TRUE. Sub-agents filtered (`subagent.ts:443`): TRUE. `net` events are no longer
+broadcast (`browser-host.ts:167-177`): TRUE. The hub checks ownership before forwarding and before answering
+from the ring (`:212-244`): TRUE. Seed union on resume is off-wins (`hosted-session.ts:3842`): TRUE, but the reload
+path (#3) is not a seed.
+
+**Mutations (each reverted; `git status` empty afterwards):** `browserDefaultOff` forced to `[]` → 2 fail
+(wiring), so that test holds. `onWebRequest`'s `tabSession.has` filter removed → **0 fail**: the
+"headers feed only for owned tabs" property (D1) is untested (a gap, not a bug today).
+
+**Attacks tried:** (a) can a page spoof `handover` through `runtime.onMessage`? No: `page.js` never sends
+to the background, and pages cannot reach `onMessage` without `externally_connectable`. (b) Can a cross-session
+read go through the hub? No: `check()` covers lease plus tab owner, and `list`/`get` are behind it. (c) Masking
+corpus → #1 and #2 found; the urlencoded first field is caught by the `redactText` net. (d) Pod or sub-agent exposure:
+none found. (e) Hub/extension divergence after a daemon `release`: the hub keeps tab→session, while the
+extension drops `tabSession`. A re-claimed session can still read its old tabs, but they are labelled «(ended)» and get no
+headers feed or console hook. Low impact, worth a note.
+
+**Executor behaviour:** the Execution notes are honest and detailed (drifts listed, unverified Chrome
+paths stated, a vacuous test found and rewritten). The masking table tests cover the documented shapes
+but not CDP's real alternates (`postDataEntries`, `*HeadersText`), which is the blind spot behind #1/#2.
+Same model family as the B4 executor (Opus); only the context is fresh.
+
+*— claude-opus-5-5, 2026-11-25*
+
+### Round 2
+
+**Verdict: PASS.** Reviewed `48bdcd92` (the round-1 fixes) plus `27262c07` (a gate-only fixture change in
+`cli/test/fixtures/worker-exit-net.ts`).
+
+- **#1 `postDataEntries`, FIXED.** `net-view.ts:242`, `postDataEntries()`, decodes the base64 and masks it as a body
+  using the request's own Content-Type. It never echoes the raw bytes. My round-1 repro now prints
+  `"text": "user=bob&password=‹…masked…›"`.
+- **#2 `*HeadersText`, FIXED.** `net-view.ts:228`, `headersText()`, puts each line through the header rules. The repro shows
+  `Set-Cookie: sid=‹masked cookie sid …›` and `Cookie: sid=‹masked …›`. An urlencoded `postData` with no
+  Content-Type is now sniffed as a form, so its first field is masked too.
+- **#3 `serve` reload, FIXED.** `hosted-session.ts:1247-1253`: a default-off browser tool that this host built OFF stays off on
+  reload (off wins).
+- **#4 handover / drag-out, FIXED.** `ops.js` `handover` now calls `group()` first and refuses if grouping fails.
+  `onTabUpdated` treats a `groupId` change on an owned tab as the user taking it back (`takeBack` → `tab_closed`, the debugger is
+  detached, the feed stops). Race check: `group()` sets `tabSession` only after Chrome has grouped the tab, so the
+  `onUpdated` event from our own grouping cannot take the tab back. A handover that moves a tab out of another session's group sends
+  `tab_closed` and then `handover`, and the hub ends with the new owner.
+- **Mutations (all reverted, `git status` empty):** I made five, one per fix, and ran them together: no `postDataEntries` branch,
+  `requestHeadersText` dropped, `builtOff` emptied, the `groupId` takeback disabled, handover without `group()`.
+  The result was 5 fail, each on exactly its own new test.
+- **Gate:** 15 touched files → 136 pass / 0 fail; `bun run lint` clean (2464 files); `bun run typecheck` clean.
+- **Nits (non-blocking):** (a) If a user turns the browser ON with `/tools` in a `serve` session, it goes back OFF after a daemon
+  restart. This is fail-safe and visible in the snapshot; the remedy is `tools.enabled.browser`. (b) `ops.js` `tabs()` now reports
+  `handedOver: false` for handed-over tabs, because handover puts the tab into `s.tabs`. Only the model-facing label is affected; the hub's
+  `Ownership.handed` is unchanged, so B5's first-action ask is not. (c) `redactText` partly eats the mask string
+  (`password=[REDACTED] field password · …›`). This is cosmetic and the value stays masked.
+
+*— claude-opus-5-5, 2026-11-25*

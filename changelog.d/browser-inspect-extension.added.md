@@ -1,0 +1,1 @@
+- **Browser extension (not yet driven by the model).** `tentacle browser install` now also unpacks a small Chrome extension (key-pinned id) that groups the tabs it opens per session, reads/outlines pages, clicks and types on request, and attaches the debugger only on demand (detached after 10 idle minutes). Nothing uses it until the browser tools land.

@@ -73,6 +73,7 @@ import {
   type PermissionRequester,
   type ScheduleLimits,
   type ToolImageStore,
+  browserDefaultOff,
 } from "@tentacle/core";
 import { BackgroundJobs, HostExecution, killGroup, trackGroup, untrackGroup } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
@@ -557,6 +558,15 @@ export interface BuildAgentOptions {
   readonly workloadShell?:
     | { readonly backend: import("@tentacle/tools").WorkloadShellBackend }
     | undefined;
+  /**
+   * Offer the read-only `browser_*` tools (docs/feat/browser-inspect.md B4): the
+   * daemon's ONE toolset over its hub link. Set ONLY where the daemon runs on
+   * the user's own Mac — the worker and `serve` — never a pod daemon (Q1: a pod
+   * is not trusted to act as the user on the web) and never a child agent
+   * (`subagent.ts`'s filter). The group starts OFF in the session's switches
+   * unless `tools.enabled` names it (`browserDefaultOff`).
+   */
+  readonly browser?: import("@tentacle/tools").BrowserToolset | undefined;
 }
 
 /**
@@ -1133,6 +1143,26 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (containers !== undefined) {
     tools.register(createWorkloadShellTool(containers));
   }
+  // The browser tools (docs/feat/browser-inspect.md B4): registered with this
+  // model's image limits (a shot is stored like `image_view`'s pictures), and
+  // switched off below unless the user's `tools.enabled` turns them on.
+  if (options.browser !== undefined) {
+    for (const tool of options.browser.tools({
+      maxEdge: imageFileMaxEdge(config.provider),
+      maxImageBytes: imageLimitValues.maxBytes,
+    })) {
+      tools.register(tool);
+    }
+  }
+  const disabledTools =
+    options.browser !== undefined
+      ? [
+          ...new Set([
+            ...(config.disabledTools ?? []),
+            ...browserDefaultOff(config.toolsEnabled ?? {}),
+          ]),
+        ].sort()
+      : (config.disabledTools ?? []);
   // Scheduled wakes (docs/feat/cron-tool.md D1/D2): only with the host's link —
   // `serve` and the worker. Never a pod daemon (no link), never a child agent
   // (`subagent.ts`'s filter). The link is looked up per call: the table is the
@@ -1180,7 +1210,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     },
     // `tools.enabled` seeds the state in ONE place, for every runtime (plain and
     // one-shot included): a hosted session starts from it (docs/feat/tool-toggles.md D4).
-    capabilities: { ...NO_CAPABILITIES, disabledTools: config.disabledTools ?? [] },
+    capabilities: { ...NO_CAPABILITIES, disabledTools },
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):

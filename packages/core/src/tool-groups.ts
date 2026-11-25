@@ -24,7 +24,39 @@ export const TOOL_GROUPS: Readonly<Record<string, readonly string[]>> = {
   context_reset: ["context_reset"],
   move_session: ["move_session"],
   workload_shell: ["workload_shell"],
+  // The user's real Chrome (docs/feat/browser-inspect.md B4): OFF per session
+  // unless `tools.enabled.browser` says otherwise (`browserDefaultOff`).
+  browser: [
+    "browser_tabs",
+    "browser_open",
+    "browser_read",
+    "browser_shot",
+    "browser_net",
+    "browser_console",
+  ],
 };
+
+/**
+ * The browser tools a session starts with switched OFF (B4 «off by default»):
+ * every member unless `tools.enabled` names it or the `browser` group. Applied
+ * only where the tools are registered (the worker, `serve`).
+ */
+export function browserDefaultOff(enabled: Readonly<Record<string, boolean>>): string[] {
+  if (Object.hasOwn(enabled, "browser")) {
+    return [];
+  }
+  return (TOOL_GROUPS.browser ?? []).filter((tool) => !Object.hasOwn(enabled, tool));
+}
+
+/**
+ * A tool that is OFF unless the host's config turns it on (the browser group).
+ * A `serve` reload keeps such a tool off when its host built it off: a record
+ * cannot tell "the person turned it on" from "written before it existed"
+ * (all-on logs nothing), and the safe reading of either is off.
+ */
+export function isDefaultOffTool(name: string): boolean {
+  return (TOOL_GROUPS.browser ?? []).includes(name);
+}
 
 /** Built-ins in no group. */
 const UNGROUPED_TOOLS: readonly string[] = [
