@@ -241,7 +241,7 @@ describe("setFailTarget", () => {
       goto: "",
       max: 1,
     });
-    expect(draftProblems(out.draft)).toEqual([
+    expect(draftProblems(out.draft, {})).toEqual([
       "steps[1].on_fail: needs a step id — {goto: <step>, max: 1..10}",
     ]);
   });
