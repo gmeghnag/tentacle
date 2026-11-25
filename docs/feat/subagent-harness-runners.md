@@ -601,6 +601,16 @@ from the phone. 7. Usage visibility. 8. Where it runs. 9. Remote
 - Lint: `biome check` on the 3 new files clean. Full gate: left to the orchestrator. No protocol/schema change (no `protocol.json`, no `protocol.d/` note).
 - Changelog fragment `changelog.d/subagent-harness-runners.added.md` written (reword at shr-5 when the feature is reachable).
 
+*— claude-sonnet-5-5, 2026-11-25 — slice shr-2-process only*
+
+- **Load-bearing check:** NOT re-run live (this sandbox denies spawning `claude`, as in shr-1). The run-time defence the plan names (`init.tools` / `init.permissionMode` / version floor) is implemented in the transport and pinned by fake tests; the live re-run stays for the orchestrator.
+- Added `packages/agent/src/harness/process.ts` (`createProcessAdapter`, `HarnessProc`, `Spawner`, `DEFAULT_SPAWNER`, `ProcessGroups`, `HarnessFailure`) and `packages/agent/test/harness-process.test.ts` (13 tests green; 36 with shr-1's file).
+- Behaviour: spawn detached via the injected `Spawner`; `groups.track` after spawn, `untrack` on exit; prompt sent as `codec.userMessage`; stdout → capped lines (8 MiB; an over-long line is dropped + counted, never held whole); 4 KiB stderr tail; the event stream closes at `end` (process reaped separately: stdin EOF → TERM → KILL after 2 s graces); no `end` → `HarnessFailure{exitCode, stderrTail, partial, droppedLines, unparsableLines}`; cancelled with no `end` → synthesized `end{cancelled}`. Cancel ladder: interrupt line → wait ≤ 5 s for `end` → stdin EOF → SIGTERM group → 2 s → SIGKILL group. Init check: a bypass `permissionMode`, a tool in `init.tools` outside the allowed set, or a version below the floor SIGKILLs the group before any event is delivered. `probe` runs `<command> --version` (not installed / too old / unreadable → `ok:false`).
+- **Drift:** (1) NO new `@tentacle/exec` dependency in `@tentacle/agent`: the sandbox could not link the workspace package; `trackGroup`/`untrackGroup`/`killGroup` are injected as `ProcessGroups`, and the shr-4 wiring (cli already depends on exec) supplies them. (2) `process.ts` imports `versionAtLeast` from `claude-code.ts`. (3) Optional `defaultTools` dep so the init tool check also covers the no-`spec.tools` case. (4) Not exported from `packages/agent/src/index.ts` (no consumer until shr-4). (5) No second changelog fragment: shr-1's `changelog.d/subagent-harness-runners.added.md` covers the task.
+- **Mutations (each → red, then reverted):** SIGTERM before the interrupt → 3 ladder tests fail; line cap removed (per-line and partial-buffer guard) → over-long-line test fails; `track` removed → group-lifecycle test fails; init check disabled → 2 init tests fail.
+- Lint: `biome check` on the 2 files clean; `tsc --noEmit` whole repo clean. Full gate left to the orchestrator. No protocol/schema change.
+- Unverified: `DEFAULT_SPAWNER` against a real `claude` (only a real `sleep`: pgid = pid); stdout drain with a real lingering grandchild.
+
 ## Review
 
 *— pending*
