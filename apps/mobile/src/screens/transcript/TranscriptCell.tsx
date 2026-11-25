@@ -31,6 +31,12 @@ export interface CellActions {
   readonly onSpeak: (row: { readonly key: string; readonly text: string }) => void;
   readonly onArtifact: (meta: ArtifactMeta) => void;
   readonly onRowError: (fields: ReturnType<typeof rowErrorFields>) => void;
+  /**
+   * A long-press on a message (docs/feat/mobile-copy-text.md D2): the screen
+   * decides what the row copies and owns the clipboard and the pill, so a
+   * skipped cell still reaches the latest handler (this handle's rule).
+   */
+  readonly onCopy: (row: Row) => void;
 }
 
 export interface TranscriptCellProps extends CellData<Row, Palette, ThumbnailState> {
@@ -57,6 +63,7 @@ function TranscriptCellView(props: TranscriptCellProps): JSX.Element {
           onLink={(href) => actions.current.onLink(href)}
           thumbnails={props.thumbnails}
           chartLabels={props.chartLabels}
+          onCopy={(row) => actions.current.onCopy(row)}
           {...(props.look === undefined ? {} : { look: props.look })}
           step={{
             cell: props.cell,

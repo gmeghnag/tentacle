@@ -113,6 +113,14 @@ export interface RowProps {
    * drawn on its own): it draws as a block of its own WITH its own level's glyph.
    */
   readonly look?: NoticeLook;
+  /**
+   * A long-press on a message row copies it (docs/feat/mobile-copy-text.md D2):
+   * the screen decides WHAT (the pure `messageCopy`) and owns the clipboard, the
+   * haptic and the pill — this only reports the row. Absent: no long-press at
+   * all (a test, or a surface that must not offer one such as the Activity
+   * sheet).
+   */
+  readonly onCopy?: (row: Row) => void;
 }
 
 /**
@@ -169,6 +177,47 @@ function Shell({
     </View>
   );
 }
+
+/**
+ * The long-press that copies a MESSAGE (docs/feat/mobile-copy-text.md D2): a
+ * dumb Pressable around a message row's content, present only when the screen
+ * passed `onCopy`. No `onPress` — a tap must keep doing what it did (open a
+ * link, play a photo, speak) — and `delayLongPress` 400 ms, the iOS feel.
+ *
+ * A VoiceOver user cannot long-press a bubble, so the same copy is an
+ * accessibility ACTION on the row (the rotor's Actions menu).
+ */
+function CopyPress({
+  row,
+  onCopy,
+  children,
+}: {
+  readonly row: Row;
+  readonly onCopy: ((row: Row) => void) | undefined;
+  readonly children: ReactNode;
+}): JSX.Element {
+  if (onCopy === undefined) {
+    return <>{children}</>;
+  }
+  return (
+    <Pressable
+      testID={`row-${row.key}-copy`}
+      onLongPress={() => onCopy(row)}
+      delayLongPress={LONG_PRESS_MS}
+      accessibilityActions={[{ name: "copy", label: "Copy message" }]}
+      onAccessibilityAction={(event) => {
+        if (event.nativeEvent.actionName === "copy") {
+          onCopy(row);
+        }
+      }}
+    >
+      {children}
+    </Pressable>
+  );
+}
+
+/** How long a press must last to copy (docs/feat/mobile-copy-text.md D2). */
+const LONG_PRESS_MS = 400;
 
 /** The parsed markdown for a text row (cached by key + version in markdown.ts's caller). */
 function parsedOf(text: string): Parsed {
@@ -268,7 +317,7 @@ export function PhotoTiles({
   );
 }
 
-function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Element {
+function UserRowView({ row, palette, onLink, thumbnails, onCopy }: RowProps): JSX.Element {
   /**
    * Item 4 / mockup F (feat/mobile-thinking-images S4): the photos are their OWN
    * element ABOVE the bubble, and a photo-only message has no bubble at all
@@ -299,6 +348,7 @@ function UserRowView({ row, palette, onLink, thumbnails }: RowProps): JSX.Elemen
         broken={broken}
         onOpen={setViewing}
         onBroken={(uri) => setBroken((had) => (had.includes(uri) ? had : [...had, uri]))}
+        {...(onCopy === undefined ? {} : { onCopy })}
       />
       <MediaViewer
         items={viewing.pages}
@@ -324,6 +374,7 @@ export function UserRowBody({
   broken,
   onOpen,
   onBroken,
+  onCopy,
 }: {
   readonly user: Extract<Row, { kind: "user" }>;
   readonly palette: Palette;
@@ -333,6 +384,8 @@ export function UserRowBody({
   /** A tile with pixels was tapped: the viewer's pages, opened on it. */
   readonly onOpen: (pages: ViewerPages) => void;
   readonly onBroken: (uri: string) => void;
+  /** The long-press that copies this message (`RowProps.onCopy`); absent = none. */
+  readonly onCopy?: (row: Row) => void;
 }): JSX.Element {
   const parts = userRowParts(user);
   const block = photoBlock(user.images);
@@ -355,7 +408,7 @@ export function UserRowBody({
     label: shown[position]?.label ?? imageRowText(tile.ref),
   }));
   return (
-    <>
+    <CopyPress row={user} onCopy={onCopy}>
       {!parts.photos ? null : (
         // Right-aligned, capped at the block's own 200 pt: the photos are a
         // message element of their own, never the bubble's content.
@@ -402,32 +455,34 @@ export function UserRowBody({
           )}
         </View>
       )}
-    </>
+    </CopyPress>
   );
 }
 
-function AssistantRowView({ row, palette, onLink, speak, onSpeak }: RowProps): JSX.Element {
+function AssistantRowView({ row, palette, onLink, speak, onSpeak, onCopy }: RowProps): JSX.Element {
   const assistant = row as Extract<Row, { kind: "assistant" }>;
   const speaking = speak === "speaking";
   return (
     <Shell row={assistant}>
-      <Markdown parsed={parsedOf(assistant.text)} palette={palette} onLink={onLink} />
-      {speak === undefined || onSpeak === undefined ? null : (
-        <Pressable
-          testID={speaking ? "assistant-speak-stop" : "assistant-speak"}
-          accessibilityRole="button"
-          accessibilityLabel={speaking ? "Stop reading" : "Read aloud"}
-          onPress={() => onSpeak({ key: assistant.key, text: assistant.text })}
-          hitSlop={8}
-          style={styles.speak}
-        >
-          <Icon
-            name={speaking ? "stop.circle" : "speaker.wave.2"}
-            color={speaking ? palette.accent : palette.sec}
-            size={16}
-          />
-        </Pressable>
-      )}
+      <CopyPress row={assistant} onCopy={onCopy}>
+        <Markdown parsed={parsedOf(assistant.text)} palette={palette} onLink={onLink} />
+        {speak === undefined || onSpeak === undefined ? null : (
+          <Pressable
+            testID={speaking ? "assistant-speak-stop" : "assistant-speak"}
+            accessibilityRole="button"
+            accessibilityLabel={speaking ? "Stop reading" : "Read aloud"}
+            onPress={() => onSpeak({ key: assistant.key, text: assistant.text })}
+            hitSlop={8}
+            style={styles.speak}
+          >
+            <Icon
+              name={speaking ? "stop.circle" : "speaker.wave.2"}
+              color={speaking ? palette.accent : palette.sec}
+              size={16}
+            />
+          </Pressable>
+        )}
+      </CopyPress>
     </Shell>
   );
 }

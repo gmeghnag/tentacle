@@ -291,7 +291,134 @@ Orchestrator note: this plan was written on 2026-11-21 against an older main (br
 
 ## Execution
 
-*— (executor), (date)*
+*— deepseek, 2026-11-25*
+
+### Load-bearing assumption — re-checked on this branch: holds
+
+Re-ran the doc's probe here (output kept in `.tentacle/tmp/mobile-copy-text/probe.out`):
+
+- `react-native@0.88.0`; `RCTParagraphComponentView.mm:344` adds the native
+  long-press recogniser when the paragraph is selectable, `:386` lets the menu do
+  only `action == @selector(copy:)`, and `:399` copies
+  `NSMakeRange(0, attributedText.length)` — one paragraph, whole.
+- `RCTUITextView.mm`: **0 hits** for `selectable` ⇒ a read-only multiline
+  `TextInput` keeps UIKit's real partial selection. That is what the sheet leans on.
+- Before this change `TranscriptRow.tsx` had **0 hits** for `onLongPress` /
+  `Clipboard` — no message row copied anything.
+
+So the design is used as written: no `selectable` on transcript rows, long-press =
+the whole message, "a part" = the `TextInput` sheet.
+
+### As built, per slice
+
+1. **`src/message-copy.ts` (new)** — `messageText` (`:33`), the `MessageCopy`
+   union with its third arm `failed` (`:54`), `messageCopy` (`:64`), `COPY_FAILED`
+   (`:78`), `COPY_FLASH_MS = 2500` (`:81`), `copyFlashShown` half-open (`:88`).
+2. **`src/session-menu.ts:31-37`** — `said()` now reads `messageText`; the fired
+   rule stays out of it (no clock), so "Copy conversation" is byte-identical.
+3. **`src/ui/CopyFlash.tsx` (new)** — render only: absolutely positioned pill,
+   `testID="copy-flash"`, glyph + word; `testID="copy-flash-select"` exists **only**
+   in the `copy` state (the other two have no text behind them to select).
+4. **`src/screens/SelectTextSheet.tsx` (new)** — `ui/Sheet` + read-only
+   `multiline` `TextInput` (`:50-55`, `editable={false}`) and "Copy all"
+   (`:65-72`), wired to the same `copyText` path.
+5. **`src/screens/transcript/TranscriptRow.tsx`** — `RowProps.onCopy` (`:117-123`);
+   `CopyPress` (`:182-215`: `delayLongPress={LONG_PRESS_MS}`
+   (`:219`, 400 ms), `testID={`row-${row.key}-copy`}` (`:204`), no `onPress`, the
+   VoiceOver `copy` action (`:207-212`), absent handler ⇒ the row draws exactly as
+   before); the wrapper sits in `UserRowBody` (`:368-459`) and around
+   `AssistantRowView`'s Markdown + speak (`:462-489`).
+6. **`src/screens/transcript/TranscriptCell.tsx:39,66`** — `CellActions.onCopy`
+   and the pass-through.
+7. **`src/screens/SessionScreen.tsx`** — `copyFlash` / `selectText` state
+   (`:810-814`), the one `copyText` path (haptic → `setStringAsync` → pill, and
+   `COPY_FAILED` on reject: `:820-831`), `copyMessage` = the pure rule plus the
+   haptic-only `empty` branch (`:836-847`), one timer (`:849-855`), the reset on
+   session change (`:858-862`, with a `biome-ignore lint/correctness/useExhaustiveDependencies`
+   because the body resets state rather than reading it), `onCopy` into the cells
+   (`:867`), `<CopyFlash>` ahead of `<OutboxRows` gated by `copyFlashShown`
+   (`:2246-2252`), `<SelectTextSheet text={yields ? null : selectText}>` (`:2372-2376`).
+8. **`test/message-copy.test.ts` (new, 15 tests)** T1, T2 (prompt / restart /
+   photo-only / pdf-only / blank), T3, T4 (tool, thought, notice, compaction), T5
+   parity with the header's last-answer copy, T6 Mac vs serve row, T7 the window.
+   **`test/message-copy-render.test.ts` (new, 11 tests)** R1–R4 on the
+   `artifact-card-render.test.ts` element-walk pattern. 26 tests, green.
+9. **`apps/mobile/e2e/flows/06-session-open.yaml:35-50`** — the session the flow
+   already opens has a transcript (`row-r1` prompt, `row-r2` answer): assert
+   `row-r2-copy`, `longPressOn` it, `extendedWaitUntil` `copy-flash` (5 s), then
+   assert `copy-flash-select`. Ids only, because RN's new architecture exposes no
+   text to XCUITest (P9, `docs/feat/mobile-session-view.md:170`), and
+   `copy-flash-select`'s presence is what pins the state to "Copied" — the two
+   other pills offer no action.
+10. **`changelog.d/mobile-copy-text.added.md`** — the one bullet from the header.
+
+### Drift from Implementation (two, both justified)
+
+- **D2: the wrapper moved from "`UserRowView`'s bubble" into `UserRowBody`**
+  (`TranscriptRow.tsx:368`). `UserRowView` (`:320`) calls hooks, so a
+  hook-free element walker (the render-test pattern this repo uses) cannot draw
+  it; `UserRowBody` is the same bubble body, already exported for that reason.
+  What the person sees is unchanged: the whole bubble — photo tiles included —
+  is one long-press target, and the photo *viewer* stays outside it, so tapping a
+  tile still opens it (S4).
+- **D1: `messageText` also handles a `context` row with `event === "reset"`**
+  (`message-copy.ts:39-43`). The plan says "restart prompt → its text", but since
+  `mobile-reset-in-timeline` the restart prompt is a `ContextRow`, not a `user`
+  row — without this, T2's restart case would be a silent `null`. A `context`
+  COMPACT row still returns `null` (a step over a conversation that is gone), which
+  is T4's compaction case.
+
+### Honest scope of R1 (as the plan worded it)
+
+R1's "tool / notice / fired get no wrapper" is proven in-render only for the
+**notice** row: tool, thought and fired-wake rows draw `StepNode`, which calls
+hooks, so an element walker cannot render them at all. Their absence is pinned
+instead by the pure rule — T3 (a fired wake → `null`) and T4 (tool, thought,
+notice, compaction → `null`) — plus the wrapper's own "absent handler ⇒ no
+wrapper" (`CopyPress:199`) that R2 checks. The two halves together are the claim;
+neither alone would be.
+
+### Mutation checks (each turned a named test red, then reverted)
+
+| Mutation | Red |
+|---|---|
+| M1 `messageText` for `assistant` returns rendered text (strips `**`) | T1 |
+| M2 drop the fired check in `messageCopy` | T3 |
+| M3 blank text → `{kind:"copy", text:""}` | T2 (3 assertions) |
+| M4 `<=` instead of `<` in `copyFlashShown` | T7 |
+| M5 remove `editable={false}` from the sheet's `TextInput` | R4 |
+| M6 `said()` keeps its own `row.text` (no `trimEnd`) | T5 |
+
+All reverted; the two new files are green again (26 pass, 0 fail).
+
+### What was run
+
+- `bun test` from `apps/mobile` on the two new files → 26 pass / 0 fail, 57
+  `expect()`s; and together with `session-menu`, `artifact-card-render`,
+  `notice-row`, `context-row-render`, `chart-view`, `schedule-view`,
+  `transcript-cell`, `step-rail-render`, `step-thought-marker`, `tool-step-view`
+  → 138 tests, all green.
+- `npx tsc -p . --noEmit` in `apps/mobile` → clean.
+- `bunx biome check` on the 9 changed TS files → clean.
+- The full `bun run check` (whole-repo typecheck + lint + parallel suite) is the
+  orchestrator's merge gate — **not run here**.
+
+### Not verified (no device and no simulator in this environment)
+
+- **S1–S11** (`### Simulator check` above), i.e. everything that needs a phone:
+  haptics, the pill's placement/fade, the native long-press vs. `selectable` race
+  (S2), the sheet's real double-tap/drag-handle selection (S6), a ~200 KB row
+  (S7), VoiceOver (S11) and Dynamic Type XXL (S11). The design's iOS claims were
+  verified from the native source, not on hardware.
+- **The Maestro flow** (`06-session-open.yaml:35-50`): the local gate cannot run
+  it (no iOS simulator here). `longPressOn` is the idiom already in
+  `26-drawer.yaml`, `33-hub.yaml` and `44-workflow-editor.yaml`, and both ids it
+  asserts exist in the source (`CopyFlash.tsx`: `copy-flash`,
+  `copy-flash-select`), but the flow itself is red-or-green only on the gate's
+  simulator.
+- **`apps/mobile/node_modules` in this worktree is a local symlink** to the main
+  checkout's (so `react-native` and `@tentacle/*` resolve). It existed only to run
+  the tests and is **not** committed.
 
 ## Review
 
