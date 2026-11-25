@@ -217,6 +217,11 @@ live row and the `interrupted` note speaks instead.
      client is attached, the next fire wakes). A gap not yet elapsed → re-arm at the gap's
      end. Any other failed condition → disarm (the key stays un-woken; a later publish that
      changes nothing does not re-arm it — one timer per key, armed only when the key APPEARS).
+     **Order (fixed in S5):** disarm on «key gone or changed / attached / already woke / wake
+     off / closed» → busy re-arms → `lastEndBad` disarms → gap. Busy MUST come before
+     `lastEndBad`: that flag is written only when a turn ends (`hosted-session.ts:3962`), so
+     during a turn it still describes the turn before, and disarming on it would drop a wake
+     the running turn's good end allows.
   4. *The note.* Due → `session.noteWorkflowWait(runId, text)` → `pendingExits`
      `{ kind: "workflow_wait", runId, text }` (counts in `pendingExitCount`, like an end note)
      → `kickWake()` → `maybeWake` → a daemon-minted `wake-<uuid>` turn (`hosted-session.ts:4029-4066`).
@@ -625,6 +630,74 @@ restored: true
   continues the turn for one more round, as a sub-agent exit does). Same code path
   (`flushMidTurn`); a test would need the run to end while the model streams.
 - Changelog: S1's fragment already covers this (no new one).
+
+**Gate:** only the files above; full typecheck/lint/test left to the orchestrator's script. No
+schema change, so `protocol.json` is untouched.
+
+### S5 — the pure user wait + wake gate — DONE
+
+*— claude-sonnet-5-5, 2026-11-25 (branch at `8c73ca98`, uncommitted)*
+
+**Load-bearing check, re-run first: holds.** The repro prints `request-only seam (voice line):
+in request: true | in history: false` and `autoApproves(workflow_approve, own=true): false`.
+S5's own premise, by `rg` + read: the driver publishes an ask as a `needs-approval` (hash,
+approve step) or `waiting` step/run state (`stepRequester`), a slot wait as `waiting` +
+`live: "slot"`; `daemonWakeGate` is the gate `maybeWake` uses.
+
+**As built:**
+- `packages/agent/src/workflow-status-line.ts` — `workflowUserWait(rows)` (first live run
+  waiting for the user: `{ runId, key, line }`, `line` = that run's status line) and
+  `workflowWaitWakeDue(state)` → `wake | disarm | rearm | rearm_at{at}`, built on core's
+  `daemonWakeGate`. The line and the wait share one live-step choice and one slot predicate,
+  so they cannot disagree. Already exported (S1's `export *`). Nothing calls them yet (S6).
+- T7 in `packages/agent/test/workflow-status-line.test.ts`.
+
+**Red** (stubs returning `undefined` / `disarm`): `37 pass, 13 fail`, the fails on assertions;
+the new passes are the "no wait" / "disarm" cases. **Green:** `50 pass, 0 fail`; with
+`status-line-request` and `workflow-hosted`: `84 pass, 0 fail`. `bunx biome check` on the 2
+files: clean. `tsc --noEmit -p packages/agent`: clean.
+
+**Mutations** (`.tentacle/tmp/workflow-run-awareness/mutate-s5.ts`, source restored). First run:
+`unclipped wait line: SURVIVED` (the long-label case was under 200 chars, so it never clipped);
+the test now uses a 32-char run id and asserts the `…`. Second run:
+
+```
+slot wait counted as a user wait: killed (49 pass, 1 fail)
+running step counted as a user wait: killed (48 pass, 2 fail)
+no hash-approval wait: killed (49 pass, 1 fail)
+any live run with no live step waits: killed (48 pass, 2 fail)
+key without the attempt: killed (45 pass, 5 fail)
+key without the round: killed (45 pass, 5 fail)
+ended rows can wait: killed (48 pass, 2 fail)
+unclipped wait line: killed (49 pass, 1 fail)
+no same-key check: killed (46 pass, 4 fail)
+no attach check: killed (48 pass, 2 fail)
+no woken-key check: killed (48 pass, 2 fail)
+no enabled check: killed (48 pass, 2 fail)
+no closed check: killed (49 pass, 1 fail)
+busy ignored: killed (47 pass, 3 fail)
+bad end ignored: killed (48 pass, 2 fail)
+bad end checked before busy: killed (49 pass, 1 fail)
+no gap: killed (49 pass, 1 fail)
+gap boundary off by one: killed (49 pass, 1 fail)
+rearm at now + gap: killed (49 pass, 1 fail)
+restored: true
+```
+
+**Drift:**
+- Design (b) point 3 did not order the conditions; the order is now written there. «Busy →
+  re-arm» wins over a stale `lastEndBad` only; every other failed condition still disarms,
+  busy or not.
+- T7's red is on assertions (stubs), not «module missing»: the module exists since S1.
+- Changelog: S1's fragment already covers this (no new one).
+
+**Note for S6** (read, not run):
+- `line` is the plain status line. Point 4's `(since HH:MM)` sits inside it, after «waits for
+  the user» and, for the hash approval, before «to approve the run» or at the end: S6 has to
+  pick and build that.
+- The key names a step execution, not one ask: a second ask in the same attempt and round has
+  the same key, so after a wake it never wakes again (point 3, «a key wakes once»).
+- `woke` and `lastWakeAt` are inputs: the woken-key set and the per-run time are S6's state.
 
 **Gate:** only the files above; full typecheck/lint/test left to the orchestrator's script. No
 schema change, so `protocol.json` is untouched.
