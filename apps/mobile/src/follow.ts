@@ -184,6 +184,12 @@ export interface Landing {
    * rather than appearing at the TOP. Never set on a re-attach.
    */
   readonly awaiting: boolean;
+  /**
+   * The bound was hit on a hidden opening landing and its scroll was issued, but the
+   * list was NOT shown with it (fix/mobile-open-long-session-2): the reveal waits
+   * for the quiet timer, the one moment the native view has painted that scroll.
+   */
+  readonly capped?: boolean;
 }
 
 /** A fresh screen's landing: hidden until the end stops moving. */
@@ -322,6 +328,18 @@ export function landingStep(
     return {
       state: bounded ? landingDone : { ...state, last: m.content, rounds, awaiting: false },
       step: bounded ? { state: initialFollow, scrollTo: endOffset(m), animated: false } : null,
+    };
+  }
+  if (state.settling && m.content !== state.last && rounds >= LANDING_ROUNDS && !state.capped) {
+    // The bound hit on the very measurement that GREW the content
+    // (fix/mobile-open-long-session-2): the scroll goes out, but the list is NOT
+    // shown in the same tick — the native view then painted the previous end (the
+    // QA's long session resting a turn short, turn 57 under the composer). It
+    // stays hidden for the quiet timer (`landingReveal`), which shows it after
+    // the scroll has landed; a further growth meanwhile takes the tail below.
+    return {
+      state: { ...state, last: m.content, rounds, capped: true },
+      step: { state: initialFollow, scrollTo: endOffset(m), animated: false },
     };
   }
   if (state.settling && m.content !== state.last && rounds >= LANDING_ROUNDS) {
