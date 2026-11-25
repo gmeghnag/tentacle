@@ -545,6 +545,37 @@ errors, all `permission-router.ts` (F1's link, pre-existing; none in a touched
 file). `bunx biome check` on the 7 changed TS files → clean. Full gate: the
 orchestrator's script.
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-25*
+
+Round 2 left one finding open: **F1 (HIGH), the symlink is still committed.** It is
+**PARTIAL again, and only the orchestrator can close it.** Findings 2 and 3 are
+fixed; this round did not touch them.
+
+- Red evidence (on this tree, `7039d526`): `git ls-files -s apps/mobile/node_modules`
+  → `120000 336b3c831090c9acdb1396fd46089ae73ec2a901 0	apps/mobile/node_modules`.
+- The fix is an index operation, not a code change: `git rm --cached
+  apps/mobile/node_modules`. This executor session's permission layer **refused** it
+  ("requires approval"; the session is non-interactive). No workaround was tried: no
+  hand-editing of `.git/index`, and no other plumbing.
+- `.gitignore` already says `node_modules` (no trailing slash, round 1), so once the
+  link is untracked, `git add -A` will not re-add it.
+- No production code or test changed this round, so there was nothing to
+  mutation-check.
+
+**Orchestrator, run these from this worktree:**
+`git rm --cached apps/mobile/node_modules && git commit -m "fix(mobile-copy-text): untrack apps/mobile/node_modules symlink"`
+Then check:
+1. `git ls-files apps/mobile/node_modules` prints nothing. This is green.
+2. `git check-ignore apps/mobile/node_modules` prints the path.
+3. `bun run typecheck` loses the 10 TS2339 errors in `permission-router.ts`.
+   Unverified: those errors come from `tsc -p apps/mobile` resolving through the
+   link into the main checkout. After the untrack the link is still on disk, though
+   untracked, so typecheck in THIS worktree may still go through it. The red should
+   clear on the merged `main`, where `apps/mobile/node_modules` is a real
+   directory.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-25* (fresh context; plan author is the same model family — shared blind spots possible)
