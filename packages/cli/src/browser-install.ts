@@ -6,21 +6,14 @@
  * pinned extension origin (no wildcards). The unpacked extension itself ships
  * with B3; this slice is the host side.
  */
-import {
-  chmodSync,
-  cpSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   BROWSER_EXTENSION_ID,
   BROWSER_HOST_NAME,
   BROWSER_HOST_SUBCOMMAND,
 } from "@tentacle/browser";
+import { EXTENSION_ASSETS } from "./browser-extension-assets.ts";
 import { browserDir, hubSocketPath, probeSocket } from "./browser-host.ts";
 
 export interface BrowserInstallEnv {
@@ -29,8 +22,12 @@ export interface BrowserInstallEnv {
   /** The command that runs THIS tentacle (`selfCommand()`): absolute paths. */
   readonly self: readonly string[];
   readonly extensionId?: string;
-  /** The unpacked extension source (tests inject); default: the repo's apps/browser-extension. */
-  readonly extensionSrc?: string;
+  /**
+   * The unpacked extension's files (tests inject); default: the table EMBEDDED
+   * in this build (`EXTENSION_ASSETS`), so install works from the compiled
+   * binary too (B5).
+   */
+  readonly extensionAssets?: Readonly<Record<string, string>>;
   /** The org-managed-Chrome policy file (tests inject). */
   readonly managedPolicyPath?: string;
 }
@@ -51,7 +48,6 @@ export function manifestPath(home: string): string {
 export function extensionDir(configDir: string): string {
   return join(browserDir(configDir), "extension");
 }
-const DEFAULT_EXTENSION_SRC = new URL("../../../apps/browser-extension", import.meta.url).pathname;
 
 export function wrapperPath(configDir: string): string {
   return join(browserDir(configDir), "host");
@@ -91,18 +87,21 @@ export function installBrowser(env: BrowserInstallEnv): string[] {
   mkdirSync(join(manifest, ".."), { recursive: true });
   writeFileSync(manifest, manifestJson(wrapper, id));
   const out = [`host wrapper: ${wrapper}`, `host manifest: ${manifest}`];
-  const src = env.extensionSrc ?? DEFAULT_EXTENSION_SRC;
-  if (existsSync(join(src, "manifest.json"))) {
-    const dest = extensionDir(env.configDir);
-    rmSync(dest, { recursive: true, force: true });
-    cpSync(src, dest, { recursive: true, filter: (f) => !f.endsWith("package.json") });
-    out.push(
-      `extension: ${dest}`,
-      "next: chrome://extensions → Developer mode → Load unpacked → choose that folder",
-    );
-  } else {
-    out.push("extension: sources not found next to this build — run install from a repo checkout");
+  const assets = env.extensionAssets ?? EXTENSION_ASSETS;
+  const dest = extensionDir(env.configDir);
+  rmSync(dest, { recursive: true, force: true });
+  for (const [rel, content] of Object.entries(assets)) {
+    const file = join(dest, rel);
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, content);
   }
+  out.push(
+    `extension: ${dest}`,
+    "next: chrome://extensions → Developer mode → Load unpacked → choose that folder",
+    // The id is pinned by the manifest's key: a copy loaded from another
+    // folder is the SAME extension, and keeps working with this host.
+    "(already loaded from another folder? it keeps working: same key, same id)",
+  );
   return out;
 }
 

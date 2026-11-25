@@ -37,4 +37,12 @@
 // session/workflow and workflow/list methods, the display update workflows, the
 // snapshot field workflows, and three non-critical log entry types workflow_start,
 // workflow_step and workflow_end.
-export const PROTOCOL_VERSION = 25 as const;
+// 26: Browser actions (docs/feat/browser-inspect.md B5): a permission_request whose
+// tool is browser_action (a click, typing or navigation in the user's real Chrome
+// that the browser tools classified as consequential: a form submit, destructive or
+// payment wording, a new domain, a password field, the first action on a tab the
+// user handed over) must NEVER be auto-accepted, and it is offered allow-once or
+// deny only. An older client's auto-accept would answer it allow-once, acting as
+// the user on the web with no human, so a mixed pair must fail at initialize
+// instead.
+export const PROTOCOL_VERSION = 26 as const;
