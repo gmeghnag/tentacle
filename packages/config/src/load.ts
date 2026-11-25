@@ -198,6 +198,8 @@ export interface TentacleConfig {
   readonly subagentModels: Readonly<Record<string, string>>;
   /** `subagents.selectableModels` (`[]` = off). */
   readonly selectableModels: readonly string[];
+  /** `harnesses.<name>`, defaults filled (docs/feat/subagent-harness-runners.md); laptop/serve only. */
+  readonly harnesses: ResolvedConfig["harnesses"];
   /**
    * Over the model tunnel: what the laptop published (docs/feat/models-map-pod.md).
    * Never loaded from a file: only the laptop's carried settings set it.
@@ -913,6 +915,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     models,
     subagentModels: resolved.subagentModels,
     selectableModels: resolved.selectableModels,
+    harnesses: resolved.harnesses,
     maxInlineOutputChars: resolved.maxInlineOutputChars,
     toolOutputRetentionDays: resolved.toolOutputRetentionDays,
     redactSecrets: resolved.redactSecrets,

@@ -37,6 +37,15 @@ export const CLAUDE_DEFAULT_TOOLS: readonly string[] = [
   "Bash",
 ];
 
+/** The `claude` sub-agent type's description (D3: a ROLE; the model is per call). */
+export const CLAUDE_TYPE_DESCRIPTION =
+  "Claude Code, another agent harness, on this machine: works on a snapshot of the current tree (uncommitted changes included) in its own git worktree, and may edit files and run commands there. Its changes stay on a branch it reports — never merged. Use it when the user asks for Claude or Claude Code.";
+
+/** How the `model` argument works for the `claude` type (D3, Owner A1). */
+export function claudeModelNote(defaultModel: string | undefined): string {
+  return `for \`claude\`: an alias — \`opus\`, \`sonnet\`, \`haiku\` (Claude Code resolves each to the latest) — or a full model id; omit it for the default (\`harnesses.claude-code.model\`, now ${defaultModel ?? "Claude Code's own"})`;
+}
+
 /** 1–64 chars, no leading `-`: one argv element, never a flag (D3). */
 const MODEL_SHAPE = /^[A-Za-z0-9._:[\]][A-Za-z0-9._:[\]-]{0,63}$/;
 const TOOL_SHAPE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;

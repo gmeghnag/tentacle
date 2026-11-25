@@ -386,6 +386,11 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | -1 | Resets allowed per user message (-1 = unlimited). |
 | `detach.keepAwake` | — | true | Hold a macOS sleep assertion while a turn of a detached run runs. |
 | `engine` | `TENTACLE_ENGINE` | "kubernetes" | Default engine of `run`/`attach`: kubernetes, docker or podman; `--engine` wins, unknown refused. |
+| `harnesses.*.adapter` | — | — | Which adapter the instance runs on; defaults to the instance name. |
+| `harnesses.*.command` | — | — | The executable to run (unset: `claude`). |
+| `harnesses.*.enabled` | — | — | Offer this harness's sub-agent type (default on). |
+| `harnesses.*.idleMinutes` | — | — | Hang guard: a run with no output for this many minutes is stopped (unset: 15). |
+| `harnesses.*.model` | — | — | The model when an `agent_task` call names none (unset: `opus`). |
 | `hooks` | — | — | Shell commands run on agent events, with a JSON input on stdin. |
 | `liveActivity.enabled` | — | `true` | Whether a `serve` starts a live activity at all. |
 | `liveActivity.startAfterSeconds` | — | `20` | How long a turn must run before a phone that is not watching it gets an activity. |

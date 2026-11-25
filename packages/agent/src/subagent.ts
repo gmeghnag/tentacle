@@ -46,6 +46,7 @@ import {
 } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { SessionCapabilities } from "./capabilities.ts";
+import { type HarnessDeps, runHarnessChild } from "./harness/child.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
 import { classOf, isReadClass } from "./round-plan.ts";
@@ -69,6 +70,15 @@ export interface AgentType {
    * (docs/feat/context-awareness.md). Absent → the parent's window.
    */
   readonly contextWindow?: number;
+  /**
+   * Run by another agent harness, not a tentacle `Agent`
+   * (docs/feat/subagent-harness-runners.md D3): the instance name in
+   * `SubagentDeps.harness` and the mode (`write` = a local process in its own
+   * worktree; `remote` = the only mode a remote adapter accepts, D10). `prompt`,
+   * `tools` and `model` are then unused: the call's `model` goes to the harness
+   * verbatim.
+   */
+  readonly harness?: { readonly adapter: string; readonly mode: "write" | "remote" };
 }
 
 const GENERAL_PROMPT = `You are an autonomous sub-agent working on a focused task delegated by a
@@ -360,6 +370,12 @@ export interface SubagentDeps {
    * from every child too, from its next model call. Absent → everything on.
    */
   readonly capabilities?: () => SessionCapabilities;
+  /**
+   * The harness instances a `harness` type runs on
+   * (docs/feat/subagent-harness-runners.md D3). Given by the wiring only when
+   * NOT tunnelled (D5): a pod has no harness type and no harness deps.
+   */
+  readonly harness?: HarnessDeps;
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -380,6 +396,19 @@ export function createSubagentRunner(deps: SubagentDeps): {
     const type = types.find((t) => t.name === opts.type) ?? types[0];
     if (!type) {
       return { report: "no sub-agent type available", toolUses: 0, stopReason: "end_turn" };
+    }
+    // Another harness runs this child (D3): the call's `model` is that harness's
+    // own string (never a `models` name), shown as given; everything after the
+    // start event is the harness child's.
+    if (type.harness !== undefined) {
+      const model = opts.model ?? deps.harness?.instances.get(type.harness.adapter)?.model;
+      controls?.onEvent?.({
+        kind: "subagent_start",
+        agentType: type.name,
+        description: opts.description,
+        ...(model !== undefined ? { model } : {}),
+      });
+      return runHarnessChild(type, opts, controls, deps.harness);
     }
     // The child's model, picked BEFORE its start event so the row carries it: a
     // `models` name for the wire (never an id, AGENTS §7) and the resolved ID
@@ -666,6 +695,11 @@ export function createSubagentRunner(deps: SubagentDeps): {
 
   const readOnlyType = (name: string): boolean => {
     const type = types.find((t) => t.name === name);
+    // A harness child changes nothing on this machine only when it is remote
+    // (D3); a `write` run edits its worktree and runs commands.
+    if (type?.harness !== undefined) {
+      return type.harness.mode === "remote";
+    }
     if (!type || type.tools === "all") {
       return false;
     }
