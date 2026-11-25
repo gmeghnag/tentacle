@@ -466,5 +466,65 @@ All three reverted; the suites are green again afterwards.
 
 ## Review
 
-*— (fresh-context reviewer — Opus, per `TODO.md:14`; not the implementing model,
-AGENTS §10)*
+*— claude-opus-5-5, 2026-11-26* (fresh context, a different model family from the
+executor — sonnet)
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM).
+
+**Findings**
+
+1. **MEDIUM — a reminder that runs out of the step's remaining budget stops the whole
+   run as `budget`, and the cause (no verdict) disappears.**
+   `workflow-driver.ts:1861` maps a reminder that ends `max_token_budget` with no
+   verdict to `budget_hit`. The reminder's cap is the REMAINDER
+   (`workflow-verdict.ts:103`), and its first round alone costs a full prompt (system
+   prompt + tools + a tail of up to 4 000 chars). `Agent` ends any round that goes over
+   the cap as `max_token_budget`, even a prose-only one (`agent.ts:1941`). Example:
+   `tokens: 20000`, run 1 spends 16 000 and ends with the text «PASS»; the reminder gets
+   4 000 tokens, answers in prose again, and its first round goes over. The step gets
+   `budget_hit`, and the machine stops the run `budget` (`workflow-machine.ts:328-337`).
+   No `retry` and no `on_fail` run, and the reason is «step X reached its token budget».
+   Before this change the same step failed `no verdict` and the `retry`/`on_fail` rules
+   ran. So, under a tight remainder, the fix makes its own target case worse: a model that
+   ignores the tool is exactly the kind that ignores the reminder too. Failure mode 4
+   accepted this case but missed that a small remainder makes it likely, and that it
+   hides the reason that (b) is meant to show. Fix: without a verdict, a reminder
+   that ends `max_token_budget` should end `fail: NO_VERDICT_REASON`, because the first
+   run did not hit the cap. Or skip the reminder below a minimum remaining budget. Add a
+   driver test for it (second call returns `max_token_budget` with no verdict → step
+   `error`, `retry`/`on_fail` still apply).
+
+**Gate (run here):** touched files (driver, verdict, 2 mobile, TUI frames) **138 pass /
+0 fail**; `bun run lint` clean (2554 files); `bun run typecheck` clean (root + mobile +
+relay). I did not run the full parallel suite.
+
+**Mutation non-vacuity** (each reverted; `cmp` against the backups shows the files are
+byte-identical, and `git status` is clean):
+A. drop the `aborted` gate → 5 fail (incl. `cancelled run is not reminded`, `stop`/`dispose`/`timeout`).
+B. reminder cap = full `tokens` → 2 fail (`REMAINING budget`, pure gate).
+C. the step keeps the reminder's report → 1 fail (`tokens land in ONE sum`, report assertion).
+The executor's mutations i–iii cover the remaining properties.
+
+**Attacks tried**
+- Single broker (§7): the reminder reuses the ONE `stepRequester`. Its asks carry the
+  same `agentId` and `budget.wait`. Holds.
+- Abort or timeout between the two runs: `signal` combines `run.controller` and
+  `stepAbort` (an ask timeout aborts `stepAbort`). The gate sees it, and `cutEvent`
+  still overrides the result. Holds (mutation A).
+- `live` is left set: «asking for a verdict» is cleared by the step-end `setStep`
+  (`live: undefined`). Holds.
+- Retry or a new attempt shows the old reason on the phone: the step start clears
+  `reason`. Holds.
+- Harness child: only `claude-code` exists (`structuredResult: true`). The reminder
+  there is a second full external run in a NEW snapshot worktree, and its
+  worktree/cost footer is dropped because the step keeps run 1's report. This is
+  low-impact and not blocking, but worth a note in the docs.
+- Other callers of mobile `detailBlocks().log`: only `stepBlocks` uses it, and it
+  overrides `log`. Holds.
+- Protocol: no new field, and `reason` is already in `WorkflowStepRow`. No
+  `protocol.d/` note is needed. Holds.
+
+**Executor behaviour:** wrote the tests first and showed them failing, kept the logic in
+the pure module, recorded the drift honestly, and listed the full gate as not run.
+Clean work. The one gap is a design choice the plan made (Failure mode 4), not a
+slip in execution.
