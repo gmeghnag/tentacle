@@ -19,6 +19,7 @@ import {
   authenticateCaller,
   readBoundedBody,
 } from "../external/route.ts";
+import { tasksMethod } from "./tasks.ts";
 import { InvalidToolParams, MCP_TOOLS, type McpTools } from "./tools.ts";
 import {
   ErrorCode,
@@ -28,11 +29,11 @@ import {
   discoverResult,
   errorBody,
   initializeResult,
+  mayUseTasks,
   methodNotAllowed,
   parseRequest,
   progressCounter,
   progressNotification,
-  requireTasks,
   resultBody,
   rpcError,
   rpcResult,
@@ -130,10 +131,12 @@ export function createMcpRoute(options: McpHttpOptions): ExternalRoute {
       case "tasks/get":
       case "tasks/update":
       case "tasks/cancel":
-        // M4 serves these; until then a declaring client is told "not here".
-        return reply(
-          requireTasks(r) ?? rpcError(r.id, ErrorCode.MethodNotFound, `${r.method} not supported`),
-        );
+        // Only for a request that declared the extension (else -32021).
+        try {
+          return reply(await tasksMethod(options.tools, r, caller, options.onAudit));
+        } catch (error) {
+          return reply(invalid(r, error));
+        }
       default:
         return reply(rpcError(r.id, ErrorCode.MethodNotFound, `unknown method ${r.method}`));
     }
@@ -157,7 +160,11 @@ export function createMcpRoute(options: McpHttpOptions): ExternalRoute {
       args.waitSeconds > 0;
     if (!held) {
       try {
-        return reply(rpcResult(r.id, await options.tools.call(caller, name, args, signal)));
+        // A task only for a request that declared the extension (never legacy).
+        const result = mayUseTasks(r)
+          ? await options.tools.callAsTask(caller, name, args, signal)
+          : await options.tools.call(caller, name, args, signal);
+        return reply(rpcResult(r.id, result));
       } catch (error) {
         return reply(invalid(r, error));
       }

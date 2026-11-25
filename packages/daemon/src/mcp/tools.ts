@@ -14,6 +14,11 @@
  * turn's final round. Asks are the owner's unless `callerAsks` says `both` for
  * this caller (M3, Design §7): then `session_answer` may answer a `tool` ask of
  * a turn the caller started, once, through A2A's shared `external/asks.ts`.
+ *
+ * Tasks (M4, Design §3/§5/§6): for a request that declared the extension, a
+ * call that starts a turn answers a `CreateTaskResult` (taskId = turnId) once
+ * the turn's start is durable; `task` / `answerTask` / `cancelTask` back
+ * `mcp/tasks.ts`. A task is the turn's unit projected, never stored.
  */
 import type { WorkUnit } from "@tentacle/core";
 import type { KnownSessionUpdateParams } from "@tentacle/protocol";
@@ -32,7 +37,8 @@ import {
 import { connectSession, detachSession, openSession } from "../external/session-driver.ts";
 import { callerPrefix, contextIdOf, externalSessionId } from "../external/session-ids.ts";
 import type { SessionHost } from "../session-host.ts";
-import { type CallToolResult, toolError, toolResult } from "./wire.ts";
+import { decisionOf, projectTask } from "./task-projection.ts";
+import { type CallToolResult, createTaskResult, toolError, toolResult } from "./wire.ts";
 
 export const MCP_PROTOCOL = "mcp";
 /** A prompt / steer, in UTF-8 bytes. */
@@ -72,6 +78,32 @@ export interface McpToolsOptions {
    * the caller too. Absent, or `undefined` for a caller = `owner`.
    */
   readonly callerAsks?: (caller: string) => AskMode | undefined;
+  /**
+   * Make a started turn durable before its task is handed out (Design §3,
+   * assumption 3; M4). Resolves whether the write landed. Absent: the
+   * session's own `persisted()` (its latest write settled; no persister =
+   * nothing to make durable).
+   */
+  readonly durable?: (sessionId: string, turnId: string) => Promise<boolean>;
+}
+
+/** A turn's start is awaited this long before its task is refused (a `session/prompt` already accepted it). */
+export const MCP_TASK_START_MS = 10_000;
+/** "could not record the task": the turn is cancelled, no task is handed out. */
+export const TASK_NOT_RECORDED = "could not record the task";
+/** Acceptance times kept for live tasks' `createdAt` (a live unit has no `startedAt`). */
+const ACCEPTED_MAX = 256;
+
+/** A tool call answered with a task (`CreateTaskResult`). */
+export type TaskCreated = Record<string, unknown> & { readonly resultType: "task" };
+
+/** A task as `tasks/get` reads it: the turn's unit and the asks THIS turn raised. */
+export interface TaskLookup {
+  readonly sessionId: string;
+  readonly unit: WorkUnit;
+  readonly asks: readonly PendingAsk[];
+  readonly mode: AskMode;
+  readonly acceptedAt?: number;
 }
 
 /** One live MCP session's in-process attachment (Design §9). */
@@ -82,9 +114,13 @@ interface Attachment {
   ready: Promise<void>;
   /** Pending asks as the session sent them (titles for the status line). */
   readonly asks: Map<string, PendingAsk>;
+  /** The turn each pending ask was raised by (a task answers only its own). */
+  readonly askTurn: Map<string, string>;
   activeTurn?: string;
   /** Status waits parked on this session's next change. */
   readonly waiters: Set<() => void>;
+  /** Waits for a turn's start (a task's `durable`), woken on `turn_start` / `turn_end`. */
+  readonly starts: Set<() => void>;
   waiting: boolean;
   detachTimer?: ReturnType<typeof setTimeout>;
   closed: boolean;
@@ -235,6 +271,8 @@ export class McpTools {
   private readonly opts: McpToolsOptions;
   private readonly attachments = new Map<string, Attachment>();
   private readonly archived: ArchivedUnitIndex;
+  /** taskId → when its call was accepted (insertion order = age, bounded). */
+  private readonly accepted = new Map<string, number>();
 
   constructor(opts: McpToolsOptions) {
     this.opts = opts;
@@ -248,11 +286,35 @@ export class McpTools {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<CallToolResult> {
+    return (await this.dispatch(caller, name, args, false, signal)) as CallToolResult;
+  }
+
+  /**
+   * One `tools/call` from a request that declared the tasks extension (M4): a
+   * call that starts a turn answers a `CreateTaskResult` (taskId = turnId),
+   * only once the turn's start is durable; anything else is `call`'s answer.
+   */
+  async callAsTask(
+    caller: string,
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<CallToolResult | TaskCreated> {
+    return this.dispatch(caller, name, args, true, signal);
+  }
+
+  private async dispatch(
+    caller: string,
+    name: string,
+    args: Record<string, unknown>,
+    task: boolean,
+    signal?: AbortSignal,
+  ): Promise<CallToolResult | TaskCreated> {
     switch (name) {
       case "session_start":
-        return this.start(caller, args);
+        return this.start(caller, args, task);
       case "session_send":
-        return this.send(caller, args);
+        return this.send(caller, args, task);
       case "session_status":
         return this.status(caller, args, signal);
       case "session_answer":
@@ -278,7 +340,11 @@ export class McpTools {
 
   // --- verbs -------------------------------------------------------------------
 
-  private async start(caller: string, args: Record<string, unknown>): Promise<CallToolResult> {
+  private async start(
+    caller: string,
+    args: Record<string, unknown>,
+    task: boolean,
+  ): Promise<CallToolResult | TaskCreated> {
     const prompt = text(args, "prompt");
     const title = optStr(args, "title", MCP_TITLE_MAX);
     if (this.liveCount(caller) >= MCP_MAX_LIVE_SESSIONS) {
@@ -292,16 +358,21 @@ export class McpTools {
       return toolError("no caller identity");
     }
     const turnId = `${s}.${crypto.randomUUID()}`;
+    let a: Attachment;
     try {
-      const a = await this.attach(sessionId, mcpTitle(prompt, title));
+      a = await this.attach(sessionId, mcpTitle(prompt, title));
       await this.prompt(a, turnId, prompt);
     } catch (error) {
       return toolError(`the session refused the prompt${codeOf(error)}`);
     }
-    return toolResult({ sessionId, turnId });
+    return task ? this.taskCreated(a, turnId) : toolResult({ sessionId, turnId });
   }
 
-  private async send(caller: string, args: Record<string, unknown>): Promise<CallToolResult> {
+  private async send(
+    caller: string,
+    args: Record<string, unknown>,
+    task: boolean,
+  ): Promise<CallToolResult | TaskCreated> {
     const sessionId = str(args, "sessionId", 256);
     const body = text(args, "text");
     const key = optStr(args, "key", MCP_KEY_MAX);
@@ -316,7 +387,8 @@ export class McpTools {
         if (running === undefined) {
           const turnId = `${s}.${crypto.randomUUID()}`;
           await this.prompt(a, turnId, body);
-          return toolResult({ turnId, steered: false });
+          // A steer adds no unit: only a new turn is a task.
+          return task ? this.taskCreated(a, turnId) : toolResult({ turnId, steered: false });
         }
         try {
           await a.peer.request("session/enqueue", {
@@ -403,6 +475,157 @@ export class McpTools {
       return toolError(`the approval is no longer pending${codeOf(error)}`);
     }
     return toolResult({ sessionId, requestId, decision, answered: true });
+  }
+
+  // --- tasks (M4, Design §3, §5, §6) ------------------------------------------
+
+  /**
+   * The `CreateTaskResult` of a turn just accepted — returned ONLY once its
+   * start is on disk (the spec's MUST): the turn is in `workUnits()` (its
+   * start's write was scheduled in the same step), then `durable`. Either
+   * failing → the turn is cancelled and the call answers `isError`: no
+   * unrecorded task is ever handed out.
+   */
+  private async taskCreated(a: Attachment, turnId: string): Promise<CallToolResult | TaskCreated> {
+    const acceptedAt = Date.now();
+    this.accepted.set(turnId, acceptedAt);
+    while (this.accepted.size > ACCEPTED_MAX) {
+      const oldest = this.accepted.keys().next().value;
+      if (oldest === undefined) break;
+      this.accepted.delete(oldest);
+    }
+    const durable =
+      this.opts.durable ??
+      (async (id: string) => {
+        await this.opts.host.get(id)?.persisted();
+        return true;
+      });
+    const unit = (await this.started(a, turnId))
+      ? await durable(a.sessionId, turnId).then(
+          (landed) => (landed ? this.unitOf(a.sessionId, turnId) : undefined),
+          () => undefined,
+        )
+      : undefined;
+    if (unit === undefined) {
+      if (!a.closed) a.peer.notify("session/cancel", { sessionId: a.sessionId, turnId });
+      return toolError(TASK_NOT_RECORDED);
+    }
+    const view = projectTask({
+      unit,
+      asks: [],
+      mode: "owner",
+      elicitationForm: false,
+      acceptedAt,
+      now: Date.now(),
+    });
+    return createTaskResult(view) as TaskCreated;
+  }
+
+  /** Until the turn is in the session's units (started; it may have ended already), or a timeout. */
+  private started(a: Attachment, turnId: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const check = () => {
+        const seen = this.unitOf(a.sessionId, turnId) !== undefined;
+        if (!seen && !a.closed) return;
+        a.starts.delete(check);
+        clearTimeout(timer);
+        resolve(seen);
+      };
+      const timer = setTimeout(() => {
+        a.starts.delete(check);
+        resolve(false);
+      }, MCP_TASK_START_MS);
+      a.starts.add(check);
+      check();
+    });
+  }
+
+  private unitOf(sessionId: string, turnId: string): WorkUnit | undefined {
+    return turnsOf(this.opts.host.get(sessionId)?.workUnits() ?? []).find((u) => u.id === turnId);
+  }
+
+  /**
+   * The caller's task `taskId` (= a turn id `<s>.<t>`), or undefined — the
+   * same for a malformed id, another caller's session (it is resolved under
+   * THIS caller's prefix only) or an evicted unit (no oracle). Live units come
+   * from `workUnits()`, an archived session's from the read-only index (never
+   * reopened). A live turn waiting on an ask re-attaches lazily (Design §9),
+   * so the asks it raised are known.
+   */
+  async task(caller: string, taskId: string): Promise<TaskLookup | undefined> {
+    const dot = taskId.indexOf(".");
+    if (dot <= 0 || taskId.length > TURN_ID_MAX) return undefined;
+    const sessionId = externalSessionId(MCP_PROTOCOL, caller, taskId.slice(0, dot));
+    if (sessionId === null) return undefined;
+    const read = await this.read(caller, sessionId);
+    const unit = read === undefined ? undefined : turnsOf(read.units).find((u) => u.id === taskId);
+    if (read === undefined || unit === undefined) return undefined;
+    let a = this.attachments.get(sessionId);
+    if (read.live && unit.state === "waiting" && (a === undefined || a.closed)) {
+      a = await this.attach(sessionId, "MCP").catch(() => undefined);
+    }
+    const asks =
+      a === undefined || !isLive(unit)
+        ? []
+        : [...a.asks.values()].filter((x) => a.askTurn.get(x.requestId) === taskId);
+    const acceptedAt = this.accepted.get(taskId);
+    return {
+      sessionId,
+      unit,
+      asks,
+      mode: this.modeOf(caller),
+      ...(acceptedAt !== undefined ? { acceptedAt } : {}),
+    };
+  }
+
+  /**
+   * `tasks/update`: each key naming a pending ask of THIS task that the caller
+   * may answer is resolved with that ask's own `*_once` option (the shared
+   * `resolveCallerAnswer`; `decline`/`cancel`/ambiguous → deny). A key naming
+   * any other pending ask is refused (counted: the caller audits it), an
+   * unknown key ignored (the spec). First answer wins: a late one is a no-op.
+   */
+  async answerTask(
+    caller: string,
+    taskId: string,
+    responses: Record<string, unknown>,
+  ): Promise<{ found: boolean; refused: number }> {
+    const t = await this.task(caller, taskId);
+    if (t === undefined) return { found: false, refused: 0 };
+    const a = this.attachments.get(t.sessionId);
+    let refused = 0;
+    for (const [requestId, response] of Object.entries(responses)) {
+      const pending = a?.asks.get(requestId);
+      if (a === undefined || pending === undefined) continue;
+      const mine = t.asks.includes(pending);
+      const resolved = mine
+        ? resolveCallerAnswer({ requestId, decision: decisionOf(response) }, [pending], t.mode)
+        : null;
+      if (resolved === null) {
+        refused++;
+        continue;
+      }
+      try {
+        await a.peer.request("session/resolve_permission", {
+          sessionId: t.sessionId,
+          ...resolved,
+        });
+      } catch {
+        // Answered meanwhile (first answer wins) or gone: nothing changed.
+      }
+    }
+    return { found: true, refused };
+  }
+
+  /** `tasks/cancel`: a live task's turn gets the one per-turn `session/cancel`; an ended one is untouched. */
+  async cancelTask(caller: string, taskId: string): Promise<boolean> {
+    const t = await this.task(caller, taskId);
+    if (t === undefined) return false;
+    if (isLive(t.unit)) {
+      const a = await this.attach(t.sessionId, "MCP").catch(() => undefined);
+      a?.peer.notify("session/cancel", { sessionId: t.sessionId, turnId: taskId });
+    }
+    return true;
   }
 
   private modeOf(caller: string): AskMode {
@@ -579,7 +802,9 @@ export class McpTools {
     const a: Attachment = {
       sessionId,
       asks: new Map(),
+      askTurn: new Map(),
       waiters: new Set(),
+      starts: new Set(),
       waiting: false,
       closed: false,
       ready: Promise.resolve(),
@@ -627,6 +852,7 @@ export class McpTools {
       case "turn_start":
         a.activeTurn = u.turnId;
         this.settle(a);
+        this.wakeStarts(a);
         return;
       case "permission_request": {
         // The caller's own only when raised by a turn IT started (`<ctx>.<t>`,
@@ -634,15 +860,18 @@ export class McpTools {
         const turn = a.activeTurn ?? this.runningTurn(a.sessionId)?.id;
         const own = turn !== undefined && isCallerTurn(a.sessionId, turn) && askIsOwn(u, turn);
         a.asks.set(u.requestId, askOf(u, own));
+        if (turn !== undefined) a.askTurn.set(u.requestId, turn);
         this.wake(a);
         return;
       }
       case "permission_resolved":
+        a.askTurn.delete(u.requestId);
         if (a.asks.delete(u.requestId)) this.wake(a);
         return;
       case "turn_end":
         this.settle(a);
         this.wake(a);
+        this.wakeStarts(a);
         return;
       default:
         return;
@@ -669,6 +898,10 @@ export class McpTools {
 
   private wake(a: Attachment): void {
     for (const w of [...a.waiters]) w();
+  }
+
+  private wakeStarts(a: Attachment): void {
+    for (const w of [...a.starts]) w();
   }
 
   /**
@@ -719,6 +952,7 @@ export class McpTools {
     if (a.detachTimer !== undefined) clearTimeout(a.detachTimer);
     if (this.attachments.get(a.sessionId) === a) this.attachments.delete(a.sessionId);
     this.wake(a);
+    this.wakeStarts(a);
   }
 }
 

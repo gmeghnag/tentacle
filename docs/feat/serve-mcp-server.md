@@ -415,6 +415,18 @@ ends. After a restart it re-attaches lazily on the next call.
 | 7 | `packages/daemon/package.json` devDependencies `@modelcontextprotocol/client` `2.4.0` + `@modelcontextprotocol/ext-tasks` (pinned, test-only) + `bun.lock` | M5 |
 | 8 | `changelog.d/serve-mcp-server.added.md`, `README.md` "MCP server", `TODO.md` (backlog B-items) | M5 |
 
+*(Corrected in M4: `SessionPersister.flush(id)` resolves `void` even when the
+write failed (`session-persister.ts` `track`: the failure is reported, then
+`latest` resolves). So "`durable` = `flush`" (row 6) cannot see the failure
+that the failure-mode row "`durable()` write fails" needs. As built in M4:
+`McpToolsOptions.durable?: (sessionId, turnId) => Promise<boolean>`. When it is
+absent, the default is the session's own `persisted()` → `true`, so a failed
+write is reported to the operator and the task is still handed out. M5 should
+wire a hook that knows whether the write LANDED. For example, a persister read
+of the latest write's boolean: `track` already computes it, but adding it
+touches `session-persister.ts`, outside M4's files. Decide this before M5's
+code.)*
+
 ### Failure modes
 
 | Case | Behaviour / convergence |
@@ -683,6 +695,157 @@ Each test names its mutation (§9).
   2. The `asks` map is session-wide, and only caller-turn `tool` asks are answerable.
   3. An identical re-send after the owner chose the same option is a success at the daemon (`settled-answers.ts`). But by then the ask has normally left the map (`permission_resolved`), so the caller gets `NOT_ANSWERABLE`.
   4. The push "no push" test ends with a fixed microtask flush (300 rounds) before a NEGATIVE assert, which no condition can poll. Its control case proves the path is live.
+
+*— claude-opus-5-5, 2026-11-25*
+
+### M4-mcp-tasks (done)
+
+- *Load-bearing check (assumption 3) run FIRST: HOLDS.* The repro is
+  `.tentacle/tmp/serve-mcp-server/m4/durable.ts`. It uses a real
+  `LogSessionStore` + `SessionPersister`, `host.open{create}`, then
+  `prompt("s1.t1")` on a model that never ends. It waits for `turn_start`, then
+  `persister.flush(id)`. The "kill" is no `stop()`, because `stop` drains
+  pending writes and would hide the bug. A second persister then `load`s the
+  file and `restore`s it.
+  ```
+  flush:    reloaded units: [{"kind":"turn","id":"s1.t1","state":"failed","native":"error","reason":"interrupted: the daemon restarted during this turn",…}]
+  no flush: reload: NOT FOUND its file is gone
+  ```
+  The first control drained with `stop()` and so passed without the flush. It
+  was replaced by the no-`stop` read above.
+  - Code fact: a turn start and its `this.persist()` share one synchronous
+    block. The successor-turn path shows it (`hosted-session.ts:3782-3801`),
+    and its comment says it works "As `prompt`: the turn key and the prompt
+    reach the disk together". The repro confirms it for `prompt`.
+  - So "the turn is in `workUnits()`" implies "its start's write is scheduled".
+    `durable` waits for the former, then the hook.
+- **Plan correction (Files, after the table):** `flush` cannot report a failed
+  write, so M5's "`durable` = `flush`" needs a decision. See the note there.
+- Red first: `packages/daemon/test/mcp-tasks.test.ts` (14 tests) was run against
+  the M3 code with only the pure projection present. Result: **0 pass / 14 fail**,
+  each failing on the missing feature (`not a task: {…plain result…}`).
+- Added `packages/daemon/src/mcp/task-projection.ts` (pure, no clock: `now` is
+  passed in):
+  - `projectTask`, with the mapping from the Design §5 table:
+    - `working` → `working`.
+    - `waiting:permission`:
+      - with caller-answerable asks and elicitation form → `input_required` +
+        `inputRequests{requestId: decisionElicitation("Allow once? <title>")}`;
+      - with caller-answerable asks but no form → `working` + the
+        `session_answer requestId=` hint;
+      - otherwise → `working` + "waiting for the owner's approval".
+    - `failed` → `completed` + `result.isError` + the reason.
+    - `canceled` → `cancelled`.
+    - `resultDropped` → "result no longer retained".
+  - `answerableAsks` is the shared `callerMayAnswer`.
+  - `decisionOf`: only `accept` + `decision:"allow"` allows; anything else denies.
+  - Task fields: `ttlMs: null`, `pollIntervalMs: 2000`. `createdAt` is the
+    unit's `startedAt`, else the acceptance time, else `now`.
+- Added `packages/daemon/src/mcp/tasks.ts`, `tasksMethod`:
+  - It handles `tasks/get|update|cancel`. A request that did not declare the
+    extension gets `-32021` (M1's `requireTasks`).
+  - Every not-found case is one answer, `-32602 "unknown task"`: malformed,
+    another caller's, unknown in your own session, or evicted.
+  - `tasks/update` returns `{}` and audits one `mcp-answer-refused` per refused
+    key. `tasks/cancel` returns `{}`.
+- `packages/daemon/src/mcp/tools.ts`:
+  - `McpToolsOptions.durable?`.
+  - `callAsTask` (`call` keeps its plain `CallToolResult` type). A new turn from
+    `session_start`, or from `session_send` on an idle session →
+    `taskCreated`:
+    1. wait until the turn is in `workUnits()` (≤ 10 s);
+    2. then `durable`;
+    3. then `CreateTaskResult` from the projection.
+    If any step fails, the turn gets `session/cancel` and the call answers
+    `isError "could not record the task"`.
+  - A steer stays plain `{turnId, steered:true}`.
+  - `task(caller, taskId)` parses `<s>.<t>` and builds the session id with
+    `externalSessionId(mcp, THIS caller, s)`. It finds the turn unit with
+    `id === taskId` in `workUnits()`, or in the archived read-only index (never
+    reopened). A live unit waiting on an ask re-attaches lazily (§9), so the
+    asks it raised are known.
+  - `answerTask` resolves only the asks THIS task raised (`askTurn` per
+    requestId), through the shared `resolveCallerAnswer` (`*_once` only). Any
+    other pending key is refused; an unknown key is ignored.
+  - `cancelTask` sends the one per-turn `session/cancel`.
+- `packages/daemon/src/mcp/http.ts`:
+  - `tools/call` uses `callAsTask` only when `mayUseTasks(r)` (modern AND
+    declared on this request).
+  - `tasks/*` → `tasksMethod`.
+- `changelog.d/serve-mcp-server.added.md` gains one clause on the task verbs.
+- No protocol, schema, persisted-format or `protocol.json` change, and no
+  `protocol.d/` note. `daemon/src/index.ts` is unchanged (the `durable` option
+  rides `McpToolsOptions`).
+- Tests (`mcp-tasks.test.ts`, 15, real store + HTTP on loopback):
+  - Negotiation: a declaring request gets a task. A non-declaring modern
+    request and a legacy one get plain results.
+  - Durable before the ack: a kill with no stop, then a reload, and `tasks/get`
+    on the new host finds the task (`completed` + `isError` "interrupted").
+  - `durable` false → `isError` and the turn ends `canceled`.
+  - `-32021` without the declaration.
+  - `session_send`: idle → a task; busy → a plain steer.
+  - Both modes:
+    - `input_required` → `tasks/update` accept → exactly `{sessionId, requestId, optionId:"allow_once"}` → `completed`;
+    - decline, cancel or an ambiguous answer → deny;
+    - no elicitation form → `working` + the hint;
+    - owner mode → "waiting for the owner's approval".
+  - Asks the caller may not answer: an owner-only `workflow_approve` key is
+    refused + audited and the ask stays untouched. Another task's ask named
+    through an ended task is refused.
+  - A failed turn → `completed` + `isError`, no `error`.
+  - `tasks/cancel` → `cancelled`.
+  - Forged, foreign, malformed or unknown taskId → the identical `-32602`.
+  - Compaction, then restart → `tasks/get` deep-equal.
+  - An archived session → `tasks/get` answers, the session is not reopened, and
+    the store is byte-identical at rest.
+- Mutations (each applied by hand with Edit, run, reverted; a grep confirmed
+  no remnant):
+
+  | # | Mutation | Result |
+  |---|---|---|
+  | A | always a task (`mayUseTasks(r) \|\| true`) | RED: negotiation |
+  | B | skip `durable` | RED: durable-before-ack, durable-false. 3/3 reruns red (`--rerun-each 3`) |
+  | C | `failed` → task `failed` | RED: failed turn; durable-before-ack |
+  | D | resolve taskId without the caller's prefix | RED: forged/foreign. Archived went red too: collateral, the mutant only searched live sessions |
+  | E | answer any pending key without the kind check | RED: owner-only; decline/ambiguous |
+  | F | ignore `durable`'s false | RED: durable-false |
+  | G | drop the per-task ask check | RED: another task's ask. This test was ADDED after G was found uncovered |
+  | H | `tasks/get` always attaches, so an archived session is reopened | RED: archived read-only |
+  | I | ignore the elicitation-form cap | RED: no-elicitation hint |
+- Checks:
+  - `bun test` on the four `mcp-*` files, `a2a-http`, `a2a-executor` and
+    `cli/serve-a2a-e2e`: 114 pass, 0 fail.
+  - `mcp-tasks.test.ts` `--rerun-each 20`: 300 pass, 0 fail.
+  - `tsc --noEmit -p packages/daemon`: no output.
+  - `bunx biome check` on the 5 changed TS files: clean.
+- Drift / notes for review:
+  1. The `durable` wiring is open for M5 (plan correction above).
+  2. `CreateTaskResult.status` is the unit's state at the ack. A fast turn may
+     already be `completed` (never with a `result`: that comes from
+     `tasks/get`).
+  3. A live unit has no `startedAt`, so `createdAt` comes from an in-memory
+     acceptance time (bounded to 256 entries). After a restart the reloaded
+     unit's `startedAt` is used instead.
+  4. **Unverified: `ttlMs: null`'s meaning in ext-tasks.** The fetch of the
+     spec page was denied in this session, and the package arrives only in M5.
+     M5 must check it against `@modelcontextprotocol/ext-tasks`. Design §5
+     says: if `null` means "never discarded", send `604800000`.
+  5. `tasks/get` on a live waiting unit attaches lazily. A read that attaches
+     is §9's "re-attach lazily on the next call", and it holds the session
+     only while the turn runs. An archived session is never attached.
+  6. The asks of a re-attached session arrive asynchronously after the attach.
+     The first `tasks/get` after a restart may still say "waiting for the
+     owner's approval", and the next poll says `input_required`. This is
+     eventually consistent, as the spec allows.
+  7. Test fix: the archived test first flaked about 1 run in 10 under reruns.
+     The session's `.lock` file is released asynchronously after the archive.
+     The fix: the snapshot is taken at rest (no lock, after a flush), and it
+     tolerates a file vanishing between listing and read.
+  8. A held `session_status` from a task-declaring client still streams
+     progress. It is not a task, so the "no progress for tasks" rule does not
+     apply.
+  9. The pure projection was written before the tests. Its red is shown by
+     mutations C and I, not by a first failing run.
 
 *— claude-opus-5-5, 2026-11-25*
 
