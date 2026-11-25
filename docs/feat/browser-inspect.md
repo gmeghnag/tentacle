@@ -1,6 +1,6 @@
 # eval/browser-inspect — the model sees and traces the user's real Chrome
 
-> **Status:** feat — PROMOTED by the owner 2026-11-25 ~11:45 («partiamo»); spike B0 first; owner questions Q1–Q9 being answered
+> **Status:** feat — PROMOTED 2026-11-25; spike B0 PASSED; Implementation APPROVED (owner answers Q1–Q9 2026-11-25 + «debugger only when needed»); execution B1→B4 (first merge after B4)
 > **Branch:** `feat/browser-inspect` (opened at promotion)
 > **Size:** L (umbrella → 7 slices, S/M each) · **Blast:** load-bearing (new capability surface on the user's logged-in identity; the single broker; the session tool set) · **Suited:** Opus plan + fresh-context Opus review on every load-bearing slice; DeepSeek may execute the `contained` slices (B1, B3)
 > **Changelog:** `none` (an eval carries no code; the code slices will name their own fragments)
