@@ -49,10 +49,11 @@ describe("T5: every documented CLI flag exists", () => {
       .filter(([, doc]) => doc.flag !== undefined)
       .map(([, doc]) => doc.flag)
       .sort();
-    // `--model`, `--profile` (profile selection), `--engine`, `--rm`. Anything
-    // else would be a flag the registry claims and the CLI does not apply.
-    expect(documented).toEqual(["--engine", "--model", "--rm"]);
+    // `--model`, `--engine`, `--network`, `--rm`. Anything else would be a flag
+    // the registry claims and the CLI does not apply.
+    expect(documented).toEqual(["--engine", "--model", "--network", "--rm"]);
     expect(keyDoc("engine")?.flag).toBe("--engine");
+    expect(keyDoc("network")?.flag).toBe("--network");
     expect(keyDoc("rm")?.flag).toBe("--rm");
   });
 });
