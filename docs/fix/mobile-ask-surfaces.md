@@ -743,3 +743,110 @@ slices. `apps/mobile/src/session-list.ts:183`'s local `WithFlags` cast is now re
 left alone, since S7b owns that file.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### S9 — kit `askCard`/`askSlim`/`askSheet`, `permissionSheet` realigned (executor claude-code, 2026-11-25) — DONE
+
+**Load-bearing check re-run first (D7 + the Context constraint):** holds, with one correction.
+- `tools/mockup-kit/kit.js:329` `K.permissionSheet` still drew the OLD stack — a head row
+  (`k-perm-tile` + title/tool), one `k-perm-detail` dump of `detail` and a vertical column of
+  `k-perm-pill`s — while `apps/mobile/src/screens/PermissionSheet.tsx:76-101` now draws `AskSlim`
+  (peek) or `AskCard` (every other detent). The constraint «mockups must match the app» was therefore
+  broken exactly as the plan says.
+- The mockup's `K.extend`s (`.tentacle/mockups/mobile-ask-surfaces/index.html:286-310`) are the
+  promotion source: `askCard`, `askSlim`, `askSheet`, all three built on plain HTML there.
+- Polpetto's 9×9 mask exists in the app as a pure function (`apps/mobile/src/polpetto-glyph.ts`), so
+  the kit folds it rather than re-deriving it from the sprite rects — a second derivation would be a
+  second truth for the owner's drawing.
+- One plan detail does NOT match the app: `PermissionSheet.tsx` keeps a plain `ScrollView`, not a
+  detented frame; the detents live in the route (`App.tsx`). So `askSheet` is a frame the CATALOGUE
+  composes, and `permissionSheet` keeps returning the `k-scrim`/`k-sheet` frame it always did (now
+  holding `askCard`), rather than nesting a second sheet chrome.
+
+**Changed**
+- `tools/mockup-kit/kit.js` — `askCard` (`:412`, the origin row, title, the 4-row command with
+  `+N lines · Show all` / `Show less`, the `… Deny Allow once` action row outside the scroll, the
+  optional menu / also-asked / arming lines), `askSlim` (`:447`), `askSheet` (`:461`, throws on an
+  unknown detent), with the private `askOriginRow`/`askGlyph`/`polpettoGlyph`/`askCommand`
+  (`:350-410`). `permissionSheet` (`:476`) now draws `askCard` inside the sheet frame: `options`
+  (validated, unchanged throw) become the card's own action capsules, `origin`/`title`/`detail`/
+  `diff` are passed through, `tool` survives only as the frame's accessible name (the card has no
+  tool row). The default origin is the main agent. The answer capsules are now `k-ask-b` (the card's
+  own class), so `k-perm-pill`/`k-perm-head`/`k-perm-detail`/`k-perm-options` are gone.
+- `tools/mockup-kit/kit.css` — the `.k-ask*` block (`:605-830`): card, origin row (the Polpetto mask
+  as runs, the SF glyph otherwise), command box with a separate `.bd` scroller (so the actions are
+  siblings, never inside the scroll), capsules, menu, the slim row, and the sheet frame (dim only
+  above `peek`). Every metric is a `var()`. The `.k-perm-*` rules were deleted with their markup.
+- `tools/mockup-kit/kit.d.ts` — `AskOriginProps`, the new `askCard`/`askSlim`/`askSheet` signatures,
+  `origin?` on `permissionSheet`.
+- `scripts/mockup-kit/manifest.ts:37-38` — `ask-card` and `ask-slim` join the style manifest, so
+  every card/slim metric is EXTRACTED from `AskCard.tsx`/`AskSlim.tsx` (`--m-ask-card-*`,
+  `--m-ask-slim-*`) instead of hand-copied: `generated/tokens.css` +28 lines of those, no
+  `APPROXIMATIONS` entry needed.
+- `scripts/mockup-kit/sources.ts:32,251` — `viewModels.polpettoMask` folds the app's own
+  `polpettoMask()`; `generated/kit-data.json` +91 lines.
+- `tools/mockup-kit/index.html` — two catalogue entries (`ask: the card, for each origin (D4)`,
+  `ask: the sheet detents (peek never dims) + the slim row (D4)`) next to the realigned
+  `permission sheet`; `tools/mockup-kit/README.md` — the builders' row names the three new ones.
+- `scripts/test/mockup-kit-components.test.ts` — four new describes (17 tests, see below) and the
+  three pre-existing `permissionSheet` assertions moved to the card's classes.
+- `changelog.d/mobile-ask-surfaces-s9.added.md` — ONE fragment. `added`, because the kit gains three
+  builders; the realignment of `K.permissionSheet` is the same bullet (one task, one fragment).
+
+**Drift from the Implementation**
+- **The plan's `SHEET_HOLDS`/`gestureCancel`/`perm-hold` cleanup is not here** — it is S5/S6's, and
+  the kit never had those names.
+- **`askSheet`'s detent names are the app's three** (`peek`/`ask`/`large`), not the mockup's
+  `ask`/`peek` pair: the app's `sheet-plan.ts` detents are `[PEEK, 0.5, 1.0]`, and the large detent
+  is the one frame the plan's A1/A6 need.
+- **`permissionSheet` keeps the scrim/sheet frame** (see the load-bearing note): the plan's "the kit's
+  `permissionSheet` draws `askCard` inside the sheet frame" is implemented literally — the card goes
+  inside the sheet it already had, and the `k-sheet[data-permission]` padding rule is no longer used
+  by it (the card carries its own padding, as `AskCard.tsx` does).
+- **Polpetto is drawn as horizontal runs** (~15 `<i>`s, 17 pt) rather than 81 cells — same mask, one
+  HTML file that stays readable; the mask itself is folded from app source, so the shape cannot drift.
+
+**Tests (red first; the property each kills)** — `scripts/test/mockup-kit-components.test.ts`:
+- `askCard` (`:131`): the glyph comes from the origin KIND, never the words (a workflow named «Main
+  agent» still draws the curve path, and only `main` draws `k-ask-p`) — this is the §7 «a pod is not
+  trusted» property; the three origins each draw their own row and an unknown kind falls back to the
+  main agent (never a blank row); the origin words are escaped and the age is its own column; the
+  command is 4 rows + `+N lines · Show all` collapsed, every row + `Show less` expanded, no footer
+  when short, and a blank line still draws; Deny is never `data-primary` and comes first; `…` exists
+  only with a rare option (a `workflow_approve` has a spacer instead); the actions are a SIBLING of
+  the command box (`</div>` between them, `.k-ask-a { flex: none }`, `.k-ask-c[data-x] .bd` is the
+  scroller).
+- `askSlim` (`:242`): the hand, the title, the origin short and the caller's action word; never
+  `Allow once`/`Deny`; `go` is the caller's word and escaped.
+- `askSheet` (`:271`): the peek detent carries no `data-dim` while `ask`/`large` do (the screen behind
+  stays usable at the peek); the grabber plus the caller's content and nothing else; an unknown detent
+  throws.
+- `permissionSheet` (`:297`): it draws the ask card, not the old head/detail/pill stack; `options`
+  stays a parameter on the card's own action row (two answers, no 「Always allow」, a malformed list
+  still throws); the origin reaches it by kind.
+- RED first: 17 of the 30 tests in the file failed before the kit change (`Expected to contain: "…"`
+  against the old `k-perm-*` markup), including the three pre-existing `permissionSheet` ones.
+
+**Mutations (each applied to the real kit file, run, then restored from
+`.tentacle/tmp/mobile-ask-surfaces/bak/`):**
+| Mutation | Result |
+|---|---|
+| glyph from the words (`origin.lead === "Main agent"`), not the kind | 2 fail (kind test, three-origins test) |
+| Deny takes `data-primary`, Allow once loses it | 1 fail (Deny-never-primary) |
+| `permissionSheet` actions back to the default pair (drops `options`) | 3 fail (options ×2, card-actions) |
+| every command line drawn, no `+N` footer | 1 fail (4-rows test) |
+| the peek detent dims too | 1 fail (peek-never-dims) |
+| CSS: `.k-ask-c[data-x]` scrolls the box itself (actions no longer siblings) | 1 fail (actions-outside-scroll) |
+
+**Verification (touched files only, per the executor budget):** `bun test
+scripts/test/mockup-kit-components.test.ts scripts/test/mockup-kit.test.ts
+scripts/test/mockup-kit-png.test.ts scripts/test/changelog.test.ts` → 90 pass / 0 fail (the two
+`calibrate` stderr lines are its documented Chrome / no-e2e exits). `bunx tsc --noEmit` and `bunx tsc
+-p apps/mobile --noEmit` clean; `bunx biome check` clean on every file this slice touched.
+`bun run mockup-kit` regenerated `generated/{tokens.css,kit-data.json}` deterministically (re-running
+it after the mutations produced no further diff). The full gate is the orchestrator's.
+
+**Not in this slice:** S7b's `App.tsx` `currentAsking` wiring and S8 (the run screen) remain open, as
+the plan orders them; the kit's `askCard` is what S8 will compose for the run screen's slim foot.
+
+*— claude-code (AI_AGENT=claude-code_2-1-325_agent — the only model id this session exposes), 2026-11-25*
+

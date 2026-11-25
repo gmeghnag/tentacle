@@ -29,6 +29,7 @@ import {
 import * as motion from "../../apps/mobile/src/motion.ts";
 import { NOTICE_GLYPHS } from "../../apps/mobile/src/notice-group.ts";
 import { ARM_MS } from "../../apps/mobile/src/permission-sheet.ts";
+import { polpettoMask } from "../../apps/mobile/src/polpetto-glyph.ts";
 import * as stepRail from "../../apps/mobile/src/step-rail.ts";
 import { FIGTREE_FACES, figtreeFace } from "../../apps/mobile/src/theme-beta.ts";
 import * as theme from "../../apps/mobile/src/theme.ts";
@@ -246,6 +247,8 @@ export function viewModels(dotLook: DotLookFn): Record<string, Value> {
     })(),
     hubButton: { size: FLOAT_SIZE },
     mascot: mascotViewModel(),
+    /** The ask's main-agent icon: Polpetto's 9×9 mask, the app's own (`polpetto-glyph.ts`). */
+    polpettoMask: polpettoMask().map((row) => [...row]),
   };
 }
 

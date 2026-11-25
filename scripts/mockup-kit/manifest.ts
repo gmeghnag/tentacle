@@ -34,6 +34,8 @@ export const MANIFEST: readonly ManifestEntry[] = [
   },
   { id: "markdown", file: "apps/mobile/src/screens/transcript/Markdown.tsx", styles: true },
   { id: "permission-sheet", file: "apps/mobile/src/screens/PermissionSheet.tsx", styles: true },
+  { id: "ask-card", file: "apps/mobile/src/ui/AskCard.tsx", styles: true },
+  { id: "ask-slim", file: "apps/mobile/src/ui/AskSlim.tsx", styles: true },
   { id: "computers", file: "apps/mobile/src/screens/ComputersScreen.tsx", styles: true },
   { id: "sessions-drawer", file: "apps/mobile/src/screens/SessionsDrawer.tsx", styles: true },
 ];
