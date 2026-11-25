@@ -293,6 +293,13 @@ export interface WorkflowHost {
   /** A step's asks name this agent id: attribute them to `turnId` (A2). */
   attribute(agentId: string, turnId: string | undefined): void;
   release(agentId: string): void;
+  /**
+   * The turn running NOW, if any. A start that names no turn (the model's
+   * `workflow` tool: `by: "model"`) is attributed to it, captured at start —
+   * so its steps' asks carry a turn and auto-accept can answer them
+   * (docs/fix/workflow-model-start-turn.md).
+   */
+  currentTurn?(): string | undefined;
   /** The full `workflows` state changed. */
   publish(rows: readonly WorkflowRow[]): void;
   /** A run ended: leave `note` in the conversation and wake. */
@@ -751,11 +758,14 @@ export class WorkflowDriver {
         ...(raced !== undefined ? { runId: raced } : {}),
       };
     }
+    // The model's tool names no turn: the one running now owns the run's asks.
+    const turnId =
+      request.turnId ?? (request.by === "model" ? this.host?.currentTurn?.() : undefined);
     return {
       ok: true,
       runId: this.begin(prepared, given, {
         by: request.by,
-        ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
+        ...(turnId !== undefined ? { turnId } : {}),
       }),
     };
   }

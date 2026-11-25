@@ -179,6 +179,11 @@ export const NOTE_KIND = {
   workflowEnd: "workflow_end",
   /** A workflow run a restart found unfinished, closed `stopped: interrupted` at load (D4). */
   workflowInterrupted: "workflow_interrupted",
+  /**
+   * A live run's step waits for the user, and nobody was attached to see it
+   * (docs/feat/workflow-run-awareness.md S6): told once, it never ends the run.
+   */
+  workflowWait: "workflow_wait",
 } as const;
 
 /** How full the model's context was: `used` tokens of a `window` (both tokens). */
