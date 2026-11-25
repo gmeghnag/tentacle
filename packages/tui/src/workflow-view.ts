@@ -13,6 +13,7 @@
  * an unknown state (a newer daemon's) is painted as its own word with a neutral
  * glyph, never coerced into one this build happens to know.
  */
+import { type WorkflowStepView, runProjection } from "@tentacle/client";
 import type {
   WorkflowCatalogueResult,
   WorkflowDefRow,
@@ -78,8 +79,33 @@ const STATES: Readonly<Record<string, StateLook>> = {
   waiting: { glyph: "⧗", word: "waiting", tone: "subtle" },
   "needs-approval": { glyph: "?", word: "needs approval", tone: "warn" },
   stopped: { glyph: "‖", word: "stopped", tone: "warn" },
+  // The wire's word for a step the daemon has not started. It is honest about the
+  // DAEMON and useless to a reader (`stepLook` words it `not yet` / `not run`), so
+  // it stays only as the fallback for a caller that holds no projection.
   pending: { glyph: "○", word: "pending", tone: "dim" },
 };
+
+/**
+ * A STEP as this TUI reads it, from the one shared projection (D2, S8a): the
+ * wire's `pending` says only "the daemon has not started it", so on its own it
+ * reads as if the step still had to come — even on a run that ENDED a minute ago
+ * (the phone's d1b5faaa bug, on the terminal side). The projection already
+ * decided: `not yet` (live, and it can still be reached) or `not run` (ended, or
+ * no route opens on it). Every other state keeps this TUI's own word, so a
+ * screenshot from before this change still reads the same way.
+ *
+ * Paint a step through THIS, never through `stateLook(step.state)`: `stateLook`
+ * only knows the wire's vocabulary.
+ */
+export function stepLook(view: WorkflowStepView): StateLook {
+  if (view.phase === "later") {
+    return { glyph: "○", word: "not yet", tone: "dim" };
+  }
+  if (view.phase === "skipped") {
+    return { glyph: "–", word: "not run", tone: "dim" };
+  }
+  return stateLook(view.state);
+}
 
 /**
  * `state` as this TUI reads it. An UNKNOWN state is `· <word>`: the daemon's own
@@ -216,8 +242,8 @@ interface RailColumns {
   readonly where: boolean;
 }
 
-function stepRow(step: WorkflowStepRow, cols: RailColumns): string {
-  const look = stateLook(step.state);
+function stepRow(step: WorkflowStepRow, view: WorkflowStepView, cols: RailColumns): string {
+  const look = stepLook(view);
   const cells: string[] = [
     pad(look.glyph, GLYPH_COLS),
     pad(oneLine(step.id), cols.id),
@@ -269,6 +295,9 @@ export function railLines(run: WorkflowRow, width: number, _now: number): RailLi
   const active = activeIndex(run);
   const win = railWindow(total, active);
   const visible = run.steps.slice(win.start, win.end);
+  // ONE projection for the whole rail (`stepLook` needs it): `pending` is `not
+  // yet` or `not run` per the RUN, which no single step's state can say.
+  const projection = runProjection(run);
   // The id column follows the rows actually painted, capped: `merge` does not
   // need eight cells at 60 columns.
   const cols: RailColumns = {
@@ -288,8 +317,12 @@ export function railLines(run: WorkflowRow, width: number, _now: number): RailLi
     if (step === undefined) {
       continue;
     }
-    const look = stateLook(step.state);
-    lines.push({ text: truncateCells(stepRow(step, cols), width), tone: look.tone });
+    const view = projection.steps[i];
+    if (view === undefined) {
+      continue;
+    }
+    const look = stepLook(view);
+    lines.push({ text: truncateCells(stepRow(step, view, cols), width), tone: look.tone });
     if (step.state === "running" && step.live !== undefined && step.live !== "") {
       const tail = liveRow(step);
       lines.push({ ...tail, text: truncateCells(tail.text, width) });
@@ -431,8 +464,9 @@ function detailColumn(
   step: WorkflowStepRow,
   detail: WorkflowDetailState | null | undefined,
   width: number,
+  view: WorkflowStepView | undefined,
 ): string[] {
-  const look = stateLook(step.state);
+  const look = view === undefined ? stateLook(step.state) : stepLook(view);
   const head = [
     `${look.glyph} ${look.word}`,
     step.model === undefined || step.model === "" ? "" : oneLine(step.model),
@@ -442,6 +476,17 @@ function detailColumn(
     .filter((part) => part !== "")
     .join(" · ");
   const lines: string[] = [head];
+  // D7: the run's own frozen edges, so the panel says where the run can go from
+  // here — the graph the phone draws, in words. Absent edges say nothing.
+  if (step.next !== null) {
+    lines.push(`next → ${oneLine(step.next)}`);
+  }
+  if (step.onFail !== null) {
+    lines.push(`on fail → ${oneLine(step.onFail.goto)} (${step.onFail.taken}/${step.onFail.max})`);
+  }
+  if (step.retry > 0) {
+    lines.push(`retry ${step.attempt}/${step.retry}`);
+  }
   const round = roundOf(step);
   if (round !== "") {
     lines.push(round);
@@ -564,12 +609,16 @@ export function workflowPanelView(
   const steps = run.steps;
   const cursor = steps.length === 0 ? 0 : Math.min(Math.max(0, state.cursor), steps.length - 1);
   const step = steps[cursor];
+  // ONE projection for the panel (S8a): the left column's words AND the right
+  // column's edge lines come from it, so the panel and the rail cannot disagree.
+  const projection = runProjection(run);
   const right =
     step === undefined
       ? ["this run has no steps"]
-      : detailColumn(step, detail, width - LEFT_COLS - 3);
+      : detailColumn(step, detail, width - LEFT_COLS - 3, projection.steps[cursor]);
   const left = steps.map((s, i) => {
-    const look = stateLook(s.state);
+    const view = projection.steps[i];
+    const look = view === undefined ? stateLook(s.state) : stepLook(view);
     return `${i === cursor ? "›" : " "}${look.glyph} ${fit(look.word, WORD_COLS).padEnd(WORD_COLS)} ${fit(oneLine(s.id), 12)}`;
   });
   const height = Math.max(left.length, right.length);

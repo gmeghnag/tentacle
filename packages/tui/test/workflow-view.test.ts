@@ -211,6 +211,64 @@ describe("railLines: the mockup's TUI 1", () => {
   });
 });
 
+describe("slice S8a: TUI parity with the shared projection (docs/fix/workflows-ux.md D2/D7)", () => {
+  // The demo-note shape: review passes on its first try, so `fix` — reachable
+  // ONLY through review's `on_fail` goto — never runs. The run then ends.
+  const ENDED: WorkflowStepRow[] = [
+    step({ id: "draft", state: "ok", next: "review" }),
+    step({
+      id: "review",
+      state: "ok",
+      reason: "LGTM",
+      next: "confirm",
+      onFail: { goto: "fix", max: 2, taken: 0 },
+    }),
+    step({ id: "fix", state: "pending", next: "review", onFail: null }),
+    step({ id: "confirm", kind: "approve", state: "pending" }),
+  ];
+  const ended = (): WorkflowRow =>
+    run({ runId: "wf-1", state: "ok", startedAt: 1_000, endedAt: 60_000, steps: ENDED });
+
+  test("an ENDED run's never-run step reads `– not run`, never `○ pending`", () => {
+    // Red on `○ pending`: the wire word was painted as if the run still had it
+    // coming (the phone's d1b5faaa bug, on the terminal side).
+    const view = workflowPanelView([ended()], "wf-1", { cursor: 2 }, null, 120, 20);
+    const all = view.rows.map((r) => r.text).join("\n");
+    expect(all).toContain("– not run");
+    expect(all).not.toContain("pending");
+    // The same word in the detail column's head: one projection, one word.
+    expect(all).toContain("– not run · [local]");
+    // A LIVE run keeps `not yet` for the step it still has to reach.
+    const live = run({ runId: "wf-1", steps: ENDED });
+    const liveView = workflowPanelView([live], "wf-1", { cursor: 2 }, null, 120, 20);
+    expect(liveView.rows.map((r) => r.text).join("\n")).toContain("○ not yet");
+  });
+
+  test("the rail words a step from the projection too, at every width tier", () => {
+    const lines = railLines(ended(), 120, 0);
+    const fix = lines.find((l) => /\sfix\s/.test(l.text));
+    expect(fix?.text).toContain("not run");
+    // Colour-blind rule: the WORD is what carries it (never the glyph alone).
+    for (const width of [120, 80, 60]) {
+      const at = railLines(ended(), width, 0).find((l) => /\sfix\s/.test(l.text));
+      expect(at?.text).toContain("not run");
+    }
+  });
+
+  test("the panel's detail lists the run's frozen edges: next, on fail, retry", () => {
+    const all = workflowPanelView([ended()], "wf-1", { cursor: 1 }, null, 120, 20)
+      .rows.map((r) => r.text)
+      .join("\n");
+    expect(all).toContain("next → confirm");
+    expect(all).toContain("on fail → fix (0/2)");
+    // A step with no route says nothing about one.
+    const fix = workflowPanelView([ended()], "wf-1", { cursor: 2 }, null, 120, 20)
+      .rows.map((r) => r.text)
+      .join("\n");
+    expect(fix).not.toContain("on fail →");
+  });
+});
+
 describe("the /workflow panel", () => {
   const STEPS: WorkflowStepRow[] = [
     step({ id: "plan", state: "ok", model: "opus" }),

@@ -1494,3 +1494,89 @@ factory,\n });\n "`), green after restoring it (69 pass, 905 expect). `biome che
 clean; `tsc -p apps/mobile --noEmit` clean; the six `apps/mobile/test/e2e*` guard files 215 pass.
 
 *— claude-sonnet-4-5 (exec), 2026-11-25*
+
+## Execution
+
+### Slice S8a — TUI not-yet/not-run + edge lines
+
+**Load-bearing check (re-run, PARTIAL rule).** `rg -n "onFail" packages/protocol/src/session.ts` → one
+match, `:856`, inside `WorkflowStepRowSchema`, and `historyDropped` at `:894`: S4 is on this branch and
+`packages/client/src/workflow-run-graph.ts` + its 28-passing test are present (S5's product). Premise
+holds.
+
+**One precondition was FALSE in code (plan drift 1).** P3 (`:82`) claims "the TUI imports
+`@tentacle/client`". It did not: `packages/tui/package.json` listed only `agent`/`core`, `packages/tui/tsconfig.json`
+had no `@tentacle/client` path, and `bun test ./packages/tui/test/__probe.test.ts` importing
+`runProjection` failed with `Cannot find module '@tentacle/client'`. D2's rule ("one truth for not yet /
+not run on both") is load-bearing for this slice, so the wiring was added rather than a second copy of
+the reachability rule in the TUI — three additive lines, no behaviour:
+`packages/tui/package.json` (`"@tentacle/client": "workspace:*"`), `packages/tui/tsconfig.json` (the
+matching `paths` entry), `bun.lock` (the workspace entry bun wrote; CI installs `--frozen-lockfile`, so
+a hand-edit would have red the build). Probe re-run after wiring: 1 pass.
+
+**Red first.** The probe `.tentacle/tmp/workflows-ux/s8a-red.test.ts` on the untouched module:
+`stateLook("pending")` → `{ glyph: "○", word: "pending", tone: "dim" }` and the ended run's panel painted
+`›○ pending        fix`. The plan's red (`:320`, "an ended run's pending step reads `– not run` in the
+panel") reproduced exactly. The three new tests then failed on their own named assertions: `Expected to
+contain: "– not run"` / `Received: "…›○ pending fix…"`; `Expected to contain: "not run"` / `Received:
+"○   fix     pending        [local]"`; `Expected to contain: "next → confirm"`.
+
+**As built** — `packages/tui/src/workflow-view.ts`:
+1. New `stepLook(view: WorkflowStepView)` beside `stateLook`: `phase === "later"` → `○ not yet` (dim),
+   `phase === "skipped"` → `– not run` (dim), everything else `stateLook(view.state)`. All four paint
+   sites now go through it (`:246` `stepRow`, `:324` the rail's loop, `:469` the detail head, `:621`
+   the panel's left column) — `stateLook` keeps the wire vocabulary and is only the fallback for a
+   caller holding no projection (`stepRow`'s own signature, `:246`, takes the view now).
+2. The rail builds ONE `runProjection(run)` per call (`:300`) and reads `projection.steps[i]` by index;
+   the panel builds one (`:610`) and shares it between the left column and the detail column.
+3. `detailColumn` gains a `view` argument and, after the head, prints the run's own frozen routes
+   (`:479-490`): `next → X`, `on fail → Y (taken/max)`, `retry attempt/retry` — each only when the step
+   HAS one, so a step with no route says nothing about one.
+4. `STATES.pending`'s comment now records why the wire word survives: it is the honest daemon-side fact
+   and the no-projection fallback, not what a reader is shown.
+
+**Tests** (`packages/tui/test/workflow-view.test.ts`, new `describe` "slice S8a", 3 tests, 9 assertions):
+an ENDED run's `fix` reads `– not run` and never `pending`, in the left column AND the detail head
+(`– not run · [local]`), with the LIVE run keeping `○ not yet`; the rail words the same step `not run`
+at all three width tiers (the colour-blind rule); and the detail lists `next → confirm` /
+`on fail → fix (0/2)` while a route-less step prints no `on fail →`.
+
+**Mutations** (each reverted at once; backup `.tentacle/tmp/workflows-ux/view.bak.ts`, and the restored
+file re-run to 34 pass):
+- M1 — `stepLook` drops the `skipped` arm (the bug itself): **killed**, 2 fails (the panel test and the
+  rail test).
+- M2 — `later` collapsed onto `not run` (a live run's waiting step claimed dead): **killed**, 1 fail
+  (`Expected to contain: "○ not yet"`).
+- M3 — the panel's left column and detail head go back to `stateLook(step.state)`: **killed**, 1 fail.
+- M4 — the `next →` / `on fail →` / `retry` lines removed: **killed**, 1 fail.
+
+**Scope kept to D7.** D7 names the rail/panel words (`not yet` `○`, `not run` `–`) and the panel's
+detail routes — both delivered. The why-sentence (`notRunWhy`) and `summary()` are D5/D2's phone
+surfaces and were NOT wired here; a first draft asserted the sentence in the panel and was corrected to
+the D7 contract rather than growing the slice (it would also have duplicated D5's rendering).
+
+**Narrow verification.** `bun test ./packages/tui/test/workflow-view.test.ts` → 34 pass, 0 fail;
+`bun test ./packages/tui/test/workflow-frames.test.tsx` → 14 pass, 0 fail (the frame's own words
+unchanged); `bun test --parallel ./packages/tui` → **3060 pass, 0 fail** across 215 files (the added
+client import does not break the package); `bun test ./packages/client/test/workflow-run-graph.test.ts`
+→ 28 pass. `bunx tsc` over the touched packages' sources with the ROOT project's `paths` (a scratch
+config mirroring `tsconfig.json`, since `packages/tui/tsconfig.json` alone cannot resolve
+`@tentacle/protocol` — a pre-existing per-package gap, unrelated to this slice) → clean.
+`bunx biome check` on the five changed files → clean. `bun test ./scripts/test/changelog-guard.test.ts`
+→ 5 pass.
+
+**Changelog.** No new fragment file: `changelog.d/workflows-ux.changed.md` already describes the shared
+step states, so S8a EXTENDED that one bullet with the panel's routes (one fragment per task, the same
+call S5 made). The `fixed` fragment is the phone's and was left alone.
+
+**No schema, no wire change** → `packages/protocol/schema/protocol.json` needs no regeneration and no
+`protocol.d` note is added (the projection reads S4's fields; it adds none).
+
+**Files touched:** `packages/tui/src/workflow-view.ts`, `packages/tui/test/workflow-view.test.ts`,
+`packages/tui/package.json`, `packages/tui/tsconfig.json`, `bun.lock`,
+`changelog.d/workflows-ux.changed.md`, this doc. No other slice was touched; `TODO.md` untouched.
+
+**Not verified:** the orchestrator's full gate (`bun run check`) — run by the script after this, per the
+brief. Everything narrower is above, green.
+
+*— claude-sonnet-4-5 (exec), 2026-11-25*
