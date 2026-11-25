@@ -69,6 +69,18 @@ export interface WsServerOptions {
    * - the upgrade is rate limited before any crypto (F6).
    */
   readonly devices?: DeviceRouteOptions;
+  /**
+   * The A2A route (docs/feat/a2a.md S9), asked FIRST on every request: a
+   * response when it owns the path (`/a2a`, the public agent card), undefined
+   * otherwise, so every other path behaves exactly as without it. It carries
+   * its own caller tokens; the WebSocket token plays no part.
+   */
+  readonly a2a?: {
+    handle(
+      req: Request,
+      srv: { timeout(req: Request, seconds: number): void },
+    ): Response | Promise<Response> | undefined;
+  };
 }
 
 /** What the device route needs from the caller (a `serve` daemon). */
@@ -358,6 +370,10 @@ export function startWsServer(options: WsServerOptions): RunningServer {
     port: options.port,
     ...(options.tls ? { tls: { cert: options.tls.cert, key: options.tls.key } } : {}),
     fetch(req, srv) {
+      const external = options.a2a?.handle(req, srv);
+      if (external !== undefined) {
+        return external;
+      }
       if (devices) {
         const route = deviceRouteOf(new URL(req.url).pathname, devices.serveId);
         if (route === "device") {

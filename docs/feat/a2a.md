@@ -1583,6 +1583,51 @@ clean. Full `bun run check` NOT run (the script runs it). Changelog: the
 existing `changelog.d/a2a.added.md` still covers the feature (serve does not
 speak A2A until S9/S10); no new fragment.
 
+### S9-a2a-http-route — DONE
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+**Load-bearing check (re-run):** `startWsServer`'s `fetch(req, srv)` is the single
+entry of every HTTP request (`ws-server.ts`), so a hook asked first can answer a
+path or return `undefined` and leave every other path as today; Bun's `srv.timeout(req, 0)`
+is reachable from it. Holds (pinned by the "A2A off" and "WebSocket still works" tests).
+
+**As built:**
+- `external/route.ts` (new, protocol-neutral per the owner's decision): `authenticateCaller`
+  (bearer from `Authorization` only, never the URL; any `Origin` → null; compares every
+  caller's token with `tokensMatch`), `readBoundedBody` (declared length, then a streamed
+  count: never buffers past the cap), `EXTERNAL_MAX_BODY_BYTES` = 1 MiB.
+- `a2a/http.ts` (new): `createA2ARoute({requestHandler, card, callers, maxBodyBytes?, onAudit?, pingMs?})`.
+  Card public on `GET|HEAD /.well-known/agent-card.json`; `POST /a2a` only (405 otherwise).
+  Order: auth (401 + audit `a2a-auth-failure`) → `srv.timeout(req, 0)` → bounded body (413) →
+  JSON parse (-32700 / -32600) → content type (-32005) → `validateVersion` (-32009; no header = SDK
+  default 0.3 = refused) → SDK `JsonRpcTransportHandler` (-32601 / -32602 …). A stream is SSE
+  with `: ping` every 15 s; the first event is awaited so a pre-stream error is plain JSON-RPC;
+  the caller dropping cancels only the stream. Callers get the token's name as `ServerCallContext.user`.
+- `ws-server.ts`: `WsServerOptions.a2a?` + `fetch` calls `a2a.handle(req, srv)` first.
+- Drift: the SDK echoes an internal error's message to the caller, so `scrub` replaces any -32603 message with
+  `internal error` (500 for a plain call). Not in the plan; added because a caller must not see internals.
+- The route takes the SDK's request handler (typed loosely); S10 must pass the daemon's `A2ARequestHandler`
+  (not `DefaultRequestHandler`) — not enforceable here without a full executor rig. `daemon/src/index.ts`
+  exports are S10's.
+- No protocol schema change, no `protocol.d/` note, no new changelog fragment (`changelog.d/a2a.added.md` exists; S10 rewrites it).
+
+**Tests** `packages/daemon/test/a2a-http.test.ts` (16, real `startWsServer` on loopback, fake handler):
+public card, 401 ×4 (none / wrong / empty / token in URL) + audit, Origin → 401, caller reaches handler,
+413 (declared + streamed), -32009 (0.3 and no header), -32601/-32700/-32602/-32005, internal error scrubbed,
+405, SSE + ping, pre-stream error as JSON, blocking call, `timeout(req, 0)` only after auth, A2A off → 426 as today,
+WS upgrade still works, no caller → throws. Red: new file on code without the route could not pass (no `a2a` option, no module).
+
+**Mutations** (each restored; 16/16 green after): skip bearer check → red; drop Origin check → red; no streamed
+cap → red; skip `validateVersion` → red; drop `timeout(req,0)` → red; no ping → red; no scrub → red; card needs token → red;
+route claims every path → red (WS upgrade); `ws-server` hook dropped → 11 red. **Survivor:** dropping the declared
+`content-length` fast path stays green — an equivalent mutant (the streamed count catches the same body; the fast path only avoids reading it).
+
+**Unverified:** a real >10 s call against Bun's default idle timeout (too slow for a gate); pinned instead by the
+`timeout(req, 0)` unit. S10's e2e should include one real long call.
+
+**Gate (narrow):** a2a-http 16 pass; ws-server + ws-device-route 33 pass / 1 skip / 0 fail; `tsc -p packages/daemon` clean; biome clean on the 4 files.
+
 ## Review
 
 ### Owner decision 2026-11-25 ~13:20 (from the feat/serve-mcp-server plan, Q1) — binding for the remaining slices
