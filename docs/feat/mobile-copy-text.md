@@ -607,3 +607,15 @@ Executor behaviour: careful, red-first, good gate-driven D3 fix with evidence; b
 3. **Fixed.** "Copy all" now runs `onClose()` and then `onCopyAll` (`SelectTextSheet.tsx`), so the pill is no longer under the Modal. Mutation: drop `onClose()` → the new R4 test is red.
 
 Regressions checked on the diff: the sheet path passes `"sheet"`, so it never holds the countdown; `copyMessage` still resets `released` for both `press` and `action`; the `empty` branch now goes through `copyFlashFor`. None found. Gate: touched tests 52 pass / 0 fail; `bun run lint` clean; `bun run typecheck` red (finding 1 only). All mutations reverted; `git status` clean.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-25* (reviewing `b1dcd35c`, `git diff HEAD~1`)
+
+**Verdict: REQUEST-CHANGES**
+
+1. **HIGH — still open.** `b1dcd35c` changes only this doc. `git ls-files apps/mobile/node_modules` still lists the file, and `git cat-file -t HEAD:apps/mobile/node_modules` → `blob`. `bun run typecheck` is still RED with the same 10 TS2339 errors in `permission-router.ts`. The executor reports that its sandbox refused `git rm --cached`; that is an honest escalation, and the fix belongs to the orchestrator. The doc's commands are correct: `git rm --cached apps/mobile/node_modules`, then commit, then `git ls-files` must print nothing.
+2. There is no code diff, so there is nothing to mutate and no regression surface. Findings 2 and 3 stay fixed (Round 2). `bun run lint` is clean.
+3. Nit: the "Fix round 2" section is signed `claude-opus-5-5`, but the commit message says `(deepseek)`. One of the two is wrong, and §10 relies on the signatures to show which model did what.
+
+Once the untrack commit lands, the branch is PASS as far as this review goes, provided `bun run typecheck` is green in a tree where `apps/mobile/node_modules` is a real directory or absent.
