@@ -33,6 +33,7 @@ import {
   type PushMessage,
   type PushPayload,
   type PushRegisterStatus,
+  QUESTION_SKIP_OPTION,
   type WorkflowRow,
   decodeBase64Url,
   encodeBase64Url,
@@ -321,6 +322,24 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
           },
         };
       }
+      if (held !== undefined && held.type === "question_request") {
+        // A remote agent's question (docs/feat/a2a-client.md C6): opened in
+        // question mode; its preview is the question's first line, and its one
+        // option a `skip` (the answer is text, never an option).
+        const preview = oneLine(held.question.split("\n").find((l) => l.trim() !== ""));
+        return {
+          ...message,
+          ask: {
+            requestId,
+            tool: held.agent?.type ?? "question",
+            title: held.title,
+            ...(preview !== undefined ? { preview } : {}),
+            options: [{ optionId: QUESTION_SKIP_OPTION, kind: "reject_once", name: "Skip" }],
+            question: { maxChars: held.maxChars },
+            ...(command.more !== undefined && command.more > 0 ? { more: command.more } : {}),
+          },
+        };
+      }
       return { ...message, ask: { requestId, tool: "", title: "", options: [] } };
     }
     const turnId = command.turnId ?? "";
@@ -551,7 +570,7 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
           return;
         }
         const update = event.update;
-        if (update.type === "permission_request") {
+        if (update.type === "permission_request" || update.type === "question_request") {
           asks.set(update.requestId, event);
           consume(rules.apply({ type: "ask", sessionId, requestId: update.requestId, attached }));
         } else if (update.type === "permission_resolved") {

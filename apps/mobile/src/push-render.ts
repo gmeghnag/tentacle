@@ -116,6 +116,10 @@ export function projectName(cwd: string): string {
  */
 export function categoryFor(ask: PushAsk): NotificationCategory {
   const kinds = new Set(ask.options.map((o) => o.kind));
+  if (ask.question !== undefined) {
+    // A question's answer is text: no quick action, the sheet opens in question mode.
+    return CATEGORY_OPEN;
+  }
   if (!kinds.has("allow_once")) {
     return CATEGORY_OPEN;
   }

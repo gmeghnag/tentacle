@@ -45,6 +45,15 @@ export const DEFAULT_HARNESS_CLAUDE_CODE = {
   model: "opus",
   idleMinutes: 15,
 } as const;
+/**
+ * A remote A2A agent (docs/feat/a2a-client.md C1): its questions go to the
+ * user; 30 min of silence ends it (remote keep-alives are invisible to us).
+ */
+export const DEFAULT_HARNESS_A2A = {
+  enabled: true,
+  inputFrom: "user",
+  idleMinutes: 30,
+} as const;
 /** Max bytes of a custom `agent_task` description, after trimming. */
 export const MAX_AGENT_TASK_DESCRIPTION_BYTES = 4096;
 /**

@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@a2a-js/sdk": "1.3.0",
     "@tentacle/config": "workspace:*",
     "@tentacle/core": "workspace:*",
     "@tentacle/tools": "workspace:*"

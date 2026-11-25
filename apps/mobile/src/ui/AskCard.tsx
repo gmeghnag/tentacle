@@ -5,12 +5,12 @@
  * scrolls inside the card when expanded, the actions sit OUTSIDE the scroll so
  * they stay reachable at any detent. Deny is grey (`fill`/`label`), never red.
  *
- * testIDs: `perm-reject_once`, `perm-allow_once`, `perm-menu`, `perm-<menuId>`,
+ * testIDs: `perm-reject_once`, `perm-allow_once` (a question: `perm-reply`), `perm-menu`, `perm-<menuId>`,
  * `perm-command-toggle`, `perm-also-asked`, `perm-arming`.
  */
 import { type JSX, type ReactNode, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
-import type { AskCardView, AskMenuItem } from "../ask-card.ts";
+import type { AskAction, AskCardView, AskMenuItem } from "../ask-card.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
 import { PolpettoGlyph } from "./PolpettoGlyph.tsx";
@@ -21,7 +21,7 @@ type Asking = Extract<AskCardView, { kind: "asking" }>;
 export interface AskCardProps {
   readonly palette: Palette;
   readonly view: Asking;
-  readonly onAnswer: (optionId: "reject_once" | "allow_once") => void;
+  readonly onAnswer: (optionId: AskAction["optionId"]) => void;
   readonly onMenu: (id: AskMenuItem["id"]) => void;
   /** Extra rows under the command (the reply field, the auto-accept switch). */
   readonly children?: ReactNode;
@@ -132,7 +132,8 @@ export function AskCard({ palette, view, onAnswer, onMenu, children }: AskCardPr
           </Pressable>
         )}
         {view.actions.map((action) => {
-          const allow = action.optionId === "allow_once";
+          // The primary look: Allow once, or a question's «Answer…» (never Deny/Skip).
+          const allow = action.optionId !== "reject_once";
           return (
             <Pressable
               key={action.optionId}

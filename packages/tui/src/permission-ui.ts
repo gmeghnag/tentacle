@@ -276,6 +276,26 @@ export function buildPermissionChoices(req: PermissionRequest): PermissionChoice
   if (req.kind === "session_hop") {
     return hopChoices(req);
   }
+  // A remote agent's question (docs/feat/a2a-client.md C10): the answer is the
+  // reply TEXT (`allowed:true + message`, sent by the field), never a grant.
+  if (req.kind === "question") {
+    return [
+      ...(req.reply
+        ? [{ label: "Answer…", response: { allowed: true as const }, reply: true as const }]
+        : []),
+      { label: "Skip", response: { allowed: false } },
+    ];
+  }
+  // A model-proposed remote agent: once-only, session-scoped, no "always".
+  if (req.kind === "agent_add") {
+    return [
+      { label: "Yes, for this session", response: { allowed: true, scope: "once" } },
+      { label: "No", response: { allowed: false } },
+      ...(req.reply
+        ? [{ label: "No, let's talk about it", response: { allowed: false }, reply: true as const }]
+        : []),
+    ];
+  }
   // A workflow approval (the hash, or an approve step) is ONE human decision:
   // the daemon offers allow-once / deny only (`daemon/src/permission-map.ts`),
   // so an "always" here would be rejected as "option not offered". A browser

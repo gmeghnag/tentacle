@@ -95,6 +95,8 @@ export type HarnessEvent =
   | {
       readonly kind: "output";
       readonly text?: string;
+      /** The text replaces the artifact's text so far (A2A `append:false`). */
+      readonly replace?: boolean;
       readonly data?: unknown;
       readonly file?: {
         readonly name?: string;

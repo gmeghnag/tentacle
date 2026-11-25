@@ -397,6 +397,7 @@ export function updateToEvent(
     case "session_closed":
     case "permission_request":
     case "permission_resolved":
+    case "question_request":
       return null;
   }
 }

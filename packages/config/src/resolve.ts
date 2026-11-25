@@ -23,6 +23,7 @@ import {
   DEFAULT_CONTEXT_STEP_PERCENT,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_DEDUP_OUTPUT,
+  DEFAULT_HARNESS_A2A,
   DEFAULT_HARNESS_CLAUDE_CODE,
   DEFAULT_MAX_INLINE_OUTPUT_CHARS,
   DEFAULT_MAX_ITERATIONS,
@@ -464,7 +465,7 @@ function parseBool(raw: string | undefined): boolean | undefined {
  * `load.ts` must know it BEFORE scanning (a disabled scan does no I/O).
  */
 /** One `harnesses.<name>` with its defaults (docs/feat/subagent-harness-runners.md D6). */
-export interface ResolvedHarness {
+export interface ResolvedClaudeHarness {
   readonly adapter: "claude-code";
   readonly enabled: boolean;
   readonly command: string;
@@ -474,6 +475,21 @@ export interface ResolvedHarness {
   readonly configured: boolean;
 }
 
+/** One `harnesses.<name>` with `adapter: "a2a"` (docs/feat/a2a-client.md C1). */
+export interface ResolvedA2AHarness {
+  readonly adapter: "a2a";
+  readonly enabled: boolean;
+  readonly card: string;
+  readonly tokenCommand?: string;
+  readonly description?: string;
+  readonly inputFrom: "parent" | "user" | "both";
+  readonly idleMinutes: number;
+  /** Always written by the config file. */
+  readonly configured: true;
+}
+
+export type ResolvedHarness = ResolvedClaudeHarness | ResolvedA2AHarness;
+
 /** `harnesses`, defaults filled: `claude-code` is always there (on by default, Owner A4). */
 export function resolveHarnesses(
   file: FileConfig["harnesses"],
@@ -482,6 +498,20 @@ export function resolveHarnesses(
   type Entry = NonNullable<FileConfig["harnesses"]>[string];
   const entries: Record<string, Entry | undefined> = { "claude-code": undefined, ...(file ?? {}) };
   for (const [name, entry] of Object.entries(entries)) {
+    if (entry?.adapter === "a2a") {
+      const a = DEFAULT_HARNESS_A2A;
+      out[name] = {
+        adapter: "a2a",
+        enabled: entry.enabled ?? a.enabled,
+        card: entry.card,
+        ...(entry.tokenCommand !== undefined ? { tokenCommand: entry.tokenCommand } : {}),
+        ...(entry.description !== undefined ? { description: entry.description } : {}),
+        inputFrom: entry.inputFrom ?? a.inputFrom,
+        idleMinutes: entry.idleMinutes ?? a.idleMinutes,
+        configured: true,
+      };
+      continue;
+    }
     const d = DEFAULT_HARNESS_CLAUDE_CODE;
     out[name] = {
       adapter: entry?.adapter ?? "claude-code",

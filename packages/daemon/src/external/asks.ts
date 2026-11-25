@@ -12,6 +12,7 @@
  * (AGENTS §7): it never creates a lasting approval.
  */
 import {
+  A2A_ADD_AGENT_TOOL,
   BROWSER_ACTION_TOOL,
   type PermissionKind,
   WORKFLOW_APPROVE_TOOL,
@@ -72,7 +73,9 @@ export function askOf(u: PermissionRequestUpdate, own: boolean): PendingAsk {
       ? "workflow_approve"
       : u.tool === BROWSER_ACTION_TOOL
         ? "browser_action"
-        : "tool";
+        : u.tool === A2A_ADD_AGENT_TOOL
+          ? "agent_add"
+          : "tool";
   return {
     requestId: u.requestId,
     title: u.title,

@@ -65,6 +65,15 @@ export type InboxPush =
 interface InboxItem {
   readonly text: string;
   readonly from: AgentMessageSender;
+  /** What the sender wrote, unwrapped (a remote agent gets this, not `text`). */
+  readonly raw: string;
+}
+
+/** One text taken by `next`: the wrapped form, the sender's own words, who wrote it. */
+export interface InboxMessage {
+  readonly text: string;
+  readonly raw: string;
+  readonly from: AgentMessageSender;
 }
 
 /** What an inbox is built with. */
@@ -92,6 +101,8 @@ export class AgentInbox {
    */
   private readonly readCounts: Record<AgentMessageSender, number> = { agent: 0, user: 0 };
   private readonly onRead?: () => void;
+  /** The ONE reader blocked in `next` (a harness child waiting on a reply). */
+  private waiter: ((item: InboxItem | undefined) => void) | undefined;
 
   constructor(options: AgentInboxOptions = {}) {
     this.onRead = options.onRead;
@@ -126,15 +137,56 @@ export class AgentInbox {
    * already holds `AGENT_INBOX_MAX` unread ones (`full`): the sender reports it,
    * nothing is queued.
    */
-  push(text: string, from: AgentMessageSender = "agent"): InboxPush {
+  push(text: string, from: AgentMessageSender = "agent", raw: string = text): InboxPush {
     if (this.isClosed) {
       return { ok: false, reason: "closed" };
     }
     if (this.items.length >= AGENT_INBOX_MAX) {
       return { ok: false, reason: "full" };
     }
-    this.items.push({ text, from });
+    const item: InboxItem = { text, from, raw };
+    const waiter = this.waiter;
+    if (waiter !== undefined) {
+      // A reader is blocked in `next`: handed over in this same stretch, read.
+      this.waiter = undefined;
+      this.readCounts[from] += 1;
+      this.onRead?.();
+      waiter(item);
+      return { ok: true, index: this.readCounts[from] };
+    }
+    this.items.push(item);
     return { ok: true, index: this.readCounts[from] + this.unreadFrom(from) };
+  }
+
+  /**
+   * Wait for the NEXT text pushed after this call (docs/feat/a2a-client.md C6,
+   * the `parent` route of a remote question): the reply to THIS question. A
+   * text already queued was written before the question was raised (a stale
+   * message, or a late reply to an earlier question another route answered),
+   * so it is never taken here: it stays queued, and `close` reports it unread.
+   * `undefined` when the inbox is (or gets) closed or `signal` aborts — nothing
+   * is taken then. One reader at a time: a second `next` releases the first
+   * with `undefined`.
+   */
+  next(signal: AbortSignal): Promise<InboxMessage | undefined> {
+    if (this.isClosed || signal.aborted) {
+      return Promise.resolve(undefined);
+    }
+    return new Promise((resolve) => {
+      const settle = (item: InboxItem | undefined): void => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(item);
+      };
+      const onAbort = (): void => {
+        if (this.waiter === settle) {
+          this.waiter = undefined;
+        }
+        resolve(undefined);
+      };
+      this.release();
+      this.waiter = settle;
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   /** Take everything queued (in order). A closed inbox has nothing left to read. */
@@ -159,6 +211,7 @@ export class AgentInbox {
       return this.takeAll();
     }
     this.isClosed = true;
+    this.release();
     return [];
   }
 
@@ -172,7 +225,15 @@ export class AgentInbox {
       return [];
     }
     this.isClosed = true;
+    this.release();
     return this.items.splice(0).map((item) => item.text);
+  }
+
+  /** A reader blocked in `next` learns it gets nothing: it took nothing. */
+  private release(): void {
+    const waiter = this.waiter;
+    this.waiter = undefined;
+    waiter?.(undefined);
   }
 
   /**

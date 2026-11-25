@@ -37,6 +37,14 @@ export const WORKFLOW_APPROVE_TOOL = "workflow_approve";
  */
 export const BROWSER_ACTION_TOOL = "browser_action";
 
+/**
+ * The wire `tool` of the ask to use a remote agent the MODEL proposed
+ * (docs/feat/a2a-client.md C11): the client maps it back to `kind:
+ * "agent_add"`, which auto-accept never answers (a model-supplied URL may come
+ * from injected text).
+ */
+export const A2A_ADD_AGENT_TOOL = "a2a_add_agent";
+
 export interface PermissionRequest {
   /**
    * What is asked (laptop-internal, never on the wire): a tool call (absent =
@@ -48,8 +56,19 @@ export interface PermissionRequest {
    * `workflow_approve` (a workflow's hash approval, or its `approve` step —
    * docs/feat/agent-workflows.md D2/D3) is NEVER answered by auto-accept,
    * nor is a `browser_action` (acting AS the user on the web, browser-inspect Q3).
+   * A `question` is a remote agent asking the PERSON (docs/feat/a2a-client.md
+   * C6): its answer is `{allowed: true, message: <text>}`, `allowed: false` =
+   * skipped — a human's text, never auto-accepted. An `agent_add` approves a
+   * remote agent the model proposed (C11): once-only, never auto-accepted.
    */
-  readonly kind?: "tool" | "hooks_trust" | "session_hop" | "workflow_approve" | "browser_action";
+  readonly kind?:
+    | "tool"
+    | "hooks_trust"
+    | "session_hop"
+    | "workflow_approve"
+    | "browser_action"
+    | "question"
+    | "agent_add";
   /**
    * Slack (laptop-internal, never on the wire): this `session_hop` is one
    * auto-accept MAY answer, because the LAPTOP's own rule said so
@@ -106,6 +125,10 @@ export const EXTERNAL_ANSWER: { readonly [K in PermissionKind]: "once" | "owner-
   // A click/type in the owner's own Chrome: only the owner ever answers it
   // (docs/feat/browser-inspect.md Q3; a remote is not trusted).
   browser_action: "owner-only",
+  // A remote agent's question to the PERSON, and a new destination the model
+  // proposed (docs/feat/a2a-client.md C6/C11): the owner's, in every mode.
+  question: "owner-only",
+  agent_add: "owner-only",
 };
 
 /** May an external caller answer an ask of this kind? `undefined` = not known = never (fail-closed). */
@@ -139,7 +162,9 @@ export interface PermissionResponse {
   /**
    * The person's reply with a refusal (only with `allowed: false`, only for a
    * request with `reply`): the model gets it with the denial
-   * (docs/feat/permission-reply.md). Ignored on an approval.
+   * (docs/feat/permission-reply.md). Ignored on an approval — except for a
+   * `question` ask, whose ANSWER it is, with `allowed: true`
+   * (docs/feat/a2a-client.md C6).
    */
   readonly message?: string;
   /**
@@ -365,6 +390,10 @@ export function autoApproves(req: PermissionRequest, own = true): boolean {
     // A browser action acts AS the user on the web: its own switch, never the
     // session's auto-accept (docs/feat/browser-inspect.md Q3).
     req.kind !== "browser_action" &&
+    // A remote agent's question needs a human's text; a model-proposed remote
+    // agent is a new destination (docs/feat/a2a-client.md C6/C11).
+    req.kind !== "question" &&
+    req.kind !== "agent_add" &&
     (req.kind !== "session_hop" || req.hopAuto === true)
   );
 }
@@ -372,11 +401,14 @@ export function autoApproves(req: PermissionRequest, own = true): boolean {
 /**
  * An ask answered allow-once or deny only, on every surface: a workflow's
  * approval (a merge) and a browser action (acting as the user on the web) are
- * each one human decision. The daemon offers exactly these options
+ * each one human decision, as is a model-proposed remote agent (session-only,
+ * docs/feat/a2a-client.md C11). The daemon offers exactly these options
  * (`permissionOptions`), so a surface offering "always" would be refused.
  */
 export function onceOnlyAsk(req: PermissionRequest): boolean {
-  return req.kind === "workflow_approve" || req.kind === "browser_action";
+  return (
+    req.kind === "workflow_approve" || req.kind === "browser_action" || req.kind === "agent_add"
+  );
 }
 
 /**

@@ -26,7 +26,7 @@ import {
 } from "react-native";
 import { askCard } from "../ask-card.ts";
 import { askSurface } from "../ask-park.ts";
-import type { PermissionSheet, SheetState } from "../permission-sheet.ts";
+import { type PermissionSheet, type SheetState, replyCopy } from "../permission-sheet.ts";
 import { DENSE_FONT_SCALE, type Palette, radius, size, typography } from "../theme.ts";
 import { AskCard } from "../ui/AskCard.tsx";
 import { AskSlim } from "../ui/AskSlim.tsx";
@@ -140,7 +140,7 @@ export function PermissionSheetView({
                   styles.reply,
                   { color: palette.label, backgroundColor: palette.fill },
                 ]}
-                placeholder="Tell it what to do instead"
+                placeholder={replyCopy(asking.request).placeholder}
                 placeholderTextColor={palette.sec}
                 value={asking.replyText}
                 onChangeText={(text) => sheet.setReplyText(text)}
@@ -149,7 +149,7 @@ export function PermissionSheetView({
               <Pressable
                 testID="perm-reply-send"
                 accessibilityRole="button"
-                accessibilityLabel="Send reply"
+                accessibilityLabel={replyCopy(asking.request).send}
                 accessibilityState={{ disabled: !asking.armed }}
                 disabled={!asking.armed}
                 onPress={() => sheet.sendReply()}
@@ -159,7 +159,7 @@ export function PermissionSheetView({
                   maxFontSizeMultiplier={DENSE_FONT_SCALE}
                   style={[typography.headline, { color: palette.accent }]}
                 >
-                  Send reply
+                  {replyCopy(asking.request).send}
                 </Text>
               </Pressable>
             </>

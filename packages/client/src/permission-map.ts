@@ -4,7 +4,11 @@
  * daemon's `outcomeToResponse`.
  */
 import type { AnswerLostCause, PermissionResponse } from "@tentacle/core";
-import { MAX_PERMISSION_REPLY_CHARS, type PermissionOutcome } from "@tentacle/protocol";
+import {
+  MAX_PERMISSION_REPLY_CHARS,
+  MAX_QUESTION_ANSWER_CHARS,
+  type PermissionOutcome,
+} from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import { SessionLostError } from "./session-lost.ts";
 
@@ -18,7 +22,20 @@ const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
  * pod may advertise anything). Nothing left → null (a plain No).
  */
 export function normalizePermissionReply(text: string, maxChars: number): string | null {
-  const limit = Math.max(0, Math.min(Math.floor(maxChars), MAX_PERMISSION_REPLY_CHARS));
+  return normalizeText(text, maxChars, MAX_PERMISSION_REPLY_CHARS);
+}
+
+/**
+ * An answer to a remote agent's question as it may go on the wire
+ * (docs/feat/a2a-client.md C6): the same cleaning as a reply, clamped to
+ * `MAX_QUESTION_ANSWER_CHARS`. Nothing left → null (a skip).
+ */
+export function normalizeQuestionAnswer(text: string, maxChars: number): string | null {
+  return normalizeText(text, maxChars, MAX_QUESTION_ANSWER_CHARS);
+}
+
+function normalizeText(text: string, maxChars: number, cap: number): string | null {
+  const limit = Math.max(0, Math.min(Math.floor(maxChars), cap));
   const clean = text.replace(/\r\n?/g, "\n").replace(CONTROLS, "").trim().slice(0, limit).trimEnd();
   return clean === "" ? null : clean;
 }

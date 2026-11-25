@@ -27,7 +27,8 @@ export interface AskCtx {
 }
 
 export interface AskAction {
-  readonly optionId: "reject_once" | "allow_once";
+  /** `reply` only for a remote question, whose answer IS the reply (a2a-client C10). */
+  readonly optionId: "reject_once" | "allow_once" | "reply";
   readonly label: string;
 }
 
@@ -48,8 +49,11 @@ export type AskCardView =
       readonly title: string;
       readonly preview: CommandPreview | null;
       readonly armed: boolean;
-      /** Deny first, Allow once last (Deny is never the primary look). */
-      readonly actions: readonly [AskAction, AskAction];
+      /**
+       * Deny first, Allow once last (Deny is never the primary look). A remote
+       * question: Skip, then «Answer…» when a reply is bound (else Skip alone).
+       */
+      readonly actions: readonly AskAction[];
       /** The rare options behind `…`; null when there are none (no `…`). */
       readonly menu: readonly AskMenuItem[] | null;
       readonly alsoAsked: string | null;
@@ -89,11 +93,15 @@ export function askCard(state: SheetState, ctx: AskCtx): AskCardView | null {
   const label = (id: SheetOptionId, fallback: string): string =>
     state.options.find((o) => o.optionId === id)?.label ?? fallback;
   const has = (id: SheetOptionId): boolean => state.options.some((o) => o.optionId === id);
+  // A remote agent's question (docs/feat/a2a-client.md C10) is never an
+  // approval: its answer is the reply, so «Answer…» takes the allow capsule's
+  // place and leaves the `…` menu.
+  const question = state.request.kind === "question";
   const menu: AskMenuItem[] = [];
   if (has("allow_always")) {
     menu.push({ id: "allow_always", label: label("allow_always", "") });
   }
-  if (has("reply")) {
+  if (has("reply") && !question) {
     menu.push({ id: "reply", label: label("reply", "") });
   }
   if (ctx.hasAutoAccept) {
@@ -113,10 +121,17 @@ export function askCard(state: SheetState, ctx: AskCtx): AskCardView | null {
     preview:
       detail === undefined || detail === "" ? null : commandPreview(detail, { cols: ctx.cols }),
     armed: state.armed,
-    actions: [
-      { optionId: "reject_once", label: label("reject_once", "Deny") },
-      { optionId: "allow_once", label: label("allow_once", "Allow once") },
-    ],
+    actions: question
+      ? [
+          { optionId: "reject_once", label: label("reject_once", "Skip") },
+          ...(has("reply")
+            ? [{ optionId: "reply" as const, label: label("reply", "Answer…") }]
+            : []),
+        ]
+      : [
+          { optionId: "reject_once", label: label("reject_once", "Deny") },
+          { optionId: "allow_once", label: label("allow_once", "Allow once") },
+        ],
     menu: menu.length > 0 ? menu : null,
     alsoAsked: state.alsoAsked.length > 0 ? `Also asked on ${state.alsoAsked.join(", ")}` : null,
   };
