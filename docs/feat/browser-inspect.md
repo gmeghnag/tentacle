@@ -525,12 +525,31 @@ first merge after B1–B3.
   shared «tentacle» group. — **Rec: one per session** (D1 scope is visible to
   the user).
 
+### Spike B0 results (2026-11-25, owner's real Chrome profile, Sonnet-built throwaway spike)
+
+| Unknown | Result |
+|---|---|
+| U7 key-pinned id | ✅ id matches the pinned `key` |
+| U2 `chrome.debugger` on the default profile | ✅ attaches (`Network.enable` events flow) — the «real profile» direction holds |
+| U1 infobar | ⚠️ «… started debugging this browser» shows on **every** tab and window while attached (browser-wide). Cancel → `debugger.onDetach` reason `canceled_by_user` → treat as a revocation: no silent re-attach, the tool says so and asks |
+| U5 cookie headers | ✅ raw request/response headers incl. `cookie` / `set-cookie` (`*ExtraInfo`) — masking (D2) is mandatory |
+| U3 DevTools | ✅ coexists with our debugger session |
+| U4 refusals | ✅ `chrome://` («Cannot access a chrome:// URL») and the Web Store («cannot be scripted») refused by Chrome; **`chrome-extension://` pages DO attach** → our tools must refuse every extension page themselves |
+| U6 Chrome quit | ✅ host gets STDIN EOF and exits; no orphan |
+| Worker alive ≥ 10 min idle with the port | ✅ one boot, a heartbeat every 60 s, host alive |
+| Background-tab screenshot | ✅ (~265 KB) |
+| **NEW: cross-site navigation** | the debugger DETACHES (`target_closed`) ~1 s after navigating to another site (site-isolation process swap) → re-attach automatically when the tab is still ours (not a revocation); verify the first requests of the new site are not lost (attach-then-navigate if needed) |
+| **NEW: worker start** | the MV3 worker does NOT start when Chrome opens; it woke only on a later tab event (~7 min) → the extension must open its port in `chrome.runtime.onStartup` (and `onInstalled`) |
+| **RISK: managed browser** | the owner's Chrome is managed by an organization: a future policy could block Developer mode, the unpacked extension or `chrome.debugger` — `tentacle browser status` must detect and say it |
+
+The spike was removed after the run (extension, native-host manifest, logs with browsing URLs).
+
 ### Owner answers (2026-11-25 ~11:50)
 
 - **Q1 pod sessions:** no browser tools in v1 (as recommended).
 - **Q2 «clear» and the log:** yes, the log = what the model saw, with the «secrets visible» label (as recommended).
 - **Q3 auto mode:** a SEPARATE browser switch; session auto-accept never answers browser asks; payment clicks and password/card typing always ask (as recommended).
-- **Q4 debugger policy:** pending spike B0 (infobar scope U1).
+- **Q4 debugger policy:** attach while the session's group is in use, detach after 10 idle minutes (as recommended) — decided after B0 showed the infobar is browser-wide.
 - **Q5 distribution:** unpacked + pinned key, `tentacle browser install`, while pre-public (as recommended).
 - **Q6 Chrome not running:** `browser_open` launches it in the background (`open -g`, ≤ 10 s) (as recommended).
 - **Q7 screenshots:** session image store, deleted with the session (as recommended).
