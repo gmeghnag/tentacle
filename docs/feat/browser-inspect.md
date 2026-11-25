@@ -474,6 +474,17 @@ and here the effect is acting AS the user on the web. v1: **pod sessions get no
 
 *— claude-sonnet-5-5, 2026-11-25*
 
+### B3 — extension (as built)
+
+- **Load-bearing check**: B0 proved port + `chrome.debugger` on the real profile and the worker-start / cross-site-detach behaviours; B3 encodes them (port opened in `onStartup`/`onInstalled`/top level + reconnect with backoff; `target_closed` re-attaches while traced; `canceled_by_user` is a revocation). Holds. (No separate B3 plan section: scope from the Slices table + «Debugger only when needed» + §5/§6.)
+- New app `apps/browser-extension/` (plain ESM/JS, no build step; own `package.json`): `manifest.json` (MV3, pinned `key`, `<all_urls>`, `debugger`, `webRequest`), `src/background.js` (wiring only), `src/ops.js` (all logic over an injected `chrome`/`send`: claim/release/tabs/open/read/click/type/net; one tab group per session `tentacle · <title>`; refuses non-http(s) pages incl. `chrome-extension://`; debugger on demand, 10-min idle detach re-armed by use; headers-tier `webRequest` feed; handover event), `src/page.js` (content script: outline with stable `eN` refs, text/html read with DOM password values stripped, click/type with `probe` = facts without acting, password echo as dots), `src/popup.{html,js}` (handover).
+- `packages/browser/src/link-schema.ts`: `BROWSER_EXTENSION_ID` replaced by the id its manifest key yields (pinned by `apps/browser-extension/test/manifest.test.ts`); additive: op `net {start|stop}`, event `net {tab, tier, entry}`, `probe?` on `click`/`type`. `packages/cli/src/browser-install.ts`: install copies the extension to `<configDir>/browser/extension` and prints the «Load unpacked» step; uninstall removes it.
+- Tests: `apps/browser-extension/test/{ops,page,manifest}.test.ts` (16, fake chrome / fake DOM), two in `browser-install.test.ts`; 78 pass across the touched files. Biome clean on touched files. No `PROTOCOL_VERSION` change (hub protocol only). Fragment appended to `changelog.d/browser-inspect.added.md`.
+- **Drift**: (1) red-before-green not stepwise; non-vacuity by mutation. (2) JS, not TS, with no own `tsc -p` (no build step; a typed build is debt). (3) `browser_console` hooks (main-world script) deferred to B4 where the tool lands; the `net` events are sent but the hub does not yet ring them (B4). (4) Headers tier sends only url/method/status/type from `webRequest.onCompleted`. (5) Real-Chrome smoke (`TENTACLE_BROWSER_TESTS=1`) not written; unverified in a live Chrome — verify by `tentacle browser install`, loading the folder, then `tentacle browser status`.
+- **Mutations** (each failed the suite, then reverted; baseline 16 pass): `isTouchable` accepts any string → 2 fail; `canceled_by_user` branch disabled → 1 fail; password echo disabled → 1 fail; html password-strip disabled → 1 fail. (The probe-acts and idle-re-arm mutations were not run.)
+
+*— claude-sonnet-5-5, 2026-11-25*
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-24*

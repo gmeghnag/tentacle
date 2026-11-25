@@ -31,6 +31,25 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
+describe("browser install copies the extension", () => {
+  test("unpacked extension lands in <configDir>/browser/extension; uninstall removes it", () => {
+    const lines = installBrowser(env);
+    const dest = join(env.configDir, "browser", "extension");
+    expect(existsSync(join(dest, "manifest.json"))).toBe(true);
+    expect(existsSync(join(dest, "src", "background.js"))).toBe(true);
+    expect(existsSync(join(dest, "package.json"))).toBe(false);
+    expect(lines.join("\n")).toContain("Load unpacked");
+    uninstallBrowser(env);
+    expect(existsSync(dest)).toBe(false);
+  });
+
+  test("sources missing: says so, still writes the host side", () => {
+    const lines = installBrowser({ ...env, extensionSrc: join(root, "nope") });
+    expect(lines.join("\n")).toContain("sources not found");
+    expect(existsSync(wrapperPath(env.configDir))).toBe(true);
+  });
+});
+
 describe("tentacle browser install / status / uninstall", () => {
   test("the manifest names ONLY the pinned origin and the absolute wrapper, no wildcard", () => {
     installBrowser(env);
@@ -75,7 +94,7 @@ describe("tentacle browser install / status / uninstall", () => {
 
   test("uninstall removes both files and is a no-op the second time", () => {
     installBrowser(env);
-    expect(uninstallBrowser(env)).toHaveLength(2);
+    expect(uninstallBrowser(env)).toHaveLength(3);
     expect(existsSync(manifestPath(env.home))).toBe(false);
     expect(existsSync(wrapperPath(env.configDir))).toBe(false);
     expect(uninstallBrowser(env)).toEqual([]);

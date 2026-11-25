@@ -17,7 +17,7 @@ export const HOST_TO_CHROME_MAX_BYTES = 1024 * 1024;
  * the one its manifest `key` yields (U7).
  */
 export const BROWSER_HOST_NAME = "so.tentacle.browser";
-export const BROWSER_EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+export const BROWSER_EXTENSION_ID = "kkhicjoemmpaaaepoaeenijabpeamcog";
 /** The hidden subcommand Chrome's wrapper runs (pinned by a `main` dispatch test). */
 export const BROWSER_HOST_SUBCOMMAND = "__browser-host";
 
@@ -76,6 +76,14 @@ export const HubOp = z.discriminatedUnion("op", [
     ref: z.string().optional(),
     x: z.number().optional(),
     y: z.number().optional(),
+    /** Resolve the target and report its facts WITHOUT acting (the classifier runs first, §5). */
+    probe: z.boolean().optional(),
+  }),
+  z.object({
+    op: z.literal("net"),
+    sessionUid: z.string(),
+    tab: TabId,
+    action: z.enum(["start", "stop"]),
   }),
   z.object({
     op: z.literal("type"),
@@ -84,6 +92,7 @@ export const HubOp = z.discriminatedUnion("op", [
     ref: z.string(),
     text: z.string().max(64 * 1024),
     submit: z.boolean().optional(),
+    probe: z.boolean().optional(),
   }),
 ]);
 export type HubOp = z.infer<typeof HubOp>;
@@ -97,5 +106,12 @@ export const HubEvent = z.discriminatedUnion("event", [
     reason: z.enum(["canceled_by_user", "target_closed", "other"]),
   }),
   z.object({ event: z.literal("chrome_closed") }),
+  /** One traced request / WS message (`tier`: headers-only webRequest, or full CDP). */
+  z.object({
+    event: z.literal("net"),
+    tab: TabId,
+    tier: z.enum(["headers", "full"]),
+    entry: z.record(z.unknown()),
+  }),
 ]);
 export type HubEvent = z.infer<typeof HubEvent>;

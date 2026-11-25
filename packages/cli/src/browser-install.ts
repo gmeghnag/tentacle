@@ -6,7 +6,15 @@
  * pinned extension origin (no wildcards). The unpacked extension itself ships
  * with B3; this slice is the host side.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   BROWSER_EXTENSION_ID,
@@ -21,6 +29,8 @@ export interface BrowserInstallEnv {
   /** The command that runs THIS tentacle (`selfCommand()`): absolute paths. */
   readonly self: readonly string[];
   readonly extensionId?: string;
+  /** The unpacked extension source (tests inject); default: the repo's apps/browser-extension. */
+  readonly extensionSrc?: string;
   /** The org-managed-Chrome policy file (tests inject). */
   readonly managedPolicyPath?: string;
 }
@@ -38,6 +48,11 @@ export function manifestPath(home: string): string {
     `${BROWSER_HOST_NAME}.json`,
   );
 }
+export function extensionDir(configDir: string): string {
+  return join(browserDir(configDir), "extension");
+}
+const DEFAULT_EXTENSION_SRC = new URL("../../../apps/browser-extension", import.meta.url).pathname;
+
 export function wrapperPath(configDir: string): string {
   return join(browserDir(configDir), "host");
 }
@@ -75,14 +90,31 @@ export function installBrowser(env: BrowserInstallEnv): string[] {
   const manifest = manifestPath(env.home);
   mkdirSync(join(manifest, ".."), { recursive: true });
   writeFileSync(manifest, manifestJson(wrapper, id));
-  return [`host wrapper: ${wrapper}`, `host manifest: ${manifest}`];
+  const out = [`host wrapper: ${wrapper}`, `host manifest: ${manifest}`];
+  const src = env.extensionSrc ?? DEFAULT_EXTENSION_SRC;
+  if (existsSync(join(src, "manifest.json"))) {
+    const dest = extensionDir(env.configDir);
+    rmSync(dest, { recursive: true, force: true });
+    cpSync(src, dest, { recursive: true, filter: (f) => !f.endsWith("package.json") });
+    out.push(
+      `extension: ${dest}`,
+      "next: chrome://extensions → Developer mode → Load unpacked → choose that folder",
+    );
+  } else {
+    out.push("extension: sources not found next to this build — run install from a repo checkout");
+  }
+  return out;
 }
 
 export function uninstallBrowser(env: BrowserInstallEnv): string[] {
   const removed: string[] = [];
-  for (const p of [manifestPath(env.home), wrapperPath(env.configDir)]) {
+  for (const p of [
+    manifestPath(env.home),
+    wrapperPath(env.configDir),
+    extensionDir(env.configDir),
+  ]) {
     if (existsSync(p)) {
-      rmSync(p, { force: true });
+      rmSync(p, { force: true, recursive: true });
       removed.push(p);
     }
   }
