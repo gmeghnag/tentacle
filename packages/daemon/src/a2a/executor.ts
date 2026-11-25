@@ -47,8 +47,13 @@ import {
   type ServerCallContext,
   type TaskStore,
 } from "@a2a-js/sdk/server";
-import { type WorkUnit, unifyTurn } from "@tentacle/core";
-import type { KnownSessionUpdateParams } from "@tentacle/protocol";
+import { type WorkUnit, unifyTurn, unifyWorkflow } from "@tentacle/core";
+import {
+  type KnownSessionUpdateParams,
+  type WorkflowInputValue,
+  WorkflowResultSchema,
+  type WorkflowRow,
+} from "@tentacle/protocol";
 import { ErrorCode, RpcError, type RpcPeer } from "@tentacle/transport";
 import type { HooksTrustPrecheck } from "../connection.ts";
 import {
@@ -95,6 +100,11 @@ export const REFUSED = {
 export interface CallerPolicy {
   /** Who answers its tasks' asks: the owner only (default), or the caller too. */
   readonly asks: AskMode;
+  /**
+   * May this caller start a workflow run (a `tentacle/workflow` data part)?
+   * Default off: a run is the owner's automation, so it is opt-in per caller.
+   */
+  readonly workflows?: boolean;
 }
 
 export interface A2AExecutorOptions {
@@ -117,6 +127,10 @@ interface Watcher {
   /** The caller that started it: the only one whose answer is admitted. */
   readonly caller: string;
   readonly mode: AskMode;
+  /** A turn task, or a workflow run task (its unit is the run, `runId`). */
+  readonly kind: "turn" | "workflow";
+  /** A run task: the run's `wf-N`, once the start answered. */
+  runId?: string;
   readonly peer: RpcPeer;
   readonly bus: ExecutionEventBus;
   readonly asks: Map<string, PendingAsk>;
@@ -203,25 +217,35 @@ export class A2AExecutor implements AgentExecutor {
             : REFUSED.empty,
       );
     }
-    if (parts.workflow !== undefined) {
+    const policy = this.opts.callerPolicy?.(user.userName);
+    if (parts.workflow !== undefined && policy?.workflows !== true) {
       return reject(REFUSED.workflow);
     }
     if (parts.answer !== undefined) {
       return reject(REFUSED.answer);
     }
-    if (parts.text === "") {
+    if (parts.text === "" && parts.workflow === undefined) {
       return reject(REFUSED.empty);
     }
 
-    const mode = this.opts.callerPolicy?.(user.userName)?.asks ?? "owner";
+    const mode = policy?.asks ?? "owner";
     const watcher = this.connect(
-      { taskId, contextId, sessionId, caller: user.userName, mode },
+      {
+        taskId,
+        contextId,
+        sessionId,
+        caller: user.userName,
+        mode,
+        kind: parts.workflow === undefined ? "turn" : "workflow",
+      },
       bus,
     );
     try {
       await openSession(watcher.peer, {
         sessionId,
-        title: a2aTitle(parts.text),
+        title: a2aTitle(
+          parts.workflow === undefined ? parts.text : `workflow ${parts.workflow.name}`,
+        ),
         client: { name: A2A_PROTOCOL, version: this.opts.version ?? "0" },
       });
     } catch (error) {
@@ -233,6 +257,10 @@ export class A2AExecutor implements AgentExecutor {
     }
 
     this.publishFirst(ctx, bus, { state: TaskState.TASK_STATE_WORKING });
+    if (parts.workflow !== undefined) {
+      await this.startRun(watcher, parts.workflow);
+      return watcher.done;
+    }
     try {
       await watcher.peer.request("session/prompt", {
         sessionId,
@@ -254,9 +282,69 @@ export class A2AExecutor implements AgentExecutor {
     if (watcher === undefined || watcher.ended) {
       throw new TaskNotCancelableError(`task ${taskId} is not running here`);
     }
+    if (watcher.kind === "workflow") {
+      // The run's own stop; CANCELED comes from its end (`stopped:cancelled`).
+      if (watcher.runId === undefined) {
+        throw new TaskNotCancelableError(`task ${taskId} has not started its run yet`);
+      }
+      await watcher.peer
+        .request("session/workflow", {
+          sessionId: watcher.sessionId,
+          action: "stop",
+          runId: watcher.runId,
+        })
+        .catch(() => {});
+      return;
+    }
     // Per-turn cancel: a turn another device started meanwhile is never hit.
     // CANCELED comes from the turn's own end (the owner's stop is the same path).
     watcher.peer.notify("session/cancel", { sessionId: watcher.sessionId, turnId: taskId });
+  }
+
+  /**
+   * Start a run (`session/workflow{start}`, the user's own method) under the
+   * task's id: its asks and its end are then the task's. A refusal ends the
+   * task here, with the daemon's own one-line reason (`running` → REJECTED like
+   * a busy context; `changed`, `invalid`, `inputs`, … → FAILED).
+   */
+  private async startRun(
+    w: Watcher,
+    workflow: { readonly name: string; readonly inputs: WorkflowInputValue[] },
+  ): Promise<void> {
+    let result: ReturnType<typeof WorkflowResultSchema.safeParse>;
+    try {
+      result = WorkflowResultSchema.safeParse(
+        await w.peer.request("session/workflow", {
+          sessionId: w.sessionId,
+          action: "start",
+          name: workflow.name,
+          inputs: workflow.inputs,
+          turnId: w.taskId,
+        }),
+      );
+    } catch (error) {
+      return this.end(w, {
+        state: TaskState.TASK_STATE_FAILED,
+        message: `the session refused the workflow${codeOf(error)}`,
+      });
+    }
+    if (!result.success) {
+      return this.end(w, {
+        state: TaskState.TASK_STATE_FAILED,
+        message: "the session answered the workflow start unreadably",
+      });
+    }
+    const { ok, runId, reason, refusal } = result.data;
+    if (!ok || runId === undefined) {
+      const busy = refusal === "running";
+      return this.end(w, {
+        state: busy ? TaskState.TASK_STATE_REJECTED : TaskState.TASK_STATE_FAILED,
+        message: busy ? REFUSED.busy : (reason ?? "the workflow did not start"),
+      });
+    }
+    w.runId = runId;
+    // The run may have moved (or ended) before this answer was read.
+    this.syncRun(w);
   }
 
   // --- follow-up ------------------------------------------------------------
@@ -364,6 +452,7 @@ export class A2AExecutor implements AgentExecutor {
       readonly sessionId: string;
       readonly caller: string;
       readonly mode: AskMode;
+      readonly kind: "turn" | "workflow";
     },
     bus: ExecutionEventBus,
   ): Watcher {
@@ -376,7 +465,8 @@ export class A2AExecutor implements AgentExecutor {
       ...ids,
       bus,
       asks: new Map(),
-      inTurn: false,
+      // A run's asks are the task's from the start (they carry its turnId).
+      inTurn: ids.kind === "workflow",
       afterTool: false,
       hasChunks: false,
       last: { state: TaskState.TASK_STATE_WORKING },
@@ -405,23 +495,28 @@ export class A2AExecutor implements AgentExecutor {
     }
     const u = params.update;
     switch (u.type) {
+      case "workflows":
+        if (w.kind === "workflow") {
+          this.syncRun(w, u.runs);
+        }
+        return;
       case "turn_start":
-        if (u.turnId === w.taskId) {
+        if (w.kind === "turn" && u.turnId === w.taskId) {
           w.inTurn = true;
         }
         return;
       case "tool_call":
-        if (w.inTurn) {
+        if (w.kind === "turn" && w.inTurn) {
           w.afterTool = true;
         }
         return;
       case "agent_message_chunk":
-        if (w.inTurn && u.content.type === "text" && u.content.text !== "") {
+        if (w.kind === "turn" && w.inTurn && u.content.type === "text" && u.content.text !== "") {
           this.publishChunk(w, u.content.text);
         }
         return;
       case "permission_request":
-        if (w.inTurn && (u.turnId === undefined || u.turnId === w.taskId)) {
+        if (w.inTurn && (u.turnId === w.taskId || (w.kind === "turn" && u.turnId === undefined))) {
           w.asks.set(u.requestId, askOf(u, askIsOwn(u, w.taskId)));
           this.publishStatus(w);
         }
@@ -432,7 +527,7 @@ export class A2AExecutor implements AgentExecutor {
         }
         return;
       case "turn_end":
-        if (u.turnId === w.taskId) {
+        if (w.kind === "turn" && u.turnId === w.taskId) {
           this.endFromUnit(w, u.stopReason);
         }
         return;
@@ -464,6 +559,10 @@ export class A2AExecutor implements AgentExecutor {
    */
   private publishStatus(w: Watcher): void {
     const asks = [...w.asks.values()];
+    if (w.kind === "workflow") {
+      this.syncRun(w);
+      return;
+    }
     const unit = unifyTurn({ turnId: w.taskId, asking: asks.length > 0 });
     const next = projectStatus(unit, w.mode, asks);
     if (next.state === w.last.state && next.message === w.last.message) {
@@ -492,6 +591,11 @@ export class A2AExecutor implements AgentExecutor {
         ?.workUnits()
         .find((x) => x.kind === "turn" && x.id === w.taskId) ??
       unifyTurn({ turnId: w.taskId, stopReason });
+    this.endWithUnit(w, unit);
+  }
+
+  /** The final artifact and terminal status of an ended unit (a turn or a run). */
+  private endWithUnit(w: Watcher, unit: WorkUnit): void {
     const response = responseText(unit);
     if (response.text !== undefined || w.hasChunks) {
       // The final round, whole: replaces whatever the deltas built.
@@ -508,6 +612,64 @@ export class A2AExecutor implements AgentExecutor {
     }
     // The same status a later GetTask projects from this unit (`unitStatus`).
     this.end(w, unitStatus(unit, w.mode));
+  }
+
+  /**
+   * A run task's status from the run (`workflows` rows, or the session's own
+   * unit): a pending ask of the run reads as the caller's mode says; the run's
+   * end is the session's ended unit (the one `GetTask` projects), so the live
+   * end and a later read agree. No-op until the start answered (`runId`): the
+   * start's own answer calls it again.
+   */
+  private syncRun(w: Watcher, rows?: readonly WorkflowRow[]): void {
+    const runId = w.runId;
+    if (w.ended || runId === undefined) {
+      return;
+    }
+    const known = this.opts.host
+      .get(w.sessionId)
+      ?.workUnits()
+      .find((x) => x.kind === "workflow" && x.id === runId);
+    const row = rows?.find((r) => r.runId === runId);
+    let unit: WorkUnit | undefined = known;
+    if (row !== undefined && row.endedAt !== undefined && known?.endedAt === undefined) {
+      // The row is ahead of the ended-units table: its own end, no result.
+      unit = unifyWorkflow({
+        runId,
+        origin: w.taskId,
+        state: row.state,
+        ...(row.stopReason !== undefined ? { stopReason: row.stopReason } : {}),
+        ...(row.reason !== undefined ? { reason: row.reason } : {}),
+        startedAt: row.startedAt,
+        endedAt: row.endedAt,
+      });
+    }
+    if (unit === undefined) {
+      return;
+    }
+    if (unit.endedAt !== undefined) {
+      this.endWithUnit(w, unit);
+      return;
+    }
+    const asks = [...w.asks.values()];
+    // An ask pending while the row still says `running`: it is waiting.
+    const live: WorkUnit =
+      asks.length > 0 && unit.state === "working"
+        ? { ...unit, state: "waiting", waitingFor: "permission" }
+        : unit;
+    const next = projectStatus(live, w.mode, asks);
+    if (next.state === w.last.state && next.message === w.last.message) {
+      return;
+    }
+    w.last = next;
+    w.bus.publish(
+      AgentEvent.statusUpdate({
+        taskId: w.taskId,
+        contextId: w.contextId,
+        status: status(w.taskId, w.contextId, next),
+        metadata: {},
+      }),
+    );
   }
 
   /** Publish the terminal status, then detach and close: the session lives on. */

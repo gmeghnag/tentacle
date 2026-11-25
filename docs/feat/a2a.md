@@ -1528,6 +1528,61 @@ projection test files; each restored, `restored true` ×17):
 - `tsc` scoped to them (`.tentacle/tmp/a2a/tsconfig.s7.json`) is clean.
 - Full `bun run check` NOT run (the orchestrator's script runs it).
 
+### S8-workflow-tasks — DONE
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+**Load-bearing check (re-run):** the projection already addresses a run by its
+`origin` (`external/work-units.ts:addressableUnits`), and
+`session/workflow{start}` takes the task id as `turnId` and answers `runId`
+synchronously (`hosted-session.ts:2838`, `workflow-driver.ts:691`) → holds.
+
+**As built** (`packages/daemon/src/a2a/executor.ts` only; no protocol change):
+- `CallerPolicy.workflows?: boolean` (default off). A `tentacle/workflow` data
+  part with the switch off → the existing `REJECTED` + `REFUSED.workflow`, nothing opened.
+- A `Watcher` has `kind: "turn" | "workflow"` and a `runId`. A run task opens
+  `a2a-<caller>-<ctx>` (title `A2A: workflow <name>`), publishes `WORKING`, sends
+  `session/workflow{start, name, inputs, turnId: taskId}` (`startRun`).
+  Refusal: `running` → `REJECTED` + busy; any other refusal → `FAILED` + the
+  daemon's own one-line reason; an unreadable answer → `FAILED`.
+- `syncRun` projects the run on every `workflows` update, ask change and the
+  start's answer: the session's own unit (`workUnits()`; ended → its result is
+  the `response` artifact, the same record `GetTask` reads); if the row ended
+  before the ended-units table, the row's own end (no result). A pending ask
+  while the row says `running` → `waiting`. Mode/kind rules are `projectStatus`'s
+  (S5): file approval → `WORKING` + message in every mode; a step's `tool` ask
+  → `INPUT_REQUIRED` in `both`.
+- Asks are admitted for a run only with `turnId === taskId` (strict; a turn also
+  admits `undefined`). Turn-only events (`turn_start`, chunks, `turn_end`) are
+  ignored by a run watcher.
+- `cancelTask` of a run → `session/workflow{stop, runId}` (`CANCELED` from the
+  run's `stopped:cancelled`); before the run id is known → `TaskNotCancelable`.
+
+**Drift / limits:** (1) S2's note holds: a `needs-approval` run has no `origin`
+yet, so `GetTask` cannot find it until approved; while the executor drives it,
+the in-flight copy answers. (2) "`changed` refusal → FAILED" comes from the
+start's own refusal (nothing is run, no unit), not from a unit. (3) The
+flag/CLI wiring (`--a2a-workflows`) is S10's.
+
+**Tests** `packages/daemon/test/a2a-workflow-tasks.test.ts` (8): switch off;
+start→COMPLETED + artifact + GetTask + phone listing; refused start (inputs,
+missing file); busy context; CancelTask → CANCELED; unapproved file in `both`
+(never INPUT_REQUIRED, owner approves); `both` step ask → INPUT_REQUIRED →
+caller's allow → COMPLETED (once); `owner` step ask → WORKING, owner answers.
+
+**Red / mutations** (each restored; 8/8 green after): the feature is new — on
+the S7 tree a workflow part was always REJECTED, so tests 2, 4–8 could not pass.
+Mutations killed: switch ignored → "switch off" red; stop sent to `wf-999` →
+CancelTask red; run asks not admitted (`inTurn:false`) → `both` ask red; mode
+forced to `both` for a run → `owner` ask red; `running` mapped to FAILED → busy
+red.
+
+**Gate:** 3 daemon test files (workflow-tasks, executor, task-projection) 34
+pass / 0 fail; `biome check` clean on the 2 touched files; `tsc -p packages/daemon`
+clean. Full `bun run check` NOT run (the script runs it). Changelog: the
+existing `changelog.d/a2a.added.md` still covers the feature (serve does not
+speak A2A until S9/S10); no new fragment.
+
 ## Review
 
 ### Owner decision 2026-11-25 ~13:20 (from the feat/serve-mcp-server plan, Q1) — binding for the remaining slices
