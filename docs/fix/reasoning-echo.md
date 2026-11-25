@@ -1064,3 +1064,31 @@ only one cause per endpoint, which is why both findings slipped.
 Reviewer is the same model family as the s1/s3/s4 executor (fresh context only).
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Round 2
+
+**Verdict: PASS** (commit 157e1b62, `git diff HEAD~1`).
+
+- **Finding 1: fixed.** The echo latch now needs the retry to succeed AND the
+  400 body to name the field (`namesEchoField`, `openai-provider.ts:685`).
+  `\breasoning(_content)?\b` does not match `reasoning_effort`. Round 1's
+  repro `d9-latch.ts` now prints `later small turn echoes? [true]`.
+- **Finding 2: fixed.** When both single drops 400, one last try goes out with
+  neither (`openai-provider.ts:340-347`). It differs from the refused request
+  only in the switches, so latching `reasoningSwitchesRefused` on it is sound
+  F9 evidence. `d9-voice.ts` now prints: turn 1 OK after 4 requests, turn 2 OK
+  after 2. main took 2.
+- **Mutation:** each mutation was applied alone, then reverted (tree clean).
+  - Latch on `res.ok` only → the overflow test fails.
+  - Last try removed → the both-refuse test fails.
+  - `namesEchoField` forced to false → "latched only after it succeeds" fails.
+- **Gate:** `bun test packages/providers` → 246 pass, 0 fail. `bun run
+  typecheck` clean. `bun run lint` clean (2536 files).
+- **Regressions checked:** the body read for D9 is always the 400 of a request
+  without the switches (F9 retries first), so the switches cannot name a false
+  echo refusal.
+- **Nit, accepted trade-off:** some endpoints refuse the field with a body that
+  does not name it. On those the echo never latches. Each such request pays
+  one extra 400 round trip, but the turn never fails.
+
+*— claude-opus-5-5, 2026-11-25*
