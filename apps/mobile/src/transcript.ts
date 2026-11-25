@@ -15,7 +15,7 @@ import type { EndReason, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef, ChatMessage, ToolDiffDetail } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation, toolLabel } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
-import { compactionSeparatorRow, historyRows, restartPromptOf } from "./transcript-history.ts";
+import { compactionRow, historyRows, restartPromptOf } from "./transcript-history.ts";
 import {
   type ImageRef,
   type LocalPhoto,
@@ -43,11 +43,7 @@ export type {
   UserRow,
 } from "./transcript-rows.ts";
 export { imageRef, imageRefWithLocal, imageRowText } from "./transcript-rows.ts";
-export {
-  CONTEXT_RESET_HEADER,
-  CONTEXT_RESET_SEPARATOR,
-  restartPromptOf,
-} from "./transcript-history.ts";
+export { CONTEXT_RESET_HEADER, restartPromptOf } from "./transcript-history.ts";
 
 /** A turn's outcome, as `turn_end` / a cut stream gives it. */
 export type TurnOutcome = "ended" | "cancelled" | "interrupted" | "lost" | "failed";
@@ -516,6 +512,11 @@ function sameSlot(a: Row, b: Row): boolean {
       return b.kind === a.kind && b.text === a.text;
     case "tool":
       return b.kind === "tool" && b.id === a.id;
+    case "context":
+      // A step of the SAME fact keeps its key across a resync (so a step the
+      // person opened stays open); a body that changed is another fact and
+      // mints a new key, which honestly closes it.
+      return b.kind === "context" && b.event === a.event && b.body === a.body;
     default:
       // An answer or a thought of a turn whose earlier rows all matched: its text
       // may differ (a live reasoning body is never stored; a cut stream), its
@@ -549,12 +550,11 @@ function applyHistory(state: State, input: Extract<TranscriptInput, { type: "his
     return appendHistory(state, input.messages, input.times);
   }
   if (input.reason === "compact") {
-    // The transcript stays; another device's compaction says so once — as the
-    // SAME separator a reopen draws from its summary (docs/fix/mobile-qa-1117.md,
-    // bug 4), so live and reload agree.
-    return input.own === true
-      ? state
-      : push(state, (key) => compactionSeparatorRow(key, input.messages));
+    // The transcript stays; the compaction leaves ONE step — the same row a
+    // reopen draws from its summary (docs/feat/mobile-reset-in-timeline.md 1A),
+    // and now for THIS phone's own compaction too (Q4-A: the client's history
+    // carries the summary on the own path as well).
+    return push(state, (key) => compactionRow(key, input.messages));
   }
   return withHistory(state, input.messages, input.times);
 }

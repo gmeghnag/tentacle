@@ -385,7 +385,12 @@ describe("serve sessions get the host's MCP servers", () => {
     const session = remote.newSession(undefined, undefined, seedTitle("S"));
     // Turn 1: the server dies mid-call (the model gets a tool error, honestly).
     await sendAndSettle(session, "call it");
-    expect(pidAlive(firstPid)).toBe(false);
+    // Poll, never sample: the child's death and its REAPING are separate events.
+    // The transport settles the turn on the pipe close, at which point the pid
+    // still answers `kill(pid, 0)` as a zombie (`ps` says `ZN`) until the
+    // parent's SIGCHLD handling reaps it — a single sample is a race, not a sync
+    // point (AGENTS §9).
+    await until(() => !pidAlive(firstPid), 20_000);
     // Mutation: no supervision → the server stays `closed` and no new pid appears.
     await until(() => notices.some((line) => line.includes("restarting")), 20_000);
     await until(() => {

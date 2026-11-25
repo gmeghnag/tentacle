@@ -124,6 +124,13 @@ describe("sameCellData", () => {
     }
   });
 
+  test("a context cell compares its thread", () => {
+    const a = { kind: "context", thread: { up: true, down: true } } as const;
+    expect(sameStepCell(a, { kind: "context", thread: { up: true, down: true } })).toBe(true);
+    expect(sameStepCell(a, { kind: "context", thread: { up: true, down: false } })).toBe(false);
+    expect(sameStepCell(a, { kind: "thought", ms: undefined, thread: a.thread })).toBe(false);
+  });
+
   test("a thought cell compares its duration and thread", () => {
     const a = { kind: "thought", ms: 10, thread: { up: true, down: false } } as const;
     expect(sameStepCell(a, { ...a, thread: { up: true, down: false } })).toBe(true);

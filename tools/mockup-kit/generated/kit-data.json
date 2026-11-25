@@ -6,12 +6,12 @@
     "apps/mobile/src/screens/PermissionSheet.tsx": "4df08bc4dc1f8b0ecca2fb9698f4b33d18ddc768",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "5cb64e4a707fb3ade80d489dc643e6bfac5cb60e",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "4acc16969f29573f6f292b0c1fdcc6ce6fa61efa",
-    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "04e443f0bac5ef63f0a9f936a12ec5b52ee2c7ae",
+    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "9b699f60e963df28386e07a6dcf40811af9a8646",
     "apps/mobile/src/step-rail.ts": "83bd11f3b10e19be6edd27a835ef90252f69f46e",
     "apps/mobile/src/theme-beta.ts": "2359c83e90604bd9bd7625702ae21337499290d2",
     "apps/mobile/src/theme.ts": "77bfa592e2bb2bee950a9936e2ce566002976edf",
     "apps/mobile/src/thinking-motion.ts": "4fd5a2e149a69bb6c58326516420a74efc077eaa",
-    "apps/mobile/src/tool-steps.ts": "0d019463789d10c05fff693841e785e422a8b36b",
+    "apps/mobile/src/tool-steps.ts": "3d811ceff3c4892f4f9cb43831214aeba94be1c5",
     "apps/mobile/src/ui/BandSection.tsx": "7b65870db2faa7a51663560d2641476973ed7b2a",
     "apps/mobile/src/ui/CodeBlock.tsx": "a67a398ac01da1192d82b650be380221c15806f0",
     "apps/mobile/src/ui/Composer.tsx": "e767b7545c52d0e63f729dce7f957f25ad79492b",
@@ -22,7 +22,7 @@
     "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
     "apps/mobile/src/ui/ScreenHeader.tsx": "7b42b610beaf4124fe240a609a39c4480b3f203e",
     "apps/mobile/src/ui/Sheet.tsx": "511816016f43feef1b11ce7d5d29def68fad8e22",
-    "apps/mobile/src/ui/StepNode.tsx": "2c4f506264b6aacf0e809e85cea6017bc2a9c87d",
+    "apps/mobile/src/ui/StepNode.tsx": "0af38ff20ce44a87ea45b18148d2deade5bab82f",
     "packages/tui/src/blink.ts": "29c9f101f7942a0942e48c977a13e3759820c8e3",
     "packages/tui/src/components/Thinking.tsx": "c9f80123d32ad706b7c96d858b822d9336d15d2d",
     "packages/tui/src/shimmer.ts": "96515bf4852e36f0cf9ca27a3f665d00e37f076c",
@@ -712,6 +712,12 @@
           "lineHeight": 15,
           "textAlign": "center"
         },
+        "contextNode": {
+          "width": 14,
+          "height": 14,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
         "dotBox": {
           "width": 13,
           "height": 13
@@ -839,6 +845,7 @@
       },
       "consts": {
         "THEREFORE_SIZE": 13,
+        "CONTEXT_NODE_SIZE": 14,
         "DOT_AT": {
           "top": {
             "left": 5,
@@ -1507,12 +1514,16 @@
           "flex": 1,
           "gap": 2
         },
+        "contextBody": {
+          "gap": 6,
+          "paddingTop": 2,
+          "paddingBottom": 7
+        },
+        "contextMore": {
+          "paddingTop": 2
+        },
         "fallback": {
           "fontStyle": "italic"
-        },
-        "rule": {
-          "height": 0.3333333333333333,
-          "marginVertical": 6
         }
       },
       "consts": {

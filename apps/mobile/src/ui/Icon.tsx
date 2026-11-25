@@ -51,6 +51,9 @@ export type IconName =
   | "waveform"
   | "speaker.wave.2"
   | "stop.circle"
+  /** A context reset / a compaction on the step rail (docs/feat/mobile-reset-in-timeline.md). */
+  | "arrow.counterclockwise"
+  | "arrow.down.right.and.arrow.up.left"
   /** A pinned session in the sessions list (docs/feat/mobile-session-actions.md). */
   | "pin"
   /** The hub's Tools item (docs/feat/mobile-hub-tools.md): what the sheet switches. */
