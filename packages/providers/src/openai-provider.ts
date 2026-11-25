@@ -199,7 +199,8 @@ export class OpenAIProvider implements ModelProvider {
   /**
    * This endpoint 400ed a request carrying echoed reasoning and accepted the
    * same request without it (D9, docs/fix/reasoning-echo.md): the echo is off
-   * for the process. Latched only when the retry SUCCEEDS, as above.
+   * for the process. Latched only when the retry SUCCEEDS and the 400 body
+   * named the field; any other 400 falls back for that request alone.
    */
   private reasoningEchoRefused = false;
 
@@ -328,12 +329,23 @@ export class OpenAIProvider implements ModelProvider {
       this.reasoningSwitchesRefused = res.ok;
     }
     if (echoing && res.status === 400) {
-      // D9: one retry WITHOUT the echoed reasoning, never a failed turn;
-      // latched only if the retry succeeds (a 400 for another cause fails both).
-      await discardBody(res);
+      // D9: one retry WITHOUT the echoed reasoning, never a failed turn.
+      // Latched only if the retry succeeds AND the 400 named the field:
+      // dropping the echo makes the body smaller, so a size 400 (context over
+      // the limit) is fixed by the retry too and must not switch the echo off
+      // for the rest of a long-lived daemon.
+      const named = namesEchoField(await safeText(res));
       const off = wantOff && !this.reasoningSwitchesRefused;
       res = await this.post(headers, request, images, off, false);
-      this.reasoningEchoRefused = res.ok;
+      if (off && res.status === 400) {
+        // Both single drops 400ed (switches kept, then echo kept): one last
+        // try with neither. Only the switches differ from the request just
+        // refused, so its success is F9's evidence and latches them.
+        await discardBody(res);
+        res = await this.post(headers, request, images, false, false);
+        this.reasoningSwitchesRefused = res.ok;
+      }
+      this.reasoningEchoRefused = res.ok && named;
     }
     if (!res.ok || !res.body) {
       throw new ModelRequestError(
@@ -664,6 +676,14 @@ async function discardBody(res: Response): Promise<void> {
   } catch {
     // already consumed, or no body: nothing to release
   }
+}
+
+/**
+ * D9: does a 400 body name an echoed reasoning field? `reasoning_content`, or
+ * `reasoning` as a whole word — NOT `reasoning_effort` (an F9 switch).
+ */
+function namesEchoField(body: string): boolean {
+  return /\breasoning(_content)?\b/.test(body);
 }
 
 async function safeText(res: Response): Promise<string> {

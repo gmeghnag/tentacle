@@ -878,6 +878,56 @@ clean. Whole-repo gate: the orchestrator's.
 
 **Status: s4 DONE.** s5 untouched.
 
+### Fix round 1 (Review s1–s5: two MEDIUM, both D9)
+
+**Changed:** `packages/providers/src/openai-provider.ts` — the D9 block in
+`stream()` and a new `namesEchoField()` next to `safeText()`;
+`packages/providers/test/reasoning-echo-openai.test.ts` — two new D9 tests, and
+the existing latch test's 400 body now names the field.
+
+1. **Finding 1 (latch on a 400 it did not cause) — FIXED.** The echo latch now
+   needs the retry to succeed AND the 400 body to name `reasoning_content` or
+   `reasoning` as a whole word. `reasoning_effort` (an F9 switch) does not
+   count. Any other 400 falls back for that one request and latches nothing.
+   That makes the failure-mode row "a 400 for another cause … latches nothing"
+   true again. *Not done:* the reviewer also suggested reporting the latch
+   (`onRetry`/a log). `OpenAIProvider` has no reporting seam: no logger, and
+   `onRetry` belongs to `RetryingModelProvider`. Adding one is outside the
+   approved Implementation. With the evidence rule, a latch only fires on a
+   400 that names the field, so it is no longer a silent wrong latch.
+2. **Finding 2 (voice turn fails on an endpoint that refuses both) — FIXED.**
+   When the D9 retry still carried the switches and 400ed, there is now one
+   last request with neither. Its success latches `reasoningSwitchesRefused`.
+   That is F9's own evidence: the only difference from the request just
+   refused is the switches. So the next voice turn sends 2 requests, not 4.
+   The echo latch still follows finding 1's rule.
+
+**Red first** (tests on the unfixed code, 9 pass / 2 fail, both on the
+property): the overflow test asserts the next small turn still echoes and got
+`Expected: true, Received: false`. The both-refused test asserts the voice turn
+succeeds and got `ModelRequestError … status 400: bad request`.
+**Green:** `reasoning-echo-openai` + `reasoning-off` → 18 pass, 0 fail. All
+six OpenAI/voice provider test files (`openai-{provider,images,stop-reason,
+stream-error}`, `reasoning-off`, `reasoning-echo-openai`) → 47 pass, 0 fail.
+`bunx biome check` on the 2 files → clean.
+
+**Mutations** (each one alone, then reverted; a grep for the markers finds
+none left):
+| Mutation | Caught by |
+|---|---|
+| M1 echo latch ignores evidence (`res.ok`) | overflow test (1 fail) |
+| M2 no last try with neither (`false && off …`) | both-refused test (1 fail) |
+| M3 last try does not latch the switches | both-refused test, 2nd turn bound (1 fail) |
+| M4 `namesEchoField` → `false` | "one retry … latched only after it succeeds" (1 fail) |
+
+**Drift:** D9's rule ("latch only if the retry succeeds") is now stricter: the
+400 must also name the field. On top of that, a voice turn gets one extra
+request when both single drops fail. An endpoint that refuses the field with a
+generic body pays 2 requests on each echoing turn, and never fails one. Gate:
+the orchestrator's script.
+
+*— claude-opus-5-5, 2026-11-25*
+
 ## Review
 
 *(empty until Execution)*

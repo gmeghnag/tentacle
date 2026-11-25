@@ -127,7 +127,11 @@ describe("D9 400 fallback", () => {
 
   test("one retry without the field, latched only after it succeeds", async () => {
     const fake = endpoint((b) =>
-      withField(b) ? new Response("unknown field", { status: 400 }) : ok([{ content: "x" }]),
+      withField(b)
+        ? new Response("Unrecognized request argument supplied: reasoning_content", {
+            status: 400,
+          })
+        : ok([{ content: "x" }]),
     );
     const p = provider(fake.fetchImpl);
     const h = history(record(p.id, "reasoning_content", "t"));
@@ -149,6 +153,44 @@ describe("D9 400 fallback", () => {
     // 2 bodies per turn: the echo is still tried first on the 2nd turn.
     expect(fake.bodies.length).toBe(4);
     expect(withField(fake.bodies[2])).toBe(true);
+  });
+
+  test("a 400 that a smaller body fixes (context overflow) does not latch the echo off", async () => {
+    // llama.cpp-like: any body over the limit 400s, with a message that does
+    // not name the echoed field. Dropping the echo shrinks the body, so the
+    // retry succeeds — that is not evidence the field is refused.
+    const limit = 700;
+    const fake = endpoint((b) =>
+      JSON.stringify(b).length > limit
+        ? new Response("the request exceeds the available context size", { status: 400 })
+        : ok([{ content: "x" }]),
+    );
+    const p = provider(fake.fetchImpl);
+    const big = history(record(p.id, "reasoning_content", "t".repeat(600)));
+    await events(p, { messages: big });
+    expect(fake.bodies.map(withField)).toEqual([true, false]);
+    // A later, small turn: the echo is still sent.
+    await events(p, { messages: history(record(p.id, "reasoning_content", "t")) });
+    expect(withField(fake.bodies[2])).toBe(true);
+  });
+
+  test("an endpoint refusing both the voice switches and the echo: the turn still succeeds", async () => {
+    const switches = (b: Body | undefined) => JSON.stringify(b).includes("reasoning_effort");
+    const fake = endpoint((b) =>
+      switches(b) || withField(b)
+        ? new Response("bad request", { status: 400 })
+        : ok([{ content: "x" }]),
+    );
+    const p = provider(fake.fetchImpl);
+    const h = history(record(p.id, "reasoning_content", "t"));
+    const done = doneOf(await events(p, { messages: h, reasoning: "off" }));
+    expect(done?.type).toBe("done");
+    const last = fake.bodies.at(-1);
+    expect(switches(last) || withField(last)).toBe(false);
+    // The next voice turn converges too.
+    const n = fake.bodies.length;
+    expect(doneOf(await events(p, { messages: h, reasoning: "off" }))?.type).toBe("done");
+    expect(fake.bodies.length - n).toBeLessThan(n);
   });
 
   test("a request without echoed reasoning gets no retry", async () => {
