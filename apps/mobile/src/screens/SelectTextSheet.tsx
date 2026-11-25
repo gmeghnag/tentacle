@@ -25,7 +25,7 @@ export interface SelectTextSheetProps {
   /** `null`: the sheet is closed (nothing is drawn). */
   readonly text: string | null;
   readonly onClose: () => void;
-  /** The same copy the long-press runs (the screen's handler), so the pill answers too. */
+  /** The same copy the long-press runs (the screen's handler); the sheet closes first so the pill is seen. */
   readonly onCopyAll: (text: string) => void;
 }
 
@@ -64,7 +64,13 @@ export function SelectTextSheet({
                 testID="select-text-copy-all"
                 accessibilityRole="button"
                 accessibilityLabel="Copy all"
-                onPress={() => onCopyAll(text ?? "")}
+                // Close FIRST: the pill is drawn on the screen, under this
+                // Modal, so "Copied" / "Couldn't copy" is only seen once the
+                // sheet is gone (left open, a failure would be silent).
+                onPress={() => {
+                  onClose();
+                  onCopyAll(text ?? "");
+                }}
                 hitSlop={8}
                 style={[styles.copyAll, { backgroundColor: palette.fill }]}
               >

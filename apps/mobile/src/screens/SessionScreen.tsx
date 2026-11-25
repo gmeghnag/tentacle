@@ -128,6 +128,9 @@ import {
   COPY_FAILED,
   COPY_FLASH_MS,
   type CopyFlashState,
+  type CopySource,
+  type CopyVia,
+  copyFlashFor,
   copyFlashShown,
   flashReleased,
   messageCopy,
@@ -817,19 +820,21 @@ export function SessionScreen({
    * haptic, the clipboard, then a pill — `Copied`, or `Couldn't copy` when the
    * clipboard itself refuses (never a false `Copied`: no silent drop).
    */
-  const copyText = (text: string, pressing = false) => {
+  const copyText = (text: string, source: CopySource) => {
     playHaptic("light");
     // A release that arrived before the clipboard answered (a fast long press)
-    // cannot await it: the pill then starts its window where it lands.
-    const down = () => pressing && !released.current;
+    // cannot await it: `released` is read when the pill lands (`copyFlashFor`).
     void Clipboard.setStringAsync(text).then(
       () =>
-        setCopyFlash({
-          outcome: { kind: "copy", text, label: "Copied" },
-          at: Date.now(),
-          pressing: down(),
-        }),
-      () => setCopyFlash({ outcome: COPY_FAILED, at: Date.now(), pressing: down() }),
+        setCopyFlash(
+          copyFlashFor(
+            { kind: "copy", text, label: "Copied" },
+            Date.now(),
+            source,
+            released.current,
+          ),
+        ),
+      () => setCopyFlash(copyFlashFor(COPY_FAILED, Date.now(), source, released.current)),
     );
   };
   /**
@@ -837,18 +842,18 @@ export function SessionScreen({
    * nothing to give still answers — a light haptic (the owner's standard) and a
    * pill saying why — while a row that is not a message does nothing at all.
    */
-  const copyMessage = (row: Row) => {
+  const copyMessage = (row: Row, via: CopyVia) => {
     const outcome = messageCopy(row, Date.now());
     if (outcome === null) {
       return;
     }
     released.current = false;
     if (outcome.kind === "copy") {
-      copyText(outcome.text, true);
+      copyText(outcome.text, via);
       return;
     }
     playHaptic("light");
-    setCopyFlash({ outcome, at: Date.now(), pressing: true });
+    setCopyFlash(copyFlashFor(outcome, Date.now(), via, false));
   };
   /**
    * The finger left the message (D3): the pill's window starts now, once. A long
@@ -2389,7 +2394,7 @@ export function SessionScreen({
           palette={palette}
           text={yields ? null : selectText}
           onClose={() => setSelectText(null)}
-          onCopyAll={(text) => copyText(text)}
+          onCopyAll={(text) => copyText(text, "sheet")}
         />
         <ActionSheet
           palette={palette}

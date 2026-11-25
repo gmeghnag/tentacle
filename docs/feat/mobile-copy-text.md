@@ -488,6 +488,63 @@ After the gate fix (D3):
   removed from the index here (`git rm --cached`, the file stays on disk for the
   worktree); the deletion rides the next commit.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-25*
+
+**F1 (HIGH) symlink committed — PARTIAL, needs the orchestrator.**
+`git ls-files -s apps/mobile/node_modules` → `120000 336b3c83… apps/mobile/node_modules`
+(still tracked). Both `git rm --cached apps/mobile/node_modules` and
+`git update-index --force-remove` were refused by this session's permission layer,
+so the index removal is **not done**. Done here: `.gitignore:2` `node_modules/` →
+`node_modules` (the trailing slash matches only directories, which is how a
+worktree's symlink got in; without it the next `git add -A` would re-add the link
+right after it is untracked). **Orchestrator, before committing:**
+`git rm --cached apps/mobile/node_modules` (the link stays on disk for the
+worktree's tests). Not verified: `git check-ignore` was also refused. The 10×
+TS2339 in `permission-router.ts` under `tsc -p apps/mobile` are this link
+(it resolves `@tentacle/client` into the MAIN checkout) — unchanged by this round.
+
+**F2 (MEDIUM) VoiceOver copy pins the pill — FIXED.** The pill's `pressing` is now
+decided by one pure rule, `copyFlashFor(outcome, now, source, released)`
+(`message-copy.ts`): only `source === "press"` with no release yet holds the
+countdown; `"action"` (VoiceOver) and `"sheet"` count down at once. `CopyPress`
+reports how it was asked — `onCopy(row, "press")` from `onLongPress`,
+`onCopy(row, "action")` from `onAccessibilityAction` (`TranscriptRow.tsx`, new
+`CopyVia` type on `RowProps.onCopy` and `CellActions.onCopy`, passed through by
+`TranscriptCell.tsx`). `SessionScreen` `copyText(text, source)` and
+`copyMessage(row, via)` both build the pill with `copyFlashFor`, so the
+`released`-ref timing the review flagged as component-only logic is now the
+pure, tested rule (the ref is just its input).
+
+**F3 (MEDIUM) "Copy all" answers under the Modal — FIXED.** `SelectTextSheet`'s
+"Copy all" now calls `onClose()` THEN `onCopyAll(text)`: the sheet goes away
+and the screen's pill ("Copied" or "Couldn't copy") is what the person sees.
+`SessionScreen` passes `copyText(text, "sheet")` (counts down at once).
+
+Red first (each on its assertion, not an import):
+- T9 (`message-copy.test.ts`, 4 tests) with `copyFlashFor` first written as
+  today's screen rule (`pressing: source !== "sheet" && !released`):
+  `T9 the VoiceOver action has no finger to lift…` → `Expected: false, Received: true`
+  (22 pass / 1 fail).
+- R1 (`message-copy-render.test.ts`) "…as a PRESS" and "…as an ACTION", and R4
+  "Copy all copies the whole text AND closes the sheet" → 3 fail on the
+  unchanged wrapper/sheet (11 pass / 4 fail, the 4th being T9's import).
+
+Mutations (each red, then reverted):
+
+| Mutation | Red |
+|---|---|
+| M9 `onAccessibilityAction` reports `"press"` | R1 "…as an ACTION" (13 pass / 1 fail) |
+| M10 "Copy all" without `onClose()` | R4 "Copy all … closes the sheet" (13 / 1) |
+| M11 `copyFlashFor` ignores `released` | T9 "a long press already released" (22 / 1) |
+
+Run: `bun test` on `message-copy`, `message-copy-render`, `transcript-cell`,
+`session-menu` → **52 pass / 0 fail**. `bunx tsc -p apps/mobile --noEmit` → 10
+errors, all `permission-router.ts` (F1's link, pre-existing; none in a touched
+file). `bunx biome check` on the 7 changed TS files → clean. Full gate: the
+orchestrator's script.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-25* (fresh context; plan author is the same model family — shared blind spots possible)

@@ -156,7 +156,7 @@ const THUMBS = { loaded: [], inFlight: [], failed: [] };
  * provide).
  */
 function drawUserBody(
-  onCopy: ((row: unknown) => void) | null = () => {},
+  onCopy: ((row: unknown, via?: unknown) => void) | null = () => {},
   onCopyRelease?: () => void,
 ): Node[] {
   return walk(
@@ -177,7 +177,7 @@ function drawUserBody(
 /** One transcript row as the screen would draw it, with the copy handler (`null` = none). */
 function draw(
   row: Record<string, unknown>,
-  onCopy: ((row: unknown) => void) | null = () => {},
+  onCopy: ((row: unknown, via?: unknown) => void) | null = () => {},
   onCopyRelease?: () => void,
 ): Node[] {
   return walk(
@@ -241,23 +241,24 @@ describe("R1 the long-press wrapper exists on a MESSAGE row and nowhere else", (
     expect(copyWrappers(draw(noticeRow))).toEqual([]);
   });
 
-  test("the wrapper reports the ROW it wraps", () => {
+  test("the wrapper reports the ROW it wraps, as a PRESS", () => {
     const seen: unknown[] = [];
-    const nodes = draw(answerRow, (row) => seen.push(row));
+    const nodes = draw(answerRow, (row, via) => seen.push([row, via]));
     const wrapper = copyWrappers(nodes)[0];
     (wrapper?.props.onLongPress as (() => void) | undefined)?.();
-    expect(seen).toEqual([answerRow]);
+    expect(seen).toEqual([[answerRow, "press"]]);
   });
 
-  test("the VoiceOver action copies the same row", () => {
+  test("the VoiceOver action copies the same row, as an ACTION (no finger to lift)", () => {
+    // An action has no onPressOut: reported as a press, its pill would never count down.
     const seen: unknown[] = [];
-    const wrapper = copyWrappers(draw(answerRow, (row) => seen.push(row)))[0];
+    const wrapper = copyWrappers(draw(answerRow, (row, via) => seen.push([row, via])))[0];
     const handler = wrapper?.props.onAccessibilityAction as
       | ((event: { nativeEvent: { actionName: string } }) => void)
       | undefined;
     handler?.({ nativeEvent: { actionName: "copy" } });
     handler?.({ nativeEvent: { actionName: "activate" } });
-    expect(seen).toEqual([answerRow]);
+    expect(seen).toEqual([[answerRow, "action"]]);
   });
 
   test("the press END is reported, so the pill counts from the release", () => {
@@ -341,6 +342,23 @@ describe("R4 the sheet is a read-only TextInput, never a `selectable` Text", () 
     expect(body[0]?.props.disabled).toBeUndefined();
     expect(texts(nodes)).toContain("Select text");
     expect(byTestId(nodes, "select-text-copy-all")).toHaveLength(1);
+  });
+
+  test("Copy all copies the whole text AND closes the sheet, so the pill is seen", () => {
+    // The pill lives on the screen, UNDER this Modal: left open, the sheet would
+    // hide both "Copied" and "Couldn't copy" (a silent drop of the failure).
+    const calls: string[] = [];
+    const nodes = walk(
+      sheet.SelectTextSheet({
+        palette: theme.lightPalette,
+        text: "all of it",
+        onClose: () => calls.push("close"),
+        onCopyAll: (text) => calls.push(`copy:${text}`),
+      }),
+    );
+    const button = byTestId(nodes, "select-text-copy-all")[0];
+    (button?.props.onPress as (() => void) | undefined)?.();
+    expect(calls).toEqual(["close", "copy:all of it"]);
   });
 
   test("a message row draws no `selectable` Text: that is the race the design avoids", () => {

@@ -88,6 +88,31 @@ export interface CopyFlashState {
 }
 
 /**
+ * How a copy was asked for: a long `press` (the finger is still down when it
+ * copies), the VoiceOver `action` (no touch at all), or the sheet's "Copy all"
+ * (a tap that has already ended).
+ */
+export type CopyVia = "press" | "action";
+export type CopySource = CopyVia | "sheet";
+
+/**
+ * The pill a finished copy puts up. Only a long press whose finger has not yet
+ * lifted holds the countdown (`pressing`): its `onPressOut` re-anchors it
+ * (`flashReleased`). The VoiceOver action and "Copy all" have no release to
+ * wait for — held, their pill would stay up until some later press on a message.
+ * `released`: the press already ended before the clipboard answered (a fast
+ * long press), so the window starts now.
+ */
+export function copyFlashFor(
+  outcome: MessageCopy,
+  now: number,
+  source: CopySource,
+  released: boolean,
+): CopyFlashState {
+  return { outcome, at: now, pressing: source === "press" && !released };
+}
+
+/**
  * The press that copied a message has ENDED (`onPressOut`): the countdown starts
  * HERE. A long press copies at `delayLongPress` (400 ms) while the finger is
  * still down, so anchoring the window at the copy burns it under the finger — a

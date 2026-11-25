@@ -38,6 +38,7 @@ import {
   userRowParts,
   viewerPages,
 } from "../../media-layout.ts";
+import type { CopyVia } from "../../message-copy.ts";
 import { NOTICE_GLYPHS, type NoticeLook } from "../../notice-group.ts";
 import { ROW_FALLBACK_TEXT } from "../../row-guard.ts";
 import { type FiredRow, firedRowView } from "../../schedule-view.ts";
@@ -118,9 +119,10 @@ export interface RowProps {
    * the screen decides WHAT (the pure `messageCopy`) and owns the clipboard, the
    * haptic and the pill — this only reports the row. Absent: no long-press at
    * all (a test, or a surface that must not offer one such as the Activity
-   * sheet).
+   * sheet). `via`: a long `press`, or the VoiceOver `action` (no finger to lift,
+   * so the pill must not wait for a release).
    */
-  readonly onCopy?: (row: Row) => void;
+  readonly onCopy?: (row: Row, via: CopyVia) => void;
   /**
    * The press that copied a message ENDED (docs/feat/mobile-copy-text.md D3):
    * the pill's countdown starts here, so a slow long press does not burn its
@@ -200,7 +202,7 @@ function CopyPress({
   children,
 }: {
   readonly row: Row;
-  readonly onCopy: ((row: Row) => void) | undefined;
+  readonly onCopy: ((row: Row, via: CopyVia) => void) | undefined;
   readonly onCopyRelease: (() => void) | undefined;
   readonly children: ReactNode;
 }): JSX.Element {
@@ -210,14 +212,15 @@ function CopyPress({
   return (
     <Pressable
       testID={`row-${row.key}-copy`}
-      onLongPress={() => onCopy(row)}
+      onLongPress={() => onCopy(row, "press")}
       // The release is when a person can look: the pill's window starts there.
       onPressOut={() => onCopyRelease?.()}
       delayLongPress={LONG_PRESS_MS}
       accessibilityActions={[{ name: "copy", label: "Copy message" }]}
       onAccessibilityAction={(event) => {
         if (event.nativeEvent.actionName === "copy") {
-          onCopy(row);
+          // No touch, so no onPressOut: the pill must count down by itself.
+          onCopy(row, "action");
         }
       }}
     >
@@ -404,7 +407,7 @@ export function UserRowBody({
   readonly onOpen: (pages: ViewerPages) => void;
   readonly onBroken: (uri: string) => void;
   /** The long-press that copies this message (`RowProps.onCopy`); absent = none. */
-  readonly onCopy?: (row: Row) => void;
+  readonly onCopy?: (row: Row, via: CopyVia) => void;
   /** The copy press ended (`RowProps.onCopyRelease`); absent = no re-anchor. */
   readonly onCopyRelease?: () => void;
 }): JSX.Element {

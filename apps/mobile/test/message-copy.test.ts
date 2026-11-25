@@ -8,6 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   COPY_FLASH_MS,
+  copyFlashFor,
   copyFlashShown,
   flashReleased,
   messageCopy,
@@ -203,5 +204,35 @@ describe("flashReleased: the pill's window starts when the finger leaves", () =>
     const sheet = { ...pressed, pressing: false };
     expect(flashReleased(sheet, NOW + 3000)).toBe(sheet);
     expect(flashReleased(null, NOW)).toBeNull();
+  });
+});
+
+describe("copyFlashFor: only a finger still DOWN holds the pill's countdown", () => {
+  const copied = { kind: "copy", text: "hi", label: "Copied" } as const;
+  const empty = { kind: "empty", label: "No text to copy" } as const;
+
+  test("T9 a long press still held: the pill waits for the release", () => {
+    expect(copyFlashFor(copied, NOW, "press", false)).toEqual({
+      outcome: copied,
+      at: NOW,
+      pressing: true,
+    });
+  });
+
+  test("T9 a long press already released (a fast press): the window starts now", () => {
+    expect(copyFlashFor(copied, NOW, "press", true).pressing).toBe(false);
+  });
+
+  test("T9 the VoiceOver action has no finger to lift: the pill counts down at once", () => {
+    // No touch ⇒ no onPressOut ⇒ a `pressing` pill would stay up forever.
+    for (const outcome of [copied, empty]) {
+      const shown = copyFlashFor(outcome, NOW, "action", false);
+      expect(shown.pressing).toBe(false);
+      expect(copyFlashShown(shown, NOW + COPY_FLASH_MS)).toBe(false);
+    }
+  });
+
+  test("T9 the sheet's Copy all has no finger either", () => {
+    expect(copyFlashFor(copied, NOW, "sheet", false).pressing).toBe(false);
   });
 });
