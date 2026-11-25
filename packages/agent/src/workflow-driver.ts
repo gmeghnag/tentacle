@@ -53,8 +53,8 @@ import {
   workflowWhereLabel,
   workflowYaml,
 } from "@tentacle/core";
-import type { SubagentRunner } from "./subagent.ts";
-import { createStepVerdict } from "./workflow-verdict.ts";
+import type { SubagentResult, SubagentRunner } from "./subagent.ts";
+import { NO_VERDICT_REASON, createStepVerdict, planVerdictReminder } from "./workflow-verdict.ts";
 
 /**
  * One step of a run as the wire's `WorkflowStepRow` carries it
@@ -1774,11 +1774,14 @@ export class WorkflowDriver {
     const verdict = createStepVerdict();
     let tokens = 0;
     this.host?.attribute(agentId, run.turnId);
-    try {
-      const result = await this.deps.runnerFor(this.stepRequester(run, step.id))(
+    // ONE identity for the whole step (decisions 9): both runs share the requester,
+    // the `onEvent` accumulator and the ids, so a reminder is the same step's turn.
+    const requester = this.stepRequester(run, step.id);
+    const runChild = (prompt: string, maxTokens: number | undefined) =>
+      this.deps.runnerFor(requester)(
         {
           description: `${run.spec.name}/${step.id}`,
-          prompt: action.text,
+          prompt,
           type: step.type ?? "general",
           ...(step.model !== undefined ? { model: step.model } : {}),
         },
@@ -1786,7 +1789,7 @@ export class WorkflowDriver {
           signal,
           toolCallId: run.runId,
           agentId,
-          ...(step.tokens !== undefined ? { maxTokens: step.tokens } : {}),
+          ...(maxTokens !== undefined ? { maxTokens } : {}),
           extraTools: [verdict.tool],
           onEvent: (event) => {
             if (event.kind === "subagent_usage") {
@@ -1798,6 +1801,12 @@ export class WorkflowDriver {
           },
         },
       );
+    try {
+      const first = await runChild(action.text, step.tokens);
+      // The first run did the work: its report is the one the step keeps, and the
+      // reminder's only when there is nothing to keep (decision 2).
+      const kept = (second: SubagentResult): string =>
+        first.report !== "" ? first.report : second.report;
       const said = verdict.verdict();
       if (said !== undefined) {
         return {
@@ -1806,32 +1815,70 @@ export class WorkflowDriver {
             verdict: said.verdict,
             reason: said.reason,
             tokens,
-            report: result.report,
+            report: first.report,
           },
           reason: said.reason,
           tokens,
-          report: result.report,
+          report: first.report,
         };
       }
-      if (result.stopReason === "max_token_budget") {
+      if (first.stopReason === "max_token_budget") {
         return {
           event: { kind: "budget_hit", reason: `step ${step.id} reached its token budget` },
           reason: "token budget reached",
           tokens,
-          report: result.report,
+          report: first.report,
         };
       }
+      // Forgot the tool, and nothing else decided this step: ONE more turn.
+      const reminder = planVerdictReminder({
+        stepId: step.id,
+        report: first.report,
+        usedTokens: tokens,
+        tokens: step.tokens,
+        aborted: signal.aborted,
+      });
+      let ended: SubagentResult | undefined;
+      if (reminder !== undefined) {
+        this.setStep(run, step.id, { live: "asking for a verdict" });
+        this.publish();
+        ended = await runChild(reminder.prompt, reminder.maxTokens);
+        const late = verdict.verdict();
+        if (late !== undefined) {
+          return {
+            event: {
+              kind: "step_result",
+              verdict: late.verdict,
+              reason: late.reason,
+              tokens,
+              report: kept(ended),
+            },
+            reason: late.reason,
+            tokens,
+            report: kept(ended),
+          };
+        }
+        if (ended.stopReason === "max_token_budget") {
+          return {
+            event: { kind: "budget_hit", reason: `step ${step.id} reached its token budget` },
+            reason: "token budget reached",
+            tokens,
+            report: kept(ended),
+          };
+        }
+      }
+      const report = ended === undefined ? first.report : kept(ended);
       return {
         event: {
           kind: "step_result",
           verdict: "fail",
-          reason: "no verdict",
+          reason: NO_VERDICT_REASON,
           tokens,
-          report: result.report,
+          report,
         },
-        reason: "no verdict",
+        reason: NO_VERDICT_REASON,
         tokens,
-        report: result.report,
+        report,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

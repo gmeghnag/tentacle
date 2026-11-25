@@ -1,6 +1,6 @@
 # fix/workflow-no-verdict — a step ends with the `step_verdict` TOOL, and its failure says why
 
-> **Status:** implementation (approved) — Execution not started
+> **Status:** execution done — awaiting review (fresh-context, Opus)
 > **Branch:** `fix/workflow-no-verdict`
 > **Size:** M · **Blast:** cross-module · **Suited:** DeepSeek plan+exec, Opus review (owner, `TODO.md:14`)
 > **Changelog:** `changelog.d/workflow-no-verdict.fixed.md`
@@ -268,8 +268,11 @@ Dependency order; the smallest diff that lands the three parts.
 3. `packages/core/src/workflow-templates.ts` — the review prompt's text (`:112-116`).
 4. `packages/tools/src/workflow.ts` — `DESCRIPTION` (`:52`).
 5. `apps/mobile/src/workflow-skeleton.ts` — the `Reason` kv row in `detailBlocks`
-   (`:233-270`); `apps/mobile/src/workflow-step-detail.ts` — drop the redundant
-   `log: logLines(step.reason)` input at `:387` (the base log is overridden anyway).
+   (`:233-270`), and its `log` becomes `[]` (the log block is the READ's, `detailLog`).
+   `apps/mobile/src/workflow-step-detail.ts` needs **no change**: the input the plan
+   named (`log: logLines(step.reason)`, `:269`) is that one line inside `detailBlocks`,
+   not a call site — `stepBlocks` overrides `log` anyway (`:394`). *(Corrected in
+   Execution: the plan's `:387` edit had no site.)*
 6. `docs/feat/agent-workflows.md` — D3 (`:236-238`) + failure-mode row 4 (`:356`).
 7. `changelog.d/workflow-no-verdict.fixed.md` — one `fixed` bullet.
 
@@ -347,14 +350,119 @@ runner dispatches by step id (`:147-152`), so a two-call script keeps its own co
 10. **Non-vacuity (§9)**, done once and reported in Execution: (i) drop the reminder
     gate → test 1 fails; (ii) move the reason back into the log block → test 8 fails;
     (iii) fire the reminder on `max_token_budget` → test 3 fails. Revert each.
+11. **Two existing skeleton tests pinned the old shape and were updated** (drift,
+    recorded in Execution): `apps/mobile/test/workflow-morph-skeleton.test.ts` — the
+    kv label list gains `Reason` (7 → 8 bars, `:265-280`) and the log-line-height case
+    now supplies its log from a read (`detailBlocks` no longer makes one, `:306-316`).
 
 Iterate with `bun test packages/agent/test/workflow-driver.test.ts` (+ the new pure
 file, the mobile file, the TUI file); full `bun run check` before done (§4).
 
 ## Execution
 
-*— (the executor fills this and signs it, with the gate result and any drift from
-Implementation, AGENTS §10)*
+*— claude-sonnet-4-5 (executor), 2026-11-26*
+
+Worktree `.tentacle/worktrees/workflow-no-verdict`, branch `fix/workflow-no-verdict`
+(HEAD `f2567452`, the plan commit). No `git` state was changed.
+
+**Load-bearing check — PASSED, statically and empirically.** `SubagentRunner` is a
+plain `(opts, controls) => Promise<SubagentResult>` with no conversation carried
+(`packages/agent/src/subagent.ts:148-152`, `:267-270`), the verdict slot is created
+ONCE before any run (`workflow-driver.ts:1774`, closed over `recorded` by the tool,
+`workflow-verdict.ts:22-60`, first valid call wins), and both runs report
+`subagent_usage` into the SAME `tokens` closure, which is what `step_result` carries
+and the machine adds to the run (`workflow-machine.ts:344-345`). The repro below
+confirms it: two runs → the run's `tokens` is the SUM (test 1 asserts 30 = 15 + 15).
+
+**Repro before** (`bun .tentacle/tmp/workflow-no-verdict/repro.ts`, pasted per §6):
+
+```
+driver: child runs = 1
+driver: step = {"id":"write",…,"state":"error",…,"reason":"no verdict"}
+mobile: kv rows = [["State","error"],["Kind","agent"],["Where","local"]]
+mobile: log block = ["prompt:","write it","report:","I think it works. PASS"]
+```
+
+**Repro after**: `child runs = 2`, `reason: "no verdict — the step ended without
+calling step_verdict"`, `kv rows = [["State","error"],["Kind","agent"],["Where","local"],
+["Reason","no verdict"]]`.
+
+### As built, in order
+
+1. **Tests first (red).** `packages/agent/test/workflow-driver.test.ts` — the existing
+   `no verdict` test extended + 5 new ones (late verdict & token sum, budget-capped not
+   reminded, remaining budget, spent budget, cancelled not reminded). Run before any
+   production edit: **4 fail / 50 pass**, on the assertions the fix must move
+   (`Expected: 2, Received: 1` for `runs`; `Expected: "no verdict — …", Received:
+   "no verdict"`; `caps` `[100]` vs `[100, 40]`). Not on an import.
+2. **Slice (a) — `packages/agent/src/workflow-verdict.ts`**: `NO_VERDICT_REASON`,
+   `STEP_REMINDER_REPORT_MAX` (4 000), `StepReminder`, `planVerdictReminder` (pure: the
+   `aborted` gate, then the remaining-budget gate, then the prompt = sentence + the
+   report's LAST chars), and the tool description's «A PASS/FAIL line in your text is
+   NOT a verdict» sentence. New `packages/agent/test/workflow-verdict.test.ts` (7 tests:
+   every gate, the cap, the empty report, the sentence).
+3. **Slice (a) — `packages/agent/src/workflow-driver.ts`**: `agentStep` now builds one
+   `requester` + a local `runChild(prompt, maxTokens)` (same `onEvent` accumulator,
+   `agentId`, `toolCallId`, `extraTools`), then: verdict → `step_result`;
+   `max_token_budget` → `budget_hit`; `planVerdictReminder` → one more turn under a
+   `live: "asking for a verdict"` line; its verdict → `step_result`, its
+   `max_token_budget` → `budget_hit`, still nothing → `fail: NO_VERDICT_REASON`. The
+   kept report is the first run's, the reminder's only when the first was empty
+   (decision 2). Driver file: **54 pass**.
+4. **Slice (b) — `apps/mobile/src/workflow-skeleton.ts`**: `detailBlocks` appends a
+   `Reason` kv row (`oneLine`d, absent when empty, **excluded for `approve`**) and no
+   longer returns a log from the row (`log: []`). Mobile: **5435 pass**.
+5. **Slice (c)**: `packages/core/src/workflow-templates.ts:113` (review prompt ends the
+   step with the tool; a PASS/FAIL line is not a verdict),
+   `packages/tools/src/workflow.ts:52` (`DESCRIPTION` gains the contract + the reminder
+   + «never ask for a text PASS line»), `workflow-verdict.ts` tool description (step 2).
+6. **Docs**: `docs/feat/agent-workflows.md` D3 and failure-mode row 4 record the
+   reminder, the skipped cases and the new sentence. Changelog:
+   `changelog.d/workflow-no-verdict.fixed.md` (one `fixed` bullet). No protocol change
+   (`reason` was already `WorkflowStepRow.reason`), so no `protocol.d/` note and no
+   schema regeneration; no TUI code change.
+7. **Non-vacuity (§9) — three mutations, each run and reverted** (results below).
+
+### Drift from Implementation (and why)
+
+- **Files item 5, second half did not exist.** The plan said to drop `log:
+  logLines(step.reason)` at `workflow-step-detail.ts:387`; there is no such call site —
+  the input is the ONE line inside `detailBlocks` (`workflow-skeleton.ts:269`), which
+  `stepBlocks` already overrides. So the change is `detailBlocks` returning `log: []`,
+  and `workflow-step-detail.ts` is untouched. The doc's Files item now says so.
+- **Two existing tests pinned the old shape** and were updated (Tests item 11):
+  `apps/mobile/test/workflow-morph-skeleton.test.ts` — the kv label list gains `Reason`
+  (7 → 8 bars) and the log-line-height case now supplies its own log, because
+  `detailBlocks` no longer produces one. Both failed as predicted before the update
+  (`Expected 7 / Received 8`; `Expected length: 3 / Received length: 0`).
+- **`NO_VERDICT_REASON` replaced the two literals** in the driver as planned; nothing
+  else in the repo held `"no verdict"` except the old driver test (now asserting the
+  sentence) and doc prose.
+
+### Mutation checks (§9 / Tests 10)
+
+| # | Mutation | Result |
+|---|---|---|
+| i | `if (reminder !== undefined && false)` — drop the reminder gate | **3 fail** (`reminded ONCE`, `tokens land in ONE sum`, `REMAINING budget`), 51 pass |
+| ii | `detailBlocks`: Reason row off, `log: logLines(step.reason)` back | **2 fail** (`Reason row`, `multi-line reason`), 37 pass |
+| iii | `if (first.stopReason === "max_token_budget" && false)` | **1 fail** (`a child that hit its token budget is NOT reminded`), 53 pass |
+
+All three reverted; the suites are green again afterwards.
+
+### Verification actually run here
+
+- `bun test packages/agent/test/` — 1029 pass, 0 fail (after the revert).
+- `bun test apps/mobile/test/` — 5435 pass, 0 fail.
+- `bun test packages/tui/test/workflow-frames.test.tsx` — 15 pass (incl. the new rail +
+  panel reason guard, Tests 9).
+- `bun test packages/core/test/workflow-draft.test.ts` + the two mobile files + the TUI
+  file — 133 pass.
+- Scoped typechecks: `bunx tsc --noEmit -p packages/agent`, `-p packages/core`,
+  `-p packages/tools`, `-p apps/mobile` — all clean.
+- `bunx biome check` on the 11 changed files — clean.
+- **Not run here (by the owner's budget):** the full `bun run check` (whole-repo
+  typecheck + lint + parallel suite). The orchestrator runs it; nothing else was
+  touched, and the four scoped typechecks + the changed-file lint are clean.
 
 ## Review
 

@@ -281,6 +281,24 @@ describe("slice 2 TUI 1: the rail, in the live area", () => {
     t.term.unmount();
   });
 
+  test("a failed step's REASON is painted — the rail's note column, the panel's body", async () => {
+    // docs/fix/workflow-no-verdict (b): the TUI already paints `step.reason` in both
+    // places; this pins it, so a change that moves the reason out of either fails.
+    const projected = railLines(RUN, 120, Date.now()).find((l) => l.text.includes("review"));
+    expect(projected?.text).toContain("REQUEST-CHANGES");
+    const t = await mount(fake([RUN]));
+    expect(t.frame()).toContain("REQUEST-CHANGES");
+    // The panel: two rows down to `review`, whose body carries the reason.
+    await t.line("/workflow");
+    t.term.stdin.write(DOWN);
+    t.term.stdin.write(DOWN);
+    await delay(60);
+    const panel = t.frame();
+    expect(panel).toContain("Workflow task · 2/6");
+    expect(panel).toContain("REQUEST-CHANGES");
+    t.term.unmount();
+  });
+
   test("the input sits on the SAME row with and without the rail (the exact property)", async () => {
     const withRail = await mount(fake([RUN]));
     const frameA = withRail.frame();
