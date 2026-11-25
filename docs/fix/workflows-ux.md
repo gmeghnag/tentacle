@@ -872,6 +872,86 @@ Resumed after DeepSeek was stopped by the watchdog. Its protocol/driver/core edi
 
 *— claude-opus-5-5 (S4 executor, resumed), 2026-11-25*
 
+### Slice S5 — Shared run projection in `client`
+
+**Load-bearing re-check (PARTIAL rule):** `rg -n "onFail" packages/protocol/src/session.ts` → one match,
+`packages/protocol/src/session.ts:856`, inside `WorkflowStepRowSchema` — S4's fields are on `main` of this
+branch. S5's premise holds.
+
+**Red first.** `.tentacle/tmp/workflows-ux` got a throwaway stub of `workflow-run-graph.ts` that behaves
+the way the phone does today (`pending` ⇒ always `later`, edges = file order, no history, no why, no
+timeline, no summary). `bun test packages/client/test/workflow-run-graph.test.ts` → **4 pass, 21 fail**,
+every failure on a named assertion (`Expected "skipped" / Received "later"` for `fix` on the ended run ①
+— the d1b5faaa bug itself; `Expected "Not run — review passed on its first try."`; …). The real module
+then took the file to 26 pass, 0 fail.
+
+**As built** — `packages/client/src/workflow-run-graph.ts` (new, pure, React-free), exported from
+`packages/client/src/index.ts:20`:
+
+- `runProjection(row)` → per step a **phase** (`ok | error | running | ask | later | skipped | stopped |
+  unknown`), the word (`done`/`approved`, `failed`, `running`, `needs approval`/`waiting on you`,
+  `not yet`, `not run`, `stopped`, the unknown wire word verbatim) and its `meta` line
+  (`done · 0.4s`, `running · edit notes/demo-note.md`); per edge (`next`/`fail`/`retry`) a **trace**
+  (`taken | go | later | never`) with its chip (`✗ taken/max`, `↻ attempt/retry`); the `current` step;
+  `next[]` and `notRun[]`; and the run's own facts (`run: {runId, name, state, stopReason?, tokens,
+  budget?, startedAt, endedAt?, history, historyDropped}`), so `timeline`/`summary`/`notRunWhy` take the
+  projection **alone** — the plan's signatures minus the `row` argument drift noted below.
+  - Phases: wire `ok/error/running/stopped` as is; `needs-approval`/`waiting` → `ask`; `pending` →
+    `later` iff the run is **live** and the step is **reachable** (BFS over `next`, over
+    `onFail.goto` while `taken < max`, cycle-guarded), else `skipped`; an unknown word → `unknown`.
+  - Traces: `go` = the live leg into the step the run is on now; `taken` = proven by two consecutive
+    visits in `history`, or by the leg into the current step, or by a state-free counter cell
+    (`onFail.taken > 0`, `attempt > 0`) — proof that survives an ended run; `later` = live and still
+    movable (a pass edge off a source that ran or still has to, a goto off a source that failed or still
+    has to **and** whose counter has room, a retry with a try left); `never` otherwise.
+- `notRunWhy(projection, stepId)` → `{text, small?}`, `null` when the step ran. Order: its only way in
+  is a goto from a step that PASSED → «Not run — review passed on its first try.» + «fix runs only when
+  review fails, up to 2 times.» (`on round 2` when the source passed on a later round); else the run
+  ended at the last failed/stopped step → «Not run — the run ended at draft.»; else «Not run — the run
+  went another way.».
+- `timeline(projection)` → `{rows, next, notRun, droppedNote?}`: the visits in order (`done · try 2`,
+  `failed · try 1`, `failed · round 1 → fix`), then the current visit (`needs you` for a step waiting on
+  the person), then — live only — `next` (`after confirm`), then `notRun` (each with its why), plus
+  «N earlier steps not shown» when `historyDropped > 0`.
+- `summary(projection, now)` → `{phase, word, time, line2}`: `Done | Failed | Stopped · <reason> |
+  Running | Needs approval | Waiting on you`, an unknown run state said as sent; `36s`/`1m 12s`; `21.4k
+  tokens` (`of 40k tokens` with a budget, ` so far` while live) · `5 of 6 steps ran` / `step 5 of 6` ·
+  `1 loop`.
+- Two local helpers kept private (`elapsedLabel`, `compactTokens`): both ends will need them, but nothing
+  in S5's Files list asks for them to be public, and the phone has its own `elapsed`.
+
+**Drift from Implementation:**
+1. **`timeline`/`summary`/`notRunWhy` take the projection only, not `(row)`/`(row, now)`.** D2 writes
+   `timeline(row)` and `summary(row, now)`, but the plan also says the phone/TUI keep ONE projection;
+   carrying the run's few facts on it (`projection.run`) means a screen cannot hand a different row to
+   the timeline than the one it drew the graph from. `summary` keeps its `now` (a pure module reads no
+   clock).
+2. **`packages/client/src/index.ts` edited** (not in S5's Files list, which names only the module + its
+   test). The plan's own P3 says the TUI and the phone reach this projection through `@tentacle/client`;
+   without the barrel line neither can import it.
+3. **Changelog folded into the existing `changelog.d/workflows-ux.changed.md`** rather than a new
+   fragment: S5 is a pure module with no consumer yet (S6–S8 draw it), and the task already owns that
+   file — a second bullet there keeps one fragment per task, which is the collision rule's point.
+
+**Mutations** (each reverted immediately; `cp` backup in `.tentacle/tmp/workflows-ux/graph.bak.ts`):
+- M1 — reachability drops `onFail.taken < max`: **killed**, 1 fail, the new "a LIVE run whose goto is
+  spent does not make its target 'not yet'" case (the plan named this mutation; it needed that test to
+  exist, added for it).
+- M2 — reachability computed on ended runs too (the d1b5faaa behaviour): **killed**, 4 fails (the
+  cancelled run, two `notRunWhy` sentences, the 64-step chain).
+- M3 — `go` collapsed into `taken`: **killed**, 1 fail, scenario ④.
+- M4 — "N of M steps ran" counted from `history` instead of the live rows: **killed**, 1 fail (a capped
+  history undercounts).
+
+**Narrow verification:** `bun test packages/client/test/workflow-run-graph.test.ts` → 26 pass, 0 fail;
+`bun test packages/client` (the whole package) → 941 pass, 0 fail; narrow `tsc` over the module + its
+test → clean; `bunx biome check` on both files → clean.
+
+**Not verified:** the full gate (`bun run check`) — the orchestrator's script runs it. No schema changed,
+so `protocol.json` needs no regeneration; no wire change, so no `protocol.d` note.
+
+*— deepseek-chat, 2026-11-25*
+
 ## Review
 
 ### Review — S1, S2, S3 (fresh context)
