@@ -133,9 +133,6 @@ export const NOTHING_RUNNING = "Nothing running";
 export const NO_ARTIFACTS = "No artifacts yet";
 /** The same rule for Tools: nothing to switch, so the sheet would be two empty lists. */
 export const NO_TOOLS = "No MCP servers or skills in this session";
-/** No workflow run on this computer (docs/feat/workflows-ui.md D4): the item is dimmed with it. */
-export const NO_WORKFLOW_RUNS = "No workflow runs";
-
 const LABELS: Readonly<Record<HubActionId, string>> = {
   stop: "Stop",
   steer: "Steer",
@@ -267,6 +264,9 @@ function dimmedBecause(id: HubEntryId, ctx: HubContext): string | null {
   if (id === "tools") {
     return ctx.toolsEmpty ? NO_TOOLS : null;
   }
+  // Workflows dims ONLY with the older-daemon reason (docs/feat/workflow-editor.md
+  // D8 + E1: an empty list is not "nothing to open" — the runs screen's empty
+  // state is where the first workflow is created, so it must stay reachable).
   if (id === "workflows") {
     return ctx.workflowsEmpty ?? null;
   }

@@ -35,6 +35,12 @@ export interface WorkflowRunsScreenProps {
   readonly sessionId?: string;
   /** Start a workflow — only ever passed together with `sessionId`. */
   readonly onStart?: () => void;
+  /**
+   * Create one on the graph (docs/feat/workflow-editor.md D8, slice 7a). Passed
+   * only with `sessionId`, like `onStart`: the editor saves through THAT session's
+   * daemon, so without one there is no editor at all.
+   */
+  readonly onNew?: () => void;
 }
 
 function RunRow({
@@ -154,7 +160,24 @@ export function WorkflowRunsScreen(props: WorkflowRunsScreenProps): JSX.Element 
           />
         ) : null}
         {state.kind === "ready" && state.runs.length === 0 ? (
-          <EmptyState testID="workflow-runs-empty" palette={palette} title="No workflow runs" />
+          <EmptyState
+            testID="workflow-runs-empty"
+            palette={palette}
+            title="No workflow runs"
+            {...(props.sessionId === undefined || props.onNew === undefined
+              ? {}
+              : {
+                  action: (
+                    <PillButton
+                      palette={palette}
+                      testID="workflow-runs-new"
+                      label="New workflow"
+                      icon="plus"
+                      onPress={props.onNew}
+                    />
+                  ),
+                })}
+          />
         ) : null}
         {section("workflow-runs-needs-you", "Needs you", needYou)}
         {section("workflow-runs-live", "In progress", others)}

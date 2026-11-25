@@ -686,6 +686,48 @@ describe("createLocalRuntime (local over RPC)", () => {
     ]);
   });
 
+  // docs/feat/workflow-editor.md slice 4 (D5): the editor's two calls reach the
+  // daemon through the SAME controller, so a dropped forward leaves a phone-side
+  // feature with nothing behind it on the TUI's runtime — a silent no-op.
+  // Mutation: delete either forward below → red.
+  test("persistingController forwards workflowSource / workflowSave to the inner session", async () => {
+    const seen: string[] = [];
+    const inner = {
+      workflowSource: async (name: string) => {
+        seen.push(`workflowSource:${name}`);
+        return { ok: true, path: `.tentacle/workflows/${name}.yaml`, hash: "a".repeat(64) };
+      },
+      workflowSave: async (request: { name: string; dryRun: boolean; baseHash?: string }) => {
+        seen.push(`workflowSave:${request.name}:${String(request.dryRun)}:${request.baseHash}`);
+        return { ok: true, hash: "b".repeat(64), version: 2 };
+      },
+      readBack: async () => null,
+      onTitle: () => () => {},
+    } as unknown as RemoteSession;
+    const ctl = persistingController(inner, () => {});
+    expect(await ctl.workflowSource?.("task")).toEqual({
+      ok: true,
+      path: ".tentacle/workflows/task.yaml",
+      hash: "a".repeat(64),
+    });
+    const request = {
+      name: "task",
+      mode: "replace" as const,
+      draft: '{"name":"task"}',
+      prompts: [],
+      baseHash: "a".repeat(64),
+      dryRun: true,
+    };
+    expect(await ctl.workflowSave?.(request)).toEqual({
+      ok: true,
+      hash: "b".repeat(64),
+      version: 2,
+    });
+    // The request is forwarded AS GIVEN: `dryRun` and `baseHash` are the
+    // caller's decision (a Review preview vs the write), never the wrapper's.
+    expect(seen).toEqual(["workflowSource:task", `workflowSave:task:true:${"a".repeat(64)}`]);
+  });
+
   // docs/feat/send-now-b.md: the send-now turn is saved like a `send` turn.
   test("persistingController.sendNow: forwarded as is, saved once after the new turn settles", async () => {
     const log: string[] = [];

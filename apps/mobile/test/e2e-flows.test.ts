@@ -18,6 +18,9 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { FLOWS } from "../e2e/run.ts";
+import type { HubContext, HubEntries } from "../src/hub-actions.ts";
+import { hubActions } from "../src/hub-actions.ts";
+import { hubContextOf } from "../src/hub-session.ts";
 
 const FLOWS_DIR = join(import.meta.dir, "..", "e2e", "flows");
 
@@ -942,6 +945,138 @@ describe("native sheets S6: the sheet shots flow (Validation's evidence set)", (
     expect(last).toContain("http.get");
     expect(last).toMatch(/throw new Error/);
     expect(last).toContain("MAESTRO_HOOKS");
+  });
+});
+
+describe("a flow reaches a hub item through the helper that can actually hold it", () => {
+  // `_hub-fan` taps the button and WAITS for `hub-item-${ITEM}`; `_hub-more` goes
+  // one step further, through the fan's More disc into the plain menu and waits
+  // for `hub-menu-${ITEM}`. The fan holds `FAN_MAX` (6) items, so an entry that
+  // sits deeper is only ever in More — a flow asking `_hub-fan` for it can never
+  // pass. That is exactly how flow 44 failed twice on device (Workflows is 9th
+  // in `CANONICAL`, in neither the idle nor the turn fan).
+  const noop = (): void => undefined;
+  // Present for ANY id: the guard must not hardcode the entry list and drift.
+  const ALL: HubEntries = new Proxy({} as HubEntries, { get: () => noop });
+  const ids = (items: readonly { readonly id: string }[]): string[] => items.map((i) => i.id);
+  const entitled = (ctx: HubContext): { fan: string[]; more: string[] } => {
+    const a = hubActions(ctx, ALL);
+    return { fan: ids(a.fan), more: ids(a.more) };
+  };
+  // The conditional entries (Dictate on, a wake scheduled, a run waiting) exist
+  // only for a context that holds them, and a BADGE promotes an item into the
+  // fan — so one item can move between fan and More across the app's states.
+  // Hence the general rule below only asks "does the hub offer it at all"; the
+  // rule that pins THIS bug is the flow-specific one after it.
+  const base = (): HubContext =>
+    hubContextOf({ link: "up", turn: null, ended: null, editable: true, dictation: true });
+  const shapes = [
+    base(),
+    { ...base(), schedules: 2, nextWakeInMs: 60_000 },
+    { ...base(), workflowsNeedYou: 3 },
+    hubContextOf({
+      link: "up",
+      turn: { kind: "turn", key: "t", turnId: "t", own: true },
+      ended: null,
+      editable: true,
+      dictation: true,
+    }),
+  ].map(entitled);
+  const FAN = new Set(shapes.flatMap((s) => s.fan));
+  const MORE = new Set(shapes.flatMap((s) => s.more));
+
+  /** Every `{file, ITEM}` pair a flow hands a hub helper. */
+  const helperCalls = (file: string): readonly { file: string; item: string }[] => {
+    const lines = readFileSync(join(FLOWS_DIR, file), "utf8").split("\n");
+    const out: { file: string; item: string }[] = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const helper = /file: (_hub-(?:fan|more))\.yaml/.exec(lines[i] ?? "")?.[1];
+      if (helper === undefined) {
+        continue;
+      }
+      const item = /ITEM: "(.+)"/.exec(lines.slice(i, i + 4).join("\n"))?.[1];
+      if (item !== undefined) {
+        out.push({ file: helper, item });
+      }
+    }
+    return out;
+  };
+
+  test("every helper ITEM is an entry the hub offers at all (no typo, no dead id)", () => {
+    const offered = new Set([...FAN, ...MORE]);
+    const wrong: string[] = [];
+    for (const file of readdirSync(FLOWS_DIR).filter((f) => f.endsWith(".yaml"))) {
+      for (const call of helperCalls(file)) {
+        if (!offered.has(call.item)) {
+          wrong.push(`${file}: ${call.file} ITEM=${call.item}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  test("flow 44 reaches Workflows through More — its own setup puts it there", () => {
+    // Flow 44's setup (its header: no `.tentacle/workflows/`, so the runs list is
+    // EMPTY; the session is idle): `workflows` carries no count badge, so it
+    // keeps its CANONICAL slot — 9th — and `FAN_MAX` is 6. It is in More and
+    // nowhere else. Asking `_hub-fan` for it (what the flow did) waits 5 s for a
+    // disc that is never on screen: the two device failures, verbatim.
+    const flow44 = entitled(
+      hubContextOf({
+        link: "up",
+        turn: null,
+        ended: null,
+        editable: true,
+        dictation: false,
+        workflows: { needYou: 0, empty: null },
+      }),
+    );
+    expect(flow44.more).toContain("workflows");
+    expect(flow44.fan).not.toContain("workflows");
+    expect(helperCalls("44-workflow-editor.yaml")).toContainEqual({
+      file: "_hub-more",
+      item: "workflows",
+    });
+    expect(helperCalls("44-workflow-editor.yaml")).not.toContainEqual({
+      file: "_hub-fan",
+      item: "workflows",
+    });
+  });
+});
+
+describe("flow 44 proves a step sheet can be CLOSED (validation round 3, P1)", () => {
+  // The BLOCKER was a `large` detent of 1.0: the sheet's own Done sat under the
+  // status bar and the tap never reached the app, so a step sheet could only be
+  // escaped by relaunching. The unit test pins the height; only a flow can prove
+  // the CONTROL is reachable, so the flow must open a step sheet, close it with
+  // Done, and assert the sheet is gone — in that order.
+  const body = readFileSync(join(FLOWS_DIR, "44-workflow-editor.yaml"), "utf8");
+
+  test("it opens a STEP's sheet (not only the kind picker) and fills a field", () => {
+    const open = body.indexOf('id: "workflow-edit-node-gate"');
+    const typed = body.indexOf('id: "workflow-sheet-input-run"');
+    expect(open).toBeGreaterThan(-1);
+    expect(typed).toBeGreaterThan(open);
+  });
+
+  test("Done closes it, and the flow ASSERTS the sheet is gone", () => {
+    const done = body.indexOf('tapOn:\n    id: "workflow-sheet-done"');
+    expect(done).toBeGreaterThan(body.indexOf('id: "workflow-sheet-input-run"'));
+    const gone = body.indexOf('id: "workflow-sheet"', done);
+    expect(gone).toBeGreaterThan(done);
+    // A VISIBLE assertion on `workflow-sheet` after Done would pass while the
+    // sheet stayed up (which is exactly the bug): it must be `assertNotVisible`.
+    const after = body.slice(done, gone + 'id: "workflow-sheet"'.length + 80);
+    expect(after).toContain("assertNotVisible");
+  });
+
+  test("the keyboard is dismissed before Done, so the tap lands on the control", () => {
+    // Round 3's `09-run-filled.png`: the keyboard covered the sheet's footer.
+    const typed = body.indexOf('id: "workflow-sheet-input-run"');
+    const keyboard = body.indexOf("hideKeyboard", typed);
+    const done = body.indexOf('tapOn:\n    id: "workflow-sheet-done"');
+    expect(keyboard).toBeGreaterThan(typed);
+    expect(keyboard).toBeLessThan(done);
   });
 });
 

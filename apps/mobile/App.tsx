@@ -188,6 +188,10 @@ import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
+import { WorkflowEditScreen, type WorkflowEditScreenProps } from "./src/screens/WorkflowEdit.tsx";
+import { WorkflowEditReview } from "./src/screens/WorkflowEditReview.tsx";
+import { WorkflowEditSheets } from "./src/screens/WorkflowEditSheets.tsx";
+import { WorkflowNew } from "./src/screens/WorkflowNew.tsx";
 import { WorkflowRunScreen } from "./src/screens/WorkflowRun.tsx";
 import { WorkflowRunsScreen } from "./src/screens/WorkflowRuns.tsx";
 import { WorkflowStartScreen } from "./src/screens/WorkflowStart.tsx";
@@ -233,6 +237,52 @@ import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
 import { AppFontContext, Text } from "./src/ui/Text.tsx";
 import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
 import type { VoiceSettings } from "./src/voice-settings-store.ts";
+import {
+  type EditIntent,
+  type GestureResult,
+  applyIntent,
+  drawnSteps,
+  menuGesture,
+  menuInputs,
+  portRelease,
+  tapIntent,
+  toastFor,
+} from "./src/workflow-edit-actions.ts";
+import {
+  EDIT_NAME_RULE,
+  type EditSessionHandle,
+  type EditState,
+  type WorkflowEditController,
+  createWorkflowEditController,
+} from "./src/workflow-edit-controller.ts";
+import { editGeometry, validDropTargets } from "./src/workflow-edit-graph.ts";
+import {
+  NEW_DEFAULT_TEMPLATE,
+  type NewSheetInput,
+  headerAction,
+  newSheetCreate,
+  newSheetModel,
+  newSheetUp,
+  renameOffered,
+  reviewModel,
+  savedLine,
+  showsReview,
+} from "./src/workflow-edit-review.ts";
+import {
+  type SheetAction,
+  type SheetActions,
+  type SheetModel,
+  type SheetRequest,
+  afterSheet,
+  applySheetAction,
+  choiceAction,
+  segmentAction,
+  sheetAfterAction,
+  sheetForIntent,
+  sheetModel,
+  stepperAction,
+  textAction,
+} from "./src/workflow-edit-sheets.ts";
 import {
   type RunMode,
   type RunState,
@@ -2025,6 +2075,7 @@ function WorkflowRunsRoute({
   onBack,
   onOpen,
   onStart,
+  onNew,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -2037,6 +2088,8 @@ function WorkflowRunsRoute({
     readonly name: string;
   }) => void;
   readonly onStart: (sessionId: string) => void;
+  /** The empty state's "New workflow": the editor, in create mode. */
+  readonly onNew: (sessionId: string) => void;
 }): JSX.Element {
   const { state, pull } = useWorkflowRuns(computerId);
   return (
@@ -2047,7 +2100,9 @@ function WorkflowRunsRoute({
       now={Date.now()}
       onBack={onBack}
       onPull={pull}
-      {...(sessionId === undefined ? {} : { sessionId, onStart: () => onStart(sessionId) })}
+      {...(sessionId === undefined
+        ? {}
+        : { sessionId, onStart: () => onStart(sessionId), onNew: () => onNew(sessionId) })}
       onOpen={(run) => {
         if (run.sessionId !== undefined) {
           onOpen({ runId: run.runId, sessionId: run.sessionId, name: run.name });
@@ -2182,12 +2237,21 @@ function WorkflowStartRoute({
   sessionId,
   onBack,
   onOpenRun,
+  onEdit,
+  onNew,
+  saved,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly sessionId: string;
+  /** The editor's Run came back here with the hash it wrote: the catalogue is re-read. */
+  readonly saved?: string;
   readonly onBack: () => void;
   readonly onOpenRun: (runId: string, name: string) => void;
+  /** A catalogue row's Edit: the editor, on that file (a broken one opens as a draft). */
+  readonly onEdit: (name: string) => void;
+  /** The catalogue's New workflow: the editor, in create mode. */
+  readonly onNew: () => void;
 }): JSX.Element {
   const [state, setState] = useState<StartState | null>(null);
   const [controller, setController] = useState<ReturnType<
@@ -2229,6 +2293,13 @@ function WorkflowStartRoute({
       created?.dispose();
     };
   }, [computerId, sessionId, onOpenRun]);
+  // A save from the editor landed: this screen's catalogue predates it, so it is
+  // read again (ONE more read, the controller's own `pull` rule).
+  useEffect(() => {
+    if (saved !== undefined) {
+      controller?.pull();
+    }
+  }, [saved, controller]);
   if (controller === null || state === null) {
     return (
       <View testID="workflow-start" style={[styles.screen, { backgroundColor: palette.page }]}>
@@ -2248,7 +2319,374 @@ function WorkflowStartRoute({
       onCloseRow={() => controller.closeRow()}
       onValue={(name, value) => controller.setValue(name, value)}
       onStart={() => void controller.beginStart()}
+      onEdit={onEdit}
+      onNew={onNew}
     />
+  );
+}
+
+/**
+ * The graph editor (docs/feat/workflow-editor.md D8, slice 7a): a native-stack
+ * PUSH beside `WorkflowStart`, never a `<Modal>`. Wiring only — the draft, the
+ * bar, the Save gate and every refusal are `workflow-edit-controller.ts`'s, the
+ * drawing and the hit priority are `workflow-edit-graph.ts`'s, and what a tap, a
+ * drag or a menu item MEANS is `workflow-edit-actions.ts`'s.
+ *
+ * It attaches through the SAME session runtime as every other screen (an archived
+ * session is never revived from here, §7) and answers nothing on the broker: the editor makes
+ * no ask of its own, and a save's approval ask arrives later, on the run screen.
+ */
+function WorkflowEditRoute({
+  palette,
+  computerId,
+  sessionId,
+  name,
+  onBack,
+  onRun,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  /** The file to edit; ABSENT is the create flow (the New sheet names it). */
+  readonly name?: string;
+  readonly onBack: () => void;
+  /**
+   * Run, once a write landed: the EXISTING start path (workflows-ui D6), whose
+   * start pins the catalogue's hash, so the approval ask is the normal sheet.
+   * `hash` is what the write landed: the start screen re-reads its catalogue.
+   */
+  readonly onRun: (hash: string) => void;
+}): JSX.Element {
+  const [state, setState] = useState<EditState | null>(null);
+  const [controller, setController] = useState<WorkflowEditController | null>(null);
+  const [menu, setMenu] = useState<WorkflowEditScreenProps["menu"]>(null);
+  const [armed, setArmed] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [dropTargets, setDropTargets] = useState<readonly string[]>([]);
+  /**
+   * The sheet that is up (`null` = the graph). It is a `SheetRequest`, not a
+   * model: which sheet a gesture opens is `sheetForIntent`'s answer, and what it
+   * draws is re-derived from the draft on screen on every render, so a refusal or
+   * an edit can never leave a stale value behind (slice 7b).
+   */
+  const [sheet, setSheet] = useState<SheetRequest | null>(null);
+  /** The New sheet's fields while it is up (slice 7c); what they mean is `newSheetModel`'s. */
+  const [newInput, setNewInput] = useState<NewSheetInput>({
+    name: "",
+    description: "",
+    template: NEW_DEFAULT_TEMPLATE,
+  });
+  useEffect(() => {
+    let live = true;
+    let created: WorkflowEditController | null = null;
+    let unsubscribe: (() => void) | undefined;
+    void LINKS.get(computerId).then((link) => {
+      if (!live) {
+        return;
+      }
+      const runtime = RUNTIMES.controller(link.client);
+      created = createWorkflowEditController({
+        sessionId,
+        // The Session screen underneath follows it: never detach it from there.
+        borrowed: runtime.follows(sessionId),
+        open: async (id) => {
+          const result = await runtime.open(id);
+          // `newSession` hands back a `RemoteSession` (typed as the screen's subset).
+          return result.ok
+            ? { ok: true, session: result.session as unknown as EditSessionHandle }
+            : result;
+        },
+        leave: () => void runtime.leave(sessionId),
+        ...(name === undefined ? {} : { name }),
+        onChange: () => {
+          if (live && created !== null) {
+            setState(created.state());
+          }
+        },
+      });
+      // The link's own status: the bar says "Offline — your draft stays on this
+      // phone" and Save goes off, and coming back re-checks a lost save (D7).
+      unsubscribe = link.onStatus((status) => created?.setLink(status.state === "up"));
+      setController(created);
+      setState(created.state());
+      // A CREATE starts when the New sheet's Create names the file (`create`
+      // then `start`): the first read is then the picker-vocabulary probe, and
+      // a sheet that is cancelled never attached anything.
+      if (name !== undefined) {
+        created.start();
+      }
+    });
+    return () => {
+      live = false;
+      unsubscribe?.();
+      created?.dispose();
+    };
+    // `name` is a route param like `title`: fixed for the route's life.
+  }, [computerId, sessionId, name]);
+
+  if (controller === null || state === null) {
+    return (
+      <View testID="workflow-edit" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ActivityIndicator color={palette.accent} />
+      </View>
+    );
+  }
+
+  /** The one drawing the gestures read: `editGeometry` of the draft on screen. */
+  const geometry = editGeometry(state.draft ?? {}, state.problems);
+
+  /**
+   * What the sheet on screen draws, or `null` when none is up (or there is no
+   * draft to draw it from): `sheetModel` of the draft on screen, never of an edit.
+   */
+  const sheetView =
+    sheet === null || state.draft === null
+      ? null
+      : sheetModel({
+          request: sheet,
+          draft: state.draft,
+          prompts: state.prompts,
+          ...(state.context?.models === undefined ? {} : { models: state.context.models }),
+          ...(state.context?.agentTypes === undefined
+            ? {}
+            : { agentTypes: state.context.agentTypes }),
+          notice: state.notice,
+        });
+
+  /**
+   * Everything a sheet may ask of the draft: the controller's own methods, mapped
+   * one for one, so a control's meaning stays in `workflow-edit-sheets.ts`.
+   */
+  const sheetActions: SheetActions = {
+    insert: (at, kind) => controller.insert(at, kind),
+    patch: (id, patch) => controller.patch(id, patch),
+    rename: (id, to) => controller.rename(id, to),
+    prompt: (id, prompt) => controller.prompt(id, prompt),
+    setRetry: (id, retry) => controller.setRetry(id, retry),
+    setFail: (id, target, max) => controller.setFail(id, target, max),
+    setGotoMax: (id, max) => controller.setGotoMax(id, max),
+    setNext: (id, target) => controller.setNext(id, target),
+    edit: (change) => void controller.edit(change),
+  };
+
+  /**
+   * One door for every gesture and every menu row: `applyIntent` decides which
+   * controller method an intent is, and a refusal lands on the bar by itself (the
+   * controller's `notice`), so nothing is branched here. `insert` opens the kind
+   * picker and `open` the step (or its `✗` counter): both are STATES, set through
+   * `sheetForIntent`, so the same `applyIntent` carries every gesture.
+   */
+  const act = (result: GestureResult): void => {
+    setArmed(result.armed);
+    setDropTargets(result.armed === null ? [] : validDropTargets(geometry, result.armed));
+    applyIntent(
+      {
+        insert: (at) => setSheet(sheetForIntent({ kind: "insert", at })),
+        open: (id, which) => setSheet(sheetForIntent({ kind: "open", id, which })),
+        duplicate: (id) => controller.duplicate(id),
+        move: (id, by) => controller.move(id, by),
+        remove: (id) => {
+          controller.remove(id);
+          // The undo toast is the ONE way back: `EditHistory` holds the draft.
+          setToast(toastFor("delete", id));
+        },
+        setFail: (id, target) => controller.setFail(id, target),
+      },
+      result.intent,
+    );
+    setMenu(null);
+  };
+
+  /** Cancel: a dirty draft is confirmed first (`discardPrompt`), never silently lost. */
+  const cancel = (): void => {
+    const prompt = controller.discardPrompt();
+    if (prompt === null) {
+      onBack();
+      return;
+    }
+    Alert.alert(prompt, undefined, [
+      { text: "Keep editing", style: "cancel" },
+      {
+        text: "Discard",
+        style: "destructive",
+        onPress: () => {
+          controller.discard();
+          // The history those Undos pointed into is gone.
+          setToast(toastFor("draftReplaced"));
+          onBack();
+        },
+      },
+    ]);
+  };
+
+  /**
+   * `changed` → Reload: D7 says it "discards, with confirm", so a dirty draft is
+   * confirmed first — in the words Cancel already uses (`discardPrompt`, D7's own
+   * "Discard N changes?"), because it drops exactly the same thing. A clean draft
+   * has nothing to lose, so it re-reads at once, with nothing to confirm.
+   */
+  const reload = (): void => {
+    const prompt = controller.reloadPrompt();
+    /** Reload itself: the draft any "Deleted … · Undo" described really does go. */
+    const doReload = (): void => {
+      setToast(toastFor("draftReplaced"));
+      controller.reload();
+    };
+    if (prompt === null) {
+      doReload();
+      return;
+    }
+    // "Keep editing" leaves the draft — and the undo it offers — alone: only the
+    // confirmed path drops them, which is why the toast is cleared THERE.
+    Alert.alert(prompt, undefined, [
+      { text: "Keep editing", style: "cancel" },
+      { text: "Reload", style: "destructive", onPress: doReload },
+    ]);
+  };
+
+  /**
+   * A control pressed, turned into the ONE controller call it means: the action is
+   * `workflow-edit-sheets.ts`'s, `applySheetAction` carries it out, and
+   * `sheetAfterAction` says where the sheet goes (a refusal keeps it up). With no
+   * sheet up (or no draft) there is nothing to press, so nothing is applied.
+   */
+  const control = (action: (model: SheetModel) => SheetAction | null): void => {
+    if (sheet !== null && sheetView !== null) {
+      const decided = action(sheetView);
+      applySheetAction(sheetActions, decided);
+      setSheet(sheetAfterAction(sheet, decided));
+    }
+  };
+
+  /**
+   * A create refused `exists`: the file is renamed (`renameFile` judges the name,
+   * and a refusal lands on the bar). iOS's own text prompt, never a new screen.
+   */
+  const rename = (): void => {
+    Alert.prompt(
+      "Rename the file",
+      EDIT_NAME_RULE,
+      (text) => controller.renameFile(text.trim()),
+      "plain-text",
+      state.name ?? "",
+    );
+  };
+
+  /** What Review draws, or null: the `dryRun:true` answer, never recomputed here. */
+  const review = showsReview(state)
+    ? reviewModel({ preview: state.preview, canonical: state.canonical, offline: state.offline })
+    : null;
+
+  /** The New sheet (a create, before the file is named): `newSheetModel` of its fields. */
+  const newSheet = newSheetUp({ routeName: name, state }) ? newSheetModel(newInput) : null;
+
+  /** The New sheet's Create: `create` from the template, THEN `start` (the probe). */
+  const createFromSheet = (): void => {
+    const made = newSheetCreate(newInput);
+    if (made !== null) {
+      controller.create(made.templateId, made.name, made.description, made.inputs);
+      controller.start();
+      playHaptic("light");
+    }
+  };
+
+  /** The header's right button: Save (the review) or, once written, Run. */
+  const action = headerAction({ canSave: controller.canSave(), canRun: controller.canRun() });
+
+  if (review !== null) {
+    return (
+      <WorkflowEditReview
+        palette={palette}
+        model={review}
+        canConfirm={controller.canConfirm()}
+        saving={state.kind === "saving"}
+        notice={state.notice}
+        onBack={() => controller.cancelReview()}
+        onConfirm={() => controller.confirmSave()}
+      />
+    );
+  }
+
+  return (
+    <>
+      <WorkflowEditScreen
+        palette={palette}
+        state={state}
+        title={state.name ?? "New workflow"}
+        action={action}
+        saved={savedLine(state)}
+        onRename={renameOffered(state) ? rename : null}
+        steps={drawnSteps(state.draft ?? {})}
+        geometry={state.draft === null ? null : geometry}
+        onCancel={cancel}
+        onSave={() =>
+          action.label === "Run" && state.saved !== null
+            ? onRun(state.saved.hash)
+            : controller.beginReview()
+        }
+        onReload={reload}
+        onKeepEditing={() => controller.keepEditing()}
+        onOpenSession={onBack}
+        onSettings={() => setSheet({ kind: "settings" })}
+        actions={{
+          tap: (target) => act(tapIntent(armed, target)),
+          release: (portId, locationX, locationY) =>
+            act(portRelease(armed, geometry, portId, locationX, locationY)),
+          longPress: (id, nodeTop) => {
+            // The note under Delete is the CORE's own count (`deleteStep`'s
+            // `dangling`), read on a throwaway draft: the same words the operation
+            // will report, and the draft on screen is never touched.
+            const height = geometry.nodes.find((node) => node.id === id)?.height ?? 0;
+            setMenu(
+              state.draft === null
+                ? null
+                : {
+                    id,
+                    ...menuInputs({ draft: state.draft, prompts: state.prompts, id }),
+                    top: nodeTop,
+                    height,
+                  },
+            );
+            playHaptic("light");
+          },
+          menu: (intent) => act(menuGesture(intent)),
+          armed,
+          dropTargets,
+        }}
+        menu={menu}
+        onDismissMenu={() => setMenu(null)}
+        toast={toast}
+        onUndo={() => {
+          controller.undo();
+          setToast(toastFor("undo"));
+        }}
+        onDismissToast={() => setToast(toastFor("undo"))}
+      />
+      <WorkflowEditSheets
+        palette={palette}
+        model={sheetView}
+        // A picker's close hands back the step it belongs to (`afterSheet`), so
+        // backing out of "go to" lands on the sheet that opened it, not the graph.
+        onClose={() => setSheet(sheet === null ? null : afterSheet(sheet))}
+        onDone={() => setSheet(sheet === null ? null : afterSheet(sheet))}
+        onText={(key, value) => control((model) => textAction(model, key, value))}
+        onStep={(key, delta) => control((model) => stepperAction(model, key, delta))}
+        onSegment={(key, option) => control((model) => segmentAction(model, key, option))}
+        onChoice={(key, value) => control((model) => choiceAction(model, key, value))}
+        onOpen={(next) => setSheet(next)}
+      />
+      <WorkflowNew
+        palette={palette}
+        model={newSheet}
+        input={newInput}
+        onName={(next) => setNewInput((was) => ({ ...was, name: next }))}
+        onDescription={(next) => setNewInput((was) => ({ ...was, description: next }))}
+        onTemplate={(id) => setNewInput((was) => ({ ...was, template: id }))}
+        // Nothing was attached or written: leaving is the whole of Cancel.
+        onCancel={onBack}
+        onCreate={createFromSheet}
+      />
+    </>
   );
 }
 
@@ -3218,6 +3656,12 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     sessionId,
                   })
                 }
+                onNew={(sessionId) =>
+                  navigation.navigate("WorkflowEdit", {
+                    computerId: route.params.computerId,
+                    sessionId,
+                  })
+                }
                 onOpen={(run) =>
                   navigation.navigate("WorkflowRun", {
                     computerId: route.params.computerId,
@@ -3262,6 +3706,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                 palette={palette}
                 computerId={route.params.computerId}
                 sessionId={route.params.sessionId}
+                {...(route.params.saved === undefined ? {} : { saved: route.params.saved })}
                 onBack={() => navigation.goBack()}
                 onOpenRun={(runId, name) =>
                   navigation.navigate("WorkflowRun", {
@@ -3269,6 +3714,46 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     sessionId: route.params.sessionId,
                     runId,
                     title: name,
+                  })
+                }
+                onEdit={(name) =>
+                  navigation.navigate("WorkflowEdit", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    name,
+                  })
+                }
+                onNew={() =>
+                  navigation.navigate("WorkflowEdit", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          {/* Create or edit a workflow (docs/feat/workflow-editor.md D8): a plain
+              PUSH beside `WorkflowStart` — never the `Sheet` route, never a
+              `<Modal>`. Identity only in the params: the draft, the problems and
+              every refusal belong to the editor's own controller. */}
+          <Stack.Screen
+            name="WorkflowEdit"
+            options={{ title: "Edit workflow", headerShown: false }}
+          >
+            {({ navigation, route }) => (
+              <WorkflowEditRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                {...(route.params.name === undefined ? {} : { name: route.params.name })}
+                onBack={() => navigation.goBack()}
+                // The existing start screen: back to it when the editor was pushed
+                // from there, else in the editor's place (`popTo`), never a second one.
+                onRun={(hash) =>
+                  navigation.popTo("WorkflowStart", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    saved: hash,
                   })
                 }
               />

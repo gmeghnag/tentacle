@@ -17,7 +17,6 @@
  *   `dispose`.
  */
 import type { WorkflowListResult } from "@tentacle/protocol";
-import { NO_WORKFLOW_RUNS } from "./hub-actions.ts";
 import { type ElencoRun, fromListRow, needsUserCount } from "./workflow-list.ts";
 
 /** A burst of `workflows` frames is one read, this long after the last. */
@@ -171,6 +170,14 @@ export function createWorkflowRunsController(deps: WorkflowRunsDeps): WorkflowRu
  * why there is nothing to open. `undefined` while the list is not known (still
  * loading, or the first read failed): an unknown list never dims the item whose
  * tap is what reads it.
+ *
+ * An EMPTY list is NOT a reason to dim (docs/feat/workflow-editor.md D8
+ * "Entries" + E1, which supersede docs/feat/workflows-ui.md D4's "dimmed when
+ * `workflow/list` returned none"): the runs screen's empty state is the "New
+ * workflow" button, and this item is the ONLY door to that screen. Dimming an
+ * empty list would make the first workflow unreachable from the phone — the
+ * dead end flow 44 hit on device. Only an older daemon still dims: there is no
+ * usable screen behind it.
  */
 export function workflowsHub(
   state: RunsState,
@@ -181,8 +188,5 @@ export function workflowsHub(
   if (state.kind !== "ready") {
     return undefined;
   }
-  return {
-    needYou: needsUserCount(state.runs),
-    empty: state.runs.length === 0 ? NO_WORKFLOW_RUNS : null,
-  };
+  return { needYou: needsUserCount(state.runs), empty: null };
 }

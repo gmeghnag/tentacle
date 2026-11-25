@@ -10,7 +10,12 @@
  *
  * Pure: no React, no I/O.
  */
-import type { WorkflowInputValue, WorkflowRow, WorkflowStepRow } from "@tentacle/protocol";
+import type {
+  WorkflowInputValue,
+  WorkflowRow,
+  WorkflowSaveParams,
+  WorkflowStepRow,
+} from "@tentacle/protocol";
 import { progressText } from "./mapping.ts";
 
 /**
@@ -36,6 +41,14 @@ export type WorkflowAction =
   | { readonly action: "stop"; readonly runId: string }
   | { readonly action: "resume"; readonly runId: string }
   | { readonly action: "rerun_step"; readonly runId: string; readonly stepId: string };
+
+/**
+ * What an editor ASKS to write (docs/feat/workflow-editor.md D5/D7): the wire
+ * params minus the `sessionId` its session already knows — the same split as
+ * `WorkflowAction`, so a caller can never name another session's file, and a
+ * `dryRun`-less request cannot be built at all (the wire makes it required).
+ */
+export type WorkflowSaveRequest = Omit<WorkflowSaveParams, "sessionId">;
 
 /**
  * How many runs a client keeps. The daemon already sends the live run + 5 ended
