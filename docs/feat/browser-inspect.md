@@ -534,7 +534,7 @@ first merge after B1–B3.
 - **Q5 distribution:** unpacked + pinned key, `tentacle browser install`, while pre-public (as recommended).
 - **Q6 Chrome not running:** `browser_open` launches it in the background (`open -g`, ≤ 10 s) (as recommended).
 - **Q7 screenshots:** session image store, deleted with the session (as recommended).
-- **Q8 `browser_eval` / upload / download:** the owner asked what each is — open.
+- **Q8 `browser_eval` / upload / download:** **download in v1** (into the session folder, on request; nothing leaves); upload later (always asked, file shown); NO `browser_eval` — if a need appears, add TARGETED read-only CDP tools instead (console/JS errors, a selector query, storage keys masked, wait-for), each bounded and maskable.
 - **Q9 tab groups:** one per session, `tentacle · <title>` (as recommended).
 - **Routing (owner):** «ottimizziamo con sonnet quando possiamo» — B0 and B2 by Sonnet; Sonnet wherever a mistake is cheap to iterate on.
 
