@@ -1,0 +1,1 @@
+- **A2A support, groundwork.** Turns and workflow runs now map to one shared work-unit state vocabulary, which the A2A server for `tentacle serve` will report as task states. `serve` does not speak A2A yet.

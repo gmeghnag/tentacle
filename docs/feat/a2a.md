@@ -329,10 +329,14 @@ Native → unified (one table each, unit-tested): turn `end_turn`/`max_*` →
 `running` → `working`, `ok` → `completed`, `error` → `failed`,
 `stopped:cancelled` → `canceled`, other `stopped:*` → `failed` + reason; an
 unknown word → `working` if not ended, else `failed` (a newer build's word
-never breaks a reader). Pure functions: `unitsFromSegment(entries, messages)`
+never breaks a reader). Pure functions: `unitsFromSegment(entries)`
 (native entries + carried `unit_end` entries of ONE segment → ended and open
 units, results computed by ONE function `turnResult(messages, span)`) and
-`unifyTurn` / `unifyWorkflow` for live state.
+`unifyTurn` / `unifyWorkflow` for live state. *(S0 correction: no `messages`
+parameter. A turn's span is only knowable by folding the entries
+(`projectEntry`); a final `messages` array has no per-turn boundaries. A
+segment cut mid-turn has no `turn_start`: `base.turn` names the turn and its
+span starts after the base's `count` messages.)*
 
 **2. One persisted record shape for an ended unit carried across segments —
 `unit_end`, a NEW NON-critical log entry** (`protocol/src/session-log.ts`):
@@ -346,6 +350,9 @@ units, results computed by ONE function `turnResult(messages, span)`) and
 - Written ONLY by `logSegmentFacts` (the carry), never at a unit's end: inside
   a segment the native entries (`turn_*`, `workflow_*`) are the record; across
   segments `unit_end` is. One fact is never stored twice in one segment.
+- *(S0 correction for S1: `native` can be `stopped:<stopReason>` (≤ 65
+  chars), so `Word` is a plain bounded string, NOT `WorkflowWordSchema`, whose
+  regex refuses `:` and stops at 32.)*
 - Every word is a **bounded free string, never an enum** (the workflow
   entries' rule, `session-log.ts:313-320`: a malformed KNOWN entry makes a
   reader refuse the whole log, so a newer word must never poison an older
@@ -525,7 +532,7 @@ SSE (`: ping` every 15 s), `server.timeout(req, 0)`; off without an A2A token.
 2. `packages/core/src/permission.ts` — the `PermissionKind → once | owner-only` table (exhaustive).
 3. `packages/protocol/src/session-log.ts` — `LogUnitEndEntrySchema` (non-critical, bounded free words) in the known-entry union; `protocol.json` regenerated at merge.
 4. `packages/daemon/src/session-log.ts` — `unitEnd(fact)` writer (like `subagentEnd`).
-5. `packages/daemon/src/daemon-state-file.ts` — `units` from `unitsFromSegment(derivedFrom, messages)` into the restored record.
+5. `packages/daemon/src/daemon-state-file.ts` — `units` from `unitsFromSegment(derivedFrom)` into the restored record.
 6. `packages/daemon/src/hosted-session.ts` — ended-units table (bounded), live fill at turn/run end, carry in `logSegmentFacts`, `workUnits()`.
 7. `packages/daemon/package.json` — `"@a2a-js/sdk": "1.3.0"` (pinned) + `bun.lock`.
 8. `packages/daemon/src/a2a/mapping.ts` (new, pure) — parts, WorkUnit→A2A, round replace, ask message, `callerMayAnswer`, answer parser, card, session id.
@@ -608,5 +615,76 @@ beside `S1`–`S2` if the orchestrator has a second worktree — disjoint files)
 | **Total** | | **≈ 15 h 30** serial (≈ 13 h 30 with S3 + S9 in parallel) | from ~12:30 → ~02:00–04:00 (owner accepted past midnight) |
 
 ## Execution
+
+### S0-work-units-core — DONE
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+**Load-bearing check re-run first** (`bun .tentacle/tmp/a2a/seam.ts` in the
+worktree; HOLDS, same five lines as the plan):
+
+```
+1. a2a open → a2a-ctx-1 created true
+2. phone session/list → a2a-ctx-1 "A2A: hello"
+3. ask seen by a2a: 1 by phone (replayed on attach): 1
+4. a2a updates after phone answered → turn_start tool_call permission_request permission_resolved tool_call_phase tool_call_update agent_message_chunk:"done: 42" turn_end:end_turn
+5. a2a tail after phone cancel → turn_end:end_turn turn_start turn_end:cancelled
+```
+
+**As built:** `packages/core/src/work-unit.ts` (new, pure), exported from
+`core/src/index.ts`; `packages/core/test/work-unit.test.ts`;
+`changelog.d/a2a.added.md` (says `serve` does not speak A2A yet: **S10 must
+rewrite it**). No schema change, so `protocol.json` is untouched.
+
+**Red before green:** against a stub with the final signatures, 45 fail / 4
+pass on assertions (the 4 matched the stub's defaults). Then 49 pass / 0 fail.
+
+**Drift from Implementation:**
+- `unitsFromSegment(entries)` has no `messages` argument (fixed above).
+- `unit_end` is not in `KnownLogEntry` until S1, so core declares the
+  structural `CarriedUnitEntry` and accepts `KnownLogEntry | CarriedUnitEntry`.
+- Added `unitEndBody(unit)`, the capped inverse of the carried read (the
+  round-trip test needs it; S1/S2 write through it). Unlike the workflow body
+  builders it does not yet judge by a schema (S1 adds the schema). S1 also
+  defines the schema's bounds in protocol (protocol cannot import core), and
+  core should then import them rather than keep two copies.
+- A turn's `reason` comes from its `stopReason` alone: `turn_end` logs nothing
+  else, so a live-only error message would make live and load records differ.
+- A carried unit of an unknown `kind` is skipped; a non-terminal or unknown
+  carried `state` reads as `failed`.
+
+**Notes for S2 / S4 / S8** (not verified by execution):
+- For "live end = load derivation", derive live ends with `unitsFromSegment`
+  over the live segment's entries (materialized: drop lazy checkpoint slots),
+  not from the driver row, whose `endedAt` is its own clock.
+- A run's result has only the last step report of the CURRENT segment: a live
+  run carries just its `workflow_start` across a boundary (also re-stamping
+  `startedAt`). A step that ended before the boundary is missing from `result`.
+- The driver's row is born `needs-approval` before `launch`
+  (`agent/src/workflow-driver.ts:1168`), so an already-approved run may be
+  seen as `waiting:approval` briefly.
+
+**Mutations** (`.tentacle/tmp/a2a/mutate-s0.ts`, original restored after each;
+49/49 green afterwards). All 10 killed:
+
+| Mutation | Fails |
+|---|---|
+| M1 `turnResult` = first assistant of the span | 3 |
+| M2 silent final round falls back to an earlier one | 1 |
+| M3 no result budget | 2 |
+| M4 no 256 bound | 2 |
+| M5 carried `unit_end` ignored | 4 |
+| M6 `base.turn` span starts at 0 | 1 |
+| M7 `stopped:cancelled` is a failure | 1 |
+| M8 ended + non-terminal word stays non-terminal | 1 |
+| M9 carried `state` trusted as is | 1 |
+| M10 rerun keeps the old report | 1 |
+
+**Gate (narrow):** `bun test` on `core/test/work-unit.test.ts`,
+`core/test/workflow-ledger.test.ts`, `scripts/test/changelog.test.ts`,
+`scripts/test/changelog-guard.test.ts` → 83 pass / 0 fail; `biome check` on the
+three changed TS files clean; `tsc --noEmit` limited to `core/src/index.ts` and
+the new test clean. The full `bun run check` was NOT run: the orchestrator's
+script runs it.
 
 ## Review
