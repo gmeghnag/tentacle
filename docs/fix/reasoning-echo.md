@@ -798,6 +798,86 @@ blocks). Whole-repo gate: the orchestrator's.
 **Status: s3 DONE** (V3 done except the interleaved case, unverified as
 above). s4–s5 untouched.
 
+### s4 — loop + pod wire + T1, T5, T7
+
+*— claude-opus-5-5, 2026-11-25*
+
+**Load-bearing check, re-run first** (`.tentacle/tmp/reasoning-echo/repro-wt.ts`,
+worktree sources, s1–s3 in): still red — `requests: 2`, 2nd assistant message
+`{"role":"assistant","content":"","tool_calls":[…]}`, `FAIL (red)`. The
+remaining missing link was the loop (D4), as planned. The plan's other claims
+for s4 were confirmed in the source: `toWireRequest` copied field by field;
+the laptop's `laptopRequest` spreads and `onModelStream`/`onModelStreamChunked`
+return the provider's events as-is (`remote-client.ts:2680`, `:4625`, `:4840`).
+**After s4 the repro prints `PASS: reasoning echoed`** (the 2nd request's
+assistant message ends `"reasoning_content":"I should list the dir first."`).
+
+**As built (red first, then green):**
+1. T1 + T7, new `packages/agent/test/reasoning-echo.test.ts` (real `Agent` +
+   real `OpenAIProvider` against a `Bun.serve` fake bound to `127.0.0.1`):
+   `reasoning_content` in → out and `reasoning` in → out, byte-identical
+   (unicode/quotes/newlines), the other field absent; no reasoning → no field;
+   D6 always: request 3 carries rounds 1 AND 2 on their own messages, and the
+   stored history holds the `openai:m` records; the forced final report
+   (`maxIterations: 1`) stores its record and its request echoes round 1; a cut
+   stream (no stop reason) keeps its text and stores NO record. T7: the
+   compaction transcript contains the content, never the reasoning; the
+   compacted history has no record. **Red on the buggy loop: 4 fail on the
+   assertions** (`Received: undefined`); the 2 passing were guards (no
+   reasoning; cut stream), plus T7 (true today by P5) — all made non-vacuous by
+   M3/M6 below.
+2. `packages/agent/src/agent.ts`: `let reasoning` per round (`:1689`), set in
+   `case "done"` (`:1709`); the normal-end push adds it (`:1816`). The forced
+   final report keeps its own `finalReasoning` (`:2032`, `:2036`) and pushes it
+   (`:2072`). The throw paths (provider throw, `stopReason: "other"`, cut tool
+   call) and the DSML re-ask push no record, unchanged.
+3. T5, `packages/daemon/test/proxy-model.test.ts` (new describe at the end):
+   `toWireRequest` keeps an openai AND an anthropic record, on `stream` and on
+   `countTokens`, checked after `WireChatRequestSchema.parse` (as the laptop's
+   peer parses it); a message without a record has no key. A POD `Agent` whose
+   only model is `ProxyModelProvider`, the laptop side validating each request
+   with `WireChatRequestSchema` and answering `done{reasoning}`: request 2 that
+   reaches the laptop carries the record — chunked path and batch path
+   (`ModelStreamResultSchema.parse`). **Red before the fix: 3 of 3 fail** on
+   the assertions.
+4. `packages/daemon/src/proxy-model.ts`: `toWireRequest` copies `reasoning`
+   (`:98`) through `toWireReasoning` (`:60`).
+5. Changelog: the s1 fragment `changelog.d/reasoning-echo.fixed.md` already
+   states the end-to-end behaviour s4 delivers; unchanged.
+
+**Drift from Implementation (and why):**
+- `toWireReasoning` copies the Anthropic `blocks` array (`[...body.blocks]`)
+  instead of passing the record through: core's `ReasoningRecord` has
+  `readonly` arrays and the wire type is mutable, so the plain copy failed
+  `tsc -p packages/daemon` (TS2322, the risk s1 noted). Same values, no cast —
+  the pattern `toolCalls` already uses on the same function. T5's anthropic
+  case pins it (M5).
+- No other drift. `client/remote-client.ts` unchanged, as planned (the pod T5
+  tests play the laptop with the real wire schemas; the `RemoteClient` pass-
+  through itself was read, not run).
+
+**Mutations (each reverted; script `.tentacle/tmp/reasoning-echo/mutate-s4.ts`,
+run over both touched test files; `git diff --stat` of `src/` unchanged
+afterwards):**
+
+| mutation | tests failing |
+|---|---|
+| M1 `case "done"` does not keep `event.reasoning` | 6 (4 T1 + both T5 pod-loop) |
+| M2 the final report does not keep its record | 1 (final report) |
+| M3 the cut-stream push (`stopReason: "other"`) stores the record | 1 (cut stream) |
+| M4 `toWireRequest` drops the field | 4 (all T5) |
+| M5 `toWireReasoning` drops the anthropic blocks | 1 (anthropic wire) |
+| M6 compaction transcript renders the reasoning | 1 (T7 transcript) |
+
+**Verification (narrow):** `bun test packages/agent/test/reasoning-echo.test.ts
+packages/daemon/test/proxy-model.test.ts` → 30 pass, 0 fail; existing loop
+tests `thinking-placeholder`, `truncated-reply`, `agent`, `compact`,
+`dsml-leak` → 81 pass, 0 fail; `bunx tsc --noEmit -p packages/agent` and
+`-p packages/daemon` → 0 errors; `bunx biome check` on the 4 touched files →
+clean. Whole-repo gate: the orchestrator's.
+
+**Status: s4 DONE.** s5 untouched.
+
 ## Review
 
 *(empty until Execution)*
