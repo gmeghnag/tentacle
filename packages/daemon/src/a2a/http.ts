@@ -17,6 +17,8 @@ import {
 import {
   EXTERNAL_MAX_BODY_BYTES,
   type ExternalCaller,
+  type ExternalRoute,
+  type TimeoutServer,
   authenticateCaller,
   readBoundedBody,
 } from "../external/route.ts";
@@ -26,16 +28,8 @@ export const AGENT_CARD_PATH = "/.well-known/agent-card.json";
 const SSE_PING_MS = 15_000;
 const VERSION_HEADER = "A2A-Version";
 
-/** What the route needs from Bun's server (lifts the idle timeout of a long call). */
-export interface TimeoutServer {
-  timeout(req: Request, seconds: number): void;
-}
-
-/** The hook `startWsServer` calls first on every request. */
-export interface A2ARoute {
-  /** A response when the route owns the path; undefined = not ours, fall through. */
-  handle(req: Request, srv: TimeoutServer): Response | Promise<Response> | undefined;
-}
+/** The hook `startWsServer` calls first on every request (the shared external route shape). */
+export type A2ARoute = ExternalRoute;
 
 export interface A2AHttpOptions {
   /** The handler built over the executor and the projection store (an `A2ARequestHandler`). */

@@ -1955,6 +1955,14 @@ export class HostedSession {
     return this.persister ? this.persister.flush(this.id) : Promise.resolve();
   }
 
+  /**
+   * `persisted()`, plus whether the latest write LANDED (`SessionPersister.lastWriteLanded`).
+   * No persister → `true`: nothing on this daemon is ever made durable.
+   */
+  persistedLanded(): Promise<boolean> {
+    return this.persister ? this.persister.lastWriteLanded(this.id) : Promise.resolve(true);
+  }
+
   /** What is pending now, in request order: the resumed turn's carried entries, then each live ask. */
   private pendingList(): PendingPermission[] {
     const live = [...this.asks.values()].flatMap((ask) => (ask.record ? [ask.record] : []));
