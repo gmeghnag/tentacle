@@ -706,6 +706,98 @@ written in s1 (unchanged). Whole-repo gate: the orchestrator's.
 
 **Status: s2 DONE.** s3–s5 untouched.
 
+### s3 — Anthropic provider blocks / encode + T3 + V3
+
+*— claude-opus-5-5, 2026-11-25*
+
+**Load-bearing check, re-run first:** the s3 links read in the worktree as the
+plan states (`content_block_start` kept type/id/name only; `signature_delta`
+fell to `default`; `buildPayload` wrote text + `tool_use` only). Shown red by
+T3 below.
+
+**As built (red first, then green):**
+1. `packages/providers/test/reasoning-echo-anthropic.test.ts` (new, T3, injected
+   `fetch`): decode — thinking (deltas + `signature_delta`) and
+   `redacted_thinking` (`data`) on `done`, in stream order, live `reasoning`
+   deltas unchanged; omitted-display block (`""` + signature) kept; unsigned
+   block dropped (⇒ no record); a block never closed (cut) dropped; no
+   reasoning ⇒ no record. Encode — provider round trip, request 2's assistant
+   content `[thinking, redacted_thinking, text, tool_use]` verbatim; a no-call
+   assistant with a record → blocks, reasoning first; reasoning-only assistant
+   dropped; another `source` / an openai-format record not sent (message
+   unchanged); no `cache_control` on a reasoning block, both with and without
+   calls, with `applyCacheControl` (P8). Red on the buggy code: 6 fail on the
+   assertions (`Received: undefined` / missing blocks); the 4 passing were the
+   guards (unsigned, none, reasoning-only, other source), made non-vacuous by
+   the mutations below.
+2. `packages/providers/src/anthropic-provider.ts`:
+   - `OpenBlock` + `thinking` / `signature` / `data` (`:112`); `AnthropicEvent`
+     reads them on `content_block` and `delta.signature`.
+   - `stream`: `thinking_delta` also appends to the block; `signature_delta`
+     sets it (`:303`); on `content_block_stop` a non-tool block goes through
+     `reasoningBlock` (`:406`: signed thinking, or redacted with data) into
+     `reasoning` (`:215`) in stream order; `doneEvent` (`:433`) attaches
+     `{ source: this.id, body: { format: "anthropic", blocks } }` when any.
+   - `buildPayload(…, echoSource?)` (`:547`); `ownReasoningBlocks` (`:656`,
+     D5: assistant, `source === echoSource`, format `anthropic`). With
+     own blocks a no-call assistant uses blocks; reasoning first, then text,
+     then `tool_use`; a reasoning-only turn is still dropped (`:603`).
+     `stream` (`:193`) and `countTokens` (`:150`) pass `this.id`, so the
+     free count measures what is sent.
+   - `anthropic-cache.ts` unchanged (P8, pinned by T3).
+
+**Drift:** none from D2/D3/D5. Explicit: `buildPayload` echoes nothing when
+called without `echoSource` (the 3 existing test callers keep today's bytes).
+The thinking `signature` is SET from `signature_delta` (as D2 says), not
+appended.
+
+**Mutations (each reverted, `rg MUTATION` clean, diff stat unchanged; script
+`.tentacle/tmp/reasoning-echo/mutate-s3.ts`):**
+
+| mutation | T3 tests failing |
+|---|---|
+| M1 `signature_delta` ignored | 4 |
+| M2 unsigned thinking kept | 1 (unsigned dropped) |
+| M3 redacted dropped | 2 |
+| M4 no record on `done` | 4 |
+| M5 no `source` check | 1 (other source) |
+| M6 no format check | 1 (openai-format record) — a first variant with `?? []` was an equivalent mutant and survived; replaced |
+| M7 reasoning-only kept | 1 |
+| M8 reasoning not first (reversed) | 3 (incl. P8) |
+| M9 `stream` passes no `echoSource` | 1 (round trip) |
+| M10 thinking text not accumulated | 3 |
+
+**V3 — live Anthropic** (`.tentacle/tmp/reasoning-echo/v3.ts`: the REAL
+`AnthropicProvider` from this worktree, key from Keychain `tentacle-anthropic`
+never printed; the injected `fetch` adds the `thinking` param tentacle does not
+send, everything else is the provider's own bytes). `claude-haiku-5-5`:
+- `thinking: {type: "enabled"}` → 400 "not supported for this model, use
+  adaptive". Adaptive with default effort on a trivial prompt → no thinking.
+- adaptive + `output_config.effort: "high"` (display default = omitted):
+  round 1 `thinking, text, tool_use` → record `thinking(0ch, sig 1524ch)`;
+  count_tokens 825; **round 2 with echoed blocks: HTTP 200**, prompt 825 tokens
+  vs **633 without** the echo (control, also HTTP 200). So the API does not
+  400 on dropped blocks (the eval's case (a)): today's loss is silent, and the
+  echo is what puts the reasoning back in front of the model.
+- adaptive + `display: "summarized"`: record `thinking(193ch, sig 1380ch)`,
+  round 2 HTTP 200 (770 tokens).
+- Parallel calls (`thinking, text, tool_use, tool_use`): round 2 HTTP 200.
+- **Interleaved within ONE message (thinking after text): NOT observed.** Even
+  when the prompt asked for it, Haiku put all its thinking first. The failure-mode
+  row stays a residual risk, unverified. To verify it, capture a real response
+  whose block order is `thinking, text, thinking, …` (more likely on a
+  Sonnet/Opus long tool round) and replay request 2.
+- Spend ≈ $0.003 (5 Haiku calls of ≤ 900 prompt / ≤ 600 output tokens + free
+  count_tokens).
+
+**Verification:** `bun test packages/providers` → 244 pass, 0 fail; `bunx biome
+check` on the 2 touched files → clean; `bunx tsc --noEmit -p .` → 0 errors.
+Changelog fragment unchanged (s1's already names Anthropic's signed `thinking`
+blocks). Whole-repo gate: the orchestrator's.
+
+**Status: s3 DONE** (V3 done except the interleaved case, unverified as
+above). s4–s5 untouched.
+
 ## Review
 
 *(empty until Execution)*
