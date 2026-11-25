@@ -32,6 +32,17 @@ describe("SessionScreen follow wiring (bug 3: the TRUE end, padding included)", 
   });
 });
 
+describe("SessionScreen hidden landing batch (docs/fix/mobile-open-long-session-3.md)", () => {
+  const src = read("screens", "SessionScreen.tsx");
+
+  test("the FlatList's maxToRenderPerBatch is `landingBatch(settling)`, never a constant", () => {
+    expect(src).toMatch(/<FlatList[\s\S]{0,200}maxToRenderPerBatch=\{landingBatch\(settling\)\}/);
+    expect(src).toMatch(
+      /import \{[\s\S]{0,400}landingBatch,[\s\S]{0,400}\} from "\.\.\/follow\.ts"/,
+    );
+  });
+});
+
 describe("RenameSheet (bug 1: the dialog sits above the keyboard, with a top inset)", () => {
   const src = read("screens", "RenameSheet.tsx");
 

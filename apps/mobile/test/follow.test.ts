@@ -853,8 +853,10 @@ describe("landingBatch: a hidden landing renders its window in few rounds", () =
     expect(landingBatch(landingQuiet.settling)).toBeUndefined();
   });
 
-  test("the batch covers a whole FlatList window (21 viewports of short rows)", () => {
-    // Default windowSize 21 x ~720 pt viewport / ~40 pt shortest row ~ 380 rows.
-    expect(LANDING_BATCH).toBeGreaterThanOrEqual(200);
+  test("the batch is far above the FlatList default of 10 (the knob that ends growth in few rounds)", () => {
+    // The jump branch of VirtualizeUtils renders the last `maxToRenderPerBatch + 1`
+    // rows in ONE pass (windowSize does not bound it), so the batch must dwarf the
+    // 10-row default, or a long opening still outlasts LANDING_ROUNDS.
+    expect(LANDING_BATCH).toBeGreaterThanOrEqual(LANDING_ROUNDS * 10);
   });
 });

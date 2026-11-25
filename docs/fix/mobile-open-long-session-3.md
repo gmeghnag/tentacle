@@ -25,13 +25,13 @@ Round 2 (`mobile-open-long-session-2.md`) fixed the 114-row case. Post-merge QA 
 
 **Load-bearing assumption.** The growth steps are FlatList render batches, so bigger batches while hidden finish the window within `LANDING_ROUNDS`. Falsifiable: 400 rows open with no intermediate frame (done, see Execution).
 
-**Design.** `follow.ts` `landingBatch(settling)` (pure) returns `LANDING_BATCH` (240) while the list is hidden, `undefined` (the FlatList default) once shown. `SessionScreen.tsx` passes it as `maxToRenderPerBatch`. No history-loading change, no bound change, nothing rendered that the window would not render anyway (the default `windowSize` 21 bounds it; 240 rows ≥ the whole window of the shortest rows).
+**Design.** `follow.ts` `landingBatch(settling)` (pure) returns `LANDING_BATCH` (240) while the list is hidden, `undefined` (the FlatList default) once shown. `SessionScreen.tsx` passes it as `maxToRenderPerBatch`. No history-loading change, no bound change. **Mechanism (corrected in Fix round 1):** when the scroll target lies past the rendered window, `VirtualizeUtils.js:144-149` (`@react-native/virtualized-lists` 0.88) renders the LAST `maxToRenderPerBatch + 1` rows in one pass, whatever `windowSize` is; with 240 that is 241 rows at once while hidden, which is why a long opening lands in few rounds. `windowSize` does not bound that pass (the next pass trims). Cost: one long hidden JS stall, so a longer blank on a slow device.
 
 **Files.** `apps/mobile/src/follow.ts`, `apps/mobile/src/screens/SessionScreen.tsx` (1 prop), `apps/mobile/test/follow.test.ts`, `changelog.d/mobile-open-long-session-3.fixed.md`.
 
-**Failure modes.** Very long (1000+) sessions: the window, not the count, bounds rendering; if the growth still outlasts 12 rounds the old capped/tail path applies (unchanged, travel possible again — not measured beyond 400). Growing while opening: unchanged path. Short sessions: never above 10 rows per batch anyway. Re-open/re-attach: `settling` false → default batching. Rotation: after reveal, default. Cost: one hidden render pass of up to ~240 rows on the JS thread during the (already hidden) landing.
+**Failure modes.** Very long (1000+) sessions: the window, not the count, bounds rendering; if the growth still outlasts 12 rounds the old capped/tail path applies (unchanged, travel possible again — not measured beyond 400). Growing while opening: unchanged path. Short sessions: never above 10 rows per batch anyway. Re-open/re-attach: `settling` false → default batching. Rotation: after reveal, default. Cost: one hidden render pass of ~241 rows on the JS thread (even when they span far more than 21 viewports, e.g. code/diagram rows), i.e. a longer blank on a slow device — not measured.
 
-**Tests.** `follow.test.ts` "landingBatch": hidden → `LANDING_BATCH`, shown/quiet → `undefined`; the batch covers a whole window.
+**Tests.** `follow.test.ts` "landingBatch": hidden → `LANDING_BATCH`, shown/quiet → `undefined`; 
 
 ## Execution
 
@@ -43,7 +43,7 @@ Round 2 (`mobile-open-long-session-2.md`) fixed the 114-row case. Post-merge QA 
 - before: `red-sheet-400.png` (blank → turn 82 → travel to 200).
 - after: `green-sheet-400.png` (10 fps, last 27 frames: blank ~0.5 s, then turns 194–200 directly, no intermediate position), `green-long400.png` (400 msgs at rest), `green-alpha114.png` (114 msgs: turn 57 + answer above the composer), `green-charlie.png` (short session right).
 
-**Unverified:** sessions ≫ 400 rows; blank length with no Maestro/video running; behaviour on a physical device (slower JS may need more than one batch).
+**Unverified:** blank length on a slow device / with tall rows (241-row pass); sessions ≫ 400 rows; "proportional to length" (one length measured); blank length with no Maestro/video running; behaviour on a physical device (slower JS may need more than one batch).
 
 ## Review (Round 1)
 
@@ -83,3 +83,12 @@ Round 2 (`mobile-open-long-session-2.md`) fixed the 114-row case. Post-merge QA 
 **What holds.** The diagnosis and the one-prop fix are sound and minimal. The pure-module split is right. The changelog fragment is well formed. The simulator red/green evidence is real and checks the exact property: no intermediate frame.
 
 **Executor behaviour.** Execution is honest and compact. It names its unverified parts (≫400 rows, no-driver blank, physical device) and does not overclaim the 3.5 s blank. Weaknesses: it presented a red-by-missing-import as red, left the only behavioural line unpinned, and stated the windowing premise without reading `VirtualizeUtils`.
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+- **MEDIUM 1 (wiring unpinned):** added a source pin in `apps/mobile/test/session-screen-follow-wiring.test.ts` (`<FlatList … maxToRenderPerBatch={landingBatch(settling)}` + the import). **Red:** with the prop replaced by `{10}` → 1 fail; with the prop removed → 1 fail (93 pass each); restored → 94 pass / 0 fail (`follow.test.ts` + wiring). No render change, so no new simulator run.
+- **MEDIUM 2 (false windowSize premise):** Design/Failure modes above now state the real mechanism (the jump branch renders the last `maxToRenderPerBatch + 1` rows) and its cost; the follow test comment/assertion no longer claims "covers a whole window" and asserts only `LANDING_BATCH >= LANDING_ROUNDS * 10`. Code unchanged.
+- **LOW 3:** the mechanism is shown by intervention (N=1 red/green), not instrumentation; recorded under Unverified.
+- **LOW 4 (Notes):** re-attach / resync / Reopen start from `landingQuiet` (`settling: false`) and keep 10-row batches; a resync that re-keys a long list could show the same mid-growth travel on the shown list. Pre-existing, out of scope; follow-up candidate.
