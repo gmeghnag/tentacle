@@ -48,7 +48,14 @@ class Scripted implements ModelProvider {
       yield { type: "done" };
       return;
     }
-    const last = [...request.messages].reverse().find((m) => m.role === "user");
+    // A workflow status note may be queued after the prompt: skip those messages.
+    const last = [...request.messages]
+      .reverse()
+      .find(
+        (m) =>
+          m.role === "user" &&
+          !(typeof m.content === "string" && m.content.startsWith("[workflow")),
+      );
     // The prompt's last line (the host prefixes a date stamp line).
     const text = (typeof last?.content === "string" ? last.content : "").split("\n").at(-1) ?? "";
     if (text === "ask") {
