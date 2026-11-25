@@ -158,7 +158,13 @@ import {
 } from "./run-state.ts";
 import { localAutoAccept, styleInfo } from "./run-ui.ts";
 import { type ServeA2AOptions, describeA2A, parseA2AAsks } from "./serve-a2a.ts";
-import { type ServeMcpOptions, describeMcp, mcpAddHint, parseMcpAsks } from "./serve-mcp-server.ts";
+import {
+  type ServeMcpOptions,
+  describeMcp,
+  hintUrl,
+  mcpAddHint,
+  parseMcpAsks,
+} from "./serve-mcp-server.ts";
 import { serveModelNotice } from "./serve-model-notice.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { autoAcceptOf, routingAutoAccept, seedAutoAcceptOf } from "./session-auto-accept.ts";
@@ -1260,7 +1266,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         );
       }
       if (mcp) {
-        const httpUrl = server.url.replace(/^ws/, "http").replace(/\/+$/, "");
+        const httpUrl = hintUrl(server.url.replace(/^ws/, "http").replace(/\/+$/, ""));
         err(`MCP on ${httpUrl}/mcp (${describeMcp(mcp)})\n  ${mcpAddHint(httpUrl)}\n`);
       }
       // `serve`'s own config decides its titles; no Ink here, so its log line.

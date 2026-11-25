@@ -398,7 +398,33 @@ describe("mcp tasks — negotiated per request, durable before the ack", () => {
     await mcp(r.base, "tasks/cancel", { taskId: nextId });
     await untilStatus(r.base, nextId, "cancelled");
   });
+
+  // docs/fix/serve-mcp-polish.md T7 (P3): a retried keyed start answers the SAME
+  // task — taskId IS the turn id, so one turn cannot carry two. Mutation: no start
+  // memo → two sessions under two taskIds → red.
+  test("a retried keyed start: one session, one task, one taskId", async () => {
+    const r = rig(root());
+    const task = await startTask2(r.base, { prompt: "hang", key: "t1" });
+    const again = await startTask2(r.base, { prompt: "hang", key: "t1" });
+    expect(again.taskId).toBe(task.taskId);
+    expect(again.sessionId).toBe(task.sessionId);
+    const read = await getTask(r.base, task.taskId);
+    expect(read.status).toBe("working");
+    expect(sessionOf(task.taskId)).toBe(task.sessionId);
+    expect(r.host.size).toBe(1);
+  });
 });
+
+/** `session_start` as a task with raw arguments (a retry key). */
+async function startTask2(
+  base: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown> & { taskId: string; sessionId: string }> {
+  const r = await callTool(base, "session_start", args);
+  if (r.result?.resultType !== "task") throw new Error(`not a task: ${JSON.stringify(r)}`);
+  const taskId = String(r.result.taskId);
+  return { ...r.result, taskId, sessionId: sessionOf(taskId) };
+}
 
 describe("mcp tasks — projection of the turn", () => {
   test("both + elicitation: input_required → tasks/update accept → that ask's allow_once → completed", async () => {
