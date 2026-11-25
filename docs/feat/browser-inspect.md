@@ -544,6 +544,20 @@ first merge after B1–B3.
 
 The spike was removed after the run (extension, native-host manifest, logs with browsing URLs).
 
+### Debugger only when needed (owner 2026-11-25, after B0: «possibile nascondere il tab della debugging session?» → option 2)
+
+The infobar cannot be hidden from an extension (Chrome's own guard; the `--silent-debugger-extension-api` launch flag is rejected: unsupported-flag warning, policy-blockable on a managed browser). So the design minimises the time the debugger is attached — every capability uses the LEAST powerful API that serves it:
+
+| Capability | API (no infobar unless noted) |
+|---|---|
+| read page text / outline, query, click, type | content script |
+| URL, method, status, request/response headers, timing | `chrome.webRequest` (observational, MV3) |
+| screenshot of the VISIBLE tab | `chrome.tabs.captureVisibleTab` |
+| console log + JS errors (`browser_console`) | content script hooks (page console / `error` / `unhandledrejection`); the debugger's `Runtime`/`Log` only while already attached |
+| response BODIES, WebSocket frames, background-tab screenshot, raw `cookie` headers | `chrome.debugger` — **infobar**; attached on demand for these, detached after 10 idle minutes (Q4) |
+
+`browser_net` reports which tier its data came from (headers-only vs full) so the model knows when to ask for the deeper capture. B3 (extension) and B4 (read-only tools) are re-scoped accordingly; the masking (D2) applies to both tiers.
+
 ### Owner answers (2026-11-25 ~11:50)
 
 - **Q1 pod sessions:** no browser tools in v1 (as recommended).
