@@ -850,3 +850,18 @@ the plan orders them; the kit's `askCard` is what S8 will compose for the run sc
 
 *— claude-code (AI_AGENT=claude-code_2-1-325_agent — the only model id this session exposes), 2026-11-25*
 
+
+## Execution — S8 (run screen)
+
+- **Load-bearing check (re-run): holds.** `AskOrigin` carries `runId`/`stepId` (`packages/client/src/ask-origin.ts:21-31`); the `WorkflowRun` route carries `computerId`/`sessionId`/`runId` (`routes.ts:126`); the Session screen already reads the root routes (`SessionScreen.tsx` `rootRoutes`).
+- **`sheet-plan.ts`:** `ownRunTopId`/`ownRunOnTop` (top non-`Sheet` route is this session's `WorkflowRun`; a `Sheet` above it is ignored; any other screen above → not on top), `askPresentable(origin, topRunId)` (over a run only an ask whose `origin.runId` is that run; Q1), `sessionInFront(…, ownRun)`.
+- **`SessionScreen.tsx`:** `topRunId` feeds `inFront` and `askPresented`'s `presentable`.
+- **`workflow-run-controller.ts`:** `CardAsk.origin`; `askForRunStep` pairs by `origin.runId/stepId` first (another run's origin never pairs, whatever the agent id says), falling back to the `agentId` split only for an origin with no run id; `AskBar` gains `foreign` (an ask that is not this run's); `AskSource.unpark` + `controller.reviewAsk()`; `askSourceFromSheet` passes `origin`/`unpark`.
+- **`WorkflowRun.tsx`:** `AskBlock` removed; `AskPanel` draws one `AskSlim` (`Review` → unpark; `Open the session` for foreign / `!canAnswer`). Prop `onAnswer` → `onReviewAsk` (`App.tsx` wires it and `unpark`). `controller.answer` stays (tested), unused by the screen.
+- **e2e `44`:** the run's hash approval is now answered on `perm-sheet`. `46-ask-park.yaml` run leg NOT written (no new flow registered), unverified on a simulator.
+- **Drift:** the plan's `askForStep` move is `askForRunStep` in the mobile controller (client `askForStep` untouched, the TUI uses it). `ASK_PARKS.forget` is not called from the run screen's `Review` (only `sheet.unpark()`); the Session screen underneath owns that memory.
+- **Tests:** `sheet-plan`, `workflow-run-controller`, `workflow-screens-wiring` (rewritten for the slim row): 129 pass / 0 fail; `tsc -p apps/mobile` clean; biome clean. Red: before the code, import/assertion failures (4 assertion reds in the controller file).
+- **Mutations:** `askPresentable`→`true`: 1 fail; `sessionInFront` without `ownRun`: 1 fail (+ askPresentable still mutated at that moment); `askForRunStep` structured branch disabled: 2 fail. All reverted, 129 green again.
+- Changelog: `changelog.d/mobile-ask-surfaces-s8.changed.md` (the `mobile-ask-surfaces.*` names were already taken by earlier slices).
+
+*— claude-sonnet-5-5, 2026-11-25*

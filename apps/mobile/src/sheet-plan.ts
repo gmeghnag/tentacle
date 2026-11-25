@@ -22,6 +22,7 @@
  *   `sheetHidden` is "locked OR not active", and the drain never waits for a
  *   transition.
  */
+import type { AskOrigin } from "@tentacle/client";
 import { DENSE_FONT_SCALE } from "./theme.ts";
 
 /**
@@ -758,8 +759,66 @@ export function yieldForeign(
  * which today read `useIsFocused()` alone. A sheet route on top BLURS Session,
  * so without this an ask's auto-read would stop exactly when its own sheet opens.
  */
-export function sessionInFront(focused: boolean, actual: readonly SheetEntry[]): boolean {
-  return focused || actual.length > 0;
+export function sessionInFront(
+  focused: boolean,
+  actual: readonly SheetEntry[],
+  ownRun = false,
+): boolean {
+  return focused || actual.length > 0 || ownRun;
+}
+
+/** The route `WorkflowRun` is registered under (`routes.ts`). */
+export const WORKFLOW_RUN_ROUTE = "WorkflowRun";
+
+/**
+ * The id of THIS session's own run when it is the screen on top (docs/fix/
+ * mobile-ask-surfaces.md D6), else null. `Sheet` routes above it are ignored: the
+ * run is what the person is looking at under them. A run of another session, or
+ * any other screen above the run, is not "on top".
+ */
+export function ownRunTopId(
+  routes: readonly SheetRouteLike[],
+  owner: { readonly computerId: string; readonly sessionId: string },
+): string | null {
+  for (let i = routes.length - 1; i >= 0; i--) {
+    const route = routes[i];
+    if (route === undefined || route.name === SHEET_ROUTE) {
+      continue;
+    }
+    if (route.name !== WORKFLOW_RUN_ROUTE) {
+      return null;
+    }
+    const params = route.params as
+      | { readonly computerId?: unknown; readonly sessionId?: unknown; readonly runId?: unknown }
+      | undefined;
+    return params?.computerId === owner.computerId &&
+      params?.sessionId === owner.sessionId &&
+      typeof params.runId === "string"
+      ? params.runId
+      : null;
+  }
+  return null;
+}
+
+/** Whether this session's own run is the screen on top (the session is then "in front"). */
+export function ownRunOnTop(
+  routes: readonly SheetRouteLike[],
+  owner: { readonly computerId: string; readonly sessionId: string },
+): boolean {
+  return ownRunTopId(routes, owner) !== null;
+}
+
+/**
+ * Whether the ask may be presented as a SHEET on the screen in front (Q1, owner
+ * «only the slim row»): over a run (`topRunId`) only that run's own ask; anything
+ * else (main agent, a sub-agent, another run, a run id the daemon did not send)
+ * stays a slim row. Everywhere else, always.
+ */
+export function askPresentable(origin: AskOrigin, topRunId: string | null): boolean {
+  if (topRunId === null) {
+    return true;
+  }
+  return origin.kind === "workflow" && origin.runId === topRunId;
 }
 
 /** The app activity `AppState` reports (`AppStateStatus`, minus its RN typing). */

@@ -2165,6 +2165,7 @@ function WorkflowRunRoute({
                 view: () => screen.sheet().view(),
                 answerFor: (requestId, optionId) => screen.sheet().answerFor(requestId, optionId),
                 subscribe: (listener) => screen.subscribe(() => listener()),
+                unpark: () => screen.sheet().unpark(),
               }),
         mode: {
           get: () => WORKFLOW_RUN_MODE,
@@ -2207,7 +2208,7 @@ function WorkflowRunRoute({
         now={Date.now()}
         onBack={onBack}
         onMode={(mode) => controller.setMode(mode)}
-        onAnswer={(stepId, optionId) => controller.answer(stepId, optionId)}
+        onReviewAsk={() => controller.reviewAsk()}
         onStop={() => void controller.stop()}
         onResume={() => void controller.resume()}
         onRerun={(stepId) => void controller.rerun(stepId)}

@@ -150,12 +150,14 @@ import {
   type SheetEntry,
   type SheetRouteLike,
   appActivity,
+  askPresentable,
   askRouteId,
   askingParamUpdate,
   desiredStack,
   dismissedNatively,
   drainPops,
   managedStack,
+  ownRunTopId,
   queueAfterDismiss,
   readyIntents,
   reconcile,
@@ -460,7 +462,10 @@ export function SessionScreen({
   // Session, so the raw flag would stop the auto-read exactly when the ask's own
   // sheet opens (docs/feat/mobile-native-sheets.md D4).
   const focused = useIsFocused();
-  const inFront = sessionInFront(focused, sheetStack);
+  // This session's OWN run on top keeps it in front too (docs/fix/mobile-ask-surfaces.md D6):
+  // its ask is then presented as a sheet over the run, and only that run's (Q1).
+  const topRunId = owner === null ? null : ownRunTopId(rootRoutes, owner);
+  const inFront = sessionInFront(focused, sheetStack, topRunId !== null);
   const lastTurn = useRef(state.view.turn);
   useEffect(() => {
     const ended = endedTurn(lastTurn.current, state.view.turn);
@@ -1332,7 +1337,9 @@ export function SessionScreen({
         asking: state.sheet.kind === "asking",
         parked: state.sheet.kind === "asking" && state.sheet.parked,
         drawerOpen,
-        presentable: true,
+        presentable:
+          state.sheet.kind !== "asking" ||
+          askPresentable(state.sheet.origin ?? { kind: "main" }, topRunId),
       }),
   });
   // Only the kinds this build presents natively are pushed: the other three

@@ -20,6 +20,7 @@ import {
   SHEET_SPEC,
   type SheetEntry,
   type SheetKind,
+  askPresentable,
   askRouteId,
   askRouteParams,
   askingParamUpdate,
@@ -31,6 +32,8 @@ import {
   initialDetent,
   managedStack,
   openingDetent,
+  ownRunOnTop,
+  ownRunTopId,
   queueAfterDismiss,
   readyIntents,
   reconcile,
@@ -507,6 +510,56 @@ describe("sessionInFront — this session is what the person sees", () => {
 
   test("blurred with no sheet up is behind", () => {
     expect(sessionInFront(false, [])).toBe(false);
+  });
+
+  test("S8: an own run on top keeps the session in front", () => {
+    expect(sessionInFront(false, [], true)).toBe(true);
+  });
+});
+
+describe("S8 — the run screen over a session (docs/fix/mobile-ask-surfaces.md D6)", () => {
+  const owner = { computerId: "c", sessionId: "s" };
+  const session = { key: "k0", name: "Session", params: { computerId: "c", sessionId: "s" } };
+  const run = (sessionId: string, runId = "wf-1") => ({
+    key: "k1",
+    name: "WorkflowRun",
+    params: { computerId: "c", sessionId, runId, title: "t" },
+  });
+  const sheetRoute = {
+    key: "k2",
+    name: "Sheet",
+    params: { kind: "permission", computerId: "c", sessionId: "s" },
+  };
+
+  test("ownRunOnTop: this session's run on top is true, another session's is false", () => {
+    expect(ownRunOnTop([session, run("s")], owner)).toBe(true);
+    expect(ownRunOnTop([session, run("t")], owner)).toBe(false);
+    expect(ownRunOnTop([session], owner)).toBe(false);
+    expect(ownRunOnTop([], owner)).toBe(false);
+  });
+
+  test("a sheet over the run keeps it on top; another screen above it does not", () => {
+    expect(ownRunOnTop([session, run("s"), sheetRoute], owner)).toBe(true);
+    expect(ownRunOnTop([session, run("s"), { key: "k3", name: "Other" }], owner)).toBe(false);
+    expect(ownRunTopId([session, run("s", "wf-7"), sheetRoute], owner)).toBe("wf-7");
+    expect(ownRunTopId([session, run("t")], owner)).toBeNull();
+  });
+
+  test("askPresentable (Q1): over a run only THAT run's ask is presented", () => {
+    const wf = (runId: string | null) => ({
+      kind: "workflow" as const,
+      name: "n",
+      runId,
+      stepId: "a",
+      position: null,
+    });
+    expect(askPresentable({ kind: "main" }, null)).toBe(true);
+    expect(askPresentable(wf("wf-2"), null)).toBe(true);
+    expect(askPresentable(wf("wf-1"), "wf-1")).toBe(true);
+    expect(askPresentable(wf("wf-2"), "wf-1")).toBe(false);
+    expect(askPresentable(wf(null), "wf-1")).toBe(false);
+    expect(askPresentable({ kind: "main" }, "wf-1")).toBe(false);
+    expect(askPresentable({ kind: "subagent", type: "x", task: "y" }, "wf-1")).toBe(false);
   });
 });
 
