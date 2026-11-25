@@ -1028,3 +1028,31 @@ Each test names its mutation (§9).
 **Reviewer:** the same model family (Opus) as M2–M4's executor, in a fresh context only. Shared blind spots may survive.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Round 2
+
+**Verdict: PASS.** The fix commit `c3af5239` (`git diff HEAD~1`) closes all three round-1 findings.
+
+| Finding | Fix (as read) | Mutation → result |
+|---|---|---|
+| 1 HIGH: `resultType` | `wire.ts` `eraResult`/`eraReply` stamp `resultType:"complete"` on every modern result (SSE status and a task's `result` too). `MODERN_CACHE` (`ttlMs`, `cacheScope`) on `server/discover` and `tools/list`. | `eraResult` made a no-op → RED: "SDK v2 pinned to 2026-07-28", "SDK v2 + ext-tasks", plus the mcp-tasks HTTP tests. The round-1 repro `review/sdk-modern.ts` now lists 6 tools in default, `auto` and pinned mode. |
+| 2 MEDIUM: durable | `SessionPersister.lastWriteLanded` (fail-closed: no write, stopped or blocked → `false`); `HostedSession.persistedLanded`; the default `durable` uses it. | `lastWriteLanded` → always `true` → RED: "the DEFAULT durable sees a real write fail". |
+| 3 MEDIUM: cap | `admit()` takes a slot synchronously (the `admitting` map) on `start` AND `send`. Live means running, held or being brought up; idle held attachments are let go first. | No `admitting.set` → RED: "the cap holds under concurrent starts". `send` without `admit` → RED: "session_send cannot bring a 9th session back". |
+
+Every mutation was reverted with the exact inverse Edit; `git diff` was empty afterwards.
+
+**Gate:**
+- Touched files (6 `mcp`/`a2a` files): 101 pass / 0 fail.
+- Regressions on the persister change: `persistence`, `session-auto-accept-persist` and `cli/serve-a2a-e2e`: 135 pass / 0 fail.
+- `bun run typecheck`: clean. `bun run lint`: clean (2522 files).
+- The full parallel `bun run test` is the orchestrator's gate.
+
+**Regression attacks:**
+- `flush()` keeps its `void` contract (`.then(() => {})`), so existing callers are unchanged.
+- A later failed write for the same id makes `lastWriteLanded` false even if the turn start landed. That spuriously refuses a task, which is fail-closed and acceptable.
+- Idle sessions let go by the adapter are no longer counted. They are detached, so the host's detached cap (archive-to-make-room) bounds them, and the host's 64 cannot be filled through this route.
+- The ext-tasks e2e passing against the real `@modelcontextprotocol/ext-tasks` also settles round 1's open `ttlMs: null` and field-name question for the paths it exercises.
+
+**Still not done (not blocking):** the manual live Claude Code check (M5).
+
+*— claude-opus-5-5, 2026-11-25*
