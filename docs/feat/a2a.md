@@ -1,6 +1,6 @@
 # feat/a2a — `tentacle serve` speaks A2A (server MVP)
 
-> **Status:** implementation — **APPROVED (owner answers 2026-11-25)** (revision 2: scope re-examined per owner Q3)
+> **Status:** implementation — **NOT approved** (rev. 3 after the owner's addendum: owner questions round 3 open)
 > **Branch:** `feat/a2a`
 > **Size:** L → split into S/M slices · **Blast:** load-bearing (a new external session entry, AGENTS §7 "a remote is not trusted") · **Suited:** Opus plans + executes; mandatory fresh-context Opus review
 > **Changelog:** `changelog.d/a2a.added.md`
@@ -83,7 +83,7 @@ non-upgrade request with 401 or 426 (`packages/daemon/src/ws-server.ts:371-378`)
 
 ## Implementation
 
-*— claude-opus-5-5, 2026-11-25 (rev. 2 after the owner answers: Q1 option, Q3 scope re-examined)*
+*— claude-opus-5-5, 2026-11-25 (rev. 2: Q1 option, Q3 scope; rev. 3: one work-unit vocabulary, A2A tasks a projection of the session log — no A2A store)*
 
 ### Load-bearing assumption
 
@@ -240,18 +240,15 @@ console.log("5. a2a tail after phone cancel →", a2aU.slice(-3).join(" "));
 - **A turn's state is readable without side effects:**
   `HostedSession.knownTurn(turnId)` → `{turnId}` (running) / `{turnId, ended}` /
   `undefined` (`hosted-session.ts:3275-3281`); the turn keys survive an
-  archive/reopen (`:4950-4958`). ⇒ restart reconciliation READS the turn's
-  state; it never re-sends a prompt (a key the daemon no longer has would
+  archive/reopen (`:4950-4958`). ⇒ the projection READS a turn's state; nothing
+  A2A-side ever re-sends a prompt (a key the daemon no longer has would
   otherwise RUN the task a second time).
 - **The push grace already arbitrates "first answer wins":** an ask answered
   before its grace ends is never pushed; an attached device is never pushed
   (`packages/daemon/src/push-rules.ts:14-28`). The A2A adapter is not a
   registered device, so it never suppresses the owner's push.
-- **Deleted sessions are known to `serve`:** `TombstoneFile(dir)`
-  (`serve.ts:594`).
 - **SDK seams** (`@a2a-js/sdk` 1.3.0): `TaskStore { save, load, list }`
-  (scoped by `context.user`); `InMemoryTaskStore(ownerResolver?)` implements
-  all three; `AgentExecutor.execute` is called again with
+  (scoped by `context.user`) — implemented here as a projection; `AgentExecutor.execute` is called again with
   `requestContext.task` set for a follow-up message on an interrupted task;
   the handler keeps the event bus alive in `INPUT_REQUIRED`/`AUTH_REQUIRED`
   (`DefaultRequestHandlerOptions`, `dist/server/index.d.ts:267-280`).
@@ -265,233 +262,274 @@ console.log("5. a2a tail after phone cancel →", a2aU.slice(-3).join(" "));
 3. **MVP cuts:** «preferisco sforare la mezzanotte ma fare le cose pulite in ottica design robusto e risparmio tokens se questo MVP non soddisfacesse queste richieste»
 4. **SDK:** yes, `@a2a-js/sdk`.
 
-### Scope (revision 2 — every cut re-examined)
+*Addendum 2026-11-25 ~11:35 (binding), verbatim:* «riusciamo poi a uniformare i tasks dei workflows con questi? cerchiamo di deduplicare e tenere pulito e uniforme il più possibile» — an A2A Task must NOT become a fourth "unit of work with a state" beside workflow runs, sub-agents and turns.
 
-Rule (owner Q3): a cut stays OUT only if adding it later is **purely
-additive** (no rework, no breaking change, no migration of stored data);
-otherwise it comes IN. Second lens: **token saving** for the caller (what we
-send) and for us (what we store/resend).
+### Survey — the units of work tentacle already has (rev. 3)
 
-| Item | Draft 1 | Rev. 2 | Why |
+| | Turn | Workflow run | Background sub-agent |
 |---|---|---|---|
-| Agent Card, `SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask` | in | **in** | the MVP |
-| `SubscribeToTask` | in | **in** | free with the SDK; the way back after a dropped stream |
-| Task records | memory only | **in: persisted** (one file per task, write on state change) + restart reconciliation | memory-only is NOT additive to fix: tasks created before the fix would be lost, and a restart today breaks `GetTask` on a live session; an interrupted task (`INPUT_REQUIRED`) must survive a restart since the daemon resumes its turn |
-| `ListTasks` | out | **in** | a persistent `TaskStore` must implement `list` anyway; owner-scoped by the SDK |
-| Caller identity on every record + session id | none | **in**: `a2a-<caller>-<contextId>`, task owner = caller | adding it later would mean migrating records/ids (not additive). One caller (`default`) today; more callers later = config only |
-| Who answers asks (Q1) | owner only | **in**: per-caller `asks: owner \| both` | owner answer |
-| Continue an ARCHIVED context (idle TTL) | error | **in**: `reopen` own `a2a-<caller>-…` only | multi-turn over hours must not die at the TTL; one param |
-| Response size (token saving) | all text, streamed | **in**: artifact `response` = the **final round's** text (a new round after a tool call starts with `append:false`, replacing); streamed as deltas | the caller gets the answer, not "let me read the file…" narration; `GetTask` returns only the final text |
-| Per-tool status updates | status message per tool call | **out** | they cost the caller's tokens on every stream; adding them later as an opt-in A2A extension is additive |
-| Task `history` | user message | **in**: caller messages only (never agent chunks); `historyLength` honoured | no re-sending of what the caller already has |
-| Thoughts, plans, usage, tool output | not sent | **not sent** | token saving; tool output stays on the host |
-| Inbound `raw`/`url` file parts | refused (−32005) | **out** (−32005) | accepting later turns an error into success = additive; `url` fetch is an SSRF surface needing its own design |
-| Outbound files / presented artifacts | not sent | **out**; when added: **by reference** (`url` part to an authenticated `/a2a/files/<sha>`), never inline base64 | new artifacts beside `response` = additive |
-| HTTP+JSON (REST), gRPC bindings | out | **out** | a new `supportedInterfaces` entry = additive |
-| A2A push notifications (webhooks) | out | **out** (`capabilities.pushNotifications:false`) | additive; caller-supplied URLs = egress/SSRF, own design |
-| A2A 0.3 compat (missing `A2A-Version`) | out | **out** (−32009) | SDK `legacyCompat` later = additive |
-| Extended / signed Agent Card | out | **out** | additive card fields |
-| Message to a busy context | error | **error** (UnsupportedOperation) | queueing later turns an error into success = additive |
+| **Id** | `turnId`, client-chosen, ≤ 128 (`protocol/src/session.ts:439`); `wake-…` reserved for the daemon (`:452`) | `wf-N`, session-scoped (`agent/src/workflow-driver.ts:1152-1153`), never reused after a restart: seeded from history (`reserveRunIds`, `:607-616`); `WorkflowRunIdSchema` (`protocol/src/session-log.ts:323-326`); a rerun keeps the id (`workflow-driver.ts:1196-1199`) | `sa-N` (`protocol/src/session.ts:718-719`) |
+| **States** | running → ended with `StopReason` `end_turn`/`max_tokens`/`max_iterations`/`max_token_budget`/`cancelled`/`error` (`session.ts:493-500`); suspended on a pending ask (`permission.ts:3-10`) | `needs-approval`/`running`/`waiting`/`ok`/`error`/`stopped` + stopReason `budget`/`timeout`/`cancelled`/`interrupted`/`changed` — free words (`session.ts:836-839`) | free string `state` (`session.ts:724-725`); end `stopReason` free, `killed` included (`session-log.ts:273-274`) |
+| **Started by** | `session/prompt` | `session/workflow{action:"start", …, turnId}` — **the start already carries a `turnId`** (`session.ts:883-900`), logged as `workflow_start.turnId` (`session-log.ts:366-367`) | the `agent_task` tool, inside a turn |
+| **Persisted (session log, all NON-critical)** | `turn_start{turnId}`, `turn_end{turnId, stopReason}` (`session-log.ts:227-241`) + the sidecar's turn keys and pending asks (`daemon/src/persisted-session.ts:343-346,396`) | `workflow_start`/`workflow_step`/`workflow_end{state, stopReason, reason}` (`session-log.ts:353-405`); `running`/`waiting` live in memory and on the wire only (`:316`) | `subagent_background`/`subagent_end{stopReason, report}` (`session-log.ts:257-276`) |
+| **Closed honestly at load** | `RESTART_TURN_END` (`persisted-session.ts:335-341`) | `workflowLoadNotes` (`core/src/workflow-ledger.ts:286`) | `subagentLoadNotes` (`core/src/agent-job-ledger.ts:382`) |
+| **Phone/TUI read** | `turn_start`/`turn_end` updates (mandatory, `protocol/src/updates.ts:572-573`), the snapshot | `workflows` update rows (`updates.ts:598-599`) + `workflow/list` (serve, every live session) | `subagents` update rows (`updates.ts:582-583`) |
+| **Daemon holds in memory** | `knownTurn(turnId)` (`daemon/src/hosted-session.ts:3275-3281`) | the driver's runs + rows (`workflow-driver.ts:547-579`) | the job rows |
+
+**Finding:** every fact an A2A Task needs is ALREADY durable in the session log
+(the current segment is in memory: `daemon/src/session-log.ts:73-90`), keyed by
+ids tentacle already mints. The three units differ only in their **state
+words**. So the deduplication is: **one lifecycle vocabulary + one projection
+seam**, and **no A2A store at all** (rev. 2's per-task files are dropped).
+
+### Unification (rev. 3)
+
+**One vocabulary — `packages/core/src/work-unit.ts` (pure, React-free, new):**
+
+```ts
+type WorkUnitKind = "turn" | "workflow";            // "subagent" = follow-up F2
+type WorkUnitState = "working" | "waiting" | "completed" | "failed" | "canceled";
+interface WorkUnit {
+  kind: WorkUnitKind; id: string;                   // turnId | wf-N
+  origin?: string;                                  // the turnId that started it (workflow_start.turnId)
+  state: WorkUnitState;
+  waitingFor?: "permission" | "approval";           // a tool ask | a workflow file's approval
+  native: string;                                   // the unit's own word, kept for display/debug
+  reason?: string;                                  // one line: why it ended / what it waits for
+  startedAt?: number; endedAt?: number;
+  result?: string;                                  // turn: the final round's text; workflow: end reason + last step report
+}
+```
+
+Native → unified (one table each, unit-tested): turn `end_turn`/`max_*` →
+`completed` (`max_*` keeps a `reason`), `cancelled` → `canceled`, `error` →
+`failed`, pending ask → `waiting:permission`, else `working`. Workflow
+`needs-approval` → `waiting:approval`, `waiting` → `waiting:permission`,
+`running` → `working`, `ok` → `completed`, `error` → `failed`, `stopped:cancelled`
+→ `canceled`, any other `stopped:*` → `failed` with the stopReason as `reason`;
+an unknown free word → `working` if not ended, `failed` if ended (a newer
+build's word never breaks a reader). Projections: `turnUnits(entries, live)`,
+`workflowUnits(entries, rows)` → `WorkUnit[]`, from the log entries above plus
+the live state — **no new entry, no new field, no wire change**.
+
+**One seam — `HostedSession.workUnits()`** (daemon, read-only, ~40 lines): the
+session's units projected from its in-memory segment + live state (`knownTurn`,
+pending asks, the driver's rows). This is the ONE place an A2A task's state is
+read; the log stays the ONE place it is stored.
+
+**A2A Task = projection of a `WorkUnit`** (`daemon/src/a2a/task-projection.ts`):
+- `taskId` ↔ the unit: a turn task's `turnId` IS the `taskId`; a workflow
+  task's `workflow_start.turnId` IS the `taskId` (the SDK mints UUID task ids —
+  `crypto.randomUUID()`, `@a2a-js/sdk dist/server/index.js:2802` — and we pass
+  that id as the `turnId`). Rule: `turn_start{taskId}` exists → turn task, else
+  `workflow_start{turnId: taskId}` → workflow task.
+- `contextId` ↔ session `a2a-<caller>-<contextId>`; owner = caller (in the id).
+- Task `status` ← `WorkUnitState` (table in Design); `artifacts[response]` ←
+  `result`; `history` ← the caller's message (the turn's user message / the
+  workflow's inputs), never agent text.
+- The SDK `TaskStore`: `save` keeps ONLY in-flight tasks in memory (the SDK's
+  streaming bookkeeping); `load`/`list` = the live entry if any, else the
+  projection. A terminal task is dropped from memory: its truth is the log.
+- `taskId → session` index: in memory, rebuilt lazily by scanning the
+  caller's live `a2a-<caller>-*` sessions' segments (a derived cache, never
+  persisted).
+
+**What this buys:** a workflow started via A2A is an A2A task with no
+workflow-specific A2A code (start = one `session/workflow` call; tracking =
+the shared projection); every workflow run in a caller's context is pollable
+by `GetTask`; restart needs no reconciliation (the daemon already reloads and
+closes the log, the projection just reads it); deleting a session deletes its
+tasks.
+
+**Unified IN THIS BRANCH:** the vocabulary (turn + workflow tables), the
+projection seam, A2A tasks as its projection, workflow start via A2A.
+
+**Later, purely additive (named follow-ups, not in this branch):**
+- **F1 `feat/work-units-wire`** — expose the seam as `session/work_units` (a new method: free per §7) so the phone/TUI show turns, runs and sub-agents with ONE state chip/vocabulary; `workflow/list` becomes its projection.
+- **F2 `feat/subagents-as-work-units`** — the sub-agent table (`subagent_*` entries + rows) in the same vocabulary; background sub-agents of an A2A turn exposed as related tasks (`referenceTaskIds`).
+- **F3 `feat/work-units-survive-compaction`** — carry each ended unit's terminal fact across a compaction/`context_reset` (a NON-critical entry, re-logged like `workflow_start` already is), so `GetTask` finds tasks older than the in-memory segments.
+- **F4 `feat/a2a-archived-tasks`** — `GetTask` of a task in an ARCHIVED context reads the archived log read-only (never reopening it).
+- **F5** — the workflow driver's free-string states typed from the vocabulary (internal; the wire words stay free).
+
+### Scope (rev. 3 — every cut re-examined; owner Q3 + addendum)
+
+A cut stays OUT only if adding it later is purely additive.
+
+| Item | Rev. 3 | Why |
+|---|---|---|
+| Agent Card, `SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`, `SubscribeToTask`, `ListTasks` | **in** | MVP; Subscribe/List are free with the SDK + projection |
+| Task records | **no A2A store**: tasks are a projection of the session log + live state | addendum: no fourth store; the log is already durable, reloaded and closed honestly at start |
+| Unified vocabulary + `workUnits()` seam (turn, workflow) | **in** | the one place state is read; the A2A mapping depends on it |
+| Workflow start via A2A | **in**, behind a per-caller switch (Q5) | addendum: a workflow via A2A = a task with no extra code |
+| Caller identity in the session id `a2a-<caller>-<contextId>` | **in** | adding it later would rename sessions (not additive) |
+| Who answers asks: per-caller `owner \| both` | **in** | owner Q1 |
+| Reopen an archived own context on a new message | **in** | multi-turn must not die at the idle TTL |
+| Final-round-only `response` artifact, deltas streamed, history = caller messages only, no tool/thought/usage output | **in** | token saving |
+| Tasks older than the in-memory segments / in archived contexts | **out** → `TaskNotFound` (Q6) | F3/F4, additive |
+| Sub-agents as work units / tasks | **out** | F2, additive |
+| Phone/TUI on the shared vocabulary | **out** | F1, additive |
+| Per-tool status updates | **out** | token saving; opt-in extension later |
+| Inbound `raw`/`url` parts (−32005); outbound files (later by reference); REST/gRPC; webhooks; A2A 0.3; extended/signed card; queueing on a busy context | **out** | each additive later (unchanged from rev. 2) |
 
 ### Design
 
 ```
 A2A caller ──HTTP(S)── Bun.serve fetch (ws-server.ts) ──► a2a/http.ts (A2A token, Origin, size, card, SDK glue, SSE)
-                                                             │ SDK DefaultRequestHandler + a2a/task-store.ts (persisted)
-                                                             ▼
-                                                 a2a/executor.ts (AgentExecutor; one in-process client per live task)
-                                                             ▼ createChannelPair()
-                                       Connection ──► SessionHost (the SAME one the phone/TUI use)
+                                                             │ SDK DefaultRequestHandler + a2a/task-projection.ts (TaskStore = projection)
+                                                             ▼                                   ▲ reads
+                                                 a2a/executor.ts (AgentExecutor)        HostedSession.workUnits()  ◄── core/work-unit.ts (vocabulary + projections)
+                                                             ▼ createChannelPair()               ▲
+                                       Connection ──► SessionHost (the SAME one the phone/TUI use; its session log = the one store)
 ```
 
-**Mapping (pure, `a2a/mapping.ts`):**
+**WorkUnit → A2A (pure, `a2a/mapping.ts`):**
 
-| A2A | tentacle |
+| WorkUnit | A2A `TaskState` |
 |---|---|
-| caller (the A2A token's name; `default` from the CLI) | `ServerCallContext.user`; task owner; session-id prefix |
-| `contextId` | session `a2a-<caller>-<contextId>` (created on first message, `title:{text:"A2A: <first line ≤60>", source:"user"}`; reopened if archived) |
-| `taskId` | `turnId` of the turn that message starts |
-| `text` parts | one `{type:"text"}` block (parts joined in order) |
-| `data` parts | `{type:"text"}` block of the JSON, fenced — except a `tentacle/permission` answer (below) |
-| `raw` / `url` parts | `ContentTypeNotSupportedError` (−32005), nothing opened |
-| `agent_message_chunk` (text) | `artifactUpdate` `response`: `append:true`; the first chunk after a `tool_call` → `append:false` (replaces: final round only) |
-| `permission_request` (our turn) | `owner`: none (task stays `WORKING`, one status message "waiting for the owner's approval"); `both`: `INPUT_REQUIRED` + the ask (below) |
-| `permission_resolved` (owner answered first) | back to `WORKING` |
-| `turn_end end_turn` / `max_*` | `COMPLETED` (`max_*` adds a status message with the reason) |
-| `turn_end cancelled` | `CANCELED` |
-| `turn_end error` | `FAILED`, message = the (already redacted) turn error |
-| `session_closed` / channel closed mid-turn | `FAILED "session closed"` |
-| thoughts, plan, usage, tool calls, jobs, … | not forwarded |
+| `working` | `WORKING` |
+| `waiting:permission`, caller `owner` | `WORKING` + status message "waiting for the owner's approval: <title>" |
+| `waiting:permission`, caller `both` | `INPUT_REQUIRED` + the ask (below) |
+| `waiting:approval` (a workflow file) | `WORKING` + "waiting for the owner to approve workflow <name>" — **always owner-only**, in every mode: approving a file hash is a LASTING approval |
+| `completed` | `COMPLETED` (+ `reason` as status message when present) |
+| `failed` | `FAILED` (+ `reason`, already redacted) |
+| `canceled` | `CANCELED` |
 
-**Asks answered by the caller (Q1) — config per caller (= per token):**
-`asks: "owner"` (default, the safe one) | `"both"`. CLI: `serve
---a2a-token-command <cmd> [--a2a-asks owner|both]` defines the caller
-`default`. There is deliberately no "caller-only" mode: the owner is the
-trusted party on this host and can always answer or cancel (they are always
-raised the ask), and `both` already covers the unattended scenario — the push
+| A2A input | tentacle |
+|---|---|
+| caller (the A2A token's name; `default` from the CLI) | `ServerCallContext.user`; session-id prefix |
+| `contextId` | session `a2a-<caller>-<contextId>` (`title:{text:"A2A: <first line ≤60>", source:"user"}`; reopened if archived) |
+| `text` parts | one `{type:"text"}` block |
+| `data` part `{"tentacle/workflow": {name, inputs}}` | `session/workflow{action:"start", name, inputs, turnId: taskId}` (only if the caller's `workflows` switch is on, Q5; else UnsupportedOperation) |
+| `data` part `{"tentacle/permission": …}` | a caller's answer (below) |
+| other `data` parts | `{type:"text"}` block of the JSON, fenced |
+| `raw` / `url` parts | −32005, nothing opened |
+| `agent_message_chunk` (our turn) | `artifactUpdate response`, `append:true`; first chunk after a `tool_call` → `append:false` (final round only) |
+| `workflows` row change (our run) | `statusUpdate` from the projected unit; at the end `artifactUpdate response` = `result` |
+
+**Asks answered by the caller (Q1)** — unchanged from rev. 2: per caller (=
+per token) `asks: "owner"` (default) | `"both"`; in `both`, `INPUT_REQUIRED`
+lists every pending ask of the task (a turn's, or a workflow step's: its asks
+carry the run's `turnId` = the task id) with options filtered to
+`allow_once`/`reject_once`; the caller answers with a `data` part
+`{"tentacle/permission": {requestId, decision:"allow"|"deny", message?}}` or,
+with exactly one ask pending, the text `allow`/`approve`/`yes` (anything else
+= deny, the text as the refusal reply when offered: fail-closed). The adapter
+(trusted, daemon-side) maps the decision to the ask's own `*_once` option; a
+caller never names an `optionId`, so no lasting approval is reachable from
+A2A. No "caller-only" mode: the owner is always raised the ask, and the push
 grace keeps the phone silent when the caller answers in time
-(`push-rules.ts:14-28`), and pings the owner when it does not.
-
-In `both`, on a `permission_request` of the task's own turn the adapter
-publishes `INPUT_REQUIRED` with `status.message` = one text part ("<tool>:
-<title>. Answer allow or deny.") + one `data` part
-`{"tentacle/permission": [{requestId, tool, title, explanation?, options:[{optionId, kind}], reply?:{maxChars}}]}`
-listing EVERY pending ask of the turn, with options **filtered to
-`allow_once` / `reject_once`**. The caller answers with `SendMessage{message.taskId}`:
-- a `data` part `{"tentacle/permission": {requestId, decision:"allow"|"deny", message?}}` (one per ask), or
-- text, only when exactly one ask is pending: `allow`/`approve`/`yes` (trimmed,
-  case-insensitive, nothing else) → allow; **any other text → deny**, with the
-  text as the refusal reply when the ask offers `reply` (fail-closed).
-
-**Never a lasting approval, always decided on the host:** the adapter — daemon-side,
-trusted code — maps `decision` to the ask's own `*_once` `optionId`; a caller
-never names an `optionId`, so `allow_always`/`reject_always` are unreachable
-from A2A. The adapter never sends `session/set_auto_accept`,
-`session/set_capability`, `session/update_settings`, a `skill`, or a `hooks/trust`
-`true`. In `owner` mode a caller's answer is refused
-(UnsupportedOperation "this task waits for the owner"). A late answer
-(`PermissionNotPending`) returns the task as it is now.
+(`push-rules.ts:14-28`). Never sent by the adapter: `set_auto_accept`,
+`set_capability`, `update_settings`, a `skill`, `hooks/trust: true`, a
+workflow approval.
 
 **Executor (`a2a/executor.ts`)** — `execute(requestContext, bus)`:
-- **New task:** map parts → new `createChannelPair()` + `new Connection(daemonEnd,
-  host, onError, {hooksTrustPrecheck})` + `RpcPeer(clientEnd)` whose `onRequest`
-  answers `hooks/trust` → `{trusted:false}` and everything else
-  `MethodNotFound` → `initialize` (`clientInfo:{name:"a2a"}`, no `host`;
-  `updates` incl. `permission_request`) → `session/open{create:true, reopen:true}`
-  on `a2a-<caller>-<contextId>` (never another id; never `autoAccept`,
-  `capabilities`, `settings`, `messages`) → publish the Task (`WORKING`) →
-  `session/prompt{turnId: taskId}` → translate updates of OUR `turnId` only →
-  on the terminal state `bus.finished()`, `session/detach`, close the channel
-  (the session returns to the host's normal TTL/archive life).
-- **Follow-up on a live task** (`requestContext.task` set): route to that
-  task's live watcher (a map taskId → watcher) → the caller-answer path above.
-  A follow-up on a terminal task → SDK error.
-- `cancelTask(taskId)` → `session/cancel{sessionId, turnId}`; the `CANCELED`
-  comes from the resulting `turn_end` (one source of truth; the owner's cancel
-  from the phone takes the same path).
+- **New task:** map parts → `createChannelPair()` + `new Connection(daemonEnd,
+  host, onError, {hooksTrustPrecheck})` + `RpcPeer(clientEnd)` (`hooks/trust` →
+  `{trusted:false}`, any other request → `MethodNotFound`) → `initialize`
+  (`clientInfo:{name:"a2a"}`, no `host`; `updates` incl. `permission_request`)
+  → `session/open{create:true, reopen:true}` on `a2a-<caller>-<contextId>`
+  only → publish the Task (`WORKING`) → `session/prompt{turnId: taskId}` or
+  `session/workflow{start, turnId: taskId}` → on each relevant update,
+  re-project the unit (`workUnits()`) and publish what changed → at the
+  terminal state `bus.finished()`, `session/detach`, close the channel.
+- **Follow-up on a live task** (`requestContext.task` set) → the caller-answer
+  path; on a terminal task → SDK error.
+- **After a restart:** no reconciliation. A follow-up or `SubscribeToTask` on a
+  task whose unit is still `working`/`waiting` (a resumed turn, `persisted-session.ts:343-346`)
+  attaches a watcher lazily; `GetTask` just projects.
+- `cancelTask(taskId)` → turn: `session/cancel{sessionId, turnId}`; workflow:
+  `session/workflow{action:"stop", runId}`. `CANCELED` comes from the
+  projection (one source of truth; the owner's stop from the phone is the
+  same path).
 
-**Task store (`a2a/task-store.ts`)** — `InMemoryTaskStore` (owner-scoped,
-serves `load`/`list`) + write-through to
-`<daemonStoreDir>/a2a/tasks/<taskId>.json` = `{schemaVersion:1, caller, task}`
-(A2A wire JSON), atomic (tmp + rename), under serve's existing store lock. A
-file is written only when the task's `status.state` changes (or at the
-terminal state with the final artifact) — never per streamed chunk. Load at
-start: an unknown `schemaVersion` or unreadable file is skipped with a notice
-and left untouched (AGENTS §7 on-disk rule).
-
-**Restart reconciliation** (at start, after the host reloaded its sessions),
-for each non-terminal record, through an injected read-only
-`HostReader { knownTurn(sessionId, turnId), isDeleted(sessionId) }`:
-- session deleted (tombstone) → delete the record;
-- `ended` → the mapped terminal state (a cut turn is `FAILED` "interrupted:
-  the daemon restarted");
-- running (a resumed, re-asked turn) → re-attach a watcher (`session/open`,
-  no create) and re-publish the ask state (`INPUT_REQUIRED` in `both`);
-- unknown turn / session not live → `FAILED` "interrupted by a restart".
-  Never a re-prompt: nothing runs twice.
-`GetTask`/`ListTasks` of a task whose session was deleted later → TaskNotFound
-and the record is removed (lazy; `isDeleted` on load).
-
-**HTTP (`a2a/http.ts`)** — `handle(req): Promise<Response> | undefined`,
-called first in `startWsServer`'s `fetch`:
-- `GET /.well-known/agent-card.json` → the card (public, per spec):
-  `supportedInterfaces[0] = {url:"<request origin>/a2a", protocolBinding:"JSONRPC", protocolVersion:"1.0"}`,
-  `capabilities{streaming:true, pushNotifications:false}`, modes
-  `text/plain`+`application/json`, one skill `tentacle-session` (no path, no
-  host name), `securitySchemes:{bearer:{httpAuthSecurityScheme:{scheme:"Bearer"}}}`
-  + `securityRequirements`.
-- `POST /a2a` → any `Origin` → 401 (cross-site POSTs are not preflighted) →
-  bearer must match a caller's token (`tokensMatch`) else 401 + audit →
-  body > 1 MiB → 413 → `validateVersion` → `JsonRpcTransportHandler.handle(body,
-  ctx{user: caller})` → JSON, or SSE with a `: ping` comment every 15 s; and
-  `server.timeout(req, 0)` so Bun's 10 s HTTP idle timeout never cuts a
-  blocking `SendMessage` waiting on an approval.
-- A2A disabled (no A2A token) → both paths behave exactly as today.
-
-**Visible + stoppable by the owner:** an A2A session is an ordinary `serve`
-session ("A2A: …") in the phone's/TUI's `session/list`: attach, read, answer
-asks (always), cancel, close, delete — existing paths, proved above.
+**HTTP (`a2a/http.ts`)** — unchanged from rev. 2: public
+`/.well-known/agent-card.json` (one skill `tentacle-session`; it names no
+workflow — Q5), `POST
+/a2a` with Origin → 401, A2A-token bearer → else 401 + audit, 1 MiB → 413,
+`validateVersion`, JSON or SSE (`: ping` every 15 s), `server.timeout(req, 0)`;
+off without an A2A token.
 
 ### Files
 
-1. `packages/daemon/package.json` — `"@a2a-js/sdk": "1.3.0"` (pinned) + `bun.lock`.
-2. `packages/daemon/src/a2a/mapping.ts` (new, pure) — parts→blocks, update→event (round replace), stopReason→state, ask→`INPUT_REQUIRED` message, caller-answer parser, card builder, session id.
-3. `packages/daemon/src/a2a/executor.ts` (new) — the `AgentExecutor` + live watchers.
-4. `packages/daemon/src/a2a/task-store.ts` (new) — persisted `TaskStore` + reconciliation.
-5. `packages/daemon/src/a2a/http.ts` (new) — route, auth, SDK glue, SSE.
-6. `packages/daemon/src/ws-server.ts` — `WsServerOptions.a2a?`; `fetch` calls `a2a.handle(req)` first (≈10 lines).
-7. `packages/daemon/src/index.ts` — exports.
-8. `packages/cli/src/flags.ts` — `serve`: `a2a-token`, `a2a-token-command`, `a2a-asks`.
-9. `packages/cli/src/serve.ts` — `ServeOptions.a2a` → task store dir, `HostReader` (host + tombstones), `startWsServer`; one startup line "A2A on …/a2a (asks: owner)".
-10. `packages/cli/src/main.ts` — help text.
-11. `changelog.d/a2a.added.md`; `README.md` "A2A" section; `TODO.md` entry.
+1. `packages/core/src/work-unit.ts` (new, pure) + `packages/core/src/index.ts` export — vocabulary, native→unified tables, `turnUnits`, `workflowUnits`.
+2. `packages/daemon/src/hosted-session.ts` — `workUnits()` read-only seam (~40 lines).
+3. `packages/daemon/package.json` — `"@a2a-js/sdk": "1.3.0"` (pinned) + `bun.lock`.
+4. `packages/daemon/src/a2a/mapping.ts` (new, pure) — parts→blocks/workflow start, WorkUnit→A2A, round replace, ask message, answer parser, card, session id.
+5. `packages/daemon/src/a2a/task-projection.ts` (new) — the SDK `TaskStore` as a projection + the derived `taskId → session` index.
+6. `packages/daemon/src/a2a/executor.ts` (new) — the `AgentExecutor` + live watchers.
+7. `packages/daemon/src/a2a/http.ts` (new) — route, auth, SDK glue, SSE.
+8. `packages/daemon/src/ws-server.ts` — `WsServerOptions.a2a?`; `fetch` calls `a2a.handle(req)` first (≈10 lines).
+9. `packages/daemon/src/index.ts` — exports.
+10. `packages/cli/src/flags.ts` — `serve`: `a2a-token`, `a2a-token-command`, `a2a-asks`, `a2a-workflows`.
+11. `packages/cli/src/serve.ts` — `ServeOptions.a2a` → `startWsServer`; startup line "A2A on …/a2a (asks: owner, workflows: off)".
+12. `packages/cli/src/main.ts` — help text.
+13. `changelog.d/a2a.added.md`; `README.md` "A2A" section; `TODO.md` (feat/a2a + the follow-ups F1–F5).
+
+No `protocol.d/` note, no `PROTOCOL_VERSION` bump, no new log entry type
+(critical or not), no on-disk format: nothing on the wire or on disk changes.
 
 ### Failure modes
 
 | Case | Behaviour / convergence |
 |---|---|
-| No / wrong token | 401 before parsing; audit `a2a-auth-failure`. Card stays public (spec). |
-| Browser `Origin` on POST | 401 (CSRF), as the WS route. |
-| Unknown method / bad params / bad version | SDK: −32601 / −32602 / −32009 (supported list). |
+| No / wrong token; browser `Origin` | 401 before parsing; audit `a2a-auth-failure`. Card stays public. |
+| Unknown method / bad params / bad version | SDK: −32601 / −32602 / −32009. |
 | Huge input | > 1 MiB → 413; nothing opened. |
 | `raw`/`url` part | −32005, nothing opened. |
-| Busy context (another task, or the owner typing) | `TurnInProgress` → UnsupportedOperation "a task is already running in this context"; nothing queued, first task unaffected. |
-| Follow-up on a terminal task | SDK rejects; a new task needs no `taskId`. |
-| Caller drops mid-stream | The turn continues; `SubscribeToTask`/`GetTask` read it. |
-| `CancelTask` mid-turn / owner cancels | `session/cancel{turnId}` → `turn_end cancelled` → `CANCELED`; terminal → `TaskNotCancelable`. |
-| Ask, `owner` mode | `WORKING` + status message; HTTP never times out (`timeout(req,0)`, SSE pings); a caller's answer is refused. |
-| Ask, `both` mode | `INPUT_REQUIRED` (stream/blocking call ends, per spec); first answer wins (caller's `*_once`, or the owner's anything); owner first → `WORKING`. |
-| Caller answers ambiguously | Fail-closed: anything but `allow`/`approve`/`yes` is a deny; several pending asks + text → InvalidParams, still `INPUT_REQUIRED`. |
-| Caller tries a lasting approval | Impossible: it sends a decision, the host picks the `*_once` option. |
-| Late answer | `PermissionNotPending` → the current task returned, no effect. |
-| Hooks trust asked | `false` → hooks run only if the host's own store trusts the folder. |
-| Session cap | `session/open` error → SendMessage error, nothing started. |
-| Context archived (idle TTL) | reopened (own prefix only); deleted (tombstone) → error "context deleted by the owner". |
-| `serve` restart | Records reload; non-terminal ones reconciled by READING `knownTurn` (never re-prompted); a resumed suspended turn gets its watcher and asks back. |
-| Crash between state writes | The record is at most one state behind; reconciliation at start converges it from `knownTurn`. |
-| Corrupt / future record file | Skipped with a notice, never rewritten. |
-| Owner deletes the session | Its records go at the next start or on the next `GetTask`/`ListTasks`. |
-| Two callers | Today one (`default`). Records and session ids carry the caller, so later callers cannot see or prompt each other's (SDK owner scoping + id prefix). |
-| contextId naming a phone session | Impossible: only `a2a-<caller>-…` is ever opened. |
-| Wake turn in an A2A session (a background job ends) | Not a task: ignored by the watcher (only our `turnId`); visible to the owner. |
+| Busy context (another task, the owner typing, a running workflow) | `TurnInProgress` / workflow `running` refusal → UnsupportedOperation; nothing queued, first unit unaffected. |
+| Workflow start with the caller's switch off | UnsupportedOperation; nothing started. |
+| Workflow file not approved / changed | Unit `waiting:approval` → `WORKING` + message; only the owner approves (every mode). `changed` refusal → `FAILED` with the reason. |
+| Caller drops mid-stream | The unit continues; `SubscribeToTask`/`GetTask` read it. |
+| `CancelTask` / owner stops | turn cancel / workflow stop → projection `canceled` → `CANCELED`; terminal → `TaskNotCancelable`. |
+| Ask, `owner` / `both` | As rev. 2: `WORKING` + message / `INPUT_REQUIRED`, first answer wins, fail-closed text, `*_once` only, late answer = no effect. |
+| Hooks trust asked | `false`: hooks run only if the host's own store trusts the folder. |
+| `serve` restart | Nothing A2A-side to recover: the daemon reloads and closes its logs (cut turn → `RESTART_TURN_END` → `failed`; open run → `workflowLoadNotes` → `failed: interrupted`; a turn suspended on an ask resumes under the same id → `waiting`), and the projection reads that. |
+| Crash mid-task | Same as restart: no second store can disagree with the log. |
+| Task older than the in-memory segments (after compaction) / context archived | `TaskNotFound` (Q6; F3/F4). The session itself stays on the phone. |
+| Owner deletes the session | Its tasks are gone (`TaskNotFound`): nothing else to clean. |
+| Unknown future native state word | Mapped by the "unknown word" rule, never a crash. |
+| Two callers | One today (`default`); ids carry the caller, the SDK scopes by owner. |
+| contextId naming a phone session | Impossible: only `a2a-<caller>-…` is opened. |
+| Model starts a workflow inside an A2A turn | Its `workflow_start.turnId` = the turn's id, but `turn_start{id}` exists → the task stays the TURN; the run is visible to the owner (and becomes a related task in F2's design). |
+| Wake turn in an A2A session | Not a task (no caller id maps to it); visible to the owner. |
 
 ### Tests
 
 Fakes: the daemon pattern (`session-auto-accept-asked-on.test.ts`: real
 `SessionHost` + `Agent` + scripted `ModelProvider`, `Connection` over
-`createChannelPair`); `until` from `packages/client/test/support/fakes.ts`,
-never a sleep; temp dirs for the store. Each test names its mutation (§9).
+`createChannelPair`), the workflow driver's own test fakes for runs; `until`
+from `packages/client/test/support/fakes.ts`, never a sleep. Each test names
+its mutation (§9).
 
-- `a2a-mapping.test.ts` (pure): stopReason→state table; parts→blocks; raw/url
-  refused; round replace (`append:false` after a `tool_call`); ask message
-  lists every pending ask with only `*_once` options; answer parser (data,
-  `allow`/`yes`, any other text → deny with reply, several asks + text →
-  invalid); card required fields + Bearer scheme; session id prefix.
-- `a2a-executor.test.ts`:
-  1. a message creates `a2a-default-<ctx>` and streams `task → artifactUpdate → COMPLETED`; the artifact holds only the final round;
-  2. `owner`: status "waiting…", a "phone" connection answers → COMPLETED; the adapter never sent `resolve_permission` (mutation: adapter answers → red);
-  3. adapter alone attached: the ask is NOT auto-denied (mutation: drop `permission_request` from its updates → red);
-  4. `both`: `INPUT_REQUIRED`; the caller's `allow` → the daemon got the `allow_once` optionId (mutation: forward a caller-supplied optionId → an `allow_always` gets through → red); "no, use X" → reject with reply; owner answers first → `WORKING`;
-  5. `cancelTask` → `CANCELED`; the phone's cancel → `CANCELED`;
-  6. busy context → error, first task unaffected;
-  7. `hooks/trust` → false; no `askedOn` entry for the adapter; detach after terminal (`attached` 0);
-  8. archived context → reopened; tombstoned → error.
-- `a2a-task-store.test.ts`: write only on state change (count writes over a streamed task); reload restores load/list with owner scoping; future `schemaVersion` skipped, file untouched; reconciliation table: ended / running → watcher / unknown → FAILED / deleted → removed; never a `session/prompt` during reconciliation (mutation: re-prompt → spy sees it → red).
-- `a2a-http.test.ts` (real `startWsServer`, loopback, port 0): 401 no/wrong token; 401 with `Origin`; card public + well-formed; 413; −32009; −32601; A2A off → paths as today; WS route unaffected; a blocking call outlives 10 s idle (short `idleTimeout` in the test).
-- **e2e** `a2a-e2e.test.ts`: `startDaemon` (scripted `createProvider`, temp store, `devices:false`, A2A token) + the **SDK client** with an auth `fetch`: card → `sendMessage` → `sendMessageStream` (order) → `getTask` → `listTasks` → `cancelTask` on a hanging turn → a WS client (serve token) sees `a2a-default-<ctx>`; caller aborts mid-stream, turn still completes; `both`: `INPUT_REQUIRED` → answer → COMPLETED; **restart**: stop + `startDaemon` on the same store → `getTask` returns the finished task.
+- `core/test/work-unit.test.ts` (pure): both native→unified tables row by row; unknown words; `turnUnits` from `turn_start`/`turn_end`/messages + live (running, waiting, ended, cut by restart); `workflowUnits` from `workflow_*` + rows (needs-approval, waiting, each `stopped:*`); `result` = final round only / end reason + last report.
+- `daemon/test/work-units.test.ts`: `hosted.workUnits()` over a real session for a turn and a workflow run, before and after a reload (mutation: read live state only → the reloaded unit is missing → red).
+- `a2a-mapping.test.ts` (pure): WorkUnit→TaskState table (`waiting:approval` is never `INPUT_REQUIRED`, mutation-tested); parts; workflow data part; round replace; ask message `*_once` only; answer parser; card.
+- `a2a-executor.test.ts`: as rev. 2 (create, stream, owner/both asks, never `resolve_permission` in owner mode, ask not auto-denied, `*_once` only, cancel, busy, hooks false, detach, reopen) + a workflow task: start via data part → `WORKING` → step ask → answer → `COMPLETED` with `result`; switch off → refused; `waiting:approval` with `both` → still `WORKING` (mutation: map approval like permission → red).
+- `a2a-task-projection.test.ts`: `GetTask` of a running / ended / restarted (reloaded host) turn and workflow; `ListTasks` per context and owner; a deleted session → `TaskNotFound`; **no write anywhere** (spy on the store dir: zero A2A files — the "no fourth store" property; mutation: persist a record → red).
+- `a2a-http.test.ts` (real `startWsServer`, loopback, port 0): as rev. 2.
+- **e2e** `a2a-e2e.test.ts`: `startDaemon` + the **SDK client**: card → `sendMessage` → `sendMessageStream` → `getTask` → `listTasks` → `cancelTask` → a workflow task (switch on) → WS client sees `a2a-default-<ctx>`; caller aborts mid-stream, unit still completes; **restart** on the same store → `getTask` returns the finished turn and run.
 
-### Slices (executor: Opus; times are wall-clock estimates)
+### Slices (executor: Opus; wall-clock estimates)
 
 | # | Slice | Size | Est. |
 |---|---|---|---|
-| S0 | **mapping** — dep + `bun build --compile` smoke + `mapping.ts` + tests | M | 1 h 15 |
-| S1 | **executor** — new task, stream, round replace, cancel, detach, owner-mode asks, hooks, reopen + tests 1–3, 5–8 | M | 1 h 30 |
-| S2 | **caller-asks** — `both` mode: `INPUT_REQUIRED`, live-watcher routing, once-only answers, owner-first + test 4 | M | 1 h 15 |
-| S3 | **task-store** — persisted `TaskStore`, `ListTasks`, restart reconciliation via `HostReader` + tests | M | 1 h 30 |
-| S4 | **http-route** — `http.ts` + `ws-server.ts` hook, auth/Origin/413/version/SSE/timeout + tests | M | 1 h |
-| S5 | **cli-e2e** — flags, serve wiring, help, README, changelog, e2e (incl. restart) | M | 1 h 15 |
-| R | **review** — fresh-context Opus (§7 "remote not trusted", single session path, on-disk rule) + one fix round + `bun run check` | — | 1 h 30 |
-| | **Total** | | **≈ 9 h 15** (serial; from ~12:00 → ~21:30, margin to midnight) |
+| S0 | **work-units** — `core/work-unit.ts` (vocabulary, tables, `turnUnits`, `workflowUnits`) + `HostedSession.workUnits()` + tests | M | 1 h 45 |
+| S1 | **mapping** — dep + `bun build --compile` smoke + `a2a/mapping.ts` + tests | M | 1 h |
+| S2 | **executor** — turn tasks: create/reopen, stream, round replace, cancel, detach, owner-mode asks, hooks + tests | M | 1 h 30 |
+| S3 | **caller-asks** — `both` mode: `INPUT_REQUIRED`, live-watcher routing (incl. lazy after restart), `*_once` answers, owner-first + tests | M | 1 h 15 |
+| S4 | **task-projection** — SDK `TaskStore` as projection, `taskId → session` index, `GetTask`/`ListTasks`, restart via reload + tests | M | 1 h 15 |
+| S5 | **workflow-tasks** — start via data part, per-caller switch, `waiting:approval` owner-only, stop, `result` + tests | M | 1 h |
+| S6 | **http-route** — `http.ts` + `ws-server.ts` hook, auth/Origin/413/version/SSE/timeout + tests | M | 1 h |
+| S7 | **cli-e2e** — flags, serve wiring, help, README, changelog, TODO follow-ups, e2e (incl. restart) | M | 1 h 15 |
+| R | **review** — fresh-context Opus (§7 "remote not trusted", single session path, "no fourth store", workflow approval owner-only) + one fix round + `bun run check` | — | 1 h 30 |
+| | **Total** | | **≈ 11 h 30** (serial; from ~12:30 → ~24:00 — at the midnight line, as the owner accepted) |
+
+### Owner questions (round 3)
+
+5. **May an A2A caller START workflows?** **Recommendation: a per-caller switch, default OFF** (`serve --a2a-workflows`). When on: a workflow whose file you already approved runs without asking you again (that is what your approval of that hash means); a new or changed file waits for YOUR approval on the phone — never the caller's, in any asks mode. The public Agent Card names no workflows (the caller is told the names out of band, or by the follow-up extended card).
+6. **Task retention for now:** `GetTask` finds a task while its context is live and the task is in the session's in-memory log segments; after a compaction, or once the context is archived by the idle TTL, it answers "not found" (the session itself stays, on your phone). Making them always findable is F3/F4 (additive). **Recommendation: accept for this branch.**
+
+No new log entry, no `critical: true` type, no wire change in this branch.
 
 ## Execution
 
