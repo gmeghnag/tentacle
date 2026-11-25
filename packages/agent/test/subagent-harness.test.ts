@@ -7,16 +7,13 @@
 import { describe, expect, test } from "bun:test";
 import { type ModelProvider, SubagentFailure, type ToolProgressEvent } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
-import {
-  HARNESS_ASK_DENIED,
-  type HarnessDeps,
-  type HarnessWorktrees,
-} from "../src/harness/child.ts";
+import type { HarnessDeps, HarnessWorktrees } from "../src/harness/child.ts";
 import {
   CLAUDE_CODE_CAPS,
   CLAUDE_DEFAULT_TOOLS,
   createClaudeCodeCodec,
 } from "../src/harness/claude-code.ts";
+import { HARNESS_ASK_DENIED } from "../src/harness/permissions.ts";
 import { type HarnessProc, type Spawner, createProcessAdapter } from "../src/harness/process.ts";
 import type { HarnessAdapter } from "../src/harness/types.ts";
 import type { SnapshotWorktree, WorktreeOutcome } from "../src/harness/worktree.ts";
@@ -303,7 +300,7 @@ describe("a claude child on the sub-agent seam", () => {
     expect(err.partialReport).toContain(`session ${SID}`);
   });
 
-  test("every permission ask is DENIED in this slice, with no permission update", async () => {
+  test("with no requester wired, a permission ask is DENIED, with no permission update", async () => {
     const { spawner, spawned } = fakeSpawner((line, ctl) => {
       if (line.type === "user") {
         ctl.emit(INIT, {

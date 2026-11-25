@@ -283,7 +283,15 @@ and hooks apply, the ask is attributed to the `agent_task` call / `sa-N`, and it
 reaches the ONE broker (TUI or phone). Mapping: `Bash{command}` →
 `shell{command}`; `Write{file_path,content}` → `fs_write`; `Edit` → `fs_edit`;
 anything else → a generic ask `{tool: "claude:<Name>", title: "Claude wants
-<Name>", detail: JSON}` with **no** session-scope option. An allow answers
+<Name>", detail: JSON}` with **no** session-scope option. *(Corrected at
+shr-5, from the code: the options shown are built by the daemon
+(`daemon/src/permission-map.ts` `permissionOptions`) and the TUI
+(`tui/src/permission-ui.ts` `buildPermissionChoices`) from the request, and
+`PermissionRequest` has no field to drop "always" — doing it needs a request
+marker across daemon + TUI + phone, out of this task's files. As built: the
+"always" option is still SHOWN for a generic ask, but an "always" answer is
+honoured ONCE — no grant is created, so the next ask asks again. Follow-up:
+a request marker that hides it.)* An allow answers
 `updatedInput` = the input the gate APPROVED (a hook rewrite reaches Claude,
 like `wiring.ts:894-906`); a deny answers its `message`; a dismissed ask (TUI
 gone) answers deny. Claude's `permission_suggestions` (e.g. `setMode
@@ -644,6 +652,36 @@ from the phone. 7. Usage visibility. 8. Where it runs. 9. Remote
   9. An `agents/*.md` named `claude` replaces the harness type (`mergeAgentTypes`); its `model` is then not free.
 - No protocol change (no `protocol.d/` note, `protocol.json` untouched). Changelog fragment `changelog.d/subagent-harness-runners.added.md` reworded for the now-reachable type (asks refused until shr-5).
 - **Unverified:** the end-to-end run with a real `claude`. Run `claude --version` and one `agent_task{subagent_type:"claude"}` in a git repo on the laptop. Also, the spawned `claude` inherits the process env: an `ANTHROPIC_API_KEY` there would switch it from the Max login to API billing (not handled; candidate for shr-5 or a follow-up).
+
+*— claude-opus-5-5, 2026-11-25 — slice shr-5-permissions only*
+
+- **Load-bearing check:** the live `claude` re-check (Repro 3/3b/9) was NOT re-run: this sandbox refuses spawning `claude`, as in shr-1/2/4. Still open for the orchestrator. The slice's own assumption — one requester path to the ONE broker — was checked in the code and then by execution: `subagentRequester` (`subagent.ts:223`) is now built ONCE per child in `run` and handed to BOTH the tentacle child `Agent` and the harness child; `PermissionGate.authorize` (`permission-gate.ts:169`) calls its requester only after the deny level, hooks and grants. Red before the change: 6 runner tests in `harness-permissions.test.ts` failed on the assertion (the broker was never asked: shr-4 hard-denied).
+- Added `packages/agent/src/harness/permissions.ts`:
+  - `mapClaudeAsk` maps `Bash`→`shell{command}`, `Write`→`fs_write{path,content}`, `Edit`→`fs_edit{path,old_string,new_string,replace_all}`, and anything else → a generic `claude:<Name>` ask titled «Claude wants <Name>», detail = input JSON capped at 2000 chars. `back()` maps the approved input back to Claude's shape, so a hook rewrite reaches Claude as `updatedInput`.
+  - `authorizeHarnessAsk` runs a `PermissionGate` built from the child's requester, hooks and the tree's `grants`. Between the gate and the broker sits the in-worktree rule, so it sees the POST-hook input: `fs_write`/`fs_edit` inside the run's worktree → allow, no broker request. Everything else goes to the broker with the run's signal, so a cancel withdraws the ask. A refusal reaches Claude as a deny with a message (hook / unavailable / the person's reply).
+  - `insideWorktree`: no `..` segment; the nearest existing ancestor is `realpath`ed; a symlink file is resolved; anything under `.git` is refused (`.git` in a worktree points git elsewhere, and `finishWorktree` runs git there); any error → asked.
+- `child.ts`: a `permission` ask → `authorizeHarnessAsk(permissions, …, {askId, signal: own.signal, worktreeRoot})`. New optional 5th param `permissions`; absent → deny. `HARNESS_ASK_DENIED` moved to `permissions.ts` (text now "denied by tentacle's permission broker").
+- `subagent.ts`: `childRequester` extracted (the same expression as before), and the harness branch passes `{requester: childRequester ?? denyAll, hooks: deps.hooks.forAgent({type, description}, model), grants, sessionId: controls.sessionId, tool: deps.tools.get}`. The session's own `shell`/`fs_write`/`fs_edit` give the permission LEVEL, so a configured `deny` still refuses.
+- `index.ts` exports `permissions.ts`. Changelog fragment reworded (asks now go through the broker and follow auto mode).
+- Tests: `agent/test/harness-permissions.test.ts`, 15 tests. 6 go through the real process transport + codec with a fake `claude`: attribution to the parent call; `sa-N` + own signal; auto-accept ON answered by the BROKER; refusal message; no requester → deny; cancel during a pending ask → withdrawn, `cancelled`. 9 test the bridge with a real temp dir: inside passes with no broker request; `outside`, `..`, symlinked dir, symlink file, `.git` and `Bash` are asked; with no worktree an in-tree Write is asked; a hook block wins over the rule; a hook rewrite reaches Claude; a hook that rewrites the path to outside is asked; the session grant `git status` answers `Bash git status -s`; a generic ask answered "always" is asked again. `subagent-harness.test.ts`: the "denied" test is renamed (no requester wired) and imports the constant from `permissions.ts`. Covering run: 173 pass across 17 files (the 16 agent `harness-*`/`subagent-*` files + `cli/test/harness-wiring.test.ts`). `tsc --noEmit -p packages/agent` is clean, and `biome check` on the 6 touched files is clean.
+- **Mutations (each → red, then restored from a scratch copy, `diff -q` identical):**
+  1. Gate bypassed in `child.ts` (allow answered directly) → 6 fail.
+  2. Harness self-allows `Bash` → 7 fail, including "auto-accept ON: the BROKER answers".
+  3. Symlink-file check off → the escape test fails.
+  4. Parent-dir `realpath` not used → the escape test fails.
+  5. Generic "always" honoured → "creates no grant" fails.
+  6. Rule decided BEFORE the gate → hook-block and hook-rewrite-outside fail.
+  7. Run signal not passed to the broker → the cancel test fails (5 s timeout).
+  8. `.git` allowed → the escape test fails.
+  9. Raw parent requester instead of `subagentRequester` → both attribution tests fail.
+- **Drift (and why):**
+  1. **D4 «no session-scope option» for a generic ask is not reachable** in this task's files. Options are built by the daemon/TUI and `PermissionRequest` has no field for it. As built: "always" is still shown, but it is honoured once (no grant). D4 is corrected in place; follow-up: a request marker across daemon + TUI + phone.
+  2. `subagent.ts` touched (not listed for shr-5): needed to hand the child's requester/hooks/grants to the harness child. It is a pure extraction for the tentacle child.
+  3. A `tool_call` hook that forces `ask` (no deny, no rewrite) on an IN-worktree write is still passed by the rule. The rule sits in the requester and cannot see the gate's `force`. A hook `deny` or a path rewrite is honoured (tested). Fixing it needs a gate seam (debt).
+  4. An "always" on a Claude `Bash`/`Write`/`Edit` ask creates the ordinary tree grant (`shell` prefix / whole `fs_write`), shared with the parent and its other children. These are the same semantics as a tentacle child's ask.
+  5. The path check is check-then-use (Claude writes after our answer). `--restricted` (cwd confinement, Repro 9) is the second fence under it, as D4 says.
+- No protocol/schema change (no `protocol.d/` note, `protocol.json` untouched). Full gate left to the orchestrator's script.
+- **Unverified:** a real `claude` run end-to-end through the TUI/phone prompt. To check it: run `agent_task{subagent_type:"claude", prompt:"create x.txt and run ls"}` in a git repo with auto mode off. The `Write` should pass, and `ls` should prompt «Run a shell command» attributed to the `claude` sub-agent.
 
 ## Review
 

@@ -24,6 +24,7 @@ export * from "./harness/claude-code.ts";
 export * from "./harness/process.ts";
 export * from "./harness/worktree.ts";
 export * from "./harness/child.ts";
+export * from "./harness/permissions.ts";
 export * from "./hooks.ts";
 export * from "./round-plan.ts";
 export * from "./capabilities.ts";

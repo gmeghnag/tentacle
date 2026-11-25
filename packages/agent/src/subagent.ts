@@ -24,6 +24,7 @@ import {
   SubagentFailure,
   type Tool,
   type ToolProgressEvent,
+  denyAll,
   shellIntent,
   toolLabel,
 } from "@tentacle/core";
@@ -397,6 +398,19 @@ export function createSubagentRunner(deps: SubagentDeps): {
     if (!type) {
       return { report: "no sub-agent type available", toolUses: 0, stopReason: "end_turn" };
     }
+    // The child's asks, attributed to the parent's call / `sa-N`: the ONE broker.
+    const childRequester = deps.requestPermission
+      ? subagentRequester(
+          deps.requestPermission,
+          controls?.toolCallId,
+          { type: type.name, description: opts.description },
+          controls?.agentId !== undefined && controls.signal
+            ? { id: controls.agentId, signal: controls.signal }
+            : controls?.move !== undefined
+              ? { move: controls.move }
+              : undefined,
+        )
+      : undefined;
     // Another harness runs this child (D3): the call's `model` is that harness's
     // own string (never a `models` name), shown as given; everything after the
     // start event is the harness child's.
@@ -408,7 +422,18 @@ export function createSubagentRunner(deps: SubagentDeps): {
         description: opts.description,
         ...(model !== undefined ? { model } : {}),
       });
-      return runHarnessChild(type, opts, controls, deps.harness);
+      // D4: its asks go through the same gate inputs a tentacle child's would.
+      return runHarnessChild(type, opts, controls, deps.harness, {
+        requester: childRequester ?? denyAll,
+        ...(deps.hooks
+          ? {
+              hooks: deps.hooks.forAgent({ type: type.name, description: opts.description }, model),
+            }
+          : {}),
+        grants,
+        sessionId: controls?.sessionId ?? "",
+        tool: (n) => deps.tools.get(n),
+      });
     }
     // The child's model, picked BEFORE its start event so the row carries it: a
     // `models` name for the wire (never an id, AGENTS §7) and the resolved ID
@@ -519,20 +544,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
-      ...(deps.requestPermission
-        ? {
-            requestPermission: subagentRequester(
-              deps.requestPermission,
-              controls?.toolCallId,
-              { type: type.name, description: opts.description },
-              controls?.agentId !== undefined && controls.signal
-                ? { id: controls.agentId, signal: controls.signal }
-                : controls?.move !== undefined
-                  ? { move: controls.move }
-                  : undefined,
-            ),
-          }
-        : {}),
+      ...(childRequester !== undefined ? { requestPermission: childRequester } : {}),
       grants,
       // A server may reuse call ids: two children must not share a spill file.
       spillScope: crypto.randomUUID().slice(0, 8),

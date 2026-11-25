@@ -6,8 +6,8 @@
  * report. The runner owns the limits every adapter shares (D2): the hang guard
  * (paused while an ask is pending) and a call's own token cap.
  *
- * Permission asks are DENIED here (slice shr-4); shr-5 bridges them to the one
- * broker (D4).
+ * A permission ask is decided by `authorizeHarnessAsk` (D4): the session's gate
+ * → `subagentRequester` → the ONE broker.
  */
 
 import { SubagentFailure, type ToolProgressEvent } from "@tentacle/core";
@@ -19,6 +19,7 @@ import type {
   SubagentRunOptions,
 } from "../subagent.ts";
 import { isModelShape } from "./claude-code.ts";
+import { type HarnessPermissions, authorizeHarnessAsk } from "./permissions.ts";
 import type {
   HarnessAdapter,
   HarnessEvent,
@@ -98,9 +99,6 @@ function probeOnce(adapter: HarnessAdapter, signal: AbortSignal): Promise<Harnes
 
 const DATA_CAP = 4096;
 const WINDOW_LABEL: Readonly<Record<string, string>> = { five_hour: "5h", seven_day: "7d" };
-/** What an ask is answered with until shr-5 bridges asks to the broker. */
-export const HARNESS_ASK_DENIED =
-  "tentacle denied this: permission asks from a harness sub-agent are not enabled yet";
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -124,6 +122,8 @@ export async function runHarnessChild(
   opts: SubagentRunOptions,
   controls: SubagentRunControls | undefined,
   deps: HarnessDeps | undefined,
+  /** The child's gate inputs (D4). Absent: every permission ask is denied. */
+  permissions?: HarnessPermissions,
 ): Promise<SubagentResult> {
   const onEvent = (event: ToolProgressEvent): void => controls?.onEvent?.(event);
   const name = type.name;
@@ -311,7 +311,13 @@ export async function runHarnessChild(
           break;
         case "ask":
           if (ev.ask.type === "permission") {
-            await run.answer(ev.askId, { allow: false, message: HARNESS_ASK_DENIED });
+            // Decided while the hang guard is paused; the run's signal withdraws it.
+            const decision = await authorizeHarnessAsk(permissions, ev.ask, {
+              askId: ev.askId,
+              signal: own.signal,
+              ...(worktree !== undefined ? { worktreeRoot: worktree.path } : {}),
+            });
+            await run.answer(ev.askId, decision);
           } else if (ev.ask.type === "auth") {
             await run.cancel().catch(() => "unconfirmed" as const);
             return await failRun(
