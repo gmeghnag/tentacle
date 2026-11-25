@@ -287,3 +287,50 @@ untouched (D8).
 - If `attach` outlives the 15 s TTL, the first call's `finally` can delete a newer memo under the same key.
 
 **Executor behaviour:** it followed the plan in order and showed red tests before green. It disclosed its drifts honestly (the explicit `:443`, the extra delete, T7's suite). Its mutation table left out the two properties above, so the single-flight claim in Execution is unproven.
+
+### Fix round 1
+
+*— claude-sonnet-4-5 (executor), 2026-11-25*
+
+All three Review findings were MEDIUM and all three are fixed; no production code outside the
+approved Implementation's files changed (`packages/cli/src/serve-mcp-server.ts` only, plus two test
+files). Round 0's behaviour and its red/mutation table are unchanged; `packages/daemon/src/mcp/tools.ts`
+is byte-identical to the reviewed tree (`git diff --stat`: 3 files, `tools.ts` absent).
+
+- **F1 — a bare v6 bind now yields a dialable hint.** New leaf `bracketV6Host` in
+  `serve-mcp-server.ts:86-99`, called by `hintUrl:66` before `parsedUrl`; the bind's own
+  `<host>:<port>` shape says where the host ends (the trailing `:<digits>` is the port), so
+  `ws://:::4001` → `ws://[::1]:4001` and `ws://::1:4001` → `ws://[::1]:4001`. Chosen over special-casing
+  `::` because `--host ::1` composes the same broken shape — one rule, both binds. If the bracketed
+  string still does not parse, the input is returned unchanged as before. T4
+  (`serve-mcp-e2e.test.ts:154-162`) now asserts all three bare forms.
+  *Red/mutation:* with `const raw = serverUrl` (the reviewed code) — `Expected "ws://[::1]:4001"
+  Received "ws://:::4001"`. Not asserted end-to-end through `main.ts`: a real `--host ::` bind in the
+  gate is a port/v6-availability risk, and the startup line is a pure composition of this function.
+- **F2 — single-flight is now pinned by a real interleaving.** `mcp-tools.test.ts` "two identical
+  calls interleaved" parks the FIRST call inside `start` (a `RpcPeer.prototype.request` spy, the same
+  patch style as `spyRequests`, holds the first `session/prompt` and counts `session/open`), then
+  issues the second start and waits until it is provably inside `start` — its memo-hit audit line, or
+  (mutated) a second `session/open` — before releasing the first. Then asserts one `session/open`, the
+  same ids, `host.size === 1`, one model round.
+  *Red/mutation:* moving `this.starts.set(...)` after `await this.prompt(...)` (the reviewer's
+  mutation, applied from a backup and restored) — `expect(opens).toHaveLength(1)` → `Expected length:
+  1, Received length: 2`.
+- **F3 — caller isolation of the replay key is tested in both namespaces.** `mcp-tools.test.ts` "the
+  replay key is per caller": alice/bob, same prompt + same `key` → distinct `mcp-<caller>-*` ids, then
+  the same for the no-key (implicit) namespace; `host.size === 4`, no replay audit line.
+  *Red/mutation (two separate runs, each restored):* dropping `${caller}` from the `k\0` form →
+  `Expected: not "mcp-alice-b8fee422-…"` (the `key` assertions); dropping it from the `r\0` form → the
+  same at the implicit assertions. Each form is pinned on its own.
+
+**Verification.** Narrow suites green: `bun test packages/daemon/test/{mcp-tools,mcp-tasks,external-peer,project-pairing}.test.ts packages/cli/test/serve-mcp-e2e.test.ts`
+→ 82 pass / 0 fail (80 in round 0, +2 new tests); `packages/cli/test/{serve-mcp,serve-mcp-e2e}.test.ts`
+→ 19 pass / 0 fail. `bunx biome check` on the three changed files: clean. `bunx tsc --noEmit -p
+packages/cli` reports only the pre-existing standalone-config noise (`new URL(...)` in
+`serve-mcp-e2e.test.ts` 197/225/255 — shifted by my 7 added lines — and the `packages/tui` `--jsx`
+noise), nothing in `serve-mcp-server.ts`. **The full gate was not run here — the orchestrator runs it
+after this task.**
+
+**Still open (Review's lower-severity notes, deliberately untouched):** the replayed *task* start that
+answered `TASK_NOT_RECORDED`, `createdAt` drift on a replay, and an `attach` outliving the 15 s TTL
+deleting a newer memo — none is a finding of this round, none is fixed.

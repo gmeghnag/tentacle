@@ -769,6 +769,76 @@ describe("mcp session_start replay — one retried start, one session", () => {
     expect(r.host.size).toBe(2);
   });
 
+  // The `:992` race for identical args, made deterministic: the FIRST call is held
+  // inside `start` (its `session/prompt` parked) while the second one arrives, so
+  // the memo — and its single-flight promise — must already be there for the second
+  // to wait on. Mutation: move `this.starts.set(...)` after `await this.prompt(...)`
+  // → the second call opens its own session and both run → red.
+  test("two identical calls interleaved: the second waits on the first, one session", async () => {
+    const audit: string[] = [];
+    const r = rig([[text("answer")]], { audit });
+    // The two awaits inside `start`: `session/open` = a session is being opened,
+    // `session/prompt` = the call got as far as sending its prompt.
+    const opens: string[] = [];
+    let prompts = 0;
+    let release = () => {};
+    const held = new Promise<void>((res) => {
+      release = res;
+    });
+    const original = RpcPeer.prototype.request;
+    RpcPeer.prototype.request = function (this: RpcPeer, method: string, ...rest: unknown[]) {
+      const pending = (original as (...a: unknown[]) => Promise<unknown>).call(
+        this,
+        method,
+        ...rest,
+      );
+      if (method === "session/open") opens.push(method);
+      if (method === "session/prompt") {
+        prompts += 1;
+        // Only the FIRST prompt is held; a second can exist only if the race re-opened.
+        if (prompts === 1) return held.then(() => pending);
+      }
+      return pending;
+    } as typeof original;
+    cleanups.push(() => {
+      RpcPeer.prototype.request = original;
+      release();
+    });
+    const first = r.tools.call("default", "session_start", { prompt: "same" });
+    await until(() => prompts === 1);
+    const second = r.tools.call("default", "session_start", { prompt: "same" });
+    // Settle once the second call is provably INSIDE `start`: it hit the memo (its
+    // replay audit) — or, mutated, opened a session of its own.
+    await until(() => audit.some((l) => l.startsWith("mcp-start-replayed ")) || opens.length === 2);
+    expect(opens).toHaveLength(1);
+    release();
+    const [a, b] = [ok(await first), ok(await second)];
+    expect(String(b.sessionId)).toBe(String(a.sessionId));
+    expect(String(b.turnId)).toBe(String(a.turnId));
+    expect(r.host.size).toBe(1);
+    expect(r.model.users).toHaveLength(1);
+  });
+
+  // No caller may replay or hijack another's start: the caller is IN the key, in
+  // both namespaces. Mutation: drop `${caller}` from the `k\0` form → Bob is
+  // answered with Alice's ids (and silently gets no session) → red; the same
+  // mutation on the `r\0` form → the no-key assertions go red.
+  test("the replay key is per caller: the same prompt and key are the other caller's own", async () => {
+    const audit: string[] = [];
+    const r = rig([[text("a")], [text("b")], [text("c")], [text("d")]], { audit });
+    const alice = ok(await r.tools.call("alice", "session_start", { prompt: "same", key: "k1" }));
+    const bob = ok(await r.tools.call("bob", "session_start", { prompt: "same", key: "k1" }));
+    expect(String(bob.sessionId)).not.toBe(String(alice.sessionId));
+    expect(String(alice.sessionId)).toMatch(/^mcp-alice-/);
+    expect(String(bob.sessionId)).toMatch(/^mcp-bob-/);
+    // The no-key (implicit) namespace is per caller too.
+    const aliceImplicit = ok(await r.tools.call("alice", "session_start", { prompt: "plain" }));
+    const bobImplicit = ok(await r.tools.call("bob", "session_start", { prompt: "plain" }));
+    expect(String(bobImplicit.sessionId)).not.toBe(String(aliceImplicit.sessionId));
+    expect(r.host.size).toBe(4);
+    expect(audit.filter((l) => l.startsWith("mcp-start-replayed "))).toHaveLength(0);
+  });
+
   // A refusal is not a replay: the memo is dropped, so a retry really retries.
   // Mutation: keep the memo after a refusal → the retry is answered as a replay
   // (the audit line appears) → red.

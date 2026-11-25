@@ -59,10 +59,12 @@ export function parseMcpAsks(value: string | undefined): AskMode {
  * loopback it also serves (`0.0.0.0` → `127.0.0.1`, `::`/`[::]` → `[::1]` — a
  * v6-only stack need not answer `127.0.0.1`). Any other host is kept verbatim,
  * so the hint stays reachable from another machine; scheme and port are kept.
- * No path and no trailing slash, so `/mcp` composes as it always did.
+ * No path and no trailing slash, so `/mcp` composes as it always did. A bare v6
+ * host (`--host ::` gives `ws://:::4001`) is bracketed first so it parses at all.
  */
 export function hintUrl(serverUrl: string): string {
-  const url = parsedUrl(serverUrl);
+  const raw = bracketV6Host(serverUrl);
+  const url = parsedUrl(raw);
   if (url === null) {
     return serverUrl;
   }
@@ -70,9 +72,30 @@ export function hintUrl(serverUrl: string): string {
   const loopback =
     host === "0.0.0.0" ? "127.0.0.1" : host === "[::]" || host === "::" ? "[::1]" : undefined;
   // `URL` elides a scheme's default port (`:443`); the hint repeats what the bind said.
-  const written = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*:(\d+)(?:[/?#]|$)/i.exec(serverUrl)?.[1];
+  const written = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*:(\d+)(?:[/?#]|$)/i.exec(raw)?.[1];
   const port = url.port !== "" ? url.port : (written ?? "");
   return `${url.protocol}//${loopback ?? host}${port === "" ? "" : `:${port}`}`;
+}
+
+/**
+ * A bare IPv6 bind is not a URL: the bind composes `${host}:${port}`, so `--host ::`
+ * yields `ws://:::4001` and `--host ::1` yields `ws://::1:4001`, both of which `URL`
+ * refuses (the host must be bracketed). The bind's own `<host>:<port>` shape says
+ * where the host ends, so the trailing `:<digits>` is the port — bracket the rest.
+ */
+function bracketV6Host(raw: string): string {
+  const parts = /^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)$/i.exec(raw);
+  if (parts === null) {
+    return raw;
+  }
+  const authority = parts[2] ?? "";
+  const split = /^(.*):(\d{1,5})$/.exec(authority);
+  const host = split?.[1] ?? authority;
+  if (!host.includes(":") || host.startsWith("[")) {
+    return raw;
+  }
+  const port = split === null ? "" : `:${split[2] ?? ""}`;
+  return `${parts[1] ?? ""}[${host}]${port}`;
 }
 
 /** `new URL`, or null when it does not parse (never in practice: the bind builds the string). */

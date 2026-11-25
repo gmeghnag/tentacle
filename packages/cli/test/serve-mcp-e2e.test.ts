@@ -152,6 +152,13 @@ describe("flags", () => {
   test("hintUrl: a wildcard bind becomes a URL a client can dial", () => {
     expect(hintUrl("http://0.0.0.0:4001")).toBe("http://127.0.0.1:4001");
     expect(hintUrl("http://[::]:4001")).toBe("http://[::1]:4001");
+    // A bare v6 bind is what `--host ::` actually composes (`ws://:::4001`): `URL`
+    // refuses it unbracketed, so the hint must bracket the host first. Mutation:
+    // parse the string as given (`bare = serverUrl`) → these three return their
+    // undialable input → red.
+    expect(hintUrl("ws://:::4001")).toBe("ws://[::1]:4001");
+    expect(hintUrl("http://:::4001")).toBe("http://[::1]:4001");
+    expect(hintUrl("http://::1:4001")).toBe("http://[::1]:4001");
     expect(hintUrl("https://0.0.0.0:443")).toBe("https://127.0.0.1:443");
     expect(hintUrl("http://192.168.1.5:4001")).toBe("http://192.168.1.5:4001");
     expect(hintUrl("http://localhost:4001")).toBe("http://localhost:4001");
