@@ -786,3 +786,19 @@ Same model family as the B4 executor (Opus); only the context is fresh.
   (`password=[REDACTED] field password · …›`). This is cosmetic and the value stays masked.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Review B5 (fresh context, `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 2 MEDIUM). Same model family as the executor (Opus): only the context is fresh.
+
+1. **HIGH — the merge of `main` (A2A) left `browser_action` unclassified for external callers.** `packages/core/src/permission.ts:101` `EXTERNAL_ANSWER` lacks `browser_action` → `bun run typecheck` red (TS2741 there + `core/test/permission-kinds.test.ts:11`). Worse, at run time `packages/daemon/src/external/asks.ts:69` (`askOf`) maps every own non-workflow wire ask to kind `tool`, so a `browser_action` ask in a `serve` session driven by an A2A task in `both` mode is caller-answerable. Repro (`.tentacle/tmp/browser-inspect/a2a-ask.ts`): `askOf({tool:"browser_action",…}, true)` → `kind: tool`, `callerMayAnswer(…, "both")` → `true`. An untrusted remote approves clicks/typing in the owner's Chrome (Q3, AGENTS §7 "a remote is not trusted"). Fix: `browser_action: "owner-only"` in the table + map `BROWSER_ACTION_TOOL` in `askOf`, with a test red on the current code.
+2. **MEDIUM — the executed action is not the one approved (probe/act TOCTOU).** `apps/browser-extension/src/page.js:165-171` re-resolves the target at act time, and `packages/tools/src/browser.ts` (`createClickTool` / `createTypeTool`) never compares the act's facts with the probe's. With `x,y` a reflow while the ask is open (ads, lazy images) makes `elementFromPoint` hit another element: the user OKs «Click “Search”» and «Buy now» is clicked, with no ask. With `ref`, page JS can rewrite `href` / `form.action` during the ask. Fix: send the probe's facts (or a digest) with the act and refuse on a mismatch.
+3. **MEDIUM — the "detected after the fact" mitigation of the unbuilt Fetch gate is not built.** The B5 plan says «reports a post-action domain change», but no result does (`browser.ts`: click says «read the tab…», read does not flag a domain outside `visited`). Also `onTab` reopens a `learn`ed URL with no ask (`browser.ts` `onTab`), and `learn` takes any URL read back from the page, including a JS/redirect target that was never approved. So the doc's claim «the URL was already approved/handed» is false for those. Either report the change and skip reopening unvisited domains (or ask first), or correct the doc and the owner-decision framing.
+
+**Gate**: lint clean (2511 files). typecheck: 2 errors (finding 1; after `bun install --frozen-lockfile`, because the worktree lacked the merged `@a2a-js/sdk`). Touched tests: 12 files, 94 pass / 0 fail. Full `bun run test` not run.
+**Mutations (mine; restored by copy, tree clean)**: `autoApproves` lets `browser_action` through → 2 fail (client, wiring); classifier ignores `formAction` → 1 fail. The executor's mutation list is plausible and was not re-run.
+**Holds**: single broker (wiring passes `permissions.request`, and the test fails against a second broker); session auto-accept is refused on all three answerers (TUI `permission-ui.ts:575`, `relay-policy.ts:65`, daemon `hosted-session.ts:1792`, all through `autoApproves`); allow-once/deny only on daemon, TUI and mobile; `close` never removes a handed-over tab; the protocol note is present.
+**Attacks with no finding**: a hook `force: "allow"` cannot skip the ask, because the ask is raised in-tool; sub-agents get no browser tools (`subagent.ts:498`); an unknown tab id is not reopened.
+**Executor**: honest STOP and deferral, with drift listed. It missed the post-merge typecheck (the merge commit came after its gate).
+
+*— claude-opus-5-5, 2026-11-25*
