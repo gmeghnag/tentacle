@@ -694,6 +694,27 @@ from the phone. 7. Usage visibility. 8. Where it runs. 9. Remote
 - No protocol change; changelog sentence added to the existing fragment `changelog.d/subagent-harness-runners.added.md`.
 - **Unverified:** a real `claude` run with `--json-schema` in a workflow (sandbox refuses spawning `claude`). Check: a workflow step `agent: {type: claude, model: opus}` in a git repo.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-25* — Review round 1's HIGH + 3 MEDIUM. Every test below was RED on the assertion before its fix (shown), then green. Mutants restored from scratch copies.
+
+1. **HIGH, env — FIXED.** `harness/process.ts`: a `childEnv()` built per spawn = `scrubSensitiveEnv(hostEnv ?? process.env)` + `deps.env` laid over it unscrubbed (the shell's `options.env` policy). It is used by BOTH `probe` and `start`, so `Bun.spawn` never inherits tentacle's env. New test seam `hostEnv`. Tests (`harness-process.test.ts`): a host env holding `TENTACLE_MODEL_API_KEY`/`ANTHROPIC_API_KEY`/`TENTACLE_REMOTE_TOKEN` gives the probe and the run exactly `PATH`/`HOME`/`CLAUDE_CONFIG_DIR`. With no env given, the spawner still gets an explicit env with no sensitive key. Red before: `Received: undefined` / the secrets present. **Mutant:** the scrub dropped (`{...process.env}`) → 2 fail.
+   - **Owner question:** `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`, used where there is no keychain, e.g. a Linux `serve`) is scrubbed too, since it matches `TOKEN`. There `claude` reports «Not logged in» unless it uses `~/.claude` credentials. Pass it through, yes or no?
+2. **MEDIUM, capabilities — FIXED.** `HarnessPermissions.capabilities` (read LIVE per ask). `authorizeHarnessAsk` refuses an ask whose mapped tool `isToolDisabled`, BEFORE the gate, the in-worktree rule and the broker. The message is «… `shell` is turned off for this session». `subagent.ts` passes `deps.capabilities`. Tests (`harness-permissions.test.ts`): (a) with auto-accept ON and `shell` off, Claude's `Bash` is denied and the broker is never asked (through the real process transport and the codec); (b) with `fs_write`/`fs_edit` turned off mid-run, an in-worktree `Write`/`Edit` is refused (the rule does not bypass it), and the same `Write` passed before. **Mutants:** wiring dropped in `subagent.ts` → (a) fails; check skipped for `fs_*` → (b) fails.
+   - **Left (debt):** Claude's `Read`/`Grep`/`Glob` never ask, so a session with `fs_read` off is not narrowed. Tentacle's own reads are unconfined by design. The fix would be to narrow `--tools` at start.
+3. **MEDIUM, kept branch — FIXED.** `finishWorktree` now commits the run's changes on `harness/<id>` (tentacle identity, `--no-verify --no-gpg-sign`). The baseline is the commit's parent. `WorktreeOutcome` gains `committed`. A failed commit keeps the worktree and returns `committed: false`. `child.ts` words the report accordingly: «Changes committed on branch `X` (the run's work is its last commit; worktree at P; …)», or «Changes left uncommitted in the worktree at P». It never says "on branch" when the branch does not hold the work. Tests: `harness-worktree.test.ts` +2, real git. `git show harness/r7:made.txt` and the edited `a.txt` are on the branch, `harness/r7^` is the baseline, and the diff vs the baseline is exactly the run's 2 files. A failing commit → `committed:false`, the file is still in the worktree, and the branch is at the baseline. `subagent-harness.test.ts`: the committed wording, plus a new uncommitted-wording test. **Mutant:** the commit replaced by a successful no-op (`git --version`) → 2 fail.
+4. **MEDIUM, init fails open — FIXED.** `process.ts`: `BYPASS_MODES` (a denylist) is replaced by `SAFE_MODES = {"default"}` (an allowlist, matching the recorded live init of a run with no mode flag: `run*.jsonl`). The checks are now:
+   - a missing `permissionMode` is refused;
+   - with an allowed tool set, a missing `init.tools` is refused;
+   - before a checked init, only `end`/`quota` pass, so an `ask`/`progress`/`output`/`usage` with no init kills the group, and nothing is delivered;
+   - an `end` before init still ends normally (e.g. «Not logged in»).
+
+   Tests (`harness-process.test.ts`, a new describe, 6 tests). The 3 older tests in that file emitted output with no init: their fixtures now send `{"t":"started","mode":"default"}` first (the contract changed; their assertions did not). Red before: 3 runs were never killed (5 s timeout), and 1 failed on the assertion. **Mutants:** no before-init gate → 1 fails; back to the denylist with a missing mode allowed → 2 fail; a missing `tools` accepted → 1 fails.
+- **Covering run:** 108 pass / 0 fail across the 7 files (the 6 `agent/test/harness-*` + `subagent-harness` files and `cli/test/harness-wiring.test.ts`). `tsc --noEmit -p packages/agent` is clean. `biome check` on the 9 touched files is clean. The full gate is the orchestrator's.
+- **Drift:** none from the review's fix directions. The run's commit uses `--no-verify` (as the baseline does), so the user's git hooks do not run on it.
+- No protocol change. No new changelog fragment (internal hardening of an unreleased feature).
+- **Unverified:** a real `claude` with the scrubbed env still logs in on macOS (keychain) and accepts `permissionMode: "default"` at init. The sandbox refuses spawning `claude`, the same open item as in every slice.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-25* — fresh context, whole branch (shr-1 … shr-6), `git diff main...HEAD`. Same model family as the shr-4/shr-5 executor (Opus): shared blind spots are possible.

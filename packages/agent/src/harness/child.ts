@@ -185,7 +185,11 @@ export async function runHarnessChild(
     const outcome = await worktrees.finish(worktree);
     worktree = undefined;
     if (outcome.changed) {
-      worktreeNote = `\n\nChanges kept on branch \`${outcome.branch}\` at ${outcome.path} (never merged by tentacle):\n${outcome.diffstat}`;
+      // Committed: the branch's last commit is the run's work (its parent, the
+      // baseline, is the user's own uncommitted state at the start).
+      worktreeNote = outcome.committed
+        ? `\n\nChanges committed on branch \`${outcome.branch}\` (the run's work is its last commit; worktree at ${outcome.path}; never merged by tentacle):\n${outcome.diffstat}`
+        : `\n\nChanges left uncommitted in the worktree at ${outcome.path} (never merged by tentacle):\n${outcome.diffstat}`;
     }
   };
 

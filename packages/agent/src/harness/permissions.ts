@@ -15,6 +15,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type PermissionLevel, type PermissionRequester, type Tool, denyAll } from "@tentacle/core";
 import { z } from "zod";
+import { type SessionCapabilities, isToolDisabled } from "../capabilities.ts";
 import type { HookRunner } from "../hooks.ts";
 import { PermissionGate } from "../permission-gate.ts";
 import type { SessionGrants } from "../session-grants.ts";
@@ -30,6 +31,12 @@ export interface HarnessPermissions {
   readonly sessionId: string;
   /** The session's own tool, by name: its configured level wins over the default `ask`. */
   readonly tool?: (name: string) => Tool | undefined;
+  /**
+   * The parent session's capability switches, read LIVE per ask: a built-in
+   * turned off (`shell`, `fs_write`, `fs_edit`) refuses the ask it maps to,
+   * before any rule, grant or broker — as a tentacle child's call is refused.
+   */
+  readonly capabilities?: () => SessionCapabilities;
 }
 
 /** A refusal with no reason of its own. */
@@ -191,6 +198,13 @@ export async function authorizeHarnessAsk(
   call: { readonly askId: string; readonly signal: AbortSignal; readonly worktreeRoot?: string },
 ): Promise<HarnessDecision> {
   const mapped = mapClaudeAsk(ask.tool, ask.input, perms?.tool);
+  const caps = perms?.capabilities?.();
+  if (caps !== undefined && isToolDisabled(mapped.tool.name, caps)) {
+    return {
+      allow: false,
+      message: `${HARNESS_ASK_DENIED}: \`${mapped.tool.name}\` is turned off for this session`,
+    };
+  }
   const base = perms?.requester ?? denyAll;
   const root = call.worktreeRoot;
   // Between the gate (after its hooks and grants) and the broker.

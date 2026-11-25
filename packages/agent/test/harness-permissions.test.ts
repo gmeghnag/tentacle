@@ -11,10 +11,12 @@ import { join } from "node:path";
 import {
   type ExecutionEnvironment,
   type ModelProvider,
+  NO_CAPABILITIES,
   type PermissionRequest,
   type PermissionRequestOptions,
   type PermissionRequester,
   type PermissionResponse,
+  type SessionCapabilities,
   type Tool,
   autoApproves,
 } from "@tentacle/core";
@@ -182,7 +184,12 @@ const CLAUDE_TYPE: AgentType = {
   harness: { adapter: "claude-code", mode: "write" },
 };
 
-function build(spawner: Spawner, broker: SpyBroker | undefined, worktreePath = "/nowhere") {
+function build(
+  spawner: Spawner,
+  broker: SpyBroker | undefined,
+  worktreePath = "/nowhere",
+  capabilities?: () => SessionCapabilities,
+) {
   const worktrees: HarnessWorktrees = {
     create: async ({ id }) => ({
       id,
@@ -225,6 +232,7 @@ function build(spawner: Spawner, broker: SpyBroker | undefined, worktreePath = "
     types: [CLAUDE_TYPE],
     harness,
     ...(broker ? { requestPermission: broker.request } : {}),
+    ...(capabilities ? { capabilities } : {}),
   });
 }
 
@@ -289,6 +297,16 @@ describe("a claude child's asks reach the ONE broker", () => {
     expect(answer()).toMatchObject({
       response: { response: { behavior: "deny", message: `${HARNESS_ASK_DENIED}: not there` } },
     });
+  });
+
+  test("a tool switched off for the session is refused even with auto-accept ON (never asked)", async () => {
+    const broker = new SpyBroker(true);
+    const { spawner, answer } = fakeClaude("Bash", { command: "env" });
+    const off = () => ({ ...NO_CAPABILITIES, disabledTools: ["shell"] });
+    await build(spawner, broker, "/nowhere", off).run(OPTS, { toolCallId: "call-1" });
+    expect(broker.asks).toEqual([]);
+    expect(answer()).toMatchObject({ response: { response: { behavior: "deny" } } });
+    expect(JSON.stringify(answer())).toContain("turned off for this session");
   });
 
   test("no requester wired → every ask denied", async () => {
@@ -362,6 +380,26 @@ describe("auto mode OFF: the in-worktree rule", () => {
     });
     expect(w).toEqual({ allow: true, input: { file_path: join(wt, "src/new/a.ts"), content: "" } });
     expect(e.allow).toBe(true);
+    expect(broker.asks).toEqual([]);
+  });
+
+  test("a switched-off fs_write/fs_edit is refused even inside the worktree, read LIVE per ask", async () => {
+    const broker = new SpyBroker();
+    let disabled: string[] = [];
+    const p = perms(broker, {
+      capabilities: () => ({ ...NO_CAPABILITIES, disabledTools: disabled }),
+    });
+    const write = { file_path: join(wt, "a.ts"), content: "" };
+    expect((await decide(p, broker, "Write", write)).allow).toBe(true);
+    disabled = ["fs_write", "fs_edit"];
+    const w = await decide(p, broker, "Write", write);
+    const e = await decide(p, broker, "Edit", {
+      file_path: "b.ts",
+      old_string: "a",
+      new_string: "b",
+    });
+    expect(w).toMatchObject({ allow: false });
+    expect(e).toMatchObject({ allow: false });
     expect(broker.asks).toEqual([]);
   });
 

@@ -81,6 +81,36 @@ describe("snapshot worktree (D8)", () => {
     expect((await g(["branch", "--list", "harness/r3"])).trim()).toContain("harness/r3");
   });
 
+  test("the kept BRANCH holds the run's changes, as one commit over the baseline", async () => {
+    await dirty();
+    const wt = await createSnapshotWorktree({ cwd: repo, id: "r7" });
+    await writeFile(join(wt.path, "made.txt"), "x\n");
+    await writeFile(join(wt.path, "a.txt"), "edited by the run\n");
+    const out = await finishWorktree(wt);
+    expect(out).toMatchObject({ changed: true, committed: true, branch: "harness/r7" });
+    // What the report invites the user to do (`git diff` / `merge harness/r7`) sees the work.
+    expect(await g(["show", "harness/r7:made.txt"])).toBe("x\n");
+    expect(await g(["show", "harness/r7:a.txt"])).toBe("edited by the run\n");
+    expect((await g(["rev-parse", "harness/r7^"])).trim()).toBe(wt.baseline);
+    expect(
+      (await g(["diff", "--name-only", wt.baseline, "harness/r7"])).trim().split("\n"),
+    ).toEqual(["a.txt", "made.txt"]);
+  });
+
+  test("a commit that fails keeps the worktree and says the branch does not hold the work", async () => {
+    await dirty();
+    const failing: GitRunner = (args, opts) =>
+      args.includes("commit")
+        ? Promise.resolve({ code: 1, stdout: "", stderr: "error: cannot commit" })
+        : DEFAULT_GIT(args, opts);
+    const wt = await createSnapshotWorktree({ cwd: repo, id: "r8" });
+    await writeFile(join(wt.path, "made.txt"), "x\n");
+    const out = await finishWorktree(wt, { git: failing });
+    expect(out).toMatchObject({ changed: true, committed: false, path: wt.path });
+    expect(existsSync(join(wt.path, "made.txt"))).toBe(true);
+    expect((await g(["rev-parse", "harness/r8"])).trim()).toBe(wt.baseline);
+  });
+
   test("non-git cwd refuses", async () => {
     // scratch lives inside the main repo, so a real non-git dir is not
     // reachable here: the runner reports what git says outside a repo.

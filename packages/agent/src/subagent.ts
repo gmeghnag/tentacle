@@ -433,6 +433,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
         grants,
         sessionId: controls?.sessionId ?? "",
         tool: (n) => deps.tools.get(n),
+        ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
       });
     }
     // The child's model, picked BEFORE its start event so the row carries it: a

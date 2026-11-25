@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { isSensitiveEnvKey } from "@tentacle/core";
 import {
   DEFAULT_SPAWNER,
   HarnessFailure,
@@ -54,6 +55,8 @@ function fakeCodec(parseSpy?: string[]): CliCodec {
           },
         ];
       if (o.t === "out") return [{ kind: "output", text: o.text }];
+      if (o.t === "ask")
+        return [{ kind: "ask", askId: "k", ask: { type: "permission", tool: "Bash", input: {} } }];
       if (o.t === "end") return [{ kind: "end", status: "completed", text: "done" }];
       return [];
     },
@@ -191,7 +194,7 @@ describe("process transport: happy path and group lifecycle", () => {
     expect(spawned[0]).toEqual(["fakecli", "--run"]);
     expect(fake.log[0]).toBe("write:U:hi");
     expect(ops).toEqual(["track:4242"]);
-    fake.stdout('{"t":"started"}\n{"t":"out","text":"a"}\n');
+    fake.stdout('{"t":"started","mode":"default"}\n{"t":"out","text":"a"}\n');
     fake.stdout('{"t":"end"}\n');
     const done = collect(run);
     const { events } = await done;
@@ -298,7 +301,7 @@ describe("process transport: failures", () => {
     const { adapter } = adapterFor(fake, [], { lineCap: 100, codec: () => fakeCodec(seen) });
     const run = await adapter.start(SPEC, new AbortController().signal);
     const result = collect(run);
-    fake.stdout('{"t":"out","text":"first"}\n');
+    fake.stdout('{"t":"started","mode":"default"}\n{"t":"out","text":"first"}\n');
     // a 50 KiB line arriving in chunks, then a normal line
     for (let i = 0; i < 50; i++) fake.stdout("x".repeat(1024));
     fake.stdout('\n{"t":"out","text":"after"}\n');
@@ -317,7 +320,7 @@ describe("process transport: failures", () => {
     const { adapter } = adapterFor(fake, []);
     const run = await adapter.start(SPEC, new AbortController().signal);
     const result = collect(run);
-    fake.stdout('{"t":"out","text":"partial "}\nnot json\n');
+    fake.stdout('{"t":"started","mode":"default"}\n{"t":"out","text":"partial "}\nnot json\n');
     fake.stderr(`${"noise\n".repeat(2000)}boom: it broke`);
     fake.exit(3);
     const { error } = await result;
@@ -353,6 +356,114 @@ describe("process transport: failures", () => {
     const { events, error } = await result;
     expect(events).toEqual([]);
     expect((error as Error).message).toContain("Bash");
+  });
+});
+
+describe("process transport: the init check fails CLOSED", () => {
+  const refused = async (lines: string, spec: HarnessRunSpec = SPEC) => {
+    const fake = fakeProc();
+    const { adapter } = adapterFor(fake, ["SIGKILL"]);
+    const run = await adapter.start(spec, new AbortController().signal);
+    const result = collect(run);
+    fake.stdout(lines);
+    const { events, error } = await result;
+    expect(events).toEqual([]);
+    expect(error).toBeInstanceOf(HarnessFailure);
+    expect(fake.log).toContain("group:SIGKILL");
+    return (error as Error).message;
+  };
+
+  test("an init with no permissionMode is refused", async () => {
+    expect(await refused('{"t":"started"}\n{"t":"out","text":"x"}\n')).toContain("permissionMode");
+  });
+
+  test("an unknown (future) permissionMode is refused: only `default` keeps the broker in the loop", async () => {
+    expect(await refused('{"t":"started","mode":"yolo"}\n{"t":"ask"}\n')).toContain('"yolo"');
+  });
+
+  test("an init that does not list its tools is refused when we restricted them", async () => {
+    const msg = await refused('{"t":"started","mode":"default"}\n{"t":"ask"}\n', {
+      ...SPEC,
+      tools: ["Read"],
+    });
+    expect(msg).toContain("tools");
+  });
+
+  test("an ask or output before any checked init is refused (no init line at all)", async () => {
+    expect(await refused('{"t":"ask"}\n{"t":"end"}\n')).toContain("before");
+    expect(await refused('{"t":"out","text":"x"}\n')).toContain("before");
+  });
+
+  test("an `end` before init (e.g. not logged in) still ends the run normally", async () => {
+    const fake = fakeProc();
+    const { adapter } = adapterFor(fake, []);
+    const run = await adapter.start(SPEC, new AbortController().signal);
+    fake.stdout('{"t":"end"}\n');
+    const { events, error } = await collect(run);
+    expect(error).toBeUndefined();
+    expect(events.map((e) => e.kind)).toEqual(["end"]);
+  });
+
+  test("a checked init lets the run through", async () => {
+    const fake = fakeProc();
+    const { adapter } = adapterFor(fake, []);
+    const run = await adapter.start({ ...SPEC, tools: ["Read"] }, new AbortController().signal);
+    fake.stdout('{"t":"started","mode":"default","tools":["Read"]}\n{"t":"ask"}\n{"t":"end"}\n');
+    const { events, error } = await collect(run);
+    expect(error).toBeUndefined();
+    expect(events.map((e) => e.kind)).toEqual(["started", "ask", "end"]);
+  });
+});
+
+describe("process transport: the child's environment is scrubbed", () => {
+  const envsOf = async (extra: Partial<Parameters<typeof createProcessAdapter>[0]>) => {
+    const envs: (Record<string, string | undefined> | undefined)[] = [];
+    const g = fakeGroups(fakeProc(), []);
+    const adapter = createProcessAdapter({
+      id: "fake",
+      command: "fakecli",
+      codec: () => fakeCodec(),
+      caps: CAPS,
+      groups: g.groups,
+      spawner: (cmd, options) => {
+        envs.push(options.env);
+        const f = fakeProc();
+        if (cmd[1] === "--version") {
+          f.stdout("1.2.0\n");
+          f.exit(0);
+        }
+        return f.proc;
+      },
+      ...FAST,
+      ...extra,
+    });
+    await adapter.probe(new AbortController().signal);
+    await adapter.start(SPEC, new AbortController().signal);
+    return envs;
+  };
+
+  test("secrets of the host env never reach the probe or the run; ordinary vars do", async () => {
+    const envs = await envsOf({
+      hostEnv: {
+        PATH: "/bin",
+        HOME: "/h",
+        CLAUDE_CONFIG_DIR: "/c",
+        TENTACLE_MODEL_API_KEY: "sk-secret-123",
+        ANTHROPIC_API_KEY: "sk-ant",
+        TENTACLE_REMOTE_TOKEN: "tok",
+      },
+    });
+    expect(envs).toHaveLength(2);
+    for (const env of envs)
+      expect(env).toEqual({ PATH: "/bin", HOME: "/h", CLAUDE_CONFIG_DIR: "/c" });
+  });
+
+  test("with no env given, the child still gets an explicit, scrubbed copy (never the inherited one)", async () => {
+    const envs = await envsOf({});
+    for (const env of envs) {
+      expect(env).toBeDefined();
+      expect(Object.keys(env ?? {}).filter((k) => isSensitiveEnvKey(k))).toEqual([]);
+    }
   });
 });
 

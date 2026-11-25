@@ -11,6 +11,7 @@
  * caller, so this package gains no dependency on `exec`.
  */
 
+import { scrubSensitiveEnv } from "@tentacle/core";
 import { versionAtLeast } from "./claude-code.ts";
 import type {
   CliCodec,
@@ -60,13 +61,14 @@ export const HARNESS_KILL_GRACE_MS = 2000;
 /** After the leader exits, how long to wait for stdout EOF (a grandchild may hold the pipe). */
 const STDOUT_DRAIN_GRACE_MS = 250;
 const PROBE_TIMEOUT_MS = 10_000;
-/** A Claude-side mode that would skip our broker: the run is killed (D4 version-skew defence). */
-const BYPASS_MODES: ReadonlySet<string> = new Set([
-  "bypassPermissions",
-  "dontAsk",
-  "acceptEdits",
-  "auto",
-]);
+/**
+ * The ONLY init permission mode a run may proceed in (D4 version-skew defence):
+ * an ALLOWLIST, so a missing, renamed or future mode is refused, never assumed
+ * safe. `default` = every decision reaches us through the permission prompt.
+ */
+const SAFE_MODES: ReadonlySet<string> = new Set(["default"]);
+/** What may arrive before a checked init: nothing that runs a tool or the model's output. */
+const BEFORE_INIT: ReadonlySet<HarnessEvent["kind"]> = new Set(["end", "quota"]);
 
 /** A run that ended without a result (crash, kill, failed init check). */
 export class HarnessFailure extends Error {
@@ -123,7 +125,14 @@ export interface ProcessAdapterDeps {
   readonly caps: HarnessCaps;
   readonly groups: ProcessGroups;
   readonly spawner?: Spawner;
+  /**
+   * Explicit vars laid over the scrubbed host env, NOT scrubbed (an opt-in, the
+   * shell's `options.env` policy). The host env itself never reaches the child
+   * unscrubbed: its keys/tokens would be one `env` away from Claude's context.
+   */
   readonly env?: Record<string, string | undefined>;
+  /** The host env the child's is built from (default `process.env`; a test seam). */
+  readonly hostEnv?: Readonly<Record<string, string | undefined>>;
   /** What the codec runs with when `spec.tools` is absent (checked against `init.tools`). */
   readonly defaultTools?: readonly string[];
   readonly lineCap?: number;
@@ -188,12 +197,21 @@ export function createProcessAdapter(deps: ProcessAdapterDeps): HarnessAdapter {
   const lineCap = deps.lineCap ?? HARNESS_LINE_CAP;
   const interruptGraceMs = deps.interruptGraceMs ?? HARNESS_INTERRUPT_GRACE_MS;
   const killGraceMs = deps.killGraceMs ?? HARNESS_KILL_GRACE_MS;
+  // Built per spawn (the host env is live): always an explicit env, so `Bun.spawn`
+  // never falls back to inheriting tentacle's own (exec/host-execution.ts policy).
+  const childEnv = (): Record<string, string> => {
+    const env = scrubSensitiveEnv(deps.hostEnv ?? process.env);
+    for (const [key, value] of Object.entries(deps.env ?? {})) {
+      if (value !== undefined) env[key] = value;
+    }
+    return env;
+  };
 
   const probe = async (signal: AbortSignal): Promise<HarnessProbe> => {
     const floor = deps.codec().versionFloor;
     let proc: HarnessProc;
     try {
-      proc = spawner([deps.command, "--version"], { env: deps.env });
+      proc = spawner([deps.command, "--version"], { env: childEnv() });
     } catch (err) {
       return {
         ok: false,
@@ -238,7 +256,7 @@ export function createProcessAdapter(deps: ProcessAdapterDeps): HarnessAdapter {
     if (signal.aborted) throw new Error("aborted before start");
     const codec = deps.codec();
     const argv = codec.argv(spec); // throws on a spec the codec refuses: before any spawn
-    const proc = spawner([deps.command, ...argv], { cwd: spec.cwd, env: deps.env });
+    const proc = spawner([deps.command, ...argv], { cwd: spec.cwd, env: childEnv() });
     const pgid = proc.pid;
     deps.groups.track(pgid);
 
@@ -295,19 +313,29 @@ export function createProcessAdapter(deps: ProcessAdapterDeps): HarnessAdapter {
       }
     };
 
+    // Fails CLOSED: nothing but `end`/`quota` before a checked init, and the init
+    // must PROVE the run is safe (allowlisted mode, the tool list when we set one).
+    let initChecked = false;
     const checkInit = (event: HarnessEvent): string | undefined => {
-      if (event.kind !== "started") return undefined;
-      const { permissionMode, tools, version } = event.detail;
-      if (permissionMode !== undefined && BYPASS_MODES.has(permissionMode)) {
-        return `init permissionMode "${permissionMode}" would bypass the broker`;
+      if (event.kind !== "started") {
+        return initChecked || BEFORE_INIT.has(event.kind)
+          ? undefined
+          : `"${event.kind}" before a checked init`;
       }
-      if (allowedTools && tools) {
+      const { permissionMode, tools, version } = event.detail;
+      if (permissionMode === undefined) return "init gave no permissionMode";
+      if (!SAFE_MODES.has(permissionMode)) {
+        return `init permissionMode "${permissionMode}" is not "default": it could bypass the broker`;
+      }
+      if (allowedTools) {
+        if (!tools) return "init does not list its tools";
         const extra = tools.filter((t) => !allowedTools.includes(t));
         if (extra.length > 0) return `init lists tools we did not allow: ${extra.join(", ")}`;
       }
       if (version !== undefined && !versionAtLeast(version, codec.versionFloor)) {
         return `version ${version} is older than ${codec.versionFloor}`;
       }
+      initChecked = true;
       return undefined;
     };
 

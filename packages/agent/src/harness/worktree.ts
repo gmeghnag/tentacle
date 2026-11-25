@@ -55,6 +55,11 @@ export type WorktreeOutcome =
   | { readonly changed: false }
   | {
       readonly changed: true;
+      /**
+       * The run's changes are a commit on `branch` (over the baseline). `false`:
+       * they are only in the worktree at `path` — the branch tip is the baseline.
+       */
+      readonly committed: boolean;
       readonly branch: string;
       readonly path: string;
       readonly diffstat: string;
@@ -168,7 +173,8 @@ export async function createSnapshotWorktree(
 
 /**
  * End of a run: no change since the baseline → remove worktree + branch; a
- * change → keep both and return the diffstat (never merged by us).
+ * change → commit it on the branch, keep both and return the diffstat (never
+ * merged by us). A failed commit keeps the worktree and says so (`committed`).
  */
 export async function finishWorktree(
   wt: SnapshotWorktree,
@@ -182,9 +188,21 @@ export async function finishWorktree(
       await removeWorktree(wt, deps);
       return { changed: false };
     }
-    return { changed: true, branch: wt.branch, path: wt.path, diffstat: stat };
+    // Commit it, so the kept branch holds the work (the baseline is its parent).
+    const commit = await git(
+      [...IDENTITY, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", `harness run ${wt.id}`],
+      { cwd: wt.path },
+    ).catch(() => undefined);
+    const committed = commit !== undefined && commit.code === 0;
+    return { changed: true, committed, branch: wt.branch, path: wt.path, diffstat: stat };
   } catch {
     // Cannot tell: keep everything rather than lose the run's work.
-    return { changed: true, branch: wt.branch, path: wt.path, diffstat: "(diffstat unavailable)" };
+    return {
+      changed: true,
+      committed: false,
+      branch: wt.branch,
+      path: wt.path,
+      diffstat: "(diffstat unavailable)",
+    };
   }
 }

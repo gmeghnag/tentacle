@@ -263,13 +263,30 @@ describe("a claude child on the sub-agent seam", () => {
     const { spawner } = fakeSpawner(happy);
     const { wt } = fakeWorktrees({
       changed: true,
+      committed: true,
       branch: "harness/r1",
       path: "/repo/.tentacle/worktrees/harness-r1",
       diffstat: " a.ts | 2 +-",
     });
     const result = await build(spawner, wt).run(OPTS);
-    expect(result.report).toContain("Changes kept on branch `harness/r1`");
+    expect(result.report).toContain("Changes committed on branch `harness/r1`");
     expect(result.report).toContain(" a.ts | 2 +-");
+  });
+
+  test("an uncommitted change is reported as in the worktree, never as on the branch", async () => {
+    const { spawner } = fakeSpawner(happy);
+    const { wt } = fakeWorktrees({
+      changed: true,
+      committed: false,
+      branch: "harness/r1",
+      path: "/repo/.tentacle/worktrees/harness-r1",
+      diffstat: " a.ts | 2 +-",
+    });
+    const result = await build(spawner, wt).run(OPTS);
+    expect(result.report).not.toContain("on branch");
+    expect(result.report).toContain(
+      "Changes left uncommitted in the worktree at /repo/.tentacle/worktrees/harness-r1",
+    );
   });
 
   test("a snapshot that cannot be made refuses the run before spawn", async () => {
