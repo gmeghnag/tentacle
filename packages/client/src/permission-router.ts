@@ -67,6 +67,18 @@ export type RouterAction =
        * surface's OWN label: `otherDevicesAsked` drops it.
        */
       readonly askedOn?: readonly string[];
+      /**
+       * The workflow step / run / schedule approval it belongs to (the update's
+       * `workflow`). Display only, bounded and sanitized here (a pod could forge
+       * it); `askOrigin` turns it into the label.
+       */
+      readonly workflow?: {
+        readonly name: string;
+        readonly runId?: string;
+        readonly stepId?: string;
+        readonly index?: number;
+        readonly count?: number;
+      };
     }
   | { readonly kind: "abort"; readonly sessionId: string; readonly requestId: string }
   | {
@@ -413,6 +425,8 @@ export class PermissionRouter {
       return [];
     }
     this.current = entry;
+    // Only a permission request carries a workflow (a remote question has none).
+    const workflow = entry.update.type === "permission_request" ? entry.update.workflow : undefined;
     return [
       {
         kind: "prompt",
@@ -429,6 +443,18 @@ export class PermissionRouter {
                 ...(entry.update.agent.id !== undefined
                   ? { id: progressText(entry.update.agent.id) }
                   : {}),
+              },
+            }
+          : {}),
+        ...(workflow
+          ? {
+              workflow: {
+                name: progressText(workflow.name),
+                ...(workflow.runId !== undefined ? { runId: progressText(workflow.runId) } : {}),
+                ...(workflow.stepId !== undefined ? { stepId: progressText(workflow.stepId) } : {}),
+                // A pod's number: only finite ones go on (the wire may not bound them).
+                ...(Number.isFinite(workflow.index) ? { index: workflow.index } : {}),
+                ...(Number.isFinite(workflow.count) ? { count: workflow.count } : {}),
               },
             }
           : {}),

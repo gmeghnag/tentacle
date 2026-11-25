@@ -315,6 +315,110 @@ describe("ask ↔ step pairing and the answer", () => {
   });
 });
 
+describe("S8 — pairing by the structured origin, and the slim bar", () => {
+  const wf = (runId: string | null, stepId: string | null) => ({
+    kind: "workflow" as const,
+    name: "wf",
+    runId,
+    stepId,
+    position: null,
+  });
+  const ask = (requestId: string, origin?: CardAsk["origin"], agentId?: string): CardAsk => ({
+    requestId,
+    title: "Approve",
+    detail: "x",
+    ...(origin === undefined ? {} : { origin }),
+    ...(agentId === undefined ? {} : { agent: { id: agentId } }),
+  });
+
+  test("an ask pairs with its step by origin.runId/stepId, not by the agent id", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    // The agent id is MISLEADING on purpose: only the origin may decide.
+    h.ask(ask("a1", wf("wf-1", "merge"), "wf-9.build"));
+    expect(h.controller.state().steps.find((s) => s.step.id === "merge")?.ask?.requestId).toBe(
+      "a1",
+    );
+    expect(h.controller.state().steps.find((s) => s.step.id === "build")?.ask).toBeNull();
+  });
+
+  test("another run's origin never pairs, even when the agent id says it is ours", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask(ask("a2", wf("wf-2", "merge"), "wf-1.merge"));
+    expect(h.controller.state().steps.every((s) => s.ask === null)).toBe(true);
+    expect(h.controller.state().runAsk).toBeNull();
+  });
+
+  test("the run's own approval is origin {runId, stepId: null}", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask(ask("a3", wf("wf-1", null)));
+    expect(h.controller.state().runAsk?.requestId).toBe("a3");
+  });
+
+  test("an origin with no run id falls back to the agent id (older daemon)", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask(ask("a4", wf(null, "merge"), "wf-1.merge"));
+    expect(h.controller.state().steps.find((s) => s.step.id === "merge")?.ask?.requestId).toBe(
+      "a4",
+    );
+  });
+
+  test("a foreign ask (main agent, another run) is a slim `foreign` bar, never answerable here", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask(ask("a5", { kind: "main" }));
+    const bar = h.controller.state().askBar;
+    expect(bar?.kind).toBe("foreign");
+    h.controller.answer(null, "allow_once");
+    h.controller.answer("merge", "allow_once");
+    expect(h.answered).toEqual([]);
+  });
+
+  test("askSourceFromSheet carries the origin and the sheet's unpark (the slim row's tap)", () => {
+    let unparked = 0;
+    const origin = wf("wf-1", "merge");
+    const src = askSourceFromSheet({
+      view: () =>
+        ({
+          kind: "asking",
+          requestId: "r1",
+          request: { title: "T", detail: "D" },
+          agentId: null,
+          origin,
+        }) as unknown as SheetState,
+      answerFor: () => "ignored",
+      subscribe: () => () => {},
+      unpark: () => {
+        unparked += 1;
+      },
+    });
+    expect(src.current()?.origin).toEqual(origin);
+    src.unpark?.();
+    expect(unparked).toBe(1);
+  });
+
+  test("canAnswer=false: the bar sends to the session (`open-session`)", async () => {
+    const h = harness({ asks: false });
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    expect(h.controller.state().askBar?.kind).toBe("open-session");
+  });
+});
+
 describe("askSourceFromSheet: the session's ONE sheet as a card's ask source", () => {
   const asking = (over: Record<string, unknown> = {}) =>
     ({

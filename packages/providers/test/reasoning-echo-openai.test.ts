@@ -7,7 +7,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage, ChatRequest, ReasoningRecord, StreamEvent } from "@tentacle/core";
-import { OpenAIProvider } from "../src/openai-provider.ts";
+import { OpenAIProvider, echoFloor } from "../src/openai-provider.ts";
 
 function sse(deltas: Record<string, unknown>[]): string {
   const chunks = deltas.map((delta) => `data: ${JSON.stringify({ choices: [{ delta }] })}\n\n`);
@@ -48,11 +48,21 @@ function record(source: string, field: "reasoning_content" | "reasoning", text: 
   return r;
 }
 
+/**
+ * A mid-turn history: the assistant round with the reasoning is AFTER the last
+ * `user` message, so the echo is in scope (docs/fix/think-tag-leak.md: the echo
+ * covers the segment after the last user message).
+ */
 function history(reasoning?: ReasoningRecord): ChatMessage[] {
   return [
     { role: "user", content: "go" },
-    { role: "assistant", content: "", ...(reasoning ? { reasoning } : {}) },
-    { role: "user", content: "again" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "read", arguments: "{}" }],
+      ...(reasoning ? { reasoning } : {}),
+    },
+    { role: "tool", content: "done", toolCallId: "c1" },
   ];
 }
 
@@ -197,5 +207,186 @@ describe("D9 400 fallback", () => {
     const fake = endpoint(() => new Response("bad", { status: 400 }));
     await expect(events(provider(fake.fetchImpl), { messages: history() })).rejects.toThrow();
     expect(fake.bodies.length).toBe(1);
+  });
+});
+
+/**
+ * fix/think-tag-leak: echoing a FINISHED turn's reasoning back makes llama.cpp's
+ * Qwen template render that earlier answer as `think … /think answer`, and the
+ * model then repeats it with a stray `</think>` in `content` (6/12 turn-2 runs;
+ * 0/12 without the echo). The echo is therefore cut at the last `user` message
+ * that opens a turn (one after a `tool` result is mid-turn and does not count):
+ * a turn's own rounds are what fix/reasoning-echo bought, an older turn's is not.
+ */
+describe("echo scope: the current segment only", () => {
+  /** The trigger needs tools (0/32 hits without: the template's tool-mode path). */
+  const TOOLS = [{ name: "read", description: "read a file", parameters: {} }];
+
+  /** Turn 1 finished, turn 2's prompt is the last message: the repro's shape. */
+  function twoTurns(reasoning?: ReasoningRecord): ChatMessage[] {
+    return [
+      { role: "user", content: "quanto fa 17 × 23?" },
+      {
+        role: "assistant",
+        content: "No: 391 = 17 × 23, quindi è composto.",
+        ...(reasoning ? { reasoning } : {}),
+      },
+      { role: "user", content: "E 391 è primo?" },
+    ];
+  }
+
+  test("echoFloor is the last `user` message with tools offered, 0 without", () => {
+    expect(echoFloor(twoTurns(), TOOLS)).toBe(2);
+    expect(echoFloor([], TOOLS)).toBe(0);
+    expect(echoFloor([{ role: "assistant", content: "resumed" }], TOOLS)).toBe(0);
+    expect(
+      echoFloor(
+        [
+          { role: "user", content: "a" },
+          { role: "tool", content: "r" },
+        ],
+        TOOLS,
+      ),
+    ).toBe(0);
+    // No tools offered (the forced final report): the pre-fix behaviour, no cut.
+    expect(echoFloor(twoTurns(), [])).toBe(0);
+    expect(echoFloor(twoTurns())).toBe(0);
+  });
+
+  test("a finished turn's reasoning is not sent (the 6/12 repro shape)", async () => {
+    const fake = endpoint(() => ok([{ content: "x" }]));
+    const p = provider(fake.fetchImpl);
+    const h = twoTurns(record(p.id, "reasoning_content", "391 è 17 per 23, non primo"));
+    await events(p, { messages: h, tools: TOOLS });
+    const sent = fake.bodies[0]?.messages[1];
+    expect(sent?.reasoning_content).toBeUndefined();
+    expect(sent?.reasoning).toBeUndefined();
+    // Cut at SEND time only: the record is still on the message, never deleted.
+    expect(h[1]?.reasoning).toBeDefined();
+  });
+
+  test("the current turn's own rounds keep it (the F8 win)", async () => {
+    // Turn 1's round carries reasoning too, and must not leak to the wire.
+    const fake = endpoint(() => ok([{ content: "x" }]));
+    const p = provider(fake.fetchImpl);
+    const r = record(p.id, "reasoning_content", "mine");
+    await events(p, {
+      messages: [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "", reasoning: r },
+        { role: "user", content: "second" },
+        { role: "assistant", content: "", reasoning: r },
+        { role: "tool", content: "r", toolCallId: "c1" },
+      ],
+      tools: TOOLS,
+    });
+    const wire = fake.bodies[0]?.messages ?? [];
+    expect(wire[1]?.reasoning_content).toBeUndefined();
+    expect(wire[3]?.reasoning_content).toBe("mine");
+  });
+
+  test("a steer after a tool result does not move the floor (mid-turn by construction)", async () => {
+    // agent.ts pushes a steer as a bare `user` message; after a `tool` result it
+    // can only be mid-turn (a turn opens after an assistant answer), so the
+    // turn's earlier rounds stay echoed, and so do the rounds after it.
+    const fake = endpoint(() => ok([{ content: "x" }]));
+    const p = provider(fake.fetchImpl);
+    const r = record(p.id, "reasoning_content", "mine");
+    await events(p, {
+      messages: [
+        { role: "user", content: "go" },
+        { role: "assistant", content: "", reasoning: r },
+        { role: "tool", content: "r", toolCallId: "c1" },
+        { role: "user", content: "steer: anche il 3" },
+        { role: "assistant", content: "", reasoning: r },
+        { role: "tool", content: "r", toolCallId: "c2" },
+      ],
+      tools: TOOLS,
+    });
+    const wire = fake.bodies[0]?.messages ?? [];
+    expect(wire[1]?.reasoning_content).toBe("mine");
+    expect(wire[4]?.reasoning_content).toBe("mine");
+  });
+
+  test("a live workflow's status line at the tail keeps the turn's echo (review r1)", async () => {
+    // `withStatusLine` (agent context-awareness.ts) appends a wire-only `user`
+    // line after the last `tool` result on EVERY request while a workflow runs:
+    // it must not cut the current turn's rounds, nor disarm the D9 retry.
+    const fake = endpoint(() => ok([{ content: "x" }]));
+    const p = provider(fake.fetchImpl);
+    const r = record(p.id, "reasoning_content", "mine");
+    const old = record(p.id, "reasoning_content", "old");
+    const h: ChatMessage[] = [
+      { role: "user", content: "prima" },
+      { role: "assistant", content: "fatto", reasoning: old },
+      { role: "user", content: "go" },
+      { role: "assistant", content: "", reasoning: r },
+      { role: "tool", content: "r", toolCallId: "c1" },
+      {
+        role: "user",
+        content: "[workflow wf-1 deploy v1: step 1/3 build running · 0/3 ok · 1k tok]",
+      },
+    ];
+    expect(echoFloor(h, TOOLS)).toBe(2);
+    await events(p, { messages: h, tools: TOOLS });
+    const wire = fake.bodies[0]?.messages ?? [];
+    expect(wire[1]?.reasoning_content).toBeUndefined();
+    expect(wire[3]?.reasoning_content).toBe("mine");
+  });
+
+  test("loop notes after a status line or steer stay mid-turn (consecutive `user` run)", () => {
+    const h: ChatMessage[] = [
+      { role: "user", content: "go" },
+      { role: "assistant", content: "" },
+      { role: "tool", content: "r", toolCallId: "c1" },
+      { role: "user", content: "steer" },
+      { role: "user", content: "[workflow status]" },
+    ];
+    expect(echoFloor(h, TOOLS)).toBe(0);
+  });
+
+  test("residual (accepted): a prompt after a turn CANCELLED mid-tool reads as mid-turn", () => {
+    // No marker tells a new prompt after a cancelled tool round from a steer:
+    // both follow a `tool` result. The cancelled turn's rounds are then echoed
+    // for the next turn only (its answer resets the floor). Pinned so a change
+    // here is a decision, not an accident.
+    const h: ChatMessage[] = [
+      { role: "user", content: "t1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "t2 (cancelled)" },
+      { role: "assistant", content: "" },
+      { role: "tool", content: "cancelled", toolCallId: "c1" },
+      { role: "user", content: "t3" },
+    ];
+    expect(echoFloor(h, TOOLS)).toBe(2);
+  });
+
+  test("only an earlier turn's reasoning arms no echo retry", async () => {
+    // The `echoing` pre-scan must use the same cut, or a 400 retry stays armed
+    // with nothing to drop (D9's latch would then be decided by a smaller body).
+    const fake = endpoint(() => new Response("bad", { status: 400 }));
+    const p = provider(fake.fetchImpl);
+    const h = twoTurns(record(p.id, "reasoning_content", "old"));
+    await expect(events(p, { messages: h, tools: TOOLS })).rejects.toThrow();
+    expect(fake.bodies.length).toBe(1);
+  });
+
+  test("a no-tools request keeps the echo unchanged (the forced final report)", async () => {
+    // The report request appends a tentacle-written `user` nudge and offers no
+    // tools, so the cut must not land on it: the turn's rounds stay echoed.
+    const fake = endpoint(() => ok([{ content: "x" }]));
+    const p = provider(fake.fetchImpl);
+    const h = [
+      { role: "user" as const, content: "go" },
+      {
+        role: "assistant" as const,
+        content: "",
+        reasoning: record(p.id, "reasoning_content", "m"),
+      },
+      { role: "tool" as const, content: "r", toolCallId: "c1" },
+      { role: "user" as const, content: "You've reached the step limit." },
+    ];
+    await events(p, { messages: h });
+    expect(fake.bodies[0]?.messages[1]?.reasoning_content).toBe("m");
   });
 });

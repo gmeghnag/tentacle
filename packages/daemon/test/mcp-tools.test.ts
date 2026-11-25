@@ -84,7 +84,7 @@ afterEach(() => {
   for (const c of cleanups.splice(0)) c();
 });
 
-function rig(rounds: Round[], opts: { detachAfterMs?: number } = {}) {
+function rig(rounds: Round[], opts: { detachAfterMs?: number; audit?: string[] } = {}) {
   const model = new Scripted(rounds);
   const ran: string[] = [];
   /** `gate` blocks until the test opens it: a turn held at a round boundary. */
@@ -123,6 +123,7 @@ function rig(rounds: Round[], opts: { detachAfterMs?: number } = {}) {
     host,
     version: "0.0.1",
     ...(opts.detachAfterMs !== undefined ? { detachAfterMs: opts.detachAfterMs } : {}),
+    ...(opts.audit !== undefined ? { onAudit: (l: string) => opts.audit?.push(l) } : {}),
   });
   cleanups.push(() => tools.dispose());
   return { host, tools, model, ran, openGate: () => open() };
@@ -516,12 +517,55 @@ describe("mcp http route — /mcp on the external entry", () => {
       expect(res.status).toBe(401);
       expect(res.headers.get("www-authenticate")).toBe("Bearer");
     }
-    expect(audit.filter((l) => l === "mcp-auth-failure")).toHaveLength(3);
+    const failures = audit.filter((l) => l.startsWith("mcp-auth-failure"));
+    expect(failures).toHaveLength(3);
+    // The rejected peer is named (address + UA) and the token never is; the tokens
+    // WERE presented, so this also proves the audit sink is wired (§9).
+    for (const line of failures) {
+      expect(line).toMatch(/^mcp-auth-failure at (127\.0\.0\.1|::1|::ffff:127\.0\.0\.1) ua "/);
+    }
+    const refused = audit.find((l) => l.startsWith("mcp-origin-refused"));
+    expect(refused).toMatch(/^mcp-origin-refused at (127\.0\.0\.1|::1|::ffff:127\.0\.0\.1) ua "/);
+    for (const line of audit) {
+      for (const secret of ["nope", MCP_TOKEN, WS_TOKEN, "Bearer"]) {
+        expect(line).not.toContain(secret);
+      }
+    }
     expect((await fetch(`${base}${MCP_PATH}`)).status).toBe(405);
     // The MCP token is not the WebSocket token: the plain route still says 401.
     const ws = await fetch(`${base}/`, { headers: { authorization: `Bearer ${MCP_TOKEN}` } });
     expect(ws.status).toBe(401);
     expect((await post(base, "x".repeat(1024 * 1024 + 1))).status).toBe(413);
+  });
+
+  // A serve with NO MCP token produces the plain route's own line for a probe of
+  // `/mcp` — the other half of the observed evidence. Mutation: drop the peer from
+  // ws-server's `auth-failure` → the prefix assertions still pass (they are the
+  // property project-pairing.test.ts relies on) and the peer ones go red.
+  test("no MCP token: the plain route's auth-failure names the peer, after the path", async () => {
+    const r = rig([]);
+    const audit: string[] = [];
+    const server = startWsServer({
+      host: "127.0.0.1",
+      port: 0,
+      sessionHost: r.host,
+      token: WS_TOKEN,
+      onAudit: (line) => audit.push(line),
+    });
+    cleanups.push(() => server.stop());
+    const base = new URL(server.url.replace(/^ws/, "http")).origin;
+    const res = await fetch(`${base}${MCP_PATH}`, {
+      method: "POST",
+      body: rpc("ping"),
+      headers: { authorization: "Bearer nope", "user-agent": "probe/9" },
+    });
+    expect(res.status).toBe(401);
+    await until(() => audit.some((l) => l.startsWith("auth-failure /mcp")));
+    const line = audit.find((l) => l.startsWith("auth-failure /mcp")) ?? "";
+    expect(line).toMatch(
+      /^auth-failure \/mcp at (127\.0\.0\.1|::1|::ffff:127\.0\.0\.1) ua "probe\/9"$/,
+    );
+    expect(line).not.toContain("nope");
   });
 
   test("legacy initialize, notification 202, tools/list, modern discover, bad params", async () => {
@@ -632,5 +676,184 @@ describe("mcp http route — /mcp on the external entry", () => {
     }, 5000);
     expect((await statusOf(r.tools, sessionId)).state).toBe("waiting");
     expect(r.tools.attachedSessionIds()).toEqual([sessionId]);
+  });
+});
+
+describe("mcp session_start replay — one retried start, one session", () => {
+  /** One `tools/call session_start` over HTTP; the raw JSON-RPC reply. */
+  const startCall = async (
+    base: string,
+    args: Record<string, unknown>,
+  ): Promise<{ result?: CallToolResult; error?: { code: number; message: string } }> =>
+    (await post(base, rpc("tools/call", { name: "session_start", arguments: args })).then((x) =>
+      x.json(),
+    )) as { result?: CallToolResult; error?: { code: number; message: string } };
+
+  const ids = (res: { result?: CallToolResult }) => ({
+    sessionId: String(res.result?.structuredContent?.sessionId),
+    turnId: String(res.result?.structuredContent?.turnId),
+  });
+
+  // The observed 2026-11-25 duplicate: Claude Code retried ONE start (no `key`,
+  // 3 s apart) and got two sessions. Mutation: mint a session per call (no memo)
+  // → two ids, two sessions, no audit line → red.
+  test("no key: the same prompt inside the window returns the same session and turn", async () => {
+    const audit: string[] = [];
+    const r = rig([[text("answer")], [text("second")]], { audit });
+    const base = serve(r);
+    const first = await startCall(base, { prompt: "Prova MCP 2", title: "t" });
+    const again = await startCall(base, { prompt: "Prova MCP 2", title: "t" });
+    expect(ids(again)).toEqual(ids(first));
+    expect(r.tools.attachedSessionIds()).toEqual([ids(first).sessionId]);
+    expect(audit.filter((l) => l.startsWith("mcp-start-replayed "))).toEqual([
+      `mcp-start-replayed ${ids(first).sessionId}`,
+    ]);
+    const listed = ok(await r.tools.call("default", "session_list", {}));
+    expect((listed.sessions as { sessionId: string }[]).map((s) => s.sessionId)).toEqual([
+      ids(first).sessionId,
+    ]);
+    // One turn ran, never two.
+    expect(r.model.users).toHaveLength(1);
+  });
+
+  // Non-vacuity of the replay: it is not a global dedupe. Mutation: key on the
+  // caller only → the second, different prompt is swallowed → red.
+  test("two different prompts are two sessions", async () => {
+    const r = rig([[text("a")], [text("b")]]);
+    const base = serve(r);
+    const one = await startCall(base, { prompt: "one" });
+    const two = await startCall(base, { prompt: "two" });
+    expect(ids(two).sessionId).not.toBe(ids(one).sessionId);
+    expect(r.host.size).toBe(2);
+  });
+
+  // Mutation: ignore the arguments on a memo hit → the wrong prompt runs silently → red.
+  test("same key, different arguments: -32602 and nothing opened", async () => {
+    const r = rig([[text("a")]]);
+    const base = serve(r);
+    await startCall(base, { prompt: "one", key: "k1" });
+    const clash = await startCall(base, { prompt: "two", key: "k1" });
+    expect(clash.error?.code).toBe(-32602);
+    expect(clash.error?.message).toContain("key reused with different arguments");
+    expect(r.host.size).toBe(1);
+    // The same key with the same arguments is still a replay.
+    const replay = await startCall(base, { prompt: "one", key: "k1" });
+    expect(ids(replay).turnId).toBe(
+      ids(await startCall(base, { prompt: "one", key: "k1" })).turnId,
+    );
+  });
+
+  // The `:992` hole for identical args: both calls are in flight at once.
+  // Mutation: look the map up before creating the memo (two attaches) → red.
+  test("two identical calls awaited together: one session, both answered", async () => {
+    const audit: string[] = [];
+    const r = rig([[text("answer")]], { audit });
+    const base = serve(r);
+    const [a, b] = await Promise.all([
+      startCall(base, { prompt: "same" }),
+      startCall(base, { prompt: "same" }),
+    ]);
+    expect(ids(b)).toEqual(ids(a));
+    expect(r.host.size).toBe(1);
+    expect(audit.filter((l) => l.startsWith("mcp-start-replayed "))).toHaveLength(1);
+    expect(r.model.users).toHaveLength(1);
+  });
+
+  // A distinct explicit key is the documented escape hatch (D3).
+  test("two distinct keys: two sessions for the same prompt", async () => {
+    const r = rig([[text("a")], [text("b")]]);
+    const base = serve(r);
+    const one = await startCall(base, { prompt: "same", key: "k1" });
+    const two = await startCall(base, { prompt: "same", key: "k2" });
+    expect(ids(two).sessionId).not.toBe(ids(one).sessionId);
+    expect(r.host.size).toBe(2);
+  });
+
+  // The `:992` race for identical args, made deterministic: the FIRST call is held
+  // inside `start` (its `session/prompt` parked) while the second one arrives, so
+  // the memo — and its single-flight promise — must already be there for the second
+  // to wait on. Mutation: move `this.starts.set(...)` after `await this.prompt(...)`
+  // → the second call opens its own session and both run → red.
+  test("two identical calls interleaved: the second waits on the first, one session", async () => {
+    const audit: string[] = [];
+    const r = rig([[text("answer")]], { audit });
+    // The two awaits inside `start`: `session/open` = a session is being opened,
+    // `session/prompt` = the call got as far as sending its prompt.
+    const opens: string[] = [];
+    let prompts = 0;
+    let release = () => {};
+    const held = new Promise<void>((res) => {
+      release = res;
+    });
+    const original = RpcPeer.prototype.request;
+    RpcPeer.prototype.request = function (this: RpcPeer, method: string, ...rest: unknown[]) {
+      const pending = (original as (...a: unknown[]) => Promise<unknown>).call(
+        this,
+        method,
+        ...rest,
+      );
+      if (method === "session/open") opens.push(method);
+      if (method === "session/prompt") {
+        prompts += 1;
+        // Only the FIRST prompt is held; a second can exist only if the race re-opened.
+        if (prompts === 1) return held.then(() => pending);
+      }
+      return pending;
+    } as typeof original;
+    cleanups.push(() => {
+      RpcPeer.prototype.request = original;
+      release();
+    });
+    const first = r.tools.call("default", "session_start", { prompt: "same" });
+    await until(() => prompts === 1);
+    const second = r.tools.call("default", "session_start", { prompt: "same" });
+    // Settle once the second call is provably INSIDE `start`: it hit the memo (its
+    // replay audit) — or, mutated, opened a session of its own.
+    await until(() => audit.some((l) => l.startsWith("mcp-start-replayed ")) || opens.length === 2);
+    expect(opens).toHaveLength(1);
+    release();
+    const [a, b] = [ok(await first), ok(await second)];
+    expect(String(b.sessionId)).toBe(String(a.sessionId));
+    expect(String(b.turnId)).toBe(String(a.turnId));
+    expect(r.host.size).toBe(1);
+    expect(r.model.users).toHaveLength(1);
+  });
+
+  // No caller may replay or hijack another's start: the caller is IN the key, in
+  // both namespaces. Mutation: drop `${caller}` from the `k\0` form → Bob is
+  // answered with Alice's ids (and silently gets no session) → red; the same
+  // mutation on the `r\0` form → the no-key assertions go red.
+  test("the replay key is per caller: the same prompt and key are the other caller's own", async () => {
+    const audit: string[] = [];
+    const r = rig([[text("a")], [text("b")], [text("c")], [text("d")]], { audit });
+    const alice = ok(await r.tools.call("alice", "session_start", { prompt: "same", key: "k1" }));
+    const bob = ok(await r.tools.call("bob", "session_start", { prompt: "same", key: "k1" }));
+    expect(String(bob.sessionId)).not.toBe(String(alice.sessionId));
+    expect(String(alice.sessionId)).toMatch(/^mcp-alice-/);
+    expect(String(bob.sessionId)).toMatch(/^mcp-bob-/);
+    // The no-key (implicit) namespace is per caller too.
+    const aliceImplicit = ok(await r.tools.call("alice", "session_start", { prompt: "plain" }));
+    const bobImplicit = ok(await r.tools.call("bob", "session_start", { prompt: "plain" }));
+    expect(String(bobImplicit.sessionId)).not.toBe(String(aliceImplicit.sessionId));
+    expect(r.host.size).toBe(4);
+    expect(audit.filter((l) => l.startsWith("mcp-start-replayed "))).toHaveLength(0);
+  });
+
+  // A refusal is not a replay: the memo is dropped, so a retry really retries.
+  // Mutation: keep the memo after a refusal → the retry is answered as a replay
+  // (the audit line appears) → red.
+  test("a refused start leaves no memo: the retry is not answered as a replay", async () => {
+    const audit: string[] = [];
+    const r = rig(Array<Round>(MCP_MAX_LIVE_SESSIONS).fill("hang"), { audit });
+    const base = serve(r);
+    for (let i = 0; i < MCP_MAX_LIVE_SESSIONS; i++) {
+      await startCall(base, { prompt: `h${i}` });
+    }
+    const refused = await startCall(base, { prompt: "boom" });
+    expect(refused.result?.isError).toBe(true);
+    const retry = await startCall(base, { prompt: "boom" });
+    expect(retry.result?.isError).toBe(true);
+    expect(audit.filter((l) => l.startsWith("mcp-start-replayed "))).toHaveLength(0);
+    expect(r.host.size).toBe(MCP_MAX_LIVE_SESSIONS);
   });
 });

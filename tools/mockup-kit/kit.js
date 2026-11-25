@@ -223,6 +223,17 @@ const ICON = {
   "arrow.up": (w) => `<path d="M10 17V3.4M4.2 9.2 10 3.4l5.8 5.8" stroke-width="${w}"/>`,
   clock: (w) =>
     `<circle cx="10" cy="10" r="7.8" stroke-width="${w}"/><path d="M10 5.4V10l3 2" stroke-width="${w}"/>`,
+  // The ask's origin and action symbols (`ui/AskCard.tsx`, `ui/AskSlim.tsx`).
+  "arrow.triangle.branch": (w) =>
+    `<path d="M5 3v11.2M5 14.2h1.6M5 14.2H3.4M5 9.6c0-2.3 1.8-3.6 4-3.6h3.4M12 3.2 14.6 6h-2.6z" stroke-width="${w}"/>`,
+  "point.topleft.down.to.point.bottomright.curvepath": (w) =>
+    `<rect x="1.8" y="3.4" width="3.2" height="3.2" rx="0.7" stroke-width="${w}"/><rect x="15" y="13.4" width="3.2" height="3.2" rx="0.7" stroke-width="${w}"/><path d="M3.4 6.6v3.6c0 2.4 2.4 3.4 5.2 3.4 2.6 0 4.6-.8 5.7-2.4" stroke-width="${w}"/>`,
+  "hand.raised": (w) =>
+    `<path d="M6.4 16.6c-1.9 0-3.1-1.3-3.1-3.1V9.2c0-.6.4-1 .9-1s.9.4.9 1v1.3M8.2 10.5V4.3c0-.6.4-1 .9-1s.9.4.9 1v6.2M10 10.9V3.3c0-.6.4-1 .9-1s.9.4.9 1v7.6M11.8 10.9V5.3c0-.6.4-1 .9-1s.9.4.9 1v7.5c0 1.9-1.5 3.3-3.4 3.3H9.2" stroke-width="${w}"/>`,
+  "chevron.up": (w) => `<path d="M4.6 12.4 10 7l5.4 5.4" stroke-width="${w}"/>`,
+  // Three filled dots: the dots are the shape, so no stroke weight applies.
+  ellipsis: () =>
+    `<circle cx="4.4" cy="10" r="1.15" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="1.15" fill="currentColor" stroke="none"/><circle cx="15.6" cy="10" r="1.15" fill="currentColor" stroke="none"/>`,
 };
 const WEIGHT = { light: 1.15, regular: 1.5, bold: 2.3 };
 /** An SF Symbol (`Icon.tsx`): `name`, point `size`, `weight` ∈ light | regular | bold. */
@@ -316,34 +327,168 @@ function permOptions(options) {
         throw new Error(
           "K.permissionSheet: options must be a non-empty array of {label, primary?}",
         );
-      return `<div class="k-perm-pill"${o.primary ? " data-primary" : ""}>${esc(o.label)}</div>`;
+      return `<span class="k-ask-b"${o.primary ? " data-primary" : ""}>${esc(o.label)}</span>`;
     })
     .join("");
 }
 
 /**
- * The approval sheet (`PermissionSheet`): tool, its detail (or a diff), the
- * options. `options` is a parameter because the answers are not always the
- * permission ones: `workflow_approve` offers allow-once / deny only.
+ * THE ask's origin row (docs/fix/mobile-ask-surfaces.md D4): the glyph comes
+ * from the origin's KIND, never from its words — a workflow named «Main agent»
+ * still draws the curve path. The words are pod-supplied text, escaped.
+ */
+const ASK_KINDS = ["main", "subagent", "workflow"];
+/** The origin glyph's point size (the app's `AskCard` origin row). */
+const ASK_GLYPH_PT = 17;
+/** The collapsed command's visual rows (`PREVIEW_ROWS` in `command-preview.ts`). */
+const ASK_PREVIEW_ROWS = 4;
+
+/**
+ * Polpetto's 9×9 silhouette, the app's own mask (`polpetto-glyph.ts`), as
+ * horizontal runs per row: ~20 `<i>`s, not 81.
+ */
+function polpettoGlyph(size) {
+  const unit = size / 9;
+  const rows = vm.polpettoMask
+    .map((row, y) => {
+      const runs = [];
+      for (let x = 0; x < row.length; x += 1) {
+        if (!row[x]) continue;
+        let w = 1;
+        while (row[x + w]) w += 1;
+        runs.push(
+          `<i style="left:${(x * unit).toFixed(2)}pt;top:${(y * unit).toFixed(2)}pt;width:${(w * unit).toFixed(2)}pt;height:${unit.toFixed(2)}pt"></i>`,
+        );
+        x += w - 1;
+      }
+      return runs.join("");
+    })
+    .join("");
+  return `<span class="k-ask-p" style="width:${size}pt;height:${size}pt" aria-hidden="true">${rows}</span>`;
+}
+
+/** The origin's glyph, chosen by KIND (`main` = Polpetto, the only non-SF one). */
+function askGlyph(kind, size = ASK_GLYPH_PT) {
+  if (kind === "main") return polpettoGlyph(size);
+  return icon(
+    kind === "subagent"
+      ? "arrow.triangle.branch"
+      : "point.topleft.down.to.point.bottomright.curvepath",
+    { size },
+  ).html;
+}
+
+function askOriginRow(origin = {}) {
+  const kind = ASK_KINDS.includes(origin.kind) ? origin.kind : "main";
+  const rest = origin.rest ? `<span class="ot"> ${esc(origin.rest)}</span>` : "";
+  const age =
+    origin.age === undefined || origin.age === ""
+      ? ""
+      : `<span class="k-ask-age">${esc(origin.age)}</span>`;
+  return `<div class="k-ask-o" data-glyph="${kind}">${askGlyph(kind)}<span class="k-ask-lead"><b>${esc(origin.lead ?? "Main agent")}</b>${rest}</span>${age}</div>`;
+}
+
+/** The command box: `rows` visual rows, the rest behind `+N lines · Show all`. */
+function askCommand(command, expanded) {
+  const lines = String(command).split("\n");
+  const shown = expanded ? lines : lines.slice(0, ASK_PREVIEW_ROWS);
+  const body = shown.map((l) => `<div class="k-ask-ln">${esc(l) || " "}</div>`).join("");
+  const foot =
+    lines.length <= ASK_PREVIEW_ROWS
+      ? ""
+      : `<div class="k-ask-ft"><span>${expanded ? `${lines.length} lines` : `+${lines.length - ASK_PREVIEW_ROWS} lines`}</span><span class="lk">${expanded ? "Show less" : "Show all"} ${icon("chevron.up", { size: 11, weight: "bold" }).html}</span></div>`;
+  return `<div class="k-ask-c"${expanded ? " data-x" : ""}><div class="bd">${body}</div>${foot}</div>`;
+}
+
+/**
+ * THE ask card (docs/fix/mobile-ask-surfaces.md D4; `ui/AskCard.tsx`): origin row,
+ * title, the four-row command, then `…  Deny  Allow once` — the actions OUTSIDE
+ * the scroll, so they stay reachable at every detent. Deny is grey (the words
+ * carry the meaning), Allow is the accent fill.
+ *
+ * `actions` replaces the default pair: `permissionSheet` passes its own answer
+ * pills, because a `workflow_approve` offers allow-once / deny only.
+ */
+export function askCard({
+  origin = {},
+  title = "Run a shell command",
+  command = "",
+  expanded = false,
+  menu = null,
+  alsoAsked = "",
+  armed = true,
+  on = "sheet",
+  actions = null,
+} = {}) {
+  const items = Array.isArray(menu) ? menu : [];
+  const more =
+    items.length > 0
+      ? `<span class="k-ask-mo" aria-label="More options">${icon("ellipsis", { size: 19 }).html}</span>`
+      : `<span class="k-ask-sp"></span>`;
+  const open =
+    items.length > 0
+      ? `<div class="k-ask-menu">${items.map((l) => `<div><span>${esc(l)}</span></div>`).join("")}</div>`
+      : "";
+  const also = alsoAsked ? `<div class="k-ask-also">${esc(alsoAsked)}</div>` : "";
+  const arming = armed ? "" : `<div class="k-ask-arming">Hold on…</div>`;
+  const answers =
+    actions ??
+    '<span class="k-ask-b">Deny</span><span class="k-ask-b" data-primary>Allow once</span>';
+  return out(
+    `<div class="k-ask" data-on="${esc(on)}">${askOriginRow(origin)}<div class="k-ask-t">${esc(title)}</div>${askCommand(command, expanded)}${also}${arming}<div class="k-ask-a">${more}${answers}</div>${open}</div>`,
+    `${origin.lead ?? "Main agent"} ${title}`,
+  );
+}
+
+/**
+ * The one-row ask (`ui/AskSlim.tsx`) — the peek detent and the banner under the
+ * header. It never draws an answer: the command is not seen from here.
+ */
+export function askSlim({ title = "Run a shell command", origin = {}, go = "Review" } = {}) {
+  const short = origin.short ?? origin.lead ?? "Main agent";
+  const more = origin.more > 0 ? ` · +${esc(origin.more)}` : "";
+  return out(
+    `<div class="k-ask-slim"><span class="hd">${icon("hand.raised", { size: 18 }).html}</span><span class="tx"><b>${esc(title)}</b><span class="k-ask-o">${esc(short)}${more}</span></span><span class="go">${esc(go)} ${icon("chevron.up", { size: 12, weight: "bold" }).html}</span></div>`,
+    `${title} — ${short}`,
+  );
+}
+
+/**
+ * The ask inside the formSheet frame (`PermissionSheet.tsx`): the grabber, the
+ * caller's content, and the dim only ABOVE the peek detent — at the peek the
+ * screen behind stays usable (`sheetLargestUndimmedDetentIndex: 0`).
+ */
+export function askSheet({ detent = "ask", inner = "" } = {}) {
+  if (!["peek", "ask", "large"].includes(detent))
+    throw new Error(`K.askSheet: unknown detent "${detent}" (peek | ask | large)`);
+  return out(
+    `<div class="k-ask-wrap"${detent === "peek" ? "" : " data-dim"}><div class="k-ask-sheet" data-detent="${detent}"><span class="k-grabber"></span>${inner}</div></div>`,
+  );
+}
+
+/**
+ * The approval sheet (`PermissionSheet`): the ask CARD inside the sheet frame —
+ * S9 realigned it to `PermissionSheet.tsx`, which draws `AskCard` at every
+ * detent above the peek. `options` stays a parameter because the answers are not
+ * always the permission ones: `workflow_approve` offers allow-once / deny only.
+ * `tool` survives as the frame's accessible name (the card has no tool row).
  */
 export function permissionSheet({
+  origin = { kind: "main", lead: "Main agent" },
   title = "Run a command?",
   tool = "shell",
   detail = "",
   diff = null,
   options = PERMISSION_OPTIONS,
 } = {}) {
-  const box = diff
-    ? stepBody({ lines: diff }).html
-    : `<div class="k-perm-detail">${esc(detail)}</div>`;
-  return sheet({
-    permission: true,
-    children: [
-      `<div class="k-perm-head"><span class="k-perm-tile">⌘</span><div><div class="k-t-headline">${esc(title)}</div><div class="k-t-footnote k-sec">${esc(tool)}</div></div></div>`,
-      box,
-      `<div class="k-perm-options">${permOptions(options)}</div>`,
-    ],
+  const card = askCard({
+    origin,
+    title,
+    command: diff ? diff.join("\n") : detail,
+    actions: permOptions(options),
   });
+  const frame = sheet({ children: [card.html] });
+  return out(frame.html, `${card.a11y} (${tool})`);
 }
 
 export const pill = ({ text, dot = false }) =>
@@ -662,6 +807,9 @@ export const K = {
   composer,
   sheet,
   permissionSheet,
+  askCard,
+  askSlim,
+  askSheet,
   pill,
   toast,
   bigButton,

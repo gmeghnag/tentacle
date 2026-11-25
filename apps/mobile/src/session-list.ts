@@ -179,6 +179,9 @@ export function reduce(state: SessionListState, action: SessionListAction): Sess
   }
 }
 
+/** `asks`/`workflows` on a list entry (mobile-ask-surfaces S7a; optional: an older daemon omits them). */
+type WithFlags = { readonly asks?: number; readonly workflows?: number };
+
 /** One row the screen renders. Strings pass through untouched (plain `Text`). */
 export interface SessionRow {
   readonly sessionId: string;
@@ -194,6 +197,9 @@ export interface SessionRow {
    * and a phone that claimed otherwise would show a wake that cannot exist here.
    */
   readonly wakes: number;
+  /** Pending asks / live workflow runs the daemon reports; 0 when absent (an older daemon). */
+  readonly asks: number;
+  readonly workflows: number;
   readonly archived: boolean;
   /** A turn runs now (the Running section, `session-groups.ts`). */
   readonly running: boolean;
@@ -281,6 +287,8 @@ export function rows(
       subtitle: relativeTime(entry.updatedAt, now),
       badges: badgesFor(entry),
       wakes: entry.schedules ?? 0,
+      asks: (entry as WithFlags).asks ?? 0,
+      workflows: (entry as WithFlags).workflows ?? 0,
       archived: entry.archived,
       running: entry.running,
       attached: entry.attached,
@@ -314,6 +322,8 @@ export function rows(
       subtitle: relativeTime(entry.updatedAt, now),
       badges: badgesFor(entry),
       wakes: entry.schedules ?? 0,
+      asks: (entry as WithFlags).asks ?? 0,
+      workflows: (entry as WithFlags).workflows ?? 0,
       archived: entry.archived,
       running: entry.running,
       attached: entry.attached,

@@ -3,8 +3,8 @@
     "apps/mobile/src/chat-header.ts": "9e509a71b3801a4486a838b353c31c96270fedcb",
     "apps/mobile/src/motion.ts": "cb710fd7643e02771a98beb41cf418b3a5364155",
     "apps/mobile/src/screens/ComputersScreen.tsx": "ac1fe5dee031bc713182ae3cee279af4ebed1daf",
-    "apps/mobile/src/screens/PermissionSheet.tsx": "d60f52ebaf0e449b4fe3d03ec404b65498b2f750",
-    "apps/mobile/src/screens/SessionsDrawer.tsx": "5cb64e4a707fb3ade80d489dc643e6bfac5cb60e",
+    "apps/mobile/src/screens/PermissionSheet.tsx": "565e96a19873db9ee89915d7666812b2d7278a1e",
+    "apps/mobile/src/screens/SessionsDrawer.tsx": "32084b81ebf112ae65e1d2c347ed4feeb04e0296",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "4acc16969f29573f6f292b0c1fdcc6ce6fa61efa",
     "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "9b699f60e963df28386e07a6dcf40811af9a8646",
     "apps/mobile/src/step-rail.ts": "83bd11f3b10e19be6edd27a835ef90252f69f46e",
@@ -12,6 +12,8 @@
     "apps/mobile/src/theme.ts": "77bfa592e2bb2bee950a9936e2ce566002976edf",
     "apps/mobile/src/thinking-motion.ts": "4fd5a2e149a69bb6c58326516420a74efc077eaa",
     "apps/mobile/src/tool-steps.ts": "3d811ceff3c4892f4f9cb43831214aeba94be1c5",
+    "apps/mobile/src/ui/AskCard.tsx": "b0d641c49ee1335ac116fd9121083eeed50b8506",
+    "apps/mobile/src/ui/AskSlim.tsx": "c0e6dcafb1866037f5afc597564affc6d628171a",
     "apps/mobile/src/ui/BandSection.tsx": "7b65870db2faa7a51663560d2641476973ed7b2a",
     "apps/mobile/src/ui/CodeBlock.tsx": "a67a398ac01da1192d82b650be380221c15806f0",
     "apps/mobile/src/ui/Composer.tsx": "e767b7545c52d0e63f729dce7f957f25ad79492b",
@@ -1636,79 +1638,126 @@
     "permission-sheet": {
       "file": "apps/mobile/src/screens/PermissionSheet.tsx",
       "styles": {
-        "autoRow": {
-          "flexDirection": "row",
-          "alignItems": "center",
-          "gap": 12,
-          "borderTopWidth": 0.3333333333333333,
-          "paddingTop": 12,
-          "marginTop": 4
-        },
         "flex": {
           "flex": 1
         },
-        "center": {
-          "textAlign": "center"
+        "pad": {
+          "paddingHorizontal": 20
         },
-        "sheet": {
+        "slim": {
+          "paddingHorizontal": 12,
+          "paddingTop": 8
+        },
+        "autoRow": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 12
+        },
+        "returned": {
           "paddingHorizontal": 20,
           "paddingTop": 16,
           "paddingBottom": 40,
           "gap": 16
         },
-        "head": {
-          "flexDirection": "row",
-          "alignItems": "center",
-          "gap": 12
-        },
-        "tile": {
-          "width": 44,
-          "height": 44,
-          "borderRadius": 12,
-          "alignItems": "center",
-          "justifyContent": "center"
-        },
         "detailBox": {
           "borderRadius": 14,
           "padding": 14
-        },
-        "options": {
-          "gap": 10
-        },
-        "pill": {
-          "minHeight": 50,
-          "borderRadius": 25,
-          "paddingHorizontal": 20,
-          "paddingVertical": 12,
-          "flexDirection": "row",
-          "alignItems": "center",
-          "justifyContent": "center",
-          "gap": 8
-        },
-        "pillLabel": {
-          "textAlign": "center",
-          "flexShrink": 1
-        },
-        "code": {
-          "fontFamily": "ui-monospace"
-        },
-        "dimmed": {
-          "opacity": 0.4
         },
         "reply": {
           "borderRadius": 14,
           "padding": 14,
           "minHeight": 96
         },
-        "later": {
-          "alignSelf": "center",
-          "paddingVertical": 10,
-          "paddingHorizontal": 16
+        "send": {
+          "minHeight": 50,
+          "borderRadius": 25,
+          "alignItems": "center",
+          "justifyContent": "center"
         }
       },
       "consts": {
-        "SHEET_OPTION_IDS": ["allow_once", "allow_always", "reject_once", "reply"]
+        "MONO_ADVANCE": 0.6,
+        "MONO_SIZE": 14,
+        "CHROME_WIDTH": 64
       }
+    },
+    "ask-card": {
+      "file": "apps/mobile/src/ui/AskCard.tsx",
+      "styles": {
+        "card": {
+          "paddingHorizontal": 20,
+          "paddingTop": 12,
+          "paddingBottom": 32,
+          "gap": 12
+        },
+        "flex": {
+          "flex": 1
+        },
+        "origin": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 8
+        },
+        "box": {
+          "borderRadius": 14,
+          "padding": 12,
+          "gap": 6
+        },
+        "boxScroll": {
+          "maxHeight": 280
+        },
+        "menu": {
+          "gap": 8
+        },
+        "menuItem": {
+          "borderRadius": 14,
+          "paddingHorizontal": 14,
+          "paddingVertical": 10
+        },
+        "actions": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 10,
+          "justifyContent": "flex-end"
+        },
+        "more": {
+          "width": 34,
+          "height": 34,
+          "borderRadius": 17,
+          "alignItems": "center",
+          "justifyContent": "center",
+          "marginRight": "auto"
+        },
+        "capsule": {
+          "minHeight": 34,
+          "borderRadius": 17,
+          "paddingHorizontal": 18,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
+        "dimmed": {
+          "opacity": 0.4
+        }
+      },
+      "consts": {}
+    },
+    "ask-slim": {
+      "file": "apps/mobile/src/ui/AskSlim.tsx",
+      "styles": {
+        "row": {
+          "flexDirection": "row",
+          "alignItems": "center",
+          "gap": 10,
+          "minHeight": 56,
+          "paddingHorizontal": 16,
+          "paddingVertical": 10,
+          "borderRadius": 14
+        },
+        "text": {
+          "flex": 1
+        }
+      },
+      "consts": {}
     },
     "computers": {
       "file": "apps/mobile/src/screens/ComputersScreen.tsx",
@@ -2611,6 +2660,17 @@
         }
       ]
     },
+    "polpettoMask": [
+      [false, false, true, true, true, true, true, false, false],
+      [false, true, true, true, true, true, true, true, false],
+      [true, true, true, true, true, true, true, true, true],
+      [true, true, false, true, true, true, false, true, true],
+      [true, true, false, true, true, true, false, true, true],
+      [true, true, true, true, true, true, true, true, true],
+      [false, true, true, true, true, true, true, true, false],
+      [true, true, true, true, true, true, true, true, true],
+      [false, true, true, false, true, false, true, true, false]
+    ],
     "tui": {
       "width": 60,
       "rows": {

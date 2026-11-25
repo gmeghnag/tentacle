@@ -67,9 +67,11 @@ export type IconName =
   | "doc.text"
   | "doc.plaintext"
   | "chart.bar.xaxis"
-  /** The hub's Workflows item (docs/fix/workflows-ux.md D6): owner, 2026-11-24. */
+  /** The hub's Workflows item (docs/fix/workflows-ux.md D6): owner, 2026-11-24. A workflow step asking, too. */
   | "point.topleft.down.to.point.bottomright.curvepath"
   | "doc"
+  /** A sub-agent asking (docs/fix/mobile-ask-surfaces.md). */
+  | "arrow.triangle.branch"
   /**
    * A workflow step's marker glyphs (docs/fix/workflows-ux.md D4, mockup
    * `markers-v2.html`): `ok` ✓, `error` ✕ (owner: `error-icon.html`), `running`
@@ -80,7 +82,8 @@ export type IconName =
   | "multiply"
   | "questionmark"
   | "play.fill"
-  | "chevron.forward.2";
+  | "chevron.forward.2"
+  | "chevron.up";
 
 export interface IconProps {
   readonly name: IconName;

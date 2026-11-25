@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import { PermissionBroker, type PermissionResponse } from "@tentacle/core";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import { ASK_PARKS, parkKey } from "../src/ask-park.ts";
 import { FAILED_NOTICE, REFUSED_NOTICE, RESYNC_FAILED_NOTICE } from "../src/composer.ts";
 import { createSessionController } from "../src/session-controller.ts";
 import {
@@ -1202,5 +1203,45 @@ describe("foreground resync (docs/fix/mobile-open-at-end.md, item 2)", () => {
     await settle();
     await pull;
     expect(h.opens()).toBe(2); // one resync from the foreground edge, the pull's was refused
+  });
+});
+
+describe("the park memory through the screen's real sheet (Review S4–S7b, findings 1–2)", () => {
+  const ask = { tool: "bash", level: "ask" as const, title: "Run", detail: "ls", input: {} };
+  // No compose wiring here, so the controller keys under computer "".
+  const key = (id: string) => parkKey("", "s1", id);
+
+  test("a parked ask withdrawn by a detach opens PARKED on its replay", async () => {
+    const h = harness();
+    const { screen, broker } = h.make();
+    await screen.open();
+    const ac = new AbortController();
+    void broker.request(ask, { requestId: "rp1", signal: ac.signal });
+    await settle();
+    ASK_PARKS.note(key("rp1")); // the swipe
+    screen.sheet().park();
+    ac.abort(); // connectionClosed / retainOnly / sessionClosed
+    await settle();
+    expect(screen.state().sheet.kind).toBe("idle");
+    expect(ASK_PARKS.has(key("rp1"))).toBe(true);
+    void broker.request(ask, { requestId: "rp1", signal: new AbortController().signal });
+    await settle();
+    const replay = screen.state().sheet;
+    expect(replay.kind === "asking" && replay.parked).toBe(true);
+    ASK_PARKS.forget(key("rp1"));
+  });
+
+  test("an answered ask spends its note", async () => {
+    const h = harness();
+    const { screen, broker } = h.make();
+    await screen.open();
+    void broker.request(ask, { requestId: "rp2", signal: new AbortController().signal });
+    await settle();
+    ASK_PARKS.note(key("rp2"));
+    screen.sheet().park();
+    h.clock.at += 10_000; // past the age guard
+    expect(screen.sheet().answer("allow_once")).toBe("sent");
+    await settle();
+    expect(ASK_PARKS.has(key("rp2"))).toBe(false);
   });
 });

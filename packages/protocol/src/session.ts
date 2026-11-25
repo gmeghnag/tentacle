@@ -2192,6 +2192,10 @@ export const SessionListEntrySchema = z.object({
   jobs: z.number().int().nonnegative().optional(),
   /** The session's armed scheduled wakes (a COUNT: the rows are the `schedules` list). Absent: an older daemon, or one that never holds a schedule. */
   schedules: z.number().int().nonnegative().optional(),
+  /** Unanswered permission asks right now (a COUNT; a 0 is a fact the drawer reads). Absent: an older daemon. */
+  asks: z.number().int().nonnegative().optional(),
+  /** Workflow runs of this session live or waiting on the user (a COUNT). Absent: it runs no workflows, or an older daemon. */
+  workflows: z.number().int().nonnegative().optional(),
   /** Pinned (`session/pin`). Absent: not pinned, or an older daemon. */
   pinned: z.literal(true).optional(),
 });

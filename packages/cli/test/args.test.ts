@@ -241,16 +241,8 @@ describe("tentacle run/attach (end to end, fake API server)", () => {
   let model: ReturnType<typeof Bun.serve>;
   let dir: string;
   const seen: string[] = [];
-  const KEYS = [
-    "TENTACLE_CONFIG_DIR",
-    "TENTACLE_K8S_SERVER",
-    "TENTACLE_K8S_TOKEN",
-    "TENTACLE_POD_BIN",
-    "TENTACLE_POD_NAMESPACE",
-    "TENTACLE_MODEL_BASE_URL",
-    "TENTACLE_NO_AGENTS_MD",
-  ];
-  const saved: Record<string, string | undefined> = {};
+  /** The `TENTACLE_*` config env every command of this suite runs WITH. */
+  let env: Record<string, string> = {};
 
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), "tentacle-args-"));
@@ -276,30 +268,52 @@ describe("tentacle run/attach (end to end, fake API server)", () => {
         return new Response("no", { status: 500 });
       },
     });
-    for (const key of KEYS) saved[key] = process.env[key];
-    process.env.TENTACLE_CONFIG_DIR = join(dir, "config");
-    process.env.TENTACLE_K8S_SERVER = `http://127.0.0.1:${k8s.port}`;
-    process.env.TENTACLE_K8S_TOKEN = "t";
-    process.env.TENTACLE_POD_BIN = "/bin/sh";
-    const podNamespace = "TENTACLE_POD_NAMESPACE";
-    delete process.env[podNamespace];
-    process.env.TENTACLE_MODEL_BASE_URL = `http://127.0.0.1:${model.port}/v1`;
-    process.env.TENTACLE_NO_AGENTS_MD = "1";
+    env = {
+      TENTACLE_CONFIG_DIR: join(dir, "config"),
+      TENTACLE_K8S_SERVER: `http://127.0.0.1:${k8s.port}`,
+      TENTACLE_K8S_TOKEN: "t",
+      TENTACLE_POD_BIN: "/bin/sh",
+      TENTACLE_MODEL_BASE_URL: `http://127.0.0.1:${model.port}/v1`,
+      TENTACLE_NO_AGENTS_MD: "1",
+    };
   });
 
   afterAll(async () => {
     k8s.stop(true);
     model.stop(true);
-    for (const key of KEYS) {
-      const value = saved[key];
-      if (value === undefined) {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * `body` runs with ONLY this suite's `TENTACLE_*`: every other one is dropped
+   * and put back afterwards. A serial `bun test` shares one process, hence one
+   * `process.env`, so a file that leaves a config variable behind
+   * (`config-main.test.ts` and `connect-theme.test.ts` both set
+   * `TENTACLE_PROFILE`) would otherwise make `loadConfig` refuse the run in
+   * ~1 ms and the prompt would never reach the model.
+   */
+  const withCleanEnv = async <T>(body: () => Promise<T>): Promise<T> => {
+    const saved = new Map<string, string | undefined>();
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("TENTACLE_")) {
+        saved.set(key, process.env[key]);
         delete process.env[key];
-      } else {
+      }
+    }
+    try {
+      Object.assign(process.env, env);
+      return await body();
+    } finally {
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith("TENTACLE_")) {
+          delete process.env[key];
+        }
+      }
+      for (const [key, value] of saved) {
         process.env[key] = value;
       }
     }
-    await rm(dir, { recursive: true, force: true });
-  });
+  };
 
   const firstRequest = async (
     args: string[],
@@ -309,12 +323,21 @@ describe("tentacle run/attach (end to end, fake API server)", () => {
     // their stdout carries no data, so it must stay empty.
     const out: string[] = [];
     const stdout: string[] = [];
-    const code = await main(["bun", "tentacle", ...args], {
-      err: (t) => out.push(t),
-      out: (t) => stdout.push(t),
-    });
+    const code = await withCleanEnv(() =>
+      main(["bun", "tentacle", ...args], {
+        err: (t) => out.push(t),
+        out: (t) => stdout.push(t),
+      }),
+    );
     expect(stdout).toEqual([]);
     return { code, ...(seen[0] ? { seen: seen[0] } : {}), out: out.join("") };
+  };
+
+  /** A missing request says WHY (the CLI's own line), never a bare `undefined`. */
+  const expectPrompt = (result: { code: number; seen?: string; out: string }, want: string) => {
+    expect(result.seen ?? `(no model request: exit ${result.code}) ${result.out.trim()}`).toBe(
+      want,
+    );
   };
 
   test("-n before or after the name reaches the API as the namespace", async () => {
@@ -351,8 +374,25 @@ describe("tentacle run/attach (end to end, fake API server)", () => {
   test("a one-shot prompt keeps its words verbatim; `--` starts one that begins with '-'", async () => {
     // The fake model refuses: what matters is that the prompt reached it.
     const inside = await firstRequest(["fix", "the", "--resume", "docs"]);
-    expect(inside.seen).toBe('MODEL "fix the --resume docs"');
+    expectPrompt(inside, 'MODEL "fix the --resume docs"');
     const dashed = await firstRequest(["--", "-x", "is", "broken"]);
-    expect(dashed.seen).toBe('MODEL "-x is broken"');
+    expectPrompt(dashed, 'MODEL "-x is broken"');
+  });
+
+  test("a config variable leaked by another file in the process cannot break the prompt", async () => {
+    // Serial `bun test` shares one process, hence one `process.env`: a file that
+    // leaves `TENTACLE_PROFILE` behind (`config-main.test.ts` and
+    // `connect-theme.test.ts` both set it) makes `loadConfig` refuse the whole
+    // run in ~1 ms — `[config error] … unknown profile` — so the one-shot
+    // prompt never reaches the model. That is the signature of the gate flake
+    // this guards: `Received: undefined` on the prompt assertion, no request.
+    process.env.TENTACLE_PROFILE = "leaked-by-another-file";
+    try {
+      const inside = await firstRequest(["say", "hi"]);
+      expectPrompt(inside, 'MODEL "say hi"');
+    } finally {
+      const key = "TENTACLE_PROFILE";
+      delete process.env[key]; // computed, so `noDelete` allows it (AGENTS §6)
+    }
   });
 });

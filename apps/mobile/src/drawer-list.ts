@@ -54,6 +54,26 @@ export interface DrawerRow {
   readonly running: boolean;
   readonly attached: number;
   readonly pinned: boolean;
+  /** Glyph flags (`rowMarks`): the drawer draws only these. */
+  readonly marks: RowMarks;
+}
+
+/** Which glyphs a drawer row carries (docs/fix/mobile-ask-surfaces.md D5). */
+export interface RowMarks {
+  readonly ask: boolean;
+  readonly workflow: boolean;
+  readonly wake: boolean;
+}
+
+/**
+ * `ask` = the daemon reports pending asks, OR the open session's own sheet holds
+ * one (`localAsk`, fresher than the list); absent fields -> no mark.
+ */
+export function rowMarks(
+  row: { readonly asks: number; readonly workflows: number; readonly wakes: number },
+  localAsk: boolean,
+): RowMarks {
+  return { ask: row.asks > 0 || localAsk, workflow: row.workflows > 0, wake: row.wakes > 0 };
 }
 
 export type DrawerSection = "pinned" | "running" | "recent" | "archived";
@@ -85,9 +105,12 @@ export interface DrawerListOptions {
   readonly currentId: string | null;
   /** The person's archived toggle: null = automatic (open iff the current is archived). */
   readonly archivedOpen: boolean | null;
+  /** The open session's own sheet holds an ask (fresher than the list). */
+  readonly currentAsking?: boolean;
 }
 
-function toRow(row: SessionRow, currentId: string | null): DrawerRow {
+function toRow(row: SessionRow, currentId: string | null, currentAsking = false): DrawerRow {
+  const current = currentId !== null && row.sessionId === currentId;
   return {
     id: row.sessionId,
     title: row.title,
@@ -96,10 +119,11 @@ function toRow(row: SessionRow, currentId: string | null): DrawerRow {
     meta: sessionLine(row),
     tone: row.archived ? "archived" : row.running ? "running" : "idle",
     archived: row.archived,
-    current: currentId !== null && row.sessionId === currentId,
+    current,
     running: row.running,
     attached: row.attached,
     pinned: row.pinned,
+    marks: rowMarks(row, current && currentAsking),
   };
 }
 
@@ -114,14 +138,15 @@ function toRow(row: SessionRow, currentId: string | null): DrawerRow {
  */
 export function drawerList(source: DrawerSource, options: DrawerListOptions): DrawerList {
   const { currentId } = options;
-  const pinned = source.sections.pinned.map((row) => toRow(row, currentId));
+  const asking = options.currentAsking === true;
+  const pinned = source.sections.pinned.map((row) => toRow(row, currentId, asking));
   const isPinned = new Set(pinned.map((row) => row.id));
   const unpinned = source.sections.active.filter((row) => !isPinned.has(row.sessionId));
-  const running = unpinned.filter((row) => row.running).map((row) => toRow(row, currentId));
-  const recent = unpinned.filter((row) => !row.running).map((row) => toRow(row, currentId));
+  const running = unpinned.filter((row) => row.running).map((row) => toRow(row, currentId, asking));
+  const recent = unpinned.filter((row) => !row.running).map((row) => toRow(row, currentId, asking));
   const archivedRows = source.sections.archived
     .filter((row) => !isPinned.has(row.sessionId))
-    .map((row) => toRow(row, currentId));
+    .map((row) => toRow(row, currentId, asking));
   const currentIn: DrawerSection | null = pinned.some((row) => row.current)
     ? "pinned"
     : running.some((row) => row.current)

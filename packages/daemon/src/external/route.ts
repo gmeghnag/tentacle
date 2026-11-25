@@ -15,6 +15,12 @@ export interface ExternalCaller {
 /** What a route needs from Bun's server (lifts the idle timeout of a long call). */
 export interface TimeoutServer {
   timeout(req: Request, seconds: number): void;
+  /**
+   * The peer address, when the server can say (Bun's `Server` does; a fake or
+   * hand-rolled `srv` may not). Optional: absent degrades to `at unknown` in the
+   * audit line, never a throw.
+   */
+  readonly requestIP?: (req: Request) => { readonly address: string } | null;
 }
 
 /**

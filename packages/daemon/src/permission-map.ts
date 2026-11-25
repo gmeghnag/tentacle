@@ -46,12 +46,16 @@ export function permissionOptions(req: PermissionRequest): PermissionOption[] {
 /**
  * The stream event for one ask; `requestId` is its nonce (fresh per ask).
  * `agent`: the sub-agent that asked (the requester's `options.agent`).
+ * `workflow`: the workflow step (or run / schedule approval) it belongs to
+ * (the requester's `options.workflow`, docs/fix/mobile-ask-surfaces.md D1) —
+ * display only, and dropped unless its `name` is a string.
  */
 export function toPermissionRequestUpdate(
   requestId: string,
   toolCallId: string,
   req: PermissionRequest,
   agent?: PermissionRequestOptions["agent"],
+  workflow?: PermissionRequestOptions["workflow"],
 ): PermissionRequestUpdate {
   return {
     type: "permission_request",
@@ -68,6 +72,19 @@ export function toPermissionRequestUpdate(
             type: agent.type,
             description: agent.description,
             ...(agent.id !== undefined ? { id: agent.id } : {}),
+          },
+        }
+      : {}),
+    // Field by field, never by spread: the wire carries the five known keys and
+    // nothing a requester may have put beside them.
+    ...(workflow !== undefined && typeof workflow.name === "string"
+      ? {
+          workflow: {
+            name: workflow.name,
+            ...(workflow.runId !== undefined ? { runId: workflow.runId } : {}),
+            ...(workflow.stepId !== undefined ? { stepId: workflow.stepId } : {}),
+            ...(workflow.index !== undefined ? { index: workflow.index } : {}),
+            ...(workflow.count !== undefined ? { count: workflow.count } : {}),
           },
         }
       : {}),
@@ -112,10 +129,13 @@ export function toAskUpdate(
   toolCallId: string,
   req: PermissionRequest,
   agent?: PermissionRequestOptions["agent"],
+  workflow?: PermissionRequestOptions["workflow"],
 ): PermissionRequestUpdate | QuestionRequestUpdate {
+  // A question carries no workflow attribution (`question_request` has no such
+  // field); a permission request keeps it (docs/fix/mobile-ask-surfaces.md).
   return req.kind === "question"
     ? toQuestionRequestUpdate(requestId, toolCallId, req, agent)
-    : toPermissionRequestUpdate(requestId, toolCallId, req, agent);
+    : toPermissionRequestUpdate(requestId, toolCallId, req, agent, workflow);
 }
 
 /** The internal options a question settles with (`answerQuestion`). */

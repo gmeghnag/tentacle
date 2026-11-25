@@ -24,7 +24,7 @@ const SHEET = code(
 
 /** The `<ScrollView …>` opening tag that carries `testID="perm-sheet"`. */
 function sheetScrollView(): string {
-  const at = SHEET.indexOf('testID="perm-sheet"');
+  const at = SHEET.lastIndexOf('testID="perm-sheet"');
   expect(at).toBeGreaterThan(-1);
   const open = SHEET.lastIndexOf("<ScrollView", at);
   expect(open).toBeGreaterThan(-1);

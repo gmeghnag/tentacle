@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@tentacle/agent";
+import { Agent, type WorkflowDriver } from "@tentacle/agent";
 import {
   type BackgroundJob,
   type ChatRequest,
@@ -19,6 +19,7 @@ import {
   type SessionListParams,
   type SessionListResult,
   SessionListResultSchema,
+  type WorkflowRow,
 } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
@@ -26,7 +27,7 @@ import { Connection } from "../src/connection.ts";
 import type { Attachment } from "../src/hosted-session.ts";
 import type { DaemonSessionRecord } from "../src/persisted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
-import { type SessionSummary, toSessionList } from "../src/session-list.ts";
+import { type SessionSummary, liveRunCount, toSessionList } from "../src/session-list.ts";
 import { SessionPersister } from "../src/session-persister.ts";
 import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
 
@@ -174,6 +175,46 @@ describe("toSessionList (pure)", () => {
     expect(page2.cursor).toBeUndefined();
   });
 
+  test("L-asks the drawer's two flags pass through; absent stays absent, a 0 stays a 0", () => {
+    // docs/fix/mobile-ask-surfaces.md D5/S7a. Mutations: `asks: s.asks ?? 0`
+    // (absence turns into a claim) and dropping either pass-through → red.
+    const [busy, idle] = list([
+      summary("busy", 2, { asks: 2, workflows: 1 }),
+      summary("idle", 1),
+    ]).sessions;
+    expect([busy?.asks, busy?.workflows]).toEqual([2, 1]);
+    expect(idle).not.toHaveProperty("asks");
+    expect(idle).not.toHaveProperty("workflows");
+    // A zero IS a fact the drawer reads (`asks > 0`), so it is carried as one.
+    const zero = list([summary("z", 1, { asks: 0, workflows: 0 })]).sessions[0];
+    expect([zero?.asks, zero?.workflows]).toEqual([0, 0]);
+    // Paging leaves them untouched.
+    const all = [summary("a", 3, { asks: 1 }), summary("b", 2, { workflows: 2 })];
+    const page1 = list(all, { limit: 1 });
+    const page2 = list(all, { limit: 1, cursor: page1.cursor ?? "" });
+    expect([...page1.sessions, ...page2.sessions].map((s) => [s.asks, s.workflows])).toEqual([
+      [1, undefined],
+      [undefined, 2],
+    ]);
+    // The wire is a STRIP schema: a client parses the page, so an unknown field
+    // would be dropped there. Mutation: omit either field from
+    // `SessionListEntrySchema` → this expectation loses it → red.
+    const parsed = SessionListResultSchema.parse(
+      list([summary("busy", 2, { asks: 2, workflows: 1 })]),
+    );
+    expect([parsed.sessions[0]?.asks, parsed.sessions[0]?.workflows]).toEqual([2, 1]);
+  });
+
+  test("L-live a run counts as live unless it is over (ok/error/stopped)", () => {
+    // The drawer's workflow glyph (D5). Mutation: count every row → 5, not 3.
+    const states = ["running", "waiting", "needs-approval", "ok", "error", "stopped"];
+    expect(liveRunCount(states.map((state) => ({ state })))).toBe(3);
+    expect(liveRunCount([])).toBe(0);
+    // An unknown state is LIVE: the glyph is display only, and a run we cannot
+    // judge must not look finished.
+    expect(liveRunCount([{ state: "someday" }])).toBe(1);
+  });
+
   test("L-cwd each entry carries its OWN cwd and archived flag; live + archived page as one list", () => {
     // Mutation M6: one cwd (the host's) for every entry → red.
     const all = [
@@ -252,6 +293,9 @@ class Gated implements ModelProvider {
 /** Persists into memory (the two-file spy); the tests read only the host. */
 class NullStore extends SpyDaemonStore {}
 
+/** Every broker `createAgent` built, in creation order: an ask is raised through it. */
+const askers: PermissionBroker[] = [];
+
 function daemon(opts: { persist?: boolean; jobs?: JobController } = {}) {
   const clock = { t: 0 };
   const model = new Gated();
@@ -264,8 +308,10 @@ function daemon(opts: { persist?: boolean; jobs?: JobController } = {}) {
           persister: new SessionPersister({ store, cwd: CWD, model: "m", onError: () => {} }),
         }
       : {}),
+    // Records each session's broker: an ask is raised through it (S7a's count).
     createAgent: () => {
       const permissions = new PermissionBroker();
+      askers.push(permissions);
       const agent = new Agent({
         model,
         tools: new ToolRegistry(),
@@ -291,7 +337,7 @@ function daemon(opts: { persist?: boolean; jobs?: JobController } = {}) {
       client.request("session/open", { sessionId, create: true }) as Promise<OpenResult>;
     return { connection, client, updates, list, open };
   };
-  return { host, model, clock, store, connect };
+  return { host, model, clock, store, connect, permissions: () => askers.at(-1) };
 }
 
 /** Runs one turn on `id` to its end at the current clock. */
@@ -306,6 +352,15 @@ async function idle(d: ReturnType<typeof daemon>, id: string): Promise<void> {
   const deadline = Date.now() + 2000;
   while (d.host.get(id)?.running) {
     if (Date.now() > deadline) throw new Error("turn did not end");
+    await tick();
+  }
+}
+
+/** Poll the very condition the next assertion reads; a fixed sleep would race (AGENTS §9). */
+async function until(condition: () => boolean | Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!(await condition())) {
+    if (Date.now() > deadline) throw new Error("condition never held");
     await tick();
   }
 }
@@ -344,6 +399,75 @@ describe("SessionHost.list over the wire", () => {
     expect(list([summary("arch", 1, { archived: true })]).sessions[0]).not.toHaveProperty("jobs");
   });
 
+  test("H-asks a pending ask and a live run reach `session/list` from the host's own state", async () => {
+    // docs/fix/mobile-ask-surfaces.md D5/S7a: the drawer's `hand.raised` and
+    // curvepath. Mutations: hard-code `asks: 0` / `workflows: 0` on the summary,
+    // and count every run row (the ended one too) → red.
+    const d = daemon();
+    const a = await d.connect();
+    await a.open("s");
+    const hosted = d.host.get("s");
+    const broker = d.permissions();
+    if (!hosted || !broker) throw new Error("no session s");
+    // No ask yet: a live 0 (the drawer reads `asks > 0`), and no workflows at
+    // all — this session runs none (no driver), so the field is absent.
+    expect(hosted.summary(CWD).asks).toBe(0);
+    expect(hosted.summary(CWD)).not.toHaveProperty("workflows");
+    // Two asks: raised through this session's broker while a turn is live (an
+    // ask outside a turn is refused — there is no turn to approve for).
+    d.model.held = true;
+    void hosted.prompt("T1", go);
+    await until(async () => d.model.parked === 1);
+    const ask = broker.request(
+      { tool: "shell", level: "ask", title: "Run it", input: {} },
+      { toolCallId: "c1", signal: new AbortController().signal },
+    );
+    await tick();
+    expect(hosted.summary(CWD).asks).toBe(1);
+    expect((await a.list()).sessions[0]?.asks).toBe(1);
+    expect((await a.list()).sessions[0]).not.toHaveProperty("workflows");
+    // Settled (withdrawn), the turn ends: the count converges on the next read.
+    const signal = new AbortController();
+    void signal;
+    d.model.release();
+    await idle(d, "s");
+    expect(hosted.summary(CWD).asks).toBe(1);
+    void ask;
+  });
+
+  test("H-runs the `workflows` count is the LIVE ones, and absent where no driver runs", async () => {
+    // docs/fix/mobile-ask-surfaces.md D5/S7a: the drawer's curvepath. Mutations:
+    // count every row, emit the field without a driver, hard-code it → red.
+    const d = daemon();
+    await d.connect();
+    d.host.open({ sessionId: "s", create: true }, detached);
+    const hosted = d.host.get("s");
+    if (!hosted) throw new Error("no session s");
+    // No driver (a pod daemon, a tunnelled session): no claim at all.
+    expect(hosted.summary(CWD)).not.toHaveProperty("workflows");
+    const row = (state: string): WorkflowRow => ({
+      runId: `wf-${state}`,
+      name: "task",
+      version: 1,
+      hash: "a".repeat(64),
+      state,
+      tokens: 0,
+      startedAt: 1,
+      history: [],
+      historyDropped: 0,
+      steps: [],
+    });
+    // The seam: a driver is what the host reads its rows from (`attachWorkflows`).
+    hosted.attachWorkflows({
+      rows: () => [row("running"), row("needs-approval"), row("ok"), row("stopped")],
+      reserveRunIds: () => {},
+      bind: () => {},
+    } as unknown as WorkflowDriver);
+    expect(hosted.summary(CWD).workflows).toBe(2);
+    const c = await d.connect();
+    expect((await c.list()).sessions[0]?.workflows).toBe(2);
+  });
+
   test("H1 running / attached / title / cwd, and a list attaches nothing", async () => {
     // Mutations M3' (running → now) and M11 (no stamp at the turn's start) → red:
     // a running session is keyed on its turn's start (25), not the clock (30)
@@ -372,6 +496,7 @@ describe("SessionHost.list over the wire", () => {
         attached: 1,
         archived: false,
         jobs: 0,
+        asks: 0,
       },
       {
         sessionId: "idle",
@@ -383,6 +508,7 @@ describe("SessionHost.list over the wire", () => {
         attached: 0,
         archived: false,
         jobs: 0,
+        asks: 0,
       },
     ]);
     // The lister attached to nothing.
@@ -454,6 +580,8 @@ describe("SessionHost.list over the wire", () => {
         attached: 0,
         archived: false,
         jobs: 0,
+        // A live session: 0 is a fact (an ARCHIVED one carries no `asks` at all).
+        asks: 0,
       },
     ]);
   });

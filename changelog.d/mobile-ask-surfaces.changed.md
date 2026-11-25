@@ -1,0 +1,1 @@
+- **Mobile: the permission ask is one standard card and never blocks.** The ask shows who is asking, a four-row command preview, and small Deny / Allow once buttons (rare options behind `…`). Swiping it down parks it into a banner under the header instead of withdrawing it, so you can open the drawer and switch session.
