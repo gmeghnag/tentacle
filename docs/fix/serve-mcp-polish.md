@@ -257,4 +257,33 @@ untouched (D8).
 
 ## Review
 
-*— to be written by the reviewer (fresh context, standard in-context level for contained/S–M).*
+*— claude-opus-5-5, 2026-11-25* (fresh context; a different model family from the executor)
+
+**Verdict: REQUEST-CHANGES.** The code is right on P1 and on P3's ordering. P2 misses the `::` form users actually type, and two of P3's properties have no test that fails when they break.
+
+**Findings**
+
+1. **MEDIUM: `serve --host ::` still prints an undialable hint.** `RunningServer.url` is built verbatim (`ws-server.ts:496`, `${scheme}://${options.host}:${port}`), so `--host ::` gives `ws://:::4001`. `new URL` throws on that, and `hintUrl` (`serve-mcp-server.ts:64-67`) returns its input unchanged. Repro (`.tentacle/tmp/serve-mcp-polish/v6.ts`): `"::" -> claude mcp add … http://:::4001/mcp`, while `"[::]" -> http://[::1]:4001/mcp`. Bun binds both forms, and the repo itself treats bare `::` as the wildcard (`serve.ts:969`). The failure-mode row "Bind `::` → `[::1]`" therefore does not hold. T4 (`serve-mcp-e2e.test.ts:154`) only tests the bracketed form.
+2. **MEDIUM: T9 does not test single-flight.** `mcp-tools.test.ts:748`. Mutation: I moved `this.starts.set(memoKey, …)` to after `await this.prompt(…)`, which reopens the `:992` race. Result: `mcp-tools` + `mcp-tasks` 43 pass / 0 fail. The two `Promise.all` HTTP calls never interleave inside `start`. The code is correct today (the memo is set synchronously before the first `await`, `tools.ts` start), but nothing pins it. The test needs a real interleaving, e.g. an `attach`/model gate that holds the first call until the second has arrived.
+3. **MEDIUM: caller isolation of the replay key is not tested.** Mutation: I dropped `${caller}` from both `memoKey` forms. Result: `mcp-tools` + `mcp-tasks` + `serve-mcp-e2e` 53 pass / 0 fail. Without the caller in the key, caller B's identical start within 15 s (or the same `key`) would be answered with caller A's `sessionId`, and B's start would be dropped silently. The design calls this a security property ("no caller can replay or hijack another's start"), so it needs a two-caller test.
+
+**Gate:** I did not run the full `bun run check`. `bun run typecheck` is clean (the executor's "pre-existing `-p packages/cli` noise" does not appear in the real gate). `bun run lint` is clean (2553 files). Touched suites (`mcp-tools`, `mcp-tasks`, `external-peer`, `serve-mcp-e2e`, `project-pairing`): 80 pass / 0 fail.
+
+**Mutations:** both were applied from a backup copy and restored. `git status` was clean afterwards, so the tree is byte-identical. The executor's seven mutations were not re-run.
+
+**Attacks tried:**
+- Bare `::` bind: found finding 1.
+- Concurrent identical starts: the code holds, the test is vacuous (finding 2).
+- Cross-caller replay: the code holds, it is untested (finding 3).
+- Token leakage in the audit path: none. Only `user-agent` and `srv.requestIP` are read.
+- UA injection: control characters and non-ASCII are dropped and `"` becomes `'`, so the line stays one printable line.
+- Import cycle: `peer.ts` imports nothing.
+- §7 invariants: no `@tentacle/protocol` change, no persisted change, and no serialisation of the peer.
+- Refused first start: the memo is deleted and the waiter retries for real. This holds.
+
+**Lower-severity notes (not blocking):**
+- A replayed *task* start whose first call answered `TASK_NOT_RECORDED` is answered with plain ids, or with a fresh `taskCreated` while the cancel is in flight. That is not "exactly as the first did".
+- A replay re-stamps `accepted[turnId]`, so `createdAt` drifts.
+- If `attach` outlives the 15 s TTL, the first call's `finally` can delete a newer memo under the same key.
+
+**Executor behaviour:** it followed the plan in order and showed red tests before green. It disclosed its drifts honestly (the explicit `:443`, the extra delete, T7's suite). Its mutation table left out the two properties above, so the single-flight claim in Execution is unproven.
