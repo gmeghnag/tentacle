@@ -120,7 +120,7 @@ describe("reasoning echo — the loop carries the provider's record to the next 
     expect(assistant && ("reasoning_content" in assistant || "reasoning" in assistant)).toBe(false);
   });
 
-  test("always (D6): request 3 carries BOTH earlier rounds' reasoning, each on its own message; history stores the record", async () => {
+  test("current segment (D6 as narrowed by fix/think-tag-leak): request 3 carries BOTH of the turn's rounds' reasoning, each on its own message; history stores the record", async () => {
     const { baseURL, bodies } = fakeServer([
       [reasoningDelta("reasoning_content", THOUGHT_1), callDelta("call_1"), finish("tool_calls")],
       [reasoningDelta("reasoning_content", THOUGHT_2), callDelta("call_2"), finish("tool_calls")],

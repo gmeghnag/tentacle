@@ -313,10 +313,12 @@ export class OpenAIProvider implements ModelProvider {
     // endpoint already refused them.
     const wantOff = request.reasoning === "off" && !this.reasoningSwitchesRefused;
     // D9: echo the reasoning this provider produced, unless this endpoint
-    // already refused it. `echoing` is true only when there is something to drop.
+    // already refused it. `echoing` is true only when there is something to
+    // drop, counted with the same cut the wire uses (echoFloor).
+    const floor = echoFloor(request.messages, request.tools);
     const echoing =
       !this.reasoningEchoRefused &&
-      request.messages.some((m) => ownOpenAIReasoning(m, this.id) !== undefined);
+      request.messages.some((m, i) => i >= floor && ownOpenAIReasoning(m, this.id) !== undefined);
     let res = await this.post(headers, request, images, wantOff, echoing);
     if (wantOff && res.status === 400) {
       // F9: one retry WITHOUT them — never a failed turn. Remembered only if
@@ -509,6 +511,35 @@ function ownOpenAIReasoning(
   return record.body.format === "openai" ? record.body : undefined;
 }
 
+/**
+ * Where the echoed reasoning starts: the index of the last `user` message
+ * (docs/fix/think-tag-leak.md). A FINISHED turn's reasoning must not go back:
+ * the server's template renders that earlier reply as `think … /think answer`,
+ * and the model then repeats it with a stray `</think>` in `content` (6/12
+ * turn-2 runs, 0/12 without the echo). Only the current segment — the rounds
+ * after the last user message — is echoed, which is the within-turn win
+ * fix/reasoning-echo measured (D6's scope, narrowed by the owner's 2026-11-25
+ * decision). A steer is a bare `user` message (agent.ts), so it moves the floor
+ * too: no marker distinguishes it, and being conservative can only drop echo.
+ * No user message at all (a resumed or summary-first history) → 0, echo as before.
+ *
+ * A request offering NO tools keeps the pre-fix behaviour (floor 0, no cut): the
+ * leak needs the template's tool-mode path (0/32 hits without tools), which is
+ * also where the echo's win was measured — and it leaves the forced final
+ * report, the one request the loop builds by hand with no tools, untouched.
+ */
+export function echoFloor(messages: readonly ChatMessage[], tools?: ChatRequest["tools"]): number {
+  if ((tools?.length ?? 0) === 0) {
+    return 0;
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") {
+      return i;
+    }
+  }
+  return 0;
+}
+
 function buildPayload(
   model: string,
   req: ChatRequest,
@@ -520,7 +551,7 @@ function buildPayload(
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model,
-    messages: wireMessages(req.messages, options, echoSource),
+    messages: wireMessages(req.messages, options, echoSource, echoFloor(req.messages, req.tools)),
     stream: true,
     stream_options: { include_usage: true },
   };
@@ -551,11 +582,17 @@ function buildPayload(
  * naming whose images they are, then the `image_url` parts in order. It is never
  * written to history and is rebuilt identically each request (cache-stable).
  * Without vision nothing is added (the tool message carries the one reason line).
+ *
+ * The echoed reasoning (`echoSource`) rides only the messages at or after
+ * `floor` (docs/fix/think-tag-leak.md): a finished turn's stays in history,
+ * unsent.
  */
 function wireMessages(
   messages: readonly ChatMessage[],
   options: ImageBuildOptions,
   echoSource?: string,
+  /** First index whose reasoning is echoed (`echoFloor`); 0 = no cut. */
+  floor = 0,
 ): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   let pending: { readonly labels: string[]; readonly images: ImagePart[] } = {
@@ -580,10 +617,10 @@ function wireMessages(
     }
     pending = { labels: [], images: [] };
   };
-  for (const message of messages) {
+  for (const [index, message] of messages.entries()) {
     if (message.role !== "tool") {
       flush();
-      out.push(toWireMessage(message, options, echoSource));
+      out.push(toWireMessage(message, options, index >= floor ? echoSource : undefined));
       continue;
     }
     const { images, lines } = toolResultImages(message, options);
