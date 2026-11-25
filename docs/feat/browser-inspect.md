@@ -637,3 +637,65 @@ The infobar cannot be hidden from an extension (Chrome's own guard; the `--silen
 Chrome facts by fetching the cited primary pages on 2026-11-24 (the CDP
 `Network.pdl` from the protocol repo because the rendered site is JS-only);
 everything not found on those pages is listed U1–U7 instead of assumed.
+
+## Review
+
+### Code review B1–B4 (fresh context, `git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** (2 HIGH, 2 MEDIUM).
+
+**Gate (re-run):** the 13 touched test files → 118 pass / 0 fail; `bun run lint` clean
+(2464 files); `bun run typecheck` clean. Full `bun run test` was not re-run (scope: touched files).
+
+**Findings**
+
+1. **HIGH — masking leak: `postDataEntries` (base64 request body).** `packages/browser/src/net-view.ts:160-192`
+   `maskEntry` masks `postData` but walks `request.postDataEntries[].bytes` as a plain
+   string (`r.url`), so a login POST traced in full shows the body base64-encoded, which
+   the model can decode. Repro (`.tentacle/tmp/browser-inspect/review-mask.ts`, with
+   the real `redactText` net): `postDataEntries:[{bytes: b64("user=bob&password=hunter2xyz")}]`
+   → output `"bytes": "dXNlcj1ib2ImcGFzc3dvcmQ9aHVudGVyMnh5eg=="`, unmasked. This text reaches the
+   `ToolResult` and the session log (D2).
+2. **HIGH — masking leak: raw header text.** Same function: `headersText` (`Network.responseReceivedExtraInfo`,
+   present on HTTP/1.x) and `response.requestHeadersText` / `response.headersText` are strings
+   routed to `r.url`, so `Set-Cookie: sid=…` and `Cookie: sid=…` lines pass through unmasked, and
+   `redactText` does not catch them either (same repro, cases A and A2). The plan's U5 row says the raw `Cookie` /
+   `Set-Cookie` lines must be masked. Fix shape: mask `*HeadersText` line by line through `headers()`, and
+   decode → `body()` → re-encode (or drop) `postDataEntries`. Add a table test for each.
+3. **MEDIUM — "off by default" does not hold on a `serve` restart.** `packages/daemon/src/hosted-session.ts:1243-1245`:
+   on reload the record wins and a missing entry means everything on. `browserDefaultOff` is applied only in
+   `buildAgent` (`packages/cli/src/wiring.ts:1060-1068`). So every `serve` session persisted before B4, and every
+   one whose caps record predates B4, comes back after a daemon restart with the six `browser_*`
+   tools ON. That includes `browser_open`, which in an auto-accept session is answered without a prompt
+   (Execution drift 3, against owner Q3). The `serve` daemon is the owner's daily driver. The wiring test covers only a
+   CREATE. Needs a reload-path seed (union the default-off set for tools the record never mentioned) plus a test.
+4. **MEDIUM — the user cannot see or revoke a handed-over tab (D1 / §6).** In `apps/browser-extension/src/ops.js:339-344`,
+   `handover` never calls `group()`, so the tab does not join the session's group. Nothing handles a
+   tab dragged out of the group either: `onTabUpdated` (`:139`) looks only at `status`, and no `groupId` change
+   leads to `tab_closed` or `dropTab`. As a result, the only way to take back a tab is to close it, which contradicts §6
+   («dragging a tab out of the group = taking it back») and `ownership.ts:87`'s own comment.
+
+**Premise table (spot-checked):** a pod never passes `browser` (`serve.ts` `createServeAgent` only,
+`tunnelledAgent` untouched): TRUE. Sub-agents filtered (`subagent.ts:443`): TRUE. `net` events are no longer
+broadcast (`browser-host.ts:167-177`): TRUE. The hub checks ownership before forwarding and before answering
+from the ring (`:212-244`): TRUE. Seed union on resume is off-wins (`hosted-session.ts:3842`): TRUE, but the reload
+path (#3) is not a seed.
+
+**Mutations (each reverted; `git status` empty afterwards):** `browserDefaultOff` forced to `[]` → 2 fail
+(wiring), so that test holds. `onWebRequest`'s `tabSession.has` filter removed → **0 fail**: the
+"headers feed only for owned tabs" property (D1) is untested (a gap, not a bug today).
+
+**Attacks tried:** (a) can a page spoof `handover` through `runtime.onMessage`? No: `page.js` never sends
+to the background, and pages cannot reach `onMessage` without `externally_connectable`. (b) Can a cross-session
+read go through the hub? No: `check()` covers lease plus tab owner, and `list`/`get` are behind it. (c) Masking
+corpus → #1 and #2 found; the urlencoded first field is caught by the `redactText` net. (d) Pod or sub-agent exposure:
+none found. (e) Hub/extension divergence after a daemon `release`: the hub keeps tab→session, while the
+extension drops `tabSession`. A re-claimed session can still read its old tabs, but they are labelled «(ended)» and get no
+headers feed or console hook. Low impact, worth a note.
+
+**Executor behaviour:** the Execution notes are honest and detailed (drifts listed, unverified Chrome
+paths stated, a vacuous test found and rewritten). The masking table tests cover the documented shapes
+but not CDP's real alternates (`postDataEntries`, `*HeadersText`), which is the blind spot behind #1/#2.
+Same model family as the B4 executor (Opus); only the context is fresh.
+
+*— claude-opus-5-5, 2026-11-25*
