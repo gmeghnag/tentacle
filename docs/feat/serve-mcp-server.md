@@ -633,4 +633,57 @@ Each test names its mutation (§9).
 
 *— claude-opus-5-5, 2026-11-25*
 
+### M3-mcp-caller-asks (done)
+
+- *Load-bearing check (assumption 1) re-run first: HOLDS.* `.tentacle/tmp/serve-mcp-server/m2/seam.ts` printed the same lines as in M2 (1–5, plus `4b. prompt task-2`). M3 has no assumption of its own: it answers through the driver's existing `session/resolve_permission` path.
+- *Preconditions checked:* `external/asks.ts` already holds the neutral pieces: `AskMode`, `PendingAsk`, `askIsOwn`, `askOf`, `callerMayAnswer`, `onceOption`, `callerOptions`, `resolveCallerAnswer`. The kind table is core's `externalMayAnswer`. Nothing was moved and `external/asks.ts` is unchanged.
+- Red first: `packages/daemon/test/mcp-caller-asks.test.ts` was written before the code and ran **0 pass / 9 fail**, each failure on the missing feature ("unknown tool: session_answer", "no ask", missing `asks`).
+- `packages/daemon/src/mcp/tools.ts`:
+  - `McpToolsOptions.callerAsks?: (caller) => AskMode | undefined`. Absent, or `undefined` for a caller, means `owner`. M5 wires `--mcp-asks` to it.
+  - A new tool, `session_answer {sessionId, requestId, decision: allow|deny, message?}`. In `tools/list` it sits between `session_status` and `session_cancel`, as in the Design §4 table.
+    - A foreign or unknown session → "unknown session".
+    - `owner` mode → `isError` naming `--mcp-asks owner`.
+    - The rest is the shared `resolveCallerAnswer` (kind table, `*_once` only, reply cleaning), then `session/resolve_permission` on the held attachment.
+    - A refused ask gets one text (`NOT_ANSWERABLE`), whether it is unknown, owner-only or no longer pending, so the answer is no oracle. A daemon refusal after that gets "no longer pending".
+    - A bad `decision` or a missing field → `InvalidToolParams` (`-32602`).
+  - Status:
+    - In `both` mode only, `asks: [{requestId, title, options:["allow","deny"]}]`, holding only the asks `callerMayAnswer` admits (`callerOptions`, never `*_always`).
+    - `statusMessage` becomes `approval needed: <title> — session_answer requestId=<id>`.
+    - Owner-only asks keep "waiting for the owner's approval".
+- **Drift (design detail, fail-closed):** an ask counts as the caller's "own" only if the turn that raised it is one the caller STARTED, i.e. its id starts with `<ctx>.` (Design §3 ids; `isCallerTurn`).
+  - The M2 code set `askIsOwn(u, a.activeTurn)` for every turn. So an ask from a turn the OWNER started from the phone inside the caller's `mcp-…` session (no `turnId`, no `agent.id`) would have been `tool` kind, and caller-answerable in `both` mode.
+  - A2A refuses the same case (an owner-started turn is "undriven").
+  - After a lazy re-attach, the turn is read from `workUnits()` when no `turn_start` has been seen.
+- `packages/daemon/test/mcp-tools.test.ts`: the `tools/list` order now includes `session_answer`. This is the only change there.
+- `changelog.d/serve-mcp-server.added.md`: one sentence added (`--mcp-asks both`, `session_answer`, once only, first answer wins).
+- Tests in `mcp-caller-asks.test.ts` (9, green):
+  - `both`: allow → exactly `{sessionId, requestId, optionId:"allow_once"}`, and the tool runs. Deny + reply → `reject_once`, and the tool never runs.
+  - Owner-only `workflow_approve` and `browser_action`: never listed, and a crafted allow/deny is refused. Nothing is sent, the phone never sees it resolved, and the state stays `waiting`.
+  - An ask of an owner-started turn → not listed, and refused.
+  - The phone answers first → the caller's late answer is `isError`, and the phone's allow stands.
+  - `owner` mode and no mode set → nothing listed, the answer refused, nothing sent.
+  - Another caller → "unknown session". `allow_always` as a decision, or a missing `requestId` → throws.
+  - Push grace (the real `createPushNotifier`, manual timers and clock):
+    - Control: an unanswered ask IS pushed once the grace ends.
+    - The caller answers in the grace → 0 deliveries.
+- Mutations (each applied by hand, run, reverted; 9/9 green after). `git diff` shows `external/asks.ts` unchanged:
+  - A: `onceOption` allow → `allow_always` → RED: "allow → that ask's allow_once".
+  - B: `callerMayAnswer` without the kind check → RED: owner-only asks; owner-started turn.
+  - C: no `isCallerTurn` check → RED: owner-started turn.
+  - D: the answer never sent → RED: allow, deny, push grace. The push test goes red at its `completed` wait, before the delivery assert.
+  - E: mode always `both` → RED: owner mode.
+- Checks:
+  - `bun test` on mcp-caller-asks, mcp-tools, mcp-wire, a2a-executor and a2a-http: 88 pass, 0 fail.
+  - `tsc --noEmit -p packages/daemon`: 0 errors.
+  - `bunx biome check` on the 3 changed TS files: clean.
+  - No schema, protocol, persisted-format or `protocol.json` change.
+  - The full gate is the orchestrator's script.
+- Notes for review:
+  1. `session_answer` is always in `tools/list`, since `tools/list` is not per caller. In `owner` mode it is refused with a clear text.
+  2. The `asks` map is session-wide, and only caller-turn `tool` asks are answerable.
+  3. An identical re-send after the owner chose the same option is a success at the daemon (`settled-answers.ts`). But by then the ask has normally left the map (`permission_resolved`), so the caller gets `NOT_ANSWERABLE`.
+  4. The push "no push" test ends with a fixed microtask flush (300 rounds) before a NEGATIVE assert, which no condition can poll. Its control case proves the path is live.
+
+*— claude-opus-5-5, 2026-11-25*
+
 ## Review

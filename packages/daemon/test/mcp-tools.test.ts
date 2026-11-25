@@ -402,6 +402,7 @@ describe("mcp tools — sessions on the single session path", () => {
       "session_start",
       "session_send",
       "session_status",
+      "session_answer",
       "session_cancel",
       "session_list",
     ]);

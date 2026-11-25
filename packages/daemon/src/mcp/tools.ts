@@ -10,15 +10,25 @@
  *
  * Untrusted caller (AGENTS §7): it works only in its own `mcp-<caller>-*`
  * namespace (`external/session-ids.ts`; any other id is "unknown session", the
- * same answer as a truly unknown one), changes no setting, never answers an
- * ask (M2: the owner's devices answer), and sees only each turn's final round.
+ * same answer as a truly unknown one), changes no setting, and sees only each
+ * turn's final round. Asks are the owner's unless `callerAsks` says `both` for
+ * this caller (M3, Design §7): then `session_answer` may answer a `tool` ask of
+ * a turn the caller started, once, through A2A's shared `external/asks.ts`.
  */
 import type { WorkUnit } from "@tentacle/core";
 import type { KnownSessionUpdateParams } from "@tentacle/protocol";
 import { ErrorCode, RpcError, type RpcPeer } from "@tentacle/transport";
 import type { HooksTrustPrecheck } from "../connection.ts";
 import { ArchivedUnitIndex } from "../external/archived-units.ts";
-import { type PendingAsk, askIsOwn, askOf } from "../external/asks.ts";
+import {
+  type AskMode,
+  type PendingAsk,
+  askIsOwn,
+  askOf,
+  callerMayAnswer,
+  callerOptions,
+  resolveCallerAnswer,
+} from "../external/asks.ts";
 import { connectSession, detachSession, openSession } from "../external/session-driver.ts";
 import { callerPrefix, contextIdOf, externalSessionId } from "../external/session-ids.ts";
 import type { SessionHost } from "../session-host.ts";
@@ -35,7 +45,12 @@ export const MCP_MAX_LIVE_SESSIONS = 8;
 export const MCP_LIST_MAX = 50;
 /** The driver's attachment is released this long after its session's turn ended. */
 export const MCP_DETACH_AFTER_MS = 60_000;
+/** A refusal's reason as the caller may send it (cleaned and cut to the ask's own limit). */
+export const MCP_ANSWER_MESSAGE_MAX = 4096;
 const RECENT = 5;
+/** One text for an ask the caller may not answer, whatever the reason (no oracle). */
+export const NOT_ANSWERABLE =
+  "not an approval you may answer: name a requestId from session_status asks";
 const TURN_ID_MAX = 128;
 
 export const UNKNOWN_SESSION = "unknown session";
@@ -52,6 +67,11 @@ export interface McpToolsOptions {
   readonly onError?: (error: Error) => void;
   /** Overrides `MCP_DETACH_AFTER_MS` (tests). */
   readonly detachAfterMs?: number;
+  /**
+   * Who answers a caller's asks (`--mcp-asks`, Design §7): the owner only, or
+   * the caller too. Absent, or `undefined` for a caller = `owner`.
+   */
+  readonly callerAsks?: (caller: string) => AskMode | undefined;
 }
 
 /** One live MCP session's in-process attachment (Design §9). */
@@ -127,6 +147,24 @@ export const MCP_TOOLS: readonly Record<string, unknown>[] = [
     },
     outputSchema: { type: "object", properties: { state: { type: "string" } } },
     annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "session_answer",
+    title: "Answer a tentacle tool approval",
+    description:
+      "Answer one approval listed in session_status `asks` (only when this serve lets callers answer): allow or deny it once. The owner is asked too; the first answer wins.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        requestId: { type: "string" },
+        decision: { type: "string", enum: ["allow", "deny"] },
+        message: { type: "string", maxLength: MCP_ANSWER_MESSAGE_MAX },
+      },
+      required: ["sessionId", "requestId", "decision"],
+    },
+    outputSchema: { type: "object", properties: { answered: { type: "boolean" } } },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   },
   {
     name: "session_cancel",
@@ -217,6 +255,8 @@ export class McpTools {
         return this.send(caller, args);
       case "session_status":
         return this.status(caller, args, signal);
+      case "session_answer":
+        return this.answer(caller, args);
       case "session_cancel":
         return this.cancel(caller, args);
       case "session_list":
@@ -317,6 +357,58 @@ export class McpTools {
     return toolResult({ sessionId, turnId: running.id, cancelled: true });
   }
 
+  /**
+   * A caller's decision on one pending ask (Design §7). Only in `both` mode,
+   * only an ask `callerMayAnswer` admits (a `tool` ask of a turn the caller
+   * started), and only as that ask's own `*_once` option: the shared
+   * `resolveCallerAnswer` picks it, the caller never names an option. The
+   * owner was asked too; the first answer wins (a late one changes nothing).
+   */
+  private async answer(caller: string, args: Record<string, unknown>): Promise<CallToolResult> {
+    const sessionId = str(args, "sessionId", 256);
+    const requestId = str(args, "requestId", 256);
+    const decision = args.decision;
+    if (decision !== "allow" && decision !== "deny") {
+      throw new InvalidToolParams('decision: "allow" or "deny"');
+    }
+    const message = optStr(args, "message", MCP_ANSWER_MESSAGE_MAX);
+    if (this.own(caller, sessionId) === null || !this.exists(sessionId)) {
+      return toolError(UNKNOWN_SESSION);
+    }
+    const mode = this.modeOf(caller);
+    if (mode !== "both") {
+      return toolError("approvals are answered by the owner on this serve (--mcp-asks owner)");
+    }
+    if (this.opts.host.get(sessionId) === undefined) {
+      return toolError(NOT_ANSWERABLE);
+    }
+    let a: Attachment;
+    try {
+      a = await this.attach(sessionId, "MCP");
+    } catch (error) {
+      return toolError(`the session could not be reached${codeOf(error)}`);
+    }
+    const resolved = resolveCallerAnswer(
+      { requestId, decision, ...(message !== undefined ? { message } : {}) },
+      [...a.asks.values()],
+      mode,
+    );
+    if (resolved === null) {
+      return toolError(NOT_ANSWERABLE);
+    }
+    try {
+      await a.peer.request("session/resolve_permission", { sessionId, ...resolved });
+    } catch (error) {
+      // Answered meanwhile (first answer wins) or gone: nothing changed.
+      return toolError(`the approval is no longer pending${codeOf(error)}`);
+    }
+    return toolResult({ sessionId, requestId, decision, answered: true });
+  }
+
+  private modeOf(caller: string): AskMode {
+    return this.opts.callerAsks?.(caller) ?? "owner";
+  }
+
   private list(caller: string): CallToolResult {
     const prefix = callerPrefix(MCP_PROTOCOL, caller);
     const sessions: Record<string, unknown>[] = [];
@@ -375,7 +467,7 @@ export class McpTools {
         unit = pick(read.units, turnId) ?? unit;
       }
     }
-    return toolResult(this.project(sessionId, read.units, unit));
+    return toolResult(this.project(sessionId, read.units, unit, this.modeOf(caller)));
   }
 
   // --- reads ---------------------------------------------------------------------
@@ -425,6 +517,7 @@ export class McpTools {
     sessionId: string,
     units: readonly WorkUnit[],
     unit: WorkUnit | undefined,
+    mode: AskMode,
   ): Record<string, unknown> {
     const recent = turnsOf(units)
       .filter((u) => !isLive(u))
@@ -439,18 +532,34 @@ export class McpTools {
       return { sessionId, state: "idle", recent };
     }
     const asks = [...(this.attachments.get(sessionId)?.asks.values() ?? [])];
-    const statusMessage =
+    // Only what the caller may answer, only in `both` (the shared rule, never a copy).
+    const answerable =
       unit.state === "waiting" && unit.waitingFor === "permission"
-        ? `waiting for the owner's approval${asks.length > 0 ? `: ${asks.map((a) => a.title).join("; ")}` : ""}`
-        : unit.state === "waiting"
-          ? "waiting for the owner"
-          : unit.reason;
+        ? asks.filter((a) => callerMayAnswer(a, mode))
+        : [];
+    const statusMessage =
+      answerable.length > 0
+        ? `approval needed: ${answerable.map((a) => `${a.title} — session_answer requestId=${a.requestId}`).join("; ")}`
+        : unit.state === "waiting" && unit.waitingFor === "permission"
+          ? `waiting for the owner's approval${asks.length > 0 ? `: ${asks.map((a) => a.title).join("; ")}` : ""}`
+          : unit.state === "waiting"
+            ? "waiting for the owner"
+            : unit.reason;
     return {
       sessionId,
       turnId: unit.id,
       state: unit.state,
       ...(unit.waitingFor !== undefined ? { waitingFor: unit.waitingFor } : {}),
       ...(statusMessage !== undefined ? { statusMessage } : {}),
+      ...(answerable.length > 0
+        ? {
+            asks: answerable.map((a) => ({
+              requestId: a.requestId,
+              title: a.title,
+              options: callerOptions(a).map((o) => (o.kind === "allow_once" ? "allow" : "deny")),
+            })),
+          }
+        : {}),
       // The final round only (never tool output or the transcript: §8).
       ...(unit.result !== undefined && !isLive(unit) ? { result: unit.result } : {}),
       ...(unit.resultDropped === true ? { resultDropped: true } : {}),
@@ -519,10 +628,15 @@ export class McpTools {
         a.activeTurn = u.turnId;
         this.settle(a);
         return;
-      case "permission_request":
-        a.asks.set(u.requestId, askOf(u, askIsOwn(u, a.activeTurn ?? "")));
+      case "permission_request": {
+        // The caller's own only when raised by a turn IT started (`<ctx>.<t>`,
+        // Design §3): an ask of the owner's turn in this session stays the owner's.
+        const turn = a.activeTurn ?? this.runningTurn(a.sessionId)?.id;
+        const own = turn !== undefined && isCallerTurn(a.sessionId, turn) && askIsOwn(u, turn);
+        a.asks.set(u.requestId, askOf(u, own));
         this.wake(a);
         return;
+      }
       case "permission_resolved":
         if (a.asks.delete(u.requestId)) this.wake(a);
         return;
@@ -613,6 +727,17 @@ function pick(units: readonly WorkUnit[], turnId: string | undefined): WorkUnit 
   const turns = turnsOf(units);
   if (turnId === undefined) return turns.at(-1);
   return turns.find((u) => u.id === turnId) ?? null;
+}
+
+/**
+ * Did the MCP caller start this turn? Its turn ids are `<ctx>.<uuid>` with
+ * `<ctx>` the session's own context (`mcp-<caller>-<ctx>`; the caller and the
+ * protocol word hold no `-`).
+ */
+function isCallerTurn(sessionId: string, turnId: string): boolean {
+  const cut = sessionId.indexOf("-", MCP_PROTOCOL.length + 1);
+  const ctx = cut < 0 ? "" : sessionId.slice(cut + 1);
+  return ctx !== "" && turnId.startsWith(`${ctx}.`);
 }
 
 function codeOf(error: unknown): string {
