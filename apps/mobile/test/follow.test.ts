@@ -801,3 +801,44 @@ describe("the landing stays HIDDEN until the list rests at its end (fix/mobile-o
     expect(landingReveal(hidden, M, true, ROWS).state.settling).toBe(false);
   });
 });
+
+describe("the bound does not show the list in the tick of its own scroll (fix/mobile-open-long-session-2)", () => {
+  // QA 25/11: 57 turns (114 rows) opened ~1 turn short. The landing's 12th measurement
+  // (content grew 5175 → 5360) hit the bound, scrolled AND revealed in the same
+  // tick; the native view painted the previous end and nothing ever re-scrolled it.
+  const grow = (n: number) => ({ content: 3000 + n * 500, viewport: 800 });
+  const toBound = (): Landing => {
+    let state: Landing = landingStart;
+    for (let i = 1; i < LANDING_ROUNDS; i++) {
+      state = landingStep(state, grow(i), true, ROWS).state;
+    }
+    return state;
+  };
+
+  test("the measurement that hits the bound scrolls silently but stays hidden", () => {
+    const hit = landingStep(toBound(), grow(LANDING_ROUNDS), true, ROWS);
+    expect(hit.step?.animated).toBe(false);
+    expect(hit.step?.scrollTo).toBe(endOffset(grow(LANDING_ROUNDS)));
+    expect(hit.state.settling).toBe(true);
+  });
+
+  test("the quiet timer then shows it, into the silent tail", () => {
+    const hit = landingStep(toBound(), grow(LANDING_ROUNDS), true, ROWS);
+    const shownNow = landingReveal(hit.state, grow(LANDING_ROUNDS), true, ROWS);
+    expect(shownNow.state.settling).toBe(false);
+    expect(landingPending(shownNow.state)).toBe(true);
+    expect(shownNow.step?.animated).toBe(false);
+  });
+
+  test("a growth while capped is not hidden again: the bound shows it into the tail", () => {
+    const hit = landingStep(toBound(), grow(LANDING_ROUNDS), true, ROWS);
+    const more = landingStep(hit.state, grow(LANDING_ROUNDS + 1), true, ROWS);
+    expect(more.state.settling).toBe(false);
+    expect(more.step?.animated).toBe(false);
+  });
+
+  test("a reader scrolled up is revealed in place, never yanked", () => {
+    const hit = landingStep(toBound(), grow(LANDING_ROUNDS), false, ROWS);
+    expect(hit).toEqual({ state: landingDone, step: null });
+  });
+});
