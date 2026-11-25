@@ -97,6 +97,7 @@ import {
   checkAttachmentRefs,
   daemonWakeGate,
   formatBytes,
+  isDefaultOffTool,
   nextDateStamp,
   ownRequest,
   scheduleCheckDelayMs,
@@ -1240,8 +1241,16 @@ export class HostedSession {
     // turned back on (`/tools`) leaves no entry, and re-seeding it would bring
     // the switch back on every restart. The agent is built with the config's
     // set (`buildAgent`, D4), so the record's absence must EXPLICITLY clear it.
+    // One exception, off wins: a default-off tool (the browser, which acts with
+    // the user's identity) this host built OFF stays off — the record cannot
+    // tell "turned on" from "written before the tool existed" (B4 fix round 1).
     if (restored !== undefined) {
-      this.caps = normalizeCapabilities(restored.capabilities ?? NO_CAPABILITIES);
+      const record = restored.capabilities ?? NO_CAPABILITIES;
+      const builtOff = session.currentAgent().capabilities().disabledTools.filter(isDefaultOffTool);
+      this.caps = normalizeCapabilities({
+        ...record,
+        disabledTools: [...record.disabledTools, ...builtOff],
+      });
       session.currentAgent().setCapabilities(this.caps);
     } else {
       // A session this host CREATES starts from what its agent was built with:

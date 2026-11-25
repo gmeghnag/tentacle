@@ -14,6 +14,10 @@
         "typescript": "5.7.2",
       },
     },
+    "apps/browser-extension": {
+      "name": "@tentacle/browser-extension",
+      "version": "0.7.1",
+    },
     "apps/mobile": {
       "name": "@tentacle/mobile",
       "dependencies": {
@@ -80,6 +84,13 @@
         "zod": "3.23.8",
       },
     },
+    "packages/browser": {
+      "name": "@tentacle/browser",
+      "version": "0.7.1",
+      "dependencies": {
+        "zod": "3.23.8",
+      },
+    },
     "packages/cli": {
       "name": "@tentacle/cli",
       "version": "0.7.1",
@@ -88,6 +99,7 @@
       },
       "dependencies": {
         "@tentacle/agent": "workspace:*",
+        "@tentacle/browser": "workspace:*",
         "@tentacle/client": "workspace:*",
         "@tentacle/config": "workspace:*",
         "@tentacle/core": "workspace:*",
@@ -214,6 +226,7 @@
       "name": "@tentacle/tools",
       "version": "0.7.1",
       "dependencies": {
+        "@tentacle/browser": "workspace:*",
         "@tentacle/core": "workspace:*",
         "diff": "5.2.0",
         "linkedom": "0.18.15",
@@ -618,6 +631,10 @@
     "@sindresorhus/is": ["@sindresorhus/is@4.6.0", "", {}, "sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw=="],
 
     "@tentacle/agent": ["@tentacle/agent@workspace:packages/agent"],
+
+    "@tentacle/browser": ["@tentacle/browser@workspace:packages/browser"],
+
+    "@tentacle/browser-extension": ["@tentacle/browser-extension@workspace:apps/browser-extension"],
 
     "@tentacle/cli": ["@tentacle/cli@workspace:packages/cli"],
 
