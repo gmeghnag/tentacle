@@ -560,7 +560,96 @@ SLICES: s1=opus s2=sonnet s3=opus s4=opus s5=sonnet
 
 ## Execution
 
-*(empty until Implementation is approved)*
+### s1 — core types + protocol schemas + T4 + T6
+
+*— claude-opus-5-5, 2026-11-25*
+
+**Load-bearing check, re-run first** (before any edit, on this worktree's
+sources: the Repro with its imports pointed at the worktree,
+`.tentacle/tmp/reasoning-echo/repro-wt.ts`): still red, exactly as in Context —
+`requests: 2`, the 2nd request's assistant message
+`{"role":"assistant","content":"","tool_calls":[…]}`, `FAIL (red):
+reasoning_content missing on the 2nd request`, exit 1. (s1 does not turn it
+green: the decode/loop/encode links are s2–s4.)
+
+**As built, in order (red first, then green):**
+1. Tests written and shown RED on the assertion (not on an import):
+   - T6 `packages/core/test/token-counter.test.ts` (new describe at the end):
+     OpenAI text counted; Anthropic thinking + redacted data counted, the
+     signature not. Red: `Expected: 35 / Received: 5`.
+   - T4 schema half, new `packages/protocol/test/reasoning-record.test.ts`:
+     valid record byte-identical (openai `reasoning_content`, openai
+     `reasoning`, anthropic incl. an omitted-display block); malformed dropped
+     whole, message still parses; bounds (at the bound kept, over dropped:
+     source 256, text/thinking/signature/data 1 MiB, blocks 64); the critical
+     `message` entry carries it and loads when malformed; older reader strips;
+     the pod wire (`WireChatMessageSchema`, `done`) keeps / drops fail-soft.
+     Red: 5 fail (the 2 that passed are the fail-soft/strip guards, true by
+     stripping today — made non-vacuous by M2 below).
+   - T4 persistence: `packages/daemon/test/persistence.test.ts` (serve daemon:
+     log + sidecar through `parseFixture` → `restore` → `snapshotPage`, next to
+     the `thought` test) and `packages/daemon/test/session-log-store.test.ts`
+     (laptop `<uid>.jsonl`: a cold base + an appended round round-trip; a file
+     without the field loads unchanged). Red: both round-trip tests fail
+     (field stripped on load).
+2. `packages/core/src/model.ts`: `ReasoningRecord` / `ReasoningBody` /
+   `AnthropicReasoningBlock` (D1, verbatim), `ChatMessage.reasoning?`,
+   `done.reasoning?` on `StreamEvent`.
+3. `packages/core/src/token-counter.ts`: `countMessages` adds
+   `countReasoning` (D7).
+4. `packages/protocol/src/model.ts`: `REASONING_TEXT_MAX` (1 MiB),
+   `REASONING_BLOCKS_MAX` (64), `AnthropicReasoningBlockSchema`,
+   `ReasoningBodySchema` (both discriminated unions), `ReasoningRecordSchema`;
+   `WireChatMessageSchema.reasoning` and `WireStreamEventSchema` `done.reasoning`,
+   both `.optional().catch(undefined)`.
+5. `packages/protocol/src/session.ts`: `chatMessageShape.reasoning =
+   ReasoningRecordSchema.optional().catch(undefined)` (so `ChatMessageSchema`,
+   `MessageWithAttachmentsSchema`, `MessageWithoutAttachmentsSchema` all carry it).
+6. `bun run schema:export` → `packages/protocol/schema/protocol.json` (+139
+   lines); `packages/protocol/test/json-schema.test.ts` union count 12 → 14
+   (the two new tagged unions, comment added).
+7. `changelog.d/reasoning-echo.fixed.md`.
+
+**Drift from Implementation (and why):**
+- `ReasoningRecordSchema` lives in `protocol/src/model.ts`, not `session.ts`:
+  the pod wire schema (in `model.ts`) needs it too, and `model.ts` cannot
+  import `session.ts` (which already imports `model.ts`) without a cycle.
+  `session.ts` imports it. Same schema, one definition.
+- The wire carriers (`WireChatMessageSchema.reasoning`, `done.reasoning`) are
+  FAIL-SOFT too (`.catch(undefined)`), not just optional: D8 says "no echo,
+  never a failed turn", and a strict field would fail a whole `model/stream`
+  on one malformed record.
+- Bounds made explicit beyond D8's list, all following D2: OpenAI `text`
+  min 1 (D2 attaches only non-empty text); a `thinking` block's `signature`
+  min 1 (an unsigned block is never stored — it would 400); `redacted_thinking`
+  `data` min 1; `blocks` min 1; the signature is bounded at 1 MiB like the texts.
+- Regenerated with `bun run schema:export`, not `protocol:bump`: there is no
+  `protocol.d/` on this branch, so the two are the same schema refresh, and
+  the version line stays the orchestrator's (AGENTS §7).
+- D8 "confirm real turns sit far below the bound": only the average is
+  measured (DeepSeek no-echo arm 6.3k ch/turn, Context table) — ≈166× under
+  1 MiB. The per-turn MAX is unmeasured; s5's bench can record it.
+
+**Mutation checks (each reverted, `rg MUTATION` clean afterwards):**
+
+| mutation | result |
+|---|---|
+| M1 drop `reasoning` from `chatMessageShape` | 3 protocol tests fail + daemon restart test + laptop store round-trip fail |
+| M2 drop `.catch(undefined)` on the `chatMessageShape` field | "malformed dropped", "bounds", "critical entry loads when malformed" fail |
+| M3 drop the field from `WireChatMessageSchema` and from `done` | both pod-wire tests fail |
+| M4 `countMessages` adds `0 * countReasoning` | both T6 tests fail |
+
+**Verification (narrow, per the token budget):**
+`bun test packages/core/test/token-counter.test.ts packages/protocol/test/` →
+586 pass, 0 fail; `bun test packages/daemon/test/session-log-store.test.ts
+packages/daemon/test/persistence.test.ts` → 165 pass, 0 fail; `bunx biome
+check` on the 10 touched TS/JSON files → clean. Whole-repo typecheck/lint/test: the
+orchestrator's gate (not run here). Typecheck risk noted: core's `readonly`
+arrays vs protocol's inferred mutable ones — the core↔wire seams already cast
+(`daemon/src/session-log.ts:478`, `client/src/remote-client.ts:4634`), as for
+`toolCalls`.
+
+**Status: s1 DONE.** s2–s5 untouched.
 
 ## Review
 

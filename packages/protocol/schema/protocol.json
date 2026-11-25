@@ -298,6 +298,59 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "AnthropicReasoningBlock": {
+      "discriminator": {
+        "mapping": {
+          "redacted_thinking": "#/$defs/AnthropicReasoningBlockRedactedThinking",
+          "thinking": "#/$defs/AnthropicReasoningBlockThinking"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AnthropicReasoningBlockThinking"
+        },
+        {
+          "$ref": "#/$defs/AnthropicReasoningBlockRedactedThinking"
+        }
+      ]
+    },
+    "AnthropicReasoningBlockRedactedThinking": {
+      "additionalProperties": true,
+      "properties": {
+        "data": {
+          "maxLength": 1048576,
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "const": "redacted_thinking",
+          "type": "string"
+        }
+      },
+      "required": ["data", "type"],
+      "type": "object"
+    },
+    "AnthropicReasoningBlockThinking": {
+      "additionalProperties": true,
+      "properties": {
+        "signature": {
+          "maxLength": 1048576,
+          "minLength": 1,
+          "type": "string"
+        },
+        "thinking": {
+          "maxLength": 1048576,
+          "type": "string"
+        },
+        "type": {
+          "const": "thinking",
+          "type": "string"
+        }
+      },
+      "required": ["signature", "thinking", "type"],
+      "type": "object"
+    },
     "ArtifactListParams": {
       "additionalProperties": true,
       "properties": {
@@ -723,6 +776,9 @@
         },
         "note": {
           "$ref": "#/$defs/MessageNote"
+        },
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
         },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
@@ -3080,6 +3136,9 @@
         "note": {
           "$ref": "#/$defs/MessageNote"
         },
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
+        },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
@@ -3196,6 +3255,9 @@
         },
         "note": {
           "$ref": "#/$defs/MessageNote"
+        },
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
         },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
@@ -4138,6 +4200,77 @@
       "required": ["entries", "returned", "type"],
       "type": "object",
       "x-event-class": "display"
+    },
+    "ReasoningBody": {
+      "discriminator": {
+        "mapping": {
+          "anthropic": "#/$defs/ReasoningBodyAnthropic",
+          "openai": "#/$defs/ReasoningBodyOpenai"
+        },
+        "propertyName": "format"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ReasoningBodyOpenai"
+        },
+        {
+          "$ref": "#/$defs/ReasoningBodyAnthropic"
+        }
+      ]
+    },
+    "ReasoningBodyAnthropic": {
+      "additionalProperties": true,
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/AnthropicReasoningBlock"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "format": {
+          "const": "anthropic",
+          "type": "string"
+        }
+      },
+      "required": ["blocks", "format"],
+      "type": "object"
+    },
+    "ReasoningBodyOpenai": {
+      "additionalProperties": true,
+      "properties": {
+        "field": {
+          "enum": ["reasoning_content", "reasoning"],
+          "type": "string"
+        },
+        "format": {
+          "const": "openai",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 1048576,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["field", "format", "text"],
+      "type": "object"
+    },
+    "ReasoningRecord": {
+      "additionalProperties": true,
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/ReasoningBody"
+        },
+        "source": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["body", "source"],
+      "type": "object"
     },
     "ReclaimParams": {
       "additionalProperties": true,
@@ -6622,6 +6755,9 @@
         "content": {
           "type": "string"
         },
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
+        },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
@@ -6701,6 +6837,9 @@
     "WireStreamEventDone": {
       "additionalProperties": true,
       "properties": {
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
+        },
         "stopReason": {
           "$ref": "#/$defs/WireStopReason"
         },

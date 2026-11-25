@@ -122,3 +122,39 @@ describe("image refs at an entry point (docs/feat/attachments-core.md, D4)", () 
     expect(formatBytes(1536)).toBe("1.5 KB");
   });
 });
+
+// docs/fix/reasoning-echo.md D7 (T6): the model's own reasoning is echoed back
+// on every request, so the estimate counts it — else prune/compaction fire late.
+describe("countMessages counts an assistant message's reasoning record", () => {
+  const counter = new HeuristicTokenCounter();
+  const bare: ChatMessage = { role: "assistant", content: "abcd" };
+
+  test("OpenAI-format text: grows by the text's own count", () => {
+    const text = "x".repeat(400);
+    const withIt: ChatMessage = {
+      ...bare,
+      reasoning: {
+        source: "openai:m",
+        body: { format: "openai", field: "reasoning_content", text },
+      },
+    };
+    expect(counter.countMessages([withIt])).toBe(counter.countMessages([bare]) + 100);
+  });
+
+  test("Anthropic blocks: thinking + redacted data are counted, the signature is not", () => {
+    const withIt: ChatMessage = {
+      ...bare,
+      reasoning: {
+        source: "anthropic:m",
+        body: {
+          format: "anthropic",
+          blocks: [
+            { type: "thinking", thinking: "y".repeat(40), signature: "s".repeat(4000) },
+            { type: "redacted_thinking", data: "z".repeat(80) },
+          ],
+        },
+      },
+    };
+    expect(counter.countMessages([withIt])).toBe(counter.countMessages([bare]) + 10 + 20);
+  });
+});
