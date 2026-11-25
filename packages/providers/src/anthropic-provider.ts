@@ -1,21 +1,3 @@
-/**
- * Anthropic Messages API provider.
- *
- * Implements `ModelProvider` against `POST {baseURL}/messages` and normalises
- * the Messages wire format behind the core `StreamEvent` contract, mirroring
- * `openai-provider.ts`:
- *   - `text_delta`            → `text`
- *   - `thinking_delta`        → `reasoning`
- *   - `tool_use` blocks (id/name from `content_block_start`, `input` JSON
- *     accumulated from `input_json_delta`) → one `tool_call` per block, emitted
- *     once the message completes — never for a call cut short (`max_tokens`,
- *     `refusal`, or a stream that ends mid-block): those throw instead
- *   - `message_start`/`message_delta` usage → `done`
- *
- * Request mapping is the reverse: the top-level `system` field, `tool_use`
- * content blocks on assistant turns, and `tool_result` user messages for tool
- * results.
- */
 import type {
   ChatMessage,
   ChatRequest,
@@ -39,6 +21,25 @@ import {
   toolResultText,
   userParts,
 } from "./images.ts";
+/**
+ * Anthropic Messages API provider.
+ *
+ * Implements `ModelProvider` against `POST {baseURL}/messages` and normalises
+ * the Messages wire format behind the core `StreamEvent` contract, mirroring
+ * `openai-provider.ts`:
+ *   - `text_delta`            → `text`
+ *   - `thinking_delta`        → `reasoning`
+ *   - `tool_use` blocks (id/name from `content_block_start`, `input` JSON
+ *     accumulated from `input_json_delta`) → one `tool_call` per block, emitted
+ *     once the message completes — never for a call cut short (`max_tokens`,
+ *     `refusal`, or a stream that ends mid-block): those throw instead
+ *   - `message_start`/`message_delta` usage → `done`
+ *
+ * Request mapping is the reverse: the top-level `system` field, `tool_use`
+ * content blocks on assistant turns, and `tool_result` user messages for tool
+ * results.
+ */
+import { toDraft2020 } from "./json-schema-2020.ts";
 import {
   ModelRequestError,
   ModelServerError,
@@ -594,7 +595,7 @@ function toWireTool(tool: ToolDefinition): Record<string, unknown> {
   return {
     name: tool.name,
     description: tool.description,
-    input_schema: tool.parameters,
+    input_schema: toDraft2020(tool.parameters),
   };
 }
 
