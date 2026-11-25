@@ -4,10 +4,11 @@
  * (`PermissionOption`/`PermissionOutcome`). The daemon offers the options; the
  * client's selection maps back to a gate decision. Pure and table-driven.
  */
-import type {
-  PermissionRequest,
-  PermissionRequestOptions,
-  PermissionResponse,
+import {
+  type PermissionRequest,
+  type PermissionRequestOptions,
+  type PermissionResponse,
+  onceOnlyAsk,
 } from "@tentacle/core";
 import {
   MAX_PERMISSION_REPLY_CHARS,
@@ -24,7 +25,8 @@ export function permissionOptions(req: PermissionRequest): PermissionOption[] {
     : "Allow for the rest of this session";
   // A workflow's hash approval / approve step is allow-once or deny only: a
   // lasting answer would wave through a merge (docs/feat/agent-workflows.md D3).
-  if (req.kind === "workflow_approve") {
+  // A browser action likewise: each one acts as the user on the web (B5).
+  if (onceOnlyAsk(req)) {
     return [
       { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
       { optionId: "reject_once", name: "Deny", kind: "reject_once" },

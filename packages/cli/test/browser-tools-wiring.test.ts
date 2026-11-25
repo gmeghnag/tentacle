@@ -9,7 +9,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "@tentacle/config";
-import type { ToolContext } from "@tentacle/core";
+import { type PermissionRequest, type Tool, type ToolContext, autoApproves } from "@tentacle/core";
 import { BROWSER_TOOL_NAMES } from "@tentacle/tools";
 import { browserToolsetOf } from "../src/browser-link.ts";
 import { createServeAgent } from "../src/serve.ts";
@@ -103,5 +103,37 @@ describe("browser tools: where they are offered, and off by default", () => {
     const r = await read?.execute({ tab: 1 } as never, ctx);
     expect(r?.content).toContain("token here");
     expect(r?.content).not.toContain(jwt);
+  });
+
+  test("B5 single broker: a browser_action ask reaches the SESSION's broker; denied → no click", async () => {
+    const ops: string[] = [];
+    const set = browserToolsetOf(
+      {
+        call: async (op) => {
+          ops.push(op.op === "click" && op.probe === true ? "probe" : op.op);
+          if (op.op === "click") return { facts: { tag: "button", name: "Pay", submits: true } };
+          return {};
+        },
+      },
+      undefined,
+    );
+    const wired = workerAgentFactory(await configIn(), {}, { browser: set });
+    const asked: PermissionRequest[] = [];
+    wired.permissions.setRequester(async (req) => {
+      asked.push(req);
+      return { allowed: false };
+    });
+    const click = built(wired.agent).config.tools.get("browser_click") as Tool<unknown> | undefined;
+    const ctx = {
+      sessionId: "s",
+      signal: new AbortController().signal,
+      env: {},
+      toolCallId: "c1",
+    } as unknown as ToolContext;
+    const r = await click?.execute({ tab: 1, ref: "e1" }, ctx);
+    expect(asked.map((a) => a.kind)).toEqual(["browser_action"]);
+    expect(autoApproves(asked[0] as PermissionRequest)).toBe(false);
+    expect(r?.isError).toBe(true);
+    expect(ops.filter((o) => o === "click")).toEqual([]);
   });
 });

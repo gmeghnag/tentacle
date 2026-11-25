@@ -136,10 +136,12 @@ export function classifyAction(a: ActionInput): ActionVerdict {
       if (PAYMENT_RE.test(name)) hard = true;
     }
   }
-  const target = a.kind === "open" ? a.targetUrl : f?.href;
-  if (target) {
-    const d = registrableDomain(target);
-    if (d && !a.visited.has(d)) reasons.push(`navigates to a new domain (${d})`);
+  // Where the action navigates: the URL opened, a link's href, or — when it
+  // submits — its form's action (the classic exfiltration post, §4 layer 4).
+  const submits = (a.kind === "click" && f?.submits === true) || (a.kind === "type" && a.submit);
+  const targets = [a.kind === "open" ? a.targetUrl : f?.href, submits ? f?.formAction : undefined];
+  for (const target of new Set(targets.map((t) => (t ? registrableDomain(t) : "")))) {
+    if (target && !a.visited.has(target)) reasons.push(`navigates to a new domain (${target})`);
   }
   if (a.firstOnHandedOver) reasons.push("first action on a tab the user handed over");
 

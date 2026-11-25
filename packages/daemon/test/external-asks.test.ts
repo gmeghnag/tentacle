@@ -4,7 +4,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { PermissionRequestUpdate } from "@tentacle/protocol";
-import { type PendingAsk, askIsOwn, askOf, resolveCallerAnswer } from "../src/external/asks.ts";
+import {
+  type PendingAsk,
+  askIsOwn,
+  askOf,
+  callerMayAnswer,
+  resolveCallerAnswer,
+} from "../src/external/asks.ts";
 
 const OPTIONS = [
   { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
@@ -53,6 +59,16 @@ describe("external asks", () => {
     expect(askOf(update(), false).kind).toBeUndefined();
     expect(askOf(update(), true).replyMax).toBe(10);
     expect(askOf(update({ reply: undefined }), true).replyMax).toBeUndefined();
+  });
+
+  // Mutation: drop the `browser_action` branch of `askOf` (→ kind `tool`), or
+  // mark it `once` in core's table → the caller approves a click in the
+  // owner's Chrome → red (docs/feat/browser-inspect.md, Review B5 finding 1).
+  test("a browser action ask is the owner's only, in every mode", () => {
+    const own = askOf(update({ tool: "browser_action" }), true);
+    expect(own.kind).toBe("browser_action");
+    expect(callerMayAnswer(own, "both")).toBe(false);
+    expect(callerMayAnswer(own, "owner")).toBe(false);
   });
 
   // Mutation (the plan's): route by requestId without the kind check → the

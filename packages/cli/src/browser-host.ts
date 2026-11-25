@@ -149,10 +149,19 @@ export function createHub(options: HubOptions): Hub {
       if (p === undefined) return;
       if (m.ok === true) {
         // The tab the extension opened for this session is the session's now.
-        const result = m.result;
+        let result = m.result;
         if (p.op.op === "open" && typeof result === "object" && result !== null) {
           const tab = (result as { tab?: unknown }).tab;
           if (typeof tab === "number") ownership.addTab(p.op.sessionUid, tab);
+        }
+        // §5: the first action on a handed-over tab asks. A probe carries the
+        // hub's fact; a done action spends it (the tool asked before acting).
+        if (p.op.op === "click" || p.op.op === "type") {
+          if (p.op.probe === true && typeof result === "object" && result !== null) {
+            result = { ...result, handedOver: ownership.isHandedOver(p.op.tab) };
+          } else if (p.op.probe !== true) {
+            ownership.markActed(p.op.tab);
+          }
         }
         settle(m.id, { ok: true, result });
       } else {
