@@ -24,6 +24,7 @@ import {
   SubagentFailure,
   type Tool,
   type ToolProgressEvent,
+  denyAll,
   shellIntent,
   toolLabel,
 } from "@tentacle/core";
@@ -47,6 +48,7 @@ import {
 } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { SessionCapabilities } from "./capabilities.ts";
+import { type HarnessDeps, runHarnessChild } from "./harness/child.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
 import { classOf, isReadClass } from "./round-plan.ts";
@@ -70,6 +72,15 @@ export interface AgentType {
    * (docs/feat/context-awareness.md). Absent → the parent's window.
    */
   readonly contextWindow?: number;
+  /**
+   * Run by another agent harness, not a tentacle `Agent`
+   * (docs/feat/subagent-harness-runners.md D3): the instance name in
+   * `SubagentDeps.harness` and the mode (`write` = a local process in its own
+   * worktree; `remote` = the only mode a remote adapter accepts, D10). `prompt`,
+   * `tools` and `model` are then unused: the call's `model` goes to the harness
+   * verbatim.
+   */
+  readonly harness?: { readonly adapter: string; readonly mode: "write" | "remote" };
 }
 
 const GENERAL_PROMPT = `You are an autonomous sub-agent working on a focused task delegated by a
@@ -361,6 +372,12 @@ export interface SubagentDeps {
    * from every child too, from its next model call. Absent → everything on.
    */
   readonly capabilities?: () => SessionCapabilities;
+  /**
+   * The harness instances a `harness` type runs on
+   * (docs/feat/subagent-harness-runners.md D3). Given by the wiring only when
+   * NOT tunnelled (D5): a pod has no harness type and no harness deps.
+   */
+  readonly harness?: HarnessDeps;
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -381,6 +398,44 @@ export function createSubagentRunner(deps: SubagentDeps): {
     const type = types.find((t) => t.name === opts.type) ?? types[0];
     if (!type) {
       return { report: "no sub-agent type available", toolUses: 0, stopReason: "end_turn" };
+    }
+    // The child's asks, attributed to the parent's call / `sa-N`: the ONE broker.
+    const childRequester = deps.requestPermission
+      ? subagentRequester(
+          deps.requestPermission,
+          controls?.toolCallId,
+          { type: type.name, description: opts.description },
+          controls?.agentId !== undefined && controls.signal
+            ? { id: controls.agentId, signal: controls.signal }
+            : controls?.move !== undefined
+              ? { move: controls.move }
+              : undefined,
+        )
+      : undefined;
+    // Another harness runs this child (D3): the call's `model` is that harness's
+    // own string (never a `models` name), shown as given; everything after the
+    // start event is the harness child's.
+    if (type.harness !== undefined) {
+      const model = opts.model ?? deps.harness?.instances.get(type.harness.adapter)?.model;
+      controls?.onEvent?.({
+        kind: "subagent_start",
+        agentType: type.name,
+        description: opts.description,
+        ...(model !== undefined ? { model } : {}),
+      });
+      // D4: its asks go through the same gate inputs a tentacle child's would.
+      return runHarnessChild(type, opts, controls, deps.harness, {
+        requester: childRequester ?? denyAll,
+        ...(deps.hooks
+          ? {
+              hooks: deps.hooks.forAgent({ type: type.name, description: opts.description }, model),
+            }
+          : {}),
+        grants,
+        sessionId: controls?.sessionId ?? "",
+        tool: (n) => deps.tools.get(n),
+        ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
+      });
     }
     // The child's model, picked BEFORE its start event so the row carries it: a
     // `models` name for the wire (never an id, AGENTS §7) and the resolved ID
@@ -495,20 +550,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
-      ...(deps.requestPermission
-        ? {
-            requestPermission: subagentRequester(
-              deps.requestPermission,
-              controls?.toolCallId,
-              { type: type.name, description: opts.description },
-              controls?.agentId !== undefined && controls.signal
-                ? { id: controls.agentId, signal: controls.signal }
-                : controls?.move !== undefined
-                  ? { move: controls.move }
-                  : undefined,
-            ),
-          }
-        : {}),
+      ...(childRequester !== undefined ? { requestPermission: childRequester } : {}),
       grants,
       // A server may reuse call ids: two children must not share a spill file.
       spillScope: crypto.randomUUID().slice(0, 8),
@@ -671,6 +713,11 @@ export function createSubagentRunner(deps: SubagentDeps): {
 
   const readOnlyType = (name: string): boolean => {
     const type = types.find((t) => t.name === name);
+    // A harness child changes nothing on this machine only when it is remote
+    // (D3); a `write` run edits its worktree and runs commands.
+    if (type?.harness !== undefined) {
+      return type.harness.mode === "remote";
+    }
     if (!type || type.tools === "all") {
       return false;
     }

@@ -248,6 +248,9 @@ export function createServeAgent(
       // Workflows (docs/feat/agent-workflows.md D3): `serve` runs them unattended
       // on the user's own host. `tunnelledAgent` never passes this.
       workflows: true,
+      // Harness sub-agents (docs/feat/subagent-harness-runners.md D5, Owner A8):
+      // `claude` on THIS host with its login. `tunnelledAgent` never passes this.
+      harnesses: {},
       // The user's Chrome (browser-inspect B4, D5: every session of this Mac,
       // phone sessions included). `tunnelledAgent` (a pod) never passes this.
       ...(browser !== undefined ? { browser } : {}),
