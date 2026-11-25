@@ -1468,3 +1468,79 @@ step). Facts for the re-run:
 - **Unverified:** the real TUI / phone sheet rendering of the question over
   this path; Bun DNS on a public card (loopback only here). Gate not run
   (script runs it); no protocol change.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-25* (fresh context; the same model family planned
+and executed the load-bearing slices, so blind spots they share may have
+survived both passes)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM bug, one MEDIUM open owner decision; no HIGH).
+
+**Gate (narrow + static):** the 23 touched test files plus `packages/protocol/test/`
+→ **917 pass / 0 fail** (82 files); `bun run typecheck` clean; `bun run lint`
+clean (2556 files). The full `bun run test` was not run here (the orchestrator's merge gate runs it).
+
+**Findings**
+1. **MEDIUM — a stale inbox message is sent as the answer to a remote question.**
+   `packages/core/src/agent-inbox.ts:172-176` (`next` returns the OLDEST
+   queued item at once), used by `packages/agent/src/harness/child.ts:601`
+   (`parent` / `both` route). Nothing drains a harness child's inbox while it
+   runs (`steer: false`; only `close()` at the end, `child.ts:423/527`), so any
+   `agent_control message` / `session/subagent_message` sent BEFORE the
+   question becomes its answer. Case: `inputFrom: "both"` — the person answers
+   Q1 in the pop-up, the parent (already told «your text is sent to the remote
+   agent») replies late. That reply sits queued and instantly answers Q2. With
+   auto mode ON or a session grant on `a2a:<name>`, it leaves with no human
+   seeing it. **Repro** (`.tentacle/tmp/a2a-client/stale-inbox.test.ts`, real
+   `createSubagentRunner`, auto-approving broker, inbox pre-loaded with «how is
+   it going?» before the question): `answers: [ "how is it going?" ]`, asks
+   `[tool, tool]`: the second consent was auto-answered. Fix direction: give
+   `next` only items pushed after the question (a watermark/epoch taken when
+   the question is raised), or drain the inbox when it is raised. Add a red
+   test for both the pre-queued case and the late `both`-loser reply.
+2. **MEDIUM — Q2 (b) is not reachable: the owner decision on the card
+   prefetch is still open.** a2c-3 is marked PARTIAL (Slices, the second «Plan
+   fix»: options a/b/c). `rg a2aCards|prefetchA2ACards` finds no caller outside
+   `packages/cli/src/wiring.ts`, so every configured `a2a:` type reads
+   «(remote card not loaded)» in production. The model never reads the card
+   text that the owner's Q2 (b) asked for. The changelog makes no claim about
+   card text, so it stays honest. Before merge: either the owner picks a/b/c
+   and it is wired, or the gap moves to Notes/debt + TODO.md with the owner's OK.
+
+**Mutations run here** (each restored; `cmp` byte-identical afterwards):
+| mutation | result |
+|---|---|
+| daemon raise/show/recheck use `"permission_request"` instead of the ask's own type (the plan's named a2c-4 mutation) | red — 2 fail (`question-ask.test.ts`: raise + detach fallback hang) |
+| `autoApproves` answers `kind: "question"` | red — 1 fail (`permission-kinds.test.ts`) |
+The executor's mutation tables (a2c-1/2/3/5/6/7/8) were not re-run one by one.
+
+**Attacks tried**
+- *Single broker:* consent (`authorizeRemoteSend`), question
+  (`askRemoteQuestion`) and the add ask (`a2a_add_agent` →
+  `permissions.request`) all go to the ONE requester. No second
+  `PermissionBroker` was found. **Holds.**
+- *Auto mode never answers a human decision:* `question`/`agent_add` are
+  excluded in `autoApproves` (laptop) and therefore in `autoAnswers` (daemon).
+  The client maps `a2a_add_agent` → `agent_add` (`permission-router.ts`).
+  `external/asks.ts` maps it → owner-only, and the external executors ignore
+  `question_request`. **Holds.**
+- *Pod gate:* `a2aHarnesses`, `proposedAgentsFor` and the tool are all behind
+  `!tunnelled && options.harnesses` (`wiring.ts:999-1009`, `:1115`). The laptop's
+  inbound method list is unchanged. **Holds.**
+- *Token / SSRF:* `pinnedFetch` drops any caller `Authorization`, locks every
+  request to the pinned origin, forces `redirect:"error"` and refuses 3xx. A
+  proposed agent is re-checked by DNS on every request. The SDK gets a card
+  copy holding only the accepted interface. Scrub covers the token and
+  `redactText`. Nothing found.
+- *Blocking-type fallback per ask:* `recheckAsks` now evaluates each ask
+  against its own type, and a permission request named in `answer_question`
+  stays pending (InvalidParams). Holds; mutation above.
+- *Persistence:* a question's pending record is `resumable: false`, and no
+  new log entry type was added. Holds.
+
+**How the executors behaved:** stops were honest (a2c-1/a2c-2 STOPPED, a2c-3
+PARTIAL with a plan fix, not forced code). Drifts are documented and mostly
+stricter than the plan. Tests were written after the code, with non-vacuity
+shown by mutation (stated openly). Unverified items are named: simulator
+screenshots (a2c-6) and Bun DNS on a public card.
