@@ -1,6 +1,6 @@
 # fix/reasoning-echo — send the model's own reasoning back to it, in every provider's format
 
-> **Status:** implementation — **NOT approved** (owner questions Q1–Q5 open)
+> **Status:** implementation — **APPROVED (owner answers 2026-11-25)**
 > **Branch:** `fix/reasoning-echo` (promoted from `eval/anthropic-thinking-echo`, owner 2026-11-25 ~17:30: absolute priority)
 > **Size:** M–L · **Blast:** load-bearing (`ChatMessage` + the persisted `message` entry + the pod model wire + every provider) · **Suited:** Opus plan + Opus on the load-bearing slices, Sonnet on the cheap ones; mandatory fresh-context Opus Review
 > **Changelog:** `changelog.d/reasoning-echo.fixed.md`
@@ -116,8 +116,8 @@ encoder sends it back exactly as that provider expects.
 (2026-11-18, option 3, binding): persist only a `thought: { ms }`
 **placeholder**, never the reasoning text, for DISPLAY. That decision was about
 what a reopened transcript shows. Echo needs the text as MODEL INPUT, which is a
-different purpose, so whether to persist it is asked again (Q1). The display
-rule is unchanged unless the owner says otherwise (Q4).
+different purpose, so whether to persist it was asked again: the owner chose to persist (Q1 A).
+The display rule is unchanged (Q4 A).
 
 ### Earlier context — the Anthropic-only eval (history, kept as written)
 
@@ -165,7 +165,7 @@ blocks; record HTTP status and response.
 
 ## Implementation
 
-*— claude-opus-5-5, 2026-11-25* — **NOT approved** (Q1–Q5 below)
+*— claude-opus-5-5, 2026-11-25* — **APPROVED (owner answers 2026-11-25)**: Q1–Q5 all A, see Owner answers
 
 Two points in the 2026-10-17 eval are superseded:
 - It said the OpenAI provider must *ignore* the new field. Now it echoes its own
@@ -229,7 +229,7 @@ T1 pins this end to end.
   The entry loads, and the reasoning is lost for that build only. There is a
   precedent for a separate critical type when stripping would be a silent
   half-load: `media_message` (`session-log.ts:169-180`). Whether the reasoning
-  counts as such a half-load is Q5.
+  counts as such a half-load was Q5: the owner chose A, an optional field on `message` (not a half-load: the transcript projects identically).
 - **P3 — the pod model wire copies field by field.** A pod's agent loop calls
   `ProxyModelProvider`. `toWireRequest` (`daemon/src/proxy-model.ts:57-99`)
   copies role/content/attachments/toolCalls/toolCallId by hand, so a new field
@@ -341,7 +341,7 @@ laptop now runs another model. There are three reasons:
 This is my design choice, not an owner question: it is the conservative one and
 it can be relaxed later.
 
-**D6 — echo scope** follows Q2. The recommended option is *always*:
+**D6 — echo scope: always** (owner Q2 A):
 - Every assistant message that has a record gets it on every request, as pi does
   and as the bench proxy did.
 - The bytes of earlier messages never change, so the prompt cache prefix holds.
@@ -354,16 +354,16 @@ it can be relaxed later.
   sum of thinking + data of the Anthropic blocks.
 - Compaction and reset drop it with the messages they replace (P5). Nothing more
   is needed.
-- Q3 asks whether anything more (a cap, or pruning old turns' reasoning) is
-  wanted.
+- No cap and no extra pruning of reasoning (owner Q3 A): it is never truncated.
 
 **D8 — wire (protocol, additive, no `protocol.d` note).**
 - `chatMessageShape` gets `reasoning: ReasoningRecordSchema.optional().catch(undefined)`.
   It is FAIL-SOFT like `thought`: a malformed or oversized value is DROPPED and
   the critical `message` entry still loads.
-- Bounds: `source` ≤ 256 chars. Each text/data ≤ 1 MiB, blocks ≤ 64 (sizes to
-  confirm in S1 against real DeepSeek turns: 6.3k ch/turn average, the max
-  observed far below).
+- Schema bounds, a guard against malformed or hostile input and NOT a cap (Q3 A:
+  nothing is ever truncated): `source` ≤ 256 chars, each text/data ≤ 1 MiB,
+  blocks ≤ 64. A value over a bound is dropped whole (fail-soft), never cut.
+  Confirm in s1 that real turns sit far below (DeepSeek: 6.3k ch/turn average).
 - `WireChatMessageSchema` gets the same optional field. `WireStreamEventSchema`
   `done` gets `reasoning` optional.
 - An older peer strips the field. The result is no echo, never a failed turn
@@ -380,7 +380,7 @@ reasoning gets a 400:
 **D10 — what crosses to the TUI and the phone.**
 - `session/log` carries the field, because the laptop store needs it (P1).
 - The TUI and the phone ignore it. The display stays the `thought` placeholder
-  (thought-placeholder, binding), unless Q4 says otherwise.
+  (thought-placeholder, binding; owner Q4 A: not shown after resume).
 
 ### Files (dependency order)
 
@@ -403,24 +403,24 @@ reasoning gets a 400:
    pins it.
 7. `changelog.d/reasoning-echo.fixed.md`.
 
-No TUI or mobile change (D10, if Q4 = A).
+No TUI or mobile change (D10, owner Q4 A).
 
 ### Failure modes
 
 | case | what happens | how it converges |
 |---|---|---|
-| Huge reasoning vs the context window | Counted in the estimate (D7). Prune and compaction fire on real size. Compaction drops it (P5). | The next request fits. Never a silent overflow. A single message over the schema bound is dropped from the persisted copy (fail-soft) and echo is lost for that message only. Q3 decides whether to cap. |
+| Huge reasoning vs the context window | Counted in the estimate (D7). Prune and compaction fire on real size. Compaction drops it (P5). | The next request fits. Never a silent overflow. No cap (Q3 A). Only a message over the 1 MiB schema guard is dropped whole (fail-soft), so echo is lost for that message only. |
 | Server rejects the unknown field (400) | D9: one retry without it, latched only on success. | The turn continues as today. A 400 for another cause fails both bodies and latches nothing. |
 | Model switch (`--resume` under another profile, a pod's laptop on another model) | D5: not sent (source ≠ id). | History keeps it. A switch back echoes again. |
 | Old session file without the field | Loads as today, nothing echoed for old messages. | New rounds carry it. |
-| Older build reading a new file | Strips the field (P2) and loads; no echo. If that build rewrites the segment, the reasoning is gone from the file. | Accepted under Q5 = A. Q5 = B makes the older build refuse instead. |
+| Older build reading a new file | Strips the field (P2) and loads; no echo. If that build rewrites the segment, the reasoning is gone from the file. | Accepted: owner Q5 A. |
 | Pod / untrusted reasoning (AGENTS §7) | A pod can already put any text in `content` of the history it sends. `reasoning` adds no new trust edge to the model. The laptop stores it only as part of a validated message (bounded, fail-soft). | A forged Anthropic signature only 400s the pod's own turn. No laptop-side effect: no approval, no I/O. |
-| Secrets in reasoning | Reasoning can quote tool output. Redaction (`agent/src/redact.ts`) runs before tool output enters the history, so the model saw masked text. Reasoning already crosses RPC live (P4), and tool output with the same content is already persisted. | No new exposure class on disk if Q1 = persist. With Q1 = memory-only, none at all. |
+| Secrets in reasoning | Reasoning can quote tool output. Redaction (`agent/src/redact.ts`) runs before tool output enters the history, so the model saw masked text. Reasoning already crosses RPC live (P4), and tool output with the same content is already persisted. | No new exposure class on disk (persisted, owner Q1 A). |
 | Cut stream / abort mid-reasoning | No `done` record (D4). Anthropic drops unsigned blocks (D2). | That round is not echoed. Never an invalid block. |
 | `display: "omitted"` (empty thinking + signature) | Kept and echoed verbatim (D2). | As the API asks. |
 | Thinking interleaved with text inside ONE Anthropic message | D3 re-emits all reasoning blocks first. Original positions are not kept. | Residual risk. The live Anthropic check (V3) decides. If it 400s, add per-block positions (S4 follow-up, contained). |
 | Sub-agent | Its own `Agent` + history: covered by the same code. The parent never sees the child's reasoning. | Nothing to do. |
-| Phone / TUI load size | `session/log` carries the text (D10). It is about 6k ch per round on bad runs, ~1k with echo. | Q4 C would strip it for display clients. |
+| Phone / TUI load size | `session/log` carries the text (D10). It is about 6k ch per round on bad runs, ~1k with echo. | Accepted (Q4 A: carried, not drawn). |
 
 ### Tests (red first, on `d98eac90`; fakes are injected `fetch` / `Bun.serve`, as in `providers/test/tool-call-split-e2e.test.ts`)
 
@@ -474,7 +474,7 @@ disable the echo and remove the schema field, and each must fail.
     (the trace's `last_message` / a body dump) and the proxy's `echoed` counter
     stays 0.
 - **V2 — resume.** Run a turn, `--resume`, then the next turn. Request 1 after
-  the resume carries the earlier reasoning (only under Q1 = persist).
+  the resume carries the earlier reasoning (Q1 A: persisted).
 - **V3 — live Anthropic.**
   - A short tool loop on the owner's API key (Keychain `tentacle-anthropic`,
     the cheapest thinking-capable model, `count_tokens` first).
@@ -493,7 +493,7 @@ disable the echo and remove the schema field, and each must fail.
 | s5 | V1–V2 bench + resume check, report into Execution | sonnet | Running and measuring only. |
 
 Review: fresh-context Opus, red-teaming the §7 on-disk records rule
-(P2/Q5), the pod wire (P3) and D5.
+(P2, owner Q5 A), the pod wire (P3) and D5.
 
 ### Owner questions
 
@@ -545,6 +545,16 @@ Review: fresh-context Opus, red-teaming the §7 on-disk records rule
 - C: a separate non-critical `reasoning` entry keyed by message index. Older
   builds skip it, but it adds a second write and a new rule to keep in sync on
   replace/truncate.
+
+### Owner answers
+
+*Recorded verbatim, owner 2026-11-25 ~17:35:*
+
+> Q1 A (persist on disk), Q2 A (send back always), Q3 A (no cap), Q4 A (not shown after resume; keep the Thought placeholder), Q5 A (optional field on the existing critical message entry) — all as you recommended.
+
+The plan above already reflects these answers: D6, D7, D8, D10, the failure
+modes and V2. Executors: Opus on the load-bearing slices, Sonnet on the cheap
+ones. DeepSeek is paused by the owner until this fix merges.
 
 SLICES: s1=opus s2=sonnet s3=opus s4=opus s5=sonnet
 
