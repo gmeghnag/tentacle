@@ -54,6 +54,9 @@ import {
 import { connectTui } from "./connect.ts";
 import { logDaemonError } from "./daemon-log.ts";
 import "./pdf-worker-url.ts";
+import { BROWSER_HOST_SUBCOMMAND } from "@tentacle/browser";
+import { browserHostMain } from "./browser-host.ts";
+import { browserCommand } from "./browser-install.ts";
 import { detachedRunOf } from "./detached-run-of.ts";
 import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
 import { type EngineHost, type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
@@ -137,6 +140,7 @@ import { logsCommand } from "./logs-cmd.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { pairCommand } from "./pair.ts";
 import { POD_DAEMON_MODES, runResidentMode } from "./pod-resident.ts";
+import { selfCommand } from "./pod-resident.ts";
 import { failedLine, notListedLine } from "./pod-stderr-log.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
 import { AnswerSplit } from "./render.ts";
@@ -703,6 +707,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     await deleteContainerFromEnv();
     return 0;
   }
+  // The browser hub Chrome spawns through the native-messaging wrapper
+  // (docs/feat/browser-inspect.md §1): stdio is Chrome's, never the terminal's.
+  if (args[0] === BROWSER_HOST_SUBCOMMAND) {
+    return browserHostMain(args[1], configDirFromEnv(process.env), {
+      stdin: process.stdin as AsyncIterable<Uint8Array>,
+      stdout: (bytes) => void process.stdout.write(bytes),
+      err,
+    });
+  }
   // The relay of a detached run (`relay.ts`): its spec comes through the env.
   if (args[0] === RELAY_SUBCOMMAND) {
     return relayMain(process.env, err);
@@ -958,6 +971,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       out,
       err,
     });
+  }
+
+  // `tentacle browser install|status|uninstall` (docs/feat/browser-inspect.md B2).
+  if (mode === "browser") {
+    return browserCommand(
+      parsed.positional,
+      { configDir: config.configDir, home: homedir(), self: selfCommand() },
+      { out, err },
+    );
   }
 
   // `tentacle voice setup|status` (docs/feat/voice-dictation.md §6): the local

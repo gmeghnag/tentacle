@@ -49,6 +49,11 @@ export class Ownership {
     else this.handed.delete(tab);
   }
 
+  /** Does this daemon hold the session's lease? */
+  holds(c: ClaimedBy): boolean {
+    return this.leases.get(c.sessionUid) === c.daemonId;
+  }
+
   /** The hub refuses an unknown/unowned tab id — not just the tool (D1). */
   check(c: ClaimedBy, tab: number): TabCheck {
     if (this.leases.get(c.sessionUid) !== c.daemonId) {

@@ -3,6 +3,7 @@
  * confined cwd and system prompt, and builds a fresh confined agent per session.
  * Binding is loopback-safe by default (a non-loopback bind requires a token).
  */
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
@@ -60,6 +61,7 @@ import type { ModelPurpose, SessionSettings, SessionSettingsReport } from "@tent
 import { relayAddress } from "@tentacle/protocol";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import { relayIdOf } from "@tentacle/transport/relay-id";
+import { createBrowserLink } from "./browser-link.ts";
 import { applyCarried } from "./carried-settings.ts";
 import { type DiscoveryDriver, startDiscovery } from "./discovery.ts";
 import type { ServeLimits } from "./flags.ts";
@@ -574,6 +576,9 @@ export async function startDaemon(
         }
       : {}),
   });
+  // The per-daemon browser link (docs/feat/browser-inspect.md §1): lazy, it dials
+  // the Chrome host's hub only on a call (the B4 tools); disposed with the daemon.
+  const browserLink = createBrowserLink({ configDir: config.configDir, daemonId: randomUUID() });
   // A second Ctrl+C (`process.exit(130)`, docs/feat/serve-mcp.md) must not leave
   // server processes behind. Synchronous by design, and removed in `stop()` so
   // tests that start many daemons in one process do not leak listeners.
@@ -629,6 +634,7 @@ export async function startDaemon(
         // Before anything else: a closed daemon's sessions must not call into a
         // server process this process is about to lose (S2, T7).
         mcpHub.dispose();
+        browserLink.dispose();
         process.off("exit", exitDispose);
         push?.notifier.stop();
         liveActivity?.stop();
@@ -652,6 +658,7 @@ export async function startDaemon(
     );
   } catch (error) {
     mcpHub.dispose();
+    browserLink.dispose();
     process.off("exit", exitDispose);
     devices?.stop();
     await persister?.stop();

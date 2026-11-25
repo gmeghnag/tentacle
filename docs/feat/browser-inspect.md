@@ -461,6 +461,19 @@ and here the effect is acting AS the user on the web. v1: **pod sessions get no
 
 *— claude-sonnet-5-5, 2026-11-25*
 
+### B2 — host + hub + install CLI (as built)
+
+- **Load-bearing check**: B0 proved native-messaging port + `chrome.debugger`; B2 depends only on F3/F4 framing + F5 (host = hub), both exercised by the tests below. Holds. (There is no separate "B2" section in the plan: scope taken from the Slices table + Design §1/§6 + failure-mode rows.)
+- `packages/browser/src/native-frame.ts` (new, pure): `encodeNative` (native-endian u32 + JSON, refuses > 1 MB) / `NativeDecoder` (64 MiB cap, dead after a violation). `link-schema.ts`: `BROWSER_HOST_NAME`, `BROWSER_HOST_SUBCOMMAND`, `BROWSER_EXTENSION_ID`. `ownership.ts`: `holds()`.
+- `packages/cli/src/browser-host.ts`: `createHub` (hub.sock 0600 in a 0700 dir, stale-socket probe, live hub → second host exits, ownership checked HERE before forwarding, `release` sent to Chrome when a daemon's connection closes, `handover` / `tab_closed` events applied, Chrome EOF → pending ops fail with «Chrome closed during the action…» + `chrome_closed` broadcast + socket removed, per-op timeout, version-skew hello → «run `tentacle browser install`»), `originAllowed`, `browserHostMain`.
+- `browser-link.ts`: `createBrowserLink` per daemon (lazy dial, re-dial, `status()`, `onEvent`). Wired in `serve.ts` (disposed with the daemon, like `mcpHub`) and `worker.ts` (lazy, nothing calls it until B4).
+- `browser-install.ts` + `flags.ts` (`browser` mode) + `main.ts`: `tentacle browser install|status|uninstall`; wrapper `<configDir>/browser/host` (pins `TENTACLE_CONFIG_DIR`, since Chrome starts the host with no tentacle env), manifest at F1's per-user path with the single pinned origin; `status` reports host/link state and an org-managed Chrome. `main.ts` dispatches `__browser-host` before config.
+- Tests: `packages/browser/test/native-frame.test.ts` (6), `packages/cli/test/browser-host.test.ts` (13, fake extension over the framing, real unix sockets), `browser-install.test.ts` (6, incl. the `main` dispatch pin). Lint on changed files clean; root `tsc --noEmit` clean. No wire/protocol change (hub protocol is `BROWSER_LINK_VERSION`, not `PROTOCOL_VERSION`). Fragment appended to `changelog.d/browser-inspect.added.md`.
+- **Drift**: (1) red-before-green not shown stepwise (new modules; non-vacuity by mutation below). (2) `BROWSER_EXTENSION_ID` is a placeholder (`a`×32): the key-pinned id exists only once B3 ships the extension — B3 must replace it. (3) `install` writes only the host side; copying the unpacked extension is B3. (4) `browser_open` launching Chrome (Q6) is a tool concern → B4. (5) The hub forwards the daemon's op fields as-is plus an `id`; the extension-side reply shape `{id, ok, result|error}` and events are defined by this slice and are B3's contract.
+- **Mutations** (each failed the suite, then reverted; baseline 25 pass): session-lease check off → 1 fail; tab-ownership check off → 2 fail; stale-socket live probe off → 1 fail; Chrome-closed message changed → 1 fail; origin check loosened → 2 fail; `releaseDaemon` dropped → 1 fail; 1 MB host cap off → 2 fail; wildcard origin in manifest → 2 fail.
+
+*— claude-sonnet-5-5, 2026-11-25*
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-24*

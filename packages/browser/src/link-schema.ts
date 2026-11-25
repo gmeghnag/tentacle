@@ -11,6 +11,16 @@ export const HUB_MAX_LINE_BYTES = 80 * 1024 * 1024;
 /** Chrome refuses a host → extension message above 1 MB (F4). */
 export const HOST_TO_CHROME_MAX_BYTES = 1024 * 1024;
 
+/**
+ * The native-messaging host name (F2: lowercase alnum / `_` / `.`) and the
+ * key-pinned extension id. B3 ships the extension and replaces the id with
+ * the one its manifest `key` yields (U7).
+ */
+export const BROWSER_HOST_NAME = "so.tentacle.browser";
+export const BROWSER_EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+/** The hidden subcommand Chrome's wrapper runs (pinned by a `main` dispatch test). */
+export const BROWSER_HOST_SUBCOMMAND = "__browser-host";
+
 export const TabId = z.number().int().nonnegative();
 
 export const ClaimedBy = z.object({

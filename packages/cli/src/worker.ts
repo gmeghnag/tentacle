@@ -28,6 +28,8 @@ import type { McpServerStatus } from "@tentacle/mcp";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
 import "./pdf-worker-url.ts";
+import { randomUUID } from "node:crypto";
+import { createBrowserLink } from "./browser-link.ts";
 import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
 import { laptopArtifactSeed } from "./laptop-artifacts.ts";
 import { createMcpHub } from "./mcp-hub.ts";
@@ -232,6 +234,10 @@ port.addEventListener("message", (event: { data: unknown }) => {
     onErrors: (errors) => postObject({ type: "mcp-errors", errors }),
   });
   hub.start();
+  // The per-daemon browser link (docs/feat/browser-inspect.md §1): lazy — it
+  // dials the Chrome host's hub only when a B4 tool calls it. The worker dies
+  // with its process, which closes the socket and releases its leases.
+  createBrowserLink({ configDir: config.configDir, daemonId: randomUUID() });
 
   // One skill scan for every session and for the `/name` list of a session
   // not created yet (docs/feat/skills-hot-reload.md).
