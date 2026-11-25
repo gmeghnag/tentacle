@@ -122,7 +122,25 @@ async function bodyFor(
   if (lastBody === undefined) {
     throw new Error("the provider sent no request");
   }
-  return lastBody;
+  // Caching (anthropic-cache.test.ts) turns the last plain-string message into one text
+  // block and adds breakpoints; undo both so these tests stay about image mapping.
+  const body = JSON.parse(
+    JSON.stringify(lastBody, (k, v) => (k === "cache_control" ? undefined : v)),
+  ) as { messages?: { role: string; content: unknown }[] };
+  const last = body.messages?.at(-1);
+  const lastIn = request.messages.filter((m) => m.role !== "system").at(-1);
+  if (
+    last &&
+    Array.isArray(last.content) &&
+    last.content.length === 1 &&
+    !(lastIn?.role === "user" && lastIn.attachments?.length)
+  ) {
+    const only = last.content[0] as { type?: string; text?: string };
+    if (only.type === "text" && typeof only.text === "string") {
+      last.content = only.text;
+    }
+  }
+  return body as Record<string, unknown>;
 }
 
 const contentOf = (body: Record<string, unknown>, at = 0): unknown =>
