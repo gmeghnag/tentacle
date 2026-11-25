@@ -12,6 +12,7 @@ import { type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { Connection, type HooksTrustPrecheck } from "./connection.ts";
 import { DEFAULT_MAX_FRAME_BYTES, acceptDevice } from "./device-accept.ts";
 import type { DeviceAuthority } from "./device-authority.ts";
+import type { ExternalRoute } from "./external/route.ts";
 import { type HandshakeLimitOptions, HandshakeLimiter } from "./handshake-limit.ts";
 import type { SessionHost } from "./session-host.ts";
 
@@ -75,12 +76,12 @@ export interface WsServerOptions {
    * otherwise, so every other path behaves exactly as without it. It carries
    * its own caller tokens; the WebSocket token plays no part.
    */
-  readonly a2a?: {
-    handle(
-      req: Request,
-      srv: { timeout(req: Request, seconds: number): void },
-    ): Response | Promise<Response> | undefined;
-  };
+  readonly a2a?: ExternalRoute;
+  /**
+   * The MCP route (docs/feat/serve-mcp-server.md M2): `/mcp`, asked right after
+   * the A2A route on the same external entry, with its own caller tokens.
+   */
+  readonly mcp?: ExternalRoute;
 }
 
 /** What the device route needs from the caller (a `serve` daemon). */
@@ -370,9 +371,13 @@ export function startWsServer(options: WsServerOptions): RunningServer {
     port: options.port,
     ...(options.tls ? { tls: { cert: options.tls.cert, key: options.tls.key } } : {}),
     fetch(req, srv) {
-      const external = options.a2a?.handle(req, srv);
-      if (external !== undefined) {
-        return external;
+      // The external callers' routes (one entry, `external/route.ts`), each
+      // owning its own paths; anything they do not own falls through.
+      for (const route of [options.a2a, options.mcp]) {
+        const external = route?.handle(req, srv);
+        if (external !== undefined) {
+          return external;
+        }
       }
       if (devices) {
         const route = deviceRouteOf(new URL(req.url).pathname, devices.serveId);

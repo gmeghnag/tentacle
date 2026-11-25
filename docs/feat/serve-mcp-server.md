@@ -280,6 +280,10 @@ Claude Code ─POST /mcp (Bearer MCP token)─► Bun.serve fetch ─► externa
 ```
 
 **1. Mount.** `/mcp` is one `ExternalMount` on the A2A-built `external/route.ts`.
+*(Corrected in M2: no `ExternalMount` existed — the A2A route was a dedicated
+`WsServerOptions.a2a`. As built: the route shape `ExternalRoute` +
+`TimeoutServer` moved into `external/route.ts`, and `WsServerOptions.mcp`
+sits beside `.a2a`, both asked in order by the one `fetch` entry.)*
 Its callers are the MCP caller(s) only, so an A2A or WS token gets `401` here and
 the MCP token gets `401` on `/a2a` and on the WS route. A browser `Origin` gets
 `403` (the MCP spec's code), `WWW-Authenticate: Bearer` on `401`. With no MCP
@@ -572,5 +576,61 @@ Each test names its mutation (§9).
 - Checks: `bunx biome check` is clean on both files. `tsc -p packages/daemon` shows 0 errors under `mcp/`. The pre-existing `@a2a-js/sdk` resolution errors in this worktree are unrelated.
 
 *— claude-sonnet-5-5, 2026-11-25*
+
+### M2-mcp-session-tools (done)
+
+- *Load-bearing check (assumption 1) re-run first — HOLDS.* `seam.ts` was gone
+  (gitignored). It was re-extracted from `docs/feat/a2a.md` into
+  `.tentacle/tmp/serve-mcp-server/m2/seam.ts`, with its imports pointed at this
+  worktree's packages. It printed the same five lines:
+  ```
+  1. a2a open → a2a-ctx-1 created true
+  2. phone session/list → a2a-ctx-1 "A2A: hello"
+  3. ask seen by a2a: 1 by phone (replayed on attach): 1
+  4. a2a updates after phone answered → turn_start tool_call permission_request permission_resolved tool_call_phase tool_call_update agent_message_chunk:"done: 42" turn_end:end_turn
+  5. a2a tail after phone cancel → turn_end:end_turn turn_start turn_end:cancelled
+  ```
+- *Step 0 (preconditions checked).* Already neutral in `external/`: `session-driver.ts`, `session-ids.ts`, `asks.ts`, `work-units.ts`, `archived-units.ts`, `route.ts` (guards only).
+  - Missing: the mount shape. The A2A route had its own `WsServerOptions.a2a` with an inline type.
+  - Moved `TimeoutServer` and the route interface (now `ExternalRoute`) from `a2a/http.ts` into `external/route.ts`. `A2ARoute` is kept as an alias, and the A2A tests are unchanged and green.
+  - `ws-server.ts` gained `mcp?: ExternalRoute`. One `fetch` loop asks `[a2a, mcp]` in order.
+  - Design §1 is corrected in place.
+- Added `packages/daemon/src/mcp/tools.ts`, `McpTools` on the shared driver:
+  - `session_start`: a fresh `mcp-<caller>-<uuid>` session, `open{create, reopen}` titled `MCP: …`, then `session/prompt{turnId:<s>.<t>}`. Returns `{sessionId, turnId}`.
+  - `session_send`: when no turn runs, a new turn. When one runs, `session/enqueue{id:key}`, and a `NoTurnRunning` is retried once as a new turn.
+  - `session_status`: reads `workUnits()`, or the archived index when the session is archived (read-only). It shows the final round only, plus the `recent` 5. `waitSeconds` parks on the attachment until `turn_end`, `permission_request` or `permission_resolved`; one wait per session.
+  - `session_cancel`: a per-turn `session/cancel`.
+  - `session_list`: pages `host.list` and keeps the prefix, ≤ 50.
+  - The namespace check uses `contextIdOf`. A foreign or nonexistent id gets the same text, "unknown session".
+  - Caps: 8 live sessions per caller, text ≤ 64 KiB (UTF-8), key ≤ 64, wait ≤ 120 s. Bad args throw `InvalidToolParams`, which the HTTP layer answers with `-32602`.
+  - One attachment per live session. It is held while a turn runs and released `detachAfterMs` (60 s) after none runs. It re-attaches lazily.
+- Added `packages/daemon/src/mcp/http.ts`, `createMcpRoute`:
+  - Guards: `Origin` → 403 before auth. A bad token → 401 + `WWW-Authenticate: Bearer` + audit `mcp-auth-failure`. Non-POST → 405. Over 1 MiB → 413. Bad JSON → `-32700`.
+  - Dispatch goes through `wire.parseRequest`: `initialize`, `server/discover`, `ping`, `tools/list`, `tools/call`.
+  - A held `session_status` with a `progressToken` answers SSE: progress every 15 s from `progressCounter`, then the result. A client disconnect aborts only the wait.
+  - Exported from `daemon/src/index.ts`.
+- Added `packages/daemon/test/mcp-tools.test.ts`: 16 tests, green.
+- Ran `mcp-tools` + `mcp-wire` + `a2a-http` + `a2a-executor` + `cli/serve-a2a-e2e`: 90 pass, 0 fail.
+- Checks: `bunx biome check` is clean on the 8 changed files. `tsc -p packages/daemon` has 0 errors. No protocol change, no `protocol.d/` note, no `protocol.json` regen. The M1 changelog fragment covers it unchanged.
+- Drift / notes for review:
+  1. `tasks/*` without the declaration → `-32021`. With it → `-32601` until M4. `server/discover` already declares the tasks extension (M1), but M2 never answers with a task. **M4 must land before M5 wires the flag.**
+  2. `session_list` reads `host.list` directly (a read, no attachment) instead of `session/list` over the driver. The data is the same.
+  3. Status uses the `WorkUnit` words (`working|waiting|completed|failed|canceled`), plus `idle` when the session has no turn yet. A failure's reason goes in `statusMessage`.
+  4. The 8-session cap counts LOADED `mcp-<caller>-*` sessions, as planned, so idle ones not yet archived by the TTL count too. A burst of more than 8 delegations inside the idle TTL hits it. Review whether to count running ones only.
+  5. A `session_send` retried with the same `key` AFTER its turn ended becomes a new turn (the key is only the enqueue id). This is B5 territory.
+  6. A `TurnInProgress` on a new-turn prompt (another device started a turn between the read and the prompt) → `isError`. The caller retries.
+  7. The archived read in status is built on the shared index. Its test is M4's, as planned.
+  8. One fixed 120 ms sleep in the attachment test. It asserts a NEGATIVE (not released while the turn runs), which no condition can poll.
+  9. The code was written before the tests, so red is shown by mutation.
+- Mutations (each reverted; 16/16 green after):
+  - M1 `own()` ignoring the prefix → RED: foreign id; 8-session cap.
+  - M2 the driver not declaring `permission_request` → RED: owner mode / phone answers; attachment held; SSE progress; disconnect (the ask is auto-denied).
+  - M3 `key` ignored → RED: a retried key steers once.
+  - M4 detach timer armed while a turn runs → RED: attachment held while a turn runs.
+  - M5 no progress inside the wait (interval ×1000) → RED: SSE progress; disconnect.
+  - M6 `result` = every turn's result joined → RED: final round per turn.
+  - M7 `/mcp` not mounted (`[options.a2a]`) → RED: 4 HTTP tests. The disconnect test first SURVIVED M7, because it never proved the wait held. It was tightened (SSE content-type + a concurrent wait refused) and is RED under M7 now.
+
+*— claude-opus-5-5, 2026-11-25*
 
 ## Review

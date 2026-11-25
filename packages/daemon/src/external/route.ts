@@ -12,6 +12,20 @@ export interface ExternalCaller {
   readonly token: string;
 }
 
+/** What a route needs from Bun's server (lifts the idle timeout of a long call). */
+export interface TimeoutServer {
+  timeout(req: Request, seconds: number): void;
+}
+
+/**
+ * One external caller's route (`/a2a`, `/mcp`), asked by `startWsServer` FIRST
+ * on every request: a response when it owns the path, undefined = not ours,
+ * fall through (every other path behaves exactly as without it).
+ */
+export interface ExternalRoute {
+  handle(req: Request, srv: TimeoutServer): Response | Promise<Response> | undefined;
+}
+
 /** Default cap of one request body (1 MiB). */
 export const EXTERNAL_MAX_BODY_BYTES = 1024 * 1024;
 
