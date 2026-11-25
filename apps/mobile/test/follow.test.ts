@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type Follow,
+  LANDING_BATCH,
   LANDING_REVEAL_MS,
   LANDING_ROUNDS,
   type Landing,
@@ -17,6 +18,7 @@ import {
   jumpPillText,
   jumped,
   landingAwaiting,
+  landingBatch,
   landingDone,
   landingEnded,
   landingOwns,
@@ -840,5 +842,21 @@ describe("the bound does not show the list in the tick of its own scroll (fix/mo
   test("a reader scrolled up is revealed in place, never yanked", () => {
     const hit = landingStep(toBound(), grow(LANDING_ROUNDS), false, ROWS);
     expect(hit).toEqual({ state: landingDone, step: null });
+  });
+});
+
+// fix/mobile-open-long-session-3: a ~400-message opening revealed mid-growth.
+describe("landingBatch: a hidden landing renders its window in few rounds", () => {
+  test("hidden (settling) landing renders a big batch; a shown list keeps the default", () => {
+    expect(landingBatch(landingStart.settling)).toBe(LANDING_BATCH);
+    expect(landingBatch(landingDone.settling)).toBeUndefined();
+    expect(landingBatch(landingQuiet.settling)).toBeUndefined();
+  });
+
+  test("the batch is far above the FlatList default of 10 (the knob that ends growth in few rounds)", () => {
+    // The jump branch of VirtualizeUtils renders the last `maxToRenderPerBatch + 1`
+    // rows in ONE pass (windowSize does not bound it), so the batch must dwarf the
+    // 10-row default, or a long opening still outlasts LANDING_ROUNDS.
+    expect(LANDING_BATCH).toBeGreaterThanOrEqual(LANDING_ROUNDS * 10);
   });
 });
