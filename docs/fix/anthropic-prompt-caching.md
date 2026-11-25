@@ -115,3 +115,41 @@ Before: every request ≈ 20.7k uncached ≈ $0.00208+ (T1.10 rows). Measured sa
 - The live evidence is self-consistent: round 3 read 20830 = 20741 + 89 written by round 2. I relied on it and made no API calls.
 
 **Executor behaviour:** a tight, honest diff. The Execution section reports its red test and its live cost. The one miss is in the plan's failure-mode reasoning (messages vs blocks), and it did not ask about one-shot callers of the same provider.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-25 (same reviewer context as Round 1; executor claude-sonnet-5-5, same family)*
+
+**Verdict: PASS.** M1 and M2 are fixed and each is pinned by a test that mutation proves non-vacuous. LOW 3 is documented. No regressions in providers. Reviewed: `git diff HEAD~1` (ef432e48).
+
+**Each finding, verified**
+- **M1 (one-shot writes) — fixed.** `anthropic-cache.ts:38` returns before any message breakpoint when `messages.length < 2`.
+  - Trace through the real `summarizeConversation` → `AnthropicProvider.stream`: the compaction body has **no** `cache_control` in `messages`; only the system block has one, and it is below the cacheable minimum, so it is harmless.
+  - Grepped every `ChatRequest = {` builder outside tests (`compact.ts:118,160`, `agent.ts:1664,2007`) plus `titleRequest`. The one-shots all send one message; the agent-loop ones send many and are re-read.
+  - Mutation MA (guard back to `=== 0`): 2 fail.
+- **M2 (lookback) — fixed.** `anthropic-cache.ts:42-53` adds a 3rd breakpoint on the nearest earlier `user` message. That is 3 of 4 at most: system (or last tool), plus the last message, plus the previous user message.
+  - Trace, 3 rounds of 12 parallel calls each, through `stream`: every request has 3 markers. In round N+1, the content up to the previous-user breakpoint equals round N's whole `messages` once the markers are ignored and a single text block is treated as the same as a plain string. So round N's entry is hit exactly, at any round width.
+  - Mutations, all with byte-identical restore checked by `cmp`:
+    - MB, the previous-user breakpoint removed: 4 fail.
+    - MC, the previous message marked whatever its role: 3 fail.
+    - MD, no `break`, so every earlier user message is marked: 1 fail.
+- **LOW 3 — documented** in Fix round 1 (prune, old-image projection, toggles, voice line).
+
+**Attacks tried**
+1. **String ↔ block form flip.** An older user text message is a string in one round and a one-block array in the next, as the breakpoint moves across it. So the exact match relies on the API treating the two as the same content. The executor's live run already supports this: round 2 read exactly the 20741 tokens round 1 wrote, even though the old code had turned that same message into a block in round 1. **Holds** (no extra API spend).
+2. **Steering edge.** A user message enqueued after tool results makes two consecutive `user` turns, because `buildPayload` merges only tool turns. The previous-user breakpoint then lands on the tool-results turn, which round N never cached. The hit then depends on the ~20-block lookback again. That is a one-time miss only in a wide round that also has a steer. **LOW, no change needed.**
+3. **First turn of a new session.** Round 1 now writes no message breakpoint, so round 2 re-writes the first user message. The cost is only that message's own tokens; tools and system still hit. **Accepted trade-off of M1.**
+4. **Breakpoint limit / empty blocks.** At most 3. `mark` skips empty strings and empty arrays, as before. **Holds.**
+
+**Gate (this worktree, at ef432e48)**
+- `bun run typecheck` clean.
+- `bun run lint` clean (2432 files).
+- `bun test packages/providers`: 225 pass, 0 fail.
+- Full `bun run test` (18423 tests, 5 skip), two runs:
+  - run 1: 1 fail;
+  - run 2: 2 fail, in `packages/tui/test/queue.test.tsx` (steering frame timing) and `scripts/test/release.test.ts` (a 5 s git-push timeout).
+- Both files pass in isolation (40/40). Load average at the time was ~48 from other agents on the host. Neither file is touched by, or depends on, this diff. I judge them load-induced flakes, not regressions. Re-run the gate on an idle host before merge to confirm.
+
+**Nit (not blocking):** the Implementation's *Design* line ("2 of 4") and its *Tests* line ("2 breakpoints") are stale. Fix round 1 supersedes them, but the orchestrator may want them edited in place.
+
+**Executor behaviour:** fixed exactly the findings, with no scope creep. It reported its own red/mutation runs, which my mutations confirm. It was honest that the 3rd breakpoint was not re-verified live.
