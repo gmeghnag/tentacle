@@ -576,3 +576,24 @@ The executor's mutations i–iii cover the remaining properties.
 the pure module, recorded the drift honestly, and listed the full gate as not run.
 Clean work. The one gap is a design choice the plan made (Failure mode 4), not a
 slip in execution.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (fresh-context reviewer, the same as round 1)
+
+**Verdict: PASS.** Finding 1 is fixed: `59e33b29` removes the reminder's `budget_hit`
+branch (`workflow-driver.ts:~1861`). A reminder that hits its cap without a verdict now
+ends `fail: NO_VERDICT_REASON`, so the step's tokens go into the run's sum and the
+`retry`/`on_fail` rules apply.
+
+- **Mutation:** with the `budget_hit` branch put back, the two new tests fail
+  (`runs out of the REMAINDER fails no verdict` and `still goes through retry`), and
+  54 others pass. After the revert, `cmp` against the backup shows the file is
+  byte-identical, and `git status` is clean.
+- **Regressions:** a first run that ends `max_token_budget` is still `budget_hit` and
+  still gets no reminder (the round-1 test still pins it). Results: driver + verdict
+  tests run 5 times, 315 pass / 0 fail. `packages/agent/test/`, the 2 mobile files and
+  the TUI frames file: 1108 pass / 0 fail. `bun run lint` clean (2554 files);
+  `bun run typecheck` clean. I did not run the full parallel suite.
+- Nit, not blocking: the retry test's poll loop (`i < 400`) ends without throwing,
+  where §9 prefers `until`. It still fails loudly on its assertions.
