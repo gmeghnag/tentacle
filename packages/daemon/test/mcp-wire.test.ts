@@ -125,7 +125,8 @@ describe("parseRequest", () => {
     expect(mayUseTasks(p)).toBe(false);
   });
   test("header ≠ _meta → 400; header missing → 400", () => {
-    for (const h of [{ "mcp-protocol-version": "2025-11-25" }, {}]) {
+    const cases: Record<string, string>[] = [{ "mcp-protocol-version": "2025-11-25" }, {}];
+    for (const h of cases) {
       const p = parseRequest(headers(h), modernBody("ping"));
       expect(p.kind === "reply" && p.reply.status).toBe(400);
     }
