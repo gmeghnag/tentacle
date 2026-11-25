@@ -25,6 +25,7 @@ import {
   Method,
   Notification,
   PROTOCOL_VERSION,
+  type WorkflowHistoryRow,
   type WorkflowRow,
   type WorkflowStepRow,
 } from "@tentacle/protocol";
@@ -171,7 +172,9 @@ describe("boundWorkflows: the rows are the client's (≤ 8 runs, ≤ 64 steps, o
   // a field it does not carry is lost for every UI — the edges and the history
   // must survive it, their ids cleaned like `id`.
   test("the run's edges and history survive the bounding, ids escape-free", () => {
-    const history = [
+    // Annotated, so the second entry's *absent* `durationMs` stays the schema's
+    // optional field instead of an inferred `undefined` union member.
+    const history: WorkflowHistoryRow[] = [
       { step: "review", attempt: 0, round: 0, state: "error", durationMs: 900 },
       { step: "fix\u001b[2J", attempt: 0, round: 1, state: "ok" },
     ];
