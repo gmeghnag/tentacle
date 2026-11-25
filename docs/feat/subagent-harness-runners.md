@@ -611,6 +611,16 @@ from the phone. 7. Usage visibility. 8. Where it runs. 9. Remote
 - Lint: `biome check` on the 2 files clean; `tsc --noEmit` whole repo clean. Full gate left to the orchestrator. No protocol/schema change.
 - Unverified: `DEFAULT_SPAWNER` against a real `claude` (only a real `sleep`: pgid = pid); stdout drain with a real lingering grandchild.
 
+*— claude-sonnet-5-5, 2026-11-25 — slice shr-3-worktree only*
+
+- **Load-bearing check:** re-run with real git in a temp repo (the tests): `git worktree add --detach` + `git apply --index --binary` of `git diff --binary HEAD` + copy of `ls-files --others --exclude-standard` + baseline commit reproduces staged, unstaged and untracked-not-ignored state. Holds.
+- Added `packages/agent/src/harness/worktree.ts` (`createSnapshotWorktree`, `finishWorktree`, `removeWorktree`, `GitRunner`/`DEFAULT_GIT`, `WorktreeError`) and `packages/agent/test/harness-worktree.test.ts` (7 tests green).
+- Behaviour: path `<repoRoot>/.tentacle/worktrees/harness-<id>`, branch `harness/<id>`; id shape-checked; non-git cwd / no commits / failed apply → `WorktreeError`, worktree+branch removed. `finishWorktree`: `add -A` then `diff --cached --stat <baseline>`; empty → remove both; otherwise keep and return `{branch, path, diffstat}`; an unreadable diffstat keeps everything (never loses work). Untracked symlinks are copied as symlinks; a path escaping the tree is refused.
+- **Drift:** (1) not exported from `packages/agent/src/index.ts` (no consumer until shr-4). (2) The "non-git cwd" test uses a fake runner (exit 128 on `rev-parse`): the mandated scratch dir lives inside the main repo, so a real non-git dir is unreachable there. (3) The report text (branch/path/diffstat appended) is left to the shr-4 runner; this module returns the data. (4) No new changelog fragment: `changelog.d/subagent-harness-runners.added.md` covers the task.
+- **Mutations (each → red, reverted):** untracked copy dropped → "contains staged, unstaged and untracked" fails; no cleanup on failed snapshot → "failing apply leaves nothing behind" fails; clean run not removed → "clean run removes worktree and branch" fails.
+- Lint: `biome check` on both files clean; `tsc --noEmit -p packages/agent` clean. No protocol/schema change. Full gate left to the orchestrator.
+- Unverified: a snapshot containing submodules or a tracked-file-deleted-and-untracked-replacement case (not tested).
+
 ## Review
 
 *— pending*
