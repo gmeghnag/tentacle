@@ -370,3 +370,29 @@ The gate after round 1 failed one test, in a file this task never touched:
   `packages/tui/src/markdown.ts` `marked-terminal` noise). The full gate was not run here — the
   orchestrator runs it after this round. No production code changed: the branch's runtime diff is
   round 1's.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (fresh context; a different model family from the executor)
+
+**Verdict: PASS.** The round-1 fixes (`f91057f7`) and the gate-flake fix (`6b8cf5d0`) were each checked by mutation. Every mutation went red, every file was restored from a backup, and `git status` was clean after each run.
+
+| Round-1 finding | Mutation | Result |
+|---|---|---|
+| 1 — bare `::` hint | `hintUrl` parses `serverUrl` without `bracketV6Host` | `(fail)` hintUrl test: `Received: "ws://:::4001"` |
+| 2 — T9 does not test single-flight | `this.starts.set` moved after `await this.prompt` | `(fail)` "two identical calls interleaved" (new; holds the first `session/prompt`) |
+| 3a — caller not tested in the `k` form | drop `${caller}` from the `k\0` key | `(fail)` "the replay key is per caller": Bob got `mcp-alice-…` |
+| 3b — caller not tested in the `r` form | drop `${caller}` from the `r\0` key | `(fail)` same test, implicit half |
+| gate flake (`args.test.ts`) | `withCleanEnv` strips nothing | `(fail)` leak test: `[config error] … unknown profile "leaked-by-another-file"` |
+
+**Regressions checked on the diff:**
+- `bracketV6Host` leaves bracketed, IPv4 and named hosts unchanged (pinned: `[::]`, `192.168.1.5`, `localhost`, `127.0.0.1`, `not a url`).
+- The `RpcPeer.prototype.request` patch is undone by the file's `afterEach` `cleanups`, which also release the held promise.
+- `withCleanEnv` restores every `TENTACLE_*` it removed, and supersedes the old `KEYS` list (including `TENTACLE_POD_NAMESPACE`).
+
+**Gate:** `bun run typecheck` is clean. `bun run lint` is clean (2553 files). The touched suites plus the two files that leak `TENTACLE_PROFILE` (`config-main`, `connect-theme`), run serially in one process: 157 pass / 0 fail. I did not run the full `bun run check`; that is the orchestrator's step at merge.
+
+**Still open (not blocking, from round 1's notes):**
+- A replayed task start after `TASK_NOT_RECORDED` is not answered the way the first call was.
+- `createdAt` re-stamps on a replay.
+- A start that outlives the 15 s TTL can delete a newer memo under the same key.
