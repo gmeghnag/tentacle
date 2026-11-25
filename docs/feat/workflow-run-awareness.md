@@ -1,9 +1,9 @@
 # feat/workflow-run-awareness — the agent knows a workflow run is live
 
-> **Status:** implementation — **NOT approved** (owner questions below)
+> **Status:** implementation — **APPROVED (owner answers 2026-11-25)**
 > **Branch:** `feat/workflow-run-awareness`
-> **Size:** M · **Blast:** load-bearing (the agent loop's request builder) · **Suited:** Opus plans + executes S2/S4 (agent loop), DeepSeek executes S1/S3 (contained / small wiring); mandatory fresh-context Opus review of the group (§10)
-> **Changelog:** `changelog.d/workflow-run-awareness.added.md` — `- **The agent knows a workflow is running.** Each request carries one short status line for the session's live run (step, waiting for you, retry/round, tokens); the run's end note is unchanged.`
+> **Size:** M · **Blast:** load-bearing (the agent loop's request builder, its exits queue, the daemon wake) · **Suited:** per-slice executor in the Slices table (Sonnet where a mistake is cheap to iterate on, Opus where it touches the agent loop / §7); final review fresh-context Opus (§10)
+> **Changelog:** `changelog.d/workflow-run-awareness.added.md` — `- **The agent knows a workflow is running.** Each request carries one short status line for the session's live run (step, waiting for you, retry/round, tokens); a run's end reaches a running turn at its next step; a step left waiting for you on an unattended \`serve\` session wakes the agent once.`
 
 ## Context
 
@@ -172,32 +172,82 @@ so it reappears right after a compaction (whose summary may drop "I started wf-3
 `/clear`; a resumed suspended turn (`Session.resume`) gets it too; after a restart there is no
 live row and the `interrupted` note speaks instead.
 
-**(b) Failure / waiting-for-the-user — annotate, do not wake (recommended, owner Q1).**
+**(b) Failure / waiting-for-the-user (owner Q1 = B).**
 
-- A **mid-run failure** (a retry or an `on_fail.goto` follows) and a step **waiting for the
-  user** change the line (above). **No wake, no persisted note.** Why:
-  - waiting for the user: the ask already reaches the user through the single broker (TUI
-    dialog, phone); the model cannot answer it (gate above). A wake would only make the model
-    restate the ask — at the cost of one full request (the whole context, e.g. 30–60k prompt
-    tokens) for ~0 value.
-  - a failure that is retried: the run handles it; a terminal failure ends the run and the END
-    note wakes, unchanged. Bound check: a run may execute up to `max_step_runs` steps
-    (default 50, ≤ 1000; `core/src/workflow-spec.ts:39`, `:303`) with `retry ≤ 5` (`:36`) —
-    a per-failure wake would be up to 50 wakes per run; a line costs nothing per failure.
-- **The END note at a round boundary (owner Q4, recommended):** add `workflow_end` to the
-  mid-turn drain (`flushMidTurn`, `agent.ts:2890-2900`), exactly like a sub-agent exit
+- A **mid-run failure** (a retry or an `on_fail.goto` follows) only changes the line. **No
+  wake, no persisted note.** A terminal failure ends the run and the END note wakes, unchanged.
+  Bound check: a run may execute up to `max_step_runs` steps (default 50, ≤ 1000;
+  `core/src/workflow-spec.ts:39`, `:303`) with `retry ≤ 5` (`:36`) — a per-failure wake would
+  be up to 50 wakes per run.
+- **The END note at a round boundary (owner Q4 = yes, S4):** add `workflow_end` to the mid-turn
+  drain (`flushMidTurn`, `agent.ts:2890-2900`), exactly like a sub-agent exit
   (docs/fix/subagent-error-report.md). A run that ends while the agent is in a long turn is
-  then told in THAT turn, and the line disappears at the same round (no gap where the run is
-  neither live nor reported). The follow-up `kickWake` sees `pendingExitCount === 0` and starts
-  nothing; `notesFlushedMidTurn` is set as for other mid-turn notes (the stale-wake guard,
-  `agent.ts:1468-1502`).
-- **If the owner wants a wake anyway (Q1 option B, not recommended):** only for "waits for the
-  user", only when no client is attached, at most ONE wake per run per 10 min (a per-run
-  timestamp in `HostedSession`, pure gate `workflowWakeDue(lastAt, now, attached)`), its note a
-  single coalesced line, never during a running turn (the line covers that). Slice S5 below.
+  told in THAT turn, and the line disappears at the same round. The follow-up `kickWake` sees
+  `pendingExitCount === 0` and starts nothing; `notesFlushedMidTurn` is set as for the other
+  mid-turn notes (the stale-wake guard, `agent.ts:1468-1502`), so a client-armed continuation
+  for the same note ends with no model request.
+- **«Waits for you» wakes the agent — once, unattended only (owner Q1 = B, S5 + S6).**
+  1. *What is a wait.* A pure `workflowUserWait(rows): { runId, key, line } | undefined` (S5,
+     beside `workflowStatusLine`) reads the SAME rows as the line: the live run whose row is
+     `needs-approval` (hash: key `wf-3/approval`) or whose step is `needs-approval`, or
+     `waiting` with `live !== "slot"` (an ask) — key `wf-3/<step>/<attempt>/<round>`. A slot
+     wait is NOT a user wait. Rows-derived, so the driver is untouched (it is also being
+     edited by fix/workflow-model-start-turn — fewer conflicts) and the trigger is the very
+     fact the phone/TUI show.
+  2. *Grace, not instant.* On every `publishWorkflows`, a key that is new arms ONE timer
+     (`graceMs`, default **30 s**); a key that disappears disarms it. Why: an ask that is
+     answered at once — a human at the screen, or a run step's tool ask auto-answered on a
+     trusted `serve` (`autoApproves`; and since fix/workflow-model-start-turn a model-started
+     run's asks carry the starting turn's id, so on `serve` they ARE auto-answered) — must never
+     wake. Only an ask still pending after the grace is a wait.
+  3. *The gate* — pure `workflowWaitWakeDue(s)` (S5), all must hold when the timer fires:
+     the same key is still the current wait (re-derived from `lastWorkflows`, never the armed
+     copy); `attachedCount === 0` (`hosted-session.ts:2202`, the attach set the daemon keeps
+     `:2271`/`:2325`) — checked AT FIRE TIME, so a client that attached during the grace
+     suppresses it; this key never woke before (an unanswered approve wakes exactly ONCE, never
+     every 10 min); `now − lastWakeAt(runId) ≥ minGapMs` (default **10 min**, per run); and the
+     existing daemon gate `daemonWakeGate` (`core/src/auto-wake.ts:56-62`): wake enabled (the
+     host's `autoWake`), not busy, last turn not `error`/`cancelled`, not closed. Busy (a turn
+     runs) → no wake, the key is NOT consumed and the timer re-arms for another `graceMs`
+     (that turn's line already says it; if the ask is still pending after the turn and no
+     client is attached, the next fire wakes). A gap not yet elapsed → re-arm at the gap's
+     end. Any other failed condition → disarm (the key stays un-woken; a later publish that
+     changes nothing does not re-arm it — one timer per key, armed only when the key APPEARS).
+  4. *The note.* Due → `session.noteWorkflowWait(runId, text)` → `pendingExits`
+     `{ kind: "workflow_wait", runId, text }` (counts in `pendingExitCount`, like an end note)
+     → `kickWake()` → `maybeWake` → a daemon-minted `wake-<uuid>` turn (`hosted-session.ts:4029-4066`).
+     Flushed at that turn's start as a persisted `role:user` message
+     `note: { kind: NOTE_KIND.workflowWait, id: runId }`, text =
+     `[workflow wf-3 demo-note: step 4/4 merge waits for the user (since 12:04) · 3/4 ok · 9.8k tok] You cannot answer it; tell the user if useful.`
+     `note.kind` is a free string on the wire and on disk (`core/src/model.ts:150-160`): an
+     older build renders it as a generic notice — no format change. The load derivation filters
+     end/interrupted notes BY KIND (`core/src/workflow-ledger.ts:312`), so a wait note naming
+     `wf-3` can never be taken for the run's end; `workflowRunSeqFromHistory` reads any
+     `wf-N` id (`:82-86`) — harmless, it only raises the floor to an id already used.
+  5. *State and restart.* `lastWakeAt` per run and the woken-key set are daemon memory
+     (`HostedSession`), dropped when the run ends. **Not persisted, on purpose:** a run never
+     survives a restart (the load closes it `stopped: interrupted`,
+     `core/src/workflow-ledger.ts:276-286`, and `reserveRunIds` never reuses its id,
+     `workflow-driver.ts:607-616`), so after a restart no key can repeat. A queued wait note
+     lost in a crash is replaced by the `interrupted` note.
+  6. *Where it can fire.* Only a session with a driver AND `wake` enabled AND no client: in
+     practice a `serve` session with the phone/TUI detached. The in-process worker always has
+     its TUI attached (attachedCount > 0) → never. A pod daemon has no driver → never.
 
-**(c) Noise.** One line, only while a run is live, no new history entries, no new wakes. A
-looping workflow changes the line's numbers, never its size; nothing accumulates.
+**(c) Noise.** One line, only while a run is live. History grows only by a wait note (≤ 1 per
+user-wait, unattended only) — no entry per step, failure or retry. A looping workflow changes
+the line's numbers, never its size. Worst case of wakes for one run: one per distinct
+unanswered ask, ≥ 10 min apart; a run's asks are bounded by its step executions
+(`max_step_runs`), and each one waits up to `budget.wait` before the run stops `timeout`.
+
+**Alignment with fix/workflow-model-start-turn** (`docs/fix/workflow-model-start-turn.md`, on
+its branch, may merge first): it adds `WorkflowHost.currentTurn?()` and binds it in the same
+`attachWorkflows` block S3 edits; a model-started run then carries its starting `turnId`.
+Effects here: (1) S3's one added line sits beside its binding — a textual merge, no semantic
+conflict; whoever merges second rebases onto it. (2) A run's asks stay attributed to the
+STARTING turn, never to a `wake-` turn this feature starts: the wake turn only tells the
+model; it raises no ask and changes no `run.turnId`. (3) Its auto-answered tool asks are the
+reason for the 30 s grace (above): pinned by T7's "auto-answered ask never wakes".
 
 ### Files
 
@@ -212,6 +262,15 @@ Dependency order (no protocol, no persistence change — the line never leaves t
 6. `docs/feat/agent-workflows.md` — one line under D3 pointing here (the end note is no longer
    the ONLY thing the model hears) — S3.
 7. `changelog.d/workflow-run-awareness.added.md` — S3.
+8. `packages/agent/src/workflow-status-line.ts` — `workflowUserWait`, `workflowWaitWakeDue`
+   (pure) — S5.
+9. `packages/core/src/model.ts` — `NOTE_KIND.workflowWait = "workflow_wait"` — S6.
+10. `packages/agent/src/agent.ts` + `session.ts` — `noteWorkflowWait` (pendingExits kind
+    `workflow_wait`, flushed at a turn's START only, counted in `pendingExitCount`, carried by
+    `retire`/`adoptExits`) — S6.
+11. `packages/daemon/src/hosted-session.ts` — the wait timer (`graceMs`/`minGapMs` options,
+    injectable `setTimeout`/`clearTimeout` like `SessionSchedules`, `this.now()`), armed from
+    `publishWorkflows`, disarmed on close — S6.
 
 ### Failure modes
 
@@ -230,6 +289,16 @@ Dependency order (no protocol, no persistence change — the line never leaves t
 | prompt injection via the line | only ids, names, states, numbers — never reason/title/command text |
 | the model tries to approve | impossible: no tool resolves an ask; `autoApproves` refuses `workflow_approve` (`permission.ts:316`) — unchanged and pinned by a test |
 | a step's failure is invisible on phone/TUI between retries | pre-existing (repro §1), out of scope — Notes |
+| ask auto-answered (trusted `serve`, model-started run since the turn fix) | answered inside the 30 s grace → key gone → timer disarmed, no wake |
+| client attaches during the grace | checked at fire time → no wake (the user sees the ask) |
+| client detaches while a step already waits | no new key → no wake; the line tells the next turn (accepted: the wake is for asks that START unattended) |
+| one approve left unanswered for an hour | key woke once → never again; the run stops `timeout` at `budget.wait` → END note wakes |
+| looping run whose every attempt asks | each attempt is a new key, but ≥ 10 min apart per run → ≤ 6 wakes/hour, each only after a 30 s unanswered wait |
+| a turn runs when the grace ends | no wake, key kept, timer re-armed (the line covers the running turn) |
+| last turn ended `error`/`cancelled`, or `autoWake` off | `daemonWakeGate` blocks, as for every other wake |
+| wait note flushed after the ask was answered | the note carries `(since HH:MM)`; the same request's status line shows the CURRENT state, so the model reads both |
+| restart during a wait | run closed `interrupted`, its note wakes as today; in-memory keys/timestamps gone with the run, ids never reused |
+| session closed during the grace | `close` clears the timer; the gate also checks `closed` |
 
 ### Tests
 
@@ -259,20 +328,39 @@ Fakes only: the driver test's `setup()`/`SpyBroker`/`FakeClock`
 - **T6 (S4) end note mid-turn** — a run that ends during round 1 of a 2-round turn: round 2's
   request contains the end note, `pendingExitCount === 0` after, no wake turn is started, and
   the note is not delivered twice. Red: today the note lands only at the next turn's start.
-- **T7 (S5, only if Q1 = B)** — fake clock: 10 asks in 5 min → 1 wake; none while a client is
-  attached; none while a turn runs.
+- **T7 (S5) pure wait + gate** — `workflowUserWait`: hash approval, approve step, an ask
+  (`waiting`, no `slot`) → a key; `waiting`+`slot`, running, ended → `undefined`; key changes with
+  attempt/round. `workflowWaitWakeDue`: each condition alone flips it (same key, attached 0,
+  never woke, gap ≥ 10 min, enabled, idle, last end good, open); busy → `rearm`, gap short →
+  `rearm at`. Red: module missing.
+- **T8 (S6) daemon wake** — hosted session with the driver fakes, injected timers + `now`:
+  (a) approve step pending, 0 clients, grace elapses → exactly ONE `wake-` turn whose request
+  contains the wait note and the line; the note is persisted with `note.kind = workflow_wait`;
+  (b) the same ask still pending 1 h later → no second wake; (c) an ask answered after 5 s →
+  no wake (the auto-answer case); (d) a client attached at fire time → no wake;
+  (e) a turn running at fire time → no wake, then the turn ends with the ask pending → one wake;
+  (f) a looping run (each attempt asks, unanswered 31 s each) → wakes ≥ 10 min apart, never
+  two inside the gap; (g) `autoWake` off → none; (h) closed during the grace → none, timer
+  cleared. Red: no wake today. Mutation: drop the attach check → (d) fails; drop the woken-key
+  set → (b) fails.
+- **T9 (S6) load** — a log with a `workflow_wait` note for `wf-3` and no end: the load still
+  closes `wf-3` `interrupted` (the wait note is not mistaken for an end).
 
 ### Slices
 
-| slice | what | size · blast | executes · review |
-|---|---|---|---|
-| S1 | pure `workflowStatusLine` + T1 | S · contained | DeepSeek · in-context |
-| S2 | `RunOptions.statusLine` + `withStatusLine` + `Session.setStatusLine` + T2/T3 | S · load-bearing (agent loop) | Opus · fresh-context review |
-| S3 | daemon wiring + doc pointer + changelog + T4/T5 | S · cross-module | DeepSeek · grouped with S2's review |
-| S4 | `workflow_end` in the mid-turn drain + T6 (if Q4 = yes) | S · load-bearing | Opus · same review round |
-| S5 | debounced wake (only if Q1 = B) + T7 | S · cross-module | Opus · same review round |
+Execution order = table order. One branch, one final fresh-context **Opus** review of the
+whole group (owner «fewer reviews»); each slice runs its narrow test file red → green.
 
-### Owner questions
+| SLICE id | what | size · blast | executor | estimate |
+|---|---|---|---|---|
+| S1 | pure `workflowStatusLine` + T1 | S · contained | sonnet | ~40 min |
+| S2 | `RunOptions.statusLine` + `withStatusLine` + `Session.setStatusLine` + T2/T3 | S · load-bearing (agent loop request builder) | opus | ~1.5 h |
+| S3 | daemon wiring of the line + agent-workflows.md pointer + changelog + T4/T5 | S · cross-module (one line in `attachWorkflows`) | sonnet | ~45 min |
+| S4 | `workflow_end` in the mid-turn drain + T6 | S · load-bearing (agent loop exits queue, stale-wake guard) | opus | ~1 h |
+| S5 | pure `workflowUserWait` + `workflowWaitWakeDue` + T7 | S · contained | sonnet | ~45 min |
+| S6 | `NOTE_KIND.workflowWait` + `noteWorkflowWait` + daemon wait timer/wake + T8/T9 | M · load-bearing (agent exits queue + daemon wake) | opus | ~2 h |
+
+### Owner questions (answered — see Owner answers)
 
 1. **Which events wake the agent?** A) only the run's END (unchanged); a mid-run failure and
    «waits for you» only update the line. B) also «waits for you», at most once per run per
@@ -290,6 +378,25 @@ Fakes only: the driver test's `setup()`/`SpyBroker`/`FakeClock`
 4. **The END note at the next round boundary of a running turn** (like a sub-agent's exit),
    instead of waiting for the turn to end and then waking? **Recommendation: yes** (S4) — no gap
    where the run is neither live nor reported, and one wake fewer.
+
+### Owner answers
+
+*2026-11-25 ~12:05, as relayed by the orchestrator:*
+
+1. Q1 = «B: anche aspetta te» — wake ALSO when a step waits for the user: at most one wake per
+   run per 10 minutes, only when NO client is attached; attach check and debounce designed
+   robustly, persisted across restart if needed. → Design (b) «Waits for you» (not persisted:
+   proven unnecessary, point 5), slices S5/S6.
+2. Q2 = A — the line on every request.
+3. Q3 = the format as is.
+4. Q4 = yes — the end note at the next round boundary inside the running turn (S4).
+
+Plus: align with fix/workflow-model-start-turn (done: «Alignment» under Design) and routing
+«ottimizziamo con sonnet quando possiamo» (the Slices table).
+
+No new owner-visible choice appeared: the 30 s grace and «a key wakes once» only narrow
+«at most one per run per 10 min» to asks that really wait (both are constants a later task
+may tune).
 
 ### Notes / debt
 
