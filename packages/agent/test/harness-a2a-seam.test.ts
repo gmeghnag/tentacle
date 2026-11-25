@@ -419,7 +419,11 @@ describe("C3 + C6: a reply to a remote question passes the same gate", () => {
       run.push(
         askId === "q1"
           ? q2
-          : { kind: "end", status: "completed", text: `got ${String(decision.input)}` },
+          : {
+              kind: "end",
+              status: "completed",
+              text: `got ${decision.allow ? String(decision.input) : decision.message}`,
+            },
       );
     };
     broker.asks[2]?.answer({ allowed: true });
