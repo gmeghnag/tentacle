@@ -3,9 +3,10 @@
  * while it runs is what it shows when it is reopened from the daemon's history.
  *
  * - a failed step stays failed (the stored `isError`, bug 2);
- * - a compaction is ONE separator whatever device made it and whenever it is
- *   seen — live from another device or after a reopen — never the summary as a
- *   user bubble, never literal markdown (bug 4);
+ * - a compaction is ONE step whatever device made it and whenever it is seen —
+ *   live from another device or after a reopen — never the summary as a user
+ *   bubble, never literal markdown (bug 4, docs/feat/mobile-reset-in-timeline
+ *   plan 1A: the step replaced the separator notice);
  * - no notice the phone writes carries `_…_` markdown: a notice row is plain
  *   text (`NoticeRowView`), so the underscores were shown as typed.
  */
@@ -100,33 +101,57 @@ describe("a failed step stays failed on reload (bug 2)", () => {
   });
 });
 
-describe("a compaction is one separator, live and after reopen (bug 4)", () => {
-  test("reopen: the summary is a separator with the figures, not a user bubble", () => {
+describe("a compaction is ONE step, live and after reopen (1A)", () => {
+  test("reopen: the summary is a step with the figures, not a user bubble", () => {
     const rows = historyRows([summary, { role: "assistant", content: "Go on." }], keys());
-    expect(rows.map((r) => r.kind)).toEqual(["notice", "assistant"]);
+    expect(rows.map((r) => r.kind)).toEqual(["context", "assistant"]);
     expect(rows[0]).toMatchObject({
-      kind: "notice",
-      text: "compacted · ctx 25k → 2k",
-      separator: true,
+      kind: "context",
+      event: "compact",
+      figures: "ctx 25k → 2k",
+      body: "The person asked for a login flow; it was drawn.",
     });
     expect(rows.some((r) => r.kind === "user")).toBe(false);
   });
 
-  test("a legacy summary (no `compacted` field) is a separator without figures", () => {
-    const rows = historyRows([{ role: "user", content: summary.content }], keys());
-    expect(rows[0]).toMatchObject({ kind: "notice", text: "compacted", separator: true });
+  test("the body is the summary WITHOUT the head, and the running/skills notes stay", () => {
+    // `packages/agent/src/compact.ts:342` writes `HEAD\n\n<summary>[\n\n<running>][\n\n<skills>]`:
+    // the notes are part of what the model continues from, so only the head goes.
+    const rows = historyRows(
+      [
+        {
+          role: "user",
+          content: `${COMPACTION_SUMMARY_HEAD}\n\nthe summary\n\nStill running: a job\n\nSkills kept: kcs`,
+          compacted: { fromTokens: 25_000, toTokens: 2_000 },
+        },
+      ],
+      keys(),
+    );
+    expect(rows[0]).toMatchObject({
+      kind: "context",
+      event: "compact",
+      body: "the summary\n\nStill running: a job\n\nSkills kept: kcs",
+      // An estimated after (no `toExact`) keeps the separator's own `~`.
+      figures: "ctx 25k → ~2k",
+    });
   });
 
-  test("live, another device: the SAME separator the reopen draws, no markdown", () => {
+  test("a legacy summary (no `compacted` field) is a step without figures", () => {
+    const rows = historyRows([{ role: "user", content: summary.content }], keys());
+    expect(rows[0]).toMatchObject({ kind: "context", event: "compact" });
+    expect(rows[0] !== undefined && "figures" in rows[0]).toBe(false);
+  });
+
+  test("live, another device: the SAME step the reopen draws, no markdown", () => {
     const before = fold([
       { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },
     ]);
     const after = apply(before, { type: "history", messages: [summary], reason: "compact" });
     const last = after.rows[after.rows.length - 1];
     expect(last).toMatchObject({
-      kind: "notice",
-      text: "compacted · ctx 25k → 2k",
-      separator: true,
+      kind: "context",
+      event: "compact",
+      figures: "ctx 25k → 2k",
     });
     expect(after.rows[0]).toMatchObject({ kind: "user", text: "hi" }); // the transcript stays
   });

@@ -61,6 +61,12 @@ export function sameStepCell(a: StepCell | undefined, b: StepCell | undefined): 
       const o = b as Extract<StepCell, { kind: "thought" }>;
       return a.ms === o.ms && a.thread.up === o.thread.up && a.thread.down === o.thread.down;
     }
+    case "context": {
+      // The row itself is compared by identity (`sameCellData`), so only the
+      // thread this layout pass decided on has to match.
+      const o = b as Extract<StepCell, { kind: "context" }>;
+      return a.thread.up === o.thread.up && a.thread.down === o.thread.down;
+    }
   }
 }
 

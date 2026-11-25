@@ -339,6 +339,8 @@
   --m-step-ring-border-width: 1.2px;
   --m-step-wake-font-size: 13px;
   --m-step-wake-line-height: 15px;
+  --m-step-context-node-width: 14px;
+  --m-step-context-node-height: 14px;
   --m-step-dot-box-width: 13px;
   --m-step-dot-box-height: 13px;
   --m-step-breath-dot-width: 3px;
@@ -388,6 +390,7 @@
   --m-step-footer-margin-bottom: 6px;
   --m-step-run-start-margin-top: 6px;
   --m-step-k-therefore-size: 13;
+  --m-step-k-context-node-size: 14;
   --m-step-k-glyph-baseline: 0.35;
   --m-composer-bar-padding-horizontal: 12px;
   --m-composer-bar-padding-top: 8px;
@@ -637,8 +640,10 @@
   --m-transcript-row-harness-glyph-width: 12px;
   --m-transcript-row-harness-body-flex: 1;
   --m-transcript-row-harness-body-gap: 2px;
-  --m-transcript-row-rule-height: 0.3333px;
-  --m-transcript-row-rule-margin-vertical: 6px;
+  --m-transcript-row-context-body-gap: 6px;
+  --m-transcript-row-context-body-padding-top: 2px;
+  --m-transcript-row-context-body-padding-bottom: 7px;
+  --m-transcript-row-context-more-padding-top: 2px;
   --m-markdown-paragraph-font-size: 16px;
   --m-markdown-paragraph-line-height: 23px;
   --m-markdown-bold-font-weight: 700;
