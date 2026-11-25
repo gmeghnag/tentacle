@@ -252,6 +252,65 @@ describe("runProjection — edge traces and chips", () => {
     expect(p.edges.find((e) => e.kind === "fail" && e.from === "review")?.chip).toBe("✗ 1/2");
   });
 
+  test("only the leg the run walked into the current step is go/taken, not every edge into it", () => {
+    // review on its FIRST pass: fix never ran and no retry happened, so the loop
+    // back `fix → review` and the retry `review ↻` are still only possible.
+    const firstPass = (state: string): WorkflowProjection =>
+      runProjection(
+        demoNote(
+          {
+            state: "running",
+            endedAt: undefined,
+            history: [
+              { step: "collect", attempt: 0, round: 0, state: "ok", durationMs: 400 },
+              { step: "draft", attempt: 0, round: 0, state: "ok", durationMs: 18_200 },
+            ],
+          },
+          [
+            step("collect", { kind: "run", state: "ok", next: "draft" }),
+            step("draft", { state: "ok", next: "review" }),
+            step("review", {
+              state,
+              next: "confirm",
+              retry: 1,
+              onFail: { goto: "fix", max: 2, taken: 0 },
+            }),
+            step("fix", { state: "pending", next: "review" }),
+            step("confirm", { kind: "approve", state: "pending", next: null }),
+          ],
+        ),
+      );
+    const running = firstPass("running");
+    expect(traceOf(running, "next", "draft", "review")).toBe("go");
+    expect(traceOf(running, "next", "fix", "review")).toBe("later");
+    expect(traceOf(running, "retry", "review", "review")).toBe("later");
+    const asking = firstPass("needs-approval");
+    expect(traceOf(asking, "next", "draft", "review")).toBe("taken");
+    expect(traceOf(asking, "next", "fix", "review")).toBe("later");
+    expect(traceOf(asking, "retry", "review", "review")).toBe("never");
+  });
+
+  test("a retry in flight is go: the run's last visit is the step it is on again", () => {
+    const row = demoNote(
+      {
+        state: "running",
+        endedAt: undefined,
+        history: [
+          { step: "collect", attempt: 0, round: 0, state: "ok", durationMs: 400 },
+          { step: "draft", attempt: 0, round: 0, state: "error", durationMs: 3_100 },
+        ],
+      },
+      [
+        step("collect", { kind: "run", state: "ok", next: "draft" }),
+        step("draft", { state: "running", attempt: 1, next: "review", retry: 1 }),
+        step("review", { state: "pending", next: null }),
+      ],
+    );
+    const p = runProjection(row);
+    expect(traceOf(p, "retry", "draft", "draft")).toBe("go");
+    expect(traceOf(p, "next", "collect", "draft")).toBe("taken");
+  });
+
   test("a LIVE run whose goto is spent does not make its target 'not yet'", () => {
     // The plan's mutation target: drop the `taken < max` term from reachability and
     // the exhausted goto still reaches `fix`, which then reads "not yet" forever.

@@ -1271,6 +1271,51 @@ changelog fragment is `changelog.d/workflows-ux-graph-render.fixed.md`.
 
 *— deepseek-chat (tentacle executor), 2026-11-25*
 
+### Fix round 1 (Review S4–S6b)
+
+**Finding 1 (MEDIUM) — FIXED.** `packages/client/src/workflow-run-graph.ts` `traceOf`: the `go`/`taken`
+short-circuit for an edge into `current` now also requires `from === lastVisited` (the run's last visit).
+Any other edge into `current` — the loop back from a step that never ran, a retry that did not happen —
+falls through to the history / counter / reachability rules. A retry in flight still reads `go`: its last
+visit IS the step it is on (`draft` failed → `draft` running, attempt 1).
+Tests (`packages/client/test/workflow-run-graph.test.ts`): "only the leg the run walked into the current step
+is go/taken…" (review's first pass, running and `needs-approval`: `draft→review` go/taken, `fix→review`
+later, retry later/never) and "a retry in flight is go…" (`collect→draft` taken, not go).
+Red on the old code: `fix→review` Expected "later" Received "go"; `collect→draft` Expected "taken" Received
+"go". Green after: 28 pass. Mutation = the old condition (drop `&& from === lastVisited`) → the same two reds.
+
+**Finding 2 (MEDIUM) — FIXED.** `apps/mobile/src/workflow-run-layout.ts` `runLayout`: one routing table for
+every non-retry edge (it replaces the per-kind branches):
+- `next` to the next spine row → the spine's vertical, unchanged;
+- same column → `backArc` on its own lane (the gap for the spine, the right margin for the side; both are
+  pill-free at every row). This also moves a FORWARD spine→spine or side→side goto off `gotoCurve`, which
+  ran down through the pills in between;
+- spine → side, target below, and no other side pill on a row in `[from.row, to.row)` → the mockup's
+  `gotoCurve` (its control hull spans exactly those rows at x ≥ 216);
+- side → spine, target above, and no other side pill on a row in `[to.row, from.row)` → the mockup's
+  `sideBackCurve`;
+- otherwise → new `gapCurve`: spine pill's right edge ↔ side pill's left edge, every control point inside
+  216…244, so it cannot meet a pill. Covers the reviewer's forward side→spine `next` (it used to take
+  `backArc` from x 386 across the side column).
+demo-note draws exactly as before (its goto and side-back pass the clearance check).
+Test (`apps/mobile/test/workflow-run-layout.test.ts`): "no edge passes through a pill that is not one of its two
+ends": samples every `M`/`L`/`C` segment (64 points per cubic) and fails on a point strictly inside a
+non-endpoint pill; on the reviewer's shape (`a→b→c→d`, `b`→`x`, `c`→`y`, `x.next = d`), demo-note, and 200
+seeded random shapes (gotos in every direction, `next` skips of up to 3).
+Red on the old code: `["fail-c-y through x", "next-x-d through y"]` — the reviewer's two crossings. Green after.
+Mutations (each restored, then green again):
+- `sideRowTaken` returns `false` (always take the mockup curve) → red `fail-c-y through x`;
+- the fallback is the old `backArc` instead of `gapCurve` → red `fail-c-y through x`, `next-x-d through y`.
+
+**Out of scope, done:** deleted the two committed `sed` backups `apps/mobile/test/e2e-flows.test.ts-E` and
+`apps/mobile/test/hub-actions.test.ts-E` (working tree only; no commit).
+
+**Gate (narrow):** the 5 test files covering the change → 100 pass / 0 fail; `bunx biome check` on the 4
+changed files → clean. Full `bun run check` not run here (the orchestrator's script runs it). Unverified: the
+simulator render of a rerouted `gapCurve` (geometry only is tested).
+
+*— claude-opus-5-5, 2026-11-25*
+
 ## Review
 
 ### Review — S4, S5, S6a, S6b (fresh context)

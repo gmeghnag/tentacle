@@ -245,6 +245,43 @@ describe("S6a · every edge starts and ends on its two nodes' boxes", () => {
     expect(points[1] ?? 0).toBeGreaterThan(points.at(-1) ?? 0);
   });
 
+  test("no edge passes through a pill that is not one of its two ends", () => {
+    // The reviewer's shape: a→b→c→d on the spine, b's goto x and c's goto y in the
+    // side column, and x's `next` back DOWN to d (a forward side→spine edge). The
+    // goto c→y used to run straight through x, and x→d across y.
+    const crossing = demoNote([
+      step("a", { state: "ok", next: "b" }),
+      step("b", { state: "ok", next: "c", onFail: { goto: "x", max: 1, taken: 0 } }),
+      step("c", { state: "ok", next: "d", onFail: { goto: "y", max: 1, taken: 0 } }),
+      step("d", { state: "ok", next: null }),
+      step("x", { state: "pending", next: "d" }),
+      step("y", { state: "pending", next: null }),
+    ]);
+    expect(crossings(layout(crossing))).toEqual([]);
+    expect(crossings(layout(demoNote()))).toEqual([]);
+    // …and a randomised family with gotos in every direction and `next` skips.
+    let seed = 20_241_124;
+    const rnd = (n: number): number => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed % n;
+    };
+    const bad: string[] = [];
+    for (let shape = 0; shape < 200; shape += 1) {
+      const count = 2 + rnd(12);
+      const ids = Array.from({ length: count }, (_, i) => `n${i}`);
+      const steps = ids.map((id, i) =>
+        step(id, {
+          next: i === count - 1 ? null : (ids[Math.min(count - 1, i + 1 + rnd(3))] ?? null),
+          onFail: rnd(2) === 0 ? { goto: ids[rnd(count)] ?? id, max: 1, taken: 0 } : null,
+        }),
+      );
+      for (const hit of crossings(layout(demoNote(steps)))) {
+        bad.push(`shape ${shape}: ${hit}`);
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+
   test("a dangling edge target draws no edge (never a made-up box)", () => {
     const row = demoNote([
       step("a", { state: "ok", next: "gone" }),
@@ -332,6 +369,69 @@ describe("S6a · chips sit outside the pills, and a cycle is an arc not a second
 /** Every number in an SVG path, in order (`M x y C c1x c1y c2x c2y x y`). */
 function numbersOf(d: string): number[] {
   return (d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+}
+
+/** Points along an SVG path of `M`/`L`/`C` commands, densely enough to catch a crossing. */
+function samplesOf(d: string): { x: number; y: number }[] {
+  const out: { x: number; y: number }[] = [];
+  let at = { x: 0, y: 0 };
+  for (const [, op, args] of d.matchAll(/([MLC])([^MLC]*)/g)) {
+    const n = numbersOf(args ?? "");
+    if (op === "M") {
+      at = { x: n[0] ?? 0, y: n[1] ?? 0 };
+      out.push(at);
+    } else if (op === "L") {
+      const to = { x: n[0] ?? 0, y: n[1] ?? 0 };
+      for (let i = 1; i <= 32; i += 1) {
+        const t = i / 32;
+        out.push({ x: at.x + (to.x - at.x) * t, y: at.y + (to.y - at.y) * t });
+      }
+      at = to;
+    } else {
+      const [ax, ay, bx, by, cx, cy] = [0, 1, 2, 3, 4, 5].map((i) => n[i] ?? 0) as [
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+      ];
+      for (let i = 1; i <= 64; i += 1) {
+        const t = i / 64;
+        const u = 1 - t;
+        out.push({
+          x: u * u * u * at.x + 3 * u * u * t * ax + 3 * u * t * t * bx + t * t * t * cx,
+          y: u * u * u * at.y + 3 * u * u * t * ay + 3 * u * t * t * by + t * t * t * cy,
+        });
+      }
+      at = { x: cx, y: cy };
+    }
+  }
+  return out;
+}
+
+/** Every `edge through pill` where a sampled point lies INSIDE a pill that is not one of its ends. */
+function crossings(geometry: RunGeometry): string[] {
+  const hits: string[] = [];
+  for (const edge of geometry.edges) {
+    const points = samplesOf(edge.d);
+    for (const node of geometry.nodes) {
+      if (node.id === edge.from || node.id === edge.to) {
+        continue;
+      }
+      const inside = points.some(
+        (p) =>
+          p.x > node.x + 0.5 &&
+          p.x < node.x + node.width - 0.5 &&
+          p.y > node.y + 0.5 &&
+          p.y < node.y + node.height - 0.5,
+      );
+      if (inside) {
+        hits.push(`${edge.key} through ${node.id}`);
+      }
+    }
+  }
+  return hits;
 }
 
 /** Whether a point lies on one of a pill's four edges (± a hairline for rounding). */

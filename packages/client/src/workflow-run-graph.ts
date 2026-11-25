@@ -305,8 +305,10 @@ export function runProjection(row: WorkflowRow): WorkflowProjection {
 
   const traceOf = (from: string, to: string, kind: WorkflowEdgeView["kind"]): WorkflowTrace => {
     const source = viewOf.get(from);
-    if (live && to === current) {
-      // The leg the run is walking right now, or the one into the step it waits on.
+    if (live && to === current && from === lastVisited) {
+      // The leg the run is walking right now, or the one into the step it waits on:
+      // ONLY the one out of its last visit. Any other edge into `current` (the loop
+      // back from a step that never ran, a retry that did not happen) falls through.
       return viewOf.get(to)?.phase === "running" ? "go" : "taken";
     }
     if (transitions.has(key(from, to))) {

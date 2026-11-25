@@ -21,9 +21,11 @@
  * - **an edge is a curve between two boxes, never a line through the middle**: a
  *   spine `next` runs straight down the spine's own centre; a goto leaves its
  *   source's right edge and enters the side pill's top; a side `next` curves back
- *   up into its target's right edge; an arc back up the spine gets its own LANE,
- *   bowing in the 28 pt gap between the columns so two arcs never coincide and no
- *   arc ever crosses the side column.
+ *   up into its target's right edge; an arc within one column gets its own LANE
+ *   outside it (the 28 pt gap for the spine, the right margin for the side), so two
+ *   arcs never coincide. The goto / side-back curves are used only when no other
+ *   side pill sits in the rows they sweep; otherwise the edge bows inside the gap
+ *   (`gapCurve`). So no edge crosses a pill that is not one of its two ends.
  *
  * The logical space is the mockup's own (`final-v3.html`: spine x16 w200, side
  * x244 w142, pitch 72, pill 44, in a 402 pt-wide phone), so the renderer scales
@@ -177,6 +179,35 @@ function sideBackCurve(from: RunNode, to: RunNode): string {
   const x2 = to.x + to.width;
   const y2 = to.y + to.height * 0.75;
   return `M ${x1} ${y1} C ${x1} ${y2 - 8}, ${x2 + 10} ${y2}, ${x2} ${y2}`;
+}
+
+/**
+ * Between the two columns: out of the spine pill's RIGHT edge and into the side
+ * pill's LEFT edge (either way round), bowing at `216 + bow`. Every control point
+ * is inside the 28 pt gap (216…244), which holds no pill at any row, so this curve
+ * cannot cross one — the route an edge between the columns takes whenever the
+ * mockup's own curve would pass a side pill on its way.
+ */
+function gapCurve(from: RunNode, to: RunNode, bow: number): string {
+  const edgeX = (node: RunNode): number => (node.column === "spine" ? node.x + node.width : node.x);
+  const x1 = edgeX(from);
+  const y1 = from.y + from.height / 2;
+  const x2 = edgeX(to);
+  const y2 = to.y + to.height / 2;
+  const c =
+    RUN_SPINE.x +
+    RUN_SPINE.w +
+    Math.min(Math.max(4, bow), RUN_SIDE.x - RUN_SPINE.x - RUN_SPINE.w - 2);
+  return `M ${x1} ${y1} C ${c} ${y1}, ${c} ${y2}, ${x2} ${y2}`;
+}
+
+/**
+ * Whether a side pill other than `except` sits on a row in `[lo, hi)`: the rows
+ * whose band the mockup's goto / side-back curves sweep across the side column
+ * (their control hull spans those rows over x ≥ 216).
+ */
+function sideRowTaken(nodes: readonly RunNode[], lo: number, hi: number, except: string): boolean {
+  return nodes.some((n) => n.column === "side" && n.id !== except && n.row >= lo && n.row < hi);
 }
 
 /**
@@ -372,28 +403,41 @@ export function runLayout(projection: WorkflowProjection): RunGeometry {
       }
       continue;
     }
-    if (edge.kind === "fail" && to.row > from.row) {
-      // A goto that fires FORWARD: down from its source's right edge into the target.
-      edges.push({
-        key,
-        kind: "fail",
-        from: from.id,
-        to: to.id,
-        trace: edge.trace,
-        d: gotoCurve(from, to),
-      });
-    } else if (edge.kind === "fail") {
-      // A goto that jumps BACK UP (the loop's own way round): its own lane.
+    // Down the spine's own centre: the pass path's vertical connector. Every other
+    // edge is routed so that no pill but its two ends is ever crossed (Review S4–S6b
+    // finding 2): within one column, a lane outside it (the gap for the spine, the
+    // right margin for the side); between the columns, the mockup's curve when no
+    // side pill sits in the rows it sweeps, else a curve inside the gap.
+    let d: string;
+    if (
+      edge.kind === "next" &&
+      from.column === "spine" &&
+      to.column === "spine" &&
+      to.row === from.row + 1
+    ) {
+      d = vertical(spineCenter, from.y + from.height, to.y);
+    } else if (from.column === to.column) {
       lane += 1;
-      edges.push({
-        key,
-        kind: "fail",
-        from: from.id,
-        to: to.id,
-        trace: edge.trace,
-        d: backArc(from, to, laneBow(lane)),
-      });
+      d = backArc(from, to, laneBow(lane));
+    } else if (
+      from.column === "spine" &&
+      to.row > from.row &&
+      !sideRowTaken(nodes, from.row, to.row, to.id)
+    ) {
+      // The mockup's goto: out of the source's right edge, down into the target's top.
+      d = gotoCurve(from, to);
+    } else if (
+      from.column === "side" &&
+      to.row < from.row &&
+      !sideRowTaken(nodes, to.row, from.row, from.id)
+    ) {
+      // The mockup's way back: out of the side pill's top, up into its target.
+      d = sideBackCurve(from, to);
+    } else {
+      lane += 1;
+      d = gapCurve(from, to, laneBow(lane));
     }
+    edges.push({ key, kind: edge.kind, from: from.id, to: to.id, trace: edge.trace, d });
     if (edge.kind === "fail") {
       if (edge.chip !== undefined) {
         const w = edge.chip.length * CHIP_CHAR + CHIP_PAD;
@@ -416,55 +460,7 @@ export function runLayout(projection: WorkflowProjection): RunGeometry {
           height: CHIP_H,
         });
       }
-      continue;
     }
-
-    // A pass edge. Down the spine is the vertical; anything that closes back UP is an
-    // arc on its own lane; a `next` into the side column is drawn like a goto.
-    const forward = to.row > from.row;
-    if (from.column === "spine" && to.column === "spine" && forward && to.row === from.row + 1) {
-      edges.push({
-        key,
-        kind: "next",
-        from: from.id,
-        to: to.id,
-        trace: edge.trace,
-        d: vertical(spineCenter, from.y + from.height, to.y),
-      });
-      continue;
-    }
-    if (from.column === "side" && to.column === "spine" && !forward) {
-      edges.push({
-        key,
-        kind: "next",
-        from: from.id,
-        to: to.id,
-        trace: edge.trace,
-        d: sideBackCurve(from, to),
-      });
-      continue;
-    }
-    if (to.column === "side" && from.column === "spine") {
-      edges.push({
-        key,
-        kind: "next",
-        from: from.id,
-        to: to.id,
-        trace: edge.trace,
-        d: gotoCurve(from, to),
-      });
-      continue;
-    }
-    // Back up the spine: its own lane in the gap between the columns.
-    lane += 1;
-    edges.push({
-      key,
-      kind: "next",
-      from: from.id,
-      to: to.id,
-      trace: edge.trace,
-      d: backArc(from, to, laneBow(lane)),
-    });
   }
 
   const lastY = nodes.reduce((max, node) => Math.max(max, node.y + node.height), RUN_TOP);
