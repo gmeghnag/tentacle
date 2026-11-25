@@ -1,0 +1,1 @@
+- **Browser host groundwork.** `tentacle browser install|status|uninstall` registers the native-messaging host Chrome will use to talk to tentacle (a hub on a private unix socket that arbitrates which session owns which tab). No extension ships yet, so nothing is user-visible until it does.

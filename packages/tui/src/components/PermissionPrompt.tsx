@@ -1,9 +1,9 @@
 import type { PermissionRequest } from "@tentacle/core";
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import { truncateCells as truncate } from "../cells.ts";
+import { type ApprovalScroll, NO_APPROVAL_SCROLL } from "../approval-scroll.ts";
 import { MENU_FOOTER, MENU_FOOTER_REPLY, type ReplyView } from "../permission-reply.ts";
-import { permissionCwdLine, permissionDetailLines, permissionShowsCwd } from "../permission-ui.ts";
+import { permissionCwdLine, permissionShowsCwd, permissionView } from "../permission-ui.ts";
 import { dimProps, palette } from "../theme.ts";
 
 /**
@@ -36,6 +36,7 @@ export function PermissionPrompt({
   selected,
   cwd,
   columns = 80,
+  approvalScroll = NO_APPROVAL_SCROLL,
   reply,
   replyable = false,
   agentLine,
@@ -45,6 +46,8 @@ export function PermissionPrompt({
   selected: number;
   cwd: string;
   columns?: number;
+  /** The `workflow_approve` detail's scroll (`approval-scroll.ts`). */
+  approvalScroll?: ApprovalScroll;
   reply?: ReplyView;
   replyable?: boolean;
   /** The asking sub-agent's row (`permissionAgentLine`); absent for a call's own ask. */
@@ -54,6 +57,9 @@ export function PermissionPrompt({
   const dim = dimProps();
   const titlePrefix = `╭─ ${req.title} `;
   const dashes = Math.max(0, columns - titlePrefix.length - 1);
+  // The same view the layout counts rows from (`app-layout.ts`). No sentence
+  // yet: the ask's own call id is not on the request (Design §5 ⚠, `askedFor`).
+  const view = permissionView(req, null, columns, approvalScroll);
 
   return (
     <Box flexDirection="column">
@@ -62,12 +68,10 @@ export function PermissionPrompt({
         {"─".repeat(dashes)}
       </Text>
       {agentLine !== undefined ? <Text {...dim}> {agentLine}</Text> : null}
-      {permissionDetailLines(req).map((line, i) => (
-        <Text key={i} {...dim}>
-          {" "}
-          {truncate(line, Math.max(10, columns - 3))}
-        </Text>
+      {view.detailRows.map((line, i) => (
+        <Text key={i}> {line}</Text>
       ))}
+      {view.intentRow !== null ? <Text {...dim}> {view.intentRow}</Text> : null}
       {permissionShowsCwd(req) ? <Text {...dim}> {permissionCwdLine(cwd, columns)}</Text> : null}
       {reply ? (
         <>

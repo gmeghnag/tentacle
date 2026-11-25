@@ -13,6 +13,11 @@ import type { ChatMessage } from "./model.ts";
 export interface HeuristicOptions {
   readonly charsPerToken?: number;
   readonly perMessageOverhead?: number;
+  /**
+   * Tokens charged per image ref (default `IMAGE_TOKEN_ESTIMATE`): the
+   * provider's estimate or `model.imageTokens` (docs/feat/image-view.md D7).
+   */
+  readonly imageTokens?: number;
 }
 
 export class HeuristicTokenCounter implements TokenCounter {
@@ -27,7 +32,11 @@ export class HeuristicTokenCounter implements TokenCounter {
     }
     this.charsPerToken = charsPerToken;
     this.perMessageOverhead = options?.perMessageOverhead ?? 4;
+    this.imageTokens = options?.imageTokens ?? IMAGE_TOKEN_ESTIMATE;
   }
+
+  /** What one image ref costs in this counter. */
+  readonly imageTokens: number;
 
   countText(text: string): number {
     if (text.length === 0) {
@@ -42,12 +51,26 @@ export class HeuristicTokenCounter implements TokenCounter {
       total += this.perMessageOverhead + this.countText(message.content);
       // An inline image is not text: it has no characters to divide. Charged per
       // ref, so a budget that ignores images never underestimates the prompt.
-      total += (message.attachments?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
+      total += (message.attachments?.length ?? 0) * this.imageTokens;
       if (message.toolCalls) {
         for (const call of message.toolCalls) {
           total += this.countText(call.name) + this.countText(call.arguments);
         }
       }
+      // The model's own reasoning is echoed on every request (docs/fix/reasoning-echo.md
+      // D7): counted, so prune and compaction fire on the real size. Anthropic's
+      // signature is opaque transport, not prompt text: not counted.
+      total += this.countReasoning(message.reasoning);
+    }
+    return total;
+  }
+
+  private countReasoning(record: ChatMessage["reasoning"]): number {
+    if (!record) return 0;
+    if (record.body.format === "openai") return this.countText(record.body.text);
+    let total = 0;
+    for (const block of record.body.blocks) {
+      total += this.countText(block.type === "thinking" ? block.thinking : block.data);
     }
     return total;
   }

@@ -25,9 +25,11 @@ const VERSION_TS = join(import.meta.dir, "..", "src", "version.ts");
 
 describe("the wire version", () => {
   test("PROTOCOL_VERSION is the number this build speaks", () => {
-    // THE pin. A bump edits this line and `version.ts`; nothing else.
-    // Mutation: change `version.ts:32` alone → red.
-    expect(PROTOCOL_VERSION).toBe(24);
+    // THE pin. `bun run protocol:bump` rewrites this line, and `version.ts`,
+    // from `protocol.d/` notes (scripts/protocol-bump.ts `applyPin`); nothing
+    // else in the tree spells the number out (scripts/test/protocol-version-literals.test.ts).
+    // Mutation: change the number line in `version.ts` alone → red.
+    expect(PROTOCOL_VERSION).toBe(27);
   });
 
   test("the newest reason comment names the number the file exports", () => {

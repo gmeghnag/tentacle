@@ -59,8 +59,6 @@ export interface UserRow {
    * degradation, never a guess).
    */
   readonly documents?: readonly string[];
-  /** The model's restart prompt after a context reset (labelled "restart prompt"). */
-  readonly restart?: true;
   /**
    * The scheduled wake that started this turn (docs/feat/scheduled-fire-row.md):
    * live, the `turn_start.schedule` ref the client trust-gated and sanitized
@@ -162,8 +160,6 @@ export interface NoticeRow {
   readonly text: string;
   /** A longer body (a tentacle note's rest), shown only when expanded. */
   readonly body?: string;
-  /** A full-width rule around the text (a context reset's separator). */
-  readonly separator?: true;
   /**
    * `warn` for something that went WRONG and the person should see (a reply cut
    * at its output limit, an empty turn — the TUI's own table,
@@ -173,10 +169,45 @@ export interface NoticeRow {
    */
   readonly level?: "warn";
   /**
+   * The turns a LOST notice is ABOUT (`docs/fix/mobile-stream-lost-repeat.md`):
+   * the `turnId`s whose stream threw, set by the fold only on that notice. It is
+   * why the notice is not stacked (one row per run of losses) and how it is
+   * RETRACTED once the same turn is seen completing. Fold-only: never rendered.
+   */
+  readonly lostTurns?: readonly string[];
+  /**
    * The tentacle note it was drawn from (`ChatMessage.note`): the Activity
    * sheet joins a sub-agent's report by its `id` (`activity-memory.ts`).
    */
   readonly note?: { readonly kind: string; readonly id?: string };
+}
+
+/**
+ * A context reset or a compaction as ONE timeline STEP (1A,
+ * docs/feat/mobile-reset-in-timeline.md): a rail node, not a notice line and
+ * not a bubble the person typed. It replaced both the old `↻ context reset by
+ * the model` separator plus its restart-prompt user row, and the compaction's
+ * separator notice — so live, another device's and a reopen all draw ONE node.
+ *
+ * Why a kind of its own rather than a `NoticeRow` flag: a notice is a harness
+ * LINE (`notice-group.ts` `isHarness`, the lost-notice logic in `transcript.ts`),
+ * and this row must be a STEP of the rail (`tool-steps.ts`).
+ */
+export interface ContextRow {
+  readonly kind: "context";
+  readonly key: string;
+  readonly event: "reset" | "compact";
+  /** reset: the restart prompt; compact: the summary (the head line excluded). */
+  readonly body: string;
+  /**
+   * compact only: the figures, without the word — `ctx 182k → 9k` / `ctx 182k
+   * → ~9k`; ABSENT for a legacy summary (no `compacted` field) and for a
+   * compaction whose summary message this build cannot recognise: never a
+   * faked number.
+   */
+  readonly figures?: string;
+  /** The reset (or summary) message's arrival time, when one is known. */
+  readonly at?: number;
 }
 
 /**
@@ -191,7 +222,7 @@ export interface TurnRow {
   readonly own: boolean;
 }
 
-export type Row = UserRow | AssistantRow | ReasoningRow | ToolRow | NoticeRow;
+export type Row = UserRow | AssistantRow | ReasoningRow | ToolRow | NoticeRow | ContextRow;
 
 /**
  * What a row shows for an image ref: `[image: name]` — the TUI's own wording

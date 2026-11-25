@@ -32,8 +32,76 @@ const tool = (key: string, status: ToolStatus = "ok", extra: Partial<ToolRow> = 
   ...extra,
 });
 
+describe("stepRowView: a FILE tool's body (docs/feat/mobile-file-view.md)", () => {
+  const editRow = (extra: Partial<ToolRow> = {}): ToolRow =>
+    tool("t", "ok", {
+      name: "fs_edit",
+      label: "Edit",
+      args: '{"path":"src/app.ts"}',
+      output: "edited src/app.ts (+2 -1)",
+      diff: {
+        kind: "diff",
+        path: "src/app.ts",
+        patch: [
+          "--- a/src/app.ts",
+          "+++ b/src/app.ts",
+          "@@ -40,2 +40,3 @@",
+          " const a = 1;",
+          "-const b = 2;",
+          "+const b = 3;",
+          "+const c = 4;",
+        ].join("\n"),
+        added: 2,
+        removed: 1,
+      },
+      ...extra,
+    });
+
+  test("a file step carries its coloured body and NO raw result line", () => {
+    const v = stepRowView(editRow(), null, false);
+    expect(v.file?.header).toBe("lines 40–42 · TypeScript");
+    // The body is the file's content, not the tool's result text: `edited …`
+    // and the repeated `+2 -1` are gone (owner: the row says them once).
+    expect(v.command).toEqual([]);
+    expect(v.output).toBe(null);
+    expect(v.file?.lines.length).toBe(4);
+  });
+
+  test("a file step is still tappable (the body opens on tap)", () => {
+    expect(stepRowView(editRow(), null, false).tappable).toBe(true);
+  });
+
+  test("`full` reaches the file body's preview", () => {
+    const many = Array.from({ length: 30 }, (_, at) => `const a${at} = 1;`);
+    const row = tool("t", "ok", {
+      name: "fs_read",
+      label: "Read",
+      args: '{"path":"src/big.ts"}',
+      output: many.join("\n"),
+    });
+    expect(stepRowView(row, null, false).file?.hidden).toBe(18);
+    expect(stepRowView(row, null, true).file?.hidden).toBe(0);
+  });
+
+  test("a non-file tool has no file body (nothing else changes)", () => {
+    const v = stepRowView(tool("t", "ok", { output: "hi" }), null, false);
+    expect(v.file).toBeUndefined();
+    expect(v.output?.text).toBe("hi");
+  });
+
+  test("a FAILED file step keeps today's output, no body", () => {
+    const v = stepRowView(
+      editRow({ status: "error", output: "old_string not found in src/app.ts" }),
+      null,
+      false,
+    );
+    expect(v.file).toBeUndefined();
+    expect(v.output?.text).toBe("old_string not found in src/app.ts");
+  });
+});
+
 describe("stepRowView: one step's line and body", () => {
-  test("a finished shell step: green dot, its command, the duration, the cut output with ⎿", () => {
+  test("a finished shell step: green dot, its command, the duration, the cut output, no ⎿", () => {
     const out = Array.from({ length: 9 }, (_, i) => `line ${i + 1}`).join("\n");
     const v = stepRowView(tool("t", "ok", { durationMs: 14, output: out }), "why", false);
     expect(v.name).toEqual({ tool: "Bash" });
@@ -42,12 +110,29 @@ describe("stepRowView: one step's line and body", () => {
     expect(v.trailing).toBe("14 ms");
     expect(v.trailingRed).toBe(false);
     expect(v.live).toBe(false);
-    expect(v.thought).toBe("why");
-    expect(v.command).toEqual(["ls -la polpo-page.png"]);
+    // docs/fix/mobile-running-row.md (owner 21/11): the body is the command and
+    // the result — never the reasoning folded into the step.
+    expect("thought" in v).toBe(false);
+    // The command appears ONCE (decision 5): on the `$` line when it is drawn,
+    // else in the body — where it is the only place the command can be read.
+    const multi = stepRowView(
+      tool("m", "ok", {
+        args: JSON.stringify({ command: "cd x\nbun test", description: "Go" }),
+      }),
+      null,
+      false,
+    );
+    expect(multi.subline).toBe("$ cd x…");
+    // The line shows the FIRST line only: the body keeps the whole command, so a
+    // multi-line call still reads in full in one place.
+    expect(multi.command).toEqual(["cd x", "bun test"]);
+    // A plain shell row (no sentence): its subtitle IS the command, so the body
+    // does not say it a second time.
+    expect(v.subtitle).toBe("ls -la polpo-page.png");
+    expect(v.command).toEqual([]);
     expect(v.output).toEqual({
-      text: ["⎿ line 1", "  line 2", "  line 3", "  line 4", "  line 5", "  line 6"].join("\n"),
+      text: ["line 4", "line 5", "line 6", "line 7", "line 8", "line 9"].join("\n"),
       hidden: 3,
-      error: false,
     });
     expect(v.tappable).toBe(true);
     expect(v.a11yLabel).toBe(
@@ -55,13 +140,13 @@ describe("stepRowView: one step's line and body", () => {
     );
   });
 
-  test("`full` shows every line; an error is red on the dot, the trailing text and the result", () => {
+  test("`full` shows every line; an error is red on the dot and the trailing text, NOT the result", () => {
     const out = Array.from({ length: 9 }, (_, i) => `e${i}`).join("\n");
     const v = stepRowView(tool("t", "error", { output: out, durationMs: 1300 }), null, true);
     expect(v.dot).toBe("error");
     expect(v.trailingRed).toBe(true);
     expect(v.output?.hidden).toBe(0);
-    expect(v.output?.error).toBe(true);
+    expect(v.output).not.toHaveProperty("error");
     expect(v.output?.text.split("\n")).toHaveLength(9);
   });
 
@@ -138,6 +223,59 @@ describe("stepRowView: one step's line and body", () => {
     expect(v.name).toEqual({ server: "playwright", tool: "browser_resize" });
     expect(v.subtitle).toBe("430 × 932");
     expect(v.command).toEqual(["width  430", "height  932"]);
+  });
+});
+
+describe("the tap detail carries NO reasoning, for every tool (owner 21/11, docs/fix/mobile-running-row.md)", () => {
+  const REASONING = "I should check the resolver latency first";
+  const rows: readonly [string, ToolRow][] = [
+    ["a shell call", tool("t", "ok", { output: "a\nb", durationMs: 5 })],
+    [
+      "a described shell call",
+      tool("t", "ok", {
+        args: JSON.stringify({ command: "dig +short a.example", description: "Test DNS" }),
+        output: "exit=0\n1.2.3.4",
+      }),
+    ],
+    [
+      "a running described shell call",
+      tool("t", "running", {
+        args: JSON.stringify({ command: "sleep 9", description: "Test DNS" }),
+        at: 5,
+      }),
+    ],
+    [
+      "a file read",
+      tool("t", "ok", { name: "fs_read", label: "Read", args: '{"path":"a.txt"}', output: "x" }),
+    ],
+    [
+      "an MCP tool",
+      tool("t", "error", { name: "mcp__demo__browser_resize", label: "", args: '{"width":4}' }),
+    ],
+  ];
+  for (const [what, row] of rows) {
+    for (const compact of [false, true]) {
+      test(`${what} (compactShell ${compact ? "on" : "off"}): the view says nothing of the thought`, () => {
+        const v = stepRowView(row, REASONING, false, true, compact);
+        expect(JSON.stringify(v)).not.toContain(REASONING);
+        expect("thought" in v).toBe(false);
+      });
+    }
+  }
+
+  test("a thought alone does not make a step tappable (its body would be empty)", () => {
+    const v = stepRowView(
+      tool("t", "ok", { name: "shell_output", args: '{"id":"j1"}' }),
+      REASONING,
+      false,
+    );
+    expect(v.tappable).toBe(false);
+  });
+
+  test("VoiceOver still says a thought came first (a fact, not the reasoning)", () => {
+    const v = stepRowView(tool("t", "ok", { durationMs: 14 }), REASONING, false);
+    expect(v.a11yLabel).toContain("thought first");
+    expect(v.a11yLabel).not.toContain(REASONING);
   });
 });
 

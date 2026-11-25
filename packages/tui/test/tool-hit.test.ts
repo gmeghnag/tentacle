@@ -87,14 +87,20 @@ describe("toolCallAt: which tool call is under screen row y (docs/feat/tui-tool-
     expect(toolCallAt(laid, earlierWindow.start + (screenY - 1))).toBeNull();
   });
 
-  test("an expanded call's command rows are text too: no id", () => {
+  test("an expanded call's `$` rows toggle (docs/fix/tui-click-dollar-row); its output rows do not", () => {
     const { laid } = layoutTranscript(items(), { ...opts, expandedIds: ["c1"] });
     const c1 = laid.find((l) => l.id === "c1");
     if (!c1) return;
     expect(toolCallAt(laid, c1.start)).toBe("c1");
-    // The `  │ ` block sits directly under the header.
-    expect(c1.rows[1]?.startsWith("  │ ")).toBe(true);
-    expect(toolCallAt(laid, c1.start + 1)).toBeNull();
+    // The `⎿ $ …` block (and its hung continuation rows) sits directly under
+    // the header; the output rows after it are text.
+    expect(c1.rows[1]?.startsWith("⎿ $ ")).toBe(true);
+    expect(toolCallAt(laid, c1.start + 1)).toBe("c1");
+    const out = c1.rows.findIndex((r) => r === "  out 1");
+    expect(out).toBeGreaterThan(1);
+    for (let r = 1; r < c1.rows.length; r++) {
+      expect(toolCallAt(laid, c1.start + r)).toBe(r < out ? "c1" : null);
+    }
   });
 
   test("an empty layout answers null for every row", () => {
@@ -151,5 +157,93 @@ describe("toolCallAtViewport: only rows INSIDE the transcript viewport count", (
   test("an empty viewport (height 0) accepts no row at all", () => {
     const { laid } = windowed();
     expect(toolCallAtViewport(laid, { start: 0, end: 0 }, 1)).toBeNull();
+  });
+});
+
+describe("toolCallAt: a shell call's `$` rows toggle too (docs/fix/tui-click-dollar-row)", () => {
+  const CMD = "echo one\necho two && echo a-very-long-second-line-that-wraps-at-forty";
+  const multi = (id: string): ToolItem => ({
+    ...tool(id, CMD),
+    status: "error",
+    resultText: "exit=2\nboom\nbang",
+  });
+  const sentence = (id: string): ToolItem => ({
+    ...multi(id),
+    args: JSON.stringify({ command: CMD, description: "Run it" }),
+  });
+  const o = { expandAll: true, width: 40 };
+
+  test("expanded described shell: header, every `$` row and the exit-spill row hit; output rows do not", () => {
+    const { laid } = layoutTranscript([sentence("s1")], o);
+    const l = laid[0];
+    expect(l).toBeDefined();
+    if (!l) return;
+    const dollarEnd = l.rows.findIndex((r) => r.includes("boom"));
+    expect(dollarEnd).toBeGreaterThan(2); // header + >1 `$` rows (non-vacuous)
+    for (let r = 0; r < dollarEnd; r++) {
+      expect(toolCallAt(laid, l.start + r)).toBe("s1");
+    }
+    expect(toolCallAt(laid, l.start + dollarEnd)).toBeNull(); // first output row
+    expect(toolCallAt(laid, l.start + l.rows.length - 1)).toBeNull();
+  });
+
+  test("collapsed described shell: header and the `$` row hit", () => {
+    const { laid } = layoutTranscript([sentence("s1")], { expandAll: false, width: 40 });
+    const l = laid[0];
+    expect(l).toBeDefined();
+    if (!l) return;
+    expect(toolCallAt(laid, l.start)).toBe("s1");
+    expect(toolCallAt(laid, l.start + 1)).toBe("s1");
+    expect(toolCallAt(laid, l.start + 2)).toBeNull();
+  });
+
+  test("a non-shell tool's second row is still not a control", () => {
+    const read: ToolItem = {
+      kind: "tool",
+      id: "r1",
+      name: "read",
+      args: JSON.stringify({ path: "a.ts" }),
+      status: "ok",
+      durationMs: 5,
+      resultText: "l1\nl2\nl3",
+    };
+    const { laid } = layoutTranscript([read], { expandAll: true, width: 40 });
+    const l = laid[0];
+    expect(l).toBeDefined();
+    if (!l) return;
+    expect(l.rows.length).toBeGreaterThan(1);
+    expect(toolCallAt(laid, l.start)).toBe("r1");
+    expect(toolCallAt(laid, l.start + 1)).toBeNull();
+  });
+
+  test("plain shell (no sentence): collapsed → header only; expanded → header + `$` rows", () => {
+    const c = layoutTranscript([multi("p1")], { expandAll: false, width: 40 }).laid;
+    const cl = c[0];
+    expect(cl).toBeDefined();
+    if (!cl) return;
+    expect(toolCallAt(c, cl.start)).toBe("p1");
+    expect(toolCallAt(c, cl.start + 1)).toBeNull();
+    const e = layoutTranscript([multi("p1")], o).laid;
+    const el = e[0];
+    expect(el).toBeDefined();
+    if (!el) return;
+    expect(toolCallAt(e, el.start + 1)).toBe("p1");
+  });
+});
+
+describe("toggleRows is memoised per item (layoutTranscript runs every frame)", () => {
+  test("a second layout of the SAME item reuses the count; a new width recomputes", () => {
+    const t = tool("m1", "echo a && echo b && echo c && echo d && echo e && echo f");
+    const o2 = { expandAll: true, width: 20 };
+    const first = layoutTranscript([t], o2).laid[0]?.toggleRows ?? 0;
+    expect(first).toBeGreaterThan(1);
+    // Same object, mutated args: a recompute would see the short command; a
+    // cache hit keeps the memoised count (the item is immutable in real use).
+    (t as { args: string }).args = JSON.stringify({ command: "x" });
+    expect(layoutTranscript([t], o2).laid[0]?.toggleRows).toBe(first);
+    // A different width is a different key → recomputed from the mutated args.
+    expect(layoutTranscript([t], { expandAll: true, width: 21 }).laid[0]?.toggleRows).not.toBe(
+      first,
+    );
   });
 });

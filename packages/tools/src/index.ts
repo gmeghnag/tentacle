@@ -23,6 +23,9 @@ export * from "./diagram.ts";
 export * from "./diagram-parse.ts";
 export * from "./subagent-tools.ts";
 export * from "./present.ts";
+export * from "./image-view.ts";
+export * from "./browser.ts";
 // PDF text extraction (docs/feat/pdf-read.md D2). Main-thread API only: pdf.js
 // itself loads inside the worker, never through this index.
 export * from "./pdf/extract.ts";
+export * from "./workflow.ts";

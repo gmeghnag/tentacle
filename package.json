@@ -10,7 +10,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit && tsc -p apps/mobile --noEmit && tsc -p apps/relay --noEmit",
-    "test": "bun test",
+    "test": "bun test --parallel --timings=scripts/test-timings.json",
+    "test:timings": "bun test --parallel --timings=scripts/test-timings.json --update-timings && biome format --write scripts/test-timings.json",
     "test:watch": "bun test --watch",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
@@ -18,6 +19,7 @@
     "check": "bun run typecheck && bun run lint && bun run test",
     "schema:export": "bun packages/protocol/src/json-schema.ts && biome format --write packages/protocol/schema/protocol.json",
     "protocol:bump": "bun scripts/protocol-bump.ts",
+    "mockup-kit": "bun scripts/mockup-kit.ts gen",
     "docs:config": "bun scripts/config-docs.ts",
     "e2e:mobile": "bun apps/mobile/e2e/run.ts",
     "compile": "bun run scripts/build.ts",

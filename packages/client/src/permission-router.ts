@@ -15,7 +15,12 @@
  * - A dismissed prompt (withdrawn, or the TUI went away) sends nothing: no
  *   human decided, so the request stays pending for another client.
  */
-import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
+import {
+  BROWSER_ACTION_TOOL,
+  type PermissionRequest,
+  type PermissionResponse,
+  WORKFLOW_APPROVE_TOOL,
+} from "@tentacle/core";
 import type { PermissionRequestUpdate } from "@tentacle/protocol";
 import { progressText } from "./mapping.ts";
 import { normalizePermissionReply, responseToOutcome } from "./permission-map.ts";
@@ -101,6 +106,13 @@ const is = (entry: Entry | null, sessionId: string, requestId: string): boolean 
 /** The local request the daemon's gate built, rebuilt from the event. */
 export function toPermissionRequest(update: PermissionRequestUpdate): PermissionRequest {
   return {
+    // A workflow's hash approval / approve step (docs/feat/agent-workflows.md
+    // D3): the one kind read off the wire, because it only ever asks MORE — a
+    // daemon naming an ordinary ask so makes auto-accept skip it, never answer.
+    ...(update.tool === WORKFLOW_APPROVE_TOOL ? { kind: "workflow_approve" as const } : {}),
+    // A browser action (docs/feat/browser-inspect.md B5, Q3): same rule, the
+    // session's auto-accept never answers acting AS the user on the web.
+    ...(update.tool === BROWSER_ACTION_TOOL ? { kind: "browser_action" as const } : {}),
     tool: update.tool,
     level: "ask",
     title: update.title,

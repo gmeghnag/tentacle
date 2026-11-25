@@ -28,7 +28,7 @@ import {
   decodeBase64Url,
   encodeBase64Url,
 } from "@tentacle/protocol";
-import { DomainErrorCode, RpcPeer } from "@tentacle/transport";
+import { type CarrierFrame, DomainErrorCode, RpcPeer, carrierFrameOf } from "@tentacle/transport";
 import { noiseInitiator, publicKeyOf, systemRandom } from "@tentacle/transport/noise";
 import { openPush } from "@tentacle/transport/push";
 import { type ApnsClient, createApnsClient } from "../../../apps/relay/src/apns-client.ts";
@@ -183,9 +183,13 @@ async function phone(url: string, configDir: string) {
   const identity = readIdentity(configDir);
   if (!identity.ok) throw new Error(identity.reason);
   const ws = new WebSocket(url);
-  let onMessage: ((data: string) => void) | undefined;
+  let onMessage: ((data: CarrierFrame) => void) | undefined;
+  ws.binaryType = "arraybuffer";
   let onClose: (() => void) | undefined;
-  ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+  ws.addEventListener("message", (e) => {
+    const frame = carrierFrameOf(e.data);
+    if (frame !== null) onMessage?.(frame);
+  });
   ws.addEventListener("close", () => onClose?.());
   await new Promise<void>((resolve, reject) => {
     ws.addEventListener("open", () => resolve());
@@ -193,9 +197,9 @@ async function phone(url: string, configDir: string) {
   });
   cleanups.push(() => ws.close());
   const channel = {
-    send: (d: string) => ws.send(d),
+    send: (d: Uint8Array) => ws.send(d),
     close: () => ws.close(),
-    setOnMessage: (h: (d: string) => void) => {
+    setOnMessage: (h: (d: CarrierFrame) => void) => {
       onMessage = h;
     },
     setOnClose: (h: () => void) => {
@@ -469,9 +473,13 @@ async function phoneDirect(url: string, configDir: string) {
   const identity = readIdentity(configDir);
   if (!identity.ok) throw new Error(identity.reason);
   const ws = new WebSocket(`${url.replace(/^http/, "ws").replace(/\/+$/, "")}/e2e`);
-  let onMessage: ((data: string) => void) | undefined;
+  let onMessage: ((data: CarrierFrame) => void) | undefined;
+  ws.binaryType = "arraybuffer";
   let onClose: (() => void) | undefined;
-  ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+  ws.addEventListener("message", (e) => {
+    const frame = carrierFrameOf(e.data);
+    if (frame !== null) onMessage?.(frame);
+  });
   ws.addEventListener("close", () => onClose?.());
   await new Promise<void>((resolve, reject) => {
     ws.addEventListener("open", () => resolve());
@@ -479,9 +487,9 @@ async function phoneDirect(url: string, configDir: string) {
   });
   cleanups.push(() => ws.close());
   const channel = {
-    send: (d: string) => ws.send(d),
+    send: (d: Uint8Array) => ws.send(d),
     close: () => ws.close(),
-    setOnMessage: (h: (d: string) => void) => {
+    setOnMessage: (h: (d: CarrierFrame) => void) => {
       onMessage = h;
     },
     setOnClose: (h: () => void) => {

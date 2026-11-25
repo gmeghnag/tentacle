@@ -1,0 +1,195 @@
+<title>Vista dei workflow</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+/* Layout: two sections (TUI, iPhone), each with two variants side by side; the same workflow run in all four. */
+:root {
+  --bg: #eceff0; --fg: #1b2123; --muted: #5a6568; --line: #d0d7d9; --pick: #0f7f93;
+  --term: #1e2126; --t-fg: #d7dae0; --t-dim: #7d838c; --t-acc: #56c2d6; --t-err: #e8737a; --t-warn: #e5c07b; --t-sel: #2c3440;
+  --app: #151B1D; --a-label: #D5DDDE; --a-sec: #98A6A8; --a-sep: #2D393D; --a-card: #1D2528; --a-fill: #262E32; --a-acc: #2ab3cf; --a-err: #e8737a; --a-off: #485058;
+  --sans: "Figtree", -apple-system, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark } }
+:root[data-theme="dark"] { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.45 var(--sans); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 22px 48px; }
+main { max-width: 1280px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+h1 { font-size: 22px; margin: 0; }
+h2 { font-size: 18px; margin: 10px 0 0; }
+.lead { margin: 4px 0 0; color: var(--muted); max-width: 80ch; }
+.row { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+.v { display: flex; flex-direction: column; gap: 8px; min-width: 0; max-width: 100%; }
+.v h3 { font-size: 15px; margin: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.v h3 .n { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--pick); font-weight: 600; }
+.v p { margin: 0; color: var(--muted); font-size: 13.5px; max-width: 62ch; }
+.legend { color: var(--muted); font-size: 13.5px; }
+.legend code { font-family: var(--mono); font-size: 12.5px; }
+
+/* terminal */
+.term { background: var(--term); color: var(--t-fg); font: 13px/1.5 var(--mono); padding: 12px 14px; border-radius: 10px; overflow-x: auto; white-space: pre; max-width: 100%; }
+.term .d { color: var(--t-dim); } .term .a { color: var(--t-acc); } .term .e { color: var(--t-err); } .term .w { color: var(--t-warn); } .term .b { font-weight: 700; }
+.term .sel { background: var(--t-sel); }
+.term .blink { animation: bl 1s steps(1) infinite; }
+@keyframes bl { 50% { opacity: .25; } }
+.term [data-s] { cursor: pointer; }
+
+/* phone */
+.ph { width: 360px; max-width: 100%; background: var(--app); color: var(--a-label); border-radius: 30px; padding: 16px 18px 20px; font-family: var(--sans); display: flex; flex-direction: column; gap: 12px; -webkit-font-smoothing: antialiased; }
+.ph .top { text-align: center; font-size: 15px; font-weight: 600; } .ph .top small { display: block; color: var(--a-sec); font-weight: 400; font-size: 12px; }
+.ph .p { font-size: 16px; line-height: 23px; font-weight: 500; margin: 0; }
+.wf { border-top: 1px solid var(--a-sep); border-bottom: 1px solid var(--a-sep); padding: 10px 0; display: flex; flex-direction: column; gap: 2px; }
+.wf .hd { display: flex; justify-content: space-between; align-items: baseline; font-size: 14px; margin-bottom: 6px; }
+.wf .hd b { font-weight: 600; } .wf .hd span { color: var(--a-sec); font-size: 13px; font-variant-numeric: tabular-nums; }
+.sr { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; column-gap: 12px; align-items: start; position: relative; padding: 5px 0; cursor: pointer; }
+.sr:not(:last-child)::after { content: ""; position: absolute; left: 6.5px; top: 17px; bottom: -7px; width: 1px; background: var(--a-sep); }
+.sr .nd { width: 8px; height: 8px; border-radius: 50%; margin: 6px auto 0; background: var(--a-sec); }
+.sr .nd.run { background: var(--a-acc); animation: bl 1s steps(1) infinite; }
+.sr .nd.err { background: var(--a-err); }
+.sr .nd.wait { background: transparent; border: 1.5px solid var(--a-off); width: 7px; height: 7px; }
+.sr .nd.ask { background: transparent; border: 2px solid var(--a-label); width: 7px; height: 7px; }
+.sr .t { font-size: 15px; line-height: 20px; min-width: 0; }
+.sr .t .st { font-weight: 600; }
+.sr .t .sub { display: block; color: var(--a-sec); font-size: 13px; }
+.sr .t .sub.e { color: var(--a-err); }
+.sr .r { color: var(--a-sec); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; line-height: 20px; }
+.det { grid-column: 2 / -1; background: var(--a-card); border-radius: 10px; padding: 10px 12px; margin-top: 6px; font-size: 13.5px; display: flex; flex-direction: column; gap: 4px; cursor: default; }
+.det code { font-family: var(--mono); font-size: 12px; color: var(--a-sec); }
+.det .acts { display: flex; gap: 8px; margin-top: 4px; }
+.btn { font: 600 15px var(--sans); border: 0; border-radius: 12px; padding: 12px 14px; cursor: pointer; }
+.btn.pri { background: var(--a-label); color: var(--app); flex: 1; }
+.btn.sec { background: var(--a-fill); color: var(--a-label); }
+.btn.sm { font-size: 13px; padding: 7px 10px; border-radius: 9px; }
+.bar { display: flex; gap: 10px; }
+.card { background: var(--a-card); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
+.card .ttl { font-weight: 600; font-size: 15px; display: flex; justify-content: space-between; }
+.card .ttl span { color: var(--a-sec); font-weight: 400; font-size: 13px; }
+.card .now { font-size: 15px; display: flex; gap: 8px; align-items: center; }
+.card .now i { width: 8px; height: 8px; border-radius: 50%; background: var(--a-acc); animation: bl 1s steps(1) infinite; }
+.card .meta { color: var(--a-sec); font-size: 13px; }
+.card .ask { margin-top: 6px; display: flex; gap: 8px; align-items: center; justify-content: space-between; border-top: 1px solid var(--a-sep); padding-top: 8px; font-size: 14px; }
+.tl { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.tl div { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 8px; }
+.tl time { color: var(--a-sec); font-variant-numeric: tabular-nums; font-size: 13px; }
+.tl .e { color: var(--a-err); }
+@media (prefers-reduced-motion: reduce) { .blink, .sr .nd.run, .card .now i { animation: none; } }
+.notes { border-top: 1px solid var(--line); padding-top: 12px; max-width: 80ch; display: flex; flex-direction: column; gap: 6px; }
+.notes h2 { margin: 0; font-size: 16px; }
+.notes ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
+</style>
+<main>
+  <div>
+    <h1>Vista dei workflow (TUI e iPhone)</h1>
+    <p class="lead">La stessa corsa nelle quattro viste: il workflow <b>task</b> sul task <b>cron-tool</b>, 4 passi su 7, la review ha chiesto modifiche e ora gira il fix. Tutto è «nuovo». Lo stato si legge sempre da glifo + parola, mai dal solo colore. Tocca o clicca un passo per vederne il dettaglio.</p>
+    <p class="legend">Stati: <code>✓ ok</code> · <code>✗ errore</code> · <code>▸ in corso</code> · <code>○ in attesa</code> · <code>‖ fermato</code> · <code>? da approvare</code> · <code>↻ 2/3</code> tentativo. Dove gira: <code>[local]</code> <code>[docker]</code> <code>[pod]</code>.</p>
+  </div>
+
+  <h2>TUI</h2>
+  <div class="row">
+    <section class="v">
+      <h3>TUI 1 · rail nella chat <span class="n">consiglio</span></h3>
+      <p>Un blocco nella trascrizione, come oggi quello dei sotto-agenti. Una riga per passo; quello in corso mostra la sua ultima azione. Invio apre la vista 2.</p>
+      <div class="term" id="tui1"></div>
+    </section>
+    <section class="v">
+      <h3>TUI 2 · pannello a due colonne <span class="n">con un tasto</span></h3>
+      <p>Si apre dalla vista 1. A sinistra i passi (↑↓ per scegliere), a destra il dettaglio: esito, modello, ramo d'eccezione preso, token e azioni.</p>
+      <div class="term" id="tui2"></div>
+    </section>
+  </div>
+
+  <h2>iPhone</h2>
+  <div class="row">
+    <section class="v">
+      <h3>iPhone 1 · rail verticale <span class="n">consiglio</span></h3>
+      <p>Stesso linguaggio dei passi della chat: rail continua e pallino che lampeggia sul passo in corso. Tocca un passo per aprirlo; il passo da approvare ha i bottoni in fondo.</p>
+      <div class="ph" id="ph1"></div>
+    </section>
+    <section class="v">
+      <h3>iPhone 2 · riassunto + cronologia</h3>
+      <p>Per un'occhiata veloce, per esempio dalla notifica: in alto il passo attivo e l'unica azione richiesta, sotto solo i passi che sono cambiati. Consigliata come notifica e nell'hub, non al posto della 1.</p>
+      <div class="ph" id="ph2"></div>
+    </section>
+  </div>
+
+  <div class="notes">
+    <h2>Da decidere</h2>
+    <ul>
+      <li>TUI: la vista 1 sempre nella chat e la 2 con un tasto, come consiglio, oppure una sola delle due?</li>
+      <li>iPhone: la vista 1 dentro la chat e la 2 come notifica e nell'hub, come consiglio?</li>
+      <li>Il merge resta sempre un passo «? da approvare» con i bottoni: nessun workflow fa merge o push da solo.</li>
+    </ul>
+  </div>
+</main>
+<script>
+const STEPS = [
+  { id: "plan", st: "ok", g: "✓", w: "ok", model: "opus", where: "local", dur: "2m", note: "doc scritto", det: ["✓ ok · plan scritto in docs/feat/cron-tool.md", "in 38k · out 6k · 2m04s"] },
+  { id: "exec", st: "ok", g: "✓", w: "ok", model: "deepseek", where: "local", dur: "14m", note: "↻ 1/1 · 9 file", det: ["✓ ok al 2º tentativo (il 1º: ECONNRESET)", "9 file cambiati · in 410k · out 31k · 14m10s"] },
+  { id: "review", st: "err", g: "✗", w: "errore", model: "opus", where: "local", dur: "3m", note: "REQUEST-CHANGES (2)", det: ["✗ errore: REQUEST-CHANGES", "1. task.ts:380 manca abort", "2. test vacuo (la mutazione non fallisce)", "→ on_fail: goto fix (1 di 3)", "in 41k · out 3k · 3m12s"] },
+  { id: "fix", st: "run", g: "▸", w: "in corso", model: "deepseek", where: "local", dur: "…", note: "↳ edit packages/x.ts", det: ["▸ in corso · round 1 di 3", "ultima azione: edit packages/x.ts", "in 92k · out 4k · 1m40s finora"] },
+  { id: "review", st: "wait", g: "○", w: "in attesa", model: "opus", where: "local", dur: "", note: "↻ 2/3", det: ["○ in attesa · parte dopo fix", "secondo giro di review (max 3)"] },
+  { id: "gate", st: "wait", g: "○", w: "in attesa", model: "", where: "docker", dur: "", note: "bun run check", det: ["○ in attesa · comando: bun run check", "gira in un container usa e getta"] },
+  { id: "merge", st: "ask", g: "?", w: "da approvare", model: "", where: "", dur: "", note: "attende te", det: ["? da approvare · merge su main", "sempre esplicito: nessun workflow fa merge da solo"] },
+];
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const pad = (s, n) => (s + " ".repeat(n)).slice(0, n);
+const cls = { ok: "", err: "e", run: "a b", wait: "d", ask: "w b" };
+
+function tui1() {
+  const out = [`<span class="b">workflow task</span> <span class="d">·</span> cron-tool <span class="d">· 4/7 · 1.2M/3M token</span>`];
+  STEPS.forEach((s, i) => {
+    const g = s.st === "run" ? `<span class="blink">${s.g}</span>` : s.g;
+    const m = s.model ? pad(s.model, 9) : " ".repeat(9);
+    const w = s.where ? pad(`[${s.where}]`, 9) : " ".repeat(9);
+    const line = ` ${g} ${pad(s.id, 7)} ${m}${w}${pad(s.dur, 4)} ${esc(s.note)}${s.st === "ask" ? "   ⏎ apri" : ""}`;
+    out.push(`<span class="${cls[s.st]}">${line}</span>`);
+  });
+  document.getElementById("tui1").innerHTML = out.join("\n");
+}
+let sel = 2;
+function tui2() {
+  const L = 16, Rw = 44, rows = [];
+  const left = STEPS.map((s, i) => `${i === sel ? "›" : " "}${s.g} ${pad(s.id + (s.id === "fix" ? " ↻1/3" : ""), L - 3)}`);
+  const s = STEPS[sel];
+  const head = `${s.id}${s.model ? " · " + s.model : ""}${s.where ? " · [" + s.where + "]" : ""}`;
+  const right = [...s.det, "", "[r] rilancia passo  [o] output completo"];
+  rows.push(`┌ passi ${"─".repeat(L - 7)}┬ ${pad(head + " ", Rw - 1).replace(/ +$/, (m) => " " + "─".repeat(m.length - 1))}┐`);
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const l = left[i] ?? " ".repeat(L), r = right[i] ?? "";
+    const st = STEPS[i];
+    const lc = i < STEPS.length ? `<span data-s="${i}" class="${i === sel ? "sel " : ""}${cls[st.st]}">${esc(pad(l, L))}</span>` : esc(pad(l, L));
+    const rc = r.startsWith("✗") || r.startsWith("1.") || r.startsWith("2.") ? "e" : r.startsWith("[") ? "d" : r.startsWith("→") ? "a" : "";
+    rows.push(`│${lc}│ <span class="${rc}">${esc(pad(r, Rw - 2))}</span> │`);
+  }
+  rows.push(`└${"─".repeat(L)}┴${"─".repeat(Rw)}┘`);
+  rows.push(`<span class="d"> ↑↓ passo · r rilancia · esc chiudi</span>`);
+  const el = document.getElementById("tui2"); el.innerHTML = rows.join("\n");
+  el.querySelectorAll("[data-s]").forEach((n) => (n.onclick = () => { sel = +n.dataset.s; tui2(); }));
+}
+let open1 = 2;
+function ph1() {
+  const nd = { ok: "", err: "err", run: "run", wait: "wait", ask: "ask" };
+  const rows = STEPS.map((s, i) => {
+    const sub = s.st === "err" ? `<span class="sub e">✗ errore · 2 problemi → fix</span>` : s.st === "run" ? `<span class="sub">▸ in corso · ${esc(s.note)}</span>` : s.st === "ask" ? `<span class="sub">? da approvare · attende te</span>` : s.st === "wait" ? `<span class="sub">○ in attesa${s.note ? " · " + esc(s.note) : ""}</span>` : `<span class="sub">✓ ok · ${esc(s.note)}</span>`;
+    const det = open1 === i ? `<div class="det">${s.det.map((d) => `<div>${esc(d)}</div>`).join("")}<div class="acts"><button class="btn sec sm">Rilancia passo</button><button class="btn sec sm">Output</button></div></div>` : "";
+    return `<div class="sr" data-i="${i}"><i class="nd ${nd[s.st]}"></i><span class="t"><span class="st">${s.id}</span>${sub}</span><span class="r">${[s.model === "deepseek" ? "ds" : s.model, s.where].filter(Boolean).join(" · ")}${s.dur && s.dur !== "…" ? "<br>" + s.dur : ""}</span>${det}</div>`;
+  }).join("");
+  const el = document.getElementById("ph1");
+  el.innerHTML = `<div class="top">cron-tool<small>~/tentacle</small></div>
+    <p class="p">Lancio il workflow <b>task</b> su cron-tool: 7 passi, tetto 3M token.</p>
+    <div class="wf"><div class="hd"><b>task · cron-tool</b><span>4/7 · 1.2M/3M</span></div>${rows}</div>
+    <div class="bar"><button class="btn pri">Approva merge</button><button class="btn sec">Ferma</button></div>`;
+  el.querySelectorAll(".sr").forEach((n) => (n.onclick = (e) => { if (e.target.closest(".det")) return; const i = +n.dataset.i; open1 = open1 === i ? -1 : i; ph1(); }));
+}
+function ph2() {
+  document.getElementById("ph2").innerHTML = `<div class="top">Workflow<small>~/tentacle</small></div>
+    <div class="card"><div class="ttl">task · cron-tool <span>4 di 7</span></div>
+      <div class="now"><i></i>▸ fix · deepseek · local</div>
+      <div class="meta">1.2M token · 23 min · review round 1 di 3</div>
+      <div class="ask"><span>? merge attende te</span><button class="btn sec sm">Apri</button></div></div>
+    <div class="tl">
+      <div><time>02:14</time><span class="e">✗ review → fix (1/3)</span></div>
+      <div><time>02:01</time><span>↻ exec ritentato (ECONNRESET)</span></div>
+      <div><time>01:47</time><span>✓ plan scritto</span></div>
+    </div>`;
+}
+tui1(); tui2(); ph1(); ph2();
+</script>

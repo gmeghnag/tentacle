@@ -43,9 +43,16 @@ import { ROW_FALLBACK_TEXT } from "../../row-guard.ts";
 import { type FiredRow, firedRowView } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, isDark, radius, space, typography } from "../../theme.ts";
 import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
-import { type StepCell, type ThreadPos, stepRowView, thoughtRowView } from "../../tool-steps.ts";
+import {
+  type StepCell,
+  type ThreadPos,
+  contextRowView,
+  stepRowView,
+  thoughtRowView,
+} from "../../tool-steps.ts";
 import { subAgentLine } from "../../tool-summary.ts";
 import { type ImageRef, type Row, imageRowText } from "../../transcript-rows.ts";
+import { FileBody } from "../../ui/FileBody.tsx";
 import { Icon } from "../../ui/Icon.tsx";
 import { StepBody, StepNode } from "../../ui/StepNode.tsx";
 import { Text } from "../../ui/Text.tsx";
@@ -121,6 +128,8 @@ export interface StepProps {
   readonly reduceMotion: boolean;
   readonly onToggle: () => void;
   readonly onShowAll: () => void;
+  /** Beta `Compact shell rows` (docs/feat/shell-intent-line.md §7): absent → off. */
+  readonly compactShell?: boolean;
 }
 
 /** A step with no neighbour on its thread: just the node. */
@@ -361,9 +370,6 @@ export function UserRowBody({
       )}
       {!parts.bubble ? null : (
         <View style={[styles.bubble, { backgroundColor: palette.fill }]}>
-          {user.restart === true ? (
-            <Text style={[typography.caption, { color: palette.sec }]}>restart prompt</Text>
-          ) : null}
           {/* The attached files, one line each (docs/feat/pdf-read.md D5/D7), inside
               the bubble: the `<file>` block they became is the model's, so the file
               is named, never quoted. */}
@@ -459,6 +465,86 @@ function FiredRowView({
             {fired.body}
           </Text>
         }
+      />
+    </StepShell>
+  );
+}
+
+/**
+ * A palette whose prose draws in the secondary grey: a step's body is a FACT
+ * about the run, like every other step line (`sec`), never prose-level text
+ * (docs/feat/mobile-reset-in-timeline.md, the owner is colour-blind: weight
+ * and the name carry the hierarchy, not hue).
+ */
+function secTinted(palette: Palette): Palette {
+  return { ...palette, label: palette.sec };
+}
+
+/**
+ * A context reset / a compaction (docs/feat/mobile-reset-in-timeline.md): a
+ * timeline NODE, like a step — `↺ Context reset` with the prompt's first line
+ * (italic, `sec`) or `⤡ Compacted` with its figures (mono), and the prompt or
+ * the summary as MARKDOWN one tap away. Every decision is `contextRowView`'s
+ * (pure, `tool-steps.ts`); this only draws it.
+ */
+function ContextRowView({ row, palette, onLink, step }: RowProps): JSX.Element {
+  const context = row as Extract<Row, { kind: "context" }>;
+  const cell = step?.cell;
+  const thread = cell?.kind === "context" ? cell.thread : LONE;
+  const full = step?.full ?? false;
+  const view = contextRowView(context, full);
+  const body = view.body;
+  return (
+    <StepShell row={context} thread={thread}>
+      <StepNode
+        palette={palette}
+        node={view.node}
+        reduceMotion={step?.reduceMotion ?? false}
+        name={{ tool: view.name }}
+        subtitle={view.subtitle}
+        subtitleItalic={view.italic}
+        trailing=""
+        trailingRed={false}
+        thread={thread}
+        open={step?.open ?? false}
+        {...(view.tappable && step !== undefined ? { onToggle: step.onToggle } : {})}
+        a11yLabel={view.a11yLabel}
+        labelTestID={`context-${context.event}-${context.key}`}
+        {...(body === null || step?.open !== true
+          ? {}
+          : {
+              body: (
+                <View style={styles.contextBody}>
+                  {/* Parsed only while open, and only the cut that is shown: a
+                      closed step costs no parse (`contextRowView` decides the
+                      cut, a ``` fence included). */}
+                  <Markdown
+                    parsed={parsedOf(body.text)}
+                    palette={secTinted(palette)}
+                    onLink={onLink}
+                  />
+                  {body.hidden === 0 ? null : (
+                    // The screen's `full` state, never a local one (it survives
+                    // cell recycling like `open`: `SessionScreen.tsx` `fullSteps`).
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Show all ${body.hidden} more ${
+                        body.hidden === 1 ? "line" : "lines"
+                      }`}
+                      disabled={step === undefined}
+                      onPress={step?.onShowAll}
+                    >
+                      <Text
+                        testID={`context-${context.event}-${context.key}-more`}
+                        style={[typography.footnote, styles.contextMore, { color: palette.accent }]}
+                      >
+                        {`… ${body.hidden} more ${body.hidden === 1 ? "line" : "lines"} · tap to see all`}
+                      </Text>
+                    </Pressable>
+                  )}
+                </View>
+              ),
+            })}
       />
     </StepShell>
   );
@@ -568,7 +654,8 @@ function DiagramRowView(props: RowProps): JSX.Element {
 
 /**
  * A tool call: one `StepNode` on the thread (its cell from the screen's
- * `stepLayout`), the thought, command, result, diff and reply in its open body;
+ * `stepLayout`), the command, result, diff and reply in its open body — never
+ * the folded reasoning (owner 21/11, docs/fix/mobile-running-row.md);
  * the sub-agent progress and Activity link always under the line. A presented
  * artifact is its card instead (a block: `isBlockRow`, no thread).
  */
@@ -581,6 +668,7 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
     cell?.kind === "step" ? cell.thought : null,
     step?.full ?? false,
     cell?.kind === "step" && cell.thoughtFirst,
+    step?.compactShell === true,
   );
   const diff = tool.diff === undefined ? null : diffView(tool.diff);
   const progress = subAgentLine(tool.sub);
@@ -644,6 +732,9 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
         reduceMotion={step?.reduceMotion ?? false}
         name={view.name}
         subtitle={view.subtitle}
+        subline={view.subline}
+        exitSuffix={view.exitSuffix}
+        shimmer={view.shimmer}
         trailing={view.trailing}
         trailingRed={view.trailingRed}
         {...(view.live && tool.at !== undefined ? { liveFrom: tool.at } : {})}
@@ -656,14 +747,32 @@ function ToolRowView({ row, palette, agent, thumbnails, onArtifact, step }: RowP
         body={
           <StepBody
             palette={palette}
-            thought={view.thought}
+            thought={null}
             command={view.command}
             output={view.output}
             outputTestID={`tool-${tool.id}-output`}
             {...(step === undefined ? {} : { onShowAll: step.onShowAll })}
-            diff={
-              diff === null ? null : <DiffView view={diff} palette={palette} callId={tool.id} />
-            }
+            {...(view.file === undefined
+              ? {
+                  diff:
+                    diff === null ? null : (
+                      <DiffView view={diff} palette={palette} callId={tool.id} />
+                    ),
+                }
+              : {
+                  // A FILE tool's content (docs/feat/mobile-file-view.md): the
+                  // coloured body replaces both the plain output and the diff
+                  // block, and carries `diff-<callId>` itself.
+                  file: (
+                    <FileBody
+                      view={view.file}
+                      palette={palette}
+                      callId={tool.id}
+                      full={step?.full ?? false}
+                      {...(step === undefined ? {} : { onShowAll: step.onShowAll })}
+                    />
+                  ),
+                })}
             {...(tool.denialReply === undefined
               ? {}
               : { reply: tool.denialReply, replyTestID: `tool-${tool.id}-reply` })}
@@ -852,28 +961,9 @@ function BandContent({
  * is the signal, the colour only a cue). A row whose look says `joined` drops its
  * top padding so consecutive lines read as ONE block, and a continuation keeps the
  * glyph column EMPTY so its text hangs aligned under the block's head.
- *
- * A `separator` notice is a different thing (a full-width rule across the
- * transcript): it stays centred and ruled, and takes no glyph.
  */
 function NoticeRowView({ row, palette, look: given }: RowProps): JSX.Element {
   const notice = row as Extract<Row, { kind: "notice" }>;
-  if (notice.separator === true) {
-    return (
-      <Shell row={notice}>
-        <View style={[styles.rule, { backgroundColor: palette.sep }]} />
-        <Text style={[typography.footnote, styles.notice, { color: palette.sec }]}>
-          {notice.text}
-        </Text>
-        {notice.body === undefined ? null : (
-          <Text style={[typography.footnote, styles.notice, { color: palette.sec }]}>
-            {notice.body}
-          </Text>
-        )}
-        <View style={[styles.rule, { backgroundColor: palette.sep }]} />
-      </Shell>
-    );
-  }
   // No look (a test, a row drawn on its own): a block of its own, WITH its glyph
   // — which is what a notice outside any block reads as.
   const look: NoticeLook = given ?? {
@@ -953,6 +1043,8 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
       return <ToolRowView {...props} />;
     case "notice":
       return <NoticeRowView {...props} />;
+    case "context":
+      return <ContextRowView {...props} />;
     default:
       return null;
   }
@@ -1037,6 +1129,9 @@ const styles = StyleSheet.create({
   harness: { flexDirection: "row", gap: 6 },
   harnessGlyph: { width: 12, textAlign: "center" },
   harnessBody: { flex: 1, gap: 2 },
+  // A context step's open body (docs/feat/mobile-reset-in-timeline.md): the
+  // prompt/summary as markdown, tinted secondary — a step's body is a fact.
+  contextBody: { gap: 6, paddingTop: 2, paddingBottom: space.transcript / 2 },
+  contextMore: { paddingTop: 2 },
   fallback: { fontStyle: "italic" },
-  rule: { height: StyleSheet.hairlineWidth, marginVertical: 6 },
 });

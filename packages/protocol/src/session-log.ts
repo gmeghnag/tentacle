@@ -39,6 +39,15 @@
  * `capabilities` (docs/feat/session-capabilities.md, owner Q2) is NON-critical
  * too: the session's MCP/skill switches; an older build skips it and shows the
  * model everything.
+ *
+ * `workflow_start` / `workflow_step` / `workflow_end` (docs/feat/agent-workflows.md
+ * D4, owner Q1) are NON-critical: a workflow run's terminal facts. The load
+ * derivation `workflowLoadNotes` (core) closes a run a crash left open.
+ *
+ * `unit_end` (docs/feat/a2a.md, Unification §2) is NON-critical: an ENDED unit
+ * of work (a turn, a workflow run) carried into a new segment, so its state and
+ * result survive a compaction, a reset, a `/clear` and a reload. It projects
+ * nothing; an older build skips it and loses only that carry.
  */
 import { type ZodTypeAny, z } from "zod";
 import {
@@ -53,6 +62,7 @@ import {
   StopReasonSchema,
   TurnIdSchema,
   type WireChatMessage,
+  WorkflowInputValueSchema,
 } from "./session.ts";
 
 /**
@@ -304,6 +314,205 @@ export type UsageEntryBody = Omit<
   "type" | "critical" | "seq" | "id" | "prev" | "ts"
 >;
 
+// --- workflow runs (docs/feat/agent-workflows.md D4, owner Q1) ---
+// Three NON-critical types: the durable TERMINAL facts of a workflow run (it
+// started, a step ended, it ended). They project nothing — the run's end note is
+// an ordinary message — so a build that does not know them skips them and the
+// conversation is intact. `running`/`waiting` live in memory and on the wire
+// only. Every state/verdict/`by` is a BOUNDED FREE STRING, never an enum: a
+// malformed KNOWN entry is fatal to a reader (it refuses the whole log), so a
+// newer build's new state must not poison an older reader (review M4). The
+// emitter (`core`'s `workflow-ledger.ts`) caps every text to these bounds.
+
+/** A run's id, `wf-N` (session-scoped). Never `id`: the envelope already has one. */
+export const WorkflowRunIdSchema = z
+  .string()
+  .max(32)
+  .regex(/^wf-[1-9][0-9]*$/);
+/** A step id as the workflow file declares it (`[a-z0-9-]`, ≤ 64). */
+export const WorkflowStepIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/);
+/** A workflow's content hash (sha-256 hex). */
+export const WorkflowHashSchema = z.string().regex(/^[0-9a-f]{64}$/);
+/** A state / verdict / stop reason / `by`: a bounded free word (see above). */
+export const WorkflowWordSchema = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(/^[a-z][a-z0-9_-]*$/);
+
+export const WORKFLOW_NAME_MAX_CHARS = 64;
+export const WORKFLOW_PATH_MAX_CHARS = 512;
+// (`WORKFLOW_INPUTS_MAX_CHARS` / `WORKFLOW_INPUT_NAME_MAX_CHARS`: session.ts, beside the input schema.)
+export const WORKFLOW_REASON_MAX_CHARS = 2 * 1024;
+/** A step's resolved prompt (an agent step) or command (a run step) / title (approve). */
+export const WORKFLOW_PROMPT_MAX_CHARS = 16 * 1024;
+export const WORKFLOW_MODEL_MAX_CHARS = 128;
+/** `local`, `docker:<name>` or `docker:<name>/<container>`. */
+export const WORKFLOW_WHERE_MAX_CHARS = 256;
+
+/** A run started: which file, which version, which content hash, by whom. */
+export const LogWorkflowStartEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("workflow_start"),
+  runId: WorkflowRunIdSchema,
+  name: z.string().min(1).max(WORKFLOW_NAME_MAX_CHARS),
+  version: z.number().int().nonnegative(),
+  hash: WorkflowHashSchema,
+  path: z.string().min(1).max(WORKFLOW_PATH_MAX_CHARS),
+  /** `{name, value}` in name order (a list: the JSON-schema export has no record). */
+  inputs: z.array(WorkflowInputValueSchema),
+  /** `user` (the `session/workflow` RPC) or `model` (the `workflow` tool); free word. */
+  by: WorkflowWordSchema,
+  /** The turn the run's asks are attributed to (A2). */
+  turnId: TurnIdSchema.optional(),
+  /** The schedule that started it (`by: schedule`, slice 10); additive. */
+  scheduleId: z.string().min(1).max(64).optional(),
+});
+
+/** One step execution ended (a retry or a goto round is another entry). */
+export const LogWorkflowStepEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("workflow_step"),
+  runId: WorkflowRunIdSchema,
+  stepId: WorkflowStepIdSchema,
+  attempt: z.number().int().nonnegative(),
+  round: z.number().int().nonnegative(),
+  /** `ok` | `error` | `stopped` today; free word. */
+  state: WorkflowWordSchema,
+  /** `pass` | `fail` today; free word. Absent when the step never reached one. */
+  verdict: WorkflowWordSchema.optional(),
+  reason: z.string().max(WORKFLOW_REASON_MAX_CHARS),
+  model: z.string().min(1).max(WORKFLOW_MODEL_MAX_CHARS).optional(),
+  where: z.string().min(1).max(WORKFLOW_WHERE_MAX_CHARS),
+  tokens: z.number().int().nonnegative(),
+  durationMs: z.number().int().nonnegative(),
+  prompt: z.string().max(WORKFLOW_PROMPT_MAX_CHARS).optional(),
+  report: z.string().max(SUBAGENT_REPORT_MAX_CHARS).optional(),
+});
+
+/** The run ended (`state` + the machine's one sentence). */
+export const LogWorkflowEndEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("workflow_end"),
+  runId: WorkflowRunIdSchema,
+  /** `ok` | `error` | `stopped` today; free word. */
+  state: WorkflowWordSchema,
+  /** With `stopped`: `budget` | `timeout` | `cancelled` | `interrupted` | `changed` today. */
+  stopReason: WorkflowWordSchema.optional(),
+  reason: z.string().max(WORKFLOW_REASON_MAX_CHARS),
+});
+export type LogWorkflowStartEntry = z.infer<typeof LogWorkflowStartEntrySchema>;
+export type LogWorkflowStepEntry = z.infer<typeof LogWorkflowStepEntrySchema>;
+export type LogWorkflowEndEntry = z.infer<typeof LogWorkflowEndEntrySchema>;
+
+// --- ended units of work, carried across segments (docs/feat/a2a.md, Unification §2) ---
+// Written ONLY when a new segment starts (the carry), never at a unit's end:
+// inside a segment the native entries (`turn_*`, `workflow_*`) are the record.
+// Every word is a BOUNDED FREE STRING, never an enum (the workflow entries'
+// rule): `native` can be `stopped:<why>`, so not `WorkflowWordSchema`. The
+// emitter (`core`'s `unitEndBody`) caps every text to these bounds and judges
+// the body by this schema.
+
+/** A carried unit's `kind` / `state` / `native` word. */
+export const UNIT_END_WORD_MAX_CHARS = 128;
+/** A unit's id: a `turnId` (≤ 128) or a run's `wf-N`. */
+export const UNIT_END_ID_MAX_CHARS = 128;
+/** One line: why it ended. */
+export const UNIT_END_REASON_MAX_CHARS = 2 * 1024;
+/** A unit's result (a turn's final round text; a run's end reason + last step report). */
+export const UNIT_END_RESULT_MAX_CHARS = 16 * 1024;
+
+const unitWord = () => z.string().min(1).max(UNIT_END_WORD_MAX_CHARS);
+
+/** An ended unit of work, carried into a new segment. Never `id`: the envelope already has one. */
+export const LogUnitEndEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("unit_end"),
+  /** `turn` | `workflow` today; free word (a reader skips a kind it does not know). */
+  kind: unitWord(),
+  unitId: z.string().min(1).max(UNIT_END_ID_MAX_CHARS),
+  /** The `turnId` that started it (`workflow_start.turnId`). */
+  origin: TurnIdSchema.optional(),
+  /** `completed` | `failed` | `canceled` today; free word. */
+  state: unitWord(),
+  /** The unit's own word: a stop reason, a run state, `stopped:<why>`. */
+  native: unitWord(),
+  reason: z.string().max(UNIT_END_REASON_MAX_CHARS).optional(),
+  startedAt: z.number().int().nonnegative().optional(),
+  endedAt: z.number().int().nonnegative(),
+  result: z.string().max(UNIT_END_RESULT_MAX_CHARS).optional(),
+  /** The unit had a result that no longer fits the retained budget. */
+  resultDropped: z.literal(true).optional(),
+});
+export type LogUnitEndEntry = z.infer<typeof LogUnitEndEntrySchema>;
+
+/**
+ * `session/workflow_step` (docs/feat/workflows-ui.md D1): ONE step execution's
+ * `prompt`/`report` — what a `workflow_step` entry carries and the `workflows`
+ * update deliberately does not (that is a live row, not history). Additive: an
+ * older daemon answers `MethodNotFound` and the client says "update tentacle".
+ *
+ * It lives HERE, beside the entry it reads, because it is bounded by the entry's
+ * own constants and shares its `WorkflowWordSchema`; `session.ts` cannot host it
+ * without a `session.ts ⇄ session-log.ts` import cycle (which breaks module init
+ * at `TurnIdSchema`). The task doc lists `session.ts` — that is the drift.
+ *
+ * `attempt`/`round` pick WHICH execution when a step ran more than once (a
+ * `retry`, a `goto` round); omitted means the newest. The daemon answers from
+ * its retained log (the current segment and the previous one), so a step whose
+ * entry compaction dropped is `detail` absent — "no longer available", never a
+ * throw and never another step's text.
+ */
+export const WorkflowStepParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  runId: WorkflowRunIdSchema,
+  stepId: WorkflowStepIdSchema,
+  /** 0 for the first attempt, 1.. after a retry. Omitted: the newest. */
+  attempt: z.number().int().nonnegative().optional(),
+  /** The `goto` round it ran in. Omitted: the newest. */
+  round: z.number().int().nonnegative().optional(),
+});
+export type WorkflowStepParams = z.infer<typeof WorkflowStepParamsSchema>;
+
+/**
+ * One step execution as the ledger recorded it, capped exactly as the entry is
+ * (`reason` 2 KiB, `prompt` 16 KiB, `report` 64 KiB): the reader on the other
+ * side of the wire paints it, and a UI row is never unbounded free text.
+ */
+export const WorkflowStepDetailSchema = z.object({
+  attempt: z.number().int().nonnegative(),
+  round: z.number().int().nonnegative(),
+  /** The step is running NOW and was asked: its live text stands in for the report. */
+  live: z.boolean(),
+  state: WorkflowWordSchema.optional(),
+  verdict: WorkflowWordSchema.optional(),
+  reason: z.string().max(WORKFLOW_REASON_MAX_CHARS).optional(),
+  /** An agent step's resolved prompt, a run step's command, an approve step's title. */
+  prompt: z.string().max(WORKFLOW_PROMPT_MAX_CHARS).optional(),
+  report: z.string().max(SUBAGENT_REPORT_MAX_CHARS).optional(),
+  tokens: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+});
+export type WorkflowStepDetail = z.infer<typeof WorkflowStepDetailSchema>;
+
+export const WorkflowStepResultSchema = z.object({
+  /**
+   * ABSENT means "not available": the step never ran, or its entry left the
+   * retained log (compaction, a `serve` reload). The UI says so; it never
+   * substitutes another step's text.
+   */
+  detail: WorkflowStepDetailSchema.optional(),
+});
+export type WorkflowStepResult = z.infer<typeof WorkflowStepResultSchema>;
+
 /**
  * The emitter's own guard: the `usage` fields its schema ACCEPTS, from a body
  * that may carry anything (a provider's raw JSON), or `null` when nothing
@@ -356,6 +565,10 @@ export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogSubagentEndEntrySchema,
   LogCapabilitiesEntrySchema,
   LogUsageEntrySchema,
+  LogWorkflowStartEntrySchema,
+  LogWorkflowStepEntrySchema,
+  LogWorkflowEndEntrySchema,
+  LogUnitEndEntrySchema,
 ]);
 export type KnownLogEntry = z.infer<typeof KnownLogEntrySchema>;
 export type LogMessageEntry = z.infer<typeof LogMessageEntrySchema>;
@@ -381,6 +594,12 @@ export const LOG_ENTRY_CRITICAL: Readonly<Record<LogEntryType, boolean>> = {
   subagent_end: false,
   usage: false,
   capabilities: false,
+  // docs/feat/agent-workflows.md owner Q1: terminal facts only, they project nothing.
+  workflow_start: false,
+  workflow_step: false,
+  workflow_end: false,
+  // docs/feat/a2a.md: a carried ended unit; it projects nothing.
+  unit_end: false,
 };
 
 /**
@@ -403,10 +622,24 @@ export function replaceEntryType(m: object): "replace" | "media_replace" {
   return hasAttachments(m) ? "media_replace" : "replace";
 }
 
+type WireReasoningBody = NonNullable<WireChatMessage["reasoning"]>["body"];
+type AnthropicReasoningBody = Extract<WireReasoningBody, { format: "anthropic" }>;
+/** A reasoning record as both ends hold it: core's readonly one, or the wire's parsed one. */
+type HeldReasoningRecord = {
+  readonly source: string;
+  readonly body:
+    | Readonly<Extract<WireReasoningBody, { format: "openai" }>>
+    | {
+        readonly format: "anthropic";
+        readonly blocks: ReadonlyArray<Readonly<AnthropicReasoningBody["blocks"][number]>>;
+      };
+};
+
 /** A message as an emitter holds it: core's readonly one, or the wire's parsed one. */
 export type AppendableMessage = Readonly<
-  Omit<WireChatMessage, "attachments" | "toolCalls" | "media">
+  Omit<WireChatMessage, "attachments" | "toolCalls" | "media" | "reasoning">
 > & {
+  readonly reasoning?: HeldReasoningRecord;
   readonly media?: ReadonlyArray<Readonly<NonNullable<WireChatMessage["media"]>[number]>>;
   readonly toolCalls?: ReadonlyArray<{
     readonly id: string;
@@ -540,8 +773,10 @@ export type Sha256 = (text: string) => string;
 
 /** A message as both ends hold it (the wire's parsed object, or core's readonly one). */
 export type DigestibleMessage = Readonly<
-  Omit<WireChatMessage, "toolCalls" | "attachments" | "media">
+  Omit<WireChatMessage, "toolCalls" | "attachments" | "media" | "reasoning">
 > & {
+  /** Never hashed (like `media`): core's readonly record is accepted. */
+  readonly reasoning?: HeldReasoningRecord;
   /** Display only, never hashed (like `note`): core's readonly array is accepted. */
   readonly media?: ReadonlyArray<Readonly<NonNullable<WireChatMessage["media"]>[number]>>;
   readonly toolCalls?: readonly {

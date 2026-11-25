@@ -1,3 +1,4 @@
+import { scheduleOutcomeNeedsHuman } from "@tentacle/core";
 /**
  * The daemon's push SHELL (docs/feat/mobile-push.md Design 5, slice P7): the
  * one place where "a session event happened" becomes "an encrypted blob is on
@@ -32,16 +33,18 @@ import {
   type PushMessage,
   type PushPayload,
   type PushRegisterStatus,
+  type WorkflowRow,
   decodeBase64Url,
   encodeBase64Url,
   fitPushMessage,
 } from "@tentacle/protocol";
 import { type SealedPush, sealPush } from "@tentacle/transport/push";
-import type { PushHookEvent, SessionPushObserver } from "./hosted-session.ts";
+import type { PushHookEvent, PushWatchedUpdate, SessionPushObserver } from "./hosted-session.ts";
 import {
   PUSH_TTL_SECONDS,
   type PushAttached,
   type PushCommand,
+  type PushEvent,
   type PushNote,
   type PushRules,
   createPushRules,
@@ -149,9 +152,66 @@ const DEFAULT_RANDOM = (length: number): Uint8Array =>
 /** A short id prefix for an audit line: never a whole token, never a payload. */
 const id8 = (id: string): string => id.slice(0, 8);
 
+/**
+ * Free text as the push wire can carry it: ONE non-empty line. `line()` on the
+ * plaintext refuses both a control character (so a newline) and the empty
+ * string, and a workflow `reason` can be either — a failed `run` step's reason
+ * is the tail of its output. `undefined` = nothing usable, so the field is
+ * absent rather than invalid.
+ */
+/** The `run_not_started` facts key: a schedule id is unique per session only. */
+const scheduleFactsKey = (sessionId: string, scheduleId: string): string =>
+  `${sessionId}\u0000${scheduleId}`;
+
+const oneLine = (text: string | undefined): string | undefined => {
+  if (text === undefined) {
+    return undefined;
+  }
+  const line = text
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim();
+  return line === "" ? undefined : line;
+};
+
 /** A push message's `id`: 128-bit random, hex — the extension dedupes replays on it (F7). */
 const messageIdOf = (random: (length: number) => Uint8Array): string =>
   [...random(16)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+/**
+ * The ended runs in one `workflows` list, as the rules' `run_end` events
+ * (docs/feat/agent-workflows.md slice 9, owner Q5).
+ *
+ * A run is ENDED when it carries `endedAt` — the driver's own stamp, set on the
+ * terminal transition (`workflow-driver.ts`, `finish`), so a session that
+ * reloads a run the log closed reports it exactly as the live one did. The
+ * list is FULL STATE: an ended run is repeated on every later step of another
+ * run, which is why the rules remember the ids they announced.
+ */
+function runEndEvents(
+  sessionId: string,
+  rows: readonly WorkflowRow[],
+  attached: PushAttached,
+): { readonly events: PushEvent[]; readonly runIds: readonly string[] } {
+  const events: PushEvent[] = [];
+  const runIds: string[] = [];
+  for (const row of rows) {
+    if (row.endedAt === undefined) {
+      continue;
+    }
+    runIds.push(row.runId);
+    events.push({
+      type: "run_end",
+      sessionId,
+      runId: row.runId,
+      state: row.state,
+      ...(row.stopReason !== undefined ? { stopReason: row.stopReason } : {}),
+      attached,
+    });
+  }
+  return { events, runIds };
+}
 
 /**
  * The push notifier: a `SessionPushObserver` plus the ONE timer it owns.
@@ -170,7 +230,7 @@ export interface PushNotifier extends SessionPushObserver {
    * for tests/diagnostics). Both are bounded by the work in flight: a `serve`
    * outlives every turn it pushes for, so a count that only ever grows is a leak.
    */
-  retained(): { readonly asks: number; readonly turnErrors: number };
+  retained(): { readonly asks: number; readonly turnErrors: number; readonly runs: number };
 }
 
 export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
@@ -202,6 +262,17 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
    * entry per turn of every session for the life of the process.
    */
   const turnErrors = new Map<string, string | undefined>();
+  /**
+   * The workflow run facts for `run_done` / `run_stopped` (docs/feat/agent-workflows.md
+   * slice 9): the run's name and the one line it stopped with, out of the
+   * session's `workflows` update, which carries rows and no message text. Bounded
+   * the way the two maps above are — an entry goes once the command it was
+   * recorded for has been built, or at once when the rules decided not to push
+   * (and, since a full-state list repeats an ended run, that is the common case).
+   */
+  const runs = new Map<string, { readonly name: string; readonly reason?: string }>();
+  /** The `run_not_started` facts (slice 10), by `scheduleFactsKey`; bounded as `runs`. */
+  const schedules = new Map<string, { readonly name: string; readonly reason: string }>();
 
   /** Map one `PushNote` to one audit line. A refusal is never silent (F20). */
   const auditNote = (note: PushNote): void => {
@@ -254,6 +325,36 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
     }
     const turnId = command.turnId ?? "";
     const error = turnErrors.get(turnId);
+    if (command.kind === "run_done" || command.kind === "run_stopped") {
+      const runId = command.runId ?? "";
+      const held = runs.get(runId);
+      // A run's `reason` is free text: a failed `run` step carries the last lines
+      // of its output. The wire's `line()` refuses a newline (and an empty
+      // string), so it is flattened to ONE line here — otherwise `fitPushMessage`
+      // would keep a shape the schema rejects and the push would be dropped.
+      const reason = oneLine(held?.reason);
+      return {
+        ...message,
+        run: {
+          runId,
+          name: oneLine(held?.name) ?? runId,
+          ...(reason !== undefined ? { reason } : {}),
+        },
+      };
+    }
+    if (command.kind === "run_not_started") {
+      const scheduleId = command.scheduleId ?? "";
+      const held = schedules.get(scheduleFactsKey(command.sessionId, scheduleId));
+      const reason = oneLine(held?.reason);
+      return {
+        ...message,
+        schedule: {
+          scheduleId,
+          name: oneLine(held?.name) ?? scheduleId,
+          ...(reason !== undefined ? { reason } : {}),
+        },
+      };
+    }
     return { ...message, turn: { turnId, ...(error !== undefined ? { error } : {}) } };
   };
 
@@ -474,6 +575,63 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
             // one for): either way this turn's line is dead weight from here on.
             () => turnErrors.delete(update.turnId),
           );
+        } else if (update.type === "workflows") {
+          // A run's end (slice 9, owner Q5). The list is FULL STATE and repeats
+          // every ended run, so each is fed, and the rules announce each id ONCE.
+          for (const row of update.runs) {
+            if (row.endedAt !== undefined) {
+              runs.set(row.runId, {
+                name: row.name,
+                ...(row.reason !== undefined ? { reason: row.reason } : {}),
+              });
+            }
+          }
+          const ended = runEndEvents(sessionId, update.runs, attached);
+          if (ended.events.length === 0) {
+            return;
+          }
+          const commands: PushCommand[] = [];
+          const notes: PushNote[] = [];
+          for (const event of ended.events) {
+            const result = rules.apply(event);
+            commands.push(...result.commands);
+            notes.push(...result.notes);
+          }
+          consume({ commands, notes }, () => {
+            for (const runId of ended.runIds) {
+              runs.delete(runId);
+            }
+          });
+        } else if (update.type === "schedules") {
+          // Slice 10 S10-7: a fire the user must fix. Full state: each row's
+          // last outcome is offered, and the rules push each fire ONCE.
+          const commands: PushCommand[] = [];
+          const notes: PushNote[] = [];
+          const held: string[] = [];
+          for (const row of update.schedules) {
+            if (row.last === undefined || !scheduleOutcomeNeedsHuman(row.last.outcome)) {
+              continue;
+            }
+            const key = scheduleFactsKey(sessionId, row.id);
+            held.push(key);
+            schedules.set(key, {
+              name: row.workflow?.name ?? row.prompt,
+              reason: row.last.reason ?? row.last.outcome,
+            });
+            const result = rules.apply({
+              type: "run_not_started",
+              sessionId,
+              scheduleId: row.id,
+              fireKey: `${row.id}#${row.fires}`,
+              attached,
+            });
+            commands.push(...result.commands);
+            notes.push(...result.notes);
+          }
+          // Bounded like `runs`: the facts go once the messages are built.
+          consume({ commands, notes }, () => {
+            for (const key of held) schedules.delete(key);
+          });
         } else {
           // `session_closed`: its asks were settled `cancelled` (so any banner was
           // already replaced), and its timers must not outlive it.
@@ -487,7 +645,7 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
       }
     },
     arm,
-    retained: () => ({ asks: asks.size, turnErrors: turnErrors.size }),
+    retained: () => ({ asks: asks.size, turnErrors: turnErrors.size, runs: runs.size }),
     stop() {
       stopped = true;
       if (handle !== undefined) {
@@ -497,6 +655,8 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
       }
       asks.clear();
       turnErrors.clear();
+      runs.clear();
+      schedules.clear();
     },
   };
 }

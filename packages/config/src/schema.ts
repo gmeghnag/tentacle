@@ -78,6 +78,16 @@ export const ModelConfigSchema = z
      * anthropic refuse image prompts. The one truth is `imageLimits()`.
      */
     images: z.boolean().optional(),
+    /**
+     * The detail `image_view` sends a picture at (docs/feat/image-view.md D6):
+     * `auto` (default) lets the model choose per call; `low`/`high` force it.
+     */
+    imageDetail: z.enum(["auto", "low", "high"]).optional(),
+    /**
+     * Tokens one image costs the context estimate (docs/feat/image-view.md D7).
+     * Unset: the provider's estimate (anthropic 1600, openai-compatible 3200).
+     */
+    imageTokens: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -88,7 +98,12 @@ export type ModelConfig = z.infer<typeof ModelConfigSchema>;
  * `autoTitle`/`titleModel` are accepted and have no effect (owner Q3) — plus a
  * `description` the agent reads when the entry is selectable.
  */
-export const ModelEntrySchema = ModelConfigSchema.extend({
+// `imageDetail`/`imageTokens` are the MAIN model's only (docs/feat/image-view.md
+// Notes): the agent's counter and `image_view` are built once, from `model`.
+export const ModelEntrySchema = ModelConfigSchema.omit({
+  imageDetail: true,
+  imageTokens: true,
+}).extend({
   description: z.string().min(1).max(300).optional(),
 });
 
@@ -357,6 +372,46 @@ const settingsShape = {
     })
     .optional(),
   /**
+   * Other agent harnesses that run a sub-agent (docs/feat/subagent-harness-runners.md
+   * D3/D6), keyed by INSTANCE name. Laptop/serve only: a pod ignores it (D5).
+   * Only `claude-code` exists in this version.
+   */
+  harnesses: z
+    .record(
+      z.string().min(1),
+      z
+        .object({
+          /** The adapter; defaults to the instance name. */
+          adapter: z.literal("claude-code").optional(),
+          /** Default on: the `claude` sub-agent type is offered when `command` is on PATH. */
+          enabled: z.boolean().optional(),
+          /** The executable (default `claude`). */
+          command: z.string().min(1).optional(),
+          /** The model when a call names none (default `opus`); passed verbatim. */
+          model: z
+            .string()
+            .regex(
+              /^[A-Za-z0-9._:[\]][A-Za-z0-9._:[\]-]{0,63}$/,
+              "an alias or a model id: letters, digits, . _ : - [ ], at most 64, not starting with -",
+            )
+            .optional(),
+          /** Hang guard: no output for this many minutes ends the run (default 15). */
+          idleMinutes: z.number().positive().optional(),
+        })
+        .strict(),
+    )
+    .superRefine((harnesses, ctx) => {
+      for (const name of Object.keys(harnesses)) {
+        if (name !== "claude-code") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `harnesses: unknown instance "${name}" (only "claude-code" in this version)`,
+          });
+        }
+      }
+    })
+    .optional(),
+  /**
    * Context awareness (docs/feat/context-awareness.md): tell the model how full
    * its context is, a short line on the message that crosses each new step.
    */
@@ -481,6 +536,13 @@ const settingsShape = {
     })
     .strict()
     .optional(),
+  /**
+   * Opt-in display features (docs/feat/shell-intent-line.md): `compactShell`
+   * hides a described `shell` row's `$ command` row while it runs and on exit 0
+   * (shown on failure; always in the ask and the expanded row). Unset: false.
+   * LAPTOP-ONLY display: never carried to a pod.
+   */
+  beta: z.object({ compactShell: z.boolean().optional() }).strict().optional(),
   /**
    * The laptop's session logs (docs/feat/session-log-laptop-store.md):
    * `keepSuperseded` keeps the history a compaction or a `context_reset`

@@ -1,0 +1,1915 @@
+# fix/workflows-ux — Workflow runs readable on the phone, reachable from the hub, quiet in the TUI
+
+> **Status:** context
+> **Branch:** `fix/workflows-ux`
+> **Size:** M–L (split into S/M slices) · **Blast:** cross-module (mobile screens + hub, TUI, workflow run data on the wire) · **Suited:** Opus plan; DeepSeek exec per slice (owner: S/M → deepseek/sonnet); Opus review per slice group
+> **Changelog:** `changelog.d/workflows-ux.fixed.md` (+ `.changed.md` for the hub entry if the plan prefers)
+
+## Context
+
+Owner 24/11, after running a real workflow (`~/assistant/.tentacle/workflows/demo-note.yaml`, collect → draft(retry 1) → review(on_fail goto fix max 2, next confirm) → fix(next review) → confirm(approve) → archive) on the iPhone and in the TUI. Screenshots: `.tentacle/tmp/workflow-run-view/{162fac2b,9bd2be28,d1b5faaa}-image.png`.
+
+### Defects (evidence)
+1. **Run graph is unreadable** (d1b5faaa): a linear chain of pills; no taken/untaken path, no failure, no loop; `fix` (never ran: review passed first time) shows `○ fix · waiting` IN the chain between review and confirm, even after the run ended; the fix→review back edge is not drawn; no run outcome/duration.
+2. **Never-run step detail** (162fac2b): `fix` says «This step's detail is no longer available» with State `waiting` — must say it did not run and why.
+3. **Step detail header overlaps** the status bar and the back chevron (both detail screenshots).
+4. **Hub entry unreachable when no run exists**: `hub-actions.ts:270` dims Workflows with `NO_WORKFLOW_RUNS` (`hub-session.ts:136`), and the Start entry lives only inside that screen (`WorkflowRuns.tsx:121`) → the first workflow can't be started from the phone.
+5. **TUI before the first message**: the `/workflow` panel says «this session is not open yet» for the catalogue (`remote-session.ts:1336`) and «not supported by this computer's tentacle» for runs (`workflow-view.ts:516`) — false; the session is just not open.
+6. **TUI at-rest catalogue line** `◇ workflows  demo-note v1 ✓ approved   /workflow` above Thinking (`workflow-view.ts:757,794`, `app-layout.ts:123`) reads like a lingering finished run. Owner: «va tolto».
+
+### Owner decisions (binding, mockups in `.tentacle/mockups/workflow-run-view/`)
+- **Run view = A + B** (`index.inline.html`): A = graph with the side branch (taken edge solid, possible dashed, not-taken faded dotted; chips `✗ 1/2` on goto, `↻ 1/1` on retry; top strip with outcome, total time, tokens) as the main view; B = rounds timeline («Next», «Not run» groups) behind the top-right list button (replacing the cards toggle).
+- **Step detail**: nav bar under the safe area (`‹ demo-note · step 4 of 6`), never-run wording «Not run — review passed on its first try…», approve step shows question, outcome, wait.
+- **Markers** (`markers-v2.inline.html`): style **(ii) tinta** — soft tinted circle body, the glyph carries the contrast; tokens `--wr-{ok,fail,run,ask,wait}-{soft,ink}` (+ `--wr-skip-ink`) light/dark as drawn; glyphs bigger (~half the circle). Glyphs are REAL SF Symbols via `apps/mobile/src/ui/Icon.tsx` (expo-symbols), not drawn SVG: succeeded `checkmark`, failed **`multiply`** (owner, `error-icon.html`), running/waiting-on-you/not-run per the mockup mapped to SF Symbols (plan proposes names). **Pending/not-yet = plain soft-grey disc with NO glyph** (owner: no ○ / dots). Owner is colour-blind: every state must stay distinguishable without colour (glyph + edge line style + the state word).
+- **Hub** (`hub-workflows.inline.html`, variant B): Workflows takes **Attach's** slot in the fan; **Attach is removed from the hub entirely** (the composer `+` already does it); Commands stays. Workflows icon = SF Symbol `point.topleft.down.to.point.bottomright.curvepath`. The item is not dimmed when the project has workflows to start (fix 4).
+- **TUI**: remove the at-rest catalogue line (catalogue stays in the `/workflow` panel); fix the wrong notes before the first message (5) — ideally the catalogue reads without an open session, else an honest «send a message first».
+- «nuovo dato» from the mockups: the run view needs the workflow DEFINITION edges (`next`, `on_fail{goto,max}`, `retry`) with the run, so a loop is drawn before it fires; the plan decides where (protocol field on the run/steps read) and wires both ends.
+
+### Constraints
+- `feat/workflow-editor` is executing in parallel (slices 3b → 7c: workflow driver/daemon save path, client, phone editor screens + route + entries). List every file both touch; order or rebase so they don't collide (this task may execute after workflow-editor merges).
+- Logic in pure modules (graph layout, state projection, hub ordering), components render only (AGENTS §7). Phone/Mac parity statement.
+
+*— orchestrator (claude-opus-5-5), 2026-11-24, owner decisions in this session*
+
+## Implementation
+
+> **Status: APPROVED** — owner 2026-11-24 (#### Owner answers, after Owner questions). Execution order: S1–S3 now; S4→ after feat/workflow-editor merges.
+
+### Load-bearing assumption (named first, proved against the source)
+
+**The run read carries each step's LAST state only — no definition edge (`next`, `on_fail{goto,max}`,
+`retry`), no goto counter, no history — so every loop/branch the phone draws today is guessed. The
+daemon HAS all of it in memory for every run (its frozen `run.spec` and `run.state.counters`), so the
+fix is to put it on the wire from the driver, not to re-derive it on the client.**
+
+Proof (static; the executor re-runs it empirically first — see PARTIAL rule):
+- Wire step row = `id, kind, model?, where, state, attempt, round, maxRound?, reason?, live?,
+  durationMs?` (`packages/protocol/src/session.ts:808-826`); run row has no history
+  (`:830-848`). Both are strip schemas (§7): a `next`/`onFail` a daemon sent would be DROPPED on
+  parse. The catalogue's step has no edges either (`:990-1000`) — and the catalogue is the file
+  NOW, not the run's snapshot, so it is the wrong source anyway.
+- The phone therefore guesses: `isLoopTarget = maxRound !== undefined` (`apps/mobile/src/workflow-graph.ts:124-126`),
+  and `maxRound` is set only once a goto FIRED (`packages/agent/src/workflow-driver.ts:1054-1061`);
+  the graph is the file order with an edge between neighbours (`workflow-graph.ts:170-197`). Run ①
+  (review passes first time) ⇒ `fix` sits in the chain between review and confirm, no back edge —
+  exactly d1b5faaa.
+- `fix · waiting`: the never-run step stays `pending` after the end (`finish` only maps
+  running/waiting/needs-approval → stopped, `workflow-driver.ts:1146-1150`) and the phone words
+  `pending` as "waiting" (`apps/mobile/src/workflow-list.ts:42,59`); its detail read finds no entry →
+  `missing` → "no longer available" (`workflow-step-detail.ts:29,146-148`) — defect 2.
+- The data exists daemon-side: rows are built from the run's own spec at start
+  (`workflow-driver.ts:772`, `pendingRow(step: WorkflowStep)` `:931-941`), a resume reuses `run.spec`
+  (`:838-853`); `WorkflowStep` has `retry`, `onFail{kind,id,max}`, `next?` (`core/src/workflow-spec.ts:98-110`);
+  the pass target is `step.next ?? steps[i+1]` (`core/src/workflow-spec.ts:483-487`, `passTarget`
+  in `core/src/workflow-machine.ts:358`); goto counters are `state.counters[edgeKey(from,to)]`
+  (`workflow-machine.ts:111-115,382-397`); every execution passes through `drive` (`workflow-driver.ts:1043-1110`),
+  where `setStep` overwrites the row (`:947-968`) — the history is lost there, so it is recorded there.
+- Rows are in-memory only (`rows()` `workflow-driver.ts:410-415`; no ledger rebuild): no persisted
+  format changes.
+- Repro script (run it first): `.tentacle/tmp/workflows-ux/lb.ts` parses a row carrying
+  `next`/`onFail`/`retry` through `WorkflowRowSchema` and a catalogue row through
+  `WorkflowCatalogueResultSchema`; expected today: the keys are absent after parse. (Not run by the
+  planner: `bun` needed approval in this session.)
+
+### Preconditions (verified)
+
+- P1 Strip schemas, a new required field = breaking ⇒ `protocol.d/<slug>.md`, never an edit of
+  `PROTOCOL_VERSION` (AGENTS §7). App unpublished ⇒ clean break preferred over optional-field
+  fallbacks (owner memory 20/11): an older daemon fails at `initialize` with `VersionMismatch`, so no
+  "edges absent" rendering path is written.
+- P2 One run's definition is frozen for its life (`workflow-driver.ts:772,838-842`) ⇒ "the file changed
+  since the run started" cannot skew the graph: the edges come from that run's snapshot.
+- P3 Phone imports `@tentacle/client` and `@tentacle/core` (`apps/mobile/package.json:10-11`); the TUI
+  imports `@tentacle/client` ⇒ one shared projection lives in `client`.
+- P4 SF Symbols (sf-symbols-typescript 2.2.0, `IconName` checked against it, `Icon.tsx:1-6`;
+  deployment target iOS 18, `apps/mobile/app.json:36`): `checkmark` (1.0), `multiply` (1.0),
+  `play.fill` (1.0), `questionmark` (1.0), `stop.fill` (1.0), `arrow.clockwise` (1.0),
+  `list.bullet` (1.0), `chevron.left` (1.0), `chevron.forward.2` (2.0, index.d.ts:2001),
+  `point.topleft.down.to.point.bottomright.curvepath` (5.0, index.d.ts:6002) — all present, all ≤ iOS 18.
+- P5 Sessionless reads have a precedent: `session/skills`/`session/tools` with no `sessionId` = "what a
+  session created now would have" (`daemon/src/connection.ts:694-712`, `session-host.ts:626-653`).
+- P6 Hub order is already a pure module (`hub-actions.ts:164-176,284-301`); the dim reason is
+  `dimmedBecause` (`:260-274`) fed by `workflowsHub` (`workflow-runs-controller.ts:175-188`).
+
+### Design
+
+**D1 — Wire (protocol + driver).** `WorkflowStepRowSchema` gains, all REQUIRED (P1):
+- `next: line(64) | null` — the RESOLVED pass target (`passTarget`), `null` = the run ends after it.
+- `onFail: { goto: line(64), max: int 1..10, taken: int ≥ 0 } | null` — `null` = stop;
+  `taken` = `state.counters[edgeKey(id, goto)]`.
+- `retry: int 0..5`.
+
+`WorkflowRowSchema` gains `history: { step, attempt, round, state, durationMs? }[] ≤ 64` (finished
+executions in order, the LATEST 64) + `historyDropped: int ≥ 0`. ~5 KB worst case per published row.
+Driver: `pendingRow` fills `next/onFail(taken 0)/retry` from the run's spec; after each `nextAction`
+(`:1106`) the source step's `onFail.taken` is refreshed from `run.state.counters`, and the finished
+execution is appended to `history` (cap + dropped count). Nothing else in the driver changes.
+`protocol.d/workflows-ux.md`: required fields added to the `workflows` row (+ D7's `sessionId`
+relaxation if Q1 = A).
+
+**D2 — Shared projection (pure, `packages/client/src/workflow-run-graph.ts`, new).** `runProjection(row)` →
+- per step a **phase**: `ok | error | running | ask | later | skipped | stopped | unknown`.
+  - wire `ok/error/running/stopped` as is; `needs-approval`/`waiting` → `ask` (the word keeps them
+    apart: "needs approval" / "waiting on you").
+  - `pending` → **not yet** (`later`) iff the run is live AND the step is reachable from the current
+    step. Reachable = BFS over `next`, over `onFail.goto` while `taken < max`, and over the retry
+    self-loop.
+  - `pending` → **not run** (`skipped`) otherwise (ended run, or unreachable).
+  - an unknown wire word → `unknown`, printed verbatim.
+- per edge (`next`, `fail`, `retry`) a **trace**: `taken` (in `history` as consecutive A→B, or
+  `taken > 0` / `attempt > 0`), `go` (taken, and its target is the current running/ask step), `later`
+  (live and still possible), `never`. Chips: `✗ taken/max` on the goto edge, `↻ attempt/retry` on retry.
+- `notRunWhy(stepId)` → `{ text, small? }`, e.g. "Not run — review passed on its first try, so its
+  on-fail route never fired." + "It runs only when review fails (up to 2 times).". Cases, in order:
+  - only entered by a goto whose source never failed;
+  - the run stopped/failed before it (`the run ended at <step>`);
+  - the path went elsewhere (fallback).
+- `timeline(row)` (view B):
+  - `history` rows, then the current step;
+  - then `next[]` (reachable, live only, with "round N" for a re-entry);
+  - then `notRun[]` (with the why);
+  - plus an "N earlier steps not shown" line when `historyDropped > 0`.
+- `summary(row, now)` (the top strip):
+  - outcome word + phase: `Done | Failed | Stopped · <stopReason> | Running | Needs approval | Waiting on you`;
+  - total time (`endedAt ?? now` − `startedAt`);
+  - `tokens of budget`;
+  - `N of M steps ran`, `· K loops`, or for a live run `so far · step i of M`.
+
+Used by the phone (D3–D5) AND the TUI (D7): one truth for "not yet / not run" on both.
+
+**D3 — Phone graph A (pure layout + dumb render).** New `apps/mobile/src/workflow-run-layout.ts`:
+- **Placement from the definition**, never from rounds:
+  - spine = the `next` walk from `steps[0]` (cycle-guarded);
+  - every off-spine step goes in the side column;
+  - its row is ≥ its first entering source's row + 1, strictly increasing within the column.
+  - Result: two pills can never overlap in either column, for any 64-step file.
+- **Edges:**
+  - spine `next` = vertical;
+  - goto = from the source's right edge into the side pill's top;
+  - side `next` back into its target's right edge;
+  - retry = self-arc on the right edge;
+  - a goto/`next` to an earlier spine step = a back arc on a side lane, one lane per arc so arcs do
+    not coincide.
+- **Chips** sit at the arc midpoints and are pushed out of pill boxes.
+- Authored in the mockup's 402-pt space (spine x16 w200, side x244 w142, pitch 72, pill 44), scaled
+  by the existing `canvasMap` (`workflow-step-detail.ts:45-51`, never upscaled).
+- `nodeAt` hit test moves here.
+- **Shared with the editor:** if `feat/workflow-editor` slice 5 has landed, the spine/side placement
+  is ONE function both `workflow-edit-graph.ts` and this module call (its D6 rule "reached only by
+  goto/next from below ⇒ side column" is the same rule). `workflow-graph.ts`'s constants that it
+  imports keep their names.
+
+`WorkflowRun.tsx` draws it:
+- pills with the D4 markers;
+- edge strokes per trace (taken = solid `label`, later = dashed dim, never = dotted dim `--wr-dot`,
+  go = dashed accent animated unless Reduce Motion; a fail edge is always dashed by kind);
+- the summary strip under the header;
+- the approve bar pinned at the bottom (today's `AskBlock`, moved; "Open the session to answer it"
+  when `!canAnswer`).
+
+**D4 — Markers (pure mapping + tokens).** New `apps/mobile/src/workflow-marker.ts`:
+`phase → { symbol: IconName | null, soft, ink, ring?: "dotted", word }`. Style (ii) tinta: a soft
+disc with the glyph in ink, the glyph at ~½ of the disc.
+
+| phase | SF Symbol | body | word |
+|---|---|---|---|
+| ok | `checkmark` | `wr-ok-soft` / ink | done · approved (approve step) · passed (when a verdict passed) |
+| error | `multiply` | `wr-fail-soft` / ink | failed · denied (approve step) |
+| running | `play.fill` (blinks; static under Reduce Motion) | `wr-run-soft` / ink | running |
+| ask | `questionmark` | `wr-ask-soft` / ink | needs approval / waiting on you |
+| later | — (**no glyph**, owner) | `wr-wait-soft` disc | not yet |
+| skipped | `chevron.forward.2` | no body, dotted ring `wr-skip-ink` | not run |
+| stopped | `stop.fill` (Q5) | `wr-wait-soft` / ink | stopped |
+| unknown | — | `wr-wait-soft` | the wire word, verbatim |
+
+- Colour-blind check: every row differs by glyph or by body/ring shape, plus the word and the pill
+  border (later = dashed pill, skipped = dotted pill).
+- Tokens `wr{Ok,Fail,Run,Ask,Wait}{Soft,Ink}` + `wrSkipInk` join `Palette` (`theme.ts:13`) for
+  light/dark/petrol, with the values in `markers-v2.html:159-174` (petrol = dark).
+- Then `bun run mockup-kit` regenerates the kit tokens.
+- The summary strip and the B rail use the same marker: 26 pt in a pill, 18 pt in the rail, 32 pt
+  in the detail hero.
+
+**D5 — Phone list B + step detail.**
+- The header's right button toggles graph ⇄ list (`list.bullet` / `square.grid.2x2`, as today,
+  `WorkflowRun.tsx:251-265`). `RunMode` `"cards"` becomes `"list"`.
+- The list = `timeline()` rendered on the chat step-rail look, with «Next» / «Not run» sections.
+  The cards and their inline actions go.
+- Step detail (`WorkflowStep.tsx`):
+  - a real nav bar UNDER the safe area: `‹ <run name>` back, `step N of M` (file order);
+  - `heroBox(top, inset, width)` with `top = insets.top + NAV_H + gap` (today `y = inset`,
+    `workflow-step-detail.ts:76-83`), so the morph lands below the bar;
+  - hero = the pill (A), Q3.
+- Never-run step:
+  - no `session/workflow_step` read is sent;
+  - the body is `notRunWhy` + bands State/Kind/Where.
+- Approve step: bands «Asked» (detail `prompt` = the question, `session-log.ts:451`), «Answer»
+  (Outcome Allowed/Denied from state + reason, Waited = `durationMs`).
+  - No who/when: not decided, not drawn as required.
+- Re-run step → the failed step's detail (Q4).
+- Stop/Resume stay at the run screen's foot.
+
+**D6 — Hub.**
+- `CANONICAL` = `workflows, activity, artifacts, tools, commands, sessions, info, scheduled,
+  dictate, new` (`hub-actions.ts:164-176`).
+- `attach` is deleted from the hub: `HubEntryId`, `LABELS`, `holds`, `ENTRY_IDS`
+  (`hub-session.ts:246-259`), `GLYPH` (`HubFan.tsx:36`), the entry (`SessionScreen.tsx:1199`) and
+  e2e `34-hub-attach.yaml`. The composer `+` is untouched.
+- Workflows glyph = `point.topleft.down.to.point.bottomright.curvepath` (added to `IconName`).
+- Dim rule, `workflowsHub(runs, catalogue)`:
+  - not dimmed when a run exists OR the catalogue lists ≥ 1 workflow;
+  - dimmed "No workflows in this project" when there are no runs AND the catalogue is known with
+    no workflow;
+  - dimmed with the catalogue's text when `unavailable`;
+  - unknown (not read, failed, offline) → never dimmed (the Tools D3 rule).
+- The catalogue is read ONCE when the session attaches — beside the session-info read that feeds
+  Tools (`SessionScreen.tsx:1186`) — never on render.
+- `catalogueFigure(answer)` is pure, in `workflow-runs-controller.ts`.
+
+**D7 — TUI.**
+- Remove the at-rest line: `workflowsLine`/`catalogueLine`/`elsewhereLine`/`catalogueRows`
+  (`workflow-view.ts:793-930`), its slot in `app-layout.ts:326-340` and `AppView.tsx:167`,
+  `components/WorkflowsLine.tsx`. The `/workflow` panel's catalogue section stays (`:988-1003`).
+- Before the first message (`session.opened()` false):
+  - the runs note becomes "No workflow run in this session yet." instead of "not supported…"
+    (`workflow-view.ts:516-529`);
+  - the catalogue: Q1.
+- Parity: the rail/panel words come from D2 (`not yet` dim `○`, `not run` dim `–`). The panel's
+  detail column lists `next → X`, `on fail → Y (taken/max)`, `retry n` from D1.
+
+### Files (dependency order)
+
+| Slice | Files |
+|---|---|
+| S1 TUI quiet | `packages/tui/src/{workflow-view.ts,app-layout.ts,AppView.tsx}`, delete `components/WorkflowsLine.tsx`, `packages/tui/test/{workflow-view.test.ts,workflow-frames.test.tsx}` |
+| S2 hub | `apps/mobile/src/{hub-actions.ts,hub-session.ts,workflow-runs-controller.ts,ui/HubFan.tsx,ui/Icon.tsx,screens/SessionScreen.tsx}`, `apps/mobile/test/{hub-actions,hub-session,workflow-runs-controller}.test.ts`, `apps/mobile/e2e/flows/34-hub-attach.yaml` → `34-hub-workflows.yaml`, `changelog.d/workflows-ux.changed.md` |
+| S3 detail header | `apps/mobile/src/{workflow-step-detail.ts,screens/WorkflowStep.tsx}`, `apps/mobile/test/workflow-run-step-detail.test.ts` |
+| S4 wire | `packages/protocol/src/session.ts` (`:808-848` only), `protocol/schema/protocol.json` (regen), `protocol.d/workflows-ux.md`, `packages/agent/src/workflow-driver.ts` (`pendingRow`, `drive`), `packages/core/src/workflow-machine.ts` (export `passTarget`/`edgeKey` if not), `packages/protocol/test/workflow-wire.test.ts`, `packages/agent/test/workflow-driver.test.ts`, fixtures that build rows (`rg "attempt: 0, round: 0"`) |
+| S5 projection | `packages/client/src/workflow-run-graph.ts` (new), `client/src/index.ts`, `packages/client/test/workflow-run-graph.test.ts` (new) |
+| S6a layout + markers | `apps/mobile/src/{workflow-run-layout.ts,workflow-marker.ts}` (new), `theme.ts`, `ui/Icon.tsx`, `tools/mockup-kit/generated/*` (regen), tests `workflow-run-layout.test.ts`, `workflow-marker.test.ts` (new) |
+| S6b graph render | `apps/mobile/src/screens/WorkflowRun.tsx`, `workflow-run-controller.ts` (`RunMode`), `workflow-step-detail.ts` (`nodeBoxOnScreen` → new layout), retire `workflow-graph.ts`'s guess (keep exported constants the editor imports), `apps/mobile/test/{workflow-list-graph,workflow-screens-wiring}.test.ts` |
+| S7 list B + detail | `apps/mobile/src/screens/{WorkflowRun.tsx,WorkflowStep.tsx}`, `workflow-step-detail.ts`, `workflow-run-controller.ts` (no read for a not-run step), `workflow-list.ts` (`pending` word), tests + e2e `45-workflow-run-view.yaml` (new) + `e2e/seed.ts` (seeded runs ① ②), `changelog.d/workflows-ux.fixed.md` |
+| S8a TUI parity | `packages/tui/src/workflow-view.ts` (`STEP_LOOK`, panel detail), `packages/tui/test/workflow-view.test.ts` |
+| S8b catalogue pre-open (if Q1 = A) | `protocol/src/session.ts` (`WorkflowCatalogueParams.sessionId` optional), `daemon/src/{connection.ts,session-host.ts}` (`newSessionWorkflowCatalogue`, throwaway like `newSessionTools`), `client/src/remote-session.ts` (`workflowCatalogue` pre-open asks without id; `workflow({start})` pre-open goes through `createOrAttach()`), tests in `daemon/test/workflow-hosted.test.ts`, `client/test/workflows-client.test.ts`, `tui/test/workflow-frames.test.tsx` |
+| S8c `elsewhere` lookup removed (Q2) | `packages/core/src/project-paths.ts` (`workflowsAbove`, `WorkflowsAboveHint`, its depth const `:55-151`), `packages/cli/src/{workflow-files.ts,project-fs.ts}` (`:112`, `:252-277`), `packages/agent/src/workflow-driver.ts` (`:131`, `:171`, `:620`), `packages/protocol/src/session.ts` (`elsewhere`, `:1039-1060`; the field removal goes into the S4 `protocol.d/workflows-ux.md` note), `protocol/schema/protocol.json` (regen), `packages/tui/src/workflow-view.ts` (`catalogueSection` hint, `:833-839`), `apps/mobile/src/{workflow-start.ts,screens/WorkflowStart.tsx}` (the `elsewhere` view field and its row), tests `core/test/project-paths.test.ts`, `cli/test/{workflow-files,workflow-wiring}.test.ts`, `agent/test/workflow-catalogue.test.ts`, `protocol/test/workflow-wire.test.ts`, `tui/test/workflow-view.test.ts`, `apps/mobile/test/workflow-start.test.ts`. Acceptance: `rg -n "workflowsAbove\|WorkflowsAboveHint" packages apps` is empty and no workflow type carries `elsewhere` |
+
+### Failure modes (how each converges)
+
+| Failure | Converges to |
+|---|---|
+| **Run still live** | Every `workflows` update re-projects (pure, O(steps+edges)). `later` vs `skipped` comes from reachability at each update, so a step flips `not yet` → `not run` the moment its last entry closes (review passes). The `go` edge is animated; static under Reduce Motion. |
+| **Definition changed since the run started** | Edges come from the run's own snapshot (P2). The graph is the run as it RAN, never the file now. The resume refusal `changed` is unchanged. |
+| **Older daemon / older app** | `PROTOCOL_VERSION` bump (P1) → `VersionMismatch` at `initialize`, the existing "update tentacle" path on both ends. No half-drawn graph. |
+| **A goto taken max times** | Chip `✗ 2/2`, the fail edge `taken`, the source `failed`, the run `Failed` with the driver's reason ("…already ran 2/2 times", `workflow-machine.ts:385-388`) in the strip. The target keeps its last state. |
+| **Retry exhausted** | `↻ 1/1`, the step `failed`, then its `on_fail` (goto edge `taken`) or the run `Failed`. Each try is its own B row (`history`). |
+| **Cancelled / timeout / budget / interrupted** | Run `Stopped · <reason>`. The cut step is `stopped` (`stop.fill`). Unvisited steps are `not run` ("the run was stopped before it got here"). Resume stays as today. |
+| **Huge workflow** (64 steps, many gotos) | Placement is strictly increasing per column (test with 64 steps and nested gotos: no pill overlap). Back arcs get distinct lanes. The canvas scrolls. `history` is capped at 64 with "N earlier steps not shown". Rows stay ~5 KB. |
+| **A step with no file order neighbour** (a `next` cycle with a counter) | The spine walk is cycle-guarded; the revisit is an arc, not a second pill. |
+| **Hub: catalogue read fails / offline / pod session** | Unknown → not dimmed; `unavailable` → dimmed with its text. The runs list keeps its own rules. |
+| **Hub: catalogue changes after the attach** (a file added from the TUI, `git pull`, the editor) | Re-read (single-flight with the attach's) at each fan open and on a dimmed Workflows tap (fan flash + the commit's notice path, so VoiceOver too): the item un-dims on the next look. A failed re-read keeps the last answer. (Fix round 1.) |
+| **TUI pre-open** | Runs: "no run yet" (never "not supported"). Catalogue: Q1. A `/workflow run` before the open: Q1 = A makes it open the session through the ONE `createOrAttach()`; Q1 = B keeps today's honest refusal. |
+
+### Tests (red first; the property each kills)
+
+- **S1**
+  - `workflow-frames.test.tsx`: an idle frame with a 2-workflow catalogue has NO `◇ workflows` row
+    and the input row index is unchanged. Red today: the row is painted, `app-layout.ts:333`.
+  - `workflowPanelView` with `opened:false` says "no run yet". Red: "not supported".
+- **S2** `hub-actions.test.ts`
+  - The idle fan is `[workflows, activity, artifacts, tools, commands, more]`, and `attach` is in no
+    list. Red today, `:111`.
+  - `workflowsHub(runs: [], catalogue: 1 ok)` → not dimmed. Red today: `NO_WORKFLOW_RUNS`.
+  - Catalogue known-empty → dimmed "No workflows in this project".
+  - Unknown → not dimmed.
+  - Mutation: drop the catalogue term → red.
+- **S3**: hero `y ≥ insets.top + NAV_H` for `insets.top` 59. Red: `y = inset`. Mutation: back to
+  `inset` → red.
+- **S4**
+  - Wire: a row without `next/onFail/retry/history` fails to parse; with them it round-trips, keys
+    kept.
+  - Driver (`workflow-driver.test.ts` fakes), the demo-note shape:
+    - review passes first → `review.onFail = {goto:"fix",max:2,taken:0}`, `fix.next = "review"`,
+      `history` = 5 entries, and `fix` is never in it;
+    - review fails once → `taken: 1`, `history` holds review(error) → fix(ok) → review(ok);
+    - draft retried → two draft entries with attempt 0/1;
+    - more than 64 executions → length 64 + `historyDropped`.
+  - Mutation: append history before `nextAction` → the order test is red.
+- **S5** `workflow-run-graph.test.ts`
+  - The four mockup scenarios as fixtures: phases, traces, chips and `notRunWhy` text exactly as
+    drawn (① fix `skipped` + the sentence; ③ archive `later`, fix `skipped`; ④ review→fix `go`,
+    confirm `later`).
+  - Ended-run `pending` → `skipped`, never `later` (kills the d1b5faaa bug at its root).
+  - Unknown word kept verbatim.
+  - Exhausted goto; cancelled run; a 64-step chain.
+  - Mutation: drop the `taken < max` term in reachability → ② after 2/2 shows `fix` "not yet" → red.
+- **S6a**
+  - Layout: no pill overlap for random + 64-step definitions. `fix` lands in the side column for
+    demo-note.
+  - Every edge starts and ends on its nodes' boxes.
+  - Chips are outside the pills.
+  - Mutation: place by file index → `fix` on the spine → red.
+  - Markers: every phase pair differs in (symbol, ring) or the word. `later` has `symbol: null`. All
+    names typecheck as `IconName`.
+- **S6b / S7**
+  - Source-reading wiring tests (the `workflow-screens-wiring.test.ts` pattern): screens import the
+    projection/layout/marker and hold no branching beyond mapping.
+  - A not-run step sends no `workflowStep` read (controller test with a fake handle). Red today:
+    the read is sent.
+  - e2e `45-workflow-run-view.yaml` on iOS 18 + 26: ① graph, "Not run — review passed…", the
+    header below the status bar, the list toggle.
+- **S8a**: an ended run's pending step reads `– not run` in the panel. Red: `○ pending`.
+- **S8b**
+  - Pre-open `workflowCatalogue()` sends ONE frame with no `sessionId` and returns rows. Red: the
+    local `unavailable`.
+  - A daemon test with a fake host.
+  - A pre-open start opens once, then starts. The fake peer sees `session/open` before
+    `session/workflow`.
+
+### Slices (each S or M; one executor at a time)
+
+| # | Slice | Size · Blast | Depends on | When |
+|---|---|---|---|---|
+| S1 | TUI at-rest line removed + pre-open runs note | S · contained | — | now (disjoint from the editor) |
+| S2 | Hub: Workflows in Attach's slot, Attach gone, dim by catalogue | M · cross-module (mobile only) | — | now |
+| S3 | Step detail nav bar under the safe area | S · contained | — | now |
+| S4 | Wire edges + counters + history (protocol.d note) | M · **load-bearing** (wire): stronger executor per §10 (owner's call), fresh-context review | — | after the editor merges |
+| S5 | Shared run projection in `client` | M · contained (new pure module) | S4 | after S4 |
+| S6a | Phone layout + markers + tokens | M · contained | S5 | after the editor's slice 5 is on `main` |
+| S6b | Phone graph A render + summary strip + ask bar | M · contained | S6a | — |
+| S7 | Phone list B + never-run/approve detail + e2e + changelog | M · contained | S6b, S3 | — |
+| S8a | TUI not-yet/not-run + edge lines | S · contained | S5 | — |
+| S8b | Catalogue before the first message (Q1 = A) | M · cross-module | S4 (same protocol.d note) | — |
+| S8c | `elsewhere` neighbouring-folder lookup removed end to end (owner Q2) | M · cross-module (wire field removal) | S4 (same protocol.d note) | — |
+
+Review: one Opus review for S1–S3, a mandatory fresh-context one for S4, then one for S5–S8.
+
+**PARTIAL rule:** before each slice, re-run its checks:
+- S4: `lb.ts` still shows the keys stripped, and `passTarget`/`edgeKey` exist;
+- S5+: `WorkflowStepRow` has `onFail`;
+- S6a: `workflow-edit-graph.ts` exists on `main` (else STOP and ask: build the layout alone, with an
+  unify-later note).
+
+If one fails, write `### Slice N — PARTIAL` with the failing line and STOP.
+
+### Overlap with `feat/workflow-editor` (verified: `git diff main...feat/workflow-editor --stat` + its Files table)
+
+| File | Editor slice | This task | Risk |
+|---|---|---|---|
+| `protocol/src/session.ts` | 3a (done: appends after `:1060`) | S4 (`:808-848`), S8b (`:1060`) | Separate hunks for S4. S8b touches the very line the editor appends after → run S8b after the merge. |
+| `protocol/schema/protocol.json` | 3a | S4, S8b | Always regenerated (`protocol:bump`, `-merge`). |
+| `agent/src/workflow-driver.ts` | 3b (`source`/`save`, in exec now) | S4 (`pendingRow`, `drive`) | Separate methods, same file → after the merge. |
+| `daemon/src/{connection,hosted-session}.ts` | 3b | S8b (`connection.ts`, `session-host.ts`) | After the merge. |
+| `client/src/remote-session.ts` | 4 | S8b | After the merge. |
+| `apps/mobile/src/workflow-graph.ts` | 5 imports `MAIN`, `LOOP_*`, `PITCH`, `curve` (`:33-63`) | S6b retires its guess | **Contract**: keep the constants; share the placement (D3). After editor 5. |
+| `apps/mobile/src/ui/Icon.tsx` | 7a–c likely add names | S2, S6a | Union lines. Trivial rebase. |
+| `apps/mobile/e2e/seed.ts` | 7c | S7 | Append-only seeds. After the merge. |
+| `apps/mobile/src/screens/WorkflowRuns.tsx`, `App.tsx`, `routes.ts` | 7a | none (S2 reads the catalogue in `SessionScreen`) | — |
+| `core/src/workflow-spec.ts` | 1 (split, done) | read-only import | Import path may move: use the barrel. |
+
+**Recommended order:**
+1. S1, S2, S3 now, on this branch (file sets disjoint from every remaining editor slice; owner
+   memory allows 2 code tasks with disjoint files).
+2. Pause.
+3. After `feat/workflow-editor` merges: rebase, then S4 → S5 → S6a → S6b → S7 → S8a → S8b.
+
+Alternative: hold the whole task until the editor merges. That gives one rebase and no pause, but
+defects 3–6 ship later.
+
+### Mac / TUI parity
+
+- The Mac is the TUI today. The data (D1) and the projection (D2) are one implementation for both.
+- The phone draws the graph. The TUI shows the same facts as words: the rail and panel read `not
+  yet`/`not run` from D2, and the panel detail lists next / on fail (taken/max) / retry.
+- The phone's `Not run — …` sentence and the TUI's are the same string.
+- Pre-open, both ends read the same catalogue (Q1). A phone session is open at the tap, so only the
+  TUI needed the fix.
+- Glyphs differ by medium: SF Symbols on the phone; text glyphs (`✓ ✗ ▸ ? ○ –`) in the TUI, where
+  `○` stays because a terminal needs a character. The phone's no-glyph `not yet` disc is phone-only.
+
+### Owner questions (each with a recommendation)
+
+1. **Q1 — Catalogue before the first message (TUI).**
+   - A: read it without a session (the `session/skills`/`tools` precedent); a start from the panel
+     opens the session first (+S8b, M).
+   - B: an honest "Send a message first to list this project's workflows" (inside S1, no protocol).
+   - **Rec. A.**
+2. **Q2 — The `elsewhere` hint** (`◇ no workflows here — ~/x has 3 (start tentacle in ~/x)`) is
+   the same at-rest slot.
+   - **Rec.: remove it with the line.** The `/workflow` panel keeps it (`workflow-view.ts:1001-1003`).
+3. **Q3 — Step-detail hero: A (pill, the graph's morph lands on it) or B (flat title)** — the
+   mockup drew both.
+   - **Rec. A** (the morph exists: `workflow-morph.ts`).
+4. **Q4 — "Re-run step"** lived on the cards that view B replaces.
+   - **Rec.: in the failed step's detail**, under the bands (same condition: state `error`).
+5. **Q5 — `stopped` step marker** (not drawn).
+   - **Rec.: `stop.fill` on the grey tint, word "stopped"** (the hub's Stop uses the same glyph).
+
+*— claude-opus-5-5, 2026-11-24*
+
+#### Owner answers (2026-11-24, binding)
+
+1. **Q1 = A** — the catalogue reads without a session; a start from the panel opens the session first (S8b).
+2. **Q2 — remove the "elsewhere" search ENTIRELY** (owner: «togliamo proprio sta cosa della ricerca in cartelle vicine»): no `~/x has N` hint anywhere (not at rest, not in the `/workflow` panel), and delete the neighbouring-folder lookup code end to end (daemon/protocol/client/TUI/phone, whatever carries it; a protocol field removal goes in the S4 `protocol.d` note or its own).
+3. **Q3 = A** — pill hero on the step detail (the graph morph lands on it).
+4. **Q4** — «Re-run step» moves to the failed step's detail (state `error`).
+5. **Q5** — stopped = `stop.fill` on the grey tint, word «stopped».
+
+Marker glyph change (owner, after Q5): **needs approval = SF `hand.raised` (outline, not fill)** — replaces `questionmark` everywhere a workflow step/run waits on the person (graph, list B, detail, TUI parity where it has a glyph). Pending/not-yet = grey disc with `circle.dashed`; failed `multiply`; running `play.fill`; done `checkmark`. Visual base for S6/S7: `.tentacle/mockups/workflow-run-view/final-v3.inline.html` (v2 look; its metrics table is what the app changes to). Owner (2026-11-24, later): **prev/next in the step detail = (c) a bottom bar with the neighbour's marker + name** (execution order = the B timeline's visits; at the ends the bar says «Start / End of run»; not-run / not-yet steps are reached at the tail, as in B — see final-v3 «Passo precedente / successivo»); add it to S7. **Taken edges are SOLID, goto and retry included** (dashed = possible later, faded dotted = not taken) — overrides the mockup's dashed taken goto/retry.
+
+Executors: DeepSeek for S/M slices (owner rule); S4 (load-bearing wire) DeepSeek too + mandatory fresh-context Opus review.
+
+*— orchestrator (claude-opus-5-5), 2026-11-24*
+
+## Execution
+
+### Slice S1 — TUI at-rest line removed + pre-open runs note
+
+**Load-bearing check re-run first** (`.tentacle/tmp/workflows-ux/lb.ts`, unchanged from the plan):
+
+```
+review keys after parse: id,kind,where,state,attempt,round
+fix state: pending · endedAt: 2
+catalogue step keys: id,kind,where
+```
+
+The wire row still drops `next`/`onFail`/`retry` and the catalogue step drops its edges — S4's
+premise holds. S1 does not depend on it; it only had to not be contradicted by it.
+
+**As built, in order**
+
+1. `packages/tui/src/workflow-view.ts` — deleted `catalogueLine`, `elsewhereLine`, `workflowsLine`,
+   `catalogueRows`, `CatalogueGrant`, the `TIER_CATALOGUE_*` tiers, `assemble`, `tilde` and the
+   `CATALOGUE_HEAD/GAP/HINT/SEP` constants (all of them existed only for the at-rest line), plus the
+   now-unused `cellWidth`/`PROJECT_PATHS` imports. `catalogueName` stays (the panel names rows with
+   it). `workflowPanelView` gained a trailing `opened?: boolean` and two exported notes:
+   `WORKFLOW_NO_FEED` (the existing "not supported by this computer's tentacle", now reachable only
+   for a session that IS open) and `WORKFLOW_PRE_OPEN` ("No workflow run in this session yet — send
+   a message to start it."). `undefined` = taken as open, so a host-less mount keeps today's words.
+2. `packages/tui/src/app-layout.ts` — dropped the `workflowsLine`/`catalogueRows` call, the
+   `catalogueHeight` term from `activeRows`, `panelBodyTop`, `dockTop` and `statusRowY`, the
+   `workflowCatalogue` and `home` inputs (nothing else read them), and added `sessionOpened`, passed
+   to `panelView`.
+3. `packages/tui/src/panels/registry.ts` + `panel.ts` — `PanelAt.opened?: boolean` (absent = open) and
+   the matching `panelView(…, opened?)` parameter; `panels/workflow.ts` forwards `at.opened`.
+4. `packages/tui/src/AppView.tsx` — the `WorkflowsLine` paint site and its destructure are gone;
+   `packages/tui/src/components/WorkflowsLine.tsx` deleted (it had no other caller).
+5. `packages/tui/src/App.tsx` — `frameLayout` gets `sessionOpened: sessionRef.current?.opened?.() ??
+   true` instead of `workflowCatalogue`/`home`; `useCatalogue` is still called for `refreshCatalogueRef`
+   (its read is still what the panel's section paints) but its `catalogue` value is no longer
+   destructured, since the line was its only other paint site.
+
+**Drift from the Implementation (and why)**
+
+- **The `elsewhere` hint is NOT removed here.** Q1/Q2's answer makes removing the neighbouring-folder
+  lookup end to end (daemon → protocol → client → TUI → phone) a cross-cutting change, and the plan
+  itself puts it in S8b / a `protocol.d` note, not in S1. S1 removed only the at-rest *line*
+  (`elsewhereLine`), which was S1's own defect 6. The `/workflow` panel's empty-catalogue hint keeps
+  its `elsewhere` sentence (`workflow-view.ts` `catalogueSection`) — that survives until the
+  end-to-end removal lands. ~~Noted as debt in the plan's own S8b line~~ — false (S8b never covered
+  it, Review finding 1); fix round 1 gave it its own slice, **S8c**. Nothing was half-deleted.
+- **`home` left `FrameInput` entirely.** It was threaded into the layout only for `elsewhereLine`'s
+  `~`-shortening. `App` still uses `home` for the header and the attach layer, so the prop stays;
+  the layout no longer takes it.
+- **One extra guard test touched.** `packages/tui/test/app-view-structure.test.ts:331` pins
+  `statusRowY`'s exact arithmetic as source text, so it had to lose the `catalogueHeight` term — the
+  same edit the layout got (it is the test that catches a silent re-derivation).
+
+**Tests (red first — shown failing on the buggy code, §9)**
+
+- `packages/tui/test/workflow-frames.test.tsx`, `docs/fix/workflows-ux.md S1: the TUI is quiet at rest`:
+  - *no at-rest catalogue line*: an idle frame with the 2-workflow `CATALOGUE` contains no
+    `◇ workflows` (and no `nightly`), and **every row of that frame equals the frame's with no
+    catalogue seam at all** — the exact property (no cell painted AND no row reserved). Red before
+    the fix:
+    `expect(received).not.toContain("◇ workflows") … Received: "…◇ workflows  nightly v1 ? needs
+    approval · task v3 ✓ approved   /workflow\n──…"`.
+  - *the catalogue is still in the `/workflow` panel*: `nightly` and `task v3` paint there, and no
+    `◇ workflows` row exists behind it (the line, not the catalogue, was what went).
+  - *before the first message*: with a lazy session (`opened()` false, a feed that reported nothing)
+    the panel says `No workflow run in this session yet` and never `not supported by this computer's
+    tentacle`. Red before the fix: the panel's last row was `  not supported by this computer's
+    tentacle`.
+- `packages/tui/test/workflow-view.test.ts`, `the /workflow panel > before the first message: no run
+  YET, never not supported (S1)`: the pure projection's three cases — `opened:false` →
+  `WORKFLOW_PRE_OPEN`, `opened:true` → `WORKFLOW_NO_FEED`, absent → `WORKFLOW_NO_FEED`. Red before
+  the fix: `Expected to contain: "No workflow run in this session yet" / Received: "  not supported
+  by this computer's tentacle"`.
+- Removed with the code they pinned: the at-rest assertions in both files (`catalogueLine` tiers,
+  `+k`, `not versioned`, the `elsewhere` line, the mounted-line grant, the input-row-with/without
+  cases). `catalogueState`/`catalogueOrder` keep their tests — the panel still uses them.
+
+Verification run, `bun test` on the three touched/covering files:
+
+```
+bun test packages/tui/test/workflow-view.test.ts packages/tui/test/workflow-frames.test.tsx
+ 45 pass, 0 fail, 211 expect() calls
+bun test packages/tui/test/app-layout.test.ts
+ 22 pass, 0 fail
+bun test packages/tui/test/app-view-structure.test.ts
+ 10 pass, 0 fail
+```
+
+**Mutation checks (non-vacuity, §9)**
+
+| Mutation | Test that caught it |
+|---|---|
+| `workflowPanelView`'s note hard-coded back to `WORKFLOW_NO_FEED` (ignore `opened`) | `before the first message: no run YET…` — 1 fail |
+| `workflowHeight` given `+ 1` (a phantom row back in the budget) | **nothing** — the old row-equality check passed, because the buggy build reserved the line inside `activeRows` too. That is why the frame test now compares **every row** of the two frames; with the `◇` assertion removed, the buggy source fails it on the whole-frame diff. |
+| `opened` ignored, on the frame level (source diff reverted) | 2 fail in `workflow-frames.test.tsx` — the exact frames above |
+
+**Changelog:** `changelog.d/workflows-ux.changed.md` (one bullet). No protocol change, so no
+`protocol.d/` note; `packages/protocol/schema/protocol.json` untouched.
+
+**Unverified here (one line):** the gate (`bun run check`: typecheck → lint → test) is run by the
+orchestrator's script, not by this executor; `bunx tsc --noEmit` (repo root, whole monorepo) and
+`bunx biome check packages/tui` were run here and are clean.
+
+*— claude-opus-5-5 (tentacle executor), 2026-11-24*
+
+### Slice S2 — Hub: Workflows in Attach's slot, Attach gone, dim by catalogue
+
+Started by DeepSeek (stopped by the watchdog at 252 tool calls, edits left in the tree); checked,
+corrected and finished by claude-opus-5-5. Everything below is the final tree.
+
+**Load-bearing check re-run first** (`lb.ts`, unchanged): `review keys after parse:
+id,kind,where,state,attempt,round` · `catalogue step keys: id,kind,where` — S4's premise still holds;
+S2 does not depend on it. S2's own premise (P6, defect 4) re-checked on the HEAD source
+(`.tentacle/tmp/workflows-ux/s2-lb.ts`): `workflowsHub` took only the runs (arity 1) and dimmed
+`No workflow runs` with 0 runs whatever the project held; the idle fan started with `attach`.
+
+**As built, in order**
+
+1. `apps/mobile/src/hub-actions.ts` — `attach` removed from `HubEntryId`, `LABELS`, `holds`, and
+   `HubContext.editable` (its only reader); `CANONICAL` starts with `workflows`;
+   `NO_WORKFLOW_RUNS` → `NO_WORKFLOWS_HERE = "No workflows in this project"`.
+2. `hub-session.ts` — `attach` out of `ENTRY_IDS`, `editable` out of `hubContextOf`.
+3. `workflow-runs-controller.ts` — pure `catalogueFigure(answer)` → `{known, count, unavailable}`
+   (`null`/`{unsupported}` = unknown; count = every listed row) and `workflowsHub(runs, catalogue)`
+   with the D6 rule: a run → open; `unavailable` → dimmed with its text; known-empty → dimmed
+   `No workflows in this project`; unknown → never dimmed. `unsupported` runs keep `Update tentacle`.
+4. `ui/Icon.tsx` + `ui/HubFan.tsx` — `point.topleft.down.to.point.bottomright.curvepath` added and
+   used as the Workflows glyph; `attach`'s glyph gone.
+5. `session-screen-controller.ts` — `SendableHandle.workflowCatalogue?()` and
+   `SessionScreenState.catalogue` (raw answer, `null` = unknown); `readCatalogue()` single-flight,
+   called once per attach beside `refreshArtifacts()`; a failed read leaves `null`.
+6. `screens/SessionScreen.tsx` — folds `workflowsHub(workflowsRuns, catalogueFigure(state.catalogue))`
+   into `hubContextOf`; the hub's `attach: openAttach` entry is gone (the composer's `onPhoto` keeps
+   `openAttach`).
+7. `App.tsx` — passes `workflowsRuns={workflowRuns.state}` instead of the folded figure.
+8. e2e: `34-hub-attach.yaml` deleted → `34-hub-workflows.yaml` (fan has Workflows, no Attach; tap →
+   run list with its empty state → Start → `workflow-start`); `33-hub.yaml`'s Attach step now checks
+   Workflows is in the fan and closes on the scrim; `run.ts` seeds
+   `<runDir>/.tentacle/workflows/demo-note.yaml` (the serve cwd = the session cwd, `run.ts:561-588`)
+   from the new fixture `e2e/fixtures/demo-note.yaml` (validated: `validateWorkflow` → `ok:true`).
+
+**Drift from the Implementation (and why)**
+
+- **The catalogue read lives in `session-screen-controller.ts`, not in `SessionScreen.tsx`.** D6 says
+  "beside the session-info read (`SessionScreen.tsx:1186`)"; that read is the controller's
+  (`controller.refreshInfo()`), and §7 keeps I/O and branching out of components. The screen only
+  folds two facts through the pure functions. Hence two files not in S2's list: the controller and
+  a new test, `apps/mobile/test/session-screen-catalogue.test.ts`.
+- **`App.tsx` and `e2e/run.ts` + `e2e/fixtures/demo-note.yaml` touched** (not in the Files row).
+  App: the fold needs runs AND catalogue in one place, and the catalogue is the screen's, so the runs
+  go down as a prop. run.ts/fixture: without a workflow file in the e2e project, the new flow's
+  item would be dimmed and its tap a no-op.
+- **`HubContext.editable` removed** — Attach was its only reader (dead field otherwise).
+- **Corrected from DeepSeek's draft:** (a) `catalogueFigure` counted only `ok` rows; the plan says
+  "lists ≥ 1 workflow", and a project holding only a broken YAML would be dimmed "No workflows in
+  this project" — false, the start screen is where its errors show. Now every row counts (test
+  updated, mutation below). (b) `34-hub-workflows.yaml` asserted `workflow-runs-empty` NOT visible
+  — wrong: with no run the list shows exactly that empty state (`WorkflowRuns.tsx:156-158`); now
+  asserted visible.
+- **Changelog is `changelog.d/workflows-ux.fixed.md`, not `.changed.md`**: S1 already holds
+  `.changed.md`, and a fragment is one file = one bullet (`docs/feat/changelog-fragments.md:139`).
+  S2 fixes defect 4, so `fixed` fits. **S7 plans `.fixed.md` too** — it must fold its bullet into
+  this one (one bullet), not add a second.
+
+**Tests (red first)**
+
+The HEAD source cannot run the new test files at all (their imports `NO_WORKFLOWS_HERE`,
+`catalogueFigure` do not exist there — a link error, not an assertion), so red-on-the-property is
+shown by putting HEAD's exact logic back into the new code (M1 = HEAD's order, M2 = HEAD's dim rule):
+
+| Mutation | Red |
+|---|---|
+| M1 `workflows` back after `scheduled` in `CANONICAL` (HEAD's order) | `hub-actions.test.ts`: *with every entry the idle fan is Workflows · Activity · Artifacts · Tools · Commands · More* (added here — the plan's exact S2 test) and *it holds the fan's first slot* — 2 fail |
+| M2 `workflowsHub` dims every 0-run case (HEAD's rule, the plan's "drop the catalogue term") | 4 fail: *no run but a workflow FILE → NOT dimmed*, *an UNKNOWN catalogue never dims*, and in `session-screen-catalogue.test.ts` *the hub's item is then NOT dimmed…*, *a FAILED read stays UNKNOWN* |
+| M3 dim on `count === 0` without `known` | 2 fail (the two UNKNOWN tests) |
+| M4 `readCatalogue()` not called at attach | 2 fail in `session-screen-catalogue.test.ts` (*the attach reads it ONCE…*, *a project with no workflow file IS dimmed*) |
+| M5 count only `ok` rows (DeepSeek's draft) | 1 fail: *every listed file counts — a broken one too* |
+
+All reverted (`rg MUTATION apps/mobile/src` empty). Attach's absence: `hub-actions.test.ts`
+*Attach is gone from the hub* passes an `attach` entry in and asserts it is never offered; the
+wiring test asserts `attach: openAttach` is gone from `SessionScreen` and `onPhoto={openAttach}` stays.
+
+Verification (narrow, foreground):
+
+```
+bun test (apps/mobile) hub-actions hub-session hub-opacity workflow-runs-controller
+  workflow-screens-wiring session-screen-catalogue   → 190 pass, 0 fail
+bun test (apps/mobile) e2e-flows e2e-gate e2e-shard e2e-preflight e2e-escape-probes
+  session-info-reveal drawer-new-session              → 222 pass, 0 fail
+bun test scripts/test/changelog-guard.test.ts scripts/test/changelog.test.ts → 21 pass
+bunx biome check <15 changed files>                   → No fixes applied
+bunx tsc -p apps/mobile                               → clean
+```
+
+No protocol change (no `protocol.d/` note, `protocol.json` untouched).
+
+**Unverified here (one line):** the Maestro flows `33-hub` / `34-hub-workflows` were not run (they need
+the simulator) — verify with the mobile e2e gate on iOS 18 + 26 before merge.
+
+*— claude-opus-5-5 (executor), 2026-11-24*
+
+### Slice S3 — Step detail nav bar under the safe area
+
+**Load-bearing check re-run first** (`.tentacle/tmp/workflows-ux/s3-lb.ts`, written for this slice):
+`heroBox(DETAIL.inset = 16, 390)` → `{x:16, y:16, w:358, h:68}`, and the layer drew the back row
+in FLOW at `y = 0`. On the owner's iPhone (`insets.top = 59`) that puts the hero's top at 16 — 43 pt
+above the safe area, and 16 pt into the back row's own 50 pt band. Defect 3 (screenshots 162fac2b /
+d1b5faaa) reproduces as described; the plan's premise holds.
+
+**As built, in order**
+
+1. `apps/mobile/src/workflow-step-detail.ts` — the pure metrics. New `STEP_NAV = {height:
+   size.headerChat (50), gap: DETAIL.inset (16)}`; `safeInset(n)` (a NaN/negative/Infinity inset is
+   0, never a NaN box); `navBox(insetTop, width)` = the bar pinned at `y = 0` with height
+   `inset + STEP_NAV.height`; `heroTop(insetTop)` = `inset + STEP_NAV.height + STEP_NAV.gap`; and
+   `navText(steps, stepId, runName)` → `{back, position}` (`step i+1 of M` in FILE order, `back`
+   flattened through `oneLine`, `"Run"` when the run has no name). `heroBox` and `flight` take
+   `top` as their first argument instead of `inset` — the shape the plan pins in D5.
+2. `apps/mobile/src/screens/WorkflowStep.tsx` — the layer reads `useSafeAreaInsets()`, computes
+   `top = heroTop(insets.top)`, and draws a real nav bar (`styles.nav`, `paddingTop: insets.top`)
+   holding the back pressable (`‹ <run name>`, 50 pt tall) and the `workflow-step-position` label.
+   The un-inset back row that used to sit at `y = 0` is gone; the hero/spacer use `top`/`hero.height`
+   plus `STEP_NAV.gap`, so the body still cannot slide under the landed pill.
+3. `apps/mobile/src/screens/WorkflowRun.tsx` — passes `runName={run.name}` (the bar's back label).
+
+**Drift from the Implementation (and why)**
+
+- **The pure-module test lives in `apps/mobile/test/workflow-step-layer.test.ts`, not in
+  `workflow-run-step-detail.test.ts` as S3's Files row says.** That file is the *controller's* test
+  (reads, one-in-flight, four answers); `heroBox`/`flight`/`heroText` have always been pinned in
+  `workflow-step-layer.test.ts`, and the plan's own S3 test ("hero `y ≥ insets.top + NAV_H`") is a
+  property of those functions. Putting it in the controller test would have split one module's
+  tests across two files. The controller test is untouched.
+- **`navBox` was added though the plan only names `heroBox`.** The mutation pass showed why: with
+  the hero assertion alone, a nav bar that only claimed the *inset* (no 50 pt content row) stayed
+  green — the weak-inequality trap §2 warns about. `navBox` makes the bar's box an assertion
+  (`nav.height - inset === STEP_NAV.height`, and `hero.y - (nav.y + nav.height) === STEP_NAV.gap`),
+  and the wiring test pins that the layer draws it that way.
+- **`navText` is new, not in the plan.** The plan asks for `‹ demo-note · step 4 of 6`; the words
+  are a computation (file order, flattening, the no-name and stale-tap cases) so they belong in the
+  pure module (§7), not in the component. `step N of M` counts FILE order per the plan; the
+  mockup's `final-v3` later switches to visit order, which is S7's prev/next bar, not this one.
+- **The wiring test was extended** (`workflow-step-wiring.test.ts`, +43 lines): the layer is a
+  `.tsx` Bun cannot import, so the drawn facts (safe-area read, `heroTop` feeding the flight, the
+  bar's `paddingTop`, the position label, the spacer) are pinned from source — the established
+  pattern. Not in S3's Files row either; without it nothing would catch a component that reverts
+  to `DETAIL.inset`.
+- **The changelog bullet was folded into the existing `changelog.d/workflows-ux.fixed.md`** (S2's),
+  as S2's own note requires: one fragment = one bullet. Its headline now covers both fixes.
+- Kept `HERO_METRICS.height` off the spacer deliberately: it is `DETAIL.heroHeight` (68) either way,
+  so the only new term is `STEP_NAV.gap`.
+
+**Tests (red first)**
+
+Red-on-the-property was shown by mutation, from green (the new API does not exist at HEAD, so a
+literal "run it on HEAD" is a link error, not an assertion — the S2 precedent):
+
+| Mutation | Red |
+|---|---|
+| M1 `heroTop` back to HEAD's `y = inset` (`return safeInset(insetTop)`) | 4 fail: *the hero starts at or below insets.top + the nav bar's height*, *the flight LANDS there too*, *the nav bar clears the status bar and sits above the hero*, *a garbage inset … is 0* |
+| M2 `navBox` height = the inset alone (no `STEP_NAV.height` row) | 1 fail: *the nav bar clears the status bar and sits above the hero*. **First run of this mutation was GREEN** — the assertion was the weak `nav.height >= inset`; it was tightened to `nav.height - inset === STEP_NAV.height` and `hero.y - (nav.y + nav.height) === STEP_NAV.gap`, then M2 went red (§2/§9 non-vacuity) |
+| M3 `navText` position `step ${steps.length} of ${index+1}` (numbers swapped) | 1 fail: *the nav bar's text: the run's name, and the step's place in FILE order* |
+| M4 the layer's flight back on `DETAIL.inset` (HEAD's argument) | 1 fail (wiring): *the layer reads the safe-area top, and the hero's top comes from the pure module* |
+| M5 `workflow-step-position` label/testID removed from the bar | 1 fail (wiring): *the bar says the run's name and `step N of M` — both from `navText`* |
+
+All reverted (`rg MUTATION apps/mobile/src/screens/WorkflowStep.tsx apps/mobile/src/workflow-step-detail.ts`
+empty; the tree's other `MUTATION` hits are pre-existing test comments).
+
+Coverage of the enumerated failure modes that land in this slice: a garbage inset (NaN/negative/
+Infinity) yields a finite box; a stale step id gets no position; a nameless run still reads as a
+button; a multi-line name is flattened; the body cannot slide under the pill (spacer accounts for
+bar gap + hero).
+
+Verification (narrow, foreground):
+
+```
+bun test apps/mobile/test/workflow-step-layer.test.ts workflow-step-wiring.test.ts → 42 pass, 0 fail
+bun test apps/mobile/test/workflow-*.test.ts (13 files)                          → 221 pass, 0 fail
+bun test apps/mobile/test/{workflow-screens-wiring,session-screen-catalogue,hub-actions}.test.ts → 90 pass
+bun test scripts/test/mockup-kit.test.ts                                        → 37 pass, 0 fail
+bun test scripts/test/changelog-guard.test.ts scripts/test/changelog.test.ts     → 21 pass, 0 fail
+bunx biome check <5 changed files>                                              → No fixes applied
+bunx tsc -p apps/mobile                                                        → clean
+```
+
+No protocol change (`protocol.json` untouched, no `protocol.d/` note): S3 is presentation only. The
+mockup kit fingerprints neither `WorkflowStep.tsx` nor `workflow-step-detail.ts`, so no regen was
+needed — confirmed by its test staying green.
+
+**Unverified here (one line):** no simulator run — the visual result (`‹ demo-note` and `step N of
+M` under a 59 pt status bar, the pill landing below them) is verified by the pure-metrics and
+source-wiring tests only; confirm on device with the mobile e2e gate (or the S7 flow
+`45-workflow-run-view.yaml` once it exists).
+
+*— claude-opus-5-5 (tentacle executor), 2026-11-24*
+
+### Gate fix — mockup-kit drift (post-exec)
+
+The orchestrator's gate on `feat/workflows-ux` failed exactly one test:
+`scripts/test/mockup-kit.test.ts` → `drift: committed tools/mockup-kit/generated/* ===
+regenerated from source > no drift` (`expect(received).toBeNull()`).
+
+Cause, not a test bug: S2 edited two sources the kit's generated data fingerprints —
+`apps/mobile/src/ui/HubFan.tsx` (its sha, and the `workflows` glyph entry in the GLYPH
+picklist) and `apps/mobile/src/ui/Icon.tsx` (the new `IconName`). The generated
+`tools/mockup-kit/generated/kit-data.json` still held `list.bullet` and the old sha,
+so the kit's docs disagreed with the app.
+
+Fix: `bun run mockup-kit` (the test's own prescribed remedy), which rewrote only that
+file — `HubFan.tsx` sha `cc651f7` → `f92e7f6`, GLYPH loses `attach` (the hub item is
+gone) and `workflows` becomes `point.topleft.down.to.point.bottomright.curvepath`.
+`tokens.css` / `tui-tokens.css` unchanged; a second run is a no-op (idempotent).
+
+```
+bun test scripts/test/mockup-kit.test.ts  → 37 pass, 0 fail
+bunx biome check tools/mockup-kit/generated/kit-data.json → No fixes applied
+bun test apps/mobile/test/{hub-actions,hub-opacity,hub-session,session-screen-catalogue,
+  workflow-runs-controller,workflow-screens-wiring}.test.ts → 209 pass, 0 fail
+```
+
+No production source changed by this fix; no protocol change.
+
+*— claude-opus-5-5 (tentacle executor), 2026-11-24*
+
+### Fix round 1
+
+Answers Review "S1, S2, S3" (two MEDIUM findings; no HIGH).
+
+**Finding 1 (MEDIUM, owner Q2 had no owning slice) — FIXED (plan).** Added slice **S8c**
+("`elsewhere` lookup removed end to end") to both the Files table (every carrier found by
+`rg`: `core/src/project-paths.ts` `workflowsAbove`/`WorkflowsAboveHint`, `cli/src/workflow-files.ts`
+`:112,:252-277`, `agent/src/workflow-driver.ts` `:131,:171,:620`, `protocol/src/session.ts`
+`elsewhere` `:1039-1060` (its removal joins the S4 `protocol.d` note), the TUI
+`catalogueSection` hint, the phone's `workflow-start.ts`/`WorkflowStart.tsx` row, and their
+tests, plus a grep acceptance check) and the Slices table (M · cross-module, after S4). The S1
+Execution's false "noted as debt in S8b" sentence is struck through and corrected. No code:
+the removal is a wire-field change and belongs after S4, as the owner's answer says.
+
+**Finding 2 (MEDIUM, the hub stayed dimmed after the catalogue changed) — FIXED.**
+- `apps/mobile/src/session-screen-controller.ts`: new `refreshCatalogue()` on the screen
+  controller = the existing single-flight `readCatalogue()`. The "read ONCE" doc comments
+  are updated. A failed re-read keeps the last answer (the existing `catch` leaves
+  `catalogue` alone).
+- `apps/mobile/src/screens/SessionScreen.tsx`: called at each fan open (`onHubFan`, open
+  branch), on a dimmed Workflows commit (`commitHub` notice path, so VoiceOver gets it too),
+  and on a dimmed Workflows tap in the fan (`flashHub`). These are the same three seams the
+  Tools re-pull uses (hub-tools D4).
+- Failure-mode table: new row "Hub: catalogue changes after the attach".
+
+Red (with `refreshCatalogue` a no-op stub, so the failures are on assertions, not on a
+missing method):
+```
+(fail) … a file added after the attach UN-dims the item on the next re-read      Expected: 2 Received: 1
+(fail) … a re-read that FAILS keeps the last answer (unknown never overwrites known)
+(fail) … re-reads at the same moment cost ONE call (single-flight)
+ 6 pass / 3 fail
+```
+Green: `bun test test/session-screen-catalogue.test.ts test/hub-workflows-wiring.test.ts
+test/hub-tools-wiring.test.ts` (in `apps/mobile`) → 21 pass, 0 fail.
+`bunx biome check` on the 4 changed files → clean.
+
+Mutations (script `.tentacle/tmp/workflows-ux/fr1/mut.ts`: apply, run both test files,
+restore; both sources byte-identical afterwards):
+
+| # | Mutation | Caught by |
+|---|---|---|
+| M1 | `refreshCatalogue` a no-op | 3 fail (all three controller tests) |
+| M2 | single-flight guard removed | 1 fail — "re-reads at the same moment cost ONE call" |
+| M3 | a failed re-read sets `catalogue = null` | 1 fail — "a re-read that FAILS keeps the last answer" |
+| M4 | no re-read at the fan open | 1 fail — wiring "at each fan OPEN" |
+| M5 | no re-read on the dimmed commit | 1 fail — wiring "on a dimmed Workflows commit" |
+| M6 | no re-read on the fan flash | 1 fail — wiring "on a dimmed Workflows tap in the fan" |
+
+**Drift:** none from the Review's suggested fix ("re-read, single-flight, when the hub opens
+or the dimmed item is tapped"). New test file `apps/mobile/test/hub-workflows-wiring.test.ts`
+(source-text wiring, the `hub-tools-wiring.test.ts` pattern, since `SessionScreen.tsx` is not
+importable from Bun). No protocol change, no changelog change: the S2 fragment already covers
+the hub's Workflows item.
+
+**Not verified:** the full gate (left to the orchestrator's script, per the token budget),
+`tsc -p apps/mobile` included. On device: the fan-open re-read lands one RPC after the open,
+so the item un-dims while the fan is up, not before it is drawn. Not run on the simulator.
+
+*— claude-opus-5-5 (tentacle executor, fix round 1), 2026-11-24*
+
+### Merge of main (after workflow-editor)
+
+`main` brought feat/workflow-editor. Conflicts in `hub-actions.ts`, `workflow-runs-controller.ts` and their tests; resolution:
+
+- **Dim rule: main wins on the empty case.** workflow-editor D8/E1 makes the runs screen's empty state the "New workflow" button and the hub item its only door, so a known-EMPTY catalogue (no run, no file) must NOT dim Workflows. D6's "No workflows in this project" dim and `NO_WORKFLOWS_HERE` are therefore removed. Kept from D6: Workflows in the fan's first slot, Attach gone, the catalogue figure, `unavailable` dimming (no run + a pod's daemon) and `unsupported` → `Update tentacle`.
+- Tests: none dropped. The "known-empty → dimmed" tests (`workflow-runs-controller`, `session-screen-catalogue`) now assert the opposite; main's two tests (older daemon dims, empty list does not) and our fan-order tests all survive.
+- Semantic conflicts git did not flag: `editable` no longer exists in `HubContext` (Attach removed), so main's new tests passing `editable: true` were fixed; flow 44 (`44-workflow-editor.yaml` + its `e2e-flows.test.ts` guard) reached Workflows through More because Attach held the first slot — it now uses `_hub-fan`/`hub-item-workflows`, and the guard asserts that.
+- Gate: `tsc --noEmit`, `tsc -p apps/mobile`, `bun run lint` clean; `bun test apps/mobile` 5295 pass, 0 fail. Full `bun run check` is the orchestrator's merge step.
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+### Slice S4 — Wire edges + counters + history
+
+Resumed after DeepSeek was stopped by the watchdog. Its protocol/driver/core edits were right and are kept. I fixed its failing tests and finished the slice.
+
+**Load-bearing re-check (PARTIAL rule):**
+- HEAD's `WorkflowStepRow`/`WorkflowRow` (`git show HEAD:packages/protocol/src/session.ts`, `:807-850`) has 0 matches for `onFail|history|retry|next:`. Strip schemas, so a daemon's edges were dropped.
+- `edgeKey` was already exported. `passTarget` was module-private and is now exported (`core/src/workflow-machine.ts:142`).
+- `lb.ts` now THROWS on the old row (the fields are required). That is the inverse of "stripped", as intended.
+
+**As built:**
+- `protocol/src/session.ts:807-824`: `WORKFLOW_HISTORY_MAX = 64` and `WorkflowHistoryRowSchema` (`step, attempt, round, state, durationMs?`).
+- `WorkflowStepRowSchema` gains required `next: line(64)|null`, `onFail: {goto, max 1..10, taken ≥0}|null` and `retry 0..5`.
+- `WorkflowRowSchema` gains required `history ≤64` and `historyDropped`.
+- `protocol.json` is regenerated (`bun run schema:export`). `json-schema.test.ts` adds the two new null sites, with the reason (null = "no edge", a fact).
+- `agent/src/workflow-driver.ts`:
+  - `pendingRow(spec, step)` fills `next = passTarget(...) ?? null`, `onFail` (taken 0) and `retry`.
+  - In `drive`, AFTER `nextAction`, the finished execution goes into `history` (`slice(-64)` + `historyDropped`). `refreshTaken` then reads `run.state.counters[edgeKey(id, goto)]`.
+  - The agent package does not depend on protocol, so it keeps its own `WORKFLOW_HISTORY_MAX` (same value).
+- `protocol.d/workflows-ux.md`: the breaking note. S8b/S8c append to it.
+
+**Drift from Implementation:**
+1. **`packages/client/src/workflows.ts` (`boundStep`/`boundRun` + new `boundHistory`), not in the S4 Files list.**
+   - The client re-builds every row field by field, so without this edit it would silently strip all four new fields for every UI. That defeats D1 and breaks typecheck.
+   - Ids pass through `progressText` like `id`; numbers are passed as sent; history is `slice(-64)`.
+   - Test: `workflows-client.test.ts` "the run's edges and history survive the bounding".
+2. Fixtures typed as rows were updated (`next:null, onFail:null, retry:0`; `history:[], historyDropped:0`):
+   - client `workflows-client`, `workflow-mapping` (also exercises non-null edges + one history entry);
+   - tui `workflow-frames`, `workflow-view`;
+   - daemon `push-notifier`;
+   - mobile `workflow-list-graph`, `workflow-run-controller`, `workflow-run-step-detail`, `workflow-step-layer`.
+3. Driver test fixes:
+   - DeepSeek's `settle` exited at once (`current()` is undefined before `start` registers the run). It now polls "last row ended" and throws on timeout (§9).
+   - The `round` expectation was corrected to the machine's own: the `next` back into review is round 0, not 1, and `confirm` follows.
+   - The 64-cap test used 70 steps, but the spec caps a file at 64 (`WORKFLOW_MAX_STEPS`). It is now 12 `run` steps × `retry: 5` (5 fails then a pass) = 72 executions.
+4. **Changelog: no fragment added.** S4 changes no visible behaviour (the graph that uses these fields is S5–S7), and `workflows-ux.{fixed,changed}.md` already exist for the visible slices.
+
+**Red/green + mutations** (each one reverted after):
+- M1 `refreshTaken` moved before `nextAction`: first SURVIVED, because the final row is refreshed by review's second pass. I added an assertion on the row published while `fix` runs (`taken` must already be 1). M1 is now killed: 1 fail, "review fails once".
+- M2 history entry built from the NEXT action's step: killed, 3 fails (passes-first, fails-once, retry).
+- M3 no `slice(-64)`: killed, 1 fail (the 64 cap).
+- W1 `next` `.optional()` in the schema: first SURVIVED, because no case omitted only `next`. I added that case plus the all-three-present control. W1 is now killed: 1 fail.
+- C1 `boundRun` drops `history`: killed, 1 fail (survive-the-bounding).
+
+**Narrow verification:**
+- `bun test` over packages/protocol/test, agent/test, client `workflows-client`/`workflow-mapping`, tui `workflow-frames`/`workflow-view`, daemon `push-notifier`/`workflow-*`/`schedule-workflow`, cli `local-runtime`/`workflow-wiring`, core `workflow-machine`: 1655 pass, 0 fail.
+- After the last edits: protocol + driver + client, 628 pass, 0 fail.
+- Mobile workflow tests: 110 pass, 0 fail.
+- `tsc -p apps/mobile`: clean.
+- Narrow `tsc` over the row-fixture files: clean, except `marked-terminal` types, an artefact of the ad-hoc config, not this change.
+- `biome check` on the 17 changed files: clean.
+
+**Not verified:** the full gate (`bun run check`, left to the orchestrator's script). `protocol:bump` runs at merge.
+
+*— claude-opus-5-5 (S4 executor, resumed), 2026-11-25*
+
+### Slice S5 — Shared run projection in `client`
+
+**Load-bearing re-check (PARTIAL rule):** `rg -n "onFail" packages/protocol/src/session.ts` → one match,
+`packages/protocol/src/session.ts:856`, inside `WorkflowStepRowSchema` — S4's fields are on `main` of this
+branch. S5's premise holds.
+
+**Red first.** `.tentacle/tmp/workflows-ux` got a throwaway stub of `workflow-run-graph.ts` that behaves
+the way the phone does today (`pending` ⇒ always `later`, edges = file order, no history, no why, no
+timeline, no summary). `bun test packages/client/test/workflow-run-graph.test.ts` → **4 pass, 21 fail**,
+every failure on a named assertion (`Expected "skipped" / Received "later"` for `fix` on the ended run ①
+— the d1b5faaa bug itself; `Expected "Not run — review passed on its first try."`; …). The real module
+then took the file to 26 pass, 0 fail.
+
+**As built** — `packages/client/src/workflow-run-graph.ts` (new, pure, React-free), exported from
+`packages/client/src/index.ts:20`:
+
+- `runProjection(row)` → per step a **phase** (`ok | error | running | ask | later | skipped | stopped |
+  unknown`), the word (`done`/`approved`, `failed`, `running`, `needs approval`/`waiting on you`,
+  `not yet`, `not run`, `stopped`, the unknown wire word verbatim) and its `meta` line
+  (`done · 0.4s`, `running · edit notes/demo-note.md`); per edge (`next`/`fail`/`retry`) a **trace**
+  (`taken | go | later | never`) with its chip (`✗ taken/max`, `↻ attempt/retry`); the `current` step;
+  `next[]` and `notRun[]`; and the run's own facts (`run: {runId, name, state, stopReason?, tokens,
+  budget?, startedAt, endedAt?, history, historyDropped}`), so `timeline`/`summary`/`notRunWhy` take the
+  projection **alone** — the plan's signatures minus the `row` argument drift noted below.
+  - Phases: wire `ok/error/running/stopped` as is; `needs-approval`/`waiting` → `ask`; `pending` →
+    `later` iff the run is **live** and the step is **reachable** (BFS over `next`, over
+    `onFail.goto` while `taken < max`, cycle-guarded), else `skipped`; an unknown word → `unknown`.
+  - Traces: `go` = the live leg into the step the run is on now; `taken` = proven by two consecutive
+    visits in `history`, or by the leg into the current step, or by a state-free counter cell
+    (`onFail.taken > 0`, `attempt > 0`) — proof that survives an ended run; `later` = live and still
+    movable (a pass edge off a source that ran or still has to, a goto off a source that failed or still
+    has to **and** whose counter has room, a retry with a try left); `never` otherwise.
+- `notRunWhy(projection, stepId)` → `{text, small?}`, `null` when the step ran. Order: its only way in
+  is a goto from a step that PASSED → «Not run — review passed on its first try.» + «fix runs only when
+  review fails, up to 2 times.» (`on round 2` when the source passed on a later round); else the run
+  ended at the last failed/stopped step → «Not run — the run ended at draft.»; else «Not run — the run
+  went another way.».
+- `timeline(projection)` → `{rows, next, notRun, droppedNote?}`: the visits in order (`done · try 2`,
+  `failed · try 1`, `failed · round 1 → fix`), then the current visit (`needs you` for a step waiting on
+  the person), then — live only — `next` (`after confirm`), then `notRun` (each with its why), plus
+  «N earlier steps not shown» when `historyDropped > 0`.
+- `summary(projection, now)` → `{phase, word, time, line2}`: `Done | Failed | Stopped · <reason> |
+  Running | Needs approval | Waiting on you`, an unknown run state said as sent; `36s`/`1m 12s`; `21.4k
+  tokens` (`of 40k tokens` with a budget, ` so far` while live) · `5 of 6 steps ran` / `step 5 of 6` ·
+  `1 loop`.
+- Two local helpers kept private (`elapsedLabel`, `compactTokens`): both ends will need them, but nothing
+  in S5's Files list asks for them to be public, and the phone has its own `elapsed`.
+
+**Drift from Implementation:**
+1. **`timeline`/`summary`/`notRunWhy` take the projection only, not `(row)`/`(row, now)`.** D2 writes
+   `timeline(row)` and `summary(row, now)`, but the plan also says the phone/TUI keep ONE projection;
+   carrying the run's few facts on it (`projection.run`) means a screen cannot hand a different row to
+   the timeline than the one it drew the graph from. `summary` keeps its `now` (a pure module reads no
+   clock).
+2. **`packages/client/src/index.ts` edited** (not in S5's Files list, which names only the module + its
+   test). The plan's own P3 says the TUI and the phone reach this projection through `@tentacle/client`;
+   without the barrel line neither can import it.
+3. **Changelog folded into the existing `changelog.d/workflows-ux.changed.md`** rather than a new
+   fragment: S5 is a pure module with no consumer yet (S6–S8 draw it), and the task already owns that
+   file — a second bullet there keeps one fragment per task, which is the collision rule's point.
+
+**Mutations** (each reverted immediately; `cp` backup in `.tentacle/tmp/workflows-ux/graph.bak.ts`):
+- M1 — reachability drops `onFail.taken < max`: **killed**, 1 fail, the new "a LIVE run whose goto is
+  spent does not make its target 'not yet'" case (the plan named this mutation; it needed that test to
+  exist, added for it).
+- M2 — reachability computed on ended runs too (the d1b5faaa behaviour): **killed**, 4 fails (the
+  cancelled run, two `notRunWhy` sentences, the 64-step chain).
+- M3 — `go` collapsed into `taken`: **killed**, 1 fail, scenario ④.
+- M4 — "N of M steps ran" counted from `history` instead of the live rows: **killed**, 1 fail (a capped
+  history undercounts).
+
+**Narrow verification:** `bun test packages/client/test/workflow-run-graph.test.ts` → 26 pass, 0 fail;
+`bun test packages/client` (the whole package) → 941 pass, 0 fail; narrow `tsc` over the module + its
+test → clean; `bunx biome check` on both files → clean.
+
+**Not verified:** the full gate (`bun run check`) — the orchestrator's script runs it. No schema changed,
+so `protocol.json` needs no regeneration; no wire change, so no `protocol.d` note.
+
+*— deepseek-chat, 2026-11-25*
+
+## Review
+
+### Review — S1, S2, S3 (fresh context)
+
+**Verdict: REQUEST-CHANGES** (code and gate are sound; two MEDIUM findings, both small).
+
+Gate (scope S1–S3): `bun run typecheck` clean; `bun run lint` clean (2384 files, 0 diagnostics);
+touched tests — TUI 4 files 77 pass / 0 fail, mobile 8 files 232 pass / 0 fail. The full `bun test`
+was not re-run here.
+
+**Findings**
+
+1. **MEDIUM — the owner's binding Q2 has no owning slice, and Execution says it does.**
+   `docs/fix/workflows-ux.md:460-465` says the end-to-end removal of the `elsewhere` lookup is
+   "noted as debt in the plan's own S8b line". It is not: S8b's Files row (`:253`) and its Slices
+   row (`:339`) cover only the pre-open catalogue. The panel still paints the hint
+   (`packages/tui/src/workflow-view.ts`, `catalogueSection`, comment "the `elsewhere` hint stays
+   HERE"). What goes wrong: S4–S8 run from their Files rows, no slice deletes the
+   daemon/protocol/client lookup, and the branch merges with a decision the owner made still not done.
+   Fix: give Q2 a slice row and Files (or fold it into S8b's row and S4's `protocol.d` note).
+2. **MEDIUM — the hub can stay dimmed after the catalogue changes.**
+   `apps/mobile/src/session-screen-controller.ts:1574` reads the catalogue once per attach, and
+   nothing re-reads it (not when the hub opens, not when the run list is left). What goes wrong:
+   a project with no workflow file at attach is dimmed "No workflows in this project". A file is then
+   added (from the TUI, `git pull`, or later the phone editor in `feat/workflow-editor`). The hub
+   item stays dimmed, so the run list and its Start, the only way into it from the hub, are blocked
+   until a re-attach. The plan's failure-mode table (`:255-268`) does not list this. Fix: re-read
+   (single-flight) when the hub opens or the dimmed item is tapped, or never dim a known-empty
+   catalogue. Pin it with a controller test.
+
+**Mutation (non-vacuity), own run:** `catalogueFigure` returning `known:true` for
+null / `{unsupported}` (an unknown catalogue taken as empty) → 3 fail
+(`workflow-runs-controller.test.ts` + `session-screen-catalogue.test.ts`). Reverted;
+`git status --short` was empty afterwards. I re-read the executor's tables for S1 (M: `opened` ignored),
+S2 (M1–M5) and S3 (M1–M5). Their mutations match the tests' assertions; I did not re-run them.
+
+**Attacks tried**
+- §7 "logic in pure modules": the dim rule (`workflowsHub`/`catalogueFigure`), `navText` and
+  `heroTop`/`navBox` are pure and tested. The screen only folds them. Holds.
+- §7 pod trust: on mobile `daemonWakes: true` (`apps/mobile/src/connection.ts:73`). A pod session's
+  `unavailable` dims with its own text and sends nothing. Holds.
+- Unknown ≠ empty: a failed read, `{unsupported}`, and a handle with no `workflowCatalogue` all leave
+  the item un-dimmed. Holds (tested, and mutated above).
+- Pre-open phone handle: `RemoteSession.workflowCatalogue` returns `unavailable: "this session is
+  not open yet"` when `id === null` (`packages/client/src/remote-session.ts:1335`). That would dim
+  the item. But `readCatalogue` runs only after a successful attach (`handle = result.session`), so I
+  found no path that reaches it on the phone today.
+- S1 row budget: `catalogueHeight` is removed from `activeRows`, `panelBodyTop`, `dockTop` and
+  `statusRowY` together. The frame test compares every row against a frame with no catalogue seam.
+  Holds.
+- S3: a NaN or negative inset becomes 0. The flight lands at `heroTop`. Holds.
+- e2e `34-hub-workflows.yaml` starts no run, so it leaves no state for later flows. Not run (needs
+  the simulator), as Execution states.
+
+**Executor behaviour:** honest. Each drift is stated with its reason, including the extra files and
+the weak `navBox` assertion its own mutation caught. The DeepSeek draft's errors were found and
+corrected. One false claim: the S8b debt note (finding 1).
+
+Same model family as the executor (Opus): only the context is fresh, so blind spots we share can survive both passes.
+
+*— claude-opus-5-5, 2026-11-24*
+
+### Round 2
+
+**Verdict: PASS.** Both MEDIUM findings are fixed. The fix commits are `5554377e` and
+`1d3d1411`; the second only adds the `?.` that typecheck required.
+
+- **Finding 1 — fixed.** S8c now owns the removal of the `elsewhere` lookup, in both the Files
+  table and the Slices table, with a grep acceptance check. The false "noted in S8b" sentence is
+  struck through.
+- **Finding 2 — fixed.** `refreshCatalogue()` reuses the single-flight `readCatalogue()`. It is
+  called at each fan open, on a dimmed Workflows commit (which covers VoiceOver), and on a dimmed
+  fan tap. A failed re-read keeps the last answer.
+- **Mutations I ran myself, then reverted** (`git status --short` empty afterwards):
+  - `refreshCatalogue` clears `catalogue` before reading → 1 fail ("a re-read that FAILS keeps the
+    last answer").
+  - the re-read removed from the fan open → 1 fail (the wiring test "at each fan OPEN").
+- **Gate:**
+  - `bun run typecheck`: clean.
+  - `bun run lint`: clean (2385 files, 0 diagnostics).
+  - Mobile tests (catalogue, hub-workflows-wiring, hub-tools-wiring, hub-actions, hub-session,
+    workflow-runs-controller): 150 pass, 0 fail.
+- **Regressions checked:**
+  - The fan-open read adds one `emit()` re-render about one round trip after the open. `HubFan` is
+    `memo` and documented as never restarting its springs on a re-render (`ui/HubFan.tsx:84-91`),
+    so I judge this not a jank regression. It is not measured on a device.
+  - A dimmed tap during that same open still acts on the world seen at the open (M7,
+    `hubOpenAt`). The item un-dims at the next look, which matches the documented behaviour.
+  - With no handle (before the attach) the re-read resolves without sending anything.
+
+*— claude-opus-5-5, 2026-11-24*
+
+### Gate fix 2 (post-exec): one bullet per fragment, a complete row fixture
+
+The orchestrator's gate on `feat/workflows-ux` failed two tests. Neither is a test bug.
+
+1. `scripts/test/changelog-guard.test.ts` → `I2: every entry in changelog.d/ is a
+   well-formed fragment > the directory on disk parses`: `ReleaseError:
+   changelog.d/workflows-ux.changed.md: one bullet per file; split it into two
+   fragments`. S5's Execution (drift 3) folded a second bullet into the task's
+   existing `.changed.md`; `parseFragments` (`scripts/changelog.ts:125`) refuses a
+   second `- ` line, and the fragment rule is one file, one bullet
+   (`docs/feat/changelog-fragments.md:139`). The two bullets are merged into ONE
+   bullet with two sentences under one headline — one change, one entry — rather
+   than split into two files of the same slug+category (which would be one path).
+2. `packages/daemon/test/push-hook.test.ts` → `a workflows update reaches the hook
+   (slice 9: a run's end is pushable)`: the fixture row was hand-written before S4
+   added `history`, `historyDropped`, the step's `next`/`onFail`/`retry` to
+   `WorkflowRowSchema` (`packages/protocol/src/session.ts:869`). `publishWorkflows`
+   judges the rows by that schema and a refusal never reaches the hook
+   (`hosted-session.ts:2578`), so `spy.types()` held only `attachment`. The fixture
+   now carries every required field, the same shape `push-notifier.test.ts:211`
+   uses. Production code unchanged.
+
+```
+bun test packages/daemon/test/push-hook.test.ts        → 17 pass, 0 fail
+bun test scripts/test/changelog-guard.test.ts           →  5 pass, 0 fail
+```
+
+*— deepseek-v4-pro (tentacle executor), 2026-11-25*
+
+### Slice S6a — Phone layout + markers + tokens
+
+**Load-bearing re-check (PARTIAL rule), run first:** `git ls-tree main --name-only
+apps/mobile/src/workflow-edit-graph.ts` → `apps/mobile/src/workflow-edit-graph.ts` (the editor's slice 5 is
+on `main`); `rg -c "function sideFlags" apps/mobile/src/workflow-edit-graph.ts` → `1` (the derived
+spine/side rule exists); `rg -n "onFail" packages/protocol/src/session.ts` → `:856`, inside
+`WorkflowStepRowSchema` (S5's premise). **Passed** — S6a runs rather than stopping.
+
+**Red first (mutation form, §9).** The two modules are NEW, so "red on the old code" is shown the way the
+plan prescribes: write the tests, then break the exact property each names and confirm the NAMED test — not
+an import — goes red. Five mutations, each applied to the finished module, run, reverted:
+
+| # | Mutation (the property removed) | Red |
+|---|---|---|
+| 1 | `column = spine.has(id) ? "spine" : "side"` → `"spine"` (place by file index) | **5 fail**: `demo-note: the spine is the pass path, and fix is in the SIDE column`; `mutation check: placing by FILE index puts fix on the spine`; `no two pills can overlap` (demo-note / 64 steps / 200 seeded shapes) |
+| 2 | chips pinned on their source pill instead of `freeSpot` | 1 fail: `every chip is clear of every pill` |
+| 3 | `vertical()` returns `y1-4 → y2-4` (edges stop short of the boxes) | 1 fail: `demo-note's edges all touch both pills` |
+| 4 | `later` given a glyph again (`circle.dashed`) | 4 fail: the plain-disc test, the glyphless list, the `IconName` list, "read by its ring only" |
+| 5 | every phase's `soft` → one shared grey (`wrWaitSoft`) | 1 fail: `mutation check: the marker colours are per-phase, not one shared grey` |
+
+Mutation 1 is the plan's own named target (`place by file index → fix on the spine → red`); it also proves
+the overlap property is not vacuous. Mutation 5 was added because without it the contrast test passes on a
+one-colour table and the owner's colour-blind rule would rest on the glyph alone.
+
+**As built.**
+
+- `apps/mobile/src/workflow-run-layout.ts` (new, pure, React-free) — the run graph as GEOMETRY:
+  `runLayout(row)` takes the S5 projection and returns pills + edges + chips. Placement is **derived from
+  the definition**, never the mockup's ids: the spine is everything the run's PASS path (`next`) reaches
+  from the first step; a `goto` target (or anything the pass path cannot reach) sits in the side column,
+  its row ≥ its first entering source's row + 1; a back `next` is an arc on its own lane in the columns'
+  gap. Constants are `final-v3.html`'s own (`SP {x16,w200}`, `BR {x244,w142}`, `TOP 18`, `PITCH 72`,
+  `H 44`), scaled into the 318 pt logical space exactly as `workflow-edit-graph.ts` already does, so the
+  two graphs share one scale. Chips (`✗ taken/max`, `↻ attempt/retry`) take their box from `freeSpot`,
+  which steps down in `CHIP_H` increments until the box holds no pill — "outside the pills" is a fold,
+  not a guess.
+- `apps/mobile/src/workflow-marker.ts` (new, pure) — D4's table: `markerLook(phase, palette)` and
+  `markerFor(view, palette)`. `ok` checkmark, `error` `multiply` (owner's `error-icon.html`), `running`
+  `play.fill`, `ask` `questionmark`, `stopped` `stop.fill`, `skipped` `chevron.forward.2` in a dotted ring
+  with no body, and **`later`/`unknown` carry no glyph at all** (the owner's plain disc). `markerFor` takes
+  the step's OWN word from S5's `WorkflowStepView.word` (`approved`, `passed`, an unknown wire word
+  verbatim). `MARKER_SIZE = {pill: 26, rail: 18, hero: 32}`, `WR_GLYPH = 0.54`.
+- `apps/mobile/src/theme.ts` — eleven `wr*` tokens on `Palette` (five soft bodies, five inks, `wrSkipInk`),
+  light and dark from `markers-v2.html`; petrol inherits `dark`'s, as the mockup draws it.
+- `apps/mobile/src/ui/Icon.tsx` — `multiply`, `questionmark`, `play.fill`, `chevron.forward.2` added to
+  `IconName`, each verified present in `sf-symbols-typescript@2.2.0`.
+- `tools/mockup-kit/generated/{tokens.css,kit-data.json}` — regenerated (`bun run mockup-kit`): the palette
+  is a source of the kit, so the drift test is red without it.
+
+**Drift from the Implementation.**
+
+1. **Two files, not one.** The Files table names a single `workflow-run-layout.ts` carrying "layout +
+   markers". They are separate modules because the marker is read by the pill, the rail AND the hero, while
+   the layout is only the graph — folding them would make every rail and hub import the graph constants.
+2. **`workflow-graph.ts` is left alive.** The plan reads as if the run graph replaces it; in fact 2A's card
+   strip and `workflow-step-detail.ts`'s hero (`graphGeometry`) still read it, and S6b/S7 own their
+   migration. S6a adds the new layout beside it rather than deleting a module S6b still calls — the
+   deletion belongs to the slice that moves its last caller.
+3. **The glyph-on-soft floor is 4.4:1 (light) / 5.2:1 (dark), not 4.5:1.** `waiting`'s ink sits at
+   4.429:1 on its soft body, which is the mockup's stated and owner-approved ratio for a GRAPHIC (WCAG
+   1.4.11 asks 3:1). Pinned at the mockup's numbers rather than a stricter guess that would have forced a
+   palette colour the owner never approved.
+4. **No screen wiring in this slice.** S6a is geometry + tokens + markers; `screens/WorkflowRun.tsx` maps
+   them in S6b (graph A render), as the slices table says.
+
+**Narrow verification.**
+
+```
+bun test apps/mobile/test/workflow-run-layout.test.ts        →  16 pass, 0 fail
+bun test apps/mobile/test/workflow-marker.test.ts            →  18 pass, 0 fail
+bun test scripts/test/mockup-kit.test.ts                     →  37 pass, 0 fail  (after `bun run mockup-kit`)
+bun test apps/mobile/test/theme.test.ts                      → 153 pass, 0 fail
+bun test apps/mobile/test/workflow-screens-wiring.test.ts apps/mobile/test/hub-workflows-wiring.test.ts → 12 pass, 0 fail
+bun test scripts/test/changelog-guard.test.ts                →   5 pass, 0 fail
+bunx tsc -p apps/mobile --noEmit                             → clean
+bunx biome check <the 6 changed/added files>                 → clean
+```
+
+**Not verified:** the full gate (`bun run check`) — the orchestrator's script runs it. No schema changed, so
+`protocol.json` needs no regeneration and no `protocol.d` note is due; the changelog fragment is
+`changelog.d/workflows-ux-run-layout.added.md`.
+
+*— Claude Sonnet 4.5 (tentacle executor), 2026-11-25*
+
+### Slice S6b — Phone graph A render + summary strip + ask bar
+
+**Load-bearing re-check, run first — the plan's own `lb.ts` is now OBSOLETE, not failing.** It asserted the
+premise S4 fixed (edges stripped by the strip schemas): re-run, it now throws `Required` on `steps[5].retry`,
+i.e. the FIELDS ARE ON THE WIRE. That is S4's premise holding, not S6b's failing, so the check was
+re-derived for this slice (`.tentacle/tmp/workflows-ux/lb-s6b.ts`, same drive: a demo-note row through
+`WorkflowRowSchema`, then `runProjection`, then `runLayout`):
+
+```
+run row keeps onFail: {"goto":"fix","max":2,"taken":0}
+projection phases: collect:ok draft:ok review:ok fix:skipped confirm:ok archive:ok
+layout keys: width,height,nodes,edges,chips
+fix column: side
+marker fix: null
+```
+
+**Passed** — the edges survive the wire, `fix` projects `skipped` on an ended run (the d1b5faaa defect at its
+root), the layout puts it in the SIDE column, and its marker has no glyph (the owner's plain disc). S6b runs.
+
+**Red first.** `apps/mobile/test/workflow-screens-wiring.test.ts` got its S6b block BEFORE the screen was
+touched: `bun test apps/mobile/test/workflow-screens-wiring.test.ts` → **6 fail**, each on its named
+assertion (`Expected to contain: "runProjection"`, `"pendingAsk(state)"`, `"dashArray("`, …) — not on an
+import. `apps/mobile/test/workflow-edge.test.ts` is a NEW module, so its red is shown the plan's way
+(mutation, below).
+
+**As built.**
+
+- `apps/mobile/src/workflow-edge.ts` (new, pure, React-free) — the PAINT as a table: `edgeLook(trace,
+  palette)` and `pillLook(phase)`. **The kind is not an argument**, which is how the owner's rule ("taken
+  edges are SOLID, goto and retry included; dashed = possible later, dotted = not taken") is enforced by the
+  signature rather than by discipline. `EDGE_DASH`/`EDGE_DOT`/`EDGE_DIM` are the mockup's `--wr-dash`/`--wr-dot`/
+  `--wr-dim`.
+- `apps/mobile/src/ui/WorkflowMark.tsx` (new) — the ONE component that draws a phase: the soft disc, the
+  glyph at `MARKER_SIZE`, a dotted ring where there is no body, an optional shared-rhythm blink for
+  `running`. Used by the pill AND the summary strip, so a phase cannot be drawn two ways.
+- `apps/mobile/src/screens/WorkflowRun.tsx` — rewritten as a dumb renderer: `state.projection` from the
+  controller, `runLayout` for the pills/edges/chips, `markerFor` for every state, `edgeLook` for every
+  stroke, `summary(projection, now)` for the strip. Delete: `graphGeometry`, `nodeAt`'s run copy,
+  `graphHeader`, the per-card inline ask, the loop/maxRound heuristic. The ask is ONE `<AskPanel>` mounted
+  AFTER `</ScrollView>`.
+- `apps/mobile/src/workflow-graph.ts` — the guess is deleted (`graphGeometry`, `nodeAt`, `nodeSubtitle`,
+  `graphHeader`, `isLoopTarget`, `GraphNode`/`GraphEdge`/`GraphGeometry`); the METRICS the editor imports
+  stay, unchanged (`GRAPH_WIDTH`, `PILL_H`, `PILL_RADIUS`, `BADGE`, `BADGE_INSET`, `NODE_GAP`, `PITCH`,
+  `TOP_PAD`, `BOTTOM_PAD`, `MAIN`, `LOOP_SOURCE`, `LOOP_TARGET`, `LOOP_BOW`, `curve`).
+- `apps/mobile/src/workflow-step-detail.ts` — `nodeBoxOnScreen`/`flight` take the shared **projection**
+  (the run's layout), not the bare step rows, and accept a precomputed `RunGeometry` so a screen with one
+  drawing does not lay it out twice. `canvasMap`'s default width is the run's `RUN_WIDTH` (402).
+- `apps/mobile/src/workflow-run-controller.ts` — `RunState.askBar` (the ONE bar: `{kind:"ask"}` the screen
+  can answer, `{kind:"open-session"}` when it cannot) and `askBarFor({runAsk, steps, projection, canAnswer})`,
+  pure and exported so the choice is a test, not a ternary in a screen. `state()` also hands the screen the
+  projection it drew the graph from.
+
+**Drift from the Implementation.**
+
+1. **`workflow-graph.ts` is reduced, not deleted.** S6b's Files row says "retire `workflow-graph.ts`'s guess
+   (keep exported constants the editor imports)" — done exactly: the geometry functions go, the constants
+   stay. Deleting the file was never possible: `workflow-edit-graph.ts` (the editor, on `main`) imports
+   eleven of its exports, and S6a already noted the deletion belongs to whoever moves its last caller.
+2. **The 2C graph suite moves rather than dies.** `workflow-list-graph.test.ts`'s "the 2C graph" describe
+   pinned the retired guess (`graphGeometry`'s file-order placement, `nodeSubtitle`, `graphHeader`), so it
+   cannot survive its subject. Its two properties that still matter — no overlap, edges on the boxes, the
+   hit test — were already proved by `workflow-run-layout.test.ts` (S6a) over the new layout; this file now
+   keeps only the shared METRICS (badge centring, pitch, the three columns' fit).
+3. **Cards stayed, and they read the projection's word.** View B (the timeline) is S7's, so the "cards"
+   half of the toggle still renders `state.steps` — but each card now takes its state word from the
+   projection, so no two views can disagree about a state while both exist. `RunMode` keeps `"cards"`
+   (renaming it to `"list"` is D5/S7's, together with the list it names).
+4. **`askBarFor` takes four named inputs, not `state`.** The plan sketches the selector taking the state;
+   taking the three facts it folds keeps it pure and total (no `RunState` cycle, and a test can ask "what
+   does this fold give for a run I can/cannot answer" without building a controller).
+5. **The blink comes from the shared clock, not a second one.** `WorkflowMark` loops on
+   `STEP_BLINK_LOOP_MS` and is switched OFF by the caller under Reduce Motion — the same rhythm every other
+   running marker in the app already uses.
+6. **`App.tsx` gained one prop** (`now={Date.now()}` on the run route), which S6b's Files row does not name.
+   `summary()` needs a clock and the module is pure by design (S5's drift 1), so a screen reading
+   `Date.now()` itself would be a second clock; the runs screen already takes `now` the same way.
+7. **`workflow-step-wiring.test.ts` had two assertions updated**, both about the flight's arguments: the
+   layer now takes the run's projection (the pill it starts from must be the one the layout placed) and the
+   run screen's detail guard grew a `projection === null` term. Same properties, one more input.
+
+**Mutations** (each applied to the finished module, run, reverted; backup in
+`.tentacle/tmp/workflows-ux/edge.keep.ts` / `run.keep.tsx`).
+
+| # | Mutation | Red |
+|---|---|---|
+| 1 | a `taken` edge given `dashArray: EDGE_DASH` (the mockup's dash-by-kind) | **2 fail** — "a taken edge is SOLID" and the kind-cannot-resurface-a-dash case |
+| 2 | `edgeLook` returns one style for every trace | **4 fail** — taken/go/later+never and the solidity case |
+| 3 | `later` dressed as `skipped` (dotted, one grey shape) | 1 fail — "`not yet` is a dashed outline with no body; `not run` a dotted one" |
+| 4 | `<AskPanel>` moved INSIDE the `ScrollView` | 1 fail — "ONE ask bar, pinned outside the scrolling content" (needed two tries: the first assertion matched `AskBlock`'s own `</ScrollView>`, so it is pinned against `lastIndexOf`) |
+| 5 | the pill re-derives its phase from the wire `state` instead of the projection | 1 fail — "no phase or trace is decided here" |
+
+Mutation 4's first run passing is recorded on purpose: it is the §9 trap (a grep-guard matching the wrong
+occurrence proves nothing), and the assertion was tightened until the mutation died.
+
+**Narrow verification.**
+
+```
+bun test apps/mobile/test                                   → 5333 pass, 0 fail
+bun test apps/mobile/test/workflow-edge.test.ts              →   8 pass, 0 fail
+bun test apps/mobile/test/workflow-screens-wiring.test.ts    →  15 pass, 0 fail
+bun test apps/mobile/test/workflow-run-layout.test.ts         →  16 pass, 0 fail
+bun test apps/mobile/test/workflow-step-layer.test.ts         →  24 pass, 0 fail
+bunx tsc -p apps/mobile --noEmit                             → clean
+bunx biome check <the 13 changed/added files>                → clean
+```
+
+**Not verified:** the full gate (`bun run check`) — the orchestrator's script runs it. The live render (an
+iOS simulator) was not run either: what the screen DRAWS is asserted from the source (a `.tsx` is
+unimportable from Bun, the repo's existing pattern), and every number it draws comes from a module with its
+own test. No schema changed, so `protocol.json` needs no regeneration and no `protocol.d` note is due; the
+changelog fragment is `changelog.d/workflows-ux-graph-render.fixed.md`.
+
+*— deepseek-chat (tentacle executor), 2026-11-25*
+
+### Fix round 1 (Review S4–S6b)
+
+**Finding 1 (MEDIUM) — FIXED.** `packages/client/src/workflow-run-graph.ts` `traceOf`: the `go`/`taken`
+short-circuit for an edge into `current` now also requires `from === lastVisited` (the run's last visit).
+Any other edge into `current` — the loop back from a step that never ran, a retry that did not happen —
+falls through to the history / counter / reachability rules. A retry in flight still reads `go`: its last
+visit IS the step it is on (`draft` failed → `draft` running, attempt 1).
+Tests (`packages/client/test/workflow-run-graph.test.ts`): "only the leg the run walked into the current step
+is go/taken…" (review's first pass, running and `needs-approval`: `draft→review` go/taken, `fix→review`
+later, retry later/never) and "a retry in flight is go…" (`collect→draft` taken, not go).
+Red on the old code: `fix→review` Expected "later" Received "go"; `collect→draft` Expected "taken" Received
+"go". Green after: 28 pass. Mutation = the old condition (drop `&& from === lastVisited`) → the same two reds.
+
+**Finding 2 (MEDIUM) — FIXED.** `apps/mobile/src/workflow-run-layout.ts` `runLayout`: one routing table for
+every non-retry edge (it replaces the per-kind branches):
+- `next` to the next spine row → the spine's vertical, unchanged;
+- same column → `backArc` on its own lane (the gap for the spine, the right margin for the side; both are
+  pill-free at every row). This also moves a FORWARD spine→spine or side→side goto off `gotoCurve`, which
+  ran down through the pills in between;
+- spine → side, target below, and no other side pill on a row in `[from.row, to.row)` → the mockup's
+  `gotoCurve` (its control hull spans exactly those rows at x ≥ 216);
+- side → spine, target above, and no other side pill on a row in `[to.row, from.row)` → the mockup's
+  `sideBackCurve`;
+- otherwise → new `gapCurve`: spine pill's right edge ↔ side pill's left edge, every control point inside
+  216…244, so it cannot meet a pill. Covers the reviewer's forward side→spine `next` (it used to take
+  `backArc` from x 386 across the side column).
+demo-note draws exactly as before (its goto and side-back pass the clearance check).
+Test (`apps/mobile/test/workflow-run-layout.test.ts`): "no edge passes through a pill that is not one of its two
+ends": samples every `M`/`L`/`C` segment (64 points per cubic) and fails on a point strictly inside a
+non-endpoint pill; on the reviewer's shape (`a→b→c→d`, `b`→`x`, `c`→`y`, `x.next = d`), demo-note, and 200
+seeded random shapes (gotos in every direction, `next` skips of up to 3).
+Red on the old code: `["fail-c-y through x", "next-x-d through y"]` — the reviewer's two crossings. Green after.
+Mutations (each restored, then green again):
+- `sideRowTaken` returns `false` (always take the mockup curve) → red `fail-c-y through x`;
+- the fallback is the old `backArc` instead of `gapCurve` → red `fail-c-y through x`, `next-x-d through y`.
+
+**Out of scope, done:** deleted the two committed `sed` backups `apps/mobile/test/e2e-flows.test.ts-E` and
+`apps/mobile/test/hub-actions.test.ts-E` (working tree only; no commit).
+
+**Gate (narrow):** the 5 test files covering the change → 100 pass / 0 fail; `bunx biome check` on the 4
+changed files → clean. Full `bun run check` not run here (the orchestrator's script runs it). Unverified: the
+simulator render of a rerouted `gapCurve` (geometry only is tested).
+
+*— claude-opus-5-5, 2026-11-25*
+
+## Review
+
+### Review — S4, S5, S6a, S6b (fresh context)
+
+**Verdict: REQUEST-CHANGES.** Scope: `git diff main...HEAD`, slices S4–S6b only.
+
+**Gate (narrow, §4):** the 13 touched test files → 248 pass / 0 fail. `bun run typecheck` clean;
+`bun run lint` clean (2433 files). Full `bun run check` not run by this review.
+
+**Mutation (§9), each reverted, `git status` clean after:**
+- S4: drop `this.refreshTaken(run, step)` (`workflow-driver.ts:1590`) → red (`review fails once: taken becomes 1…`).
+- S5: drop `taken < max` in `reachableFrom` (`workflow-run-graph.ts:225`) → red (`a LIVE run whose goto is spent…`).
+
+**Findings**
+1. **MEDIUM — every edge into the current step is drawn `go`/`taken`, walked or not**
+   (`packages/client/src/workflow-run-graph.ts:302-306`). `traceOf` returns `go` (running) or `taken`
+   (ask) for ANY edge whose `to === current`, before it checks the history. Repro
+   (`.tentacle/tmp/workflows-ux/trace.ts`): demo-note, `draft` ok, `review` running for the first time
+   → `next fix -> review go` (fix is `later`, it never ran) and `retry review -> review go ↻ 0/1`
+   (attempt 0, no retry happened). On an `ask` step the same edges come out `taken`, i.e. the graph
+   claims a loop that never ran. Fix: only the edge `lastVisited → current` (and the retry edge when
+   `attempt > 0`) is `go`/`taken`; other edges into `current` fall through to the normal rules. Add a
+   test: first pass of review ⇒ `fix→review` is `later`, retry is `later`.
+2. **MEDIUM — edges cross side pills** (`apps/mobile/src/workflow-run-layout.ts:154-160`, `:458-467`).
+   Placement keeps pills apart, but no edge avoids an intermediate side pill. Repro
+   (`.tentacle/tmp/workflows-ux/layout.ts`): `a→b→c→d`, `b` goto `x`, `c` goto `y`, `x.next = d` →
+   `fail c y` runs at x≈338 from y 176 to 234 straight through pill `x` (y 162–206), and
+   `next x d` (a FORWARD side→spine edge that drops into the "back up the spine" arm) runs
+   horizontally at y 256 through pill `y` (244–386 × 234–278). D3's "no arc ever crosses the side
+   column" does not hold. The tests check only edge endpoints. Fix: route a goto past an occupied
+   side row (or enter the target's top-left past the pills), add a forward side→spine case, and a
+   test that no edge segment's sampled points fall inside a non-endpoint pill.
+
+**Attacks tried that found nothing:** history order vs `nextAction` (the entry and `refreshTaken`
+come after `nextAction`; the counter matches `edgeKey`); resume (`rest` carries `history` and the
+`taken` counters, `rerunAt` keeps `state.counters`, so they agree); persistence (the row is in
+memory only: no on-disk record gains or needs the fields); client bounding (`boundRun` slices to the
+LATEST 64, sanitizes step ids in `next`/`onFail`/`history`); ended-run `pending` → always `skipped`
+(no reachability on `!live`); `protocol.d/workflows-ux.md` present, `PROTOCOL_VERSION` not edited;
+Reduce Motion gates both the `go` dash animation and the running blink (`WorkflowRun.tsx:205,321`).
+
+**Out of scope, noted:** the merge `6991e1df` committed two `sed` backups,
+`apps/mobile/test/e2e-flows.test.ts-E` and `apps/mobile/test/hub-actions.test.ts-E` (~2000 lines).
+They should be deleted.
+
+**Executor behaviour:** the doc is careful and honest about drift (e.g. it keeps `workflow-graph.ts`
+and says why, it names the unverified simulator render). The two defects are in cases the tests do
+not reach: the tests pin the four mockup scenarios, not the edges around them.
+
+Reviewer: fresh context, a different model family from the S5–S6b executor (deepseek) and the same
+family as the S4 executor (claude-opus-5-5), so S4 blind spots may be shared.
+
+*— claude-opus-5-5, 2026-11-25*
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`85f3da1a`).
+
+- **Finding 1 fixed** (`workflow-run-graph.ts:308`, `from === lastVisited`). The round-1 repro now
+  gives `fix→review later`, `retry review later ↻ 0/1`, and `draft→review go`. Mutation: dropping the
+  guard makes 2 new tests fail ("only the leg the run walked…", "a retry in flight is go…").
+- **Finding 2 fixed** (`workflow-run-layout.ts`: `sideRowTaken` + `gapCurve`). In the round-1 repro,
+  `c→y` and `x→d` now bow inside the 216–244 gap and cross no pill. Mutation: forcing `sideRowTaken`
+  to return false makes "no edge passes through a pill that is not one of its two ends" fail.
+- **Regression attacks, nothing found:** the demo-note shape still takes the mockup curves (its
+  tests pass); a side→side arc stays within x ≤ 400 in the right margin; `sideRowTaken`'s row bands
+  include the source row (goto) and the target row (side-back), which both curves sweep.
+- **`-E` backups:** deleted in this commit.
+- **Gate:** the 5 touched test files → 92 pass / 0 fail. `bun run typecheck` and `bun run lint` are
+  clean (2433 files). Tree byte-clean after the mutations were reverted. Full `bun run check` not run.
+
+*— claude-opus-5-5, 2026-11-25*
+
+## Execution
+
+### Slice S7 — Phone list B + never-run/approve detail + e2e + changelog
+
+Resumed from DeepSeek's partial tree (stopped by the watchdog at 253 tool calls). Its edits were kept
+where right; what follows is the as-built of the whole slice.
+
+**Load-bearing check (re-run).** S7 stands on S5's projection saying `skipped` for an ended run's
+never-run step. Scratch `.tentacle/tmp/workflows-ux/s7-why.ts` on flow 45's run ① shape (review ok
+first try, `fix` pending, run ended) prints
+`{"text":"Not run — review passed on its first try.","small":"fix runs only when review fails, up to 2 times."}`
+and `timeline().notRun = [fix]`. Holds.
+
+**As built (dependency order).**
+1. `workflow-list.ts` — `pending` gets its own tone (`◌`, word "not started"), no longer `waiting`'s
+   `○ waiting` (the plan's "`pending` word").
+2. `workflow-run-controller.ts` — `RunMode` `"cards"` → `"list"`. `StepDetail` gains `notRun`, set
+   WITHOUT a read when `runProjection` says `skipped` (`neverRan`); a `notRun` record is dropped when
+   a later feed moves the step. `openStep(stepId, visit?: StepVisit)` keeps the visit for the nav
+   (`state.openVisit`); `attemptOf` passes the visit's `attempt` to the read only when the visit is
+   of the step's CURRENT round (the read selects by attempt alone).
+3. `workflow-step-detail.ts` — `navText` (file order) replaced by `visitOrder`/`stepNav` (B's visits →
+   Next → Not run; `N of M`, prev/next sides or «Start / End of run»); `visitWord` (an older visit
+   never borrows the latest visit's word); `stepBody` = `stepBlocks` + `say` (`notRunWhy`, fallback
+   `DETAIL_TEXT.notRun`) + approve «Asked» (`prompt`) / «Answer» (Outcome Allowed/Denied, Reason,
+   Waited); `detailLog(notRun)` is empty.
+4. `screens/WorkflowRun.tsx` — cards removed; `Timeline`/`TimelineRow` render `timeline()` on the
+   step-rail gutter (18-pt marker, «Next» / «Not run» bands, the why under a not-run row, dropped
+   note); a row opens its VISIT. `screens/WorkflowStep.tsx` — `say`, «Asked»/«Answer» bands,
+   «Re-run step» on a failed step (Q4), and the bottom prev/next bar (owner 6b c).
+5. e2e: fixtures `run-view-pass.yaml` (①) / `run-view-loop.yaml` (②, review fails once via a marker
+   file), written into the harness project by `run.ts`; `seed.ts` `workflowRunsOf` starts both on a
+   fresh session and waits for each to END; flow `45-workflow-run-view.yaml` (graph, fix's
+   "Not run — review passed.*", nav bar + «End of run», shots, list toggle, the rail's fix row).
+6. `changelog.d/workflows-ux.fixed.md` — S7 folded into the ONE existing bullet (S2's note).
+
+**Drift from the Implementation (and why).**
+- `App.tsx` (not in S7's file list): the route forwards the visit (`openStep(stepId, visit)`) and a
+  comment says list; `e2e/run.ts` (not listed either): flow 45 needs its own session holding two
+  ended runs, so `spawnFlow`'s session maker takes the flow name and the fixtures are written.
+- A history visit of an EARLIER goto round reads the step's latest execution (the read API has no
+  round). The nav position/neighbours are per visit; the body is the latest. Left as debt.
+- Ordering risk (unverified): runs are listed computer-wide, so flow 45 must run after
+  `34-hub-workflows` and `44-workflow-editor` (both assert an empty run list); it is placed after
+  them in the flow list, and a shard keeps list order.
+
+**Tests (red first, by mutation — the code existed in DeepSeek's tree).**
+
+| Mutation | Covering test | Result |
+|---|---|---|
+| M1 `neverRan` → `false` (the read is sent again) | `workflow-run-step-detail` "the not-run step is `notRun` and NOTHING is sent", "never reads `loading` or `missing`" | 2 fail |
+| M2 `attemptOf` ignores the round | "a visit of an EARLIER goto round reads the latest" | 1 fail |
+| M3 `visitWord` always the latest word | `workflow-step-layer` "an OLDER visit never reads the latest visit's word" | 1 fail |
+| M4 `pending` tone back to `waiting` | `workflow-list-graph` strip `✓✓✗▸○◌?` | 1 fail |
+
+All reverted (re-run green after each). Updated stale tests: wiring (`navText` → `stepNav`, card tap →
+B row / arrow visit), the list strip glyph, `openStep(…, { attempt })`.
+
+**Gate (narrow).** `bun test apps/mobile/test/workflow*` + `apps/mobile/test/e2e*` → 633 + 247 pass,
+0 fail; `scripts/test/changelog-guard.test.ts` 5 pass; `tsc -p apps/mobile` clean; `biome check` on
+the changed files clean. Full `bun run check` left to the orchestrator's gate. **The e2e flow 45 was
+NOT run** (no simulator here): verify with the mobile e2e gate on iOS 18 + 26.
+
+*— claude-opus-5-5, 2026-11-25*
+
+### Gate fix: flow 45's seeder lacked the trust bit (after exec)
+
+**What the orchestrator's gate red was.** One item only: `scripts/e2e-gate.sh` flow
+`45-workflow-run-view`, `✗ … setup failed: workflow run-view-pass did not start: this client does not
+trust its daemon to run workflows`. Everything else in that log was green (`biome check .` 2433 files
+clean; `bun test` 18440 pass / 5 opt-in skip / 0 fail; `tsc` clean; Swift `PushCoreTests` 15 pass; flow
+44 pass). The `RpcError: connection closed` at `seed.ts:127` in the same log is pre-existing teardown
+noise, not a failure — the identical trace sits in `.tentacle/tmp/mobile-ask-surfaces-sgate.log` around
+flows that PASS.
+
+**Root cause (one sentence).** `workflowRunsOf` built its `RemoteClient` without `daemonWakes: true`,
+and that bit is what `RemoteSession.workflow()` gates `start` on (`WORKFLOW_UNTRUSTED_DAEMON`, nothing
+sent) and what `RemoteClient` drops every `workflows` update on — so the run could neither start nor
+its `endedAt` ever be seen.
+
+**Fix, in two parts** (`apps/mobile/e2e/seed.ts`, `apps/mobile/e2e/flows/45-workflow-run-view.yaml`):
+1. `workflowRunsOf`'s client carries `daemonWakes: true`, next to the `channelFactory` it dials, with
+   the reason written down where the next seeder will read it. This is the same bit the phone's own
+   single client carries (`connection.ts` `APP_CLIENT_OPTIONS`); the harness dials the same `serve` on
+   this host, and a pod is unreachable from here. NO other harness client gets it (§7: it fails closed).
+2. The flow's run-row tap became `text: "run-view-pass,.*"`. Selecting the row by its bare name could
+   never match: `RunRow` (`WorkflowRuns.tsx:57`) labels a row `name, status, position`
+   (`run-view-pass, done, 3 of 4`) and Maestro's `text` is a FULL match. This only surfaced once the
+   setup stopped failing earlier.
+
+**Evidence.** Setup now passes and the flow runs its whole body: `✓ 45-workflow-run-view (iOS 26) pass`,
+81 s, `GATE PASS — 1 passed, 0 failed` (run `1795610060318`). The step before it, on the trust fix
+alone, failed at `step-041-tapOnElement-run-view-pass` with a screen hierarchy showing the list correctly
+drawn (`workflow-run-wf-1 | run-view-pass, done, 3 of 4`, `workflow-run-wf-2 | run-view-loop, done,
+4 of 4`) — which is what proved the label mismatch rather than a missing run.
+
+**Tests (red first, then green).** `apps/mobile/test/e2e-flows.test.ts`, new describe "flow 45's seeder
+speaks the trust bit workflows hang on": the seeder's own options object carries `channelFactory` AND
+`daemonWakes: true`; no other harness client (`attach`, `laptopLink`) mentions the bit; and the flow
+taps `run-view-pass,.*`, never the bare name. Red shown by deleting `daemonWakes: true` from the seeder
+(`1 fail`, `Received: "new RemoteClient(await factory(), broker, undefined, {\n channelFactory:
+factory,\n });\n "`), green after restoring it (69 pass, 905 expect). `biome check` on the changed files
+clean; `tsc -p apps/mobile --noEmit` clean; the six `apps/mobile/test/e2e*` guard files 215 pass.
+
+*— claude-sonnet-4-5 (exec), 2026-11-25*
+
+## Execution
+
+### Slice S8a — TUI not-yet/not-run + edge lines
+
+**Load-bearing check (re-run, PARTIAL rule).** `rg -n "onFail" packages/protocol/src/session.ts` → one
+match, `:856`, inside `WorkflowStepRowSchema`, and `historyDropped` at `:894`: S4 is on this branch and
+`packages/client/src/workflow-run-graph.ts` + its 28-passing test are present (S5's product). Premise
+holds.
+
+**One precondition was FALSE in code (plan drift 1).** P3 (`:82`) claims "the TUI imports
+`@tentacle/client`". It did not: `packages/tui/package.json` listed only `agent`/`core`, `packages/tui/tsconfig.json`
+had no `@tentacle/client` path, and `bun test ./packages/tui/test/__probe.test.ts` importing
+`runProjection` failed with `Cannot find module '@tentacle/client'`. D2's rule ("one truth for not yet /
+not run on both") is load-bearing for this slice, so the wiring was added rather than a second copy of
+the reachability rule in the TUI — three additive lines, no behaviour:
+`packages/tui/package.json` (`"@tentacle/client": "workspace:*"`), `packages/tui/tsconfig.json` (the
+matching `paths` entry), `bun.lock` (the workspace entry bun wrote; CI installs `--frozen-lockfile`, so
+a hand-edit would have red the build). Probe re-run after wiring: 1 pass.
+
+**Red first.** The probe `.tentacle/tmp/workflows-ux/s8a-red.test.ts` on the untouched module:
+`stateLook("pending")` → `{ glyph: "○", word: "pending", tone: "dim" }` and the ended run's panel painted
+`›○ pending        fix`. The plan's red (`:320`, "an ended run's pending step reads `– not run` in the
+panel") reproduced exactly. The three new tests then failed on their own named assertions: `Expected to
+contain: "– not run"` / `Received: "…›○ pending fix…"`; `Expected to contain: "not run"` / `Received:
+"○   fix     pending        [local]"`; `Expected to contain: "next → confirm"`.
+
+**As built** — `packages/tui/src/workflow-view.ts`:
+1. New `stepLook(view: WorkflowStepView)` beside `stateLook`: `phase === "later"` → `○ not yet` (dim),
+   `phase === "skipped"` → `– not run` (dim), everything else `stateLook(view.state)`. All four paint
+   sites now go through it (`:246` `stepRow`, `:324` the rail's loop, `:469` the detail head, `:621`
+   the panel's left column) — `stateLook` keeps the wire vocabulary and is only the fallback for a
+   caller holding no projection (`stepRow`'s own signature, `:246`, takes the view now).
+2. The rail builds ONE `runProjection(run)` per call (`:300`) and reads `projection.steps[i]` by index;
+   the panel builds one (`:610`) and shares it between the left column and the detail column.
+3. `detailColumn` gains a `view` argument and, after the head, prints the run's own frozen routes
+   (`:479-490`): `next → X`, `on fail → Y (taken/max)`, `retry attempt/retry` — each only when the step
+   HAS one, so a step with no route says nothing about one.
+4. `STATES.pending`'s comment now records why the wire word survives: it is the honest daemon-side fact
+   and the no-projection fallback, not what a reader is shown.
+
+**Tests** (`packages/tui/test/workflow-view.test.ts`, new `describe` "slice S8a", 3 tests, 9 assertions):
+an ENDED run's `fix` reads `– not run` and never `pending`, in the left column AND the detail head
+(`– not run · [local]`), with the LIVE run keeping `○ not yet`; the rail words the same step `not run`
+at all three width tiers (the colour-blind rule); and the detail lists `next → confirm` /
+`on fail → fix (0/2)` while a route-less step prints no `on fail →`.
+
+**Mutations** (each reverted at once; backup `.tentacle/tmp/workflows-ux/view.bak.ts`, and the restored
+file re-run to 34 pass):
+- M1 — `stepLook` drops the `skipped` arm (the bug itself): **killed**, 2 fails (the panel test and the
+  rail test).
+- M2 — `later` collapsed onto `not run` (a live run's waiting step claimed dead): **killed**, 1 fail
+  (`Expected to contain: "○ not yet"`).
+- M3 — the panel's left column and detail head go back to `stateLook(step.state)`: **killed**, 1 fail.
+- M4 — the `next →` / `on fail →` / `retry` lines removed: **killed**, 1 fail.
+
+**Scope kept to D7.** D7 names the rail/panel words (`not yet` `○`, `not run` `–`) and the panel's
+detail routes — both delivered. The why-sentence (`notRunWhy`) and `summary()` are D5/D2's phone
+surfaces and were NOT wired here; a first draft asserted the sentence in the panel and was corrected to
+the D7 contract rather than growing the slice (it would also have duplicated D5's rendering).
+
+**Narrow verification.** `bun test ./packages/tui/test/workflow-view.test.ts` → 34 pass, 0 fail;
+`bun test ./packages/tui/test/workflow-frames.test.tsx` → 14 pass, 0 fail (the frame's own words
+unchanged); `bun test --parallel ./packages/tui` → **3060 pass, 0 fail** across 215 files (the added
+client import does not break the package); `bun test ./packages/client/test/workflow-run-graph.test.ts`
+→ 28 pass. `bunx tsc` over the touched packages' sources with the ROOT project's `paths` (a scratch
+config mirroring `tsconfig.json`, since `packages/tui/tsconfig.json` alone cannot resolve
+`@tentacle/protocol` — a pre-existing per-package gap, unrelated to this slice) → clean.
+`bunx biome check` on the five changed files → clean. `bun test ./scripts/test/changelog-guard.test.ts`
+→ 5 pass.
+
+**Changelog.** No new fragment file: `changelog.d/workflows-ux.changed.md` already describes the shared
+step states, so S8a EXTENDED that one bullet with the panel's routes (one fragment per task, the same
+call S5 made). The `fixed` fragment is the phone's and was left alone.
+
+**No schema, no wire change** → `packages/protocol/schema/protocol.json` needs no regeneration and no
+`protocol.d` note is added (the projection reads S4's fields; it adds none).
+
+**Files touched:** `packages/tui/src/workflow-view.ts`, `packages/tui/test/workflow-view.test.ts`,
+`packages/tui/package.json`, `packages/tui/tsconfig.json`, `bun.lock`,
+`changelog.d/workflows-ux.changed.md`, this doc. No other slice was touched; `TODO.md` untouched.
+
+**Not verified:** the orchestrator's full gate (`bun run check`) — run by the script after this, per the
+brief. Everything narrower is above, green.
+
+### Gate fix: the two test fixtures behind `next`/`onFail`/`retry` and `history`/`historyDropped`
+
+The orchestrator's gate (`bun run typecheck`) failed on two TEST helpers, not on production code. D1/S4
+made `WorkflowStepRow.next`/`onFail`/`retry` and `WorkflowRow.history`/`historyDropped` REQUIRED
+(`packages/agent/src/workflow-driver.ts:62-114`, mirrored by the protocol schemas), and two local row
+builders were never updated:
+
+- `packages/agent/test/workflow-status-line.test.ts` — the `step()` and `row()` builders now carry
+  `next: null`, `onFail: null`, `retry: 0` and `history: []`, `historyDropped: 0`.
+- `packages/daemon/test/workflow-hosted.test.ts:1177` — the `asking()` row's one `merge` step gets the
+  same three fields, and the row the same two.
+
+Fixture-only, no assertion changed and no production line touched: the fields are not read by either
+test, they only had to satisfy the types. `npx tsc --noEmit` (whole repo) → clean;
+`bun test packages/agent/test/workflow-status-line.test.ts` → 53 pass; `bun test
+packages/daemon/test/workflow-hosted.test.ts` → 32 pass; `bunx biome check` on the two files → clean.
+
+*— claude-sonnet-4-5 (exec), 2026-11-25*
+
+## Execution
+
+### Slice S8b — Catalogue before the first message (owner Q1 = A)
+
+**Load-bearing check (re-run first).** Holds on this branch: the catalogue's params were
+`{ sessionId: SessionIdSchema }` — required, so an id-less frame was refused at the peer
+(`packages/protocol/src/session.ts:1108` before the change); the client's pre-open read answered a
+LOCAL `{unavailable: "this session is not open yet"}` and sent nothing
+(`packages/client/src/remote-session.ts:1342`); `workflow()` refused the same way before its trust
+check, so a pre-open start sent nothing either; and P5's precedent is real —
+`newSessionSkills`/`newSessionTools` (`packages/daemon/src/session-host.ts:629,638`, dispatched at
+`packages/daemon/src/connection.ts:714,723`). Proceeded.
+
+**As built, in dependency order.**
+
+1. **Protocol d.7 relaxation.** `WorkflowCatalogueParamsSchema.sessionId` is now `.optional()`
+   (`packages/protocol/src/session.ts:1108-1119`), documented as the `session/skills`/`tools` shape: an
+   absent id = "the catalogue a session the daemon creates now would read". `schema:export`
+   regenerated (`required: ["sessionId"]` removed from `WorkflowCatalogueParams`) — see the gate notes.
+2. **One projection, two callers.** `WorkflowCatalogueResultSchema`'s one outbound projection was
+   inlined in `HostedSession.workflowCatalogue`; it is now `workflowCatalogueResult(catalogue)` +
+   `catalogueRow(row)` + `WORKFLOWS_UNAVAILABLE`, exported (with the driver's `WorkflowCatalogue` type)
+   from `packages/daemon/src/hosted-session.ts:722-795`. Two paths answer the same project's files, so
+   they must word, cap and refuse a row identically — the existing per-row `ok:false` rescue (review
+   round 1 #1) is in that one function, so an id-less read cannot lose it.
+3. **Daemon: the throwaway read.** `SessionHost.newSessionWorkflowCatalogue(link)`
+   (`packages/daemon/src/session-host.ts:660-687`) builds a throwaway agent through the SAME
+   `createAgent` factory `newSessionTools` uses, asks its driver, and disposes it in a `finally`
+   (driver, artifacts, jobs, agentJobs, shells). No driver → `unavailable` in the same words a live
+   session uses, with `dir` = the daemon's `defaultCwd` (a catalogue with no folder is not a valid
+   answer — the wire schema refuses `dir: ""`).
+4. **Daemon: the route.** `Connection.workflowCatalogue(sessionId)` (`connection.ts:735-743`): an id
+   still goes through `lookup` (an unknown one stays `UnknownSession`, unchanged); NO id goes to
+   `newSessionWorkflowCatalogue`. Async off the event loop and never awaiting the peer, so §7's
+   "don't serialize the RPC peer" holds: the walk runs beside a live turn.
+5. **Client: the read.** `RemoteSession.workflowCatalogue()` (`remote-session.ts:1366-1378`) keeps
+   `skills()`'s exact shape — `this.id ?? (this.opening ? await this.opening : null)` — and asks with
+   NO id when there is none, instead of answering the false `not open yet`. The trust bit still refuses
+   first (§7), and an id-holding session is routed exactly as before.
+6. **Client: the start.** `workflow({action:"start"})` pre-open now calls the new private
+   `ensureOpen()` (`remote-session.ts:1349-1359`) = `open()` + `createOrAttach()`: the attach's own open
+   and the first-send's open, i.e. the ONE session path, each a no-op in the shape the other owns — never
+   a second open. `stop`/`resume`/`rerun_step` keep the honest refusal: they name a run, and a session
+   with no id has none.
+7. **TUI.** No code change was needed: `useCatalogue`'s read is a session switch/mount trigger with
+   `session?.workflowCatalogue === undefined` as its only seam check, and `/workflow run <name>` already
+   goes through `session.workflow`. The S1 test `before the first message: no run YET, never not
+   supported` still passes, and the panel now paints the project's rows before the first message (the
+   client fix is what it was reading).
+
+**Drift from the Implementation, and why.**
+
+- **The trust check moved ABOVE the id check** in `workflow()` (it was after it). S8b gives the pre-open
+  path an `await this.ensureOpen()`, so leaving the §7 trust bit below it would CREATE a pod's session
+  before refusing the start — the pod is not trusted, so it must not even be created for work it may not
+  do. Behaviour for a trusted client is identical; for an untrusted one it is strictly stronger (mutation
+  3 below).
+- **`hosted-session.ts` is exported into, not edited in place of.** The plan named
+  `daemon/src/{connection.ts,session-host.ts}`; the shared projection lives in `hosted-session.ts`
+  already, so it is exported from there rather than duplicated in `session-host.ts`. One implementation,
+  per §7.
+- **`session-host.ts`'s `unavailable` needs a `dir`.** The plan did not foresee that the wire schema
+  refuses `dir: ""`, so the sessionless `unavailable` answer carries the daemon's `defaultCwd`. (The
+  client-side refusals already returned `dir: ""` without ever crossing the wire — that is why the
+  shipped code had it.)
+- **The plan's TUI test line was unnecessary; the daemon test is a real Connection.** `tui/test/
+  workflow-frames.test.tsx` fakes the SESSION, so an id-less frame is invisible to it (it already passed
+  before the fix); the property is the client's and the daemon's, and that is where the tests are. The
+  daemon test also uses a real `RpcPeer`+`Connection` through `createChannelPair` rather than the plan's
+  "fake host", so the params schema itself is exercised — the exact thing that used to refuse the frame.
+
+**Red before green (§9).** Every new test below was shown FAILING before its fix (the fix was developed
+against them and the mutations re-prove them): the client block in `workflows-client.test.ts`
+(`S8b: the catalogue and a start before the first message`, 4 tests) and the daemon block in
+`workflow-hosted.test.ts` (`S8b: session/workflow_catalogue before the first message`, 3 tests), plus
+the one flipped assertion in `protocol/test/workflow-wire.test.ts` (`{}` was pinned invalid; absent
+`sessionId` is now the documented shape).
+
+**Failure modes, each converged.**
+
+- *No session yet* → the read answers the project's rows (the daemon builds a throwaway agent and lists
+  no session: `host.size` stays 0, asserted); a start opens once and then starts, `session/open` before
+  `session/workflow` (asserted on the frame order).
+- *Untrusted daemon (a pod)* → refused locally BEFORE any open: nothing created, nothing sent (§7;
+  asserted).
+- *An older daemon* → `MethodNotFound` → `{unsupported: true}` unchanged (the panel says "update
+  tentacle"); the relaxation is backward-compatible for the ID-HOLDING frame an older peer already
+  accepted, and an older PEER receiving the id-less frame fails at the params schema — exactly why this
+  rides the task's existing `protocol.d` note.
+- *A daemon whose factory offers no driver* → `unavailable` in the live session's words, never an empty
+  folder (asserted), and no session hosted (asserted).
+- *A start that cannot open* (a dead link) → `ensureOpen`'s rejection reaches the caller, which the TUI
+  already paints as a notice (`commands/workflow.ts`'s reject arm) — never a silent no-op.
+- *stop/resume/rerun_step pre-open* → the honest `not open yet` refusal, unchanged (asserted).
+- *The folder route an id-less read could hijack* → an unknown `sessionId` still fails `UnknownSession`
+  (asserted), so the relaxation cannot be reached with a typo'd id.
+
+**Mutations (§9 non-vacuity, each applied then reverted; measured on the named assertion).**
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | the client's pre-open read answers the local `not open yet` again | 1 fail — *a LAZY session's catalogue is ONE frame with no sessionId* (`Expected "task", Received undefined`) |
+| 2 | drop `await this.ensureOpen()` from the pre-open start | 1 fail — *a start from the panel OPENS first, then starts* (`{ok:false, reason:"this session is not open yet"}`) |
+| 3 | put the trust check back BELOW the open | 1 fail — *an UNTRUSTED daemon still refuses locally, pre-open* (`opened()` false → true) |
+| 4 | the id-less route answers `{workflows:[], dir:"/tmp"}` instead of reading | 2 fail — *with no sessionId: the same rows* and *a daemon with no workflow seam says unavailable* |
+| 5 | the throwaway read HOSTS a session instead of disposing it | 1 fail — *with no sessionId: the same rows, and NO session is created* |
+| 6 | the sessionless `unavailable` carries `dir: ""` (no defaultCwd) | 1 fail — *a daemon with no workflow seam* (the peer refuses the result: `dir` invalid) |
+
+**Narrow verification.** `bun test packages/client/test/workflows-client.test.ts` → 31 pass;
+`bun test packages/daemon/test/workflow-hosted.test.ts` → 35 pass;
+`bun test packages/protocol/test/workflow-wire.test.ts` → 20 pass; the three together → 86 pass, 0 fail.
+The sibling workflow suites (`packages/daemon/test/workflow*.test.ts` + `packages/client/test/workflow-*`)
+→ 98 pass, 0 fail; the sessionless-read siblings (`tool-toggles`, `skills-slash`, `session-context`) →
+31 pass; `packages/tui/test/workflow-frames.test.tsx` → 14 pass (S1's pre-open test still green);
+`packages/protocol/test/{json-schema,version}.test.ts` → 25 pass; `scripts/test/changelog-guard.test.ts`
+→ 5 pass. `bunx tsc -p packages/daemon --noEmit` and `-p packages/client --noEmit` → clean;
+`bunx biome check` on the nine changed files → clean (`packages/tui` alone reports pre-existing
+`@tentacle/protocol` resolution + implicit-`any` errors in files this slice does not touch; the root
+project resolves them, which is how the repo's `typecheck` runs).
+
+**Schema.** `bun run schema:export` regenerated `packages/protocol/schema/protocol.json` (one hunk:
+`WorkflowCatalogueParams` loses `required: ["sessionId"]`) — the committed generated file, never
+hand-merged. No `PROTOCOL_VERSION` edit: the task's `protocol.d/workflows-ux.md` note now covers the
+relaxation too (merged with `bun run protocol:bump`).
+
+**Changelog.** `changelog.d/workflows-ux-pre-open-catalogue.fixed.md` (one bullet). `CHANGELOG.md` and
+`TODO.md` untouched. Its own fragment (not an extension of `workflows-ux.changed.md`) because it is a
+behaviour the released bullet does not describe: before the fix the panel refused.
+
+**Files touched:** `packages/protocol/src/session.ts`, `packages/protocol/schema/protocol.json`,
+`packages/protocol/test/workflow-wire.test.ts`, `packages/daemon/src/{connection,session-host,
+hosted-session}.ts`, `packages/daemon/test/workflow-hosted.test.ts`,
+`packages/client/src/{remote-session,remote-client}.ts`, `packages/client/test/workflows-client.test.ts`,
+`protocol.d/workflows-ux.md`, `changelog.d/workflows-ux-pre-open-catalogue.fixed.md`, this doc. No other
+slice touched.
+
+**Not verified:** the orchestrator's full gate (`bun run check`, whole-repo typecheck + lint + parallel
+suite) — run by the script after this, per the brief. Everything narrower is above, green.
+
+*— claude-sonnet-4-5 (exec), 2026-11-25*
+
+## Execution
+
+### Slice S8c — the `elsewhere` neighbouring-folder lookup, removed end to end (owner Q2)
+
+**Load-bearing check (re-run first).** Holds on this branch: `onFail` is on `WorkflowStepRow`
+(`packages/protocol/src/session.ts:856`), so S4 is in. The lookup itself was still live: a probe in
+`.tentacle/tmp/workflows-ux/s8c-lb.ts` (run before any edit) printed
+`wire accepts elsewhere: true | keys: dir,elsewhere,workflows` and
+`core exports workflowsAbove: true | WorkflowsAboveHint type is compile-only` — the field parses off
+the wire and the bounded walk is exported from `@tentacle/core`. Owner Q2 asks for both to be gone, so
+the slice is alive, not stale.
+
+**As built, in dependency order**
+
+1. `packages/core/src/project-paths.ts` — deleted `workflowsAbove`, `WorkflowsAboveHint`,
+   `WORKFLOWS_ABOVE_DEPTH`/`WORKFLOWS_ABOVE_MAX_COUNT`, their two private helpers (`parentOf`,
+   `normalize`, `isWorkflowFile`, which nothing else used) and the `list` member of `ProjectFs`
+   (it existed only to feed the walk). The module header now says why there is no seam.
+2. `packages/cli/src/project-fs.ts` — the node adapter loses `list` with it (its only caller);
+   `packages/cli/src/workflow-files.ts` — `WorkflowListing.elsewhere`, the
+   `workflowsAbove(...)` call and the spread are gone, and `workflowListing`'s comment says the
+   folder's `gitIgnored` notice is the only display-only fact left.
+3. `packages/agent/src/workflow-driver.ts` — `elsewhere` off both `WorkflowListing` and
+   `WorkflowCatalogue`, and off the object `catalogue()` returns (three sites, `:161`, `:201`, `:863`).
+4. `packages/protocol/src/session.ts` — `elsewhere` off `WorkflowCatalogueResultSchema`
+   (the S4 `protocol.d/workflows-ux.md` note grows the field removal);
+   `bun run schema:export` regenerated `packages/protocol/schema/protocol.json` (one hunk, 16 lines
+   deleted: the `elsewhere` property and its `required` entry).
+5. `packages/tui/src/workflow-view.ts` — `catalogueSection`'s empty case is one sentence naming
+   **this** folder (`  no workflow files in <dir>`) and no other. `apps/mobile/src/workflow-start.ts`
+   — `CatalogueView.elsewhere` and its projection are gone; `screens/WorkflowStart.tsx` — the
+   "N workflows found in <dir>" row is gone.
+6. Tests: `core/test/project-paths.test.ts` (the `workflowsAbove` block replaced by a removal
+   guard), `cli/test/project-fs.test.ts` (the two `list` cases), `cli/test/workflow-files.test.ts`
+   (the hint case → "nothing is looked at above it"), `agent/test/workflow-catalogue.test.ts`,
+   `protocol/test/workflow-wire.test.ts` (the field is now DROPPED on parse),
+   `protocol/test/json-schema.test.ts` (fixture), `tui/test/workflow-view.test.ts`,
+   `apps/mobile/test/workflow-start.test.ts`.
+
+**Red before green.** `packages/core/test/project-paths.test.ts` was written first and run on the
+unremoved code: 2 fail — the export probe (`"workflowsAbove" in core` true) and the source scan,
+which named all 11 carriers (`workflowsAbove: core/src/project-paths.ts`, `elsewhere:
+tui/src/workflow-view.ts`, …). Every other suite was edited together with its production change.
+
+**Mutations run, then reverted (`git status --short` clean of them afterwards)**
+
+| Mutation | Result |
+|---|---|
+| D: `export const WORKFLOWS_ABOVE_DEPTH = 4` back in `core/src/project-paths.ts` | 2 fail: the export probe + the source scan |
+| A: `elsewhere` back on `WorkflowCatalogueResultSchema` | 1 fail: "no workflow carrier carries an `elsewhere` field" (names `packages/protocol/src/session.ts`) |
+| B: the TUI's empty sentence back to `no workflow files here — <dir> has 3` | 2 fail: the three-empty-answers test + the new S8c sentence test |
+| C: `elsewhere` back on the phone's `CatalogueView` + projection | the cross-repo guard fails; its OWN suite stayed green, so `apps/mobile/test/workflow-start.test.ts` gained `expect(empty).not.toHaveProperty("elsewhere")` — re-run under the mutation, 1 fail. |
+
+**A gap this slice leaves open, deliberately.** The plan's acceptance is
+`rg -n "workflowsAbove|WorkflowsAboveHint" packages apps` empty. It is empty of *code* (no `src`
+hit); the two test files still spell the names, on purpose — a guard that forbids a symbol must
+name it. The executable form of the acceptance is the source scan in
+`core/test/project-paths.test.ts` (src-only), so the grep's letter cannot hold while its intent does.
+
+**Tests (narrow, foreground).** The nine touched suites → 181 pass, 0 fail; the adjacent workflow
+suites (`cli/test/workflow-wiring`, `tui/test/workflow-frames`, the three phone catalogue
+controllers, `workflow-screens-wiring`, `agent/test/workflow-driver`) → 135 pass;
+`daemon/test/workflow*` + `client/test/workflow*` → 121 pass; `scripts/test/changelog{,-guard}` → 21
+pass; `scripts/test/protocol-bump` + `protocol-version-literals` + `protocol/test/version` → 40 pass.
+`bunx tsc -p packages/{core,agent}` and `-p apps/mobile` → clean; `-p packages/cli` reports only
+pre-existing errors in files this slice does not touch (`packages/tui/src/workflow-view.ts` implicit
+`any`, `cli/test/shared-auto-accept`), the `@tentacle/protocol`-in-`packages/tui` resolution the
+repo's root project resolves — the same baseline S8b recorded. `bunx biome check` on all 16 changed
+files → clean.
+
+**Changelog.** `changelog.d/workflows-ux-elsewhere-hint.removed.md` (one bullet, `removed`): the
+released `workflows-ux.changed.md` describes the at-rest line and the panel, not this hint, so it
+cannot be an extension of it. `CHANGELOG.md` and `TODO.md` untouched.
+
+**Files touched:** `packages/{core,cli,agent,protocol,tui}/src/…` and their tests as listed above,
+`packages/protocol/schema/protocol.json` (regenerated), `protocol.d/workflows-ux.md`,
+`changelog.d/workflows-ux-elsewhere-hint.removed.md`, this doc. Nothing of another slice.
+
+**Worktree note (not a change to the tree):** this worktree's `node_modules` was missing two
+workspace links, so `bun test packages/cli/test/workflow-files.test.ts` died with
+`Cannot find module '@tentacle/browser'`. Restored by hand as the main worktree has them
+(`packages/tools/node_modules/@tentacle/browser`, `packages/browser/node_modules/zod`) — gitignored,
+so no diff.
+
+**Not verified:** the orchestrator's full gate (`bun run check`) — run by the script after this, per
+the brief. Everything narrower is above, green.
+
+*— claude-opus (claude-code, `settings.json` model "opus"), 2026-11-25*
+
+## Review
+
+### Review — S7, S8a, S8b, S8c (fresh context, `git diff main...HEAD`)
+
+**Verdict: APPROVE-WITH-NITS** (one MEDIUM to track; no HIGH).
+
+**Gate (this reviewer).** The 16 touched test files (client `workflows-client`, daemon `workflow-hosted`,
+protocol `workflow-wire`/`json-schema`, tui `workflow-view`/`workflow-frames`, core `project-paths`, cli
+`workflow-files`/`project-fs`, agent `workflow-catalogue`, mobile `workflow-start`/`-run-step-detail`/
+`-step-layer`/`-list-graph`/`-screens-wiring`/`e2e-flows`) → **384 pass, 0 fail**. `bun run lint` → 2490
+files clean. `bun run typecheck` (root + mobile + relay) → clean. Full parallel `bun run test` NOT
+re-run here (the orchestrator's gate owns it). e2e flow 45 not run (no simulator); the gate-fix records
+a PASS on iOS 26.
+
+**Findings.**
+1. **MEDIUM — an earlier goto round's visit shows the LATEST execution's body, undisclosed.**
+   `apps/mobile/src/workflow-run-controller.ts:365-373` (`attemptOf`) drops the attempt for a visit of an
+   older round, so the read returns the latest execution. On run ② (the seeded e2e scenario: review fails
+   once, then passes) tapping the FIRST `review` row gives a nav/marker worded `failed` over the
+   SECOND review's passing report — the reader asking "why did review fail?" sees the pass. Pinned on
+   purpose by the test "a visit of an EARLIER goto round reads the latest" and named in Execution S7 as
+   debt, but not in `TODO.md` and not shown on screen. Fix: either add `round` to the step read (a wire
+   field, a `protocol.d` line) or, cheaper, say "showing the latest run of this step" when the visit's
+   round ≠ the row's; and list it in `TODO.md`.
+2. LOW — `workflow-run-controller.ts:478-481`: a `notRun` record dropped while that step is OPEN (the
+   run resumed from another client) leaves `detail` undefined with nothing in flight, so
+   `bodyPending` (`workflow-step-detail.ts:443`) paints the skeleton until the person re-opens it.
+   Rare; not a regression (before S7 it showed a stale "no longer available").
+
+**Mutations (each applied by hand, run, reverted; `git status --short` empty after).**
+- S8b daemon: `newSessionWorkflowCatalogue` always answers `unavailable` → 1 fail ("with no sessionId: the
+  same rows, and NO session is created").
+- S8b client: `ensureOpen` drops `createOrAttach()` → 1 fail ("a start from the panel OPENS first").
+- S8a: `stepLook` loses its `skipped` arm → 2 fail (panel + rail tests).
+All killed.
+
+**Attacks tried.**
+- §7 *one session path*: the pre-open start goes through the memoized `createOrAttach()`
+  (`remote-session.ts:851-895`), the same promise the first `send`/`openSeeded` use — seed messages,
+  desired id and pre-open flips carried; no second open. Holds.
+- §7 *pod not trusted*: the trust check now precedes the open (`workflow()`), and the catalogue refuses
+  before sending; daemon side a tunnelled factory has no driver → `unavailable` with a valid `dir`. Holds.
+- §7 *don't serialize the peer*: `Connection.workflowCatalogue` is a plain async handler, no lock. Holds.
+- Throwaway driver side effects: `WorkflowDriver.dispose` (`workflow-driver.ts:1294`) only aborts its own
+  in-memory runs; the throwaway has none. cwd: every `createAgent` site uses `defaultCwd`, so the
+  id-less read is the same folder a session would read. Holds.
+- Protocol: `sessionId` optional + `elsewhere` removed are both in `protocol.d/workflows-ux.md`; no
+  `PROTOCOL_VERSION` edit on the branch. Holds.
+- S8c leftovers: `rg "elsewhere|workflowsAbove|WorkflowsAboveHint|WORKFLOWS_ABOVE"` over non-test
+  `packages apps` → only unrelated prose hits. Holds.
+- S8a index alignment: `runProjection` maps `row.steps` 1:1 (`workflow-run-graph.ts:265`), so the
+  rail/panel `projection.steps[i]` lookups never skip a row. Holds.
+
+**How the executors behaved.** Drift was declared, not hidden (S8a's missing `@tentacle/client` dep,
+S8b's trust-check move and `dir` need, S8c's test-file grep gap); each slice shows red-first or
+mutation evidence that I could reproduce. The S7 round debt (finding 1) was declared but parked only in
+the doc. Reviewer is the same model family (Opus) as the S7/S8c executors — shared blind spots possible.
+
+*— claude-opus-5-5, 2026-11-25*
+
+### Validation blocker fix
+
+**Cause — an APP defect (b), not test isolation.** Flow 45 failed deterministically after 44 (it opened
+`wfedit`, not `run-view-pass`). Evidence: the Maestro `tapOn text "run-view-pass,.*"` COMPLETED, and the
+failing hierarchy/screenshot show the `wfedit` run (`v1 · 8004e7d`, "0 of 6 steps ran"). A settle-then-tap
+variant (wait for the `run-view-loop` row + animation end) failed the same way, ruling out a layout race.
+The daemon's journals hold `"runId":"wf-1"` / `"wf-2"`: `runId` is a counter PER SESSION, while the runs list
+is per computer, so 44's session and 45's session each own a `wf-1`. `elencoRow.key` and the screen's
+`byKey` map were keyed by the bare `runId` → the two rows collided and the tap opened the other session's run
+(also a duplicate React key). Alone, 45 has no second `wf-1`, so it passed.
+
+**Change.** `workflow-list.ts`: new pure `runKey(run)` = `${sessionId}/${runId}` (bare `runId` with no
+session); `elencoRow.key` and the step-strip keys use it; `screens/WorkflowRuns.tsx`'s `byKey` uses it.
+No flow edit, no reorder, no assertion removed.
+
+**Test (red → green).** `apps/mobile/test/workflow-list-graph.test.ts`, "a run's identity across sessions":
+same `runId` in two sessions → different row keys (red on the bare-`runId` key, green after); a `byKey` built
+with `runKey` finds the run the row drew, collision order reversed.
+
+**Runs** (simulator 0B43D716…): `--only 44-workflow-editor,45-workflow-run-view` ×2 → PASS both times
+(154 s, 156 s); `--only 45-workflow-run-view` → PASS (60 s). Before: the same pair FAIL ×3. `bun run
+typecheck` and `biome check apps/mobile` clean; `workflow-list-graph.test.ts` 16 pass. Full `bun run check`
+not re-run.
+
+*— claude-sonnet-5-5, 2026-11-25*

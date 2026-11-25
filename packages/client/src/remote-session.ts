@@ -34,6 +34,12 @@ import {
   type TurnEnd,
   type UpdateSettingsResult,
   type VoiceTurn,
+  type WorkflowCatalogueResult,
+  type WorkflowResult,
+  type WorkflowRow,
+  type WorkflowSaveResult,
+  type WorkflowSourceResult,
+  type WorkflowStepResult,
   isWakeTurnId,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
@@ -73,6 +79,11 @@ import {
 import { SCHEDULE_UNTRUSTED_DAEMON, firedScheduleRef } from "./schedules.ts";
 import type { StreamOutput } from "./session-reducer.ts";
 import type { SubagentNotify } from "./subagents.ts";
+import {
+  WORKFLOW_UNTRUSTED_DAEMON,
+  type WorkflowAction,
+  type WorkflowSaveRequest,
+} from "./workflows.ts";
 
 /** Own turns remembered by `ownsTurn` after they end (the oldest fall off). */
 const MINTED_TURNS_MAX = 256;
@@ -773,6 +784,19 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * A fresh turn id for work this session BEGINS outside `send` (a workflow's
+   * `start`/`resume`/`rerun_step`, whose asks are attributed to it): minted and
+   * REGISTERED, so `ownsTurn` — and therefore auto-accept — knows it is ours.
+   * `crypto.randomUUID()` never starts with `wake-`, so it can never be mistaken
+   * for a `serve` daemon's own wake turn.
+   */
+  private mintTurn(): string {
+    const turnId = crypto.randomUUID();
+    this.mint(turnId);
+    return turnId;
+  }
+
+  /**
    * The eager attach of a session built with `attach` (`newSession(…, {attach})`):
    * `session/open{sessionId, reopen?}`, never a create; its full history comes
    * as a `history` activity (or a foreign turn, mid-turn), then live. Rejects
@@ -1078,6 +1102,18 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * The session's workflow runs as the daemon last reported them (bounded and
+   * sanitized by the client): the current run plus the last few ended ones, in
+   * the daemon's order. Undefined: no report yet, an older daemon, or a client
+   * whose daemon is not trusted to run workflows (a pod's list is dropped,
+   * AGENTS §7). Never an empty list invented for "none": only the daemon says
+   * that (docs/feat/workflows-ui.md D2).
+   */
+  get workflows(): readonly WorkflowRow[] | undefined {
+    return this.id ? this.client.workflowsOf(this.id) : undefined;
+  }
+
+  /**
    * Subscribe to this session's queue as the daemon reports it (every
    * writer's rows, live or a resync's); the current state, if any, is given
    * at once. Returns an unsubscribe (docs/feat/tui-foreign-turns.md C7).
@@ -1238,6 +1274,186 @@ export class RemoteSession implements SessionStreamListener {
       listener({ rows: now, count: now.length });
     }
     return unsubscribe;
+  }
+
+  /**
+   * Subscribe to this session's workflow runs as the daemon reports them (the
+   * FULL list each time, bounded and sanitized by the client); the current
+   * list, if any, is given at once, like `onSubagents`. A run lives between
+   * turns, so this fires while idle too. Returns an unsubscribe
+   * (docs/feat/workflows-ui.md D2).
+   */
+  onWorkflows(listener: (rows: readonly WorkflowRow[]) => void): () => void {
+    const unsubscribe = this.client.onSessionWorkflows((notice) => {
+      if (notice.sessionId === this.id) {
+        listener(notice.rows);
+      }
+    });
+    const now = this.workflows;
+    if (now) {
+      listener(now);
+    }
+    return unsubscribe;
+  }
+
+  /**
+   * `session/workflow` (docs/feat/agent-workflows.md D3): start, stop, resume a
+   * run, or re-run one step. A refusal is a RESULT with a `reason` (one run
+   * already running, the file's hash changed, an older daemon) — never a throw
+   * at a UI.
+   *
+   * The three actions that BEGIN work (`start`, `resume`, `rerun_step`) carry a
+   * `turnId` the run's asks are attributed to, so auto-accept can tell this
+   * device's own work from anyone else's. It is minted HERE, before the call,
+   * and put through `mint` like `send`'s: without that, `ownsTurn(thatId)` is
+   * false and auto-accept silently stops answering this run's asks.
+   *
+   * A client whose daemon is not trusted to run workflows (a pod, `run`/
+   * `attach`) refuses locally and sends nothing (AGENTS §7) — checked BEFORE any
+   * open, so a pod's session is never even created for work it may not do.
+   *
+   * `start` is the ONE action that works before the session exists
+   * (docs/fix/workflows-ux.md S8b, owner Q1 = A): it OPENS first (`ensureOpen`,
+   * the same ONE open a first send uses) and then starts, so `/workflow run` in
+   * the panel works before the first message instead of answering «this session
+   * is not open yet».
+   */
+  async workflow(params: WorkflowAction): Promise<WorkflowResult | { ok: false; reason: string }> {
+    if (!this.daemonWakes) {
+      // Checked BEFORE any open: a pod's session must not even be created for a
+      // start it can never be allowed to run (AGENTS §7 — nothing is sent).
+      return { ok: false, reason: WORKFLOW_UNTRUSTED_DAEMON };
+    }
+    let sessionId = this.id;
+    if (sessionId === null) {
+      if (params.action !== "start") {
+        // `stop`/`resume`/`rerun_step` name a run of a session that has none yet.
+        return { ok: false, reason: "this session is not open yet" };
+      }
+      // A start from the panel OPENS the session first (docs/fix/workflows-ux.md
+      // S8b, owner Q1 = A): the same ONE open a first send uses, so a run started
+      // here leaves the session exactly as that message would have. A failed
+      // open rejects (`context`'s rule: no figure, no guess).
+      await this.ensureOpen();
+      sessionId = this.id;
+      if (sessionId === null) {
+        return { ok: false, reason: "this session is not open yet" };
+      }
+    }
+    if (params.action === "stop") {
+      return this.client.workflow(sessionId, { sessionId, action: "stop", runId: params.runId });
+    }
+    const turnId = this.mintTurn();
+    return this.client.workflow(sessionId, { ...params, sessionId, turnId });
+  }
+
+  /**
+   * Open this session now, so a pre-open caller can act on it (a `/workflow run`
+   * from the panel, docs/fix/workflows-ux.md S8b): the attach's own `open` and the
+   * first-send's `createOrAttach` — the ONE session path (AGENTS §7), never a
+   * second one. Each no-ops in the shape the other owns, so both are safe to call;
+   * a session that still has no id afterwards was not opened (nothing created).
+   */
+  private async ensureOpen(): Promise<void> {
+    await this.open();
+    await this.createOrAttach();
+  }
+
+  /**
+   * `session/workflow_catalogue` (docs/feat/workflows-ui.md slice 5a / D6): the
+   * project's workflows, for a start screen. Three answers, kept distinct on
+   * purpose: the rows; `{unsupported:true}` (an older daemon — "update tentacle");
+   * and `{unavailable}` (this session cannot run workflows at all — a tunnelled
+   * pod session), never an empty list that looks like an empty folder. The trust
+   * bit refuses locally, like `workflow()`, and sends nothing (§7).
+   *
+   * Before the first message there is no daemon-side session to ask about, so the
+   * read goes WITHOUT an id — the `skills`/`tools` shape (docs/fix/workflows-ux.md
+   * S8b): the same project's catalogue a session created now would read. While an
+   * attach is still opening, it waits for the id, as `skills` does.
+   */
+  async workflowCatalogue(): Promise<WorkflowCatalogueResult | { unsupported: true }> {
+    const sessionId = this.id ?? (this.opening ? await this.opening : null);
+    if (!this.daemonWakes) {
+      return { workflows: [], dir: "", unavailable: WORKFLOW_UNTRUSTED_DAEMON };
+    }
+    return sessionId === null
+      ? this.client.workflowCatalogue(undefined, {})
+      : this.client.workflowCatalogue(sessionId, { sessionId });
+  }
+
+  /**
+   * `session/workflow_step` (docs/feat/workflows-ui.md D1): ONE step
+   * execution's `prompt`/`report` — the detail a `workflows` row does not
+   * carry. `detail` absent means "not available" (never ran, or its entry left
+   * the retained log), and an older daemon is `{unsupported: true}`; neither is
+   * a throw. `attempt` picks WHICH execution when a step ran more than once;
+   * omitted, the newest.
+   */
+  workflowStep(
+    runId: string,
+    stepId: string,
+    attempt?: number,
+  ): Promise<WorkflowStepResult | { unsupported: true }> {
+    const sessionId = this.id;
+    if (sessionId === null) {
+      return Promise.resolve({ unsupported: true });
+    }
+    return this.client.workflowStep(sessionId, {
+      sessionId,
+      runId,
+      stepId,
+      ...(attempt === undefined ? {} : { attempt }),
+    });
+  }
+
+  /**
+   * `session/workflow_source` (docs/feat/workflow-editor.md D5/D3): what the
+   * editor opens for ONE file — its bytes, its draft (JSON text, because the
+   * phone cannot parse YAML), the prompts its steps read, and either its hash or
+   * the validator's errors. A READ: no ask, no run, no write, so it needs no
+   * turn id.
+   *
+   * Three answers, kept distinct on purpose like `workflowCatalogue`'s:
+   * `{unsupported:true}` (an older daemon — "update tentacle on this computer"),
+   * `{unavailable}` (this session cannot edit workflows at all — a tunnelled
+   * pod session), and the file. The trust bit refuses locally and sends nothing
+   * (§7): a pod-originated draft would be pod-supplied history.
+   */
+  async workflowSource(name: string): Promise<WorkflowSourceResult | { unsupported: true }> {
+    const sessionId = this.id;
+    if (sessionId === null) {
+      return { ok: false, unavailable: "this session is not open yet" };
+    }
+    if (!this.daemonWakes) {
+      return { ok: false, unavailable: WORKFLOW_UNTRUSTED_DAEMON };
+    }
+    return this.client.workflowSource(sessionId, { sessionId, name });
+  }
+
+  /**
+   * `session/workflow_save` (docs/feat/workflow-editor.md D5/D7): `dryRun: true`
+   * is the Review screen — every check, nothing written — and `false` writes,
+   * refusing `changed` unless `baseHash` is still the file's.
+   *
+   * **It mints NO turn.** A save raises no ask (unlike a `start`, which is a run
+   * whose hash approval must be attributable to this device's turn), so there is
+   * nothing for auto-accept to own and a `turnId` here would be a lie.
+   *
+   * The trust bit refuses locally and sends nothing, with the refusal shape a
+   * write uses (`refusal` + `reason`), so a screen paints one kind of answer.
+   */
+  async workflowSave(
+    request: WorkflowSaveRequest,
+  ): Promise<WorkflowSaveResult | { unsupported: true }> {
+    const sessionId = this.id;
+    if (sessionId === null) {
+      return { ok: false, refusal: "unavailable", reason: "this session is not open yet" };
+    }
+    if (!this.daemonWakes) {
+      return { ok: false, refusal: "unavailable", reason: WORKFLOW_UNTRUSTED_DAEMON };
+    }
+    return this.client.workflowSave(sessionId, { sessionId, ...request });
   }
 
   /**

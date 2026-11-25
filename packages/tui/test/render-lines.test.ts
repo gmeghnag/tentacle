@@ -4,6 +4,8 @@ import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import * as wrapAnsiModule from "wrap-ansi";
 import * as blink from "../src/blink.ts";
+import { cellWidth } from "../src/cells.ts";
+import { transcriptToMarkdown } from "../src/commands.ts";
 import * as format from "../src/format.ts";
 import { expandTabs } from "../src/input-view.ts";
 import * as markdown from "../src/markdown.ts";
@@ -20,6 +22,7 @@ import {
   wrapLines,
 } from "../src/render-lines.ts";
 import type { DisplayItem, ToolItem } from "../src/state.ts";
+import { theme } from "../src/theme.ts";
 import { FIXTURES } from "./chart-fixtures.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -47,6 +50,13 @@ describe("itemLines", () => {
     const lines = itemLines({ kind: "assistant", text: "hello **world**" }, opts).map(strip);
     expect(lines.join("\n")).toContain("hello");
     expect(lines.join("\n")).toContain("world");
+  });
+
+  test("the reply's bullet has the reply text's colour (owner 2026-11-23), not the accent", () => {
+    const first = itemLines({ kind: "assistant", text: "plain reply" }, opts)[0] ?? "";
+    // The row opens with the bare bullet: no SGR colour before it, as the text has none.
+    expect(first.startsWith("● ")).toBe(true);
+    expect(first).not.toContain(theme.accent("●"));
   });
 
   test("skips an empty assistant item", () => {
@@ -146,9 +156,10 @@ describe("itemLines", () => {
     };
     const text = itemLines(tool, { expandAll: true }).map(strip).join("\n");
     // The header keeps only label + elapsed when expanded: the primary target
-    // (the description) is the first `  │ ` row under it (the command block,
-    // docs/feat/tui-tool-expand.md) — NOT `Agent find bug` on one row any more.
-    expect(text).toContain("  │ find bug");
+    // (the description) opens the `⎿` block under it (owner 2026-11-24: one
+    // shape for every expanded tool row) — NOT `Agent find bug` on one row.
+    expect(text).toContain("⎿ find bug");
+    expect(text).not.toContain("  │ find bug");
     // Own tokens: a bare number, the session total's formatter (12345 → "12k").
     expect(text).toContain("explore · 2 tool uses · 12k"); // tree head
     expect(text).toContain("Read auth.ts");
@@ -1330,6 +1341,17 @@ describe("toolTitle labels", () => {
     expect(toolTitle(tool("diagram", '{"mermaid":"x"}')).subtitle).toBe('{"mermaid":"x"}');
   });
 
+  // docs/feat/image-view.md T12: `Image <ref>`, ` · high` only for the costly detail.
+  test("image_view shows its ref, and the detail when high", () => {
+    expect(toolTitle(tool("image_view", '{"ref":"a1b2c3d4e5f6","detail":"high"}'))).toEqual({
+      label: "Image",
+      subtitle: "a1b2c3d4e5f6 · high",
+    });
+    expect(toolTitle(tool("image_view", '{"ref":"a1b2c3d4e5f6","detail":"low"}')).subtitle).toBe(
+      "a1b2c3d4e5f6",
+    );
+  });
+
   test("an unlabelled (MCP) tool keeps its name and raw args", () => {
     expect(toolTitle(tool("mcp__x__y", '{"q":1}'))).toEqual({
       label: "mcp__x__y",
@@ -1462,13 +1484,24 @@ describe("a spilled tool result", () => {
     ...over,
   });
   const NOTE = "40.8k chars · too large, the model reads it in parts";
-  // The body's rows: the header (row 0) and any `  │ ` command row of an
-  // expanded call (docs/feat/tui-tool-expand.md) are not body rows, so skip
-  // them both — with `expandAll` the command is shown, and these tests are
-  // about the spelling of the body itself.
+  // The body's rows: the header (row 0) and any command row of an expanded
+  // call — `⎿ <target>` for a non-shell call (owner 2026-11-24), or, for a `shell` call, the
+  // `⎿ $ <command>` block opener (docs/fix/tui-shell-row-collapsed) — are not
+  // body rows, so skip them all: these tests are about the spelling of the body
+  // itself.
   const body = (tool: ToolItem, o: Parameters<typeof itemLines>[1]) =>
     itemLines(tool, o)
-      .filter((l) => !strip(l).startsWith("  │ ") && strip(l) !== "  │")
+      .filter((l) => {
+        const text = strip(l);
+        return (
+          !text.startsWith("  │ ") &&
+          text !== "  │" &&
+          !text.startsWith("⎿ $ ") &&
+          text !== "⎿ $" &&
+          // an expanded non-shell call's target row (owner 2026-11-24: `⎿ <path>`)
+          text !== "⎿ src/a.ts"
+        );
+      })
       .slice(1)
       .map((l) => strip(l).replace(/^(⎿ | {2})/, ""));
 
@@ -1709,20 +1742,22 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
   });
 
   test("expanding ONE call shows its command wrapped under the header (mockup)", () => {
+    // docs/fix/tui-shell-row-collapsed: a `shell` call expands into the SAME
+    // `⎿ $ …` block a described one draws — continuation rows hung 4 cells, no
+    // `  │ ` rows any more — and the body stays as it was under the toggle.
     const rows = transcriptRows([longTool], {
       expandAll: false,
       width: 40,
       expandedIds: ["t1"],
     }).map(strip);
-    // The header keeps the bullet, the label and the elapsed time — no comment.
-    expect(rows[0]).toContain("Bash");
-    expect(rows[0]).toContain("1.7s");
-    expect(rows[0]).not.toContain("TestZZ");
-    // Then the full command as `  │ ` continuation rows, wrapped to the width.
-    const cont = rows.slice(1).filter((r) => r.startsWith(CONT));
-    expect(cont.length).toBeGreaterThan(1);
-    const joined = cont
-      .map((r) => r.slice(CONT.length))
+    // The header keeps the bullet, the label and the elapsed time — no command.
+    expect(rows[0]).toBe("● Bash 1.7s");
+    // Then the whole command: `⎿ $ ` first, the rest hung under it.
+    expect(rows[1]?.startsWith("⎿ $ cd . && go test")).toBe(true);
+    const joined = rows
+      .slice(1)
+      .filter((r) => r !== "⎿ ok" && !r.startsWith("  ok"))
+      .map((r) => r.replace(/^⎿ \$ /, "").replace(/^ {4}/, ""))
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
@@ -1730,8 +1765,31 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
     for (const row of rows) {
       expect(stringWidth(row)).toBeLessThanOrEqual(40);
     }
-    // The body is untouched by the toggle (still the collapsed preview).
-    expect(rows.at(-1)).toBe("⎿ ok");
+    // The body is untouched by the toggle (still the collapsed preview), hung
+    // under the command block it now follows.
+    expect(rows.at(-1)).toBe("  ok");
+  });
+
+  test("a NON-shell call expands like a shell row: its target opens the `⎿` block, no `│` rows (owner 2026-11-24)", () => {
+    const path = `src/${"deep/".repeat(12)}file.ts`;
+    const edit: ToolItem = {
+      kind: "tool",
+      id: "e1",
+      name: "fs_edit",
+      args: JSON.stringify({ path }),
+      status: "ok",
+      durationMs: 1,
+      resultText: "edited",
+    };
+    const rows = transcriptRows([edit], { expandAll: false, width: 40, expandedIds: ["e1"] }).map(
+      strip,
+    );
+    expect(rows[0]).toBe("● Edit 0.0s");
+    // The whole path, wrapped, opens the block on the connector; the body hangs under it at col 2.
+    expect(rows[1]?.startsWith("⎿ src/deep/")).toBe(true);
+    expect(rows.filter((r) => r.startsWith(CONT))).toEqual([]);
+    expect(rows.join("").replace(/\s|⎿/g, "")).toContain(path.replace(/\s/g, ""));
+    expect(rows[rows.length - 1]).toBe("  edited");
   });
 
   test("expanding one call does not touch its BODY, Ctrl+O does both", () => {
@@ -1755,10 +1813,11 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
       args: JSON.stringify({ command: `${COMMAND} | tail-second` }),
     };
     const rows = transcriptRows([longTool, second], { expandAll: true, width: 40 }).map(strip);
-    // Both calls contribute continuation rows: two bullet headers, each
-    // followed by at least one `  │ ` row, and both tails are visible.
+    // Both calls contribute command rows: two `● Bash <elapsed>` headers, each
+    // opening a `⎿ $ …` block hung 4 cells under it, both tails visible.
     expect(rows.filter((r) => r.includes("Bash"))).toHaveLength(2);
-    expect(rows.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(3);
+    expect(rows.filter((r) => r.startsWith("⎿ $ ")).length).toBe(2);
+    expect(rows.filter((r) => r.startsWith("    ")).length).toBeGreaterThan(3);
     expect(rows.join("\n")).toContain("tail -50");
     expect(rows.join("\n")).toContain("tail-second");
   });
@@ -1773,7 +1832,9 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
       width: 60,
       expandedIds: ["t1"],
     }).map(strip);
-    const cont = rows.filter((r) => r.startsWith(CONT)).map((r) => r.slice(CONT.length));
+    const cont = rows
+      .filter((r) => r.startsWith("⎿ $ ") || r.startsWith("    "))
+      .map((r) => r.replace(/^⎿ \$ /, "").replace(/^ {4}/, ""));
     expect(cont).toEqual(["make build", "make test", "make deploy"]);
   });
 
@@ -1782,7 +1843,10 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
     const rows = transcriptRows([empty], { expandAll: false, width: 60, expandedIds: ["t1"] }).map(
       strip,
     );
-    expect(rows.some((r) => r.startsWith(CONT))).toBe(false);
+    // No command to open a block with: the header alone, no `⎿ $ ` row and no
+    // continuation rows (the body keeps its own connector).
+    expect(rows.some((r) => r.startsWith("⎿ $ "))).toBe(false);
+    expect(rows.some((r) => r.startsWith("    "))).toBe(false);
     expect(rows[0]).toContain("Bash");
   });
 
@@ -1905,17 +1969,16 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
       width: 80,
       expandedIds: ["t1"],
     }).map(strip);
-    expect(at40.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(
-      at80.filter((r) => r.startsWith(CONT)).length,
-    );
+    const hung = (rows: string[]): number => rows.filter((r) => r.startsWith("    ")).length;
+    expect(hung(at40)).toBeGreaterThan(hung(at80));
     for (const row of at80) {
       expect(stringWidth(row)).toBeLessThanOrEqual(80);
     }
     // Both still show the whole command.
     const text = (rows: string[]): string =>
       rows
-        .filter((r) => r.startsWith(CONT))
-        .map((r) => r.slice(CONT.length))
+        .filter((r) => r.startsWith("⎿ $ ") || r.startsWith("    "))
+        .map((r) => r.replace(/^⎿ \$ /, "").replace(/^ {4}/, ""))
         .join(" ")
         .replace(/\s+/g, " ")
         .trim();
@@ -2184,5 +2247,95 @@ describe("fired scheduled wake row — Ctrl+O through the row cache (docs/feat/s
   test("a typed prompt is unaffected by Ctrl+O", () => {
     const items: DisplayItem[] = [{ kind: "user", text: "hello" }];
     expect(rows(items, true)).toEqual(rows(items, false));
+  });
+});
+
+describe("the startup header (docs/feat/tui-mascot.md D4)", () => {
+  const header = (over: Partial<Extract<DisplayItem, { kind: "header" }>> = {}): DisplayItem => ({
+    kind: "header",
+    version: "0.7.1",
+    model: "deepseek-v4",
+    cwd: "/home/me/tentacle",
+    home: "/home/me",
+    palette: "soft",
+    ...over,
+  });
+
+  test("truecolor, wide, sprite opted in: five rows, the sprite beside the text", () => {
+    const lines = itemLines(header(), { expandAll: false, width: 80, mascot: true });
+    expect(lines.length).toBe(5);
+    const plain = lines.map(strip);
+    // Rows 1–3 carry the text, rows 0 and 4 the sprite alone.
+    expect(plain[1]).toContain("tentacle 0.7.1");
+    expect(plain[2]).toContain("deepseek-v4 · ~/tentacle");
+    expect(plain[3]).toContain("/help for commands");
+    expect(plain[0]).not.toContain("tentacle");
+    expect(plain[4]).not.toContain("/help");
+    // Every row is a sprite row: a half/full block, or blank cells at the edges.
+    for (const row of plain) {
+      expect(cellWidth(row.trimEnd())).toBeLessThanOrEqual(80);
+    }
+    // Row 1 = pixel rows 2/3 (`KSFFFFFSK` over `KFEFFFEFK`): K/K solid, then
+    // S over F, F over E, three solids. The gutter is two spaces.
+    expect(plain[1]).toBe("█▀▀███▀▀█  tentacle 0.7.1");
+    // SGR-free measurement: the sprite is 9 cells + a 2-cell gutter.
+    expect(cellWidth((plain[1] ?? "").slice(0, (plain[1] ?? "").indexOf("tentacle")))).toBe(11);
+  });
+
+  test("the shipped default is the text-only header: three rows, no glyph, no gutter", () => {
+    // fix/tui-mascot-hidden: `chalk.level` is 3 here (the file's `beforeAll`),
+    // so this is the exact case that used to paint the sprite.
+    const lines = itemLines(header(), { expandAll: false, width: 80 });
+    expect(lines.length).toBe(3);
+    expect(lines.map(strip).join("\n")).not.toMatch(/[\u2580\u2584\u2588]/);
+    // No gutter means the text starts at column 1, not at 11.
+    expect(strip(lines[0] ?? "")).toBe("tentacle 0.7.1");
+    expect(strip(lines[1] ?? "")).toBe("deepseek-v4 · ~/tentacle");
+    expect(strip(lines[2] ?? "")).toBe("/help for commands");
+    // No sprite colour either: not one truecolor SGR sequence in the header.
+    expect(lines.join("\n")).not.toContain("38;2;");
+  });
+
+  test("narrow: three text rows, no sprite glyph", () => {
+    const lines = itemLines(header(), { expandAll: false, width: 30, mascot: true });
+    expect(lines.length).toBe(3);
+    expect(lines.map(strip).join("\n")).not.toMatch(/[▀▄█]/);
+    expect(strip(lines[0] ?? "")).toContain("tentacle");
+  });
+
+  test("colour off: three text rows, no sprite glyph", () => {
+    chalk.level = 0;
+    try {
+      const lines = itemLines(header(), { expandAll: false, width: 80 });
+      expect(lines.length).toBe(3);
+      expect(lines.map(strip).join("\n")).not.toMatch(/[▀▄█]/);
+    } finally {
+      chalk.level = 3;
+    }
+  });
+
+  test("the sprite's colours are the palette's hexes, fg and bg", () => {
+    const row = itemLines(header(), { expandAll: false, width: 80, mascot: true })[1] ?? "";
+    // Painted at level 3: the outline and the body shade appear as truecolor.
+    expect(row).toContain("38;2;123;63;192"); // #7B3FC0, the soft outline
+    expect(row).toContain("48;2;");
+  });
+
+  test("no version: the first line is `tentacle` alone", () => {
+    const lines = itemLines(header({ version: undefined }), { expandAll: false, width: 80 });
+    expect(
+      strip(lines[1] ?? "")
+        .trimEnd()
+        .endsWith("tentacle"),
+    ).toBe(true);
+  });
+
+  test("/save never exports the header", () => {
+    // A header adds nothing to the document: same as an empty transcript, and a
+    // following reply is exported on its own (D2 — never `## Assistant`).
+    expect(transcriptToMarkdown([header()])).toBe(transcriptToMarkdown([]));
+    expect(transcriptToMarkdown([header(), { kind: "assistant", text: "hello" }])).toBe(
+      "## Assistant\n\nhello\n",
+    );
   });
 });

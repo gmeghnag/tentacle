@@ -15,6 +15,7 @@ import type {
   ChatRequest,
   ModelProvider,
   ModelStopReason,
+  ReasoningRecord,
   StreamEvent,
   ToolDefinition,
   Usage,
@@ -27,12 +28,15 @@ import {
 } from "@tentacle/core";
 import {
   type ImageBuildOptions,
-  MAX_INLINE_IMAGES,
+  type ImagePart,
   NO_IMAGES,
+  buildImageOptions,
   imageLimits,
-  resolveImages,
-  selectInlineIds,
+  requestImageBudget,
   strayRefsText,
+  toolImageBudget,
+  toolResultImages,
+  toolResultText,
   userParts,
 } from "./images.ts";
 import { parseSSE } from "./sse.ts";
@@ -63,6 +67,11 @@ export interface OpenAIProviderConfig {
    * documented cloud cap). An image over it is never read or sent.
    */
   readonly maxImageBytes?: number;
+  /**
+   * How many tool-result images one request inlines (newest first), with
+   * `images: true` only. Defaults to `MAX_TOOL_IMAGES` (docs/feat/pdf-images.md Q2).
+   */
+  readonly maxToolImages?: number;
 }
 
 /** Thrown when the endpoint returns a non-2xx response. */
@@ -80,6 +89,64 @@ export class ModelRequestError extends Error {
     );
     this.name = "ModelRequestError";
   }
+}
+
+/**
+ * An error the server sent INSIDE a 200 stream (llama.cpp `error:` field,
+ * OpenAI-style `{error}` object, Anthropic `type:"error"`). It has NO `code`
+ * property on purpose: `retry.ts` reads `error.code` and must never take this
+ * for a transient connection error (docs/fix/model-stream-error.md).
+ */
+export class ModelServerError extends Error {
+  constructor(
+    readonly serverMessage: string,
+    readonly serverType?: string,
+    readonly serverCode?: number | string,
+  ) {
+    const one = serverMessage.replace(/\s+/g, " ").trim();
+    const text = `model server error: ${one}`;
+    super(text.length > 300 ? `${text.slice(0, 299)}…` : text);
+    this.name = "ModelServerError";
+  }
+}
+
+/** The in-band error a parsed payload carries, if it is one of the known shapes. */
+export function inBandError(payload: unknown): ModelServerError | undefined {
+  if (typeof payload !== "object" || payload === null) {
+    return undefined;
+  }
+  const record = payload as Record<string, unknown>;
+  const inner = record.error;
+  if (typeof inner === "string") {
+    return new ModelServerError(inner);
+  }
+  let body: Record<string, unknown>;
+  if (typeof inner === "object" && inner !== null) {
+    body = inner as Record<string, unknown>;
+  } else if (typeof record.message === "string") {
+    body = record;
+  } else {
+    return undefined;
+  }
+  const message =
+    typeof body.message === "string" ? body.message : JSON.stringify(body).slice(0, 200);
+  const code = body.code;
+  return new ModelServerError(
+    message,
+    typeof body.type === "string" ? body.type : undefined,
+    typeof code === "number" || typeof code === "string" ? code : undefined,
+  );
+}
+
+/** The error of a raw `error:` field value: JSON when it parses, else the text itself. */
+export function inBandErrorFromText(raw: string): ModelServerError {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return new ModelServerError(raw);
+  }
+  return inBandError(parsed) ?? new ModelServerError(raw.slice(0, 200));
 }
 
 /** A `retry-after` header (delta-seconds or HTTP-date) in ms; `undefined` if absent or unusable. */
@@ -101,6 +168,7 @@ export function parseRetryAfter(
 }
 
 interface WireChunk {
+  readonly error?: unknown;
   readonly choices?: ReadonlyArray<{
     readonly delta?: {
       readonly content?: string | null;
@@ -128,6 +196,13 @@ export class OpenAIProvider implements ModelProvider {
    * per provider teaches us and no later voice turn pays for it again.
    */
   private reasoningSwitchesRefused = false;
+  /**
+   * This endpoint 400ed a request carrying echoed reasoning and accepted the
+   * same request without it (D9, docs/fix/reasoning-echo.md): the echo is off
+   * for the process. Latched only when the retry SUCCEEDS and the 400 body
+   * named the field; any other 400 falls back for that request alone.
+   */
+  private reasoningEchoRefused = false;
 
   constructor(config: OpenAIProviderConfig) {
     this.config = config;
@@ -164,6 +239,8 @@ export class OpenAIProvider implements ModelProvider {
       request,
       undefined,
       await this.imageOptions(request),
+      false,
+      this.reasoningEchoRefused ? undefined : this.id,
     );
     const templated = await post("/apply-template", {
       messages: payload.messages,
@@ -184,17 +261,14 @@ export class OpenAIProvider implements ModelProvider {
    * a model with no vision must not cost a byte read, and its placeholders say
    * why no image was sent.
    */
-  private async imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
-    const { vision, maxBytes: maxImageBytes } = imageLimits("openai", this.config);
-    const inlined = selectInlineIds(request.messages);
-    return vision
-      ? {
-          images: await resolveImages(request, MAX_INLINE_IMAGES, maxImageBytes),
-          vision,
-          inlined,
-          maxImageBytes,
-        }
-      : { images: new Map(), vision, inlined, maxImageBytes };
+  private imageOptions(request: ChatRequest): Promise<ImageBuildOptions> {
+    const limits = imageLimits("openai", this.config);
+    return buildImageOptions(
+      request,
+      limits,
+      toolImageBudget(this.config.maxToolImages),
+      requestImageBudget("openai", limits),
+    );
   }
 
   /**
@@ -207,12 +281,20 @@ export class OpenAIProvider implements ModelProvider {
     request: ChatRequest,
     images: ImageBuildOptions,
     reasoningOff: boolean,
+    echo: boolean,
   ): Promise<Response> {
     const init: RequestInit = {
       method: "POST",
       headers,
       body: JSON.stringify(
-        buildPayload(this.config.model, request, this.config.maxTokens, images, reasoningOff),
+        buildPayload(
+          this.config.model,
+          request,
+          this.config.maxTokens,
+          images,
+          reasoningOff,
+          echo ? this.id : undefined,
+        ),
       ),
     };
     if (request.signal) {
@@ -230,7 +312,12 @@ export class OpenAIProvider implements ModelProvider {
     // `reasoning: "off"` (a voice turn, C3): the switches first, unless this
     // endpoint already refused them.
     const wantOff = request.reasoning === "off" && !this.reasoningSwitchesRefused;
-    let res = await this.post(headers, request, images, wantOff);
+    // D9: echo the reasoning this provider produced, unless this endpoint
+    // already refused it. `echoing` is true only when there is something to drop.
+    const echoing =
+      !this.reasoningEchoRefused &&
+      request.messages.some((m) => ownOpenAIReasoning(m, this.id) !== undefined);
+    let res = await this.post(headers, request, images, wantOff, echoing);
     if (wantOff && res.status === 400) {
       // F9: one retry WITHOUT them — never a failed turn. Remembered only if
       // the retry SUCCEEDS: a 400 for another cause (context over the limit,
@@ -238,8 +325,27 @@ export class OpenAIProvider implements ModelProvider {
       // nothing about the switches, so latching there would silently reason
       // on every later voice turn of a long-lived daemon.
       await discardBody(res);
-      res = await this.post(headers, request, images, false);
+      res = await this.post(headers, request, images, false, echoing);
       this.reasoningSwitchesRefused = res.ok;
+    }
+    if (echoing && res.status === 400) {
+      // D9: one retry WITHOUT the echoed reasoning, never a failed turn.
+      // Latched only if the retry succeeds AND the 400 named the field:
+      // dropping the echo makes the body smaller, so a size 400 (context over
+      // the limit) is fixed by the retry too and must not switch the echo off
+      // for the rest of a long-lived daemon.
+      const named = namesEchoField(await safeText(res));
+      const off = wantOff && !this.reasoningSwitchesRefused;
+      res = await this.post(headers, request, images, off, false);
+      if (off && res.status === 400) {
+        // Both single drops 400ed (switches kept, then echo kept): one last
+        // try with neither. Only the switches differ from the request just
+        // refused, so its success is F9's evidence and latches them.
+        await discardBody(res);
+        res = await this.post(headers, request, images, false, false);
+        this.reasoningSwitchesRefused = res.ok;
+      }
+      this.reasoningEchoRefused = res.ok && named;
     }
     if (!res.ok || !res.body) {
       throw new ModelRequestError(
@@ -261,8 +367,15 @@ export class OpenAIProvider implements ModelProvider {
      * truncated-reply-silent.md): the caller must not present it as an answer.
      */
     let finishReason: ModelStopReason | undefined;
+    /** The reasoning text and the field it arrived in (D2): echoed back in that field. */
+    let thinking = "";
+    let thinkingField: "reasoning_content" | "reasoning" | undefined;
 
-    for await (const data of parseSSE(res.body, request.signal)) {
+    for await (const item of parseSSE(res.body, request.signal)) {
+      if (item.field === "error") {
+        throw inBandErrorFromText(item.value);
+      }
+      const data = item.value;
       if (data === "[DONE]" || data.length === 0) {
         if (data === "[DONE]") {
           break;
@@ -273,6 +386,10 @@ export class OpenAIProvider implements ModelProvider {
       const chunk = parseChunk(data);
       if (!chunk) {
         continue;
+      }
+      const failure = inBandError(chunk);
+      if (failure) {
+        throw failure;
       }
 
       if (chunk.usage) {
@@ -302,6 +419,8 @@ export class OpenAIProvider implements ModelProvider {
       }
       const reasoning = delta?.reasoning_content ?? delta?.reasoning;
       if (reasoning) {
+        thinkingField ??= delta?.reasoning_content ? "reasoning_content" : "reasoning";
+        thinking += reasoning;
         yield { type: "reasoning", delta: reasoning };
       }
       if (delta?.tool_calls) {
@@ -335,7 +454,11 @@ export class OpenAIProvider implements ModelProvider {
     // No `finish_reason` at all: the body ended mid-reply (`parseSSE` returns
     // quietly on EOF, `sse.ts`), which is missing data, not an answer — report
     // it as "other" rather than letting it look like a finished one.
-    yield doneEvent(usage, finishReason ?? "other");
+    const record: ReasoningRecord | undefined =
+      thinkingField && thinking.length > 0
+        ? { source: this.id, body: { format: "openai", field: thinkingField, text: thinking } }
+        : undefined;
+    yield doneEvent(usage, finishReason ?? "other", record);
   }
 }
 
@@ -357,8 +480,33 @@ function normalizeFinishReason(reason: string): ModelStopReason {
 }
 
 /** `done` with its optional fields only when they were measured. */
-function doneEvent(usage: Usage | undefined, stopReason: ModelStopReason): StreamEvent {
-  return usage ? { type: "done", usage, stopReason } : { type: "done", stopReason };
+function doneEvent(
+  usage: Usage | undefined,
+  stopReason: ModelStopReason,
+  reasoning?: ReasoningRecord,
+): StreamEvent {
+  return {
+    type: "done",
+    ...(usage ? { usage } : {}),
+    stopReason,
+    ...(reasoning ? { reasoning } : {}),
+  };
+}
+
+/**
+ * The reasoning of `message` that THIS provider may send back (D5): its own
+ * record, in the OpenAI-compatible format. Anything else stays in history
+ * unsent.
+ */
+function ownOpenAIReasoning(
+  message: ChatMessage,
+  source: string,
+): { readonly field: "reasoning_content" | "reasoning"; readonly text: string } | undefined {
+  const record = message.reasoning;
+  if (message.role !== "assistant" || !record || record.source !== source) {
+    return undefined;
+  }
+  return record.body.format === "openai" ? record.body : undefined;
 }
 
 function buildPayload(
@@ -367,10 +515,12 @@ function buildPayload(
   defaultMaxTokens?: number,
   options: ImageBuildOptions = NO_IMAGES,
   reasoningOff = false,
+  /** This provider's id when the history's own reasoning is echoed (D3), else unset. */
+  echoSource?: string,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model,
-    messages: req.messages.map((m) => toWireMessage(m, options)),
+    messages: wireMessages(req.messages, options, echoSource),
     stream: true,
     stream_options: { include_usage: true },
   };
@@ -394,9 +544,72 @@ function buildPayload(
   return payload;
 }
 
+/**
+ * The history on the wire (docs/feat/pdf-images.md D7, owner Q1). A `role:"tool"`
+ * message is text only here, so the images of a RUN of tool messages travel in
+ * ONE wire-only `user` message right after the run's last tool message: a line
+ * naming whose images they are, then the `image_url` parts in order. It is never
+ * written to history and is rebuilt identically each request (cache-stable).
+ * Without vision nothing is added (the tool message carries the one reason line).
+ */
+function wireMessages(
+  messages: readonly ChatMessage[],
+  options: ImageBuildOptions,
+  echoSource?: string,
+): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  let pending: { readonly labels: string[]; readonly images: ImagePart[] } = {
+    labels: [],
+    images: [],
+  };
+  const flush = (): void => {
+    if (pending.images.length > 0) {
+      out.push({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `[images from the tool results above — ${pending.labels.join("; ")}]`,
+          },
+          ...pending.images.map((part) => ({
+            type: "image_url",
+            image_url: { url: `data:${part.mimeType};base64,${part.base64}` },
+          })),
+        ],
+      });
+    }
+    pending = { labels: [], images: [] };
+  };
+  for (const message of messages) {
+    if (message.role !== "tool") {
+      flush();
+      out.push(toWireMessage(message, options, echoSource));
+      continue;
+    }
+    const { images, lines } = toolResultImages(message, options);
+    if (images.length > 0) {
+      pending.labels.push(
+        `call ${message.toolCallId ?? "?"}: ${images.map((image) => image.label).join(", ")}`,
+      );
+      pending.images.push(...images);
+    }
+    const wire: Record<string, unknown> = {
+      role: "tool",
+      content: toolResultText(message.content, lines),
+    };
+    if (message.toolCallId) {
+      wire.tool_call_id = message.toolCallId;
+    }
+    out.push(wire);
+  }
+  flush();
+  return out;
+}
+
 function toWireMessage(
   message: ChatMessage,
   options: ImageBuildOptions = NO_IMAGES,
+  echoSource?: string,
 ): Record<string, unknown> {
   // A user message with refs: images first, then its text (docs/feat/attachments-core.md,
   // D10). `image_url` wants a data URL; an image-only prompt keeps its message.
@@ -434,6 +647,10 @@ function toWireMessage(
   if (message.toolCallId) {
     wire.tool_call_id = message.toolCallId;
   }
+  const own = echoSource === undefined ? undefined : ownOpenAIReasoning(message, echoSource);
+  if (own) {
+    wire[own.field] = own.text;
+  }
   return wire;
 }
 
@@ -459,6 +676,14 @@ async function discardBody(res: Response): Promise<void> {
   } catch {
     // already consumed, or no body: nothing to release
   }
+}
+
+/**
+ * D9: does a 400 body name an echoed reasoning field? `reasoning_content`, or
+ * `reasoning` as a whole word — NOT `reasoning_effort` (an F9 switch).
+ */
+function namesEchoField(body: string): boolean {
+  return /\breasoning(_content)?\b/.test(body);
 }
 
 async function safeText(res: Response): Promise<string> {

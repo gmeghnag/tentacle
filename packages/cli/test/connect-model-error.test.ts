@@ -58,6 +58,9 @@ function say(text: string): Response {
 function endpoint(answers: Answer[]) {
   const calls: string[] = [];
   const server = Bun.serve({
+    // Loopback only: a dual-stack port-0 server loses its IPv4 traffic to another
+    // worker's explicit `127.0.0.1:P` bind on macOS (AGENTS.md §9) → a stray 404.
+    hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
       calls.push(String(req.url));
@@ -80,12 +83,26 @@ async function serveAt(baseURL: string, name: string) {
   return handle;
 }
 
-/** A free localhost port, for a daemon that must come back on the same one. */
-async function freePort(): Promise<number> {
-  const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
-  const port = probe.port;
-  probe.stop(true);
-  return port ?? 0;
+/**
+ * Start the daemon on a port OUTSIDE the ephemeral range (macOS 49152–65535,
+ * Linux 32768–60999), so the restart below cannot lose it: port-0 allocation
+ * never hands such a port out, while an explicit `127.0.0.1:P` bind by another
+ * worker DOES take IPv4 traffic from a dual-stack `*:P` port-0 server on macOS
+ * (AGENTS §9). The bind is the probe: a candidate another process owns fails
+ * with `EADDRINUSE` and is retried, so a collision is loud, never silent.
+ */
+async function startOnFreePort(config: TentacleConfig) {
+  for (let i = 0; i < 50; i++) {
+    const port = 20_000 + Math.floor(Math.random() * 10_000);
+    try {
+      const handle = await startDaemon(config, { host: "127.0.0.1", port });
+      stops.push(() => handle.stop());
+      return { handle, port };
+    } catch {
+      // EADDRINUSE: another process owns this number. Pick again.
+    }
+  }
+  throw new Error("no free port outside the ephemeral range");
 }
 
 /** A `serve` config over `baseURL`, in its own project dir (own store + lock). */
@@ -277,6 +294,9 @@ test("(2) a carried contextWindow never moves a serve daemon's own window", asyn
   // from the request the daemon sends.
   const bodies: string[] = [];
   const server = Bun.serve({
+    // Loopback only: a dual-stack port-0 server loses its IPv4 traffic to another
+    // worker's explicit `127.0.0.1:P` bind on macOS (AGENTS.md §9) → a stray 404.
+    hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
       bodies.push(await req.text());
@@ -313,6 +333,9 @@ test("(2) a carried contextWindow never moves a serve daemon's own window", asyn
 test("(R5) a restarted daemon: the client re-opens the same session and sends", async () => {
   const bodies: string[] = [];
   const server = Bun.serve({
+    // Loopback only: a dual-stack port-0 server loses its IPv4 traffic to another
+    // worker's explicit `127.0.0.1:P` bind on macOS (AGENTS.md §9) → a stray 404.
+    hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
       bodies.push(await req.text());
@@ -323,9 +346,7 @@ test("(R5) a restarted daemon: the client re-opens the same session and sends", 
   // ONE config (own project dir ⇒ own store): the second daemon restores the
   // record the first one wrote, because both are the same project.
   const config = await projectConfig(`http://127.0.0.1:${server.port}/v1`, "restart");
-  const port = await freePort();
-  const first = await startDaemon(config, { host: "127.0.0.1", port });
-  stops.push(() => first.stop());
+  const { handle: first, port } = await startOnFreePort(config);
 
   // What the client SENDS, generation by generation (the tap keeps each channel's
   // own handlers: a spread would drop the class's methods).

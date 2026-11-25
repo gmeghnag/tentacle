@@ -1,3 +1,4 @@
+import type { WorkflowRow } from "@tentacle/protocol";
 /**
  * The panels' state rules and executors (docs/feat/app-decomposition.md S7).
  * Every DECISION stays where it was and stays pure — `panels/registry.ts` +
@@ -24,6 +25,7 @@
  */
 import { useCallback, useRef } from "react";
 import type { SessionController, SessionDirectory } from "./app-types.ts";
+import { oneLine } from "./commands.ts";
 import { SCHEDULE_UNSUPPORTED } from "./commands/schedule.ts";
 import { type OpenPanel, applyPanel } from "./panel.ts";
 import { isScheduleOpen, withSchedulesData, withSchedulesState } from "./panels/schedule.ts";
@@ -37,8 +39,23 @@ import {
   withSessionsState,
 } from "./panels/sessions.ts";
 import type { ArtifactsPanel } from "./panels/types.ts";
+import {
+  isWorkflowOpen,
+  withWorkflowDetail,
+  withWorkflowState,
+  withWorkflowsData,
+} from "./panels/workflow.ts";
 import type { ScheduleDockRow, SchedulesState } from "./schedule-view.ts";
 import type { SessionsState } from "./sessions-panel.ts";
+import type { CatalogueView } from "./workflow-view.ts";
+import {
+  WORKFLOW_DETAIL_UNSUPPORTED,
+  WORKFLOW_UNSUPPORTED,
+  type WorkflowDetailState,
+  type WorkflowState,
+  stepIdText,
+  workflowReplyNotice,
+} from "./workflow-view.ts";
 
 /** A chart preview's answer (docs/feat/model-charts.md C8): the bytes, or the failure. */
 export type ArtifactsPreview = NonNullable<ArtifactsPanel["preview"]>;
@@ -94,6 +111,27 @@ export interface PanelsLayer {
    * it the panel is the snapshot it was opened on.
    */
   setSchedulesData(rows: readonly ScheduleDockRow[] | undefined, now: number): void;
+  /** Write the `/workflow` panel's cursor (its own move answer). */
+  setWorkflowState(state: WorkflowState): void;
+  /**
+   * `o`: read one step's `prompt`/`report`, then write it on the panel IF that
+   * step is still the one shown. A refusal or a failure is a NOTICE (the panel
+   * keeps its "ask for it" line, never a blank report that looks like an empty
+   * execution).
+   */
+  fetchWorkflowStep(runId: string, stepId: string, startedGen: number): void;
+  /** `r`: ask the daemon to re-run one step; the reply is a notice, never a throw. */
+  rerunWorkflowStep(runId: string, stepId: string, startedGen: number): void;
+  /**
+   * The open `/workflow` panel follows a REPORT (`withSchedulesData`' counterpart):
+   * the new runs, re-stamped, cursor clamped, detail dropped when its step moved.
+   */
+  setWorkflowsData(rows: readonly WorkflowRow[] | undefined, now: number): void;
+  /**
+   * The open `/workflow` panel's catalogue section (slice 2b / D8): its own
+   * answer, which lands on the section without touching the runs or the cursor.
+   */
+  setCatalogueData(catalogue: CatalogueView, now: number): void;
   /** Delete one scheduled wake; the row leaves on the daemon's own frame. */
   deleteSchedule(id: string, startedGen: number): void;
   /**
@@ -181,6 +219,100 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     (rows: readonly ScheduleDockRow[] | undefined, now: number) =>
       setPanel((p) => withSchedulesData(p, rows, now)),
     [setPanel],
+  );
+
+  /** Write the `/workflow` panel's cursor (its own move answer, workflows-ui D3). */
+  const setWorkflowState = useCallback(
+    (state: WorkflowState) => setPanel((p) => withWorkflowState(p, state)),
+    [setPanel],
+  );
+
+  /** An open `/workflow` panel follows the daemon's report (workflows-ui D3). */
+  const setWorkflowsData = useCallback(
+    (rows: readonly WorkflowRow[] | undefined, now: number) =>
+      setPanel((p) => withWorkflowsData(p, rows, now)),
+    [setPanel],
+  );
+
+  /**
+   * An open `/workflow` panel's "Workflows" section follows the catalogue read
+   * (slice 2b / D8): the project's files, independently of the run feed.
+   */
+  const setCatalogueData = useCallback(
+    (catalogue: CatalogueView, now: number) =>
+      setPanel((p) =>
+        withWorkflowsData(p, p?.kind === "workflow" ? p.data : undefined, now, catalogue),
+      ),
+    [setPanel],
+  );
+
+  /**
+   * `o`: read ONE step execution's `prompt`/`report` (docs/feat/workflows-ui.md
+   * D1/D3). The loading state is written at once (the panel says it is reading);
+   * the answer is dropped unless this is still the SAME panel generation, and the
+   * kind's own rule (`withWorkflowDetail`) additionally drops it unless the step
+   * shown is still the step asked for — a slow read must never paint another
+   * step's report.
+   */
+  const fetchWorkflowStep = useCallback(
+    (runId: string, stepId: string, startedGen: number): void => {
+      const session = sessionRef.current;
+      if (!session?.workflowStep) {
+        pushNotice(WORKFLOW_DETAIL_UNSUPPORTED);
+        return;
+      }
+      const applies = (): boolean =>
+        panelGenRef.current === startedGen && isWorkflowOpen(panelRef.current);
+      setPanel((p) => withWorkflowDetail(p, { runId, stepId, phase: "loading" }));
+      void session.workflowStep(runId, stepId).then(
+        (result) => {
+          if (!applies()) return;
+          const detail: WorkflowDetailState =
+            "unsupported" in result
+              ? { runId, stepId, phase: "unsupported" }
+              : {
+                  runId,
+                  stepId,
+                  phase: "done",
+                  ...(result.detail ? { detail: result.detail } : {}),
+                };
+          setPanel((p) => withWorkflowDetail(p, detail));
+        },
+        (e: unknown) => {
+          if (!applies()) return;
+          // Back to "ask for it", plus why: an empty right column would read as
+          // "this step produced nothing".
+          setPanel((p) => withWorkflowDetail(p, { runId, stepId, phase: "done" }));
+          pushNotice(`_Could not read ${stepIdText(stepId)}: ${oneLine(String(e))}_`);
+        },
+      );
+    },
+    [sessionRef, pushNotice, panelRef, setPanel],
+  );
+
+  /**
+   * `r`: ask the daemon to re-run ONE step. The run's list follows on the
+   * daemon's own `workflows` frame, never on this answer.
+   */
+  const rerunWorkflowStep = useCallback(
+    (runId: string, stepId: string, startedGen: number): void => {
+      const session = sessionRef.current;
+      if (!session?.workflow) {
+        pushNotice(WORKFLOW_UNSUPPORTED);
+        return;
+      }
+      void session.workflow({ action: "rerun_step", runId, stepId }).then(
+        (result) => {
+          if (panelGenRef.current !== startedGen || !isWorkflowOpen(panelRef.current)) return;
+          pushNotice(workflowReplyNotice(`Re-running ${stepIdText(stepId)}.`, result));
+        },
+        (e: unknown) => {
+          if (panelGenRef.current !== startedGen || !isWorkflowOpen(panelRef.current)) return;
+          pushNotice(`_${oneLine(String(e))}_`);
+        },
+      );
+    },
+    [sessionRef, pushNotice, panelRef],
   );
 
   const claimArtifactsPreview = useCallback((): number => {
@@ -285,6 +417,11 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     setSessionsState,
     setSchedulesState,
     setSchedulesData,
+    setWorkflowState,
+    setWorkflowsData,
+    setCatalogueData,
+    fetchWorkflowStep,
+    rerunWorkflowStep,
     claimArtifactsPreview,
     setArtifactsPreview,
     deleteSchedule,

@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type Follow,
+  LANDING_BATCH,
   LANDING_REVEAL_MS,
   LANDING_ROUNDS,
   type Landing,
@@ -17,7 +18,9 @@ import {
   jumpPillText,
   jumped,
   landingAwaiting,
+  landingBatch,
   landingDone,
+  landingEnded,
   landingOwns,
   landingPending,
   landingQuiet,
@@ -26,7 +29,9 @@ import {
   landingStep,
   nearBottom,
   reattachLanding,
+  restsShort,
   scrolled,
+  settleStep,
   shown,
   viewportChanged,
 } from "../src/follow.ts";
@@ -232,7 +237,9 @@ describe("the reveal timer: the list is shown even when no measurement repeats (
     const one = landingStep(landingStart, { content: 40000, viewport: 800 }, true, ROWS);
     const revealed = landingReveal(one.state, { content: 44000, viewport: 800 }, true, ROWS);
     expect(revealed.step).toEqual({ state: initialFollow, scrollTo: 43200, animated: false });
-    expect(revealed.state).toEqual(landingDone);
+    // Hands over as the silent revealed tail (fix/mobile-open-at-bottom), not at once.
+    expect(revealed.state.settling).toBe(false);
+    expect(revealed.state.revealed).toBe(true);
   });
 
   test("nothing measured: the empty state is still SHOWN, and the rows hide it again for their own landing", () => {
@@ -256,6 +263,57 @@ describe("the reveal timer: the list is shown even when no measurement repeats (
     expect(LANDING_REVEAL_MS).toBeGreaterThan(0);
     // Short enough to be a settle, long enough to cover a landing scroll's frame.
     expect(LANDING_REVEAL_MS).toBeLessThanOrEqual(500);
+  });
+});
+
+describe("an OPENING landing the reveal timer reaches mid-growth stays silent (fix/mobile-open-at-bottom)", () => {
+  test("growth after the reveal is followed with NON-animated scrolls, never `contentGrew`", () => {
+    const one = landingStep(landingStart, { content: 3000, viewport: 800 }, true, ROWS);
+    // A busy JS thread (the list -> session transition): the quiet window passes
+    // while the list is still rendering its tail, so the timer reveals mid-growth.
+    const revealed = landingReveal(one.state, { content: 3000, viewport: 800 }, true, ROWS);
+    expect(revealed.state.settling).toBe(false);
+    const grown = landingStep(revealed.state, { content: 6000, viewport: 800 }, true, ROWS);
+    expect(grown.step).toEqual({ state: initialFollow, scrollTo: 5200, animated: false });
+    expect(landingOwns(revealed.state, grown.state, true)).toBe(true);
+    // A repeated height ends it; the next growth is the ordinary animated follow.
+    const repeated = landingStep(grown.state, { content: 6000, viewport: 800 }, true, ROWS);
+    expect(repeated.state).toEqual(landingDone);
+    expect(repeated.step).toBeNull();
+  });
+
+  test("growth that never repeats is bounded by LANDING_ROUNDS", () => {
+    let state: Landing = landingReveal(
+      landingStep(landingStart, { content: 3000, viewport: 800 }, true, ROWS).state,
+      { content: 3000, viewport: 800 },
+      true,
+      ROWS,
+    ).state;
+    for (let i = 1; i <= LANDING_ROUNDS + 1; i++) {
+      state = landingStep(state, { content: 3000 + i * 500, viewport: 800 }, true, ROWS).state;
+    }
+    expect(state).toEqual(landingDone);
+  });
+
+  test("the bound ending a hidden opening landing enters the silent tail (review round 1, finding 1)", () => {
+    let state: Landing = landingStart;
+    for (let i = 1; i <= LANDING_ROUNDS; i++) {
+      state = landingStep(state, { content: 3000 + i * 500, viewport: 800 }, true, ROWS).state;
+    }
+    expect(landingPending(state)).toBe(true);
+    const grown = landingStep(state, { content: 20000, viewport: 800 }, true, ROWS);
+    expect(grown.step?.animated).toBe(false);
+    expect(landingOwns(state, grown.state, true)).toBe(true);
+  });
+
+  test("a second quiet reveal hands the list back; a reader scrolled up is never yanked", () => {
+    const first = landingReveal(landingStart, LONG, true, ROWS);
+    expect(landingReveal(first.state, LONG, true, ROWS)).toEqual({
+      state: landingDone,
+      step: null,
+    });
+    const reading = landingStep(first.state, { content: 6000, viewport: 800 }, false, ROWS);
+    expect(reading).toEqual({ state: landingDone, step: null });
   });
 });
 
@@ -660,5 +718,145 @@ describe("settleStep — following, but parked short of the true end", () => {
     const { settleStep } = await import("../src/follow.ts");
     expect(settleStep(initialFollow, { offset: 0, content: 0, viewport: 600 })).toBeNull();
     expect(settleStep(initialFollow, { offset: 0, content: 400, viewport: 600 })).toBeNull();
+  });
+});
+
+describe("a landing that ENDS re-checks where it came to rest (fix/mobile-open-long-session)", () => {
+  const at = (offset: number, content: number) => ({ offset, content, viewport: 800 });
+
+  test("landingEnded: only the pending -> not pending edge", () => {
+    expect(landingEnded(landingStart, landingStart)).toBe(false);
+    expect(landingEnded(landingStart, landingDone)).toBe(true);
+    expect(landingEnded(landingQuiet, landingDone)).toBe(true);
+    expect(landingEnded(landingDone, landingDone)).toBe(false);
+    // a hidden landing that hands over into the silent tail is still pending
+    const tail = landingReveal(landingStart, LONG, true, ROWS).state;
+    expect(landingEnded(landingStart, tail)).toBe(false);
+    expect(landingEnded(tail, landingDone)).toBe(true);
+  });
+
+  test("the landing's own last scroll came to rest SHORT of the end: the settle step fixes it, SILENTLY", () => {
+    // The scroll went to 5447 against a stale end; the cells then grew the content
+    // to 5770+800: the list rests 323 pt (the QA's 2 turns) above the true end.
+    const step = settleStep(initialFollow, at(5447, 6570), false);
+    expect(step).toEqual({ state: initialFollow, scrollTo: 5770, animated: false });
+  });
+
+  test("a list already at its end, or a reader scrolled up, is never moved", () => {
+    expect(settleStep(initialFollow, at(5770, 6570), false)).toBeNull();
+    expect(settleStep({ following: false, unseen: false }, at(100, 6570), false)).toBeNull();
+  });
+
+  test("the default stays animated (the ordinary settle check is unchanged)", () => {
+    expect(settleStep(initialFollow, at(5447, 6570))?.animated).toBe(true);
+  });
+});
+
+describe("the landing stays HIDDEN until the list rests at its end (fix/mobile-open-long-session)", () => {
+  const M = { content: 6570, viewport: 800 }; // true end 5770
+  const SHORT = 5447; // 323 pt short: the QA's two turns
+
+  test("restsShort: unknown offset, short list and slack are never short", () => {
+    expect(restsShort(M, null)).toBe(false);
+    expect(restsShort(M, 5770)).toBe(false);
+    expect(restsShort(M, 5769)).toBe(false);
+    expect(restsShort(M, SHORT)).toBe(true);
+    expect(restsShort({ content: 500, viewport: 800 }, 0)).toBe(false);
+  });
+
+  test("a repeated height does not reveal a list that rests short: one more hidden round", () => {
+    const first = landingStep(landingStart, M, true, ROWS, 0);
+    const repeated = landingStep(first.state, M, true, ROWS, SHORT);
+    expect(repeated.state.settling).toBe(true);
+    expect(repeated.step).toEqual({ state: initialFollow, scrollTo: 5770, animated: false });
+    // at its end, the same repeat reveals (as before)
+    const done = landingStep(first.state, M, true, ROWS, 5770);
+    expect(done.state.settling).toBe(false);
+  });
+
+  test("the quiet timer re-scrolls silently and stays hidden while short, reveals once at the end", () => {
+    const hidden = landingStep(landingStart, M, true, ROWS, 0).state;
+    const again = landingReveal(hidden, M, true, ROWS, SHORT);
+    expect(again.state.settling).toBe(true);
+    expect(again.step).toEqual({ state: initialFollow, scrollTo: 5770, animated: false });
+    expect(landingPending(again.state)).toBe(true);
+    const shown = landingReveal(again.state, M, true, ROWS, 5770);
+    expect(shown.state.settling).toBe(false);
+  });
+
+  test("it is BOUNDED: a list that never reaches its end is still revealed", () => {
+    let state: Landing = landingStep(landingStart, M, true, ROWS, 0).state;
+    let rounds = 0;
+    while (state.settling && rounds++ < LANDING_ROUNDS * 2) {
+      state = landingReveal(state, M, true, ROWS, SHORT).state;
+    }
+    expect(state.settling).toBe(false);
+    expect(rounds).toBeLessThanOrEqual(LANDING_ROUNDS);
+  });
+
+  test("a reader scrolled up is never re-scrolled, and an unknown offset changes nothing", () => {
+    const hidden = landingStep(landingStart, M, true, ROWS, 0).state;
+    expect(landingReveal(hidden, M, false, ROWS, SHORT)).toEqual({
+      state: landingDone,
+      step: null,
+    });
+    expect(landingReveal(hidden, M, true, ROWS).state.settling).toBe(false);
+  });
+});
+
+describe("the bound does not show the list in the tick of its own scroll (fix/mobile-open-long-session-2)", () => {
+  // QA 25/11: 57 turns (114 rows) opened ~1 turn short. The landing's 12th measurement
+  // (content grew 5175 → 5360) hit the bound, scrolled AND revealed in the same
+  // tick; the native view painted the previous end and nothing ever re-scrolled it.
+  const grow = (n: number) => ({ content: 3000 + n * 500, viewport: 800 });
+  const toBound = (): Landing => {
+    let state: Landing = landingStart;
+    for (let i = 1; i < LANDING_ROUNDS; i++) {
+      state = landingStep(state, grow(i), true, ROWS).state;
+    }
+    return state;
+  };
+
+  test("the measurement that hits the bound scrolls silently but stays hidden", () => {
+    const hit = landingStep(toBound(), grow(LANDING_ROUNDS), true, ROWS);
+    expect(hit.step?.animated).toBe(false);
+    expect(hit.step?.scrollTo).toBe(endOffset(grow(LANDING_ROUNDS)));
+    expect(hit.state.settling).toBe(true);
+  });
+
+  test("the quiet timer then shows it, into the silent tail", () => {
+    const hit = landingStep(toBound(), grow(LANDING_ROUNDS), true, ROWS);
+    const shownNow = landingReveal(hit.state, grow(LANDING_ROUNDS), true, ROWS);
+    expect(shownNow.state.settling).toBe(false);
+    expect(landingPending(shownNow.state)).toBe(true);
+    expect(shownNow.step?.animated).toBe(false);
+  });
+
+  test("a growth while capped is not hidden again: the bound shows it into the tail", () => {
+    const hit = landingStep(toBound(), grow(LANDING_ROUNDS), true, ROWS);
+    const more = landingStep(hit.state, grow(LANDING_ROUNDS + 1), true, ROWS);
+    expect(more.state.settling).toBe(false);
+    expect(more.step?.animated).toBe(false);
+  });
+
+  test("a reader scrolled up is revealed in place, never yanked", () => {
+    const hit = landingStep(toBound(), grow(LANDING_ROUNDS), false, ROWS);
+    expect(hit).toEqual({ state: landingDone, step: null });
+  });
+});
+
+// fix/mobile-open-long-session-3: a ~400-message opening revealed mid-growth.
+describe("landingBatch: a hidden landing renders its window in few rounds", () => {
+  test("hidden (settling) landing renders a big batch; a shown list keeps the default", () => {
+    expect(landingBatch(landingStart.settling)).toBe(LANDING_BATCH);
+    expect(landingBatch(landingDone.settling)).toBeUndefined();
+    expect(landingBatch(landingQuiet.settling)).toBeUndefined();
+  });
+
+  test("the batch is far above the FlatList default of 10 (the knob that ends growth in few rounds)", () => {
+    // The jump branch of VirtualizeUtils renders the last `maxToRenderPerBatch + 1`
+    // rows in ONE pass (windowSize does not bound it), so the batch must dwarf the
+    // 10-row default, or a long opening still outlasts LANDING_ROUNDS.
+    expect(LANDING_BATCH).toBeGreaterThanOrEqual(LANDING_ROUNDS * 10);
   });
 });

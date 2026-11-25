@@ -256,6 +256,55 @@ describe("the hook sees exactly the watched updates, in emit order", () => {
     });
   });
 
+  test("a `workflows` update reaches the hook (slice 9: a run's end is pushable)", async () => {
+    // docs/feat/agent-workflows.md slice 9. A run's end is reported ONLY on the
+    // session's `workflows` update — full state, on every step of any run — so if
+    // the hook's filter does not widen to it, no run end can ever be pushed.
+    // Mutation: remove `update.type !== "workflows"` from `offerPush` → this
+    // fails, and so would every run-end push (M3 of the slice's mutation table).
+    const spy = new SpyObserver();
+    const d = daemon({ script: noTools, observer: spy });
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    const hosted = d.host.get("S");
+    if (hosted === undefined) throw new Error("no session");
+    // The daemon's own publisher, the one every run state change goes through.
+    (hosted as unknown as { publishWorkflows(rows: unknown[]): void }).publishWorkflows([
+      {
+        runId: "wf-1",
+        name: "task",
+        version: 1,
+        hash: "a".repeat(64),
+        state: "ok",
+        tokens: 0,
+        startedAt: 1,
+        endedAt: 2,
+        // Every field the wire row requires (a partial row is refused by
+        // `publishWorkflows`' schema check and never reaches the hook).
+        history: [],
+        historyDropped: 0,
+        steps: [
+          {
+            id: "plan",
+            kind: "agent",
+            where: "local",
+            state: "ok",
+            attempt: 1,
+            round: 0,
+            next: null,
+            onFail: null,
+            retry: 0,
+          },
+        ],
+      },
+    ]);
+    await flush();
+    expect(spy.types()).toContain("workflows");
+    const rows = a.of("workflows");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.runs.map((r) => r.runId)).toEqual(["wf-1"]);
+  });
+
   test("session_closed reaches the hook (its timers must not outlive the session)", async () => {
     const spy = new SpyObserver();
     const d = daemon({ script: noTools, observer: spy });

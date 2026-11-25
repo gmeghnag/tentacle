@@ -198,21 +198,6 @@ describe("a harness line is left-aligned behind a glyph column", () => {
     expect((unjoined[0]?.props.style as readonly unknown[])[1]).toBeUndefined();
   });
 
-  test("a separator stays centred and ruled, and takes no glyph", () => {
-    const nodes = draw(
-      { text: "compacted · ctx 1k → ~1k", separator: true },
-      { glyph: null, joined: true },
-    );
-    expect(textNode(nodes, "compacted · ctx 1k → ~1k")?.props.style).toEqual([
-      theme.typography.footnote,
-      { textAlign: "center" },
-      { color: theme.lightPalette.sec },
-    ]);
-    // Two rules around it (above and below), and no glyph text at all.
-    expect(all(nodes, "View").filter((n) => n.props.style !== undefined).length).toBeGreaterThan(0);
-    expect(texts(nodes)).toEqual(["compacted · ctx 1k → ~1k"]);
-  });
-
   test("no look (a row drawn on its own) still shows its own level's glyph", () => {
     // The walk of a warn notice with NO look prop: the renderer falls back to the
     // row's `level`, so a component test or a row outside a list reads correctly.
@@ -293,6 +278,18 @@ describe("SessionScreen hands each notice its look", () => {
 
   test("`looks` is in extraData, so a block's head re-renders when a neighbour arrives", () => {
     expect(src).toMatch(/rowExtraData = useMemo\([\s\S]{0,600}looks,[\s\S]{0,200}\[/);
-    expect(src).toMatch(/layout,\n\s+looks,\n\s+\],/);
+    // `looks` is a DEPENDENCY of the memo, not merely a member of the object it
+    // builds — a mutation that drops it from `[...]` leaves the row un-re-rendered.
+    // Asserted as membership: a later switch appends its own entry
+    // (`compactShell`, docs/feat/shell-intent-line.md §7), so its position is not
+    // this test's business.
+    const deps = /rowExtraData = useMemo\(\s*\(\) => \(\{[\s\S]*?\}\s*\),\s*\[([\s\S]*?)\]/.exec(
+      src,
+    );
+    const names = (deps?.[1] ?? "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter((name) => name !== "");
+    expect(names).toContain("looks");
   });
 });

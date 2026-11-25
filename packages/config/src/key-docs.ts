@@ -304,6 +304,27 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Unset: the provider default (anthropic 3.75 MB, an OpenAI-compatible endpoint 5 MB). An image over it is never read or sent: the model sees a placeholder naming the image and the limit, so an over-limit image can never 400 every later turn of the session.",
     example: "3932160",
   },
+  "model.imageDetail": {
+    summary: "The detail image_view sends a PDF's picture at: auto, low or high.",
+    kind: "leaf",
+    type: "enum",
+    values: ["auto", "low", "high"],
+    scope: "both",
+    carried: "no",
+    details:
+      'Default "auto": the model chooses per call ("low" ≤ 768 px for a picture\'s overall content, "high" ≤ 1568 px for small text). "low" or "high" forces it and hides the choice.',
+    example: "low",
+  },
+  "model.imageTokens": {
+    summary: "Tokens one image costs the context estimate (prune and the meter).",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    details:
+      "Unset: the provider's estimate (anthropic 1600, an OpenAI-compatible endpoint 3200, rounded up from a measured Qwen ≈3.1k). Raise it if a local model charges more per image.",
+    example: "3200",
+  },
   "model.images": {
     summary: "Whether this model takes images at all (an attached screenshot reaches it).",
     kind: "leaf",
@@ -678,6 +699,67 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Each name must be a `models` entry. When set, `agent_task` takes an optional `model` argument limited to these names, and its description lists them with their `description`; any other name is an error and no sub-agent starts. On `run`/`attach` it applies too, and an entry listed here is one a pod may ask for.",
     example: '["fast", "claude"]',
   },
+  harnesses: {
+    summary: "Other agent harnesses that can run a sub-agent, keyed by instance name.",
+    kind: "section",
+    type: "map",
+    scope: "both",
+    carried: "no",
+    details:
+      "Only `claude-code` exists in this version, and it is on by default: when its `command` is on PATH the agent is offered an `agent_task` type `claude` (Claude Code, run headless in its own git worktree holding a snapshot of your tree). Laptop and `serve` only: a pod (`run`/`attach`) never offers it and ignores this key. No spending cap; each report ends with the run's list-price cost, the 5 h / 7 d plan usage and the `claude --resume` session.",
+  },
+  "harnesses.*": {
+    summary: "One harness instance's settings (`claude-code`).",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "harnesses.*.adapter": {
+    summary: "Which adapter the instance runs on; defaults to the instance name.",
+    kind: "leaf",
+    type: "enum",
+    values: ["claude-code"],
+    scope: "both",
+    carried: "no",
+    example: '"claude-code"',
+  },
+  "harnesses.*.enabled": {
+    summary: "Offer this harness's sub-agent type (default on).",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    details:
+      "Unset means on. Off: the `claude` type is never offered. On: it is offered only when `command` is found on PATH; its version is checked at the first run.",
+    example: "false",
+  },
+  "harnesses.*.command": {
+    summary: "The executable to run (unset: `claude`).",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    example: '"/opt/homebrew/bin/claude"',
+  },
+  "harnesses.*.model": {
+    summary: "The model when an `agent_task` call names none (unset: `opus`).",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "Passed to the harness verbatim: for Claude Code an alias (`opus`, `sonnet`, `haiku`, each resolved by Claude Code to the latest) or a full model id. Not a `models` entry. The agent may name another per call with `agent_task`'s `model`.",
+    example: '"sonnet"',
+  },
+  "harnesses.*.idleMinutes": {
+    summary: "Hang guard: a run with no output for this many minutes is stopped (unset: 15).",
+    kind: "leaf",
+    type: "number",
+    scope: "both",
+    carried: "no",
+    details: "Paused while the run waits on a question. Not a spending cap.",
+    example: "15",
+  },
   contextAwareness: {
     summary: "Tell the model how full its context is, once per step of the window.",
     kind: "section",
@@ -1003,6 +1085,24 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "A terminal cannot report that its font lacks the braille patterns, so a chart would draw as boxes; `blocks` uses the quadrant blocks instead (2×2 dots per cell, less detail but present in most fonts). A display setting of this laptop — never carried to a pod.",
     example: '"blocks"',
+  },
+  beta: {
+    summary: "Opt-in display features still being tried; off unless set.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "beta.compactShell": {
+    summary:
+      "No effect on the TUI any more: a `shell` row has one shape (the phone still honours it).",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => false,
+    details:
+      "Retired in the TUI (docs/fix/tui-shell-row-collapsed): every `shell` row now shows its command — with `exit=N` when N is not 0 — and its output only with ctrl+o, so this key changes nothing there. The phone's own switch (`apps/mobile`) still reads it. The key stays accepted so a config that sets it keeps loading. A display setting of this laptop — never carried to a pod. An older tentacle rejects a config file that has a `beta` section.",
+    example: "true",
   },
   sessions: {
     summary: "The laptop's session logs: what they keep of a history that was replaced.",

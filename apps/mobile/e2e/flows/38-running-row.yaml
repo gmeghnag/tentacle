@@ -1,0 +1,70 @@
+appId: so.tentacle.app
+---
+# 38 (docs/fix/mobile-running-row.md): the live running row of a described
+# `shell` call — the WHOLE sentence (ellipsized at the row's width, no clipped
+# glyph), the running node a blinking dot (not a turning ring) — the live
+# `Thinking` footer, and the tap detail WITHOUT the folded reasoning. Twice:
+# default theme with compactShell off, then the Figtree beta theme with
+# compactShell on. Each shot light + dark (`_shot`). Its own session (`RUNROW_ID`).
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${RUNROW_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${RUNROW_ID}"
+- assertVisible:
+    id: "session-view"
+- runFlow:
+    file: _runrow-turn.yaml
+    env:
+      PHASE: "38-default"
+# --- beta: Figtree theme + compactShell --------------------------------------
+- launchApp
+- runFlow: _unlock.yaml
+- assertVisible:
+    id: "computers-list"
+- tapOn:
+    id: "open-settings"
+- scrollUntilVisible:
+    element:
+      id: "beta-theme-figtree"
+    direction: DOWN
+- tapOn:
+    id: "beta-theme-figtree"
+- assertVisible:
+    id: "beta-theme-figtree"
+    checked: true
+- scrollUntilVisible:
+    element:
+      id: "beta-compact-shell"
+    direction: DOWN
+- tapOn:
+    id: "beta-compact-shell"
+- assertVisible:
+    id: "beta-compact-shell"
+    checked: true
+- scrollUntilVisible:
+    element:
+      id: "settings-back"
+    direction: UP
+- tapOn:
+    id: "settings-back"
+- tapOn:
+    id: "computer-${output.computerId}"
+- scrollUntilVisible:
+    element:
+      id: "session-${RUNROW_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${RUNROW_ID}"
+- assertVisible:
+    id: "session-view"
+- runFlow:
+    file: _runrow-turn.yaml
+    env:
+      PHASE: "38-beta"

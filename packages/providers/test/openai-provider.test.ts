@@ -81,6 +81,11 @@ describe("OpenAIProvider.stream", () => {
       type: "done",
       usage: { promptTokens: 10, completionTokens: 5 },
       stopReason: "tool_calls",
+      // reasoning-echo D2: the streamed reasoning rides on `done`.
+      reasoning: {
+        source: "openai:test-model",
+        body: { format: "openai", field: "reasoning_content", text: "thinking" },
+      },
     });
   });
 

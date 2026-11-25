@@ -13,13 +13,20 @@
  * chooses refs, never paths).
  */
 import { randomUUID } from "node:crypto";
-import { readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { copyFile, link, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { isValidSessionId } from "@tentacle/agent";
 import { ATTACHMENT_ID_RE } from "@tentacle/protocol";
 
 export const BLOB_DIR_SUFFIX = ".attachments";
+
+/**
+ * `<uid>.attachments/tool-ids`: one blob id per line, the TOOL pictures
+ * (docs/feat/image-view.md, fix round 1) — so the tool sub-cap survives a
+ * `serve` restart. Not an id, so `index` skips it (an older build too).
+ */
+export const TOOL_MARKS = "tool-ids";
 
 /** `.<sha256>.tmp-<pid>-<hex>`: a write's temp inside a blob dir. */
 const BLOB_TEMP = /^\.[0-9a-f]{64}\.tmp-(\d+)-[0-9a-f]+$/;
@@ -162,9 +169,47 @@ export class SessionBlobs {
     }
   }
 
-  /** temp + fsync + rename. Idempotent: a file already there at the same size is kept. */
-  async write(uid: string, id: string, bytes: Uint8Array): Promise<void> {
+  /**
+   * The ids marked as tool pictures (`TOOL_MARKS`, docs/feat/image-view.md fix
+   * round 1), synchronous like `index`. A line that is not an id is skipped;
+   * no file → empty.
+   */
+  toolIds(uid: string): Set<string> {
+    try {
+      const text = readFileSync(join(this.blobDir(uid), TOOL_MARKS), "utf8");
+      return new Set(text.split("\n").filter((line) => ATTACHMENT_ID_RE.test(line)));
+    } catch {
+      return new Set();
+    }
+  }
+
+  /** Append `ids` to the tool marks, fsynced (a duplicate line is harmless). */
+  private async markTool(uid: string, ids: readonly string[]): Promise<void> {
+    if (ids.length === 0) return;
+    for (const id of ids) this.blobPath(uid, id); // validates every id before any write
+    const dir = this.blobDir(uid);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const handle = await open(join(dir, TOOL_MARKS), "a", 0o600);
+    try {
+      await handle.writeFile(ids.map((id) => `${id}\n`).join(""));
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /**
+   * temp + fsync + rename. Idempotent: a file already there at the same size is kept.
+   * `tool` marks it a tool picture first (a crash between: a mark without a blob).
+   */
+  async write(
+    uid: string,
+    id: string,
+    bytes: Uint8Array,
+    opts?: { readonly tool?: boolean },
+  ): Promise<void> {
     const path = this.blobPath(uid, id);
+    if (opts?.tool === true) await this.markTool(uid, [id]);
     if ((await sizeOf(path)) === bytes.length) return;
     const dir = this.blobDir(uid);
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -181,16 +226,20 @@ export class SessionBlobs {
   /**
    * Give `toUid` the blobs `ids` of `fromUid` (a `/clear` fork): a hardlink,
    * or a copy where the file system cannot link. A source id that is not on
-   * disk is skipped; one the target already has is kept.
+   * disk is skipped; one the target already has is kept. A tool mark of the
+   * source goes with its blob (marked first, like `write`).
    */
   async link(fromUid: string, toUid: string, ids: Iterable<string>): Promise<void> {
     const targetDir = this.blobDir(toUid);
+    const marks = this.toolIds(fromUid);
     let made = false;
     for (const id of ids) {
       const from = this.blobPath(fromUid, id);
       const to = this.blobPath(toUid, id);
       const size = await sizeOf(from);
-      if (size === null || (await sizeOf(to)) === size) continue;
+      if (size === null) continue;
+      if (marks.has(id)) await this.markTool(toUid, [id]);
+      if ((await sizeOf(to)) === size) continue;
       if (!made) {
         await mkdir(targetDir, { recursive: true, mode: 0o700 });
         made = true;

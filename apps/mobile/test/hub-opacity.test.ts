@@ -342,10 +342,9 @@ describe("every close path lands in `idle` (so the body returns to the setting)"
         link: "up",
         turn: null,
         ended: null,
-        editable: true,
         dictation: false,
       }),
-      { attach: () => {}, activity: () => {}, sessions: () => {}, info: () => {} },
+      { activity: () => {}, sessions: () => {}, info: () => {} },
     ).fan,
   });
   const p = { x: 100, y: 100 };

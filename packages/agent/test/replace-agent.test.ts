@@ -159,7 +159,9 @@ describe("Agent.retire / adoptExits", () => {
     const jobs = controllableJobs();
     const old = agent(new RecordingProvider(), "p", jobs);
     jobs.fireExit(job("bg-1"));
-    expect(old.retire().map((j) => ("id" in j ? j.id : j.agentId))).toEqual(["bg-1"]);
+    expect(
+      old.retire().map((j) => ("id" in j ? j.id : "agentId" in j ? j.agentId : j.kind)),
+    ).toEqual(["bg-1"]);
     expect(old.retire()).toEqual([]);
     expect(jobs.listeners()).toBe(0);
   });

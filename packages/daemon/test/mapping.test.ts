@@ -341,6 +341,8 @@ describe("toUpdateParams (the session/update frame)", () => {
         },
       ],
     },
+    // docs/feat/agent-workflows.md D5: the session's workflow runs.
+    { type: "workflows", runs: [] },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {

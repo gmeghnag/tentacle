@@ -11,6 +11,7 @@
  * - The open session itself → `stay` (just close: no remount, no detach).
  * A switch only unmounts the old screen — it detaches, never closes (F6).
  */
+import { DRAWER_MS } from "./motion.ts";
 import type { RootStackParams, SessionRoute } from "./routes.ts";
 
 /** A tapped drawer row, with the computer the drawer was listing. */
@@ -129,7 +130,6 @@ export function drawerSearchTarget(computerId: string, name: string): readonly D
 
 /** The panel's width (Design 3): the session is pushed right by the same amount. */
 export const DRAWER_WIDTH = 300;
-const DRAWER_MS = 220;
 /** A horizontal move this long (pt) is the panel's own gesture. */
 const SWIPE_CLAIM = 10;
 /** A left swipe this long (pt) closes the panel. */

@@ -17,7 +17,7 @@
  * `perm-sheet`, `perm-<optionId>`, `perm-reply-input`, `reopen`, `session-drawer`,
  * `jump-latest`, `session-menu`, `session-menu-sheet`, `session-menu-copy-last|copy-all`.
  */
-import { useIsFocused, useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation, useNavigationState } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import {
   type ComponentRef,
@@ -28,6 +28,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   Alert,
@@ -91,7 +92,9 @@ import {
   jumpPill,
   jumpPillText,
   jumped,
+  landingBatch,
   landingDone,
+  landingEnded,
   landingOwns,
   landingPending,
   landingQuiet,
@@ -120,15 +123,51 @@ import {
 } from "../hub-actions.ts";
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
+import { showsScene } from "../mascot-scenes.ts";
+import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
 import { noticeLooks } from "../notice-group.ts";
+import { type StickyBlock, openOutputSteps, stickyState } from "../output-sticky.ts";
 import { PERF } from "../perf-probe.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
-import type { ArtifactGalleryRoute } from "../routes.ts";
+import {
+  type ArtifactGalleryRoute,
+  type SheetStackNavigation,
+  openSheet,
+  popSheet,
+  updateSheetParams,
+} from "../routes.ts";
 import { rowErrorFields } from "../row-guard.ts";
 import { rowTimeLabel } from "../row-swipe.ts";
 import { type SectionId, scheduledSection } from "../session-info.ts";
 import { sessionMenu } from "../session-menu.ts";
 import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
+import { SHEET_HOSTS } from "../sheet-host.ts";
+import {
+  type AfterDismissIntent,
+  PRESENTED_SHEET_KINDS,
+  SHEET_HOLDS,
+  type SheetEntry,
+  type SheetRouteLike,
+  appActivity,
+  askRouteId,
+  askRouteParams,
+  askingParamUpdate,
+  desiredStack,
+  dismissedNatively,
+  drainPops,
+  holdKey,
+  managedStack,
+  queueAfterDismiss,
+  readyIntents,
+  reconcile,
+  sessionInFront,
+  sheetEntriesOf,
+  sheetHidden,
+  sheetsOfSession,
+  stackSignature,
+  userSheet,
+  yieldForeign,
+} from "../sheet-plan.ts";
 import { dictationLocale } from "../speech-locale.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
@@ -146,8 +185,10 @@ import { FloatingActivity, useAccessibilityFlags } from "../ui/FloatingActivity.
 import { HeaderDot } from "../ui/HeaderDot.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
+import { MascotSceneLayer } from "../ui/MascotScene.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
+import { STICKY_HEAD_H, StickyHost, type StickyHostHandle } from "../ui/StickyStep.tsx";
 import { Text } from "../ui/Text.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import { DiagramRenderer } from "../ui/diagram/DiagramRenderer.tsx";
@@ -159,6 +200,7 @@ import {
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
 import type { VoiceSettings } from "../voice-settings-store.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
+import { type RunsState, catalogueFigure, workflowsHub } from "../workflow-runs-controller.ts";
 import { ActivitySheet } from "./ActivitySheet.tsx";
 import { CommandsSheet } from "./CommandsSheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
@@ -169,6 +211,7 @@ import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.ts
 import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
 import { PendingBubbles } from "./compose/PendingBubble.tsx";
 import { type CellActions, TranscriptCell } from "./transcript/TranscriptCell.tsx";
+import { type CellRect, measuredCell } from "./transcript/measured-cell.tsx";
 
 export interface SessionScreenProps {
   readonly palette: Palette;
@@ -204,6 +247,36 @@ export interface SessionScreenProps {
    * docs/fix/mobile-crash-ibm-chart.md): the app log's fields for it.
    */
   readonly onRowError?: (fields: Readonly<Record<string, AppLogField>>) => void;
+  /**
+   * Beta `Compact shell rows` (docs/feat/shell-intent-line.md §7): a described
+   * `shell` step shows its `$ cmd` line only on failure. Absent → off.
+   */
+  readonly compactShell?: boolean;
+  /**
+   * This session's identity, for the native sheets (docs/feat/mobile-native-sheets.md
+   * D1/D2): the `Sheet` route's params, and the key `SHEET_HOSTS` publishes under.
+   * Absent → no native sheet at all (a unit test with no router/Wrapper).
+   */
+  readonly computerId?: string;
+  readonly sessionId?: string;
+  /**
+   * The app lock's own value (`AppLock.view().locked`, subscribed in App.tsx).
+   * The sheet DRAIN reads it (Owner decision A): never a render-time read of an
+   * unrelated render, which Step 0b proved stale.
+   */
+  readonly locked?: boolean;
+  /**
+   * The hub's Workflows item (docs/feat/workflows-ui.md D4): opens the computer's
+   * run list. Absent: no item (P6).
+   */
+  readonly onOpenWorkflows?: () => void;
+  /**
+   * The computer's workflow runs (`RunsState`, docs/feat/workflows-ui.md D4), or
+   * absent while the screen has none. The screen folds it WITH the project's
+   * catalogue (fix/workflows-ux D6) — both facts live here, and the fold is one
+   * pure function (`workflowsHub`).
+   */
+  readonly workflowsRuns?: RunsState;
 }
 
 /** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
@@ -239,6 +312,12 @@ export function SessionScreen({
   onNewSession,
   artifactsSeenKey,
   onRowError,
+  compactShell = false,
+  computerId,
+  sessionId,
+  locked = false,
+  onOpenWorkflows,
+  workflowsRuns,
 }: SessionScreenProps): JSX.Element {
   // The perf trace (docs/fix/mobile-fan-jank-device.md): render start → commit.
   const renderStart = PERF.now();
@@ -247,6 +326,37 @@ export function SessionScreen({
   });
   const [state, setState] = useState<SessionScreenState>(() => controller.state());
   const sheet = controller.sheet();
+  //
+  // This session's identity for the native sheets (D1/D2): the `Sheet` route's
+  // params and the key `SHEET_HOSTS` publishes under. `null` with no ids (a unit
+  // test, or a screen mounted with no router) — then no sheet route is touched.
+  // Memoized: it is an effect dependency (the host's `forget` on unmount), so a
+  // fresh object per render would forget the host on EVERY render.
+  const owner = useMemo(
+    () => (computerId === undefined || sessionId === undefined ? null : { computerId, sessionId }),
+    [computerId, sessionId],
+  );
+  // The navigator's routes, as ONE string: `useNavigationState` compares its
+  // selection with `Object.is`, so a selector handing back a fresh array would
+  // re-render on every state emit. This is the reconciler's dependency and the
+  // voice gates' input; the entries themselves come from the same state.
+  const navigation = useNavigation<SheetStackNavigation>();
+  const stackKey = useNavigationState((state) =>
+    stackSignature(state.routes as readonly SheetRouteLike[]),
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `stackKey` IS the routes' content.
+  const rootRoutes = useMemo(
+    () => navigation.getState()?.routes ?? [],
+    // `stackKey` IS the routes' content: every push/pop changes it, and the
+    // navigator's own state may still be uninitialised (`undefined`) at mount.
+    [stackKey, navigation],
+  );
+  // THIS session's sheet routes, bottom→top: two Session screens can be mounted
+  // at once and every `Sheet` route lives in the same root stack.
+  const sheetStack = useMemo(
+    () => (owner === null ? [] : sheetsOfSession(rootRoutes, owner)),
+    [rootRoutes, owner],
+  );
 
   // Mount: subscribe first (so the attach's own progress is seen), then attach.
   // Unmount: `leave()` DETACHES — the session keeps running for every device
@@ -344,25 +454,29 @@ export function SessionScreen({
     voice?.settingsChanged(previous, voiceSettings);
   }, [voiceSettings, voice]);
 
-  // Auto-read (F12): a turn that just ended, while this screen is focused.
+  // Auto-read (F12): a turn that just ended, while this session is IN FRONT.
+  // `sessionInFront`, not `useIsFocused()` alone: a sheet route on top blurs
+  // Session, so the raw flag would stop the auto-read exactly when the ask's own
+  // sheet opens (docs/feat/mobile-native-sheets.md D4).
   const focused = useIsFocused();
+  const inFront = sessionInFront(focused, sheetStack);
   const lastTurn = useRef(state.view.turn);
   useEffect(() => {
     const ended = endedTurn(lastTurn.current, state.view.turn);
     lastTurn.current = state.view.turn;
     if (ended !== undefined && voice !== null) {
-      void voice.turnEnded({ ownTurn: ended.own, focused, rows: state.view.rows });
+      void voice.turnEnded({ ownTurn: ended.own, focused: inFront, rows: state.view.rows });
     }
-  }, [state.view.turn, state.view.rows, voice, focused]);
+  }, [state.view.turn, state.view.rows, voice, inFront]);
 
   // The spoken permission ask (eval Q4): the title template only, approval stays a tap.
   const askSeq = state.sheet.kind === "asking" ? state.sheet.seq : undefined;
   const askTitle = state.sheet.kind === "asking" ? state.sheet.request.title : undefined;
   useEffect(() => {
     if (askSeq !== undefined && askTitle !== undefined && voice !== null) {
-      voice.permissionAsked({ title: askTitle }, askSeq, focused);
+      voice.permissionAsked({ title: askTitle }, askSeq, inFront);
     }
-  }, [askSeq, askTitle, voice, focused]);
+  }, [askSeq, askTitle, voice, inFront]);
 
   // A link tap asks first: the whole URL, then Safari (plan F22 / Owner Q7).
   const onLink = useCallback((href: string) => {
@@ -400,6 +514,10 @@ export function SessionScreen({
   // end, padding included — bug 3); the screen only reports the list's native
   // sizes and scroll metrics (a DRAG is the person's) and performs the scroll.
   const list = useRef<FlatList<Row>>(null);
+  // The sticky step row's decision, re-run on every scroll event (assigned below,
+  // once the rows and the open state exist) and the key it currently shows.
+  const recomputeSticky = useRef<() => void>(() => undefined);
+  const stickyHost = useRef<StickyHostHandle>(null);
   const followRef = useRef<Follow>(initialFollow);
   const [follow, setFollow] = useState<Follow>(initialFollow);
   const jumpText = jumpPillText(follow);
@@ -451,6 +569,10 @@ export function SessionScreen({
       reveal.current = null;
     }
   }, []);
+  // The settle check armed when a landing ENDS (declared here, assigned with
+  // `armSettle` below: the landing callbacks are created before it).
+  const offset = useRef(0);
+  const armLandedSettle = useRef<() => void>(() => {});
   const armReveal = useCallback(() => {
     disarmReveal();
     // The reveal can fire TWICE for one re-attach (Review round 1, finding 2): the
@@ -467,11 +589,16 @@ export function SessionScreen({
           size.current,
           followRef.current.following,
           hasRows.current,
+          offset.current,
         );
         const changed = next.state.settling !== landing.current.settling;
+        const ended = landingEnded(landing.current, next.state);
         landing.current = next.state;
         if (next.step !== null) {
           perform(next.step);
+        }
+        if (ended) {
+          armLandedSettle.current();
         }
         if (next.step !== null && landingPending(next.state)) {
           fire();
@@ -503,11 +630,15 @@ export function SessionScreen({
       size.current,
       followRef.current.following,
       hasRows.current,
+      offset.current,
     );
     const changed = next.state.settling !== landing.current.settling;
     landing.current = next.state;
     if (next.step !== null) {
       perform(next.step);
+    }
+    if (landingEnded(before, next.state)) {
+      armLandedSettle.current();
     }
     // A landing OWNS the list until it is done: `landingPending`, never "did it
     // scroll?". A re-attach absorbs its measurements without scrolling (bug 4),
@@ -523,23 +654,30 @@ export function SessionScreen({
   }, [perform, armReveal]);
   // Bug 5 (docs/fix/mobile-qa-1117.md): where the list really is, and the settle
   // re-check armed by every size change — `follow.ts`'s `settleStep` decides.
-  const offset = useRef(0);
   const settle = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const armSettle = useCallback(() => {
-    if (settle.current !== null) {
-      clearTimeout(settle.current);
-    }
-    settle.current = setTimeout(() => {
-      settle.current = null;
-      if (dragging.current) {
-        return;
+  const armSettle = useCallback(
+    (silent = false) => {
+      if (settle.current !== null) {
+        clearTimeout(settle.current);
       }
-      const step = settleStep(followRef.current, { offset: offset.current, ...size.current });
-      if (step !== null) {
-        perform(step);
-      }
-    }, SETTLE_MS);
-  }, [perform]);
+      settle.current = setTimeout(() => {
+        settle.current = null;
+        if (dragging.current) {
+          return;
+        }
+        const step = settleStep(
+          followRef.current,
+          { offset: offset.current, ...size.current },
+          !silent,
+        );
+        if (step !== null) {
+          perform(step);
+        }
+      }, SETTLE_MS);
+    },
+    [perform],
+  );
+  armLandedSettle.current = () => armSettle(true);
   useEffect(
     () => () => {
       if (settle.current !== null) {
@@ -553,6 +691,7 @@ export function SessionScreen({
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
       size.current = { content: contentSize.height, viewport: layoutMeasurement.height };
       offset.current = contentOffset.y;
+      recomputeSticky.current();
       setFollowState(
         scrolled(
           followRef.current,
@@ -679,6 +818,52 @@ export function SessionScreen({
   // own state would die with it.
   const [openSteps, setOpenSteps] = useState<readonly string[]>([]);
   const [fullSteps, setFullSteps] = useState<readonly string[]>([]);
+  // The sticky step row over an open long output (docs/feat/mobile-shell-output-scroll.md).
+  // `output-sticky.ts` decides; this only measures the cells, feeds the scroll
+  // offset and draws the overlay. State changes only when the row's key / line /
+  // push changes, never per frame; `follow.ts` is untouched (read-only tap-in).
+  const outputSteps = useMemo(
+    () => openOutputSteps(rows, openSteps, fullSteps, layout.cells, compactShell),
+    [rows, openSteps, fullSteps, layout, compactShell],
+  );
+  const cellRects = useRef(new Map<string, CellRect>());
+  const MeasuredCell = useMemo(() => measuredCell(cellRects.current), []);
+  recomputeSticky.current = () => {
+    const blocks: StickyBlock[] = [];
+    for (const [key, step] of outputSteps) {
+      const rect = cellRects.current.get(key);
+      if (rect !== undefined) {
+        blocks.push({
+          key,
+          top: rect.top,
+          bottom: rect.top + rect.height,
+          headH: STICKY_HEAD_H,
+          bodyTop: rect.top + STICKY_HEAD_H,
+          lineH: 17,
+          lines: step.total,
+          lineOffset: step.skipped,
+        });
+      }
+    }
+    const next = stickyState(offset.current, blocks);
+    stickyHost.current?.set(next, next === null ? "" : (outputSteps.get(next.key)?.label ?? ""));
+  };
+  // A collapse / expand while still: re-decide against the same offset.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `outputSteps` is the trigger
+  useEffect(() => recomputeSticky.current(), [outputSteps]);
+  // Collapse from the sticky row: the step row lands where the overlay was
+  // (best effort — owner 24/11: ship without the exact landing if it jitters).
+  const collapseSticky = useCallback(() => {
+    const key = stickyHost.current?.key() ?? null;
+    if (key === null) {
+      return;
+    }
+    const top = cellRects.current.get(key)?.top;
+    cellActions.current.onToggle(key);
+    if (top !== undefined) {
+      list.current?.scrollToOffset({ offset: top, animated: false });
+    }
+  }, []);
   // `Date.now()` is the voice controller's own clock (`now` above); while it
   // records, its 250 ms tick emits a new state, so the timer re-renders.
   const voiceView = voiceComposerView(
@@ -702,7 +887,7 @@ export function SessionScreen({
       return;
     }
     setActivityNow(Date.now());
-    const timer = setInterval(() => setActivityNow(Date.now()), 1000);
+    const timer = setInterval(() => setActivityNow(Date.now()), ACTIVITY_CLOCK_TICK_MS);
     return () => clearInterval(timer);
   }, [activityOpen]);
   const reports = useMemo(() => reportsOf(state.transcript.rows), [state.transcript.rows]);
@@ -850,6 +1035,8 @@ export function SessionScreen({
       // A notice's glyph/join (docs/feat/mobile-harness-notices.md S1): a block's
       // head changes when a neighbour arrives, with the row itself unchanged.
       looks,
+      // Beta `Compact shell rows`: a step re-projects with no row change.
+      compactShell,
     }),
     [
       diagramStyle,
@@ -860,6 +1047,7 @@ export function SessionScreen({
       fullSteps,
       layout,
       looks,
+      compactShell,
     ],
   );
   const compose = state.compose;
@@ -895,6 +1083,12 @@ export function SessionScreen({
   // Session info (docs/feat/mobile-session-info.md): the sheet, and which row the
   // person expanded. Every value it draws is decided in `session-info.ts`.
   const [infoOpen, setInfoOpen] = useState(false);
+  /**
+   * Session info was opened ON a section (`openScheduled`), so the list scrolls
+   * inside the sheet and the route opens at its largest detent (D3). It rides the
+   * route's params (`SheetRouteParam.reveal`), never the sheet's content.
+   */
+  const [revealWanted, setRevealWanted] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const info = state.info;
   // The Tools sheet (docs/feat/mobile-hub-tools.md D5/D6): its own surface, its
@@ -904,7 +1098,6 @@ export function SessionScreen({
   const [toolsSegment, setToolsSegment] = useState<ToolsSegmentId>("mcp");
   const [toolsQuery, setToolsQuery] = useState("");
   const [toolsExpanded, setToolsExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  const [toolsRefreshing, setToolsRefreshing] = useState(false);
   // A reveal in flight (docs/feat/mobile-hub.md H4a): the hub's Scheduled item
   // opens this sheet scrolled to SCHEDULED WAKES. The rule is `session-info.ts`'s
   // (`revealStart`/`revealStep`) and the fold is `reveal-report.ts`'s; the screen
@@ -973,12 +1166,16 @@ export function SessionScreen({
     setExpanded(null);
     startReveal(revealTrack.current, revealTo);
     setInfoOpen(true);
+    // The route opens at L when a section is wanted (D3): the reveal scrolls
+    // inside the sheet, so the sheet needs the room to scroll in.
+    setRevealWanted(revealTo !== null);
     void controller.openInfo();
   };
   // The hub's Scheduled item: Session info, scrolled to SCHEDULED WAKES — the one
   // place the wakes live and can be deleted, so the hub reaches it rather than
   // growing a second wakes screen.
-  const openScheduled = () => openInfo(scheduledSection(info?.view ?? null));
+  const openScheduled = () =>
+    openInfo(scheduledSection(info?.view ?? null, state.schedules?.length ?? 0));
   /**
    * Tools opened (D6): its controls always start fresh (a segment, a search and
    * an accordion are about the visit, not the session), and the controller is
@@ -992,26 +1189,57 @@ export function SessionScreen({
     setToolsOpen(true);
     void controller.openInfo();
   };
-  const closeTools = () => {
+  const closeTools = useCallback(() => {
     setToolsOpen(false);
     setToolsExpanded(new Set());
     controller.closeInfo();
-  };
+  }, [controller]);
+  /**
+   * Tools' close, the body both paths share — the SAME rule as Session info's
+   * below: a native swipe must leave exactly the state the glyph does.
+   */
+  const closeToolsSheetOnly = closeTools;
+  /**
+   * Session info's close, the body both paths share: the pinned glyph and a
+   * native swipe must leave the SAME state, or one of them stops telling the
+   * controller and its figures go stale (D3 `dismissedNatively`).
+   */
+  const closeInfoSheetOnly = useCallback(() => {
+    setInfoOpen(false);
+    setExpanded(null);
+    // The next plain open is not a reveal (D3): a stale `true` would open it at L.
+    setRevealWanted(false);
+    controller.closeInfo();
+  }, [controller]);
   const openCommands = () => setCommandsOpen(true);
   const closeCommands = () => setCommandsOpen(false);
   // Rename is the header title's OWN path (Owner decision 5): the sheet closes and
   // the one field opens, so there is never a second rename surface.
+  // Rename is an RN `Modal`, which cannot present while the native sheet is up
+  // (F6b): it is QUEUED and begins once the Commands route is gone (D3
+  // `afterDismiss`, run by `readyIntents` below).
   const renameFromCommands = () => {
     setCommandsOpen(false);
-    controller.beginRename();
+    setAfterDismiss((queue) => queueAfterDismiss(queue, "rename"));
   };
-  /** A pull-to-refresh or a Retry: the same `refreshInfo` Session info uses. */
+  /**
+   * Session info's Artifacts row: the gallery needs the whole frame, so the route
+   * must be GONE before it pushes — a second presentation while a formSheet is up
+   * wedges it (F6b), and the same `afterDismiss` queue Commands → Rename uses
+   * (D3). The sheet only reports the tap; `runIntent` pushes once the route has
+   * left the navigation state, and the state it needs is this one's.
+   */
+  const openArtifactsFromInfo = () => {
+    setAfterDismiss((queue) => queueAfterDismiss(queue, "artifacts"));
+  };
+  /** Tools' Refresh link or Retry: the same `refreshInfo` Session info uses. */
   const refreshTools = () => {
-    setToolsRefreshing(true);
-    void controller.refreshInfo().finally(() => setToolsRefreshing(false));
+    void controller.refreshInfo();
   };
   // The hub (docs/feat/mobile-hub.md H3): the attach chooser, shared with the
-  // composer's photo button — one path, not two.
+  // composer's photo button — one path, not two. The hub's fan no longer offers
+  // it (docs/fix/workflows-ux.md D6: the composer `+` already does), so this is
+  // the composer's handler alone now.
   const openAttach = () =>
     Alert.alert("Add an attachment", state.compose.attach.reason ?? undefined, [
       { text: "Cancel", style: "cancel" },
@@ -1026,15 +1254,22 @@ export function SessionScreen({
     ]);
   // What the hub offers is `hub-actions.ts`'s; a missing callback is a missing
   // item (P6). The context is read NOW for the items, and again at a commit.
+  const workflowsFigure = workflowsHub(
+    workflowsRuns ?? { kind: "loading", runs: [], offline: null },
+    catalogueFigure(state.catalogue),
+  );
   const hubCtx = hubContextOf({
     link: state.transcript.link,
     turn: state.transcript.turn,
     ended: state.transcript.closed,
-    editable: state.view.editable,
     dictation: voiceSettings.dictation,
     activityEmpty: activityVm.nothingRunning,
     // My compaction runs: the hub's Stop cancels it (mobile-hub-commands C2 14).
     compacting: state.slot?.kind === "compacting",
+    // The runs AND the project's catalogue, folded by ONE pure function (fix/
+    // workflows-ux D6). Both are this screen's facts: the controller reads the
+    // catalogue at the attach, `workflowsRuns` comes from the app's own hook.
+    ...(workflowsFigure === undefined ? {} : { workflows: workflowsFigure }),
     schedules: { rows: state.schedules, now: activityNow },
     // The Tools item's own figures, from the sheet's OWN summary (one source,
     // D1/D3): unknown until the controller has pulled both lists.
@@ -1051,13 +1286,13 @@ export function SessionScreen({
   const hubEntries: HubEntries = {
     stop: () => controller.stopTurn(),
     steer: () => setSteerFocus((n) => n + 1),
-    attach: openAttach,
     activity: () => openActivity(),
     info: () => openInfo(),
     // No info port, no Tools: a missing callback is a missing item (P6).
     ...(info === null ? {} : { tools: openTools }),
     commands: openCommands,
     scheduled: openScheduled,
+    ...(onOpenWorkflows === undefined ? {} : { workflows: onOpenWorkflows }),
     ...(onOpenDrawer === undefined ? {} : { sessions: onOpenDrawer }),
     ...(onNewSession === undefined ? {} : { new: onNewSession }),
     ...(onOpenArtifacts === undefined ? {} : { artifacts: () => onOpenArtifacts("hub") }),
@@ -1065,12 +1300,313 @@ export function SessionScreen({
   };
   const hub = hubActions(hubCtx, hubEntries);
   const hubOpenAt = useRef<HubOpen>(hubOpen(hubCtx));
-  const navigation = useNavigation();
+  // ── The native sheets (docs/feat/mobile-native-sheets.md D1–D5, slice S3) ──
+  // The sheet is a stack ROUTE; this screen publishes its content, derives the
+  // stack it WANTS and pops/pushes one step at a time. Every decision is
+  // `sheet-plan.ts`'s (AGENTS §7); this block only feeds it the two live inputs
+  // (the navigator's routes above, and `hidden`) and dispatches what it returns.
+  const actual = sheetStack;
+  // The drain's trigger (Owner decision A, Step 0b): `locked` comes from the
+  // lock's own subscription (`App.tsx`), `inactive` from `AppState` — the
+  // load-bearing leg, because iOS may suspend JS before delivering `background`.
+  const [appActivityState, setAppActivityState] = useState(() =>
+    appActivity(AppState.currentState),
+  );
+  useEffect(() => {
+    const app = AppState.addEventListener("change", (next) =>
+      setAppActivityState(appActivity(next)),
+    );
+    return () => app.remove();
+  }, []);
+  const hidden = sheetHidden(locked, appActivityState);
+  const desired = desiredStack({
+    user: userSheet({ commands: commandsOpen, tools: toolsOpen, info: infoOpen }),
+    outbox: decision !== null,
+    // The ask is on screen while the sheet holds ONE, answered or not: a
+    // `returned` reply still has words to read, and it is swipe-dismissible
+    // (D5). Only `idle` means "no ask to show" (today's `<Modal visible>`).
+    permission: state.sheet.kind !== "idle",
+  });
+  // Only the kinds this build presents natively are pushed: the other three
+  // still draw their own RN `Modal` (S4/S5 migrate them).
+  const wantedNow = managedStack(desired, PRESENTED_SHEET_KINDS);
+  // Stable between renders while the stack it names is the same: the loop below
+  // depends on it, and a fresh array per render would re-run it on every render.
+  const wantedKey = wantedNow.join("|");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `wantedKey` IS `wantedNow`'s content.
+  const wanted = useMemo(() => wantedNow, [wantedKey]);
+  // The ask's route identity (D5): the daemon's id for it, so a re-delivery of
+  // the SAME ask keeps its detent and its note; the sheet's own `seq` when the
+  // requester had none. Recomputed only when the presented ask changes.
+  const askingSheet = state.sheet.kind === "asking" ? state.sheet : null;
+  const askId = askingSheet === null ? null : askRouteId(askingSheet.requestId, askingSheet.seq);
+  // The blocked-dismissal note is STORED outside React (the navigator's
+  // `gestureCancel` listener writes it) and READ here, where the ask's element is
+  // built: one subscription, one `held` per ask. A new ask starts un-held.
+  const holdsKey =
+    askId === null || owner === null ? null : holdKey(owner.computerId, owner.sessionId, askId);
+  const subscribeHolds = useCallback((listener: () => void) => SHEET_HOLDS.subscribe(listener), []);
+  const heldNote = useSyncExternalStore(subscribeHolds, () =>
+    holdsKey === null ? 0 : SHEET_HOLDS.sequence(holdsKey),
+  );
+  const held = heldNote > 0;
+  // Publish what the routes draw (D2). A layout effect, so the element is in the
+  // host before the reconciler below can push the route that reads it.
+  useLayoutEffect(() => {
+    if (owner === null) {
+      return;
+    }
+    const host = SHEET_HOSTS.host(owner.computerId, owner.sessionId);
+    host.publish(
+      "commands",
+      <CommandsSheet
+        palette={palette}
+        rows={state.commands}
+        onCompact={() => void controller.compact()}
+        onStopCompact={() => controller.cancelCompaction()}
+        onArmClear={() => controller.armClear()}
+        onCancelClear={() => controller.cancelClear()}
+        onClear={() => void controller.clear()}
+        onRename={renameFromCommands}
+        onRetry={() => controller.retryLast()}
+        onAutoAccept={(on) => void controller.setAutoAccept(on)}
+        onClose={closeCommands}
+      />,
+    );
+    host.publish(
+      "outbox",
+      <OutboxDecisionSheet
+        item={decision === null ? null : { text: decision.text }}
+        palette={palette}
+        why="something changed since you wrote this — your message is still here"
+        steerable={state.view.composer.running}
+        onSend={() => void controller.outbox("send", deciding ?? "")}
+        onSteer={() => void controller.outbox("steer", deciding ?? "")}
+        onDiscard={() => void controller.outbox("discard", deciding ?? "")}
+        onEdit={() => void controller.outbox("edit", deciding ?? "")}
+        onClose={() => setDeciding(null)}
+      />,
+    );
+    // Session info and Tools (S4) are routes too: their content is the same
+    // element it was inside a `<Modal>`, with no `visible` — the route exists only
+    // while the sheet is up, and the sheet's own list is `Sheet native`'s one
+    // scroller (F8).
+    if (info !== null) {
+      host.publish(
+        "info",
+        <SessionInfoSheet
+          palette={palette}
+          view={info.view}
+          autoAcceptOn={controller.autoAcceptOn()}
+          autoAcceptError={info.autoAcceptError}
+          onAutoAccept={(on) => void controller.setAutoAccept(on)}
+          onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+          onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
+          scrollRef={(node) => {
+            infoScroller.current = node;
+          }}
+          onSectionLayout={revealOnLayout}
+          onRefresh={() => void controller.refreshInfo()}
+          onRetry={() => void controller.refreshInfo()}
+          expanded={expanded}
+          onExpand={setExpanded}
+          onOpenArtifacts={openArtifactsFromInfo}
+          onClose={closeInfoSheetOnly}
+        />,
+      );
+      host.publish(
+        "tools",
+        <ToolsSheet
+          palette={palette}
+          view={toolsView(info.tools, {
+            segment: toolsSegment,
+            query: toolsQuery,
+            open: toolsExpanded,
+          })}
+          onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+          onSegment={setToolsSegment}
+          onQuery={setToolsQuery}
+          onToggle={(key, open) =>
+            setToolsExpanded((prev) => {
+              const next = new Set(prev);
+              if (open) {
+                next.add(key);
+              } else {
+                next.delete(key);
+              }
+              return next;
+            })
+          }
+          onRefresh={refreshTools}
+          onClose={closeTools}
+        />,
+      );
+    }
+    // The ask (S5) is a route too. Published even when `idle` → `undefined`, so a
+    // route pushed for the PREVIOUS ask can never draw a stale one: the host's
+    // orphan/wait rule keeps that honest (`sheetRouteView`).
+    host.publish(
+      "permission",
+      state.sheet.kind === "idle" ? undefined : (
+        <PermissionSheetView sheet={sheet} state={state.sheet} palette={palette} held={held} />
+      ),
+    );
+  });
+  // Unmount: the host is forgotten, so a route still up pops ITSELF instead of
+  // drawing an empty sheet (the orphan leg, `sheetRouteView`).
+  useEffect(() => {
+    if (owner === null) {
+      return;
+    }
+    const at = owner;
+    return () => SHEET_HOSTS.forget(at.computerId, at.sessionId);
+  }, [owner]);
+  // What the person SWIPED away between two states runs that kind's own close
+  // handler — its pop is not ours (`dismissedNatively`'s planned-pop rule).
+  const plannedPop = useRef<readonly string[]>([]);
+  const lastActual = useRef<readonly SheetEntry[]>(actual);
+  useEffect(() => {
+    const gone = dismissedNatively(lastActual.current, actual, plannedPop.current);
+    lastActual.current = actual;
+    // Spend only the planned pops that LANDED: a drain dispatches several, and
+    // the navigator may report them over more than one state — a key still up is
+    // still ours to pop, never a swipe.
+    const still = new Set(actual.map((entry) => entry.key));
+    plannedPop.current = plannedPop.current.filter((key) => still.has(key));
+    if (gone.includes("commands")) {
+      // `closeCommands`'s body, through the stable setter (an effect dependency).
+      setCommandsOpen(false);
+    }
+    if (gone.includes("outbox")) {
+      setDeciding(null);
+    }
+    // Tools and Session info (S4): the same kind's OWN close, so a swipe never
+    // leaves the controller's figures half-torn-down.
+    if (gone.includes("tools")) {
+      closeToolsSheetOnly();
+    }
+    if (gone.includes("info")) {
+      closeInfoSheetOnly();
+    }
+    // The ask (S5): a swipe while `returned` is free (D5), so it is a real
+    // dismissal — today's `onRequestClose`, which is what `dismiss()` did.
+    if (gone.includes("permission")) {
+      sheet.dismiss();
+    }
+  }, [actual, closeToolsSheetOnly, closeInfoSheetOnly, sheet]);
+  // The intents that need the sheet gone first (Commands → Rename is the only
+  // one S3 owns; Rename is still an RN `Modal`, so F6b): they run once the route
+  // has left the navigation state.
+  const [afterDismiss, setAfterDismiss] = useState<readonly AfterDismissIntent[]>([]);
+  const runIntent = (intent: AfterDismissIntent) => {
+    if (intent === "rename") {
+      controller.beginRename();
+    } else if (onOpenArtifacts !== undefined) {
+      onOpenArtifacts("session-info");
+    }
+  };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `runIntent` is rebuilt every render; the queue and the stack are what decide.
+  useEffect(() => {
+    const ready = readyIntents(afterDismiss, actual, {
+      // Readiness is the route leaving the navigation STATE: once popped, the
+      // route is unmounted, so its `transitionEnd {closing:true}` has no JS
+      // listener left. Whether an RN Modal presents cleanly during the native
+      // dismiss animation is a simulator check (S6, Commands → Rename).
+      transitioning: false,
+    });
+    if (ready.run.length === 0) {
+      return;
+    }
+    setAfterDismiss(ready.rest);
+    for (const intent of ready.run) {
+      runIntent(intent);
+    }
+  }, [afterDismiss, actual]);
+  // The loop. The drain runs the WHOLE stack in one pass (Owner decision A: it
+  // must be empty ~before the app-switcher snapshot); otherwise it takes ONE
+  // step and lets the state change drive the next.
+  useEffect(() => {
+    if (owner === null) {
+      return;
+    }
+    if (hidden) {
+      const keys = drainPops(actual);
+      plannedPop.current = keys;
+      for (const key of keys) {
+        popSheet(navigation, key);
+      }
+      return;
+    }
+    // A screen that is not in front (a second Session mounted under this one)
+    // may tidy its own routes away but must never push: the person is not looking
+    // at it. `inFront`, not `focused`: this session's OWN sheet on top blurs it,
+    // and a second sheet (an Outbox over Commands) must still be pushed.
+    const step = reconcile(wanted, actual, { hidden: false, transitioning: false });
+    if (step === null) {
+      return;
+    }
+    if (step.action === "pop") {
+      plannedPop.current = [step.key];
+      popSheet(navigation, step.key);
+      return;
+    }
+    if (!inFront) {
+      return;
+    }
+    // The ONE param a sheet route carries beyond its identity (D3): Session info
+    // opened on a section opens at L. `openScheduled` is the only path that sets
+    // it, and the sheet is pushed once per presentation. The ask's own params
+    // (S5): its id (detent memory + the hold note's key) and `asking`, which the
+    // navigator needs BEFORE this screen mounts the route (D5's `gestureEnabled`).
+    openSheet(navigation, {
+      ...owner,
+      kind: step.kind,
+      ...(step.kind === "info" && revealWanted ? { reveal: true } : {}),
+      ...(step.kind === "permission" && askId !== null
+        ? { askId, ...(state.sheet.kind === "asking" ? { asking: true } : {}) }
+        : {}),
+    });
+  }, [hidden, wanted, actual, inFront, owner, navigation, revealWanted, askId, state.sheet.kind]);
+  // The ask SETTLED while its route is up (D5): the sheet must be swipeable again
+  // — that is `returned` — so the route's params are rewritten in place, never
+  // re-pushed (`navigate` would replace the stack's params, `openSheet`'s reason).
+  // The decision is `askingParamUpdate`'s; this effect only dispatches it.
+  const permissionAsking = state.sheet.kind === "asking";
+  useEffect(() => {
+    if (owner === null) {
+      return;
+    }
+    const update = askingParamUpdate(navigation.getState().routes, owner, {
+      asking: permissionAsking,
+      askId,
+    });
+    if (update !== null) {
+      // A PATCH: `BaseRouter` merges it over the params the route holds, so the
+      // identity it was pushed with (computer, session, kind, askId) stays.
+      updateSheetParams(navigation, update.key, update.params);
+    }
+    // The ask's note is spent with the ask: read back from the ROUTE, because a
+    // settled sheet no longer holds an id (it is a `returned` reply) — a note left
+    // behind would be inherited by the next delivery of the same ask.
+    if (permissionAsking) {
+      return;
+    }
+    const settled = askRouteParams(navigation.getState().routes, owner);
+    if (settled?.askId != null) {
+      SHEET_HOLDS.forget(holdKey(owner.computerId, owner.sessionId, settled.askId));
+    }
+  }, [navigation, owner, permissionAsking, askId]);
+  // An RN `Modal` must not be drawn while a native sheet is up or coming (F6):
+  // a stale `visible` one wedges every later formSheet.
+  const yields = yieldForeign(wanted, actual);
   const hubFanOpen = useRef(false);
   const onHubFan = (open: boolean) => {
     hubFanOpen.current = open;
     if (open) {
       hubOpenAt.current = hubOpen(hubCtx);
+      // The Workflows item is dimmed by the catalogue it last SAW (fix/workflows-ux
+      // fix round 1): re-read it at each open, so a file added since un-dims it.
+      void controller.refreshCatalogue();
     }
     // M2: no native back-swipe under the scrim; restored on every close path.
     navigation.setOptions({ gestureEnabled: !open });
@@ -1091,6 +1627,10 @@ export function SessionScreen({
     if (id === "tools" && plan.kind === "notice") {
       void controller.pullTools();
     }
+    // Same for a dimmed Workflows (VoiceOver reaches it without the fan's open).
+    if (id === "workflows" && plan.kind === "notice") {
+      void controller.refreshCatalogue();
+    }
   };
   /**
    * A dimmed item was tapped in the FAN: its own pill says why (`hub-flash.ts`),
@@ -1102,6 +1642,9 @@ export function SessionScreen({
   const flashHub = (id: HubActionId) => {
     if (id === "tools") {
       void controller.pullTools();
+    }
+    if (id === "workflows") {
+      void controller.refreshCatalogue();
     }
   };
   const hubMenuItems = hubMenu === "more" ? hub.more : hubMenu === "all" ? hub.all : [];
@@ -1310,8 +1853,10 @@ export function SessionScreen({
           <View style={settling ? styles.hidden : styles.screen}>
             <FlatList
               ref={list}
+              CellRendererComponent={MeasuredCell}
               testID="transcript"
               data={rows}
+              maxToRenderPerBatch={landingBatch(settling)}
               keyExtractor={(row: Row) => row.key}
               renderItem={({ item }) => {
                 const cell = layout.cells.get(item.key);
@@ -1348,6 +1893,7 @@ export function SessionScreen({
                     open={isOpen(openSteps, item.key)}
                     full={isOpen(fullSteps, item.key)}
                     reduceMotion={a11yFlags.reduceMotion}
+                    compactShell={compactShell}
                     speak={speak}
                     child={child}
                     voice={voice !== null}
@@ -1487,21 +2033,29 @@ export function SessionScreen({
                 }
               }}
               ListEmptyComponent={
-                <View testID="transcript-empty">
-                  {state.status.phase === "open" ? (
-                    <EmptyState
-                      palette={palette}
-                      icon="bubble.left"
-                      title="Nothing here yet"
-                      body="Say something below."
-                    />
-                  ) : state.status.phase === "opening" ? (
+                // minHeight: with the mascot the empty view has no child while open, and a
+                // 0-height view is "not visible" to XCUITest (flow 34-hub-new asserts it).
+                <View testID="transcript-empty" style={{ minHeight: 1 }}>
+                  {state.status.phase === "opening" ? (
                     <EmptyState palette={palette} loading title="Opening the session…" />
                   ) : null}
                 </View>
               }
             />
+            <StickyHost ref={stickyHost} palette={palette} onCollapse={collapseSticky} />
           </View>
+          {/* Polpetto's entrance (docs/feat/mobile-mascot-scenes.md): one scene per
+              EMPTY session, drawn OVER the (transparent) empty transcript. The
+              band's own edges clip it — behind the header above, behind the
+              composer below — and it unmounts the moment a row arrives (owner
+              decision 5). */}
+          {showsScene({ phase: state.status.phase, rowCount: rows.length }) && !settling ? (
+            <MascotSceneLayer
+              geometry={band ?? { width: 0, height: 0 }}
+              reduceMotion={a11yFlags.reduceMotion}
+              eyeFade={palette.label}
+            />
+          ) : null}
           {jumpPill(follow) ? (
             <Pressable
               testID="jump-latest"
@@ -1661,9 +2215,10 @@ export function SessionScreen({
           draft={state.draft}
           editable={state.view.editable}
           placeholder={
-            !state.view.editable
-              ? "This session has ended"
-              : (voiceView.placeholder ?? "Message tentacle")
+            state.view.composer.placeholder ??
+            (state.view.editable
+              ? (voiceView.placeholder ?? "Message tentacle")
+              : "This session has ended")
           }
           button={state.view.composer.button}
           slot={state.view.composer.slot}
@@ -1705,23 +2260,19 @@ export function SessionScreen({
             {state.view.composer.photosNotice}
           </Text>
         )}
-        <PermissionSheetView sheet={sheet} state={state.sheet} palette={palette} />
-        <OutboxDecisionSheet
-          item={decision === null ? null : { text: decision.text }}
-          palette={palette}
-          why="something changed since you wrote this — your message is still here"
-          steerable={state.view.composer.running}
-          onSend={() => void controller.outbox("send", deciding ?? "")}
-          onSteer={() => void controller.outbox("steer", deciding ?? "")}
-          onDiscard={() => void controller.outbox("discard", deciding ?? "")}
-          onEdit={() => void controller.outbox("edit", deciding ?? "")}
-          onClose={() => setDeciding(null)}
-        />
+        {/* The ask is a native sheet ROUTE now (docs/feat/mobile-native-sheets.md
+            S5): this screen PUBLISHES its element on `SHEET_HOSTS` (the block
+            above) and the route draws it, so it is not mounted here — no RN
+            `Modal` over a `formSheet` (F6). */}
+        {/* Outbox's decision and Commands are native sheet ROUTES now
+            (docs/feat/mobile-native-sheets.md S3): this screen PUBLISHES their
+            elements on `SHEET_HOSTS` (the block above) and the route draws them,
+            so they are not mounted here. */}
         {/* The hub's plain menu (Design 5/7): "More" (the overflow), no fan fits,
           or VoiceOver's long-press / Show all (everything). */}
         <ActionSheet
           palette={palette}
-          visible={hubMenu !== null}
+          visible={hubMenu !== null && !yields}
           testID="hub-menu-sheet"
           cancelTestID="hub-menu-cancel"
           actions={hubMenuItems.map((item) => ({
@@ -1738,7 +2289,7 @@ export function SessionScreen({
         />
         <ActionSheet
           palette={palette}
-          visible={menuOpen}
+          visible={menuOpen && !yields}
           testID="session-menu-sheet"
           cancelTestID="session-menu-cancel"
           message={menu.every((action) => action.text === "") ? "Nothing to copy yet" : undefined}
@@ -1765,84 +2316,13 @@ export function SessionScreen({
           }))}
           onCancel={() => setMenuOpen(false)}
         />
-        {info === null ? null : (
-          <SessionInfoSheet
-            palette={palette}
-            visible={infoOpen}
-            view={info.view}
-            autoAcceptOn={controller.autoAcceptOn()}
-            autoAcceptError={info.autoAcceptError}
-            onAutoAccept={(on) => void controller.setAutoAccept(on)}
-            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
-            onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
-            scrollRef={(node) => {
-              infoScroller.current = node;
-            }}
-            onSectionLayout={revealOnLayout}
-            onRefresh={() => void controller.refreshInfo()}
-            onRetry={() => void controller.refreshInfo()}
-            expanded={expanded}
-            onExpand={setExpanded}
-            onOpenArtifacts={() => {
-              // The sheet is a way IN: the gallery needs the whole frame, so the
-              // sheet closes before the route pushes (docs D9).
-              setInfoOpen(false);
-              setExpanded(null);
-              controller.closeInfo();
-              onOpenArtifacts?.("session-info");
-            }}
-            onClose={() => {
-              setInfoOpen(false);
-              setExpanded(null);
-              controller.closeInfo();
-            }}
-          />
-        )}
-        {info === null ? null : (
-          <ToolsSheet
-            palette={palette}
-            visible={toolsOpen}
-            view={toolsView(info.tools, {
-              segment: toolsSegment,
-              query: toolsQuery,
-              open: toolsExpanded,
-            })}
-            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
-            onSegment={setToolsSegment}
-            onQuery={setToolsQuery}
-            onToggle={(key, open) =>
-              setToolsExpanded((prev) => {
-                const next = new Set(prev);
-                if (open) {
-                  next.add(key);
-                } else {
-                  next.delete(key);
-                }
-                return next;
-              })
-            }
-            onRefresh={refreshTools}
-            refreshing={toolsRefreshing}
-            onClose={closeTools}
-          />
-        )}
-        <CommandsSheet
-          palette={palette}
-          visible={commandsOpen}
-          rows={state.commands}
-          onCompact={() => void controller.compact()}
-          onStopCompact={() => controller.cancelCompaction()}
-          onArmClear={() => controller.armClear()}
-          onCancelClear={() => controller.cancelClear()}
-          onClear={() => void controller.clear()}
-          onRename={renameFromCommands}
-          onRetry={() => controller.retryLast()}
-          onAutoAccept={(on) => void controller.setAutoAccept(on)}
-          onClose={closeCommands}
-        />
+        {/* Session info and Tools are native sheet ROUTES now
+            (docs/feat/mobile-native-sheets.md S4), like Outbox and Commands: this
+            screen PUBLISHES their elements on `SHEET_HOSTS` (the block above) and
+            the route draws them, so they are not mounted here. */}
         <ActivitySheet
           palette={palette}
-          visible={activityOpen}
+          visible={activityOpen && !yields}
           view={activityVm}
           detail={activityDetail}
           focus={activityFocus}
@@ -1872,7 +2352,7 @@ export function SessionScreen({
         />
         <RenameSheet
           palette={palette}
-          state={renaming}
+          state={yields ? null : renaming}
           onChange={(text) => controller.setRenameText(text)}
           onSave={() => void controller.submitRename()}
           onCancel={() => controller.cancelRename()}

@@ -9,6 +9,7 @@ import { type JSX, useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { codeBlockView, trailingFade } from "../code-block.ts";
 import { playHaptic } from "../haptics.ts";
+import { scopeColor } from "../syntax-color.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
 import { Text } from "./Text.tsx";
@@ -22,26 +23,7 @@ export interface CodeBlockProps {
   readonly testID?: string;
 }
 
-/** The few `hljs-*` scopes the palette colours; anything else stays the text colour. */
-function scopeColor(scope: string, palette: Palette): string {
-  switch (scope) {
-    case "keyword":
-    case "built_in":
-    case "literal":
-      return palette.kw;
-    case "comment":
-    case "quote":
-      return palette.com;
-    case "string":
-      return palette.green;
-    case "number":
-      return palette.orange;
-    case "title":
-      return palette.accent;
-    default:
-      return palette.label;
-  }
-}
+/** The scope→colour mapping lives in `syntax-color.ts` (shared with a tool's file body). */
 
 export function CodeBlock({
   text,

@@ -1,0 +1,204 @@
+appId: so.tentacle.app
+---
+# 44-workflow-editor (docs/feat/workflow-editor.md D8, slice 7c): create a
+# workflow on the phone from a template, edit it, review exactly what will be
+# written, save it through `serve`, and Run it into the normal hash approval.
+#
+# Covered: E1 (empty list → New), E2 (the template's graph), E3 (＋ → kind
+# picker), E5 (delete → ghost + Undo), E6 (Review: hash + 5 files), E7 (saved
+# toast), E8 (Run → the hash approval, Allow once / Deny — denied, so no agent
+# step runs on the mock model), and E4 (a step's sheet opens, takes a command and
+# closes with Done — the `large` detent, which validation round 3 found unclosable).
+# NOT here (see the task doc's 7c Execution): the ✗ DRAG (a long press-and-move,
+# which Maestro cannot express) and E9 (the file edited meanwhile → `changed`,
+# which needs a harness hook that writes the file mid-flow).
+#
+# Its own session (`COMPOSE_SESSION_VARS`), created just before it runs, and the
+# harness project has no `.tentacle/workflows/` yet, so the runs list is EMPTY.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${WFEDIT_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${WFEDIT_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+# The hub entry is `workflows` and it holds the fan's FIRST slot (Attach is gone —
+# docs/fix/workflows-ux.md D6), so `_hub-fan` finds its disc; the tap is the disc's.
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "workflows"
+- tapOn:
+    id: "hub-item-workflows"
+# E1: no workflow yet — one line, one action.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-runs-new"
+    timeout: 15000
+- tapOn:
+    id: "workflow-runs-new"
+# The New sheet: the name is checked live, Create is off until it is valid.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-new"
+    timeout: 10000
+- tapOn:
+    id: "workflow-new-name"
+- inputText: "Bad Name"
+- assertVisible:
+    id: "workflow-new-name-problem"
+- eraseText: 20
+- inputText: "wfedit"
+- assertVisible:
+    id: "workflow-new-saved-as"
+- assertVisible:
+    id: "workflow-new-template-plan-build-review-merge"
+- assertVisible:
+    id: "workflow-new-input-slug"
+- tapOn:
+    id: "workflow-new-create"
+# E2: the template lands as a graph, valid, 6 steps.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-edit-node-plan"
+    timeout: 15000
+- assertVisible:
+    id: "workflow-edit-node-merge"
+- assertVisible:
+    text: "Valid · 6 steps"
+# E3: a ＋ on an edge opens the kind picker; Cancel leaves the graph unchanged.
+- tapOn:
+    id: "workflow-edit-plus-exec"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-sheet"
+    timeout: 5000
+- tapOn:
+    id: "workflow-sheet-cancel"
+- assertNotVisible:
+    id: "workflow-sheet"
+# E4 (P1 proof): a STEP's sheet — the "large" detent — opens, takes a typed
+# command, and closes with Done. This is the flow's whole reason to exist after
+# validation round 3: `SHEET_DETENT.large` was 1.0, so the sheet covered the window
+# and its header (`‹ Graph · gate · Done`) sat under the status bar, where Done
+# could not be tapped at all — a step sheet could only be escaped by relaunching
+# the app. The command typed is the one the template already has, so the Review
+# below still counts exactly 35 lines and 5 files.
+- tapOn:
+    id: "workflow-edit-node-gate"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-sheet"
+    timeout: 5000
+- assertVisible:
+    id: "workflow-sheet-done"
+- tapOn:
+    id: "workflow-sheet-input-run"
+- eraseText: 20
+- inputText: "bun run check"
+# The keyboard is up over the sheet's Done (the screenshot in validation round 3,
+# `09-run-filled.png`): dismiss it so the tap lands on the control, not the keyboard.
+- hideKeyboard
+- tapOn:
+    id: "workflow-sheet-done"
+# The proof: Done CLOSED it, and the graph is back (no relaunch, no restart).
+- assertNotVisible:
+    id: "workflow-sheet"
+- assertVisible:
+    id: "workflow-edit-node-gate"
+# E5: delete `gate` → its incoming link dangles (a ghost, Save off with the
+# problem verbatim), and Undo brings it back.
+- longPressOn:
+    id: "workflow-edit-node-gate"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-edit-menu"
+    timeout: 5000
+- tapOn:
+    id: "workflow-edit-menu-delete"
+- assertVisible:
+    id: "workflow-edit-toast"
+- assertVisible:
+    text: ".*no step \"gate\".*"
+- tapOn:
+    id: "workflow-edit-undo"
+- assertVisible:
+    text: "Valid · 6 steps"
+# E6: Save → Review: the YAML + its 4 prompt files, the hash, nothing written yet.
+# "nothing written yet" is D8's own caption (docs/feat/workflow-editor.md:339-340,
+# the mockup's `editorHeader({title:"Review", caption:"nothing written yet"})`):
+# it is asserted because the SCREEN owes it, and it went missing on the device
+# when `ScreenHeader` rendered a raw string (e2e fix round 2). The rows carry
+# their real counts now too (`new · 35 lines`), so the file list is a fact, not
+# five zeroes.
+- tapOn:
+    id: "workflow-edit-save"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-review"
+    timeout: 15000
+- assertVisible:
+    text: "nothing written yet"
+- assertVisible:
+    id: "workflow-review-hash"
+- assertVisible:
+    id: "workflow-review-file-4"
+# The template's YAML is 35 lines and its four prompts 3/5/5/3 — never
+# "0 lines" (e2e fix round 2: the writer reported 0 for every `new` file).
+- assertVisible:
+    text: "new · 35 lines"
+- assertVisible:
+    text: "Save 5 files"
+- tapOn:
+    id: "workflow-review-confirm"
+# E7: the saved toast, and Save became Run.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-edit-saved"
+    timeout: 15000
+- assertVisible:
+    text: "Saved .*wfedit.yaml · v1 · .*"
+- assertVisible:
+    text: "Run"
+# E8: Run → the existing start path → the hash approval (Allow once / Deny).
+- tapOn:
+    id: "workflow-edit-save"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-start-row-wfedit"
+    timeout: 15000
+# The row's centre is its nested Edit pill (it opens the editor, not the detail):
+# tap the row's title line instead (e2e fix round 3).
+- tapOn:
+    id: "workflow-start-row-wfedit"
+    point: "30%,15%"
+- tapOn:
+    id: "workflow-start-input-slug"
+- inputText: "e2e"
+# The keyboard covers Run: dismiss it so the tap lands on the button (as 07-prompt).
+- hideKeyboard
+- tapOn:
+    id: "workflow-start-run"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-ask-run"
+    timeout: 20000
+# The run's hash approval is INLINE on the run screen (WorkflowRun `workflow-ask-run`,
+# Allow once / Deny), not a `perm-sheet` (e2e fix round 3).
+- assertVisible:
+    id: "workflow-ask-run-allow"
+- tapOn:
+    id: "workflow-ask-run-deny"
+# Daemon truth: the file the Review listed is on the daemon's disk.
+- runScript:
+    file: "44-workflow-editor.js"

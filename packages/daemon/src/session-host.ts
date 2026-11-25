@@ -13,6 +13,7 @@ import {
   Session,
   type SessionGrants,
   type SkillListing,
+  type WorkflowDriver,
   recordTitleText,
 } from "@tentacle/agent";
 import type {
@@ -24,6 +25,7 @@ import type {
   ModelProvider,
   PermissionBroker,
   ScheduleLink,
+  ToolImageStore,
 } from "@tentacle/core";
 import {
   type DaemonDiscovery,
@@ -52,6 +54,9 @@ import {
   type SessionTtlParams,
   type SessionTtlResult,
   type UpdateSettingsResult,
+  type WorkflowCatalogueResult,
+  type WorkflowListResult,
+  type WorkflowListRow,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
@@ -70,12 +75,18 @@ import {
   type SessionPushObserver,
   type SessionSchedules,
   type TurnErrorPolicy,
+  WORKFLOWS_UNAVAILABLE,
+  type WorkflowWaitTiming,
+  workflowCatalogueResult,
 } from "./hosted-session.ts";
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
 import { fromWireCapabilities, toSessionSkills, toSessionTools } from "./mapping.ts";
 import {
+  type ArchivedUnitsRead,
   type ClearForkCapture,
   type DaemonSessionRecord,
+  archivedUnitsOf,
+  endedUnitsAtLoad,
   reconcileOnReload,
   restoredActivity,
 } from "./persisted-session.ts";
@@ -128,6 +139,13 @@ export interface AgentContext {
    */
   readonly attachments?: AttachmentSource;
   /**
+   * The SAME store as `attachments`, under its write-capable type, for the
+   * `fs_read`/`image_view` pair (docs/feat/image-view.md D1). Set under the
+   * same `"store"` condition; a factory that does not forward it (the pod
+   * factory) leaves the feature off.
+   */
+  readonly toolImages?: ToolImageStore;
+  /**
    * The session's artifact store (docs/feat/model-artifacts.md D4), on EVERY
    * session-hosting daemon: a factory that offers `present` hands it to the
    * agent (`AgentConfig.artifacts`). Session-owned like `attachments`, so a
@@ -171,6 +189,8 @@ export interface AgentReuse {
    * shells (and their remote state) on the floor.
    */
   readonly workloadShells?: WorkloadShellsLike;
+  /** The workflow driver (docs/feat/agent-workflows.md D3): a live run carries over. */
+  readonly workflows?: WorkflowDriver;
 }
 
 /** The teardown half of `@tentacle/tools`' `WorkloadShells` (no daemon-side import). */
@@ -191,6 +211,12 @@ export type AgentFactory = (
    * (ids, markers, exits, the ask) and disposes it at close.
    */
   agentJobs?: AgentJobs;
+  /**
+   * Optional: the workflow driver (docs/feat/agent-workflows.md D3). Absent on
+   * a tunnelled session — then `session/workflow` is refused. The hosted
+   * session binds it and disposes it at close.
+   */
+  workflows?: WorkflowDriver;
   /**
    * Optional: the session's shells (docs/feat/workload-shell.md D4). The hosted
    * session disposes them at close, and hands them to the next agent on a
@@ -393,6 +419,8 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * daemons and the worker never pass it: off.
    */
   readonly wakeOnJobExit?: boolean;
+  /** With `wakeOnJobExit`: the workflow user-wait wake's clock (default: real timers, 30 s / 10 min). */
+  readonly workflowWait?: WorkflowWaitTiming;
   /**
    * `serve` and the in-process worker only (docs/feat/cron-tool.md D1, owner
    * Q4): every session keeps the agent's scheduled wakes and fires them by
@@ -485,6 +513,8 @@ interface ArchivedEntry {
   readonly cwd: string;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /** When it was archived (absent: an older record). With `updatedAt`, an archived read's version (S7). */
+  readonly archivedAt: number | undefined;
   record: DaemonSessionRecord | undefined;
   /** The last write of `record` failed: a sweep retries it. */
   unwritten: boolean;
@@ -505,6 +535,7 @@ function archivedEntry(
     cwd: record.cwd,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    archivedAt: record.archivedAt,
     record: resident,
     unwritten: false,
     retrying: false,
@@ -634,6 +665,37 @@ export class SessionHost {
   }
 
   /**
+   * `session/workflow_catalogue` with no session (docs/fix/workflows-ux.md S8b):
+   * the project's workflows a session created NOW would read — the `createAgent`
+   * factory builds a throwaway agent, exactly as `newSessionTools` does, and its
+   * driver answers. The catalogue is the PROJECT's (`defaultCwd`), and every
+   * session of this daemon shares it, so nothing here needs to be hosted or
+   * listed. No driver (a pod daemon, a tunnelled factory) → `unavailable`, never
+   * an empty folder. The throwaway driver is disposed at once: it owns no run.
+   */
+  async newSessionWorkflowCatalogue(link: ModelLink | null): Promise<WorkflowCatalogueResult> {
+    const artifacts = new ArtifactStore(this.artifactBudget);
+    const { agent, jobs, agentJobs, workloadShells, workflows } = this.opts.createAgent(
+      this.opts.defaultCwd,
+      { modelLink: () => link, artifacts },
+    );
+    try {
+      if (workflows === undefined) {
+        return { workflows: [], dir: this.opts.defaultCwd, unavailable: WORKFLOWS_UNAVAILABLE };
+      }
+      return workflowCatalogueResult(await workflows.catalogue());
+    } finally {
+      // `dispose` cuts every live run and closes it `interrupted`; a throwaway
+      // driver has none, so it only marks itself disposed.
+      workflows?.dispose();
+      artifacts.dispose();
+      jobs?.dispose();
+      agentJobs?.dispose();
+      await workloadShells?.dispose();
+    }
+  }
+
+  /**
    * `session/context` with no session: the context a session created now would
    * send (system prompt + tools), counted like a live one's. The same
    * `createAgent` factory builds a throwaway agent (its jobs are disposed at
@@ -750,6 +812,13 @@ export class SessionHost {
         `cannot store this device's push registration: ${written.reason}`,
       );
     }
+    // Fix C (docs/fix/mobile-push-not-registered.md): a successful registration
+    // was SILENT, so the whole class of bug — a phone that never registered, or
+    // registered a token APNs refuses — had to be inferred from a directory
+    // mtime. The env is in the line because IT was the defect: a sandbox token
+    // declared `production` is a silent `BadDeviceToken` → `gone` → deleted.
+    // Never a token, never a key (the id8 prefix is the device id).
+    this.opts.onAudit?.(`push-registered ${deviceId.slice(0, 8)} ${params.env}`);
     return { graceSeconds: push.graceSeconds, push: push.status() };
   }
 
@@ -895,6 +964,16 @@ export class SessionHost {
    * either fully registered or gone. A read only: it attaches nothing and
    * moves no stamp, so a list never keeps a session alive.
    */
+  /** `workflow/list` (docs/feat/agent-workflows.md D5): every live session's runs, newest first. */
+  workflowList(): WorkflowListResult {
+    const runs: WorkflowListRow[] = [];
+    for (const hosted of this.sessions.values()) {
+      runs.push(...hosted.workflowListRows());
+    }
+    runs.sort((a, b) => b.startedAt - a.startedAt);
+    return { runs };
+  }
+
   list(params: SessionListParams): SessionListResult {
     const summaries: SessionSummary[] = [];
     for (const hosted of this.sessions.values()) {
@@ -920,6 +999,47 @@ export class SessionHost {
   /** Number of ARCHIVED sessions (not in `size`). */
   get archivedCount(): number {
     return this.archived.size;
+  }
+
+  /** The ARCHIVED sessions, metadata only (docs/feat/a2a.md S7: an external caller's archived index). */
+  archivedSessions(): Array<{
+    readonly id: string;
+    readonly updatedAt: number;
+    readonly archivedAt?: number;
+  }> {
+    return [...this.archived.values()].map((e) =>
+      e.archivedAt === undefined
+        ? { id: e.id, updatedAt: e.updatedAt }
+        : { id: e.id, updatedAt: e.updatedAt, archivedAt: e.archivedAt },
+    );
+  }
+
+  /**
+   * An ARCHIVED session's units of work, READ-ONLY (docs/feat/a2a.md S7): from
+   * the record its reopen would restore — resident, or read back by
+   * `persister.load` (both files parsed, nothing written) — closed as that
+   * reopen would close them (`archivedUnitsOf`). Never reopens, never writes,
+   * never drops or blocks the entry (a failed REOPEN does; a read only reports).
+   * `absent`: not archived (live, deleted or unknown).
+   */
+  async readArchivedUnits(id: string): Promise<ArchivedUnitsRead> {
+    const entry = this.archived.get(id);
+    const persister = this.opts.persister;
+    if (!entry) {
+      return { status: "absent" };
+    }
+    let record = entry.record;
+    if (!record) {
+      if (!persister) {
+        return { status: "absent" };
+      }
+      const loaded = await persister.load(id);
+      if (!loaded.ok) {
+        return { status: "unreadable", reason: loaded.reason };
+      }
+      record = loaded.record;
+    }
+    return { status: "ok", units: archivedUnitsOf(record) };
   }
 
   /**
@@ -1391,6 +1511,9 @@ export class SessionHost {
       turns: reconciled.turns,
       enqueueIds: reconciled.enqueueIds,
       returned: reconciled.returned,
+      // The ended-units table (docs/feat/a2a.md, Unification §3): what the log
+      // ended, plus what the cut left open closed honestly (the resumed turn stays live).
+      units: endedUnitsAtLoad(record.units, reconciled.turns, reconciled.resume?.turnId, now),
       ...(record.head !== undefined ? { head: record.head } : {}),
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
       // A restart KEEPS the session's auto-accept (owner Q3).
@@ -1559,10 +1682,13 @@ export class SessionHost {
       settingsReport,
       grants,
       workloadShells,
+      workflows,
     } = this.opts.createAgent(this.opts.defaultCwd, {
       modelLink: () => bound.hosted?.modelLink() ?? null,
       ...(settings ? { settings } : {}),
-      ...(this.opts.images?.source === "store" ? { attachments: uploads } : {}),
+      ...(this.opts.images?.source === "store"
+        ? { attachments: uploads, toolImages: uploads }
+        : {}),
       artifacts,
       // D8/D9: the client that CREATED this session can ask its owner about a
       // `move_session` proposal, so this factory may offer the tool. Unset →
@@ -1602,7 +1728,10 @@ export class SessionHost {
         ...(this.opts.titleTimeoutMs !== undefined ? { timeoutMs: this.opts.titleTimeoutMs } : {}),
       },
       this.opts.wakeOnJobExit
-        ? { ...(this.opts.onAudit ? { onAudit: this.opts.onAudit } : {}) }
+        ? {
+            ...(this.opts.onAudit ? { onAudit: this.opts.onAudit } : {}),
+            ...(this.opts.workflowWait ? { workflowWait: this.opts.workflowWait } : {}),
+          }
         : undefined,
       log,
       agentJobs,
@@ -1615,6 +1744,9 @@ export class SessionHost {
     hosted.imagesPolicy = this.opts.images;
     hosted.grants = grants;
     hosted.workloadShells = workloadShells;
+    if (workflows) {
+      hosted.attachWorkflows(workflows);
+    }
     hosted.hop = hop === true;
     // The push observer (docs/feat/mobile-push.md P7): `serve` with push on
     // only. A pod daemon and the worker pass no `push`, so nothing observes
@@ -1650,7 +1782,9 @@ export class SessionHost {
       settings,
       reuse,
       // A settings sync must not silently turn every image into a placeholder.
-      ...(this.opts.images?.source === "store" ? { attachments: hosted.uploads } : {}),
+      ...(this.opts.images?.source === "store"
+        ? { attachments: hosted.uploads, toolImages: hosted.uploads }
+        : {}),
       // The session's artifacts are its own, not the agent's: the same store.
       artifacts: hosted.artifacts,
       // A settings sync rebuilds the agent: the session's `hop` fact is its own
@@ -1665,7 +1799,8 @@ export class SessionHost {
       next.permissions !== reuse.permissions ||
       next.jobs !== reuse.jobs ||
       next.agentJobs !== reuse.agentJobs ||
-      next.workloadShells !== reuse.workloadShells;
+      next.workloadShells !== reuse.workloadShells ||
+      next.workflows !== reuse.workflows;
     if (!next.settingsReport || foreign) {
       // It leaves the session's jobs; jobs of its own (a factory that ignored
       // `reuse`) go with it.
@@ -1681,6 +1816,9 @@ export class SessionHost {
       // factory that IGNORED `reuse` and built its own is closed here.
       if (next.workloadShells && next.workloadShells !== reuse.workloadShells) {
         void next.workloadShells.dispose();
+      }
+      if (next.workflows && next.workflows !== reuse.workflows) {
+        next.workflows.dispose();
       }
       if (!next.settingsReport) {
         return { applied: false };

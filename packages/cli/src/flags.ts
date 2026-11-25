@@ -117,6 +117,14 @@ export const ARGS = {
       // `serve --relay <url>`: the mobile relay this daemon dials out to
       // (docs/feat/mobile-relay.md R5a).
       relay: {},
+      // The A2A route (docs/feat/a2a.md S10): its own token, never `--token`.
+      "a2a-token": {},
+      "a2a-token-command": {},
+      "a2a-asks": {},
+      // The MCP route (docs/feat/serve-mcp-server.md M5): its own token too.
+      "mcp-token": {},
+      "mcp-token-command": {},
+      "mcp-asks": {},
       ...SESSION_MODEL,
     },
     // `serve --address <url>`, repeatable: a LIST, as `pair`'s is (one value
@@ -127,6 +135,8 @@ export const ARGS = {
     bools: {
       // `serve --no-relay`: never dial the mobile relay, whatever the config says.
       "no-relay": {},
+      // `serve --a2a-workflows`: the A2A caller may start workflow runs (default off).
+      "a2a-workflows": {},
       stdio: {},
       "model-proxy": {},
       bridge: {},
@@ -239,6 +249,8 @@ export const ARGS = {
   // The verb is the only word (plus `--yes` for setup), so a stray one is refused
   // here rather than guessed at.
   voice: { bools: { yes: { short: "y" } }, positional: { min: 1, max: 2 } },
+  // `tentacle browser install|status|uninstall` (docs/feat/browser-inspect.md B2).
+  browser: { positional: { min: 1, max: 1 } },
   // `tentacle logs [<uid>] [--tail N] [--only …] [--json] [--summary] [-f]`
   // (docs/feat/logs-cmd.md). `-f` is `--follow`'s alias, as in `tail -f`; the
   // uid is the only word, so a second one is refused here, not guessed at.
@@ -625,6 +637,47 @@ export async function resolveToken(flags: Map<string, string>): Promise<string |
   return env && env.length > 0 ? env : undefined;
 }
 
+/**
+ * The A2A bearer token of `serve` (`--a2a-token`, `--a2a-token-command`), or
+ * undefined = A2A off. No env fallback and never the WebSocket token: A2A
+ * answers only to a token made for it. An empty one is refused, not "off".
+ */
+export async function resolveA2AToken(flags: Map<string, string>): Promise<string | undefined> {
+  const direct = flags.get("a2a-token");
+  const command = flags.get("a2a-token-command");
+  if (direct !== undefined && command !== undefined) {
+    throw new Error("use either --a2a-token or --a2a-token-command, not both");
+  }
+  const token = direct ?? (command !== undefined ? await runCommand(command) : undefined);
+  if (token === undefined) {
+    return undefined;
+  }
+  if (token.length === 0) {
+    throw new Error("the A2A token is empty");
+  }
+  return token;
+}
+
+/**
+ * The MCP bearer token of `serve` (`--mcp-token`, `--mcp-token-command`), or
+ * undefined = MCP off. No env fallback and never the WebSocket or A2A token.
+ */
+export async function resolveMcpToken(flags: Map<string, string>): Promise<string | undefined> {
+  const direct = flags.get("mcp-token");
+  const command = flags.get("mcp-token-command");
+  if (direct !== undefined && command !== undefined) {
+    throw new Error("use either --mcp-token or --mcp-token-command, not both");
+  }
+  const token = direct ?? (command !== undefined ? await runCommand(command) : undefined);
+  if (token === undefined) {
+    return undefined;
+  }
+  if (token.length === 0) {
+    throw new Error("the MCP token is empty");
+  }
+  return token;
+}
+
 export type SessionFlags =
   | {
       readonly ok: true;
@@ -765,6 +818,7 @@ export type CliMode =
   | "pair"
   | "devices"
   | "voice"
+  | "browser"
   | "logs"
   | "plain"
   | "tui"
@@ -802,6 +856,8 @@ const USES_MODEL: Readonly<Record<CliMode, boolean>> = {
   logs: false,
   // `voice` runs the local helper only: no daemon, no model, no session.
   voice: false,
+  // `browser` writes the native-messaging host manifest only: no model.
+  browser: false,
   // Everything that builds an agent or proxies to a model.
   serve: true,
   run: true,
@@ -844,6 +900,7 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "pair" ||
     first === "devices" ||
     first === "voice" ||
+    first === "browser" ||
     first === "logs"
   ) {
     return first;
@@ -878,6 +935,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   devices:
     "tentacle devices | revoke <name|id-prefix> [--project <dir> | --all-projects] | reset [--yes]",
   voice: "tentacle voice setup [--yes] | status",
+  browser: "tentacle browser install | status | uninstall",
   logs: "tentacle logs [<uid>|<run-name>] [--tail N] [--only ask,error,tool] [--json] [--summary] [--usage] [-f|--follow] [--connect ws(s)://host:port [--token T] [--ca-cert FILE|--insecure-skip-tls-verify]]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
 };

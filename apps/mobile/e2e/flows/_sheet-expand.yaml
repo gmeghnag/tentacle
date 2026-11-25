@@ -1,0 +1,20 @@
+appId: so.tentacle.app
+---
+# `_sheet-expand` (docs/feat/mobile-native-sheets.md, Fix round (simulator)): a
+# native `formSheet` at its MIDDLE detent is dragged UP to LARGE, the way a person
+# does it — a SLOW drag on the sheet's ONE scroller, from near the screen's bottom
+# (always inside the sheet at S/M/L) to near the screen's top. The scroller is at its
+# top, so UIKit's `prefersScrollingExpandsWhenScrolledToEdge` gives the drag to the
+# sheet (F8), and it settles at L.
+#
+# Why not `scrollUntilVisible` / `swipe from: id`: Maestro's scroll starts at the
+# SCREEN's centre, which at the middle detent (top edge ≈ 52 %) is the dimmed
+# backdrop above the sheet, so nothing moves; its default swipe is a short flick
+# that the scroller takes as a scroll, not as a detent change (gate run
+# 1795466539487 vs the probe 1795473183450, P1). At L the screen's centre IS inside
+# the sheet, so a flow's later `scrollUntilVisible`s scroll the content normally.
+- swipe:
+    start: "50%, 85%"
+    end: "50%, 15%"
+    duration: 900
+- waitForAnimationToEnd

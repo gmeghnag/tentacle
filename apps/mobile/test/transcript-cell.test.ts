@@ -24,6 +24,7 @@ function data(over: Partial<CellData> = {}): CellData {
     open: false,
     full: false,
     reduceMotion: false,
+    compactShell: false,
     speak: undefined,
     child: null,
     voice: false,
@@ -105,6 +106,7 @@ describe("sameCellData", () => {
       { open: true },
       { full: true },
       { reduceMotion: true },
+      { compactShell: true },
       { speak: "offered" },
       { child: "sub-1" },
       { voice: true },
@@ -120,6 +122,13 @@ describe("sameCellData", () => {
         same: false,
       });
     }
+  });
+
+  test("a context cell compares its thread", () => {
+    const a = { kind: "context", thread: { up: true, down: true } } as const;
+    expect(sameStepCell(a, { kind: "context", thread: { up: true, down: true } })).toBe(true);
+    expect(sameStepCell(a, { kind: "context", thread: { up: true, down: false } })).toBe(false);
+    expect(sameStepCell(a, { kind: "thought", ms: undefined, thread: a.thread })).toBe(false);
   });
 
   test("a thought cell compares its duration and thread", () => {

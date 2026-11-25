@@ -25,6 +25,8 @@
  * whole-call frame would not exercise it.
  */
 
+import { FILE_VIEW_EDIT, FILE_VIEW_MULTI_EDITS, FILE_VIEW_PAGE } from "./file-view-fixture.ts";
+
 export interface MockModelOptions {
   /** How long a `HOLD` stream keeps streaming (a rough total, ms). */
   readonly holdMs?: number;
@@ -245,6 +247,27 @@ export const CHART_SPEC = {
 export const TOOLROWS_PROMPT = "TOOLROWS29";
 /** Round 3's thinking spacing (ms): long enough for a flow to shoot the footer. */
 export const TOOLROWS_THINK_MS = 2500;
+/**
+ * Flow 38's turn (docs/fix/mobile-running-row.md): round 1 thinks, then runs ONE
+ * described `shell` call that takes a while (the live running row: the sentence
+ * shimmering, the running node); round 2 thinks SLOWLY (the live `Thinking`
+ * footer) and answers. The thought folded into the step must NOT show in its
+ * tap detail (owner, docs/feat/shell-intent-line.md).
+ */
+export const RUNROW_PROMPT = "RUNROW38";
+/** Flow 38's described shell sentence — long, so a clipped label shows. */
+export const RUNROW_SENTENCE = "Test DNS con 50 query e latenze misurate per ogni risolutore";
+/** Flow 38's folded thought (asserted ABSENT from the tap detail). */
+export const RUNROW_THOUGHT = "Measure the resolver latency with fifty queries.";
+/** Flow 38's FAILED described shell (fix round 1): `exit N` on the `$` line, a command too long for one. */
+export const RUNROW_FAIL_SENTENCE = "Controllo il container del resolver";
+/**
+ * Flow 41's turn (docs/feat/mobile-file-view.md, Validation part 1): round 1
+ * WRITES a new html page, round 2 READS a range of it, round 3 EDITS it once,
+ * round 4 MULTI-EDITS it, round 5 answers. The page's name is new on every turn
+ * (a retried flow must still write a NEW file: `new file`).
+ */
+export const FILEVIEW_PROMPT = "FILEVIEW41";
 /** A child's prompt: `CHILDSTEPS <n>` — it calls `fs_read` n times, one per round, then reports. */
 export const CHILD_MARK = "CHILDSTEPS";
 /** The spacing of a child's rounds (ms): slow enough for a flow to see its steps advance. */
@@ -349,6 +372,8 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
   const prompts: string[] = [];
   const replies: string[] = [];
   const calls: string[] = [];
+  // Flow 41's page: a new name per turn.
+  const fileView = { turns: 0, path: "" };
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -384,6 +409,7 @@ export function startMockModel(options: MockModelOptions = {}): MockModel {
           prompts,
           replies,
           calls,
+          fileView,
         }),
         {
           headers: { "content-type": "text/event-stream", "cache-control": "no-store" },
@@ -417,6 +443,7 @@ function stream(
     readonly prompts: string[];
     readonly replies: string[];
     readonly calls: string[];
+    readonly fileView: { turns: number; path: string };
   },
 ): ReadableStream {
   const encoder = new TextEncoder();
@@ -501,6 +528,76 @@ function stream(
           }
           send(frame({ content: "The workspace has **notes.txt** (40 lines). " }));
           send(frame({ content: "`missing-dir` is not there, and no browser tool is set up." }));
+          send(frame({}, "stop"));
+        }
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      // Flow 41: one html page written, read, edited, multi-edited.
+      if (promptLine(prompt, FILEVIEW_PROMPT)) {
+        const done = toolResultsThisTurn(body);
+        if (done === 0) {
+          ctx.fileView.turns += 1;
+          ctx.fileView.path =
+            ctx.fileView.turns === 1
+              ? "project/polpetto.html"
+              : `project/polpetto-${ctx.fileView.turns}.html`;
+        }
+        const path = ctx.fileView.path;
+        const call =
+          done === 0
+            ? { name: "fs_write", args: { path, content: FILE_VIEW_PAGE } }
+            : done === 1
+              ? { name: "fs_read", args: { path, offset: 1, limit: 40 } }
+              : done === 2
+                ? { name: "fs_edit", args: { path, ...FILE_VIEW_EDIT } }
+                : done === 3
+                  ? { name: "fs_multi_edit", args: { path, edits: FILE_VIEW_MULTI_EDITS } }
+                  : null;
+        if (call === null) {
+          send(frame({ content: "The page is written, read and edited." }));
+          send(frame({}, "stop"));
+        } else {
+          for (const chunk of toolCallFrames(0, mint(), call.name, call.args)) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        }
+        send(DONE_FRAME);
+        controller.close();
+        return;
+      }
+      // Flow 38: a described shell that runs a while, then a slow thought.
+      if (promptLine(prompt, RUNROW_PROMPT)) {
+        const think = (text: string) => send(frame({ reasoning_content: text }));
+        if (toolResultsThisTurn(body) === 0) {
+          think(RUNROW_THOUGHT);
+          for (const chunk of toolCallFrames(0, mint(), "shell", {
+            command: "sleep 20 && echo resolved 50/50",
+            description: RUNROW_SENTENCE,
+          })) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else if (toolResultsThisTurn(body) === 1) {
+          // The FAILED row (mobile-step-rail fix round 1), its own round so its
+          // permission ask comes after the first call's: a command too long for
+          // one line, and a fixed `exit 125` (it really runs on the host, so it
+          // must not depend on what is installed there).
+          for (const chunk of toolCallFrames(0, mint(), "shell", {
+            command: `echo "Error: no container named tentacle-dns-resolver-cache matches the filter" >&2; exit 125`,
+            description: RUNROW_FAIL_SENTENCE,
+          })) {
+            send(chunk);
+          }
+          send(frame({}, "tool_calls"));
+        } else {
+          for (const part of ["All fifty resolved. ", "Summarise the latency."]) {
+            think(part);
+            await Bun.sleep(ctx.thinkMs * 3);
+          }
+          send(frame({ content: "All 50 queries resolved." }));
           send(frame({}, "stop"));
         }
         send(DONE_FRAME);

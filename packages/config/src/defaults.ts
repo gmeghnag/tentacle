@@ -35,6 +35,16 @@ export const DEFAULT_SUBAGENT_MAX_PARALLEL = 4;
  * (docs/feat/agent-message-two-way.md, owner Q3 a).
  */
 export const DEFAULT_SUBAGENTS_TWO_WAY = false;
+/**
+ * The `claude-code` harness (docs/feat/subagent-harness-runners.md D6, Owner
+ * A4): on by default, no cap; the model a call names none of; the hang guard.
+ */
+export const DEFAULT_HARNESS_CLAUDE_CODE = {
+  enabled: true,
+  command: "claude",
+  model: "opus",
+  idleMinutes: 15,
+} as const;
 /** Max bytes of a custom `agent_task` description, after trimming. */
 export const MAX_AGENT_TASK_DESCRIPTION_BYTES = 4096;
 /**
@@ -262,6 +272,11 @@ export const DEFAULT_CONFIG_JSONC = `{
   // A chart's plot glyphs: "braille" (default) or "blocks" for a font without the
   // braille patterns (a terminal cannot report a missing glyph, so it is a setting).
   // "tui": { "chartGlyphs": "braille" },
+
+  // Beta: with the model's sentence on a shell row, show the "$ command" row only on
+  // failure (the command stays in the permission ask and in the expanded row; a
+  // sentence that lies is then caught only by expanding). Default false.
+  // "beta": { "compactShell": false },
 
   // Session files (one log per conversation under <configDir>/sessions/): keep the
   // history a compaction or a context reset replaced in the file too (resume still

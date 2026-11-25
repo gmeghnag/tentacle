@@ -1339,8 +1339,8 @@ describe("persisted-session (pure)", () => {
     expect(sidecarReason({ format: "tentacle.daemon-session" })).toMatch(
       /not a tentacle daemon state file/,
     );
-    expect(sidecarReason({ schemaVersion: 4 })).toMatch(
-      /state file schemaVersion 4 is not 1 or 2 or 3/,
+    expect(sidecarReason({ schemaVersion: 5 })).toMatch(
+      /state file schemaVersion 5 is not 1 or 2 or 3 or 4/,
     );
     expect(reason(base(), "/elsewhere")).toMatch(/another project/);
     expect(reason({ ...base(), turns: [{ turnId: "x", end: { stopReason: "nope" } }] })).toMatch(
@@ -2826,6 +2826,45 @@ describe("the v8 record: a refused call's reply and the installed head (docs/fea
     const restored = rig([], () => []).host.restore(parsed(bytes));
     const reply = restored.snapshotPage().messages.find((m) => m.role === "assistant");
     expect(reply?.thought).toEqual({ ms: 12_400 });
+  });
+
+  test("an assistant's reasoning record survives a restart byte-identical (docs/fix/reasoning-echo.md T4)", () => {
+    const openai = {
+      source: "openai:m",
+      body: { format: "openai", field: "reasoning_content", text: "list the dir first" },
+    } as const;
+    const anthropic = {
+      source: "anthropic:m",
+      body: {
+        format: "anthropic",
+        blocks: [
+          { type: "thinking", thinking: "", signature: "sig==" },
+          { type: "redacted_thinking", data: "opaque" },
+        ],
+      },
+    } as const;
+    const messages: ChatMessage[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "c1", name: "shell", arguments: "{}" }],
+        reasoning: openai,
+      },
+      { role: "tool", content: "ok", toolCallId: "c1" },
+      { role: "assistant", content: "done", reasoning: anthropic },
+    ];
+    const bytes = JSON.parse(
+      JSON.stringify(
+        record({ messages, turns: [{ turnId: "t1", end: { stopReason: "end_turn" } }] }),
+      ),
+    );
+    const restored = rig([], () => []).host.restore(parsed(bytes));
+    const replies = restored.snapshotPage().messages.filter((m) => m.role === "assistant");
+    expect(replies.map((m) => JSON.stringify(m.reasoning))).toEqual([
+      JSON.stringify(openai),
+      JSON.stringify(anthropic),
+    ]);
   });
 
   test("V8-3 `head` must name a user message of the history", () => {

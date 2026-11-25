@@ -19,11 +19,19 @@
  */
 import { createHash } from "node:crypto";
 import type { AttachmentRef, ChatMessage, ChatRequest } from "@tentacle/core";
-import { attachmentLabel, formatBytes } from "@tentacle/core";
+import { attachmentLabel, imageOverCapReason } from "@tentacle/core";
 import { MAX_IMAGE_BYTES, isKnownImageType } from "@tentacle/protocol";
 
 /** How many images one request may inline: the last K distinct refs (owner Q4). */
 export const MAX_INLINE_IMAGES = 5;
+
+/**
+ * How many TOOL-RESULT images one request may inline (docs/feat/pdf-images.md
+ * D7, owner Q2): the newest N distinct refs on `role:"tool"` messages — a budget
+ * SEPARATE from the user's `MAX_INLINE_IMAGES`, so a PDF read never pushes the
+ * user's own pictures out. Overridable per provider (`maxToolImages`).
+ */
+export const MAX_TOOL_IMAGES = 20;
 
 /**
  * The most raw image bytes a model's wire accepts, by provider.
@@ -43,6 +51,38 @@ export const ANTHROPIC_MAX_IMAGE_BYTES = 3_932_160;
  * than any documented cloud cap). `model.maxImageBytes` raises it.
  */
 export const OPENAI_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * The most images ONE Anthropic request may carry, user ∪ tool. Above 20 images
+ * per request the Messages API lowers its per-image dimension limit (to
+ * 2000×2000 px), and user images are not downscaled: an older 3000 px screenshot
+ * would 400 every later turn. At 20, that rule never applies.
+ */
+export const ANTHROPIC_MAX_REQUEST_IMAGES = 20;
+
+/**
+ * What one request may inline in total (docs/feat/pdf-images.md, review round 1):
+ * a COUNT and RAW BYTES across user ∪ tool images. The byte budget is
+ * `MAX_INLINE_IMAGES × the per-image cap` — exactly what a request could already
+ * carry before tool images existed (Anthropic: 5 × 3.75 MiB ≈ 26 MB of base64,
+ * under its 32 MB request limit), so tool images only fill what the user's
+ * images leave. Before any read: decided from `ref.size`, deterministic, so the
+ * same history builds the same request every turn (no poisoned session).
+ */
+export interface RequestImageBudget {
+  readonly maxImages: number;
+  readonly maxBytes: number;
+}
+
+export function requestImageBudget(
+  provider: VisionProvider,
+  limits: { readonly maxBytes: number },
+): RequestImageBudget {
+  return {
+    maxImages: provider === "anthropic" ? ANTHROPIC_MAX_REQUEST_IMAGES : Number.POSITIVE_INFINITY,
+    maxBytes: MAX_INLINE_IMAGES * effectiveMaxImageBytes(limits.maxBytes),
+  };
+}
 
 export type ImagePart = {
   readonly kind: "image";
@@ -65,6 +105,17 @@ export interface ImageBuildOptions {
    * "older than the last K" from "selected but its bytes are missing".
    */
   readonly inlined: ReadonlySet<string>;
+  /**
+   * The TOOL-result selection (`selectToolImageIds`): id → the ONE tool message
+   * that owns its inline slot (the newest carrying it), so a picture read twice
+   * is sent once and the count of tool images never exceeds the budget.
+   * Absent: no tool image is inlined (every ref gets a reason line).
+   */
+  readonly toolInlined?: ReadonlyMap<string, ChatMessage>;
+  /** The tool budget the selection used, named in the "older" reason line. */
+  readonly toolKeep?: number;
+  /** Selected ids left out by the request-wide budget (`RequestImageBudget`): their own reason line. */
+  readonly overBudget?: ReadonlySet<string>;
   /**
    * This model's per-image cap in raw bytes (`ANTHROPIC_MAX_IMAGE_BYTES` /
    * `OPENAI_MAX_IMAGE_BYTES`, or `model.maxImageBytes`).
@@ -109,6 +160,101 @@ export function selectInlineIds(
   return chosen;
 }
 
+/**
+ * The tool-result images this request will inline: the newest `keep` DISTINCT
+ * refs on TOOL messages, walked newest-first, each mapped to the newest tool
+ * message carrying it (its one inline slot). Separate from `selectInlineIds`:
+ * the two budgets never share a slot.
+ */
+export function selectToolImageIds(
+  messages: readonly ChatMessage[],
+  keep: number = MAX_TOOL_IMAGES,
+): Map<string, ChatMessage> {
+  const chosen = new Map<string, ChatMessage>();
+  if (keep <= 0) {
+    return chosen;
+  }
+  for (let at = messages.length - 1; at >= 0 && chosen.size < keep; at--) {
+    const message = messages[at];
+    if (message?.role !== "tool") {
+      continue;
+    }
+    const refs = message.attachments ?? [];
+    for (let k = refs.length - 1; k >= 0 && chosen.size < keep; k--) {
+      const ref = refs[k];
+      if (ref !== undefined && !chosen.has(ref.id)) {
+        chosen.set(ref.id, message);
+      }
+    }
+  }
+  return chosen;
+}
+
+/** What one request inlines: both selections, after the request-wide budget. */
+export interface RequestImageSelection {
+  readonly user: Set<string>;
+  readonly tool: Map<string, ChatMessage>;
+  readonly overBudget: Set<string>;
+}
+
+/**
+ * The user selection (K) and the tool selection (N), then the request-wide
+ * budget: the USER's images first (newest-first), then the tool images
+ * (newest-first); an image that would pass the count or the bytes leaves its
+ * selection and lands in `overBudget` (a reason line, never a silent drop). A
+ * ref that could never be sent (`sendable`) costs nothing: it is never read.
+ * An id selected on both sides is sent twice, so it is counted twice.
+ */
+export function selectRequestImages(
+  messages: readonly ChatMessage[],
+  keep: number,
+  toolKeep: number,
+  maxImageBytes: number,
+  budget?: RequestImageBudget,
+): RequestImageSelection {
+  const user = selectInlineIds(messages, keep);
+  const tool = selectToolImageIds(messages, toolKeep);
+  const overBudget = new Set<string>();
+  if (budget === undefined) {
+    return { user, tool, overBudget };
+  }
+  const refs = new Map<string, AttachmentRef>();
+  for (const message of messages) {
+    for (const ref of message.attachments ?? []) {
+      if (!refs.has(ref.id)) {
+        refs.set(ref.id, ref);
+      }
+    }
+  }
+  const max = effectiveMaxImageBytes(maxImageBytes);
+  let count = 0;
+  let bytes = 0;
+  const fits = (id: string): boolean => {
+    const ref = refs.get(id);
+    if (ref === undefined || !sendable(ref, max)) {
+      return true;
+    }
+    if (count + 1 > budget.maxImages || bytes + ref.size > budget.maxBytes) {
+      overBudget.add(id);
+      return false;
+    }
+    count += 1;
+    bytes += ref.size;
+    return true;
+  };
+  for (const id of [...user]) {
+    if (!fits(id)) {
+      user.delete(id);
+    }
+  }
+  for (const id of [...tool.keys()]) {
+    if (!fits(id)) {
+      tool.delete(id);
+    }
+  }
+  return { user, tool, overBudget };
+}
+
 /** True when this ref could ever be inlined, before any read (`max` = the model's cap). */
 function sendable(ref: AttachmentRef, max: number): boolean {
   return isKnownImageType(ref.mimeType) && ref.size <= Math.min(max, MAX_IMAGE_BYTES);
@@ -150,6 +296,73 @@ export function imageLimits(
 }
 
 /**
+ * The largest SIDE an image FILE may have (owner Q1 (C), docs/feat/image-files.md):
+ * `high` is the original bytes (nothing downscales yet), so this is the one
+ * bound that keeps a phone photo from either a provider 400 (Anthropic accepts
+ * 8000 px) or an unbounded token bill on an OpenAI-compatible endpoint (1568 px).
+ * It sits HERE, next to the byte cap, so the two can never disagree.
+ */
+export function imageFileMaxEdge(provider: VisionProvider): number {
+  return provider === "anthropic" ? ANTHROPIC_MAX_IMAGE_EDGE : OPENAI_MAX_IMAGE_EDGE;
+}
+
+export const ANTHROPIC_MAX_IMAGE_EDGE = 8000;
+export const OPENAI_MAX_IMAGE_EDGE = 1568;
+
+/**
+ * What one image ref costs the heuristic counter, by provider
+ * (docs/feat/image-view.md D7). Anthropic keeps the flat 1600; an
+ * OpenAI-compatible endpoint (Qwen measured ≈3.1k per image) is charged 3200 —
+ * rounded UP, the counter's never-underestimate contract. `model.imageTokens`
+ * (`override`) wins.
+ */
+export function imageTokenEstimate(provider: VisionProvider, override?: number): number {
+  if (override !== undefined && Number.isInteger(override) && override > 0) {
+    return override;
+  }
+  return provider === "anthropic" ? ANTHROPIC_IMAGE_TOKENS : OPENAI_IMAGE_TOKENS;
+}
+
+export const ANTHROPIC_IMAGE_TOKENS = 1600;
+export const OPENAI_IMAGE_TOKENS = 3200;
+
+/** The tool-image budget of a provider config (`maxToolImages`, default `MAX_TOOL_IMAGES`). */
+export function toolImageBudget(maxToolImages: number | undefined): number {
+  return Math.max(0, Math.floor(maxToolImages ?? MAX_TOOL_IMAGES));
+}
+
+/**
+ * The image options of one request, for either provider: no vision reads
+ * NOTHING (the refs still reach the model as reason lines); with vision, the
+ * user selection and the tool selection are resolved together, each id once.
+ */
+export async function buildImageOptions(
+  request: ChatRequest,
+  limits: { readonly vision: boolean; readonly maxBytes: number },
+  toolKeep: number = MAX_TOOL_IMAGES,
+  budget?: RequestImageBudget,
+): Promise<ImageBuildOptions> {
+  const { vision, maxBytes: maxImageBytes } = limits;
+  const selection = selectRequestImages(
+    request.messages,
+    MAX_INLINE_IMAGES,
+    toolKeep,
+    maxImageBytes,
+    budget,
+  );
+  const images = vision ? await readSelected(request, selection, maxImageBytes) : EMPTY_RESOLVED;
+  return {
+    images,
+    vision,
+    inlined: selection.user,
+    toolInlined: selection.tool,
+    toolKeep,
+    overBudget: selection.overBudget,
+    maxImageBytes,
+  };
+}
+
+/**
  * Read and verify the bytes of the refs `selectInlineIds` chose. No source, or
  * nothing selected, reads nothing. A ref whose bytes are absent (`null`), the
  * wrong length or the wrong sha256 is LEFT OUT (its placeholder says so). Each
@@ -165,19 +378,38 @@ export async function resolveImages(
   req: ChatRequest,
   keep: number = MAX_INLINE_IMAGES,
   maxImageBytes: number = MAX_IMAGE_BYTES,
+  toolKeep = 0,
+  budget?: RequestImageBudget,
+): Promise<ResolvedImages> {
+  return readSelected(
+    req,
+    selectRequestImages(req.messages, keep, toolKeep, maxImageBytes, budget),
+    maxImageBytes,
+  );
+}
+
+/** Read and verify exactly the ids of one `selectRequestImages` result, each once. */
+async function readSelected(
+  req: ChatRequest,
+  selection: RequestImageSelection,
+  maxImageBytes: number,
 ): Promise<ResolvedImages> {
   const source = req.attachments;
   if (source === undefined) {
     return EMPTY_RESOLVED;
   }
-  const selected = selectInlineIds(req.messages, keep);
-  if (selected.size === 0) {
+  // Two selections, one read per id: the user's K and the tool results' own N.
+  const userSelected = selection.user;
+  const toolSelected = selection.tool;
+  if (userSelected.size === 0 && toolSelected.size === 0) {
     return EMPTY_RESOLVED;
   }
   const max = effectiveMaxImageBytes(maxImageBytes);
   const refs = new Map<string, AttachmentRef>();
   for (const message of req.messages) {
-    if (message.role !== "user") {
+    const selected =
+      message.role === "user" ? userSelected : message.role === "tool" ? toolSelected : undefined;
+    if (selected === undefined) {
       continue;
     }
     for (const ref of message.attachments ?? []) {
@@ -206,7 +438,11 @@ export async function resolveImages(
  */
 function placeholder(
   ref: AttachmentRef,
-  options: Pick<ImageBuildOptions, "images" | "vision" | "inlined" | "maxImageBytes">,
+  options: Pick<
+    ImageBuildOptions,
+    "images" | "vision" | "inlined" | "maxImageBytes" | "overBudget"
+  >,
+  older = `only the last ${MAX_INLINE_IMAGES} images are sent`,
 ): string {
   const label = attachmentLabel(ref);
   if (!options.vision) {
@@ -217,14 +453,15 @@ function placeholder(
   }
   const max = effectiveMaxImageBytes(options.maxImageBytes);
   if (ref.size > max) {
-    // The MODEL's cap when it is the binding one (the entry point already
-    // refused anything over `MAX_IMAGE_BYTES`, but a request may be built from
-    // history a bigger build wrote), named as such so the fix is obvious.
-    const which = max < MAX_IMAGE_BYTES ? "this model's" : "the";
-    return `[image omitted: ${formatBytes(ref.size)} is over ${which} ${formatBytes(max)} limit — ${label}]`;
+    // The ONE cap sentence, shared with `fs_read`'s own refusal (docs/feat/
+    // image-files.md D1), so the same limit reads the same way everywhere.
+    return `[image omitted: ${imageOverCapReason(ref.size, max)} — ${label}]`;
+  }
+  if (!options.inlined.has(ref.id) && options.overBudget?.has(ref.id) === true) {
+    return `[image omitted: over this request's image budget (newer images go first) — ${label}]`;
   }
   if (!options.inlined.has(ref.id)) {
-    return `[image omitted: only the last ${MAX_INLINE_IMAGES} images are sent — ${label}]`;
+    return `[image omitted: ${older} — ${label}]`;
   }
   if (!options.images.has(ref.id)) {
     return `[image unavailable — ${label}]`;
@@ -241,7 +478,9 @@ function placeholder(
 export function userParts(m: ChatMessage, options: ImageBuildOptions): (ImagePart | TextPart)[] {
   const parts: (ImagePart | TextPart)[] = [];
   for (const ref of m.attachments ?? []) {
-    const base64 = options.images.get(ref.id);
+    // `images` also holds the TOOL selection's bytes: only the user's own
+    // selection may inline here, so tool refs never widen the user's K.
+    const base64 = options.inlined.has(ref.id) ? options.images.get(ref.id) : undefined;
     if (base64 !== undefined && options.vision && isKnownImageType(ref.mimeType)) {
       parts.push({ kind: "image", mimeType: ref.mimeType, base64 });
       continue;
@@ -258,8 +497,80 @@ export function userParts(m: ChatMessage, options: ImageBuildOptions): (ImagePar
 }
 
 /**
- * A NON-user message that carries refs (only a pod could send one): never
- * inlined — a ref is only ever inlined from a USER message — so each one says
+ * A TOOL message's images (docs/feat/pdf-images.md D7): the inlined ones, in
+ * ref order, and one reason LINE per ref that is not — never a silent drop. An
+ * image is inlined only from bytes `resolveImages` verified AND only in the one
+ * tool message that owns its slot (`toolInlined`), so the count of tool images
+ * in a request never exceeds the tool budget. A model without vision gets ONE
+ * line for the whole result, not one per image.
+ */
+export function toolResultImages(
+  m: ChatMessage,
+  options: ImageBuildOptions,
+): { readonly images: (ImagePart & { readonly label: string })[]; readonly lines: string[] } {
+  const refs = m.attachments ?? [];
+  if (refs.length === 0) {
+    return { images: [], lines: [] };
+  }
+  if (!options.vision) {
+    const n = refs.length;
+    return {
+      images: [],
+      lines: [
+        `[${n} image${n === 1 ? "" : "s"} in this result not sent: this model does not take images]`,
+      ],
+    };
+  }
+  const toolInlined = options.toolInlined ?? new Map<string, ChatMessage>();
+  const keep = options.toolKeep ?? 0;
+  const images: (ImagePart & { readonly label: string })[] = [];
+  const lines: string[] = [];
+  const sent = new Set<string>();
+  const selected = new Set(toolInlined.keys());
+  for (const ref of refs) {
+    const owner = toolInlined.get(ref.id);
+    if (owner !== undefined && owner !== m) {
+      lines.push(
+        `[image omitted: the same image is in a newer tool result — ${attachmentLabel(ref)}]`,
+      );
+      continue;
+    }
+    const base64 = owner === m && !sent.has(ref.id) ? options.images.get(ref.id) : undefined;
+    if (base64 !== undefined && isKnownImageType(ref.mimeType)) {
+      sent.add(ref.id);
+      images.push({ kind: "image", mimeType: ref.mimeType, base64, label: attachmentLabel(ref) });
+      continue;
+    }
+    if (sent.has(ref.id)) {
+      continue; // the same image twice in ONE result: sent once, nothing lost
+    }
+    const text = placeholder(
+      ref,
+      { ...options, inlined: selected },
+      `only the newest ${keep} tool-result images are sent (call image_view again to see it)`,
+    );
+    if (text !== "") {
+      lines.push(text);
+    }
+  }
+  return { images, lines };
+}
+
+/**
+ * The text of a tool message whose images do NOT travel inside it (the
+ * OpenAI-compatible wire, where a tool message is text only): its content plus
+ * one reason line per ref not inlined (`toolResultImages`).
+ */
+export function toolResultText(content: string, lines: readonly string[]): string {
+  if (lines.length === 0) {
+    return content;
+  }
+  return content === "" ? lines.join("\n") : `${content}\n${lines.join("\n")}`;
+}
+
+/**
+ * An ASSISTANT/SYSTEM message that carries refs (only a pod could send one): never
+ * inlined — a ref is only ever inlined from a user or tool message — so each one says
  * "unavailable" (or the more specific reason), and none are silent.
  */
 export function strayRefsText(m: ChatMessage, options: Omit<ImageBuildOptions, "inlined">): string {

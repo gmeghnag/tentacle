@@ -23,6 +23,7 @@ import {
   DEFAULT_CONTEXT_STEP_PERCENT,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_DEDUP_OUTPUT,
+  DEFAULT_HARNESS_CLAUDE_CODE,
   DEFAULT_MAX_INLINE_OUTPUT_CHARS,
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MODEL,
@@ -158,6 +159,10 @@ export interface ResolvedConfig {
    * (docs/feat/attachments-prompt.md D4). Unset → the provider's default.
    */
   readonly images?: boolean;
+  /** `model.imageDetail` (docs/feat/image-view.md D6). Unset → `auto`. */
+  readonly imageDetail?: "auto" | "low" | "high";
+  /** `model.imageTokens` (docs/feat/image-view.md D7). Unset → the provider's estimate. */
+  readonly imageTokens?: number;
   readonly systemPrompt: string;
   /** The identity part of `systemPrompt`, before AGENTS.md and the skills catalog. */
   readonly promptIdentity: string;
@@ -187,6 +192,11 @@ export interface ResolvedConfig {
   readonly subagentModels: Readonly<Record<string, string>>;
   /** `subagents.selectableModels`, de-duplicated in order; `[]` when unset (off). */
   readonly selectableModels: readonly string[];
+  /**
+   * `harnesses.<name>` with defaults (docs/feat/subagent-harness-runners.md);
+   * always holds `claude-code`. Laptop/serve only: a pod ignores it (D5).
+   */
+  readonly harnesses: Readonly<Record<string, ResolvedHarness>>;
   /** Max characters of a tool result kept inline before spilling to a file. */
   readonly maxInlineOutputChars: number;
   /** Days a spilled tool output is kept; `<= 0` = never swept. */
@@ -233,6 +243,8 @@ export interface ResolvedConfig {
     /** A chart's plot glyphs (docs/feat/model-charts.md D5); absent = `braille`. */
     readonly chartGlyphs?: "braille" | "blocks" | undefined;
   };
+  /** Opt-in display features (docs/feat/shell-intent-line.md); absent = all off. */
+  readonly beta?: { readonly compactShell?: boolean | undefined };
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: { readonly keepSuperseded?: boolean | undefined };
   /** Voice dictation (file or profile); absent = OFF, Ctrl+R, `auto`, no auto-stop. */
@@ -451,6 +463,38 @@ function parseBool(raw: string | undefined): boolean | undefined {
  * falsy enables; wins) > file `loadSkills` > enabled. Exported because
  * `load.ts` must know it BEFORE scanning (a disabled scan does no I/O).
  */
+/** One `harnesses.<name>` with its defaults (docs/feat/subagent-harness-runners.md D6). */
+export interface ResolvedHarness {
+  readonly adapter: "claude-code";
+  readonly enabled: boolean;
+  readonly command: string;
+  readonly model: string;
+  readonly idleMinutes: number;
+  /** The config file wrote this instance (a pod says it ignores it, D5). */
+  readonly configured: boolean;
+}
+
+/** `harnesses`, defaults filled: `claude-code` is always there (on by default, Owner A4). */
+export function resolveHarnesses(
+  file: FileConfig["harnesses"],
+): Readonly<Record<string, ResolvedHarness>> {
+  const out: Record<string, ResolvedHarness> = {};
+  type Entry = NonNullable<FileConfig["harnesses"]>[string];
+  const entries: Record<string, Entry | undefined> = { "claude-code": undefined, ...(file ?? {}) };
+  for (const [name, entry] of Object.entries(entries)) {
+    const d = DEFAULT_HARNESS_CLAUDE_CODE;
+    out[name] = {
+      adapter: entry?.adapter ?? "claude-code",
+      enabled: entry?.enabled ?? d.enabled,
+      command: entry?.command ?? d.command,
+      model: entry?.model ?? d.model,
+      idleMinutes: entry?.idleMinutes ?? d.idleMinutes,
+      configured: entry !== undefined,
+    };
+  }
+  return out;
+}
+
 export function skillsEnabled(fileConfig: FileConfig, env: Env): boolean {
   return pickSkillsEnabled(fileConfig, env).value;
 }
@@ -550,6 +594,9 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   // File-only, like `maxImageBytes`: whether this model takes images at all.
   // The effective value (with the provider's default) is `imageLimits()`.
   const images = model.images;
+  // File-only too (docs/feat/image-view.md D6/D7).
+  const imageDetail = model.imageDetail;
+  const imageTokens = model.imageTokens;
   // System prompt = identity (env | PROMPT.md | default). AGENTS.md, when
   // auto-loaded, is appended AFTER it as repo rules — additive, never replacing
   // the identity. Disable via env TENTACLE_NO_AGENTS_MD (truthy, wins) or file
@@ -767,6 +814,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     }
   }
   const selectableModels = [...new Set(fileConfig.subagents?.selectableModels ?? [])];
+  const harnesses = resolveHarnesses(fileConfig.harnesses);
 
   return {
     provider: providerValue,
@@ -804,6 +852,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     ...(maxImageBytes !== undefined ? { maxImageBytes } : {}),
     ...(images !== undefined ? { images } : {}),
+    ...(imageDetail !== undefined ? { imageDetail } : {}),
+    ...(imageTokens !== undefined ? { imageTokens } : {}),
     systemPrompt: systemPromptValue,
     promptIdentity: systemPrompt.value,
     agentsMdLoaded,
@@ -820,6 +870,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     models,
     subagentModels,
     selectableModels,
+    harnesses,
     maxInlineOutputChars: maxInlineOutputChars.value,
     toolOutputRetentionDays: toolOutputRetentionDays.value,
     redactSecrets: redactSecrets.value,
@@ -835,6 +886,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(fileConfig.rm !== undefined ? { rm: fileConfig.rm } : {}),
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
     ...(fileConfig.tui !== undefined ? { tui: fileConfig.tui } : {}),
+    ...(fileConfig.beta !== undefined ? { beta: fileConfig.beta } : {}),
     ...(fileConfig.sessions !== undefined ? { sessions: fileConfig.sessions } : {}),
     ...(fileConfig.voice !== undefined ? { voice: fileConfig.voice } : {}),
     ...(fileConfig.relay !== undefined ? { relay: fileConfig.relay } : {}),

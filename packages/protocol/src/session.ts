@@ -18,7 +18,7 @@ import {
   MAX_ATTACHMENTS_PER_MESSAGE,
 } from "./attachment.ts";
 import { ContentBlockSchema, PromptContentBlockSchema } from "./content.ts";
-import { ModelNameSchema } from "./model.ts";
+import { ModelNameSchema, ReasoningRecordSchema } from "./model.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { ToolResultSpillSchema } from "./spill.ts";
 import { line } from "./text-line.ts";
@@ -197,6 +197,15 @@ const chatMessageShape = () => ({
     .object({ ms: z.number().int().nonnegative().max(86_400_000) })
     .optional()
     .catch(undefined),
+  /**
+   * ONLY on an assistant message: the model's own reasoning, as its provider
+   * must get it back (NOT display-only — echoed to the model; persisted, owner
+   * Q1 A; docs/fix/reasoning-echo.md D8). The display stays `thought`. FAIL-SOFT
+   * like `thought`: a malformed or over-bound value is DROPPED whole (never
+   * cut; the message still loads, that round is just not echoed), never a
+   * refusal of the CRITICAL entry.
+   */
+  reasoning: ReasoningRecordSchema.optional().catch(undefined),
   /**
    * On a USER message: image refs to send with it (docs/feat/attachments-core.md).
    * Refs, never bytes — the bytes live behind an `AttachmentSource` on the side
@@ -795,6 +804,472 @@ export const AgentKillResultSchema = z.object({
 });
 export type AgentKillResult = z.infer<typeof AgentKillResultSchema>;
 
+// --- workflow runs (docs/feat/agent-workflows.md D5) ---
+// The session's runs (the current one + the last few ended) as ONE full-state
+// `workflows` update, never a delta, so a client converges from any loss; the
+// snapshot's first page carries the same list. Not turn-scoped: a run lives
+// between turns. Labels are `line()`-bounded; `reason`/`live` are bounded free
+// text (a failed `run` step's reason carries its last output lines), which the
+// client flattens for display. States are free words (a newer daemon's state is
+// shown as is), never an enum.
+
+/** How many finished executions a run row's `history` keeps (the LATEST ones). */
+export const WORKFLOW_HISTORY_MAX = 64;
+
+/**
+ * One finished execution of a step, as the run row's `history` carries it
+ * (docs/fix/workflows-ux.md D1): the run as it RAN, so a client draws the
+ * loops/branches from evidence instead of guessing them from counters.
+ */
+export const WorkflowHistoryRowSchema = z.object({
+  /** The step id this execution ran. */
+  step: line(64),
+  attempt: z.number().int().nonnegative(),
+  round: z.number().int().nonnegative(),
+  /** Its state when it ended: `ok` | `error` | `stopped` today; free word. */
+  state: line(32),
+  durationMs: z.number().int().nonnegative().optional(),
+});
+export type WorkflowHistoryRow = z.infer<typeof WorkflowHistoryRowSchema>;
+
+/** One step of a run, as the daemon reports it. */
+export const WorkflowStepRowSchema = z.object({
+  id: line(64),
+  /** `agent` | `run` | `approve` today; free word. */
+  kind: line(16),
+  /** The step's `models` NAME only, never an id or URL (AGENTS §7). */
+  model: line(128).optional(),
+  /** `local` | `docker:<name>[/<container>]`. */
+  where: line(256),
+  /** `pending` | `running` | `waiting` | `needs-approval` | `ok` | `error` | `stopped` today. */
+  state: line(32),
+  attempt: z.number().int().nonnegative(),
+  round: z.number().int().nonnegative(),
+  /** The goto edge's `max` when `round` is a goto round. */
+  maxRound: z.number().int().positive().optional(),
+  reason: z.string().max(2000).optional(),
+  /** The running step's last action (a tool label, a output line). */
+  live: z.string().max(200).optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  /**
+   * The RESOLVED pass target (`passTarget` over the run's own frozen spec):
+   * the step's `next`, else the one after it in the file. `null` = the run ends
+   * after it. From the RUN's snapshot, never the file as it is now (P2).
+   */
+  next: line(64).nullable(),
+  /**
+   * Its `on_fail`, with the counter as it stands: `goto` = where a failure
+   * jumps, `max` = how many times that edge may be taken, `taken` =
+   * `state.counters[edgeKey(id, goto)]`. `null` = a failure stops the run.
+   */
+  onFail: z
+    .object({
+      goto: line(64),
+      max: z.number().int().min(1).max(10),
+      taken: z.number().int().nonnegative(),
+    })
+    .nullable(),
+  /** Re-runs of the same step after a `fail` (`0..5`). */
+  retry: z.number().int().min(0).max(5),
+});
+export type WorkflowStepRow = z.infer<typeof WorkflowStepRowSchema>;
+
+/** One run, as the daemon reports it. */
+export const WorkflowRowSchema = z.object({
+  /** `wf-N`: what `session/workflow` takes and the log entries carry. */
+  runId: line(32),
+  name: line(64),
+  version: z.number().int().nonnegative(),
+  hash: z.string().regex(/^[0-9a-f]{64}$/),
+  /** `running` | `waiting` | `needs-approval` | `ok` | `error` | `stopped` today. */
+  state: line(32),
+  /** With `stopped`: `budget` | `timeout` | `cancelled` | `interrupted` | `changed` today. */
+  stopReason: line(32).optional(),
+  reason: z.string().max(2000).optional(),
+  /** The run's token sum so far. */
+  tokens: z.number().int().nonnegative(),
+  /** `budget.tokens`, when the file sets one. */
+  budget: z.number().int().positive().optional(),
+  startedAt: z.number().int().nonnegative(),
+  endedAt: z.number().int().nonnegative().optional(),
+  /**
+   * Every FINISHED execution of this run, in order — the LATEST
+   * `WORKFLOW_HISTORY_MAX` of them (docs/fix/workflows-ux.md D1). The current
+   * step is not in it: its state is on the step row. In memory only; nothing
+   * persisted changes.
+   */
+  history: z.array(WorkflowHistoryRowSchema).max(WORKFLOW_HISTORY_MAX),
+  /** How many earlier executions the cap dropped, so a client can say so. */
+  historyDropped: z.number().int().nonnegative(),
+  steps: z.array(WorkflowStepRowSchema).max(64),
+});
+export type WorkflowRow = z.infer<typeof WorkflowRowSchema>;
+
+// --- session/workflow: the USER starts / stops / resumes a run (D3) ---
+// Start paths that begin work carry a client-minted `turnId` like
+// `session/prompt` (the run's asks are attributed to it, A2). Additive: an
+// older daemon answers `MethodNotFound` ("update tentacle").
+
+/** A workflow's name as `.tentacle/workflows/<name>.yaml` names it. */
+export const WorkflowNameSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/);
+/** A run id (`wf-N`), as the methods take it. Its own named export (JSON-schema `$defs`). */
+export const WorkflowRunRefSchema = z
+  .string()
+  .max(32)
+  .regex(/^wf-[1-9][0-9]*$/);
+
+export const WORKFLOW_INPUT_NAME_MAX_CHARS = 64;
+/** One input value; the log's emitter also caps the whole list at this much JSON. */
+export const WORKFLOW_INPUTS_MAX_CHARS = 4 * 1024;
+
+/**
+ * One input of a run, `{name, value}` (strings only in v1). A list, not a
+ * record: the JSON-schema export does not represent `z.record`. Names are
+ * unique (the daemon refuses a duplicate against the file's `inputs`).
+ */
+export const WorkflowInputValueSchema = z.object({
+  name: z.string().min(1).max(WORKFLOW_INPUT_NAME_MAX_CHARS),
+  value: z.string().max(WORKFLOW_INPUTS_MAX_CHARS),
+});
+export type WorkflowInputValue = z.infer<typeof WorkflowInputValueSchema>;
+
+export const WorkflowParamsSchema = z.discriminatedUnion("action", [
+  z.object({
+    sessionId: SessionIdSchema,
+    action: z.literal("start"),
+    name: WorkflowNameSchema,
+    /** The daemon validates them against the file's `inputs`. */
+    inputs: z.array(WorkflowInputValueSchema).max(64).optional(),
+    /**
+     * The content hash the caller SAW (the catalogue's row, D6): present and
+     * different from the file's hash now → refused `changed`, nothing asked,
+     * nothing run. Absent → the file is read afresh (the TUI's `/workflow run`,
+     * the model's tool).
+     */
+    hash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    turnId: TurnIdSchema,
+  }),
+  z.object({
+    sessionId: SessionIdSchema,
+    action: z.literal("stop"),
+    runId: WorkflowRunRefSchema,
+  }),
+  z.object({
+    sessionId: SessionIdSchema,
+    action: z.literal("resume"),
+    runId: WorkflowRunRefSchema,
+    turnId: TurnIdSchema,
+  }),
+  z.object({
+    sessionId: SessionIdSchema,
+    action: z.literal("rerun_step"),
+    runId: WorkflowRunRefSchema,
+    stepId: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/),
+    turnId: TurnIdSchema,
+  }),
+]);
+export type WorkflowParams = z.infer<typeof WorkflowParamsSchema>;
+
+/**
+ * Why a `session/workflow` did nothing, as ONE word a UI branches on
+ * (docs/feat/workflows-ui.md D6): `changed` (the file moved since it was
+ * listed), `running` (a run is in flight — `runId` names it), `invalid` (the
+ * file does not validate), `inputs` (unknown / missing input), `unavailable`
+ * (this session cannot run workflows). A BOUNDED FREE WORD, never an enum: a
+ * newer daemon's word is carried to the UI as is, and the `reason` stays the
+ * text a human reads.
+ */
+export const WorkflowRefusalSchema = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(/^[a-z][a-z0-9_-]*$/);
+
+export const WorkflowResultSchema = z.object({
+  /** `false` with a `reason` (one run already running, hash changed, not allowed here, …). */
+  ok: z.boolean(),
+  /** The run started or acted on (also the run in flight, on a `running` refusal). */
+  runId: z.string().max(32).optional(),
+  /** Why nothing happened: shown to the user as a notice, never thrown at a UI. */
+  reason: z.string().max(2000).optional(),
+  /** The machine-readable half of the refusal (`changed`, `running`, …). */
+  refusal: WorkflowRefusalSchema.optional(),
+});
+export type WorkflowResult = z.infer<typeof WorkflowResultSchema>;
+
+// --- workflow/list: every live session's runs (serve only; the phone's "Elenco") ---
+
+export const WorkflowListParamsSchema = z.object({});
+export type WorkflowListParams = z.infer<typeof WorkflowListParamsSchema>;
+
+export const WorkflowListRowSchema = z.object({
+  sessionId: SessionIdSchema,
+  /** The session's title text, when it has one. */
+  title: z.string().max(MAX_SESSION_TITLE).optional(),
+  runId: line(32),
+  name: line(64),
+  state: line(32),
+  /** The step running / waiting now (absent once ended). */
+  step: line(64).optional(),
+  done: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  /** A step waits for the user (an approve step or an open ask): the hub's signal. */
+  needsUser: z.boolean(),
+  startedAt: z.number().int().nonnegative(),
+  endedAt: z.number().int().nonnegative().optional(),
+});
+export type WorkflowListRow = z.infer<typeof WorkflowListRowSchema>;
+
+export const WorkflowListResultSchema = z.object({
+  runs: z.array(WorkflowListRowSchema),
+});
+export type WorkflowListResult = z.infer<typeof WorkflowListResultSchema>;
+
+// --- session/workflow_catalogue: what this project's workflows ARE (D6) ---
+// The phone's "start a workflow" reads it; `/workflow` and the TUI name the
+// folder from it. Session-scoped, because the rows are validated against THAT
+// session's `models`/agent types and the run starts in that session. Model-free
+// and deterministic: no LLM, no ask, no write, one directory walk. Additive: an
+// older daemon answers `MethodNotFound` ("update tentacle").
+
+/** A step of a definition, uncapped per row (the phone shows every `run` command BEFORE the approval). */
+export const WorkflowDefStepSchema = z.object({
+  id: line(64),
+  /** `agent` | `run` | `approve` today; free word. */
+  kind: line(16),
+  /** The step's `models` NAME only, never an id or URL (AGENTS §7). */
+  model: line(128).optional(),
+  /** `local` | `docker:<name>`. */
+  where: line(256),
+  /** A `run` step's command verbatim — the text an approval would show. */
+  command: z.string().max(4096).optional(),
+});
+export type WorkflowDefStep = z.infer<typeof WorkflowDefStepSchema>;
+
+/** One declared input of a definition. */
+export const WorkflowDefInputSchema = z.object({
+  name: z.string().min(1).max(WORKFLOW_INPUT_NAME_MAX_CHARS),
+  required: z.boolean(),
+  default: z.string().max(WORKFLOW_INPUTS_MAX_CHARS).optional(),
+});
+export type WorkflowDefInput = z.infer<typeof WorkflowDefInputSchema>;
+
+/**
+ * One workflow FILE of the project. `ok: false` carries `errors` (each naming
+ * its YAML path) and nothing else beyond `name`/`path`: it cannot be started,
+ * and the UI shows the errors verbatim instead of a form.
+ */
+export const WorkflowDefRowSchema = z.object({
+  /** The file stem — a workflow name. */
+  name: line(64),
+  /** Project-relative: `.tentacle/workflows/<name>.yaml`. */
+  path: line(512),
+  ok: z.boolean(),
+  version: z.number().int().nonnegative().optional(),
+  description: z.string().max(500).optional(),
+  /** The content hash `start{hash}` pins (sha-256 hex). */
+  hash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  /** Whether THAT hash is approved in this project's store (display only; the daemon decides). */
+  approved: z.boolean().optional(),
+  inputs: z.array(WorkflowDefInputSchema).max(64).optional(),
+  steps: z.array(WorkflowDefStepSchema).max(64).optional(),
+  errors: z.array(z.string().max(300)).max(20).optional(),
+});
+export type WorkflowDefRow = z.infer<typeof WorkflowDefRowSchema>;
+
+/**
+ * The catalogue of one project. `dir` is the ABSOLUTE folder read — a user in
+ * the wrong folder sees where tentacle looks. Nothing looks ABOVE that folder
+ * (docs/fix/workflows-ux.md S8c, owner Q2): the project's workflows are the
+ * ones under its own root.
+ */
+export const WorkflowCatalogueResultSchema = z.object({
+  workflows: z.array(WorkflowDefRowSchema).max(64),
+  /** More than 64 YAML files in the folder: what is shown is not all of it. */
+  truncated: z.literal(true).optional(),
+  /** This session cannot run workflows at all (a pod's daemon) — NOT "the folder is empty". */
+  unavailable: line(200).optional(),
+  /** git ignores the folder: the "not versioned" notice (tentacle never edits a `.gitignore`). */
+  gitIgnored: z.boolean().optional(),
+  /** The absolute folder the catalogue read. */
+  dir: z.string().min(1).max(1024),
+});
+export type WorkflowCatalogueResult = z.infer<typeof WorkflowCatalogueResultSchema>;
+
+export const WorkflowCatalogueParamsSchema = z.object({
+  /**
+   * A session this connection opened. Absent → the catalogue a session the
+   * daemon creates NOW would read (a client opens its session lazily, at the
+   * first prompt: the `/workflow` panel is asked before it exists, exactly like
+   * `session/skills`/`session/tools`, docs/fix/workflows-ux.md S8b).
+   */
+  sessionId: SessionIdSchema.optional(),
+});
+export type WorkflowCatalogueParams = z.infer<typeof WorkflowCatalogueParamsSchema>;
+
+// --- session/workflow_source + session/workflow_save: the workflow EDITOR ---
+// (docs/feat/workflow-editor.md D3). Two ADDITIVE methods: an older daemon
+// answers `MethodNotFound` (the client maps it to `unsupported`, so the phone
+// hides Edit/New), so neither moves PROTOCOL_VERSION.
+//
+// The phone cannot parse YAML (`validateWorkflow` needs `Bun.YAML`,
+// `workflow-spec.ts`), so a `draft` crosses the wire as JSON TEXT, not as a
+// `z.record`: the JSON-schema export represents neither a `z.record` nor a
+// `.refine` (the `WorkflowInputValueSchema` and `attachment.ts` precedents), and
+// a `.refine`-only bound would be invisible to every other client. Text keeps
+// the 512 KiB cap part of the contract, and the daemon parses it into the same
+// mapping the strict validator reads — so an unknown draft field is an ERROR
+// there, never a silent drop from a file the user saves.
+
+/** The draft's JSON, serialized: the same mapping `Bun.YAML.parse` would give. */
+export const WORKFLOW_DRAFT_MAX_CHARS = 512 * 1024;
+/** One prompt file's bytes (the loader's own per-file cap, `WORKFLOW_FILE_MAX_BYTES`). */
+export const WORKFLOW_PROMPT_FILE_MAX_CHARS = 64 * 1024;
+export const WORKFLOW_PROMPTS_MAX = 32;
+/** The file's raw YAML: the loader never reads more than this. */
+export const WORKFLOW_SOURCE_TEXT_MAX_CHARS = 256 * 1024;
+/** ONE written file's patch (a review screen renders it; it is never the truth). */
+export const WORKFLOW_PATCH_MAX_CHARS = 64 * 1024;
+/** The YAML plus every prompt file a save can write (the loader's file cap is 200). */
+export const WORKFLOW_WRITE_FILES_MAX = 1 + WORKFLOW_PROMPTS_MAX;
+
+/** A prompt file of a draft, by the path a step's `prompt:` names. A LIST, not a
+ * record, for the `WorkflowInputValueSchema` reason. */
+export const WorkflowPromptTextSchema = z.object({
+  path: line(300),
+  text: z.string().max(WORKFLOW_PROMPT_FILE_MAX_CHARS),
+});
+export type WorkflowPromptText = z.infer<typeof WorkflowPromptTextSchema>;
+
+/**
+ * What an editor opens: the file's bytes, its draft, its prompts, and the
+ * session's picker vocabulary. `draft` is present iff the mapping could be read
+ * as one (`asDraft`), `hash` iff the file validated, `errors` iff it did not —
+ * so a client never has to guess which state it is in. `context` carries model
+ * NAMES only, never an id or a URL (AGENTS §7), and it is what makes the phone's
+ * local problem list word-for-word the daemon's.
+ */
+export const WorkflowSourceParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  name: WorkflowNameSchema,
+});
+export type WorkflowSourceParams = z.infer<typeof WorkflowSourceParamsSchema>;
+
+export const WorkflowSourceResultSchema = z.object({
+  ok: z.boolean(),
+  /** Project-relative, `.tentacle/workflows/<name>.yaml`; absent when there is no file
+   * to name at all (a session with no workflow driver). */
+  path: line(512).optional(),
+  /** The file's raw YAML, uncut: it is what a Review patch is computed against. */
+  text: z.string().max(WORKFLOW_SOURCE_TEXT_MAX_CHARS).optional(),
+  /** The draft as JSON text (see above), present iff the mapping is structurally a workflow. */
+  draft: z.string().max(WORKFLOW_DRAFT_MAX_CHARS).optional(),
+  /** Only the prompt files the draft's steps reference. */
+  prompts: z.array(WorkflowPromptTextSchema).max(WORKFLOW_PROMPTS_MAX).optional(),
+  /** The content hash `start{hash}` pins (sha-256 hex); present iff the file validated. */
+  hash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  version: z.number().int().nonnegative().optional(),
+  /** Whether the file already holds the emitter's bytes: false = a save rewrites its
+   * layout or comments, and Review says so (owner answer 3). */
+  canonical: z.boolean().optional(),
+  /** The validator's sentences, each naming its YAML path (the bar shows the first). */
+  errors: z.array(z.string().max(300)).max(20).optional(),
+  /** Why the file cannot be edited at all (a non-mapping, a wrong-typed field). */
+  unreadable: line(300).optional(),
+  /** The phone's pickers: NAME-level vocabulary, never an id or a URL (§7).
+   * Either list may be absent (a session with no models configured) — a missing
+   * list means "no choice", never "anything goes". */
+  context: z
+    .object({
+      models: z.array(line(128)).max(64).optional(),
+      agentTypes: z.array(line(128)).max(64).optional(),
+    })
+    .optional(),
+  /** This session cannot edit workflows at all (a pod's daemon) — NOT "the file is missing". */
+  unavailable: line(200).optional(),
+});
+export type WorkflowSourceResult = z.infer<typeof WorkflowSourceResultSchema>;
+
+/** A `session/workflow_save`: `dryRun: true` IS the Review screen (it returns
+ * everything and writes nothing); `false` re-does every check and writes. */
+export const WorkflowSaveParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  name: WorkflowNameSchema,
+  /** `create` refuses an existing file; `replace` requires `baseHash` to still be the file's. */
+  mode: z.enum(["create", "replace"]),
+  /** The draft as JSON text; the daemon parses it and the STRICT validator judges it. */
+  draft: z.string().max(WORKFLOW_DRAFT_MAX_CHARS),
+  /** The prompt files the draft carries. Every one must be referenced by a step. */
+  prompts: z.array(WorkflowPromptTextSchema).max(WORKFLOW_PROMPTS_MAX),
+  /** The hash the caller loaded: a different one on disk refuses `changed`, nothing written. */
+  baseHash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  /** Required, never defaulted: a client that forgot it must not write what it meant to preview. */
+  dryRun: z.boolean(),
+});
+export type WorkflowSaveParams = z.infer<typeof WorkflowSaveParamsSchema>;
+
+/** One file a save writes (or would), as Review lists it. */
+export const WorkflowWriteFileSchema = z.object({
+  /** Project-relative: `.tentacle/workflows/<name>.yaml` or a prompt beside it. */
+  path: line(512),
+  /** `unchanged` = identical bytes on disk already (legal, and not a conflict). */
+  status: z.enum(["new", "changed", "unchanged"]),
+  added: z.number().int().nonnegative(),
+  removed: z.number().int().nonnegative(),
+  /** The unified diff of this file; absent on `unchanged`. */
+  patch: z.string().max(WORKFLOW_PATCH_MAX_CHARS).optional(),
+});
+export type WorkflowWriteFile = z.infer<typeof WorkflowWriteFileSchema>;
+
+export const WorkflowSaveResultSchema = z.object({
+  ok: z.boolean(),
+  /** `changed` | `exists` | `invalid` | `unavailable`: a bounded free word (the refusal
+   * schema above), never an enum. */
+  refusal: WorkflowRefusalSchema.optional(),
+  /** The human sentence: shown verbatim, never thrown at a UI. */
+  reason: z.string().max(2000).optional(),
+  errors: z.array(z.string().max(300)).max(20).optional(),
+  /** The hash of the bytes a write produces — the hash the next start asks about. */
+  hash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  version: z.number().int().nonnegative().optional(),
+  path: line(512).optional(),
+  files: z.array(WorkflowWriteFileSchema).max(WORKFLOW_WRITE_FILES_MAX).optional(),
+  /** Whether THAT hash is approved already (display only; the save never approves). */
+  approved: z.boolean().optional(),
+  /** Other workflows whose hash these prompt files also change: their next start asks. */
+  alsoChanges: z.array(WorkflowNameSchema).max(64).optional(),
+  /** A run of this workflow is in flight: it keeps its own snapshot and version. */
+  running: WorkflowRunRefSchema.optional(),
+  /** Schedules pinned to the OLD hash: they skip `changed` at fire time until re-created.
+   * `sc-N`, as `ScheduleIdSchema` reads it (declared later in this file, so a
+   * reference here would be a temporal-dead-zone error at module load). */
+  schedules: z.array(line(64)).max(64).optional(),
+});
+export type WorkflowSaveResult = z.infer<typeof WorkflowSaveResultSchema>;
+
 // --- the session's background shell jobs (docs/feat/shell-jobs-panel.md) ---
 // The live list of the `shell{run_in_background}` jobs a session started: one
 // full-state update (`jobs`), sent only on a start or an exit (never a stream).
@@ -926,6 +1401,32 @@ export const ScheduleRowSchema = z.object({
   /** Fired turns so far: the ordinal the fired prompt quotes (`fire 5`). */
   fires: z.number().int().nonnegative(),
   createdAt: z.number().int().nonnegative(),
+  /**
+   * Present iff the job starts a WORKFLOW instead of a turn (agent-workflows
+   * slice 10). Lenient labels like the rest of the row: `inputs` as `k=v`
+   * strings, `hash` shortened. An older client drops it and paints `prompt`
+   * (the daemon fills it with `workflow <name> k=v…`).
+   */
+  workflow: z
+    .object({
+      name: z.string(),
+      inputs: z.array(z.string()),
+      hash: z.string(),
+    })
+    .optional(),
+  /**
+   * The last fire of a workflow job: when, and its outcome word (`started`,
+   * `skipped`, `missed`, `changed`, `unapproved`, `invalid`, `unavailable`, or a
+   * newer build's — a free string).
+   */
+  last: z
+    .object({
+      at: z.number().int().nonnegative(),
+      outcome: z.string(),
+      reason: z.string().optional(),
+      runId: z.string().optional(),
+    })
+    .optional(),
 });
 export type ScheduleRow = z.infer<typeof ScheduleRowSchema>;
 
@@ -956,6 +1457,36 @@ export const ScheduleDeleteResultSchema = z.object({
 });
 export type ScheduleDeleteResult = z.infer<typeof ScheduleDeleteResultSchema>;
 
+/**
+ * `session/schedule_create` (agent-workflows slice 10): the USER schedules a
+ * workflow to start by itself — `every 2h` / `daily 03:00` / `at …`, exactly
+ * one. Workflow targets only in v1. `turnId` is client-minted (a `wake-` id is
+ * refused, as on `session/workflow`); the daemon answers up to the create and
+ * RAISES the hash approval when needed, never awaiting it (§7 don't serialize
+ * the peer). Additive: an older daemon answers `MethodNotFound`.
+ */
+export const ScheduleCreateParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  turnId: TurnIdSchema,
+  workflow: z.object({
+    name: WorkflowNameSchema,
+    inputs: z.array(WorkflowInputValueSchema).max(64).optional(),
+  }),
+  every: z.string().min(1).max(32).optional(),
+  at: z.string().min(1).max(64).optional(),
+  daily: z.string().min(1).max(16).optional(),
+});
+export type ScheduleCreateParams = z.infer<typeof ScheduleCreateParamsSchema>;
+
+export const ScheduleCreateResultSchema = z.object({
+  ok: z.boolean(),
+  /** The new job's `sc-N`. */
+  scheduleId: z.string().max(64).optional(),
+  /** Why nothing was created (or a note, e.g. "approval asked"): a notice, never thrown. */
+  reason: z.string().max(2000).optional(),
+});
+export type ScheduleCreateResult = z.infer<typeof ScheduleCreateResultSchema>;
+
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */
   messages: z.array(ChatMessageSchema),
@@ -980,6 +1511,12 @@ export const SnapshotResultSchema = z.object({
    * not report them", never "none left".
    */
   schedules: z.array(ScheduleRowSchema).optional(),
+  /**
+   * The session's workflow runs at the cut — the current one + the last few
+   * ended (docs/feat/agent-workflows.md D5; first page only). Absent from an
+   * older daemon, and from a pod daemon (it never runs one, MVP).
+   */
+  workflows: z.array(WorkflowRowSchema).optional(),
   /**
    * Each message's ARRIVAL time (docs/fix/mobile-open-at-end.md, slice B):
    * epoch ms, same length and order as `messages`, `0` = not known (a message a

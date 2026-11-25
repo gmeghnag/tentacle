@@ -50,6 +50,9 @@ import type {
   Session,
   SessionCapabilities,
   SessionGrants,
+  WorkflowCatalogue,
+  WorkflowDriver,
+  WorkflowSaveFileRow,
 } from "@tentacle/agent";
 import {
   CapabilityRefusal,
@@ -57,6 +60,10 @@ import {
   NO_CAPABILITIES,
   applyCapabilityOp,
   sessionTitle,
+  workflowStatusLine,
+  workflowUserWait,
+  workflowWaitNote,
+  workflowWaitWakeDue,
 } from "@tentacle/agent";
 import {
   AGENT_MESSAGE_MAX_CHARS,
@@ -70,34 +77,45 @@ import {
   type MessageMedia,
   type ModelProvider,
   NOTE_KIND,
+  PROJECT_PATHS,
   type PermissionBroker,
   type PermissionRequest,
   type PermissionRequestOptions,
   type PermissionResponse,
   SCHEDULE_ID_PREFIX,
   type ScheduleCreateResult,
+  type ScheduleLast,
   type ScheduleLimits,
   type ScheduleLink,
   type ScheduleRequest,
   type ScheduledFire,
   type ScheduledJob,
+  type SegmentUnits,
   type SubagentBackgroundBody,
   type SubagentEndBody,
+  type WorkUnit,
   anySignal,
   attachmentLabel,
   autoApproves,
   checkAttachmentRefs,
   daemonWakeGate,
   formatBytes,
+  isDefaultOffTool,
   nextDateStamp,
   ownRequest,
   scheduleCheckDelayMs,
   scheduleCreate,
   scheduleDelete,
   schedulePromptText,
+  scheduleRecordFire,
   scheduleSettled,
   scheduleStep,
+  unifyTurn,
+  unifyWorkflow,
+  unitEndBody,
+  unitsFromSegment,
   wakeDue,
+  workflowRunSeqFromHistory,
   zoneOrDefault,
 } from "@tentacle/core";
 import {
@@ -123,6 +141,8 @@ import {
   type QueuedEntry,
   type ReturnedEntry,
   SCHEDULE_LABEL_MAX,
+  type ScheduleCreateParams,
+  type ScheduleCreateResult as ScheduleCreateRpcResult,
   type ScheduleDeleteResult,
   type ScheduleRow,
   type SendNowMessage,
@@ -147,6 +167,23 @@ import {
   type WatchCategory,
   type WatchNextResult,
   type WatchResult,
+  type WorkflowCatalogueResult,
+  WorkflowCatalogueResultSchema,
+  type WorkflowDefRow,
+  WorkflowDefRowSchema,
+  type WorkflowListRow,
+  type WorkflowParams,
+  type WorkflowResult,
+  type WorkflowRow,
+  WorkflowRowSchema,
+  type WorkflowSaveParams,
+  type WorkflowSaveResult,
+  WorkflowSaveResultSchema,
+  type WorkflowSourceParams,
+  type WorkflowSourceResult,
+  WorkflowSourceResultSchema,
+  type WorkflowStepParams,
+  type WorkflowStepResult,
   clientSupportsUpdate,
   watchAccepts,
 } from "@tentacle/protocol";
@@ -347,6 +384,8 @@ interface Cut {
   readonly jobs: readonly JobRow[];
   /** The scheduled wakes as of the cut: the last `schedules` list emitted (docs/feat/cron-tool.md D5). */
   readonly schedules: readonly ScheduleRow[];
+  /** The workflow runs as of the cut: the last `workflows` list emitted (docs/feat/agent-workflows.md D5). */
+  readonly workflows: readonly WorkflowRow[];
 }
 
 /**
@@ -412,6 +451,11 @@ export interface RestoredSessionState {
    * a new lineage, from the reloaded history.
    */
   readonly log?: { readonly head: LogCursor; readonly logged: readonly ChatMessage[] };
+  /**
+   * The ended-units table at the reload (`endedUnitsAtLoad`, docs/feat/a2a.md
+   * Unification §3): carried into the first segment as `unit_end`. Absent → none.
+   */
+  readonly units?: readonly WorkUnit[];
 }
 
 /**
@@ -449,7 +493,29 @@ export interface SessionPersistence {
 export interface SessionWake {
   /** One line per wake started (the session id only — never a job's command). */
   readonly onAudit?: (line: string) => void;
+  /** The workflow user-wait wake's clock (defaults below; tests inject it). */
+  readonly workflowWait?: WorkflowWaitTiming;
 }
+
+/**
+ * When a workflow step that waits for the user wakes the agent
+ * (docs/feat/workflow-run-awareness.md Design (b), S6): only an ask still
+ * pending after `graceMs` with no client attached, each ask once, a run at
+ * most once per `minGapMs`.
+ */
+export interface WorkflowWaitTiming {
+  /** Default `WORKFLOW_WAIT_GRACE_MS`. */
+  readonly graceMs?: number;
+  /** Default `WORKFLOW_WAIT_MIN_GAP_MS`. */
+  readonly minGapMs?: number;
+  readonly setTimeout?: (fn: () => void, ms: number) => unknown;
+  readonly clearTimeout?: (handle: unknown) => void;
+}
+
+/** An ask answered inside this (a person at the screen, an auto-answer) never wakes. */
+export const WORKFLOW_WAIT_GRACE_MS = 30_000;
+/** One run wakes the agent for a wait at most once per this. */
+export const WORKFLOW_WAIT_MIN_GAP_MS = 10 * 60_000;
 
 /**
  * `serve` and the in-process worker only (docs/feat/cron-tool.md D1): the
@@ -498,7 +564,15 @@ export type PushWatchedUpdate =
   // deliberately NOT watched.
   | UpdateOf<"turn_start">
   | UpdateOf<"tool_call">
-  | UpdateOf<"session_title">;
+  | UpdateOf<"session_title">
+  // docs/feat/agent-workflows.md slice 9: a run's end is the session's own news
+  // too, and the `workflows` update is where the session says it. Fed to the
+  // push rules as `run_end`, which ignores a run it has already announced (the
+  // list is FULL STATE and repeats an ended run on every later step).
+  | UpdateOf<"workflows">
+  // Slice 10: the `schedules` list carries a workflow fire's outcome (`last`);
+  // the push rules turn a "needs the human" one into `run_not_started`, once.
+  | UpdateOf<"schedules">;
 
 /**
  * What a push observer is told, when (`PushEvent` in `push-rules.ts` is the
@@ -617,6 +691,173 @@ function oneLineText(text: string): string {
     out += char;
   }
   return out;
+}
+
+/** The wire's caps on a catalogue row's `errors` (`WorkflowDefRowSchema`). */
+const WORKFLOW_ERRORS_MAX = 20;
+const WORKFLOW_ERROR_MAX_CHARS = 300;
+
+/** A Review row's diff cap (`WorkflowWriteFileSchema`). */
+const WORKFLOW_PATCH_MAX_CHARS = 64 * 1024;
+/** A save answer's `reason` and `alsoChanges` caps (`WorkflowSaveResultSchema`). */
+const WORKFLOW_REASON_MAX = 2000;
+const WORKFLOW_ALSO_CHANGES_MAX = 64;
+
+/** `text` within `max` UTF-16 units, ending in `…` when cut (never mid-surrogate). */
+function capWithEllipsis(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  let end = max - 1;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    end -= 1;
+  }
+  return `${text.slice(0, end)}…`;
+}
+
+/**
+ * A row's errors within the wire's caps, none lost silently (review round 1
+ * #2): each is ONE line (the validator's text can hold a newline), an over-long
+ * one ends in `…`, and past 20 the last line says how many more there are.
+ */
+function boundedWorkflowErrors(errors: readonly string[]): string[] {
+  const lines = errors.map((e) => capWithEllipsis(oneLineText(e), WORKFLOW_ERROR_MAX_CHARS));
+  if (lines.length <= WORKFLOW_ERRORS_MAX) {
+    return lines;
+  }
+  const kept = lines.slice(0, WORKFLOW_ERRORS_MAX - 1);
+  return [...kept, `+${lines.length - kept.length} more`];
+}
+
+type DriverCatalogueRow = Awaited<ReturnType<WorkflowDriver["catalogue"]>>["workflows"][number];
+
+/**
+ * One catalogue row as the wire carries it. A row the wire schema refuses (a
+ * valid workflow whose `run:` exceeds the step-command cap, an over-long
+ * description, …) becomes an `ok:false` row whose errors name the field — by
+ * step id — so one file cannot fail the whole answer (review round 1 #1).
+ */
+export function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
+  const candidate = {
+    ...row,
+    ...(row.errors !== undefined ? { errors: boundedWorkflowErrors(row.errors) } : {}),
+  };
+  const parsed = WorkflowDefRowSchema.safeParse(candidate);
+  if (parsed.success) {
+    return parsed.data;
+  }
+  const steps = row.steps ?? [];
+  const problems = parsed.error.issues.map((issue) => {
+    const [head, index, ...rest] = issue.path;
+    const at =
+      head === "steps" && typeof index === "number"
+        ? [`step "${steps[index]?.id ?? index}"`, ...rest].join(" ")
+        : issue.path.join(".");
+    return `${at === "" ? "row" : at}: ${issue.message} (the catalogue cannot carry it)`;
+  });
+  // Name and path are one-line and capped here, so the refusal row itself parses.
+  return {
+    name: capWithEllipsis(oneLineText(row.name), 64) || "?",
+    path: capWithEllipsis(oneLineText(row.path), 512) || "?",
+    ok: false,
+    errors: boundedWorkflowErrors(problems),
+  };
+}
+
+/**
+ * The ONE projection of a driver's catalogue onto the wire, shared by a hosted
+ * session's read and the daemon-wide pre-open read (`SessionHost.
+ * newSessionWorkflowCatalogue`): two paths answer the same project's files, so
+ * they must word a row, cap it and refuse it identically (docs/fix/workflows-ux.md
+ * S8b). Each row is judged ON ITS OWN (review round 1 #1): a valid workflow the
+ * wire cannot carry becomes one `ok:false` row naming why — never a failed whole
+ * answer that hides every other workflow.
+ */
+export function workflowCatalogueResult(catalogue: WorkflowCatalogue): WorkflowCatalogueResult {
+  const parsed = WorkflowCatalogueResultSchema.safeParse({
+    ...catalogue,
+    workflows: catalogue.workflows.map(catalogueRow),
+  });
+  if (!parsed.success) {
+    return {
+      workflows: [],
+      dir: catalogue.dir,
+      unavailable: oneLineText(`the catalogue could not be read: ${parsed.error.message}`).slice(
+        0,
+        200,
+      ),
+    };
+  }
+  return parsed.data;
+}
+
+/**
+ * The catalogue's answer when there is no workflow seam AT ALL: no session may
+ * run workflows here (a pod's daemon), or the daemon's factory offered no driver
+ * (`SessionHost.newSessionWorkflowCatalogue`). It must still parse as the wire's
+ * result, so `dir` is a placeholder the callers REPLACE with the daemon's own
+ * `defaultCwd` — a catalogue with no folder is not a valid answer.
+ */
+export const WORKFLOWS_UNAVAILABLE = "workflows run only on a laptop or serve session";
+
+/**
+ * One file a save wrote (or would), in the WIRE's shape (docs/feat/
+ * workflow-editor.md D3/D4): the patch is cut to its cap here, so a big file is
+ * a Review row whose diff ends in `…`, never a save whose answer fails to parse.
+ */
+function writeFileRow(file: WorkflowSaveFileRow): {
+  path: string;
+  status: "new" | "changed" | "unchanged";
+  added: number;
+  removed: number;
+  patch?: string;
+} {
+  const patch = file.patch;
+  return {
+    path: capWithEllipsis(oneLineText(file.path), 512),
+    status: file.status,
+    added: file.added,
+    removed: file.removed,
+    ...(patch !== undefined && patch !== ""
+      ? {
+          patch:
+            patch.length > WORKFLOW_PATCH_MAX_CHARS
+              ? `${patch.slice(0, WORKFLOW_PATCH_MAX_CHARS - 1)}…`
+              : patch,
+        }
+      : {}),
+  };
+}
+
+/**
+ * The schedules THIS save invalidates: its jobs name this workflow and are
+ * pinned to the hash the save replaces (`oldHash`), with new bytes under a
+ * different hash — so they skip `changed` at fire time until they are
+ * re-created (docs/feat/workflow-editor.md, failure modes). A job pinned to an
+ * older hash was already reported by the save that broke it, and one pinned to
+ * the hash being written breaks nothing: neither is this save's news.
+ */
+function pinnedToOldHash(
+  jobs: readonly ScheduledJob[],
+  name: string,
+  oldHash: string | undefined,
+  newHash: string | undefined,
+): string[] {
+  const ids: string[] = [];
+  if (oldHash === undefined || newHash === undefined || oldHash === newHash) {
+    return ids;
+  }
+  for (const job of jobs) {
+    const target = job.target?.workflow;
+    if (target === undefined) continue;
+    // `target.workflow.name` is the workflow's NAME (as `ScheduleWorkflowTarget`
+    // carries it), never its path.
+    if (target.name !== name) continue;
+    if (target.hash !== oldHash) continue;
+    ids.push(job.id);
+  }
+  return ids;
 }
 
 /**
@@ -943,6 +1184,27 @@ export class HostedSession {
   private scheduleTimer: unknown = null;
   /** The last `schedules` list emitted (or the initial one): what the cut records. */
   private lastSchedules: readonly ScheduleRow[] = [];
+  /** The last `workflows` list emitted: what the cut records. */
+  private lastWorkflows: readonly WorkflowRow[] = [];
+  /**
+   * The ONE user-wait timer (docs/feat/workflow-run-awareness.md S6): the wait
+   * key it was armed for, its run, and when that wait began (the note's `since`).
+   */
+  private waitTimer: {
+    readonly key: string;
+    readonly runId: string;
+    readonly since: number;
+    readonly handle: unknown;
+  } | null = null;
+  /** The user wait the last publish showed: a timer is armed only when it CHANGES. */
+  private waitSeen: string | undefined;
+  /**
+   * Per run still live: the wait keys that woke the agent, and when it last
+   * did. Memory only, dropped at the run's end: a run never survives a restart.
+   */
+  private readonly waitWakes = new Map<string, { readonly woken: Set<string>; at: number }>();
+  /** The workflow driver (docs/feat/agent-workflows.md D3); absent on a tunnelled session. */
+  private workflows: WorkflowDriver | undefined;
   /** The fired turns that have not ended, by turnId → the job that fired each (its failure budget). */
   private readonly firedTurns = new Map<string, string>();
   /** The committed history as a typed log (`session/log`), derived at the cut's own points. */
@@ -955,6 +1217,15 @@ export class HostedSession {
    * children). It is the one ledger the live path (6a) and a replay share.
    */
   private readonly agentJobs: AgentJobLedger;
+  /**
+   * The ended-units table (docs/feat/a2a.md, Unification §3), oldest first,
+   * bounded: a CACHE of the log, never a store. Always exactly
+   * `unitsFromSegment(current segment).ended` — set at a reload from the record,
+   * re-derived from the segment at every turn or run end (`refreshUnits`), and
+   * carried into every new segment as `unit_end` entries (`logSegmentFacts`),
+   * so a live end and a load derivation give the same record.
+   */
+  private endedUnits: readonly WorkUnit[] = [];
 
   constructor(
     id: string,
@@ -1027,8 +1298,16 @@ export class HostedSession {
     // turned back on (`/tools`) leaves no entry, and re-seeding it would bring
     // the switch back on every restart. The agent is built with the config's
     // set (`buildAgent`, D4), so the record's absence must EXPLICITLY clear it.
+    // One exception, off wins: a default-off tool (the browser, which acts with
+    // the user's identity) this host built OFF stays off — the record cannot
+    // tell "turned on" from "written before the tool existed" (B4 fix round 1).
     if (restored !== undefined) {
-      this.caps = normalizeCapabilities(restored.capabilities ?? NO_CAPABILITIES);
+      const record = restored.capabilities ?? NO_CAPABILITIES;
+      const builtOff = session.currentAgent().capabilities().disabledTools.filter(isDefaultOffTool);
+      this.caps = normalizeCapabilities({
+        ...record,
+        disabledTools: [...record.disabledTools, ...builtOff],
+      });
       session.currentAgent().setCapabilities(this.caps);
     } else {
       // A session this host CREATES starts from what its agent was built with:
@@ -1052,6 +1331,7 @@ export class HostedSession {
       // no jobs), and every later job announces itself through `onStart`.
       jobs: [],
       schedules: [],
+      workflows: [],
     };
     // The scheduled wakes a restart or a reopen brings back (D6), with the
     // counter seeded from them and the history: no id the model saw is reused.
@@ -1066,6 +1346,8 @@ export class HostedSession {
     this.logSha256 = logOptions.sha256 ?? nodeSha256;
     this.logVerify = logOptions.verify;
     this.log = new SessionLog(crypto.randomUUID(), now);
+    // Before the first segment: `logSegmentFacts` carries it.
+    this.endedUnits = restored?.units ?? [];
     if (restored?.log) {
       // A reload of a paired record continues its lineage: the base restates
       // EXACTLY what the last landed write logged (a reader holding that head
@@ -1673,6 +1955,14 @@ export class HostedSession {
     return this.persister ? this.persister.flush(this.id) : Promise.resolve();
   }
 
+  /**
+   * `persisted()`, plus whether the latest write LANDED (`SessionPersister.lastWriteLanded`).
+   * No persister → `true`: nothing on this daemon is ever made durable.
+   */
+  persistedLanded(): Promise<boolean> {
+    return this.persister ? this.persister.lastWriteLanded(this.id) : Promise.resolve(true);
+  }
+
   /** What is pending now, in request order: the resumed turn's carried entries, then each live ask. */
   private pendingList(): PendingPermission[] {
     const live = [...this.asks.values()].flatMap((ask) => (ask.record ? [ask.record] : []));
@@ -2206,6 +2496,8 @@ export class HostedSession {
       ...(cursor === undefined ? { jobs: [...cut.jobs] } : {}),
       // Only where the session schedules (a pod daemon sends none, D5).
       ...(cursor === undefined && this.scheduling ? { schedules: [...cut.schedules] } : {}),
+      // Only where the session runs workflows (a tunnelled session has no driver).
+      ...(cursor === undefined && this.workflows ? { workflows: [...cut.workflows] } : {}),
     };
   }
 
@@ -2248,6 +2540,7 @@ export class HostedSession {
       subagents: this.lastSubagents,
       jobs: this.lastJobs,
       schedules: this.lastSchedules,
+      workflows: this.lastWorkflows,
     };
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
@@ -2287,6 +2580,73 @@ export class HostedSession {
         this.log.subagentBackground(fact);
       }
     }
+    // A live workflow run's start, again (Slice 3 obligation): a segment that
+    // dropped the older `workflow_start` would leave a crash during the run
+    // with nothing to close at the next load.
+    const live = this.workflows?.liveStart();
+    if (live !== undefined) {
+      this.log.workflowStart(live);
+    }
+    // The ended units (docs/feat/a2a.md, Unification §2): the new segment no
+    // longer holds their native entries, so it carries them. One unit the
+    // schema refuses is skipped (and reported), never the segment's start.
+    for (const ended of this.endedUnits) {
+      try {
+        this.log.unitEnd(unitEndBody(ended));
+      } catch (error) {
+        this.reportTurnError(error);
+      }
+    }
+  }
+
+  /**
+   * Re-derive the ended-units table from the current segment (THE derivation,
+   * `unitsFromSegment`: the one a reload runs). Called right after a unit's
+   * end is logged. Synchronous, O(segment): never at a turn's every round.
+   */
+  private refreshUnits(): void {
+    this.endedUnits = this.segmentUnits().ended;
+  }
+
+  /** `unitsFromSegment` over the current segment (the derivation a load of it runs). */
+  private segmentUnits(): SegmentUnits {
+    const entries: KnownLogEntry[] = [];
+    for (const slot of this.log.since().slots) {
+      // A lazy slot is a checkpoint: it states no unit.
+      if (slot.entry !== null) entries.push(slot.entry);
+    }
+    return unitsFromSegment(entries);
+  }
+
+  /**
+   * The session's units of work (docs/feat/a2a.md, Unification §3), read-only:
+   * the ended-units table (oldest first), then the running turn (waiting when
+   * one of its asks is pending) and the driver's live run. A live turn or run
+   * carries no result; its end does.
+   */
+  workUnits(): WorkUnit[] {
+    const units: WorkUnit[] = [...this.endedUnits];
+    const turnId = this.activeTurnId;
+    if (turnId !== null && this.turns.get(turnId)?.end === undefined) {
+      const asking = [...this.asks.values()].some((ask) => ask.turnId === turnId);
+      units.push(unifyTurn({ turnId, asking }));
+    }
+    const start = this.workflows?.liveStart();
+    for (const row of this.workflows?.rows() ?? []) {
+      if (row.endedAt !== undefined) continue;
+      const origin = start?.runId === row.runId ? start.turnId : undefined;
+      units.push(
+        unifyWorkflow({
+          runId: row.runId,
+          ...(origin !== undefined ? { origin } : {}),
+          state: row.state,
+          ...(row.stopReason !== undefined ? { stopReason: row.stopReason } : {}),
+          ...(row.reason !== undefined ? { reason: row.reason } : {}),
+          startedAt: row.startedAt,
+        }),
+      );
+    }
+    return units;
   }
 
   /**
@@ -2340,6 +2700,486 @@ export class HostedSession {
   /** The background sub-agents still running (6a's liveness, the quit count, `/clear`'s hand-over). */
   agentJobsRunning(): readonly AgentJob[] {
     return this.agentJobs.running();
+  }
+
+  /**
+   * Bind the session's workflow driver (docs/feat/agent-workflows.md D3). The
+   * session host calls it once, right after construction, and only where the
+   * factory built one (never on a tunnelled session). Seeded from the history,
+   * so a restart never re-mints a run id the log or the conversation names.
+   */
+  attachWorkflows(driver: WorkflowDriver): void {
+    this.workflows = driver;
+    driver.reserveRunIds(workflowRunSeqFromHistory(this.session.messages));
+    driver.bind({
+      // The durable facts: logged at once, made durable by the next write.
+      logStart: (body) => {
+        this.log.workflowStart(body);
+        this.persist();
+      },
+      logStep: (body) => {
+        this.log.workflowStep(body);
+        this.persist();
+      },
+      logEnd: (body) => {
+        this.log.workflowEnd(body);
+        this.refreshUnits();
+        this.persist();
+      },
+      // A step's asks ride the background path, attributed to the start turn (A2).
+      attribute: (agentId, turnId) => {
+        if (turnId !== undefined) {
+          this.spawnTurns.set(agentId, turnId);
+        }
+      },
+      release: (agentId) => {
+        this.spawnTurns.delete(agentId);
+      },
+      currentTurn: () => (this.compacting ? undefined : (this.activeTurnId ?? undefined)),
+      publish: (rows) => this.publishWorkflows(rows),
+      // The end note rides the exits queue (told at the next turn) and wakes.
+      ended: (runId, note) => {
+        this.spawnTurns.delete(runId);
+        this.waitWakes.delete(runId);
+        this.session.noteWorkflowEnd(runId, note);
+        this.kickWake();
+      },
+    });
+    // The model's live line (docs/feat/workflow-run-awareness.md): read per
+    // request, from the very rows the clients are shown; never in the history.
+    this.session.setStatusLine(() =>
+      this.closed ? undefined : workflowStatusLine(this.lastWorkflows),
+    );
+    // The starting list is STATE, not an event: nobody is attached yet (this runs
+    // inside session creation), so it is set for the snapshot without an emit or a
+    // cut. A cut here committed before the session's open had finished and lost
+    // the first turn's text (review R2-2, connect-model-error (R5)).
+    const initial = WorkflowRowSchema.array().safeParse(driver.rows());
+    if (initial.success) {
+      this.lastWorkflows = initial.data;
+      this.cut = { ...this.cut, workflows: initial.data };
+    }
+  }
+
+  /** The full `workflows` list, judged by its schema on the way out; the cut follows when idle. */
+  private publishWorkflows(rows: readonly unknown[]): void {
+    if (this.closed) {
+      return;
+    }
+    const parsed = WorkflowRowSchema.array().safeParse(rows);
+    if (!parsed.success) {
+      this.reportTurnError(new Error(`workflows: ${parsed.error.message}`));
+      return;
+    }
+    this.lastWorkflows = parsed.data;
+    try {
+      this.emit({ type: "workflows", runs: parsed.data });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+    this.trackWorkflowWait();
+  }
+
+  // --- the workflow user-wait wake (docs/feat/workflow-run-awareness.md S6) ---
+
+  private waitTiming(): { readonly graceMs: number; readonly minGapMs: number } {
+    const t = this.wake?.workflowWait;
+    return {
+      graceMs: t?.graceMs ?? WORKFLOW_WAIT_GRACE_MS,
+      minGapMs: t?.minGapMs ?? WORKFLOW_WAIT_MIN_GAP_MS,
+    };
+  }
+
+  /**
+   * After every publish: a user wait that APPEARS arms one timer (a grace); one
+   * that goes or changes disarms it. A publish that keeps the same wait changes
+   * nothing — so a wait disarmed at its fire is never re-armed by it.
+   */
+  private trackWorkflowWait(): void {
+    if (this.wake === undefined || this.closed) {
+      return;
+    }
+    const wait = workflowUserWait(this.lastWorkflows);
+    if (wait?.key === this.waitSeen) {
+      return;
+    }
+    this.waitSeen = wait?.key;
+    this.disarmWorkflowWait();
+    if (wait !== undefined) {
+      const at = this.now();
+      this.armWorkflowWait(wait.key, wait.runId, at, this.waitTiming().graceMs);
+    }
+  }
+
+  private armWorkflowWait(key: string, runId: string, since: number, ms: number): void {
+    const set = this.wake?.workflowWait?.setTimeout ?? defaultSetTimeout;
+    const handle = set(() => this.fireWorkflowWait(), ms);
+    this.waitTimer = { key, runId, since, handle };
+  }
+
+  private disarmWorkflowWait(): void {
+    if (this.waitTimer === null) {
+      return;
+    }
+    (this.wake?.workflowWait?.clearTimeout ?? defaultClearTimeout)(this.waitTimer.handle);
+    this.waitTimer = null;
+  }
+
+  /**
+   * The grace ended: the pure gate decides on what holds NOW (the rows, the
+   * attached clients, the slot), never on the armed copy. A wake queues the
+   * note on the exits queue (it counts in `pendingExitCount`) and lets the one
+   * waker start the turn.
+   */
+  private fireWorkflowWait(): void {
+    const armed = this.waitTimer;
+    if (armed === null) {
+      return;
+    }
+    this.waitTimer = null;
+    const wait = workflowUserWait(this.lastWorkflows);
+    const record = this.waitWakes.get(armed.runId);
+    const timing = this.waitTiming();
+    const now = this.now();
+    const due = workflowWaitWakeDue({
+      armedKey: armed.key,
+      currentKey: wait?.key,
+      attachedCount: this.attachedCount,
+      woke: record?.woken.has(armed.key) ?? false,
+      lastWakeAt: record?.at,
+      now,
+      minGapMs: timing.minGapMs,
+      enabled: this.wake !== undefined,
+      busy: this.running,
+      lastEndBad: this.lastEndBad,
+      closed: this.closed,
+    });
+    if (due.kind === "rearm") {
+      this.armWorkflowWait(armed.key, armed.runId, armed.since, timing.graceMs);
+      return;
+    }
+    if (due.kind === "rearm_at") {
+      this.armWorkflowWait(armed.key, armed.runId, armed.since, Math.max(0, due.at - now));
+      return;
+    }
+    // `wake` implies the current wait IS the armed one.
+    if (due.kind === "disarm" || wait === undefined) {
+      return;
+    }
+    const woken = record?.woken ?? new Set<string>();
+    woken.add(armed.key);
+    this.waitWakes.set(armed.runId, { woken, at: now });
+    this.session.noteWorkflowWait(
+      armed.runId,
+      workflowWaitNote(wait, armed.since, zoneOrDefault(this.zone())),
+    );
+    this.kickWake();
+  }
+
+  /**
+   * `session/workflow` (D3): the USER starts / stops / resumes a run. A
+   * session without a driver (tunnelled: a pod's daemon) refuses — a run's
+   * asks and approvals belong to the laptop or a `serve` daemon.
+   */
+  async workflow(params: WorkflowParams): Promise<WorkflowResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return { ok: false, reason: "workflows run only on a laptop or serve session" };
+    }
+    if ("turnId" in params && params.turnId.startsWith(WAKE_TURN_PREFIX)) {
+      return { ok: false, reason: "a wake turn id cannot start a workflow" };
+    }
+    switch (params.action) {
+      case "start": {
+        const inputs = new Map<string, string>();
+        for (const { name, value } of params.inputs ?? []) {
+          if (inputs.has(name)) {
+            return { ok: false, reason: `input ${name} is given twice` };
+          }
+          inputs.set(name, value);
+        }
+        return driver.start({
+          name: params.name,
+          inputs: Object.fromEntries(inputs),
+          // The hash the user SAW (the catalogue's row, slice 5a): a file edited
+          // since then is refused `changed`, so a start never runs an edit the
+          // user never reviewed. Absent (a TUI `/workflow run`, the model's
+          // tool) keeps the old behaviour: the current file.
+          ...(params.hash !== undefined ? { hash: params.hash } : {}),
+          by: "user",
+          turnId: params.turnId,
+        });
+      }
+      case "stop":
+        return driver.stop(params.runId);
+      case "resume":
+        return driver.rerun(params.runId, undefined, params.turnId);
+      case "rerun_step":
+        return driver.rerun(params.runId, params.stepId, params.turnId);
+    }
+  }
+
+  /**
+   * `session/workflow_catalogue` (docs/feat/workflows-ui.md slice 5a / D6): the
+   * project's workflow files, validated and hashed against THIS session's
+   * `models`/agent types, with whether each hash is approved. A read: no ask, no
+   * run, no write. A session without a driver (tunnelled: a pod's daemon) answers
+   * `unavailable` — never an empty list that would look like "no workflows".
+   *
+   * The answer is judged by the wire schema on the way out (a pod may have sent
+   * it, and a row's free text is painted on the laptop).
+   */
+  async workflowCatalogue(): Promise<WorkflowCatalogueResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return {
+        workflows: [],
+        dir: "",
+        unavailable: WORKFLOWS_UNAVAILABLE,
+      };
+    }
+    return workflowCatalogueResult(await driver.catalogue());
+  }
+
+  /**
+   * `session/workflow_source` (docs/feat/workflow-editor.md D3/D4): what an
+   * editor opens — the bytes, the draft, the prompts its steps read, the hash or
+   * the errors. A read: no ask, no run, no write. A session without a driver
+   * (tunnelled: a pod's daemon) answers `unavailable`, never a read that would
+   * look like an empty file.
+   *
+   * The answer is judged by the wire schema on the way out (the `:2591` pattern):
+   * a row's free text is painted on the laptop.
+   */
+  async workflowSource(params: WorkflowSourceParams): Promise<WorkflowSourceResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return {
+        ok: false,
+        unavailable: "workflows can be edited only on a laptop or serve session",
+      };
+    }
+    const view = await driver.source(params.name);
+    const prompts = Object.entries(view.prompts ?? {}).map(([path, text]) => ({ path, text }));
+    const parsed = WorkflowSourceResultSchema.safeParse({
+      ok: view.ok,
+      ...(view.path !== undefined ? { path: view.path } : {}),
+      ...(view.text !== undefined ? { text: view.text } : {}),
+      ...(view.draft !== undefined ? { draft: JSON.stringify(view.draft) } : {}),
+      // Present iff the draft is: "every step's prompts" is an answer, an empty
+      // list included — a client never has to tell it from "not asked".
+      ...(view.draft !== undefined ? { prompts } : {}),
+      ...(view.hash !== undefined ? { hash: view.hash } : {}),
+      ...(view.version !== undefined ? { version: view.version } : {}),
+      ...(view.canonical !== undefined ? { canonical: view.canonical } : {}),
+      // The validator does not bound its list; the wire does (the catalogue's capper).
+      ...(view.errors !== undefined ? { errors: boundedWorkflowErrors(view.errors) } : {}),
+      ...(view.unreadable !== undefined
+        ? { unreadable: capWithEllipsis(oneLineText(view.unreadable), 300) }
+        : {}),
+      ...(view.context !== undefined ? { context: view.context } : {}),
+      ...(view.unavailable !== undefined ? { unavailable: view.unavailable } : {}),
+    });
+    if (!parsed.success) {
+      // `unavailable` means "this session cannot edit workflows" and nothing
+      // else: a file this answer cannot carry is UNREADABLE, by its path.
+      return {
+        ok: false,
+        path: `${PROJECT_PATHS.workflows}/${params.name}.yaml`,
+        unreadable: capWithEllipsis(
+          oneLineText(`the file could not be reported: ${parsed.error.message}`),
+          300,
+        ),
+      };
+    }
+    return parsed.data;
+  }
+
+  /**
+   * `session/workflow_save` (docs/feat/workflow-editor.md D4): `dryRun: true` is
+   * the Review screen, `false` writes through the driver's writer. The draft and
+   * the prompts are decoded HERE — a draft that is not JSON, or one prompt path
+   * given twice, is `invalid` before the driver, so nothing is validated against
+   * a half-read request. The answer is judged by the wire schema on the way out.
+   *
+   * The one fact the session adds is `schedules`: the jobs pinned to the OLD
+   * hash, which skip `changed` at fire time until they are re-created.
+   */
+  async workflowSave(params: WorkflowSaveParams): Promise<WorkflowSaveResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return {
+        ok: false,
+        refusal: "unavailable",
+        reason: "workflows can be edited only on a laptop or serve session",
+      };
+    }
+    const invalid = (reason: string): WorkflowSaveResult => ({
+      ok: false,
+      refusal: "invalid",
+      reason,
+    });
+    let draft: unknown;
+    try {
+      draft = JSON.parse(params.draft);
+    } catch (error) {
+      return invalid(`the draft is not JSON: ${oneLineText(String(error)).slice(0, 200)}`);
+    }
+    const prompts: Record<string, string> = {};
+    for (const { path, text } of params.prompts) {
+      if (Object.hasOwn(prompts, path)) {
+        return invalid(`${path} is given twice`);
+      }
+      prompts[path] = text;
+    }
+    const outcome = await driver.save({
+      name: params.name,
+      mode: params.mode,
+      draft,
+      prompts,
+      ...(params.baseHash !== undefined ? { baseHash: params.baseHash } : {}),
+      dryRun: params.dryRun,
+    });
+    const schedules = pinnedToOldHash(
+      this.scheduleTable,
+      params.name,
+      params.baseHash,
+      outcome.hash,
+    );
+    // The wire's caps, applied here, none lost silently: the validator's list
+    // (the catalogue's capper), the joined reason, and `alsoChanges` past 64
+    // (counted in the reason when the driver gave none).
+    const also = outcome.alsoChanges ?? [];
+    const alsoCut =
+      also.length > WORKFLOW_ALSO_CHANGES_MAX
+        ? `${also.length} other workflows also change; the first ${WORKFLOW_ALSO_CHANGES_MAX} are listed`
+        : undefined;
+    const reason = outcome.reason ?? alsoCut;
+    const parsed = WorkflowSaveResultSchema.safeParse({
+      ok: outcome.ok,
+      ...(outcome.refusal !== undefined ? { refusal: outcome.refusal } : {}),
+      ...(reason !== undefined ? { reason: capWithEllipsis(reason, WORKFLOW_REASON_MAX) } : {}),
+      ...(outcome.errors !== undefined ? { errors: boundedWorkflowErrors(outcome.errors) } : {}),
+      ...(outcome.hash !== undefined ? { hash: outcome.hash } : {}),
+      ...(outcome.version !== undefined ? { version: outcome.version } : {}),
+      ...(outcome.path !== undefined ? { path: outcome.path } : {}),
+      ...(outcome.files !== undefined ? { files: outcome.files.map(writeFileRow) } : {}),
+      ...(outcome.approved !== undefined ? { approved: outcome.approved } : {}),
+      ...(outcome.alsoChanges !== undefined
+        ? { alsoChanges: also.slice(0, WORKFLOW_ALSO_CHANGES_MAX) }
+        : {}),
+      ...(outcome.running !== undefined ? { running: outcome.running } : {}),
+      ...(schedules.length > 0 ? { schedules } : {}),
+    });
+    if (parsed.success) {
+      return parsed.data;
+    }
+    const why = capWithEllipsis(
+      oneLineText(`the rest of the save could not be reported: ${parsed.error.message}`),
+      WORKFLOW_REASON_MAX,
+    );
+    // `unavailable` means "this session cannot edit workflows" and nothing else.
+    // A write that LANDED keeps its answer (the hash the next start asks about);
+    // a refusal keeps its own word.
+    const fallback = WorkflowSaveResultSchema.safeParse(
+      outcome.ok
+        ? {
+            ok: true,
+            reason: why,
+            ...(outcome.hash !== undefined ? { hash: outcome.hash } : {}),
+            ...(outcome.version !== undefined ? { version: outcome.version } : {}),
+            ...(outcome.path !== undefined ? { path: outcome.path } : {}),
+            ...(outcome.approved !== undefined ? { approved: outcome.approved } : {}),
+          }
+        : { ok: false, refusal: outcome.refusal ?? "invalid", reason: why },
+    );
+    return fallback.success
+      ? fallback.data
+      : { ok: outcome.ok, ...(outcome.ok ? {} : { refusal: "invalid" }), reason: why };
+  }
+
+  /** This session's rows of `workflow/list` (D5): the hub's signal is `needsUser`. */
+  workflowListRows(): WorkflowListRow[] {
+    const title = this.wireTitle().text;
+    return this.lastWorkflows.map((run) => {
+      const step = run.steps.find(
+        (s) => s.state === "running" || s.state === "waiting" || s.state === "needs-approval",
+      );
+      return {
+        sessionId: this.id,
+        ...(title !== "" ? { title } : {}),
+        runId: run.runId,
+        name: run.name,
+        state: run.state,
+        ...(step !== undefined && run.endedAt === undefined ? { step: step.id } : {}),
+        done: run.steps.filter((s) => s.state === "ok").length,
+        total: run.steps.length,
+        needsUser:
+          run.endedAt === undefined && (run.state === "needs-approval" || run.state === "waiting"),
+        startedAt: run.startedAt,
+        ...(run.endedAt !== undefined ? { endedAt: run.endedAt } : {}),
+      };
+    });
+  }
+
+  /**
+   * `session/workflow_step` (docs/feat/workflows-ui.md D1): ONE step execution's
+   * `prompt`/`report`, which the `workflows` row deliberately does not carry.
+   * Synchronous from the retained log, so it holds no lock and never serializes
+   * the peer (AGENTS §7).
+   *
+   * The durable entry wins: it is the execution that ENDED. A step still running
+   * has none yet, so the driver's in-flight record answers instead — `live: true`
+   * and the row's live text, no report. Nothing available (a step that never ran,
+   * or one whose entry a compaction left behind) is `{}`: the UI says so, it
+   * never paints another step's text.
+   */
+  workflowStep(params: WorkflowStepParams): WorkflowStepResult {
+    const entry = this.log.workflowStepDetail({
+      runId: params.runId,
+      stepId: params.stepId,
+      ...(params.attempt !== undefined ? { attempt: params.attempt } : {}),
+      ...(params.round !== undefined ? { round: params.round } : {}),
+    });
+    if (entry !== undefined) {
+      return {
+        detail: {
+          attempt: entry.attempt,
+          round: entry.round,
+          live: false,
+          state: entry.state,
+          ...(entry.verdict !== undefined ? { verdict: entry.verdict } : {}),
+          reason: entry.reason,
+          ...(entry.prompt !== undefined ? { prompt: entry.prompt } : {}),
+          ...(entry.report !== undefined ? { report: entry.report } : {}),
+          tokens: entry.tokens,
+          durationMs: entry.durationMs,
+        },
+      };
+    }
+    // No entry: the step is either running now or its record is gone.
+    const live = this.workflows?.liveStep(params.runId);
+    if (
+      live !== undefined &&
+      live.stepId === params.stepId &&
+      (params.attempt === undefined || params.attempt === live.attempt) &&
+      (params.round === undefined || params.round === live.round)
+    ) {
+      return {
+        detail: {
+          attempt: live.attempt,
+          round: live.round,
+          live: true,
+          state: "running",
+          prompt: live.prompt,
+          ...(live.live !== undefined ? { reason: live.live } : {}),
+        },
+      };
+    }
+    return {};
   }
 
   /**
@@ -2562,7 +3402,12 @@ export class HostedSession {
       // of `attachments`, stays synchronous, and is still never awaited.
       update.type !== "turn_start" &&
       update.type !== "tool_call" &&
-      update.type !== "session_title"
+      update.type !== "session_title" &&
+      // Slice 9: a run's end (owner Q5). Full state, so the push rules see the
+      // same ended run again on a later step; they announce each run id ONCE.
+      update.type !== "workflows" &&
+      // Slice 10: a scheduled workflow fire that did not start (`run_not_started`).
+      update.type !== "schedules"
     ) {
       return;
     }
@@ -3006,9 +3851,11 @@ export class HostedSession {
     readonly agentJobs?: AgentJobs;
     readonly grants?: SessionGrants;
     readonly workloadShells?: WorkloadShellsLike;
+    readonly workflows?: WorkflowDriver;
   } {
     return {
       permissions: this.permissions,
+      ...(this.workflows ? { workflows: this.workflows } : {}),
       ...(this.jobs ? { jobs: this.jobs } : {}),
       ...(this.agentRuntime ? { agentJobs: this.agentRuntime } : {}),
       ...(this.grants ? { grants: this.grants } : {}),
@@ -3400,6 +4247,7 @@ export class HostedSession {
       // After the turn's last message (derived just above); the checkpoint's
       // digest is lazy (the first read hashes, never this window).
       this.log.turnEnd(turnId, end.stopReason);
+      this.refreshUnits();
       this.log.checkpoint();
       // Inside the steering window, and safe there: this method cannot await,
       // and `persist` only captures — the I/O starts after the window.
@@ -3498,6 +4346,12 @@ export class HostedSession {
     return {
       now: () => this.now(),
       create: (request) => this.createSchedule(request),
+      createWorkflow: (request) =>
+        this.createWorkflowSchedule(
+          request,
+          this.activeTurnId ?? "",
+          this.activeTurnId ?? undefined,
+        ),
       list: () => this.scheduleTable,
       delete: (id) => this.removeSchedule(id),
     };
@@ -3519,6 +4373,90 @@ export class HostedSession {
       this.scheduleChanged(result.table);
     }
     return result;
+  }
+
+  /**
+   * A WORKFLOW schedule (agent-workflows slice 10 S10-4), from the model's
+   * `schedule_create{workflow}` or the user's `session/schedule_create`. The
+   * file and inputs are validated through the driver and the CURRENT hash is
+   * pinned. An unapproved hash does not refuse: the job is created and the
+   * approval is asked NOW, while someone is there (raised, never awaited —
+   * a fire before the answer records `unapproved`).
+   */
+  async createWorkflowSchedule(
+    request: ScheduleRequest,
+    createdBy: string,
+    approvalTurnId: string | undefined,
+  ): Promise<ScheduleCreateResult> {
+    const workflow = request.workflow;
+    if (workflow === undefined || request.prompt !== undefined) {
+      return { ok: false, reason: "give exactly one of `prompt` or `workflow`" };
+    }
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return { ok: false, reason: "workflows run only on a laptop or serve session" };
+    }
+    if (this.scheduling === undefined) {
+      return { ok: false, reason: "this session cannot schedule" };
+    }
+    const inputs = new Map<string, string>();
+    for (const { name, value } of workflow.inputs) {
+      if (inputs.has(name)) {
+        return { ok: false, reason: `input ${name} is given twice` };
+      }
+      inputs.set(name, value);
+    }
+    const seen = await driver.inspect(workflow.name, Object.fromEntries(inputs));
+    if (!seen.ok) {
+      return { ok: false, reason: seen.reason };
+    }
+    if (this.closed) {
+      return { ok: false, reason: "this session has ended" };
+    }
+    const result = scheduleCreate(
+      this.scheduleTable,
+      { ...request, workflow: { ...workflow, hash: seen.hash } },
+      {
+        id: `${SCHEDULE_ID_PREFIX}${this.scheduleSeq + 1}`,
+        now: this.now(),
+        createdBy,
+        ...(this.scheduling.limits ? { limits: this.scheduling.limits } : {}),
+      },
+    );
+    if (!result.ok) {
+      return result;
+    }
+    this.scheduleSeq += 1;
+    this.scheduleChanged(result.table);
+    this.scheduleAudit(`schedule: ${result.job.id} created workflow ${workflow.name} ${this.id}`);
+    if (!seen.approved) {
+      void driver.requestApproval(workflow.name, approvalTurnId).catch(() => {});
+    }
+    return result;
+  }
+
+  /**
+   * `session/schedule_create` (S10-4): the USER schedules a workflow. Answers up
+   * to the create; the approval ask, when needed, is raised and never awaited
+   * (§7). A `wake-` id is the daemon's own and is refused, as on `session/workflow`.
+   */
+  async scheduleCreateRpc(params: ScheduleCreateParams): Promise<ScheduleCreateRpcResult> {
+    if (params.turnId.startsWith(WAKE_TURN_PREFIX)) {
+      return { ok: false, reason: "a wake turn id cannot create a schedule" };
+    }
+    const result = await this.createWorkflowSchedule(
+      {
+        workflow: { name: params.workflow.name, inputs: params.workflow.inputs ?? [] },
+        ...(params.every !== undefined ? { every: params.every } : {}),
+        ...(params.at !== undefined ? { at: params.at } : {}),
+        ...(params.daily !== undefined ? { daily: params.daily } : {}),
+      },
+      params.turnId,
+      params.turnId,
+    );
+    return result.ok
+      ? { ok: true, scheduleId: result.job.id }
+      : { ok: false, reason: result.reason.slice(0, 2000) };
   }
 
   /** Drop one job (the model's `schedule_control{delete}` or the user's method). */
@@ -3581,6 +4519,14 @@ export class HostedSession {
     for (const job of step.expired) {
       this.scheduleAudit(`schedule: ${job.id} expired ${this.id}`);
     }
+    for (const job of step.missed) {
+      this.scheduleAudit(`schedule: ${job.id} missed (later than the grace) ${this.id}`);
+    }
+    if (step.due !== null && step.due.target !== undefined) {
+      // A workflow job: the driver starts the run directly — no turn, no slot.
+      this.fireWorkflow(step.due, step.table);
+      return;
+    }
     if (step.due === null) {
       if (changed) {
         this.scheduleTable = step.table;
@@ -3629,6 +4575,99 @@ export class HostedSession {
       this.reportTurnError(error);
     }
     this.scheduleAudit(`wake: scheduled ${job.id} ${this.id}`);
+    this.armSchedules();
+  }
+
+  /**
+   * Fire a WORKFLOW job (slice 10 S10-2), already advanced in `table`: commit
+   * and capture the advance FIRST (at-most-once, as `fireSchedule`), then ask
+   * the driver for a scheduled start under a daemon-minted `wake-` turn id (A10:
+   * the id both sides' auto-accept trust, and never a client's). No `prompt()`,
+   * no `firedTurns`, no turn slot. The outcome is recorded on the row (`last`),
+   * captured, published and audited when the driver answers.
+   */
+  private fireWorkflow(job: ScheduledJob, table: readonly ScheduledJob[]): void {
+    // The advanced row is a NEW fire (`fires` +1): it must not carry the
+    // previous fire's `last`, or a reader keyed on `<id>#<fires>` (the push
+    // rules) takes the old outcome for this fire. `last` is set again when the
+    // driver answers (`settleWorkflowFire`).
+    this.scheduleTable = table.map((row) => {
+      if (row.id !== job.id || row.last === undefined) return row;
+      const { last: _previous, ...fresh } = row;
+      return fresh;
+    });
+    this.persist();
+    this.publishSchedules();
+    const target = job.target?.workflow;
+    const driver = this.workflows;
+    const at = this.now();
+    if (target === undefined || driver === undefined) {
+      this.settleWorkflowFire(job.id, {
+        at,
+        outcome: "unavailable",
+        reason: "workflows run only on a laptop or serve session",
+      });
+      this.armSchedules();
+      return;
+    }
+    const inputs: Record<string, string> = {};
+    for (const { name, value } of target.inputs) inputs[name] = value;
+    void driver
+      .startScheduled({
+        name: target.name,
+        inputs,
+        pinnedHash: target.hash,
+        scheduleId: job.id,
+        turnId: `${WAKE_TURN_PREFIX}${crypto.randomUUID()}`,
+      })
+      .then(
+        (result) =>
+          this.settleWorkflowFire(
+            job.id,
+            result.ok
+              ? { at, outcome: "started", runId: result.runId }
+              : { at, outcome: result.outcome, reason: result.reason },
+          ),
+        (error: unknown) =>
+          this.settleWorkflowFire(job.id, {
+            at,
+            outcome: "invalid",
+            reason: error instanceof Error ? error.message : String(error),
+          }),
+      );
+    this.armSchedules();
+  }
+
+  /** Record a workflow fire's outcome (`last`), the failure stop, and tell everyone. */
+  private settleWorkflowFire(jobId: string, last: ScheduleLast): void {
+    if (this.closed) {
+      return;
+    }
+    const { table, removed } = scheduleRecordFire(this.scheduleTable, jobId, last);
+    if (removed) {
+      // The row with its last outcome is published once before it goes, so a
+      // reader (the push rules) sees WHY it was removed.
+      this.scheduleTable = this.scheduleTable.map((job) =>
+        job.id === jobId
+          ? {
+              ...job,
+              last: { ...last, reason: `${last.reason ?? last.outcome} · schedule removed` },
+            }
+          : job,
+      );
+      this.publishSchedules();
+    }
+    this.scheduleTable = table;
+    this.persist();
+    this.publishSchedules();
+    this.scheduleAudit(
+      last.outcome === "started"
+        ? `schedule: ${jobId} started ${last.runId ?? ""} ${this.id}`
+        : `schedule: ${jobId} not started · ${last.outcome} ${this.id}`,
+    );
+    if (removed) {
+      this.scheduleAudit(`schedule: ${jobId} stopped after failures ${this.id}`);
+    }
     this.armSchedules();
   }
 
@@ -4050,6 +5089,8 @@ export class HostedSession {
       jobs: this.lastJobs,
       // And the scheduled wakes (owner Q7: `/clear` keeps them; a compaction too).
       schedules: this.lastSchedules,
+      // And the workflow runs: a run lives across a compaction or `/clear`.
+      workflows: this.lastWorkflows,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
@@ -4120,6 +5161,7 @@ export class HostedSession {
       clearTimeout(this.wakeKick);
       this.wakeKick = null;
     }
+    this.disarmWorkflowWait();
     // The table itself stays (an archive keeps it frozen, D6); only the timer goes.
     this.disarmSchedules();
     if (this.activeTurnId !== null) {
@@ -4168,6 +5210,8 @@ export class HostedSession {
     this.unsubscribeAgentNotify?.();
     this.unsubscribeAgentRows?.();
     this.agentRuntime?.dispose();
+    // A live run is cut (`interrupted`); a reload closes it from the log too.
+    this.workflows?.dispose();
   }
 
   /**
@@ -4184,6 +5228,9 @@ export class HostedSession {
    */
   archive(after?: LogCursor): DaemonSessionState {
     const before = this.persistedState(after);
+    // The units of the log part written below (before the close), as a load
+    // of the file derives them: the resident record's table (S7).
+    const units = this.segmentUnits();
     this.close("closed");
     // The log part is the one BEFORE the close (docs/feat/session-log-serve-store.md
     // §2): an archived session's log is the shape a crash leaves — no
@@ -4193,6 +5240,7 @@ export class HostedSession {
       ...closed,
       ...(before.log ? { log: before.log } : {}),
       ...(before.turn ? { turn: { ...before.turn, steering: [], steeringIds: [] } } : {}),
+      units,
     };
   }
 }

@@ -109,12 +109,14 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "33-hub-opacity-20"
-# Long-press → the sticky fan; Attach is in it; a tap commits → the chooser.
+# Long-press → the sticky fan; Workflows holds the first slot (Attach's, owner
+# 2026-11-24: the composer `+` is the one chooser, docs/fix/workflows-ux.md D6),
+# and the fan closes on the scrim without running anything.
 - longPressOn:
     id: "floating-activity"
 - extendedWaitUntil:
     visible:
-      id: "hub-item-attach"
+      id: "hub-item-workflows"
     timeout: 5000
 - assertVisible:
     id: "hub-item-activity"
@@ -123,15 +125,11 @@ appId: so.tentacle.app
     env:
       SHOT: "33-hub-fan"
 - tapOn:
-    id: "hub-item-attach"
-- extendedWaitUntil:
-    visible:
-      text: "Add an attachment"
-    timeout: 5000
-- tapOn:
-    text: "Cancel"
+    id: "hub-scrim"
 - assertNotVisible:
-    id: "hub-item-attach"
+    id: "hub-item-workflows"
+- assertNotVisible:
+    text: "Add an attachment"
 # Long-press → tap outside the items → the fan is gone, nothing ran.
 - longPressOn:
     id: "floating-activity"

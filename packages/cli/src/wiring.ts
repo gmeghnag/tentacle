@@ -12,18 +12,33 @@ import {
   type AgentType,
   type AskHooksTrust,
   BUILTIN_AGENT_TYPES,
+  CLAUDE_CODE_CAPS,
+  CLAUDE_CODE_ID,
+  CLAUDE_DEFAULT_TOOLS,
+  CLAUDE_TYPE_DESCRIPTION,
   EMPTY_SKILL_LISTING,
+  type HarnessDeps,
   HookRunner,
   NO_CAPABILITIES,
+  PermissionGate,
+  type ProcessGroups,
   type ResultTransform,
   SessionGrants,
   type SessionSkills,
   type SkillListing,
+  type Spawner,
   type ToolOutputStore,
+  type WorkflowContainerOutcome,
+  type WorkflowContainerTarget,
+  WorkflowDriver,
+  claudeModelNote,
   collapseRepeatedLines,
+  createClaudeCodeCodec,
+  createProcessAdapter,
   createSubagentRunner,
   createToolOutputStore,
   exemptTools,
+  isModelShape,
   mergeAgentTypes,
   parseAgentDefinition,
   redactSecrets,
@@ -55,29 +70,42 @@ import {
   type JobController,
   type ModelProvider,
   PermissionBroker,
+  type PermissionRequester,
   type ScheduleLimits,
+  type ToolImageStore,
+  browserDefaultOff,
 } from "@tentacle/core";
-import { BackgroundJobs, HostExecution } from "@tentacle/exec";
+import { BackgroundJobs, HostExecution, killGroup, trackGroup, untrackGroup } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
 import { HooksTrustParamsSchema } from "@tentacle/protocol";
+import { imageFileMaxEdge, imageLimits, imageTokenEstimate } from "@tentacle/providers";
 import {
+  NOTICES,
+  type RunOutcome,
   SKILL_TOOL_NAME,
   type SkillBodyReader,
   ToolRegistry,
+  WorkloadShellAborted,
+  type WorkloadShellBackend,
+  WorkloadShellRefused,
   WorkloadShells,
   builtinTools,
   chartTool,
   createAgentControlTool,
   createContextResetTool,
+  createFsReadTool,
+  createImageViewTool,
   createMoveSessionTool,
   createScheduleControlTool,
   createScheduleCreateTool,
   createSkillActivator,
   createSkillTool,
   createTaskTool,
+  createWorkflowTool,
   createWorkloadShellTool,
   diagramTool,
   presentTool,
+  shellTool,
   subagentExtraTools,
 } from "@tentacle/tools";
 import { logDaemonError } from "./daemon-log.ts";
@@ -89,6 +117,8 @@ import {
   subagentModelResolver,
   tunnelSubagentResolver,
 } from "./model-provider.ts";
+import { workflowApprovals } from "./workflow-approvals.ts";
+import { loadWorkflowSource, workflowListing, writeWorkflowFiles } from "./workflow-files.ts";
 
 /**
  * Load user-defined agent types from `<configDir>/agents/*.md`, then from each
@@ -279,6 +309,61 @@ export interface WiredAgent {
    * this build offered `workload_shell`, and disposed next to `jobs`.
    */
   readonly workloadShells?: { dispose(): Promise<void> };
+  /** The workflow driver (docs/feat/agent-workflows.md D3): only with `workflows: true`, never tunnelled. */
+  readonly workflows?: WorkflowDriver;
+}
+
+/**
+ * The `claude` sub-agent type and its harness deps
+ * (docs/feat/subagent-harness-runners.md D3/D6): only when `claude-code` is
+ * enabled AND its command is on PATH (its version is probed at the first run).
+ * The caller gates it on `!tunnelled` (D5).
+ */
+export function claudeHarness(
+  config: TentacleConfig,
+  options: NonNullable<BuildAgentOptions["harnesses"]>,
+): { readonly deps: HarnessDeps; readonly type: AgentType; readonly note: string } | undefined {
+  const h = config.harnesses[CLAUDE_CODE_ID];
+  if (h === undefined || !h.enabled) {
+    return undefined;
+  }
+  const path = (options.which ?? ((command: string) => Bun.which(command)))(h.command);
+  if (path === null) {
+    return undefined;
+  }
+  const adapter = createProcessAdapter({
+    id: CLAUDE_CODE_ID,
+    command: path,
+    codec: createClaudeCodeCodec,
+    caps: CLAUDE_CODE_CAPS,
+    groups: options.groups ?? { track: trackGroup, untrack: untrackGroup, kill: killGroup },
+    ...(options.spawner ? { spawner: options.spawner } : {}),
+    defaultTools: CLAUDE_DEFAULT_TOOLS,
+  });
+  return {
+    deps: {
+      instances: new Map([
+        [
+          CLAUDE_CODE_ID,
+          {
+            adapter,
+            model: h.model,
+            idleMinutes: h.idleMinutes,
+            resumeHint: (handle) => `${h.command} --resume ${handle.id}`,
+          },
+        ],
+      ]),
+      cwd: config.cwd,
+    },
+    type: {
+      name: "claude",
+      description: CLAUDE_TYPE_DESCRIPTION,
+      prompt: "",
+      tools: [],
+      harness: { adapter: CLAUDE_CODE_ID, mode: "write" },
+    },
+    note: claudeModelNote(h.model),
+  };
 }
 
 /**
@@ -295,6 +380,7 @@ export function workerSessionBuild(wired: WiredAgent) {
     jobs: wired.jobs,
     agentJobs: wired.agentJobs,
     grants: wired.grants,
+    ...(wired.workflows ? { workflows: wired.workflows } : {}),
     // The main thread's config (the laptop's): absent with `autoTitle` off.
     ...(wired.titleModel ? { titleModel: wired.titleModel } : {}),
   };
@@ -367,6 +453,24 @@ export interface BuildAgentOptions {
   readonly agentJobs?: AgentJobs;
   readonly grants?: SessionGrants;
   /**
+   * Build the session's workflow driver and offer the `workflow` tool
+   * (docs/feat/agent-workflows.md D3): the worker and `serve` only. Ignored
+   * over a `modelOverride` (a tunnelled pod session never runs one).
+   */
+  readonly workflows?: true;
+  /**
+   * Offer the harness sub-agent types (docs/feat/subagent-harness-runners.md
+   * D5): the worker and `serve` only, NEVER over a `modelOverride` (a pod never
+   * runs another harness — it would act with the pod host's login, and the
+   * pod is not trusted). `which` finds the command on PATH (default
+   * `Bun.which`); `spawner` / `groups` default to the real ones. Tests inject.
+   */
+  readonly harnesses?: {
+    readonly which?: (command: string) => string | null;
+    readonly spawner?: Spawner;
+    readonly groups?: ProcessGroups;
+  };
+  /**
    * Daemon-side log for hook failures (`onFailure: "ignore"`). Never the
    * terminal while Ink owns it (AGENTS §7): a log file / the piped stderr.
    */
@@ -409,6 +513,14 @@ export interface BuildAgentOptions {
    */
   readonly artifacts?: ArtifactSink;
   /**
+   * The session's tool-image store (docs/feat/image-view.md D1): the SAME object
+   * as `attachments`, under its write-capable type. Set (and the model has
+   * vision) ⇒ `fs_read` keeps a PDF's pictures and `image_view` is offered.
+   * Only the worker and `serve` forward it — never a pod daemon, a one-shot or
+   * a child: a forgotten hop turns the feature off, never opens a hole.
+   */
+  readonly toolImages?: ToolImageStore;
+  /**
    * Offer this agent `move_session` (docs/feat/session-hop.md D9): the model may
    * PROPOSE moving its session, and nothing more — the laptop asks the owner at
    * the turn's end. Set by the runtimes that own a hoppable session (the local
@@ -446,6 +558,15 @@ export interface BuildAgentOptions {
   readonly workloadShell?:
     | { readonly backend: import("@tentacle/tools").WorkloadShellBackend }
     | undefined;
+  /**
+   * Offer the read-only `browser_*` tools (docs/feat/browser-inspect.md B4): the
+   * daemon's ONE toolset over its hub link. Set ONLY where the daemon runs on
+   * the user's own Mac — the worker and `serve` — never a pod daemon (Q1: a pod
+   * is not trusted to act as the user on the web) and never a child agent
+   * (`subagent.ts`'s filter). The group starts OFF in the session's switches
+   * unless `tools.enabled` names it (`browserDefaultOff`).
+   */
+  readonly browser?: import("@tentacle/tools").BrowserToolset | undefined;
 }
 
 /**
@@ -473,6 +594,94 @@ function publishedOptions(
     const description = published?.models.find((m) => m.name === name)?.description;
     return description !== undefined ? { name, description } : { name };
   });
+}
+
+/**
+ * A `where: {docker: …}` run step's outcome (docs/feat/agent-workflows.md
+ * Slice 5), from the workload seam's own `RunOutcome`. Only the notices that
+ * say the command did NOT simply run to its end — killed by the timeout ladder
+ * (whose exit code is then 0), a lost stream, a shell the command itself ended —
+ * fail the step. A reopened shell (`newShell`, the cwd restore) is information:
+ * an idle close between two steps of one run is normal. Information goes into
+ * the output, never into the verdict.
+ */
+export function workflowContainerOutcome(
+  outcome: Pick<RunOutcome, "exitCode" | "body" | "notices" | "shellStderr">,
+  timeoutMs: number,
+): WorkflowContainerOutcome {
+  const seconds = Math.round(timeoutMs / 1000);
+  const failing = new Set<string>([
+    NOTICES.lost,
+    NOTICES.shellExited,
+    NOTICES.killedSurvived(seconds),
+    NOTICES.killedRestarted(seconds),
+  ]);
+  const notes = outcome.notices.filter((n) => failing.has(n));
+  const info = outcome.notices.filter((n) => !failing.has(n));
+  const output = [...info, outcome.body, outcome.shellStderr ?? ""]
+    .filter((s) => s !== "")
+    .join("\n");
+  return { exitCode: outcome.exitCode, output, notes };
+}
+
+/**
+ * A `run` step's APPROVED command and workload, read from the gate's
+ * `outcome.input` through the tool's own schema — which is what would validate
+ * it in the agent loop, so a rewrite the loop could run is one a step can run.
+ * A docker step is approved as the `workload_shell` call it is; a local one as
+ * `shell`. A rewrite the schema rejects fails the step closed (never falls back
+ * to the file's original: that one was not what the person approved).
+ */
+export function readApprovedCall(
+  parsed:
+    | { readonly success: true; readonly data: unknown }
+    | {
+        readonly success: false;
+        readonly error: { readonly issues: readonly { readonly message: string }[] };
+      },
+):
+  | {
+      readonly ok: true;
+      readonly command?: string;
+      readonly target?: WorkflowContainerTarget;
+      /** The rewrite NAMED a target that a `run` step cannot express. */
+      readonly badTarget?: string;
+    }
+  | { readonly ok: false; readonly why: string } {
+  if (!parsed.success) {
+    return { ok: false, why: parsed.error.issues[0]?.message ?? "invalid" };
+  }
+  const data = parsed.data;
+  if (typeof data !== "object" || data === null) {
+    return { ok: false, why: "not an object" };
+  }
+  const record = data as { command?: unknown; target?: unknown };
+  const command = typeof record.command === "string" ? record.command : undefined;
+  const target = readApprovedTarget(record.target);
+  // A rewrite that named a target this step cannot express is refused below:
+  // reading it as "no target" would run the FILE's workload instead.
+  const badTarget =
+    record.target !== undefined && target === undefined ? "not a docker workload" : undefined;
+  return {
+    ok: true,
+    ...(command !== undefined ? { command } : {}),
+    ...(target !== undefined ? { target } : {}),
+    ...(badTarget !== undefined ? { badTarget } : {}),
+  };
+}
+
+/** The `workload_shell` target of an approved call, as a `run` step's own. */
+function readApprovedTarget(value: unknown): WorkflowContainerTarget | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const target = value as { engine?: unknown; name?: unknown };
+  if (typeof target.name !== "string" || target.engine !== "docker") {
+    return undefined;
+  }
+  // No `container`: a docker target has none, and the tool's own schema (which
+  // just parsed this) already refuses one.
+  return { engine: "docker", name: target.name };
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
@@ -613,21 +822,42 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // (docs/feat/parallel-agents.md, Design 3). The ONE broker is still the only
   // requester: the lane only orders calls to it.
   const grants = options.grants ?? new SessionGrants();
+  let workflows: WorkflowDriver | undefined;
+  // The session's container shells, for a run step's `where: {docker: …}`
+  // (docs/feat/agent-workflows.md Slice 5): the SAME registry `workload_shell`
+  // uses, so a step and a model call share one shell per container, one idle
+  // close and one timeout ladder. Built before the driver, which takes it;
+  // registered as a tool further down, where every other tool is.
+  const containers =
+    options.workloadShell !== undefined && config.workloadShell.tool
+      ? new WorkloadShells(options.workloadShell.backend)
+      : undefined;
 
   // Sub-agents: when enabled, register the `agent_task` delegation tool. Children
   // inherit the same confined env + permission requester; the runner filters
   // out `agent_task` itself so a sub-agent cannot spawn further sub-agents.
   if (config.subagentsEnabled) {
-    const agentTypes = mergeAgentTypes(
-      BUILTIN_AGENT_TYPES,
-      loadUserAgentTypes(config.configDir, config.packageAgentDirs).types,
-    );
     // A sub-agent's model (docs/feat/models-map.md): the call's selectable
     // `model` › `subagents.types.<t>.model` › the `agents/*.md` `model` › the
     // main model. Over the model tunnel (a pod) the same pick runs on what the
     // laptop published (docs/feat/models-map-pod.md): this pod's own `models`
     // are ignored, no provider is built here, and no key is touched.
     const tunnelled = options.modelOverride !== undefined;
+    // Another agent harness (docs/feat/subagent-harness-runners.md D5): the
+    // laptop or a `serve` the user owns, NEVER a pod — no type, no deps there.
+    const harness =
+      !tunnelled && options.harnesses !== undefined
+        ? claudeHarness(config, options.harnesses)
+        : undefined;
+    if (tunnelled && Object.values(config.harnesses).some((h) => h.configured)) {
+      options.notice?.(
+        "harnesses: ignored in a pod — a harness sub-agent runs only on the laptop or a serve you own",
+      );
+    }
+    const agentTypes = mergeAgentTypes(
+      harness ? [...BUILTIN_AGENT_TYPES, harness.type] : BUILTIN_AGENT_TYPES,
+      loadUserAgentTypes(config.configDir, config.packageAgentDirs).types,
+    );
     const published = tunnelled ? config.publishedModels : undefined;
     if (
       tunnelled &&
@@ -642,7 +872,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       : published && options.namedModelOverride
         ? tunnelSubagentResolver(published, options.namedModelOverride)
         : undefined;
-    const { run, types, readOnlyType } = createSubagentRunner({
+    const runnerDeps: Parameters<typeof createSubagentRunner>[0] = {
       model,
       ...(modelFor ? { modelFor } : {}),
       env,
@@ -670,7 +900,12 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // (docs/feat/session-capabilities.md): read at each child round, so
       // `agent` (built below) is always set by the time a child runs.
       capabilities: () => agent.capabilities(),
-    });
+      ...(harness ? { harness: harness.deps } : {}),
+    };
+    const { run, types, readOnlyType } = createSubagentRunner(runnerDeps);
+    // The types a harness runs (an `agents/*.md` of the same name replaces one):
+    // their `model` is the harness's own string, shape-checked only (D3).
+    const harnessTypeNames = types.filter((t) => t.harness !== undefined).map((t) => t.name);
     if (published) {
       // Said here because only the pod knows its own types (the laptop cannot).
       for (const line of unknownTypeModelWarnings(
@@ -690,6 +925,11 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         // `subagents.twoWay` on, a background child may answer with
         // `agent_notify` (docs/feat/agent-message-two-way.md).
         twoWay: config.subagentsTwoWay,
+        ...(harness && harnessTypeNames.length > 0
+          ? {
+              harnessModels: { types: harnessTypeNames, note: harness.note, isModel: isModelShape },
+            }
+          : {}),
         models: tunnelled
           ? publishedOptions(published)
           : config.selectableModels.map((name) => {
@@ -704,6 +944,129 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     // is offered: without the runtime no child has an id to name. One tool, not
     // three, keeps each request's tool definitions ~1000 chars shorter.
     tools.register(createAgentControlTool(agentJobs, { twoWay: config.subagentsTwoWay }));
+    // The two tool identities a `run` step's command is approved AS: a local
+    // step asks like `shell`, a `docker` step like `workload_shell` (the
+    // per-workload rule lives in the grants store only there). Only where the
+    // container registry exists: without it the driver gets no `execOn` and
+    // fails a docker step before any ask.
+    const portWorkloads =
+      containers !== undefined ? createWorkloadShellTool(containers) : undefined;
+    // Workflows (docs/feat/agent-workflows.md D3): only where the caller asks
+    // (the worker and `serve`) and NEVER tunnelled — a pod session's asks and
+    // approvals are not the laptop's to keep (AGENTS §7). Same runner deps, the
+    // step's requester as the asker (drift 2), the session's ONE broker below it.
+    if (options.workflows === true && !tunnelled) {
+      const gate = (requester: PermissionRequester) => new PermissionGate(requester, hooks, grants);
+      workflows = new WorkflowDriver({
+        load: async (name) => loadWorkflowSource(config.cwd, name),
+        list: async () => workflowListing(config.cwd),
+        // The ONE writer (docs/feat/workflow-editor.md D4), inside this block and
+        // nowhere else: a `serve`/worker session can edit its own files, a pod
+        // session (`tunnelled`) never gets it and answers `unavailable`. It
+        // writes and nothing more — it never reaches the approval store.
+        save: (plan, currentHash) => writeWorkflowFiles(config.cwd, plan, currentHash),
+        context: () => ({
+          models: Object.keys(config.models),
+          agentTypes: types.map((t) => t.name),
+          harnessTypes: harnessTypeNames,
+        }),
+        approvals: workflowApprovals(config.configDir, config.cwd),
+        request: (req, opts) => permissions.request(req, opts),
+        runnerFor: (requester) =>
+          createSubagentRunner({ ...runnerDeps, requestPermission: requester }).run,
+        commands: {
+          authorize: async (command, requester, call) => {
+            // A `docker` step is approved as the `workload_shell` call it IS: the
+            // rule it can remember is keyed per workload (D6/session-grants), so
+            // an "always" in one container never covers another.
+            if (call.target !== undefined && portWorkloads === undefined) {
+              return { allowed: false, reason: "no container backend in this session" };
+            }
+            const tool = call.target !== undefined && portWorkloads ? portWorkloads : shellTool;
+            const input =
+              call.target !== undefined
+                ? { action: "run", target: call.target, command }
+                : { command };
+            const outcome = await gate(requester).authorize(tool, input, {
+              sessionId: "",
+              toolCallId: call.toolCallId,
+              signal: call.signal,
+            });
+            if (!outcome.allowed) {
+              return {
+                allowed: false,
+                reason: `not allowed${outcome.message !== undefined ? `: ${outcome.message}` : outcome.reason !== undefined ? `: ${outcome.reason}` : ""}`,
+              };
+            }
+            // What the step runs is what was APPROVED: a `tool_call` hook may
+            // rewrite the input (`effective = verdict.input`, and the ask shows
+            // exactly that), and the agent loop runs `outcome.input` — so a
+            // rewrite of the command or of the target must reach the step, or a
+            // hook turning `rm -rf /work` into `echo blocked` would show the
+            // safe form and run the dangerous one.
+            const approved = readApprovedCall(tool.inputSchema.safeParse(outcome.input));
+            if (!approved.ok) {
+              return {
+                allowed: false,
+                reason: `the approved ${tool.name} input is unusable: ${approved.why}`,
+              };
+            }
+            // No fallback to the file's own command: a rewrite that dropped it
+            // approved something else, and running the original would be exactly
+            // the mismatch this guards against. `workload_shell`'s own schema
+            // allows an absent `command` (its other actions need none).
+            if (approved.command === undefined) {
+              return {
+                allowed: false,
+                reason: `the approved ${tool.name} input names no command`,
+              };
+            }
+            if (approved.badTarget !== undefined) {
+              return {
+                allowed: false,
+                reason: `the approved ${tool.name} target is unusable for a run step: ${approved.badTarget}`,
+              };
+            }
+            return {
+              allowed: true,
+              command: approved.command,
+              ...(approved.target !== undefined ? { target: approved.target } : {}),
+            };
+          },
+          exec: (command, { signal, timeoutMs }) =>
+            env.exec(command, { signal, timeoutMs, cwd: config.cwd }),
+          // A `where: {docker: …}` step runs in the container through the SAME
+          // registry `workload_shell` uses (one shell per target, one idle close,
+          // one timeout ladder), so a step and a model call cannot disagree about
+          // what is open where.
+          ...(containers !== undefined
+            ? {
+                execOn: async (
+                  target: WorkflowContainerTarget,
+                  command: string,
+                  { signal, timeoutMs }: { signal: AbortSignal; timeoutMs: number },
+                ) => {
+                  try {
+                    const outcome = await containers.run(target, command, { signal, timeoutMs });
+                    return workflowContainerOutcome(outcome, timeoutMs);
+                  } catch (error) {
+                    // The seam's own sentence is the step's reason: a refusal,
+                    // the abort's notices, or the backend's explanation of a
+                    // dial failure (no container, a stopped one, no /bin/sh).
+                    if (error instanceof WorkloadShellRefused) throw error;
+                    if (error instanceof WorkloadShellAborted) {
+                      throw new Error(["aborted", ...error.notices].join(" "));
+                    }
+                    throw await containers.explain(error, target);
+                  }
+                },
+              }
+            : {}),
+        },
+        slots: { acquire: (description) => agentJobs.acquire(description) },
+      });
+      tools.register(createWorkflowTool(workflows));
+    }
   }
 
   // Context reset (docs/feat/context-reset.md): the model renews its own
@@ -751,6 +1114,25 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (options.artifacts) {
     tools.register(presentTool);
   }
+  // `image_view` (docs/feat/image-view.md D1/D5): the session's write handle AND
+  // a model that takes images. `fs_read` becomes its image variant (one more
+  // sentence; it keeps pictures only when its context carries the store).
+  const imageLimitValues = imageLimits(config.provider, config);
+  const toolImages =
+    options.toolImages !== undefined && imageLimitValues.vision ? options.toolImages : undefined;
+  if (toolImages !== undefined) {
+    // An image FILE read (docs/feat/image-files.md D2): the model's own byte cap
+    // and Q1's side bound, both from the same two places the providers use.
+    tools.replace(
+      "fs_read",
+      createFsReadTool({
+        images: true,
+        maxImageBytes: imageLimitValues.maxBytes,
+        maxEdge: imageFileMaxEdge(config.provider),
+      }),
+    );
+    tools.register(createImageViewTool(config.imageDetail ?? "auto"));
+  }
   // `workload_shell` (docs/feat/workload-shell.md D3): a stateful, non-interactive
   // `sh` reached through the LAPTOP's engine credentials. Offered only when the
   // caller passes a backend — the local worker and `serve`; never a pod daemon
@@ -758,13 +1140,32 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // credentials: AGENTS §7) — AND the host's owner has switched it on
   // (`workloadShell.tool`, off by default: docs/fix/workload-shell-live.md,
   // owner decision 1). The registry is session-owned and disposed beside `jobs`.
-  const workloadShells =
-    options.workloadShell !== undefined && config.workloadShell.tool
-      ? new WorkloadShells(options.workloadShell.backend)
-      : undefined;
-  if (workloadShells !== undefined) {
-    tools.register(createWorkloadShellTool(workloadShells));
+  if (containers !== undefined) {
+    tools.register(createWorkloadShellTool(containers));
   }
+  // The browser tools (docs/feat/browser-inspect.md B4): registered with this
+  // model's image limits (a shot is stored like `image_view`'s pictures), and
+  // switched off below unless the user's `tools.enabled` turns them on.
+  if (options.browser !== undefined) {
+    for (const tool of options.browser.tools({
+      maxEdge: imageFileMaxEdge(config.provider),
+      maxImageBytes: imageLimitValues.maxBytes,
+      // B5: an acting tool asks `browser_action` through the session's ONE
+      // broker — the same one the agent's gate uses (AGENTS §7 single broker).
+      ask: (req, opts) => permissions.request(req, opts),
+    })) {
+      tools.register(tool);
+    }
+  }
+  const disabledTools =
+    options.browser !== undefined
+      ? [
+          ...new Set([
+            ...(config.disabledTools ?? []),
+            ...browserDefaultOff(config.toolsEnabled ?? {}),
+          ]),
+        ].sort()
+      : (config.disabledTools ?? []);
   // Scheduled wakes (docs/feat/cron-tool.md D1/D2): only with the host's link —
   // `serve` and the worker. Never a pod daemon (no link), never a child agent
   // (`subagent.ts`'s filter). The link is looked up per call: the table is the
@@ -787,6 +1188,9 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     // The session's bytes, where this side holds them (docs/feat/attachments-prompt.md D4).
     ...(options.attachments ? { attachments: options.attachments } : {}),
     ...(options.artifacts ? { artifacts: options.artifacts } : {}),
+    ...(toolImages !== undefined ? { toolImages } : {}),
+    // The per-provider image cost of the loop's own counter (docs/feat/image-view.md D7).
+    imageTokens: imageTokenEstimate(config.provider, config.imageTokens),
     resultTransforms,
     toolOutput,
     systemPrompt: config.systemPrompt,
@@ -809,7 +1213,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     },
     // `tools.enabled` seeds the state in ONE place, for every runtime (plain and
     // one-shot included): a hosted session starts from it (docs/feat/tool-toggles.md D4).
-    capabilities: { ...NO_CAPABILITIES, disabledTools: config.disabledTools ?? [] },
+    capabilities: { ...NO_CAPABILITIES, disabledTools },
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):
@@ -830,7 +1234,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     tools,
     grants,
     ...(titleModel ? { titleModel } : {}),
-    ...(workloadShells !== undefined ? { workloadShells } : {}),
+    ...(containers !== undefined ? { workloadShells: containers } : {}),
+    ...(workflows !== undefined ? { workflows } : {}),
   };
 }
 

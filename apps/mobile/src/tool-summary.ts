@@ -65,6 +65,9 @@ export const SUMMARISED_TOOLS: readonly string[] = [
   // A diagram's row likewise names the diagram, never its Mermaid source
   // (docs/feat/model-diagrams.md D2) — the TUI's case, name for name.
   "diagram",
+  // The model looks at a kept picture: its ref, never the raw args
+  // (docs/feat/image-view.md D10).
+  "image_view",
 ];
 
 /** The TUI's `toolSubtitle`, case for case. */
@@ -117,6 +120,12 @@ function subtitleOf(name: string, raw: string): string {
     // (docs/feat/model-diagrams.md D2) — the TUI's case, mirrored.
     case "diagram":
       return str("title") ?? raw;
+    // `Image <ref>`, plus ` · high` for the costly detail
+    // (docs/feat/image-view.md D10) — the TUI's case, mirrored.
+    case "image_view": {
+      const ref = str("ref") ?? "";
+      return str("detail") === "high" ? `${ref} · high` : ref;
+    }
     default:
       return raw;
   }
@@ -129,8 +138,9 @@ export interface ToolMeta {
   readonly tone: ToolTone;
   /**
    * The row's right-hand text: a diff's `+n −m`, else `denied`, else the
-   * duration; "" when the row knows none of them. Never an exit code: a
-   * `ToolResult` carries none, so the row does not invent one.
+   * duration; "" when the row knows none of them. Never an exit code here: a
+   * `ToolResult` carries none — shell's outcome adds one (`shellOutcome`, in
+   * `stepRowView`), read from its own `exit=N` line, never invented.
    */
   readonly trailing: string;
 }
@@ -438,7 +448,7 @@ export function bodyCommand(name: string, raw: string): readonly string[] {
   ];
 }
 
-/** The TUI's cut (`render-lines.ts`): over 8 lines → the first 6 + `… +N more lines`. */
+/** The cut: over 8 lines → the LAST 6 + `… N earlier lines` (owner 24/11: a log's tail). */
 const CUT_OVER = 8;
 const CUT_KEEP = 6;
 
@@ -460,7 +470,9 @@ export function outputView(
   if (opts.full || lines.length <= CUT_OVER) {
     return { lines, hidden: 0, error: opts.error };
   }
-  return { lines: lines.slice(0, CUT_KEEP), hidden: lines.length - CUT_KEEP, error: opts.error };
+  // The TAIL: a log's end is what a reader wants (owner 24/11); `hidden` counts
+  // the earlier lines held back.
+  return { lines: lines.slice(-CUT_KEEP), hidden: lines.length - CUT_KEEP, error: opts.error };
 }
 
 function unit(n: number, word: string): string {

@@ -121,31 +121,33 @@ describe("StepNode replaces ToolRow", () => {
     expect(node).toContain("maxFontSizeMultiplier={DENSE_FONT_SCALE}");
   });
 
-  test("every ∴ (a thought's node, a folded thought) is one size, 12–13 pt (owner 09:33)", () => {
+  test("the open body's folded ∴ is one size, 12–13 pt (owner 09:33)", () => {
     const node = read("ui", "StepNode.tsx");
     const size = /const THEREFORE_SIZE = ([\d.]+);/.exec(node);
     expect(size === null ? 0 : Number(size[1])).toBeGreaterThanOrEqual(12);
     expect(size === null ? 99 : Number(size[1])).toBeLessThanOrEqual(13);
     // The font's ∴ glyph stays tiny even at 13 pt (simulator, 29-tool-rows-running
-    // shots): every ∴ is DRAWN as three dots in a THEREFORE_SIZE box, like the live node.
-    expect(node).not.toMatch(/>\s*∴\s*</);
-    // Two, since 17/11: a thought's node and the folded thought in the open body.
-    // A tool step's line carries NONE — it sat next to the command's duration
+    // shots): the ∴ of an open body's folded thought is DRAWN as three dots in a
+    // THEREFORE_SIZE box. It is the ONLY ∴ left (owner decision 4, 22/11): the
+    // reasoning node is a dot/ring now, and a tool step's line carries none
     // (docs/fix/mobile-step-thought-marker.md, `step-thought-marker.test.ts`).
-    expect(node.match(/<ThereforeDots\b/g)?.length ?? 0).toBe(2);
+    expect(node).not.toMatch(/>\s*∴\s*</);
+    expect(node.match(/<ThereforeDots\b/g)?.length ?? 0).toBe(1);
     expect(node).toMatch(/dotBox: \{ width: THEREFORE_SIZE, height: THEREFORE_SIZE/);
   });
 
-  test("the live Thinking node is mockup B + D: a breathing ∴ and a shimmering word (09:36)", () => {
+  test("the live Thinking node is the running tool's own dot; a Thought is a dim ring (22/11)", () => {
     const node = read("ui", "StepNode.tsx");
-    // B: the "thinking" node is the breathing ∴, no longer the queued ring.
-    expect(node).toMatch(/case "thinking":\s*return <BreathingTherefore /);
-    expect(node).toContain("clock.interpolate(breatheCurve(i))");
-    // D: the footer's word is the shimmer, fed by the pure sweep.
-    expect(node).toMatch(/node === "thinking" \? \(\s*<ThinkingWord/);
+    // docs/fix/mobile-step-rail.md owner decision 4: ONE node shape for every
+    // step. The breathing ∴ is gone; the live thought is the running tool's
+    // own dot — literally the same component, so the blink clock is shared.
+    expect(node).not.toContain("BreathingTherefore");
+    expect(node).toMatch(/case "thinking":\s*return <ThoughtDot [^>]*live /);
+    expect(node).toMatch(/case "thought":\s*return <ThoughtDot [^>]*live=\{false\}/);
+    expect(node).toMatch(/return <BlinkingDot palette=\{palette\} still=\{still\} \/>;/);
+    // The shimmered word survives (it is what says "still thinking" in text).
+    expect(node).toMatch(/node === "thinking" \|\| shimmer === true \? \(\s*<ThinkingWord/);
     expect(node).toContain("shimmerSweep(width)");
-    // Reduce Motion stops both clocks (useLoop returns null when still).
-    expect(node).toContain("useLoop(BREATHE_MS, !look.animate)");
     expect(node).toContain("useLoop(SHIMMER_MS, !look.animate)");
   });
 
@@ -160,9 +162,9 @@ describe("StepNode replaces ToolRow", () => {
     // The bright layer is the gradient, inside a clip made of the word itself,
     // and the grey word is the SAME svg text (they cannot drift apart).
     expect(word).toMatch(
-      /<ClipPath id="thinking-glyphs">\s*<SvgText \{\.\.\.glyph\}>\{word\}<\/SvgText>/,
+      /<ClipPath id="thinking-glyphs">\s*<SvgText \{\.\.\.glyph\}>\{line\}<\/SvgText>/,
     );
-    expect(word).toMatch(/<SvgText \{\.\.\.glyph\} fill=\{palette\[look\.word\]\}>/);
+    expect(word).toMatch(/<SvgText \{\.\.\.glyph\} fill=\{palette\[look\.word\]\}>\s*\{line\}/);
     expect(word).toMatch(
       /<G clipPath="url\(#thinking-glyphs\)">\s*<AnimatedRect\s+x=\{x\}[\s\S]{0,120}fill="url\(#thinking-shine\)"/,
     );
@@ -192,5 +194,44 @@ describe("StepNode replaces ToolRow", () => {
     // are animated — all on the native driver.
     expect(motion).not.toMatch(/(left|top|width|color): (clock|x)\b/);
     expect(motion).not.toMatch(/(width|height|offset|stopOpacity)=\{(clock|x)\}/);
+  });
+});
+
+/**
+ * docs/fix/mobile-running-row.md: the svg layer draws what the RN label has room
+ * for (its own wrapped lines at the label's real width), in the label's face,
+ * in a canvas with room for an italic overhang; a running step is the blinking
+ * dot; a tool's tap detail never gets the folded reasoning.
+ */
+describe("running row wiring (docs/fix/mobile-running-row.md)", () => {
+  test("the shimmer svg is told the text that fits, the face, and a canvas past the advance width", () => {
+    const node = read("ui", "StepNode.tsx");
+    const word = fnBody(node, "ThinkingWord");
+    expect(word).toContain("setLine(shimmerLine(e.nativeEvent.lines))");
+    expect(word).toContain("shimmerFont(font, ");
+    expect(word).toContain("shimmerCanvas(width, height, fontSize)");
+    expect(word).toMatch(/<Svg[^>]*width=\{canvas\.width\} height=\{canvas\.height\}/);
+    // The label is not capped at 45 % when nothing sits beside it (a sentence).
+    expect(word).toContain("wide ? styles.nameWide : styles.name");
+    // The measuring copy is never seen, never read by VoiceOver.
+    expect(word).toMatch(/accessibilityElementsHidden[\s\S]{0,300}onTextLayout/);
+  });
+
+  test("a running step is the blinking dot on the shared clock — no turning ring", () => {
+    const node = read("ui", "StepNode.tsx");
+    expect(node).toMatch(/case "running":\s*return <BlinkingDot /);
+    expect(node).not.toContain("function Spinner(");
+    expect(node).not.toContain("STEP_SPINNER_TURN_MS");
+    const dot = fnBody(node, "BlinkingDot");
+    expect(dot).toContain("runningDotLook(still)");
+    expect(dot).toContain("STEP_BLINK_CURVE");
+    expect(dot).toContain("styles.dot");
+  });
+
+  test("a tool row's open body is given no thought", () => {
+    const row = read("screens", "transcript", "TranscriptRow.tsx");
+    const tool = fnBody(row, "ToolRowView");
+    expect(tool).toContain("thought={null}");
+    expect(tool).not.toContain("view.thought");
   });
 });

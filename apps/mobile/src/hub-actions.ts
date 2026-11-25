@@ -12,7 +12,6 @@ import type { TurnRow } from "./transcript-rows.ts";
 export type HubEntryId =
   | "stop"
   | "steer"
-  | "attach"
   | "activity"
   | "artifacts"
   | "sessions"
@@ -22,6 +21,8 @@ export type HubEntryId =
   // Clear, Rename, Retry, Auto-accept — one sheet, not five fan discs.
   | "commands"
   | "scheduled"
+  // The computer's workflow runs (docs/feat/workflows-ui.md D4): a push screen.
+  | "workflows"
   | "dictate"
   | "new";
 
@@ -66,8 +67,6 @@ export interface HubContext {
   /** The running turn (own or another device's), null when idle. */
   readonly turn: TurnRow | null;
   readonly ended: EndReason | null;
-  /** `state.view.editable`: Attach only where a prompt can carry photos. */
-  readonly editable: boolean;
   /** `settings.dictation` (feat/mobile-voice-hidden). */
   readonly dictation: boolean;
   /** How many scheduled wakes the daemon reported (0 when it never sends `schedules`). */
@@ -98,6 +97,17 @@ export interface HubContext {
    * Stop is offered with no turn and cancels it. Absent = false.
    */
   readonly compacting?: boolean;
+  /**
+   * Workflow runs that wait on the person (docs/feat/workflows-ui.md D4): the
+   * item's count badge. Absent = 0.
+   */
+  readonly workflowsNeedYou?: number;
+  /**
+   * Why the Workflows item has nothing to open (no run AND no workflow file in
+   * the project), or null/absent when it does — or when either list is not known
+   * yet: an unknown list never dims the item whose tap reads it (Tools D3).
+   */
+  readonly workflowsEmpty?: string | null;
 }
 
 export interface HubActions {
@@ -120,11 +130,9 @@ export const NOTHING_RUNNING = "Nothing running";
 export const NO_ARTIFACTS = "No artifacts yet";
 /** The same rule for Tools: nothing to switch, so the sheet would be two empty lists. */
 export const NO_TOOLS = "No MCP servers or skills in this session";
-
 const LABELS: Readonly<Record<HubActionId, string>> = {
   stop: "Stop",
   steer: "Steer",
-  attach: "Attach",
   activity: "Activity",
   artifacts: "Artifacts",
   sessions: "Sessions",
@@ -132,6 +140,7 @@ const LABELS: Readonly<Record<HubActionId, string>> = {
   tools: "Tools",
   commands: "Commands",
   scheduled: "Scheduled",
+  workflows: "Workflows",
   dictate: "Dictate (Beta)",
   new: "New session",
   more: "More",
@@ -146,7 +155,10 @@ const TURN_PAIR: readonly HubEntryId[] = ["stop", "steer"];
  * Sessions.
  */
 const CANONICAL: readonly HubEntryId[] = [
-  "attach",
+  // Workflows takes the slot the fan's Attach had (docs/fix/workflows-ux.md D6,
+  // owner 2026-11-24): the composer's `+` already adds a photo, so the disc was a
+  // duplicate — and Workflows is now FIRST, so a badge never reorders the fan.
+  "workflows",
   "activity",
   "artifacts",
   "tools",
@@ -177,8 +189,6 @@ function holds(id: HubEntryId, ctx: HubContext): boolean {
       return turnStoppable(ctx) || (ctx.compacting === true && ctx.link === "up");
     case "steer":
       return turnStoppable(ctx);
-    case "attach":
-      return ctx.editable && ctx.ended === null;
     case "scheduled":
       return ctx.schedules > 0;
     case "dictate":
@@ -189,6 +199,8 @@ function holds(id: HubEntryId, ctx: HubContext): boolean {
     case "info":
     // Tools is offered wherever Session info is: its own content decides.
     case "tools":
+    // Workflows is about the whole computer, not this session: its own list decides.
+    case "workflows":
     case "new":
       return true;
     // The commands sheet reuses what the screen already has (rename, auto-accept
@@ -205,6 +217,9 @@ function badgeOf(id: HubEntryId, ctx: HubContext): HubBadge | null {
   }
   if (id === "scheduled" && ctx.nextWakeInMs !== null && ctx.nextWakeInMs <= DUE_SOON_MS) {
     return { kind: "dot" };
+  }
+  if (id === "workflows" && (ctx.workflowsNeedYou ?? 0) > 0) {
+    return { kind: "count", n: ctx.workflowsNeedYou ?? 0 };
   }
   return null;
 }
@@ -244,6 +259,12 @@ function dimmedBecause(id: HubEntryId, ctx: HubContext): string | null {
   }
   if (id === "tools") {
     return ctx.toolsEmpty ? NO_TOOLS : null;
+  }
+  // Workflows dims ONLY with the older-daemon reason (docs/feat/workflow-editor.md
+  // D8 + E1: an empty list is not "nothing to open" — the runs screen's empty
+  // state is where the first workflow is created, so it must stay reachable).
+  if (id === "workflows") {
+    return ctx.workflowsEmpty ?? null;
   }
   return null;
 }

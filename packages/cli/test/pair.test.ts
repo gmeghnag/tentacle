@@ -319,7 +319,7 @@ describe("the payload", () => {
     recordServing(configDir);
     const run = await runPair({ configDir, ttlMs: 0 });
     expect(run.addresses).toEqual(["ws://192.168.1.8:4000/e2e"]);
-    expect(run.payload).toStartWith("tentacle://pair?v=1&k=");
+    expect(run.payload).toStartWith("tentacle://pair?v=2&k=");
     // No --name: the identity is created with this machine's hostname.
     expect(run.payload).toContain(`n=${encodeURIComponent(hostname())}`);
     expect(payloadCode(run.payload)).toMatch(/^[0-9A-Z]{10}$/);

@@ -294,18 +294,146 @@ describe("a turn's stream", () => {
   });
 });
 
+describe("the LOST notice is per LOSS, not per throw (docs/fix/mobile-stream-lost-repeat.md)", () => {
+  const lostIn = (turnId: string, own = false) =>
+    [
+      { type: "turn_started" as const, turnId, own },
+      { type: "turn_ended" as const, outcome: "lost" as const },
+    ] as const;
+  const lost = (state: State): readonly string[] =>
+    state.rows.flatMap((row) =>
+      row.kind === "notice" && row.text === TURN_LOST_NOTICE ? [row.text] : [],
+    );
+  const lostTurnsOf = (state: State): readonly (readonly string[])[] =>
+    state.rows.flatMap((row) =>
+      row.kind === "notice" && row.text === TURN_LOST_NOTICE ? [row.lostTurns ?? []] : [],
+    );
+
+  test("T1: one turn whose stream was lost 3× (re-subscribed each reconnect), then completed → no notice", () => {
+    // Mutation: drop the `lostTurns.includes(turnId)` dedupe in `foldLostNotice`
+    // → red (3 rows); drop the retraction in `endTurn` → red (1 row stays).
+    // Each re-subscription is a fresh bracket for the SAME turn (the relay's
+    // reconnect, docs/fix/mobile-stream-lost-repeat.md Context).
+    let state = fold([{ type: "turn_started", turnId: "T", own: true }, text("partial ")]);
+    state = apply(state, { type: "turn_ended", outcome: "lost" });
+    for (let i = 0; i < 2; i += 1) {
+      state = apply(state, { type: "turn_started", turnId: "T", own: false });
+      state = apply(state, { type: "turn_ended", outcome: "lost" });
+    }
+    expect(lost(state)).toHaveLength(1); // one loss, never three stacked rows
+    // …and the row names the turn ONCE (a duplicate entry would be invisible to a
+    // row count, and would make rule 2a look like dead code).
+    const notice = state.rows.at(-1);
+    expect(notice?.kind === "notice" ? notice.lostTurns : undefined).toEqual(["T"]);
+    state = apply(state, { type: "turn_started", turnId: "T", own: false });
+    state = apply(state, text("full reply"));
+    state = apply(state, { type: "turn_ended", outcome: "ended" });
+    // The turn completed and the phone has the full reply: nothing is lost.
+    expect(lost(state)).toHaveLength(0);
+  });
+
+  test("T2: two different turns lost back-to-back read as ONE line listing both", () => {
+    // Mutation: drop the "last row is a LOST notice" merge → red (2 rows).
+    const state = fold([...lostIn("A"), ...lostIn("B")]);
+    expect(lost(state)).toHaveLength(1);
+    const row = state.rows.at(-1);
+    expect(row?.kind === "notice" ? row.lostTurns : undefined).toEqual(["A", "B"]);
+  });
+
+  test("T3: a reply between the two losses breaks adjacency → two notices (the boundary)", () => {
+    // "never stacked" = never two in a ROW: a row between them separates them,
+    // and each is about a different real loss.
+    const state = fold([...lostIn("A"), text("an answer"), ...lostIn("B")]);
+    expect(lost(state)).toHaveLength(2);
+    // …while the same pair with nothing between them is ONE line (T2).
+    expect(lost(fold([...lostIn("A"), ...lostIn("B")]))).toHaveLength(1);
+  });
+
+  test("T4: a turn seen ENDING `interrupted`/`failed` does NOT retract its loss", () => {
+    // The turn did not complete for the phone, so the loss is still real.
+    // Mutation: retract on any `turn_ended` → red.
+    for (const outcome of ["interrupted", "failed"] as const) {
+      const lostFirst = fold(lostIn("T"));
+      const after = apply(lostFirst, { type: "turn_started", turnId: "T", own: false });
+      const ended = apply(after, {
+        type: "turn_ended",
+        outcome,
+        ...(outcome === "failed" ? { message: "boom" } : {}),
+      });
+      expect(lost(ended)).toHaveLength(1);
+    }
+  });
+
+  test("T5: a DIFFERENT turn ending cleanly never retracts this one's loss", () => {
+    // Mutation: retract by text instead of by `turnId` → red.
+    const state = fold([
+      ...lostIn("T"),
+      { type: "turn_started", turnId: "U", own: false },
+      { type: "turn_ended", outcome: "ended" },
+    ]);
+    expect(lost(state)).toHaveLength(1);
+  });
+
+  test("T7: a re-lost turn is deduped even when its notice is NOT the last row", () => {
+    // Rule 2a is "already said ANYWHERE", not "the last row lists it": after
+    // A-lost, a reply, B-lost, the last notice names only B — A's loss must still
+    // not be said twice.
+    // Mutation: check only the last LOST row for `turnId` → red (3 rows).
+    const state = fold([...lostIn("A"), text("a reply"), ...lostIn("B"), ...lostIn("A")]);
+    expect(lost(state)).toHaveLength(2);
+    expect(lostTurnsOf(state)).toEqual([["A"], ["B"]]);
+  });
+
+  test("T8: a merged notice is retracted PARTIALLY — only the turn that completed leaves it", () => {
+    // A and B merged into one line (T2); A is re-subscribed and completes, so
+    // only A's loss is recoverable — B's is still real and must stay said.
+    // Mutation: drop the WHOLE row when it lists `turnId` (`const rest: string[] = []`)
+    // → red (no notice left, B's loss silently hidden).
+    const state = fold([
+      ...lostIn("A"),
+      ...lostIn("B"),
+      { type: "turn_started", turnId: "A", own: false },
+      { type: "turn_ended", outcome: "ended" },
+    ]);
+    expect(lost(state)).toHaveLength(1);
+    expect(lostTurnsOf(state)).toEqual([["B"]]);
+    // …and a notice that cannot be attributed (no bracket when it was folded)
+    // is not this turn's to retract: mutation "retract a notice with no
+    // `lostTurns` too" → red.
+    const unattributed = fold([
+      ...lostIn("A"),
+      { type: "turn_ended", outcome: "lost" }, // no open bracket: plain notice
+      { type: "turn_started", turnId: "A", own: false },
+      { type: "turn_ended", outcome: "ended" },
+    ]);
+    expect(lost(unattributed)).toHaveLength(1);
+    expect(lostTurnsOf(unattributed)).toEqual([[]]);
+  });
+
+  test("T6: a history REPLACE drops every notice (the existing rule, unchanged)", () => {
+    const lostFirst = fold(lostIn("T"));
+    const replaced = apply(lostFirst, {
+      type: "history",
+      messages: [{ role: "assistant", content: "the daemon's reply" }],
+      reason: null,
+    });
+    expect(lost(replaced)).toHaveLength(0);
+  });
+});
+
 describe("history events", () => {
-  test("a compaction KEEPS the transcript and says so once (another device's)", () => {
+  test("a compaction KEEPS the transcript and leaves ONE step (another device's)", () => {
     const before = fold([
       { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },
     ]);
     const after = apply(before, { type: "history", messages: [], reason: "compact" });
     expect(after.rows).toHaveLength(2);
-    // One wording whatever device compacted (harness-notices Q6): the separator.
-    expect(after.rows[1]).toMatchObject({ kind: "notice", text: "compacted", separator: true });
+    // ONE timeline step whatever device compacted (harness-notices Q6, 1A): the
+    // same row a reopen draws, never a notice line nor a user bubble.
+    expect(after.rows[1]).toMatchObject({ kind: "context", event: "compact" });
   });
 
-  test("this client's OWN compaction says nothing (the screen already showed it)", () => {
+  test("this client's OWN compaction leaves the step too (Q4-A)", () => {
     const before = fold([
       { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },
     ]);
@@ -315,7 +443,10 @@ describe("history events", () => {
       reason: "compact",
       own: true,
     });
-    expect(after).toBe(before);
+    // Q4-A: the phone's own `/compact` is the one path that used to say nothing
+    // until a reopen; now it leaves the same step (the footer's ✓ is unchanged).
+    expect(after.rows.map((row) => row.kind)).toEqual(["user", "context"]);
+    expect(after.rows[1]).toMatchObject({ kind: "context", event: "compact" });
   });
 
   test("a context reset APPENDS (the old transcript stays, decision 9)", () => {
@@ -330,9 +461,83 @@ describe("history events", () => {
       },
     ];
     const after = apply(before, { type: "history", messages: reset, reason: "context_reset" });
-    expect(after.rows.map((row) => row.kind)).toEqual(["user", "notice", "user"]);
-    expect(after.rows[1]?.kind === "notice" && after.rows[1].separator).toBe(true);
-    expect(after.rows[2]?.kind === "user" && after.rows[2].restart).toBe(true);
+    // ONE step (1A), not today's divider + user-shaped bubble holding the prompt.
+    expect(after.rows.map((row) => row.kind)).toEqual(["user", "context"]);
+    expect(after.rows[1]).toMatchObject({
+      kind: "context",
+      event: "reset",
+      body: "carry on",
+    });
+    expect(after.rows.some((row) => row.kind === "user" && row.text === "carry on")).toBe(false);
+  });
+
+  test("a reset mid-turn: the old round closes, and the next delta opens a NEW answer row", () => {
+    const before = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      text("before the reset"),
+    ]);
+    const after = apply(before, {
+      type: "context_reset",
+      messages: [
+        {
+          role: "user",
+          content:
+            "[context reset] You renewed your own context with context_reset.\nEverything before it was discarded. Your restart prompt:\n<restart_prompt>\ncarry on\n</restart_prompt>",
+        },
+      ],
+    });
+    expect(after.rows.map((row) => row.kind)).toEqual(["assistant", "context"]);
+    // `lastTextRow` only extends an ASSISTANT last row, so the next round's text
+    // never lands inside the step or the round before it.
+    const next = apply(after, text("after the reset"));
+    expect(next.rows.map((row) => row.kind)).toEqual(["assistant", "context", "assistant"]);
+    expect(next.rows[0]?.kind === "assistant" && next.rows[0].text).toBe("before the reset");
+  });
+
+  test("a reset delivered TWICE shows TWO steps (main's behaviour, reported not fixed)", () => {
+    // Pre-existing on `main` and untouched here (the plan says report, don't
+    // fix): both paths append via `historyRows`, so a stream event AND the
+    // follow-up `history{context_reset}` of the same reset give two rows. Pinned
+    // so a future dedupe has a red test to flip.
+    const message: ChatMessage = {
+      role: "user",
+      content:
+        "[context reset] You renewed your own context with context_reset.\nEverything before it was discarded. Your restart prompt:\n<restart_prompt>\ncarry on\n</restart_prompt>",
+    };
+    const after = fold([
+      { type: "context_reset", messages: [message] },
+      { type: "history", messages: [message], reason: "context_reset" },
+    ]);
+    expect(after.rows.filter((row) => row.kind === "context")).toHaveLength(2);
+  });
+
+  test("a resync keeps the context step's KEY (an opened step stays open)", () => {
+    const message: ChatMessage = {
+      role: "user",
+      content:
+        "[context reset] You renewed your own context with context_reset.\nEverything before it was discarded. Your restart prompt:\n<restart_prompt>\ncarry on\n</restart_prompt>",
+    };
+    const before = fold([{ type: "history", messages: [message], reason: null }]);
+    const first = before.rows[0];
+    if (first === undefined || first.kind !== "context") {
+      throw new Error("the mapper must mint a context row for a restart message");
+    }
+    const after = apply(before, { type: "history", messages: [message], reason: null });
+    expect(after.rows[0]?.kind === "context" ? after.rows[0].key : undefined).toBe(first.key);
+    // And the very same row object: a `keepKeys` slot match keeps key AND
+    // identity, so a step the person opened survives a pull-to-refresh opened.
+    expect(after.rows[0] === first).toBe(true);
+    // …and a body that CHANGED is another fact: a new key, so the step closes
+    // (honest — it is not the prompt that was opened). This is what makes the
+    // `sameSlot` context arm non-vacuous: matching on kind alone would keep it.
+    const changed = apply(before, {
+      type: "history",
+      messages: [{ ...message, content: message.content.replace("carry on", "carry on, again") }],
+      reason: null,
+    });
+    expect(changed.rows[0]?.kind === "context" ? changed.rows[0].key : undefined).not.toBe(
+      first.key,
+    );
   });
 
   test("a /clear replaces it all", () => {
@@ -676,5 +881,19 @@ describe("local_notice (docs/feat/mobile-hub-commands.md C2 item 12)", () => {
       ["compaction cancelled", "info"],
     ]);
     expect(s.turn).toBeNull();
+  });
+});
+
+describe("a server-side model error (docs/fix/model-stream-error.md)", () => {
+  // Parity pin with the Mac TUI: green on both trees, not the red test.
+  test("the failed turn's message is the notice, word for word", () => {
+    const message = "model server error: Context size has been exceeded.";
+    const state = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      { type: "turn_ended", outcome: "failed", message },
+    ]);
+    const last = state.rows.at(-1);
+    expect(last?.kind === "notice" ? last.text : undefined).toBe(message);
+    expect(last?.kind === "notice" ? last.level : undefined).toBe("warn");
   });
 });

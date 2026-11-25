@@ -7,6 +7,7 @@
 import { type JSX, useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, Animated, Easing } from "react-native";
 import { type HeaderDot as Dot, dotLook } from "../chat-header.ts";
+import { HEADER_DOT_HALF_MS, HEADER_DOT_LOW_OPACITY } from "../motion.ts";
 import type { Palette } from "../theme.ts";
 import { toneColor } from "./StatusDot.tsx";
 
@@ -37,10 +38,14 @@ export function HeaderDot({
       opacity.setValue(1);
       return;
     }
-    const half = { duration: 700, easing: Easing.inOut(Easing.ease), useNativeDriver: true };
+    const half = {
+      duration: HEADER_DOT_HALF_MS,
+      easing: Easing.inOut(Easing.ease),
+      useNativeDriver: true,
+    };
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(opacity, { toValue: 0.3, ...half }),
+        Animated.timing(opacity, { toValue: HEADER_DOT_LOW_OPACITY, ...half }),
         Animated.timing(opacity, { toValue: 1, ...half }),
       ]),
     );

@@ -23,13 +23,22 @@
  * `rebased` to the last `base`.
  */
 import type { SessionCapabilities } from "@tentacle/agent";
-import type { ChatMessage, SubagentBackgroundBody, SubagentEndBody } from "@tentacle/core";
+import type {
+  ChatMessage,
+  SubagentBackgroundBody,
+  SubagentEndBody,
+  UnitEndBody,
+  WorkflowEndBody,
+  WorkflowStartBody,
+  WorkflowStepBody,
+} from "@tentacle/core";
 import {
   type KnownLogEntry,
   LOG_PAGE_MAX_CHARS,
   type LogBaseReason,
   type LogCursor,
   type LogResult,
+  type LogWorkflowStepEntry,
   type SessionTitle,
   type Sha256,
   type StopReason,
@@ -211,6 +220,34 @@ export class SessionLog {
   }
 
   /**
+   * A workflow run started / one step execution ended / the run ended
+   * (docs/feat/agent-workflows.md D4): NON-critical terminal facts. The body
+   * comes from core's builders (`workflowStartBody`, …), which cap it and judge
+   * it by the entry's schema, so the log never holds an entry a reader refuses.
+   */
+  workflowStart(body: WorkflowStartBody): void {
+    this.push({ type: "workflow_start", critical: false, ...body });
+  }
+
+  workflowStep(body: WorkflowStepBody): void {
+    this.push({ type: "workflow_step", critical: false, ...body });
+  }
+
+  workflowEnd(body: WorkflowEndBody): void {
+    this.push({ type: "workflow_end", critical: false, ...body });
+  }
+
+  /**
+   * An ENDED unit of work carried into the segment just started (docs/feat/a2a.md,
+   * Unification §2): written only by the carry at a segment boundary, never at
+   * the unit's end. NON-critical; the body comes from core's `unitEndBody`,
+   * which caps it and judges it by the entry's schema.
+   */
+  unitEnd(body: UnitEndBody): void {
+    this.push({ type: "unit_end", critical: false, ...body });
+  }
+
+  /**
    * One model round's measured spend (docs/feat/token-usage-log.md). NOT
    * critical and projects nothing: it is a fact about the conversation's cost,
    * not part of its history. An unmeasured field is absent, never 0.
@@ -388,6 +425,35 @@ export class SessionLog {
       this.previous = baseIndex === 0 ? -1 : this.current;
       this.current = baseIndex;
     }
+  }
+
+  /**
+   * `session/workflow_step` (docs/feat/workflows-ui.md D1): the entry of ONE
+   * step execution — the newest, or the `attempt`/`round` asked for. Scans the
+   * RETAINED slots (the current segment and the previous one) newest-first, so
+   * what compaction dropped is honestly `undefined` (the caller says "not
+   * available") and never another step's text. Pure over the retained entries,
+   * no await, no lock (§7).
+   */
+  workflowStepDetail(request: {
+    readonly runId: string;
+    readonly stepId: string;
+    readonly attempt?: number;
+    readonly round?: number;
+  }): LogWorkflowStepEntry | undefined {
+    for (let i = this.slots.length - 1; i >= 0; i--) {
+      const slot = this.slots[i];
+      if (slot === undefined) continue;
+      const entry = slot.entry;
+      // Only a materialized non-checkpoint slot can be a `workflow_step`: its
+      // body is pushed whole (`push`), and a lazy slot is a message.
+      if (entry === null || entry.type !== "workflow_step") continue;
+      if (entry.runId !== request.runId || entry.stepId !== request.stepId) continue;
+      if (request.attempt !== undefined && entry.attempt !== request.attempt) continue;
+      if (request.round !== undefined && entry.round !== request.round) continue;
+      return entry;
+    }
+    return undefined;
   }
 
   private push(body: DistributiveOmit<KnownLogEntry, "seq" | "id" | "prev" | "ts">): void {

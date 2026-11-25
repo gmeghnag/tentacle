@@ -24,6 +24,8 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // A diagram is shown, never acted on either: the row reads `Diagram`
   // (docs/feat/model-diagrams.md D2).
   diagram: "Diagram",
+  // The model looks at an extracted picture (docs/feat/image-view.md D10).
+  image_view: "Image",
 };
 
 /** The display label for a tool name; the name itself when it has none. */

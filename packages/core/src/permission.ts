@@ -23,6 +23,20 @@ export function isPermissionReplyText(value: unknown): value is string {
   return PermissionReplyTextSchema.safeParse(value).success;
 }
 
+/**
+ * The wire `tool` of a `workflow_approve` ask (docs/feat/agent-workflows.md D2/D3):
+ * the daemon raises it, the client maps it back to `kind: "workflow_approve"`.
+ */
+export const WORKFLOW_APPROVE_TOOL = "workflow_approve";
+
+/**
+ * The wire `tool` of a browser action ask (docs/feat/browser-inspect.md B5 §5):
+ * a `browser_*` tool raises it from inside its call, after the extension
+ * reported what the click / typing / navigation would do; the client maps it
+ * back to `kind: "browser_action"`.
+ */
+export const BROWSER_ACTION_TOOL = "browser_action";
+
 export interface PermissionRequest {
   /**
    * What is asked (laptop-internal, never on the wire): a tool call (absent =
@@ -30,9 +44,12 @@ export interface PermissionRequest {
    * docs/feat/hooks-project-trust.md) — or whether to move this session to
    * another target (`"session_hop"`, docs/feat/session-hop.md D6/D9). A
    * `hooks_trust` is never answered by auto-accept. A `session_hop` is answered
-   * ONLY when `hopAuto` is set (docs/feat/session-hop-ux OD4).
+   * ONLY when `hopAuto` is set (docs/feat/session-hop-ux OD4). A
+   * `workflow_approve` (a workflow's hash approval, or its `approve` step —
+   * docs/feat/agent-workflows.md D2/D3) is NEVER answered by auto-accept,
+   * nor is a `browser_action` (acting AS the user on the web, browser-inspect Q3).
    */
-  readonly kind?: "tool" | "hooks_trust" | "session_hop";
+  readonly kind?: "tool" | "hooks_trust" | "session_hop" | "workflow_approve" | "browser_action";
   /**
    * Slack (laptop-internal, never on the wire): this `session_hop` is one
    * auto-accept MAY answer, because the LAPTOP's own rule said so
@@ -66,6 +83,34 @@ export interface PermissionRequest {
    * refusal carries no `message` — a frontend does not offer one.
    */
   readonly reply?: { readonly maxChars: number };
+}
+
+/** What an ask is about (`PermissionRequest.kind`; absent there = `"tool"`). */
+export type PermissionKind = NonNullable<PermissionRequest["kind"]>;
+
+/**
+ * Which asks an EXTERNAL caller (an A2A / MCP client given a task, not the
+ * owner) may ever answer, by kind (docs/feat/a2a.md, "Asks answered by the
+ * caller"). `once`: its allow lasts one call — a caller may answer it, with a
+ * `*_once` option only. `owner-only`: its allow lasts (a workflow file's hash
+ * approval is stored for good even when the option says once; a hop moves the
+ * session; hooks trust runs the repo's code) — only the owner answers, in
+ * every mode. Exhaustive on purpose: a new kind does not compile until it is
+ * classified here (a remote is not trusted, AGENTS §7).
+ */
+export const EXTERNAL_ANSWER: { readonly [K in PermissionKind]: "once" | "owner-only" } = {
+  tool: "once",
+  hooks_trust: "owner-only",
+  session_hop: "owner-only",
+  workflow_approve: "owner-only",
+  // A click/type in the owner's own Chrome: only the owner ever answers it
+  // (docs/feat/browser-inspect.md Q3; a remote is not trusted).
+  browser_action: "owner-only",
+};
+
+/** May an external caller answer an ask of this kind? `undefined` = not known = never (fail-closed). */
+export function externalMayAnswer(kind: PermissionKind | undefined): boolean {
+  return kind !== undefined && EXTERNAL_ANSWER[kind] === "once";
 }
 
 export interface PermissionSuggestion {
@@ -166,6 +211,14 @@ export interface PermissionRequestOptions {
   readonly groupStart?: string;
   /** Which sub-agent asked (display only; set with `origin: "subagent"`). */
   readonly agent?: { readonly type: string; readonly description: string; readonly id?: string };
+  /**
+   * The daemon's id for this ask (process-internal, never on the wire — the
+   * requester is handed it with the update it came from). A surface that
+   * carries the prompt across a navigation uses it to tell one ask from the
+   * next (mobile: the sheet's route param, docs/feat/mobile-native-sheets.md).
+   * Absent: the requester did not say (a local request).
+   */
+  readonly requestId?: string;
 }
 
 export type PermissionRequester = (
@@ -292,7 +345,27 @@ export class PermissionBroker {
  * AGENTS §7) still reaches a human.
  */
 export function autoApproves(req: PermissionRequest, own = true): boolean {
-  return own && req.kind !== "hooks_trust" && (req.kind !== "session_hop" || req.hopAuto === true);
+  return (
+    own &&
+    req.kind !== "hooks_trust" &&
+    // A workflow's hash approval authorises a whole sequence, and its approve
+    // step is a merge/push: a human decision (docs/feat/agent-workflows.md D3).
+    req.kind !== "workflow_approve" &&
+    // A browser action acts AS the user on the web: its own switch, never the
+    // session's auto-accept (docs/feat/browser-inspect.md Q3).
+    req.kind !== "browser_action" &&
+    (req.kind !== "session_hop" || req.hopAuto === true)
+  );
+}
+
+/**
+ * An ask answered allow-once or deny only, on every surface: a workflow's
+ * approval (a merge) and a browser action (acting as the user on the web) are
+ * each one human decision. The daemon offers exactly these options
+ * (`permissionOptions`), so a surface offering "always" would be refused.
+ */
+export function onceOnlyAsk(req: PermissionRequest): boolean {
+  return req.kind === "workflow_approve" || req.kind === "browser_action";
 }
 
 /**

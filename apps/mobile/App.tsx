@@ -20,7 +20,7 @@ import {
   useNavigationContainerRef,
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { type RemoteClient, type RemoteSession, webSocketChannelFactory } from "@tentacle/client";
+import { type RemoteClient, type RemoteSession, webSocketCarrierFactory } from "@tentacle/client";
 import {
   type AttachmentRef,
   type DaemonDiscovery,
@@ -28,7 +28,7 @@ import {
   encodeBase64Url,
   parsePairingPayload,
 } from "@tentacle/protocol";
-import type { DuplexChannel } from "@tentacle/transport";
+import type { ByteCarrier } from "@tentacle/transport";
 import { getRandomBytes } from "expo-crypto";
 import { File } from "expo-file-system";
 import {
@@ -47,6 +47,7 @@ import {
   AppState,
   Dimensions,
   Linking,
+  PixelRatio,
   Platform,
   Pressable,
   StyleSheet,
@@ -121,6 +122,8 @@ import { createDrawerRename } from "./src/drawer-rename.ts";
 import { createDrawerRowActions } from "./src/drawer-row-actions.ts";
 import type { ActivityButtonMode } from "./src/floating-button.ts";
 import { loadFigtree } from "./src/fonts-expo.ts";
+import { foregroundAction } from "./src/foreground-gate.ts";
+import { playHaptic } from "./src/haptics.ts";
 import { createLinkDiagnoser } from "./src/link-diagnosis.ts";
 import { createLinkRegistry } from "./src/link-registry.ts";
 import { createLinkStatusWatcher } from "./src/link-status-watcher.ts";
@@ -128,6 +131,7 @@ import { tapLink } from "./src/links.ts";
 import { authenticate, biometry, capability } from "./src/lock-auth.ts";
 import { LOCK_SETTING_STORE } from "./src/lock-settings-expo.ts";
 import { MemoryAnswers } from "./src/notification-dispatch.ts";
+import { createRouteQueue } from "./src/notification-route-queue.ts";
 import { createDraftStore } from "./src/outbox-drafts.ts";
 import { createOutboxDriver } from "./src/outbox-driver.ts";
 import { createExpoOutboxFs, outboxRoot } from "./src/outbox-fs-expo.ts";
@@ -149,10 +153,17 @@ import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
 import type { PhotoSettings } from "./src/photo-settings-store.ts";
 import { photosRoot, pickFromLibrary, takePhoto } from "./src/photo-source.ts";
 import {
+  type ProjectObservation,
+  type ProjectRecordLike,
   type ProjectRow,
   type ProjectSection,
+  type ProjectTap,
+  TAP_WAIT_MS,
   projectSections,
+  projectTap,
   reprobeDelay,
+  tapSettled,
+  wasBackgrounded,
 } from "./src/project-rows.ts";
 import { rewritePushDirectory } from "./src/push-directory-expo.ts";
 import { readAsked, readPermission, readPushFacts, requestPermission } from "./src/push-expo.ts";
@@ -171,11 +182,19 @@ import { QrScanner, usePairingCamera } from "./src/scanner.tsx";
 import { ArtifactGalleryScreen } from "./src/screens/ArtifactGallery.tsx";
 import { ComputersScreen } from "./src/screens/ComputersScreen.tsx";
 import { LockGate } from "./src/screens/LockGate.tsx";
+import { NativeSheetRoute } from "./src/screens/NativeSheetRoute.tsx";
 import { PairScreen } from "./src/screens/PairScreen.tsx";
 import { SessionScreen } from "./src/screens/SessionScreen.tsx";
 import { SessionsDrawer } from "./src/screens/SessionsDrawer.tsx";
 import { SessionsScreen } from "./src/screens/SessionsScreen.tsx";
 import { SettingsScreen } from "./src/screens/SettingsScreen.tsx";
+import { WorkflowEditScreen, type WorkflowEditScreenProps } from "./src/screens/WorkflowEdit.tsx";
+import { WorkflowEditReview } from "./src/screens/WorkflowEditReview.tsx";
+import { WorkflowEditSheets } from "./src/screens/WorkflowEditSheets.tsx";
+import { WorkflowNew } from "./src/screens/WorkflowNew.tsx";
+import { WorkflowRunScreen } from "./src/screens/WorkflowRun.tsx";
+import { WorkflowRunsScreen } from "./src/screens/WorkflowRuns.tsx";
+import { WorkflowStartScreen } from "./src/screens/WorkflowStart.tsx";
 import {
   KEYCHAIN_ACCESSIBLE,
   KEYCHAIN_STORE,
@@ -195,16 +214,87 @@ import {
   type SessionScreenController,
   createSessionScreen,
 } from "./src/session-screen-controller.ts";
+import {
+  SHEET_DETENTS,
+  SHEET_HOLDS,
+  holdKey,
+  recordDetent,
+  sheetDetentContext,
+  sheetGround,
+  sheetIdentity,
+  sheetOptions,
+} from "./src/sheet-plan.ts";
+import { SHELL_ROWS } from "./src/shell-rows-expo.ts";
+import type { ShellRowsSettings } from "./src/shell-rows-store.ts";
 import { createSwitcherCover } from "./src/switcher-cover.ts";
 import { type Theme, themeFor } from "./src/theme-beta.ts";
 import { THEME_SETTINGS } from "./src/theme-settings-expo.ts";
 import type { ThemeSettings } from "./src/theme-settings-store.ts";
 import { type Palette, space } from "./src/theme.ts";
+import { useAccessibilityFlags } from "./src/ui/FloatingActivity.tsx";
 import { HeaderIcon } from "./src/ui/HeaderIcon.tsx";
 import { ScreenHeader } from "./src/ui/ScreenHeader.tsx";
 import { AppFontContext, Text } from "./src/ui/Text.tsx";
 import { VOICE_SETTINGS } from "./src/voice-settings-expo.ts";
 import type { VoiceSettings } from "./src/voice-settings-store.ts";
+import {
+  type EditIntent,
+  type GestureResult,
+  applyIntent,
+  drawnSteps,
+  menuGesture,
+  menuInputs,
+  portRelease,
+  tapIntent,
+  toastFor,
+} from "./src/workflow-edit-actions.ts";
+import {
+  EDIT_NAME_RULE,
+  type EditSessionHandle,
+  type EditState,
+  type WorkflowEditController,
+  createWorkflowEditController,
+} from "./src/workflow-edit-controller.ts";
+import { editGeometry, validDropTargets } from "./src/workflow-edit-graph.ts";
+import {
+  NEW_DEFAULT_TEMPLATE,
+  type NewSheetInput,
+  headerAction,
+  newSheetCreate,
+  newSheetModel,
+  newSheetUp,
+  renameOffered,
+  reviewModel,
+  savedLine,
+  showsReview,
+} from "./src/workflow-edit-review.ts";
+import {
+  type SheetAction,
+  type SheetActions,
+  type SheetModel,
+  type SheetRequest,
+  afterSheet,
+  applySheetAction,
+  choiceAction,
+  segmentAction,
+  sheetAfterAction,
+  sheetForIntent,
+  sheetModel,
+  stepperAction,
+  textAction,
+} from "./src/workflow-edit-sheets.ts";
+import {
+  type RunMode,
+  type RunState,
+  askSourceFromSheet,
+  createWorkflowRunController,
+} from "./src/workflow-run-controller.ts";
+import { type RunsState, createWorkflowRunsController } from "./src/workflow-runs-controller.ts";
+import {
+  type StartSessionHandle,
+  type StartState,
+  createWorkflowStartController,
+} from "./src/workflow-start-controller.ts";
 
 const Stack = createNativeStackNavigator<RootStackParams>();
 
@@ -324,6 +414,62 @@ const RUNTIMES = createSessionRuntimes<RemoteClient, SendableHandle>({
         }) as SendableHandle,
     }),
 });
+
+/**
+ * The Session screens that are up, by `sessionKey` (docs/feat/workflows-ui.md D4):
+ * a workflow run screen answers its approve asks through THAT screen's permission
+ * sheet (`answerFor`) — the one requester on the client's one broker — never a
+ * second one. Absent → the run screen has no buttons and offers the session.
+ */
+const SESSION_SCREENS = new Map<string, SessionScreenController>();
+
+/** The run screen's graph ⇄ list choice, kept for the app's life (D4). */
+let WORKFLOW_RUN_MODE: RunMode = "graph";
+
+/**
+ * The computer's workflow runs (`workflow-runs-controller.ts`), read while the
+ * calling screen is mounted. Wiring only: every rule is the controller's.
+ */
+function useWorkflowRuns(computerId: string): { state: RunsState; pull: () => void } {
+  const [state, setState] = useState<RunsState>({ kind: "loading", runs: [], offline: null });
+  const pullRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    let live = true;
+    let controller: ReturnType<typeof createWorkflowRunsController> | null = null;
+    void LINKS.get(computerId).then(
+      (link) => {
+        if (!live) {
+          return;
+        }
+        controller = createWorkflowRunsController({
+          load: () => link.client.workflowList(),
+          onNotice: (listener) => link.client.onSessionWorkflows(() => listener()),
+          schedule: (fn, ms) => {
+            const timer = setTimeout(fn, ms);
+            return { cancel: () => clearTimeout(timer) };
+          },
+          onChange: (next) => {
+            if (live) {
+              setState(next);
+            }
+          },
+        });
+        pullRef.current = () => controller?.pull();
+        controller.focus();
+      },
+      (caught: unknown) => {
+        if (live) {
+          setState({ kind: "error", runs: [], offline: null, error: errorText(caught) });
+        }
+      },
+    );
+    return () => {
+      live = false;
+      controller?.dispose();
+    };
+  }, [computerId]);
+  return { state, pull: () => pullRef.current() };
+}
 
 /**
  * One outbox per COMPUTER (13d): its file, its driver and its drafts, kept for
@@ -599,11 +745,12 @@ const LINKS = createLinkRegistry<ComputerLink>({
       random: phoneRandom,
       diagnosis: diagnoserFor(id),
       log: APP_LOG,
+      onAnswered: (address) => KEYCHAIN_STORE.setLastAddress(id, address),
     });
     // A link dialled while the app is already in the background starts held:
     // iOS would suspend it anyway, and a socket opened now would be a ghost
     // attachment for the daemon (docs/feat/mobile-session-view.md 12a.4).
-    if (AppState.currentState !== "active") {
+    if (foregroundAction(AppState.currentState) === "suspend") {
       link.suspend();
     }
     LIVE_LINKS.add(link);
@@ -664,7 +811,7 @@ function errorText(error: unknown): string {
 const PROBE_PAGE = 20;
 
 /** Every listed record, probed once (a `broken` one is never dialled, F-K2). */
-async function probeAll(): Promise<{
+async function probeAll(onRecords?: (records: readonly ProjectRecordLike[]) => void): Promise<{
   readonly entries: readonly ComputerEntry[];
   readonly probes: readonly ComputerProbe[];
 }> {
@@ -675,6 +822,10 @@ async function probeAll(): Promise<{
       RECORDS.set(entry.id, entry.computer);
     }
   }
+  // The records are known BEFORE any dial (docs/fix/mobile-project-first-tap.md):
+  // the screen can draw every row as `checking` instead of showing nothing, and
+  // a row that has not been asked yet never claims the computer is unreachable.
+  onRecords?.(recordsOf(entries));
   const probes = await Promise.all(
     entries.map(
       async (entry: ComputerEntry): Promise<ComputerProbe> =>
@@ -698,32 +849,58 @@ async function probeAll(): Promise<{
 /** The last pairing's record id and when (the 4 s "Paired just now", §6). */
 const JUST_PAIRED: { current: { id: string; at: number } | undefined } = { current: undefined };
 
-/** The Computers screen's sections (variant A, docs/feat/mobile-projects.md §6). */
-async function loadSections(): Promise<readonly ProjectSection[]> {
-  const { entries, probes } = await probeAll();
-  return projectSections(
-    entries.map((entry) =>
-      entry.state === "broken"
-        ? { id: entry.id, name: entry.name, broken: true }
-        : {
-            id: entry.id,
-            name: entry.computer.name,
-            ...(entry.computer.computerId === undefined
-              ? {}
-              : { computerId: entry.computer.computerId }),
-            ...(entry.computer.project === undefined ? {} : { project: entry.computer.project }),
-          },
-    ),
-    entries.map((entry, index) => ({
+/** The Keychain's entries as the view-model's records (a `broken` one keeps its own name). */
+function recordsOf(entries: readonly ComputerEntry[]): readonly ProjectRecordLike[] {
+  return entries.map((entry) =>
+    entry.state === "broken"
+      ? { id: entry.id, name: entry.name, broken: true }
+      : {
+          id: entry.id,
+          name: entry.computer.name,
+          ...(entry.computer.computerId === undefined
+            ? {}
+            : { computerId: entry.computer.computerId }),
+          ...(entry.computer.project === undefined ? {} : { project: entry.computer.project }),
+        },
+  );
+}
+
+/** The Computers screen's inputs, before they are projected (docs/fix/mobile-project-first-tap.md). */
+interface SectionInputs {
+  readonly records: readonly ProjectRecordLike[];
+  readonly observations: readonly ProjectObservation[];
+}
+
+/**
+ * Every listed record and what its probe observed. The projection is a separate
+ * step (`projectSections`) so the screen can show the SAME records as `checking`
+ * while a tap's probe is in flight — a row that has not answered yet is not a
+ * verdict about the computer.
+ */
+async function readSectionInputs(
+  onRecords?: (records: readonly ProjectRecordLike[]) => void,
+): Promise<SectionInputs> {
+  const { entries, probes } = await probeAll(onRecords);
+  return {
+    records: recordsOf(entries),
+    observations: entries.map((entry, index) => ({
       probe: probes[index] ?? { ok: false, error: new Error("no answer") },
       diagnosis: entry.state === "broken" ? "ok" : diagnoserFor(entry.id).current(),
       absent: entry.state === "broken" ? false : diagnoserFor(entry.id).absent(),
     })),
-    {
-      now: Date.now(),
-      ...(JUST_PAIRED.current === undefined ? {} : { justPaired: JUST_PAIRED.current }),
-    },
-  );
+  };
+}
+
+/** The sections for these inputs, with the records whose probe is in flight as `checking`. */
+function sectionsOf(
+  inputs: SectionInputs,
+  checking: readonly string[] = [],
+): readonly ProjectSection[] {
+  return projectSections(inputs.records, inputs.observations, {
+    now: Date.now(),
+    ...(JUST_PAIRED.current === undefined ? {} : { justPaired: JUST_PAIRED.current }),
+    ...(checking.length === 0 ? {} : { checking }),
+  });
 }
 
 /**
@@ -979,9 +1156,10 @@ async function findExisting(
   }
 }
 
-/** The phone's dial to one address: the client's own factory, over RN's WebSocket, no token. */
-function phoneDial(address: string): () => Promise<DuplexChannel> {
-  return webSocketChannelFactory(address, {}, { WebSocket: WebSocket as never });
+/** The phone's dial to one address: the client's own carrier factory, over RN's WebSocket, no token. */
+function phoneDial(address: string): () => Promise<ByteCarrier> {
+  // The Noise channel's raw byte carrier (E2E v2: binary frames).
+  return webSocketCarrierFactory(address, {}, { WebSocket: WebSocket as never });
 }
 
 /** The app's ONE row of a computer's project label (a `broken` entry has no sessions to read). */
@@ -1010,17 +1188,57 @@ function ComputersRoute({
   const [pairHint, setPairHint] = useState<string | undefined>(undefined);
   /** Bumped to re-probe now (a tap on a stopped row, the 15 s timer, the app's return). */
   const [tick, setTick] = useState(0);
+  /** The last read's inputs: what a tap repaints from while its probe runs. */
+  const inputsRef = useRef<SectionInputs | undefined>(undefined);
+  /**
+   * Bumped by EVERY thing the person can ask for (a tap's open, its menu, the
+   * Add/Pair screens, a Remove, and the screen leaving), so a tap's wait that
+   * lands after they moved on does nothing instead of yanking them elsewhere
+   * (docs/fix/mobile-project-first-tap.md Review round 1).
+   */
+  const tapGeneration = useRef(0);
+  /**
+   * No wait may act while the person has left the Computers screen — the app
+   * backgrounded counts, the screen blurred counts.
+   */
+  const sentOffscreen = useRef(true);
+  /** Has a completed read painted real states? (records-first is a FIRST paint only) */
+  const painted = useRef(false);
+  /**
+   * The person asked for something else: every wait already running is now stale
+   * and must NOT act when its probe lands (Review round 1's MEDIUM — a tap on a
+   * working row, the menu, Add, a Remove, or closing the screen).
+   */
+  const supersede = useCallback((): void => {
+    tapGeneration.current += 1;
+  }, []);
 
   useFocusEffect(
     // biome-ignore lint/correctness/useExhaustiveDependencies: `tick` IS the re-probe trigger
     useCallback(() => {
       let live = true;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      void loadSections().then(
-        (built) => {
+      // The records are drawn BEFORE the probes land, as `checking`: the screen
+      // never sits empty and, once a row exists, it never claims a computer it
+      // has not asked yet does not answer (docs/fix/mobile-project-first-tap.md).
+      // FIRST paint only: repainting known rows as `checking` on every 15 s
+      // reconsideration would flash away the states the person already sees.
+      const showRecords = (records: readonly ProjectRecordLike[]): void => {
+        if (live && inputsRef.current === undefined) {
+          inputsRef.current = { records, observations: [] };
+          if (!painted.current) {
+            setSections(sectionsOf({ records, observations: [] }));
+          }
+        }
+      };
+      void readSectionInputs(showRecords).then(
+        (inputs) => {
           if (!live) {
             return;
           }
+          inputsRef.current = inputs;
+          painted.current = true;
+          const built = sectionsOf(inputs);
           setSections(built);
           setError(undefined);
           // §6 Live behaviour (Owner Q12): a stopped / unreachable project is
@@ -1041,10 +1259,19 @@ function ComputersRoute({
       );
       // …and on every return of the app to the foreground.
       const subscription = AppState.addEventListener("change", (state) => {
-        if (state === "active") {
+        const away = wasBackgrounded(state);
+        sentOffscreen.current = away;
+        if (away) {
+          // Leaving the app is the person moving on: a wait still running must
+          // not open anything when it comes back (Review round 1).
+          supersede();
+        } else {
           setTick((n) => n + 1);
         }
       });
+      // From the TRUTH, not from `false`: this effect re-runs on every 15 s
+      // reconsideration, and that must not claim a backgrounded app is in front.
+      sentOffscreen.current = wasBackgrounded(AppState.currentState);
       return () => {
         live = false;
         if (timer !== undefined) {
@@ -1052,7 +1279,85 @@ function ComputersRoute({
         }
         subscription.remove();
       };
-    }, [tick]),
+    }, [tick, supersede]),
+  );
+
+  useFocusEffect(
+    // Its own effect, with NO dependency on `tick`: the 15 s reconsideration must
+    // not count as the person moving on. Leaving the screen is the one thing that
+    // must stop a tap's wait from acting after they are somewhere else
+    // (docs/fix/mobile-project-first-tap.md Review round 1).
+    useCallback(() => {
+      sentOffscreen.current = wasBackgrounded(AppState.currentState);
+      return () => {
+        sentOffscreen.current = true;
+        supersede();
+      };
+    }, [supersede]),
+  );
+
+  /**
+   * A tap on a row that is not answering (docs/fix/mobile-project-first-tap.md):
+   * re-read, then open the row if that probe says it answers. Bounded by
+   * `TAP_WAIT_MS` — a probe that never settles falls back to the old behaviour
+   * (the next 15 s reconsideration picks it up), and the tap is never a no-op.
+   * One wait at a time: a tap that lands while the earlier one still runs
+   * SUPERSEDES it (the earlier wait's probe is stale from then on), so a second
+   * tap is never silently swallowed.
+   */
+  const awaitProbe = useCallback(
+    async (id: string): Promise<void> => {
+      const mine = ++tapGeneration.current;
+      // The row turns into `Checking…` while its probe runs (from the inputs of
+      // the last read), so the tap is visibly AN ANSWER, not a no-op.
+      const before = inputsRef.current;
+      if (before !== undefined) {
+        setSections(sectionsOf(before, [id]));
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const inputs = await Promise.race([
+          readSectionInputs(),
+          new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => resolve(undefined), TAP_WAIT_MS);
+          }),
+        ]);
+        // The person asked for something else while this ran: no repaint and no
+        // navigation of theirs (Review round 1's MEDIUM — the generation used to
+        // be only this wait's own, so it could never be stale).
+        const superseded = mine !== tapGeneration.current;
+        const offscreen = sentOffscreen.current;
+        const settledRow =
+          inputs === undefined
+            ? undefined
+            : sectionsOf(inputs)
+                .flatMap((section) => section.rows)
+                .find((row) => row.id === id);
+        const outcome = tapSettled(settledRow, { superseded, backgrounded: offscreen });
+        if (outcome === "drop") {
+          return;
+        }
+        if (inputs !== undefined) {
+          inputsRef.current = inputs;
+          setSections(sectionsOf(inputs));
+          setError(undefined);
+        }
+        if (outcome === "open" && settledRow !== undefined) {
+          // Opening is itself the person's last ask, and nothing may follow it.
+          supersede();
+          onOpen(settledRow);
+          return;
+        }
+        // It still does not answer (or the wait ran out): ask again shortly, so
+        // the row is not frozen by a probe that failed once.
+        setTick((n) => n + 1);
+      } finally {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      }
+    },
+    [onOpen, supersede],
   );
 
   return (
@@ -1061,42 +1366,64 @@ function ComputersRoute({
       sections={sections}
       error={error}
       onOpen={(row) => {
-        // A row that does not answer: the tap is a new attempt (mockup A3).
-        if (row.ok) {
+        // Every ask bumps the generation: a wait from an earlier tap is stale from
+        // here on, so it cannot navigate under this one (Review round 1).
+        supersede();
+        // A row that does not answer: the tap asks again — and, unlike mockup
+        // A3's silent "Try again", it then OPENS the row if that probe answers
+        // (docs/fix/mobile-project-first-tap.md: the first tap after a pairing
+        // used to be swallowed right here).
+        const tap = projectTap(row);
+        if (tap === "open") {
           onOpen(row);
-        } else if (row.state === "stopped" || row.state === "unreachable") {
-          setTick((n) => n + 1);
-        } else {
-          setMenu(row);
+          return;
         }
+        if (tap === "menu") {
+          setMenu(row);
+          return;
+        }
+        void awaitProbe(row.id);
       }}
-      onAdd={onAdd}
+      onAdd={() => {
+        supersede();
+        onAdd();
+      }}
       {...(pairHint === undefined ? {} : { pairHint })}
       onPairProject={setPairHint}
       onPairHintClosed={() => setPairHint(undefined)}
       onScan={() => {
+        supersede();
         setPairHint(undefined);
         onAdd();
       }}
       onRetry={() => {
+        supersede();
         setMenu(undefined);
         setTick((n) => n + 1);
       }}
       onPairAgain={(row) => {
+        supersede();
         setMenu(undefined);
         onPairAgain(row);
       }}
-      onMenu={setMenu}
+      onMenu={(row) => {
+        supersede();
+        setMenu(row);
+      }}
       onMenuClosed={() => setMenu(undefined)}
       {...(menu === undefined ? {} : { menu })}
       onRemove={(row) => {
+        supersede();
         // The menu turns into the confirmation (one sheet: `ComputersScreen`).
         setMenu(undefined);
         setRemoving(row);
       }}
       onRemoveCancelled={() => setRemoving(undefined)}
       {...(removing === undefined ? {} : { removing })}
-      onOpenSettings={onOpenSettings}
+      onOpenSettings={() => {
+        supersede();
+        onOpenSettings();
+      }}
       onRemoveConfirmed={(row) => {
         setRemoving(undefined);
         void onRemove(row);
@@ -1552,8 +1879,10 @@ function SessionRoute({
   cwd,
   onOpenDrawer,
   drawerOpen,
+  locked,
   onOpenArtifacts,
   onNewSession,
+  onOpenWorkflows,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
@@ -1561,6 +1890,8 @@ function SessionRoute({
   readonly title: string;
   readonly archived: boolean;
   readonly focus: boolean;
+  /** The hub's Workflows item: the computer's run list (docs/feat/workflows-ui.md D4). */
+  readonly onOpenWorkflows: () => void;
   /** The tapped row's working folder (`SessionRoute.cwd`), for the header. */
   readonly cwd: string | undefined;
   readonly onOpenDrawer: () => void;
@@ -1569,9 +1900,31 @@ function SessionRoute({
   readonly onOpenArtifacts: (from: ArtifactGalleryRoute["from"], open?: string) => void;
   /** The drawer's New session, reached from the hub too (docs/feat/mobile-hub.md H3). */
   readonly onNewSession: () => void;
+  /**
+   * The lock's own current value, subscribed in `AppShell` (never a render-time
+   * read): the native sheets' drain is gated on it (docs/feat/mobile-native-sheets.md
+   * D3, Owner decision A).
+   */
+  readonly locked: boolean;
 }): JSX.Element {
+  const shellRows = useShellRows();
   const [controller, setController] = useState<SessionScreenController | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
+  // The hub's Workflows figure: the computer's runs (D4), read while this screen is up.
+  const workflowRuns = useWorkflowRuns(computerId);
+  // A run screen answers asks through THIS screen's sheet (`SESSION_SCREENS`).
+  useEffect(() => {
+    if (controller === null) {
+      return;
+    }
+    const key = sessionKey(computerId, sessionId);
+    SESSION_SCREENS.set(key, controller);
+    return () => {
+      if (SESSION_SCREENS.get(key) === controller) {
+        SESSION_SCREENS.delete(key);
+      }
+    };
+  }, [controller, computerId, sessionId]);
 
   useEffect(() => {
     let live = true;
@@ -1696,9 +2049,640 @@ function SessionRoute({
       drawerOpen={drawerOpen}
       onOpenArtifacts={onOpenArtifacts}
       onNewSession={onNewSession}
+      computerId={computerId}
+      sessionId={sessionId}
+      locked={locked}
       artifactsSeenKey={sessionKey(computerId, sessionId)}
       onRowError={(fields) => APP_LOG.log("error", "client-error", fields)}
+      compactShell={shellRows.settings.compactShell}
+      onOpenWorkflows={onOpenWorkflows}
+      workflowsRuns={workflowRuns.state}
     />
+  );
+}
+
+/** The computer's workflow runs (docs/feat/workflows-ui.md D4): wiring only. */
+function WorkflowRunsRoute({
+  palette,
+  computerId,
+  name,
+  sessionId,
+  onBack,
+  onOpen,
+  onStart,
+  onNew,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly name: string;
+  readonly sessionId?: string;
+  readonly onBack: () => void;
+  readonly onOpen: (run: {
+    readonly runId: string;
+    readonly sessionId: string;
+    readonly name: string;
+  }) => void;
+  readonly onStart: (sessionId: string) => void;
+  /** The empty state's "New workflow": the editor, in create mode. */
+  readonly onNew: (sessionId: string) => void;
+}): JSX.Element {
+  const { state, pull } = useWorkflowRuns(computerId);
+  return (
+    <WorkflowRunsScreen
+      palette={palette}
+      computer={name}
+      state={state}
+      now={Date.now()}
+      onBack={onBack}
+      onPull={pull}
+      {...(sessionId === undefined
+        ? {}
+        : { sessionId, onStart: () => onStart(sessionId), onNew: () => onNew(sessionId) })}
+      onOpen={(run) => {
+        if (run.sessionId !== undefined) {
+          onOpen({ runId: run.runId, sessionId: run.sessionId, name: run.name });
+        }
+      }}
+    />
+  );
+}
+
+/**
+ * One workflow run (docs/feat/workflows-ui.md D4): attaches through the SAME
+ * session runtime as the Session screen (never `reopen`), and answers asks only
+ * through the Session screen's own sheet when that screen is up. Wiring only.
+ */
+function WorkflowRunRoute({
+  palette,
+  computerId,
+  sessionId,
+  runId,
+  title,
+  onBack,
+  onOpenSession,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly title: string;
+  readonly onBack: () => void;
+  readonly onOpenSession: () => void;
+}): JSX.Element {
+  const [state, setState] = useState<RunState | null>(null);
+  const [controller, setController] = useState<ReturnType<
+    typeof createWorkflowRunController
+  > | null>(null);
+  // D5: the flight needs the screen's width, and Reduce Motion replaces it with a
+  // crossfade — both read live (a toggle converges without a restart).
+  const [pageWidth, setPageWidth] = useState(0);
+  const flags = useAccessibilityFlags();
+  useEffect(() => {
+    let live = true;
+    let created: ReturnType<typeof createWorkflowRunController> | null = null;
+    void LINKS.get(computerId).then((link) => {
+      if (!live) {
+        return;
+      }
+      const runtime = RUNTIMES.controller(link.client);
+      const screen = SESSION_SCREENS.get(sessionKey(computerId, sessionId));
+      created = createWorkflowRunController({
+        runId,
+        sessionId,
+        // The Session screen underneath follows it: never detach it from there.
+        borrowed: runtime.follows(sessionId),
+        open: async (id) => {
+          const result = await runtime.open(id);
+          // `newSession` hands back a `RemoteSession` (typed as the screen's subset).
+          return result.ok
+            ? { ok: true, session: result.session as unknown as RemoteSession }
+            : result;
+        },
+        leave: () => void runtime.leave(sessionId),
+        asks:
+          screen === undefined
+            ? null
+            : askSourceFromSheet({
+                view: () => screen.sheet().view(),
+                answerFor: (requestId, optionId) => screen.sheet().answerFor(requestId, optionId),
+                subscribe: (listener) => screen.subscribe(() => listener()),
+              }),
+        mode: {
+          get: () => WORKFLOW_RUN_MODE,
+          set: (mode) => {
+            WORKFLOW_RUN_MODE = mode;
+          },
+        },
+        onChange: () => {
+          if (live && created !== null) {
+            setState(created.state());
+          }
+        },
+      });
+      setController(created);
+      setState(created.state());
+      created.start();
+    });
+    return () => {
+      live = false;
+      created?.dispose();
+    };
+  }, [computerId, sessionId, runId]);
+  if (controller === null || state === null) {
+    return (
+      <View testID="workflow-run" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ActivityIndicator color={palette.accent} />
+      </View>
+    );
+  }
+  return (
+    <View
+      testID="workflow-run"
+      style={[styles.screen, { backgroundColor: palette.page }]}
+      onLayout={(e) => setPageWidth(e.nativeEvent.layout.width)}
+    >
+      <WorkflowRunScreen
+        palette={palette}
+        title={title}
+        state={state}
+        now={Date.now()}
+        onBack={onBack}
+        onMode={(mode) => controller.setMode(mode)}
+        onAnswer={(stepId, optionId) => controller.answer(stepId, optionId)}
+        onStop={() => void controller.stop()}
+        onResume={() => void controller.resume()}
+        onRerun={(stepId) => void controller.rerun(stepId)}
+        onOpenSession={onOpenSession}
+        onOpenStep={(stepId, visit) => controller.openStep(stepId, visit)}
+        onCloseStep={() => controller.closeStep()}
+        reduceMotion={flags.reduceMotion}
+        width={pageWidth}
+      />
+    </View>
+  );
+}
+
+/**
+ * Start a workflow (docs/feat/workflows-ui.md D6, slice 5b): attaches through the
+ * SAME session runtime as the Session screen (never `reopen`), reads the
+ * catalogue through that session and sends the start through it too. Wiring only.
+ */
+function WorkflowStartRoute({
+  palette,
+  computerId,
+  sessionId,
+  onBack,
+  onOpenRun,
+  onEdit,
+  onNew,
+  saved,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  /** The editor's Run came back here with the hash it wrote: the catalogue is re-read. */
+  readonly saved?: string;
+  readonly onBack: () => void;
+  readonly onOpenRun: (runId: string, name: string) => void;
+  /** A catalogue row's Edit: the editor, on that file (a broken one opens as a draft). */
+  readonly onEdit: (name: string) => void;
+  /** The catalogue's New workflow: the editor, in create mode. */
+  readonly onNew: () => void;
+}): JSX.Element {
+  const [state, setState] = useState<StartState | null>(null);
+  const [controller, setController] = useState<ReturnType<
+    typeof createWorkflowStartController
+  > | null>(null);
+  useEffect(() => {
+    let live = true;
+    let created: ReturnType<typeof createWorkflowStartController> | null = null;
+    void LINKS.get(computerId).then((link) => {
+      if (!live) {
+        return;
+      }
+      const runtime = RUNTIMES.controller(link.client);
+      created = createWorkflowStartController({
+        sessionId,
+        // The Session screen underneath follows it: never detach it from there.
+        borrowed: runtime.follows(sessionId),
+        open: async (id) => {
+          const result = await runtime.open(id);
+          // `newSession` hands back a `RemoteSession` (typed as the screen's subset).
+          return result.ok
+            ? { ok: true, session: result.session as unknown as StartSessionHandle }
+            : result;
+        },
+        leave: () => void runtime.leave(sessionId),
+        onOpenRun,
+        onChange: () => {
+          if (live && created !== null) {
+            setState(created.state());
+          }
+        },
+      });
+      setController(created);
+      setState(created.state());
+      created.start();
+    });
+    return () => {
+      live = false;
+      created?.dispose();
+    };
+  }, [computerId, sessionId, onOpenRun]);
+  // A save from the editor landed: this screen's catalogue predates it, so it is
+  // read again (ONE more read, the controller's own `pull` rule).
+  useEffect(() => {
+    if (saved !== undefined) {
+      controller?.pull();
+    }
+  }, [saved, controller]);
+  if (controller === null || state === null) {
+    return (
+      <View testID="workflow-start" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ActivityIndicator color={palette.accent} />
+      </View>
+    );
+  }
+  return (
+    <WorkflowStartScreen
+      palette={palette}
+      computer={RECORDS.get(computerId)?.name ?? ""}
+      state={state}
+      canStart={controller.canStart()}
+      onBack={onBack}
+      onPull={() => controller.pull()}
+      onOpenRow={(key) => controller.openRow(key)}
+      onCloseRow={() => controller.closeRow()}
+      onValue={(name, value) => controller.setValue(name, value)}
+      onStart={() => void controller.beginStart()}
+      onEdit={onEdit}
+      onNew={onNew}
+    />
+  );
+}
+
+/**
+ * The graph editor (docs/feat/workflow-editor.md D8, slice 7a): a native-stack
+ * PUSH beside `WorkflowStart`, never a `<Modal>`. Wiring only — the draft, the
+ * bar, the Save gate and every refusal are `workflow-edit-controller.ts`'s, the
+ * drawing and the hit priority are `workflow-edit-graph.ts`'s, and what a tap, a
+ * drag or a menu item MEANS is `workflow-edit-actions.ts`'s.
+ *
+ * It attaches through the SAME session runtime as every other screen (an archived
+ * session is never revived from here, §7) and answers nothing on the broker: the editor makes
+ * no ask of its own, and a save's approval ask arrives later, on the run screen.
+ */
+function WorkflowEditRoute({
+  palette,
+  computerId,
+  sessionId,
+  name,
+  onBack,
+  onRun,
+}: {
+  readonly palette: Palette;
+  readonly computerId: string;
+  readonly sessionId: string;
+  /** The file to edit; ABSENT is the create flow (the New sheet names it). */
+  readonly name?: string;
+  readonly onBack: () => void;
+  /**
+   * Run, once a write landed: the EXISTING start path (workflows-ui D6), whose
+   * start pins the catalogue's hash, so the approval ask is the normal sheet.
+   * `hash` is what the write landed: the start screen re-reads its catalogue.
+   */
+  readonly onRun: (hash: string) => void;
+}): JSX.Element {
+  const [state, setState] = useState<EditState | null>(null);
+  const [controller, setController] = useState<WorkflowEditController | null>(null);
+  const [menu, setMenu] = useState<WorkflowEditScreenProps["menu"]>(null);
+  const [armed, setArmed] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [dropTargets, setDropTargets] = useState<readonly string[]>([]);
+  /**
+   * The sheet that is up (`null` = the graph). It is a `SheetRequest`, not a
+   * model: which sheet a gesture opens is `sheetForIntent`'s answer, and what it
+   * draws is re-derived from the draft on screen on every render, so a refusal or
+   * an edit can never leave a stale value behind (slice 7b).
+   */
+  const [sheet, setSheet] = useState<SheetRequest | null>(null);
+  /** The New sheet's fields while it is up (slice 7c); what they mean is `newSheetModel`'s. */
+  const [newInput, setNewInput] = useState<NewSheetInput>({
+    name: "",
+    description: "",
+    template: NEW_DEFAULT_TEMPLATE,
+  });
+  useEffect(() => {
+    let live = true;
+    let created: WorkflowEditController | null = null;
+    let unsubscribe: (() => void) | undefined;
+    void LINKS.get(computerId).then((link) => {
+      if (!live) {
+        return;
+      }
+      const runtime = RUNTIMES.controller(link.client);
+      created = createWorkflowEditController({
+        sessionId,
+        // The Session screen underneath follows it: never detach it from there.
+        borrowed: runtime.follows(sessionId),
+        open: async (id) => {
+          const result = await runtime.open(id);
+          // `newSession` hands back a `RemoteSession` (typed as the screen's subset).
+          return result.ok
+            ? { ok: true, session: result.session as unknown as EditSessionHandle }
+            : result;
+        },
+        leave: () => void runtime.leave(sessionId),
+        ...(name === undefined ? {} : { name }),
+        onChange: () => {
+          if (live && created !== null) {
+            setState(created.state());
+          }
+        },
+      });
+      // The link's own status: the bar says "Offline — your draft stays on this
+      // phone" and Save goes off, and coming back re-checks a lost save (D7).
+      unsubscribe = link.onStatus((status) => created?.setLink(status.state === "up"));
+      setController(created);
+      setState(created.state());
+      // A CREATE starts when the New sheet's Create names the file (`create`
+      // then `start`): the first read is then the picker-vocabulary probe, and
+      // a sheet that is cancelled never attached anything.
+      if (name !== undefined) {
+        created.start();
+      }
+    });
+    return () => {
+      live = false;
+      unsubscribe?.();
+      created?.dispose();
+    };
+    // `name` is a route param like `title`: fixed for the route's life.
+  }, [computerId, sessionId, name]);
+
+  if (controller === null || state === null) {
+    return (
+      <View testID="workflow-edit" style={[styles.screen, { backgroundColor: palette.page }]}>
+        <ActivityIndicator color={palette.accent} />
+      </View>
+    );
+  }
+
+  /** The one drawing the gestures read: `editGeometry` of the draft on screen. */
+  const geometry = editGeometry(state.draft ?? {}, state.problems);
+
+  /**
+   * What the sheet on screen draws, or `null` when none is up (or there is no
+   * draft to draw it from): `sheetModel` of the draft on screen, never of an edit.
+   */
+  const sheetView =
+    sheet === null || state.draft === null
+      ? null
+      : sheetModel({
+          request: sheet,
+          draft: state.draft,
+          prompts: state.prompts,
+          ...(state.context?.models === undefined ? {} : { models: state.context.models }),
+          ...(state.context?.agentTypes === undefined
+            ? {}
+            : { agentTypes: state.context.agentTypes }),
+          notice: state.notice,
+        });
+
+  /**
+   * Everything a sheet may ask of the draft: the controller's own methods, mapped
+   * one for one, so a control's meaning stays in `workflow-edit-sheets.ts`.
+   */
+  const sheetActions: SheetActions = {
+    insert: (at, kind) => controller.insert(at, kind),
+    patch: (id, patch) => controller.patch(id, patch),
+    rename: (id, to) => controller.rename(id, to),
+    prompt: (id, prompt) => controller.prompt(id, prompt),
+    setRetry: (id, retry) => controller.setRetry(id, retry),
+    setFail: (id, target, max) => controller.setFail(id, target, max),
+    setGotoMax: (id, max) => controller.setGotoMax(id, max),
+    setNext: (id, target) => controller.setNext(id, target),
+    edit: (change) => void controller.edit(change),
+  };
+
+  /**
+   * One door for every gesture and every menu row: `applyIntent` decides which
+   * controller method an intent is, and a refusal lands on the bar by itself (the
+   * controller's `notice`), so nothing is branched here. `insert` opens the kind
+   * picker and `open` the step (or its `✗` counter): both are STATES, set through
+   * `sheetForIntent`, so the same `applyIntent` carries every gesture.
+   */
+  const act = (result: GestureResult): void => {
+    setArmed(result.armed);
+    setDropTargets(result.armed === null ? [] : validDropTargets(geometry, result.armed));
+    applyIntent(
+      {
+        insert: (at) => setSheet(sheetForIntent({ kind: "insert", at })),
+        open: (id, which) => setSheet(sheetForIntent({ kind: "open", id, which })),
+        duplicate: (id) => controller.duplicate(id),
+        move: (id, by) => controller.move(id, by),
+        remove: (id) => {
+          controller.remove(id);
+          // The undo toast is the ONE way back: `EditHistory` holds the draft.
+          setToast(toastFor("delete", id));
+        },
+        setFail: (id, target) => controller.setFail(id, target),
+      },
+      result.intent,
+    );
+    setMenu(null);
+  };
+
+  /** Cancel: a dirty draft is confirmed first (`discardPrompt`), never silently lost. */
+  const cancel = (): void => {
+    const prompt = controller.discardPrompt();
+    if (prompt === null) {
+      onBack();
+      return;
+    }
+    Alert.alert(prompt, undefined, [
+      { text: "Keep editing", style: "cancel" },
+      {
+        text: "Discard",
+        style: "destructive",
+        onPress: () => {
+          controller.discard();
+          // The history those Undos pointed into is gone.
+          setToast(toastFor("draftReplaced"));
+          onBack();
+        },
+      },
+    ]);
+  };
+
+  /**
+   * `changed` → Reload: D7 says it "discards, with confirm", so a dirty draft is
+   * confirmed first — in the words Cancel already uses (`discardPrompt`, D7's own
+   * "Discard N changes?"), because it drops exactly the same thing. A clean draft
+   * has nothing to lose, so it re-reads at once, with nothing to confirm.
+   */
+  const reload = (): void => {
+    const prompt = controller.reloadPrompt();
+    /** Reload itself: the draft any "Deleted … · Undo" described really does go. */
+    const doReload = (): void => {
+      setToast(toastFor("draftReplaced"));
+      controller.reload();
+    };
+    if (prompt === null) {
+      doReload();
+      return;
+    }
+    // "Keep editing" leaves the draft — and the undo it offers — alone: only the
+    // confirmed path drops them, which is why the toast is cleared THERE.
+    Alert.alert(prompt, undefined, [
+      { text: "Keep editing", style: "cancel" },
+      { text: "Reload", style: "destructive", onPress: doReload },
+    ]);
+  };
+
+  /**
+   * A control pressed, turned into the ONE controller call it means: the action is
+   * `workflow-edit-sheets.ts`'s, `applySheetAction` carries it out, and
+   * `sheetAfterAction` says where the sheet goes (a refusal keeps it up). With no
+   * sheet up (or no draft) there is nothing to press, so nothing is applied.
+   */
+  const control = (action: (model: SheetModel) => SheetAction | null): void => {
+    if (sheet !== null && sheetView !== null) {
+      const decided = action(sheetView);
+      applySheetAction(sheetActions, decided);
+      setSheet(sheetAfterAction(sheet, decided));
+    }
+  };
+
+  /**
+   * A create refused `exists`: the file is renamed (`renameFile` judges the name,
+   * and a refusal lands on the bar). iOS's own text prompt, never a new screen.
+   */
+  const rename = (): void => {
+    Alert.prompt(
+      "Rename the file",
+      EDIT_NAME_RULE,
+      (text) => controller.renameFile(text.trim()),
+      "plain-text",
+      state.name ?? "",
+    );
+  };
+
+  /** What Review draws, or null: the `dryRun:true` answer, never recomputed here. */
+  const review = showsReview(state)
+    ? reviewModel({ preview: state.preview, canonical: state.canonical, offline: state.offline })
+    : null;
+
+  /** The New sheet (a create, before the file is named): `newSheetModel` of its fields. */
+  const newSheet = newSheetUp({ routeName: name, state }) ? newSheetModel(newInput) : null;
+
+  /** The New sheet's Create: `create` from the template, THEN `start` (the probe). */
+  const createFromSheet = (): void => {
+    const made = newSheetCreate(newInput);
+    if (made !== null) {
+      controller.create(made.templateId, made.name, made.description, made.inputs);
+      controller.start();
+      playHaptic("light");
+    }
+  };
+
+  /** The header's right button: Save (the review) or, once written, Run. */
+  const action = headerAction({ canSave: controller.canSave(), canRun: controller.canRun() });
+
+  if (review !== null) {
+    return (
+      <WorkflowEditReview
+        palette={palette}
+        model={review}
+        canConfirm={controller.canConfirm()}
+        saving={state.kind === "saving"}
+        notice={state.notice}
+        onBack={() => controller.cancelReview()}
+        onConfirm={() => controller.confirmSave()}
+      />
+    );
+  }
+
+  return (
+    <>
+      <WorkflowEditScreen
+        palette={palette}
+        state={state}
+        title={state.name ?? "New workflow"}
+        action={action}
+        saved={savedLine(state)}
+        onRename={renameOffered(state) ? rename : null}
+        steps={drawnSteps(state.draft ?? {})}
+        geometry={state.draft === null ? null : geometry}
+        onCancel={cancel}
+        onSave={() =>
+          action.label === "Run" && state.saved !== null
+            ? onRun(state.saved.hash)
+            : controller.beginReview()
+        }
+        onReload={reload}
+        onKeepEditing={() => controller.keepEditing()}
+        onOpenSession={onBack}
+        onSettings={() => setSheet({ kind: "settings" })}
+        actions={{
+          tap: (target) => act(tapIntent(armed, target)),
+          release: (portId, locationX, locationY) =>
+            act(portRelease(armed, geometry, portId, locationX, locationY)),
+          longPress: (id, nodeTop) => {
+            // The note under Delete is the CORE's own count (`deleteStep`'s
+            // `dangling`), read on a throwaway draft: the same words the operation
+            // will report, and the draft on screen is never touched.
+            const height = geometry.nodes.find((node) => node.id === id)?.height ?? 0;
+            setMenu(
+              state.draft === null
+                ? null
+                : {
+                    id,
+                    ...menuInputs({ draft: state.draft, prompts: state.prompts, id }),
+                    top: nodeTop,
+                    height,
+                  },
+            );
+            playHaptic("light");
+          },
+          menu: (intent) => act(menuGesture(intent)),
+          armed,
+          dropTargets,
+        }}
+        menu={menu}
+        onDismissMenu={() => setMenu(null)}
+        toast={toast}
+        onUndo={() => {
+          controller.undo();
+          setToast(toastFor("undo"));
+        }}
+        onDismissToast={() => setToast(toastFor("undo"))}
+      />
+      <WorkflowEditSheets
+        palette={palette}
+        model={sheetView}
+        // A picker's close hands back the step it belongs to (`afterSheet`), so
+        // backing out of "go to" lands on the sheet that opened it, not the graph.
+        onClose={() => setSheet(sheet === null ? null : afterSheet(sheet))}
+        onDone={() => setSheet(sheet === null ? null : afterSheet(sheet))}
+        onText={(key, value) => control((model) => textAction(model, key, value))}
+        onStep={(key, delta) => control((model) => stepperAction(model, key, delta))}
+        onSegment={(key, option) => control((model) => segmentAction(model, key, option))}
+        onChoice={(key, value) => control((model) => choiceAction(model, key, value))}
+        onOpen={(next) => setSheet(next)}
+      />
+      <WorkflowNew
+        palette={palette}
+        model={newSheet}
+        input={newInput}
+        onName={(next) => setNewInput((was) => ({ ...was, name: next }))}
+        onDescription={(next) => setNewInput((was) => ({ ...was, description: next }))}
+        onTemplate={(id) => setNewInput((was) => ({ ...was, template: id }))}
+        // Nothing was attached or written: leaving is the whole of Cancel.
+        onCancel={onBack}
+        onCreate={createFromSheet}
+      />
+    </>
   );
 }
 
@@ -1776,13 +2760,52 @@ function useAppTheme(): AppTheme {
   return { ...theme, settings: themeSettings, error: themeError, select: selectTheme };
 }
 
+/**
+ * The `Compact shell rows` Beta switch (docs/feat/shell-intent-line.md §7): OFF
+ * by default, remembered per device, applied live (a render input of the
+ * transcript; nothing is stored per row). `SHELL_ROWS.load` reads once per run.
+ */
+function useShellRows(): {
+  readonly settings: ShellRowsSettings;
+  readonly error: string | undefined;
+  readonly select: (next: ShellRowsSettings) => void;
+} {
+  const [settings, setSettings] = useState<ShellRowsSettings>(() => SHELL_ROWS.current());
+  const [error, setError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const unsubscribe = SHELL_ROWS.subscribe(setSettings);
+    void SHELL_ROWS.load();
+    return unsubscribe;
+  }, []);
+  const select = useCallback((next: ShellRowsSettings) => {
+    setError(undefined);
+    SHELL_ROWS.set(next).catch(() => setError("That shell-rows setting didn't save"));
+  }, []);
+  return { settings, error, select };
+}
+
 function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   const palette = theme.palette;
+  const shellRows = useShellRows();
   const [computers, setComputers] = useState<readonly ComputerEntry[] | null>(null);
   const [storeError, setStoreError] = useState<string | undefined>(undefined);
   // The navigation ref exists only to route an incoming link: a `Linking` event
   // arrives outside the navigator's tree (11b.2, Owner Q6).
   const navigationRef = useNavigationContainerRef<RootStackParams>();
+  const routeQueue = useMemo(
+    () =>
+      createRouteQueue<unknown>((route) => {
+        if (route === "computers") {
+          navigationRef.navigate("Computers");
+          return;
+        }
+        navigationRef.navigate(
+          "Session",
+          route as { computerId: string; sessionId: string; title: string; archived: boolean },
+        );
+      }),
+    [navigationRef],
+  );
   // The lock's setting, read once at launch (D3). `loading` until the Keychain
   // answers: the lock screen covers the first frame in the meantime (F10).
   const [lockSetting, setLockSetting] = useState<LockDelay | "loading">("loading");
@@ -2023,6 +3046,11 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   useEffect(() => {
     replayPendingLink();
   }, [replayPendingLink]);
+  // `onReady`: the link replay AND the parked notification route.
+  const onNavigatorReady = useCallback(() => {
+    replayPendingLink();
+    routeQueue.flush(navigationRef.isReady());
+  }, [replayPendingLink, routeQueue, navigationRef]);
 
   // The app's unmount closes every live client: no socket, no listener left.
   useEffect(() => {
@@ -2036,12 +3064,12 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   // decision is `foreground-gate.ts`'s; this is the `AppState` wiring.
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
+      // Only `background` suspends (2d): `inactive` (Face ID, Control Center, a
+      // call banner) keeps the socket.
+      const action = foregroundAction(state);
       for (const link of LIVE_LINKS) {
-        if (state === "active") {
-          link.resume();
-        } else {
-          link.suspend();
-        }
+        if (action === "resume") link.resume();
+        else if (action === "suspend") link.suspend();
       }
     });
     return () => subscription.remove();
@@ -2073,22 +3101,9 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
         unlockApp: () => lock.current?.dispatch({ type: "authResult", result: "success" }),
         inForeground: () => AppState.currentState === "active",
         computerName: (computerId: string) => RECORDS.get(computerId)?.name ?? "your computer",
-        navigate: (route: unknown) => {
-          if (route === "computers") {
-            navigationRef.navigate("Computers");
-            return;
-          }
-          const to = route as {
-            computerId: string;
-            sessionId: string;
-            title: string;
-            archived: boolean;
-          };
-          if (!navigationRef.isReady()) {
-            return;
-          }
-          navigationRef.navigate("Session", to);
-        },
+        // Parked until the navigator is up (a tap that launched the app arrives
+        // before it mounts); `onNavigatorReady` replays it.
+        navigate: (route: unknown) => routeQueue.route(route, navigationRef.isReady()),
         refuse: (why: string) => {
           // One line, never the notification's text (decision 19 / task 14).
           APP_LOG.log("warn", "notify", { line: `refused ${why}` });
@@ -2151,7 +3166,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
       }
       started?.stop();
     };
-  }, [navigationRef]);
+  }, [navigationRef, routeQueue]);
 
   // The lock's ONE instance, created lazily on this render (a `useRef` initial
   // value would run on every render — `createAppLock` is cheap but its state is
@@ -2161,6 +3176,15 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
   }
   const lockInstance = lock.current;
   const lockView = lockInstance.view();
+  /**
+   * The sheets' drain reads `locked` from the LOCK, not from this render
+   * (docs/feat/mobile-native-sheets.md D3, Step 0b): `AppShell` re-renders for its
+   * own reasons, so `lockView` above is stale exactly when the lock changes
+   * without one. `LockGate`'s own dispatch is what notifies (`app-lock.ts`'s
+   * `subscribe`), and this subscription only mirrors the flag the sheets need.
+   */
+  const [sheetLocked, setSheetLocked] = useState(() => lockInstance.view().locked);
+  useEffect(() => lockInstance.subscribe((view) => setSheetLocked(view.locked)), [lockInstance]);
   const lockGateDeps = {
     lock: lockInstance,
     authenticate,
@@ -2328,7 +3352,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
 
   return (
     <LockGate {...lockGateDeps} palette={palette}>
-      <NavigationContainer ref={navigationRef} onReady={replayPendingLink}>
+      <NavigationContainer ref={navigationRef} onReady={onNavigatorReady}>
         <Stack.Navigator
           initialRouteName={initialRoute(computers)}
           screenOptions={{
@@ -2451,6 +3475,9 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                 themeBeta={theme.settings}
                 {...(theme.error === undefined ? {} : { themeError: theme.error })}
                 onThemeBeta={theme.select}
+                shellRows={shellRows.settings}
+                {...(shellRows.error === undefined ? {} : { shellRowsError: shellRows.error })}
+                onShellRows={shellRows.select}
                 activityMode={activitySettings.mode}
                 activityWritable={activityWritable}
                 {...(activityError === undefined ? {} : { activityError })}
@@ -2550,6 +3577,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     palette={palette}
                     onOpenDrawer={openDrawer}
                     drawerOpen={drawerOpen}
+                    locked={sheetLocked}
                     onNewSession={newSession}
                     computerId={route.params.computerId}
                     sessionId={route.params.sessionId}
@@ -2557,6 +3585,13 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     archived={route.params.archived}
                     focus={route.params.focus === true}
                     cwd={route.params.cwd}
+                    onOpenWorkflows={() =>
+                      navigation.navigate("WorkflowRuns", {
+                        computerId: route.params.computerId,
+                        name: RECORDS.get(route.params.computerId)?.name ?? "",
+                        sessionId: route.params.sessionId,
+                      })
+                    }
                     onOpenArtifacts={(from, open) =>
                       openArtifactGallery(navigation, {
                         computerId: route.params.computerId,
@@ -2596,6 +3631,192 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                   void shareCachedCopy(fileUri);
                 }}
                 onRenderError={(fields) => APP_LOG.log("error", "client-error", fields)}
+              />
+            )}
+          </Stack.Screen>
+          {/* Workflow runs (docs/feat/workflows-ui.md D4): two plain PUSH screens —
+              never the `Sheet` route, never a `<Modal>`. */}
+          <Stack.Screen name="WorkflowRuns" options={{ title: "Workflows", headerShown: false }}>
+            {({ navigation, route }) => (
+              <WorkflowRunsRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                name={route.params.name}
+                {...(route.params.sessionId === undefined
+                  ? {}
+                  : { sessionId: route.params.sessionId })}
+                onBack={() => navigation.goBack()}
+                onStart={(sessionId) =>
+                  navigation.navigate("WorkflowStart", {
+                    computerId: route.params.computerId,
+                    sessionId,
+                  })
+                }
+                onNew={(sessionId) =>
+                  navigation.navigate("WorkflowEdit", {
+                    computerId: route.params.computerId,
+                    sessionId,
+                  })
+                }
+                onOpen={(run) =>
+                  navigation.navigate("WorkflowRun", {
+                    computerId: route.params.computerId,
+                    sessionId: run.sessionId,
+                    runId: run.runId,
+                    title: run.name,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen
+            name="WorkflowRun"
+            options={({ route }) => ({ title: route.params.title, headerShown: false })}
+          >
+            {({ navigation, route }) => (
+              <WorkflowRunRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                runId={route.params.runId}
+                title={route.params.title}
+                onBack={() => navigation.goBack()}
+                onOpenSession={() =>
+                  navigation.navigate("Session", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    title: route.params.title,
+                    // From a live run: never the archived path (Owner Q4).
+                    archived: false,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          <Stack.Screen
+            name="WorkflowStart"
+            options={{ title: "Start a workflow", headerShown: false }}
+          >
+            {({ navigation, route }) => (
+              <WorkflowStartRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                {...(route.params.saved === undefined ? {} : { saved: route.params.saved })}
+                onBack={() => navigation.goBack()}
+                onOpenRun={(runId, name) =>
+                  navigation.navigate("WorkflowRun", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    runId,
+                    title: name,
+                  })
+                }
+                onEdit={(name) =>
+                  navigation.navigate("WorkflowEdit", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    name,
+                  })
+                }
+                onNew={() =>
+                  navigation.navigate("WorkflowEdit", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          {/* Create or edit a workflow (docs/feat/workflow-editor.md D8): a plain
+              PUSH beside `WorkflowStart` — never the `Sheet` route, never a
+              `<Modal>`. Identity only in the params: the draft, the problems and
+              every refusal belong to the editor's own controller. */}
+          <Stack.Screen
+            name="WorkflowEdit"
+            options={{ title: "Edit workflow", headerShown: false }}
+          >
+            {({ navigation, route }) => (
+              <WorkflowEditRoute
+                palette={palette}
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                {...(route.params.name === undefined ? {} : { name: route.params.name })}
+                onBack={() => navigation.goBack()}
+                // The existing start screen: back to it when the editor was pushed
+                // from there, else in the editor's place (`popTo`), never a second one.
+                onRun={(hash) =>
+                  navigation.popTo("WorkflowStart", {
+                    computerId: route.params.computerId,
+                    sessionId: route.params.sessionId,
+                    saved: hash,
+                  })
+                }
+              />
+            )}
+          </Stack.Screen>
+          {/* The native sheets (docs/feat/mobile-native-sheets.md D1): ONE route,
+              five kinds, presented as an iOS `formSheet` with three detents. The
+              detents, the opening index, the undimmed index and the grabber are
+              `sheetOptions`' — never restated here — so RNS's dev asserts cannot
+              fire. Nothing carries the sheet's CONTENT in params: the session
+              screen publishes it on `SHEET_HOSTS` (D2). */}
+          <Stack.Screen
+            name="Sheet"
+            options={({ route }) => ({
+              // The opening detent is the one the person left this sheet at, if
+              // any (D3 detent memory); the identity is the kind for the user
+              // sheets, the ask's own id for Permission (S5) — so a re-delivery
+              // of the SAME ask opens where the person left it.
+              ...sheetOptions(route.params.kind, {
+                ...sheetDetentContext(
+                  route.params.kind,
+                  sheetIdentity(route.params.kind, route.params.askId ?? null),
+                  PixelRatio.getFontScale(),
+                  // Session info opened on a section (`openScheduled`) scrolls
+                  // inside the sheet, so it opens at L (D3).
+                  route.params.reveal === true,
+                ),
+                // D5: an unanswered ask cannot be swiped away — it rides the
+                // params because options resolve before the screen mounts, so
+                // the sheet is un-swipeable from its first frame. The screen
+                // rewrites it in place once the ask settles (S5).
+                ...(route.params.asking === true ? { asking: true } : {}),
+              }),
+              contentStyle: { backgroundColor: palette[sheetGround(route.params.kind)] },
+            })}
+            listeners={({ route }) => ({
+              // Only a STABLE change is remembered (`recordDetent`): a re-push
+              // after the lock drain re-opens at it (Step 0b L3).
+              sheetDetentChange: (event) =>
+                recordDetent(
+                  SHEET_DETENTS,
+                  route.params.kind,
+                  sheetIdentity(route.params.kind, route.params.askId ?? null),
+                  event.data,
+                ),
+              // A swipe/backdrop that the blocked `gestureEnabled:false` refused
+              // (D5): RNS reports it, so the attempt is not silent — the light
+              // haptic and the inline footnote under the ask's options.
+              gestureCancel: () => {
+                const askId = route.params.askId;
+                if (route.params.kind !== "permission" || askId === undefined) {
+                  return;
+                }
+                playHaptic("light");
+                SHEET_HOLDS.note(holdKey(route.params.computerId, route.params.sessionId, askId));
+              },
+            })}
+          >
+            {({ navigation, route }) => (
+              <NativeSheetRoute
+                computerId={route.params.computerId}
+                sessionId={route.params.sessionId}
+                kind={route.params.kind}
+                // A KEYED pop: this screen's navigation dispatches with
+                // `source: route.key`, so `pop` removes this sheet only. An
+                // unkeyed `goBack()` would pop Session itself.
+                onClose={() => navigation.pop()}
               />
             )}
           </Stack.Screen>

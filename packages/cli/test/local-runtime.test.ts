@@ -37,6 +37,19 @@ import { createLocalRuntime, persistingController } from "../src/local-runtime.t
 import { SessionSaver } from "../src/session-saver.ts";
 import { recordWrite, saveFixture } from "./session-fixture.ts";
 
+/**
+ * Wait for an ASYNC condition; THROWS on a timeout (the shared `until` contract,
+ * AGENTS §9). A fixed sleep as a synchronisation point is long enough on an idle
+ * machine and not long enough under the CPU contention of a parallel gate.
+ */
+async function untilAsync(pred: () => Promise<boolean>, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!(await pred())) {
+    if (Date.now() > end) throw new Error(`untilAsync: timed out after ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
   readonly requests: ChatRequest[] = [];
@@ -115,6 +128,21 @@ const drain = async (gen: AsyncIterable<unknown>): Promise<void> => {
   for await (const _ of gen) {
     // consume
   }
+};
+
+/**
+ * Poll until `check` holds. A save reaches `<uid>.jsonl` in the background
+ * (fire-and-forget `SessionSaver.write`), so a fixed sleep races a loaded
+ * machine — wait for the fact itself, with a bound.
+ */
+const eventually = async (check: () => Promise<boolean>, what: string): Promise<void> => {
+  for (let i = 0; i < 400; i++) {
+    if (await check()) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out waiting for: ${what}`);
 };
 
 let dir: string;
@@ -291,8 +319,14 @@ describe("createLocalRuntime (local over RPC)", () => {
     });
 
     await drain(runtime.createSession().send("hello"));
-    // Give the post-turn snapshot/persist a tick to land.
-    await new Promise((r) => setTimeout(r, 20));
+    // Wait for the post-turn snapshot/persist to hold the very messages asserted
+    // next — "a record exists" is a weaker correlate that races the mid-turn save
+    // (AGENTS §2/§9).
+    await untilAsync(
+      async () =>
+        (await store.loadAll()).records[0]?.messages.map((m) => m.content).join("|") ===
+        "hello|hi back",
+    );
 
     const saved = (await store.loadAll()).records;
     expect(saved).toHaveLength(1);
@@ -471,7 +505,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       resume: null,
     });
     await drain(rt1.createSession().send("first question"));
-    await new Promise((r) => setTimeout(r, 20));
+    await eventually(async () => (await store.loadAll()).records.length > 0, "the first save");
     const record = (await store.loadAll()).records[0] ?? null;
     expect(record).not.toBeNull();
     rt1.dispose();
@@ -489,7 +523,6 @@ describe("createLocalRuntime (local over RPC)", () => {
       resume: record,
     });
     await drain(rt2.createSession().send("second question"));
-    await new Promise((r) => setTimeout(r, 20));
 
     // The model saw the resumed history before the new turn.
     expect(model2.requests[0]?.messages.map((m) => stripped(m.content))).toEqual([
@@ -497,7 +530,13 @@ describe("createLocalRuntime (local over RPC)", () => {
       "one",
       "second question",
     ]);
-    // And it was saved back under the SAME uid (one file, not two).
+    // And it was saved back under the SAME uid (one file, not two), the new
+    // exchange on the SAME file's end (a wait for the save, never a sleep: the
+    // assertion below would pass vacuously while only the first one had landed).
+    await eventually(
+      async () => ((await store.loadAll()).records[0]?.messages.length ?? 0) > 2,
+      "the second save",
+    );
     const all = (await store.loadAll()).records;
     expect(all).toHaveLength(1);
     expect(all[0]?.id).toBe(record?.id ?? "");
@@ -578,6 +617,115 @@ describe("createLocalRuntime (local over RPC)", () => {
     const rejCtl = persistingController(rejInner, () => {});
     const rejEnqueue = rejCtl.enqueue;
     await expect(rejEnqueue?.("nope")).rejects.toThrow(/method not found/);
+  });
+
+  // docs/feat/workflows-ui.md D2: the TUI reads a run's feed and acts on a run
+  // through the controller, so a forward dropped here leaves a rail that never
+  // repaints and a `/workflow` whose buttons do nothing — with no reason shown.
+  // Mutation: delete any of the three forwards below → red.
+  test("persistingController forwards onWorkflows / workflow / workflowStep to the inner session", async () => {
+    const seen: string[] = [];
+    const unsubscribe = () => {
+      seen.push("unsubscribe");
+    };
+    const inner = {
+      onWorkflows: (listener: (rows: readonly unknown[]) => void) => {
+        seen.push("onWorkflows");
+        listener([]);
+        return unsubscribe;
+      },
+      workflow: async (params: { action: string; runId?: string }) => {
+        seen.push(`workflow:${params.action}`);
+        return { ok: true, runId: "wf-1" };
+      },
+      workflowStep: async (runId: string, stepId: string, attempt?: number) => {
+        seen.push(`workflowStep:${runId}.${stepId}:${String(attempt)}`);
+        return { detail: { attempt: 0, round: 0, live: false } };
+      },
+      workflowCatalogue: async () => {
+        seen.push("workflowCatalogue");
+        return { workflows: [], dir: "/proj/.tentacle/workflows" };
+      },
+      readBack: async () => null,
+      onTitle: () => () => {},
+    } as unknown as RemoteSession;
+    const ctl = persistingController(inner, () => {});
+    let rows: readonly unknown[] | undefined;
+    const off = ctl.onWorkflows?.((next) => {
+      rows = next;
+    });
+    expect(seen).toEqual(["onWorkflows"]);
+    expect(rows).toEqual([]);
+    off?.();
+    expect(seen.at(-1)).toBe("unsubscribe");
+    expect(await ctl.workflow?.({ action: "stop", runId: "wf-1" })).toEqual({
+      ok: true,
+      runId: "wf-1",
+    });
+    // The attempt is passed through as given, and ABSENT stays absent (the
+    // daemon's "newest" — never a `0` invented here, which would ask for the
+    // first execution instead).
+    expect(await ctl.workflowStep?.("wf-1", "merge")).toEqual({
+      detail: { attempt: 0, round: 0, live: false },
+    });
+    await ctl.workflowStep?.("wf-1", "merge", 2);
+    // docs/feat/workflows-ui.md slice 5a: the TUI's `/workflow` reads the
+    // project's catalogue through the same controller. Mutation: drop this
+    // forward → the panel never lists a file.
+    expect(await ctl.workflowCatalogue?.()).toEqual({
+      workflows: [],
+      dir: "/proj/.tentacle/workflows",
+    });
+    expect(seen).toEqual([
+      "onWorkflows",
+      "unsubscribe",
+      "workflow:stop",
+      "workflowStep:wf-1.merge:undefined",
+      "workflowStep:wf-1.merge:2",
+      "workflowCatalogue",
+    ]);
+  });
+
+  // docs/feat/workflow-editor.md slice 4 (D5): the editor's two calls reach the
+  // daemon through the SAME controller, so a dropped forward leaves a phone-side
+  // feature with nothing behind it on the TUI's runtime — a silent no-op.
+  // Mutation: delete either forward below → red.
+  test("persistingController forwards workflowSource / workflowSave to the inner session", async () => {
+    const seen: string[] = [];
+    const inner = {
+      workflowSource: async (name: string) => {
+        seen.push(`workflowSource:${name}`);
+        return { ok: true, path: `.tentacle/workflows/${name}.yaml`, hash: "a".repeat(64) };
+      },
+      workflowSave: async (request: { name: string; dryRun: boolean; baseHash?: string }) => {
+        seen.push(`workflowSave:${request.name}:${String(request.dryRun)}:${request.baseHash}`);
+        return { ok: true, hash: "b".repeat(64), version: 2 };
+      },
+      readBack: async () => null,
+      onTitle: () => () => {},
+    } as unknown as RemoteSession;
+    const ctl = persistingController(inner, () => {});
+    expect(await ctl.workflowSource?.("task")).toEqual({
+      ok: true,
+      path: ".tentacle/workflows/task.yaml",
+      hash: "a".repeat(64),
+    });
+    const request = {
+      name: "task",
+      mode: "replace" as const,
+      draft: '{"name":"task"}',
+      prompts: [],
+      baseHash: "a".repeat(64),
+      dryRun: true,
+    };
+    expect(await ctl.workflowSave?.(request)).toEqual({
+      ok: true,
+      hash: "b".repeat(64),
+      version: 2,
+    });
+    // The request is forwarded AS GIVEN: `dryRun` and `baseHash` are the
+    // caller's decision (a Review preview vs the write), never the wrapper's.
+    expect(seen).toEqual(["workflowSource:task", `workflowSave:task:true:${"a".repeat(64)}`]);
   });
 
   // docs/feat/send-now-b.md: the send-now turn is saved like a `send` turn.
@@ -1841,7 +1989,10 @@ describe("N clients of one session (detached-handover)", () => {
       const { relay, tui } = await cutInTool();
       relay.runtime.stopSaving();
       await relay.runtime.release();
-      await new Promise((r) => setTimeout(r, 30));
+      // Wait for the TUI to HOLD the session (the hand-over landed; its quit's
+      // read-back has something to read), never a fixed 30 ms: under contention
+      // the hand-over has not landed yet and the record comes out short.
+      await untilAsync(async () => tui.runtime.holdsSession(UID));
       await tui.runtime.quit({ closeForAll: true });
       const stored = (await tui.store.loadAll()).records;
       const messages = stored[0]?.messages ?? [];

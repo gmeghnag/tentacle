@@ -21,14 +21,23 @@ export const MAX_NOISE_MESSAGE = 65_535;
  * Why a secure channel failed. `denied` is authenticated (only the holder of
  * the responder's static key can say it); every other kind is not.
  */
-export type NoiseErrorKind = "denied" | "timeout" | "closed" | "handshake-failed" | "bad-frame";
+export type NoiseErrorKind =
+  | "denied"
+  | "timeout"
+  | "closed"
+  | "handshake-failed"
+  | "bad-frame"
+  | "version-mismatch";
 
 export class NoiseError extends Error {
   readonly kind: NoiseErrorKind;
-  constructor(kind: NoiseErrorKind, message: string) {
+  /** On `version-mismatch`: the e2e channel version the peer named (unauthenticated). */
+  readonly remoteVersion?: number;
+  constructor(kind: NoiseErrorKind, message: string, remoteVersion?: number) {
     super(message);
     this.name = "NoiseError";
     this.kind = kind;
+    if (remoteVersion !== undefined) this.remoteVersion = remoteVersion;
   }
 }
 

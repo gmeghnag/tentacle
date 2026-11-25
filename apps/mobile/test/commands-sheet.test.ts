@@ -140,11 +140,10 @@ const press = (what: string) => () => {
 };
 
 /** The sheet tree for `rows`, with every handler recording its own call. */
-function draw(rows: readonly CommandRow[] = BASE, visible = true): readonly Node[] {
+function draw(rows: readonly CommandRow[] = BASE): readonly Node[] {
   return walk(
     sheet.CommandsSheet({
       palette: theme.lightPalette,
-      visible,
       rows,
       onCompact: press("compact"),
       onStopCompact: press("stop"),
@@ -175,8 +174,10 @@ describe("the sheet is one band of rows under the hub's own words", () => {
     for (const id of ["compact", "clear", "rename", "retry", "autoAccept"]) {
       expect(byId(nodes, `command-${id}`)).toBeDefined();
     }
-    // One sheet, exactly: never a second one behind it.
-    expect(all(nodes, "Modal")).toHaveLength(1);
+    // No `Modal` of its own any more: the stack's `Sheet` route presents it
+    // (docs/feat/mobile-native-sheets.md S3), and a JS modal left here would
+    // wedge every later native formSheet (F6).
+    expect(all(nodes, "Modal")).toHaveLength(0);
   });
 
   test("every row shows its one-line explanation, which the plan's mockup asks for", () => {
@@ -186,9 +187,26 @@ describe("the sheet is one band of rows under the hub's own words", () => {
     }
   });
 
-  test("a closed sheet still renders (the `Modal` decides), so a row never mounts late", () => {
-    const nodes = draw(BASE, false);
-    expect(all(nodes, "Modal")[0]?.props.visible).toBe(false);
+  test("it is drawn only when on screen, so it has no `visible` prop to mount late", () => {
+    // The presentation is the route's: a sheet that is not up is not mounted at
+    // all. What used to be "still renders, `visible` false" is now the host's
+    // `publish` (an unpublished kind draws nothing — `sheetRouteView`).
+    const props = Object.keys(
+      sheet.CommandsSheet({
+        palette: theme.lightPalette,
+        rows: BASE,
+        onCompact: press("compact"),
+        onStopCompact: press("stop"),
+        onArmClear: press("arm"),
+        onCancelClear: press("cancel"),
+        onClear: press("clear"),
+        onRename: press("rename"),
+        onRetry: press("retry"),
+        onAutoAccept: press("autoAccept"),
+        onClose: press("close"),
+      }).props as Record<string, unknown>,
+    );
+    expect(props).not.toContain("visible");
   });
 });
 
@@ -264,8 +282,10 @@ describe("Clear confirms INLINE, in its own row", () => {
     expect(texts(nodes)).not.toContain("clear explained twice");
     expect(byId(nodes, "command-clear-cancel")).toBeDefined();
     expect(byId(nodes, "command-clear-confirm")).toBeDefined();
-    // ONE sheet: the confirm never stacks a second modal.
-    expect(all(nodes, "Modal")).toHaveLength(1);
+    // ONE sheet: the confirm never stacks a second modal — and since
+    // docs/feat/mobile-native-sheets.md S3 the one sheet is the stack's route, so
+    // this file draws no `Modal` at all.
+    expect(all(nodes, "Modal")).toHaveLength(0);
     // A confirming row's own tap does nothing more: the two words decide.
     expect(tapTestID(nodes, "command-clear")).toBeUndefined();
   });
@@ -319,14 +339,21 @@ describe("the screen mounts it, on the controller's own view-model", () => {
   const ROOT = join(import.meta.dir, "..");
   const SCREEN = readFileSync(join(ROOT, "src", "screens", "SessionScreen.tsx"), "utf8");
 
-  test("`commandsOpen` is finally READ: the mount is what closes C1's no-op tap", () => {
-    const at = SCREEN.indexOf("<CommandsSheet");
+  test("`commandsOpen` is finally READ: it is what the publish block derives the stack from", () => {
+    // Since docs/feat/mobile-native-sheets.md S3 the sheet is a ROUTE: the screen
+    // publishes its element on `SHEET_HOSTS` and `desiredStack` decides whether a
+    // route is up. `commandsOpen` is read there — the mount is no longer what
+    // closes C1's no-op tap, the derived `desired` stack is.
+    // (`userSheet` in `sheet-plan.ts` maps the three flags to one sheet.)
+    expect(SCREEN).toContain("user: userSheet({ commands: commandsOpen,");
+    const at = SCREEN.indexOf('host.publish(\n      "commands"');
     expect(at).toBeGreaterThan(-1);
-    const props = SCREEN.slice(at, SCREEN.indexOf("/>", at));
-    expect(props).toContain("visible={commandsOpen}");
+    const props = SCREEN.slice(at, SCREEN.indexOf("/>,", at));
     // The rows come from `session-commands.ts`'s view-model, never built here.
     expect(props).toContain("rows={state.commands}");
     expect(props).toContain("onClose={closeCommands}");
+    // No `Modal` of its own: a JS modal here would wedge the native sheet (F6).
+    expect(props).not.toContain("visible=");
     expect(SCREEN).toContain("const closeCommands = () => setCommandsOpen(false);");
   });
 
@@ -335,7 +362,12 @@ describe("the screen mounts it, on the controller's own view-model", () => {
     expect(at).toBeGreaterThan(-1);
     const body = SCREEN.slice(at, SCREEN.indexOf("\n  };", at));
     expect(body).toContain("setCommandsOpen(false);");
-    expect(body).toContain("controller.beginRename();");
+    // The field is an RN `Modal`: it opens once the native sheet is GONE
+    // (docs/feat/mobile-native-sheets.md S3, `afterDismiss`), through the ONE
+    // `beginRename` the header title uses.
+    expect(body).toContain('queueAfterDismiss(queue, "rename")');
+    const run = SCREEN.slice(SCREEN.indexOf("const runIntent"));
+    expect(run.slice(0, run.indexOf("\n  };"))).toContain("controller.beginRename();");
   });
 
   test("it hides the floating button under itself, like every other sheet", () => {
@@ -345,8 +377,8 @@ describe("the screen mounts it, on the controller's own view-model", () => {
   });
 
   test("every action is the controller's own — no second command path", () => {
-    const at = SCREEN.indexOf("<CommandsSheet");
-    const props = SCREEN.slice(at, SCREEN.indexOf("/>", at));
+    const at = SCREEN.indexOf('host.publish(\n      "commands"');
+    const props = SCREEN.slice(at, SCREEN.indexOf("/>,", at));
     expect(props).toContain("onCompact={() => void controller.compact()}");
     expect(props).toContain("onStopCompact={() => controller.cancelCompaction()}");
     expect(props).toContain("onArmClear={() => controller.armClear()}");

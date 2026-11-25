@@ -13,9 +13,14 @@
  *    and no simulator.
  *
  * Load-bearing properties, each pinned by a test here:
- * - **register at most once per fingerprint per computer**: a re-connect with
- *   the same token, environment and key sends NOTHING (a daemon restart, a
- *   reconnect storm or a screen remount must not re-register);
+ * - **at most one registration per fingerprint per computer per app RUN**: a
+ *   re-connect with the same token, environment and key sends NOTHING (a daemon
+ *   restart, a reconnect storm or a screen remount must not re-register), while
+ *   the FIRST sync after a launch registers — so a registration the daemon lost
+ *   (an APNs `gone`, a hand-deleted file) heals on the next launch instead of
+ *   never (docs/fix/mobile-push-not-registered.md). The dedupe is the in-process
+ *   `registeredHash`; the Keychain record is NOT consulted for it, because it
+ *   outlives the daemon's copy and cannot know it changed;
  * - **any change of the fingerprint re-registers** (F11: iOS rotates the token;
  *   F12: the push key is regenerated) — the hash is over all three;
  * - **`MethodNotFound` is terminal, not retried** (F16): an older daemon
@@ -131,7 +136,11 @@ export interface PushPlanInput {
   readonly permission: PushPermission;
   /** Absent = the OS gave no token (a simulator, or a build with no entitlement). */
   readonly facts: PushFacts | undefined;
-  /** What this computer last accepted (from its own Keychain record). */
+  /**
+   * What this computer last accepted (from its own Keychain record). Kept for the
+   * toggle-off DEBT (`off: true`, so `last !== undefined` is what says a
+   * registration may exist to forget); it does NOT gate a registration.
+   */
   readonly last: PushRegistration | undefined;
 }
 
@@ -142,7 +151,7 @@ export interface PushPlanInput {
  * "we would not use it").
  */
 export function planPushRegistration(input: PushPlanInput): PushPlan {
-  const { state, permission, facts, last } = input;
+  const { state, permission, facts } = input;
   if (!state.enabled) {
     return { kind: "skip", reason: "disabled" };
   }
@@ -158,7 +167,15 @@ export function planPushRegistration(input: PushPlanInput): PushPlan {
     return { kind: "skip", reason: "no-token" };
   }
   const hash = pushFactsHash(facts);
-  if (last !== undefined && last.hash === hash) {
+  // Dedupe on THIS PROCESS's accepted fingerprint (`state.registeredHash`), never
+  // on `last.hash` — the Keychain record, which OUTLIVES the app
+  // (docs/fix/mobile-push-not-registered.md, root cause 2). A daemon-side delete
+  // (an APNs `gone`, a hand-deleted store file, a re-adoption) is invisible to the
+  // phone, so gating on the persisted record made one `gone` permanent: every
+  // later launch skipped `same` and the device was never registered again.
+  // Per-process, the launch after any such loss heals it with ONE register while
+  // a reconnect storm still sends nothing (`serialise` + this hash).
+  if (state.registeredHash === hash) {
     return { kind: "skip", reason: "same" };
   }
   return { kind: "register", hash };

@@ -11,7 +11,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DaemonDiscovery } from "@tentacle/protocol";
-import { type DuplexChannel, RpcPeer, createChannelPair } from "@tentacle/transport";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
+import {
+  type ByteCarrier,
+  type CarrierFrame,
+  RpcPeer,
+  carrierFrameOf,
+  createByteCarrierPair,
+  createChannelPair,
+} from "@tentacle/transport";
 import { noiseInitiator, publicKeyOf, systemRandom } from "@tentacle/transport/noise";
 import { Connection } from "../src/connection.ts";
 import { acceptDevice } from "../src/device-accept.ts";
@@ -116,10 +124,10 @@ const dummyHost = new SessionHost({
 /** `acceptDevice` on an in-memory channel for one serve's authority. */
 function acceptOn(a: DeviceAuthority, host: SessionHost = dummyHost) {
   const audit: string[] = [];
-  const [daemon, phone] = createChannelPair();
+  const [daemon, phone] = createByteCarrierPair();
   let built = 0;
   let closed = false;
-  const wrapped: DuplexChannel = {
+  const wrapped: ByteCarrier = {
     send: (d) => daemon.send(d),
     close: () => {
       closed = true;
@@ -147,7 +155,7 @@ function acceptOn(a: DeviceAuthority, host: SessionHost = dummyHost) {
   return { phone, audit, built: () => built, closedByDaemon: () => closed };
 }
 
-async function handshake(phone: DuplexChannel, privateKey: Uint8Array, computer: Uint8Array) {
+async function handshake(phone: ByteCarrier, privateKey: Uint8Array, computer: Uint8Array) {
   const secure = await noiseInitiator(phone, {
     staticKey: privateKey,
     remoteStatic: computer,
@@ -165,7 +173,7 @@ async function handshake(phone: DuplexChannel, privateKey: Uint8Array, computer:
 
 const initialize = (peer: RpcPeer) =>
   peer.request("initialize", {
-    protocolVersion: 24,
+    protocolVersion: PROTOCOL_VERSION,
     clientCapabilities: {},
     clientInfo: { name: "phone", version: "0" },
   });
@@ -458,11 +466,15 @@ describe("the device route names its serve (§5, Owner Q5)", () => {
       audit.some((line) => line.startsWith("e2e-rate-limited") || line.startsWith("auth-failure")),
     ).toBe(false);
     for (const path of ["/s/MINE/e2e", "/e2e"]) {
-      const raw = await new Promise<DuplexChannel>((resolve, reject) => {
+      const raw = await new Promise<ByteCarrier>((resolve, reject) => {
         const ws = new WebSocket(`${server.url}${path}`);
-        let onMessage: ((d: string) => void) | undefined;
+        let onMessage: ((d: CarrierFrame) => void) | undefined;
         let onClose: (() => void) | undefined;
-        ws.addEventListener("message", (e) => onMessage?.(String(e.data)));
+        ws.binaryType = "arraybuffer";
+        ws.addEventListener("message", (e) => {
+          const frame = carrierFrameOf(e.data);
+          if (frame !== null) onMessage?.(frame);
+        });
         ws.addEventListener("close", () => onClose?.());
         ws.addEventListener("error", () => reject(new Error(`dial ${path}`)));
         ws.addEventListener("open", () =>

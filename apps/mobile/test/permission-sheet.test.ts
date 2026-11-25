@@ -195,6 +195,27 @@ describe("the age guard (plan P10; mutation: ARM_MS = 0 → red)", () => {
   });
 });
 
+describe("the presented ask carries the daemon's id (S5 route param)", () => {
+  test("asking carries requestId, and null when the requester had none", async () => {
+    // Mutation: `requestId: entry.options?.requestId ?? null` → hardcoded null → red.
+    const { sheet, clock } = sheetAt();
+    const answer = sheet.requester(ask(), { requestId: "ask-7" });
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({ kind: "asking", requestId: "ask-7" });
+    clock.at += ARM_MS;
+    expect(sheet.answer("allow_once")).toBe("sent");
+    await answer;
+
+    const local = sheetAt();
+    const plain = local.sheet.requester(ask());
+    await Promise.resolve();
+    expect(local.sheet.view()).toMatchObject({ kind: "asking", requestId: null });
+    local.clock.at += ARM_MS;
+    expect(local.sheet.answer("allow_once")).toBe("sent");
+    await plain;
+  });
+});
+
 describe("the options are exactly what the daemon offered", () => {
   test("all three wherever a reply is offered", () => {
     expect(sheetOptions(ask()).map((o) => o.optionId)).toEqual([
@@ -402,5 +423,61 @@ describe("labelRuns: a label's `code` spans (no literal backticks on screen, B3)
 
   test("an unpaired backtick is kept as text (never a half-open code run)", () => {
     expect(labelRuns("it`s fine")).toEqual([{ text: "it`s fine", code: false }]);
+  });
+});
+
+describe("answerFor: a workflow card answers ONE named ask (docs/feat/workflows-ui.md D4)", () => {
+  test("the ask on screen carries its agent id, for the step pairing (`askForStep`)", async () => {
+    const { sheet } = sheetAt();
+    void sheet.requester(ask({ kind: "workflow_approve" }), {
+      requestId: "ask-1",
+      agent: { type: "workflow", description: "merge", id: "wf-1.merge" },
+    });
+    await Promise.resolve();
+    expect(sheet.view()).toMatchObject({
+      kind: "asking",
+      requestId: "ask-1",
+      agentId: "wf-1.merge",
+    });
+    const plain = sheetAt();
+    void plain.sheet.requester(ask(), { requestId: "ask-2" });
+    await Promise.resolve();
+    expect(plain.sheet.view()).toMatchObject({ kind: "asking", agentId: null });
+  });
+
+  test("the named ask is settled through the SAME path as a tap on the sheet", async () => {
+    const { sheet, clock } = sheetAt();
+    const answer = sheet.requester(ask({ kind: "workflow_approve" }), { requestId: "ask-1" });
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    expect(sheet.answerFor("ask-1", "allow_once")).toBe("sent");
+    expect(await answer).toEqual({ allowed: true, scope: "once" });
+    expect(sheet.view().kind).toBe("idle");
+  });
+
+  test("a card for an ask that is no longer on screen answers NOTHING (stale card)", async () => {
+    // Mutation: answerFor ignores the id (calls `answer`) → the OTHER ask is allowed → red.
+    const { sheet, clock } = sheetAt();
+    let settled = false;
+    void sheet.requester(ask({ title: "other" }), { requestId: "ask-2" }).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    clock.at += ARM_MS;
+    expect(sheet.answerFor("ask-1", "allow_once")).toBe("ignored");
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(sheet.view()).toMatchObject({ kind: "asking", requestId: "ask-2" });
+  });
+
+  test("the age guard holds for a card too, and the reply option is not a card answer", async () => {
+    const { sheet, clock } = sheetAt();
+    void sheet.requester(ask(), { requestId: "ask-1" });
+    await Promise.resolve();
+    expect(sheet.answerFor("ask-1", "reject_once")).toBe("ignored");
+    clock.at += ARM_MS;
+    expect(sheet.answerFor("ask-1", "reply")).toBe("ignored");
+    expect(sheet.view().kind).toBe("asking");
+    expect(sheet.answerFor("ask-1", "reject_once")).toBe("sent");
   });
 });

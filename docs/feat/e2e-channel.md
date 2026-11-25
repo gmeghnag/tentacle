@@ -353,9 +353,13 @@ Nothing reaches `RpcPeer` before the confirm: the daemon constructs its
 - The address is not bound (decision 2: the link addresses, it never authorises).
   A relay cannot redirect the client elsewhere, because `rs` is pinned.
 
-**Framing.** A wire frame is the text `t1:` + canonical base64 of one Noise
-message. The tag lets a peer not speaking this channel (or another version) fail
-with a clear error before any decrypt, and is covered by the prologue version.
+**Framing.** v2 (`docs/feat/noise-binary-carrier.md`): one **binary** WebSocket
+message per Noise message. Handshake flights 1–2 carry a cleartext version byte
+(`[2] ‖ message`), so a skew is named before any decrypt (a 1-byte frame `[v]` is a
+version refusal); the confirm and transport messages are the raw Noise message.
+The prologue `tentacle-e2e/2` still binds the version. A text frame is never
+valid: `t1:…` in the handshake is a v1 peer (`version-mismatch`), anything else
+`bad-frame`. (v1 used the text `t1:` + canonical base64 of one Noise message.)
 
 - A Noise message is at most 65 535 bytes (spec), and RPC frames reach megabytes,
   so a frame is split. The plaintext of each transport message is one type byte +
@@ -514,7 +518,7 @@ and it belongs to the other branch now).
 | Garbled or forged message 2 | Decrypt fails → close | `rejected`, transient, never terminal |
 | Status byte unknown | Violation → close | as above |
 | Low-order `e` or `s` (zero DH) | DH must throw → handshake fails | closed; verified by test, not assumed of noble |
-| Plaintext peer (old daemon answers JSON) | Missing `t1:` → `bad-frame` | clear error, no decrypt attempted |
+| Plaintext peer (old daemon answers JSON) | A text frame → `bad-frame` (v2: binary frames only; a `t1:` one is `version-mismatch` v1) | clear error, no decrypt attempted |
 | Another `E2E_CHANNEL_VERSION` | Tag mismatch → close | clear on the responder; generic `closed` on the initiator |
 | Silent peer | Timer closes raw | `timeout`; both ends |
 | Oversized handshake frame | Rejected before decoding | closed |

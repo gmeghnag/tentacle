@@ -358,3 +358,63 @@ describe("reduceAppLock is pure and total", () => {
     expect(start.prompted).toBe(false);
   });
 });
+
+describe("createAppLock's subscription — the sheets read `locked` from here (S3)", () => {
+  /** A lock whose setting is loaded and capability is known, then unlocked. */
+  function unlocked(now: () => number) {
+    const lock = createAppLock({ now });
+    lock.dispatch({ type: "launch" });
+    lock.dispatch({ type: "capability", capability: "ok" });
+    lock.dispatch({ type: "loaded", setting: "immediately" });
+    lock.dispatch({ type: "authResult", result: "success" });
+    return lock;
+  }
+
+  test("a listener sees every new view, and `locked` really changes", () => {
+    const at = 1_000;
+    const lock = unlocked(() => at);
+    const seen: boolean[] = [];
+    lock.subscribe((view) => seen.push(view.locked));
+    expect(lock.view().locked).toBe(false);
+    // Going to the background under `immediately` locks at once (app-lock D1).
+    lock.dispatch({ type: "appState", state: "background" });
+    expect(seen).toEqual([true]);
+    expect(lock.view().locked).toBe(true);
+  });
+
+  test("the reloaded setting reaches a listener too (the `loaded` leg)", () => {
+    const lock = createAppLock({ now: () => 0 });
+    const covers: string[] = [];
+    lock.subscribe((view) => covers.push(view.cover));
+    lock.dispatch({ type: "launch" });
+    lock.dispatch({ type: "capability", capability: "ok" });
+    // Still `loading` → covered (F10); then the read lands.
+    expect(lock.view().cover).toBe("lock");
+    lock.dispatch({ type: "loaded", setting: "never" });
+    expect(covers[covers.length - 1]).toBe("none");
+    expect(lock.view().cover).toBe("none");
+  });
+
+  test("unsubscribing stops it, and a listener still hears every later event", () => {
+    const lock = createAppLock({ now: () => 0 });
+    const calls: string[] = [];
+    const off = lock.subscribe(() => calls.push("first"));
+    lock.subscribe(() => calls.push("second"));
+    lock.dispatch({ type: "launch" });
+    expect(calls).toEqual(["first", "second"]);
+    off();
+    lock.dispatch({ type: "tick" });
+    expect(calls).toEqual(["first", "second", "second"]);
+  });
+
+  test("the lock is NOT penetrated by a subscriber list shared between instances", () => {
+    // Two instances are two truths (the fail-open risk LockGate's own doc names):
+    // one's listeners must never hear the other's events.
+    const a = createAppLock({ now: () => 0 });
+    const b = createAppLock({ now: () => 0 });
+    const heard: string[] = [];
+    a.subscribe(() => heard.push("a"));
+    b.dispatch({ type: "launch" });
+    expect(heard).toEqual([]);
+  });
+});

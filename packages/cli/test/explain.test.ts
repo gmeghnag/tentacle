@@ -20,7 +20,8 @@ const lines = (key: string | undefined, opts: { all?: boolean } = {}): string[] 
 describe("explain with no key: the top level only", () => {
   test("one line per top-level key, sections marked with their sub-key count", () => {
     const out = lines(undefined);
-    expect(out.some((line) => /^\s*model\b.*\(11 sub-keys\)/.test(line))).toBe(true);
+    // 13 since image-view (`model.imageDetail`, `model.imageTokens`).
+    expect(out.some((line) => /^\s*model\b.*\(13 sub-keys\)/.test(line))).toBe(true);
     // 10 since subagent-token-budget (`subagents.maxTokens`).
     expect(out.some((line) => /^\s*subagents\b.*\(10 sub-keys\)/.test(line))).toBe(true);
     // 12 since attachments-prompt (`models.*.images`).
@@ -59,8 +60,8 @@ describe("explain with no key: the top level only", () => {
     if (!result.ok) throw new Error("expected ok");
     const model = result.entries.find((e) => e.path === "model");
     expect(model?.kind).toBe("section");
-    expect(model?.subKeys).toBe(11);
-    expect(text(undefined)).toContain("(11 sub-keys)");
+    expect(model?.subKeys).toBe(13);
+    expect(text(undefined)).toContain("(13 sub-keys)");
   });
 
   test("it is a list, not a wall of prose: one line per key on a wide terminal", () => {
@@ -297,7 +298,7 @@ describe("--json", () => {
     const parsed = JSON.parse(renderExplainJson(result)) as {
       entries: { path: string; subKeys?: number }[];
     };
-    expect(parsed.entries.find((e) => e.path === "model")?.subKeys).toBe(11);
+    expect(parsed.entries.find((e) => e.path === "model")?.subKeys).toBe(13);
   });
 
   test("an error serialises as the error, with its suggestions", () => {

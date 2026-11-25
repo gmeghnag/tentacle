@@ -46,6 +46,7 @@ import {
   stopArmed,
 } from "../activity-panel.ts";
 import { type ActivityGroup, type ActivityView, oneLine } from "../activity.ts";
+import { ACTIVITY_SHEET_RESIZE_MS } from "../motion.ts";
 import type { ChildAction, JobAction } from "../session-screen-controller.ts";
 import type { ActivityFocus, SheetDetail } from "../subagent-detail.ts";
 import { DENSE_FONT_SCALE, type Palette, size as SIZE, radius, typography } from "../theme.ts";
@@ -221,9 +222,11 @@ export function ActivitySheet({
     (to: number, done?: () => void) => {
       setShown(to);
       if (reduceMotion) {
-        Animated.timing(height, { toValue: to, duration: 150, useNativeDriver: false }).start(() =>
-          done?.(),
-        );
+        Animated.timing(height, {
+          toValue: to,
+          duration: ACTIVITY_SHEET_RESIZE_MS,
+          useNativeDriver: false,
+        }).start(() => done?.());
         return;
       }
       Animated.spring(height, {

@@ -46,7 +46,12 @@ import {
   DevicePushUnregisterParamsSchema,
   DevicePushUnregisterResultSchema,
 } from "./push.ts";
-import { LogParamsSchema, LogResultSchema } from "./session-log.ts";
+import {
+  LogParamsSchema,
+  LogResultSchema,
+  WorkflowStepParamsSchema,
+  WorkflowStepResultSchema,
+} from "./session-log.ts";
 import {
   AgentKillParamsSchema,
   AgentKillResultSchema,
@@ -79,6 +84,8 @@ import {
   ReclaimResultSchema,
   RenameParamsSchema,
   RenameResultSchema,
+  ScheduleCreateParamsSchema,
+  ScheduleCreateResultSchema,
   ScheduleDeleteParamsSchema,
   ScheduleDeleteResultSchema,
   SendNowParamsSchema,
@@ -98,6 +105,16 @@ import {
   UnqueueResultSchema,
   UpdateSettingsParamsSchema,
   UpdateSettingsResultSchema,
+  WorkflowCatalogueParamsSchema,
+  WorkflowCatalogueResultSchema,
+  WorkflowListParamsSchema,
+  WorkflowListResultSchema,
+  WorkflowParamsSchema,
+  WorkflowResultSchema,
+  WorkflowSaveParamsSchema,
+  WorkflowSaveResultSchema,
+  WorkflowSourceParamsSchema,
+  WorkflowSourceResultSchema,
 } from "./session.ts";
 import { SessionSkillsParamsSchema, SessionSkillsResultSchema } from "./skills.ts";
 import { SessionToolsParamsSchema, SessionToolsResultSchema } from "./tools.ts";
@@ -155,6 +172,44 @@ export const Method = {
    * daemon-side (it is state, never a turn), so it never awaits the peer.
    */
   ScheduleDelete: "session/schedule_delete",
+  /**
+   * The user schedules a workflow to start by itself (agent-workflows slice 10).
+   * Synchronous up to the create; a needed hash approval is raised, never awaited.
+   */
+  ScheduleCreate: "session/schedule_create",
+  /**
+   * The user starts / stops / resumes a workflow run, or re-runs one step
+   * (docs/feat/agent-workflows.md D3). An older daemon answers `MethodNotFound`.
+   */
+  Workflow: "session/workflow",
+  /**
+   * ONE step execution's `prompt`/`report` (docs/feat/workflows-ui.md D1): the
+   * detail the `workflows` row does not carry. Read-only and synchronous
+   * daemon-side. An older daemon answers `MethodNotFound`.
+   */
+  WorkflowStep: "session/workflow_step",
+  /**
+   * The project's workflow FILES, validated against this session (D6): what the
+   * phone's "start a workflow" lists and `/workflow` names its folder from.
+   * Read-only, model-free, deterministic. An older daemon answers `MethodNotFound`.
+   */
+  WorkflowCatalogue: "session/workflow_catalogue",
+  /** Every live session's workflow runs (serve only; the phone's run list, D5). */
+  WorkflowList: "workflow/list",
+  /**
+   * Read one workflow file as a DRAFT, for the phone's editor
+   * (docs/feat/workflow-editor.md D3): its YAML, the parsed mapping (as JSON
+   * text — the phone has no YAML), the prompts its steps reference, and this
+   * session's model names. Read-only, model-free. An older daemon answers
+   * `MethodNotFound`, which the client maps to `unsupported`.
+   */
+  WorkflowSource: "session/workflow_source",
+  /**
+   * Preview (`dryRun: true`, the Review screen) or WRITE one workflow file plus
+   * its prompts (D3/D4). Writing is a write and NOTHING else: it never approves
+   * a hash, so the next start asks as any hand-edited file does (D2's invariant).
+   */
+  WorkflowSave: "session/workflow_save",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
@@ -295,6 +350,25 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: ScheduleDeleteParamsSchema,
     result: ScheduleDeleteResultSchema,
   },
+  [Method.ScheduleCreate]: {
+    params: ScheduleCreateParamsSchema,
+    result: ScheduleCreateResultSchema,
+  },
+  [Method.Workflow]: { params: WorkflowParamsSchema, result: WorkflowResultSchema },
+  [Method.WorkflowStep]: {
+    params: WorkflowStepParamsSchema,
+    result: WorkflowStepResultSchema,
+  },
+  [Method.WorkflowCatalogue]: {
+    params: WorkflowCatalogueParamsSchema,
+    result: WorkflowCatalogueResultSchema,
+  },
+  [Method.WorkflowList]: { params: WorkflowListParamsSchema, result: WorkflowListResultSchema },
+  [Method.WorkflowSource]: {
+    params: WorkflowSourceParamsSchema,
+    result: WorkflowSourceResultSchema,
+  },
+  [Method.WorkflowSave]: { params: WorkflowSaveParamsSchema, result: WorkflowSaveResultSchema },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {
     params: ModelStreamChunkedParamsSchema,

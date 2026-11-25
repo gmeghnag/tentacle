@@ -67,6 +67,7 @@ import {
   type RenameResult,
   type ResolvePermissionParams,
   type ResolvePermissionResult,
+  type ScheduleCreateParams,
   type ScheduleDeleteParams,
   type SendNowParams,
   type SessionContextParams,
@@ -94,6 +95,12 @@ import {
   type WatchParams,
   type WatchResult,
   type WireChatRequest,
+  type WorkflowCatalogueParams,
+  type WorkflowCatalogueResult,
+  type WorkflowParams,
+  type WorkflowSaveParams,
+  type WorkflowSourceParams,
+  type WorkflowStepParams,
   isWakeTurnId,
 } from "@tentacle/protocol";
 import {
@@ -442,6 +449,42 @@ export class Connection {
         const { sessionId, agentId, text } = params as SubagentMessageParams;
         return this.messageSubagent(this.lookup(sessionId), agentId, text);
       }
+      // A run starts / stops and returns at once (its approval is the run's
+      // first wait, never this request's): no lock, no turn awaited (AGENTS §7).
+      case Method.Workflow: {
+        const workflowParams = params as WorkflowParams;
+        return this.lookup(workflowParams.sessionId).workflow(workflowParams);
+      }
+      // Daemon-wide read: attaches this connection to nothing.
+      case Method.WorkflowList:
+        return this.host.workflowList();
+      // Likewise synchronous from the retained log (AGENTS §7): one step's
+      // detail, never a turn awaited (docs/feat/workflows-ui.md D1).
+      case Method.WorkflowStep: {
+        const step = params as WorkflowStepParams;
+        return this.lookup(step.sessionId).workflowStep(step);
+      }
+      // Likewise a READ (docs/feat/workflows-ui.md slice 5a): one walk of the
+      // project's workflow folder, no ask, no run (AGENTS §7 — it never awaits a
+      // turn, though the walk itself is async off the event loop). No session id
+      // → the catalogue a session created now would read (`session/skills`'s
+      // precedent): a client opens its session lazily, at the first prompt.
+      case Method.WorkflowCatalogue: {
+        const catalogue = params as WorkflowCatalogueParams;
+        return this.workflowCatalogue(catalogue.sessionId);
+      }
+      // An EDITOR's read and write (docs/feat/workflow-editor.md D3/D4): the read
+      // never awaits a turn; the write is the writer's one synchronous block, so
+      // two saves through this daemon cannot interleave (the second gets
+      // `changed`). No lock on either (AGENTS §7).
+      case Method.WorkflowSource: {
+        const source = params as WorkflowSourceParams;
+        return this.lookup(source.sessionId).workflowSource(source);
+      }
+      case Method.WorkflowSave: {
+        const save = params as WorkflowSaveParams;
+        return this.lookup(save.sessionId).workflowSave(save);
+      }
       case Method.AgentKill: {
         const { sessionId, agentId } = params as AgentKillParams;
         return this.lookup(sessionId).killSubagent(agentId);
@@ -460,6 +503,12 @@ export class Connection {
         // Synchronous (docs/feat/cron-tool.md D5): never waits on a turn.
         const { sessionId, scheduleId } = params as ScheduleDeleteParams;
         return this.lookup(sessionId).deleteSchedule(scheduleId);
+      }
+      case Method.ScheduleCreate: {
+        // agent-workflows slice 10: answers up to the create (reads the file);
+        // the approval ask is raised, never awaited (§7).
+        const create = params as ScheduleCreateParams;
+        return this.lookup(create.sessionId).scheduleCreateRpc(create);
       }
       case Method.McpStatus:
         return this.mcpStatus();
@@ -677,6 +726,17 @@ export class Connection {
       return this.host.newSessionTools(this.servesModel ? this : null, params.settings);
     }
     return this.lookup(params.sessionId).tools();
+  }
+
+  // No lock (AGENTS §7). A session id must be one this connection opened; none
+  // → the project's catalogue a session created now would read (the
+  // `session/skills`/`session/tools` precedent, docs/fix/workflows-ux.md S8b):
+  // the TUI's `/workflow` panel is asked before the first message creates one.
+  private async workflowCatalogue(sessionId: string | undefined): Promise<WorkflowCatalogueResult> {
+    if (sessionId === undefined) {
+      return this.host.newSessionWorkflowCatalogue(this.servesModel ? this : null);
+    }
+    return this.lookup(sessionId).workflowCatalogue();
   }
 
   private snapshot(params: SnapshotParams): SnapshotResult {

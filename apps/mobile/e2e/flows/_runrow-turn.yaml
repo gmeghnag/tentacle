@@ -1,0 +1,87 @@
+appId: so.tentacle.app
+---
+# One `RUNROW38` turn (flow 38, docs/fix/mobile-running-row.md), shot as
+# `${PHASE}-running`, `${PHASE}-thinking`, `${PHASE}-detail` (light + dark).
+- tapOn:
+    id: "composer-input"
+- inputText: "RUNROW38"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+# The described shell runs ~20 s (both appearances shot while it runs): the live row (sentence + running node).
+- extendedWaitUntil:
+    visible:
+      id: "tool-mocked-.*-running"
+    timeout: 20000
+- assertVisible:
+    id: "tool-mocked-.*-running"
+    text: "Test DNS con 50 query e latenze misurate.*"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "${PHASE}-running"
+# Round 2: the FAILED described shell asks its own permission (fix round 1).
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 30000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "thinking-footer"
+    timeout: 30000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "${PHASE}-thinking"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 40000
+# The tap detail: the command and the output — never the folded thought.
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: -1
+- extendedWaitUntil:
+    visible:
+      id: "tool-mocked-.*-output"
+    timeout: 5000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "${PHASE}-detail"
+- assertNotVisible:
+    text: ".*Measure the resolver latency.*"
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: -1
+# The FAILED step with a command longer than one line (fix round 1): `exit N` at
+# the end of the `$` line — never cut — the branch off the rail onto that line,
+# and an open body that repeats neither the command nor the code.
+- scrollUntilVisible:
+    element:
+      id: "tool-mocked-.*-error"
+    direction: DOWN
+- tapOn:
+    id: "tool-mocked-.*-error"
+    index: -1
+- extendedWaitUntil:
+    visible:
+      id: "tool-mocked-.*-output"
+    timeout: 5000
+- assertVisible:
+    text: ".*exit 125.*"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "${PHASE}-failed"
+- tapOn:
+    id: "tool-mocked-.*-error"
+    index: -1

@@ -42,6 +42,37 @@ attempt is killed after `--flow-timeout` / `E2E_FLOW_TIMEOUT_S` seconds (default
 `<runDir>/summary.txt` and `summary.json`; a failed flow keeps Maestro's
 screenshots + `maestro.log` in `<runDir>/ios<major>/<flow>/`.
 
+### Two simulators at once (docs/feat/e2e-parallel-gate.md)
+
+```sh
+scripts/e2e-gate.sh <udidA>,<udidB>        # the SAME suite, half the wall time
+```
+
+One Release build is installed on both; the flows are split between them by
+their last recorded durations (from every finished run's `summary.json`), keeping
+together the ones that read the same seeded session — 07 adds a turn to the
+session 26 renames, so they cannot be separated. Each half gets its own `serve`,
+mock model and Maestro device, so the halves cannot see each other. The end is
+still ONE table and ONE exit code, in the same `FLOWS` order as a single run:
+
+- `--only` runs on both; a shard with nothing to run simply starts nothing.
+- A flow that a dead or crashed half never reported is RED, pointing at that
+  half's dir — the gate never gets greener by running in parallel.
+- `<runDir>/summary.txt` + `summary.json` are the merged result;
+  `<runDir>/<sim-udid8>/` holds that half's artefacts and `<runDir>/<sim-udid8>.log`
+  its output, every line tagged with its shard as a suffix (`✗ 07-prompt … [sim-0FA4B51F]`),
+  so `grep '^✗'` and `awk '{print $2}'` still find the flow name.
+- `Ctrl+C` on the parent stops both halves (and their Maestro drivers).
+
+**The app cache.** A Release build is reused across runs when nothing it is
+built from changed: the key is the content of every tracked app/package source
+plus `xcodebuild -version` and the Bun version (the e2e harness, the flows and
+unit tests are excluded — the bundle never imports them). A cached build lives
+under `.tentacle/tmp/e2e-app-cache/<key>/` (shared by every worktree), the three
+newest are kept, and a hit logs `app: cached <key12>`. A JS change is a new key,
+because `apps/mobile/src` and `packages/*/src` are inputs. `--no-app-cache` (or
+`E2E_NO_APP_CACHE=1`) forces a rebuild; a cache FAILURE never fails a gate.
+
 Exit: `0` every counted flow passed · `1` a counted flow failed or timed out ·
 `2` a missing prerequisite, a bad UDID or a tag without its reason · other = build.
 

@@ -356,6 +356,35 @@ A non-loopback `--host` requires a token. TLS: `--tls-cert`/`--tls-key` on
 `serve`; `--ca-cert FILE` on `connect` for a private CA. Details:
 [`docs/architecture/F3-remote-control.md`](./docs/architecture/F3-remote-control.md).
 
+**A2A: other agents can call a `serve`.** With `--a2a-token T` (or
+`--a2a-token-command CMD`) the daemon also speaks
+[A2A](https://a2a-protocol.org) 1.0 over JSON-RPC: the public agent card at
+`/.well-known/agent-card.json`, and `POST /a2a` (`SendMessage`,
+`SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`,
+`SubscribeToTask`) behind `Authorization: Bearer <A2A token>`. It is a token of
+its own, never `--token`; without it A2A is off. A caller's `contextId` is a
+session (`a2a-default-<contextId>`) and each turn is a task; tasks survive a
+restart and stay readable once their session is archived. The owner is always
+asked first: `--a2a-asks both` lets the caller answer tool asks too (file
+approvals stay owner-only), and `--a2a-workflows` lets it start workflow runs
+(off by default). Design: [`docs/feat/a2a.md`](./docs/feat/a2a.md).
+
+**MCP server: Claude Code and other MCP clients can call a `serve`.** With
+`--mcp-token T` (or `--mcp-token-command CMD`) the daemon also answers
+`POST /mcp` (Streamable HTTP) behind `Authorization: Bearer <MCP token>`, a
+token of its own (never `--token` or the A2A one); without it MCP is off.
+Tools: `session_start`, `session_send`, `session_status` (`waitSeconds` waits),
+`session_answer`, `session_cancel`, `session_list`. A session it starts is
+`mcp-default-<uuid>` and shows up on your phone like any other. The owner is
+asked first: `--mcp-asks both` lets the caller answer tool asks too (file
+approvals stay owner-only). `serve` prints the line to register it:
+
+```
+claude mcp add --transport http tentacle http://127.0.0.1:4000/mcp --header "Authorization: Bearer <token>"
+```
+
+Design: [`docs/feat/serve-mcp-server.md`](./docs/feat/serve-mcp-server.md).
+
 `tentacle --help` lists every flag.
 
 ## Configuration
@@ -374,6 +403,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | --- | --- | --- | --- |
 | `$schema` | — | — | A JSON-schema pointer for editor completion; accepted and ignored. |
 | `autoWake` | `TENTACLE_AUTO_WAKE` | true | Start a continuation turn when a background job exits while idle. |
+| `beta.compactShell` | — | false | No effect on the TUI any more: a `shell` row has one shape (the phone still honours it). |
 | `contextAwareness.enabled` | — | true | Whether the model is told how full its context is. |
 | `contextAwareness.stepPercent` | — | 1 | A line per this many percent of the window (1–100). |
 | `contextPrune.enabled` | — | false | Whether the model's copy of the history is pruned in batches. |
@@ -385,6 +415,11 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | -1 | Resets allowed per user message (-1 = unlimited). |
 | `detach.keepAwake` | — | true | Hold a macOS sleep assertion while a turn of a detached run runs. |
 | `engine` | `TENTACLE_ENGINE` | "kubernetes" | Default engine of `run`/`attach`: kubernetes, docker or podman; `--engine` wins, unknown refused. |
+| `harnesses.*.adapter` | — | — | Which adapter the instance runs on; defaults to the instance name. |
+| `harnesses.*.command` | — | — | The executable to run (unset: `claude`). |
+| `harnesses.*.enabled` | — | — | Offer this harness's sub-agent type (default on). |
+| `harnesses.*.idleMinutes` | — | — | Hang guard: a run with no output for this many minutes is stopped (unset: 15). |
+| `harnesses.*.model` | — | — | The model when an `agent_task` call names none (unset: `opus`). |
 | `hooks` | — | — | Shell commands run on agent events, with a JSON input on stdin. |
 | `liveActivity.enabled` | — | `true` | Whether a `serve` starts a live activity at all. |
 | `liveActivity.startAfterSeconds` | — | `20` | How long a turn must run before a phone that is not watching it gets an activity. |
@@ -404,6 +439,8 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `model.autoTitle` | — | false | Ask a model to name each session after its first exchange. |
 | `model.baseURL` | `TENTACLE_MODEL_BASE_URL` | `http://localhost:8080/v1` (openai) or `https://api.anthropic.com/v1` (anthropic) | The endpoint, including its API version. |
 | `model.contextWindow` | `TENTACLE_CONTEXT_WINDOW` | 128000 | The context window in tokens: the fill meter and the model's context line. |
+| `model.imageDetail` | — | — | The detail image_view sends a PDF's picture at: auto, low or high. |
+| `model.imageTokens` | — | — | Tokens one image costs the context estimate (prune and the meter). |
 | `model.images` | — | — | Whether this model takes images at all (an attached screenshot reaches it). |
 | `model.maxImageBytes` | — | — | Raw bytes one image may have on this model's wire (its own limit). |
 | `model.maxTokens` | `TENTACLE_MAX_TOKENS` | omitted for openai (the server decides); `64000` for anthropic | Max output tokens per response (`max_tokens` on the wire). |

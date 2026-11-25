@@ -33,11 +33,9 @@ export interface NoticeLook {
   readonly joined: boolean;
 }
 
-/** Whether `row` is a harness line: a notice that is not a full-width separator rule. */
-export function isHarness(row: Row | undefined): row is Extract<Row, { kind: "notice" }> & {
-  readonly separator?: undefined;
-} {
-  return row !== undefined && row.kind === "notice" && row.separator !== true;
+/** Whether `row` is a harness line: a notice, as opposed to any other row kind. */
+export function isHarness(row: Row | undefined): row is Extract<Row, { kind: "notice" }> {
+  return row !== undefined && row.kind === "notice";
 }
 
 /** One harness line's level, `info` unless a warning. */

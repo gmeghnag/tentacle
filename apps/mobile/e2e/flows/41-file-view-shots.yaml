@@ -1,0 +1,126 @@
+appId: so.tentacle.app
+---
+# 41-file-view-shots (docs/feat/mobile-file-view.md, Validation part 1): the
+# coloured file bodies. `FILEVIEW41` makes the mock model (mock-model.ts
+# `FILEVIEW_PROMPT`) WRITE a new html page (a `<style>` and a `<script>`), READ a
+# range of it, EDIT it once and MULTI-EDIT it — four steps, in that order. The
+# shots (light + dark, `_shot`) are the visual review's evidence: all collapsed,
+# each step open (the preview), and the full view of the Read and the MultiEdit.
+# Ids are regexes: the mock's call ids are minted across the whole run; the
+# steps are addressed by their order in the thread.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${FILEVIEW_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${FILEVIEW_ID}"
+- assertVisible:
+    id: "session-view"
+- tapOn:
+    id: "composer-input"
+- inputText: "FILEVIEW41"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+# Write, Edit and MultiEdit are ask tools: approve each (the Read is not).
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 30000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-collapsed"
+# Write (step 1): open = the preview.
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: 0
+- assertVisible:
+    id: "file-mocked-.*-header"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-write-open"
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: 0
+# Read (step 2): open, then the full view (a tap on the "more" line).
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: 1
+- assertVisible:
+    id: "file-mocked-.*-header"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-read-open"
+- tapOn:
+    id: "file-mocked-.*-more"
+- assertNotVisible:
+    id: "file-mocked-.*-more"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-read-full"
+# The full view pushed the step lines off screen (an index counts only what is
+# visible): back to the prompt, so the four steps are on screen again.
+- scrollUntilVisible:
+    element:
+      text: "FILEVIEW41"
+    direction: UP
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: 1
+# Edit (step 3): open.
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: 2
+- assertVisible:
+    id: "file-mocked-.*-header"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-edit-open"
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: 2
+# MultiEdit (step 4): open, then the full view.
+- tapOn:
+    id: "tool-mocked-.*-ok"
+    index: 3
+- assertVisible:
+    id: "file-mocked-.*-header"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-multiedit-open"
+- tapOn:
+    id: "file-mocked-.*-more"
+    optional: true
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "41-multiedit-full"

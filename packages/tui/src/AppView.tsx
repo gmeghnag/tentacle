@@ -40,6 +40,7 @@ import { QuitConfirm } from "./components/QuitConfirm.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
 import { VoiceStrip } from "./components/VoiceStrip.tsx";
+import { WorkflowRail } from "./components/WorkflowRail.tsx";
 import { permissionAgentLine } from "./permission-ui.ts";
 import { rowTexts } from "./queued.ts";
 import { stripAnsi } from "./render-lines.ts";
@@ -81,6 +82,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     paletteRows,
     listView,
     capsShown,
+    workflowRail,
     shown,
     dockView,
     drawer,
@@ -139,6 +141,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
             selected={permission.selected}
             cwd={cwd}
             columns={columns}
+            approvalScroll={permission.approvalScroll()}
             {...(replyShown ? { reply: replyShown } : {})}
             replyable={permission.choices.some((c) => c.reply === true)}
             {...(permission.pendingAgent
@@ -147,6 +150,13 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
           />
         ) : (
           <Box flexDirection="column" width={columns}>
+            {/* The workflow rail (docs/feat/workflows-ui.md D3, mockup TUI 1):
+                the run in flight, ABOVE the queued/slot block, and its rows are
+                already inside `activeRows` (`workflowHeight`) — the transcript
+                viewport gave them up, so the input never moves. `null` when
+                nothing paints (no run, an ended one, a panel's slot, a short
+                terminal). */}
+            {workflowRail === null ? null : <WorkflowRail lines={workflowRail} columns={columns} />}
             {/* Queued messages sit where a sent message would (right under the
                 conversation); the thinking/working line stays just above the
                 input, under them (owner, 2026-10-25). */}

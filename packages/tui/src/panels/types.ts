@@ -1,4 +1,4 @@
-import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactMeta, WorkflowRow } from "@tentacle/protocol";
 import type { ArtifactsData } from "../artifacts-panel.ts";
 /**
  * The panel MODEL (docs/feat/app-decomposition.md S7): the three open panels as
@@ -17,6 +17,8 @@ import { SESSIONS_START } from "../sessions-panel.ts";
 import type { SkillsListView } from "../skills-panel.ts";
 import type { ToolEntryView } from "../tools-panel.ts";
 import { TREE_START, type TreeState } from "../tree-panel.ts";
+import { WORKFLOW_START, type WorkflowDetailState, type WorkflowState } from "../workflow-view.ts";
+import type { CatalogueView } from "../workflow-view.ts";
 
 /** A tree panel (`/mcp`, `/skills`, `/tools`): groups and an expandable cursor. */
 export type TreePanel =
@@ -73,7 +75,33 @@ export interface SchedulesPanel {
   readonly now: number;
 }
 
-export type OpenPanel = TreePanel | SessionsPanel | ArtifactsPanel | SchedulesPanel;
+/**
+ * `/workflow` (docs/feat/workflows-ui.md D3, mockup TUI 2): the session's runs as
+ * last reported, a cursor over the current run's steps, and the ONE step detail
+ * a fetch has landed (`o`), keyed by the step it belongs to so a stale answer is
+ * never painted on the step the cursor moved to.
+ */
+export interface WorkflowPanel {
+  readonly kind: "workflow";
+  /** The runs; `undefined` = no report (a pod, an older daemon) — never "none". */
+  readonly data: readonly WorkflowRow[] | undefined;
+  /** The run this panel shows; absent = the one in flight (`currentRun`). */
+  readonly runId?: string | undefined;
+  readonly state: WorkflowState;
+  /** The fetched detail, or the phase of the fetch that has not landed yet. */
+  readonly detail: WorkflowDetailState | null;
+  /** When the rows were projected (the rail's live durations share it). */
+  readonly now: number;
+  /**
+   * The project's workflows (docs/feat/workflows-ui.md D8, slice 2b): the
+   * "Workflows" section ABOVE the runs, from `session/workflow_catalogue`.
+   * `undefined` = not read (yet, or this session has no such read) — never
+   * "the folder is empty", which is what an absent section would claim.
+   */
+  readonly catalogue?: CatalogueView;
+}
+
+export type OpenPanel = TreePanel | SessionsPanel | ArtifactsPanel | SchedulesPanel | WorkflowPanel;
 
 /** The `/schedule` panel (docs/feat/cron-tool.md S5): the daemon's table, or `undefined` until it reports. */
 export const schedulesPanel = (
@@ -108,7 +136,25 @@ export const toolsPanel = (data: readonly ToolEntryView[] | null = null): TreePa
   tree: TREE_START,
 });
 
-/** The `/artifacts` panel, in its loading state (or showing `view`). */
+/**
+ * The `/workflow` panel (docs/feat/workflows-ui.md D3): the runs, or `undefined`
+ * until one is reported — plus (slice 2b / D8) the project's own catalogue, which
+ * the panel paints as its "Workflows" section above the runs.
+ */
+export const workflowPanel = (
+  now: number,
+  data: readonly WorkflowRow[] | undefined = undefined,
+  runId?: string,
+  catalogue?: CatalogueView,
+): WorkflowPanel => ({
+  kind: "workflow",
+  data,
+  ...(runId === undefined ? {} : { runId }),
+  ...(catalogue === undefined ? {} : { catalogue }),
+  state: WORKFLOW_START,
+  detail: null,
+  now,
+});
 export const artifactsPanel = (
   view: { readonly artifacts: readonly ArtifactMeta[]; readonly truncated?: boolean } | null = null,
   now: number = Date.now(),

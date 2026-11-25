@@ -15,6 +15,7 @@ import {
   type AgentInbox,
   type AgentNotifyResult,
   type ExecutionEnvironment,
+  IMAGE_VIEW_TOOL_NAME,
   type ModelProvider,
   type PermissionRequest,
   type PermissionRequestOptions,
@@ -23,6 +24,8 @@ import {
   SubagentFailure,
   type Tool,
   type ToolProgressEvent,
+  denyAll,
+  shellIntent,
   toolLabel,
 } from "@tentacle/core";
 import {
@@ -31,6 +34,7 @@ import {
   AGENT_MESSAGE_TOOL_NAME,
   AGENT_NOTIFY_TOOL_NAME,
   AGENT_STATUS_TOOL_NAME,
+  BROWSER_TOOL_NAMES,
   CHART_TOOL_NAME,
   CONTEXT_RESET_TOOL_NAME,
   DIAGRAM_TOOL_NAME,
@@ -39,10 +43,12 @@ import {
   SCHEDULE_CONTROL_TOOL_NAME,
   SCHEDULE_CREATE_TOOL_NAME,
   ToolRegistry,
+  WORKFLOW_TOOL_NAME,
   createAgentNotifyTool,
 } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { SessionCapabilities } from "./capabilities.ts";
+import { type HarnessDeps, runHarnessChild } from "./harness/child.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
 import { classOf, isReadClass } from "./round-plan.ts";
@@ -66,6 +72,15 @@ export interface AgentType {
    * (docs/feat/context-awareness.md). Absent → the parent's window.
    */
   readonly contextWindow?: number;
+  /**
+   * Run by another agent harness, not a tentacle `Agent`
+   * (docs/feat/subagent-harness-runners.md D3): the instance name in
+   * `SubagentDeps.harness` and the mode (`write` = a local process in its own
+   * worktree; `remote` = the only mode a remote adapter accepts, D10). `prompt`,
+   * `tools` and `model` are then unused: the call's `model` goes to the harness
+   * verbatim.
+   */
+  readonly harness?: { readonly adapter: string; readonly mode: "write" | "remote" };
 }
 
 const GENERAL_PROMPT = `You are an autonomous sub-agent working on a focused task delegated by a
@@ -177,10 +192,22 @@ export interface SubagentRunControls {
    * when the child stops reading (so a late text is refused, never lost).
    */
   readonly inbox?: AgentInbox;
+  /**
+   * This call's token cap, replacing `deps.maxTokens` for this child only (a
+   * workflow step's `tokens`, docs/feat/agent-workflows.md D3). A positive
+   * integer or `-1` (unlimited).
+   */
+  readonly maxTokens?: number;
+  /**
+   * Tools offered to THIS child beyond its type's (a workflow step's
+   * `step_verdict`, D3). Bypasses the type's allow-list — a channel back, like
+   * `agent_notify` — but never the parent-only exclusions.
+   */
+  readonly extraTools?: readonly Tool[];
 }
 
 /**
- * A child's requester: the parent's, with each ask attributed to the parent's
+ * A child's requester:the parent's, with each ask attributed to the parent's
  * `agent_task` call (`parentCallId`) and tagged with the asking sub-agent.
  * These fields WIN over the child gate's own: the child's call ids are unknown
  * to the parent history, so one must never escape — without a parent id the
@@ -259,7 +286,9 @@ export function childToolLabel(name: string, args: string): string {
     typeof obj[key] === "string" ? (obj[key] as string) : undefined;
   switch (name) {
     case "shell":
-      return `$ ${str("command") ?? ""}`.trimEnd();
+      // A described call reads as its intent sentence, like the parent's rows (owner 2026-11-23);
+      // no sentence → the command, as before.
+      return shellIntent(args) ?? `$ ${str("command") ?? ""}`.trimEnd();
     case "fs_read":
       return `Read ${str("path") ?? ""}`.trimEnd();
     case "fs_write":
@@ -343,6 +372,12 @@ export interface SubagentDeps {
    * from every child too, from its next model call. Absent → everything on.
    */
   readonly capabilities?: () => SessionCapabilities;
+  /**
+   * The harness instances a `harness` type runs on
+   * (docs/feat/subagent-harness-runners.md D3). Given by the wiring only when
+   * NOT tunnelled (D5): a pod has no harness type and no harness deps.
+   */
+  readonly harness?: HarnessDeps;
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -363,6 +398,44 @@ export function createSubagentRunner(deps: SubagentDeps): {
     const type = types.find((t) => t.name === opts.type) ?? types[0];
     if (!type) {
       return { report: "no sub-agent type available", toolUses: 0, stopReason: "end_turn" };
+    }
+    // The child's asks, attributed to the parent's call / `sa-N`: the ONE broker.
+    const childRequester = deps.requestPermission
+      ? subagentRequester(
+          deps.requestPermission,
+          controls?.toolCallId,
+          { type: type.name, description: opts.description },
+          controls?.agentId !== undefined && controls.signal
+            ? { id: controls.agentId, signal: controls.signal }
+            : controls?.move !== undefined
+              ? { move: controls.move }
+              : undefined,
+        )
+      : undefined;
+    // Another harness runs this child (D3): the call's `model` is that harness's
+    // own string (never a `models` name), shown as given; everything after the
+    // start event is the harness child's.
+    if (type.harness !== undefined) {
+      const model = opts.model ?? deps.harness?.instances.get(type.harness.adapter)?.model;
+      controls?.onEvent?.({
+        kind: "subagent_start",
+        agentType: type.name,
+        description: opts.description,
+        ...(model !== undefined ? { model } : {}),
+      });
+      // D4: its asks go through the same gate inputs a tentacle child's would.
+      return runHarnessChild(type, opts, controls, deps.harness, {
+        requester: childRequester ?? denyAll,
+        ...(deps.hooks
+          ? {
+              hooks: deps.hooks.forAgent({ type: type.name, description: opts.description }, model),
+            }
+          : {}),
+        grants,
+        sessionId: controls?.sessionId ?? "",
+        tool: (n) => deps.tools.get(n),
+        ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
+      });
     }
     // The child's model, picked BEFORE its start event so the row carries it: a
     // `models` name for the wire (never an id, AGENTS §7) and the resolved ID
@@ -412,10 +485,20 @@ export function createSubagentRunner(deps: SubagentDeps): {
         tool.name === CHART_TOOL_NAME ||
         // A diagram likewise (docs/feat/model-diagrams.md D2, P6).
         tool.name === DIAGRAM_TOOL_NAME ||
+        // A child has no tool-image store (it is built without `attachments`),
+        // so its markers carry no ref to view (docs/feat/image-view.md D9).
+        tool.name === IMAGE_VIEW_TOOL_NAME ||
         // The schedule table is the SESSION's, and a fire starts a MAIN-agent
         // turn (docs/feat/cron-tool.md P4): a child may neither arm nor drop one.
         tool.name === SCHEDULE_CREATE_TOOL_NAME ||
         tool.name === SCHEDULE_CONTROL_TOOL_NAME ||
+        // A workflow run is the SESSION's (one per session): a child (a step's
+        // own child included) may neither start nor stop one.
+        tool.name === WORKFLOW_TOOL_NAME ||
+        // The browser tabs are the SESSION's (one lease, one tab group, its own
+        // masking key) and a child has no image store for a shot
+        // (docs/feat/browser-inspect.md B4): the parent browses and delegates text.
+        BROWSER_TOOL_NAMES.includes(tool.name) ||
         tool.name === AGENT_CONTROL_TOOL_NAME ||
         tool.name === AGENT_KILL_TOOL_NAME ||
         tool.name === AGENT_MESSAGE_TOOL_NAME ||
@@ -437,6 +520,15 @@ export function createSubagentRunner(deps: SubagentDeps): {
     if (deps.notify && controls?.agentId !== undefined) {
       childTools.register(createAgentNotifyTool(controls.agentId, deps.notify));
     }
+    // This call's own channel back (a workflow step's `step_verdict`): like
+    // `agent_notify`, past `type.tools`; a name the child already holds wins.
+    for (const tool of controls?.extraTools ?? []) {
+      if (childTools.get(tool.name) === undefined) {
+        childTools.register(tool);
+      }
+    }
+    // This call's cap, else the runner's (a workflow step's `tokens`).
+    const maxTokens = controls?.maxTokens ?? deps.maxTokens;
 
     const model = chosen?.provider ?? deps.model;
     // The child counts against its own model's window: the chosen one's, else
@@ -457,21 +549,8 @@ export function createSubagentRunner(deps: SubagentDeps): {
       systemPrompt: type.prompt,
       ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
-      ...(deps.maxTokens !== undefined ? { maxTokens: deps.maxTokens } : {}),
-      ...(deps.requestPermission
-        ? {
-            requestPermission: subagentRequester(
-              deps.requestPermission,
-              controls?.toolCallId,
-              { type: type.name, description: opts.description },
-              controls?.agentId !== undefined && controls.signal
-                ? { id: controls.agentId, signal: controls.signal }
-                : controls?.move !== undefined
-                  ? { move: controls.move }
-                  : undefined,
-            ),
-          }
-        : {}),
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
+      ...(childRequester !== undefined ? { requestPermission: childRequester } : {}),
       grants,
       // A server may reuse call ids: two children must not share a spill file.
       spillScope: crypto.randomUUID().slice(0, 8),
@@ -617,8 +696,8 @@ export function createSubagentRunner(deps: SubagentDeps): {
     // Appended to `finalReport` BELOW the empty-report fallback, which must still
     // fire for a child that wrote nothing (the note is not a report).
     const budgetNote =
-      stopReason === "max_token_budget" && deps.maxTokens !== undefined && deps.maxTokens > 0
-        ? `\n\n(token budget reached: ${tokens.toLocaleString("en-US")} of ${deps.maxTokens.toLocaleString("en-US")} tokens used)`
+      stopReason === "max_token_budget" && maxTokens !== undefined && maxTokens > 0
+        ? `\n\n(token budget reached: ${tokens.toLocaleString("en-US")} of ${maxTokens.toLocaleString("en-US")} tokens used)`
         : "";
     onEvent?.({ kind: "subagent_end", toolUses, stopReason });
     // Never hand the parent an empty report (the agent loop forces a final
@@ -634,6 +713,11 @@ export function createSubagentRunner(deps: SubagentDeps): {
 
   const readOnlyType = (name: string): boolean => {
     const type = types.find((t) => t.name === name);
+    // A harness child changes nothing on this machine only when it is remote
+    // (D3); a `write` run edits its worktree and runs commands.
+    if (type?.harness !== undefined) {
+      return type.harness.mode === "remote";
+    }
     if (!type || type.tools === "all") {
       return false;
     }
@@ -653,6 +737,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === PRESENT_TOOL_NAME ||
         toolName === CHART_TOOL_NAME ||
         toolName === DIAGRAM_TOOL_NAME ||
+        toolName === WORKFLOW_TOOL_NAME ||
         toolName === AGENT_CONTROL_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||

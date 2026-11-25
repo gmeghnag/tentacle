@@ -405,6 +405,24 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       // delete is the daemon's own method. Forwarded in `persistingController`.
       "onSchedules",
       "deleteSchedule",
+      // The session's workflow runs (docs/feat/workflows-ui.md D2): the rail, the
+      // panel and `/workflow` read this ONE feed, and every action (start / stop /
+      // resume / rerun step) plus one step's detail are the daemon's own methods.
+      // Forwarded in `persistingController`.
+      "onWorkflows",
+      "workflow",
+      "workflowStep",
+      // The project's workflows (docs/feat/workflows-ui.md slice 5a): the TUI's
+      // `/workflow` lists them through this, so a dropped forward leaves a panel
+      // that can never offer a file. Forwarded in `persistingController`.
+      "workflowCatalogue",
+      // The workflow EDITOR's two calls (docs/feat/workflow-editor.md D5): the
+      // phone reads a file and writes it through this session, so a dropped
+      // forward would leave Edit/New answering "unsupported" on every runtime.
+      // Optional on `SessionController` (this task ships no TUI editor), present
+      // on `RemoteSession`, so they are still the wrapper's to forward.
+      "workflowSource",
+      "workflowSave",
       "onJobs",
       "jobOutput",
       "killJob",

@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { Agent } from "@tentacle/agent";
 import type { AgentEvent } from "@tentacle/agent";
-import type { ChatRequest } from "@tentacle/core";
+import type { ChatRequest, ReasoningRecord } from "@tentacle/core";
 import { ModelStreamCutError } from "@tentacle/core";
-import { JsonRpcErrorCode, ModelStreamResultSchema } from "@tentacle/protocol";
+import {
+  JsonRpcErrorCode,
+  ModelStreamResultSchema,
+  WireChatRequestSchema,
+} from "@tentacle/protocol";
 import type { ModelStreamChunkedResult } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { ProxyModelProvider } from "../src/proxy-model.ts";
@@ -494,4 +498,123 @@ describe("ProxyModelProvider — MethodNotFound probe + latch (old laptop)", () 
     expect(batchCalls).toBe(1);
     expect(seen).toEqual([{ type: "reasoning", delta: "r" }, { type: "done" }]);
   });
+});
+
+describe("ProxyModelProvider — the reasoning record crosses the tunnel (docs/fix/reasoning-echo.md T5)", () => {
+  // Produced by the LAPTOP's provider: its id is the source, so only it echoes it (D5).
+  const RECORD = {
+    source: "laptop:m",
+    body: { format: "openai", field: "reasoning_content", text: 'think "first"\n✓' },
+  } as const;
+  const ANTHROPIC: ReasoningRecord = {
+    source: "anthropic:m",
+    body: {
+      format: "anthropic",
+      blocks: [
+        { type: "thinking", thinking: "", signature: "sig==" },
+        { type: "redacted_thinking", data: "opaque" },
+      ],
+    },
+  };
+
+  for (const record of [RECORD, ANTHROPIC]) {
+    test(`toWireRequest keeps an assistant message's ${record.body.format} reasoning (stream and countTokens)`, async () => {
+      // Mutation (red, verified): drop the `reasoning` copy in toWireRequest → fails.
+      const sent: unknown[] = [];
+      const provider = new ProxyModelProvider(
+        () => Promise.reject(new Error("batch path must not be used")),
+        async (req) => {
+          sent.push(req);
+          return { chunks: 0 };
+        },
+        async (req) => {
+          sent.push(req);
+          return { tokens: 1 };
+        },
+      );
+      const call = { id: "c1", name: "t", arguments: "{}" };
+      const request: ChatRequest = {
+        messages: [
+          { role: "user", content: "go" },
+          { role: "assistant", content: "", toolCalls: [call], reasoning: record },
+          { role: "tool", content: "ok", toolCallId: "c1" },
+        ],
+      };
+      for await (const _ of provider.stream(request)) {
+        // drain
+      }
+      await provider.countTokens(request);
+      expect(sent).toHaveLength(2);
+      for (const wire of sent) {
+        // Parsed as the laptop's peer parses it: the field survives validation.
+        const parsed = WireChatRequestSchema.parse(wire);
+        const assistant: unknown = parsed.messages[1];
+        expect(assistant).toEqual({
+          role: "assistant",
+          content: "",
+          toolCalls: [call],
+          reasoning: record,
+        });
+        // A message without a record carries no key at all.
+        expect("reasoning" in (parsed.messages[0] ?? {})).toBe(false);
+      }
+    });
+  }
+
+  /** A pod agent whose only model is the proxy; the laptop answers `rounds[i]` to the i-th request. */
+  async function podRun(via: "chunked" | "batch"): Promise<unknown[]> {
+    const laptopSaw: unknown[] = [];
+    const rounds = [
+      [
+        { type: "reasoning", delta: RECORD.body.text },
+        { type: "tool_call", toolCall: { id: "c1", name: "ls", arguments: "{}" } },
+        { type: "done", stopReason: "tool_calls", reasoning: RECORD },
+      ],
+      [
+        { type: "text", delta: "ok" },
+        { type: "done", stopReason: "stop" },
+      ],
+    ];
+    // The laptop side: validates the pod's request as its peer does, then answers.
+    const laptop = (wire: unknown): unknown[] => {
+      laptopSaw.push(WireChatRequestSchema.parse(wire));
+      return rounds[laptopSaw.length - 1] ?? [{ type: "done", stopReason: "stop" }];
+    };
+    const provider =
+      via === "chunked"
+        ? new ProxyModelProvider(
+            () => Promise.reject(new Error("no batch")),
+            (req, { onProgress }) => {
+              onProgress(laptop(req), 0);
+              return Promise.resolve({ chunks: 1 });
+            },
+          )
+        : new ProxyModelProvider((req) =>
+            Promise.resolve(ModelStreamResultSchema.parse({ events: laptop(req) })),
+          );
+    const agent = new Agent({
+      model: provider,
+      tools: new ToolRegistry(),
+      env: {
+        id: "noop",
+        exec: () => Promise.resolve({ stdout: "", stderr: "", exitCode: 0 }),
+        readFile: () => Promise.resolve(""),
+        writeFile: () => Promise.resolve(),
+      },
+    });
+    for await (const _ of agent.runMessages([{ role: "user", content: "hi" }], "s1")) {
+      // drain
+    }
+    return laptopSaw;
+  }
+
+  for (const via of ["chunked", "batch"] as const) {
+    test(`the laptop's done.reasoning reaches the pod loop and rides back on the next request (${via})`, async () => {
+      const laptopSaw = await podRun(via);
+      expect(laptopSaw).toHaveLength(2);
+      const second = laptopSaw[1] as { messages: Array<{ role: string; reasoning?: unknown }> };
+      const echoed = second.messages.filter((m) => m.role === "assistant").map((m) => m.reasoning);
+      expect(echoed).toEqual([RECORD]);
+    });
+  }
 });

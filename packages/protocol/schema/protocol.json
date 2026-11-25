@@ -298,6 +298,59 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "AnthropicReasoningBlock": {
+      "discriminator": {
+        "mapping": {
+          "redacted_thinking": "#/$defs/AnthropicReasoningBlockRedactedThinking",
+          "thinking": "#/$defs/AnthropicReasoningBlockThinking"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AnthropicReasoningBlockThinking"
+        },
+        {
+          "$ref": "#/$defs/AnthropicReasoningBlockRedactedThinking"
+        }
+      ]
+    },
+    "AnthropicReasoningBlockRedactedThinking": {
+      "additionalProperties": true,
+      "properties": {
+        "data": {
+          "maxLength": 1048576,
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "const": "redacted_thinking",
+          "type": "string"
+        }
+      },
+      "required": ["data", "type"],
+      "type": "object"
+    },
+    "AnthropicReasoningBlockThinking": {
+      "additionalProperties": true,
+      "properties": {
+        "signature": {
+          "maxLength": 1048576,
+          "minLength": 1,
+          "type": "string"
+        },
+        "thinking": {
+          "maxLength": 1048576,
+          "type": "string"
+        },
+        "type": {
+          "const": "thinking",
+          "type": "string"
+        }
+      },
+      "required": ["signature", "thinking", "type"],
+      "type": "object"
+    },
     "ArtifactListParams": {
       "additionalProperties": true,
       "properties": {
@@ -723,6 +776,9 @@
         },
         "note": {
           "$ref": "#/$defs/MessageNote"
+        },
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
         },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
@@ -1828,7 +1884,11 @@
           "truncate": "#/$defs/LogTruncateEntry",
           "turn_end": "#/$defs/LogTurnEndEntry",
           "turn_start": "#/$defs/LogTurnStartEntry",
-          "usage": "#/$defs/LogUsageEntry"
+          "unit_end": "#/$defs/LogUnitEndEntry",
+          "usage": "#/$defs/LogUsageEntry",
+          "workflow_end": "#/$defs/LogWorkflowEndEntry",
+          "workflow_start": "#/$defs/LogWorkflowStartEntry",
+          "workflow_step": "#/$defs/LogWorkflowStepEntry"
         },
         "propertyName": "type"
       },
@@ -1877,6 +1937,18 @@
         },
         {
           "$ref": "#/$defs/LogUsageEntry"
+        },
+        {
+          "$ref": "#/$defs/LogWorkflowStartEntry"
+        },
+        {
+          "$ref": "#/$defs/LogWorkflowStepEntry"
+        },
+        {
+          "$ref": "#/$defs/LogWorkflowEndEntry"
+        },
+        {
+          "$ref": "#/$defs/LogUnitEndEntry"
         }
       ]
     },
@@ -2519,6 +2591,80 @@
       "required": ["id", "seq", "ts", "turnId", "type"],
       "type": "object"
     },
+    "LogUnitEndEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "endedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "native": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "result": {
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "resultDropped": {
+          "const": true,
+          "type": "boolean"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "unit_end",
+          "type": "string"
+        },
+        "unitId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["endedAt", "id", "kind", "native", "seq", "state", "ts", "type", "unitId"],
+      "type": "object"
+    },
     "LogUsageEntry": {
       "additionalProperties": true,
       "properties": {
@@ -2580,6 +2726,225 @@
         }
       },
       "required": ["completionTokens", "id", "promptTokens", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogWorkflowEndEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunId"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "stopReason": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "workflow_end",
+          "type": "string"
+        }
+      },
+      "required": ["id", "reason", "runId", "seq", "state", "ts", "type"],
+      "type": "object"
+    },
+    "LogWorkflowStartEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "by": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "hash": {
+          "$ref": "#/$defs/WorkflowHash"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowInputValue"
+          },
+          "type": "array"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunId"
+        },
+        "scheduleId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "const": "workflow_start",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "by",
+        "hash",
+        "id",
+        "inputs",
+        "name",
+        "path",
+        "runId",
+        "seq",
+        "ts",
+        "type",
+        "version"
+      ],
+      "type": "object"
+    },
+    "LogWorkflowStepEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "model": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prompt": {
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "report": {
+          "maxLength": 65536,
+          "type": "string"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunId"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "stepId": {
+          "$ref": "#/$defs/WorkflowStepId"
+        },
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "workflow_step",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "where": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "durationMs",
+        "id",
+        "reason",
+        "round",
+        "runId",
+        "seq",
+        "state",
+        "stepId",
+        "tokens",
+        "ts",
+        "type",
+        "where"
+      ],
       "type": "object"
     },
     "McpServerState": {
@@ -2771,6 +3136,9 @@
         "note": {
           "$ref": "#/$defs/MessageNote"
         },
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
+        },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
@@ -2887,6 +3255,9 @@
         },
         "note": {
           "$ref": "#/$defs/MessageNote"
+        },
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
         },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
@@ -3619,7 +3990,15 @@
       "type": "string"
     },
     "PushKind": {
-      "enum": ["ask", "ask_resolved", "turn_done", "turn_failed"],
+      "enum": [
+        "ask",
+        "ask_resolved",
+        "turn_done",
+        "turn_failed",
+        "run_done",
+        "run_stopped",
+        "run_not_started"
+      ],
       "type": "string"
     },
     "PushMessage": {
@@ -3650,6 +4029,12 @@
         },
         "kind": {
           "$ref": "#/$defs/PushKind"
+        },
+        "run": {
+          "$ref": "#/$defs/PushRun"
+        },
+        "schedule": {
+          "$ref": "#/$defs/PushSchedule"
         },
         "sessionId": {
           "maxLength": 128,
@@ -3687,6 +4072,56 @@
     "PushRegisterStatus": {
       "enum": ["on", "off", "relay-off", "relay-no-push"],
       "type": "string"
+    },
+    "PushRun": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "runId": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["name", "runId"],
+      "type": "object"
+    },
+    "PushSchedule": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "scheduleId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["name", "scheduleId"],
+      "type": "object"
     },
     "PushTurn": {
       "additionalProperties": true,
@@ -3765,6 +4200,77 @@
       "required": ["entries", "returned", "type"],
       "type": "object",
       "x-event-class": "display"
+    },
+    "ReasoningBody": {
+      "discriminator": {
+        "mapping": {
+          "anthropic": "#/$defs/ReasoningBodyAnthropic",
+          "openai": "#/$defs/ReasoningBodyOpenai"
+        },
+        "propertyName": "format"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ReasoningBodyOpenai"
+        },
+        {
+          "$ref": "#/$defs/ReasoningBodyAnthropic"
+        }
+      ]
+    },
+    "ReasoningBodyAnthropic": {
+      "additionalProperties": true,
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/AnthropicReasoningBlock"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "format": {
+          "const": "anthropic",
+          "type": "string"
+        }
+      },
+      "required": ["blocks", "format"],
+      "type": "object"
+    },
+    "ReasoningBodyOpenai": {
+      "additionalProperties": true,
+      "properties": {
+        "field": {
+          "enum": ["reasoning_content", "reasoning"],
+          "type": "string"
+        },
+        "format": {
+          "const": "openai",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 1048576,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["field", "format", "text"],
+      "type": "object"
+    },
+    "ReasoningRecord": {
+      "additionalProperties": true,
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/ReasoningBody"
+        },
+        "source": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["body", "source"],
+      "type": "object"
     },
     "ReclaimParams": {
       "additionalProperties": true,
@@ -4290,6 +4796,69 @@
       "required": ["cause", "id", "text"],
       "type": "object"
     },
+    "ScheduleCreateParams": {
+      "additionalProperties": true,
+      "properties": {
+        "at": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "daily": {
+          "maxLength": 16,
+          "minLength": 1,
+          "type": "string"
+        },
+        "every": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "workflow": {
+          "additionalProperties": true,
+          "properties": {
+            "inputs": {
+              "items": {
+                "$ref": "#/$defs/WorkflowInputValue"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "name": {
+              "$ref": "#/$defs/WorkflowName"
+            }
+          },
+          "required": ["name"],
+          "type": "object"
+        }
+      },
+      "required": ["sessionId", "turnId", "workflow"],
+      "type": "object"
+    },
+    "ScheduleCreateResult": {
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "scheduleId": {
+          "maxLength": 64,
+          "type": "string"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
     "ScheduleDeleteParams": {
       "additionalProperties": true,
       "properties": {
@@ -4343,6 +4912,26 @@
         "kind": {
           "type": "string"
         },
+        "last": {
+          "additionalProperties": true,
+          "properties": {
+            "at": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "runId": {
+              "type": "string"
+            }
+          },
+          "required": ["at", "outcome"],
+          "type": "object"
+        },
         "nextAt": {
           "minimum": 0,
           "type": "integer"
@@ -4352,6 +4941,25 @@
         },
         "spec": {
           "type": "string"
+        },
+        "workflow": {
+          "additionalProperties": true,
+          "properties": {
+            "hash": {
+              "type": "string"
+            },
+            "inputs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": ["hash", "inputs", "name"],
+          "type": "object"
         }
       },
       "required": ["createdAt", "fires", "id", "kind", "nextAt", "prompt", "spec"],
@@ -5027,7 +5635,8 @@
           "tool_progress": "#/$defs/ToolProgress",
           "truncated_reply": "#/$defs/TruncatedReply",
           "turn_end": "#/$defs/TurnEndUpdate",
-          "turn_start": "#/$defs/TurnStart"
+          "turn_start": "#/$defs/TurnStart",
+          "workflows": "#/$defs/WorkflowsUpdate"
         },
         "propertyName": "type"
       },
@@ -5124,6 +5733,9 @@
         },
         {
           "$ref": "#/$defs/CapabilitiesUpdate"
+        },
+        {
+          "$ref": "#/$defs/WorkflowsUpdate"
         }
       ]
     },
@@ -5343,6 +5955,12 @@
         },
         "turn": {
           "$ref": "#/$defs/SnapshotTurn"
+        },
+        "workflows": {
+          "items": {
+            "$ref": "#/$defs/WorkflowRow"
+          },
+          "type": "array"
         }
       },
       "required": ["messages"],
@@ -6137,6 +6755,9 @@
         "content": {
           "type": "string"
         },
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
+        },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
@@ -6216,6 +6837,9 @@
     "WireStreamEventDone": {
       "additionalProperties": true,
       "properties": {
+        "reasoning": {
+          "$ref": "#/$defs/ReasoningRecord"
+        },
         "stopReason": {
           "$ref": "#/$defs/WireStopReason"
         },
@@ -6316,6 +6940,1011 @@
       },
       "required": ["completionTokens", "promptTokens"],
       "type": "object"
+    },
+    "WorkflowCatalogueParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "type": "object"
+    },
+    "WorkflowCatalogueResult": {
+      "additionalProperties": true,
+      "properties": {
+        "dir": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "gitIgnored": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "const": true,
+          "type": "boolean"
+        },
+        "unavailable": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "workflows": {
+          "items": {
+            "$ref": "#/$defs/WorkflowDefRow"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": ["dir", "workflows"],
+      "type": "object"
+    },
+    "WorkflowDefInput": {
+      "additionalProperties": true,
+      "properties": {
+        "default": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": ["name", "required"],
+      "type": "object"
+    },
+    "WorkflowDefRow": {
+      "additionalProperties": true,
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "description": {
+          "maxLength": 500,
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "maxLength": 300,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowDefInput"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/WorkflowDefStep"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "version": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["name", "ok", "path"],
+      "type": "object"
+    },
+    "WorkflowDefStep": {
+      "additionalProperties": true,
+      "properties": {
+        "command": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 16,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "model": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "where": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["id", "kind", "where"],
+      "type": "object"
+    },
+    "WorkflowHash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "WorkflowHistoryRow": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "step": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["attempt", "round", "state", "step"],
+      "type": "object"
+    },
+    "WorkflowInputValue": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": ["name", "value"],
+      "type": "object"
+    },
+    "WorkflowListParams": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
+    "WorkflowListResult": {
+      "additionalProperties": true,
+      "properties": {
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowListRow"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["runs"],
+      "type": "object"
+    },
+    "WorkflowListRow": {
+      "additionalProperties": true,
+      "properties": {
+        "done": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "endedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "needsUser": {
+          "type": "boolean"
+        },
+        "runId": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "step": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 256,
+          "type": "string"
+        },
+        "total": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "done",
+        "name",
+        "needsUser",
+        "runId",
+        "sessionId",
+        "startedAt",
+        "state",
+        "total"
+      ],
+      "type": "object"
+    },
+    "WorkflowName": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "WorkflowParams": {
+      "discriminator": {
+        "mapping": {
+          "rerun_step": "#/$defs/WorkflowParamsRerunStep",
+          "resume": "#/$defs/WorkflowParamsResume",
+          "start": "#/$defs/WorkflowParamsStart",
+          "stop": "#/$defs/WorkflowParamsStop"
+        },
+        "propertyName": "action"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WorkflowParamsStart"
+        },
+        {
+          "$ref": "#/$defs/WorkflowParamsStop"
+        },
+        {
+          "$ref": "#/$defs/WorkflowParamsResume"
+        },
+        {
+          "$ref": "#/$defs/WorkflowParamsRerunStep"
+        }
+      ]
+    },
+    "WorkflowParamsRerunStep": {
+      "additionalProperties": true,
+      "properties": {
+        "action": {
+          "const": "rerun_step",
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "stepId": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["action", "runId", "sessionId", "stepId", "turnId"],
+      "type": "object"
+    },
+    "WorkflowParamsResume": {
+      "additionalProperties": true,
+      "properties": {
+        "action": {
+          "const": "resume",
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["action", "runId", "sessionId", "turnId"],
+      "type": "object"
+    },
+    "WorkflowParamsStart": {
+      "additionalProperties": true,
+      "properties": {
+        "action": {
+          "const": "start",
+          "type": "string"
+        },
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowInputValue"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "name": {
+          "$ref": "#/$defs/WorkflowName"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["action", "name", "sessionId", "turnId"],
+      "type": "object"
+    },
+    "WorkflowParamsStop": {
+      "additionalProperties": true,
+      "properties": {
+        "action": {
+          "const": "stop",
+          "type": "string"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["action", "runId", "sessionId"],
+      "type": "object"
+    },
+    "WorkflowPromptText": {
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 65536,
+          "type": "string"
+        }
+      },
+      "required": ["path", "text"],
+      "type": "object"
+    },
+    "WorkflowRefusal": {
+      "maxLength": 32,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "type": "string"
+    },
+    "WorkflowResult": {
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "refusal": {
+          "$ref": "#/$defs/WorkflowRefusal"
+        },
+        "runId": {
+          "maxLength": 32,
+          "type": "string"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
+    "WorkflowRow": {
+      "additionalProperties": true,
+      "properties": {
+        "budget": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "endedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "history": {
+          "items": {
+            "$ref": "#/$defs/WorkflowHistoryRow"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "historyDropped": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "runId": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/WorkflowStepRow"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "stopReason": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hash",
+        "history",
+        "historyDropped",
+        "name",
+        "runId",
+        "startedAt",
+        "state",
+        "steps",
+        "tokens",
+        "version"
+      ],
+      "type": "object"
+    },
+    "WorkflowRunId": {
+      "maxLength": 32,
+      "pattern": "^wf-[1-9][0-9]*$",
+      "type": "string"
+    },
+    "WorkflowRunRef": {
+      "maxLength": 32,
+      "pattern": "^wf-[1-9][0-9]*$",
+      "type": "string"
+    },
+    "WorkflowSaveParams": {
+      "additionalProperties": true,
+      "properties": {
+        "baseHash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "draft": {
+          "maxLength": 524288,
+          "type": "string"
+        },
+        "dryRun": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": ["create", "replace"],
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/WorkflowName"
+        },
+        "prompts": {
+          "items": {
+            "$ref": "#/$defs/WorkflowPromptText"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["draft", "dryRun", "mode", "name", "prompts", "sessionId"],
+      "type": "object"
+    },
+    "WorkflowSaveResult": {
+      "additionalProperties": true,
+      "properties": {
+        "alsoChanges": {
+          "items": {
+            "$ref": "#/$defs/WorkflowName"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "errors": {
+          "items": {
+            "maxLength": 300,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/WorkflowWriteFile"
+          },
+          "maxItems": 33,
+          "type": "array"
+        },
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "refusal": {
+          "$ref": "#/$defs/WorkflowRefusal"
+        },
+        "running": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        },
+        "schedules": {
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "version": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
+    "WorkflowSourceParams": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/WorkflowName"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["name", "sessionId"],
+      "type": "object"
+    },
+    "WorkflowSourceResult": {
+      "additionalProperties": true,
+      "properties": {
+        "canonical": {
+          "type": "boolean"
+        },
+        "context": {
+          "additionalProperties": true,
+          "properties": {
+            "agentTypes": {
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            },
+            "models": {
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+                "type": "string"
+              },
+              "maxItems": 64,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "draft": {
+          "maxLength": 524288,
+          "type": "string"
+        },
+        "errors": {
+          "items": {
+            "maxLength": 300,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "prompts": {
+          "items": {
+            "$ref": "#/$defs/WorkflowPromptText"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "text": {
+          "maxLength": 262144,
+          "type": "string"
+        },
+        "unavailable": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "unreadable": {
+          "maxLength": 300,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
+    "WorkflowStepDetail": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "live": {
+          "type": "boolean"
+        },
+        "prompt": {
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "report": {
+          "maxLength": 65536,
+          "type": "string"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowWord"
+        },
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "verdict": {
+          "$ref": "#/$defs/WorkflowWord"
+        }
+      },
+      "required": ["attempt", "live", "round"],
+      "type": "object"
+    },
+    "WorkflowStepId": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "WorkflowStepParams": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunId"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "stepId": {
+          "$ref": "#/$defs/WorkflowStepId"
+        }
+      },
+      "required": ["runId", "sessionId", "stepId"],
+      "type": "object"
+    },
+    "WorkflowStepResult": {
+      "additionalProperties": true,
+      "properties": {
+        "detail": {
+          "$ref": "#/$defs/WorkflowStepDetail"
+        }
+      },
+      "type": "object"
+    },
+    "WorkflowStepRow": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 16,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "live": {
+          "maxLength": 200,
+          "type": "string"
+        },
+        "maxRound": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "next": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "onFail": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "properties": {
+                "goto": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+                  "type": "string"
+                },
+                "max": {
+                  "maximum": 10,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "taken": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": ["goto", "max", "taken"],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "retry": {
+          "maximum": 5,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "where": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["attempt", "id", "kind", "next", "onFail", "retry", "round", "state", "where"],
+      "type": "object"
+    },
+    "WorkflowWord": {
+      "maxLength": 32,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "type": "string"
+    },
+    "WorkflowWriteFile": {
+      "additionalProperties": true,
+      "properties": {
+        "added": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "patch": {
+          "maxLength": 65536,
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "removed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "enum": ["new", "changed", "unchanged"],
+          "type": "string"
+        }
+      },
+      "required": ["added", "path", "removed", "status"],
+      "type": "object"
+    },
+    "WorkflowsUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/WorkflowRow"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "workflows",
+          "type": "string"
+        }
+      },
+      "required": ["runs", "type"],
+      "type": "object",
+      "x-event-class": "display"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6627,6 +8256,14 @@
         "$ref": "#/$defs/ResolvePermissionResult"
       }
     },
+    "session/schedule_create": {
+      "params": {
+        "$ref": "#/$defs/ScheduleCreateParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ScheduleCreateResult"
+      }
+    },
     "session/schedule_delete": {
       "params": {
         "$ref": "#/$defs/ScheduleDeleteParams"
@@ -6730,6 +8367,54 @@
       "result": {
         "$ref": "#/$defs/WatchNextResult"
       }
+    },
+    "session/workflow": {
+      "params": {
+        "$ref": "#/$defs/WorkflowParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowResult"
+      }
+    },
+    "session/workflow_catalogue": {
+      "params": {
+        "$ref": "#/$defs/WorkflowCatalogueParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowCatalogueResult"
+      }
+    },
+    "session/workflow_save": {
+      "params": {
+        "$ref": "#/$defs/WorkflowSaveParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowSaveResult"
+      }
+    },
+    "session/workflow_source": {
+      "params": {
+        "$ref": "#/$defs/WorkflowSourceParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowSourceResult"
+      }
+    },
+    "session/workflow_step": {
+      "params": {
+        "$ref": "#/$defs/WorkflowStepParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowStepResult"
+      }
+    },
+    "workflow/list": {
+      "params": {
+        "$ref": "#/$defs/WorkflowListParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowListResult"
+      }
     }
   },
   "notifications": {
@@ -6760,5 +8445,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 24
+  "x-protocol-version": 27
 }

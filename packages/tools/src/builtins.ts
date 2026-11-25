@@ -8,21 +8,37 @@
  * so a rich frontend can render a git-style diff. Mutating tools default to
  * `permission: "ask"`.
  */
-import type { ExecOptions, Tool, ToolContext, ToolDiffDetail } from "@tentacle/core";
+import type {
+  ExecOptions,
+  Tool,
+  ToolContext,
+  ToolDiffDetail,
+  ToolImageStore,
+  ToolResult,
+} from "@tentacle/core";
 import {
+  DEFAULT_IMAGE_FILE_MAX_EDGE,
+  DEFAULT_PDF_IMAGE_LIMITS,
+  MAX_IMAGE_BYTES,
   MAX_PDF_BYTES,
   PDF_HEAD_BYTES,
   formatPdfText,
+  imageFooter,
   isPdf,
   looksLikeTextBytes,
   pathLocksFor,
   pdfVerdict,
+  stripImageMarkers,
+  toolImageLabel,
+  toolImageLimits,
+  unkeepImageMarker,
 } from "@tentacle/core";
 import { createTwoFilesPatch } from "diff";
 import { z } from "zod";
 import { shellKillTool, shellOutputTool } from "./background.ts";
 import { pathConcurrency } from "./concurrency.ts";
-import { extractPdf } from "./pdf/extract.ts";
+import { type ImageFileOptions, readImageFile } from "./image-file.ts";
+import { type PdfExtractedPage, extractPdf } from "./pdf/extract.ts";
 
 /** Build a unified-diff detail and count changed lines. */
 function makeDiff(path: string, before: string, after: string): ToolDiffDetail {
@@ -37,6 +53,23 @@ function makeDiff(path: string, before: string, after: string): ToolDiffDetail {
     }
   }
   return { kind: "diff", path, patch, added, removed };
+}
+
+/**
+ * One path's unified patch and its line counts, without the tool-result wrapper
+ * (`makeDiff` above): what shows a write BEFORE it happens
+ * (docs/feat/workflow-editor.md D4 — the editor's Review screen shows exactly
+ * the patch it is about to write). A caller that is not a tool cannot build a
+ * `ToolDiffDetail` (`kind: "diff"` is the tool protocol's), so this is the same
+ * patch in the shape such a caller needs.
+ */
+export function unifiedDiff(
+  path: string,
+  before: string,
+  after: string,
+): { readonly patch: string; readonly added: number; readonly removed: number } {
+  const { patch, added, removed } = makeDiff(path, before, after);
+  return { patch, added, removed };
 }
 
 /** Hold `path`'s lock across a read-modify-write (the ctx's, else the env's shared one). */
@@ -98,43 +131,96 @@ function parsePathRange(path: string): { path: string; offset?: number; limit?: 
 export const fsReadTool: Tool<z.infer<typeof fsReadInput>> = {
   name: "fs_read",
   description:
-    "Read a UTF-8 text file. By default returns the whole file; pass `offset`/`limit` (or a `path:start:end` range) to read only a slice — preferred for large files, then edit precisely. A ranged read is prefixed with a `[path lines A-B of N]` header. A PDF is detected by content and returned as extracted text with `--- page N / M ---` markers; use `pages` for large documents; scanned PDFs have no text.",
+    "Read a UTF-8 text file. By default returns the whole file; pass `offset`/`limit` (or a `path:start:end` range) to read only a slice — preferred for large files, then edit precisely. A ranged read is prefixed with a `[path lines A-B of N]` header. A PDF is detected by content and returned as extracted text with `--- page N / M ---` markers and an `[image p.N · W×H]` line where each picture sits; use `pages` for large documents; scanned PDFs have no text.",
   inputSchema: fsReadInput,
   permission: "none",
   concurrency: pathConcurrency("read", (path) => parsePathRange(path).path),
   async execute(input, ctx) {
-    // A range may come from explicit offset/limit, or a `path:start:end` suffix.
-    const fromPath =
-      input.offset === undefined && input.limit === undefined
-        ? parsePathRange(input.path)
-        : { path: input.path, offset: input.offset, limit: input.limit };
-    const path = fromPath.path;
-    const offset = fromPath.offset;
-    const limit = fromPath.limit;
-
-    // A PDF is decided by its BYTES, never its name (D3): `notes.pdf` that is
-    // text stays text, a `download` that is a PDF is parsed.
-    const pdf = await readPdf(path, input.pages, { offset, limit }, ctx);
-    if (pdf !== undefined) {
-      return pdf;
-    }
-    if (input.pages !== undefined) {
-      throw new Error(`\`pages\` applies only to PDFs: ${path} is not a PDF`);
-    }
-
-    const content = await ctx.env.readFile(path);
-    if (offset === undefined && limit === undefined) {
-      return { content };
-    }
-    const lines = content.split("\n");
-    const start = Math.max(1, offset ?? 1);
-    const count = limit ?? lines.length - (start - 1);
-    const slice = lines.slice(start - 1, start - 1 + count);
-    const endLine = start - 1 + slice.length;
-    const header = `[${path} lines ${start}-${endLine} of ${lines.length}]`;
-    return { content: `${header}\n${slice.join("\n")}` };
+    return readFileOrImage(input, ctx);
   },
 };
+
+/**
+ * The read itself, in today's order: a PDF by its bytes, then an image FILE
+ * (docs/feat/image-files.md D2 — only where the session's store and its limits
+ * are given), then the text path. ONE function for both tool shapes, so the PDF
+ * sniff happens once and a session without vision cannot pay for it.
+ */
+async function readFileOrImage(
+  input: z.infer<typeof fsReadInput>,
+  ctx: ToolContext,
+  imageOptions?: ImageFileOptions,
+): Promise<ToolResult> {
+  // A range may come from explicit offset/limit, or a `path:start:end` suffix.
+  const fromPath =
+    input.offset === undefined && input.limit === undefined
+      ? parsePathRange(input.path)
+      : { path: input.path, offset: input.offset, limit: input.limit };
+  const path = fromPath.path;
+  const offset = fromPath.offset;
+  const limit = fromPath.limit;
+
+  // A PDF is decided by its BYTES, never its name (D3): `notes.pdf` that is
+  // text stays text, a `download` that is a PDF is parsed.
+  const pdf = await readPdf(path, input.pages, { offset, limit }, ctx);
+  if (pdf !== undefined) {
+    return pdf;
+  }
+  if (input.pages !== undefined) {
+    throw new Error(`\`pages\` applies only to PDFs: ${path} is not a PDF`);
+  }
+
+  // An image FILE, after the PDF branch, so the PDF path keeps its own read.
+  if (imageOptions !== undefined && ctx.images !== undefined) {
+    const image = await readImageFile(path, { offset, limit }, ctx, imageOptions);
+    if (image !== undefined) {
+      return image;
+    }
+  }
+
+  const content = await ctx.env.readFile(path);
+  if (offset === undefined && limit === undefined) {
+    return { content };
+  }
+  const lines = content.split("\n");
+  const start = Math.max(1, offset ?? 1);
+  const count = limit ?? lines.length - (start - 1);
+  const slice = lines.slice(start - 1, start - 1 + count);
+  const endLine = start - 1 + slice.length;
+  const header = `[${path} lines ${start}-${endLine} of ${lines.length}]`;
+  return { content: `${header}\n${slice.join("\n")}` };
+}
+
+/**
+ * `fs_read`, optionally in its image variant (docs/feat/image-view.md D4): the
+ * same behaviour (a read keeps pictures only when its context carries the
+ * session's store), plus one sentence pointing the model at `image_view`. A
+ * NEW object: the shared `fsReadTool` is never mutated.
+ */
+export function createFsReadTool(opts: {
+  readonly images: boolean;
+  /** This model's per-image cap and Q1's largest side (docs/feat/image-files.md D2). */
+  readonly maxImageBytes?: number;
+  readonly maxEdge?: number;
+}): Tool<z.infer<typeof fsReadInput>> {
+  if (!opts.images) {
+    return fsReadTool;
+  }
+  const imageOptions: ImageFileOptions = {
+    maxImageBytes: opts.maxImageBytes ?? MAX_IMAGE_BYTES,
+    maxEdge: opts.maxEdge ?? DEFAULT_IMAGE_FILE_MAX_EDGE,
+  };
+  return {
+    ...fsReadTool,
+    description: `${fsReadTool.description} With image_view available, a kept picture's marker carries a ref (\`[image p.N · W×H · ref <hex>]\`): call \`image_view\` with a marker's ref when a picture matters to the answer (diagrams, charts, scanned pages); skip logos. A PNG or JPEG file (read by its bytes) is kept the same way: its marker is \`[image <name> · W×H · <format> · <size> · ref <hex> · high only]\`, and only high detail is available for it.`,
+    // The image branch of the read: the same range parsing and PDF-first order,
+    // then the file's own limits, so the model's cap and Q1's side bound are the
+    // session's (docs/feat/image-files.md D2).
+    async execute(input, ctx) {
+      return readFileOrImage(input, ctx, imageOptions);
+    },
+  };
+}
 
 /**
  * The PDF branch of `fs_read` (D3): `undefined` when the file is not a PDF —
@@ -173,8 +259,12 @@ async function readPdf(
     throw new Error(`${path} is a PDF: use pages (e.g. "1-5"), not line ranges`);
   }
   const bytes = await readBytes(path, { maxBytes: MAX_PDF_BYTES });
+  // With the session's tool-image store (docs/feat/image-view.md D4) the read
+  // keeps its pictures for `image_view`: both variants and their ids.
+  const sink = ctx.images;
   const extraction = await extractPdf(bytes, {
     ...(pages !== undefined ? { pages } : {}),
+    images: sink !== undefined ? toolImageLimits() : DEFAULT_PDF_IMAGE_LIMITS,
     signal: ctx.signal,
   });
   if (!extraction.ok) {
@@ -195,17 +285,92 @@ async function readPdf(
   const verdict = pdfVerdict({
     name,
     numPages: extraction.numPages,
-    pages: extraction.pages,
+    // Judged on the document's own text: an image marker is not text.
+    pages: extraction.pages.map((page) => ({ n: page.n, text: stripImageMarkers(page.text) })),
   });
-  if (verdict.kind === "no-text") {
+  const kept = sink === undefined ? undefined : await keepPdfImages(sink, name, extraction.pages);
+  // A scan with pictures kept for `image_view` (owner Q4) is not a refusal: the
+  // verdict comes first, so the model still knows there is no text layer.
+  if (verdict.kind === "no-text" && (kept === undefined || kept.held === 0)) {
     throw new Error(verdict.message);
   }
+  // The pages' text already carries the image markers. Without a store their
+  // PNGs stop here (docs/feat/pdf-images.md S2): the model gets the markers only.
+  const summary =
+    extraction.images === undefined || kept === undefined
+      ? extraction.images
+      : {
+          ...extraction.images,
+          sent: extraction.images.sent - kept.refused,
+          refused: kept.refused,
+        };
   const text = formatPdfText({
-    pages: extraction.pages,
+    pages: kept?.pages ?? extraction.pages.map((page) => ({ n: page.n, text: page.text })),
     numPages: extraction.numPages,
     name,
+    ...(summary !== undefined ? { imageFooter: imageFooter(summary) } : {}),
   });
+  if (verdict.kind === "no-text") {
+    return { content: `${verdict.message}\n${text}` };
+  }
   return { content: verdict.kind === "partial" ? `${text}\n${verdict.message}` : text };
+}
+
+/**
+ * Put each kept picture of a read into the session's store, once per id
+ * (docs/feat/image-view.md D4), and rewrite the marker of every picture the
+ * store refused to `not kept: <reason>`. The result carries no ref: the refs
+ * are text in the markers, so no message this read writes can exceed one.
+ */
+async function keepPdfImages(
+  sink: ToolImageStore,
+  name: string,
+  pages: readonly PdfExtractedPage[],
+): Promise<{ pages: { n: number; text: string }[]; held: number; refused: number }> {
+  const outcome = new Map<string, string | null>(); // id → refusal reason, or null = held
+  for (const page of pages) {
+    for (const image of page.images ?? []) {
+      if (image.id === undefined || image.png === undefined || outcome.has(image.id)) {
+        continue;
+      }
+      const result = await sink.putTool({
+        variants: {
+          high: { bytes: image.png, width: image.width, height: image.height },
+          ...(image.low !== undefined
+            ? {
+                low: {
+                  bytes: image.low,
+                  width: image.lowWidth ?? image.width,
+                  height: image.lowHeight ?? image.height,
+                },
+              }
+            : {}),
+        },
+        mimeType: "image/png",
+        label: toolImageLabel(name, page.n),
+      });
+      outcome.set(image.id, "refused" in result ? result.refused : null);
+    }
+  }
+  let held = 0;
+  let refused = 0;
+  const reasons: [string, string][] = [];
+  for (const [id, reason] of outcome) {
+    if (reason === null) {
+      held += 1;
+    } else {
+      refused += 1;
+      reasons.push([id, reason]);
+    }
+  }
+  return {
+    pages: pages.map((page) => ({
+      n: page.n,
+      text: reasons.reduce((text, [id, why]) => unkeepImageMarker(text, id, why), page.text),
+    })),
+    held,
+    refused,
+  };
 }
 
 /**
@@ -406,6 +571,14 @@ const KILLED_EXIT_CODE = 124;
 
 const shellInput = z.object({
   command: z.string().min(1).describe("Shell command to run via /bin/sh -c."),
+  // No `.max()`: an over-long sentence must never fail the call and cost a
+  // round — the clients cut it for display (`shellIntent`, @tentacle/core).
+  description: z
+    .string()
+    .optional()
+    .describe(
+      "A short sentence (≤ 8 words) saying WHAT this command does and why, in the language the user writes in — e.g. 'Run the mobile package tests'. Shown to the user above the command.",
+    ),
   cwd: z.string().optional().describe("Working directory; defaults to the environment's cwd."),
   timeout: z
     .number()
@@ -424,7 +597,7 @@ const shellInput = z.object({
 export const shellTool: Tool<z.infer<typeof shellInput>> = {
   name: "shell",
   description:
-    "Run a shell command and capture stdout, stderr and the exit code. By default the command runs in the FOREGROUND and BLOCKS until it exits, so a long-running process (a server, a watcher, `tail -f`) would hang the turn and be killed at the timeout. For those, set `run_in_background: true` — it returns a job id at once and keeps running; read its output with `shell_output` and stop it with `shell_kill`.",
+    "Run a shell command and capture stdout, stderr and the exit code. By default the command runs in the FOREGROUND and BLOCKS until it exits, so a long-running process (a server, a watcher, `tail -f`) would hang the turn and be killed at the timeout. For those, set `run_in_background: true` — it returns a job id at once and keeps running; read its output with `shell_output` and stop it with `shell_kill`. Always give `description`.",
   inputSchema: shellInput,
   permission: "ask",
   async execute(input, ctx) {

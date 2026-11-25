@@ -42,6 +42,12 @@ export interface TuiOptions {
    */
   readonly modelLabel?: string;
   readonly cwd: string;
+  /**
+   * This tentacle's release version, for the startup header's first line
+   * (docs/feat/tui-mascot.md D5). Absent (a test, an unwired host) → `tentacle`
+   * alone.
+   */
+  readonly version?: string;
   readonly contextWindow?: number;
   /** In a container/pod: the status bar's badge (`engine-runtime`'s laptop-side facts). */
   readonly target?: TargetBadge;
@@ -182,6 +188,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         model={options.model}
         {...(options.modelLabel !== undefined ? { modelLabel: options.modelLabel } : {})}
         cwd={options.cwd}
+        {...(options.version !== undefined ? { version: options.version } : {})}
         {...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {})}
         {...(options.target ? { target: options.target } : {})}
         {...(options.permissions ? { permissions: options.permissions } : {})}

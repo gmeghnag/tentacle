@@ -67,9 +67,16 @@ export interface DaemonStore {
   /** The log's header line and the state file's text (the log itself unread). */
   readState(id: string): Promise<RawSessionState>;
   /** A verified image blob made durable beside the log, in the session's queue (absent: no blobs kept). */
-  putBlob?(id: string, blobId: string, bytes: Uint8Array): Promise<void>;
+  putBlob?(
+    id: string,
+    blobId: string,
+    bytes: Uint8Array,
+    opts?: { readonly tool?: boolean },
+  ): Promise<void>;
   readBlob?(id: string, blobId: string): Promise<Uint8Array | null>;
   blobIndex?(id: string): Map<string, number>;
+  /** The blob ids marked as tool pictures (docs/feat/image-view.md; absent: none). */
+  toolBlobIds?(id: string): Set<string>;
 }
 
 /** What a session builds at each write; `after` = this persister's log cursor for it. */
@@ -126,8 +133,8 @@ const NO_STATE = "it has no state file (a session cut before its first save land
 
 export class SessionPersister {
   private readonly opts: PersisterOptions;
-  /** Settles when the latest write scheduled for the id has (never rejects). */
-  private readonly latest = new Map<string, Promise<void>>();
+  /** Settles when the latest write scheduled for the id has, with whether it landed (never rejects). */
+  private readonly latest = new Map<string, Promise<boolean>>();
   /** The log entry each session's last unit was captured at: the next unit's entries start after it. */
   private readonly cursors = new Map<string, LogCursor>();
   /** Ids whose files could not be loaded: never written, never removed. */
@@ -370,10 +377,7 @@ export class SessionPersister {
         return false;
       },
     );
-    this.latest.set(
-      id,
-      landed.then(() => {}),
-    );
+    this.latest.set(id, landed);
     return landed;
   }
 
@@ -501,9 +505,11 @@ export class SessionPersister {
     if (!store.putBlob || !store.readBlob || !store.blobIndex) return undefined;
     const putBlob = store.putBlob.bind(store);
     const readBlob = store.readBlob.bind(store);
+    const toolIds = store.toolBlobIds?.(id);
     return {
       index: store.blobIndex(id),
-      write: (blobId, bytes) => putBlob(id, blobId, bytes),
+      ...(toolIds !== undefined ? { toolIds } : {}),
+      write: (blobId, bytes, opts) => putBlob(id, blobId, bytes, opts),
       read: (blobId) => readBlob(id, blobId),
     };
   }
@@ -549,6 +555,8 @@ export class SessionPersister {
       ...(state.schedules !== undefined && state.schedules.length > 0
         ? { schedules: state.schedules }
         : {}),
+      // An archive's capture: the table its reopen restores (S7; a load of the file derives the same).
+      ...(state.units !== undefined ? { units: state.units } : {}),
       logged: log.logged,
       logHead: log.head,
       paired: true,
@@ -575,7 +583,19 @@ export class SessionPersister {
 
   /** Resolves once the latest write scheduled for `id` has settled (failures are reported, not thrown). */
   flush(id: string): Promise<void> {
-    return this.latest.get(id) ?? Promise.resolve();
+    return this.latest.get(id)?.then(() => {}) ?? Promise.resolve();
+  }
+
+  /**
+   * `flush`, plus whether that latest write LANDED — for a caller that must
+   * not hand out a fact that is not on disk (an MCP task's start,
+   * docs/feat/serve-mcp-server.md). Fail-closed: no write scheduled for `id`,
+   * a stopped persister or an unwritable id → `false`. A later write that
+   * lands carries the earlier units too (it appends what the file lacks).
+   */
+  lastWriteLanded(id: string): Promise<boolean> {
+    if (this.stopped || this.blocked.has(id)) return Promise.resolve(false);
+    return this.latest.get(id) ?? Promise.resolve(false);
   }
 
   /**

@@ -88,6 +88,13 @@ const CASES: readonly {
     subtitle: "Flusso di login",
   },
   { name: "diagram", args: '{"mermaid":"flowchart TD"}', subtitle: '{"mermaid":"flowchart TD"}' },
+  // docs/feat/image-view.md T12: the ref, and ` · high` only for the costly detail.
+  {
+    name: "image_view",
+    args: '{"ref":"a1b2c3d4e5f6","detail":"high"}',
+    subtitle: "a1b2c3d4e5f6 · high",
+  },
+  { name: "image_view", args: '{"ref":"a1b2c3d4e5f6"}', subtitle: "a1b2c3d4e5f6" },
   { name: "shell", args: "not json at all", subtitle: "" },
   { name: "mystery_tool", args: "raw args", subtitle: "raw args" },
 ];
@@ -388,10 +395,16 @@ describe("outputView: the TUI's cut (Owner Q8)", () => {
     expect(view).toEqual({ lines: lines(8).split("\n"), hidden: 0, error: false });
   });
 
-  test("9 lines → the first 6 + 3 hidden", () => {
+  test("9 lines → the TAIL (last 6) + 3 earlier lines hidden", () => {
     const view = outputView(lines(9), { full: false, error: false });
-    expect(view.lines).toEqual(["l1", "l2", "l3", "l4", "l5", "l6"]);
+    expect(view.lines).toEqual(["l4", "l5", "l6", "l7", "l8", "l9"]);
     expect(view.hidden).toBe(3);
+  });
+
+  test("a long log keeps its last lines; hidden counts the skipped head", () => {
+    const view = outputView(lines(400), { full: false, error: false });
+    expect(view.lines).toEqual(["l395", "l396", "l397", "l398", "l399", "l400"]);
+    expect(view.hidden).toBe(394);
   });
 
   test("full → whole", () => {

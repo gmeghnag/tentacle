@@ -43,6 +43,13 @@ export interface Palette {
   readonly sepChat: string;
   /** Separator on a sheet. */
   readonly sepSheet: string;
+  /**
+   * A FINISHED thought's node (the `Thought` ring, docs/fix/mobile-step-rail.md
+   * owner decision 4): a dim, "disabled" grey near the rail, so a thought steps
+   * back behind the actions it sits between. Its own token because it is quiet by
+   * DESIGN, not because it happens to equal a hairline.
+   */
+  readonly thought: string;
   /** Accent for text and icons. */
   readonly accent: string;
   /** Accent for a filled button. */
@@ -85,6 +92,25 @@ export interface Palette {
   readonly delText: string;
   readonly dash: string;
   readonly switchOff: string;
+  /**
+   * A workflow step's MARKER (docs/fix/workflows-ux.md D4, the owner's (ii) tinta
+   * from `.tentacle/mockups/workflow-run-view/markers-v2.html`): a soft tinted
+   * body per phase, and the ink the glyph carries — the ink is what clears the
+   * contrast, measured in `workflow-marker.test.ts`. `wait` is shared by `later`
+   * (not yet) and `stopped`; `skipInk` is the colour of a "not run" ring, drawn on
+   * the card, with no body at all.
+   */
+  readonly wrOkSoft: string;
+  readonly wrOkInk: string;
+  readonly wrFailSoft: string;
+  readonly wrFailInk: string;
+  readonly wrRunSoft: string;
+  readonly wrRunInk: string;
+  readonly wrAskSoft: string;
+  readonly wrAskInk: string;
+  readonly wrWaitSoft: string;
+  readonly wrWaitInk: string;
+  readonly wrSkipInk: string;
 }
 
 const light: Palette = {
@@ -103,6 +129,7 @@ const light: Palette = {
   sep: "#C6C6C8",
   sepChat: "#D1D1D6",
   sepSheet: "#C6C6C8",
+  thought: "#A9A9B0",
   accent: "#0E7490",
   accentFill: "#0E7490",
   onAccent: "#FFFFFF",
@@ -130,6 +157,19 @@ const light: Palette = {
   delText: "#9F1020",
   dash: "#8E8E93",
   switchOff: "#C7C7CC",
+  // markers-v2 light: ok → green, fail → red pulled to rose, run → accent,
+  // ask → orange pulled to sand, wait → the neutral grey, skip → sec.
+  wrOkSoft: "#e2efe5",
+  wrOkInk: "#2e6a3f",
+  wrFailSoft: "#f6e4e9",
+  wrFailInk: "#9a3b55",
+  wrRunSoft: "#dfedf0",
+  wrRunInk: "#1f6272",
+  wrAskSoft: "#f3ebdd",
+  wrAskInk: "#7f5527",
+  wrWaitSoft: "#ececef",
+  wrWaitInk: "#6c6c71",
+  wrSkipInk: "#78787d",
 };
 
 const dark: Palette = {
@@ -148,6 +188,7 @@ const dark: Palette = {
   sep: "#37383C",
   sepChat: "#313236",
   sepSheet: "#3D3E42",
+  thought: "#5D6166",
   accent: "#22D3EE",
   accentFill: "#06B6D4",
   onAccent: "#00191F",
@@ -178,6 +219,19 @@ const dark: Palette = {
   delText: "#FFA3A8",
   dash: "#636366",
   switchOff: "#434448",
+  // markers-v2 dark — and the petrol palette inherits these by spreading `dark`
+  // (the mockup draws petrol and dark with the same marker inks).
+  wrOkSoft: "#25352a",
+  wrOkInk: "#a3d2b0",
+  wrFailSoft: "#3a272d",
+  wrFailInk: "#e9aabb",
+  wrRunSoft: "#20343a",
+  wrRunInk: "#94d0dd",
+  wrAskSoft: "#3a3126",
+  wrAskInk: "#e3c493",
+  wrWaitSoft: "#2f3034",
+  wrWaitInk: "#a6a9ae",
+  wrSkipInk: "#8f9297",
 };
 
 /**
@@ -209,6 +263,7 @@ const petrol: Palette = {
   sep: "#2D393D",
   sepChat: "#253033",
   sepSheet: "#333F43",
+  thought: "#55636A",
   tint: "#173136",
   glass: "rgba(29,37,40,0.86)",
   switchOff: "#3A4043",
@@ -319,8 +374,19 @@ export const typography = {
   monoCode: { fontSize: 12.5, lineHeight: 19, fontFamily: MONO },
   monoDiff: { fontSize: 12, lineHeight: 21, fontFamily: MONO },
   monoInline: { fontSize: 14, lineHeight: 20, fontFamily: MONO },
-  /** A step's name and its one mono line (docs/feat/mobile-tool-rows.md, mockup C). */
-  step: { fontSize: 14, lineHeight: 20, fontWeight: "500" },
+  /**
+   * A step's name and its one mono line (docs/feat/mobile-tool-rows.md, mockup C).
+   * 400 by owner decision 2026-11-22 (docs/fix/mobile-transcript-type.md): a step row
+   * steps back behind the prose by size and lightness, never by hue. Its lineHeight
+   * stays 20 — the rail's branch geometry measures it (`step-rail.ts`).
+   */
+  step: { fontSize: 14, lineHeight: 20, fontWeight: "400" },
+  /**
+   * A step's trailing duration: one size down from its name (owner decision 3).
+   * 400 spelled out, like `step`: the quietest thing on the line is regular, not
+   * a lighter face (`transcript-type.test.ts` pins it).
+   */
+  stepMeta: { fontSize: 13, lineHeight: 18, fontWeight: "400" },
   stepMono: { fontSize: 12.5, lineHeight: 18, fontFamily: MONO },
   sas: { fontSize: 40, lineHeight: 48, fontWeight: "600", letterSpacing: 6, fontFamily: MONO },
 } as const satisfies Record<string, TextStyleToken>;

@@ -104,6 +104,18 @@ import {
   type UpdateSettingsResult,
   type VoiceTurn,
   type WireStreamEvent,
+  type WorkflowCatalogueParams,
+  type WorkflowCatalogueResult,
+  type WorkflowListResult,
+  type WorkflowParams,
+  type WorkflowResult,
+  type WorkflowRow,
+  type WorkflowSaveParams,
+  type WorkflowSaveResult,
+  type WorkflowSourceParams,
+  type WorkflowSourceResult,
+  type WorkflowStepParams,
+  type WorkflowStepResult,
   text,
 } from "@tentacle/protocol";
 import {
@@ -134,6 +146,7 @@ import {
   dialFailed,
   initialLink,
   linkDropped,
+  linkResumed,
   linkUp,
   liveness,
   stopped,
@@ -184,6 +197,7 @@ import {
   UploadWindow,
 } from "./upload-window.ts";
 import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
+import { WORKFLOW_OLD_DAEMON, boundWorkflows, workflowsFromSnapshot } from "./workflows.ts";
 
 /** A daemon that predates `session/subagent_message`: a typed refusal, never a throw at a UI. */
 export const SUBAGENT_MESSAGE_OLD_DAEMON =
@@ -439,6 +453,19 @@ export interface SessionSchedulesNotice {
   readonly sessionId: string;
   readonly rows: readonly ScheduleRow[];
   readonly count: number;
+}
+
+/**
+ * The session's workflow runs as the daemon reports them (a `workflows` update,
+ * or the snapshot of a resync): the FULL list — the current run plus the last
+ * few ended ones — already bounded and sanitized here. Not turn-scoped: a run
+ * lives between turns. Display only, and read only by a client whose daemon is
+ * trusted to run workflows of its own (`daemonWakes`, AGENTS §7: a pod's list
+ * is a pod-supplied claim about the laptop's runs).
+ */
+export interface SessionWorkflowsNotice {
+  readonly sessionId: string;
+  readonly rows: readonly WorkflowRow[];
 }
 
 /**
@@ -778,6 +805,8 @@ interface Snap {
   readonly jobs?: readonly JobRow[];
   /** The scheduled wakes at the cut (absent: an older daemon, or one that never holds any). */
   readonly schedules?: readonly ScheduleRow[];
+  /** The workflow runs at the cut (absent: an older daemon, or a pod daemon). */
+  readonly workflows?: readonly WorkflowRow[];
   /**
    * Each message's arrival time, index-aligned with `messages`
    * (docs/fix/mobile-open-at-end.md, slice B). Absent when the daemon does not
@@ -848,6 +877,8 @@ interface SessionEntry {
   jobs: readonly JobRow[] | undefined;
   /** The daemon's last reported scheduled wakes; undefined until it reports one. */
   schedules: readonly ScheduleRow[] | undefined;
+  /** The daemon's last reported workflow runs; undefined until it reports one. */
+  workflows: readonly WorkflowRow[] | undefined;
   /** The session's newest settings report (an open's, an own sync's, a `session_settings`). */
   settings: SessionSettingsReport | undefined;
   /** The exits no turn had flushed when the newest open answered (an older daemon: 0). */
@@ -965,6 +996,7 @@ export class RemoteClient {
   private readonly subagentListeners = new Set<(notice: SessionSubagentsNotice) => void>();
   private readonly jobListeners = new Set<(notice: SessionJobsNotice) => void>();
   private readonly scheduleListeners = new Set<(notice: SessionSchedulesNotice) => void>();
+  private readonly workflowListeners = new Set<(notice: SessionWorkflowsNotice) => void>();
   private readonly subagentNotifyListeners = new Set<
     (notice: SessionSubagentNotifyNotice) => void
   >();
@@ -1576,6 +1608,158 @@ export class RemoteClient {
   /** The session's scheduled wakes as last reported; undefined if never reported. */
   schedulesOf(sessionId: string): readonly ScheduleRow[] | undefined {
     return this.sessions.get(sessionId)?.schedules;
+  }
+
+  /** Subscribe to workflow-run changes across all sessions (see the notice type). */
+  onSessionWorkflows(listener: (notice: SessionWorkflowsNotice) => void): () => void {
+    this.workflowListeners.add(listener);
+    return () => this.workflowListeners.delete(listener);
+  }
+
+  /** The session's workflow runs as last reported; undefined if never reported. */
+  workflowsOf(sessionId: string): readonly WorkflowRow[] | undefined {
+    return this.sessions.get(sessionId)?.workflows;
+  }
+
+  /**
+   * `session/workflow` (docs/feat/agent-workflows.md D3): the user starts,
+   * stops or resumes a run, or re-runs one step. Never a throw for a refusal:
+   * `{ok: false, reason}` is a VALUE a notice paints — and an older daemon's
+   * `MethodNotFound` becomes the same typed refusal. Not re-sent after a drop
+   * (`"once"`): a lost answer converges through the `workflows` frame the daemon
+   * broadcasts, and a repeat could start a run twice.
+   */
+  workflow(sessionId: string, params: WorkflowParams): Promise<WorkflowResult> {
+    return this.sessionCall(sessionId, Method.Workflow, params, "once").then(
+      (result) => result as WorkflowResult,
+      (error: unknown): WorkflowResult => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { ok: false, reason: WORKFLOW_OLD_DAEMON };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `workflow/list` (a daemon-wide read, serve only: the phone's run list).
+   * `{unsupported: true}` from an older daemon (or one that runs no workflows),
+   * never a throw: the caller dims its entry instead of showing an error. Not
+   * re-sent after a drop (a fresh read: ask again).
+   */
+  workflowList(): Promise<WorkflowListResult | { unsupported: true }> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.WorkflowList, {}).then(
+      (result) => result as WorkflowListResult,
+      (error: unknown): WorkflowListResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/workflow_catalogue` (docs/feat/workflows-ui.md slice 5a / D6): the
+   * project's workflow files, validated and hashed against THAT session's models,
+   * with whether each hash is approved. A read: nothing is asked, nothing runs.
+   * An older daemon's `MethodNotFound` is `{unsupported: true}` — never a throw,
+   * and never the `unavailable` a tunnelled session answers (they read
+   * differently on screen: "update tentacle" vs "workflows only on a laptop").
+   */
+  workflowCatalogue(
+    sessionId: string | undefined,
+    params: WorkflowCatalogueParams,
+  ): Promise<WorkflowCatalogueResult | { unsupported: true }> {
+    const call =
+      sessionId === undefined
+        ? // No session (a client opens its lazily, at the first prompt): a plain
+          // request, the `session/skills`/`session/tools` shape
+          // (docs/fix/workflows-ux.md S8b).
+          this.call(this.peer, Method.WorkflowCatalogue, params)
+        : this.sessionCall(sessionId, Method.WorkflowCatalogue, params, "once");
+    return call.then(
+      (result) => result as WorkflowCatalogueResult,
+      (error: unknown): WorkflowCatalogueResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/workflow_step` (docs/feat/workflows-ui.md D1): ONE step execution's
+   * `prompt`/`report` — the detail a `workflows` row does not carry. `detail`
+   * absent is the honest "not available" (never ran, or its entry left the
+   * retained log). An older daemon's `MethodNotFound` is `{unsupported: true}`.
+   * Read-only and synchronous daemon-side, so it never awaits the peer (§7).
+   */
+  workflowStep(
+    sessionId: string,
+    params: WorkflowStepParams,
+  ): Promise<WorkflowStepResult | { unsupported: true }> {
+    return this.sessionCall(sessionId, Method.WorkflowStep, params, "once").then(
+      (result) => result as WorkflowStepResult,
+      (error: unknown): WorkflowStepResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/workflow_source` (docs/feat/workflow-editor.md D5/D3): what the
+   * editor opens — the file's bytes, its draft, its prompts, the hash or the
+   * errors. A READ: it raises no ask and writes nothing. An older daemon's
+   * `MethodNotFound` is `{unsupported: true}` — the phone then hides Edit/New
+   * and says "update tentacle on this computer"; never a throw at a screen, and
+   * never an empty file that blames the folder.
+   */
+  workflowSource(
+    sessionId: string,
+    params: WorkflowSourceParams,
+  ): Promise<WorkflowSourceResult | { unsupported: true }> {
+    return this.sessionCall(sessionId, Method.WorkflowSource, params, "once").then(
+      (result) => result as WorkflowSourceResult,
+      (error: unknown): WorkflowSourceResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/workflow_save` (docs/feat/workflow-editor.md D5/D3): `dryRun: true`
+   * IS the Review screen (every check, nothing written); `false` re-does them and
+   * writes, refusing `changed` unless `baseHash` is still the file's.
+   *
+   * Not re-sent after a drop (`"once"`): a write is not idempotent from here —
+   * the caller re-reads the file (`workflowSource`) and decides from its hash
+   * (D7). A refusal is a RESULT with a `refusal` word and a `reason`, never a
+   * throw; an older daemon is `{unsupported: true}`.
+   */
+  workflowSave(
+    sessionId: string,
+    params: WorkflowSaveParams,
+  ): Promise<WorkflowSaveResult | { unsupported: true }> {
+    return this.sessionCall(sessionId, Method.WorkflowSave, params, "once").then(
+      (result) => result as WorkflowSaveResult,
+      (error: unknown): WorkflowSaveResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
   }
 
   /**
@@ -3467,6 +3651,17 @@ export class RemoteClient {
     this.kick();
   }
 
+  redialNow(): void {
+    if (this.disposed || this.stopError !== null || !this.channelFactory) return;
+    const step = linkResumed(this.link);
+    if (step === null) return;
+    if (this.dialTimer !== null) {
+      this.clock.clearTimeout(this.dialTimer as ReturnType<typeof setTimeout>);
+      this.dialTimer = null;
+    }
+    this.schedule(step);
+  }
+
   private redial(error: unknown): void {
     if (this.disposed || this.stopError) return;
     this.schedule(dialFailed(this.link, error, this.clock.now(), this.random));
@@ -3515,6 +3710,7 @@ export class RemoteClient {
       subagents: undefined,
       jobs: undefined,
       schedules: undefined,
+      workflows: undefined,
       settings: undefined,
       unflushedExits: 0,
       attachMark: 0,
@@ -3577,6 +3773,14 @@ export class RemoteClient {
     entry.schedules = rows;
     for (const listener of this.scheduleListeners) {
       listener({ sessionId: entry.id, rows, count });
+    }
+  }
+
+  /** The workflow runs now (a `workflows` update in seq order, or a resync's snapshot): bounded here. */
+  private workflowsChanged(entry: SessionEntry, rows: readonly WorkflowRow[]): void {
+    entry.workflows = rows;
+    for (const listener of this.workflowListeners) {
+      listener({ sessionId: entry.id, rows });
     }
   }
   private subagentNotified(entry: SessionEntry, notify: SubagentNotify): void {
@@ -4000,6 +4204,13 @@ export class RemoteClient {
     if (snapshotSchedules && this.daemonWakes) {
       this.schedulesChanged(entry, snapshotSchedules, snap.schedules?.length ?? 0);
     }
+    // The runs at the cut: the same fold, under the SAME trust bit the live frame
+    // is (`daemonWakes`) — a pod's list is a pod-supplied claim about the
+    // laptop's runs, whose approve steps the laptop would be asked to answer.
+    const snapshotWorkflows = workflowsFromSnapshot(snap.workflows);
+    if (snapshotWorkflows && this.daemonWakes) {
+      this.workflowsChanged(entry, snapshotWorkflows);
+    }
     this.step(entry, {
       kind: "snapshot",
       messages: snap.messages,
@@ -4189,6 +4400,12 @@ export class RemoteClient {
         if (this.daemonWakes) {
           this.schedulesChanged(entry, boundSchedules(update.schedules), update.schedules.length);
         }
+      } else if (update.type === "workflows") {
+        // Not turn-scoped (a run lives between turns), and DROPPED with the trust
+        // bit off: a pod runs no workflow of the laptop's (AGENTS §7).
+        if (this.daemonWakes) {
+          this.workflowsChanged(entry, boundWorkflows(update.runs));
+        }
       } else if (update.type === "subagent_notify") {
         // Not turn-scoped: a child messages the agent while it runs (idle too).
         this.subagentNotified(entry, boundSubagentNotify(update));
@@ -4374,6 +4591,7 @@ export class RemoteClient {
       ...(first?.subagents ? { subagents: first.subagents } : {}),
       ...(first?.jobs ? { jobs: first.jobs } : {}),
       ...(first?.schedules ? { schedules: first.schedules } : {}),
+      ...(first?.workflows ? { workflows: first.workflows } : {}),
     };
   }
 
@@ -4718,6 +4936,7 @@ export class RemoteClient {
             signal: controller.signal,
             ...(action.turnId !== undefined ? { turnId: action.turnId } : {}),
             ...(action.agent !== undefined ? { agent: action.agent } : {}),
+            ...(action.requestId !== undefined ? { requestId: action.requestId } : {}),
           })
           .then(answered, (error: unknown) => {
             this.onError?.(error instanceof Error ? error : new Error(String(error)));

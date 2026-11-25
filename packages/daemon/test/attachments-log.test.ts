@@ -11,7 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { AttachmentRef, ChatMessage, ChatRequest } from "@tentacle/core";
-import type { KnownLogEntry } from "@tentacle/protocol";
+import { type KnownLogEntry, KnownLogEntrySchema } from "@tentacle/protocol";
 import { ProxyModelProvider } from "../src/proxy-model.ts";
 import { SessionLog, replayFromBase } from "../src/session-log.ts";
 
@@ -99,6 +99,38 @@ describe("T3 — the emitter picks the media entry type", () => {
     // base, so exactly one media_message is visible).
     expect(entries().filter((e) => e.type === "media_message")).toHaveLength(1);
     expect(replayFromBase(entries())).toEqual(reseeded);
+  });
+});
+
+describe("image-view T8 — a tool message's ONE ref rides the same media entry", () => {
+  const viewed = (): ChatMessage => ({
+    role: "tool",
+    content: "doc.pdf p.3 · 768×384 · low · 12 KB",
+    toolCallId: "v1",
+    attachments: [ref({ name: "doc.pdf p.3" })],
+  });
+
+  test("an image_view result is a critical media_message that every reader parses and replays", () => {
+    const { log, entries } = pureLog();
+    log.start([m("system", "S")], "create");
+    const h: ChatMessage[] = [
+      m("system", "S"),
+      m("user", "look"),
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "v1", name: "image_view", arguments: "{}" }],
+      },
+      viewed(),
+    ];
+    log.commit(h, 4);
+    const media = entries().filter((e) => e.type === "media_message");
+    expect(media).toHaveLength(1);
+    expect(media[0]).toMatchObject({ critical: true });
+    // The laptop's reader validates with the shared schema (no change: the
+    // schema has always accepted refs on any role — F11 version skew).
+    expect(KnownLogEntrySchema.safeParse(media[0]).success).toBe(true);
+    expect(replayFromBase(entries())).toEqual(h);
   });
 });
 

@@ -33,7 +33,6 @@ import { Text } from "./Text.tsx";
 const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   stop: "stop.fill",
   steer: "bubble.left",
-  attach: "photo",
   activity: "bolt.fill",
   artifacts: "doc.on.doc",
   sessions: "folder",
@@ -43,6 +42,9 @@ const GLYPH: Readonly<Record<HubActionId, IconName>> = {
   // for it that is not a framed window (owner Q1: glyph A, a bare `>_`).
   commands: "terminal",
   scheduled: "clock",
+  // The computer's workflow runs (docs/feat/workflows-ui.md D4): its own disc,
+  // first in the fan (docs/fix/workflows-ux.md D6, owner 2026-11-24).
+  workflows: "point.topleft.down.to.point.bottomright.curvepath",
   dictate: "mic",
   new: "square.and.pencil",
   more: "ellipsis",

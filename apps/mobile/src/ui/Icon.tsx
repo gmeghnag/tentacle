@@ -51,6 +51,9 @@ export type IconName =
   | "waveform"
   | "speaker.wave.2"
   | "stop.circle"
+  /** A context reset / a compaction on the step rail (docs/feat/mobile-reset-in-timeline.md). */
+  | "arrow.counterclockwise"
+  | "arrow.down.right.and.arrow.up.left"
   /** A pinned session in the sessions list (docs/feat/mobile-session-actions.md). */
   | "pin"
   /** The hub's Tools item (docs/feat/mobile-hub-tools.md): what the sheet switches. */
@@ -64,7 +67,20 @@ export type IconName =
   | "doc.text"
   | "doc.plaintext"
   | "chart.bar.xaxis"
-  | "doc";
+  /** The hub's Workflows item (docs/fix/workflows-ux.md D6): owner, 2026-11-24. */
+  | "point.topleft.down.to.point.bottomright.curvepath"
+  | "doc"
+  /**
+   * A workflow step's marker glyphs (docs/fix/workflows-ux.md D4, mockup
+   * `markers-v2.html`): `ok` ✓, `error` ✕ (owner: `error-icon.html`), `running`
+   * ▶, `ask` ?, `stopped` ■ (Q5), `skipped` ». `later`/`unknown` have NO glyph on
+   * purpose — the owner's plain soft disc — so `workflow-marker.ts` maps them to
+   * `null` rather than to a name here.
+   */
+  | "multiply"
+  | "questionmark"
+  | "play.fill"
+  | "chevron.forward.2";
 
 export interface IconProps {
   readonly name: IconName;

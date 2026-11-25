@@ -674,8 +674,8 @@ describe("the state file's v3 (D6, owner Q8)", () => {
         `a schemaVersion ${schemaVersion} state file carries "schedules" (it must be 3)`,
       );
     }
-    // And an unknown newer version is refused as before.
-    const newer = parse({ ...file, schemaVersion: 4 });
+    // And an unknown newer version is refused as before (4 is slice 10's, agent-workflows).
+    const newer = parse({ ...file, schemaVersion: 5 });
     expect(newer.ok).toBe(false);
   });
 

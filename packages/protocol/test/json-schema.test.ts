@@ -297,6 +297,196 @@ const FIXTURES: Record<string, Json[]> = {
     { deleted: false },
     { deleted: false, reason: "no schedule sc-9 in this session" },
   ],
+  // feat/agent-workflows slice 10: the user schedules a workflow.
+  "methods/session~1schedule_create/params": [
+    {
+      sessionId: "s",
+      turnId: "t-1",
+      workflow: { name: "nightly", inputs: [{ name: "slug", value: "main" }] },
+      daily: "03:00",
+    },
+    { sessionId: "s", turnId: "t-1", workflow: { name: "gate" }, every: "2h" },
+  ],
+  "methods/session~1schedule_create/result": [
+    { ok: true, scheduleId: "sc-3" },
+    { ok: false, reason: "workflows run only on a laptop or serve session" },
+  ],
+  // feat/workflows-ui slice 5a: the project's workflow files, for a start screen.
+  "methods/session~1workflow_catalogue/params": [{ sessionId: "s" }],
+  "methods/session~1workflow_catalogue/result": [
+    {
+      dir: "/proj/.tentacle/workflows",
+      workflows: [
+        {
+          name: "task",
+          path: ".tentacle/workflows/task.yaml",
+          ok: true,
+          version: 3,
+          description: "a demo",
+          hash: `${"a".repeat(64)}`,
+          approved: false,
+          inputs: [
+            { name: "slug", required: true },
+            { name: "note", required: false },
+          ],
+          steps: [
+            { id: "plan", kind: "agent", model: "opus", where: "local" },
+            { id: "build", kind: "run", where: "local", command: "make test" },
+            { id: "ship", kind: "approve", where: "local" },
+          ],
+        },
+        {
+          name: "broken",
+          path: ".tentacle/workflows/broken.yaml",
+          ok: false,
+          errors: ["steps[0].run: a run step needs a command"],
+        },
+      ],
+    },
+    // No workflow in the cwd's folder: an empty catalogue, nothing loadable.
+    {
+      dir: "/proj/apps/mobile/.tentacle/workflows",
+      workflows: [],
+      gitIgnored: false,
+    },
+    // A session that cannot run workflows at all, and a folder over the walk's cap.
+    { dir: "/proj/.tentacle/workflows", workflows: [], unavailable: "not on this session" },
+    { dir: "/proj/.tentacle/workflows", workflows: [], truncated: true },
+  ],
+  // feat/workflow-editor slice 3a (D3): read a workflow as a draft; preview/write it.
+  "methods/session~1workflow_source/params": [{ sessionId: "s", name: "task" }],
+  "methods/session~1workflow_source/result": [
+    {
+      ok: true,
+      path: ".tentacle/workflows/task.yaml",
+      text: "schemaVersion: 1\n",
+      draft: '{"schemaVersion":1,"name":"task","version":3,"steps":[]}',
+      prompts: [{ path: "prompts/gate.md", text: "review {{inputs.slug}}" }],
+      hash: "a".repeat(64),
+      version: 3,
+      canonical: false,
+      context: { models: ["gpt-5"], agentTypes: ["general"] },
+    },
+    // A file that cannot be opened as a graph: its YAML plus the reason, no draft.
+    {
+      ok: false,
+      path: ".tentacle/workflows/task.yaml",
+      text: "not: [a workflow",
+      unreadable: "a workflow must be a YAML mapping",
+    },
+    // A session with no workflow driver (a pod): no path, no draft, the reason.
+    { ok: false, unavailable: "workflows run only on a laptop or serve session" },
+  ],
+  "methods/session~1workflow_save/params": [
+    {
+      sessionId: "s",
+      name: "task",
+      mode: "create",
+      draft: '{"schemaVersion":1,"name":"task","version":1,"steps":[]}',
+      prompts: [{ path: "prompts/gate.md", text: "hi" }],
+      dryRun: true,
+    },
+    {
+      sessionId: "s",
+      name: "task",
+      mode: "replace",
+      draft: "{}",
+      prompts: [],
+      baseHash: "b".repeat(64),
+      dryRun: false,
+    },
+  ],
+  "methods/session~1workflow_save/result": [
+    {
+      ok: true,
+      path: ".tentacle/workflows/task.yaml",
+      hash: "a".repeat(64),
+      version: 4,
+      approved: false,
+      files: [
+        { path: "prompts/gate.md", status: "new", added: 3, removed: 0, patch: "@@ -0,0 +1,3 @@" },
+        { path: ".tentacle/workflows/task.yaml", status: "changed", added: 1, removed: 1 },
+      ],
+      alsoChanges: ["other"],
+      running: "wf-2",
+      schedules: ["sc-7"],
+    },
+    {
+      ok: false,
+      refusal: "changed",
+      reason: ".tentacle/workflows/task.yaml changed since you opened it",
+    },
+    { ok: false, refusal: "invalid", errors: ["steps[0].run: is not a command"] },
+  ],
+  // feat/agent-workflows S3: the user drives a workflow run; the phone lists them.
+  "methods/session~1workflow/params": [
+    {
+      sessionId: "s",
+      action: "start",
+      name: "task",
+      inputs: [{ name: "slug", value: "x" }],
+      turnId: "t1",
+    },
+    {
+      sessionId: "s",
+      action: "start",
+      name: "task",
+      hash: `${`${"a".repeat(64)}`}`,
+      turnId: "t4",
+    },
+    { sessionId: "s", action: "stop", runId: "wf-1" },
+    { sessionId: "s", action: "resume", runId: "wf-1", turnId: "t2" },
+    { sessionId: "s", action: "rerun_step", runId: "wf-1", stepId: "gate", turnId: "t3" },
+  ],
+  "methods/session~1workflow/result": [
+    { ok: true, runId: "wf-1" },
+    { ok: false, reason: "workflows run only on a laptop or serve session" },
+    { ok: false, refusal: "changed", reason: "workflows/task.yaml changed since you opened it" },
+    { ok: false, refusal: "running", reason: "another workflow started meanwhile", runId: "wf-2" },
+  ],
+  // feat/workflows-ui slice 1a: ONE step execution's detail (D1).
+  "methods/session~1workflow_step/params": [
+    { sessionId: "s", runId: "wf-1", stepId: "plan" },
+    { sessionId: "s", runId: "wf-1", stepId: "plan", attempt: 0, round: 1 },
+  ],
+  "methods/session~1workflow_step/result": [
+    {},
+    {
+      detail: {
+        attempt: 1,
+        round: 0,
+        live: false,
+        state: "ok",
+        verdict: "pass",
+        reason: "planned",
+        prompt: "plan it",
+        report: "the report",
+        tokens: 12,
+        durationMs: 34,
+      },
+    },
+    { detail: { attempt: 0, round: 0, live: true, state: "running", prompt: "plan it" } },
+  ],
+  "methods/workflow~1list/params": [{}],
+  "methods/workflow~1list/result": [
+    { runs: [] },
+    {
+      runs: [
+        {
+          sessionId: "s",
+          title: "t",
+          runId: "wf-1",
+          name: "task",
+          state: "needs-approval",
+          step: "merge",
+          done: 6,
+          total: 7,
+          needsUser: true,
+          startedAt: 1,
+        },
+      ],
+    },
+  ],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
   "methods/session~1send_now/params": [
@@ -815,7 +1005,10 @@ describe("tagged-union shape (what codegen needs)", () => {
     //     R1). Not RPC (they have their own `RELAY_PROTOCOL_VERSION`), but the
     //     same `*Schema`/tagged-union shape, so codegen sees them too.
     // +1: `DocumentSource` (an attached document's ref | text, docs/feat/pdf-read.md D4).
-    expect(unions).toBe(11);
+    // +1: `WorkflowParams` (session/workflow by `action`, docs/feat/agent-workflows.md D3).
+    // +2: `AnthropicReasoningBlock` and `ReasoningBody` (an assistant message's
+    //     reasoning record, docs/fix/reasoning-echo.md D8).
+    expect(unions).toBe(14);
   });
 
   test("every $ref names a $def", () => {
@@ -902,10 +1095,16 @@ describe("event classes and the unknown-event catch-all", () => {
 });
 
 describe("wire hygiene — optional fields are omitted, never null", () => {
-  test("null appears only where it carries meaning (exitCode, JSON-RPC error id)", () => {
+  test("null appears only where it carries meaning (exitCode, JSON-RPC error id, a run's edges)", () => {
     expect(nullSites(buildProtocolJsonSchema())).toEqual([
       "#/$defs/BackgroundExit/properties/exitCode/anyOf/1",
       "#/$defs/JsonRpcErrorResponse/properties/id/anyOf/1",
+      // docs/fix/workflows-ux.md D1: both are REQUIRED (an older daemon must fail
+      // at `initialize`, not render a graph with no edges), and "no edge" is a
+      // fact a client must be told — absent would be indistinguishable from a
+      // daemon that dropped the field.
+      "#/$defs/WorkflowStepRow/properties/next/anyOf/1",
+      "#/$defs/WorkflowStepRow/properties/onFail/anyOf/1",
     ]);
   });
 

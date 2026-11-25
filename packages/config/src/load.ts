@@ -168,6 +168,10 @@ export interface TentacleConfig {
    * (docs/feat/attachments-prompt.md D4). Unset → the provider's default.
    */
   readonly images?: boolean;
+  /** `model.imageDetail` (docs/feat/image-view.md D6). Unset → `auto`. */
+  readonly imageDetail?: "auto" | "low" | "high";
+  /** `model.imageTokens` (docs/feat/image-view.md D7). Unset → the provider's estimate. */
+  readonly imageTokens?: number;
   readonly systemPrompt: string;
   /** The identity part of `systemPrompt`: with `agentsMdContent`, what a recompose needs. */
   readonly promptIdentity: string;
@@ -194,6 +198,8 @@ export interface TentacleConfig {
   readonly subagentModels: Readonly<Record<string, string>>;
   /** `subagents.selectableModels` (`[]` = off). */
   readonly selectableModels: readonly string[];
+  /** `harnesses.<name>`, defaults filled (docs/feat/subagent-harness-runners.md); laptop/serve only. */
+  readonly harnesses: ResolvedConfig["harnesses"];
   /**
    * Over the model tunnel: what the laptop published (docs/feat/models-map-pod.md).
    * Never loaded from a file: only the laptop's carried settings set it.
@@ -231,6 +237,8 @@ export interface TentacleConfig {
   readonly mount?: ResolvedConfig["mount"];
   /** The configured TUI palette (file or profile); absent = `auto` (the TUI probes). */
   readonly tui?: ResolvedConfig["tui"];
+  /** Beta display toggles (`beta.*`, file or profile); absent = all off. LAPTOP-ONLY. */
+  readonly beta?: ResolvedConfig["beta"];
   /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
   readonly sessions?: ResolvedConfig["sessions"];
   /** Voice dictation (file or profile); absent = the defaults in `voice-session.ts`. */
@@ -890,6 +898,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     ...(resolved.maxImageBytes !== undefined ? { maxImageBytes: resolved.maxImageBytes } : {}),
     ...(resolved.images !== undefined ? { images: resolved.images } : {}),
+    ...(resolved.imageDetail !== undefined ? { imageDetail: resolved.imageDetail } : {}),
+    ...(resolved.imageTokens !== undefined ? { imageTokens: resolved.imageTokens } : {}),
     systemPrompt: resolved.systemPrompt,
     promptIdentity: resolved.promptIdentity,
     ...(agentsMd !== undefined ? { agentsMdContent: agentsMd } : {}),
@@ -905,6 +915,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     models,
     subagentModels: resolved.subagentModels,
     selectableModels: resolved.selectableModels,
+    harnesses: resolved.harnesses,
     maxInlineOutputChars: resolved.maxInlineOutputChars,
     toolOutputRetentionDays: resolved.toolOutputRetentionDays,
     redactSecrets: resolved.redactSecrets,
@@ -921,6 +932,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.detach !== undefined ? { detach: resolved.detach } : {}),
     ...(resolved.mount !== undefined ? { mount: resolved.mount } : {}),
     ...(resolved.tui !== undefined ? { tui: resolved.tui } : {}),
+    ...(resolved.beta !== undefined ? { beta: resolved.beta } : {}),
     ...(resolved.sessions !== undefined ? { sessions: resolved.sessions } : {}),
     ...(resolved.voice !== undefined ? { voice: resolved.voice } : {}),
     ...(resolved.relay !== undefined ? { relay: resolved.relay } : {}),

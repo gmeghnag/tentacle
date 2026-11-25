@@ -29,6 +29,7 @@ import { scheduleKind } from "./schedule.ts";
 import { sessionsKind } from "./sessions.ts";
 import { skillsKind } from "./skills.ts";
 import { toolsKind } from "./tools.ts";
+import { workflowKind } from "./workflow.ts";
 
 /** The precedence layer a panel kind is offered keys on (two of the 14, unchanged). */
 export type PanelLayerName = "sessions" | "tree";
@@ -48,6 +49,13 @@ export interface PanelAt {
    * (docs/feat/session-capabilities.md S4); absent → no switch column.
    */
   readonly caps?: CapsPhase;
+  /**
+   * The session is open daemon-side (`SessionController.opened()`). A lazy
+   * session (a fresh or resumed one opens at its first message) has no run feed
+   * yet, and a panel that called that "not supported by this computer's tentacle"
+   * said something false. Absent → taken as open (a host-less mount).
+   */
+  readonly opened?: boolean;
 }
 
 /**
@@ -93,6 +101,7 @@ export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [
   toolsKind,
   artifactsKind,
   scheduleKind,
+  workflowKind,
 ];
 
 /**

@@ -15,10 +15,11 @@ import type { EndReason, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef, ChatMessage, ToolDiffDetail } from "@tentacle/core";
 import { describeEmptyTurn, describeRepairs, describeTruncation, toolLabel } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
-import { compactionSeparatorRow, historyRows, restartPromptOf } from "./transcript-history.ts";
+import { compactionRow, historyRows, restartPromptOf } from "./transcript-history.ts";
 import {
   type ImageRef,
   type LocalPhoto,
+  type NoticeRow,
   type Row,
   type SubProgress,
   type ToolRow,
@@ -42,11 +43,7 @@ export type {
   UserRow,
 } from "./transcript-rows.ts";
 export { imageRef, imageRefWithLocal, imageRowText } from "./transcript-rows.ts";
-export {
-  CONTEXT_RESET_HEADER,
-  CONTEXT_RESET_SEPARATOR,
-  restartPromptOf,
-} from "./transcript-history.ts";
+export { CONTEXT_RESET_HEADER, restartPromptOf } from "./transcript-history.ts";
 
 /** A turn's outcome, as `turn_end` / a cut stream gives it. */
 export type TurnOutcome = "ended" | "cancelled" | "interrupted" | "lost" | "failed";
@@ -333,16 +330,90 @@ export function startTurn(state: State, turnId: string, own: boolean): State {
   };
 }
 
-/** End a turn: the bracket goes; an outcome nobody stated becomes a notice. */
+/**
+ * End a turn: the bracket goes; an outcome nobody stated becomes a notice.
+ *
+ * The LOST notice gets one extra rule (docs/fix/mobile-stream-lost-repeat.md):
+ * it knows WHICH turns it is about (`NoticeRow.lostTurns`), so a re-subscribed
+ * turn that throws again cannot stack a second row, and a turn later seen
+ * COMPLETING retracts its own loss. The bracket is the only turn this fold can
+ * name (`state.turn`, read before it is cleared), so nothing else is guessed.
+ */
 export function endTurn(
   state: State,
   input: Extract<TranscriptInput, { type: "turn_ended" }>,
 ): State {
+  const turnId = state.turn === null ? null : state.turn.turnId;
   const base: State = { ...state, turn: null };
+  if (input.outcome === "lost") {
+    return foldLostNotice(base, turnId);
+  }
+  if (input.outcome === "ended" || input.outcome === "cancelled") {
+    // The daemon's end arrived through a live stream, so the phone has the
+    // reply: nothing is lost for THAT turn any more. `failed`/`interrupted` do
+    // not retract — the turn did not complete for the phone.
+    return retractLostNotice(base, turnId);
+  }
   const notice = outcomeNotice(input);
   return notice === null
     ? base
     : push(base, (key) => ({ kind: "notice", key, text: notice.text, ...levelOf(notice) }));
+}
+
+/** The one LOST notice a turn's loss adds, deduped and never stacked. */
+function foldLostNotice(state: State, turnId: string | null): State {
+  if (turnId === null) {
+    // No open bracket: today's plain notice, never merged nor retracted — a
+    // guess must not delete a real loss.
+    return push(state, (key) => ({ kind: "notice", key, text: TURN_LOST_NOTICE, level: "warn" }));
+  }
+  // Rule 2a: this turn's loss is ALREADY said — anywhere, not only on the last
+  // row (a later loss of another turn may have followed it).
+  if (state.rows.some((row) => isLostNotice(row) && row.lostTurns?.includes(turnId) === true)) {
+    return state; // re-subscription of the same turn's stream: one row
+  }
+  const at = state.rows.findLastIndex((row) => isLostNotice(row));
+  const notice = at < 0 ? undefined : (state.rows[at] as NoticeRow);
+  if (notice !== undefined && at === state.rows.length - 1 && notice.lostTurns !== undefined) {
+    // Rule 2b: the LAST row is a LOST notice, so two turns lost back-to-back
+    // read as one line (a row in between keeps them apart).
+    const rows = [...state.rows];
+    rows[at] = { ...notice, lostTurns: [...notice.lostTurns, turnId] };
+    return { ...state, rows };
+  }
+  return push(state, (key) => ({
+    kind: "notice",
+    key,
+    text: TURN_LOST_NOTICE,
+    level: "warn",
+    lostTurns: [turnId],
+  }));
+}
+
+/**
+ * Drop `turnId` from every LOST notice (a notice left with none goes). A notice
+ * that names no turns (an older shape, or one folded with no bracket) is left
+ * alone: it is not known to be about this turn.
+ */
+function retractLostNotice(state: State, turnId: string | null): State {
+  if (turnId === null) {
+    return state;
+  }
+  let changed = false;
+  const rows = state.rows.flatMap((row): readonly Row[] => {
+    if (!isLostNotice(row) || row.lostTurns === undefined || !row.lostTurns.includes(turnId)) {
+      return [row];
+    }
+    changed = true;
+    const rest = row.lostTurns.filter((id) => id !== turnId);
+    return rest.length === 0 ? [] : [{ ...row, lostTurns: rest }];
+  });
+  return changed ? { ...state, rows } : state;
+}
+
+/** A LOST notice: its text is the one constant, so nothing else can be mistaken for it. */
+function isLostNotice(row: Row): row is NoticeRow {
+  return row.kind === "notice" && row.text === TURN_LOST_NOTICE;
 }
 
 /**
@@ -359,8 +430,6 @@ function outcomeNotice(
   switch (input.outcome) {
     case "interrupted":
       return { text: TURN_INTERRUPTED_NOTICE };
-    case "lost":
-      return { text: TURN_LOST_NOTICE, warn: true };
     case "failed":
       return {
         text:
@@ -368,7 +437,9 @@ function outcomeNotice(
         warn: true,
       };
     default:
-      return null; // ended / cancelled: the transcript says what happened
+      // ended / cancelled: the transcript says what happened. `lost` is decided
+      // by `foldLostNotice` alone (it needs the turn's id, not just its text).
+      return null;
   }
 }
 
@@ -441,6 +512,11 @@ function sameSlot(a: Row, b: Row): boolean {
       return b.kind === a.kind && b.text === a.text;
     case "tool":
       return b.kind === "tool" && b.id === a.id;
+    case "context":
+      // A step of the SAME fact keeps its key across a resync (so a step the
+      // person opened stays open); a body that changed is another fact and
+      // mints a new key, which honestly closes it.
+      return b.kind === "context" && b.event === a.event && b.body === a.body;
     default:
       // An answer or a thought of a turn whose earlier rows all matched: its text
       // may differ (a live reasoning body is never stored; a cut stream), its
@@ -474,12 +550,11 @@ function applyHistory(state: State, input: Extract<TranscriptInput, { type: "his
     return appendHistory(state, input.messages, input.times);
   }
   if (input.reason === "compact") {
-    // The transcript stays; another device's compaction says so once — as the
-    // SAME separator a reopen draws from its summary (docs/fix/mobile-qa-1117.md,
-    // bug 4), so live and reload agree.
-    return input.own === true
-      ? state
-      : push(state, (key) => compactionSeparatorRow(key, input.messages));
+    // The transcript stays; the compaction leaves ONE step — the same row a
+    // reopen draws from its summary (docs/feat/mobile-reset-in-timeline.md 1A),
+    // and now for THIS phone's own compaction too (Q4-A: the client's history
+    // carries the summary on the own path as well).
+    return push(state, (key) => compactionRow(key, input.messages));
   }
   return withHistory(state, input.messages, input.times);
 }

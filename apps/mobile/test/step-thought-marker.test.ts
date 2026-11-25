@@ -164,19 +164,16 @@ describe("a tool step's line carries no ∴ (owner 17/11)", () => {
     const props = stepNodeOf(TOOL, stepOf("I should list the files first"));
     // The row's line is name + mono subtitle + trailing text; the ∴ is gone.
     expect("marker" in props).toBe(false);
-    // …and the going-away is safe: the folded thought is the body's first line,
-    // still drawn with its own ∴ (a mutation that swaps the body's text fails here).
+    // docs/fix/mobile-running-row.md (owner 21/11): the open body is the command
+    // and the result — the folded thought is NOT in it (no ∴, no text).
     const body = props.body as { type: { name: string }; props: Record<string, unknown> };
     expect(nameOf(body.type)).toBe("StepBody");
+    expect(body.props.thought ?? null).toBeNull();
     const drawn = body.type as unknown as (p: unknown) => unknown;
     const items = (drawn(body.props) as { props: { children: unknown } }).props
-      .children as Element[];
-    expect(nameOf(items[0]?.type)).toBe("View");
-    const marks = (items[0]?.props.children as Element[])[0];
-    expect(nameOf(marks?.type)).toBe("ThereforeDots");
-    expect(((items[0]?.props.children as Element[])[1] as Element).props.children).toBe(
-      "I should list the files first",
-    );
+      .children as unknown[];
+    expect(JSON.stringify(items)).not.toContain("I should list the files first");
+    expect(JSON.stringify(items)).toContain("ls -la");
   });
 
   test("a tool step without a thought draws no marker either", () => {
@@ -213,8 +210,10 @@ describe("StepNode: the trailing marker is gone from the renderer", () => {
     expect(node).not.toMatch(/readonly marker:/);
     expect(node).not.toContain("styles.marker");
     expect(node).not.toMatch(/marker=\{(?:true|false|[^}]*)\}/);
-    // The remaining ∴ are the reasoning node and the folded thought in the body.
-    expect(node.match(/<ThereforeDots\b/g)?.length).toBe(2);
+    // ONE ∴ left: the folded thought in the open body. The reasoning NODE is no
+    // longer a glyph at all (docs/fix/mobile-step-rail.md owner decision 4: a dot
+    // while thinking, a dim ring once thought — the same shape as a tool's).
+    expect(node.match(/<ThereforeDots\b/g)?.length).toBe(1);
   });
 
   test("no caller passes a marker", () => {

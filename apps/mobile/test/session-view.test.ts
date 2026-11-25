@@ -4,7 +4,7 @@
  * line, and the composer the screen draws. Pure — no React, no simulator.
  */
 import { describe, expect, test } from "bun:test";
-import { type Banner, type SessionViewInput, sessionView } from "../src/session-view.ts";
+import { type Banner, type SessionViewInput, retryOnUp, sessionView } from "../src/session-view.ts";
 import type { Row, TurnRow } from "../src/transcript-rows.ts";
 
 const ROWS: readonly Row[] = [
@@ -187,5 +187,40 @@ describe("the daemon's own end of a session we reached (F14)", () => {
       input({ status: { phase: "failed", failure: "archived" }, ended: "closed" }),
     );
     expect(kind(view.banner)).toBe("archived");
+  });
+});
+
+describe("fix/mobile-connect-latency 3c/3d: the view-model owns the retry decision and the placeholder", () => {
+  test("T9 retryOnUp: only a failed attach whose banner offers Retry (link / timeout / gone / unspecified)", () => {
+    expect(retryOnUp({ phase: "failed", failure: "link" })).toBe(true);
+    expect(retryOnUp({ phase: "failed", failure: "timeout" })).toBe(true);
+    expect(retryOnUp({ phase: "failed", failure: "gone" })).toBe(true);
+    expect(retryOnUp({ phase: "failed" })).toBe(true);
+    expect(retryOnUp({ phase: "failed", failure: "archived" })).toBe(false);
+    expect(retryOnUp({ phase: "failed", failure: "deleted" })).toBe(false);
+    expect(retryOnUp({ phase: "failed", failure: "too-many" })).toBe(false);
+    expect(retryOnUp({ phase: "open" })).toBe(false);
+    expect(retryOnUp({ phase: "opening" })).toBe(false);
+    // One source of truth: it agrees with the banner's own Retry button.
+    for (const failure of ["link", "timeout", "gone", "archived", "deleted", "too-many"] as const) {
+      const status = { phase: "failed" as const, failure };
+      expect(retryOnUp(status)).toBe(sessionView(input({ status })).retry);
+    }
+  });
+
+  test("T10 placeholder per phase: ended / failed-retryable / failed-other / opening / live → undefined", () => {
+    const placeholder = (over: Partial<SessionViewInput>) =>
+      sessionView(input(over)).composer.placeholder;
+    expect(placeholder({ ended: "closed" })).toBe("This session has ended");
+    expect(placeholder({ status: { phase: "failed", failure: "link" } })).toBe(
+      "Not connected — tap Retry",
+    );
+    expect(placeholder({ status: { phase: "failed", failure: "timeout" } })).toBe(
+      "Not connected — tap Retry",
+    );
+    expect(placeholder({ status: { phase: "failed", failure: "deleted" } })).toBe("Session closed");
+    expect(placeholder({ status: { phase: "opening" } })).toBe("Loading…");
+    expect(placeholder({})).toBeUndefined();
+    expect(placeholder({ link: "down" })).toBeUndefined();
   });
 });

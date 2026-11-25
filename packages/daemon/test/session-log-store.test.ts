@@ -1084,3 +1084,52 @@ describe("image blobs beside the log (docs/feat/attachments-durable.md T2)", () 
     expect(await store.blobOrphans()).toEqual(["lonely"]);
   });
 });
+
+// docs/fix/reasoning-echo.md T4 (owner Q1 A: persisted): the laptop's
+// `<uid>.jsonl` keeps an assistant's `reasoning` record through a write and a
+// load, byte-identical — else `--resume` loses the echo. A file without it
+// loads exactly as before.
+describe("the reasoning record on the laptop log", () => {
+  const openai = {
+    source: "openai:m",
+    body: { format: "openai", field: "reasoning", text: "check the tests first" },
+  } as const;
+  const anthropic = {
+    source: "anthropic:m",
+    body: {
+      format: "anthropic",
+      blocks: [
+        { type: "thinking", thinking: "plan", signature: "sig==" },
+        { type: "redacted_thinking", data: "opaque" },
+      ],
+    },
+  } as const;
+
+  test("a cold base and an appended round both round-trip it", async () => {
+    const store = new LogSessionStore(fresh());
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    const first: ChatMessage = { ...asst("", ["c1"]), reasoning: openai };
+    await store.write(reader.read(log.base([user("go"), first]), "cold"));
+    const second: ChatMessage = { ...asst("done"), reasoning: anthropic };
+    await store.write(reader.read([log.msg(tool("c1")), log.msg(second)]));
+    const loaded = await load(store, "s");
+    expect(
+      typeof loaded === "string" ? loaded : loaded.map((m) => JSON.stringify(m.reasoning)),
+    ).toEqual([
+      JSON.stringify(undefined),
+      JSON.stringify(openai),
+      JSON.stringify(undefined),
+      JSON.stringify(anthropic),
+    ]);
+  });
+
+  test("a file without the field loads unchanged", async () => {
+    const store = new LogSessionStore(fresh());
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    const history = [user("go"), asst("", ["c1"]), tool("c1"), asst("done")];
+    await store.write(reader.read(log.base(history), "cold"));
+    expect(await load(store, "s")).toEqual(history);
+  });
+});

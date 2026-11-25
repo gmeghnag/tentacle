@@ -24,6 +24,8 @@ export interface CellData<RowT = unknown, PaletteT = unknown, ThumbsT = unknown>
   readonly open: boolean;
   readonly full: boolean;
   readonly reduceMotion: boolean;
+  /** Beta `Compact shell rows` (docs/feat/shell-intent-line.md §7). */
+  readonly compactShell: boolean;
   readonly speak: "offered" | "speaking" | undefined;
   /** The sub-agent the card opens, or null. */
   readonly child: string | null;
@@ -59,6 +61,12 @@ export function sameStepCell(a: StepCell | undefined, b: StepCell | undefined): 
       const o = b as Extract<StepCell, { kind: "thought" }>;
       return a.ms === o.ms && a.thread.up === o.thread.up && a.thread.down === o.thread.down;
     }
+    case "context": {
+      // The row itself is compared by identity (`sameCellData`), so only the
+      // thread this layout pass decided on has to match.
+      const o = b as Extract<StepCell, { kind: "context" }>;
+      return a.thread.up === o.thread.up && a.thread.down === o.thread.down;
+    }
   }
 }
 
@@ -76,6 +84,7 @@ export function sameCellData(a: CellData, b: CellData): boolean {
     a.open === b.open &&
     a.full === b.full &&
     a.reduceMotion === b.reduceMotion &&
+    a.compactShell === b.compactShell &&
     a.speak === b.speak &&
     a.child === b.child &&
     a.voice === b.voice &&

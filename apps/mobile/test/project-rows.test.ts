@@ -11,10 +11,15 @@ import {
   PROJECT_WORDS,
   type ProjectObservation,
   type ProjectRecordLike,
+  type ProjectRow,
   REPROBE_MS,
+  TAP_WAIT_MS,
   justPaired,
   projectSections,
+  projectTap,
   reprobeDelay,
+  tapSettled,
+  wasBackgrounded,
 } from "../src/project-rows.ts";
 
 const entry = (over: Partial<SessionListEntry> = {}): SessionListEntry => ({
@@ -154,6 +159,29 @@ describe("projectSections", () => {
     ]);
   });
 
+  test("a row with NO probe result yet is `checking`, never 'the computer does not answer' (mutation: project an absent observation as unreachable → red)", () => {
+    // The Computers screen now draws its rows from the records BEFORE the probes
+    // land (docs/fix/mobile-project-first-tap.md): every row it does not have an
+    // observation for is one still being checked.
+    const waiting = projectSections([rec("a", "mac", "tentacle")], [])[0];
+    expect(waiting?.rows[0]?.state).toBe("checking");
+    expect(waiting?.rows[0]?.word).toBe("Checking…");
+    expect(waiting?.rows[0]?.detail).toBe("");
+    expect(waiting?.rows[0]?.ok).toBe(false);
+    expect(waiting?.rows[0]?.tone).toBe("wait");
+    // Not dimmed with the dashed folder of a row that does not answer.
+    expect(waiting?.rows[0]?.muted).toBe(false);
+    expect(waiting?.state).toBe("checking");
+    expect(waiting?.status).toBe("Checking…");
+    // The offline explanation ("None of its projects answers") is a CLAIM: only
+    // once a probe actually failed.
+    expect(waiting?.note).toBeUndefined();
+    // Partly probed: the answered one keeps its state, the other is still checking.
+    const mixed = projectSections([rec("a", "mac", "a"), rec("b", "mac", "b")], [answered()])[0];
+    expect(mixed?.rows.map((r) => r.state)).toEqual(["idle", "checking"]);
+    expect(mixed?.state).toBe("online");
+  });
+
   test("a legacy record (no project/computerId) is its own computer, labelled by its last session's folder, else its name", () => {
     const legacy: ProjectRecordLike = { id: "mac", name: "MacBook" };
     const sections = projectSections(
@@ -164,6 +192,74 @@ describe("projectSections", () => {
     expect(sections.map((s) => s.computerId)).toEqual(["mac"]);
     expect(sections[0]?.rows.map((r) => r.label)).toEqual(["tentacle", "assistant"]);
     expect(projectSections([legacy], [failed()])[0]?.rows[0]?.label).toBe("MacBook");
+  });
+});
+
+describe("what a tap does (docs/fix/mobile-project-first-tap.md: a silent re-probe is not an answer)", () => {
+  const rows = projectSections(
+    [
+      rec("working", "mac", "working"),
+      rec("stopped", "mac", "stopped"),
+      rec("unreachable", "mac", "unreachable"),
+      rec("revoked", "mac", "revoked"),
+      rec("reset", "mac", "reset"),
+      // LAST, and with no observation: still being checked.
+      rec("waiting", "mac", "waiting"),
+    ],
+    [
+      answered([entry({ running: true })]),
+      failed({ absent: true }),
+      failed(),
+      failed({ diagnosis: "revoked" }),
+      failed({ diagnosis: "maybe-reset" }),
+    ],
+  ).flatMap((s) => s.rows);
+  const rowOf = (id: string): ProjectRow => {
+    const found = rows.find((row) => row.id === id);
+    if (found === undefined) {
+      throw new Error(`no row ${id}`);
+    }
+    return found;
+  };
+
+  test("open an answering row; wait for the probe on checking/stopped/unreachable; the menu only for a pairing problem (mutation: one arm for every non-ok row → red)", () => {
+    expect(rowOf("working").state).toBe("working");
+    expect(projectTap(rowOf("working"))).toBe("open");
+    expect(rowOf("waiting").state).toBe("checking");
+    expect(projectTap(rowOf("waiting"))).toBe("reprobe");
+    expect(rowOf("stopped").state).toBe("stopped");
+    expect(projectTap(rowOf("stopped"))).toBe("reprobe");
+    expect(projectTap(rowOf("unreachable"))).toBe("reprobe");
+    expect(projectTap(rowOf("revoked"))).toBe("menu");
+    expect(projectTap(rowOf("reset"))).toBe("menu");
+  });
+
+  test("the wait a tap started: open only if the row answers now — gone, still down, or needing a pairing retries the list (mutation: trust the asked row → red)", () => {
+    expect(tapSettled(rowOf("working"))).toBe("open");
+    // Removed / revoked while the person waited: the row is gone, or no longer
+    // the thing they tapped.
+    expect(tapSettled(undefined)).toBe("retry");
+    expect(tapSettled(rowOf("unreachable"))).toBe("retry");
+    expect(tapSettled(rowOf("waiting"))).toBe("retry");
+    expect(tapSettled(rowOf("revoked"))).toBe("retry");
+  });
+
+  test("a wait the person has moved on from does NOTHING — not even if the row answers (mutation: ignore `superseded`/`backgrounded` → red)", () => {
+    // Review round 1's MEDIUM: tap unreachable A, then tap working B (B opens);
+    // A's probe answers and A's screen yanked the person off B's. The screen
+    // bumps a generation on every tap/menu/Add/Pair and on blur, and the wait
+    // compares it — so an answering row that arrived after that is `drop`.
+    expect(tapSettled(rowOf("working"), { superseded: true })).toBe("drop");
+    // …and coming back to the app is not the same tap: still`drop`.
+    expect(tapSettled(rowOf("working"), { backgrounded: true })).toBe("drop");
+    expect(tapSettled(undefined, { superseded: true })).toBe("drop");
+    // A still-down row is left to the 15 s reconsideration, never re-navigated.
+    expect(tapSettled(rowOf("unreachable"), { superseded: true })).toBe("drop");
+  });
+
+  test("a tap that waits is bounded: `TAP_WAIT_MS` is what the screen arms, and it is short enough to feel like a response", () => {
+    expect(TAP_WAIT_MS).toBeGreaterThanOrEqual(1_000);
+    expect(TAP_WAIT_MS).toBeLessThanOrEqual(5_000);
   });
 });
 
@@ -186,6 +282,17 @@ describe("reprobeDelay (Owner Q12: 15 s while something is down)", () => {
     expect(
       reprobeDelay(projectSections(pair, [answered(), answered()]), 9_000, last),
     ).toBeUndefined();
+  });
+});
+
+describe("wasBackgrounded (a wait must not act on a screen the person left)", () => {
+  test("only `active` is in front; an unknown state is not a reason to drop (mutation: treat `undefined` as backgrounded → red)", () => {
+    expect(wasBackgrounded("active")).toBe(false);
+    expect(wasBackgrounded("background")).toBe(true);
+    expect(wasBackgrounded("inactive")).toBe(true);
+    expect(wasBackgrounded(undefined)).toBe(false);
+    // RN types `AppState.currentState` as `string | null` before it is known.
+    expect(wasBackgrounded(null)).toBe(false);
   });
 });
 

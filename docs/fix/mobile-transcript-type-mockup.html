@@ -1,0 +1,109 @@
+<title>Font della chat</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Inter:wght@400..700&family=Atkinson+Hyperlegible+Next:wght@400..700&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: four phones in a wrap row (today + A/B/C), same transcript; page chrome in both themes, phones in the app's dark palette. */
+:root {
+  --bg: #eceff0; --fg: #1b2123; --muted: #5a6568; --line: #d0d7d9; --pick: #0f7f93;
+  --app-bg: #151B1D; --app-label: #D5DDDE; --app-sec: #98A6A8; --app-sep: #2D393D; --app-code: #1D2528; --app-off: #485058; --app-accent: #2ab3cf;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark } }
+:root[data-theme="dark"] { --bg: #0e1213; --fg: #e3e8e9; --muted: #95a2a5; --line: #263033; --pick: #3cc0db; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.45 "Figtree", -apple-system, system-ui, sans-serif; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 22px 48px; }
+main { max-width: 1640px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+h1 { font-size: 22px; margin: 0; }
+.lead { margin: 4px 0 0; color: var(--muted); max-width: 78ch; }
+.row { display: flex; flex-wrap: wrap; gap: 22px; }
+.col { width: 375px; max-width: 100%; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.col h2 { font-size: 15.5px; margin: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.col h2 small { color: var(--muted); font-weight: 400; font-size: 13px; }
+.col h2 .rec { color: var(--pick); font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; font-weight: 600; }
+.col p.how { margin: 0; color: var(--muted); font-size: 13px; min-height: 3.2em; }
+
+/* the phone */
+.ph { background: var(--app-bg); color: var(--app-label); border-radius: 28px; padding: 18px 20px 22px; display: flex; flex-direction: column; gap: 14px; -webkit-font-smoothing: antialiased; }
+.ph p { margin: 0; font-size: 16px; line-height: 23px; }
+.ph ul { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; font-size: 16px; line-height: 23px; }
+.ph ul li::marker { color: var(--app-sec); }
+.ph code { font: 14px/20px "JetBrains Mono", ui-monospace, Menlo, monospace; background: var(--app-code); padding: 1px 5px; border-radius: 4px; }
+.spk { width: 16px; height: 14px; color: var(--app-sec); display: block; margin-top: -6px; }
+.steps { display: flex; flex-direction: column; }
+.st { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; column-gap: 12px; align-items: center; position: relative; min-height: 30px; }
+.st .nd { width: 8px; height: 8px; border-radius: 50%; justify-self: center; background: #30D158; } /* outcome dot as in the app: green ok (red on a failure) */
+.st .nd.th { background: transparent; border: 1.5px solid var(--app-off); width: 7px; height: 7px; }
+.st:not(:last-child)::after { content: ""; position: absolute; left: 6.5px; top: 19px; bottom: -11px; width: 1px; background: var(--app-sep); }
+.st .tt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st .du { color: var(--app-sec); font-variant-numeric: tabular-nums; }
+.st .th-l { color: var(--app-sec); }
+
+/* today: Figtree 400 everywhere; step rows same size and colour as prose (500 is not bundled → renders 400) */
+.v0 .ph { font-family: "Figtree", sans-serif; font-weight: 400; }
+.v0 .st { font-size: 16px; }
+.v0 .st .tt { color: var(--app-label); font-weight: 400; }
+.v0 .st .du { font-size: 15px; }
+.v0 b { font-weight: 700; }
+/* shared "new" treatment for tool rows: smaller, secondary grey, regular */
+.new .st { font-size: 14px; }
+.new .st .tt { color: var(--app-sec); }
+.new .st .du { font-size: 13px; }
+.new .st .th-l { font-size: 14px; }
+/* A: Figtree medium */
+.va .ph { font-family: "Figtree", sans-serif; }
+.va .ph p, .va .ph li { font-weight: 500; }
+.va .st .tt, .va .st .du { font-weight: 400; }
+.va b { font-weight: 700; }
+/* B: Inter 450 */
+.vb .ph { font-family: "Inter", sans-serif; letter-spacing: -0.1px; }
+.vb .ph p, .vb .ph li { font-weight: 450; font-size: 15.5px; }
+.vb .st .tt, .vb .st .du { font-weight: 400; }
+.vb b { font-weight: 650; }
+/* C: Atkinson Hyperlegible Next */
+.vc .ph { font-family: "Atkinson Hyperlegible Next", sans-serif; }
+.vc .ph p, .vc .ph li { font-weight: 450; }
+.vc .st .tt, .vc .st .du { font-weight: 400; }
+.vc b { font-weight: 700; }
+.notes { border-top: 1px solid var(--line); padding-top: 12px; max-width: 78ch; display: flex; flex-direction: column; gap: 6px; }
+.notes h2 { font-size: 16px; margin: 0; }
+.notes ul { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 4px; }
+</style>
+<main>
+  <div>
+    <h1>Font della chat (iPhone, tema scuro)</h1>
+    <p class="lead">La stessa risposta del tuo screenshot, quattro volte. «Oggi» è come la vedi adesso. In A, B e C cambia il font del testo, mentre le righe dei tool ricevono lo stesso trattamento nuovo: più piccole, grigio secondario e spessore normale. Così si staccano dal testo per grandezza e luminosità, senza usare il colore. I pallini seguono già le decisioni prese sui passi: niente ✓, rail continua, anello grigio per «Thought».</p>
+  </div>
+  <div class="row" id="row"></div>
+  <div class="notes">
+    <h2>Cosa guardare</h2>
+    <ul>
+      <li>Il testo della risposta: quanto è «pieno» e quanto si legge senza sforzo.</li>
+      <li>Le righe dei tool: devono restare leggibili, ma passare in secondo piano.</li>
+      <li>Il grassetto («50/50 risoluzioni ok», «3 ms») deve ancora staccare dal testo.</li>
+      <li>Per Figtree (A) basta aggiungere all'app i file degli spessori 500 e 600. Inter (B) e Atkinson (C) sono cambi di font in tutta l'app.</li>
+    </ul>
+  </div>
+</main>
+<script>
+const SPK = '<svg class="spk" viewBox="0 0 16 14" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M2 5h2.5L8 2v10L4.5 9H2z"/><path d="M10.5 4.5a3.5 3.5 0 0 1 0 5M12.5 2.5a6.3 6.3 0 0 1 0 9"/></svg>';
+const T = `
+<p>Parsing sbagliato, rilancio corretto:</p>${SPK}
+<div class="steps"><div class="st"><i class="nd"></i><span class="tt">Test DNS 50 query con latenza corretta</span><span class="du">18.4 s</span></div>
+<div class="st"><i class="nd th"></i><span class="th-l">Thought · 1 s</span><span></span></div></div>
+<p>Il parsing dell'output <code>dig</code> su macOS è fastidioso, ripeto con misura pulita in python:</p>${SPK}
+<div class="steps"><div class="st"><i class="nd"></i><span class="tt">50 risoluzioni DNS con latenza misurata</span><span class="du">463 ms</span></div>
+<div class="st"><i class="nd th"></i><span class="th-l">Thought · &lt;1 s</span><span></span></div></div>
+<p>Fatto. Risultati stress test DNS:</p>
+<ul><li><b>50/50 risoluzioni ok</b>, 0 fallite</li><li>Latenza media: <b>3 ms</b> (le prime query reali: max 66 ms, poi cache locale)</li><li>Nessun timeout né errore</li></ul>
+<p>Il DNS (WARP + router) risponde bene, anche sotto carico.</p>${SPK}`;
+const V = [
+  { c: "v0", name: "Oggi", small: "Figtree 400", how: "Testo e righe dei tool hanno stesso font, spessore, grigio e quasi la stessa grandezza." },
+  { c: "va new", name: "A · Figtree medio", small: "500 per il testo", how: "Stesso font di oggi, testo a 500 (va aggiunto il file). Il cambio più piccolo.", rec: true },
+  { c: "vb new", name: "B · Inter", small: "450 per il testo", how: "Più neutro e «tecnico», molto nitido sugli schermi. Cambio di font in tutta l'app." },
+  { c: "vc new", name: "C · Atkinson Hyperlegible Next", small: "450 per il testo", how: "Disegnato per la massima leggibilità: lettere molto distinte (I/l/1, 0/O). Più personalità." },
+];
+const row = document.getElementById("row");
+for (const v of V) {
+  const d = document.createElement("section"); d.className = "col " + v.c;
+  d.innerHTML = `<h2>${v.name} <small>${v.small}</small>${v.rec ? '<span class="rec">consiglio</span>' : ""}</h2><p class="how">${v.how}</p><div class="ph">${T}</div>`;
+  row.append(d);
+}
+</script>

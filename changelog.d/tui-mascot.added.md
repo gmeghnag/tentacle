@@ -1,0 +1,1 @@
+- **A startup header in the TUI.** A fresh session now opens with a header — tentacle and its version, the model and folder, and the `/help` hint — which replaces the old `Tentacle ready.` line. The folder is shortened to fit the window.

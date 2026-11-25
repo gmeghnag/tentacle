@@ -29,7 +29,13 @@ import {
   PROTOCOL_VERSION,
 } from "@tentacle/protocol";
 import { ToolRegistry, presentTool } from "@tentacle/tools";
-import { type DuplexChannel, RpcPeer, createChannelPair } from "@tentacle/transport";
+import {
+  type ByteCarrier,
+  type DuplexChannel,
+  RpcPeer,
+  createByteCarrierPair,
+  createChannelPair,
+} from "@tentacle/transport";
 import { noiseInitiator, noiseResponder, publicKeyOf } from "@tentacle/transport/noise";
 import { ArtifactStore, Connection, SessionHost } from "../src/index.ts";
 
@@ -124,6 +130,19 @@ function measure(ch: DuplexChannel, onSend: (len: number) => void): DuplexChanne
   };
 }
 
+/** `measure` for the raw byte carrier under Noise (E2E v2: binary frames). */
+function measureBytes(ch: ByteCarrier, onSend: (len: number) => void): ByteCarrier {
+  return {
+    send: (b) => {
+      onSend(b.byteLength);
+      ch.send(b);
+    },
+    close: () => ch.close(),
+    setOnMessage: (h) => ch.setOnMessage(h),
+    setOnClose: (h) => ch.setOnClose(h),
+  };
+}
+
 /** A client on `h`; `noise` wraps both ends in the E2E channel (the phone's path). */
 async function connect(h: SessionHost, noise = false): Promise<Client> {
   const max = { rpc: 0, raw: 0 };
@@ -131,10 +150,11 @@ async function connect(h: SessionHost, noise = false): Promise<Client> {
   let d: DuplexChannel = rawD;
   let c: DuplexChannel = rawC;
   if (noise) {
+    const [bytesD, bytesC] = createByteCarrierPair();
     [c, d] = await Promise.all([
-      noiseInitiator(rawC, { staticKey: key(2), remoteStatic: publicKeyOf(key(1)), random: rng }),
+      noiseInitiator(bytesC, { staticKey: key(2), remoteStatic: publicKeyOf(key(1)), random: rng }),
       noiseResponder(
-        measure(rawD, (n) => {
+        measureBytes(bytesD, (n) => {
           max.raw = Math.max(max.raw, n);
         }),
         { staticKey: key(1), authorize: () => true, random: rng },

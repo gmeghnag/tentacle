@@ -12,6 +12,7 @@
  */
 import type { PermissionResponse } from "@tentacle/core";
 import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ApprovalScroll } from "../approval-scroll.ts";
 import type { ArtifactIntent } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
 import type { ChordState } from "../chord.ts";
@@ -49,6 +50,8 @@ export interface KeyHost {
   clearPasteTimeout(): void;
   insertReply(text: string): boolean;
   setReplyMode(mode: ReplyMode): void;
+  /** Write the `workflow_approve` dialog's detail scroll. */
+  approvalScroll(scroll: ApprovalScroll): void;
   permissionSelect(index: number): void;
   permissionAnswer(response: PermissionResponse): void;
   /** Ctrl+C on the dialog: dismiss it and abort the turn shown here, if any. */
@@ -93,6 +96,10 @@ export interface KeyHost {
   deleteSchedule(id: string): void;
   /** Write the `/schedule` panel's own state (its arm/answer). */
   setSchedulesState(state: SchedulesState): void;
+  /** `o` in `/workflow`: read one step's prompt/report (`session/workflow_step`). */
+  workflowDetail(runId: string, stepId: string, startedGen: number): void;
+  /** `r` in `/workflow`: re-run the selected step (`rerun_step`). */
+  workflowRerun(runId: string, stepId: string, startedGen: number): void;
   setDock(state: DockState): void;
   toggleAgents(): void;
   toggleExpandAll(): void;
@@ -155,6 +162,9 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "setReplyMode":
       host.setReplyMode(effect.mode);
+      return;
+    case "approvalScroll":
+      host.approvalScroll(effect.scroll);
       return;
     case "permissionSelect":
       host.permissionSelect(effect.index);
@@ -227,6 +237,12 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "setSchedulesState":
       host.setSchedulesState(effect.state);
+      return;
+    case "workflowDetail":
+      host.workflowDetail(effect.runId, effect.stepId, effect.startedGen);
+      return;
+    case "workflowRerun":
+      host.workflowRerun(effect.runId, effect.stepId, effect.startedGen);
       return;
     case "setDock":
       host.setDock(effect.state);

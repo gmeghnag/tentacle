@@ -13,6 +13,11 @@ import type {
   DocumentContent,
   JobOutputResult,
   JobRow,
+  WorkflowCatalogueResult,
+  WorkflowRow,
+  WorkflowSaveResult,
+  WorkflowSourceResult,
+  WorkflowStepDetail,
 } from "@tentacle/protocol";
 import type { AttachMode } from "./attach-draft.ts";
 import type { FileProbe } from "./attach-files.ts";
@@ -46,6 +51,41 @@ import type { VoiceSpawner } from "./voice-spawn.ts";
  * `AppProps` below — keeps working unchanged.
  */
 export type { RunQuit } from "./useQuitClear.ts";
+
+/**
+ * What the TUI asks of a run, MIRRORED structurally (never the protocol's
+ * type — the TUI does not depend on `@tentacle/client`, and the wire's
+ * `sessionId`/`turnId` are the client's own to fill: it alone knows which turns
+ * this device began). The `turnId` is therefore absent here on purpose.
+ */
+export type WorkflowActionView =
+  | {
+      readonly action: "start";
+      readonly name: string;
+      readonly inputs?: readonly { readonly name: string; readonly value: string }[];
+    }
+  | { readonly action: "stop"; readonly runId: string }
+  | { readonly action: "resume"; readonly runId: string }
+  | { readonly action: "rerun_step"; readonly runId: string; readonly stepId: string };
+
+/**
+ * What the workflow editor asks to write (`session/workflow_save`, docs/feat/
+ * workflow-editor.md D5), MIRRORED structurally for `WorkflowActionView`'s reason:
+ * the TUI does not depend on `@tentacle/client`, and `sessionId` is the client's
+ * own to fill. Every field the wire requires is here, so a caller can never build
+ * a request that forgets `dryRun` (Review) or the prompt files.
+ */
+export interface WorkflowSaveRequestView {
+  readonly name: string;
+  /** `create` refuses an existing file; `replace` requires `baseHash` to still be the file's. */
+  readonly mode: "create" | "replace";
+  /** The draft as JSON text (the phone and the TUI cannot parse YAML either). */
+  readonly draft: string;
+  readonly prompts: readonly { readonly path: string; readonly text: string }[];
+  readonly baseHash?: string;
+  /** Required, never defaulted: `true` IS Review, `false` writes. */
+  readonly dryRun: boolean;
+}
 
 /**
  * The conversation the App drives. Both the local agent `Session` and the
@@ -320,6 +360,62 @@ export interface SessionController {
    */
   deleteSchedule?(scheduleId: string): Promise<{ deleted: boolean; reason?: string }>;
   /**
+   * The session's workflow runs (`workflows`, docs/feat/workflows-ui.md D2): the
+   * current run plus the last few ended, bounded and sanitized by the client (a
+   * `run` step's `reason` is a MODEL's text on its way to a terminal, and a
+   * pod's daemon is not trusted). The current list, if any, is given at once;
+   * then every change, since a run lives between turns. Optional: absent on a
+   * pod's client, on an older daemon and on a client whose daemon is not trusted
+   * to run workflows — where no run exists, and painting an empty rail would
+   * claim there is none.
+   */
+  onWorkflows?(listener: (rows: readonly WorkflowRow[]) => void): (() => void) | undefined;
+  /**
+   * Start, stop or resume a run, or re-run one step (`session/workflow`). A
+   * refusal — one run already going, the file's hash changed, an older daemon,
+   * a client whose daemon is not trusted — is a typed RESULT with a `reason`,
+   * never a throw. The turn id a `start`/`resume`/`rerun_step` is attributed to
+   * is the client's own (it alone knows which turns this device began). Optional
+   * with `onWorkflows`.
+   */
+  workflow?(params: WorkflowActionView): Promise<{ ok: boolean; runId?: string; reason?: string }>;
+  /**
+   * ONE step execution's `prompt`/`report` (`session/workflow_step`, D1): the
+   * detail a run's row deliberately does not carry. `detail` absent means "not
+   * available" (never ran, or a compaction dropped its entry). Optional: absent
+   * on an older daemon.
+   */
+  workflowStep?(
+    runId: string,
+    stepId: string,
+    attempt?: number,
+  ): Promise<{ detail?: WorkflowStepDetail } | { unsupported: true }>;
+  /**
+   * The project's workflows (`session/workflow_catalogue`, slice 5a / D6): the
+   * rows a start screen lists, each with its hash and inputs. A read — nothing is
+   * asked, nothing runs. Optional: absent on an older daemon, which answers
+   * `{unsupported: true}`.
+   */
+  workflowCatalogue?(): Promise<WorkflowCatalogueResult | { unsupported: true }>;
+  /**
+   * What the workflow editor opens for ONE file (`session/workflow_source`,
+   * docs/feat/workflow-editor.md D5): its bytes, its draft, its prompts, and
+   * either its hash or the validator's errors. A read — nothing is asked,
+   * nothing runs, nothing is written. Optional: absent on an older daemon, which
+   * answers `{unsupported: true}`.
+   */
+  workflowSource?(name: string): Promise<WorkflowSourceResult | { unsupported: true }>;
+  /**
+   * The editor's write (`session/workflow_save`): `dryRun: true` is Review (every
+   * check, nothing written), `false` writes and refuses `changed` unless
+   * `baseHash` is still the file's. A refusal is a RESULT (`refusal` + `reason`),
+   * never a throw; an older daemon answers `{unsupported: true}`. Optional: the
+   * TUI has no editor in this task.
+   */
+  workflowSave?(
+    request: WorkflowSaveRequestView,
+  ): Promise<WorkflowSaveResult | { unsupported: true }>;
+  /**
    * Subscribe to this session's running background SHELL jobs as the daemon
    * reports them (bounded by the client; `count` is the daemon's own number).
    * The current list, if any, is given at once. Optional: absent on an older
@@ -551,6 +647,12 @@ export interface AppProps {
    */
   readonly modelLabel?: string;
   readonly cwd: string;
+  /**
+   * This tentacle's release version, painted in the startup header's first line
+   * (docs/feat/tui-mascot.md D5). The TUI package cannot import it (cli → tui),
+   * so the CLI passes it; absent → the line is `tentacle` alone.
+   */
+  readonly version?: string;
   readonly contextWindow?: number;
   /** In a container/pod: the status bar's accent badge (laptop-side facts). Absent: local. */
   readonly target?: TargetBadge;

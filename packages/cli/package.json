@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@tentacle/agent": "workspace:*",
+    "@tentacle/browser": "workspace:*",
     "@tentacle/client": "workspace:*",
     "@tentacle/config": "workspace:*",
     "@tentacle/core": "workspace:*",
@@ -28,6 +29,8 @@
     "zod": "3.23.8"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@modelcontextprotocol/ext-tasks": "0.2.3",
     "@tentacle/protocol": "workspace:*",
     "@types/react": "18.3.12",
     "ink": "5.0.1",

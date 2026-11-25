@@ -13,6 +13,9 @@ import {
   DOT_ORDER,
   SHIMMER_MS,
   breatheCurve,
+  shimmerCanvas,
+  shimmerFont,
+  shimmerLine,
   shimmerSweep,
   thinkingElapsed,
   thinkingLabel,
@@ -111,6 +114,64 @@ describe("the word shimmers (D)", () => {
 });
 
 /**
+ * docs/fix/mobile-running-row.md: the svg layer that draws the shimmering label
+ * must draw the SAME text, in the SAME face, inside a canvas big enough for the
+ * glyphs — the owner's phone showed «Test DNS 50 query con l» (the sentence cut
+ * mid-word at the 45 % cap, no ellipsis) and «Thinkinɡ» (the italic g's tail
+ * cut at the measured advance width), in the default theme and the Figtree beta.
+ */
+describe("the shimmering label's svg text (docs/fix/mobile-running-row.md)", () => {
+  test("one laid-out line: the whole text, as is", () => {
+    expect(shimmerLine([{ text: "Thinking" }])).toBe("Thinking");
+    expect(shimmerLine([{ text: "Test DNS con 50 query" }])).toBe("Test DNS con 50 query");
+  });
+
+  test("more lines (the row is too narrow): the first line, cut at a word, ending in …", () => {
+    expect(
+      shimmerLine([{ text: "Test DNS con 50 query e latenze " }, { text: "misurate per ogni" }]),
+    ).toBe("Test DNS con 50 query e…");
+  });
+
+  test("the … never makes the line wider: at least the last word goes (mutation: keep it → red)", () => {
+    const first = "Test DNS con 50 query e latenze ";
+    const cut = shimmerLine([{ text: first }, { text: "misurate" }]);
+    expect(cut.endsWith("…")).toBe(true);
+    expect(cut.length).toBeLessThanOrEqual(first.trimEnd().length);
+    expect(first.startsWith(cut.slice(0, -1))).toBe(true);
+  });
+
+  test("one word wider than the row (broken mid-word): two characters make room for the …", () => {
+    expect(shimmerLine([{ text: "supercalifragilistic" }, { text: "expialidocious" }])).toBe(
+      "supercalifragilist…",
+    );
+  });
+
+  test("nothing laid out yet: nothing to draw", () => {
+    expect(shimmerLine([])).toBe("");
+  });
+
+  test("the svg face is the RN text's face: Figtree under the beta, the system font otherwise", () => {
+    expect(shimmerFont(null, "500")).toEqual({ fontWeight: "500", fontStyle: "italic" });
+    // 500 is Medium Italic now that the face ships (docs/fix/mobile-transcript-type.md).
+    expect(shimmerFont("figtree", "500")).toEqual({
+      fontFamily: "Figtree-MediumItalic",
+      fontWeight: "500",
+      fontStyle: "italic",
+    });
+  });
+
+  test("the canvas leaves room past the advance width for an italic overhang and a descender", () => {
+    const c = shimmerCanvas(61.4, 20, 14);
+    // Never narrower than the laid-out text, and a margin of ≥ 20 % of the size
+    // to its right (an italic g/f/y leans past its advance) and below.
+    expect(c.width).toBeGreaterThanOrEqual(61.4 + 14 * 0.2);
+    expect(c.height).toBeGreaterThanOrEqual(20 + 14 * 0.2);
+    expect(Number.isInteger(c.width) && Number.isInteger(c.height)).toBe(true);
+    expect(shimmerCanvas(0, 0, 14)).toEqual({ width: 0, height: 0 });
+  });
+});
+
+/**
  * Review round 1, finding 1: S1 shipped `shimmerStops`, which nothing imported
  * and nothing tested — a peak-opacity mutation there survived the suite. The
  * rule this pins is the one that would have caught it: this module exports the
@@ -131,6 +192,9 @@ const EXPORTS = [
   "Curve",
   "breatheCurve",
   "shimmerSweep",
+  "shimmerLine",
+  "shimmerFont",
+  "shimmerCanvas",
   "thinkingLook",
   "thinkingElapsed",
   "thinkingLabel",

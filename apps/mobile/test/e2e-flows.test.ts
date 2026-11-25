@@ -15,9 +15,12 @@
  * assertion ids, where a `runScript` sits among them, and what each script asserts.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { FLOWS } from "../e2e/run.ts";
+import type { HubContext, HubEntries } from "../src/hub-actions.ts";
+import { hubActions } from "../src/hub-actions.ts";
+import { hubContextOf } from "../src/hub-session.ts";
 
 const FLOWS_DIR = join(import.meta.dir, "..", "e2e", "flows");
 
@@ -675,5 +678,472 @@ describe("N8's notification flows (docs/feat/mobile-notifications.md)", () => {
         expect(body).toMatch(/MAESTRO_HOOKS/);
       }
     }
+  });
+});
+
+/**
+ * docs/feat/mobile-native-sheets.md S6: the five session sheets are native
+ * `formSheet` ROUTES now (S3–S5), so three things the e2e suite relied on are no
+ * longer true and must be asserted here, where a source edit cannot quietly undo
+ * them (AGENTS §9):
+ *
+ *  1. a sheet opens at the MIDDLE detent (0.5 of the screen, `SHEET_SPEC`), not a
+ *     pageSheet: its content no longer all fits, so a flow that reaches for a low
+ *     item must SCROLL to it — an `assertVisible`/`tapOn` that assumes it is on
+ *     screen is a flow that fails on the simulator;
+ *  2. an unanswered ask cannot be swiped away (D5): the ONLY dismissals are the
+ *     explicit `perm-later` and an answer, and a blocked swipe shows `perm-hold`.
+ *     Nothing in the unit suite can prove a native gesture — it is driven here;
+ *  3. the lock drains every sheet before the app leaves the screen (S3's L1): with
+ *     a sheet up, backgrounding must still raise `lock-screen`, and the sheet must
+ *     be back after the unlock (`desired` survives the drain).
+ */
+const SHEET_FLOWS = [
+  "08-permission",
+  "08c-permission-reply",
+  "25-session-info",
+  "29-tool-rows",
+  "34-hub-tools",
+  "34-hub-info",
+] as const;
+
+/** The line index of `needle` in a flow's text, asserting it exists. */
+function flowIndexOf(name: string, needle: string): number {
+  const body = readFileSync(join(FLOWS_DIR, `${name}.yaml`), "utf8");
+  const at = body.indexOf(needle);
+  expect({ name, needle, found: at > -1 }).toEqual({ name, needle, found: true });
+  return at;
+}
+
+/** A `scrollUntilVisible` block that names `id` (the fold, D3's middle detent). */
+function scrollsTo(name: string, id: string): boolean {
+  const body = readFileSync(join(FLOWS_DIR, `${name}.yaml`), "utf8");
+  return new RegExp(
+    `- scrollUntilVisible:\\n    element:\\n      id: "${id}"\\n    direction: (UP|DOWN)`,
+  ).test(body);
+}
+
+describe("native sheets S6: a sheet's below-the-fold content is scrolled to", () => {
+  test("every sheet flow scrolls to the item it reaches for low in the sheet", () => {
+    // The permission sheet's four options plus "Not now" do not fit 0.5, and
+    // Session info's MCP/skills sections start below it: each of these is reached
+    // by a `scrollUntilVisible`, so the flow works whatever the detent ends up as.
+    const lows: readonly (readonly [string, string])[] = [
+      ["08-permission", "perm-reply"],
+      ["08-permission", "perm-later"],
+      ["08c-permission-reply", "perm-reply"],
+      ["08c-permission-reply", "perm-reply-send"],
+      ["25-session-info", "session-info-mcp-demo"],
+      ["34-hub-tools", "tools-mcp:demo"],
+    ];
+    for (const [flow, id] of lows) {
+      expect({ flow, id, scrolled: scrollsTo(flow, id) }).toEqual({ flow, id, scrolled: true });
+    }
+  });
+
+  test("a scrolled-to sheet item is scrolled to BEFORE it is tapped or asserted", () => {
+    // Order is the property: scrolling after the tap is a flow that already failed.
+    const body = readFileSync(join(FLOWS_DIR, "08c-permission-reply.yaml"), "utf8");
+    const scrollAt = body.indexOf(
+      '- scrollUntilVisible:\n    element:\n      id: "perm-reply-send"',
+    );
+    const tapAt = body.indexOf('- tapOn:\n    id: "perm-reply-send"');
+    expect(scrollAt).toBeGreaterThan(-1);
+    expect(tapAt).toBeGreaterThan(scrollAt);
+  });
+
+  test("a flow drags the sheet to LARGE before its first scroll inside it", () => {
+    // Fix round (simulator): Maestro's `scrollUntilVisible` starts at the SCREEN's
+    // centre, which at the middle detent is the backdrop above the sheet — the
+    // scroll moved nothing (gate run 1795466539487: 08, 08c, 25). `_sheet-expand`
+    // is a slow drag on the sheet's one scroller, which takes it to L.
+    const firsts: readonly (readonly [string, string])[] = [
+      ["08c-permission-reply", "perm-reply"],
+      ["25-session-info", "session-info-mcp-demo"],
+      ["08-permission", "perm-hold"],
+    ];
+    for (const [flow, id] of firsts) {
+      const expandAt = flowIndexOf(flow, "- runFlow: _sheet-expand.yaml");
+      const scrollAt = flowIndexOf(flow, `- scrollUntilVisible:\n    element:\n      id: "${id}"`);
+      expect({ flow, expandFirst: expandAt < scrollAt }).toEqual({ flow, expandFirst: true });
+    }
+    // 25 proves the expand is a real detent change: the band is NOT on screen at M.
+    const notAtM = flowIndexOf(
+      "25-session-info",
+      '- assertNotVisible:\n    id: "session-info-mcp-demo"',
+    );
+    expect(notAtM).toBeLessThan(flowIndexOf("25-session-info", "- runFlow: _sheet-expand.yaml"));
+  });
+
+  test("`_sheet-expand` is a SLOW coordinate drag from low in the sheet to near the top", () => {
+    const body = readFileSync(join(FLOWS_DIR, "_sheet-expand.yaml"), "utf8");
+    expect(body).toMatch(
+      /- swipe:\n {4}start: "50%, (8\d|9\d)%"\n {4}end: "50%, (\d|1\d)%"\n {4}duration: (\d{3,})/,
+    );
+  });
+
+  test("the sheet flows are the ones the task names, and they exist", () => {
+    for (const name of SHEET_FLOWS) {
+      expect(() => readFileSync(join(FLOWS_DIR, `${name}.yaml`), "utf8")).not.toThrow();
+      expect(FLOWS).toContain(name);
+    }
+  });
+});
+
+describe("native sheets S6: D5's blocked swipe is driven, not assumed", () => {
+  const body = readFileSync(join(FLOWS_DIR, "08-permission.yaml"), "utf8");
+
+  const SWIPE = '- swipe:\n    start: "50%, 54%"\n    end: "50%, 99%"';
+
+  test("flow 08 swipes DOWN on the ask and asserts the held note", () => {
+    // A native gesture is the only proof that `gestureEnabled:false` holds: the
+    // unit tests pin the OPTION, not what UIKit does with a finger.
+    const swipeAt = body.indexOf(SWIPE);
+    const holdAt = body.indexOf('- scrollUntilVisible:\n    element:\n      id: "perm-hold"');
+    expect(swipeAt).toBeGreaterThan(-1);
+    expect(holdAt).toBeGreaterThan(swipeAt);
+  });
+
+  test("the note is NOT there before the swipe (or its presence after proves nothing)", () => {
+    const absentAt = body.indexOf('- assertNotVisible:\n    id: "perm-hold"');
+    expect(absentAt).toBeGreaterThan(-1);
+    expect(absentAt).toBeLessThan(body.indexOf(SWIPE));
+  });
+
+  test("the swipe comes BEFORE the ask is answered (a held note is a pre-answer state)", () => {
+    const swipeAt = body.indexOf(SWIPE);
+    const answerAt = body.indexOf('- tapOn:\n    id: "perm-allow_once"');
+    expect(answerAt).toBeGreaterThan(-1);
+    expect(answerAt).toBeGreaterThan(swipeAt);
+  });
+
+  test("`perm-later` is the sheet's offered way out (D5's one explicit dismissal)", () => {
+    expect(body).toContain('id: "perm-later"');
+  });
+});
+
+describe("native sheets S6: the lock gate with a sheet up (S3's L1, run here)", () => {
+  const LOCK_FLOW = "43-native-sheets-lock";
+  const body = readFileSync(join(FLOWS_DIR, `${LOCK_FLOW}.yaml`), "utf8");
+  const at = (needle: string): number => body.indexOf(needle);
+
+  test("it is run, on its own session, and it changes the lock setting", () => {
+    expect(FLOWS).toContain(LOCK_FLOW);
+    expect(body).toContain('id: "session-${SHEETLOCK_ID}"');
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    expect(runner).toContain('"SHEETLOCK_ID"');
+    // `immediately`: with the default delay this flow would assert nothing.
+    expect(body).toContain('id: "lock-delay-immediately"');
+  });
+
+  test("a sheet is really up before the app leaves (or the drain proves nothing)", () => {
+    const sheetAt = at('id: "tools-sheet"');
+    const homeAt = at("- pressKey: Home");
+    expect(sheetAt).toBeGreaterThan(-1);
+    expect(homeAt).toBeGreaterThan(sheetAt);
+  });
+
+  // The unlock is inlined (Fix round (simulator)): `_unlock` keys on `app-content`,
+  // which a presented formSheet hides from XCUITest, so it keys on the sheet here.
+  const UNLOCK = 'file: "faceid-match.js"';
+
+  test("the cover wins over the sheet: `lock-screen`, and no sheet in front", () => {
+    // The exact property F5a failed: while the cover is up, the sheet's route is
+    // GONE (the drain popped it), not merely hidden behind the cover.
+    const lockAt = at('id: "lock-screen"');
+    const notSheetAt = at('- assertNotVisible:\n    id: "tools-sheet"');
+    const unlockAt = at(UNLOCK);
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(notSheetAt).toBeGreaterThan(lockAt);
+    expect(notSheetAt).toBeLessThan(unlockAt);
+  });
+
+  test("after the unlock the sheet is BACK (the drain pops the route, `desired` survives)", () => {
+    const unlockAt = at(UNLOCK);
+    expect(unlockAt).toBeGreaterThan(at('id: "lock-screen"'));
+    const after = body.slice(unlockAt);
+    expect(after).toMatch(/- extendedWaitUntil:\n {4}visible:\n {6}id: "tools-sheet"/);
+  });
+
+  test("once the sheet is closed the app is IN: `_unlock`'s own signal, after the sheet", () => {
+    const closedAt = at('- extendedWaitUntil:\n    notVisible:\n      id: "tools-sheet"');
+    const inAt = at('- assertVisible:\n    id: "app-content"');
+    expect(closedAt).toBeGreaterThan(at(UNLOCK));
+    expect(inAt).toBeGreaterThan(closedAt);
+  });
+
+  test("it ends on daemon truth, never on the screen it came back to", () => {
+    const files = scripts(LOCK_FLOW);
+    expect(files.length).toBeGreaterThan(0);
+    expect(files[files.length - 1]).toBe("20-log-dialled.js");
+  });
+});
+
+describe("native sheets S6: the sheet shots flow (Validation's evidence set)", () => {
+  const SHOTS = "42-native-sheets-shots";
+  const body = readFileSync(join(FLOWS_DIR, `${SHOTS}.yaml`), "utf8");
+
+  test("it is run, on its own session, and it is registered as a shots flow", () => {
+    expect(FLOWS).toContain(SHOTS);
+    expect(body).toContain('id: "session-${NATIVESHEETS_ID}"');
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    expect(runner).toContain('"NATIVESHEETS_ID"');
+  });
+
+  test("it shoots each detent of a sheet, and every shot name is its own", () => {
+    const shots = [...body.matchAll(/SHOT: "([^"]+)"/g)].map((m) => m[1] as string);
+    expect(shots).toEqual(
+      expect.arrayContaining(["42-commands-M", "42-tools-M", "42-tools-L", "42-tools-S"]),
+    );
+    expect(new Set(shots).size).toBe(shots.length);
+  });
+
+  test("it drags the sheet between detents (a shot of M alone says nothing about S/L)", () => {
+    // Fix round (simulator): slow COORDINATE drags — UP on the list (`_sheet-expand`,
+    // owner A: no pull-to-refresh to take it), DOWN on the pinned head (a
+    // `from: id` flick scrolled the list instead).
+    const tools = body.slice(body.indexOf('SHOT: "42-tools-M"'), body.indexOf('SHOT: "42-info-M"'));
+    const drags = [
+      ...tools.matchAll(
+        /- runFlow: _sheet-expand\.yaml|- swipe:\n {4}start: "50%, (\d+)%"\n {4}end: "50%, (\d+)%"\n {4}duration: \d{3,}/g,
+      ),
+    ].map((m) =>
+      m[0].startsWith("- runFlow") ? "UP" : Number(m[2]) > Number(m[1]) ? "DOWN" : "UP",
+    );
+    expect(drags).toEqual(["UP", "DOWN", "DOWN", "UP"]);
+  });
+
+  test("L is proven, not named: a backdrop-at-M tap leaves the sheet up before the L shot", () => {
+    // Fix round (simulator): run 1795476170131 shot `42-tools-L` at M — the list
+    // drag scrolled the list, and `assertVisible tools-sheet` held at any detent.
+    const lShotAt = body.indexOf('SHOT: "42-tools-L"');
+    const tapAt = body.indexOf('- tapOn:\n    point: "4%,30%"');
+    expect(tapAt).toBeGreaterThan(body.indexOf('SHOT: "42-tools-M"'));
+    expect(tapAt).toBeLessThan(lShotAt);
+    const between = body.slice(tapAt, lShotAt);
+    expect(between).toContain('- assertVisible:\n    id: "tools-sheet"');
+  });
+
+  test("S is proven by what it cuts: Refresh is on screen at M, gone at S", () => {
+    const sShotAt = body.indexOf('SHOT: "42-tools-S"');
+    const goneAt = body.indexOf('- assertNotVisible:\n    id: "tools-refresh"');
+    expect(goneAt).toBeGreaterThan(body.indexOf('SHOT: "42-tools-L"'));
+    expect(goneAt).toBeLessThan(sShotAt);
+    expect(body.indexOf('- assertVisible:\n    id: "tools-refresh"')).toBeLessThan(goneAt);
+  });
+
+  test("every sheet it opens asserts that it opened", () => {
+    for (const id of ["commands-sheet", "tools-sheet", "session-info-sheet", "perm-sheet"]) {
+      expect({ id, asserted: body.includes(`id: "${id}"`) }).toEqual({ id, asserted: true });
+    }
+  });
+
+  test("it ends on daemon truth (a screenshot proves only what was drawn)", () => {
+    const files = scripts(SHOTS);
+    expect(files[files.length - 1]).toBe("42-native-sheets-file.js");
+    const last = scriptBody(files[files.length - 1] as string);
+    expect(last).toContain("http.get");
+    expect(last).toMatch(/throw new Error/);
+    expect(last).toContain("MAESTRO_HOOKS");
+  });
+});
+
+describe("a flow reaches a hub item through the helper that can actually hold it", () => {
+  // `_hub-fan` taps the button and WAITS for `hub-item-${ITEM}`; `_hub-more` goes
+  // one step further, through the fan's More disc into the plain menu and waits
+  // for `hub-menu-${ITEM}`. The fan holds `FAN_MAX` (6) items, so an entry that
+  // sits deeper is only ever in More — a flow asking `_hub-fan` for it can never
+  // pass. That is exactly how flow 44 failed twice on device (Workflows is 9th
+  // in `CANONICAL`, in neither the idle nor the turn fan).
+  const noop = (): void => undefined;
+  // Present for ANY id: the guard must not hardcode the entry list and drift.
+  const ALL: HubEntries = new Proxy({} as HubEntries, { get: () => noop });
+  const ids = (items: readonly { readonly id: string }[]): string[] => items.map((i) => i.id);
+  const entitled = (ctx: HubContext): { fan: string[]; more: string[] } => {
+    const a = hubActions(ctx, ALL);
+    return { fan: ids(a.fan), more: ids(a.more) };
+  };
+  // The conditional entries (Dictate on, a wake scheduled, a run waiting) exist
+  // only for a context that holds them, and a BADGE promotes an item into the
+  // fan — so one item can move between fan and More across the app's states.
+  // Hence the general rule below only asks "does the hub offer it at all"; the
+  // rule that pins THIS bug is the flow-specific one after it.
+  const base = (): HubContext =>
+    hubContextOf({ link: "up", turn: null, ended: null, dictation: true });
+  const shapes = [
+    base(),
+    { ...base(), schedules: 2, nextWakeInMs: 60_000 },
+    { ...base(), workflowsNeedYou: 3 },
+    hubContextOf({
+      link: "up",
+      turn: { kind: "turn", key: "t", turnId: "t", own: true },
+      ended: null,
+
+      dictation: true,
+    }),
+  ].map(entitled);
+  const FAN = new Set(shapes.flatMap((s) => s.fan));
+  const MORE = new Set(shapes.flatMap((s) => s.more));
+
+  /** Every `{file, ITEM}` pair a flow hands a hub helper. */
+  const helperCalls = (file: string): readonly { file: string; item: string }[] => {
+    const lines = readFileSync(join(FLOWS_DIR, file), "utf8").split("\n");
+    const out: { file: string; item: string }[] = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const helper = /file: (_hub-(?:fan|more))\.yaml/.exec(lines[i] ?? "")?.[1];
+      if (helper === undefined) {
+        continue;
+      }
+      const item = /ITEM: "(.+)"/.exec(lines.slice(i, i + 4).join("\n"))?.[1];
+      if (item !== undefined) {
+        out.push({ file: helper, item });
+      }
+    }
+    return out;
+  };
+
+  test("every helper ITEM is an entry the hub offers at all (no typo, no dead id)", () => {
+    const offered = new Set([...FAN, ...MORE]);
+    const wrong: string[] = [];
+    for (const file of readdirSync(FLOWS_DIR).filter((f) => f.endsWith(".yaml"))) {
+      for (const call of helperCalls(file)) {
+        if (!offered.has(call.item)) {
+          wrong.push(`${file}: ${call.file} ITEM=${call.item}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  test("flow 44 reaches Workflows on the fan — it holds the first slot (workflows-ux D6)", () => {
+    // Flow 44's setup (no `.tentacle/workflows/`, so the runs list is EMPTY; the
+    // session idle): Workflows is FIRST in CANONICAL, so it is on the fan, and an
+    // empty list does not dim it (workflow-editor D8/E1). `_hub-more` would wait
+    // for a menu row that is not there.
+    const flow44 = entitled(
+      hubContextOf({
+        link: "up",
+        turn: null,
+        ended: null,
+        dictation: false,
+        workflows: { needYou: 0, empty: null },
+      }),
+    );
+    expect(flow44.fan).toContain("workflows");
+    expect(flow44.more).not.toContain("workflows");
+    expect(helperCalls("44-workflow-editor.yaml")).toContainEqual({
+      file: "_hub-fan",
+      item: "workflows",
+    });
+    expect(helperCalls("44-workflow-editor.yaml")).not.toContainEqual({
+      file: "_hub-more",
+      item: "workflows",
+    });
+  });
+});
+
+describe("flow 44 proves a step sheet can be CLOSED (validation round 3, P1)", () => {
+  // The BLOCKER was a `large` detent of 1.0: the sheet's own Done sat under the
+  // status bar and the tap never reached the app, so a step sheet could only be
+  // escaped by relaunching. The unit test pins the height; only a flow can prove
+  // the CONTROL is reachable, so the flow must open a step sheet, close it with
+  // Done, and assert the sheet is gone — in that order.
+  const body = readFileSync(join(FLOWS_DIR, "44-workflow-editor.yaml"), "utf8");
+
+  test("it opens a STEP's sheet (not only the kind picker) and fills a field", () => {
+    const open = body.indexOf('id: "workflow-edit-node-gate"');
+    const typed = body.indexOf('id: "workflow-sheet-input-run"');
+    expect(open).toBeGreaterThan(-1);
+    expect(typed).toBeGreaterThan(open);
+  });
+
+  test("Done closes it, and the flow ASSERTS the sheet is gone", () => {
+    const done = body.indexOf('tapOn:\n    id: "workflow-sheet-done"');
+    expect(done).toBeGreaterThan(body.indexOf('id: "workflow-sheet-input-run"'));
+    const gone = body.indexOf('id: "workflow-sheet"', done);
+    expect(gone).toBeGreaterThan(done);
+    // A VISIBLE assertion on `workflow-sheet` after Done would pass while the
+    // sheet stayed up (which is exactly the bug): it must be `assertNotVisible`.
+    const after = body.slice(done, gone + 'id: "workflow-sheet"'.length + 80);
+    expect(after).toContain("assertNotVisible");
+  });
+
+  test("the keyboard is dismissed before Done, so the tap lands on the control", () => {
+    // Round 3's `09-run-filled.png`: the keyboard covered the sheet's footer.
+    const typed = body.indexOf('id: "workflow-sheet-input-run"');
+    const keyboard = body.indexOf("hideKeyboard", typed);
+    const done = body.indexOf('tapOn:\n    id: "workflow-sheet-done"');
+    expect(keyboard).toBeGreaterThan(typed);
+    expect(keyboard).toBeLessThan(done);
+  });
+});
+
+describe("flow 45's seeder speaks the trust bit workflows hang on (the gate's red)", () => {
+  // `45-workflow-run-view` failed its SETUP, not its assertions:
+  // "workflow run-view-pass did not start: this client does not trust its daemon
+  // to run workflows". `RemoteSession.workflow()` refuses `start` locally when
+  // `daemonWakes` is off — and `RemoteClient` drops every `workflows` update on
+  // the same bit, so the end-wait could never have fired either. The phone's own
+  // client carries it (`connection.ts` `APP_CLIENT_OPTIONS`); the seeder dials
+  // the same `serve` on this host and must too.
+  const seed = readFileSync(join(import.meta.dir, "..", "e2e", "seed.ts"), "utf8");
+
+  /** One function's body, from its name to the next top-level function. */
+  function fnBody(name: string): string {
+    const start = seed.indexOf(`async function ${name}(`);
+    if (start === -1) {
+      return "";
+    }
+    const end = seed.indexOf("async function ", start + 1);
+    return seed.slice(start, end === -1 ? undefined : end);
+  }
+
+  /** The one options object this client is built with (its `new RemoteClient(…, {…})`). */
+  function optionsOf(name: string): string {
+    const body = fnBody(name);
+    const start = body.indexOf("new RemoteClient(");
+    if (start === -1) {
+      return "";
+    }
+    return body.slice(start, body.indexOf("await live.initialize()"));
+  }
+
+  test("the seeder's own client is built with daemonWakes: true", () => {
+    // Mutation: drop the bit → red, and the flow's setup fails with
+    // WORKFLOW_UNTRUSTED_DAEMON (exactly the gate's message).
+    const options = optionsOf("workflowRunsOf");
+    expect(options).toContain("channelFactory: factory");
+    expect(options).toContain("daemonWakes: true");
+  });
+
+  test("no OTHER harness client claims the trust bit (it fails closed, §7)", () => {
+    // The bit says "this daemon is a trusted `serve` that starts its own turns".
+    // Only the seeder, which runs a workflow on this host, may say it; a
+    // copy-paste into the plain attach/laptop links would widen what a pod's
+    // frames can make the harness act on.
+    for (const name of ["attach", "laptopLink"]) {
+      expect(fnBody(name)).not.toContain("daemonWakes");
+    }
+  });
+
+  test("the flow taps the run row by its LABEL, not its bare name", () => {
+    // The second half of the same red: run rows carry `name, status, position`
+    // (`WorkflowRuns.tsx` `RunRow`), and Maestro's `text` is a FULL match, so
+    // `text: "run-view-pass"` matches nothing and the flow dies on that tap.
+    const flow = readFileSync(join(FLOWS_DIR, "45-workflow-run-view.yaml"), "utf8");
+    expect(flow).toContain('text: "run-view-pass,.*"');
+    expect(flow).not.toContain('text: "run-view-pass"\n');
+  });
+});
+
+describe("the flow list is the flow files (the other direction)", () => {
+  test("no flow file is silently not run", () => {
+    // 12c's guard checks the list's entries exist; this checks the reverse, which
+    // is how a new flow (42/43 here) can be written and never driven.
+    const files = readdirSync(FLOWS_DIR)
+      .filter((file) => file.endsWith(".yaml") && !file.startsWith("_"))
+      .map((file) => file.slice(0, -".yaml".length))
+      .sort();
+    expect(files).toEqual([...FLOWS].sort());
   });
 });

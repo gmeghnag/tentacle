@@ -152,7 +152,13 @@ describe("the manager registers through the link it is given", () => {
     expect(manager.stateOf("c1")?.phase).toBe("on");
   });
 
-  test("the fingerprint survives a NEW manager (it lives in the Keychain, not in memory)", async () => {
+  test("a relaunch REGISTERS again: the dedupe is per process, not per Keychain record", async () => {
+    // The inverse of what this asserted before `fix/mobile-push-not-registered`:
+    // the Keychain fingerprint outlives the daemon's copy and cannot know it was
+    // deleted (an APNs `gone`), so carrying it across launches made one `gone`
+    // permanent — the phone never registered again. A fresh manager is a fresh
+    // launch, and a launch re-registers; what still never repeats is a re-CONNECT
+    // inside one launch (the test above).
     const store = fakeStore();
     const first = createPushManager({
       toggle: fakeToggle(),
@@ -162,7 +168,7 @@ describe("the manager registers through the link it is given", () => {
     });
     const client = fakeClient();
     await first.sync("c1", () => client);
-    // A relaunch: a fresh manager, the same store.
+    // A relaunch: a fresh manager, the same store (the Keychain record survives).
     const second = createPushManager({
       toggle: fakeToggle(),
       store,
@@ -170,7 +176,7 @@ describe("the manager registers through the link it is given", () => {
       now: () => 2,
     });
     await second.sync("c1", () => client);
-    expect(client.registers.length).toBe(1);
+    expect(client.registers.length).toBe(2);
   });
 
   test("two computers do not share a registrar or a fingerprint", async () => {

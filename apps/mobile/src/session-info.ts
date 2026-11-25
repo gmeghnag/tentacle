@@ -1103,8 +1103,19 @@ function skippedText(count: number): string {
  * A sheet that does not draw that band at all (no feed wired, an older daemon)
  * answers `null`: `revealStep` then never scrolls and the person lands at the top
  * rather than on empty space. The section order stays `sessionInfoView`'s.
+ *
+ * `wakes` is how many wakes the session already knows of (its schedule feed),
+ * the count the entry points are shown for. When there are any, the band is
+ * asked for whatever the sheet's value says: that value can predate the wake (or
+ * not exist yet) and lack the band, and the open re-pulls it. Without this the
+ * native sheet opened at M on the top band (docs/feat/mobile-native-sheets.md,
+ * Fix round (simulator); a full-height sheet used to hide it). Asking for a band
+ * not laid out yet is safe: `revealStep` scrolls only once it reports its y.
  */
-export function scheduledSection(view: SessionInfoView | null): SectionId | null {
+export function scheduledSection(view: SessionInfoView | null, wakes: number): SectionId | null {
+  if (wakes > 0) {
+    return "schedules";
+  }
   return view?.sections.some((section) => section.id === "schedules") === true ? "schedules" : null;
 }
 

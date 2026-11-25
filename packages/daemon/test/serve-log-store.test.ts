@@ -54,13 +54,25 @@ async function until(cond: () => boolean, ms = 20_000): Promise<void> {
   }
 }
 
-/** A round that waits (the model "streaming") until the turn is aborted or `PARKED.open()`. */
+/**
+ * A round that waits (the model "streaming") until the turn is aborted or
+ * `PARKED.open()`. The release is LATCHED: an `open()` that lands before a round
+ * parks (the prompt path's write can flush first) covers that round instead of
+ * being lost — a lost release parked the round forever and only the `until`
+ * dead-man ended the test (S2 (a) at 20003 ms, and (b) cascading off the round
+ * (a) left waiting). One `open()` covers exactly one park, in either order.
+ */
 const PARK = "park" as const;
 type Round = readonly StreamEvent[] | typeof PARK;
 const PARKED = {
   waiting: 0,
+  /** Rounds that have parked so far, monotonic: a test can wait for its OWN park. */
+  parks: 0,
+  /** An `open()` no round has consumed yet. */
+  latched: false,
   release: (): void => {},
   open(): void {
+    this.latched = true;
     this.release();
   },
 };
@@ -75,11 +87,16 @@ class Scripted implements ModelProvider {
     await tick();
     const round = this.script[this.calls.length - 1] ?? [{ type: "done" }];
     if (round === PARK) {
+      PARKED.parks++;
       PARKED.waiting++;
-      await new Promise<void>((resolve) => {
-        PARKED.release = resolve;
-        request.signal?.addEventListener("abort", () => resolve(), { once: true });
-      });
+      if (PARKED.latched) {
+        PARKED.latched = false;
+      } else {
+        await new Promise<void>((resolve) => {
+          PARKED.release = resolve;
+          request.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
       PARKED.waiting--;
       yield* text("late");
       return;
@@ -473,6 +490,7 @@ async function stateFile(dir: string, id = "s1"): Promise<Record<string, unknown
 describe("S2 — the overlay: what the log has not committed yet survives a crash", () => {
   test("(a) a crash right after a prompt was accepted: the reload has the prompt (the state file's tail)", async () => {
     // Mutation: the state file's `tail` dropped (`sidecarOf` → []) → the prompt is gone.
+    PARKED.latched = false;
     const dir = await freshDir();
     const persister = persisterOn(dir);
     const host = hostWith(persister, [PARK], []);
@@ -501,6 +519,7 @@ describe("S2 — the overlay: what the log has not committed yet survives a cras
   test("(b) an in-place annotation of a committed message, then a steer before the next commit: k < the log's length, the annotated copy kept", async () => {
     // Mutation: `k = logged.length` whenever the capture is at least as long (no reference
     // compare) → the reload has the log's old, unannotated copy.
+    PARKED.latched = false;
     const dir = await freshDir();
     const persister = persisterOn(dir);
     const host = hostWith(
@@ -512,8 +531,11 @@ describe("S2 — the overlay: what the log has not committed yet survives a cras
     );
     const c = client();
     const { hosted } = host.open({ sessionId: "s1", create: true }, c.attachment);
+    // Wait for THIS test's park, not for "a" park: a round another test left
+    // waiting (it failed) made `waiting === 1` true before ours existed.
+    const start = PARKED.parks;
     hosted.prompt("T1", [{ type: "text", text: "go" }]);
-    await until(() => PARKED.waiting === 1);
+    await until(() => PARKED.parks > start);
     hosted.enqueue("e1", "T1", "steer-1");
     await hosted.persisted();
     const record = await loaded(dir);

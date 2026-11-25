@@ -19,6 +19,7 @@ import {
   type PermissionRequest,
   type PermissionResponse,
   autoApproves,
+  onceOnlyAsk,
   ownRequest,
 } from "@tentacle/core";
 import {
@@ -29,7 +30,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { truncateCells } from "./cells.ts";
+import {
+  type ApprovalScroll,
+  NO_APPROVAL_SCROLL,
+  approvalHint,
+  approvalRows,
+} from "./approval-scroll.ts";
+import { cellWidth, graphemes, truncateCells } from "./cells.ts";
 import { MENU, type OrphanCause, type ReplyMode, draftOf } from "./permission-reply.ts";
 
 /** The sub-agent a request comes from. */
@@ -133,8 +140,95 @@ export function permissionDetailLines(req: PermissionRequest): string[] {
   if (lines.length <= MAX_DETAIL_ROWS) {
     return lines;
   }
+  return capRows(lines);
+}
+
+/** At most `MAX_DETAIL_ROWS`; when cut, the last row says how many were left out. */
+function capRows(lines: readonly string[]): string[] {
+  if (lines.length <= MAX_DETAIL_ROWS) {
+    return [...lines];
+  }
   const kept = lines.slice(0, MAX_DETAIL_ROWS - 1);
   return [...kept, `… ${lines.length - kept.length} more lines`];
+}
+
+/** `line` cut into consecutive pieces of at most `width` cells (`""` stays one row). */
+function wrapCells(line: string, width: number): string[] {
+  const rows: string[] = [];
+  let row = "";
+  let used = 0;
+  for (const g of graphemes(line)) {
+    const w = cellWidth(g);
+    if (used + w > width && row !== "") {
+      rows.push(row);
+      row = "";
+      used = 0;
+    }
+    row += g;
+    used += w;
+  }
+  rows.push(row);
+  return rows;
+}
+
+/** What the dialog draws under its title: the subject rows and the model's sentence. */
+export interface PermissionView {
+  /** Each row already fits `columns − 3` cells (the component draws them as they are). */
+  readonly detailRows: string[];
+  /** `the model says: “…”`, one row; `null` when there is no sentence to show. */
+  readonly intentRow: string | null;
+  /**
+   * A `workflow_approve`'s WHOLE wrapped list: how many rows it takes, and how
+   * tall its window is. The key layer scrolls with these (the scroll's one
+   * decision lives here, beside the paint); 0 for any other ask.
+   */
+  readonly detailTotal: number;
+  readonly detailWindow: number;
+}
+
+/**
+ * The ONE decision both the layout (row count) and `PermissionPrompt` (paint)
+ * read (docs/feat/shell-intent-line.md Design §5, Q3). A `shell` ask shows the
+ * WHOLE command: each of its lines wrapped to the width, capped at
+ * `MAX_DETAIL_ROWS` with a `… N more lines` row — never a silent cut (a shell
+ * ROW cuts its command to make room for `exit=N`; the ask must show what really
+ * runs). A `workflow_approve` shows its WHOLE step list the same way — every
+ * `run` command verbatim, wrapped, never cut — in a window of at most
+ * `MAX_DETAIL_ROWS` rows, scrolled by `scroll` with a row saying how much is
+ * left (docs/fix/workflow-approve-detail.md D2: an approval must never hide a
+ * command, and Yes stays allowed). Other asks: today's rows, each cut to one row.
+ * `intent`: the asking call's own sentence (display only, never decided on).
+ */
+export function permissionView(
+  req: PermissionRequest,
+  intent: string | null,
+  columns: number,
+  scroll: ApprovalScroll = NO_APPROVAL_SCROLL,
+): PermissionView {
+  const width = Math.max(10, columns - 3);
+  if (req.kind === "workflow_approve") {
+    // Every line of the list, wrapped: the dialog never cuts a step or a command.
+    const wrapped = (req.detail ?? "—").split("\n").flatMap((line) => wrapCells(line, width));
+    // Scrollable: the last row is the hint, so the window is one row shorter and
+    // the dialog stays exactly `MAX_DETAIL_ROWS` tall (the layout counts this).
+    const scrollable = wrapped.length > MAX_DETAIL_ROWS - 1;
+    const window = scrollable ? MAX_DETAIL_ROWS - 1 : Math.max(1, wrapped.length);
+    const { rows, below } = approvalRows(wrapped, scroll.offset, window);
+    return {
+      detailRows: [...rows, ...(scrollable ? [truncateCells(approvalHint(below), width)] : [])],
+      intentRow: intent === null ? null : truncateCells(`the model says: “${intent}”`, width),
+      detailTotal: wrapped.length,
+      detailWindow: window,
+    };
+  }
+  const detailRows =
+    req.tool === "shell" && (req.kind === undefined || req.kind === "tool")
+      ? capRows(
+          req.detail ? req.detail.split("\n").flatMap((line) => wrapCells(line, width)) : ["—"],
+        )
+      : permissionDetailLines(req).map((line) => truncateCells(line, width));
+  const intentRow = intent === null ? null : truncateCells(`the model says: “${intent}”`, width);
+  return { detailRows, intentRow, detailTotal: 0, detailWindow: 0 };
 }
 
 /** The trust menu: 4 choices when the laptop stores decisions, else this session only. */
@@ -181,6 +275,19 @@ export function buildPermissionChoices(req: PermissionRequest): PermissionChoice
   }
   if (req.kind === "session_hop") {
     return hopChoices(req);
+  }
+  // A workflow approval (the hash, or an approve step) is ONE human decision:
+  // the daemon offers allow-once / deny only (`daemon/src/permission-map.ts`),
+  // so an "always" here would be rejected as "option not offered". A browser
+  // action likewise (docs/feat/browser-inspect.md B5).
+  if (onceOnlyAsk(req)) {
+    return [
+      { label: "Yes", response: { allowed: true, scope: "once" } },
+      { label: "No", response: { allowed: false } },
+      ...(req.reply
+        ? [{ label: "No, let's talk about it", response: { allowed: false }, reply: true as const }]
+        : []),
+    ];
   }
   // `workload_shell`'s "always" is scoped to the SINGLE workload
   // (docs/feat/workload-shell.md D6), so its label says so — and with no
@@ -254,6 +361,14 @@ export interface PermissionController {
    * length is real time, not frames.
    */
   shownAt(): number | null;
+  /**
+   * Where a `workflow_approve`'s detail is scrolled to, as of NOW (a ref: the
+   * key path composes scrolls inside one tick, docs/fix/workflow-approve-detail.md
+   * D2). Reset with `shownAt`, so a new request always starts at the top.
+   */
+  approvalScroll(): ApprovalScroll;
+  /** Write the scroll the key decided (`stepApprovalScroll`). */
+  setApprovalScroll(scroll: ApprovalScroll): void;
 }
 
 /**
@@ -334,6 +449,14 @@ export function usePermissionBroker(
    * (docs/fix/quit-enter-ask.md): `null` until the commit that draws it.
    */
   const shownAtRef = useRef<number | null>(null);
+  /**
+   * The `workflow_approve` detail's scroll for the request on screen
+   * (docs/fix/workflow-approve-detail.md D2): a ref, like `shownAt` — keys in one
+   * tick compose, and the paint reads it each render. Reset with `shownAt`.
+   */
+  const approvalScrollRef = useRef<ApprovalScroll>(NO_APPROVAL_SCROLL);
+  /** Bumped to repaint after a scroll key wrote only the ref. */
+  const [, setApprovalScrollTick] = useState(0);
   const draftBackRef = useRef(onDraftBack);
   draftBackRef.current = onDraftBack;
 
@@ -343,6 +466,11 @@ export function usePermissionBroker(
   }, []);
   const readMode = useCallback(() => modeRef.current, []);
   const shownAt = useCallback(() => shownAtRef.current, []);
+  const approvalScroll = useCallback(() => approvalScrollRef.current, []);
+  const setApprovalScroll = useCallback((next: ApprovalScroll) => {
+    approvalScrollRef.current = next;
+    setApprovalScrollTick((n) => n + 1);
+  }, []);
 
   /** The request closed: an unsent draft goes back (`cause`), the mode resets. */
   const closeDraft = useCallback(
@@ -362,6 +490,7 @@ export function usePermissionBroker(
       resolveRef.current = null;
       pendingRef.current = null;
       setPending(null);
+      approvalScrollRef.current = NO_APPROVAL_SCROLL;
       const message = response.message;
       if (message !== undefined) {
         // Sent: the field's text IS the message. If it never reaches the
@@ -458,6 +587,7 @@ export function usePermissionBroker(
             resolveRef.current = null;
             pendingRef.current = null;
             setPending(null);
+            approvalScrollRef.current = NO_APPROVAL_SCROLL;
             closeDraft("withdrawn");
           }
           resolve(DISMISSED);
@@ -473,6 +603,7 @@ export function usePermissionBroker(
         // A NEW request: the window starts when its dialog commits (the effect
         // below), never when the request arrived — a slow render must not eat it.
         shownAtRef.current = null;
+        approvalScrollRef.current = NO_APPROVAL_SCROLL;
         setSelected(0);
         setMode(MENU);
         setPendingAgent(options?.agent ?? null);
@@ -515,5 +646,7 @@ export function usePermissionBroker(
     readMode,
     setMode,
     shownAt,
+    approvalScroll,
+    setApprovalScroll,
   };
 }

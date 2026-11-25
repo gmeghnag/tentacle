@@ -149,6 +149,12 @@ describe("session/log schemas", () => {
       capabilities: false,
       // docs/feat/token-usage-log.md: not critical (it projects nothing).
       usage: false,
+      // docs/feat/agent-workflows.md, owner Q1 (2026-11-22): not critical.
+      workflow_start: false,
+      workflow_step: false,
+      workflow_end: false,
+      // docs/feat/a2a.md, Unification §2: a carried ended unit, not critical.
+      unit_end: false,
     });
     for (const option of KnownLogEntrySchema.options) {
       const type = option.shape.type.value as keyof typeof LOG_ENTRY_CRITICAL;

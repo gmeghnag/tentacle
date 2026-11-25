@@ -5,8 +5,15 @@
  * list cell per row stays the contract: the layout only says how a row draws.
  */
 import { describe, expect, test } from "bun:test";
-import { isOpen, stepA11yLabel, stepLayout, toggleOpen } from "../src/tool-steps.ts";
-import type { Row, ToolRow, ToolStatus } from "../src/transcript-rows.ts";
+import {
+  CONTEXT_BODY_LINES,
+  contextRowView,
+  isOpen,
+  stepA11yLabel,
+  stepLayout,
+  toggleOpen,
+} from "../src/tool-steps.ts";
+import type { ContextRow, Row, ToolRow, ToolStatus } from "../src/transcript-rows.ts";
 
 const user = (key: string): Row => ({ kind: "user", key, text: "do it", images: [] });
 const text = (key: string): Row => ({ kind: "assistant", key, text: "reply", version: 5 });
@@ -29,6 +36,15 @@ const tool = (key: string, status: ToolStatus = "ok", extra: Partial<ToolRow> = 
 });
 
 const UP_DOWN = (up: boolean, down: boolean) => ({ up, down });
+
+/** A context reset / compaction step (docs/feat/mobile-reset-in-timeline.md 1A). */
+const context = (key: string, extra: Partial<ContextRow> = {}): ContextRow => ({
+  kind: "context",
+  key,
+  event: "reset",
+  body: "carry on\n",
+  ...extra,
+});
 
 describe("fold: a thought joins the NEXT tool across thought-only gaps", () => {
   test("reasoning → tool: the tool carries the thought, the reasoning cell is hidden", () => {
@@ -182,6 +198,168 @@ describe("the thread: up/down per node", () => {
     expect(cells.get("a2")).toMatchObject({ thread: UP_DOWN(true, false) });
     expect(cells.get("b")).toMatchObject({ thread: UP_DOWN(false, true) });
     expect(tail).toEqual({ thought: "", up: true });
+  });
+});
+
+describe("a context step on the rail (docs/feat/mobile-reset-in-timeline.md 1A)", () => {
+  test("a context row is a node of the run, threaded with its neighbours", () => {
+    const { cells } = stepLayout([tool("t1"), context("c1"), tool("t2")], false);
+    expect(cells.get("c1")).toEqual({ kind: "context", thread: UP_DOWN(true, true) });
+    expect(cells.get("t1")).toMatchObject({ thread: UP_DOWN(false, true) });
+    expect(cells.get("t2")).toMatchObject({ thread: UP_DOWN(true, false) });
+  });
+
+  test("alone between text rows: a lone node, no thread", () => {
+    const { cells } = stepLayout([text("a1"), context("c1"), text("a2")], false);
+    expect(cells.get("c1")).toEqual({ kind: "context", thread: UP_DOWN(false, false) });
+  });
+
+  test("pending reasoning before it is an orphan Thought (it belongs to the round before)", () => {
+    const { cells } = stepLayout([tool("t1"), think("r1"), context("c1")], false);
+    expect(cells.get("r1")).toMatchObject({ kind: "thought", thread: UP_DOWN(true, true) });
+    expect(cells.get("c1")).toEqual({ kind: "context", thread: UP_DOWN(true, false) });
+  });
+
+  test("the tail shows with a context row last: the model starts a new round", () => {
+    expect(stepLayout([user("u"), context("c1")], true).tail).toEqual({ thought: "", up: true });
+    const { cells } = stepLayout([user("u"), context("c1")], true);
+    expect(cells.get("c1")).toMatchObject({ thread: UP_DOWN(false, true) });
+  });
+});
+
+describe("Q3-A: a successful context_reset call merges into the reset step", () => {
+  const call = (status: ToolStatus): ToolRow =>
+    tool("call", status, { name: "context_reset", label: "Context reset", args: "{}" });
+
+  test("ok + the reset row right after it: the tool cell is hidden, the reset is the node", () => {
+    const { cells } = stepLayout([tool("t1"), call("ok"), context("c1"), tool("t2")], false);
+    expect(cells.get("call")).toEqual({ kind: "hidden" });
+    expect(cells.get("c1")).toEqual({ kind: "context", thread: UP_DOWN(true, true) });
+    expect(cells.get("t1")).toMatchObject({ thread: UP_DOWN(false, true) });
+    expect(cells.get("t2")).toMatchObject({ thread: UP_DOWN(true, false) });
+  });
+
+  test("hidden reasoning between the call and the reset is transparent", () => {
+    const { cells } = stepLayout(
+      [user("u"), call("ok"), think("r1"), context("c1"), tool("t2")],
+      false,
+    );
+    expect(cells.get("call")).toEqual({ kind: "hidden" });
+    expect(cells.get("r1")).toMatchObject({ kind: "thought" });
+    // The merged call is transparent to the thread: the run is ONE thread
+    // through it (the thought before the reset is an orphan node of that run).
+    expect(cells.get("c1")).toMatchObject({ thread: UP_DOWN(true, true) });
+    expect(cells.get("r1")).toMatchObject({ thread: UP_DOWN(false, true) });
+    expect(cells.get("t2")).toMatchObject({ thread: UP_DOWN(true, false) });
+  });
+
+  test("an error / denied / running call stays an ordinary step (no reset happened)", () => {
+    for (const status of ["error", "denied", "running", "queued"] as const) {
+      const { cells } = stepLayout([call(status), context("c1")], false);
+      expect({ status, cell: cells.get("call") }).toMatchObject({
+        status,
+        cell: { kind: "step" },
+      });
+    }
+  });
+
+  test("an ok call with NO reset row after it stays a step (a cancelled reset)", () => {
+    const { cells } = stepLayout([call("ok"), tool("t2")], false);
+    expect(cells.get("call")).toMatchObject({ kind: "step" });
+  });
+
+  test("a compaction row after the call does not merge it (only a reset is the same fact)", () => {
+    const { cells } = stepLayout([call("ok"), context("c1", { event: "compact" })], false);
+    expect(cells.get("call")).toMatchObject({ kind: "step" });
+  });
+});
+
+describe("contextRowView: one line, then a capped markdown body", () => {
+  const view = (row: ContextRow, full = false) => contextRowView(row, full);
+
+  test("a reset: node, name, the prompt's first line without its markdown marks", () => {
+    const v = view(context("c1", { body: "\n## Carry **on** with `the` plan\nsecond line" }));
+    expect(v.node).toBe("reset");
+    expect(v.name).toBe("Context reset");
+    expect(v.subtitle).toBe("Carry on with the plan");
+    expect(v.italic).toBe(true);
+    expect(v.tappable).toBe(true);
+  });
+
+  test("a list bullet and a quote mark on the first line go too; the LINE only", () => {
+    expect(view(context("c1", { body: "- **Carry** on" })).subtitle).toBe("Carry on");
+    expect(view(context("c1", { body: "1. Carry on" })).subtitle).toBe("Carry on");
+    expect(view(context("c1", { body: "> Carry on" })).subtitle).toBe("Carry on");
+    // The body keeps its markdown: only the one-line subtitle is stripped.
+    expect(view(context("c1", { body: "- **Carry** on" }), true).body?.text).toBe("- **Carry** on");
+  });
+
+  test("a compaction: node, name, the figures as its line, no italic", () => {
+    const v = view(
+      context("c1", { event: "compact", body: "the summary", figures: "ctx 182k → 9k" }),
+    );
+    expect(v.node).toBe("compact");
+    expect(v.name).toBe("Compacted");
+    expect(v.subtitle).toBe("ctx 182k → 9k");
+    expect(v.italic).toBe(false);
+  });
+
+  test("a legacy compaction carries no figures: the name alone, nothing invented", () => {
+    const v = view(context("c1", { event: "compact", body: "the summary" }));
+    expect(v.subtitle).toBe("");
+    expect(v.a11yLabel).toBe("Compacted");
+  });
+
+  test("the body is capped at CONTEXT_BODY_LINES source lines, the rest is `hidden`", () => {
+    const body = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+    const v = view(context("c1", { body }));
+    expect(v.body?.text).toBe(
+      Array.from({ length: CONTEXT_BODY_LINES }, (_, i) => `line ${i + 1}`).join("\n"),
+    );
+    expect(v.body?.hidden).toBe(20 - CONTEXT_BODY_LINES);
+    expect(view(context("c1", { body }), true).body).toEqual({ text: body, hidden: 0 });
+  });
+
+  test("a fence across the cut is never cut: the cut moves back to its opening line", () => {
+    const lines = [
+      ...Array.from({ length: 10 }, (_, i) => `line ${i + 1}`),
+      "```ts",
+      ...Array.from({ length: 5 }, (_, i) => `code ${i + 1}`),
+      "```",
+    ];
+    const v = view(context("c1", { body: lines.join("\n") }));
+    expect(v.body?.text.split("\n")).toEqual(lines.slice(0, 10));
+    expect(v.body?.hidden).toBe(lines.length - 10);
+    expect(v.body?.text).not.toContain("```");
+  });
+
+  test("a fence opened on line 1 is cut past its close instead", () => {
+    const lines = [
+      "```sh",
+      ...Array.from({ length: 14 }, (_, i) => `cmd ${i + 1}`),
+      "```",
+      "after",
+    ];
+    const v = view(context("c1", { body: lines.join("\n") }));
+    expect(v.body?.text.split("\n")).toEqual(lines.slice(0, 16));
+    expect(v.body?.hidden).toBe(1);
+  });
+
+  test("a blank body: no body at all, and not tappable", () => {
+    for (const body of ["", "   \n\n \t"]) {
+      const v = view(context("c1", { body }));
+      expect(v.body).toBeNull();
+      expect(v.tappable).toBe(false);
+    }
+  });
+
+  test("VoiceOver: the name, then what it holds — the arrow read in words", () => {
+    expect(view(context("c1", { body: "\n  Carry on now." })).a11yLabel).toBe(
+      "Context reset. Restart prompt: Carry on now.",
+    );
+    expect(
+      view(context("c1", { event: "compact", body: "s", figures: "ctx 182k → ~9k" })).a11yLabel,
+    ).toBe("Compacted, context 182k to about 9k");
   });
 });
 

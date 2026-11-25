@@ -44,6 +44,7 @@ import type { PermissionRequest } from "@tentacle/core";
  */
 import type { Key } from "ink";
 import type { SessionDirectory } from "../app-types.ts";
+import type { ApprovalScroll } from "../approval-scroll.ts";
 import type { ArtifactConfirmView } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
 import type { DockJobRow } from "../background-list.ts";
@@ -67,6 +68,12 @@ export interface KeyPermission {
    * the arming window's stamp, read live (docs/fix/quit-enter-ask.md).
    */
   shownAt(): number | null;
+  /**
+   * A `workflow_approve` detail's scroll, read live: keys in one tick compose,
+   * so the second PgDn must see the first one's offset
+   * (docs/fix/workflow-approve-detail.md D2).
+   */
+  approvalScroll(): ApprovalScroll;
 }
 
 /** Everything one chunk's decision may read. See the file header for SOURCES. */
@@ -96,6 +103,8 @@ export interface KeySnapshot {
   exitPending(): boolean;
   /** The request's `reply.maxChars` (0 when it takes none): a render value. */
   readonly replyMaxChars: number;
+  /** The frame's column count, a render value (the dialog's wrap width). */
+  readonly columns: number;
   subagents(): readonly BackgroundAgentRow[];
   jobRows(): readonly DockJobRow[];
 

@@ -139,7 +139,10 @@ describe("smart compaction in the loop", () => {
       new Session(agentWith(high, { contextPrune: { ...PRUNE, window: 1_000_000_000 } }), "s1"),
       "go",
     );
-    expect(high.requests).toEqual(off.requests);
+    // `durationMs` is each tool's wall-clock time: it differs run to run and is not part of the shape.
+    const shape = (rs: readonly ChatRequest[]): unknown =>
+      JSON.parse(JSON.stringify(rs, (k, v) => (k === "durationMs" ? 0 : v)));
+    expect(shape(high.requests)).toEqual(shape(off.requests));
     expect(off.requests.some((r) => pruned(r) > 0)).toBe(false);
   });
 

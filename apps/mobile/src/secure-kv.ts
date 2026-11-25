@@ -12,6 +12,7 @@
 import * as SecureStore from "expo-secure-store";
 import type { ComputerStore } from "./computer-store.ts";
 import { type SecureKV, createComputerStore } from "./computer-store.ts";
+import { PUSH_KEYCHAIN_SERVICE } from "./push-access-group.ts";
 import { directoryStore } from "./push-directory-expo.ts";
 import type { DirectoryStore } from "./push-directory.ts";
 import type { PushKeyStore } from "./push-key.ts";
@@ -46,13 +47,22 @@ export const keychainKV: SecureKV = {
  * dropped (`pairing-guards.test.ts` pins that).
  */
 export const pushKeychain: PushKeyStore = {
-  get: (key, options) => SecureStore.getItemAsync(key, { accessGroup: options.accessGroup }),
+  get: (key, options) =>
+    SecureStore.getItemAsync(key, {
+      accessGroup: options.accessGroup,
+      keychainService: PUSH_KEYCHAIN_SERVICE,
+    }),
   set: (key, value, options) =>
     SecureStore.setItemAsync(key, value, {
       keychainAccessible: options.keychainAccessible,
       accessGroup: options.accessGroup,
+      keychainService: PUSH_KEYCHAIN_SERVICE,
     }),
-  delete: (key, options) => SecureStore.deleteItemAsync(key, { accessGroup: options.accessGroup }),
+  delete: (key, options) =>
+    SecureStore.deleteItemAsync(key, {
+      accessGroup: options.accessGroup,
+      keychainService: PUSH_KEYCHAIN_SERVICE,
+    }),
 };
 
 /** The app's ONE computer store (the Keychain, this-device-only). */

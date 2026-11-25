@@ -1,0 +1,52 @@
+/*
+ * The TUI's cell grid (docs/feat/mobile-mockup-kit.md Slice 2). Colours are
+ * var(--tui-*) from generated/tui-tokens.css, or — for a row rendered by the
+ * TUI's own renderer — the SGR colour that row carries (`K.tui.fromAnsi`).
+ * No literal hex / px / ms here (scripts/test/mockup-kit.test.ts).
+ */
+.k-tui {
+  display: inline-block;
+  padding: 1ch;
+  background: var(--tui-bg);
+  color: var(--tui-fg);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre;
+  line-height: 1.25;
+}
+.k-tui-row {
+  display: block;
+  min-height: 1.25em;
+}
+.k-tui-row span[data-bold] {
+  font-weight: bold;
+}
+.k-tui-row span[data-dim] {
+  opacity: 0.55;
+}
+.k-tui-row span[data-inverse] {
+  background: var(--tui-fg);
+  color: var(--tui-bg);
+}
+.k-tui-accent {
+  color: var(--tui-accent);
+}
+.k-tui-subtle {
+  color: var(--tui-subtle);
+}
+.k-tui-dim {
+  color: var(--tui-dim);
+}
+.k-tui-gutter {
+  color: var(--tui-gutter);
+}
+.k-tui-blink {
+  animation: k-tui-blink calc(2 * var(--ms-tui-blink-half)) steps(1) infinite;
+}
+@keyframes k-tui-blink {
+  50% {
+    opacity: 0;
+  }
+}
+[data-reduce-motion] .k-tui-blink {
+  animation: none;
+}

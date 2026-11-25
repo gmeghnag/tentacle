@@ -125,7 +125,36 @@ export interface ChatMessage {
    * field by field, so the model never sees it. A reload draws `Thought · 12 s`.
    */
   readonly thought?: ThoughtFact;
+  /**
+   * On an ASSISTANT message: the model's own reasoning for it, as its provider
+   * must get it back (docs/fix/reasoning-echo.md D1). NOT display-only, unlike
+   * `thought`: the provider that produced it (`source`) re-sends it on every
+   * later request; any other provider skips it. The loop never looks inside.
+   * Rides the critical `message` log entry fail-soft (persisted, owner Q1 A).
+   */
+  readonly reasoning?: ReasoningRecord;
 }
+
+/** The model's own reasoning for one assistant message, as its provider must get it back. */
+export interface ReasoningRecord {
+  /** `ModelProvider.id` of the producer: only that provider re-sends it (D5). */
+  readonly source: string;
+  readonly body: ReasoningBody;
+}
+
+export type ReasoningBody =
+  /** OpenAI-compatible: the text, and the field it arrived in (sent back in the same one). */
+  | {
+      readonly format: "openai";
+      readonly field: "reasoning_content" | "reasoning";
+      readonly text: string;
+    }
+  /** Anthropic: the response's reasoning blocks, verbatim, in order. */
+  | { readonly format: "anthropic"; readonly blocks: readonly AnthropicReasoningBlock[] };
+
+export type AnthropicReasoningBlock =
+  | { readonly type: "thinking"; readonly thinking: string; readonly signature: string }
+  | { readonly type: "redacted_thinking"; readonly data: string };
 
 /** A round's thinking, as a placeholder: its duration only (docs/fix/thought-placeholder.md). */
 export interface ThoughtFact {
@@ -175,6 +204,15 @@ export const NOTE_KIND = {
    * docs/feat/subagent-panel.md): the parent agent is told, and asked for nothing.
    */
   userToSubagent: "user_to_subagent",
+  /** A workflow run ended (`wf-N`): the live end note (docs/feat/agent-workflows.md D3). */
+  workflowEnd: "workflow_end",
+  /** A workflow run a restart found unfinished, closed `stopped: interrupted` at load (D4). */
+  workflowInterrupted: "workflow_interrupted",
+  /**
+   * A live run's step waits for the user, and nobody was attached to see it
+   * (docs/feat/workflow-run-awareness.md S6): told once, it never ends the run.
+   */
+  workflowWait: "workflow_wait",
 } as const;
 
 /** How full the model's context was: `used` tokens of a `window` (both tokens). */
@@ -225,7 +263,17 @@ export type StreamEvent =
   | { readonly type: "text"; readonly delta: string }
   | { readonly type: "reasoning"; readonly delta: string }
   | { readonly type: "tool_call"; readonly toolCall: ToolCall }
-  | { readonly type: "done"; readonly usage?: Usage; readonly stopReason?: ModelStopReason };
+  | {
+      readonly type: "done";
+      readonly usage?: Usage;
+      readonly stopReason?: ModelStopReason;
+      /**
+       * The response's reasoning, complete, for the loop to store on the
+       * assistant message (docs/fix/reasoning-echo.md D2). Absent when the
+       * model did not reason (or the provider does not echo).
+       */
+      readonly reasoning?: ReasoningRecord;
+    };
 
 /**
  * The voice-turn profile of one request (docs/feat/voice-conversation.md §4,

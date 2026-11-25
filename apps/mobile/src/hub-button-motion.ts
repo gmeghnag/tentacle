@@ -14,6 +14,7 @@
  */
 import { motion } from "./floating-button.ts";
 import type { Point } from "./hub-fan.ts";
+import { HUB_GLOW_IN_MS, HUB_GLOW_OUT_MS } from "./motion.ts";
 
 export interface TimingPlan {
   readonly toValue: number;
@@ -69,8 +70,8 @@ export interface GlowPlan {
 export function glowPlan(reduceMotion: boolean): GlowPlan {
   return {
     fade: [
-      { toValue: 0.9, duration: 220 },
-      { toValue: 0, duration: 480 },
+      { toValue: 0.9, duration: HUB_GLOW_IN_MS },
+      { toValue: 0, duration: HUB_GLOW_OUT_MS },
     ],
     scale: reduceMotion ? 1 : GLOW_SCALE,
     native: true,

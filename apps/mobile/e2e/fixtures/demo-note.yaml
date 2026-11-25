@@ -1,0 +1,21 @@
+schemaVersion: 1
+name: demo-note
+version: 1
+description: collect → draft → review (loop) → confirm → archive — the demo the phone's run view was drawn from
+steps:
+  - id: collect
+    run: echo collected
+  - id: draft
+    agent: { prompt_text: "Draft the note from the collected material.", type: general }
+    retry: 1
+  - id: review
+    agent: { prompt_text: "Review the draft and pass or fail it." }
+    on_fail: { goto: fix, max: 2 }
+    next: confirm
+  - id: fix
+    agent: { prompt_text: "Fix the draft following the review's reason." }
+    next: review
+  - id: confirm
+    approve: { title: "Confirm the note", detail: "The draft is ready." }
+  - id: archive
+    run: echo archived

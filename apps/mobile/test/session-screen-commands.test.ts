@@ -8,7 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import type { ChatMessage } from "@tentacle/core";
-import { PermissionBroker } from "@tentacle/core";
+import { COMPACTION_SUMMARY_HEAD, PermissionBroker } from "@tentacle/core";
 import { DomainErrorCode, JsonRpcErrorCode } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import {
@@ -35,7 +35,11 @@ interface Fake extends SendableHandle {
 
 const SUMMARY: ChatMessage[] = [
   { role: "system", content: "sys" },
-  { role: "user", content: "[Conversation summary]\nwe mapped the repo" },
+  {
+    role: "user",
+    content: `${COMPACTION_SUMMARY_HEAD}\n\nwe mapped the repo`,
+    compacted: { fromTokens: 3_000, toTokens: 2_000, toExact: true },
+  },
 ];
 
 function fake(): Fake {
@@ -126,8 +130,10 @@ const CHAT: ChatMessage[] = [
 const notices = (rows: readonly Row[]) =>
   rows.flatMap((r) =>
     r.kind === "notice"
-      ? [r.separator === true ? "<separator>" : `${r.level === "warn" ? "▲" : "◇"} ${r.text}`]
-      : [],
+      ? [`${r.level === "warn" ? "▲" : "◇"} ${r.text}`]
+      : r.kind === "context"
+        ? [`<${r.event}>`]
+        : [],
   );
 
 const row = (
@@ -201,7 +207,7 @@ describe("Clear (the load-bearing check: the daemon's history IS the transcript)
 });
 
 describe("Compact", () => {
-  test("history{compact} then resolve → ONE separator, no line, slot Compacted ✓ for 3 s", async () => {
+  test("history{compact} then resolve → ONE step, no line, slot Compacted ✓ for 3 s", async () => {
     const { screen, handle, clock } = await harness(CHAT);
     const run = screen.compact();
     expect(screen.state().slot).toEqual({ kind: "compacting", since: 10_000 });
@@ -209,7 +215,16 @@ describe("Compact", () => {
     expect(row(screen, "clear")).toEqual({ kind: "dimmed", reason: "Compacting…" });
     handle.settleCompact?.({ before: 3, after: 2 });
     await run;
-    expect(notices(screen.state().transcript.rows)).toEqual(["<separator>"]);
+    // Q4-A: the phone's own compaction leaves the `⤡ Compacted` step at once
+    // (today it said nothing until a reopen — the one silent path).
+    expect(notices(screen.state().transcript.rows)).toEqual(["<compact>"]);
+    const step = screen.state().transcript.rows.find((r) => r.kind === "context");
+    expect(step).toMatchObject({
+      kind: "context",
+      event: "compact",
+      figures: "ctx 3k → 2k",
+      body: "we mapped the repo",
+    });
     expect(screen.state().slot).toEqual({ kind: "compacted" });
     expect(row(screen, "compact")).toEqual({ kind: "done", text: "Compacted ✓" });
     clock.at += 2_999;

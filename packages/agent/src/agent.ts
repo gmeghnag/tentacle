@@ -20,6 +20,7 @@ import {
   type AgentJobs,
   type AgentNotify,
   type ArtifactSink,
+  type AttachmentRef,
   type AttachmentSource,
   type BackgroundJob,
   COUNT_TOKENS_CAP_MS,
@@ -30,17 +31,21 @@ import {
   DsmlToolCallLeakError,
   type ExecutionEnvironment,
   HeuristicTokenCounter,
+  IMAGE_VIEW_TOOL_NAME,
   type JobController,
   type ModelProvider,
   type ModelStopReason,
   ModelStreamCutError,
   NOTE_KIND,
+  PROJECT_PATHS,
   type PermissionRequester,
+  type ReasoningRecord,
   type TokenCounter,
   type Tool,
   type ToolCall,
   type ToolContext,
   type ToolDefinition,
+  type ToolImageStore,
   type ToolProgressEvent,
   type ToolResult,
   type Usage,
@@ -48,6 +53,7 @@ import {
   type VoiceTurn,
   allowAll,
   answerOutstandingCalls,
+  checkAttachmentRefs,
   countTokensBounded,
   subagentReportNote,
   voiceReasoning,
@@ -81,6 +87,7 @@ import {
   modelView,
   renderForModel,
   shouldEmit,
+  withStatusLine,
 } from "./context-awareness.ts";
 import {
   contextResetHistory,
@@ -91,6 +98,7 @@ import {
 } from "./context-reset.ts";
 import { EventQueue } from "./event-queue.ts";
 import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
+import { projectOldImages } from "./old-images.ts";
 import { type GateOutcome, PermissionGate } from "./permission-gate.ts";
 import {
   type PruneEntry,
@@ -217,6 +225,14 @@ export interface RunOptions {
    * caller owns the queue, so the caller owns the mark (`Session.takeVoice`).
    */
   readonly voiceMark?: () => VoiceMark | undefined;
+  /**
+   * A live status line (the session's workflow run,
+   * docs/feat/workflow-run-awareness.md), read SYNCHRONOUSLY once per request
+   * built and appended at the request's tail (`withStatusLine`) — never in the
+   * history. Only `Session` passes it, so a sub-agent (its own `Agent`) never
+   * sees it. `undefined` result → no line.
+   */
+  readonly statusLine?: () => string | undefined;
 }
 
 /** What a voice turn asks of one round: see `@tentacle/core`'s `voiceReasoning`. */
@@ -278,9 +294,26 @@ const TURN_STOPPED_INTERRUPTED_NOTE =
  * and a failed result's error flag (docs/fix/mobile-qa-1117.md).
  */
 function toolMessage(callId: string, result: ToolResult, durationMs?: number): ChatMessage {
+  // `image_view`'s ONE image (docs/feat/image-view.md D9): a ref that fails the
+  // wire's own check becomes an error result naming why — never a thrown turn,
+  // never a message the log would refuse.
+  const image = result.image === undefined ? undefined : imageCheck(result.image);
+  if (image !== undefined && "error" in image) {
+    const { image: _dropped, ...rest } = result;
+    return toolMessage(
+      callId,
+      {
+        ...rest,
+        content: `${result.content}\n[image not attached: ${image.error}]`,
+        isError: true,
+      },
+      durationMs,
+    );
+  }
   return {
     role: "tool",
     content: result.content,
+    ...(image !== undefined ? { attachments: [image.ref] } : {}),
     toolCallId: callId,
     ...(result.spill ? { spill: result.spill } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
@@ -289,6 +322,15 @@ function toolMessage(callId: string, result: ToolResult, durationMs?: number): C
     // as live did (docs/fix/mobile-qa-1117.md, bug 2). Display only.
     ...(result.isError === true ? { isError: true as const } : {}),
   };
+}
+
+function imageCheck(ref: AttachmentRef): { ref: AttachmentRef } | { error: string } {
+  try {
+    checkAttachmentRefs([ref]);
+    return { ref };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /** A tool run's outcome: `durationMs` is set iff the tool (or the skill read) actually ran. */
@@ -321,7 +363,52 @@ function lastUserText(messages: readonly ChatMessage[]): string {
 }
 
 /** A finished background job awaiting its note: a shell job, or a sub-agent (`agentId` in it). */
-export type PendingExit = BackgroundJob | AgentJobExit | PendingAgentMessage | PendingUserNote;
+export type PendingExit =
+  | BackgroundJob
+  | AgentJobExit
+  | PendingAgentMessage
+  | PendingUserNote
+  | PendingWorkflowEnd
+  | PendingWorkflowWait;
+
+/**
+ * A workflow run ended (docs/feat/agent-workflows.md D3): its end note, keyed
+ * `note.id = runId` (the load derivation's dedupe), rides the SAME queue as a
+ * job exit, so it WAKES like one. It is told at the next round boundary of a
+ * running turn (the mid-turn drain, like a sub-agent's exit), else at the next
+ * turn's start (docs/feat/workflow-run-awareness.md S4).
+ */
+export type PendingWorkflowEnd = {
+  readonly kind: "workflow_end";
+  readonly runId: string;
+  readonly text: string;
+};
+
+const isWorkflowEnd = (job: PendingExit): job is PendingWorkflowEnd =>
+  "kind" in job && job.kind === "workflow_end";
+
+/**
+ * A live run's step waits for the user and nobody is attached
+ * (docs/feat/workflow-run-awareness.md S6): its note WAKES like an end note, but
+ * is told at a turn's START only — never mid-turn, where the status line
+ * already says it. `note.id = runId`, under its own kind: never taken for the
+ * run's end by the load derivation.
+ */
+export type PendingWorkflowWait = {
+  readonly kind: "workflow_wait";
+  readonly runId: string;
+  readonly text: string;
+};
+
+const isWorkflowWait = (job: PendingExit): job is PendingWorkflowWait =>
+  "kind" in job && job.kind === "workflow_wait";
+
+/** THE end note's message: the start flush and the mid-turn drain both use it. */
+const workflowEndNote = (job: PendingWorkflowEnd): ChatMessage => ({
+  role: "user",
+  content: job.text,
+  note: { kind: NOTE_KIND.workflowEnd, id: job.runId },
+});
 
 /**
  * A running background child's `agent_notify` text, queued for the parent agent
@@ -591,6 +678,17 @@ export interface AgentConfig {
    */
   readonly attachments?: AttachmentSource;
   /**
+   * The session's tool-image store (docs/feat/image-view.md D1/D9): handed to
+   * every tool call as `ctx.images` (`fs_read` keeps a PDF's pictures in it,
+   * `image_view` picks one). The SAME object as `attachments`; absent = off.
+   */
+  readonly toolImages?: ToolImageStore;
+  /**
+   * Tokens one image ref costs the loop's default counter (docs/feat/image-view.md
+   * D7: the provider's estimate or `model.imageTokens`). Absent = 1600.
+   */
+  readonly imageTokens?: number;
+  /**
    * The session's artifact store (docs/feat/model-artifacts.md D4): handed to
    * every tool call's context for `present`. A sub-agent is built without one,
    * so it cannot present.
@@ -783,6 +881,8 @@ export interface SessionSkills {
 
 export class Agent {
   private readonly config: AgentConfig;
+  /** The loop's own default counter: per-provider image cost (docs/feat/image-view.md D7). */
+  private readonly counter: HeuristicTokenCounter;
   private readonly gate: PermissionGate;
   /**
    * The activator behind every skill activation: `config.skills` at the start,
@@ -856,6 +956,10 @@ export class Agent {
 
   constructor(config: AgentConfig) {
     this.config = config;
+    this.counter =
+      config.imageTokens === undefined
+        ? DEFAULT_COUNTER
+        : new HeuristicTokenCounter({ imageTokens: config.imageTokens });
     this.activator = config.skills;
     this.listing = config.skillListing ?? EMPTY_SKILL_LISTING;
     const initial = config.capabilities ?? NO_CAPABILITIES;
@@ -950,6 +1054,16 @@ export class Agent {
     this.pendingExits.push({ kind: "user_note", agentId, text });
   }
 
+  /** A workflow run ended: its note, told at the next round boundary or turn start (and it wakes). */
+  noteWorkflowEnd(runId: string, text: string): void {
+    this.pendingExits.push({ kind: "workflow_end", runId, text });
+  }
+
+  /** A workflow step waits for the user, unattended: its note, told at the next turn's start (and it wakes). */
+  noteWorkflowWait(runId: string, text: string): void {
+    this.pendingExits.push({ kind: "workflow_wait", runId, text });
+  }
+
   /** Whether the user may activate `name` (`/name`) in this agent. */
   canActivateForUser(name: string): boolean {
     return this.activator?.userInvocable(name) ?? false;
@@ -1022,17 +1136,36 @@ export class Agent {
   }
 
   /**
-   * What a request built under `caps` sends: the projection with the
-   * conversation's prune set applied. A copy when anything is stubbed; every
-   * other message keeps its identity (a context anchor still matches it).
+   * What a request built under `caps` sends: the projection, the user's images
+   * past `OLD_IMAGE_TURNS` answered turns replaced by their `image_view` line
+   * (docs/feat/image-old-on-demand.md D2), then the conversation's prune set.
+   * A copy when anything changes; every other message keeps its identity (a
+   * context anchor still matches it).
    */
   private requestHistory(
     messages: ChatMessage[],
     caps: SessionCapabilities,
+    turnFrom: number,
   ): readonly ChatMessage[] {
     const projected = this.projectedHistory(messages, caps);
+    const images = this.oldImagesOnDemand(caps) ? projectOldImages(projected, turnFrom) : projected;
     const set = this.pruneState.get(messages);
-    return set === undefined ? projected : applyPrune(projected, set);
+    return set === undefined ? images : applyPrune(images, set);
+  }
+
+  /**
+   * Whether old user images are projected out of the request: only when the
+   * placeholder names a tool the model can actually call — the store is wired
+   * AND `image_view` is registered AND not switched off in `caps`. Decided on
+   * the capability snapshot (not the request's tool list), so the forced final
+   * report sends the same bytes as the turn's other rounds (F5/F6/F7).
+   */
+  private oldImagesOnDemand(caps: SessionCapabilities): boolean {
+    return (
+      this.config.toolImages !== undefined &&
+      this.config.tools.get(IMAGE_VIEW_TOOL_NAME) !== undefined &&
+      !isToolDisabled(IMAGE_VIEW_TOOL_NAME, caps)
+    );
   }
 
   /**
@@ -1047,16 +1180,17 @@ export class Agent {
     messages: ChatMessage[],
     tools: readonly ToolDefinition[],
     caps: SessionCapabilities,
+    turnFrom: number,
   ): void {
     const prune = this.config.contextPrune;
     if (prune === undefined || !(prune.window > 0)) {
       return;
     }
     const used = estimateUsed(
-      this.requestHistory(messages, caps),
+      this.requestHistory(messages, caps, turnFrom),
       tools,
       this.anchors.get(messages),
-      prune.counter ?? DEFAULT_COUNTER,
+      prune.counter ?? this.counter,
     );
     if (used * 100 < prune.window * prune.pruneAtPercent) {
       return;
@@ -1071,7 +1205,11 @@ export class Agent {
         fresh.set(index, entry);
       }
     }
-    if (estimateGain(messages, fresh).tokens * 100 < prune.window * prune.minGainPercent) {
+    const imageTokens = this.counter.imageTokens;
+    if (
+      estimateGain(messages, fresh, { imageTokens }).tokens * 100 <
+      prune.window * prune.minGainPercent
+    ) {
       return;
     }
     const next = new Map<number, PruneEntry>();
@@ -1311,6 +1449,7 @@ export class Agent {
       env: this.config.env,
       ...(this.config.jobs ? { jobs: this.config.jobs } : {}),
       ...(this.config.artifacts ? { artifacts: this.config.artifacts } : {}),
+      ...(this.config.toolImages ? { images: this.config.toolImages } : {}),
       history: messages,
     };
 
@@ -1319,6 +1458,11 @@ export class Agent {
     // From here on, the messages the model has not seen yet: the only ones a
     // context line may ride on (moves past each request as it is sent).
     let unseen = Math.min(opts.newFrom ?? messages.length, messages.length);
+    // Where THIS turn began, captured once: the old-image projection reads only
+    // `messages[0, turnFrom)`, so every round of the turn sends those bytes
+    // identically and the prompt-cache prefix holds
+    // (docs/feat/image-old-on-demand.md D2/F1).
+    const turnFrom = unseen;
 
     // Project hooks run only once trusted: decided before a fresh turn runs
     // any hook or tool (never on a resumed turn, which already started).
@@ -1511,15 +1655,16 @@ export class Agent {
       const tools = this.projectedTools(caps);
       // A prune batch first (it changes what is sent), so the context line
       // below reports the request the model actually gets.
-      this.maybePrune(messages, tools, caps);
-      this.noteContextUsage(messages, unseen, tools, caps);
+      this.maybePrune(messages, tools, caps, turnFrom);
+      this.noteContextUsage(messages, unseen, tools, caps, turnFrom);
       // The model's copy: stored context lines rendered into `content`, always
       // (enabled or not), so every request repeats the same bytes for a
       // message an earlier one sent — the provider's prompt cache holds.
-      const view = modelView(this.requestHistory(messages, caps));
+      const view = modelView(this.requestHistory(messages, caps, turnFrom));
       const voiceTurn = voiceRequest(view.messages);
       const request: ChatRequest = {
-        messages: voiceTurn.messages,
+        // The live status line (a workflow run's) at the TAIL, request only.
+        messages: withStatusLine(voiceTurn.messages, opts.statusLine?.()),
         tools,
         ...(this.config.temperature !== undefined ? { temperature: this.config.temperature } : {}),
         ...(signal ? { signal } : {}),
@@ -1536,6 +1681,12 @@ export class Agent {
       const toolCalls: ToolCall[] = [];
       /** Why the provider's stream ended; `undefined` from a provider that does not say. */
       let stopReason: ModelStopReason | undefined;
+      /**
+       * The model's own reasoning for this round, as its provider must get it
+       * back (docs/fix/reasoning-echo.md D4). Opaque here: only stored on the
+       * assistant message; the provider that produced it decides the echo.
+       */
+      let reasoning: ReasoningRecord | undefined;
       /** How long this round thought: a placeholder kept with its message (thought-placeholder). */
       const thinking = new ThinkingClock(this.config.now ?? (() => performance.now()));
       this.notifyModelRequest(sessionId, iteration, request);
@@ -1555,6 +1706,7 @@ export class Agent {
               break;
             case "done":
               stopReason = event.stopReason;
+              reasoning = event.reasoning;
               if (event.usage) {
                 this.anchorContext(messages, sent, event.usage);
                 this.addSpend(messages, event.usage);
@@ -1659,10 +1811,13 @@ export class Agent {
         };
       }
 
+      // Only a round that reached a normal end stores its reasoning: the throw
+      // paths above (a failed or cut stream) never do (D4).
+      const echo = reasoning ? { reasoning } : {};
       messages.push(
         toolCalls.length > 0
-          ? { role: "assistant", content: text, toolCalls, ...thinking.fact() }
-          : { role: "assistant", content: text, ...thinking.fact() },
+          ? { role: "assistant", content: text, toolCalls, ...thinking.fact(), ...echo }
+          : { role: "assistant", content: text, ...thinking.fact(), ...echo },
       );
 
       // Any real progress (text or a tool call) resets the stall counter.
@@ -1844,12 +1999,16 @@ export class Agent {
       markVoice();
       try {
         // No tools are sent, but the system prompt is: its catalog is projected.
-        const view = modelView(this.requestHistory(messages, this.capabilities()));
+        const view = modelView(this.requestHistory(messages, this.capabilities(), turnFrom));
         if (view.repairs !== null) {
           yield { type: "history_repaired", ...view.repairs };
         }
         const finalMessages: ChatMessage[] = [
-          ...(voice === null ? view.messages : withSpokenLine(view.messages)),
+          // The status line before the nudge, so the nudge stays the last word.
+          ...withStatusLine(
+            voice === null ? view.messages : withSpokenLine(view.messages),
+            opts.statusLine?.(),
+          ),
           {
             role: "user",
             content: nudge,
@@ -1869,8 +2028,13 @@ export class Agent {
         };
         this.notifyModelRequest(sessionId, "final", finalRequest);
         const finalThinking = new ThinkingClock(this.config.now ?? (() => performance.now()));
+        /** The report's own reasoning, stored with it (D4). */
+        let finalReasoning: ReasoningRecord | undefined;
         for await (const event of this.config.model.stream(finalRequest)) {
           finalThinking.see(event);
+          if (event.type === "done") {
+            finalReasoning = event.reasoning;
+          }
           if (event.type === "text") {
             finalText += event.delta;
             yield { type: "text", delta: event.delta };
@@ -1901,7 +2065,12 @@ export class Agent {
         }
         // Persist only the summary (not the synthetic nudge), so history stays clean.
         if (finalText.trim() !== "") {
-          messages.push({ role: "assistant", content: finalText, ...finalThinking.fact() });
+          messages.push({
+            role: "assistant",
+            content: finalText,
+            ...finalThinking.fact(),
+            ...(finalReasoning ? { reasoning: finalReasoning } : {}),
+          });
         }
       } catch (error) {
         if (signal?.aborted) {
@@ -1937,6 +2106,7 @@ export class Agent {
     unseen: number,
     tools: NonNullable<ChatRequest["tools"]>,
     caps: SessionCapabilities,
+    turnFrom: number,
   ): void {
     const awareness = this.config.contextAwareness;
     if (!awareness) {
@@ -1956,10 +2126,10 @@ export class Agent {
     }
     const current: ContextUsage = {
       used: estimateUsed(
-        this.requestHistory(messages, caps),
+        this.requestHistory(messages, caps, turnFrom),
         tools,
         this.anchors.get(messages),
-        awareness.counter ?? DEFAULT_COUNTER,
+        awareness.counter ?? this.counter,
       ),
       window: awareness.window,
     };
@@ -2012,9 +2182,11 @@ export class Agent {
     timeoutMs: number = CONTEXT_COUNT_TIMEOUT_MS,
   ): Promise<{ readonly used: number; readonly exact: boolean }> {
     // What the next request would really send: the same projection as a round.
+    // Between turns, `turnFrom` is the history's length — what the next turn
+    // computes, since a turn's opener is a user message (no answer).
     const caps = this.capabilities();
     const tools = this.projectedTools(caps);
-    const sent = this.requestHistory(messages, caps);
+    const sent = this.requestHistory(messages, caps, messages.length);
     // Bounded and silent (`countTokensBounded`): a count that cannot, fails or
     // is slow falls through to the estimate.
     const exact = await countTokensBounded(
@@ -2033,7 +2205,7 @@ export class Agent {
     return {
       // `sent` keeps every stored message but the system one by identity, so
       // the anchor (keyed by the stored array) still matches past index 0.
-      used: estimateUsed(sent, tools, this.anchors.get(messages), DEFAULT_COUNTER),
+      used: estimateUsed(sent, tools, this.anchors.get(messages), this.counter),
       exact: false,
     };
   }
@@ -2777,7 +2949,9 @@ export class Agent {
    * Drain what a mid-turn boundary may deliver: the running children's notes
    * (`agent_message`) AND a SUB-AGENT's exit (`sa-N`), in queue order
    * (docs/fix/subagent-error-report.md root cause A — a child that ends while
-   * the parent works is invisible until the next turn otherwise). A shell job's
+   * the parent works is invisible until the next turn otherwise) AND a workflow
+   * run's end note (docs/feat/workflow-run-awareness.md S4: told in the turn that
+   * runs when it ends, the round its status line disappears). A shell job's
    * exit and the USER's note stay where they are: the turn's start only (owner
    * Q1). Synchronous (the late-drain invariant) and order preserving.
    */
@@ -2786,7 +2960,7 @@ export class Agent {
     let kept = 0;
     for (let i = 0; i < this.pendingExits.length; i++) {
       const job = this.pendingExits[i];
-      if (job !== undefined && (isAgentMessage(job) || isSubagentExit(job))) {
+      if (job !== undefined && (isAgentMessage(job) || isSubagentExit(job) || isWorkflowEnd(job))) {
         midTurn.push(job);
       } else if (job !== undefined) {
         this.pendingExits[kept++] = job;
@@ -2803,6 +2977,11 @@ export class Agent {
         const message = agentMessageNote(job);
         messages.push(message);
         events.push({ type: "context_note", text: message.content, reason: "background_exit" });
+        continue;
+      }
+      if (isWorkflowEnd(job)) {
+        messages.push(workflowEndNote(job));
+        events.push({ type: "context_note", text: job.text, reason: "background_exit" });
         continue;
       }
       if (!isSubagentExit(job)) {
@@ -2883,6 +3062,20 @@ export class Agent {
         messages.push(userToSubagentNote(job));
         continue;
       }
+      if (isWorkflowEnd(job)) {
+        messages.push(workflowEndNote(job));
+        events.push({ type: "context_note", text: job.text, reason: "background_exit" });
+        continue;
+      }
+      if (isWorkflowWait(job)) {
+        messages.push({
+          role: "user",
+          content: job.text,
+          note: { kind: NOTE_KIND.workflowWait, id: job.runId },
+        });
+        events.push({ type: "context_note", text: job.text, reason: "background_exit" });
+        continue;
+      }
       if ("agentId" in job) {
         // ONE renderer with the mid-turn drain (docs/fix/subagent-error-report.md).
         const rendered = this.subagentExitNote(job);
@@ -2937,7 +3130,7 @@ export class Agent {
     const safe = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 60);
     const scope = this.config.spillScope;
     const callId = this.spillId(extra.sessionId, scope, call);
-    const path = `.tentacle/tool-output/${scope !== undefined ? `${safe(scope)}-` : ""}${safe(call.name)}-${safe(callId)}.txt`;
+    const path = `${PROJECT_PATHS.toolOutput}/${scope !== undefined ? `${safe(scope)}-` : ""}${safe(call.name)}-${safe(callId)}.txt`;
     const sink = this.config.toolOutput;
     return applyResultTransforms(result, transforms, {
       toolName: call.name,

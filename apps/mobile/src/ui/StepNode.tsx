@@ -1,14 +1,19 @@
 /**
  * One node on the thread of steps (docs/feat/mobile-tool-rows.md Design 3,
- * mockup C): a 1 px `sep` thread in a 10 pt gutter, the node on the first line's
- * centre (a dot, a spinner, a hollow ring, or ∴), then ONE line — name, mono
- * subtitle, the duration — and, when open, the body under it. The line carries
- * NO ∴: owner 17/11 sent it away from a command's duration, so the ∴ on this
- * thread is a thought's node and the folded thought's in the open body. A dumb
- * renderer: every string and decision comes from `tool-steps.ts` /
- * `tool-summary.ts`; this file owns only the look, the 1 s clock and the spin.
+ * mockup C): a 1 px `sep` rail in a 10 pt gutter, the node on the first line's
+ * centre (a dot — blinking while it runs —, or a ring), then ONE line — name, mono
+ * subtitle, the duration — and, when open, the body under it. A dumb renderer:
+ * every string and decision comes from `tool-steps.ts` / `tool-summary.ts` /
+ * `step-blink.ts` / `step-rail.ts`; this file owns only the look, the 1 s clock
+ * and the spin.
+ *
+ * docs/fix/mobile-step-rail.md (owner 22/11): ONE node shape for every step, so
+ * the rail reads as one continuous line — a tool's dot, the live thought's dot
+ * (the same accent, the same blink clock) and a finished thought's dim ring;
+ * a step with a `$ command` line grows a small curved branch off the rail to it
+ * (decision 3), and the line shows a failure's `exit N` at its end (decision 2).
  */
-import { type JSX, type ReactNode, useEffect, useRef, useState } from "react";
+import { type JSX, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
 import Svg, {
   ClipPath,
@@ -20,31 +25,47 @@ import Svg, {
   Text as SvgText,
 } from "react-native-svg";
 import type { SlotView } from "../compact-slot.ts";
+import { STEP_ELAPSED_TICK_MS } from "../motion.ts";
+import {
+  STEP_BLINK_CURVE,
+  STEP_BLINK_LOOP_MS,
+  runningDotLook,
+  thoughtLook,
+} from "../step-blink.ts";
+import { BRANCH_REACH, BRANCH_TURN, GUTTER, NODE_Y, branchGeometry } from "../step-rail.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, size, space, typography } from "../theme.ts";
 import {
-  BREATHE_MS,
   DOT_ORDER,
   type DotPos,
   SHIMMER_MS,
-  breatheCurve,
+  shimmerCanvas,
+  shimmerFont,
+  shimmerLine,
   shimmerSweep,
   thinkingLabel,
   thinkingLook,
 } from "../thinking-motion.ts";
 import { type StepDot, type ThreadPos, thinkingA11yLabel } from "../tool-steps.ts";
 import { type ToolNameParts, liveElapsed } from "../tool-summary.ts";
+import { Icon } from "./Icon.tsx";
+import { OutputBlock } from "./OutputBlock.tsx";
 import { Text } from "./Text.tsx";
 import { animateNextLayout } from "./animate.ts";
+import { AppFontContext } from "./app-font.ts";
 
-/** The node's look: a tool's status, an orphan thought (∴), the live footer (breathing ∴). */
-/** `wake`: a fired scheduled wake's `◷` (docs/feat/scheduled-fire-row.md). */
-export type NodeKind = StepDot | "thought" | "thinking" | "wake";
+/** The node's look: a tool's status, an orphan thought (a dim ring), the live footer (an accent dot). */
+/**
+ * `wake`: a fired scheduled wake's `◷` (docs/feat/scheduled-fire-row.md).
+ * `reset` / `compact`: a context reset's `↺` and a compaction's `⤡`
+ * (docs/feat/mobile-reset-in-timeline.md — the wake glyph's box, in `sec`).
+ */
+export type NodeKind = StepDot | "thought" | "thinking" | "wake" | "reset" | "compact";
 
-const GUTTER = 10;
-/** The node sits on the first line's centre; the line is one touch target tall. */
-const NODE_Y = size.touch / 2;
-/** Every ∴ (a thought's node, a folded thought): owner asked a bit larger than 10. */
+/** Every ∴ (a folded thought in the open body): owner asked a bit larger than 10. */
 const THEREFORE_SIZE = 13;
+
+/** A context node's SF Symbol box: the `◷`'s own (13 pt glyph in the 14 pt node box). */
+const CONTEXT_NODE_SIZE = 14;
 
 /** Milliseconds since `from`, re-read once a second; null when there is no `from`. */
 function useElapsed(from: number | undefined): number | null {
@@ -54,40 +75,68 @@ function useElapsed(from: number | undefined): number | null {
       return;
     }
     setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNow(Date.now()), STEP_ELAPSED_TICK_MS);
     return () => clearInterval(id);
   }, [from]);
   return from === undefined ? null : Math.max(0, now - from);
 }
 
-/** A 10 pt ring that turns (native driver); still under Reduce Motion. */
-function Spinner({ color, page, still }: { color: string; page: string; still: boolean }) {
-  const turn = useRef(new Animated.Value(0)).current;
+/**
+ * The ONE blink clock every running step shares (like the TUI's one phase): a
+ * 0→1 loop on the native driver, started by the first blinking dot and stopped
+ * with the last, so every running dot is ON and OFF at the same moment.
+ */
+const blink: { value: Animated.Value; users: number; loop: Animated.CompositeAnimation | null } = {
+  value: new Animated.Value(0),
+  users: 0,
+  loop: null,
+};
+
+/** The shared blink clock while `on`; null (a steady dot) otherwise. */
+function useSharedBlink(on: boolean): Animated.Value | null {
   useEffect(() => {
-    if (still) {
+    if (!on) {
       return;
     }
-    const loop = Animated.loop(
-      Animated.timing(turn, {
-        toValue: 1,
-        duration: 900,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      }),
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [still, turn]);
-  if (still) {
-    return <View style={[styles.dot, { backgroundColor: color, borderColor: page }]} />;
-  }
-  const rotate = turn.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] });
+    blink.users += 1;
+    if (blink.users === 1) {
+      blink.value.setValue(0);
+      blink.loop = Animated.loop(
+        Animated.timing(blink.value, {
+          toValue: 1,
+          duration: STEP_BLINK_LOOP_MS,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        }),
+      );
+      blink.loop.start();
+    }
+    return () => {
+      blink.users -= 1;
+      if (blink.users === 0) {
+        blink.loop?.stop();
+        blink.loop = null;
+      }
+    };
+  }, [on]);
+  return on ? blink.value : null;
+}
+
+/**
+ * A running step's node (docs/fix/mobile-running-row.md): the done dot — same
+ * place, same size, the `page` ring stopping the thread — in accent, blinking ON
+ * and OFF on the TUI's rhythm (`step-blink.ts`); steady under Reduce Motion.
+ */
+function BlinkingDot({ palette, still }: { palette: Palette; still: boolean }) {
+  const look = runningDotLook(still);
+  const clock = useSharedBlink(look.blink);
   return (
     <Animated.View
+      testID="step-running-dot"
       style={[
-        styles.spinner,
-        { borderColor: color, borderTopColor: page, backgroundColor: page },
-        { transform: [{ rotate }] },
+        styles.dot,
+        { backgroundColor: palette[look.fill], borderColor: palette.page },
+        clock === null ? undefined : { opacity: clock.interpolate(STEP_BLINK_CURVE) },
       ]}
     />
   );
@@ -123,9 +172,10 @@ const DOT_AT: Readonly<Record<DotPos, { left: number; top: number }>> = {
 };
 
 /**
- * A static ∴ (a thought's node, a folded thought), DRAWN as the
- * live node's three dots: the font's glyph stays tiny even at 13 pt (simulator
- * sweep, docs/fix/mobile-qa-sweep.md), and drawn, every ∴ is the same size.
+ * A static ∴, drawn as three dots — the OPEN BODY's folded thought, which keeps
+ * its marker (owner 17/11: the reasoning in the body is what the ∴ belongs to).
+ * Drawn, not the font's glyph, which stays tiny even at 13 pt (simulator sweep,
+ * docs/fix/mobile-qa-sweep.md).
  */
 function ThereforeDots({
   color,
@@ -151,25 +201,34 @@ function ThereforeDots({
   );
 }
 
-/** The live node (mockup B): ∴ in accent, its dots breathing top → right → left. */
-function BreathingTherefore({ palette, still }: { palette: Palette; still: boolean }) {
-  const look = thinkingLook(still);
-  const clock = useLoop(BREATHE_MS, !look.animate);
-  return (
-    <View testID="thinking-therefore" style={[styles.dotBox, { backgroundColor: palette.page }]}>
-      {DOT_ORDER.map((pos, i) => (
-        <Animated.View
-          key={pos}
-          style={[
-            styles.breathDot,
-            DOT_AT[pos],
-            { backgroundColor: palette[look.glyph] },
-            clock === null ? undefined : { opacity: clock.interpolate(breatheCurve(i)) },
-          ]}
-        />
-      ))}
-    </View>
-  );
+/**
+ * The REASONING node (docs/fix/mobile-step-rail.md, owner decision 4): the tool
+ * dot's size and place, so the thread has ONE shape. Still thinking ⇒ a filled
+ * accent dot on the running step's OWN blink clock; done ⇒ an outline-only ring
+ * in the dim `thought` token (a steady ring either way).
+ *
+ * Exported for its own render test (`step-rail-render.test.ts`): it holds no
+ * state, so it can be called directly the way `StepBody` is.
+ */
+export function ThoughtDot({
+  palette,
+  live,
+  still,
+}: { palette: Palette; live: boolean; still: boolean }): JSX.Element {
+  const look = thoughtLook(live);
+  if (look.node === "thought-done") {
+    return (
+      <View
+        testID="step-thought-ring"
+        style={[
+          styles.dot,
+          styles.thoughtRing,
+          { borderColor: palette.thought, backgroundColor: palette.page },
+        ]}
+      />
+    );
+  }
+  return <BlinkingDot palette={palette} still={still} />;
 }
 
 /** An svg `Rect` the native driver can move (S0 of docs/feat/mobile-thinking-images.md). */
@@ -178,46 +237,58 @@ const AnimatedRect = Animated.createAnimatedComponent(Rect);
 const GLYPH_BASELINE = 0.35;
 
 /**
- * The word "Thinking" (Owner Q1 = "B", docs/feat/mobile-thinking-images.md): grey,
- * with a soft bright gradient sweeping across it that is CLIPPED to the glyphs —
- * an svg `ClipPath` made of the word itself, so no box can ever show. The grey
- * word and the clip are the same svg text, so the two cannot drift apart; the RN
- * `Text` under them is transparent and only lays out (width, testID, Dynamic
- * Type). The gradient's `x` is one native-driver clock (S0's verdict). Plain grey
- * RN text under Reduce Motion or before it is measured.
+ * The word "Thinking" (Owner Q1 = "B", docs/feat/mobile-thinking-images.md) — and
+ * a described shell step's running sentence: grey, with a soft bright gradient
+ * sweeping across it that is CLIPPED to the glyphs — an svg `ClipPath` made of
+ * the text itself, so no box can ever show. The grey text and the clip are the
+ * same svg text, so the two cannot drift apart; the RN `Text` under them is
+ * transparent and only lays out (width, testID, Dynamic Type, the ellipsis). The
+ * gradient's `x` is one native-driver clock (S0's verdict). Plain grey RN text
+ * under Reduce Motion or before it is measured.
+ *
+ * docs/fix/mobile-running-row.md — the svg cannot ellipsize and draws in its own
+ * canvas, so it is told (a) the text that FITS: `shimmerLine` of the same text's
+ * lines, laid out at the label's real width by a never-seen copy; (b) the
+ * label's face (`shimmerFont`, the beta's Figtree); (c) a canvas with room past
+ * the advance width for an italic tail (`shimmerCanvas`). `wide`: nothing sits
+ * beside it, so it may take the line (as the plain label does), not 45 %.
  */
 function ThinkingWord({
   palette,
   word,
   reduceMotion,
+  wide,
   testID,
 }: {
   palette: Palette;
   word: string;
   reduceMotion: boolean;
+  wide: boolean;
   testID?: string;
 }) {
   const look = thinkingLook(reduceMotion);
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(0);
+  const [line, setLine] = useState("");
   const clock = useLoop(SHIMMER_MS, !look.animate);
   const sweep = shimmerSweep(width);
+  const font = useContext(AppFontContext);
   const { fontScale } = useWindowDimensions();
-  const glyphs = clock !== null && sweep.band > 0 && height > 0;
   const fontSize = typography.step.fontSize * Math.min(fontScale, DENSE_FONT_SCALE);
+  const canvas = shimmerCanvas(width, height, fontSize);
+  const glyphs = clock !== null && sweep.band > 0 && height > 0 && line !== "";
   const glyph = {
     x: 0,
     y: height / 2 + fontSize * GLYPH_BASELINE,
     fontSize,
-    fontWeight: typography.step.fontWeight,
-    fontStyle: "italic" as const,
+    ...shimmerFont(font, typography.step.fontWeight),
   };
   const x =
     clock === null
       ? null
       : clock.interpolate({ inputRange: [0, 1], outputRange: [sweep.from, sweep.to] });
   return (
-    <View style={styles.name}>
+    <View style={wide ? styles.nameWide : styles.name}>
       <Text
         testID={testID}
         numberOfLines={1}
@@ -228,14 +299,26 @@ function ThinkingWord({
           { color: glyphs ? "transparent" : palette[look.word] },
         ]}
         onLayout={(e) => {
-          setWidth(Math.round(e.nativeEvent.layout.width));
-          setHeight(Math.round(e.nativeEvent.layout.height));
+          setWidth(e.nativeEvent.layout.width);
+          setHeight(e.nativeEvent.layout.height);
         }}
       >
         {word}
       </Text>
+      {clock === null || width === 0 ? null : (
+        <Text
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          pointerEvents="none"
+          maxFontSizeMultiplier={DENSE_FONT_SCALE}
+          style={[typography.step, styles.italic, styles.measure, { width }]}
+          onTextLayout={(e) => setLine(shimmerLine(e.nativeEvent.lines))}
+        >
+          {word}
+        </Text>
+      )}
       {!glyphs || x === null ? null : (
-        <Svg pointerEvents="none" width={width} height={height} style={styles.glyphs}>
+        <Svg pointerEvents="none" width={canvas.width} height={canvas.height} style={styles.glyphs}>
           <Defs>
             <LinearGradient id="thinking-shine" x1="0" y1="0" x2="1" y2="0">
               {sweep.stops.map((s) => (
@@ -248,18 +331,18 @@ function ThinkingWord({
               ))}
             </LinearGradient>
             <ClipPath id="thinking-glyphs">
-              <SvgText {...glyph}>{word}</SvgText>
+              <SvgText {...glyph}>{line}</SvgText>
             </ClipPath>
           </Defs>
           <SvgText {...glyph} fill={palette[look.word]}>
-            {word}
+            {line}
           </SvgText>
           <G clipPath="url(#thinking-glyphs)">
             <AnimatedRect
               x={x}
               y={0}
               width={sweep.band}
-              height={height}
+              height={canvas.height}
               fill="url(#thinking-shine)"
             />
           </G>
@@ -289,11 +372,11 @@ function Node({
         />
       );
     case "running":
-      return <Spinner color={palette.accent} page={palette.page} still={reduceMotion} />;
+      return <BlinkingDot palette={palette} still={reduceMotion} />;
     case "thought":
-      return <ThereforeDots color={palette.sec} background={palette.page} />;
+      return <ThoughtDot palette={palette} live={false} still={reduceMotion} />;
     case "thinking":
-      return <BreathingTherefore palette={palette} still={reduceMotion} />;
+      return <ThoughtDot palette={palette} live still={reduceMotion} />;
     case "wake":
       // The clock glyph, harness-grey on the page (it masks the rail like a dot).
       return (
@@ -303,6 +386,23 @@ function Node({
         >
           ◷
         </Text>
+      );
+    case "reset":
+    case "compact":
+      // A context step's glyph (docs/feat/mobile-reset-in-timeline.md): an SF
+      // Symbol in the `◷`'s box, `sec` on the page — the symbol and the name
+      // carry the fact, never the hue (the owner is colour-blind).
+      return (
+        <View style={[styles.contextNode, { backgroundColor: palette.page }]}>
+          <Icon
+            name={
+              kind === "reset" ? "arrow.counterclockwise" : "arrow.down.right.and.arrow.up.left"
+            }
+            color={palette.sec}
+            size={CONTEXT_NODE_SIZE}
+            weight="light"
+          />
+        </View>
       );
     default:
       // queued: a hollow ring.
@@ -321,6 +421,16 @@ export interface StepNodeProps {
   readonly subtitle: string;
   /** Sans italic (a thought's first line) instead of mono (a command). */
   readonly subtitleItalic?: boolean;
+  /** A second mono line under the name line (a described shell step's `$ cmd`). */
+  readonly subline?: string | null;
+  /**
+   * At the END of that second line: a failed shell call's `exit N`, never cut
+   * (docs/fix/mobile-step-rail.md owner decision 2 — written in TEXT, the owner
+   * is colour-blind; the red is only a second cue).
+   */
+  readonly exitSuffix?: string | null;
+  /** The name shimmers like the thinking word (a described shell step, running). */
+  readonly shimmer?: boolean;
   readonly trailing: string;
   readonly trailingRed: boolean;
   /** A running step's start (`row.at`): the trailing text is its live clock. */
@@ -346,6 +456,9 @@ export function StepNode({
   nameItalic,
   subtitle,
   subtitleItalic,
+  subline,
+  exitSuffix,
+  shimmer,
   trailing,
   trailingRed,
   liveFrom,
@@ -360,6 +473,8 @@ export function StepNode({
   const elapsed = useElapsed(liveFrom);
   const shown = elapsed === null ? trailing : liveElapsed(elapsed);
   const tappable = onToggle !== undefined;
+  const { fontScale } = useWindowDimensions();
+  const branch = branchGeometry(fontScale);
   return (
     <View style={styles.node}>
       <View
@@ -370,6 +485,20 @@ export function StepNode({
       >
         {thread.up ? <View style={[styles.up, { backgroundColor: palette.sep }]} /> : null}
         {thread.down ? <View style={[styles.down, { backgroundColor: palette.sep }]} /> : null}
+        {subline == null ? null : (
+          // The rail grows a branch to the `$` line (owner decision 3): the line
+          // stays continuous, and the sub-line is visibly THIS step's. Its height
+          // and turn follow the type (`branchGeometry`), so Dynamic Type cannot
+          // shrink it back to a tick.
+          <View
+            testID="step-subline-branch"
+            style={[
+              styles.branch,
+              { top: branch.top, height: branch.height, borderColor: palette.sep },
+              { borderBottomLeftRadius: BRANCH_TURN },
+            ]}
+          />
+        )}
         <View style={styles.nodeBox}>
           <Node kind={node} palette={palette} reduceMotion={reduceMotion} />
         </View>
@@ -380,63 +509,99 @@ export function StepNode({
           accessibilityLabel={a11yLabel}
           {...(tappable
             ? {
-                accessibilityHint: "Shows the thought, command and result",
+                accessibilityHint: "Shows the details",
                 accessibilityState: { expanded: open },
               }
             : {})}
           disabled={!tappable}
           onPress={onToggle}
-          style={({ pressed }) => [styles.line, pressed ? styles.pressed : undefined]}
+          style={({ pressed }) => [
+            styles.line,
+            subline != null ? styles.stacked : undefined,
+            pressed ? styles.pressed : undefined,
+          ]}
         >
-          {node === "thinking" ? (
-            <ThinkingWord
-              palette={palette}
-              word={name.tool}
-              reduceMotion={reduceMotion}
-              {...(labelTestID === undefined ? {} : { testID: labelTestID })}
-            />
-          ) : (
+          <View style={subline != null ? styles.lineRow : styles.rowFill}>
+            {node === "thinking" || shimmer === true ? (
+              <ThinkingWord
+                palette={palette}
+                word={name.tool}
+                reduceMotion={reduceMotion}
+                wide={subtitle === ""}
+                {...(labelTestID === undefined ? {} : { testID: labelTestID })}
+              />
+            ) : (
+              <Text
+                testID={labelTestID}
+                numberOfLines={1}
+                maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                style={[
+                  typography.step,
+                  styles.name,
+                  subtitle === "" ? styles.nameWide : undefined,
+                  // `sec`, not `label` (docs/fix/mobile-transcript-type.md owner
+                  // decision 3): a step row steps back behind the prose by size and
+                  // lightness, never by hue alone (the owner is colour-blind).
+                  { color: palette.sec },
+                  nameItalic === true ? styles.italic : undefined,
+                ]}
+              >
+                {name.server === undefined ? null : (
+                  <Text style={[styles.server, { color: palette.sec }]}>{`${name.server} · `}</Text>
+                )}
+                {name.tool}
+              </Text>
+            )}
             <Text
-              testID={labelTestID}
               numberOfLines={1}
               maxFontSizeMultiplier={DENSE_FONT_SCALE}
               style={[
-                typography.step,
-                styles.name,
-                { color: palette.label },
-                nameItalic === true ? styles.italic : undefined,
+                subtitleItalic === true
+                  ? [typography.step, styles.thoughtLine]
+                  : typography.stepMono,
+                styles.subtitle,
+                { color: palette.sec },
               ]}
             >
-              {name.server === undefined ? null : (
-                <Text style={[styles.server, { color: palette.sec }]}>{`${name.server} · `}</Text>
+              {subtitle}
+            </Text>
+            {shown === "" ? null : (
+              <Text
+                numberOfLines={1}
+                maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                style={[
+                  // One size down from the name (13 vs 14), `sec` below: the duration
+                  // is the quietest thing on the line (owner decision 3).
+                  typography.stepMeta,
+                  { color: trailingRed ? palette.red : palette.sec },
+                  // The live clock's figures hold one width as they count (S2).
+                  node === "thinking" ? styles.tabular : undefined,
+                ]}
+              >
+                {shown}
+              </Text>
+            )}
+          </View>
+          {subline == null ? null : (
+            <View style={styles.sublineRow}>
+              <Text
+                numberOfLines={1}
+                ellipsizeMode="tail"
+                maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                style={[typography.stepMono, styles.sublineText, { color: palette.sec }]}
+              >
+                {subline}
+              </Text>
+              {exitSuffix == null ? null : (
+                <Text
+                  numberOfLines={1}
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.stepMono, styles.exitSuffix, { color: palette.red }]}
+                >
+                  {exitSuffix}
+                </Text>
               )}
-              {name.tool}
-            </Text>
-          )}
-          <Text
-            numberOfLines={1}
-            maxFontSizeMultiplier={DENSE_FONT_SCALE}
-            style={[
-              subtitleItalic === true ? [typography.step, styles.thoughtLine] : typography.stepMono,
-              styles.subtitle,
-              { color: palette.sec },
-            ]}
-          >
-            {subtitle}
-          </Text>
-          {shown === "" ? null : (
-            <Text
-              numberOfLines={1}
-              maxFontSizeMultiplier={DENSE_FONT_SCALE}
-              style={[
-                typography.caption,
-                { color: trailingRed ? palette.red : palette.sec },
-                // The live clock's figures hold one width as they count (S2).
-                node === "thinking" ? styles.tabular : undefined,
-              ]}
-            >
-              {shown}
-            </Text>
+            </View>
           )}
         </Pressable>
         {below}
@@ -455,17 +620,21 @@ export interface StepBodyProps {
   readonly output: {
     readonly text: string;
     readonly hidden: number;
-    readonly error: boolean;
   } | null;
   readonly outputTestID?: string;
   readonly onShowAll?: () => void;
   /** The diff (`DiffView`), moved here from always-visible (Owner Q7). */
   readonly diff?: ReactNode;
+  /**
+   * A file tool's coloured content (docs/feat/mobile-file-view.md): it takes
+   * the body's place instead of `command`/`output`/`diff`.
+   */
+  readonly file?: ReactNode;
   readonly reply?: string;
   readonly replyTestID?: string;
 }
 
-/** The open body: the thought, the full command, the result (`⎿`), the diff, the reply. */
+/** The open body: the thought, the command (or its result), the file, the diff, the reply. */
 export function StepBody({
   palette,
   thought,
@@ -473,6 +642,7 @@ export function StepBody({
   output,
   outputTestID,
   onShowAll,
+  file,
   diff,
   reply,
   replyTestID,
@@ -485,25 +655,18 @@ export function StepBody({
           <Text style={[styles.thoughtText, { color: palette.sec }]}>{thought}</Text>
         </View>
       )}
+      {file}
       {command.length === 0 ? null : (
         <Text style={[styles.code, { color: palette.label }]}>{command.join("\n")}</Text>
       )}
       {output === null ? null : (
-        <Pressable
-          testID={outputTestID}
-          accessibilityRole="button"
-          disabled={output.hidden === 0}
-          onPress={onShowAll}
-        >
-          <Text style={[styles.code, { color: output.error ? palette.red : palette.sec }]}>
-            {output.text}
-          </Text>
-          {output.hidden === 0 ? null : (
-            <Text style={[typography.footnote, { color: palette.accent }]}>
-              {`… +${output.hidden} more lines`}
-            </Text>
-          )}
-        </Pressable>
+        <OutputBlock
+          text={output.text}
+          hidden={output.hidden}
+          palette={palette}
+          {...(outputTestID === undefined ? {} : { testID: outputTestID })}
+          {...(onShowAll === undefined ? {} : { onShowAll })}
+        />
       )}
       {diff}
       {reply === undefined ? null : (
@@ -516,7 +679,8 @@ export function StepBody({
 }
 
 /**
- * The live "Thinking…" node, the list's footer (Owner Q2): a breathing ∴ and a
+ * The live "Thinking…" node, the list's footer (Owner Q2): the accent dot a
+ * running step draws (blinking, docs/fix/mobile-step-rail.md decision 4) and a
  * shimmering word (mockup B + D, `thinking-motion.ts`; static under Reduce Motion), the
  * seconds since it appeared (its mount is the tail's identity: a tool or text in
  * between unmounts it), and a tap that opens the live thought.
@@ -566,9 +730,9 @@ export function ThinkingNode({
 
 /**
  * The compaction slot in the Thinking node's place (docs/feat/mobile-hub-commands.md
- * C2 item 15): `Compacting…` with the same breathing ∴ (static under Reduce
- * Motion) and its live seconds, or a static `Compacted ✓`. `compact-slot.ts`
- * decides which; this only draws it.
+ * C2 item 15): `Compacting…` with the same live thought node (an accent dot,
+ * static under Reduce Motion) and its live seconds, or a static `Compacted ✓`.
+ * `compact-slot.ts` decides which; this only draws it.
  */
 export function CompactSlotNode({
   palette,
@@ -616,17 +780,53 @@ const styles = StyleSheet.create({
   },
   // A 7 pt dot ringed 3 pt in `page`, so the thread stops short of it.
   dot: { width: 13, height: 13, borderRadius: 6.5, borderWidth: 3 },
+  // A finished thought: the dot's own box, outline only (owner decision 4).
+  thoughtRing: { borderWidth: 2 },
   ring: { width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.2 },
-  spinner: { width: 10, height: 10, borderRadius: 5, borderWidth: 1.5 },
   wake: { fontSize: 13, lineHeight: 15, textAlign: "center" },
-  // The live ∴ (B): the glyph's size (`THEREFORE_SIZE`), drawn as three thin dots.
+  // A context node's glyph: the wake's box, on the page so it masks the rail.
+  contextNode: {
+    width: CONTEXT_NODE_SIZE,
+    height: CONTEXT_NODE_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  // The folded thought's ∴ in the open body: the glyph's size, three thin dots.
   dotBox: { width: THEREFORE_SIZE, height: THEREFORE_SIZE },
   breathDot: { position: "absolute", width: 3, height: 3, borderRadius: 1.5 },
   glyphs: { position: "absolute", top: 0, left: 0 },
+  // The shimmer's measuring copy: laid out at the label's width, never seen.
+  measure: { position: "absolute", top: 0, left: 0, opacity: 0 },
   column: { flex: 1, marginLeft: GUTTER },
   line: { minHeight: size.touch, flexDirection: "row", alignItems: "center", gap: 6 },
+  // The name line inside `line`: fills it exactly as its children did directly.
+  rowFill: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6 },
+  // A described shell step: the name line, then the `$` line under it.
+  stacked: { flexDirection: "column", alignItems: "stretch", justifyContent: "center", gap: 0 },
+  lineRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   pressed: { opacity: 0.6 },
+  // The `$` line with the failure's code pinned at its end: the command shrinks
+  // (and ellipsises) so `exit N` is never cut (owner decision 2).
+  sublineRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  sublineText: { flexShrink: 1 },
+  exitSuffix: { flexShrink: 0 },
+  /**
+   * The branch off the rail to a step's `$` line (decision 3): it leaves the rail
+   * below the node and curves onto the sub-line — the `⎿` idea, hung on the rail
+   * instead of stamped in front of the text. Left + bottom border only, one
+   * radius rounding the turn; `top`/`height`/radius come from `branchGeometry`,
+   * which follows the type's Dynamic Type scale.
+   */
+  branch: {
+    position: "absolute",
+    left: GUTTER / 2 - 0.5,
+    width: BRANCH_REACH,
+    borderLeftWidth: 1,
+    borderBottomWidth: 1,
+  },
   name: { flexShrink: 0, maxWidth: "45%" },
+  // No subtitle beside it (a sentence): the name may take the whole line.
+  nameWide: { flexShrink: 1, maxWidth: "100%" },
   server: { fontWeight: "400" },
   italic: { fontStyle: "italic" },
   tabular: { fontVariant: ["tabular-nums"] },

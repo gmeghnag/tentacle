@@ -16,6 +16,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { type FrameInput, frameLayout } from "../src/app-layout.ts";
+import { NO_APPROVAL_SCROLL } from "../src/approval-scroll.ts";
 import type { DockState } from "../src/background-focus.ts";
 import { skillsPanel } from "../src/panel.ts";
 import type { PermissionController } from "../src/permission-ui.ts";
@@ -64,6 +65,9 @@ const noPermission = (over: Partial<PermissionController> = {}): PermissionContr
     mode: { mode: "menu" },
     setMode: () => {},
     readMode: () => ({ mode: "menu" }),
+    // A ref read the layout makes for a `workflow_approve`'s window (the list is
+    // scrolled, never cut); at rest it is the top of the list.
+    approvalScroll: () => NO_APPROVAL_SCROLL,
     ...over,
   }) as unknown as PermissionController;
 
@@ -280,9 +284,10 @@ describe("S10 app-layout: the frame's geometry, as the inline code computed it",
 
   test("the status bar's row is the sum of the parts the tree paints above it", () => {
     const at = frameLayout(base());
-    // viewport + spacer + running rows + dock height + input box + the bar's own.
+    // viewport + spacer + workflow rail + running rows + dock height + input box
+    // + the bar's own.
     expect(at.statusRowY).toBe(
-      at.viewport + 1 + at.runningRows + at.dockHeight + at.inputBoxRows + 1,
+      at.viewport + 1 + at.workflowHeight + at.runningRows + at.dockHeight + at.inputBoxRows + 1,
     );
     // …and it is INVARIANT under the attach row, which is the whole point of
     // counting that row INSIDE the input box (P8): the viewport shrinks by one

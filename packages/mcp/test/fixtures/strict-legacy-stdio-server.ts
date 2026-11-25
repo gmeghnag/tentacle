@@ -11,7 +11,10 @@ const send = (message: unknown): void => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 };
 let buffer = "";
-for await (const chunk of Bun.stdin.stream()) {
+// The DOM lib's `ReadableStream` type has no `[Symbol.asyncIterator]` (Bun provides
+// one at runtime): cast so this fixture type-checks under either lib set.
+const stdin = Bun.stdin.stream() as unknown as AsyncIterable<Uint8Array>;
+for await (const chunk of stdin) {
   buffer += new TextDecoder().decode(chunk);
   const lines = buffer.split("\n");
   buffer = lines.pop() ?? "";

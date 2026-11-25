@@ -1,7 +1,7 @@
 /**
  * The device path, independent of how the frames reach it
  * (docs/feat/mobile-relay.md R3): run the Noise responder on a
- * `DuplexChannel`, and only once it RESOLVES build the (unchanged)
+ * `ByteCarrier` (E2E v2: binary frames), and only once it RESOLVES build the (unchanged)
  * `Connection` on the resolved channel.
  *
  * It used to live inside `ws-server`'s `openDevice`, coupled to a Bun socket
@@ -11,7 +11,7 @@
  * (`onSettled`, `onConnection`, the returned `release`) and the direct `/e2e`
  * route behaves exactly as before — its own tests are the proof (AGENTS §9).
  * That is what makes the mobile relay "one more transport": its accept leg is
- * a `DuplexChannel` too, and no second authentication or session path exists
+ * a `ByteCarrier` too, and no second authentication or session path exists
  * (§7 one session path).
  *
  * Everything the device route promises stays here: a replayed message 1 builds
@@ -20,8 +20,14 @@
  * pairing window does (F16), and a socket that closed between the confirm and
  * the build leaves no orphan `Connection` (F22).
  */
-import type { DuplexChannel } from "@tentacle/transport";
-import { type AuthorizeVerdict, noiseResponder, systemRandom } from "@tentacle/transport/noise";
+import type { ByteCarrier } from "@tentacle/transport";
+import {
+  type AuthorizeVerdict,
+  E2E_CHANNEL_VERSION,
+  type NoiseError,
+  noiseResponder,
+  systemRandom,
+} from "@tentacle/transport/noise";
 import { Connection, type ConnectionPrincipal, type HooksTrustPrecheck } from "./connection.ts";
 import type { DeviceAllow, DeviceAuthority, DeviceClose } from "./device-authority.ts";
 import { adoptLegacy, hasLivePairing, touchSeen } from "./device-store.ts";
@@ -72,6 +78,21 @@ export interface AcceptDeviceDeps {
   readonly onConnection?: (connection: Connection) => void;
 }
 
+/**
+ * The audit line for a handshake violation. A version skew names both versions
+ * and the side to update, so the operator reads "update the app" rather than a
+ * bare violation (docs/feat/noise-binary-carrier.md §3). The remote version is
+ * unauthenticated (an on-path party can forge it): a hint, never a decision.
+ */
+export function violationAudit(error: NoiseError): string {
+  if (error.kind === "version-mismatch" && error.remoteVersion !== undefined) {
+    const remote = error.remoteVersion;
+    const hint = remote < E2E_CHANNEL_VERSION ? "update the app" : "update tentacle";
+    return `e2e-version-mismatch remote=${remote} local=${E2E_CHANNEL_VERSION} (${hint})`;
+  }
+  return `e2e-violation ${error.kind}`;
+}
+
 /** The handle returned by `acceptDevice`. */
 export interface DeviceAccept {
   /**
@@ -89,7 +110,7 @@ export interface DeviceAccept {
  * Accept one device connection on `channel`: the Noise handshake IS the
  * authentication (no token, no Origin check — a phone sends an Origin).
  */
-export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): DeviceAccept {
+export function acceptDevice(channel: ByteCarrier, deps: AcceptDeviceDeps): DeviceAccept {
   const { authority } = deps;
   const identity = authority.staticKey();
   // The whole identity, not just its private key: the pairing result names the
@@ -153,7 +174,7 @@ export function acceptDevice(channel: DuplexChannel, deps: AcceptDeviceDeps): De
       if (verdict !== false) admitted = verdict;
       return verdict as AuthorizeVerdict;
     },
-    onViolation: (error) => deps.onAudit?.(`e2e-violation ${error.kind}`),
+    onViolation: (error) => deps.onAudit?.(violationAudit(error)),
   }).then(
     (secure) => {
       settle();
