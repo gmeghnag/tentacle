@@ -70,6 +70,7 @@ import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
 import { type McpHub, capStderr, createMcpHub } from "./mcp-hub.ts";
 import type { ProviderFactory } from "./model-provider.ts";
 import { readRelaySecret } from "./relay-secret.ts";
+import { type ServeA2AOptions, buildA2A } from "./serve-a2a.ts";
 import { serveHooksTrustPrecheck } from "./serve-hooks-trust.ts";
 import { type RelayOptions, relayChoice } from "./serve-relay.ts";
 import { APP_VERSION } from "./version.ts";
@@ -167,6 +168,11 @@ export interface ServeOptions extends ServeLimits {
    * `DEFAULT_RELAY_URL`).
    */
   readonly relay?: RelayOptions;
+  /**
+   * The A2A route (docs/feat/a2a.md S10): `POST /a2a` + the public agent card,
+   * on its OWN bearer token (never the WebSocket token). Absent = off.
+   */
+  readonly a2a?: ServeA2AOptions;
 }
 
 /** A running `serve`: `stop` waits for every session write, then releases the store. */
@@ -952,6 +958,15 @@ async function reloadedHost(
   return sessionHost;
 }
 
+/** The card's base URL; undefined (port 0, a wildcard bind) = taken from the first request. */
+function a2aBaseUrl(options: ServeOptions): string | undefined {
+  if (options.port === 0 || options.host === "0.0.0.0" || options.host === "::") {
+    return undefined;
+  }
+  const host = options.host.includes(":") ? `[${options.host}]` : options.host;
+  return `${options.tls ? "https" : "http"}://${host}:${options.port}`;
+}
+
 /** Serve `sessionHost` over the WebSocket, with its reaper; `release` runs after both stop. */
 function listen(
   sessionHost: SessionHost,
@@ -1012,6 +1027,18 @@ function listen(
       ? { devices: { authority: devices, ...(serveId !== undefined ? { serveId } : {}) } }
       : {}),
     ...(hooksTrustPrecheck ? { hooksTrustPrecheck } : {}),
+    ...(options.a2a
+      ? {
+          a2a: buildA2A({
+            host: sessionHost,
+            options: options.a2a,
+            baseUrl: a2aBaseUrl(options),
+            ...(hooksTrustPrecheck ? { hooksTrustPrecheck } : {}),
+            ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+            ...(options.onError ? { onError: options.onError } : {}),
+          }),
+        }
+      : {}),
   });
   // The host exists now, and it must exist before the relay link does (the link
   // dials only while the authority wants reachability, and the notifier reads

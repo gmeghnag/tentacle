@@ -1628,6 +1628,30 @@ route claims every path → red (WS upgrade); `ws-server` hook dropped → 11 re
 
 **Gate (narrow):** a2a-http 16 pass; ws-server + ws-device-route 33 pass / 1 skip / 0 fail; `tsc -p packages/daemon` clean; biome clean on the 4 files.
 
+### S10-cli-e2e — DONE (workflow-task e2e not added: S8's tests pin it; TODO.md untouched by order)
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+**Load-bearing check (re-run):** `startDaemon` → `listen` → `startWsServer` is the single place the route can be mounted, and the `SessionHost` it builds is the one the executor/store need (`archivedSessions`/`readArchivedUnits`/`values()`). Holds: the e2e drives a real daemon.
+
+**As built:**
+- `cli/src/flags.ts`: `serve` accepts `--a2a-token`, `--a2a-token-command`, `--a2a-asks` (values) and `--a2a-workflows` (bool); `resolveA2AToken` (no env, never `--token`; empty or both given → error).
+- `cli/src/serve-a2a.ts` (new): `buildA2A` (executor + `A2ATaskStore` + `A2ARequestHandler` + `createA2ARoute`), `parseA2AAsks` (fail closed), `describeA2A`. Caller name `default`. One policy for the one caller.
+- `cli/src/serve.ts`: `ServeOptions.a2a?`; `listen` passes `a2a` to `startWsServer`; card base URL from the bind, or — port 0 / wildcard bind — from the first request's origin (`a2aBaseUrl`).
+- `cli/src/main.ts`: flags → `ServeA2AOptions`; `--a2a-asks/--a2a-workflows` without a token is a usage error (not silently ignored); startup line `A2A on http://…/a2a (asks: owner, workflows: off)`; help text.
+- `daemon/src/index.ts`: exports `a2a/executor|http|task-projection`, `buildAgentCard`, `A2A_PROTOCOL`, `AskMode`, `external/route`.
+- `README.md` (A2A paragraph), `changelog.d/a2a.added.md` rewritten. No protocol change.
+
+**Drift:** (1) the e2e speaks raw JSON-RPC over `fetch`, not the SDK client: the CLI package has no `@a2a-js/sdk` dependency and adding one would touch `bun.lock`; the wire is the contract. (2) The workflow-task e2e case was left to S8's tests (needs a workflow file + driver rig). (3) Archive test waits for the archive writer's `.lock` to go (the audit line precedes the write).
+
+**Tests** `packages/cli/test/serve-a2a-e2e.test.ts` (10): flags accepted, token resolution, asks parsing, A2A off, public card with the daemon's URL + 401/audit, SendMessage→COMPLETED + GetTask + ListTasks + WS still works, SSE stream, caller abort leaves the unit running then CancelTask → CANCELED, restart on the same store, archived GetTask with store files byte-identical. Red: before the slice there is no `a2a` option/flags/exports (module-level failure).
+
+**Mutations** (restored, 10/10 after): wiring `a2a` off in `listen` → 6 red; card base URL fixed to `http://x` → 1 red; `resolveA2AToken` falls back to `--token` → 1 red. Not mutated here: the archive no-reopen (S7's own mutation) and the ask table (S5's).
+
+**Unverified:** a real >10 s blocking call against Bun's idle timeout (pinned by S9's `timeout(req,0)` unit); `--a2a-token-command` through `main` (unit-tested via `resolveA2AToken` only).
+
+**Gate (narrow):** serve-a2a-e2e 10 pass; cli `serve-limits` + `main.test.ts` 120 pass; biome clean on `packages/cli` + daemon index; `tsc -p packages/cli` shows no error in the touched files (pre-existing errors elsewhere: `main.ts:2355` `RoutingAutoAccept.current`, tui/connect any-typing — not from this slice).
+
 ## Review
 
 ### Owner decision 2026-11-25 ~13:20 (from the feat/serve-mcp-server plan, Q1) — binding for the remaining slices
