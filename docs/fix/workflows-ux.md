@@ -1453,3 +1453,44 @@ the changed files clean. Full `bun run check` left to the orchestrator's gate. *
 NOT run** (no simulator here): verify with the mobile e2e gate on iOS 18 + 26.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Gate fix: flow 45's seeder lacked the trust bit (after exec)
+
+**What the orchestrator's gate red was.** One item only: `scripts/e2e-gate.sh` flow
+`45-workflow-run-view`, `✗ … setup failed: workflow run-view-pass did not start: this client does not
+trust its daemon to run workflows`. Everything else in that log was green (`biome check .` 2433 files
+clean; `bun test` 18440 pass / 5 opt-in skip / 0 fail; `tsc` clean; Swift `PushCoreTests` 15 pass; flow
+44 pass). The `RpcError: connection closed` at `seed.ts:127` in the same log is pre-existing teardown
+noise, not a failure — the identical trace sits in `.tentacle/tmp/mobile-ask-surfaces-sgate.log` around
+flows that PASS.
+
+**Root cause (one sentence).** `workflowRunsOf` built its `RemoteClient` without `daemonWakes: true`,
+and that bit is what `RemoteSession.workflow()` gates `start` on (`WORKFLOW_UNTRUSTED_DAEMON`, nothing
+sent) and what `RemoteClient` drops every `workflows` update on — so the run could neither start nor
+its `endedAt` ever be seen.
+
+**Fix, in two parts** (`apps/mobile/e2e/seed.ts`, `apps/mobile/e2e/flows/45-workflow-run-view.yaml`):
+1. `workflowRunsOf`'s client carries `daemonWakes: true`, next to the `channelFactory` it dials, with
+   the reason written down where the next seeder will read it. This is the same bit the phone's own
+   single client carries (`connection.ts` `APP_CLIENT_OPTIONS`); the harness dials the same `serve` on
+   this host, and a pod is unreachable from here. NO other harness client gets it (§7: it fails closed).
+2. The flow's run-row tap became `text: "run-view-pass,.*"`. Selecting the row by its bare name could
+   never match: `RunRow` (`WorkflowRuns.tsx:57`) labels a row `name, status, position`
+   (`run-view-pass, done, 3 of 4`) and Maestro's `text` is a FULL match. This only surfaced once the
+   setup stopped failing earlier.
+
+**Evidence.** Setup now passes and the flow runs its whole body: `✓ 45-workflow-run-view (iOS 26) pass`,
+81 s, `GATE PASS — 1 passed, 0 failed` (run `1795610060318`). The step before it, on the trust fix
+alone, failed at `step-041-tapOnElement-run-view-pass` with a screen hierarchy showing the list correctly
+drawn (`workflow-run-wf-1 | run-view-pass, done, 3 of 4`, `workflow-run-wf-2 | run-view-loop, done,
+4 of 4`) — which is what proved the label mismatch rather than a missing run.
+
+**Tests (red first, then green).** `apps/mobile/test/e2e-flows.test.ts`, new describe "flow 45's seeder
+speaks the trust bit workflows hang on": the seeder's own options object carries `channelFactory` AND
+`daemonWakes: true`; no other harness client (`attach`, `laptopLink`) mentions the bit; and the flow
+taps `run-view-pass,.*`, never the bare name. Red shown by deleting `daemonWakes: true` from the seeder
+(`1 fail`, `Received: "new RemoteClient(await factory(), broker, undefined, {\n channelFactory:
+factory,\n });\n "`), green after restoring it (69 pass, 905 expect). `biome check` on the changed files
+clean; `tsc -p apps/mobile --noEmit` clean; the six `apps/mobile/test/e2e*` guard files 215 pass.
+
+*— claude-sonnet-4-5 (exec), 2026-11-25*

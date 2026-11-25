@@ -37,8 +37,11 @@ appId: so.tentacle.app
     visible:
       id: "workflow-runs"
     timeout: 10000
+# A row's accessibility label is `name, status, position` (WorkflowRuns.tsx
+# `RunRow`), and Maestro's `text` is a FULL match: a bare "run-view-pass" matches
+# nothing and the flow dies on this tap (the first green setup's failure).
 - tapOn:
-    text: "run-view-pass"
+    text: "run-view-pass,.*"
 # ① as a graph: every step is a pill, fix included.
 - extendedWaitUntil:
     visible:

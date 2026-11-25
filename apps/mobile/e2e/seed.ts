@@ -160,6 +160,16 @@ export async function composeSessionOf(deps: {
  * hash approval and its `run:` commands are this seeder's own work on a session
  * nobody else is attached to, and it DETACHES once both runs ended — so no ask of
  * a flow's ever reaches it (the `holdingBroker` rule above is about that).
+ *
+ * `daemonWakes: true` is REQUIRED here, not a convenience (the gate's red on
+ * `45-workflow-run-view`): it is the TRUST bit `RemoteSession.workflow()` gates
+ * `start` on (`remote-session.ts`: `WORKFLOW_UNTRUSTED_DAEMON`, sent nothing) and
+ * the one `RemoteClient` drops every `workflows` update on — so without it the
+ * run cannot be started (`workflow run-view-pass did not start: this client does
+ * not trust its daemon to run workflows`) and its `endedAt` could never be seen.
+ * The harness dials the run's own `serve` on this host, exactly like the phone,
+ * whose single client carries the same bit (`connection.ts`
+ * `APP_CLIENT_OPTIONS`); a pod's daemon is never reachable from here.
  */
 export async function workflowRunsOf(deps: {
   readonly url: string;
@@ -168,7 +178,10 @@ export async function workflowRunsOf(deps: {
   const broker = new PermissionBroker(undefined, { holdUntilSet: true });
   broker.setRequester(async () => ({ allowed: true, scope: "once" }));
   const factory = webSocketChannelFactory(deps.url, { token: deps.token });
-  const live = new RemoteClient(await factory(), broker, undefined, { channelFactory: factory });
+  const live = new RemoteClient(await factory(), broker, undefined, {
+    channelFactory: factory,
+    daemonWakes: true,
+  });
   await live.initialize();
   const id = crypto.randomUUID();
   try {

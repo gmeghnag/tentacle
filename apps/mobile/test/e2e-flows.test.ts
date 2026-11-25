@@ -1078,6 +1078,64 @@ describe("flow 44 proves a step sheet can be CLOSED (validation round 3, P1)", (
   });
 });
 
+describe("flow 45's seeder speaks the trust bit workflows hang on (the gate's red)", () => {
+  // `45-workflow-run-view` failed its SETUP, not its assertions:
+  // "workflow run-view-pass did not start: this client does not trust its daemon
+  // to run workflows". `RemoteSession.workflow()` refuses `start` locally when
+  // `daemonWakes` is off — and `RemoteClient` drops every `workflows` update on
+  // the same bit, so the end-wait could never have fired either. The phone's own
+  // client carries it (`connection.ts` `APP_CLIENT_OPTIONS`); the seeder dials
+  // the same `serve` on this host and must too.
+  const seed = readFileSync(join(import.meta.dir, "..", "e2e", "seed.ts"), "utf8");
+
+  /** One function's body, from its name to the next top-level function. */
+  function fnBody(name: string): string {
+    const start = seed.indexOf(`async function ${name}(`);
+    if (start === -1) {
+      return "";
+    }
+    const end = seed.indexOf("async function ", start + 1);
+    return seed.slice(start, end === -1 ? undefined : end);
+  }
+
+  /** The one options object this client is built with (its `new RemoteClient(…, {…})`). */
+  function optionsOf(name: string): string {
+    const body = fnBody(name);
+    const start = body.indexOf("new RemoteClient(");
+    if (start === -1) {
+      return "";
+    }
+    return body.slice(start, body.indexOf("await live.initialize()"));
+  }
+
+  test("the seeder's own client is built with daemonWakes: true", () => {
+    // Mutation: drop the bit → red, and the flow's setup fails with
+    // WORKFLOW_UNTRUSTED_DAEMON (exactly the gate's message).
+    const options = optionsOf("workflowRunsOf");
+    expect(options).toContain("channelFactory: factory");
+    expect(options).toContain("daemonWakes: true");
+  });
+
+  test("no OTHER harness client claims the trust bit (it fails closed, §7)", () => {
+    // The bit says "this daemon is a trusted `serve` that starts its own turns".
+    // Only the seeder, which runs a workflow on this host, may say it; a
+    // copy-paste into the plain attach/laptop links would widen what a pod's
+    // frames can make the harness act on.
+    for (const name of ["attach", "laptopLink"]) {
+      expect(fnBody(name)).not.toContain("daemonWakes");
+    }
+  });
+
+  test("the flow taps the run row by its LABEL, not its bare name", () => {
+    // The second half of the same red: run rows carry `name, status, position`
+    // (`WorkflowRuns.tsx` `RunRow`), and Maestro's `text` is a FULL match, so
+    // `text: "run-view-pass"` matches nothing and the flow dies on that tap.
+    const flow = readFileSync(join(FLOWS_DIR, "45-workflow-run-view.yaml"), "utf8");
+    expect(flow).toContain('text: "run-view-pass,.*"');
+    expect(flow).not.toContain('text: "run-view-pass"\n');
+  });
+});
+
 describe("the flow list is the flow files (the other direction)", () => {
   test("no flow file is silently not run", () => {
     // 12c's guard checks the list's entries exist; this checks the reverse, which
