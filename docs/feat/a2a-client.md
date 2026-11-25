@@ -1783,3 +1783,92 @@ still fixed (Round 2). No new HIGH or MEDIUM.
 - **Not run here:** the full parallel `bun run test` (the merge gate's), and
   the simulator screenshots from a2c-6, which are still owed before any iOS
   build.
+
+### Merge review (2026-11-26)
+
+Verdict: PASS
+
+Scope: only what merge `a3758bb8` (+ note `28d7d559`) added beyond a
+mechanical union (`git show --remerge-diff a3758bb8`), not the feature (round 3
+PASS, `5476f39f`).
+
+**Gate (narrow, this worktree):** `bun run typecheck` exit 0; `bun run lint`
+clean (2574 files, 0 errors/warnings); `bun test --parallel apps/mobile/test
+packages/client packages/daemon` → **8191 pass / 1 skip / 0 fail** (the skip is
+the opt-in real-socket keepalive in `packages/daemon/test/ws-server.test.ts`);
+`bun test packages/protocol` 581/0 (incl. the `protocol.json` drift test);
+`bun test scripts` 200/0 (incl. the mockup-kit `kit-data.json` drift test).
+Full parallel `bun run test` not run here (merge gate's job).
+
+**Mutation outcomes (each reverted; `git status` clean after):**
+
+| Mutation | Result |
+| --- | --- |
+| `ask-card.ts:99` `question` forced `false` (= main's card) | red — 2 fail (the two question tests) |
+| `ask-card.ts:104` `reply` left in the `…` menu for a question | red — 1 fail |
+| `permission-map.ts:138` drop `workflow` from `toPermissionRequestUpdate` | red — 2 fail in main's `both ask paths carry the workflow origin` (turn ask + background child ask) |
+| `permission-router.ts:429` `workflow` forced `undefined` | red — 4 fail (main's `PermissionRouter — the workflow an ask belongs to` ×3 + laptop-requester attribution) |
+
+**Attacks tried:**
+1. *Other ask kinds on the card.* For any `request.kind !== "question"` the
+   actions are the same literal pair as main (`reject_once` Deny,
+   `allow_once` Allow once), the menu rule is main's (`has("reply")` with
+   `!question` true), and `AskCard.tsx:136` `allow = optionId !== "reject_once"`
+   is equivalent to main's `=== "allow_once"` on a pair that contains only
+   those two ids. `agent_add` keeps No · Yes, for this session (labels come
+   from `sheetOptions`). Workflow asks never reach `askCard` with a question:
+   the run screen answers through `workflow-run-controller.ts:91`
+   (`allow_once | reject_once` only). `askCard` has ONE consumer
+   (`PermissionSheet.tsx:60`), so widening `actions` from a 2-tuple to an
+   array breaks no indexer (typecheck agrees). Holds.
+2. *«Answer…» is not a dead button.* `AskCard` → `sheet.answer("reply")` →
+   `permission-sheet.ts:575` opens the field (`replyOpen`) since `reply` is
+   offered for a question with `req.reply`; the field then renders under
+   main's `replyOpen` gate with `replyCopy` (`PermissionSheet.tsx:143/152/162`:
+   «Your answer» / «Send answer»). `answerFor` (`:591`) refuses `reply`, but
+   nothing routes a question's capsule there. Holds.
+3. *Workflow attribution regression (main's mobile-ask-surfaces S8).* Both
+   daemon sites (`hosted-session.ts:1570`, `:1746`) pass `options.workflow`
+   into `toAskUpdate`, which forwards it for every non-question kind; the
+   router reads it off a `permission_request`. Main's tests for it all run and
+   pass, and the mutations above prove they pin the merged code path. No
+   path loses it. Holds.
+4. *PermissionSheet.* The branch's only change to that file (vs merge-base
+   `8d29dd10`) was `replyCopy` on placeholder + Send label — both re-applied,
+   plus the accessibility label. The question flow (options, Skip/Answer…,
+   reply normalisation) lives in `permission-sheet.ts`, untouched by the
+   merge; `permission-sheet-question.test.ts` passes. Nothing lost.
+5. *TODO.md.* `feat/a2a-card-reload` folded into main's `feat/a2a-reload`
+   (`TODO.md:17`) with `startA2ACards` / `wiring.ts` / «one build late» kept;
+   main's S–M · cross-module sizing kept (more honest: it needs a
+   client→daemon path). No other item dropped; no stale reference to the old
+   slug left in the doc. Holds.
+
+**Findings:**
+1. **LOW — a remote question raised inside a workflow step loses its run
+   attribution** (`permission-map.ts:136-137`, `permission-router.ts:429`).
+   `stepRequester` (`packages/agent/src/workflow-driver.ts:1660-1697`) stamps
+   `workflow` on EVERY ask of a step child, so an `a2a:<name>` sub-agent
+   spawned by an agent step that asks the user produces a `question_request`
+   with the attribution dropped: the phone shows it as a session ask, not «a
+   sheet over the run», and the TUI prompt carries no run/step. It is still
+   asked and answerable (no silent drop), and dropping is the safer choice
+   today (the run screen only knows Allow/Deny). Not a regression of either
+   side — a new combination. Follow-up if wanted: a `workflow` field on
+   `question_request` (a display-only, additive field). Document it as debt.
+2. **LOW — the `agent_add` test (`ask-card.test.ts:140`) is a guard, not a red
+   test:** it passes with the fix reverted (main already drew that pair). The
+   merge note's «2 of the 3 new tests failed before the fix» is accurate; just
+   don't count it as pinning the change.
+3. **LOW (carried) — simulator screenshots of the new Skip · Answer… card are
+   still owed** (merge note says so); pixels unverified.
+
+**How the merger behaved:** the note in Execution is accurate against the
+diff (every claim checked); the semantic follow-ups (question card, workflow
+threading, router narrowing) were found without a textual conflict pointing at
+them, kept in the pure modules, and shipped with red-first tests. No scope
+creep.
+
+*— claude-opus-5-5 (fresh context; same model family as the feature's
+executor and earlier reviewers, so shared blind spots are possible),
+2026-11-26*
