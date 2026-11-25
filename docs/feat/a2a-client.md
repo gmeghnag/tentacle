@@ -1517,6 +1517,69 @@ step). Facts for the re-run:
 - **Gate:** not run here (the orchestrator's script runs it). No protocol
   or changelog change (internal fix, no wire change).
 
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-25*
+
+- **Finding 2 (MEDIUM, card prefetch caller) — FIXED, owner decision (c).**
+  - `packages/cli/src/wiring.ts:455` `startA2ACards(config, opts)` → an
+    `A2ACardCache` `{cards(), refresh()}`: no `a2a` instance ⇒ returns at
+    once, no read; else awaits `prefetchA2ACards` once (≤ 2 s). `refresh()`
+    re-reads in the background (one read at a time); a card it cannot read
+    keeps its last text.
+  - Worker: `workerAgentFactory` takes `a2aCards` → `harnesses: {a2aCards}`
+    (`worker.ts:131`); `workerSessionHost` takes the cache, freezes
+    `cards()` into each build and calls `refresh()` after it (`:215`). The
+    entry awaits `startA2ACards` before the host (`startWorker`, `:300-308`).
+  - `serve`: `createServeAgent(…, a2aCards)` (`serve.ts:269`);
+    `reloadedHost` awaits `startA2ACards` before `new SessionHost` (`:768`),
+    so reloaded sessions are covered too; each build freezes `cards()` and
+    then refreshes (`:805`).
+  - **Drift (needed, not in the plan text):** the worker's `Connection`
+    used to bind synchronously in the bootstrap handler. With an await in
+    front of it, the main thread's `initialize` (posted right after the
+    bootstrap) would hit a port with no listener and be dropped.
+    `heldChannel` (`worker.ts:233`) subscribes before the await. It holds
+    early frames and passes them on in order, on a microtask after the
+    `Connection` sets its handler. The main thread's handshake timeout is 8 s
+    (`local-runtime.ts`), which is more than the 2 s budget. MCP connection
+    in the worker now starts after the card read, which only delays it when
+    an `a2a` instance is configured.
+  - **Owner-deferred:** `/a2a` reload command → `TODO.md` (feat/a2a-card-reload).
+  - Tests: `packages/cli/test/a2a-card-hosts.test.ts` (8): the worker build
+    reads the card text; refresh after each build means the next build reads
+    v2; `serve` (real `startDaemon`, a loopback card server, a turn through
+    a recorder) has the card text in `agent_task`; no `a2a` ⇒ 0 reads and no
+    wait; a card that never answers ⇒ start-up < 1 s at a 50 ms budget and
+    «not loaded»; a failed refresh keeps the last card; `heldChannel` order;
+    an `initialize` sent before the `Connection` exists is answered.
+  - **Red before green** (the helper in place, worker/`serve` not wired):
+    3 fail on the property. Each got `Received: "- a2a:acme: Reviews Go PRs
+    (owner). Remote card: (remote card not loaded)"` instead of the card
+    text (worker ×2, `serve` ×1).
+  - **Mutations** (`.tentacle/tmp/a2a-client/mutate-fix2.ts`; each restored,
+    byte-identical):
+    | mutation | result |
+    |---|---|
+    | M1 worker build without the cards | red — 2 fail |
+    | M2 worker: no refresh after a build | red — 1 fail |
+    | M3 `serve` build without the cards | red — 1 fail |
+    | M4 a failed refresh drops the last card | red — 1 fail |
+    | M5 start-up budget ignored (60 s) | red — 1 fail |
+    | M6 `heldChannel` holds nothing | red — 2 fail |
+  - Narrow runs: `a2a-card-hosts`, `a2a-wiring`, `a2a-client-e2e`,
+    `image-hosts`, `artifact-hosts`, `browser-tools-wiring`,
+    `image-view-wiring`, `schedule-hosts`, `serve-autoaccept-unattended` →
+    52 pass / 0 fail. `tsc -p packages/cli`: no error in the changed files.
+    Biome on the 4 changed files: clean.
+  - Unverified: the compiled-binary worker path (the real `Worker` +
+    `heldChannel`) is covered by a channel-pair test only. To check it, run
+    `tentacle` with an `a2a` harness configured and confirm the first
+    session's `agent_task` text.
+- **Changelog:** `changelog.d/a2a-client.added.md` now states the card text
+  and the start-up wait of up to 2 s, which users will notice.
+- **Gate:** not run here (the orchestrator's script runs it).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-25* (fresh context; the same model family planned

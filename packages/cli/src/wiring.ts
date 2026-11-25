@@ -437,6 +437,46 @@ export async function prefetchA2ACards(
   return new Map(entries.map(({ name }) => [name, got.get(name)]));
 }
 
+/** A long-lived host's card texts (docs/feat/a2a-client.md, owner decision (c)). */
+export interface A2ACardCache {
+  /** The snapshot the next build freezes into its `agent_task` text. */
+  readonly cards: () => A2ACards;
+  /** Read the cards again in the background (one read at a time); the NEXT build sees it. */
+  readonly refresh: () => Promise<void>;
+}
+
+/**
+ * Owner decision (c) for C5: a worker / `serve` awaits this ONCE before its
+ * `SessionHost` (≤ the budget, and only when an `a2a` instance is configured:
+ * none ⇒ no read, no wait), passes `cards()` into every build and calls
+ * `refresh()` after each. A card a refresh cannot read keeps its last text:
+ * a transient failure never turns a loaded card back into «not loaded».
+ */
+export async function startA2ACards(
+  config: TentacleConfig,
+  opts: Parameters<typeof prefetchA2ACards>[1] = {},
+): Promise<A2ACardCache> {
+  if (a2aEntries(config).length === 0) {
+    const none: A2ACards = new Map();
+    return { cards: () => none, refresh: () => Promise.resolve() };
+  }
+  let current = await prefetchA2ACards(config, opts);
+  let inFlight: Promise<void> | undefined;
+  const refresh = (): Promise<void> => {
+    inFlight ??= prefetchA2ACards(config, opts).then(
+      (fresh) => {
+        current = new Map([...fresh].map(([name, card]) => [name, card ?? current.get(name)]));
+        inFlight = undefined;
+      },
+      () => {
+        inFlight = undefined;
+      },
+    );
+    return inFlight;
+  };
+  return { cards: () => current, refresh };
+}
+
 /**
  * The `a2a:<name>` sub-agent types and their harness instances
  * (docs/feat/a2a-client.md C1/C2/C5): one per enabled `adapter: "a2a"`
