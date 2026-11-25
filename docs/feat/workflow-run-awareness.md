@@ -141,6 +141,10 @@ is reached only through `RunOptions` that `Session` passes — never by a sub-ag
    | … attempt > 0 / round > 0 | `… step 2/4 test running (retry 2) …` / `… (round 2/3) …` |
    | a step `needs-approval` or `waiting` on an ask | `[workflow wf-3 demo-note: step 4/4 merge waits for the user · 3/4 ok · 9.8k tok]` |
    | a step `waiting` with `live: "slot"` | `[workflow wf-3 demo-note: step 3/4 review waits for a sub-agent slot · 2/4 ok · 6k tok]` |
+   | a live run with no live step, not `needs-approval` (between two steps; added in S1) | `[workflow wf-3 demo-note: running · 2/4 ok · 4.1k tok]` |
+
+   Lines are joined by `\n`; `+N more` is a line of its own. A line over 200 chars cuts the
+   name and the step id to 32 chars (with `…`), so the state and the numbers stay whole.
 
    Fields used: `runId`, `name`, `steps[].id/state/attempt/round/maxRound/live`, `tokens` —
    validated identifiers and numbers only. NEVER `reason`, `live` text other than the `slot`
@@ -408,7 +412,58 @@ may tune).
 
 ## Execution
 
-*— (empty until the Implementation is approved)*
+### S1 — the pure status line — DONE
+
+*— claude-sonnet-5-5, 2026-11-25 (branch at `e9931b12`, uncommitted)*
+
+**Load-bearing check, re-run first: holds.** `bun .tentacle/tmp/workflow-run-awareness/repro.ts`:
+
+```
+step failures logged: 2 | published rows ever showing state=error: 0 | notes to the model before the end: 0
+== 2. request-only seam (voice line): in request: true | in history: false
+== 4. autoApproves(workflow_approve, own=true): false
+```
+
+By `rg`: the loop's two request builders are still in `agent.ts` (the round and the final
+report; `compact.ts` builds its own summary requests), `session.ts:226`/`:305` are the
+main-session `runMessages` callers (`agent.ts:1338` is the `Agent`'s own entry into it), and a
+sub-agent calls `child.runMessages` (`subagent.ts:567`).
+
+**As built:** new `packages/agent/src/workflow-status-line.ts` (`workflowStatusLine`), exported
+from `packages/agent/src/index.ts`; T1 in `packages/agent/test/workflow-status-line.test.ts`.
+Tokens use core's `formatTokens` (`4.1k`), not the context line's whole-k one. Nothing calls
+the function yet (S2/S3).
+
+**Red** (against a stub returning `undefined`): `2 pass, 15 fail`; the 2 passes are the
+"no line" cases. **Green:** `17 pass, 0 fail`. `bunx biome check` on the 3 files: clean.
+
+**Mutations** (`.tentacle/tmp/workflow-run-awareness/mutate-s1.ts`, source restored):
+
+```
+leak the run's reason: killed (5 pass, 12 fail)
+show the live text on an ask: killed (14 pass, 3 fail)
+drop the live-run filter: killed (15 pass, 2 fail)
+ignore the slot marker: killed (15 pass, 2 fail)
+never clip the labels: killed (16 pass, 1 fail)
+no 2-line cap: killed (16 pass, 1 fail)
+drop the hash-approval line: killed (16 pass, 1 fail)
+restored: true
+```
+
+**Drift:**
+- The grammar had no line for a live run with no live step; added to the table (Design (a)),
+  with the line join and the clipping rule.
+- T1's red is on assertions (stub), not «module missing», per the executor brief.
+- The changelog fragment (listed under S3) was written now, as the orchestrator asked, with the
+  header's text. It describes the whole branch: true only once S2–S6 are in.
+
+**Note for S3/S5** (read, not run): `createRun` publishes the row as `needs-approval` before
+the hash check (`workflow-driver.ts`, the `state: "needs-approval"` literal), so an
+already-approved run can read «waits for the user to approve the run» for that instant. S5's
+30 s grace covers the wake.
+
+**Gate:** only T1 and lint on the changed files; full typecheck/lint/test left to the
+orchestrator's script. No schema change, so `protocol.json` is untouched.
 
 ## Review
 
