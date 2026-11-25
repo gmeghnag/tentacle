@@ -849,4 +849,55 @@ Each test names its mutation (§9).
 
 *— claude-opus-5-5, 2026-11-25*
 
+### M5-cli-e2e (PARTIAL: the two modern-era SDK e2e tests are blocked, see Blocker)
+
+- Load-bearing check: M5 has none of its own. Assumption 3 was proved in M4
+  (HOLDS). Re-checked what M5 depends on: `McpTools`' default `durable` is
+  `host.get(id).persisted()` = `persister.flush(id)` (`hosted-session.ts:1917`).
+- As built:
+  - `cli/src/serve-mcp-server.ts` (new): `buildMcp` (an `McpTools` + `createMcpRoute`
+    on the one caller `default`, `callerAsks` from `--mcp-asks`, `dispose` at stop),
+    `parseMcpAsks`, `describeMcp`, `mcpAddHint` (a `<token>` placeholder, never the secret).
+  - `cli/src/flags.ts`: `mcp-token`, `mcp-token-command`, `mcp-asks`; `resolveMcpToken`
+    (no env fallback, both/empty refused).
+  - `cli/src/serve.ts`: `ServeOptions.mcp`; the route is built beside A2A and passed as
+    `WsServerOptions.mcp`; `tools.dispose()` at stop.
+  - `cli/src/main.ts`: flags, `--mcp-asks` without a token refused, startup line + `claude mcp add` hint, help.
+  - `README.md` "MCP server" paragraph. `changelog.d/serve-mcp-server.added.md` already existed (from M1).
+  - `cli/test/serve-mcp-e2e.test.ts`: 7 tests: flag parsing (3), tentacle's own `packages/mcp`
+    client (legacy `initialize`), SDK v2 `Client` (its default legacy era, no tasks), WS
+    `session/list` sees `mcp-default-…` + wrong/missing token → 401 + audit, off without a token.
+- Drift:
+  1. **devDependencies in `packages/cli`, not `packages/daemon`** (plan row 7): the e2e lives in
+     `cli`, and bun does not hoist daemon's. Pinned `@modelcontextprotocol/client` `2.4.0` and
+     `@modelcontextprotocol/ext-tasks` `0.2.3`, `bun.lock` updated.
+  2. **`durable` = the default** (`persisted()` = `flush`), not a custom hook. The boolean the M4
+     correction asked for needs `session-persister.ts` (outside M5's files). Behaviour as in M4: a
+     failed write is reported to the operator and the task is still handed out. **Open for the owner.**
+  3. TODO.md untouched (instruction); README done.
+- **Blocker (plan is wrong; STOPPED, no production code changed):** the real SDK v2 `Client` pinned to
+  `2026-07-28` (`versionNegotiation: {mode: {pin}}`) rejects our `tools/list`:
+  `Invalid result for tools/list: missing required resultType — servers implementing 2026-07-28 MUST
+  include it`. Our modern results (`server/discover`, `tools/list`, plain `tools/call`, `tasks/*`) carry
+  `resultType` only for a task (`wire.ts:272`); the hand-written wire in M1 never had the real client to
+  check against. So e2e client 1 (SDK + ext-tasks, `ToolExecution.kind === "task"`) and the modern half
+  of client 2 cannot pass until `wire.ts`/`http.ts` add `resultType: "complete"` to every non-task modern
+  result (M1/M2 files). The ext-tasks V2 path also needs a host `rawDispatch` + `v2RequestFraming`
+  (README of the package), which the test would supply with a `fetch` POST. The other `_meta`/`ttlMs`
+  facts of M4's unverified list are likewise still unchecked against ext-tasks. Next step: an Opus fix
+  slice on `wire.ts` + `http.ts`, then re-add those two tests (repro: `Client` with `versionNegotiation`
+  pin + `StreamableHTTPClientTransport`, then `listTools()`). The changelog fragment's "2026-07-28" claim
+  holds on the wire but is unproven against the real SDK until then.
+- Mutations (all RED on the intended test, then reverted; 7/7 green after):
+  | A | drop `mcp: mcp.route` from `startWsServer` | RED: tentacle client, SDK client, WS/401 tests (the "off" test is green by design) |
+  | B | `parseMcpAsks` returns `"both"` for an unknown value | RED: fails-closed test |
+  | C | the hint interpolates a real-looking token instead of `<token>` | RED: placeholder test |
+- Checks: `bun test` on `serve-mcp-e2e`, `args`, `serve-a2a-e2e`, `serve-mcp`: 41 pass, 0 fail
+  (the e2e file alone: 7 pass); `bunx biome check --write` on the 5 changed TS files: clean; `bunx tsc --noEmit`
+  clean before the test file was added (the test file is typechecked by the orchestrator's gate).
+- NOT done: the manual live Claude Code check (no Claude Code ≥ 2.1.304 session available here;
+  and its modern path would hit the blocker above).
+
+*— claude-sonnet-5-5, 2026-11-25*
+
 ## Review
