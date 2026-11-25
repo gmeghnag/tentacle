@@ -824,3 +824,15 @@ Same model family as the B4 executor (Opus); only the context is fresh.
 **Executor**: honest STOP and deferral, with drift listed. It missed the post-merge typecheck (the merge commit came after its gate).
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Round 2
+
+**Verdict: PASS**. The fix commit `a149973b` (`git diff HEAD~1`) closes all 3 findings. Same model family (Opus) as round 1, fresh context.
+
+- **F1 (HIGH, A2A answers `browser_action`): fixed.** `EXTERNAL_ANSWER.browser_action = "owner-only"`, and `askOf` maps `BROWSER_ACTION_TOOL`. Mutation: `askOf` returns `tool` → `external-asks.test.ts` fails.
+- **F2 (MEDIUM, probe/act TOCTOU): fixed.** The act carries `expect`, and `page.js` `changed()` refuses on any difference. For an outdated extension, `actedOnOther` reports the mismatch after the fact. `ElementFacts` (the strip schema the hub parses, `browser-host.ts:292`) covers every key `facts()` emits, so `expect` is not truncated and acts are not refused by mistake. Mutation: `changed()` never refuses → `page.test.ts` fails.
+- **F3 (MEDIUM, after-the-fact report + unapproved reopen): fixed.** `learn` notes a move to a domain this session never allowed. `onTab` runs the URL to reopen through `gate()`. Mutation: the reopen gate skipped → `browser-actions.test.ts` fails. Owner-visible drift (recorded by the executor): reopening a closed handed-over tab, or a redirect target, now ASKS, against B5 addition 2's «no new ask». This is a policy call for the owner, in the safe direction.
+- **Gate**: typecheck 0 errors; lint clean (2511 files). Related tests (tools, external asks, permission kinds, extension, hub, wiring, browser, a2a executor): 691 pass / 0 fail. Mutations restored by copy, tree clean. Full `bun run test` not run.
+- **Regressions looked for, none found**: the hub strip-parse dropping keys from `expect`; read/net/console becoming factories (they still use the ONE broker's `ask`); a handed-over tab seen first is not flagged (`before === undefined`).
+
+*— claude-opus-5-5, 2026-11-25*
