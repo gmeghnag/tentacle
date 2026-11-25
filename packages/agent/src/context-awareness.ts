@@ -96,6 +96,26 @@ export function modelView(history: readonly ChatMessage[]): {
   };
 }
 
+/**
+ * The request's message list with a live status `line` (a workflow run's,
+ * docs/feat/workflow-run-awareness.md) at its TAIL, as a `user` message: on the
+ * model's copy only — the history is never touched, so the line is never
+ * persisted, compacted or repeated. The tail keeps the cached prefix (a
+ * `system` line would change the request's first bytes). Only after a `user`
+ * or `tool` message: a request ending in an assistant message is never given a
+ * fabricated user prompt. `undefined` → the list as is.
+ */
+export function withStatusLine(
+  messages: readonly ChatMessage[],
+  line: string | undefined,
+): ChatMessage[] {
+  const last = messages.at(-1)?.role;
+  if (line === undefined || (last !== "user" && last !== "tool")) {
+    return [...messages];
+  }
+  return [...messages, { role: "user", content: line }];
+}
+
 /** The latest line in `history`, if any — the counting state, never stored apart. */
 export function lastEmitted(history: readonly ChatMessage[]): ContextUsage | undefined {
   for (let i = history.length - 1; i >= 0; i--) {
