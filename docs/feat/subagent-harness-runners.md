@@ -1,9 +1,9 @@
 # feat/subagent-harness-runners — sub-agents run by another agent harness (Claude Code first)
 
-> **Status:** implementation — **plan NOT approved** (owner questions below)
+> **Status:** implementation — **APPROVED (owner answers 2026-11-25)**
 > **Branch:** `feat/subagent-harness-runners`
-> **Size:** L → split into 5 slices (S/M each) · **Blast:** load-bearing (sub-agent seam + trust + permissions) · **Suited:** Opus plans; slice 1 interface by Opus, codec by DeepSeek; slices 2, 5 DeepSeek + Opus review; slices 3, 4 Opus + mandatory fresh-context review
-> **Changelog:** `changelog.d/subagent-harness-runners.added.md` (written by the last slice that makes it user-visible, slice 3)
+> **Size:** L → split into 6 slices (S/M each) · **Blast:** load-bearing (sub-agent seam + trust + permissions) · **Suited:** owner routing 2026-11-25 — Sonnet where a mistake is cheap to iterate on, Opus where a slice touches §7; final review fresh-context Opus (table in *Slices*)
+> **Changelog:** `changelog.d/subagent-harness-runners.added.md` (written by `shr-5-permissions`, the slice that makes it usable)
 
 ## Context
 
@@ -34,7 +34,7 @@ mapping table.
 **Constraints (owner, TODO.md):**
 1. laptop only — never requested by a pod (AGENTS §7, a pod is not trusted);
 2. it spends the owner's Max quota — visible and capped;
-3. a writing run gets its own worktree; a review run is read-only;
+3. a writing run gets its own worktree; a review run is read-only (after Owner A3 a review is a `claude` run too: its worktree is a snapshot, so the user's own tree is never touched — D8);
 4. permissions go through the single broker;
 5. reuse the sub-agent seam (`agent_task`, `subagent.ts`) and the workflow step
    kinds — no parallel session path.
@@ -181,8 +181,8 @@ interface HarnessRun {
   send(text: string): Promise<void>;            // steer (caps.steer)
   cancel(): Promise<"confirmed" | "unconfirmed">; // best effort: A2A cancel is not guaranteed
 }
-type HarnessRunSpec = { prompt; mode: "review" | "write" | "remote"; cwd?; tools?: readonly string[];
-                        model?; jsonSchema?; maxCostUsd?; runId: string };
+type HarnessRunSpec = { prompt; mode: "write" | "remote"; cwd?; tools?: readonly string[];
+                        model?; jsonSchema?; runId: string };
 type HarnessEvent =
   | { kind: "started"; handle: HarnessHandle; detail: { tools?; permissionMode?; version? } }
   | { kind: "progress"; label: string }               // a tool call / a status text → subagent_tool
@@ -215,17 +215,34 @@ group; interrupt first because SIGTERM loses the `result` and its cost
 (Repro 8). A remote adapter (D10) implements `HarnessAdapter` directly over
 HTTP; it shares nothing with this file.
 
-Timeouts and caps are NOT the adapter's: the runner (D3) owns them for every
-adapter — idle (no event for N min, paused while an `ask` is pending), wall
-clock, tokens (if `caps.usage`), cost (if `caps.cost`). A remote task may be
-legitimately long, so its idle/wall defaults are per harness instance.
+Limits are NOT the adapter's: the runner (D3) owns them for every adapter —
+the hang guard (no event for `idleMinutes`, paused while an `ask` is pending)
+and a workflow step's own `tokens` (if `caps.usage`). No spending cap (Owner
+A4). A remote task may be legitimately long, so its idle default is per harness
+instance.
 
 **D3 — Mapping onto the existing sub-agent seam (no parallel path).**
-`AgentType` gains an optional `harness: { adapter: string; mode: "review" |
-"write" | "remote"; model?: string }` (`remote` is the only mode a
-`kind: "remote"` adapter accepts, and a local adapter refuses it — checked when
-the types are loaded, D10) (built-ins + `agents/*.md` frontmatter `harness:`,
-`mode:`, `model:`). `createSubagentRunner` gets an optional dep
+`AgentType` gains an optional `harness: { adapter: string; mode: "write" |
+"remote" }` (`remote` is the only mode a `kind: "remote"` adapter accepts, and
+a local adapter refuses it — checked when the types are built, D10). **One
+built-in type, `claude`** (Owner A1/A3: a type is a ROLE; no `claude-review`
+for now), registered from config by the wiring — no `agents/*.md` frontmatter
+in this task.
+
+**The model is a free parameter of the call, never a list in code (Owner A1).**
+`agent_task`'s `model` argument (today offered only with
+`subagents.selectableModels` and checked against those names,
+`packages/tools/src/task.ts:325-346`, `:381-388`) is also offered when a harness
+type exists; for a harness type it is NOT checked against `models` but passed
+to the adapter verbatim, shape-checked only (1–64 chars of `[A-Za-z0-9._:\-\[\]]`,
+not starting with `-`; one argv element, no shell). The description says:
+«for `claude`: an alias — `opus`, `sonnet`, `haiku` (Claude Code resolves each
+to the latest) — or a full model id; omit it for the default
+(`harnesses.claude-code.model`, default `opus`)». So the delegating agent may
+pick a lighter model per call, and a new Anthropic model needs no tentacle
+release. A wrong id fails fast as Claude's own `is_error` result →
+`SubagentFailure` the parent reads. The row shows it: `subagent_start{model}`
+carries the string as given (display only, laptop-side; no wire change). `createSubagentRunner` gets an optional dep
 `harness?: HarnessDeps` (adapters by id, spawner, quota store, worktree maker,
 gate factory). In `run` (`subagent.ts:379`), **after** `subagent_start` is
 emitted and **before** the child `Agent` is built, a type with `harness` goes
@@ -238,7 +255,7 @@ to `runHarnessChild(type, opts, controls, deps)` and returns the same
 | `started` | handle kept for the footer / reattach; Claude: `detail.tools` + `permissionMode` checked (Failure modes, version skew) |
 | `progress` | `subagent_tool{label}` — the Claude codec maps names to the labels `childToolLabel` makes (`Bash`→`$ cmd`/its description, `Read`→`Read p`, `Edit`/`Write`→`Edit p`/`Write p`, `Grep`/`Glob`→`Search …`); A2A: the status message text |
 | `usage` (Claude: deduped per message id; prompt = input + cache_creation + cache_read) | `subagent_usage` → the row, the workflow step's `tokens`, `controls.maxTokens` (exceeded → `cancel` → `max_token_budget`) |
-| `quota` | `HarnessQuota` (D6) |
+| `quota` | the footer's 5 h / 7 d figures (D6); a non-`allowed` status → failure |
 | `ask` | `permission` → D4 · `input` → D10 · `auth` → failure (D10) |
 | `output` | appended to the report (text; `data` as capped JSON; a `file` is LISTED, never written — D10) |
 | `disconnected` | `reattach` if the adapter has it (bounded), else failure |
@@ -250,30 +267,47 @@ to `runHarnessChild(type, opts, controls, deps)` and returns the same
 
 So `agent_task`, background (`sa-N`), `agent_control status/kill`, the panel,
 the tail view, the ledger, the session log and the phone see an ordinary
-child whose `agentType` is e.g. `claude-review`. `readOnlyType` answers `true`
-for `mode: "review"` and `"remote"` (neither changes anything on this machine,
-so it may run in parallel, `task.ts:376`), `false` for `write`. **No protocol change, no new log entry type, no new RPC method.**
+child whose `agentType` is `claude`. `readOnlyType` answers `true`
+for `mode: "remote"` (changes nothing on this machine, may run in parallel,
+`task.ts:376`), `false` for `write` (`claude`). **No protocol change, no new log entry type, no new RPC method.**
 
-**D4 — Permissions: the harness asks us, through the one broker.**
-Spawned with `--permission-prompt-tool stdio` (never `dontAsk`,
-`acceptEdits` or `bypassPermissions`). Each `ask` is mapped to a TENTACLE tool
-identity and authorised by `new PermissionGate(childRequester, hooks,
-grants).authorize(tool, input, {toolCallId, signal})`, where `childRequester`
-is `subagentRequester(deps.requestPermission, …)` — so the session's grants,
-rules and hooks apply, the ask is attributed to the `agent_task` call / `sa-N`,
-and it reaches the ONE broker (TUI or phone). Mapping: `Bash{command}` →
+**D4 — Permissions: the harness asks us, through the one broker; auto mode
+decides (Owner A2).**
+Spawned with `--permission-prompt-tool stdio` (never `dontAsk`, `acceptEdits`,
+`auto` or `bypassPermissions`: no Claude-side mode ever replaces our answer).
+Each `ask{permission}` is mapped to a TENTACLE tool identity and authorised by
+`new PermissionGate(childRequester, hooks, grants).authorize(tool, input,
+{toolCallId, signal})`, where `childRequester` is
+`subagentRequester(deps.requestPermission, …)` — so the session's grants, rules
+and hooks apply, the ask is attributed to the `agent_task` call / `sa-N`, and it
+reaches the ONE broker (TUI or phone). Mapping: `Bash{command}` →
 `shell{command}`; `Write{file_path,content}` → `fs_write`; `Edit` → `fs_edit`;
 anything else → a generic ask `{tool: "claude:<Name>", title: "Claude wants
-<Name>", detail: JSON}` with **no** session-scope option (a pod is not in play,
-but an unknown tool must never get an "always"). An allow answers
+<Name>", detail: JSON}` with **no** session-scope option. An allow answers
 `updatedInput` = the input the gate APPROVED (a hook rewrite reaches Claude,
-like `wiring.ts:894-906`); a deny answers its `message`. A dismissed ask (TUI
-gone) answers deny.
-What Claude decides alone, and why that is acceptable: reads inside its
-working directories (Repro 3b) — the same class tentacle runs without asking
-(`fs_read`/`search` are `permission: "none"`, `packages/tools/src/builtins.ts:136`, `search-tool.ts:156`). In a **write** run, edits inside
-the worktree are auto-allowed only if Owner Q2 says so (then via the gate's
-answer, not via a Claude mode, so it stays one decision point).
+like `wiring.ts:894-906`); a deny answers its `message`; a dismissed ask (TUI
+gone) answers deny. Claude's `permission_suggestions` (e.g. `setMode
+acceptEdits`, Repro 3) are IGNORED: we never answer with permission updates,
+so no lasting approval is created on Claude's side.
+
+**Owner A2 — «segue l'auto mode»:**
+- **auto mode ON** → everything inside the run passes, Bash too. Nothing new
+  implements it: every ask above is an ordinary `kind: "tool"` request, and the
+  broker's own auto-accept answers it (`autoApproves`,
+  `packages/core/src/permission.ts:310-318`). Harness code never reads the
+  auto-mode bit — the broker stays the one place that decides.
+- **auto mode OFF** → `Edit`/`Write` whose path is INSIDE the run's worktree
+  pass without a prompt; `Bash` and anything outside are asked. Implemented as a
+  RUN-scoped rule in the bridge, evaluated AFTER the gate's hook stage (a
+  `tool_call` hook still blocks or rewrites) and only for a `write`-mode run with
+  a worktree: path canonicalised (`realpath` of the parent dir, no `..`, no
+  symlink escape) and inside the worktree root; never stored as a grant, gone
+  with the run. `--restricted` (file tools confined to cwd, Repro 9) is a second
+  fence under it.
+What Claude decides alone: reads inside its working directory (Repro 3b) — the
+same class tentacle runs without asking (`fs_read`/`search` are `permission:
+"none"`, `packages/tools/src/builtins.ts:136`, `search-tool.ts:156`); with the
+worktree as cwd that is the snapshot of the user's own tree (D8).
 
 **D5 — Trust: laptop only, enforced on the laptop.**
 (a) Harness types are added to `agentTypes` and `harness` deps are given to the
@@ -284,19 +318,20 @@ NOT a `ModelProvider` / `models` entry — otherwise `publishedModels` would let
 a pod pick it through the model tunnel. (c) The laptop's inbound list
 (`remote-client.ts:3357-3378`) gets no new method; a test pins that a pod
 asking for anything else is `MethodNotFound`. A `serve` on another host the
-user owns runs `claude` THERE with that host's login (Owner Q8).
+user owns runs `claude` THERE with that host's login (Owner A8).
 
-**D6 — Cost and quota: visible and capped.**
-(Claude-specific; an adapter without `caps.quota`/`cost` — A2A — gets only the
-runner's wall-clock/idle/run-count caps, D10.) Max-plan reality (Repro 1): `total_cost_usd` is a list-price ESTIMATE
-(`costBasis:"list"`), the real limit is the 5 h / 7 d window utilization
-(`rate_limit_event`). So: (1) a per-run `--max-budget-usd` (soft, Repro 6) from
-config; (2) a laptop-wide `HarnessQuota` (in-memory, last `quota` event per
-adapter) that REFUSES to start a run when the last-seen 5 h utilization ≥ the
-configured stop (a refusal is a tool error the model reads, with the reset
-time); (3) every report ends with one footer line: `— claude · opus · $0.42
-(list) · 5h 34% · 7d 12% · session <uuid> (claude --resume <uuid>)`, and
-`agent_control status` shows the same. A UI badge is later (Owner Q7).
+**D6 — Usage visible, no cap (Owner A4, A7).** Enabled by default
+(`harnesses.claude-code.enabled`, default `true`; the type is offered only when
+`claude` probes OK). No per-run `--max-budget-usd`, no quota-based refusal.
+Visible: every report ends with one footer line — `— claude · <model> · $0.42
+(list) · 5h 34% · 7d 12% · session <uuid> (claude --resume <uuid>)` — and
+`agent_control status` shows the same (Max-plan note, Repro 1: `total_cost_usd`
+is a list-price ESTIMATE, `costBasis:"list"`; the real limit is the 5 h / 7 d
+window from `rate_limit_event`). A quota HIT is still a failure (Failure modes)
+— that is Anthropic refusing, not our cap. What remains bounded is not a
+spending cap: a workflow step's own `tokens` (the author's choice, existing
+semantics) and the hang guard (idle timer, paused while an ask is pending). An
+adapter without usage (A2A) shows «cost: not reported».
 
 **D7 — Persistence.** Nothing new: the foreground report is the `agent_task`
 result; a background one is `subagent_end{report}` (capped by its emitter, as
@@ -305,21 +340,28 @@ today). Claude keeps its own transcript (`~/.claude/projects`, not
 user open it in a terminal. Events are not persisted beyond what a tentacle
 child persists (labels on the live row only).
 
-**D8 — Worktree for write, read-only for review.**
-`mode: "review"` → cwd = session cwd, `--restricted --tools Read,Grep,Glob`
-(no Bash/Edit/Write: nothing can change; Owner Q3). `mode: "write"` → slice 4
-creates `git worktree add <repo>/.tentacle/worktrees/harness-<id> -b
-harness/<id>` (gitignored dir), runs Claude there with `--restricted --tools
-Read,Grep,Glob,Edit,Write,Bash`; the report ends with the branch and `git diff
---stat`; worktree with no changes is removed, otherwise kept (Owner Q5). A
-non-git cwd refuses a write run with a clear error. Nothing is merged by us.
+**D8 — Every `claude` run gets a worktree that is a snapshot of the user's
+tree (Owner A3, A5).** With one role (`claude`, `mode: "write"`), a REVIEW is a
+`claude` run too — so the worktree must show Claude what the user sees, or a
+review of uncommitted work would read stale HEAD. `shr-3-worktree` creates
+`git worktree add --detach <repo>/.tentacle/worktrees/harness-<id> HEAD`
+(gitignored dir), then applies the session tree's uncommitted state: `git diff
+--binary HEAD` (staged + unstaged) applied with `git apply --index`, plus
+untracked non-ignored files copied (`git ls-files --others --exclude-standard`),
+then a baseline commit on branch `harness/<id>`. Claude runs there with
+`--restricted --tools Read,Grep,Glob,Edit,Write,Bash`. At the end: `git diff
+--stat` against the baseline — **no change → worktree and branch removed; a
+change → both kept**, the report ends with the branch, path and diffstat;
+**never merged by us** (Owner A5). A non-git cwd: the run refuses with a clear
+error (no worktree, no fallback to the real tree). A snapshot that fails to
+apply (binary/conflict) → refuse with the git error, nothing left behind.
 
 **D9 — Workflow verdict.** A harness child cannot call `step_verdict` (our
 tool). For a workflow step (`controls.extraTools` contains `step_verdict`),
 the run is given `--json-schema {verdict: pass|fail, reason, report}`; the
 `structured` result is fed to the SAME `verdict.tool` the driver created
 (calling its `execute` once), so `workflow-driver.ts:1714` reads it unchanged.
-No new step kind: a step names the type (`type: claude-review`).
+No new step kind: a step names the type and model (`type: claude`, `model: opus` — the step's `model` is passed through like `agent_task`'s for a harness type, and `workflow-spec.ts` accepts a free model string for a harness type instead of a `models` name).
 
 **D10 — How a remote A2A agent fits (interface only; the adapter is
 `feat/a2a`, not built here).** A remote agent is untrusted like a pod (AGENTS
@@ -328,8 +370,10 @@ So, against the same seam:
 - **Trust & consent.** `kind: "remote"`: only `mode: "remote"`, no `cwd`, no
   worktree, `caps.permissionAsks: false` (there is nothing local to approve).
   What crosses the trust line is the DATA the prompt carries off the laptop, so
-  `start` of a remote run is itself one broker ask («send this task to
-  <name> at <origin>?», session scope per agent; Owner Q10). Its report,
+  `start` of a remote run is one ordinary `kind: "tool"` broker ask («send this
+  task to <name> at <origin>?», "always for this session" per agent) —
+  **following auto mode (Owner A10)**: ON → the broker's auto-accept answers it
+  (`permission.ts:310`), OFF → the person is asked. Its report,
   status texts and `input` questions are remote-supplied text: they reach the
   parent as a tool result (as today for any tool), never trigger a laptop
   effect by themselves, and every effect the parent then takes still goes
@@ -351,13 +395,24 @@ So, against the same seam:
   out of scope (a background child is closed honestly on reload today); the
   handle in the footer keeps it recoverable later.
 - **`INPUT_REQUIRED` mid-run** (spec §3.4.3: the client replies with a new
-  message carrying the same `taskId` + `contextId`) → `ask{type:"input"}`. The
-  runner routes it to the PARENT agent through the existing two-way channel
-  (`deps.notify` → `agent_notify`-style note; the reply comes back through the
-  child's `inbox` via `agent_control message`, `subagent.ts:178-182`,
-  `:356`), and `answer(askId, {text})` sends it. Without two-way (or in the
-  foreground), the child ENDS with the question as its report and the handle,
-  so nothing waits forever (Owner Q9).
+  message carrying the same `taskId` + `contextId`) → `ask{type:"input"}`.
+  **Configurable per remote agent (Owner A9)**, `harnesses.<name>.inputFrom:
+  parent | user | both`:
+  `parent` → the existing two-way channel (`deps.notify` → an
+  `agent_notify`-style note; the reply returns through the child's `inbox` via
+  `agent_control message`, `subagent.ts:178-182`, `:356`); `user` → a broker
+  question; `both` → both at once, **the first answer wins** and the other is
+  withdrawn (the broker ask by its `withdraw` signal; a late inbox text is
+  reported unread, the existing path, `subagent.ts:636-645`). `answer(askId,
+  {text})` sends the winner. With no route available (parent chosen but no
+  two-way / foreground), the child ENDS with the question + handle as its
+  report, so nothing waits forever. Requirements this puts on `feat/a2a`: the
+  user question is a NEW request kind that auto-accept never answers (added to
+  the `autoApproves` exclusions next to `hooks_trust` / `workflow_approve`,
+  `permission.ts:313-316` — a question needs a human's text, not an "allow"),
+  that never offers session scope, and whose remote-supplied text is shown
+  bounded like a pod's: **never a lasting approval from a remote** (Owner A9,
+  AGENTS §7).
 - **`AUTH_REQUIRED`** (spec §7.6) → `ask{type:"auth"}` → v1 fails the run with
   the agent's explanation + «configure credentials for <name>»; no interactive
   auth flow mid-run.
@@ -401,17 +456,17 @@ code is written.
 
 Dependency order. Slice in brackets.
 
-1. [S1] `packages/agent/src/harness/types.ts` (new) — D1 types (`HarnessAdapter`, `HarnessCaps`, `HarnessRun`, `HarnessEvent`, `HarnessHandle`) + `CliCodec`.
-2. [S1] `packages/agent/src/harness/claude-code.ts` (new) — the Claude Code `CliCodec`: argv, `parse`, `answer`, `interrupt`, `userMessage`, version floor; pure.
-3. [S2] `packages/agent/src/harness/process.ts` (new) — D2 process transport (`HarnessAdapter` from a codec + injected `Spawner`); uses `packages/exec/src/process-group.ts` (`trackGroup`, `killGroup`, `untrackGroup`).
-4. [S3] `packages/agent/src/subagent.ts` — `AgentType.harness`, `SubagentDeps.harness`, dispatch in `run`, `readOnlyType`.
-5. [S3] `packages/agent/src/harness/child.ts` (new) — `runHarnessChild`: events → progress, D4 permission bridge, D10 input/auth/disconnect/reattach paths, caps-gated timeouts and caps, D6 quota/footer.
-6. [S3] `packages/agent/src/agent-defs.ts` — frontmatter `harness`, `mode`.
-7. [S3] `packages/config/src/schema.ts` (+ `defaults.ts`, `key-docs.ts`) — `harnesses.<name>.{adapter, enabled, command, maxCostUsd, stopAtQuota, idleMinutes, wallMinutes}`, keyed by INSTANCE name with an `adapter` field (so `feat/a2a` adds `adapter: a2a` instances with `card`/`auth` without reshaping the key); only `claude-code` is accepted in this task.
-8. [S3] `packages/cli/src/wiring.ts` — build harness deps only `!tunnelled`; built-in harness types; pod notice.
-9. [S4] `packages/agent/src/harness/worktree.ts` (new) — create / diffstat / remove-if-clean via injected git runner.
-10. [S5] `packages/agent/src/harness/child.ts` — D9 json-schema verdict; quota refusal.
-11. [S3] `changelog.d/subagent-harness-runners.added.md`; `docs/feat/subagent-harness-runners.md` Execution.
+1. [shr-1] `packages/agent/src/harness/types.ts` (new) — D1 types (`HarnessAdapter`, `HarnessCaps`, `HarnessRun`, `HarnessEvent`, `HarnessHandle`) + `CliCodec`.
+2. [shr-1] `packages/agent/src/harness/claude-code.ts` (new) — the Claude Code `CliCodec`: argv, `parse`, `answer`, `interrupt`, `userMessage`, version floor; pure.
+3. [shr-2] `packages/agent/src/harness/process.ts` (new) — D2 process transport (`HarnessAdapter` from a codec + injected `Spawner`); uses `packages/exec/src/process-group.ts` (`trackGroup`, `killGroup`, `untrackGroup`).
+4. [shr-3] `packages/agent/src/harness/worktree.ts` (new) — D8 snapshot worktree / diffstat / remove-if-clean via an injected git runner.
+5. [shr-4] `packages/agent/src/subagent.ts` — `AgentType.harness`, `SubagentDeps.harness`, dispatch in `run`, `readOnlyType`.
+6. [shr-4] `packages/agent/src/harness/child.ts` (new) — `runHarnessChild`: events → progress, D6 footer, hang guard, D10 input/auth/disconnect/reattach paths (fake remote adapter). Every permission ask is DENIED in this slice (safe default until shr-5).
+7. [shr-4] `packages/tools/src/task.ts` — the `model` argument for harness types (free, shape-checked; D3).
+8. [shr-4] `packages/config/src/schema.ts` (+ `defaults.ts`, `key-docs.ts`) — `harnesses.<name>.{adapter, enabled, command, model, idleMinutes}` keyed by INSTANCE name (so `feat/a2a` adds `adapter: a2a` instances with `card` / `auth` / `inputFrom`); only `claude-code` accepted here.
+9. [shr-4] `packages/cli/src/wiring.ts` — harness deps + the `claude` type only `!tunnelled`; pod notice.
+10. [shr-5] `packages/agent/src/harness/permissions.ts` (new) + `child.ts` — D4 bridge (gate → `subagentRequester` → broker), the auto-mode-OFF worktree rule, ignored suggestions; `changelog.d/subagent-harness-runners.added.md`.
+11. [shr-6] `child.ts` + `packages/core/src/workflow-spec.ts` — D9 `--json-schema` verdict; free `model` on a harness step.
 
 No A2A code, dependency or `@a2a-js/sdk` in this task (`feat/a2a`). No change to `packages/protocol` (no `protocol.d/` note), `client`, `daemon`, `tui`, `apps/mobile`.
 
@@ -421,9 +476,10 @@ No A2A code, dependency or `@a2a-js/sdk` in this task (`feat/a2a`). No change to
 |---|---|
 | `claude` not on PATH | `probe` fails → the harness types are still listed but a call returns a tool error "Claude Code not installed (`command` …)"; no spawn. Probed lazily at first use, cached per process. |
 | not logged in | `result{is_error:true}` despite `subtype:"success"` (Repro 7) → `SubagentFailure("Claude Code: Not logged in — run `claude /login` on this machine")`. The adapter keys on `is_error`, never on `subtype`. |
-| quota hit (5 h window) | `rate_limit_event.status ≠ "allowed"` or an `is_error` result with a rate-limit error → failure with reset time; `HarnessQuota` records it, next runs refused until `resetsAt`. *Unverified live (cannot trigger cheaply) — covered by a fake-harness test.* |
-| per-run cost cap | `error_max_budget_usd` → `stopReason "max_token_budget"` + report note (soft cap: overshoot ≤ one call, Repro 6). |
-| hang (no events) | idle timer (paused while an ask is pending) → cancel ladder → failure "no output for N min" with stderr tail. |
+| quota hit (5 h window) | `rate_limit_event.status ≠ "allowed"` or an `is_error` result with a rate-limit error → failure with the reset time in the message (no refusal of later runs: Owner A4). *Unverified live (cannot trigger cheaply) — covered by a fake-harness test.* |
+| unknown / mistyped model | Claude's own `is_error` result → `SubagentFailure` with its text; the parent picks another. A value starting with `-` or outside the shape never reaches argv. |
+| uncommitted tree cannot be snapshotted | refuse before spawn with the git error; temp worktree removed. |
+| hang (no events) | idle timer (`idleMinutes`, default 15; paused while an ask is pending) → cancel ladder → failure "no output for N min" with stderr tail. |
 | cancel mid-run (Esc, `agent_control kill`, workflow stop) | signal → `interrupt` line → `result{error_during_execution}` (cost kept) → `stopReason "cancelled"`; if no result in 5 s → TERM/KILL the group. A pending ask is withdrawn (its `signal`). |
 | tentacle exits / worker dies | the group is tracked → SIGKILLed by the exit net (`process-group.ts:2-28`); stdin EOF also ends Claude after its turn. |
 | crash (non-zero exit, no `result`) | `SubagentFailure` with exit code + stderr tail + the text seen so far as partial report. |
@@ -431,7 +487,8 @@ No A2A code, dependency or `@a2a-js/sdk` in this task (`feat/a2a`). No change to
 | garbled / unknown event | unknown `type` ignored (forward-compatible); unparsable line counted; a run that ends without a parsable `result` is a failure. |
 | version skew of the CLI | version floor checked at probe; `init` must echo the requested `tools` and a non-bypass `permissionMode`, else the run is killed before any tool executes (defends D4's assumption against a future flag change). |
 | ask answered after the run ended | answer written only while the process is alive; late answers dropped (the ask was withdrawn by the run's signal). |
-| two write runs at once | each its own `harness-<id>` worktree/branch; review runs share cwd read-only. |
+| two runs at once | each its own `harness-<id>` worktree/branch (writers run sequentially per `subagents.execution`, `task.ts:376`). |
+| auto mode flips mid-run | each ask is decided by the broker when it is asked — the live value, nothing cached in the harness. |
 | pod asks for a harness | impossible by construction (D5): no type, no dep, no method; pinned by tests. |
 | empty report | the existing fallback text (`subagent.ts:659-663`) applies to the mapped result. |
 | *Remote (A2A) — paths the interface must carry; exercised by a fake remote adapter in S3, implemented in `feat/a2a`:* | |
@@ -443,7 +500,7 @@ No A2A code, dependency or `@a2a-js/sdk` in this task (`feat/a2a`). No change to
 | cancel not honoured | `cancel()` → `"unconfirmed"` after grace → child ends `cancelled` locally; report: «the remote task may still be running (taskId …)». |
 | remote text tries to steer the parent (prompt injection) | it is tool-result text like any other; no laptop effect without the broker; never an "always" from remote-supplied input (AGENTS §7). |
 | remote `file` / huge artifact | listed, never written; text/data capped like any report. |
-| remote run with no usage | caps fall back to wall clock + idle + per-session run count; footer «cost: not reported». |
+| remote run with no usage | footer «cost: not reported»; the hang guard still applies. |
 
 ### Tests
 
@@ -452,40 +509,85 @@ process (scripted stdout lines, captured stdin lines, controllable exit and
 signals) — the "fake spawner" pattern (§9). Fixtures are the Repro shapes
 above. No real `claude` in any test.
 
-- S1 `claude-code.test.ts`: argv per mode (review never contains Bash/Edit/Write; always `--restricted`, `--permission-prompt-tool stdio`, never `dontAsk`/`bypass`); `parse` of each fixture; usage dedupe by message id; `is_error` + `subtype:"success"` → not ok; `answer` allow carries `updatedInput`, deny carries `message`.
-- S2 `driver.test.ts`: cancel ladder order (interrupt before TERM; TERM only if no result in grace — mutation: swap order → red); idle timer paused while an ask is pending; group tracked and released; over-long line dropped not buffered; no-result exit → failure with stderr tail.
-- S3 `harness-remote-fit.test.ts`: a **FakeRemoteAdapter** (in-memory, `kind: "remote"`, no usage/cost, `inputRequired`, `reattach`) driven through the same runner: `disconnected` → `reattach` → completes; reattach exhausted → failure carrying the handle; `ask input` reaches the parent's two-way channel and the inbox reply reaches `answer`; without two-way the child ends with the question; `auth` → failure; `cancel` `unconfirmed` → `cancelled` + note; a remote type with `mode: write` is refused at load; a remote `start` asks the broker once (session scope per agent).
-- S3 `subagent-harness.test.ts`: a harness type emits start/tool/usage/end exactly like a tentacle child; an `ask` reaches a **SpyBroker** through `subagentRequester` with the parent call id / `sa-N` (mutation: bypass the gate → red); a session grant for `shell git status` answers a Claude `Bash git status` without a prompt; a hook rewrite reaches Claude as `updatedInput`; unknown Claude tool never offers "session" scope; `readOnlyType` true/false by mode; `wiring` with `modelOverride` registers no harness type (mutation: drop the `!tunnelled` → red); `RemoteClient` answers `MethodNotFound` to an unknown pod request.
-- S4 `worktree.test.ts` (fake git runner): write run cwd = new worktree; clean run removes it; dirty run keeps it and reports branch + diffstat; non-git cwd refuses.
-- S5: workflow step with `type: claude-review` → `structured_output` becomes the step verdict (pass and fail); quota at/above stop → refusal before spawn; cost cap → `budget_hit`.
+- shr-1 `claude-code.test.ts`: argv always `--restricted`, `--permission-prompt-tool stdio`, never `dontAsk`/`acceptEdits`/`auto`/`bypass`; `--model` one element; `parse` of each Repro fixture; usage dedupe by message id; `is_error` + `subtype:"success"` → failed; `answer` allow carries `updatedInput` and NO permission updates, deny carries `message`.
+- shr-2 `process.test.ts`: cancel ladder order (interrupt before TERM; TERM only if no `end` in grace — mutation: swap order → red); group tracked and released; over-long line dropped not buffered; no-`end` exit → failure with stderr tail.
+- shr-3 `worktree.test.ts` (real temp git repo, no network): the worktree contains staged, unstaged and untracked-not-ignored changes of the source tree (mutation: drop the untracked copy → red); clean run removes worktree + branch; changed run keeps both and reports diffstat against the baseline; non-git cwd refuses; a failing apply leaves nothing behind.
+- shr-4 `subagent-harness.test.ts`: a `claude` child emits start/tool/usage/end exactly like a tentacle child; free `model` reaches argv, a bad shape is refused before spawn; `readOnlyType("claude")` false; wiring with `modelOverride` registers no harness type (mutation: drop `!tunnelled` → red); `RemoteClient` answers `MethodNotFound` to an unknown pod request; every permission ask denied in this slice. `harness-remote-fit.test.ts` (**FakeRemoteAdapter**, in-memory, `kind: "remote"`, no usage): `disconnected` → `reattach` → completes; reattach exhausted → failure carrying the handle; `input` routed per `parent`/`user`/`both` with first-answer-wins and the loser withdrawn; no route → child ends with the question; `auth` → failure; `cancel` `unconfirmed` → `cancelled` + note; `mode: write` on a remote type refused.
+- shr-5 `harness-permissions.test.ts` (**SpyBroker**): an ask reaches the broker through `subagentRequester` with the parent call id / `sa-N` (mutation: bypass the gate → red); with auto-accept ON a `Bash` ask is answered by the broker's `autoApproves`, never by harness code (mutation: harness answers allow itself → the spy sees no request → red); auto OFF: `Write` inside the worktree passes without a broker request, `Write` to `../x` and through a symlink out of the worktree are asked, `Bash` is asked; a `tool_call` hook blocking an in-worktree `Write` wins; a session grant `shell git status` answers `Bash git status`; unknown Claude tool never offers session scope; `permission_suggestions` never echoed.
+- shr-6: workflow step `type: claude, model: opus` → `structured_output` becomes the step verdict (pass and fail); a step `tokens` budget hit → `budget_hit`.
 - Gate: `bun run check` per slice.
 
 ### Slices
 
-| # | slice | size · blast | executor · review |
-|---|---|---|---|
-| 1 | transport-agnostic interface + Claude Code codec (pure) | S · contained | Opus writes `types.ts` (the shape A2A must fit), DeepSeek the codec · in-context |
-| 2 | process transport (spawn, groups, cancel ladder, line caps) | M · cross-module | DeepSeek · Opus review |
-| 3 | sub-agent seam wiring + permission bridge + trust gate + config + built-in types + caps/timeouts + remote-fit paths (fake remote adapter) | M · load-bearing | Opus · fresh-context review |
-| 4 | write mode in a worktree | M · load-bearing | Opus · fresh-context review |
-| 5 | workflow verdict via json-schema + quota refusal/footer | S · cross-module | DeepSeek · Opus review |
+Owner routing (2026-11-25): Sonnet where a mistake is cheap to iterate on,
+Opus where the slice touches an AGENTS §7 invariant; one final fresh-context
+Opus review over the whole branch (not listed as a slice).
 
-After this task (not in it): background steering (`agent_message` → a stdin
+| order | SLICE id | what | size · blast | executor | estimate |
+|---|---|---|---|---|---|
+| 1 | `shr-1-codec` | D1 interface + Claude Code codec (pure) | S · contained | sonnet | ~350 lines incl. tests · ~1 h |
+| 2 | `shr-2-process` | D2 process transport (spawn, groups, cancel ladder, line caps) | M · cross-module | sonnet | ~400 lines · ~1.5 h |
+| 3 | `shr-3-worktree` | D8 snapshot worktree, diffstat, keep/remove | M · cross-module | sonnet | ~300 lines · ~1.5 h |
+| 4 | `shr-4-seam` | D3/D5/D6/D10: sub-agent dispatch, `claude` type, free `model`, config, `!tunnelled` gate, footer, hang guard, remote-fit fake; asks denied | M · load-bearing (sub-agent seam, pod trust) | opus | ~600 lines · ~3 h |
+| 5 | `shr-5-permissions` | D4: bridge to the one broker, auto-mode rule, worktree-write rule; changelog | M · load-bearing (single broker) | opus | ~400 lines · ~2 h |
+| 6 | `shr-6-workflow` | D9: json-schema verdict, free model on a harness step | S · cross-module | sonnet | ~200 lines · ~1 h |
+
+After this task (not in it): a read-only review role, background steering (`agent_message` → a stdin
 user message), quota badge on TUI/phone (mockups first), a phone hub entry,
 Codex/Gemini codecs, the A2A adapter (`feat/a2a`, client side).
 
 ### Owner questions
 
-1. **Built-in types.** Recommend two: `claude-review` (read-only, Opus) and `claude` (write in worktree, Opus); more via `agents/*.md` (`harness: claude-code`).
-2. **Asks in a write run.** Recommend: Edit/Write inside its worktree auto-allowed (isolated branch), every Bash and anything outside asked through the broker. Alternative: ask everything.
-3. **Review run tools.** Recommend Read/Grep/Glob only, no Bash (tests belong in a workflow `run` step).
-4. **Caps and opt-in.** Recommend off until `harnesses.claude-code.enabled: true`; `maxCostUsd: 5` per run (list price); refuse new runs at 5 h utilization ≥ 80%.
-5. **Worktree after a write run.** Recommend: keep branch + worktree if it changed something (report gives branch + diffstat), remove if clean, never auto-merge.
-6. **«Fallo fare a Claude» from the phone.** Recommend for now through the chat (the main agent calls `agent_task type: claude`); a dedicated hub button later, with mockups.
-7. **Quota visibility.** Recommend a text footer on the report + `agent_control status` now; a badge on TUI/phone later, with mockups.
-8. **Where it runs.** Recommend: laptop worker AND a `serve` on any host the user owns (it uses that host's `claude` login); a pod never.
-9. **A remote agent asks for input mid-run (A2A `INPUT_REQUIRED`).** Recommend: the PARENT agent answers it (two-way channel, background child); without it the child ends with the question as its report. Alternative: ask the user through the broker. (Decided now because it shapes `ask input`; built in `feat/a2a`.)
-10. **Sending work to a remote agent.** Recommend: starting a remote run is one broker ask («send this task to <agent> at <host>?»), with "always for this session" per agent; Claude Code (your own account) asks nothing at start.
+All answered 2026-11-25 (below). No new owner-visible choice arose from the
+revision: the worktree snapshot of uncommitted changes (D8) is what makes A3
+(«solo modelli precisi», no review role) correct for a review, and the
+remote-input request kind (D10) is a consequence of A9 + §7.
+
+1. Built-in types / model choice. 2. Asks in a write run. 3. Review role.
+4. Caps and opt-in. 5. Worktree after a write run. 6. «Fallo fare a Claude»
+from the phone. 7. Usage visibility. 8. Where it runs. 9. Remote
+`INPUT_REQUIRED`. 10. Sending work to a remote agent.
+
+### Owner answers
+
+*Recorded verbatim, 2026-11-25 ~13:10.*
+
+- Q1 types: «Non esiste modo dinamico per scegliere quale? Senza hardcodare tutti i modelli anthropic disponibili?» → the agent TYPE is a role and the MODEL is a free parameter of the call (no list in code): Claude Code accepts aliases opus/sonnet/haiku (it resolves them to the latest) or a full id; a config default (e.g. opus); the delegating agent may pick a lighter model.
+- Q2 asks in a write run: «Segue l'auto mode» — the session's auto mode decides (auto mode ON → everything inside the run passes, Bash too; OFF → Edit/Write inside its worktree pass, Bash and anything outside asked through the broker).
+- Q3 review type: «Senza claude-review per ora, solo modelli precisi» — NO claude-review role for now; ONE type 'claude' with the model chosen per call.
+- Q4 caps: «Acceso, nessun tetto» — enabled by default, no per-run cap and no quota-based refusal (keep the usage visible, Q7).
+- Q5 worktree: keep branch+worktree if it changed something, remove if clean, never auto-merge (as recommended).
+- Q6 phone: through the chat for now (as recommended). Q7 usage: a line in the report + agent_control status (as recommended). Q8 where: laptop + any serve the user owns, never a pod (as recommended).
+- Q9 remote INPUT_REQUIRED: «Configurabile» — per remote agent: the parent, the user via broker, or both (first answer wins); never a lasting approval from a remote.
+- Q10 sending work to a remote agent: «Segue l'auto mode» — auto mode ON → starts without asking; OFF → one broker ask with 'always for this session' per agent.
+
+### §7 re-check after the answers
+
+*— claude-opus-5-5, 2026-11-25*
+
+- **Single broker — holds.** Every ask the answers introduce (Claude
+  permission, remote start A10, remote question A9) is a request to the ONE
+  `permissions.request` (`wiring.ts:783`) via `subagentRequester`. Auto mode
+  (A2, A10) is applied by the broker's `autoApproves`
+  (`core/permission.ts:310-318`) and by nothing else; harness code never reads
+  the bit. The only decision taken outside the broker is A2-OFF's in-worktree
+  edit rule: run-scoped, after hooks, never a grant — the same footing as a
+  confinement check, not a second approver.
+- **A pod never — holds.** Unchanged `!tunnelled` gate (`wiring.ts:763`);
+  and a pod cannot turn auto mode ON (the trusted-client bit,
+  `client/src/remote-client.ts:586-595`), so A2/A10's "auto ON → pass" cannot
+  be reached from a pod either.
+- **Auto mode never answers `workflow_approve` / `hooks_trust` — holds.**
+  Harness asks are `kind: "tool"`; a workflow using `claude` steps still has its
+  hash approval and `approve` steps as `workflow_approve`, excluded at
+  `permission.ts:316`. A9's user question must join those exclusions (a new
+  kind, built in `feat/a2a`).
+- **No lasting approval from untrusted input — holds.** Claude's
+  `permission_suggestions` are never applied; a remote's answer/question never
+  creates a grant (A9); the remote-start "always" is per agent, not per input.
+- **A4 (no cap)** touches no invariant; usage stays visible (A7).
+- **Persistence / protocol** — unchanged: no new log type, no wire change, no
+  `protocol.d/` note.
 
 ## Execution
 
