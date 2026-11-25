@@ -20,7 +20,9 @@ const kinds = (rows: readonly Row[]) => rows.map((row) => row.kind);
 /** The row's time, when the row type carries one at all. */
 const ats = (rows: readonly Row[]) =>
   rows.map((row) =>
-    row.kind === "user" || row.kind === "assistant" || row.kind === "tool" ? row.at : undefined,
+    row.kind === "user" || row.kind === "assistant" || row.kind === "tool" || row.kind === "context"
+      ? row.at
+      : undefined,
   );
 function keyer(): () => string {
   let n = 0;
@@ -77,7 +79,7 @@ describe("historyRows takes the daemon's times, index-aligned", () => {
     expect(rows[0] !== undefined && "at" in rows[0]).toBe(false);
   });
 
-  test("the restart prompt after a context reset keeps the reset message's time", () => {
+  test("the reset step keeps the reset message's time", () => {
     const reset: readonly ChatMessage[] = [
       {
         role: "user",
@@ -86,9 +88,9 @@ describe("historyRows takes the daemon's times, index-aligned", () => {
       },
     ];
     const rows = historyRows(reset, keyer(), [99]);
-    // The separator is a notice (no time); the restart prompt is a user row.
-    expect(kinds(rows)).toEqual(["notice", "user"]);
-    expect(ats(rows)).toEqual([undefined, 99]);
+    // ONE row now (the step), so the time the bubble used to carry is its own.
+    expect(kinds(rows)).toEqual(["context"]);
+    expect(ats(rows)).toEqual([99]);
   });
 });
 

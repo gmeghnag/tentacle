@@ -232,16 +232,15 @@ export function photoTileStyle(
  *
  * A photo-only message has NO bubble (mockup F: the photo is its own element) —
  * an empty `fill` block under the photos would be a second element saying
- * nothing. The bubble exists iff it holds words, the attached files' lines, or
- * the context-reset caption.
+ * nothing. The bubble exists iff it holds words or the attached files' lines.
  */
-export function userRowParts(row: Pick<UserRow, "text" | "images" | "documents" | "restart">): {
+export function userRowParts(row: Pick<UserRow, "text" | "images" | "documents">): {
   readonly photos: boolean;
   readonly bubble: boolean;
 } {
   return {
     photos: row.images.length > 0,
-    bubble: row.text !== "" || (row.documents?.length ?? 0) > 0 || row.restart === true,
+    bubble: row.text !== "" || (row.documents?.length ?? 0) > 0,
   };
 }
 

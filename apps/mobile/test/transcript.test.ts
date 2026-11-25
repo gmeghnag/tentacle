@@ -422,17 +422,18 @@ describe("the LOST notice is per LOSS, not per throw (docs/fix/mobile-stream-los
 });
 
 describe("history events", () => {
-  test("a compaction KEEPS the transcript and says so once (another device's)", () => {
+  test("a compaction KEEPS the transcript and leaves ONE step (another device's)", () => {
     const before = fold([
       { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },
     ]);
     const after = apply(before, { type: "history", messages: [], reason: "compact" });
     expect(after.rows).toHaveLength(2);
-    // One wording whatever device compacted (harness-notices Q6): the separator.
-    expect(after.rows[1]).toMatchObject({ kind: "notice", text: "compacted", separator: true });
+    // ONE timeline step whatever device compacted (harness-notices Q6, 1A): the
+    // same row a reopen draws, never a notice line nor a user bubble.
+    expect(after.rows[1]).toMatchObject({ kind: "context", event: "compact" });
   });
 
-  test("this client's OWN compaction says nothing (the screen already showed it)", () => {
+  test("this client's OWN compaction leaves the step too (Q4-A)", () => {
     const before = fold([
       { type: "history", messages: [{ role: "user", content: "hi" }], reason: null },
     ]);
@@ -442,7 +443,10 @@ describe("history events", () => {
       reason: "compact",
       own: true,
     });
-    expect(after).toBe(before);
+    // Q4-A: the phone's own `/compact` is the one path that used to say nothing
+    // until a reopen; now it leaves the same step (the footer's ✓ is unchanged).
+    expect(after.rows.map((row) => row.kind)).toEqual(["user", "context"]);
+    expect(after.rows[1]).toMatchObject({ kind: "context", event: "compact" });
   });
 
   test("a context reset APPENDS (the old transcript stays, decision 9)", () => {
@@ -457,9 +461,83 @@ describe("history events", () => {
       },
     ];
     const after = apply(before, { type: "history", messages: reset, reason: "context_reset" });
-    expect(after.rows.map((row) => row.kind)).toEqual(["user", "notice", "user"]);
-    expect(after.rows[1]?.kind === "notice" && after.rows[1].separator).toBe(true);
-    expect(after.rows[2]?.kind === "user" && after.rows[2].restart).toBe(true);
+    // ONE step (1A), not today's divider + user-shaped bubble holding the prompt.
+    expect(after.rows.map((row) => row.kind)).toEqual(["user", "context"]);
+    expect(after.rows[1]).toMatchObject({
+      kind: "context",
+      event: "reset",
+      body: "carry on",
+    });
+    expect(after.rows.some((row) => row.kind === "user" && row.text === "carry on")).toBe(false);
+  });
+
+  test("a reset mid-turn: the old round closes, and the next delta opens a NEW answer row", () => {
+    const before = fold([
+      { type: "turn_started", turnId: "t", own: true },
+      text("before the reset"),
+    ]);
+    const after = apply(before, {
+      type: "context_reset",
+      messages: [
+        {
+          role: "user",
+          content:
+            "[context reset] You renewed your own context with context_reset.\nEverything before it was discarded. Your restart prompt:\n<restart_prompt>\ncarry on\n</restart_prompt>",
+        },
+      ],
+    });
+    expect(after.rows.map((row) => row.kind)).toEqual(["assistant", "context"]);
+    // `lastTextRow` only extends an ASSISTANT last row, so the next round's text
+    // never lands inside the step or the round before it.
+    const next = apply(after, text("after the reset"));
+    expect(next.rows.map((row) => row.kind)).toEqual(["assistant", "context", "assistant"]);
+    expect(next.rows[0]?.kind === "assistant" && next.rows[0].text).toBe("before the reset");
+  });
+
+  test("a reset delivered TWICE shows TWO steps (main's behaviour, reported not fixed)", () => {
+    // Pre-existing on `main` and untouched here (the plan says report, don't
+    // fix): both paths append via `historyRows`, so a stream event AND the
+    // follow-up `history{context_reset}` of the same reset give two rows. Pinned
+    // so a future dedupe has a red test to flip.
+    const message: ChatMessage = {
+      role: "user",
+      content:
+        "[context reset] You renewed your own context with context_reset.\nEverything before it was discarded. Your restart prompt:\n<restart_prompt>\ncarry on\n</restart_prompt>",
+    };
+    const after = fold([
+      { type: "context_reset", messages: [message] },
+      { type: "history", messages: [message], reason: "context_reset" },
+    ]);
+    expect(after.rows.filter((row) => row.kind === "context")).toHaveLength(2);
+  });
+
+  test("a resync keeps the context step's KEY (an opened step stays open)", () => {
+    const message: ChatMessage = {
+      role: "user",
+      content:
+        "[context reset] You renewed your own context with context_reset.\nEverything before it was discarded. Your restart prompt:\n<restart_prompt>\ncarry on\n</restart_prompt>",
+    };
+    const before = fold([{ type: "history", messages: [message], reason: null }]);
+    const first = before.rows[0];
+    if (first === undefined || first.kind !== "context") {
+      throw new Error("the mapper must mint a context row for a restart message");
+    }
+    const after = apply(before, { type: "history", messages: [message], reason: null });
+    expect(after.rows[0]?.kind === "context" ? after.rows[0].key : undefined).toBe(first.key);
+    // And the very same row object: a `keepKeys` slot match keeps key AND
+    // identity, so a step the person opened survives a pull-to-refresh opened.
+    expect(after.rows[0] === first).toBe(true);
+    // …and a body that CHANGED is another fact: a new key, so the step closes
+    // (honest — it is not the prompt that was opened). This is what makes the
+    // `sameSlot` context arm non-vacuous: matching on kind alone would keep it.
+    const changed = apply(before, {
+      type: "history",
+      messages: [{ ...message, content: message.content.replace("carry on", "carry on, again") }],
+      reason: null,
+    });
+    expect(changed.rows[0]?.kind === "context" ? changed.rows[0].key : undefined).not.toBe(
+      first.key,
+    );
   });
 
   test("a /clear replaces it all", () => {

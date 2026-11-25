@@ -105,3 +105,32 @@ describe("the reasoning node: Thinking is the running dot, Thought a dim ring (d
     expect(src).toMatch(/node=\{running \? "thinking" : "ok"\}/);
   });
 });
+
+/**
+ * docs/feat/mobile-reset-in-timeline.md Slice 3: a context reset and a
+ * compaction are rail NODES, drawn as the wake glyph's box — an SF Symbol in
+ * `sec` on the page, so it masks the rail like a dot. Pinned as SOURCE (the
+ * file imports React Native); the mapping itself is `context-row-render.test.ts`.
+ */
+describe("a context step's node: a glyph in the wake's box, `sec` on the page", () => {
+  test("the two kinds are `NodeKind`s, drawn through the ONE icon seam", () => {
+    const src = source();
+    expect(src).toMatch(
+      /export type NodeKind = StepDot \| "thought" \| "thinking" \| "wake" \| "reset" \| "compact";/,
+    );
+    const at = src.indexOf('case "reset":');
+    expect(at).toBeGreaterThan(0);
+    const drawn = src.slice(at, src.indexOf("default:", at));
+    // One `case "compact"` arm with it, and the plan's two SF Symbols.
+    expect(drawn).toContain('case "compact":');
+    expect(drawn).toContain('"arrow.counterclockwise"');
+    expect(drawn).toContain('"arrow.down.right.and.arrow.up.left"');
+    // Light, the glyph box's size, `sec` on the page — the wake's own look.
+    expect(drawn).toContain('weight="light"');
+    expect(drawn).toContain("size={CONTEXT_NODE_SIZE}");
+    expect(drawn).toContain("color={palette.sec}");
+    expect(drawn).toContain("backgroundColor: palette.page");
+    // The symbol is decorative: the NAME carries the fact.
+    expect(src).toMatch(/contextNode: \{\s*width: CONTEXT_NODE_SIZE,\s*height: CONTEXT_NODE_SIZE,/);
+  });
+});
