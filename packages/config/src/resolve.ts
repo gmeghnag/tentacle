@@ -232,6 +232,12 @@ export interface ResolvedConfig {
    * the CLI, which refuses an unknown value instead of falling through.
    */
   readonly engine?: "kubernetes" | "docker" | "podman";
+  /**
+   * The configured network of `run`'s container (file or profile); absent when
+   * unset. The CLI layers `--network` and `TENTACLE_NETWORK` over it and
+   * refuses a malformed value (`networkValueProblem`) instead of falling through.
+   */
+  readonly network?: string;
   /** The configured `run --rm` default (file or profile); absent = the CLI default (false: kept). */
   readonly rm?: boolean;
   /** `run --detach`'s settings (file or profile); absent = the relay's defaults. */
@@ -913,6 +919,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     disabledTools: disabledToolsOf(fileConfig.tools?.enabled ?? {}),
     ...(fileConfig.tools?.enabled !== undefined ? { toolsEnabled: fileConfig.tools.enabled } : {}),
     ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
+    ...(fileConfig.network !== undefined ? { network: fileConfig.network } : {}),
     ...(fileConfig.rm !== undefined ? { rm: fileConfig.rm } : {}),
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
     ...(fileConfig.tui !== undefined ? { tui: fileConfig.tui } : {}),

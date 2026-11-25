@@ -19,6 +19,7 @@
 import { ChannelError } from "@tentacle/client";
 import {
   type ContainerCreateBody,
+  ContainerCreateError,
   DockerApiError,
   type DockerClient,
   type EngineEndpoint,
@@ -77,6 +78,11 @@ export interface DockerEngineHostOptions {
 export interface ContainerBodyOptions {
   /** The laptop folder (slice D): one structured bind + the M5b masks. */
   readonly workspace?: WorkspaceMount;
+  /**
+   * The engine network (feat/run-network): `HostConfig.NetworkMode`, verbatim.
+   * Absent: no `NetworkMode` key at all — the engine's own default (D4).
+   */
+  readonly network?: string;
   /** The daemon exec's `uid:gid` (only labelled here; applied per exec). */
   readonly user?: string;
   readonly securityOpt?: readonly string[];
@@ -95,12 +101,13 @@ export function containerBody(
   image: string,
   options: ContainerBodyOptions = {},
 ): ContainerCreateBody {
-  const { workspace } = options;
+  const { workspace, network } = options;
   return {
     Image: image,
     Cmd: ["sleep", "infinity"],
     HostConfig: {
       Privileged: false,
+      ...(network ? { NetworkMode: network } : {}),
       ...(workspace ? { Mounts: workspaceMounts(workspace) } : {}),
       ...(options.securityOpt ? { SecurityOpt: [...options.securityOpt] } : {}),
     },
@@ -168,6 +175,7 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
     where,
     async create(name, image, createOptions) {
       const workspace = createOptions?.workspace;
+      const network = createOptions?.network;
       // Engine facts only matter for a mount; unknown (info failed) → no
       // mapping and no SecurityOpt — the probe still catches an unusable mount.
       const engineOptions: ReturnType<typeof workspaceEngineOptions> = workspace
@@ -178,18 +186,22 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
         : {};
       const body = containerBody(image, {
         ...(workspace ? { workspace } : {}),
+        ...(network ? { network } : {}),
         ...engineOptions,
         ...(createOptions?.labels || createOptions?.annotations
           ? { labels: { ...createOptions.annotations, ...createOptions.labels } }
           : {}),
       });
-      // The client's 404 branch (no such image) is the only plain-`Error` reject
-      // that starts with this prefix; API errors are `DockerApiError`s.
+      // The client classifies a refused create (feat/run-network D5): only a
+      // MISSING IMAGE pulls and retries — a bad `NetworkMode` never does.
       const missingImage = (error: unknown): boolean =>
-        !(error instanceof DockerApiError) &&
-        error instanceof Error &&
-        error.message.startsWith(`cannot create container ${name}:`);
+        error instanceof ContainerCreateError && error.reason === "image";
       const conflict = (error: unknown): Error => {
+        if (error instanceof ContainerCreateError && error.reason === "network") {
+          return new RefusalError(
+            `no network "${network ?? ""}" on ${where} (${error.engineMessage}) — check the name (\`${cli} network ls\`), or create it (\`${cli} network create ${network ?? ""}\`)`,
+          );
+        }
         if (error instanceof DockerApiError && error.status === 409) {
           return new RefusalError(
             `a container named "${name}" already exists on ${where} — pick another name or remove it (\`${cli} rm ${name}\`)`,

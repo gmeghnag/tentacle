@@ -1070,6 +1070,20 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Not resolved into the config: the CLI layers `--engine` › `TENTACLE_ENGINE` › profile › this file › kubernetes, and refuses an unknown value instead of falling through.",
     example: '"docker"',
   },
+  network: {
+    summary:
+      "Network of `run`'s container: a name, or `none` for air-gapped runs; `--network` wins.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    env: "TENTACLE_NETWORK",
+    sample: "none",
+    flag: "--network",
+    details:
+      "Not resolved into the config: the CLI layers `--network` › `TENTACLE_NETWORK` › profile › this file › the engine's own default (no `NetworkMode` at all). The SHAPE is checked here (a name, `none`, `bridge`, `host`, `container:<id>`); whether the network EXISTS is the engine's. Refused on `--engine kubernetes` (a pod's network is the cluster's); `run` only — `attach` never creates.",
+    example: '"none"',
+  },
   rm: {
     summary: "Whether `run` removes its pod/container when the run ends.",
     kind: "leaf",

@@ -2539,7 +2539,10 @@ describe("cli main: --engine", () => {
       env: Record<string, string | undefined> = unreachable,
     ) => {
       let seen:
-        | { workspace?: { source: string; target: string; masks: readonly unknown[] } }
+        | {
+            workspace?: { source: string; target: string; masks: readonly unknown[] };
+            network?: string;
+          }
         | undefined;
       const out: string[] = [];
       const prompts: string[] = [];
@@ -2572,6 +2575,7 @@ describe("cli main: --engine", () => {
       return {
         reached: seen !== undefined,
         workspace: seen?.workspace,
+        network: seen?.network,
         text: out.join(""),
         prompts,
       };
@@ -2594,6 +2598,72 @@ describe("cli main: --engine", () => {
         else await writeFile(path, before);
       }
     };
+
+    // feat/run-network: the network reaches the ONE create path from every
+    // source, in the engine's own precedence; a network on a pod is a hard error.
+    describe("--network", () => {
+      test("the flag reaches the runtime", async () => {
+        const r = await seenWith([...base, "--network", "none"]);
+        expect(r.reached).toBe(true);
+        expect(r.network).toBe("none");
+      });
+
+      test("TENTACLE_NETWORK, and a configured network (flag > env > config)", async () => {
+        const env = { ...unreachable, TENTACLE_NETWORK: "envnet" };
+        const r = await seenWith(base, {}, env);
+        expect(r.network).toBe("envnet");
+        const flag = await seenWith([...base, "--network", "flagnet"], {}, env);
+        expect(flag.network).toBe("flagnet");
+        const cfg = await withConfig({ network: "cfgnet" }, () => seenWith(base, {}, env));
+        expect(cfg.network).toBe("envnet");
+        const only = await withConfig({ network: "cfgnet" }, () => seenWith(base));
+        expect(only.network).toBe("cfgnet");
+      });
+
+      test("unset: no network at all (the engine's default)", async () => {
+        const r = await seenWith(base);
+        expect(r.reached).toBe(true);
+        expect(r.network).toBeUndefined();
+      });
+
+      test("kubernetes + a network (any source) is refused BEFORE anything runs", async () => {
+        const flag = await seenWith([
+          "run",
+          "--engine",
+          "kubernetes",
+          "--image",
+          "x",
+          "--network",
+          "none",
+        ]);
+        expect(flag.reached).toBe(false);
+        expect(flag.text).toContain("a pod's network is the cluster's");
+        const env = await seenWith(
+          ["run", "--engine", "kubernetes", "--image", "x"],
+          {},
+          {
+            ...unreachable,
+            TENTACLE_NETWORK: "none",
+          },
+        );
+        expect(env.reached).toBe(false);
+        expect(env.text).toContain("a pod's network is the cluster's");
+      });
+
+      test("a malformed value is a usage error; attach has no such flag (D3/D7)", async () => {
+        for (const bad of ["a/b", "a b", "my net"]) {
+          const r = await seenWith([...base, "--network", bad]);
+          expect(r.reached).toBe(false);
+          expect(r.text).toContain("[error] invalid network");
+        }
+        const noValue = await seenWith([...base, "--network"]);
+        expect(noValue.reached).toBe(false);
+        expect(noValue.text).toContain("--network needs a value");
+        const a = await seenWith(["attach", "--engine", "docker", "--network", "none", "box"]);
+        expect(a.reached).toBe(false);
+        expect(a.text).toContain("unknown option --network");
+      });
+    });
 
     test("a local engine mounts the cwd: source = its realpath, target = the cwd", async () => {
       const r = await seenWith(base);

@@ -216,6 +216,13 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
       if (options?.workspace) {
         throw new Error("a Kubernetes pod cannot mount a laptop folder");
       }
+      // Backstop too (feat/run-network D1): a pod's network is the cluster's, so
+      // `run` refuses a network before this — never silently ignore one here.
+      if (options?.network !== undefined) {
+        throw new Error(
+          `a Kubernetes pod cannot join the network "${options.network}" (its network is the cluster's) — use --engine docker or podman`,
+        );
+      }
       const labels = options?.labels;
       const annotations = options?.annotations;
       try {

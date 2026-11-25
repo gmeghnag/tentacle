@@ -133,6 +133,27 @@ function cardUrlOk(value: string): boolean {
 }
 
 /**
+ * The SHAPE of a network `run` may put its container on (feat/run-network D3),
+ * the one truth for the config file and the `--network` flag alike: a name, an
+ * engine mode (`none`, `bridge`, `host`, `default`) or docker's
+ * `container:<id>` form. Whether it EXISTS is the engine's — never cached here.
+ */
+export const NETWORK_VALUE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const NETWORK_VALUE_MESSAGE =
+  'network: use a network name, "none", "bridge", "host" or "container:<id>" (letters, digits, "_", ".", ":", "-"; at most 128)';
+
+/**
+ * A malformed network value → one line naming it, else `null`. The CLI's
+ * `--network` and `TENTACLE_NETWORK` ask this before anything is created, so a
+ * typo never reaches an engine (the file's own check is `NETWORK_VALUE`).
+ */
+export function networkValueProblem(value: string): string | null {
+  return NETWORK_VALUE.test(value)
+    ? null
+    : `invalid network ${JSON.stringify(value)} — ${NETWORK_VALUE_MESSAGE.slice("network: ".length)}`;
+}
+
+/**
  * `__proto__` cannot be a name: the JSONC parser assigns it, swapping the map's
  * prototype (so the record check reads the entry's FIELDS as entries), and
  * `JSON.parse` keeps it as an own key the record then drops. Refused by name.
@@ -564,6 +585,13 @@ const settingsShape = {
    * `--engine` flag and `TENTACLE_ENGINE` win. Unset: `kubernetes`.
    */
   engine: z.enum(["kubernetes", "docker", "podman"]).optional(),
+  /**
+   * The network `run` puts its container on (feat/run-network): a name, or
+   * `none` for an air-gapped workload. `--network` and `TENTACLE_NETWORK` win.
+   * Unset: no `NetworkMode` in the create body (the engine's own default).
+   * Refused on `--engine kubernetes` (a pod's network is the cluster's).
+   */
+  network: z.string().regex(NETWORK_VALUE, NETWORK_VALUE_MESSAGE).optional(),
   /**
    * Whether `run` removes its pod/container when the run ends (fix/run-rm-flag;
    * docs/feat/docker-engine-cli.md); `--rm[=true|false]` wins. Unset: false (kept).
