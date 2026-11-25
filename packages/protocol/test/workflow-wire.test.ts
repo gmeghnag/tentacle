@@ -166,7 +166,11 @@ describe("session/workflow_catalogue + start{hash}", () => {
     expect(RequestSchemas[Method.WorkflowCatalogue].params).toBe(WorkflowCatalogueParamsSchema);
     expect(RequestSchemas[Method.WorkflowCatalogue].result).toBe(WorkflowCatalogueResultSchema);
     expect(WorkflowCatalogueParamsSchema.safeParse({ sessionId: "s" }).success).toBe(true);
-    expect(WorkflowCatalogueParamsSchema.safeParse({}).success).toBe(false);
+    // S8b (docs/fix/workflows-ux.md): `sessionId` is OPTIONAL, the
+    // `session/skills`/`session/tools` precedent — a client opens its session at
+    // its first prompt, so the TUI asks the catalogue before one exists. An
+    // absent id = "the catalogue a session the daemon creates now would read".
+    expect(WorkflowCatalogueParamsSchema.safeParse({}).success).toBe(true);
   });
 
   test("a catalogue result round-trips: valid rows, an invalid row with its errors, the folder", () => {

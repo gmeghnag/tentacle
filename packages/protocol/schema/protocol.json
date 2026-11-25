@@ -6731,7 +6731,6 @@
           "$ref": "#/$defs/SessionId"
         }
       },
-      "required": ["sessionId"],
       "type": "object"
     },
     "WorkflowCatalogueResult": {

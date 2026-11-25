@@ -29,8 +29,15 @@ import {
   workflowYaml,
 } from "@tentacle/core";
 import type { KnownLogEntry, KnownSessionUpdateParams, LogCursor } from "@tentacle/protocol";
+import {
+  DomainErrorCode,
+  PROTOCOL_VERSION,
+  WorkflowCatalogueResultSchema,
+} from "@tentacle/protocol";
 import { ToolRegistry, createWorkflowTool } from "@tentacle/tools";
+import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { z } from "zod";
+import { Connection } from "../src/connection.ts";
 import { HostedSession } from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
 import { SessionPersister } from "../src/session-persister.ts";
@@ -399,6 +406,127 @@ describe("session/workflow_catalogue on a hosted session (slice 5a)", () => {
     expect(cut).toBeDefined();
     expect(cut?.length).toBe(300);
     expect(cut?.endsWith("…")).toBe(true);
+  });
+});
+
+/**
+ * docs/fix/workflows-ux.md S8b (owner Q1 = A): `session/workflow_catalogue` with
+ * NO `sessionId` — the catalogue a session the daemon creates now would read, the
+ * `session/skills`/`session/tools` precedent. The TUI asks it before the first
+ * message, so it must never need a live session.
+ */
+describe("S8b: session/workflow_catalogue before the first message", () => {
+  /** A host whose session factory builds the listing driver into every session. */
+  function hostWithCatalogue(): SessionHost {
+    return new SessionHost({
+      defaultCwd: "/tmp/workflow-hosted",
+      createAgent: () => {
+        const agent = new Agent({
+          model: {
+            id: "one",
+            async *stream() {
+              yield { type: "done" };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: noopEnv,
+        });
+        return {
+          agent,
+          permissions: new PermissionBroker(),
+          workflows: listingDriver(),
+        };
+      },
+    });
+  }
+
+  async function connected(host: SessionHost) {
+    const [d, c] = createChannelPair();
+    new Connection(d, host);
+    const client = new RpcPeer(c, {
+      onNotification: () => {},
+      onRequest: async (method) => {
+        throw new Error(`unexpected request ${method}`);
+      },
+    });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true },
+      clientInfo: { name: "tentacle", version: "1.0.0" },
+    });
+    const catalogue = async (params: Record<string, unknown>) =>
+      WorkflowCatalogueResultSchema.parse(
+        await client.request("session/workflow_catalogue", params),
+      );
+    return { client, catalogue };
+  }
+
+  test("with no sessionId: the same rows, and NO session is created", async () => {
+    // Red before the fix: the params schema REQUIRED a `sessionId`, so this frame
+    // was refused at the peer and the TUI showed «this session is not open yet».
+    // Mutation: answer an empty catalogue instead of reading the project's → the
+    // rows go missing; mutation: `session/open` on the way → the create assertion.
+    const host = hostWithCatalogue();
+    const { client, catalogue } = await connected(host);
+    const answer = await catalogue({});
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.workflows.map((w) => [w.name, w.ok])).toEqual([
+      ["task", true],
+      ["broken", false],
+    ]);
+    // No session was opened, and the read did not leave a live one behind.
+    expect(host.size).toBe(0);
+    client.close();
+  });
+
+  test("a live sessionId still wins: the named session's own answer", async () => {
+    // The relaxation is additive: an open session's id is used as before, so a
+    // session with NO driver keeps saying `unavailable` even though the project
+    // has workflows.
+    const host = hostWithCatalogue();
+    const { client, catalogue } = await connected(host);
+    await client.request("session/open", { sessionId: "plain", create: true });
+    // A session this host built always has the driver, so prove the ID ROUTE
+    // instead: an unknown id is refused rather than silently answered by the
+    // throwaway read.
+    let code: number | undefined;
+    try {
+      await catalogue({ sessionId: "nope" });
+    } catch (error) {
+      code = (error as { code?: number }).code;
+    }
+    expect(code).toBe(DomainErrorCode.UnknownSession);
+    const answer = await catalogue({ sessionId: "plain" });
+    expect(answer.workflows.map((w) => w.name)).toEqual(["task", "broken"]);
+    client.close();
+  });
+
+  test("a daemon with no workflow seam answers `unavailable`, never an empty folder", async () => {
+    // A host whose factory offers no driver at all (the tunnelled shape): the
+    // throwaway session cannot read workflows either, and says so in the same
+    // words a live session does — never "this project has no workflows".
+    const host = new SessionHost({
+      defaultCwd: "/tmp/workflow-hosted",
+      createAgent: () => ({
+        agent: new Agent({
+          model: {
+            id: "one",
+            async *stream() {
+              yield { type: "done" };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: noopEnv,
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const { client, catalogue } = await connected(host);
+    const answer = await catalogue({});
+    expect(answer.workflows).toEqual([]);
+    expect(answer.unavailable).toBe("workflows run only on a laptop or serve session");
+    expect(host.size).toBe(0);
+    client.close();
   });
 });
 

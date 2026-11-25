@@ -1105,7 +1105,15 @@ export const WorkflowCatalogueResultSchema = z.object({
 });
 export type WorkflowCatalogueResult = z.infer<typeof WorkflowCatalogueResultSchema>;
 
-export const WorkflowCatalogueParamsSchema = z.object({ sessionId: SessionIdSchema });
+export const WorkflowCatalogueParamsSchema = z.object({
+  /**
+   * A session this connection opened. Absent → the catalogue a session the
+   * daemon creates NOW would read (a client opens its session lazily, at the
+   * first prompt: the `/workflow` panel is asked before it exists, exactly like
+   * `session/skills`/`session/tools`, docs/fix/workflows-ux.md S8b).
+   */
+  sessionId: SessionIdSchema.optional(),
+});
 export type WorkflowCatalogueParams = z.infer<typeof WorkflowCatalogueParamsSchema>;
 
 // --- session/workflow_source + session/workflow_save: the workflow EDITOR ---

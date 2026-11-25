@@ -54,6 +54,7 @@ import {
   type SessionTtlParams,
   type SessionTtlResult,
   type UpdateSettingsResult,
+  type WorkflowCatalogueResult,
   type WorkflowListResult,
   type WorkflowListRow,
 } from "@tentacle/protocol";
@@ -74,7 +75,9 @@ import {
   type SessionPushObserver,
   type SessionSchedules,
   type TurnErrorPolicy,
+  WORKFLOWS_UNAVAILABLE,
   type WorkflowWaitTiming,
+  workflowCatalogueResult,
 } from "./hosted-session.ts";
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
 import { fromWireCapabilities, toSessionSkills, toSessionTools } from "./mapping.ts";
@@ -648,6 +651,37 @@ export class SessionHost {
     try {
       return toSessionTools(agent.builtinTools());
     } finally {
+      artifacts.dispose();
+      jobs?.dispose();
+      agentJobs?.dispose();
+      await workloadShells?.dispose();
+    }
+  }
+
+  /**
+   * `session/workflow_catalogue` with no session (docs/fix/workflows-ux.md S8b):
+   * the project's workflows a session created NOW would read — the `createAgent`
+   * factory builds a throwaway agent, exactly as `newSessionTools` does, and its
+   * driver answers. The catalogue is the PROJECT's (`defaultCwd`), and every
+   * session of this daemon shares it, so nothing here needs to be hosted or
+   * listed. No driver (a pod daemon, a tunnelled factory) → `unavailable`, never
+   * an empty folder. The throwaway driver is disposed at once: it owns no run.
+   */
+  async newSessionWorkflowCatalogue(link: ModelLink | null): Promise<WorkflowCatalogueResult> {
+    const artifacts = new ArtifactStore(this.artifactBudget);
+    const { agent, jobs, agentJobs, workloadShells, workflows } = this.opts.createAgent(
+      this.opts.defaultCwd,
+      { modelLink: () => link, artifacts },
+    );
+    try {
+      if (workflows === undefined) {
+        return { workflows: [], dir: this.opts.defaultCwd, unavailable: WORKFLOWS_UNAVAILABLE };
+      }
+      return workflowCatalogueResult(await workflows.catalogue());
+    } finally {
+      // `dispose` cuts every live run and closes it `interrupted`; a throwaway
+      // driver has none, so it only marks itself disposed.
+      workflows?.dispose();
       artifacts.dispose();
       jobs?.dispose();
       agentJobs?.dispose();

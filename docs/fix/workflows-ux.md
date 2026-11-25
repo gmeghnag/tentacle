@@ -1597,3 +1597,144 @@ test, they only had to satisfy the types. `npx tsc --noEmit` (whole repo) → cl
 packages/daemon/test/workflow-hosted.test.ts` → 32 pass; `bunx biome check` on the two files → clean.
 
 *— claude-sonnet-4-5 (exec), 2026-11-25*
+
+## Execution
+
+### Slice S8b — Catalogue before the first message (owner Q1 = A)
+
+**Load-bearing check (re-run first).** Holds on this branch: the catalogue's params were
+`{ sessionId: SessionIdSchema }` — required, so an id-less frame was refused at the peer
+(`packages/protocol/src/session.ts:1108` before the change); the client's pre-open read answered a
+LOCAL `{unavailable: "this session is not open yet"}` and sent nothing
+(`packages/client/src/remote-session.ts:1342`); `workflow()` refused the same way before its trust
+check, so a pre-open start sent nothing either; and P5's precedent is real —
+`newSessionSkills`/`newSessionTools` (`packages/daemon/src/session-host.ts:629,638`, dispatched at
+`packages/daemon/src/connection.ts:714,723`). Proceeded.
+
+**As built, in dependency order.**
+
+1. **Protocol d.7 relaxation.** `WorkflowCatalogueParamsSchema.sessionId` is now `.optional()`
+   (`packages/protocol/src/session.ts:1108-1119`), documented as the `session/skills`/`tools` shape: an
+   absent id = "the catalogue a session the daemon creates now would read". `schema:export`
+   regenerated (`required: ["sessionId"]` removed from `WorkflowCatalogueParams`) — see the gate notes.
+2. **One projection, two callers.** `WorkflowCatalogueResultSchema`'s one outbound projection was
+   inlined in `HostedSession.workflowCatalogue`; it is now `workflowCatalogueResult(catalogue)` +
+   `catalogueRow(row)` + `WORKFLOWS_UNAVAILABLE`, exported (with the driver's `WorkflowCatalogue` type)
+   from `packages/daemon/src/hosted-session.ts:722-795`. Two paths answer the same project's files, so
+   they must word, cap and refuse a row identically — the existing per-row `ok:false` rescue (review
+   round 1 #1) is in that one function, so an id-less read cannot lose it.
+3. **Daemon: the throwaway read.** `SessionHost.newSessionWorkflowCatalogue(link)`
+   (`packages/daemon/src/session-host.ts:660-687`) builds a throwaway agent through the SAME
+   `createAgent` factory `newSessionTools` uses, asks its driver, and disposes it in a `finally`
+   (driver, artifacts, jobs, agentJobs, shells). No driver → `unavailable` in the same words a live
+   session uses, with `dir` = the daemon's `defaultCwd` (a catalogue with no folder is not a valid
+   answer — the wire schema refuses `dir: ""`).
+4. **Daemon: the route.** `Connection.workflowCatalogue(sessionId)` (`connection.ts:735-743`): an id
+   still goes through `lookup` (an unknown one stays `UnknownSession`, unchanged); NO id goes to
+   `newSessionWorkflowCatalogue`. Async off the event loop and never awaiting the peer, so §7's
+   "don't serialize the RPC peer" holds: the walk runs beside a live turn.
+5. **Client: the read.** `RemoteSession.workflowCatalogue()` (`remote-session.ts:1366-1378`) keeps
+   `skills()`'s exact shape — `this.id ?? (this.opening ? await this.opening : null)` — and asks with
+   NO id when there is none, instead of answering the false `not open yet`. The trust bit still refuses
+   first (§7), and an id-holding session is routed exactly as before.
+6. **Client: the start.** `workflow({action:"start"})` pre-open now calls the new private
+   `ensureOpen()` (`remote-session.ts:1349-1359`) = `open()` + `createOrAttach()`: the attach's own open
+   and the first-send's open, i.e. the ONE session path, each a no-op in the shape the other owns — never
+   a second open. `stop`/`resume`/`rerun_step` keep the honest refusal: they name a run, and a session
+   with no id has none.
+7. **TUI.** No code change was needed: `useCatalogue`'s read is a session switch/mount trigger with
+   `session?.workflowCatalogue === undefined` as its only seam check, and `/workflow run <name>` already
+   goes through `session.workflow`. The S1 test `before the first message: no run YET, never not
+   supported` still passes, and the panel now paints the project's rows before the first message (the
+   client fix is what it was reading).
+
+**Drift from the Implementation, and why.**
+
+- **The trust check moved ABOVE the id check** in `workflow()` (it was after it). S8b gives the pre-open
+  path an `await this.ensureOpen()`, so leaving the §7 trust bit below it would CREATE a pod's session
+  before refusing the start — the pod is not trusted, so it must not even be created for work it may not
+  do. Behaviour for a trusted client is identical; for an untrusted one it is strictly stronger (mutation
+  3 below).
+- **`hosted-session.ts` is exported into, not edited in place of.** The plan named
+  `daemon/src/{connection.ts,session-host.ts}`; the shared projection lives in `hosted-session.ts`
+  already, so it is exported from there rather than duplicated in `session-host.ts`. One implementation,
+  per §7.
+- **`session-host.ts`'s `unavailable` needs a `dir`.** The plan did not foresee that the wire schema
+  refuses `dir: ""`, so the sessionless `unavailable` answer carries the daemon's `defaultCwd`. (The
+  client-side refusals already returned `dir: ""` without ever crossing the wire — that is why the
+  shipped code had it.)
+- **The plan's TUI test line was unnecessary; the daemon test is a real Connection.** `tui/test/
+  workflow-frames.test.tsx` fakes the SESSION, so an id-less frame is invisible to it (it already passed
+  before the fix); the property is the client's and the daemon's, and that is where the tests are. The
+  daemon test also uses a real `RpcPeer`+`Connection` through `createChannelPair` rather than the plan's
+  "fake host", so the params schema itself is exercised — the exact thing that used to refuse the frame.
+
+**Red before green (§9).** Every new test below was shown FAILING before its fix (the fix was developed
+against them and the mutations re-prove them): the client block in `workflows-client.test.ts`
+(`S8b: the catalogue and a start before the first message`, 4 tests) and the daemon block in
+`workflow-hosted.test.ts` (`S8b: session/workflow_catalogue before the first message`, 3 tests), plus
+the one flipped assertion in `protocol/test/workflow-wire.test.ts` (`{}` was pinned invalid; absent
+`sessionId` is now the documented shape).
+
+**Failure modes, each converged.**
+
+- *No session yet* → the read answers the project's rows (the daemon builds a throwaway agent and lists
+  no session: `host.size` stays 0, asserted); a start opens once and then starts, `session/open` before
+  `session/workflow` (asserted on the frame order).
+- *Untrusted daemon (a pod)* → refused locally BEFORE any open: nothing created, nothing sent (§7;
+  asserted).
+- *An older daemon* → `MethodNotFound` → `{unsupported: true}` unchanged (the panel says "update
+  tentacle"); the relaxation is backward-compatible for the ID-HOLDING frame an older peer already
+  accepted, and an older PEER receiving the id-less frame fails at the params schema — exactly why this
+  rides the task's existing `protocol.d` note.
+- *A daemon whose factory offers no driver* → `unavailable` in the live session's words, never an empty
+  folder (asserted), and no session hosted (asserted).
+- *A start that cannot open* (a dead link) → `ensureOpen`'s rejection reaches the caller, which the TUI
+  already paints as a notice (`commands/workflow.ts`'s reject arm) — never a silent no-op.
+- *stop/resume/rerun_step pre-open* → the honest `not open yet` refusal, unchanged (asserted).
+- *The folder route an id-less read could hijack* → an unknown `sessionId` still fails `UnknownSession`
+  (asserted), so the relaxation cannot be reached with a typo'd id.
+
+**Mutations (§9 non-vacuity, each applied then reverted; measured on the named assertion).**
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | the client's pre-open read answers the local `not open yet` again | 1 fail — *a LAZY session's catalogue is ONE frame with no sessionId* (`Expected "task", Received undefined`) |
+| 2 | drop `await this.ensureOpen()` from the pre-open start | 1 fail — *a start from the panel OPENS first, then starts* (`{ok:false, reason:"this session is not open yet"}`) |
+| 3 | put the trust check back BELOW the open | 1 fail — *an UNTRUSTED daemon still refuses locally, pre-open* (`opened()` false → true) |
+| 4 | the id-less route answers `{workflows:[], dir:"/tmp"}` instead of reading | 2 fail — *with no sessionId: the same rows* and *a daemon with no workflow seam says unavailable* |
+| 5 | the throwaway read HOSTS a session instead of disposing it | 1 fail — *with no sessionId: the same rows, and NO session is created* |
+| 6 | the sessionless `unavailable` carries `dir: ""` (no defaultCwd) | 1 fail — *a daemon with no workflow seam* (the peer refuses the result: `dir` invalid) |
+
+**Narrow verification.** `bun test packages/client/test/workflows-client.test.ts` → 31 pass;
+`bun test packages/daemon/test/workflow-hosted.test.ts` → 35 pass;
+`bun test packages/protocol/test/workflow-wire.test.ts` → 20 pass; the three together → 86 pass, 0 fail.
+The sibling workflow suites (`packages/daemon/test/workflow*.test.ts` + `packages/client/test/workflow-*`)
+→ 98 pass, 0 fail; the sessionless-read siblings (`tool-toggles`, `skills-slash`, `session-context`) →
+31 pass; `packages/tui/test/workflow-frames.test.tsx` → 14 pass (S1's pre-open test still green);
+`packages/protocol/test/{json-schema,version}.test.ts` → 25 pass; `scripts/test/changelog-guard.test.ts`
+→ 5 pass. `bunx tsc -p packages/daemon --noEmit` and `-p packages/client --noEmit` → clean;
+`bunx biome check` on the nine changed files → clean (`packages/tui` alone reports pre-existing
+`@tentacle/protocol` resolution + implicit-`any` errors in files this slice does not touch; the root
+project resolves them, which is how the repo's `typecheck` runs).
+
+**Schema.** `bun run schema:export` regenerated `packages/protocol/schema/protocol.json` (one hunk:
+`WorkflowCatalogueParams` loses `required: ["sessionId"]`) — the committed generated file, never
+hand-merged. No `PROTOCOL_VERSION` edit: the task's `protocol.d/workflows-ux.md` note now covers the
+relaxation too (merged with `bun run protocol:bump`).
+
+**Changelog.** `changelog.d/workflows-ux-pre-open-catalogue.fixed.md` (one bullet). `CHANGELOG.md` and
+`TODO.md` untouched. Its own fragment (not an extension of `workflows-ux.changed.md`) because it is a
+behaviour the released bullet does not describe: before the fix the panel refused.
+
+**Files touched:** `packages/protocol/src/session.ts`, `packages/protocol/schema/protocol.json`,
+`packages/protocol/test/workflow-wire.test.ts`, `packages/daemon/src/{connection,session-host,
+hosted-session}.ts`, `packages/daemon/test/workflow-hosted.test.ts`,
+`packages/client/src/{remote-session,remote-client}.ts`, `packages/client/test/workflows-client.test.ts`,
+`protocol.d/workflows-ux.md`, `changelog.d/workflows-ux-pre-open-catalogue.fixed.md`, this doc. No other
+slice touched.
+
+**Not verified:** the orchestrator's full gate (`bun run check`, whole-repo typecheck + lint + parallel
+suite) — run by the script after this, per the brief. Everything narrower is above, green.
+
+*— claude-sonnet-4-5 (exec), 2026-11-25*
