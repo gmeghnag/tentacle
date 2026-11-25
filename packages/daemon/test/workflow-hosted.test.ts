@@ -827,7 +827,10 @@ const toolCall = (id: string, name: string, args: unknown): StreamEvent => ({
  * with a real driver on an `approve` step, whose ask goes to the session's ONE
  * broker, a recording model and the persister over an in-memory store.
  */
-function waitingRig(script: readonly (readonly StreamEvent[])[] = []) {
+function waitingRig(
+  script: readonly (readonly StreamEvent[])[] = [],
+  opts: { readonly wake?: boolean } = {},
+) {
   const requests: ChatRequest["messages"][] = [];
   const asked: PermissionRequest[] = [];
   const runs: string[] = [];
@@ -859,6 +862,7 @@ function waitingRig(script: readonly (readonly StreamEvent[])[] = []) {
     }),
     sharedAutoAccept: true,
     answersAutoAccept: true,
+    ...(opts.wake === true ? { wakeOnJobExit: true } : {}),
     createAgent: () => {
       const permissions = new PermissionBroker();
       const workflows = new WorkflowDriver({
@@ -885,9 +889,30 @@ function waitingRig(script: readonly (readonly StreamEvent[])[] = []) {
           return { content: "askme ok" };
         },
       };
+      // The USER answers the run's ask while this tool runs (S4): the run ends
+      // inside the model's round, so its end note is queued mid-turn.
+      const answer: Tool = {
+        name: "answer",
+        description: "answer",
+        inputSchema: z.object({}).passthrough(),
+        permission: "none",
+        async execute() {
+          const ask = pending()[0];
+          if (!ask) throw new Error("no pending ask");
+          session.resolvePermission(ask.requestId, "allow_once");
+          // The LIVE frame, not `snapshotPage()` (its cut does not move while a
+          // turn runs). `finish()` publishes, then calls `ended`, synchronously.
+          await until(() => liveState() === "ok");
+          await settle();
+          return { content: "answered" };
+        },
+      };
       const agent = new Agent({
         model,
-        tools: new ToolRegistry().register(askme).register(createWorkflowTool(workflows)),
+        tools: new ToolRegistry()
+          .register(askme)
+          .register(answer)
+          .register(createWorkflowTool(workflows)),
         env: noopEnv,
         requestPermission: (req, options) => permissions.request(req, options),
       });
@@ -907,6 +932,10 @@ function waitingRig(script: readonly (readonly StreamEvent[])[] = []) {
     );
   };
   const runState = (): string | undefined => session.snapshotPage().workflows?.[0]?.state;
+  const liveState = (): string | undefined =>
+    updates()
+      .flatMap((u) => (u.type === "workflows" ? [u.runs[0]?.state] : []))
+      .at(-1);
   const startAndWait = async (): Promise<void> => {
     const started = await session.workflow({
       sessionId: session.id,
@@ -921,7 +950,7 @@ function waitingRig(script: readonly (readonly StreamEvent[])[] = []) {
     session.prompt(turnId, [{ type: "text", text }]);
     await until(() => !session.running);
   };
-  return { session, store, requests, asked, runs, pending, runState, startAndWait, turn };
+  return { session, store, frames, requests, asked, runs, pending, runState, startAndWait, turn };
 }
 
 describe("the live status line on a hosted session (workflow-run-awareness S3)", () => {
@@ -982,6 +1011,47 @@ describe("the live status line on a hosted session (workflow-run-awareness S3)",
     if (!approve) throw new Error("no workflow ask");
     expect(approve.kind).toBe("workflow_approve");
     expect(autoApproves(approve, true)).toBe(false);
+    rig.session.close();
+  });
+
+  test("T6 a run that ends during round 1 is told at round 2 of the SAME turn: once, and no wake follows", async () => {
+    // S4: `workflow_end` rides the mid-turn drain like a sub-agent exit. Today's
+    // behaviour (start-only) puts the note in no request of this turn and wakes.
+    const rig = waitingRig([[toolCall("c1", "answer", {}), { type: "done" }]], { wake: true });
+    await rig.startAndWait();
+
+    await rig.turn("t-1", "go");
+
+    const endNote = (c: unknown): boolean => String(c).startsWith("[workflow wf-1 task: ok · 1/1");
+    expect(rig.requests).toHaveLength(2);
+    // Round 1: the run still waits (the line), no end note yet.
+    expect(rig.requests[0]?.at(-1)).toEqual({ role: "user", content: WAITS_LINE });
+    const round2 = rig.requests[1] ?? [];
+    // Round 2: the end note right after the tool result, and no line any more.
+    expect(round2.filter((m) => endNote(m.content))).toHaveLength(1);
+    expect(round2.at(-1)?.content).toSatisfy(endNote);
+    expect(round2.at(-2)?.role).toBe("tool");
+    expect(round2.some((m) => String(m.content).startsWith("[workflow wf-1 task: step"))).toBe(
+      false,
+    );
+    // Persisted as the end note (its kind + id), as the turn-start flush does.
+    expect(round2.at(-1)).toMatchObject({ note: { kind: NOTE_KIND.workflowEnd, id: "wf-1" } });
+    expect(rig.session.unflushedExits).toBe(0);
+
+    // No wake turn: the follow-up check finds nothing pending.
+    await settle();
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await settle();
+    }
+    expect(rig.session.running).toBe(false);
+    expect(rig.requests).toHaveLength(2);
+    expect(JSON.stringify(rig.frames)).not.toContain('"wake-');
+
+    // Never told twice: the next turn's request holds the note exactly once.
+    await rig.turn("t-2", "next");
+    expect(rig.requests).toHaveLength(3);
+    expect((rig.requests[2] ?? []).filter((m) => endNote(m.content))).toHaveLength(1);
     rig.session.close();
   });
 

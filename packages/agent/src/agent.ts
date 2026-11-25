@@ -372,7 +372,9 @@ export type PendingExit =
 /**
  * A workflow run ended (docs/feat/agent-workflows.md D3): its end note, keyed
  * `note.id = runId` (the load derivation's dedupe), rides the SAME queue as a
- * job exit, so it is told at the next turn's start and WAKES like one.
+ * job exit, so it WAKES like one. It is told at the next round boundary of a
+ * running turn (the mid-turn drain, like a sub-agent's exit), else at the next
+ * turn's start (docs/feat/workflow-run-awareness.md S4).
  */
 export type PendingWorkflowEnd = {
   readonly kind: "workflow_end";
@@ -382,6 +384,13 @@ export type PendingWorkflowEnd = {
 
 const isWorkflowEnd = (job: PendingExit): job is PendingWorkflowEnd =>
   "kind" in job && job.kind === "workflow_end";
+
+/** THE end note's message: the start flush and the mid-turn drain both use it. */
+const workflowEndNote = (job: PendingWorkflowEnd): ChatMessage => ({
+  role: "user",
+  content: job.text,
+  note: { kind: NOTE_KIND.workflowEnd, id: job.runId },
+});
 
 /**
  * A running background child's `agent_notify` text, queued for the parent agent
@@ -1027,7 +1036,7 @@ export class Agent {
     this.pendingExits.push({ kind: "user_note", agentId, text });
   }
 
-  /** A workflow run ended: its note, told at the next turn's start (and it wakes). */
+  /** A workflow run ended: its note, told at the next round boundary or turn start (and it wakes). */
   noteWorkflowEnd(runId: string, text: string): void {
     this.pendingExits.push({ kind: "workflow_end", runId, text });
   }
@@ -2897,7 +2906,9 @@ export class Agent {
    * Drain what a mid-turn boundary may deliver: the running children's notes
    * (`agent_message`) AND a SUB-AGENT's exit (`sa-N`), in queue order
    * (docs/fix/subagent-error-report.md root cause A — a child that ends while
-   * the parent works is invisible until the next turn otherwise). A shell job's
+   * the parent works is invisible until the next turn otherwise) AND a workflow
+   * run's end note (docs/feat/workflow-run-awareness.md S4: told in the turn that
+   * runs when it ends, the round its status line disappears). A shell job's
    * exit and the USER's note stay where they are: the turn's start only (owner
    * Q1). Synchronous (the late-drain invariant) and order preserving.
    */
@@ -2906,7 +2917,7 @@ export class Agent {
     let kept = 0;
     for (let i = 0; i < this.pendingExits.length; i++) {
       const job = this.pendingExits[i];
-      if (job !== undefined && (isAgentMessage(job) || isSubagentExit(job))) {
+      if (job !== undefined && (isAgentMessage(job) || isSubagentExit(job) || isWorkflowEnd(job))) {
         midTurn.push(job);
       } else if (job !== undefined) {
         this.pendingExits[kept++] = job;
@@ -2923,6 +2934,11 @@ export class Agent {
         const message = agentMessageNote(job);
         messages.push(message);
         events.push({ type: "context_note", text: message.content, reason: "background_exit" });
+        continue;
+      }
+      if (isWorkflowEnd(job)) {
+        messages.push(workflowEndNote(job));
+        events.push({ type: "context_note", text: job.text, reason: "background_exit" });
         continue;
       }
       if (!isSubagentExit(job)) {
@@ -3004,11 +3020,7 @@ export class Agent {
         continue;
       }
       if (isWorkflowEnd(job)) {
-        messages.push({
-          role: "user",
-          content: job.text,
-          note: { kind: NOTE_KIND.workflowEnd, id: job.runId },
-        });
+        messages.push(workflowEndNote(job));
         events.push({ type: "context_note", text: job.text, reason: "background_exit" });
         continue;
       }

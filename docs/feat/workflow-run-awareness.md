@@ -573,6 +573,62 @@ auto-accept approves workflow asks: killed (22 pass, 1 fail)
 **Gate:** only the files above; full typecheck/lint/test left to the orchestrator's script. No
 schema change, so `protocol.json` is untouched.
 
+### S4 — the end note at the next round boundary — DONE
+
+*— claude-opus-5-5, 2026-11-25 (branch at `11f4bcc2`, uncommitted)*
+
+**Load-bearing check, re-run first: holds** (by `rg` + read): the loop's request is still built
+per round from `messages` (round + final report); the mid-turn drain is `flushMidTurn`, called at
+the round boundary and in the late drain before a final answer (the synchronous steering
+window); it took only `agent_message` and sub-agent exits. `ended` → `noteWorkflowEnd` +
+`kickWake`; `maybeWake` is gated on `pendingExitCount > 0` and `busy`, and `kickWake` runs again
+at every turn's end, so a note drained mid-turn leaves nothing to wake for.
+
+**As built:**
+- `packages/agent/src/agent.ts` — `flushMidTurn` also takes `workflow_end` (queue order kept),
+  pushing the note and a `context_note` event exactly as the turn-start flush does; ONE renderer
+  `workflowEndNote(job)` (role `user`, `note: { kind: workflowEnd, id: runId }`) now used by both
+  drains. Doc comments of `PendingWorkflowEnd`, `noteWorkflowEnd` and `flushMidTurn` updated.
+  `notesFlushedMidTurn` is set by the existing callers of `flushMidTurn` (stale-wake guard), no
+  new code.
+- T6 in `packages/daemon/test/workflow-hosted.test.ts` (real `SessionHost` → `attachWorkflows`,
+  `wakeOnJobExit: true`): round 1 calls an `answer` tool that resolves the `approve` ask and waits
+  for the run's `ok` frame. Asserted: round 1 ends with the waits line; round 2 holds the end note
+  exactly once, as its last message, right after the tool result, with `note.kind = workflow_end`
+  / `id = wf-1`, and no status line; `unflushedExits === 0`; after several macrotasks no turn
+  runs, no 3rd request, no `wake-` id in any frame; the next turn's request holds the note once.
+  `waitingRig` gained an opt-in `wake` and the `answer` tool (unused by T4/T5).
+
+**Red** (before the agent change): `23 pass, 1 fail` — `round2 … endNote … toHaveLength(1)`,
+received 0. **Green:** `24 pass, 0 fail`; T6 `--rerun-each 20`: `20 pass`. Neighbours
+(`steering`, `subagent-background`, `status-line-request`, `agent`, `workflow-driver`,
+`serve-autowake`, `workflow-load`, `workflow-hosted`): `146 pass, 0 fail`. `bunx biome check` on
+the 2 files: clean. `tsc --noEmit -p packages/agent` and `-p packages/daemon`: clean.
+
+**Mutations** (`.tentacle/tmp/workflow-run-awareness/mutate-s4.ts`, source restored):
+
+```
+end note not in the mid-turn drain: killed (23 pass, 1 fail) error: expect(received).toHaveLength(expected)
+drained but also kept in the queue (told twice / wakes): killed (23 pass, 1 fail) error: expect(received).toHaveLength(expected)
+mid-turn note without its note kind: killed (23 pass, 1 fail) error: expect(received).toMatchObject(expected)
+restored: true
+```
+
+**Drift:**
+- T6's `answer` tool waits on the LIVE `workflows` frame, not `snapshotPage()`: the snapshot's
+  cut does not move while a turn runs (`publishWorkflows` records a cut only when idle), so a
+  first version waiting on the snapshot timed out in 6 of 8 reruns. `finish()` publishes and then
+  calls `ended` synchronously, so the `ok` frame implies the note is queued.
+- No agent-level unit test added: T6 drives the real agent loop through the daemon, which is
+  where "no wake follows" is observable.
+- Not exercised by a test: the late drain (a run ending during the model's FINAL round, which then
+  continues the turn for one more round, as a sub-agent exit does). Same code path
+  (`flushMidTurn`); a test would need the run to end while the model streams.
+- Changelog: S1's fragment already covers this (no new one).
+
+**Gate:** only the files above; full typecheck/lint/test left to the orchestrator's script. No
+schema change, so `protocol.json` is untouched.
+
 ## Review
 
 *— (empty)*
