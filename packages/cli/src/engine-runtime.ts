@@ -270,6 +270,11 @@ export interface EngineRuntimeDeps {
    * by the caller BEFORE this runtime starts — `workspace-mount.ts`).
    */
   readonly workspace?: WorkspaceMount;
+  /**
+   * docker/podman: the engine network of the container (feat/run-network);
+   * absent = no `NetworkMode` (the engine's default). A k8s host refuses it.
+   */
+  readonly network?: string;
   /** Extra workload labels (slice E: `tentacle.kept`). */
   readonly labels?: Readonly<Record<string, string>>;
   /** Workload annotations (slice E: engine, model, created; docker writes them as labels). */
@@ -638,6 +643,7 @@ async function provisionNamed(
     // Errors arrive translated (e.g. a missing k8s namespace → actionable).
     await host.create(name, deps.image, {
       ...(workspace ? { workspace } : {}),
+      ...(deps.network ? { network: deps.network } : {}),
       ...(deps.labels ? { labels: deps.labels } : {}),
       ...(deps.annotations ? { annotations: deps.annotations } : {}),
     });

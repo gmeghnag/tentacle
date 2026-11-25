@@ -8,10 +8,12 @@ import {
   attachCommand,
   buildEngineHost,
   chooseEngine,
+  chooseNetwork,
   engineFlagProblem,
   hostOptionsFor,
   keptLocation,
   kubeNamespace,
+  networkOnKubernetes,
   setupFailureLine,
 } from "../src/engine-select.ts";
 
@@ -325,5 +327,32 @@ describe("buildEngineHost", () => {
     expect(dockerCalls.map((ep) => (ep.kind === "unix" ? ep.path : ep.kind))).toEqual([
       "/run/user/1000/podman/podman.sock",
     ]);
+  });
+});
+
+// feat/run-network: the container's network. Its PRECEDENCE mirrors
+// `chooseEngine` exactly; its SHAPE is validated elsewhere (`networkValueProblem`),
+// because a network name has no closed set (D3).
+describe("chooseNetwork", () => {
+  test("flag > a non-empty env > configured > undefined", () => {
+    expect(chooseNetwork({})).toBeUndefined();
+    expect(chooseNetwork({ configured: "my-net" })).toBe("my-net");
+    expect(chooseNetwork({ env: "none", configured: "my-net" })).toBe("none");
+    expect(chooseNetwork({ flag: "host", env: "none", configured: "my-net" })).toBe("host");
+  });
+
+  test("an empty env var is unset (the flag is passed through to be validated)", () => {
+    expect(chooseNetwork({ env: "", configured: "my-net" })).toBe("my-net");
+    expect(chooseNetwork({ env: "" })).toBeUndefined();
+    expect(chooseNetwork({ flag: "none", env: "" })).toBe("none");
+  });
+});
+
+describe("networkOnKubernetes", () => {
+  test("true only with a network AND the kubernetes engine", () => {
+    expect(networkOnKubernetes("kubernetes", "none")).toBe(true);
+    expect(networkOnKubernetes("kubernetes", undefined)).toBe(false);
+    expect(networkOnKubernetes("docker", "none")).toBe(false);
+    expect(networkOnKubernetes("podman", "my-net")).toBe(false);
   });
 });

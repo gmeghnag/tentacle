@@ -17,6 +17,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import {
   type ContainerCreateBody,
+  ContainerCreateError,
   type ContainerInspect,
   DockerApiError,
   type DockerExecTarget,
@@ -480,11 +481,7 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
 
   test("a missing image (404 on create) is pulled once, then created", async () => {
     const client = new FakeDockerClient(new ScriptedProvider([]));
-    client.createErrors = [
-      new Error(
-        "cannot create container c1: No such image: img:1 — pull the image or check its name",
-      ),
-    ];
+    client.createErrors = [new ContainerCreateError("c1", "image", "No such image: img:1")];
     const { result: runtime } = await captureExitListeners(() =>
       startEngineRuntime(config, {
         host: hostFor(client),
@@ -504,7 +501,7 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
 
   test("a pull failure surfaces; nothing was created, so no net and no remove", async () => {
     const client = new FakeDockerClient(new ScriptedProvider([]));
-    client.createErrors = [new Error("cannot create container c1: No such image: nope")];
+    client.createErrors = [new ContainerCreateError("c1", "image", "No such image: nope")];
     client.pullImage = (ref) => {
       client.calls.push(`pull:${ref}`);
       return Promise.reject(new Error(`cannot pull ${ref}: not found — check the name`));
@@ -1102,4 +1099,69 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
     expect(client.execTargets[0]?.workingDir).toBeUndefined();
     expect(client.execTargets[0]?.user).toBeUndefined();
   });
+});
+
+// feat/run-network: the container's network is data, not a mode — one optional
+// string to `HostConfig.NetworkMode`, absent when unset (D4/D6).
+describe("the container network (feat/run-network)", () => {
+  test("containerBody: NetworkMode is passed through verbatim, and absent when unset", () => {
+    expect(JSON.stringify(containerBody("img", { network: "none" }))).toContain(
+      '"NetworkMode":"none"',
+    );
+    expect(JSON.stringify(containerBody("img", { network: "container:abc" }))).toContain(
+      '"NetworkMode":"container:abc"',
+    );
+    // Unset stays byte-identical to today's body (the pinned guards above).
+    expect(JSON.stringify(containerBody("img"))).not.toContain("NetworkMode");
+  });
+
+  test("a network the engine does not have: ONE refusal, no image pull, no second create", async () => {
+    const client = new FakeDockerClient(new ScriptedProvider([]));
+    // Mutation: make `missingImage` true → a pointless `pull:` appears here.
+    client.createErrors = [new ContainerCreateError("c1", "network", 'network "nope" not found')];
+    const { listeners, error } = await captureExitListeners(() =>
+      startEngineRuntime(config, {
+        host: hostFor(client),
+        image: "img:1",
+        name: "c1",
+        network: "nope",
+        ...common("run-net404").deps,
+      }),
+    );
+    expect(error).toBeInstanceOf(RefusalError);
+    expect(String(error.message)).toContain('network "nope"');
+    expect(String(error.message)).toContain("network create nope");
+    expect(listeners).toHaveLength(0);
+    // ONE create, no pull, no retry: docker's create is atomic, nothing exists.
+    expect(client.calls).toEqual(["create:c1:img:1"]);
+  });
+});
+
+// The plan's LOAD-BEARING proof (docs/feat/run-network.md): a run with
+// `network: "none"` serves a whole turn over zero sockets — the daemon rides the
+// exec's stdio and the model is RPC to this host, so no in-container network is
+// needed. If this ever needs a socket, `--network none` is a broken promise.
+test("network none: a scripted turn completes and the body says NetworkMode none", async () => {
+  const client = new FakeDockerClient(
+    new ScriptedProvider([[{ type: "text", delta: "offline ok" }, { type: "done" }]]),
+  );
+  const { result: runtime } = await captureExitListeners(() =>
+    startEngineRuntime(config, {
+      host: hostFor(client),
+      image: "img",
+      name: "netnone",
+      network: "none",
+      ...common("run-netnone").deps,
+    }),
+  );
+  if (!runtime) {
+    throw new Error("runtime did not start");
+  }
+  expect(client.bodies[0]?.HostConfig?.NetworkMode).toBe("none");
+  const chunks: unknown[] = [];
+  for await (const update of runtime.createSession().send("hi")) {
+    chunks.push(update);
+  }
+  expect(JSON.stringify(chunks)).toContain("offline ok");
+  runtime.dispose();
 });

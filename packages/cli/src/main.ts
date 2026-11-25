@@ -46,6 +46,7 @@ import {
   configDirFromEnv,
   loadConfig,
   longToolNameWarnings,
+  networkValueProblem,
   titleConfigNotice,
   topLevelKeys,
   unknownTypeModelWarnings,
@@ -70,12 +71,14 @@ import {
   attachCommand,
   buildEngineHost,
   chooseEngine,
+  chooseNetwork,
   engineFlagProblem,
   engineNoun,
   hostOptionsFor,
   keptLocation,
   kubeNamespace,
   laptopWorkspaceInput,
+  networkOnKubernetes,
   resolveRm,
   setupFailureLine,
 } from "./engine-select.ts";
@@ -295,7 +298,7 @@ Usage:
   tentacle --plain         plain line-based REPL (for pipes / no TTY)
   tentacle --resume [uid]  resume a saved session of this folder (pick one if no uid)
   tentacle --continue      resume this folder's most recent session
-  tentacle run --image <ref> [--engine kubernetes|docker|podman] [--rm[=true|false]] [--no-mount] [--confirm-mount] [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [--name <n>] [--auto-accept[=true|false]] ["<prompt>" | --prompt <text>]
+  tentacle run --image <ref> [--engine kubernetes|docker|podman] [--network <name|none>] [--rm[=true|false]] [--no-mount] [--confirm-mount] [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [--name <n>] [--auto-accept[=true|false]] ["<prompt>" | --prompt <text>]
                                 run the agent inside a new Kubernetes pod or Docker/Podman
                                 container (sandbox), local TUI (--name is its name; random
                                 when omitted; "<prompt>" is sent at once as the first
@@ -488,6 +491,15 @@ Engines (tentacle run / attach --engine kubernetes|docker|podman):
            overrides it; DOCKER_HOST is ignored. --context <ctx> uses a docker context.
   --insecure-docker-tcp   allow a plaintext tcp:// engine (unauthenticated root on
                           that host; refused by default — use TLS or ssh://)
+  --network <name|none> (run only)
+                          the docker/podman network of the container: a network
+                          name, or "none" for an air-gapped run (no egress at all —
+                          the agent's own git/HTTP tools fail; nothing tentacle does
+                          needs it). Unset: the engine's default (bridge). Precedence:
+                          --network > TENTACLE_NETWORK > profile > config "network:"
+                          > the engine's default. A malformed value, and any network
+                          with --engine kubernetes, is an error. Fixed at create, so
+                          attach has no such flag.
   --rm[=true|false] (run only)
                           DEFAULT false: the pod/container is NOT deleted on exit or
                           Ctrl+C; tentacle prints the "tentacle attach --engine …" to
@@ -1562,6 +1574,30 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return 1;
     }
     const noun = engineNoun(engine);
+    // feat/run-network: the container's network, resolved ONCE (flag >
+    // TENTACLE_NETWORK > profile/config > the engine's own default), then
+    // validated and gated BEFORE sessions, the host, a run dir or a create.
+    // A malformed value is a usage error (the shape rule is the config's, so
+    // the loader and this flag cannot disagree); a network with kubernetes is a
+    // hard error whatever its source (D1) — a pod's network is the cluster's.
+    const network = chooseNetwork({
+      flag: runFlags.get("network"),
+      env: process.env.TENTACLE_NETWORK,
+      configured: config.network,
+    });
+    if (network !== undefined) {
+      const networkProblem = networkValueProblem(network);
+      if (networkProblem !== null) {
+        err(`[error] ${networkProblem}\nusage: ${USAGE.run}\n`);
+        return 1;
+      }
+      if (networkOnKubernetes(engine, network)) {
+        err(
+          `[${noun}] --network is for --engine docker or podman (a pod's network is the cluster's): drop it (--network, TENTACLE_NETWORK or "network" in the config), or add --engine docker|podman\n`,
+        );
+        return 1;
+      }
+    }
     const rm = resolveRm({
       bare: runBools.has("rm"),
       value: runFlags.get("rm"),
@@ -1705,6 +1741,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       ...(binDir ? { binDir } : {}),
       ...(name ? { name } : {}),
       ...(wsPlan.kind === "mount" ? { workspace: wsPlan.mount } : {}),
+      ...(network !== undefined ? { network } : {}),
       ...(listed
         ? {
             resumeHint: (name: string) =>

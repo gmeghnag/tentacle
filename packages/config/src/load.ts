@@ -229,6 +229,8 @@ export interface TentacleConfig {
   readonly toolsEnabled?: Readonly<Record<string, boolean>>;
   /** The configured default engine of `run`/`attach` (file/profile); absent = unset. */
   readonly engine?: ResolvedConfig["engine"];
+  /** The configured network of `run`'s container (file/profile); absent = the engine's default. */
+  readonly network?: ResolvedConfig["network"];
   /** The configured `run --rm` default (file/profile); absent = the CLI default (false: kept). */
   readonly rm?: ResolvedConfig["rm"];
   /** `run --detach`'s settings (file/profile); absent = the relay's defaults. */
@@ -928,6 +930,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     disabledTools: resolved.disabledTools,
     ...(resolved.toolsEnabled !== undefined ? { toolsEnabled: resolved.toolsEnabled } : {}),
     ...(resolved.engine !== undefined ? { engine: resolved.engine } : {}),
+    ...(resolved.network !== undefined ? { network: resolved.network } : {}),
     ...(resolved.rm !== undefined ? { rm: resolved.rm } : {}),
     ...(resolved.detach !== undefined ? { detach: resolved.detach } : {}),
     ...(resolved.mount !== undefined ? { mount: resolved.mount } : {}),

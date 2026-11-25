@@ -256,8 +256,10 @@ Dependency order; smallest diff each.
    (one shared truth for the loader and the flag).
 3. `packages/config/src/resolve.ts` — `TentacleConfig.network` (`:229-233`),
    carry it (`:885`).
-4. `packages/config/src/key-docs.ts` — the `network` entry (after `:1026`).
-5. `packages/config/src/defaults.ts` — the commented example (`:253-258`).
+3b. `packages/config/src/load.ts` — the loaded-config field and its carry
+   (ADDED during Execution; the plan missed it: `loadConfig` re-lists every
+   carried key explicitly, so `resolveConfig` alone does not surface it).
+4. `packages/config/src/key-docs.ts` — the `network` entry (after `:1026`).5. `packages/config/src/defaults.ts` — the commented example (`:253-258`).
 6. `packages/cli/src/engine-host.ts` — `EngineCreateOptions.network`
    (`:75-82`).
 7. `packages/cli/src/engine-docker.ts` — `ContainerBodyOptions.network`
@@ -353,8 +355,92 @@ Validation: `bun test <file>` per slice, then `bun run check` green
 
 ## Execution
 
-*— pending (DeepSeek)*
+*— claude (claude-code 2.1.332 agent), 2026-11-26*
 
 ## Review
 
 *— pending (Opus, in-context; re-read the create-error path)*
+
+**Load-bearing check, re-run first.** The Context repro was re-run on
+`feat/run-network` before any edit and reproduced byte-for-byte (`[error]
+unknown option --network` + the same usage line, refused by `flags.ts` before
+any engine or session). `rg NetworkMode` over the tree (minus node_modules)
+found only the two negative guards in `engine-docker.test.ts:813`, `:845` — no
+production `NetworkMode` anywhere, so the capability really was absent. The six
+steps of the load-bearing assumption were re-read at their cited sites
+(`containerBody`, the exec `StdDemux`, `ProxyModelProvider`, `checkPodBinaries`,
+`createContainer`'s pull path, `armExitNet`) — all still hold; the empirical
+proof landed as one test (§Tests 5) and is green.
+
+**Order of work (all slices done).**
+
+1. **docker** (`packages/docker/src/client.ts`): `ContainerCreateError` with
+   `reason: "image" | "network"`, `NETWORK_NOT_FOUND` classification inside
+   `createContainer`, and the 404/image text kept verbatim. `index.ts` was NOT
+   edited — it already does `export * from "./client.ts"` (drift 1, below).
+2. **config** (`schema.ts` `NETWORK_VALUE` + `NETWORK_VALUE_MESSAGE` +
+   `networkValueProblem`, the `network` key; `resolve.ts` `TentacleConfig.network`
+   + carry; `key-docs.ts` entry; `defaults.ts` commented example).
+3. **cli**: `EngineCreateOptions.network` (`engine-host.ts`); `ContainerBodyOptions.network`
+   + the `HostConfig` spread + `create`'s pass-through, `missingImage` and the
+   network `RefusalError` (`engine-docker.ts`); the k8s backstop (`engine-k8s.ts`);
+   `EngineRuntimeDeps.network` → `provisionNamed` (`engine-runtime.ts`);
+   `chooseNetwork` + `networkOnKubernetes` (`engine-select.ts`); `network: {}` in
+   `run.values` + `USAGE.run` (`flags.ts`); resolve → `networkValueProblem` →
+   k8s refusal → `workloadDeps.network`, usage and the Engines help block
+   (`main.ts`).
+4. **README** (run examples, the Engines paragraph, the regenerated config table
+   via `bun run docs:config`) and `changelog.d/run-network.added.md`.
+
+**Drift from the Implementation (and why).**
+
+1. `packages/docker/src/index.ts` needed **no** edit: it already re-exports
+   `client.ts` wholesale, so the class is public without a second line.
+2. `packages/config/src/load.ts` **was** needed and the plan missed it:
+   `loadConfig` returns an explicit `LoadedConfig` literal that re-lists every
+   carried key (`:231`, `:930` next to `engine`), so `resolveConfig` alone left
+   `config.network` `undefined` end to end. Found by the `main.test.ts` test, not
+   by reading — added to the Files list as `3b`.
+3. Two existing tests in `engine-docker.test.ts` faked the missing image with a
+   **plain `Error`** carrying the `cannot create container …` prefix; D5 makes
+   `missingImage` a typed check, so those fakes now throw
+   `new ContainerCreateError(name, "image", …)` — what the real client throws.
+   Assertions unchanged; the pull-and-retry behaviour is still pinned.
+4. `--network ""` is refused by the flags table (`--network needs a value`)
+   before `networkValueProblem` ever sees it, so the malformed-value test uses
+   values that reach it (`a/b`, `a b`); the empty-value case is asserted
+   separately as the parse refusal the Context repro describes.
+5. The optional live `TENTACLE_DOCKER_TESTS=1` case (Tests 9) was **not** added:
+   it needs a real engine and would only run under the opt-in, and the Docker
+   test run here had no engine. Stated as unverified: whether podman's compat
+   API honours `NetworkMode: "none"` on a real socket.
+
+**Tests (red → green, then mutated).** New/extended: `packages/config/test/network.test.ts`
+(shape + schema + resolve + profile), `packages/docker/test/client.test.ts`
+(the classification), `packages/cli/test/engine-select.test.ts` (precedence +
+the kubernetes predicate), `packages/cli/test/engine-docker.test.ts` (wire body,
+the refusal with no pull, and the load-bearing whole-turn-under-`none`),
+`packages/cli/test/main.test.ts` (flag/env/config → `deps.network`, k8s refusal
+from flag AND env, malformed value, `attach` unknown option),
+`packages/cli/test/engine-k8s.test.ts` (the backstop). Narrow runs:
+`engine-docker` 42 ✓, `main` 125 ✓, `engine-select` 18 ✓, `engine-k8s` 19 ✓,
+`packages/config` + engine-runtime 643 ✓, explain/flags/config-run 95 ✓,
+`docker/client` + `config/network` 69 ✓; `biome check` clean on every file
+touched.
+
+The new files' first RED was a missing export (a new symbol cannot be imported
+before it exists); non-vacuity was therefore proved by **mutation**, each
+reverted immediately:
+
+| Mutation | Result |
+| --- | --- |
+| `missingImage = true` (always pull) | 6 fail in `engine-docker.test.ts` |
+| `chooseNetwork` env step dropped | 2 fail in `engine-select.test.ts` |
+| `networkOnKubernetes` → `false` | 1 fail (`main` — k8s refusal) |
+| `NetworkMode` spread removed from the body | 2 fail (`engine-docker` — body + `none` turn) |
+| `networkValueProblem` → always `null` | 2 fail (`config/network` + `main`) |
+| network classification removed from `createContainer` | 1 fail (`docker/client`) |
+
+**Gate.** Not run here by design (the orchestrator's script runs
+`bun run check`); the narrow per-slice runs above are green. No protocol schema
+changed, so `packages/protocol/schema/protocol.json` needed no regeneration.

@@ -111,8 +111,8 @@ context reset replaced (default off).
 
 ```sh
 tentacle run --image <ref> [-n <namespace>] [--rm] [--name <n>] ["<prompt>"]        # Kubernetes (default)
-tentacle run --engine docker --image <ref> [--context <ctx>] [--name <n>] ["<prompt>"]  # Docker
-tentacle run --engine podman --image <ref> [--name <n>] ["<prompt>"]                    # Podman
+tentacle run --engine docker --image <ref> [--context <ctx>] [--network <name|none>] [--name <n>] ["<prompt>"]  # Docker
+tentacle run --engine podman --image <ref> [--network <name|none>] [--name <n>] ["<prompt>"]                    # Podman
 ```
 
 `--name <n>` names the workload (a random name when omitted). The optional
@@ -330,7 +330,12 @@ Docker uses the engine the docker CLI would (`--context` › `DOCKER_HOST` ›
 unless `--insecure-docker-tcp`. Podman's socket is found automatically
 (`podman machine` on macOS, rootless/rootful on Linux; `CONTAINER_HOST`
 overrides it) — no `DOCKER_HOST` needed. `-n`/`-c` are Kubernetes-only;
-`--context`/`--insecure-docker-tcp` are Docker/Podman-only. Read-only root
+`--context`/`--insecure-docker-tcp`/`--network` are Docker/Podman-only. A
+container's network is chosen at create: `--network <name|none>` (or
+`TENTACLE_NETWORK`, or `"network"` in `config.jsonc` — flag › env › profile ›
+file › the engine's default `bridge`), where `none` is an air-gapped run; a
+network with `--engine kubernetes` is an error (a pod's network is the
+cluster's), and `attach` has no such flag. Read-only root
 filesystem? Add `--bin-dir /tmp`. Details:
 [`docs/architecture/F4-pod-execution.md`](./docs/architecture/F4-pod-execution.md),
 [`docs/feat/docker-engine-cli.md`](./docs/feat/docker-engine-cli.md).
@@ -461,6 +466,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `models.*.titleModel` | — | — | Accepted for the shape of `model`; has no effect inside an entry. |
 | `mount.hide` | — | — | The paths to hide — this list REPLACES the default one. |
 | `mount.hideExtra` | — | — | Extra paths to hide, ADDED to the default list. |
+| `network` | `TENTACLE_NETWORK` | — | Network of `run`'s container: a name, or `none` for air-gapped runs; `--network` wins. |
 | `packages.*` | — | — | Whether this installed package is enabled. |
 | `push.enabled` | — | `true` | Whether this `serve` pushes notifications to its paired phones. |
 | `push.graceSeconds` | — | `30` | How long an unanswered permission request waits before a phone is pushed. |

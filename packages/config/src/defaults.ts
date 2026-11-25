@@ -256,6 +256,13 @@ export const DEFAULT_CONFIG_JSONC = `{
   // "docker" or "podman" (a container). --engine and TENTACLE_ENGINE win.
   // "engine": "kubernetes",
 
+  // The network \`tentacle run\` puts its container on: a docker/podman network
+  // name, or "none" for an air-gapped run (the agent's own git/HTTP tools then
+  // fail — that is the point). --network and TENTACLE_NETWORK win; unset leaves
+  // the engine's default. Refused with --engine kubernetes (a pod's network is
+  // the cluster's), and it is a \`run\` flag only: attach never creates.
+  // "network": "none",
+
   // Whether \`tentacle run\` removes its pod/container when the run ends. Default
   // false: it is kept and the re-attach command printed; true removes it.
   // --rm[=true|false] wins, then a profile.
