@@ -1,13 +1,9 @@
 /**
- * S7 of docs/feat/agent-workflows.md — the Elenco and the 2C graph, as the plan's
- * "Tests" section states them: "list rows / `needsUser`; graph geometry".
- *
- * The mockup is the spec (`docs/feat/agent-workflows/diagram.html`), and these pin
- * the two properties the mockup cannot state because it hard-codes one run:
- * - a state we do not know is never relabelled into one we do ("shape + glyph +
- *   word, never hue alone" — and never a neighbour's word);
- * - two pills never overlap, whatever the names or the width of the run, because
- *   the graph's `y` is a uniform pitch rather than the mockup's hand-placed one.
+ * docs/feat/agent-workflows.md S7's ELENCO — the list, its sections and its
+ * `needsUser` signal — plus (docs/fix/workflows-ux.md S6b) the METRICS the two
+ * graphs share. Its 2C graph section pinned the run's file-order placement, which
+ * S6b deleted along with the guess: the drawing's own suite now lives in
+ * `workflow-run-layout.test.ts`, and what is left here is what did not move.
  */
 import { describe, expect, test } from "bun:test";
 import type { WorkflowListRow, WorkflowRow, WorkflowStepRow } from "@tentacle/protocol";
@@ -15,12 +11,13 @@ import {
   BADGE,
   BADGE_INSET,
   GRAPH_WIDTH,
-  type GraphGeometry,
+  LOOP_SOURCE,
+  LOOP_TARGET,
+  MAIN,
+  NODE_GAP,
   PILL_H,
-  graphGeometry,
-  graphHeader,
-  nodeAt,
-  nodeSubtitle,
+  PILL_RADIUS,
+  PITCH,
 } from "../src/workflow-graph.ts";
 import {
   type ElencoRun,
@@ -30,6 +27,7 @@ import {
   fromSessionRun,
   needsUserCount,
   positionOf,
+  runKey,
   stateLook,
 } from "../src/workflow-list.ts";
 
@@ -43,6 +41,9 @@ function step(id: string, state: string, extra: Partial<WorkflowStepRow> = {}): 
     state,
     attempt: 0,
     round: 0,
+    next: null,
+    onFail: null,
+    retry: 0,
     ...extra,
   };
 }
@@ -58,6 +59,8 @@ function mockRun(): WorkflowRow {
     tokens: 1_200_000,
     budget: 3_000_000,
     startedAt: 1_000,
+    history: [],
+    historyDropped: 0,
     steps: [
       step("plan", "ok"),
       step("exec", "ok"),
@@ -136,7 +139,8 @@ describe("an Elenco row (mockup 1)", () => {
 
   test("the step strip exists only where the shape carries steps, and blinks only where it runs", () => {
     const full = elencoRow(fromSessionRun(mockRun()), 1_000);
-    expect(full.strip?.map((c) => c.glyph).join("")).toBe("✓✓✗▸○○?");
+    // S7: `gate` is `pending` — its own dotted `◌`, no longer `waiting`'s `○`.
+    expect(full.strip?.map((c) => c.glyph).join("")).toBe("✓✓✗▸○◌?");
     expect(full.strip?.filter((c) => c.live)).toHaveLength(1);
     // The summary shape has no steps at all: the row says nothing rather than
     // drawing seven blank cells.
@@ -287,152 +291,71 @@ describe("`needsUser` (the hub's signal)", () => {
   });
 });
 
-describe("the 2C graph (mockup section 2C)", () => {
-  const graph = graphGeometry(mockRun().steps);
-
-  test("one node per step, in the file's order, each with its state's tone", () => {
-    expect(graph.nodes.map((n) => n.id)).toEqual([
-      "plan",
-      "exec",
-      "review",
-      "fix",
-      "review 2",
-      "gate",
-      "merge",
-    ]);
-    expect(graph.nodes.map((n) => n.tone)).toEqual([
-      "ok",
-      "ok",
-      "error",
-      "running",
-      "waiting",
-      "waiting",
-      "approval",
-    ]);
-  });
-
-  test("NO two pills overlap: `y` is a uniform pitch, whatever the run", () => {
-    // The mockup hand-places its seven nodes; a real run has any names, 1..64 steps.
-    const many = Array.from({ length: 64 }, (_v, i) => step(`s${i}`, i === 63 ? "running" : "ok"));
-    for (const g of [graph, graphGeometry(many), graphGeometry([])]) {
-      const sorted = [...g.nodes].sort((a, b) => a.y - b.y);
-      for (let i = 1; i < sorted.length; i += 1) {
-        const prev = sorted[i - 1];
-        const cur = sorted[i];
-        if (prev === undefined || cur === undefined) {
-          continue;
-        }
-        // Strictly below the previous pill's bottom edge: not "mostly", never.
-        expect(cur.y).toBeGreaterThanOrEqual(prev.y + prev.height);
-      }
-    }
-  });
-
-  test("the loop is placed from the WIRE's round data, not from the mockup's ids", () => {
-    // The mockup matches `id === "review"`/`"fix"`. A workflow may name them
-    // anything, and the goto fact the driver records is `round`/`maxRound` on the
-    // step ENTERED through `on_fail` — the target, never the step it left.
-    const renamed = graphGeometry([
-      step("critique", "error"),
-      step("patch", "running", { round: 1, maxRound: 3 }),
-    ]);
-    const critique = renamed.nodes.find((n) => n.id === "critique");
-    const patch = renamed.nodes.find((n) => n.id === "patch");
-    expect(critique?.loopSource).toBe(true);
-    expect(patch?.loopTarget).toBe(true);
-    expect(patch?.loopLabel).toBe("↻ 1 of 3");
-    expect(renamed.edges.some((e) => e.kind === "back")).toBe(true);
-  });
-
-  test("a plain step is never marked as a loop's source or target", () => {
-    const plain = graphGeometry([step("a", "ok"), step("b", "running")]);
-    expect(plain.nodes.every((n) => !n.loopSource && !n.loopTarget)).toBe(true);
-    expect(plain.edges.some((e) => e.kind === "back")).toBe(false);
-  });
-
-  test("the loop's two nodes sit on opposite sides, so the dashed edge has room", () => {
-    const source = graph.nodes.find((n) => n.id === "review");
-    const target = graph.nodes.find((n) => n.id === "fix");
-    expect(source).toBeDefined();
-    expect(target).toBeDefined();
-    if (source === undefined || target === undefined) {
-      return;
-    }
-    // Narrower than the main flow, and horizontally clear of each other.
-    expect(source.x).toBeLessThan(64);
-    expect(target.x).toBeGreaterThan(64);
-    expect(target.x).toBeGreaterThanOrEqual(source.x + source.width - 40);
-  });
-
-  test("a step that has not started is a dashed edge; the running one is not", () => {
-    const entrance = graph.edges.filter((e) => e.kind !== "back");
-    const intoRunning = entrance.find((e) => e.to === "fix");
-    const intoPending = entrance.find((e) => e.to === "gate");
-    expect(intoRunning?.kind).toBe("flow");
-    expect(intoPending?.kind).toBe("future");
-  });
-
-  test("the drawing is authored at the mockup's width and grows in HEIGHT only", () => {
-    expect(GRAPH_WIDTH).toBe(318);
-    expect(graph.width).toBe(GRAPH_WIDTH);
-    for (const node of graph.nodes) {
-      expect(node.x).toBeGreaterThanOrEqual(0);
-      expect(node.x + node.width).toBeLessThanOrEqual(GRAPH_WIDTH);
-      expect(node.height).toBe(PILL_H);
-    }
-    // The height follows the content: a longer run is taller, never wider.
-    expect(graph.height).toBeGreaterThan(graphGeometry(mockRun().steps.slice(0, 3)).height);
-  });
-
-  test("every edge's path is real SVG starting at a move", () => {
-    for (const edge of graph.edges) {
-      expect(edge.d.startsWith("M ")).toBe(true);
-      expect(edge.d).toContain("C ");
-      expect(edge.d).not.toContain("NaN");
-      expect(edge.d).not.toContain("undefined");
-    }
-  });
-
-  test("the badge sits centred on the pill's own middle", () => {
+/**
+ * docs/fix/workflows-ux.md S6b: the RUN's graph geometry is no longer here. The
+ * suite that stood in this place (`graphGeometry`, `graphHeader`, `nodeSubtitle`,
+ * `nodeAt`) pinned the GUESS the slice retires — pills in file order, the loop read
+ * off `maxRound` — so it went with the code. What it proved and still matters is
+ * proved where the drawing now lives: `workflow-run-layout.test.ts` (placement from
+ * the definition, no overlap, edges on the boxes, the hit test).
+ *
+ * What stays in this file is the METRICS the editor's graph still shares, because a
+ * badge off-centre or a width that disagreed between the two graphs would show as a
+ * jump when a draft is opened over a run.
+ */
+describe("the metrics both graphs share", () => {
+  test("the state badge sits centred on the pill's own middle", () => {
     expect(BADGE_INSET * 2 + BADGE).toBe(PILL_H);
   });
 
-  test("a tap resolves to the pill it landed on, and to nothing between pills", () => {
-    const node = graph.nodes[1];
-    if (node === undefined) {
-      throw new Error("the fixture has a second node");
-    }
-    expect(nodeAt(graph, node.x + 2, node.y + 2)?.id).toBe(node.id);
-    expect(nodeAt(graph, node.x + node.width - 1, node.y + node.height - 1)?.id).toBe(node.id);
-    // The gap between two pills is nobody's.
-    expect(nodeAt(graph, node.x + 2, node.y + node.height + 4)).toBeNull();
-    // Off the drawing entirely.
-    expect(nodeAt({ ...graph, nodes: [] }, 0, 0)).toBeNull();
+  test("a pill is one touch target tall and fully rounded, and the pitch leaves the mockup's gap", () => {
+    expect(PILL_H).toBe(44);
+    expect(PILL_RADIUS).toBe(PILL_H / 2);
+    expect(PITCH).toBe(PILL_H + NODE_GAP);
+    expect(NODE_GAP).toBe(26);
   });
 
-  test("a node's subtitle is the state's WORD plus its model and where, flattened", () => {
-    const running = mockRun().steps.find((s) => s.id === "fix");
-    if (running === undefined) {
-      throw new Error("the fixture has a running step");
+  test("the three columns all fit inside the graph, and the loop's are narrower", () => {
+    // The editor's columns share row BANDS on purpose (a draft's `on_fail` target is
+    // a step of the same chain), so they may overlap on x; what must hold is that no
+    // pill overhangs the drawing and that the loop's two are the narrow ones.
+    for (const column of [MAIN, LOOP_SOURCE, LOOP_TARGET]) {
+      expect(column.x).toBeGreaterThanOrEqual(0);
+      expect(column.x + column.w).toBeLessThanOrEqual(GRAPH_WIDTH);
     }
-    expect(nodeSubtitle({ ...running, model: "deepseek" })).toBe("in progress · deepseek · local");
-    // An absent model is absent, not an empty segment.
-    expect(nodeSubtitle({ ...running, model: undefined })).toBe("in progress · local");
+    expect(LOOP_SOURCE.w).toBeLessThan(MAIN.w);
+    expect(LOOP_TARGET.w).toBeLessThan(MAIN.w);
+  });
+});
+
+describe("a run's identity across sessions (docs/fix/workflows-ux.md, validation blocker)", () => {
+  // `runId` is a PER-SESSION counter (`wf-1`, `wf-2`), and the list is per computer:
+  // two sessions each hold a `wf-1`. The row key (React key, testID, the screen's
+  // lookup of the run to open) must be the pair, or tapping one opens the other.
+  const run = (runId: string, sessionId: string, name: string): ElencoRun => ({
+    runId,
+    name,
+    state: "ok",
+    done: 1,
+    total: 1,
+    needsUser: false,
+    startedAt: 0,
+    endedAt: 1,
+    sessionId,
   });
 
-  test("the header says the run's name over its version, hash and position", () => {
-    const header = graphHeader(
-      { name: "task", version: 3, hash: HASH, state: "running" },
-      "4 of 7",
+  test("the same runId in two sessions gives two different row keys", () => {
+    const a = run("wf-1", "session-a", "wfedit");
+    const b = run("wf-1", "session-b", "run-view-pass");
+    expect(elencoRow(a, 0).key).not.toBe(elencoRow(b, 0).key);
+  });
+
+  test("the row key is the run's runKey, so the screen can find the run it drew", () => {
+    const b = run("wf-1", "session-b", "run-view-pass");
+    expect(elencoRow(b, 0).key).toBe(runKey(b));
+    const byKey = new Map(
+      [b, run("wf-1", "session-a", "wfedit")].map((r) => [runKey(r), r] as const),
     );
-    expect(header.title).toBe("task");
-    expect(header.subtitle).toBe("task v3 · a1b2c3d · 4 of 7");
-  });
-
-  test("an empty run draws an empty canvas, not a crash", () => {
-    const empty: GraphGeometry = graphGeometry([]);
-    expect(empty.nodes).toHaveLength(0);
-    expect(empty.edges).toHaveLength(0);
-    expect(empty.height).toBeGreaterThan(0);
+    expect(byKey.get(elencoRow(b, 0).key)?.name).toBe("run-view-pass");
   });
 });

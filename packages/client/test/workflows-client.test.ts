@@ -25,6 +25,7 @@ import {
   Method,
   Notification,
   PROTOCOL_VERSION,
+  type WorkflowHistoryRow,
   type WorkflowRow,
   type WorkflowStepRow,
 } from "@tentacle/protocol";
@@ -53,6 +54,9 @@ const stepRow = (id: string, extra: Partial<WorkflowStepRow> = {}): WorkflowStep
   state: "pending",
   attempt: 0,
   round: 0,
+  next: null,
+  onFail: null,
+  retry: 0,
   ...extra,
 });
 
@@ -64,6 +68,8 @@ const run = (n: number, extra: Partial<WorkflowRow> = {}): WorkflowRow => ({
   state: "running",
   tokens: n,
   startedAt: n,
+  history: [],
+  historyDropped: 0,
   steps: [stepRow("merge")],
   ...extra,
 });
@@ -160,6 +166,38 @@ describe("boundWorkflows: the rows are the client's (≤ 8 runs, ≤ 64 steps, o
     expect(boundWorkflows(Array.from({ length: 10_000 }, (_, i) => run(i + 1)))).toHaveLength(
       MAX_WORKFLOW_RUNS,
     );
+  });
+
+  // docs/fix/workflows-ux.md S4 (D1): the bounding is the client's own copy, so
+  // a field it does not carry is lost for every UI — the edges and the history
+  // must survive it, their ids cleaned like `id`.
+  test("the run's edges and history survive the bounding, ids escape-free", () => {
+    // Annotated, so the second entry's *absent* `durationMs` stays the schema's
+    // optional field instead of an inferred `undefined` union member.
+    const history: WorkflowHistoryRow[] = [
+      { step: "review", attempt: 0, round: 0, state: "error", durationMs: 900 },
+      { step: "fix\u001b[2J", attempt: 0, round: 1, state: "ok" },
+    ];
+    const [row] = boundWorkflows([
+      run(1, {
+        history,
+        historyDropped: 3,
+        steps: [
+          stepRow("review", { next: "confirm", onFail: { goto: "fix", max: 2, taken: 1 } }),
+          stepRow("fix", { next: "review\u0007", retry: 2 }),
+        ],
+      }),
+    ]);
+    expect(row?.steps[0]?.next).toBe("confirm");
+    expect(row?.steps[0]?.onFail).toEqual({ goto: "fix", max: 2, taken: 1 });
+    expect(row?.steps[1]?.onFail).toBeNull();
+    expect(row?.steps[1]?.retry).toBe(2);
+    expect(CONTROL.test(row?.steps[1]?.next ?? "")).toBe(false);
+    expect(row?.historyDropped).toBe(3);
+    expect(row?.history.map((h) => h.step)).toEqual(["review", "fix [2J"]);
+    const first = history[0];
+    expect(first).toBeDefined();
+    if (first) expect(row?.history[0]).toEqual(first);
   });
 
   test("every label is one line and escape-free; the numbers as sent", () => {
@@ -509,6 +547,128 @@ describe("session/workflow_catalogue (slice 5a): the three answers are distinct"
     expect(params.hash).toBe(hash);
     expect(params.inputs).toEqual([{ name: "slug", value: "x" }]);
     expect(session.ownsTurn(params.turnId)).toBe(true);
+    client.close();
+  });
+});
+
+/**
+ * docs/fix/workflows-ux.md S8b (owner Q1 = A): the catalogue and a start BEFORE
+ * the session's first message. A client opens its session lazily, at the first
+ * prompt, so the TUI's `/workflow` panel used to answer «this session is not open
+ * yet» — false: nothing was wrong, the session simply did not exist yet.
+ */
+describe("S8b: the catalogue and a start before the first message", () => {
+  const catalogue = {
+    dir: "/proj/.tentacle/workflows",
+    workflows: [
+      {
+        name: "task",
+        path: ".tentacle/workflows/task.yaml",
+        ok: true,
+        version: 1,
+        hash: "a".repeat(64),
+        approved: true,
+        inputs: [],
+        steps: [{ id: "plan", kind: "agent", where: "local" }],
+      },
+    ],
+  };
+
+  test("a LAZY session's catalogue is ONE frame with no sessionId, and the rows come back", async () => {
+    // Red before the fix: `{unavailable: "this session is not open yet"}` and no
+    // frame at all — the panel blamed the session for a read it never made.
+    // Mutation: send `{sessionId: undefined}` → the parse strips it and the frame
+    // carries no id; kept as an equality on the RAW params so a stripped field
+    // cannot pass silently.
+    const d = fakeDaemon({ [Method.WorkflowCatalogue]: () => catalogue });
+    const client = new RemoteClient(d.clientCh, new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        throw new Error("unused");
+      },
+      random: () => 0,
+      daemonWakes: true,
+    });
+    await client.initialize();
+    // Built WITHOUT `attach` and never sent to: the lazy shape.
+    const session = client.newSession();
+    expect(session.opened()).toBe(false);
+
+    const answer = await session.workflowCatalogue();
+    expect("unsupported" in answer).toBe(false);
+    expect("workflows" in answer ? answer.workflows[0]?.name : "").toBe("task");
+    expect(d.raw.filter((s) => s.method === Method.WorkflowCatalogue)).toHaveLength(1);
+    expect(d.raw.at(-1)).toEqual({ method: Method.WorkflowCatalogue, params: {} });
+    // And it never opened one on the way: a read is a read.
+    expect(session.opened()).toBe(false);
+    expect(d.raw.some((s) => s.method === Method.Open)).toBe(false);
+    client.close();
+  });
+
+  test("a start from the panel OPENS first, then starts — one open, session-scoped", async () => {
+    // Mutation: keep `not open yet` for a start → red (nothing is sent). The
+    // ORDER is the property: `session/open` before `session/workflow`, so no run
+    // is asked of a session the daemon does not have.
+    const d = fakeDaemon({ [Method.Workflow]: () => ({ ok: true, runId: "wf-1" }) });
+    const client = new RemoteClient(d.clientCh, new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        throw new Error("unused");
+      },
+      random: () => 0,
+      daemonWakes: true,
+    });
+    await client.initialize();
+    const session = client.newSession();
+    const started = await session.workflow({ action: "start", name: "task" });
+    expect(started).toEqual({ ok: true, runId: "wf-1" });
+    expect(session.opened()).toBe(true);
+    const methods = d.raw.map((s) => s.method).filter((m) => m !== Method.Initialize);
+    expect(methods).toEqual([Method.Open, Method.Workflow]);
+    // The start itself is the session's, with the turn its asks are attributed to.
+    const params = d.sent.at(-1)?.params as { sessionId: string; turnId: string; name: string };
+    expect(params.sessionId).toBe("s1");
+    expect(params.name).toBe("task");
+    expect(session.ownsTurn(params.turnId)).toBe(true);
+    client.close();
+  });
+
+  test("an UNTRUSTED daemon still refuses locally, pre-open: nothing is created, nothing sent", async () => {
+    // AGENTS §7: the trust bit is checked BEFORE the open, so a pod's session is
+    // never even created for work it may not do.
+    const d = fakeDaemon({ [Method.Workflow]: () => ({ ok: true, runId: "wf-1" }) });
+    const client = new RemoteClient(d.clientCh, new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        throw new Error("unused");
+      },
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession();
+    expect(await session.workflow({ action: "start", name: "task" })).toEqual({
+      ok: false,
+      reason: WORKFLOW_UNTRUSTED_DAEMON,
+    });
+    expect(session.opened()).toBe(false);
+    expect(d.raw.map((s) => s.method)).not.toContain(Method.Open);
+    expect(d.raw.map((s) => s.method)).not.toContain(Method.Workflow);
+    client.close();
+  });
+
+  test("stop/resume before the first message stay an honest refusal (they name a run)", async () => {
+    const d = fakeDaemon({ [Method.Workflow]: () => ({ ok: true }) });
+    const client = new RemoteClient(d.clientCh, new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        throw new Error("unused");
+      },
+      random: () => 0,
+      daemonWakes: true,
+    });
+    await client.initialize();
+    const session = client.newSession();
+    expect(await session.workflow({ action: "stop", runId: "wf-1" })).toEqual({
+      ok: false,
+      reason: "this session is not open yet",
+    });
+    expect(session.opened()).toBe(false);
     client.close();
   });
 });

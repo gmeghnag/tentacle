@@ -6,12 +6,12 @@
     "apps/mobile/src/screens/PermissionSheet.tsx": "a644f9409c98161104be1ec2b42afc40004f0585",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "32084b81ebf112ae65e1d2c347ed4feeb04e0296",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "4acc16969f29573f6f292b0c1fdcc6ce6fa61efa",
-    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "04e443f0bac5ef63f0a9f936a12ec5b52ee2c7ae",
+    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "9b699f60e963df28386e07a6dcf40811af9a8646",
     "apps/mobile/src/step-rail.ts": "83bd11f3b10e19be6edd27a835ef90252f69f46e",
     "apps/mobile/src/theme-beta.ts": "2359c83e90604bd9bd7625702ae21337499290d2",
-    "apps/mobile/src/theme.ts": "21e4c775d07043924a727890452b854b82c966d4",
+    "apps/mobile/src/theme.ts": "77bfa592e2bb2bee950a9936e2ce566002976edf",
     "apps/mobile/src/thinking-motion.ts": "4fd5a2e149a69bb6c58326516420a74efc077eaa",
-    "apps/mobile/src/tool-steps.ts": "0d019463789d10c05fff693841e785e422a8b36b",
+    "apps/mobile/src/tool-steps.ts": "3d811ceff3c4892f4f9cb43831214aeba94be1c5",
     "apps/mobile/src/ui/AskCard.tsx": "9cf2e6a10739ce813016e2e5f3499c5a6de83e51",
     "apps/mobile/src/ui/AskSlim.tsx": "c0e6dcafb1866037f5afc597564affc6d628171a",
     "apps/mobile/src/ui/BandSection.tsx": "7b65870db2faa7a51663560d2641476973ed7b2a",
@@ -20,11 +20,11 @@
     "apps/mobile/src/ui/FloatingActivity.tsx": "cc8ae250d2303f88efe4261ad4e66168425d31b0",
     "apps/mobile/src/ui/GlassButton.tsx": "a595e5654c4b6167edfd83387e3322c5b1dc611c",
     "apps/mobile/src/ui/HeaderDot.tsx": "1d49445123ec6a8eabd55ef377e30c8ff4bee94d",
-    "apps/mobile/src/ui/HubFan.tsx": "cc651f77f09644df69d99191ed2b5335bc3a691f",
+    "apps/mobile/src/ui/HubFan.tsx": "f92e7f6e0ec2f0d350f01813c5df1003f455defb",
     "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
     "apps/mobile/src/ui/ScreenHeader.tsx": "7b42b610beaf4124fe240a609a39c4480b3f203e",
     "apps/mobile/src/ui/Sheet.tsx": "511816016f43feef1b11ce7d5d29def68fad8e22",
-    "apps/mobile/src/ui/StepNode.tsx": "2c4f506264b6aacf0e809e85cea6017bc2a9c87d",
+    "apps/mobile/src/ui/StepNode.tsx": "0af38ff20ce44a87ea45b18148d2deade5bab82f",
     "packages/tui/src/blink.ts": "29c9f101f7942a0942e48c977a13e3759820c8e3",
     "packages/tui/src/components/Thinking.tsx": "c9f80123d32ad706b7c96d858b822d9336d15d2d",
     "packages/tui/src/shimmer.ts": "96515bf4852e36f0cf9ca27a3f665d00e37f076c",
@@ -243,7 +243,18 @@
       "delStrong": "#F6C4CA",
       "delText": "#9F1020",
       "dash": "#8E8E93",
-      "switchOff": "#C7C7CC"
+      "switchOff": "#C7C7CC",
+      "wrOkSoft": "#e2efe5",
+      "wrOkInk": "#2e6a3f",
+      "wrFailSoft": "#f6e4e9",
+      "wrFailInk": "#9a3b55",
+      "wrRunSoft": "#dfedf0",
+      "wrRunInk": "#1f6272",
+      "wrAskSoft": "#f3ebdd",
+      "wrAskInk": "#7f5527",
+      "wrWaitSoft": "#ececef",
+      "wrWaitInk": "#6c6c71",
+      "wrSkipInk": "#78787d"
     },
     "dark": {
       "bg": "#1E1F21",
@@ -288,7 +299,18 @@
       "delStrong": "#64222B",
       "delText": "#FFA3A8",
       "dash": "#636366",
-      "switchOff": "#434448"
+      "switchOff": "#434448",
+      "wrOkSoft": "#25352a",
+      "wrOkInk": "#a3d2b0",
+      "wrFailSoft": "#3a272d",
+      "wrFailInk": "#e9aabb",
+      "wrRunSoft": "#20343a",
+      "wrRunInk": "#94d0dd",
+      "wrAskSoft": "#3a3126",
+      "wrAskInk": "#e3c493",
+      "wrWaitSoft": "#2f3034",
+      "wrWaitInk": "#a6a9ae",
+      "wrSkipInk": "#8f9297"
     },
     "petrol": {
       "bg": "#151B1D",
@@ -333,7 +355,18 @@
       "delStrong": "#64222B",
       "delText": "#FFA3A8",
       "dash": "#636366",
-      "switchOff": "#3A4043"
+      "switchOff": "#3A4043",
+      "wrOkSoft": "#25352a",
+      "wrOkInk": "#a3d2b0",
+      "wrFailSoft": "#3a272d",
+      "wrFailInk": "#e9aabb",
+      "wrRunSoft": "#20343a",
+      "wrRunInk": "#94d0dd",
+      "wrAskSoft": "#3a3126",
+      "wrAskInk": "#e3c493",
+      "wrWaitSoft": "#2f3034",
+      "wrWaitInk": "#a6a9ae",
+      "wrSkipInk": "#8f9297"
     }
   },
   "tui": {
@@ -681,6 +714,12 @@
           "lineHeight": 15,
           "textAlign": "center"
         },
+        "contextNode": {
+          "width": 14,
+          "height": 14,
+          "alignItems": "center",
+          "justifyContent": "center"
+        },
         "dotBox": {
           "width": 13,
           "height": 13
@@ -808,6 +847,7 @@
       },
       "consts": {
         "THEREFORE_SIZE": 13,
+        "CONTEXT_NODE_SIZE": 14,
         "DOT_AT": {
           "top": {
             "left": 5,
@@ -1034,7 +1074,6 @@
         "GLYPH": {
           "stop": "stop.fill",
           "steer": "bubble.left",
-          "attach": "photo",
           "activity": "bolt.fill",
           "artifacts": "doc.on.doc",
           "sessions": "folder",
@@ -1042,7 +1081,7 @@
           "tools": "powerplug",
           "commands": "terminal",
           "scheduled": "clock",
-          "workflows": "list.bullet",
+          "workflows": "point.topleft.down.to.point.bottomright.curvepath",
           "dictate": "mic",
           "new": "square.and.pencil",
           "more": "ellipsis"
@@ -1477,12 +1516,16 @@
           "flex": 1,
           "gap": 2
         },
+        "contextBody": {
+          "gap": 6,
+          "paddingTop": 2,
+          "paddingBottom": 7
+        },
+        "contextMore": {
+          "paddingTop": 2
+        },
         "fallback": {
           "fontStyle": "italic"
-        },
-        "rule": {
-          "height": 0.3333333333333333,
-          "marginVertical": 6
         }
       },
       "consts": {

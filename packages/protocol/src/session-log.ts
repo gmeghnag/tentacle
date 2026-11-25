@@ -43,6 +43,11 @@
  * `workflow_start` / `workflow_step` / `workflow_end` (docs/feat/agent-workflows.md
  * D4, owner Q1) are NON-critical: a workflow run's terminal facts. The load
  * derivation `workflowLoadNotes` (core) closes a run a crash left open.
+ *
+ * `unit_end` (docs/feat/a2a.md, Unification §2) is NON-critical: an ENDED unit
+ * of work (a turn, a workflow run) carried into a new segment, so its state and
+ * result survive a compaction, a reset, a `/clear` and a reload. It projects
+ * nothing; an older build skips it and loses only that carry.
  */
 import { type ZodTypeAny, z } from "zod";
 import {
@@ -407,6 +412,48 @@ export type LogWorkflowStartEntry = z.infer<typeof LogWorkflowStartEntrySchema>;
 export type LogWorkflowStepEntry = z.infer<typeof LogWorkflowStepEntrySchema>;
 export type LogWorkflowEndEntry = z.infer<typeof LogWorkflowEndEntrySchema>;
 
+// --- ended units of work, carried across segments (docs/feat/a2a.md, Unification §2) ---
+// Written ONLY when a new segment starts (the carry), never at a unit's end:
+// inside a segment the native entries (`turn_*`, `workflow_*`) are the record.
+// Every word is a BOUNDED FREE STRING, never an enum (the workflow entries'
+// rule): `native` can be `stopped:<why>`, so not `WorkflowWordSchema`. The
+// emitter (`core`'s `unitEndBody`) caps every text to these bounds and judges
+// the body by this schema.
+
+/** A carried unit's `kind` / `state` / `native` word. */
+export const UNIT_END_WORD_MAX_CHARS = 128;
+/** A unit's id: a `turnId` (≤ 128) or a run's `wf-N`. */
+export const UNIT_END_ID_MAX_CHARS = 128;
+/** One line: why it ended. */
+export const UNIT_END_REASON_MAX_CHARS = 2 * 1024;
+/** A unit's result (a turn's final round text; a run's end reason + last step report). */
+export const UNIT_END_RESULT_MAX_CHARS = 16 * 1024;
+
+const unitWord = () => z.string().min(1).max(UNIT_END_WORD_MAX_CHARS);
+
+/** An ended unit of work, carried into a new segment. Never `id`: the envelope already has one. */
+export const LogUnitEndEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("unit_end"),
+  /** `turn` | `workflow` today; free word (a reader skips a kind it does not know). */
+  kind: unitWord(),
+  unitId: z.string().min(1).max(UNIT_END_ID_MAX_CHARS),
+  /** The `turnId` that started it (`workflow_start.turnId`). */
+  origin: TurnIdSchema.optional(),
+  /** `completed` | `failed` | `canceled` today; free word. */
+  state: unitWord(),
+  /** The unit's own word: a stop reason, a run state, `stopped:<why>`. */
+  native: unitWord(),
+  reason: z.string().max(UNIT_END_REASON_MAX_CHARS).optional(),
+  startedAt: z.number().int().nonnegative().optional(),
+  endedAt: z.number().int().nonnegative(),
+  result: z.string().max(UNIT_END_RESULT_MAX_CHARS).optional(),
+  /** The unit had a result that no longer fits the retained budget. */
+  resultDropped: z.literal(true).optional(),
+});
+export type LogUnitEndEntry = z.infer<typeof LogUnitEndEntrySchema>;
+
 /**
  * `session/workflow_step` (docs/feat/workflows-ui.md D1): ONE step execution's
  * `prompt`/`report` — what a `workflow_step` entry carries and the `workflows`
@@ -521,6 +568,7 @@ export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogWorkflowStartEntrySchema,
   LogWorkflowStepEntrySchema,
   LogWorkflowEndEntrySchema,
+  LogUnitEndEntrySchema,
 ]);
 export type KnownLogEntry = z.infer<typeof KnownLogEntrySchema>;
 export type LogMessageEntry = z.infer<typeof LogMessageEntrySchema>;
@@ -550,6 +598,8 @@ export const LOG_ENTRY_CRITICAL: Readonly<Record<LogEntryType, boolean>> = {
   workflow_start: false,
   workflow_step: false,
   workflow_end: false,
+  // docs/feat/a2a.md: a carried ended unit; it projects nothing.
+  unit_end: false,
 };
 
 /**

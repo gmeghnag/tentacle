@@ -35,6 +35,16 @@ export const DEFAULT_SUBAGENT_MAX_PARALLEL = 4;
  * (docs/feat/agent-message-two-way.md, owner Q3 a).
  */
 export const DEFAULT_SUBAGENTS_TWO_WAY = false;
+/**
+ * The `claude-code` harness (docs/feat/subagent-harness-runners.md D6, Owner
+ * A4): on by default, no cap; the model a call names none of; the hang guard.
+ */
+export const DEFAULT_HARNESS_CLAUDE_CODE = {
+  enabled: true,
+  command: "claude",
+  model: "opus",
+  idleMinutes: 15,
+} as const;
 /** Max bytes of a custom `agent_task` description, after trimming. */
 export const MAX_AGENT_TASK_DESCRIPTION_BYTES = 4096;
 /**

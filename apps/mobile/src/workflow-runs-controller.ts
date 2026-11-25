@@ -16,7 +16,7 @@
  * - Nothing is read while the screen is away (`blur`), and nothing lands after
  *   `dispose`.
  */
-import type { WorkflowListResult } from "@tentacle/protocol";
+import type { WorkflowCatalogueResult, WorkflowListResult } from "@tentacle/protocol";
 import { type ElencoRun, fromListRow, needsUserCount } from "./workflow-list.ts";
 
 /** A burst of `workflows` frames is one read, this long after the last. */
@@ -166,8 +166,43 @@ export function createWorkflowRunsController(deps: WorkflowRunsDeps): WorkflowRu
 }
 
 /**
- * The hub's Workflows figure (D4): how many live runs wait on the person, and
- * why there is nothing to open. `undefined` while the list is not known (still
+ * The project's workflow files, as the hub's dim rule needs them
+ * (docs/fix/workflows-ux.md D6): how many it can start, and the reason the
+ * session cannot run workflows at all. `known:false` — not read yet, an older
+ * daemon, a failed read — is UNKNOWN, which never dims the item whose tap is
+ * what reads the list (the Tools D3 rule).
+ */
+export interface CatalogueFigure {
+  readonly known: boolean;
+  /**
+   * Every listed file, broken ones included (plan D6: "the catalogue lists ≥ 1
+   * workflow"): a broken YAML is still a workflow in this project, and the start
+   * screen is where its errors are read — "No workflows in this project" would lie.
+   */
+  readonly count: number;
+  /** `unavailable`'s own text (a pod's daemon), else null. */
+  readonly unavailable: string | null;
+}
+
+/** The catalogue answer as the hub's fact, folded once so the rule never re-derives it. */
+export function catalogueFigure(
+  answer: WorkflowCatalogueResult | { unsupported: true } | null,
+): CatalogueFigure {
+  // An older daemon is UNKNOWN, not empty: `Update tentacle` is the run list's
+  // own line (`workflowsHub`), and a project it cannot read must not be called
+  // empty because of a version.
+  if (answer === null || "unsupported" in answer) {
+    return { known: false, count: 0, unavailable: null };
+  }
+  if (answer.unavailable !== undefined) {
+    return { known: true, count: 0, unavailable: answer.unavailable };
+  }
+  return { known: true, count: answer.workflows.length, unavailable: null };
+}
+
+/**
+ * The hub's Workflows figure (D4, D6): how many live runs wait on the person, and
+ * why there is nothing to open. `undefined` while the run list is not known (still
  * loading, or the first read failed): an unknown list never dims the item whose
  * tap is what reads it.
  *
@@ -178,9 +213,14 @@ export function createWorkflowRunsController(deps: WorkflowRunsDeps): WorkflowRu
  * empty list would make the first workflow unreachable from the phone — the
  * dead end flow 44 hit on device. Only an older daemon still dims: there is no
  * usable screen behind it.
+ *
+ * The catalogue adds one dim: `unavailable` (a pod's daemon can run no workflow).
+ * A known-EMPTY catalogue never dims (the runs screen's "New workflow" is how the
+ * first file is made).
  */
 export function workflowsHub(
   state: RunsState,
+  catalogue: CatalogueFigure | null = null,
 ): { readonly needYou: number; readonly empty: string | null } | undefined {
   if (state.kind === "unsupported") {
     return { needYou: 0, empty: WORKFLOWS_UPDATE_TENTACLE };
@@ -188,5 +228,9 @@ export function workflowsHub(
   if (state.kind !== "ready") {
     return undefined;
   }
-  return { needYou: needsUserCount(state.runs), empty: null };
+  const needYou = needsUserCount(state.runs);
+  if (state.runs.length === 0 && catalogue?.unavailable != null) {
+    return { needYou, empty: catalogue.unavailable };
+  }
+  return { needYou, empty: null };
 }

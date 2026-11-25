@@ -50,6 +50,7 @@ import type {
   Session,
   SessionCapabilities,
   SessionGrants,
+  WorkflowCatalogue,
   WorkflowDriver,
   WorkflowSaveFileRow,
 } from "@tentacle/agent";
@@ -59,6 +60,10 @@ import {
   NO_CAPABILITIES,
   applyCapabilityOp,
   sessionTitle,
+  workflowStatusLine,
+  workflowUserWait,
+  workflowWaitNote,
+  workflowWaitWakeDue,
 } from "@tentacle/agent";
 import {
   AGENT_MESSAGE_MAX_CHARS,
@@ -85,14 +90,17 @@ import {
   type ScheduleRequest,
   type ScheduledFire,
   type ScheduledJob,
+  type SegmentUnits,
   type SubagentBackgroundBody,
   type SubagentEndBody,
+  type WorkUnit,
   anySignal,
   attachmentLabel,
   autoApproves,
   checkAttachmentRefs,
   daemonWakeGate,
   formatBytes,
+  isDefaultOffTool,
   nextDateStamp,
   ownRequest,
   scheduleCheckDelayMs,
@@ -102,6 +110,10 @@ import {
   scheduleRecordFire,
   scheduleSettled,
   scheduleStep,
+  unifyTurn,
+  unifyWorkflow,
+  unitEndBody,
+  unitsFromSegment,
   wakeDue,
   workflowRunSeqFromHistory,
   zoneOrDefault,
@@ -439,6 +451,11 @@ export interface RestoredSessionState {
    * a new lineage, from the reloaded history.
    */
   readonly log?: { readonly head: LogCursor; readonly logged: readonly ChatMessage[] };
+  /**
+   * The ended-units table at the reload (`endedUnitsAtLoad`, docs/feat/a2a.md
+   * Unification §3): carried into the first segment as `unit_end`. Absent → none.
+   */
+  readonly units?: readonly WorkUnit[];
 }
 
 /**
@@ -476,7 +493,29 @@ export interface SessionPersistence {
 export interface SessionWake {
   /** One line per wake started (the session id only — never a job's command). */
   readonly onAudit?: (line: string) => void;
+  /** The workflow user-wait wake's clock (defaults below; tests inject it). */
+  readonly workflowWait?: WorkflowWaitTiming;
 }
+
+/**
+ * When a workflow step that waits for the user wakes the agent
+ * (docs/feat/workflow-run-awareness.md Design (b), S6): only an ask still
+ * pending after `graceMs` with no client attached, each ask once, a run at
+ * most once per `minGapMs`.
+ */
+export interface WorkflowWaitTiming {
+  /** Default `WORKFLOW_WAIT_GRACE_MS`. */
+  readonly graceMs?: number;
+  /** Default `WORKFLOW_WAIT_MIN_GAP_MS`. */
+  readonly minGapMs?: number;
+  readonly setTimeout?: (fn: () => void, ms: number) => unknown;
+  readonly clearTimeout?: (handle: unknown) => void;
+}
+
+/** An ask answered inside this (a person at the screen, an auto-answer) never wakes. */
+export const WORKFLOW_WAIT_GRACE_MS = 30_000;
+/** One run wakes the agent for a wait at most once per this. */
+export const WORKFLOW_WAIT_MIN_GAP_MS = 10 * 60_000;
 
 /**
  * `serve` and the in-process worker only (docs/feat/cron-tool.md D1): the
@@ -699,7 +738,7 @@ type DriverCatalogueRow = Awaited<ReturnType<WorkflowDriver["catalogue"]>>["work
  * description, …) becomes an `ok:false` row whose errors name the field — by
  * step id — so one file cannot fail the whole answer (review round 1 #1).
  */
-function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
+export function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
   const candidate = {
     ...row,
     ...(row.errors !== undefined ? { errors: boundedWorkflowErrors(row.errors) } : {}),
@@ -725,6 +764,42 @@ function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
     errors: boundedWorkflowErrors(problems),
   };
 }
+
+/**
+ * The ONE projection of a driver's catalogue onto the wire, shared by a hosted
+ * session's read and the daemon-wide pre-open read (`SessionHost.
+ * newSessionWorkflowCatalogue`): two paths answer the same project's files, so
+ * they must word a row, cap it and refuse it identically (docs/fix/workflows-ux.md
+ * S8b). Each row is judged ON ITS OWN (review round 1 #1): a valid workflow the
+ * wire cannot carry becomes one `ok:false` row naming why — never a failed whole
+ * answer that hides every other workflow.
+ */
+export function workflowCatalogueResult(catalogue: WorkflowCatalogue): WorkflowCatalogueResult {
+  const parsed = WorkflowCatalogueResultSchema.safeParse({
+    ...catalogue,
+    workflows: catalogue.workflows.map(catalogueRow),
+  });
+  if (!parsed.success) {
+    return {
+      workflows: [],
+      dir: catalogue.dir,
+      unavailable: oneLineText(`the catalogue could not be read: ${parsed.error.message}`).slice(
+        0,
+        200,
+      ),
+    };
+  }
+  return parsed.data;
+}
+
+/**
+ * The catalogue's answer when there is no workflow seam AT ALL: no session may
+ * run workflows here (a pod's daemon), or the daemon's factory offered no driver
+ * (`SessionHost.newSessionWorkflowCatalogue`). It must still parse as the wire's
+ * result, so `dir` is a placeholder the callers REPLACE with the daemon's own
+ * `defaultCwd` — a catalogue with no folder is not a valid answer.
+ */
+export const WORKFLOWS_UNAVAILABLE = "workflows run only on a laptop or serve session";
 
 /**
  * One file a save wrote (or would), in the WIRE's shape (docs/feat/
@@ -1111,6 +1186,23 @@ export class HostedSession {
   private lastSchedules: readonly ScheduleRow[] = [];
   /** The last `workflows` list emitted: what the cut records. */
   private lastWorkflows: readonly WorkflowRow[] = [];
+  /**
+   * The ONE user-wait timer (docs/feat/workflow-run-awareness.md S6): the wait
+   * key it was armed for, its run, and when that wait began (the note's `since`).
+   */
+  private waitTimer: {
+    readonly key: string;
+    readonly runId: string;
+    readonly since: number;
+    readonly handle: unknown;
+  } | null = null;
+  /** The user wait the last publish showed: a timer is armed only when it CHANGES. */
+  private waitSeen: string | undefined;
+  /**
+   * Per run still live: the wait keys that woke the agent, and when it last
+   * did. Memory only, dropped at the run's end: a run never survives a restart.
+   */
+  private readonly waitWakes = new Map<string, { readonly woken: Set<string>; at: number }>();
   /** The workflow driver (docs/feat/agent-workflows.md D3); absent on a tunnelled session. */
   private workflows: WorkflowDriver | undefined;
   /** The fired turns that have not ended, by turnId → the job that fired each (its failure budget). */
@@ -1125,6 +1217,15 @@ export class HostedSession {
    * children). It is the one ledger the live path (6a) and a replay share.
    */
   private readonly agentJobs: AgentJobLedger;
+  /**
+   * The ended-units table (docs/feat/a2a.md, Unification §3), oldest first,
+   * bounded: a CACHE of the log, never a store. Always exactly
+   * `unitsFromSegment(current segment).ended` — set at a reload from the record,
+   * re-derived from the segment at every turn or run end (`refreshUnits`), and
+   * carried into every new segment as `unit_end` entries (`logSegmentFacts`),
+   * so a live end and a load derivation give the same record.
+   */
+  private endedUnits: readonly WorkUnit[] = [];
 
   constructor(
     id: string,
@@ -1197,8 +1298,16 @@ export class HostedSession {
     // turned back on (`/tools`) leaves no entry, and re-seeding it would bring
     // the switch back on every restart. The agent is built with the config's
     // set (`buildAgent`, D4), so the record's absence must EXPLICITLY clear it.
+    // One exception, off wins: a default-off tool (the browser, which acts with
+    // the user's identity) this host built OFF stays off — the record cannot
+    // tell "turned on" from "written before the tool existed" (B4 fix round 1).
     if (restored !== undefined) {
-      this.caps = normalizeCapabilities(restored.capabilities ?? NO_CAPABILITIES);
+      const record = restored.capabilities ?? NO_CAPABILITIES;
+      const builtOff = session.currentAgent().capabilities().disabledTools.filter(isDefaultOffTool);
+      this.caps = normalizeCapabilities({
+        ...record,
+        disabledTools: [...record.disabledTools, ...builtOff],
+      });
       session.currentAgent().setCapabilities(this.caps);
     } else {
       // A session this host CREATES starts from what its agent was built with:
@@ -1237,6 +1346,8 @@ export class HostedSession {
     this.logSha256 = logOptions.sha256 ?? nodeSha256;
     this.logVerify = logOptions.verify;
     this.log = new SessionLog(crypto.randomUUID(), now);
+    // Before the first segment: `logSegmentFacts` carries it.
+    this.endedUnits = restored?.units ?? [];
     if (restored?.log) {
       // A reload of a paired record continues its lineage: the base restates
       // EXACTLY what the last landed write logged (a reader holding that head
@@ -2485,6 +2596,66 @@ export class HostedSession {
     if (live !== undefined) {
       this.log.workflowStart(live);
     }
+    // The ended units (docs/feat/a2a.md, Unification §2): the new segment no
+    // longer holds their native entries, so it carries them. One unit the
+    // schema refuses is skipped (and reported), never the segment's start.
+    for (const ended of this.endedUnits) {
+      try {
+        this.log.unitEnd(unitEndBody(ended));
+      } catch (error) {
+        this.reportTurnError(error);
+      }
+    }
+  }
+
+  /**
+   * Re-derive the ended-units table from the current segment (THE derivation,
+   * `unitsFromSegment`: the one a reload runs). Called right after a unit's
+   * end is logged. Synchronous, O(segment): never at a turn's every round.
+   */
+  private refreshUnits(): void {
+    this.endedUnits = this.segmentUnits().ended;
+  }
+
+  /** `unitsFromSegment` over the current segment (the derivation a load of it runs). */
+  private segmentUnits(): SegmentUnits {
+    const entries: KnownLogEntry[] = [];
+    for (const slot of this.log.since().slots) {
+      // A lazy slot is a checkpoint: it states no unit.
+      if (slot.entry !== null) entries.push(slot.entry);
+    }
+    return unitsFromSegment(entries);
+  }
+
+  /**
+   * The session's units of work (docs/feat/a2a.md, Unification §3), read-only:
+   * the ended-units table (oldest first), then the running turn (waiting when
+   * one of its asks is pending) and the driver's live run. A live turn or run
+   * carries no result; its end does.
+   */
+  workUnits(): WorkUnit[] {
+    const units: WorkUnit[] = [...this.endedUnits];
+    const turnId = this.activeTurnId;
+    if (turnId !== null && this.turns.get(turnId)?.end === undefined) {
+      const asking = [...this.asks.values()].some((ask) => ask.turnId === turnId);
+      units.push(unifyTurn({ turnId, asking }));
+    }
+    const start = this.workflows?.liveStart();
+    for (const row of this.workflows?.rows() ?? []) {
+      if (row.endedAt !== undefined) continue;
+      const origin = start?.runId === row.runId ? start.turnId : undefined;
+      units.push(
+        unifyWorkflow({
+          runId: row.runId,
+          ...(origin !== undefined ? { origin } : {}),
+          state: row.state,
+          ...(row.stopReason !== undefined ? { stopReason: row.stopReason } : {}),
+          ...(row.reason !== undefined ? { reason: row.reason } : {}),
+          startedAt: row.startedAt,
+        }),
+      );
+    }
+    return units;
   }
 
   /**
@@ -2561,6 +2732,7 @@ export class HostedSession {
       },
       logEnd: (body) => {
         this.log.workflowEnd(body);
+        this.refreshUnits();
         this.persist();
       },
       // A step's asks ride the background path, attributed to the start turn (A2).
@@ -2572,14 +2744,21 @@ export class HostedSession {
       release: (agentId) => {
         this.spawnTurns.delete(agentId);
       },
+      currentTurn: () => (this.compacting ? undefined : (this.activeTurnId ?? undefined)),
       publish: (rows) => this.publishWorkflows(rows),
       // The end note rides the exits queue (told at the next turn) and wakes.
       ended: (runId, note) => {
         this.spawnTurns.delete(runId);
+        this.waitWakes.delete(runId);
         this.session.noteWorkflowEnd(runId, note);
         this.kickWake();
       },
     });
+    // The model's live line (docs/feat/workflow-run-awareness.md): read per
+    // request, from the very rows the clients are shown; never in the history.
+    this.session.setStatusLine(() =>
+      this.closed ? undefined : workflowStatusLine(this.lastWorkflows),
+    );
     // The starting list is STATE, not an event: nobody is attached yet (this runs
     // inside session creation), so it is set for the snapshot without an emit or a
     // cut. A cut here committed before the session's open had finished and lost
@@ -2610,6 +2789,103 @@ export class HostedSession {
     if (this.controller === null) {
       this.recordCut(null);
     }
+    this.trackWorkflowWait();
+  }
+
+  // --- the workflow user-wait wake (docs/feat/workflow-run-awareness.md S6) ---
+
+  private waitTiming(): { readonly graceMs: number; readonly minGapMs: number } {
+    const t = this.wake?.workflowWait;
+    return {
+      graceMs: t?.graceMs ?? WORKFLOW_WAIT_GRACE_MS,
+      minGapMs: t?.minGapMs ?? WORKFLOW_WAIT_MIN_GAP_MS,
+    };
+  }
+
+  /**
+   * After every publish: a user wait that APPEARS arms one timer (a grace); one
+   * that goes or changes disarms it. A publish that keeps the same wait changes
+   * nothing — so a wait disarmed at its fire is never re-armed by it.
+   */
+  private trackWorkflowWait(): void {
+    if (this.wake === undefined || this.closed) {
+      return;
+    }
+    const wait = workflowUserWait(this.lastWorkflows);
+    if (wait?.key === this.waitSeen) {
+      return;
+    }
+    this.waitSeen = wait?.key;
+    this.disarmWorkflowWait();
+    if (wait !== undefined) {
+      const at = this.now();
+      this.armWorkflowWait(wait.key, wait.runId, at, this.waitTiming().graceMs);
+    }
+  }
+
+  private armWorkflowWait(key: string, runId: string, since: number, ms: number): void {
+    const set = this.wake?.workflowWait?.setTimeout ?? defaultSetTimeout;
+    const handle = set(() => this.fireWorkflowWait(), ms);
+    this.waitTimer = { key, runId, since, handle };
+  }
+
+  private disarmWorkflowWait(): void {
+    if (this.waitTimer === null) {
+      return;
+    }
+    (this.wake?.workflowWait?.clearTimeout ?? defaultClearTimeout)(this.waitTimer.handle);
+    this.waitTimer = null;
+  }
+
+  /**
+   * The grace ended: the pure gate decides on what holds NOW (the rows, the
+   * attached clients, the slot), never on the armed copy. A wake queues the
+   * note on the exits queue (it counts in `pendingExitCount`) and lets the one
+   * waker start the turn.
+   */
+  private fireWorkflowWait(): void {
+    const armed = this.waitTimer;
+    if (armed === null) {
+      return;
+    }
+    this.waitTimer = null;
+    const wait = workflowUserWait(this.lastWorkflows);
+    const record = this.waitWakes.get(armed.runId);
+    const timing = this.waitTiming();
+    const now = this.now();
+    const due = workflowWaitWakeDue({
+      armedKey: armed.key,
+      currentKey: wait?.key,
+      attachedCount: this.attachedCount,
+      woke: record?.woken.has(armed.key) ?? false,
+      lastWakeAt: record?.at,
+      now,
+      minGapMs: timing.minGapMs,
+      enabled: this.wake !== undefined,
+      busy: this.running,
+      lastEndBad: this.lastEndBad,
+      closed: this.closed,
+    });
+    if (due.kind === "rearm") {
+      this.armWorkflowWait(armed.key, armed.runId, armed.since, timing.graceMs);
+      return;
+    }
+    if (due.kind === "rearm_at") {
+      this.armWorkflowWait(armed.key, armed.runId, armed.since, Math.max(0, due.at - now));
+      return;
+    }
+    // `wake` implies the current wait IS the armed one.
+    if (due.kind === "disarm" || wait === undefined) {
+      return;
+    }
+    const woken = record?.woken ?? new Set<string>();
+    woken.add(armed.key);
+    this.waitWakes.set(armed.runId, { woken, at: now });
+    this.session.noteWorkflowWait(
+      armed.runId,
+      workflowWaitNote(wait, armed.since, zoneOrDefault(this.zone())),
+    );
+    this.kickWake();
   }
 
   /**
@@ -2671,28 +2947,10 @@ export class HostedSession {
       return {
         workflows: [],
         dir: "",
-        unavailable: "workflows run only on a laptop or serve session",
+        unavailable: WORKFLOWS_UNAVAILABLE,
       };
     }
-    const catalogue = await driver.catalogue();
-    // Each row is judged ON ITS OWN (review round 1 #1): a valid workflow the
-    // wire cannot carry becomes one `ok:false` row naming why — never a failed
-    // whole answer that hides every other workflow.
-    const parsed = WorkflowCatalogueResultSchema.safeParse({
-      ...catalogue,
-      workflows: catalogue.workflows.map(catalogueRow),
-    });
-    if (!parsed.success) {
-      return {
-        workflows: [],
-        dir: catalogue.dir,
-        unavailable: oneLineText(`the catalogue could not be read: ${parsed.error.message}`).slice(
-          0,
-          200,
-        ),
-      };
-    }
-    return parsed.data;
+    return workflowCatalogueResult(await driver.catalogue());
   }
 
   /**
@@ -3998,6 +4256,7 @@ export class HostedSession {
       // After the turn's last message (derived just above); the checkpoint's
       // digest is lazy (the first read hashes, never this window).
       this.log.turnEnd(turnId, end.stopReason);
+      this.refreshUnits();
       this.log.checkpoint();
       // Inside the steering window, and safe there: this method cannot await,
       // and `persist` only captures — the I/O starts after the window.
@@ -4911,6 +5170,7 @@ export class HostedSession {
       clearTimeout(this.wakeKick);
       this.wakeKick = null;
     }
+    this.disarmWorkflowWait();
     // The table itself stays (an archive keeps it frozen, D6); only the timer goes.
     this.disarmSchedules();
     if (this.activeTurnId !== null) {
@@ -4977,6 +5237,9 @@ export class HostedSession {
    */
   archive(after?: LogCursor): DaemonSessionState {
     const before = this.persistedState(after);
+    // The units of the log part written below (before the close), as a load
+    // of the file derives them: the resident record's table (S7).
+    const units = this.segmentUnits();
     this.close("closed");
     // The log part is the one BEFORE the close (docs/feat/session-log-serve-store.md
     // §2): an archived session's log is the shape a crash leaves — no
@@ -4986,6 +5249,7 @@ export class HostedSession {
       ...closed,
       ...(before.log ? { log: before.log } : {}),
       ...(before.turn ? { turn: { ...before.turn, steering: [], steeringIds: [] } } : {}),
+      units,
     };
   }
 }

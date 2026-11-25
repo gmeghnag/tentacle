@@ -56,6 +56,7 @@ function view(panel: WorkflowPanel, at: PanelAt): PanelView {
     at.width,
     at.maxBody,
     panel.catalogue,
+    at.opened,
   );
 }
 

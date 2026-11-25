@@ -2773,3 +2773,35 @@ describe("a model HTTP error on a pod run (docs/fix/detached-model-error-reason.
     r.client.close();
   });
 });
+
+describe("a pod cannot ask the laptop to run a harness (docs/feat/subagent-harness-runners.md D5c)", () => {
+  test("any request outside the closed inbound list is MethodNotFound", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    const answers = new Map<string, (f: { error?: { code: number } }) => void>();
+    daemonCh.setOnMessage((data) => {
+      const f = JSON.parse(data) as { id?: unknown; method?: string; error?: { code: number } };
+      if (f.method === Method.Initialize) {
+        daemonCh.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: f.id,
+            result: {
+              protocolVersion: PROTOCOL_VERSION,
+              agentCapabilities: { tools: true, permissions: true },
+            },
+          }),
+        );
+      } else if (f.method === undefined && typeof f.id === "string") {
+        answers.get(f.id)?.(f);
+      }
+    });
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    for (const method of ["harness/start", "subagent/run", "claude/run"]) {
+      const answered = new Promise<{ error?: { code: number } }>((r) => answers.set(method, r));
+      daemonCh.send(JSON.stringify({ jsonrpc: "2.0", id: method, method, params: {} }));
+      expect((await answered).error?.code).toBe(JsonRpcErrorCode.MethodNotFound);
+    }
+    client.close();
+  });
+});

@@ -89,7 +89,7 @@ style suggestions.
 
 ## 6. Repo facts (verified)
 
-- Bun workspaces monorepo, **15 packages** (`agent`, `cli`, `client`, `config`,
+- Bun workspaces monorepo, **16 packages** (`agent`, `browser`, `cli`, `client`, `config`,
   `core`, `daemon`, `docker`, `exec`, `k8s`, `mcp`, `protocol`, `providers`, `tools`,
   `transport`, `tui`) + **2 apps** (`apps/mobile`, Expo / React Native, React
   19 — the TUI stays on React 18; CI installs with

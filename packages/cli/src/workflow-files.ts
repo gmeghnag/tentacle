@@ -24,11 +24,9 @@ import {
   PROJECT_PATHS,
   WORKFLOW_FILE_MAX_BYTES,
   WORKFLOW_NAME_RE,
-  type WorkflowsAboveHint,
   promptPathProblem,
   resolveInside,
   workflowYaml,
-  workflowsAbove,
 } from "@tentacle/core";
 import { unifiedDiff } from "@tentacle/tools";
 import { nodeProjectFs } from "./project-fs.ts";
@@ -118,12 +116,6 @@ export interface WorkflowListing {
    * Only `workflowListing` asks this; `listWorkflowSources` never runs git.
    */
   readonly gitIgnored?: boolean;
-  /**
-   * The display-only "workflows higher up" hint (D7 v5), present ONLY when this
-   * folder lists no workflow at all. It is never loadable: `loadWorkflowSource`
-   * takes `cwd` and nothing else.
-   */
-  readonly elsewhere?: WorkflowsAboveHint;
 }
 
 /** The absolute folder the catalogue reads for the project at `cwd`. */
@@ -253,25 +245,16 @@ export async function workflowsGitIgnored(cwd: string): Promise<boolean | undefi
 
 /**
  * The `WorkflowDriverDeps.list` of the project at `cwd` (docs/feat/workflows-ui.md
- * slice 5a): ONE walk, plus the two DISPLAY-ONLY facts a user in the wrong
- * folder needs — whether git ignores the folder ("not versioned"), and, only
- * when the folder listed NO workflow, the bounded `workflowsAbove` hint of where
- * workflows were found higher up (D7 v5).
+ * slice 5a): ONE walk, plus the DISPLAY-ONLY fact a user in the wrong folder
+ * needs — whether git ignores the folder ("not versioned"). Nothing looks above
+ * `cwd` (docs/fix/workflows-ux.md S8c, owner Q2): the folder this project's
+ * workflows live in is the one the catalogue names.
  *
- * The hint is looked for ONLY on an empty folder, so it never costs an lstat on
- * the ordinary path, and nothing it names can be loaded, hashed, approved or
- * started: `loadWorkflowSource` and the walk both take `cwd`, never an ancestor.
  * `git check-ignore` runs only when there is something to notice (at least one
  * readable workflow), so a project without the folder spawns no process.
  */
 export async function workflowListing(cwd: string): Promise<WorkflowListing> {
   const listing = await listWorkflowSources(cwd);
-  const elsewhere =
-    listing.rows.length === 0
-      ? workflowsAbove(cwd, nodeProjectFs(), {
-          ...(process.env.HOME !== undefined ? { home: process.env.HOME } : {}),
-        })
-      : undefined;
   const gitIgnored = listing.rows.some((row) => row.kind === "source")
     ? await workflowsGitIgnored(cwd)
     : false;
@@ -280,7 +263,6 @@ export async function workflowListing(cwd: string): Promise<WorkflowListing> {
     rows: listing.rows,
     truncated: listing.truncated,
     ...(gitIgnored !== undefined ? { gitIgnored } : {}),
-    ...(elsewhere !== undefined ? { elsewhere } : {}),
   };
 }
 

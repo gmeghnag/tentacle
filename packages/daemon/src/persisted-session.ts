@@ -13,7 +13,16 @@ import {
   type TitleState,
   suspendedInGroup,
 } from "@tentacle/agent";
-import type { ChatMessage, ScheduledJob, ToolCall } from "@tentacle/core";
+import {
+  type ChatMessage,
+  type ScheduledJob,
+  type SegmentUnits,
+  type ToolCall,
+  type WorkUnit,
+  boundEndedUnits,
+  unifyTurn,
+  unifyWorkflow,
+} from "@tentacle/core";
 import {
   DomainErrorCode,
   type KnownLogEntry,
@@ -106,6 +115,13 @@ export interface DaemonSessionState {
   readonly schedules?: readonly ScheduledJob[];
   /** The session log's part (absent: none — e.g. `archive`'s capture after the close, which reuses the one before). */
   readonly log?: DaemonLogCapture;
+  /**
+   * `archive`'s capture only: the units of the log part it writes
+   * (`unitsFromSegment`, as a load of that file derives them), so the RESIDENT
+   * record a quick reopen restores keeps the ended-units table (docs/feat/a2a.md
+   * S7; S4 drift 5). Never written to disk: the log is the record.
+   */
+  readonly units?: SegmentUnits;
 }
 
 /** The chat `/clear` is about to drop, captured synchronously before the barrier (docs/feat/clear-fork-history.md). */
@@ -182,7 +198,75 @@ export interface DaemonSessionRecord extends SessionRecord {
    * nothing to say, so an idle resume is untouched.
    */
   readonly loadNotes: readonly ChatMessage[];
+  /**
+   * The units of work of the SAME entries (`unitsFromSegment`, docs/feat/a2a.md
+   * Unification §3): the ended ones (native ends and carried `unit_end`s) and
+   * the ones a crash left open. `endedUnitsAtLoad` closes those. Absent → none.
+   */
+  readonly units?: SegmentUnits;
 }
+
+/**
+ * The session's ended-units table at a reload (docs/feat/a2a.md, Unification
+ * §3): the record's ended units, then every unit the cut left OPEN closed
+ * honestly at `at` — a turn with the end its reconciled key holds (a restart's
+ * `error`, an archive's `cancelled`), a turn without one `RESTART_TURN_END`, a
+ * run `stopped:interrupted` (its load note says the same). Only `resumed` (a
+ * turn the reload continues under its id) stays open: it is live, not here.
+ * Pure; the host carries the result into its first segment as `unit_end`.
+ */
+export function endedUnitsAtLoad(
+  units: SegmentUnits | undefined,
+  turns: readonly PersistedTurnKey[],
+  resumed: string | undefined,
+  at: number,
+): WorkUnit[] {
+  const closed: WorkUnit[] = [];
+  for (const open of units?.open ?? []) {
+    if (open.kind === "turn") {
+      if (open.id === resumed) continue;
+      const end = turns.find((k) => k.turnId === open.id)?.end ?? RESTART_TURN_END;
+      const turn = unifyTurn({
+        turnId: open.id,
+        stopReason: end.stopReason,
+        ...(open.startedAt !== undefined ? { startedAt: open.startedAt } : {}),
+        endedAt: at,
+      });
+      closed.push(end.error ? { ...turn, reason: end.error.message } : turn);
+    } else {
+      closed.push(
+        unifyWorkflow({
+          runId: open.id,
+          ...(open.origin !== undefined ? { origin: open.origin } : {}),
+          state: "stopped",
+          stopReason: "interrupted",
+          reason: RESTART_TURN_END.error?.message ?? "interrupted",
+          ...(open.startedAt !== undefined ? { startedAt: open.startedAt } : {}),
+          endedAt: at,
+        }),
+      );
+    }
+  }
+  return boundEndedUnits([...(units?.ended ?? []), ...closed]);
+}
+
+/**
+ * An ARCHIVED session's units, as its reopen would restore them (docs/feat/a2a.md
+ * S7): the reconciled keys (an archive resumes nothing) and every unit the
+ * close cut closed — at the archive's own time, so two reads of one archived
+ * record are equal. Pure: reading an archived context never reopens it.
+ */
+export function archivedUnitsOf(record: DaemonSessionRecord): WorkUnit[] {
+  const reconciled = reconcileOnReload(record);
+  const at = record.archivedAt ?? record.updatedAt;
+  return endedUnitsAtLoad(record.units, reconciled.turns, reconciled.resume?.turnId, at);
+}
+
+/** An archived session's units read back (`SessionHost.readArchivedUnits`). */
+export type ArchivedUnitsRead =
+  | { readonly status: "ok"; readonly units: readonly WorkUnit[] }
+  | { readonly status: "absent" }
+  | { readonly status: "unreadable"; readonly reason: string };
 
 /**
  * Whether a permission request attributed to call `toolCallId` is resumable

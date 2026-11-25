@@ -89,12 +89,28 @@ if (!runtime) {
 for await (const _ of runtime.createSession().send("start the job")) {
   // drain the turn
 }
-// The job is running in the worker; give the forwarded pgid one hop to land.
-await Bun.sleep(100);
-const live = Bun.spawnSync(["pgrep", "-f", `sleep ${marker}`])
-  .stdout.toString()
-  .trim();
-console.log(`job processes: ${live === "" ? 0 : live.split("\n").length}`);
+// The job is running in the worker. Poll (never a fixed sleep: the gate is
+// parallel, AGENTS §9) until its tree has settled — `sh` + `sleep`, or for
+// `amp` the lone lingering `sleep` — and the forwarded pgid has landed on the
+// main thread. On timeout the count is printed as-is and the test fails on it.
+function jobProcesses(): number {
+  const live = Bun.spawnSync(["pgrep", "-f", `sleep ${marker}`])
+    .stdout.toString()
+    .trim();
+  return live === "" ? 0 : live.split("\n").length;
+}
+// `short` (`sleep 1.<marker>`) never matches the pattern: wait only for the pgid.
+const expected = form === "short" ? null : form === "amp" ? 1 : 2;
+const deadline = Date.now() + 5000;
+let count = jobProcesses();
+while (
+  ((expected !== null && count !== expected) || trackedGroups().length === 0) &&
+  Date.now() < deadline
+) {
+  await Bun.sleep(20);
+  count = jobProcesses();
+}
+console.log(`job processes: ${count}`);
 if (form === "short") {
   console.log(`main tracked while running: ${trackedGroups().length}`);
   await Bun.sleep(2500);

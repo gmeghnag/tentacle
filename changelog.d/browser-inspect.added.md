@@ -1,0 +1,1 @@
+- **Browser inspection (groundwork).** A new internal `@tentacle/browser` package holds the pure core of the upcoming "the model sees and traces your Chrome" feature: secret masking for page-derived data (headers, cookies, URLs, JSON/form bodies), the rule for which browser actions must ask first, tab ownership per session and a bounded network ring. Nothing is user-visible yet.

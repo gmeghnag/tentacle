@@ -54,6 +54,7 @@ import {
   type SessionTtlParams,
   type SessionTtlResult,
   type UpdateSettingsResult,
+  type WorkflowCatalogueResult,
   type WorkflowListResult,
   type WorkflowListRow,
 } from "@tentacle/protocol";
@@ -74,12 +75,18 @@ import {
   type SessionPushObserver,
   type SessionSchedules,
   type TurnErrorPolicy,
+  WORKFLOWS_UNAVAILABLE,
+  type WorkflowWaitTiming,
+  workflowCatalogueResult,
 } from "./hosted-session.ts";
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
 import { fromWireCapabilities, toSessionSkills, toSessionTools } from "./mapping.ts";
 import {
+  type ArchivedUnitsRead,
   type ClearForkCapture,
   type DaemonSessionRecord,
+  archivedUnitsOf,
+  endedUnitsAtLoad,
   reconcileOnReload,
   restoredActivity,
 } from "./persisted-session.ts";
@@ -412,6 +419,8 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * daemons and the worker never pass it: off.
    */
   readonly wakeOnJobExit?: boolean;
+  /** With `wakeOnJobExit`: the workflow user-wait wake's clock (default: real timers, 30 s / 10 min). */
+  readonly workflowWait?: WorkflowWaitTiming;
   /**
    * `serve` and the in-process worker only (docs/feat/cron-tool.md D1, owner
    * Q4): every session keeps the agent's scheduled wakes and fires them by
@@ -504,6 +513,8 @@ interface ArchivedEntry {
   readonly cwd: string;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /** When it was archived (absent: an older record). With `updatedAt`, an archived read's version (S7). */
+  readonly archivedAt: number | undefined;
   record: DaemonSessionRecord | undefined;
   /** The last write of `record` failed: a sweep retries it. */
   unwritten: boolean;
@@ -524,6 +535,7 @@ function archivedEntry(
     cwd: record.cwd,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    archivedAt: record.archivedAt,
     record: resident,
     unwritten: false,
     retrying: false,
@@ -645,6 +657,37 @@ export class SessionHost {
     try {
       return toSessionTools(agent.builtinTools());
     } finally {
+      artifacts.dispose();
+      jobs?.dispose();
+      agentJobs?.dispose();
+      await workloadShells?.dispose();
+    }
+  }
+
+  /**
+   * `session/workflow_catalogue` with no session (docs/fix/workflows-ux.md S8b):
+   * the project's workflows a session created NOW would read — the `createAgent`
+   * factory builds a throwaway agent, exactly as `newSessionTools` does, and its
+   * driver answers. The catalogue is the PROJECT's (`defaultCwd`), and every
+   * session of this daemon shares it, so nothing here needs to be hosted or
+   * listed. No driver (a pod daemon, a tunnelled factory) → `unavailable`, never
+   * an empty folder. The throwaway driver is disposed at once: it owns no run.
+   */
+  async newSessionWorkflowCatalogue(link: ModelLink | null): Promise<WorkflowCatalogueResult> {
+    const artifacts = new ArtifactStore(this.artifactBudget);
+    const { agent, jobs, agentJobs, workloadShells, workflows } = this.opts.createAgent(
+      this.opts.defaultCwd,
+      { modelLink: () => link, artifacts },
+    );
+    try {
+      if (workflows === undefined) {
+        return { workflows: [], dir: this.opts.defaultCwd, unavailable: WORKFLOWS_UNAVAILABLE };
+      }
+      return workflowCatalogueResult(await workflows.catalogue());
+    } finally {
+      // `dispose` cuts every live run and closes it `interrupted`; a throwaway
+      // driver has none, so it only marks itself disposed.
+      workflows?.dispose();
       artifacts.dispose();
       jobs?.dispose();
       agentJobs?.dispose();
@@ -956,6 +999,47 @@ export class SessionHost {
   /** Number of ARCHIVED sessions (not in `size`). */
   get archivedCount(): number {
     return this.archived.size;
+  }
+
+  /** The ARCHIVED sessions, metadata only (docs/feat/a2a.md S7: an external caller's archived index). */
+  archivedSessions(): Array<{
+    readonly id: string;
+    readonly updatedAt: number;
+    readonly archivedAt?: number;
+  }> {
+    return [...this.archived.values()].map((e) =>
+      e.archivedAt === undefined
+        ? { id: e.id, updatedAt: e.updatedAt }
+        : { id: e.id, updatedAt: e.updatedAt, archivedAt: e.archivedAt },
+    );
+  }
+
+  /**
+   * An ARCHIVED session's units of work, READ-ONLY (docs/feat/a2a.md S7): from
+   * the record its reopen would restore — resident, or read back by
+   * `persister.load` (both files parsed, nothing written) — closed as that
+   * reopen would close them (`archivedUnitsOf`). Never reopens, never writes,
+   * never drops or blocks the entry (a failed REOPEN does; a read only reports).
+   * `absent`: not archived (live, deleted or unknown).
+   */
+  async readArchivedUnits(id: string): Promise<ArchivedUnitsRead> {
+    const entry = this.archived.get(id);
+    const persister = this.opts.persister;
+    if (!entry) {
+      return { status: "absent" };
+    }
+    let record = entry.record;
+    if (!record) {
+      if (!persister) {
+        return { status: "absent" };
+      }
+      const loaded = await persister.load(id);
+      if (!loaded.ok) {
+        return { status: "unreadable", reason: loaded.reason };
+      }
+      record = loaded.record;
+    }
+    return { status: "ok", units: archivedUnitsOf(record) };
   }
 
   /**
@@ -1427,6 +1511,9 @@ export class SessionHost {
       turns: reconciled.turns,
       enqueueIds: reconciled.enqueueIds,
       returned: reconciled.returned,
+      // The ended-units table (docs/feat/a2a.md, Unification §3): what the log
+      // ended, plus what the cut left open closed honestly (the resumed turn stays live).
+      units: endedUnitsAtLoad(record.units, reconciled.turns, reconciled.resume?.turnId, now),
       ...(record.head !== undefined ? { head: record.head } : {}),
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
       // A restart KEEPS the session's auto-accept (owner Q3).
@@ -1641,7 +1728,10 @@ export class SessionHost {
         ...(this.opts.titleTimeoutMs !== undefined ? { timeoutMs: this.opts.titleTimeoutMs } : {}),
       },
       this.opts.wakeOnJobExit
-        ? { ...(this.opts.onAudit ? { onAudit: this.opts.onAudit } : {}) }
+        ? {
+            ...(this.opts.onAudit ? { onAudit: this.opts.onAudit } : {}),
+            ...(this.opts.workflowWait ? { workflowWait: this.opts.workflowWait } : {}),
+          }
         : undefined,
       log,
       agentJobs,

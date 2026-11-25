@@ -35,7 +35,13 @@ import type {
   PermissionRequester,
   PermissionResponse,
 } from "@tentacle/core";
-import { DISMISSED, autoApproves, otherDevicesAsked, ownRequest } from "@tentacle/core";
+import {
+  DISMISSED,
+  autoApproves,
+  onceOnlyAsk,
+  otherDevicesAsked,
+  ownRequest,
+} from "@tentacle/core";
 import { stripAnsi } from "./ansi.ts";
 
 /**
@@ -241,8 +247,9 @@ export function sheetOptions(req: PermissionRequest): readonly SheetOption[] {
       ? `Allow \`${req.suggestion.prefix}\` commands for this session`
       : "Allow for the rest of this session";
   // A workflow approval is ONE human decision: the daemon offers no
-  // `allow_always` for it, so offering one here would be rejected.
-  const once = req.kind === "workflow_approve";
+  // `allow_always` for it, so offering one here would be rejected. A browser
+  // action likewise (docs/feat/browser-inspect.md B5).
+  const once = onceOnlyAsk(req);
   return [
     { optionId: "allow_once", label: "Allow once", kind: "allow" },
     ...(once ? [] : ([{ optionId: "allow_always", label: always, kind: "allow" }] as const)),

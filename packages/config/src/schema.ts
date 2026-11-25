@@ -372,6 +372,46 @@ const settingsShape = {
     })
     .optional(),
   /**
+   * Other agent harnesses that run a sub-agent (docs/feat/subagent-harness-runners.md
+   * D3/D6), keyed by INSTANCE name. Laptop/serve only: a pod ignores it (D5).
+   * Only `claude-code` exists in this version.
+   */
+  harnesses: z
+    .record(
+      z.string().min(1),
+      z
+        .object({
+          /** The adapter; defaults to the instance name. */
+          adapter: z.literal("claude-code").optional(),
+          /** Default on: the `claude` sub-agent type is offered when `command` is on PATH. */
+          enabled: z.boolean().optional(),
+          /** The executable (default `claude`). */
+          command: z.string().min(1).optional(),
+          /** The model when a call names none (default `opus`); passed verbatim. */
+          model: z
+            .string()
+            .regex(
+              /^[A-Za-z0-9._:[\]][A-Za-z0-9._:[\]-]{0,63}$/,
+              "an alias or a model id: letters, digits, . _ : - [ ], at most 64, not starting with -",
+            )
+            .optional(),
+          /** Hang guard: no output for this many minutes ends the run (default 15). */
+          idleMinutes: z.number().positive().optional(),
+        })
+        .strict(),
+    )
+    .superRefine((harnesses, ctx) => {
+      for (const name of Object.keys(harnesses)) {
+        if (name !== "claude-code") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `harnesses: unknown instance "${name}" (only "claude-code" in this version)`,
+          });
+        }
+      }
+    })
+    .optional(),
+  /**
    * Context awareness (docs/feat/context-awareness.md): tell the model how full
    * its context is, a short line on the message that crosses each new step.
    */

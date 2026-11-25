@@ -27,6 +27,7 @@ import type {
   ChatMessage,
   SubagentBackgroundBody,
   SubagentEndBody,
+  UnitEndBody,
   WorkflowEndBody,
   WorkflowStartBody,
   WorkflowStepBody,
@@ -234,6 +235,16 @@ export class SessionLog {
 
   workflowEnd(body: WorkflowEndBody): void {
     this.push({ type: "workflow_end", critical: false, ...body });
+  }
+
+  /**
+   * An ENDED unit of work carried into the segment just started (docs/feat/a2a.md,
+   * Unification §2): written only by the carry at a segment boundary, never at
+   * the unit's end. NON-critical; the body comes from core's `unitEndBody`,
+   * which caps it and judges it by the entry's schema.
+   */
+  unitEnd(body: UnitEndBody): void {
+    this.push({ type: "unit_end", critical: false, ...body });
   }
 
   /**

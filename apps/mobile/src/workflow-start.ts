@@ -71,8 +71,6 @@ export interface CatalogueView {
   readonly truncated: boolean;
   /** Git ignores the folder: the "not versioned" note. */
   readonly gitIgnored: boolean;
-  /** DISPLAY ONLY: where workflows were found higher up, when this folder had none. */
-  readonly elsewhere: { readonly dir: string; readonly count: number } | null;
   /** `unavailable`'s own reason, else null. */
   readonly reason: string | null;
 }
@@ -91,7 +89,6 @@ export const LOADING_CATALOGUE: CatalogueView = {
   invalid: [],
   truncated: false,
   gitIgnored: false,
-  elsewhere: null,
   reason: null,
 };
 
@@ -164,10 +161,6 @@ export function catalogueRows(
     invalid,
     truncated: result.truncated === true,
     gitIgnored: result.gitIgnored === true,
-    elsewhere:
-      result.elsewhere === undefined
-        ? null
-        : { dir: result.elsewhere.dir, count: result.elsewhere.count },
     reason: result.unavailable === undefined ? null : oneLine(result.unavailable),
   };
 }

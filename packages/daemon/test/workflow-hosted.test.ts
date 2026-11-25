@@ -10,19 +10,38 @@ import {
   Session,
   WorkflowDriver,
   type WorkflowDriverDeps,
+  type WorkflowHost,
+  type WorkflowRow,
   type WorkflowSource,
 } from "@tentacle/agent";
 import {
   type ChatMessage,
+  type ChatRequest,
   type ExecutionEnvironment,
+  type ModelProvider,
   NOTE_KIND,
   PermissionBroker,
+  type PermissionRequest,
+  type StreamEvent,
+  type Tool,
   type ToolContext,
+  autoApproves,
   workflowYaml,
 } from "@tentacle/core";
-import type { KnownLogEntry, LogCursor } from "@tentacle/protocol";
-import { ToolRegistry } from "@tentacle/tools";
+import type { KnownLogEntry, KnownSessionUpdateParams, LogCursor } from "@tentacle/protocol";
+import {
+  DomainErrorCode,
+  PROTOCOL_VERSION,
+  WorkflowCatalogueResultSchema,
+} from "@tentacle/protocol";
+import { ToolRegistry, createWorkflowTool } from "@tentacle/tools";
+import { RpcPeer, createChannelPair } from "@tentacle/transport";
+import { z } from "zod";
+import { Connection } from "../src/connection.ts";
 import { HostedSession } from "../src/hosted-session.ts";
+import { SessionHost } from "../src/session-host.ts";
+import { SessionPersister } from "../src/session-persister.ts";
+import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
 
 const noopEnv: ExecutionEnvironment = {
   id: "noop",
@@ -387,6 +406,127 @@ describe("session/workflow_catalogue on a hosted session (slice 5a)", () => {
     expect(cut).toBeDefined();
     expect(cut?.length).toBe(300);
     expect(cut?.endsWith("…")).toBe(true);
+  });
+});
+
+/**
+ * docs/fix/workflows-ux.md S8b (owner Q1 = A): `session/workflow_catalogue` with
+ * NO `sessionId` — the catalogue a session the daemon creates now would read, the
+ * `session/skills`/`session/tools` precedent. The TUI asks it before the first
+ * message, so it must never need a live session.
+ */
+describe("S8b: session/workflow_catalogue before the first message", () => {
+  /** A host whose session factory builds the listing driver into every session. */
+  function hostWithCatalogue(): SessionHost {
+    return new SessionHost({
+      defaultCwd: "/tmp/workflow-hosted",
+      createAgent: () => {
+        const agent = new Agent({
+          model: {
+            id: "one",
+            async *stream() {
+              yield { type: "done" };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: noopEnv,
+        });
+        return {
+          agent,
+          permissions: new PermissionBroker(),
+          workflows: listingDriver(),
+        };
+      },
+    });
+  }
+
+  async function connected(host: SessionHost) {
+    const [d, c] = createChannelPair();
+    new Connection(d, host);
+    const client = new RpcPeer(c, {
+      onNotification: () => {},
+      onRequest: async (method) => {
+        throw new Error(`unexpected request ${method}`);
+      },
+    });
+    await client.request("initialize", {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true },
+      clientInfo: { name: "tentacle", version: "1.0.0" },
+    });
+    const catalogue = async (params: Record<string, unknown>) =>
+      WorkflowCatalogueResultSchema.parse(
+        await client.request("session/workflow_catalogue", params),
+      );
+    return { client, catalogue };
+  }
+
+  test("with no sessionId: the same rows, and NO session is created", async () => {
+    // Red before the fix: the params schema REQUIRED a `sessionId`, so this frame
+    // was refused at the peer and the TUI showed «this session is not open yet».
+    // Mutation: answer an empty catalogue instead of reading the project's → the
+    // rows go missing; mutation: `session/open` on the way → the create assertion.
+    const host = hostWithCatalogue();
+    const { client, catalogue } = await connected(host);
+    const answer = await catalogue({});
+    expect(answer.unavailable).toBeUndefined();
+    expect(answer.workflows.map((w) => [w.name, w.ok])).toEqual([
+      ["task", true],
+      ["broken", false],
+    ]);
+    // No session was opened, and the read did not leave a live one behind.
+    expect(host.size).toBe(0);
+    client.close();
+  });
+
+  test("a live sessionId still wins: the named session's own answer", async () => {
+    // The relaxation is additive: an open session's id is used as before, so a
+    // session with NO driver keeps saying `unavailable` even though the project
+    // has workflows.
+    const host = hostWithCatalogue();
+    const { client, catalogue } = await connected(host);
+    await client.request("session/open", { sessionId: "plain", create: true });
+    // A session this host built always has the driver, so prove the ID ROUTE
+    // instead: an unknown id is refused rather than silently answered by the
+    // throwaway read.
+    let code: number | undefined;
+    try {
+      await catalogue({ sessionId: "nope" });
+    } catch (error) {
+      code = (error as { code?: number }).code;
+    }
+    expect(code).toBe(DomainErrorCode.UnknownSession);
+    const answer = await catalogue({ sessionId: "plain" });
+    expect(answer.workflows.map((w) => w.name)).toEqual(["task", "broken"]);
+    client.close();
+  });
+
+  test("a daemon with no workflow seam answers `unavailable`, never an empty folder", async () => {
+    // A host whose factory offers no driver at all (the tunnelled shape): the
+    // throwaway session cannot read workflows either, and says so in the same
+    // words a live session does — never "this project has no workflows".
+    const host = new SessionHost({
+      defaultCwd: "/tmp/workflow-hosted",
+      createAgent: () => ({
+        agent: new Agent({
+          model: {
+            id: "one",
+            async *stream() {
+              yield { type: "done" };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: noopEnv,
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const { client, catalogue } = await connected(host);
+    const answer = await catalogue({});
+    expect(answer.workflows).toEqual([]);
+    expect(answer.unavailable).toBe("workflows run only on a laptop or serve session");
+    expect(host.size).toBe(0);
+    client.close();
   });
 });
 
@@ -792,5 +932,610 @@ describe("session/workflow_source + workflow_save on a hosted session (slice 3b)
     if (written.hash === undefined) return;
     expect(again.hash).toBe(written.hash);
     expect(again.schedules).toBeUndefined();
+  });
+});
+
+// --- the live status line (docs/feat/workflow-run-awareness.md S3: T4, T5) ----
+
+async function until(cond: () => boolean, ms = 2000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out: ${String(cond)}`);
+    await new Promise((r) => setTimeout(r, 1));
+  }
+}
+
+const WAITS_LINE = "[workflow wf-1 task: step 1/1 merge waits for the user · 0/1 ok · 0 tok]";
+
+/** A clock and its timers, driven by `advance` only (the wait wake's, and the host's `now`). */
+interface FakeTimers {
+  readonly now: () => number;
+  readonly setTimeout: (fn: () => void, ms: number) => unknown;
+  readonly clearTimeout: (handle: unknown) => void;
+  /** Timers armed and not yet fired or cleared. */
+  readonly pending: () => number;
+  /** Move the clock by `ms`, firing every timer due on the way, in order. */
+  readonly advance: (ms: number) => void;
+}
+
+function fakeTimers(): FakeTimers {
+  let clock = Date.UTC(2026, 10, 25, 12, 0);
+  let next = 1;
+  const timers = new Map<number, { readonly fn: () => void; readonly at: number }>();
+  return {
+    now: () => clock,
+    setTimeout: (fn, ms) => {
+      const id = next++;
+      timers.set(id, { fn, at: clock + ms });
+      return id;
+    },
+    clearTimeout: (handle) => {
+      timers.delete(handle as number);
+    },
+    pending: () => timers.size,
+    advance: (ms) => {
+      const end = clock + ms;
+      for (;;) {
+        const due = [...timers].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (due === undefined) break;
+        timers.delete(due[0]);
+        clock = Math.max(clock, due[1].at);
+        due[1].fn();
+      }
+      clock = end;
+    },
+  };
+}
+
+const toolCall = (id: string, name: string, args: unknown): StreamEvent => ({
+  type: "tool_call",
+  toolCall: { id, name, arguments: JSON.stringify(args) },
+});
+
+/**
+ * A `serve`-shaped host (the real `SessionHost.build` → `attachWorkflows` path)
+ * with a real driver on an `approve` step, whose ask goes to the session's ONE
+ * broker, a recording model and the persister over an in-memory store.
+ */
+function waitingRig(
+  script: readonly (readonly StreamEvent[])[] = [],
+  opts: {
+    readonly wake?: boolean;
+    /** S6: the wait wake's clock, and the host's. */
+    readonly timers?: FakeTimers;
+    /** S6: a stand-in driver whose rows the test publishes itself. */
+    readonly driver?: WorkflowDriver;
+    /** S6: the first model round waits on it (a turn that runs while a timer fires). */
+    readonly hold?: Promise<void>;
+  } = {},
+) {
+  const requests: ChatRequest["messages"][] = [];
+  const asked: PermissionRequest[] = [];
+  const runs: string[] = [];
+  let round = 0;
+  const model: ModelProvider = {
+    id: "recording",
+    async *stream(request: ChatRequest) {
+      // The title request shares this model and offers no tool: not a loop round.
+      if (!request.tools?.length) {
+        yield { type: "done" } as const;
+        return;
+      }
+      requests.push([...request.messages]);
+      if (round === 0 && opts.hold) await opts.hold;
+      // A bare `done` is an empty reply, which the loop asks again: say something.
+      yield* script[round++] ?? [
+        { type: "text", delta: "noted" } as const,
+        { type: "done" } as const,
+      ];
+    },
+  };
+  const store = new SpyDaemonStore();
+  const host = new SessionHost({
+    defaultCwd: "/tmp/workflow-status-line",
+    persister: new SessionPersister({
+      store,
+      cwd: "/tmp/workflow-status-line",
+      model: "m",
+      onError: () => {},
+    }),
+    sharedAutoAccept: true,
+    answersAutoAccept: true,
+    ...(opts.wake === true ? { wakeOnJobExit: true } : {}),
+    ...(opts.timers
+      ? {
+          now: opts.timers.now,
+          workflowWait: {
+            setTimeout: opts.timers.setTimeout,
+            clearTimeout: opts.timers.clearTimeout,
+          },
+        }
+      : {}),
+    createAgent: () => {
+      const permissions = new PermissionBroker();
+      const workflows =
+        opts.driver ??
+        new WorkflowDriver({
+          load: async () => ({
+            path: ".tentacle/workflows/task.yaml",
+            text: APPROVE_YAML,
+            prompts: {},
+          }),
+          context: () => ({ models: [], agentTypes: ["general"] }),
+          approvals: { has: async () => true, add: async () => {} },
+          request: (req, options) => {
+            asked.push(req);
+            return permissions.request(req, options);
+          },
+          runnerFor: () => async () => ({ report: "ok", toolUses: 0, stopReason: "end_turn" }),
+        });
+      const askme: Tool = {
+        name: "askme",
+        description: "askme",
+        inputSchema: z.object({}).passthrough(),
+        permission: "ask",
+        async execute() {
+          runs.push("askme");
+          return { content: "askme ok" };
+        },
+      };
+      // The USER answers the run's ask while this tool runs (S4): the run ends
+      // inside the model's round, so its end note is queued mid-turn.
+      const answer: Tool = {
+        name: "answer",
+        description: "answer",
+        inputSchema: z.object({}).passthrough(),
+        permission: "none",
+        async execute() {
+          const ask = pending()[0];
+          if (!ask) throw new Error("no pending ask");
+          session.resolvePermission(ask.requestId, "allow_once");
+          // The LIVE frame, not `snapshotPage()` (its cut does not move while a
+          // turn runs). `finish()` publishes, then calls `ended`, synchronously.
+          await until(() => liveState() === "ok");
+          await settle();
+          return { content: "answered" };
+        },
+      };
+      const agent = new Agent({
+        model,
+        tools: new ToolRegistry()
+          .register(askme)
+          .register(answer)
+          .register(createWorkflowTool(workflows)),
+        env: noopEnv,
+        requestPermission: (req, options) => permissions.request(req, options),
+      });
+      return { agent, permissions, workflows };
+    },
+  });
+  const frames: KnownSessionUpdateParams[] = [];
+  const client = { send: (u: KnownSessionUpdateParams) => frames.push(u) };
+  const { hosted: session } = host.open({ create: true }, client);
+  const updates = () => frames.map((f) => f.update);
+  /** The asks nobody answered yet. */
+  const pending = () => {
+    const resolved = new Set(
+      updates().flatMap((u) => (u.type === "permission_resolved" ? [u.requestId] : [])),
+    );
+    return updates().flatMap((u) =>
+      u.type === "permission_request" && !resolved.has(u.requestId) ? [u] : [],
+    );
+  };
+  const runState = (): string | undefined => session.snapshotPage().workflows?.[0]?.state;
+  const liveState = (): string | undefined =>
+    updates()
+      .flatMap((u) => (u.type === "workflows" ? [u.runs[0]?.state] : []))
+      .at(-1);
+  const startAndWait = async (): Promise<void> => {
+    const started = await session.workflow({
+      sessionId: session.id,
+      action: "start",
+      name: "task",
+      turnId: "t-start",
+    });
+    expect(started).toEqual({ ok: true, runId: "wf-1" });
+    await until(() => pending().length === 1 && runState() === "needs-approval");
+  };
+  const turn = async (turnId: string, text: string): Promise<void> => {
+    session.prompt(turnId, [{ type: "text", text }]);
+    await until(() => !session.running);
+  };
+  /** The one client leaves: the session runs unattended. */
+  const detach = (): void => session.detach(client);
+  return {
+    session,
+    store,
+    frames,
+    requests,
+    asked,
+    runs,
+    pending,
+    runState,
+    startAndWait,
+    turn,
+    detach,
+  };
+}
+
+describe("the live status line on a hosted session (workflow-run-awareness S3)", () => {
+  test("T4 the request ends with the line while the run waits, has the end note and no line after, and the log never holds it", async () => {
+    const rig = waitingRig();
+    await rig.startAndWait();
+
+    await rig.turn("t-1", "first prompt");
+    expect(rig.requests).toHaveLength(1);
+    expect(rig.requests[0]?.at(-1)).toEqual({ role: "user", content: WAITS_LINE });
+
+    const ask = rig.pending()[0];
+    if (!ask) throw new Error("no pending ask");
+    rig.session.resolvePermission(ask.requestId, "allow_once");
+    await until(() => rig.runState() === "ok");
+
+    await rig.turn("t-2", "second prompt");
+    expect(rig.requests).toHaveLength(2);
+    const after = (rig.requests[1] ?? []).map((m) => String(m.content));
+    expect(after.some((c) => c.startsWith("[workflow wf-1 task: ok · 1/1"))).toBe(true);
+    expect(after.some((c) => c.startsWith("[workflow wf-1 task: step"))).toBe(false);
+    // No line at the tail: the prompt (stamped), then the queued end note.
+    expect(after.at(-2)).toEndWith("second prompt");
+    expect(after.at(-1)).toStartWith("[workflow wf-1 task: ok · 1/1");
+
+    // Non-vacuity: what landed really holds this conversation and the end note.
+    await until(() => rig.store.files.get(rig.session.id)?.log?.includes("second prompt") === true);
+    const files = rig.store.files.get(rig.session.id);
+    expect(files?.log).toContain("first prompt");
+    expect(files?.log).toContain("[workflow wf-1 task: ok · 1/1");
+    expect(JSON.stringify([files, rig.store.units])).not.toContain("[workflow wf-1 task: step");
+    expect(JSON.stringify(rig.session.snapshotPage())).not.toContain("[workflow wf-1 task: step");
+  });
+
+  test("T5 in auto-accept, a whole model turn leaves the workflow ask pending; the line grants nothing", async () => {
+    const rig = waitingRig([
+      [
+        toolCall("c1", "workflow", { action: "status" }),
+        toolCall("c2", "askme", {}),
+        { type: "done" },
+      ],
+    ]);
+    rig.session.setAutoAccept(true, "phone");
+    await rig.startAndWait();
+
+    await rig.turn("t-1", "go");
+
+    // Auto-accept is live in this turn: the ordinary tool's ask was answered.
+    expect(rig.runs).toEqual(["askme"]);
+    expect(rig.requests).toHaveLength(2);
+    for (const request of rig.requests) {
+      expect(request.at(-1)).toEqual({ role: "user", content: WAITS_LINE });
+    }
+    // The run's own ask was not.
+    expect(rig.runState()).toBe("needs-approval");
+    expect(rig.pending()).toHaveLength(1);
+    const approve = rig.asked[0];
+    if (!approve) throw new Error("no workflow ask");
+    expect(approve.kind).toBe("workflow_approve");
+    expect(autoApproves(approve, true)).toBe(false);
+    rig.session.close();
+  });
+
+  test("T6 a run that ends during round 1 is told at round 2 of the SAME turn: once, and no wake follows", async () => {
+    // S4: `workflow_end` rides the mid-turn drain like a sub-agent exit. Today's
+    // behaviour (start-only) puts the note in no request of this turn and wakes.
+    const rig = waitingRig([[toolCall("c1", "answer", {}), { type: "done" }]], { wake: true });
+    await rig.startAndWait();
+
+    await rig.turn("t-1", "go");
+
+    const endNote = (c: unknown): boolean => String(c).startsWith("[workflow wf-1 task: ok · 1/1");
+    expect(rig.requests).toHaveLength(2);
+    // Round 1: the run still waits (the line), no end note yet.
+    expect(rig.requests[0]?.at(-1)).toEqual({ role: "user", content: WAITS_LINE });
+    const round2 = rig.requests[1] ?? [];
+    // Round 2: the end note right after the tool result, and no line any more.
+    expect(round2.filter((m) => endNote(m.content))).toHaveLength(1);
+    expect(round2.at(-1)?.content).toSatisfy(endNote);
+    expect(round2.at(-2)?.role).toBe("tool");
+    expect(round2.some((m) => String(m.content).startsWith("[workflow wf-1 task: step"))).toBe(
+      false,
+    );
+    // Persisted as the end note (its kind + id), as the turn-start flush does.
+    expect(round2.at(-1)).toMatchObject({ note: { kind: NOTE_KIND.workflowEnd, id: "wf-1" } });
+    expect(rig.session.unflushedExits).toBe(0);
+
+    // No wake turn: the follow-up check finds nothing pending.
+    await settle();
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await settle();
+    }
+    expect(rig.session.running).toBe(false);
+    expect(rig.requests).toHaveLength(2);
+    expect(JSON.stringify(rig.frames)).not.toContain('"wake-');
+
+    // Never told twice: the next turn's request holds the note exactly once.
+    await rig.turn("t-2", "next");
+    expect(rig.requests).toHaveLength(3);
+    expect((rig.requests[2] ?? []).filter((m) => endNote(m.content))).toHaveLength(1);
+    rig.session.close();
+  });
+
+  test("a closed session gives no line, though the last rows it published are still live", async () => {
+    // Mutation: drop the `this.closed` guard in the provider → the line comes back.
+    const rig = waitingRig();
+    await rig.startAndWait();
+    const inner = (rig.session as unknown as { session: { statusLine?: () => string | undefined } })
+      .session;
+    expect(inner.statusLine?.()).toBe(WAITS_LINE);
+    rig.session.close();
+    expect(inner.statusLine).toBeDefined();
+    expect(inner.statusLine?.()).toBeUndefined();
+  });
+});
+
+// --- the user-wait wake (docs/feat/workflow-run-awareness.md S6: T8) ---------
+
+const GRACE = 30_000;
+const GAP = 10 * 60_000;
+const WAIT_TAIL = " You cannot answer it; tell the user if useful.";
+const isWaitNote = (m: { readonly content: unknown }): boolean =>
+  String(m.content).endsWith(WAIT_TAIL);
+/** The model requests that carry a wait note (each one a wake: nothing else sends it). */
+const waitRequests = (requests: readonly ChatRequest["messages"][]) =>
+  requests.filter((r) => r.some(isWaitNote));
+
+/** A stand-in driver: the test publishes the rows itself (`publish`). */
+function rowsDriver(): {
+  readonly driver: WorkflowDriver;
+  readonly publish: (row: WorkflowRow) => void;
+} {
+  let host: WorkflowHost | undefined;
+  const driver = {
+    bind: (h: WorkflowHost) => {
+      host = h;
+    },
+    reserveRunIds: () => {},
+    rows: () => [],
+    dispose: () => {},
+  } as unknown as WorkflowDriver;
+  return { driver, publish: (row) => host?.publish([row]) };
+}
+
+/** `wf-1`'s one `merge` step, at `attempt`: asking the user, or running. */
+const asking = (attempt: number, state = "needs-approval"): WorkflowRow => ({
+  runId: "wf-1",
+  name: "task",
+  version: 1,
+  hash: "a".repeat(64),
+  state: "running",
+  tokens: 0,
+  startedAt: 1,
+  history: [],
+  historyDropped: 0,
+  steps: [
+    {
+      id: "merge",
+      kind: "approve",
+      where: "local",
+      state,
+      attempt,
+      round: 0,
+      next: null,
+      onFail: null,
+      retry: 0,
+    },
+  ],
+});
+
+/** Let the wake's macrotask start its turn, and that turn end. */
+async function wakeSettles(rig: ReturnType<typeof waitingRig>, requests: number): Promise<void> {
+  await until(() => rig.requests.length >= requests && !rig.session.running);
+  await settle();
+}
+
+/** A few macrotasks with nothing due: whatever was going to start has started. */
+async function quiet(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+    await settle();
+  }
+}
+
+describe("a step waiting for the user wakes an unattended session once (workflow-run-awareness S6)", () => {
+  test("T8a/b grace elapsed, nobody attached: ONE wake whose request has the note and the line; never again for that ask", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { wake: true, timers });
+    await rig.startAndWait();
+    rig.detach();
+    expect(timers.pending()).toBe(1);
+
+    timers.advance(GRACE - 1);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
+
+    timers.advance(1);
+    await wakeSettles(rig, 1);
+    expect(rig.requests).toHaveLength(1);
+    const request = rig.requests[0] ?? [];
+    // The note, then the live line at the tail (the request-only seam).
+    expect(request.at(-1)).toEqual({ role: "user", content: WAITS_LINE });
+    const note = request.at(-2);
+    expect(note).toMatchObject({
+      role: "user",
+      note: { kind: NOTE_KIND.workflowWait, id: "wf-1" },
+    });
+    expect(String(note?.content)).toMatch(
+      /^\[workflow wf-1 task: step 1\/1 merge waits for the user \(since \d\d:\d\d\) · 0\/1 ok · 0 tok\] You cannot answer it; tell the user if useful\.$/,
+    );
+    // Persisted with its kind (the daemon's own log).
+    await until(
+      () => rig.store.files.get(rig.session.id)?.log?.includes(NOTE_KIND.workflowWait) === true,
+    );
+
+    // (b) the same ask, still unanswered an hour later: no second wake, nothing armed.
+    expect(timers.pending()).toBe(0);
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(1);
+    expect(rig.session.unflushedExits).toBe(0);
+    expect(rig.pending()).toHaveLength(1);
+    rig.session.close();
+  });
+
+  test("T8c an ask answered inside the grace never wakes for the wait (the run's end still does)", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { wake: true, timers });
+    await rig.startAndWait();
+    rig.detach();
+    timers.advance(5_000);
+    const ask = rig.pending()[0];
+    if (!ask) throw new Error("no pending ask");
+    rig.session.resolvePermission(ask.requestId, "allow_once");
+    await until(() => rig.runState() === "ok");
+    // The wait went with its ask: the timer is cleared.
+    expect(timers.pending()).toBe(0);
+    // The END note wakes, as before this feature: one turn, without a wait note.
+    await wakeSettles(rig, 1);
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(1);
+    expect(waitRequests(rig.requests)).toHaveLength(0);
+    rig.session.close();
+  });
+
+  test("T8d a client attached when the grace ends: no wake, and the ask's timer is gone", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { wake: true, timers });
+    await rig.startAndWait();
+    timers.advance(GRACE);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
+    expect(rig.session.unflushedExits).toBe(0);
+    expect(timers.pending()).toBe(0);
+    // Leaving later does not revive it: the wake is for asks that START unattended.
+    rig.detach();
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
+    rig.session.close();
+  });
+
+  test("T8e a turn running when the grace ends: no wake then; the turn ends with the ask pending → one wake", async () => {
+    const timers = fakeTimers();
+    let release = (): void => {};
+    const hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const rig = waitingRig([], { wake: true, timers, hold });
+    await rig.startAndWait();
+    rig.detach();
+    rig.session.prompt("t-1", [{ type: "text", text: "busy" }]);
+    await until(() => rig.requests.length === 1);
+    expect(rig.session.running).toBe(true);
+
+    timers.advance(GRACE);
+    await settle();
+    // Not consumed: re-armed for another grace.
+    expect(rig.session.unflushedExits).toBe(0);
+    expect(timers.pending()).toBe(1);
+
+    release();
+    await until(() => !rig.session.running);
+    await quiet();
+    expect(rig.requests).toHaveLength(1);
+
+    timers.advance(GRACE);
+    await wakeSettles(rig, 2);
+    expect(rig.requests).toHaveLength(2);
+    expect(waitRequests(rig.requests)).toHaveLength(1);
+    expect(rig.requests[1]?.some(isWaitNote)).toBe(true);
+    rig.session.close();
+  });
+
+  test("T8f a looping run whose every attempt asks: wakes at least 10 min apart, never two inside the gap", async () => {
+    const timers = fakeTimers();
+    const { driver, publish } = rowsDriver();
+    const rig = waitingRig([], { wake: true, timers, driver });
+    rig.detach();
+    const wakes: number[] = [];
+    const count = async (): Promise<void> => {
+      await quiet();
+      await until(() => !rig.session.running);
+      while (wakes.length < waitRequests(rig.requests).length) wakes.push(timers.now());
+    };
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      publish(asking(attempt));
+      timers.advance(GRACE + 1_000);
+      await count();
+      // The step fails and retries: its next attempt asks again.
+      publish({ ...asking(attempt), steps: [] });
+      timers.advance(1_000);
+      await count();
+    }
+    // Then the last attempt stays unanswered long enough for the gap to pass.
+    publish(asking(6));
+    timers.advance(GAP);
+    await count();
+
+    expect(wakes.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < wakes.length; i++) {
+      expect((wakes[i] ?? 0) - (wakes[i - 1] ?? 0)).toBeGreaterThanOrEqual(GAP);
+    }
+    rig.session.close();
+  });
+
+  test("T8b2 the same ask key coming back (a second ask in the same attempt) never wakes again, even past the gap", async () => {
+    // Mutation target: the woken-key set. The key is armed again when it re-appears.
+    const timers = fakeTimers();
+    const { driver, publish } = rowsDriver();
+    const rig = waitingRig([], { wake: true, timers, driver });
+    rig.detach();
+    publish(asking(0));
+    timers.advance(GRACE);
+    await wakeSettles(rig, 1);
+    expect(waitRequests(rig.requests)).toHaveLength(1);
+
+    publish(asking(0, "running"));
+    timers.advance(GAP);
+    publish(asking(0));
+    expect(timers.pending()).toBe(1);
+    timers.advance(GRACE);
+    await quiet();
+    expect(rig.requests).toHaveLength(1);
+    expect(rig.session.unflushedExits).toBe(0);
+
+    // Non-vacuity: the NEXT attempt is a new ask, and it does wake.
+    publish(asking(1));
+    timers.advance(GRACE);
+    await wakeSettles(rig, 2);
+    expect(waitRequests(rig.requests)).toHaveLength(2);
+    rig.session.close();
+  });
+
+  test("T8g autoWake off: no timer is ever armed, no wake", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { timers });
+    await rig.startAndWait();
+    rig.detach();
+    expect(timers.pending()).toBe(0);
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
+    expect(rig.session.unflushedExits).toBe(0);
+    rig.session.close();
+  });
+
+  test("T8h closed during the grace: the timer is cleared, no wake", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { wake: true, timers });
+    await rig.startAndWait();
+    rig.detach();
+    expect(timers.pending()).toBe(1);
+    rig.session.close();
+    expect(timers.pending()).toBe(0);
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
   });
 });

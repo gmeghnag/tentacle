@@ -270,10 +270,6 @@ describe("userRowParts — a photo-only message has no bubble", () => {
     });
   });
 
-  test("a restart caption alone keeps the bubble (it is drawn inside it)", () => {
-    expect(userRowParts(user({ restart: true }))).toEqual({ photos: false, bubble: true });
-  });
-
   test("an entirely empty message draws nothing at all", () => {
     expect(userRowParts(user({}))).toEqual({ photos: false, bubble: false });
   });

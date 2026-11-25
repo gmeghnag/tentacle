@@ -16,8 +16,21 @@ const row = {
   tokens: 1200,
   budget: 3_000_000,
   startedAt: 1,
+  history: [{ step: "plan", attempt: 0, round: 0, state: "ok", durationMs: 40 }],
+  historyDropped: 0,
   steps: [
-    { id: "plan", kind: "agent", model: "opus", where: "local", state: "ok", attempt: 0, round: 0 },
+    {
+      id: "plan",
+      kind: "agent",
+      model: "opus",
+      where: "local",
+      state: "ok",
+      attempt: 0,
+      round: 0,
+      next: "review",
+      onFail: null,
+      retry: 0,
+    },
     {
       id: "review",
       kind: "agent",
@@ -27,6 +40,9 @@ const row = {
       round: 2,
       maxRound: 3,
       live: "fs_read src/a.ts",
+      next: null,
+      onFail: { goto: "plan", max: 3, taken: 2 },
+      retry: 1,
     },
   ],
 };

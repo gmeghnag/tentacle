@@ -1828,6 +1828,7 @@
           "truncate": "#/$defs/LogTruncateEntry",
           "turn_end": "#/$defs/LogTurnEndEntry",
           "turn_start": "#/$defs/LogTurnStartEntry",
+          "unit_end": "#/$defs/LogUnitEndEntry",
           "usage": "#/$defs/LogUsageEntry",
           "workflow_end": "#/$defs/LogWorkflowEndEntry",
           "workflow_start": "#/$defs/LogWorkflowStartEntry",
@@ -1889,6 +1890,9 @@
         },
         {
           "$ref": "#/$defs/LogWorkflowEndEntry"
+        },
+        {
+          "$ref": "#/$defs/LogUnitEndEntry"
         }
       ]
     },
@@ -2529,6 +2533,80 @@
         }
       },
       "required": ["id", "seq", "ts", "turnId", "type"],
+      "type": "object"
+    },
+    "LogUnitEndEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "endedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "native": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "result": {
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "resultDropped": {
+          "const": true,
+          "type": "boolean"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "unit_end",
+          "type": "string"
+        },
+        "unitId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["endedAt", "id", "kind", "native", "seq", "state", "ts", "type", "unitId"],
       "type": "object"
     },
     "LogUsageEntry": {
@@ -6761,7 +6839,6 @@
           "$ref": "#/$defs/SessionId"
         }
       },
-      "required": ["sessionId"],
       "type": "object"
     },
     "WorkflowCatalogueResult": {
@@ -6771,22 +6848,6 @@
           "maxLength": 1024,
           "minLength": 1,
           "type": "string"
-        },
-        "elsewhere": {
-          "additionalProperties": true,
-          "properties": {
-            "count": {
-              "minimum": 0,
-              "type": "integer"
-            },
-            "dir": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          "required": ["count", "dir"],
-          "type": "object"
         },
         "gitIgnored": {
           "type": "boolean"
@@ -6928,6 +6989,37 @@
     "WorkflowHash": {
       "pattern": "^[0-9a-f]{64}$",
       "type": "string"
+    },
+    "WorkflowHistoryRow": {
+      "additionalProperties": true,
+      "properties": {
+        "attempt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "round": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "step": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["attempt", "round", "state", "step"],
+      "type": "object"
     },
     "WorkflowInputValue": {
       "additionalProperties": true,
@@ -7213,6 +7305,17 @@
           "pattern": "^[0-9a-f]{64}$",
           "type": "string"
         },
+        "history": {
+          "items": {
+            "$ref": "#/$defs/WorkflowHistoryRow"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "historyDropped": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "name": {
           "maxLength": 64,
           "minLength": 1,
@@ -7261,7 +7364,18 @@
           "type": "integer"
         }
       },
-      "required": ["hash", "name", "runId", "startedAt", "state", "steps", "tokens", "version"],
+      "required": [
+        "hash",
+        "history",
+        "historyDropped",
+        "name",
+        "runId",
+        "startedAt",
+        "state",
+        "steps",
+        "tokens",
+        "version"
+      ],
       "type": "object"
     },
     "WorkflowRunId": {
@@ -7599,9 +7713,56 @@
           "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
           "type": "string"
         },
+        "next": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "onFail": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "properties": {
+                "goto": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+                  "type": "string"
+                },
+                "max": {
+                  "maximum": 10,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "taken": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": ["goto", "max", "taken"],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reason": {
           "maxLength": 2000,
           "type": "string"
+        },
+        "retry": {
+          "maximum": 5,
+          "minimum": 0,
+          "type": "integer"
         },
         "round": {
           "minimum": 0,
@@ -7620,7 +7781,7 @@
           "type": "string"
         }
       },
-      "required": ["attempt", "id", "kind", "round", "state", "where"],
+      "required": ["attempt", "id", "kind", "next", "onFail", "retry", "round", "state", "where"],
       "type": "object"
     },
     "WorkflowWord": {
@@ -8175,5 +8336,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 25
+  "x-protocol-version": 27
 }

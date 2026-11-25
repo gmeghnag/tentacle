@@ -453,6 +453,8 @@ describe("SessionHost.list over the wire", () => {
       state,
       tokens: 0,
       startedAt: 1,
+      history: [],
+      historyDropped: 0,
       steps: [],
     });
     // The seam: a driver is what the host reads its rows from (`attachWorkflows`).
