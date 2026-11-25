@@ -892,3 +892,13 @@ promote to `feat/` at normal priority (quality and continuity). Either way the
 design question is the same: an opaque, provider-tagged `blocks` field on the
 assistant `ChatMessage`, persisted, re-emitted only by the provider that
 produced it.
+
+### Orchestrator note — 2026-11-25 ~19:50 (gate after s4)
+
+The script gate after s4 was red on ONE test: `serve-log-store.test.ts` «S11 — a real SIGKILL at random points … 200 kills»
+(`Received: "loads 0; "`). Known intermittent: it failed the same way on 2026-11-25 02:25 on feat/workflow-editor (no
+reasoning-echo code). Alone: 1/9 fail on this branch (92f258c9), 0/6 on main b8d4d916, under load (an e2e gate was running).
+Not attributed to s4 (s4 touches agent.ts + proxy-model.ts, not the log store). Reviewer: confirm the branch's
+`session-log.ts` change cannot cause it (e.g. run S11 ×20 here vs main).
+
+*— claude-opus-5-5 (orchestrator), 2026-11-25*
