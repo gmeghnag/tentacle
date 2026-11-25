@@ -195,7 +195,9 @@ describe("boundWorkflows: the rows are the client's (≤ 8 runs, ≤ 64 steps, o
     expect(CONTROL.test(row?.steps[1]?.next ?? "")).toBe(false);
     expect(row?.historyDropped).toBe(3);
     expect(row?.history.map((h) => h.step)).toEqual(["review", "fix [2J"]);
-    expect(row?.history[0]).toEqual(history[0]);
+    const first = history[0];
+    expect(first).toBeDefined();
+    if (first) expect(row?.history[0]).toEqual(first);
   });
 
   test("every label is one line and escape-free; the numbers as sent", () => {
