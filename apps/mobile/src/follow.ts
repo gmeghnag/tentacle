@@ -255,6 +255,22 @@ export const landingAwaiting: Landing = {
 export const LANDING_ROUNDS = 12;
 
 /**
+ * Rows a HIDDEN landing renders per batch (fix/mobile-open-long-session-3). A
+ * `FlatList` renders 10 rows per batch, so a long opening grows its content for
+ * ~40 measurements while `LANDING_ROUNDS` allows 12: the bound revealed the list
+ * mid-growth and the tail then followed the rest ANIMATED — the person watched
+ * the transcript travel from turn ~80 to the end. Rendered hidden in big batches
+ * the window (default 21 viewports, a few hundred rows at most) is complete in a
+ * few measurements, so the landing ends on a repeated height, before the bound.
+ */
+export const LANDING_BATCH = 240;
+
+/** The list's `maxToRenderPerBatch` for a landing: big while hidden, else the default (`undefined`). */
+export function landingBatch(settling: boolean): number | undefined {
+  return settling ? LANDING_BATCH : undefined;
+}
+
+/**
  * Whether the list RESTS short of its true end (fix/mobile-open-long-session): a
  * known `offset` more than `SETTLE_SLACK_PT` from `endOffset`. `null` (unknown) and
  * a list shorter than its viewport are never short.

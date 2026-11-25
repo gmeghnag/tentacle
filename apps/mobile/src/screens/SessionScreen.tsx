@@ -92,6 +92,7 @@ import {
   jumpPill,
   jumpPillText,
   jumped,
+  landingBatch,
   landingDone,
   landingEnded,
   landingOwns,
@@ -1832,6 +1833,7 @@ export function SessionScreen({
               CellRendererComponent={MeasuredCell}
               testID="transcript"
               data={rows}
+              maxToRenderPerBatch={landingBatch(settling)}
               keyExtractor={(row: Row) => row.key}
               renderItem={({ item }) => {
                 const cell = layout.cells.get(item.key);
