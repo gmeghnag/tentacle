@@ -238,7 +238,13 @@ function subtitleOf(step: Mapping, kind: StepKind): string {
     const timeout = textOf(step.timeout);
     return [
       "run",
-      docker === undefined ? "local" : `docker ${oneLine(docker)}`,
+      // A pending container (the phone holds `{docker: ""}` until a name is
+      // typed) is NAMED: `docker ` with a trailing space reads as a glitch.
+      docker === undefined
+        ? "local"
+        : docker === ""
+          ? "docker · not named"
+          : `docker ${oneLine(docker)}`,
       ...(timeout === undefined ? [] : [oneLine(timeout)]),
     ].join(" · ");
   }

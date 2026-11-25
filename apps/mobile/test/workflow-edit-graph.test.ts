@@ -143,6 +143,25 @@ describe("placement comes from the draft's structure", () => {
     expect(nodeById(geom, "gate").sub).toContain("run");
     expect(nodeById(geom, "merge").sub).toBe("approve · waits for you");
   });
+  test("a pending container is NAMED on the pill, not left as a trailing space", () => {
+    // The phone can now hold `where: {docker: ""}` (a Docker step whose name is
+    // not typed yet): the pill must not read `docker ` and look like a glitch.
+    const draft: WorkflowDraft = {
+      schemaVersion: 1,
+      name: "task",
+      version: 1,
+      steps: [
+        { id: "exec", run: "bun test", where: { docker: "" } },
+        { id: "lint", run: "bun run lint", where: { docker: "node" } },
+        { id: "plan", run: "bun run plan" },
+      ],
+    };
+    const geom = editGeometry(draft, []);
+    expect(nodeById(geom, "exec").sub).toBe("run · docker · not named");
+    // A named container is unchanged, and a `local` step still says Local.
+    expect(nodeById(geom, "lint").sub).toBe("run · docker node");
+    expect(nodeById(geom, "plan").sub).toBe("run · local");
+  });
 });
 
 describe("edges: one ＋ per drawable edge, plus the end", () => {

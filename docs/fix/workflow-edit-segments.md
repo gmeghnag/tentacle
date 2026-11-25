@@ -298,7 +298,123 @@ whose red state needs a synthetic draft, stated as such.
 
 ## Execution
 
-*— claude-sonnet-5-5, 2026-11-26* (planner; left empty — the executor fills it)
+*— claude-code 2.1.332 (Claude; the harness exposes no model id string), 2026-11-26*
+
+**Load-bearing check re-run first (before any edit).** The Context's repro, rebuilt
+from the plan's own sketch at the worktree-local scratch dir
+`.tentacle/worktrees/workflow-edit-segments/.tentacle/tmp/workflow-edit-segments/repro.ts`
+(AGENTS §6; the worktree is the sandbox root, as the planner also found). It
+drives `stepSheet`/`segmentAction`/`applySheetAction`/`textAction` plus the CORE
+(`patchStep`, `setFailTarget`, `draftProblems`, `editGeometry`) exactly as
+`App.tsx:2549-2555` does. Output on `main` @ 5c9a1e10 (plan commit), BEFORE the
+fix:
+
+```
+start          : lint: where [Local] · docker row ABSENT | then [Stop] · goto row ABSENT
+Where->Docker  : lint: where [Local] · docker row ABSENT | then [Stop] · goto row ABSENT
+  action       : {"do":"patch","id":"lint","patch":{"kind":"run","where":{"docker":""}}}
+  draft where  : {"id":"lint","run":"bun run lint","where":{"docker":""}}
+Then->Go to    : lint: where [Local] · docker row ABSENT | then [Stop] · goto row ABSENT
+  action       : {"do":"then","id":"lint","target":""} · calls []
+  draft step   : {"id":"lint","run":"bun run lint"}
+textAction(docker, "") : null
+setFailTarget("")      : "no step \"\""
+problems(docker "")    : steps[0].where: needs a container name — {docker: <container>}
+problems(goto "")      : steps[0].on_fail: needs a step id — {goto: <step>, max: 1..10}
+graph run sub          : "run · docker "
+```
+
+Every number the Context cites holds: the write lands (`{docker: ""}`) and the
+field still draws Local (bug 1); the `then` tap writes nothing at all (bug 2);
+both validator sentences already exist; the pill reads `run · docker ` (D5). Same
+script after the fix:
+
+```
+start          : lint: where [Local] · docker row ABSENT | then [Stop] · goto row ABSENT
+Where->Docker  : lint: where [Docker] · docker row present | then [Stop] · goto row ABSENT
+Then->Go to    : lint: where [Local] · docker row ABSENT | then [Go to step] · goto row present
+  draft step   : {"id":"lint","run":"bun run lint","on_fail":{"goto":"","max":1}}
+textAction(docker, "") : {"do":"patch","id":"lint","patch":{"kind":"run","where":{"docker":""}}}
+setFailTarget("")      : {"id":"lint","run":"bun run lint","on_fail":{"goto":"","max":1}}
+graph run sub          : "run · docker · not named"
+```
+
+**As built, in the Implementation's order (red before green at every slice).**
+
+1. **Core** — `packages/core/src/workflow-draft.ts:250-272`: `setFailTarget`
+   accepts `""` as the pending target (the `idsOf` membership check is skipped for
+   it, the `itself` refusal still fires first) and writes `{goto: "", max}`
+   keeping the current `max`; doc comment extended. RED first
+   (`packages/core/test/workflow-draft.test.ts:234`, new test 7 — failed with
+   `Received: "no step \"\""`, exactly the plan's prediction) → green.
+2. **Mobile sheets** — `apps/mobile/src/workflow-edit-sheets.ts`:
+   - `stepSheet` `:425` + `:460-464`: `failing = onFailOf(step) !== undefined`
+     drives both `then` options and the `goto`/`max` rows; the pending `goto`
+     row carries `sub: "not picked yet"` (D-point 7); the foot expression is
+     unchanged, so it stays `null` until a target exists.
+   - `bodyFields` run branch `:532-590`: `container` (a non-array mapping) is the
+     Docker shape (`:532`), `docker` its content (possibly `""`), used for the
+     option states (`:566`), the row's presence (`:570`) and its `value` (`:578`).
+   - `bodyFields` agent branch `:602-621`: `isFile = agent.prompt !== undefined`
+     drives `promptMode` (`:610`) and which prompt row renders (`:614`) (D3).
+   - `textAction`'s `docker` case `:1051-1054`: a blank name is SENT (D2).
+   - `applySheetAction`'s `then` case `:1218-1221`: `""` is passed to `setFail`
+     (D1's other half).
+3. **Graph** — `apps/mobile/src/workflow-edit-graph.ts:238-247`: a blank docker
+   is named `docker · not named` (D5).
+4. **Tests** — 6 new tests in `apps/mobile/test/workflow-edit-sheets.test.ts`
+   (`describe("a segmented option follows the SHAPE, not its content")`, `:277-426`)
+   = the plan's tests 1-6, 1 new in `workflow-edit-graph.test.ts` (`:146-164`).
+5. **Changelog** — `changelog.d/workflow-edit-segments.fixed.md` (D7).
+
+**Drift from the Implementation (and why).**
+
+- **One EXISTING test had to be rewritten, not only added.**
+  `refusals: the sheet never guesses > "Go to step" with no target picked yet sets
+  no fail target` (`:483`, now `… writes the PENDING shape`) asserted `calls == []`
+  — i.e. it pinned the very bug (the dropped write) that Design point 2 removes,
+  so it now asserts `setFail plan ""`. The plan's Tests section listed only
+  additions; a plan-time read of that test would have caught it. Its red state was
+  shown in the same run as the new tests (`Received: []`).
+- **A graph test was added** (the plan's Tests list had no item for Design point 7,
+  though Files item 3 named the change): §9 needs a red-first test for every fixed
+  line. `apps/mobile/test/workflow-edit-graph.test.ts:146` — red with
+  `Received: "run · docker "`.
+- **`draftProblems(draft, prompts)` takes the prompts map**, so the new tests pass
+  `PROMPTS` (`:329`, `:372`, `:423`); no production impact, noted only because the
+  plan's sketches spelled it `draftProblems(draft)`.
+- No other file was touched: `screens/WorkflowEditSheets.tsx`, `App.tsx`,
+  `workflow-edit-controller.ts`, `workflow-spec.ts` unchanged. No schema, no wire,
+  no persisted shape ⇒ `packages/protocol/schema/protocol.json` untouched (nothing
+  to regenerate) and no `protocol.d/` note.
+
+**Non-vacuity (§9), by mutation — each change reverted alone, the suite re-run,
+then restored (final `git diff` reviewed line by line):**
+
+| mutation (single line reverted to the pre-fix code) | result |
+| --- | --- |
+| core: `setFailTarget` membership check without the `target !== ""` skip | 2 fail — `setFailTarget > "" is the PENDING target`, and the mobile `Then`→Go to step test (it applies through the core) |
+| sheets: `then` options/rows back to `goto === ""` / `goto !== ""` (the exact pre-fix read) | 1 fail — `Then`→Go to step sticks; **no pre-existing test moves**, which matches the repro (nothing else observed the bug) |
+| sheets: the `if (action.target !== "")` guard restored in `applySheetAction` | 2 fail — `Then`→Go to step sticks + `Go to step … writes the PENDING shape` |
+| sheets: `where` options/row back to `docker === ""` / `docker !== ""` | 1 fail — `Where`→Docker sticks |
+| sheets: `docker` text case back to `value === "" ? null : …` | 1 fail — a blank container name reaches the VALIDATOR |
+| sheets: `promptMode` back to `path !== ""` / `path === ""` | 1 fail — `promptMode` reads the KEY |
+| graph: blank docker back to `` `docker ${oneLine(docker)}` `` | 1 fail — a pending container is NAMED on the pill |
+
+The two "clears" directions (`Where`→Local, `Then`→Stop) pass on both old and new
+code by construction — they guard the reverse move rather than the bug, as the
+plan says.
+
+**Gate status.** Narrow suites green after every slice; final run of the six files
+the change touches (`workflow-edit-sheets`, `workflow-edit-graph`,
+`workflow-edit-wiring`, `workflow-edit-controller`, `workflow-edit-actions`,
+core `workflow-draft`): **264 pass, 0 fail**. `bunx biome check` on all six
+changed files: clean (3 format-only fixes applied by `--write`: the graph ternary,
+one long test line, one draft literal). `bunx tsc -p apps/mobile --noEmit`:
+clean — this caught one real slip first (`LOCAL.steps` was `unknown`), fixed by
+typing the fixture `satisfies WorkflowDraft` instead of `: WorkflowDraft`. The
+full `bun run check` is run by the orchestrator's script, not here: the only part
+of it I did not execute is the root `tsc --noEmit` and the full suite.
 
 ## Review
 

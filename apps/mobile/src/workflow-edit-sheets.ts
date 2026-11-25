@@ -420,6 +420,9 @@ export function stepSheet(input: {
   const body = kind === null ? [] : bodyFields(draft, input.prompts, id, step, input);
   const onFail = onFailOf(step);
   const goto = text(onFail?.goto);
+  // The SHAPE decides, never the content: `{goto: ""}` is "Go to step" with the
+  // step still to pick (the empty string is what the validator then refuses).
+  const failing = onFail !== undefined;
   const retry = numberish(step.retry) ?? 0;
   const next = text(step.next);
   const following = passTargetOf(draft, id);
@@ -454,19 +457,20 @@ export function stepSheet(input: {
             key: "then",
             label: "Then",
             options: [
-              { label: "Stop", on: goto === "" },
-              { label: "Go to step", on: goto !== "" },
+              { label: "Stop", on: !failing },
+              { label: "Go to step", on: failing },
             ],
           },
-          ...(goto === ""
-            ? []
-            : [
+          ...(failing
+            ? [
                 {
                   control: "pick" as const,
                   key: "goto",
                   label: "Go to",
                   value: goto,
-                  sub: null,
+                  // A `pick` row draws its value as plain text: an empty one is a
+                  // blank line, so the pending step says so in words.
+                  sub: goto === "" ? "not picked yet" : null,
                   opens: { kind: "pick" as const, id, purpose: "fail" as const },
                 },
                 {
@@ -478,7 +482,8 @@ export function stepSheet(input: {
                   min: 1,
                   max: WORKFLOW_MAX_GOTO,
                 },
-              ]),
+              ]
+            : []),
         ],
         foot: goto === "" ? null : `Draws a dashed ✗ link to ${goto}. Each pass through it counts.`,
         footBad: false,
@@ -523,8 +528,14 @@ function bodyFields(
 ): SheetField[] {
   const kind = kindOf(step);
   if (kind === "run") {
-    const where = step.where as Mapping | undefined;
-    const docker = typeof where === "object" && where !== null ? text(where.docker) : "";
+    const where = step.where;
+    const container =
+      typeof where === "object" && where !== null && !Array.isArray(where)
+        ? (where as Mapping)
+        : undefined;
+    // Docker is the SHAPE (`where` is a mapping); the name inside may still be
+    // empty, which is a pending container the validator names on Save.
+    const docker = text(container?.docker);
     const timeout = text(step.timeout);
     return [
       {
@@ -552,11 +563,11 @@ function bodyFields(
         key: "where",
         label: "Where",
         options: [
-          { label: "Local", on: docker === "" },
-          { label: "Docker", on: docker !== "" },
+          { label: "Local", on: container === undefined },
+          { label: "Docker", on: container !== undefined },
         ],
       },
-      ...(docker === ""
+      ...(container === undefined
         ? []
         : [
             {
@@ -586,6 +597,9 @@ function bodyFields(
     const agent = (step.agent ?? {}) as Mapping;
     const path = text(agent.prompt);
     const inline = text(agent.prompt_text);
+    // The KEY decides the mode, as it does for `where`/`on_fail`: a hand-written
+    // `prompt: ""` is a File step that names no file, not an Inline one.
+    const isFile = agent.prompt !== undefined;
     const file = path === "" ? (prompts[defaultPromptPath(id)] ?? "") : (prompts[path] ?? "");
     return [
       {
@@ -593,11 +607,11 @@ function bodyFields(
         key: "promptMode",
         label: "Prompt",
         options: [
-          { label: "File", on: path !== "" },
-          { label: "Inline", on: path === "" },
+          { label: "File", on: isFile },
+          { label: "Inline", on: !isFile },
         ],
       },
-      ...(path === ""
+      ...(!isFile
         ? [
             {
               control: "text" as const,
@@ -1035,9 +1049,9 @@ export function textAction(model: SheetModel, key: string, raw: string): SheetAc
     case "id":
       return value === "" || value === id ? null : { do: "rename", id, to: value };
     case "docker":
-      return value === ""
-        ? null
-        : { do: "patch", id, patch: { kind: "run", where: { docker: value } } };
+      // A blank name is SENT: the draft keeps `{docker: ""}` and Save names it,
+      // instead of a field that shows empty while the file keeps the old name.
+      return { do: "patch", id, patch: { kind: "run", where: { docker: value } } };
     case "timeout":
       if (value === "") {
         return { do: "patch", id, patch: { kind: "run", timeout: null } };
@@ -1202,10 +1216,9 @@ export function applySheetAction(actions: SheetActions, action: SheetAction | nu
       actions.setRetry(action.id, action.retry);
       return;
     case "then":
-      // A `Go to step` with nothing picked yet is not a target: it stays off.
-      if (action.target !== "") {
-        actions.setFail(action.id, action.target);
-      }
+      // `""` is the pending target: it is WRITTEN, so the sheet can draw the
+      // choice it is being asked for (Save then refuses it until it is picked).
+      actions.setFail(action.id, action.target);
       return;
     case "gotoMax":
       actions.setGotoMax(action.id, action.max);
