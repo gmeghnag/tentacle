@@ -998,3 +998,19 @@ SLICES: a2c-1-mapping=sonnet a2c-2-transport=opus a2c-3-seam=opus a2c-4-question
   M1 is red only in core: daemon-side the question offers no `allow_once`, so
   `autoAnswer` cannot answer it even with the rule broken (defence in depth).
 - **Gate:** not run here (the orchestrator's script runs it).
+
+### Orchestrator note — 2026-11-25 ~17:50 (resume after a mis-counted chain)
+
+The chain counted a2c-1/a2c-2 as done although a2c-1 STOPPED (it needed approval
+to run the compile smoke) and a2c-2 was BLOCKED on it; a2c-3 is PARTIAL (wiring
+step). Facts for the re-run:
+
+- **Compile smoke PASSED** (run by the orchestrator on this branch, f5fdb624):
+  `bun build --compile packages/agent/smoke-a2a.ts` → `48 modules`, the binary
+  prints `function function function` (ClientFactory, DefaultAgentCardResolver,
+  JsonRpcTransportFactory), exit 0. a2c-1 deletes `packages/agent/smoke-a2a.ts`
+  and implements its pure module.
+- Re-run order: a2c-1 (rest of slice) → a2c-2 → a2c-3 (finish the wiring step
+  only; keep what is built) → a2c-5 … a2c-8 → review. a2c-4 is DONE.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-25*
