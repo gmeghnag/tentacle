@@ -269,6 +269,11 @@ export class Session {
     this.agent.noteWorkflowEnd(runId, text);
   }
 
+  /** A workflow step waits for the user, unattended (S6): told at the next turn's start, on the CURRENT agent. */
+  noteWorkflowWait(runId: string, text: string): void {
+    this.agent.noteWorkflowWait(runId, text);
+  }
+
   noteUserToSubagent(agentId: string, text: string): void {
     this.agent.noteUserToSubagent(agentId, text);
   }

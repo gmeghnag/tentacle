@@ -10,6 +10,8 @@ import {
   Session,
   WorkflowDriver,
   type WorkflowDriverDeps,
+  type WorkflowHost,
+  type WorkflowRow,
   type WorkflowSource,
 } from "@tentacle/agent";
 import {
@@ -817,6 +819,46 @@ async function until(cond: () => boolean, ms = 2000): Promise<void> {
 
 const WAITS_LINE = "[workflow wf-1 task: step 1/1 merge waits for the user · 0/1 ok · 0 tok]";
 
+/** A clock and its timers, driven by `advance` only (the wait wake's, and the host's `now`). */
+interface FakeTimers {
+  readonly now: () => number;
+  readonly setTimeout: (fn: () => void, ms: number) => unknown;
+  readonly clearTimeout: (handle: unknown) => void;
+  /** Timers armed and not yet fired or cleared. */
+  readonly pending: () => number;
+  /** Move the clock by `ms`, firing every timer due on the way, in order. */
+  readonly advance: (ms: number) => void;
+}
+
+function fakeTimers(): FakeTimers {
+  let clock = Date.UTC(2026, 10, 25, 12, 0);
+  let next = 1;
+  const timers = new Map<number, { readonly fn: () => void; readonly at: number }>();
+  return {
+    now: () => clock,
+    setTimeout: (fn, ms) => {
+      const id = next++;
+      timers.set(id, { fn, at: clock + ms });
+      return id;
+    },
+    clearTimeout: (handle) => {
+      timers.delete(handle as number);
+    },
+    pending: () => timers.size,
+    advance: (ms) => {
+      const end = clock + ms;
+      for (;;) {
+        const due = [...timers].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (due === undefined) break;
+        timers.delete(due[0]);
+        clock = Math.max(clock, due[1].at);
+        due[1].fn();
+      }
+      clock = end;
+    },
+  };
+}
+
 const toolCall = (id: string, name: string, args: unknown): StreamEvent => ({
   type: "tool_call",
   toolCall: { id, name, arguments: JSON.stringify(args) },
@@ -829,7 +871,15 @@ const toolCall = (id: string, name: string, args: unknown): StreamEvent => ({
  */
 function waitingRig(
   script: readonly (readonly StreamEvent[])[] = [],
-  opts: { readonly wake?: boolean } = {},
+  opts: {
+    readonly wake?: boolean;
+    /** S6: the wait wake's clock, and the host's. */
+    readonly timers?: FakeTimers;
+    /** S6: a stand-in driver whose rows the test publishes itself. */
+    readonly driver?: WorkflowDriver;
+    /** S6: the first model round waits on it (a turn that runs while a timer fires). */
+    readonly hold?: Promise<void>;
+  } = {},
 ) {
   const requests: ChatRequest["messages"][] = [];
   const asked: PermissionRequest[] = [];
@@ -844,6 +894,7 @@ function waitingRig(
         return;
       }
       requests.push([...request.messages]);
+      if (round === 0 && opts.hold) await opts.hold;
       // A bare `done` is an empty reply, which the loop asks again: say something.
       yield* script[round++] ?? [
         { type: "text", delta: "noted" } as const,
@@ -863,22 +914,33 @@ function waitingRig(
     sharedAutoAccept: true,
     answersAutoAccept: true,
     ...(opts.wake === true ? { wakeOnJobExit: true } : {}),
+    ...(opts.timers
+      ? {
+          now: opts.timers.now,
+          workflowWait: {
+            setTimeout: opts.timers.setTimeout,
+            clearTimeout: opts.timers.clearTimeout,
+          },
+        }
+      : {}),
     createAgent: () => {
       const permissions = new PermissionBroker();
-      const workflows = new WorkflowDriver({
-        load: async () => ({
-          path: ".tentacle/workflows/task.yaml",
-          text: APPROVE_YAML,
-          prompts: {},
-        }),
-        context: () => ({ models: [], agentTypes: ["general"] }),
-        approvals: { has: async () => true, add: async () => {} },
-        request: (req, options) => {
-          asked.push(req);
-          return permissions.request(req, options);
-        },
-        runnerFor: () => async () => ({ report: "ok", toolUses: 0, stopReason: "end_turn" }),
-      });
+      const workflows =
+        opts.driver ??
+        new WorkflowDriver({
+          load: async () => ({
+            path: ".tentacle/workflows/task.yaml",
+            text: APPROVE_YAML,
+            prompts: {},
+          }),
+          context: () => ({ models: [], agentTypes: ["general"] }),
+          approvals: { has: async () => true, add: async () => {} },
+          request: (req, options) => {
+            asked.push(req);
+            return permissions.request(req, options);
+          },
+          runnerFor: () => async () => ({ report: "ok", toolUses: 0, stopReason: "end_turn" }),
+        });
       const askme: Tool = {
         name: "askme",
         description: "askme",
@@ -920,7 +982,8 @@ function waitingRig(
     },
   });
   const frames: KnownSessionUpdateParams[] = [];
-  const { hosted: session } = host.open({ create: true }, { send: (u) => frames.push(u) });
+  const client = { send: (u: KnownSessionUpdateParams) => frames.push(u) };
+  const { hosted: session } = host.open({ create: true }, client);
   const updates = () => frames.map((f) => f.update);
   /** The asks nobody answered yet. */
   const pending = () => {
@@ -950,7 +1013,21 @@ function waitingRig(
     session.prompt(turnId, [{ type: "text", text }]);
     await until(() => !session.running);
   };
-  return { session, store, frames, requests, asked, runs, pending, runState, startAndWait, turn };
+  /** The one client leaves: the session runs unattended. */
+  const detach = (): void => session.detach(client);
+  return {
+    session,
+    store,
+    frames,
+    requests,
+    asked,
+    runs,
+    pending,
+    runState,
+    startAndWait,
+    turn,
+    detach,
+  };
 }
 
 describe("the live status line on a hosted session (workflow-run-awareness S3)", () => {
@@ -1065,5 +1142,258 @@ describe("the live status line on a hosted session (workflow-run-awareness S3)",
     rig.session.close();
     expect(inner.statusLine).toBeDefined();
     expect(inner.statusLine?.()).toBeUndefined();
+  });
+});
+
+// --- the user-wait wake (docs/feat/workflow-run-awareness.md S6: T8) ---------
+
+const GRACE = 30_000;
+const GAP = 10 * 60_000;
+const WAIT_TAIL = " You cannot answer it; tell the user if useful.";
+const isWaitNote = (m: { readonly content: unknown }): boolean =>
+  String(m.content).endsWith(WAIT_TAIL);
+/** The model requests that carry a wait note (each one a wake: nothing else sends it). */
+const waitRequests = (requests: readonly ChatRequest["messages"][]) =>
+  requests.filter((r) => r.some(isWaitNote));
+
+/** A stand-in driver: the test publishes the rows itself (`publish`). */
+function rowsDriver(): {
+  readonly driver: WorkflowDriver;
+  readonly publish: (row: WorkflowRow) => void;
+} {
+  let host: WorkflowHost | undefined;
+  const driver = {
+    bind: (h: WorkflowHost) => {
+      host = h;
+    },
+    reserveRunIds: () => {},
+    rows: () => [],
+    dispose: () => {},
+  } as unknown as WorkflowDriver;
+  return { driver, publish: (row) => host?.publish([row]) };
+}
+
+/** `wf-1`'s one `merge` step, at `attempt`: asking the user, or running. */
+const asking = (attempt: number, state = "needs-approval"): WorkflowRow => ({
+  runId: "wf-1",
+  name: "task",
+  version: 1,
+  hash: "a".repeat(64),
+  state: "running",
+  tokens: 0,
+  startedAt: 1,
+  steps: [{ id: "merge", kind: "approve", where: "local", state, attempt, round: 0 }],
+});
+
+/** Let the wake's macrotask start its turn, and that turn end. */
+async function wakeSettles(rig: ReturnType<typeof waitingRig>, requests: number): Promise<void> {
+  await until(() => rig.requests.length >= requests && !rig.session.running);
+  await settle();
+}
+
+/** A few macrotasks with nothing due: whatever was going to start has started. */
+async function quiet(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+    await settle();
+  }
+}
+
+describe("a step waiting for the user wakes an unattended session once (workflow-run-awareness S6)", () => {
+  test("T8a/b grace elapsed, nobody attached: ONE wake whose request has the note and the line; never again for that ask", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { wake: true, timers });
+    await rig.startAndWait();
+    rig.detach();
+    expect(timers.pending()).toBe(1);
+
+    timers.advance(GRACE - 1);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
+
+    timers.advance(1);
+    await wakeSettles(rig, 1);
+    expect(rig.requests).toHaveLength(1);
+    const request = rig.requests[0] ?? [];
+    // The note, then the live line at the tail (the request-only seam).
+    expect(request.at(-1)).toEqual({ role: "user", content: WAITS_LINE });
+    const note = request.at(-2);
+    expect(note).toMatchObject({
+      role: "user",
+      note: { kind: NOTE_KIND.workflowWait, id: "wf-1" },
+    });
+    expect(String(note?.content)).toMatch(
+      /^\[workflow wf-1 task: step 1\/1 merge waits for the user \(since \d\d:\d\d\) · 0\/1 ok · 0 tok\] You cannot answer it; tell the user if useful\.$/,
+    );
+    // Persisted with its kind (the daemon's own log).
+    await until(
+      () => rig.store.files.get(rig.session.id)?.log?.includes(NOTE_KIND.workflowWait) === true,
+    );
+
+    // (b) the same ask, still unanswered an hour later: no second wake, nothing armed.
+    expect(timers.pending()).toBe(0);
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(1);
+    expect(rig.session.unflushedExits).toBe(0);
+    expect(rig.pending()).toHaveLength(1);
+    rig.session.close();
+  });
+
+  test("T8c an ask answered inside the grace never wakes for the wait (the run's end still does)", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { wake: true, timers });
+    await rig.startAndWait();
+    rig.detach();
+    timers.advance(5_000);
+    const ask = rig.pending()[0];
+    if (!ask) throw new Error("no pending ask");
+    rig.session.resolvePermission(ask.requestId, "allow_once");
+    await until(() => rig.runState() === "ok");
+    // The wait went with its ask: the timer is cleared.
+    expect(timers.pending()).toBe(0);
+    // The END note wakes, as before this feature: one turn, without a wait note.
+    await wakeSettles(rig, 1);
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(1);
+    expect(waitRequests(rig.requests)).toHaveLength(0);
+    rig.session.close();
+  });
+
+  test("T8d a client attached when the grace ends: no wake, and the ask's timer is gone", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { wake: true, timers });
+    await rig.startAndWait();
+    timers.advance(GRACE);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
+    expect(rig.session.unflushedExits).toBe(0);
+    expect(timers.pending()).toBe(0);
+    // Leaving later does not revive it: the wake is for asks that START unattended.
+    rig.detach();
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
+    rig.session.close();
+  });
+
+  test("T8e a turn running when the grace ends: no wake then; the turn ends with the ask pending → one wake", async () => {
+    const timers = fakeTimers();
+    let release = (): void => {};
+    const hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const rig = waitingRig([], { wake: true, timers, hold });
+    await rig.startAndWait();
+    rig.detach();
+    rig.session.prompt("t-1", [{ type: "text", text: "busy" }]);
+    await until(() => rig.requests.length === 1);
+    expect(rig.session.running).toBe(true);
+
+    timers.advance(GRACE);
+    await settle();
+    // Not consumed: re-armed for another grace.
+    expect(rig.session.unflushedExits).toBe(0);
+    expect(timers.pending()).toBe(1);
+
+    release();
+    await until(() => !rig.session.running);
+    await quiet();
+    expect(rig.requests).toHaveLength(1);
+
+    timers.advance(GRACE);
+    await wakeSettles(rig, 2);
+    expect(rig.requests).toHaveLength(2);
+    expect(waitRequests(rig.requests)).toHaveLength(1);
+    expect(rig.requests[1]?.some(isWaitNote)).toBe(true);
+    rig.session.close();
+  });
+
+  test("T8f a looping run whose every attempt asks: wakes at least 10 min apart, never two inside the gap", async () => {
+    const timers = fakeTimers();
+    const { driver, publish } = rowsDriver();
+    const rig = waitingRig([], { wake: true, timers, driver });
+    rig.detach();
+    const wakes: number[] = [];
+    const count = async (): Promise<void> => {
+      await quiet();
+      await until(() => !rig.session.running);
+      while (wakes.length < waitRequests(rig.requests).length) wakes.push(timers.now());
+    };
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      publish(asking(attempt));
+      timers.advance(GRACE + 1_000);
+      await count();
+      // The step fails and retries: its next attempt asks again.
+      publish({ ...asking(attempt), steps: [] });
+      timers.advance(1_000);
+      await count();
+    }
+    // Then the last attempt stays unanswered long enough for the gap to pass.
+    publish(asking(6));
+    timers.advance(GAP);
+    await count();
+
+    expect(wakes.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < wakes.length; i++) {
+      expect((wakes[i] ?? 0) - (wakes[i - 1] ?? 0)).toBeGreaterThanOrEqual(GAP);
+    }
+    rig.session.close();
+  });
+
+  test("T8b2 the same ask key coming back (a second ask in the same attempt) never wakes again, even past the gap", async () => {
+    // Mutation target: the woken-key set. The key is armed again when it re-appears.
+    const timers = fakeTimers();
+    const { driver, publish } = rowsDriver();
+    const rig = waitingRig([], { wake: true, timers, driver });
+    rig.detach();
+    publish(asking(0));
+    timers.advance(GRACE);
+    await wakeSettles(rig, 1);
+    expect(waitRequests(rig.requests)).toHaveLength(1);
+
+    publish(asking(0, "running"));
+    timers.advance(GAP);
+    publish(asking(0));
+    expect(timers.pending()).toBe(1);
+    timers.advance(GRACE);
+    await quiet();
+    expect(rig.requests).toHaveLength(1);
+    expect(rig.session.unflushedExits).toBe(0);
+
+    // Non-vacuity: the NEXT attempt is a new ask, and it does wake.
+    publish(asking(1));
+    timers.advance(GRACE);
+    await wakeSettles(rig, 2);
+    expect(waitRequests(rig.requests)).toHaveLength(2);
+    rig.session.close();
+  });
+
+  test("T8g autoWake off: no timer is ever armed, no wake", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { timers });
+    await rig.startAndWait();
+    rig.detach();
+    expect(timers.pending()).toBe(0);
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
+    expect(rig.session.unflushedExits).toBe(0);
+    rig.session.close();
+  });
+
+  test("T8h closed during the grace: the timer is cleared, no wake", async () => {
+    const timers = fakeTimers();
+    const rig = waitingRig([], { wake: true, timers });
+    await rig.startAndWait();
+    rig.detach();
+    expect(timers.pending()).toBe(1);
+    rig.session.close();
+    expect(timers.pending()).toBe(0);
+    timers.advance(60 * 60_000);
+    await quiet();
+    expect(rig.requests).toHaveLength(0);
   });
 });

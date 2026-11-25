@@ -702,6 +702,97 @@ restored: true
 **Gate:** only the files above; full typecheck/lint/test left to the orchestrator's script. No
 schema change, so `protocol.json` is untouched.
 
+### S6 — the wait note and the daemon's wait wake — DONE
+
+*— claude-opus-5-5, 2026-11-25 (branch at `a36ec2b8`, uncommitted)*
+
+**Load-bearing check, re-run first: holds.** The repro prints `request-only seam (voice line):
+in request: true | in history: false` and `autoApproves(workflow_approve, own=true): false`. S6's
+own premises, by `rg` + read: `maybeWake` wakes on `pendingExitCount > 0` through
+`daemonWakeGate`; `pendingExitCount` skips only user notes and non-waking child notes; the
+stale-wake guard does not cut a turn whose START flushed a note (it emits a `context_note`);
+`attachedCount` is the attach set; the load closes runs by note KIND.
+
+**As built:**
+- `packages/core/src/model.ts` — `NOTE_KIND.workflowWait = "workflow_wait"`.
+- `packages/agent/src/agent.ts` — `PendingWorkflowWait` (`kind: "workflow_wait"`), `noteWorkflowWait`;
+  flushed by the turn-START flush only (persisted `role:user`, `note: { kind: workflow_wait,
+  id: runId }`, a `context_note` event); NOT in `flushMidTurn`; counted by `pendingExitCount`
+  (no filter change); carried by `retire`/`adoptExits` (they move the whole queue).
+  `packages/agent/src/session.ts` — `Session.noteWorkflowWait`.
+- `packages/agent/src/workflow-status-line.ts` — pure `workflowWaitNote(wait, sinceAt, zone)`:
+  the wait's line with `(since HH:MM)` after the LAST «waits for the user», then
+  `You cannot answer it; tell the user if useful.` (`?` for an unrenderable zone/instant).
+- `packages/daemon/src/hosted-session.ts` — `SessionWake.workflowWait?: WorkflowWaitTiming`
+  (`graceMs`, `minGapMs`, injectable `setTimeout`/`clearTimeout`; defaults
+  `WORKFLOW_WAIT_GRACE_MS = 30 s`, `WORKFLOW_WAIT_MIN_GAP_MS = 10 min`). `publishWorkflows` →
+  `trackWorkflowWait`: only with `wake`; the wait key from `workflowUserWait(lastWorkflows)`;
+  unchanged key → nothing; changed → disarm, and arm ONE timer if a key appeared (since = now).
+  `fireWorkflowWait` → `workflowWaitWakeDue` on the rows/attach set/slot read at fire time:
+  `rearm` → another grace, `rearm_at` → at the gap's end, `wake` → mark the key woken + the
+  run's `at`, `session.noteWorkflowWait(…)` (zone: the last client's, else the host's), `kickWake()`.
+  Per-run memory dropped in `ended`; `close` disarms the timer.
+- `packages/daemon/src/session-host.ts` — `SessionHostOptions.workflowWait`, passed into
+  `SessionWake` only with `wakeOnJobExit` (the tests' clock).
+- Tests: T8a–h + T8b2 in `packages/daemon/test/workflow-hosted.test.ts` (the real
+  `SessionHost` → `attachWorkflows` rig with a fake clock + timers, the rig's client detached;
+  T8f/T8b2 drive rows through a stand-in driver's `publish`); `workflowWaitNote` ×3 in
+  `packages/agent/test/workflow-status-line.test.ts`; T9 in `packages/core/test/workflow-ledger.test.ts`.
+
+**Red:** the «no wait tracking» mutant below IS the pre-S6 daemon (no timer is ever armed):
+`27 pass, 5 fail` (T8a/b, T8e, T8f, T8b2, T8h), each on an assertion. T9 and T8c/d/g pass on
+pre-S6 code by design (they pin «no wake» and the load's kind filter); their non-vacuity is the
+mutations. **Green:** `workflow-hosted` `32 pass, 0 fail`; the S6 tests `--rerun-each 15`:
+`120 pass, 0 fail`. Neighbours (`steering`, `status-line-request`, `agent`, `replace-agent`,
+`workflow-status-line`, `serve-autowake`, `workflow-load`, `workflow-hosted`,
+`core/workflow-ledger`): `179 pass, 0 fail`. `tsc --noEmit -p` agent/daemon/core: clean.
+`bunx biome check` on the 9 files: clean.
+
+**Mutations** (`.tentacle/tmp/workflow-run-awareness/mutate-s6.ts`, sources restored):
+
+```
+RED: no wait tracking (pre-S6 daemon): killed (27 pass, 5 fail)
+no attach check: killed (31 pass, 1 fail) T8d
+no woken-key set: killed (31 pass, 1 fail) T8b2
+no per-run gap: killed (31 pass, 1 fail) T8f
+busy drops the wait (no re-arm): killed (31 pass, 1 fail) T8e
+close keeps the timer: killed (31 pass, 1 fail) T8h
+a vanished ask keeps its timer: killed (28 pass, 4 fail)
+wake gate ignores autoWake: SURVIVED (32 pass, 0 fail)
+no grace (fires at once): killed (30 pass, 2 fail) T8a/b, T8c
+wait note under the end kind: killed (31 pass, 1 fail) T8a/b
+wait note does not wake: killed (28 pass, 4 fail)
+load takes a wait note for the end: killed (13 pass, 1 fail) T9
+restored: true
+```
+
+The survivor is equivalent: without `wake` the timing option is never passed, so the arm uses a
+real (unref'd) timer the test cannot see, and at its fire the gate's `enabled` check (S5,
+mutation-killed there) disarms. No wake either way.
+
+**Drift:**
+- Plan T8 (b) says «drop the woken-key set → (b) fails». In this design a key is armed only when
+  it APPEARS, so a continuously pending ask is never re-armed after its wake and (b) holds even
+  without the set. The set matters when the SAME key comes back (a second ask in one attempt and
+  round, S5's note): added T8b2 for it, which kills that mutant.
+- `workflowWaitNote` (pure, in `workflow-status-line.ts`, item 8's file) builds the note's text;
+  the plan only gave the text. `(since HH:MM)` sits after the last «waits for the user», so the
+  hash approval reads `… waits for the user (since 12:04) to approve the run]`.
+- `session-host.ts` (not in Files) gained the `workflowWait` option: the only way to inject the
+  clock through the real `SessionHost.build` path. Production passes nothing (defaults).
+- The timing lives on `SessionWake` (the plan said «options»): the wait wake exists only where the
+  wake does.
+- T8 (a)'s «persisted» is asserted on the `serve` daemon's own log (`SpyDaemonStore`) containing
+  `workflow_wait`.
+- Not exercised: a wait note queued while a turn runs is flushed at the NEXT turn's start, never
+  mid-turn (by reading: `flushMidTurn`'s filter has no `workflow_wait`); the wake only queues it
+  when idle, so this needs a turn starting inside the `kickWake` macrotask.
+- Changelog: S1's fragment already describes this (no new one).
+
+**Gate:** only the files above; full typecheck/lint/test left to the orchestrator's script. No
+schema change (`note.kind` is a free string), so `protocol.json` is untouched and no
+`protocol.d/` note.
+
 ## Review
 
 *— (empty)*

@@ -4,6 +4,7 @@ import {
   type WorkflowWaitWakeState,
   workflowStatusLine,
   workflowUserWait,
+  workflowWaitNote,
   workflowWaitWakeDue,
 } from "../src/workflow-status-line.ts";
 
@@ -315,5 +316,35 @@ describe("workflowWaitWakeDue", () => {
 
   test("a bad end wins over a short gap", () => {
     expect(decide({ lastEndBad: true, lastWakeAt: due.now })).toEqual({ kind: "disarm" });
+  });
+});
+
+describe("workflowWaitNote (S6): the wake note's text", () => {
+  const at = Date.UTC(2026, 10, 25, 11, 4);
+  const TAIL = " You cannot answer it; tell the user if useful.";
+
+  test("a step's ask: `(since HH:MM)` in the zone, after «waits for the user»", () => {
+    const wait = workflowUserWait([row("running", [step("merge", "needs-approval")])]);
+    if (!wait) throw new Error("no wait");
+    expect(workflowWaitNote(wait, at, "Europe/Rome")).toBe(
+      `[workflow wf-3 demo-note: step 1/1 merge waits for the user (since 12:04) · 0/1 ok · 4.1k tok]${TAIL}`,
+    );
+    expect(workflowWaitNote(wait, at, "UTC")).toContain("(since 11:04)");
+  });
+
+  test("the run's approval: before «to approve the run»; a label holding the phrase is left alone", () => {
+    const wait = workflowUserWait([
+      row("needs-approval", [step("a", "pending")], { name: "waits for the user" }),
+    ]);
+    if (!wait) throw new Error("no wait");
+    expect(workflowWaitNote(wait, at, "UTC")).toBe(
+      `[workflow wf-3 waits for the user: waits for the user (since 11:04) to approve the run]${TAIL}`,
+    );
+  });
+
+  test("an unknown zone never throws", () => {
+    const wait = workflowUserWait([row("running", [step("merge", "waiting")])]);
+    if (!wait) throw new Error("no wait");
+    expect(workflowWaitNote(wait, at, "Not/AZone")).toContain("(since ?)");
   });
 });

@@ -367,7 +367,8 @@ export type PendingExit =
   | AgentJobExit
   | PendingAgentMessage
   | PendingUserNote
-  | PendingWorkflowEnd;
+  | PendingWorkflowEnd
+  | PendingWorkflowWait;
 
 /**
  * A workflow run ended (docs/feat/agent-workflows.md D3): its end note, keyed
@@ -384,6 +385,22 @@ export type PendingWorkflowEnd = {
 
 const isWorkflowEnd = (job: PendingExit): job is PendingWorkflowEnd =>
   "kind" in job && job.kind === "workflow_end";
+
+/**
+ * A live run's step waits for the user and nobody is attached
+ * (docs/feat/workflow-run-awareness.md S6): its note WAKES like an end note, but
+ * is told at a turn's START only — never mid-turn, where the status line
+ * already says it. `note.id = runId`, under its own kind: never taken for the
+ * run's end by the load derivation.
+ */
+export type PendingWorkflowWait = {
+  readonly kind: "workflow_wait";
+  readonly runId: string;
+  readonly text: string;
+};
+
+const isWorkflowWait = (job: PendingExit): job is PendingWorkflowWait =>
+  "kind" in job && job.kind === "workflow_wait";
 
 /** THE end note's message: the start flush and the mid-turn drain both use it. */
 const workflowEndNote = (job: PendingWorkflowEnd): ChatMessage => ({
@@ -1039,6 +1056,11 @@ export class Agent {
   /** A workflow run ended: its note, told at the next round boundary or turn start (and it wakes). */
   noteWorkflowEnd(runId: string, text: string): void {
     this.pendingExits.push({ kind: "workflow_end", runId, text });
+  }
+
+  /** A workflow step waits for the user, unattended: its note, told at the next turn's start (and it wakes). */
+  noteWorkflowWait(runId: string, text: string): void {
+    this.pendingExits.push({ kind: "workflow_wait", runId, text });
   }
 
   /** Whether the user may activate `name` (`/name`) in this agent. */
@@ -3021,6 +3043,15 @@ export class Agent {
       }
       if (isWorkflowEnd(job)) {
         messages.push(workflowEndNote(job));
+        events.push({ type: "context_note", text: job.text, reason: "background_exit" });
+        continue;
+      }
+      if (isWorkflowWait(job)) {
+        messages.push({
+          role: "user",
+          content: job.text,
+          note: { kind: NOTE_KIND.workflowWait, id: job.runId },
+        });
         events.push({ type: "context_note", text: job.text, reason: "background_exit" });
         continue;
       }

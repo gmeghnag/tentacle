@@ -113,6 +113,41 @@ export function workflowUserWait(rows: readonly WorkflowRow[]): WorkflowUserWait
   return undefined;
 }
 
+const WAITS = "waits for the user";
+
+/** `HH:MM`, 24-hour, in `zone`; `"?"` for an instant or zone that cannot be rendered. */
+function clockOf(at: number, zone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      timeZone: zone,
+    }).formatToParts(new Date(at));
+    const get = (type: Intl.DateTimeFormatPartTypes): string =>
+      parts.find((part) => part.type === type)?.value ?? "";
+    return `${get("hour")}:${get("minute")}`;
+  } catch {
+    return "?";
+  }
+}
+
+/**
+ * The wake note of a wait (Design (b) point 4): its status line with
+ * `(since HH:MM)` after «waits for the user», then the one fixed sentence. The
+ * LAST occurrence: the phrase follows the run's name and the step's id.
+ */
+export function workflowWaitNote(wait: WorkflowUserWait, sinceAt: number, zone: string): string {
+  const since = `(since ${clockOf(sinceAt, zone)})`;
+  const index = wait.line.lastIndexOf(WAITS);
+  // Never without the phrase (every wait line has it); defensively, at the end.
+  const line =
+    index < 0
+      ? `${wait.line} ${since}`
+      : `${wait.line.slice(0, index + WAITS.length)} ${since}${wait.line.slice(index + WAITS.length)}`;
+  return `${line} You cannot answer it; tell the user if useful.`;
+}
+
 /** What the daemon knows when a wait's timer fires. */
 export interface WorkflowWaitWakeState extends DaemonWakeState {
   /** The key the timer was armed for. */
