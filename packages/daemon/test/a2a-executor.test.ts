@@ -22,7 +22,7 @@ import {
   TaskNotFoundError,
   UnsupportedOperationError,
 } from "@a2a-js/sdk/errors";
-import { InMemoryTaskStore, ServerCallContext, UnauthenticatedUser } from "@a2a-js/sdk/server";
+import { ServerCallContext, UnauthenticatedUser } from "@a2a-js/sdk/server";
 import { Agent, type HookRunner } from "@tentacle/agent";
 import {
   type ChatRequest,
@@ -40,9 +40,11 @@ import {
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { z } from "zod";
-import { A2AExecutor, A2ARequestHandler, REFUSED, adapterRequest } from "../src/a2a/executor.ts";
+import { A2AExecutor, A2ARequestHandler, REFUSED } from "../src/a2a/executor.ts";
 import { buildAgentCard } from "../src/a2a/mapping.ts";
+import { A2ATaskStore } from "../src/a2a/task-projection.ts";
 import { Connection, type HooksTrustPrecheck } from "../src/connection.ts";
+import { adapterRequest } from "../src/external/session-driver.ts";
 import { SessionHost } from "../src/session-host.ts";
 import { LogSessionStore } from "../src/session-log-store.ts";
 import { SessionPersister } from "../src/session-persister.ts";
@@ -156,12 +158,23 @@ function rig(opts: RigOptions) {
         }
       : {}),
   });
+  // The store the route wires (S6): a projection of the session, no A2A store.
+  const store = new A2ATaskStore({
+    host,
+    isDriving: (taskId) => executor.isDriving(taskId),
+    ...(opts.asks !== undefined
+      ? {
+          callerPolicy: (who: string) =>
+            who === "default" ? { asks: opts.asks ?? "owner" } : undefined,
+        }
+      : {}),
+  });
   const handler = new A2ARequestHandler(
     buildAgentCard({ url: "http://127.0.0.1:1/a2a", version: "0.0.1" }),
-    new InMemoryTaskStore(),
+    store,
     executor,
   );
-  return { host, executor, handler, model, ran };
+  return { host, executor, handler, model, ran, store };
 }
 
 const caller = (userName = "default") =>

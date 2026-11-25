@@ -1211,6 +1211,169 @@ fail (44 tests). `biome check` on the 8 changed files is clean. `tsc` limited
 to them (`.tentacle/tmp/a2a/tsconfig.s5.json`, main checkout) is clean. Full
 `bun run check` NOT run (the orchestrator's script runs it).
 
+### S6-task-projection — DONE (archived contexts are S7's, as planned)
+
+*— claude-opus-5-5, 2026-11-25*
+
+**Load-bearing check re-run first.** `seam.ts` was gone (gitignored), so it was
+re-extracted from this doc into `.tentacle/tmp/a2a/s6/seam.ts`, with its
+imports pointed at THIS worktree's packages. It HOLDS, with the same five lines
+(`1. a2a open → a2a-ctx-1 created true` … `5. … turn_end:end_turn turn_start
+turn_end:cancelled`).
+
+**S6's own premise, checked in the SDK before coding** (`@a2a-js/sdk`
+`dist/server/index.js`):
+- The store is read far more often than by `GetTask`:
+  - `ResultManager` does load → merge → save for EVERY event (`:2311`,
+    `:2341`, `:2452`);
+  - a follow-up loads its task (`:2785`);
+  - `cancelTask` re-loads after cancelling and needs CANCELED (`:3264`);
+  - a stream's `task` event is re-read (`:3393`).
+- So `load` must return the in-flight copy while the task streams, and a
+  faithful projection once that copy is gone.
+
+**As built:**
+- `daemon/src/external/work-units.ts` (new, protocol-neutral, read-only):
+  - `addressableUnits(units)`: a turn is addressed by its id, a run by its
+    `origin` unless a turn has that id (the plan's rule), and a run with no
+    origin is not addressable;
+  - `callerUnits(source, protocol, caller, contextId?)` and
+    `findCallerUnit(...)` read only the caller's `<protocol>-<caller>-*` live
+    sessions, through `workUnits()`.
+- `daemon/src/a2a/task-projection.ts` (new): `A2ATaskStore implements
+  TaskStore`.
+  - `save` keeps a task in memory, per caller, only while it is non-terminal.
+    A terminal save deletes it, and an unauthenticated context keeps nothing.
+  - `load` and `list` return the in-flight copy while
+    `executor.isDriving(taskId)`, else the projection (`unitTask`). An undriven
+    copy whose unit the session has ENDED is forgotten, because the session is
+    the truth. An undriven copy whose unit has not ended (or that the session
+    lacks) stays.
+  - `list` follows the SDK in-memory store's filters, order (status timestamp
+    desc, then id) and cursor format. Artifacts are included only on request.
+  - Pure helpers: `unitTask` and `pageTasks`.
+- `a2a/mapping.ts`:
+  - `unitStatus(unit, mode)` is now the ONE status composition (projected
+    state + message + the dropped-result note), used by both the executor's
+    live end and the projection;
+  - `textPart`, `responseArtifact` and `RESPONSE_ARTIFACT_ID` moved here from
+    the executor (pure builders).
+- `a2a/executor.ts`:
+  - new `isDriving(taskId)`;
+  - `endFromUnit` uses `unitStatus`;
+  - the plumbing moved to `external/` (below).
+- **Owner decision, the rest of S5's drift 1 (the `external/` move):**
+  - `external/session-ids.ts`: `externalSessionId` / `callerPrefix` /
+    `contextIdOf`, now taking a `protocol` word. They replace
+    `a2aSessionId` / `a2aCallerPrefix` / `contextIdOf` of `a2a/mapping.ts`,
+    which keeps only `A2A_PROTOCOL = "a2a"`. Same ids: `a2a-<caller>-<ctx>`.
+  - `external/session-driver.ts`: the in-process client, i.e.
+    `connectSession`, `openSession`, `detachSession` and `adapterRequest`:
+    - `Connection` over `createChannelPair`;
+    - `hooks/trust` always answered NO;
+    - every update type declared;
+    - no `host`;
+    - open with create + reopen;
+    - detach, then close.
+
+    Its event seam is the raw `session/update` (`onUpdate` / `onClose`).
+  - No shims: imports updated in the executor and the tests.
+- Tests:
+  - `daemon/test/a2a-task-projection.test.ts` (new, 12 tests: 7 integration
+    tests with the real SDK handler and a real host, 5 pure);
+  - `a2a-executor.test.ts`: the rig now wires `A2ATaskStore` instead of
+    `InMemoryTaskStore`, so all 14 S4/S5 flows run on the projection. They
+    passed unchanged, with no SDK `ResultManager` warning in the output.
+
+**Drift from Implementation (and why):**
+1. **`history` of a projected task is always empty.** The plan wanted "the
+   caller's messages while their segment is live". No side-effect-free
+   accessor gives a turn's user message, so it would need a new
+   `HostedSession` method, which is S2's load-bearing file and outside S6's
+   files. The spec allows empty history, and the caller sent those messages
+   itself. An in-flight task keeps the history the SDK merged.
+2. **The index is a scan, not a cache.** For live sessions the "taskId →
+   session" index is derived on each miss, by walking the caller's live
+   sessions' `workUnits()` (in memory, ≤ 256 units each). A cache would need
+   invalidation on archive, delete and reopen; a scan cannot go stale. S7's
+   archived side (disk reads) is where the plan's cached index and LRU belong.
+3. **A projection never reads INPUT_REQUIRED.** Only a live watcher knows an
+   ask's options, so a projected pending ask reads WORKING + "waiting for the
+   owner's approval" in both modes (fail-closed). A caller's answer still goes
+   through the live watcher (S5).
+4. **A task that never became a unit is not retained.** That covers REJECTED
+   (busy, bad ids, …) and FAILED at open. Once its terminal save lands,
+   `GetTask` → `TaskNotFound`. This is "no A2A store" taken literally; it is
+   pinned by a test.
+5. **The driver split stops at the raw-update seam.** Turn-level interpretation
+   (round replace, asks map, turn end), SDK bus publishing and claims stay in
+   `a2a/executor.ts`. They are A2A-shaped. When MCP mounts it may lift a
+   turn-event layer, but that layer has one user today.
+6. Not done here (S7's, per S4 drift 5): the resident-record reopen that
+   loses the ended-units table.
+7. No schema change: no `protocol.d/` note, and `protocol.json` is untouched.
+   The changelog fragment `a2a.added.md` is unchanged: S6 is invisible until
+   S9's route, and S10 rewrites the fragment.
+
+**Failure modes covered by tests** (`a2a-task-projection.test.ts`):
+- ended → leaves memory, and `GetTask` = the session's unit (same result,
+  deterministic);
+- running → the in-flight copy for both `GetTask` and `ListTasks`, then the
+  projection after the owner's answer;
+- a unit the executor does not drive (the owner's own turn in the caller's
+  context) → projected. `CancelTask` there → `TaskNotCancelable`, and the turn
+  is still waiting (never a phantom CANCELED);
+- owner scoping: another caller, an unauthenticated caller and a phone session
+  all read nothing;
+- `ListTasks`: per context, newest first, paged with a cursor, status filter,
+  artifacts only on request;
+- a deleted session → `TaskNotFound`, and a busy REJECTED task is not
+  retained;
+- reload into a fresh store and host from disk → an identical task, and the
+  store dir holds only the session's own files (**no A2A file**);
+- pure tests: the stale-copy rule (both arms), addressing, `unitTask`, and a
+  malformed cursor.
+
+**Red before green:** the new tests passed on their first run against the new
+code, so the red proof is the mutations below. M1 is exactly the pre-S6 store
+rule (`InMemoryTaskStore` keeps terminal tasks), and it turns 5 tests red. M2
+(no projection) turns 10 red, the S4/S5 suite included.
+
+**Mutations** (`.tentacle/tmp/a2a/mutate-s6.ts`, run on the projection,
+executor and mapping test files; each restored, `restored true` ×15):
+
+| Mutation | Fails |
+|---|---|
+| M1 `save` keeps terminal tasks (the in-memory store's rule) | 5 |
+| M2 `load` reads memory only (no projection) | 10 |
+| M3 the in-flight copy never used | 5 |
+| M4 the copy trusted without `isDriving` | 1 |
+| M5 drop the "projection not terminal" arm | 3 |
+| M6 `contextIdOf` ignores the caller (the plan's owner scoping) | 2 |
+| M7 `ownerOf` accepts an unauthenticated user | 1 |
+| M8 `callerUnits` drops its `contextId` filter | **0 — equivalent**: `pageTasks` filters `contextId` again (the contract), so the first filter only saves work |
+| M9 a run overrides a same-id turn | 1 |
+| M10 `list` ignores in-flight copies | 1 (survived at first; a running-task `ListTasks` assertion was added) |
+| M11 the live end and the read compose the status differently | 1 |
+| D1 driver: `hooks/trust` → true | 1 |
+| D2 driver: `clientInfo` names a `host` | 1 |
+| D3 driver: no `session/detach` | 2 |
+| D4 driver: open without `reopen` | 1 |
+
+**Notes for S7 / S9** (not verified by execution):
+- S9 wires the store as the executor test rig does:
+  `new A2ATaskStore({host, isDriving: (id) => executor.isDriving(id),
+  callerPolicy})`, with the SAME `callerPolicy` as the executor.
+- S7 adds the archived side behind `findCallerUnit` / `callerUnits` (an
+  `archived` source next to `UnitSource`). Live wins on the same id.
+
+**Gate (narrow):**
+- `bun test --rerun-each 3` on `a2a-task-projection`, `a2a-executor`,
+  `a2a-mapping` and `external-asks` → 162 pass / 0 fail (54 tests).
+- `biome check` on the 10 changed or new files is clean.
+- `tsc` limited to them (`.tentacle/tmp/a2a/tsconfig.s6.json`) is clean.
+- Full `bun run check` NOT run (the orchestrator's script runs it).
+
 ## Review
 
 ### Owner decision 2026-11-25 ~13:20 (from the feat/serve-mcp-server plan, Q1) — binding for the remaining slices

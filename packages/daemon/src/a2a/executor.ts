@@ -26,7 +26,6 @@
 import {
   type AgentCard,
   type Message,
-  type Part,
   Role,
   type SendMessageRequest,
   type StreamResponse,
@@ -49,13 +48,9 @@ import {
   type TaskStore,
 } from "@a2a-js/sdk/server";
 import { type WorkUnit, unifyTurn } from "@tentacle/core";
-import {
-  KNOWN_UPDATE_TYPES,
-  type KnownSessionUpdateParams,
-  PROTOCOL_VERSION,
-} from "@tentacle/protocol";
-import { ErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
-import { Connection, type HooksTrustPrecheck } from "../connection.ts";
+import type { KnownSessionUpdateParams } from "@tentacle/protocol";
+import { ErrorCode, RpcError, type RpcPeer } from "@tentacle/transport";
+import type { HooksTrustPrecheck } from "../connection.ts";
 import {
   type AskMode,
   type PendingAsk,
@@ -65,20 +60,22 @@ import {
   callerMayAnswer,
   resolveCallerAnswer,
 } from "../external/asks.ts";
+import { connectSession, detachSession, openSession } from "../external/session-driver.ts";
+import { externalSessionId } from "../external/session-ids.ts";
 import type { SessionHost } from "../session-host.ts";
 import {
+  A2A_PROTOCOL,
   type ProjectedStatus,
-  a2aSessionId,
   a2aTitle,
   chunkAppend,
   inboundParts,
   parseTextAnswer,
   projectStatus,
+  responseArtifact,
   responseText,
+  textPart,
+  unitStatus,
 } from "./mapping.ts";
-
-/** The one artifact a turn task streams: the final round's text. */
-export const RESPONSE_ARTIFACT_ID = "response";
 
 export const REFUSED = {
   unauthenticated: "no caller identity",
@@ -138,19 +135,6 @@ interface Watcher {
   finish(): void;
 }
 
-/** The `daemon → client` requests the adapter answers: `hooks/trust` is always NO. */
-export function adapterRequest(method: string): unknown {
-  if (method === "hooks/trust") {
-    // An untrusted remote never creates a lasting approval (AGENTS §7).
-    return { trusted: false };
-  }
-  throw new RpcError(ErrorCode.MethodNotFound, `a2a adapter: ${method} not supported`);
-}
-
-function textPart(value: string): Part {
-  return { content: { $case: "text", value }, mediaType: "text/plain", filename: "", metadata: {} };
-}
-
 function agentMessage(taskId: string, contextId: string, text: string): Message {
   return {
     messageId: crypto.randomUUID(),
@@ -186,6 +170,15 @@ export class A2AExecutor implements AgentExecutor {
     return [...this.watchers.keys()];
   }
 
+  /**
+   * This executor is driving `taskId` now: what it publishes is the task's
+   * truth. The task store trusts its in-flight copy only while this holds.
+   */
+  isDriving(taskId: string): boolean {
+    const w = this.watchers.get(taskId);
+    return w !== undefined && !w.ended;
+  }
+
   async execute(ctx: RequestContext, bus: ExecutionEventBus): Promise<void> {
     const { taskId, contextId } = ctx;
     if (ctx.task !== undefined) {
@@ -196,7 +189,7 @@ export class A2AExecutor implements AgentExecutor {
     if (user === undefined || !user.isAuthenticated) {
       return reject(REFUSED.unauthenticated);
     }
-    const sessionId = a2aSessionId(user.userName, contextId);
+    const sessionId = externalSessionId(A2A_PROTOCOL, user.userName, contextId);
     if (sessionId === null) {
       return reject(REFUSED.badIds);
     }
@@ -226,20 +219,10 @@ export class A2AExecutor implements AgentExecutor {
       bus,
     );
     try {
-      await watcher.peer.request("initialize", {
-        protocolVersion: PROTOCOL_VERSION,
-        // Every known update, so `permission_request` (blocking) is DECLARED:
-        // an attachment that did not declare it would make the host deny
-        // every ask at once (hosted-session's ask gate).
-        clientCapabilities: { streaming: true, updates: [...KNOWN_UPDATE_TYPES] },
-        // No `host`: the owner's ask is never "also asked on A2A".
-        clientInfo: { name: "a2a", version: this.opts.version ?? "0" },
-      });
-      await watcher.peer.request("session/open", {
+      await openSession(watcher.peer, {
         sessionId,
-        create: true,
-        reopen: true,
-        title: { text: a2aTitle(parts.text), source: "user" },
+        title: a2aTitle(parts.text),
+        client: { name: A2A_PROTOCOL, version: this.opts.version ?? "0" },
       });
     } catch (error) {
       this.teardown(watcher);
@@ -385,13 +368,6 @@ export class A2AExecutor implements AgentExecutor {
     bus: ExecutionEventBus,
   ): Watcher {
     const { taskId } = ids;
-    const [daemonEnd, clientEnd] = createChannelPair();
-    // The SAME object a socket becomes (ws-server.ts): one session path.
-    new Connection(daemonEnd, this.opts.host, this.opts.onError, {
-      ...(this.opts.hooksTrustPrecheck !== undefined
-        ? { hooksTrustPrecheck: this.opts.hooksTrustPrecheck }
-        : {}),
-    });
     let finish = () => {};
     const done = new Promise<void>((resolve) => {
       finish = resolve;
@@ -407,13 +383,9 @@ export class A2AExecutor implements AgentExecutor {
       ended: false,
       done,
       finish: () => finish(),
-      peer: new RpcPeer(clientEnd, {
-        onRequest: (method) => adapterRequest(method),
-        onNotification: (method, params) => {
-          if (method === "session/update") {
-            this.onUpdate(watcher, params as KnownSessionUpdateParams);
-          }
-        },
+      // The protocol-neutral in-process client (`external/session-driver.ts`).
+      peer: connectSession(this.opts, {
+        onUpdate: (params) => this.onUpdate(watcher, params),
         // The daemon went away under us: say nothing terminal (the turn may
         // still run daemon-side; GetTask reads its real state), just stop.
         onClose: () => {
@@ -421,7 +393,6 @@ export class A2AExecutor implements AgentExecutor {
             this.teardown(watcher);
           }
         },
-        ...(this.opts.onError !== undefined ? { onError: this.opts.onError } : {}),
       }),
     };
     this.watchers.set(taskId, watcher);
@@ -478,7 +449,7 @@ export class A2AExecutor implements AgentExecutor {
       AgentEvent.artifactUpdate({
         taskId: w.taskId,
         contextId: w.contextId,
-        artifact: artifact([textPart(text)]),
+        artifact: responseArtifact([textPart(text)]),
         append,
         lastChunk: false,
         metadata: {},
@@ -528,16 +499,15 @@ export class A2AExecutor implements AgentExecutor {
         AgentEvent.artifactUpdate({
           taskId: w.taskId,
           contextId: w.contextId,
-          artifact: artifact(response.text === undefined ? [] : [textPart(response.text)]),
+          artifact: responseArtifact(response.text === undefined ? [] : [textPart(response.text)]),
           append: false,
           lastChunk: true,
           metadata: {},
         }),
       );
     }
-    const projected = projectStatus(unit, w.mode);
-    const message = [projected.message, response.note].filter((m) => m !== undefined).join("\n");
-    this.end(w, message === "" ? { state: projected.state } : { state: projected.state, message });
+    // The same status a later GetTask projects from this unit (`unitStatus`).
+    this.end(w, unitStatus(unit, w.mode));
   }
 
   /** Publish the terminal status, then detach and close: the session lives on. */
@@ -561,12 +531,7 @@ export class A2AExecutor implements AgentExecutor {
   private teardown(w: Watcher): void {
     w.ended = true;
     this.watchers.delete(w.taskId);
-    void w.peer
-      .request("session/detach", { sessionId: w.sessionId })
-      .catch(() => undefined)
-      .finally(() => {
-        w.peer.close();
-      });
+    detachSession(w.peer, w.sessionId);
     w.finish();
   }
 
@@ -631,17 +596,6 @@ export class A2ARequestHandler extends DefaultRequestHandler {
       throw error;
     }
   }
-}
-
-function artifact(parts: Part[]) {
-  return {
-    artifactId: RESPONSE_ARTIFACT_ID,
-    name: "response",
-    description: "",
-    parts,
-    metadata: {},
-    extensions: [],
-  };
 }
 
 /** ` (code N)` for an RPC refusal; never its message (it may carry internals). */

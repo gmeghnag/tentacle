@@ -20,33 +20,11 @@ import {
 
 // --- caller + session id ---------------------------------------------------
 
-export const A2A_SESSION_PREFIX = "a2a-";
-/** The caller name a token carries (`default` from the CLI). No `-`: it delimits the id. */
-const CALLER_RE = /^[A-Za-z0-9_]{1,32}$/;
-const CONTEXT_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
-
-/** `a2a-<caller>-<contextId>`; null when either part is not a safe word (InvalidParams). */
-export function a2aSessionId(caller: string, contextId: string): string | null {
-  if (!CALLER_RE.test(caller) || !CONTEXT_RE.test(contextId)) {
-    return null;
-  }
-  return `${A2A_SESSION_PREFIX}${caller}-${contextId}`;
-}
-
-/** The session ids of ONE caller start with this (caller names hold no `-`, so it is exact). */
-export function a2aCallerPrefix(caller: string): string | null {
-  return CALLER_RE.test(caller) ? `${A2A_SESSION_PREFIX}${caller}-` : null;
-}
-
-/** The contextId of a session this caller owns; null for anyone else's or a phone session. */
-export function contextIdOf(caller: string, sessionId: string): string | null {
-  const prefix = a2aCallerPrefix(caller);
-  if (prefix === null || !sessionId.startsWith(prefix)) {
-    return null;
-  }
-  const context = sessionId.slice(prefix.length);
-  return CONTEXT_RE.test(context) ? context : null;
-}
+/**
+ * The A2A protocol word: a context is the session `a2a-<caller>-<contextId>`
+ * (the protocol-neutral helpers: `external/session-ids.ts`).
+ */
+export const A2A_PROTOCOL = "a2a";
 
 const TITLE_MAX = 60;
 /** `A2A: <first line, ≤ 60 chars>` (the session title, source `user`). */
@@ -258,6 +236,37 @@ export function responseText(unit: WorkUnit): { text?: string; note?: string } {
     return { note: RESULT_DROPPED_MESSAGE };
   }
   return unit.result === undefined || unit.result === "" ? {} : { text: unit.result };
+}
+
+/**
+ * The status of a unit read from the session (an end, or a `GetTask`): its
+ * projected state, the message joined with the dropped-result note. ONE
+ * function, so the executor's live end and a later read agree.
+ */
+export function unitStatus(unit: WorkUnit, mode: AskMode): ProjectedStatus {
+  const projected = projectStatus(unit, mode);
+  const message = [projected.message, responseText(unit).note]
+    .filter((m) => m !== undefined)
+    .join("\n");
+  return message === "" ? { state: projected.state } : { state: projected.state, message };
+}
+
+/** The one artifact a task carries: the final round's text. */
+export const RESPONSE_ARTIFACT_ID = "response";
+
+export function textPart(value: string): Part {
+  return { content: { $case: "text", value }, mediaType: "text/plain", filename: "", metadata: {} };
+}
+
+export function responseArtifact(parts: Part[]) {
+  return {
+    artifactId: RESPONSE_ARTIFACT_ID,
+    name: "response",
+    description: "",
+    parts,
+    metadata: {},
+    extensions: [],
+  };
 }
 
 // --- streaming: final round only -------------------------------------------

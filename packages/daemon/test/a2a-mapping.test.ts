@@ -3,14 +3,12 @@ import { type Part, TaskState } from "@a2a-js/sdk";
 import type { WorkUnit } from "@tentacle/core";
 import type { PermissionOption } from "@tentacle/protocol";
 import {
+  A2A_PROTOCOL,
   RESULT_DROPPED_MESSAGE,
-  a2aCallerPrefix,
-  a2aSessionId,
   a2aTitle,
   askMessage,
   buildAgentCard,
   chunkAppend,
-  contextIdOf,
   inboundParts,
   parseTextAnswer,
   projectStatus,
@@ -22,6 +20,7 @@ import {
   callerOptions,
   onceOption,
 } from "../src/external/asks.ts";
+import { callerPrefix, contextIdOf, externalSessionId } from "../src/external/session-ids.ts";
 
 const text = (value: string): Part => ({
   content: { $case: "text", value },
@@ -58,21 +57,25 @@ const unit = (over: Partial<WorkUnit>): WorkUnit => ({
 });
 
 describe("session id", () => {
+  const P = A2A_PROTOCOL;
   test("round trip and owner scoping", () => {
-    expect(a2aSessionId("default", "ctx-1")).toBe("a2a-default-ctx-1");
-    expect(contextIdOf("default", "a2a-default-ctx-1")).toBe("ctx-1");
-    expect(contextIdOf("other", "a2a-default-ctx-1")).toBeNull();
+    expect(externalSessionId(P, "default", "ctx-1")).toBe("a2a-default-ctx-1");
+    expect(contextIdOf(P, "default", "a2a-default-ctx-1")).toBe("ctx-1");
+    expect(contextIdOf(P, "other", "a2a-default-ctx-1")).toBeNull();
     // a caller whose name is a prefix of another's never matches the other's sessions
-    expect(contextIdOf("a", "a2a-ab-ctx")).toBeNull();
-    expect(a2aCallerPrefix("a")).toBe("a2a-a-");
+    expect(contextIdOf(P, "a", "a2a-ab-ctx")).toBeNull();
+    expect(callerPrefix(P, "a")).toBe("a2a-a-");
+    // another protocol's sessions are never this one's
+    expect(contextIdOf(P, "default", "mcp-default-ctx-1")).toBeNull();
   });
   test("a phone session or a malformed part is never an A2A context", () => {
-    expect(contextIdOf("default", "9f3c-uuid")).toBeNull();
-    expect(a2aSessionId("de-fault", "c")).toBeNull();
-    expect(a2aSessionId("default", "")).toBeNull();
-    expect(a2aSessionId("default", "../x")).toBeNull();
-    expect(a2aSessionId("default", "a".repeat(129))).toBeNull();
-    expect(a2aCallerPrefix("bad name")).toBeNull();
+    expect(contextIdOf(P, "default", "9f3c-uuid")).toBeNull();
+    expect(externalSessionId(P, "de-fault", "c")).toBeNull();
+    expect(externalSessionId(P, "default", "")).toBeNull();
+    expect(externalSessionId(P, "default", "../x")).toBeNull();
+    expect(externalSessionId(P, "default", "a".repeat(129))).toBeNull();
+    expect(callerPrefix(P, "bad name")).toBeNull();
+    expect(callerPrefix("a-2", "default")).toBeNull();
   });
   test("title: first non-empty line, capped", () => {
     expect(a2aTitle("\n  hello\nworld")).toBe("A2A: hello");
