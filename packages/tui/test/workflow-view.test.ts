@@ -646,12 +646,16 @@ describe("slice 2b: the project's workflows at rest (D8)", () => {
         .map((r) => r.text)
         .join("\n"),
     ).toContain("no workflow files in");
-    // Empty here, present above: the hint names the other folder.
-    expect(
-      catalogueSection(cat({ elsewhere: { dir: "/h/.tentacle/workflows", count: 3 } }), 80)
-        .map((r) => r.text)
-        .join("\n"),
-    ).toContain("no workflow files here");
+  });
+
+  test("an empty catalogue names THIS project's folder only (no neighbouring-folder hint, S8c)", () => {
+    // Mutation: put a "here — <other folder> has N" sentence back → red.
+    const text = catalogueSection(cat({ dir: "/w/empty/.tentacle/workflows" }), 80)
+      .map((r) => r.text)
+      .join("\n");
+    expect(text).toContain("no workflow files in /w/empty/.tentacle/workflows");
+    expect(text).not.toContain("here");
+    expect(text).not.toMatch(/has \d+$/);
   });
 
   test("more than the section paints: the rest is counted, and `truncated` is said", () => {

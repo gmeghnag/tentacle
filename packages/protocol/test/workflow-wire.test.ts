@@ -204,7 +204,7 @@ describe("session/workflow_catalogue + start{hash}", () => {
     expect(parsed.success && parsed.data).toEqual(result);
   });
 
-  test("the nullable-ish members: truncated is `true` only, `elsewhere` is display-only", () => {
+  test("the nullable-ish members: `truncated` is `true` only, and no `elsewhere` rides the wire", () => {
     // Mutation: `truncated: z.boolean()` → the `false` case goes green and an
     // older client would show "truncated" beside a complete list.
     expect(
@@ -215,13 +215,14 @@ describe("session/workflow_catalogue + start{hash}", () => {
       WorkflowCatalogueResultSchema.safeParse({ workflows: [], dir: "/p", truncated: false })
         .success,
     ).toBe(false);
-    const elsewhere = {
+    // A neighbouring-folder hint is GONE (docs/fix/workflows-ux.md S8c, owner Q2):
+    // a frame still carrying one parses, and the field is dropped.
+    const parsed = WorkflowCatalogueResultSchema.safeParse({
       workflows: [],
       dir: "/Users/me/proj/apps/mobile/.tentacle/workflows",
       elsewhere: { dir: "/Users/me/proj/.tentacle/workflows", count: 3 },
-    };
-    const parsed = WorkflowCatalogueResultSchema.safeParse(elsewhere);
-    expect(parsed.success && parsed.data.elsewhere).toEqual(elsewhere.elsewhere);
+    });
+    expect(parsed.success && "elsewhere" in parsed.data).toBe(false);
     // `unavailable` is a distinct answer from an empty folder, never a list.
     const unavailable = WorkflowCatalogueResultSchema.safeParse({
       workflows: [],

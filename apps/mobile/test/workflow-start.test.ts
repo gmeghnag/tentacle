@@ -98,17 +98,13 @@ describe("the catalogue as rows", () => {
     expect(byName.get("unknown")).toBeNull();
   });
 
-  test("the folder, `gitIgnored`, `truncated` and the `elsewhere` hint survive the projection", () => {
+  test("the folder, `gitIgnored` and `truncated` survive the projection", () => {
     const view = catalogueRows(
       catalogue({ truncated: true, gitIgnored: true, workflows: [row()] }),
     );
     expect(view.dir).toBe("/work/proj/.tentacle/workflows");
     expect(view.truncated).toBe(true);
     expect(view.gitIgnored).toBe(true);
-    expect(view.elsewhere).toBeNull();
-
-    const hint = { dir: "/work/proj", count: 2 };
-    expect(catalogueRows(catalogue({ elsewhere: hint })).elsewhere).toEqual(hint);
   });
 
   test("unsupported, unavailable and an empty folder are THREE different things", () => {
@@ -125,12 +121,13 @@ describe("the catalogue as rows", () => {
     // …never an empty list that looks like an empty folder.
     expect(unavailable.kind).not.toBe("empty");
 
-    const empty = catalogueRows(
-      catalogue({ workflows: [], elsewhere: { dir: "/work/proj", count: 2 } }),
-    );
+    const empty = catalogueRows(catalogue({ workflows: [] }));
     expect(empty.kind).toBe("empty");
     expect(empty.dir).toBe("/work/proj/.tentacle/workflows");
-    expect(empty.elsewhere).toEqual({ dir: "/work/proj", count: 2 });
+    expect(empty.reason).toBeNull();
+    // An empty folder offers no route out of it (S8c, owner Q2): no
+    // neighbouring-folder hint, in the view or on the screen.
+    expect(empty).not.toHaveProperty("elsewhere");
   });
 
   test("the loading view claims nothing", () => {

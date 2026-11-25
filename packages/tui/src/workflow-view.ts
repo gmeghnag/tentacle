@@ -879,14 +879,9 @@ export function catalogueSection(cat: CatalogueView, width: number): PanelViewRo
   }
   const rows = catalogueOrder(cat.workflows);
   if (rows.length === 0) {
-    // The `elsewhere` hint stays HERE (owner Q2 removes that lookup end to end in
-    // a later slice, with the daemon/protocol/client halves): the at-rest line it
-    // also fed is gone.
-    const hint =
-      cat.elsewhere === undefined
-        ? `  no workflow files in ${oneLine(cat.dir)}`
-        : `  no workflow files here — ${oneLine(cat.elsewhere.dir)} has ${cat.elsewhere.count}`;
-    return [noteRow(hint, width)];
+    // The folder it read, and nothing about any other folder (docs/fix/workflows-ux.md
+    // S8c, owner Q2): nothing looks above the cwd.
+    return [noteRow(`  no workflow files in ${oneLine(cat.dir)}`, width)];
   }
   const out: PanelViewRow[] = [];
   const shown = rows.slice(0, CATALOGUE_SECTION_MAX);

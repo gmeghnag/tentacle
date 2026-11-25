@@ -6741,22 +6741,6 @@
           "minLength": 1,
           "type": "string"
         },
-        "elsewhere": {
-          "additionalProperties": true,
-          "properties": {
-            "count": {
-              "minimum": 0,
-              "type": "integer"
-            },
-            "dir": {
-              "maxLength": 1024,
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          "required": ["count", "dir"],
-          "type": "object"
-        },
         "gitIgnored": {
           "type": "boolean"
         },

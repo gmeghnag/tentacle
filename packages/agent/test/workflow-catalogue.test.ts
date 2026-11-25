@@ -230,7 +230,6 @@ describe("catalogue (D6)", () => {
         rows: [],
         truncated: true,
         gitIgnored: false,
-        elsewhere: { dir: "/proj/.tentacle/workflows", count: 3 },
       }),
     });
     expect(await driver.catalogue()).toEqual({
@@ -238,7 +237,6 @@ describe("catalogue (D6)", () => {
       truncated: true,
       gitIgnored: false,
       dir: "/proj/apps/mobile/.tentacle/workflows",
-      elsewhere: { dir: "/proj/.tentacle/workflows", count: 3 },
     });
   });
 

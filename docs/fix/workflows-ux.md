@@ -1738,3 +1738,92 @@ slice touched.
 suite) — run by the script after this, per the brief. Everything narrower is above, green.
 
 *— claude-sonnet-4-5 (exec), 2026-11-25*
+
+## Execution
+
+### Slice S8c — the `elsewhere` neighbouring-folder lookup, removed end to end (owner Q2)
+
+**Load-bearing check (re-run first).** Holds on this branch: `onFail` is on `WorkflowStepRow`
+(`packages/protocol/src/session.ts:856`), so S4 is in. The lookup itself was still live: a probe in
+`.tentacle/tmp/workflows-ux/s8c-lb.ts` (run before any edit) printed
+`wire accepts elsewhere: true | keys: dir,elsewhere,workflows` and
+`core exports workflowsAbove: true | WorkflowsAboveHint type is compile-only` — the field parses off
+the wire and the bounded walk is exported from `@tentacle/core`. Owner Q2 asks for both to be gone, so
+the slice is alive, not stale.
+
+**As built, in dependency order**
+
+1. `packages/core/src/project-paths.ts` — deleted `workflowsAbove`, `WorkflowsAboveHint`,
+   `WORKFLOWS_ABOVE_DEPTH`/`WORKFLOWS_ABOVE_MAX_COUNT`, their two private helpers (`parentOf`,
+   `normalize`, `isWorkflowFile`, which nothing else used) and the `list` member of `ProjectFs`
+   (it existed only to feed the walk). The module header now says why there is no seam.
+2. `packages/cli/src/project-fs.ts` — the node adapter loses `list` with it (its only caller);
+   `packages/cli/src/workflow-files.ts` — `WorkflowListing.elsewhere`, the
+   `workflowsAbove(...)` call and the spread are gone, and `workflowListing`'s comment says the
+   folder's `gitIgnored` notice is the only display-only fact left.
+3. `packages/agent/src/workflow-driver.ts` — `elsewhere` off both `WorkflowListing` and
+   `WorkflowCatalogue`, and off the object `catalogue()` returns (three sites, `:161`, `:201`, `:863`).
+4. `packages/protocol/src/session.ts` — `elsewhere` off `WorkflowCatalogueResultSchema`
+   (the S4 `protocol.d/workflows-ux.md` note grows the field removal);
+   `bun run schema:export` regenerated `packages/protocol/schema/protocol.json` (one hunk, 16 lines
+   deleted: the `elsewhere` property and its `required` entry).
+5. `packages/tui/src/workflow-view.ts` — `catalogueSection`'s empty case is one sentence naming
+   **this** folder (`  no workflow files in <dir>`) and no other. `apps/mobile/src/workflow-start.ts`
+   — `CatalogueView.elsewhere` and its projection are gone; `screens/WorkflowStart.tsx` — the
+   "N workflows found in <dir>" row is gone.
+6. Tests: `core/test/project-paths.test.ts` (the `workflowsAbove` block replaced by a removal
+   guard), `cli/test/project-fs.test.ts` (the two `list` cases), `cli/test/workflow-files.test.ts`
+   (the hint case → "nothing is looked at above it"), `agent/test/workflow-catalogue.test.ts`,
+   `protocol/test/workflow-wire.test.ts` (the field is now DROPPED on parse),
+   `protocol/test/json-schema.test.ts` (fixture), `tui/test/workflow-view.test.ts`,
+   `apps/mobile/test/workflow-start.test.ts`.
+
+**Red before green.** `packages/core/test/project-paths.test.ts` was written first and run on the
+unremoved code: 2 fail — the export probe (`"workflowsAbove" in core` true) and the source scan,
+which named all 11 carriers (`workflowsAbove: core/src/project-paths.ts`, `elsewhere:
+tui/src/workflow-view.ts`, …). Every other suite was edited together with its production change.
+
+**Mutations run, then reverted (`git status --short` clean of them afterwards)**
+
+| Mutation | Result |
+|---|---|
+| D: `export const WORKFLOWS_ABOVE_DEPTH = 4` back in `core/src/project-paths.ts` | 2 fail: the export probe + the source scan |
+| A: `elsewhere` back on `WorkflowCatalogueResultSchema` | 1 fail: "no workflow carrier carries an `elsewhere` field" (names `packages/protocol/src/session.ts`) |
+| B: the TUI's empty sentence back to `no workflow files here — <dir> has 3` | 2 fail: the three-empty-answers test + the new S8c sentence test |
+| C: `elsewhere` back on the phone's `CatalogueView` + projection | the cross-repo guard fails; its OWN suite stayed green, so `apps/mobile/test/workflow-start.test.ts` gained `expect(empty).not.toHaveProperty("elsewhere")` — re-run under the mutation, 1 fail. |
+
+**A gap this slice leaves open, deliberately.** The plan's acceptance is
+`rg -n "workflowsAbove|WorkflowsAboveHint" packages apps` empty. It is empty of *code* (no `src`
+hit); the two test files still spell the names, on purpose — a guard that forbids a symbol must
+name it. The executable form of the acceptance is the source scan in
+`core/test/project-paths.test.ts` (src-only), so the grep's letter cannot hold while its intent does.
+
+**Tests (narrow, foreground).** The nine touched suites → 181 pass, 0 fail; the adjacent workflow
+suites (`cli/test/workflow-wiring`, `tui/test/workflow-frames`, the three phone catalogue
+controllers, `workflow-screens-wiring`, `agent/test/workflow-driver`) → 135 pass;
+`daemon/test/workflow*` + `client/test/workflow*` → 121 pass; `scripts/test/changelog{,-guard}` → 21
+pass; `scripts/test/protocol-bump` + `protocol-version-literals` + `protocol/test/version` → 40 pass.
+`bunx tsc -p packages/{core,agent}` and `-p apps/mobile` → clean; `-p packages/cli` reports only
+pre-existing errors in files this slice does not touch (`packages/tui/src/workflow-view.ts` implicit
+`any`, `cli/test/shared-auto-accept`), the `@tentacle/protocol`-in-`packages/tui` resolution the
+repo's root project resolves — the same baseline S8b recorded. `bunx biome check` on all 16 changed
+files → clean.
+
+**Changelog.** `changelog.d/workflows-ux-elsewhere-hint.removed.md` (one bullet, `removed`): the
+released `workflows-ux.changed.md` describes the at-rest line and the panel, not this hint, so it
+cannot be an extension of it. `CHANGELOG.md` and `TODO.md` untouched.
+
+**Files touched:** `packages/{core,cli,agent,protocol,tui}/src/…` and their tests as listed above,
+`packages/protocol/schema/protocol.json` (regenerated), `protocol.d/workflows-ux.md`,
+`changelog.d/workflows-ux-elsewhere-hint.removed.md`, this doc. Nothing of another slice.
+
+**Worktree note (not a change to the tree):** this worktree's `node_modules` was missing two
+workspace links, so `bun test packages/cli/test/workflow-files.test.ts` died with
+`Cannot find module '@tentacle/browser'`. Restored by hand as the main worktree has them
+(`packages/tools/node_modules/@tentacle/browser`, `packages/browser/node_modules/zod`) — gitignored,
+so no diff.
+
+**Not verified:** the orchestrator's full gate (`bun run check`) — run by the script after this, per
+the brief. Everything narrower is above, green.
+
+*— claude-opus (claude-code, `settings.json` model "opus"), 2026-11-25*

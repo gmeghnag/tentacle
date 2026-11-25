@@ -8,3 +8,9 @@ owner Q1 = A): with no id the daemon answers the catalogue a session it creates 
 `session/skills`/`session/tools` precedent — the TUI's `/workflow` panel is asked before the first
 message creates a session, and `{unavailable: "not open yet"}` was a false claim. Required before,
 so an older peer would refuse the id-less frame: the note covers both.
+
+`WorkflowCatalogueResult` also LOSES `elsewhere` (S8c, owner Q2): the "workflows found higher up"
+hint was removed end to end (the core lookup, the cli listing, the driver, the TUI's empty-catalogue
+sentence and the phone's row), so nothing produces it. A removed field: a peer that still sends it
+loses it on inbound parse (strip schemas, so this is not a parse error for the sender), but a peer
+that still READS it draws a hint no one should see — hence the version bump the note asks for.

@@ -153,12 +153,6 @@ export interface WorkflowListing {
   readonly truncated: boolean;
   /** git ignores the folder (the "not versioned" notice); absent = unknown, never claimed. */
   readonly gitIgnored?: boolean;
-  /**
-   * Where workflows WERE found higher up, given only when `dir` listed none
-   * (docs/feat/workflows-ui.md D7 v5). DISPLAY ONLY: nothing it names can be
-   * loaded, hashed, approved or started.
-   */
-  readonly elsewhere?: { readonly dir: string; readonly count: number };
 }
 
 /**
@@ -198,7 +192,6 @@ export interface WorkflowCatalogue {
   readonly unavailable?: string;
   readonly gitIgnored?: boolean;
   readonly dir: string;
-  readonly elsewhere?: { readonly dir: string; readonly count: number };
 }
 
 /**
@@ -860,7 +853,6 @@ export class WorkflowDriver {
       ...(listing.truncated ? { truncated: true as const } : {}),
       ...(listing.gitIgnored !== undefined ? { gitIgnored: listing.gitIgnored } : {}),
       dir: listing.dir,
-      ...(listing.elsewhere !== undefined ? { elsewhere: listing.elsewhere } : {}),
     };
   }
 

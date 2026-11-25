@@ -1084,9 +1084,9 @@ export type WorkflowDefRow = z.infer<typeof WorkflowDefRowSchema>;
 
 /**
  * The catalogue of one project. `dir` is the ABSOLUTE folder read — a user in
- * the wrong folder sees where tentacle looks. `elsewhere` is DISPLAY ONLY (D7
- * v5): the nearest ancestor folder holding workflows, given only when this one
- * has none. Nothing it names can be loaded, hashed, approved or started.
+ * the wrong folder sees where tentacle looks. Nothing looks ABOVE that folder
+ * (docs/fix/workflows-ux.md S8c, owner Q2): the project's workflows are the
+ * ones under its own root.
  */
 export const WorkflowCatalogueResultSchema = z.object({
   workflows: z.array(WorkflowDefRowSchema).max(64),
@@ -1098,10 +1098,6 @@ export const WorkflowCatalogueResultSchema = z.object({
   gitIgnored: z.boolean().optional(),
   /** The absolute folder the catalogue read. */
   dir: z.string().min(1).max(1024),
-  /** Present ONLY when `dir` listed no workflow: where they were found higher up. */
-  elsewhere: z
-    .object({ dir: z.string().min(1).max(1024), count: z.number().int().nonnegative() })
-    .optional(),
 });
 export type WorkflowCatalogueResult = z.infer<typeof WorkflowCatalogueResultSchema>;
 

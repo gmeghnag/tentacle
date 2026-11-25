@@ -343,11 +343,10 @@ const FIXTURES: Record<string, Json[]> = {
         },
       ],
     },
-    // No workflow in the cwd's folder: the display-only hint, nothing loadable.
+    // No workflow in the cwd's folder: an empty catalogue, nothing loadable.
     {
       dir: "/proj/apps/mobile/.tentacle/workflows",
       workflows: [],
-      elsewhere: { dir: "/proj/.tentacle/workflows", count: 3 },
       gitIgnored: false,
     },
     // A session that cannot run workflows at all, and a folder over the walk's cap.
