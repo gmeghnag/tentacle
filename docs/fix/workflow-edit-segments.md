@@ -448,3 +448,22 @@ case, with its reason, and the Implementation is marked APPROVED on that basis.
   the switch, and it would widen an S task; recorded as debt in Review.
 - **D7 — the changelog fragment is `fixed`**, one bullet naming the two controls.
   Reason: user-visible behaviour repaired (AGENTS §10).
+
+#### Adversarial review (fresh context)
+
+*— claude-opus-5-5, 2026-11-26* (fresh context; a different model from the executor, DeepSeek, and the same family as the planner, Sonnet)
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings.
+
+- **Gate, partial on purpose:** the six touched or neighbouring test files (`workflow-edit-{sheets,graph,wiring,controller,actions}`, core `workflow-draft`) give **264 pass, 0 fail**. `bun run lint` is clean on 2553 files. `bun run typecheck` (root + mobile + relay) is clean. I did not run the full suite; the orchestrator's merge gate does that.
+- **Premises checked against the code, all TRUE:** the validator's sentences (`workflow-spec.ts` `needs a container name` / `needs a step id`); the graph draws no edge for a blank goto (`workflow-edit-graph.ts:208-220`); `maxSheet` returns null on a blank goto (`workflow-edit-sheets.ts:806-807`); `patchStep` writes `{docker: ""}` as given and treats `"local"` as removing the key (`workflow-draft.ts:549-553`); Inline rebuilds `agent` with no `prompt` key (`workflow-draft.ts:566-576`), so the key-based `isFile` cannot get stuck on File.
+- **Mutation check (reverted, `git status` clean afterwards):** the sheets `failing` check back to `goto !== ""` makes 1 test fail; `isFile` back to `path !== ""` makes 1 fail; the core skip removed (`!idsOf…` only) makes 2 fail. Combined with the executor's 7-row table, every changed line has a test that goes red without it.
+- **Attacks tried:**
+  1. **End to end through the real `createWorkflowEditController`** (scratch `.tentacle/tmp/workflow-edit-segments/e2e.ts`). Tapping Docker holds Docker on and Save is off with the validator's sentence. Typing a name and then clearing it holds Docker and brings the sentence back. "Go to step" holds. `beginReview` with something pending sends nothing (0 saves). Undo ×4 goes back to Local / Stop.
+  2. **Other callers of `setFailTarget`:** the ✗-drop `saveFail` passes `target.id` (`workflow-edit-actions.ts:75,98`), a real step id, so `""` is no new input there.
+  3. **Other readers of `goto`:** `renameStep` and `deleteStep` compare it to a real id, so `""` never matches. `setGotoMax` on a pending goto keeps `{goto: "", max}`, which the validator still refuses.
+  4. **Hand-written `on_fail: "stop"` and `where: "local"` (strings):** `onFailOf` and the `container` check accept only a mapping, so these read as Stop / Local, the same as before.
+  5. **The docker field fires on every keystroke** (`onChangeText`): a blank value now reaches the draft and Save names it. That is the intended D2 behaviour, with no silent fallback to the old name.
+- **§7:** none touched. No wire or persisted shape changes, components are untouched, and the logic stays in the pure modules.
+- **Nit (not blocking):** tapping "Go to step" again while the target is still pending rewrites the same `{goto: "", max}`. It probably adds an empty Undo step; I did not check this.
+- **Executor behaviour:** stayed in scope and recorded where it drifted from the plan (the graph test, the `PROMPTS` argument). Its red-first mutation table matches what I reproduced. It said plainly that it had not run the full gate.
