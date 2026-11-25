@@ -1,6 +1,6 @@
 # fix/think-tag-leak — a stray `</think>` and a doubled answer in a Qwen reply, caused by echoing last turn's reasoning
 
-> **Status:** implementation — **awaiting approval**
+> **Status:** implementation — APPROVED (owner decision 2026-11-25)
 > **Branch:** `fix/think-tag-leak`
 > **Type:** fix · **Size:** S · **Blast:** contained (one provider's request builder; no protocol, no persistence) · **Suited:** Sonnet/DeepSeek exec, standard in-context Review
 > **Changelog:** `changelog.d/think-tag-leak.fixed.md`
@@ -90,6 +90,12 @@ Red before green (§9), on current `8d29dd10`, then mutation (move the floor to 
 5. `echoing` is false for a history whose only reasoning is earlier-turn → no retry path armed (fake `fetch`, existing `FakeWS`-style fake in that test file).
 
 Live check after the fix (optional, GPU): re-run `drive.sh` ×12 through `proxy.ts` → expect 0/12 (baseline 6/12) and no stray tag in `content`.
+
+### Owner decision (2026-11-25 ~21:45)
+
+Owner, verbatim: «ok, per think-tag-leak vai con il turno corrente». This REPLACES reasoning-echo's Q2 A («send back always») for past turns: reasoning is echoed only for the CURRENT turn (the assistant messages after the last user message that opened it); a finished turn's reasoning stays on disk (Q1 A unchanged) but is not sent back. Update docs/fix/reasoning-echo.md's decision text with a pointer to this doc.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-25*
 
 ## Execution
 
