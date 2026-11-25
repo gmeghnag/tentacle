@@ -12,6 +12,7 @@ import { type CarrierFrame, carrierFrameOf } from "@tentacle/transport";
 import { Connection, type HooksTrustPrecheck } from "./connection.ts";
 import { DEFAULT_MAX_FRAME_BYTES, acceptDevice } from "./device-accept.ts";
 import type { DeviceAuthority } from "./device-authority.ts";
+import { describePeer } from "./external/peer.ts";
 import type { ExternalRoute } from "./external/route.ts";
 import { type HandshakeLimitOptions, HandshakeLimiter } from "./handshake-limit.ts";
 import type { SessionHost } from "./session-host.ts";
@@ -390,7 +391,7 @@ export function startWsServer(options: WsServerOptions): RunningServer {
         }
       }
       if (!authorize(req)) {
-        options.onAudit?.(`auth-failure ${new URL(req.url).pathname}`);
+        options.onAudit?.(`auth-failure ${new URL(req.url).pathname} ${describePeer(req, srv)}`);
         return new Response("unauthorized", { status: 401 });
       }
       if (srv.upgrade(req, { data: { channel: null, route: "plain" } })) {

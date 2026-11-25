@@ -186,7 +186,74 @@ Then the full gate: `bun run check` (typecheck → lint → test), compared with
 
 ## Execution
 
-*— to be written by the executor (DeepSeek), after the plan above is executed.*
+*— deepseek-v3.2 (executor), 2026-11-25*
+
+**Load-bearing check (re-run first, PASSED).** `ws-server.ts:376-381` still hands the route Bun's
+`Server` (`route?.handle(req, srv)`), `TimeoutServer` still carried only `timeout`, and the peer is
+not on the `Request`. Proven empirically, not just statically (`.tentacle/tmp/serve-mcp-polish/lb.ts`,
+a bare `Bun.serve` whose `fetch(req, srv)` calls `srv.requestIP(req)`): `{"ip":{"address":"127.0.0.1",
+"family":"IPv4","port":55877},"ua":"probe/1"}` — one interface field away, as the plan claimed. The
+Context repro also reproduced verbatim on the branch (`0.0.0.0` in the hint; `session_start` schema
+with no `key`, `session_send` with one).
+
+Slices, in the plan's order, red before green:
+
+- **P1 (peer identity).** New leaf `packages/daemon/src/external/peer.ts` (`PEER_UA_MAX`,
+  `sanitizeUserAgent`, `describePeer`, plus its own structural `PeerSource` — the optional-member twin
+  of ws-server.ts:142-144's `PeerAddressable`, which stays the device limiter's; no imports, so the
+  `route.ts → ws-server.ts` cycle is not re-created). `route.ts:23`: `TimeoutServer.requestIP?`
+  (optional). `mcp/http.ts:85,90`: both audit lines append `describePeer(req, srv)`. `ws-server.ts:394`:
+  `auth-failure <path> at <addr> ua "<ua>"` — the path keeps its position, so
+  `project-pairing.test.ts:466`'s `startsWith("auth-failure")` still holds. Tokens, their length and
+  the query string are never read; the 401 status/body/`www-authenticate` are unchanged.
+  RED first: `mcp-tools.test.ts` guards test (the exact-equality line listed in Preconditions) and the
+  new no-MCP-token test both failed on `Received: "mcp-auth-failure"` / `"auth-failure /mcp"` — the
+  assertion of the property, not an import error.
+- **P2 (dialable hint).** `hintUrl` beside `mcpAddHint` (`serve-mcp-server.ts:64-84`), used by
+  `main.ts:1269` for the MCP line only (A2A untouched, D8). One drift from the plan's wording: `URL`
+  elides a scheme's default port, so `https://0.0.0.0:443` became `https://127.0.0.1` instead of the
+  planned `https://127.0.0.1:443`; the implementation now repeats an explicitly written port (T4
+  asserts `:443`).
+- **P3 (idempotent `session_start`).** `tools.ts`: `onAudit?` on `McpToolsOptions`; `key` on the
+  `session_start` schema (same bound/wording as `session_send`); `STARTS_MAX`/`START_KEY_TTL_MS`/
+  `START_REPLAY_TTL_MS` + `StartMemo`; `start` now looks the memo up under `k\0<caller>\0<key>` or
+  `r\0<caller>\0sha256(prompt\0title)`, sweeps, refuses a reused key with different arguments
+  (`-32602`), and on a miss registers the memo **with its single-flight promise before the first
+  await** (before `admit`), resolving `accepted` once the prompt was accepted and deleting the memo on
+  any refusal. A memo hit awaits that promise and answers the first call's ids; for a task request it
+  re-derives `taskCreated` only while that turn is live, else the plain `{sessionId, turnId}`.
+  `serve-mcp-server.ts:105,111` passes `onAudit` to `McpTools` as well as the route.
+  Drift: the memo delete on refusal sits in both the `admit`-null branch and the `finally` (the plan
+  named only `finally`) — `admit` runs after the memo exists, so its refusal needs one too; the
+  promise is also rejected before each delete, so a concurrent waiter can never be left pending.
+  Drift: T7 lives in `packages/daemon/test/mcp-tasks.test.ts`, not `mcp-tools.test.ts` — that is the
+  suite that owns the tasks rig (`caps`, `TASKS`, `startTask`); `mcp-tools.test.ts` has no task
+  helper. Also `attachedSessionIds()`/`host.size` assertions were used as the "one session" oracle.
+
+**Mutations (§9 non-vacuity; each reverted immediately).**
+
+| Mutation | Result |
+|---|---|
+| `mcp-auth-failure` without `describePeer` | `(fail)` guards test — `Received: "mcp-auth-failure"` |
+| `auth-failure <path>` without `describePeer` | `(fail)` no-MCP-token test |
+| sanitizer keeps control chars (`code > 0x7e` only) | `(fail)` 2 sanitiser tests (CR/LF/ESC) |
+| `hintUrl` returns its input | `(fail)` hintUrl test — `Expected "http://127.0.0.1:4001" Received "http://0.0.0.0:4001"` |
+| no memo lookup (`known` forced `undefined`) | `(fail)` 3 replay tests + T7 |
+| arguments not compared on a hit | `(fail)` T8 — `Expected: -32602 Received: undefined` |
+| memo kept after a refusal (both deletes) | `(fail)` refused-start test — `Expected length: 0 Received length: 1` |
+
+**Verification.** Narrow suites green: `bun test mcp-tools mcp-tasks external-peer project-pairing
+serve-mcp-e2e a2a-http serve-a2a-e2e` → 80 + 37 pass, 0 fail. `bunx biome check` on the 11 changed
+files: clean. `bunx tsc --noEmit -p packages/daemon` clean; `-p packages/cli` reports only
+pre-existing standalone-config noise (`workflow-view.ts`, `new URL(...)` in `serve-mcp-e2e.test.ts`
+lines 190/218/248, `SharedAutoAccept.current`), none of it in the changed lines. No schema change
+under `@tentacle/protocol`, so `packages/protocol/schema/protocol.json` needs no regeneration and no
+`protocol.d/` note is due. Fragment: `changelog.d/serve-mcp-polish.fixed.md`. **The full gate
+(`bun run check`) was not run here — the orchestrator runs it after this task.**
+
+**Left as the plan says:** a restart drops the memos (a second session then), two *different*
+concurrent starts still both pass (`:992` in the general case), and A2A's own audit lines are
+untouched (D8).
 
 ## Review
 

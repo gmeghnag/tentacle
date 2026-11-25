@@ -86,6 +86,8 @@ export interface McpToolsOptions {
    * is `false`; no persister = nothing to make durable).
    */
   readonly durable?: (sessionId: string, turnId: string) => Promise<boolean>;
+  /** The operator's audit log (`serve`'s stderr): start replays are named here. */
+  readonly onAudit?: (line: string) => void;
 }
 
 /** A turn's start is awaited this long before its task is refused (a `session/prompt` already accepted it). */
@@ -94,6 +96,28 @@ export const MCP_TASK_START_MS = 10_000;
 export const TASK_NOT_RECORDED = "could not record the task";
 /** Acceptance times kept for live tasks' `createdAt` (a live unit has no `startedAt`). */
 const ACCEPTED_MAX = 256;
+/** Start replays kept per process (a retry is seconds away); oldest evicted first. */
+const STARTS_MAX = 256;
+/** An explicit `key` a caller chose answers a replay this long. */
+const START_KEY_TTL_MS = 10 * 60_000;
+/** No key: the window an identical `(prompt, title)` collapses into (the observed retry was 3 s). */
+const START_REPLAY_TTL_MS = 15_000;
+
+/**
+ * One answered `session_start`, kept briefly so a retried start returns THAT
+ * session and turn instead of opening a second one (docs/fix/serve-mcp-polish.md
+ * P3, the 2026-11-25 duplicate). `answer` settles when its turn was ACCEPTED, so
+ * a concurrent identical call waits on the first instead of starting its own.
+ */
+interface StartMemo {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly prompt: string;
+  readonly title?: string;
+  readonly kind: "explicit" | "implicit";
+  readonly at: number;
+  readonly answer: Promise<void>;
+}
 
 /** A tool call answered with a task (`CreateTaskResult`). */
 export type TaskCreated = Record<string, unknown> & { readonly resultType: "task" };
@@ -139,6 +163,12 @@ export const MCP_TOOLS: readonly Record<string, unknown>[] = [
       properties: {
         prompt: { type: "string", minLength: 1, description: "The task (≤ 64 KiB)." },
         title: { type: "string", maxLength: MCP_TITLE_MAX },
+        key: {
+          type: "string",
+          minLength: 1,
+          maxLength: MCP_KEY_MAX,
+          description: "makes a retried start return the same session",
+        },
       },
       required: ["prompt"],
     },
@@ -276,6 +306,8 @@ export class McpTools {
   private readonly archived: ArchivedUnitIndex;
   /** taskId → when its call was accepted (insertion order = age, bounded). */
   private readonly accepted = new Map<string, number>();
+  /** Replay key → the start it answered (insertion order = age, bounded, in memory only). */
+  private readonly starts = new Map<string, StartMemo>();
 
   constructor(opts: McpToolsOptions) {
     this.opts = opts;
@@ -343,6 +375,14 @@ export class McpTools {
 
   // --- verbs -------------------------------------------------------------------
 
+  /**
+   * A start whose turn was accepted shortly before is answered with THAT session
+   * and turn, never a second one: a retried call (the client's own retry, or a
+   * concurrent identical one) must not open a session twice (docs/fix/
+   * serve-mcp-polish.md P3). The replay key is the caller's `key` when it sends
+   * one, else a short implicit window over `(caller, prompt, title)` — the client
+   * that duplicated a start sends no key it does not know.
+   */
   private async start(
     caller: string,
     args: Record<string, unknown>,
@@ -350,28 +390,114 @@ export class McpTools {
   ): Promise<CallToolResult | TaskCreated> {
     const prompt = text(args, "prompt");
     const title = optStr(args, "title", MCP_TITLE_MAX);
+    const key = optStr(args, "key", MCP_KEY_MAX);
+    // The caller is IN the key: no caller replays or hijacks another's start, and
+    // the two namespaces are ours, so a `key` cannot collide with an implicit one.
+    const memoKey =
+      key === undefined
+        ? `r\0${caller}\0${digest(`${prompt}\0${title ?? ""}`)}`
+        : `k\0${caller}\0${key}`;
+    this.sweepStarts();
+    const known = this.starts.get(memoKey);
+    if (known !== undefined) {
+      if (known.prompt !== prompt || known.title !== title) {
+        throw new InvalidToolParams("key reused with different arguments");
+      }
+      this.audit(`mcp-start-replayed ${known.sessionId}`);
+      const accepted = await known.answer.then(
+        () => true,
+        () => false,
+      );
+      if (accepted) {
+        return this.replayed(known, task);
+      }
+      // A refusal is not a replay: its memo is gone, so this call starts for real.
+    }
     const s = crypto.randomUUID();
     const sessionId = externalSessionId(MCP_PROTOCOL, caller, s);
     if (sessionId === null) {
       return toolError("no caller identity");
     }
+    const turnId = `${s}.${crypto.randomUUID()}`;
+    // The memo — and the promise a concurrent identical call waits on — exists
+    // BEFORE the first await, so two identical starts cannot both open a session.
+    let accepted = false;
+    let accept = () => {};
+    let refuse = (_error: unknown) => {};
+    const answer = new Promise<void>((resolve, reject) => {
+      accept = () => {
+        accepted = true;
+        resolve();
+      };
+      refuse = reject;
+    });
+    // The first call answers from its own path and may leave this unawaited.
+    void answer.catch(() => {});
+    this.starts.set(memoKey, {
+      sessionId,
+      turnId,
+      prompt,
+      ...(title !== undefined ? { title } : {}),
+      kind: key === undefined ? "implicit" : "explicit",
+      at: Date.now(),
+      answer,
+    });
     const admitted = this.admit(caller, sessionId);
     if (admitted === null) {
+      refuse(new Error(TOO_MANY_LIVE));
+      this.starts.delete(memoKey);
       return toolError(TOO_MANY_LIVE);
     }
     try {
-      const turnId = `${s}.${crypto.randomUUID()}`;
       let a: Attachment;
       try {
         a = await this.attach(sessionId, mcpTitle(prompt, title));
         await this.prompt(a, turnId, prompt);
       } catch (error) {
+        refuse(error);
         return toolError(`the session refused the prompt${codeOf(error)}`);
       }
+      accept();
       return task ? await this.taskCreated(a, turnId) : toolResult({ sessionId, turnId });
     } finally {
       admitted();
+      // A refusal is not a replay: a retry must be able to try again.
+      if (!accepted) {
+        refuse(new Error("start refused"));
+        this.starts.delete(memoKey);
+      }
     }
+  }
+
+  /** A memo hit's answer: the first call's ids, and a task only while that turn is live. */
+  private replayed(
+    memo: StartMemo,
+    task: boolean,
+  ): CallToolResult | Promise<CallToolResult | TaskCreated> {
+    const a = this.attachments.get(memo.sessionId);
+    const live =
+      a !== undefined && !a.closed && this.runningTurn(memo.sessionId)?.id === memo.turnId;
+    return task && live && a !== undefined
+      ? this.taskCreated(a, memo.turnId)
+      : toolResult({ sessionId: memo.sessionId, turnId: memo.turnId });
+  }
+
+  /** Drop start memos past their own TTL, then the oldest beyond `STARTS_MAX`. */
+  private sweepStarts(): void {
+    const now = Date.now();
+    for (const [key, memo] of this.starts) {
+      const ttl = memo.kind === "explicit" ? START_KEY_TTL_MS : START_REPLAY_TTL_MS;
+      if (now - memo.at > ttl) this.starts.delete(key);
+    }
+    while (this.starts.size > STARTS_MAX) {
+      const oldest = this.starts.keys().next().value;
+      if (oldest === undefined) break;
+      this.starts.delete(oldest);
+    }
+  }
+
+  private audit(line: string): void {
+    this.opts.onAudit?.(line);
   }
 
   private async send(
@@ -1034,4 +1160,12 @@ function isCallerTurn(sessionId: string, turnId: string): boolean {
 
 function codeOf(error: unknown): string {
   return error instanceof RpcError ? ` (${error.code})` : "";
+}
+
+/**
+ * A stable digest of `text` — the implicit replay key of a start. Never persisted
+ * and never part of an id: it only keeps the memo map from holding a prompt.
+ */
+function digest(text: string): string {
+  return new Bun.CryptoHasher("sha256").update(text).digest("hex");
 }

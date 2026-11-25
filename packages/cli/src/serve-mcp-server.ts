@@ -54,6 +54,36 @@ export function parseMcpAsks(value: string | undefined): AskMode {
   throw new Error(`--mcp-asks must be "owner" or "both" (got "${value}")`);
 }
 
+/**
+ * The URL the startup hint may suggest: a wildcard bind is rewritten to the
+ * loopback it also serves (`0.0.0.0` → `127.0.0.1`, `::`/`[::]` → `[::1]` — a
+ * v6-only stack need not answer `127.0.0.1`). Any other host is kept verbatim,
+ * so the hint stays reachable from another machine; scheme and port are kept.
+ * No path and no trailing slash, so `/mcp` composes as it always did.
+ */
+export function hintUrl(serverUrl: string): string {
+  const url = parsedUrl(serverUrl);
+  if (url === null) {
+    return serverUrl;
+  }
+  const host = url.hostname;
+  const loopback =
+    host === "0.0.0.0" ? "127.0.0.1" : host === "[::]" || host === "::" ? "[::1]" : undefined;
+  // `URL` elides a scheme's default port (`:443`); the hint repeats what the bind said.
+  const written = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*:(\d+)(?:[/?#]|$)/i.exec(serverUrl)?.[1];
+  const port = url.port !== "" ? url.port : (written ?? "");
+  return `${url.protocol}//${loopback ?? host}${port === "" ? "" : `:${port}`}`;
+}
+
+/** `new URL`, or null when it does not parse (never in practice: the bind builds the string). */
+function parsedUrl(raw: string) {
+  try {
+    return new URL(raw);
+  } catch {
+    return null;
+  }
+}
+
 /** The `claude mcp add` line for the startup notice (`<token>` is a placeholder, never the secret). */
 export function mcpAddHint(httpUrl: string): string {
   return `claude mcp add --transport http tentacle ${httpUrl}${MCP_PATH} --header "Authorization: Bearer <token>"`;
@@ -72,6 +102,7 @@ export function buildMcp(input: BuildMcpInput): {
     callerAsks: () => asks,
     ...(input.hooksTrustPrecheck ? { hooksTrustPrecheck: input.hooksTrustPrecheck } : {}),
     ...(input.onError ? { onError: input.onError } : {}),
+    ...(input.onAudit ? { onAudit: input.onAudit } : {}),
   });
   const route = createMcpRoute({
     tools,
