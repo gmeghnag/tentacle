@@ -750,3 +750,34 @@ from the phone. 7. Usage visibility. 8. Where it runs. 9. Remote
 **What holds:** the single-broker path (`childRequester` is built once and shared by both child kinds); no protocol, client or daemon change; the stderr pipe (no raw terminal write); the cancel ladder order; the D9 verdict feeding the driver's own tool.
 
 **Executor behaviour:** the Execution notes are honest and detailed: drift is declared, and "code before tests" is admitted with mutation evidence instead. The live `claude` check was never run in any slice (the sandbox refused it). That check is still open and is the orchestrator's before merge.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-25* — fresh context, `git diff HEAD~1` (cb314306, the fix for round 1).
+
+**Verdict: PASS** (no HIGH/MEDIUM left).
+
+**Each round-1 finding, re-checked by my own mutation** (restored from a scratch copy; `git status --porcelain` empty after each):
+
+| # | finding | fix | mutation | result |
+|---|---|---|---|---|
+| 1 | HIGH, env | `process.ts` `childEnv()` = scrubbed host env, used by `probe` and `start` | scrub replaced by a raw copy | 2 fail (`harness-process.test.ts`) |
+| 2 | MEDIUM, capabilities | `permissions.ts` refuses a disabled mapped tool before the gate, the rule and the broker | the check made unreachable | 2 fail (`harness-permissions.test.ts`) |
+| 3 | MEDIUM, branch | `finishWorktree` commits the run's work (`committed` flag, report reworded) | the commit replaced by `git --version` | 2 fail (`harness-worktree.test.ts`) |
+| 4 | MEDIUM, init fail-open | allowlist `{"default"}`; mode and tools required; only `end`/`quota` before init | a missing mode accepted, and the before-init gate off | 2 fail (`harness-process.test.ts`) |
+
+**End-to-end:** the round-1 env repro (`envrepro/launch.ts`, the real `DEFAULT_SPAWNER`, the secret in the parent's startup env) now gives `KEY=` with 62 ordinary vars still passed (it gave `KEY=sk-secret-123` before).
+
+**Premise check:** the recorded live init has `"permissionMode":"default"` (`run*.jsonl`: 1× `default`, 3× `dontAsk`), so the allowlist matches a real run. Whether the init of a `--restricted --permission-prompt-tool stdio` run also reports `default` is unverified live. If it does not, every run is killed loudly; nothing passes silently.
+
+**Gate:** 12 touched test files → 311 pass / 0 fail. `bun run typecheck` clean. `bun run lint` clean (2446 files).
+
+**Regression attacks on the diff (none found):**
+- The new run commit uses `--no-verify` like the baseline. The repo's hooks live in the main `.git`, which the in-worktree rule refuses.
+- The before-init gate admits only `end`/`quota`. A pre-init «Not logged in» `end` still ends normally (tested).
+- 3 older process tests had their fixtures changed to send init first. That is a contract change; their assertions did not change.
+
+**Still open (not findings):**
+- The owner's question on passing `CLAUDE_CODE_OAUTH_TOKEN` through. Today it is scrubbed, which fails loudly as «Not logged in».
+- `fs_read` turned off does not narrow Claude's own reads (declared debt).
+- The live `claude` run, which remains the orchestrator's before merge.
