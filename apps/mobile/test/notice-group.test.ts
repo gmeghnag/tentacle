@@ -17,12 +17,8 @@ import type { Row } from "../src/transcript-rows.ts";
 
 const info = (key: string): Row => ({ kind: "notice", key, text: "an info line" });
 const warn = (key: string): Row => ({ kind: "notice", key, text: "a warning", level: "warn" });
-const separator = (key: string): Row => ({
-  kind: "notice",
-  key,
-  text: "compacted · ctx 1k → ~1k",
-  separator: true,
-});
+/** A step of the rail (a reset / a compaction): not a harness line, and it breaks a block. */
+const step = (key: string): Row => ({ kind: "context", key, event: "compact", body: "" });
 
 /** The looks as `[glyph, joined]` pairs, in row order (only the ones drawn). */
 function looksOf(rows: readonly Row[], cells?: ReadonlyMap<string, { kind: string }>) {
@@ -33,11 +29,11 @@ function looksOf(rows: readonly Row[], cells?: ReadonlyMap<string, { kind: strin
   });
 }
 
-describe("a harness line is a notice that is not a separator rule", () => {
-  test("info, warn and a continuation are harness lines; a separator is not", () => {
+describe("a harness line is a notice, and only a notice", () => {
+  test("info and warn are harness lines; a context step and a user row are not", () => {
     expect(isHarness(info("a"))).toBe(true);
     expect(isHarness(warn("a"))).toBe(true);
-    expect(isHarness(separator("a"))).toBe(false);
+    expect(isHarness(step("a"))).toBe(false);
     expect(isHarness(undefined)).toBe(false);
     expect(isHarness({ kind: "user", key: "u", text: "hi", images: [] } as Row)).toBe(false);
   });
@@ -45,7 +41,7 @@ describe("a harness line is a notice that is not a separator rule", () => {
   test("a level is warn only when it says so", () => {
     expect(harnessLevel(warn("a"))).toBe("warn");
     expect(harnessLevel(info("a"))).toBe("info");
-    expect(harnessLevel(separator("a"))).toBe("info");
+    expect(harnessLevel(step("a"))).toBe("info");
   });
 });
 
@@ -69,12 +65,12 @@ describe("grouping: the S1 acceptance sequence", () => {
     expect(showsGlyph(rows[2], rows[3] as Row)).toBe(true);
   });
 
-  test("a separator breaks a block: the line after it opens with its glyph, unjoined", () => {
-    expect(looksOf([info("a"), separator("sep"), info("b")])).toEqual([
+  test("a context STEP breaks a block: the line after it opens with its glyph, unjoined", () => {
+    expect(looksOf([info("a"), step("sep"), info("b")])).toEqual([
       [NOTICE_GLYPHS.info, false],
       [NOTICE_GLYPHS.info, false],
     ]);
-    expect(joinsPrevious(separator("sep"), info("b"))).toBe(false);
+    expect(joinsPrevious(step("sep"), info("b"))).toBe(false);
   });
 
   test("a non-notice row breaks a block", () => {
@@ -130,7 +126,7 @@ describe("grouping over the VISIBLE rows (Owner Q5)", () => {
 test("no look for any row that is not a harness line", () => {
   const rows: readonly Row[] = [
     { kind: "user", key: "u", text: "q", images: [] },
-    separator("s"),
+    step("s"),
     info("n"),
   ];
   expect([...noticeLooks(rows).keys()]).toEqual(["n"]);

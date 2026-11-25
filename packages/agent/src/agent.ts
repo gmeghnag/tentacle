@@ -86,6 +86,7 @@ import {
   modelView,
   renderForModel,
   shouldEmit,
+  withStatusLine,
 } from "./context-awareness.ts";
 import {
   contextResetHistory,
@@ -223,6 +224,14 @@ export interface RunOptions {
    * caller owns the queue, so the caller owns the mark (`Session.takeVoice`).
    */
   readonly voiceMark?: () => VoiceMark | undefined;
+  /**
+   * A live status line (the session's workflow run,
+   * docs/feat/workflow-run-awareness.md), read SYNCHRONOUSLY once per request
+   * built and appended at the request's tail (`withStatusLine`) — never in the
+   * history. Only `Session` passes it, so a sub-agent (its own `Agent`) never
+   * sees it. `undefined` result → no line.
+   */
+  readonly statusLine?: () => string | undefined;
 }
 
 /** What a voice turn asks of one round: see `@tentacle/core`'s `voiceReasoning`. */
@@ -358,12 +367,15 @@ export type PendingExit =
   | AgentJobExit
   | PendingAgentMessage
   | PendingUserNote
-  | PendingWorkflowEnd;
+  | PendingWorkflowEnd
+  | PendingWorkflowWait;
 
 /**
  * A workflow run ended (docs/feat/agent-workflows.md D3): its end note, keyed
  * `note.id = runId` (the load derivation's dedupe), rides the SAME queue as a
- * job exit, so it is told at the next turn's start and WAKES like one.
+ * job exit, so it WAKES like one. It is told at the next round boundary of a
+ * running turn (the mid-turn drain, like a sub-agent's exit), else at the next
+ * turn's start (docs/feat/workflow-run-awareness.md S4).
  */
 export type PendingWorkflowEnd = {
   readonly kind: "workflow_end";
@@ -373,6 +385,29 @@ export type PendingWorkflowEnd = {
 
 const isWorkflowEnd = (job: PendingExit): job is PendingWorkflowEnd =>
   "kind" in job && job.kind === "workflow_end";
+
+/**
+ * A live run's step waits for the user and nobody is attached
+ * (docs/feat/workflow-run-awareness.md S6): its note WAKES like an end note, but
+ * is told at a turn's START only — never mid-turn, where the status line
+ * already says it. `note.id = runId`, under its own kind: never taken for the
+ * run's end by the load derivation.
+ */
+export type PendingWorkflowWait = {
+  readonly kind: "workflow_wait";
+  readonly runId: string;
+  readonly text: string;
+};
+
+const isWorkflowWait = (job: PendingExit): job is PendingWorkflowWait =>
+  "kind" in job && job.kind === "workflow_wait";
+
+/** THE end note's message: the start flush and the mid-turn drain both use it. */
+const workflowEndNote = (job: PendingWorkflowEnd): ChatMessage => ({
+  role: "user",
+  content: job.text,
+  note: { kind: NOTE_KIND.workflowEnd, id: job.runId },
+});
 
 /**
  * A running background child's `agent_notify` text, queued for the parent agent
@@ -1018,9 +1053,14 @@ export class Agent {
     this.pendingExits.push({ kind: "user_note", agentId, text });
   }
 
-  /** A workflow run ended: its note, told at the next turn's start (and it wakes). */
+  /** A workflow run ended: its note, told at the next round boundary or turn start (and it wakes). */
   noteWorkflowEnd(runId: string, text: string): void {
     this.pendingExits.push({ kind: "workflow_end", runId, text });
+  }
+
+  /** A workflow step waits for the user, unattended: its note, told at the next turn's start (and it wakes). */
+  noteWorkflowWait(runId: string, text: string): void {
+    this.pendingExits.push({ kind: "workflow_wait", runId, text });
   }
 
   /** Whether the user may activate `name` (`/name`) in this agent. */
@@ -1622,7 +1662,8 @@ export class Agent {
       const view = modelView(this.requestHistory(messages, caps, turnFrom));
       const voiceTurn = voiceRequest(view.messages);
       const request: ChatRequest = {
-        messages: voiceTurn.messages,
+        // The live status line (a workflow run's) at the TAIL, request only.
+        messages: withStatusLine(voiceTurn.messages, opts.statusLine?.()),
         tools,
         ...(this.config.temperature !== undefined ? { temperature: this.config.temperature } : {}),
         ...(signal ? { signal } : {}),
@@ -1952,7 +1993,11 @@ export class Agent {
           yield { type: "history_repaired", ...view.repairs };
         }
         const finalMessages: ChatMessage[] = [
-          ...(voice === null ? view.messages : withSpokenLine(view.messages)),
+          // The status line before the nudge, so the nudge stays the last word.
+          ...withStatusLine(
+            voice === null ? view.messages : withSpokenLine(view.messages),
+            opts.statusLine?.(),
+          ),
           {
             role: "user",
             content: nudge,
@@ -2883,7 +2928,9 @@ export class Agent {
    * Drain what a mid-turn boundary may deliver: the running children's notes
    * (`agent_message`) AND a SUB-AGENT's exit (`sa-N`), in queue order
    * (docs/fix/subagent-error-report.md root cause A — a child that ends while
-   * the parent works is invisible until the next turn otherwise). A shell job's
+   * the parent works is invisible until the next turn otherwise) AND a workflow
+   * run's end note (docs/feat/workflow-run-awareness.md S4: told in the turn that
+   * runs when it ends, the round its status line disappears). A shell job's
    * exit and the USER's note stay where they are: the turn's start only (owner
    * Q1). Synchronous (the late-drain invariant) and order preserving.
    */
@@ -2892,7 +2939,7 @@ export class Agent {
     let kept = 0;
     for (let i = 0; i < this.pendingExits.length; i++) {
       const job = this.pendingExits[i];
-      if (job !== undefined && (isAgentMessage(job) || isSubagentExit(job))) {
+      if (job !== undefined && (isAgentMessage(job) || isSubagentExit(job) || isWorkflowEnd(job))) {
         midTurn.push(job);
       } else if (job !== undefined) {
         this.pendingExits[kept++] = job;
@@ -2909,6 +2956,11 @@ export class Agent {
         const message = agentMessageNote(job);
         messages.push(message);
         events.push({ type: "context_note", text: message.content, reason: "background_exit" });
+        continue;
+      }
+      if (isWorkflowEnd(job)) {
+        messages.push(workflowEndNote(job));
+        events.push({ type: "context_note", text: job.text, reason: "background_exit" });
         continue;
       }
       if (!isSubagentExit(job)) {
@@ -2990,10 +3042,15 @@ export class Agent {
         continue;
       }
       if (isWorkflowEnd(job)) {
+        messages.push(workflowEndNote(job));
+        events.push({ type: "context_note", text: job.text, reason: "background_exit" });
+        continue;
+      }
+      if (isWorkflowWait(job)) {
         messages.push({
           role: "user",
           content: job.text,
-          note: { kind: NOTE_KIND.workflowEnd, id: job.runId },
+          note: { kind: NOTE_KIND.workflowWait, id: job.runId },
         });
         events.push({ type: "context_note", text: job.text, reason: "background_exit" });
         continue;

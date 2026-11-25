@@ -7,7 +7,7 @@ import {
   WORKFLOW_PROMPT_MAX_CHARS,
   WORKFLOW_REASON_MAX_CHARS,
 } from "@tentacle/protocol";
-import type { ChatMessage } from "../src/model.ts";
+import { type ChatMessage, NOTE_KIND } from "../src/model.ts";
 import {
   capWorkflowInputs,
   workflowEndBody,
@@ -188,6 +188,19 @@ describe("workflowLoadNotes — a run a crash left open is closed honestly, once
       note: { kind: "subagent_lost", id: "wf-1" },
     };
     expect(workflowLoadNotes([start("wf-1")], [other])).toHaveLength(1);
+  });
+
+  test("T9 a WAIT note for the run is not its end: the load still closes it interrupted", () => {
+    // docs/feat/workflow-run-awareness.md S6: the wake note names the run's id.
+    const wait: ChatMessage = {
+      role: "user",
+      content:
+        "[workflow wf-3 task: step 1/1 merge waits for the user (since 12:04) · 0/1 ok · 0 tok]",
+      note: { kind: NOTE_KIND.workflowWait, id: "wf-3" },
+    };
+    const notes = workflowLoadNotes([start("wf-3")], [wait]);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.note).toEqual({ kind: NOTE_KIND.workflowInterrupted, id: "wf-3" });
   });
 
   test("a step/end whose start is not in the segment is ignored; several runs keep start order", () => {
