@@ -23,3 +23,4 @@ export * from "./hooks.ts";
 export * from "./round-plan.ts";
 export * from "./capabilities.ts";
 export * from "./workflow-driver.ts";
+export * from "./workflow-status-line.ts";

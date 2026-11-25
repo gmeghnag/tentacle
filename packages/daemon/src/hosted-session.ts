@@ -59,6 +59,10 @@ import {
   NO_CAPABILITIES,
   applyCapabilityOp,
   sessionTitle,
+  workflowStatusLine,
+  workflowUserWait,
+  workflowWaitNote,
+  workflowWaitWakeDue,
 } from "@tentacle/agent";
 import {
   AGENT_MESSAGE_MAX_CHARS,
@@ -486,7 +490,29 @@ export interface SessionPersistence {
 export interface SessionWake {
   /** One line per wake started (the session id only — never a job's command). */
   readonly onAudit?: (line: string) => void;
+  /** The workflow user-wait wake's clock (defaults below; tests inject it). */
+  readonly workflowWait?: WorkflowWaitTiming;
 }
+
+/**
+ * When a workflow step that waits for the user wakes the agent
+ * (docs/feat/workflow-run-awareness.md Design (b), S6): only an ask still
+ * pending after `graceMs` with no client attached, each ask once, a run at
+ * most once per `minGapMs`.
+ */
+export interface WorkflowWaitTiming {
+  /** Default `WORKFLOW_WAIT_GRACE_MS`. */
+  readonly graceMs?: number;
+  /** Default `WORKFLOW_WAIT_MIN_GAP_MS`. */
+  readonly minGapMs?: number;
+  readonly setTimeout?: (fn: () => void, ms: number) => unknown;
+  readonly clearTimeout?: (handle: unknown) => void;
+}
+
+/** An ask answered inside this (a person at the screen, an auto-answer) never wakes. */
+export const WORKFLOW_WAIT_GRACE_MS = 30_000;
+/** One run wakes the agent for a wait at most once per this. */
+export const WORKFLOW_WAIT_MIN_GAP_MS = 10 * 60_000;
 
 /**
  * `serve` and the in-process worker only (docs/feat/cron-tool.md D1): the
@@ -1121,6 +1147,23 @@ export class HostedSession {
   private lastSchedules: readonly ScheduleRow[] = [];
   /** The last `workflows` list emitted: what the cut records. */
   private lastWorkflows: readonly WorkflowRow[] = [];
+  /**
+   * The ONE user-wait timer (docs/feat/workflow-run-awareness.md S6): the wait
+   * key it was armed for, its run, and when that wait began (the note's `since`).
+   */
+  private waitTimer: {
+    readonly key: string;
+    readonly runId: string;
+    readonly since: number;
+    readonly handle: unknown;
+  } | null = null;
+  /** The user wait the last publish showed: a timer is armed only when it CHANGES. */
+  private waitSeen: string | undefined;
+  /**
+   * Per run still live: the wait keys that woke the agent, and when it last
+   * did. Memory only, dropped at the run's end: a run never survives a restart.
+   */
+  private readonly waitWakes = new Map<string, { readonly woken: Set<string>; at: number }>();
   /** The workflow driver (docs/feat/agent-workflows.md D3); absent on a tunnelled session. */
   private workflows: WorkflowDriver | undefined;
   /** The fired turns that have not ended, by turnId → the job that fired each (its failure budget). */
@@ -2632,14 +2675,21 @@ export class HostedSession {
       release: (agentId) => {
         this.spawnTurns.delete(agentId);
       },
+      currentTurn: () => (this.compacting ? undefined : (this.activeTurnId ?? undefined)),
       publish: (rows) => this.publishWorkflows(rows),
       // The end note rides the exits queue (told at the next turn) and wakes.
       ended: (runId, note) => {
         this.spawnTurns.delete(runId);
+        this.waitWakes.delete(runId);
         this.session.noteWorkflowEnd(runId, note);
         this.kickWake();
       },
     });
+    // The model's live line (docs/feat/workflow-run-awareness.md): read per
+    // request, from the very rows the clients are shown; never in the history.
+    this.session.setStatusLine(() =>
+      this.closed ? undefined : workflowStatusLine(this.lastWorkflows),
+    );
     // The starting list is STATE, not an event: nobody is attached yet (this runs
     // inside session creation), so it is set for the snapshot without an emit or a
     // cut. A cut here committed before the session's open had finished and lost
@@ -2670,6 +2720,103 @@ export class HostedSession {
     if (this.controller === null) {
       this.recordCut(null);
     }
+    this.trackWorkflowWait();
+  }
+
+  // --- the workflow user-wait wake (docs/feat/workflow-run-awareness.md S6) ---
+
+  private waitTiming(): { readonly graceMs: number; readonly minGapMs: number } {
+    const t = this.wake?.workflowWait;
+    return {
+      graceMs: t?.graceMs ?? WORKFLOW_WAIT_GRACE_MS,
+      minGapMs: t?.minGapMs ?? WORKFLOW_WAIT_MIN_GAP_MS,
+    };
+  }
+
+  /**
+   * After every publish: a user wait that APPEARS arms one timer (a grace); one
+   * that goes or changes disarms it. A publish that keeps the same wait changes
+   * nothing — so a wait disarmed at its fire is never re-armed by it.
+   */
+  private trackWorkflowWait(): void {
+    if (this.wake === undefined || this.closed) {
+      return;
+    }
+    const wait = workflowUserWait(this.lastWorkflows);
+    if (wait?.key === this.waitSeen) {
+      return;
+    }
+    this.waitSeen = wait?.key;
+    this.disarmWorkflowWait();
+    if (wait !== undefined) {
+      const at = this.now();
+      this.armWorkflowWait(wait.key, wait.runId, at, this.waitTiming().graceMs);
+    }
+  }
+
+  private armWorkflowWait(key: string, runId: string, since: number, ms: number): void {
+    const set = this.wake?.workflowWait?.setTimeout ?? defaultSetTimeout;
+    const handle = set(() => this.fireWorkflowWait(), ms);
+    this.waitTimer = { key, runId, since, handle };
+  }
+
+  private disarmWorkflowWait(): void {
+    if (this.waitTimer === null) {
+      return;
+    }
+    (this.wake?.workflowWait?.clearTimeout ?? defaultClearTimeout)(this.waitTimer.handle);
+    this.waitTimer = null;
+  }
+
+  /**
+   * The grace ended: the pure gate decides on what holds NOW (the rows, the
+   * attached clients, the slot), never on the armed copy. A wake queues the
+   * note on the exits queue (it counts in `pendingExitCount`) and lets the one
+   * waker start the turn.
+   */
+  private fireWorkflowWait(): void {
+    const armed = this.waitTimer;
+    if (armed === null) {
+      return;
+    }
+    this.waitTimer = null;
+    const wait = workflowUserWait(this.lastWorkflows);
+    const record = this.waitWakes.get(armed.runId);
+    const timing = this.waitTiming();
+    const now = this.now();
+    const due = workflowWaitWakeDue({
+      armedKey: armed.key,
+      currentKey: wait?.key,
+      attachedCount: this.attachedCount,
+      woke: record?.woken.has(armed.key) ?? false,
+      lastWakeAt: record?.at,
+      now,
+      minGapMs: timing.minGapMs,
+      enabled: this.wake !== undefined,
+      busy: this.running,
+      lastEndBad: this.lastEndBad,
+      closed: this.closed,
+    });
+    if (due.kind === "rearm") {
+      this.armWorkflowWait(armed.key, armed.runId, armed.since, timing.graceMs);
+      return;
+    }
+    if (due.kind === "rearm_at") {
+      this.armWorkflowWait(armed.key, armed.runId, armed.since, Math.max(0, due.at - now));
+      return;
+    }
+    // `wake` implies the current wait IS the armed one.
+    if (due.kind === "disarm" || wait === undefined) {
+      return;
+    }
+    const woken = record?.woken ?? new Set<string>();
+    woken.add(armed.key);
+    this.waitWakes.set(armed.runId, { woken, at: now });
+    this.session.noteWorkflowWait(
+      armed.runId,
+      workflowWaitNote(wait, armed.since, zoneOrDefault(this.zone())),
+    );
+    this.kickWake();
   }
 
   /**
@@ -4972,6 +5119,7 @@ export class HostedSession {
       clearTimeout(this.wakeKick);
       this.wakeKick = null;
     }
+    this.disarmWorkflowWait();
     // The table itself stays (an archive keeps it frozen, D6); only the timer goes.
     this.disarmSchedules();
     if (this.activeTurnId !== null) {

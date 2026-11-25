@@ -74,6 +74,7 @@ import {
   type SessionPushObserver,
   type SessionSchedules,
   type TurnErrorPolicy,
+  type WorkflowWaitTiming,
 } from "./hosted-session.ts";
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
 import { fromWireCapabilities, toSessionSkills, toSessionTools } from "./mapping.ts";
@@ -413,6 +414,8 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * daemons and the worker never pass it: off.
    */
   readonly wakeOnJobExit?: boolean;
+  /** With `wakeOnJobExit`: the workflow user-wait wake's clock (default: real timers, 30 s / 10 min). */
+  readonly workflowWait?: WorkflowWaitTiming;
   /**
    * `serve` and the in-process worker only (docs/feat/cron-tool.md D1, owner
    * Q4): every session keeps the agent's scheduled wakes and fires them by
@@ -1645,7 +1648,10 @@ export class SessionHost {
         ...(this.opts.titleTimeoutMs !== undefined ? { timeoutMs: this.opts.titleTimeoutMs } : {}),
       },
       this.opts.wakeOnJobExit
-        ? { ...(this.opts.onAudit ? { onAudit: this.opts.onAudit } : {}) }
+        ? {
+            ...(this.opts.onAudit ? { onAudit: this.opts.onAudit } : {}),
+            ...(this.opts.workflowWait ? { workflowWait: this.opts.workflowWait } : {}),
+          }
         : undefined,
       log,
       agentJobs,

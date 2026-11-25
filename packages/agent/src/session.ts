@@ -129,6 +129,12 @@ export class Session {
    * own read (`takeVoice` is idempotent per round).
    */
   private pendingVoice: VoiceMark | null = null;
+  /**
+   * The live status line of every request this session's turns build
+   * (`RunOptions.statusLine`, docs/feat/workflow-run-awareness.md). Held HERE,
+   * not by the agent, so `replaceAgent` keeps it.
+   */
+  private statusLine: (() => string | undefined) | undefined;
 
   constructor(agent: Agent, id?: string, options: SessionOptions = {}) {
     this.agent = agent;
@@ -167,6 +173,15 @@ export class Session {
    */
   currentAgent(): Agent {
     return this.agent;
+  }
+
+  /**
+   * Give every request of this session's turns a live status line (`fn`,
+   * read once per request built; `undefined` → none), or stop (`undefined`).
+   * The line is on the request only, never in the history.
+   */
+  setStatusLine(fn: (() => string | undefined) | undefined): void {
+    this.statusLine = fn;
   }
 
   /** A snapshot of durable state, for persisting or inspecting the session. */
@@ -231,6 +246,7 @@ export class Session {
         ...(opts.beforeRun !== undefined ? { beforeRun: opts.beforeRun } : {}),
         ...(opts.voice !== undefined ? { voice: opts.voice } : {}),
         voiceMark: () => this.takeVoice(),
+        ...(this.statusLine !== undefined ? { statusLine: this.statusLine } : {}),
       });
     } finally {
       // Persist once the turn settles (normal end, error, or abort), so a
@@ -251,6 +267,11 @@ export class Session {
    */
   noteWorkflowEnd(runId: string, text: string): void {
     this.agent.noteWorkflowEnd(runId, text);
+  }
+
+  /** A workflow step waits for the user, unattended (S6): told at the next turn's start, on the CURRENT agent. */
+  noteWorkflowWait(runId: string, text: string): void {
+    this.agent.noteWorkflowWait(runId, text);
   }
 
   noteUserToSubagent(agentId: string, text: string): void {
@@ -309,6 +330,7 @@ export class Session {
           ? { beforeResumedCall: opts.beforeResumedCall }
           : {}),
         voiceMark: () => this.takeVoice(),
+        ...(this.statusLine !== undefined ? { statusLine: this.statusLine } : {}),
       });
     } finally {
       this.persist();
