@@ -1,9 +1,9 @@
 # feat/serve-mcp-server — `tentacle serve` exposes an MCP server
 
-> **Status:** implementation — **NOT approved** (owner questions below)
+> **Status:** implementation — **APPROVED (owner answers 2026-11-25)** (rev. 2: Q1–Q6 answered; MCP tasks and caller asks into slice 1; re-sliced)
 > **Branch:** `feat/serve-mcp-server`
-> **Size:** L → slices (only slice 1 planned in full, the rest a ranked backlog) · **Blast:** load-bearing for S1a/S1c (a second external session entry: AGENTS §7 "a remote caller is not trusted", single session path, single broker); contained for S1b · **Suited:** Opus plans; per sub-slice Sonnet (pure, cheap to iterate) or Opus (touches §7); mandatory fresh-context Opus review
-> **Changelog:** `changelog.d/serve-mcp-server.added.md` — "**`serve` is an MCP server.** Claude Code (or any MCP client) can start a tentacle session on your serve, steer it, read its status and result, and cancel it — with a dedicated MCP token; your phone still answers its approvals."
+> **Size:** L → slices (slice 1 = M1–M5 planned in full, the rest a ranked backlog) · **Blast:** load-bearing for M2–M4 (a second mount on the external session entry: AGENTS §7 "a remote caller is not trusted", single session path, single broker, durable task records); contained for M1 · **Suited:** Opus plans; Sonnet executes pure / cheap-to-iterate slices, Opus the §7 ones; mandatory fresh-context Opus review
+> **Changelog:** `changelog.d/serve-mcp-server.added.md` — "**`serve` is an MCP server.** Claude Code (or any MCP client) can start a tentacle session on your serve, steer it, follow it as an MCP task, read its result and cancel it — with a dedicated MCP token; your phone answers its approvals (or, if you allow it, the caller answers one-time tool approvals)."
 
 ## Context
 
@@ -20,18 +20,22 @@ to the phone. Today tentacle is only an MCP **client** (`packages/mcp/`,
 hands a piece of work to a tentacle session on the owner's serve (cheaper model,
 the project's tools, visible on the phone), goes on, and later reads the
 result. That needs exactly four verbs — start, send (steer), status (+ result),
-cancel — plus "which of my sessions exist". Everything else (answering asks from
-Claude Code, a push to the phone, workflows, a full event feed, the owner's own
-sessions, MCP tasks) is additive on top of those and is ranked in the backlog.
+cancel — plus "which of my sessions exist". Per the owner's answers (Q4, Q5),
+slice 1 also carries MCP tasks (negotiated) and caller-answered asks
+(configurable). Everything else (a push to the phone, workflows, a full event
+feed, the owner's own sessions) is additive and ranked in the backlog.
 
 **Constraints that shape it:**
 
 - **feat/a2a** (on its own branch, mid-execution; `git show
   feat/a2a:docs/feat/a2a.md`) adds the same kind of thing for A2A: a
-  dedicated-token external entry on `serve` (`a2a/http.ts` hooked into
-  `ws-server.ts` `fetch`, S9 — not built yet), an in-process adapter that drives
-  sessions over `createChannelPair()` + a real `Connection` (S4 — not built
-  yet), and the **work-units seam** (`HostedSession.workUnits()`,
+  dedicated-token external entry on `serve`, an in-process adapter that drives
+  sessions over `createChannelPair()` + a real `Connection`, caller-answered
+  asks, and the **work-units seam**. Per the owner's decision of 13:20 (Q1
+  here; recorded in a2a.md "Owner decision 2026-11-25 ~13:20"), the route, the
+  session driver, the token check, the caller identity and the work-units
+  projection land **protocol-neutral in `packages/daemon/src/external/`**, with
+  only the A2A wire in `a2a/`. Also part of feat/a2a: the work-units seam (`HostedSession.workUnits()`,
   `feat/a2a:packages/daemon/src/hosted-session.ts:2567`, built in S2) with one
   state vocabulary for turns and workflow runs (`packages/core/src/work-unit.ts`,
   S0). This task REUSES all three; there must never be a second external-entry
@@ -72,10 +76,44 @@ sessions, MCP tasks) is additive on top of those and is ranked in the backlog.
 - **Progress**: `params._meta.progressToken` → `notifications/progress
   {progressToken, progress, total?, message?}` on that request's own response
   stream, `progress` strictly increasing.
-- **Tasks** are an **extension** (`io.modelcontextprotocol/tasks`,
-  github.com/modelcontextprotocol/ext-tasks), states `working |
-  input_required | completed | failed | cancelled` — the same shape as our
-  `WorkUnitState`. Claude Code documents support on 2026-07-28 (v2.1.304+).
+- **Tasks** are an **extension**, stable for 2026-07-28
+  (https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks.html,
+  repo github.com/modelcontextprotocol/ext-tasks), `tools/call` only:
+  - The client declares it **per request**:
+    `_meta["io.modelcontextprotocol/clientCapabilities"].extensions["io.modelcontextprotocol/tasks"] = {}`.
+    The server declares it in `server/discover` `capabilities.extensions`.
+  - The **server alone decides**, per request, whether to answer with a
+    task. It MUST NOT send a task to a client that did not declare the
+    extension (if it cannot answer without one: `-32021` +
+    `data.requiredCapabilities`).
+  - The answer is `CreateTaskResult {resultType:"task", taskId, status,
+    statusMessage?, createdAt, lastUpdatedAt, ttlMs (int|null),
+    pollIntervalMs?}`. It is returned **only once the task is durably
+    created**.
+  - `tasks/get {taskId}` → the task. At `input_required` it adds
+    `inputRequests`. At `completed` it adds `result` (the `CallToolResult`,
+    `isError:true` included). At `failed` it adds `error` (**JSON-RPC errors
+    only**, never `isError`).
+  - `tasks/update {taskId, inputResponses}` → an empty ack, eventually
+    consistent. `tasks/cancel {taskId}` → an empty ack, cooperative.
+  - There is **no `tasks/list` and no `tasks/result`**. An unknown taskId →
+    `-32602`.
+  - States are `working | input_required | completed | failed | cancelled`:
+    our `WorkUnitState` one-to-one.
+  - `inputRequests` is a map `key → {method:"elicitation/create",
+    params:{mode:"form", message, requestedSchema}}` (keys never reused).
+    `inputResponses` maps each key to an `ElicitResult {action, content}`.
+  - `notifications/tasks` is optional and only on a `subscriptions/listen`
+    stream. **`notifications/progress` MUST NOT be sent for tasks.**
+  - The extension is not defined for legacy `initialize`-era clients (those
+    pages are silent; the 2025-11-25 tasks semantics differ and are NOT
+    implemented here).
+  - Claude Code documents tasks on 2026-07-28 (v2.1.304+). The TS client is
+    `@modelcontextprotocol/client` **2.4.0** + `@modelcontextprotocol/ext-tasks`:
+    `createTaskSessionFromClient(client)`, then `session.callTool(...)` → a
+    `ToolExecution` (`kind === "task"`, `settle()`, `cancel()`), and
+    `session.task(taskId)` re-attaches
+    (https://modelcontextprotocol.github.io/ext-tasks/typescript/).
 - **Elicitation** is no longer a server push: a `tools/call` result
   `resultType:"input_required"` + `inputRequests`, the client retries (MRTR).
 - **Claude Code client limits** (code.claude.com/docs/en/mcp): a call with **no
@@ -111,327 +149,400 @@ Every non-upgrade request is 401/426 (`packages/daemon/src/ws-server.ts:371-378`
 
 ## Implementation
 
-*— claude-opus-5-5, 2026-11-25*
+*— claude-opus-5-5, 2026-11-25 (rev. 2: owner answers Q1–Q6; MCP tasks negotiated per request with the non-blocking tools as the fallback; caller asks configurable, reusing A2A's code; no extraction slice; re-sliced M1–M5)*
 
-### Load-bearing assumption
+### Owner answers
 
-**An in-process client — a real `Connection` on one end of
-`createChannelPair()` — drives the SAME `SessionHost` a phone does, and its
-session is listed to, answerable by and cancellable from the owner's phone with
-no new daemon path.** Already PROVED for A2A by `.tentacle/tmp/a2a/seam.ts`
-(`feat/a2a:docs/feat/a2a.md`, Load-bearing assumption, re-run green before
-S0–S3). The MCP adapter is the same construction with a different HTTP face, so
-it inherits the proof; the S1c executor re-runs `seam.ts` first, and S1c's own
-test pins it for an MCP-created session (phone answers the ask, phone cancels).
+*2026-11-25 ~13:25, verbatim as relayed by the orchestrator:*
 
-The second assumption, specific to MCP: **one stateless POST per tool call is
-enough for every slice-1 tool** — none needs a server→client request mid-call
-(no elicitation, no sampling). True by design below: start/send/cancel are acks
-(`session/prompt` resolves at acceptance, `PromptResultSchema`,
-`packages/protocol/src/session.ts:527-533`), status is a bounded read.
+1. **Q1 one protocol-neutral external entry** — «YES (the decision is now
+   recorded in docs/feat/a2a.md on feat/a2a; slice 1 mounts on external/ once
+   feat/a2a is merged — no extraction slice).»
+2. **Q2 token** — «dedicated MCP token (--mcp-token-command, opens only /mcp) — yes.»
+3. **Q3 implementation** — «hand-written server, official SDK v2 client only as
+   a pinned devDependency for the e2e — yes.»
+4. **Q4 long calls** — «MCP tasks subito, ma per chi non lo supporta i tool
+   tornano subito; session_status {waitSeconds ≤ 120} aspetta con un progresso
+   ogni 15 s» — implement MCP tasks in slice 1 for clients that declare support
+   (negotiated), with the non-blocking tools + session_status wait as the
+   fallback for the others; verify against the current spec (fetch it) and the
+   SDK v2 client.
+5. **Q5 who answers asks** — configurable like A2A (owner default / both, first
+   answer wins, never a lasting approval from the caller), REUSING A2A's
+   caller-asks code.
+6. **Q6 scope** — only the sessions the MCP caller created (as recommended).
+
+Consequences in this revision:
+
+- **Q1:** the S1a extraction is gone. Slice M2 mounts on `external/`.
+- **Q4:** MCP tasks move from backlog B6 into slice 1 (M4). Spec and SDK
+  were re-read 2026-11-25 (Context).
+- **Q5:** caller asks move from backlog B1 into slice 1 (M3).
+- **SDK:** the e2e needs the ext-tasks client package beside
+  `@modelcontextprotocol/client`. Both are official and test-only, so this is
+  inside Q3, not a new choice.
+
+### Load-bearing assumptions
+
+1. **An in-process client — a real `Connection` on one end of
+   `createChannelPair()` — drives the SAME `SessionHost` a phone does.** Its
+   session is listed to, answerable by and cancellable from the owner's phone,
+   with no new daemon path. A2A PROVED this with `.tentacle/tmp/a2a/seam.ts`
+   (`feat/a2a:docs/feat/a2a.md`, Load-bearing assumption, re-run green before
+   each of S0–S3). MCP reuses that very driver (`external/session-driver.ts`),
+   so the proof carries over. M2 re-runs `seam.ts` first, and M2's own test
+   pins it for an MCP-created session.
+2. **No slice-1 call needs a server→client request mid-call.** Each is one
+   stateless POST.
+   - Start, send, cancel and answer are acks: `session/prompt` resolves at
+     acceptance (`PromptResultSchema`,
+     `packages/protocol/src/session.ts:527-533`).
+   - Status is a bounded read.
+   - A task's input is pulled by `tasks/get` and answered by `tasks/update`
+     (spec: no independent requests on a response stream).
+3. **(M4, prove FIRST) A turn's start can be made durable before the
+   `CreateTaskResult` is returned.** The spec says MUST. `SessionPersister.flush(id)`
+   resolves once the latest write scheduled for `id` has settled
+   (`packages/daemon/src/session-persister.ts:585-596`). AGENTS §7 lists
+   daemon writes at committed rounds, turn ends and compactions — **not
+   explicitly at a turn's start**. M4's first step is a 10-line repro:
+   `session/prompt` → see `turn_start` → `flush(id)` → kill (no stop) →
+   reload → `workUnits()` shows that turnId (a turn cut mid-run is closed as
+   `failed`; that is still a task, not `-32602`).
+   - **If it holds:** the driver's `durable(sessionId, turnId)` = "await the
+     `turn_start` update for that turn, then `flush`".
+   - **If it does not:** STOP. M4 then adds a write at turn start through
+     `SessionPersister.schedule` (a daemon write inside a turn, §7), and the
+     plan is revised before code. This is a design step, not an owner choice.
 
 ### Preconditions
 
-- **One session path.** A socket is `new Connection(channel, sessionHost, …)`
-  (`ws-server.ts:391-399`); `createChannelPair()` gives the in-process pair
-  (`packages/transport/src/channel.ts:77`). Every verb the MCP tools need is an
-  existing method: `session/open` `session/prompt` `session/enqueue`
-  `session/cancel` `session/detach` `session/list`
-  (`packages/protocol/src/methods.ts:134-160,290`).
-- **Steering exists and is retry-safe:** `session/enqueue{sessionId, id,
-  turnId, text}` injects into the RUNNING turn at the next round boundary; `id`
-  is an idempotency key and `turnId` binds it to that exact turn
-  (`session.ts:1955-1976`).
-- **`session/prompt` is an ack and idempotent by `turnId`** (`session.ts:527-533`):
-  a retried id returns the same turn, with `ended` if it finished.
-- **Asks wait for a client** when none is attached; denied at once only when a
-  client IS attached and none declared `permission_request`
-  (`hosted-session.ts:1652-1662`, re-checked `:1689-1702`) ⇒ the adapter
-  declares `permission_request` and never answers (owner mode).
-- **`askedOn`** lists only attachments with `ClientInfo.host` (`hosted-session.ts:1672-1682`)
-  ⇒ the adapter sends no `host`.
-- **Hooks trust** asks the prompting client (`connection.ts:1179-1195`) ⇒ the
-  adapter answers `{trusted:false}` (AGENTS §7: no lasting approval from a remote).
-- **Work units (feat/a2a S0+S2):** `HostedSession.workUnits()` returns the ended
-  table + the running turn (`waiting:permission` when an ask is pending) + live
-  runs (`feat/a2a:…/hosted-session.ts:2567`), surviving restart, compaction,
-  reset, `/clear` (the `unit_end` carry). `WorkUnit.result` = the final
-  round's text, ≤ 16 KiB (`core/src/work-unit.ts`, S0/S1).
-- **Read-only follower exists:** `session/watch` / `watch_next` (long-poll,
-  bounded queue, never an attachment, never offered an ask;
-  `packages/protocol/src/watch.ts:1-23,145-190`) — the seam for the events
-  feed (backlog B4), not needed in slice 1.
-- **Exposure today:** `--token`/`--token-command` (`packages/cli/src/flags.ts:74,614-625`),
-  `tokensMatch` constant-time (`ws-server.ts:201-208`), browser `Origin`
-  default-denied (`ws-server.ts:218-223`), loopback unless a token
-  (`ws-server.ts:291-295`); `serve` builds the server at
-  `packages/cli/src/serve.ts:982-994`.
-- **Session caps:** `DEFAULT_MAX_SESSIONS = 64`, `DEFAULT_MAX_DETACHED_SESSIONS
-  = 16` (`packages/daemon/src/session-host.ts:96-97`).
-- **No protocol change:** the adapter is a protocol CLIENT; `/mcp` is an HTTP
-  face, not the tentacle wire ⇒ no `protocol.d/` note, no `PROTOCOL_VERSION`
-  bump, no persisted-format change (sessions persist through serve's
-  `SessionPersister` like any other).
+- **feat/a2a is merged to `main`**, and `main` is merged into this branch
+  before M1. From it this task USES (M2 checks each one before any code):
+  - `external/route.ts` — mounts, the dedicated-token check, caller identity
+    `[A-Za-z0-9_]{1,32}`.
+  - `external/session-driver.ts` — open/create/reopen, prompt, cancel, detach,
+    the caller-answer path; hooks `{trusted:false}`; `permission_request`
+    declared; no `host`.
+  - The caller-asks pieces: `PendingAsk`, `AskMode`, `callerMayAnswer`,
+    `onceOption`, `callerOptions`, `askMessage`, today in `a2a/mapping.ts`
+    `:173-214` (S3), plus S5's `PermissionKind → once | owner-only` table in
+    `core/src/permission.ts`.
+  - The work-units projection and the archived read-only reader (A2A S6/S7).
+
+  A neutral piece that the merge still leaves under `a2a/` is **moved** (move
+  only, re-exported from `a2a/`, A2A tests unchanged) as M2's step 0, and the
+  move is recorded in Execution. This is the rule a2a.md itself sets.
+- **One session path:** a socket is `new Connection(channel, sessionHost, …)`
+  (`ws-server.ts:391-399`); `createChannelPair()`
+  (`packages/transport/src/channel.ts:77`). The verbs are existing methods:
+  `session/open` `prompt` `enqueue` `cancel` `detach` `list`
+  `resolve_permission` (`packages/protocol/src/methods.ts:134-160,290`).
+- **Steering is retry-safe:** `session/enqueue{sessionId, id, turnId, text}`
+  injects into the RUNNING turn. `id` is an idempotency key, and `turnId`
+  binds the steer to that turn (`session.ts:1955-1976`).
+- **`session/prompt` is idempotent by `turnId`** (`session.ts:527-533`).
+  `TurnIdSchema` ≤ 128 chars, never `wake-…` (`session.ts:439,452`).
+- **Asks wait for a client** when none is attached. They are denied at once
+  only when a client IS attached and none declared `permission_request`
+  (`hosted-session.ts:1652-1662`, re-checked `:1689-1702`).
+- **First answer wins**: a late answer → `PermissionNotPending`, no effect. The
+  push grace keeps the phone silent when the caller answers in time
+  (`push-rules.ts:14-28`).
+- **`workUnits()`** (`feat/a2a:…/hosted-session.ts:2567`) returns ended units
+  (they survive restart, compaction, reset and `/clear` through the
+  `unit_end` carry), the running turn (`waiting:permission` with a pending
+  ask) and live runs. `result` = the final round's text, ≤ 16 KiB.
+- **Exposure:** `--token`/`--token-command` resolver (`packages/cli/src/flags.ts:74,614-625`),
+  `tokensMatch` (`ws-server.ts:201-208`), `serve` builds the server at
+  `packages/cli/src/serve.ts:982-994`. Caps: 64 sessions, 16 detached
+  (`session-host.ts:96-97`).
+- **No protocol change:** the adapter is a protocol CLIENT, and `/mcp` is an
+  HTTP face. So no `protocol.d/` note, no `PROTOCOL_VERSION` bump, no
+  persisted-format change (no MCP store: a task is a projection of a work
+  unit, the A2A rule).
 
 ### Design
 
 ```
-Claude Code ─POST /mcp (Bearer MCP token)─► Bun.serve fetch (ws-server.ts)
-                                             │ external/route.ts  ← ONE external entry (shared with /a2a):
-                                             │   path → Origin(403) → bearer→caller(401) → 1 MiB cap(413) → audit
-                                             ▼
-                                         mcp/http.ts ── mcp/wire.ts (pure: JSON-RPC, dual-era, headers, schemas)
-                                             │ tools/call
-                                             ▼
-                                         mcp/tools.ts ──► external/session-driver.ts (shared with A2A executor):
-                                             │              createChannelPair + Connection + RpcPeer, own namespace,
-                                             │              hooks false, asks never answered (owner mode), detach at end
-                                             │ status: host.get(id).workUnits()  (read-only seam, feat/a2a S2)
-                                             ▼
-                                         SessionHost ── HostedSession ── phone/TUI see the same session
+Claude Code ─POST /mcp (Bearer MCP token)─► Bun.serve fetch ─► external/route.ts (feat/a2a; ONE entry, mounts /a2a and /mcp)
+                                                                │ Origin 403 · bearer→caller 401 · 1 MiB 413 · audit
+                                                                ▼
+                                                          mcp/http.ts ── mcp/wire.ts (pure: dual-era JSON-RPC, headers, _meta caps, SSE)
+                                                                │
+                                         tools/call ────────────┼──────────── tasks/get · tasks/update · tasks/cancel
+                                                                ▼                         │
+                                                          mcp/tools.ts                    ▼
+                                                                │                  mcp/task-projection.ts (pure: WorkUnit → MCP task)
+                                                                ▼                         │
+                                     external/session-driver.ts (A2A's) ─► Connection ─► SessionHost ◄─ workUnits() (read-only)
+                                                                                                    ◄─ phone / TUI: same session
 ```
 
-**1. One external entry, two mounts (prerequisite, S1a).** A2A's plan hooks
-`a2a.handle(req)` into `fetch` before `authorize` (a2a.md Files 11–12). MCP must
-not add a sibling hook. The entry is a protocol-neutral module,
-`packages/daemon/src/external/route.ts`:
+**1. Mount.** `/mcp` is one `ExternalMount` on the A2A-built `external/route.ts`.
+Its callers are the MCP caller(s) only, so an A2A or WS token gets `401` here and
+the MCP token gets `401` on `/a2a` and on the WS route. A browser `Origin` gets
+`403` (the MCP spec's code), `WWW-Authenticate: Bearer` on `401`. With no MCP
+token, `/mcp` is not mounted and paths behave as today.
 
-```ts
-interface ExternalCaller { name: string /* [A-Za-z0-9_]{1,32} */; token: string; asks: "owner" | "both"; workflows: boolean }
-interface ExternalMount { path: string /* "/a2a", "/mcp" */; public?: (req) => Response | undefined /* the agent card */;
-                          callers: readonly ExternalCaller[]; handle(req: Request, caller: ExternalCaller): Promise<Response> }
-function externalEntry(req, mounts, audit): Promise<Response> | undefined  // undefined = not ours → today's path
-```
-
-Order inside it: path match → browser `Origin` refused (MCP: `403` per spec;
-A2A keeps its `401`) → bearer → caller by `tokensMatch` over that mount's
-callers only (`401` + `WWW-Authenticate: Bearer`, audit `<mount>-auth-failure`)
-→ body > 1 MiB → `413` → `handle`. A mount with no caller is not mounted (paths
-behave as today). A2A's caller rule (`[A-Za-z0-9_]{1,32}`, a2a.md S3 drift) is
-the shared one. **Coordination:** if feat/a2a's S9 is still unwritten when this
-is approved, its executor builds `external/route.ts` directly (Q1); else S1a
-extracts it from `a2a/http.ts` with A2A's tests unchanged and green.
-
-**2. MCP wire (pure, S1b) — `packages/daemon/src/mcp/wire.ts`.** Hand-written
-(Q3): the surface is small and our MCP client is hand-written too
-(`packages/mcp/`, deps only `core` + `zod`). Stateless, **dual-era**:
+**2. Wire (pure) — `packages/daemon/src/mcp/wire.ts`.** Hand-written, stateless,
+**dual-era**:
 
 | Inbound | Answer |
 |---|---|
-| `initialize` (legacy `2025-11-25`/`2025-06-18`/`2025-03-26`) | `{protocolVersion: the client's if supported else 2025-11-25, capabilities:{tools:{}}, serverInfo:{name:"tentacle", version}, instructions}`; **no `Mcp-Session-Id` minted** (optional in the legacy spec — verify in S1b against the 2025-11-25 transport page) |
-| `notifications/initialized`, any notification | `202`, no body |
-| `server/discover` (modern) | `{capabilities:{tools:{}}, supportedVersions:["2026-07-28", …legacy], serverInfo}` |
-| modern request (`_meta` version) | header `MCP-Protocol-Version` must equal `_meta` → else `400`; unsupported → `-32022 {supported}` |
-| `ping` | `{}` |
-| `tools/list` | the slice's tools, deterministic order, `inputSchema` + `outputSchema` (JSON Schema from zod, the repo's `json-schema.ts` export) + annotations (`readOnlyHint` on status/list) |
-| `tools/call` | `{content:[{type:"text", text: JSON}], structuredContent, isError?}`; a domain refusal is `isError:true` with a one-line reason; bad params → `-32602` |
-| unknown method | `-32601`; GET / DELETE → `405` |
+| `initialize` (legacy `2025-11-25`/`2025-06-18`/`2025-03-26`) | `{protocolVersion: the client's if supported else 2025-11-25, capabilities:{tools:{}}, serverInfo, instructions}`. **No `Mcp-Session-Id`**. Legacy requests never get a task. |
+| `server/discover` (modern) | `{capabilities:{tools:{}, extensions:{"io.modelcontextprotocol/tasks":{}}}, supportedVersions, serverInfo}` |
+| modern request | `MCP-Protocol-Version` header ≠ `_meta` version → `400`; unsupported → `-32022 {supported}`. Per-request caps read from `_meta["io.modelcontextprotocol/clientCapabilities"]`: `tasks` (extension declared) and `elicitationForm`. |
+| notification | `202`, no body |
+| `ping` / `tools/list` | `{}` / the tools, deterministic order, `inputSchema` + `outputSchema` + annotations |
+| `tools/call` | `CallToolResult` (`content` text JSON + `structuredContent`, `isError` for a domain refusal) or `CreateTaskResult` (below) |
+| `tasks/get` / `update` / `cancel` | below; a client that did not declare tasks on THAT request → `-32021` |
+| GET/DELETE, unknown method, bad params | `405` / `-32601` / `-32602` |
 
-Responses are `application/json`, except a `tools/call` carrying a
-`progressToken` on a tool that may hold (status with `waitSeconds`): then
-`text/event-stream` — `notifications/progress` every 15 s (`progress` = elapsed
-seconds, strictly increasing), then the result, then close. Closing the
-request (client disconnect) aborts the wait only — never the session's turn.
+Responses are `application/json`. The exception is a non-task
+`session_status` with `waitSeconds > 0` and a `progressToken`: it answers
+`text/event-stream`, with `notifications/progress` every 15 s (`progress` =
+elapsed seconds, strictly increasing), then the result, then close. A client
+disconnect ends only that wait.
 
-**3. Slice-1 tools (S1c) — `packages/daemon/src/mcp/tools.ts`.** Names are short
-(Claude Code shows `mcp__tentacle__session_start`). Every session the caller
-touches is `mcp-<caller>-<uuid>`; any other id → `isError` "unknown session"
-(never a hint that it exists).
+**3. Ids (self-locating — no index, survives restart).**
+- Session id: `mcp-<caller>-<s>`, where `<s>` is a UUID.
+- Turn id = task id: `<s>.<t>` (73 chars, ≤ 128, never `wake-`), where `<t>`
+  is a fresh UUID.
+- `tasks/get` resolves the session from the taskId by parsing it, under the
+  TOKEN's caller, so a forged taskId cannot reach another caller's session.
+- The task is then the unit with `id === taskId` in that session's
+  `workUnits()`, or in the archived read-only projection.
+- Not found or malformed → `-32602` (the same answer whether or not the
+  session exists: no oracle).
 
-| Tool | Input | Does | Output (structured) |
-|---|---|---|---|
-| `session_start` | `prompt` (1..64 KiB), `title?` (≤ 60) | `session/open{create, title:{text:"MCP: <title or first line>", source:"user"}}` on a fresh `mcp-<caller>-<uuid>` → `session/prompt{turnId}` | `{sessionId, turnId}` |
-| `session_send` | `sessionId`, `text`, `key?` (idempotency, ≤ 64) | idle → new turn (`session/open{reopen}` + `session/prompt`); a turn running → steer it (`session/enqueue{id:key, turnId: running}`) | `{turnId, steered}` |
-| `session_status` | `sessionId`, `turnId?`, `waitSeconds?` (0..120, default 0) | `workUnits()` projected; with a wait, returns early on the unit's next state change (signalled by the driver's held connection: `turn_end`, `permission_request`, `permission_resolved`) | `{state, waitingFor?, waiting?: "<ask title> — answer on your phone", reason?, result?, resultDropped?, turnId, units: [last 5 ended: {turnId, state, reason?}]}` |
-| `session_cancel` | `sessionId`, `turnId?` (default: the running one) | `session/cancel{sessionId, turnId}` | `{cancelled: turnId}` or `isError` "nothing running" |
-| `session_list` | — | `session/list` filtered to `mcp-<caller>-` | `[{sessionId, title, state, updatedAt}]` (≤ 50, newest first) |
+**4. Tools.** Every session id outside the caller's `mcp-<caller>-` prefix →
+`isError` "unknown session".
 
-`state` is the `WorkUnitState` word (`working | waiting | completed | failed |
-canceled`) — the same vocabulary A2A projects, and the same an MCP-tasks
-projection would use (B7). `result` is only the final round's text: the token
-saving A2A chose, and what keeps one status call far under Claude Code's 25k
-output cap.
+| Tool | Input | Does | Task-capable client | Other client |
+|---|---|---|---|---|
+| `session_start` | `prompt` (1..64 KiB), `title?` (≤ 60) | `session/open{create, title:"MCP: …"}` on a fresh `mcp-<caller>-<s>` → `session/prompt{turnId:<s>.<t>}` | `CreateTaskResult` (taskId = turnId, `working`), returned after `durable()` (assumption 3) | `{sessionId, turnId}` at once |
+| `session_send` | `sessionId`, `text`, `key?` (≤ 64) | idle → new turn (`open{reopen}` + `prompt`); a turn running → steer it (`enqueue{id:key}`) | new turn → `CreateTaskResult`; a steer → plain `{turnId, steered:true}` (no new unit) | `{turnId, steered}` |
+| `session_status` | `sessionId`, `turnId?`, `waitSeconds?` (0..120) | `workUnits()` projected; a wait returns early on the unit's next change (`turn_end`, `permission_request`, `permission_resolved` on the driver's held attachment) | plain result (works for tasks too) | same; SSE progress when waiting |
+| `session_answer` | `sessionId`, `requestId`, `decision: allow\|deny`, `message?` | only with `--mcp-asks both`, only a caller-answerable ask: `resolve_permission` with that ask's own `*_once` option | plain | plain |
+| `session_cancel` | `sessionId`, `turnId?` | `session/cancel{sessionId, turnId}` | plain | plain |
+| `session_list` | — | `session/list` filtered to the prefix, ≤ 50 newest | plain | plain |
 
-**4. Session driver (S1c, shared with A2A S4) —
-`packages/daemon/src/external/session-driver.ts`.** Owns, per live
-external-caller session, ONE held in-process attachment: built on first use
-(`initialize{clientInfo:{name:"mcp"|"a2a"}, no host, updates incl.
-permission_request}`; `hooks/trust` → `{trusted:false}`; any other inbound
-request → `MethodNotFound`), kept while a turn runs (so the detached cap and
-idle TTL never archive a session mid-turn on our account, and the status
-waiter has its signal), released with `session/detach` at the turn's end + 60 s
-grace (a follow-up `send` reuses it). Never sent: `resolve_permission` (owner
-mode), `set_auto_accept`, `set_capability`, `update_settings`, `skill`,
-`session/delete`, `session/clear`. **Coordination:** if A2A S4 is unwritten at
-approval, its executor writes this module protocol-neutral and A2A's executor
-uses it (Q1); else S1c extracts it from `a2a/executor.ts`.
+The status output is `{turnId, state, waitingFor?, statusMessage?, asks?:
+[{requestId, title, options:["allow","deny"]}] (only caller-answerable, only in
+both), result?, resultDropped?, recent:[last 5 ended {turnId, state,
+reason?}]}`. `result` is the final round's text only (token saving, far under
+Claude Code's 25k cap).
 
-**5. Asks (slice 1 = owner mode only).** An MCP session's asks go to the owner
-exactly like a phone session's: replayed on the phone, pushed after the grace
-(`push-rules.ts:14-28`; the adapter is not a registered device, so it never
-suppresses a push). `session_status` says `waiting` + the ask's title + "answer
-on your phone". `--mcp-asks both` (Claude Code answers `tool` asks with a
-`*_once` decision, through A2A S5's kind table) is backlog B1 — it reuses
-`callerMayAnswer`/`onceOption` (`feat/a2a:…/a2a/mapping.ts:173-184`) unchanged.
+**5. Task projection (pure) — `packages/daemon/src/mcp/task-projection.ts`.**
+The A2A rules (`a2a/mapping.ts` `projectStatus`) with MCP words. The
+"answerable?" decision is the SHARED `callerMayAnswer` + kind table, never a
+copy:
 
-**6. Auth (Q2).** A dedicated **MCP token** (`--mcp-token` /
-`--mcp-token-command`, the same resolver as `--token`, `flags.ts:614-625`),
-caller `default`. It opens `/mcp` only — not the WS route, not `/a2a`; the WS
-token does not open `/mcp` either. Reason: Claude Code stores the header in its
-config file, so this token WILL sit on disk; it must be the narrowest one, and
-revocable alone. Startup line: `MCP on http://127.0.0.1:<port>/mcp (asks: owner)`
-+ the exact `claude mcp add` command with a `<token>` placeholder (never the
-token itself).
+| WorkUnit | MCP task |
+|---|---|
+| `working` | `working` |
+| `waiting:permission`, mode `owner` | `working` + `statusMessage` "waiting for the owner's approval: <title>" |
+| `waiting:permission`, mode `both`, a caller-answerable ask, **client declared elicitation form** | `input_required` + `inputRequests{<requestId>: {method:"elicitation/create", params:{mode:"form", message: askMessage, requestedSchema:{type:"object", properties:{decision:{type:"string", enum:["allow","deny"]}}, required:["decision"]}}}}` |
+| same, client without elicitation form | `working` + `statusMessage` "approval needed: <title> — `session_answer` requestId=<id>" |
+| owner-only ask kind (hooks, hop, workflow approval), any mode | `working` + "waiting for the owner" |
+| `completed` | `completed` + `result` = `CallToolResult{content:[text: result], structuredContent:{turnId, result}}` |
+| `failed` (model error, interrupted by a restart, `max_*`) | **`completed` + `result.isError:true`** + the reason. The spec keeps `failed` for JSON-RPC errors only. |
+| `canceled` | `cancelled` |
+| result dropped (over budget) | `completed` + text "result no longer retained" |
 
-**7. Untrusted caller (AGENTS §7) — what it can and cannot reach.** It can
-create sessions in its own namespace, prompt/steer/cancel them, and read their
-units. It cannot: read or touch any other session (phone, TUI, A2A); change a
-setting, auto-accept, a capability or hooks trust; answer an ask (slice 1); see
-a tool's raw output or the transcript (status carries the final round only).
-Caps: ≤ 8 live `mcp-<caller>-*` sessions (the 9th start → `isError` "too many
-live MCP sessions; cancel or wait"), prompt ≤ 64 KiB, body ≤ 1 MiB, ≤ 1
-in-flight status wait per session (a second → `isError`), wait ≤ 120 s.
+Each task also carries `createdAt` (the unit's `startedAt`, else the
+acceptance time), `lastUpdatedAt`, `pollIntervalMs: 2000` and `ttlMs: null`.
+- `ttlMs: null` because a task lives as long as its unit: the ended-units
+  bounds (256 units / results budget) and the archive; after eviction
+  `tasks/get` → `-32602`.
+- M4 checks the ext-tasks schema meaning of `null`. If `null` means "never
+  discarded", it sends `604800000` (7 d) and documents the count bound.
+
+**6. Task methods.**
+- **`tasks/update{taskId, inputResponses}`:** each key must be a pending,
+  caller-answerable ask of THAT task. `{action:"accept", content:{decision}}`
+  maps to that ask's `*_once` option through the shared driver answer path;
+  `decline`/`cancel` → deny (fail-closed).
+  - Unknown keys are ignored (spec).
+  - A key naming an owner-only ask is ignored and audited
+    (`mcp-answer-refused`); the ask is untouched.
+  - The ack is empty, eventually consistent (first answer wins).
+- **`tasks/cancel{taskId}`** → `session/cancel{sessionId, turnId}`. The ack is
+  empty; the `cancelled` state shows up in the projection.
+
+**7. Caller asks (Q5).** The switch is per caller: `--mcp-asks owner|both`,
+default `owner`.
+- In `owner` mode the adapter never answers.
+- In `both` mode the caller may answer only kind `tool`, with `*_once` only,
+  through the SAME code A2A uses (kind table, `callerMayAnswer`, `onceOption`,
+  the driver's answer path).
+- The owner is always asked too: first answer wins, and the push grace
+  silences the phone when the caller answered.
+- Never sent: `set_auto_accept`, `set_capability`, `update_settings`, a skill,
+  `hooks/trust:true`, an `*_always` option, an answer to an owner-only kind.
+
+**8. Untrusted caller (AGENTS §7).** The caller works only in its own
+namespace. It changes no setting and creates no lasting approval. It never
+sees tool output or the transcript (status/task carry the final round only).
+
+Caps:
+- ≤ 8 live `mcp-<caller>-*` sessions;
+- prompt ≤ 64 KiB, body ≤ 1 MiB;
+- one status wait per session, wait ≤ 120 s;
+- `tasks/get` is a pure read, so it needs no rate cap beyond the body cap.
+
+**9. Driver attachment.** The adapter holds ONE in-process attachment per live
+MCP session (A2A's driver). It is kept while a turn runs: the idle TTL and the
+detached cap never archive the session on our account, and the status waiter
+gets its signal. It is released with `session/detach` 60 s after the turn
+ends. After a restart it re-attaches lazily on the next call.
 
 ### Files (slice 1, dependency order)
 
-**Precondition:** feat/a2a merged to `main` (work units, and `external/` if Q1
-lands there); then `main` is merged into this branch before S1a.
-
-| # | File | Sub-slice |
+| # | File | Slice |
 |---|---|---|
-| 1 | `packages/daemon/src/external/route.ts` (new, or extracted from `a2a/http.ts`) + `ws-server.ts` `WsServerOptions.external?` and the one call in `fetch` before `authorize` (`ws-server.ts:360-371`) | S1a |
-| 2 | `packages/daemon/src/mcp/wire.ts` (new, pure) | S1b |
-| 3 | `packages/daemon/src/external/session-driver.ts` (new or extracted from `a2a/executor.ts`) | S1c |
-| 4 | `packages/daemon/src/mcp/tools.ts` (new) + `mcp/http.ts` (new: the `ExternalMount` for `/mcp`, SSE writer) | S1c |
-| 5 | `packages/daemon/src/index.ts` — exports | S1c |
-| 6 | `packages/cli/src/flags.ts` — `serve`: `mcp-token`, `mcp-token-command` | S1d |
-| 7 | `packages/cli/src/serve.ts` — `ServeOptions.mcp` → the `/mcp` mount; startup line (`serve.ts:982-994`) | S1d |
-| 8 | `packages/cli/src/main.ts` — help | S1d |
-| 9 | `packages/daemon/package.json` — devDependency `@modelcontextprotocol/client` (SDK v2, pinned, test-only; Q3) + `bun.lock` | S1d |
-| 10 | `changelog.d/serve-mcp-server.added.md`, `README.md` "MCP server", `TODO.md` (backlog items B1–B9) | S1d |
+| 1 | `packages/daemon/src/mcp/wire.ts` (new, pure) | M1 |
+| 2 | (step 0, only if needed) neutral pieces moved `a2a/` → `external/`, re-exported | M2 |
+| 3 | `packages/daemon/src/mcp/http.ts` (new: the `/mcp` `ExternalMount`, JSON/SSE writer) + `mcp/tools.ts` (new: start/send/status/cancel/list) + `daemon/src/index.ts` exports | M2 |
+| 4 | `mcp/tools.ts` `session_answer` + status `asks`; the per-caller `asks` mode on the MCP caller | M3 |
+| 5 | `packages/daemon/src/mcp/task-projection.ts` (new, pure) + `mcp/tasks.ts` (new: `tasks/get|update|cancel`, `CreateTaskResult` after `durable`) + `durable` hook option on the mount | M4 |
+| 6 | `packages/cli/src/flags.ts` (`mcp-token`, `mcp-token-command`, `mcp-asks`), `packages/cli/src/serve.ts` (`ServeOptions.mcp` → the mount, `durable` = `persister.flush` after `turn_start`; startup line with a `claude mcp add` hint, `<token>` placeholder), `packages/cli/src/main.ts` help | M5 |
+| 7 | `packages/daemon/package.json` devDependencies `@modelcontextprotocol/client` `2.4.0` + `@modelcontextprotocol/ext-tasks` (pinned, test-only) + `bun.lock` | M5 |
+| 8 | `changelog.d/serve-mcp-server.added.md`, `README.md` "MCP server", `TODO.md` (backlog B-items) | M5 |
 
 ### Failure modes
 
 | Case | Behaviour / convergence |
 |---|---|
-| No / wrong token | `401` + `WWW-Authenticate: Bearer` before any parse; audit `mcp-auth-failure`. |
-| Browser `Origin` (a web page on the laptop) | `403` before auth (spec MUST; WS route keeps its own rule). |
-| WS token on `/mcp`, MCP token on WS or `/a2a` | `401`: each mount checks only its own callers. |
-| No MCP token configured | `/mcp` not mounted → today's `401`/`426`; nothing else changes. |
-| Legacy client (`initialize`) / modern client / unknown version | Both eras served; unknown → `-32022 {supported}`; header ≠ `_meta` → `400`. |
-| GET / DELETE `/mcp`, unknown method, bad params | `405` / `-32601` / `-32602`; nothing opened. |
-| Body > 1 MiB, prompt > 64 KiB | `413` / `-32602`. |
-| Session id outside `mcp-<caller>-` | `isError` "unknown session" — same text as a truly unknown id (no oracle). |
-| `send` while a turn runs | Steer (enqueue) into that turn; `key` makes a retry a no-op; the turn ended between read and enqueue → `NoTurnRunning` → retry once as a new turn. |
-| Retried `session_start` (client retry after a lost response) | Creates a second session (no idempotency key on start in slice 1): visible in `session_list`, harmless; documented. B-item if it bites. |
-| Ask pending | `waiting` + title; the phone answers; Claude Code's status wait returns on `permission_resolved`. No auto-deny (the adapter declares `permission_request`). |
-| Claude Code idle timeout (5 min) | No call holds > 120 s, and a held one emits progress every 15 s. |
-| Client disconnects mid-wait | That wait ends; the turn continues; the next status reads it. |
-| Caller cancels / owner cancels from phone | Same `session/cancel` path → unit `canceled`. |
-| `serve` restart | The adapter's attachments are gone; the reload restores sessions and the ended-units table (A2A S2); a cut turn reads `failed` ("interrupted: the daemon restarted"); a turn suspended on an ask is `waiting` under its id; the driver re-attaches lazily on the next call. |
-| Compaction / reset / `/clear` | `workUnits()` carries ended units (`unit_end`) → status unchanged. |
-| Session archived (idle TTL after the driver detached, or the owner closed it) | Slice 1: `session_status` reads it read-only through A2A S7's archived reader if merged, else `isError` "archived — open it from your phone"; `session_send` reopens it (`session/open{reopen:true}`, as A2A). Never purged. |
-| Owner deletes the session | Absent from `list()` → "unknown session". |
-| > 8 live MCP sessions; host at 64 | `isError` with the reason; the host's own cap refuses before ours if lower. |
-| Two concurrent status waits on one session | Second → `isError`; never two waiters racing one signal. |
-| Model of the session misbehaves (loop) | Owner sees it on the phone; Claude Code can `session_cancel`. |
-| Prompt injection in Claude Code drives tentacle | Bounded by §7 above: own namespace, owner answers every ask, no setting/approval changes. |
+| No / wrong token; WS or A2A token on `/mcp`; MCP token elsewhere | `401` before any parse; audit `mcp-auth-failure`. |
+| Browser `Origin` | `403` before auth. |
+| No MCP token configured | `/mcp` unmounted → today's `401`/`426`. |
+| Legacy / modern / unknown version; header ≠ `_meta` | Both eras served; `-32022 {supported}`; `400`. |
+| Legacy client and tasks | Never a task (not declared): the tools answer at once; status wait with progress. |
+| Modern client without the tasks extension | Same fallback; `tasks/*` → `-32021`. |
+| GET/DELETE, unknown method, bad params, > 1 MiB, prompt > 64 KiB | `405` / `-32601` / `-32602` / `413` / `-32602`; nothing opened. |
+| Foreign session id or taskId (phone, `a2a-…`, another caller) | "unknown session" / `-32602`, untouched, same text as truly unknown. |
+| `send` while a turn runs | Steer; `key` makes a retry a no-op. If the turn ended between read and enqueue → `NoTurnRunning` → one retry as a new turn. |
+| Retried `session_start` | A second session (documented, visible in `session_list`); B5 if it bites. |
+| Crash after `CreateTaskResult` | `durable()` happened first. The reload closes the cut turn → `completed`+`isError` "interrupted: the daemon restarted", or `input_required`/`working` if it was suspended on an ask (it resumes under its id). |
+| `durable()` write fails | The persister reports it to the operator (it never throws). The tool then answers `isError` "could not record the task" and cancels the turn: no unrecorded task is ever handed out. |
+| Ask in `owner` mode | Task `working` + message; the phone answers; no auto-deny (`permission_request` declared). |
+| Ask in `both` mode | `input_required` (elicitation) or status `asks` (fallback). First answer wins; a late answer → no effect. |
+| Caller answers an owner-only ask / tries `*_always` | Never offered. A crafted `requestId` → ignored + audit (tasks/update) or `isError` (session_answer); the ask is untouched. The caller only sends a decision; the host picks `*_once`. |
+| `decline` / `cancel` / ambiguous answer | Deny (fail-closed). |
+| Claude Code idle timeout (5 min, HTTP) | No call holds > 120 s. A held status emits progress every 15 s. Tasks are polled (`pollIntervalMs` 2 s). |
+| Client disconnect mid-wait | Only the wait ends; the turn continues. |
+| `tasks/cancel` / phone cancel / `session_cancel` | One `session/cancel` path → `cancelled`. |
+| Compaction / reset / `/clear` / restart | `workUnits()` carries ended units → `tasks/get` and status unchanged. |
+| Session archived (TTL after detach, owner close) | Read-only through the archived projection (never reopened by a read); `session_send` reopens it. |
+| Ended unit evicted (> 256) or session deleted | `-32602` / "unknown session". |
+| > 8 live MCP sessions | `isError` with the reason. |
+| Prompt injection in Claude Code | Bounded by §8 above: own namespace, `*_once` tool asks at most (only if the owner chose `both`), no settings. |
 
 ### Tests
 
-Fakes: the daemon pattern (real `SessionHost` + `Agent` + scripted
-`ModelProvider`, `Connection` over `createChannelPair`, as
-`session-auto-accept-asked-on.test.ts` and A2A's `work-units.test.ts`);
-`until` from `packages/client/test/support/fakes.ts`, never a sleep (§9);
-loopback `port: 0` for the server under test (a port that must stay closed is
-`127.0.0.1:1`). Each test names its mutation.
+The fakes:
+- the daemon pattern: real `SessionHost` + `Agent` + a scripted
+  `ModelProvider`, `Connection` over `createChannelPair`, temp
+  `LogSessionStore` + `SessionPersister` (as A2A's `work-units.test.ts`);
+- `until` from `packages/client/test/support/fakes.ts`, never a sleep;
+- loopback `port: 0` for the server under test.
 
-- **S1a** `daemon/test/external-route.test.ts`: path routing, `403` Origin, `401`
-  per mount (MCP token on `/a2a` → 401; mutation: one shared caller list → red),
-  `413`, unmounted → today's 401/426; WS upgrade unaffected. If extracted:
-  A2A's `a2a-http.test.ts` passes unchanged.
-- **S1b** `daemon/test/mcp-wire.test.ts` (pure, table-driven): `initialize`
-  per legacy version, `server/discover`, `_meta`/header mismatch → 400,
-  `-32022`, notifications → 202, `405`, `-32601`, `-32602`, tool schemas;
-  progress tokens strictly increasing (mutation: constant progress → red).
-- **S1c** `daemon/test/mcp-tools.test.ts`: start → status `working` → `completed`
-  with the final round only (mutation: concatenate all rounds → red); send idle
-  → new turn, send busy → steer with `steered:true`, a retried `key` → one
-  steer; cancel; a foreign session id (a phone session, an `a2a-…`, another
-  caller's) → "unknown session", untouched (mutation: drop the prefix check →
-  red); the ask: phone (a second `Connection`) answers it and the wait returns
-  (mutation: adapter declares no `permission_request` → the ask is auto-denied
-  → red); the adapter never sends `resolve_permission` / `hooks/trust:true`
-  (spy peer); cap of 8; restart (stop + reload on the same store) → status of
-  an ended turn and of a cut turn (`failed`); compaction → status unchanged.
-  Pins the load-bearing assumption for an MCP-created session: listed to the
-  phone, phone cancel → `canceled`.
-- **S1d e2e** `cli/test/serve-mcp-e2e.test.ts`: `startDaemon` with an MCP token
-  and a scripted model; **two real MCP clients**: the official SDK v2 client
-  (`@modelcontextprotocol/client`, Streamable HTTP, modern era — the SDK Claude
-  Code's runtime is built on) AND tentacle's own `packages/mcp` client (legacy
-  `initialize` era): each `tools/list` → `session_start` → `session_status
-  {waitSeconds}` with a `progressToken` until `completed` → `session_send` →
-  `session_cancel`; a WS client sees `mcp-default-…` in `session/list`; wrong
-  token → 401. Plus a **manual live check** recorded in Execution: `claude mcp
-  add --transport http tentacle http://127.0.0.1:<port>/mcp --header
-  "Authorization: Bearer …"` in a real Claude Code, one delegation end to end.
+Each test names its mutation (§9).
 
-### Slices (slice 1 = S1a–S1d)
+- **M1 `daemon/test/mcp-wire.test.ts`** (pure, table-driven):
+  - `initialize` per legacy version; `server/discover` declares the tasks
+    extension;
+  - `_meta` caps parsing (tasks, elicitation form); header ≠ `_meta` → 400;
+    `-32022`; `-32021` for `tasks/*` without the declaration;
+  - notification → 202; `405`; `-32601`; `-32602`;
+  - `CreateTaskResult` / task / `inputRequests` shapes against the ext-tasks
+    schema (vendored as a test fixture);
+  - progress strictly increasing (mutation: constant progress → red).
+- **M2 `daemon/test/mcp-tools.test.ts`**:
+  - start → status `working` → `completed` with the final round only
+    (mutation: all rounds → red);
+  - send idle → a new turn; send busy → `steered:true`; a retried `key` → one
+    steer;
+  - cancel; list shows only the prefix;
+  - a foreign id (phone, `a2a-…`, another caller) → unknown and untouched
+    (mutation: drop the prefix check → red);
+  - the phone (a second `Connection`) sees the session and answers its ask,
+    and the status wait returns (mutation: no `permission_request` declared →
+    auto-deny → red);
+  - phone cancel → `canceled`;
+  - the adapter never sends `resolve_permission` in owner mode (spy peer);
+  - 8-session cap;
+  - progress over SSE.
+- **M3 `daemon/test/mcp-caller-asks.test.ts`**:
+  - `both`: status lists the tool ask; `session_answer allow` → that ask's
+    `allow_once` (never `*_always`; mutation: pass the caller's choice through
+    → red);
+  - an owner-only ask (`workflow_approve`, `hooks_trust`) is never listed, and
+    a crafted answer is refused with the ask untouched (mutation: route by
+    `requestId` without the kind check → red);
+  - phone answers first → the caller's answer has no effect;
+  - `owner` mode → `session_answer` refused;
+  - the caller answers in time → no push (the push spy as in
+    `push-rules` tests).
+- **M4 `daemon/test/mcp-tasks.test.ts`**:
+  - a declaring client gets `CreateTaskResult`, a non-declaring one a plain
+    result (mutation: always task → red);
+  - **durable before the ack**: a kill right after the ack (no stop), then a
+    reload → `tasks/get` finds the task (mutation: skip `durable` → red);
+  - `tasks/get` through working → `input_required` (both + elicitation) →
+    `tasks/update accept` → `completed` with `result`;
+  - without elicitation → `working` + the `session_answer` hint;
+  - failed turn → `completed` + `isError` (mutation: map to `failed` → red);
+  - `tasks/cancel` → `cancelled`;
+  - compaction and restart → `tasks/get` unchanged;
+  - a forged taskId naming another caller's session → `-32602`;
+  - archived session → read-only (store files byte-identical before/after).
+- **M5 e2e `cli/test/serve-mcp-e2e.test.ts`**: `startDaemon` with an MCP token
+  and a scripted model, three real clients:
+  1. **SDK v2 + ext-tasks** (modern, tasks):
+     `createTaskSessionFromClient` → `session_start` → `ToolExecution.kind ===
+     "task"` → `settle()` → `completed` with the result; a second task →
+     `cancel()` → `cancelled`.
+  2. **SDK v2 without ext-tasks** (modern, no tasks): `session_start` → a plain
+     result → `session_status{waitSeconds}` with `onprogress` until
+     `completed`.
+  3. **tentacle's own `packages/mcp` client** (legacy `initialize`): the same
+     non-task flow.
+
+  Plus: a WS client sees `mcp-default-…` in `session/list`; a wrong token →
+  401.
+
+  A **manual live check** is recorded in Execution: `claude mcp add
+  --transport http tentacle http://127.0.0.1:<port>/mcp --header
+  "Authorization: Bearer …"` in a real Claude Code (≥ v2.1.304), with one
+  delegation end to end, noting whether Claude Code took the task path.
+
+### Slices (slice 1 = M1–M5, after feat/a2a is merged)
 
 | Slice | Executor | Est. | Scope |
 |---|---|---|---|
-| `S1a-external-entry` | **opus** | 1 h | shared route (or extraction from A2A) — the auth path of `serve` (§7 untrusted) |
-| `S1b-mcp-wire` | **sonnet** | 1 h 30 | pure dual-era JSON-RPC + headers + schemas + SSE framing — table-tested, cheap to iterate |
-| `S1c-mcp-session-tools` | **opus** | 2 h | session driver on the single session path, the 5 tools, namespace, caps, asks never answered (§7 single path / broker / untrusted) |
-| `S1d-cli-e2e` | **sonnet** | 1 h 30 | flags, wiring, startup line, help, README, changelog, e2e with both clients, live Claude Code check |
-| `R-review` | opus (fresh) | 1 h | §7 red-team (namespace escape, ask answering, lasting approvals, second entry path), non-vacuity, `bun run check` |
-| **Total** | | **≈ 7 h** | after feat/a2a merges |
+| `M1-mcp-wire` | **sonnet** | 1 h 45 | pure dual-era JSON-RPC, headers, `_meta` caps, `server/discover`, tasks/elicitation shapes, error codes, SSE framing + tests |
+| `M2-mcp-session-tools` | **opus** | 2 h | step 0 (check `external/`, move-only if needed) + the `/mcp` mount + start/send/status/cancel/list on the shared driver, ids, namespace, caps, status wait + progress (§7 single path, untrusted caller) |
+| `M3-mcp-caller-asks` | **opus** | 1 h | `--mcp-asks`, `session_answer`, status `asks`, on A2A's caller-asks code (§7 broker, no lasting approval) |
+| `M4-mcp-tasks` | **opus** | 2 h 15 | prove assumption 3 first; task projection, `CreateTaskResult` after `durable`, `tasks/get|update|cancel`, `input_required` via elicitation, restart/compaction/archived tests (durable records, §7 persistence) |
+| `M5-cli-e2e` | **sonnet** | 1 h 45 | flags, serve wiring (`durable` = `flush`), startup line, help, README, changelog, TODO, devDeps, e2e with the three clients, live Claude Code check |
+| `R-review` | opus (fresh) | 1 h 15 | §7 red-team: namespace escape, forged taskId, caller answers (kinds, `*_once`, first-wins), second entry path, durability; non-vacuity; `bun run check` |
+| **Total** | | **≈ 10 h** | M1 may start before feat/a2a merges (pure, no `external/` import); M2–M5 after |
 
-### Backlog (ranked by need; each its own later slice, purely additive)
+### Backlog (ranked by need; each a later slice, purely additive)
 
-| # | Item | Why this rank | Shape / reuse | Executor |
-|---|---|---|---|---|
-| B1 | **Claude Code answers asks** (`--mcp-asks both`, `session_answer{sessionId, requestId, decision}`) | without it a delegated run blocks on the phone; with it Claude Code is a real driver | A2A S5 kind table + `callerMayAnswer`/`onceOption`, `*_once` only, owner-only kinds never listed | opus (§7 broker) |
-| B2 | **Push to the phone** (`notify_owner{title, body}`) | "tell me when it's done" from Claude Code | a new push kind from an external caller, labelled "via MCP <caller>", rate-limited (e.g. 10/h); needs the push payload + app rendering checked (`push-notifier.ts`, app) — phone/Mac parity | opus plan (new push kind), sonnet exec |
-| B3 | **Workflows** (`workflow_start{name, inputs}`, status via the same `session_status`) | owner's third item | `session/workflow{start, turnId}` → the run is a work unit with `origin` = turnId (A2A S8); per-caller `--mcp-workflows` OFF by default; file approval owner-only | sonnet |
-| B4 | **Events feed** (`session_events{sessionId, since?, only?}`) | "status AND events": tool calls, errors, asks — for debugging a delegated run | `session/watch` + `watch_next` (long-poll, bounded, never an attachment, `watch.ts`), coalesced, capped per call | sonnet |
-| B5 | **Owner's own sessions** (read, and optionally steer, phone/TUI sessions) | "list sessions" in the broad sense | opt-in caller scope `sessions: own \| all-read \| all`; default `own` | opus (§7) |
-| B6 | **MCP tasks extension** (`io.modelcontextprotocol/tasks`) | Claude Code backgrounds long calls natively | a task = projection of a `WorkUnit` (same states), like A2A tasks; only after a live check that Claude Code uses it on our server | opus plan |
-| B7 | **Start-idempotency + `session_result` paging** (long results over 16 KiB) | only if retries / truncation bite | `key` on start; transcript tail via `session/log` | sonnet |
-| B8 | **OAuth 2.1 + RFC 9728** | only for third-party clients that cannot send a static header | out unless a real client needs it | — |
-| B9 | **Per-session model / pod target** ("start a DeepSeek session in a k8s pod") | a different serve covers the model today; a pod target is `run`, laptop-side | needs its own eval (pod launch from a remote caller = laptop effect, §7) | eval |
-
-### Owner questions
-
-1. **One external entry, built once.** feat/a2a's S4 (executor) and S9 (HTTP
-   route) are not written yet. Should their executor write them
-   protocol-neutral — `external/route.ts` and `external/session-driver.ts`, with
-   only the A2A mapping in `a2a/` — so MCP mounts on them with no extraction?
-   **Recommendation: yes** — about +20 min on A2A, and it removes S1a's
-   extraction and any risk of two entry paths.
-2. **Token.** A dedicated MCP token (`--mcp-token-command`, opens only `/mcp`),
-   or the existing serve token? **Recommendation: dedicated** — Claude Code
-   keeps the header in its config file on disk, so it must be the narrowest,
-   separately revocable credential (the serve token is full control of
-   everything).
-3. **Implementation + test client.** Hand-written server (no runtime
-   dependency, like our MCP client) with the official SDK v2 client only as a
-   pinned **devDependency** for the e2e, plus our own client for the legacy
-   era? **Recommendation: yes** — the SDK server pulls express/hono and a
-   second zod; our surface is ~5 methods.
-4. **Long calls.** Slice 1 = non-blocking tools + `session_status
-   {waitSeconds ≤ 120}` with progress every 15 s; MCP tasks (B6) later, after
-   a live check. **Recommendation: yes** — works on every client and era
-   today; tasks is an extension whose client support varies.
-5. **Who answers asks in slice 1.** Only the owner (phone/TUI), with B1 (Claude
-   Code answers `tool` asks, `*_once`, per-caller switch) as the very next
-   slice? **Recommendation: yes** — mirrors A2A's default; B1 reuses A2A S5
-   as-is once merged.
-6. **Scope of slice 1.** Only sessions the MCP caller created
-   (`mcp-default-*`); the owner's phone/TUI sessions stay invisible until B5.
-   **Recommendation: yes** — a leaked or prompt-injected token can then only
-   touch its own sessions.
+| # | Item | Shape / reuse | Executor |
+|---|---|---|---|
+| B2 | **Push to the phone** (`notify_owner{title, body}`) | a new push kind from an external caller, labelled "via MCP <caller>", rate-limited; push payload + app rendering to check (`push-notifier.ts`, app), phone/Mac parity | opus plan, sonnet exec |
+| B3 | **Workflows** (`workflow_start{name, inputs}`, a task via `origin` = turnId) | `session/workflow{start, turnId}` (A2A S8), `--mcp-workflows` OFF by default, file approval owner-only | sonnet |
+| B4 | **Events feed** (`session_events{sessionId, only?}`) | `session/watch` + `watch_next` (bounded long-poll, never an attachment, `packages/protocol/src/watch.ts`) | sonnet |
+| B5 | **Start idempotency** (`key` on `session_start`) + long-result paging | `session/log` tail | sonnet |
+| B6 | **`notifications/tasks`** over `subscriptions/listen` | optional in the spec; polling covers it | sonnet |
+| B7 | **Owner's own sessions** (read / steer phone & TUI sessions) | opt-in caller scope; default stays own (Q6) | opus (§7) |
+| B8 | **OAuth 2.1 + RFC 9728** | only if a client cannot send a static header | — |
+| B9 | **Per-session model / pod target** | a different serve covers the model today; a pod launch from a remote caller is a laptop effect (§7) → eval first | eval |
 
 ## Execution
 
