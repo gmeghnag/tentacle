@@ -488,6 +488,123 @@ nothing user-visible on its own (Slice 3 draws it), so it is unchanged.
 the plan's Gate asks for) — Slice 3 draws the node; nothing renders
 `contextRowView` yet.
 
+### Slice 3 — drawing
+
+*— claude-code 2.1.325 (this agent's model id is not exposed to it; Slice 2 ran on
+the same binary, model `opus`), 2026-11-25*
+
+**Load-bearing check, re-run before any edit** (branch tip `c267d857`, Slices 1–2
+in): `bun test apps/mobile/test/{tool-steps,step-rail-render}.test.ts` →
+**51 pass / 0 fail**, and the gap is exactly this slice: `contextRowView` exists
+and is tested (`tool-steps.ts:604`), the `context` row reaches
+`TranscriptRow`, but `TranscriptRow`'s `switch` has **no `context` arm** (it falls
+to `default: return null`), so a context step draws NOTHING — and `NodeKind` has
+no `reset`/`compact` (the new render test was red on exactly that: 6 fail, then
+0).
+
+**As built, in the plan's order:**
+
+1. `apps/mobile/src/ui/StepNode.tsx` — `NodeKind` gains `"reset" | "compact"`;
+   `Node` draws one `case` for both through the ONE icon seam (`Icon.tsx`, the
+   plan's `arrow.counterclockwise` / `arrow.down.right.and.arrow.up.left`),
+   `weight="light"`, in a new `styles.contextNode` box (`CONTEXT_NODE_SIZE = 14`,
+   the `◷` wake glyph's box) on `palette.page` so it masks the rail, in
+   `palette.sec`. The NAME was already `sec` (`StepNode.tsx:545`), so the system
+   fact is carried by symbol + word, never hue alone.
+2. `apps/mobile/src/screens/transcript/TranscriptRow.tsx` — `ContextRowView`
+   (a dumb renderer over `contextRowView`: `StepShell` + `StepNode`, `open`/
+   `full`/`onToggle`/`onShowAll` all from `StepProps`, i.e. screen state, never
+   `useState`), the `case "context"` arm, the open body = `<Markdown>` of the
+   view's cut with a `sec`-tinted palette (`secTinted`), the show-all line when
+   `body.hidden > 0`, and two styles (`contextBody`, `contextMore`). The restart
+   caption and its `separator` branch were already gone (Slice 1's forced carry).
+3. Tests: `apps/mobile/test/context-row-render.test.ts` (new, the cell render,
+   `notice-row.test.ts`'s host-stub walker) + one source-pin case in
+   `test/step-rail-render.test.ts` for the glyph's box (the file imports React
+   Native, so the node's look is pinned as SOURCE — that file's own pattern).
+4. `bun run mockup-kit` regenerated `tools/mockup-kit/generated/*` (StepNode and
+   TranscriptRow styles changed): `kit-data.json` + `tokens.css`, 3 files written,
+   drift test green.
+
+**Drift from the Implementation, and why:**
+
+- **The cell-render test is a NEW file, `test/context-row-render.test.ts`**, not
+  the plan's `test/step-rail-render.test.ts`. That file pins StepNode's drawing
+  as SOURCE (it imports React Native, so it has no walker); a real
+  walk-and-assert of a row's tree needs `notice-row.test.ts`'s host-stub +
+  `mock.module` harness, which is ~110 lines of setup. Splitting keeps one file
+  per job — the walker in the new file, the glyph's look as a source pin added to
+  `step-rail-render.test.ts` (its own pattern, one `describe`).
+- **`apps/mobile/src/ui/Icon.tsx` gained the two `IconName`s** — a file the slice
+  does not name. `StepNode` cannot pass an SF Symbol name without it
+  (`Icon.tsx`'s `IconName` is a closed union; `tsc -p apps/mobile` failed with
+  `TS2322: "arrow.counterclockwise" is not assignable to type 'IconName'`). Same
+  compiler-forced one-site carry the earlier slices reported.
+- **The open body lives inside `StepNode`'s `body` slot**, not as a sibling: that
+  is what the node already does for a tool's `StepBody` (`open && body !==
+  undefined`), so the reset step gets the same open/closed animation, the same
+  `borderTopColor: sepChat` rule and the same "no body while closed" property for
+  free — the plan says "`StepShell` + `StepNode` ... body = `<Markdown parsed>`",
+  which this realises at the node's own seam.
+- **The show-all line is a `Pressable` calling `step.onShowAll`** (the plan names
+  `onShowAll`); a bare `<Text>`, the first version, would have shown an offer
+  nothing could accept. Its label is the plan's wording, and it is `disabled`
+  without `StepProps` (a row drawn alone never offers a dead tap).
+- **The a11y figures wording is Slice 2's**, not the plan's sample: the plan's
+  `Compacted, context 182k to about 9k` assumed a `~` figure; Slice 2's
+  `spokenFigures` adds "about" only when the figures carry a `~`
+  (`tool-steps.ts:718-726`), and the fixture figure (`ctx 182k → 9k`) is exact.
+  The test asserts the code's real wording, and Slice 2's own test already pins
+  the `~` case. The plan's line was an illustration, not a second rule.
+- **Three test-helper bugs of my own, fixed while going red**: the walker must
+  STOP at `StepNode` (it runs hooks — an invalid-hook crash otherwise), it NESTS
+  children (so a flat `all()` found nothing below the first `View`), and
+  `bodyText` must walk the body's own tree. Recorded because the first version of
+  the test failed for these reasons, not for the feature's.
+
+**Mutations (each reverted immediately; the failing assertion named):**
+
+- `body === null || step?.open !== true` → `body === null` (body drawn while
+  closed) → 2 failures, `the node, the name ... a11y label` and `no StepProps ...
+  still a lone, closed step` (both assert `props.body` is undefined).
+- `palette={secTinted(palette)}` → `palette={palette}` → `the body is the parsed
+  markdown of the prompt, tinted sec` FAILS.
+- `onPress={step?.onShowAll}` → `onPress={undefined}` → `nothing held back = no
+  show-all line; a cut body offers it` FAILS.
+- `const full = step?.full ?? false` → `const full = false` → the same test
+  FAILS (a `full` body would still draw "tap to see all").
+- `cell?.kind === "context" ? cell.thread : LONE` → `LONE` → `the node, the name
+  ...` FAILS on the thread.
+- `view.tappable && step !== undefined` → `step !== undefined` → `a blank body is
+  never an empty expansion` FAILS (an empty body became tappable).
+- The `case "context"` arm removed → all 6 render tests FAIL (the row draws
+  nothing — the pre-slice behaviour, so this is the red state itself).
+- `StepNode`: `kind === "reset" ? … : …` → one symbol for both → the
+  `step-rail-render` source pin FAILS.
+- **Not mutation-checked:** `Icon.tsx`'s union (its only failure mode is a
+  typecheck error, which is what forced the edit) and the kit regeneration (the
+  drift test in `scripts/test/mockup-kit.test.ts` is the check: 50 pass / 0 fail
+  over the two kit files).
+
+**Gate:** the slice's own + adjacent files, as instructed — 278 pass / 0 fail
+across the 18 mobile test files that render or fold a row; 50 pass / 0 fail for
+the two kit test files; `bunx tsc -p apps/mobile --noEmit` clean; `bunx biome
+check` clean on all 5 changed source/test files (kit data is generated). The full
+`bun run check` is the orchestrator's. No `packages/protocol` file was touched, so
+`protocol.json` needs no regeneration. Changelog: the Slice-1 fragment
+`changelog.d/mobile-reset-in-timeline.changed.md` still describes exactly this
+outcome (it names the `↺ Context reset` / `⤡ Compacted` nodes, which now actually
+draw), so it is unchanged rather than duplicated. `TODO.md` untouched.
+
+**Unverified:** the on-device look — the plan's Gate asks for simulator
+screenshots (a session with a reset and a compaction, light + dark) before any
+iOS build, and this agent has no simulator. Verify by running the app on a
+session that reset its context: `↺ Context reset` + the prompt's first line in
+italic `sec`, tap → the prompt as markdown, capped at 12 lines with `… N more
+lines · tap to see all`; a compaction draws `⤡ Compacted` + `ctx A → B`.
+
+
+
 ## Review
 
 *— (empty)*

@@ -43,7 +43,13 @@ import { ROW_FALLBACK_TEXT } from "../../row-guard.ts";
 import { type FiredRow, firedRowView } from "../../schedule-view.ts";
 import { DENSE_FONT_SCALE, type Palette, isDark, radius, space, typography } from "../../theme.ts";
 import { type ThumbnailState, thumbnailFor } from "../../thumbnails.ts";
-import { type StepCell, type ThreadPos, stepRowView, thoughtRowView } from "../../tool-steps.ts";
+import {
+  type StepCell,
+  type ThreadPos,
+  contextRowView,
+  stepRowView,
+  thoughtRowView,
+} from "../../tool-steps.ts";
 import { subAgentLine } from "../../tool-summary.ts";
 import { type ImageRef, type Row, imageRowText } from "../../transcript-rows.ts";
 import { FileBody } from "../../ui/FileBody.tsx";
@@ -459,6 +465,86 @@ function FiredRowView({
             {fired.body}
           </Text>
         }
+      />
+    </StepShell>
+  );
+}
+
+/**
+ * A palette whose prose draws in the secondary grey: a step's body is a FACT
+ * about the run, like every other step line (`sec`), never prose-level text
+ * (docs/feat/mobile-reset-in-timeline.md, the owner is colour-blind: weight
+ * and the name carry the hierarchy, not hue).
+ */
+function secTinted(palette: Palette): Palette {
+  return { ...palette, label: palette.sec };
+}
+
+/**
+ * A context reset / a compaction (docs/feat/mobile-reset-in-timeline.md): a
+ * timeline NODE, like a step — `↺ Context reset` with the prompt's first line
+ * (italic, `sec`) or `⤡ Compacted` with its figures (mono), and the prompt or
+ * the summary as MARKDOWN one tap away. Every decision is `contextRowView`'s
+ * (pure, `tool-steps.ts`); this only draws it.
+ */
+function ContextRowView({ row, palette, onLink, step }: RowProps): JSX.Element {
+  const context = row as Extract<Row, { kind: "context" }>;
+  const cell = step?.cell;
+  const thread = cell?.kind === "context" ? cell.thread : LONE;
+  const full = step?.full ?? false;
+  const view = contextRowView(context, full);
+  const body = view.body;
+  return (
+    <StepShell row={context} thread={thread}>
+      <StepNode
+        palette={palette}
+        node={view.node}
+        reduceMotion={step?.reduceMotion ?? false}
+        name={{ tool: view.name }}
+        subtitle={view.subtitle}
+        subtitleItalic={view.italic}
+        trailing=""
+        trailingRed={false}
+        thread={thread}
+        open={step?.open ?? false}
+        {...(view.tappable && step !== undefined ? { onToggle: step.onToggle } : {})}
+        a11yLabel={view.a11yLabel}
+        labelTestID={`context-${context.event}-${context.key}`}
+        {...(body === null || step?.open !== true
+          ? {}
+          : {
+              body: (
+                <View style={styles.contextBody}>
+                  {/* Parsed only while open, and only the cut that is shown: a
+                      closed step costs no parse (`contextRowView` decides the
+                      cut, a ``` fence included). */}
+                  <Markdown
+                    parsed={parsedOf(body.text)}
+                    palette={secTinted(palette)}
+                    onLink={onLink}
+                  />
+                  {body.hidden === 0 ? null : (
+                    // The screen's `full` state, never a local one (it survives
+                    // cell recycling like `open`: `SessionScreen.tsx` `fullSteps`).
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Show all ${body.hidden} more ${
+                        body.hidden === 1 ? "line" : "lines"
+                      }`}
+                      disabled={step === undefined}
+                      onPress={step?.onShowAll}
+                    >
+                      <Text
+                        testID={`context-${context.event}-${context.key}-more`}
+                        style={[typography.footnote, styles.contextMore, { color: palette.accent }]}
+                      >
+                        {`… ${body.hidden} more ${body.hidden === 1 ? "line" : "lines"} · tap to see all`}
+                      </Text>
+                    </Pressable>
+                  )}
+                </View>
+              ),
+            })}
       />
     </StepShell>
   );
@@ -957,6 +1043,8 @@ export function TranscriptRow(props: RowProps): JSX.Element | null {
       return <ToolRowView {...props} />;
     case "notice":
       return <NoticeRowView {...props} />;
+    case "context":
+      return <ContextRowView {...props} />;
     default:
       return null;
   }
@@ -1041,5 +1129,9 @@ const styles = StyleSheet.create({
   harness: { flexDirection: "row", gap: 6 },
   harnessGlyph: { width: 12, textAlign: "center" },
   harnessBody: { flex: 1, gap: 2 },
+  // A context step's open body (docs/feat/mobile-reset-in-timeline.md): the
+  // prompt/summary as markdown, tinted secondary — a step's body is a fact.
+  contextBody: { gap: 6, paddingTop: 2, paddingBottom: space.transcript / 2 },
+  contextMore: { paddingTop: 2 },
   fallback: { fontStyle: "italic" },
 });

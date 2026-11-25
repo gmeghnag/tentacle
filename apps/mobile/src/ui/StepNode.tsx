@@ -47,17 +47,25 @@ import {
 } from "../thinking-motion.ts";
 import { type StepDot, type ThreadPos, thinkingA11yLabel } from "../tool-steps.ts";
 import { type ToolNameParts, liveElapsed } from "../tool-summary.ts";
+import { Icon } from "./Icon.tsx";
 import { OutputBlock } from "./OutputBlock.tsx";
 import { Text } from "./Text.tsx";
 import { animateNextLayout } from "./animate.ts";
 import { AppFontContext } from "./app-font.ts";
 
 /** The node's look: a tool's status, an orphan thought (a dim ring), the live footer (an accent dot). */
-/** `wake`: a fired scheduled wake's `◷` (docs/feat/scheduled-fire-row.md). */
-export type NodeKind = StepDot | "thought" | "thinking" | "wake";
+/**
+ * `wake`: a fired scheduled wake's `◷` (docs/feat/scheduled-fire-row.md).
+ * `reset` / `compact`: a context reset's `↺` and a compaction's `⤡`
+ * (docs/feat/mobile-reset-in-timeline.md — the wake glyph's box, in `sec`).
+ */
+export type NodeKind = StepDot | "thought" | "thinking" | "wake" | "reset" | "compact";
 
 /** Every ∴ (a folded thought in the open body): owner asked a bit larger than 10. */
 const THEREFORE_SIZE = 13;
+
+/** A context node's SF Symbol box: the `◷`'s own (13 pt glyph in the 14 pt node box). */
+const CONTEXT_NODE_SIZE = 14;
 
 /** Milliseconds since `from`, re-read once a second; null when there is no `from`. */
 function useElapsed(from: number | undefined): number | null {
@@ -378,6 +386,23 @@ function Node({
         >
           ◷
         </Text>
+      );
+    case "reset":
+    case "compact":
+      // A context step's glyph (docs/feat/mobile-reset-in-timeline.md): an SF
+      // Symbol in the `◷`'s box, `sec` on the page — the symbol and the name
+      // carry the fact, never the hue (the owner is colour-blind).
+      return (
+        <View style={[styles.contextNode, { backgroundColor: palette.page }]}>
+          <Icon
+            name={
+              kind === "reset" ? "arrow.counterclockwise" : "arrow.down.right.and.arrow.up.left"
+            }
+            color={palette.sec}
+            size={CONTEXT_NODE_SIZE}
+            weight="light"
+          />
+        </View>
       );
     default:
       // queued: a hollow ring.
@@ -759,6 +784,13 @@ const styles = StyleSheet.create({
   thoughtRing: { borderWidth: 2 },
   ring: { width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.2 },
   wake: { fontSize: 13, lineHeight: 15, textAlign: "center" },
+  // A context node's glyph: the wake's box, on the page so it masks the rail.
+  contextNode: {
+    width: CONTEXT_NODE_SIZE,
+    height: CONTEXT_NODE_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   // The folded thought's ∴ in the open body: the glyph's size, three thin dots.
   dotBox: { width: THEREFORE_SIZE, height: THEREFORE_SIZE },
   breathDot: { position: "absolute", width: 3, height: 3, borderRadius: 1.5 },
