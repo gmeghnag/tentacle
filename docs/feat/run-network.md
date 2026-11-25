@@ -582,3 +582,26 @@ relay never creates. "No silent drop" — FALSE (finding 1).
 stated the unverified part (podman on a real socket) honestly. Missed the second
 `startEngineRuntime` caller because the plan's call-site audit stopped at
 `host.create`; filed the as-built under the wrong heading.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26 (fresh context; reviewed `ea77a694..HEAD`)*
+
+**Verdict: PASS.**
+
+- **Finding 1 (hop drops the network): FIXED.** `hop-targets.ts:305-323` resolves
+  `chooseNetwork({env: TENTACLE_NETWORK, configured: config.network})` and validates
+  it with `networkValueProblem` before the mount gate asks or anything is created.
+  `:388-389` passes it to `startEngineRuntime`. `containerEngine` (`:717`) only
+  returns docker/podman, so this path has no k8s case. The only `startEngineRuntime`
+  / `provisionWorkload` callers are `main` and the hop. Mutations, each reverted:
+  spread dropped → 2 fail; validation dropped → 1 fail (malformed row); env ignored →
+  1 fail (precedence row). The unset row asserts no `network` key.
+- **Finding 2 (doc headings): FIXED.** The as-built is under `## Execution`
+  (+ `### Fix round 1`), and the stray `## Review`/`pending` stub is gone.
+- **Regressions:** `key-docs-carried` T5 now lists `--network`, which is correct because
+  the flag exists on `run`. The test's `TENTACLE_NETWORK` save/restore keeps the env
+  from leaking between rows. The changelog bullet covers the hop.
+- **Gate:** `session-hop-targets`, `key-docs-carried`, `main` and `engine-docker` give
+  211 pass, 0 fail. `bun run typecheck` and `bun run lint` are clean. `git status` was
+  clean after the mutations. Full `bun run test` was not run here; the merge gate covers it.
