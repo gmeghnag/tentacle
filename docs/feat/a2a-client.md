@@ -1287,3 +1287,35 @@ step). Facts for the re-run:
   All reverted; 38 pass over the 4 permission test files.
 - **Changelog:** sentence appended to `changelog.d/a2a-client.added.md`.
 - **Gate:** not run here (the script runs it). No schema change.
+
+### a2c-6-question-mobile — DONE
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+- **Load-bearing check:** the sheet's `sheetOptions`/`responseFor`/`sendReply`
+  and the push `categoryFor`/`decideAction` are the only places that decide the
+  phone's options and quick actions (rg over `apps/mobile/src`); `kind` reaches
+  them on `PermissionRequest`, `question` on `PushAsk`. Holds.
+- **As built:** `permission-sheet.ts` — `sheetOptions` for `question`
+  («Answer…» only when `req.reply`, «Skip») and `agent_add` («Yes, for this
+  session» · «No» · «No, let's talk about it», no always); `responseFor(…, kind)`
+  sends `allowed:true + message` (no scope) for a question's reply; new pure
+  `replyCopy` (placeholder «Your answer» / «Send answer»), used by
+  `screens/PermissionSheet.tsx` (copy only).
+- **Drift (found in code, needed):** a question push carries one `reject_once`
+  option, so the banner's Deny would have sent a bare refusal through
+  `resolve_permission` (refused by the daemon). `push-render.ts` `categoryFor` →
+  plain Open for `ask.question`; `notification-action.ts` `decideAction` refuses
+  every quick action (`no-option`) for it. The tap opens the sheet in question mode.
+- **Tests:** `apps/mobile/test/permission-sheet-question.test.ts` (10, new),
+  `notification-action.test.ts` (+3), `push-render.test.ts` (+1). Red before:
+  question file errored on the missing `replyCopy`; 3 banner-action cases and the
+  push-render case failed on assertions. Green after: 107 pass over 7 files.
+- **Mutations (all red, reverted):** `allowed: false` for a question's reply → 1
+  fail; `agent_add` branch disabled → 1 fail; banner guard / `categoryFor` guard
+  removal → the red runs above.
+- **Changelog:** phone already covered by `changelog.d/a2a-client.added.md`.
+- **Unverified:** simulator screenshots (owner rule, before any build) not taken
+  here; `tsc -p apps/mobile` clean, biome clean on touched files. The Swift NSE
+  category is unaffected (a question push has no `allow_once`, so already Open).
+- **Gate:** not run here (the script runs it). No schema change.

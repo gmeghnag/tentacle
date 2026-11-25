@@ -28,6 +28,7 @@ import {
   type SheetState,
   labelRuns,
   optionStyle,
+  replyCopy,
 } from "../permission-sheet.ts";
 import { DENSE_FONT_SCALE, MONO, type Palette, radius, size, typography } from "../theme.ts";
 import { Icon, type IconName } from "../ui/Icon.tsx";
@@ -241,7 +242,7 @@ export function PermissionSheetView({
                 styles.reply,
                 { color: palette.label, backgroundColor: palette.fill },
               ]}
-              placeholder="Tell it what to do instead"
+              placeholder={replyCopy(asking.request).placeholder}
               placeholderTextColor={palette.sec}
               value={asking.replyText}
               onChangeText={(text) => sheet.setReplyText(text)}
@@ -252,7 +253,7 @@ export function PermissionSheetView({
             <AnswerPill
               testID="perm-reply-send"
               palette={palette}
-              label="Send reply"
+              label={replyCopy(asking.request).send}
               pill="secondary"
               icon={null}
               disabled={!asking.armed}
