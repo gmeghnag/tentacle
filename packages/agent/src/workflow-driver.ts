@@ -292,7 +292,7 @@ export interface WorkflowDriverDeps {
    */
   readonly list?: () => Promise<WorkflowListing>;
   /** The session's `models` names and agent types (validated at start). */
-  readonly context: () => Pick<WorkflowContext, "models" | "agentTypes">;
+  readonly context: () => Pick<WorkflowContext, "models" | "agentTypes" | "harnessTypes">;
   readonly approvals: WorkflowApprovals;
   /** The session's ONE requester (`permissions.request`). */
   readonly request: PermissionRequester;
@@ -394,7 +394,7 @@ export interface WorkflowSourceView {
   readonly canonical?: boolean;
   readonly errors?: readonly string[];
   readonly unreadable?: string;
-  readonly context?: Pick<WorkflowContext, "models" | "agentTypes">;
+  readonly context?: Pick<WorkflowContext, "models" | "agentTypes" | "harnessTypes">;
   readonly unavailable?: string;
 }
 

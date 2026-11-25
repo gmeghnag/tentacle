@@ -121,6 +121,9 @@ export function workerAgentFactory(
       // Workflows (docs/feat/agent-workflows.md D3): the laptop runs them; a run
       // lives as long as this worker (a TUI quit cuts it, closed at next load).
       workflows: true,
+      // Harness sub-agents (docs/feat/subagent-harness-runners.md D5): the
+      // laptop runs `claude` with its own login. A pod daemon never passes this.
+      harnesses: {},
       // The laptop's own Chrome (browser-inspect B4); a pod daemon never passes this.
       ...(options.browser ? { browser: options.browser } : {}),
     },

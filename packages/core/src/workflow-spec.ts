@@ -204,6 +204,12 @@ export interface WorkflowContext {
   /** The agent types this session offers (the runner's `types`). */
   readonly agentTypes?: readonly string[];
   /**
+   * The agent types another harness runs (`claude`). A step of such a type names
+   * a free model string for that harness (shape-checked when it runs), not a
+   * `models` name (docs/feat/subagent-harness-runners.md D9).
+   */
+  readonly harnessTypes?: readonly string[];
+  /**
    * Text of a `prompt:` file, relative to `.tentacle/workflows/`. Absent → paths are
    * checked but their bytes are left unresolved (`promptText` undefined).
    */
@@ -758,7 +764,14 @@ export function validateWorkflowValue(raw: unknown, ctx: WorkflowContext = {}): 
         }
       }
       const model = agent.model;
-      if (model !== undefined && ctx.models !== undefined && !ctx.models.includes(model)) {
+      const harnessStep =
+        agent.type !== undefined && ctx.harnessTypes?.includes(agent.type) === true;
+      if (
+        model !== undefined &&
+        !harnessStep &&
+        ctx.models !== undefined &&
+        !ctx.models.includes(model)
+      ) {
         errors.push(
           `${at}.agent.model: "${model}" is not a model of this session${didYouMean(model, ctx.models)} — one of ${ctx.models.join(", ")}`,
         );
