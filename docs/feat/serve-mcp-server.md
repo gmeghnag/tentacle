@@ -901,3 +901,69 @@ Each test names its mutation (§9).
 *— claude-sonnet-5-5, 2026-11-25*
 
 ## Review
+
+**Verdict: REQUEST-CHANGES** (slice 1, M1–M5; `git diff main...HEAD` only)
+
+**Gate (re-run here):** the six touched test files (`mcp-wire`, `mcp-tools`, `mcp-caller-asks`, `mcp-tasks`, `cli/serve-mcp-e2e`, `a2a-http`): **95 pass / 0 fail**. `bun run lint`: clean (2522 files). `bun run typecheck`: clean. The full parallel `bun run test` was not run here; it is the orchestrator's gate.
+
+**Findings (HIGH/MEDIUM only):**
+
+1. **HIGH: the modern (2026-07-28) era is unusable by the real SDK client, so MCP tasks are unreachable.**
+   - Cause: only a task result carries `resultType` (`packages/daemon/src/mcp/wire.ts:272`). `server/discover`, `tools/list`, a plain `tools/call` and `tasks/*` results do not.
+   - Repro: `.tentacle/tmp/serve-mcp-server/review/sdk-modern.ts` runs `@modelcontextprotocol/client` 2.4.0 against `/mcp`:
+     ```
+     "default" → tools 6
+     {"mode":"auto"} → FAIL Invalid result for tools/list: missing required resultType — servers implementing protocol revision 2026-07-28 MUST include it
+     {"mode":{"pin":"2026-07-28"}} → FAIL (same)
+     ```
+   - This is worse than the M5 Blocker says. An `auto` client probes `server/discover`, which succeeds, so it picks the modern era and does NOT fall back to legacy. Every call then fails. Only a legacy-mode client works.
+   - So the advertised tasks extension is a trap for any modern client, and M4's task path has never been exercised by a real client.
+   - M5's acceptance is unmet: e2e client 1 (SDK + ext-tasks) and the modern half of client 2 are missing, and so is the live Claude Code check.
+   - Also still unverified against `@modelcontextprotocol/ext-tasks`: what `ttlMs: null` means, and the ext-tasks field names (M4 notes 4 and 1).
+   - Fix: add `resultType: "complete"` to every non-task modern result, then add the two SDK e2e tests back.
+2. **MEDIUM: a failed `durable()` write still hands out the task.**
+   - The default `durable` returns `true` whatever happened (`packages/daemon/src/mcp/tools.ts:497-502`: `persisted()` = `flush`, which never reports a failure). `packages/cli/src/serve-mcp-server.ts:68-74` wires no hook.
+   - This contradicts the plan's failure-mode row ("`durable()` write fails → `isError` … no unrecorded task is ever handed out") and the ext-tasks MUST.
+   - The M4 test proves the refusal path only with an injected `durable: false`. In production that path is dead code.
+   - The owner must decide this (Execution M5 drift 2); until then the row is false.
+3. **MEDIUM: an untrusted caller can get past the per-caller cap of 8 live sessions (Design §8) and exhaust the host's 64.**
+   - Two ways in:
+     - `start` checks `liveCount` (`tools.ts:350`), then awaits `attach` (`:363`) with nothing reserved, so N concurrent `session_start` calls all pass.
+     - `session_send` reopens an archived session through `attach` (`:384`) with no cap check at all.
+   - Running MCP sessions are attached, so the detached-cap eviction never picks them. `maxSessions` only refuses (`session-host.ts:1544-1548`).
+   - Result: the owner's phone or TUI is refused new sessions and reopens.
+   - The inverse problem (also a usability bug): idle, still-loaded sessions count toward the 8, and there is no close tool. So the 9th delegation is refused until the idle TTL archives one, and `session_cancel` frees nothing.
+
+**Premise spot-checks:**
+
+| Premise | Result |
+|---|---|
+| Context symptom (`/mcp` was 401/426 on main) | Now mounted. Its own guard test, Origin and 401, goes RED under mutation (below). |
+| `ws-server.ts` one `fetch` loop asks `[a2a, mcp]` | TRUE |
+| `ExternalRoute` moved, `A2ARoute` kept as an alias, A2A tests unchanged | TRUE (a2a-http green) |
+| `persisted()` = `flush`, which cannot report a failure | TRUE. This is finding 2. |
+| The SDK client works on the modern era | **FALSE.** This is finding 1. |
+
+**Mutations (each applied with Edit and reverted with the exact inverse Edit):**
+- `http.ts` Origin check disabled → RED: "guards: Origin 403 before auth…".
+- `tools.ts` `answerTask` `mine = true` (no per-task ask check) → RED: "a key answers only ITS task…".
+- With both mutations applied, the run was 45 pass / 2 fail. Both were reverted afterwards.
+- The executor's own mutation tables (M1–M5) are plausible. They were not re-run here.
+
+**Attacks tried:**
+1. A forged or foreign `taskId`. It is resolved under the TOKEN's caller prefix (`tools.ts:558`). Caller names exclude `-`, so prefixes cannot collide. **Holds.**
+2. A caller answering an ask from an owner-started turn, or an owner-only ask kind. Blocked by `isCallerTurn` plus the shared `resolveCallerAnswer`, `*_once` only (`tools.ts:860-862`, `:601-602`). **Holds.**
+3. A second session path. Everything goes through the A2A driver (`connectSession`/`openSession`), with no new daemon path. **Holds** (§7 single path, single broker).
+4. Archived reads. `read()` never attaches an archived session; `tasks/get` and `session_status` are read-only. **Holds.**
+5. The real SDK on the modern era. **Broken** (finding 1).
+6. The caps. **Bypassable** (finding 3).
+7. A protocol change. None was made, correctly: there is no `protocol.d/` note and no persisted-format change.
+
+**Executor behaviour:**
+- Honest. M5 stopped at the blocker instead of forcing the plan, and the open `durable` decision is surfaced.
+- Red-first was shown by mutation where the code came first, and this is disclosed.
+- The modern-era gap comes from M1 writing the wire with no real client to check against, and nothing caught it until M5.
+
+**Reviewer:** the same model family (Opus) as M2–M4's executor, in a fresh context only. Shared blind spots may survive.
+
+*— claude-opus-5-5, 2026-11-25*
