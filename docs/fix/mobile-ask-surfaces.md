@@ -865,3 +865,12 @@ the plan orders them; the kit's `askCard` is what S8 will compose for the run sc
 - Changelog: `changelog.d/mobile-ask-surfaces-s8.changed.md` (the `mobile-ask-surfaces.*` names were already taken by earlier slices).
 
 *— claude-sonnet-5-5, 2026-11-25*
+
+### S8 gate fix (e2e 44)
+
+- **Symptom:** `44-workflow-editor` red 2/2 at `extendedWaitUntil perm-sheet` after Run: the run screen showed only the slim row (`Review ⌃`), no sheet. Main passed because the hash approval was inline there; the flow change to `perm-sheet` is the intended S8 behaviour (D6/Q1: the run's OWN ask is a sheet over the run).
+- **Root cause (app bug, not a stale flow):** `SessionScreen`'s `rootRoutes` was memoized on `stackKey`, which is `stackSignature` = the *Sheet* routes only. Pushing WorkflowRuns/WorkflowRun over Session never changed it, so the memo kept `Computers>Sessions>Session`, `ownRunTopId` returned null, `inFront` stayed false and the sheet was never pushed. Evidence: a temporary on-screen dump (reverted) read `topRunId:null, origin.runId:"wf-1", f=false, rr=Computers>Sessions>Session`. S8's unit tests fed `ownRunTopId` hand-made routes, so they could not see it.
+- **Fix:** `SessionScreen.tsx` reads `navigation.getState()` fresh each render and memoizes on all route keys (`freshKey`). Red→green: wiring test `native-sheets-wiring.test.ts` "root routes are re-read FRESH…" fails on the old source (1 fail), passes now; `apps/mobile/test` 5433 pass; biome + `tsc -p apps/mobile` clean.
+- **e2e (sim 0B43D716):** 44 PASS twice (94 s, 95 s); 08-permission, 08b-permission-deny, 10-background-ask PASS. Note: two earlier red runs (21–28 s, at pairing) were another session's `e2e:mobile` using the same simulator (uninstalling the app) — unrelated to this fix.
+
+*— claude-sonnet-5-5, 2026-11-25*

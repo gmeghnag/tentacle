@@ -347,13 +347,14 @@ export function SessionScreen({
   const stackKey = useNavigationState((state) =>
     stackSignature(state.routes as readonly SheetRouteLike[]),
   );
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `stackKey` IS the routes' content.
-  const rootRoutes = useMemo(
-    () => navigation.getState()?.routes ?? [],
-    // `stackKey` IS the routes' content: every push/pop changes it, and the
-    // navigator's own state may still be uninitialised (`undefined`) at mount.
-    [stackKey, navigation],
-  );
+  // Read FRESH at every render, then memoized on ALL the routes' keys: `stackKey`
+  // covers only the Sheet routes, so a screen pushed over Session (the run) never
+  // changed it, the memo kept the routes from before, and `ownRunTopId` never saw
+  // the run (e2e 44, docs/fix/mobile-ask-surfaces.md S8 gate fix).
+  const freshRoutes = navigation.getState()?.routes ?? [];
+  const freshKey = freshRoutes.map((route) => route.key).join("|");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `freshKey` IS `freshRoutes`' content.
+  const rootRoutes = useMemo(() => freshRoutes, [freshKey]);
   // THIS session's sheet routes, bottom→top: two Session screens can be mounted
   // at once and every `Sheet` route lives in the same root stack.
   const sheetStack = useMemo(

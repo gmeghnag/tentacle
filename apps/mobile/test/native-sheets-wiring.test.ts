@@ -214,6 +214,16 @@ describe("S3 — the reconciler is the pure module's, and the screen only dispat
     expect(SCREEN).toContain("sheetsOfSession(rootRoutes, owner)");
   });
 
+  test("the root routes are re-read FRESH each render, never memoized on the hook's stale key (e2e 44)", () => {
+    // `stackKey` covers only the Sheet routes: a screen pushed over Session (the run)
+    // never changed it, a memo keyed on it kept the routes from before, `ownRunTopId`
+    // never saw the run, and the run's ask stayed a slim row instead of a sheet.
+    expect(SCREEN).toContain("const freshRoutes = navigation.getState()?.routes ?? [];");
+    expect(SCREEN).toContain("useMemo(() => freshRoutes, [freshKey])");
+    expect(SCREEN).toContain("freshRoutes.map((route) => route.key)");
+    expect(SCREEN).not.toContain("[stackKey, navigation]");
+  });
+
   test("the voice gates read `sessionInFront`, not the raw blur-able flag", () => {
     expect(SCREEN).toContain("sessionInFront(focused, sheetStack, topRunId !== null)");
     expect(SCREEN).toContain("focused: inFront");
