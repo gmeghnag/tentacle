@@ -109,7 +109,7 @@ export function createA2ARoute(options: A2AHttpOptions): A2ARoute {
       const context = defaultServerCallContextBuilder({
         extensions: undefined,
         user: { isAuthenticated: true, userName: caller },
-        headers: Object.fromEntries(req.headers.entries()),
+        headers: Object.fromEntries([...(req.headers as unknown as Iterable<[string, string]>)]),
         requestedVersion: req.headers.get(VERSION_HEADER) || undefined,
       });
       validateVersion(context.requestedVersion, options.card, "JSONRPC");

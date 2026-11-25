@@ -169,7 +169,7 @@ describe("A2A http route", () => {
         },
       }),
       duplex: "half",
-    });
+    } as RequestInit);
     expect(chunked.status).toBe(413);
     expect(seenCallers).toEqual([]);
   });
