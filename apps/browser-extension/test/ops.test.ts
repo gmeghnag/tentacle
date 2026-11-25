@@ -180,11 +180,59 @@ describe("browser extension ops", () => {
     await ops.handle({ op: "open", sessionUid: "s1", url: "https://a.test/" });
     await ops.handle({ op: "release", sessionUid: "s1" });
     expect(calls).toContain("groupTitle 7 tentacle · demo (ended)");
-    expect(ops.handover("nope", 3)).toBe(false);
+    expect(await ops.handover("nope", 3)).toBe(false);
     expect(sent.some((m) => m.event === "handover")).toBe(false);
     await claim(ops);
-    expect(ops.handover("s1", 3)).toBe(true);
+    expect(await ops.handover("s1", 3)).toBe(true);
     expect(sent).toContainEqual({ event: "handover", sessionUid: "s1", tab: 3 });
+  });
+
+  test("a handed-over tab joins the session's group, so the user sees it (D1, fix round 1)", async () => {
+    const { ops, calls, sent } = setup();
+    await claim(ops);
+    await ops.handle({ op: "open", sessionUid: "s1", url: "https://a.test/" });
+    expect(await ops.handover("s1", 3)).toBe(true);
+    expect(calls).toContain("group 3 7");
+    expect(sent).toContainEqual({ event: "handover", sessionUid: "s1", tab: 3 });
+    // A tab Chrome refuses to group is not handed over (the user could not see it).
+    const refused = setup();
+    await claim(refused.ops);
+    (refused.chrome.tabs as Any).group = async () => {
+      throw new Error("no such tab");
+    };
+    expect(await refused.ops.handover("s1", 3)).toBe(false);
+    expect(refused.sent.some((m) => m.event === "handover")).toBe(false);
+  });
+
+  test("dragging an owned tab out of the group takes it back: tab_closed, debugger released, no feed (§6)", async () => {
+    const { ops, sent, calls } = setup({ 100: { id: 100, url: "https://a.test/" } });
+    await claim(ops);
+    await ops.handle({ op: "open", sessionUid: "s1", url: "https://a.test/" });
+    await ops.handle({ op: "net", sessionUid: "s1", tab: 100, action: "start" });
+    const feed = {
+      tabId: 100,
+      url: "https://a.test/x",
+      method: "GET",
+      statusCode: 200,
+      type: "xhr",
+    };
+    // Owned: the headers feed flows; a regroup INTO our own group is no take-back.
+    ops.onWebRequest(feed);
+    expect(sent.filter((m) => m.event === "net")).toHaveLength(1);
+    ops.onTabUpdated(100, { groupId: 7 });
+    expect(sent).not.toContainEqual({ event: "tab_closed", tab: 100 });
+    // Dragged out (ungrouped = -1).
+    ops.onTabUpdated(100, { groupId: -1 });
+    expect(sent).toContainEqual({ event: "tab_closed", tab: 100 });
+    await Promise.resolve();
+    expect(calls).toContain("detach 100");
+    ops.onWebRequest(feed);
+    expect(sent.filter((m) => m.event === "net")).toHaveLength(1);
+    // Not ours at all: never a tab_closed, never a feed.
+    ops.onTabUpdated(55, { groupId: -1 });
+    ops.onWebRequest({ ...feed, tabId: 55 });
+    expect(sent).not.toContainEqual({ event: "tab_closed", tab: 55 });
+    expect(sent.filter((m) => m.event === "net")).toHaveLength(1);
   });
 });
 

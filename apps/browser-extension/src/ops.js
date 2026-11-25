@@ -135,8 +135,19 @@ export function createOps({
     }
   }
 
-  /** A navigation in an owned tab starts a new document: hook it as early as we can. */
+  /**
+   * A navigation in an owned tab starts a new document: hook it as early as we
+   * can. A `groupId` change that takes an owned tab OUT of its session's group
+   * is the user taking it back (§6): the session loses it like a closed tab.
+   */
   function onTabUpdated(tab, info) {
+    if (info?.groupId !== undefined && tabSession.has(tab)) {
+      const s = sessions.get(tabSession.get(tab));
+      if (s?.groupId !== info.groupId) {
+        takeBack(tab);
+        return;
+      }
+    }
     if (info?.status === "loading" && tabSession.has(tab)) void hookConsole(tab);
   }
 
@@ -326,7 +337,8 @@ export function createOps({
     });
   }
 
-  function onTabRemoved(tab) {
+  /** The tab is no longer the session's (closed, or dragged out of its group). */
+  function takeBack(tab) {
     const session = tabSession.get(tab);
     tabSession.delete(tab);
     tracing.delete(tab);
@@ -335,10 +347,23 @@ export function createOps({
     send({ event: "tab_closed", tab });
   }
 
-  /** The user gives a tab to a session (popup): the hub marks it handed-over. */
-  function handover(sessionUid, tab) {
+  function onTabRemoved(tab) {
+    takeBack(tab);
+  }
+
+  /**
+   * The user gives a tab to a session (popup): it joins the session's group
+   * (D1: the user sees what the session holds, and drags it out to take it
+   * back), then the hub marks it handed-over. A tab Chrome refuses to group is
+   * not handed over.
+   */
+  async function handover(sessionUid, tab) {
     if (!sessions.has(sessionUid)) return false;
-    tabSession.set(tab, sessionUid);
+    try {
+      await group(sessionUid, tab);
+    } catch {
+      return false;
+    }
     send({ event: "handover", sessionUid, tab });
     return true;
   }

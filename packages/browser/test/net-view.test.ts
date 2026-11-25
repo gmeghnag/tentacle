@@ -143,6 +143,73 @@ describe("maskEntry (get)", () => {
     expect(masked).toContain("user");
   });
 
+  test("raw header text (HTTP/1.x `*HeadersText`) is masked line by line", () => {
+    for (const [key, text] of [
+      ["headersText", `HTTP/1.1 200 OK\r\nSet-Cookie: sid=${SECRET}; Path=/\r\nX-Ok: 1\r\n\r\n`],
+      ["requestHeadersText", `GET /?q=1 HTTP/1.1\r\nCookie: sid=${SECRET}; theme=dark\r\n`],
+      ["headersText", `HTTP/1.1 200 OK\r\nAuthorization: Bearer ${SECRET}\r\n`],
+    ] as const) {
+      const masked = JSON.stringify(maskEntry({ params: { response: { [key]: text } } }, r));
+      expect(masked).not.toContain(SECRET);
+      expect(masked).toContain("‹masked");
+    }
+    const kept = JSON.stringify(
+      maskEntry(
+        { headersText: `HTTP/1.1 200 OK\r\nSet-Cookie: sid=${SECRET}; Path=/\r\nX-Ok: 1\r\n` },
+        r,
+      ),
+    );
+    expect(kept).toContain("HTTP/1.1 200 OK");
+    expect(kept).toContain("Set-Cookie: sid=‹masked cookie sid");
+    expect(kept).toContain("; Path=/");
+    expect(kept).toContain("X-Ok: 1");
+  });
+
+  test("`postDataEntries` (base64 request body) is decoded and masked, never echoed raw", () => {
+    const b64 = (s: string): string => Buffer.from(s).toString("base64");
+    const bodies = [
+      { ct: "application/x-www-form-urlencoded", text: `user=bob&password=${SECRET}` },
+      { ct: undefined, text: `password=${SECRET}&user=bob` },
+      { ct: "application/json", text: `{"user":"bob","password":"${SECRET}"}` },
+    ];
+    for (const { ct, text } of bodies) {
+      const masked = JSON.stringify(
+        maskEntry(
+          {
+            params: {
+              request: {
+                url: "https://a.test/login",
+                ...(ct !== undefined ? { headers: { "Content-Type": ct } } : {}),
+                postDataEntries: [{ bytes: b64(text) }],
+              },
+            },
+          },
+          r,
+        ),
+      );
+      expect(masked).not.toContain(SECRET);
+      expect(masked).not.toContain(b64(text));
+      expect(masked).toContain("user");
+    }
+    // A binary entry is summarised, not echoed.
+    const bin = JSON.stringify(
+      maskEntry(
+        { postDataEntries: [{ bytes: Buffer.from([0xff, 0xfe, 0x00, 0x81]).toString("base64") }] },
+        r,
+      ),
+    );
+    expect(bin).toContain("4 B");
+    expect(bin).not.toContain("//4AgQ==");
+  });
+
+  test("a urlencoded `postData` without a Content-Type masks its first field too", () => {
+    const masked = JSON.stringify(
+      maskEntry({ request: { postData: `password=${SECRET}&user=bob` } }, r),
+    );
+    expect(masked).not.toContain(SECRET);
+    expect(masked).toContain("user=bob");
+  });
+
   test("the tag is stable within one redactor, different across sessions", () => {
     const a = JSON.stringify(maskEntry({ headers: { Authorization: SECRET } }, r));
     const b = JSON.stringify(maskEntry({ headers: { Authorization: SECRET } }, r));

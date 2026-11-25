@@ -48,6 +48,16 @@ export function browserDefaultOff(enabled: Readonly<Record<string, boolean>>): s
   return (TOOL_GROUPS.browser ?? []).filter((tool) => !Object.hasOwn(enabled, tool));
 }
 
+/**
+ * A tool that is OFF unless the host's config turns it on (the browser group).
+ * A `serve` reload keeps such a tool off when its host built it off: a record
+ * cannot tell "the person turned it on" from "written before it existed"
+ * (all-on logs nothing), and the safe reading of either is off.
+ */
+export function isDefaultOffTool(name: string): boolean {
+  return (TOOL_GROUPS.browser ?? []).includes(name);
+}
+
 /** Built-ins in no group. */
 const UNGROUPED_TOOLS: readonly string[] = [
   "fs_read",

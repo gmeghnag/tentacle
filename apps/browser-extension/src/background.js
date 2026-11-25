@@ -56,8 +56,11 @@ chrome.webRequest.onCompleted.addListener((d) => ops.onWebRequest(d), { urls: ["
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg?.target !== "tentacle-bg") return false;
   if (msg.kind === "sessions") reply({ sessions: ops.listSessions(), linked: port !== null });
-  else if (msg.kind === "handover") reply({ ok: ops.handover(msg.sessionUid, msg.tab) });
-  else return false;
+  else if (msg.kind === "handover") {
+    // Async (the tab joins the session's group first): keep the channel open.
+    void ops.handover(msg.sessionUid, msg.tab).then((ok) => reply({ ok }));
+    return true;
+  }
   return false;
 });
 

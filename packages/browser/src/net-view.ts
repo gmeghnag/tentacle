@@ -152,15 +152,80 @@ function cookie(v: unknown, r: Redactor): unknown {
 }
 
 /**
- * Mask a CDP entry for `get`, structure first: headers by name, cookies
- * (`associatedCookies` / `blockedCookies`, U5) name kept and value masked,
- * request bodies and WS / SSE text through the body rules, every URL's
- * params, and any value under a secret-named key at any depth.
+ * Raw HTTP/1.x header text (`headersText`, `requestHeadersText`): each
+ * `Name: value` line through the header rules (so `Cookie` / `Set-Cookie` /
+ * `Authorization` lines are masked), any other line (the request / status
+ * line) through the URL rules.
  */
-export function maskEntry(v: unknown, r: Redactor, key?: string): unknown {
+function headersText(text: string, r: Redactor): string {
+  return text
+    .split(/(\r?\n)/)
+    .map((line) => {
+      const i = line.indexOf(":");
+      if (i <= 0 || /\s/.test(line.slice(0, i))) return r.url(line);
+      const name = line.slice(0, i);
+      const sp = /^\s*/.exec(line.slice(i + 1))?.[0] ?? "";
+      const value = line.slice(i + 1 + sp.length);
+      return `${name}:${sp}${r.headers({ [name]: value })[name] ?? ""}`;
+    })
+    .join("");
+}
+
+/** `a=1&b=2` with no Content-Type is still a form (its first field included). */
+const FORM = /^[^\s=&{[]+=[^\s&]*(?:&[^\s=&]+=[^\s&]*)*$/;
+
+/** A request body: the declared Content-Type, else a sniffed form, else the body rules. */
+function maskBody(text: string, r: Redactor, ct: string | undefined): string {
+  if (ct === undefined || ct === "") {
+    return FORM.test(text.trim())
+      ? r.body(text, "application/x-www-form-urlencoded")
+      : r.body(text);
+  }
+  return r.body(text, ct);
+}
+
+/** CDP `postDataEntries[].bytes` is base64: decode, mask as a body, never echo the raw bytes. */
+function postDataEntries(v: unknown[], r: Redactor, ct: string | undefined): unknown[] {
+  return v.map((x) => {
+    const o = obj(x);
+    const b = str(o.bytes);
+    if (b === undefined) return maskEntry(x, r);
+    let bytes: Uint8Array;
+    try {
+      bytes = Uint8Array.from(atob(b), (c) => c.charCodeAt(0));
+    } catch {
+      return { bytes: `‹undecodable ${b.length} chars›` };
+    }
+    try {
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      return { text: maskBody(text, r, ct) };
+    } catch {
+      return { binary: `${bytes.length} B` };
+    }
+  });
+}
+
+/** The Content-Type of a CDP request / response object, from its `headers`. */
+function contentTypeOf(o: Record<string, unknown>): string | undefined {
+  for (const [k, x] of Object.entries(obj(o.headers))) {
+    if (k.toLowerCase() === "content-type" && typeof x === "string") return x;
+  }
+  return undefined;
+}
+
+/**
+ * Mask a CDP entry for `get`, structure first: headers by name (object or raw
+ * `*HeadersText`), cookies (`associatedCookies` / `blockedCookies`, U5) name
+ * kept and value masked, request bodies (`postData`, base64 `postDataEntries`)
+ * and WS / SSE text through the body rules, every URL's params, and any value
+ * under a secret-named key at any depth.
+ */
+export function maskEntry(v: unknown, r: Redactor, key?: string, ct?: string): unknown {
   if (typeof v === "string") {
-    if (key === "postData" || key === "payloadData" || key === "data") return r.body(v);
+    if (key === "postData") return maskBody(v, r, ct);
+    if (key === "payloadData" || key === "data") return r.body(v);
     if (key === "cookieLine") return r.setCookie(v);
+    if (key === "headersText" || key === "requestHeadersText") return headersText(v, r);
     return r.url(v);
   }
   if (Array.isArray(v)) {
@@ -174,18 +239,20 @@ export function maskEntry(v: unknown, r: Redactor, key?: string): unknown {
         };
       });
     }
+    if (key === "postDataEntries") return postDataEntries(v, r, ct);
     return v.map((x) => maskEntry(x, r));
   }
   if (v !== null && typeof v === "object") {
     if (key === "headers" || key === "requestHeaders" || key === "responseHeaders") {
       return headers(v, r);
     }
+    const own = contentTypeOf(v as Record<string, unknown>);
     const out: Record<string, unknown> = {};
     for (const [k, x] of Object.entries(v)) {
       out[k] =
         isSecretName(k) && x !== null && typeof x !== "object" && x !== ""
           ? r.mask("field", k, String(x))
-          : maskEntry(x, r, k);
+          : maskEntry(x, r, k, own);
     }
     return out;
   }
