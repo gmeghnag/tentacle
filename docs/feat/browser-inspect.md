@@ -525,6 +525,21 @@ first merge after B1–B3.
   shared «tentacle» group. — **Rec: one per session** (D1 scope is visible to
   the user).
 
+### Owner answers (2026-11-25 ~11:50)
+
+- **Q1 pod sessions:** no browser tools in v1 (as recommended).
+- **Q2 «clear» and the log:** yes, the log = what the model saw, with the «secrets visible» label (as recommended).
+- **Q3 auto mode:** a SEPARATE browser switch; session auto-accept never answers browser asks; payment clicks and password/card typing always ask (as recommended).
+- **Q4 debugger policy:** pending spike B0 (infobar scope U1).
+- **Q5 distribution:** unpacked + pinned key, `tentacle browser install`, while pre-public (as recommended).
+- **Q6 Chrome not running:** `browser_open` launches it in the background (`open -g`, ≤ 10 s) (as recommended).
+- **Q7 screenshots:** session image store, deleted with the session (as recommended).
+- **Q8 `browser_eval` / upload / download:** the owner asked what each is — open.
+- **Q9 tab groups:** one per session, `tentacle · <title>` (as recommended).
+- **Routing (owner):** «ottimizziamo con sonnet quando possiamo» — B0 and B2 by Sonnet; Sonnet wherever a mistake is cheap to iterate on.
+
+*— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-25*
+
 ### Notes / debt
 
 - The phone-side WKWebView variant from the original TODO entry (in-app
