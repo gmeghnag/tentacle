@@ -795,4 +795,45 @@ schema change (`note.kind` is a free string), so `protocol.json` is untouched an
 
 ## Review
 
-*— (empty)*
+*— claude-opus-5-5, 2026-11-25* (fresh context; same model family as the S2/S4/S6 executor —
+shared blind spots possible)
+
+**Verdict: APPROVE** — no HIGH/MEDIUM finding. Scope: `git diff main...HEAD`, S1–S6.
+
+**Gate (re-run here):** `bun run typecheck` clean; `bun run lint` clean (2427 files, 0
+fixes); touched files (`agent/workflow-status-line`, `agent/status-line-request`,
+`daemon/workflow-hosted`, `core/workflow-ledger`): `109 pass, 0 fail`. Full `bun run test` not
+re-run here (left to the merge gate, §10).
+
+**Mutations (mine, reverted, `git status` clean after):**
+- `flushMidTurn` without `isWorkflowEnd` → killed (T6 fails).
+- `fireWorkflowWait` passes `attachedCount: 0` → killed (T8d fails).
+The executor's S1–S6 mutation tables are consistent with the tests read; the one survivor
+(«wake gate ignores autoWake») is equivalent as argued (no `wake` → no timer is armed:
+`trackWorkflowWait` returns on `this.wake === undefined`).
+
+**Attacks tried:**
+1. *Prompt-injection via the line* — `name` and step ids go through `idProblem`
+   (`core/src/workflow-spec.ts:385`, kebab-case) ; `reason`/`live`/titles never read
+   (`live` only compared with `"slot"`). Holds.
+2. *False «waits for the user»* — the driver's only `waiting` states are an ask
+   (`workflow-driver.ts:1606`) and the slot (`:1800`); `setStep` keeps a prior sub-agent `live`
+   label on an ask (≠ `"slot"`) and clears `live` on slot acquire (`:1796`). Holds (a sub-agent
+   label of literally `slot` would misclassify — negligible).
+3. *Cache breaking* — no `cache_control` anywhere in `packages/providers/src`; OpenAI-style
+   prefix caching keeps the tail-only line cheap. Holds.
+4. *Sub-agent sees the line / history leak* — only `Session.send/resume` pass `statusLine`;
+   `withStatusLine` copies; T2/T3/T4 pin it. Holds.
+5. *Double delivery / spurious wake after the mid-turn end note* — drained from the queue
+   (`kept` compaction), `notesFlushedMidTurn` set by both callers (`agent.ts:1643`, `:1880`).
+   Holds (T6).
+6. *Model approves its own wait* — no tool path; `autoApproves` false (T5). Holds.
+7. *Timer leaks* — `close` disarms; default timer is `unref`'d (`hosted-session.ts:528-532`).
+   Holds.
+
+**Accepted, not findings:** a client that attached at fire time and later detaches never gets
+that ask's wake (Design failure table); the late-drain path (run ends during the final round)
+is untested but shares `flushMidTurn`.
+
+**Executor behaviour:** honest Execution notes, drift recorded (T8b2 added when the plan's
+mutation premise proved wrong), red shown on assertions, mutation tables per slice.
