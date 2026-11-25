@@ -960,11 +960,11 @@ export function App({
   voicePhaseRef.current = voice.model.phase;
 
   /**
-   * The project's workflows at rest (docs/feat/workflows-ui.md D8 / slice 2b):
-   * ONE read, at the moments that can change it — no watcher, no polling. It is
-   * declared HERE because the line's ONE row is part of the layout's row budget
-   * (`app-layout.ts` counts it once), exactly as the rail's is. ONE write feeds
-   * both paint sites: the line (this state) and, if it is open, the panel.
+   * The project's workflow catalogue (docs/feat/workflows-ui.md D8 / slice 2b):
+   * ONE read, at the moments that can change it — no watcher, no polling. Since
+   * docs/fix/workflows-ux.md S1 the answer has ONE paint site, the `/workflow`
+   * panel's "Workflows" section: the at-rest line above the input is gone (it
+   * read like a lingering finished run).
    */
   const endedRunId = workflowRows?.find((run) => run.endedAt !== undefined)?.runId ?? null;
   /**
@@ -977,7 +977,7 @@ export function App({
     setCatalogue(cat);
     setCataloguePanelRef.current(cat);
   }, []);
-  const { catalogue: catalogueNow, refreshCatalogueRef } = useCatalogue({
+  const { refreshCatalogueRef } = useCatalogue({
     sessionRef,
     sessionId: sessionRef.current?.sessionId ?? null,
     running: st.running,
@@ -1001,8 +1001,7 @@ export function App({
     jobRowsRef,
     scheduleRows,
     workflowRun: currentRun(workflowRows),
-    workflowCatalogue: catalogueNow,
-    home,
+    sessionOpened: sessionRef.current?.opened?.() ?? true,
     drawerRow,
     drawerJob,
     jobOutput: jobOutputRef.current,

@@ -77,7 +77,6 @@ export function hubContextOf(input: {
   readonly link: "up" | "down";
   readonly turn: TurnRow | null;
   readonly ended: EndReason | null;
-  readonly editable: boolean;
   readonly dictation: boolean;
   /** `activityView(...).groups.length === 0`: nothing for Activity to show (mobile-hub-tap). */
   readonly activityEmpty?: boolean;
@@ -105,8 +104,9 @@ export function hubContextOf(input: {
   readonly compacting?: boolean;
   /**
    * The computer's workflow runs as the hub needs them (docs/feat/workflows-ui.md
-   * D4, `workflowsHub`): how many wait on the person, and why there is nothing to
-   * open (or null). Absent: not read yet — unknown, never empty.
+   * D4 + fix/workflows-ux D6, `workflowsHub`): how many wait on the person, and
+   * why there is nothing to open (or null). Absent: not read yet — unknown, never
+   * empty.
    */
   readonly workflows?: { readonly needYou: number; readonly empty: string | null };
 }): HubContext {
@@ -115,7 +115,6 @@ export function hubContextOf(input: {
     link: input.link,
     turn: input.turn,
     ended: input.ended,
-    editable: input.editable,
     dictation: input.dictation,
     schedules: wakes.schedules,
     nextWakeInMs: wakes.nextWakeInMs,
@@ -246,7 +245,6 @@ export function hubA11yActions(
 const ENTRY_IDS: readonly string[] = [
   "stop",
   "steer",
-  "attach",
   "activity",
   "artifacts",
   "sessions",

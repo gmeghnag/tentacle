@@ -279,7 +279,23 @@ describe("the hook sees exactly the watched updates, in emit order", () => {
         tokens: 0,
         startedAt: 1,
         endedAt: 2,
-        steps: [{ id: "plan", kind: "agent", where: "local", state: "ok", attempt: 1, round: 0 }],
+        // Every field the wire row requires (a partial row is refused by
+        // `publishWorkflows`' schema check and never reaches the hook).
+        history: [],
+        historyDropped: 0,
+        steps: [
+          {
+            id: "plan",
+            kind: "agent",
+            where: "local",
+            state: "ok",
+            attempt: 1,
+            round: 0,
+            next: null,
+            onFail: null,
+            retry: 0,
+          },
+        ],
       },
     ]);
     await flush();

@@ -511,6 +511,18 @@ async function main(): Promise<number> {
     await writeFile(join(runDir, "project", "q3-report.pdf"), reportPdf());
     await writeFile(join(runDir, "project", "hero.png"), pngFixture(1280, 720));
   }
+  await mkdir(join(runDir, ".tentacle", "workflows"), { recursive: true });
+  await writeFile(
+    join(runDir, ".tentacle", "workflows", "demo-note.yaml"),
+    await readFile(join(REPO, "apps", "mobile", "e2e", "fixtures", "demo-note.yaml"), "utf8"),
+  );
+  // Flow 45's two runs (docs/fix/workflows-ux.md S7), started by `workflowRunsOf`.
+  for (const name of ["run-view-pass", "run-view-loop"]) {
+    await writeFile(
+      join(runDir, ".tentacle", "workflows", `${name}.yaml`),
+      await readFile(join(REPO, "apps", "mobile", "e2e", "fixtures", `${name}.yaml`), "utf8"),
+    );
+  }
   // The mock model runs in THIS process: no extra children to reap.
   const { startMockModel } = await import("./mock-model.ts");
   const mock = startMockModel({ holdMs: 120_000 });
@@ -641,6 +653,7 @@ async function main(): Promise<number> {
       historyOf,
       queueStateOf,
       composeSessionOf,
+      workflowRunsOf,
       fileExists,
       turnOnce,
     } = await import("./seed.ts");
@@ -996,7 +1009,12 @@ async function main(): Promise<number> {
               runDir,
               seeded,
               hooks.address,
-              () => composeSessionOf(endpoint),
+              // Flow 45's session holds two ENDED workflow runs (S7); every
+              // other flow's own session is a plain compose session.
+              (name) =>
+                name === "45-workflow-run-view"
+                  ? workflowRunsOf(endpoint)
+                  : composeSessionOf(endpoint),
               flowTimeoutMs,
             );
           } catch (error) {
@@ -1828,7 +1846,7 @@ export const FLOWS: readonly string[] = [
   "33-hub",
   // docs/feat/mobile-e2e-gate.md: one flow per hub item (fan + More), each
   // asserting the item opens what it names — on a session of its own.
-  "34-hub-attach",
+  "34-hub-workflows",
   "34-hub-activity",
   "34-hub-artifacts",
   "34-hub-tools",
@@ -1857,6 +1875,11 @@ export const FLOWS: readonly string[] = [
   // the phone, Review, Save through `serve`, Run into the hash approval (denied).
   // Its own session; it writes `.tentacle/workflows/wfedit.yaml` in the project.
   "44-workflow-editor",
+  // docs/fix/workflows-ux.md S7: a finished run's graph, a never-run step's
+  // "Not run — …" detail under its nav bar, and the list toggle. Its own session,
+  // holding two ENDED runs. AFTER 34-hub-workflows and 44: both assert the
+  // computer's run list is empty, and these runs are listed computer-wide.
+  "45-workflow-run-view",
   // docs/feat/mobile-file-preview-cards.md: the transcript's preview cards (a
   // PDF page, an image, markdown lines, an HTML page), light and dark.
   "36-preview-cards",
@@ -1955,7 +1978,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "32-chart-interact": "CHART2_ID",
   "33-hub": "HUB_ID",
   // docs/feat/mobile-e2e-gate.md: ONE variable, a fresh session per flow.
-  "34-hub-attach": "HUBITEM_ID",
+  "34-hub-workflows": "HUBITEM_ID",
   "34-hub-activity": "HUBITEM_ID",
   "34-hub-artifacts": "HUBITEM_ID",
   "34-hub-tools": "HUBITEM_ID",
@@ -1981,6 +2004,8 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "41-transcript-type-shots": "TRANSCRIPT_ID",
   // docs/feat/workflow-editor.md slice 7c: the editor's create → save → Run flow.
   "44-workflow-editor": "WFEDIT_ID",
+  // docs/fix/workflows-ux.md S7: a session holding the two seeded, ENDED runs.
+  "45-workflow-run-view": "RUNVIEW_ID",
 };
 
 /** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */
@@ -2111,8 +2136,8 @@ async function spawnFlow(
     readonly askIds: readonly string[];
   },
   hooks: string,
-  /** Create one compose session on demand (the harness's own client). */
-  newComposeSession: () => Promise<string>,
+  /** Create the flow's own session on demand (the harness's own client), by flow name. */
+  newComposeSession: (flowName: string) => Promise<string>,
   /** One attempt is killed after this long (a hung driver must not stall the run). */
   timeoutMs: number,
 ): Promise<AttemptStatus> {
@@ -2121,14 +2146,13 @@ async function spawnFlow(
   // seeding all of them up front pushed the earlier flows' rows off the visible
   // list (found by the first iOS 26 run: flows 02/05/06/07/08 failed).
   // `flow` is the yaml PATH: the map is keyed by the flow's name.
-  const compose =
-    COMPOSE_SESSION_VARS[
-      flow
-        .split("/")
-        .pop()
-        ?.replace(/\.yaml$/, "") ?? ""
-    ];
-  const fresh = compose === undefined ? {} : { [compose]: await newComposeSession() };
+  const flowName =
+    flow
+      .split("/")
+      .pop()
+      ?.replace(/\.yaml$/, "") ?? "";
+  const compose = COMPOSE_SESSION_VARS[flowName];
+  const fresh = compose === undefined ? {} : { [compose]: await newComposeSession(flowName) };
   // The seeded ids the flows interpolate come from ONE map (`shard.ts`), the
   // same one the splitter unions over: a new seeded session cannot be handed to
   // the flows yet stay invisible to "these flows cannot be separated".

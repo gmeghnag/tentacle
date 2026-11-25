@@ -4,9 +4,11 @@
  *
  * The project root IS the directory tentacle runs in (`cwd`, owner 23/11
  * ~11:25): there is no upward walk, so callers pass the cwd they already have.
- * What lives here is therefore (a) the names, (b) ONE symlink check over every
- * component of a path inside a base, and (c) a bounded, read-only, DISPLAY-ONLY
- * hint that says where workflows were found higher up.
+ * What lives here is therefore (a) the names and (b) ONE symlink check over
+ * every component of a path inside a base. The bounded "workflows higher up"
+ * hint that used to live here was removed end to end (docs/fix/workflows-ux.md
+ * S8c, owner Q2): nothing looks above the cwd, so there is no seam for a listing
+ * either.
  *
  * Pure: no `node:fs`, no clock, no process — the I/O is injected (`ProjectFs`),
  * the one no-links check. The `.tentacle/hide` reader keeps its own FIFO-safe
@@ -36,14 +38,10 @@ export const WORKFLOW_NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 export type ProjectEntryKind = "dir" | "file" | "link" | "other";
 
-/** The reads this module needs, injected (the real one is `cli/src/project-fs.ts`). */
+/** The read this module needs, injected (the real one is `cli/src/project-fs.ts`). */
 export interface ProjectFs {
   /** `lstat`: `undefined` when there is nothing there (ENOENT/ENOTDIR). */
   lstat(path: string): ProjectEntryKind | undefined;
-  /** The entries of `dir`; `undefined` when it cannot be read. */
-  list(
-    dir: string,
-  ): readonly { readonly name: string; readonly kind: ProjectEntryKind }[] | undefined;
 }
 
 /** `resolveInside`: the path (absolute), or why it is not usable. */
@@ -52,44 +50,11 @@ export type InsidePath =
   | { readonly absent: true }
   | { readonly problem: string };
 
-/** How many ancestors `workflowsAbove` looks at (parent … great-great-grandparent). */
-export const WORKFLOWS_ABOVE_DEPTH = 4;
-/** More workflows than this in one folder are counted as this many (a hint, not an inventory). */
-export const WORKFLOWS_ABOVE_MAX_COUNT = 200;
-
-/** The ancestors of `WorkflowsAbove`'s display-only hint. */
-export interface WorkflowsAboveHint {
-  /** The absolute `.tentacle/workflows` folder found — for DISPLAY only. */
-  readonly dir: string;
-  /** How many `*.yaml` workflow files it holds (capped). */
-  readonly count: number;
-}
-
 const SEPARATORS = /[\\/]+/;
-
-/** `a/b` from `a`, `a/b/`; `undefined` at the root (nothing above it). */
-function parentOf(path: string): string | undefined {
-  const trimmed = path.replace(/[\\/]+$/, "");
-  if (trimmed === "") {
-    return undefined;
-  }
-  const cut = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  if (cut < 0) {
-    return undefined;
-  }
-  const head = trimmed.slice(0, cut);
-  return /^[A-Za-z]:$/.test(head) || head === "" ? `${head}/` : head;
-}
 
 /** `base` + `rel`, with exactly one separator between them. */
 function joinPath(base: string, rel: string): string {
   return /[\\/]$/.test(base) ? `${base}${rel}` : `${base}/${rel}`;
-}
-
-/** The same path without trailing separators, for comparing two spellings. */
-function normalize(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/, "");
-  return trimmed === "" ? "/" : trimmed;
 }
 
 /**
@@ -123,50 +88,4 @@ export function resolveInside(base: string, rel: string, fs: ProjectFs): InsideP
     }
   }
   return { path: current };
-}
-
-/** A `*.yaml` in a workflows folder: a regular file whose stem is a workflow name. */
-function isWorkflowFile(entry: { name: string; kind: ProjectEntryKind }): boolean {
-  if (entry.kind !== "file" || !entry.name.endsWith(".yaml")) {
-    return false;
-  }
-  return WORKFLOW_NAME_RE.test(entry.name.slice(0, -".yaml".length));
-}
-
-/**
- * The DISPLAY-ONLY "workflows higher up" hint: the nearest of the 4 ancestors of
- * `cwd` that holds a real `.tentacle/workflows` with at least one workflow file.
- *
- * It never contributes a file to a run: `loadWorkflowSource`, the catalogue and
- * the driver take the cwd, and nothing here can be asked for. No file is opened,
- * no YAML parsed, no hash computed, nothing written — at most 8 `lstat` and one
- * listing per ancestor tried. `$HOME` and `/` are never looked at (a dotfiles
- * `~/.tentacle` would otherwise claim every folder), and a symlinked `.tentacle`
- * or `workflows` is skipped, never followed.
- */
-export function workflowsAbove(
-  cwd: string,
-  fs: ProjectFs,
-  options: { readonly home?: string } = {},
-): WorkflowsAboveHint | undefined {
-  const home = options.home === undefined ? undefined : normalize(options.home);
-  let at = parentOf(cwd);
-  for (let depth = 0; depth < WORKFLOWS_ABOVE_DEPTH && at !== undefined; depth++) {
-    const folder = normalize(at);
-    if (folder === "/" || (home !== undefined && folder === home)) {
-      return undefined;
-    }
-    const dir = `${folder}/${PROJECT_PATHS.workflows}`;
-    if (fs.lstat(`${folder}/${TENTACLE_DIR}`) === "dir" && fs.lstat(dir) === "dir") {
-      const entries = fs.list(dir);
-      if (entries !== undefined) {
-        const count = entries.filter(isWorkflowFile).length;
-        if (count > 0) {
-          return { dir, count: Math.min(count, WORKFLOWS_ABOVE_MAX_COUNT) };
-        }
-      }
-    }
-    at = parentOf(folder);
-  }
-  return undefined;
 }

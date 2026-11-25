@@ -222,7 +222,21 @@ function runRow(over: {
     tokens: 0,
     startedAt: 1,
     ...(over.endedAt !== undefined ? { endedAt: over.endedAt } : {}),
-    steps: [{ id: "plan", kind: "agent", where: "local", state: "ok", attempt: 1, round: 0 }],
+    history: [],
+    historyDropped: 0,
+    steps: [
+      {
+        id: "plan",
+        kind: "agent",
+        where: "local",
+        state: "ok",
+        attempt: 1,
+        round: 0,
+        next: null,
+        onFail: null,
+        retry: 0,
+      },
+    ],
   };
 }
 

@@ -29,6 +29,9 @@ const step = (id: string, state: string, over: Partial<WorkflowStepRow> = {}): W
   state,
   attempt: 0,
   round: 0,
+  next: null,
+  onFail: null,
+  retry: 0,
   ...over,
 });
 
@@ -40,6 +43,8 @@ const run = (over: Partial<WorkflowRow> = {}): WorkflowRow => ({
   state: "ok",
   tokens: 0,
   startedAt: 1_000,
+  history: [],
+  historyDropped: 0,
   steps: [step("build", "ok"), step("review", "error"), step("merge", "ok")],
   ...over,
 });
@@ -153,9 +158,30 @@ describe("a step's detail: read on demand, held per step", () => {
   test("the attempt asked for is passed through (a step that ran twice)", async () => {
     const h = harness();
     await ready(h);
-    h.controller.openStep("review", 1);
+    h.controller.openStep("review", { attempt: 1 });
     await h.flush();
     expect(h.stepCalls).toEqual([{ runId: "wf-1", stepId: "review", attempt: 1 }]);
+    // The visit is kept for the nav bar (S7: position + neighbours are per visit).
+    expect(h.controller.state().openVisit).toEqual({ attempt: 1 });
+  });
+
+  test("S7 · a visit of an EARLIER goto round reads the latest, never that round's attempt", async () => {
+    // The read selects by attempt alone: review round 0 attempt 0 would match the
+    // round-1 execution's attempt 0 — so an older round's visit names no attempt.
+    const opened = async (visit: { attempt: number; round: number }) => {
+      const h = harness();
+      h.controller.start();
+      await h.flush();
+      h.push([run({ steps: [step("review", "ok", { round: 1 })] })]);
+      h.controller.openStep("review", visit);
+      await h.flush();
+      return h;
+    };
+    const older = await opened({ attempt: 0, round: 0 });
+    expect(older.stepCalls).toEqual([{ runId: "wf-1", stepId: "review" }]);
+    expect(older.controller.state().openVisit).toEqual({ attempt: 0, round: 0 });
+    const current = await opened({ attempt: 0, round: 1 });
+    expect(current.stepCalls).toEqual([{ runId: "wf-1", stepId: "review", attempt: 0 }]);
   });
 
   test("ONE read in flight per step: a second open while it flies does not refetch", async () => {
@@ -235,9 +261,9 @@ describe("a step's detail: read on demand, held per step", () => {
     h.controller.start();
     await h.flush();
     h.push([run({ steps: [step("review", "error", { attempt: 1 })] })]);
-    h.controller.openStep("review", 0);
+    h.controller.openStep("review", { attempt: 0 });
     await h.flush();
-    h.controller.openStep("review", 0);
+    h.controller.openStep("review", { attempt: 0 });
     await h.flush();
     expect(h.stepCalls).toHaveLength(1);
   });
@@ -317,6 +343,83 @@ describe("the four answers a read can give, kept DISTINCT", () => {
     await h.flush();
     expect(h.stepCalls).toEqual([]);
     expect(h.controller.state().steps).toHaveLength(0);
+  });
+});
+
+/**
+ * docs/fix/workflows-ux.md S7/D5: a step that NEVER RAN has no execution to read.
+ * The daemon answers `{}` for it, so the old path sent a `workflowStep` request for
+ * a detail that cannot exist and painted a `missing` record ("no longer available")
+ * — a false story about a step that simply was not run. The projection already
+ * knows (`phase: "skipped"`), so the screen must not ask at all.
+ */
+describe("S7 · a not-run step sends no read, and says why in words", () => {
+  /** demo-note as run ① ended: review passed first try, so `fix` never ran. */
+  const ranRun = (): WorkflowRow =>
+    run({
+      state: "ok",
+      endedAt: 2_000,
+      steps: [
+        step("collect", "ok", { kind: "run", next: "draft" }),
+        step("draft", "ok", { next: "review" }),
+        step("review", "ok", { next: "confirm", onFail: { goto: "fix", max: 2, taken: 0 } }),
+        step("fix", "pending", { next: "review" }),
+        step("confirm", "pending", { kind: "approve", next: "archive" }),
+        step("archive", "pending", { kind: "run", next: null }),
+      ],
+    });
+  const notRunOf = (h: ReturnType<typeof harness>, id: string) =>
+    h.controller.state().steps.find((s) => s.step.id === id)?.detail;
+
+  test("the not-run step is `notRun` and NOTHING is sent for it", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([ranRun()]);
+    h.controller.openStep("fix");
+    await h.flush();
+    expect(h.stepCalls).toEqual([]);
+    expect(notRunOf(h, "fix")).toEqual({ kind: "notRun" });
+  });
+
+  test("…while a step that DID run is still read (the guard is the projection, not the ended run)", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([ranRun()]);
+    h.controller.openStep("review");
+    await h.flush();
+    expect(h.stepCalls).toEqual([{ runId: "wf-1", stepId: "review" }]);
+    expect(notRunOf(h, "review")).toEqual({ kind: "loaded", detail: detail() });
+  });
+
+  test("a not-run step never reads `loading` or `missing` (nothing is on its way)", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([ranRun()]);
+    h.controller.openStep("fix");
+    // The SAME state() call that opens it: no skeleton, no "no longer available".
+    expect(notRunOf(h, "fix")).toEqual({ kind: "notRun" });
+    await h.flush();
+    expect(notRunOf(h, "fix")).toEqual({ kind: "notRun" });
+  });
+
+  test("a step the run still says will run is NOT treated as not-run", async () => {
+    // A live run: `confirm` is merely not yet, so a read is legitimate (the daemon
+    // answers what it has) — the guard is `skipped` alone.
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([
+      run({
+        state: "running",
+        steps: [step("collect", "ok", { next: "confirm" }), step("confirm", "pending")],
+      }),
+    ]);
+    h.controller.openStep("confirm");
+    await h.flush();
+    expect(h.stepCalls).toEqual([{ runId: "wf-1", stepId: "confirm" }]);
   });
 });
 

@@ -1671,10 +1671,17 @@ export class RemoteClient {
    * differently on screen: "update tentacle" vs "workflows only on a laptop").
    */
   workflowCatalogue(
-    sessionId: string,
+    sessionId: string | undefined,
     params: WorkflowCatalogueParams,
   ): Promise<WorkflowCatalogueResult | { unsupported: true }> {
-    return this.sessionCall(sessionId, Method.WorkflowCatalogue, params, "once").then(
+    const call =
+      sessionId === undefined
+        ? // No session (a client opens its lazily, at the first prompt): a plain
+          // request, the `session/skills`/`session/tools` shape
+          // (docs/fix/workflows-ux.md S8b).
+          this.call(this.peer, Method.WorkflowCatalogue, params)
+        : this.sessionCall(sessionId, Method.WorkflowCatalogue, params, "once");
+    return call.then(
       (result) => result as WorkflowCatalogueResult,
       (error: unknown): WorkflowCatalogueResult | { unsupported: true } => {
         if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {

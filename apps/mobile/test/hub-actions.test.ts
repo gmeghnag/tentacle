@@ -43,7 +43,6 @@ const TURN = { kind: "turn", key: "t1", turnId: "t1", own: true } as const;
 const MAIN: HubEntries = {
   stop: noop,
   steer: noop,
-  attach: noop,
   activity: noop,
   sessions: noop,
   info: noop,
@@ -75,7 +74,6 @@ const IDLE_CTX: HubContext = {
   link: "up",
   turn: null,
   ended: null,
-  editable: true,
   dictation: false,
   schedules: 0,
   nextWakeInMs: null,
@@ -108,14 +106,14 @@ const ids = (items: readonly { id: string }[]): string[] => items.map((i) => i.i
 describe("hubActions: order and presence", () => {
   test("idle: the canonical order, no More while it fits in six", () => {
     const a = hubActions(IDLE_CTX, MAIN);
-    expect(ids(a.fan)).toEqual(["attach", "activity", "sessions", "info", "new"]);
+    expect(ids(a.fan)).toEqual(["activity", "sessions", "info", "new"]);
     expect(a.more).toEqual([]);
     expect(ids(a.all)).toEqual(ids(a.fan));
   });
 
   test("running: Stop, Steer first, then the canonical list; Stop is the only red item", () => {
     const a = hubActions(RUNNING, MAIN);
-    expect(ids(a.all)).toEqual(["stop", "steer", "attach", "activity", "sessions", "info", "new"]);
+    expect(ids(a.all)).toEqual(["stop", "steer", "activity", "sessions", "info", "new"]);
     expect(a.all.filter((i) => i.danger).map((i) => i.id)).toEqual(["stop"]);
     expect(a.all[0]?.label).toBe("Stop");
   });
@@ -132,12 +130,16 @@ describe("hubActions: order and presence", () => {
   });
 
   test("an ended session: no turn pair, no Attach", () => {
-    const a = hubActions({ ...RUNNING, ended: "closed", editable: false }, MAIN);
+    const a = hubActions({ ...RUNNING, ended: "closed" }, MAIN);
     expect(ids(a.all)).toEqual(["activity", "sessions", "info", "new"]);
   });
 
-  test("Attach only while the session is editable", () => {
-    expect(ids(hubActions({ ...IDLE_CTX, editable: false }, MAIN).all)).not.toContain("attach");
+  test("Attach is gone from the hub (owner 2026-11-24: the composer `+` does it)", () => {
+    const withAttach = { ...MAIN, attach: noop } as unknown as HubEntries;
+    expect(ids(hubActions(IDLE_CTX, withAttach).all)).not.toContain("attach");
+    expect(ids(hubActions(RUNNING, withAttach).all)).not.toContain("attach");
+    // The composer's own handler is untouched — it is not a hub entry at all.
+    expect(Object.keys(MAIN)).not.toContain("attach");
   });
 
   test("a missing entry is an absent action (P6/M9), whatever the context says", () => {
@@ -164,7 +166,7 @@ describe("Stop while the phone compacts (mobile-hub-commands C2 item 14)", () =>
   const COMPACTING: HubContext = { ...IDLE_CTX, compacting: true };
   test("Stop is offered with no turn while my compaction runs; Steer is not", () => {
     const a = hubActions(COMPACTING, EVERY);
-    expect(ids(a.all).slice(0, 2)).toEqual(["stop", "attach"]);
+    expect(ids(a.all).slice(0, 2)).toEqual(["stop", "activity"]);
     expect(ids(a.all)).not.toContain("steer");
     expect(resolveCommit("stop", COMPACTING, EVERY, hubOpen(COMPACTING))).toEqual({
       kind: "run",
@@ -182,7 +184,6 @@ describe("Stop while the phone compacts (mobile-hub-commands C2 item 14)", () =>
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       compacting: true,
     });
@@ -208,7 +209,6 @@ describe("hubActions: badges and promotion", () => {
     expect(ids(a.all)).toEqual([
       "artifacts",
       "scheduled",
-      "attach",
       "activity",
       "tools",
       "commands",
@@ -226,7 +226,6 @@ describe("hubActions: badges and promotion", () => {
   test("without badges nothing moves (muscle memory)", () => {
     const a = hubActions({ ...IDLE_CTX, schedules: 1, dictation: true }, EVERY);
     expect(ids(a.all)).toEqual([
-      "attach",
       "activity",
       "artifacts",
       "tools",
@@ -242,17 +241,17 @@ describe("hubActions: badges and promotion", () => {
 
 describe("hubActions: six slots (M14)", () => {
   test("exactly six: all in the fan, no More", () => {
-    const a = hubActions({ ...IDLE_CTX }, { ...MAIN, artifacts: noop });
+    const a = hubActions({ ...IDLE_CTX }, { ...MAIN, artifacts: noop, tools: noop });
     expect(a.all.length).toBe(6);
     expect(ids(a.fan)).toEqual(ids(a.all));
     expect(a.more).toEqual([]);
   });
 
-  test("eleven candidates: the first five + More, and the six others in More in canonical order", () => {
+  test("ten candidates: the first five + More, the five others in More in canonical order", () => {
     const a = hubActions({ ...RUNNING, schedules: 1 }, EVERY);
-    expect(a.all.length).toBe(11);
-    expect(ids(a.fan)).toEqual(["stop", "steer", "attach", "activity", "artifacts", "more"]);
-    expect(ids(a.more)).toEqual(["tools", "commands", "sessions", "info", "scheduled", "new"]);
+    expect(a.all.length).toBe(10);
+    expect(ids(a.fan)).toEqual(["stop", "steer", "activity", "artifacts", "tools", "more"]);
+    expect(ids(a.more)).toEqual(["commands", "sessions", "info", "scheduled", "new"]);
     expect(a.fan[5]?.label).toBe("More");
     expect(ids(a.all)).not.toContain("more");
   });
@@ -331,18 +330,6 @@ describe("resolveCommit: the world is read again at release (M7/M8)", () => {
       kind: "noop",
       notice: NO_CONNECTION,
     });
-  });
-
-  test("Attach on an ended session → a silent no-op, even where the prompt is editable", () => {
-    expect(
-      resolveCommit("attach", { ...IDLE_CTX, ended: "closed", editable: false }, MAIN, OPENED_IDLE),
-    ).toEqual({
-      kind: "noop",
-      notice: null,
-    });
-    expect(
-      resolveCommit("attach", { ...IDLE_CTX, ended: "closed", editable: true }, MAIN, OPENED_IDLE),
-    ).toEqual({ kind: "noop", notice: null });
   });
 
   test("an entry gone since the open → a silent no-op; More and live entries run", () => {
@@ -604,11 +591,11 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
     expect(a.all[at]?.label).toBe("Tools");
   });
 
-  test("the idle fan is Attach · Activity · Artifacts · Tools · Commands · More (owner Q1 O1)", () => {
+  test("the idle fan is Activity · Artifacts · Tools · Commands · Sessions · More (Q1 O1)", () => {
     // Six candidates, so the SIXTH slot is More and Session info goes into it.
     const a = hubActions(IDLE_CTX, EVERY);
-    expect(ids(a.fan)).toEqual(["attach", "activity", "artifacts", "tools", "commands", "more"]);
-    expect(ids(a.more)).toEqual(["sessions", "info", "new"]);
+    expect(ids(a.fan)).toEqual(["activity", "artifacts", "tools", "commands", "sessions", "more"]);
+    expect(ids(a.more)).toEqual(["info", "new"]);
     expect(a.fan[5]?.label).toBe("More");
   });
 
@@ -631,7 +618,6 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
     });
     expect(unknown.toolsEmpty).toBe(false);
@@ -647,7 +633,6 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       tools: toolsSummary(LOADING_TOOLS),
     });
@@ -660,7 +645,6 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       tools: { known: true, total: 2, on: 2 },
     });
@@ -672,7 +656,6 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       tools: { known: true, total: 0, on: 0 },
     });
@@ -685,7 +668,6 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       tools: { known: true, total: 4, on: 4 },
     });
@@ -696,7 +678,6 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       tools: { known: true, total: 4, on: 3 },
     });
@@ -709,7 +690,6 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       tools: { known: true, total: 4, on: 1 },
     });
@@ -729,22 +709,22 @@ describe("the Tools item (docs/feat/mobile-hub-tools.md D3)", () => {
 });
 
 describe("the Commands item (docs/feat/mobile-hub-commands.md C1, owner Q1 O1)", () => {
-  test("the idle fan is exactly O1: Attach · Activity · Artifacts · Tools · Commands · More", () => {
+  test("the idle fan is exactly O1: Activity · Artifacts · Tools · Commands · Sessions · More", () => {
     const a = hubActions(IDLE_CTX, EVERY);
-    expect(ids(a.fan)).toEqual(["attach", "activity", "artifacts", "tools", "commands", "more"]);
+    expect(ids(a.fan)).toEqual(["activity", "artifacts", "tools", "commands", "sessions", "more"]);
     expect(a.all.find((i) => i.id === "commands")?.label).toBe("Commands");
   });
 
-  test("More starts Sessions · Session info, and no Commands (it is in the fan)", () => {
+  test("More starts Session info, and no Commands (it is in the fan)", () => {
     const a = hubActions(IDLE_CTX, EVERY);
-    expect(ids(a.more).slice(0, 2)).toEqual(["sessions", "info"]);
+    expect(ids(a.more).slice(0, 1)).toEqual(["info"]);
     expect(ids(a.more)).not.toContain("commands");
   });
 
   test("during a turn Stop · Steer push Tools and Commands into More (README Q1)", () => {
     const a = hubActions(RUNNING, EVERY);
-    expect(ids(a.fan)).toEqual(["stop", "steer", "attach", "activity", "artifacts", "more"]);
-    expect(ids(a.more)).toEqual(["tools", "commands", "sessions", "info", "new"]);
+    expect(ids(a.fan)).toEqual(["stop", "steer", "activity", "artifacts", "tools", "more"]);
+    expect(ids(a.more)).toEqual(["commands", "sessions", "info", "new"]);
   });
 
   test("an ended session has no Commands: nothing to run, Rename stays on the title", () => {
@@ -790,7 +770,6 @@ describe("an empty Artifacts is dimmed too (owner Q3 A)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
     });
     expect(unknown.artifactsEmpty).toBe(false);
@@ -800,7 +779,6 @@ describe("an empty Artifacts is dimmed too (owner Q3 A)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       artifacts: { list: [], seen: NOTHING_SEEN },
     });
@@ -813,7 +791,6 @@ describe("an empty Artifacts is dimmed too (owner Q3 A)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       artifacts: { list: [ARTIFACT], seen: NOTHING_SEEN },
     });
@@ -871,14 +848,33 @@ describe("the Workflows item (docs/feat/workflows-ui.md D4)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       workflows: { needYou: 2, empty: null },
     });
     expect(wf(ctx)?.badge).toEqual({ kind: "count", n: 2 });
-    // Promotion: the badged item moves into the fan ahead of the unbadged ones.
+    // Workflows is FIRST in the canonical order now (fix D6), so the badge has
+    // nothing to overtake: it already sits in the fan's first unbadged slot.
     expect(ids(hubActions(ctx, WF).fan)[0]).toBe("workflows");
     expect(itemA11yLabel(wf(ctx) as HubItem)).toBe("Workflows, 2 new");
+  });
+
+  test("with every entry the idle fan is Workflows · Activity · Artifacts · Tools · Commands · More", () => {
+    // docs/fix/workflows-ux.md S2: the full hub, so Workflows competes for the
+    // six slots — it must win the first one, and Attach must be nowhere.
+    const a = hubActions(IDLE_CTX, { ...EVERY, workflows: noop });
+    expect(ids(a.fan)).toEqual(["workflows", "activity", "artifacts", "tools", "commands", "more"]);
+    expect(ids(a.more)).toEqual(["sessions", "info", "new"]);
+    expect([...ids(a.fan), ...ids(a.more)]).not.toContain("attach");
+  });
+
+  test("it holds the fan's first slot — the one Attach used to (owner 2026-11-24)", () => {
+    expect(ids(hubActions(IDLE_CTX, WF).fan)).toEqual([
+      "workflows",
+      "activity",
+      "sessions",
+      "info",
+      "new",
+    ]);
   });
 
   test("an older daemon dims it with its reason; the commit says it, nothing opens", () => {
@@ -889,7 +885,6 @@ describe("the Workflows item (docs/feat/workflows-ui.md D4)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       workflows: { needYou: 0, empty: WORKFLOWS_UPDATE_TENTACLE },
     });
@@ -905,7 +900,7 @@ describe("the Workflows item (docs/feat/workflows-ui.md D4)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
+
       dictation: false,
       workflows: { needYou: 0, empty: null },
     });
@@ -921,7 +916,6 @@ describe("the Workflows item (docs/feat/workflows-ui.md D4)", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
     });
     expect(wf(ctx)).toMatchObject({ dimmed: false, badge: null });

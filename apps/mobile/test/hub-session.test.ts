@@ -25,12 +25,11 @@ import {
 
 const BAND = { width: 390, height: 600 };
 const noop = () => {};
-const ENTRIES = { attach: noop, activity: noop, sessions: noop, info: noop };
+const ENTRIES = { activity: noop, sessions: noop, info: noop };
 const idle = hubContextOf({
   link: "up",
   turn: null,
   ended: null,
-  editable: true,
   dictation: false,
 });
 
@@ -40,7 +39,6 @@ describe("hubContextOf", () => {
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       schedules: 0,
       nextWakeInMs: null,
@@ -64,7 +62,7 @@ describe("hubContextOf", () => {
     // hard-coded `false` hides Dictate even with the setting on. Both directions,
     // because a hard-coded `true` would be the same bug mirrored.
     const withIt = (dictation: boolean) =>
-      hubContextOf({ link: "up", turn: null, ended: null, editable: true, dictation });
+      hubContextOf({ link: "up", turn: null, ended: null, dictation });
     expect(withIt(true).dictation).toBe(true);
     expect(withIt(false).dictation).toBe(false);
   });
@@ -111,14 +109,13 @@ describe("wakeContext — the daemon's wake table, as the hub reads it (H4a)", (
       link: "up",
       turn: null,
       ended: null,
-      editable: true,
       dictation: false,
       schedules: { rows: [wake({ nextAt: NOW + DUE_SOON_MS - 1_000 })], now: NOW },
     });
     expect(soon).toMatchObject({ schedules: 1, nextWakeInMs: DUE_SOON_MS - 1_000 });
     // End to end: the daemon's table alone makes the item appear, badged, first.
     const a = hubActions(soon, { ...ENTRIES, scheduled: noop });
-    expect(a.all.map((i) => i.id)).toEqual(["scheduled", "attach", "activity", "sessions", "info"]);
+    expect(a.all.map((i) => i.id)).toEqual(["scheduled", "activity", "sessions", "info"]);
     expect(a.all[0]?.badge).toEqual({ kind: "dot" });
     expect(a.all[0]?.label).toBe("Scheduled");
   });
@@ -140,7 +137,6 @@ const withArtifacts = (list: readonly ArtifactMeta[] | undefined, seen = NOTHING
     link: "up",
     turn: null,
     ended: null,
-    editable: true,
     dictation: false,
     artifacts: { list, seen },
   });
@@ -202,7 +198,7 @@ describe("solveHub — the fan solved at the open", () => {
 
   test("anchored on the button's centre, in band coordinates, one id per item in fan order", () => {
     const menu = solveHub({ bounds: BAND, position: undefined, items });
-    expect(menu.ids).toEqual(["attach", "activity", "sessions", "info"]);
+    expect(menu.ids).toEqual(["activity", "sessions", "info"]);
     expect(menu.dimmed).toEqual([]);
     expect(menu.layout.kind).toBe("fan");
     const at = place(undefined, BAND);
@@ -211,7 +207,7 @@ describe("solveHub — the fan solved at the open", () => {
     }
     expect(menu.layout.anchor).toEqual({ x: at.x + FLOAT_SIZE / 2, y: at.y + FLOAT_SIZE / 2 });
     expect(menu.layout.edge).toBe("right");
-    expect(menu.layout.items).toHaveLength(4);
+    expect(menu.layout.items).toHaveLength(3);
     for (const it of menu.layout.items) {
       expect(it.x - ITEM_SIZE / 2).toBeGreaterThanOrEqual(0);
       expect(it.x + ITEM_SIZE / 2).toBeLessThanOrEqual(BAND.width);
@@ -287,14 +283,13 @@ describe("commitPlan — what a released item does (Design 5, M7/M8, M14)", () =
     link: "up",
     turn: { turnId: "t1" } as never,
     ended: null,
-    editable: true,
     dictation: false,
   });
   const withStop = { ...ENTRIES, stop: noop, steer: noop };
   test("a live entry runs; More opens the overflow", () => {
-    expect(commitPlan("attach", idle, ENTRIES, hubOpen(idle))).toEqual({
+    expect(commitPlan("activity", idle, ENTRIES, hubOpen(idle))).toEqual({
       kind: "run",
-      id: "attach",
+      id: "activity",
     });
     expect(commitPlan("more", idle, ENTRIES, hubOpen(idle))).toEqual({ kind: "more" });
   });
@@ -309,7 +304,6 @@ describe("commitPlan — what a released item does (Design 5, M7/M8, M14)", () =
       link: "up",
       turn: { turnId: "t2" } as never,
       ended: null,
-      editable: true,
       dictation: false,
     });
     for (const id of ["stop", "steer"] as const) {
@@ -325,7 +319,7 @@ describe("commitPlan — what a released item does (Design 5, M7/M8, M14)", () =
     });
   });
   test("an entry gone since the open is a silent no-op (P6)", () => {
-    expect(commitPlan("info", idle, { attach: noop }, hubOpen(idle))).toEqual({ kind: "none" });
+    expect(commitPlan("info", idle, { activity: noop }, hubOpen(idle))).toEqual({ kind: "none" });
   });
 });
 
@@ -347,7 +341,6 @@ describe("hub accessibility actions (Design 7) — never the fan under VoiceOver
     expect(hubA11yRoute("activate")).toEqual({ kind: "menu" });
     expect(hubA11yRoute("longpress")).toEqual({ kind: "menu" });
     expect(hubA11yRoute("show-all")).toEqual({ kind: "menu" });
-    expect(hubA11yRoute("hub-attach")).toEqual({ kind: "commit", id: "attach" });
     expect(hubA11yRoute("hub-activity")).toEqual({ kind: "commit", id: "activity" });
     expect(hubA11yRoute("hub-bogus")).toEqual({ kind: "none" });
     expect(hubA11yRoute("magicTap")).toEqual({ kind: "none" });
