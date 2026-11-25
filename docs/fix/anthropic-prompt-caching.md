@@ -159,3 +159,68 @@ Main gate red on `prune-loop.test.ts` "below the threshold the requests are exac
 **Nit (not blocking):** the Implementation's *Design* line ("2 of 4") and its *Tests* line ("2 breakpoints") are stale. Fix round 1 supersedes them, but the orchestrator may want them edited in place.
 
 **Executor behaviour:** fixed exactly the findings, with no scope creep. It reported its own red/mutation runs, which my mutations confirm. It was honest that the 3rd breakpoint was not re-verified live.
+
+## Review (Round 1) — fresh re-review after "Fix after revert" (022aad6a)
+
+*— claude-opus-5-5, 2026-11-25 (fresh context. The executor is claude-sonnet-5-5: a different model but the same family, so shared blind spots may survive. The earlier rounds were also Opus, in another context.)*
+
+**Verdict: PASS (APPROVE-WITH-NITS).** No HIGH or MEDIUM findings. Scope: `git diff main...HEAD` (merge-base 20723e2f).
+
+**Findings**
+
+1. **LOW: the 5-minute TTL is not discussed.** `EPHEMERAL` (`anthropic-cache.ts:19`) is the default 5-minute TTL.
+   - The case: the user takes more than 5 minutes between turns.
+   - The effect: the next turn's first request re-writes the whole history at 1.25×, where main paid 1×. The rounds inside a turn are fast, so they read at 0.1×, and the net effect stays a large saving.
+   - Ask: document it under Failure modes. A `ttl: "1h"` (2× write) belongs to a separate eval, not this fix.
+2. **NIT: stale text.**
+   - `anthropic-cache.ts:5` says "Two are placed" but lists three.
+   - The changelog fragment says "end of tools+system, and the last message". It leaves out the previous-user breakpoint and the one-shot skip.
+   - Implementation *Design* "2 of 4" and *Tests* "2 breakpoints" were already flagged in Round 2 and are still unfixed.
+3. **NIT: the `anthropic-images.test.ts` normaliser hides one regression shape.** `bodyFor` (`:125-143`) folds a one-text-block last message back into a string. A `buildPayload` regression that turned a plain last text message into a block would be invisible in that file. Acceptable: that file is about images, and `buildPayload`'s own tests pin the string form.
+4. **Scope note, not a defect.** `prune-loop.test.ts:142-145` is outside this task. It neutralises only `durationMs` (wall-clock) before the exact `toEqual`. It is the minimal relaxation, and it is justified by the gate diff recorded in "Fix after revert". There is no honest red for it (a flake), as the executor says.
+
+**Questions asked**
+
+| Question | Verdict / evidence |
+|---|---|
+| Is the prefix before the breakpoints stable (no timestamps, ids, unsorted keys or varying tool order)? | **Yes.** <br>• The system prompt is identity + AGENTS.md + the skills catalog (`config/src/resolve.ts:501-512`), with no `Date`, cwd or uuid. <br>• `buildPayload` joins all system messages into one string (`anthropic-provider.ts:557-559`). <br>• The only mid-session system additions are the voice line (`core/src/voice/turn-profile.ts:73`, a documented one-time miss) and `context-reset.ts:72`, which re-seeds the same prompt, so tools+system still hits. <br>• Tools are `req.tools.map(toWireTool)` in registry order. `projectTools` returns the same array when nothing is hidden (`agent/src/capabilities.ts:159-161`). <br>• No dynamic tool descriptions were found (grep `description: \``). <br>• No thinking blocks are sent back, so a breakpoint can never land on one. <br>• Old-image projection and prune are documented one-time misses (Fix round 1, LOW 3). |
+| ≤ 4 breakpoints? | **Yes, at most 3:** system (or the last tool), the last message, and the previous user message (`anthropic-cache.ts:25-53`). |
+| Compaction / `context_reset` handled? | **Yes.** <br>• The one-shot summary gets no message breakpoint (`:38`). <br>• The rebuilt history keeps the identical system and tools, so that breakpoint hits. |
+| Pure module + exact request-shape tests? | **Yes.** `anthropic-cache.ts` is React-free and I/O-free, called once in `stream` (`anthropic-provider.ts:178-185`). <br>• 6 shape tests with exact `toEqual` and breakpoint counts. <br>• 1 test through the real `AnthropicProvider.stream` with an injected `fetch`. <br>• `buildPayload`, and so `count_tokens`, stays breakpoint-free. |
+| OpenAI provider unchanged? | **Yes.** It is not in `git diff main...HEAD --stat`. |
+| Usage / context meter still right? | **Yes.** `promptTokens = input + cache_creation + cache_read` (`anthropic-provider.ts:233-238`, pre-existing), so auto-compaction is not starved. |
+| Red on main? | **Yes.** Scratch copy in `.tentacle/tmp/apc-review3/`, with `git show main:…anthropic-provider.ts` swapped in (no checkout). <br>• `anthropic-cache` + `anthropic-images` tests: **26 pass, 1 fail** (the stream-body test). <br>• With the branch's file: **27 pass, 0 fail**. |
+
+**Mutations** (scratch copy of `anthropic-cache.ts`, `anthropic-cache.test.ts` run each time; restored byte-identical, confirmed with `cmp`). All killed:
+
+| Mutation | Result |
+|---|---|
+| A: one-shot guard back to `< 1` | 2 fail |
+| B: `break` removed, so every earlier user message is marked | 1 fail |
+| C: previous-user `mark` removed | 4 fail |
+| D: first block marked instead of the last | 2 fail |
+| E: no system breakpoint | 3 fail |
+| F: previous message marked whatever its role | 3 fail |
+
+**Gate (this worktree, at 022aad6a; host load average ~32)**
+
+| Check | Result |
+|---|---|
+| `bun run typecheck` | clean (exit 0) |
+| `bun run lint` | clean (2432 files) |
+| `bun test packages/providers packages/agent/test/prune-loop.test.ts` | 236 pass, 0 fail |
+| `bun run test` (parallel) | **18418 pass, 5 skip, 0 fail** (18423 tests, 1275 files) |
+
+The 5 skips are the same as in the earlier rounds. The diff adds no `.skip`.
+
+**Live evidence:** I made no API calls (credits are scarce). I relied on the executor's tap rows: round 2 read 20741 = round 1's write, and round 3 read 20830 = 20741 + 89. Round 2 read round 1's user message back after it had flipped from a text block to a string, so the string ↔ block forms hash the same. The 3-breakpoint version itself was not re-verified live, as the executor says.
+
+**Attacks tried**
+1. Silent invalidators in system or tools: **none found** (table above).
+2. A breakpoint on an invalid block (empty text or thinking): `mark` skips `""` and `[]`, `buildPayload` drops empty content, and there are no thinking blocks. **Holds.**
+3. The usage regression with caching (`input_tokens` ≈ 4): already summed. **Holds.**
+4. A pod run (`ProxyModelProvider`): `stream` runs on the laptop's `AnthropicProvider`, so caching applies, with no protocol change. **Holds.**
+5. Idle longer than the TTL between turns: **LOW 1.**
+6. The test normaliser masking regressions: **NIT 3.**
+
+**Executor behaviour:** a tight diff that stays on task. The gate-flake fix is diagnosed from the gate's own diff, and the executor says honestly that it has no red for it. The Round 2 nit on stale text was not addressed (NIT 2).
