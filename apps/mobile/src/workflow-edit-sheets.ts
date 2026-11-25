@@ -33,10 +33,37 @@ import {
 import type { EditIntent } from "./workflow-edit-actions.ts";
 import { type EditLabel, KIND_GLYPH } from "./workflow-edit-graph.ts";
 
-/** The owner's three detents (short / medium / large) as a fraction of the window. */
-export const SHEET_DETENT = { short: 0.3, medium: 0.5, large: 1 } as const;
+/**
+ * The owner's three detents (short / medium / large) as a fraction of the window —
+ * the mockup's `--wf-detent-short: 0.3` / `--wf-detent-medium: 0.5` /
+ * `--wf-detent-large: 0.92` (`index.html:66-68`).
+ */
+export const SHEET_DETENT = { short: 0.3, medium: 0.5, large: 0.92 } as const;
 
 export type SheetDetent = keyof typeof SHEET_DETENT;
+
+/** How much of the screen a sheet covers, in points — the mockup's `calc()`.
+ *
+ * `short` and `medium` are a plain share of the window: their content starts at
+ * the sheet's top, so the fraction is all that matters. `large` is a FULL-HEIGHT
+ * sheet with a header at its top, and the mockup measures it as
+ * `calc((var(--frame-h) - var(--frame-safe-top)) * var(--wf-detent-large) -
+ * var(--frame-safe-bottom))` (`index.html:205`): a share of the area BELOW the
+ * status bar, so the header (`‹ Graph · Done`) lands below the clock instead of
+ * on it. (Its
+ * `- safe-bottom` is not applied here: the sheet is anchored to the window's
+ * bottom edge, so subtracting it would float the sheet above the home indicator.)
+ * A sheet never covers the whole window — the graph must stay visibly underneath.
+ */
+export function sheetHeight(
+  detent: SheetDetent,
+  window: { readonly height: number; readonly insetTop: number },
+): number {
+  const below = Math.max(0, window.height - window.insetTop);
+  return Math.round(
+    detent === "large" ? below * SHEET_DETENT.large : window.height * SHEET_DETENT[detent],
+  );
+}
 
 /** Which sheet is up. `null` (nothing) is the graph again. */
 export type SheetRequest =
@@ -101,7 +128,15 @@ export type SheetField =
   | {
       readonly control: "choice";
       readonly key: string;
-      readonly label: string;
+      /**
+       * The list's heading, or `null` when the BAND already carries it. A heading
+       * drawn as a row label sits on no horizontal margin at all — the field's
+       * `paddingHorizontal` is the row's, and a stacked field has none — so a
+       * picker's heading is the section's, on the band's margin like every other
+       * one (validation round 3, N3). Only a list that shares a band with other
+       * rows keeps its own.
+       */
+      readonly label: string | null;
       readonly options: readonly SheetChoice[];
     }
   | {
@@ -322,12 +357,14 @@ export function kindSheet(draft: WorkflowDraft, at: InsertAt): SheetModel {
     note: null,
     sections: [
       {
-        label: null,
+        // The heading is the BAND's, like every other section's (`If it fails`,
+        // `When it passes`), so it lands on the same margin (validation N3).
+        label: "What it does",
         fields: [
           {
             control: "choice",
             key: "kind",
-            label: "What it does",
+            label: null,
             options: (["agent", "run", "approve"] as const).map((kind) => ({
               value: kind,
               label: kindTitle(kind),
@@ -737,7 +774,7 @@ export function pickSheet(input: {
     sections: [
       {
         label: null,
-        fields: [{ control: "choice", key: "target", label: "Steps", options }],
+        fields: [{ control: "choice", key: "target", label: null, options }],
         foot:
           purpose === "fail"
             ? "A step above makes a loop: it is allowed because the link is counted (at most n times). A step below skips ahead."

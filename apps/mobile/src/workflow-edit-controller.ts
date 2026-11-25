@@ -213,6 +213,11 @@ export interface WorkflowEditController {
   confirmSave(): void;
   /** `changed` → Reload: discard the draft and read the file again (the caller confirms first). */
   reload(): void;
+  /**
+   * What Reload must ask first (`reloadConfirm`), or `null` when it may re-read at
+   * once because no edit would be lost.
+   */
+  reloadPrompt(): string | null;
   /** `changed` → Keep editing: the banner goes, the draft stays (the next save is `changed` again). */
   keepEditing(): void;
   /** "Discard N changes?" — null when there is nothing to discard. */
@@ -236,6 +241,20 @@ interface Snapshot {
 /** "Discard 3 changes?" — one edit is still one change (mockup wording). */
 export function discardText(changes: number): string {
   return `Discard ${changes} ${changes === 1 ? "change" : "changes"}?`;
+}
+
+/**
+ * What a `changed` banner's Reload asks before it throws the draft away, or `null`
+ * when there is nothing to lose and it may re-read at once. D7: "Reload (discards,
+ * with confirm)". The words are Cancel's own (`discardText`), because it drops
+ * exactly the same thing — a second wording for one danger is how a prompt stops
+ * being read.
+ */
+export function reloadConfirm(input: {
+  readonly dirty: boolean;
+  readonly changes: number;
+}): string | null {
+  return input.dirty ? discardText(Math.max(1, input.changes)) : null;
 }
 
 /** "Saved .tentacle/workflows/demo.yaml · v2 · 1a2b3c4d", the toast a landed save raises. */
@@ -924,6 +943,11 @@ export function createWorkflowEditController(deps: WorkflowEditDeps): WorkflowEd
       notice = null;
       phase = "loading";
       read(name);
+    },
+    reloadPrompt() {
+      // `changedOnDisk` alone is not an edit: the banner says the FILE moved, and
+      // re-reading it loses nothing (validation P3).
+      return reloadConfirm({ dirty: dirty(), changes });
     },
     keepEditing() {
       changedOnDisk = false;

@@ -30,6 +30,7 @@ import {
   discardText,
   existsNotice,
   reconnectOutcome,
+  reloadConfirm,
   saveOffReason,
   savedToast,
 } from "../src/workflow-edit-controller.ts";
@@ -454,6 +455,26 @@ describe("the outcomes, by refusal word", () => {
     await saved(h);
     h.controller.keepEditing();
     expect(h.state().changed).toBe(false);
+    expect(JSON.stringify(h.state().draft)).toContain('"retry":2');
+  });
+
+  test('Reload asks first when edits are pending (D7\'s "discards, with confirm", P3)', async () => {
+    // Validation round 3, P3: Reload threw the draft away with no question at all,
+    // while D7 says it "discards, with confirm". The words are Cancel's own, since
+    // it drops exactly the same thing.
+    const h = harness({
+      saves: [okSave(), { ok: false, refusal: "changed" }],
+    });
+    await opened(h);
+    // A loaded file nobody has touched: the banner is about the FILE moving, so
+    // re-reading it loses nothing and there is nothing to ask about.
+    expect(h.controller.reloadPrompt()).toBeNull();
+    await saved(h);
+    expect(h.controller.reloadPrompt()).toBe(discardText(1));
+    expect(reloadConfirm({ dirty: true, changes: 1 })).toBe("Discard 1 change?");
+    expect(reloadConfirm({ dirty: true, changes: 3 })).toBe("Discard 3 changes?");
+    // The confirm is a QUESTION: the draft the user chose to keep is still here
+    // until they answer, so the prompt never drops it by itself.
     expect(JSON.stringify(h.state().draft)).toContain('"retry":2');
   });
 

@@ -24,6 +24,7 @@ import {
   sheetAfterAction,
   sheetForIntent,
   sheetForLabel,
+  sheetHeight,
   sheetModel,
   stepped,
   stepperAction,
@@ -553,5 +554,77 @@ describe("where a sheet goes after a control fires", () => {
     // Done is the component's `onDone` (`afterSheet`), not a control: the counter
     // closes to the graph, never to a step sheet it never opened from.
     expect(afterSheet(max)).toBeNull();
+  });
+});
+
+/**
+ * Validation round 3, P1 (BLOCKER): the `large` detent was 1.0, so a step's sheet
+ * covered the whole window and its header row — `‹ Graph · run · Done` — landed
+ * under the status bar, where the simulator does not deliver the tap. A step sheet
+ * then could not be closed at all. The mockup says 0.92 of the area BELOW the safe
+ * top (`index.html:66-68`, `:205`), which is what these assertions pin: the height
+ * is the module's, and it is a share of the screen the header can be tapped in.
+ */
+describe("a sheet's height leaves the status bar alone (P1)", () => {
+  const IPHONE = { height: 956, insetTop: 62 };
+  // The mockup's own frame (`--frame-h` 956, `--frame-safe-top` 62, 0.92).
+  const MOCKUP_LARGE = Math.round((956 - 62) * 0.92);
+
+  test("`large` is 0.92 of the area below the status bar, not the whole window", () => {
+    // The bug's exact number: 956, one whole window, with the header at y≈14.
+    expect(sheetHeight("large", IPHONE)).toBe(MOCKUP_LARGE);
+    expect(sheetHeight("large", IPHONE)).toBeLessThan(IPHONE.height);
+  });
+
+  test("the header sits BELOW the safe top, so Done is a tap the system delivers", () => {
+    // A bottom-anchored sheet's header is at `window - height`.
+    const top = IPHONE.height - sheetHeight("large", IPHONE);
+    expect(top).toBeGreaterThanOrEqual(IPHONE.insetTop);
+    // And the sheet still leaves a strip of graph visible (the mockup's rule).
+    expect(top).toBeGreaterThan(IPHONE.insetTop);
+  });
+
+  test("short and medium stay plain shares of the WINDOW (their content starts at the top)", () => {
+    // Their top is the sheet's own content, not a header under the clock: scaling
+    // them by the safe area too would make a "medium" picker a quarter of the phone.
+    expect(sheetHeight("short", IPHONE)).toBe(Math.round(956 * 0.3));
+    expect(sheetHeight("medium", IPHONE)).toBe(Math.round(956 * 0.5));
+  });
+
+  test("a device with no status bar inset still gets a sheet shorter than its window", () => {
+    // The regression the constant itself carried: `large: 1` covered everything
+    // on EVERY device, so its header was always at the window's top edge.
+    for (const device of [IPHONE, { height: 844, insetTop: 47 }, { height: 700, insetTop: 0 }]) {
+      expect(sheetHeight("large", device)).toBeLessThan(device.height);
+      expect(device.height - sheetHeight("large", device)).toBeGreaterThanOrEqual(device.insetTop);
+    }
+  });
+});
+
+/**
+ * Validation round 3, N3: the kind picker's heading was a ROW's label inside a
+ * stacked field, which is drawn on no horizontal margin at all — flush against the
+ * sheet's left edge, while every other band's heading sits on `space.rowX`. A list
+ * is a band, so its heading is the SECTION's (and the row carries none).
+ */
+describe("a list's heading is the band's, on the band's margin (N3)", () => {
+  const choices = (model: SheetModel) =>
+    model.sections.flatMap((section) => section.fields).filter((f) => f.control === "choice");
+
+  test("the kind picker's `What it does` is its section's label, on the band's margin", () => {
+    const model = kindSheet(DRAFT, { after: "exec" });
+    expect(model.sections[0]?.label).toBe("What it does");
+    // The row no longer carries it: drawn twice, or drawn flush, both break it.
+    expect(choices(model).map((f) => f.label)).toEqual([null]);
+  });
+
+  test("the goto picker's list is a band too: no row label flush at the edge", () => {
+    const model = pickSheet({ draft: DRAFT, id: "exec", purpose: "fail" });
+    if (model === null) {
+      throw new Error("expected a pick sheet");
+    }
+    for (const field of choices(model)) {
+      expect(field.label).toBeNull();
+    }
   });
 });

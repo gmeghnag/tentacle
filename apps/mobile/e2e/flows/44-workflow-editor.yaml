@@ -7,9 +7,11 @@ appId: so.tentacle.app
 # Covered: E1 (empty list → New), E2 (the template's graph), E3 (＋ → kind
 # picker), E5 (delete → ghost + Undo), E6 (Review: hash + 5 files), E7 (saved
 # toast), E8 (Run → the hash approval, Allow once / Deny — denied, so no agent
-# step runs on the mock model). NOT here (see the task doc's 7c Execution): E4
-# (the ✗ drag) and E9 (the file edited meanwhile → `changed`, which needs a
-# harness hook that writes the file mid-flow).
+# step runs on the mock model), and E4 (a step's sheet opens, takes a command and
+# closes with Done — the `large` detent, which validation round 3 found unclosable).
+# NOT here (see the task doc's 7c Execution): the ✗ DRAG (a long press-and-move,
+# which Maestro cannot express) and E9 (the file edited meanwhile → `changed`,
+# which needs a harness hook that writes the file mid-flow).
 #
 # Its own session (`COMPOSE_SESSION_VARS`), created just before it runs, and the
 # harness project has no `.tentacle/workflows/` yet, so the runs list is EMPTY.
@@ -89,6 +91,35 @@ appId: so.tentacle.app
     id: "workflow-sheet-cancel"
 - assertNotVisible:
     id: "workflow-sheet"
+# E4 (P1 proof): a STEP's sheet — the "large" detent — opens, takes a typed
+# command, and closes with Done. This is the flow's whole reason to exist after
+# validation round 3: `SHEET_DETENT.large` was 1.0, so the sheet covered the window
+# and its header (`‹ Graph · gate · Done`) sat under the status bar, where Done
+# could not be tapped at all — a step sheet could only be escaped by relaunching
+# the app. The command typed is the one the template already has, so the Review
+# below still counts exactly 35 lines and 5 files.
+- tapOn:
+    id: "workflow-edit-node-gate"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-sheet"
+    timeout: 5000
+- assertVisible:
+    id: "workflow-sheet-done"
+- tapOn:
+    id: "workflow-sheet-input-run"
+- eraseText: 20
+- inputText: "bun run check"
+# The keyboard is up over the sheet's Done (the screenshot in validation round 3,
+# `09-run-filled.png`): dismiss it so the tap lands on the control, not the keyboard.
+- hideKeyboard
+- tapOn:
+    id: "workflow-sheet-done"
+# The proof: Done CLOSED it, and the graph is back (no relaunch, no restart).
+- assertNotVisible:
+    id: "workflow-sheet"
+- assertVisible:
+    id: "workflow-edit-node-gate"
 # E5: delete `gate` → its incoming link dangles (a ghost, Save off with the
 # problem verbatim), and Undo brings it back.
 - longPressOn:

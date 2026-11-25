@@ -19,7 +19,15 @@
  * 7c's, and the route draws them instead of / over this screen.
  */
 import { type JSX, useRef } from "react";
-import { PanResponder, Pressable, ScrollView, StyleSheet, View } from "react-native";
+import {
+  PanResponder,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+  useWindowDimensions,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Path } from "react-native-svg";
 import type { Palette } from "../theme.ts";
 import { size as SIZE, radius, space, typography } from "../theme.ts";
@@ -34,6 +42,8 @@ import {
   barLine,
   draftCaption,
   editMenuModel,
+  menuPlacement,
+  versionOfDraft,
 } from "../workflow-edit-actions.ts";
 import type { EditState } from "../workflow-edit-controller.ts";
 import {
@@ -84,6 +94,10 @@ export interface WorkflowEditScreenProps {
     readonly dangling: readonly string[];
     readonly index: number;
     readonly count: number;
+    /** The pressed pill's top in the window (`menuPlacement`'s anchor). */
+    readonly top: number | null;
+    /** That pill's height: a menu with no room under it clears it from above. */
+    readonly height: number;
   } | null;
   readonly onDismissMenu: () => void;
   /** The undo toast's text (`Deleted gate`), or null when nothing was deleted. */
@@ -110,8 +124,8 @@ export interface WorkflowEditActions {
   readonly tap: (target: EditTarget | null) => void;
   /** A `✗` port released, in that port's OWN coordinates: `portRelease` decides. */
   readonly release: (portId: string, locationX: number, locationY: number) => void;
-  /** A long press on a step: the menu opens on it. */
-  readonly longPress: (id: string) => void;
+  /** A long press on a step: the menu opens on it, at the pill's own top in the window. */
+  readonly longPress: (id: string, nodeTop: number | null) => void;
   /** A menu row: `editMenuModel`'s own intent. */
   readonly menu: (intent: EditIntent) => void;
   /** The `✗` port this canvas has armed (`null` = none). */
@@ -132,7 +146,8 @@ function Pill({
   readonly palette: Palette;
   readonly node: EditNode;
   readonly onTap: () => void;
-  readonly onLongPress: () => void;
+  /** The press's own measurement: the pill's top in the window (`page − location`). */
+  readonly onLongPress: (nodeTop: number | null) => void;
   /** A `✗` port is held and this pill is not a legal target (D6's view-model flag). */
   readonly dimmed: boolean;
   /** A `✗` port is held and this pill IS a legal target: it is ticked. */
@@ -144,7 +159,21 @@ function Pill({
       accessibilityRole="button"
       accessibilityLabel={`${node.id} · ${node.sub}${node.ghost ? " · no such step" : ""}`}
       onPress={onTap}
-      onLongPress={node.ghost ? undefined : onLongPress}
+      onLongPress={(event) => {
+        // A ghost names no step, so it has no menu (there is nothing to open,
+        // duplicate or delete: the break is fixed in the file).
+        if (node.ghost) {
+          return;
+        }
+        // The menu hangs under THIS pill (validation P2), and the canvas scrolls:
+        // the pill's top in the window is the one place both agree. `pageY` and
+        // `locationY` are in the same vertical space, so their difference is it;
+        // an event that carries no numbers hands `null` down, never a guess.
+        const { pageY, locationY } = event.nativeEvent;
+        onLongPress(
+          typeof pageY === "number" && typeof locationY === "number" ? pageY - locationY : null,
+        );
+      }}
       delayLongPress={400}
       style={[
         styles.pill,
@@ -317,7 +346,7 @@ function Canvas({
           palette={palette}
           node={node}
           onTap={() => actions.tap({ kind: "node", id: node.id })}
-          onLongPress={() => actions.longPress(node.id)}
+          onLongPress={(nodeTop) => actions.longPress(node.id, nodeTop)}
           dimmed={armed !== null && !dropTargets.includes(node.id)}
           target={armed !== null && dropTargets.includes(node.id)}
         />
@@ -363,15 +392,23 @@ function Canvas({
   );
 }
 
-/** The long-press menu: the model's rows, the note under Delete, and a scrim. */
+/**
+ * The long-press menu: the model's rows, the note under Delete, and a scrim. It is
+ * drawn at `top`, which `menuPlacement` decided from the node the press landed on
+ * (an anchored menu, never one pinned at the overlay's origin, where its first row
+ * lands under the status bar — validation P2).
+ */
 function Menu({
   palette,
   menu,
+  top,
   onPick,
   onDismiss,
 }: {
   readonly palette: Palette;
   readonly menu: EditMenu;
+  /** Where the menu starts, in the window: `menuPlacement`'s answer. */
+  readonly top: number;
   readonly onPick: (intent: EditIntent) => void;
   readonly onDismiss: () => void;
 }): JSX.Element {
@@ -382,7 +419,10 @@ function Menu({
         style={[StyleSheet.absoluteFill, { backgroundColor: palette.scrim }]}
         onPress={onDismiss}
       />
-      <View testID="workflow-edit-menu" style={[styles.menu, { backgroundColor: palette.sheet }]}>
+      <View
+        testID="workflow-edit-menu"
+        style={[styles.menu, { backgroundColor: palette.sheet, top }]}
+      >
         {menu.items.map((item) => (
           <Pressable
             key={item.label}
@@ -459,10 +499,22 @@ function NoEditor({
 
 export function WorkflowEditScreen(props: WorkflowEditScreenProps): JSX.Element {
   const { palette, state, geometry } = props;
+  const window = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   // `edit` | `view` (saved: drawn, not touchable) | null — the module's answer.
   const mode = canvasMode(state.kind);
   const editable = geometry !== null && mode !== null;
   const menu = props.menu;
+  /** The menu model IS the menu's rows: derived once, read by the placement too. */
+  const menuModel =
+    menu === null
+      ? null
+      : editMenuModel({
+          id: menu.id,
+          dangling: menu.dangling,
+          index: menu.index,
+          count: menu.count,
+        });
   return (
     <View testID="workflow-edit" style={[styles.screen, { backgroundColor: palette.page }]}>
       <ScreenHeader
@@ -472,6 +524,8 @@ export function WorkflowEditScreen(props: WorkflowEditScreenProps): JSX.Element 
         subtitle={draftCaption({
           phase: state.kind,
           savedVersion: state.saved?.version ?? null,
+          clean: !state.dirty,
+          version: versionOfDraft(state.draft),
         })}
         titleTestID="workflow-edit-title"
         onTitlePress={props.onSettings}
@@ -652,15 +706,19 @@ export function WorkflowEditScreen(props: WorkflowEditScreenProps): JSX.Element 
           {EDIT_OFFLINE}
         </Text>
       ) : null}
-      {menu === null ? null : (
+      {menu === null || menuModel === null ? null : (
         <Menu
           palette={palette}
-          menu={editMenuModel({
-            id: menu.id,
-            dangling: menu.dangling,
-            index: menu.index,
-            count: menu.count,
-          })}
+          menu={menuModel}
+          top={
+            menuPlacement({
+              menu: menuModel,
+              nodeTop: menu.top,
+              nodeHeight: menu.height,
+              windowHeight: window.height,
+              insetTop: insets.top,
+            }).top
+          }
           onPick={(intent) => props.actions.menu(intent)}
           onDismiss={props.onDismissMenu}
         />
@@ -752,6 +810,8 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     alignSelf: "center",
     width: "62%",
+    // No `top` here: `menuPlacement` decides it from the pressed pill (validation
+    // P2), so a style default can never pin it under the status bar.
   },
   menuRow: {
     flexDirection: "row",

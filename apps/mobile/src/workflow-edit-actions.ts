@@ -22,6 +22,7 @@
  *   the NEXT tap meaning something else.
  */
 import { type DraftPrompts, type InsertAt, type WorkflowDraft, deleteStep } from "@tentacle/core";
+import { size } from "./theme.ts";
 import type { EditGeometry, EditLabel, EditTarget } from "./workflow-edit-graph.ts";
 import { dropTargetAt, hitContains } from "./workflow-edit-graph.ts";
 
@@ -205,6 +206,76 @@ export function deletedToast(id: string): string {
   return `Deleted ${id}`;
 }
 
+/**
+ * The undo toast after a route-level event — the ONE rule for its lifetime.
+ * `Deleted gate · Undo` undoes an edit on the draft that is on screen, so:
+ * - a delete raises it, naming the step that went;
+ * - undo, and every event that REPLACES the draft (`draftReplaced`: a Reload
+ *   re-reads the file, a discard rebuilds from the baseline), take it away.
+ *
+ * The last part is validation P3: after Reload the toast stayed up over a draft it
+ * no longer described, and its Undo would have written into a history that was
+ * gone. Tying it to the same moment `EditHistory` is rebuilt means the two can
+ * never disagree — there is no "is my Undo still valid?" question left to get wrong.
+ */
+export function toastFor(event: "delete" | "undo" | "draftReplaced", deleted = ""): string | null {
+  return event === "delete" ? deletedToast(deleted) : null;
+}
+
+/** The gap between a node's bottom edge and the menu that belongs to it. */
+export const MENU_GAP = 8;
+
+/** The menu's own height, from its rows (a row is `size.rowSetting`, the note is a caption). */
+export function menuHeight(menu: EditMenu): number {
+  const note = menu.note === null ? 0 : MENU_NOTE_H;
+  return menu.items.length * size.rowSetting + note;
+}
+
+/** A menu note's height: the mockup's `small` under Delete (`padding: 0 16px 10px`). */
+const MENU_NOTE_H = 30;
+
+/**
+ * Where the long-press menu sits: hung UNDER the node it belongs to, centred, as
+ * the mockup anchors it (`top: g.y + 50 + 44 + 10 + 6`, `index.html:606`) — never
+ * pinned at the overlay's own origin, where its first row lands under the status
+ * bar (validation round 3, P2).
+ *
+ * `nodeTop` is the pressed pill's top in the WINDOW, measured from the press
+ * itself (`pageY - locationY` in the pill's own view): the canvas scrolls, so a
+ * canvas-space `y` alone would anchor the menu to the wrong place. It is `null`
+ * when the event carried no measurement, and then the menu falls back to the first
+ * place that is always on screen — just below the status bar.
+ *
+ * Two rules keep it usable at the END of a long graph: it never leaves the window,
+ * and when there is no room under the node it is drawn ABOVE it rather than
+ * clipped. It never starts above `insetTop`.
+ */
+export function menuPlacement(input: {
+  readonly menu: EditMenu;
+  /** The pressed pill's top in the window, measured; `null` when it did not report. */
+  readonly nodeTop: number | null;
+  /** That pill's height, so a menu drawn above it clears it. */
+  readonly nodeHeight: number;
+  readonly windowHeight: number;
+  /** The status bar's height: the first row must never hide under it. */
+  readonly insetTop: number;
+}): { readonly top: number } {
+  const height = menuHeight(input.menu);
+  const lowest = input.windowHeight - height - MENU_GAP;
+  if (input.nodeTop === null) {
+    // The press reported no measurement: hang it under the status bar, the one
+    // place that is never clipped and never a guess at where the pill was.
+    return { top: input.insetTop };
+  }
+  const below = input.nodeTop + input.nodeHeight + MENU_GAP;
+  if (below <= lowest) {
+    return { top: below };
+  }
+  // No room under the node: over the node, never clipped by the window's edge.
+  const above = input.nodeTop - MENU_GAP - height;
+  return { top: Math.max(input.insetTop, Math.min(above, lowest)) };
+}
+
 /** A draft's `steps:` as mappings; a structurally broken draft has none. */
 function stepsOf(draft: WorkflowDraft): readonly Readonly<Record<string, unknown>>[] {
   const steps = draft.steps;
@@ -301,20 +372,45 @@ export function applyIntent(actions: EditActions, intent: EditIntent): void {
 }
 
 /**
+ * The draft's own `version:` — what the file on disk says. `null` when the draft
+ * has no positive integer there (a structurally broken create), so the caption
+ * never claims a version the file does not carry.
+ */
+export function versionOfDraft(draft: WorkflowDraft | null): number | null {
+  const version = draft?.version;
+  return typeof version === "number" && Number.isInteger(version) && version > 0 ? version : null;
+}
+
+/**
  * The header's second line: what the draft on screen IS, in the mockup's words.
  * Review and the write say "nothing written yet"; a landed save names its version.
+ *
+ * A loaded file that nobody has touched is NOT a draft: it is the file on disk, at
+ * its own version — the mockup's `v1 · saved` (`index.html:638`), never "Draft · not
+ * saved" for bytes that are already written. Only a draft that differs from its
+ * file (a create, an edit) is a draft.
  */
 export function draftCaption(input: {
   /** `EditState.kind`: only `reviewing`/`saving`/`saved` read differently. */
   readonly phase: string;
   /** The version a landed save reported (`state.saved`), or null. */
   readonly savedVersion: number | null;
+  /** The draft holds NO edit against the file it came from (`!EditState.dirty`). */
+  readonly clean: boolean;
+  /** The draft's own `version:` — what the file on disk says (`versionOfDraft`). */
+  readonly version: number | null;
 }): string {
   if (input.phase === "reviewing" || input.phase === "saving") {
     return "nothing written yet";
   }
   if (input.phase === "saved" && input.savedVersion !== null) {
     return `v${input.savedVersion} · saved`;
+  }
+  if (input.phase === "editing" && input.clean) {
+    // At its own version when the file carries one (the mockup's `v1 · saved`),
+    // and "Saved" rather than a version it has not got — never "Draft · not saved"
+    // over bytes that ARE written (validation N4).
+    return input.version === null ? "Saved" : `v${input.version} · saved`;
   }
   return "Draft · not saved";
 }

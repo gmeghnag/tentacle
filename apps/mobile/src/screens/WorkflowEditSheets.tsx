@@ -21,15 +21,16 @@
  */
 import type { JSX } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, View, useWindowDimensions } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { type Palette, size as SIZE, radius, space, typography } from "../theme.ts";
 import { Icon } from "../ui/Icon.tsx";
 import { Text, TextInput } from "../ui/Text.tsx";
 import {
-  SHEET_DETENT,
   type SheetChoice,
   type SheetField,
   type SheetModel,
   type SheetRequest,
+  sheetHeight,
 } from "../workflow-edit-sheets.ts";
 
 /** What a screen hands a sheet: the model, and one callback per kind of control. */
@@ -50,11 +51,6 @@ export interface WorkflowEditSheetsProps {
   readonly onChoice: (key: string, value: string) => void;
   /** A `pick` row: the picker it opens (`pickOpens`). */
   readonly onOpen: (request: SheetRequest) => void;
-}
-
-/** The mockup's detent as a height, so a short sheet is short on every device. */
-function detentHeight(detent: SheetModel["detent"], windowHeight: number): number {
-  return Math.round(windowHeight * SHEET_DETENT[detent]);
 }
 
 /** A stepper: the end that cannot move is DIM, never hidden (`retry 0..5`). */
@@ -203,7 +199,9 @@ function Field({
 }): JSX.Element {
   const label = (
     <View style={styles.labelColumn}>
-      <Text style={[typography.body, { color: palette.label }]}>{field.label}</Text>
+      {field.label === null ? null : (
+        <Text style={[typography.body, { color: palette.label }]}>{field.label}</Text>
+      )}
       {"sub" in field && field.sub !== null ? (
         <Text style={[typography.caption, { color: palette.sec }]}>{field.sub}</Text>
       ) : null}
@@ -365,6 +363,7 @@ function Section({
 export function WorkflowEditSheets(props: WorkflowEditSheetsProps): JSX.Element {
   const { palette, model } = props;
   const window = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   return (
     <Modal visible={model !== null} transparent animationType="fade" onRequestClose={props.onClose}>
       <View style={styles.root}>
@@ -379,7 +378,7 @@ export function WorkflowEditSheets(props: WorkflowEditSheetsProps): JSX.Element 
             style={[
               styles.sheet,
               {
-                height: detentHeight(model.detent, window.height),
+                height: sheetHeight(model.detent, { height: window.height, insetTop: insets.top }),
                 backgroundColor: palette.bg,
               },
             ]}

@@ -1044,6 +1044,42 @@ describe("a flow reaches a hub item through the helper that can actually hold it
   });
 });
 
+describe("flow 44 proves a step sheet can be CLOSED (validation round 3, P1)", () => {
+  // The BLOCKER was a `large` detent of 1.0: the sheet's own Done sat under the
+  // status bar and the tap never reached the app, so a step sheet could only be
+  // escaped by relaunching. The unit test pins the height; only a flow can prove
+  // the CONTROL is reachable, so the flow must open a step sheet, close it with
+  // Done, and assert the sheet is gone — in that order.
+  const body = readFileSync(join(FLOWS_DIR, "44-workflow-editor.yaml"), "utf8");
+
+  test("it opens a STEP's sheet (not only the kind picker) and fills a field", () => {
+    const open = body.indexOf('id: "workflow-edit-node-gate"');
+    const typed = body.indexOf('id: "workflow-sheet-input-run"');
+    expect(open).toBeGreaterThan(-1);
+    expect(typed).toBeGreaterThan(open);
+  });
+
+  test("Done closes it, and the flow ASSERTS the sheet is gone", () => {
+    const done = body.indexOf('tapOn:\n    id: "workflow-sheet-done"');
+    expect(done).toBeGreaterThan(body.indexOf('id: "workflow-sheet-input-run"'));
+    const gone = body.indexOf('id: "workflow-sheet"', done);
+    expect(gone).toBeGreaterThan(done);
+    // A VISIBLE assertion on `workflow-sheet` after Done would pass while the
+    // sheet stayed up (which is exactly the bug): it must be `assertNotVisible`.
+    const after = body.slice(done, gone + 'id: "workflow-sheet"'.length + 80);
+    expect(after).toContain("assertNotVisible");
+  });
+
+  test("the keyboard is dismissed before Done, so the tap lands on the control", () => {
+    // Round 3's `09-run-filled.png`: the keyboard covered the sheet's footer.
+    const typed = body.indexOf('id: "workflow-sheet-input-run"');
+    const keyboard = body.indexOf("hideKeyboard", typed);
+    const done = body.indexOf('tapOn:\n    id: "workflow-sheet-done"');
+    expect(keyboard).toBeGreaterThan(typed);
+    expect(keyboard).toBeLessThan(done);
+  });
+});
+
 describe("the flow list is the flow files (the other direction)", () => {
   test("no flow file is silently not run", () => {
     // 12c's guard checks the list's entries exist; this checks the reverse, which

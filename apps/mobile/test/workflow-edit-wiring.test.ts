@@ -120,7 +120,7 @@ describe("the screen is a dumb renderer", () => {
       "tapIntent(",
       "portRelease(",
       "applyIntent(",
-      "deletedToast(",
+      "toastFor(",
       "editGeometry(",
       "validDropTargets(",
       "menuInputs(",
@@ -177,6 +177,26 @@ describe("the screen is a dumb renderer", () => {
     expect(EDIT).toContain("editMenuModel");
     expect(EDIT).toContain('testID="workflow-edit-menu"');
     expect(EDIT).toContain('testID="workflow-edit-undo"');
+  });
+
+  test("the menu is ANCHORED: its top is the module's, never the overlay's origin (P2)", () => {
+    // Validation round 3, P2: the menu started at y=0 and its first row (`Open`)
+    // landed under the clock. `menuPlacement` decides the top from the pressed
+    // pill's measured position, so neither this screen nor the style may pin it.
+    expect(EDIT).toContain("menuPlacement(");
+    expect(EDIT).toContain("nodeTop:");
+    expect(EDIT).toContain("insetTop:");
+    const style = between(EDIT, "const styles = StyleSheet.create", "\n});");
+    const menuStyle = between(style, "\n  menu: {", "\n  },");
+    expect(menuStyle).toContain('position: "absolute"');
+    expect(menuStyle).not.toContain("top:");
+  });
+
+  test("the caption is told whether the draft is CLEAN and at which version (N4)", () => {
+    // Validation round 3, N4: a saved file reopened untouched said "Draft · not
+    // saved". The screen may not decide it — it passes both facts to the module.
+    expect(EDIT).toContain("clean: !state.dirty");
+    expect(EDIT).toContain("version: versionOfDraft(state.draft)");
   });
 
   test("the screens that say why there is no editor at all are all drawn", () => {
@@ -353,9 +373,22 @@ describe("the sheet screen is a dumb renderer (7b)", () => {
     ]) {
       expect(SHEETS).not.toContain(call);
     }
-    // What it DOES read: the types and the detent table.
+    // What it DOES read: the types and the module's height function (never the
+    // detent table itself: `large` must leave the status bar's area alone, P1).
     expect(SHEETS).toContain("SheetModel");
-    expect(SHEETS).toContain("SHEET_DETENT");
+    expect(SHEETS).toContain("sheetHeight(model.detent");
+  });
+
+  test("the sheet's height is the MODULE's, with the safe top it must clear (P1)", () => {
+    // Validation round 3, P1 (BLOCKER): the detent was applied to the raw window,
+    // so a `large` step sheet's header sat under the status bar and Done could not
+    // be tapped. The component must hand the inset in, never multiply itself.
+    expect(SHEETS).toContain("useSafeAreaInsets");
+    expect(SHEETS).toContain(
+      "sheetHeight(model.detent, { height: window.height, insetTop: insets.top })",
+    );
+    // No local detent arithmetic left anywhere: that IS how the bug got in.
+    expect(SHEETS).not.toContain("* SHEET_DETENT");
   });
 
   test("it is a Modal overlay, not a stack route: the graph stays underneath", () => {
@@ -363,7 +396,11 @@ describe("the sheet screen is a dumb renderer (7b)", () => {
     expect(SHEETS).not.toContain("navigate(");
     // The detent is a fraction of the window, so "short" is short on every device.
     expect(SHEETS).toContain("useWindowDimensions");
-    expect(SHEETS).toContain("SHEET_DETENT[detent]");
+    // The height is the MODULE's (`sheetHeight`, so `large` can leave the status
+    // bar's area alone): the component never multiplies the window by a detent
+    // itself, which is exactly how `large: 1` put Done under the battery.
+    expect(SHEETS).toContain("sheetHeight(model.detent");
+    expect(SHEETS).not.toContain("SHEET_DETENT[detent]");
   });
 
   test("every control is named, so the e2e flow can press it (7c)", () => {

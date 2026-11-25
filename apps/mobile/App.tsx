@@ -241,12 +241,12 @@ import {
   type EditIntent,
   type GestureResult,
   applyIntent,
-  deletedToast,
   drawnSteps,
   menuGesture,
   menuInputs,
   portRelease,
   tapIntent,
+  toastFor,
 } from "./src/workflow-edit-actions.ts";
 import {
   EDIT_NAME_RULE,
@@ -2488,7 +2488,7 @@ function WorkflowEditRoute({
         remove: (id) => {
           controller.remove(id);
           // The undo toast is the ONE way back: `EditHistory` holds the draft.
-          setToast(deletedToast(id));
+          setToast(toastFor("delete", id));
         },
         setFail: (id, target) => controller.setFail(id, target),
       },
@@ -2511,9 +2511,36 @@ function WorkflowEditRoute({
         style: "destructive",
         onPress: () => {
           controller.discard();
+          // The history those Undos pointed into is gone.
+          setToast(toastFor("draftReplaced"));
           onBack();
         },
       },
+    ]);
+  };
+
+  /**
+   * `changed` → Reload: D7 says it "discards, with confirm", so a dirty draft is
+   * confirmed first — in the words Cancel already uses (`discardPrompt`, D7's own
+   * "Discard N changes?"), because it drops exactly the same thing. A clean draft
+   * has nothing to lose, so it re-reads at once, with nothing to confirm.
+   */
+  const reload = (): void => {
+    const prompt = controller.reloadPrompt();
+    /** Reload itself: the draft any "Deleted … · Undo" described really does go. */
+    const doReload = (): void => {
+      setToast(toastFor("draftReplaced"));
+      controller.reload();
+    };
+    if (prompt === null) {
+      doReload();
+      return;
+    }
+    // "Keep editing" leaves the draft — and the undo it offers — alone: only the
+    // confirmed path drops them, which is why the toast is cleared THERE.
+    Alert.alert(prompt, undefined, [
+      { text: "Keep editing", style: "cancel" },
+      { text: "Reload", style: "destructive", onPress: doReload },
     ]);
   };
 
@@ -2597,7 +2624,7 @@ function WorkflowEditRoute({
             ? onRun(state.saved.hash)
             : controller.beginReview()
         }
-        onReload={() => controller.reload()}
+        onReload={reload}
         onKeepEditing={() => controller.keepEditing()}
         onOpenSession={onBack}
         onSettings={() => setSheet({ kind: "settings" })}
@@ -2605,14 +2632,20 @@ function WorkflowEditRoute({
           tap: (target) => act(tapIntent(armed, target)),
           release: (portId, locationX, locationY) =>
             act(portRelease(armed, geometry, portId, locationX, locationY)),
-          longPress: (id) => {
+          longPress: (id, nodeTop) => {
             // The note under Delete is the CORE's own count (`deleteStep`'s
             // `dangling`), read on a throwaway draft: the same words the operation
             // will report, and the draft on screen is never touched.
+            const height = geometry.nodes.find((node) => node.id === id)?.height ?? 0;
             setMenu(
               state.draft === null
                 ? null
-                : { id, ...menuInputs({ draft: state.draft, prompts: state.prompts, id }) },
+                : {
+                    id,
+                    ...menuInputs({ draft: state.draft, prompts: state.prompts, id }),
+                    top: nodeTop,
+                    height,
+                  },
             );
             playHaptic("light");
           },
@@ -2625,9 +2658,9 @@ function WorkflowEditRoute({
         toast={toast}
         onUndo={() => {
           controller.undo();
-          setToast(null);
+          setToast(toastFor("undo"));
         }}
-        onDismissToast={() => setToast(null)}
+        onDismissToast={() => setToast(toastFor("undo"))}
       />
       <WorkflowEditSheets
         palette={palette}

@@ -2691,3 +2691,74 @@ Gate: `bun test packages/cli/test/workflow-files.test.ts` 18 pass; `bun test app
 **Final: `GATE PASS — 1 passed, 0 failed (of 1; 80 s)` for `44-workflow-editor`; `30-artifact-escape` `GATE PASS — 1 passed (53 s)`.**
 
 Unverified: full `bun test` / `bun run typecheck` not re-run this round (only the touched files); nothing committed (the script commits).
+
+### Fix round 4 (validation P1–P3)
+
+*— claude-opus-5-5, 2026-11-25*
+
+The Sonnet simulator validation round 3 (`.tentacle/tmp/wfeditor-val-2411/REPORT-r3.md`) found one
+BLOCKER and three defects in the slices' own work. Each fix puts its decision in a pure module
+(AGENTS §7) with a test that was **shown red on the buggy code** (mutation: each fix's own branch
+re-introduced, then reverted).
+
+**P1 (BLOCKER) — `SHEET_DETENT.large` was `1`.** A step/goto/settings sheet covered the whole
+window, so its header (`‹ Graph · run · Done`) sat at y≈14–37 pt, under the status bar, where the
+simulator delivered no tap on `workflow-sheet-done`: **a step sheet could not be closed at all**
+without relaunching the app. The mockup is `--wf-detent-large: 0.92` of the area BELOW the safe top
+(`index.html:66-68`, `:205`). Fix: `large: 0.92`, and the arithmetic moved out of the component into
+`sheetHeight(detent, {height, insetTop})` (`workflow-edit-sheets.ts:57`), which `WorkflowEditSheets
+.tsx:381` calls while handing the real `useSafeAreaInsets().top` in. `short`/`medium` stay plain
+shares of the window on purpose: their content starts at the sheet's top, so the safe area would
+only shrink a "medium" picker to a quarter of the phone.
+Tests: `a sheet's height leaves the status bar alone (P1)` (4 cases: the mockup's own numbers, the
+header below the safe top, short/medium unchanged, every device shorter than its window) and the
+component contract in `workflow-edit-wiring.test.ts` (`sheetHeight(model.detent…`, no `* SHEET_DETENT`
+left in the renderer). e2e: flow 44 now opens a step's sheet, retypes the command, dismisses the
+keyboard, taps Done and asserts `workflow-sheet` is gone — and that order is itself pinned by
+`e2e-flows.test.ts` (`flow 44 proves a step sheet can be CLOSED`), because a flow is the only place
+the reachability of a control can be shown.
+
+**P2 — the long-press menu was pinned at the overlay's origin.** `styles.menu` had no `top`, so the
+menu started at y=0 and its first row (`Open`) landed under the clock. The mockup anchors it under
+the node (`index.html:606`). Fix: `menuPlacement({menu, nodeTop, nodeHeight, windowHeight,
+insetTop})` in `workflow-edit-actions.ts` — hung under the pill, flipped above it when there is no
+room, never above the status bar — fed by the pill's **measured** top (`pageY − locationY`, since the
+canvas scrolls; an event with no numbers passes `null`, which falls back to the safe top, never to
+0). Tests: `where the long-press menu sits (P2)` (under the pill, the flip, the no-measurement case,
+the height that makes a flip plannable) plus the wiring test that the top is the module's.
+
+**P3 — Reload threw the draft away with no question, and the `Deleted … · Undo` toast survived it.**
+D7 says Reload "discards, with confirm". Fix: `reloadConfirm({dirty, changes})` next to `discardText`
+in `workflow-edit-controller.ts` (exposed as `controller.reloadPrompt()`) — a prompt in Cancel's own
+words when edits are pending, `null` (re-read at once) when the banner is only about the FILE moving;
+and `toastFor("delete" | "undo" | "draftReplaced")`, the ONE rule for the toast's lifetime, which
+`App.tsx` now uses for every write (a Reload or a Discard replaces the draft, so the toast goes with
+the history it undid). "Keep editing" is deliberately NOT such an event: it leaves the draft, and so
+the Undo it offers, exactly where they were. Tests: the `changed` block of `workflow-edit-controller.test.ts` (a clean
+reopen asks nothing, an edited one asks `Discard 1 change?`, and asking does not drop the draft) and
+`the undo toast dies with its draft (P3)`.
+
+**N3 — the kind picker's "What it does" was flush against the left edge.** It was a ROW's label in a
+stacked field (no horizontal padding), while every other band's heading is the section's, on
+`space.rowX`. Fix: the heading is `sections[0].label` and the choice row's `label` is `null` (the
+same for the goto picker's list); the component draws a null label as nothing. Tests: `a list's
+heading is the band's, on the band's margin (N3)`.
+
+**N4 — a saved file reopened without changes said "Draft · not saved".** The mockup keeps "Draft" for
+bytes that are not written (`index.html:551`, `:986`) and names the file's own version otherwise
+(`:638`, `v1 · saved`). `draftCaption` already had the rule but was never told the facts; `EditState
+.dirty` and the draft's `version:` are now passed (`clean`, `version`, read by `versionOfDraft`, which
+refuses a non-positive or non-numeric version). Tests: the N4 case in `the header and the bar's words`
+plus `versionOfDraft reads only a real version`.
+
+Skipped, as product decisions the doc and mockups do not cover (reported, not guessed):
+- the "Changed on the computer" banner's own padding/explanatory text (P3's third sentence);
+- N1 (`✗ ×3` crossing the flow line), N2 (a green caption with no glyph), N5 (`.tentacle/workflows/…`
+  in Review's file names);
+- the E4 ✗-drag and the `changed`-mid-flow e2e (E9) remain uncovered, as slice 7c recorded.
+
+Gate: `bun run check` **18273 pass / 5 skip / 0 fail** (the skips are the three documented opt-ins
+— live-k8s, live-docker, real-socket keepalive — plus the mockup-kit PNG calibration, which needs a
+Chrome this box has not got), `bun run typecheck` clean, `bun run lint` clean (0 errors, 0 warnings).
+e2e NOT run this round (as instructed: no simulator, no gate); the extended flow 44 is unverified
+until the next gate run, and its order is pinned by `e2e-flows.test.ts` meanwhile.

@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 import type { WorkflowDraft } from "@tentacle/core";
 import {
   type EditMenuItem,
+  MENU_GAP,
   applyIntent,
   barLine,
   deletedToast,
@@ -21,9 +22,13 @@ import {
   drawnSteps,
   editMenuModel,
   menuGesture,
+  menuHeight,
   menuInputs,
+  menuPlacement,
   portRelease,
   tapIntent,
+  toastFor,
+  versionOfDraft,
 } from "../src/workflow-edit-actions.ts";
 import { editGeometry } from "../src/workflow-edit-graph.ts";
 
@@ -285,13 +290,52 @@ describe("the dispatcher: every intent becomes exactly ONE controller call", () 
 });
 
 describe("the header and the bar's words", () => {
+  const caption = (input: {
+    phase: string;
+    savedVersion?: number | null;
+    clean?: boolean;
+    version?: number | null;
+  }): string =>
+    draftCaption({
+      phase: input.phase,
+      savedVersion: input.savedVersion ?? null,
+      clean: input.clean ?? false,
+      version: input.version ?? null,
+    });
+
   test("the caption: a draft, Review's promise, or the version that landed", () => {
-    expect(draftCaption({ phase: "editing", savedVersion: null })).toBe("Draft · not saved");
-    expect(draftCaption({ phase: "reviewing", savedVersion: null })).toBe("nothing written yet");
-    expect(draftCaption({ phase: "saving", savedVersion: null })).toBe("nothing written yet");
-    expect(draftCaption({ phase: "saved", savedVersion: 3 })).toBe("v3 · saved");
+    expect(caption({ phase: "editing" })).toBe("Draft · not saved");
+    expect(caption({ phase: "reviewing" })).toBe("nothing written yet");
+    expect(caption({ phase: "saving" })).toBe("nothing written yet");
+    expect(caption({ phase: "saved", savedVersion: 3 })).toBe("v3 · saved");
     // A `saved` phase with no version reported still never claims a version.
-    expect(draftCaption({ phase: "saved", savedVersion: null })).toBe("Draft · not saved");
+    expect(caption({ phase: "saved" })).toBe("Draft · not saved");
+  });
+
+  test("a saved file reopened with no edit is NOT a draft: it is the file, at its version (N4)", () => {
+    // Validation round 3, N4: opening a file and changing nothing said "Draft ·
+    // not saved" over bytes that were already on disk. The mockup keeps "Draft"
+    // for what is NOT written yet (`index.html:551`, `:986`) and names the file's
+    // own version otherwise (`:638`).
+    expect(caption({ phase: "editing", clean: true, version: 1 })).toBe("v1 · saved");
+    expect(caption({ phase: "editing", clean: true, version: 4 })).toBe("v4 · saved");
+    // The FIRST edit makes it a draft again — the version it will bump FROM does
+    // not make written bytes of unwritten ones.
+    expect(caption({ phase: "editing", clean: false, version: 4 })).toBe("Draft · not saved");
+    // A create is never clean: there is no file to be saved at.
+    expect(caption({ phase: "editing", clean: false, version: 1 })).toBe("Draft · not saved");
+    // No `version:` in the draft: nothing to claim, but it is still WRITTEN, so
+    // the draft wording would be a lie — it says "Saved", never a version.
+    expect(caption({ phase: "editing", clean: true })).toBe("Saved");
+  });
+
+  test("`versionOfDraft` reads only a real version, never a string or a zero", () => {
+    expect(versionOfDraft(DRAFT)).toBe(1);
+    expect(versionOfDraft({ schemaVersion: 1, version: 7 })).toBe(7);
+    expect(versionOfDraft({ schemaVersion: 1 })).toBeNull();
+    expect(versionOfDraft({ schemaVersion: 1, version: 0 })).toBeNull();
+    expect(versionOfDraft({ schemaVersion: 1, version: "3" })).toBeNull();
+    expect(versionOfDraft(null)).toBeNull();
   });
 
   test("the bar: the first problem VERBATIM (its YAML path), else the state in words", () => {
@@ -340,5 +384,84 @@ describe("the menu's own inputs, read from the draft (never a second count)", ()
     expect(drawnSteps(ghosted)).toBe(2);
     // A structurally broken draft has no steps at all: zero, never a crash.
     expect(drawnSteps({ schemaVersion: 1 })).toBe(0);
+  });
+});
+
+/**
+ * Validation round 3, P2: the long-press menu was drawn at the overlay's origin,
+ * so its first row (`Open`) landed under the clock and the menu was cut by the
+ * status bar. The mockup anchors it to the node it belongs to (`index.html:606`:
+ * `top: g.y + 50 + 44 + 10 + 6`), which is what `menuPlacement` decides — from the
+ * pill's MEASURED top in the window, because the canvas scrolls.
+ */
+describe("where the long-press menu sits (P2)", () => {
+  const WINDOW = 956;
+  const INSET = 62;
+  const menu = editMenuModel({ id: "gate", dangling: [], index: 2, count: 3 });
+  const at = (top: number) =>
+    menuPlacement({
+      menu,
+      nodeTop: top,
+      nodeHeight: 50,
+      windowHeight: WINDOW,
+      insetTop: INSET,
+    });
+
+  test("hung UNDER the pressed pill, never pinned at the window's top edge", () => {
+    // A pill in the middle of the screen: the menu starts below it plus the gap.
+    expect(at(400).top).toBe(400 + 50 + MENU_GAP);
+    // The bug's exact shape was 0: a menu whose first row is under the status bar.
+    expect(at(400).top).toBeGreaterThan(INSET);
+  });
+
+  test("a pill near the bottom: the menu flips ABOVE it rather than past the edge", () => {
+    const top = at(WINDOW - 40).top;
+    // Above the pill, and fully inside the window (no row cut off).
+    expect(top).toBeLessThan(WINDOW - 40);
+    expect(top + menuHeight(menu)).toBeLessThanOrEqual(WINDOW);
+  });
+
+  test("no measurement from the press: the menu still clears the status bar", () => {
+    // A pure-RN event can arrive without numbers. The bug's behaviour — pinned at
+    // the overlay's origin — is what a `null` must NOT reproduce.
+    expect(at(0).top).toBeGreaterThan(0);
+    expect(
+      menuPlacement({
+        menu,
+        nodeTop: null,
+        nodeHeight: 50,
+        windowHeight: WINDOW,
+        insetTop: INSET,
+      }).top,
+    ).toBe(INSET);
+  });
+
+  test("the menu's height is its rows plus the note, so a flip can be planned", () => {
+    const items = editMenuModel({ id: "gate", dangling: [], index: 2, count: 3 });
+    expect(menuHeight(items)).toBeGreaterThan(items.items.length * 0);
+    // The note under Delete is part of the box: a flip that ignored it would cut it.
+    const noted = editMenuModel({ id: "gate", dangling: ["review"], index: 2, count: 3 });
+    expect(menuHeight(noted)).toBeGreaterThan(menuHeight(items));
+  });
+});
+
+/**
+ * Validation round 3, P3 (the half the pure module owns): the `Deleted … · Undo`
+ * toast outlived the draft it undoes — after a Reload it stayed up over the file it
+ * had just re-read, and its Undo would have written into a different history. The
+ * confirm Reload asks is `reloadConfirm` (`workflow-edit-controller.ts`, next to
+ * `discardText`, the wording it reuses).
+ */
+describe("the undo toast dies with its draft (P3)", () => {
+  test("a delete raises it, naming the step that went", () => {
+    expect(toastFor("delete", "gate")).toBe("Deleted gate");
+  });
+
+  test("undo and a replaced draft take it away — never over a draft it cannot undo", () => {
+    // Undo was taken: there is nothing left to undo.
+    expect(toastFor("undo")).toBeNull();
+    // Reload / Discard: the history the Undo pointed into is GONE. This is the
+    // bug: the toast (and its Undo) survived a Reload.
+    expect(toastFor("draftReplaced")).toBeNull();
   });
 });
