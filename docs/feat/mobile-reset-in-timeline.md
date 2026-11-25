@@ -1,6 +1,6 @@
 # feat/mobile-reset-in-timeline — Context reset and compaction as timeline steps (iPhone)
 
-> **Status:** implementation — **NOT approved** (4 owner questions open, below)
+> **Status:** implementation — **APPROVED (owner 25/11, answers 1A 2A 3A 4A)** (4 owner questions open, below)
 > **Branch:** `feat/mobile-reset-in-timeline`
 > **Size:** M (3 DeepSeek slices, S–M each) · **Blast:** contained (app only: no protocol, persistence, daemon or TUI change) · **Suited:** Opus mockups/plan → DeepSeek exec per slice → standard review (one Opus round for the group, `fewer-reviews`)
 > **Changelog:** `changelog.d/mobile-reset-in-timeline.changed.md`
@@ -100,11 +100,17 @@ collapsed AND expanded; `?nuovo=1` outlines what the kit does not have.
    *Recommendation: A* (today it is the only path where the chat says nothing
    until a reopen).
 
+### Owner answers
+
+Owner 2026-11-25 ~09:20, from the mockups (`.tentacle/mockups/mobile-reset-in-timeline/`): **1 A** (a rail step: thin `↺` / `⤡` glyph + first line of the prompt, or `ctx 182k → 9k`) · **2 A** (open body: neutral-grey markdown, first 12 lines + «show all») · **3 A** (live: the `context_reset` call merges into the reset step — one node, as after a reopen) · **4 A** (the phone's own `/compact` leaves a `⤡ Compacted` step at once). Plan APPROVED (owner).
+
+*— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-25*
+
 ## Implementation
 
 *— claude-opus-5-5, 2026-11-25*
 
-**NOT approved** — written for the recommended answers (1A 2A 3A 4A); each other
+**APPROVED (owner 25/11, answers 1A 2A 3A 4A)** — written for the recommended answers (1A 2A 3A 4A); each other
 answer is a local swap, noted inline as *(Qn-B: …)*.
 
 ### Load-bearing assumption
