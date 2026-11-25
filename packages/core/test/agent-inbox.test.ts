@@ -155,17 +155,19 @@ describe("T6: the read count, per sender", () => {
 // docs/feat/a2a-client.md C6 (slice a2c-3): a remote agent's question waits on
 // the parent's reply — `next` is the wait, `raw` the sender's own words.
 describe("next(signal): the wait a harness child's parent route reads", () => {
-  test("a queued text is taken at once, raw kept beside the wrapped form, counted read", async () => {
+  test("a text queued BEFORE the call is not taken (it predates the question): the next push is, raw kept", async () => {
     const inbox = new AgentInbox();
+    inbox.push("stale", "agent");
+    const p = inbox.next(new AbortController().signal);
     inbox.push("[message from the parent agent] main", "agent", "main");
-    const got = await inbox.next(new AbortController().signal);
-    expect(got).toEqual({
+    expect(await p).toEqual({
       text: "[message from the parent agent] main",
       raw: "main",
       from: "agent",
     });
     expect(inbox.read("agent")).toBe(1);
-    expect(inbox.pending).toBe(0);
+    expect(inbox.pending).toBe(1);
+    expect(inbox.close()).toEqual(["stale"]);
   });
 
   test("a waiting reader gets the first push, which is read, not queued", async () => {
@@ -201,7 +203,8 @@ describe("next(signal): the wait a harness child's parent route reads", () => {
 
   test("push without raw: raw is the text", async () => {
     const inbox = new AgentInbox();
+    const p = inbox.next(new AbortController().signal);
     inbox.push("plain");
-    expect((await inbox.next(new AbortController().signal))?.raw).toBe("plain");
+    expect((await p)?.raw).toBe("plain");
   });
 });

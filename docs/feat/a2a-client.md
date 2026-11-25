@@ -1469,6 +1469,54 @@ step). Facts for the re-run:
   this path; Bun DNS on a public card (loopback only here). Gate not run
   (script runs it); no protocol change.
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-25*
+
+- **Finding 1 (MEDIUM, stale inbox text answers a question) — FIXED.**
+  Root cause: `AgentInbox.next` took the oldest QUEUED text at once, and a
+  harness child's inbox is never drained while it runs, so a text written
+  before the question (stale, or a `both`-loser's late reply to Q1) became the
+  answer.
+  - `packages/core/src/agent-inbox.ts:171` — `next` now takes only a text
+    pushed AFTER the call; one already queued stays queued and `close`
+    reports it unread (the run's «N message(s) … were not read» note), so it
+    is neither sent nor lost.
+  - `packages/agent/src/harness/child.ts:597` — `routeInput` starts the wait
+    BEFORE `notify` (a reply cannot slip in between the note and the wait),
+    on its own controller linked to `withdraw`; a failed `notify` aborts it
+    at once, so a later text is not swallowed by a wait nobody will answer.
+  - Tests: `harness-a2a-seam.test.ts` + 3 (pre-queued text; `both` late
+    reply to Q1 does not answer Q2; failed notify does not swallow a push);
+    `agent-inbox.test.ts` — the «queued text taken at once» test asserted the
+    bug: rewritten to «queued before the call is not taken», and «push
+    without raw» now pushes after `next`.
+  - **Red before green** (unfixed code): the 2 seam tests fail on the
+    property — `Expected "… · main"`, `Received "… · how is it going?"`;
+    `Expected "… · README.md"`, `Received "… · develop"`.
+  - **Mutations** (scratch `.tentacle/tmp/a2a-client/mutate-fix1.ts` and
+    `mutate-fix1b.ts`; each restored, byte-identical):
+    | mutation | result |
+    |---|---|
+    | M1 `next` takes the oldest queued text again | red — 3 fail |
+    | M2 no `stopWait()` on a failed notify | red — 1 fail |
+    | M3 wait started AFTER `notify` (old order) | red — 2 fail (`harness-remote-fit` parent/both: its fake replies inside `notify`) |
+  - Narrow runs: seam, remote-fit, a2a, a2a-registry, subagent,
+    subagent-budget, `agent-inbox`, daemon `subagent-panel`, cli
+    `a2a-wiring` + `a2a-client-e2e` → 156 pass / 0 fail. Biome on the 4
+    changed files: clean.
+  - Left (debt): stale texts still occupy the inbox; with
+    `AGENT_INBOX_MAX` (8) unread ones a reply is refused `full` — the parent
+    sees the refusal, nothing is lost.
+- **Finding 2 (MEDIUM, card prefetch caller) — NOT FIXED: owner decision.**
+  Options (a)/(b)/(c) are under Slices (the second «Plan fix»),
+  recommended (c). No code here: picking one is the owner's, and writing it
+  without that decision would be production code outside the approved plan.
+  The alternative — move the gap to Notes/debt + `TODO.md` — also needs the
+  owner's OK.
+- **Gate:** not run here (the orchestrator's script runs it). No protocol
+  or changelog change (internal fix, no wire change).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-25* (fresh context; the same model family planned

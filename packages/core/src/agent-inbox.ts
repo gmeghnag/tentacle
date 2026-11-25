@@ -159,21 +159,18 @@ export class AgentInbox {
   }
 
   /**
-   * Take the NEXT text, waiting for one (docs/feat/a2a-client.md C6, the
-   * `parent` route of a remote question): the oldest queued text at once, else
-   * the first one pushed. `undefined` when the inbox is (or gets) closed or
-   * `signal` aborts — nothing is taken then. One reader at a time: a second
-   * `next` releases the first with `undefined`.
+   * Wait for the NEXT text pushed after this call (docs/feat/a2a-client.md C6,
+   * the `parent` route of a remote question): the reply to THIS question. A
+   * text already queued was written before the question was raised (a stale
+   * message, or a late reply to an earlier question another route answered),
+   * so it is never taken here: it stays queued, and `close` reports it unread.
+   * `undefined` when the inbox is (or gets) closed or `signal` aborts — nothing
+   * is taken then. One reader at a time: a second `next` releases the first
+   * with `undefined`.
    */
   next(signal: AbortSignal): Promise<InboxMessage | undefined> {
     if (this.isClosed || signal.aborted) {
       return Promise.resolve(undefined);
-    }
-    const first = this.items.shift();
-    if (first !== undefined) {
-      this.readCounts[first.from] += 1;
-      this.onRead?.();
-      return Promise.resolve(first);
     }
     return new Promise((resolve) => {
       const settle = (item: InboxItem | undefined): void => {

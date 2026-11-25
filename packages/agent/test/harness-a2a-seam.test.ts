@@ -351,6 +351,117 @@ describe("C3 + C6: a reply to a remote question passes the same gate", () => {
     expect(result.report).toContain("got main");
   });
 
+  // Review round 1 finding 1: a text the parent sent BEFORE the question is not
+  // its reply — it must never leave as the answer (with auto mode or a session
+  // grant on the agent it would leave unseen).
+  test("parent route: a text queued before the question is not its answer", async () => {
+    const broker = new SpyBroker();
+    const acme = remote("a2a:acme", () => [question]);
+    const inbox = new AgentInbox();
+    inbox.push("[message from the parent agent] how is it going?", "agent", "how is it going?");
+    const notes: string[] = [];
+    const p = runner([acme], broker, {
+      inputFrom: "parent",
+      notify: (_id, text) => {
+        notes.push(text);
+        return { ok: true, wakes: true };
+      },
+    }).run(opts("a2a:acme"), { agentId: "sa-1", inbox, signal: new AbortController().signal });
+    await until(() => broker.asks.length === 1);
+    broker.asks[0]?.answer({ allowed: true });
+    await until(() => notes.length === 1);
+    inbox.push("[message from the parent agent] main", "agent", "main");
+    await until(() => broker.asks.length === 2);
+    expect(broker.asks[1]?.req.detail).toBe("https://agents.acme.dev · main");
+    broker.asks[1]?.answer({ allowed: true });
+    const result = await p;
+    expect(acme.runs[0]?.answers).toEqual([
+      { askId: "q1", decision: { allow: true, input: "main" } },
+    ]);
+    expect(broker.asks.map((a) => a.req.detail)).not.toContain(
+      "https://agents.acme.dev · how is it going?",
+    );
+    // Never read, never lost: the run reports it.
+    expect(result.report).toContain("1 message(s) sent to this sub-agent");
+  });
+
+  test("both route: the parent's late reply to Q1 (the person answered first) does not answer Q2", async () => {
+    const broker = new SpyBroker();
+    const q2: HarnessEvent = {
+      kind: "ask",
+      askId: "q2",
+      ask: { type: "input", question: "Which file?" },
+    };
+    const acme = remote("a2a:acme", () => [question]);
+    const inbox = new AgentInbox();
+    const notes: string[] = [];
+    const p = runner([acme], broker, {
+      inputFrom: "both",
+      notify: (_id, text) => {
+        notes.push(text);
+        return { ok: true, wakes: true };
+      },
+    }).run(opts("a2a:acme"), { agentId: "sa-1", inbox, signal: new AbortController().signal });
+    await until(() => broker.asks.length === 1);
+    broker.asks[0]?.answer({ allowed: true });
+    // Q1: the person answers in the pop-up first.
+    await until(() => broker.asks.length === 2);
+    expect(broker.asks[1]?.req.kind).toBe("question");
+    broker.asks[1]?.answer({ allowed: true, message: "main" });
+    await until(() => broker.asks.length === 3);
+    expect(broker.asks[2]?.req.detail).toBe("https://agents.acme.dev · main");
+    // The parent, already told about Q1, replies late: the route was withdrawn.
+    inbox.push("[message from the parent agent] develop", "agent", "develop");
+    const run = acme.runs[0];
+    if (!run) throw new Error("no run");
+    run.answer = async (askId, decision) => {
+      run.answers.push({ askId, decision });
+      run.push(
+        askId === "q1"
+          ? q2
+          : { kind: "end", status: "completed", text: `got ${String(decision.input)}` },
+      );
+    };
+    broker.asks[2]?.answer({ allowed: true });
+    // Q2 is raised: the pop-up is asked (not withdrawn by the stale reply).
+    await until(() => notes.length === 2);
+    await until(() => broker.asks.length >= 4);
+    const q2Ask = broker.asks[3];
+    expect(q2Ask?.req.kind).toBe("question");
+    q2Ask?.answer({ allowed: true, message: "README.md" });
+    await until(() => broker.asks.length === 5);
+    expect(broker.asks[4]?.req.detail).toBe("https://agents.acme.dev · README.md");
+    broker.asks[4]?.answer({ allowed: true });
+    const result = await p;
+    expect(run.answers.map((a) => a.decision)).toEqual([
+      { allow: true, input: "main" },
+      { allow: true, input: "README.md" },
+    ]);
+    expect(broker.asks.map((a) => a.req.detail)).not.toContain("https://agents.acme.dev · develop");
+    expect(result.report).toContain("1 message(s) sent to this sub-agent");
+  });
+
+  test("both route, the parent could not be told: a text pushed meanwhile is not swallowed by a wait nobody answers", async () => {
+    const broker = new SpyBroker();
+    const acme = remote("a2a:acme", () => [question]);
+    const inbox = new AgentInbox();
+    const p = runner([acme], broker, {
+      inputFrom: "both",
+      notify: () => ({ ok: false, reason: "limit" }),
+    }).run(opts("a2a:acme"), { agentId: "sa-1", inbox, signal: new AbortController().signal });
+    await until(() => broker.asks.length === 1);
+    broker.asks[0]?.answer({ allowed: true });
+    await until(() => broker.asks.length === 2);
+    expect(broker.asks[1]?.req.kind).toBe("question");
+    inbox.push("[message from the parent agent] unrelated", "agent", "unrelated");
+    expect(inbox.pending).toBe(1);
+    broker.asks[1]?.answer({ allowed: true, message: "main" });
+    await until(() => broker.asks.length === 3);
+    broker.asks[2]?.answer({ allowed: true });
+    const result = await p;
+    expect(result.report).toContain("1 message(s) sent to this sub-agent");
+  });
+
   test("a skipped question is never answered", async () => {
     const broker = new SpyBroker();
     const acme = remote("a2a:acme", () => [question]);
