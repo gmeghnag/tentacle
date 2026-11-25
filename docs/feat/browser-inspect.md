@@ -944,3 +944,17 @@ Mockups `.tentacle/mockups/browser-b6/index.html`. Owner, verbatim: «per browse
 - **Q4 → B** (as recommended): the unmistakable «clear»/«auto» sign in the chat is the strip by the composer, with a one-tap exit, present only while on.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-25*
+
+## Review
+
+### Review B6 (fresh context, `git diff main...HEAD` = `33ee73a6`, doc only)
+
+**Verdict: PASS (the STOP is correct)** — no code, test or fragment in the diff; nothing to mutate.
+
+- **Gate**: `bun run lint` clean (2536 files); `bun run typecheck` (root + mobile + relay) green. No touched test files (diff = this doc only), so no narrow run and no mutation: the slice adds no test.
+- **Premise table (all TRUE, re-checked in the worktree)**: `protocol/src/session.ts:1693-1697` `SessionCapabilitiesSchema` = `disabledMcp/disabledSkills/disabledTools?`, no `browser`; `core/src/permission.ts:52,108,356` kind / owner-only / refused by `autoApproves`, no `browserAuto` (rg); `tools/src/browser.ts` no `secrets|actions`; `protocol/src/methods.ts`, `updates.ts` no `browser`; `session-log.ts:214-219` non-critical (`skippable`) `capabilities` entry; `updates.ts:383-386` display update; `hosted-session.ts:~3989` `setCapability`; the four TUI files exist.
+- **Attacks tried**: (1) is B6 really unplanned? Files #7 names only «TUI `/browser` + status row; iPhone toggles» — no load-bearing assumption, failure modes or tests; the owner's Q2–Q4 need auto/clear state that B5 explicitly deferred (`:468`, `:607`) → STOP justified. (2) Does the proposed split break §7? `browserAuto` laptop-set slack + the refusal in `autoApproves` keeps the single-broker / "auto-accept never answers" rule; the additive optional field on a strip schema needs no bump — sound. (3) `browser/status` answered "from the laptop's own hub": for `serve` the daemon IS on the laptop, but for a pod session the hub is reachable only by the laptop main, not the pod daemon — the proposal must say the method is answered client-side or by a trusted daemon only; to settle in the B5b/B6 plan (not a defect of this diff).
+- **Finding — MEDIUM (process/attribution)**: `:523` and `:678` are signed `claude-sonnet-4-5`, but the commit is `exec (deepseek)` and that model id is not one this repo runs. §10's signature exists to trace which model did what; a wrong one defeats it. Fix: re-sign with the model that actually ran.
+- **Executor behaviour**: correct escalation per §0 (stopped, cited, two options, no scope picked alone); it self-reports a wrong `cd` to the main checkout (read-only, re-verified).
+
+*— claude-opus-5-5, 2026-11-25*
