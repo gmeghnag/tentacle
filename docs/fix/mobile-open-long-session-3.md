@@ -44,3 +44,42 @@ Round 2 (`mobile-open-long-session-2.md`) fixed the 114-row case. Post-merge QA 
 - after: `green-sheet-400.png` (10 fps, last 27 frames: blank ~0.5 s, then turns 194–200 directly, no intermediate position), `green-long400.png` (400 msgs at rest), `green-alpha114.png` (114 msgs: turn 57 + answer above the composer), `green-charlie.png` (short session right).
 
 **Unverified:** sessions ≫ 400 rows; blank length with no Maestro/video running; behaviour on a physical device (slower JS may need more than one batch).
+
+## Review (Round 1)
+
+*— claude-opus-5-5, 2026-11-25 (fresh context; executor claude-sonnet-5-5: different model, same Claude family, so blind spots may be shared)*
+
+**Verdict: REQUEST-CHANGES**: two MEDIUM findings, both cheap to fix. The fix itself holds, and the simulator evidence supports it.
+
+**Gate (this tree).** `bun run typecheck`: exit 0. `bun run lint`: 2395 files, clean. `bun run test` run 1: 17884 pass / 5 skip / **1 fail**. Run 2: 17885 pass / 5 skip / 0 fail. The failing test was not identified: the parallel runner's tail did not name it, and it did not recur. The diff is a pure function plus one FlatList prop, so it cannot plausibly cause a failure outside the mobile list. The 5 skips are 2 more than the AGENTS §6 baseline of 3. The diff adds no skip, so they come from `main`.
+
+**Findings**
+1. **MEDIUM: the fix's wiring is not pinned by any test.** In place, I deleted `maxToRenderPerBatch={landingBatch(settling)}` (`SessionScreen.tsx:1836`) and ran `bun test` in `apps/mobile`: **5022 pass / 0 fail**. I restored the file and its shasum matched. The new tests pin only the pure helper. Test 2 (`LANDING_BATCH >= 200`) restates a constant. "Red on main" was red only because the import did not exist, not because the behaviour was wrong. This is not a §9 regression test. Fix: add a source pin to `apps/mobile/test/session-screen-follow-wiring.test.ts`, which already pins the landing wiring that way. It must fail when the prop is removed or passed a constant.
+2. **MEDIUM: false premise in Implementation/Design.** The Design says "nothing rendered that the window would not render anyway (the default `windowSize` 21 bounds it)", and the test comment says "the batch covers a whole window". Neither holds for the branch this fix relies on. In `VirtualizeUtils.js:144-149` (`@react-native/virtualized-lists` 0.88), when the scroll target lies past the rendered window ("entire list is before our overscan window"), the list renders the **last `maxToRenderPerBatch + 1` rows**, whatever `windowSize` is. With 240, that is 241 rows in one JS batch while the list is hidden, even when those rows span far more than 21 viewports (code or diagram rows); the next pass trims them. This is probably the real reason 400 rows land in one step, so the mechanism text should say so. Its cost (one long hidden JS stall, so a longer blank on a slow device) should sit under Failure modes and Unverified, not be ruled out. Fix the doc and the test comment; the code can stay.
+3. LOW: the mechanism is shown by intervention (N=1 red, N=1 green, `red-sheet-400.png` / `green-sheet-400.png`: red shows turn 82 → 200 travel, green shows blank → 194–200 with no intermediate frame), not by instrumentation. Nothing logged `capped`/`rounds` reaching `LANDING_ROUNDS` on the red run. The "~570 px gap" in my brief is the round-1 symptom (`mobile-open-long-session.md`). This round's symptom is travel. The cause explains the travel: the bound expires mid-growth and the rest arrives through `contentGrew` animated. "Proportional to length" was inferred, not measured at two lengths.
+4. LOW: re-attach, resync, pull-to-refresh and Reopen start from `landingQuiet` (`settling: false`), so they keep 10-row batches. If a resync re-keys a long list (cf. `mobile-foreground-jump.md`), the same mid-growth travel can recur on the shown list. This predates the diff and is out of scope; record it in Notes.
+
+**Mutation.** (a) Prop removed from `SessionScreen.tsx`: 0 fail. That is finding 1. (b) `landingBatch` always returns `undefined`: follow.test.ts 70 pass / 1 fail, which matches Execution's claim. Both files were restored and shasums verified. `git status` is clean.
+
+**Premise table**
+| Premise | Verdict |
+|---|---|
+| Red: 400 msgs open at a middle turn and visibly travel to the end | TRUE (`red-sheet-400.png`, turn 82 → 200 over ~13 frames) |
+| FlatList default batch 10, growth one batch per update | TRUE (`VirtualizedList.js:650-653`, `computeWindowedRenderLimits` caps `newCellCount` at `maxToRenderPerBatch`) |
+| `LANDING_ROUNDS` = 12, capped path then tail follows animated | TRUE (`follow.ts:255`, `:349-372`) |
+| `windowSize` bounds what a 240 batch renders | **FALSE** for the jump branch (`VirtualizeUtils.js:144-149`), finding 2 |
+| Short sessions unaffected | TRUE (≤ 10 rows already render in the initial batch; `green-charlie.png`) |
+| Prior constraint "keep virtualization, no `initialNumToRender = rows.length`" (`mobile-open-at-end.md:76`) | HOLDS: virtualization is on; only the per-batch cap rises, and only while hidden |
+
+**Attacks tried**
+- *Very long (1000+) sessions:* the jump branch renders the last 241 rows; if those do not reach the window edge, further batches of 240 follow, so convergence should take a few rounds and stay well under 12. Not measured. Cost risk: finding 2.
+- *Content growing while opening:* `settling` drives the prop and the landing machine is unchanged. The batch drops to default at reveal. Nothing new.
+- *Reveal transition (240 → default):* the prop change re-runs `computeWindowedRenderLimits` against the large previous window. It trims only outside overscan, so the visible end does not move. No visible travel.
+- *Rotation / keyboard / composer inset:* after reveal `settling` is false and the prop is `undefined` (the default). `viewportChanged` is untouched.
+- *Re-open / re-attach:* the default batch applies, which is finding 4.
+- *Logic in pure module:* yes. `landingBatch` lives in `follow.ts`, and the component maps it to a prop. That follows §7.
+- *No new visible scroll travel:* green shows no intermediate position, and nothing scrolls while shown.
+
+**What holds.** The diagnosis and the one-prop fix are sound and minimal. The pure-module split is right. The changelog fragment is well formed. The simulator red/green evidence is real and checks the exact property: no intermediate frame.
+
+**Executor behaviour.** Execution is honest and compact. It names its unverified parts (≫400 rows, no-driver blank, physical device) and does not overclaim the 3.5 s blank. Weaknesses: it presented a red-by-missing-import as red, left the only behavioural line unpinned, and stated the windowing premise without reading `VirtualizeUtils`.
