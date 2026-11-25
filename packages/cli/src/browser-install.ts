@@ -120,25 +120,42 @@ export function uninstallBrowser(env: BrowserInstallEnv): string[] {
   return removed;
 }
 
-export async function statusBrowser(env: BrowserInstallEnv): Promise<string[]> {
+/**
+ * The native host is installed and current: the manifest names THIS wrapper and
+ * only our extension's origin, and the wrapper exists. Pure over the files; the
+ * `status` command and `browser/status` (B5b) share it.
+ */
+export function nativeHostInstalled(
+  env: Pick<BrowserInstallEnv, "configDir" | "home" | "extensionId">,
+): boolean {
   const id = env.extensionId ?? BROWSER_EXTENSION_ID;
-  const lines: string[] = [];
   const wrapper = wrapperPath(env.configDir);
   const manifest = manifestPath(env.home);
-  let manifestOk = false;
-  if (existsSync(manifest)) {
-    try {
-      const m = JSON.parse(readFileSync(manifest, "utf8")) as {
-        path?: string;
-        allowed_origins?: string[];
-      };
-      manifestOk = m.path === wrapper && m.allowed_origins?.[0] === `chrome-extension://${id}/`;
-    } catch {
-      manifestOk = false;
-    }
+  if (!existsSync(manifest)) return false;
+  try {
+    const m = JSON.parse(readFileSync(manifest, "utf8")) as {
+      path?: string;
+      allowed_origins?: string[];
+    };
+    return (
+      m.path === wrapper &&
+      m.allowed_origins?.[0] === `chrome-extension://${id}/` &&
+      existsSync(wrapper)
+    );
+  } catch {
+    return false;
   }
+}
+
+/** Chrome is managed by an organization (a policy may block the extension or the debugger). */
+export function chromeManaged(env: Pick<BrowserInstallEnv, "managedPolicyPath">): boolean {
+  return existsSync(env.managedPolicyPath ?? MANAGED_POLICY);
+}
+
+export async function statusBrowser(env: BrowserInstallEnv): Promise<string[]> {
+  const lines: string[] = [];
   lines.push(
-    manifestOk && existsSync(wrapper)
+    nativeHostInstalled(env)
       ? "native host: installed"
       : "native host: not installed (or stale) — run `tentacle browser install`",
   );
@@ -147,7 +164,7 @@ export async function statusBrowser(env: BrowserInstallEnv): Promise<string[]> {
       ? "chrome link: connected (extension running)"
       : "chrome link: not running (Chrome closed, or the tentacle extension is not enabled)",
   );
-  if (existsSync(env.managedPolicyPath ?? MANAGED_POLICY)) {
+  if (chromeManaged(env)) {
     lines.push(
       "note: this Chrome is managed by an organization — a policy may block developer-mode extensions or the debugger API",
     );

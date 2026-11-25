@@ -1694,6 +1694,23 @@ export const SessionCapabilitiesSchema = z.object({
   disabledMcp: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
   disabledSkills: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES),
   disabledTools: z.array(CapabilityNameSchema).max(MAX_DISABLED_CAPABILITIES).optional(),
+  /**
+   * The user's Chrome in this session (docs/feat/browser-inspect.md B5b):
+   * PRESENT only when the session's host has it (the worker, `serve`; never a
+   * pod) — the UIs read its presence as "available". `enabled` is a
+   * projection of `disabledTools` (the `browser` group is the one truth; set it
+   * with the `tool` op), never stored on its own. Additive: an older client
+   * drops it. A FUTURE new enum value would fail an older client's parse.
+   */
+  browser: z
+    .object({
+      enabled: z.boolean(),
+      /** `clear`: page-derived results are NOT masked (an ask still is). */
+      secrets: z.enum(["masked", "clear"]),
+      /** `auto`: a non-hard browser action is answered allow-once by the host itself. */
+      actions: z.enum(["ask", "auto"]),
+    })
+    .optional(),
 });
 export type SessionCapabilitiesWire = z.infer<typeof SessionCapabilitiesSchema>;
 
@@ -1841,11 +1858,13 @@ export type SetAutoAcceptResult = z.infer<typeof SetAutoAcceptResultSchema>;
 
 export const SetCapabilityParamsSchema = z.object({
   sessionId: SessionIdSchema,
-  kind: z.enum(["mcp", "skill", "tool"]),
+  kind: z.enum(["mcp", "skill", "tool", "browser"]),
   /**
    * A server name (`mcp`) or a skill name (`skill`): an unknown one is stored
    * (F10). A built-in tool or group name (`tool`): an unknown one, or the
    * always-on `skill`, is `InvalidParams` (an older daemon refuses the kind).
+   * A browser switch (`browser`, B5b): `auto` (actions) or `clear` (secrets);
+   * any other name, or a host without the user's Chrome, is `InvalidParams`.
    */
   name: CapabilityNameSchema,
   enabled: z.boolean(),
@@ -1857,6 +1876,46 @@ export const SetCapabilityResultSchema = z.object({
   capabilities: SessionCapabilitiesSchema,
 });
 export type SetCapabilityResult = z.infer<typeof SetCapabilityResultSchema>;
+
+// --- browser/status -----------------------------------------------------
+// The user's Chrome as one session sees it (docs/feat/browser-inspect.md B5b):
+// the link's state and the session's own tabs, for the phone's Browser page. A
+// READ: it never claims the browser (an unclaimed session gets no tabs), never
+// throws except for an unknown session. A host without the browser (a pod)
+// answers `{available: false}`. Additive: an older daemon → `MethodNotFound`.
+
+/** The most tabs one status lists. */
+export const MAX_BROWSER_STATUS_TABS = 64;
+
+export const BrowserStatusParamsSchema = z.object({ sessionId: SessionIdSchema });
+export type BrowserStatusParams = z.infer<typeof BrowserStatusParamsSchema>;
+
+export const BrowserStatusResultSchema = z.object({
+  available: z.boolean(),
+  link: z
+    .object({
+      state: z.enum(["connected", "not_running", "extension_missing", "not_installed"]),
+      /** Installed by a managed policy (not the user's own «Load unpacked»). */
+      managed: z.boolean(),
+    })
+    .optional(),
+  /** Another tentacle process holds the browser: no tabs are listed. */
+  heldElsewhere: z.boolean().optional(),
+  tabs: z
+    .array(
+      z.object({
+        id: z.number().int().nonnegative(),
+        /** Page text, masked and capped (200 chars). */
+        title: z.string().max(200),
+        /** Host + path only (no query, no fragment), masked. */
+        where: z.string().max(2048),
+        handedOver: z.boolean(),
+        traced: z.boolean(),
+      }),
+    )
+    .max(MAX_BROWSER_STATUS_TABS),
+});
+export type BrowserStatusResult = z.infer<typeof BrowserStatusResultSchema>;
 
 // --- session/close ------------------------------------------------------
 // End the session for everyone: abort its turn, stop its background jobs, tell

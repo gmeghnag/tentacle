@@ -7,7 +7,21 @@
  * (docs/fix/mobile-bundle-node-import.md). `@tentacle/agent`'s
  * `capabilities.ts` re-exports it and adds the projections the model sees.
  */
-import { ALWAYS_ON_TOOLS, expandToolName } from "./tool-groups.ts";
+import { ALWAYS_ON_TOOLS, TOOL_GROUPS, expandToolName } from "./tool-groups.ts";
+
+/**
+ * The two switches of the user's Chrome in one session (docs/feat/browser-inspect.md
+ * B5b): `secrets` — page-derived results masked (default) or in clear; `actions`
+ * — a browser action asks (default) or, when not `hard`, is answered allow-once
+ * by the session's own host.
+ */
+export interface BrowserSwitches {
+  readonly secrets: "masked" | "clear";
+  readonly actions: "ask" | "auto";
+}
+
+/** The safe state: masked, every action asks. What an absent `browser` means. */
+export const BROWSER_DEFAULTS: BrowserSwitches = { secrets: "masked", actions: "ask" };
 
 /** A session's capability switches: sorted, de-duplicated names, the three disabled sets. */
 export interface SessionCapabilities {
@@ -15,6 +29,12 @@ export interface SessionCapabilities {
   readonly disabledSkills: readonly string[];
   /** Built-in tools switched off (docs/feat/tool-toggles.md), groups expanded. */
   readonly disabledTools: readonly string[];
+  /**
+   * The browser switches (B5b), set ONLY by a live `session/set_capability`:
+   * never restored from a record, never carried by a seed (the daemon's
+   * `normalizeCapabilities` drops it). Absent = `BROWSER_DEFAULTS`.
+   */
+  readonly browser?: BrowserSwitches;
 }
 
 /** Everything on: a brand-new session's state. */
@@ -24,8 +44,18 @@ export const NO_CAPABILITIES: SessionCapabilities = {
   disabledTools: [],
 };
 
-/** The kinds a switch can turn off. */
-export type CapabilityKind = "mcp" | "skill" | "tool";
+/** The session's browser switches, defaults filled in. */
+export function browserSwitchesOf(caps: SessionCapabilities): BrowserSwitches {
+  return caps.browser ?? BROWSER_DEFAULTS;
+}
+
+/** The browser tool group is on: none of its tools is switched off (the wire's `enabled` projection). */
+export function browserToolsEnabled(caps: SessionCapabilities): boolean {
+  return !(TOOL_GROUPS.browser ?? []).some((tool) => caps.disabledTools.includes(tool));
+}
+
+/** The kinds a switch applies to. */
+export type CapabilityKind = "mcp" | "skill" | "tool" | "browser";
 
 /**
  * One toggle, as the protocol carries it: a DELTA (not the whole state), so two
@@ -41,23 +71,43 @@ const KEY_OF = {
   mcp: "disabledMcp",
   skill: "disabledSkills",
   tool: "disabledTools",
-} as const satisfies Record<CapabilityKind, keyof SessionCapabilities>;
+} as const satisfies Record<Exclude<CapabilityKind, "browser">, keyof SessionCapabilities>;
 
 /**
  * Why a `tool` op cannot apply: its name is no built-in tool or group, or it
  * names an always-on tool (`skill`). Built-in names are static per build, so
  * an unknown one is a typo or version skew — never stored (unlike MCP/skill
- * names, which may appear later).
+ * names, which may appear later). A `browser` op names `auto` or `clear` only.
  */
 export class CapabilityRefusal extends Error {
   constructor(readonly op: CapabilityOp) {
     super(
-      ALWAYS_ON_TOOLS.includes(op.name)
-        ? `${op.name} is always on and cannot be switched`
-        : `unknown built-in tool or group: ${JSON.stringify(op.name)}`,
+      op.kind === "browser"
+        ? `unknown browser switch: ${JSON.stringify(op.name)} (auto or clear)`
+        : ALWAYS_ON_TOOLS.includes(op.name)
+          ? `${op.name} is always on and cannot be switched`
+          : `unknown built-in tool or group: ${JSON.stringify(op.name)}`,
     );
     this.name = "CapabilityRefusal";
   }
+}
+
+/** A `browser` op: `auto` sets `actions`, `clear` sets `secrets`; `enabled` = the non-default value. */
+function applyBrowserOp(state: SessionCapabilities, op: CapabilityOp): SessionCapabilities {
+  const current = browserSwitchesOf(state);
+  let next: BrowserSwitches;
+  if (op.name === "auto") {
+    const actions = op.enabled ? "auto" : "ask";
+    if (current.actions === actions) return state;
+    next = { ...current, actions };
+  } else if (op.name === "clear") {
+    const secrets = op.enabled ? "clear" : "masked";
+    if (current.secrets === secrets) return state;
+    next = { ...current, secrets };
+  } else {
+    throw new CapabilityRefusal(op);
+  }
+  return { ...state, browser: next };
 }
 
 /**
@@ -65,12 +115,16 @@ export class CapabilityRefusal extends Error {
  * back, so a caller can tell "no change" from "changed" by identity (and a
  * no-op set emits no session-log entry and no broadcast). A `tool` op names a
  * tool OR a group: a group is ONE op (atomic, one log entry, one broadcast).
- * An unknown tool name or `skill` throws a `CapabilityRefusal`, state untouched.
+ * An unknown tool name or `skill` throws a `CapabilityRefusal`, state untouched;
+ * so does a `browser` op naming anything but `auto` / `clear`.
  */
 export function applyCapabilityOp(
   state: SessionCapabilities,
   op: CapabilityOp,
 ): SessionCapabilities {
+  if (op.kind === "browser") {
+    return applyBrowserOp(state, op);
+  }
   const names = op.kind === "tool" ? expandToolName(op.name) : [op.name];
   if (names === undefined) {
     throw new CapabilityRefusal(op);

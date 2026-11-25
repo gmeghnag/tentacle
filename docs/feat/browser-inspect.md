@@ -886,6 +886,111 @@ changed). One doc edit: the «B6 plan (executor proposal)» above.
 
 *— claude-sonnet-4-5, 2026-11-25*
 
+### B5b — the switches, the auto answer, `browser/status` (as built) — DONE
+
+**Load-bearing check, re-run first.** All five points of «### B5b — Implementation» hold at
+`78717493` (`autoAnswers` gated on `answersAutoAccept` + `autoAccept`; `autoAnswer` →
+`resolvePermission(allow_once)`; the show-time re-check; the OD5 skip; the field-by-field
+`toPermissionRequestUpdate`). **Red** (`packages/daemon/test/browser-switches.test.ts` A1, before
+any daemon edit, core op already in): `timed out: () => !hosted.running` — a `browserAuto` ask
+with `actions: auto` on a host without `answersAutoAccept` was never answered. Green after the
+daemon branch.
+
+Built, in the plan's order:
+1. **Protocol** — `SessionCapabilitiesSchema.browser? {enabled, secrets, actions}`, kind
+   `browser` on `SetCapabilityParamsSchema`, `BrowserStatus{Params,Result}Schema` +
+   `MAX_BROWSER_STATUS_TABS` (`protocol/src/session.ts`); `Method.BrowserStatus` +
+   `RequestSchemas` (`methods.ts`). `protocol.json` regenerated (`bun run schema:export`) and the
+   two new methods' fixtures added to `protocol/test/json-schema.test.ts` (its coverage test
+   demands one per method). No `protocol.d` note (additive).
+2. **Core** — `BrowserSwitches`, `BROWSER_DEFAULTS`, `browserSwitchesOf`, `browserToolsEnabled`
+   (the `enabled` projection), kind `browser` + `applyBrowserOp` (identity on no-op, refusal on
+   any name but `auto`/`clear`) in `capabilities.ts`; `PermissionRequest.browserAuto` +
+   `browserAutoAnswers` in `permission.ts` (`autoApproves` untouched); `ToolContext.browserSecrets`.
+3. **`@tentacle/browser`** — `IDENTITY_REDACTOR` (`redact.ts`), op `retitle` (`link-schema.ts`),
+   pure `linkState` (`link-state.ts`, NEW); extension `retitle` (`ops.js`: updates `s.title`
+   and the group title, keeps the session and its tabs; unclaimed → refused).
+4. **Agent** — `toolContext.browserSecrets` dereferences `this.readCapabilities` at call time.
+5. **Daemon** — `BrowserHostPort` (`hosted-session.ts`, re-exported by `session-host.ts`);
+   `SessionHost` option `browser` → `hosted.attachBrowser(port)` right after construction (the
+   `imagesPolicy` shape, not a 16th constructor argument — the port is not needed inside the
+   constructor: a reloaded session's caps are normalized, so no browser ask can auto-answer
+   there). `autoAnswers` = `browserAutoAnswers(req, this.caps) ||` the existing rule;
+   `setCapability`: kind `browser` without a port → InvalidParams «this session has no browser»,
+   the switch-on sweep after the emit; `toWireCapabilities(state, browserAvailable)`;
+   `fromWireCapabilities` reads `browser` (so a record carries it, Q2) and `normalizeCapabilities`
+   keeps dropping it (comment says why); `hasDisabled` counts a switch that is on (a new segment
+   re-states it); the log writer goes through `toWireCapabilities`; `browserStatus()` (no port →
+   `{available:false, tabs:[]}`, a port fault → `{available:true, tabs:[]}`); `setTitle` →
+   `port.retitle` (swallowed). `connection.ts` routes `Method.BrowserStatus` (async, no lock).
+6. **Client** — `RemoteClient.browserStatus`, the `browser` kind on `setSessionCapability` /
+   `setCapabilityOn` / `RemoteSession.setCapability`, `RemoteSession.browserStatus()`.
+7. **Tools** — per call, `run` records the live `ctx.browserSecrets()`; `redactor`/`clean` pick
+   `IDENTITY_REDACTOR` and skip `textNet` in clear; the ask's title/detail go through a separate
+   always-masked path; `gate()` sets `browserAuto` iff `!verdict.hard`; `status(uid)` (no claim →
+   `[]` and no op; lease refusal → `heldElsewhere`; host+path only, masked, ≤ 64 tabs, titles
+   ≤ 200) and `retitle(uid, title)` (kept for the first `claim`, sent when claimed, errors
+   swallowed).
+8. **CLI** — `browser-status.ts` (NEW: `createBrowserHostPort`, `defaultBrowserLinkProbes` with
+   `pgrep -x "Google Chrome"` on darwin); `nativeHostInstalled` + `chromeManaged` extracted from
+   `statusBrowser` (same output); the worker and `serve` build the port over their ONE link +
+   toolset and pass it as `SessionHost.browser`; `podSessionHost` / tunnelled paths untouched.
+
+**Drift from the Implementation (and why):**
+- **D1 — `seedCapabilities` is a second layer.** N1 (seed with auto/clear) stayed GREEN under
+  the plan's mutation «`normalizeCapabilities` keeps `browser`»: `seedCapabilities` builds its
+  state from the three sets only, so the seed's `browser` never reaches `normalizeCapabilities`.
+  Safe direction (two layers). The test's mutation comment now names the mutation that reds it
+  (both layers), verified below. The reload path (N2) is guarded by `normalizeCapabilities` alone.
+- **D2 — a pre-open browser flip is refused client-side** (`RemoteSession.setCapability` on a
+  lazy session throws «the browser switches apply to an open session»). The plan did not cover
+  the pre-open preview; previewing a switch whose availability is only known after the open
+  would be a guess. `CapabilityFlip` / `SwitchFailure` keep their three kinds.
+- **D3 — the `tools` redactor pick is per SESSION per call** (a `modes` map set at `run` start),
+  not threaded through every helper: concurrent calls of one session read the switch as of the
+  latest call start. The ask path never depends on it (always masked).
+- **D4 — changelog fragment named `browser-inspect-switches.added.md`** (the plan's name and the
+  `browser-inspect-tools.added.md` precedent): `browser-inspect.added.md` and
+  `browser-inspect.changed.md` already exist from earlier slices, one bullet each.
+- **D5 — the mobile app and the TUI keep their own 3-kind `CapabilityKind` / `CapKind`**: no UI
+  in B5b (B6). The phone parses the optional `browser` and ignores it.
+
+**Mutations** (each applied to the source, the named test run, the file restored from a scratch
+copy; `git status` confirmed the restores):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | browser branch of `autoAnswers` gated on `answersAutoAccept` | daemon A1, W4 |
+| M2 | `normalizeCapabilities` keeps `browser` | daemon N2 (N1 green → D1) |
+| M2b | M2 + `seedCapabilities` carries `seed.browser` | daemon N1, N2 |
+| M3 | drop the switch-on sweep | daemon W4 |
+| M4 | `autoApproves` lets `browser_action` + `browserAuto` through | core autoApproves row, daemon W2, client slack test |
+| M5 | agent getter captures `this.readCapabilities` at turn start | agent mid-turn flip |
+| M6 | `gate()` sets the slack on every ask | tools: payment click, password typing rows |
+| M7 | `run` ignores `ctx.browserSecrets` | tools read + net get, daemon L1 (`<uid>.jsonl`) |
+| M8 | the ask's title/detail through the mode's redactor | tools «ask stays masked in clear» |
+| M9 | `status` claims first | tools «unclaimed: zero hub ops» |
+| M10 | `wiring.ts` hands the browser tools a second broker | cli single-broker (turn hangs, no click) |
+
+**Tests added** (all green): `daemon/test/browser-switches.test.ts` (15: A1 load-bearing, S1–S3,
+W1–W5, N1–N3, P1–P2, L1), `core/test/browser-switches.test.ts` (10), `protocol/test/browser-switches.test.ts`
+(6), `tools/test/browser-switches.test.ts` (10), `agent/test/browser-secrets-live.test.ts` (1),
+`browser/test/link-state.test.ts` (6), `cli/test/browser-status.test.ts` (8: port table,
+faults, pod has no port, worker single-broker auto answer), +1 in
+`client/test/browser-action-permission.test.ts`, +1 in `apps/browser-extension/test/ops.test.ts`.
+
+**Verification run here** (narrow, per the budget): the 24 touched/covering files → `247 pass,
+0 fail`; `bunx biome check` on the 33 changed files → clean; `tsc` over the touched import graph
+(scratch tsconfig extending the root one, entry points `cli/src/main.ts`, `serve.ts`, `worker.ts`
+and every new test) → 0 errors. The full gate (`bun run check`, incl. `tsc -p apps/mobile`) is
+the orchestrator's script.
+
+**Unverified:** the real-Chrome path of `retitle` (`chrome.tabGroups.update` on a live group) and
+`pgrep` probing — covered by fakes only; verify with `tentacle browser status` + a rename in a
+live session with the extension reloaded.
+
+*— claude-opus-5-5, 2026-11-25*
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-24*

@@ -12,6 +12,7 @@
  * built with `holdUntilSet`, so "no requester yet" queues instead of approving.
  */
 import { PermissionReplyTextSchema } from "@tentacle/protocol";
+import { type SessionCapabilities, browserSwitchesOf } from "./capabilities.ts";
 import type { PermissionLevel } from "./tool.ts";
 
 /**
@@ -63,6 +64,16 @@ export interface PermissionRequest {
    * facts only the laptop holds (AGENTS §7, "a pod is not trusted").
    */
   readonly hopAuto?: true;
+  /**
+   * Slack (laptop-internal, never on the wire): this `browser_action` is one
+   * the session's browser AUTO mode may answer — not `hard` (a payment click,
+   * password / card typing always ask, browser-inspect Q3). Set ONLY by the
+   * browser tools' gate, which states eligibility and never reads the switch:
+   * the hosting daemon decides on the live `actions` (`browserAutoAnswers`).
+   * `autoApproves` ignores it, so a session's auto-accept never answers a
+   * browser ask; `toPermissionRequest` never yields it (B5b).
+   */
+  readonly browserAuto?: true;
   readonly tool: string;
   readonly level: PermissionLevel;
   /** Human-readable action, e.g. "Run a shell command". */
@@ -355,6 +366,22 @@ export function autoApproves(req: PermissionRequest, own = true): boolean {
     // session's auto-accept (docs/feat/browser-inspect.md Q3).
     req.kind !== "browser_action" &&
     (req.kind !== "session_hop" || req.hopAuto === true)
+  );
+}
+
+/**
+ * Whether the session's browser AUTO mode answers `req` (docs/feat/browser-inspect.md
+ * B5b): a `browser_action` the tool marked eligible (`browserAuto`, never on a
+ * `hard` verdict) in a session whose LIVE `actions` switch is `auto`. Its own
+ * rule, apart from `autoApproves`: the session's auto-accept never answers a
+ * browser ask, and this never answers anything else. Read at answer time, never
+ * cached (switching auto off before an ask is shown leaves it to a human).
+ */
+export function browserAutoAnswers(req: PermissionRequest, caps: SessionCapabilities): boolean {
+  return (
+    req.kind === "browser_action" &&
+    req.browserAuto === true &&
+    browserSwitchesOf(caps).actions === "auto"
   );
 }
 

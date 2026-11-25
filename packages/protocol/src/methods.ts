@@ -55,6 +55,8 @@ import {
 import {
   AgentKillParamsSchema,
   AgentKillResultSchema,
+  BrowserStatusParamsSchema,
+  BrowserStatusResultSchema,
   CancelParamsSchema,
   ClearParamsSchema,
   ClearResultSchema,
@@ -145,6 +147,8 @@ export const Method = {
   SetAutoAccept: "session/set_auto_accept",
   /** Turn one MCP server or skill on/off for the model in this session (docs/feat/session-capabilities.md). */
   SetCapability: "session/set_capability",
+  /** The user's Chrome as one session sees it: link state + its tabs (docs/feat/browser-inspect.md B5b). */
+  BrowserStatus: "browser/status",
   Snapshot: "session/snapshot",
   /** The session's committed history as a typed event log, after a position (docs/feat/session-log.md). */
   Log: "session/log",
@@ -325,6 +329,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.SetCapability]: {
     params: SetCapabilityParamsSchema,
     result: SetCapabilityResultSchema,
+  },
+  [Method.BrowserStatus]: {
+    params: BrowserStatusParamsSchema,
+    result: BrowserStatusResultSchema,
   },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },
   [Method.Log]: { params: LogParamsSchema, result: LogResultSchema },

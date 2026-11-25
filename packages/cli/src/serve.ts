@@ -4,7 +4,7 @@
  * Binding is loopback-safe by default (a non-loopback bind requires a token).
  */
 import { randomUUID } from "node:crypto";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
@@ -12,6 +12,7 @@ import { DEFAULT_PUSH_GRACE_SECONDS } from "@tentacle/config";
 import type { ArtifactSink, AttachmentSource, ScheduleLink, ToolImageStore } from "@tentacle/core";
 import {
   type AgentReuse,
+  type BrowserHostPort,
   Connection,
   DEFAULT_LA_START_AFTER_SECONDS,
   DEFAULT_MAX_DETACHED_SESSIONS,
@@ -63,6 +64,7 @@ import type { BrowserToolset } from "@tentacle/tools";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import { relayIdOf } from "@tentacle/transport/relay-id";
 import { browserToolsetOf, createBrowserLink } from "./browser-link.ts";
+import { createBrowserHostPort, defaultBrowserLinkProbes } from "./browser-status.ts";
 import { applyCarried } from "./carried-settings.ts";
 import { type DiscoveryDriver, startDiscovery } from "./discovery.ts";
 import type { ServeLimits } from "./flags.ts";
@@ -601,6 +603,12 @@ export async function startDaemon(
   // the Chrome host's hub only on a call (the B4 tools); disposed with the daemon.
   const browserLink = createBrowserLink({ configDir: config.configDir, daemonId: randomUUID() });
   const browserTools = browserToolsetOf(browserLink);
+  // Its host port (B5b), over the SAME link and toolset (one lease holder).
+  const browserPort = createBrowserHostPort({
+    link: browserLink,
+    toolset: browserTools,
+    probes: defaultBrowserLinkProbes({ configDir: config.configDir, home: homedir() }),
+  });
   // A second Ctrl+C (`process.exit(130)`, docs/feat/serve-mcp.md) must not leave
   // server processes behind. Synchronous by design, and removed in `stop()` so
   // tests that start many daemons in one process do not leak listeners.
@@ -648,6 +656,7 @@ export async function startDaemon(
       push?.hostOptions,
       liveActivity?.hostOptions,
       browserTools,
+      browserPort,
     );
     return listen(
       sessionHost,
@@ -752,6 +761,8 @@ async function reloadedHost(
   liveActivity?: SessionHostOptions["liveActivity"],
   /** The daemon's browser toolset (docs/feat/browser-inspect.md B4). */
   browserTools?: BrowserToolset,
+  /** Its host port (B5b): the switches, `browser/status`, the group titles. */
+  browserPort?: BrowserHostPort,
 ): Promise<SessionHost> {
   // One skill scan for every session and for a session not created yet
   // (docs/feat/skills-hot-reload.md).
@@ -813,6 +824,8 @@ async function reloadedHost(
     // the worker or the relay: there a daemon-side "approval" is a check the
     // workload controls (AGENTS §7).
     answersAutoAccept: true,
+    // The user's own Chrome (B5b): the switches and `browser/status` exist here.
+    ...(browserPort ? { browser: browserPort } : {}),
     identity: { tentacle: APP_VERSION, kind: "serve" },
     modelInfo: { name: config.model, contextWindow: config.contextWindow },
     // ITS OWN model, told to a client for DISPLAY only (a `connect` TUI's ctx

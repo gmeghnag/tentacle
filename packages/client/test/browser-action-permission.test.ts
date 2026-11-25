@@ -25,6 +25,19 @@ describe("browser_action on the client", () => {
     expect(onceOnlyAsk(req)).toBe(true);
   });
 
+  test("B5b: the `browserAuto` slack never comes off the wire, even when planted", () => {
+    // Mutation: spread the update into the request in `toPermissionRequest` → the slack survives.
+    const planted = {
+      ...update(BROWSER_ACTION_TOOL),
+      browserAuto: true,
+    } as PermissionRequestUpdate;
+    const req = toPermissionRequest(planted);
+    expect(req.browserAuto).toBeUndefined();
+    expect("browserAuto" in req).toBe(false);
+    // And a request carrying it is still refused by the session's auto-accept.
+    expect(autoApproves({ ...req, browserAuto: true }, true)).toBe(false);
+  });
+
   test("an ordinary tool ask is unchanged", () => {
     const req = toPermissionRequest(update("browser_read"));
     expect(req.kind).toBeUndefined();

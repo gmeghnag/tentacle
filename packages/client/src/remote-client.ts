@@ -41,6 +41,7 @@ import {
   type ArtifactMeta,
   type ArtifactReadResult,
   type AttachmentPutResult,
+  type BrowserStatusResult,
   type ClearResult,
   type ClientInfo,
   type CompactResult,
@@ -3951,7 +3952,7 @@ export class RemoteClient {
    */
   setSessionCapability(
     session: RemoteSession,
-    kind: "mcp" | "skill" | "tool",
+    kind: "mcp" | "skill" | "tool" | "browser",
     name: string,
     enabled: boolean,
   ): Promise<SetCapabilityResult> {
@@ -3975,12 +3976,22 @@ export class RemoteClient {
    */
   setCapabilityOn(
     sessionId: string,
-    kind: "mcp" | "skill" | "tool",
+    kind: "mcp" | "skill" | "tool" | "browser",
     name: string,
     enabled: boolean,
   ): Promise<SetCapabilityResult> {
     return this.call(this.peer, Method.SetCapability, { sessionId, kind, name, enabled }).then(
       (result) => result as SetCapabilityResult,
+    );
+  }
+
+  /**
+   * `browser/status` (docs/feat/browser-inspect.md B5b): the user's Chrome as
+   * this session sees it. A read; an older daemon is `MethodNotFound`.
+   */
+  browserStatus(sessionId: string): Promise<BrowserStatusResult> {
+    return this.call(this.peer, Method.BrowserStatus, { sessionId }).then(
+      (result) => result as BrowserStatusResult,
     );
   }
 

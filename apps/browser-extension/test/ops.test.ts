@@ -180,6 +180,27 @@ describe("browser extension ops", () => {
     expect(calls).toContain("detach 5");
   });
 
+  test("retitle (B5b) renames the session's group and keeps its tabs; an unclaimed session is refused", async () => {
+    // Mutation: retitle re-runs claim (resets the session) → the next open makes a NEW group.
+    const { ops, calls } = setup();
+    expect(await ops.handle({ op: "retitle", sessionUid: "s1", title: "x" })).toMatchObject({
+      ok: false,
+    });
+    await claim(ops);
+    // Before any tab: the title is kept for the group the first open makes.
+    await ops.handle({ op: "retitle", sessionUid: "s1", title: "Fix login" });
+    await ops.handle({ op: "open", sessionUid: "s1", url: "https://a.test/" });
+    expect(calls).toContain("groupTitle 7 tentacle · Fix login");
+    expect(
+      await ops.handle({ op: "retitle", sessionUid: "s1", title: "Fix login form" }),
+    ).toMatchObject({ ok: true });
+    expect(calls.at(-1)).toBe("groupTitle 7 tentacle · Fix login form");
+    await ops.handle({ op: "open", sessionUid: "s1", url: "https://b.test/" });
+    expect(calls).toContain("group 101 7");
+    const tabs = await ops.handle({ op: "tabs", sessionUid: "s1" });
+    expect(tabs).toMatchObject({ ok: true });
+  });
+
   test("release retitles the group and detaches its tabs; handover only for a claimed session", async () => {
     const { ops, calls, sent } = setup();
     await claim(ops);

@@ -150,10 +150,29 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1set_capability/params": [
     { sessionId: "s", kind: "mcp", name: "k8s", enabled: false },
     { sessionId: "s", kind: "skill", name: "kubernetes", enabled: true },
+    { sessionId: "s", kind: "browser", name: "auto", enabled: true },
   ],
   "methods/session~1set_capability/result": [
     { capabilities: { disabledMcp: [], disabledSkills: [] } },
     { capabilities: { disabledMcp: ["a__b", "k8s"], disabledSkills: ["kubernetes"] } },
+    {
+      capabilities: {
+        disabledMcp: [],
+        disabledSkills: [],
+        disabledTools: [],
+        browser: { enabled: true, secrets: "clear", actions: "auto" },
+      },
+    },
+  ],
+  "methods/browser~1status/params": [{ sessionId: "s" }],
+  "methods/browser~1status/result": [
+    { available: false, tabs: [] },
+    {
+      available: true,
+      link: { state: "connected", managed: false },
+      heldElsewhere: true,
+      tabs: [{ id: 3, title: "Inbox", where: "mail.test/inbox", handedOver: true, traced: false }],
+    },
   ],
   "methods/session~1update_settings/params": [
     { sessionId: "s", id: "a1", settings: { maxIterations: 3, toolExecution: "parallel" } },

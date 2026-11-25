@@ -53,6 +53,7 @@ import {
   type VoiceTurn,
   allowAll,
   answerOutstandingCalls,
+  browserSwitchesOf,
   checkAttachmentRefs,
   countTokensBounded,
   subagentReportNote,
@@ -1451,6 +1452,9 @@ export class Agent {
       ...(this.config.artifacts ? { artifacts: this.config.artifacts } : {}),
       ...(this.config.toolImages ? { images: this.config.toolImages } : {}),
       history: messages,
+      // Dereferences `this.readCapabilities` at CALL time: `setCapabilities`
+      // swaps the function, so a mid-turn flip reaches the next call (B5b).
+      browserSecrets: () => browserSwitchesOf(this.readCapabilities()).secrets,
     };
 
     // The user's prompt for `turn_start` hooks, read before any note lands.

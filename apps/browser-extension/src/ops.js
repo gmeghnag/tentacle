@@ -390,6 +390,17 @@ export function createOps({
     return ok({ closed: true, released: false });
   }
 
+  /** The session's title changed (B5b): its group follows; its tabs stay. */
+  async function retitle(op) {
+    const s = sessions.get(op.sessionUid);
+    if (!s) return fail("this session has not claimed the browser");
+    s.title = op.title;
+    if (s.groupId !== undefined) {
+      await chrome.tabGroups.update(s.groupId, { title: `tentacle · ${s.title}` });
+    }
+    return ok({});
+  }
+
   async function release(op) {
     const s = sessions.get(op.sessionUid);
     if (!s) return ok({});
@@ -417,6 +428,8 @@ export function createOps({
           return ok({});
         case "release":
           return await release(msg);
+        case "retitle":
+          return await retitle(msg);
         case "tabs":
           return await tabs(msg);
         case "open":

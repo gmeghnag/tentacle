@@ -97,6 +97,7 @@ import {
   anySignal,
   attachmentLabel,
   autoApproves,
+  browserAutoAnswers,
   checkAttachmentRefs,
   daemonWakeGate,
   formatBytes,
@@ -121,6 +122,7 @@ import {
 import {
   type AttachmentRef,
   BLOCKING_UPDATE_TYPES,
+  type BrowserStatusResult,
   type CompactResult,
   type HistoryCut,
   type JobOutputResult,
@@ -634,7 +636,27 @@ export interface TurnErrorPolicy {
 /** The most of a failed turn's message the wire carries (it may be an upstream body). */
 export const TURN_ERROR_MAX = 400;
 
-/** A state from outside (a client's seed, a reloaded log entry): sorted and de-duplicated, like every applied op. */
+/**
+ * The user's Chrome as this daemon's sessions reach it (docs/feat/browser-inspect.md
+ * B5b): passed ONLY by a host that has the browser (the worker, `serve`), never
+ * a pod. Its presence is what makes `capabilities.browser` appear and the
+ * `browser` op apply.
+ */
+export interface BrowserHostPort {
+  /** `browser/status` of session `uid`: a read, never a claim; never throws for a link fault. */
+  status(uid: string): Promise<BrowserStatusResult>;
+  /** The session's title changed: its tab group follows (best effort, never throws). */
+  retitle(uid: string, title: string): void;
+}
+
+/**
+ * A state from outside (a client's seed, a reloaded log entry): sorted and
+ * de-duplicated, like every applied op. It rebuilds ONLY the three disabled
+ * sets, and that is on purpose: the browser switches (`browser`, B5b) are set
+ * only by a live `session/set_capability`, never restored (a resume, a fork, a
+ * hop, a `serve` reload — a log a pod wrote included), so every session that
+ * starts or comes back starts masked / ask (AGENTS §7, "a pod is not trusted").
+ */
 function normalizeCapabilities(state: SessionCapabilities): SessionCapabilities {
   const norm = (names: readonly string[]) => [...new Set(names)].sort();
   return {
@@ -644,12 +666,17 @@ function normalizeCapabilities(state: SessionCapabilities): SessionCapabilities 
   };
 }
 
-/** Something is turned off (else the state is the default, and the log says nothing). */
+/**
+ * Something is off the default (else the log says nothing): a disabled set, or
+ * a browser switch on (recorded so a segment states it, Q2 — never restored).
+ */
 function hasDisabled(state: SessionCapabilities): boolean {
   return (
     state.disabledMcp.length > 0 ||
     state.disabledSkills.length > 0 ||
-    state.disabledTools.length > 0
+    state.disabledTools.length > 0 ||
+    (state.browser !== undefined &&
+      (state.browser.secrets === "clear" || state.browser.actions === "auto"))
   );
 }
 
@@ -938,6 +965,8 @@ export class HostedSession {
    * nothing is left in the workload.
    */
   workloadShells: WorkloadShellsLike | undefined = undefined;
+  /** The user's Chrome (`attachBrowser`, B5b): absent on a host without it (a pod). */
+  private browserPort: BrowserHostPort | undefined = undefined;
   /**
    * The client that CREATED this session declared `hop` (D8/D9): it can put a
    * `move_session` proposal to its owner, so this session's agent may be offered
@@ -1823,6 +1852,13 @@ export class HostedSession {
    * against the LIVE `this.autoAccept`, never cached (the toggle sweep, D4).
    */
   private autoAnswers(req: PermissionRequest, turnId: string | undefined): boolean {
+    // The session's browser AUTO mode (docs/feat/browser-inspect.md B5b): its
+    // own rule, on the LIVE switch, gated on neither `answersAutoAccept` nor the
+    // session's auto-accept — the worker hosts browser sessions too, and only a
+    // laptop host has the browser at all (no port → the switch cannot be set).
+    if (browserAutoAnswers(req, this.caps)) {
+      return true;
+    }
     return (
       this.answersAutoAccept &&
       this.autoAccept &&
@@ -3946,7 +3982,38 @@ export class HostedSession {
 
   /** The session's switches now: the `OpenResult.capabilities` snapshot (F5). */
   capabilities(): SessionCapabilitiesWire {
-    return toWireCapabilities(this.caps);
+    return toWireCapabilities(this.caps, this.browserPort !== undefined);
+  }
+
+  /**
+   * This host has the user's Chrome (B5b): `SessionHost` hands its port to every
+   * session it builds, right after construction (the `imagesPolicy` shape). The
+   * session's current title goes to its tab group at once.
+   */
+  attachBrowser(port: BrowserHostPort): void {
+    this.browserPort = port;
+    if (this.title.source !== "auto") {
+      port.retitle(this.id, this.title.text);
+    }
+  }
+
+  /**
+   * `browser/status` (B5b): the link and this session's tabs, through the
+   * host's port. A host without the browser (a pod) answers `available: false`.
+   * A read: it never claims the browser, and a port fault is no throw (only an
+   * unknown session is, by `assertKnown`). Async, no lock (AGENTS §7 peer).
+   */
+  async browserStatus(): Promise<BrowserStatusResult> {
+    this.assertKnown();
+    const port = this.browserPort;
+    if (port === undefined) {
+      return { available: false, tabs: [] };
+    }
+    try {
+      return await port.status(this.id);
+    } catch {
+      return { available: true, tabs: [] };
+    }
   }
 
   /**
@@ -3989,6 +4056,10 @@ export class HostedSession {
    */
   setCapability(op: CapabilityOp, by?: string): SetCapabilityResult {
     this.assertKnown();
+    // The browser switches (B5b) exist only where the user's Chrome does.
+    if (op.kind === "browser" && this.browserPort === undefined) {
+      throw new RpcError(JsonRpcErrorCode.InvalidParams, "this session has no browser");
+    }
     let next: SessionCapabilities;
     try {
       next = applyCapabilityOp(this.caps, op);
@@ -4020,13 +4091,22 @@ export class HostedSession {
       // change, and the reload says what it has (F6).
       this.log.capabilities(next);
       this.persist();
+      const browser = this.browserPort !== undefined;
       this.emit({
         type: "capabilities",
-        capabilities: toWireCapabilities(next),
+        capabilities: toWireCapabilities(next, browser),
         ...(by ? { by } : {}),
       });
+      // Browser AUTO switched ON with asks pending (B5b): answer the eligible
+      // shown ones now, after the emit — the `setAutoAccept` sweep's shape. A
+      // `hard` one carries no slack and stays; switching OFF answers nothing.
+      if (op.kind === "browser" && op.name === "auto" && op.enabled) {
+        for (const requestId of [...this.asks.keys()]) {
+          this.autoAnswer(requestId);
+        }
+      }
     }
-    return { capabilities: toWireCapabilities(this.caps) };
+    return { capabilities: toWireCapabilities(this.caps, this.browserPort !== undefined) };
   }
 
   /**
@@ -4859,6 +4939,12 @@ export class HostedSession {
     this.title = next;
     this.log.title(this.wireTitle());
     this.persist();
+    // The session's tab group in the user's Chrome follows (B5b, Q9): best effort.
+    try {
+      this.browserPort?.retitle(this.id, next.text);
+    } catch {
+      // a link fault never touches the title
+    }
     try {
       this.emit({ type: "session_title", title: next.text, source: next.source });
     } catch (error) {
