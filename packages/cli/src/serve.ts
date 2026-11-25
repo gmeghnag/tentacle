@@ -72,6 +72,7 @@ import type { ProviderFactory } from "./model-provider.ts";
 import { readRelaySecret } from "./relay-secret.ts";
 import { type ServeA2AOptions, buildA2A } from "./serve-a2a.ts";
 import { serveHooksTrustPrecheck } from "./serve-hooks-trust.ts";
+import { type ServeMcpOptions, buildMcp } from "./serve-mcp-server.ts";
 import { type RelayOptions, relayChoice } from "./serve-relay.ts";
 import { APP_VERSION } from "./version.ts";
 import {
@@ -173,6 +174,11 @@ export interface ServeOptions extends ServeLimits {
    * on its OWN bearer token (never the WebSocket token). Absent = off.
    */
   readonly a2a?: ServeA2AOptions;
+  /**
+   * The MCP route (docs/feat/serve-mcp-server.md M5): `POST /mcp` on its OWN
+   * bearer token (never the WebSocket or A2A token). Absent = off.
+   */
+  readonly mcp?: ServeMcpOptions;
 }
 
 /** A running `serve`: `stop` waits for every session write, then releases the store. */
@@ -1014,6 +1020,15 @@ function listen(
   const storeForId = relay?.storeDir ?? serveStoreDir;
   const relaySecret = devices && storeForId !== undefined ? readRelaySecret(storeForId) : undefined;
   const serveId = relaySecret?.ok === true ? relayIdOf(relaySecret.secret) : undefined;
+  const mcp = options.mcp
+    ? buildMcp({
+        host: sessionHost,
+        options: options.mcp,
+        ...(hooksTrustPrecheck ? { hooksTrustPrecheck } : {}),
+        ...(options.onAudit ? { onAudit: options.onAudit } : {}),
+        ...(options.onError ? { onError: options.onError } : {}),
+      })
+    : undefined;
   const server = startWsServer({
     host: options.host,
     port: options.port,
@@ -1039,6 +1054,7 @@ function listen(
           }),
         }
       : {}),
+    ...(mcp ? { mcp: mcp.route } : {}),
   });
   // The host exists now, and it must exist before the relay link does (the link
   // dials only while the authority wants reachability, and the notifier reads
@@ -1225,6 +1241,7 @@ function listen(
         relayLink?.stop();
         if (devices) removeDaemonRecord(devices.configDir);
         server.stop();
+        mcp?.dispose();
         await release();
       })();
       return stopping;

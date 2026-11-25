@@ -121,6 +121,10 @@ export const ARGS = {
       "a2a-token": {},
       "a2a-token-command": {},
       "a2a-asks": {},
+      // The MCP route (docs/feat/serve-mcp-server.md M5): its own token too.
+      "mcp-token": {},
+      "mcp-token-command": {},
+      "mcp-asks": {},
       ...SESSION_MODEL,
     },
     // `serve --address <url>`, repeatable: a LIST, as `pair`'s is (one value
@@ -650,6 +654,26 @@ export async function resolveA2AToken(flags: Map<string, string>): Promise<strin
   }
   if (token.length === 0) {
     throw new Error("the A2A token is empty");
+  }
+  return token;
+}
+
+/**
+ * The MCP bearer token of `serve` (`--mcp-token`, `--mcp-token-command`), or
+ * undefined = MCP off. No env fallback and never the WebSocket or A2A token.
+ */
+export async function resolveMcpToken(flags: Map<string, string>): Promise<string | undefined> {
+  const direct = flags.get("mcp-token");
+  const command = flags.get("mcp-token-command");
+  if (direct !== undefined && command !== undefined) {
+    throw new Error("use either --mcp-token or --mcp-token-command, not both");
+  }
+  const token = direct ?? (command !== undefined ? await runCommand(command) : undefined);
+  if (token === undefined) {
+    return undefined;
+  }
+  if (token.length === 0) {
+    throw new Error("the MCP token is empty");
   }
   return token;
 }

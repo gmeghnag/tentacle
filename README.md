@@ -369,6 +369,22 @@ asked first: `--a2a-asks both` lets the caller answer tool asks too (file
 approvals stay owner-only), and `--a2a-workflows` lets it start workflow runs
 (off by default). Design: [`docs/feat/a2a.md`](./docs/feat/a2a.md).
 
+**MCP server: Claude Code and other MCP clients can call a `serve`.** With
+`--mcp-token T` (or `--mcp-token-command CMD`) the daemon also answers
+`POST /mcp` (Streamable HTTP) behind `Authorization: Bearer <MCP token>`, a
+token of its own (never `--token` or the A2A one); without it MCP is off.
+Tools: `session_start`, `session_send`, `session_status` (`waitSeconds` waits),
+`session_answer`, `session_cancel`, `session_list`. A session it starts is
+`mcp-default-<uuid>` and shows up on your phone like any other. The owner is
+asked first: `--mcp-asks both` lets the caller answer tool asks too (file
+approvals stay owner-only). `serve` prints the line to register it:
+
+```
+claude mcp add --transport http tentacle http://127.0.0.1:4000/mcp --header "Authorization: Bearer <token>"
+```
+
+Design: [`docs/feat/serve-mcp-server.md`](./docs/feat/serve-mcp-server.md).
+
 `tentacle --help` lists every flag.
 
 ## Configuration

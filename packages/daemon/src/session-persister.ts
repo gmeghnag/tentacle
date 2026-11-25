@@ -133,8 +133,8 @@ const NO_STATE = "it has no state file (a session cut before its first save land
 
 export class SessionPersister {
   private readonly opts: PersisterOptions;
-  /** Settles when the latest write scheduled for the id has (never rejects). */
-  private readonly latest = new Map<string, Promise<void>>();
+  /** Settles when the latest write scheduled for the id has, with whether it landed (never rejects). */
+  private readonly latest = new Map<string, Promise<boolean>>();
   /** The log entry each session's last unit was captured at: the next unit's entries start after it. */
   private readonly cursors = new Map<string, LogCursor>();
   /** Ids whose files could not be loaded: never written, never removed. */
@@ -377,10 +377,7 @@ export class SessionPersister {
         return false;
       },
     );
-    this.latest.set(
-      id,
-      landed.then(() => {}),
-    );
+    this.latest.set(id, landed);
     return landed;
   }
 
@@ -586,7 +583,19 @@ export class SessionPersister {
 
   /** Resolves once the latest write scheduled for `id` has settled (failures are reported, not thrown). */
   flush(id: string): Promise<void> {
-    return this.latest.get(id) ?? Promise.resolve();
+    return this.latest.get(id)?.then(() => {}) ?? Promise.resolve();
+  }
+
+  /**
+   * `flush`, plus whether that latest write LANDED — for a caller that must
+   * not hand out a fact that is not on disk (an MCP task's start,
+   * docs/feat/serve-mcp-server.md). Fail-closed: no write scheduled for `id`,
+   * a stopped persister or an unwritable id → `false`. A later write that
+   * lands carries the earlier units too (it appends what the file lacks).
+   */
+  lastWriteLanded(id: string): Promise<boolean> {
+    if (this.stopped || this.blocked.has(id)) return Promise.resolve(false);
+    return this.latest.get(id) ?? Promise.resolve(false);
   }
 
   /**

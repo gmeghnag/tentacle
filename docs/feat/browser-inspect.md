@@ -836,3 +836,14 @@ Same model family as the B4 executor (Opus); only the context is fresh.
 - **Regressions looked for, none found**: the hub strip-parse dropping keys from `expect`; read/net/console becoming factories (they still use the ONE broker's `ask`); a handed-over tab seen first is not flagged (`before === undefined`).
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Owner answers — B6 UI (2026-11-25 ~17:55)
+
+Mockups `.tentacle/mockups/browser-b6/index.html`. Owner, verbatim: «per browser-b6/index.html Q1 B, Q2 A, Q3 B, Q4 B».
+
+- **Q1 → B** (as recommended): TUI `/browser` is the same panel as `/tools`, `/mcp`, `/skills` (same keys, same `[✓]/[ ]/[–]`).
+- **Q2 → A** (as recommended): one status-bar sign (`◉ chrome N tabs`) only while the browser is on in the session; auto and clear appear ONLY when on (▲ + upper case).
+- **Q3 → B** (NOT the recommendation, which was A): iPhone — one «Browser» row in the Session band of the sheet (`◉ On · asks · masked ›`) opening a dedicated page with the link, the three switches (browser, auto, secrets) and the group's tabs.
+- **Q4 → B** (as recommended): the unmistakable «clear»/«auto» sign in the chat is the strip by the composer, with a one-tap exit, present only while on.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-25*
