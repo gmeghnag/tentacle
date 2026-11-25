@@ -117,6 +117,10 @@ export const ARGS = {
       // `serve --relay <url>`: the mobile relay this daemon dials out to
       // (docs/feat/mobile-relay.md R5a).
       relay: {},
+      // The A2A route (docs/feat/a2a.md S10): its own token, never `--token`.
+      "a2a-token": {},
+      "a2a-token-command": {},
+      "a2a-asks": {},
       ...SESSION_MODEL,
     },
     // `serve --address <url>`, repeatable: a LIST, as `pair`'s is (one value
@@ -127,6 +131,8 @@ export const ARGS = {
     bools: {
       // `serve --no-relay`: never dial the mobile relay, whatever the config says.
       "no-relay": {},
+      // `serve --a2a-workflows`: the A2A caller may start workflow runs (default off).
+      "a2a-workflows": {},
       stdio: {},
       "model-proxy": {},
       bridge: {},
@@ -625,6 +631,27 @@ export async function resolveToken(flags: Map<string, string>): Promise<string |
   }
   const env = process.env.TENTACLE_REMOTE_TOKEN;
   return env && env.length > 0 ? env : undefined;
+}
+
+/**
+ * The A2A bearer token of `serve` (`--a2a-token`, `--a2a-token-command`), or
+ * undefined = A2A off. No env fallback and never the WebSocket token: A2A
+ * answers only to a token made for it. An empty one is refused, not "off".
+ */
+export async function resolveA2AToken(flags: Map<string, string>): Promise<string | undefined> {
+  const direct = flags.get("a2a-token");
+  const command = flags.get("a2a-token-command");
+  if (direct !== undefined && command !== undefined) {
+    throw new Error("use either --a2a-token or --a2a-token-command, not both");
+  }
+  const token = direct ?? (command !== undefined ? await runCommand(command) : undefined);
+  if (token === undefined) {
+    return undefined;
+  }
+  if (token.length === 0) {
+    throw new Error("the A2A token is empty");
+  }
+  return token;
 }
 
 export type SessionFlags =

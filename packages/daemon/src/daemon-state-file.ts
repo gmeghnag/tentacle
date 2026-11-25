@@ -25,6 +25,7 @@ import {
   type ChatMessage,
   type ScheduledJob,
   subagentLoadNotes,
+  unitsFromSegment,
   workflowLoadNotes,
 } from "@tentacle/core";
 import {
@@ -537,6 +538,9 @@ export function rebuild(
   // entries, so a change logged after `logHead` (its write never paired) is
   // ignored like the rest of that tail (F6).
   const capabilities = lastCapabilities(derivedFrom);
+  // The units of work (docs/feat/a2a.md, Unification §3): the SAME entries
+  // again, so a unit that ended after `logHead` is ignored like the rest.
+  const units = unitsFromSegment(derivedFrom);
   return {
     ok: true,
     value: {
@@ -562,6 +566,7 @@ export function rebuild(
       logHead: sidecar.logHead,
       paired: through !== null,
       loadNotes,
+      units,
     },
   };
 }

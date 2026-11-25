@@ -558,6 +558,8 @@ export class SessionPersister {
       ...(state.schedules !== undefined && state.schedules.length > 0
         ? { schedules: state.schedules }
         : {}),
+      // An archive's capture: the table its reopen restores (S7; a load of the file derives the same).
+      ...(state.units !== undefined ? { units: state.units } : {}),
       logged: log.logged,
       logHead: log.head,
       paired: true,

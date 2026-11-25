@@ -85,6 +85,31 @@ export interface PermissionRequest {
   readonly reply?: { readonly maxChars: number };
 }
 
+/** What an ask is about (`PermissionRequest.kind`; absent there = `"tool"`). */
+export type PermissionKind = NonNullable<PermissionRequest["kind"]>;
+
+/**
+ * Which asks an EXTERNAL caller (an A2A / MCP client given a task, not the
+ * owner) may ever answer, by kind (docs/feat/a2a.md, "Asks answered by the
+ * caller"). `once`: its allow lasts one call — a caller may answer it, with a
+ * `*_once` option only. `owner-only`: its allow lasts (a workflow file's hash
+ * approval is stored for good even when the option says once; a hop moves the
+ * session; hooks trust runs the repo's code) — only the owner answers, in
+ * every mode. Exhaustive on purpose: a new kind does not compile until it is
+ * classified here (a remote is not trusted, AGENTS §7).
+ */
+export const EXTERNAL_ANSWER: { readonly [K in PermissionKind]: "once" | "owner-only" } = {
+  tool: "once",
+  hooks_trust: "owner-only",
+  session_hop: "owner-only",
+  workflow_approve: "owner-only",
+};
+
+/** May an external caller answer an ask of this kind? `undefined` = not known = never (fail-closed). */
+export function externalMayAnswer(kind: PermissionKind | undefined): boolean {
+  return kind !== undefined && EXTERNAL_ANSWER[kind] === "once";
+}
+
 export interface PermissionSuggestion {
   /** A shell command prefix, e.g. `npm run` — future commands with it auto-run. */
   readonly prefix: string;
