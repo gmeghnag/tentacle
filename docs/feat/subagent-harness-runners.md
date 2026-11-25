@@ -696,4 +696,36 @@ from the phone. 7. Usage visibility. 8. Where it runs. 9. Remote
 
 ## Review
 
-*— pending*
+*— claude-opus-5-5, 2026-11-25* — fresh context, whole branch (shr-1 … shr-6), `git diff main...HEAD`. Same model family as the shr-4/shr-5 executor (Opus): shared blind spots are possible.
+
+**Verdict: REQUEST-CHANGES** (1 HIGH, 3 MEDIUM).
+
+**Gate (narrow + static):** the 12 touched test files → 322 pass / 0 fail (`bun test` on them, 8.4 s); `bun run typecheck` clean; `bun run lint` clean (2446 files, baseline 0/0). The full `bun run test` was not re-run here: it is the orchestrator's merge gate.
+
+**Findings**
+
+1. **HIGH — the `claude` child inherits tentacle's UNSCRUBBED environment.** `packages/agent/src/harness/process.ts:96` passes `env` only when `deps.env` is set, and `packages/cli/src/wiring.ts:334-342` never sets it. So `Bun.spawn` gives the child all of `process.env`. Every other child tentacle spawns uses `scrubSensitiveEnv(process.env)`: the shell (`exec/src/host-execution.ts:453`), MCP (`mcp/src/transport.ts:31`) and ssh (`docker/src/ssh-dialer.ts:110`). **Repro** (`.tentacle/tmp/subagent-harness-runners/envrepro/`): the real `DEFAULT_SPAWNER` with a fake `claude` that echoes `$TENTACLE_MODEL_API_KEY` returned `KEY=sk-secret-123`, from a parent that had the key in its startup env. **Failure scenario:** with auto mode ON, every Claude `Bash` passes (Owner A2), so `env` runs with no prompt. The provider keys, `TENTACLE_REMOTE_TOKEN` and the rest then enter Claude's context, go to Anthropic and are written to `~/.claude/projects`. With auto mode OFF, a read-only `env`/`printenv` may still be one Claude decides alone (Repro 3b class). This also covers the noted `ANTHROPIC_API_KEY` → API-billing switch. Fix direction: spawn with `scrubSensitiveEnv(process.env)`, plus an explicit allowlist of what `claude` needs for its own login (e.g. `CLAUDE_CONFIG_DIR`; decide `CLAUDE_CODE_OAUTH_TOKEN` with the owner). Add a test with a secret in the env. No test pins this today.
+2. **MEDIUM — session capabilities are bypassed.** A tentacle child refuses a disabled built-in at execution (`agent.ts:1239`, `isToolDisabled`). The harness branch (`subagent.ts:417-437`, `harness/permissions.ts:193-215`) never reads `deps.capabilities`. **Failure scenario:** the user turns `shell` (or `fs_write`) off for the session, and auto mode is ON. The parent calls `agent_task{subagent_type:"claude"}`, and Claude's `Bash` is mapped to `shell`, auto-accepted by the broker and run. Fix direction: deny an ask whose mapped tool is disabled, or narrow `--tools` from the capabilities at start.
+3. **MEDIUM — the "changes kept on branch" report is false about the branch.** `finishWorktree` (`harness/worktree.ts:179-185`) only does `git add -A` in the worktree, and it never commits. So `harness/<id>`'s tip is the BASELINE, i.e. the user's own uncommitted work. The report says «Changes kept on branch `harness/<id>`» (`harness/child.ts:188`). **Failure scenario:** the user runs `git merge harness/x` or `git diff HEAD harness/x` as the report invites. They get a commit of their own WIP, and none of Claude's changes, which live only in the worktree's index. Fix: commit the run's changes on the branch (identity + `--no-verify`, as the baseline does), or word the report as "staged in the worktree at <path>". Either way, add a test asserting the branch content. No current test does (`harness-worktree.test.ts:68-81` checks only that the branch exists).
+4. **MEDIUM — the init defence fails OPEN.** `checkInit` (`harness/process.ts:298-312`) kills the run only on a KNOWN bypass mode (a denylist) or on an extra tool. A missing `permissionMode`, a missing `tools`, an unknown new mode, or no `init` line at all lets tools run. **Failure scenario:** a future `claude` renames or adds an auto-approving mode, or drops the `init` fields. The run proceeds with no broker in the loop, which is exactly the version skew the plan's Failure-modes row says «the run is killed before any tool executes». Fix: require `init`, require `permissionMode === "default"` (an allowlist), and require `tools`. Also refuse an `ask`/`progress` that arrives before a checked `init`.
+
+**Premise table (spot-checked):** `wiring.ts` one `runnerDeps` → `agent_task` + `runnerFor`: TRUE. `tunnelled = modelOverride !== undefined` gates the harness: TRUE (`wiring.ts:838-841`). `PermissionGate.authorize` calls the requester only after level/hooks/grants: TRUE (the hook-block test plus mutation below). Process-group tracking: TRUE (`process.ts:243,264`).
+
+**Mutations (each restored by copy; `git status --porcelain` empty after each):**
+- The in-worktree rule also self-allows `shell` → 6 fail in `harness-permissions.test.ts`. Non-vacuous.
+- `answer()`'s late-answer guard removed → 47 pass. This is an EQUIVALENT mutant (`writeLine` already refuses after `exited`/`closeInput`), not a vacuous test.
+- Executor-listed mutations: not repeated.
+
+**Attacks tried:**
+- (a) Secret env reaching the child → **found (#1)**.
+- (b) Disabled-tool capability → **found (#2)**.
+- (c) What the kept branch actually holds → **found (#3)**.
+- (d) The init check against missing/unknown fields → **found (#4)**.
+- (e) A pod reaching the harness: `!tunnelled` + `harnesses` opt-in only from the worker/`serve` → holds.
+- (f) A broker bypass through the worktree rule: post-hook input, `..`, symlinks and `.git` refused → holds. A hook `force ask` is still bypassed inside the worktree, which is acknowledged debt (shr-5 drift 3).
+- (g) Model argv injection: the shape regex forbids a leading `-`, and the value is one argv element → holds.
+- (h) `subagent_end` emitted exactly once on every exit path of `runHarnessChild` → holds by reading.
+
+**What holds:** the single-broker path (`childRequester` is built once and shared by both child kinds); no protocol, client or daemon change; the stderr pipe (no raw terminal write); the cancel ladder order; the D9 verdict feeding the driver's own tool.
+
+**Executor behaviour:** the Execution notes are honest and detailed: drift is declared, and "code before tests" is admitted with mutation evidence instead. The live `claude` check was never run in any slice (the sandbox refused it). That check is still open and is the orchestrator's before merge.
