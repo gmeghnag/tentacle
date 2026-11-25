@@ -1624,3 +1624,16 @@ screenshots (a2c-6) and Bun DNS on a public card.
   Before merge, the owner either picks one (recommended (c)), which is then
   wired and reviewed, or OKs moving it to Notes/debt + `TODO.md`. Either
   closes this review, with no new code review needed for the second.
+
+#### Owner decision — finding 2 (2026-11-25 ~22:45)
+
+**(c)**, as recommended above (Slices, the second «Plan fix»): worker and `serve`
+await `prefetchA2ACards` ONCE before building their `SessionHost` (≤ 2 s, and only
+when an `a2a` instance is configured), pass the snapshot as `a2aCards` into every
+`buildAgent`, and refresh it in the background after each build (the next build
+sees the new text). No daemon change, no protocol change. Fix round 2 wires it
+(red before green: a configured `a2a:` type built by the worker/`serve` builder
+reads the card text, not «(remote card not loaded)»; a slow/failing card still
+starts within the budget and reads «not loaded»; no `a2a` configured ⇒ no wait).
+**Deferred by the owner, NOT in this task:** a `/a2a` TUI command to reload the
+agents' cards on demand → `TODO.md`.
