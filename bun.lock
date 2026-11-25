@@ -169,8 +169,6 @@
         "@tentacle/transport": "workspace:*",
       },
       "devDependencies": {
-        "@modelcontextprotocol/client": "2.4.0",
-        "@modelcontextprotocol/ext-tasks": "0.2.3",
         "@tentacle/exec": "workspace:*",
         "@tentacle/tools": "workspace:*",
         "zod": "3.23.8",

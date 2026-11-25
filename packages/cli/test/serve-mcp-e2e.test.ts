@@ -226,7 +226,8 @@ describe("serve --mcp-token", () => {
     const listed = await ask(2, "session/list", {});
     expect(JSON.stringify(listed?.result)).toContain(sessionId);
     release();
-    for (const headers of [{ authorization: "Bearer nope" }, {}]) {
+    const badAuth: Record<string, string>[] = [{ authorization: "Bearer nope" }, {}];
+    for (const headers of badAuth) {
       const res = await fetch(url, {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
