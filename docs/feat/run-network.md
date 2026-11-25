@@ -444,3 +444,79 @@ reverted immediately:
 **Gate.** Not run here by design (the orchestrator's script runs
 `bun run check`); the narrow per-slice runs above are green. No protocol schema
 changed, so `packages/protocol/schema/protocol.json` needed no regeneration.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-26 (fresh context; different model family from the executor)*
+
+**Verdict: REQUEST-CHANGES** — one MEDIUM finding; everything on the `run` path holds.
+
+**Findings**
+
+1. **MEDIUM — a configured `network` is silently dropped by `/move container`.**
+   `packages/cli/src/hop-targets.ts:358-390` calls the same `startEngineRuntime`
+   (→ `provisionNamed` → `host.create`) to create a docker/podman container
+   ("the `run` shape", kept + indexed), with `config` in hand, but passes no
+   `network`. Scenario: `network: "none"` in `config.jsonc` (or a profile, or
+   `TENTACLE_NETWORK=none`) to sandbox untrusted work → `/move container <image>`
+   creates a container on `bridge` with full egress, no notice. That is exactly
+   the "silently ignoring `network: none` falsely claims a sandbox" case D1 calls
+   a bug, and it contradicts "No silent drop: every set value either reaches the
+   create body or produces a refusal". The plan's precondition ("`host.create`
+   has exactly ONE caller … one option threads to both `run` paths") is TRUE but
+   missed that `startEngineRuntime` has a second, non-`run` caller. Fix: resolve
+   `chooseNetwork({env, configured: config.network})` + `networkValueProblem` in
+   the hop and pass it (it already uses `containerEngine(config)`, so no k8s
+   case), with a test; or, if the owner scopes it out, a visible notice on the
+   hop when a network is configured and the key docs saying so.
+2. **Doc structure (not blocking):** the executor's as-built is written under a
+   `## Review` heading with a `pending` stub; `## Execution` is empty. Move it
+   under Execution at the fix round.
+
+**Gate (narrow, as asked).** Touched tests (`engine-docker`, `engine-k8s`,
+`engine-select`, `main`, `config/network`, `docker/client`, `key-docs`,
+`readme-config-table`): **276 pass, 0 fail**. `bun run lint`: clean (2552 files).
+`bun run typecheck`: clean. Full `bun run test` not run in this review.
+
+**Mutation (non-vacuity, all reverted; `git status` clean after).**
+
+| Mutation | Result |
+| --- | --- |
+| network classification in `createContainer` disabled | 2 fail (`docker/client`, `engine-docker` refusal) |
+| `deps.network` not passed by `provisionNamed` | 1 fail (`network none` whole-turn test) |
+| `configured: config.network` → `undefined` in `main` | 1 fail (precedence test) |
+| k8s backstop in `kubeEngineHost.create` disabled | 1 fail (`engine-k8s`) |
+
+The executor's own table (6 mutations) is consistent with these.
+
+**Premise table (spot-checked).** `containerBody` one pure fn / `host.create`
+one caller — TRUE. `missingImage` was a prefix sniff on a plain `Error` — TRUE
+(now typed). `createContainer` non-201 previously threw `DockerApiError` via
+`expect` — TRUE; the new `throw apiError(res)` is the same object, so the 409 /
+`MOUNT_DENIED` branches of `conflict` are unchanged. `--detach` provisions in
+`main` through the same `workloadDeps` (`main.ts:1744`, `:1774`) — TRUE; the
+relay never creates. "No silent drop" — FALSE (finding 1).
+
+**Attacks tried.**
+- 404 for an image whose name contains "network": the regex needs
+  `network <space>…not found`; docker's `No such image: x:latest` cannot match. Nothing.
+- Non-404 create failures: still a `DockerApiError` (same status/message), unless
+  the engine message says a network is missing (podman's 500 wording) — intended.
+- Unset path: `NetworkMode` key absent (spread on a truthy value; `""` is refused
+  by the flag table and the regex) — the two pinned body tests stay green.
+- k8s with a network from flag, env, config: refused in `main` before sessions /
+  host / create; backstop in `kubeEngineHost.create`. Holds.
+- `attach` with `--network`: unknown option. With `TENTACLE_NETWORK`/config set it
+  is ignored by design (D2: fixed at create). Acceptable, documented.
+- Other container-creating callers of `startEngineRuntime`: found the hop (finding 1).
+- §7 "model stays on the laptop / pod not trusted": no new pod→laptop effect; the
+  model and binaries still flow over exec. Note (not a finding): `--network host`
+  on a Linux engine gives the untrusted container the laptop's loopback (e.g. a
+  local model server or a localhost `serve`); it is an explicit opt-in, but the
+  help text could say so.
+
+**How the executor behaved.** Followed the plan in order, recorded real drift
+(`load.ts` carry found by a test, typed fakes), proved non-vacuity by mutation and
+stated the unverified part (podman on a real socket) honestly. Missed the second
+`startEngineRuntime` caller because the plan's call-site audit stopped at
+`host.create`; filed the as-built under the wrong heading.
