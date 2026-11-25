@@ -86,6 +86,7 @@ import {
   modelView,
   renderForModel,
   shouldEmit,
+  withStatusLine,
 } from "./context-awareness.ts";
 import {
   contextResetHistory,
@@ -223,6 +224,14 @@ export interface RunOptions {
    * caller owns the queue, so the caller owns the mark (`Session.takeVoice`).
    */
   readonly voiceMark?: () => VoiceMark | undefined;
+  /**
+   * A live status line (the session's workflow run,
+   * docs/feat/workflow-run-awareness.md), read SYNCHRONOUSLY once per request
+   * built and appended at the request's tail (`withStatusLine`) — never in the
+   * history. Only `Session` passes it, so a sub-agent (its own `Agent`) never
+   * sees it. `undefined` result → no line.
+   */
+  readonly statusLine?: () => string | undefined;
 }
 
 /** What a voice turn asks of one round: see `@tentacle/core`'s `voiceReasoning`. */
@@ -1622,7 +1631,8 @@ export class Agent {
       const view = modelView(this.requestHistory(messages, caps, turnFrom));
       const voiceTurn = voiceRequest(view.messages);
       const request: ChatRequest = {
-        messages: voiceTurn.messages,
+        // The live status line (a workflow run's) at the TAIL, request only.
+        messages: withStatusLine(voiceTurn.messages, opts.statusLine?.()),
         tools,
         ...(this.config.temperature !== undefined ? { temperature: this.config.temperature } : {}),
         ...(signal ? { signal } : {}),
@@ -1952,7 +1962,11 @@ export class Agent {
           yield { type: "history_repaired", ...view.repairs };
         }
         const finalMessages: ChatMessage[] = [
-          ...(voice === null ? view.messages : withSpokenLine(view.messages)),
+          // The status line before the nudge, so the nudge stays the last word.
+          ...withStatusLine(
+            voice === null ? view.messages : withSpokenLine(view.messages),
+            opts.statusLine?.(),
+          ),
           {
             role: "user",
             content: nudge,

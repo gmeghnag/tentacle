@@ -465,6 +465,64 @@ already-approved run can read «waits for the user to approve the run» for that
 **Gate:** only T1 and lint on the changed files; full typecheck/lint/test left to the
 orchestrator's script. No schema change, so `protocol.json` is untouched.
 
+### S2 — the request-only seam (`RunOptions.statusLine`) — DONE
+
+*— claude-opus-5-5, 2026-11-25 (branch at `ec2cccee`, uncommitted)*
+
+**Load-bearing check, re-run first: holds.** The repro again prints
+`request-only seam (voice line): in request: true | in history: false` and
+`autoApproves(workflow_approve, own=true): false`. `rg`: the loop's request builders are the round
+(`agent.ts`, `modelView` → `voiceRequest` → `ChatRequest`) and the forced final report; the
+third `modelView` call (`contextUsage`, the open-time count) builds no model request — the line
+is not counted there, as the Design accepts. Main-session `runMessages` callers are still only
+`Session.send`/`resume`; a sub-agent calls `child.runMessages` (`subagent.ts:567`).
+
+**As built:**
+- `packages/agent/src/context-awareness.ts` — pure `withStatusLine(messages, line)`: appends
+  `{ role: "user", content: line }` only when `line !== undefined` and the last message is
+  `user`/`tool`; always returns a new array.
+- `packages/agent/src/agent.ts` — `RunOptions.statusLine?: () => string | undefined`; the round's
+  request is `withStatusLine(voiceTurn.messages, opts.statusLine?.())`; the final report applies
+  it to the pre-nudge list, so the order is `… tool, line, nudge`.
+- `packages/agent/src/session.ts` — private `statusLine`, `setStatusLine(fn | undefined)`; `send`
+  and `resume` spread it into `RunOptions` when set.
+- T2/T3: new `packages/agent/test/status-line-request.test.ts` (10 tests: pure helper ×2; every
+  round ends with the line, read once per request, never in `messages`/`snapshot`, round 2
+  extends round 1's prefix; `undefined` → identical requests to a session without a provider;
+  `setStatusLine(undefined)` clears; assistant-tail history → no line; forced final report
+  carries it before the nudge; `replaceAgent` keeps it; `resume` passes it; a sub-agent's
+  requests never carry it while the parent's all do).
+
+**Red** (with `setStatusLine` storing but not passing the provider): `5 pass, 5 fail`, every fail
+on an assertion; the 5 passes are the "no line" guards. **Green:** `10 pass, 0 fail`.
+Neighbours (`steering`, `resume`, `replace-agent`, `session`, `context-awareness`,
+`context-awareness-loop`, `subagent`, `agent`): `142 pass, 0 fail`. `bunx biome check` on the 4
+files: clean (after `--write` formatting the test). `tsc --noEmit -p packages/agent`: clean.
+
+**Mutations** (`.tentacle/tmp/workflow-run-awareness/mutate-s2.ts`, source restored):
+
+```
+line pushed into the history: killed (5 pass, 5 fail)
+line at the head (cache-breaking): killed (4 pass, 6 fail)
+final report without the line: killed (9 pass, 1 fail)
+line after an assistant tail too: killed (8 pass, 2 fail)
+Session does not pass it (send+resume): killed (5 pass, 5 fail)
+restored: true
+```
+
+**Drift:**
+- The final report: the plan says only "carries it". Placed BEFORE the nudge (the nudge stays the
+  last instruction); the assistant-tail rule still applies to the pre-nudge list. Two consecutive
+  `user` messages (line, nudge) are already legal on the wire (the Anthropic API merges
+  same-role turns, `anthropic-provider.ts` comment at the empty-assistant drop).
+- T2's red is on assertions (a storing-only `setStatusLine` stub), not "today no request has it"
+  by a missing method — same property, per the executor brief.
+- No changelog fragment written: S1's `changelog.d/workflow-run-awareness.added.md` already
+  covers the branch.
+
+**Gate:** only the files above; full typecheck/lint/test left to the orchestrator's script. No
+schema change, so `protocol.json` is untouched.
+
 ## Review
 
 *— (empty)*
