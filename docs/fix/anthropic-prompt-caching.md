@@ -51,6 +51,12 @@ Before: every request ≈ 20.7k uncached ≈ $0.00208+ (T1.10 rows). Measured sa
 - **LOW 3 (documented):** besides compaction/`context_reset`, these also rewrite the prefix, each a one-time miss by design: `contextPrune`, old-image projection at turn boundaries, capability toggles (`projectTools`), and the voice spoken line (joins into `system`, so a voice↔text switch also misses tools+system; no tools-only breakpoint was added).
 - **Tests (`anthropic-cache.test.ts`, 7 pass):** one-shot → system only; 12 parallel calls → exactly one breakpoint on the previous user message's last block; stream test now expects 1 breakpoint (single message) then 3. Red/mutation: `messages.length < 1` (M1 reverted) → 2 fail; previous-user `mark` removed (M2 reverted) → 4 fail; restored byte-identical (`cmp`). `bun test packages/providers`: 225 pass; typecheck and biome clean. Not re-verified live (the 3rd breakpoint adds no cost on a 3-round run; the ~20-block lookback is the API's documented behaviour).
 
+### Fix after revert
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+Main gate red on `prune-loop.test.ts` "below the threshold the requests are exactly today's (no contextPrune)". Diagnosis: **not the breakpoints** — the diff the gate printed is only each tool message's `durationMs` (0 vs 1 vs 4): the test compares two separate runs' requests with `toEqual`, and `durationMs` is wall-clock. It uses a `Scripted` model, never the Anthropic provider; `applyCacheControl` runs only inside `AnthropicProvider.stream`, so nothing leaks into the loop's request (no `cache_control` in the diff). A pre-existing timing flake that lost the race under the parallel gate. Fix: the test now neutralises `durationMs` on both sides before the exact comparison (`packages/agent/test/prune-loop.test.ts`); everything else stays exact. Not reproducible on demand (passes 3/3 before and 5/5 after, so there is no honest red); the cause is read from the gate's diff. Full `bun run test` (parallel): 18418 pass, 5 skip, 0 fail. One other full run of mine showed 1 uncaptured fail (the next run was clean) — an unattributed flake; I did not identify it.
+
 ## Review (Round 1)
 
 *— claude-opus-5-5, 2026-11-25 (fresh context; different model from the executor, claude-sonnet-5-5, but the same family — shared blind spots possible)*
