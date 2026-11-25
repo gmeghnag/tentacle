@@ -45,3 +45,40 @@ Round 1 (`docs/fix/mobile-open-long-session.md`, merged `df358162`) was never re
 - after: `out-fix-alpha/*/open/takeScreenshot/settled.png` (114 msgs: turn 57 + answer fully above the composer); `out-fix-long/*/later.png` (260 msgs, last turn 186 + answer); `out-fix-charlie/*/later.png` (short session right).
 
 **Unverified:** visible travel was judged from the settled/later frames only (no video); the underlying native staleness (why the paint misses a scroll issued in the reveal tick) is inferred from the overlay + nudge, not from UIKit.
+
+## Review (Round 1)
+
+*— claude-opus-5-5, 2026-11-25 (fresh context; a different model family from the executor, claude-sonnet-5-5)*
+
+**Verdict: APPROVE-WITH-NITS (PASS).** No HIGH or MEDIUM findings. Two LOW findings below; neither blocks the merge.
+
+**Gate.** `bun run typecheck` passes on all three projects. `bun run lint` reports no issues (2395 files checked). `bun test apps/mobile/test/follow.test.ts` gives 69 pass / 0 fail. `bun test apps/mobile` gives 5020 pass / 0 fail. I did not run the full parallel `bun run test`.
+
+**Red on main (scratch copy, no checkout).** I put `git show main:apps/mobile/src/follow.ts` and the branch's `follow.test.ts` in `.tentacle/tmp/mobile-open-long-session-2-review/`. Result: 67 pass, 2 fail ("…scrolls silently but stays hidden" and "the quiet timer then shows it, into the silent tail"). This matches the Execution section.
+
+**Mutation.** I removed `capped: true` from the new branch (`follow.ts:341`). Result: 2 fail ("a growth while capped is not hidden again" and the older "a never-repeating content height still ends the landing"). So the guard against hiding forever is pinned. The scratch copy was deleted and the worktree is unchanged (`git status` clean before this edit).
+
+**Premise table.**
+| Premise | Verdict |
+|---|---|
+| Symptom: 114 rows open one turn short (`red-later.png`); after the fix the end is visible (`out-fix-alpha/…/settled.png`) | TRUE. I looked at both frames. "turn 56" sits about 557 device px (≈186 pt at @3x) lower before the fix. That is the last growth (185 pt), so it matches the ~570 px gap. The fault is tied to the last growth, not to a fixed inset. The cause explains the measured gap. It is not just a correlated symptom. |
+| On main, the bound branch scrolls and ends `settling` on the same measurement (`main:follow.ts` bound branch → `settling:false`) | TRUE |
+| The screen re-arms the reveal timer while a landing is pending, so a capped state cannot stay hidden (`SessionScreen.tsx:640-642`, `596-598`) | TRUE. The capped step leaves `settling:true`, so `armReveal()` runs. |
+| The timer's reveal of a capped state issues a scroll to `endOffset` again (`follow.ts:497-509`) | TRUE. This also covers an alternative cause I could not rule out: a scroll clamped natively to the old content size. Either way, the list is shown after a second scroll that comes 120 ms later. |
+| The "stale native paint" mechanism itself | UNPROVEN, as the doc admits. It is inferred from the debug overlay and the nudge test. The fix holds under both explanations (row above). |
+
+**Attacks tried.**
+1. **Very long or still-growing session, with the timer firing between growths** (pure trace script, fix vs main). After capped → timer, the tail inherits `rounds: 12`. It therefore absorbs only one silent growth before handing back to the animated `contentGrew`. Main's bound branch gives the tail fresh rounds, but in the same timing main's timer then ends the revealed tail at once (`landingDone`), so every later growth is animated there too. **Not a regression:** the fix absorbs one more growth than main in that sequence. → LOW-1.
+2. **Viewport or inset change (keyboard, composer, safe area) during the 120 ms capped window.** Traced: a measurement with the same content but a new viewport skips both bound branches. It falls into `next` with `rounds 13 ≥ 12`, so `settling:false` and `silent:false`, together with a scroll to the new end. That is a reveal and a scroll in the same tick, the mechanism this fix exists to avoid, and with no silent tail after it. Main had the same path for a layout event on round 12, so this is not a regression, but the fix's own claim ("shown only after its last scroll has landed") does not hold for a non-growth measurement. The window is narrow: round 12 plus 120 ms. → LOW-2.
+3. **Short session, re-open/re-attach, scrolled-up reader, rotation.** A short session never reaches round 12. `landingQuiet`/`awaiting` have `settling:false`, so the new branch is unreachable for them. A reader who is not following leaves at the early exit (pinned by the 4th test). Rotation goes through `onListLayout`, which is attack 2 while capped and unchanged otherwise. Found nothing new.
+4. **Growth while capped, and capped forever.** A second growth takes the old bound path (reveal into a tail with fresh rounds). This is pinned by the test and confirmed by the mutation. `capped` is dropped by every fresh-literal state (tail, `landingDone`), so it cannot leak into a later landing. Found nothing.
+5. **New visible scroll travel.** Every new step is `animated:false`. The capped step is issued while the list is hidden. Found nothing. Video was not checked (it is also unverified in the Execution section).
+
+**Findings.**
+- **LOW-1** `follow.ts:497-509` (pre-existing in kind): after a capped landing is revealed by the timer, the tail keeps `rounds: state.rounds` (12), so it has a budget of one silent scroll. The bound branch's comment says "the tail gets fresh rounds". Optional fix: reset `rounds` to 0 when `landingReveal` reveals a `capped` state.
+- **LOW-2** `follow.ts:365-379`: a non-growth measurement (a viewport change) while capped reveals with a scroll in the same tick. Optional fix: while `capped`, keep any measurement hidden with its silent scroll, or route it into the tail, as the second bound branch does.
+- **Nit** `follow.test.ts` test 3 checks `settling:false` and a non-animated step but not `landingPending(more.state)`, i.e. that the state really is the silent tail rather than `landingDone`.
+
+**What holds.** The logic stays in the pure module (`follow.ts`) and the screen is untouched, as AGENTS §7 requires. The change is small and additive (one optional field and one branch). The test goes red on main and green on the branch, and the mutation shows it is not vacuous. The changelog fragment is correct.
+
+**How the executor behaved.** The executor reproduced the bug before fixing it, using an instrumented overlay and three runs. They measured the magnitude and correctly tied it to the round count, not to the inset. They openly said what was unverified (the native mechanism; video). Their red/green and mutation claims matched what I measured exactly. One gap: they did not consider a non-growth measurement during the capped window (LOW-2).
