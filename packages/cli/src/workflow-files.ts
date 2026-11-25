@@ -180,19 +180,11 @@ export async function listWorkflowSources(cwd: string): Promise<WorkflowListing>
   const kept = yamlFiles.slice(0, WORKFLOW_SOURCES_MAX);
   // ONE walk: every regular, non-link, in-cap file of the folder is read once
   // and shared — the same prompt map `loadWorkflowSource` builds for one name.
+  // Recursive, like `loadWorkflowSource`: `prompts/*.md` live in a sub-folder.
   const files: Record<string, string> = {};
-  for (const entry of names) {
-    if (Object.keys(files).length >= WORKFLOW_FILES_MAX) {
-      break;
-    }
-    try {
-      const info = await lstat(join(dir, entry));
-      if (info.isSymbolicLink() || !info.isFile() || info.size > WORKFLOW_FILE_MAX_BYTES) {
-        continue;
-      }
-      files[entry] = await readFile(join(dir, entry), "utf8");
-    } catch {}
-  }
+  try {
+    collect(dir, dir, files);
+  } catch {}
   const rows: WorkflowSourceRow[] = [];
   for (const file of kept) {
     const stem = file.slice(0, -".yaml".length);

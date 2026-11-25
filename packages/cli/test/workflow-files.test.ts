@@ -132,6 +132,17 @@ describe("listWorkflowSources: ONE walk of the folder (slice 5a)", () => {
     expect(task.source.text).toBe(loaded.text);
   });
 
+  test("a row's prompts include files in sub-folders, exactly as loadWorkflowSource's (e2e fix round 3)", async () => {
+    const root = project(`${PROJECT_PATHS.workflows}/task.yaml`, YAML);
+    mkdirSync(join(root, PROJECT_PATHS.workflows, "prompts"), { recursive: true });
+    writeFileSync(join(root, PROJECT_PATHS.workflows, "prompts", "plan.md"), "the plan");
+    const listing = await listWorkflowSources(root);
+    const task = listing.rows.find((r) => r.name === "task");
+    if (task?.kind !== "source") throw new Error("no task row");
+    expect(task.source.prompts["prompts/plan.md"]).toBe("the plan");
+    expect(task.source.prompts).toEqual(loadWorkflowSource(root, "task").prompts);
+  });
+
   test("a missing folder is [], never a throw (nothing to list)", async () => {
     const root = mkdtempSync(join(dir, "none-"));
     expect(await listWorkflowSources(root)).toEqual({

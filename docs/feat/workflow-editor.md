@@ -2673,3 +2673,21 @@ sheet's keyboard on a small device).
 **Docs.** No changelog fragment: `changelog.d/workflow-editor.added.md` already carries this task's one
 user-visible sentence, and a second fragment for the same slug would be the collision the changelog rules
 forbid (round 1's reasoning, unchanged).
+
+### e2e fix round 3 (44 end-to-end)
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+Failures met, in order (each from the run's screenshot + `maestro.log`), with the verdict and the fix:
+
+1. **`workflow-start-row-wfedit` not visible** — the Start list showed `wfedit` as "Cannot run: no file "prompts/plan.md" under .tentacle/workflows/" (×4). **PRODUCT bug.** `listWorkflowSources` walked the folder FLAT (`readdir` + `isFile`), so `prompts/` was never read, while `loadWorkflowSource` collects recursively; every listed workflow with a `prompts/` folder was unrunnable (and the Review's own 4 prompts are written there, D3/D4). Fix: the listing reuses the recursive `collect` (`packages/cli/src/workflow-files.ts`). Test `a row's prompts include files in sub-folders, exactly as loadWorkflowSource's` (`packages/cli/test/workflow-files.test.ts`): **RED** (`prompts["prompts/plan.md"]` Expected "the plan", Received undefined; 17 pass / 1 fail) → **GREEN** (18 pass).
+2. **`workflow-start-input-slug` not found** — the screenshot was the editor, not the detail: Maestro taps the row's centre, which is the row's nested Edit pill (the mockup's row carries it, §D7). **FLOW stale.** Fix: `tapOn … point: "30%,15%"` (title line).
+3. **`perm-sheet` not visible (keyboard)** — the keyboard covered Run. **FLOW stale.** Fix: `hideKeyboard` before Run (same as `07-prompt.yaml`).
+4. **`perm-sheet` not visible (again)** — the hash approval is INLINE on the run screen (`WorkflowRun.tsx` `workflow-ask-run` + `-allow`/`-deny`, "Run workflow wfedit v1 (hash …)", Allow once / Deny), not a sheet. **FLOW stale.** Fix: assert `workflow-ask-run`/`-allow`, tap `-deny`.
+5. **final `runScript` "wfedit.yaml was not written"** — the `file-exists` hook is rooted at `<run>/project` (`seed.ts fileExists`), the Save writes at the daemon project root, its parent (the file was on disk in the failed run's dir). **FLOW stale.** Fix: `file=../.tentacle/workflows/wfedit.yaml` in `44-workflow-editor.js`.
+
+Gate: `bun test packages/cli/test/workflow-files.test.ts` 18 pass; `bun test apps/mobile/test/e2e-flows.test.ts` 63 pass; `bunx biome check packages/cli apps/mobile/e2e` clean. Runs of flow 44 this round: 6 of 8.
+
+**Final: `GATE PASS — 1 passed, 0 failed (of 1; 80 s)` for `44-workflow-editor`; `30-artifact-escape` `GATE PASS — 1 passed (53 s)`.**
+
+Unverified: full `bun test` / `bun run typecheck` not re-run this round (only the touched files); nothing committed (the script commits).

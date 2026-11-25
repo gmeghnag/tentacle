@@ -150,21 +150,28 @@ appId: so.tentacle.app
     visible:
       id: "workflow-start-row-wfedit"
     timeout: 15000
+# The row's centre is its nested Edit pill (it opens the editor, not the detail):
+# tap the row's title line instead (e2e fix round 3).
 - tapOn:
     id: "workflow-start-row-wfedit"
+    point: "30%,15%"
 - tapOn:
     id: "workflow-start-input-slug"
 - inputText: "e2e"
+# The keyboard covers Run: dismiss it so the tap lands on the button (as 07-prompt).
+- hideKeyboard
 - tapOn:
     id: "workflow-start-run"
 - extendedWaitUntil:
     visible:
-      id: "perm-sheet"
+      id: "workflow-ask-run"
     timeout: 20000
+# The run's hash approval is INLINE on the run screen (WorkflowRun `workflow-ask-run`,
+# Allow once / Deny), not a `perm-sheet` (e2e fix round 3).
 - assertVisible:
-    id: "perm-allow_once"
+    id: "workflow-ask-run-allow"
 - tapOn:
-    id: "perm-reject_once"
+    id: "workflow-ask-run-deny"
 # Daemon truth: the file the Review listed is on the daemon's disk.
 - runScript:
     file: "44-workflow-editor.js"

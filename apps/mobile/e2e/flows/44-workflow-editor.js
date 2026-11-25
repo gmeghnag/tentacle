@@ -3,8 +3,10 @@
  * phone's Save really wrote the file through `serve` — the YAML the Review
  * listed is on the daemon's disk, not just a toast on the screen.
  */
+// The hook is rooted at <run>/project; the daemon's project (where a Save writes
+// `.tentacle/workflows/`) is its parent (e2e fix round 3).
 const response = http.get(
-  `http://${MAESTRO_HOOKS}/file-exists?file=.tentacle/workflows/wfedit.yaml`,
+  `http://${MAESTRO_HOOKS}/file-exists?file=../.tentacle/workflows/wfedit.yaml`,
 );
 if (!response.ok) {
   throw new Error(`file-exists failed: ${response.status} ${response.body}`);
