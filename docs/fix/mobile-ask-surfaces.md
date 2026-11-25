@@ -429,6 +429,44 @@ frames A1–A7 before the iOS build.
 - **Mutations (reverted; diff shows only the fix + tests):** (a) no forward (the original code): the carry-through test fails. (b) Unconditional `workflow: action.workflow` (the key is present even when undefined): the absent-case test fails (1 pass / 1 fail).
 - **Drift:** none beyond the one-line forward. S3 remains STOPPED and waits for the owner's OK to move `ask-origin.ts` to `@tentacle/core` (Review (f)).
 
+### S1b — the driver fills the origin, the daemon forwards it (executor claude-opus-5-5, 2026-11-24)
+
+- **Load-bearing check re-run (passed).** On the pre-edit tree: `rg -n "workflow:" packages/agent/src/workflow-driver.ts` → **no hits** (the driver set no origin), and `packages/daemon/src/permission-map.ts` had no `workflow` parameter (its only hit was the doc comment on `permissionOptions`). S1a's `workflow?` was present on both `PermissionRequestUpdateSchema` (`protocol/src/permission.ts:89`) and `PermissionRequestOptions` (`core/src/permission.ts:181`), and the client forwards it (`remote-client.ts:4932`) — so the plan's premise (the gap is exactly these three files) held.
+- **Red first (whole slice):** with all three source files reverted to their pre-edit state, the three touched test files gave **42 pass / 11 fail**; after the change, **53 pass / 0 fail**. The 11 failures are on the assertion of the property (a missing or wrong `workflow`), not on an import or a type error.
+- **Changed:**
+  1. `packages/agent/src/workflow-driver.ts`
+     - `stepRequester` (`:1583-1600`) builds `workflow` from the RUN, not from the options: `{name: run.spec.name, runId: run.runId}` for the hash approval (`stepId === null`), plus `stepId` and `{index: findIndex, count: spec.steps.length}` for a step. `index` is 0-based in file order, `count` is `spec.steps.length` (the schema already caps a run at 64 steps, so no bound is added here — P1).
+     - it is passed **after** `agent` in the requester's options (`:1624-1628`), so it OVERRIDES any `workflow` a child put there: `??` stays what `agent` gets (the transition's fallback), never what the origin gets.
+     - `requestApproval` (`:1127-1129`) sets `{name: spec.name}` only — a schedule's approval has no run and no step.
+  2. `packages/daemon/src/permission-map.ts` — `toPermissionRequestUpdate(requestId, toolCallId, req, agent?, workflow?)`: a 5th field, **built field by field** (never spread), gated on `typeof workflow.name === "string"` so a pod-supplied payload the blocking schema would refuse is DROPPED rather than making the update unparseable (AGENTS §7). No `.max()`/`.int()` added (P1: the client bounds it).
+  3. `packages/daemon/src/hosted-session.ts` — the two call sites the plan names: `awaitDecision` (`:1440`, a turn's own ask) and `awaitBackgroundDecision` (`:1611`, the path every workflow STEP's ask takes — `stepRequester` always sets `agent.id`).
+- **Tests:**
+  - `packages/agent/test/workflow-driver.test.ts` — `describe("the ask's structured workflow origin (S1b)")`, 6 tests: an agent step's ask (`{name, runId, stepId, index: 1, count: 2}`) keeps the child's `explore` agent label beside it; the origin OVERRIDES a forged one; two `run` steps report `1 of 2` then `2 of 2`; an `approve` step names its own step and position; the hash approval carries `{name, runId}` with no step and no position; a schedule's approval carries `{name}` only.
+  - `packages/daemon/test/permission-map-workflow.test.ts` (new) — 6 tests: the five fields travel; a name alone is whole and the absent keys stay ABSENT (no fabricated `null`); absent stays absent (no key at all); field-by-field (a forged extra key never reaches the wire); a non-string `name` is dropped and the update still parses; hostile numbers / a 10 KB name still parse.
+  - `packages/daemon/test/permission-workflow-origin.test.ts` (new) — 3 tests on a REAL `HostedSession`: a turn's own ask (`awaitDecision`) carries it, a background child's ask (`awaitBackgroundDecision`, with `agent.id` + a child signal) carries it beside its `agent` label, and an ask with none emits no `workflow` key at all. This is the "both call sites" property driven end to end, not read off the code.
+- **Green:** the touched + covering files — `workflow-driver`, `permission-map-workflow`, `permission-workflow-origin`, `workflow-hosted`, `workflow-permission-map`, `permission-events`, `subagent-background` — **113 pass / 0 fail**. `tsc --noEmit -p packages/agent` and `-p packages/daemon`: clean. Biome clean on the 6 files.
+- **Mutations (all reverted; `git diff` afterwards shows only the fix + tests):**
+
+  | Mutation | Result |
+  |---|---|
+  | `stepRequester` passes no `workflow` (the original code) | 5 fail / 39 pass (`workflow-driver`) |
+  | `workflow: options?.workflow ?? workflow` (a child's origin wins) | 1 fail — "the origin OVERRIDES a workflow the child tried to set" |
+  | `index: 0` instead of the step's position | 3 fail |
+  | `awaitDecision`'s call site drops `options?.workflow` | 1 fail (`permission-workflow-origin`) |
+  | `awaitBackgroundDecision`'s call site drops `options.workflow` | 1 fail (`permission-workflow-origin`) |
+  | the map spreads `{...workflow}` | 1 fail — the forged extra key reaches the wire |
+  | the map drops the `typeof name === "string"` guard | 1 fail — a non-string name reaches a blocking update |
+  | the map emits `workflow: undefined` instead of omitting the key | 2 fail |
+
+- **`protocol.json`:** regenerated with `bun run schema:export` — **no diff** (S1b adds no schema; S1a already exported the field). No `protocol.d/` note: nothing breaks the wire.
+- **Changelog:** `changelog.d/mobile-ask-surfaces.fixed.md` (S1a's ONE fragment) extended with the daemon side — still one bullet, no second file.
+- **Drift from the plan:** none in scope. Two points worth recording:
+  - the plan's `### Tests` line ("the driver's ask for an `agent` / `run` / `approve` step") is satisfied, but a `run` step's ask reaches the requester through `deps.commands.authorize` and an `agent` step's through the child's runner — so the tests drive those real paths instead of calling `stepRequester` directly.
+  - a workflow ask ALWAYS has `agent.id`, so it always takes `awaitBackgroundDecision`; the `awaitDecision` leg is covered with an ask that has no sub-agent label. Both legs were mutated separately, so neither assertion is vacuous.
+- **Not in this slice (unchanged, as the plan orders them):** S3 is still STOPPED; S7a (`session/list` `asks`/`workflows`) and S8/S9 remain open.
+
+*— claude-opus-5-5, 2026-11-24*
+
 ## Review
 
 ### Group S1a–S3 — Verdict: REQUEST-CHANGES

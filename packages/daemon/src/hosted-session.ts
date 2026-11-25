@@ -1437,7 +1437,13 @@ export class HostedSession {
     const toolCallId = options?.toolCallId || undefined;
     const asked = this.askedOn();
     const update = {
-      ...toPermissionRequestUpdate(requestId, toolCallId ?? "pending", req, options?.agent),
+      ...toPermissionRequestUpdate(
+        requestId,
+        toolCallId ?? "pending",
+        req,
+        options?.agent,
+        options?.workflow,
+      ),
       ...(asked !== undefined ? { askedOn: asked } : {}),
     };
     // The asking call's group head (a call alone: itself), kept with the entry:
@@ -1602,7 +1608,13 @@ export class HostedSession {
     }
     const asked = this.askedOn();
     const update: PermissionRequestUpdate = {
-      ...toPermissionRequestUpdate(requestId, options.toolCallId || "pending", req, options.agent),
+      ...toPermissionRequestUpdate(
+        requestId,
+        options.toolCallId || "pending",
+        req,
+        options.agent,
+        options.workflow,
+      ),
       ...(spawnTurn !== undefined ? { turnId: spawnTurn } : {}),
       ...(asked !== undefined ? { askedOn: asked } : {}),
     };

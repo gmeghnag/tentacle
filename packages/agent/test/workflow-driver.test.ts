@@ -1036,6 +1036,154 @@ describe("the approval shows every command, verbatim (docs/fix/workflow-approve-
   });
 });
 
+// docs/fix/mobile-ask-surfaces.md S1b: the ask says WHERE it comes from, as
+// structure (name, run, step, N of M) instead of leaving every surface to parse
+// `agent.description`/`id`. Only the driver knows the step's position.
+describe("the ask's structured workflow origin (S1b)", () => {
+  const askShell = async (
+    o: SubagentRunOptions,
+    c: SubagentRunControls | undefined,
+    ask: PermissionRequester,
+  ): Promise<PermissionResponse> =>
+    ask(
+      { tool: "shell", level: "ask", title: "Run", input: {} },
+      { agent: { type: "explore", description: o.description, id: c?.agentId ?? "" } },
+    );
+
+  test("an agent step's ask carries name, run, step, index and count — and keeps the child's own agent label", async () => {
+    // Mutation: drop the `workflow` from `stepRequester`'s options → absent here.
+    const { driver, broker } = setup({
+      approved: true,
+      children: {
+        exec: async (o, c, ask) => {
+          await askShell(o, c, ask);
+          return says("pass")(o, c, ask);
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const shell = broker.asks.find((a) => a.req.tool === "shell");
+    expect(shell?.options?.workflow).toEqual({
+      name: "task",
+      runId: "wf-1",
+      stepId: "exec",
+      index: 1,
+      count: 2,
+    });
+    // The transition's fallback: the child's `agent` survives beside the origin.
+    expect(shell?.options?.agent).toEqual({
+      type: "explore",
+      description: "task/exec",
+      id: "wf-1.exec",
+    });
+    shell?.answer({ allowed: true, scope: "once" });
+    await flush();
+  });
+
+  test("the origin OVERRIDES a workflow the child tried to set: a step cannot claim another's", async () => {
+    // Mutation: `workflow: options?.workflow ?? workflow` → the forged one wins.
+    const { driver, broker } = setup({
+      approved: true,
+      children: {
+        exec: async (o, c, ask) => {
+          await ask(
+            { tool: "shell", level: "ask", title: "Run", input: {} },
+            {
+              agent: { type: "general", description: "d", id: c?.agentId ?? "" },
+              workflow: { name: "other", runId: "wf-9", stepId: "x", index: 0, count: 9 },
+            },
+          );
+          return says("pass")(o, c, ask);
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const shell = broker.asks.find((a) => a.req.tool === "shell");
+    expect(shell?.options?.workflow).toEqual({
+      name: "task",
+      runId: "wf-1",
+      stepId: "exec",
+      index: 1,
+      count: 2,
+    });
+    shell?.answer({ allowed: true, scope: "once" });
+    await flush();
+  });
+
+  test("a run step's ask says the same, and a later step says its own N", async () => {
+    // Mutation: `index: 0` instead of the step's position → both asks say `1 of 2`.
+    const t = setup({
+      approved: true,
+      text: YAML("  - id: gate\n    run: bun run lint\n  - id: after\n    run: bun run build\n"),
+    });
+    const driver = new WorkflowDriver({
+      ...t.deps,
+      commands: {
+        authorize: async (command, requester) => {
+          const r = await requester({ tool: "shell", level: "ask", title: command, input: {} });
+          return r.allowed ? { allowed: true, command } : { allowed: false, reason: "denied" };
+        },
+        exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      },
+    });
+    driver.bind(noopHost());
+    t.broker.auto = () => ({ allowed: true, scope: "once" });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(
+      t.broker.asks.filter((a) => a.req.tool === "shell").map((a) => a.options?.workflow),
+    ).toEqual([
+      { name: "task", runId: "wf-1", stepId: "gate", index: 0, count: 2 },
+      { name: "task", runId: "wf-1", stepId: "after", index: 1, count: 2 },
+    ]);
+  });
+
+  test("an approve step's ask carries its own step and position", async () => {
+    const { driver, broker } = setup({
+      approved: true,
+      text: YAML("  - id: merge\n    approve: { title: Merge it }\n"),
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const merge = broker.asks.find(
+      (a) => a.req.kind === "workflow_approve" && a.req.title === "Merge it",
+    );
+    expect(merge?.options?.workflow).toEqual({
+      name: "task",
+      runId: "wf-1",
+      stepId: "merge",
+      index: 0,
+      count: 1,
+    });
+    merge?.answer({ allowed: true });
+    await flush();
+  });
+
+  test("the run's HASH approval carries the run, no step and no position", async () => {
+    // Mutation: give the hash approval a `stepId` (e.g. the first step) → red.
+    const { driver, broker } = setup();
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const hash = broker.asks[0];
+    expect(hash?.req.kind).toBe("workflow_approve");
+    expect(hash?.options?.workflow).toEqual({ name: "task", runId: "wf-1" });
+    hash?.answer({ allowed: true });
+    await flush();
+  });
+
+  test("a SCHEDULE's approval carries the name only: it has no run", async () => {
+    // Mutation: give it the run id of the last run → a label for a run that is not it.
+    const t = setup();
+    const pending = t.driver.requestApproval("task");
+    await flush();
+    expect(t.broker.asks[0]?.options?.workflow).toEqual({ name: "task" });
+    t.broker.asks[0]?.answer({ allowed: true });
+    expect(await pending).toBe(true);
+  });
+});
+
 function noopHost(): WorkflowHost {
   return {
     logStart: () => {},
