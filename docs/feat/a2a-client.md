@@ -1592,3 +1592,35 @@ PARTIAL with a plan fix, not forced code). Drifts are documented and mostly
 stricter than the plan. Tests were written after the code, with non-vacuity
 shown by mutation (stated openly). Unverified items are named: simulator
 screenshots (a2c-6) and Bun DNS on a public card.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-25* (fresh context; diff `783d3ede..HEAD` =
+`b285f52f` + `ed1f64c5`)
+
+**Verdict: REQUEST-CHANGES — blocked ONLY on the owner's decision for finding
+2.** The code is clean: finding 1 is fixed, and no regression was found.
+
+- **Finding 1 — FIXED, verified.** `AgentInbox.next` (`packages/core/src/agent-inbox.ts:171`)
+  now waits only for a text pushed after the call. `routeInput` (`packages/agent/src/harness/child.ts:597-615`)
+  opens the wait before `notify` and aborts it when the notify fails. A stale
+  text stays queued and is reported unread at close: it is not sent and not lost.
+  Mutations I ran (each restored, `cmp` byte-identical):
+  | mutation | result |
+  |---|---|
+  | `next` takes the oldest queued text again | red — 3 fail (`agent-inbox` + 2 seam: pre-queued, `both` late reply) |
+  | no `stopWait()` on a failed notify | red — 1 fail (seam «not swallowed») |
+  The executor's M3 (wait after `notify`) was not re-run.
+- **Regressions:** `next` has one caller (`child.ts:600`). The one changed
+  test in `agent-inbox.test.ts` used to assert the bug, so rewriting it was
+  correct. Known gap, accepted: 8 stale texts fill the inbox (`AGENT_INBOX_MAX`),
+  and then the parent's reply is refused `full`. The refusal is loud and
+  nothing is lost.
+  Gate: `bun run typecheck` clean; `bun run lint` clean (2556 files).
+  `packages/agent/test/` + `packages/core/test/` + cli `a2a-*` (3) + daemon
+  `question-ask` + `subagent-panel` → **2229 pass / 0 fail** (161 files).
+- **Finding 2 — still OPEN (owner decision).** No caller passes `a2aCards`, so
+  Q2 (b) is unreachable. The executor was right not to pick (a)/(b)/(c).
+  Before merge, the owner either picks one (recommended (c)), which is then
+  wired and reviewed, or OKs moving it to Notes/debt + `TODO.md`. Either
+  closes this review, with no new code review needed for the second.
