@@ -2598,6 +2598,7 @@ export class HostedSession {
       release: (agentId) => {
         this.spawnTurns.delete(agentId);
       },
+      currentTurn: () => (this.compacting ? undefined : (this.activeTurnId ?? undefined)),
       publish: (rows) => this.publishWorkflows(rows),
       // The end note rides the exits queue (told at the next turn) and wakes.
       ended: (runId, note) => {
