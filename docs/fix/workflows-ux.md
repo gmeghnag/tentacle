@@ -1827,3 +1827,63 @@ so no diff.
 the brief. Everything narrower is above, green.
 
 *— claude-opus (claude-code, `settings.json` model "opus"), 2026-11-25*
+
+## Review
+
+### Review — S7, S8a, S8b, S8c (fresh context, `git diff main...HEAD`)
+
+**Verdict: APPROVE-WITH-NITS** (one MEDIUM to track; no HIGH).
+
+**Gate (this reviewer).** The 16 touched test files (client `workflows-client`, daemon `workflow-hosted`,
+protocol `workflow-wire`/`json-schema`, tui `workflow-view`/`workflow-frames`, core `project-paths`, cli
+`workflow-files`/`project-fs`, agent `workflow-catalogue`, mobile `workflow-start`/`-run-step-detail`/
+`-step-layer`/`-list-graph`/`-screens-wiring`/`e2e-flows`) → **384 pass, 0 fail**. `bun run lint` → 2490
+files clean. `bun run typecheck` (root + mobile + relay) → clean. Full parallel `bun run test` NOT
+re-run here (the orchestrator's gate owns it). e2e flow 45 not run (no simulator); the gate-fix records
+a PASS on iOS 26.
+
+**Findings.**
+1. **MEDIUM — an earlier goto round's visit shows the LATEST execution's body, undisclosed.**
+   `apps/mobile/src/workflow-run-controller.ts:365-373` (`attemptOf`) drops the attempt for a visit of an
+   older round, so the read returns the latest execution. On run ② (the seeded e2e scenario: review fails
+   once, then passes) tapping the FIRST `review` row gives a nav/marker worded `failed` over the
+   SECOND review's passing report — the reader asking "why did review fail?" sees the pass. Pinned on
+   purpose by the test "a visit of an EARLIER goto round reads the latest" and named in Execution S7 as
+   debt, but not in `TODO.md` and not shown on screen. Fix: either add `round` to the step read (a wire
+   field, a `protocol.d` line) or, cheaper, say "showing the latest run of this step" when the visit's
+   round ≠ the row's; and list it in `TODO.md`.
+2. LOW — `workflow-run-controller.ts:478-481`: a `notRun` record dropped while that step is OPEN (the
+   run resumed from another client) leaves `detail` undefined with nothing in flight, so
+   `bodyPending` (`workflow-step-detail.ts:443`) paints the skeleton until the person re-opens it.
+   Rare; not a regression (before S7 it showed a stale "no longer available").
+
+**Mutations (each applied by hand, run, reverted; `git status --short` empty after).**
+- S8b daemon: `newSessionWorkflowCatalogue` always answers `unavailable` → 1 fail ("with no sessionId: the
+  same rows, and NO session is created").
+- S8b client: `ensureOpen` drops `createOrAttach()` → 1 fail ("a start from the panel OPENS first").
+- S8a: `stepLook` loses its `skipped` arm → 2 fail (panel + rail tests).
+All killed.
+
+**Attacks tried.**
+- §7 *one session path*: the pre-open start goes through the memoized `createOrAttach()`
+  (`remote-session.ts:851-895`), the same promise the first `send`/`openSeeded` use — seed messages,
+  desired id and pre-open flips carried; no second open. Holds.
+- §7 *pod not trusted*: the trust check now precedes the open (`workflow()`), and the catalogue refuses
+  before sending; daemon side a tunnelled factory has no driver → `unavailable` with a valid `dir`. Holds.
+- §7 *don't serialize the peer*: `Connection.workflowCatalogue` is a plain async handler, no lock. Holds.
+- Throwaway driver side effects: `WorkflowDriver.dispose` (`workflow-driver.ts:1294`) only aborts its own
+  in-memory runs; the throwaway has none. cwd: every `createAgent` site uses `defaultCwd`, so the
+  id-less read is the same folder a session would read. Holds.
+- Protocol: `sessionId` optional + `elsewhere` removed are both in `protocol.d/workflows-ux.md`; no
+  `PROTOCOL_VERSION` edit on the branch. Holds.
+- S8c leftovers: `rg "elsewhere|workflowsAbove|WorkflowsAboveHint|WORKFLOWS_ABOVE"` over non-test
+  `packages apps` → only unrelated prose hits. Holds.
+- S8a index alignment: `runProjection` maps `row.steps` 1:1 (`workflow-run-graph.ts:265`), so the
+  rail/panel `projection.steps[i]` lookups never skip a row. Holds.
+
+**How the executors behaved.** Drift was declared, not hidden (S8a's missing `@tentacle/client` dep,
+S8b's trust-check move and `dir` need, S8c's test-file grep gap); each slice shows red-first or
+mutation evidence that I could reproduce. The S7 round debt (finding 1) was declared but parked only in
+the doc. Reviewer is the same model family (Opus) as the S7/S8c executors — shared blind spots possible.
+
+*— claude-opus-5-5, 2026-11-25*
