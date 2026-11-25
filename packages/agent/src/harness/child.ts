@@ -10,7 +10,7 @@
  * → `subagentRequester` → the ONE broker.
  */
 
-import { SubagentFailure, type ToolProgressEvent } from "@tentacle/core";
+import { SubagentFailure, type ToolContext, type ToolProgressEvent } from "@tentacle/core";
 import type { AgentStopReason } from "../agent.ts";
 import type {
   AgentType,
@@ -18,6 +18,7 @@ import type {
   SubagentRunControls,
   SubagentRunOptions,
 } from "../subagent.ts";
+import { STEP_VERDICT_TOOL_NAME } from "../workflow-verdict.ts";
 import { isModelShape } from "./claude-code.ts";
 import { type HarnessPermissions, authorizeHarnessAsk } from "./permissions.ts";
 import type {
@@ -96,6 +97,22 @@ function probeOnce(adapter: HarnessAdapter, signal: AbortSignal): Promise<Harnes
   }
   return p;
 }
+
+/**
+ * D9: the result a workflow step's harness child must return (`--json-schema`).
+ * `step_verdict` is OUR tool, so the child cannot call it: its `structured`
+ * result is fed to the step's own verdict tool instead.
+ */
+export const HARNESS_VERDICT_SCHEMA = {
+  type: "object",
+  properties: {
+    verdict: { type: "string", enum: ["pass", "fail"] },
+    reason: { type: "string", minLength: 1 },
+    report: { type: "string" },
+  },
+  required: ["verdict", "reason"],
+  additionalProperties: false,
+} as const;
 
 const DATA_CAP = 4096;
 const WINDOW_LABEL: Readonly<Record<string, string>> = { five_hour: "5h", seven_day: "7d" };
@@ -215,6 +232,7 @@ export async function runHarnessChild(
       }
     }
 
+    const verdictTool = controls?.extraTools?.find((t) => t.name === STEP_VERDICT_TOOL_NAME);
     let run: HarnessRun;
     try {
       run = await adapter.start(
@@ -224,6 +242,9 @@ export async function runHarnessChild(
           runId,
           ...(worktree !== undefined ? { cwd: worktree.path } : {}),
           ...(model !== undefined ? { model } : {}),
+          ...(verdictTool !== undefined && adapter.caps.structuredResult
+            ? { jsonSchema: HARNESS_VERDICT_SCHEMA }
+            : {}),
         },
         own.signal,
       );
@@ -391,7 +412,15 @@ export async function runHarnessChild(
         end.status === "rejected" ? `rejected by ${adapter.id}: ${why}` : `${name}: ${why}${quota}`,
       );
     } else {
-      if (end.text) report += end.text;
+      const verdict = verdictFrom(end.structured);
+      if (verdictTool !== undefined && verdict !== undefined) {
+        // The step's own verdict tool records it (the driver reads it unchanged).
+        await verdictTool.execute({ verdict: verdict.verdict, reason: verdict.reason }, {
+          sessionId: controls?.sessionId ?? "",
+          signal: own.signal,
+        } as ToolContext);
+        report += verdict.report ?? end.text ?? "";
+      } else if (end.text) report += end.text;
       stopReason =
         budgetHit || end.status === "budget"
           ? "max_token_budget"
@@ -421,6 +450,21 @@ export async function runHarnessChild(
     outer?.removeEventListener("abort", onOuterAbort);
     await closeWorktree().catch(() => {});
   }
+}
+
+function verdictFrom(
+  value: unknown,
+): { verdict: "pass" | "fail"; reason: string; report?: string } | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if ((v.verdict !== "pass" && v.verdict !== "fail") || typeof v.reason !== "string") {
+    return undefined;
+  }
+  return {
+    verdict: v.verdict,
+    reason: v.reason,
+    ...(typeof v.report === "string" && v.report !== "" ? { report: v.report } : {}),
+  };
 }
 
 function unreadNote(n: number): string {

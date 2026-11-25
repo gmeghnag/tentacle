@@ -18,6 +18,7 @@ import { type HarnessProc, type Spawner, createProcessAdapter } from "../src/har
 import type { HarnessAdapter } from "../src/harness/types.ts";
 import type { SnapshotWorktree, WorktreeOutcome } from "../src/harness/worktree.ts";
 import { type AgentType, createSubagentRunner } from "../src/subagent.ts";
+import { createStepVerdict } from "../src/workflow-verdict.ts";
 
 const enc = new TextEncoder();
 const SID = "11111111-2222-3333-4444-555555555555";
@@ -411,5 +412,68 @@ describe("a claude child on the sub-agent seam", () => {
     });
     const err = await failureOf(runner.run(OPTS));
     expect(err.message).toContain("no harness claude-code is available here");
+  });
+});
+
+describe("D9: a workflow step's verdict from --json-schema", () => {
+  const structuredResult = (structured: unknown) => ({ ...RESULT, structured_output: structured });
+  const run = async (structured: unknown) => {
+    const { spawner, spawned } = fakeSpawner((line, ctl) => {
+      if (line.type === "user") ctl.emit(INIT, TOOL_USE, structuredResult(structured));
+    });
+    const verdict = createStepVerdict();
+    const result = await build(spawner, fakeWorktrees().wt).run(
+      { ...OPTS, model: "opus" },
+      { extraTools: [verdict.tool] },
+    );
+    return { result, verdict: verdict.verdict(), spawned };
+  };
+  const argvOf = (spawned: Spawned[]): readonly string[] =>
+    spawned.find((s) => s.cmd[1] !== "--version")?.cmd ?? [];
+
+  test("structured_output → the step verdict: pass", async () => {
+    const { result, verdict, spawned } = await run({
+      verdict: "pass",
+      reason: "all good",
+      report: "checked it",
+    });
+    expect(verdict).toEqual({ verdict: "pass", reason: "all good" });
+    expect(result.report).toContain("checked it");
+    const cmd = argvOf(spawned);
+    const at = cmd.indexOf("--json-schema");
+    expect(at).toBeGreaterThan(-1);
+    expect(JSON.parse(cmd[at + 1] ?? "{}").required).toEqual(["verdict", "reason"]);
+    expect(cmd[cmd.indexOf("--model") + 1]).toBe("opus");
+  });
+
+  test("structured_output → the step verdict: fail", async () => {
+    const { verdict } = await run({ verdict: "fail", reason: "tests red" });
+    expect(verdict).toEqual({ verdict: "fail", reason: "tests red" });
+  });
+
+  test("a structured result that is not a verdict records none", async () => {
+    expect((await run({ verdict: "maybe", reason: "x" })).verdict).toBeUndefined();
+    expect((await run("nope")).verdict).toBeUndefined();
+  });
+
+  test("a call without step_verdict gets no --json-schema", async () => {
+    const { spawner, spawned } = fakeSpawner(happy);
+    await build(spawner, fakeWorktrees().wt).run(OPTS);
+    expect(argvOf(spawned)).not.toContain("--json-schema");
+  });
+
+  test("a step token cap hit → max_token_budget and no verdict", async () => {
+    const { spawner } = fakeSpawner((line, ctl) => {
+      if (line.type === "user") ctl.emit(INIT, TOOL_USE);
+      if (line.type === "control_request")
+        ctl.emit({ ...RESULT, is_error: true, terminal_reason: "aborted_streaming" });
+    });
+    const verdict = createStepVerdict();
+    const result = await build(spawner, fakeWorktrees().wt).run(OPTS, {
+      maxTokens: 100,
+      extraTools: [verdict.tool],
+    });
+    expect(result.stopReason).toBe("max_token_budget");
+    expect(verdict.verdict()).toBeUndefined();
   });
 });

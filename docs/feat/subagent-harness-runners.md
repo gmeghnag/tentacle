@@ -683,6 +683,17 @@ from the phone. 7. Usage visibility. 8. Where it runs. 9. Remote
 - No protocol/schema change (no `protocol.d/` note, `protocol.json` untouched). Full gate left to the orchestrator's script.
 - **Unverified:** a real `claude` run end-to-end through the TUI/phone prompt. To check it: run `agent_task{subagent_type:"claude", prompt:"create x.txt and run ls"}` in a git repo with auto mode off. The `Write` should pass, and `ls` should prompt «Run a shell command» attributed to the `claude` sub-agent.
 
+*— claude-sonnet-5-5, 2026-11-25 — slice shr-6-workflow only*
+
+- **Load-bearing check:** the driver reads `verdict.verdict()` of the tool it created (`workflow-driver.ts:1697/1724`) and passes it as `controls.extraTools`; so executing that tool once from the child is enough. Confirmed by running the child against a real `createStepVerdict()`.
+- `harness/child.ts`: `HARNESS_VERDICT_SCHEMA` (`verdict` pass|fail, `reason`, optional `report`). When `controls.extraTools` has `step_verdict` and the adapter has `caps.structuredResult`, the run gets `jsonSchema`. On `end` the `structured` result is validated (`verdictFrom`) and fed to the tool's `execute`; the report is `structured.report`, else the end text. A structured result that is not a verdict records nothing (the driver's existing «no verdict» fail). A token-cap hit stays `max_token_budget` (no verdict, driver's existing path).
+- `core/workflow-spec.ts`: new `WorkflowContext.harnessTypes`; a step of such a type skips the `models`-name check (the free model is shape-checked when it runs, by `child.ts`/the codec). `workflow-driver.ts` context type widened; `cli/wiring.ts` passes `harnessTypeNames`.
+- Tests: `subagent-harness.test.ts` +5 (pass, fail, non-verdict structured result, no `--json-schema` without `step_verdict`, step token cap → `max_token_budget` with no verdict); `workflow-spec.test.ts` +1 (free model refused without `harnessTypes`, accepted with). 115 pass across those + `harness-wiring` + `workflow-driver`. Biome clean on the 6 touched files; no tsc errors in them.
+- **Mutations (each → red, then restored, `diff -q` identical):** no `jsonSchema` passed → "pass" test fails (1); verdict never fed to the tool → 2 fail (pass, fail); spec ignores `harnessTypes` → the spec test fails (1).
+- **Order drift:** code before tests (not red first); non-vacuity by mutation.
+- No protocol change; changelog sentence added to the existing fragment `changelog.d/subagent-harness-runners.added.md`.
+- **Unverified:** a real `claude` run with `--json-schema` in a workflow (sandbox refuses spawning `claude`). Check: a workflow step `agent: {type: claude, model: opus}` in a git repo.
+
 ## Review
 
 *— pending*

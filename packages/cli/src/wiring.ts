@@ -958,6 +958,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         context: () => ({
           models: Object.keys(config.models),
           agentTypes: types.map((t) => t.name),
+          harnessTypes: harnessTypeNames,
         }),
         approvals: workflowApprovals(config.configDir, config.cwd),
         request: (req, opts) => permissions.request(req, opts),
