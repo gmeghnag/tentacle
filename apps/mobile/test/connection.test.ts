@@ -198,13 +198,13 @@ const open = (d: Daemon, log?: ReturnType<typeof createAppLog>): ReturnType<type
 /**
  * A loopback `ws://…/e2e` URL nothing listens on: connecting is REFUSED at once,
  * which is the "this path is not there" failure (`opened: false`) a diagnosis is
- * fed. Bound and released, so the port is real but closed (no guess at a number).
+ * fed. Port 1 stands in: port-0 allocation never hands it out, so no concurrent
+ * shard can own it (a probed-then-released ephemeral port CAN be taken by another
+ * worker before the dial — a port-0 dual-stack bind is stealable via an explicit
+ * `127.0.0.1:P` bind, AGENTS §9).
  */
 function freeLoopbackAddress(): string {
-  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("") });
-  const port = probe.port;
-  probe.stop(true);
-  return `ws://127.0.0.1:${port}/e2e`;
+  return "ws://127.0.0.1:1/e2e";
 }
 
 /** `expo-crypto`'s job on the phone; Bun's CSPRNG stands in here. */
