@@ -369,6 +369,16 @@ asked first: `--a2a-asks both` lets the caller answer tool asks too (file
 approvals stay owner-only), and `--a2a-workflows` lets it start workflow runs
 (off by default). Design: [`docs/feat/a2a.md`](./docs/feat/a2a.md).
 
+**A2A client: hand a sub-task to another agent.** Configure a remote agent
+under `harnesses.<name>` with `"adapter": "a2a"`, its `card` URL and an optional
+`tokenCommand` (a command that prints the token, never the token itself); the
+model can then start it as the sub-agent type `a2a:<name>`. Each send asks you
+first, only the task text leaves the machine, and the report comes back framed
+as remote data. A question from the remote agent reaches you as a prompt (and a
+phone notification), and cancelling the call sends `CancelTask`. Two tentacles
+work end to end this way (`serve --a2a-token` on one side). Design:
+[`docs/feat/a2a-client.md`](./docs/feat/a2a-client.md).
+
 **MCP server: Claude Code and other MCP clients can call a `serve`.** With
 `--mcp-token T` (or `--mcp-token-command CMD`) the daemon also answers
 `POST /mcp` (Streamable HTTP) behind `Authorization: Bearer <MCP token>`, a

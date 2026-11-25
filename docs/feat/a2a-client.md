@@ -1435,3 +1435,36 @@ step). Facts for the re-run:
   real `fetch` + DNS on a public card (tests inject both).
 - **Gate:** not run here (the orchestrator's script runs it). No protocol
   schema change; `protocol.json` untouched.
+
+### a2c-8-e2e — DONE
+
+*— claude-sonnet-5-5, 2026-11-25*
+
+- **Load-bearing check (re-run):** the seam carries a remote agent end to end
+  — now proved against a REAL `serve`, not only the SDK fake: the four e2e
+  tests below pass.
+- **Added** `packages/cli/test/a2a-client-e2e.test.ts` (4 tests; real
+  `startDaemon` on loopback port 0 with an A2A token, real `fetch`, laptop =
+  `buildAgent` + the one `PermissionBroker`): (1) `agent_task` → framed report
+  + footer `task <id>`, consent asked first, one serve turn; (2) a wrong token
+  → `isError`, neither token in the text; (3) `--a2a-asks both` + a `shell`
+  call → INPUT_REQUIRED → the broker gets a `question`, the answer reaches the
+  serve model on the same task, report `done`; asks are `tool, question,
+  tool` (consent to send, the question, consent for the reply — C3);
+  (4) aborting the call → `CancelTask` → serve task `CANCELED`, call ends
+  «cancelled». README: «A2A client» paragraph. No production code changed;
+  the existing fragment `changelog.d/a2a-client.added.md` covers it (none added).
+- **Red before green:** the file was first red on a wrong expectation (asks
+  `tool, question` vs the real `tool, question, tool`); corrected to the C3
+  behaviour, not to the code. All other tests passed on first run (the code
+  was already built by a2c-1…7); non-vacuity is shown by mutations.
+- **Mutations** (applied by hand, reverted, `git status` clean after):
+  | mutation | result |
+  |---|---|
+  | M1 report header without the frame (`a2a-map.ts`) | red — 1 fail |
+  | M2 token never added (`a2a.ts` fetch) | red — 3 fail |
+  | M3 question raised as kind `tool` (`permissions.ts`) | red — 1 fail |
+  | M4 no `cancelTask` call on abort (`a2a.ts`) | red — 1 fail |
+- **Unverified:** the real TUI / phone sheet rendering of the question over
+  this path; Bun DNS on a public card (loopback only here). Gate not run
+  (script runs it); no protocol change.
