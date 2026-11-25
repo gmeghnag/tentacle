@@ -1309,17 +1309,36 @@ export class RemoteSession implements SessionStreamListener {
    * false and auto-accept silently stops answering this run's asks.
    *
    * A client whose daemon is not trusted to run workflows (a pod, `run`/
-   * `attach`) refuses locally and sends nothing (AGENTS §7). `stop` is allowed
-   * either way below: it removes work, never creates it — but a pod's session
-   * has no run of the laptop's to stop, so it is refused with the same reason.
+   * `attach`) refuses locally and sends nothing (AGENTS §7) — checked BEFORE any
+   * open, so a pod's session is never even created for work it may not do.
+   *
+   * `start` is the ONE action that works before the session exists
+   * (docs/fix/workflows-ux.md S8b, owner Q1 = A): it OPENS first (`ensureOpen`,
+   * the same ONE open a first send uses) and then starts, so `/workflow run` in
+   * the panel works before the first message instead of answering «this session
+   * is not open yet».
    */
   async workflow(params: WorkflowAction): Promise<WorkflowResult | { ok: false; reason: string }> {
-    const sessionId = this.id;
-    if (sessionId === null) {
-      return { ok: false, reason: "this session is not open yet" };
-    }
     if (!this.daemonWakes) {
+      // Checked BEFORE any open: a pod's session must not even be created for a
+      // start it can never be allowed to run (AGENTS §7 — nothing is sent).
       return { ok: false, reason: WORKFLOW_UNTRUSTED_DAEMON };
+    }
+    let sessionId = this.id;
+    if (sessionId === null) {
+      if (params.action !== "start") {
+        // `stop`/`resume`/`rerun_step` name a run of a session that has none yet.
+        return { ok: false, reason: "this session is not open yet" };
+      }
+      // A start from the panel OPENS the session first (docs/fix/workflows-ux.md
+      // S8b, owner Q1 = A): the same ONE open a first send uses, so a run started
+      // here leaves the session exactly as that message would have. A failed
+      // open rejects (`context`'s rule: no figure, no guess).
+      await this.ensureOpen();
+      sessionId = this.id;
+      if (sessionId === null) {
+        return { ok: false, reason: "this session is not open yet" };
+      }
     }
     if (params.action === "stop") {
       return this.client.workflow(sessionId, { sessionId, action: "stop", runId: params.runId });
@@ -1329,22 +1348,38 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * Open this session now, so a pre-open caller can act on it (a `/workflow run`
+   * from the panel, docs/fix/workflows-ux.md S8b): the attach's own `open` and the
+   * first-send's `createOrAttach` — the ONE session path (AGENTS §7), never a
+   * second one. Each no-ops in the shape the other owns, so both are safe to call;
+   * a session that still has no id afterwards was not opened (nothing created).
+   */
+  private async ensureOpen(): Promise<void> {
+    await this.open();
+    await this.createOrAttach();
+  }
+
+  /**
    * `session/workflow_catalogue` (docs/feat/workflows-ui.md slice 5a / D6): the
    * project's workflows, for a start screen. Three answers, kept distinct on
    * purpose: the rows; `{unsupported:true}` (an older daemon — "update tentacle");
    * and `{unavailable}` (this session cannot run workflows at all — a tunnelled
    * pod session), never an empty list that looks like an empty folder. The trust
    * bit refuses locally, like `workflow()`, and sends nothing (§7).
+   *
+   * Before the first message there is no daemon-side session to ask about, so the
+   * read goes WITHOUT an id — the `skills`/`tools` shape (docs/fix/workflows-ux.md
+   * S8b): the same project's catalogue a session created now would read. While an
+   * attach is still opening, it waits for the id, as `skills` does.
    */
   async workflowCatalogue(): Promise<WorkflowCatalogueResult | { unsupported: true }> {
-    const sessionId = this.id;
-    if (sessionId === null) {
-      return { workflows: [], dir: "", unavailable: "this session is not open yet" };
-    }
+    const sessionId = this.id ?? (this.opening ? await this.opening : null);
     if (!this.daemonWakes) {
       return { workflows: [], dir: "", unavailable: WORKFLOW_UNTRUSTED_DAEMON };
     }
-    return this.client.workflowCatalogue(sessionId, { sessionId });
+    return sessionId === null
+      ? this.client.workflowCatalogue(undefined, {})
+      : this.client.workflowCatalogue(sessionId, { sessionId });
   }
 
   /**

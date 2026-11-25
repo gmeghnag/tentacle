@@ -32,18 +32,14 @@ appId: so.tentacle.app
     visible:
       id: "floating-activity"
     timeout: 30000
-# The hub entry is `workflows` and it lives in More, not on the fan: the fan is
-# `FAN_MAX` (6) and this item is 9th in CANONICAL, carrying no count badge with
-# zero runs (docs/feat/mobile-hub-commands.md:22 pins the idle fan, "… · More";
-# docs/feat/workflows-ui.md:1754 puts Workflows after Scheduled, "the idle fan O1
-# is unchanged"). `_hub-fan` waits for a disc the fan cannot hold — the two device
-# failures of this flow.
+# The hub entry is `workflows` and it holds the fan's FIRST slot (Attach is gone —
+# docs/fix/workflows-ux.md D6), so `_hub-fan` finds its disc; the tap is the disc's.
 - runFlow:
-    file: _hub-more.yaml
+    file: _hub-fan.yaml
     env:
       ITEM: "workflows"
 - tapOn:
-    id: "hub-menu-workflows"
+    id: "hub-item-workflows"
 # E1: no workflow yet — one line, one action.
 - extendedWaitUntil:
     visible:

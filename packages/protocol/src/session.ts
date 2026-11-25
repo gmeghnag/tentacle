@@ -804,6 +804,25 @@ export type AgentKillResult = z.infer<typeof AgentKillResultSchema>;
 // client flattens for display. States are free words (a newer daemon's state is
 // shown as is), never an enum.
 
+/** How many finished executions a run row's `history` keeps (the LATEST ones). */
+export const WORKFLOW_HISTORY_MAX = 64;
+
+/**
+ * One finished execution of a step, as the run row's `history` carries it
+ * (docs/fix/workflows-ux.md D1): the run as it RAN, so a client draws the
+ * loops/branches from evidence instead of guessing them from counters.
+ */
+export const WorkflowHistoryRowSchema = z.object({
+  /** The step id this execution ran. */
+  step: line(64),
+  attempt: z.number().int().nonnegative(),
+  round: z.number().int().nonnegative(),
+  /** Its state when it ended: `ok` | `error` | `stopped` today; free word. */
+  state: line(32),
+  durationMs: z.number().int().nonnegative().optional(),
+});
+export type WorkflowHistoryRow = z.infer<typeof WorkflowHistoryRowSchema>;
+
 /** One step of a run, as the daemon reports it. */
 export const WorkflowStepRowSchema = z.object({
   id: line(64),
@@ -823,6 +842,26 @@ export const WorkflowStepRowSchema = z.object({
   /** The running step's last action (a tool label, a output line). */
   live: z.string().max(200).optional(),
   durationMs: z.number().int().nonnegative().optional(),
+  /**
+   * The RESOLVED pass target (`passTarget` over the run's own frozen spec):
+   * the step's `next`, else the one after it in the file. `null` = the run ends
+   * after it. From the RUN's snapshot, never the file as it is now (P2).
+   */
+  next: line(64).nullable(),
+  /**
+   * Its `on_fail`, with the counter as it stands: `goto` = where a failure
+   * jumps, `max` = how many times that edge may be taken, `taken` =
+   * `state.counters[edgeKey(id, goto)]`. `null` = a failure stops the run.
+   */
+  onFail: z
+    .object({
+      goto: line(64),
+      max: z.number().int().min(1).max(10),
+      taken: z.number().int().nonnegative(),
+    })
+    .nullable(),
+  /** Re-runs of the same step after a `fail` (`0..5`). */
+  retry: z.number().int().min(0).max(5),
 });
 export type WorkflowStepRow = z.infer<typeof WorkflowStepRowSchema>;
 
@@ -844,6 +883,15 @@ export const WorkflowRowSchema = z.object({
   budget: z.number().int().positive().optional(),
   startedAt: z.number().int().nonnegative(),
   endedAt: z.number().int().nonnegative().optional(),
+  /**
+   * Every FINISHED execution of this run, in order — the LATEST
+   * `WORKFLOW_HISTORY_MAX` of them (docs/fix/workflows-ux.md D1). The current
+   * step is not in it: its state is on the step row. In memory only; nothing
+   * persisted changes.
+   */
+  history: z.array(WorkflowHistoryRowSchema).max(WORKFLOW_HISTORY_MAX),
+  /** How many earlier executions the cap dropped, so a client can say so. */
+  historyDropped: z.number().int().nonnegative(),
   steps: z.array(WorkflowStepRowSchema).max(64),
 });
 export type WorkflowRow = z.infer<typeof WorkflowRowSchema>;
@@ -1036,9 +1084,9 @@ export type WorkflowDefRow = z.infer<typeof WorkflowDefRowSchema>;
 
 /**
  * The catalogue of one project. `dir` is the ABSOLUTE folder read — a user in
- * the wrong folder sees where tentacle looks. `elsewhere` is DISPLAY ONLY (D7
- * v5): the nearest ancestor folder holding workflows, given only when this one
- * has none. Nothing it names can be loaded, hashed, approved or started.
+ * the wrong folder sees where tentacle looks. Nothing looks ABOVE that folder
+ * (docs/fix/workflows-ux.md S8c, owner Q2): the project's workflows are the
+ * ones under its own root.
  */
 export const WorkflowCatalogueResultSchema = z.object({
   workflows: z.array(WorkflowDefRowSchema).max(64),
@@ -1050,14 +1098,18 @@ export const WorkflowCatalogueResultSchema = z.object({
   gitIgnored: z.boolean().optional(),
   /** The absolute folder the catalogue read. */
   dir: z.string().min(1).max(1024),
-  /** Present ONLY when `dir` listed no workflow: where they were found higher up. */
-  elsewhere: z
-    .object({ dir: z.string().min(1).max(1024), count: z.number().int().nonnegative() })
-    .optional(),
 });
 export type WorkflowCatalogueResult = z.infer<typeof WorkflowCatalogueResultSchema>;
 
-export const WorkflowCatalogueParamsSchema = z.object({ sessionId: SessionIdSchema });
+export const WorkflowCatalogueParamsSchema = z.object({
+  /**
+   * A session this connection opened. Absent → the catalogue a session the
+   * daemon creates NOW would read (a client opens its session lazily, at the
+   * first prompt: the `/workflow` panel is asked before it exists, exactly like
+   * `session/skills`/`session/tools`, docs/fix/workflows-ux.md S8b).
+   */
+  sessionId: SessionIdSchema.optional(),
+});
 export type WorkflowCatalogueParams = z.infer<typeof WorkflowCatalogueParamsSchema>;
 
 // --- session/workflow_source + session/workflow_save: the workflow EDITOR ---

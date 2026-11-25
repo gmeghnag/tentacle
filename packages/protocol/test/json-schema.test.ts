@@ -343,11 +343,10 @@ const FIXTURES: Record<string, Json[]> = {
         },
       ],
     },
-    // No workflow in the cwd's folder: the display-only hint, nothing loadable.
+    // No workflow in the cwd's folder: an empty catalogue, nothing loadable.
     {
       dir: "/proj/apps/mobile/.tentacle/workflows",
       workflows: [],
-      elsewhere: { dir: "/proj/.tentacle/workflows", count: 3 },
       gitIgnored: false,
     },
     // A session that cannot run workflows at all, and a folder over the walk's cap.
@@ -1099,10 +1098,16 @@ describe("event classes and the unknown-event catch-all", () => {
 });
 
 describe("wire hygiene — optional fields are omitted, never null", () => {
-  test("null appears only where it carries meaning (exitCode, JSON-RPC error id)", () => {
+  test("null appears only where it carries meaning (exitCode, JSON-RPC error id, a run's edges)", () => {
     expect(nullSites(buildProtocolJsonSchema())).toEqual([
       "#/$defs/BackgroundExit/properties/exitCode/anyOf/1",
       "#/$defs/JsonRpcErrorResponse/properties/id/anyOf/1",
+      // docs/fix/workflows-ux.md D1: both are REQUIRED (an older daemon must fail
+      // at `initialize`, not render a graph with no edges), and "no edge" is a
+      // fact a client must be told — absent would be indistinguishable from a
+      // daemon that dropped the field.
+      "#/$defs/WorkflowStepRow/properties/next/anyOf/1",
+      "#/$defs/WorkflowStepRow/properties/onFail/anyOf/1",
     ]);
   });
 

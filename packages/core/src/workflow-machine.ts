@@ -133,8 +133,13 @@ export function edgeKey(from: string, to: string): string {
   return `${from}->${to}`;
 }
 
-/** The step a `pass` falls through to: `next`, else the next one in the file. */
-function passTarget(spec: WorkflowSpec, step: WorkflowStep): string | undefined {
+/** The step a `pass` falls through to: `next`, else the next one in the file.
+ *
+ * Exported for the run row (docs/fix/workflows-ux.md D1): the driver reports the
+ * RESOLVED pass target per step, so a client never re-derives it (and never
+ * from the file as it is now, which may differ from the run's snapshot).
+ */
+export function passTarget(spec: WorkflowSpec, step: WorkflowStep): string | undefined {
   if (step.next !== undefined) {
     return step.next;
   }

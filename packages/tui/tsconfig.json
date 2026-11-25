@@ -7,6 +7,7 @@
     "baseUrl": ".",
     "paths": {
       "@tentacle/agent": ["../agent/src/index.ts"],
+      "@tentacle/client": ["../client/src/index.ts"],
       "@tentacle/core": ["../core/src/index.ts"]
     }
   },

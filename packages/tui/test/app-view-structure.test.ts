@@ -328,9 +328,11 @@ describe("S10: the view-model and the tree leave App.tsx", () => {
     // The workflow rail (docs/feat/workflows-ui.md D3) is one of those parts: it
     // paints ABOVE the queued/slot block, so its reserved rows sit between the
     // spacer and the running rows — exactly as `activeRows`/`dockTop` count them.
+    // The at-rest catalogue line's row is GONE (docs/fix/workflows-ux.md S1): the
+    // rail is now the only workflow part of that sum.
     expect(layout).toContain("const statusRowY =");
     expect(layout).toMatch(
-      /const statusRowY =\s*viewport \+ 1 \+ workflowHeight \+ catalogueHeight \+ runningRows \+ dockHeight \+ inputBoxRows \+ 1;/,
+      /const statusRowY =\s*viewport \+ 1 \+ workflowHeight \+ runningRows \+ dockHeight \+ inputBoxRows \+ 1;/,
     );
     // …and the view never re-derives it.
     expect(code(view)).not.toContain("statusRowY");

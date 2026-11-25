@@ -5,6 +5,8 @@
  * sheet's ONE path with that ask's `requestId`, and stop/resume/rerun as notices.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { WorkflowAction } from "@tentacle/client";
 import type { WorkflowResult, WorkflowRow, WorkflowStepRow } from "@tentacle/protocol";
 import type { SheetState } from "../src/permission-sheet.ts";
@@ -24,6 +26,9 @@ const step = (id: string, state: string, over: Partial<WorkflowStepRow> = {}): W
   state,
   attempt: 0,
   round: 0,
+  next: null,
+  onFail: null,
+  retry: 0,
   ...over,
 });
 
@@ -35,6 +40,8 @@ const run = (over: Partial<WorkflowRow> = {}): WorkflowRow => ({
   state: "needs-approval",
   tokens: 0,
   startedAt: 1_000,
+  history: [],
+  historyDropped: 0,
   steps: [step("build", "ok"), step("merge", "needs-approval", { kind: "approve" })],
   ...over,
 });
@@ -200,9 +207,20 @@ describe("the run, from the session's own feed", () => {
   test("the view mode toggles and is remembered through the injected store", async () => {
     const h = harness();
     expect(h.controller.state().mode).toBe("graph");
-    h.controller.setMode("cards");
-    expect(h.controller.state().mode).toBe("cards");
-    expect(h.mode).toBe("cards");
+    h.controller.setMode("list");
+    expect(h.controller.state().mode).toBe("list");
+    expect(h.mode).toBe("list");
+  });
+
+  test("the two views are graph ⇄ list — `cards` is not a mode any more (S7/D5)", async () => {
+    // `RunMode` names what the screen DRAWS: the 2A cards went with the slice that
+    // replaced them, and a mode still called `cards` would outlive its screen.
+    const src = readFileSync(
+      join(import.meta.dir, "..", "src", "workflow-run-controller.ts"),
+      "utf8",
+    );
+    expect(src).toContain('export type RunMode = "graph" | "list"');
+    expect(src).not.toContain('"cards"');
   });
 });
 

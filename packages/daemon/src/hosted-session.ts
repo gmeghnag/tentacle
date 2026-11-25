@@ -50,6 +50,7 @@ import type {
   Session,
   SessionCapabilities,
   SessionGrants,
+  WorkflowCatalogue,
   WorkflowDriver,
   WorkflowSaveFileRow,
 } from "@tentacle/agent";
@@ -753,7 +754,7 @@ type DriverCatalogueRow = Awaited<ReturnType<WorkflowDriver["catalogue"]>>["work
  * description, …) becomes an `ok:false` row whose errors name the field — by
  * step id — so one file cannot fail the whole answer (review round 1 #1).
  */
-function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
+export function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
   const candidate = {
     ...row,
     ...(row.errors !== undefined ? { errors: boundedWorkflowErrors(row.errors) } : {}),
@@ -779,6 +780,42 @@ function catalogueRow(row: DriverCatalogueRow): WorkflowDefRow {
     errors: boundedWorkflowErrors(problems),
   };
 }
+
+/**
+ * The ONE projection of a driver's catalogue onto the wire, shared by a hosted
+ * session's read and the daemon-wide pre-open read (`SessionHost.
+ * newSessionWorkflowCatalogue`): two paths answer the same project's files, so
+ * they must word a row, cap it and refuse it identically (docs/fix/workflows-ux.md
+ * S8b). Each row is judged ON ITS OWN (review round 1 #1): a valid workflow the
+ * wire cannot carry becomes one `ok:false` row naming why — never a failed whole
+ * answer that hides every other workflow.
+ */
+export function workflowCatalogueResult(catalogue: WorkflowCatalogue): WorkflowCatalogueResult {
+  const parsed = WorkflowCatalogueResultSchema.safeParse({
+    ...catalogue,
+    workflows: catalogue.workflows.map(catalogueRow),
+  });
+  if (!parsed.success) {
+    return {
+      workflows: [],
+      dir: catalogue.dir,
+      unavailable: oneLineText(`the catalogue could not be read: ${parsed.error.message}`).slice(
+        0,
+        200,
+      ),
+    };
+  }
+  return parsed.data;
+}
+
+/**
+ * The catalogue's answer when there is no workflow seam AT ALL: no session may
+ * run workflows here (a pod's daemon), or the daemon's factory offered no driver
+ * (`SessionHost.newSessionWorkflowCatalogue`). It must still parse as the wire's
+ * result, so `dir` is a placeholder the callers REPLACE with the daemon's own
+ * `defaultCwd` — a catalogue with no folder is not a valid answer.
+ */
+export const WORKFLOWS_UNAVAILABLE = "workflows run only on a laptop or serve session";
 
 /**
  * One file a save wrote (or would), in the WIRE's shape (docs/feat/
@@ -2965,28 +3002,10 @@ export class HostedSession {
       return {
         workflows: [],
         dir: "",
-        unavailable: "workflows run only on a laptop or serve session",
+        unavailable: WORKFLOWS_UNAVAILABLE,
       };
     }
-    const catalogue = await driver.catalogue();
-    // Each row is judged ON ITS OWN (review round 1 #1): a valid workflow the
-    // wire cannot carry becomes one `ok:false` row naming why — never a failed
-    // whole answer that hides every other workflow.
-    const parsed = WorkflowCatalogueResultSchema.safeParse({
-      ...catalogue,
-      workflows: catalogue.workflows.map(catalogueRow),
-    });
-    if (!parsed.success) {
-      return {
-        workflows: [],
-        dir: catalogue.dir,
-        unavailable: oneLineText(`the catalogue could not be read: ${parsed.error.message}`).slice(
-          0,
-          200,
-        ),
-      };
-    }
-    return parsed.data;
+    return workflowCatalogueResult(await driver.catalogue());
   }
 
   /**
