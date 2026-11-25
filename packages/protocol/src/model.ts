@@ -17,6 +17,54 @@ export const ModelToolCallSchema = z.object({
   arguments: z.string(),
 });
 
+// --- the model's own reasoning (docs/fix/reasoning-echo.md D1/D8) -----------
+// Mirrors core's `ReasoningRecord`. Defined HERE (not in session.ts) because
+// both the pod model wire below and `chatMessageShape` (session.ts, which
+// imports this file) carry it. The bounds guard against malformed or hostile
+// input; they are NOT a cap (owner Q3 A): every carrier wraps the record
+// FAIL-SOFT (`.optional().catch(undefined)`), so a value over a bound is
+// dropped WHOLE — never cut — and the critical `message` entry still loads.
+
+/** Bound on one reasoning text / redacted blob / signature (chars). */
+export const REASONING_TEXT_MAX = 1024 * 1024;
+/** Bound on the reasoning blocks of one Anthropic message. */
+export const REASONING_BLOCKS_MAX = 64;
+
+/** One Anthropic reasoning block, verbatim. A `thinking` block is stored only when signed. */
+export const AnthropicReasoningBlockSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("thinking"),
+    // `display: "omitted"` sends an EMPTY thinking with its signature: kept.
+    thinking: z.string().max(REASONING_TEXT_MAX),
+    signature: z.string().min(1).max(REASONING_TEXT_MAX),
+  }),
+  z.object({
+    type: z.literal("redacted_thinking"),
+    data: z.string().min(1).max(REASONING_TEXT_MAX),
+  }),
+]);
+
+/** A reasoning record's body, in its provider's own format. */
+export const ReasoningBodySchema = z.discriminatedUnion("format", [
+  z.object({
+    format: z.literal("openai"),
+    /** The field the text arrived in, sent back in the same one. */
+    field: z.enum(["reasoning_content", "reasoning"]),
+    text: z.string().min(1).max(REASONING_TEXT_MAX),
+  }),
+  z.object({
+    format: z.literal("anthropic"),
+    blocks: z.array(AnthropicReasoningBlockSchema).min(1).max(REASONING_BLOCKS_MAX),
+  }),
+]);
+
+/** An assistant message's reasoning; `source` is the producing provider's id (D5). */
+export const ReasoningRecordSchema = z.object({
+  source: z.string().min(1).max(256),
+  body: ReasoningBodySchema,
+});
+export type WireReasoningRecord = z.infer<typeof ReasoningRecordSchema>;
+
 export const WireChatMessageSchema = z.object({
   role: z.enum(["system", "user", "assistant", "tool"]),
   content: z.string(),
@@ -24,6 +72,13 @@ export const WireChatMessageSchema = z.object({
   toolCallId: z.string().optional(),
   /** User messages only; refs, never bytes (docs/feat/attachments-core.md). */
   attachments: AttachmentsSchema.optional(),
+  /**
+   * Assistant messages only: the model's own reasoning, for the laptop's
+   * provider to echo (docs/fix/reasoning-echo.md P3). Optional and FAIL-SOFT:
+   * an older laptop strips it, a malformed one is dropped — no echo, never a
+   * failed turn (AGENTS §7: additive, no `protocol.d` note).
+   */
+  reasoning: ReasoningRecordSchema.optional().catch(undefined),
 });
 
 export const WireToolDefinitionSchema = z.object({
@@ -76,6 +131,12 @@ export const WireStreamEventSchema = z.discriminatedUnion("type", [
     type: z.literal("done"),
     usage: WireUsageSchema.optional(),
     stopReason: WireStopReasonSchema.optional(),
+    /**
+     * The laptop provider's reasoning record for this reply, for the POD's
+     * loop to store (docs/fix/reasoning-echo.md D2/P3). Optional and FAIL-SOFT,
+     * like the request's field: dropped means no echo, never a failed turn.
+     */
+    reasoning: ReasoningRecordSchema.optional().catch(undefined),
   }),
 ]);
 export type WireStreamEvent = z.infer<typeof WireStreamEventSchema>;

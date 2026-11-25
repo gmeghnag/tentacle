@@ -57,6 +57,20 @@ export class HeuristicTokenCounter implements TokenCounter {
           total += this.countText(call.name) + this.countText(call.arguments);
         }
       }
+      // The model's own reasoning is echoed on every request (docs/fix/reasoning-echo.md
+      // D7): counted, so prune and compaction fire on the real size. Anthropic's
+      // signature is opaque transport, not prompt text: not counted.
+      total += this.countReasoning(message.reasoning);
+    }
+    return total;
+  }
+
+  private countReasoning(record: ChatMessage["reasoning"]): number {
+    if (!record) return 0;
+    if (record.body.format === "openai") return this.countText(record.body.text);
+    let total = 0;
+    for (const block of record.body.blocks) {
+      total += this.countText(block.type === "thinking" ? block.thinking : block.data);
     }
     return total;
   }
