@@ -99,6 +99,7 @@ import {
   modeUsesModel,
   parseArgs,
   parseServeLimits,
+  resolveA2AToken,
   resolveRunPrompt,
   resolveTls,
   resolveToken,
@@ -155,6 +156,7 @@ import {
   runStem,
 } from "./run-state.ts";
 import { localAutoAccept, styleInfo } from "./run-ui.ts";
+import { type ServeA2AOptions, describeA2A, parseA2AAsks } from "./serve-a2a.ts";
 import { serveModelNotice } from "./serve-model-notice.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { autoAcceptOf, routingAutoAccept, seedAutoAcceptOf } from "./session-auto-accept.ts";
@@ -421,6 +423,12 @@ Remote control:
                       [--session-ttl 24h|never] [--session-admin-cap DUR] [--max-sessions 64]
                       [--max-detached-sessions 16] [--ws-idle-timeout 60s]
                       [--push-grace 30]
+                      [--a2a-token T|--a2a-token-command CMD [--a2a-asks owner|both]
+                       [--a2a-workflows]]
+  --a2a-token turns on A2A (POST /a2a + the public /.well-known/agent-card.json) with
+  its OWN bearer token, never --token. --a2a-asks both lets the caller answer
+  its tasks' tool asks (the owner still can; file approvals stay owner-only);
+  --a2a-workflows lets it start workflow runs (default off).
   --push-grace <seconds> is how long a permission request waits for a phone
   before it is pushed to it (0 = at once; default push.graceSeconds, 30).
   With paired devices, serve dials OUT to the mobile relay (relay.tentacle.so by
@@ -1183,9 +1191,19 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     let token: string | undefined;
     let limits: ServeLimits;
+    let a2a: ServeA2AOptions | undefined;
     try {
       limits = parseServeLimits({ flags, bools });
       token = await resolveToken(flags);
+      const a2aToken = await resolveA2AToken(flags);
+      const a2aAsks = parseA2AAsks(flags.get("a2a-asks"));
+      if (a2aToken === undefined) {
+        if (flags.has("a2a-asks") || bools.has("a2a-workflows")) {
+          throw new Error("--a2a-asks / --a2a-workflows need --a2a-token or --a2a-token-command");
+        }
+      } else {
+        a2a = { token: a2aToken, asks: a2aAsks, workflows: bools.has("a2a-workflows") };
+      }
     } catch (error) {
       err(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
@@ -1211,12 +1229,18 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           ...(bools.has("no-relay") ? { noRelay: true } : {}),
         },
         ...(token ? { token } : {}),
+        ...(a2a ? { a2a } : {}),
         ...(tls ? { tls } : {}),
         onAudit: (line) => err(`[daemon] ${line}\n`),
         onError: (error) => err(`[daemon] error: ${error.message}\n`),
         onNotice: (line) => err(`[daemon] ${line}\n`),
       });
       err(`daemon listening on ${server.url}\n`);
+      if (a2a) {
+        err(
+          `A2A on ${server.url.replace(/^ws/, "http").replace(/\/+$/, "")}/a2a (${describeA2A(a2a)})\n`,
+        );
+      }
       // `serve`'s own config decides its titles; no Ink here, so its log line.
       const titleNotice = titleConfigNotice(config);
       if (titleNotice) {

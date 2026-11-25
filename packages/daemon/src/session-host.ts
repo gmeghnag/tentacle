@@ -82,8 +82,11 @@ import {
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
 import { fromWireCapabilities, toSessionSkills, toSessionTools } from "./mapping.ts";
 import {
+  type ArchivedUnitsRead,
   type ClearForkCapture,
   type DaemonSessionRecord,
+  archivedUnitsOf,
+  endedUnitsAtLoad,
   reconcileOnReload,
   restoredActivity,
 } from "./persisted-session.ts";
@@ -510,6 +513,8 @@ interface ArchivedEntry {
   readonly cwd: string;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /** When it was archived (absent: an older record). With `updatedAt`, an archived read's version (S7). */
+  readonly archivedAt: number | undefined;
   record: DaemonSessionRecord | undefined;
   /** The last write of `record` failed: a sweep retries it. */
   unwritten: boolean;
@@ -530,6 +535,7 @@ function archivedEntry(
     cwd: record.cwd,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    archivedAt: record.archivedAt,
     record: resident,
     unwritten: false,
     retrying: false,
@@ -993,6 +999,47 @@ export class SessionHost {
   /** Number of ARCHIVED sessions (not in `size`). */
   get archivedCount(): number {
     return this.archived.size;
+  }
+
+  /** The ARCHIVED sessions, metadata only (docs/feat/a2a.md S7: an external caller's archived index). */
+  archivedSessions(): Array<{
+    readonly id: string;
+    readonly updatedAt: number;
+    readonly archivedAt?: number;
+  }> {
+    return [...this.archived.values()].map((e) =>
+      e.archivedAt === undefined
+        ? { id: e.id, updatedAt: e.updatedAt }
+        : { id: e.id, updatedAt: e.updatedAt, archivedAt: e.archivedAt },
+    );
+  }
+
+  /**
+   * An ARCHIVED session's units of work, READ-ONLY (docs/feat/a2a.md S7): from
+   * the record its reopen would restore — resident, or read back by
+   * `persister.load` (both files parsed, nothing written) — closed as that
+   * reopen would close them (`archivedUnitsOf`). Never reopens, never writes,
+   * never drops or blocks the entry (a failed REOPEN does; a read only reports).
+   * `absent`: not archived (live, deleted or unknown).
+   */
+  async readArchivedUnits(id: string): Promise<ArchivedUnitsRead> {
+    const entry = this.archived.get(id);
+    const persister = this.opts.persister;
+    if (!entry) {
+      return { status: "absent" };
+    }
+    let record = entry.record;
+    if (!record) {
+      if (!persister) {
+        return { status: "absent" };
+      }
+      const loaded = await persister.load(id);
+      if (!loaded.ok) {
+        return { status: "unreadable", reason: loaded.reason };
+      }
+      record = loaded.record;
+    }
+    return { status: "ok", units: archivedUnitsOf(record) };
   }
 
   /**
@@ -1464,6 +1511,9 @@ export class SessionHost {
       turns: reconciled.turns,
       enqueueIds: reconciled.enqueueIds,
       returned: reconciled.returned,
+      // The ended-units table (docs/feat/a2a.md, Unification §3): what the log
+      // ended, plus what the cut left open closed honestly (the resumed turn stays live).
+      units: endedUnitsAtLoad(record.units, reconciled.turns, reconciled.resume?.turnId, now),
       ...(record.head !== undefined ? { head: record.head } : {}),
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
       // A restart KEEPS the session's auto-accept (owner Q3).

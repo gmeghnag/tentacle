@@ -356,6 +356,19 @@ A non-loopback `--host` requires a token. TLS: `--tls-cert`/`--tls-key` on
 `serve`; `--ca-cert FILE` on `connect` for a private CA. Details:
 [`docs/architecture/F3-remote-control.md`](./docs/architecture/F3-remote-control.md).
 
+**A2A: other agents can call a `serve`.** With `--a2a-token T` (or
+`--a2a-token-command CMD`) the daemon also speaks
+[A2A](https://a2a-protocol.org) 1.0 over JSON-RPC: the public agent card at
+`/.well-known/agent-card.json`, and `POST /a2a` (`SendMessage`,
+`SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`,
+`SubscribeToTask`) behind `Authorization: Bearer <A2A token>`. It is a token of
+its own, never `--token`; without it A2A is off. A caller's `contextId` is a
+session (`a2a-default-<contextId>`) and each turn is a task; tasks survive a
+restart and stay readable once their session is archived. The owner is always
+asked first: `--a2a-asks both` lets the caller answer tool asks too (file
+approvals stay owner-only), and `--a2a-workflows` lets it start workflow runs
+(off by default). Design: [`docs/feat/a2a.md`](./docs/feat/a2a.md).
+
 `tentacle --help` lists every flag.
 
 ## Configuration
