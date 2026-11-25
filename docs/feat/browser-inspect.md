@@ -715,3 +715,33 @@ but not CDP's real alternates (`postDataEntries`, `*HeadersText`), which is the 
 Same model family as the B4 executor (Opus); only the context is fresh.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Round 2
+
+**Verdict: PASS.** Reviewed `48bdcd92` (the round-1 fixes) plus `27262c07` (a gate-only fixture change in
+`cli/test/fixtures/worker-exit-net.ts`).
+
+- **#1 `postDataEntries`, FIXED.** `net-view.ts:242`, `postDataEntries()`, decodes the base64 and masks it as a body
+  using the request's own Content-Type. It never echoes the raw bytes. My round-1 repro now prints
+  `"text": "user=bob&password=‹…masked…›"`.
+- **#2 `*HeadersText`, FIXED.** `net-view.ts:228`, `headersText()`, puts each line through the header rules. The repro shows
+  `Set-Cookie: sid=‹masked cookie sid …›` and `Cookie: sid=‹masked …›`. An urlencoded `postData` with no
+  Content-Type is now sniffed as a form, so its first field is masked too.
+- **#3 `serve` reload, FIXED.** `hosted-session.ts:1247-1253`: a default-off browser tool that this host built OFF stays off on
+  reload (off wins).
+- **#4 handover / drag-out, FIXED.** `ops.js` `handover` now calls `group()` first and refuses if grouping fails.
+  `onTabUpdated` treats a `groupId` change on an owned tab as the user taking it back (`takeBack` → `tab_closed`, the debugger is
+  detached, the feed stops). Race check: `group()` sets `tabSession` only after Chrome has grouped the tab, so the
+  `onUpdated` event from our own grouping cannot take the tab back. A handover that moves a tab out of another session's group sends
+  `tab_closed` and then `handover`, and the hub ends with the new owner.
+- **Mutations (all reverted, `git status` empty):** I made five, one per fix, and ran them together: no `postDataEntries` branch,
+  `requestHeadersText` dropped, `builtOff` emptied, the `groupId` takeback disabled, handover without `group()`.
+  The result was 5 fail, each on exactly its own new test.
+- **Gate:** 15 touched files → 136 pass / 0 fail; `bun run lint` clean (2464 files); `bun run typecheck` clean.
+- **Nits (non-blocking):** (a) If a user turns the browser ON with `/tools` in a `serve` session, it goes back OFF after a daemon
+  restart. This is fail-safe and visible in the snapshot; the remedy is `tools.enabled.browser`. (b) `ops.js` `tabs()` now reports
+  `handedOver: false` for handed-over tabs, because handover puts the tab into `s.tabs`. Only the model-facing label is affected; the hub's
+  `Ownership.handed` is unchanged, so B5's first-action ask is not. (c) `redactText` partly eats the mask string
+  (`password=[REDACTED] field password · …›`). This is cosmetic and the value stays masked.
+
+*— claude-opus-5-5, 2026-11-25*
