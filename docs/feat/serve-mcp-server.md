@@ -546,4 +546,31 @@ Each test names its mutation (§9).
 
 ## Execution
 
+### M1-mcp-wire (done)
+
+- *Load-bearing check:* M1 has none of its own (assumption 1 is M2's, 3 is M4's). Re-checked its one precondition: `mcp/wire.ts` imports nothing from `external/` or `a2a/` (pure, no I/O, no clock).
+- Added `packages/daemon/src/mcp/wire.ts`:
+  - The era is chosen per request. A legacy `initialize` never gets tasks. A modern request needs the `_meta` version AND the `MCP-Protocol-Version` header to agree, else 400. An unsupported version → `-32022 {supported}`.
+  - Per-request caps: `tasks`, `elicitationForm`.
+  - A notification → `kind:"notification"` (the caller answers 202). `methodNotAllowed` → 405 + Allow.
+  - `requireTasks` → `-32021 {requiredCapabilities}`. `mayUseTasks`.
+  - `initializeResult` (no session id). `discoverResult` (declares the tasks extension).
+  - `createTaskResult`, `taskResult`, `decisionElicitation`, `toolResult`, `toolError`.
+  - `sseEvent`, `progressNotification`, `progressCounter` (strictly increasing).
+- Added `packages/daemon/test/mcp-wire.test.ts` (32 tests, green).
+- Drift:
+  1. The ext-tasks schema is NOT vendored. The test uses a hand-written fixture of its field names from the spec read in Context. M4 must check them against the real `@modelcontextprotocol/ext-tasks` types (the devDependency lands in M5).
+  2. The wire code was written before its tests, so red-before-green was shown by mutation, not by a failing first run.
+  3. `-32022` and a header mismatch reply HTTP 400. Other JSON-RPC errors reply HTTP 200.
+  4. `changelog.d/serve-mcp-server.added.md` describes the whole feature, though only M1 exists. It stays user-invisible until M5 wires the flags.
+  5. No protocol change and no `protocol.d/` note. Not exported from `daemon/src/index.ts` yet (M2 does that).
+- Mutations (each reverted, 32/32 green again):
+  - constant progress → `progress is strictly increasing…` RED;
+  - header check removed → `header ≠ _meta → 400` RED;
+  - `requireTasks` ignoring the declaration → `tasks/* without the declaration → -32021` RED.
+  - A fourth (legacy gets tasks) was not run.
+- Checks: `bunx biome check` is clean on both files. `tsc -p packages/daemon` shows 0 errors under `mcp/`. The pre-existing `@a2a-js/sdk` resolution errors in this worktree are unrelated.
+
+*— claude-sonnet-5-5, 2026-11-25*
+
 ## Review
