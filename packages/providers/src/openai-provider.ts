@@ -512,15 +512,15 @@ function ownOpenAIReasoning(
 }
 
 /**
- * Where the echoed reasoning starts: the index of the last `user` message
- * (docs/fix/think-tag-leak.md). A FINISHED turn's reasoning must not go back:
- * the server's template renders that earlier reply as `think … /think answer`,
- * and the model then repeats it with a stray `</think>` in `content` (6/12
- * turn-2 runs, 0/12 without the echo). Only the current segment — the rounds
- * after the last user message — is echoed, which is the within-turn win
- * fix/reasoning-echo measured (D6's scope, narrowed by the owner's 2026-11-25
- * decision). A steer is a bare `user` message (agent.ts), so it moves the floor
- * too: no marker distinguishes it, and being conservative can only drop echo.
+ * Where the echoed reasoning starts: the index of the last `user` message that
+ * opens a turn (docs/fix/think-tag-leak.md). A FINISHED turn's reasoning must
+ * not go back: the server's template renders that earlier reply as
+ * `think … /think answer`, and the model then repeats it with a stray `</think>`
+ * in `content` (6/12 turn-2 runs, 0/12 without the echo). Only the current
+ * turn's rounds are echoed, which is the within-turn win fix/reasoning-echo
+ * measured (D6's scope, narrowed by the owner's 2026-11-25 decision). A `user`
+ * message after a `tool` result (a steer, a loop note, the workflow status
+ * line) is mid-turn and does not move the floor (below).
  * No user message at all (a resumed or summary-first history) → 0, echo as before.
  *
  * A request offering NO tools keeps the pre-fix behaviour (floor 0, no cut): the
@@ -532,8 +532,17 @@ export function echoFloor(messages: readonly ChatMessage[], tools?: ChatRequest[
   if ((tools?.length ?? 0) === 0) {
     return 0;
   }
+  // Walk back to the last `user` message that OPENS a turn: one whose nearest
+  // earlier non-`user` message is not a `tool` result. A `user` message after a
+  // tool result is mid-turn by construction (a turn opens after an assistant
+  // answer): a steer, a loop note, or the wire-only workflow status line
+  // (`withStatusLine`, on every request while a run is live). Residual: a new
+  // prompt after a turn cancelled mid-tool looks the same, so that turn's
+  // rounds are echoed for the next turn only (its answer resets the floor).
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === "user") {
+    // `i` starts a run of `user` messages, and the run does not follow a tool result.
+    const before = messages[i - 1]?.role;
+    if (messages[i]?.role === "user" && before !== "user" && before !== "tool") {
       return i;
     }
   }

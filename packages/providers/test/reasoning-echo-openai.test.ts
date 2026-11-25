@@ -214,7 +214,8 @@ describe("D9 400 fallback", () => {
  * fix/think-tag-leak: echoing a FINISHED turn's reasoning back makes llama.cpp's
  * Qwen template render that earlier answer as `think … /think answer`, and the
  * model then repeats it with a stray `</think>` in `content` (6/12 turn-2 runs;
- * 0/12 without the echo). The echo is therefore cut at the last `user` message:
+ * 0/12 without the echo). The echo is therefore cut at the last `user` message
+ * that opens a turn (one after a `tool` result is mid-turn and does not count):
  * a turn's own rounds are what fix/reasoning-echo bought, an older turn's is not.
  */
 describe("echo scope: the current segment only", () => {
@@ -284,10 +285,10 @@ describe("echo scope: the current segment only", () => {
     expect(wire[3]?.reasoning_content).toBe("mine");
   });
 
-  test("a steer's `user` message moves the floor (documented: steers are unmarked)", async () => {
-    // agent.ts:1568 pushes a steer as a bare `user` message, so the provider
-    // cannot tell it from the message that opened the turn: after a steer the
-    // turn's earlier rounds are out of scope, and the rounds after it are in.
+  test("a steer after a tool result does not move the floor (mid-turn by construction)", async () => {
+    // agent.ts pushes a steer as a bare `user` message; after a `tool` result it
+    // can only be mid-turn (a turn opens after an assistant answer), so the
+    // turn's earlier rounds stay echoed, and so do the rounds after it.
     const fake = endpoint(() => ok([{ content: "x" }]));
     const p = provider(fake.fetchImpl);
     const r = record(p.id, "reasoning_content", "mine");
@@ -303,8 +304,61 @@ describe("echo scope: the current segment only", () => {
       tools: TOOLS,
     });
     const wire = fake.bodies[0]?.messages ?? [];
-    expect(wire[1]?.reasoning_content).toBeUndefined();
+    expect(wire[1]?.reasoning_content).toBe("mine");
     expect(wire[4]?.reasoning_content).toBe("mine");
+  });
+
+  test("a live workflow's status line at the tail keeps the turn's echo (review r1)", async () => {
+    // `withStatusLine` (agent context-awareness.ts) appends a wire-only `user`
+    // line after the last `tool` result on EVERY request while a workflow runs:
+    // it must not cut the current turn's rounds, nor disarm the D9 retry.
+    const fake = endpoint(() => ok([{ content: "x" }]));
+    const p = provider(fake.fetchImpl);
+    const r = record(p.id, "reasoning_content", "mine");
+    const old = record(p.id, "reasoning_content", "old");
+    const h: ChatMessage[] = [
+      { role: "user", content: "prima" },
+      { role: "assistant", content: "fatto", reasoning: old },
+      { role: "user", content: "go" },
+      { role: "assistant", content: "", reasoning: r },
+      { role: "tool", content: "r", toolCallId: "c1" },
+      {
+        role: "user",
+        content: "[workflow wf-1 deploy v1: step 1/3 build running · 0/3 ok · 1k tok]",
+      },
+    ];
+    expect(echoFloor(h, TOOLS)).toBe(2);
+    await events(p, { messages: h, tools: TOOLS });
+    const wire = fake.bodies[0]?.messages ?? [];
+    expect(wire[1]?.reasoning_content).toBeUndefined();
+    expect(wire[3]?.reasoning_content).toBe("mine");
+  });
+
+  test("loop notes after a status line or steer stay mid-turn (consecutive `user` run)", () => {
+    const h: ChatMessage[] = [
+      { role: "user", content: "go" },
+      { role: "assistant", content: "" },
+      { role: "tool", content: "r", toolCallId: "c1" },
+      { role: "user", content: "steer" },
+      { role: "user", content: "[workflow status]" },
+    ];
+    expect(echoFloor(h, TOOLS)).toBe(0);
+  });
+
+  test("residual (accepted): a prompt after a turn CANCELLED mid-tool reads as mid-turn", () => {
+    // No marker tells a new prompt after a cancelled tool round from a steer:
+    // both follow a `tool` result. The cancelled turn's rounds are then echoed
+    // for the next turn only (its answer resets the floor). Pinned so a change
+    // here is a decision, not an accident.
+    const h: ChatMessage[] = [
+      { role: "user", content: "t1" },
+      { role: "assistant", content: "a1" },
+      { role: "user", content: "t2 (cancelled)" },
+      { role: "assistant", content: "" },
+      { role: "tool", content: "cancelled", toolCallId: "c1" },
+      { role: "user", content: "t3" },
+    ];
+    expect(echoFloor(h, TOOLS)).toBe(2);
   });
 
   test("only an earlier turn's reasoning arms no echo retry", async () => {

@@ -75,6 +75,10 @@ messages after the last `user` message, steer or not** — the echo covers the
 current segment. It is safe-directional (it can only ever drop echo, never
 re-introduce the earlier-turn echo that triggers the stray tag), and it costs at
 most the tail of a turn that a person steered.
+**Superseded by fix round 1 (Review finding 1):** a `user` message (or run of
+them) right after a `tool` result is mid-turn by construction and does NOT move
+the floor — steers, loop notes and the workflow status line keep the turn's echo;
+residual: a prompt after a turn cancelled mid-tool (see Execution, Fix round 1).
 
 **Plan fix 2 — the cut is gated on the request offering tools.** The Context's
 bisect is the reason: `no tools` → 0/32 hits, i.e. the leak lives in the
@@ -212,6 +216,47 @@ on the 0/12/0/32 controls plus the captured-request check above.
 **Drift from Implementation, beyond the two plan fixes:** none in the code shape;
 the helper takes the extra `tools?` argument and one more test exists than the
 plan listed (the no-tools guard, forced by plan fix 2).
+
+### Fix round 1
+
+*— claude-opus-5-5 (executor), 2026-11-25*
+
+**Finding 1 (MEDIUM, workflow status line turns the echo off) — FIXED**, with the
+Review's first option. `echoFloor` (`packages/providers/src/openai-provider.ts:531-549`)
+now returns the last `user` message that OPENS a turn: the start of a run of `user`
+messages whose preceding message is not a `tool` result. A `user` message after a
+tool result is mid-turn by construction — the status line `withStatusLine` appends
+(`packages/agent/src/context-awareness.ts:110-117`), a steer (`agent.ts:1568`), the
+loop's notes after a tool round (`:1738, 1864, 1915, 1927`) — so it no longer moves
+the floor; the `echoing` pre-scan uses the same helper, so the D9 retry stays armed.
+A turn opener after an assistant answer still cuts every finished turn (the 6/12
+shape is unchanged). Notes after an assistant answer (a `turn_end` hook note, a
+truncation re-ask after text) still move the floor — safe direction, only drops echo.
+
+**Accepted residual (owner may veto):** a new prompt after a turn CANCELLED mid-tool
+also follows a `tool` result, and no marker tells it from a steer; that cancelled
+turn's tool rounds are then echoed for the next turn only (its answer resets the
+floor). Tool-round reasoning is the shape already echoed within every turn; the
+repro's trigger was an answer turn. Pinned by a test so a change is a decision.
+
+Tests (`packages/providers/test/reasoning-echo-openai.test.ts`): the steer test
+flipped to the new rule (earlier round now echoed); new: the workflow status-line
+shape (floor = turn opener, current round echoed, previous turn's not), a
+consecutive `user` run after a tool (steer + status line), the cancelled-turn residual.
+
+**Red before green:** new tests on the round-0 code → `16 pass, 4 fail`, each on
+the property (`Expected: "mine" Received: undefined`; `Expected: 2 Received: 5`;
+`Expected: 0 Received: 4`; `Expected: 2 Received: 5`).
+
+**Mutations** (each reverted; tests = the two reasoning-echo files):
+| mutation | result |
+|---|---|
+| tool check removed (= round-0 rule, last `user`) | 4 fail: steer, status line, `user` run, residual |
+| run-start check removed (`before !== "user"` dropped) | 1 fail: consecutive `user` run |
+
+**Verified:** `bun test` reasoning-echo-openai + agent reasoning-echo → 28 pass / 0
+fail; `openai-provider.test.ts` → pass; `bunx biome check` on both changed files →
+clean. Full gate: the orchestrator's script.
 
 
 ## Review
