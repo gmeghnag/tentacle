@@ -926,3 +926,91 @@ No code changed in s5; no changelog fragment written (the s1–s4 slices own it,
 s5 adds no user-visible change).
 
 *— claude-sonnet-5-5, 2026-11-25*
+
+### Review — fresh-context adversarial, s1–s5 (`git diff main...HEAD`)
+
+**Verdict: REQUEST-CHANGES** — two MEDIUM findings, both in the D9 fallback
+(`openai-provider.ts`); everything else holds.
+
+**Findings**
+
+1. **MEDIUM — D9 latches echo OFF for the process on a 400 it did not cause**
+   (`packages/providers/src/openai-provider.ts:330-336`). The retry drops the
+   reasoning, so the body gets SMALLER. A 400 for another cause that a smaller
+   body fixes (llama.cpp's context-overflow 400 near the limit) makes the retry
+   succeed and sets `reasoningEchoRefused = true`. On the long-lived `serve`
+   daemon the echo is then silently off until restart: the ×3/×15 regression
+   this task fixes comes back with no trace. That is the class the F9 comment
+   at :321-325 warns against. It also falsifies the failure-mode row "a 400 for
+   another cause … latches nothing". Repro (`.tentacle/tmp/reasoning-echo/d9-latch.ts`,
+   a fake endpoint that 400s when the body is over 600 B): near-limit turn
+   `[[652, echo], [329, no echo]]`, then a small later turn `echoes? [false]`.
+   Fix direction: latch only on evidence that names the field (the 400 body
+   mentions `reasoning_content`/`reasoning`), or don't latch (per-request
+   fallback); and report the latch (`onRetry`/log), so it is never silent.
+   Add a red test for it.
+2. **MEDIUM — a voice turn now FAILS where main succeeds, and keeps failing**
+   (`openai-provider.ts:320-336`). Take an endpoint that 400s on both the F9
+   switches and the echoed field, with a history that holds this provider's
+   own record. The calls go: (off+echo) 400 → F9 (echo) 400, so
+   `reasoningSwitchesRefused = false` → D9 `off = wantOff && !false = true` →
+   (off, no echo) 400 → throw. Nothing is latched, so EVERY later voice turn
+   fails the same way (a voice-only phone session never converges). On main
+   the same turn is OK after 2 requests. Repro (`.tentacle/tmp/reasoning-echo/d9-voice.ts`):
+   branch `voice turn 1: FAILED after 3 requests`, `voice turn 2: FAILED after 3`;
+   no-record history `OK after 2`. This breaks D9's "never a failed turn".
+   Fix direction: once both single drops have 400ed, make one last attempt
+   with neither (or try the combinations in a fixed order); add a test that
+   rejects both.
+
+**Gate (this worktree, a4c05fe7):** `bun run test` → **19115 pass, 5 skip, 0 fail**
+(1329 files, 58 s; the diff adds no skip). `bun run typecheck` clean.
+`bun run lint` clean (2536 files). The 11 touched test files → 271 pass, 0 fail.
+
+**Mutation (§9)** — six mutations applied together, each caught by its own
+test (15 fails total), then reverted; `git status` clean, tree byte-identical:
+loop push without `echo` (agent.ts) → T1 ×4 fail. `toWireRequest` without
+`reasoning` (proxy-model.ts) → T5 ×4 fail. Anthropic source check removed →
+"another source … not sent" fails. D9 latch forced `true` → "400 for another
+cause is not latched" fails. `.catch(undefined)` removed from `chatMessageShape`
+→ 3 fail-soft tests fail. `countReasoning` → 0 → both token-counter tests fail.
+
+**Premises checked (TRUE):** provider ids are model-scoped
+(`anthropic-provider.ts:126`, `openai-provider.ts:208`; the `RetryingModelProvider`
+passes `inner.id` through, `retry.ts:174`), so D5 really keys on the model.
+`canonicalMessage` (`session-log.ts:804`) does not hash `reasoning`, so the
+digests and checkpoints already on disk stay valid. The log entry builders
+(`session-log.ts:673-689`) pass the whole message, and no site copies `thought`
+field by field, so the record reaches `session/log` and the laptop store with no
+missed copy site. The laptop's `onModelStream` (`remote-client.ts:4625`) passes
+the request and the events through whole, so the record crosses both ways.
+`mark()` (`anthropic-cache.ts:57`) marks the LAST block, and reasoning is never
+last (a reasoning-only message is dropped), so P8 holds.
+
+**Attacks tried:**
+- Pod forging a record with the laptop's provider id: no new trust edge. Its
+  content is pod-controlled text like `content`; a forged signature 400s only
+  its own turn; it is bounded and fail-soft. §7 holds.
+- The S11 flake (orchestrator note): the branch's `session-log.ts` change is
+  **type-only** (erased at runtime), so it cannot cause S11. The S11 test is
+  green in the gate run above.
+- Anthropic dormancy: the provider never sends a `thinking` param, so today
+  the Anthropic echo fires only for models that think by default. The
+  interleaved-order risk stays the documented residual (V3 did not observe it).
+  Not a finding.
+- Token count: Anthropic signatures are not counted, yet V3 shows an omitted
+  block costs ~190 prompt tokens. The heuristic is re-anchored by real usage,
+  so this is a nit, not a finding.
+- `openai:${model}` leaves out `baseURL`: two endpoints serving the same model
+  name share a source. The record is text only, so this is harmless.
+
+**s5:** V1/V2 were not run (blocked on bench access); the resume path is
+covered at unit level only. Live proof of the fix still needs the
+orchestrator's V1.
+
+**Executor behaviour:** clean, narrow diffs, honest Execution notes (s5 says
+openly that nothing was measured). Tests are non-vacuous. The D9 tests cover
+only one cause per endpoint, which is why both findings slipped.
+Reviewer is the same model family as the s1/s3/s4 executor (fresh context only).
+
+*— claude-opus-5-5, 2026-11-25*
