@@ -342,6 +342,13 @@ This is my design choice, not an owner question: it is the conservative one and
 it can be relaxed later.
 
 **D6 — echo scope: always** (owner Q2 A):
+> **Superseded for past turns** by `docs/fix/think-tag-leak.md` (owner,
+> 2026-11-25): reasoning is echoed only for the CURRENT turn — the assistant
+> messages after the last `user` message — and only on a request that offers
+> tools. A finished turn's reasoning stays on disk (Q1 A), unsent: echoing it
+> made llama.cpp's Qwen template render that reply as `think … /think answer`,
+> and the model repeated it with a stray `</think>` in `content` (6/12 turn-2
+> runs, 0/12 without). Within a turn, the points below still hold.
 - Every assistant message that has a record gets it on every request, as pi does
   and as the bench proxy did.
 - The bytes of earlier messages never change, so the prompt cache prefix holds.
@@ -512,6 +519,10 @@ Review: fresh-context Opus, red-teaming the §7 on-disk records rule
   - It is what pi and the bench proxy did.
   - The bytes of old messages never change, so the prompt cache holds.
   - The server's template already discards what it does not want.
+  - **Narrowed later** (owner, 2026-11-25) to the current turn only — see D6's
+    pointer and `docs/fix/think-tag-leak.md`: the template did NOT discard it, it
+    rendered it as an earlier `think … /think answer` block and the model copied
+    that shape.
 - B: current turn only. Fewer bytes per request, but each new user message
   changes the earlier bytes (the cache restarts from there), and it departs from
   what was measured.
