@@ -163,11 +163,29 @@
       };
     }
 
+    // The act carries the facts the user approved (`expect`, from the probe):
+    // a reflow under x,y or page JS rewriting href / form action while the
+    // ask was open must not act on something else (Review B5 finding 2).
+    function sameFacts(a, b) {
+      const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+      for (const k of keys) if (a[k] !== b[k]) return false;
+      return true;
+    }
+    function changed(msg, f) {
+      if (msg.probe || msg.expect === undefined || sameFacts(f, msg.expect)) return undefined;
+      return {
+        error:
+          "the target changed since it was checked (page reflow or rewrite): nothing was done — read the tab again and retry",
+      };
+    }
+
     function click(msg) {
       const r = resolve(msg);
       if (r.error) return r;
       const f = facts(r.el);
       if (msg.probe) return { value: { facts: f } };
+      const moved = changed(msg, f);
+      if (moved) return moved;
       r.el.click();
       return { value: { facts: f, clicked: true } };
     }
@@ -178,6 +196,8 @@
       const el = r.el;
       const f = facts(el);
       if (msg.probe) return { value: { facts: f } };
+      const moved = changed(msg, f);
+      if (moved) return moved;
       if (el.isContentEditable) {
         el.textContent = msg.text;
       } else if ("value" in el) {

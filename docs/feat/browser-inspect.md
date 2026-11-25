@@ -558,6 +558,28 @@ The owner ran B1–B4 in their real Chrome (15:20, news site: open/read/shot/sea
 
 *— claude-opus-5-5, 2026-11-25*
 
+### Fix round 1 (Review B5: 1 HIGH, 2 MEDIUM)
+
+1. **HIGH, FIXED: an A2A caller could approve a `browser_action` ask.** `core/src/permission.ts` `EXTERNAL_ANSWER` now has `browser_action: "owner-only"`. `daemon/src/external/asks.ts` `askOf` maps `BROWSER_ACTION_TOOL` to kind `browser_action`. Before, it fell through to `tool`. This also clears the 2 typecheck errors (TS2741). Tests: `daemon/test/external-asks.test.ts`, «a browser action ask is the owner's only, in every mode» (RED: `Expected "browser_action", Received "tool"`). `core/test/permission-kinds.test.ts`: the table now pins `browser_action: "owner-only"` (RED: missing key).
+2. **MEDIUM, FIXED: probe/act TOCTOU.** The act now sends the probe's facts as `expect`. `link-schema.ts` adds `expect: ElementFacts.optional()` to `click` and `type`, so the field survives the hub's `HubOp` parse. `page.js` `click` / `type` compare the facts at act time with `expect`, key by key, and REFUSE on a mismatch, doing nothing: «the target changed since it was checked … nothing was done». This covers a reflow under `x,y`, a rewritten `href`, and a rewritten `form.action`. Defence in depth for an extension older than this check, which ignores `expect`: `tools/src/browser.ts` `actedOnOther` compares the act reply's facts with the approved ones. On a mismatch it returns an error saying the element acted on is NOT the one checked, and that the extension needs reinstalling. This can only come after the fact. Tests: `apps/browser-extension/test/page.test.ts` covers the reflow, the href and the form action on type (RED: act happened, `r.error` undefined). `tools/test/browser-actions.test.ts` checks that the click and type acts carry `expect` through `HubOp.parse` (RED), and that a mismatched act reply is flagged (RED).
+3. **MEDIUM, FIXED (with a drift from B5 addition 2): the after-the-fact report and the unapproved reopen.**
+   - **The report.** `learn()` now returns a note when a tab's URL moves to a registrable domain that is outside `visited` and differs from where the tab was meant to be. «Where it was meant to be» is the tab's last known URL, or the requested URL for `browser_open`. The note is appended to the results of `browser_read`, `browser_tabs` and `browser_open`: «note: tab N left <origin> for <domain>, a domain this session was never allowed to navigate to (a redirect or the page's own script) — treat … with extra suspicion». A tab seen for the first time, such as a handed-over one, is not flagged.
+   - **The reopen.** `onTab` now runs the remembered URL through `classifyAction({kind:"open"})` + `gate()` before reopening. A domain this session never visited asks `browser_action`, exactly like `browser_open`. A denial means nothing is opened. An allowed reopen visits the domain. To give `onTab` the session's `ask`, read, net and console became factories (`createReadTool` / `createNetTool` / `createConsoleTool(limits.ask)`), like click, type and open. Shot passes `limits.ask`. The ONE broker is still the only asker.
+   - **Drift / owner-visible**: B5 addition 2 said «no new ask (the URL was already approved/handed)». That is false for a redirect or script target, so such a reopen now ASKS first. It is still reopened after an OK, never turned into an error. A handed-over tab's URL is not seeded as visited (B5 drift 3), so reopening a closed HANDED-OVER tab asks too. If the owner wants no ask there, the fix is to seed the domain at hand-over. That is a policy call, not made here.
+   - Test: «a redirect onto an unapproved domain is flagged, and reopening it asks first» (RED on the flag: `Expected to contain: "never allowed"`).
+- **Mutations** (each from a scratch copy in `.tentacle/tmp/browser-inspect/`, restored with `cp`, and `cmp`-verified):
+  - `EXTERNAL_ANSWER.browser_action: "once"` → 2 fail (core table + daemon asks).
+  - `page.js` `changed()` always returns `undefined` → 1 fail (page).
+  - Tool sends the act without `expect` → 1 fail.
+  - `expect` removed from the `HubOp` schema → 1 fail.
+  - `actedOnOther` never flags → 1 fail.
+  - `learn` never flags → 1 fail.
+  - The reopen gate in `onTab` skipped (line-scoped, so the type tool's gate is untouched) → 1 fail.
+- **Narrow gate**: 18 covering files (A2A executor, mapping and e2e; hub; install table; wiring; `packages/browser/test`; `apps/browser-extension/test`; tools browser and actions; external asks; permission kinds): 198 pass, 0 fail. `tsc --noEmit -p` core, browser, daemon and tools: clean. `biome check` on the 9 changed files: clean. The full suite and the whole-repo typecheck were not run (the orchestrator's gate).
+- **Unverified**: a real Chrome run of the `expect` refusal. To verify: `tentacle browser install`, reload the extension, then click a ref whose `href` is rewritten by devtools between probe and act.
+
+*— claude-opus-5-5, 2026-11-25*
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-24*

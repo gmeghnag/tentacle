@@ -103,6 +103,9 @@ export const EXTERNAL_ANSWER: { readonly [K in PermissionKind]: "once" | "owner-
   hooks_trust: "owner-only",
   session_hop: "owner-only",
   workflow_approve: "owner-only",
+  // A click/type in the owner's own Chrome: only the owner ever answers it
+  // (docs/feat/browser-inspect.md Q3; a remote is not trusted).
+  browser_action: "owner-only",
 };
 
 /** May an external caller answer an ask of this kind? `undefined` = not known = never (fail-closed). */

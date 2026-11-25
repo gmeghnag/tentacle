@@ -83,6 +83,8 @@ export const HubOp = z.discriminatedUnion("op", [
     y: z.number().optional(),
     /** Resolve the target and report its facts WITHOUT acting (the classifier runs first, §5). */
     probe: z.boolean().optional(),
+    /** The act: the probe's facts the user approved; the page refuses if the target no longer matches. */
+    expect: ElementFacts.optional(),
   }),
   /**
    * `start`/`stop` reach the extension (debugger on/off); `list`/`get` are
@@ -129,6 +131,7 @@ export const HubOp = z.discriminatedUnion("op", [
     text: z.string().max(64 * 1024),
     submit: z.boolean().optional(),
     probe: z.boolean().optional(),
+    expect: ElementFacts.optional(),
   }),
 ]);
 export type HubOp = z.infer<typeof HubOp>;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { HubOp } from "@tentacle/browser";
+import { HubOp } from "@tentacle/browser";
 import {
   BROWSER_ACTION_TOOL,
   type PermissionRequest,
@@ -105,6 +105,38 @@ describe("browser action tools (B5)", () => {
       .filter((o) => o.op === "click")
       .map((o) => ("probe" in o && o.probe ? "probe" : "act"));
     expect(order).toEqual(["probe", "act"]);
+  });
+
+  // Review B5 finding 2: the act carries the probe's facts (the page refuses
+  // on a mismatch), and they survive the hub's HubOp parse. Mutation: drop
+  // `expect` from the act (tool) or from the HubOp schema → red.
+  test("click and type acts carry the approved facts as `expect`, through the hub schema", async () => {
+    const facts = { tag: "button", name: "Save", submits: true, formAction: "https://a.test/f" };
+    const { backend, ops } = page(facts);
+    const t = tools(backend, spyAsk().ask);
+    await t.exec("browser_click", { tab: 5, ref: "e3" });
+    await t.exec("browser_type", { tab: 5, ref: "e4", text: "hi", submit: true });
+    for (const act of [...acts(ops, "click"), ...acts(ops, "type")]) {
+      const parsed = HubOp.parse(act);
+      expect("expect" in parsed ? parsed.expect : undefined).toEqual(facts);
+    }
+    expect(acts(ops, "click")).toHaveLength(1);
+    expect(acts(ops, "type")).toHaveLength(1);
+  });
+
+  // An extension older than this check acts anyway: the result must say the
+  // acted-on element is not the approved one. Mutation: drop the post-check → red.
+  test("an act reply whose facts differ from the probe's is flagged to the model", async () => {
+    const { backend } = fakeBackend((op) => {
+      if (op.op === "click" && op.probe === true)
+        return { facts: { tag: "button", name: "Search" } };
+      if (op.op === "click") return { facts: { tag: "button", name: "Buy now" }, clicked: true };
+      return {};
+    });
+    const t = tools(backend, spyAsk().ask);
+    const r = await t.exec("browser_click", { tab: 5, x: 1, y: 2 });
+    expect(r.isError).toBe(true);
+    expect(String(r.content)).toContain("NOT the one checked");
   });
 
   test("a denied ask never acts, and the model is told", async () => {
@@ -224,6 +256,58 @@ describe("browser action tools (B5)", () => {
     const again = await t.exec("browser_read", { tab: 5 });
     expect(again.content).toContain("body of 6");
     expect(ops.filter((o) => o.op === "open")).toHaveLength(2);
+  });
+
+  // Review B5 finding 3: a page that redirected (or scripted) itself onto a
+  // domain this session was never allowed to reach is FLAGGED on read, and
+  // reopening it asks first (denied → nothing opened). Mutations: drop the
+  // read flag → red; reopen with no gate → red.
+  test("a redirect onto an unapproved domain is flagged, and reopening it asks first", async () => {
+    let landed = "https://a.test/";
+    const open = new Set<number>();
+    let next = 5;
+    const { backend, ops } = fakeBackend((op) => {
+      if (op.op === "open") {
+        const tab = next++;
+        open.add(tab);
+        return { tab, url: op.url, title: "A" };
+      }
+      if (op.op === "read") {
+        if (!open.has(op.tab)) throw CLOSED(op.tab);
+        return { url: landed, title: "T", text: "x" };
+      }
+      return {};
+    });
+    let allow = true;
+    const asked: PermissionRequest[] = [];
+    const ask = async (req: PermissionRequest): Promise<PermissionResponse> => {
+      asked.push(req);
+      return { allowed: allow, scope: "once" };
+    };
+    const t = tools(backend, ask);
+    await t.exec("browser_open", { url: "https://a.test/" });
+    const same = await t.exec("browser_read", { tab: 5 });
+    expect(String(same.content)).not.toContain("never allowed");
+    landed = "https://evil.test/collect?d=1"; // the page's own script navigated
+    const moved = await t.exec("browser_read", { tab: 5 });
+    expect(String(moved.content)).toContain("evil.test");
+    expect(String(moved.content)).toContain("never allowed");
+    // The user closes it: reopening evil.test asks; a denial opens nothing.
+    open.clear();
+    asked.length = 0;
+    allow = false;
+    const denied = await t.exec("browser_read", { tab: 5 });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.kind).toBe("browser_action");
+    expect(asked[0]?.title).toContain("evil.test");
+    expect(denied.isError).toBe(true);
+    expect(ops.filter((o) => o.op === "open")).toHaveLength(1);
+    // Allowed → reopened there, and the domain is now an allowed one (no 2nd ask).
+    allow = true;
+    const r = await t.exec("browser_read", { tab: 5 });
+    expect(r.content).toContain("reopened https://evil.test/collect?d=1 as tab 6");
+    expect(ops.filter((o) => o.op === "open")).toHaveLength(2);
+    expect(String(r.content)).not.toContain("never allowed");
   });
 
   test("an unknown tab is never reopened; a reopen that fails is the ordinary error", async () => {
