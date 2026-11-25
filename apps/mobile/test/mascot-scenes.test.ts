@@ -694,8 +694,13 @@ describe("pixels: the one grid → points projection", () => {
               BAND,
               colorsFor(palette),
             );
-            const keys = rects.map(rectKey);
-            const dupes = keys.filter((key, i) => keys.indexOf(key) !== i);
+            const seen = new Set<string>();
+            const dupes: string[] = [];
+            rects.forEach((rect, i) => {
+              const key = rectKey(rect, i);
+              if (seen.has(key)) dupes.push(key);
+              seen.add(key);
+            });
             if (dupes.length > 0) {
               throw new Error(
                 `${s.key}/${palette}/run${run} at ${ms} ms: ${dupes.length} duplicate key(s), e.g. ${dupes[0]}`,
@@ -705,7 +710,9 @@ describe("pixels: the one grid → points projection", () => {
         }
       }
     }
-  });
+    // An exhaustive sweep (every scene × palette × run × 10 ms frame): ~2.5 s
+    // alone, over Bun's 5 s default under the parallel gate's CPU contention.
+  }, 30_000);
 
   test("the rocket's three stacked puffs get three keys, at the same place and colour", () => {
     // The named case: one cell, one shape, one colour, one alpha — three rects,
