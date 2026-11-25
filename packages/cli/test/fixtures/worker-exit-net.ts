@@ -89,12 +89,27 @@ if (!runtime) {
 for await (const _ of runtime.createSession().send("start the job")) {
   // drain the turn
 }
-// The job is running in the worker; give the forwarded pgid one hop to land.
-await Bun.sleep(100);
-const live = Bun.spawnSync(["pgrep", "-f", `sleep ${marker}`])
-  .stdout.toString()
-  .trim();
-console.log(`job processes: ${live === "" ? 0 : live.split("\n").length}`);
+// The job is running in the worker. Poll (never a fixed sleep: under a loaded
+// parallel gate the `&` form's `sh` may still be alive, or the sleep not yet
+// started) until the job's tree reaches its steady shape, then report it.
+function jobProcesses(): number {
+  const live = Bun.spawnSync(["pgrep", "-f", `sleep ${marker}`])
+    .stdout.toString()
+    .trim();
+  return live === "" ? 0 : live.split("\n").length;
+}
+const steady = form === "amp" ? 1 : 2;
+const deadline = Date.now() + 5000;
+let count = jobProcesses();
+while (form !== "short" && count !== steady && Date.now() < deadline) {
+  await Bun.sleep(20);
+  count = jobProcesses();
+}
+// The forwarded pgid needs one more hop to land on the main thread.
+while (trackedGroups().length === 0 && Date.now() < deadline) {
+  await Bun.sleep(20);
+}
+console.log(`job processes: ${count}`);
 if (form === "short") {
   console.log(`main tracked while running: ${trackedGroups().length}`);
   await Bun.sleep(2500);
