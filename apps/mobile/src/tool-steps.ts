@@ -22,7 +22,7 @@ import {
   toolMeta,
   toolName,
 } from "./tool-summary.ts";
-import type { ReasoningRow, Row, ToolRow, ToolStatus } from "./transcript-rows.ts";
+import type { ContextRow, ReasoningRow, Row, ToolRow, ToolStatus } from "./transcript-rows.ts";
 
 /** Draw the thread segment above / below a node. */
 export interface ThreadPos {
@@ -49,7 +49,13 @@ export type StepCell =
    * `Thought · 12 s`, collapsed and not expandable (owner decision 2,
    * docs/fix/thought-placeholder.md). `ms` absent = not measured (no clock).
    */
-  | { readonly kind: "thought"; readonly ms: number | undefined; readonly thread: ThreadPos };
+  | { readonly kind: "thought"; readonly ms: number | undefined; readonly thread: ThreadPos }
+  /**
+   * A context reset or a compaction as a node of the rail
+   * (docs/feat/mobile-reset-in-timeline.md 1A): the row's own body is drawn by
+   * `contextRowView`, this only places it on the thread.
+   */
+  | { readonly kind: "context"; readonly thread: ThreadPos };
 
 export interface StepLayout {
   /** By row key. A row absent from the map (user, text, notice) draws as today. */
@@ -84,15 +90,17 @@ function totalMs(rows: readonly ReasoningRow[]): number | undefined {
 
 /**
  * While `running`, the turn is "thinking" when the last row is reasoning, a
- * finished tool (and no tool of its trailing batch still runs or waits), or the
- * user's own prompt. Streaming text or a running tool is its own signal.
+ * finished tool (and no tool of its trailing batch still runs or waits), the
+ * user's own prompt, or a context step (a reset / compaction starts a new round,
+ * so the model is about to answer). Streaming text or a running tool is its own
+ * signal.
  */
 function isThinking(rows: readonly Row[], running: boolean): boolean {
   const last = rows.at(-1);
   if (!running || last === undefined) {
     return false;
   }
-  if (last.kind === "reasoning" || last.kind === "user") {
+  if (last.kind === "reasoning" || last.kind === "user" || last.kind === "context") {
     return true;
   }
   if (last.kind !== "tool") {
@@ -113,7 +121,48 @@ function isThinking(rows: readonly Row[], running: boolean): boolean {
 type Node = { key: string } & (
   | { kind: "step"; thought: string | null; thoughtFirst: boolean }
   | { kind: "thought"; ms: number | undefined }
+  | { kind: "context" }
 );
+
+/** The tool that renews the model's context (its call is one fact with the reset step). */
+const CONTEXT_RESET_TOOL = "context_reset";
+
+/**
+ * The first row after `from` that says a FACT (a step, a text, a context step…),
+ * skipping reasoning: thinking is not a node boundary for the Q3-A merge — a
+ * thought between a `context_reset` call and the reset it caused belongs to the
+ * round before, and is flushed as an orphan Thought either way.
+ */
+function nextFactRow(rows: readonly Row[], from: number): Row | undefined {
+  for (let i = from + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (row !== undefined && row.kind !== "reasoning") {
+      return row;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The keys of the `context_reset` calls that draw NOTHING (owner Q3-A): a
+ * successful call immediately followed by the reset step it produced is the same
+ * fact, so live shows one node — exactly what a reopen shows (the call is
+ * discarded with the old history). A running, failed or denied call stays an
+ * ordinary step: no reset happened.
+ */
+function mergedResetCalls(rows: readonly Row[]): ReadonlySet<string> {
+  const merged = new Set<string>();
+  for (const [i, row] of rows.entries()) {
+    if (row.kind !== "tool" || row.name !== CONTEXT_RESET_TOOL || row.status !== "ok") {
+      continue;
+    }
+    const next = nextFactRow(rows, i);
+    if (next?.kind === "context" && next.event === "reset") {
+      merged.add(row.key);
+    }
+  }
+  return merged;
+}
 
 /**
  * `isBlock`: a tool row that draws as a block instead of a step (a chart, an
@@ -126,9 +175,10 @@ export function stepLayout(
   isBlock: (row: ToolRow) => boolean = () => false,
 ): StepLayout {
   const thinking = isThinking(rows, running);
+  const merged = mergedResetCalls(rows);
   const cells = new Map<string, StepCell>();
-  // Nodes per run, in order; a run ends at any row that is not a step/thought
-  // (hidden cells are transparent).
+  // Nodes per run, in order; a run ends at any row that is not a step/thought/
+  // context step (hidden cells are transparent).
   const runs: Node[][] = [[]];
   let pending: ReasoningRow[] = [];
 
@@ -161,7 +211,23 @@ export function stepLayout(
       batchOpen = false;
       continue;
     }
+    if (row.kind === "context") {
+      // A step of the rail like a tool's: the reasoning written before it belongs
+      // to the round it ENDED, so it flushes as an orphan Thought (never folds
+      // into the new round), then the context step joins the thread.
+      flushOrphan();
+      node({ key: row.key, kind: "context" });
+      batchOpen = false;
+      continue;
+    }
     if (row.kind === "tool" && !isBlock(row)) {
+      if (merged.has(row.key)) {
+        // The call that caused the reset step below it: one fact, one node (Q3-A).
+        // Transparent like a folded reasoning row: it neither ends the run nor
+        // opens a batch.
+        cells.set(row.key, HIDDEN);
+        continue;
+      }
       let thought: string | null = null;
       let thoughtFirst = false;
       if (pending.length > 0) {
@@ -212,7 +278,9 @@ export function stepLayout(
         n.key,
         n.kind === "step"
           ? { kind: "step", thought: n.thought, thoughtFirst: n.thoughtFirst, thread }
-          : { kind: "thought", ms: n.ms, thread },
+          : n.kind === "context"
+            ? { kind: "context", thread }
+            : { kind: "thought", ms: n.ms, thread },
       );
     });
   }
@@ -492,6 +560,167 @@ export function thoughtRowView(cell: { readonly ms: number | undefined }): {
 }
 
 const NOT_KEPT = "The thinking itself is not kept.";
+
+// ── A context reset / compaction step (docs/feat/mobile-reset-in-timeline.md) ──
+
+/**
+ * How many SOURCE lines of a reset prompt / compaction summary an open step
+ * shows before "show all" (owner Q2-A): the tool output's own rule, in lines of
+ * markdown rather than of a log, so the cut's fence rule below can hold.
+ */
+export const CONTEXT_BODY_LINES = 12;
+
+export interface ContextRowView {
+  /** The glyph's node: `↺` for a reset, `⤡` for a compaction. */
+  readonly node: "reset" | "compact";
+  readonly name: string;
+  /** The reset prompt's first line (marks stripped) or the compaction's figures. */
+  readonly subtitle: string;
+  /** The subtitle is the prompt's own prose: drawn italic, like a thought's line. */
+  readonly italic: boolean;
+  /**
+   * The open body: markdown source, its first `CONTEXT_BODY_LINES` lines unless
+   * `full`; `hidden` = the source lines held back (0 when all are shown). Null
+   * when the body says nothing: never an empty expansion
+   * (`ui-empty-action-standard`).
+   */
+  readonly body: { readonly text: string; readonly hidden: number } | null;
+  /** False when there is no body to open. */
+  readonly tappable: boolean;
+  readonly a11yLabel: string;
+}
+
+/**
+ * A context reset or a compaction as its rail step (owner 1A/2A): ONE line —
+ * the name, then the prompt's first line in italic or the figures in mono — and,
+ * when opened, the body as markdown in secondary grey, capped at
+ * `CONTEXT_BODY_LINES` source lines with "show all" (`full`) for the rest.
+ *
+ * Always ONE element, never cut inside a ``` fence: a cut that would fall in the
+ * middle of a code block moves back to the fence's opening line, so an open step
+ * never draws a code block with no close (or — if the fence opens on line 1 — it
+ * runs on past its close instead, since there is no room to move back to).
+ */
+export function contextRowView(row: ContextRow, full: boolean): ContextRowView {
+  const reset = row.event === "reset";
+  const subtitle = reset ? firstSourceLine(row.body) : (row.figures ?? "");
+  const cut = contextBody(row.body, full);
+  return {
+    node: reset ? "reset" : "compact",
+    name: reset ? "Context reset" : "Compacted",
+    subtitle,
+    italic: reset && subtitle !== "",
+    body: cut,
+    tappable: cut !== null,
+    a11yLabel: contextA11yLabel(reset, row, subtitle),
+  };
+}
+
+/** The prompt's first line with its markdown marks stripped, or `""`. */
+function firstSourceLine(body: string): string {
+  for (const line of body.split(/\r?\n/)) {
+    const text = stripMarks(line);
+    if (text !== "") {
+      return text;
+    }
+  }
+  return "";
+}
+
+/**
+ * The marks a prompt's opening line may carry, dropped so the step reads as
+ * prose: an ATX heading's `#`s, a list's bullet, bold/italic/strike marks and
+ * inline-code backticks. Only the LINE, never the body: the body is markdown and
+ * is rendered as such.
+ */
+function stripMarks(line: string): string {
+  return line
+    .trim()
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^(?:[-*+]|\d+[.)])\s+/, "")
+    .replace(/^>\s*/, "")
+    .replace(/`+([^`]*)`+/g, "$1")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/(\*|_)(.*?)\1/g, "$2")
+    .replace(/~~(.*?)~~/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * The body a step opens: its first `CONTEXT_BODY_LINES` source lines (never a
+ * cut inside a fence), or all of it when `full`. Null for a blank body.
+ */
+function contextBody(
+  body: string,
+  full: boolean,
+): { readonly text: string; readonly hidden: number } | null {
+  const lines = body.replace(/\s+$/, "").split(/\r?\n/);
+  if (lines.every((line) => line.trim() === "")) {
+    return null;
+  }
+  if (full || lines.length <= CONTEXT_BODY_LINES) {
+    return { text: lines.join("\n"), hidden: 0 };
+  }
+  const cut = safeCut(lines);
+  return { text: lines.slice(0, cut).join("\n"), hidden: lines.length - cut };
+}
+
+/**
+ * Where an open step's body may be cut so that no ``` fence is left open: the
+ * cap (`CONTEXT_BODY_LINES`), unless that lands inside a fence — then the fence's
+ * opening line; and if that opening is line 1, the fence's own close instead
+ * (moving back is impossible, so it runs on rather than break the block).
+ */
+function safeCut(lines: readonly string[]): number {
+  const open = [...lines.slice(0, CONTEXT_BODY_LINES)].map(isFence);
+  const fencesBefore = open.filter(Boolean).length;
+  if (fencesBefore % 2 === 0) {
+    return CONTEXT_BODY_LINES;
+  }
+  const opening = open.lastIndexOf(true);
+  if (opening > 0) {
+    return opening;
+  }
+  for (let i = CONTEXT_BODY_LINES; i < lines.length; i++) {
+    if (isFence(lines[i] ?? "")) {
+      return i + 1;
+    }
+  }
+  return lines.length;
+}
+
+/** A ``` fence line (its info string may follow on the opening one). */
+function isFence(line: string): boolean {
+  return line.trim().startsWith("```");
+}
+
+/**
+ * VoiceOver for a context step: the name, then what it holds — the prompt's
+ * first line, or the figures spoken in words (the `→` arrow is not read
+ * reliably, and an estimated figure says so).
+ */
+function contextA11yLabel(reset: boolean, row: ContextRow, subtitle: string): string {
+  if (reset) {
+    return subtitle === "" ? "Context reset" : `Context reset. Restart prompt: ${subtitle}`;
+  }
+  const figures = row.figures;
+  if (figures === undefined || figures === "") {
+    return "Compacted";
+  }
+  return `Compacted, ${spokenFigures(figures)}`;
+}
+
+/** `ctx 182k → ~9k` as VoiceOver reads it: `context 182k to about 9k`. */
+function spokenFigures(figures: string): string {
+  const match = /^ctx (\d+(?:\.\d+)?k) → (~?)(\d+(?:\.\d+)?k)$/.exec(figures);
+  if (match === null) {
+    return figures;
+  }
+  const [, from, approximate, to] = match;
+  return `context ${from} to ${approximate === "~" ? "about " : ""}${to}`;
+}
 
 /** The footer's VoiceOver label: `Thinking`, then `Thinking, 12 seconds`. */
 export function thinkingA11yLabel(ms: number): string {

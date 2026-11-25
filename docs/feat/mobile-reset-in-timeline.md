@@ -398,6 +398,96 @@ No `packages/protocol` file was touched, so `protocol.json` needs no
 regeneration. Changelog: `changelog.d/mobile-reset-in-timeline.changed.md`
 (one bullet). `TODO.md` untouched.
 
+### Slice 2 — rail layout + view-model
+
+*— claude-opus (claude-code 2.1.325, model `opus`), 2026-11-25*
+
+**Load-bearing check, re-run before any edit** (branch tip `f461275e`, Slice 1 in):
+`bun test apps/mobile/test/{tool-steps,step-rail,transcript-cell}.test.ts` →
+**37 pass / 0 fail**. The assumption holds: a `context` row exists in the `Row`
+union (`transcript-rows.ts:243-262`), reaches the layout through `stepLayout`, and
+today the layout **ignores** it (`tool-steps.ts` only branches on `reasoning`,
+`tool`, and the rest; `sameStepCell` has no `context` arm) — so the residue of
+Slice 1 is exactly the gap this slice fills.
+
+**As built, in the plan's order (`apps/mobile/src/tool-steps.ts`):**
+
+1. `StepCell` gains `{ kind: "context"; thread: ThreadPos }`; `Node` gains a
+   `context` member.
+2. `stepLayout` treats a `context` row as a node of the current run: it flushes
+   pending reasoning as an orphan `Thought` (a thought belongs to the round the
+   reset ENDED) and joins the thread like a step.
+3. Q3-A merge: `mergedResetCalls` finds every `context_reset` tool row with
+   `status === "ok"` whose next NON-reasoning row is a `context{event:"reset"}`
+   and hides it (`HIDDEN`); a running/error/denied/queued call, an ok call with
+   no reset row after it, and an ok call followed by a COMPACTION row stay
+   ordinary steps. A merged call is transparent to the thread (it neither ends
+   the run nor opens a batch), like a folded reasoning row.
+4. `isThinking` treats a last row of kind `context` like `user`.
+5. `contextRowView(row, full)` + `CONTEXT_BODY_LINES = 12`, next to
+   `thoughtRowView`: `{ node, name, subtitle, italic, body, tappable, a11yLabel }`
+   — subtitle = the prompt's first non-blank line with markdown marks stripped
+   (headings, list bullets, quotes, code, bold/italic/strike, links) or the
+   figures; `italic` true only for a reset's prose line; body = the first 12
+   source lines (`safeCut`: never inside a ``` fence — back to the fence's
+   opening line, or past its close when that opening IS line 1) unless `full`;
+   blank body ⇒ `body: null`, `tappable: false`; a11y = `Context reset. Restart
+   prompt: <line>` / `Compacted, context 182k to about 9k` (the `→` spoken).
+
+**Drift from the Implementation, and why:**
+
+- **`transcript-cell.ts` gained a `context` arm** — a file Slice 2's list does not
+  name. `sameStepCell` is an exhaustive switch over `StepCell`; the new member
+  left it returning `undefined`, which only shows up at runtime (typecheck is
+  happy, `noImplicitReturns` counts the pre-existing `switch` as returning). Its
+  test is `test/transcript-cell.test.ts`, also not in the slice's list — both
+  added with a red-before-green case. Same category of drift Slice 1 reported for
+  `media-layout.ts`/`transcript-parity.test.ts`: the compiler (or, here, the
+  contract) forces one line outside the named files.
+- **`test/tool-steps.test.ts` also carries the view-model tests.** The slice
+  names `tool-steps.test.ts` + `step-rail.test.ts`; `step-rail.test.ts` is
+  `step-rail.ts`'s GEOMETRY (the branch to a `$` line) and has nothing to do with
+  this slice — untouched and still green. `contextRowView` is tested in
+  `tool-steps.test.ts`, beside `stepRowView`/`thoughtRowView`.
+- **The view-model's `italic` is a boolean, not the plan's bare field** — the
+  plan writes `italic` without saying what it qualifies; it is "the subtitle is
+  the prompt's own prose", so a compaction's mono figures are not italic.
+- **No `figures` parsing in `contextRowView`:** absent ⇒ `subtitle: ""` and a11y
+  `Compacted` (a legacy summary), exactly as the mapper leaves it.
+
+**Mutations (each reverted immediately; the failing assertion named):**
+
+- `status !== "ok"` dropped from `mergedResetCalls` → `an error / denied /
+  running call stays an ordinary step (no reset happened)` FAILS.
+- The whole `context` branch dropped from `stepLayout`'s loop → 5 failures (all
+  four rail tests + the merge test that needs `c1` threaded).
+- `last.kind === "context"` dropped from `isThinking` → `the tail shows with a
+  context row last` FAILS.
+- `safeCut(lines)` → the fixed `CONTEXT_BODY_LINES` → both fence tests FAIL.
+- The list-bullet strip dropped from `stripMarks` → initially **no test failed**;
+  the case (`- **Carry** on` / `1. Carry on` / `> Carry on`, and the body
+  keeping its markdown) was written WHILE the mutation was in place, went red,
+  then green on the revert. The §9 non-vacuity check earning its keep again.
+- `transcript-cell.ts`'s `context` arm returning `true` unconditionally →
+  `a context cell compares its thread` FAILS.
+- A merged call ending the run (`endRun()` instead of nothing) → `ok + the reset
+  row right after it` FAILS. While fixing that test's thread expectation it
+  first asserted the WRONG shape (an orphan thought as a run of its own), which
+  the correct code rejected — the assertion was corrected from a real
+  observation, not bent to pass.
+
+**Gate:** the slice's own + adjacent files — 219 pass / 0 fail across the 12
+mobile test files that import `tool-steps.ts`/`transcript-cell.ts` or build
+`context` rows, plus 89/0 across the render-level transcript tests;
+`bunx tsc -p apps/mobile --noEmit` clean; `bunx biome check` clean on all 4
+changed files. The full `bun run check` is the orchestrator's. No
+`packages/protocol` file was touched. Changelog fragment already exists from
+Slice 1 (`changelog.d/mobile-reset-in-timeline.changed.md`) and this slice adds
+nothing user-visible on its own (Slice 3 draws it), so it is unchanged.
+`TODO.md` untouched. **Unverified:** the on-device look (the simulator screenshots
+the plan's Gate asks for) — Slice 3 draws the node; nothing renders
+`contextRowView` yet.
+
 ## Review
 
 *— (empty)*
