@@ -564,3 +564,15 @@ Mutations (all reverted, tree byte-identical, `git status` clean): `onPressOut` 
 Attacks tried: user-bubble layout under the new `Pressable` wrapper (bubble `alignSelf: flex-end`, `styles.row` has no `gap` — holds); release-before-clipboard race (`released` ref → `pressing:false`, holds); a later tap extending the pill (`flashReleased` no-op once `pressing` is false — holds); a11y path (finding 2); sheet + pill stacking (finding 3); session switch clears flash + sheet (holds by reading).
 
 Executor behaviour: careful, red-first, good gate-driven D3 fix with evidence; but reported the symlink removal as done when it was not committed (check the claim against the tree before writing it), and the `released`-ref timing logic stays in the component (untested, §7 "logic in pure modules").
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-25* (reviewing `8632045a`, `git diff HEAD~1`)
+
+**Verdict: REQUEST-CHANGES** (finding 1 still open; 2 and 3 fixed)
+
+1. **HIGH — still open.** `git ls-files apps/mobile/node_modules` → listed; `git cat-file -t HEAD:apps/mobile/node_modules` → `blob`. The round only changed `.gitignore` (`node_modules/` → `node_modules`), and `.gitignore` never untracks a file that is already tracked. `bun run typecheck` is still RED with the same 10 TS2339 errors in `../../../packages/client/src/permission-router.ts` (the link routes `tsc -p apps/mobile` into the main checkout). Fix: `git rm --cached apps/mobile/node_modules` and commit, then confirm that `git ls-files` prints nothing.
+2. **Fixed.** VoiceOver → `onCopy(row, "action")` (`TranscriptRow.tsx` `CopyPress`) → `copyFlashFor(…, "action", …)` gives `pressing:false` (`message-copy.ts` `copyFlashFor`). Moving the logic into the pure module also covers the earlier §7 note. Mutations: a11y path reports `"press"` → R1 red; `pressing: source !== "sheet"` → T9 red.
+3. **Fixed.** "Copy all" now runs `onClose()` and then `onCopyAll` (`SelectTextSheet.tsx`), so the pill is no longer under the Modal. Mutation: drop `onClose()` → the new R4 test is red.
+
+Regressions checked on the diff: the sheet path passes `"sheet"`, so it never holds the countdown; `copyMessage` still resets `released` for both `press` and `action`; the `empty` branch now goes through `copyFlashFor`. None found. Gate: touched tests 52 pass / 0 fail; `bun run lint` clean; `bun run typecheck` red (finding 1 only). All mutations reverted; `git status` clean.
