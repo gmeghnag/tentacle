@@ -456,6 +456,8 @@ describe("a2a TaskStore — pure rules", () => {
       unit({ kind: "workflow", id: "wf-1", origin: "t1" }),
       unit({ kind: "workflow", id: "wf-2", origin: "t2" }),
       unit({ kind: "workflow", id: "wf-3" }),
+      // an owner's re-run that inherited wf-2's origin: wf-2 keeps the task (R1 finding 3)
+      unit({ kind: "workflow", id: "wf-4", origin: "t2", state: "working", endedAt: undefined }),
     ]);
     expect([...byId.entries()].map(([k, u]) => `${k}=${u.id}`)).toEqual(["t1=t1", "t2=wf-2"]);
   });

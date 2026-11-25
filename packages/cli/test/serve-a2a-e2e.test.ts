@@ -185,6 +185,23 @@ describe("serve --a2a-token (e2e)", () => {
     expect(audit).toContain("a2a-auth-failure");
   });
 
+  test("a spoofed Host never reaches another requester's card (port 0 / wildcard bind)", async () => {
+    // Review R1 finding 1. mutation: cache the first request's origin → the real card names evil
+    const { base } = await serve(rig(), new PongModel());
+    const spoof = await fetch(`${base}/anything`, { headers: { host: "evil.example:8443" } });
+    await spoof.arrayBuffer();
+    const spoofCard = await fetch(`${base}/.well-known/agent-card.json`, {
+      headers: { host: "evil.example:8443" },
+    });
+    await spoofCard.arrayBuffer();
+    const card = (await (await fetch(`${base}/.well-known/agent-card.json`)).json()) as {
+      supportedInterfaces: { url: string }[];
+    };
+    expect(card.supportedInterfaces.map((i) => i.url)).toEqual([`${base}/a2a`]);
+    // built per request from the requester's own origin: never cached by a proxy
+    expect(spoofCard.headers.get("cache-control")).toBe("no-store");
+  });
+
   test("SendMessage → COMPLETED with the answer; GetTask and ListTasks see it; WS route unaffected", async () => {
     // mutation: wire the executor with a different SessionHost → no task found / not completed
     const { base, handle } = await serve(rig(), new PongModel());

@@ -31,8 +31,10 @@ export interface UnitSource {
  * The addressable units of ONE session, by task id. A turn is addressed by its
  * own id; a run by its `origin`, unless a turn of that id exists (the turn
  * wins: a run the model started inside a caller's turn is part of that task).
- * A run with no origin is not addressable. Among same-id units the later one
- * (`workUnits()` order: ended oldest first, then live) wins.
+ * A run with no origin is not addressable. Among runs of one origin the FIRST
+ * (`workUnits()` order: ended oldest first, then live) owns it: a re-run starts
+ * only after its run ended and may inherit its origin (`WorkflowDriver.rerun`),
+ * and it must never re-open a terminal task (review R1 finding 3).
  */
 export function addressableUnits(units: readonly WorkUnit[]): Map<string, WorkUnit> {
   const byId = new Map<string, WorkUnit>();
@@ -41,9 +43,8 @@ export function addressableUnits(units: readonly WorkUnit[]): Map<string, WorkUn
       byId.set(unit.id, unit);
     }
   }
-  const turns = new Set(byId.keys());
   for (const unit of units) {
-    if (unit.kind === "workflow" && unit.origin !== undefined && !turns.has(unit.origin)) {
+    if (unit.kind === "workflow" && unit.origin !== undefined && !byId.has(unit.origin)) {
       byId.set(unit.origin, unit);
     }
   }

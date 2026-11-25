@@ -42,6 +42,12 @@ export interface A2AHttpOptions {
   readonly requestHandler: SdkRequestHandler;
   /** The public card (its `supportedInterfaces` fix the versions accepted). */
   readonly card: AgentCard;
+  /**
+   * When the public URL is unknown (port 0, a wildcard bind): the card served to
+   * THIS request, from its own origin — built per request, never stored, sent
+   * `no-store`, so a spoofed Host only ever reaches the request that sent it.
+   */
+  readonly cardFor?: (req: Request) => AgentCard;
   /** One entry per caller; none = the route is not built. */
   readonly callers: readonly ExternalCaller[];
   readonly maxBodyBytes?: number;
@@ -197,6 +203,12 @@ export function createA2ARoute(options: A2AHttpOptions): A2ARoute {
           return new Response("method not allowed", {
             status: 405,
             headers: { allow: "GET, HEAD" },
+          });
+        }
+        if (options.cardFor !== undefined) {
+          return new Response(JSON.stringify(options.cardFor(req)), {
+            status: 200,
+            headers: { "content-type": "application/json", "cache-control": "no-store" },
           });
         }
         return json(200, options.card);

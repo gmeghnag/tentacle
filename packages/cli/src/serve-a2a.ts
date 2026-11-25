@@ -56,8 +56,9 @@ export function parseA2AAsks(value: string | undefined): AskMode {
 }
 
 /**
- * The route `startWsServer` asks first. With no `baseUrl` (port 0) the card
- * is built from the first request's own origin, once.
+ * The route `startWsServer` asks first. With no `baseUrl` (port 0, a wildcard
+ * bind) each card fetch gets a card built from its OWN origin, never cached: a
+ * request's Host header never reaches another requester (review R1 finding 1).
  */
 export function buildA2A(input: BuildA2AInput): NonNullable<WsServerOptions["a2a"]> {
   const { host, options } = input;
@@ -82,20 +83,18 @@ export function buildA2A(input: BuildA2AInput): NonNullable<WsServerOptions["a2a
         }
       : {}),
   });
-  const make = (base: string) => {
-    const card = buildAgentCard({ url: `${base}${A2A_PATH}`, version: APP_VERSION });
-    return createA2ARoute({
-      requestHandler: new A2ARequestHandler(card, store, executor),
-      card,
-      callers: [{ name: A2A_CLI_CALLER, token: options.token }],
-      ...(input.onAudit ? { onAudit: input.onAudit } : {}),
-    });
-  };
-  let route = input.baseUrl !== undefined ? make(input.baseUrl) : undefined;
-  return {
-    handle(req, srv) {
-      route ??= make(new URL(req.url).origin);
-      return route.handle(req, srv);
-    },
-  };
+  const cardAt = (base: string) =>
+    buildAgentCard({ url: `${base}${A2A_PATH}`, version: APP_VERSION });
+  // The handler's card is read only for capabilities/modes, never served: with no
+  // public URL it carries the bare path, and the card endpoint builds its own per request.
+  const card = cardAt(input.baseUrl ?? "");
+  return createA2ARoute({
+    requestHandler: new A2ARequestHandler(card, store, executor),
+    card,
+    ...(input.baseUrl === undefined
+      ? { cardFor: (req: Request) => cardAt(new URL(req.url).origin) }
+      : {}),
+    callers: [{ name: A2A_CLI_CALLER, token: options.token }],
+    ...(input.onAudit ? { onAudit: input.onAudit } : {}),
+  });
 }

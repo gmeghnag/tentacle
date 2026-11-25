@@ -958,7 +958,7 @@ async function reloadedHost(
   return sessionHost;
 }
 
-/** The card's base URL; undefined (port 0, a wildcard bind) = taken from the first request. */
+/** The card's base URL; undefined (port 0, a wildcard bind) = each card fetch's own origin. */
 function a2aBaseUrl(options: ServeOptions): string | undefined {
   if (options.port === 0 || options.host === "0.0.0.0" || options.host === "::") {
     return undefined;

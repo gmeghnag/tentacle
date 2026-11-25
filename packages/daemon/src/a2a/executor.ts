@@ -25,10 +25,12 @@
  */
 import {
   type AgentCard,
+  type CancelTaskRequest,
   type Message,
   Role,
   type SendMessageRequest,
   type StreamResponse,
+  type SubscribeToTaskRequest,
   type Task,
   TaskState,
 } from "@a2a-js/sdk";
@@ -67,6 +69,7 @@ import {
 } from "../external/asks.ts";
 import { connectSession, detachSession, openSession } from "../external/session-driver.ts";
 import { externalSessionId } from "../external/session-ids.ts";
+import { findCallerUnit } from "../external/work-units.ts";
 import type { SessionHost } from "../session-host.ts";
 import {
   A2A_PROTOCOL,
@@ -94,6 +97,8 @@ export const REFUSED = {
   running: "the task is running and takes no input now: it waits on no ask you may answer",
   notAnswerable:
     "not an answer to an ask you may answer: name a requestId from the task's status, or send the text allow with one ask pending",
+  undriven:
+    "the task is not driven over A2A by this daemon process (it outlived a restart, or the owner started it): it runs on, the owner's devices answer or stop it; GetTask still reads its state",
 } as const;
 
 /** What one caller (= one A2A token) may do. */
@@ -368,6 +373,9 @@ export class A2AExecutor implements AgentExecutor {
     }
     const w = this.watchers.get(taskId);
     if (w === undefined || w.ended) {
+      if (this.isUndriven(taskId, context)) {
+        throw new UnsupportedOperationError(REFUSED.undriven);
+      }
       return none;
     }
     const user = context.user;
@@ -399,6 +407,24 @@ export class A2AExecutor implements AgentExecutor {
         w.claim = undefined;
       }
     };
+  }
+
+  /**
+   * A task of this caller still open in its session but driven by no watcher
+   * here — it outlived a `serve` restart, or its in-process connection closed
+   * (`onClose`) — is refused LOUDLY for every control (an answer, a cancel, a
+   * subscribe): nothing here could deliver it, and a silent snapshot would read
+   * as accepted (review R1 finding 2; the Design's lazy watcher is not built).
+   * Another caller's (or an unknown) task falls through to TaskNotFound. An
+   * owner-started turn in the caller's context is the same case.
+   */
+  isUndriven(taskId: string, context: ServerCallContext): boolean {
+    const user = context.user;
+    if (this.isDriving(taskId) || user === undefined || !user.isAuthenticated) {
+      return false;
+    }
+    const unit = findCallerUnit(this.opts.host, A2A_PROTOCOL, user.userName, taskId)?.unit;
+    return unit?.state === "working" || unit?.state === "waiting";
   }
 
   /**
@@ -744,6 +770,25 @@ export class A2ARequestHandler extends DefaultRequestHandler {
       release();
       throw error;
     }
+  }
+
+  /** A task no watcher here drives (a restart): refused with the reason, before the SDK's bare "not cancelable". */
+  override async cancelTask(params: CancelTaskRequest, context: ServerCallContext): Promise<Task> {
+    if (this.a2a.isUndriven(params.id, context)) {
+      throw new TaskNotCancelableError(REFUSED.undriven);
+    }
+    return super.cancelTask(params, context);
+  }
+
+  /** Same: never a snapshot stream that ends on a non-terminal state with no word. */
+  override async *resubscribe(
+    params: SubscribeToTaskRequest,
+    context: ServerCallContext,
+  ): AsyncGenerator<StreamResponse, void, undefined> {
+    if (this.a2a.isUndriven(params.id, context)) {
+      throw new UnsupportedOperationError(REFUSED.undriven);
+    }
+    yield* super.resubscribe(params, context);
   }
 
   override async *sendMessageStream(

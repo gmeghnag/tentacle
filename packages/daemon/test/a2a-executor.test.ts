@@ -19,6 +19,7 @@ import {
 } from "@a2a-js/sdk";
 import {
   RequestMalformedError,
+  TaskNotCancelableError,
   TaskNotFoundError,
   UnsupportedOperationError,
 } from "@a2a-js/sdk/errors";
@@ -760,6 +761,59 @@ describe("a2a executor — caller-answered asks (S5)", () => {
     );
     expect(late).toBeInstanceOf(UnsupportedOperationError);
     expect(ran).toEqual(["run"]);
+    await handler.cancelTask({ tenant: "", id: taskId, metadata: {} }, caller());
+    await until(() => executor.liveTaskIds().length === 0);
+  });
+
+  // Review R1 finding 2. A restart leaves the session's turn running (its ask
+  // re-asked) and a NEW executor with no watcher: every control is refused
+  // LOUDLY, never a silent snapshot. Mutation: drop the follow-up refusal →
+  // the answer returns the task, no error → red. Mutation: drop the
+  // cancel/subscribe refusals → the bare "not cancelable" / a snapshot → red.
+  test("a task that outlived a restart (no watcher here): answer, cancel and subscribe are refused with the reason; the ask stays the owner's", async () => {
+    const { host, handler, ran, executor } = rig({
+      asks: "both",
+      rounds: [[call("c1", "run")], [text("done")]],
+    });
+    const s = collect(handler.sendMessageStream(request([textPart("go")], "ctx23"), caller()));
+    await s.done;
+    expect(states(s.events).at(-1)).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
+    const taskId = taskIdOf(s.events);
+    const id = askIdOf(s.events);
+    // What `serve` builds after a restart: the same live host, a fresh adapter.
+    const policy = (who: string) => (who === "default" ? { asks: "both" as const } : undefined);
+    const fresh = new A2AExecutor({ host, version: "0.0.1", callerPolicy: policy });
+    const restarted = new A2ARequestHandler(
+      buildAgentCard({ url: "http://127.0.0.1:1/a2a", version: "0.0.1" }),
+      new A2ATaskStore({ host, isDriving: (t) => fresh.isDriving(t), callerPolicy: policy }),
+      fresh,
+    );
+    const answered = await refusal(
+      restarted.sendMessage(request([answerPart(id, "allow")], "ctx23", taskId), caller()),
+    );
+    expect(answered).toBeInstanceOf(UnsupportedOperationError);
+    expect(String(answered)).toContain(REFUSED.undriven);
+    const canceled = await refusal(
+      restarted.cancelTask({ tenant: "", id: taskId, metadata: {} }, caller()),
+    );
+    expect(canceled).toBeInstanceOf(TaskNotCancelableError);
+    expect(String(canceled)).toContain(REFUSED.undriven);
+    const subscribed = await refusal(
+      (async () => {
+        for await (const _ of restarted.resubscribe({ tenant: "", id: taskId }, caller())) {
+          // a snapshot here would be the silent case
+        }
+      })(),
+    );
+    expect(String(subscribed)).toContain(REFUSED.undriven);
+    // Another caller still sees no such task (not the reason).
+    expect(
+      await refusal(
+        restarted.sendMessage(request([answerPart(id, "allow")], "ctx23", taskId), caller("other")),
+      ),
+    ).toBeInstanceOf(TaskNotFoundError);
+    expect(ran).toEqual([]);
+    expect(host.get("a2a-default-ctx23")?.workUnits().at(-1)?.state).toBe("waiting");
     await handler.cancelTask({ tenant: "", id: taskId, metadata: {} }, caller());
     await until(() => executor.liveTaskIds().length === 0);
   });

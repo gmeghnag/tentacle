@@ -75,6 +75,8 @@ interface RigOptions {
 function rig(opts: RigOptions = {}) {
   /** What the step's ask was answered. */
   const stepAnswers: boolean[] = [];
+  /** Each session's driver (the owner's re-run is driven on it directly). */
+  const drivers: WorkflowDriver[] = [];
   const host = new SessionHost({
     defaultCwd: CWD,
     createAgent: () => {
@@ -117,6 +119,7 @@ function rig(opts: RigOptions = {}) {
           return { report: "the plan", toolUses: 1, stopReason: "end_turn" };
         },
       });
+      drivers.push(workflows);
       return { agent, permissions, workflows };
     },
   });
@@ -135,7 +138,7 @@ function rig(opts: RigOptions = {}) {
     store,
     executor,
   );
-  return { host, executor, handler, stepAnswers };
+  return { host, executor, handler, stepAnswers, drivers };
 }
 
 const caller = () =>
@@ -383,5 +386,43 @@ describe("a2a workflow tasks (S8)", () => {
     await s.done;
     expect(states(s.events).at(-1)).toBe(TaskState.TASK_STATE_COMPLETED);
     expect(stepAnswers).toEqual([true]);
+  });
+
+  // Review R1 finding 3. A re-run with no turn id of its own inherits the run's
+  // origin (`WorkflowDriver.rerun`: `turnId ?? run.turnId`). Mutation: the later
+  // same-origin unit wins (`addressableUnits`) → GetTask of the COMPLETED task
+  // reads WORKING → red.
+  test("an owner's re-run of a caller's run never changes that terminal task", async () => {
+    /** The step blocks only once set: the first run ends, the re-run waits. */
+    const gate: { block?: Promise<void> } = {};
+    let release = () => {};
+    const { host, handler, drivers } = rig({
+      get block() {
+        return gate.block;
+      },
+    });
+    const s = collect(handler.sendMessageStream(request([wfPart()], "w9"), caller()));
+    await s.done;
+    expect(states(s.events).at(-1)).toBe(TaskState.TASK_STATE_COMPLETED);
+    const taskId = taskIdOf(s.events);
+    const hosted = host.get("a2a-default-w9");
+    const first = hosted?.workUnits().find((u) => u.kind === "workflow");
+    gate.block = new Promise<void>((r) => {
+      release = r;
+    });
+    const rerun = await drivers[0]?.rerun(first?.id ?? "", undefined);
+    expect(rerun?.ok).toBe(true);
+    await until(
+      () =>
+        hosted?.workUnits().some((u) => u.kind === "workflow" && u.state === "working") === true,
+    );
+    expect(hosted?.workUnits().filter((u) => u.origin === taskId).length).toBe(2);
+    const during = await handler.getTask({ tenant: "", id: taskId }, caller());
+    expect(during.status?.state).toBe(TaskState.TASK_STATE_COMPLETED);
+    release();
+    await until(() => hosted?.workUnits().every((u) => u.state !== "working") === true);
+    const after = await handler.getTask({ tenant: "", id: taskId }, caller());
+    expect(after.status?.state).toBe(TaskState.TASK_STATE_COMPLETED);
+    expect(after.status?.timestamp ?? "").toBe(during.status?.timestamp ?? "");
   });
 });
