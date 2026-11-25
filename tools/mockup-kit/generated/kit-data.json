@@ -6,7 +6,7 @@
     "apps/mobile/src/screens/PermissionSheet.tsx": "4df08bc4dc1f8b0ecca2fb9698f4b33d18ddc768",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "5cb64e4a707fb3ade80d489dc643e6bfac5cb60e",
     "apps/mobile/src/screens/transcript/Markdown.tsx": "4acc16969f29573f6f292b0c1fdcc6ce6fa61efa",
-    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "e032760d5adb4ec796d17639a615c6b3cc4c9b07",
+    "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "9b699f60e963df28386e07a6dcf40811af9a8646",
     "apps/mobile/src/step-rail.ts": "83bd11f3b10e19be6edd27a835ef90252f69f46e",
     "apps/mobile/src/theme-beta.ts": "2359c83e90604bd9bd7625702ae21337499290d2",
     "apps/mobile/src/theme.ts": "21e4c775d07043924a727890452b854b82c966d4",

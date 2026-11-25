@@ -605,6 +605,44 @@ lines · tap to see all`; a compaction draws `⤡ Compacted` + `ctx A → B`.
 
 
 
+### Gate fixes after Execution (2 failures)
+
+The orchestrator's gate failed on two tests, neither in this task's own code.
+Both are fixed here.
+
+1. **`scripts/test/mockup-kit.test.ts > drift … > no drift`** — real, and ours.
+   Slice 3 edited `apps/mobile/src/screens/transcript/TranscriptRow.tsx` but did
+   not regenerate the kit, so the committed
+   `tools/mockup-kit/generated/kit-data.json` still carried the OLD content hash
+   for that file (`e032760d…` ≠ `9b699f60…`). Fixed with `bun run mockup-kit`:
+   the only change in the regenerated output is that one hash — no style value,
+   token or kit row moved, so Slice 3's "the kit is unaffected" claim holds.
+   Evidence: the drift test was red before (it names the file, both hashes and
+   the fix), green after (`37 pass / 0 fail`); the diff is one line.
+2. **`packages/cli/test/serve-mcp.test.ts > T12`** — a pre-existing flake in
+   `packages/cli`, not caused by this branch (it touches no file under
+   `packages/cli`), but the gate stays red until it is fixed. It sampled
+   `pidAlive(firstPid)` ONCE right after the crashing turn settled. The child's
+   death and its REAPING are two separate events: the transport settles the turn
+   on the pipe close, and at that instant the pid is still a **zombie** — probed
+   directly (`.tentacle/tmp/mobile-reset-in-timeline/probe5.ts`, 25/25 runs):
+   `kill(pid, 0)` answers `true` while `ps -o stat=` says `ZN`, becoming empty
+   only once the parent reaps it. A single sample is a race, not a sync point
+   (AGENTS §9). Replaced with `await until(() => !pidAlive(firstPid), 20_000)`,
+   which polls the very condition the next assertions read.
+   Non-vacuity (§9): mutating the fixture knob (`MCP_CRASH_ON_CALL_ONCE: "1"` →
+   `"0"`, so the server never crashes) makes the poll time out and T12 fail;
+   reverted → green. That ~1 ms window is also why 10 parallel runs and 14× CPU
+   pressure did not reproduce it — unloaded, the reaping usually wins.
+
+Both fixes are test/artifact-only: no production code changed.
+
+**Gate (this agent, as instructed):** `packages/cli/test/serve-mcp.test.ts`
+9 pass / 0 fail; `scripts/test/mockup-kit.test.ts` 37 pass / 0 fail;
+`bunx biome check packages/cli/test/serve-mcp.test.ts
+tools/mockup-kit/generated/kit-data.json` clean. The full `bun run check` is the
+orchestrator's.
+
 ## Review
 
 *— (empty)*
