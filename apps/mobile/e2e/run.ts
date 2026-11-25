@@ -1858,6 +1858,10 @@ export const FLOWS: readonly string[] = [
   // docs/fix/mobile-transcript-type.md: the transcript's type (prose, a Bash
   // step, a Thought row, a bold list), light + dark — on a session of its own.
   "41-transcript-type-shots",
+  // docs/feat/workflow-editor.md slice 7c: create a workflow from a template on
+  // the phone, Review, Save through `serve`, Run into the hash approval (denied).
+  // Its own session; it writes `.tentacle/workflows/wfedit.yaml` in the project.
+  "44-workflow-editor",
   // docs/feat/mobile-file-preview-cards.md: the transcript's preview cards (a
   // PDF page, an image, markdown lines, an HTML page), light and dark.
   "36-preview-cards",
@@ -1980,6 +1984,8 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "38-running-row": "RUNROW_ID",
   // docs/fix/mobile-transcript-type.md: the transcript's type, dark + light.
   "41-transcript-type-shots": "TRANSCRIPT_ID",
+  // docs/feat/workflow-editor.md slice 7c: the editor's create → save → Run flow.
+  "44-workflow-editor": "WFEDIT_ID",
 };
 
 /** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */

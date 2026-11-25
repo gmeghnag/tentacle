@@ -11,6 +11,19 @@ import { main } from "../src/index.ts";
 import { type OwnerRecord, RUN_STATE_VERSION, readSpec, writeOwner } from "../src/run-state.ts";
 import { simulateSilentTerminal } from "./silent-terminal.ts";
 
+/**
+ * Wait for a condition; THROWS on a timeout (the shared `until` contract, AGENTS
+ * §9). A fixed sleep used as a synchronisation point is long enough on an idle
+ * machine and not long enough under the CPU contention of a parallel gate.
+ */
+async function until(pred: () => boolean, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > end) throw new Error(`until: timed out after ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 /** A docker host whose workload never gets ready: setup fails after its first phase. */
 const neverReady = (): EngineHost =>
   ({
@@ -197,6 +210,8 @@ describe("ps (data on stdout only)", () => {
 describe("serve (D2): every line is a log, on stderr", () => {
   test("listening, audit, notice and error lines: stdout empty", async () => {
     let stop = (): void => {};
+    const settled = (): boolean => stop !== noop;
+    const noop = stop;
     const done = capture(["serve"], {
       startDaemon: async (_config, options) => {
         options.onAudit?.("audit line");
@@ -210,8 +225,14 @@ describe("serve (D2): every line is a log, on stderr", () => {
         >;
       },
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    stop();
+    // The daemon installed its SIGINT handler once it settled: wait for THAT, not
+    // for a fixed 20 ms (under CPU contention the handler is not there yet and
+    // `stop()` stays the no-op, so the run hangs to its timeout).
+    try {
+      await until(settled);
+    } finally {
+      stop();
+    }
     const r = await done;
     expect(r.code).toBe(0);
     expect(r.out).toBe("");

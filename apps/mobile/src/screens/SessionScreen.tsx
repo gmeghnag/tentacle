@@ -92,7 +92,9 @@ import {
   jumpPill,
   jumpPillText,
   jumped,
+  landingBatch,
   landingDone,
+  landingEnded,
   landingOwns,
   landingPending,
   landingQuiet,
@@ -567,6 +569,10 @@ export function SessionScreen({
       reveal.current = null;
     }
   }, []);
+  // The settle check armed when a landing ENDS (declared here, assigned with
+  // `armSettle` below: the landing callbacks are created before it).
+  const offset = useRef(0);
+  const armLandedSettle = useRef<() => void>(() => {});
   const armReveal = useCallback(() => {
     disarmReveal();
     // The reveal can fire TWICE for one re-attach (Review round 1, finding 2): the
@@ -583,11 +589,16 @@ export function SessionScreen({
           size.current,
           followRef.current.following,
           hasRows.current,
+          offset.current,
         );
         const changed = next.state.settling !== landing.current.settling;
+        const ended = landingEnded(landing.current, next.state);
         landing.current = next.state;
         if (next.step !== null) {
           perform(next.step);
+        }
+        if (ended) {
+          armLandedSettle.current();
         }
         if (next.step !== null && landingPending(next.state)) {
           fire();
@@ -619,11 +630,15 @@ export function SessionScreen({
       size.current,
       followRef.current.following,
       hasRows.current,
+      offset.current,
     );
     const changed = next.state.settling !== landing.current.settling;
     landing.current = next.state;
     if (next.step !== null) {
       perform(next.step);
+    }
+    if (landingEnded(before, next.state)) {
+      armLandedSettle.current();
     }
     // A landing OWNS the list until it is done: `landingPending`, never "did it
     // scroll?". A re-attach absorbs its measurements without scrolling (bug 4),
@@ -639,23 +654,30 @@ export function SessionScreen({
   }, [perform, armReveal]);
   // Bug 5 (docs/fix/mobile-qa-1117.md): where the list really is, and the settle
   // re-check armed by every size change — `follow.ts`'s `settleStep` decides.
-  const offset = useRef(0);
   const settle = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const armSettle = useCallback(() => {
-    if (settle.current !== null) {
-      clearTimeout(settle.current);
-    }
-    settle.current = setTimeout(() => {
-      settle.current = null;
-      if (dragging.current) {
-        return;
+  const armSettle = useCallback(
+    (silent = false) => {
+      if (settle.current !== null) {
+        clearTimeout(settle.current);
       }
-      const step = settleStep(followRef.current, { offset: offset.current, ...size.current });
-      if (step !== null) {
-        perform(step);
-      }
-    }, SETTLE_MS);
-  }, [perform]);
+      settle.current = setTimeout(() => {
+        settle.current = null;
+        if (dragging.current) {
+          return;
+        }
+        const step = settleStep(
+          followRef.current,
+          { offset: offset.current, ...size.current },
+          !silent,
+        );
+        if (step !== null) {
+          perform(step);
+        }
+      }, SETTLE_MS);
+    },
+    [perform],
+  );
+  armLandedSettle.current = () => armSettle(true);
   useEffect(
     () => () => {
       if (settle.current !== null) {
@@ -1834,6 +1856,7 @@ export function SessionScreen({
               CellRendererComponent={MeasuredCell}
               testID="transcript"
               data={rows}
+              maxToRenderPerBatch={landingBatch(settling)}
               keyExtractor={(row: Row) => row.key}
               renderItem={({ item }) => {
                 const cell = layout.cells.get(item.key);

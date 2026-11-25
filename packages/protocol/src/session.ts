@@ -1060,6 +1060,155 @@ export type WorkflowCatalogueResult = z.infer<typeof WorkflowCatalogueResultSche
 export const WorkflowCatalogueParamsSchema = z.object({ sessionId: SessionIdSchema });
 export type WorkflowCatalogueParams = z.infer<typeof WorkflowCatalogueParamsSchema>;
 
+// --- session/workflow_source + session/workflow_save: the workflow EDITOR ---
+// (docs/feat/workflow-editor.md D3). Two ADDITIVE methods: an older daemon
+// answers `MethodNotFound` (the client maps it to `unsupported`, so the phone
+// hides Edit/New), so neither moves PROTOCOL_VERSION.
+//
+// The phone cannot parse YAML (`validateWorkflow` needs `Bun.YAML`,
+// `workflow-spec.ts`), so a `draft` crosses the wire as JSON TEXT, not as a
+// `z.record`: the JSON-schema export represents neither a `z.record` nor a
+// `.refine` (the `WorkflowInputValueSchema` and `attachment.ts` precedents), and
+// a `.refine`-only bound would be invisible to every other client. Text keeps
+// the 512 KiB cap part of the contract, and the daemon parses it into the same
+// mapping the strict validator reads — so an unknown draft field is an ERROR
+// there, never a silent drop from a file the user saves.
+
+/** The draft's JSON, serialized: the same mapping `Bun.YAML.parse` would give. */
+export const WORKFLOW_DRAFT_MAX_CHARS = 512 * 1024;
+/** One prompt file's bytes (the loader's own per-file cap, `WORKFLOW_FILE_MAX_BYTES`). */
+export const WORKFLOW_PROMPT_FILE_MAX_CHARS = 64 * 1024;
+export const WORKFLOW_PROMPTS_MAX = 32;
+/** The file's raw YAML: the loader never reads more than this. */
+export const WORKFLOW_SOURCE_TEXT_MAX_CHARS = 256 * 1024;
+/** ONE written file's patch (a review screen renders it; it is never the truth). */
+export const WORKFLOW_PATCH_MAX_CHARS = 64 * 1024;
+/** The YAML plus every prompt file a save can write (the loader's file cap is 200). */
+export const WORKFLOW_WRITE_FILES_MAX = 1 + WORKFLOW_PROMPTS_MAX;
+
+/** A prompt file of a draft, by the path a step's `prompt:` names. A LIST, not a
+ * record, for the `WorkflowInputValueSchema` reason. */
+export const WorkflowPromptTextSchema = z.object({
+  path: line(300),
+  text: z.string().max(WORKFLOW_PROMPT_FILE_MAX_CHARS),
+});
+export type WorkflowPromptText = z.infer<typeof WorkflowPromptTextSchema>;
+
+/**
+ * What an editor opens: the file's bytes, its draft, its prompts, and the
+ * session's picker vocabulary. `draft` is present iff the mapping could be read
+ * as one (`asDraft`), `hash` iff the file validated, `errors` iff it did not —
+ * so a client never has to guess which state it is in. `context` carries model
+ * NAMES only, never an id or a URL (AGENTS §7), and it is what makes the phone's
+ * local problem list word-for-word the daemon's.
+ */
+export const WorkflowSourceParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  name: WorkflowNameSchema,
+});
+export type WorkflowSourceParams = z.infer<typeof WorkflowSourceParamsSchema>;
+
+export const WorkflowSourceResultSchema = z.object({
+  ok: z.boolean(),
+  /** Project-relative, `.tentacle/workflows/<name>.yaml`; absent when there is no file
+   * to name at all (a session with no workflow driver). */
+  path: line(512).optional(),
+  /** The file's raw YAML, uncut: it is what a Review patch is computed against. */
+  text: z.string().max(WORKFLOW_SOURCE_TEXT_MAX_CHARS).optional(),
+  /** The draft as JSON text (see above), present iff the mapping is structurally a workflow. */
+  draft: z.string().max(WORKFLOW_DRAFT_MAX_CHARS).optional(),
+  /** Only the prompt files the draft's steps reference. */
+  prompts: z.array(WorkflowPromptTextSchema).max(WORKFLOW_PROMPTS_MAX).optional(),
+  /** The content hash `start{hash}` pins (sha-256 hex); present iff the file validated. */
+  hash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  version: z.number().int().nonnegative().optional(),
+  /** Whether the file already holds the emitter's bytes: false = a save rewrites its
+   * layout or comments, and Review says so (owner answer 3). */
+  canonical: z.boolean().optional(),
+  /** The validator's sentences, each naming its YAML path (the bar shows the first). */
+  errors: z.array(z.string().max(300)).max(20).optional(),
+  /** Why the file cannot be edited at all (a non-mapping, a wrong-typed field). */
+  unreadable: line(300).optional(),
+  /** The phone's pickers: NAME-level vocabulary, never an id or a URL (§7).
+   * Either list may be absent (a session with no models configured) — a missing
+   * list means "no choice", never "anything goes". */
+  context: z
+    .object({
+      models: z.array(line(128)).max(64).optional(),
+      agentTypes: z.array(line(128)).max(64).optional(),
+    })
+    .optional(),
+  /** This session cannot edit workflows at all (a pod's daemon) — NOT "the file is missing". */
+  unavailable: line(200).optional(),
+});
+export type WorkflowSourceResult = z.infer<typeof WorkflowSourceResultSchema>;
+
+/** A `session/workflow_save`: `dryRun: true` IS the Review screen (it returns
+ * everything and writes nothing); `false` re-does every check and writes. */
+export const WorkflowSaveParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  name: WorkflowNameSchema,
+  /** `create` refuses an existing file; `replace` requires `baseHash` to still be the file's. */
+  mode: z.enum(["create", "replace"]),
+  /** The draft as JSON text; the daemon parses it and the STRICT validator judges it. */
+  draft: z.string().max(WORKFLOW_DRAFT_MAX_CHARS),
+  /** The prompt files the draft carries. Every one must be referenced by a step. */
+  prompts: z.array(WorkflowPromptTextSchema).max(WORKFLOW_PROMPTS_MAX),
+  /** The hash the caller loaded: a different one on disk refuses `changed`, nothing written. */
+  baseHash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  /** Required, never defaulted: a client that forgot it must not write what it meant to preview. */
+  dryRun: z.boolean(),
+});
+export type WorkflowSaveParams = z.infer<typeof WorkflowSaveParamsSchema>;
+
+/** One file a save writes (or would), as Review lists it. */
+export const WorkflowWriteFileSchema = z.object({
+  /** Project-relative: `.tentacle/workflows/<name>.yaml` or a prompt beside it. */
+  path: line(512),
+  /** `unchanged` = identical bytes on disk already (legal, and not a conflict). */
+  status: z.enum(["new", "changed", "unchanged"]),
+  added: z.number().int().nonnegative(),
+  removed: z.number().int().nonnegative(),
+  /** The unified diff of this file; absent on `unchanged`. */
+  patch: z.string().max(WORKFLOW_PATCH_MAX_CHARS).optional(),
+});
+export type WorkflowWriteFile = z.infer<typeof WorkflowWriteFileSchema>;
+
+export const WorkflowSaveResultSchema = z.object({
+  ok: z.boolean(),
+  /** `changed` | `exists` | `invalid` | `unavailable`: a bounded free word (the refusal
+   * schema above), never an enum. */
+  refusal: WorkflowRefusalSchema.optional(),
+  /** The human sentence: shown verbatim, never thrown at a UI. */
+  reason: z.string().max(2000).optional(),
+  errors: z.array(z.string().max(300)).max(20).optional(),
+  /** The hash of the bytes a write produces — the hash the next start asks about. */
+  hash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  version: z.number().int().nonnegative().optional(),
+  path: line(512).optional(),
+  files: z.array(WorkflowWriteFileSchema).max(WORKFLOW_WRITE_FILES_MAX).optional(),
+  /** Whether THAT hash is approved already (display only; the save never approves). */
+  approved: z.boolean().optional(),
+  /** Other workflows whose hash these prompt files also change: their next start asks. */
+  alsoChanges: z.array(WorkflowNameSchema).max(64).optional(),
+  /** A run of this workflow is in flight: it keeps its own snapshot and version. */
+  running: WorkflowRunRefSchema.optional(),
+  /** Schedules pinned to the OLD hash: they skip `changed` at fire time until re-created.
+   * `sc-N`, as `ScheduleIdSchema` reads it (declared later in this file, so a
+   * reference here would be a temporal-dead-zone error at module load). */
+  schedules: z.array(line(64)).max(64).optional(),
+});
+export type WorkflowSaveResult = z.infer<typeof WorkflowSaveResultSchema>;
+
 // --- the session's background shell jobs (docs/feat/shell-jobs-panel.md) ---
 // The live list of the `shell{run_in_background}` jobs a session started: one
 // full-state update (`jobs`), sent only on a start or an exit (never a stream).

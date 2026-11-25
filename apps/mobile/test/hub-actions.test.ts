@@ -19,7 +19,6 @@ import {
   NO_ARTIFACTS,
   NO_CONNECTION,
   NO_TOOLS,
-  NO_WORKFLOWS_HERE,
   PULSE_START,
   type PulseInput,
   type PulseState,
@@ -35,6 +34,7 @@ import {
 import { fanItemLook } from "../src/hub-fan.ts";
 import { commitPlan, hubA11yRoute, hubContextOf } from "../src/hub-session.ts";
 import { type SwitchFacts, toolsSummary } from "../src/tools-view.ts";
+import { WORKFLOWS_UPDATE_TENTACLE } from "../src/workflow-runs-controller.ts";
 
 const noop = (): void => undefined;
 const TURN = { kind: "turn", key: "t1", turnId: "t1", own: true } as const;
@@ -877,19 +877,37 @@ describe("the Workflows item (docs/feat/workflows-ui.md D4)", () => {
     ]);
   });
 
-  test("no run AND no workflow in the project dims it; the commit says it, nothing opens", () => {
+  test("an older daemon dims it with its reason; the commit says it, nothing opens", () => {
+    // Only an older daemon dims Workflows (docs/feat/workflow-editor.md D8 + E1):
+    // an EMPTY list must still open, because the runs screen's empty state is
+    // where the first workflow is created (see workflow-runs-controller.test.ts).
     const ctx = hubContextOf({
       link: "up",
       turn: null,
       ended: null,
       dictation: false,
-      workflows: { needYou: 0, empty: NO_WORKFLOWS_HERE },
+      workflows: { needYou: 0, empty: WORKFLOWS_UPDATE_TENTACLE },
     });
-    expect(NO_WORKFLOWS_HERE).toBe("No workflows in this project");
-    expect(wf(ctx)).toMatchObject({ dimmed: true, emptyLabel: NO_WORKFLOWS_HERE });
+    expect(wf(ctx)).toMatchObject({ dimmed: true, emptyLabel: WORKFLOWS_UPDATE_TENTACLE });
     expect(resolveCommit("workflows", ctx, WF, hubOpen(ctx))).toEqual({
       kind: "noop",
-      notice: NO_WORKFLOWS_HERE,
+      notice: WORKFLOWS_UPDATE_TENTACLE,
+    });
+  });
+
+  test("an EMPTY list does NOT dim it: that screen is where the first workflow is made", () => {
+    const ctx = hubContextOf({
+      link: "up",
+      turn: null,
+      ended: null,
+
+      dictation: false,
+      workflows: { needYou: 0, empty: null },
+    });
+    expect(wf(ctx)).toMatchObject({ dimmed: false, emptyLabel: null });
+    expect(resolveCommit("workflows", ctx, WF, hubOpen(ctx))).toEqual({
+      kind: "run",
+      id: "workflows",
     });
   });
 

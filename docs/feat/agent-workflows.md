@@ -1544,8 +1544,11 @@ dichiara PASS senza prova, non è ripetibile, non è visibile come sequenza. Il 
 - **Ora:** forma B, ridotta (MVP sotto).
 - **Dopo:** step paralleli (`needs`), trigger su push git, workflow lanciato da `schedule_create`,
   libreria di workflow condivisi tra progetti.
-- **Mai:** editor visuale drag-and-drop; connettori stile n8n (Slack, Gmail…: ci sono gli MCP);
-  un workflow che si auto-approva o si auto-modifica durante il run.
+- **Mai:** ~~editor visuale drag-and-drop~~ (**rovesciato** dall'owner il 22/11 ~22:55: l'editor
+  visuale sul grafo iPhone, variante A a manipolazione diretta, è `feat/workflow-editor` —
+  `docs/feat/workflow-editor.md`; resta vero che salvare NON approva: ogni modifica è un hash
+  nuovo, chiesto di nuovo alla prima esecuzione); connettori stile n8n (Slack, Gmail…: ci sono
+  gli MCP); un workflow che si auto-approva o si auto-modifica durante il run.
 
 **MVP (prima slice).** Un file `.tentacle/workflows/*.yaml`, solo **sequenziale**. Tipi di step:
 `agent` (prompt + modello + dove) e `run` (comando shell, locale o `workload_shell`). Ogni step

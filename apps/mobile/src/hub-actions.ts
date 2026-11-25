@@ -130,13 +130,6 @@ export const NOTHING_RUNNING = "Nothing running";
 export const NO_ARTIFACTS = "No artifacts yet";
 /** The same rule for Tools: nothing to switch, so the sheet would be two empty lists. */
 export const NO_TOOLS = "No MCP servers or skills in this session";
-/**
- * Nothing at all to open on the Workflows item (docs/fix/workflows-ux.md D6): no
- * run AND the project's catalogue is known to list no workflow. A project WITH a
- * workflow file is never dimmed — the run list is where starting it lives.
- */
-export const NO_WORKFLOWS_HERE = "No workflows in this project";
-
 const LABELS: Readonly<Record<HubActionId, string>> = {
   stop: "Stop",
   steer: "Steer",
@@ -267,6 +260,9 @@ function dimmedBecause(id: HubEntryId, ctx: HubContext): string | null {
   if (id === "tools") {
     return ctx.toolsEmpty ? NO_TOOLS : null;
   }
+  // Workflows dims ONLY with the older-daemon reason (docs/feat/workflow-editor.md
+  // D8 + E1: an empty list is not "nothing to open" — the runs screen's empty
+  // state is where the first workflow is created, so it must stay reachable).
   if (id === "workflows") {
     return ctx.workflowsEmpty ?? null;
   }

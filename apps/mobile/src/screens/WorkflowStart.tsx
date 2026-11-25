@@ -42,6 +42,15 @@ export interface WorkflowStartScreenProps {
   readonly onCloseRow: () => void;
   readonly onValue: (name: string, value: string) => void;
   readonly onStart: () => void;
+  /**
+   * Open a row in the graph editor (`docs/feat/workflow-editor.md` D8, slice 7a).
+   * Offered on EVERY row that names a file — a broken one included, because such a
+   * file opens as `broken` there and says why (slice 6), which is where a person
+   * finds out what to fix.
+   */
+  readonly onEdit?: (name: string) => void;
+  /** "New workflow" (D8): the graph editor in create mode. */
+  readonly onNew?: () => void;
 }
 
 /** The folder the catalogue read, and the two notices about it. */
@@ -85,10 +94,12 @@ function ValidRow({
   palette,
   entry,
   onPress,
+  onEdit,
 }: {
   readonly palette: Palette;
   readonly entry: CatalogueEntry;
   readonly onPress: () => void;
+  readonly onEdit?: (name: string) => void;
 }): JSX.Element {
   return (
     <Pressable
@@ -110,6 +121,16 @@ function ValidRow({
       {entry.description === null ? null : (
         <Text style={[typography.subhead, { color: palette.sec }]}>{entry.description}</Text>
       )}
+      {onEdit === undefined ? null : (
+        <PillButton
+          palette={palette}
+          testID={`workflow-start-edit-${entry.name}`}
+          kind="secondary"
+          label="Edit"
+          icon="square.and.pencil"
+          onPress={() => onEdit(entry.name)}
+        />
+      )}
     </Pressable>
   );
 }
@@ -118,9 +139,11 @@ function ValidRow({
 function BrokenRow({
   palette,
   entry,
+  onEdit,
 }: {
   readonly palette: Palette;
   readonly entry: CatalogueEntry;
+  readonly onEdit?: (name: string) => void;
 }): JSX.Element {
   return (
     <View
@@ -141,6 +164,16 @@ function BrokenRow({
           ),
         )}
       </View>
+      {onEdit === undefined ? null : (
+        <PillButton
+          palette={palette}
+          testID={`workflow-start-edit-${entry.name}`}
+          kind="secondary"
+          label="Edit"
+          icon="square.and.pencil"
+          onPress={() => onEdit(entry.name)}
+        />
+      )}
     </View>
   );
 }
@@ -336,6 +369,16 @@ export function WorkflowStartScreen(props: WorkflowStartScreenProps): JSX.Elemen
           />
         ) : null}
         {entry === null ? <FolderLine palette={palette} state={state} /> : null}
+        {entry === null && state.kind === "ready" && props.onNew !== undefined ? (
+          <PillButton
+            palette={palette}
+            testID="workflow-start-new"
+            kind="secondary"
+            label="New workflow"
+            icon="plus"
+            onPress={props.onNew}
+          />
+        ) : null}
         {state.kind === "ready" && view?.kind === "empty" ? (
           <EmptyState
             testID="workflow-start-empty"
@@ -352,12 +395,13 @@ export function WorkflowStartScreen(props: WorkflowStartScreenProps): JSX.Elemen
                 palette={palette}
                 entry={row}
                 onPress={() => props.onOpenRow(row.key)}
+                {...(props.onEdit === undefined ? {} : { onEdit: props.onEdit })}
               />
             ))
           : null}
         {entry === null
           ? (view?.invalid ?? []).map((row) => (
-              <BrokenRow key={row.key} palette={palette} entry={row} />
+              <BrokenRow key={row.key} palette={palette} entry={row} onEdit={props.onEdit} />
             ))
           : null}
         {entry === null ? null : (

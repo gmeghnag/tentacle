@@ -326,11 +326,11 @@ describe("socketDialer: dial errors are actionable", () => {
   });
 
   test("a closed TCP port → 'connection refused'", async () => {
-    const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
-    const port = server.port;
-    server.stop(true);
-    const err = await dialErr(tcpEp(port));
-    expect(err?.message).toContain(`connection refused by 127.0.0.1:${port}`);
+    // Port 1: never handed out by port-0 allocation and bound by no test, so a
+    // concurrent shard cannot own it (a probed-then-released ephemeral port can
+    // be taken between probe and dial — see AGENTS §9).
+    const err = await dialErr(tcpEp(1));
+    expect(err?.message).toContain("connection refused by 127.0.0.1:1");
   });
 
   test("a TLS server that never handshakes → connect timeout, no hang", async () => {

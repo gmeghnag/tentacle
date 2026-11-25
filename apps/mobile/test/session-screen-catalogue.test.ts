@@ -115,7 +115,7 @@ describe("the session screen's workflow catalogue", () => {
     expect(figure).toEqual({ needYou: 0, empty: null });
   });
 
-  test("a project with no workflow file IS dimmed, with its own reason", async () => {
+  test("a project with no workflow file is NOT dimmed (the runs screen offers New workflow)", async () => {
     const h = harness({ answer: catalogue() });
     const screen = h.screen();
     await screen.open();
@@ -124,7 +124,7 @@ describe("the session screen's workflow catalogue", () => {
       { kind: "ready", runs: [], offline: null },
       catalogueFigure(screen.state().catalogue),
     );
-    expect(figure).toEqual({ needYou: 0, empty: "No workflows in this project" });
+    expect(figure).toEqual({ needYou: 0, empty: null });
   });
 
   test("a FAILED read stays UNKNOWN — never an empty project", async () => {
@@ -171,9 +171,7 @@ describe("the session screen's workflow catalogue", () => {
     await screen.open();
     await settle();
     const ready = { kind: "ready", runs: [], offline: null } as const;
-    expect(workflowsHub(ready, catalogueFigure(screen.state().catalogue))?.empty).toBe(
-      "No workflows in this project",
-    );
+    expect(catalogueFigure(screen.state().catalogue)).toMatchObject({ known: true, count: 0 });
     h.next.answer = oneWorkflow;
     await screen.refreshCatalogue();
     await settle();

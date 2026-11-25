@@ -17,7 +17,6 @@
  *   `dispose`.
  */
 import type { WorkflowCatalogueResult, WorkflowListResult } from "@tentacle/protocol";
-import { NO_WORKFLOWS_HERE } from "./hub-actions.ts";
 import { type ElencoRun, fromListRow, needsUserCount } from "./workflow-list.ts";
 
 /** A burst of `workflows` frames is one read, this long after the last. */
@@ -207,9 +206,17 @@ export function catalogueFigure(
  * loading, or the first read failed): an unknown list never dims the item whose
  * tap is what reads it.
  *
- * The dim rule is the pair's, never the run list's alone (fix D6): a project with
- * a workflow FILE has something to open even with no run — that screen is where
- * starting one lives — so only "no run AND no workflow" dims the item.
+ * An EMPTY list is NOT a reason to dim (docs/feat/workflow-editor.md D8
+ * "Entries" + E1, which supersede docs/feat/workflows-ui.md D4's "dimmed when
+ * `workflow/list` returned none"): the runs screen's empty state is the "New
+ * workflow" button, and this item is the ONLY door to that screen. Dimming an
+ * empty list would make the first workflow unreachable from the phone — the
+ * dead end flow 44 hit on device. Only an older daemon still dims: there is no
+ * usable screen behind it.
+ *
+ * The catalogue adds one dim: `unavailable` (a pod's daemon can run no workflow).
+ * A known-EMPTY catalogue never dims (the runs screen's "New workflow" is how the
+ * first file is made).
  */
 export function workflowsHub(
   state: RunsState,
@@ -222,15 +229,8 @@ export function workflowsHub(
     return undefined;
   }
   const needYou = needsUserCount(state.runs);
-  if (state.runs.length > 0) {
-    return { needYou, empty: null };
-  }
-  if (catalogue?.unavailable != null) {
+  if (state.runs.length === 0 && catalogue?.unavailable != null) {
     return { needYou, empty: catalogue.unavailable };
   }
-  if (catalogue?.known === true && catalogue.count === 0) {
-    return { needYou, empty: NO_WORKFLOWS_HERE };
-  }
-  // A workflow file to start, or a catalogue nobody has read: offered, never dimmed.
   return { needYou, empty: null };
 }

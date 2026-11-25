@@ -10,7 +10,6 @@ import type {
   WorkflowListResult,
   WorkflowListRow,
 } from "@tentacle/protocol";
-import { NO_WORKFLOWS_HERE } from "../src/hub-actions.ts";
 import {
   type CatalogueFigure,
   RUNS_DEBOUNCE_MS,
@@ -221,6 +220,23 @@ describe("workflowsHub: the hub's figure (D4, D6)", () => {
     expect(workflowsHub({ kind: "error", runs: [], offline: null, error: "x" })).toBeUndefined();
   });
 
+  /**
+   * docs/feat/workflow-editor.md D8 "Entries" (`WorkflowRuns` empty state "New
+   * workflow") + E1 ("empty list → New"): with zero runs the runs list IS the
+   * only way to create the first workflow, and the hub item is its only door
+   * (`App.tsx`'s `onOpenWorkflows` → `WorkflowRuns`). So an EMPTY list must
+   * still open: dimming it — docs/feat/workflows-ui.md D4's earlier rule, from
+   * before the phone could create one — makes the first workflow unreachable,
+   * which is also what broke flow 44. An older daemon keeps its dim: there is
+   * no runs screen to open there.
+   */
+  test("an EMPTY list does not dim the item — its tap is how the first workflow is created", () => {
+    expect(workflowsHub({ kind: "ready", runs: [], offline: null })).toEqual({
+      needYou: 0,
+      empty: null,
+    });
+  });
+
   test("an older daemon → dimmed `Update tentacle` (a version is not an empty project)", () => {
     expect(workflowsHub({ kind: "unsupported", runs: [], offline: null })).toEqual({
       needYou: 0,
@@ -237,9 +253,8 @@ describe("workflowsHub: the hub's figure (D4, D6)", () => {
     expect(workflowsHub(READY_EMPTY, ONE_FILE)).toEqual({ needYou: 0, empty: null });
   });
 
-  test("no run and a catalogue known to be EMPTY → dimmed `No workflows in this project`", () => {
-    expect(NO_WORKFLOWS_HERE).toBe("No workflows in this project");
-    expect(workflowsHub(READY_EMPTY, NO_FILE)).toEqual({ needYou: 0, empty: NO_WORKFLOWS_HERE });
+  test("no run and a catalogue known to be EMPTY → NOT dimmed (workflow-editor D8/E1: New workflow lives there)", () => {
+    expect(workflowsHub(READY_EMPTY, NO_FILE)).toEqual({ needYou: 0, empty: null });
   });
 
   test("an UNKNOWN catalogue never dims (not read, older daemon, a failed read)", () => {

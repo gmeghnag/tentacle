@@ -416,6 +416,13 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       // `/workflow` lists them through this, so a dropped forward leaves a panel
       // that can never offer a file. Forwarded in `persistingController`.
       "workflowCatalogue",
+      // The workflow EDITOR's two calls (docs/feat/workflow-editor.md D5): the
+      // phone reads a file and writes it through this session, so a dropped
+      // forward would leave Edit/New answering "unsupported" on every runtime.
+      // Optional on `SessionController` (this task ships no TUI editor), present
+      // on `RemoteSession`, so they are still the wrapper's to forward.
+      "workflowSource",
+      "workflowSave",
       "onJobs",
       "jobOutput",
       "killJob",

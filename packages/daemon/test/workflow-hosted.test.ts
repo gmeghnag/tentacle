@@ -18,6 +18,7 @@ import {
   NOTE_KIND,
   PermissionBroker,
   type ToolContext,
+  workflowYaml,
 } from "@tentacle/core";
 import type { KnownLogEntry, LogCursor } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
@@ -386,5 +387,410 @@ describe("session/workflow_catalogue on a hosted session (slice 5a)", () => {
     expect(cut).toBeDefined();
     expect(cut?.length).toBe(300);
     expect(cut?.endsWith("…")).toBe(true);
+  });
+});
+
+/**
+ * A driver over an in-memory folder WITH the writer (docs/feat/workflow-editor.md
+ * slice 3b): `load` reads it, `save` writes it (no dry-run write), the store is
+ * a spy whose `add` must never run.
+ */
+function editableDriver(adds: { count: number }) {
+  const disk = new Map<string, string>([["task.yaml", YAML]]);
+  const read = (name: string): WorkflowSource | undefined => {
+    const text = disk.get(`${name}.yaml`);
+    return text === undefined
+      ? undefined
+      : { path: `.tentacle/workflows/${name}.yaml`, text, prompts: Object.fromEntries(disk) };
+  };
+  const deps: WorkflowDriverDeps = {
+    load: async (name) => {
+      const source = read(name);
+      if (source === undefined) throw new Error(`no workflow ${name}`);
+      return source;
+    },
+    save: (plan, currentHash) => {
+      const base = read(plan.name);
+      if (plan.mode === "replace" && (base === undefined || currentHash(base) !== plan.baseHash)) {
+        return { ok: false, refusal: "changed", reason: "changed", files: [] };
+      }
+      const text = workflowYaml(plan.draft);
+      if (!plan.dryRun) disk.set(`${plan.name}.yaml`, text);
+      return {
+        ok: true,
+        files: [
+          {
+            path: `${plan.name}.yaml`,
+            status: "changed",
+            patch: "p".repeat(70_000),
+            added: 1,
+            removed: 1,
+          },
+        ],
+      };
+    },
+    context: () => ({ models: ["opus"], agentTypes: ["general"] }),
+    approvals: {
+      has: async () => true,
+      add: async () => {
+        adds.count += 1;
+      },
+    },
+    request: async () => ({ allowed: false }),
+    runnerFor: () => async () => ({ report: "ok", toolUses: 1, stopReason: "end_turn" }),
+  };
+  return { driver: new WorkflowDriver(deps), disk };
+}
+
+/** A hosted session that can schedule (its own timer seam, never the globals). */
+function schedulingHosted(): HostedSession {
+  const agent = new Agent({
+    model: {
+      id: "one",
+      async *stream() {
+        yield { type: "done" };
+      },
+    },
+    tools: new ToolRegistry(),
+    env: noopEnv,
+  });
+  return new HostedSession(
+    "s1",
+    new Session(agent),
+    new PermissionBroker(),
+    undefined,
+    {},
+    undefined,
+    Date.now,
+    undefined,
+    {},
+    undefined,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    { setTimeout: () => ({}), clearTimeout: () => {} },
+  );
+}
+
+const EDITED = {
+  schemaVersion: 1,
+  name: "task",
+  version: 2,
+  steps: [{ id: "plan", agent: { prompt_text: "plan it better" } }],
+};
+
+describe("session/workflow_source + workflow_save on a hosted session (slice 3b)", () => {
+  test("a tunnelled session (no driver): both answer `unavailable`, nothing else", async () => {
+    const session = hosted();
+    const source = await session.workflowSource({ sessionId: "s1", name: "task" });
+    expect(source.ok).toBe(false);
+    expect(source.unavailable).toBe("workflows can be edited only on a laptop or serve session");
+    const saved = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "replace",
+      draft: JSON.stringify(EDITED),
+      prompts: [],
+      dryRun: false,
+    });
+    expect(saved).toEqual({
+      ok: false,
+      refusal: "unavailable",
+      reason: "workflows can be edited only on a laptop or serve session",
+    });
+  });
+
+  test("a driver session answers both, on the wire's shapes; a save never approves", async () => {
+    const adds = { count: 0 };
+    const { driver, disk } = editableDriver(adds);
+    const session = hosted();
+    session.attachWorkflows(driver);
+    const source = await session.workflowSource({ sessionId: "s1", name: "task" });
+    expect(source.ok).toBe(true);
+    expect(source.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.parse(source.draft ?? "null")).toMatchObject({ name: "task", version: 1 });
+    expect(source.prompts).toEqual([]);
+    expect(source.context).toEqual({ models: ["opus"], agentTypes: ["general"] });
+    const saved = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "replace",
+      draft: JSON.stringify(EDITED),
+      prompts: [],
+      ...(source.hash !== undefined ? { baseHash: source.hash } : {}),
+      dryRun: false,
+    });
+    expect(saved.ok).toBe(true);
+    expect(saved.hash).not.toBe(source.hash);
+    expect(disk.get("task.yaml")).toBe(workflowYaml(EDITED));
+    // The writer's 70 000-char patch is cut to the wire's cap, never a failed answer.
+    expect(saved.files?.[0]?.path).toBe(".tentacle/workflows/task.yaml");
+    expect(saved.files?.[0]?.patch?.length).toBe(64 * 1024);
+    expect(adds.count).toBe(0);
+    // The catalogue then reports exactly the hash the save returned.
+  });
+
+  test("a draft that is not JSON, or a prompt given twice, is `invalid` before the driver", async () => {
+    const { driver, disk } = editableDriver({ count: 0 });
+    const session = hosted();
+    session.attachWorkflows(driver);
+    const notJson = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "create",
+      draft: "{nope",
+      prompts: [],
+      dryRun: false,
+    });
+    expect(notJson.refusal).toBe("invalid");
+    // Each guard is named, so neither test passes on the other's cause.
+    expect(notJson.reason).toContain("the draft is not JSON");
+    const twice = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "create",
+      draft: JSON.stringify(EDITED),
+      prompts: [
+        { path: "prompts/a.md", text: "1" },
+        { path: "prompts/a.md", text: "2" },
+      ],
+      dryRun: false,
+    });
+    expect(twice.refusal).toBe("invalid");
+    expect(twice.reason).toContain("prompts/a.md");
+    expect(twice.reason).toContain("given twice");
+    expect(disk.get("task.yaml")).toBe(YAML);
+  });
+
+  test("60 validator errors: both answer them capped (20 lines, `+k more`), never `unavailable`", async () => {
+    // Review of 3a+3b #1: the validator does not bound its list; the wire does.
+    const steps = Array.from({ length: 60 }, (_, i) => ({ id: `s${i}`, run: "" }));
+    const broken = { schemaVersion: 1, name: "task", version: 1, steps };
+    const { driver, disk } = editableDriver({ count: 0 });
+    const session = hosted();
+    session.attachWorkflows(driver);
+    const saved = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "replace",
+      draft: JSON.stringify(broken),
+      prompts: [],
+      dryRun: true,
+    });
+    expect(saved.ok).toBe(false);
+    expect(saved.refusal).toBe("invalid");
+    expect(saved.errors).toHaveLength(20);
+    expect(saved.errors?.[19]).toBe("+41 more");
+    expect(saved.reason?.length ?? 0).toBeLessThanOrEqual(2000);
+    expect(saved.reason).toContain("steps[0].run");
+    expect(saved.reason?.endsWith("…")).toBe(true);
+    // The same file hand-written on disk: it OPENS, with its errors.
+    disk.set(
+      "task.yaml",
+      `schemaVersion: 1\nname: task\nversion: 1\nsteps:\n${steps.map((s) => `  - id: ${s.id}\n    run: ""\n`).join("")}`,
+    );
+    const source = await session.workflowSource({ sessionId: "s1", name: "task" });
+    expect(source.unavailable).toBeUndefined();
+    expect(source.ok).toBe(true);
+    expect(source.hash).toBeUndefined();
+    expect(source.errors).toHaveLength(20);
+    expect(source.errors?.[19]).toBe("+41 more");
+    expect(JSON.parse(source.draft ?? "null")).toMatchObject({ name: "task" });
+  });
+
+  test("a source the wire cannot carry is `unreadable` by its path, never `unavailable`", async () => {
+    const { driver } = editableDriver({ count: 0 });
+    const session = hosted();
+    session.attachWorkflows(driver);
+    driver.source = async () => ({
+      ok: true,
+      path: ".tentacle/workflows/task.yaml",
+      text: "x".repeat(256 * 1024 + 1),
+    });
+    const source = await session.workflowSource({ sessionId: "s1", name: "task" });
+    expect(source.unavailable).toBeUndefined();
+    expect(source.ok).toBe(false);
+    expect(source.path).toBe(".tentacle/workflows/task.yaml");
+    expect(source.unreadable).toContain("could not be reported");
+  });
+
+  test("a write that LANDED is never reported `unavailable`: the hash survives an unreportable rest", async () => {
+    const { driver } = editableDriver({ count: 0 });
+    const session = hosted();
+    session.attachWorkflows(driver);
+    const hash = "a".repeat(64);
+    const row = { status: "changed" as const, added: 1, removed: 0 };
+    // 70 other workflows read the rewritten prompt (wire: ≤ 64), and 40 file rows (wire: ≤ 33).
+    driver.save = async () => ({
+      ok: true,
+      hash,
+      version: 2,
+      path: ".tentacle/workflows/task.yaml",
+      files: Array.from({ length: 40 }, (_, i) => ({ ...row, path: `p${i}.md` })),
+      approved: false,
+      alsoChanges: Array.from({ length: 70 }, (_, i) => `w${i}`),
+    });
+    const saved = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "create",
+      draft: JSON.stringify(EDITED),
+      prompts: [],
+      dryRun: false,
+    });
+    expect(saved.ok).toBe(true);
+    expect(saved.refusal).toBeUndefined();
+    expect(saved.hash).toBe(hash);
+    expect(saved.version).toBe(2);
+    expect(saved.approved).toBe(false);
+    expect(saved.reason).toContain("could not be reported");
+    // Only alsoChanges over: it is cut to the wire's 64, and the reason says how many.
+    driver.save = async () => ({
+      ok: true,
+      hash,
+      version: 2,
+      path: ".tentacle/workflows/task.yaml",
+      files: [{ ...row, path: "task.yaml" }],
+      approved: false,
+      alsoChanges: Array.from({ length: 70 }, (_, i) => `w${i}`),
+    });
+    const cut = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "create",
+      draft: JSON.stringify(EDITED),
+      prompts: [],
+      dryRun: false,
+    });
+    expect(cut.ok).toBe(true);
+    expect(cut.alsoChanges).toHaveLength(64);
+    expect(cut.files).toHaveLength(1);
+    expect(cut.reason).toContain("70");
+  });
+
+  test("`schedules` lists a job pinned to the OLD hash (the preview already says it)", async () => {
+    const { driver } = editableDriver({ count: 0 });
+    const session = schedulingHosted();
+    session.attachWorkflows(driver);
+    const source = await session.workflowSource({ sessionId: "s1", name: "task" });
+    const created = await session.scheduleCreateRpc({
+      sessionId: "s1",
+      turnId: "t-user",
+      workflow: { name: "task", inputs: [] },
+      every: "2h",
+    });
+    expect(created).toEqual({ ok: true, scheduleId: "sc-1" });
+    const request = {
+      sessionId: "s1",
+      name: "task",
+      mode: "replace" as const,
+      draft: JSON.stringify(EDITED),
+      prompts: [],
+      ...(source.hash !== undefined ? { baseHash: source.hash } : {}),
+    };
+    const preview = await session.workflowSave({ ...request, dryRun: true });
+    expect(preview.schedules).toEqual(["sc-1"]);
+    const saved = await session.workflowSave({ ...request, dryRun: false });
+    expect(saved.schedules).toEqual(["sc-1"]);
+    // An unchanged re-save (same bytes, same hash) breaks no schedule.
+    const fresh = await session.workflowSource({ sessionId: "s1", name: "task" });
+    const again = await session.workflowSave({
+      ...request,
+      ...(fresh.hash !== undefined ? { baseHash: fresh.hash } : {}),
+      dryRun: true,
+    });
+    expect(again.schedules).toBeUndefined();
+  });
+
+  /**
+   * The other half of `schedules` (mutation-checked): a job is reported by the
+   * save that BREAKS it, once. A job still pinned to an ever older hash was
+   * already reported then — reporting it again would nag on every later save
+   * forever, so it is not this save's news.
+   */
+  test("`schedules` is the job THIS save breaks: an older pin is not re-reported", async () => {
+    const { driver } = editableDriver({ count: 0 });
+    const session = schedulingHosted();
+    session.attachWorkflows(driver);
+    const created = await session.scheduleCreateRpc({
+      sessionId: "s1",
+      turnId: "t-user",
+      workflow: { name: "task", inputs: [] },
+      every: "2h",
+    });
+    expect(created).toEqual({ ok: true, scheduleId: "sc-1" });
+    const source = await session.workflowSource({ sessionId: "s1", name: "task" });
+    // Save #1 breaks the pin: reported.
+    const first = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "replace",
+      draft: JSON.stringify(EDITED),
+      prompts: [],
+      ...(source.hash !== undefined ? { baseHash: source.hash } : {}),
+      dryRun: false,
+    });
+    expect(first.ok).toBe(true);
+    expect(first.schedules).toEqual(["sc-1"]);
+    // Save #2 replaces those bytes again; the job is still pinned to the ORIGINAL
+    // hash, which save #2 did not invalidate — nothing new to report.
+    const second = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "replace",
+      draft: JSON.stringify({ ...EDITED, version: 3 }),
+      prompts: [],
+      ...(first.hash !== undefined ? { baseHash: first.hash } : {}),
+      dryRun: true,
+    });
+    expect(second.ok).toBe(true);
+    expect(second.schedules).toBeUndefined();
+  });
+
+  /**
+   * The third case (mutation-checked): a job pinned to EXACTLY the hash being
+   * rewritten with identical bytes is not broken — the file still holds what it
+   * fires. Re-saving a file unchanged must never nag about it.
+   */
+  test("`schedules` spares a job pinned to the very hash being re-written unchanged", async () => {
+    const { driver } = editableDriver({ count: 0 });
+    const session = schedulingHosted();
+    session.attachWorkflows(driver);
+    const opened = await session.workflowSource({ sessionId: "s1", name: "task" });
+    // Save ONCE so the file holds the emitter's own bytes: from here a re-save of
+    // the same draft reproduces the same bytes, and so the same hash.
+    const written = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "replace",
+      draft: opened.draft ?? "{}",
+      prompts: [],
+      ...(opened.hash !== undefined ? { baseHash: opened.hash } : {}),
+      dryRun: false,
+    });
+    expect(written.ok).toBe(true);
+    const created = await session.scheduleCreateRpc({
+      sessionId: "s1",
+      turnId: "t-user",
+      workflow: { name: "task", inputs: [] },
+      every: "2h",
+    });
+    expect(created).toEqual({ ok: true, scheduleId: "sc-1" });
+    // The job is now pinned to exactly the hash this re-save writes: not broken.
+    const again = await session.workflowSave({
+      sessionId: "s1",
+      name: "task",
+      mode: "replace",
+      draft: opened.draft ?? "{}",
+      prompts: [],
+      ...(written.hash !== undefined ? { baseHash: written.hash } : {}),
+      dryRun: true,
+    });
+    expect(again.ok).toBe(true);
+    expect(written.hash).toBeDefined();
+    if (written.hash === undefined) return;
+    expect(again.hash).toBe(written.hash);
+    expect(again.schedules).toBeUndefined();
   });
 });

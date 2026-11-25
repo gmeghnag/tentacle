@@ -305,4 +305,34 @@ describe("session/workflow_step over the wire", () => {
     })) as { detail?: { report?: string; live: boolean } };
     expect(result.detail).toMatchObject({ live: false, report: "step report text" });
   });
+
+  /**
+   * The editor's two methods (docs/feat/workflow-editor.md slice 3b) reach the
+   * session through the dispatch — which the direct-call tests above cannot see:
+   * they call `session.workflowSource`/`workflowSave` themselves.
+   *
+   * This session's driver has no writer wired, so both answer `unavailable`.
+   * That ANSWER is the proof of dispatch: a missing `case` in `connection.ts`
+   * rejects `MethodNotFound` instead, and these requests would throw.
+   */
+  test("session/workflow_source and workflow_save are dispatched, both answering", async () => {
+    const peer = await peerTo();
+    const source = (await peer.request(Method.WorkflowSource, {
+      sessionId: "s1",
+      name: "task",
+    })) as { ok: boolean; unavailable?: string };
+    expect(source.ok).toBe(false);
+    expect(source.unavailable).toContain("edited only on a laptop or serve session");
+    const saved = (await peer.request(Method.WorkflowSave, {
+      sessionId: "s1",
+      name: "task",
+      mode: "replace",
+      draft: "{}",
+      prompts: [],
+      dryRun: true,
+    })) as { ok: boolean; refusal?: string; reason?: string };
+    expect(saved.ok).toBe(false);
+    expect(saved.refusal).toBe("unavailable");
+    expect(saved.reason).toContain("edited only on a laptop or serve session");
+  });
 });

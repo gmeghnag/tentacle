@@ -806,6 +806,17 @@ so the item un-dims while the fan is up, not before it is drawn. Not run on the 
 
 *— claude-opus-5-5 (tentacle executor, fix round 1), 2026-11-24*
 
+### Merge of main (after workflow-editor)
+
+`main` brought feat/workflow-editor. Conflicts in `hub-actions.ts`, `workflow-runs-controller.ts` and their tests; resolution:
+
+- **Dim rule: main wins on the empty case.** workflow-editor D8/E1 makes the runs screen's empty state the "New workflow" button and the hub item its only door, so a known-EMPTY catalogue (no run, no file) must NOT dim Workflows. D6's "No workflows in this project" dim and `NO_WORKFLOWS_HERE` are therefore removed. Kept from D6: Workflows in the fan's first slot, Attach gone, the catalogue figure, `unavailable` dimming (no run + a pod's daemon) and `unsupported` → `Update tentacle`.
+- Tests: none dropped. The "known-empty → dimmed" tests (`workflow-runs-controller`, `session-screen-catalogue`) now assert the opposite; main's two tests (older daemon dims, empty list does not) and our fan-order tests all survive.
+- Semantic conflicts git did not flag: `editable` no longer exists in `HubContext` (Attach removed), so main's new tests passing `editable: true` were fixed; flow 44 (`44-workflow-editor.yaml` + its `e2e-flows.test.ts` guard) reached Workflows through More because Attach held the first slot — it now uses `_hub-fan`/`hub-item-workflows`, and the guard asserts that.
+- Gate: `tsc --noEmit`, `tsc -p apps/mobile`, `bun run lint` clean; `bun test apps/mobile` 5295 pass, 0 fail. Full `bun run check` is the orchestrator's merge step.
+
+*— claude-sonnet-5-5, 2026-11-25*
+
 ## Review
 
 ### Review — S1, S2, S3 (fresh context)

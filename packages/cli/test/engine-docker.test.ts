@@ -275,6 +275,19 @@ function hostFor(
   });
 }
 
+/**
+ * Wait for an ASYNC condition; THROWS on a timeout (the shared `until` contract,
+ * AGENTS §9). A fixed sleep as a synchronisation point is long enough on an idle
+ * machine and not long enough under the CPU contention of a parallel gate.
+ */
+async function untilAsync(pred: () => Promise<boolean>, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!(await pred())) {
+    if (Date.now() > end) throw new Error(`untilAsync: timed out after ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 /** The cwd mount the planner gives for `/work` (with `~/.ssh` inside it). */
 const wsMount: WorkspaceMount = {
   source: "/real/work",
@@ -409,7 +422,12 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
     expect(net).toEqual(["net:unix:c1"]);
 
     await drain(runtime.createSession().send("hello"));
-    await new Promise((r) => setTimeout(r, 20));
+    // Poll for the very messages asserted next, not "a record exists" (AGENTS §2/§9).
+    await untilAsync(
+      async () =>
+        (await store.loadAll()).records[0]?.messages.map((m) => m.content).join("|") ===
+        "hello|hi from docker",
+    );
     const saved = (await store.loadAll()).records;
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi from docker"]);
 
