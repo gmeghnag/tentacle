@@ -509,7 +509,8 @@ caller answers in time (`push-rules.ts:14-28`). Never sent by the adapter:
   only → publish the Task (`WORKING`) → `session/prompt{turnId: taskId}` or
   `session/workflow{start, turnId: taskId}` → on each relevant update
   re-project the unit and publish what changed → at the terminal state
-  `bus.finished()`, `session/detach`, close the channel.
+  `session/detach`, close the channel, return (the SDK settles the bus when
+  `execute` returns — S4 correction: no `bus.finished()` of ours).
 - **Follow-up on a live task** → the caller-answer path; on a terminal task →
   SDK error; on a task of an ARCHIVED context → it is terminal (archive ends
   its turn) → SDK error; a NEW task (no `taskId`) on that context reopens it.
@@ -552,7 +553,8 @@ SSE (`: ping` every 15 s), `server.timeout(req, 0)`; off without an A2A token.
 |---|---|
 | No / wrong token; browser `Origin` | 401 before parsing; audit `a2a-auth-failure`. Card public. |
 | Unknown method / bad params / bad version / huge input / `raw`-`url` part | −32601 / −32602 / −32009 / 413 / −32005; nothing opened. |
-| Busy context | `TurnInProgress` / workflow `running` refusal → UnsupportedOperation; first unit unaffected. |
+| Busy context | `TurnInProgress` / workflow `running` refusal → the task `REJECTED` + reason (S4: the SDK turns an `execute` error into a FAILED task, so a JSON-RPC error is impossible there); first unit unaffected. |
+| Follow-up message naming a RUNNING task | Refused before `execute` by `A2ARequestHandler` → UnsupportedOperation (−32004): the task's bus is shared and a second `execute` would break its stream (S4). S5 lets a caller's answer through in `INPUT_REQUIRED`. |
 | Workflow start, switch off | UnsupportedOperation. |
 | Workflow file new/changed | `waiting:approval` → `WORKING` + message; ONLY the owner approves, in every mode (kind table). `changed` refusal → `FAILED`. |
 | Caller tries to answer an owner-only ask (file approval, hop, hooks) | Never listed to it; a crafted answer naming its `requestId` → InvalidParams, the ask untouched. |
@@ -929,5 +931,158 @@ the non-vacuity proof (each turns assertions red, not an import error).
 **Gate (narrow):** `bun test packages/daemon/test/a2a-mapping.test.ts` 24 pass /
 0 fail; `biome check --write` on the 2 files clean; `tsc` limited to the 2 files
 (`.tentacle/tmp/a2a/tsconfig.s3.json`) clean. Full `bun run check` NOT run.
+
+### S4-a2a-executor — DONE (one finding against S2, outside S4's files)
+
+*— claude-opus-5-5, 2026-11-25*
+
+**Load-bearing check re-run first** (`bun .tentacle/tmp/a2a/seam.ts`): HOLDS,
+the same five lines as above.
+
+**As built:**
+- `packages/daemon/src/a2a/executor.ts` (new):
+  - `A2AExecutor implements AgentExecutor`. A NEW task:
+    1. Checks the caller (`ServerCallContext.user`, authenticated), the ids
+       (`a2aSessionId`) and the parts (`inboundParts`).
+    2. Builds `createChannelPair()` + `new Connection(daemonEnd, host, onError,
+       {hooksTrustPrecheck})` + `RpcPeer(clientEnd)`.
+    3. Sends `initialize`: every `KNOWN_UPDATE_TYPES`, so `permission_request`
+       is declared; `clientInfo {name:"a2a"}`, no `host`.
+    4. Sends `session/open{create, reopen, title}` on `a2a-<caller>-<ctx>`.
+    5. Publishes the Task `WORKING`.
+    6. Sends `session/prompt{turnId: taskId}`.
+    7. While that turn runs, maps its updates: `agent_message_chunk` →
+       `artifactUpdate response` (`chunkAppend` round replace); asks → WORKING
+       + "waiting for the owner's approval: <title>" (`projectStatus(…,
+       "owner")`; the adapter never answers). It drops updates outside its own
+       `turn_start`…`turn_end`.
+    8. On its `turn_end`, reads the unit from `host.get(sid).workUnits()`, the
+       same record `GetTask` will project. It publishes the final round whole
+       (`append:false, lastChunk:true`, = `unit.result`), then the terminal
+       status (`unit.reason`; a turn's error message is never forwarded).
+       Then `session/detach` and close.
+  - `cancelTask` → `session/cancel{sessionId, turnId}`; `CANCELED` comes from
+    the turn's own end. A task not running here → `TaskNotCancelableError`.
+  - `adapterRequest`: `hooks/trust` → `{trusted:false}`; anything else →
+    `MethodNotFound`.
+  - `A2ARequestHandler extends DefaultRequestHandler`: `sendMessage` /
+    `sendMessageStream` call `executor.refuseFollowUp(message.taskId)` first.
+- `packages/daemon/test/a2a-executor.test.ts` (new, 11 tests). It uses the
+  real `A2ARequestHandler` + `InMemoryTaskStore`, a real `SessionHost` +
+  `Agent` with a scripted model, a "phone" `Connection`, and a temp
+  `LogSessionStore` for reopen. It covers:
+  - stream order, round replace, the final artifact, the phone listing the
+    session, unit = task;
+  - detach;
+  - owner-mode asks: not auto-denied, the phone answers, no `askedOn` label
+    from the adapter;
+  - `CancelTask`, and the phone's cancel;
+  - busy;
+  - hooks `false` + the host precheck honoured;
+  - reopen of an archived context;
+  - refusals open nothing;
+  - follow-up on a running task refused (−32004) for both bindings;
+  - cancel of an unknown task.
+- No schema change (`protocol.json` untouched), no `protocol.d/` note, no new
+  changelog fragment (S0's `changelog.d/a2a.added.md` stands; S10 rewrites it).
+
+**Drift from Implementation:**
+1. **Refusals are `REJECTED` tasks, not JSON-RPC errors.** The SDK runs
+   `execute` detached and turns a rejection into a synthetic FAILED task
+   (`_runExecutor`, `sdk dist/server/index.js:2914-2961`). So "busy →
+   UnsupportedOperation" and "`raw`/`url` → −32005" cannot come from the
+   executor. Busy → `REJECTED` + "the context is busy…". Bad ids, no caller,
+   unsupported parts, a workflow part (until S8) and a bare answer (until S5)
+   → `REJECTED` + a fixed reason. **Note for S9:** if −32005 must be a
+   JSON-RPC error, check the parts in `http.ts` or in `A2ARequestHandler`
+   before the SDK runs.
+2. **New `A2ARequestHandler`, not in the plan.** A follow-up message naming
+   a RUNNING task runs a second `execute` on the task's SHARED bus. Anything
+   it publishes breaks a stream: a `task`/`message` breaks the running
+   stream ("Stream ordering violation", `_advanceStreamPattern`
+   `:3475-3492`, reproduced red), and a status first breaks the follow-up's.
+   So it is refused BEFORE `execute`, as `UnsupportedOperationError` (−32004).
+   **S9 must construct `A2ARequestHandler`, not `DefaultRequestHandler`.**
+   **S5** relaxes `refuseFollowUp` for a task in `INPUT_REQUIRED`: the
+   original stream has already ended at that state, so a second `execute`
+   may publish there.
+3. The executor never calls `bus.finished()`. The SDK settles the bus once
+   `execute` returns (`_settleBus` `:2978-2987`). `execute` resolves at the
+   turn's end, and a follow-up that slips past the guard waits for that end
+   without publishing anything.
+4. If the in-process channel closes before the end, NO terminal status is
+   published: the turn may still run daemon-side, and `GetTask` (S6) reads
+   its real state.
+5. **Finding against S2 — STOPPED, not fixed here (outside S4's files).** A
+   reopen of an archived session while its record is still RESIDENT (before
+   its archive write lands, `session-host.ts:1036`, `:1384-1397`) restores
+   from `SessionPersister.toRecord` (`session-persister.ts:538-568`). That
+   record has **no `units`**, so the ended-units table comes back EMPTY. A
+   reopen from disk keeps it. Experiment
+   (`.tentacle/tmp/a2a/s4/reopen-units.test.ts`, one turn `t1`, then
+   close → reopen):
+   ```
+   resident []
+   disk [ "t1" ]
+   ```
+   Effect: after an idle-TTL archive + quick reopen, earlier tasks of that
+   context drop out of `GetTask` (F3/F4 promise). Fix, for S2's owner (or
+   S7): carry the table in the captured state → `toRecord` sets
+   `units: {ended: table, open: []}`, plus a test reopening from the
+   resident record. The S4 reopen test asserts only S4's property (the
+   reopened conversation carries the first exchange), not the earlier unit.
+
+**Notes for S5 / S6 / S9 / S10** (not verified by execution):
+- S5: `askOf` sets no `kind` (fail-closed: owner-only). Map it with
+  `client/permission-map`. `projectStatus` is called with `"owner"` in three
+  places; make it the caller's mode.
+- S6: the executor's live state is only `liveTaskIds()` and the bus. The
+  projection should read `workUnits()` exactly as `endFromUnit` does.
+- S9/S10: the executor's `version` option (`ClientInfo.version`) should get
+  the build version. `daemon/src/index.ts` exports are not added yet (S9/S10
+  wire them).
+
+**Red before green:** the first run of the new file had 5 reds, each a real
+defect, fixed in turn:
+- the follow-up stream-ordering violation → drift 2;
+- the phone's cancel needed an attached session;
+- the hooks fake's request was invalid;
+- the S2 reopen gap → drift 5;
+- a wrong `askedOn` expectation.
+
+Non-vacuity: R0 below (the executor's session wiring removed) → 9 of 11 fail.
+
+**Mutations** (`.tentacle/tmp/a2a/mutate-s4.ts`, the file restored after each,
+`restored true`):
+
+| Mutation | Fails |
+|---|---|
+| R0 `execute` publishes WORKING and returns (no session path) | 9 |
+| M1 `permission_request` not declared (the plan's "ask not auto-denied") | 2 |
+| M2 the adapter answers the ask itself (the plan's "never `resolve_permission`") | 2 |
+| M3 `hooks/trust` → `true` | 1 |
+| M4 the host's precheck not passed | 1 |
+| M5 open without `reopen` | 1 |
+| M6 no `session/detach` | 2 |
+| M7 `cancelTask` sends nothing | 2 |
+| M8 busy → FAILED | 1 |
+| M9 no round replace in the deltas | 1 |
+| M10 `refuseFollowUp` lets a follow-up through | 1 |
+| M11 no final whole-round artifact | 1 |
+| M12 an unauthenticated user accepted | 1 (after adding `UnauthenticatedUser` + `isAuthenticated:false` cases; it survived with only `user: undefined`) |
+| M13 `clientInfo` carries a `host` | 1 |
+| M14 the terminal state from `turn_end` alone, not the session's unit | 2 |
+| M15 an owner ask shown as plain WORKING | 2 |
+| M16 a `turn_end` of ANY turn ends the task | **0 — survives** |
+
+M16 is believed equivalent in reachable states (not proved). A session runs
+one turn at a time, and the prompt is refused (`TurnInProgress`) while
+another runs, so no other turn's `turn_end` reaches a watcher between its
+accepted prompt and its own `turn_end`. The filter stays as defence.
+
+**Gate (narrow):** `bun test` on `a2a-executor.test.ts` + `a2a-mapping.test.ts`
+→ 35 pass / 0 fail. `biome check` on the 2 new files is clean. `tsc` limited
+to the 2 files (`.tentacle/tmp/a2a/tsconfig.s4.json`) is clean. Full `bun run
+check` NOT run (the orchestrator's script runs it).
 
 ## Review
