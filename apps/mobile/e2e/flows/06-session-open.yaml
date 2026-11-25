@@ -38,6 +38,9 @@ appId: so.tentacle.app
 # state to "Copied" — "No text to copy" and "Couldn't copy" offer no action.
 # `row-r2` is the seeded answer, `r2` per the fold's `r<seq>` keys
 # (`transcript.ts:197`), so its wrapper is `row-r2-copy`.
+# The pill's 2.5 s window starts at the RELEASE, not at the copy (D3): Maestro
+# holds a long press for 3 s, so a window counted from the copy would be spent
+# under the finger — the first gate run asserted exactly that and found nothing.
 - assertVisible:
     id: "row-r2-copy"
 - longPressOn:

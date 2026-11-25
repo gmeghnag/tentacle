@@ -127,8 +127,9 @@ import { showsScene } from "../mascot-scenes.ts";
 import {
   COPY_FAILED,
   COPY_FLASH_MS,
-  type MessageCopy,
+  type CopyFlashState,
   copyFlashShown,
+  flashReleased,
   messageCopy,
 } from "../message-copy.ts";
 import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
@@ -807,25 +808,28 @@ export function SessionScreen({
   // outcome and when it appeared, and the text the "Select text" sheet shows.
   // In the SCREEN, keyed by nothing but its own arrival, so a cell that scrolls
   // out of the window and unmounts cannot take a pending copy with it.
-  const [copyFlash, setCopyFlash] = useState<{
-    readonly outcome: MessageCopy;
-    readonly at: number;
-  } | null>(null);
+  const [copyFlash, setCopyFlash] = useState<CopyFlashState | null>(null);
+  /** Has the press that is copying already ended? (D3 re-anchors the pill ONCE.) */
+  const released = useRef(false);
   const [selectText, setSelectText] = useState<string | null>(null);
   /**
    * The ONE copy path (the long-press and the sheet's "Copy all"): a light
    * haptic, the clipboard, then a pill — `Copied`, or `Couldn't copy` when the
    * clipboard itself refuses (never a false `Copied`: no silent drop).
    */
-  const copyText = (text: string) => {
+  const copyText = (text: string, pressing = false) => {
     playHaptic("light");
+    // A release that arrived before the clipboard answered (a fast long press)
+    // cannot await it: the pill then starts its window where it lands.
+    const down = () => pressing && !released.current;
     void Clipboard.setStringAsync(text).then(
       () =>
         setCopyFlash({
           outcome: { kind: "copy", text, label: "Copied" },
           at: Date.now(),
+          pressing: down(),
         }),
-      () => setCopyFlash({ outcome: COPY_FAILED, at: Date.now() }),
+      () => setCopyFlash({ outcome: COPY_FAILED, at: Date.now(), pressing: down() }),
     );
   };
   /**
@@ -838,16 +842,27 @@ export function SessionScreen({
     if (outcome === null) {
       return;
     }
+    released.current = false;
     if (outcome.kind === "copy") {
-      copyText(outcome.text);
+      copyText(outcome.text, true);
       return;
     }
     playHaptic("light");
-    setCopyFlash({ outcome, at: Date.now() });
+    setCopyFlash({ outcome, at: Date.now(), pressing: true });
   };
-  // One timer per pill: a second copy REPLACES it (a new `at`, a new window).
+  /**
+   * The finger left the message (D3): the pill's window starts now, once. A long
+   * press copies at 400 ms under the finger, so counting from the copy itself
+   * would spend the window before the person could read it.
+   */
+  const copyRelease = () => {
+    released.current = true;
+    setCopyFlash((flash) => flashReleased(flash, Date.now()));
+  };
+  // One timer per pill: a second copy REPLACES it (a new `at`, a new window). No
+  // countdown while the press is still down — the release re-anchors it (`D3`).
   useEffect(() => {
-    if (copyFlash === null) {
+    if (copyFlash === null || copyFlash.pressing) {
       return undefined;
     }
     const timer = setTimeout(() => setCopyFlash(null), COPY_FLASH_MS);
@@ -865,6 +880,7 @@ export function SessionScreen({
     copyFlash !== null && copyFlash.outcome.kind === "copy" ? copyFlash.outcome.text : null;
   cellActions.current = {
     onCopy: copyMessage,
+    onCopyRelease: copyRelease,
     onLink,
     onToggle: (key) => {
       animateNextLayout(a11yFlags.reduceMotion);

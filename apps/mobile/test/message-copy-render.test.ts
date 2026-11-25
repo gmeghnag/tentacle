@@ -155,7 +155,10 @@ const THUMBS = { loaded: [], inFlight: [], failed: [] };
  * stateful `UserRowView` calls hooks, which a walker without a renderer cannot
  * provide).
  */
-function drawUserBody(onCopy: ((row: unknown) => void) | null = () => {}): Node[] {
+function drawUserBody(
+  onCopy: ((row: unknown) => void) | null = () => {},
+  onCopyRelease?: () => void,
+): Node[] {
   return walk(
     transcript.UserRowBody({
       user: userRow as never,
@@ -166,6 +169,7 @@ function drawUserBody(onCopy: ((row: unknown) => void) | null = () => {}): Node[
       onOpen: () => {},
       onBroken: () => {},
       ...(onCopy === null ? {} : { onCopy }),
+      ...(onCopyRelease === undefined ? {} : { onCopyRelease }),
     }),
   );
 }
@@ -174,6 +178,7 @@ function drawUserBody(onCopy: ((row: unknown) => void) | null = () => {}): Node[
 function draw(
   row: Record<string, unknown>,
   onCopy: ((row: unknown) => void) | null = () => {},
+  onCopyRelease?: () => void,
 ): Node[] {
   return walk(
     transcript.TranscriptRow({
@@ -182,6 +187,7 @@ function draw(
       onLink: () => {},
       thumbnails: THUMBS,
       ...(onCopy === null ? {} : { onCopy }),
+      ...(onCopyRelease === undefined ? {} : { onCopyRelease }),
     } as never),
   );
 }
@@ -252,6 +258,25 @@ describe("R1 the long-press wrapper exists on a MESSAGE row and nowhere else", (
     handler?.({ nativeEvent: { actionName: "copy" } });
     handler?.({ nativeEvent: { actionName: "activate" } });
     expect(seen).toEqual([answerRow]);
+  });
+
+  test("the press END is reported, so the pill counts from the release", () => {
+    const ended: number[] = [];
+    const wrapper = copyWrappers(
+      draw(
+        answerRow,
+        () => {},
+        () => ended.push(ended.length + 1),
+      ),
+    )[0];
+    (wrapper?.props.onPressOut as (() => void) | undefined)?.();
+    expect(ended).toHaveLength(1);
+  });
+
+  test("with no release handler the wrapper still draws, and a release is a no-op", () => {
+    const wrapper = copyWrappers(drawUserBody())[0];
+    expect(typeof wrapper?.props.onPressOut).toBe("function");
+    expect(() => (wrapper?.props.onPressOut as (() => void) | undefined)?.()).not.toThrow();
   });
 });
 

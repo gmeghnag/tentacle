@@ -121,6 +121,12 @@ export interface RowProps {
    * sheet).
    */
   readonly onCopy?: (row: Row) => void;
+  /**
+   * The press that copied a message ENDED (docs/feat/mobile-copy-text.md D3):
+   * the pill's countdown starts here, so a slow long press does not burn its
+   * window under the finger. Absent: the pill counts from the copy itself.
+   */
+  readonly onCopyRelease?: () => void;
 }
 
 /**
@@ -190,10 +196,12 @@ function Shell({
 function CopyPress({
   row,
   onCopy,
+  onCopyRelease,
   children,
 }: {
   readonly row: Row;
   readonly onCopy: ((row: Row) => void) | undefined;
+  readonly onCopyRelease: (() => void) | undefined;
   readonly children: ReactNode;
 }): JSX.Element {
   if (onCopy === undefined) {
@@ -203,6 +211,8 @@ function CopyPress({
     <Pressable
       testID={`row-${row.key}-copy`}
       onLongPress={() => onCopy(row)}
+      // The release is when a person can look: the pill's window starts there.
+      onPressOut={() => onCopyRelease?.()}
       delayLongPress={LONG_PRESS_MS}
       accessibilityActions={[{ name: "copy", label: "Copy message" }]}
       onAccessibilityAction={(event) => {
@@ -317,7 +327,14 @@ export function PhotoTiles({
   );
 }
 
-function UserRowView({ row, palette, onLink, thumbnails, onCopy }: RowProps): JSX.Element {
+function UserRowView({
+  row,
+  palette,
+  onLink,
+  thumbnails,
+  onCopy,
+  onCopyRelease,
+}: RowProps): JSX.Element {
   /**
    * Item 4 / mockup F (feat/mobile-thinking-images S4): the photos are their OWN
    * element ABOVE the bubble, and a photo-only message has no bubble at all
@@ -349,6 +366,7 @@ function UserRowView({ row, palette, onLink, thumbnails, onCopy }: RowProps): JS
         onOpen={setViewing}
         onBroken={(uri) => setBroken((had) => (had.includes(uri) ? had : [...had, uri]))}
         {...(onCopy === undefined ? {} : { onCopy })}
+        {...(onCopyRelease === undefined ? {} : { onCopyRelease })}
       />
       <MediaViewer
         items={viewing.pages}
@@ -375,6 +393,7 @@ export function UserRowBody({
   onOpen,
   onBroken,
   onCopy,
+  onCopyRelease,
 }: {
   readonly user: Extract<Row, { kind: "user" }>;
   readonly palette: Palette;
@@ -386,6 +405,8 @@ export function UserRowBody({
   readonly onBroken: (uri: string) => void;
   /** The long-press that copies this message (`RowProps.onCopy`); absent = none. */
   readonly onCopy?: (row: Row) => void;
+  /** The copy press ended (`RowProps.onCopyRelease`); absent = no re-anchor. */
+  readonly onCopyRelease?: () => void;
 }): JSX.Element {
   const parts = userRowParts(user);
   const block = photoBlock(user.images);
@@ -408,7 +429,7 @@ export function UserRowBody({
     label: shown[position]?.label ?? imageRowText(tile.ref),
   }));
   return (
-    <CopyPress row={user} onCopy={onCopy}>
+    <CopyPress row={user} onCopy={onCopy} onCopyRelease={onCopyRelease}>
       {!parts.photos ? null : (
         // Right-aligned, capped at the block's own 200 pt: the photos are a
         // message element of their own, never the bubble's content.
@@ -459,12 +480,20 @@ export function UserRowBody({
   );
 }
 
-function AssistantRowView({ row, palette, onLink, speak, onSpeak, onCopy }: RowProps): JSX.Element {
+function AssistantRowView({
+  row,
+  palette,
+  onLink,
+  speak,
+  onSpeak,
+  onCopy,
+  onCopyRelease,
+}: RowProps): JSX.Element {
   const assistant = row as Extract<Row, { kind: "assistant" }>;
   const speaking = speak === "speaking";
   return (
     <Shell row={assistant}>
-      <CopyPress row={assistant} onCopy={onCopy}>
+      <CopyPress row={assistant} onCopy={onCopy} onCopyRelease={onCopyRelease}>
         <Markdown parsed={parsedOf(assistant.text)} palette={palette} onLink={onLink} />
         {speak === undefined || onSpeak === undefined ? null : (
           <Pressable

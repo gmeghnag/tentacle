@@ -6,7 +6,13 @@
  * (both are just `Row`s).
  */
 import { describe, expect, test } from "bun:test";
-import { COPY_FLASH_MS, copyFlashShown, messageCopy, messageText } from "../src/message-copy.ts";
+import {
+  COPY_FLASH_MS,
+  copyFlashShown,
+  flashReleased,
+  messageCopy,
+  messageText,
+} from "../src/message-copy.ts";
 import { sessionMenu } from "../src/session-menu.ts";
 import type { Row } from "../src/transcript-rows.ts";
 
@@ -146,17 +152,56 @@ describe("messageCopy: what a long-press does", () => {
 });
 
 describe("copyFlashShown: the pill's window is half-open", () => {
-  test("T7 shown at the press, still shown a millisecond before the window closes", () => {
-    expect(copyFlashShown({ at: NOW }, NOW)).toBe(true);
-    expect(copyFlashShown({ at: NOW }, NOW + COPY_FLASH_MS - 1)).toBe(true);
+  const flash = {
+    outcome: { kind: "copy", text: "hi", label: "Copied" },
+    at: NOW,
+    pressing: false,
+  } as const;
+
+  test("T7 shown at the copy, still shown a millisecond before the window closes", () => {
+    expect(copyFlashShown(flash, NOW)).toBe(true);
+    expect(copyFlashShown(flash, NOW + COPY_FLASH_MS - 1)).toBe(true);
   });
 
   test("T7 hidden once the window elapses", () => {
-    expect(copyFlashShown({ at: NOW }, NOW + COPY_FLASH_MS)).toBe(false);
+    expect(copyFlashShown(flash, NOW + COPY_FLASH_MS)).toBe(false);
   });
 
   test("T7 a clock that went backwards hides it, and no flash is not shown", () => {
-    expect(copyFlashShown({ at: NOW }, NOW - 1)).toBe(false);
+    expect(copyFlashShown(flash, NOW - 1)).toBe(false);
     expect(copyFlashShown(null, NOW)).toBe(false);
+  });
+
+  test("T7 while the press is still DOWN the pill does not count down", () => {
+    // A long press copies at 400 ms and may be held for seconds: a window that ran
+    // under the finger would hide the pill before its release (the gate's bug).
+    expect(copyFlashShown({ ...flash, pressing: true }, NOW + COPY_FLASH_MS * 4)).toBe(true);
+  });
+});
+
+describe("flashReleased: the pill's window starts when the finger leaves", () => {
+  const pressed = {
+    outcome: { kind: "copy", text: "hi", label: "Copied" },
+    at: NOW,
+    pressing: true,
+  } as const;
+
+  test("T8 the press that copied ends: the pill is re-anchored at the release", () => {
+    const released = flashReleased(pressed, NOW + 3000);
+    expect(released?.at).toBe(NOW + 3000);
+    expect(released?.outcome).toEqual(pressed.outcome);
+    expect(released?.pressing).toBe(false);
+  });
+
+  test("T8 only ONE release re-anchors: a later tap cannot extend the pill", () => {
+    const released = flashReleased(pressed, NOW + 3000);
+    // The same object back, so React skips the render.
+    expect(flashReleased(released, NOW + 3200)).toBe(released);
+  });
+
+  test("T8 a pill no press produced (the sheet's Copy all) is never re-anchored", () => {
+    const sheet = { ...pressed, pressing: false };
+    expect(flashReleased(sheet, NOW + 3000)).toBe(sheet);
+    expect(flashReleased(null, NOW)).toBeNull();
   });
 });

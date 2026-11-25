@@ -80,14 +80,51 @@ export const COPY_FAILED: MessageCopy = { kind: "failed", label: "Couldn't copy"
 /** How long the confirmation pill stays up (the hub's own flash window). */
 export const COPY_FLASH_MS = 2500;
 
+/** The pill as the screen holds it: what it says, when it appeared, and whether the press that made it is still down. */
+export interface CopyFlashState {
+  readonly outcome: MessageCopy;
+  readonly at: number;
+  readonly pressing: boolean;
+}
+
 /**
- * Whether the pill is still up, half-open like hub-flash: `now - at <
- * COPY_FLASH_MS`. A clock that went backwards (a `Date.now()` that stepped
- * between the press and the paint) hides it rather than pinning it on screen.
+ * The press that copied a message has ENDED (`onPressOut`): the countdown starts
+ * HERE. A long press copies at `delayLongPress` (400 ms) while the finger is
+ * still down, so anchoring the window at the copy burns it under the finger — a
+ * slow, careful press (or the e2e harness, which holds 3 s) releases onto a pill
+ * that is already gone.
+ *
+ * ONE re-anchor per pill: `pressing` is cleared by the first release, so an
+ * unrelated tap on another message later cannot extend it. A pill that no press
+ * produced (the sheet's "Copy all") is never re-anchored. The same object comes
+ * back when there is nothing to do, so React skips the render.
+ *
+ * While `pressing` the pill does not count down at all (`copyFlashShown`), so a
+ * lost release (the app backgrounded mid-press) leaves it up until the next copy
+ * or the next press on a message — it can never pin itself there permanently.
  */
-export function copyFlashShown(flash: { readonly at: number } | null, now: number): boolean {
+export function flashReleased(flash: CopyFlashState | null, now: number): CopyFlashState | null {
+  if (flash === null || !flash.pressing) {
+    return flash;
+  }
+  return { outcome: flash.outcome, at: now, pressing: false };
+}
+
+/**
+ * Whether the pill is still up. Counted from `at`, half-open like hub-flash
+ * (`now - at < COPY_FLASH_MS`) — but NOT while `pressing`: a long press copies
+ * with the finger still down, and a window that ran under the finger would hide
+ * the pill before its release. The release re-anchors `at` (`flashReleased`), so
+ * the window then starts where the person can read it. A clock that went
+ * backwards (a `Date.now()` that stepped between the press and the paint) hides
+ * it rather than pinning it on screen.
+ */
+export function copyFlashShown(flash: CopyFlashState | null, now: number): boolean {
   if (flash === null) {
     return false;
+  }
+  if (flash.pressing) {
+    return true;
   }
   const elapsed = now - flash.at;
   return elapsed >= 0 && elapsed < COPY_FLASH_MS;

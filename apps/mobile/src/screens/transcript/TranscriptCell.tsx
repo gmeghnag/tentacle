@@ -37,6 +37,11 @@ export interface CellActions {
    * skipped cell still reaches the latest handler (this handle's rule).
    */
   readonly onCopy: (row: Row) => void;
+  /**
+   * The press that copied a message ended (docs/feat/mobile-copy-text.md D3):
+   * the pill's countdown starts at the release, never under the finger.
+   */
+  readonly onCopyRelease: () => void;
 }
 
 export interface TranscriptCellProps extends CellData<Row, Palette, ThumbnailState> {
@@ -64,6 +69,7 @@ function TranscriptCellView(props: TranscriptCellProps): JSX.Element {
           thumbnails={props.thumbnails}
           chartLabels={props.chartLabels}
           onCopy={(row) => actions.current.onCopy(row)}
+          onCopyRelease={() => actions.current.onCopyRelease()}
           {...(props.look === undefined ? {} : { look: props.look })}
           step={{
             cell: props.cell,

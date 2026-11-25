@@ -180,6 +180,25 @@ Glyph + word (colour-blind safe; the ✓ uses `palette.label`, not green-only).
 `copyFlashShown` decides visibility; the screen owns one timer. A second
 long-press replaces the flash (new `at`, new row).
 
+**The window starts at the RELEASE, not at the copy** (added by the gate, see
+Execution drift D3). A long press copies at `delayLongPress` (400 ms) with the
+finger still down, so a window anchored at the copy is spent under the finger:
+the person releases onto a pill that is already fading, and a 3 s press (a slow,
+careful one — or Maestro's fixed 3 s `longPressOn`) never sees it at all.
+`flashReleased(flash, now)` (pure, half-open rules as above) re-anchors the pill on
+the press's `onPressOut`, **once** per pill: `pressing` is cleared by that single
+release, so an unrelated later tap cannot extend it, and a pill no press produced
+(the sheet's "Copy all") is never re-anchored.
+
+So `copyFlashShown` gains one rule — **no countdown while `pressing`** — and the
+screen arms its one timer only for a released pill; otherwise the 2.5 s would
+still elapse under the finger and the release would re-anchor a pill that the
+timer had already removed. A release that lands before the clipboard answers (a
+very short long press) is remembered in a ref, so the pill simply starts its
+window when it arrives; a release that never lands (the app backgrounded
+mid-press) leaves the pill up until the next copy or the next press on a message
+— never pinning it there, since any press-out re-anchors it and re-arms the timer.
+
 **D4 — "Select text" sheet** (`src/screens/SelectTextSheet.tsx`, render only,
 reusing `ui/Sheet.tsx` with `onClose`): title "Select text", body a
 `TextInput` `value={text}` `editable={false}` `multiline` `scrollEnabled`
@@ -192,8 +211,10 @@ path. It shows the SAME `messageText` string the long-press copied, so
 1. `apps/mobile/src/message-copy.ts` (new) + `apps/mobile/test/message-copy.test.ts` (new).
 2. `apps/mobile/src/session-menu.ts` — `said()` uses `messageText`.
 3. `apps/mobile/src/ui/CopyFlash.tsx` (new), `apps/mobile/src/screens/SelectTextSheet.tsx` (new).
-4. `apps/mobile/src/screens/transcript/TranscriptRow.tsx` — `onCopy` prop, the two wrappers.
-5. `apps/mobile/src/screens/transcript/TranscriptCell.tsx` — pass `onCopy` through.
+4. `apps/mobile/src/screens/transcript/TranscriptRow.tsx` — `onCopy` and
+   `onCopyRelease` props, the two wrappers.
+5. `apps/mobile/src/screens/transcript/TranscriptCell.tsx` — pass `onCopy` and
+   `onCopyRelease` through.
 6. `apps/mobile/src/screens/SessionScreen.tsx` — handler, flash state + timer, sheet state.
 7. `apps/mobile/test/message-copy-render.test.ts` (new; the `artifact-card-render.test.ts` element-walk pattern).
 8. `apps/mobile/e2e/flows/` — one Maestro step in the UI flow (long-press `row-…-copy`, assert "Copied"), if the gate's flow allows long-press (`longPressOn`).
@@ -352,7 +373,7 @@ the whole message, "a part" = the `TextInput` sheet.
    other pills offer no action.
 10. **`changelog.d/mobile-copy-text.added.md`** — the one bullet from the header.
 
-### Drift from Implementation (two, both justified)
+### Drift from Implementation (three, all justified)
 
 - **D2: the wrapper moved from "`UserRowView`'s bubble" into `UserRowBody`**
   (`TranscriptRow.tsx:368`). `UserRowView` (`:320`) calls hooks, so a
@@ -367,9 +388,37 @@ the whole message, "a part" = the `TextInput` sheet.
   row — without this, T2's restart case would be a silent `null`. A `context`
   COMPACT row still returns `null` (a step over a conversation that is gone), which
   is T4's compaction case.
+- **D3: the pill's 2.5 s window starts at the RELEASE, not at the copy**
+  (`message-copy.ts` `flashReleased` + the `pressing` rule in `copyFlashShown`,
+  `TranscriptRow.tsx` `CopyPress.onPressOut`,
+  `TranscriptCell`/`SessionScreen` pass-through, and the screen's timer armed only
+  for a released pill). The plan had the screen set `at` when the copy happened. On a device that puts the whole window under the
+  finger: `onLongPress` fires 400 ms into a press whose release comes later, so a
+  slow press — and Maestro's `longPressOn`, which holds **3.0 s** — releases onto
+  a pill that is already gone. Found by the first gate run; evidence below.
+
+### The gate run that found D3 (fixed, not papered over)
+
+The first `bun run e2e:mobile` after exec was red on ONE flow, `06-session-open`,
+asserting `copy-flash` visible (`GATE FAIL — 0 passed, 1 failed (of 1; 54 s)`),
+twice. Its artifact is not an ambiguity — the runner log and the command
+metadata date the failure exactly:
+
+- `xctest_runner…log:2755`: `Long pressing 220.0, 193.0 for 3.0s` at
+  `21:11:47.05`, `Tapping took 3.21`.
+- So `onLongPress` (400 ms in) set the pill at `21:11:47.45`, and the 2.5 s
+  window closed at `21:11:49.95`.
+- `commands.json` #36 (`longPress: true`) ended at `21:11:50.44`; the
+  `extendedWaitUntil` (#37) then polled for 5.3 s and found nothing.
+- The failing hierarchy has `row-r1`, `row-r1-copy`, `row-r2`, `row-r2-copy` and
+  no `copy-flash`: the press DID copy — the pill had already expired.
+
+Hence D3 above: the flow is right (it asserts the feature as a person sees it),
+the window was anchored wrong. No assertion was weakened and no constant was
+stretched; `COPY_FLASH_MS` stays 2500 and the pill is simply still up when the
+finger leaves.
 
 ### Honest scope of R1 (as the plan worded it)
-
 R1's "tool / notice / fired get no wrapper" is proven in-render only for the
 **notice** row: tool, thought and fired-wake rows draw `StepNode`, which calls
 hooks, so an element walker cannot render them at all. Their absence is pinned
@@ -388,8 +437,10 @@ neither alone would be.
 | M4 `<=` instead of `<` in `copyFlashShown` | T7 |
 | M5 remove `editable={false}` from the sheet's `TextInput` | R4 |
 | M6 `said()` keeps its own `row.text` (no `trimEnd`) | T5 |
+| M7 `flashReleased` ignoring `pressing` + no re-anchor, and the wrapper without `onPressOut` | T8 ×3, R1 ×2 |
+| M8 `copyFlashShown` counting down while `pressing` | T7 (the under-the-finger case) |
 
-All reverted; the two new files are green again (26 pass, 0 fail).
+All reverted; the two new files are green again (32 pass, 0 fail).
 
 ### What was run
 
@@ -403,6 +454,22 @@ All reverted; the two new files are green again (26 pass, 0 fail).
 - The full `bun run check` (whole-repo typecheck + lint + parallel suite) is the
   orchestrator's merge gate — **not run here**.
 
+After the gate fix (D3):
+
+- `bun test apps/mobile/test` → **5417 pass / 0 fail, 339 files** (the whole
+  mobile suite, not a selection: the pass-through touches `TranscriptCell` and
+  `SessionScreen`).
+- `bunx tsc -p apps/mobile --noEmit` → clean; `bunx biome check` on the 6 changed
+  TS files → clean.
+- M7 above is the red-first proof for the fix (T8 + R1, then reverted).
+- `bun run e2e:mobile --udid <iOS 26> --only 06-session-open` was attempted twice
+  to see the flow green and both attempts died in the *pairing* preamble
+  (`pair-paste-submit` / a `-32603` on seed), because the orchestrator's own e2e
+  run was on that same simulator at the time (`44-workflow-editor`, same udid).
+  **The flow's result after D3 is therefore not yet observed here** — the
+  orchestrator's gate run is what decides it; the timings above say the pill is
+  now up at the moment the harness looks.
+
 ### Not verified (no device and no simulator in this environment)
 
 - **S1–S11** (`### Simulator check` above), i.e. everything that needs a phone:
@@ -410,15 +477,16 @@ All reverted; the two new files are green again (26 pass, 0 fail).
   (S2), the sheet's real double-tap/drag-handle selection (S6), a ~200 KB row
   (S7), VoiceOver (S11) and Dynamic Type XXL (S11). The design's iOS claims were
   verified from the native source, not on hardware.
-- **The Maestro flow** (`06-session-open.yaml:35-50`): the local gate cannot run
-  it (no iOS simulator here). `longPressOn` is the idiom already in
-  `26-drawer.yaml`, `33-hub.yaml` and `44-workflow-editor.yaml`, and both ids it
-  asserts exist in the source (`CopyFlash.tsx`: `copy-flash`,
-  `copy-flash-select`), but the flow itself is red-or-green only on the gate's
-  simulator.
-- **`apps/mobile/node_modules` in this worktree is a local symlink** to the main
-  checkout's (so `react-native` and `@tentacle/*` resolve). It existed only to run
-  the tests and is **not** committed.
+- **The Maestro flow** (`06-session-open.yaml:38-56`): `longPressOn` is the idiom
+  already in `26-drawer.yaml`, `33-hub.yaml` and `44-workflow-editor.yaml`, and
+  both ids it asserts exist in the source (`CopyFlash.tsx`: `copy-flash`,
+  `copy-flash-select`). Its first run WAS the gate's (and found D3); after the fix
+  it has not been re-observed (see "What was run").
+- **`apps/mobile/node_modules` was a local symlink** to the main checkout's (so
+  `react-native` and `@tentacle/*` resolve). It existed only to run the tests, was
+  **committed by mistake** in the exec commit (the plan said it was not), and is
+  removed from the index here (`git rm --cached`, the file stays on disk for the
+  worktree); the deletion rides the next commit.
 
 ## Review
 
