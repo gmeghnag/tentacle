@@ -3,6 +3,7 @@
  * confined cwd and system prompt, and builds a fresh confined agent per session.
  * Binding is loopback-safe by default (a non-loopback bind requires a token).
  */
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
@@ -58,8 +59,10 @@ import {
 } from "@tentacle/daemon";
 import type { ModelPurpose, SessionSettings, SessionSettingsReport } from "@tentacle/protocol";
 import { relayAddress } from "@tentacle/protocol";
+import type { BrowserToolset } from "@tentacle/tools";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import { relayIdOf } from "@tentacle/transport/relay-id";
+import { browserToolsetOf, createBrowserLink } from "./browser-link.ts";
 import { applyCarried } from "./carried-settings.ts";
 import { type DiscoveryDriver, startDiscovery } from "./discovery.ts";
 import type { ServeLimits } from "./flags.ts";
@@ -216,6 +219,8 @@ export function createServeAgent(
   },
   /** The daemon-wide MCP set: its tools join every registry this builds (S2). */
   mcpHub?: Pick<McpHub, "onBuilt">,
+  /** The daemon's browser toolset (docs/feat/browser-inspect.md B4): `serve` is the user's own Mac. */
+  browser?: BrowserToolset,
 ): WiredAgent {
   const wired = buildAgent(
     { ...config, cwd: ctx.cwd },
@@ -243,6 +248,12 @@ export function createServeAgent(
       // Workflows (docs/feat/agent-workflows.md D3): `serve` runs them unattended
       // on the user's own host. `tunnelledAgent` never passes this.
       workflows: true,
+      // Harness sub-agents (docs/feat/subagent-harness-runners.md D5, Owner A8):
+      // `claude` on THIS host with its login. `tunnelledAgent` never passes this.
+      harnesses: {},
+      // The user's Chrome (browser-inspect B4, D5: every session of this Mac,
+      // phone sessions included). `tunnelledAgent` (a pod) never passes this.
+      ...(browser !== undefined ? { browser } : {}),
     },
   );
   // The MCP tools join THIS registry too — now, or at settle through the hub's
@@ -574,6 +585,10 @@ export async function startDaemon(
         }
       : {}),
   });
+  // The per-daemon browser link (docs/feat/browser-inspect.md §1): lazy, it dials
+  // the Chrome host's hub only on a call (the B4 tools); disposed with the daemon.
+  const browserLink = createBrowserLink({ configDir: config.configDir, daemonId: randomUUID() });
+  const browserTools = browserToolsetOf(browserLink);
   // A second Ctrl+C (`process.exit(130)`, docs/feat/serve-mcp.md) must not leave
   // server processes behind. Synchronous by design, and removed in `stop()` so
   // tests that start many daemons in one process do not leak listeners.
@@ -620,6 +635,7 @@ export async function startDaemon(
       mcpHub,
       push?.hostOptions,
       liveActivity?.hostOptions,
+      browserTools,
     );
     return listen(
       sessionHost,
@@ -629,6 +645,7 @@ export async function startDaemon(
         // Before anything else: a closed daemon's sessions must not call into a
         // server process this process is about to lose (S2, T7).
         mcpHub.dispose();
+        browserLink.dispose();
         process.off("exit", exitDispose);
         push?.notifier.stop();
         liveActivity?.stop();
@@ -652,6 +669,7 @@ export async function startDaemon(
     );
   } catch (error) {
     mcpHub.dispose();
+    browserLink.dispose();
     process.off("exit", exitDispose);
     devices?.stop();
     await persister?.stop();
@@ -720,6 +738,8 @@ async function reloadedHost(
   push?: SessionHostOptions["push"],
   /** The Live Activity wiring (docs/feat/mobile-live-activity.md L8), same shape. */
   liveActivity?: SessionHostOptions["liveActivity"],
+  /** The daemon's browser toolset (docs/feat/browser-inspect.md B4). */
+  browserTools?: BrowserToolset,
 ): Promise<SessionHost> {
   // One skill scan for every session and for a session not created yet
   // (docs/feat/skills-hot-reload.md).
@@ -755,7 +775,7 @@ async function reloadedHost(
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     // Each session gets its own agent, confined to the daemon's cwd.
     createAgent: (cwd, ctx) =>
-      createServeAgent(config, options, skillScan, { ...ctx, cwd }, mcpHub),
+      createServeAgent(config, options, skillScan, { ...ctx, cwd }, mcpHub, browserTools),
     newSessionSkills: () => skillScan.newSession(),
     // `/mcp` (`mcp/status`): the connection set is daemon-wide, so this is the
     // right answer for every session on it (docs/feat/serve-mcp.md S2).

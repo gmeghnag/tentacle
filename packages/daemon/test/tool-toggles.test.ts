@@ -43,6 +43,8 @@ const INIT = {
 const CWD = "/tmp/tool-toggles";
 const env = {} as ExecutionEnvironment;
 const echoTool = { ...builtinTools[4], name: "mcp__echo__echo", mcpServer: "echo" } as never;
+// A stand-in for the real `browser_open` (docs/feat/browser-inspect.md B4): default-off.
+const browserOpen = { ...builtinTools[4], name: "browser_open" } as never;
 
 class Recorder implements ModelProvider {
   readonly id = "recorder";
@@ -70,7 +72,8 @@ function daemon(hostOff: readonly string[] = [], store?: SpyDaemonStore) {
       .registerAll(builtinTools)
       .register(chartTool as never)
       .register(diagramTool as never)
-      .register(echoTool);
+      .register(echoTool)
+      .register(browserOpen);
     if (skillTool) tools.register(skillTool);
     const agent = new Agent({
       model,
@@ -262,6 +265,39 @@ describe("session/set_capability{kind: tool}", () => {
     const restarted = daemon(["fs_write"], store);
     const restored = restarted.host.restore(record);
     expect(restored.capabilities().disabledTools).toEqual(["chart", "diagram"]);
+  });
+
+  test("a serve restart keeps the browser tools OFF when the host's config has them off (B4 fix round 1)", async () => {
+    // A record cannot tell "turned on by the person" from "written before the
+    // browser tools existed" (all-on logs nothing), so a default-off tool the
+    // restarted host built off stays off: off wins, like a resume's seed.
+    // Mutation: drop the reload union → `browser_open` comes back on.
+    const store = new SpyDaemonStore();
+    const d = daemon([], store);
+    const { hosted } = d.host.open(
+      { create: true, messages: [{ role: "user", content: "q" }] },
+      { send: () => {} },
+    );
+    hosted.setCapability({ kind: "tool", name: "chart", enabled: false });
+    await hosted.persisted();
+    const withChart = store.durable.get(hosted.id);
+    if (!withChart) throw new Error("nothing durable");
+    // (a) a record with an entry, (b) a record with none (everything on).
+    for (const record of [withChart, { ...withChart, capabilities: undefined }]) {
+      const restarted = daemon(["browser_open"], store);
+      const restored = restarted.host.restore(record);
+      expect(restored.capabilities().disabledTools).toContain("browser_open");
+      restored.prompt("t1", [{ type: "text", text: "go" }]);
+      for (let i = 0; i < 400 && restarted.model.tools.length === 0; i++) await Bun.sleep(1);
+      expect(restarted.model.tools.at(-1)).not.toContain("browser_open");
+      expect(restarted.model.tools.at(-1)).toContain("diagram");
+    }
+    // A host whose config turns the browser on (built without it) leaves the record's set.
+    const on = daemon([], store).host.restore(withChart);
+    expect(on.capabilities().disabledTools).toEqual(["chart"]);
+    // A non-browser config-off tool still does NOT come back off (Q4 unchanged).
+    const chartOff = daemon(["diagram"], store).host.restore(withChart);
+    expect(chartOff.capabilities().disabledTools).toEqual(["chart"]);
   });
 });
 

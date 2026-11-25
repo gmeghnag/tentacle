@@ -112,3 +112,67 @@ describe("agent_task with selectable models", () => {
     expect(s.calls).toEqual([]);
   });
 });
+
+describe("agent_task with a harness type (docs/feat/subagent-harness-runners.md D3)", () => {
+  const HTYPES = [...TYPES, { name: "claude", description: "Claude Code" }];
+  const harnessModels = {
+    types: ["claude"],
+    note: "for `claude`: an alias or a full id",
+    isModel: (m: string) => /^[A-Za-z0-9._:[\]][A-Za-z0-9._:[\]-]{0,63}$/.test(m),
+  };
+  const registry = (s: ReturnType<typeof spy>, models?: { name: string }[]) =>
+    new ToolRegistry().register(
+      createTaskTool(s.run, HTYPES, { harnessModels, ...(models ? { models } : {}) }),
+    );
+
+  test("`model` is offered with no selectable models, and its text explains the harness's", () => {
+    const def = registry(spy())
+      .definitions()
+      .find((d) => d.name === "agent_task");
+    const props = (def?.parameters as { properties?: Record<string, { description?: string }> })
+      .properties;
+    expect(props?.model?.description).toBe("The model, for `claude`: an alias or a full id.");
+  });
+
+  test("a FREE model reaches the runner verbatim for the harness type (never checked against models)", async () => {
+    const s = spy();
+    const result = await call(registry(s, [{ name: "fast" }]), {
+      description: "d",
+      prompt: "p",
+      subagent_type: "claude",
+      model: "claude-sonnet-5-5",
+    });
+    expect(result.isError).toBeUndefined();
+    expect(s.calls).toEqual([{ type: "claude", model: "claude-sonnet-5-5" }]);
+  });
+
+  test("a bad shape (a flag) is refused before any child starts", async () => {
+    const s = spy();
+    const result = await call(registry(s), {
+      description: "d",
+      prompt: "p",
+      subagent_type: "claude",
+      model: "--dangerously-skip-permissions",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("invalid model");
+    expect(s.calls).toEqual([]);
+  });
+
+  test("a model on a tentacle type with no selectable models is an error, not silently dropped", async () => {
+    const s = spy();
+    const result = await call(registry(s), { description: "d", prompt: "p", model: "opus" });
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe("model is accepted only for claude — omit it for general");
+    expect(s.calls).toEqual([]);
+  });
+
+  test("a harness type the runner does not offer gives no free model", () => {
+    const tool = createTaskTool(spy().run, TYPES, { harnessModels });
+    expect(schemaKeys(new ToolRegistry().register(tool))).toEqual([
+      "description",
+      "prompt",
+      "subagent_type",
+    ]);
+  });
+});

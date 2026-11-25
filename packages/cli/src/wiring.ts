@@ -12,22 +12,33 @@ import {
   type AgentType,
   type AskHooksTrust,
   BUILTIN_AGENT_TYPES,
+  CLAUDE_CODE_CAPS,
+  CLAUDE_CODE_ID,
+  CLAUDE_DEFAULT_TOOLS,
+  CLAUDE_TYPE_DESCRIPTION,
   EMPTY_SKILL_LISTING,
+  type HarnessDeps,
   HookRunner,
   NO_CAPABILITIES,
   PermissionGate,
+  type ProcessGroups,
   type ResultTransform,
   SessionGrants,
   type SessionSkills,
   type SkillListing,
+  type Spawner,
   type ToolOutputStore,
   type WorkflowContainerOutcome,
   type WorkflowContainerTarget,
   WorkflowDriver,
+  claudeModelNote,
   collapseRepeatedLines,
+  createClaudeCodeCodec,
+  createProcessAdapter,
   createSubagentRunner,
   createToolOutputStore,
   exemptTools,
+  isModelShape,
   mergeAgentTypes,
   parseAgentDefinition,
   redactSecrets,
@@ -62,8 +73,9 @@ import {
   type PermissionRequester,
   type ScheduleLimits,
   type ToolImageStore,
+  browserDefaultOff,
 } from "@tentacle/core";
-import { BackgroundJobs, HostExecution } from "@tentacle/exec";
+import { BackgroundJobs, HostExecution, killGroup, trackGroup, untrackGroup } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
 import { HooksTrustParamsSchema } from "@tentacle/protocol";
 import { imageFileMaxEdge, imageLimits, imageTokenEstimate } from "@tentacle/providers";
@@ -302,6 +314,59 @@ export interface WiredAgent {
 }
 
 /**
+ * The `claude` sub-agent type and its harness deps
+ * (docs/feat/subagent-harness-runners.md D3/D6): only when `claude-code` is
+ * enabled AND its command is on PATH (its version is probed at the first run).
+ * The caller gates it on `!tunnelled` (D5).
+ */
+export function claudeHarness(
+  config: TentacleConfig,
+  options: NonNullable<BuildAgentOptions["harnesses"]>,
+): { readonly deps: HarnessDeps; readonly type: AgentType; readonly note: string } | undefined {
+  const h = config.harnesses[CLAUDE_CODE_ID];
+  if (h === undefined || !h.enabled) {
+    return undefined;
+  }
+  const path = (options.which ?? ((command: string) => Bun.which(command)))(h.command);
+  if (path === null) {
+    return undefined;
+  }
+  const adapter = createProcessAdapter({
+    id: CLAUDE_CODE_ID,
+    command: path,
+    codec: createClaudeCodeCodec,
+    caps: CLAUDE_CODE_CAPS,
+    groups: options.groups ?? { track: trackGroup, untrack: untrackGroup, kill: killGroup },
+    ...(options.spawner ? { spawner: options.spawner } : {}),
+    defaultTools: CLAUDE_DEFAULT_TOOLS,
+  });
+  return {
+    deps: {
+      instances: new Map([
+        [
+          CLAUDE_CODE_ID,
+          {
+            adapter,
+            model: h.model,
+            idleMinutes: h.idleMinutes,
+            resumeHint: (handle) => `${h.command} --resume ${handle.id}`,
+          },
+        ],
+      ]),
+      cwd: config.cwd,
+    },
+    type: {
+      name: "claude",
+      description: CLAUDE_TYPE_DESCRIPTION,
+      prompt: "",
+      tools: [],
+      harness: { adapter: CLAUDE_CODE_ID, mode: "write" },
+    },
+    note: claudeModelNote(h.model),
+  };
+}
+
+/**
  * What the worker hands `SessionHost` for one session. ONE function,
  * so a field cannot be forgotten at the call site: dropping `grants` made
  * `/clear` keep the session's approvals on the default local runtime
@@ -394,6 +459,18 @@ export interface BuildAgentOptions {
    */
   readonly workflows?: true;
   /**
+   * Offer the harness sub-agent types (docs/feat/subagent-harness-runners.md
+   * D5): the worker and `serve` only, NEVER over a `modelOverride` (a pod never
+   * runs another harness — it would act with the pod host's login, and the
+   * pod is not trusted). `which` finds the command on PATH (default
+   * `Bun.which`); `spawner` / `groups` default to the real ones. Tests inject.
+   */
+  readonly harnesses?: {
+    readonly which?: (command: string) => string | null;
+    readonly spawner?: Spawner;
+    readonly groups?: ProcessGroups;
+  };
+  /**
    * Daemon-side log for hook failures (`onFailure: "ignore"`). Never the
    * terminal while Ink owns it (AGENTS §7): a log file / the piped stderr.
    */
@@ -481,6 +558,15 @@ export interface BuildAgentOptions {
   readonly workloadShell?:
     | { readonly backend: import("@tentacle/tools").WorkloadShellBackend }
     | undefined;
+  /**
+   * Offer the read-only `browser_*` tools (docs/feat/browser-inspect.md B4): the
+   * daemon's ONE toolset over its hub link. Set ONLY where the daemon runs on
+   * the user's own Mac — the worker and `serve` — never a pod daemon (Q1: a pod
+   * is not trusted to act as the user on the web) and never a child agent
+   * (`subagent.ts`'s filter). The group starts OFF in the session's switches
+   * unless `tools.enabled` names it (`browserDefaultOff`).
+   */
+  readonly browser?: import("@tentacle/tools").BrowserToolset | undefined;
 }
 
 /**
@@ -751,16 +837,27 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // inherit the same confined env + permission requester; the runner filters
   // out `agent_task` itself so a sub-agent cannot spawn further sub-agents.
   if (config.subagentsEnabled) {
-    const agentTypes = mergeAgentTypes(
-      BUILTIN_AGENT_TYPES,
-      loadUserAgentTypes(config.configDir, config.packageAgentDirs).types,
-    );
     // A sub-agent's model (docs/feat/models-map.md): the call's selectable
     // `model` › `subagents.types.<t>.model` › the `agents/*.md` `model` › the
     // main model. Over the model tunnel (a pod) the same pick runs on what the
     // laptop published (docs/feat/models-map-pod.md): this pod's own `models`
     // are ignored, no provider is built here, and no key is touched.
     const tunnelled = options.modelOverride !== undefined;
+    // Another agent harness (docs/feat/subagent-harness-runners.md D5): the
+    // laptop or a `serve` the user owns, NEVER a pod — no type, no deps there.
+    const harness =
+      !tunnelled && options.harnesses !== undefined
+        ? claudeHarness(config, options.harnesses)
+        : undefined;
+    if (tunnelled && Object.values(config.harnesses).some((h) => h.configured)) {
+      options.notice?.(
+        "harnesses: ignored in a pod — a harness sub-agent runs only on the laptop or a serve you own",
+      );
+    }
+    const agentTypes = mergeAgentTypes(
+      harness ? [...BUILTIN_AGENT_TYPES, harness.type] : BUILTIN_AGENT_TYPES,
+      loadUserAgentTypes(config.configDir, config.packageAgentDirs).types,
+    );
     const published = tunnelled ? config.publishedModels : undefined;
     if (
       tunnelled &&
@@ -803,8 +900,12 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // (docs/feat/session-capabilities.md): read at each child round, so
       // `agent` (built below) is always set by the time a child runs.
       capabilities: () => agent.capabilities(),
+      ...(harness ? { harness: harness.deps } : {}),
     };
     const { run, types, readOnlyType } = createSubagentRunner(runnerDeps);
+    // The types a harness runs (an `agents/*.md` of the same name replaces one):
+    // their `model` is the harness's own string, shape-checked only (D3).
+    const harnessTypeNames = types.filter((t) => t.harness !== undefined).map((t) => t.name);
     if (published) {
       // Said here because only the pod knows its own types (the laptop cannot).
       for (const line of unknownTypeModelWarnings(
@@ -824,6 +925,11 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         // `subagents.twoWay` on, a background child may answer with
         // `agent_notify` (docs/feat/agent-message-two-way.md).
         twoWay: config.subagentsTwoWay,
+        ...(harness && harnessTypeNames.length > 0
+          ? {
+              harnessModels: { types: harnessTypeNames, note: harness.note, isModel: isModelShape },
+            }
+          : {}),
         models: tunnelled
           ? publishedOptions(published)
           : config.selectableModels.map((name) => {
@@ -862,6 +968,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         context: () => ({
           models: Object.keys(config.models),
           agentTypes: types.map((t) => t.name),
+          harnessTypes: harnessTypeNames,
         }),
         approvals: workflowApprovals(config.configDir, config.cwd),
         request: (req, opts) => permissions.request(req, opts),
@@ -1036,6 +1143,26 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (containers !== undefined) {
     tools.register(createWorkloadShellTool(containers));
   }
+  // The browser tools (docs/feat/browser-inspect.md B4): registered with this
+  // model's image limits (a shot is stored like `image_view`'s pictures), and
+  // switched off below unless the user's `tools.enabled` turns them on.
+  if (options.browser !== undefined) {
+    for (const tool of options.browser.tools({
+      maxEdge: imageFileMaxEdge(config.provider),
+      maxImageBytes: imageLimitValues.maxBytes,
+    })) {
+      tools.register(tool);
+    }
+  }
+  const disabledTools =
+    options.browser !== undefined
+      ? [
+          ...new Set([
+            ...(config.disabledTools ?? []),
+            ...browserDefaultOff(config.toolsEnabled ?? {}),
+          ]),
+        ].sort()
+      : (config.disabledTools ?? []);
   // Scheduled wakes (docs/feat/cron-tool.md D1/D2): only with the host's link —
   // `serve` and the worker. Never a pod daemon (no link), never a child agent
   // (`subagent.ts`'s filter). The link is looked up per call: the table is the
@@ -1083,7 +1210,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     },
     // `tools.enabled` seeds the state in ONE place, for every runtime (plain and
     // one-shot included): a hosted session starts from it (docs/feat/tool-toggles.md D4).
-    capabilities: { ...NO_CAPABILITIES, disabledTools: config.disabledTools ?? [] },
+    capabilities: { ...NO_CAPABILITIES, disabledTools },
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):

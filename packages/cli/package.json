@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@tentacle/agent": "workspace:*",
+    "@tentacle/browser": "workspace:*",
     "@tentacle/client": "workspace:*",
     "@tentacle/config": "workspace:*",
     "@tentacle/core": "workspace:*",

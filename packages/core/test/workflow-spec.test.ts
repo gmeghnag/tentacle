@@ -318,6 +318,16 @@ describe("validateWorkflow — every refusal names its YAML path", () => {
     );
   });
 
+  test("a harness type takes a free model string, not a `models` name (D9)", () => {
+    const text = variant("model: deepseek }", "model: claude-opus-4-5, type: claude }");
+    const ctx = { models: ["opus", "haiku"], agentTypes: ["general", "claude"] };
+    const refused =
+      'steps[1].agent.model: "claude-opus-4-5" is not a model of this session — one of opus, haiku';
+    expect(errorsOf(text, ctx)).toContain(refused);
+    const ok = validateWorkflow(text, { ...ctx, harnessTypes: ["claude"] });
+    expect(ok.ok).toBe(true);
+  });
+
   test("an unknown agent type names the session's types", () => {
     expect(errorsOf(EXAMPLE, { agentTypes: ["explore"] })).toContain(
       'steps[0].agent.type: "general" is not an agent type — one of explore',
