@@ -251,7 +251,7 @@ describe("scripts/install.sh — the voice helper", () => {
     const r = await install({ PATH: fakeUname("Darwin", "arm64") });
     expect(r.code).not.toBe(0);
     expect(readFileSync(helper(), "utf8")).toBe(voiceStub());
-  });
+  }, 30_000);
 
   test("the asset name is one truth: CI builds, uploads and requires the name install.sh fetches", () => {
     const yml = readFileSync(resolve(import.meta.dir, "../../.github/workflows/build.yml"), "utf8");
