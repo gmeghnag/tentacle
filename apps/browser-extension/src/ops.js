@@ -51,6 +51,7 @@ export function createOps({
   const tabSession = new Map(); // tabId -> sessionUid
   const attached = new Map(); // tabId -> idle timer
   const tracing = new Set(); // tabIds the session asked to trace
+  const handed = new Set(); // tabIds the user handed over (closing releases, never closes)
 
   const fail = (error) => ({ ok: false, error });
   const ok = (result) => ({ ok: true, result });
@@ -233,7 +234,7 @@ export function createOps({
           title: t.title ?? "",
           url: t.url ?? "",
           traced: attached.has(id),
-          handedOver: s ? !s.tabs.has(id) : true,
+          handedOver: handed.has(id) || !s?.tabs.has(id),
         });
       } catch {
         // closed: onRemoved already told the hub
@@ -341,6 +342,7 @@ export function createOps({
   function takeBack(tab) {
     const session = tabSession.get(tab);
     tabSession.delete(tab);
+    handed.delete(tab);
     tracing.delete(tab);
     sessions.get(session)?.tabs.delete(tab);
     void detach(tab);
@@ -364,8 +366,28 @@ export function createOps({
     } catch {
       return false;
     }
+    handed.add(tab);
     send({ event: "handover", sessionUid, tab });
     return true;
+  }
+
+  /**
+   * `browser_close` (B5): the session's OWN tab is closed (onRemoved then tells
+   * the hub); a handed-over tab is the user's — it leaves the group and goes
+   * back to them, open. The hub checked ownership before forwarding.
+   */
+  async function close(op) {
+    if (handed.has(op.tab)) {
+      takeBack(op.tab);
+      try {
+        await chrome.tabs.ungroup(op.tab);
+      } catch {
+        // already out of the group, or gone
+      }
+      return ok({ closed: false, released: true });
+    }
+    await chrome.tabs.remove(op.tab);
+    return ok({ closed: true, released: false });
   }
 
   async function release(op) {
@@ -405,6 +427,8 @@ export function createOps({
           return await pageOp(msg.tab, { kind: "click", ...msg });
         case "type":
           return await pageOp(msg.tab, { kind: "type", ...msg });
+        case "close":
+          return await close(msg);
         case "net":
           return await net(msg);
         case "shot":

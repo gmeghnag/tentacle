@@ -28,6 +28,12 @@ function setup(tabsInfo: Record<number, Any> = {}) {
         calls.push(`group ${(o.tabIds as number[]).join(",")} ${o.groupId ?? "new"}`);
         return 7;
       },
+      remove: async (id: number) => {
+        calls.push(`remove ${id}`);
+      },
+      ungroup: async (id: number) => {
+        calls.push(`ungroup ${id}`);
+      },
       sendMessage: async (id: number, m: Any) => {
         calls.push(`msg ${id} ${m.kind}`);
         return { value: { ok: 1 } };
@@ -233,6 +239,30 @@ describe("browser extension ops", () => {
     ops.onWebRequest({ ...feed, tabId: 55 });
     expect(sent).not.toContainEqual({ event: "tab_closed", tab: 55 });
     expect(sent.filter((m) => m.event === "net")).toHaveLength(1);
+  });
+
+  test("close: an own tab is closed; a handed-over one is released to the user, never closed (B5)", async () => {
+    const { ops, sent, calls } = setup({
+      100: { id: 100, url: "https://a.test/" },
+      8: { id: 8, url: "https://mine.test/" },
+    });
+    await claim(ops);
+    await ops.handle({ op: "open", sessionUid: "s1", url: "https://a.test/" });
+    expect(await ops.handover("s1", 8)).toBe(true);
+
+    expect(await ops.handle({ op: "close", sessionUid: "s1", tab: 8 })).toEqual({
+      ok: true,
+      result: { closed: false, released: true },
+    });
+    expect(calls).toContain("ungroup 8");
+    expect(calls).not.toContain("remove 8");
+    expect(sent).toContainEqual({ event: "tab_closed", tab: 8 });
+
+    expect(await ops.handle({ op: "close", sessionUid: "s1", tab: 100 })).toEqual({
+      ok: true,
+      result: { closed: true, released: false },
+    });
+    expect(calls).toContain("remove 100");
   });
 });
 

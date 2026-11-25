@@ -13,6 +13,7 @@ describe("external answer table", () => {
       hooks_trust: "owner-only",
       session_hop: "owner-only",
       workflow_approve: "owner-only",
+      browser_action: "owner-only",
     });
     const kinds = Object.keys(EXTERNAL_ANSWER) as PermissionKind[];
     expect(kinds.filter((k) => externalMayAnswer(k))).toEqual(["tool"]);

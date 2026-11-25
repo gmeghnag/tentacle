@@ -117,6 +117,24 @@ describe("classifyAction", () => {
       }).ask,
     ).toBe(true);
   });
+  test("a form posting to a new domain names it (Enter-submit typing too)", () => {
+    const facts = {
+      tag: "input",
+      name: "q",
+      inForm: true,
+      formAction: "https://evil.test/collect",
+    };
+    const v = classifyAction({ ...base, kind: "type", submit: true, facts });
+    expect(v.reasons).toContain("navigates to a new domain (evil.test)");
+    // Without submitting, typing into the same field navigates nowhere.
+    expect(classifyAction({ ...base, kind: "type", facts }).ask).toBe(false);
+    const click = classifyAction({
+      ...base,
+      kind: "click",
+      facts: { tag: "button", name: "Go", submits: true, formAction: "https://evil.test/c" },
+    });
+    expect(click.reasons).toContain("navigates to a new domain (evil.test)");
+  });
   test("handed-over first action asks", () => {
     const v = classifyAction({
       ...base,

@@ -16,6 +16,7 @@
  *   human decided, so the request stays pending for another client.
  */
 import {
+  BROWSER_ACTION_TOOL,
   type PermissionRequest,
   type PermissionResponse,
   WORKFLOW_APPROVE_TOOL,
@@ -109,6 +110,9 @@ export function toPermissionRequest(update: PermissionRequestUpdate): Permission
     // D3): the one kind read off the wire, because it only ever asks MORE — a
     // daemon naming an ordinary ask so makes auto-accept skip it, never answer.
     ...(update.tool === WORKFLOW_APPROVE_TOOL ? { kind: "workflow_approve" as const } : {}),
+    // A browser action (docs/feat/browser-inspect.md B5, Q3): same rule, the
+    // session's auto-accept never answers acting AS the user on the web.
+    ...(update.tool === BROWSER_ACTION_TOOL ? { kind: "browser_action" as const } : {}),
     tool: update.tool,
     level: "ask",
     title: update.title,

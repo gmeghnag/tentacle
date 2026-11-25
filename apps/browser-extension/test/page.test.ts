@@ -91,6 +91,44 @@ describe("page logic", () => {
     expect(p.handle({ kind: "click", ref: "e99" }).error).toContain("unknown");
   });
 
+  // Review B5 finding 2 (probe/act TOCTOU). Mutation: ignore `expect` in
+  // page.js → the reflowed / rewritten target is acted on → red.
+  test("an act whose target changed since the probe is refused, nothing done", () => {
+    const search = el("button", {}, { text: "Search" });
+    const buy = el("button", {}, { text: "Buy now" });
+    const items = [search, buy];
+    const d = docOf(items);
+    const p = create(d);
+    const approved = p.handle({ kind: "click", x: 1, y: 1, probe: true }).value.facts;
+    // A reflow while the ask was open: the point now hits «Buy now».
+    d.elementFromPoint = () => buy;
+    const r = p.handle({ kind: "click", x: 1, y: 1, expect: approved });
+    expect(r.error).toContain("changed");
+    expect(buy.clicked).toBe(0);
+    // Page JS rewrites a link's href during the ask (ref path).
+    const link = el("a", { href: "https://a.test/x" }, { text: "Go" });
+    const p2 = create(docOf([link]));
+    p2.handle({ kind: "read", mode: "outline" });
+    const ok = p2.handle({ kind: "click", ref: "e1", probe: true }).value.facts;
+    link.href = "https://evil.test/steal";
+    expect(p2.handle({ kind: "click", ref: "e1", expect: ok }).error).toContain("changed");
+    expect(link.clicked).toBe(0);
+    // A form's action rewritten during a type ask: nothing is typed.
+    const form = { method: "post", action: "https://a.test/login" };
+    const field = el("input", { type: "text" }, { value: "", form });
+    const p3 = create(docOf([field]));
+    p3.handle({ kind: "read", mode: "outline" });
+    const f3 = p3.handle({ kind: "type", ref: "e1", text: "hi", probe: true }).value.facts;
+    form.action = "https://evil.test/post";
+    expect(p3.handle({ kind: "type", ref: "e1", text: "hi", expect: f3 }).error).toContain(
+      "changed",
+    );
+    expect(field.value).toBe("");
+    // Unchanged → acts.
+    link.href = "https://a.test/x";
+    expect(p2.handle({ kind: "click", ref: "e1", expect: ok }).value.clicked).toBe(true);
+  });
+
   test("type sets value + events; a password field echoes only dots; probe types nothing", () => {
     const pw = el("input", { type: "password" }, { value: "" });
     const p = create(docOf([pw]));

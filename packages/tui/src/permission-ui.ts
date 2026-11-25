@@ -19,6 +19,7 @@ import {
   type PermissionRequest,
   type PermissionResponse,
   autoApproves,
+  onceOnlyAsk,
   ownRequest,
 } from "@tentacle/core";
 import {
@@ -277,8 +278,9 @@ export function buildPermissionChoices(req: PermissionRequest): PermissionChoice
   }
   // A workflow approval (the hash, or an approve step) is ONE human decision:
   // the daemon offers allow-once / deny only (`daemon/src/permission-map.ts`),
-  // so an "always" here would be rejected as "option not offered".
-  if (req.kind === "workflow_approve") {
+  // so an "always" here would be rejected as "option not offered". A browser
+  // action likewise (docs/feat/browser-inspect.md B5).
+  if (onceOnlyAsk(req)) {
     return [
       { label: "Yes", response: { allowed: true, scope: "once" } },
       { label: "No", response: { allowed: false } },
