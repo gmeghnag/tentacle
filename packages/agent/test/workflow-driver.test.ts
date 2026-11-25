@@ -445,6 +445,66 @@ describe("verdicts", () => {
     expect(last(host.rows)?.steps[0]?.reason).toBe(SENTENCE);
   });
 
+  // The reminder's cap is the REMAINDER, so its hitting it is an artefact of the
+  // plan, not the step's budget: run 1 did NOT hit the cap, so the honest outcome
+  // is the step's own `no verdict` (docs/fix/workflow-no-verdict, Review round 1).
+  test("a reminder that runs out of the REMAINDER fails `no verdict`, never `budget`", async () => {
+    let runs = 0;
+    const { driver, host } = setup({
+      approved: true,
+      text: YAML("  - id: plan\n    agent: { prompt_text: p, tokens: 100 }\n"),
+      children: {
+        plan: async (_o, controls) => {
+          runs += 1;
+          controls?.onEvent?.({ kind: "subagent_usage", promptTokens: 40, completionTokens: 20 });
+          // Run 1 answers in prose («PASS»); the reminder (cap 40) burns it all.
+          return {
+            report: runs === 1 ? "PASS" : "PASS again",
+            toolUses: 0,
+            stopReason: runs === 1 ? "end_turn" : "max_token_budget",
+          };
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(runs).toBe(2);
+    const row = last(host.rows);
+    expect(row?.steps[0]?.state).toBe("error");
+    expect(row?.steps[0]?.reason).toBe(SENTENCE);
+    // NOT the run-level `budget` stop, which hides the cause and skips the edges.
+    expect(row?.state).toBe("error");
+    expect(row?.stopReason).toBeUndefined();
+  });
+
+  test("that `no verdict` still goes through `retry` (the run is not stopped `budget`)", async () => {
+    let runs = 0;
+    const { driver, host } = setup({
+      approved: true,
+      text: YAML("  - id: plan\n    agent: { prompt_text: p, tokens: 100 }\n    retry: 1\n"),
+      children: {
+        plan: async (_o, controls) => {
+          runs += 1;
+          controls?.onEvent?.({ kind: "subagent_usage", promptTokens: 40, completionTokens: 20 });
+          return {
+            report: "PASS",
+            toolUses: 0,
+            stopReason: runs % 2 === 1 ? "end_turn" : "max_token_budget",
+          };
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    // Poll the condition the asserts read; a fixed number of ticks would be a wait.
+    for (let i = 0; i < 400 && runs < 4; i++) {
+      await flush();
+    }
+    // Two attempts (the first run + its capped reminder) = the step was retried.
+    expect(runs).toBe(4);
+    expect(last(host.rows)?.steps[0]?.reason).toBe(SENTENCE);
+    expect(last(host.rows)?.steps[0]?.attempt).toBe(1);
+  });
+
   test("a cancelled run is not reminded: its outcome is already decided", async () => {
     let runs = 0;
     let release: (() => void) | undefined;

@@ -1,6 +1,6 @@
 # fix/workflow-no-verdict — a step ends with the `step_verdict` TOOL, and its failure says why
 
-> **Status:** execution done — awaiting review (fresh-context, Opus)
+> **Status:** fix round 1 done — awaiting review round 2
 > **Branch:** `fix/workflow-no-verdict`
 > **Size:** M · **Blast:** cross-module · **Suited:** DeepSeek plan+exec, Opus review (owner, `TODO.md:14`)
 > **Changelog:** `changelog.d/workflow-no-verdict.fixed.md`
@@ -287,7 +287,7 @@ change.
 | 1 | The reminder child also ends without a verdict | `fail: no verdict` with the sentence — the run's `on_fail`/retry rules act exactly as today (`workflow-machine.ts:346-392`). |
 | 2 | The reminder child calls `step_verdict` twice | The tool already refuses the second with «the verdict is already recorded … stop now» (`workflow-verdict.ts:43-50`); the first wins. |
 | 3 | The reminder child throws (`SubagentFailure`) | The existing catch (`:1836-1851`) yields `error: <message>` with the partial report — never a silent `no verdict`. |
-| 4 | The reminder hits the cap | `budget_hit` → run `stopped: budget` with the driver's sentence (`workflow-machine.ts:330-337`), same as a first-run budget hit. |
+| 4 | The reminder hits the cap | `fail: no verdict` with the sentence, NOT `budget_hit`: the reminder's cap is the step's REMAINDER (`workflow-verdict.ts:103`), and run 1 did not hit the cap, so a `stopped: budget` would hide the cause and skip `retry`/`on_fail` (Review round 1). A FIRST-run hit is still `budget_hit` (`:1827`). |
 | 5 | The step's `tokens` already spent by the first run | No reminder (`remaining ≤ 0`), `fail: no verdict`; the child did not hit the runner's cap, it merely used up the step's. |
 | 6 | The run is cancelled / the session closes between the two runs | `signal` is already aborted → `planVerdictReminder` returns `undefined`; `cutEvent` (`:1719-1727`) then reports `cancel`/`interrupted`. A throw from the second run lands in the same catch. |
 | 7 | Disposed mid-reminder | `run.controller.signal` is the same signal the child got; the abort path is #6. |
@@ -464,7 +464,55 @@ All three reverted; the suites are green again afterwards.
   typecheck + lint + parallel suite). The orchestrator runs it; nothing else was
   touched, and the four scoped typechecks + the changed-file lint are clean.
 
-## Review
+### Fix round 1
+
+*— claude-opus-5-5 (executor, fresh context), 2026-11-26*
+
+Answering Review finding 1 (MEDIUM): a reminder that ends `max_token_budget` no longer
+maps to `budget_hit`.
+
+- **Fix — `packages/agent/src/workflow-driver.ts:1861`**: the reminder's
+  `ended.stopReason === "max_token_budget"` → `budget_hit` branch is **deleted**, so the
+  path falls through to the existing `fail: NO_VERDICT_REASON` (the report is still
+  `kept(ended)`, the tokens still the step's sum). A comment records why it is absent.
+  Root cause in one sentence: the reminder's cap is the step's REMAINDER
+  (`workflow-verdict.ts:103`), not the step's budget, so `budget_hit` stopped the whole
+  run, hid the cause and skipped `retry`/`on_fail` — the exact edges that make the
+  no-verdict case survivable.
+- **Took the reviewer's first option**, not "skip the reminder below a minimum
+  remainder": it needs no new constant, and a small remainder may still be enough to
+  produce the tool call. A first-run `max_token_budget` is unchanged (`:1827`).
+- **Tests — `packages/agent/test/workflow-driver.test.ts:451` and `:480`**, written and
+  run BEFORE the fix. **Red on the assertions** of the property:
+  - `a reminder that runs out of the REMAINDER fails no verdict, never budget` →
+    `Expected: "error", Received: "stopped"` (then the reason/unset `stopReason`
+    asserts);
+  - `that no verdict still goes through retry` (`retry: 1`, tokens: 100, run 1
+    `end_turn`, reminder `max_token_budget`) → `Expected: 4, Received: 2` (2 runs = one
+    attempt: the run was stopped instead of retried).
+  After the fix: `packages/agent/test/workflow-driver.test.ts` +
+  `workflow-verdict.test.ts` **63 pass / 0 fail**;
+  `+ packages/core/test/workflow-machine.test.ts` **84 pass / 0 fail**.
+- **Mutation non-vacuity (§9), each reverted, `cmp` byte-identical, `git status` shows
+  only the two intended files:**
+
+| # | Mutation | Result |
+|---|---|---|
+| A | re-insert the deleted reminder → `budget_hit` branch | **2 fail** — exactly the two new tests (`stopped` vs `error`; `2` vs `4` runs), 1 pass |
+| B | `workflow-machine.ts`: `if (state.attempt < step.retry && false)` (retry edge off) | **1 fail** — only the retry test (`Expected: 4, Received: 2`), 2 pass |
+
+B proves the second test pins the machine's retry edge, not merely the new reason.
+- **Docs**: `docs/feat/agent-workflows.md` D3 and its failure-mode row 4 now separate
+  run 1's `max_token_budget` (`stopped: budget`) from the reminder's (still
+  `fail: no verdict`); this doc's Failure-mode row 4 says the same. No changelog change
+  (same `fixed` fragment covers it) and no protocol change.
+- **Gate here**: the touched test files only, as the owner's budget requires. The
+  orchestrator's `bun run check` is the gate of record.
+- **Not changed**: the harness-child note from the Review's "attacks" (a `claude-code`
+  step's reminder is a second external run whose footer is dropped). Still true, still
+  low-impact; it belongs to the doc's debt list, not this fix.
+
+## Review — round 1
 
 *— claude-opus-5-5, 2026-11-26* (fresh context, a different model family from the
 executor — sonnet)

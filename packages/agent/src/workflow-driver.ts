@@ -1858,14 +1858,11 @@ export class WorkflowDriver {
             report: kept(ended),
           };
         }
-        if (ended.stopReason === "max_token_budget") {
-          return {
-            event: { kind: "budget_hit", reason: `step ${step.id} reached its token budget` },
-            reason: "token budget reached",
-            tokens,
-            report: kept(ended),
-          };
-        }
+        // Deliberately NOT `budget_hit` when the reminder hits its cap: that cap is
+        // the step's REMAINDER (`planVerdictReminder`), and run 1 did not hit the
+        // cap, so the honest outcome is the step's own `no verdict` — a `budget_hit`
+        // would stop the whole run, hide the cause and skip `retry`/`on_fail`
+        // (docs/fix/workflow-no-verdict, Review round 1).
       }
       const report = ended === undefined ? first.report : kept(ended);
       return {
