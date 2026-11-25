@@ -448,6 +448,14 @@ and here the effect is acting AS the user on the web. v1: **pod sessions get no
 - The extension: a Chrome-for-Testing smoke behind an opt-in env
   (`TENTACLE_BROWSER_TESTS=1`, like the docker/k8s opt-ins).
 
+### B5 additions (owner 2026-11-25, after the first live test)
+
+The owner ran B1–B4 in their real Chrome (15:20, news site: open/read/shot/search-by-URL WORK; a 404 self-corrected). B5 carries, on top of the Slices-table scope (`browser_click/type`, `browser_action` kind, Fetch-paused cross-domain gate, auto mode, clear mode, `protocol.d` note):
+
+1. **`browser_close`** — the agent closes its OWN tabs (owned by the session; a handed-over tab is released back to the user, not closed). No ask (it touches nothing of the user's). The live agent reported «I can't close tabs: close it yourself».
+2. **A closed tab is never an error — it is reopened** (owner: «se trova una scheda chiusa non deve andare in errore ma aprirne un'altra»; asked about exceptions: «se ha chiuso un tab può crearne un altro no? … non capisco queste eccezioni» → **NO exceptions**). Today the hub drops the tab on `tab_closed` (`packages/cli/src/browser-host.ts:181`) and the next op on it fails. B5: the tool layer remembers each tab's last URL; an op on a tab found closed (by the user, by Chrome, by `browser_close`, handed-over or own) opens that URL in a NEW tab of the session's group — no new ask (the URL was already approved/handed) — then runs the op there, and the result tells the model «tab N was closed; reopened <url> as tab M — scroll/form state and its traffic log are lost». A reopen that itself fails (URL unreachable, Chrome closed) is the ordinary error.
+3. **`tentacle browser install` from the compiled binary** (owner's first install: «extension: sources not found next to this build»): `packages/cli/src/browser-install.ts:54` resolves `apps/browser-extension` from `import.meta.url`, which is inside the bun bundle. Embed the extension files in the binary (e.g. `import … with { type: "file" }` / a generated asset table, pinned by a test that fails when a file of `apps/browser-extension/src` or `manifest.json` is missing from the table) so `install` works from `~/bin/tentacle`. The owner loaded the unpacked extension from `~/Documents/tentacle-browser-extension` (id `kkhicjoemmpaaaepoaeenijabpeamcog`, matches `BROWSER_EXTENSION_ID`): `install` keeps writing `<configDir>/browser/extension`; print the «Load unpacked» step AND, when an older copy is loaded from elsewhere, nothing breaks (same key → same id).
+
 ## Execution
 
 ### B1 — `@tentacle/browser` pure core (as built)
