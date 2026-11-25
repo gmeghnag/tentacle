@@ -1,6 +1,6 @@
 # feat/mobile-copy-text — Copy a message (whole or a part) on the phone
 
-> **Status:** implementation (awaiting approval + Owner question)
+> **Status:** APPROVED (owner answer Q1 = A, 2026-11-25)
 > **Branch:** `feat/mobile-copy-text`
 > **Type:** feat · **Size:** M · **Blast:** contained · **Suited:** DeepSeek executes; standard in-context Review + Simulator check (below)
 > **Changelog:** `changelog.d/mobile-copy-text.added.md` — `- **Copy a message on the phone.** Long-press a message to copy it whole (a light haptic and a "Copied" confirmation); "Select text" opens it in a sheet where any part can be selected and copied.`
@@ -280,6 +280,14 @@ Mockup: `.tentacle/mockups/mobile-copy-text/index.html` (390 pt frames, light + 
 
 Recommendation: **A** — it matches the binding choice literally (long-press =
 copied), and the timeout is harmless: a second long-press brings the pill back.
+
+### Owner answers (2026-11-25 ~20:55)
+
+Owner, verbatim: «A» → **Q1 = A** (as recommended): long-press copies at once; the pill says `✓ Copied · Select text`; tapping "Select text" opens the sheet.
+
+Orchestrator note: this plan was written on 2026-11-21 against an older main (branch merged with main 348b2461 on 2026-11-25); every `file:line` above must be re-verified before use — if one contradicts the code, fix the plan step (AGENTS §8), don't force it.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-25*
 
 ## Execution
 
