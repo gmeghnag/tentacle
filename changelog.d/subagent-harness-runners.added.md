@@ -1,0 +1,1 @@
+- **Sub-agents on another agent harness (groundwork).** A sub-agent will be able to run through Claude Code (`claude -p`) on the laptop, its every permission asked through the same broker as any tool; this step adds the harness adapter interface and the pure Claude Code stream-json codec (not yet reachable from a session).

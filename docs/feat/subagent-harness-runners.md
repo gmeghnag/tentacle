@@ -591,7 +591,15 @@ from the phone. 7. Usage visibility. 8. Where it runs. 9. Remote
 
 ## Execution
 
-*— pending (plan not approved)*
+*— claude-sonnet-5-5, 2026-11-25 — slice shr-1-codec only*
+
+- **Load-bearing check:** NOT re-run live — this sandbox denies spawning `claude` (approval required, non-interactive). Verified instead against the same-day recorded transcripts in `.tentacle/tmp/subagent-harness-runners/` (`run1/2/7.jsonl`: init shape, duplicate message ids, `permission_denied` for `--restricted`, rate_limit_event, result). Nothing contradicted the plan. The live re-run stays for slice 2 (`init.tools`/`permissionMode` check at run time).
+- Added `packages/agent/src/harness/types.ts` (D1 types + `CliCodec`) and `packages/agent/src/harness/claude-code.ts` (`createClaudeCodeCodec()`, `versionAtLeast`, `isModelShape`, `claudeToolLabel`, `CLAUDE_CODE_VERSION_FLOOR = 2.1.331`).
+- Tests: `packages/agent/test/harness-claude-code.test.ts` (23 tests, green).
+- **Drift (small, deliberate):** (1) `CliCodec.parse` returns `HarnessEvent[] | null` (`null` = unparsable line, so the transport can count it) instead of a bare array; (2) a codec instance is ONE run (`createClaudeCodeCodec()` factory) because usage dedupe is stateful — "pure" here means no I/O; (3) the `usage` event is an INCREMENT per message id (a repeated id with a larger `output_tokens` reports only the delta); (4) the prompt is not in argv: with `--input-format stream-json` it is sent as `userMessage(prompt)` on stdin; (5) `argv` throws for `mode: "remote"`, a bad model shape, or a tool name outside `[A-Za-z][A-Za-z0-9_]*`; (6) `rate_limit_event` yields one `quota` per unified window; (7) the codec is not exported from `packages/agent/src/index.ts` yet (no consumer until shr-2).
+- **Mutations (each → red, then reverted):** usage dedupe off → "usage is deduped" fails; key `result` on `subtype` instead of `is_error` → 2 fails; `allow` without `updatedInput` → "allow carries updatedInput" fails; drop `--restricted` → argv test fails; skip model shape check → "bad shape never reaches argv" fails.
+- Lint: `biome check` on the 3 new files clean. Full gate: left to the orchestrator. No protocol/schema change (no `protocol.json`, no `protocol.d/` note).
+- Changelog fragment `changelog.d/subagent-harness-runners.added.md` written (reword at shr-5 when the feature is reachable).
 
 ## Review
 
