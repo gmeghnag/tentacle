@@ -1,0 +1,1 @@
+- **Workflow editor: picking Docker or "Go to step" now sticks.** A segmented option is drawn from the SHAPE the control wrote (`where: {docker}` / `on_fail: {goto}`), not from its content, so choosing Docker or "Go to step" before typing a container name or a step no longer snaps back to Local / Stop — the field stays up, empty, and Save names what is still missing.
