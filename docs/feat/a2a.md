@@ -1689,3 +1689,18 @@ The external entry is **protocol-neutral**, written once for A2A and MCP: the se
 **Executor behaviour:** tests are well targeted and mostly non-vacuous; drift is recorded per slice except finding 2. Same model family as the planner (Opus) for this review — shared blind spots possible.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Round 2
+
+**Verdict: PASS** (review of `git diff HEAD~1`, commit `acbe0296`).
+
+**Gate:** `bun run typecheck` exit 0 · `bun run lint` exit 0 · the 8 affected test files (a2a-executor, a2a-workflow-tasks, a2a-task-projection, a2a-archived-tasks, a2a-http, serve-a2a-e2e, work-units, external-asks): **85 pass, 0 fail**.
+
+**R1 findings, re-checked by mutation (each reverted; `git status --porcelain` empty afterwards):**
+1. HIGH card poisoning — **FIXED.** I made `cardFor` cache the first request's origin again → the e2e test "a spoofed Host never reaches another requester's card" fails. The handler's own card (bare `/a2a` path) is never served: `extendedAgentCard` is off, so the SDK's `getAuthenticatedExtendedAgentCard` (sdk `server/index.js:2734`) refuses.
+2. MEDIUM undriven task after restart — **FIXED by refusing loudly** (the lazy watcher is still not built; the drift and the debt are recorded in Execution). With `isUndriven` always false → the restart test fails at the answer (`Received value: undefined`). With only the `cancelTask` override disabled → it fails with the SDK's bare "Task not cancelable". Another caller still gets TaskNotFound.
+3. MEDIUM re-run changes a terminal task — **FIXED** in `addressableUnits` (the first run of an origin keeps the task id). Mutation back to "a later run wins" → 2 red (the workflow re-run test, the projection addressing test). The executor's note that the phone/TUI mints a fresh `turnId` is plausible; I did not re-verify it. The residual it records (the original run dropped from the 256 kept units while its re-run stays) is honest and minor.
+
+**Regression attacks (nothing found):** a fresh task (no `taskId`) never reaches `isUndriven`; a watcher that ended through the row-ahead path leaves no open unit, so it is not wrongly refused; with an explicit host:port the static card is unchanged; per-request cards are sent `no-store`.
+
+*— claude-opus-5-5, 2026-11-25 (same model family as the executor's fix author; fresh context only)*
