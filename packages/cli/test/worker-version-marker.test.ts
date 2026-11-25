@@ -23,7 +23,10 @@ function reachable(entry: string): Set<string> {
     for (const imp of transpiler.scanImports(readFileSync(file, "utf8"))) {
       if (imp.path.startsWith(".")) {
         const target = resolve(dirname(file), imp.path);
-        if (existsSync(target)) {
+        // Only TS sources: `with { type: "text" }` assets (the browser
+        // extension's manifest.json / .html / .js) are bundled as strings and
+        // cannot import anything, and the TS scanner rejects them.
+        if (/\.tsx?$/.test(target) && existsSync(target)) {
           visit(target);
         }
       }
