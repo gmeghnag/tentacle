@@ -17,6 +17,20 @@ import { createLocalRuntime } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import { buildAgent } from "../src/wiring.ts";
 
+/**
+ * Wait for an ASYNC condition; THROWS on a timeout (the `until` contract,
+ * AGENTS §9). A fixed sleep before an assertion on something another task
+ * produces is not a synchronisation point: short enough on an idle machine is
+ * not short enough under the CPU contention of a parallel gate.
+ */
+async function untilAsync(pred: () => Promise<boolean>, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!(await pred())) {
+    if (Date.now() > end) throw new Error(`untilAsync: timed out after ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 // docs/feat/context-reset.md (slice 3), end to end: the real `buildAgent`
 // (the tool, the loop, the refresh over real files), a real daemon, the
 // laptop's `RemoteClient` runtime and its saved copy. A skill and an
@@ -178,8 +192,15 @@ test("a context reset end to end: fresh files, the laptop's approval, the saved 
     const tail: unknown[] = end?.messages.slice(0, cut?.messages.length) ?? [];
     expect(tail).toEqual([...(cut?.messages ?? [])]);
 
-    // The laptop's saved copy holds only the fresh context (decision 4).
-    await new Promise((r) => setTimeout(r, 20));
+    // The laptop's saved copy holds only the fresh context (decision 4). Poll for
+    // the very content asserted next — not "some last message is there": the store
+    // briefly holds the mid-turn "Interrupted…" note, so a weaker condition lets
+    // the read race that note (AGENTS §2/§9: prove the exact property).
+    await untilAsync(
+      async () =>
+        (await store.loadAll()).records[0]?.messages.at(-1)?.content ===
+        "done on the fresh context",
+    );
     const listed = await store.loadAll();
     const record = listed.records[0];
     expect(record?.messages[0]?.content).toBe(system);

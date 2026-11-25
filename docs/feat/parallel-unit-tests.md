@@ -283,4 +283,74 @@ Every other shared global resource, and why it is isolated:
 
 ## Execution
 
+Executed in two passes: DeepSeek wrote most of the working tree and was stopped by the watchdog (the
+same call ×4); claude-opus-5-5 reviewed every hunk of that partial diff against the Design, kept it,
+finished T1 and ran the checks below. Nothing was committed.
+
+**Load-bearing check (re-run).** The three defect classes reproduce on the pre-fix code and go away
+with the fix: C → T2 red/green below; A → the mutations below; B → by construction (T4 guard empty;
+theft repro `steal.ts` from planning). Files: the timings keys = the test files on disk (1254 = 1254,
+`missing []`, `stale []`: 1253 + `test-gate.test.ts`).
+
+As built, in plan order:
+
+1. **C** — `apps/mobile/test/artifact-card-render.test.ts:99-104`: `mock.module("../src/ui/Text.tsx", …)`
+   → `{ Text: "Text", TextInput: "TextInput" }`. **Drift:** the Design said to add `TextInput` to the
+   `react-native` mock. The missing import comes from the text seam (`src/ui/Text.tsx`, which calls
+   `useContext`, and a walker that never renders can't provide that), so the file now stubs the seam
+   the way 8 sibling render tests already do (`row-a11y`, `commands-sheet`, `notice-row`, …).
+2. `packages/client/test/support/fakes.ts:124-140` — `untilAsync` (same contract as `until`: throws
+   on a timeout). The cli files don't import client test support, so each one got a local 8-line
+   `untilAsync`/`until` instead (the Design allowed this). The shared one stays as the helper the
+   AGENTS §9 rule names.
+3. **B** — `ws-factory.test.ts:82-110` `restartPort`/`startOn` (random 20000–29999, bound for real on
+   127.0.0.1, retried ≤ 50 times on a throw), used at `:133`. `connect-model-error.test.ts:83-103`
+   `startOnFreePort(config)` replaces `freePort` and starts the first daemon itself (the bind is the
+   probe), used at `:340`. `connection.test.ts:206-208` → `ws://127.0.0.1:1/e2e`.
+   `byte-duplex.test.ts:328-334` → `tcpEp(1)`, `connection refused by 127.0.0.1:1`.
+4. **A** — each sleep now polls the exact content asserted next, not just "a record exists":
+   `context-reset-e2e.test.ts:195-203` (last message `=== "done on the fresh context"`; the store
+   briefly holds the mid-turn "Interrupted…" note), `engine-runtime.test.ts:488-496, 1601-1608`,
+   `engine-docker.test.ts:425-430`, `local-runtime.test.ts:322-329`. `local-runtime.test.ts:1950-1953`
+   waits for `tui.runtime.holdsSession(UID)` (the hand-over landed). `output-streams.test.ts:213-235`
+   waits for `stop !== noop` (the SIGINT handler is installed), with `stop()` in a `finally`.
+5. **T1** — fixtures `scripts/test/fixtures/test-gate/{passes,fails,exits}.fixture.ts` +
+   `scripts/test/test-gate.test.ts` (3 tests). I added the `1 pass` / `2 fail` summary assertions the
+   plan lists, which the partial diff lacked.
+6. `package.json:13-14` `test` / `test:timings` exactly as in the Design. `scripts/test-timings.json`
+   is committed (1254 entries, Biome-clean).
+7. `AGENTS.md` §4 `:76`, §6 `:99-112`, §9 `:417-426` as in the Design (§6 also says parallel is
+   stricter, and names the gate test).
+8. **Drift:** a changelog fragment `changelog.d/parallel-unit-tests.changed.md` was written because
+   the owner's executor instructions require one. The header's "Changelog: none" is superseded.
+
+**Evidence.**
+- T2 red (Text mock removed): `bun test apps/mobile/test/artifact-card-render.test.ts` → `SyntaxError:
+  Export named 'TextInput' not found in module …/react-native/index.js` · `0 pass 1 fail`. Green:
+  `5 pass 0 fail`, serially AND with `--parallel`.
+- T1 red (`"test": "bun test"` put back temporarily): `(fail) … not the bare serial runner` (`Expected:
+  not "bun test"`), `(fail) … both fail, both named, exit non-zero` (`Expected: not 0`, i.e. the
+  serial runner exited 0) · `1 pass 2 fail`. Green: `3 pass 0 fail`. Gate output over the 3 fixtures
+  ends `1 pass · 2 fail · error: script "test" exited with code 1`.
+- All 11 touched test files together: `Ran 315 tests across 11 files` · `0 fail`.
+- **T3 mutations (class A).** (a) Poll timeout set to 1 ms in all 5 helpers. Idle serial run: `253
+  pass 0 fail`; the condition already holds at the first check, so that run proves nothing. Under
+  `bun test --parallel --rerun-each=20 <5 files>`: `4678 pass · 3 fail`, 2× `untilAsync: timed out
+  after 1 ms` (`context-reset-e2e`, `engine-docker`). So the wait is load-bearing there under load.
+  (b) Predicate forced never-true (`|| true`): each of the 7 sites fails loudly with `timed out after
+  3000 ms` (startPodRuntime, startAttachRuntime, serve D2, Docker engine, context reset, local persist,
+  N-clients hand-over). So no wait can pass vacuously. Both mutations were reverted (`git diff
+  --numstat` matches the pre-mutation counts).
+- **Not run: the CPU-burner before/after counts from the T3 plan** (14× `yes`). Every site was instead
+  covered by mutations (a) + (b).
+- **T4:** `rg -n -A3 "\.port;?$" --glob '**/test/**' | rg -B1 "stop\("` → empty.
+- Lint: `bunx biome check <17 changed files>` → `No fixes applied`, clean.
+
+**Not run by the executor (owner rule: the orchestrator's gate script runs the full suite).** None of
+Validation 1–3 was run here: the serial-vs-parallel file-set run, the 5 consecutive `bun run test`, and
+`bun run check`. Those numbers must come from the gate run. If any run flakes, apply the Failure-modes
+rule: fix it here if it is class A/B, otherwise STOP and report.
+
+*— claude-opus-5-5, 2026-11-25 (executor, resuming DeepSeek's partial pass)*
+
 ## Review

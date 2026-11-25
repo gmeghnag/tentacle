@@ -37,6 +37,19 @@ import { createLocalRuntime, persistingController } from "../src/local-runtime.t
 import { SessionSaver } from "../src/session-saver.ts";
 import { recordWrite, saveFixture } from "./session-fixture.ts";
 
+/**
+ * Wait for an ASYNC condition; THROWS on a timeout (the shared `until` contract,
+ * AGENTS §9). A fixed sleep as a synchronisation point is long enough on an idle
+ * machine and not long enough under the CPU contention of a parallel gate.
+ */
+async function untilAsync(pred: () => Promise<boolean>, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!(await pred())) {
+    if (Date.now() > end) throw new Error(`untilAsync: timed out after ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
   readonly requests: ChatRequest[] = [];
@@ -306,8 +319,14 @@ describe("createLocalRuntime (local over RPC)", () => {
     });
 
     await drain(runtime.createSession().send("hello"));
-    // Give the post-turn snapshot/persist a tick to land.
-    await new Promise((r) => setTimeout(r, 20));
+    // Wait for the post-turn snapshot/persist to hold the very messages asserted
+    // next — "a record exists" is a weaker correlate that races the mid-turn save
+    // (AGENTS §2/§9).
+    await untilAsync(
+      async () =>
+        (await store.loadAll()).records[0]?.messages.map((m) => m.content).join("|") ===
+        "hello|hi back",
+    );
 
     const saved = (await store.loadAll()).records;
     expect(saved).toHaveLength(1);
@@ -1928,7 +1947,10 @@ describe("N clients of one session (detached-handover)", () => {
       const { relay, tui } = await cutInTool();
       relay.runtime.stopSaving();
       await relay.runtime.release();
-      await new Promise((r) => setTimeout(r, 30));
+      // Wait for the TUI to HOLD the session (the hand-over landed; its quit's
+      // read-back has something to read), never a fixed 30 ms: under contention
+      // the hand-over has not landed yet and the record comes out short.
+      await untilAsync(async () => tui.runtime.holdsSession(UID));
       await tui.runtime.quit({ closeForAll: true });
       const stored = (await tui.store.loadAll()).records;
       const messages = stored[0]?.messages ?? [];

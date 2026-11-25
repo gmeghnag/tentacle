@@ -73,7 +73,7 @@ style suggestions.
 
 - During iteration: run only the relevant test file
   (`bun test packages/tui/test/app.test.tsx`), not the full suite.
-- Before reporting done: full `bun test` + `bun run typecheck` + `bun run
+- Before reporting done: full `bun run test` + `bun run typecheck` + `bun run
   lint`, compared against the pre-existing lint baseline in §6 so the claim
   "no new issues" is true.
 - Every fix ships with a regression test that was **shown failing on the
@@ -96,11 +96,20 @@ style suggestions.
   `--filter '!@tentacle/mobile'`; and `apps/relay`, the mobile relay service —
   a plain Bun process, no React, and it has its own `tsc -p apps/relay`), TypeScript strict, Biome. **Bun ≥ 1.4.3 required**
   (`engines.bun`; the compiled-binary worker path needs it — see the TODO entry).
-  - `bun test` — full suite. **Baseline: all pass except the three opt-in
+  - `bun run test` — full suite, PARALLEL (`bun test --parallel`, one worker
+    per core, each file in a fresh global and module registry, ~1 min here),
+    slowest files first from the committed `scripts/test-timings.json`
+    (refreshed by `bun run test:timings`, never written by a gate run). Bare
+    `bun test` runs the SAME files serially (~10 min): use it only to bisect an
+    isolation question (`bun test <path>` for one file/dir is still the
+    iteration form, §4). **Baseline: all pass except the three opt-in
     skips** — live-k8s (`TENTACLE_K8S_SERVER`), live-docker (`TENTACLE_DOCKER_TESTS=1`)
     and the real-socket keepalive test (`TENTACLE_SLOW_TESTS=1`, ~12 s); those skips are NOT failures. The total grows with every
     task, so no exact count is pinned here — it only goes stale; run it, and any
-    *new* fail (or a non-opt-in skip) is yours.
+    *new* fail (or a non-opt-in skip) is yours. Parallel is also STRICTER: a
+    file that kills its own process is `✗ <file> (worker crashed: …)`, counted
+    as a fail, where the serial runner exits 0 and loses it (pinned by
+    `scripts/test/test-gate.test.ts`).
   - **Test env guard:** `bunfig.toml` preloads `scripts/test-preload.ts`
     (`scripts/test-env-guard.ts`), which strips `TENTACLE_*`, points
     `KUBECONFIG`/`DOCKER_HOST`/`CONTAINER_HOST` at nonexistent paths and `HOME` at a
@@ -405,6 +414,16 @@ nothing.
 - Repo style: double quotes, trailing commas, **no `!` non-null assertions**
   (assert conditionally, like the existing tests). Iterate on the single relevant
   file; full suite only before done.
+- **Two things that only break under concurrency** (the gate is parallel, §6;
+  both classes were real failures): never use a fixed sleep as a
+  synchronisation point — poll the very condition the next assertion reads,
+  with a timeout that THROWS (`until`/`untilAsync` in
+  `packages/client/test/support/fakes.ts`); and never probe-then-reuse a
+  loopback port (a dual-stack `port: 0` bind is stealable on macOS by an
+  explicit `127.0.0.1:P` bind from another process) — a port that must stay
+  CLOSED is `127.0.0.1:1`, a port to be REBOUND is picked outside the
+  ephemeral range (macOS 49152–65535, Linux 32768–60999) and bound for real,
+  retrying on `EADDRINUSE`.
 
 ## 10. Task workflow (one task, one living doc)
 

@@ -485,9 +485,15 @@ describe("startPodRuntime", () => {
     expect(versionIdx).toBe(4);
     expect(daemonIdx).toBe(5);
 
-    // A turn runs over the exec channel and persists on the laptop side.
+    // A turn runs over the exec channel and persists on the laptop side. Poll for
+    // the very messages asserted next, not "a record exists": a mid-turn save can
+    // land first and the read would race it (AGENTS §2/§9).
     await drain(runtime.createSession().send("hello"));
-    await new Promise((r) => setTimeout(r, 20));
+    await untilAsync(
+      async () =>
+        (await store.loadAll()).records[0]?.messages.map((m) => m.content).join("|") ===
+        "hello|hi from the pod",
+    );
     const saved = (await store.loadAll()).records;
     expect(saved).toHaveLength(1);
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi from the pod"]);
@@ -1592,9 +1598,14 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     expect(kube.calls.some((c) => c.includes("uname"))).toBe(false);
     expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
 
-    // A turn runs over the exec channel and persists on the laptop side.
+    // A turn runs over the exec channel and persists on the laptop side. Poll for
+    // the very messages asserted next, not "a record exists" (AGENTS §2/§9).
     await drain(runtime.createSession().send("hello"));
-    await new Promise((r) => setTimeout(r, 20));
+    await untilAsync(
+      async () =>
+        (await store.loadAll()).records[0]?.messages.map((m) => m.content).join("|") ===
+        "hello|hi from the existing pod",
+    );
     const saved = (await store.loadAll()).records;
     expect(saved).toHaveLength(1);
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi from the existing pod"]);
@@ -3045,6 +3056,15 @@ async function until(pred: () => boolean, ms = 3000): Promise<boolean> {
     await new Promise((r) => setTimeout(r, 5));
   }
   return true;
+}
+
+/** `until` for an async condition; THROWS on a timeout (AGENTS §9: never a fixed sleep as sync). */
+async function untilAsync(pred: () => Promise<boolean>, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!(await pred())) {
+    if (Date.now() > end) throw new Error(`untilAsync: timed out after ${ms} ms`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
