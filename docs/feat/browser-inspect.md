@@ -470,6 +470,58 @@ The owner ran B1–B4 in their real Chrome (15:20, news site: open/read/shot/sea
 
 *— claude-opus-5-5, 2026-11-25*
 
+### B6 plan (executor proposal, 2026-11-25) — **NOT APPROVED**; B6 as drawn needs B5b first
+
+Reverse-engineered from the approved umbrella Design (§3 «clear», §5 auto mode, §7
+persistence, Files #3) + the owner's B6 mockup answers (Q1 B, Q2 A, Q3 B, Q4 B), because the
+slice table names B6 but the doc carried no Implementation section for it. Written here per
+§8's drift rule; **execution stopped** (see Execution).
+
+- **Load-bearing assumption**: the two extra switches (`browser.secrets`, `browser.actions`)
+  and the phone's tab list can ride seams that already exist — the `capabilities` state, the
+  NON-critical `capabilities` log entry, the existing display `capabilities` update — so B6 is
+  UI work. **VERIFIED FALSE as of this date**:
+  - `SessionCapabilitiesSchema` carries only `disabledMcp` / `disabledSkills` / `disabledTools`
+    (`packages/protocol/src/session.ts:1694-1696`): umbrella Files #3's optional
+    `browser{enabled, secrets, actions}` does not exist.
+  - No auto path: `packages/core/src/permission.ts` has the `browser_action` kind (`:52`),
+    `EXTERNAL_ANSWER.browser_action = "owner-only"` (`:108`) and refuses it unconditionally
+    (`:356`, `:368`); no `browserAuto` slack anywhere. Auto mode is unbuilt (B5 drift).
+  - `packages/tools/src/browser.ts` has no `secrets` / `actions` switch (rg: no match): masking
+    is always on, every action asks — the B5 deferral.
+  - **No `browser*` method exists** in `packages/protocol/src/methods.ts` / `updates.ts`: the
+    phone page's «the group's tabs» has no RPC to the hub.
+  So B6 is **B5b (gates; load-bearing — it is the ONE thing a session auto-accept must never
+  answer) + UI (cross-module)**, not the `S–M · cross-module` the slice table assumed.
+- **Proposed split** (recommended):
+  1. **B5b — the switches, no UI.** (a) Protocol: optional
+     `capabilities.browser{secrets: "masked"|"clear", actions: "ask"|"auto"}` on
+     `SessionCapabilitiesSchema` — an additive optional field on a strip schema ⇒ free, no
+     `PROTOCOL_VERSION` bump (§7). (b) Daemon: `session/set_capability`'s delta gains the two
+     values (`packages/daemon/src/hosted-session.ts:3981`), persisted in the existing
+     NON-critical `capabilities` log entry (`packages/protocol/src/session-log.ts:214-219`) and
+     broadcast by the existing display `capabilities` update
+     (`packages/protocol/src/updates.ts:383-386`). (c) Tools: the browser toolset reads the
+     session's switches through a host-injected getter (the `redactText` precedent, B4 drift 5)
+     and an `auto` action passes a laptop-set `browserAuto` slack (the `hopAuto` pattern,
+     `packages/core/src/permission.ts:56`) — **never** a session auto-accept.
+  2. **B6 — the UI** over (1): TUI `/browser` panel (same keys and `[✓]/[ ]/[–]` as `/tools`:
+     `packages/tui/src/panels/tools.ts`, routed from `packages/tui/src/commands.ts`), the
+     status-bar sign (`◉ chrome N tabs`) only while the browser is on
+     (`packages/tui/src/status-view.ts`), the composer strip while auto/clear are on
+     (`packages/tui/src/input-view.ts` + a pure strip module), the mobile Session-band row and
+     its page. The phone's tab list needs the one genuinely new wire surface, an additive
+     `browser/status` read (tabs + switches) answered by the daemon from the laptop's own hub
+     (a pod-originated call refused, §7).
+- **Alternative if scope must stay UI-only**: ship only the TUI `/browser` panel + status sign
+  over the EXISTING `browser` tool-group switch (`disabledTools`, B5 drift 1) and defer auto,
+  clear and the phone page to B6b. Then Q2/Q3/Q4's auto/clear signs are not delivered and the
+  phone keeps no Browser row.
+- **Decision needed**: approve the split (B5b → B6) with the additive `browser/status` method,
+  or the UI-only alternative.
+
+*— claude-sonnet-4-5, 2026-11-25*
+
 ## Execution
 
 ### B1 — `@tentacle/browser` pure core (as built)
@@ -579,6 +631,51 @@ The owner ran B1–B4 in their real Chrome (15:20, news site: open/read/shot/sea
 - **Unverified**: a real Chrome run of the `expect` refusal. To verify: `tentacle browser install`, reload the extension, then click a ref whose `href` is rewritten by devtools between probe and act.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### B6 — STOP: this slice has no approved Implementation section (2026-11-25)
+
+**Nothing was implemented** (no production code, no test, no changelog fragment: no behaviour
+changed). One doc edit: the «B6 plan (executor proposal)» above.
+
+- **What the brief said to do**: implement B6 from its own approved Implementation section,
+  after re-running its load-bearing check. **That section does not exist.** `rg -n 'B6'
+  docs/feat/browser-inspect.md` returns three mentions (B4 drift 2 «B6 may retitle», the slice
+  table row at the `Review › Slices` table, and the owner's mockup answers
+  `### Owner answers — B6 UI`) plus the B5 deferral («Deferred to B5b … need a `capabilities`
+  field, the daemon's set/persist path and a user surface (B6)»). The last doc commit is
+  `1a2e2f29 docs(browser-inspect): owner answers B6 Q1–Q4 (B, A, B, B)` — mockup answers, not a
+  plan. There is no `### B6 plan`, so there is no load-bearing assumption, file list, failure
+  mode list or test list to execute and no one to approve them.
+- **Load-bearing check, run anyway (on B6's de-facto assumption «B6 is UI over existing
+  seams»): FAILS.** Verified on `feat/browser-inspect` @ `262e8cf2`:
+  - `sed -n 1694,1699p packages/protocol/src/session.ts` → `SessionCapabilitiesSchema` =
+    `{disabledMcp, disabledSkills, disabledTools?}`. No `browser` field: umbrella Files #3's
+    `capabilities.browser{enabled, secrets, actions}` was never built.
+  - `rg -n "browserAuto|browser_action" packages/core/src/permission.ts` → the kind (`:52`),
+    `EXTERNAL_ANSWER` owner-only (`:108`), refused in `autoApproves` (`:356`, `:368`); **no
+    `browserAuto`**. Auto mode does not exist (B5 drift 2: «`hard` is computed but changes
+    nothing until auto mode exists»).
+  - `rg -n "secrets|actions" packages/tools/src/browser.ts` → **no match**: the masking switch
+    does not exist either (B5 deferral).
+  - `rg -n "browser" packages/protocol/src/methods.ts packages/protocol/src/updates.ts` → **no
+    match**: no `browser*` RPC at all, so the phone page Q3 chose («the group's tabs») has no
+    way to read the hub.
+  The owner's Q2/Q3/Q4 answers are all about auto and clear being *visible* («auto and clear
+  appear ONLY when on», «the three switches»), so B6 cannot be delivered as UI-only without
+  first building B5b. That makes the slice table's `S–M · cross-module` wrong: it is a
+  load-bearing gate (the one thing a session auto-accept must never answer) plus a new wire
+  method plus two UIs.
+- **Decision needed (escalated, §0)**: (a) approve the split **B5b → B6** in the proposal
+  above, including the additive `browser/status` method, and spawn B5b first (stronger model,
+  fresh-context review per the blast rule); or (b) narrow B6 to the TUI `/browser` panel +
+  status sign over the existing `browser` tool-group switch and defer auto/clear/phone to B6b.
+  I did not pick one myself: both change the approved scope, and (a) touches the broker.
+- **Process note**: this worktree is on `feat/browser-inspect` (correct); the first readings
+  above were taken with a wrong `cd` to the main checkout `/Users/gmeghnag/tentacle` — the
+  files are identical at `262e8cf2` between the two, and every citation was re-checked from the
+  worktree root.
+
+*— claude-sonnet-4-5, 2026-11-25*
 
 ## Review
 
