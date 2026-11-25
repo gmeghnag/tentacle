@@ -1,7 +1,7 @@
 # eval/browser-inspect — the model sees and traces the user's real Chrome
 
-> **Status:** context · review (verdict below) — Implementation is a PROPOSED design, **not approved**
-> **Branch:** none (`eval`, committed to `main`, AGENTS §10)
+> **Status:** feat — PROMOTED by the owner 2026-11-25 ~11:45 («partiamo»); spike B0 first; owner questions Q1–Q9 being answered
+> **Branch:** `feat/browser-inspect` (opened at promotion)
 > **Size:** L (umbrella → 7 slices, S/M each) · **Blast:** load-bearing (new capability surface on the user's logged-in identity; the single broker; the session tool set) · **Suited:** Opus plan + fresh-context Opus review on every load-bearing slice; DeepSeek may execute the `contained` slices (B1, B3)
 > **Changelog:** `none` (an eval carries no code; the code slices will name their own fragments)
 
@@ -491,7 +491,7 @@ Red-team of the proposal itself:
 | **B1** `@tentacle/browser` pure core | link schemas, redaction, classifier, ownership, ring | M · contained | DeepSeek + review |
 | **B2** host + hub + install CLI | `__browser-host`, Chrome framer, `hub.sock`, `tentacle browser install/status/uninstall`, `BrowserLink` in worker + serve | M · cross-module | Opus plan, DS exec, Opus review |
 | **B3** extension | MV3 worker, groups, content script read/outline/click/type, debugger attach + Network ring feed, handover popup | M · contained (new app) | DS/Sonnet + Opus review |
-| **B4** read-only tools | `browser_tabs/open/read/shot/net`, off by default, per-session switch, masking, untrusted framing | M · load-bearing | Opus exec + fresh review |
+| **B4** read-only tools | `browser_tabs/open/read/shot/net/console` (`browser_console`: console log + JS errors with stack, bounded ring per tab like the Network ring, masked; owner 2026-11-25), off by default, per-session switch, masking, untrusted framing | M · load-bearing | Opus exec + fresh review |
 | **B5** action tools + gates | `browser_click/type`, `browser_action` kind, Fetch-paused cross-domain gate, auto mode, clear mode (+ `protocol.d` note) | M · load-bearing (single broker) | Opus exec + fresh review |
 | **B6** UI | TUI `/browser` + status, iPhone session sheet toggles + labels (mockups first, ≥ 2 variants) | S–M · cross-module | Opus mockups, DS exec |
 
@@ -524,6 +524,21 @@ first merge after B1–B3.
 - **Q9 tab group naming**: one group per session `tentacle · <title>` vs one
   shared «tentacle» group. — **Rec: one per session** (D1 scope is visible to
   the user).
+
+### Owner answers (2026-11-25 ~11:50)
+
+- **Q1 pod sessions:** no browser tools in v1 (as recommended).
+- **Q2 «clear» and the log:** yes, the log = what the model saw, with the «secrets visible» label (as recommended).
+- **Q3 auto mode:** a SEPARATE browser switch; session auto-accept never answers browser asks; payment clicks and password/card typing always ask (as recommended).
+- **Q4 debugger policy:** pending spike B0 (infobar scope U1).
+- **Q5 distribution:** unpacked + pinned key, `tentacle browser install`, while pre-public (as recommended).
+- **Q6 Chrome not running:** `browser_open` launches it in the background (`open -g`, ≤ 10 s) (as recommended).
+- **Q7 screenshots:** session image store, deleted with the session (as recommended).
+- **Q8 `browser_eval` / upload / download:** **download in v1** (into the session folder, on request; nothing leaves); upload later (always asked, file shown); NO `browser_eval`; `browser_console` added to B4 (owner, same day) — further needs → add TARGETED read-only CDP tools instead (console/JS errors, a selector query, storage keys masked, wait-for), each bounded and maskable.
+- **Q9 tab groups:** one per session, `tentacle · <title>` (as recommended).
+- **Routing (owner):** «ottimizziamo con sonnet quando possiamo» — B0 and B2 by Sonnet; Sonnet wherever a mistake is cheap to iterate on.
+
+*— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-25*
 
 ### Notes / debt
 
