@@ -6,8 +6,8 @@
  *
  * Three things live here, all of them the kind of decision that must not sit in a
  * component:
- * - **the flight's box.** A graph node is drawn inside the graph's own logical
- *   space (318 pt wide, `workflow-graph.ts`), while the detail lives in screen
+ * - **the flight's box.** A graph node is drawn inside the run graph's own logical
+ *   space (402 pt wide, `workflow-run-layout.ts`), while the detail lives in screen
  *   points. The morph needs ONE space, so `nodeBoxOnScreen` maps the node's box
  *   through the canvas's scale/offset — the pill starts exactly where it was
  *   tapped, whatever the screen width.
@@ -16,12 +16,14 @@
  *   place they are decided), so the skeleton and the loaded view cannot list
  *   different rows; this module only says what each state READS.
  */
+import type { WorkflowProjection } from "@tentacle/client";
 import type { WorkflowStepDetail, WorkflowStepRow } from "@tentacle/protocol";
 import { oneLine } from "./activity.ts";
 import { size } from "./theme.ts";
-import { GRAPH_WIDTH, graphGeometry } from "./workflow-graph.ts";
 import { type Box, HERO_METRICS, NODE_METRICS } from "./workflow-morph.ts";
 import type { StepDetail } from "./workflow-run-controller.ts";
+import type { RunGeometry } from "./workflow-run-layout.ts";
+import { RUN_WIDTH, runLayout } from "./workflow-run-layout.ts";
 import { DETAIL, type DetailBlocks, detailBlocks, logLines } from "./workflow-skeleton.ts";
 
 /** What the body says for each state of the read (the plan's four answers, plus loading). */
@@ -32,9 +34,9 @@ export const DETAIL_TEXT = {
 } as const;
 
 /**
- * The graph's canvas as the screen draws it: the logical 318 pt width scaled to
- * whatever the phone gives, with the canvas's own left inset. `graphGeometry`
- * works in the logical space, so one scale maps a node's pill onto the screen.
+ * The run graph's canvas as the screen draws it: the logical 402 pt width scaled
+ * to whatever the phone gives, with the canvas's own left inset. `runLayout` works
+ * in the logical space, so one scale maps a node's pill onto the screen.
  */
 export interface CanvasMap {
   readonly scale: number;
@@ -42,26 +44,27 @@ export interface CanvasMap {
   readonly offsetY: number;
 }
 
-/** The canvas for a drawn graph: centred if the phone is wider than 318 pt, never upscaled past 1. */
-export function canvasMap(screenWidth: number, graphWidth: number = GRAPH_WIDTH): CanvasMap {
+/** The canvas for a drawn graph: centred if the phone is wider than the run's own 402 pt, never upscaled past 1. */
+export function canvasMap(screenWidth: number, graphWidth: number = RUN_WIDTH): CanvasMap {
   const usable = Math.max(0, screenWidth);
-  // The graph is never magnified (a 390 pt phone would blur the pills' text); a
-  // narrower phone scales it down so every node stays reachable.
+  // The graph is never magnified (a narrower phone's pill text would blur); a phone
+  // narrower than the drawing scales it down so every node stays reachable.
   const scale = graphWidth <= 0 ? 1 : Math.min(1, usable / graphWidth);
   return { scale, offsetX: Math.max(0, (usable - graphWidth * scale) / 2), offsetY: 0 };
 }
 
 /**
  * A node's pill, in SCREEN points: the morph's start. It returns null for an id
- * the geometry does not hold (a stale tap, a run that changed under it) rather
- * than a made-up box that would fly in from nowhere.
+ * the run's own layout does not hold (a stale tap, a run that changed under it)
+ * rather than a made-up box that would fly in from nowhere.
  */
 export function nodeBoxOnScreen(
-  steps: readonly WorkflowStepRow[],
+  projection: WorkflowProjection,
   stepId: string,
   canvas: CanvasMap,
+  geometry: RunGeometry = runLayout(projection),
 ): Box | null {
-  const node = graphGeometry(steps).nodes.find((n) => n.id === stepId);
+  const node = geometry.nodes.find((n) => n.id === stepId);
   if (node === undefined) {
     return null;
   }
@@ -222,16 +225,17 @@ export function bodyPending(detail: StepDetail | undefined): boolean {
   return detail === undefined || detail.kind === "loading";
 }
 
-/** The pill's start/end for the flight, or null when the node is not on this graph. */
+/** The pill's start/end for the flight, or null when the node is not on this run's graph. */
 export function flight(
-  steps: readonly WorkflowStepRow[],
+  projection: WorkflowProjection,
   stepId: string,
   canvas: CanvasMap,
   top: number,
   inset: number,
   width: number,
+  geometry: RunGeometry = runLayout(projection),
 ): { readonly from: Box; readonly to: Box } | null {
-  const from = nodeBoxOnScreen(steps, stepId, canvas);
+  const from = nodeBoxOnScreen(projection, stepId, canvas, geometry);
   return from === null ? null : { from, to: heroBox(top, inset, width) };
 }
 

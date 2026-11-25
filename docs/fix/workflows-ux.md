@@ -1156,3 +1156,117 @@ bunx biome check <the 6 changed/added files>                 → clean
 `changelog.d/workflows-ux-run-layout.added.md`.
 
 *— Claude Sonnet 4.5 (tentacle executor), 2026-11-25*
+
+### Slice S6b — Phone graph A render + summary strip + ask bar
+
+**Load-bearing re-check, run first — the plan's own `lb.ts` is now OBSOLETE, not failing.** It asserted the
+premise S4 fixed (edges stripped by the strip schemas): re-run, it now throws `Required` on `steps[5].retry`,
+i.e. the FIELDS ARE ON THE WIRE. That is S4's premise holding, not S6b's failing, so the check was
+re-derived for this slice (`.tentacle/tmp/workflows-ux/lb-s6b.ts`, same drive: a demo-note row through
+`WorkflowRowSchema`, then `runProjection`, then `runLayout`):
+
+```
+run row keeps onFail: {"goto":"fix","max":2,"taken":0}
+projection phases: collect:ok draft:ok review:ok fix:skipped confirm:ok archive:ok
+layout keys: width,height,nodes,edges,chips
+fix column: side
+marker fix: null
+```
+
+**Passed** — the edges survive the wire, `fix` projects `skipped` on an ended run (the d1b5faaa defect at its
+root), the layout puts it in the SIDE column, and its marker has no glyph (the owner's plain disc). S6b runs.
+
+**Red first.** `apps/mobile/test/workflow-screens-wiring.test.ts` got its S6b block BEFORE the screen was
+touched: `bun test apps/mobile/test/workflow-screens-wiring.test.ts` → **6 fail**, each on its named
+assertion (`Expected to contain: "runProjection"`, `"pendingAsk(state)"`, `"dashArray("`, …) — not on an
+import. `apps/mobile/test/workflow-edge.test.ts` is a NEW module, so its red is shown the plan's way
+(mutation, below).
+
+**As built.**
+
+- `apps/mobile/src/workflow-edge.ts` (new, pure, React-free) — the PAINT as a table: `edgeLook(trace,
+  palette)` and `pillLook(phase)`. **The kind is not an argument**, which is how the owner's rule ("taken
+  edges are SOLID, goto and retry included; dashed = possible later, dotted = not taken") is enforced by the
+  signature rather than by discipline. `EDGE_DASH`/`EDGE_DOT`/`EDGE_DIM` are the mockup's `--wr-dash`/`--wr-dot`/
+  `--wr-dim`.
+- `apps/mobile/src/ui/WorkflowMark.tsx` (new) — the ONE component that draws a phase: the soft disc, the
+  glyph at `MARKER_SIZE`, a dotted ring where there is no body, an optional shared-rhythm blink for
+  `running`. Used by the pill AND the summary strip, so a phase cannot be drawn two ways.
+- `apps/mobile/src/screens/WorkflowRun.tsx` — rewritten as a dumb renderer: `state.projection` from the
+  controller, `runLayout` for the pills/edges/chips, `markerFor` for every state, `edgeLook` for every
+  stroke, `summary(projection, now)` for the strip. Delete: `graphGeometry`, `nodeAt`'s run copy,
+  `graphHeader`, the per-card inline ask, the loop/maxRound heuristic. The ask is ONE `<AskPanel>` mounted
+  AFTER `</ScrollView>`.
+- `apps/mobile/src/workflow-graph.ts` — the guess is deleted (`graphGeometry`, `nodeAt`, `nodeSubtitle`,
+  `graphHeader`, `isLoopTarget`, `GraphNode`/`GraphEdge`/`GraphGeometry`); the METRICS the editor imports
+  stay, unchanged (`GRAPH_WIDTH`, `PILL_H`, `PILL_RADIUS`, `BADGE`, `BADGE_INSET`, `NODE_GAP`, `PITCH`,
+  `TOP_PAD`, `BOTTOM_PAD`, `MAIN`, `LOOP_SOURCE`, `LOOP_TARGET`, `LOOP_BOW`, `curve`).
+- `apps/mobile/src/workflow-step-detail.ts` — `nodeBoxOnScreen`/`flight` take the shared **projection**
+  (the run's layout), not the bare step rows, and accept a precomputed `RunGeometry` so a screen with one
+  drawing does not lay it out twice. `canvasMap`'s default width is the run's `RUN_WIDTH` (402).
+- `apps/mobile/src/workflow-run-controller.ts` — `RunState.askBar` (the ONE bar: `{kind:"ask"}` the screen
+  can answer, `{kind:"open-session"}` when it cannot) and `askBarFor({runAsk, steps, projection, canAnswer})`,
+  pure and exported so the choice is a test, not a ternary in a screen. `state()` also hands the screen the
+  projection it drew the graph from.
+
+**Drift from the Implementation.**
+
+1. **`workflow-graph.ts` is reduced, not deleted.** S6b's Files row says "retire `workflow-graph.ts`'s guess
+   (keep exported constants the editor imports)" — done exactly: the geometry functions go, the constants
+   stay. Deleting the file was never possible: `workflow-edit-graph.ts` (the editor, on `main`) imports
+   eleven of its exports, and S6a already noted the deletion belongs to whoever moves its last caller.
+2. **The 2C graph suite moves rather than dies.** `workflow-list-graph.test.ts`'s "the 2C graph" describe
+   pinned the retired guess (`graphGeometry`'s file-order placement, `nodeSubtitle`, `graphHeader`), so it
+   cannot survive its subject. Its two properties that still matter — no overlap, edges on the boxes, the
+   hit test — were already proved by `workflow-run-layout.test.ts` (S6a) over the new layout; this file now
+   keeps only the shared METRICS (badge centring, pitch, the three columns' fit).
+3. **Cards stayed, and they read the projection's word.** View B (the timeline) is S7's, so the "cards"
+   half of the toggle still renders `state.steps` — but each card now takes its state word from the
+   projection, so no two views can disagree about a state while both exist. `RunMode` keeps `"cards"`
+   (renaming it to `"list"` is D5/S7's, together with the list it names).
+4. **`askBarFor` takes four named inputs, not `state`.** The plan sketches the selector taking the state;
+   taking the three facts it folds keeps it pure and total (no `RunState` cycle, and a test can ask "what
+   does this fold give for a run I can/cannot answer" without building a controller).
+5. **The blink comes from the shared clock, not a second one.** `WorkflowMark` loops on
+   `STEP_BLINK_LOOP_MS` and is switched OFF by the caller under Reduce Motion — the same rhythm every other
+   running marker in the app already uses.
+6. **`App.tsx` gained one prop** (`now={Date.now()}` on the run route), which S6b's Files row does not name.
+   `summary()` needs a clock and the module is pure by design (S5's drift 1), so a screen reading
+   `Date.now()` itself would be a second clock; the runs screen already takes `now` the same way.
+7. **`workflow-step-wiring.test.ts` had two assertions updated**, both about the flight's arguments: the
+   layer now takes the run's projection (the pill it starts from must be the one the layout placed) and the
+   run screen's detail guard grew a `projection === null` term. Same properties, one more input.
+
+**Mutations** (each applied to the finished module, run, reverted; backup in
+`.tentacle/tmp/workflows-ux/edge.keep.ts` / `run.keep.tsx`).
+
+| # | Mutation | Red |
+|---|---|---|
+| 1 | a `taken` edge given `dashArray: EDGE_DASH` (the mockup's dash-by-kind) | **2 fail** — "a taken edge is SOLID" and the kind-cannot-resurface-a-dash case |
+| 2 | `edgeLook` returns one style for every trace | **4 fail** — taken/go/later+never and the solidity case |
+| 3 | `later` dressed as `skipped` (dotted, one grey shape) | 1 fail — "`not yet` is a dashed outline with no body; `not run` a dotted one" |
+| 4 | `<AskPanel>` moved INSIDE the `ScrollView` | 1 fail — "ONE ask bar, pinned outside the scrolling content" (needed two tries: the first assertion matched `AskBlock`'s own `</ScrollView>`, so it is pinned against `lastIndexOf`) |
+| 5 | the pill re-derives its phase from the wire `state` instead of the projection | 1 fail — "no phase or trace is decided here" |
+
+Mutation 4's first run passing is recorded on purpose: it is the §9 trap (a grep-guard matching the wrong
+occurrence proves nothing), and the assertion was tightened until the mutation died.
+
+**Narrow verification.**
+
+```
+bun test apps/mobile/test                                   → 5333 pass, 0 fail
+bun test apps/mobile/test/workflow-edge.test.ts              →   8 pass, 0 fail
+bun test apps/mobile/test/workflow-screens-wiring.test.ts    →  15 pass, 0 fail
+bun test apps/mobile/test/workflow-run-layout.test.ts         →  16 pass, 0 fail
+bun test apps/mobile/test/workflow-step-layer.test.ts         →  24 pass, 0 fail
+bunx tsc -p apps/mobile --noEmit                             → clean
+bunx biome check <the 13 changed/added files>                → clean
+```
+
+**Not verified:** the full gate (`bun run check`) — the orchestrator's script runs it. The live render (an
+iOS simulator) was not run either: what the screen DRAWS is asserted from the source (a `.tsx` is
+unimportable from Bun, the repo's existing pattern), and every number it draws comes from a module with its
+own test. No schema changed, so `protocol.json` needs no regeneration and no `protocol.d` note is due; the
+changelog fragment is `changelog.d/workflows-ux-graph-render.fixed.md`.
+
+*— deepseek-chat (tentacle executor), 2026-11-25*

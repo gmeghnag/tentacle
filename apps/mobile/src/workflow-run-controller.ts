@@ -18,7 +18,12 @@
  * - **Stop / resume / rerun** are the session's `workflow(...)`; a refusal is a
  *   notice with the daemon's reason.
  */
-import { type WorkflowAction, askForStep } from "@tentacle/client";
+import {
+  type WorkflowAction,
+  type WorkflowProjection,
+  askForStep,
+  runProjection,
+} from "@tentacle/client";
 import type {
   WorkflowResult,
   WorkflowRow,
@@ -142,9 +147,20 @@ export interface RunState {
   readonly phase: "opening" | "ready" | "ended" | "failed";
   /** The run, or null until the session's feed carries it. */
   readonly run: WorkflowRow | null;
+  /**
+   * The run as the SHARED projection reads it (`@tentacle/client`, D2, slice S6b):
+   * phases, traces, chips and the words, so this screen and the TUI cannot
+   * disagree about what an edge is. Null until the feed carries the run.
+   */
+  readonly projection: WorkflowProjection | null;
   readonly steps: readonly StepCard[];
   /** The run's own hash approval, when it is the ask on the sheet. */
   readonly runAsk: CardAsk | null;
+  /**
+   * The ONE bar the run screen shows (D3): the ask it can answer, the sentence that
+   * sends the person to the session, or null. Decided by `askBarFor`, never here.
+   */
+  readonly askBar: AskBar | null;
   readonly mode: RunMode;
   /** A refusal, an ended session, a stale tap. */
   readonly notice: string | null;
@@ -155,6 +171,46 @@ export interface RunState {
 }
 
 const ENDED: readonly SessionOpenFailure[] = ["archived", "deleted", "gone"];
+
+/**
+ * The ask the run screen shows in its ONE bar (D3, slice S6b): the run's own
+ * approval first (answering it is what lets the run go on), then a step's. This
+ * is a pure selector rather than a component's `if`, so the precedence is pinned
+ * by a test; `stepId: null` means the run itself.
+ */
+export function pendingAsk(
+  state: Pick<RunState, "runAsk" | "steps">,
+): { readonly stepId: string | null; readonly ask: CardAsk } | null {
+  if (state.runAsk !== null) {
+    return { stepId: null, ask: state.runAsk };
+  }
+  const step = state.steps.find((card) => card.ask !== null);
+  return step?.ask === null || step === undefined ? null : { stepId: step.step.id, ask: step.ask };
+}
+
+/**
+ * What the bottom bar holds on this screen (D3). An ask it can answer is the ask
+ * itself; a step the run says waits on the person while no sheet is here (`phase`
+ * `ask`, and `canAnswer` false) is the sentence that sends the person to the
+ * session — never a button that cannot work. Null = nothing waits, so no bar.
+ */
+export type AskBar =
+  | { readonly kind: "ask"; readonly stepId: string | null; readonly ask: CardAsk }
+  | { readonly kind: "open-session"; readonly stepId: string };
+
+export function askBarFor(
+  state: Pick<RunState, "runAsk" | "steps" | "projection" | "canAnswer">,
+): AskBar | null {
+  const pending = pendingAsk(state);
+  if (pending !== null) {
+    return { kind: "ask", stepId: pending.stepId, ask: pending.ask };
+  }
+  if (state.canAnswer || state.projection === null) {
+    return null;
+  }
+  const waiting = state.projection.steps.find((step) => step.phase === "ask");
+  return waiting === undefined ? null : { kind: "open-session", stepId: waiting.id };
+}
 
 /**
  * Whether a held detail still answers an open of `row` (asked for `attempt`, or the
@@ -218,16 +274,26 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
   function state(): RunState {
     const run = rows.find((r) => r.runId === deps.runId) ?? null;
     const asks = pending();
+    const projection = run === null ? null : runProjection(run);
+    const cards: StepCard[] = (run?.steps ?? []).map((step) => ({
+      step,
+      look: stateLook(step.state),
+      ask: askForStep(asks, deps.runId, step.id) ?? null,
+      ...(details.has(step.id) ? { detail: details.get(step.id) } : {}),
+    }));
+    const runAsk = askForStep(asks, deps.runId, null) ?? null;
     return {
       phase,
       run,
-      steps: (run?.steps ?? []).map((step) => ({
-        step,
-        look: stateLook(step.state),
-        ask: askForStep(asks, deps.runId, step.id) ?? null,
-        ...(details.has(step.id) ? { detail: details.get(step.id) } : {}),
-      })),
-      runAsk: askForStep(asks, deps.runId, null) ?? null,
+      projection,
+      steps: cards,
+      runAsk,
+      askBar: askBarFor({
+        runAsk,
+        steps: cards,
+        projection,
+        canAnswer: deps.asks !== null,
+      }),
       mode: deps.mode.get(),
       notice,
       canAnswer: deps.asks !== null,

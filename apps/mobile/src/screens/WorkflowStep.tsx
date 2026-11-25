@@ -1,3 +1,4 @@
+import type { WorkflowProjection } from "@tentacle/client";
 import type { WorkflowStepRow } from "@tentacle/protocol";
 /**
  * The step detail's LAYER (docs/feat/workflows-ui.md D5, slice 4): a dumb
@@ -35,6 +36,7 @@ import {
   rowStartMs,
 } from "../workflow-morph.ts";
 import type { StepDetail } from "../workflow-run-controller.ts";
+import { RUN_WIDTH } from "../workflow-run-layout.ts";
 import { DETAIL, detailLayout, logLines, skeletonBars } from "../workflow-skeleton.ts";
 import {
   type HeroText,
@@ -54,8 +56,13 @@ export interface WorkflowStepLayerProps {
   readonly step: WorkflowStepRow;
   /** Its prompt/report as this screen holds it (`undefined` = not asked yet). */
   readonly detail: StepDetail | undefined;
-  /** The run's steps, for the node's on-screen box (the flight's start). */
+  /** The run's steps, for the nav bar's position (and the run's name). */
   readonly steps: readonly WorkflowStepRow[];
+  /**
+   * The run as the shared projection reads it (S6b): the flight starts from the
+   * node the SHARED layout places, so the pill takes off from where it is DRAWN.
+   */
+  readonly projection: WorkflowProjection;
   readonly width: number;
   readonly reduceMotion: boolean;
   /** The run's name, for the nav bar's back button (`‹ demo-note`). */
@@ -83,10 +90,12 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
   const insets = useSafeAreaInsets();
   const top = heroTop(insets.top);
   const nav = navText(steps, step.id, props.runName);
-  const canvas = useMemo(() => canvasMap(width), [width]);
+  // The graph's own logical width (S6b: the run's drawing is 402 pt, wider than the
+  // editor's — the canvas map must be told, or the flight starts from the wrong box).
+  const canvas = useMemo(() => canvasMap(width, RUN_WIDTH), [width]);
   const pair = useMemo(
-    () => flight(steps, step.id, canvas, top, DETAIL.inset, width),
-    [steps, step.id, canvas, top, width],
+    () => flight(props.projection, step.id, canvas, top, DETAIL.inset, width),
+    [props.projection, step.id, canvas, top, width],
   );
   const table: MorphTable | null = useMemo(
     () => (pair === null ? null : morphTable(pair.from, pair.to)),

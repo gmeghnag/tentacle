@@ -44,7 +44,11 @@ describe("the detail is a LAYER inside the run screen, never a navigation push",
     expect(LAYER).not.toContain("navigate(");
     // The graph screen is the layer's sibling, not its parent's replacement.
     expect(RUN).toContain("<Graph");
-    expect(RUN).toContain("{openCard === undefined || run === null ? null : (");
+    // The guard grew one term in S6b (the projection, which the flight starts from):
+    // the layer still mounts BESIDE the graph, never instead of it.
+    expect(RUN).toContain(
+      "{openCard === undefined || run === null || projection === null ? null : (",
+    );
   });
 });
 
@@ -153,7 +157,9 @@ describe("S3 · the layer draws the nav bar under the safe area and the hero bel
     expect(LAYER).toContain("useSafeAreaInsets()");
     expect(body).toContain("heroTop(insets.top)");
     // The flight is given that top — NOT the sheet's inset, which was the bug.
-    expect(body).toContain("flight(steps, step.id, canvas, top, DETAIL.inset, width)");
+    // S6b: the flight starts from a pill the RUN's layout placed, so it takes the
+    // shared projection rather than the bare step rows.
+    expect(body).toContain("flight(props.projection, step.id, canvas, top, DETAIL.inset, width)");
     expect(body).not.toContain("flight(steps, step.id, canvas, DETAIL.inset, width)");
   });
 

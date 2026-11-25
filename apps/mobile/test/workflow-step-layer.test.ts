@@ -10,9 +10,10 @@
  * function with a test, never an arithmetic detail buried in a component.
  */
 import { describe, expect, test } from "bun:test";
-import type { WorkflowStepRow } from "@tentacle/protocol";
-import { GRAPH_WIDTH } from "../src/workflow-graph.ts";
+import { runProjection } from "@tentacle/client";
+import type { WorkflowRow, WorkflowStepRow } from "@tentacle/protocol";
 import { HERO_METRICS } from "../src/workflow-morph.ts";
+import { RUN_WIDTH } from "../src/workflow-run-layout.ts";
 import {
   DETAIL_TEXT,
   STEP_NAV,
@@ -42,7 +43,26 @@ const step = (id: string, over: Partial<WorkflowStepRow> = {}): WorkflowStepRow 
   ...over,
 });
 
-const STEPS = [step("build"), step("review", { state: "error" }), step("merge")];
+const STEPS = [
+  step("build", { state: "ok", next: "review" }),
+  step("review", { state: "error", next: "merge" }),
+  step("merge", { state: "pending" }),
+];
+
+/** The run's own row, then the shared projection (S6b: the flight starts from a pill the layout placed). */
+const RUN: WorkflowRow = {
+  runId: "wf-1",
+  name: "demo-note",
+  version: 1,
+  hash: "a".repeat(64),
+  state: "running",
+  tokens: 0,
+  startedAt: 1_000,
+  history: [],
+  historyDropped: 0,
+  steps: STEPS,
+};
+const PROJECTION = runProjection(RUN);
 
 const detail = (over: Record<string, unknown> = {}) => ({
   attempt: 0,
@@ -55,23 +75,24 @@ const detail = (over: Record<string, unknown> = {}) => ({
 
 describe("canvasMap: the graph's logical space → the screen", () => {
   test("a phone wider than the graph draws it at 1:1, CENTRED (never magnified)", () => {
-    const map = canvasMap(390, GRAPH_WIDTH);
+    // The drawing is the mockup's 402 pt; a 430 pt phone (16 Pro Max) is wider.
+    const map = canvasMap(430, RUN_WIDTH);
     expect(map.scale).toBe(1);
-    expect(map.offsetX).toBe((390 - GRAPH_WIDTH) / 2);
+    expect(map.offsetX).toBe((430 - RUN_WIDTH) / 2);
     expect(map.offsetX).toBeGreaterThan(0);
     expect(map.offsetY).toBe(0);
   });
 
   test("a narrower phone scales the graph DOWN so every node stays reachable", () => {
-    const map = canvasMap(300, GRAPH_WIDTH);
-    expect(map.scale).toBeCloseTo(300 / GRAPH_WIDTH, 6);
+    const map = canvasMap(300, RUN_WIDTH);
+    expect(map.scale).toBeCloseTo(300 / RUN_WIDTH, 6);
     expect(map.scale).toBeLessThan(1);
     expect(map.offsetX).toBe(0);
   });
 
   test("a zero/garbage width never yields a NaN scale (a NaN box draws nothing)", () => {
     for (const width of [0, -40, Number.NaN]) {
-      const map = canvasMap(Number.isFinite(width) ? width : 0, GRAPH_WIDTH);
+      const map = canvasMap(Number.isFinite(width) ? width : 0, RUN_WIDTH);
       expect(Number.isFinite(map.scale)).toBe(true);
       expect(Number.isFinite(map.offsetX)).toBe(true);
       expect(map.scale).toBeGreaterThanOrEqual(0);
@@ -81,8 +102,8 @@ describe("canvasMap: the graph's logical space → the screen", () => {
 
 describe("nodeBoxOnScreen: the pill takes off from where the finger was", () => {
   test("the mapped box is the node's own box, scaled and offset (NOT the hero's)", () => {
-    const canvas = canvasMap(390, GRAPH_WIDTH);
-    const box = nodeBoxOnScreen(STEPS, "review", canvas);
+    const canvas = canvasMap(390, RUN_WIDTH);
+    const box = nodeBoxOnScreen(PROJECTION, "review", canvas);
     expect(box).not.toBeNull();
     const hero = heroBox(heroTop(59), 16, 390);
     // It is a DIFFERENT box: a flight from the hero to the hero goes nowhere.
@@ -92,13 +113,13 @@ describe("nodeBoxOnScreen: the pill takes off from where the finger was", () => 
   });
 
   test("an id the geometry does not hold is null, never a box flown in from nowhere", () => {
-    expect(nodeBoxOnScreen(STEPS, "nope", canvasMap(390))).toBeNull();
+    expect(nodeBoxOnScreen(PROJECTION, "nope", canvasMap(390))).toBeNull();
   });
 
   test("the node sits at the geometry's own y, and the LAST node is further down", () => {
-    const canvas = canvasMap(GRAPH_WIDTH, GRAPH_WIDTH);
-    const first = nodeBoxOnScreen(STEPS, "build", canvas);
-    const last = nodeBoxOnScreen(STEPS, "merge", canvas);
+    const canvas = canvasMap(RUN_WIDTH, RUN_WIDTH);
+    const first = nodeBoxOnScreen(PROJECTION, "build", canvas);
+    const last = nodeBoxOnScreen(PROJECTION, "merge", canvas);
     expect(first?.y).toBeLessThan(last?.y ?? 0);
     expect(first?.height).toBe(44);
   });
@@ -212,10 +233,10 @@ describe("stepBlocks: the kv list is final BEFORE the read lands", () => {
 
 describe("flight: the two ends of the morph, or nothing", () => {
   test("it is the node's screen box and the hero's — the pair the animation interpolates", () => {
-    const canvas = canvasMap(375, GRAPH_WIDTH);
-    const pair = flight(STEPS, "review", canvas, heroTop(59), 16, 375);
+    const canvas = canvasMap(375, RUN_WIDTH);
+    const pair = flight(PROJECTION, "review", canvas, heroTop(59), 16, 375);
     expect(pair?.to).toEqual(heroBox(heroTop(59), 16, 375));
-    const node = nodeBoxOnScreen(STEPS, "review", canvas);
+    const node = nodeBoxOnScreen(PROJECTION, "review", canvas);
     if (node === null) {
       throw new Error("the fixture's step is in the graph");
     }
@@ -223,7 +244,7 @@ describe("flight: the two ends of the morph, or nothing", () => {
   });
 
   test("a step the graph does not hold has no flight (the layer does not open)", () => {
-    expect(flight(STEPS, "gone", canvasMap(375), heroTop(59), 16, 375)).toBeNull();
+    expect(flight(PROJECTION, "gone", canvasMap(375), heroTop(59), 16, 375)).toBeNull();
   });
 });
 
@@ -246,7 +267,7 @@ describe("S3 · the detail's nav bar under the safe area, the hero below it", ()
   });
 
   test("the flight LANDS there too (the morph cannot land under the clock)", () => {
-    const pair = flight(STEPS, "review", canvasMap(390), heroTop(59), 16, 390);
+    const pair = flight(PROJECTION, "review", canvasMap(390), heroTop(59), 16, 390);
     expect(pair?.to.y).toBe(heroTop(59));
     expect(pair?.to.y).toBeGreaterThanOrEqual(59 + STEP_NAV.height);
   });

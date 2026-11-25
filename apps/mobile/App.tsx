@@ -2205,6 +2205,7 @@ function WorkflowRunRoute({
         palette={palette}
         title={title}
         state={state}
+        now={Date.now()}
         onBack={onBack}
         onMode={(mode) => controller.setMode(mode)}
         onAnswer={(stepId, optionId) => controller.answer(stepId, optionId)}

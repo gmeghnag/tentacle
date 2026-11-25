@@ -1,14 +1,28 @@
 /**
- * One workflow run (docs/feat/workflows-ui.md D4, slice 3): graph 2C ⇄ cards 2A,
- * a native-stack PUSH. A dumb renderer (AGENTS §7): the run, the step looks, the
- * ask ↔ step pairing and every action are `workflow-run-controller.ts`'s; the
- * graph's geometry is `workflow-graph.ts`'s. An approve card shows the ask's
- * title and detail VERBATIM — scrollable, never truncated (§7: a `run` command is
- * shown as it will run). Glyph + word on every step (never hue alone).
+ * One workflow run (docs/fix/workflows-ux.md S6/D3–D4): the graph A render, the
+ * summary strip and the ONE ask bar. A dumb renderer (AGENTS §7): what a step IS,
+ * what an edge TRACES and what the run SAYS all come from the shared projection
+ * (`@tentacle/client`'s `runProjection`/`summary`, D2), where each pill SITS from
+ * `workflow-run-layout.ts` (D3), how a phase is drawn from `workflow-marker.ts`
+ * (D4) and how a trace is stroked from `workflow-edge.ts`. No branch here decides
+ * a phase, a word or a line style — that is the whole point of the slice: the
+ * phone's graph and the TUI's words cannot disagree because there is one truth.
+ *
+ * Two rules the owner set are the reason this looks the way it does:
+ * - a TAKEN edge is solid, goto and retry included; only "possible later" is
+ *   dashed and "not taken" dotted (`workflow-edge.ts`).
+ * - every state is readable without colour: a soft disc with its own glyph, a
+ *   plain disc for `not yet`, a dotted ring for `not run`, plus the word.
+ *
+ * An ask is shown VERBATIM in a bar pinned under the content — never per card
+ * (§7: a `run` command is shown as it will run), and never truncated.
  */
+import type { WorkflowProjection, WorkflowStepView } from "@tentacle/client";
+import { summary } from "@tentacle/client";
 import type { WorkflowStepRow } from "@tentacle/protocol";
 import type { JSX } from "react";
-import { Pressable, ScrollView, StyleSheet, View } from "react-native";
+import { useEffect, useRef } from "react";
+import { Animated, Easing, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
 import type { Palette } from "../theme.ts";
 import { space, typography } from "../theme.ts";
@@ -17,9 +31,12 @@ import { Icon } from "../ui/Icon.tsx";
 import { PillButton } from "../ui/PillButton.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { Text } from "../ui/Text.tsx";
-import { graphGeometry } from "../workflow-graph.ts";
+import { WorkflowMark } from "../ui/WorkflowMark.tsx";
+import { EDGE_DIM, type EdgeLook, edgeLook, pillLook } from "../workflow-edge.ts";
 import { stateLook } from "../workflow-list.ts";
-import type { CardAsk, RunMode, RunState, StepCard } from "../workflow-run-controller.ts";
+import { MARKER_SIZE, markerFor } from "../workflow-marker.ts";
+import type { AskBar, CardAsk, RunMode, RunState, StepCard } from "../workflow-run-controller.ts";
+import { type RunChip, type RunEdge, type RunNode, runLayout } from "../workflow-run-layout.ts";
 import { stepBlocks } from "../workflow-step-detail.ts";
 import { WorkflowStepLayer } from "./WorkflowStep.tsx";
 
@@ -27,6 +44,8 @@ export interface WorkflowRunScreenProps {
   readonly palette: Palette;
   readonly title: string;
   readonly state: RunState;
+  /** The clock, once per render: the strip's elapsed time is a pure function of it. */
+  readonly now: number;
   readonly onBack: () => void;
   readonly onMode: (mode: RunMode) => void;
   readonly onAnswer: (stepId: string | null, optionId: "allow_once" | "reject_once") => void;
@@ -48,7 +67,7 @@ export interface WorkflowRunScreenProps {
   readonly width: number;
 }
 
-/** The approve block: the ask VERBATIM, then Allow once / Deny (a workflow ask has no "always"). */
+/** The ask VERBATIM, then Allow once / Deny (a workflow ask has no "always"). */
 function AskBlock({
   palette,
   ask,
@@ -87,31 +106,300 @@ function AskBlock({
   );
 }
 
-function stepLine(step: WorkflowStepRow): string {
-  return [step.kind, step.model, step.where === "" ? undefined : step.where]
-    .filter((p): p is string => p !== undefined && p !== "")
-    .join(" · ");
+/**
+ * The bar pinned under the content (D3): the ask when it can be answered here,
+ * otherwise the sentence that sends the person to the session. One bar, whatever
+ * the view — an ask belongs to the RUN, not to a card that may be scrolled away.
+ */
+function AskPanel({
+  palette,
+  bar,
+  onAnswer,
+  onOpenSession,
+}: {
+  readonly palette: Palette;
+  readonly bar: AskBar;
+  readonly onAnswer: WorkflowRunScreenProps["onAnswer"];
+  readonly onOpenSession: () => void;
+}): JSX.Element {
+  if (bar.kind === "ask") {
+    return (
+      <View testID="workflow-ask" style={[styles.bar, { borderTopColor: palette.sepChat }]}>
+        <AskBlock
+          palette={palette}
+          ask={bar.ask}
+          testID={bar.stepId === null ? "workflow-ask-run" : `workflow-ask-${bar.stepId}`}
+          onAnswer={(optionId) => onAnswer(bar.stepId, optionId)}
+        />
+      </View>
+    );
+  }
+  return (
+    <View testID="workflow-ask" style={[styles.bar, { borderTopColor: palette.sepChat }]}>
+      <Pressable
+        testID={`workflow-open-session-${bar.stepId}`}
+        accessibilityRole="button"
+        onPress={onOpenSession}
+        style={styles.rowHead}
+      >
+        <Icon name="hand.raised" color={palette.accent} size={18} />
+        <Text style={[styles.openSession, { color: palette.accent }]}>
+          Open the session to answer it
+        </Text>
+      </Pressable>
+    </View>
+  );
 }
 
+/** The run's own facts (D2's `summary`): the outcome and its phase marker, the time, then the detail line. */
+function SummaryStrip({
+  palette,
+  projection,
+  now,
+}: {
+  readonly palette: Palette;
+  readonly projection: WorkflowProjection;
+  readonly now: number;
+}): JSX.Element {
+  const line = summary(projection, now);
+  const look = markerFor({ phase: line.phase, word: line.word }, palette);
+  return (
+    <View testID="workflow-summary" style={[styles.summary, { borderBottomColor: palette.sep }]}>
+      <View style={styles.summaryLine}>
+        <WorkflowMark
+          palette={palette}
+          look={look}
+          size={MARKER_SIZE.rail}
+          label={line.word}
+          blink={false}
+        />
+        <Text style={[styles.summaryWord, { color: palette.label }]} numberOfLines={1}>
+          {line.word}
+        </Text>
+        <Text style={[styles.summaryTime, { color: palette.label }]}>{line.time}</Text>
+      </View>
+      <Text testID="workflow-summary-line" style={[styles.meta, { color: palette.sec }]}>
+        {line.line2}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * One drawn edge. A `go` edge's dash FLOWS (`--wr-flow`: the offset walks a dash
+ * period and repeats) and stands still under Reduce Motion — the animation is the
+ * only thing that ever says "right now" by movement, so it must be the one the
+ * switch stops.
+ */
+function Edge({
+  palette,
+  edge,
+  reduceMotion,
+}: {
+  readonly palette: Palette;
+  readonly edge: RunEdge;
+  readonly reduceMotion: boolean;
+}): JSX.Element {
+  const look: EdgeLook = edgeLook(edge.trace, palette);
+  const flow = useRef(new Animated.Value(0)).current;
+  const animate = look.animate && !reduceMotion;
+  useEffect(() => {
+    if (!animate) {
+      flow.setValue(0);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.timing(flow, {
+        toValue: 1,
+        duration: FLOW_MS,
+        easing: Easing.linear,
+        useNativeDriver: false,
+      }),
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+      flow.setValue(0);
+    };
+  }, [animate, flow]);
+  const offset = animate
+    ? flow.interpolate({ inputRange: [0, 1], outputRange: [0, -FLOW_OFFSET] })
+    : 0;
+  return (
+    <AnimatedPath
+      testID={`workflow-edge-${edge.key}`}
+      d={edge.d}
+      stroke={look.stroke}
+      strokeWidth={look.width}
+      strokeOpacity={look.opacity}
+      strokeDasharray={look.dashArray}
+      strokeDashoffset={offset}
+      strokeLinecap="round"
+      fill="none"
+    />
+  );
+}
+
+/** The mockup's `wr-flow`: one dash period per `--ms-breathe` (1500 ms). */
+const FLOW_MS = 1500;
+const FLOW_OFFSET = 18;
+const AnimatedPath = Animated.createAnimatedComponent(Path);
+
+/** A counter chip (`✗ 1/2`, `↻ 0/1`), centred on its arc and clear of every pill (D3). */
+function Chip({
+  palette,
+  chip,
+}: { readonly palette: Palette; readonly chip: RunChip }): JSX.Element {
+  const look = edgeLook(chip.trace, palette);
+  return (
+    <View
+      testID={`workflow-chip-${chip.key}`}
+      style={[
+        styles.chip,
+        {
+          left: chip.x - chip.width / 2,
+          top: chip.y - chip.height / 2,
+          width: chip.width,
+          height: chip.height,
+          backgroundColor: palette.page,
+          borderColor: palette.sep,
+          borderStyle: look.dashArray === undefined ? "solid" : "dashed",
+        },
+      ]}
+    >
+      <Text style={[styles.chipText, { color: look.stroke }]} numberOfLines={1}>
+        {chip.text}
+      </Text>
+    </View>
+  );
+}
+
+/** One pill: the phase's marker, the step's name, and the projection's own `meta` line. */
+function Pill({
+  palette,
+  projection,
+  node,
+  reduceMotion,
+  onOpenStep,
+}: {
+  readonly palette: Palette;
+  readonly projection: WorkflowProjection;
+  readonly node: RunNode;
+  readonly reduceMotion: boolean;
+  readonly onOpenStep: (stepId: string) => void;
+}): JSX.Element {
+  const step: WorkflowStepView | undefined = projection.steps.find((s) => s.id === node.id);
+  const look = markerFor(step ?? { phase: node.phase, word: "" }, palette);
+  const chrome = pillLook(node.phase);
+  const running = node.phase === "running";
+  return (
+    <Pressable
+      testID={`workflow-node-${node.id}`}
+      accessibilityRole="button"
+      accessibilityLabel={`${node.id} · ${look.word}`}
+      onPress={() => onOpenStep(node.id)}
+      style={[
+        styles.pill,
+        {
+          left: node.x,
+          top: node.y,
+          width: node.width,
+          height: node.height,
+          borderRadius: node.radius,
+          backgroundColor: chrome.body ? palette.card : "transparent",
+          borderColor: chrome.emphatic ? palette.accent : palette.sep,
+          borderWidth: chrome.ringWidth,
+          borderStyle: chrome.ring,
+        },
+      ]}
+    >
+      <WorkflowMark
+        palette={palette}
+        look={look}
+        size={MARKER_SIZE.pill}
+        label={look.word}
+        blink={running && !reduceMotion}
+      />
+      <View style={styles.pillText}>
+        <Text
+          numberOfLines={1}
+          style={[styles.pillName, { color: palette.label, opacity: chrome.dim ? DIM : 1 }]}
+        >
+          {node.id}
+        </Text>
+        <Text
+          numberOfLines={1}
+          style={[styles.pillMeta, { color: palette.sec, opacity: chrome.dim ? DIM : 1 }]}
+        >
+          {step?.meta ?? look.word}
+        </Text>
+      </View>
+    </Pressable>
+  );
+}
+
+/** The mockup's `--wr-dim`, for a step that did not happen. */
+const DIM = EDGE_DIM;
+
+/** View A: the run's graph, drawn from the shared layout (never a guess at the definition). */
+function Graph({
+  palette,
+  projection,
+  reduceMotion,
+  onOpenStep,
+}: {
+  readonly palette: Palette;
+  readonly projection: WorkflowProjection;
+  readonly reduceMotion: boolean;
+  onOpenStep: (stepId: string) => void;
+}): JSX.Element {
+  const geometry = runLayout(projection);
+  return (
+    <View
+      testID="workflow-graph"
+      style={{ width: geometry.width, height: geometry.height, alignSelf: "center" }}
+    >
+      <Svg width={geometry.width} height={geometry.height} style={StyleSheet.absoluteFill}>
+        {geometry.edges.map((edge) => (
+          <Edge key={edge.key} palette={palette} edge={edge} reduceMotion={reduceMotion} />
+        ))}
+      </Svg>
+      {geometry.nodes.map((node) => (
+        <Pill
+          key={node.id}
+          palette={palette}
+          projection={projection}
+          node={node}
+          reduceMotion={reduceMotion}
+          onOpenStep={onOpenStep}
+        />
+      ))}
+      {geometry.chips.map((chip) => (
+        <Chip key={chip.key} palette={palette} chip={chip} />
+      ))}
+    </View>
+  );
+}
+
+/**
+ * View 2A's cards, until S7 replaces them with the B timeline (the owner's plan:
+ * S7 owns the list). They already read the projection's WORD, so the two views
+ * never disagree about a state while both exist.
+ */
 function Card({
   palette,
   card,
-  canAnswer,
-  onAnswer,
+  word,
   onRerun,
-  onOpenSession,
   onOpenStep,
 }: {
   readonly palette: Palette;
   readonly card: StepCard;
-  readonly canAnswer: boolean;
-  readonly onAnswer: WorkflowRunScreenProps["onAnswer"];
+  readonly word: string;
   readonly onRerun: (stepId: string) => void;
-  readonly onOpenSession: () => void;
   readonly onOpenStep: (stepId: string) => void;
 }): JSX.Element {
-  const { step, look, ask } = card;
-  const waits = step.state === "needs-approval" || step.state === "waiting";
+  const { step } = card;
   return (
     <View
       testID={`workflow-card-${step.id}`}
@@ -120,16 +408,15 @@ function Card({
       <Pressable
         testID={`workflow-card-open-${step.id}`}
         accessibilityRole="button"
-        accessibilityLabel={`${step.id} · ${look.word}`}
+        accessibilityLabel={`${step.id} · ${word}`}
         onPress={() => onOpenStep(step.id)}
         style={styles.cardHead}
       >
         <View style={styles.rowHead}>
-          <Text style={[styles.glyph, { color: palette.label }]}>{look.glyph}</Text>
           <Text style={[styles.name, { color: palette.label }]} numberOfLines={1}>
             {step.id}
           </Text>
-          <Text style={[styles.meta, { color: palette.sec }]}>{look.word}</Text>
+          <Text style={[styles.meta, { color: palette.sec }]}>{word}</Text>
         </View>
         <Text style={[styles.meta, { color: palette.sec }]} numberOfLines={1}>
           {stepLine(step)}
@@ -138,20 +425,6 @@ function Card({
       {step.reason === undefined ? null : (
         <Text style={[styles.meta, { color: palette.sec }]}>{step.reason}</Text>
       )}
-      {ask !== null ? (
-        <AskBlock
-          palette={palette}
-          ask={ask}
-          testID={`workflow-ask-${step.id}`}
-          onAnswer={(optionId) => onAnswer(step.id, optionId)}
-        />
-      ) : waits && !canAnswer ? (
-        <Pressable testID={`workflow-open-session-${step.id}`} onPress={onOpenSession}>
-          <Text style={[styles.meta, { color: palette.accent }]}>
-            Open the session to answer it
-          </Text>
-        </Pressable>
-      ) : null}
       {step.state === "error" ? (
         <PillButton
           palette={palette}
@@ -165,71 +438,22 @@ function Card({
   );
 }
 
-function Graph({
-  palette,
-  steps,
-  onOpenStep,
-}: {
-  readonly palette: Palette;
-  readonly steps: readonly StepCard[];
-  readonly onOpenStep: (stepId: string) => void;
-}): JSX.Element {
-  const geometry = graphGeometry(steps.map((s) => s.step));
-  const looks = new Map(steps.map((s) => [s.step.id, s.look]));
-  return (
-    <View testID="workflow-graph" style={{ width: geometry.width, height: geometry.height }}>
-      <Svg width={geometry.width} height={geometry.height} style={StyleSheet.absoluteFill}>
-        {geometry.edges.map((edge) => (
-          <Path
-            key={edge.key}
-            d={edge.d}
-            stroke={edge.kind === "future" ? palette.sep : palette.sec}
-            strokeWidth={1.5}
-            strokeDasharray={edge.kind === "future" ? "4 4" : undefined}
-            fill="none"
-          />
-        ))}
-      </Svg>
-      {geometry.nodes.map((node) => {
-        const look = looks.get(node.id);
-        return (
-          <Pressable
-            key={node.id}
-            testID={`workflow-node-${node.id}`}
-            accessibilityRole="button"
-            accessibilityLabel={`${node.id} · ${look?.word ?? node.state}`}
-            onPress={() => onOpenStep(node.id)}
-            style={[
-              styles.node,
-              {
-                left: node.x,
-                top: node.y,
-                width: node.width,
-                height: node.height,
-                borderRadius: node.radius,
-                backgroundColor: palette.card,
-                borderColor: palette.sep,
-              },
-            ]}
-          >
-            <Text style={[styles.nodeText, { color: palette.label }]} numberOfLines={1}>
-              {`${look?.glyph ?? "○"} ${node.id} · ${look?.word ?? node.state}`}
-              {node.loopLabel === undefined ? "" : ` ${node.loopLabel}`}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
+function stepLine(step: WorkflowStepRow): string {
+  return [step.kind, step.model, step.where === "" ? undefined : step.where]
+    .filter((p): p is string => p !== undefined && p !== "")
+    .join(" · ");
 }
 
 export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
   const { palette, state } = props;
   const run = state.run;
+  const projection = state.projection;
   const next: RunMode = state.mode === "graph" ? "cards" : "graph";
   // The detail layer (D5): ONE flight at a time — the node tapped, or the card.
   const openCard =
     state.openStepId === null ? undefined : state.steps.find((c) => c.step.id === state.openStepId);
+  const words = new Map((projection?.steps ?? []).map((s) => [s.id, s.word]));
+  const ready = state.phase === "ready" && run !== null && projection !== null;
   return (
     <View testID="workflow-run" style={[styles.screen, { backgroundColor: palette.page }]}>
       <ScreenHeader
@@ -285,69 +509,65 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
           title="Could not open the session"
         />
       ) : (
-        <ScrollView contentContainerStyle={styles.content}>
-          {state.runAsk === null ? null : (
-            <AskBlock
-              palette={palette}
-              ask={state.runAsk}
-              testID="workflow-ask-run"
-              onAnswer={(optionId) => props.onAnswer(null, optionId)}
-            />
+        <>
+          {projection === null ? null : (
+            <SummaryStrip palette={palette} projection={projection} now={props.now} />
           )}
-          {state.mode === "graph" ? (
-            <>
-              {state.steps.map((card) =>
-                card.ask === null ? null : (
-                  <AskBlock
-                    key={card.step.id}
-                    palette={palette}
-                    ask={card.ask}
-                    testID={`workflow-ask-${card.step.id}`}
-                    onAnswer={(optionId) => props.onAnswer(card.step.id, optionId)}
-                  />
-                ),
-              )}
-              <Graph palette={palette} steps={state.steps} onOpenStep={props.onOpenStep} />
-            </>
-          ) : (
-            state.steps.map((card) => (
-              <Card
-                key={card.step.id}
+          <ScrollView contentContainerStyle={styles.content}>
+            {state.mode === "graph" && projection !== null ? (
+              <Graph
                 palette={palette}
-                card={card}
-                canAnswer={state.canAnswer}
-                onAnswer={props.onAnswer}
-                onRerun={props.onRerun}
-                onOpenSession={props.onOpenSession}
+                projection={projection}
+                reduceMotion={props.reduceMotion}
                 onOpenStep={props.onOpenStep}
               />
-            ))
-          )}
-          {run === null ? null : run.endedAt === undefined ? (
-            <PillButton
-              palette={palette}
-              testID="workflow-run-stop"
-              kind="destructive"
-              label="Stop"
-              onPress={props.onStop}
-            />
-          ) : run.state !== "ok" ? (
-            <PillButton
-              palette={palette}
-              testID="workflow-run-resume"
-              kind="secondary"
-              label="Resume"
-              onPress={props.onResume}
-            />
-          ) : null}
-        </ScrollView>
+            ) : (
+              state.steps.map((card) => (
+                <Card
+                  key={card.step.id}
+                  palette={palette}
+                  card={card}
+                  word={words.get(card.step.id) ?? ""}
+                  onRerun={props.onRerun}
+                  onOpenStep={props.onOpenStep}
+                />
+              ))
+            )}
+            {run === null ? null : run.endedAt === undefined ? (
+              <PillButton
+                palette={palette}
+                testID="workflow-run-stop"
+                kind="destructive"
+                label="Stop"
+                onPress={props.onStop}
+              />
+            ) : run.state !== "ok" ? (
+              <PillButton
+                palette={palette}
+                testID="workflow-run-resume"
+                kind="secondary"
+                label="Resume"
+                onPress={props.onResume}
+              />
+            ) : null}
+          </ScrollView>
+        </>
       )}
-      {openCard === undefined || run === null ? null : (
+      {ready && state.askBar === null ? null : ready && state.askBar !== null ? (
+        <AskPanel
+          palette={palette}
+          bar={state.askBar}
+          onAnswer={props.onAnswer}
+          onOpenSession={props.onOpenSession}
+        />
+      ) : null}
+      {openCard === undefined || run === null || projection === null ? null : (
         <WorkflowStepLayer
           palette={palette}
           step={openCard.step}
           detail={openCard.detail}
           steps={run.steps}
+          projection={projection}
           width={props.width}
           reduceMotion={props.reduceMotion}
           runName={run.name}
@@ -369,22 +589,52 @@ const styles = StyleSheet.create({
   screen: { flex: 1 },
   content: { padding: space.inset, gap: space.inset },
   notice: { ...typography.footnote, paddingHorizontal: space.inset },
+  summary: {
+    paddingHorizontal: space.inset,
+    paddingTop: space.inset - 6,
+    paddingBottom: space.inset - 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: 4,
+  },
+  summaryLine: { flexDirection: "row", alignItems: "center", gap: space.inset / 2 },
+  summaryWord: { ...typography.headline, flex: 1 },
+  summaryTime: { ...typography.body, fontVariant: ["tabular-nums"] },
   card: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 12, gap: 6 },
   cardHead: { gap: 6 },
   rowHead: { flexDirection: "row", alignItems: "center", gap: 8 },
-  glyph: { ...typography.body, width: 18, textAlign: "center" },
   name: { ...typography.body, flex: 1, fontWeight: "600" },
   meta: { ...typography.footnote },
+  pill: {
+    position: "absolute",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingLeft: 7,
+    paddingRight: 12,
+    overflow: "hidden",
+  },
+  pillText: { flex: 1, minWidth: 0 },
+  pillName: { ...typography.subheadStrong },
+  pillMeta: { ...typography.caption },
+  chip: {
+    position: "absolute",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 9,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  chipText: { ...typography.caption, fontFamily: typography.mono.fontFamily },
+  bar: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: space.inset,
+    paddingTop: 12,
+    paddingBottom: 12,
+    backgroundColor: "transparent",
+  },
+  openSession: { ...typography.body, flex: 1 },
   ask: { gap: 8 },
   askTitle: { ...typography.headline },
   detail: { maxHeight: 220, borderRadius: 8, padding: 8 },
   mono: { ...typography.mono },
   buttons: { flexDirection: "row", gap: 8 },
-  node: {
-    position: "absolute",
-    borderWidth: StyleSheet.hairlineWidth,
-    justifyContent: "center",
-    paddingHorizontal: 10,
-  },
-  nodeText: { ...typography.footnote },
 });
