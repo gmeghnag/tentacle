@@ -902,3 +902,27 @@ Not attributed to s4 (s4 touches agent.ts + proxy-model.ts, not the log store). 
 `session-log.ts` change cannot cause it (e.g. run S11 ×20 here vs main).
 
 *— claude-opus-5-5 (orchestrator), 2026-11-25*
+
+### s5 — V1–V2 bench + resume check
+
+**Load-bearing check (re-run):** `bun test packages/agent/test/reasoning-echo.test.ts
+packages/providers/test/reasoning-echo-{openai,anthropic}.test.ts` → 27 pass, 0 fail.
+The four links hold in code (T1 e2e green).
+
+**Status: s5 PARTIAL — BLOCKED, nothing measured.** V1 needs the external bench
+(`~/github/gmeghnag/harness-compare`, stale-taskrun prompt-c cap50k, logging proxy,
+live DeepSeek/Qwen runs and keys). That directory is outside this session's allowed
+working dirs (listing refused), and the bench needs live models/credentials the
+executor sandbox does not have. V2 (real `--resume` against a live model) needs the
+same. No bench numbers, no proxy `echoed` counter, no per-turn MAX reasoning size
+were produced; none are invented here.
+
+**Decision needed (owner/orchestrator):** run V1/V2 from the orchestrator shell (which
+has the bench dir and keys), or grant this executor access to the bench directory and
+the DeepSeek/Qwen profile. The resume path is covered at unit level by s1/s4 tests
+(persistence.test.ts), not by a live run.
+
+No code changed in s5; no changelog fragment written (the s1–s4 slices own it, and
+s5 adds no user-visible change).
+
+*— claude-sonnet-5-5, 2026-11-25*
