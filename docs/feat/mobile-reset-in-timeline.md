@@ -645,4 +645,68 @@ orchestrator's.
 
 ## Review
 
-*— (empty)*
+*— claude-opus-5-5, 2026-11-25* (fresh context; scope `git diff main...HEAD`, Slices 1–3)
+
+**Verdict: APPROVE-WITH-NITS** — no HIGH/MEDIUM finding.
+
+**Gate (this reviewer):** the 14 touched test files (12 mobile + `packages/cli/test/serve-mcp.test.ts`
++ `scripts/test/mockup-kit.test.ts`) → **270 pass / 0 fail**; `bun run lint` clean
+(2423 files); `bun run typecheck` clean (root + mobile + relay). Full `bun run test`
+not re-run here (the orchestrator's merge gate).
+
+**Mutation non-vacuity (each reverted; `git status` empty afterwards):**
+- `mergedResetCalls` drops `next.event === "reset"` (a compaction would swallow the
+  call) → `a compaction row after the call does not merge it` FAILS.
+- `safeCut` `opening > 0` → `>= 0` → `a fence opened on line 1 is cut past its close` FAILS.
+- `compactionRow` body = whole content (head kept) → 2 `transcript-reload` compaction tests FAIL.
+
+**End-to-end trace** (`.tentacle/tmp/mobile-reset-in-timeline/trace-review.ts`, real
+`apply` + `stepLayout`): `turn_started → tool_call/tool_result context_reset (ok) →
+context_reset event` ⇒ rows `[tool:ok, context:reset]`, cells `{tool: hidden, context:
+node}` — Q3-A live = reopen holds. A `history{compact}` ⇒ one `context` row, body without
+the head.
+
+**Premise table (deltas only):**
+- FALSE (harmless): Context's "THIS phone's successful `/compact` leaves no transcript
+  row" via `own === true ? state`. No producer ever sets `own: true` (`git grep` on
+  `main`: none in `apps/mobile/src` or `packages/client/src`; `session-feed.ts:314-327`
+  forwards `reason` only), so `main` already drew the separator for an own compaction.
+  Q4-A's outcome is unchanged; the removed term was dead, and the Q4-A mutation test
+  pins only the fold, not a real path.
+- TRUE: one `historyRows` path for all deliveries; `sameSlot` positional + new arm;
+  `lastTextRow` only extends an assistant row (pinned by the mid-turn test).
+
+**Attacks tried:**
+1. §7 "logic in pure modules": every decision (merge, cut, subtitle, a11y, thread) is in
+   `tool-steps.ts`/`transcript-history.ts`; `ContextRowView` only maps the view. Holds.
+2. §7 protocol/persistence: no `packages/protocol`, daemon or TUI file touched; nothing
+   persisted. Holds (blast `contained` is accurate).
+3. Open/full state survives recycling: `TranscriptCell` passes `open`/`full`/`onShowAll`
+   by key for every row (`SessionScreen.tsx:1866-1872`, `TranscriptCell.tsx:61-68`);
+   `sameStepCell` gained the `context` arm. Holds.
+4. Q3-A false merges: compaction after the call, error/denied/running calls stay steps
+   (tests + mutation above). Holds.
+5. Fence-cut / blank body / legacy summary: pinned by tests; blank ⇒ not tappable. Holds.
+
+**Nits (not blocking):**
+- N1 `tool-steps.ts:718-726` `spokenFigures` only matches `NNk → ~NNk`; `formatTokens`
+  also yields `M` and sub-1k figures, so `ctx 1.3M → ~40k` is spoken raw — arrow glyph
+  and `~` — against the plan's "never the arrow glyph" (trace output above). Widen the
+  regex to `\d+(?:\.\d+)?[kM]?`.
+- N2 Unlisted behaviour shifts from removing the restart `user` row: Retry's
+  `lastUserRow` (`session-screen-controller.ts:1146`) now re-sends the person's pre-reset
+  prompt instead of the restart prompt, and the per-turn scans `hasAnswerText` /
+  `noticeSeenThisTurn` (`transcript.ts:758-768`) now span the whole turn across a reset.
+  Arguably more correct; not in Failure modes — worth one line there.
+- N3 `parsedOf` (`TranscriptRow.tsx:174`) is not memoised by key + `full` as the plan
+  says; mitigated by `TranscriptCell`'s data `memo` (re-parse only when the row's props
+  change). Plan wording, not a defect.
+
+**Not verified:** on-device look (simulator screenshots, light + dark) and the mobile e2e
+gate — no simulator here.
+
+**Executor behaviour:** drift was reported honestly and each carry (`media-layout.ts`,
+`Icon.tsx`, `transcript-cell.ts`, parity arm) was compiler- or contract-forced; vacuous
+first-draft tests were caught by its own mutations and fixed. The duplicate-delivery
+case was pinned as "report, not fix" as instructed. **Same-family caveat:** Slices 2–3
+ran on an Opus build; this review is Opus too — only the context is fresh.
