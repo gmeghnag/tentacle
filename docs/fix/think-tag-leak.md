@@ -216,4 +216,47 @@ plan listed (the no-tools guard, forced by plan fix 2).
 
 ## Review
 
-*— (empty until Execution)*
+*— claude-opus-5-5, 2026-11-25* (fresh context; Opus family, executor was Opus 4.5 → shared-family blind spots possible)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+**Findings**
+
+1. **MEDIUM — a live workflow run turns the echo OFF for the whole turn, silently.**
+   `packages/agent/src/agent.ts:1667` (and `:2008`) builds every request as
+   `withStatusLine(...)`, which appends a wire-only `{ role: "user" }` line at the
+   TAIL after any `tool`/`user` message (`packages/agent/src/context-awareness.ts:110-117`);
+   `serve` sets it whenever a workflow run is live (`packages/daemon/src/hosted-session.ts:2750`,
+   `packages/agent/src/workflow-status-line.ts:71`). `echoFloor`
+   (`packages/providers/src/openai-provider.ts:309-319`) then returns the LAST index,
+   so no assistant round is ever ≥ floor: `reasoning_content` is dropped on every
+   request of every tool loop while a workflow runs, and `echoing` is false.
+   Scenario: owner's `serve` + a running workflow + DeepSeek/Qwen tool loop → the F8
+   within-turn win is gone, with no test, no doc line, and contrary to the owner's
+   decision («turno corrente»). The plan's Failure modes name only the steer; the same
+   class also covers the loop's own mid-turn `user` notes (`agent.ts:1738, 1864, 1915,
+   1927`, hook notes) — those are rarer and arguably acceptable, but they are
+   undocumented too. Fix (executor's choice): either make the floor ignore a `user`
+   message that directly follows a `tool` message (mid-turn by construction: a
+   turn-opening prompt follows an assistant answer — this also un-penalises steers
+   and notes, while still cutting every finished turn), or have the agent pass the
+   status line so it is not a floor-moving `user` message; at minimum, owner-accepted
+   debt in this doc + a test pinning the workflow shape.
+
+**Gate (this review):** `bun test` of the two touched files → 25 pass / 0 fail;
+`bun run lint` → clean (2536 files); `bun run typecheck` → clean. Full `bun run check`
+not run (scope of the brief).
+
+**Mutations (§9), each reverted, `git status` clean afterwards:**
+| mutation | result |
+|---|---|
+| `echoing` scan ignores the floor | 1 fail (`only an earlier turn's reasoning arms no echo retry`) |
+| wire ignores the floor (`echoSource` always) | 2 fail (F8 win, steer rule) — the 6/12-shape test survives this one alone because `echoing` is already false there; it is covered by the scan mutation |
+| tools gate removed | 3 fail (helper arms, no-tools guard, agent's forced-final-report test) |
+Executor's "floor = 0 always" mutation table is consistent with these.
+
+**Premises:** `agent.ts:1568` steer push TRUE; `agent.ts:2006-2025` forced report with no tools TRUE (`:2008` also uses `withStatusLine` — see 1); `openai-provider.ts` `echoing` scan + `buildPayload` + `wireMessages` share `request.messages` and the same floor TRUE (the count-tokens `buildPayload` at `:237` gets the same cut — consistent). Nothing persisted changes (cut is in `wireMessages` only) TRUE.
+
+**Attacks tried:** (a) index drift between `echoing` scan and wire (tool messages take the other branch of `wireMessages`) — none, `entries()` index matches; (b) §7 persistence / protocol — untouched, `ChatMessage.reasoning` stays (asserted); (c) pod path — `ProxyModelProvider` hands the same messages to the laptop provider, one cut; (d) synthetic mid-turn `user` messages — found finding 1; (e) no-tools requests (compaction/title/forced report) — floor 0 = pre-fix bytes, safe by the 0/32 control.
+
+**Executor behaviour:** honest and disciplined — two plan fixes forced by the code were recorded with evidence, red-before-green and a mutation table given, the un-run live GPU check stated plainly. Missed the status-line path (another route to the steer shape).
