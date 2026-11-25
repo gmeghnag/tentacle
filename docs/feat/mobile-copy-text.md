@@ -490,4 +490,20 @@ After the gate fix (D3):
 
 ## Review
 
-*— (reviewer), (date)*
+*— claude-opus-5-5, 2026-11-25* (fresh context; plan author is the same model family — shared blind spots possible)
+
+**Verdict: REQUEST-CHANGES**
+
+Findings (HIGH/MEDIUM only):
+
+1. **HIGH — `apps/mobile/node_modules` is still committed** (symlink → `/Users/gmeghnag/tentacle/apps/mobile/node_modules`; `git diff main...HEAD --stat` shows it, `git show HEAD:apps/mobile/node_modules` prints the target). Execution claims it was `git rm --cached`, but no commit carries that removal and the tree is clean. `.gitignore`'s `node_modules/` (trailing slash = directories) does not match a symlink. Failure: merging puts a tracked symlink over the main checkout's real `node_modules` directory (merge/checkout conflict), and every clone/CI/worktree gets a dangling absolute link. Already visible: `bun run typecheck` here is RED (10× TS2339 in `../../../packages/client/src/permission-router.ts`) because `tsc -p apps/mobile` resolves `@tentacle/client` through the link into the MAIN checkout's packages; `tsc --noEmit` (root) and `tsc -p apps/relay` pass. Fix: `git rm --cached apps/mobile/node_modules` and commit.
+2. **MEDIUM — VoiceOver copy pins the pill forever** (`SessionScreen.tsx` `copyMessage` → `copyText(outcome.text, true)`; the `empty` branch sets `pressing: true`). The accessibility action (`TranscriptRow.tsx` `CopyPress` `onAccessibilityAction`) has no touch, so `onPressOut`/`copyRelease` never fires: `pressing` stays `true`, `copyFlashShown` returns `true` and the timer is never armed. Every VoiceOver copy leaves the pill up until the next touch-press on a message. Fix: the a11y path must copy with `pressing = false` (and a test pinning it).
+3. **MEDIUM — "Copy all" in the sheet answers invisibly** (`SessionScreen.tsx` `onCopyAll={(text) => copyText(text)}`; `SelectTextSheet` is a RN `Modal`). The pill is drawn in the screen, UNDER the modal, so while the sheet is open both "Copied" and the clipboard-failure "Couldn't copy" are not seen — the failure-mode row "Clipboard write rejects → pill (no silent drop)" does not hold on this path. Fix: confirm inside the sheet (or close it on copy so the pill shows).
+
+Gate: touched tests (`message-copy`, `message-copy-render`, `session-menu`, `transcript-cell`) 47 pass / 0 fail; `bun run lint` clean; `bun run typecheck` red (finding 1 only). Full `bun run test` not run here.
+
+Mutations (all reverted, tree byte-identical, `git status` clean): `onPressOut` no-op → R1 red; `said()` back to raw `row.text` → T5 red; `copyFlashShown` counting down while pressing → T7 red. Non-vacuous.
+
+Attacks tried: user-bubble layout under the new `Pressable` wrapper (bubble `alignSelf: flex-end`, `styles.row` has no `gap` — holds); release-before-clipboard race (`released` ref → `pressing:false`, holds); a later tap extending the pill (`flashReleased` no-op once `pressing` is false — holds); a11y path (finding 2); sheet + pill stacking (finding 3); session switch clears flash + sheet (holds by reading).
+
+Executor behaviour: careful, red-first, good gate-driven D3 fix with evidence; but reported the symlink removal as done when it was not committed (check the claim against the tree before writing it), and the `released`-ref timing logic stays in the component (untested, §7 "logic in pure modules").
