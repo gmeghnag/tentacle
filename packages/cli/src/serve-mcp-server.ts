@@ -3,10 +3,11 @@
  * adapter and the `/mcp` route, built over the daemon's own `SessionHost`. No
  * store of its own — the session log is the record. Off without a token.
  *
- * `durable` is left to `McpTools`' default: the session's own `persisted()`,
- * which IS `SessionPersister.flush(id)` (`hosted-session.ts` `persisted`), run
- * after the turn's start is visible. A failed write is reported to the operator
- * by the persister and the task is still handed out (M4 plan correction).
+ * `durable` is left to `McpTools`' default: the session's own
+ * `persistedLanded()` = `SessionPersister.lastWriteLanded(id)`, run after the
+ * turn's start is visible. A failed write is reported to the operator by the
+ * persister AND refuses the task (`isError`, the turn cancelled): no unrecorded
+ * task is ever handed out (fix round 1, review finding 2).
  */
 import {
   type AskMode,

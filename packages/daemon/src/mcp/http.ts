@@ -27,6 +27,8 @@ import {
   type ServerInfo,
   type WireReply,
   discoverResult,
+  eraReply,
+  eraResult,
   errorBody,
   initializeResult,
   mayUseTasks,
@@ -38,6 +40,7 @@ import {
   rpcError,
   rpcResult,
   sseEvent,
+  toolsListResult,
 } from "./wire.ts";
 
 export const MCP_PATH = "/mcp";
@@ -114,18 +117,19 @@ export function createMcpRoute(options: McpHttpOptions): ExternalRoute {
   ): Promise<Response> => {
     switch (r.method) {
       case "initialize":
-        return reply(
+        return answer(
+          r,
           rpcResult(
             r.id,
             initializeResult(r.params.protocolVersion, options.serverInfo, MCP_INSTRUCTIONS),
           ),
         );
       case "server/discover":
-        return reply(rpcResult(r.id, discoverResult(options.serverInfo, MCP_INSTRUCTIONS)));
+        return answer(r, rpcResult(r.id, discoverResult(options.serverInfo, MCP_INSTRUCTIONS)));
       case "ping":
-        return reply(rpcResult(r.id, {}));
+        return answer(r, rpcResult(r.id, {}));
       case "tools/list":
-        return reply(rpcResult(r.id, { tools: MCP_TOOLS }));
+        return answer(r, rpcResult(r.id, toolsListResult(r.era, MCP_TOOLS)));
       case "tools/call":
         return toolsCall(r, caller, signal);
       case "tasks/get":
@@ -133,7 +137,7 @@ export function createMcpRoute(options: McpHttpOptions): ExternalRoute {
       case "tasks/cancel":
         // Only for a request that declared the extension (else -32021).
         try {
-          return reply(await tasksMethod(options.tools, r, caller, options.onAudit));
+          return answer(r, await tasksMethod(options.tools, r, caller, options.onAudit));
         } catch (error) {
           return reply(invalid(r, error));
         }
@@ -141,6 +145,9 @@ export function createMcpRoute(options: McpHttpOptions): ExternalRoute {
         return reply(rpcError(r.id, ErrorCode.MethodNotFound, `unknown method ${r.method}`));
     }
   };
+
+  /** Every request's result, stamped for its era (`resultType` on the modern one). */
+  const answer = (r: ParsedRequest, w: WireReply): Response => reply(eraReply(r.era, w));
 
   const toolsCall = async (
     r: ParsedRequest,
@@ -164,7 +171,7 @@ export function createMcpRoute(options: McpHttpOptions): ExternalRoute {
         const result = mayUseTasks(r)
           ? await options.tools.callAsTask(caller, name, args, signal)
           : await options.tools.call(caller, name, args, signal);
-        return reply(rpcResult(r.id, result));
+        return answer(r, rpcResult(r.id, result));
       } catch (error) {
         return reply(invalid(r, error));
       }
@@ -208,7 +215,10 @@ export function createMcpRoute(options: McpHttpOptions): ExternalRoute {
             send(
               resultBody(
                 r.id,
-                await options.tools.call(caller, "session_status", args, abort.signal),
+                eraResult(
+                  r.era,
+                  await options.tools.call(caller, "session_status", args, abort.signal),
+                ),
               ),
             );
           } catch (error) {

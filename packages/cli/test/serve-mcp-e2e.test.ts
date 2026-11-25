@@ -9,6 +9,10 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import {
+  createTaskSessionFromClient,
+  resultFromTaskOutcome,
+} from "@modelcontextprotocol/ext-tasks/client";
 import { loadConfig } from "@tentacle/config";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { McpClient, createStreamableHttpTransport } from "@tentacle/mcp";
@@ -17,6 +21,7 @@ import { mcpAddHint, parseMcpAsks } from "../src/serve-mcp-server.ts";
 import { type ServeOptions, startDaemon } from "../src/serve.ts";
 
 const TOKEN = "mcp-secret";
+const MODERN = "2026-07-28";
 const dirs: string[] = [];
 const handles: { stop(): Promise<void> }[] = [];
 const closers: (() => Promise<void> | void)[] = [];
@@ -185,6 +190,86 @@ describe("serve --mcp-token", () => {
       ["completed"],
     );
     expect(JSON.stringify(done)).toContain("pong");
+  });
+
+  test("SDK v2 pinned to 2026-07-28 (no tasks): tools/list, plain start, held status until completed", async () => {
+    // mutation: drop the modern `resultType` stamp (http.ts `answer`) → listTools is red
+    const { url } = await serve(new PongModel());
+    const client = new Client(
+      { name: "e2e", version: "0" },
+      { versionNegotiation: { mode: { pin: MODERN } } },
+    );
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: auth } }),
+    );
+    closers.push(() => client.close());
+    expect((await client.listTools()).tools.map((t) => t.name)).toContain("session_start");
+    const started = json(
+      await client.callTool({ name: "session_start", arguments: { prompt: "ping" } }),
+    );
+    const sessionId = String(started.sessionId);
+    expect(sessionId).toMatch(/^mcp-default-/);
+    const done = await untilState(
+      async () =>
+        json(
+          await client.callTool(
+            { name: "session_status", arguments: { sessionId, waitSeconds: 5 } },
+            { onprogress: () => {} },
+          ),
+        ),
+      ["completed"],
+    );
+    expect(JSON.stringify(done)).toContain("pong");
+  });
+
+  test("SDK v2 + ext-tasks (2026-07-28): session_start is a task that settles with the answer", async () => {
+    // mutation: drop `resultType` on tasks/get (or its inner result) → settle is red
+    const { url } = await serve(new PongModel());
+    const client = new Client(
+      { name: "e2e", version: "0" },
+      { versionNegotiation: { mode: { pin: MODERN } } },
+    );
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: auth } }),
+    );
+    closers.push(() => client.close());
+    let nextId = 1;
+    const session = createTaskSessionFromClient(client, {
+      endpointId: "e2e",
+      // The V2 task wire is a raw POST: ext-tasks frames `_meta`, we add the envelope + header.
+      rawDispatch: async (request) => {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            ...auth,
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            "mcp-protocol-version": MODERN,
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: nextId++,
+            ...(request as Record<string, unknown>),
+          }),
+        });
+        const msg = (await res.json()) as { result?: unknown; error?: unknown };
+        return msg.error !== undefined
+          ? { kind: "error", error: msg.error as never }
+          : { kind: "result", result: msg.result as never };
+      },
+      v2RequestFraming: {
+        protocolVersion: MODERN,
+        clientInfo: { name: "e2e", version: "0" },
+        clientCapabilities: {},
+      },
+    });
+    closers.push(() => session.close());
+    const execution = await session.callTool("session_start", { prompt: "ping" });
+    expect(execution.kind).toBe("task");
+    const { outcome } = await execution.settle();
+    const result = resultFromTaskOutcome(outcome) as { isError?: boolean };
+    expect(result.isError).not.toBe(true);
+    expect(JSON.stringify(result)).toContain("pong");
   });
 
   test("a WS client sees the MCP session in session/list; a wrong or missing token is 401", async () => {

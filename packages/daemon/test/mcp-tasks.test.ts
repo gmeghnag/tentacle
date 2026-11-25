@@ -107,12 +107,23 @@ const MCP_TOKEN = "mcp-token";
 interface RigOptions {
   readonly mode?: AskMode;
   readonly durable?: (sessionId: string, turnId: string) => Promise<boolean>;
+  /** Every store write rejects (a full disk): the persister reports it, never throws. */
+  readonly failWrites?: boolean;
 }
 
 /** A `serve`-shaped host on a real store under `root`, its MCP route on loopback. */
 function rig(root: string, opts: RigOptions = {}) {
   const store = new LogSessionStore(root);
-  const persister = new SessionPersister({ store, cwd: CWD, model: "m", onError: () => {} });
+  if (opts.failWrites) {
+    store.write = () => Promise.reject(new Error("disk full"));
+  }
+  const reported: string[] = [];
+  const persister = new SessionPersister({
+    store,
+    cwd: CWD,
+    model: "m",
+    onError: (e) => reported.push(e.message),
+  });
   const ran: string[] = [];
   const tool = (name: string): Tool => ({
     name,
@@ -167,7 +178,7 @@ function rig(root: string, opts: RigOptions = {}) {
     tools.dispose();
   });
   const base = new URL(server.url.replace(/^ws/, "http")).origin;
-  return { host, tools, persister, ran, audit, base };
+  return { host, tools, persister, ran, audit, base, reported };
 }
 
 const META_VERSION = { "io.modelcontextprotocol/protocolVersion": "2026-07-28" };
@@ -300,13 +311,20 @@ describe("mcp tasks — negotiated per request, durable before the ack", () => {
     expect(typeof task.lastUpdatedAt).toBe("string");
     expect(task.taskId).toMatch(/^[0-9a-f-]{36}\.[0-9a-f-]{36}$/);
     const done = await untilStatus(r.base, task.taskId, "completed");
+    // tasks/get and its inner CallToolResult are modern results: both say "complete".
+    expect(done.resultType).toBe("complete");
     expect(done.result).toEqual({
+      resultType: "complete",
       content: [{ type: "text", text: "answer: hello" }],
       structuredContent: { turnId: task.taskId, result: "answer: hello" },
     });
-    for (const caps of [{ ...FORM }, null]) {
+    // Modern without the extension: a plain result, stamped; legacy: never stamped.
+    for (const [caps, kind] of [
+      [{ ...FORM }, "complete"],
+      [null, undefined],
+    ] as const) {
       const plain = await callTool(r.base, "session_start", { prompt: "plain" }, caps);
-      expect(plain.result?.resultType).toBeUndefined();
+      expect(plain.result?.resultType).toBe(kind);
       expect(plain.result?.structuredContent).toMatchObject({ sessionId: expect.any(String) });
     }
   });
@@ -334,9 +352,23 @@ describe("mcp tasks — negotiated per request, durable before the ack", () => {
     // Mutation: ignore `durable`'s false → a task is handed out.
     const r = rig(root(), { durable: async () => false });
     const res = await callTool(r.base, "session_start", { prompt: "hang" });
-    expect(res.result?.resultType).toBeUndefined();
+    expect(res.result?.resultType).toBe("complete");
     expect(res.result?.isError).toBe(true);
     expect(JSON.stringify(res.result)).toContain("could not record the task");
+    const s = [...r.host.values()][0];
+    if (s === undefined) throw new Error("no session");
+    await until(() => s.workUnits()[0]?.state === "canceled");
+  });
+
+  test("the DEFAULT durable sees a real write fail → isError, reported, the turn cancelled", async () => {
+    // Mutation: the default `durable` returns true once the write settled (the
+    // old `persisted()` → true) → a task is handed out for a turn not on disk.
+    const r = rig(root(), { failWrites: true });
+    const res = await callTool(r.base, "session_start", { prompt: "hang" });
+    expect(res.result?.resultType).toBe("complete");
+    expect(res.result?.isError).toBe(true);
+    expect(JSON.stringify(res.result)).toContain("could not record the task");
+    expect(r.reported.join("\n")).toContain("disk full");
     const s = [...r.host.values()][0];
     if (s === undefined) throw new Error("no session");
     await until(() => s.workUnits()[0]?.state === "canceled");
@@ -361,7 +393,7 @@ describe("mcp tasks — negotiated per request, durable before the ack", () => {
     const nextId = String(next.result?.taskId);
     expect(nextId.startsWith(`${task.taskId.slice(0, 36)}.`)).toBe(true);
     const steer = await callTool(r.base, "session_send", { sessionId, text: "more" });
-    expect(steer.result?.resultType).toBeUndefined();
+    expect(steer.result?.resultType).toBe("complete");
     expect(steer.result?.structuredContent).toEqual({ turnId: nextId, steered: true });
     await mcp(r.base, "tasks/cancel", { taskId: nextId });
     await untilStatus(r.base, nextId, "cancelled");
@@ -394,7 +426,7 @@ describe("mcp tasks — projection of the turn", () => {
       taskId: task.taskId,
       inputResponses: { [key]: { action: "accept", content: { decision: "allow" } } },
     });
-    expect(ack.result).toEqual({});
+    expect(ack.result).toEqual({ resultType: "complete" });
     const done = await untilStatus(r.base, task.taskId, "completed");
     expect((done.result as { content: { text: string }[] }).content[0]?.text).toBe("answer: ran");
     expect(r.ran).toEqual(["run"]);
@@ -463,7 +495,7 @@ describe("mcp tasks — projection of the turn", () => {
         unknown: { action: "accept", content: { decision: "allow" } },
       },
     });
-    expect(ack.result).toEqual({});
+    expect(ack.result).toEqual({ resultType: "complete" });
     expect(requests.filter((q) => q.method === "session/resolve_permission")).toEqual([]);
     expect(r.audit).toContain("mcp-answer-refused");
     expect(s?.workUnits()[0]?.state).toBe("waiting");
@@ -487,7 +519,7 @@ describe("mcp tasks — projection of the turn", () => {
       taskId: first.taskId,
       inputResponses: { [key]: { action: "accept", content: { decision: "allow" } } },
     });
-    expect(ack.result).toEqual({});
+    expect(ack.result).toEqual({ resultType: "complete" });
     expect(requests.filter((q) => q.method === "session/resolve_permission")).toEqual([]);
     expect(r.audit).toContain("mcp-answer-refused");
     expect((await getTask(r.base, nextId)).status).toBe("input_required");
@@ -508,7 +540,9 @@ describe("mcp tasks — projection of the turn", () => {
   test("tasks/cancel → cancelled; unknown → -32602", async () => {
     const r = rig(root());
     const task = await startTask(r.base, "hang");
-    expect((await mcp(r.base, "tasks/cancel", { taskId: task.taskId })).result).toEqual({});
+    expect((await mcp(r.base, "tasks/cancel", { taskId: task.taskId })).result).toEqual({
+      resultType: "complete",
+    });
     await untilStatus(r.base, task.taskId, "cancelled");
     expect((await mcp(r.base, "tasks/cancel", { taskId: "nope.nope" })).error?.code).toBe(-32602);
   });

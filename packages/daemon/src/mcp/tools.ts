@@ -46,8 +46,9 @@ export const MCP_TEXT_MAX_BYTES = 64 * 1024;
 export const MCP_TITLE_MAX = 60;
 export const MCP_KEY_MAX = 64;
 export const MCP_WAIT_MAX_SECONDS = 120;
-/** Live (loaded) `mcp-<caller>-*` sessions one caller may hold. */
+/** Live `mcp-<caller>-*` sessions one caller may hold (running, held, or being brought up). */
 export const MCP_MAX_LIVE_SESSIONS = 8;
+const TOO_MANY_LIVE = `too many live sessions (${MCP_MAX_LIVE_SESSIONS}): cancel one or wait for one to end`;
 export const MCP_LIST_MAX = 50;
 /** The driver's attachment is released this long after its session's turn ended. */
 export const MCP_DETACH_AFTER_MS = 60_000;
@@ -81,8 +82,8 @@ export interface McpToolsOptions {
   /**
    * Make a started turn durable before its task is handed out (Design §3,
    * assumption 3; M4). Resolves whether the write landed. Absent: the
-   * session's own `persisted()` (its latest write settled; no persister =
-   * nothing to make durable).
+   * session's own `persistedLanded()` (its latest write LANDED, a failed one
+   * is `false`; no persister = nothing to make durable).
    */
   readonly durable?: (sessionId: string, turnId: string) => Promise<boolean>;
 }
@@ -270,6 +271,8 @@ const turnsOf = (units: readonly WorkUnit[]) => units.filter((u) => u.kind === "
 export class McpTools {
   private readonly opts: McpToolsOptions;
   private readonly attachments = new Map<string, Attachment>();
+  /** sessionId → `start`/`send` calls bringing it up now: counted before their attach lands. */
+  private readonly admitting = new Map<string, number>();
   private readonly archived: ArchivedUnitIndex;
   /** taskId → when its call was accepted (insertion order = age, bounded). */
   private readonly accepted = new Map<string, number>();
@@ -347,25 +350,28 @@ export class McpTools {
   ): Promise<CallToolResult | TaskCreated> {
     const prompt = text(args, "prompt");
     const title = optStr(args, "title", MCP_TITLE_MAX);
-    if (this.liveCount(caller) >= MCP_MAX_LIVE_SESSIONS) {
-      return toolError(
-        `too many live sessions (${MCP_MAX_LIVE_SESSIONS}): cancel or wait for one to be archived`,
-      );
-    }
     const s = crypto.randomUUID();
     const sessionId = externalSessionId(MCP_PROTOCOL, caller, s);
     if (sessionId === null) {
       return toolError("no caller identity");
     }
-    const turnId = `${s}.${crypto.randomUUID()}`;
-    let a: Attachment;
-    try {
-      a = await this.attach(sessionId, mcpTitle(prompt, title));
-      await this.prompt(a, turnId, prompt);
-    } catch (error) {
-      return toolError(`the session refused the prompt${codeOf(error)}`);
+    const admitted = this.admit(caller, sessionId);
+    if (admitted === null) {
+      return toolError(TOO_MANY_LIVE);
     }
-    return task ? this.taskCreated(a, turnId) : toolResult({ sessionId, turnId });
+    try {
+      const turnId = `${s}.${crypto.randomUUID()}`;
+      let a: Attachment;
+      try {
+        a = await this.attach(sessionId, mcpTitle(prompt, title));
+        await this.prompt(a, turnId, prompt);
+      } catch (error) {
+        return toolError(`the session refused the prompt${codeOf(error)}`);
+      }
+      return task ? await this.taskCreated(a, turnId) : toolResult({ sessionId, turnId });
+    } finally {
+      admitted();
+    }
   }
 
   private async send(
@@ -380,6 +386,11 @@ export class McpTools {
     if (s === null || !this.exists(sessionId)) {
       return toolError(UNKNOWN_SESSION);
     }
+    // A new turn on an idle or archived session makes it live again: the same cap as a start.
+    const admitted = this.admit(caller, sessionId);
+    if (admitted === null) {
+      return toolError(TOO_MANY_LIVE);
+    }
     try {
       const a = await this.attach(sessionId, "MCP");
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -388,7 +399,7 @@ export class McpTools {
           const turnId = `${s}.${crypto.randomUUID()}`;
           await this.prompt(a, turnId, body);
           // A steer adds no unit: only a new turn is a task.
-          return task ? this.taskCreated(a, turnId) : toolResult({ turnId, steered: false });
+          return task ? await this.taskCreated(a, turnId) : toolResult({ turnId, steered: false });
         }
         try {
           await a.peer.request("session/enqueue", {
@@ -406,6 +417,8 @@ export class McpTools {
       return toolError("the session is busy: try again");
     } catch (error) {
       return toolError(`the session refused the message${codeOf(error)}`);
+    } finally {
+      admitted();
     }
   }
 
@@ -496,10 +509,8 @@ export class McpTools {
     }
     const durable =
       this.opts.durable ??
-      (async (id: string) => {
-        await this.opts.host.get(id)?.persisted();
-        return true;
-      });
+      // Whether the start's write LANDED (a reported failure is `false`); a vanished session too.
+      (async (id: string) => (await this.opts.host.get(id)?.persistedLanded()) ?? false);
     const unit = (await this.started(a, turnId))
       ? await durable(a.sessionId, turnId).then(
           (landed) => (landed ? this.unitOf(a.sessionId, turnId) : undefined),
@@ -707,12 +718,59 @@ export class McpTools {
     );
   }
 
-  private liveCount(caller: string): number {
-    let n = 0;
+  /**
+   * The caller's LIVE sessions (Design §8 cap): those with a running turn,
+   * those this adapter still holds attached, and those a `start`/`send` is
+   * bringing up right now. An idle session we let go of is not counted: it is
+   * detached, so the host's detached cap may archive it.
+   */
+  private liveIds(caller: string): Set<string> {
+    const ids = new Set<string>();
     for (const s of this.opts.host.values()) {
-      if (this.own(caller, s.id) !== null) n++;
+      if (this.own(caller, s.id) !== null && this.runningTurn(s.id) !== undefined) ids.add(s.id);
     }
-    return n;
+    for (const [id, a] of this.attachments) {
+      if (!a.closed && this.own(caller, id) !== null) ids.add(id);
+    }
+    for (const id of this.admitting.keys()) {
+      if (this.own(caller, id) !== null) ids.add(id);
+    }
+    return ids;
+  }
+
+  /**
+   * Take a live slot for `sessionId` SYNCHRONOUSLY — before any await, so N
+   * concurrent calls cannot all pass one check. Over the cap, the idle
+   * sessions we still hold (no turn running, none being brought up) are let
+   * go first: an ended or cancelled delegation frees its slot at once.
+   * `null` → refused; else the release, called once the call is done.
+   */
+  private admit(caller: string, sessionId: string): (() => void) | null {
+    const full = () => {
+      const live = this.liveIds(caller);
+      return !live.has(sessionId) && live.size >= MCP_MAX_LIVE_SESSIONS;
+    };
+    if (full()) {
+      for (const [id, a] of [...this.attachments]) {
+        if (
+          this.own(caller, id) !== null &&
+          !this.admitting.has(id) &&
+          this.runningTurn(id) === undefined
+        ) {
+          this.release(a);
+        }
+      }
+      if (full()) return null;
+    }
+    this.admitting.set(sessionId, (this.admitting.get(sessionId) ?? 0) + 1);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      const n = (this.admitting.get(sessionId) ?? 1) - 1;
+      if (n > 0) this.admitting.set(sessionId, n);
+      else this.admitting.delete(sessionId);
+    };
   }
 
   private runningTurn(sessionId: string): WorkUnit | undefined {

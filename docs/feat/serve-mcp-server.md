@@ -900,6 +900,67 @@ Each test names its mutation (§9).
 
 *— claude-sonnet-5-5, 2026-11-25*
 
+### Fix round 1 (review findings 1–3)
+
+- **F1 HIGH: modern era unusable by the real SDK. FIXED.**
+  - Repro before (the reviewer's `review/sdk-modern.ts`): `auto` and `pin 2026-07-28` → `missing required resultType`.
+    With `resultType` alone the SDK then failed `tools/list` on `ttlMs` (expected number), a second gap.
+  - `wire.ts`: `eraResult`/`eraReply` stamp `resultType:"complete"` on every modern result that names none
+    (a task keeps `"task"`); `taskResult` stamps the completed task's inner `CallToolResult` (ext-tasks parses
+    it with `CallToolResultV2Schema`, which requires it); `MODERN_CACHE {ttlMs:0, cacheScope:"private"}`
+    (the SDK server's own defaults) on `server/discover` and modern `tools/list` (`toolsListResult`).
+  - `http.ts`: every request result goes through `answer` = `eraReply(r.era, …)`; the held SSE status too.
+  - After: the repro prints `tools 6` for default / `auto` / `pin`. Legacy results are unchanged (no stamp).
+  - e2e added back (`cli/test/serve-mcp-e2e.test.ts`): SDK v2 pinned to 2026-07-28 (list, plain start,
+    held status with `onprogress` until completed) and SDK v2 + ext-tasks 0.2.3 with `rawDispatch` (a fetch
+    POST) + `v2RequestFraming`: `session_start` → `execution.kind === "task"` → `settle()` → the answer.
+  - ext-tasks facts now checked against its V2 schemas: `ttlMs: z.int().nullable()` (null accepted; the
+    package does not define its meaning — still unverified, M4 note 4), field names `taskId status
+    statusMessage createdAt lastUpdatedAt ttlMs pollIntervalMs inputRequests inputResponses` match ours,
+    `tasks/get|update|cancel` results need `resultType:"complete"` (now sent).
+  - `mcp-tasks.test.ts`: the M4 tests pinned the old unstamped modern shapes (`{}` acks, `resultType`
+    undefined on plain modern results); updated to `"complete"`, legacy still asserted unstamped.
+- **F2 MEDIUM: a failed `durable()` write still handed out the task. FIXED** (as the approved failure-mode
+  row and the M4 plan correction say: "a persister read of the latest write's boolean").
+  - `session-persister.ts`: `latest` keeps the `landed` boolean `track` already computed; `flush` unchanged
+    (still `Promise<void>`); new `lastWriteLanded(id)` — fail-closed (`false` when nothing was scheduled, the
+    persister stopped, or the id is blocked).
+  - `hosted-session.ts`: `persistedLanded()` (no persister → `true`, as `persisted()`).
+  - `mcp/tools.ts`: the default `durable` = `persistedLanded()`, a vanished session → `false`.
+    `serve-mcp-server.ts` header comment corrected (it still wires no hook: the default is now right).
+  - Test `the DEFAULT durable sees a real write fail…` (real `SessionPersister`, store `write` rejects,
+    no injected `durable`): RED before (`Expected "complete", Received "task"`), green after.
+- **F3 MEDIUM: the per-caller cap was bypassable. FIXED.**
+  - `mcp/tools.ts`: `admit(caller, sessionId)` takes a slot SYNCHRONOUSLY (refcounted `admitting` map)
+    before any await, in `start` AND `send` (a new turn on an idle/archived session), released in `finally`.
+    Live = own sessions with a running turn ∪ attachments we hold ∪ being brought up (`liveIds`). Over the
+    cap, idle held attachments (no running turn, not being brought up) are released first, so an ended or
+    cancelled delegation frees its slot at once (the inverse usability bug). An idle session we let go of
+    is detached, so the host's detached cap may archive it (`session-host.ts` `selectEvictable`).
+  - Drift: "live" now means running/held/being brought up, not "loaded" (Design §8 said "live" without
+    defining it; the M2 code counted loaded). Message: "cancel one or wait for one to end".
+  - Tests (`mcp-tools.test.ts`): the cap test rewritten on hanging turns + a cancel frees a slot; 12
+    concurrent starts → exactly 8; `session_send` cannot revive a 9th; 8 ended-but-held → the 9th starts.
+    All 4 RED on HEAD's `tools.ts` (swapped in temporarily, then restored), green after.
+- Mutations (each applied, run RED, reverted; `rg MUT-` empty after):
+  | id | mutation | RED |
+  |---|---|---|
+  | A | `eraResult` never stamps | both modern SDK e2e tests (`missing required resultType`) |
+  | B | `taskResult` inner result unstamped | ext-tasks e2e (`Protocol value failed schema validation`) |
+  | C | held SSE status stamped as legacy | SDK pinned e2e (`tools/call: missing required resultType`) |
+  | D | cache fields on legacy instead of modern | both modern SDK e2e tests |
+  | E | persister `latest` always `true` | the DEFAULT durable test |
+  | F | `admit` does not reserve | the concurrent-starts test |
+  | G | `send` skips `admit` | the `session_send` revive test |
+  | H | idle held attachments never released | cap+cancel, revive (its 8th start), ended-but-held tests |
+- Checks: `bun test` on `mcp-tools`, `mcp-tasks`, `mcp-wire`, `mcp-caller-asks`, `a2a-http`,
+  `persistence`, `cli/serve-mcp-e2e`: 220 pass / 0 fail (`serve-log-store`, `clear-reload` too, for
+  `flush`). `bunx biome check` on the 9 changed files: clean. Typecheck and the full suite are left to the
+  orchestrator's gate (not run here, per the brief).
+- Still NOT done: the live Claude Code check; the meaning of `ttlMs: null` (above).
+
+*— claude-opus-5-5, 2026-11-25*
+
 ## Review
 
 **Verdict: REQUEST-CHANGES** (slice 1, M1–M5; `git diff main...HEAD` only)

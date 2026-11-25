@@ -87,6 +87,23 @@ export function rpcResult(id: JsonRpcId, result: unknown): WireReply {
   return { status: 200, body: resultBody(id, result) };
 }
 
+/**
+ * 2026-07-28: every result names its kind (`resultType`); "absent means
+ * complete" is a legacy-era bridge only, so the real SDK client refuses a
+ * modern result without it. A result that already names one (a task) is kept.
+ */
+export function eraResult(era: Era, result: unknown): unknown {
+  if (era !== "modern" || !isRecord(result) || "resultType" in result) return result;
+  return { resultType: "complete", ...result };
+}
+
+/** `eraResult` applied to a reply's JSON-RPC result (errors and empty bodies untouched). */
+export function eraReply(era: Era, reply: WireReply): WireReply {
+  const body = reply.body;
+  if (!isRecord(body) || !("result" in body)) return reply;
+  return { ...reply, body: { ...body, result: eraResult(era, body.result) } };
+}
+
 /** GET / DELETE / anything but POST: no stream, no session to end. */
 export function methodNotAllowed(): WireReply {
   return { status: 405, headers: { Allow: "POST" } };
@@ -217,9 +234,22 @@ export function initializeResult(
   };
 }
 
+/**
+ * 2026-07-28 cacheable results (`server/discover`, `tools/list`) MUST carry
+ * `ttlMs` + `cacheScope`. The SDK server's own defaults: never cached, private
+ * (the list sits behind a caller token).
+ */
+export const MODERN_CACHE = { ttlMs: 0, cacheScope: "private" } as const;
+
+/** `tools/list`: the cache fields on the modern era only. */
+export function toolsListResult(era: Era, tools: readonly unknown[]): Record<string, unknown> {
+  return { tools, ...(era === "modern" ? MODERN_CACHE : {}) };
+}
+
 /** Modern `server/discover`: declares the tasks extension. */
 export function discoverResult(info: ServerInfo, instructions?: string): Record<string, unknown> {
   return {
+    ...MODERN_CACHE,
     supportedVersions: [...SUPPORTED_VERSIONS],
     capabilities: { tools: {}, extensions: { [TASKS_EXTENSION]: {} } },
     serverInfo: info,
@@ -284,7 +314,8 @@ export function taskResult(t: TaskView): Record<string, unknown> {
   return {
     ...taskFields(t),
     ...(t.status === "input_required" && t.inputRequests ? { inputRequests: t.inputRequests } : {}),
-    ...(t.status === "completed" && t.result ? { result: t.result } : {}),
+    // A task is modern-only, and its result is a modern CallToolResult (`resultType` too).
+    ...(t.status === "completed" && t.result ? { result: eraResult("modern", t.result) } : {}),
     ...(t.status === "failed" && t.error ? { error: t.error } : {}),
   };
 }

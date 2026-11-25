@@ -351,14 +351,59 @@ describe("mcp tools — sessions on the single session path", () => {
     await untilAsync(async () => (await statusOf(r.tools, sessionId)).state === "canceled");
   });
 
-  test("at most 8 live sessions per caller; another caller is not counted", async () => {
-    const r = rig([]);
-    for (let i = 0; i < MCP_MAX_LIVE_SESSIONS; i++) await startTask(r.tools, `t${i}`);
+  test("at most 8 live sessions per caller; another caller is not counted; a cancel frees a slot", async () => {
+    // Mutation: count every loaded session (the old `liveCount`) → the 9th after the cancel is red.
+    const r = rig(Array.from({ length: 12 }, () => "hang" as const));
+    const started: { sessionId: string; turnId: string }[] = [];
+    for (let i = 0; i < MCP_MAX_LIVE_SESSIONS; i++) started.push(await startTask(r.tools, `t${i}`));
     const ninth = await r.tools.call("default", "session_start", { prompt: "one more" });
     expect(ninth.isError).toBe(true);
     expect(ninth.content[0]?.text).toContain("too many live sessions");
     expect(r.host.size).toBe(MCP_MAX_LIVE_SESSIONS);
     await startTask(r.tools, "other's", "other");
+    const first = started[0];
+    if (first === undefined) throw new Error("no session");
+    ok(await r.tools.call("default", "session_cancel", { sessionId: first.sessionId }));
+    await untilAsync(async () => (await statusOf(r.tools, first.sessionId)).state === "canceled");
+    await startTask(r.tools, "after the cancel");
+  });
+
+  test("the cap holds under concurrent starts: no start passes the check while another attaches", async () => {
+    // Mutation: check without reserving (the old check-then-await) → all 12 pass, red.
+    const r = rig(Array.from({ length: 12 }, () => "hang" as const));
+    const results = await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        r.tools.call("default", "session_start", { prompt: `c${i}` }),
+      ),
+    );
+    expect(results.filter((x) => x.isError !== true).length).toBe(MCP_MAX_LIVE_SESSIONS);
+    expect(r.host.size).toBe(MCP_MAX_LIVE_SESSIONS);
+  });
+
+  test("session_send cannot bring a 9th session back to life past the cap", async () => {
+    // Mutation: drop the cap check from `send` → the idle session is re-attached and runs, red.
+    const rounds: Round[] = [[text("done")], ...Array.from({ length: 9 }, () => "hang" as const)];
+    const r = rig(rounds, { detachAfterMs: 10 });
+    const idle = await startTask(r.tools, "first");
+    await untilAsync(async () => (await statusOf(r.tools, idle.sessionId)).state === "completed");
+    for (let i = 0; i < MCP_MAX_LIVE_SESSIONS; i++) await startTask(r.tools, `t${i}`);
+    const sent = await r.tools.call("default", "session_send", {
+      sessionId: idle.sessionId,
+      text: "wake up",
+    });
+    expect(sent.isError).toBe(true);
+    expect(sent.content[0]?.text).toContain("too many live sessions");
+    expect(r.model.users.length).toBe(1 + MCP_MAX_LIVE_SESSIONS);
+  });
+
+  test("ended delegations still held do not block a new one (idle held attachments are let go)", async () => {
+    // Mutation: never release idle held attachments in `admit` → the 9th is refused, red.
+    const r = rig([]);
+    for (let i = 0; i < MCP_MAX_LIVE_SESSIONS; i++) {
+      const { sessionId } = await startTask(r.tools, `t${i}`);
+      await untilAsync(async () => (await statusOf(r.tools, sessionId)).state === "completed");
+    }
+    await startTask(r.tools, "the ninth");
   });
 
   test("bad arguments throw before anything is opened", async () => {
