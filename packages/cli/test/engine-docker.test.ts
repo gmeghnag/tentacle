@@ -1129,8 +1129,8 @@ describe("the container network (feat/run-network)", () => {
       }),
     );
     expect(error).toBeInstanceOf(RefusalError);
-    expect(String(error.message)).toContain('network "nope"');
-    expect(String(error.message)).toContain("network create nope");
+    expect(String(error)).toContain('network "nope"');
+    expect(String(error)).toContain("network create nope");
     expect(listeners).toHaveLength(0);
     // ONE create, no pull, no retry: docker's create is atomic, nothing exists.
     expect(client.calls).toEqual(["create:c1:img:1"]);
@@ -1157,7 +1157,8 @@ test("network none: a scripted turn completes and the body says NetworkMode none
   if (!runtime) {
     throw new Error("runtime did not start");
   }
-  expect(client.bodies[0]?.HostConfig?.NetworkMode).toBe("none");
+  const hostConfig = client.bodies[0]?.HostConfig as Record<string, unknown> | undefined;
+  expect(hostConfig?.NetworkMode).toBe("none");
   const chunks: unknown[] = [];
   for await (const update of runtime.createSession().send("hi")) {
     chunks.push(update);
