@@ -17,7 +17,11 @@ import {
   type Task,
   TaskState,
 } from "@a2a-js/sdk";
-import { UnsupportedOperationError } from "@a2a-js/sdk/errors";
+import {
+  RequestMalformedError,
+  TaskNotFoundError,
+  UnsupportedOperationError,
+} from "@a2a-js/sdk/errors";
 import { InMemoryTaskStore, ServerCallContext, UnauthenticatedUser } from "@a2a-js/sdk/server";
 import { Agent, type HookRunner } from "@tentacle/agent";
 import {
@@ -62,9 +66,12 @@ class Scripted implements ModelProvider {
   readonly id = "scripted";
   /** The user messages each model call saw. */
   readonly users: number[] = [];
+  /** The last message each model call saw (a tool result carries a denial's reply). */
+  readonly lastSeen: string[] = [];
   constructor(private readonly rounds: Round[]) {}
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     this.users.push(request.messages.filter((m) => m.role === "user").length);
+    this.lastSeen.push(JSON.stringify(request.messages.at(-1) ?? null));
     const round = this.rounds.shift() ?? [{ type: "text", delta: "idle" }];
     if (round === "hang") {
       await new Promise<void>((resolve) => {
@@ -89,16 +96,23 @@ interface RigOptions {
   readonly persistRoot?: string;
   readonly hooks?: HookRunner;
   readonly hooksTrustPrecheck?: HooksTrustPrecheck;
+  /** The caller's ask mode (S5); absent = no policy = owner. */
+  readonly asks?: "owner" | "both";
 }
 
 function rig(opts: RigOptions) {
   const model = new Scripted(opts.rounds);
+  /** The tools that actually ran, in order. */
+  const ran: string[] = [];
   const tool = (name: string, permission: "ask" | "none"): Tool => ({
     name,
     description: name,
     inputSchema: z.object({}).passthrough(),
     permission,
-    execute: async () => ({ content: "ok" }),
+    execute: async () => {
+      ran.push(name);
+      return { content: "ok" };
+    },
   });
   const persister =
     opts.persistRoot === undefined
@@ -116,7 +130,12 @@ function rig(opts: RigOptions) {
       const permissions = new PermissionBroker();
       const agent = new Agent({
         model,
-        tools: new ToolRegistry().register(tool("run", "ask")).register(tool("note", "none")),
+        // `workflow_approve` stands in for a workflow file's approval: its wire
+        // `tool` is what makes the ask owner-only (WORKFLOW_APPROVE_TOOL).
+        tools: new ToolRegistry()
+          .register(tool("run", "ask"))
+          .register(tool("note", "none"))
+          .register(tool("workflow_approve", "ask")),
         env,
         ...(opts.hooks !== undefined ? { hooks: opts.hooks } : {}),
         requestPermission: (req, options) => permissions.request(req, options),
@@ -130,13 +149,19 @@ function rig(opts: RigOptions) {
     ...(opts.hooksTrustPrecheck !== undefined
       ? { hooksTrustPrecheck: opts.hooksTrustPrecheck }
       : {}),
+    ...(opts.asks !== undefined
+      ? {
+          callerPolicy: (who: string) =>
+            who === "default" ? { asks: opts.asks ?? "owner" } : undefined,
+        }
+      : {}),
   });
   const handler = new A2ARequestHandler(
     buildAgentCard({ url: "http://127.0.0.1:1/a2a", version: "0.0.1" }),
     new InMemoryTaskStore(),
     executor,
   );
-  return { host, executor, handler, model };
+  return { host, executor, handler, model, ran };
 }
 
 const caller = (userName = "default") =>
@@ -565,5 +590,164 @@ describe("a2a executor — turn tasks on the single session path", () => {
   test("cancel of a task this executor does not run → TaskNotCancelable", async () => {
     const { executor } = rig({ rounds: [] });
     await expect(executor.cancelTask("nope", undefined as never)).rejects.toThrow("not running");
+  });
+});
+
+const dataPart = (value: Record<string, unknown>): Part => ({
+  content: { $case: "data", value },
+  mediaType: "",
+  filename: "",
+  metadata: {},
+});
+const answerPart = (requestId: string, decision: "allow" | "deny") =>
+  dataPart({ "tentacle/permission": { requestId, decision } });
+const taskIdOf = (events: readonly StreamResponse[]) => {
+  const first = events[0]?.payload;
+  return first?.$case === "task" ? first.value.id : "";
+};
+/** The requestId an INPUT_REQUIRED status names (`[<id>] <title> (allow | deny)`). */
+const askIdOf = (events: readonly StreamResponse[]) =>
+  /^\[([^\]]+)\]/m.exec(statusTexts(events).at(-1) ?? "")?.[1] ?? "";
+const refusal = (p: Promise<unknown>) =>
+  p.then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+
+describe("a2a executor — caller-answered asks (S5)", () => {
+  // Mutation: answer with `allow_always` → the second `run` never asks, f1
+  // ends COMPLETED → red. Mutation: the mode ignored (always owner) → no
+  // INPUT_REQUIRED → red. Mutation: the text answer defaults to allow → the
+  // second `run` runs → red.
+  test("both: a tool ask is INPUT_REQUIRED; the caller's allow is once (the next call asks again); a text refusal carries its reply", async () => {
+    const { handler, ran, model, executor } = rig({
+      asks: "both",
+      rounds: [[call("c1", "run")], [call("c2", "run")], [text("done")]],
+    });
+    const s = collect(handler.sendMessageStream(request([textPart("go")], "ctx20"), caller()));
+    await s.done;
+    expect(states(s.events).at(-1)).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
+    expect(statusTexts(s.events).at(-1)).toContain("(allow | deny)");
+    const taskId = taskIdOf(s.events);
+    const first = askIdOf(s.events);
+    expect(executor.liveTaskIds()).toEqual([taskId]);
+
+    const f1 = collect(
+      handler.sendMessageStream(request([answerPart(first, "allow")], "ctx20", taskId), caller()),
+    );
+    await f1.done;
+    expect(kinds(f1.events)[0]).toBe("task");
+    expect(states(f1.events).at(-1)).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
+    const second = askIdOf(f1.events);
+    expect(second).not.toBe(first);
+    expect(ran).toEqual(["run"]);
+
+    const done = (await handler.sendMessage(
+      request([textPart("no, use note")], "ctx20", taskId),
+      caller(),
+    )) as Task;
+    expect(done.status?.state).toBe(TaskState.TASK_STATE_COMPLETED);
+    expect(artifactText(done)).toBe("done");
+    expect(ran).toEqual(["run"]);
+    expect(model.lastSeen.at(-1)).toContain("no, use note");
+    expect(executor.liveTaskIds()).toEqual([]);
+  });
+
+  // Mutation: `callerMayAnswer` without the kind check → the approval reads
+  // INPUT_REQUIRED and the caller's allow runs it → red.
+  test("both: an owner-only ask (a workflow approval) is never INPUT_REQUIRED; the caller's answer is refused, the owner's stands", async () => {
+    const { host, handler, ran } = rig({
+      asks: "both",
+      rounds: [[call("c1", "workflow_approve")], [text("ok")]],
+    });
+    const s = collect(handler.sendMessageStream(request([textPart("go")], "ctx21"), caller()));
+    await until(() => statusTexts(s.events).some((t) => t.startsWith("waiting for the owner")));
+    expect(states(s.events)).not.toContain(TaskState.TASK_STATE_INPUT_REQUIRED);
+    const taskId = taskIdOf(s.events);
+    const p = await phone(host);
+    await p.peer.request("session/open", { sessionId: "a2a-default-ctx21" });
+    await until(() => p.asks().length === 1);
+    const ask = p.asks()[0];
+    const refused = await refusal(
+      handler.sendMessage(
+        request([answerPart(ask?.requestId ?? "", "allow")], "ctx21", taskId),
+        caller(),
+      ),
+    );
+    expect(refused).toBeInstanceOf(UnsupportedOperationError);
+    expect(ran).toEqual([]);
+    expect(host.get("a2a-default-ctx21")?.workUnits().at(-1)?.state).toBe("waiting");
+    await p.peer.request("session/resolve_permission", {
+      sessionId: "a2a-default-ctx21",
+      requestId: ask?.requestId,
+      optionId: ask?.options.find((o) => o.kind === "allow_once")?.optionId,
+    });
+    await s.done;
+    expect(states(s.events).at(-1)).toBe(TaskState.TASK_STATE_COMPLETED);
+    expect(ran).toEqual(["workflow_approve"]);
+  });
+
+  // Mutation: no caller check → "other" is admitted → red. Mutation: no
+  // release on a failed request → the next valid answer is refused −32004 →
+  // red. Mutation: no claim → the concurrent second answer is admitted → red.
+  test("both: another caller, a bad answer, a failed request, a concurrent second answer and a late one answer nothing", async () => {
+    const { host, handler, ran, executor } = rig({
+      asks: "both",
+      rounds: [[call("c1", "run")], [call("c2", "run")], "hang"],
+    });
+    const s = collect(handler.sendMessageStream(request([textPart("go")], "ctx22"), caller()));
+    await s.done;
+    const taskId = taskIdOf(s.events);
+    const id = askIdOf(s.events);
+    const answer = (ctx: string, who = caller()) =>
+      handler.sendMessage(request([answerPart(id, "allow")], ctx, taskId), who);
+
+    expect(await refusal(answer("ctx22", caller("other")))).toBeInstanceOf(TaskNotFoundError);
+    // The executor's own guard, not only the SDK's user-scoped store (S6
+    // replaces the store): another or an unauthenticated caller is never admitted.
+    const msg = message([answerPart(id, "allow")], "ctx22", taskId);
+    expect(() => executor.admitFollowUp(msg, caller("other"))).toThrow(TaskNotFoundError);
+    expect(() =>
+      executor.admitFollowUp(msg, new ServerCallContext({ user: new UnauthenticatedUser() })),
+    ).toThrow(TaskNotFoundError);
+    const bad = await refusal(
+      handler.sendMessage(request([answerPart("nope", "allow")], "ctx22", taskId), caller()),
+    );
+    expect(bad).toBeInstanceOf(RequestMalformedError);
+    // Admitted, then refused by the SDK (contextId mismatch): the claim is released.
+    expect(String(await refusal(answer("other-ctx")))).toContain("contextId mismatch");
+    expect(ran).toEqual([]);
+
+    // Two at once: the first is admitted, the second refused while it is pending.
+    const a = collect(
+      handler.sendMessageStream(request([answerPart(id, "allow")], "ctx22", taskId), caller()),
+    );
+    const b = await refusal(answer("ctx22"));
+    expect(b).toBeInstanceOf(UnsupportedOperationError);
+    await a.done;
+    expect(states(a.events).at(-1)).toBe(TaskState.TASK_STATE_INPUT_REQUIRED);
+    expect(ran).toEqual(["run"]);
+
+    // Late: the owner answers the second ask first; the caller's answer then meets a running task.
+    const p = await phone(host);
+    await p.peer.request("session/open", { sessionId: "a2a-default-ctx22" });
+    await until(() => p.asks().length >= 1);
+    const ask = p.asks().at(-1);
+    await p.peer.request("session/resolve_permission", {
+      sessionId: "a2a-default-ctx22",
+      requestId: ask?.requestId,
+      optionId: ask?.options.find((o) => o.kind === "reject_once")?.optionId,
+    });
+    await until(() => host.get("a2a-default-ctx22")?.workUnits().at(-1)?.state === "working");
+    const late = await refusal(
+      handler.sendMessage(
+        request([answerPart(ask?.requestId ?? "", "allow")], "ctx22", taskId),
+        caller(),
+      ),
+    );
+    expect(late).toBeInstanceOf(UnsupportedOperationError);
+    expect(ran).toEqual(["run"]);
+    await handler.cancelTask({ tenant: "", id: taskId, metadata: {} }, caller());
+    await until(() => executor.liveTaskIds().length === 0);
   });
 });

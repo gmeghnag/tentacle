@@ -3,23 +3,25 @@ import { type Part, TaskState } from "@a2a-js/sdk";
 import type { WorkUnit } from "@tentacle/core";
 import type { PermissionOption } from "@tentacle/protocol";
 import {
-  type PendingAsk,
   RESULT_DROPPED_MESSAGE,
   a2aCallerPrefix,
   a2aSessionId,
   a2aTitle,
   askMessage,
   buildAgentCard,
-  callerMayAnswer,
-  callerOptions,
   chunkAppend,
   contextIdOf,
   inboundParts,
-  onceOption,
   parseTextAnswer,
   projectStatus,
   responseText,
 } from "../src/a2a/mapping.ts";
+import {
+  type PendingAsk,
+  callerMayAnswer,
+  callerOptions,
+  onceOption,
+} from "../src/external/asks.ts";
 
 const text = (value: string): Part => ({
   content: { $case: "text", value },

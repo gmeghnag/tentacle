@@ -9,7 +9,14 @@
  */
 import { type AgentCard, type Part, TaskState } from "@a2a-js/sdk";
 import type { WorkUnit } from "@tentacle/core";
-import type { PermissionOption, WorkflowInputValue } from "@tentacle/protocol";
+import type { WorkflowInputValue } from "@tentacle/protocol";
+import {
+  type AskMode,
+  type CallerAnswer,
+  type PendingAsk,
+  callerMayAnswer,
+  callerOptions,
+} from "../external/asks.ts";
 
 // --- caller + session id ---------------------------------------------------
 
@@ -53,12 +60,6 @@ export function a2aTitle(text: string): string {
 
 export const WORKFLOW_DATA_KEY = "tentacle/workflow";
 export const PERMISSION_DATA_KEY = "tentacle/permission";
-
-export interface CallerAnswer {
-  readonly requestId: string;
-  readonly decision: "allow" | "deny";
-  readonly message?: string;
-}
 
 export type InboundParts =
   | {
@@ -153,37 +154,7 @@ export function inboundParts(parts: readonly Part[]): InboundParts {
 
 // --- asks ------------------------------------------------------------------
 
-export type AskMode = "owner" | "both";
-
-/** The ask as the adapter knows it (the client's reverse mapping of the wire ask). */
-export interface PendingAsk {
-  readonly requestId: string;
-  readonly title: string;
-  /** From `client/permission-map`; absent = could not be mapped = owner-only. */
-  readonly kind?: "tool" | "hooks_trust" | "session_hop" | "workflow_approve";
-  readonly options: readonly PermissionOption[];
-}
-
-/**
- * May the CALLER ever answer this ask? Only in `both` mode and only a `tool`
- * ask (its allow, once, is a single call). Everything else — a workflow file's
- * approval, a hop, hooks trust (lasting approvals), an unmapped ask — is
- * owner-only in every mode. (S5 moves the kind table to core; this reads it.)
- */
-export function callerMayAnswer(ask: PendingAsk, mode: AskMode): boolean {
-  return mode === "both" && ask.kind === "tool";
-}
-
-/** The ask's own `*_once` option for a decision; null when it offers none (nothing is sent). */
-export function onceOption(ask: PendingAsk, decision: "allow" | "deny"): PermissionOption | null {
-  const kind = decision === "allow" ? "allow_once" : "reject_once";
-  return ask.options.find((o) => o.kind === kind) ?? null;
-}
-
-/** The options a caller is shown: `*_once` only, never an `*_always`. */
-export function callerOptions(ask: PendingAsk): PermissionOption[] {
-  return ask.options.filter((o) => o.kind === "allow_once" || o.kind === "reject_once");
-}
+// The ask policy (kinds, modes, `*_once`) is protocol-neutral: `external/asks.ts`.
 
 const ALLOW_WORDS = new Set(["allow", "approve", "yes"]);
 

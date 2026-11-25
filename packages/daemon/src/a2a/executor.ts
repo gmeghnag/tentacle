@@ -9,10 +9,16 @@
  * store: the turn's state is the session's, and its end is read back from
  * `HostedSession.workUnits()` (the same record `GetTask` projects).
  *
+ * Asks (S5): per caller, `owner` (default — the owner's devices answer, the
+ * task reads WORKING + "waiting for the owner's approval") or `both` (a
+ * caller-answerable ask also reads INPUT_REQUIRED, and the caller's follow-up
+ * answers it with the ask's `*_once` option; `external/asks.ts`).
+ *
  * What the adapter NEVER does (a remote is not trusted, AGENTS §7): answer an
- * ask (S4 is owner mode: the owner's devices answer, the task reads WORKING +
- * "waiting for the owner's approval"), say `hooks/trust: true`, or send any
- * method beyond open / prompt / cancel / detach.
+ * ask on its own, answer an owner-only ask (a lasting kind, or one not
+ * provably the task's), pick an `*_always` option, say `hooks/trust: true`,
+ * or send any method beyond open / prompt / resolve_permission / cancel /
+ * detach.
  *
  * The SDK turns an `execute` rejection into a FAILED task on the task's bus,
  * so every refusal here is PUBLISHED (`REJECTED` + a reason), never thrown.
@@ -27,7 +33,12 @@ import {
   type Task,
   TaskState,
 } from "@a2a-js/sdk";
-import { TaskNotCancelableError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
+import {
+  RequestMalformedError,
+  TaskNotCancelableError,
+  TaskNotFoundError,
+  UnsupportedOperationError,
+} from "@a2a-js/sdk/errors";
 import {
   AgentEvent,
   type AgentExecutor,
@@ -42,18 +53,26 @@ import {
   KNOWN_UPDATE_TYPES,
   type KnownSessionUpdateParams,
   PROTOCOL_VERSION,
-  type PermissionRequestUpdate,
 } from "@tentacle/protocol";
 import { ErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { Connection, type HooksTrustPrecheck } from "../connection.ts";
+import {
+  type AskMode,
+  type PendingAsk,
+  type ResolvedAnswer,
+  askIsOwn,
+  askOf,
+  callerMayAnswer,
+  resolveCallerAnswer,
+} from "../external/asks.ts";
 import type { SessionHost } from "../session-host.ts";
 import {
-  type PendingAsk,
   type ProjectedStatus,
   a2aSessionId,
   a2aTitle,
   chunkAppend,
   inboundParts,
+  parseTextAnswer,
   projectStatus,
   responseText,
 } from "./mapping.ts";
@@ -70,11 +89,21 @@ export const REFUSED = {
   workflow: "workflow tasks are not enabled for this caller",
   answer: "there is no task to answer: send the answer with the task's taskId",
   busy: "the context is busy: a task is already running in it",
-  running: "the task is running and takes no input now: its asks are answered by its owner",
+  running: "the task is running and takes no input now: it waits on no ask you may answer",
+  notAnswerable:
+    "not an answer to an ask you may answer: name a requestId from the task's status, or send the text allow with one ask pending",
 } as const;
+
+/** What one caller (= one A2A token) may do. */
+export interface CallerPolicy {
+  /** Who answers its tasks' asks: the owner only (default), or the caller too. */
+  readonly asks: AskMode;
+}
 
 export interface A2AExecutorOptions {
   readonly host: SessionHost;
+  /** Per caller; absent (or no policy) = `{asks: "owner"}`. */
+  readonly callerPolicy?: (caller: string) => CallerPolicy | undefined;
   /** The host's own project-hooks answer (the same one `serve` gives a socket). */
   readonly hooksTrustPrecheck?: HooksTrustPrecheck;
   /** `ClientInfo.version` (the build's version). */
@@ -88,9 +117,18 @@ interface Watcher {
   readonly taskId: string;
   readonly contextId: string;
   readonly sessionId: string;
+  /** The caller that started it: the only one whose answer is admitted. */
+  readonly caller: string;
+  readonly mode: AskMode;
   readonly peer: RpcPeer;
   readonly bus: ExecutionEventBus;
   readonly asks: Map<string, PendingAsk>;
+  /**
+   * A caller's answer admitted in INPUT_REQUIRED (`admitFollowUp`), not yet
+   * taken by its `execute`: while set, a second answer is refused, so two
+   * follow-ups never publish on the shared bus at once.
+   */
+  claim?: { readonly answer: ResolvedAnswer; consumed: boolean };
   inTurn: boolean;
   afterTool: boolean;
   hasChunks: boolean;
@@ -182,7 +220,11 @@ export class A2AExecutor implements AgentExecutor {
       return reject(REFUSED.empty);
     }
 
-    const watcher = this.connect(taskId, contextId, sessionId, bus);
+    const mode = this.opts.callerPolicy?.(user.userName)?.asks ?? "owner";
+    const watcher = this.connect(
+      { taskId, contextId, sessionId, caller: user.userName, mode },
+      bus,
+    );
     try {
       await watcher.peer.request("initialize", {
         protocolVersion: PROTOCOL_VERSION,
@@ -237,32 +279,74 @@ export class A2AExecutor implements AgentExecutor {
   // --- follow-up ------------------------------------------------------------
 
   /**
-   * A message naming a task this executor is RUNNING is refused before the
-   * SDK runs `execute` (`A2ARequestHandler`): the task's bus is shared, and any
-   * first event a second `execute` published there (`task` / `message`) would
-   * break the running task's stream (the SDK's ordering rule), while a status
-   * first breaks the follow-up's. Owner mode: the caller has nothing to answer.
-   * S5 lets an answer through when the task waits on a caller-answerable ask.
+   * Checked by `A2ARequestHandler` BEFORE the SDK runs `execute`, for a
+   * message naming a task this executor is RUNNING. The task's bus is shared:
+   * while its stream is live, any first event a second `execute` published
+   * there (`task` / `message`) would break it (the SDK's ordering rule), so
+   * such a message is refused (−32004) — except in INPUT_REQUIRED, where the
+   * running stream has ended: then the message must be a valid answer to a
+   * caller-answerable ask of the task (else −32602, the ask untouched), and it
+   * is admitted as this task's one pending claim. Returns the claim's release,
+   * for a request that fails before its `execute` takes it.
    */
-  refuseFollowUp(taskId: string | undefined): void {
-    if (taskId === undefined || taskId === "") {
-      return;
+  admitFollowUp(message: Message | undefined, context: ServerCallContext): () => void {
+    const none = () => {};
+    const taskId = message?.taskId;
+    if (message === undefined || taskId === undefined || taskId === "") {
+      return none;
     }
-    const watcher = this.watchers.get(taskId);
-    if (watcher !== undefined && !watcher.ended) {
+    const w = this.watchers.get(taskId);
+    if (w === undefined || w.ended) {
+      return none;
+    }
+    const user = context.user;
+    if (user === undefined || !user.isAuthenticated || user.userName !== w.caller) {
+      // Another caller's task does not exist for this one.
+      throw new TaskNotFoundError(`Task not found: ${taskId}`);
+    }
+    if (w.last.state !== TaskState.TASK_STATE_INPUT_REQUIRED || w.claim !== undefined) {
       throw new UnsupportedOperationError(REFUSED.running);
     }
+    const parts = inboundParts(message.parts);
+    const pending = [...w.asks.values()];
+    const answer =
+      !parts.ok || parts.workflow !== undefined
+        ? null
+        : (parts.answer ??
+          parseTextAnswer(
+            parts.text,
+            pending.filter((a) => callerMayAnswer(a, w.mode)),
+          ));
+    const resolved = answer === null ? null : resolveCallerAnswer(answer, pending, w.mode);
+    if (resolved === null) {
+      throw new RequestMalformedError(REFUSED.notAnswerable);
+    }
+    const claim = { answer: resolved, consumed: false };
+    w.claim = claim;
+    return () => {
+      if (w.claim === claim && !claim.consumed) {
+        w.claim = undefined;
+      }
+    };
   }
 
   /**
-   * A follow-up that reached `execute` anyway. Not running here (its watcher
-   * ended, or it never had one): the stored snapshot, nothing sent. Running (a
-   * race past `refuseFollowUp`): publish NOTHING on the shared bus, follow the
-   * task to its end so the bus is not settled under it.
+   * A follow-up that reached `execute`. Running here with an admitted answer:
+   * take it, start the follow-up's stream with the task (WORKING), send the
+   * answer, then follow the task to its next stop. Running without one (a
+   * race past the guard): publish NOTHING, follow the task to its end so the
+   * bus is not settled under it. Not running here (its watcher ended, or it
+   * never had one): the stored snapshot, nothing sent.
    */
   private async followUp(ctx: RequestContext, bus: ExecutionEventBus): Promise<void> {
     const watcher = this.watchers.get(ctx.taskId);
     if (watcher !== undefined && !watcher.ended) {
+      const claim = watcher.claim;
+      if (claim !== undefined && !claim.consumed && ctx.task !== undefined) {
+        claim.consumed = true;
+        watcher.claim = undefined;
+        await this.answer(watcher, ctx.task, bus, claim.answer);
+      }
       await watcher.done;
       return;
     }
@@ -271,14 +355,36 @@ export class A2AExecutor implements AgentExecutor {
     }
   }
 
+  /**
+   * Send a caller's admitted answer: the ask's own `*_once` option, never an
+   * `*_always` (`resolveCallerAnswer`). The owner was raised the same ask; the
+   * first answer wins — a `PermissionNotPending` (or any refusal) changes
+   * nothing, and the task re-reads what the session still holds.
+   */
+  private async answer(w: Watcher, task: Task, bus: ExecutionEventBus, a: ResolvedAnswer) {
+    // The original stream ended at INPUT_REQUIRED; the follow-up's starts with the task.
+    w.last = { state: TaskState.TASK_STATE_WORKING };
+    bus.publish(AgentEvent.task({ ...task, status: status(w.taskId, w.contextId, w.last) }));
+    try {
+      await w.peer.request("session/resolve_permission", { sessionId: w.sessionId, ...a });
+    } catch {
+      this.publishStatus(w);
+    }
+  }
+
   // --- the in-process client ------------------------------------------------
 
   private connect(
-    taskId: string,
-    contextId: string,
-    sessionId: string,
+    ids: {
+      readonly taskId: string;
+      readonly contextId: string;
+      readonly sessionId: string;
+      readonly caller: string;
+      readonly mode: AskMode;
+    },
     bus: ExecutionEventBus,
   ): Watcher {
+    const { taskId } = ids;
     const [daemonEnd, clientEnd] = createChannelPair();
     // The SAME object a socket becomes (ws-server.ts): one session path.
     new Connection(daemonEnd, this.opts.host, this.opts.onError, {
@@ -291,9 +397,7 @@ export class A2AExecutor implements AgentExecutor {
       finish = resolve;
     });
     const watcher: Watcher = {
-      taskId,
-      contextId,
-      sessionId,
+      ...ids,
       bus,
       asks: new Map(),
       inTurn: false,
@@ -347,7 +451,7 @@ export class A2AExecutor implements AgentExecutor {
         return;
       case "permission_request":
         if (w.inTurn && (u.turnId === undefined || u.turnId === w.taskId)) {
-          w.asks.set(u.requestId, askOf(u));
+          w.asks.set(u.requestId, askOf(u, askIsOwn(u, w.taskId)));
           this.publishStatus(w);
         }
         return;
@@ -382,11 +486,15 @@ export class A2AExecutor implements AgentExecutor {
     );
   }
 
-  /** The running turn's status, owner mode: an ask reads WORKING + a message. */
+  /**
+   * The running turn's status in the caller's mode: an owner-only ask reads
+   * WORKING + "waiting for the owner"; in `both`, a caller-answerable one
+   * reads INPUT_REQUIRED + the ask (which ends the live stream: the SDK's rule).
+   */
   private publishStatus(w: Watcher): void {
     const asks = [...w.asks.values()];
     const unit = unifyTurn({ turnId: w.taskId, asking: asks.length > 0 });
-    const next = projectStatus(unit, "owner", asks);
+    const next = projectStatus(unit, w.mode, asks);
     if (next.state === w.last.state && next.message === w.last.message) {
       return;
     }
@@ -427,7 +535,7 @@ export class A2AExecutor implements AgentExecutor {
         }),
       );
     }
-    const projected = projectStatus(unit, "owner");
+    const projected = projectStatus(unit, w.mode);
     const message = [projected.message, response.note].filter((m) => m !== undefined).join("\n");
     this.end(w, message === "" ? { state: projected.state } : { state: projected.state, message });
   }
@@ -484,10 +592,11 @@ export class A2AExecutor implements AgentExecutor {
 }
 
 /**
- * The SDK's request handler with the one check only the executor can make:
- * a message naming a task this executor is running is refused here, as a
- * JSON-RPC error (−32004), before the SDK runs `execute` on the task's shared
- * bus (`A2AExecutor.refuseFollowUp`).
+ * The SDK's request handler with the one check only the executor can make: a
+ * message naming a task this executor is running is admitted (a valid answer
+ * in INPUT_REQUIRED) or refused as a JSON-RPC error, before the SDK runs
+ * `execute` on the task's shared bus (`A2AExecutor.admitFollowUp`). A request
+ * that fails before its `execute` takes the admitted answer releases it.
  */
 export class A2ARequestHandler extends DefaultRequestHandler {
   private readonly a2a: A2AExecutor;
@@ -501,16 +610,26 @@ export class A2ARequestHandler extends DefaultRequestHandler {
     params: SendMessageRequest,
     context: ServerCallContext,
   ): Promise<Message | Task> {
-    this.a2a.refuseFollowUp(params.message?.taskId);
-    return super.sendMessage(params, context);
+    const release = this.a2a.admitFollowUp(params.message, context);
+    try {
+      return await super.sendMessage(params, context);
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   override async *sendMessageStream(
     params: SendMessageRequest,
     context: ServerCallContext,
   ): AsyncGenerator<StreamResponse, void, undefined> {
-    this.a2a.refuseFollowUp(params.message?.taskId);
-    yield* super.sendMessageStream(params, context);
+    const release = this.a2a.admitFollowUp(params.message, context);
+    try {
+      yield* super.sendMessageStream(params, context);
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 }
 
@@ -523,12 +642,6 @@ function artifact(parts: Part[]) {
     metadata: {},
     extensions: [],
   };
-}
-
-function askOf(u: PermissionRequestUpdate): PendingAsk {
-  // Owner mode: no kind is needed (the caller answers nothing). S5 maps it
-  // with the client's reverse mapping; absent = owner-only (fail-closed).
-  return { requestId: u.requestId, title: u.title, options: u.options };
 }
 
 /** ` (code N)` for an RPC refusal; never its message (it may carry internals). */

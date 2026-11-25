@@ -1085,4 +1085,134 @@ accepted prompt and its own `turn_end`. The filter stays as defence.
 to the 2 files (`.tentacle/tmp/a2a/tsconfig.s4.json`) is clean. Full `bun run
 check` NOT run (the orchestrator's script runs it).
 
+### S5-caller-asks — DONE (the owner's `external/` move: partial, see drift 1)
+
+*— claude-opus-5-5, 2026-11-25*
+
+**Load-bearing check re-run first** (`bun .tentacle/tmp/a2a/seam.ts`): HOLDS,
+the same five lines. **S5's own premise, checked in the SDK before coding:** a
+follow-up on a task gets the SAME bus (`createOrGetByTaskId`,
+`sdk dist/server/index.js:2125-2133`). Both the blocking call and the stream
+stop at `INPUT_REQUIRED` (`ExecutionEventQueue` `:2181`). The bus outlives an
+`execute` that returns in an interrupted state (`keepBusAliveStates` =
+`INTERRUPTED_STATE_LIST`, `:2720`, `:2982`). An `execute` that returns while
+the task is WORKING settles (closes) the shared bus. So every `execute` of a
+task, the follow-ups included, awaits the turn's end.
+
+**As built:**
+- `packages/core/src/permission.ts`: `PermissionKind`, plus
+  `EXTERNAL_ANSWER: {[K in PermissionKind]: "once" | "owner-only"}`. The type
+  is exhaustive and only `tool` is `once`. Also `externalMayAnswer(kind)`:
+  `undefined` → false.
+- `packages/daemon/src/external/asks.ts` (new, pure, protocol-neutral, per
+  the owner's decision):
+  - `AskMode`, `PendingAsk` (+ `replyMax`) and `CallerAnswer`, moved from
+    `a2a/mapping.ts`.
+  - `callerMayAnswer`, now reading the core table, plus `onceOption` and
+    `callerOptions`, also moved from `a2a/mapping.ts`.
+  - New: `askIsOwn`, `askOf(update, own)` and `resolveCallerAnswer` (a
+    decision → the ask's `*_once` `optionId`; a refusal's reply cleaned and
+    clamped, sent only when the ask takes one).
+- `a2a/mapping.ts` imports these from `external/asks.ts`. Nothing is
+  re-exported (no shim). The mapping test imports from the new path.
+- `a2a/executor.ts`:
+  - `callerPolicy(caller) → {asks}` (absent → `owner`). The watcher carries
+    `caller`, `mode` and `claim`. Both `projectStatus` calls use the mode.
+  - Asks become `askOf(u, askIsOwn(u, taskId))`.
+  - `refuseFollowUp` is replaced by `admitFollowUp(message, context)`, called
+    by `A2ARequestHandler` before the SDK:
+    - not the starting caller → `TaskNotFound`;
+    - not INPUT_REQUIRED, or an answer already admitted → −32004;
+    - not a valid answer to a caller-answerable ask → −32602
+      (`RequestMalformedError`);
+    - else the answer becomes the task's ONE claim. The handler releases it if
+      the request fails before `execute` takes it.
+  - The follow-up `execute` takes the claim, publishes the task (WORKING) as
+    the follow-up stream's first event, and sends `session/resolve_permission`
+    with that `optionId`. On any failure (e.g. the owner answered first), it
+    re-projects the status. It then awaits the turn's end.
+- Tests:
+  - `core/test/permission-kinds.test.ts` (2) and
+    `daemon/test/external-asks.test.ts` (4, pure).
+  - `a2a-executor.test.ts`: the rig gains `asks` and a `workflow_approve`
+    tool. That tool's wire name is what makes an ask owner-only, so it stands
+    in for a file approval. 3 integration tests:
+    - `both`: INPUT_REQUIRED; a data-part allow is `allow_once` (the next call
+      asks again); a text refusal reaches the model with its reply;
+    - an owner-only ask is never INPUT_REQUIRED, and a caller's answer is
+      refused;
+    - another caller, a bad answer, the claim released after an SDK refusal,
+      a concurrent second answer, and a late answer after the owner's.
+
+**Drift from Implementation:**
+1. **Owner decision (`external/`), partly applied.** Moved: the ask policy,
+   i.e. everything S5 touches. NOT moved:
+   - the session driver (`connect` / `onUpdate` / `teardown` /
+     `adapterRequest` in `a2a/executor.ts`);
+   - the session id / caller helpers (`a2aSessionId`, `a2aCallerPrefix`,
+     `contextIdOf` in `a2a/mapping.ts`).
+
+   Splitting the driver from the SDK bus is a design step of its own: an event
+   interface between the driver and the A2A publisher. S5's claim / bus rules
+   are SDK-specific and sit on top of it. It belongs with S6, which builds the
+   work-units projection in `external/` anyway. **S6 must do it.**
+2. **The kind is not read through `client/permission-map`.** `@tentacle/daemon`
+   does not depend on `@tentacle/client`. `askOf` applies the same one rule as
+   the client's `toPermissionRequest` (`client/permission-router.ts:107-121`,
+   `WORKFLOW_APPROVE_TOOL` → `workflow_approve`, else `tool`). On a daemon ask,
+   `hooks_trust` and `session_hop` never appear: hooks trust is the
+   `hooks/trust` request (answered NO), and a hop is the laptop's. The
+   refusal-reply cleaning repeats the client's `normalizePermissionReply` in
+   about 6 lines, for the same reason.
+3. **Attribution, a gap the plan did not name.** A workflow step's ask (and a
+   background child's) rides the background path. Its wire `turnId` is set
+   only when the daemon knows the starting turn
+   (`hosted-session.ts:1665-1671`, `workflow-driver.ts:1612-1620`). S4's
+   watcher keeps such an ask while its turn runs. Unfiltered, a step of a run
+   the OWNER started could become the caller's to answer. So an ask is the
+   task's own only when it has no `turnId` and no `agent.id` (the turn's own,
+   or a foreground sub-agent's), or when its `turnId` is the task. Anything
+   else gets no kind, so it is owner-only.
+4. **A crafted answer to an owner-only ask is −32004, not −32602, when it is
+   the only pending ask.** In that case the task is not INPUT_REQUIRED (it
+   reads WORKING + "waiting for the owner"), so the state refusal comes first.
+   When a caller-answerable ask is pending too, the same answer is −32602.
+   Either way the ask is untouched.
+5. No schema change: `protocol.json` untouched, no `protocol.d/` note. The
+   changelog fragment is unchanged: S5 has no user-visible effect until S9's
+   route, and S10 rewrites it.
+
+**Red before green:** the S5 tests passed on first run against the new code, so
+the red proof is M1 below. M1 forces `owner` mode, which is exactly the pre-S5
+behaviour, and both S5 tests that need `both` mode go red. The new pure modules
+did not exist before.
+
+**Mutations** (`/Users/gmeghnag/tentacle/.tentacle/tmp/a2a/mutate-s5.ts`, on
+the 4 test files; each restored, `restored true` ×13):
+
+| Mutation | Fails |
+|---|---|
+| M1 mode always `owner` (= pre-S5) | 2 |
+| M2 allow → `allow_always` | 5 |
+| M3 `workflow_approve` marked `once` (the plan's) | 6 |
+| M4 resolve by `requestId` without the kind check (the plan's) | 1 |
+| M5 `callerMayAnswer` ignores the kind | 5 |
+| M6 every ask is the task's own | 1 |
+| M7 no caller check in `admitFollowUp` | 1 (it survived at first, masked by the SDK's user-scoped store; a direct `admitFollowUp` assertion was added) |
+| M8 the claim is never released | 1 |
+| M9 no claim guard (two answers at once) | 1 |
+| M10 any text allows | 2 |
+| M11 the refusal reply dropped | 2 |
+| M12 the follow-up publishes no task first | 2 |
+| M13 the answer is never sent | 2 |
+
+**Gate (narrow):** `bun test --rerun-each 3` on the 4 files → 132 pass / 0
+fail (44 tests). `biome check` on the 8 changed files is clean. `tsc` limited
+to them (`.tentacle/tmp/a2a/tsconfig.s5.json`, main checkout) is clean. Full
+`bun run check` NOT run (the orchestrator's script runs it).
+
 ## Review
+
+### Owner decision 2026-11-25 ~13:20 (from the feat/serve-mcp-server plan, Q1) — binding for the remaining slices
+
+The external entry is **protocol-neutral**, written once for A2A and MCP: the session driver and the HTTP route live in `external/` (e.g. `external/session-driver.ts`, `external/route.ts`; the dedicated-token check, the caller identity, the work-units projection), and ONLY the A2A wire mapping lives in `a2a/`. MCP (feat/serve-mcp-server) will mount on the same `external/` seam with no extraction. If a slice already done put a protocol-neutral piece under `a2a/`, the NEXT slice moves it to `external/` (record the move in Execution). *— claude-opus-5-5 (orchestrator, recording the owner's decision), 2026-11-25*
