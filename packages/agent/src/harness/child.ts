@@ -63,6 +63,12 @@ export interface HarnessInstance {
    * put before a non-empty report (the remote text is data, not instructions).
    */
   readonly reportHeader?: () => string;
+  /**
+   * What an `ask{auth}` failure tells the model to do. Default «configure
+   * credentials for <adapter>»; a PROPOSED remote agent never has a token, so
+   * it says to add it under `harnesses` (docs/feat/a2a-client.md C11).
+   */
+  readonly authHint?: string;
 }
 
 export interface HarnessWorktrees {
@@ -399,7 +405,7 @@ export async function runHarnessChild(
           } else if (ev.ask.type === "auth") {
             await run.cancel().catch(() => "unconfirmed" as const);
             return await failRun(
-              `${name} needs authentication: ${ev.ask.explanation} — configure credentials for ${adapter.id}`,
+              `${name} needs authentication: ${ev.ask.explanation} — ${instance.authHint ?? `configure credentials for ${adapter.id}`}`,
             );
           } else {
             const answer = await routeInput(

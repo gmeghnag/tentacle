@@ -1319,3 +1319,119 @@ step). Facts for the re-run:
   here; `tsc -p apps/mobile` clean, biome clean on touched files. The Swift NSE
   category is unaffected (a question push has no `allow_once`, so already Open).
 - **Gate:** not run here (the script runs it). No schema change.
+
+### a2c-7-proposed-agents — DONE
+
+*— claude-opus-5-5, 2026-11-25*
+
+- **Load-bearing check — holds.** `harness-remote-fit` + `harness-a2a` +
+  `harness-a2a-seam` + `cli/a2a-wiring` → 61 pass / 0 fail before any edit.
+  Slice-specific facts verified first: the runner resolves a type by
+  `types.find(…) ?? types[0]` (`subagent.ts`) and `agent_task`'s `resolveType`
+  falls back to the default type (`task.ts`) — so an unlisted type must be
+  looked up explicitly or it silently runs as `general`; `/clear` empties the
+  session's ONE `SessionGrants` (`hosted-session.ts:5100`) while a settings
+  rebuild REUSES it (`session-host.ts:1834`, `AgentReuse.grants`). Capability
+  missing before: no `a2a_add_agent` tool (the wire constant only, a2c-4).
+- **Done, in dependency order:**
+  1. `agent/src/session-grants.ts:108` `onClear(listener)` — `clear()` calls
+     the listeners. The registry's lifetime IS the approvals store's.
+  2. `agent/src/harness/child.ts:71` `HarnessInstance.authHint` — the
+     `ask{auth}` failure says it (`:408`); default text unchanged.
+  3. `agent/src/harness/registry.ts` (new): `ProposedAgents` (by type, by
+     origin, `clear`); `proposedAgentsFor(grants)` (`:65`, one per store via a
+     WeakMap, emptied on its `clear`); `proposedAgentName` (`:82`, slug of the
+     host, `-2`… on a collision, always `[a-z0-9][a-z0-9-]{0,31}`);
+     `inspectProposedAgent` (`:158`): `proposedUrlRefusal`, then the card read
+     through `fetchA2ACard` with `policy: "proposed"` (pinned origin, DNS check
+     on every request, `redirect: "error"`) over a 64 KiB `cappedFetch`
+     (`:118`) and a 10 s deadline, then `checkCard`, then refused when the card
+     declares `securitySchemes` / `securityRequirements`; `createProposedAgent`
+     (`:225`): adapter with `policy: "proposed"` and no token, `inputFrom:
+     "user"`, `idleMinutes: 30`, C5's report frame, the «add it under
+     `harnesses`» auth hint. Exported from `agent/src/index.ts`.
+  4. `agent/src/subagent.ts`: `SubagentDeps.proposed` (`:394`); `typeOf`
+     (`:415`) = the static list, THEN the registry (a configured name always
+     wins), used by `run` and `readOnlyType` (a proposed type is remote ⇒
+     read-only); a proposed type runs on its own instance merged into the
+     harness deps (`:452`).
+  5. `tools/src/task.ts`: `proposedTypes` (`:126`) — accepted by name, a
+     `model` refused (remote), NOT in the type list (the text stays
+     byte-stable); an `a2a:` name neither configured nor added → «unknown
+     sub-agent type» (`:412`) instead of silently running the default type.
+  6. `tools/src/a2a-add-agent.ts` (new, `:65`): known origin → the existing
+     type, no card read, no ask; refused card → the reason, no ask; ONE ask to
+     the injected broker — `kind: "agent_add"`, wire tool `a2a_add_agent`,
+     title «Use a new remote agent?», detail = URL · origin «public address» ·
+     «Model's reason» (one line, controls stripped) · «Remote card text» (C5's
+     marked blurb); no → nothing registered; yes → re-check the origin (two
+     proposals asked at once register once), then register. `permission:
+     "none"` — the tool raises its own owner-only ask, never a generic one.
+  7. `cli/src/wiring.ts`: `proposed = !tunnelled && options.harnesses ?
+     proposedAgentsFor(grants)` (`:1009`) → runner `proposed`, harness deps
+     built even with no configured instance, `agent_task` `proposedTypes`, and
+     the tool (`:1122`) over the build's `fetch`/`lookup` and
+     `permissions.request` (the ONE broker). Names avoid every type the runner
+     has and every `harnesses` key.
+  8. `changelog.d/a2a-client.added.md`: one sentence appended to the bullet.
+- **Drift from Implementation:**
+  - The registry lives with the session's `SessionGrants` (a WeakMap +
+    `onClear`), not with the agent build: a settings sync rebuilds the agent
+    and would otherwise have dropped approved agents mid-session; `/clear`
+    still drops them «with the grants», literally. `session-grants.ts` and
+    `child.ts` (the auth hint the failure-mode table asks for) are files the
+    plan did not list.
+  - The card check lives in `registry.ts` (agent, beside the adapter); the
+    tool in `tools` gets it injected (`tools` cannot import `@tentacle/agent`).
+  - The card read carries no token and goes through `fetchA2ACard` (a2c-2's
+    one code path), so «re-checked at every request» is the adapter's.
+  - Tests are three files, one per package, not one `a2a-add-agent.test.ts`.
+- **Tests → failure modes:** `agent/test/harness-a2a-registry.test.ts` (21):
+  http / userinfo / loopback, metadata and v6 literals / `.local` / single
+  label / a private, mixed, mapped-metadata, CGNAT or empty lookup → refused
+  with ZERO requests; credentials declared (either field) → «add it under
+  `harnesses`»; interface on another origin; > 64 KiB; no answer by the
+  deadline; a redirect not followed; names; registry per store, emptied by
+  `grants.clear()`; the agent's mode / route / idle / auth hint.
+  `tools/test/a2a-add-agent.test.ts` (8): an auto-mode requester
+  (`autoApproves`) does not answer the ask; yes registers once; refused → no
+  ask; declined / nobody to ask; known origin → no read, no ask; concurrent
+  proposals register once; the reason as one line. `cli/test/a2a-add-agent.test.ts`
+  (8, real `buildAgent` + the SDK's server): offered on laptop/serve, never with
+  `modelOverride`, not in one-shot builds; approved → ONE `agent_add` ask with
+  the URL/origin/reason/card text, only the card read, `agent_task` text
+  byte-identical, then the first send asks C3's `a2a:<slug>` consent before
+  the fake gets «work», framed report; auto mode ON → the human is asked and a
+  no leaves the type unknown; second proposal → same type, no ask; `/clear`
+  (`grants.clear()`) → «unknown sub-agent type», while a settings rebuild on
+  the same grants still runs it; private lookup → no ask, no request; a later
+  401 → «add it under `harnesses`», no `Authorization` ever sent; config dir +
+  cwd byte-identical after add + send + clear.
+  **Red before green:** the cli file ran against the code before the wiring
+  step — 7 fail on assertions (tool absent / type unknown), 1 pass (the
+  nothing-written guard, green by construction).
+- **Mutations** (scratch `.tentacle/tmp/a2a-client/mutate-a2c7.ts`: apply one,
+  run its target files, restore; byte-identical after each):
+  | mutation | result |
+  |---|---|
+  | M1 add ask raised as `kind: "tool"` (plan's named mutation) | red — 3 fail |
+  | M2 registry not emptied by `grants.clear` | red — 2 fail |
+  | M3 tool offered without `!tunnelled` | red — 1 fail |
+  | M4 card read under the `configured` policy | red — 6 fail |
+  | M5 no credentials check | red — 1 fail |
+  | M6 no 64 KiB cap | red — 1 fail |
+  | M7 unknown `a2a:` type runs the default type | red — 2 fail |
+  | M8 no origin re-check after the yes (race) | red — 1 fail |
+  | M9 runner ignores the registry | red — 4 fail |
+  | M10 proposed agent without its auth hint | red — 1 fail |
+- **Narrow runs:** the 3 new files + `harness-a2a*`, `remote-fit`,
+  `session-grants`, `subagent*` (3), `task*` (3), `cli` `a2a-wiring`,
+  `harness-wiring`, `wiring`, `browser-tools-wiring` → 329 pass / 0 fail;
+  `scripts/test/changelog*.test.ts` 21/0. Biome on the 12 touched files:
+  clean. `tsc -p packages/cli`: no error in the changed files (the remaining
+  ones are pre-existing per-package artefacts — the gate's root `tsc` decides).
+- **Unverified:** the add ask on the real TUI / phone sheet / push (a2c-5/6
+  render `agent_add`; the end-to-end path through a daemon is a2c-8's); Bun's
+  real `fetch` + DNS on a public card (tests inject both).
+- **Gate:** not run here (the orchestrator's script runs it). No protocol
+  schema change; `protocol.json` untouched.

@@ -117,6 +117,13 @@ export interface TaskToolOptions {
    * argument for one is refused — the remote agent chooses its own model.
    */
   readonly remoteTypes?: readonly string[];
+  /**
+   * Remote agents the owner approved DURING the session
+   * (docs/feat/a2a-client.md C11), asked live: accepted by name, remote (no
+   * `model`), never listed in the text (it stays byte-stable). An `a2a:` name
+   * that is neither listed nor approved is refused, never run as the default.
+   */
+  readonly proposedTypes?: (name: string) => boolean;
 }
 
 const NEUTRAL_DESCRIPTION =
@@ -335,8 +342,11 @@ export function createTaskTool(
   const typeList = types.map((t) => `- ${t.name}: ${t.description}`).join("\n");
   const resolveType = (requested: string | undefined): string => {
     const name = requested ?? defaultType;
-    return names.includes(name) ? name : defaultType;
+    return names.includes(name) || options.proposedTypes?.(name) === true ? name : defaultType;
   };
+  const isRemote = (type: string): boolean =>
+    options.remoteTypes?.includes(type) === true ||
+    (!names.includes(type) && options.proposedTypes?.(type) === true);
 
   const models = options.models ?? [];
   const modelNames = models.map((m) => m.name);
@@ -396,8 +406,15 @@ export function createTaskTool(
     async execute(input, ctx): Promise<ToolResult> {
       const args = input as z.infer<typeof baseSchema> & { model?: string; background?: boolean };
       const type = resolveType(args.subagent_type);
+      if (args.subagent_type?.startsWith("a2a:") && type !== args.subagent_type) {
+        // A remote agent added with `a2a_add_agent` lasts until `/clear` (C11).
+        return {
+          content: `unknown sub-agent type ${JSON.stringify(args.subagent_type.slice(0, 128))} — not configured, and not added in this session`,
+          isError: true,
+        };
+      }
       const model = offerModel ? args.model : undefined;
-      if (model !== undefined && options.remoteTypes?.includes(type)) {
+      if (model !== undefined && isRemote(type)) {
         return {
           content: `model is not accepted for ${type} — a remote agent chooses its own model; omit model`,
           isError: true,

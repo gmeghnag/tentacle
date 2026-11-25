@@ -42,13 +42,17 @@ import {
   createA2AAdapter,
   createClaudeCodeCodec,
   createProcessAdapter,
+  createProposedAgent,
   createSubagentRunner,
   createToolOutputStore,
   exemptTools,
   fetchA2ACard,
+  inspectProposedAgent,
   isModelShape,
   mergeAgentTypes,
   parseAgentDefinition,
+  proposedAgentName,
+  proposedAgentsFor,
   redactSecrets,
   reportHeader,
   resolveToolOutputRoot,
@@ -100,6 +104,7 @@ import {
   WorkloadShells,
   builtinTools,
   chartTool,
+  createA2AAddAgentTool,
   createAgentControlTool,
   createContextResetTool,
   createFsReadTool,
@@ -997,8 +1002,15 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       !tunnelled && options.harnesses !== undefined
         ? a2aHarnesses(config, options.harnesses, options.notice)
         : undefined;
+    // Remote agents the model proposes and the owner approves (C11): the same
+    // gate — never in a pod. ONE registry per approvals store: a settings
+    // rebuild keeps it, `/clear` empties it with the grants.
+    const proposed =
+      !tunnelled && options.harnesses !== undefined ? proposedAgentsFor(grants) : undefined;
     const harnessDeps: HarnessDeps | undefined =
-      harness !== undefined || (remote !== undefined && remote.instances.size > 0)
+      harness !== undefined ||
+      proposed !== undefined ||
+      (remote !== undefined && remote.instances.size > 0)
         ? {
             ...(harness?.deps ?? { cwd: config.cwd }),
             instances: new Map([...(harness?.deps.instances ?? []), ...(remote?.instances ?? [])]),
@@ -1056,6 +1068,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // `agent` (built below) is always set by the time a child runs.
       capabilities: () => agent.capabilities(),
       ...(harnessDeps ? { harness: harnessDeps } : {}),
+      ...(proposed ? { proposed } : {}),
     };
     const { run, types, readOnlyType } = createSubagentRunner(runnerDeps);
     // The types a harness runs (an `agents/*.md` of the same name replaces one):
@@ -1090,6 +1103,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
             }
           : {}),
         ...(remoteTypeNames.length > 0 ? { remoteTypes: remoteTypeNames } : {}),
+        ...(proposed ? { proposedTypes: (name: string) => proposed.get(name) !== undefined } : {}),
         models: tunnelled
           ? publishedOptions(published)
           : config.selectableModels.map((name) => {
@@ -1098,6 +1112,42 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
             }),
       }),
     );
+    if (proposed !== undefined) {
+      const net = options.harnesses;
+      const typeNames = new Set([
+        ...types.map((t) => t.name),
+        ...Object.keys(config.harnesses).map((name) => `a2a:${name}`),
+      ]);
+      tools.register(
+        createA2AAddAgentTool({
+          inspect: (cardUrl, signal) =>
+            inspectProposedAgent(cardUrl, {
+              signal,
+              ...(net?.fetch ? { fetch: net.fetch } : {}),
+              ...(net?.lookup ? { lookup: net.lookup } : {}),
+            }),
+          existing: (origin) => {
+            const agent = proposed.forOrigin(origin);
+            return agent && { type: agent.type.name, summary: agent.summary };
+          },
+          register: (checked) => {
+            const agent = createProposedAgent({
+              name: proposedAgentName(
+                checked.host,
+                (t) => typeNames.has(t) || proposed.get(t) !== undefined,
+              ),
+              checked,
+              ...(net?.fetch ? { fetch: net.fetch } : {}),
+              ...(net?.lookup ? { lookup: net.lookup } : {}),
+            });
+            proposed.add(agent);
+            return { type: agent.type.name, summary: agent.summary };
+          },
+          // The add ask goes to the session's ONE broker (AGENTS §7).
+          ask: (req, opts) => permissions.request(req, opts),
+        }),
+      );
+    }
     // The model's ONE handle on a child it launched (docs/feat/agent-status.md,
     // "Merge into agent_control"): see it (`status`, read-only), write to it
     // (`message`) or stop it (`kill`). Registered only here, where `background`

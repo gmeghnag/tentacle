@@ -49,7 +49,7 @@ import {
 } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { SessionCapabilities } from "./capabilities.ts";
-import { type HarnessDeps, runHarnessChild } from "./harness/child.ts";
+import { type HarnessDeps, type HarnessInstance, runHarnessChild } from "./harness/child.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
 import { classOf, isReadClass } from "./round-plan.ts";
@@ -385,6 +385,17 @@ export interface SubagentDeps {
    * NOT tunnelled (D5): a pod has no harness type and no harness deps.
    */
   readonly harness?: HarnessDeps;
+  /**
+   * The remote agents the owner approved during THIS session
+   * (docs/feat/a2a-client.md C11): looked up by type name AFTER `types` (a
+   * configured name always wins), each with the instance it runs on. Given
+   * with `harness`, never in a pod.
+   */
+  readonly proposed?: {
+    get(
+      typeName: string,
+    ): { readonly type: AgentType; readonly instance: HarnessInstance } | undefined;
+  };
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -401,8 +412,11 @@ export function createSubagentRunner(deps: SubagentDeps): {
   const spawnToolName = deps.spawnToolName ?? "agent_task";
   const grants = deps.grants ?? new SessionGrants();
 
+  const typeOf = (name: string): AgentType | undefined =>
+    types.find((t) => t.name === name) ?? deps.proposed?.get(name)?.type;
+
   const run: SubagentRunner = async (opts, controls) => {
-    const type = types.find((t) => t.name === opts.type) ?? types[0];
+    const type = typeOf(opts.type) ?? types[0];
     if (!type) {
       return { report: "no sub-agent type available", toolUses: 0, stopReason: "end_turn" };
     }
@@ -434,10 +448,22 @@ export function createSubagentRunner(deps: SubagentDeps): {
       // A remote question's `parent` route reaches the parent through the
       // session's `notify` (docs/feat/a2a-client.md C6), the same seam as
       // `agent_notify`; absent (`subagents.twoWay` off) → no parent route.
-      const harnessDeps =
-        deps.harness !== undefined && deps.notify !== undefined && deps.harness.notify === undefined
-          ? { ...deps.harness, notify: deps.notify }
+      // A proposed agent (C11) runs on its own instance, beside the configured ones.
+      const added = deps.proposed?.get(type.name);
+      const withAdded =
+        added !== undefined && added.type === type && deps.harness !== undefined
+          ? {
+              ...deps.harness,
+              instances: new Map([
+                ...deps.harness.instances,
+                [type.harness.adapter, added.instance],
+              ]),
+            }
           : deps.harness;
+      const harnessDeps =
+        withAdded !== undefined && deps.notify !== undefined && withAdded.notify === undefined
+          ? { ...withAdded, notify: deps.notify }
+          : withAdded;
       return runHarnessChild(type, opts, controls, harnessDeps, {
         requester: childRequester ?? denyAll,
         ...(deps.hooks
@@ -726,7 +752,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
   };
 
   const readOnlyType = (name: string): boolean => {
-    const type = types.find((t) => t.name === name);
+    const type = typeOf(name);
     // A harness child changes nothing on this machine only when it is remote
     // (D3); a `write` run edits its worktree and runs commands.
     if (type?.harness !== undefined) {

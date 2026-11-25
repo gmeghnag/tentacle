@@ -35,6 +35,7 @@ export {
   fetchA2ACard,
 } from "./harness/a2a.ts";
 export { cardBlurb, reportHeader } from "./harness/a2a-map.ts";
+export * from "./harness/registry.ts";
 export * from "./hooks.ts";
 export * from "./round-plan.ts";
 export * from "./capabilities.ts";
