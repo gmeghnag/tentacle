@@ -1369,3 +1369,22 @@ Reviewer: fresh context, a different model family from the S5–S6b executor (de
 family as the S4 executor (claude-opus-5-5), so S4 blind spots may be shared.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Round 2
+
+**Verdict: PASS.** Scope: `git diff HEAD~1` (`85f3da1a`).
+
+- **Finding 1 fixed** (`workflow-run-graph.ts:308`, `from === lastVisited`). The round-1 repro now
+  gives `fix→review later`, `retry review later ↻ 0/1`, and `draft→review go`. Mutation: dropping the
+  guard makes 2 new tests fail ("only the leg the run walked…", "a retry in flight is go…").
+- **Finding 2 fixed** (`workflow-run-layout.ts`: `sideRowTaken` + `gapCurve`). In the round-1 repro,
+  `c→y` and `x→d` now bow inside the 216–244 gap and cross no pill. Mutation: forcing `sideRowTaken`
+  to return false makes "no edge passes through a pill that is not one of its two ends" fail.
+- **Regression attacks, nothing found:** the demo-note shape still takes the mockup curves (its
+  tests pass); a side→side arc stays within x ≤ 400 in the right margin; `sideRowTaken`'s row bands
+  include the source row (goto) and the target row (side-back), which both curves sweep.
+- **`-E` backups:** deleted in this commit.
+- **Gate:** the 5 touched test files → 92 pass / 0 fail. `bun run typecheck` and `bun run lint` are
+  clean (2433 files). Tree byte-clean after the mutations were reverted. Full `bun run check` not run.
+
+*— claude-opus-5-5, 2026-11-25*
