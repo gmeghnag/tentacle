@@ -1700,3 +1700,41 @@ reads the card text, not «(remote card not loaded)»; a slow/failing card still
 starts within the budget and reads «not loaded»; no `a2a` configured ⇒ no wait).
 **Deferred by the owner, NOT in this task:** a `/a2a` TUI command to reload the
 agents' cards on demand → `TODO.md`.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-25* (fresh context; diff `HEAD~1` = `f9807643`)
+
+**Verdict: PASS.** Finding 2 is fixed as the owner decided (c). Finding 1 is
+still fixed (Round 2). No new HIGH or MEDIUM.
+
+- **What landed:**
+  - `startA2ACards` (`packages/cli/src/wiring.ts:440-478`) reads the cards
+    once before the host, waits at most 2 s, and does nothing when no `a2a`
+    instance is configured.
+  - Only one refresh runs at a time, and a failed refresh keeps the last text.
+  - The worker (`worker.ts:308`, builds `:215-218`) and the persisting `serve`
+    (`serve.ts:768`, `:797-810`) freeze `cards()` into each build, then refresh
+    for the next one.
+  - The pod paths (`serve --stdio`/resident, `tunnelledAgent`) do not reach
+    `reloadedHost`, so a pod reads no card (§7 holds).
+  - The card read is still `configured` policy with no token.
+- **Mutations** (each restored, `cmp` byte-identical; `a2a-card-hosts.test.ts`):
+  | mutation | result |
+  |---|---|
+  | `serve` build ignores the snapshot (`harnesses: {}`) | red — 1 fail |
+  | worker: no `refresh()` after a build | red — 1 fail |
+  | a failed refresh drops the last text (`card ?? current` removed) | red — 1 fail (together with the previous row: 2 fail) |
+  | `heldChannel` drops frames that arrived before the handler | red — 2 fail (incl. «`initialize` while starting is answered») |
+- **Regressions:**
+  - The worker bootstrap now awaits before its `Connection`. `heldChannel`
+    subscribes in the same tick as the bootstrap, and the `started` guard is
+    unchanged.
+  - The 20 worker/serve/a2a/wiring cli files → **167 pass / 0 fail**.
+  - `bun run typecheck` clean; `bun run lint` clean (2557 files).
+- **Changelog / TODO:** the fragment now says the card text is read at
+  start-up (≤ 2 s) and refreshed for the next session, which is accurate. The
+  deferred `/a2a` reload is `TODO.md` `feat/a2a-card-reload`.
+- **Not run here:** the full parallel `bun run test` (the merge gate's), and
+  the simulator screenshots from a2c-6, which are still owed before any iOS
+  build.
