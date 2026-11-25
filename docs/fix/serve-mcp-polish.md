@@ -334,3 +334,39 @@ after this task.**
 **Still open (Review's lower-severity notes, deliberately untouched):** the replayed *task* start that
 answered `TASK_NOT_RECORDED`, `createdAt` drift on a replay, and an `attach` outliving the 15 s TTL
 deleting a newer memo — none is a finding of this round, none is fixed.
+
+### Fix round 2 (the gate's one failure)
+
+*— executing agent (gate fix), 2026-11-25*
+
+The gate after round 1 failed one test, in a file this task never touched:
+`packages/cli/test/args.test.ts` — "a one-shot prompt keeps its words verbatim" →
+`expect(inside.seen).toBe('MODEL "fix the --resume docs"')`, `Received: undefined`, **1.84 ms**.
+
+- **Root cause (verified, not inferred).** `undefined` plus ~1 ms means `main` returned before any
+  fetch: `loadConfig` refused the run (`[config error] … unknown profile`) and the prompt never
+  reached the fake model. Proven with a scratch probe calling `main` directly
+  (`.tentacle/tmp/serve-mcp-polish/probe/probe2.ts`): clean → `seen` set, 1324 ms; with a leaked
+  `TENTACLE_PROFILE=bogus` → `seen` **undefined**, **1 ms**, `[config error] … unknown profile "bogus"`.
+  A serial `bun test` runs every file in ONE process, so one `process.env`: `config-main.test.ts:394`
+  and `connect-theme.test.ts:58` both set `TENTACLE_PROFILE`, and the e2e describe saved/restored only
+  its own seven keys. The leaking file was not identified (the cli-only serial run does not
+  reproduce it: 3827 pass); the class is pinned instead.
+- **Fix (test-only, `packages/cli/test/args.test.ts`).** The suite now owns its env through one seam:
+  `withCleanEnv` (called by `firstRequest`, so EVERY command in the describe) drops every `TENTACLE_*`,
+  applies only this suite's six, and restores exactly what it found — the same strip
+  `scripts/test-env-guard.ts` does at process start, done per call. `TENTACLE_POD_NAMESPACE` no longer
+  needs its own `delete` (absent by construction). `expectPrompt` was added so a future no-request
+  failure prints the CLI's own line (`(no model request: exit 1) [config error] …`) instead of a bare
+  `undefined`.
+- **Red before green.** The new test "a config variable leaked by another file in the process cannot
+  break the prompt" was written first and run on the old helper: `Received: undefined`, `0.65 ms` — the
+  gate's exact signature. It sets `TENTACLE_PROFILE=leaked-by-another-file` around one `firstRequest`
+  and clears it in a `finally`. With `withCleanEnv` in: 22 pass / 0 fail, and 3× green also when
+  `config-main.test.ts` + `connect-theme.test.ts` run *before* it in one process (75 pass each run).
+- **Verification.** `bun test packages/cli/test/args.test.ts` → 22 pass / 0 fail; the leak-file trio
+  3× → 75 pass / 0 fail each; `bunx biome check packages/cli/test/args.test.ts` clean; the file
+  typechecks (a single-file `tsc -p` scratch config reports only the pre-existing
+  `packages/tui/src/markdown.ts` `marked-terminal` noise). The full gate was not run here — the
+  orchestrator runs it after this round. No production code changed: the branch's runtime diff is
+  round 1's.
