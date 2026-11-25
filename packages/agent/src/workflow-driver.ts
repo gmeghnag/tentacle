@@ -1150,6 +1150,8 @@ export class WorkflowDriver {
         {
           toolCallId: agentId,
           agent: { type: "workflow", description: `${spec.name}/approval`, id: agentId },
+          // A schedule's approval has no run (docs/fix/mobile-ask-surfaces.md D1).
+          workflow: { name: spec.name },
           signal: waited.signal,
         },
       );
@@ -1650,6 +1652,20 @@ export class WorkflowDriver {
   private stepRequester(run: Run, stepId: string | null): PermissionRequester {
     // `null`: the run's hash approval, asked before any step (its own id).
     const agentId = stepId !== null ? `${run.runId}.${stepId}` : run.runId;
+    // The ask's structured origin (docs/fix/mobile-ask-surfaces.md D1): only the
+    // driver knows the step's position, and it OVERRIDES whatever the options
+    // carried — a step's child sets no `workflow`, so it cannot claim another's.
+    // The hash approval is the run's own ask (`stepId` absent, no position).
+    const at = stepId !== null ? run.spec.steps.findIndex((s) => s.id === stepId) : -1;
+    const workflow: PermissionRequestOptions["workflow"] =
+      stepId === null
+        ? { name: run.spec.name, runId: run.runId }
+        : {
+            name: run.spec.name,
+            runId: run.runId,
+            stepId,
+            ...(at >= 0 ? { index: at, count: run.spec.steps.length } : {}),
+          };
     return async (
       req: PermissionRequest,
       options?: PermissionRequestOptions,
@@ -1677,6 +1693,8 @@ export class WorkflowDriver {
             description: `${run.spec.name}/${stepId ?? "approval"}`,
             id: agentId,
           },
+          // AFTER `agent`: the origin is the driver's, never a child's.
+          workflow,
           signal,
         });
       } finally {

@@ -1,4 +1,4 @@
-import type { AutoAcceptLink } from "@tentacle/client";
+import { type AskOrigin, type AutoAcceptLink, askOrigin } from "@tentacle/client";
 /**
  * The permission sheet (docs/feat/mobile-session-view.md 12c): the phone's
  * `PermissionRequester`. Pure and React-free (AGENTS §7) — the screen renders
@@ -100,11 +100,21 @@ export type SheetState =
        */
       readonly agentId: string | null;
       /**
+       * Who asked, from the structured fields only (`askOrigin`: workflow beats
+       * agent; nothing parsed out of text). Display only — it feeds no decision.
+       */
+      readonly origin?: AskOrigin;
+      /**
        * The OTHER devices this ask also reached (docs/feat/session-auto-accept.md
        * D7): each a bounded, sanitized label, this phone's own already dropped.
        * Empty when nobody else was asked. Display only; the first answer wins.
        */
       readonly alsoAsked: readonly string[];
+      /**
+       * The person swiped the sheet away (docs/fix/mobile-ask-surfaces.md): the ask
+       * is still pending and answerable, only its sheet is down (a banner shows).
+       */
+      readonly parked: boolean;
     }
   | {
       /**
@@ -157,6 +167,19 @@ export interface PermissionSheetDeps {
    * device, and the terminal's is the stricter one).
    */
   readonly autoAcceptsTurn?: (turnId: string) => boolean;
+  /**
+   * Was this daemon ask PARKED by the person before (a re-delivery after a
+   * detach, a session switch)? True → it opens parked, never as a surprise sheet
+   * (`ask-park.ts`'s `ASK_PARKS.has`). Absent → every ask opens presented.
+   */
+  readonly wasParked?: (requestId: string) => boolean;
+  /**
+   * A daemon ask was ANSWERED here (a tap, a card, a sent reply): its park note is
+   * spent. Never called on a withdrawal (a detach, `permission_resolved`, a
+   * dismiss) — a detach's replay must still find the note
+   * (docs/fix/mobile-ask-surfaces.md, Review S4–S7b finding 1).
+   */
+  readonly onSettled?: (requestId: string) => void;
 }
 
 /**
@@ -184,12 +207,21 @@ export interface PermissionSheet {
   setReplyText(text: string): void;
   /** Send the refusal with the person's words (`reject_once` + `message`). */
   sendReply(now?: number): "sent" | "ignored";
+  /**
+   * The person swiped the ask down: it stays pending (nothing resolved, nothing
+   * sent) and only its sheet goes. No-op unless an ask is on screen.
+   */
+  park(): void;
+  /** Bring a parked ask back (the banner was tapped). */
+  unpark(): void;
   /** The screen went away: withdraw the ask, send nothing (`reset()` on the broker). */
   dismiss(): void;
   /** Clear a returned reply (its notice was read and its text reused or dropped). */
   clearReturned(): void;
   /** Whether an ask is on screen. */
   readonly asking: boolean;
+  /** Asks waiting behind the one on screen (the banner's «+1»). */
+  readonly queued: number;
   /**
    * The session's shared auto-accept, for the screen's switch (`null`: this
    * computer does not share it — the switch is disabled with a reason).
@@ -324,12 +356,19 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
             }
           : null,
       agentId: entry.options?.agent?.id ?? null,
+      origin: askOrigin({
+        ...(entry.options?.agent === undefined ? {} : { agent: entry.options.agent }),
+        ...(entry.options?.workflow === undefined ? {} : { workflow: entry.options.workflow }),
+      }),
       // The daemon's list of who else was asked, minus this phone's own label
       // (docs/feat/session-auto-accept.md D7). Display only, and the labels come
       // from a daemon that may be a pod: bounded and stripped, never trusted.
       alsoAsked: otherDevicesAsked(entry.options?.askedOn, deps.ownHost?.()).map((label) =>
         stripAnsi(label).replace(/\s+/g, " ").trim().slice(0, 40),
       ),
+      parked:
+        entry.options?.requestId !== undefined &&
+        deps.wasParked?.(entry.options.requestId) === true,
     });
     if (armMs > 0 && entry === current) {
       // The window's END is a state change, not a guess: the sheet says so once,
@@ -354,6 +393,10 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     detach(entry);
     const next = queue.shift() ?? null;
     present(next);
+    const id = entry?.options?.requestId;
+    if (id !== undefined) {
+      deps.onSettled?.(id);
+    }
     entry?.resolve(response);
   }
 
@@ -398,6 +441,8 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
         if (wasCurrent) {
           const next = queue.shift() ?? null;
           present(next);
+        } else if (at >= 0) {
+          commit(state); // the queue shrank: the «+1» is re-read
         }
         resolve(DISMISSED);
       }
@@ -406,6 +451,7 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
         present(entry);
       } else {
         queue.push(entry);
+        commit(state); // the queue grew: the «+1» is re-read
       }
     });
 
@@ -458,6 +504,9 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
     requester,
     get asking() {
       return state.kind === "asking";
+    },
+    get queued() {
+      return queue.length;
     },
     get autoAccept() {
       return deps.autoAccept?.() ?? null;
@@ -544,6 +593,16 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
       // The person's words come back if they never reach the agent.
       settle({ ...response, onAnswerLost: returnReply });
       return "sent";
+    },
+    park() {
+      if (state.kind === "asking" && !state.parked) {
+        commit({ ...state, parked: true });
+      }
+    },
+    unpark() {
+      if (state.kind === "asking" && state.parked) {
+        commit({ ...state, parked: false });
+      }
     },
     dismiss() {
       // Everything the sheet holds is withdrawn: the ask on screen AND the ones

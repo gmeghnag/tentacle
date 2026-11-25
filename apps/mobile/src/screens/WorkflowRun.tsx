@@ -18,6 +18,7 @@
  * (§7: a `run` command is shown as it will run), and never truncated.
  */
 import type { WorkflowProjection, WorkflowStepView, WorkflowTimelineRow } from "@tentacle/client";
+import { originWords } from "@tentacle/client";
 import { summary, timeline } from "@tentacle/client";
 import type { JSX } from "react";
 import { useEffect, useRef } from "react";
@@ -27,6 +28,7 @@ import { elapsed } from "../activity.ts";
 import { GUTTER } from "../step-rail.ts";
 import { type Palette, size } from "../theme.ts";
 import { space, typography } from "../theme.ts";
+import { AskSlim } from "../ui/AskSlim.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { PillButton } from "../ui/PillButton.tsx";
@@ -36,7 +38,7 @@ import { WorkflowMark } from "../ui/WorkflowMark.tsx";
 import { EDGE_DIM, type EdgeLook, edgeLook, pillLook } from "../workflow-edge.ts";
 import { stateLook } from "../workflow-list.ts";
 import { MARKER_SIZE, markerFor } from "../workflow-marker.ts";
-import type { AskBar, CardAsk, RunMode, RunState } from "../workflow-run-controller.ts";
+import type { AskBar, RunMode, RunState } from "../workflow-run-controller.ts";
 import { type RunChip, type RunEdge, type RunNode, runLayout } from "../workflow-run-layout.ts";
 import type { NavVisit } from "../workflow-step-detail.ts";
 import { stepBody, stepNav, visitWord } from "../workflow-step-detail.ts";
@@ -50,7 +52,8 @@ export interface WorkflowRunScreenProps {
   readonly now: number;
   readonly onBack: () => void;
   readonly onMode: (mode: RunMode) => void;
-  readonly onAnswer: (stepId: string | null, optionId: "allow_once" | "reject_once") => void;
+  /** The slim row's `Review`: bring the parked ask's sheet back over this run. */
+  readonly onReviewAsk: () => void;
   readonly onStop: () => void;
   readonly onResume: () => void;
   readonly onRerun: (stepId: string) => void;
@@ -70,86 +73,66 @@ export interface WorkflowRunScreenProps {
   readonly width: number;
 }
 
-/** The ask VERBATIM, then Allow once / Deny (a workflow ask has no "always"). */
-function AskBlock({
-  palette,
-  ask,
-  testID,
-  onAnswer,
-}: {
-  readonly palette: Palette;
-  readonly ask: CardAsk;
-  readonly testID: string;
-  readonly onAnswer: (optionId: "allow_once" | "reject_once") => void;
-}): JSX.Element {
-  return (
-    <View testID={testID} style={styles.ask}>
-      <Text style={[styles.askTitle, { color: palette.label }]}>{ask.title}</Text>
-      <ScrollView style={[styles.detail, { backgroundColor: palette.code }]} nestedScrollEnabled>
-        <Text selectable style={[styles.mono, { color: palette.label }]}>
-          {ask.detail}
-        </Text>
-      </ScrollView>
-      <View style={styles.buttons}>
-        <PillButton
-          palette={palette}
-          testID={`${testID}-allow`}
-          label="Allow once"
-          onPress={() => onAnswer("allow_once")}
-        />
-        <PillButton
-          palette={palette}
-          testID={`${testID}-deny`}
-          kind="destructive"
-          label="Deny"
-          onPress={() => onAnswer("reject_once")}
-        />
-      </View>
-    </View>
-  );
-}
-
 /**
- * The bar pinned under the content (D3): the ask when it can be answered here,
- * otherwise the sentence that sends the person to the session. One bar, whatever
- * the view — an ask belongs to the RUN, not to a card that may be scrolled away.
+ * The slim row pinned under the content (docs/fix/mobile-ask-surfaces.md D6): the
+ * ask is never answered here and never drawn verbatim here — its sheet (the card
+ * with the command as it will run, §7) is presented over this run by the Session
+ * screen under it. The row is what stays when that sheet is parked (`Review`
+ * brings it back), when the ask is not this run's (Q1: `Open the session`) or
+ * when no sheet exists for the session. One row, whatever the view.
  */
 function AskPanel({
   palette,
   bar,
-  onAnswer,
+  onReviewAsk,
   onOpenSession,
 }: {
   readonly palette: Palette;
   readonly bar: AskBar;
-  readonly onAnswer: WorkflowRunScreenProps["onAnswer"];
+  readonly onReviewAsk: () => void;
   readonly onOpenSession: () => void;
 }): JSX.Element {
-  if (bar.kind === "ask") {
-    return (
-      <View testID="workflow-ask" style={[styles.bar, { borderTopColor: palette.sepChat }]}>
-        <AskBlock
-          palette={palette}
-          ask={bar.ask}
-          testID={bar.stepId === null ? "workflow-ask-run" : `workflow-ask-${bar.stepId}`}
-          onAnswer={(optionId) => onAnswer(bar.stepId, optionId)}
-        />
-      </View>
-    );
-  }
+  const row =
+    bar.kind === "ask"
+      ? {
+          title: bar.ask.title,
+          origin: bar.ask.origin === undefined ? "This run" : originWords(bar.ask.origin).lead,
+          action: "Review",
+          onPress: onReviewAsk,
+        }
+      : bar.kind === "foreign"
+        ? {
+            title: bar.ask.title,
+            origin:
+              bar.ask.origin === undefined ? "Another request" : originWords(bar.ask.origin).lead,
+            action: "Open the session",
+            onPress: onOpenSession,
+          }
+        : {
+            title: "Waiting for your answer",
+            origin: bar.stepId,
+            action: "Open the session",
+            onPress: onOpenSession,
+          };
   return (
     <View testID="workflow-ask" style={[styles.bar, { borderTopColor: palette.sepChat }]}>
-      <Pressable
-        testID={`workflow-open-session-${bar.stepId}`}
-        accessibilityRole="button"
-        onPress={onOpenSession}
-        style={styles.rowHead}
-      >
-        <Icon name="hand.raised" color={palette.accent} size={18} />
-        <Text style={[styles.openSession, { color: palette.accent }]}>
-          Open the session to answer it
-        </Text>
-      </Pressable>
+      <AskSlim
+        testID={
+          bar.kind === "ask"
+            ? bar.stepId === null
+              ? "workflow-ask-run"
+              : `workflow-ask-${bar.stepId}`
+            : bar.kind === "foreign"
+              ? "workflow-ask-foreign"
+              : `workflow-open-session-${bar.stepId}`
+        }
+        palette={palette}
+        title={row.title}
+        originShort={row.origin}
+        more={0}
+        actionLabel={row.action}
+        onPress={row.onPress}
+      />
     </View>
   );
 }
@@ -645,7 +628,7 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
         <AskPanel
           palette={palette}
           bar={state.askBar}
-          onAnswer={props.onAnswer}
+          onReviewAsk={props.onReviewAsk}
           onOpenSession={props.onOpenSession}
         />
       ) : null}
@@ -735,10 +718,4 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     backgroundColor: "transparent",
   },
-  openSession: { ...typography.body, flex: 1 },
-  ask: { gap: 8 },
-  askTitle: { ...typography.headline },
-  detail: { maxHeight: 220, borderRadius: 8, padding: 8 },
-  mono: { ...typography.mono },
-  buttons: { flexDirection: "row", gap: 8 },
 });

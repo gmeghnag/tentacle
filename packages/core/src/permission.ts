@@ -212,6 +212,17 @@ export interface PermissionRequestOptions {
   /** Which sub-agent asked (display only; set with `origin: "subagent"`). */
   readonly agent?: { readonly type: string; readonly description: string; readonly id?: string };
   /**
+   * The workflow step (or run / schedule approval) the ask belongs to
+   * (display only; `index` 0-based of `count` steps).
+   */
+  readonly workflow?: {
+    readonly name: string;
+    readonly runId?: string;
+    readonly stepId?: string;
+    readonly index?: number;
+    readonly count?: number;
+  };
+  /**
    * The daemon's id for this ask (process-internal, never on the wire — the
    * requester is handed it with the update it came from). A surface that
    * carries the prompt across a navigation uses it to tell one ask from the

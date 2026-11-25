@@ -831,6 +831,124 @@ describe("permission attribution at the laptop requester", () => {
     expect(seen[0]?.requestId).toBe("ask-7");
     client.close();
   });
+
+  test("a workflow step's request reaches the requester with its workflow origin", async () => {
+    // docs/fix/mobile-ask-surfaces.md Review finding 1. Mutation: drop
+    // `workflow` from RemoteClient's request options → red.
+    const [daemonCh, clientCh] = createChannelPair();
+    let seq = 0;
+    const notify = (update: unknown): void =>
+      daemon.notify(Notification.SessionUpdate, {
+        sessionId: "s1",
+        seq: ++seq,
+        mandatory: true,
+        update,
+      });
+    const daemon: RpcPeer = new RpcPeer(daemonCh, {
+      onRequest: async (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.Open) {
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
+        }
+        if (method === Method.Prompt) {
+          notify({ type: "turn_start", turnId: "T", prompt: "go" });
+          notify({
+            type: "permission_request",
+            requestId: "r-wf",
+            toolCallId: "t1",
+            tool: "shell",
+            title: "Run a shell command",
+            options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
+            agent: { type: "general", description: "wf/generate" },
+            workflow: { name: "release", runId: "run-1", stepId: "generate", index: 1, count: 3 },
+          });
+          return new Promise(() => {});
+        }
+        if (method === Method.ResolvePermission) {
+          return {};
+        }
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
+      },
+    });
+    const seen: PermissionRequestOptions[] = [];
+    const broker = new PermissionBroker(async (_req, options) => {
+      if (options) seen.push(options);
+      return { allowed: true, scope: "once" };
+    });
+    const client = new RemoteClient(clientCh, broker);
+    await client.initialize();
+    const session = client.newSession(undefined, "s1");
+    void drain(session.send("go"), []);
+    await until(() => seen.length === 1);
+    expect(seen[0]?.workflow).toEqual({
+      name: "release",
+      runId: "run-1",
+      stepId: "generate",
+      index: 1,
+      count: 3,
+    });
+    expect(seen[0]?.agent).toEqual({ type: "general", description: "wf/generate" });
+    client.close();
+  });
+
+  test("a request without a workflow hands the requester no workflow", async () => {
+    // The absent case stays absent (no empty object invented on the way).
+    const [daemonCh, clientCh] = createChannelPair();
+    let seq = 0;
+    const notify = (update: unknown): void =>
+      daemon.notify(Notification.SessionUpdate, {
+        sessionId: "s1",
+        seq: ++seq,
+        mandatory: true,
+        update,
+      });
+    const daemon: RpcPeer = new RpcPeer(daemonCh, {
+      onRequest: async (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.Open) {
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
+        }
+        if (method === Method.Prompt) {
+          notify({ type: "turn_start", turnId: "T", prompt: "go" });
+          notify({
+            type: "permission_request",
+            requestId: "r-plain",
+            toolCallId: "t1",
+            tool: "shell",
+            title: "Run a shell command",
+            options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
+          });
+          return new Promise(() => {});
+        }
+        if (method === Method.ResolvePermission) {
+          return {};
+        }
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
+      },
+    });
+    const seen: PermissionRequestOptions[] = [];
+    const broker = new PermissionBroker(async (_req, options) => {
+      if (options) seen.push(options);
+      return { allowed: true, scope: "once" };
+    });
+    const client = new RemoteClient(clientCh, broker);
+    await client.initialize();
+    const session = client.newSession(undefined, "s1");
+    void drain(session.send("go"), []);
+    await until(() => seen.length === 1);
+    expect(seen[0] !== undefined && "workflow" in seen[0]).toBe(false);
+    client.close();
+  });
 });
 
 describe("the bracket property, pinned (T-B0)", () => {

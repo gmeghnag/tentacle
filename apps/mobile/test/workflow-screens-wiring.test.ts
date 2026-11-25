@@ -45,19 +45,23 @@ describe("two plain PUSH screens (never the Sheet route, never a Modal)", () => 
   });
 });
 
-describe("the approve card shows the ask VERBATIM (§7)", () => {
-  test("the ask's detail is never cut to a line count", () => {
-    const ask = between(RUN, "function AskBlock", "\nfunction ");
-    expect(ask).toContain("{ask.detail}");
-    expect(ask).not.toContain("numberOfLines");
-    // Scrollable instead of truncated.
-    expect(ask).toContain("<ScrollView");
+describe("the run screen holds only the slim ask row (docs/fix/mobile-ask-surfaces.md D6)", () => {
+  test("no inline answer on the run screen: the sheet over the run is the verbatim surface", () => {
+    expect(RUN).not.toContain("AskBlock");
+    expect(RUN).not.toContain("onAnswer");
+    expect(RUN).not.toContain("allow_once");
+    expect(RUN).not.toContain("allow_always");
+    const panel = between(RUN, "function AskPanel", "\nfunction ");
+    expect(panel).toContain("<AskSlim");
+    // Own ask (parked): Review. Foreign ask / no sheet: Open the session.
+    expect(panel).toContain('"Review"');
+    expect(panel).toContain('"Open the session"');
   });
 
-  test("Allow once and Deny — no `allow_always` (a workflow approval is ONE decision)", () => {
-    expect(RUN).toContain('onAnswer("allow_once")');
-    expect(RUN).toContain('onAnswer("reject_once")');
-    expect(RUN).not.toContain("allow_always");
+  test("the Session screen presents over its own run, and only that run's ask", () => {
+    expect(SESSION).toContain("ownRunTopId(");
+    expect(SESSION).toContain("sessionInFront(focused, sheetStack, topRunId !== null)");
+    expect(SESSION).toContain("askPresentable(");
   });
 });
 
@@ -134,11 +138,10 @@ describe("S6b · the run screen draws the shared projection, never a guess", () 
     // The bar is handed the ask the controller paired, by its own pure selector.
     expect(RUN).toContain("state.askBar");
     expect(RUNCTRL).toContain("askBarFor(");
-    // ONE answer surface: no step has an inline ask any more, so an ask can never
-    // be scrolled away from the button that answers it.
-    expect(RUN.match(/<AskBlock/g) ?? []).toHaveLength(1);
+    // ONE ask row, never one per card…
+    expect(RUN.match(/<AskSlim/g) ?? []).toHaveLength(1);
     // …and it is RENDERED outside the screen's scroll view: the bar mounts after
-    // it closes. (The LAST `</ScrollView>` — `AskBlock` has one of its own above.)
+    // it closes.
     expect(RUN.indexOf("<AskPanel")).toBeGreaterThan(RUN.lastIndexOf("</ScrollView>"));
   });
 

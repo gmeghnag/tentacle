@@ -80,6 +80,22 @@ export const PermissionRequestUpdateSchema = z.object({
     .object({ type: z.string(), description: z.string(), id: z.string().optional() })
     .optional(),
   /**
+   * The workflow step (or run / schedule approval) this ask belongs to: its
+   * name, run, step and position (`index` 0-based, of `count` steps). Display
+   * only, from a daemon that may be a pod: no `.max()`, no `.int()`, so a bad
+   * value never makes this blocking update unparseable — a client validates
+   * and bounds it. Absent (an older daemon, or not a workflow's ask) → none.
+   */
+  workflow: z
+    .object({
+      name: z.string(),
+      runId: z.string().optional(),
+      stepId: z.string().optional(),
+      index: z.number().optional(),
+      count: z.number().optional(),
+    })
+    .optional(),
+  /**
    * The turn that spawned a BACKGROUND child, whose ask may arrive outside any
    * turn (the client attributes it to this one). No `.max()`, as `agent`: this
    * update is blocking, and only an equality test reads it.

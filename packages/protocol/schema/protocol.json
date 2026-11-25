@@ -3659,6 +3659,28 @@
         "type": {
           "const": "permission_request",
           "type": "string"
+        },
+        "workflow": {
+          "additionalProperties": true,
+          "properties": {
+            "count": {
+              "type": "number"
+            },
+            "index": {
+              "type": "number"
+            },
+            "name": {
+              "type": "string"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "stepId": {
+              "type": "string"
+            }
+          },
+          "required": ["name"],
+          "type": "object"
         }
       },
       "required": ["options", "requestId", "title", "tool", "toolCallId", "type"],
@@ -5204,6 +5226,10 @@
         "archived": {
           "type": "boolean"
         },
+        "asks": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "attached": {
           "minimum": 0,
           "type": "integer"
@@ -5243,6 +5269,10 @@
           "type": "string"
         },
         "updatedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workflows": {
           "minimum": 0,
           "type": "integer"
         }

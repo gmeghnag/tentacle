@@ -74,6 +74,51 @@ const SCREENS = {
     `<div class="k-scroll">${K.stepRail([{ node: "pending", name: "Shell", subtitle: "rm -rf dist" }]).html}</div>`,
     K.permissionSheet({ title: "Run a command?", tool: "shell", detail: "rm -rf dist && bun run build" }),
   ],
+  "ask: the card, for each origin (D4)": () => [
+    K.askSheet({
+      detent: "ask",
+      inner: K.askCard({
+        origin: { kind: "main", lead: "Main agent", age: "12s" },
+        title: "Run a shell command",
+        command: "cd rassegna/raw && python3 -c \"import xml.etree.ElementTree as ET\"\nfor f in ['bbc.xml','guardian.xml']:\n    print(f)\nprint('done')\nexit 0",
+        menu: ["Always allow `cd rassegna/raw`", "Deny with a reply…"],
+      }).html,
+    }),
+    K.askSheet({
+      detent: "ask",
+      inner: K.askCard({
+        origin: { kind: "subagent", lead: "Sub-agent explore", rest: "Find where the feeds are parsed", age: "4s" },
+        title: "Run a shell command",
+        command: 'rg -n "ET.parse|findall" rassegna/ --type py',
+      }).html,
+    }),
+    K.askSheet({
+      detent: "ask",
+      inner: K.askCard({
+        origin: { kind: "workflow", lead: "rassegna-stampa", rest: "step generate · 2 of 5", age: "43s" },
+        title: "Run a shell command",
+        command: 'rg -n "ET.parse|findall" rassegna/ --type py',
+        armed: false,
+      }).html,
+    }),
+  ],
+  "ask: the sheet detents (peek never dims) + the slim row (D4)": () => [
+    K.askSheet({
+      detent: "peek",
+      inner: K.askSlim({ origin: { short: "rassegna-stampa · generate" }, title: "Run a shell command", go: "Drag up" }).html,
+    }),
+    K.askSheet({
+      detent: "large",
+      inner: K.askCard({
+        origin: { kind: "workflow", lead: "rassegna-stampa", rest: "step generate · 2 of 5" },
+        title: "Run a shell command",
+        command: "a\nb\nc\nd\ne\nf",
+        expanded: true,
+      }).html,
+    }),
+    K.askSlim({ origin: { short: "Main agent" }, title: "Run a shell command", go: "Open" }),
+    K.askSlim({ origin: { short: "Sub-agent explore", more: 1 }, title: "Run a shell command" }),
+  ],
   "computers list (bands, square) + toast + banner": () => [
     `<div class="k-header"><span class="k-t-large-title">Computers</span></div>`,
     K.banner({ text: "Offline — showing the last saved sessions" }),
