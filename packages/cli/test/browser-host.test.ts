@@ -140,6 +140,35 @@ describe("browser hub: ops and ownership (D1)", () => {
     expect(c.hub.ownership.isHandedOver(7)).toBe(true);
   });
 
+  test("a probe on a handed-over tab says so; an action spends it; close is ownership-checked (B5)", async () => {
+    const c = fakeChrome();
+    await c.hub.start();
+    const l = link("d1");
+    const claim = l.call({ op: "claim", sessionUid: "s1", title: "T" });
+    await until(() => c.sent.length === 1);
+    c.reply({ id: c.sent[0]?.id, ok: true, result: {} });
+    await claim;
+    c.reply({ event: "handover", sessionUid: "s1", tab: 7 });
+    await until(() => c.hub.ownership.isHandedOver(7));
+
+    const probe = l.call({ op: "click", sessionUid: "s1", tab: 7, ref: "e1", probe: true });
+    await until(() => c.sent.length === 2);
+    c.reply({ id: c.sent[1]?.id, ok: true, result: { facts: { tag: "a" } } });
+    expect(await probe).toEqual({ facts: { tag: "a" }, handedOver: true });
+    expect(c.hub.ownership.isHandedOver(7)).toBe(true);
+
+    const act = l.call({ op: "click", sessionUid: "s1", tab: 7, ref: "e1" });
+    await until(() => c.sent.length === 3);
+    c.reply({ id: c.sent[2]?.id, ok: true, result: { clicked: true } });
+    await act;
+    expect(c.hub.ownership.isHandedOver(7)).toBe(false);
+
+    await expect(l.call({ op: "close", sessionUid: "s1", tab: 9 })).rejects.toThrow(
+      /not one of this session's tabs/,
+    );
+    expect(c.sent.length).toBe(3);
+  });
+
   test("tab_closed from Chrome drops ownership and reaches the daemons", async () => {
     const c = fakeChrome();
     await c.hub.start();

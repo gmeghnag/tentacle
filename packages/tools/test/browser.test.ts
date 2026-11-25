@@ -7,6 +7,7 @@ import {
   type ToolImagePut,
   type ToolImageStore,
   type ToolResult,
+  allowAll,
   browserDefaultOff,
 } from "@tentacle/core";
 import { BROWSER_TOOL_NAMES, type BrowserBackend, createBrowserToolset } from "../src/browser.ts";
@@ -73,7 +74,8 @@ function tools(
     ...(extra.textNet ? { textNet: extra.textNet } : {}),
     ...(extra.launchWaitMs !== undefined ? { launchWaitMs: extra.launchWaitMs } : {}),
   });
-  const list = set.tools({ maxEdge: 1568, maxImageBytes: 5_000_000 });
+  // B5: an open of a new domain asks; these B4 tests are not about that ask.
+  const list = set.tools({ maxEdge: 1568, maxImageBytes: 5_000_000, ask: allowAll });
   const by = (name: string): Tool<unknown> => {
     const t = list.find((x) => x.name === name);
     if (t === undefined) throw new Error(`no ${name}`);
@@ -85,11 +87,10 @@ function tools(
 }
 
 describe("browser tools: the group and its default", () => {
-  test("the core group lists exactly the six tools; only `open` asks", () => {
+  test("the core group lists exactly the tools", () => {
     const { list } = tools(fakeBackend(() => ({})).backend);
     expect(TOOL_GROUPS.browser).toEqual([...BROWSER_TOOL_NAMES]);
     expect(list.map((t) => t.name)).toEqual([...BROWSER_TOOL_NAMES]);
-    expect(list.filter((t) => t.permission === "ask").map((t) => t.name)).toEqual(["browser_open"]);
   });
 
   test("off by default: every member, unless tools.enabled names the group or the tool", () => {

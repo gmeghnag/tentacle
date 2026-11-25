@@ -1150,6 +1150,9 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     for (const tool of options.browser.tools({
       maxEdge: imageFileMaxEdge(config.provider),
       maxImageBytes: imageLimitValues.maxBytes,
+      // B5: an acting tool asks `browser_action` through the session's ONE
+      // broker — the same one the agent's gate uses (AGENTS §7 single broker).
+      ask: (req, opts) => permissions.request(req, opts),
     })) {
       tools.register(tool);
     }

@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +15,7 @@ import {
   BROWSER_HOST_NAME,
   BROWSER_HOST_SUBCOMMAND,
 } from "@tentacle/browser";
+import { EXTENSION_ASSETS } from "../src/browser-extension-assets.ts";
 import {
   browserCommand,
   installBrowser,
@@ -43,9 +52,20 @@ describe("browser install copies the extension", () => {
     expect(existsSync(dest)).toBe(false);
   });
 
-  test("sources missing: says so, still writes the host side", () => {
-    const lines = installBrowser({ ...env, extensionSrc: join(root, "nope") });
-    expect(lines.join("\n")).toContain("sources not found");
+  test("B5: the EMBEDDED table holds every extension file, byte-equal — install needs no checkout", () => {
+    const app = join(import.meta.dir, "..", "..", "..", "apps", "browser-extension");
+    const onDisk = [
+      "manifest.json",
+      ...readdirSync(join(app, "src")).map((f) => `src/${f}`),
+    ].sort();
+    expect(Object.keys(EXTENSION_ASSETS).sort()).toEqual(onDisk);
+    for (const rel of onDisk) {
+      expect(EXTENSION_ASSETS[rel]).toBe(readFileSync(join(app, rel), "utf8"));
+    }
+    // Install writes the table, whatever is (not) next to this build.
+    installBrowser({ ...env, extensionAssets: { "manifest.json": "{}", "src/a.js": "x" } });
+    const dest = join(env.configDir, "browser", "extension");
+    expect(readFileSync(join(dest, "src", "a.js"), "utf8")).toBe("x");
     expect(existsSync(wrapperPath(env.configDir))).toBe(true);
   });
 });

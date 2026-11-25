@@ -33,6 +33,10 @@ export const TOOL_GROUPS: Readonly<Record<string, readonly string[]>> = {
     "browser_shot",
     "browser_net",
     "browser_console",
+    // B5: acting (each asks the user itself when the action is consequential).
+    "browser_click",
+    "browser_type",
+    "browser_close",
   ],
 };
 
