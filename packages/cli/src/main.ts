@@ -54,6 +54,9 @@ import {
 import { connectTui } from "./connect.ts";
 import { logDaemonError } from "./daemon-log.ts";
 import "./pdf-worker-url.ts";
+import { BROWSER_HOST_SUBCOMMAND } from "@tentacle/browser";
+import { browserHostMain } from "./browser-host.ts";
+import { browserCommand } from "./browser-install.ts";
 import { detachedRunOf } from "./detached-run-of.ts";
 import { devicesCommand, resetCommand, revokeCommand } from "./devices-cmd.ts";
 import { type EngineHost, type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
@@ -96,6 +99,7 @@ import {
   modeUsesModel,
   parseArgs,
   parseServeLimits,
+  resolveA2AToken,
   resolveRunPrompt,
   resolveTls,
   resolveToken,
@@ -137,6 +141,7 @@ import { logsCommand } from "./logs-cmd.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { pairCommand } from "./pair.ts";
 import { POD_DAEMON_MODES, runResidentMode } from "./pod-resident.ts";
+import { selfCommand } from "./pod-resident.ts";
 import { failedLine, notListedLine } from "./pod-stderr-log.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
 import { AnswerSplit } from "./render.ts";
@@ -151,6 +156,7 @@ import {
   runStem,
 } from "./run-state.ts";
 import { localAutoAccept, styleInfo } from "./run-ui.ts";
+import { type ServeA2AOptions, describeA2A, parseA2AAsks } from "./serve-a2a.ts";
 import { serveModelNotice } from "./serve-model-notice.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { autoAcceptOf, routingAutoAccept, seedAutoAcceptOf } from "./session-auto-accept.ts";
@@ -417,6 +423,12 @@ Remote control:
                       [--session-ttl 24h|never] [--session-admin-cap DUR] [--max-sessions 64]
                       [--max-detached-sessions 16] [--ws-idle-timeout 60s]
                       [--push-grace 30]
+                      [--a2a-token T|--a2a-token-command CMD [--a2a-asks owner|both]
+                       [--a2a-workflows]]
+  --a2a-token turns on A2A (POST /a2a + the public /.well-known/agent-card.json) with
+  its OWN bearer token, never --token. --a2a-asks both lets the caller answer
+  its tasks' tool asks (the owner still can; file approvals stay owner-only);
+  --a2a-workflows lets it start workflow runs (default off).
   --push-grace <seconds> is how long a permission request waits for a phone
   before it is pushed to it (0 = at once; default push.graceSeconds, 30).
   With paired devices, serve dials OUT to the mobile relay (relay.tentacle.so by
@@ -703,6 +715,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     await deleteContainerFromEnv();
     return 0;
   }
+  // The browser hub Chrome spawns through the native-messaging wrapper
+  // (docs/feat/browser-inspect.md §1): stdio is Chrome's, never the terminal's.
+  if (args[0] === BROWSER_HOST_SUBCOMMAND) {
+    return browserHostMain(args[1], configDirFromEnv(process.env), {
+      stdin: process.stdin as AsyncIterable<Uint8Array>,
+      stdout: (bytes) => void process.stdout.write(bytes),
+      err,
+    });
+  }
   // The relay of a detached run (`relay.ts`): its spec comes through the env.
   if (args[0] === RELAY_SUBCOMMAND) {
     return relayMain(process.env, err);
@@ -960,6 +981,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     });
   }
 
+  // `tentacle browser install|status|uninstall` (docs/feat/browser-inspect.md B2).
+  if (mode === "browser") {
+    return browserCommand(
+      parsed.positional,
+      { configDir: config.configDir, home: homedir(), self: selfCommand() },
+      { out, err },
+    );
+  }
+
   // `tentacle voice setup|status` (docs/feat/voice-dictation.md §6): the local
   // helper only — no model, no daemon, no session (`usesModel` is false, so no
   // `apiKeyCommand` runs). Ink is not mounted here, so the helper keeps the
@@ -1161,9 +1191,19 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     let token: string | undefined;
     let limits: ServeLimits;
+    let a2a: ServeA2AOptions | undefined;
     try {
       limits = parseServeLimits({ flags, bools });
       token = await resolveToken(flags);
+      const a2aToken = await resolveA2AToken(flags);
+      const a2aAsks = parseA2AAsks(flags.get("a2a-asks"));
+      if (a2aToken === undefined) {
+        if (flags.has("a2a-asks") || bools.has("a2a-workflows")) {
+          throw new Error("--a2a-asks / --a2a-workflows need --a2a-token or --a2a-token-command");
+        }
+      } else {
+        a2a = { token: a2aToken, asks: a2aAsks, workflows: bools.has("a2a-workflows") };
+      }
     } catch (error) {
       err(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
@@ -1189,12 +1229,18 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           ...(bools.has("no-relay") ? { noRelay: true } : {}),
         },
         ...(token ? { token } : {}),
+        ...(a2a ? { a2a } : {}),
         ...(tls ? { tls } : {}),
         onAudit: (line) => err(`[daemon] ${line}\n`),
         onError: (error) => err(`[daemon] error: ${error.message}\n`),
         onNotice: (line) => err(`[daemon] ${line}\n`),
       });
       err(`daemon listening on ${server.url}\n`);
+      if (a2a) {
+        err(
+          `A2A on ${server.url.replace(/^ws/, "http").replace(/\/+$/, "")}/a2a (${describeA2A(a2a)})\n`,
+        );
+      }
       // `serve`'s own config decides its titles; no Ink here, so its log line.
       const titleNotice = titleConfigNotice(config);
       if (titleNotice) {

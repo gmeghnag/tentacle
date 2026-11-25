@@ -101,6 +101,17 @@ export interface TaskToolOptions {
    * the text is exactly what it was before the flag existed.
    */
   readonly twoWay?: boolean;
+  /**
+   * Types run by another agent harness (docs/feat/subagent-harness-runners.md
+   * D3): for these the `model` argument is FREE — passed to the harness
+   * verbatim, never checked against `models` — and only shape-checked by
+   * `isModel`. `note` says how it works. Absent → no harness type.
+   */
+  readonly harnessModels?: {
+    readonly types: readonly string[];
+    readonly note: string;
+    readonly isModel: (model: string) => boolean;
+  };
 }
 
 const NEUTRAL_DESCRIPTION =
@@ -324,6 +335,17 @@ export function createTaskTool(
 
   const models = options.models ?? [];
   const modelNames = models.map((m) => m.name);
+  const harness = options.harnessModels;
+  const harnessTypes = (harness?.types ?? []).filter((t) => names.includes(t));
+  const offerModel = models.length > 0 || harnessTypes.length > 0;
+  const modelText = [
+    ...(models.length > 0
+      ? [
+          `Which model runs the sub-agent: one of ${modelNames.join(", ")}. Omit it for the type's own model.`,
+        ]
+      : []),
+    ...(harness !== undefined && harnessTypes.length > 0 ? [`The model, ${harness.note}.`] : []),
+  ].join(" ");
   const baseSchema = z.object({
     description: z.string().min(1).describe("A short (3-5 word) description of the task"),
     prompt: z.string().min(1).describe("The full task for the sub-agent to perform"),
@@ -337,16 +359,7 @@ export function createTaskTool(
   // stray one is stripped like any unknown argument.
   const inputSchema = z.object({
     ...baseSchema.shape,
-    ...(models.length > 0
-      ? {
-          model: z
-            .string()
-            .optional()
-            .describe(
-              `Which model runs the sub-agent: one of ${modelNames.join(", ")}. Omit it for the type's own model.`,
-            ),
-        }
-      : {}),
+    ...(offerModel ? { model: z.string().optional().describe(modelText) } : {}),
     ...(options.background
       ? {
           background: z
@@ -378,8 +391,22 @@ export function createTaskTool(
     async execute(input, ctx): Promise<ToolResult> {
       const args = input as z.infer<typeof baseSchema> & { model?: string; background?: boolean };
       const type = resolveType(args.subagent_type);
-      const model = models.length > 0 ? args.model : undefined;
-      if (model !== undefined && !modelNames.includes(model)) {
+      const model = offerModel ? args.model : undefined;
+      if (model !== undefined && harnessTypes.includes(type)) {
+        // A harness's own model string (D3): one argv element, never a flag.
+        if (!harness?.isModel(model)) {
+          return {
+            content: `invalid model ${JSON.stringify(model.slice(0, 64))} for ${type} — an alias or a model id (letters, digits, . _ : - [ ]; at most 64; not starting with -), or omit model`,
+            isError: true,
+          };
+        }
+      } else if (model !== undefined && !modelNames.includes(model)) {
+        if (models.length === 0) {
+          return {
+            content: `model is accepted only for ${harnessTypes.join(", ")} — omit it for ${type}`,
+            isError: true,
+          };
+        }
         // No child starts: the agent learns the allowed names and may retry.
         return {
           content: `unknown model ${JSON.stringify(model.slice(0, 64))} for agent_task — use one of: ${modelNames.join(", ")}, or omit model`,

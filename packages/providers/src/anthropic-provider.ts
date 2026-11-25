@@ -9,6 +9,7 @@ import type {
   Usage,
 } from "@tentacle/core";
 import { tokenCount, wireArguments } from "@tentacle/core";
+import { applyCacheControl } from "./anthropic-cache.ts";
 import {
   type ImageBuildOptions,
   NO_IMAGES,
@@ -174,18 +175,14 @@ export class AnthropicProvider implements ModelProvider {
       headers["x-api-key"] = this.config.apiKey;
     }
 
-    const init: RequestInit = {
-      method: "POST",
-      headers,
-      body: JSON.stringify(
-        buildPayload(
-          this.config.model,
-          request,
-          this.config.maxTokens,
-          await this.imageOptions(request),
-        ),
-      ),
-    };
+    const payload = buildPayload(
+      this.config.model,
+      request,
+      this.config.maxTokens,
+      await this.imageOptions(request),
+    );
+    applyCacheControl(payload);
+    const init: RequestInit = { method: "POST", headers, body: JSON.stringify(payload) };
     if (request.signal) {
       init.signal = request.signal;
     }

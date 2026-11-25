@@ -51,4 +51,5 @@ export * from "./workflow-draft.ts";
 export * from "./workflow-templates.ts";
 export * from "./workflow-machine.ts";
 export * from "./workflow-ledger.ts";
+export * from "./work-unit.ts";
 export * from "./capabilities.ts";

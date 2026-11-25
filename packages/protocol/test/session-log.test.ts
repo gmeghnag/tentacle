@@ -153,6 +153,8 @@ describe("session/log schemas", () => {
       workflow_start: false,
       workflow_step: false,
       workflow_end: false,
+      // docs/feat/a2a.md, Unification §2: a carried ended unit, not critical.
+      unit_end: false,
     });
     for (const option of KnownLogEntrySchema.options) {
       const type = option.shape.type.value as keyof typeof LOG_ENTRY_CRITICAL;

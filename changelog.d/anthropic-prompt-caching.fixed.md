@@ -1,0 +1,1 @@
+- **Anthropic prompt caching.** The Anthropic provider now sends `cache_control` breakpoints (end of tools+system, and the last message), so the ~20k-token fixed prefix is read from the cache (0.1× price) from the second request on instead of being re-billed in full every round (~88% cheaper per follow-up request on Haiku 5.5).
