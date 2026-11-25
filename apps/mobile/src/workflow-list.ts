@@ -23,14 +23,29 @@
 import type { WorkflowListRow, WorkflowRow, WorkflowStepRow } from "@tentacle/protocol";
 import { elapsed, oneLine } from "./activity.ts";
 
-/** The six looks the mockups draw. A known wire state maps onto one; an unknown one onto none. */
-export type WorkflowTone = "ok" | "error" | "running" | "waiting" | "approval" | "stopped";
+/** The seven looks the mockups draw. A known wire state maps onto one; an unknown one onto none. */
+export type WorkflowTone =
+  | "ok"
+  | "error"
+  | "running"
+  | "waiting"
+  | "approval"
+  | "stopped"
+  /** `pending`: not started. Its own tone since S7 — see the comment below. */
+  | "pending";
 
 /**
  * The wire's states, as the daemon writes them (`WorkflowStepRowSchema`'s
  * comment): `pending | running | waiting | needs-approval | ok | error | stopped`.
  * `pending` and `waiting` share the mockup's open ring — the WORD tells them
  * apart, which is the owner's rule (shape + glyph + word).
+ *
+ * `pending` is NOT `waiting` (docs/fix/workflows-ux.md S7, D2): whether a
+ * not-started step will still run ("not yet") or never will ("not run") is the
+ * RUN's answer, which `runProjection` gives and a bare state word cannot. The
+ * list also counted a `pending` run as "waiting on you" while it shared the tone,
+ * which it never was. So it has its own tone, its own glyph (`circle.dashed`'s
+ * dotted disc) and its own honest word.
  */
 const TONE_OF: Readonly<Record<string, WorkflowTone>> = {
   ok: "ok",
@@ -39,7 +54,7 @@ const TONE_OF: Readonly<Record<string, WorkflowTone>> = {
   waiting: "waiting",
   "needs-approval": "approval",
   stopped: "stopped",
-  pending: "waiting",
+  pending: "pending",
 };
 
 /** The glyph a tone is drawn with (the mockup's `G`, one letter per state). */
@@ -50,6 +65,8 @@ const GLYPH_OF: Readonly<Record<WorkflowTone, string>> = {
   waiting: "○",
   approval: "?",
   stopped: "‖",
+  // The owner's `circle.dashed`: a dotted disc, distinct from `waiting`'s solid ring.
+  pending: "◌",
 };
 
 /** The word a tone is SAID with (the mockup's `W`): never the wire's enum-ish token. */
@@ -60,6 +77,9 @@ const WORD_OF: Readonly<Record<WorkflowTone, string>> = {
   waiting: "waiting",
   approval: "needs approval",
   stopped: "stopped",
+  // Neither "not yet" (a promise the state word cannot make) nor "not run" (the
+  // run's verdict): the bare wire state only says the step has not started.
+  pending: "not started",
 };
 
 /** How one state reads: its tone (null when the wire sent a word we do not know), glyph and word. */

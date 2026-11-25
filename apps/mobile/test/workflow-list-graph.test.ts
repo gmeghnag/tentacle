@@ -138,7 +138,8 @@ describe("an Elenco row (mockup 1)", () => {
 
   test("the step strip exists only where the shape carries steps, and blinks only where it runs", () => {
     const full = elencoRow(fromSessionRun(mockRun()), 1_000);
-    expect(full.strip?.map((c) => c.glyph).join("")).toBe("✓✓✗▸○○?");
+    // S7: `gate` is `pending` — its own dotted `◌`, no longer `waiting`'s `○`.
+    expect(full.strip?.map((c) => c.glyph).join("")).toBe("✓✓✗▸○◌?");
     expect(full.strip?.filter((c) => c.live)).toHaveLength(1);
     // The summary shape has no steps at all: the row says nothing rather than
     // drawing seven blank cells.

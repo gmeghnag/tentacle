@@ -423,7 +423,7 @@ const RUNTIMES = createSessionRuntimes<RemoteClient, SendableHandle>({
  */
 const SESSION_SCREENS = new Map<string, SessionScreenController>();
 
-/** The run screen's graph ⇄ cards choice, kept for the app's life (D4). */
+/** The run screen's graph ⇄ list choice, kept for the app's life (D4). */
 let WORKFLOW_RUN_MODE: RunMode = "graph";
 
 /**
@@ -2213,7 +2213,7 @@ function WorkflowRunRoute({
         onResume={() => void controller.resume()}
         onRerun={(stepId) => void controller.rerun(stepId)}
         onOpenSession={onOpenSession}
-        onOpenStep={(stepId) => controller.openStep(stepId)}
+        onOpenStep={(stepId, visit) => controller.openStep(stepId, visit)}
         onCloseStep={() => controller.closeStep()}
         reduceMotion={flags.reduceMotion}
         width={pageWidth}

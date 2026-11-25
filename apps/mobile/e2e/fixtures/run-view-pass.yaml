@@ -1,0 +1,16 @@
+schemaVersion: 1
+name: run-view-pass
+version: 1
+description: flow 45's run ① (docs/fix/workflows-ux.md S7) — review passes first time, so fix never runs
+steps:
+  - id: collect
+    run: echo collected
+  - id: review
+    run: echo reviewed
+    on_fail: { goto: fix, max: 2 }
+    next: archive
+  - id: fix
+    run: echo fixed
+    next: review
+  - id: archive
+    run: echo archived

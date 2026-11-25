@@ -1,0 +1,91 @@
+appId: so.tentacle.app
+---
+# 45-workflow-run-view (docs/fix/workflows-ux.md S7): a FINISHED run read on the
+# phone. Run ① (`run-view-pass`: review passes first time) is seeded by the
+# harness (`workflowRunsOf`) on this flow's own session, with run ②
+# (`run-view-loop`: review fails once, fix runs) beside it.
+#
+# Covered: ① the graph (fix drawn, not chained as "waiting"); fix's detail says
+# "Not run — review passed…" with no read sent (a "no longer available" here
+# was defect 2); the detail's nav bar (`‹ run`, `N of M`) under the status bar
+# (the shots); the prev/next bar ending on «End of run» (fix is B's last row);
+# the graph ⇄ list toggle and the B rail's «Not run» row.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${RUNVIEW_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${RUNVIEW_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "workflows"
+- tapOn:
+    id: "hub-item-workflows"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-runs"
+    timeout: 10000
+- tapOn:
+    text: "run-view-pass"
+# ① as a graph: every step is a pill, fix included.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-graph"
+    timeout: 15000
+- assertVisible:
+    id: "workflow-summary"
+- assertVisible:
+    id: "workflow-node-fix"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "45-run-graph"
+# fix never ran: its detail says why, in words.
+- tapOn:
+    id: "workflow-node-fix"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-step-say"
+    timeout: 10000
+- assertVisible:
+    id: "workflow-step-say"
+    text: "Not run — review passed.*"
+- assertVisible:
+    id: "workflow-step-back"
+- assertVisible:
+    id: "workflow-step-position"
+- assertVisible:
+    id: "workflow-step-next-end"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "45-step-not-run"
+- tapOn:
+    id: "workflow-step-back"
+# The list toggle: B's rail, with fix under «Not run».
+- tapOn:
+    id: "workflow-run-mode"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-timeline"
+    timeout: 10000
+- assertVisible:
+    id: "workflow-timeline-review"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "45-run-list"
+- assertVisible:
+    id: "workflow-timeline-fix"

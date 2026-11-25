@@ -1388,3 +1388,68 @@ family as the S4 executor (claude-opus-5-5), so S4 blind spots may be shared.
   clean (2433 files). Tree byte-clean after the mutations were reverted. Full `bun run check` not run.
 
 *— claude-opus-5-5, 2026-11-25*
+
+## Execution
+
+### Slice S7 — Phone list B + never-run/approve detail + e2e + changelog
+
+Resumed from DeepSeek's partial tree (stopped by the watchdog at 253 tool calls). Its edits were kept
+where right; what follows is the as-built of the whole slice.
+
+**Load-bearing check (re-run).** S7 stands on S5's projection saying `skipped` for an ended run's
+never-run step. Scratch `.tentacle/tmp/workflows-ux/s7-why.ts` on flow 45's run ① shape (review ok
+first try, `fix` pending, run ended) prints
+`{"text":"Not run — review passed on its first try.","small":"fix runs only when review fails, up to 2 times."}`
+and `timeline().notRun = [fix]`. Holds.
+
+**As built (dependency order).**
+1. `workflow-list.ts` — `pending` gets its own tone (`◌`, word "not started"), no longer `waiting`'s
+   `○ waiting` (the plan's "`pending` word").
+2. `workflow-run-controller.ts` — `RunMode` `"cards"` → `"list"`. `StepDetail` gains `notRun`, set
+   WITHOUT a read when `runProjection` says `skipped` (`neverRan`); a `notRun` record is dropped when
+   a later feed moves the step. `openStep(stepId, visit?: StepVisit)` keeps the visit for the nav
+   (`state.openVisit`); `attemptOf` passes the visit's `attempt` to the read only when the visit is
+   of the step's CURRENT round (the read selects by attempt alone).
+3. `workflow-step-detail.ts` — `navText` (file order) replaced by `visitOrder`/`stepNav` (B's visits →
+   Next → Not run; `N of M`, prev/next sides or «Start / End of run»); `visitWord` (an older visit
+   never borrows the latest visit's word); `stepBody` = `stepBlocks` + `say` (`notRunWhy`, fallback
+   `DETAIL_TEXT.notRun`) + approve «Asked» (`prompt`) / «Answer» (Outcome Allowed/Denied, Reason,
+   Waited); `detailLog(notRun)` is empty.
+4. `screens/WorkflowRun.tsx` — cards removed; `Timeline`/`TimelineRow` render `timeline()` on the
+   step-rail gutter (18-pt marker, «Next» / «Not run» bands, the why under a not-run row, dropped
+   note); a row opens its VISIT. `screens/WorkflowStep.tsx` — `say`, «Asked»/«Answer» bands,
+   «Re-run step» on a failed step (Q4), and the bottom prev/next bar (owner 6b c).
+5. e2e: fixtures `run-view-pass.yaml` (①) / `run-view-loop.yaml` (②, review fails once via a marker
+   file), written into the harness project by `run.ts`; `seed.ts` `workflowRunsOf` starts both on a
+   fresh session and waits for each to END; flow `45-workflow-run-view.yaml` (graph, fix's
+   "Not run — review passed.*", nav bar + «End of run», shots, list toggle, the rail's fix row).
+6. `changelog.d/workflows-ux.fixed.md` — S7 folded into the ONE existing bullet (S2's note).
+
+**Drift from the Implementation (and why).**
+- `App.tsx` (not in S7's file list): the route forwards the visit (`openStep(stepId, visit)`) and a
+  comment says list; `e2e/run.ts` (not listed either): flow 45 needs its own session holding two
+  ended runs, so `spawnFlow`'s session maker takes the flow name and the fixtures are written.
+- A history visit of an EARLIER goto round reads the step's latest execution (the read API has no
+  round). The nav position/neighbours are per visit; the body is the latest. Left as debt.
+- Ordering risk (unverified): runs are listed computer-wide, so flow 45 must run after
+  `34-hub-workflows` and `44-workflow-editor` (both assert an empty run list); it is placed after
+  them in the flow list, and a shard keeps list order.
+
+**Tests (red first, by mutation — the code existed in DeepSeek's tree).**
+
+| Mutation | Covering test | Result |
+|---|---|---|
+| M1 `neverRan` → `false` (the read is sent again) | `workflow-run-step-detail` "the not-run step is `notRun` and NOTHING is sent", "never reads `loading` or `missing`" | 2 fail |
+| M2 `attemptOf` ignores the round | "a visit of an EARLIER goto round reads the latest" | 1 fail |
+| M3 `visitWord` always the latest word | `workflow-step-layer` "an OLDER visit never reads the latest visit's word" | 1 fail |
+| M4 `pending` tone back to `waiting` | `workflow-list-graph` strip `✓✓✗▸○◌?` | 1 fail |
+
+All reverted (re-run green after each). Updated stale tests: wiring (`navText` → `stepNav`, card tap →
+B row / arrow visit), the list strip glyph, `openStep(…, { attempt })`.
+
+**Gate (narrow).** `bun test apps/mobile/test/workflow*` + `apps/mobile/test/e2e*` → 633 + 247 pass,
+0 fail; `scripts/test/changelog-guard.test.ts` 5 pass; `tsc -p apps/mobile` clean; `biome check` on
+the changed files clean. Full `bun run check` left to the orchestrator's gate. **The e2e flow 45 was
+NOT run** (no simulator here): verify with the mobile e2e gate on iOS 18 + 26.
+
+*— claude-opus-5-5, 2026-11-25*

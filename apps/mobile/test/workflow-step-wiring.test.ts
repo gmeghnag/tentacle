@@ -122,15 +122,17 @@ describe("Reduce Motion: a crossfade, and a still skeleton", () => {
 });
 
 describe("the tap → the controller's `openStep`, never a screen-local selection", () => {
-  test("both the graph node and the card open through the passed callback", () => {
+  test("the graph node, the B row and the prev/next arrow open through the passed callback", () => {
     expect(RUN).toContain("onOpenStep(node.id)");
-    expect(RUN).toContain("onOpenStep(step.id)");
+    // S7: a B row names its VISIT, and so does an arrow (a step that ran twice).
+    expect(RUN).toContain("onOpenStep(entry.step, visitOf(entry))");
+    expect(LAYER).toContain("onOpenStep(side.step, side.visit)");
     expect(RUN).not.toContain("setState({ openStepId");
   });
 
   test("the route forwards them to the controller", () => {
     const route = between(APP, "function WorkflowRunRoute", "\nfunction ");
-    expect(route).toContain("controller.openStep(stepId)");
+    expect(route).toContain("controller.openStep(stepId, visit)");
     expect(route).toContain("controller.closeStep()");
     // The read is the controller's (it knows the run and the attempt).
     expect(route).not.toContain("workflowStep(");
@@ -173,8 +175,9 @@ describe("S3 · the layer draws the nav bar under the safe area and the hero bel
     expect(body.indexOf("styles.nav")).toBeLessThan(body.indexOf('testID="workflow-step-back"'));
   });
 
-  test("the bar says the run's name and `step N of M` — both from `navText`", () => {
-    expect(body).toContain("navText(steps, step.id, props.runName)");
+  test("the bar says the run's name and `N of M` — both from the pure `stepNav` (S7: B's visits)", () => {
+    expect(RUN).toContain("stepNav(projection, openCard.step.id, run.name, state.openVisit)");
+    expect(body).not.toContain("navText(");
     expect(body).toContain("{nav.back}");
     expect(body).toContain("{nav.position}");
     expect(body).toContain('testID="workflow-step-position"');

@@ -23,9 +23,12 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { Palette } from "../theme.ts";
 import { space, typography } from "../theme.ts";
 import { Icon } from "../ui/Icon.tsx";
+import { PillButton } from "../ui/PillButton.tsx";
 import { Text } from "../ui/Text.tsx";
+import { WorkflowMark } from "../ui/WorkflowMark.tsx";
 import type { StateLook } from "../workflow-list.ts";
 import { stateLook } from "../workflow-list.ts";
+import { MARKER_SIZE, markerFor } from "../workflow-marker.ts";
 import {
   CROSSFADE_MS,
   MORPH_EASING,
@@ -40,14 +43,17 @@ import { RUN_WIDTH } from "../workflow-run-layout.ts";
 import { DETAIL, detailLayout, logLines, skeletonBars } from "../workflow-skeleton.ts";
 import {
   type HeroText,
+  type NavSide,
+  type NavVisit,
   STEP_NAV,
+  type StepBody,
+  type StepNav,
   bodyPending,
   canvasMap,
   flight,
   heroBox,
   heroText,
   heroTop,
-  navText,
 } from "../workflow-step-detail.ts";
 
 export interface WorkflowStepLayerProps {
@@ -56,8 +62,6 @@ export interface WorkflowStepLayerProps {
   readonly step: WorkflowStepRow;
   /** Its prompt/report as this screen holds it (`undefined` = not asked yet). */
   readonly detail: StepDetail | undefined;
-  /** The run's steps, for the nav bar's position (and the run's name). */
-  readonly steps: readonly WorkflowStepRow[];
   /**
    * The run as the shared projection reads it (S6b): the flight starts from the
    * node the SHARED layout places, so the pill takes off from where it is DRAWN.
@@ -67,9 +71,18 @@ export interface WorkflowStepLayerProps {
   readonly reduceMotion: boolean;
   /** The run's name, for the nav bar's back button (`‹ demo-note`). */
   readonly runName: string;
-  /** The rows the body holds, already decided (`stepBlocks`). */
-  readonly blocks: ReturnType<typeof import("../workflow-step-detail.ts").stepBlocks>;
+  /** Where this visit sits in B's order, and its two neighbours (owner 6b). */
+  readonly nav: StepNav;
+  /** The body's blocks, already decided (`stepBody`). */
+  readonly blocks: StepBody;
   readonly onClose: () => void;
+  /**
+   * Follow a `4 of 8` arrow (owner 6b): the neighbour's step and WHICH visit of it,
+   * so the detail moves through the history instead of round-robin over the file.
+   */
+  readonly onOpenStep: (stepId: string, visit?: NavVisit) => void;
+  /** «Re-run step» on a FAILED step (owner Q4): the action lives here, not on the list. */
+  readonly onRerun: (stepId: string) => void;
 }
 
 /** React Native's own curve for the flight, built from the mockup's four points. */
@@ -81,7 +94,7 @@ const FLIGHT_EASING = Easing.bezier(
 );
 
 export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
-  const { palette, step, detail, steps, width, reduceMotion, blocks } = props;
+  const { palette, step, detail, width, reduceMotion, blocks, nav } = props;
   const look: StateLook = stateLook(step.state);
   const text: HeroText = heroText(step, look.word);
   // The detail's nav bar lives UNDER the status bar and the hero lands BELOW it
@@ -89,7 +102,6 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
   // this layer only feeds them to the layout.
   const insets = useSafeAreaInsets();
   const top = heroTop(insets.top);
-  const nav = navText(steps, step.id, props.runName);
   // The graph's own logical width (S6b: the run's drawing is 402 pt, wider than the
   // editor's — the canvas map must be told, or the flight starts from the wrong box).
   const canvas = useMemo(() => canvasMap(width, RUN_WIDTH), [width]);
@@ -194,7 +206,7 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
               {nav.position}
             </Text>
           )}
-        </View>
+        </View>{" "}
         {table === null ? null : (
           <Animated.View
             testID={`workflow-step-hero-${step.id}`}
@@ -264,6 +276,16 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
               rows never slide under it. */}
         </View>
         <View style={styles.body}>
+          {blocks.say === null ? null : (
+            <FadeRow index={0} reduceMotion={reduceMotion} style={styles.sayBox}>
+              <Text testID="workflow-step-say" style={[styles.say, { color: palette.label }]}>
+                {blocks.say.text}
+              </Text>
+              {blocks.say.small === undefined ? null : (
+                <Text style={[styles.saySmall, { color: palette.sec }]}>{blocks.say.small}</Text>
+              )}
+            </FadeRow>
+          )}
           {blocks.kv.map(([label, value], i) => (
             <FadeRow
               // biome-ignore lint/suspicious/noArrayIndexKey: a kv list is a fixed, ordered set of labels
@@ -276,6 +298,34 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
               <Text style={[styles.kvValue, { color: palette.label }]}>{value}</Text>
             </FadeRow>
           ))}
+          {blocks.asked === null ? null : (
+            <FadeRow index={blocks.kv.length} reduceMotion={reduceMotion} style={styles.askedBox}>
+              <Text style={[styles.bandLabel, { color: palette.sec }]}>Asked</Text>
+              <Text testID="workflow-step-asked" style={[styles.asked, { color: palette.label }]}>
+                {blocks.asked}
+              </Text>
+            </FadeRow>
+          )}
+          {blocks.answer.length === 0 ? null : (
+            <FadeRow
+              index={blocks.kv.length + 1}
+              reduceMotion={reduceMotion}
+              style={styles.askedBox}
+            >
+              <Text style={[styles.bandLabel, { color: palette.sec }]}>Answer</Text>
+              {blocks.answer.map(([label, value], i) => (
+                <View
+                  // biome-ignore lint/suspicious/noArrayIndexKey: a fixed, ordered answer
+                  key={`ans-${label}-${i}`}
+                  testID={`workflow-step-answer-${label.toLowerCase()}`}
+                  style={styles.kvRow}
+                >
+                  <Text style={[styles.kvLabel, { color: palette.sec }]}>{label}</Text>
+                  <Text style={[styles.kvValue, { color: palette.label }]}>{value}</Text>
+                </View>
+              ))}
+            </FadeRow>
+          )}
           {logBoxes.length === 0 && bars.length === 0 ? null : (
             <FadeRow
               index={blocks.kv.length}
@@ -311,9 +361,110 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
                   ))}
             </FadeRow>
           )}
+          {step.state === "error" ? (
+            <PillButton
+              palette={palette}
+              testID={`workflow-rerun-${step.id}`}
+              kind="secondary"
+              label="Re-run step"
+              onPress={() => props.onRerun(step.id)}
+            />
+          ) : null}
         </View>
       </ScrollView>
+      <PrevNext palette={palette} nav={nav} onOpenStep={props.onOpenStep} bottom={insets.bottom} />
     </View>
+  );
+}
+
+/**
+ * The bottom bar (owner 6b, option c): the neighbour's marker + name + what it was,
+ * either side of a «4 of 8». At the ends there is no arrow to nowhere — the bar says
+ * «Start of run» / «End of run» instead.
+ */
+function PrevNext({
+  palette,
+  nav,
+  onOpenStep,
+  bottom,
+}: {
+  readonly palette: Palette;
+  readonly nav: StepNav;
+  readonly onOpenStep: (stepId: string, visit?: NavVisit) => void;
+  readonly bottom: number;
+}): JSX.Element {
+  return (
+    <View
+      testID="workflow-step-prevnext"
+      style={[styles.pager, { borderTopColor: palette.sep, paddingBottom: Math.max(8, bottom) }]}
+    >
+      <NavArrow palette={palette} side={nav.prev} which="prev" onOpenStep={onOpenStep} />
+      <NavArrow palette={palette} side={nav.next} which="next" onOpenStep={onOpenStep} />
+    </View>
+  );
+}
+
+/** One half of the pager: the neighbour, or the honest end of the run. */
+function NavArrow({
+  palette,
+  side,
+  which,
+  onOpenStep,
+}: {
+  readonly palette: Palette;
+  readonly side: NavSide;
+  readonly which: "prev" | "next";
+  readonly onOpenStep: (stepId: string, visit?: NavVisit) => void;
+}): JSX.Element {
+  if (side.kind === "end") {
+    return (
+      <View testID={`workflow-step-${which}-end`} style={[styles.pagerSide, styles.pagerEnd]}>
+        <Text style={[styles.pagerEndText, { color: palette.sec }]}>{side.label}</Text>
+      </View>
+    );
+  }
+  const look = markerFor(side, palette);
+  return (
+    <Pressable
+      testID={`workflow-step-${which}-${side.step}`}
+      accessibilityRole="button"
+      accessibilityLabel={`${which === "prev" ? "Previous" : "Next"}: ${side.step} · ${look.word}`}
+      hitSlop={8}
+      onPress={() => onOpenStep(side.step, side.visit)}
+      style={[styles.pagerSide, which === "next" ? styles.pagerNext : null]}
+    >
+      {which === "prev" ? <Icon name="chevron.left" color={palette.sec} size={14} /> : null}
+      <WorkflowMark
+        palette={palette}
+        look={look}
+        size={MARKER_SIZE.rail}
+        label={look.word}
+        blink={false}
+      />
+      <View style={styles.pagerText}>
+        <Text
+          numberOfLines={1}
+          style={[
+            styles.pagerName,
+            { color: palette.label },
+            which === "next" ? styles.pagerRight : null,
+          ]}
+        >
+          {side.step}
+        </Text>
+        <Text
+          numberOfLines={1}
+          style={[
+            styles.pagerMeta,
+            { color: palette.sec },
+            which === "next" ? styles.pagerRight : null,
+          ]}
+        >
+          {side.meta}
+        </Text>
+      </View>
+      {which === "next" ? <Icon name="chevron.right" color={palette.sec} size={14} /> : null}
+    </Pressable>
   );
 }
 
@@ -377,6 +528,29 @@ const styles = StyleSheet.create({
   heroTitle: { fontWeight: "600" },
   heroSubtitle: {},
   body: { paddingHorizontal: DETAIL.inset, gap: DETAIL.rowGap },
+  sayBox: { gap: 4, paddingBottom: 4 },
+  say: { ...typography.body },
+  saySmall: { ...typography.footnote },
+  askedBox: { gap: 4 },
+  bandLabel: { ...typography.caption, textTransform: "uppercase" },
+  asked: { ...typography.body },
+  pager: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: DETAIL.inset,
+    paddingTop: 10,
+    backgroundColor: "transparent",
+  },
+  pagerSide: { flex: 1, flexDirection: "row", alignItems: "center", gap: 6, minHeight: 44 },
+  pagerNext: { justifyContent: "flex-end" },
+  pagerEnd: { justifyContent: "flex-start" },
+  pagerEndText: { ...typography.footnote },
+  pagerText: { flexShrink: 1, minWidth: 0 },
+  pagerName: { ...typography.footnote, fontWeight: "600" },
+  pagerMeta: { ...typography.caption },
+  pagerRight: { textAlign: "right" },
   kvRow: { flexDirection: "row", justifyContent: "space-between", minHeight: DETAIL.rowHeight },
   kvLabel: { ...typography.footnote },
   kvValue: { ...typography.footnote, flexShrink: 1, textAlign: "right" },

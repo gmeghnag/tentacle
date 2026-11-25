@@ -17,14 +17,15 @@
  * An ask is shown VERBATIM in a bar pinned under the content — never per card
  * (§7: a `run` command is shown as it will run), and never truncated.
  */
-import type { WorkflowProjection, WorkflowStepView } from "@tentacle/client";
-import { summary } from "@tentacle/client";
-import type { WorkflowStepRow } from "@tentacle/protocol";
+import type { WorkflowProjection, WorkflowStepView, WorkflowTimelineRow } from "@tentacle/client";
+import { summary, timeline } from "@tentacle/client";
 import type { JSX } from "react";
 import { useEffect, useRef } from "react";
 import { Animated, Easing, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
-import type { Palette } from "../theme.ts";
+import { elapsed } from "../activity.ts";
+import { GUTTER } from "../step-rail.ts";
+import { type Palette, size } from "../theme.ts";
 import { space, typography } from "../theme.ts";
 import { EmptyState } from "../ui/EmptyState.tsx";
 import { Icon } from "../ui/Icon.tsx";
@@ -35,9 +36,10 @@ import { WorkflowMark } from "../ui/WorkflowMark.tsx";
 import { EDGE_DIM, type EdgeLook, edgeLook, pillLook } from "../workflow-edge.ts";
 import { stateLook } from "../workflow-list.ts";
 import { MARKER_SIZE, markerFor } from "../workflow-marker.ts";
-import type { AskBar, CardAsk, RunMode, RunState, StepCard } from "../workflow-run-controller.ts";
+import type { AskBar, CardAsk, RunMode, RunState } from "../workflow-run-controller.ts";
 import { type RunChip, type RunEdge, type RunNode, runLayout } from "../workflow-run-layout.ts";
-import { stepBlocks } from "../workflow-step-detail.ts";
+import type { NavVisit } from "../workflow-step-detail.ts";
+import { stepBody, stepNav, visitWord } from "../workflow-step-detail.ts";
 import { WorkflowStepLayer } from "./WorkflowStep.tsx";
 
 export interface WorkflowRunScreenProps {
@@ -55,10 +57,11 @@ export interface WorkflowRunScreenProps {
   /** The session's own screen (where an ask is answered when this screen cannot). */
   readonly onOpenSession: () => void;
   /**
-   * Open a step's detail layer (D5): the tap on a graph node AND on a card. The
-   * screen does not decide what a tap means — the controller's `openStep` does.
+   * Open a step's detail layer (D5): the tap on a graph node AND on a rail row. The
+   * screen does not decide what a tap means — the controller's `openStep` does. The
+   * VISIT is named too, so a step that ran twice opens the row that was tapped.
    */
-  readonly onOpenStep: (stepId: string) => void;
+  readonly onOpenStep: (stepId: string, visit?: NavVisit) => void;
   /** Close the detail layer (its back, or the backdrop). */
   readonly onCloseStep: () => void;
   /** Reduce Motion, read live by the route (a crossfade instead of the flight). */
@@ -382,77 +385,166 @@ function Graph({
 }
 
 /**
- * View 2A's cards, until S7 replaces them with the B timeline (the owner's plan:
- * S7 owns the list). They already read the projection's WORD, so the two views
- * never disagree about a state while both exist.
+ * View B (docs/fix/workflows-ux.md D5, S7): the run's TIMELINE, drawn on the chat
+ * step-rail look — the visits as they happened, then «Next», then «Not run», each
+ * row a marker, the step's name, what happened to it and its duration.
+ *
+ * It is the SAME `timeline()` the detail's position and arrows read
+ * (`workflow-step-detail.ts`), so a row and a `4 of 8` can never disagree. Every
+ * row is a tap into the step's detail — the rail is the run's history, and the
+ * history is how a person reaches a step that the graph's pills also show.
  */
-function Card({
+function Timeline({
   palette,
-  card,
-  word,
-  onRerun,
+  projection,
+  reduceMotion,
   onOpenStep,
 }: {
   readonly palette: Palette;
-  readonly card: StepCard;
-  readonly word: string;
-  readonly onRerun: (stepId: string) => void;
-  readonly onOpenStep: (stepId: string) => void;
+  readonly projection: WorkflowProjection;
+  readonly reduceMotion: boolean;
+  readonly onOpenStep: (stepId: string, visit?: NavVisit) => void;
 }): JSX.Element {
-  const { step } = card;
+  const line = timeline(projection);
+  const row = (entry: WorkflowTimelineRow, key: string): JSX.Element => (
+    <TimelineRow
+      key={key}
+      palette={palette}
+      entry={entry}
+      word={visitWord(projection, entry)}
+      reduceMotion={reduceMotion}
+      onPress={() => onOpenStep(entry.step, visitOf(entry))}
+    />
+  );
   return (
-    <View
-      testID={`workflow-card-${step.id}`}
-      style={[styles.card, { backgroundColor: palette.card, borderColor: palette.sep }]}
-    >
-      <Pressable
-        testID={`workflow-card-open-${step.id}`}
-        accessibilityRole="button"
-        accessibilityLabel={`${step.id} · ${word}`}
-        onPress={() => onOpenStep(step.id)}
-        style={styles.cardHead}
-      >
-        <View style={styles.rowHead}>
-          <Text style={[styles.name, { color: palette.label }]} numberOfLines={1}>
-            {step.id}
-          </Text>
-          <Text style={[styles.meta, { color: palette.sec }]}>{word}</Text>
-        </View>
-        <Text style={[styles.meta, { color: palette.sec }]} numberOfLines={1}>
-          {stepLine(step)}
-        </Text>
-      </Pressable>
-      {step.reason === undefined ? null : (
-        <Text style={[styles.meta, { color: palette.sec }]}>{step.reason}</Text>
+    <View testID="workflow-timeline" style={styles.timeline}>
+      {line.droppedNote === undefined ? null : (
+        <Text style={[styles.dropped, { color: palette.sec }]}>{line.droppedNote}</Text>
       )}
-      {step.state === "error" ? (
-        <PillButton
-          palette={palette}
-          testID={`workflow-rerun-${step.id}`}
-          kind="secondary"
-          label="Re-run step"
-          onPress={() => onRerun(step.id)}
-        />
-      ) : null}
+      {line.rows.map((entry, i) => row(entry, `visit-${i}-${entry.step}`))}
+      <TimelineSection
+        palette={palette}
+        label="Next"
+        entries={line.next}
+        render={(entry, i) => row(entry, `next-${i}-${entry.step}`)}
+      />
+      <TimelineSection
+        palette={palette}
+        label="Not run"
+        entries={line.notRun}
+        render={(entry, i) => row(entry, `notrun-${i}-${entry.step}`)}
+      />
     </View>
   );
 }
 
-function stepLine(step: WorkflowStepRow): string {
-  return [step.kind, step.model, step.where === "" ? undefined : step.where]
-    .filter((p): p is string => p !== undefined && p !== "")
-    .join(" · ");
+/** The visit a row Stands for, so a tap opens THAT visit's detail (not just its step). */
+function visitOf(entry: WorkflowTimelineRow): NavVisit | undefined {
+  if (entry.attempt === undefined && entry.round === undefined) {
+    return undefined;
+  }
+  return {
+    ...(entry.attempt === undefined ? {} : { attempt: entry.attempt }),
+    ...(entry.round === undefined ? {} : { round: entry.round }),
+  };
+}
+
+/** «Next» / «Not run»: a band's label, then its rows — absent entirely when empty. */
+function TimelineSection({
+  palette,
+  label,
+  entries,
+  render,
+}: {
+  readonly palette: Palette;
+  readonly label: string;
+  readonly entries: readonly WorkflowTimelineRow[];
+  readonly render: (entry: WorkflowTimelineRow, index: number) => JSX.Element;
+}): JSX.Element | null {
+  if (entries.length === 0) {
+    return null;
+  }
+  return (
+    <View style={styles.section}>
+      <Text style={[styles.sectionLabel, { color: palette.sec }]}>{label}</Text>
+      {entries.map(render)}
+    </View>
+  );
+}
+
+/**
+ * One row of the rail: the phase's marker in the gutter, the step's name and what
+ * happened to it, its duration on the right, and — on a `not run` row — the WHY.
+ * The marker is a `rail` (18 pt) and blinks only while the run is on it and Reduce
+ * Motion allows it; the row's own indent comes from `step-rail.ts`'s gutter, so it
+ * lines up with the transcript's steps above and below.
+ */
+function TimelineRow({
+  palette,
+  entry,
+  word,
+  reduceMotion,
+  onPress,
+}: {
+  readonly palette: Palette;
+  readonly entry: WorkflowTimelineRow;
+  /** The row's word, decided by `visitWord` (an older visit never reads the latest). */
+  readonly word: string;
+  readonly reduceMotion: boolean;
+  readonly onPress: () => void;
+}): JSX.Element {
+  const look = markerFor({ phase: entry.phase, word }, palette);
+  const running = entry.phase === "running";
+  return (
+    <Pressable
+      testID={`workflow-timeline-${entry.step}`}
+      accessibilityRole="button"
+      accessibilityLabel={`${entry.step} · ${look.word}`}
+      onPress={onPress}
+      style={styles.tlRow}
+    >
+      <View style={styles.tlRail}>
+        <WorkflowMark
+          palette={palette}
+          look={look}
+          size={MARKER_SIZE.rail}
+          label={look.word}
+          blink={running && !reduceMotion}
+        />
+      </View>
+      <View style={styles.tlText}>
+        <View style={styles.rowHead}>
+          <Text style={[styles.name, { color: palette.label }]} numberOfLines={1}>
+            {entry.step}
+          </Text>
+          <Text style={[styles.meta, { color: palette.sec }]} numberOfLines={1}>
+            {entry.meta}
+          </Text>
+          {entry.durationMs === undefined ? null : (
+            <Text style={[styles.duration, { color: palette.sec }]}>
+              {elapsed(entry.durationMs)}
+            </Text>
+          )}
+        </View>
+        {entry.why === undefined ? null : (
+          <Text style={[styles.why, { color: palette.sec }]}>
+            {entry.why.text}
+            {entry.why.small === undefined ? "" : ` ${entry.why.small}`}
+          </Text>
+        )}
+      </View>
+    </Pressable>
+  );
 }
 
 export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
   const { palette, state } = props;
   const run = state.run;
   const projection = state.projection;
-  const next: RunMode = state.mode === "graph" ? "cards" : "graph";
-  // The detail layer (D5): ONE flight at a time — the node tapped, or the card.
+  const next: RunMode = state.mode === "graph" ? "list" : "graph";
+  // The detail layer (D5): ONE flight at a time — the node tapped, or the rail row.
   const openCard =
     state.openStepId === null ? undefined : state.steps.find((c) => c.step.id === state.openStepId);
-  const words = new Map((projection?.steps ?? []).map((s) => [s.id, s.word]));
   const ready = state.phase === "ready" && run !== null && projection !== null;
   return (
     <View testID="workflow-run" style={[styles.screen, { backgroundColor: palette.page }]}>
@@ -476,12 +568,12 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
           <Pressable
             testID="workflow-run-mode"
             accessibilityRole="button"
-            accessibilityLabel={next === "cards" ? "Show cards" : "Show graph"}
+            accessibilityLabel={next === "list" ? "Show the list" : "Show the graph"}
             hitSlop={8}
             onPress={() => props.onMode(next)}
           >
             <Icon
-              name={next === "cards" ? "list.bullet" : "square.grid.2x2"}
+              name={next === "list" ? "list.bullet" : "square.grid.2x2"}
               color={palette.label}
               size={18}
             />
@@ -521,17 +613,13 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
                 reduceMotion={props.reduceMotion}
                 onOpenStep={props.onOpenStep}
               />
-            ) : (
-              state.steps.map((card) => (
-                <Card
-                  key={card.step.id}
-                  palette={palette}
-                  card={card}
-                  word={words.get(card.step.id) ?? ""}
-                  onRerun={props.onRerun}
-                  onOpenStep={props.onOpenStep}
-                />
-              ))
+            ) : projection === null ? null : (
+              <Timeline
+                palette={palette}
+                projection={projection}
+                reduceMotion={props.reduceMotion}
+                onOpenStep={props.onOpenStep}
+              />
             )}
             {run === null ? null : run.endedAt === undefined ? (
               <PillButton
@@ -566,12 +654,14 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
           palette={palette}
           step={openCard.step}
           detail={openCard.detail}
-          steps={run.steps}
           projection={projection}
           width={props.width}
           reduceMotion={props.reduceMotion}
           runName={run.name}
-          blocks={stepBlocks(
+          /** The detail's position and its prev/next: B's visit order (owner 6b). */
+          nav={stepNav(projection, openCard.step.id, run.name, state.openVisit)}
+          blocks={stepBody(
+            projection,
             openCard.step,
             openCard.detail,
             (kind) => kind,
@@ -579,6 +669,8 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
             openCard.look.tone === "error" ? 1 : 0,
           )}
           onClose={props.onCloseStep}
+          onOpenStep={props.onOpenStep}
+          onRerun={props.onRerun}
         />
       )}
     </View>
@@ -599,8 +691,20 @@ const styles = StyleSheet.create({
   summaryLine: { flexDirection: "row", alignItems: "center", gap: space.inset / 2 },
   summaryWord: { ...typography.headline, flex: 1 },
   summaryTime: { ...typography.body, fontVariant: ["tabular-nums"] },
-  card: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 12, gap: 6 },
-  cardHead: { gap: 6 },
+  timeline: { gap: 2 },
+  dropped: { ...typography.footnote, paddingVertical: 6 },
+  section: { gap: 2 },
+  sectionLabel: { ...typography.caption, paddingTop: space.inset - 6, paddingBottom: 4 },
+  tlRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    minHeight: size.touch * 0.66,
+    paddingVertical: 6,
+  },
+  tlRail: { width: GUTTER + MARKER_SIZE.rail, alignItems: "flex-start", paddingTop: 2 },
+  tlText: { flex: 1, minWidth: 0, gap: 2 },
+  why: { ...typography.footnote },
+  duration: { ...typography.footnote, fontVariant: ["tabular-nums"] },
   rowHead: { flexDirection: "row", alignItems: "center", gap: 8 },
   name: { ...typography.body, flex: 1, fontWeight: "600" },
   meta: { ...typography.footnote },

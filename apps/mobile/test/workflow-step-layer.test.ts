@@ -25,9 +25,12 @@ import {
   heroText,
   heroTop,
   navBox,
-  navText,
   nodeBoxOnScreen,
   stepBlocks,
+  stepBody,
+  stepNav,
+  visitOrder,
+  visitWord,
 } from "../src/workflow-step-detail.ts";
 
 const step = (id: string, over: Partial<WorkflowStepRow> = {}): WorkflowStepRow => ({
@@ -63,6 +66,11 @@ const RUN: WorkflowRow = {
   steps: STEPS,
 };
 const PROJECTION = runProjection(RUN);
+
+/** A run row holding only what a body/neighbour test needs. */
+const run = (over: Partial<WorkflowRow> = {}): WorkflowRow => ({ ...RUN, ...over });
+/** A one-step projection, for a test whose subject is not the run's shape. */
+const proposal = () => runProjection(run({ steps: [step("confirm", { kind: "approve" })] }));
 
 const detail = (over: Record<string, unknown> = {}) => ({
   attempt: 0,
@@ -297,20 +305,251 @@ describe("S3 · the detail's nav bar under the safe area, the hero below it", ()
     }
   });
 
-  test("the nav bar's text: the run's name, and the step's place in FILE order", () => {
-    expect(navText(STEPS, "review", "demo-note")).toEqual({
-      back: "demo-note",
-      position: "step 2 of 3",
-    });
-    expect(navText(STEPS, "merge", "demo-note").position).toBe("step 3 of 3");
+  test("the nav bar's text: the run's name, and the step's place in B's VISIT order (S7)", () => {
+    // Owner 6b: the order is the timeline's — the visits as they happened, then
+    // `Next`, then `Not run`. FILE order (`step 2 of 3`) is what it was, and it lies
+    // about a run with a goto: it cannot say which review, and it jumps review → fix.
+    const nav = stepNav(PROJECTION, "review", "demo-note");
+    expect(nav.back).toBe("demo-note");
+    expect(nav.position).toBe("2 of 3");
   });
 
   test("a step this run does not hold gets no position (never a made-up one)", () => {
-    expect(navText(STEPS, "gone", "demo-note").position).toBeNull();
+    expect(stepNav(PROJECTION, "gone", "demo-note").position).toBeNull();
+    // …and no neighbour is invented either.
+    expect(stepNav(PROJECTION, "gone", "demo-note").prev).toEqual({
+      kind: "end",
+      label: "Start of run",
+    });
   });
 
   test("an empty run name still reads as a button, and a multi-line name is flattened", () => {
-    expect(navText(STEPS, "review", "").back).toBe("Run");
-    expect(navText(STEPS, "review", "a\nb").back).toBe("a b");
+    expect(stepNav(PROJECTION, "review", "").back).toBe("Run");
+    expect(stepNav(PROJECTION, "review", "a\nb").back).toBe("a b");
+  });
+});
+
+/**
+ * docs/fix/workflows-ux.md S7, owner 6b: the detail's position and its prev/next
+ * bar come from B's own order. A run with a retry and a goto is the case that
+ * separates it from file order: `draft` ran twice and `review` twice, so the
+ * timeline has 8 rows where the file has 6 steps.
+ */
+describe("S7 · the detail's position and neighbours are B's visits, not the file", () => {
+  /** The mockup's run ②: collect → draft (retried) → review ⇄ fix → confirm → archive. */
+  const ranTwice: WorkflowRow = {
+    runId: "wf-2",
+    name: "demo-note",
+    version: 1,
+    hash: "a".repeat(64),
+    state: "ok",
+    tokens: 0,
+    startedAt: 1_000,
+    endedAt: 80_000,
+    history: [
+      { step: "collect", attempt: 0, round: 0, state: "ok", durationMs: 400 },
+      { step: "draft", attempt: 0, round: 0, state: "error", durationMs: 3_100 },
+      { step: "draft", attempt: 1, round: 0, state: "ok", durationMs: 14_700 },
+      { step: "review", attempt: 0, round: 0, state: "error", durationMs: 8_900 },
+      { step: "fix", attempt: 0, round: 1, state: "ok", durationMs: 14_300 },
+      { step: "review", attempt: 0, round: 1, state: "ok", durationMs: 7_200 },
+      { step: "confirm", attempt: 0, round: 0, state: "ok", durationMs: 12_000 },
+      { step: "archive", attempt: 0, round: 0, state: "ok", durationMs: 200 },
+    ],
+    historyDropped: 0,
+    steps: [
+      step("collect", { state: "ok", next: "draft" }),
+      step("draft", { state: "ok", attempt: 1, retry: 1, next: "review" }),
+      step("review", {
+        state: "ok",
+        round: 1,
+        maxRound: 2,
+        next: "confirm",
+        onFail: { goto: "fix", max: 2, taken: 1 },
+      }),
+      step("fix", { state: "ok", round: 1, next: "review" }),
+      step("confirm", { state: "ok", kind: "approve", next: "archive" }),
+      step("archive", { state: "ok", kind: "run", next: null }),
+    ],
+  };
+  const RAN_TWICE = runProjection(ranTwice);
+
+  test("the order is the timeline's: 8 visits from a 6-step file", () => {
+    expect(visitOrder(RAN_TWICE).map((v) => v.step)).toEqual([
+      "collect",
+      "draft",
+      "draft",
+      "review",
+      "fix",
+      "review",
+      "confirm",
+      "archive",
+    ]);
+  });
+
+  test("an OLDER visit never reads the latest visit's word (draft failed, then passed)", () => {
+    const words = visitOrder(RAN_TWICE).map((v) => [v.step, v.phase, v.word]);
+    // draft's first try failed: its row is `error`, and its word must not be the
+    // step's current "done"/"passed" — `""` lets `markerFor` say the phase's own.
+    expect(words[1]).toEqual(["draft", "error", ""]);
+    const latest = RAN_TWICE.steps.find((s) => s.id === "draft");
+    expect(words[2]).toEqual(["draft", "ok", latest?.word ?? "missing"]);
+    expect(visitWord(RAN_TWICE, { step: "review", phase: "error" })).toBe("");
+  });
+
+  test("review round 1 is `4 of 8`, and its neighbours are the visits around it", () => {
+    const nav = stepNav(RAN_TWICE, "review", "demo-note", { round: 0 });
+    expect(nav.position).toBe("4 of 8");
+    expect(nav.prev).toMatchObject({ kind: "step", step: "draft" });
+    expect(nav.next).toMatchObject({ kind: "step", step: "fix", phase: "ok" });
+  });
+
+  test("no attempt named: the LAST visit of that step (the row a person just tapped)", () => {
+    expect(stepNav(RAN_TWICE, "review", "demo-note").position).toBe("6 of 8");
+    expect(stepNav(RAN_TWICE, "draft", "demo-note").position).toBe("3 of 8");
+  });
+
+  test("the ends say so instead of wrapping round (never an empty tap target)", () => {
+    expect(stepNav(RAN_TWICE, "collect", "demo-note").prev).toEqual({
+      kind: "end",
+      label: "Start of run",
+    });
+    expect(stepNav(RAN_TWICE, "archive", "demo-note").next).toEqual({
+      kind: "end",
+      label: "End of run",
+    });
+  });
+
+  test("a `not run` step is reached at the TAIL, after the Next ones (as in B)", () => {
+    // Run ①: review passed first try, so `fix` is `skipped` — the last row.
+    const firstTry = runProjection(
+      run({
+        state: "ok",
+        endedAt: 2_000,
+        history: [
+          { step: "collect", attempt: 0, round: 0, state: "ok", durationMs: 400 },
+          { step: "review", attempt: 0, round: 0, state: "ok", durationMs: 9_600 },
+        ],
+        steps: [
+          step("collect", { state: "ok", next: "review" }),
+          step("review", { state: "ok", next: null, onFail: { goto: "fix", max: 2, taken: 0 } }),
+          step("fix", { state: "pending", next: "review" }),
+        ],
+      }),
+    );
+    expect(visitOrder(firstTry).map((v) => v.step)).toEqual(["collect", "review", "fix"]);
+    const nav = stepNav(firstTry, "fix", "demo-note");
+    expect(nav.position).toBe("3 of 3");
+    expect(nav.prev).toMatchObject({ kind: "step", step: "review" });
+    expect(nav.next).toEqual({ kind: "end", label: "End of run" });
+  });
+});
+
+/**
+ * docs/fix/workflows-ux.md S7/D5: the body of a step that never ran, and of an
+ * approve step — the two bodies whose stories the old screen could not tell.
+ */
+describe("S7 · stepBody: the never-run sentence, and an approve step's asked/answer", () => {
+  const kindWord = (k: string) => k;
+  const stateWord = (s: string) => s;
+  const projection = PROJECTION;
+
+  test("a never-run step says WHY (the projection's own words) and draws no log", () => {
+    // The run ① projection: review passed first try, so `fix` never ran.
+    const firstTry = runProjection(
+      run({
+        state: "ok",
+        endedAt: 2_000,
+        history: [{ step: "collect", attempt: 0, round: 0, state: "ok" }],
+        steps: [
+          step("collect", { state: "ok", next: "review" }),
+          step("review", { state: "ok", next: null, onFail: { goto: "fix", max: 2, taken: 0 } }),
+          step("fix", { state: "pending", next: "review" }),
+        ],
+      }),
+    );
+    const fixStep = step("fix", { state: "pending", next: "review" });
+    const body = stepBody(firstTry, fixStep, { kind: "notRun" }, kindWord, stateWord, 0);
+    expect(body.say).toEqual({
+      text: "Not run — review passed on its first try.",
+      small: "fix runs only when review fails, up to 2 times.",
+    });
+    expect(body.log).toEqual([]);
+    // The bands are the step's own, and they never depend on the missing read.
+    expect(body.kv.map(([label]) => label)).toEqual(["State", "Kind", "Where"]);
+  });
+
+  test("a step that DID run has no `say` (the sentence is for what did not happen)", () => {
+    const body = stepBody(
+      projection,
+      step("review", { state: "error" }),
+      { kind: "loaded", detail: detail() },
+      kindWord,
+      stateWord,
+      1,
+    );
+    expect(body.say).toBeNull();
+  });
+
+  test("an approve step: «Asked» is the read's prompt VERBATIM, «Answer» the outcome", () => {
+    const confirm = step("confirm", {
+      kind: "approve",
+      state: "ok",
+      durationMs: 5_100,
+      next: "archive",
+    });
+    const body = stepBody(
+      projection,
+      confirm,
+      {
+        kind: "loaded",
+        detail: detail({
+          prompt: "Archiviare la nota su idee per il weekend?",
+          report: "approved",
+        }),
+      },
+      kindWord,
+      stateWord,
+      0,
+    );
+    expect(body.asked).toBe("Archiviare la nota su idee per il weekend?");
+    expect(body.answer).toEqual([
+      ["Outcome", "Allowed"],
+      ["Waited", "5.1s"],
+    ]);
+    // No who and no when: neither is on the wire, and neither is required.
+    for (const label of ["By", "At", "When"]) {
+      expect({ label, drawn: body.answer.some(([k]) => k === label) }).toEqual({
+        label,
+        drawn: false,
+      });
+    }
+  });
+
+  test("a DENIED approve step says Denied, with the daemon's reason", () => {
+    const confirm = step("confirm", {
+      kind: "approve",
+      state: "error",
+      reason: "denied: not this time",
+    });
+    const body = stepBody(proposal(), confirm, { kind: "missing" }, kindWord, stateWord, 0);
+    expect(body.answer).toEqual([
+      ["Outcome", "Denied"],
+      ["Reason", "denied: not this time"],
+    ]);
+    // A missing read never invents a question.
+    expect(body.asked).toBeNull();
+  });
+
+  test("a non-approve step has neither an `asked` nor an `answer`", () => {
+    const body = stepBody(
+      projection,
+      step("build", { state: "ok" }),
+      { kind: "loaded", detail: detail() },
+      kindWord,
+      stateWord,
+      0,
+    );
+    expect(body).toMatchObject({ asked: null, answer: [] });
   });
 });

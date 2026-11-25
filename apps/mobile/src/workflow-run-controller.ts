@@ -1,7 +1,7 @@
 /**
- * One workflow run on the phone, graph 2C ⇄ cards 2A (docs/feat/workflows-ui.md
- * D4, slice 3). Pure and injected (AGENTS §7): the screen draws `state()` and
- * forwards taps.
+ * One workflow run on the phone, graph A ⇄ list B (docs/fix/workflows-ux.md D3/D5;
+ * was `docs/feat/workflows-ui.md` D4, slice 3). Pure and injected (AGENTS §7): the
+ * screen draws `state()` and forwards taps.
  *
  * - **The attach** goes through the SAME session runtime as the Session screen
  *   (`session-runtimes.ts`): `open(sessionId)`, never with `reopen` — an archived
@@ -40,21 +40,38 @@ export const SESSION_ENDED = "This session has ended";
 /** A tap on an ask that was settled meanwhile (answered elsewhere, withdrawn). */
 export const RUN_ASK_GONE = "That request is no longer waiting";
 
-export type RunMode = "graph" | "cards";
+export type RunMode = "graph" | "list";
+
+/**
+ * WHICH visit of a step a tap named (a list row, a prev/next arrow): `round`
+ * tells two runs of one goto apart, `attempt` two tries of one retried step.
+ * Absent = the step's latest execution.
+ */
+export interface StepVisit {
+  readonly attempt?: number;
+  readonly round?: number;
+}
 
 /**
  * A step's DETAIL, as this screen holds it (docs/feat/workflows-ui.md D5): absent
  * = never asked. The four answers a read can give are kept apart on purpose —
- * `missing` (never ran, or its entry left the retained log) is not the same thing
- * as `unsupported` (an older daemon: "update tentacle"), and a failed read is its
+ * `missing` (its entry left the retained log) is not the same thing as
+ * `unsupported` (an older daemon: "update tentacle"), and a failed read is its
  * own state with the reason, never a skeleton left shimmering forever.
+ *
+ * `notRun` is the fifth (docs/fix/workflows-ux.md S7, D5) and the only one that
+ * is decided WITHOUT a read: the shared projection says the step never ran, so
+ * there is no execution to ask about — and asking anyway got `{}` back, which
+ * this screen drew as "no longer available", a false story about a step that
+ * simply was not reached.
  */
 export type StepDetail =
   | { readonly kind: "loading" }
   | { readonly kind: "loaded"; readonly detail: WorkflowStepDetail }
   | { readonly kind: "missing" }
   | { readonly kind: "unsupported" }
-  | { readonly kind: "failed"; readonly reason: string };
+  | { readonly kind: "failed"; readonly reason: string }
+  | { readonly kind: "notRun" };
 
 /** The ask a card shows: its id, the asker's id (the pairing), and the text VERBATIM. */
 export interface CardAsk {
@@ -168,6 +185,12 @@ export interface RunState {
   readonly canAnswer: boolean;
   /** The step whose detail is open (the morph layer), or null. */
   readonly openStepId: string | null;
+  /**
+   * The visit the open step was opened FOR, when a list row or an arrow named one
+   * (a step that ran twice): the nav bar's position and its neighbours are per
+   * VISIT, so the screen must know which visit it is looking at.
+   */
+  readonly openVisit?: StepVisit;
 }
 
 const ENDED: readonly SessionOpenFailure[] = ["archived", "deleted", "gone"];
@@ -243,8 +266,12 @@ export interface WorkflowRunController {
   stop(): Promise<void>;
   resume(): Promise<void>;
   rerun(stepId: string): Promise<void>;
-  /** Open a step's detail, reading its prompt/report once (D5). */
-  openStep(stepId: string, attempt?: number): void;
+  /**
+   * Open a step's detail, reading its prompt/report once (D5). `visit` names the
+   * row tapped; its `attempt` is read only when it is of the step's CURRENT round
+   * (the read selects by attempt alone — an earlier round reads the latest).
+   */
+  openStep(stepId: string, visit?: StepVisit): void;
   /** Close the detail layer (its record stays, so a reopen paints at once). */
   closeStep(): void;
 }
@@ -259,6 +286,7 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
   let unfeed: (() => void) | null = null;
   let unasks: (() => void) | null = null;
   let openStepId: string | null = null;
+  let openVisit: StepVisit | undefined;
   /** One record per step, kept across close/reopen (the read is not repeated). */
   const details = new Map<string, StepDetail>();
   /** The steps whose read is in flight: one request per step, never a storm. */
@@ -298,6 +326,7 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
       notice,
       canAnswer: deps.asks !== null,
       openStepId,
+      ...(openVisit === undefined ? {} : { openVisit }),
     };
   }
 
@@ -314,6 +343,36 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
   }
 
   /**
+   * Whether the run's OWN projection says this step never ran (S7): the one fact
+   * that makes a read wrong rather than merely redundant — there is no execution
+   * to ask about, and a `workflowStep` for one answered `{}`, painted as "no longer
+   * available". `skipped` is D2's phase for exactly that (a live run's `pending`
+   * step is `later`, which a read may legitimately answer).
+   */
+  function neverRan(stepId: string): boolean {
+    const run = rows.find((r) => r.runId === deps.runId);
+    if (run === null || run === undefined) {
+      return false;
+    }
+    return runProjection(run).steps.some((s) => s.id === stepId && s.phase === "skipped");
+  }
+
+  /**
+   * The attempt a visit's read may name: only one of the step's CURRENT round —
+   * the read selects by attempt alone, so an attempt of an earlier goto round
+   * would match the wrong execution. Anything else reads the latest.
+   */
+  function attemptOf(stepId: string, visit: StepVisit | undefined): number | undefined {
+    if (visit?.attempt === undefined) {
+      return undefined;
+    }
+    const row = rows.find((r) => r.runId === deps.runId)?.steps.find((s) => s.id === stepId);
+    return row !== undefined && (visit.round === undefined || visit.round === row.round)
+      ? visit.attempt
+      : undefined;
+  }
+
+  /**
    * One step's `prompt`/`report`: at most ONE read in flight, and never repeated once
    * an ended read of the same attempt/round is held (`heldFits`).
    */
@@ -323,6 +382,13 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
     // is not on the feed (a stale tap, or another run's step).
     const row = rows.find((r) => r.runId === deps.runId)?.steps.find((s) => s.id === stepId);
     if (row === undefined) {
+      return;
+    }
+    // A step that never ran has no detail to read: the record is `notRun` and no
+    // request is sent (S7). Decided by the projection, never by the state word.
+    if (neverRan(stepId)) {
+      details.set(stepId, { kind: "notRun" });
+      changed();
       return;
     }
     if (handle === null || handle.workflowStep === undefined) {
@@ -375,12 +441,14 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
 
   return {
     state,
-    openStep(stepId, attempt) {
+    openStep(stepId, visit) {
       openStepId = stepId;
-      readStep(stepId, attempt);
+      openVisit = visit;
+      readStep(stepId, attemptOf(stepId, visit));
     },
     closeStep() {
       openStepId = null;
+      openVisit = undefined;
       changed();
     },
     start() {
@@ -404,6 +472,14 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
         phase = "ready";
         unfeed = result.session.onWorkflows((next) => {
           rows = next;
+          // A `notRun` record is a fact about the RUN, not about an execution: when
+          // the run moves that step (a resume, a re-run), it is stale — dropped, so
+          // the next open decides again from the projection.
+          for (const [id, held] of details) {
+            if (held.kind === "notRun" && !neverRan(id)) {
+              details.delete(id);
+            }
+          }
           changed();
         });
         changed();

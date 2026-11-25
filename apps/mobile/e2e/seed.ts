@@ -150,6 +150,72 @@ export async function composeSessionOf(deps: {
   return id;
 }
 
+/**
+ * Flow 45's session (docs/fix/workflows-ux.md S7): one session that ran the two
+ * seeded workflow runs to their END — ① `run-view-pass` (review passes first, so
+ * `fix` never runs) and ② `run-view-loop` (review fails once, `fix` runs, review
+ * passes). Created just before the flow, like a compose session.
+ *
+ * The one harness client that ANSWERS asks, on purpose and only here: the run's
+ * hash approval and its `run:` commands are this seeder's own work on a session
+ * nobody else is attached to, and it DETACHES once both runs ended — so no ask of
+ * a flow's ever reaches it (the `holdingBroker` rule above is about that).
+ */
+export async function workflowRunsOf(deps: {
+  readonly url: string;
+  readonly token: string;
+}): Promise<string> {
+  const broker = new PermissionBroker(undefined, { holdUntilSet: true });
+  broker.setRequester(async () => ({ allowed: true, scope: "once" }));
+  const factory = webSocketChannelFactory(deps.url, { token: deps.token });
+  const live = new RemoteClient(await factory(), broker, undefined, { channelFactory: factory });
+  await live.initialize();
+  const id = crypto.randomUUID();
+  try {
+    const session = live.newSession(undefined, id);
+    await finishTurn(session, "Workflow runs");
+    for (const name of ["run-view-pass", "run-view-loop"]) {
+      const started = await session.workflow({ action: "start", name });
+      if (!started.ok || !("runId" in started) || started.runId === undefined) {
+        throw new Error(`workflow ${name} did not start: ${started.reason ?? "no run id"}`);
+      }
+      const runId = started.runId;
+      // `onWorkflows` calls back SYNCHRONOUSLY with the rows it holds, so the end
+      // may be seen before the unsubscribe exists: settle on a flag, unsubscribe after.
+      let ended = false;
+      let wake: () => void = () => {};
+      const off = session.onWorkflows((rows) => {
+        if (rows.some((row) => row.runId === runId && row.endedAt !== undefined)) {
+          ended = true;
+          wake();
+        }
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          if (ended) {
+            resolve();
+            return;
+          }
+          const timer = setTimeout(() => {
+            reject(new Error(`workflow ${name} did not end within 30 s`));
+          }, 30_000);
+          wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      } finally {
+        off();
+      }
+    }
+  } finally {
+    // A DETACH, not `closeSessions`: the flow opens this session's runs.
+    await live.drain().catch(() => {});
+    live.close();
+  }
+  return id;
+}
+
 /** Flow 03's hook: create one more session with a finished turn; return its id. */ export async function addDelta(deps: {
   readonly url: string;
   readonly token: string;
