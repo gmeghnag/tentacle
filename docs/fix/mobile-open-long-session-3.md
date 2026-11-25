@@ -92,3 +92,32 @@ Round 2 (`mobile-open-long-session-2.md`) fixed the 114-row case. Post-merge QA 
 - **MEDIUM 2 (false windowSize premise):** Design/Failure modes above now state the real mechanism (the jump branch renders the last `maxToRenderPerBatch + 1` rows) and its cost; the follow test comment/assertion no longer claims "covers a whole window" and asserts only `LANDING_BATCH >= LANDING_ROUNDS * 10`. Code unchanged.
 - **LOW 3:** the mechanism is shown by intervention (N=1 red/green), not instrumentation; recorded under Unverified.
 - **LOW 4 (Notes):** re-attach / resync / Reopen start from `landingQuiet` (`settling: false`) and keep 10-row batches; a resync that re-keys a long list could show the same mid-growth travel on the shown list. Pre-existing, out of scope; follow-up candidate.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-25 (fresh context; executor claude-sonnet-5-5)*
+
+**Verdict: PASS** (two LOW nits, not blocking).
+
+**Gate (this tree, `45d7bc49`).** `bun run typecheck`: exit 0. `bun run lint`: 2395 files, clean. `bun run test`: **17886 pass / 5 skip / 0 fail** (17891 tests, 1254 files). That is round 1's 17885 plus the new wiring test. The round 1 one-off failure did not recur, and the 5 skips are unchanged and come from `main`.
+
+**MEDIUM 1 (wiring unpinned): fixed.** The new pin is in `session-screen-follow-wiring.test.ts:35-44`. Its baseline is 23 pass / 0 fail. I mutated `SessionScreen.tsx` in place three times and restored it after each; the final shasum matched.
+| Mutation | Result |
+|---|---|
+| prop removed | 1 fail |
+| `maxToRenderPerBatch={240}` (constant) | 1 fail |
+| `landingBatch(true)` (never drops to the default after reveal) | 1 fail |
+All three now fail, where round 1's prop removal gave 0 fail across 5022 tests. The `{0,200}` reach after `<FlatList` is tight: a prop added above `data` could break the test with no real fault. That is acceptable, because it fails loudly rather than silently.
+
+**MEDIUM 2 (false `windowSize` premise): fixed.** Design now cites `VirtualizeUtils.js:144-149` as the mechanism (the last `maxToRenderPerBatch + 1` rows render in one pass) and names its cost: a longer blank on slow devices with tall rows. Unverified lists that cost. The follow test no longer claims to cover the window.
+
+**LOW 3 / LOW 4:** recorded under Unverified and Notes, as asked.
+
+**Regressions.** No production code changed in this round (`git diff HEAD~1` touches only two test files and the doc). Mobile, typecheck, lint and the full gate are all green.
+
+**Nits (LOW, optional)**
+- Failure modes still opens with "Very long (1000+) sessions: the window, not the count, bounds rendering", which contradicts the corrected mechanism in the same section: the first pass is bounded by the count (241), not the window. The `follow.ts:257-264` comment ("the window … is complete in a few measurements") is loosely in the same vein.
+- The **Tests** line ends in a dangling `; `.
+- `LANDING_BATCH >= LANDING_ROUNDS * 10` still only constrains a constant. It is harmless now that the wiring is pinned.
+
+**Executor behaviour.** It addressed every finding in scope and did not touch code it did not need to. It showed its own red runs (prop `{10}` and prop removed), and my mutations reproduced them. Its account in Fix round 1 is accurate.
