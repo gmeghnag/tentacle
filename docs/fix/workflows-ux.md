@@ -1579,4 +1579,21 @@ call S5 made). The `fixed` fragment is the phone's and was left alone.
 **Not verified:** the orchestrator's full gate (`bun run check`) — run by the script after this, per the
 brief. Everything narrower is above, green.
 
+### Gate fix: the two test fixtures behind `next`/`onFail`/`retry` and `history`/`historyDropped`
+
+The orchestrator's gate (`bun run typecheck`) failed on two TEST helpers, not on production code. D1/S4
+made `WorkflowStepRow.next`/`onFail`/`retry` and `WorkflowRow.history`/`historyDropped` REQUIRED
+(`packages/agent/src/workflow-driver.ts:62-114`, mirrored by the protocol schemas), and two local row
+builders were never updated:
+
+- `packages/agent/test/workflow-status-line.test.ts` — the `step()` and `row()` builders now carry
+  `next: null`, `onFail: null`, `retry: 0` and `history: []`, `historyDropped: 0`.
+- `packages/daemon/test/workflow-hosted.test.ts:1177` — the `asking()` row's one `merge` step gets the
+  same three fields, and the row the same two.
+
+Fixture-only, no assertion changed and no production line touched: the fields are not read by either
+test, they only had to satisfy the types. `npx tsc --noEmit` (whole repo) → clean;
+`bun test packages/agent/test/workflow-status-line.test.ts` → 53 pass; `bun test
+packages/daemon/test/workflow-hosted.test.ts` → 32 pass; `bunx biome check` on the two files → clean.
+
 *— claude-sonnet-4-5 (exec), 2026-11-25*

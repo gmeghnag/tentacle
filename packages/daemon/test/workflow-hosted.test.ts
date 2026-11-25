@@ -1182,7 +1182,21 @@ const asking = (attempt: number, state = "needs-approval"): WorkflowRow => ({
   state: "running",
   tokens: 0,
   startedAt: 1,
-  steps: [{ id: "merge", kind: "approve", where: "local", state, attempt, round: 0 }],
+  history: [],
+  historyDropped: 0,
+  steps: [
+    {
+      id: "merge",
+      kind: "approve",
+      where: "local",
+      state,
+      attempt,
+      round: 0,
+      next: null,
+      onFail: null,
+      retry: 0,
+    },
+  ],
 });
 
 /** Let the wake's macrotask start its turn, and that turn end. */
