@@ -13,6 +13,7 @@ import {
   LogMessageEntrySchema,
   MessageWithoutAttachmentsSchema,
   WireChatMessageSchema,
+  type WireReasoningRecord,
   WireStreamEventSchema,
 } from "../src/index.ts";
 
@@ -32,15 +33,15 @@ const entry = (message: unknown) => ({
   message,
 });
 
-const openai = {
+const openai: WireReasoningRecord = {
   source: "openai:deepseek",
   body: { format: "openai", field: "reasoning_content", text: "I should list the dir first." },
 };
-const openaiAlt = {
+const openaiAlt: WireReasoningRecord = {
   source: "openai:qwen",
   body: { format: "openai", field: "reasoning", text: "Let me think." },
 };
-const anthropic = {
+const anthropic: WireReasoningRecord = {
   source: "anthropic:claude",
   body: {
     format: "anthropic",
@@ -94,7 +95,7 @@ describe("ChatMessage.reasoning", () => {
   });
 
   test("bounds are a guard, not a cap: a value over one is dropped whole, at the bound it is kept", () => {
-    const text = (n: number) => ({
+    const text = (n: number): WireReasoningRecord => ({
       source: "openai:m",
       body: { format: "openai", field: "reasoning", text: "x".repeat(n) },
     });
@@ -104,12 +105,12 @@ describe("ChatMessage.reasoning", () => {
     expect(
       ChatMessageSchema.parse({ ...reply, reasoning: text(MiB + 1) }).reasoning,
     ).toBeUndefined();
-    const source = (n: number) => ({ ...openai, source: "s".repeat(n) });
+    const source = (n: number): WireReasoningRecord => ({ ...openai, source: "s".repeat(n) });
     expect(ChatMessageSchema.parse({ ...reply, reasoning: source(256) }).reasoning).toEqual(
       source(256),
     );
     expect(ChatMessageSchema.parse({ ...reply, reasoning: source(257) }).reasoning).toBeUndefined();
-    const blocks = (n: number) => ({
+    const blocks = (n: number): WireReasoningRecord => ({
       source: "a:m",
       body: {
         format: "anthropic",
@@ -120,7 +121,7 @@ describe("ChatMessage.reasoning", () => {
       blocks(64),
     );
     expect(ChatMessageSchema.parse({ ...reply, reasoning: blocks(65) }).reasoning).toBeUndefined();
-    const big = (field: "thinking" | "signature" | "data") => ({
+    const big = (field: "thinking" | "signature" | "data"): WireReasoningRecord => ({
       source: "a:m",
       body: {
         format: "anthropic",
