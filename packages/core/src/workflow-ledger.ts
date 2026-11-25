@@ -92,7 +92,7 @@ export function workflowRunSeqFromHistory(messages: readonly ChatMessage[]): num
 }
 
 /** Throw unless `body` is a valid entry of `schema` (a dummy envelope stands in for the emitter's). */
-function judged<T extends object>(schema: z.ZodTypeAny, type: string, body: T): T {
+export function judged<T extends object>(schema: z.ZodTypeAny, type: string, body: T): T {
   const parsed = schema.safeParse({ ...body, type, seq: 1, id: "check/1", ts: 0 });
   if (!parsed.success) {
     const issue = parsed.error.issues[0];

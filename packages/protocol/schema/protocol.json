@@ -1828,6 +1828,7 @@
           "truncate": "#/$defs/LogTruncateEntry",
           "turn_end": "#/$defs/LogTurnEndEntry",
           "turn_start": "#/$defs/LogTurnStartEntry",
+          "unit_end": "#/$defs/LogUnitEndEntry",
           "usage": "#/$defs/LogUsageEntry",
           "workflow_end": "#/$defs/LogWorkflowEndEntry",
           "workflow_start": "#/$defs/LogWorkflowStartEntry",
@@ -1889,6 +1890,9 @@
         },
         {
           "$ref": "#/$defs/LogWorkflowEndEntry"
+        },
+        {
+          "$ref": "#/$defs/LogUnitEndEntry"
         }
       ]
     },
@@ -2529,6 +2533,80 @@
         }
       },
       "required": ["id", "seq", "ts", "turnId", "type"],
+      "type": "object"
+    },
+    "LogUnitEndEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "endedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "kind": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "native": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "result": {
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "resultDropped": {
+          "const": true,
+          "type": "boolean"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "startedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "unit_end",
+          "type": "string"
+        },
+        "unitId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["endedAt", "id", "kind", "native", "seq", "state", "ts", "type", "unitId"],
       "type": "object"
     },
     "LogUsageEntry": {

@@ -12,9 +12,19 @@
  * Every native word is a free string: a newer build's word never breaks a
  * reader (unknown → `working` if not ended, else `failed`).
  */
-import { type KnownLogEntry, projectEntry } from "@tentacle/protocol";
+import {
+  type KnownLogEntry,
+  type LogUnitEndEntry,
+  LogUnitEndEntrySchema,
+  UNIT_END_ID_MAX_CHARS,
+  UNIT_END_REASON_MAX_CHARS,
+  UNIT_END_RESULT_MAX_CHARS,
+  UNIT_END_WORD_MAX_CHARS,
+  projectEntry,
+} from "@tentacle/protocol";
 import { capSubagentText } from "./agent-job-ledger.ts";
 import type { ChatMessage } from "./model.ts";
+import { judged } from "./workflow-ledger.ts";
 
 export type WorkUnitKind = "turn" | "workflow";
 export type WorkUnitState = "working" | "waiting" | "completed" | "failed" | "canceled";
@@ -44,23 +54,12 @@ export interface WorkUnit {
 export const WORK_UNIT_MAX_ENDED = 256;
 /** All retained results together (UTF-16 code units, like every cap here), newest first. */
 export const WORK_UNIT_RESULTS_BUDGET_CHARS = 256 * 1024;
-export const WORK_UNIT_RESULT_MAX_CHARS = 16 * 1024;
-export const WORK_UNIT_REASON_MAX_CHARS = 2 * 1024;
+/** The entry's own bounds: protocol is the one truth (it cannot import core). */
+export const WORK_UNIT_RESULT_MAX_CHARS = UNIT_END_RESULT_MAX_CHARS;
+export const WORK_UNIT_REASON_MAX_CHARS = UNIT_END_REASON_MAX_CHARS;
 
-/** A carried ended unit, as a segment holds it. Every word is free: see the module comment. */
-export interface CarriedUnitEntry {
-  readonly type: "unit_end";
-  readonly kind: string;
-  readonly unitId: string;
-  readonly origin?: string | undefined;
-  readonly state: string;
-  readonly native: string;
-  readonly reason?: string | undefined;
-  readonly startedAt?: number | undefined;
-  readonly endedAt: number;
-  readonly result?: string | undefined;
-  readonly resultDropped?: true | undefined;
-}
+/** A carried ended unit, as a segment holds it (the entry without its envelope). Every word is free. */
+export type CarriedUnitEntry = Omit<LogUnitEndEntry, "seq" | "id" | "prev" | "ts" | "critical">;
 /** What a `unit_end` entry carries (the payload, without its envelope). */
 export type UnitEndBody = Omit<CarriedUnitEntry, "type">;
 
@@ -242,24 +241,33 @@ export function boundEndedUnits(units: readonly WorkUnit[]): WorkUnit[] {
   return kept;
 }
 
-/** The `unit_end` body that carries an ENDED unit into a new segment, every text capped. */
+/** A short identifying word: cut, never a cut line (noise in a label). `""` → `"unknown"`. */
+function word(text: string, max = UNIT_END_WORD_MAX_CHARS): string {
+  return text === "" ? "unknown" : text.slice(0, max);
+}
+
+/**
+ * The `unit_end` body that carries an ENDED unit into a new segment: every text
+ * capped, then judged by the entry's schema (a malformed KNOWN entry makes a
+ * reader refuse the whole log, so an invalid body throws here, never on disk).
+ */
 export function unitEndBody(ended: WorkUnit): UnitEndBody {
   if (!TERMINAL.has(ended.state) || ended.endedAt === undefined) {
     throw new Error(`unit_end: ${ended.kind} ${ended.id} is not ended`);
   }
   const result = cappedResult(ended.result);
-  return {
+  return judged(LogUnitEndEntrySchema, "unit_end", {
     kind: ended.kind,
-    unitId: ended.id,
+    unitId: word(ended.id, UNIT_END_ID_MAX_CHARS),
     ...(ended.origin !== undefined ? { origin: ended.origin } : {}),
     state: ended.state,
-    native: ended.native,
+    native: word(ended.native),
     ...(ended.reason !== undefined ? { reason: oneLine(ended.reason) } : {}),
     ...(ended.startedAt !== undefined ? { startedAt: ended.startedAt } : {}),
     endedAt: ended.endedAt,
     ...(result !== undefined ? { result } : {}),
     ...(ended.resultDropped === true ? { resultDropped: true as const } : {}),
-  };
+  });
 }
 
 /** A carried entry back as a unit; `undefined` for a kind this build does not know. */

@@ -687,4 +687,75 @@ three changed TS files clean; `tsc --noEmit` limited to `core/src/index.ts` and
 the new test clean. The full `bun run check` was NOT run: the orchestrator's
 script runs it.
 
+### S1-unit-end-entry — DONE
+
+*— claude-opus-5-5, 2026-11-25*
+
+**Load-bearing check re-run first** (`bun .tentacle/tmp/a2a/seam.ts`): HOLDS,
+the same five lines as above.
+
+**As built:**
+- `packages/protocol/src/session-log.ts` — `LogUnitEndEntrySchema` (skippable,
+  every word a bounded free string: `kind`/`state`/`native` ≤ 128, `unitId`
+  ≤ 128, `origin` = `TurnIdSchema`, `reason` ≤ 2 KiB, `result` ≤ 16 KiB,
+  `startedAt?`/`endedAt` non-negative ints, `resultDropped?: true`) + the
+  `UNIT_END_*_MAX_CHARS` constants; added to `KnownLogEntrySchema` and to
+  `LOG_ENTRY_CRITICAL` as `false`; module comment.
+- `packages/core/src/work-unit.ts` — the bounds and `CarriedUnitEntry` now come
+  from protocol (one copy, as S0 asked: `WORK_UNIT_RESULT/REASON_MAX_CHARS`
+  alias the protocol constants; `CarriedUnitEntry` = the entry minus its
+  envelope). `unitEndBody` now cuts `unitId`/`native` to their bounds and
+  judges the body by the schema (throws, never writes an invalid entry).
+- `packages/core/src/workflow-ledger.ts` — `judged` exported (reused, not copied).
+- `packages/daemon/src/session-log.ts` — `SessionLog.unitEnd(body)`, like `workflowEnd`.
+- `packages/protocol/schema/protocol.json` regenerated (`bun run schema:export`).
+- `packages/protocol/test/session-log.test.ts` — the critical-table pin gains `unit_end: false`.
+- Tests: `packages/protocol/test/session-log-unit-end.test.ts` (non-critical,
+  parses at every cap, one over each cap refused, documented bounds pinned,
+  unknown words parse, required shapes, projects nothing);
+  `packages/daemon/test/session-log-unit-end.test.ts` (writer emits a
+  non-critical known entry; disk round trip `SessionLog` → `entryLines` →
+  `parseLogFile` → `unitsFromSegment` gives the identical unit; an older reader
+  — the same file with the type renamed to one it does not know — skips 1 line
+  and projects the same history; the emitter caps words and throws on a body
+  the schema refuses).
+- No changelog change: S0's `changelog.d/a2a.added.md` is the task's one
+  fragment; S1 has no user-visible effect of its own.
+
+**Drift from Implementation:**
+- The "older reader skips it" test lives in the DAEMON test, not protocol's:
+  the file parser (`parseLogFile`) is the daemon's; protocol has no reader.
+- `judged` is now a core export (it rides `export *` from `workflow-ledger.ts`).
+- No `protocol.d/` note, no `PROTOCOL_VERSION` bump: a new non-critical type,
+  as the plan says.
+
+**Note for S2:** `unitEndBody` THROWS on a body the schema refuses. Its inputs
+come from parsed entries (so `origin` is already a valid `TurnId`), but the
+carry in `logSegmentFacts` should still not let one bad unit abort a segment
+start: skip it (and say so) rather than throw.
+
+**Red before green:** mutation R0 below (no `unit_end` in the known union, i.e.
+the code before this slice) → 6 fail; then all green.
+
+**Mutations** (`.tentacle/tmp/a2a/mutate-s1.ts`, each restored; all 9 killed):
+
+| Mutation | Fails |
+|---|---|
+| R0 `unit_end` not in the known union | 6 |
+| M1 `unit_end: true` in the critical table | 1 |
+| M2 the writer marks it `critical: true` | 4 |
+| M3 result cap 64 KiB | 1 (after pinning the documented bounds; it survived before) |
+| M4 `kind` an enum | 4 |
+| M5 `native` a `WorkflowWordSchema` | 5 |
+| M6 the emitter does not cut words | 1 |
+| M7 the emitter does not judge | 1 |
+| M8 `origin` unbounded | 2 |
+
+**Gate (narrow):** `bun test` on the two new files + protocol
+`session-log`/`json-schema`/`forward-compat`, daemon `session-log`/`session-log-file`,
+core `work-unit`/`workflow-ledger`, client `session-log-reader` → 182 pass / 0
+fail; `biome check` on the 8 changed files clean; `tsc` limited to the changed
+modules and tests (`.tentacle/tmp/a2a/tsconfig.s1.json`) clean. Full `bun run
+check` NOT run (the orchestrator's script runs it).
+
 ## Review
