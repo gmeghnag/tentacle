@@ -9,7 +9,7 @@
     "apps/mobile/src/screens/transcript/TranscriptRow.tsx": "04e443f0bac5ef63f0a9f936a12ec5b52ee2c7ae",
     "apps/mobile/src/step-rail.ts": "83bd11f3b10e19be6edd27a835ef90252f69f46e",
     "apps/mobile/src/theme-beta.ts": "2359c83e90604bd9bd7625702ae21337499290d2",
-    "apps/mobile/src/theme.ts": "21e4c775d07043924a727890452b854b82c966d4",
+    "apps/mobile/src/theme.ts": "77bfa592e2bb2bee950a9936e2ce566002976edf",
     "apps/mobile/src/thinking-motion.ts": "4fd5a2e149a69bb6c58326516420a74efc077eaa",
     "apps/mobile/src/tool-steps.ts": "0d019463789d10c05fff693841e785e422a8b36b",
     "apps/mobile/src/ui/BandSection.tsx": "7b65870db2faa7a51663560d2641476973ed7b2a",
@@ -241,7 +241,18 @@
       "delStrong": "#F6C4CA",
       "delText": "#9F1020",
       "dash": "#8E8E93",
-      "switchOff": "#C7C7CC"
+      "switchOff": "#C7C7CC",
+      "wrOkSoft": "#e2efe5",
+      "wrOkInk": "#2e6a3f",
+      "wrFailSoft": "#f6e4e9",
+      "wrFailInk": "#9a3b55",
+      "wrRunSoft": "#dfedf0",
+      "wrRunInk": "#1f6272",
+      "wrAskSoft": "#f3ebdd",
+      "wrAskInk": "#7f5527",
+      "wrWaitSoft": "#ececef",
+      "wrWaitInk": "#6c6c71",
+      "wrSkipInk": "#78787d"
     },
     "dark": {
       "bg": "#1E1F21",
@@ -286,7 +297,18 @@
       "delStrong": "#64222B",
       "delText": "#FFA3A8",
       "dash": "#636366",
-      "switchOff": "#434448"
+      "switchOff": "#434448",
+      "wrOkSoft": "#25352a",
+      "wrOkInk": "#a3d2b0",
+      "wrFailSoft": "#3a272d",
+      "wrFailInk": "#e9aabb",
+      "wrRunSoft": "#20343a",
+      "wrRunInk": "#94d0dd",
+      "wrAskSoft": "#3a3126",
+      "wrAskInk": "#e3c493",
+      "wrWaitSoft": "#2f3034",
+      "wrWaitInk": "#a6a9ae",
+      "wrSkipInk": "#8f9297"
     },
     "petrol": {
       "bg": "#151B1D",
@@ -331,7 +353,18 @@
       "delStrong": "#64222B",
       "delText": "#FFA3A8",
       "dash": "#636366",
-      "switchOff": "#3A4043"
+      "switchOff": "#3A4043",
+      "wrOkSoft": "#25352a",
+      "wrOkInk": "#a3d2b0",
+      "wrFailSoft": "#3a272d",
+      "wrFailInk": "#e9aabb",
+      "wrRunSoft": "#20343a",
+      "wrRunInk": "#94d0dd",
+      "wrAskSoft": "#3a3126",
+      "wrAskInk": "#e3c493",
+      "wrWaitSoft": "#2f3034",
+      "wrWaitInk": "#a6a9ae",
+      "wrSkipInk": "#8f9297"
     }
   },
   "tui": {

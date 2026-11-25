@@ -1072,3 +1072,87 @@ bun test scripts/test/changelog-guard.test.ts           →  5 pass, 0 fail
 ```
 
 *— deepseek-v4-pro (tentacle executor), 2026-11-25*
+
+### Slice S6a — Phone layout + markers + tokens
+
+**Load-bearing re-check (PARTIAL rule), run first:** `git ls-tree main --name-only
+apps/mobile/src/workflow-edit-graph.ts` → `apps/mobile/src/workflow-edit-graph.ts` (the editor's slice 5 is
+on `main`); `rg -c "function sideFlags" apps/mobile/src/workflow-edit-graph.ts` → `1` (the derived
+spine/side rule exists); `rg -n "onFail" packages/protocol/src/session.ts` → `:856`, inside
+`WorkflowStepRowSchema` (S5's premise). **Passed** — S6a runs rather than stopping.
+
+**Red first (mutation form, §9).** The two modules are NEW, so "red on the old code" is shown the way the
+plan prescribes: write the tests, then break the exact property each names and confirm the NAMED test — not
+an import — goes red. Five mutations, each applied to the finished module, run, reverted:
+
+| # | Mutation (the property removed) | Red |
+|---|---|---|
+| 1 | `column = spine.has(id) ? "spine" : "side"` → `"spine"` (place by file index) | **5 fail**: `demo-note: the spine is the pass path, and fix is in the SIDE column`; `mutation check: placing by FILE index puts fix on the spine`; `no two pills can overlap` (demo-note / 64 steps / 200 seeded shapes) |
+| 2 | chips pinned on their source pill instead of `freeSpot` | 1 fail: `every chip is clear of every pill` |
+| 3 | `vertical()` returns `y1-4 → y2-4` (edges stop short of the boxes) | 1 fail: `demo-note's edges all touch both pills` |
+| 4 | `later` given a glyph again (`circle.dashed`) | 4 fail: the plain-disc test, the glyphless list, the `IconName` list, "read by its ring only" |
+| 5 | every phase's `soft` → one shared grey (`wrWaitSoft`) | 1 fail: `mutation check: the marker colours are per-phase, not one shared grey` |
+
+Mutation 1 is the plan's own named target (`place by file index → fix on the spine → red`); it also proves
+the overlap property is not vacuous. Mutation 5 was added because without it the contrast test passes on a
+one-colour table and the owner's colour-blind rule would rest on the glyph alone.
+
+**As built.**
+
+- `apps/mobile/src/workflow-run-layout.ts` (new, pure, React-free) — the run graph as GEOMETRY:
+  `runLayout(row)` takes the S5 projection and returns pills + edges + chips. Placement is **derived from
+  the definition**, never the mockup's ids: the spine is everything the run's PASS path (`next`) reaches
+  from the first step; a `goto` target (or anything the pass path cannot reach) sits in the side column,
+  its row ≥ its first entering source's row + 1; a back `next` is an arc on its own lane in the columns'
+  gap. Constants are `final-v3.html`'s own (`SP {x16,w200}`, `BR {x244,w142}`, `TOP 18`, `PITCH 72`,
+  `H 44`), scaled into the 318 pt logical space exactly as `workflow-edit-graph.ts` already does, so the
+  two graphs share one scale. Chips (`✗ taken/max`, `↻ attempt/retry`) take their box from `freeSpot`,
+  which steps down in `CHIP_H` increments until the box holds no pill — "outside the pills" is a fold,
+  not a guess.
+- `apps/mobile/src/workflow-marker.ts` (new, pure) — D4's table: `markerLook(phase, palette)` and
+  `markerFor(view, palette)`. `ok` checkmark, `error` `multiply` (owner's `error-icon.html`), `running`
+  `play.fill`, `ask` `questionmark`, `stopped` `stop.fill`, `skipped` `chevron.forward.2` in a dotted ring
+  with no body, and **`later`/`unknown` carry no glyph at all** (the owner's plain disc). `markerFor` takes
+  the step's OWN word from S5's `WorkflowStepView.word` (`approved`, `passed`, an unknown wire word
+  verbatim). `MARKER_SIZE = {pill: 26, rail: 18, hero: 32}`, `WR_GLYPH = 0.54`.
+- `apps/mobile/src/theme.ts` — eleven `wr*` tokens on `Palette` (five soft bodies, five inks, `wrSkipInk`),
+  light and dark from `markers-v2.html`; petrol inherits `dark`'s, as the mockup draws it.
+- `apps/mobile/src/ui/Icon.tsx` — `multiply`, `questionmark`, `play.fill`, `chevron.forward.2` added to
+  `IconName`, each verified present in `sf-symbols-typescript@2.2.0`.
+- `tools/mockup-kit/generated/{tokens.css,kit-data.json}` — regenerated (`bun run mockup-kit`): the palette
+  is a source of the kit, so the drift test is red without it.
+
+**Drift from the Implementation.**
+
+1. **Two files, not one.** The Files table names a single `workflow-run-layout.ts` carrying "layout +
+   markers". They are separate modules because the marker is read by the pill, the rail AND the hero, while
+   the layout is only the graph — folding them would make every rail and hub import the graph constants.
+2. **`workflow-graph.ts` is left alive.** The plan reads as if the run graph replaces it; in fact 2A's card
+   strip and `workflow-step-detail.ts`'s hero (`graphGeometry`) still read it, and S6b/S7 own their
+   migration. S6a adds the new layout beside it rather than deleting a module S6b still calls — the
+   deletion belongs to the slice that moves its last caller.
+3. **The glyph-on-soft floor is 4.4:1 (light) / 5.2:1 (dark), not 4.5:1.** `waiting`'s ink sits at
+   4.429:1 on its soft body, which is the mockup's stated and owner-approved ratio for a GRAPHIC (WCAG
+   1.4.11 asks 3:1). Pinned at the mockup's numbers rather than a stricter guess that would have forced a
+   palette colour the owner never approved.
+4. **No screen wiring in this slice.** S6a is geometry + tokens + markers; `screens/WorkflowRun.tsx` maps
+   them in S6b (graph A render), as the slices table says.
+
+**Narrow verification.**
+
+```
+bun test apps/mobile/test/workflow-run-layout.test.ts        →  16 pass, 0 fail
+bun test apps/mobile/test/workflow-marker.test.ts            →  18 pass, 0 fail
+bun test scripts/test/mockup-kit.test.ts                     →  37 pass, 0 fail  (after `bun run mockup-kit`)
+bun test apps/mobile/test/theme.test.ts                      → 153 pass, 0 fail
+bun test apps/mobile/test/workflow-screens-wiring.test.ts apps/mobile/test/hub-workflows-wiring.test.ts → 12 pass, 0 fail
+bun test scripts/test/changelog-guard.test.ts                →   5 pass, 0 fail
+bunx tsc -p apps/mobile --noEmit                             → clean
+bunx biome check <the 6 changed/added files>                 → clean
+```
+
+**Not verified:** the full gate (`bun run check`) — the orchestrator's script runs it. No schema changed, so
+`protocol.json` needs no regeneration and no `protocol.d` note is due; the changelog fragment is
+`changelog.d/workflows-ux-run-layout.added.md`.
+
+*— Claude Sonnet 4.5 (tentacle executor), 2026-11-25*

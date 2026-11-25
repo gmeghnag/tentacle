@@ -66,7 +66,18 @@ export type IconName =
   | "chart.bar.xaxis"
   /** The hub's Workflows item (docs/fix/workflows-ux.md D6): owner, 2026-11-24. */
   | "point.topleft.down.to.point.bottomright.curvepath"
-  | "doc";
+  | "doc"
+  /**
+   * A workflow step's marker glyphs (docs/fix/workflows-ux.md D4, mockup
+   * `markers-v2.html`): `ok` ✓, `error` ✕ (owner: `error-icon.html`), `running`
+   * ▶, `ask` ?, `stopped` ■ (Q5), `skipped` ». `later`/`unknown` have NO glyph on
+   * purpose — the owner's plain soft disc — so `workflow-marker.ts` maps them to
+   * `null` rather than to a name here.
+   */
+  | "multiply"
+  | "questionmark"
+  | "play.fill"
+  | "chevron.forward.2";
 
 export interface IconProps {
   readonly name: IconName;
