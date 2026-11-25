@@ -24,6 +24,9 @@ import {
   HubHello,
   HubOp,
   NativeDecoder,
+  NetEvent,
+  type NetRecord,
+  NetRing,
   Ownership,
   encodeNative,
 } from "@tentacle/browser";
@@ -33,7 +36,7 @@ import { ByteFramer } from "@tentacle/transport";
 const SUN_PATH_MAX = 103;
 export const CHROME_CLOSED_MESSAGE =
   "Chrome closed during the action — it may or may not have happened";
-export const NO_EXTENSION_MESSAGE = "Chrome isn't running with the tentacle extension";
+export { NO_EXTENSION_MESSAGE } from "@tentacle/browser";
 export const VERSION_MESSAGE = "browser link version mismatch — run `tentacle browser install`";
 
 export function browserDir(configDir: string): string {
@@ -99,6 +102,9 @@ export function createHub(options: HubOptions): Hub {
   const sock = hubSocketPath(options.configDir);
   const timeoutMs = options.opTimeoutMs ?? 30_000;
   const ownership = new Ownership();
+  // Traced traffic per tab (2 000 entries / 8 MiB each): pulled by the owner
+  // with `net list|get`, never broadcast — it is page data (D1).
+  const rings = new Map<number, NetRing<Omit<NetRecord, "seq">>>();
   const conns = new Set<Conn>();
   const pending = new Map<number, Pending>();
   let nextId = 1;
@@ -158,10 +164,49 @@ export function createHub(options: HubOptions): Hub {
       ownership.addTab(m.sessionUid, m.tab, true);
       return;
     }
+    if (m.event === "net") {
+      const net = NetEvent.safeParse(m);
+      if (!net.success) return;
+      let ring = rings.get(net.data.tab);
+      if (ring === undefined) {
+        ring = new NetRing();
+        rings.set(net.data.tab, ring);
+      }
+      const item = { tier: net.data.tier, entry: net.data.entry };
+      ring.push(item, JSON.stringify(item.entry).length);
+      return;
+    }
     const ev = HubEvent.safeParse(m);
     if (!ev.success) return;
-    if (ev.data.event === "tab_closed") ownership.dropTab(ev.data.tab);
+    if (ev.data.event === "tab_closed") {
+      ownership.dropTab(ev.data.tab);
+      rings.delete(ev.data.tab);
+    }
     broadcast(ev.data);
+  }
+
+  /** `net list|get`: answered from the ring, after the ownership check. */
+  function fromRing(op: Extract<HubOp, { op: "net" }>): Record<string, unknown> {
+    const ring = rings.get(op.tab);
+    if (op.action === "get") {
+      const hit = op.seq === undefined ? undefined : ring?.get(op.seq);
+      if (hit === undefined) {
+        return {
+          ok: false,
+          error: `no network entry #${op.seq ?? "?"} (evicted or never recorded)`,
+        };
+      }
+      return { ok: true, result: { seq: hit.seq, ...hit.item } };
+    }
+    const page = ring?.list(op.cursor ?? 0, op.limit ?? 100);
+    return {
+      ok: true,
+      result: {
+        entries: (page?.entries ?? []).map((e) => ({ seq: e.seq, ...e.item })),
+        next: page?.next ?? op.cursor ?? 0,
+        dropped: page?.dropped ?? 0,
+      },
+    };
   }
 
   function onOp(conn: Conn, reqId: number, op: HubOp): void {
@@ -171,6 +216,10 @@ export function createHub(options: HubOptions): Hub {
     const refused = refusal(c, op);
     if (refused !== undefined) {
       send(conn, { id: reqId, ok: false, error: refused });
+      return;
+    }
+    if (op.op === "net" && (op.action === "list" || op.action === "get")) {
+      send(conn, { id: reqId, ...fromRing(op) });
       return;
     }
     // The extension supplies titles/origins; the hub says which tabs are ours.
@@ -287,6 +336,7 @@ export function createHub(options: HubOptions): Hub {
       for (const id of [...pending.keys()]) settle(id, { ok: false, error: CHROME_CLOSED_MESSAGE });
       broadcast({ event: "chrome_closed" });
       ownership.reset();
+      rings.clear();
       await hubApi.stop();
     },
     async stop() {

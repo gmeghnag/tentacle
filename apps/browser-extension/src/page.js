@@ -7,7 +7,53 @@
   const INTERACTIVE =
     'a[href],button,input,select,textarea,summary,[role="button"],[role="link"],[contenteditable=""],[contenteditable="true"]';
 
-  function createPage(doc) {
+  // The page's console + JS errors: a bounded ring, read ONLY by an owned tab's
+  // `console` op (docs/feat/browser-inspect.md B4). Entries come from the
+  // MAIN-world hook (console-hook.js, injected into owned tabs) or, until it
+  // speaks, from this script's own `error` / `unhandledrejection` listeners.
+  const LOG_MAX = 300;
+  const TEXT_MAX = 2000;
+  const STACK_MAX = 4000;
+
+  function createLog() {
+    const entries = [];
+    let seq = 0;
+    let first = 0;
+    let hooked = false;
+    return {
+      push(e) {
+        if (e?.level === "hook") {
+          hooked = true;
+          return;
+        }
+        entries.push({
+          seq: seq++,
+          level: String(e?.level ?? "log").slice(0, 20),
+          text: String(e?.text ?? "").slice(0, TEXT_MAX),
+          ...(e?.stack ? { stack: String(e.stack).slice(0, STACK_MAX) } : {}),
+        });
+        while (entries.length > LOG_MAX) {
+          entries.shift();
+          first++;
+        }
+      },
+      /** Own listeners only fill in while the MAIN hook is absent (no duplicates). */
+      get hooked() {
+        return hooked;
+      },
+      list(cursor = 0) {
+        const out = entries.filter((e) => e.seq >= cursor);
+        return {
+          entries: out,
+          next: seq,
+          dropped: Math.max(0, first - cursor),
+          hooked,
+        };
+      },
+    };
+  }
+
+  function createPage(doc, log = createLog()) {
     const refs = new Map(); // ref -> element
     const ids = new WeakMap(); // element -> ref
     let next = 1;
@@ -158,15 +204,33 @@
         if (msg.kind === "read") return read(msg);
         if (msg.kind === "click") return click(msg);
         if (msg.kind === "type") return type(msg);
+        if (msg.kind === "console") return { value: log.list(msg.cursor ?? 0) };
         return { error: `unknown page op ${msg.kind}` };
       },
     };
   }
 
   globalThis.__tentacleCreatePage = createPage;
+  globalThis.__tentacleCreateLog = createLog;
   if (typeof chrome !== "undefined" && chrome.runtime?.onMessage && globalThis.document) {
     if (!globalThis.__tentaclePage) {
-      globalThis.__tentaclePage = createPage(globalThis.document);
+      const log = createLog();
+      globalThis.document.addEventListener("__tentacle_console", (e) => {
+        try {
+          log.push(JSON.parse(String(e.detail)));
+        } catch {
+          // not ours
+        }
+      });
+      globalThis.addEventListener("error", (e) => {
+        if (!log.hooked) {
+          log.push({ level: "exception", text: e.message, stack: `${e.filename}:${e.lineno}` });
+        }
+      });
+      globalThis.addEventListener("unhandledrejection", (e) => {
+        if (!log.hooked) log.push({ level: "rejection", text: String(e.reason) });
+      });
+      globalThis.__tentaclePage = createPage(globalThis.document, log);
       chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
         if (msg?.target !== "tentacle-page") return false;
         reply(globalThis.__tentaclePage.handle(msg));

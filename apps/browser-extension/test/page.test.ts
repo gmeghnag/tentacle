@@ -106,3 +106,31 @@ describe("page logic", () => {
     expect(r.typed).not.toContain("s3cret");
   });
 });
+
+describe("page console ring (B4)", () => {
+  test("bounded at 300 with an honest dropped count; cursor paging; long text capped", () => {
+    const log = (globalThis as Any).__tentacleCreateLog();
+    const p = create({ ...docOf([]) }, log);
+    for (let i = 0; i < 305; i++) log.push({ level: "log", text: `m${i}` });
+    const all = p.handle({ kind: "console" }).value;
+    expect(all.entries).toHaveLength(300);
+    expect(all.entries[0].text).toBe("m5");
+    expect(all.dropped).toBe(5);
+    expect(all.next).toBe(305);
+    const tail = p.handle({ kind: "console", cursor: 303 }).value;
+    expect(tail.entries.map((e: Any) => e.text)).toEqual(["m303", "m304"]);
+    expect(tail.dropped).toBe(0);
+    log.push({ level: "error", text: "x".repeat(5000), stack: "s".repeat(9000) });
+    const last = p.handle({ kind: "console", cursor: 305 }).value.entries[0];
+    expect(last.text).toHaveLength(2000);
+    expect(last.stack).toHaveLength(4000);
+  });
+
+  test("the hook's hello marks it hooked and is not an entry", () => {
+    const log = (globalThis as Any).__tentacleCreateLog();
+    expect(log.hooked).toBe(false);
+    log.push({ level: "hook", text: "" });
+    expect(log.hooked).toBe(true);
+    expect(log.list().entries).toEqual([]);
+  });
+});

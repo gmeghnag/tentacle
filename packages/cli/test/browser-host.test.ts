@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BROWSER_EXTENSION_ID, BROWSER_LINK_VERSION, NativeDecoder } from "@tentacle/browser";
@@ -248,5 +248,72 @@ describe("browser hub: failure modes", () => {
     links.push(l);
     await expect(l.call({ op: "tabs", sessionUid: "s1" })).rejects.toThrow(NO_EXTENSION_MESSAGE);
     silent.close();
+  });
+});
+
+describe("browser hub: the per-tab network ring (B4)", () => {
+  async function claimed(c: ReturnType<typeof fakeChrome>, daemonId: string, sessionUid: string) {
+    const l = link(daemonId);
+    const before = c.sent.length;
+    const p = l.call({ op: "claim", sessionUid, title: "T" });
+    await until(() => c.sent.length === before + 1);
+    c.reply({ id: c.sent[before]?.id, ok: true, result: {} });
+    await p;
+    return l;
+  }
+
+  test("a traced request reaches ONLY its owner, by pull: never broadcast to another daemon (D1)", async () => {
+    const c = fakeChrome();
+    await c.hub.start();
+    const mine = await claimed(c, "d1", "s1");
+    const other = await claimed(c, "d2", "s2");
+    // Another daemon's RAW bytes: what reaches its socket, not what its link parses.
+    const raw = createConnection(hubSocketPath(dir));
+    let bytes = "";
+    raw.on("data", (d) => {
+      bytes += d.toString();
+    });
+    raw.write(`${JSON.stringify({ version: BROWSER_LINK_VERSION, daemonId: "d3" })}\n`);
+    await until(() => bytes.includes('"ok":true'));
+    c.hub.ownership.addTab("s1", 5);
+    const entry = { url: "https://a.test/x?token=SECRET", method: "GET", status: 200 };
+    c.reply({ event: "net", tab: 5, tier: "headers", entry });
+    // A later broadcast proves the stream was flushed past the net event.
+    c.reply({ event: "tab_closed", tab: 99 });
+    await until(() => bytes.includes("tab_closed"));
+    raw.destroy();
+    expect(bytes).not.toContain("SECRET");
+    const page = (await mine.call({ op: "net", sessionUid: "s1", tab: 5, action: "list" })) as {
+      entries: { seq: number; tier: string; entry: unknown }[];
+      dropped: number;
+    };
+    expect(page.entries).toEqual([{ seq: 0, tier: "headers", entry }]);
+    expect(page.dropped).toBe(0);
+    expect(await mine.call({ op: "net", sessionUid: "s1", tab: 5, action: "get", seq: 0 })).toEqual(
+      { seq: 0, tier: "headers", entry },
+    );
+    // Another session cannot pull it either: the tab check runs first.
+    await expect(
+      other.call({ op: "net", sessionUid: "s2", tab: 5, action: "list" }),
+    ).rejects.toThrow(/belongs to another session/);
+    // list/get are answered by the hub itself: no net op reached Chrome.
+    expect(c.sent.filter((m) => m.op === "net")).toEqual([]);
+  });
+
+  test("a closed tab's ring is dropped; an evicted seq says so", async () => {
+    const c = fakeChrome();
+    await c.hub.start();
+    const l = await claimed(c, "d1", "s1");
+    c.hub.ownership.addTab("s1", 5);
+    c.reply({ event: "net", tab: 5, tier: "headers", entry: { url: "https://a.test/" } });
+    await expect(
+      l.call({ op: "net", sessionUid: "s1", tab: 5, action: "get", seq: 7 }),
+    ).rejects.toThrow(/no network entry #7/);
+    c.reply({ event: "tab_closed", tab: 5 });
+    c.hub.ownership.addTab("s1", 5);
+    const page = (await l.call({ op: "net", sessionUid: "s1", tab: 5, action: "list" })) as {
+      entries: unknown[];
+    };
+    expect(page.entries).toEqual([]);
   });
 });

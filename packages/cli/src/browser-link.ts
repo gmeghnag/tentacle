@@ -4,10 +4,39 @@
  * and reports `status()` for a UI. The worker and `serve` share this one
  * module; the `browser_*` tools (B4) will call `call()`.
  */
+import { spawn } from "node:child_process";
 import { type Socket, createConnection } from "node:net";
+import { redactText } from "@tentacle/agent";
 import { BROWSER_LINK_VERSION, HUB_MAX_LINE_BYTES, HubEvent, type HubOp } from "@tentacle/browser";
+import { type BrowserToolset, createBrowserToolset } from "@tentacle/tools";
 import { ByteFramer } from "@tentacle/transport";
 import { NO_EXTENSION_MESSAGE, hubSocketPath } from "./browser-host.ts";
+
+/** Q6: start Chrome in the background (`open -g`), macOS only; detached, output ignored. */
+export function launchChrome(): Promise<void> {
+  const child = spawn("open", ["-g", "-a", "Google Chrome"], { stdio: "ignore", detached: true });
+  child.on("error", () => {});
+  child.unref();
+  return Promise.resolve();
+}
+
+/**
+ * The daemon's ONE browser toolset over its link (docs/feat/browser-inspect.md
+ * B4): per-session masking keys and leases live here, so an agent rebuilt by
+ * a settings change keeps them. The generic `redactText` runs last on every
+ * text the tools return, whatever `tools.redactSecrets` says.
+ */
+export function browserToolsetOf(
+  link: Pick<BrowserLink, "call">,
+  launch: (() => Promise<void>) | undefined = process.platform === "darwin"
+    ? launchChrome
+    : undefined,
+): BrowserToolset {
+  return createBrowserToolset({
+    backend: { call: (op) => link.call(op), ...(launch !== undefined ? { launch } : {}) },
+    textNet: (text) => redactText(text),
+  });
+}
 
 export type BrowserLinkStatus =
   | { readonly state: "idle" }

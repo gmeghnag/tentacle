@@ -52,7 +52,12 @@ function setup(tabsInfo: Record<number, Any> = {}) {
     },
   };
   let tid = 0;
+  const scaled: unknown[] = [];
   const ops = createOps({
+    scale: (async (b64: string, maxEdge?: number) => {
+      scaled.push(maxEdge);
+      return `${b64}@${maxEdge ?? "full"}`;
+    }) as never,
     // biome-ignore lint/suspicious/noExplicitAny: fake chrome
     chrome: chrome as any,
     send: (m: Any) => sent.push(m),
@@ -65,7 +70,7 @@ function setup(tabsInfo: Record<number, Any> = {}) {
       if (i >= 0) timers.splice(i, 1);
     }) as never,
   });
-  return { ops, sent, calls, timers, tabsInfo };
+  return { ops, sent, calls, timers, tabsInfo, chrome: chrome as Any, scaled };
 }
 
 const claim = (ops: ReturnType<typeof setup>["ops"]) =>
@@ -180,5 +185,97 @@ describe("browser extension ops", () => {
     await claim(ops);
     expect(ops.handover("s1", 3)).toBe(true);
     expect(sent).toContainEqual({ event: "handover", sessionUid: "s1", tab: 3 });
+  });
+});
+
+describe("browser extension ops: read-only tools (B4)", () => {
+  test("shot of the ACTIVE tab uses captureVisibleTab — no debugger, no infobar", async () => {
+    const s = setup({ 5: { id: 5, url: "https://a.test/", active: true, windowId: 2 } });
+    (s.chrome.tabs as Any).captureVisibleTab = async (w: number) => {
+      s.calls.push(`capture ${w}`);
+      return "data:image/jpeg;base64,QUJD";
+    };
+    const r = await s.ops.handle({ op: "shot", sessionUid: "s1", tab: 5, maxEdge: 768 });
+    expect(r).toEqual({
+      ok: true,
+      result: { mimeType: "image/jpeg", data: "QUJD@768", via: "visible" },
+    });
+    expect(s.calls).toEqual(["capture 2"]);
+  });
+
+  test("shot of a BACKGROUND tab attaches the debugger on demand (Page.captureScreenshot)", async () => {
+    const s = setup({ 5: { id: 5, url: "https://a.test/", active: false } });
+    (s.chrome.debugger as Any).sendCommand = async (t: Any, m: string) => {
+      s.calls.push(`cmd ${t.tabId} ${m}`);
+      return m === "Page.captureScreenshot" ? { data: "WFla" } : undefined;
+    };
+    const r = await s.ops.handle({ op: "shot", sessionUid: "s1", tab: 5 });
+    expect(r).toMatchObject({ ok: true, result: { data: "WFla@full", via: "debugger" } });
+    expect(s.calls).toContain("attach 5");
+    expect(s.calls).toContain("cmd 5 Page.captureScreenshot");
+    // …and the idle detach is armed like for tracing.
+    expect(s.timers.some((t) => t.ms === DEBUGGER_IDLE_MS)).toBe(true);
+  });
+
+  test("shot refuses an extension page (U4) before touching Chrome's capture", async () => {
+    const s = setup({ 5: { id: 5, url: "chrome-extension://x/p.html", active: true } });
+    expect(await s.ops.handle({ op: "shot", sessionUid: "s1", tab: 5 })).toMatchObject({
+      ok: false,
+    });
+    expect(s.calls).toEqual([]);
+  });
+
+  test("console injects the MAIN-world hook, then reads the page's ring", async () => {
+    const s = setup({ 5: { id: 5, url: "https://a.test/" } });
+    const injected: Any[] = [];
+    (s.chrome.scripting as Any).executeScript = async (o: Any) => {
+      injected.push(o);
+    };
+    const r = await s.ops.handle({ op: "console", sessionUid: "s1", tab: 5, cursor: 3 });
+    expect(r).toMatchObject({ ok: true });
+    expect(injected[0]).toMatchObject({
+      target: { tabId: 5 },
+      world: "MAIN",
+      files: ["src/console-hook.js"],
+    });
+    expect(s.calls).toContain("msg 5 console");
+  });
+
+  test("a navigation hooks the console ONLY in a tab a session owns", async () => {
+    const s = setup();
+    const injected: number[] = [];
+    (s.chrome.scripting as Any).executeScript = async (o: Any) => {
+      injected.push((o.target as Any).tabId as number);
+    };
+    s.ops.onTabUpdated(42, { status: "loading" });
+    await claim(s.ops);
+    await s.ops.handle({ op: "open", sessionUid: "s1", url: "https://a.test/" });
+    injected.length = 0;
+    s.ops.onTabUpdated(100, { status: "loading" });
+    s.ops.onTabUpdated(100, { status: "complete" });
+    s.ops.onTabUpdated(42, { status: "loading" });
+    await Promise.resolve();
+    expect(injected).toEqual([100]);
+  });
+
+  test("body needs full tracing; a binary body is size + sha256, never bytes", async () => {
+    const s = setup({ 5: { id: 5, url: "https://a.test/" } });
+    expect(
+      await s.ops.handle({ op: "body", sessionUid: "s1", tab: 5, requestId: "r1" }),
+    ).toMatchObject({ ok: false, error: expect.stringContaining("browser_net start") });
+    await s.ops.handle({ op: "net", sessionUid: "s1", tab: 5, action: "start" });
+    (s.chrome.debugger as Any).sendCommand = async () => ({
+      body: "AAEC",
+      base64Encoded: true,
+    });
+    const bin = await s.ops.handle({ op: "body", sessionUid: "s1", tab: 5, requestId: "r1" });
+    expect(bin).toMatchObject({ ok: true, result: { binary: true, size: 3 } });
+    expect((bin.result as Any).sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(bin)).not.toContain("AAEC");
+    (s.chrome.debugger as Any).sendCommand = async () => ({ body: "hi", base64Encoded: false });
+    expect(await s.ops.handle({ op: "body", sessionUid: "s1", tab: 5, requestId: "r1" })).toEqual({
+      ok: true,
+      result: { binary: false, size: 2, text: "hi", truncated: false },
+    });
   });
 });

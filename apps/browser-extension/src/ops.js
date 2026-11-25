@@ -9,7 +9,44 @@ export function isTouchable(url) {
   return typeof url === "string" && /^https?:\/\//i.test(url);
 }
 
-export function createOps({ chrome, send, setTimer = setTimeout, clearTimer = clearTimeout }) {
+/** A response body the daemon may see: text ≤ 1 MiB; binary only as size + sha256. */
+export const BODY_MAX_CHARS = 1024 * 1024;
+
+const toBytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+function toBase64(bytes) {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+
+/** Downscale a JPEG to `maxEdge` in the worker (OffscreenCanvas); unchanged when it fits or cannot. */
+export async function scaleJpeg(b64, maxEdge) {
+  if (
+    !maxEdge ||
+    typeof OffscreenCanvas === "undefined" ||
+    typeof createImageBitmap !== "function"
+  ) {
+    return b64;
+  }
+  const bmp = await createImageBitmap(new Blob([toBytes(b64)], { type: "image/jpeg" }));
+  const k = maxEdge / Math.max(bmp.width, bmp.height);
+  if (k >= 1) return b64;
+  const canvas = new OffscreenCanvas(
+    Math.max(1, Math.round(bmp.width * k)),
+    Math.max(1, Math.round(bmp.height * k)),
+  );
+  canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.8 });
+  return toBase64(new Uint8Array(await blob.arrayBuffer()));
+}
+
+export function createOps({
+  chrome,
+  send,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  scale = scaleJpeg,
+}) {
   const sessions = new Map(); // sessionUid -> { title, groupId?, tabs:Set }
   const tabSession = new Map(); // tabId -> sessionUid
   const attached = new Map(); // tabId -> idle timer
@@ -75,8 +112,103 @@ export function createOps({ chrome, send, setTimer = setTimeout, clearTimer = cl
     } else {
       tab = await chrome.tabs.create({ url: op.url, active: false });
       await group(op.sessionUid, tab.id);
+      // Its first `loading` may have fired before the tab was ours.
+      void hookConsole(tab.id);
     }
     return ok({ tab: tab.id, url: tab.pendingUrl ?? tab.url ?? op.url, title: tab.title ?? "" });
+  }
+
+  // ---- console: a MAIN-world hook, injected ONLY into owned tabs -----------------
+
+  /** Idempotent (the hook guards itself); a page that refuses scripting just has no console capture. */
+  async function hookConsole(tab) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab },
+        world: "MAIN",
+        injectImmediately: true,
+        files: ["src/console-hook.js"],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** A navigation in an owned tab starts a new document: hook it as early as we can. */
+  function onTabUpdated(tab, info) {
+    if (info?.status === "loading" && tabSession.has(tab)) void hookConsole(tab);
+  }
+
+  async function consoleOp(op) {
+    const g = await touchable(op.tab);
+    if (g.error) return fail(g.error);
+    const hooked = await hookConsole(op.tab);
+    const r = await pageOp(op.tab, { kind: "console", cursor: op.cursor ?? 0 });
+    if (r.ok && !hooked) r.result = { ...r.result, hookFailed: true };
+    return r;
+  }
+
+  // ---- screenshot: the visible tab without the debugger; a background one with it --
+
+  async function shot(op) {
+    const g = await touchable(op.tab);
+    if (g.error) return fail(g.error);
+    let data;
+    let via;
+    if (g.tab.active) {
+      const url = await chrome.tabs.captureVisibleTab(g.tab.windowId, {
+        format: "jpeg",
+        quality: 80,
+      });
+      data = String(url).replace(/^data:image\/jpeg;base64,/, "");
+      via = "visible";
+    } else {
+      try {
+        await attach(op.tab);
+      } catch (e) {
+        return fail(`cannot capture this background tab: ${e?.message ?? e}`);
+      }
+      const r = await chrome.debugger.sendCommand({ tabId: op.tab }, "Page.captureScreenshot", {
+        format: "jpeg",
+        quality: 80,
+      });
+      data = r?.data;
+      via = "debugger";
+      touch(op.tab);
+    }
+    if (typeof data !== "string" || data === "") return fail("Chrome returned no picture");
+    return ok({ mimeType: "image/jpeg", data: await scale(data, op.maxEdge), via });
+  }
+
+  // ---- one response body (full tier only) ---------------------------------------
+
+  async function body(op) {
+    if (!attached.has(op.tab)) {
+      return fail("a response body needs full tracing: browser_net start on this tab first");
+    }
+    let r;
+    try {
+      r = await chrome.debugger.sendCommand({ tabId: op.tab }, "Network.getResponseBody", {
+        requestId: op.requestId,
+      });
+    } catch (e) {
+      return fail(`no body for ${op.requestId}: ${e?.message ?? e}`);
+    }
+    touch(op.tab);
+    const text = String(r?.body ?? "");
+    if (r?.base64Encoded) {
+      const bytes = toBytes(text);
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+      const sha256 = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+      return ok({ binary: true, size: bytes.length, sha256 });
+    }
+    return ok({
+      binary: false,
+      size: text.length,
+      text: text.slice(0, BODY_MAX_CHARS),
+      truncated: text.length > BODY_MAX_CHARS,
+    });
   }
 
   async function tabs(op) {
@@ -250,6 +382,12 @@ export function createOps({ chrome, send, setTimer = setTimeout, clearTimer = cl
           return await pageOp(msg.tab, { kind: "type", ...msg });
         case "net":
           return await net(msg);
+        case "shot":
+          return await shot(msg);
+        case "console":
+          return await consoleOp(msg);
+        case "body":
+          return await body(msg);
         default:
           return fail(`unknown op ${String(msg.op)}`);
       }
@@ -266,6 +404,7 @@ export function createOps({ chrome, send, setTimer = setTimeout, clearTimer = cl
     onDebuggerDetach,
     onWebRequest,
     onTabRemoved,
+    onTabUpdated,
     handover,
     listSessions,
   };

@@ -47,6 +47,7 @@ function schedule() {
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 chrome.tabs.onRemoved.addListener((tab) => ops.onTabRemoved(tab));
+chrome.tabs.onUpdated.addListener((tab, info) => ops.onTabUpdated(tab, info));
 chrome.debugger.onEvent.addListener((s, m, p) => ops.onDebuggerEvent(s, m, p));
 chrome.debugger.onDetach.addListener((s, r) => ops.onDebuggerDetach(s, r));
 chrome.webRequest.onCompleted.addListener((d) => ops.onWebRequest(d), { urls: ["<all_urls>"] });
