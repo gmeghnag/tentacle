@@ -59,6 +59,7 @@ import {
   NO_CAPABILITIES,
   applyCapabilityOp,
   sessionTitle,
+  workflowStatusLine,
 } from "@tentacle/agent";
 import {
   AGENT_MESSAGE_MAX_CHARS,
@@ -2563,6 +2564,11 @@ export class HostedSession {
         this.kickWake();
       },
     });
+    // The model's live line (docs/feat/workflow-run-awareness.md): read per
+    // request, from the very rows the clients are shown; never in the history.
+    this.session.setStatusLine(() =>
+      this.closed ? undefined : workflowStatusLine(this.lastWorkflows),
+    );
     // The starting list is STATE, not an event: nobody is attached yet (this runs
     // inside session creation), so it is set for the snapshot without an emit or a
     // cut. A cut here committed before the session's open had finished and lost

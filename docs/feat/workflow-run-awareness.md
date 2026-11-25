@@ -523,6 +523,56 @@ restored: true
 **Gate:** only the files above; full typecheck/lint/test left to the orchestrator's script. No
 schema change, so `protocol.json` is untouched.
 
+### S3 — the daemon wiring of the line — DONE
+
+*— claude-sonnet-5-5, 2026-11-25 (branch at `256833a5`, uncommitted)*
+
+**Load-bearing check, re-run first: holds.** The repro prints `request-only seam (voice line):
+in request: true | in history: false` and `autoApproves(workflow_approve, own=true): false`.
+`attachWorkflows` still has one caller (`session-host.ts`, in `build`).
+
+**As built:**
+- `packages/daemon/src/hosted-session.ts` — `attachWorkflows` calls
+  `this.session.setStatusLine(() => this.closed ? undefined : workflowStatusLine(this.lastWorkflows))`
+  after `driver.bind`.
+- `docs/feat/agent-workflows.md` D3 — the pointer here.
+- T4/T5 in `packages/daemon/test/workflow-hosted.test.ts`: the real `SessionHost` →
+  `attachWorkflows` path with a real `WorkflowDriver` (`approve` step), the one
+  `PermissionBroker`, `answersAutoAccept`, a recording model and a `SessionPersister` over
+  `SpyDaemonStore`. T4: the request ends with the waits line; after the answer the next
+  request has the end note and no line; no unit handed to the store, no file and no snapshot
+  holds `[workflow wf-1 task: step`. T5: in auto-accept, one two-round turn (`workflow status`
+  + an ordinary asking tool, which IS auto-answered) leaves the `workflow_approve` pending;
+  `autoApproves` is `false`. A third test pins the `closed` guard (after `close` the published
+  rows are still live, the provider gives nothing); it reads the provider through a private
+  field, because no turn can run on a closed session.
+
+**Red** (before the wiring): `20 pass, 3 fail`, each on an assertion (the request's tail is the
+prompt; the provider gives `undefined`). **Green:** `23 pass, 0 fail`. Neighbours
+(`workflow-load`, `workflow-step-detail`, `workflow-permission-map`, `schedule-workflow`,
+`serve-autoaccept-unattended`, `agent/workflow-status-line`, `agent/status-line-request`,
+the `cli` workflow tests): `137 pass, 0 fail`. `bunx biome check` on the 2 TS files: clean.
+`tsc --noEmit -p packages/daemon`: clean.
+
+**Mutations** (`.tentacle/tmp/workflow-run-awareness/mutate-s3.ts`, sources restored):
+
+```
+no wiring: killed (20 pass, 3 fail)
+no closed guard: killed (22 pass, 1 fail)
+rows frozen at attach (not the published list): killed (20 pass, 3 fail)
+the line also pushed into the history: killed (22 pass, 1 fail)
+auto-accept approves workflow asks: killed (22 pass, 1 fail)
+```
+
+**Drift:**
+- T4: on the turn after the run, the request's tail is the end note, not the prompt: the exits
+  queue is flushed after the new prompt (existing behaviour).
+- The changelog fragment (item 7) already exists from S1; not rewritten. It also describes S4
+  and S6, so it is true only once they are in.
+
+**Gate:** only the files above; full typecheck/lint/test left to the orchestrator's script. No
+schema change, so `protocol.json` is untouched.
+
 ## Review
 
 *— (empty)*

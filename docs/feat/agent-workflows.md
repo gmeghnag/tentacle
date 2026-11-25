@@ -257,7 +257,9 @@ laptop-side process (worker or `serve` on the user's host); a pod never reads or
     rerun_step`, client-minted `turnId` as `session/prompt`, `session.ts:479`; `wake-` refused as
     today, `connection.ts:1163-1175`).
   - End → a note in the conversation (`[workflow wf-3 task: ok · 7/7 · 1.4M tok]`) +
-    `background_exit`-style notice + wake, as `hosted-session.ts:1144-1156`.
+    `background_exit`-style notice + wake, as `hosted-session.ts:1144-1156`. The end note is not
+    the only thing the model hears: while a run is live each request also carries a request-only
+    status line (`docs/feat/workflow-run-awareness.md`).
   - **Snapshot at start:** the parsed spec + prompt texts are held in memory for the whole run; a
     mid-run edit of the file does not affect it. `resume`/`rerun_step` recompute the hash and
     refuse on mismatch (`stopped: changed` → "start a new run").

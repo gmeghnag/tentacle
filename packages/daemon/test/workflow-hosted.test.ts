@@ -14,15 +14,25 @@ import {
 } from "@tentacle/agent";
 import {
   type ChatMessage,
+  type ChatRequest,
   type ExecutionEnvironment,
+  type ModelProvider,
   NOTE_KIND,
   PermissionBroker,
+  type PermissionRequest,
+  type StreamEvent,
+  type Tool,
   type ToolContext,
+  autoApproves,
   workflowYaml,
 } from "@tentacle/core";
-import type { KnownLogEntry, LogCursor } from "@tentacle/protocol";
-import { ToolRegistry } from "@tentacle/tools";
+import type { KnownLogEntry, KnownSessionUpdateParams, LogCursor } from "@tentacle/protocol";
+import { ToolRegistry, createWorkflowTool } from "@tentacle/tools";
+import { z } from "zod";
 import { HostedSession } from "../src/hosted-session.ts";
+import { SessionHost } from "../src/session-host.ts";
+import { SessionPersister } from "../src/session-persister.ts";
+import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
 
 const noopEnv: ExecutionEnvironment = {
   id: "noop",
@@ -792,5 +802,198 @@ describe("session/workflow_source + workflow_save on a hosted session (slice 3b)
     if (written.hash === undefined) return;
     expect(again.hash).toBe(written.hash);
     expect(again.schedules).toBeUndefined();
+  });
+});
+
+// --- the live status line (docs/feat/workflow-run-awareness.md S3: T4, T5) ----
+
+async function until(cond: () => boolean, ms = 2000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`timed out: ${String(cond)}`);
+    await new Promise((r) => setTimeout(r, 1));
+  }
+}
+
+const WAITS_LINE = "[workflow wf-1 task: step 1/1 merge waits for the user · 0/1 ok · 0 tok]";
+
+const toolCall = (id: string, name: string, args: unknown): StreamEvent => ({
+  type: "tool_call",
+  toolCall: { id, name, arguments: JSON.stringify(args) },
+});
+
+/**
+ * A `serve`-shaped host (the real `SessionHost.build` → `attachWorkflows` path)
+ * with a real driver on an `approve` step, whose ask goes to the session's ONE
+ * broker, a recording model and the persister over an in-memory store.
+ */
+function waitingRig(script: readonly (readonly StreamEvent[])[] = []) {
+  const requests: ChatRequest["messages"][] = [];
+  const asked: PermissionRequest[] = [];
+  const runs: string[] = [];
+  let round = 0;
+  const model: ModelProvider = {
+    id: "recording",
+    async *stream(request: ChatRequest) {
+      // The title request shares this model and offers no tool: not a loop round.
+      if (!request.tools?.length) {
+        yield { type: "done" } as const;
+        return;
+      }
+      requests.push([...request.messages]);
+      // A bare `done` is an empty reply, which the loop asks again: say something.
+      yield* script[round++] ?? [
+        { type: "text", delta: "noted" } as const,
+        { type: "done" } as const,
+      ];
+    },
+  };
+  const store = new SpyDaemonStore();
+  const host = new SessionHost({
+    defaultCwd: "/tmp/workflow-status-line",
+    persister: new SessionPersister({
+      store,
+      cwd: "/tmp/workflow-status-line",
+      model: "m",
+      onError: () => {},
+    }),
+    sharedAutoAccept: true,
+    answersAutoAccept: true,
+    createAgent: () => {
+      const permissions = new PermissionBroker();
+      const workflows = new WorkflowDriver({
+        load: async () => ({
+          path: ".tentacle/workflows/task.yaml",
+          text: APPROVE_YAML,
+          prompts: {},
+        }),
+        context: () => ({ models: [], agentTypes: ["general"] }),
+        approvals: { has: async () => true, add: async () => {} },
+        request: (req, options) => {
+          asked.push(req);
+          return permissions.request(req, options);
+        },
+        runnerFor: () => async () => ({ report: "ok", toolUses: 0, stopReason: "end_turn" }),
+      });
+      const askme: Tool = {
+        name: "askme",
+        description: "askme",
+        inputSchema: z.object({}).passthrough(),
+        permission: "ask",
+        async execute() {
+          runs.push("askme");
+          return { content: "askme ok" };
+        },
+      };
+      const agent = new Agent({
+        model,
+        tools: new ToolRegistry().register(askme).register(createWorkflowTool(workflows)),
+        env: noopEnv,
+        requestPermission: (req, options) => permissions.request(req, options),
+      });
+      return { agent, permissions, workflows };
+    },
+  });
+  const frames: KnownSessionUpdateParams[] = [];
+  const { hosted: session } = host.open({ create: true }, { send: (u) => frames.push(u) });
+  const updates = () => frames.map((f) => f.update);
+  /** The asks nobody answered yet. */
+  const pending = () => {
+    const resolved = new Set(
+      updates().flatMap((u) => (u.type === "permission_resolved" ? [u.requestId] : [])),
+    );
+    return updates().flatMap((u) =>
+      u.type === "permission_request" && !resolved.has(u.requestId) ? [u] : [],
+    );
+  };
+  const runState = (): string | undefined => session.snapshotPage().workflows?.[0]?.state;
+  const startAndWait = async (): Promise<void> => {
+    const started = await session.workflow({
+      sessionId: session.id,
+      action: "start",
+      name: "task",
+      turnId: "t-start",
+    });
+    expect(started).toEqual({ ok: true, runId: "wf-1" });
+    await until(() => pending().length === 1 && runState() === "needs-approval");
+  };
+  const turn = async (turnId: string, text: string): Promise<void> => {
+    session.prompt(turnId, [{ type: "text", text }]);
+    await until(() => !session.running);
+  };
+  return { session, store, requests, asked, runs, pending, runState, startAndWait, turn };
+}
+
+describe("the live status line on a hosted session (workflow-run-awareness S3)", () => {
+  test("T4 the request ends with the line while the run waits, has the end note and no line after, and the log never holds it", async () => {
+    const rig = waitingRig();
+    await rig.startAndWait();
+
+    await rig.turn("t-1", "first prompt");
+    expect(rig.requests).toHaveLength(1);
+    expect(rig.requests[0]?.at(-1)).toEqual({ role: "user", content: WAITS_LINE });
+
+    const ask = rig.pending()[0];
+    if (!ask) throw new Error("no pending ask");
+    rig.session.resolvePermission(ask.requestId, "allow_once");
+    await until(() => rig.runState() === "ok");
+
+    await rig.turn("t-2", "second prompt");
+    expect(rig.requests).toHaveLength(2);
+    const after = (rig.requests[1] ?? []).map((m) => String(m.content));
+    expect(after.some((c) => c.startsWith("[workflow wf-1 task: ok · 1/1"))).toBe(true);
+    expect(after.some((c) => c.startsWith("[workflow wf-1 task: step"))).toBe(false);
+    // No line at the tail: the prompt (stamped), then the queued end note.
+    expect(after.at(-2)).toEndWith("second prompt");
+    expect(after.at(-1)).toStartWith("[workflow wf-1 task: ok · 1/1");
+
+    // Non-vacuity: what landed really holds this conversation and the end note.
+    await until(() => rig.store.files.get(rig.session.id)?.log?.includes("second prompt") === true);
+    const files = rig.store.files.get(rig.session.id);
+    expect(files?.log).toContain("first prompt");
+    expect(files?.log).toContain("[workflow wf-1 task: ok · 1/1");
+    expect(JSON.stringify([files, rig.store.units])).not.toContain("[workflow wf-1 task: step");
+    expect(JSON.stringify(rig.session.snapshotPage())).not.toContain("[workflow wf-1 task: step");
+  });
+
+  test("T5 in auto-accept, a whole model turn leaves the workflow ask pending; the line grants nothing", async () => {
+    const rig = waitingRig([
+      [
+        toolCall("c1", "workflow", { action: "status" }),
+        toolCall("c2", "askme", {}),
+        { type: "done" },
+      ],
+    ]);
+    rig.session.setAutoAccept(true, "phone");
+    await rig.startAndWait();
+
+    await rig.turn("t-1", "go");
+
+    // Auto-accept is live in this turn: the ordinary tool's ask was answered.
+    expect(rig.runs).toEqual(["askme"]);
+    expect(rig.requests).toHaveLength(2);
+    for (const request of rig.requests) {
+      expect(request.at(-1)).toEqual({ role: "user", content: WAITS_LINE });
+    }
+    // The run's own ask was not.
+    expect(rig.runState()).toBe("needs-approval");
+    expect(rig.pending()).toHaveLength(1);
+    const approve = rig.asked[0];
+    if (!approve) throw new Error("no workflow ask");
+    expect(approve.kind).toBe("workflow_approve");
+    expect(autoApproves(approve, true)).toBe(false);
+    rig.session.close();
+  });
+
+  test("a closed session gives no line, though the last rows it published are still live", async () => {
+    // Mutation: drop the `this.closed` guard in the provider → the line comes back.
+    const rig = waitingRig();
+    await rig.startAndWait();
+    const inner = (rig.session as unknown as { session: { statusLine?: () => string | undefined } })
+      .session;
+    expect(inner.statusLine?.()).toBe(WAITS_LINE);
+    rig.session.close();
+    expect(inner.statusLine).toBeDefined();
+    expect(inner.statusLine?.()).toBeUndefined();
   });
 });
