@@ -13,7 +13,16 @@ import {
   type TitleState,
   suspendedInGroup,
 } from "@tentacle/agent";
-import type { ChatMessage, ScheduledJob, ToolCall } from "@tentacle/core";
+import {
+  type ChatMessage,
+  type ScheduledJob,
+  type SegmentUnits,
+  type ToolCall,
+  type WorkUnit,
+  boundEndedUnits,
+  unifyTurn,
+  unifyWorkflow,
+} from "@tentacle/core";
 import {
   DomainErrorCode,
   type KnownLogEntry,
@@ -182,6 +191,56 @@ export interface DaemonSessionRecord extends SessionRecord {
    * nothing to say, so an idle resume is untouched.
    */
   readonly loadNotes: readonly ChatMessage[];
+  /**
+   * The units of work of the SAME entries (`unitsFromSegment`, docs/feat/a2a.md
+   * Unification §3): the ended ones (native ends and carried `unit_end`s) and
+   * the ones a crash left open. `endedUnitsAtLoad` closes those. Absent → none.
+   */
+  readonly units?: SegmentUnits;
+}
+
+/**
+ * The session's ended-units table at a reload (docs/feat/a2a.md, Unification
+ * §3): the record's ended units, then every unit the cut left OPEN closed
+ * honestly at `at` — a turn with the end its reconciled key holds (a restart's
+ * `error`, an archive's `cancelled`), a turn without one `RESTART_TURN_END`, a
+ * run `stopped:interrupted` (its load note says the same). Only `resumed` (a
+ * turn the reload continues under its id) stays open: it is live, not here.
+ * Pure; the host carries the result into its first segment as `unit_end`.
+ */
+export function endedUnitsAtLoad(
+  units: SegmentUnits | undefined,
+  turns: readonly PersistedTurnKey[],
+  resumed: string | undefined,
+  at: number,
+): WorkUnit[] {
+  const closed: WorkUnit[] = [];
+  for (const open of units?.open ?? []) {
+    if (open.kind === "turn") {
+      if (open.id === resumed) continue;
+      const end = turns.find((k) => k.turnId === open.id)?.end ?? RESTART_TURN_END;
+      const turn = unifyTurn({
+        turnId: open.id,
+        stopReason: end.stopReason,
+        ...(open.startedAt !== undefined ? { startedAt: open.startedAt } : {}),
+        endedAt: at,
+      });
+      closed.push(end.error ? { ...turn, reason: end.error.message } : turn);
+    } else {
+      closed.push(
+        unifyWorkflow({
+          runId: open.id,
+          ...(open.origin !== undefined ? { origin: open.origin } : {}),
+          state: "stopped",
+          stopReason: "interrupted",
+          reason: RESTART_TURN_END.error?.message ?? "interrupted",
+          ...(open.startedAt !== undefined ? { startedAt: open.startedAt } : {}),
+          endedAt: at,
+        }),
+      );
+    }
+  }
+  return boundEndedUnits([...(units?.ended ?? []), ...closed]);
 }
 
 /**

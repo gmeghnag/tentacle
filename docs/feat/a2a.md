@@ -758,4 +758,120 @@ fail; `biome check` on the 8 changed files clean; `tsc` limited to the changed
 modules and tests (`.tentacle/tmp/a2a/tsconfig.s1.json`) clean. Full `bun run
 check` NOT run (the orchestrator's script runs it).
 
+### S2-work-units-seam — DONE
+
+*— claude-opus-5-5, 2026-11-25*
+
+**Load-bearing check re-run first** (`bun .tentacle/tmp/a2a/seam.ts`): HOLDS,
+the same five lines as above.
+
+**As built:**
+- `packages/daemon/src/daemon-state-file.ts` — `rebuild` adds
+  `units = unitsFromSegment(derivedFrom)` to the record: the SAME entries the
+  sub-agent/workflow notes and the switches come from, so a unit ended after
+  `logHead` is ignored like the rest of that tail.
+- `packages/daemon/src/persisted-session.ts` — `DaemonSessionRecord.units?`
+  and the pure `endedUnitsAtLoad(units, reconciledTurns, resumedTurnId, at)`:
+  the record's ended units, then each unit the cut left open closed at `at`.
+  A turn gets its reconciled key's end (a restart → `failed`, reason = the
+  `RESTART_TURN_END` message; an archive → `canceled`), or `RESTART_TURN_END`
+  when no key has one. A run gets `stopped:interrupted` → `failed`. The
+  resumed turn stays out of the table, because it is live. The result is
+  bounded (`boundEndedUnits`).
+- `packages/daemon/src/session-host.ts` — `restore` passes
+  `units: endedUnitsAtLoad(record.units, reconciled.turns, reconciled.resume?.turnId, now)`.
+- `packages/daemon/src/hosted-session.ts` — `RestoredSessionState.units?`; the
+  private `endedUnits` table, set from `restored.units` BEFORE the first
+  segment. `logSegmentFacts` ends with one `log.unitEnd(unitEndBody(u))` per
+  table unit; a unit the schema refuses is skipped and reported through
+  `errorPolicy.onTurnError`, never aborting the segment start (S1's note).
+  `refreshUnits()` re-derives the table as
+  `unitsFromSegment(current segment's materialized entries).ended`. It runs
+  right after `log.turnEnd` (in `finishTurn`) and after `log.workflowEnd` (the
+  driver's `logEnd`). Public read-only `workUnits()` returns the table (oldest
+  first), then the running turn (`waiting:permission` when one of its asks is
+  pending), then the driver's live runs (`unifyWorkflow` over the rows without
+  `endedAt`).
+- `packages/daemon/test/work-units.test.ts` (new; real `SessionHost` + real
+  `LogSessionStore` + `SessionPersister`, the real `WorkflowDriver`). It covers:
+  - a turn and a run ending live, with their records and results;
+  - the chain compaction → context reset → `/clear` → reload;
+  - each boundary on its own (compaction, context_reset, clear, reload), with
+    a NEW end after it;
+  - the last segment on disk carrying the earlier units as `unit_end`;
+  - live records equal to the reloaded ones;
+  - a crash before the turn's and the run's ends: both load `failed`, the
+    turn's reason is the restart message, the run's `native` is
+    `stopped:interrupted`, and the reload segment carries them;
+  - a turn suspended on an ask: `waiting:permission` live, still waiting under
+    its id after a reload, then answered once → `completed`;
+  - `endedUnitsAtLoad` table cases (pure).
+
+**Drift from Implementation:**
+- `persisted-session.ts` and `session-host.ts` were not in Files. The plan
+  says the load fills the table but not who closes the units a crash left
+  open ("a cut turn → `failed: interrupted`"). That is now
+  `endedUnitsAtLoad`, next to `RESTART_TURN_END`.
+- The live fill does not cache per-unit work. It re-derives the whole table
+  from the current segment with THE load derivation, so a live end and a
+  reload give the same record by construction. This is O(segment) entries,
+  synchronous, and runs only at a turn's or a run's end. It reads
+  `SessionLog.since()` (no new log accessor) and skips lazy checkpoint slots.
+- The context reset in the tests goes through the private
+  `historyReplaced("context_reset")` (cast, as `workflow-hosted.test.ts`
+  does). It is the same barrier the agent's reset calls.
+- A restart-closed unit's `reason` is the `RESTART_TURN_END` message, not
+  `unifyTurn`'s generic "the turn failed". Such a unit exists only through the
+  load path and is then carried, so live and load records still agree.
+
+**Notes for S4 / S6 / S8** (not verified by execution):
+- In `workUnits()` the LIVE turn has no `startedAt`: its `turn_start` time is
+  not cached. Its ended record has one.
+- A live run's `origin` comes from `driver.liveStart()`, which exists only once
+  the run is approved. A `needs-approval` run has no `origin` yet, so S8 must
+  map it to its task another way: either a small driver accessor (outside S2's
+  files) or the start's own `turnId`.
+- A run that ends before any `workflow_start` (refused unapproved/`changed`)
+  produces no unit: `unitsFromSegment` ignores an end without a start. S8's
+  "`changed` refusal → `FAILED`" needs a different source.
+- The carry's skip-and-report path (a unit the schema refuses) is not
+  exercised: through public paths every table unit comes from parsed
+  entries. To verify it, inject a unit with a 129-char `origin` and watch
+  `onTurnError`.
+
+**Red before green:** R0 below (the slice's daemon wiring removed: no carry,
+no load units, no live refresh) → 7 of 9 fail; then 9/9 green.
+
+**Mutations** (`.tentacle/tmp/a2a/mutate-s2.ts`, each restored, tree verified
+clean afterwards; all 11 killed):
+
+| Mutation | Fails |
+|---|---|
+| R0 no carry + no load units + no live refresh | 7 |
+| M1 no `unit_end` carry in `logSegmentFacts` (the plan's mutation) | 6 (each of the 4 per-boundary tests + the chain + the crash test) |
+| M2 load keeps only `units.ended` (open units dropped) | 2 |
+| M3 load ignores the reconciled key's end | 1 |
+| M4 restore not given the record's units | 3 |
+| M5 loader derives no units | 3 |
+| M6 live turn record built from the stream, not derived (the plan's mutation) | 2 |
+| M7 no refresh at a run's end | 5 |
+| M8 `workUnits` ignores pending asks | 1 |
+| M9 the resumed turn closed at load too (phantom end) | 2 |
+| M10 `workUnits` omits the live run | 1 |
+
+**Gate (narrow):** `bun test` on the new file and the covering ones (daemon
+`workflow-load`, `workflow-hosted`, `persistence`, `clear-reload`,
+`serve-subagent-reload`, `session-log-unit-end`, `serve-log-store`,
+`context-reset-barrier`, `compaction-fact`, `clear`; core `work-unit`) →
+254 pass / 0 fail. The segment-pinning files (client `session-titles`,
+`session-log`, `session-log-reader`; daemon `session-log-file`,
+`session-capabilities-log`, `session-fork`, `session-log`,
+`attachments-log-file`, `clear-fork`, `history-cut`, `integration`; cli
+`logs-cmd`, `log-events`) → 191 pass / 0 fail. `biome check` on the 5 changed
+files is clean. `tsc` limited to `daemon/src/index.ts`, `session-host.ts` and
+the new test (`.tentacle/tmp/a2a/tsconfig.s2.json`) is clean. No schema
+change, so `protocol.json` is untouched. No changelog change (S0's fragment
+covers the task). Full `bun run check` NOT run (the orchestrator's script
+runs it).
+
 ## Review

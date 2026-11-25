@@ -80,6 +80,7 @@ import { fromWireCapabilities, toSessionSkills, toSessionTools } from "./mapping
 import {
   type ClearForkCapture,
   type DaemonSessionRecord,
+  endedUnitsAtLoad,
   reconcileOnReload,
   restoredActivity,
 } from "./persisted-session.ts";
@@ -1427,6 +1428,9 @@ export class SessionHost {
       turns: reconciled.turns,
       enqueueIds: reconciled.enqueueIds,
       returned: reconciled.returned,
+      // The ended-units table (docs/feat/a2a.md, Unification §3): what the log
+      // ended, plus what the cut left open closed honestly (the resumed turn stays live).
+      units: endedUnitsAtLoad(record.units, reconciled.turns, reconciled.resume?.turnId, now),
       ...(record.head !== undefined ? { head: record.head } : {}),
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
       // A restart KEEPS the session's auto-accept (owner Q3).

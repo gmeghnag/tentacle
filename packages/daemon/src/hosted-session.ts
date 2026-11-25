@@ -87,6 +87,7 @@ import {
   type ScheduledJob,
   type SubagentBackgroundBody,
   type SubagentEndBody,
+  type WorkUnit,
   anySignal,
   attachmentLabel,
   autoApproves,
@@ -102,6 +103,10 @@ import {
   scheduleRecordFire,
   scheduleSettled,
   scheduleStep,
+  unifyTurn,
+  unifyWorkflow,
+  unitEndBody,
+  unitsFromSegment,
   wakeDue,
   workflowRunSeqFromHistory,
   zoneOrDefault,
@@ -439,6 +444,11 @@ export interface RestoredSessionState {
    * a new lineage, from the reloaded history.
    */
   readonly log?: { readonly head: LogCursor; readonly logged: readonly ChatMessage[] };
+  /**
+   * The ended-units table at the reload (`endedUnitsAtLoad`, docs/feat/a2a.md
+   * Unification §3): carried into the first segment as `unit_end`. Absent → none.
+   */
+  readonly units?: readonly WorkUnit[];
 }
 
 /**
@@ -1125,6 +1135,15 @@ export class HostedSession {
    * children). It is the one ledger the live path (6a) and a replay share.
    */
   private readonly agentJobs: AgentJobLedger;
+  /**
+   * The ended-units table (docs/feat/a2a.md, Unification §3), oldest first,
+   * bounded: a CACHE of the log, never a store. Always exactly
+   * `unitsFromSegment(current segment).ended` — set at a reload from the record,
+   * re-derived from the segment at every turn or run end (`refreshUnits`), and
+   * carried into every new segment as `unit_end` entries (`logSegmentFacts`),
+   * so a live end and a load derivation give the same record.
+   */
+  private endedUnits: readonly WorkUnit[] = [];
 
   constructor(
     id: string,
@@ -1237,6 +1256,8 @@ export class HostedSession {
     this.logSha256 = logOptions.sha256 ?? nodeSha256;
     this.logVerify = logOptions.verify;
     this.log = new SessionLog(crypto.randomUUID(), now);
+    // Before the first segment: `logSegmentFacts` carries it.
+    this.endedUnits = restored?.units ?? [];
     if (restored?.log) {
       // A reload of a paired record continues its lineage: the base restates
       // EXACTLY what the last landed write logged (a reader holding that head
@@ -2468,6 +2489,61 @@ export class HostedSession {
     if (live !== undefined) {
       this.log.workflowStart(live);
     }
+    // The ended units (docs/feat/a2a.md, Unification §2): the new segment no
+    // longer holds their native entries, so it carries them. One unit the
+    // schema refuses is skipped (and reported), never the segment's start.
+    for (const ended of this.endedUnits) {
+      try {
+        this.log.unitEnd(unitEndBody(ended));
+      } catch (error) {
+        this.reportTurnError(error);
+      }
+    }
+  }
+
+  /**
+   * Re-derive the ended-units table from the current segment (THE derivation,
+   * `unitsFromSegment`: the one a reload runs). Called right after a unit's
+   * end is logged. Synchronous, O(segment): never at a turn's every round.
+   */
+  private refreshUnits(): void {
+    const entries: KnownLogEntry[] = [];
+    for (const slot of this.log.since().slots) {
+      // A lazy slot is a checkpoint: it states no unit.
+      if (slot.entry !== null) entries.push(slot.entry);
+    }
+    this.endedUnits = unitsFromSegment(entries).ended;
+  }
+
+  /**
+   * The session's units of work (docs/feat/a2a.md, Unification §3), read-only:
+   * the ended-units table (oldest first), then the running turn (waiting when
+   * one of its asks is pending) and the driver's live run. A live turn or run
+   * carries no result; its end does.
+   */
+  workUnits(): WorkUnit[] {
+    const units: WorkUnit[] = [...this.endedUnits];
+    const turnId = this.activeTurnId;
+    if (turnId !== null && this.turns.get(turnId)?.end === undefined) {
+      const asking = [...this.asks.values()].some((ask) => ask.turnId === turnId);
+      units.push(unifyTurn({ turnId, asking }));
+    }
+    const start = this.workflows?.liveStart();
+    for (const row of this.workflows?.rows() ?? []) {
+      if (row.endedAt !== undefined) continue;
+      const origin = start?.runId === row.runId ? start.turnId : undefined;
+      units.push(
+        unifyWorkflow({
+          runId: row.runId,
+          ...(origin !== undefined ? { origin } : {}),
+          state: row.state,
+          ...(row.stopReason !== undefined ? { stopReason: row.stopReason } : {}),
+          ...(row.reason !== undefined ? { reason: row.reason } : {}),
+          startedAt: row.startedAt,
+        }),
+      );
+    }
+    return units;
   }
 
   /**
@@ -2544,6 +2620,7 @@ export class HostedSession {
       },
       logEnd: (body) => {
         this.log.workflowEnd(body);
+        this.refreshUnits();
         this.persist();
       },
       // A step's asks ride the background path, attributed to the start turn (A2).
@@ -3981,6 +4058,7 @@ export class HostedSession {
       // After the turn's last message (derived just above); the checkpoint's
       // digest is lazy (the first read hashes, never this window).
       this.log.turnEnd(turnId, end.stopReason);
+      this.refreshUnits();
       this.log.checkpoint();
       // Inside the steering window, and safe there: this method cannot await,
       // and `persist` only captures — the I/O starts after the window.
