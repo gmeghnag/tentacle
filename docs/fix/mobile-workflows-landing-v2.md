@@ -231,4 +231,38 @@ Red first on the unchanged code for each (§9); the narrow files are `apps/mobil
 
 ## Review
 
-*— (reviewer), (date)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same family as the planner, different model from the executor)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, evidence only; the code holds).
+
+**Findings**
+
+1. **MEDIUM — the plan's light + dark shots are not built, and Execution does not declare it as drift.** Tests asks flow 46 to shoot A·landing/ask/sheet/delete «in light AND dark (`appearance.js` around each `_shot`)» and 46b to shoot A·two-asks/offline in both. `46-workflow-landing.yaml:44-99` has four `_shot` calls and 46b two, with zero `appearance` steps (`grep -c appearance` = 0; `40-mascot-shots.yaml` = 2). Failure scenario: the owner checks mockup A's dark variant against the simulator, and no dark frame exists — "pixels unverified" for half the states, and Drift does not say so. Fix: add the `appearance.js` dark/light pair around each `_shot` (as `40-mascot-shots.yaml:69-72`), or record the drop in Drift. Neither flow has run on a simulator yet (Execution says so). The 2-sim gate must run `46-workflow-landing,46b-workflow-landing-shots` before merge, because 46 is a gate flow whose assertions changed (`scrollUntilVisible` after the banner, `text: "Asking… landing-demo"`), and 46b is a new gate entry (`run.ts` FLOWS).
+
+**Gate (this worktree)**: touched tests (`ask-park`, `permission-sheet`, `sheet-plan`, `workflow-landing`, `workflow-landing-controller`, `workflow-run-controller`, `workflow-start-wiring`, `e2e-gate`) → **278 pass, 0 fail**. `bun run lint`: clean (2592 files). `bun run typecheck`: clean. The full `bun run check` was not run here.
+
+**Mutations** (script `.tentacle/tmp/mobile-workflows-landing-v2/rev/mut.ts`, each restored; `git status` clean afterwards):
+
+| Mutation | Result |
+|---|---|
+| `askPresentable` over the landing → `return true` | red (sheet-plan) |
+| `blockedWhy`: «asking» blocks every act | red (landing) |
+| `landingAskBanner` drops `!state.parked &&` | red (ask-park) |
+| `unpark` back to the parked-only guard | red (permission-sheet) |
+| `sheetChanged` never redraws | red (landing-controller) |
+| landing source in `App.tsx:2284` drops `unpark` | red (wiring) |
+| `PillButton` compact dimmed opacity removed | **green**: unpinned, but presentation only, so not a finding |
+
+On the first try the App.tsx mutation hit the run screen's identical line (`App.tsx:2160`) and stayed green. The wiring test slices `WorkflowStartRoute`, so the landing's own line is pinned. The run screen's `unpark` line is not pinned by any test; that was already true on `main`.
+
+**Premises** (TRUE unless noted): `unpark()` sends nothing (`permission-sheet.ts:646-649`) — TRUE. A single `askPresentable` call site (`SessionScreen.tsx:1439`) — TRUE (grep). The sheet's `onChange` reaches the landing's subscription (`session-screen-controller.ts:809` `emit()` → `screen.subscribe`) — TRUE. A serve left down by 46b is restarted before the next flow (`run.ts:1013-1014`) — TRUE, so there is no cascade.
+
+**Attacks tried**
+
+- §7 single broker: the landing's `deps.asks` is `Pick<…"current"|"subscribe"|"unpark"|"banner">`, with no `answerFor`. `reviewAsk` only calls `unpark`, and every answer still goes through the sheet. No new requester or resolve path. **Holds.**
+- A surprise sheet over the landing: a new ask is born `reviewed:false` in `present()`. A run popped back onto the landing with an unreviewed ask → banner, no flash. Off the landing, `reviewed` is ignored. **Holds.**
+- Other flows that relied on D8: 34/44/45 grep. Flow 44's hash ask is presented over the RUN screen (`topRunId`), not the landing, so it is unaffected. **Holds.**
+- «Asking…» plus Start/Delete: a separate `asked` set means a flight no longer erases «Asking…». A read drops the flight of a row that is gone. **Holds.**
+- Banner redraw dedup by `title/originShort/more`: two different asks with equal fields produce the same view, so skipping the redraw is harmless. **Holds.**
+
+**Executor**: honest. It reported the unrun flows, the unreachable `+1` (correct: one router prompt at a time), and the open `ASK_PARKS` and hitSlop items. It ran mutations M1–M10. It missed the dark-shots drift.
