@@ -1021,12 +1021,10 @@ async function main(): Promise<number> {
               runDir,
               seeded,
               hooks.address,
-              // Flow 45's session holds two ENDED workflow runs (S7); every
-              // other flow's own session is a plain compose session.
+              // A run-seeded flow's session holds two ENDED workflow runs (S7);
+              // every other flow's own session is a plain compose session.
               (name) =>
-                name === "45-workflow-run-view"
-                  ? workflowRunsOf(endpoint)
-                  : composeSessionOf(endpoint),
+                RUN_SEEDED_FLOWS.has(name) ? workflowRunsOf(endpoint) : composeSessionOf(endpoint),
               flowTimeoutMs,
             );
           } catch (error) {
@@ -1902,6 +1900,9 @@ export const FLOWS: readonly string[] = [
   // The landing's two-asks and offline states, light + dark (visual). Its own
   // session and file (`landing-shots.yaml`); it stops `serve` and restarts it.
   "46b-workflow-landing-shots",
+  // docs/fix/mobile-session-open-empty.md: «Open the session» from a run lands on
+  // the Session under it, with rows. Its own session, seeded like flow 45's.
+  "48-workflow-open-session",
   // docs/feat/mobile-file-preview-cards.md: the transcript's preview cards (a
   // PDF page, an image, markdown lines, an HTML page), light and dark.
   "36-preview-cards",
@@ -2031,7 +2032,15 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   // docs/feat/mobile-workflows-landing.md: Approve + Delete from the list.
   "46-workflow-landing": "LANDING_ID",
   "46b-workflow-landing-shots": "LANDINGSHOTS_ID",
+  // docs/fix/mobile-session-open-empty.md: the run screen's «Open the session».
+  "48-workflow-open-session": "OPENSESSION_ID",
 };
+
+/** The flows whose own session is seeded with the two ENDED workflow runs. */
+const RUN_SEEDED_FLOWS: ReadonlySet<string> = new Set([
+  "45-workflow-run-view",
+  "48-workflow-open-session",
+]);
 
 /** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */
 export interface AttemptOptions {

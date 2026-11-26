@@ -10,6 +10,11 @@
  *   keyed by id, so a fast back-then-forward would otherwise re-open an entry
  *   that the detach is about to remove (`remote-client.ts:1384-1391`) and leave
  *   two listeners on one session (F17).
+ * - **A watching open always gets the history.** `RemoteSession.watch` delivers
+ *   what the attach raised ONCE, to the first listener: a watcher takes a handle
+ *   nobody watched yet, otherwise it re-attaches (detach, then a fresh open) and
+ *   the superseded watcher is unsubscribed (docs/fix/mobile-session-open-empty.md).
+ *   `leave` names its holder by that watcher, so a superseded one releases nothing.
  * - **Leaving detaches.** `leave` is `RemoteSession.detach` (`session/detach`):
  *   the session keeps running for every client (decision 4). It is never
  *   `close()`, which is `session/close` and ends it (Hazard 3).
@@ -54,18 +59,25 @@ export interface SessionHandle {
   readonly autoAccept?: AutoAcceptLink;
 }
 
+/** A holder's listener; its identity is how that holder names itself to `leave`. */
+export type Watch = (activity: SessionActivity) => void;
+
 export interface OpenOptions {
   /** Reload an ARCHIVED session (the person's Reopen). Absent: an archived id fails `archived`. */
   readonly reopen?: boolean;
   /** What the session does that this client did not start (turns, history, closed). */
-  readonly watch?: (activity: SessionActivity) => void;
+  readonly watch?: Watch;
 }
 
 export interface SessionController<S extends SessionHandle> {
   /** Attach to `sessionId` (never create). Serialised per id; no throw. */
   open(sessionId: string, options?: OpenOptions): Promise<OpenSessionResult<S>>;
-  /** Stop following it (`session/detach`): the session keeps running for everyone. */
-  leave(sessionId: string): Promise<void>;
+  /**
+   * One holder stops following it; the last one out detaches (`session/detach`):
+   * the session keeps running for everyone. `watch` = the listener this holder
+   * opened with (absent: a holder that opened without one).
+   */
+  leave(sessionId: string, watch?: Watch): Promise<void>;
   /** Drop every subscription and forget every handle; in-flight opens are ignored. */
   dispose(): void;
   /** Whether this controller currently follows `sessionId`. */
@@ -132,18 +144,37 @@ export async function createFreshSession(
   return { ok: true };
 }
 
+/** A followed session and who holds it. */
+interface Entry<S> {
+  readonly session: S;
+  /** The one listener (`RemoteSession.watch` has a single slot); null: none now. */
+  watcher: Watch | null;
+  unwatch: () => void;
+  /** It has had a watcher: the attach history is delivered and gone. */
+  consumed: boolean;
+  /** An open without a watch created it: that holder will `leave` too. */
+  held: boolean;
+}
+
+/** An open still queued or attaching, so a `leave` can find it. */
+interface PendingOpen {
+  readonly watch: Watch | undefined;
+  /** The `held` its entry will be registered with. */
+  held: boolean;
+  /** Its holder left: it must register nothing. */
+  cancelled: boolean;
+}
+
+const nothing = (): void => {};
+
 export function createSessionController<S extends SessionHandle>(
   deps: SessionControllerDeps<S>,
 ): SessionController<S> {
-  const live = new Map<string, { readonly session: S; readonly unwatch: () => void }>();
+  const live = new Map<string, Entry<S>>();
   /** Per id: the settle of the last operation, so the next one starts after it. */
   const tails = new Map<string, Promise<unknown>>();
-  /**
-   * Per id: a `leave` was asked for and its detach has not settled yet. The open
-   * that is still attaching must NOT register it (a fast back-then-forward, and
-   * the common tap-then-back during a 30 s attach): it detaches instead.
-   */
-  const left = new Set<string>();
+  /** Per id: the opens that have not settled yet. */
+  const pending = new Map<string, Set<PendingOpen>>();
   let disposed = false;
 
   /** Run `run` after everything already queued for `id` has settled. */
@@ -165,63 +196,169 @@ export function createSessionController<S extends SessionHandle>(
     return mine;
   }
 
+  /** Unsubscribe an entry's listener and forget it; the caller detaches the handle. */
+  function drop(id: string, entry: Entry<S>): void {
+    entry.unwatch();
+    live.delete(id);
+  }
+
+  /**
+   * `session/detach` never ends it; an older daemon's `MethodNotFound` leaves the
+   * session followed, which is the safe side (nothing ended).
+   */
+  async function detach(session: S): Promise<void> {
+    await session.detach().catch(() => {});
+  }
+
+  /**
+   * Serve an open from a followed session, or null when only a fresh attach can:
+   * the history goes ONCE, to the first listener.
+   */
+  function adopt(entry: Entry<S>, watch: Watch | undefined): OpenSessionResult<S> | null {
+    if (watch !== undefined && entry.watcher !== watch) {
+      if (entry.consumed) {
+        return null;
+      }
+      entry.watcher = watch;
+      entry.consumed = true;
+      // What the attach already buffered arrives now, in order.
+      entry.unwatch = entry.session.watch(watch);
+    }
+    return { ok: true, session: entry.session };
+  }
+
+  /** The queued half of `open`: runs alone for its id. */
+  async function attach(
+    sessionId: string,
+    options: OpenOptions,
+    request: PendingOpen,
+    superseded: Entry<S> | undefined,
+  ): Promise<OpenSessionResult<S>> {
+    if (disposed) {
+      return { ok: false, reason: "link" };
+    }
+    if (superseded !== undefined) {
+      await detach(superseded.session);
+    }
+    const reused = live.get(sessionId);
+    if (reused !== undefined) {
+      // Another open of this id won the queue while this one waited.
+      if (request.cancelled) {
+        return { ok: false, reason: "link" };
+      }
+      const served = adopt(reused, options.watch);
+      if (served !== null) {
+        return served;
+      }
+      drop(sessionId, reused);
+      request.held = reused.held;
+      await detach(reused.session);
+    }
+    if (disposed) {
+      return { ok: false, reason: "link" };
+    }
+    const session = deps.newSession(sessionId, options.reopen === true ? { reopen: true } : {});
+    try {
+      await session.open();
+    } catch (error) {
+      return { ok: false, reason: openFailureReason(error) };
+    }
+    if (disposed || request.cancelled) {
+      // The holder went away while the attach was in flight (`dispose`, or a
+      // back before the attach answered): never leave a listener behind, and
+      // detach — the session was already reached at the daemon (the detach
+      // itself is fire-and-forget).
+      void detach(session);
+      return { ok: false, reason: "link" };
+    }
+    const entry: Entry<S> = {
+      session,
+      watcher: null,
+      unwatch: nothing,
+      consumed: false,
+      held: request.held,
+    };
+    live.set(sessionId, entry);
+    // Never null: nothing watched this entry yet.
+    adopt(entry, options.watch);
+    return { ok: true, session };
+  }
+
   async function open(sessionId: string, options: OpenOptions = {}): Promise<OpenSessionResult<S>> {
     const already = live.get(sessionId);
     if (already !== undefined) {
-      return { ok: true, session: already.session };
+      const served = adopt(already, options.watch);
+      if (served !== null) {
+        return served;
+      }
+      // Takeover. Dropped at once, so the superseded holder's late `leave` finds
+      // nothing of its own.
+      drop(sessionId, already);
     }
+    const request: PendingOpen = {
+      watch: options.watch,
+      held: already?.held ?? options.watch === undefined,
+      cancelled: false,
+    };
+    const waiting = pending.get(sessionId) ?? new Set<PendingOpen>();
+    pending.set(sessionId, waiting.add(request));
     return serialise(sessionId, async () => {
-      if (disposed) {
-        return { ok: false, reason: "link" } as const;
-      }
-      const reused = live.get(sessionId);
-      if (reused !== undefined) {
-        // Another open of this id won the queue while this one waited.
-        return { ok: true, session: reused.session } as const;
-      }
-      const session = deps.newSession(sessionId, options.reopen === true ? { reopen: true } : {});
       try {
-        await session.open();
-      } catch (error) {
-        return { ok: false, reason: openFailureReason(error) } as const;
+        return await attach(sessionId, options, request, already);
+      } finally {
+        waiting.delete(request);
+        if (waiting.size === 0) {
+          pending.delete(sessionId);
+        }
       }
-      if (disposed || left.has(sessionId)) {
-        // The screen went away while the attach was in flight (`dispose`, or a
-        // back before the attach answered): never leave a listener behind, and
-        // detach — the session was already reached at the daemon (the detach
-        // itself is fire-and-forget).
-        void session.detach().catch(() => {});
-        return { ok: false, reason: "link" } as const;
-      }
-      // Subscribed after the attach so the history/comments it already buffered
-      // arrive now, in order (`watch` delivers what it holds).
-      const unwatch = options.watch ? session.watch(options.watch) : () => {};
-      live.set(sessionId, { session, unwatch });
-      return { ok: true, session } as const;
     });
   }
 
-  function leave(sessionId: string): Promise<void> {
+  function leave(sessionId: string, watch?: Watch): Promise<void> {
     const entry = live.get(sessionId);
+    /** The handle this leave was the last holder of. */
+    let last: S | undefined;
     if (entry !== undefined) {
-      live.delete(sessionId);
-      entry.unwatch();
-    } else {
-      // No handle yet: a `leave` while the same id's open is still attaching.
-      // Mark it so that open detaches instead of registering (the screen is
-      // gone; registering it would keep a listener into an unmounted screen and
-      // re-offer asks to the phone's held broker). Cleared by the run below,
-      // which the tail guarantees settles after that open.
-      left.add(sessionId);
+      if (watch === undefined) {
+        // A watching holder, if any, keeps following it.
+        entry.held = false;
+        if (entry.watcher === null) {
+          last = entry.session;
+        }
+      } else if (entry.watcher === watch) {
+        entry.unwatch();
+        entry.unwatch = nothing;
+        entry.watcher = null;
+        if (!entry.held) {
+          last = entry.session;
+        }
+      }
+      if (last !== undefined) {
+        drop(sessionId, entry);
+      }
+    }
+    // A `leave` while that holder's open is still attaching: mark it so it
+    // detaches instead of registering (the screen is gone; registering it would
+    // keep a listener into an unmounted screen and re-offer asks to the phone's
+    // held broker).
+    for (const request of pending.get(sessionId) ?? []) {
+      if (watch !== undefined) {
+        if (request.watch === watch) {
+          request.cancelled = true;
+        }
+      } else if (entry === undefined) {
+        if (request.watch === undefined) {
+          request.cancelled = true;
+        } else {
+          // A takeover in flight: the holder letting go only releases its hold.
+          request.held = false;
+        }
+      }
     }
     return serialise(sessionId, async () => {
-      left.delete(sessionId);
-      if (entry === undefined) {
-        return;
+      if (last !== undefined) {
+        await detach(last);
       }
-      // `session/detach` never ends it; an older daemon's `MethodNotFound`
-      // leaves the session followed, which is the safe side (nothing ended).
-      await entry.session.detach().catch(() => {});
     });
   }
 

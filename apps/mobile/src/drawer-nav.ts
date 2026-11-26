@@ -11,6 +11,7 @@
  * - The open session itself → `stay` (just close: no remount, no detach).
  * A switch only unmounts the old screen — it detaches, never closes (F6).
  */
+import { sessionKey } from "./artifact-seen-store.ts";
 import { DRAWER_MS } from "./motion.ts";
 import type { RootStackParams, SessionRoute } from "./routes.ts";
 
@@ -39,6 +40,34 @@ export type DrawerNav =
   /** Always the Session route (same computer, another session): `navigation.replace`. */
   | { readonly kind: "replace"; readonly route: Extract<DrawerStackRoute, { name: "Session" }> }
   | { readonly kind: "reset"; readonly routes: readonly DrawerStackRoute[] };
+
+/**
+ * The `Session` screen's `getId`: one screen per session in the stack, so a
+ * `navigate` to an open one never mounts a second watcher of it
+ * (docs/fix/mobile-session-open-empty.md N1).
+ */
+export function sessionRouteId(
+  params: Pick<SessionRoute, "computerId" | "sessionId"> | undefined,
+): string | undefined {
+  return params === undefined ? undefined : sessionKey(params.computerId, params.sessionId);
+}
+
+/**
+ * The params to `navigate` back to a session with: those of its screen already
+ * in the stack, else `target`. `navigate` replaces a matched route's params, and
+ * a new title or folder would rebuild that screen (N3).
+ */
+export function sessionReturnParams(
+  routes: readonly { readonly name: string; readonly params?: object | undefined }[],
+  target: SessionRoute,
+): SessionRoute {
+  const id = sessionRouteId(target);
+  const open = routes.find(
+    (route) =>
+      route.name === "Session" && sessionRouteId(route.params as SessionRoute | undefined) === id,
+  );
+  return (open?.params as SessionRoute | undefined) ?? target;
+}
 
 export function drawerTarget(from: SessionRoute, pick: DrawerPick): DrawerNav {
   const sameComputer = pick.computerId === from.computerId;

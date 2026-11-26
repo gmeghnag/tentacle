@@ -1139,6 +1139,43 @@ describe("flow 45's seeder speaks the trust bit workflows hang on (the gate's re
   });
 });
 
+describe("flow 48 pins 'Open the session' (docs/fix/mobile-session-open-empty.md)", () => {
+  const flow = () => readFileSync(join(FLOWS_DIR, "48-workflow-open-session.yaml"), "utf8");
+  const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+
+  test("it runs, on a session of its own seeded with ENDED runs", () => {
+    expect(FLOWS).toContain("48-workflow-open-session");
+    expect(runner).toContain('"48-workflow-open-session": "OPENSESSION_ID"');
+    expect(runner).toContain("RUN_SEEDED_FLOWS.has(name)");
+    const seeded = runner.slice(runner.indexOf("const RUN_SEEDED_FLOWS"));
+    expect(seeded.slice(0, seeded.indexOf(";"))).toContain('"48-workflow-open-session"');
+  });
+
+  test("the ask is raised under the run, and the Session it opens has rows", () => {
+    const steps = flow();
+    // A main-turn ask raised while the run screen is on top is the only way to
+    // the «Open the session» bar over an ENDED run.
+    const run = steps.indexOf('id: "workflow-graph"');
+    const ask = steps.indexOf('file: "48-laptop-edit.js"');
+    const open = steps.indexOf('id: "workflow-ask-foreign"', ask);
+    const row = steps.indexOf('id: "row-r.*"', open);
+    const gone = steps.indexOf('id: "sessions-list"', open);
+    expect(run).toBeGreaterThan(-1);
+    expect(ask).toBeGreaterThan(run);
+    expect(open).toBeGreaterThan(ask);
+    expect(row).toBeGreaterThan(open);
+    // Nothing leaves the Session by the list: the rows are the opened screen's.
+    expect(gone).toBe(-1);
+  });
+
+  test("it ends on daemon truth", () => {
+    expect(flow().trimEnd().endsWith('file: "48-file.js"')).toBe(true);
+    const script = readFileSync(join(FLOWS_DIR, "48-file.js"), "utf8");
+    expect(script).toContain("/file-exists?file=w48.txt");
+    expect(script).toContain("throw new Error");
+  });
+});
+
 describe("the flow list is the flow files (the other direction)", () => {
   test("no flow file is silently not run", () => {
     // 12c's guard checks the list's entries exist; this checks the reverse, which

@@ -81,6 +81,33 @@ describe("the run screen holds only the slim ask row (docs/fix/mobile-ask-surfac
   });
 });
 
+describe("one Session screen per session in the stack (docs/fix/mobile-session-open-empty.md N)", () => {
+  /** A way into `Session` goes back to the open screen, with its own params. */
+  const goesBack = (src: string) => ({
+    pop: src.includes("pop: true"),
+    params: src.includes("params: sessionReturnParams("),
+  });
+
+  test("the Session screen is identified by its session", () => {
+    const screen = between(APP, 'name="Session"', "options=");
+    expect(screen).toContain("getId={({ params }) => sessionRouteId(params)}");
+  });
+
+  test("the run's 'Open the session' pops back to it (mutation: drop `pop` → red)", () => {
+    // Anchored on the screen: the FIRST `onOpenSession={` is a prop pass-through,
+    // and a span from it reaches the push queue's own `pop`.
+    const route = between(APP, 'name="WorkflowRun"', "</Stack.Screen>");
+    expect(route).toContain("onOpenSession={() =>");
+    expect(route).not.toContain("createRouteQueue");
+    expect(goesBack(route)).toEqual({ pop: true, params: true });
+  });
+
+  test("a push tap pops back to it too, never reordering the stack", () => {
+    const queue = between(APP, "createRouteQueue<unknown>(", "[navigationRef]");
+    expect(goesBack(queue)).toEqual({ pop: true, params: true });
+  });
+});
+
 describe("the run route reuses the ONE session path and the ONE sheet", () => {
   const route = between(APP, "function WorkflowRunRoute", "\nfunction ");
 

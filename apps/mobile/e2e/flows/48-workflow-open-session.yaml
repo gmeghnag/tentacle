@@ -1,0 +1,86 @@
+appId: so.tentacle.app
+---
+# 48 (docs/fix/mobile-session-open-empty.md): «Open the session» on a run screen
+# goes BACK to the Session under it, with its transcript — never an empty one.
+# Its own session, seeded like flow 45's (two ENDED runs, `workflowRunsOf`).
+#
+# Over an ended run the bar exists only for an ask that is not the run's, so the
+# LAPTOP raises one (`EDIT`) while the run screen is on top. The run screen does
+# not present it as a sheet (docs/fix/mobile-ask-surfaces.md Q1); the Session does.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${OPENSESSION_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${OPENSESSION_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "workflows"
+- tapOn:
+    id: "hub-item-workflows"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-landing-recent"
+    timeout: 10000
+- tapOn:
+    id: "workflow-landing-recent"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-runs"
+    timeout: 10000
+# The list is computer-wide (flow 45's runs are in it too) and newest first, so
+# the first match is one of this flow's own runs.
+- tapOn:
+    text: "run-view-pass,.*"
+    index: 0
+- extendedWaitUntil:
+    visible:
+      id: "workflow-graph"
+    timeout: 15000
+- runScript:
+    file: "48-laptop-edit.js"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-ask-foreign"
+    timeout: 20000
+- tapOn:
+    id: "workflow-ask-foreign"
+# Back on the Session, which now presents the ask.
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "48-session-ask"
+- tapOn:
+    id: "perm-allow_once"
+# The laptop's turn ends on this screen: it is attached, not a stale copy.
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 30000
+# The history is drawn (the bug: `session-view` with no rows at all).
+- assertVisible:
+    id: "row-r.*"
+- assertNotVisible:
+    id: "transcript-empty"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "48-session-rows"
+- runScript:
+    file: "48-file.js"

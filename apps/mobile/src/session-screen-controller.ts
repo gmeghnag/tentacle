@@ -81,7 +81,12 @@ import {
 import type { QueueTrace } from "./queue-trace.ts";
 import { createRenderCoalescer } from "./render-coalesce.ts";
 import { type CommandRow, clearConfirm, commandRows } from "./session-commands.ts";
-import type { SessionController, SessionHandle, SessionOpenFailure } from "./session-controller.ts";
+import type {
+  SessionController,
+  SessionHandle,
+  SessionOpenFailure,
+  Watch,
+} from "./session-controller.ts";
 import { type ForeignTurn, createSessionFeed } from "./session-feed.ts";
 import {
   type InfoPort,
@@ -1559,6 +1564,13 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   let queuedReopen = false;
 
   /**
+   * This screen's ONE listener: its identity is how the session controller tells
+   * this screen's `leave` from another screen's on the same session
+   * (docs/fix/mobile-session-open-empty.md S).
+   */
+  const watcher: Watch = (activity) => feed.activity(activity);
+
+  /**
    * Attach. `reopen` is the person's explicit Reopen button (Owner Q4) — the
    * FIRST attach of an archived session never passes it, so merely opening the
    * screen cannot revive a session or count against the daemon's cap.
@@ -1576,7 +1588,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     emit();
     const result = await deps.controller.open(deps.sessionId, {
       ...(reopen ? { reopen: true } : {}),
-      watch: (activity) => feed.activity(activity),
+      watch: watcher,
     });
     attaching = false;
     if (disposed) {
@@ -2254,7 +2266,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       activityWatch = undefined;
       capsWatch?.();
       capsWatch = undefined;
-      await deps.controller.leave(deps.sessionId);
+      await deps.controller.leave(deps.sessionId, watcher);
       emit();
     },
     async resync(silent = false) {
@@ -2275,7 +2287,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       try {
         // The owner's own recovery: leave, then re-attach. `attach` is the ONE
         // path in (AGENTS §7), so a resync cannot diverge from a first mount.
-        await deps.controller.leave(deps.sessionId);
+        await deps.controller.leave(deps.sessionId, watcher);
         handle = null;
         if (disposed) {
           return;

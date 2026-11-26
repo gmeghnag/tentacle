@@ -6,7 +6,13 @@
  * keeps `archived: true` (Owner Q4: browsing never revives).
  */
 import { describe, expect, test } from "bun:test";
-import { type DrawerPick, drawerSearchTarget, drawerTarget } from "../src/drawer-nav.ts";
+import {
+  type DrawerPick,
+  drawerSearchTarget,
+  drawerTarget,
+  sessionReturnParams,
+  sessionRouteId,
+} from "../src/drawer-nav.ts";
 import type { SessionRoute } from "../src/routes.ts";
 
 const FROM: SessionRoute = { computerId: "a", sessionId: "s1", title: "one", archived: false };
@@ -84,6 +90,40 @@ describe("drawerSearchTarget (the magnifier)", () => {
       { name: "Computers" },
       { name: "Sessions", params: { computerId: "b", name: "Mac b", search: true } },
     ]);
+  });
+});
+
+describe("one Session screen per session (docs/fix/mobile-session-open-empty.md N)", () => {
+  test("T6 the route id separates computers, and is stable for one session", () => {
+    const renamed: SessionRoute = { ...FROM, title: "renamed" };
+    expect<string | undefined>(sessionRouteId(renamed)).toBe(sessionRouteId(FROM));
+    expect(sessionRouteId({ ...FROM, computerId: "b" })).not.toBe(sessionRouteId(FROM));
+    expect(sessionRouteId({ ...FROM, sessionId: "s2" })).not.toBe(sessionRouteId(FROM));
+    expect(sessionRouteId(undefined)).toBeUndefined();
+  });
+
+  const run: SessionRoute = { computerId: "a", sessionId: "s1", title: "a run", archived: false };
+
+  test("going back to an open session keeps its params (mutation: return the target → red)", () => {
+    const open: SessionRoute = { ...FROM, cwd: "/w" };
+    const routes = [
+      { name: "Computers" },
+      { name: "Session", params: { ...open, computerId: "b" } },
+      { name: "Session", params: open },
+      { name: "WorkflowRun", params: { computerId: "a", sessionId: "s1" } },
+    ];
+    expect(sessionReturnParams(routes, run)).toBe(open);
+  });
+
+  test("a session with no screen in the stack opens with the new params", () => {
+    const routes = [
+      { name: "Computers" },
+      { name: "Session", params: { ...FROM, sessionId: "other" } },
+      // Same ids, another screen: never taken for the session's.
+      { name: "WorkflowRun", params: { computerId: "a", sessionId: "s1" } },
+    ];
+    expect(sessionReturnParams(routes, run)).toBe(run);
+    expect(sessionReturnParams([], run)).toBe(run);
   });
 });
 
