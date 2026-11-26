@@ -766,3 +766,29 @@ Sub-agents: both filters. Pods: `tunnelledAgent` gets no link.
 **Executor behaviour.** Execution is honest: the scan's cost and the gate it had not run
 are both stated. The "script gate failures" commit still left the GUARD test red: the
 full gate was not re-run before review.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (diff `HEAD~1`, commit `0f2f0268`)
+
+**Verdict: PASS.**
+
+- **Finding 1 (HIGH): fixed.** `persistingController` now forwards `onApps` and
+  `unpublishApp` (`packages/cli/src/local-runtime.ts:383-386`, `:990-997`), and the GUARD
+  list names them. The new `packages/cli/test/apps-runtime.test.ts` drives a real
+  `Connection` + `createLocalRuntime` with `WORKER_TRUST`: publish → row seen → Stop →
+  `remove` sent → row gone. Mutation: dropping the `onApps` forward turns
+  `apps-runtime.test.ts` and the GUARD test red.
+- **Finding 2 (MEDIUM): fixed.** `findSecrets` uses linear scans (`starts`) for the three
+  backtracking rules (`private-key`, `jwt`, `url-credentials`, `packages/agent/src/redact.ts`).
+  `redactText` still uses the patterns, so output redaction is unchanged. A seeded 20 000-case
+  fuzz checks that each scan returns exactly the `matchAll` indices (non-vacuous: > 100 real
+  matches per rule). Mutations: removing `starts` from `url-credentials` → 256 KiB crafted
+  test red (5.5 s); removing jwt's `at < from` guard → the fuzz test and the jwt timing test
+  red (2.8 s). Probe, mine: 16 crafted 1 MiB inputs across every rule (incl. the rules with
+  no `starts`: `ghp_`, `sk--`, `token=`, `Bearer `, `AIza`, `xoxb-`) take ≤ 7 ms each;
+  `"a."` × 10 MiB takes 3 ms (round 1: an estimated ~2 h).
+- **Regressions:** none found. `bun run typecheck` clean; `bun run lint` clean (2700
+  files); `packages/agent` + `apps-runtime` + GUARD + `apps-hosts`: 1239 pass / 0 fail.
+  The full `bun run test` was not re-run this round. Every mutation was reverted;
+  `git status` was clean before this doc edit.
