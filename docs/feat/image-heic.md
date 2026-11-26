@@ -415,7 +415,10 @@ Exact long edge also checked for 4032, 3024, 2268, 2048, 1701 and 1568. (`repro.
 
 **Checks:** 408 pass / 0 fail over the 16 covering test files; `biome check` on the changed paths clean; a `tsc` limited to the touched test files and their imports reports errors only in two untouched files (`agent/src/harness/a2a-map.ts`, `tui/src/markdown.ts`; likely the narrowed config). Full gate: not run (orchestrator's). No schema change.
 
+**Gate fix (claude-sonnet-5-5, 2026-11-27): flaky `worker-exit-net` `&` child.** Test fixture only. Its `amp` wait (one `pgrep -f "sleep M"` match) was also true for `sh` itself before its fork. Repro (`.tentacle/tmp/image-heic/stress.ts`: the real fixture, 64 at once): the deciding poll matched only `/bin/sh -c sleep …` in 261/640 instrumented runs, and in one of them the `sleep` (ppid 1, `sh`'s pgid) survived the exit. The fixture now counts only once the `sleep` itself runs; after the fix 896 runs, 0 bad.
+
 **For Review (not changed, outside the Implementation)**
+- Exit net (`exec/src/process-group.ts`, pre-existing): from the repro above, a group SIGKILL sent while `sh` is forking can leave the child alive. Not reproduced outside the real fixture (3600 shell-only rounds: 0 leaks).
 - Submit does not wait for an attach in progress (`useAttachments.ts` chains attaches only). Enter during a conversion (≈ 300 ms, worst case far longer) sends without the picture and the chip appears afterwards. The shape predates this task; HEIC widens the window. Read from code, not reproduced.
 - A turn cancel does not stop a running conversion (no signal in `HeicConverter`); each child is bounded at 20 s, so one conversion at worst ≈ 100 s (size + 4 decodes).
 - An output over 15 MiB is refused without the ×0.75 steps (D3's stat bound).

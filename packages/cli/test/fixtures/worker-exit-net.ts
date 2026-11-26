@@ -93,11 +93,19 @@ for await (const _ of runtime.createSession().send("start the job")) {
 // parallel, AGENTS §9) until its tree has settled — `sh` + `sleep`, or for
 // `amp` the lone lingering `sleep` — and the forwarded pgid has landed on the
 // main thread. On timeout the count is printed as-is and the test fails on it.
-function jobProcesses(): number {
-  const live = Bun.spawnSync(["pgrep", "-f", `sleep ${marker}`])
-    .stdout.toString()
-    .trim();
+function matches(pattern: string): number {
+  const live = Bun.spawnSync(["pgrep", "-f", pattern]).stdout.toString().trim();
   return live === "" ? 0 : live.split("\n").length;
+}
+function jobProcesses(): number {
+  // `amp`: `sh` carries `sleep <marker>` in its own argv, so a lone match may
+  // be `sh` before its fork, and a group SIGKILL racing that fork can leave the
+  // child alive. Count only once the sleep itself runs; 2 until `sh` is gone.
+  // In this order: a sleep seen by the first call is still there for the second.
+  if (form === "amp" && matches(`^sleep ${marker}`) === 0) {
+    return 0;
+  }
+  return matches(`sleep ${marker}`);
 }
 // `short` (`sleep 1.<marker>`) never matches the pattern: wait only for the pgid.
 const expected = form === "short" ? null : form === "amp" ? 1 : 2;
