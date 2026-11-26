@@ -382,7 +382,65 @@ After each revert the same files were re-run green (`27 pass` / `55 pass`).
 
 ## Review
 
-*— pending: not written by the planner. Per the metadata block the change is
-`cross-module` but not `load-bearing`, so standard in-context Review — with the
-adversarial checklist of AGENTS §10: re-run `bun run check`, re-run the Context
-repro, and confirm the mutation checks in Tests are actually red.*
+*— claude-opus-5-5, 2026-11-26* (fresh context; a different model family from
+the executor, DeepSeek, and from the planner's, Sonnet)
+
+**Verdict: REQUEST-CHANGES** — one HIGH finding.
+
+**1. HIGH — the 64 KiB cap now truncates or erases answers it used to deliver
+(D7's "strictly no worse" is FALSE).** `a2a-map.ts:311-318` (and the D5 snapshot
+path `:267-273`) emits `replace` and then sends the replacement through
+`takeText` (`a2a-map.ts:177-186`). `outChars` already counts the deltas being
+retracted, so the whole-text close is billed against a budget that its own deltas
+used up. Our daemon always streams `append:true` deltas and then closes with the whole
+text as `append:false, lastChunk:true` (`daemon/src/a2a/executor.ts:624-636`,
+`mapping.ts:279-281`). So an answer of N chars comes out as follows:
+- N ≤ 32 KiB: fine.
+- 32 KiB < N < 64 KiB: the report is cut to `64K−N` chars and gets the
+  "truncated" note, though the answer was under the cap.
+- N ≥ 64 KiB: the deltas set `truncated`. The close clears the segment, and
+  `takeText` then returns `undefined`, so **the report has none of the
+  artifact's text**.
+
+Before this change, the report had the whole answer (duplicated). Evidence (the
+real mapper and `report.ts` from this branch, `.tentacle/tmp/a2a-stream-duplicate/cap.test.ts`):
+a 40 000-char answer gives a report of length **25 564** (truncated); a
+70 000-char answer gives a report of length **0**. This turns a duplicate (loud,
+harmless) into a silent loss. Fix direction: on a replace, give the budget back
+for the text being retracted, e.g. subtract that artifact's charged chars from
+`outChars`. Reset `truncated` only if the truncation was caused by this artifact.
+Pin the change with a >32 KiB test and a >64 KiB test.
+
+**Gate:** touched files (`harness-report`, `harness-a2a-map`, `harness-remote-fit`,
+`harness-a2a`, `daemon/a2a-executor`) → 120 pass / 0 fail; `bun run lint` clean
+(2581 files); `bun run typecheck` clean. I did not run the full `bun run test`.
+
+**Mutation:** `a2a-map.ts` task-snapshot `if (seen)` → `if (seen && false)` →
+`terminal task: … replaced, not appended` FAILS (75 pass / 1 fail). I reverted it,
+and `git status` is clean. The executor's two mutations are plausible, and I did
+not re-run them.
+
+**Premises:**
+- TRUE: `replace` had no reader on `main`.
+- TRUE: the daemon closes with the whole text as `append:false` and sends
+  `parts: []` when there is no text (`executor.ts:624-636`).
+- TRUE: `dedupeTask` drops equal snapshots (`a2a.ts:216-223`).
+- FALSE: D7's "no worse" (see finding 1).
+
+**Attacks tried:**
+- (a) Cap accounting under replace: **found finding 1**.
+- (b) Text after a tool round: the daemon's `append:false` first chunk
+  (`chunkAppend`) now replaces the round-1 text. This is the server's intended
+  meaning, and the final whole text matches it. OK.
+- (c) Non-A2A adapters with no `fromArtifact`: everything goes to the plain
+  tail, so the output is byte-identical. OK.
+- (d) Segment order after a replace: the new text is pushed at the END
+  (`report.ts:45-48`), not at the artifact's first position, which the plan's
+  failure mode claims. This is harmless today, because tail notices are only
+  appended after the stream. NIT.
+- (e) §7: no wire, protocol, or persistence change, and no protocol note is
+  needed. OK.
+
+**Executor behaviour:** the work was clean and followed the plan. Drift was
+disclosed honestly, and the red-then-green tests are real. The executor
+inherited the plan's wrong D7 claim and did not test the cap edge.
