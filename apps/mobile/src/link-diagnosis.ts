@@ -18,6 +18,8 @@
  * Pure and React-free: a reducer, so every rule is testable without a socket.
  */
 import { ChannelError } from "@tentacle/client";
+import { DomainErrorCode, PROTOCOL_VERSION, VersionMismatchDataSchema } from "@tentacle/protocol";
+import { RpcError } from "@tentacle/transport";
 import { E2E_CHANNEL_VERSION } from "@tentacle/transport/noise";
 
 /** What the row says (and, for the first two, what the app offers). */
@@ -77,6 +79,64 @@ function remoteE2eVersionOf(error: unknown): number | undefined {
   return error instanceof ChannelError ? error.remoteE2eVersion : undefined;
 }
 
+/**
+ * The protocol numbers of a `VersionMismatch` (docs/fix/mobile-version-mismatch-diagnosis.md):
+ * the OTHER skew — after the dial and the Noise handshake both succeeded, on
+ * `initialize`. Ours, and the serve's when it said.
+ */
+export interface ProtocolSkew {
+  /** This app's `PROTOCOL_VERSION` — never the daemon's echo of it. */
+  readonly app: number;
+  /** The serve's protocol; absent when it is old enough to predate the report. */
+  readonly serve?: number;
+}
+
+/**
+ * The skew named by an `initialize` rejection, or `undefined` if it is not one.
+ * Decided from the error CODE and the report's SHAPE — never from its text
+ * (the rule this module exists for). A report we cannot read is not an old
+ * daemon: it has a report, so it gets no claim rather than a guessed direction.
+ */
+export function protocolSkewOf(error: unknown): ProtocolSkew | undefined {
+  if (!(error instanceof RpcError) || error.code !== DomainErrorCode.VersionMismatch) {
+    return undefined;
+  }
+  // No `data`: the serve predates the report, so it is older than any app that
+  // has this code (`packages/client/src/version-mismatch.ts` states the same).
+  if (error.data === undefined) {
+    return { app: PROTOCOL_VERSION };
+  }
+  const report = VersionMismatchDataSchema.safeParse(error.data);
+  if (!report.success) {
+    return undefined;
+  }
+  const serve = report.data.daemon.protocol;
+  // Equal numbers cannot be a mismatch: claiming a side would be a guess.
+  if (serve === PROTOCOL_VERSION) {
+    return undefined;
+  }
+  // The direction is `skewState`'s (from the two numbers); here we only report
+  // the pair, so `serve` is kept as sent.
+  return { app: PROTOCOL_VERSION, serve };
+}
+
+/** Which side must update (a `serve` that sent no report predates this code ⇒ older). */
+export function skewState(skew: ProtocolSkew): "update-app" | "update-computer" {
+  return skew.serve === undefined || skew.serve < skew.app ? "update-computer" : "update-app";
+}
+
+/** The two numbers, for a sentence: `app protocol 25, serve 28`. */
+export function protocolSkewNote(skew: ProtocolSkew): string {
+  return skew.serve === undefined
+    ? `app protocol ${skew.app}, its serve predates the version report`
+    : `app protocol ${skew.app}, serve ${skew.serve}`;
+}
+
+/** The note in parentheses, or nothing when the failure named no numbers. */
+function skewNote(skew: ProtocolSkew | undefined): string {
+  return skew === undefined ? "" : ` (${protocolSkewNote(skew)})`;
+}
+
 export function createLinkDiagnoser(): LinkDiagnoser {
   /** Consecutive attempts that OPENED and then failed to confirm the handshake. */
   let streak = 0;
@@ -130,7 +190,11 @@ export function createLinkDiagnoser(): LinkDiagnoser {
 }
 
 /** The sentence for a diagnosis (empty for `ok`: a working computer shows no status). */
-export function diagnosisMessage(diagnosis: LinkDiagnosis, computerName: string): string {
+export function diagnosisMessage(
+  diagnosis: LinkDiagnosis,
+  computerName: string,
+  skew?: ProtocolSkew,
+): string {
   switch (diagnosis) {
     case "ok":
       return "";
@@ -141,9 +205,9 @@ export function diagnosisMessage(diagnosis: LinkDiagnosis, computerName: string)
       // closes, which reads exactly like a reset (docs/feat/noise-binary-carrier.md §3).
       return `'${computerName}' may have been reset (\`tentacle devices reset\`) — pair again — or tentacle on it is older than this app (update it)`;
     case "update-app":
-      return `'${computerName}' runs a newer tentacle than this app — update the app`;
+      return `'${computerName}' runs a newer tentacle than this app — update the app${skewNote(skew)}`;
     case "update-computer":
-      return `tentacle on '${computerName}' is older than this app — update it and restart \`tentacle serve\``;
+      return `tentacle on '${computerName}' is older than this app — update it and restart \`tentacle serve\`${skewNote(skew)}`;
     case "unreachable":
       // Covers F23 (an older tentacle has no `/e2e`): its 401/refused upgrade is
       // a dial that never opened, and "update it" is the fix. The relay is named

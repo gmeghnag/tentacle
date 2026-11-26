@@ -5,11 +5,16 @@
  * must not count toward the reset hint.
  */
 import { describe, expect, test } from "bun:test";
-import { ChannelError } from "@tentacle/client";
+import { ChannelError, explainVersionMismatch } from "@tentacle/client";
+import { DomainErrorCode, PROTOCOL_VERSION } from "@tentacle/protocol";
+import { RpcError } from "@tentacle/transport";
 import {
   MAYBE_RESET_STREAK,
   createLinkDiagnoser,
   diagnosisMessage,
+  protocolSkewNote,
+  protocolSkewOf,
+  skewState,
 } from "../src/link-diagnosis.ts";
 
 const denied = () => new ChannelError("unauthorized", "the daemon refused this device");
@@ -136,5 +141,91 @@ describe("an e2e version skew names the side to update (docs/feat/noise-binary-c
     expect(diagnosisMessage("update-app", "MacBook")).toContain("update the app");
     expect(diagnosisMessage("update-computer", "MacBook")).toContain("older than this app");
     expect(diagnosisMessage("maybe-reset", "MacBook")).toContain("older than this app");
+  });
+});
+
+/**
+ * A `VersionMismatch` from `initialize` (docs/fix/mobile-version-mismatch-diagnosis.md):
+ * the OTHER skew — a protocol skew, after a successful dial and handshake. Built
+ * inline, exactly as the daemon sends it, so no socket is needed.
+ */
+describe("a protocol skew names the side to update (initialize's VersionMismatch)", () => {
+  /** The daemon's own `data` (`packages/protocol/src/session.ts` VersionMismatchDataSchema). */
+  const report = (client: number, daemon: number) => ({
+    client: { protocol: client },
+    daemon: { protocol: daemon },
+    update: "client",
+  });
+  const mismatch = (data?: unknown) =>
+    new RpcError(DomainErrorCode.VersionMismatch, "protocol version mismatch", data);
+
+  test("serve newer → update-app, with both numbers (mutation: flip the comparison → red)", () => {
+    const skew = protocolSkewOf(mismatch(report(PROTOCOL_VERSION - 3, PROTOCOL_VERSION + 1)));
+    expect(skew).toEqual({ app: PROTOCOL_VERSION, serve: PROTOCOL_VERSION + 1 });
+    expect(skew === undefined ? "none" : skewState(skew)).toBe("update-app");
+  });
+
+  test("serve older → update-computer (mutation: always update-app → red)", () => {
+    const skew = protocolSkewOf(mismatch(report(PROTOCOL_VERSION, PROTOCOL_VERSION - 2)));
+    expect(skew?.serve).toBe(PROTOCOL_VERSION - 2);
+    expect(skew === undefined ? "none" : skewState(skew)).toBe("update-computer");
+  });
+
+  test("no data at all → the serve predates the report, so it is the older one", () => {
+    const skew = protocolSkewOf(mismatch());
+    expect(skew).toEqual({ app: PROTOCOL_VERSION });
+    expect(skew === undefined ? "none" : skewState(skew)).toBe("update-computer");
+    // The note must not invent a number for a serve that never sent one.
+    expect(skew === undefined ? "" : protocolSkewNote(skew)).toContain(
+      "predates the version report",
+    );
+  });
+
+  test("data present but unreadable → no claim (mutation: treat it as absent → red)", () => {
+    // A future shape is not an OLD daemon: it has a report, so calling it old
+    // would be the guess this module exists to avoid.
+    expect(protocolSkewOf(mismatch({ client: {}, daemon: 7 }))).toBeUndefined();
+  });
+
+  test("a report contradicting itself (equal protocols) → no claim", () => {
+    expect(protocolSkewOf(mismatch(report(PROTOCOL_VERSION, PROTOCOL_VERSION)))).toBeUndefined();
+  });
+
+  test("every other failure is untouched", () => {
+    expect(protocolSkewOf(new RpcError(DomainErrorCode.Unauthorized, "nope"))).toBeUndefined();
+    expect(protocolSkewOf(new ChannelError("unreachable", "x"))).toBeUndefined();
+    expect(protocolSkewOf(new Error("x"))).toBeUndefined();
+    expect(protocolSkewOf(undefined)).toBeUndefined();
+  });
+
+  test("our own number wins over the one the serve echoes (mutation: use data.client → red)", () => {
+    const skew = protocolSkewOf(mismatch(report(1, PROTOCOL_VERSION + 2)));
+    expect(skew?.app).toBe(PROTOCOL_VERSION);
+    expect(skew?.serve).toBe(PROTOCOL_VERSION + 2);
+  });
+
+  test("diagnosisMessage appends the numbers, and is unchanged without a skew", () => {
+    const skew = { app: 25, serve: 28 };
+    const withNote = diagnosisMessage("update-app", "Mac", skew);
+    expect(withNote).toContain("app protocol 25");
+    expect(withNote).toContain("serve 28");
+    // An e2e skew has no numbers to show: the sentence is exactly today's.
+    expect(diagnosisMessage("update-app", "Mac")).toBe(
+      "'Mac' runs a newer tentacle than this app — update the app",
+    );
+    expect(diagnosisMessage("update-computer", "Mac", skew)).toContain("app protocol 25");
+    // Only the two update states carry a note.
+    expect(diagnosisMessage("revoked", "Mac", skew)).toBe(diagnosisMessage("revoked", "Mac"));
+  });
+
+  test("the client's hop keeps the report (the load-bearing assumption)", () => {
+    // `RemoteClient.initialize` maps the error through `explainVersionMismatch`
+    // and must hand back THE SAME object when `data` is there — the phone's whole
+    // derivation rides on it (docs/fix/mobile-version-mismatch-diagnosis.md §3).
+    const sent = mismatch(report(PROTOCOL_VERSION - 3, PROTOCOL_VERSION + 1));
+    expect(explainVersionMismatch(sent)).toBe(sent);
+    expect(protocolSkewOf(sent)?.serve).toBe(PROTOCOL_VERSION + 1);
+    // And a daemon that sent no data still words a skew (the app adds the advice).
+    expect(protocolSkewOf(explainVersionMismatch(mismatch()))).toEqual({ app: PROTOCOL_VERSION });
   });
 });

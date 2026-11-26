@@ -5,9 +5,15 @@
  */
 import { describe, expect, test } from "bun:test";
 import { ChannelError } from "@tentacle/client";
-import { JsonRpcErrorCode, type SessionListEntry } from "@tentacle/protocol";
+import {
+  DomainErrorCode,
+  JsonRpcErrorCode,
+  PROTOCOL_VERSION,
+  type SessionListEntry,
+} from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import { computerRow, computerRows, probeComputer } from "../src/computer-rows.ts";
+import { computerStatus } from "../src/computer-status.ts";
 
 const NOW = 1_700_000_000_000;
 
@@ -152,6 +158,63 @@ describe("the states a paired computer can be in (11b.1: F-K2, F-L1, F-L3)", () 
       ["revoked", "ok"],
     );
     expect(rows.map((row) => row.state)).toEqual(["revoked", "ok"]);
+  });
+});
+
+/**
+ * A protocol skew is a computer that ANSWERED and then refused `initialize`, so
+ * the link's own diagnosis stays `ok` — but the row must not read "Online" while
+ * its detail says "update the app" (docs/fix/mobile-version-mismatch-diagnosis.md,
+ * Review round 1 finding 1: the drawer said «Online» + "update the app", and
+ * offered New session against a daemon that refuses every `initialize`).
+ */
+describe("a protocol skew on a computer that answered (Review round 1 finding 1)", () => {
+  /** The `initialize` rejection: the daemon's own report (`session-list.test.ts`'s fixture). */
+  const versionMismatch = (serve: number) =>
+    new RpcError(DomainErrorCode.VersionMismatch, "protocol version mismatch", {
+      client: { protocol: PROTOCOL_VERSION },
+      daemon: { protocol: serve },
+      update: serve > PROTOCOL_VERSION ? "client" : "daemon",
+    });
+
+  test("a newer serve reads «Update the app», not «Online» with a contradicting detail", () => {
+    const row = computerRow(RECORD, {
+      ok: false,
+      error: versionMismatch(PROTOCOL_VERSION + 3),
+    });
+    expect(row.state).toBe("update-app");
+    const status = computerStatus(row);
+    expect(status.text).toBe("Update the app");
+    expect(status.tone).toBe("attention");
+    expect(status.pairAgain).toBe(false);
+    expect(status.detail).toContain("update the app");
+  });
+
+  test("an older serve reads «Update tentacle»", () => {
+    const row = computerRow(RECORD, {
+      ok: false,
+      error: versionMismatch(PROTOCOL_VERSION - 3),
+    });
+    expect(row.state).toBe("update-computer");
+    expect(computerStatus(row).text).toBe("Update tentacle");
+  });
+
+  test("a serve that sent no report at all is the older side", () => {
+    const row = computerRow(RECORD, {
+      ok: false,
+      error: new RpcError(DomainErrorCode.VersionMismatch, "protocol version mismatch"),
+    });
+    expect(row.state).toBe("update-computer");
+  });
+
+  test("an authenticated diagnosis still wins over the skew (revoked, not «Update»)", () => {
+    const row = computerRow(
+      RECORD,
+      { ok: false, error: versionMismatch(PROTOCOL_VERSION + 3) },
+      "revoked",
+    );
+    expect(row.state).toBe("revoked");
+    expect(row.action).toBe("remove");
   });
 });
 

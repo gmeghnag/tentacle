@@ -15,7 +15,12 @@
 import { ChannelError } from "@tentacle/client";
 import { DomainErrorCode, JsonRpcErrorCode, type SessionListEntry } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
-import { type LinkDiagnosis, diagnosisMessage } from "./link-diagnosis.ts";
+import {
+  type LinkDiagnosis,
+  diagnosisMessage,
+  protocolSkewOf,
+  skewState,
+} from "./link-diagnosis.ts";
 import { wakesBadge } from "./schedule-view.ts";
 
 /** One page as the network layer hands it back (the reducer never awaits). */
@@ -391,6 +396,20 @@ export function describeError(
     }
     if (error.code === DomainErrorCode.Unauthorized) {
       return { message: "This app is not authorized on that computer", retry: false };
+    }
+    // A protocol skew (`initialize` refused by a daemon that answered) names the
+    // side to update — and no retry can fix it (the field's own contract).
+    const skew = protocolSkewOf(error);
+    if (skew !== undefined) {
+      return {
+        message:
+          options.computerName === undefined
+            ? error.message === ""
+              ? "The computer refused the request"
+              : error.message
+            : diagnosisMessage(skewState(skew), options.computerName, skew),
+        retry: false,
+      };
     }
     return {
       message: error.message === "" ? "The computer refused the request" : error.message,
