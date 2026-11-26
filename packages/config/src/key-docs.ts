@@ -498,6 +498,19 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Default `PROMPT.md` in the config dir (scaffolded on first run). `TENTACLE_SYSTEM_PROMPT` is NOT a path: it is the whole prompt, inline, and wins. The repo's `AGENTS.md` and the skills catalog are appended after it, never replacing it.",
     example: '"PROMPT.md"',
   },
+  systemPromptEnvironment: {
+    summary: "State the working directory and platform at the end of the system prompt.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => true,
+    sourceKey: "systemPromptEnvironment",
+    resolved: (c) => c.systemPromptEnvironment,
+    details:
+      "Added to each request, never stored with the session: a `<cwd>` block with the directory the session's tools work in, then a `<platform>` line. In `run`/`attach` both are the pod's, and the pod's own config decides. Set `false` to send the prompt without it, e.g. when your prompt already states the directory.",
+    example: "false",
+  },
   loadAgentsMd: {
     summary: "Auto-load a per-repo `AGENTS.md` into the system prompt.",
     kind: "leaf",

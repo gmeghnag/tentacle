@@ -27,6 +27,7 @@ import {
   NO_CAPABILITIES,
   PermissionGate,
   type ProcessGroups,
+  type PromptEnvironment,
   type ResultTransform,
   SessionGrants,
   type SessionSkills,
@@ -889,6 +890,11 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     // docs/feat/write-tmpdir.md: this daemon's own config (never carried to a pod).
     writableDirs: config.writableDirs ?? [],
   });
+  // docs/feat/system-prompt-cwd.md D4: where `env` works, told to the model by
+  // the main agent and its native children alike.
+  const environment: PromptEnvironment | undefined = config.systemPromptEnvironment
+    ? { cwd: config.cwd, platform: process.platform }
+    : undefined;
   for (const dropped of env.droppedWritableDirs) {
     // Daemon-side, never the terminal while Ink owns it (AGENTS §7).
     (options.notice ?? options.log)?.(
@@ -1088,6 +1094,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       model,
       ...(modelFor ? { modelFor } : {}),
       env,
+      ...(environment ? { environment } : {}),
       tools,
       requestPermission: (req, options) => permissions.request(req, options),
       maxIterations: config.subagentMaxIterations,
@@ -1458,6 +1465,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     resultTransforms,
     toolOutput,
     systemPrompt: config.systemPrompt,
+    ...(environment ? { environment } : {}),
     maxIterations: config.maxIterations,
     requestPermission: (req, options) => permissions.request(req, options),
     ...(userSkills.activator ? { skills: userSkills.activator } : {}),

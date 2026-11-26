@@ -177,6 +177,8 @@ export interface TentacleConfig {
   readonly promptIdentity: string;
   /** The AGENTS.md text read at start, whether or not it was folded into `systemPrompt`. */
   readonly agentsMdContent?: string;
+  /** `systemPromptEnvironment`: state this process's `cwd` and platform to the model. */
+  readonly systemPromptEnvironment: boolean;
   readonly subagentsEnabled: boolean;
   readonly subagentMaxIterations: number;
   /** Sub-agent token budget for its whole life (prompt + completion, summed); a positive integer or -1 (unlimited). */
@@ -905,6 +907,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     systemPrompt: resolved.systemPrompt,
     promptIdentity: resolved.promptIdentity,
     ...(agentsMd !== undefined ? { agentsMdContent: agentsMd } : {}),
+    systemPromptEnvironment: resolved.systemPromptEnvironment,
     subagentsEnabled: resolved.subagentsEnabled,
     subagentMaxIterations: resolved.subagentMaxIterations,
     subagentMaxTokens: resolved.subagentMaxTokens,
