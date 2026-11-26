@@ -611,3 +611,37 @@ forging fixtures, marked the status PARTIAL, recorded its drifts and raised the
 D5 regression itself for the Review. Note for future repros: scripts in
 `.tentacle/tmp/<slug>/` importing `../../../packages/...` hit the MAIN checkout,
 not the worktree — a branch "after" repro must use the worktree's absolute path.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (fresh context; reviewed `d9c18281..HEAD`: the
+fix is in `7bd80714`, `HEAD~1..HEAD` is doc-only)
+
+**Verdict: REQUEST-CHANGES** — finding 1 is still open; finding 2 is fixed.
+
+1. **Finding 1 (HIGH): NOT fixed.** `packages/core/test/fixtures/png/` still does
+   not exist. The touched test files give 360 pass / **35 fail**, all PngSuite
+   (T1/T2). This is blocked outside the executor: the owner or orchestrator must
+   download the archive (command in "Gate-fix round after fix round 1"), then
+   Execution steps 1–4.
+2. **Finding 2 (MEDIUM): FIXED** (`packages/tools/src/image-view.ts:379-380`,
+   `unmade`). The e2e trace (`review-e2e-branch.test.ts`, 8000×4500 high-only PNG)
+   now gives, for both default `low` and forced `low`, the same result as main:
+   `… · low · 111 KB · low is not available for this image yet — sent at high`,
+   not an error. A 100×100 PNG is unchanged (`already ≤ 768 px`).
+   Mutations (restored by file copy; `git status` clean afterwards):
+   - fallback removed (`region === null`) → the 7 new D5 fallback tests fail;
+   - fallback applied to an explicit `region` too → 6 region error tests fail.
+
+   Both directions are pinned.
+3. **Regressions on the fix:** none found. The fallback is `serve(named, …)`,
+   which re-checks `holds`. With a region, errors are unchanged. Bytes that are
+   gone (`read` → `null`) still answer "no longer held" (they return before
+   `fail`, so they never reach the fallback).
+
+**Gate.** `bun run lint`: clean (2596 files). `bun run typecheck` (with
+`apps/mobile`, `apps/relay`): clean. Full `bun run test` not run: the fixture
+tests already fail.
+
+Once the fixtures land and T1/T2 pass (with M2 shown red on T1), this can be
+approved with no further code review of finding 2.
