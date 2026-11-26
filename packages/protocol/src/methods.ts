@@ -56,6 +56,8 @@ import {
 import {
   AgentKillParamsSchema,
   AgentKillResultSchema,
+  AppUnpublishParamsSchema,
+  AppUnpublishResultSchema,
   BrowserStatusParamsSchema,
   BrowserStatusResultSchema,
   CancelParamsSchema,
@@ -188,6 +190,11 @@ export const Method = {
    * Synchronous up to the create; a needed hash approval is raised, never awaited.
    */
   ScheduleCreate: "session/schedule_create",
+  /**
+   * The user takes one of this session's published apps offline
+   * (docs/feat/session-apps-publish.md). An older daemon answers `MethodNotFound`.
+   */
+  AppUnpublish: "session/app_unpublish",
   /**
    * The user starts / stops / resumes a workflow run, or re-runs one step
    * (docs/feat/agent-workflows.md D3). An older daemon answers `MethodNotFound`.
@@ -381,6 +388,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: ScheduleCreateParamsSchema,
     result: ScheduleCreateResultSchema,
   },
+  [Method.AppUnpublish]: { params: AppUnpublishParamsSchema, result: AppUnpublishResultSchema },
   [Method.Workflow]: { params: WorkflowParamsSchema, result: WorkflowResultSchema },
   [Method.WorkflowStep]: {
     params: WorkflowStepParamsSchema,

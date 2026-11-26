@@ -372,6 +372,72 @@
       "required": ["signature", "thinking", "type"],
       "type": "object"
     },
+    "AppRow": {
+      "additionalProperties": true,
+      "properties": {
+        "app": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "artifactId": {
+          "type": "string"
+        },
+        "publishedAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "since": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "version": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["app", "artifactId", "publishedAt", "since", "state", "title", "url", "version"],
+      "type": "object"
+    },
+    "AppUnpublishParams": {
+      "additionalProperties": true,
+      "properties": {
+        "app": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["app", "sessionId"],
+      "type": "object"
+    },
+    "AppUnpublishResult": {
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
     "AppsError": {
       "additionalProperties": true,
       "properties": {
@@ -447,6 +513,24 @@
       },
       "required": ["id", "leaseExpiresAt", "leaseMs", "renewAfterMs", "url"],
       "type": "object"
+    },
+    "AppsUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "apps": {
+          "items": {
+            "$ref": "#/$defs/AppRow"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "apps",
+          "type": "string"
+        }
+      },
+      "required": ["apps", "type"],
+      "type": "object",
+      "x-event-class": "display"
     },
     "ArtifactListParams": {
       "additionalProperties": true,
@@ -5904,6 +5988,7 @@
           "agent_message_chunk": "#/$defs/AgentMessageChunk",
           "agent_thought_chunk": "#/$defs/AgentThoughtChunk",
           "agent_usage": "#/$defs/AgentUsage",
+          "apps": "#/$defs/AppsUpdate",
           "auto_accept": "#/$defs/AutoAcceptUpdate",
           "background_exit": "#/$defs/BackgroundExit",
           "capabilities": "#/$defs/CapabilitiesUpdate",
@@ -6018,6 +6103,9 @@
         },
         {
           "$ref": "#/$defs/SchedulesUpdate"
+        },
+        {
+          "$ref": "#/$defs/AppsUpdate"
         },
         {
           "$ref": "#/$defs/SubagentNotify"
@@ -6209,6 +6297,12 @@
     "SnapshotResult": {
       "additionalProperties": true,
       "properties": {
+        "apps": {
+          "items": {
+            "$ref": "#/$defs/AppRow"
+          },
+          "type": "array"
+        },
         "cursor": {
           "minLength": 1,
           "type": "string"
@@ -8543,6 +8637,14 @@
         "$ref": "#/$defs/AnswerQuestionResult"
       }
     },
+    "session/app_unpublish": {
+      "params": {
+        "$ref": "#/$defs/AppUnpublishParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AppUnpublishResult"
+      }
+    },
     "session/clear": {
       "params": {
         "$ref": "#/$defs/ClearParams"
@@ -8884,5 +8986,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 28
+  "x-protocol-version": 29
 }

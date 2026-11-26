@@ -47,6 +47,16 @@ describe("the hop's laptop-internal fields never cross the wire", () => {
     expect(request?.hopAuto).toBeUndefined();
   });
 
+  // docs/feat/session-apps-publish.md D3: the kind crosses the wire by the tool
+  // name, so the client's auto-accept never answers it. Mutation: drop the
+  // `app_publish` branch → kind undefined → auto-accept would answer it → red.
+  test("the wire tool `app_publish` becomes the kind `app_publish`", () => {
+    const r = new PermissionRouter();
+    const [action] = r.request("S", req("r1", { tool: "app_publish" }));
+    const request = action?.kind === "prompt" ? action.request : undefined;
+    expect(request?.kind).toBe("app_publish");
+  });
+
   test("an answer's `send` carries only optionId and message — `auto` never leaves", () => {
     const r = new PermissionRouter();
     r.request("S", req("r1"));

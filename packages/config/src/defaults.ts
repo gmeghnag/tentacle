@@ -100,6 +100,14 @@ export const DEFAULT_SESSION_HOP_TOOL = false;
  */
 export const DEFAULT_WORKLOAD_SHELL_TOOL = false;
 /**
+ * `apps.enabled`: offer the agent `app_publish` — publish a presented HTML page
+ * as a PUBLIC web page, asked every time (docs/feat/session-apps-publish.md
+ * D11). **Default: off** until the apps host is deployed.
+ */
+export const DEFAULT_APPS_ENABLED = false;
+/** `apps.domain`: the apps host's domain; an app is `https://<id>.<domain>/`. */
+export const DEFAULT_APPS_DOMAIN = "apps.tentacle.so";
+/**
  * `schedules.*`: the host's limits on the agent's scheduled wakes
  * (docs/feat/cron-tool.md D3, owner Q6). The same values as `@tentacle/core`'s
  * `DEFAULT_SCHEDULE_LIMITS` (this package does not depend on core; a CLI test
@@ -256,6 +264,11 @@ export const DEFAULT_CONFIG_JSONC = `{
   // (a pod or container) with \`workload_shell\`? It dials with YOUR kubeconfig /
   // docker endpoint, so it is off unless you turn it on.
   // "workloadShell": { "tool": ${DEFAULT_WORKLOAD_SHELL_TOOL} },
+
+  // Session apps: may the agent publish a page it showed you as a PUBLIC web
+  // page (\`app_publish\`, asked every time), up while the session is open? Read by
+  // THIS host (the local worker, \`serve\`); never carried to a pod.
+  // "apps": { "enabled": ${DEFAULT_APPS_ENABLED}, "domain": "${DEFAULT_APPS_DOMAIN}" },
 
   // Scheduled wakes: limits on the agent's \`schedule_create\` (it asks you
   // first). Read by THIS host (the local worker, \`serve\`); never carried to a pod.

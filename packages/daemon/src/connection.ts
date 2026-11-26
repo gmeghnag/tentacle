@@ -13,6 +13,7 @@ import {
   type AgentKillParams,
   type AnswerQuestionParams,
   type AnswerQuestionResult,
+  type AppUnpublishParams,
   type ArtifactListParams,
   type ArtifactReadParams,
   type AttachmentPutParams,
@@ -527,6 +528,12 @@ export class Connection {
         // Synchronous (docs/feat/cron-tool.md D5): never waits on a turn.
         const { sessionId, scheduleId } = params as ScheduleDeleteParams;
         return this.lookup(sessionId).deleteSchedule(scheduleId);
+      }
+      case Method.AppUnpublish: {
+        // Synchronous validation (the session open here); only this request
+        // awaits the host's `DELETE` (§7 "don't serialize the peer").
+        const { sessionId, app } = params as AppUnpublishParams;
+        return this.lookup(sessionId).unpublishApp(app);
       }
       case Method.ScheduleCreate: {
         // agent-workflows slice 10: answers up to the create (reads the file);
@@ -1125,7 +1132,7 @@ export class Connection {
   // an unknown id is a no-op success. `ifLast` (a quit): with another client
   // still attached, only detach — the session (and its model link) stays theirs.
   // `closed`: did THIS request end a live session (a quit's delete hangs on it).
-  private closeSession(params: CloseParams): CloseResult {
+  private closeSession(params: CloseParams): CloseResult | Promise<CloseResult> {
     if (params.ifLast === true) {
       const live = this.host.get(params.sessionId);
       const mine = this.attached.get(params.sessionId);
@@ -1136,7 +1143,13 @@ export class Connection {
       }
     }
     this.attached.delete(params.sessionId);
-    return { closed: this.host.close(params.sessionId) };
+    const ending = this.host.get(params.sessionId);
+    const closed = this.host.close(params.sessionId);
+    // The close itself is done; the reply gives the apps' `DELETE`s a bounded
+    // chance first, so a quitting TUI's pages go with it (session apps D9). Only
+    // this request waits — the peer dispatches the others meanwhile (§7).
+    const drained = ending?.appsDrained();
+    return drained ? drained.then(() => ({ closed })) : { closed };
   }
 
   // This connection only stops listening: the session runs on for any client.

@@ -13,7 +13,9 @@
  * `MethodNotFound`, an unresponsive MCP server, a failed attach) never changes
  * another section's (F2, F3, F4).
  */
+import { appStateOf } from "@tentacle/client";
 import type {
+  AppRow,
   ArtifactMeta,
   McpServerStatus,
   ScheduleRow,
@@ -77,6 +79,11 @@ export interface InfoFacts {
    * none), which draws no section at all.
    */
   readonly schedules?: SchedulesFeed;
+  /**
+   * The session's published apps; absent: nothing reported (an older daemon, or
+   * apps off there) — no section, never a false «none».
+   */
+  readonly apps?: AppsFeed;
   /**
    * The clock the rows' distances are worded against (`next 14:30`, `today
    * 17:00`). Injected like every other clock here: a test never waits for one.
@@ -191,7 +198,14 @@ export interface ArtifactFacts {
   readonly now: number;
 }
 
-export type SectionId = "model" | "session" | "artifacts" | "schedules" | "mcp" | "skills";
+export type SectionId = "model" | "session" | "artifacts" | "schedules" | "apps" | "mcp" | "skills";
+
+/** The published apps as the client follows them (docs/feat/session-apps-publish.md). */
+export interface AppsFeed {
+  readonly rows: readonly AppRow[];
+  /** A refused stop: the daemon's reason, under the rows. */
+  readonly error: string | null;
+}
 
 export type SectionPhase =
   | "loading"
@@ -245,6 +259,8 @@ export interface InfoRow {
    * daemon) — a control that cannot send is worse than no control.
    */
   readonly delete?: RowDelete;
+  /** A published app's Copy and Stop (docs/feat/session-apps-publish.md). */
+  readonly app?: RowApp;
   /**
    * A tap OPENS another screen (docs/feat/model-artifacts.md D9): this row is a
    * way in, never a value — the sheet calls the route and closes itself.
@@ -258,6 +274,16 @@ export interface RowDelete {
   /** The RAW id sent to `session/schedule_delete` (the title is sanitized). */
   readonly id: string;
   readonly accessibilityLabel: string;
+}
+
+/** An app row's two controls: copy its address, take it offline. */
+export interface RowApp {
+  /** The URL to copy. */
+  readonly url: string;
+  /** The id `session/app_unpublish` takes; absent: a stop cannot be sent now. */
+  readonly stop?: string;
+  readonly copyLabel: string;
+  readonly stopLabel: string;
 }
 
 export interface InfoSection {
@@ -872,6 +898,64 @@ function schedulesSection(facts: InfoFacts): InfoSection | null {
   };
 }
 
+/**
+ * The session's published apps (docs/feat/session-apps-publish.md D10): title,
+ * state as a WORD (never colour alone) and address, with Copy and Stop. No
+ * report at all (an older daemon, or apps off) draws no section.
+ */
+export function appsSection(facts: InfoFacts): InfoSection | null {
+  const feed = facts.apps;
+  if (feed === undefined) {
+    return null;
+  }
+  const title = "Apps";
+  if (facts.phase !== "open") {
+    return {
+      id: "apps",
+      title,
+      phase: "not-open",
+      rows: [],
+      empty: { title: "Open the session to see its apps" },
+    };
+  }
+  if (feed.rows.length === 0) {
+    return {
+      id: "apps",
+      title,
+      phase: "empty",
+      rows: [],
+      empty: { title: "No published apps" },
+      ...(feed.error === null ? {} : { footer: feed.error }),
+    };
+  }
+  const stoppable = facts.link === "up";
+  return {
+    id: "apps",
+    title,
+    phase: "ready",
+    rows: feed.rows.map((row) => {
+      const name = sanitizeDisplay(row.title);
+      const url = sanitizeDisplay(row.url);
+      const state = appStateOf(row.state);
+      const reason = row.reason ? ` — ${sanitizeDisplay(row.reason)}` : "";
+      return {
+        key: row.app,
+        title: name,
+        subtitle: `${state}${reason}\n${url}`,
+        tone: state === "up" ? ("online" as const) : ("offline" as const),
+        app: {
+          url,
+          ...(stoppable ? { stop: row.app } : {}),
+          copyLabel: `Copy the address of "${name}"`,
+          stopLabel: `Stop the app "${name}"`,
+        },
+      };
+    }),
+    dim: facts.link === "down",
+    ...(feed.error === null ? {} : { footer: feed.error }),
+  };
+}
+
 /** An MCP server's tools, for the accordion and the row's `expand`; null: no list. */
 export function serverTools(
   server: McpServerStatus,
@@ -1193,6 +1277,7 @@ export function revealStep(
 export function sessionInfoView(facts: InfoFacts): SessionInfoView {
   const schedules = schedulesSection(facts);
   const artifacts = artifactsSection(facts);
+  const apps = appsSection(facts);
   const sections = [
     modelSection(facts),
     sessionSection(facts),
@@ -1202,6 +1287,8 @@ export function sessionInfoView(facts: InfoFacts): SessionInfoView {
     // After the session's own facts and before the computer-wide ones: a wake is
     // pending work ON this session (mockup M7's order).
     ...(schedules === null ? [] : [schedules]),
+    // A public page is this session's too.
+    ...(apps === null ? [] : [apps]),
     mcpSection(facts),
     skillsSection(facts),
   ];

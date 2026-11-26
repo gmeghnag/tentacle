@@ -12,6 +12,8 @@
  * `@tentacle/tools`) is the model-facing surface that calls it.
  */
 import {
+  APP_PUBLISH_TOOL,
+  APP_UNPUBLISH_TOOL,
   type AgentInbox,
   type AgentNotifyResult,
   type ExecutionEnvironment,
@@ -538,6 +540,11 @@ export function createSubagentRunner(deps: SubagentDeps): {
         // A workflow run is the SESSION's (one per session): a child (a step's
         // own child included) may neither start nor stop one.
         tool.name === WORKFLOW_TOOL_NAME ||
+        // A published app is the SESSION's (a public page asked of the owner in
+        // the conversation they watch): a child's output is its report
+        // (docs/feat/session-apps-publish.md F1).
+        tool.name === APP_PUBLISH_TOOL ||
+        tool.name === APP_UNPUBLISH_TOOL ||
         // The browser tabs are the SESSION's (one lease, one tab group, its own
         // masking key) and a child has no image store for a shot
         // (docs/feat/browser-inspect.md B4): the parent browses and delegates text.
@@ -782,6 +789,8 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === CHART_TOOL_NAME ||
         toolName === DIAGRAM_TOOL_NAME ||
         toolName === WORKFLOW_TOOL_NAME ||
+        toolName === APP_PUBLISH_TOOL ||
+        toolName === APP_UNPUBLISH_TOOL ||
         toolName === AGENT_CONTROL_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||

@@ -1627,6 +1627,8 @@ export function SessionScreen({
             onAutoAccept={(on) => void controller.setAutoAccept(on)}
             onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
             onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
+            onCopyApp={(url) => copyText(url, "sheet")}
+            onStopApp={(app) => void controller.stopApp(app)}
             scrollRef={(node) => {
               infoScroller.current = node;
             }}

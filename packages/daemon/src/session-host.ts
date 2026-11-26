@@ -18,6 +18,7 @@ import {
 } from "@tentacle/agent";
 import type {
   AgentJobs,
+  AppsLink,
   ArtifactSink,
   AttachmentSource,
   ChatMessage,
@@ -95,6 +96,7 @@ import {
 } from "./persisted-session.ts";
 import type { DocumentPolicy } from "./prompt-documents.ts";
 import { forgetPushRegistration, writePushRegistration } from "./push-store.ts";
+import type { AppsService } from "./session-apps.ts";
 import { type SessionSummary, toSessionList } from "./session-list.ts";
 import type { ArchivedMeta, SessionPersister } from "./session-persister.ts";
 import { type Expired, type ReapPolicy, selectEvictable, selectExpired } from "./session-reaper.ts";
@@ -177,6 +179,14 @@ export interface AgentContext {
    * this is present — never on a pod daemon (AGENTS §7).
    */
   readonly schedules?: () => ScheduleLink | null;
+  /**
+   * The session's published apps (docs/feat/session-apps-publish.md): a LAZY
+   * link like `schedules`, present ONLY where the host publishes
+   * (`SessionHostOptions.apps`: `serve` and the worker with `apps.enabled`). A
+   * factory offers `app_publish` / `app_unpublish` exactly when this is present —
+   * never on a pod daemon (AGENTS §7).
+   */
+  readonly apps?: () => AppsLink | null;
 }
 
 /** What a rebuilt agent takes over from the session it replaces the agent of. */
@@ -438,6 +448,13 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * link, no tools.
    */
   readonly schedules?: SessionSchedules;
+  /**
+   * `serve` and the in-process worker with `apps.enabled`
+   * (docs/feat/session-apps-publish.md D1): this daemon's ONE publisher. A pod
+   * daemon never passes it: no link, no tools, no key. Whoever passes it calls
+   * `stop()` when the daemon stops.
+   */
+  readonly apps?: AppsService;
 }
 
 /**
@@ -1533,6 +1550,8 @@ export class SessionHost {
       // Its scheduled wakes too, restart and reopen alike (D6): re-armed, an
       // overdue one fires once (catch-up).
       ...(record.schedules !== undefined ? { schedules: record.schedules } : {}),
+      // And its published apps (session apps D8): each renews at once.
+      ...(record.apps !== undefined ? { apps: record.apps } : {}),
       // And its switches, from the log (docs/feat/session-capabilities.md S3b):
       // a restart and an archive reopen alike — the same session's choice.
       ...(record.capabilities !== undefined ? { capabilities: record.capabilities } : {}),
@@ -1706,6 +1725,7 @@ export class SessionHost {
       ...(hop ? { hop: true as const } : {}),
       // Lazy like `modelLink`; only where this host schedules (D1).
       ...(this.opts.schedules ? { schedules: () => bound.hosted?.scheduleLink() ?? null } : {}),
+      ...(this.opts.apps ? { apps: () => bound.hosted?.appsLink() ?? null } : {}),
     });
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
@@ -1748,6 +1768,7 @@ export class SessionHost {
       uploads,
       artifacts,
       this.opts.schedules,
+      this.opts.apps,
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;
@@ -1771,6 +1792,14 @@ export class SessionHost {
     // `MethodNotFound` there (task 16's contract) while activities still run.
     hosted.pushObserver = this.opts.push?.observer ?? this.opts.liveActivity?.observer;
     return hosted;
+  }
+
+  /**
+   * The daemon is stopping (not its sessions ending): the apps publisher's timers
+   * stop and nothing is deleted (docs/feat/session-apps-publish.md D9).
+   */
+  stopApps(): void {
+    this.opts.apps?.stop();
   }
 
   /**
@@ -1807,6 +1836,7 @@ export class SessionHost {
       // The table is the SESSION's (P1): the rebuilt agent gets the same link,
       // so its tools see the same wakes and the timer is untouched.
       ...(this.opts.schedules ? { schedules: () => hosted.scheduleLink() } : {}),
+      ...(this.opts.apps ? { apps: () => hosted.appsLink() } : {}),
     });
     const foreign =
       next.permissions !== reuse.permissions ||

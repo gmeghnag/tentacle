@@ -91,6 +91,7 @@ import {
   type ToolImageStore,
   browserDefaultOff,
 } from "@tentacle/core";
+import { AppsService } from "@tentacle/daemon";
 import { BackgroundJobs, HostExecution, killGroup, trackGroup, untrackGroup } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
 import { HooksTrustParamsSchema } from "@tentacle/protocol";
@@ -109,6 +110,8 @@ import {
   chartTool,
   createA2AAddAgentTool,
   createAgentControlTool,
+  createAppPublishTool,
+  createAppUnpublishTool,
   createContextResetTool,
   createFsReadTool,
   createImageViewTool,
@@ -762,6 +765,14 @@ export interface BuildAgentOptions {
    * no table, so no link and no tools (owner Q4, AGENTS §7).
    */
   readonly schedules?: (() => import("@tentacle/core").ScheduleLink | null) | undefined;
+  /**
+   * The session's published apps (docs/feat/session-apps-publish.md D1): the
+   * LAZY link `AgentContext.apps` hands the factory. Present → the agent is
+   * offered `app_publish` (asks every time) and `app_unpublish`. The host passes
+   * it ONLY on the user's own host with `apps.enabled` — `serve` and the local
+   * worker; a pod daemon never does (AGENTS §7).
+   */
+  readonly apps?: (() => import("@tentacle/core").AppsLink | null) | undefined;
   readonly workloadShell?:
     | { readonly backend: import("@tentacle/tools").WorkloadShellBackend }
     | undefined;
@@ -791,6 +802,20 @@ export function scheduleLimitsOf(config: TentacleConfig): ScheduleLimits {
     maxAheadMs: config.schedules.maxAheadDays * day,
     promptMaxChars: config.schedules.promptMaxChars,
   };
+}
+
+/**
+ * `apps.enabled` → this host's ONE apps publisher (`SessionHostOptions.apps`);
+ * `undefined` = it publishes nothing. Only `serve` and the worker call it, each
+ * from its OWN config (docs/feat/session-apps-publish.md D1/D11).
+ */
+export function appsServiceOf(
+  config: TentacleConfig,
+  log: (line: string) => void,
+): AppsService | undefined {
+  return config.apps.enabled
+    ? new AppsService({ configDir: config.configDir, domain: config.apps.domain, log })
+    : undefined;
 }
 
 /** `agent_task`'s model list over the tunnel: the laptop's selectable names, with their text. */
@@ -1464,6 +1489,18 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   if (options.schedules !== undefined) {
     tools.register(createScheduleCreateTool(options.schedules));
     tools.register(createScheduleControlTool(options.schedules));
+  }
+  // Session apps (docs/feat/session-apps-publish.md): only with the host's link —
+  // `serve` and the worker with `apps.enabled`. Never a pod daemon, never a child
+  // agent (`subagent.ts`'s filter). The publish asks on the session's ONE broker.
+  if (options.apps !== undefined) {
+    tools.register(
+      createAppPublishTool({
+        link: options.apps,
+        ask: (req, opts) => permissions.request(req, opts),
+      }),
+    );
+    tools.register(createAppUnpublishTool(options.apps));
   }
 
   const agent = new Agent({

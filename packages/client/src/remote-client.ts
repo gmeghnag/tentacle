@@ -37,6 +37,8 @@ import type { PermissionResponse } from "@tentacle/core";
 import {
   ATTACHMENT_CHUNK_BYTES,
   type AgentCapabilities,
+  type AppRow,
+  type AppUnpublishResult,
   type ArtifactListResult,
   type ArtifactMeta,
   type ArtifactReadResult,
@@ -131,6 +133,7 @@ import {
   RpcPeer,
   encodeBase64,
 } from "@tentacle/transport";
+import { APPS_OLD_DAEMON, boundApps } from "./apps.ts";
 import { ATTACH_TIMEOUT_MS, UPLOAD_RECONNECT_MS } from "./constants.ts";
 import { type DiscoveryState, foldDiscovery } from "./discovery.ts";
 import { type DocumentsInput, type ExtractDocumentHere, documentsInput } from "./document-input.ts";
@@ -458,6 +461,18 @@ export interface SessionSchedulesNotice {
   readonly sessionId: string;
   readonly rows: readonly ScheduleRow[];
   readonly count: number;
+}
+
+/**
+ * The session's published apps as the daemon reports them (an `apps` update, or
+ * the snapshot of a resync): the FULL list, bounded here. Not turn-scoped (a
+ * lease renews between turns), and read only by a client whose daemon is trusted
+ * (`daemonWakes`, AGENTS §7: a pod's list is a pod-supplied claim about public
+ * pages of the laptop's).
+ */
+export interface SessionAppsNotice {
+  readonly sessionId: string;
+  readonly rows: readonly AppRow[];
 }
 
 /**
@@ -810,6 +825,8 @@ interface Snap {
   readonly jobs?: readonly JobRow[];
   /** The scheduled wakes at the cut (absent: an older daemon, or one that never holds any). */
   readonly schedules?: readonly ScheduleRow[];
+  /** The published apps at the cut (absent: not reported — older, apps off, or a pod). */
+  readonly apps?: readonly AppRow[];
   /** The workflow runs at the cut (absent: an older daemon, or a pod daemon). */
   readonly workflows?: readonly WorkflowRow[];
   /**
@@ -882,6 +899,8 @@ interface SessionEntry {
   jobs: readonly JobRow[] | undefined;
   /** The daemon's last reported scheduled wakes; undefined until it reports one. */
   schedules: readonly ScheduleRow[] | undefined;
+  /** The daemon's last reported published apps; undefined until it reports a list. */
+  apps: readonly AppRow[] | undefined;
   /** The daemon's last reported workflow runs; undefined until it reports one. */
   workflows: readonly WorkflowRow[] | undefined;
   /** The session's newest settings report (an open's, an own sync's, a `session_settings`). */
@@ -1001,6 +1020,7 @@ export class RemoteClient {
   private readonly subagentListeners = new Set<(notice: SessionSubagentsNotice) => void>();
   private readonly jobListeners = new Set<(notice: SessionJobsNotice) => void>();
   private readonly scheduleListeners = new Set<(notice: SessionSchedulesNotice) => void>();
+  private readonly appListeners = new Set<(notice: SessionAppsNotice) => void>();
   private readonly workflowListeners = new Set<(notice: SessionWorkflowsNotice) => void>();
   private readonly subagentNotifyListeners = new Set<
     (notice: SessionSubagentNotifyNotice) => void
@@ -1613,6 +1633,34 @@ export class RemoteClient {
   /** The session's scheduled wakes as last reported; undefined if never reported. */
   schedulesOf(sessionId: string): readonly ScheduleRow[] | undefined {
     return this.sessions.get(sessionId)?.schedules;
+  }
+
+  /** Subscribe to published-app changes across all sessions (see the notice type). */
+  onSessionApps(listener: (notice: SessionAppsNotice) => void): () => void {
+    this.appListeners.add(listener);
+    return () => this.appListeners.delete(listener);
+  }
+
+  /** The session's published apps as last reported; undefined if never reported. */
+  appsOf(sessionId: string): readonly AppRow[] | undefined {
+    return this.sessions.get(sessionId)?.apps;
+  }
+
+  /**
+   * `session/app_unpublish` (docs/feat/session-apps-publish.md): take one app
+   * offline. A refusal is a result, and an older daemon's `MethodNotFound`
+   * becomes one. The caller must hold the trust bit.
+   */
+  unpublishApp(sessionId: string, app: string): Promise<AppUnpublishResult> {
+    return this.sessionCall(sessionId, Method.AppUnpublish, { sessionId, app }, "once").then(
+      (result) => result as AppUnpublishResult,
+      (error: unknown): AppUnpublishResult => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { ok: false, reason: APPS_OLD_DAEMON };
+        }
+        throw error;
+      },
+    );
   }
 
   /** Subscribe to workflow-run changes across all sessions (see the notice type). */
@@ -3759,6 +3807,7 @@ export class RemoteClient {
       subagents: undefined,
       jobs: undefined,
       schedules: undefined,
+      apps: undefined,
       workflows: undefined,
       settings: undefined,
       unflushedExits: 0,
@@ -3822,6 +3871,14 @@ export class RemoteClient {
     entry.schedules = rows;
     for (const listener of this.scheduleListeners) {
       listener({ sessionId: entry.id, rows, count });
+    }
+  }
+
+  /** The published apps now (an `apps` update in seq order, or a resync's snapshot). */
+  private appsChanged(entry: SessionEntry, rows: readonly AppRow[]): void {
+    entry.apps = boundApps(rows);
+    for (const listener of this.appListeners) {
+      listener({ sessionId: entry.id, rows: entry.apps });
     }
   }
 
@@ -4263,6 +4320,11 @@ export class RemoteClient {
     if (snapshotSchedules && this.daemonWakes) {
       this.schedulesChanged(entry, snapshotSchedules, snap.schedules?.length ?? 0);
     }
+    // The published apps at the cut, under the same trust bit (AGENTS §7). Absent
+    // = not reported, never «none».
+    if (snap.apps && this.daemonWakes) {
+      this.appsChanged(entry, snap.apps);
+    }
     // The runs at the cut: the same fold, under the SAME trust bit the live frame
     // is (`daemonWakes`) — a pod's list is a pod-supplied claim about the
     // laptop's runs, whose approve steps the laptop would be asked to answer.
@@ -4459,6 +4521,12 @@ export class RemoteClient {
         if (this.daemonWakes) {
           this.schedulesChanged(entry, boundSchedules(update.schedules), update.schedules.length);
         }
+      } else if (update.type === "apps") {
+        // Not turn-scoped, and DROPPED without the trust bit: a pod publishes no
+        // page of the laptop's (AGENTS §7).
+        if (this.daemonWakes) {
+          this.appsChanged(entry, update.apps);
+        }
       } else if (update.type === "workflows") {
         // Not turn-scoped (a run lives between turns), and DROPPED with the trust
         // bit off: a pod runs no workflow of the laptop's (AGENTS §7).
@@ -4650,6 +4718,7 @@ export class RemoteClient {
       ...(first?.subagents ? { subagents: first.subagents } : {}),
       ...(first?.jobs ? { jobs: first.jobs } : {}),
       ...(first?.schedules ? { schedules: first.schedules } : {}),
+      ...(first?.apps ? { apps: first.apps } : {}),
       ...(first?.workflows ? { workflows: first.workflows } : {}),
     };
   }

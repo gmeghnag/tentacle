@@ -9,6 +9,8 @@
  */
 import {
   DEFAULT_ANTHROPIC_BASE_URL,
+  DEFAULT_APPS_DOMAIN,
+  DEFAULT_APPS_ENABLED,
   DEFAULT_AUTO_TITLE,
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
@@ -110,6 +112,16 @@ export interface WorkloadShellConfig {
 }
 
 /**
+ * `apps`, resolved: whether the agent is offered `app_publish` and the domain it
+ * publishes to (docs/feat/session-apps-publish.md D11). File-only, never carried:
+ * the host that publishes decides, and a pod never does (AGENTS §7).
+ */
+export interface AppsConfig {
+  readonly enabled: boolean;
+  readonly domain: string;
+}
+
+/**
  * `schedules`, resolved: THIS host's limits on the agent's scheduled wakes
  * (docs/feat/cron-tool.md D3, owner Q6). File-only, never carried: the host
  * that runs the timer decides.
@@ -146,6 +158,8 @@ export interface ResolvedConfig {
   readonly sessionHop: SessionHopConfig;
   /** The agent's `workload_shell` tool (docs/fix/workload-shell-live.md, owner decision 1). */
   readonly workloadShell: WorkloadShellConfig;
+  /** The agent's session apps (docs/feat/session-apps-publish.md). */
+  readonly apps: AppsConfig;
   /** The host's limits on the agent's scheduled wakes (docs/feat/cron-tool.md D3). */
   readonly schedules: SchedulesConfig;
   /** Max output tokens per response; unset → the provider's own default. */
@@ -339,6 +353,8 @@ export interface ResolvedConfig {
     readonly contextPruneOutputChars: Source;
     readonly sessionHopTool: Source;
     readonly workloadShellTool: Source;
+    readonly appsEnabled: Source;
+    readonly appsDomain: Source;
     readonly schedulesMaxJobs: Source;
     readonly schedulesMinIntervalMinutes: Source;
     readonly schedulesExpiryDays: Source;
@@ -747,6 +763,9 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.workloadShell?.tool,
     DEFAULT_WORKLOAD_SHELL_TOOL,
   );
+  // File-only: the host that would publish decides.
+  const appsEnabled = pick(undefined, fileConfig.apps?.enabled, DEFAULT_APPS_ENABLED);
+  const appsDomain = pick(undefined, fileConfig.apps?.domain, DEFAULT_APPS_DOMAIN);
   // File-only, like `contextAwareness`: the host running the timer decides.
   const schedulesMaxJobs = pick(
     undefined,
@@ -886,6 +905,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     },
     sessionHop: { tool: sessionHopTool.value },
     workloadShell: { tool: workloadShellTool.value },
+    apps: { enabled: appsEnabled.value, domain: appsDomain.value },
     schedules: {
       maxJobs: schedulesMaxJobs.value,
       minIntervalMinutes: schedulesMinIntervalMinutes.value,
@@ -975,6 +995,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       contextPruneOutputChars: contextPruneOutputChars.source,
       sessionHopTool: sessionHopTool.source,
       workloadShellTool: workloadShellTool.source,
+      appsEnabled: appsEnabled.source,
+      appsDomain: appsDomain.source,
       schedulesMaxJobs: schedulesMaxJobs.source,
       schedulesMinIntervalMinutes: schedulesMinIntervalMinutes.source,
       schedulesExpiryDays: schedulesExpiryDays.source,

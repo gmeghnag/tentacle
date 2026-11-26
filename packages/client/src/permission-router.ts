@@ -17,6 +17,7 @@
  */
 import {
   A2A_ADD_AGENT_TOOL,
+  APP_PUBLISH_TOOL,
   BROWSER_ACTION_TOOL,
   type PermissionRequest,
   type PermissionResponse,
@@ -161,6 +162,8 @@ export function toPermissionRequest(update: AskUpdate): PermissionRequest {
     ...(update.tool === BROWSER_ACTION_TOOL ? { kind: "browser_action" as const } : {}),
     // A remote agent the model proposed (docs/feat/a2a-client.md C11): same rule.
     ...(update.tool === A2A_ADD_AGENT_TOOL ? { kind: "agent_add" as const } : {}),
+    // Publishing a public web page (session apps D3): same rule.
+    ...(update.tool === APP_PUBLISH_TOOL ? { kind: "app_publish" as const } : {}),
     tool: update.tool,
     level: "ask",
     title: update.title,

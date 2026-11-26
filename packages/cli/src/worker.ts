@@ -16,7 +16,13 @@
  * `messagePortChannel` ignores non-string frames, so they don't reach the RPC.
  */
 import type { TentacleConfig } from "@tentacle/config";
-import type { ArtifactSink, AttachmentSource, ScheduleLink, ToolImageStore } from "@tentacle/core";
+import type {
+  AppsLink,
+  ArtifactSink,
+  AttachmentSource,
+  ScheduleLink,
+  ToolImageStore,
+} from "@tentacle/core";
 import {
   type BrowserHostPort,
   Connection,
@@ -43,6 +49,7 @@ import {
   type A2ACards,
   type SkillScan,
   type WiredAgent,
+  appsServiceOf,
   buildAgent,
   createSkillScan,
   scheduleLimitsOf,
@@ -90,6 +97,8 @@ export function workerAgentFactory(
     readonly toolImages?: ToolImageStore;
     /** The session's scheduled wakes (docs/feat/cron-tool.md D1): the worker schedules. */
     readonly schedules?: () => ScheduleLink | null;
+    /** The session's published apps (docs/feat/session-apps-publish.md D1). */
+    readonly apps?: () => AppsLink | null;
   },
   options: {
     readonly skillScan?: SkillScan;
@@ -122,6 +131,8 @@ export function workerAgentFactory(
       // Scheduled wakes (docs/feat/cron-tool.md D1): this host keeps a table (in
       // memory only — it lives as long as the TUI), so its agent is offered the tools.
       ...(ctx.schedules ? { schedules: ctx.schedules } : {}),
+      // Session apps: only where the host handed the link (`apps.enabled`).
+      ...(ctx.apps ? { apps: ctx.apps } : {}),
       // `workload_shell` (docs/feat/workload-shell.md D3): the worker IS the
       // user's own host, so it holds the kubeconfig / docker endpoint the tool
       // dials. A pod daemon never passes this.
@@ -181,6 +192,7 @@ export function workerSessionHost(
   // This worker runs the laptop's own model in this process, so it holds an
   // image's bytes (docs/feat/attachments-prompt.md D4). `undefined` = off.
   const images = daemonImagePolicy(config);
+  const apps = appsServiceOf(config, (line) => logDaemonError(config.configDir, line));
   return new SessionHost({
     defaultCwd: config.cwd,
     onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
@@ -194,6 +206,9 @@ export function workerSessionHost(
     // session's table and fires it itself, with THIS laptop's `schedules.*` limits.
     // Never persisted (pods and the worker never persist, AGENTS §7).
     schedules: { limits: scheduleLimitsOf(config) },
+    // Session apps (docs/feat/session-apps-publish.md D1): with `apps.enabled`,
+    // this host publishes with THIS laptop's key; the rows live in memory only.
+    ...(apps ? { apps } : {}),
     // The client's own build: no skew possible, named for completeness.
     identity: { tentacle: deps.version, kind: "worker" },
     newSessionSkills: () => skillScan.newSession(),

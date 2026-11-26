@@ -281,6 +281,16 @@ export function sheetOptions(req: PermissionRequest): readonly SheetOption[] {
         : []),
     ];
   }
+  // Publishing a public page (docs/feat/session-apps-publish.md D3): once or no.
+  if (req.kind === "app_publish") {
+    return [
+      { optionId: "allow_once", label: "Publish once", kind: "allow" },
+      { optionId: "reject_once", label: "No", kind: "deny" },
+      ...(req.reply !== undefined
+        ? ([{ optionId: "reply", label: "No, let's talk about it", kind: "reply" }] as const)
+        : []),
+    ];
+  }
   const always =
     req.suggestion !== undefined
       ? `Allow \`${req.suggestion.prefix}\` commands for this session`

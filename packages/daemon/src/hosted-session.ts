@@ -65,6 +65,7 @@ import {
   workflowWaitNote,
   workflowWaitWakeDue,
 } from "@tentacle/agent";
+import type { AppsLink } from "@tentacle/core";
 import {
   AGENT_MESSAGE_MAX_CHARS,
   type AgentJob,
@@ -120,6 +121,8 @@ import {
   zoneOrDefault,
 } from "@tentacle/core";
 import {
+  type AppRow,
+  type AppUnpublishResult,
   type AttachmentRef,
   BLOCKING_UPDATE_TYPES,
   type BrowserStatusResult,
@@ -197,6 +200,7 @@ import {
   watchAccepts,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import type { AppRecord } from "./apps-records.ts";
 import { ArtifactBudget, ArtifactStore } from "./artifact-store.ts";
 import { AttachmentStore, UploadBudget } from "./attachment-store.ts";
 import type { ModelLink } from "./connection.ts";
@@ -233,6 +237,7 @@ import {
   scheduleRows,
   scheduleSeqSeed,
 } from "./schedules-view.ts";
+import { APPS_CLOSE_WAIT_MS, type AppsService, type SessionApps } from "./session-apps.ts";
 import { forkableMessages } from "./session-fork.ts";
 import type { ImagePolicy, WorkloadShellsLike } from "./session-host.ts";
 import { type SessionSummary, liveRunCount } from "./session-list.ts";
@@ -406,6 +411,8 @@ interface Cut {
   readonly schedules: readonly ScheduleRow[];
   /** The workflow runs as of the cut: the last `workflows` list emitted (docs/feat/agent-workflows.md D5). */
   readonly workflows: readonly WorkflowRow[];
+  /** The published apps as of the cut: the last `apps` list emitted (docs/feat/session-apps-publish.md). */
+  readonly apps: readonly AppRow[];
 }
 
 /**
@@ -445,6 +452,11 @@ export interface RestoredSessionState {
    * at the first idle check (catch-up, D3). Absent → none.
    */
   readonly schedules?: readonly ScheduledJob[];
+  /**
+   * The apps the session publishes (`DaemonSessionRecord.apps`,
+   * docs/feat/session-apps-publish.md D8): each renews at once. Absent → none.
+   */
+  readonly apps?: readonly AppRecord[];
   /** When the session was pinned (`DaemonSessionRecord.pinnedAt`): a restart and a reopen keep it. */
   readonly pinnedAt?: number;
   /**
@@ -1236,6 +1248,13 @@ export class HostedSession {
   /** The last `workflows` list emitted: what the cut records. */
   private lastWorkflows: readonly WorkflowRow[] = [];
   /**
+   * The published apps (docs/feat/session-apps-publish.md); absent = this
+   * runtime publishes none (a pod daemon, or `apps.enabled` off).
+   */
+  private apps: SessionApps | undefined;
+  /** The last `apps` list emitted (or the restored one): what the cut records. */
+  private lastApps: readonly AppRow[] = [];
+  /**
    * The ONE user-wait timer (docs/feat/workflow-run-awareness.md S6): the wait
    * key it was armed for, its run, and when that wait began (the note's `since`).
    */
@@ -1292,6 +1311,7 @@ export class HostedSession {
     uploads: AttachmentStore = new AttachmentStore(new UploadBudget()),
     artifacts: ArtifactStore = new ArtifactStore(new ArtifactBudget()),
     schedules?: SessionSchedules,
+    apps?: AppsService,
   ) {
     this.id = id;
     this.uploads = uploads;
@@ -1381,7 +1401,16 @@ export class HostedSession {
       jobs: [],
       schedules: [],
       workflows: [],
+      apps: [],
     };
+    // The published apps a restart or a reopen brings back (session apps D8):
+    // each renews at once. Their timers fire after this constructor returns.
+    if (apps !== undefined) {
+      this.apps = apps.session(id, { artifacts, onChange: () => this.appsChanged() });
+      this.apps.restore(restored?.apps ?? []);
+      this.lastApps = this.apps.list();
+      this.cut = { ...this.cut, apps: this.lastApps };
+    }
     // The scheduled wakes a restart or a reopen brings back (D6), with the
     // counter seeded from them and the history: no id the model saw is reused.
     this.scheduleTable = restored?.schedules ?? [];
@@ -2169,6 +2198,8 @@ export class HostedSession {
       ...(this.pinnedAt !== undefined ? { pinnedAt: this.pinnedAt } : {}),
       // The table as of NOW (D6): written only when non-empty (the sidecar's v3).
       ...(this.scheduleTable.length > 0 ? { schedules: [...this.scheduleTable] } : {}),
+      // The published apps (session apps D8): only while there is one (v5).
+      ...this.appRecords(),
       ...(withLog ? { log: this.logCapture(after) } : {}),
       // From the mirror (= the agent's queue in every stretch, the module's
       // load-bearing assumption), so texts and ids never disagree.
@@ -2619,6 +2650,8 @@ export class HostedSession {
       ...(cursor === undefined ? { jobs: [...cut.jobs] } : {}),
       // Only where the session schedules (a pod daemon sends none, D5).
       ...(cursor === undefined && this.scheduling ? { schedules: [...cut.schedules] } : {}),
+      // Only where the session publishes apps (a pod daemon never does).
+      ...(cursor === undefined && this.apps ? { apps: [...cut.apps] } : {}),
       // Only where the session runs workflows (a tunnelled session has no driver).
       ...(cursor === undefined && this.workflows ? { workflows: [...cut.workflows] } : {}),
     };
@@ -2664,6 +2697,7 @@ export class HostedSession {
       jobs: this.lastJobs,
       schedules: this.lastSchedules,
       workflows: this.lastWorkflows,
+      apps: this.lastApps,
     };
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
@@ -4573,6 +4607,54 @@ export class HostedSession {
     }
   }
 
+  // --- published apps (docs/feat/session-apps-publish.md) ---------------------
+
+  /**
+   * This session's apps as its tools reach them (`AgentContext.apps`), or `null`
+   * where the host publishes none or the session has ended. Looked up per call.
+   */
+  appsLink(): AppsLink | null {
+    return this.apps === undefined || this.closed ? null : this.apps;
+  }
+
+  /** `session/app_unpublish`: the user takes one app offline. */
+  unpublishApp(app: string): Promise<AppUnpublishResult> {
+    const link = this.appsLink();
+    return link
+      ? link.unpublish(app)
+      : Promise.resolve({ ok: false, reason: "this session publishes no apps" });
+  }
+
+  /**
+   * After a close: resolves once its `DELETE`s settled, never later than
+   * `APPS_CLOSE_WAIT_MS`; `undefined` = there was nothing to take down.
+   */
+  appsDrained(): Promise<void> | undefined {
+    return this.apps?.drained(APPS_CLOSE_WAIT_MS);
+  }
+
+  private appRecords(): { apps?: readonly AppRecord[] } {
+    const records = this.apps?.records() ?? [];
+    return records.length > 0 ? { apps: records } : {};
+  }
+
+  /** The apps changed: the write (synchronous capture), then the list. */
+  private appsChanged(): void {
+    if (this.closed || this.apps === undefined) {
+      return;
+    }
+    this.persist();
+    this.lastApps = this.apps.list();
+    try {
+      this.emit({ type: "apps", apps: [...this.lastApps] });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+  }
+
   // --- scheduled wakes (docs/feat/cron-tool.md S3) ----------------------------
 
   /**
@@ -5338,6 +5420,8 @@ export class HostedSession {
       schedules: this.lastSchedules,
       // And the workflow runs: a run lives across a compaction or `/clear`.
       workflows: this.lastWorkflows,
+      // And the published apps: a public page is the session's (`/clear` keeps it).
+      apps: this.lastApps,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
@@ -5411,6 +5495,9 @@ export class HostedSession {
     this.disarmWorkflowWait();
     // The table itself stays (an archive keeps it frozen, D6); only the timer goes.
     this.disarmSchedules();
+    // Every end takes the apps offline (session apps D9): the rows go now, the
+    // `DELETE`s are fired and never awaited here.
+    void this.apps?.endAll();
     if (this.activeTurnId !== null) {
       try {
         this.finishTurn(this.activeTurnId, { stopReason: "cancelled" });

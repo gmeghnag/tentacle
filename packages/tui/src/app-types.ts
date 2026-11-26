@@ -7,6 +7,7 @@
 import type { Agent } from "@tentacle/agent";
 import type { AttachmentRef, JobController, PermissionBroker } from "@tentacle/core";
 import type {
+  AppRow,
   ArtifactListResult,
   ArtifactMeta,
   BrowserStatusResult,
@@ -368,6 +369,14 @@ export interface SessionController {
    * their own. Optional with `onSchedules`.
    */
   deleteSchedule?(scheduleId: string): Promise<{ deleted: boolean; reason?: string }>;
+  /**
+   * The session's published apps (`apps`, docs/feat/session-apps-publish.md),
+   * bounded by the client: the current list at once, then every change. Optional:
+   * absent on a client that cannot report them.
+   */
+  onApps?(listener: (rows: readonly AppRow[]) => void): (() => void) | undefined;
+  /** Take one app offline (`session/app_unpublish`); a refusal is a result with a reason. */
+  unpublishApp?(app: string): Promise<{ ok: boolean; reason?: string }>;
   /**
    * The session's workflow runs (`workflows`, docs/feat/workflows-ui.md D2): the
    * current run plus the last few ended, bounded and sanitized by the client (a

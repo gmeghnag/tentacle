@@ -11,6 +11,8 @@
  * section, so a slow or refused one never blanks the others.
  */
 import type {
+  AppRow,
+  AppUnpublishResult,
   ArtifactListResult,
   ArtifactMeta,
   BrowserStatusResult,
@@ -53,6 +55,8 @@ export interface InfoSession {
    * daemon, or one this client must not trust).
    */
   readonly schedules?: InfoSchedules | undefined;
+  /** The session's published apps; absent: this handle cannot report them. */
+  readonly apps?: InfoApps | undefined;
   /**
    * The session's MCP/skill switches (docs/feat/session-capabilities.md S5);
    * absent: the handle has none, which reads as an older daemon.
@@ -64,6 +68,18 @@ export interface InfoSession {
    * browser. Absent: the link reads `unknown`.
    */
   browserStatus?(): Promise<BrowserStatusResult>;
+}
+
+/**
+ * The part of `RemoteSession` the Apps section uses (`onApps`, `unpublishApp`,
+ * docs/feat/session-apps-publish.md). The rows are already bounded by the client.
+ */
+export interface InfoApps {
+  /** The list as last reported, or undefined (nothing reported: older, or apps off). */
+  current(): readonly AppRow[] | undefined;
+  onChange(listener: (rows: readonly AppRow[] | undefined) => void): () => void;
+  /** A refusal is a RESULT with a `reason`, never a throw (`RemoteSession.unpublishApp`). */
+  stop(app: string): Promise<AppUnpublishResult>;
 }
 
 /**
@@ -245,6 +261,11 @@ export interface SessionInfoController {
    * row and shows the daemon's own reason under the section.
    */
   deleteSchedule(scheduleId: string): Promise<void>;
+  /**
+   * Take one published app offline (docs/feat/session-apps-publish.md). The row
+   * leaves when the daemon's next list says so; a refusal keeps it and shows why.
+   */
+  stopApp(app: string): Promise<void>;
 }
 
 /** A "not connected" rejection is the LINK, not the method (F1). */
@@ -323,6 +344,12 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
    * about the PORT, which no attach is needed to state.
    */
   let feedAvailable = false;
+  /** The published apps feed, while the sheet is open. */
+  let unApps: (() => void) | null = null;
+  /** The list as last reported; `undefined` = none reported (no section). */
+  let appRows: readonly AppRow[] | undefined;
+  /** A refused stop's reason, under the rows until the next list. */
+  let appsError: string | null = null;
   /** The state the last report left, to tell what a change changed. */
   let lastCaps: SessionCapabilitiesWire | undefined;
   /** My sets not answered yet: their echoes are mine, not another device's. */
@@ -405,6 +432,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
           }),
       // No feed offered by this wiring at all: the section is not drawn.
       ...(feedAvailable ? { schedules: { rows: scheduleRows, error: schedulesError } } : {}),
+      ...(appRows === undefined ? {} : { apps: { rows: appRows, error: appsError } }),
       now: port.now(),
     };
   }
@@ -438,6 +466,26 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
     unSchedules?.();
     unSchedules = null;
     schedulesError = null;
+  }
+
+  /** Follow the handle's published apps; the install reports the list it knows. */
+  function followApps(): void {
+    stopApps();
+    const feed = port.session()?.apps;
+    appRows = feed?.current();
+    unApps =
+      feed?.onChange((rows) => {
+        appRows = rows;
+        appsError = null;
+        emit();
+      }) ?? null;
+  }
+
+  /** Stop following; a refusal lives only while the sheet is open. */
+  function stopApps(): void {
+    unApps?.();
+    unApps = null;
+    appsError = null;
   }
 
   /** Follow the handle's switches (another device's change repaints, Q4). */
@@ -631,6 +679,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       followCaps();
       stopSchedules();
       followSchedules();
+      followApps();
       // ONE refresh per link `up`, never one per section (F1).
       unlink =
         port.onLink?.((status) => {
@@ -651,6 +700,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       // never paint a stale list.
       stopSchedules();
       followSchedules();
+      followApps();
       return run();
     },
     async loadContext() {
@@ -717,6 +767,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       unSwitch = null;
       stopCaps();
       stopSchedules();
+      stopApps();
       // The LISTENERS stay: the same controller feeds the HEADER's bar, which is
       // on screen with the sheet closed (Owner decision 4), and a pull that lands
       // after the close must still repaint it (Review round 1, MEDIUM 1). The
@@ -766,6 +817,22 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
         // Answered: an echo that never came (an idempotent set, a refusal) must
         // not make a later identical change from another device look like mine.
         pendingCaps = settledOp(pendingCaps, op);
+      }
+      emit();
+    },
+    async stopApp(app) {
+      const feed = port.session()?.apps;
+      if (feed === undefined) {
+        // Not attached: nothing to send.
+        return;
+      }
+      appsError = null;
+      emit();
+      try {
+        const result = await feed.stop(app);
+        appsError = result.ok ? null : (result.reason ?? "Couldn't stop it");
+      } catch (error) {
+        appsError = error instanceof Error ? error.message : String(error);
       }
       emit();
     },

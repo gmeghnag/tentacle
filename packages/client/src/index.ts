@@ -5,6 +5,7 @@
  * mappings.
  */
 export * from "./address-dial.ts";
+export * from "./apps.ts";
 export * from "./constants.ts";
 export * from "./link-machine.ts";
 export * from "./mapping.ts";

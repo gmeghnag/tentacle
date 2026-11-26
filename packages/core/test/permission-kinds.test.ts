@@ -27,6 +27,7 @@ describe("external answer table", () => {
       browser_action: "owner-only",
       question: "owner-only",
       agent_add: "owner-only",
+      app_publish: "owner-only",
     });
     const kinds = Object.keys(EXTERNAL_ANSWER) as PermissionKind[];
     expect(kinds.filter((k) => externalMayAnswer(k))).toEqual(["tool"]);
@@ -43,6 +44,24 @@ const req = (kind: PermissionKind): PermissionRequest => ({
   level: "ask",
   title: "acme asks",
   input: {},
+});
+
+// docs/feat/session-apps-publish.md D3: publishing a page to the public internet.
+// Mutations: drop `app_publish` from `onceOnlyAsk`, or let `autoApproves` accept
+// it → red.
+describe("app_publish (session apps D3)", () => {
+  test("auto-accept never answers it, even on its own turn", () => {
+    expect(autoApproves(req("app_publish"), true)).toBe(false);
+    expect(autoApproves(req("app_publish"))).toBe(false);
+  });
+
+  test("once-only: no «always» rule can ever be made", () => {
+    expect(onceOnlyAsk(req("app_publish"))).toBe(true);
+  });
+
+  test("an external caller never answers it", () => {
+    expect(externalMayAnswer("app_publish")).toBe(false);
+  });
 });
 
 describe("a2a-client kinds (C6/C11)", () => {

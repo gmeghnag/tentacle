@@ -408,6 +408,11 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       // delete is the daemon's own method. Forwarded in `persistingController`.
       "onSchedules",
       "deleteSchedule",
+      // The session's published pages (docs/feat/session-apps-publish.md):
+      // `/apps`, the status words and the quit warning read this feed, and Stop
+      // is the daemon's own method. Forwarded in `persistingController`.
+      "onApps",
+      "unpublishApp",
       // The session's workflow runs (docs/feat/workflows-ui.md D2): the rail, the
       // panel and `/workflow` read this ONE feed, and every action (start / stop /
       // resume / rerun step) plus one step's detail are the daemon's own methods.

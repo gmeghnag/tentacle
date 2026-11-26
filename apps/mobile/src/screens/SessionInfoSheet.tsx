@@ -52,6 +52,10 @@ export interface SessionInfoSheetProps {
    * P9's rule is a testID-addressable control.
    */
   readonly onDeleteSchedule: (scheduleId: string) => void;
+  /** Copy a published app's address (docs/feat/session-apps-publish.md). */
+  readonly onCopyApp?: ((url: string) => void) | undefined;
+  /** Take a published app offline: the row's app id. */
+  readonly onStopApp?: ((app: string) => void) | undefined;
   /** Pull-to-refresh and a Retry row. */
   readonly onRefresh: () => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
@@ -107,11 +111,15 @@ function SectionBody({
   onRetry,
   onSwitch,
   onDeleteSchedule,
+  onCopyApp,
+  onStopApp,
   onOpenArtifacts,
   onOpenBrowser,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
+  readonly onCopyApp?: SessionInfoSheetProps["onCopyApp"];
+  readonly onStopApp?: SessionInfoSheetProps["onStopApp"];
   readonly expanded: string | null;
   readonly onExpand: (id: string | null) => void;
   readonly onRetry: (section: InfoSection["id"]) => void;
@@ -153,6 +161,8 @@ function SectionBody({
           sectionId={section.id}
           onSwitch={onSwitch}
           onDeleteSchedule={onDeleteSchedule}
+          onCopyApp={onCopyApp}
+          onStopApp={onStopApp}
           onOpenArtifacts={onOpenArtifacts}
           onOpenBrowser={onOpenBrowser}
           expanded={expanded === `${section.id}:${rowIdentity(row)}`}
@@ -182,11 +192,15 @@ function InfoRowView({
   onExpand,
   onSwitch,
   onDeleteSchedule,
+  onCopyApp,
+  onStopApp,
   onOpenArtifacts,
   onOpenBrowser,
 }: {
   readonly palette: Palette;
   readonly row: InfoRow;
+  readonly onCopyApp?: SessionInfoSheetProps["onCopyApp"];
+  readonly onStopApp?: SessionInfoSheetProps["onStopApp"];
   readonly first: boolean;
   readonly sectionId: InfoSection["id"];
   readonly expanded: boolean;
@@ -227,8 +241,33 @@ function InfoRowView({
   // P1 (owner): a trailing switch on the row, as Auto-accept's; a ghost
   // (disabled) one when the view-model says it cannot send. A scheduled wake's
   // trailing control is its Delete instead (cron-tool S6): a wake has no on/off.
+  const app = row.app;
+  const stop = app?.stop;
   const trailing =
-    remove !== undefined ? (
+    app !== undefined ? (
+      <View style={styles.switchTrail}>
+        <Pressable
+          testID={`session-info-${sectionId}-${rowIdentity(row)}-copy`}
+          accessibilityRole="button"
+          accessibilityLabel={app.copyLabel}
+          onPress={() => onCopyApp?.(app.url)}
+          style={styles.delete}
+        >
+          <Text style={[typography.subhead, { color: palette.sec }]}>Copy</Text>
+        </Pressable>
+        {stop === undefined ? null : (
+          <Pressable
+            testID={`session-info-${sectionId}-${rowIdentity(row)}-stop`}
+            accessibilityRole="button"
+            accessibilityLabel={app.stopLabel}
+            onPress={() => onStopApp?.(stop)}
+            style={styles.delete}
+          >
+            <Text style={[typography.subhead, { color: palette.red }]}>Stop</Text>
+          </Pressable>
+        )}
+      </View>
+    ) : remove !== undefined ? (
       <Pressable
         testID={`session-info-${sectionId}-${rowIdentity(row)}-delete`}
         accessibilityRole="button"
@@ -256,7 +295,7 @@ function InfoRowView({
   // a plain `values` read is part of the row. Both of this row's controls live in
   // the first two branches, so the last one is a READ.
   const trailingKind: "value" | "control" =
-    remove !== undefined || toggle !== undefined ? "control" : "value";
+    app !== undefined || remove !== undefined || toggle !== undefined ? "control" : "value";
   return (
     <>
       <Row
@@ -305,10 +344,14 @@ function Section({
   onRetry,
   onSwitch,
   onDeleteSchedule,
+  onCopyApp,
+  onStopApp,
   onOpenArtifacts,
   onOpenBrowser,
   lastRow,
 }: {
+  readonly onCopyApp?: SessionInfoSheetProps["onCopyApp"];
+  readonly onStopApp?: SessionInfoSheetProps["onStopApp"];
   readonly palette: Palette;
   readonly section: InfoSection;
   readonly expanded: string | null;
@@ -351,6 +394,8 @@ function Section({
           onRetry={onRetry}
           onSwitch={onSwitch}
           onDeleteSchedule={onDeleteSchedule}
+          onCopyApp={onCopyApp}
+          onStopApp={onStopApp}
           onOpenArtifacts={onOpenArtifacts}
           onOpenBrowser={onOpenBrowser}
         />
@@ -368,6 +413,8 @@ export function SessionInfoSheet({
   onAutoAccept,
   onSwitch,
   onDeleteSchedule,
+  onCopyApp,
+  onStopApp,
   onRefresh,
   onRetry,
   onOpenArtifacts,
@@ -423,6 +470,8 @@ export function SessionInfoSheet({
             onRetry={onRetry}
             onSwitch={onSwitch}
             onDeleteSchedule={onDeleteSchedule}
+            onCopyApp={onCopyApp}
+            onStopApp={onStopApp}
             onOpenArtifacts={onOpenArtifacts}
             onOpenBrowser={onOpenBrowser}
             {...(section.id === "session" && view.autoAccept === true

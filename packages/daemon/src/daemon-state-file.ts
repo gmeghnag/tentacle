@@ -34,6 +34,7 @@ import {
   type ReturnedEntry,
   hasAttachments,
 } from "@tentacle/protocol";
+import { type AppRecord, parseAppRecords } from "./apps-records.ts";
 import type {
   DaemonSessionRecord,
   PendingPermission,
@@ -81,12 +82,21 @@ export const DAEMON_STATE_VERSION_SCHEDULES = 3;
  * turn. Stamped 4, that build refuses the one session loudly instead.
  */
 export const DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES = 4;
+/**
+ * 5: the file carries `apps`, the session's published public pages
+ * (docs/feat/session-apps-publish.md D8), written only then; it may carry
+ * anything an earlier version does. An older build would DROP them and rewrite
+ * the file — leaving a public page nobody renews or can stop from this session.
+ * Stamped 5, that build refuses the one session loudly instead.
+ */
+export const DAEMON_STATE_VERSION_APPS = 5;
 /** The versions this build READS (a tail without refs is equally valid as either). */
 export const DAEMON_STATE_VERSIONS: readonly number[] = [
   DAEMON_STATE_VERSION_NO_MEDIA,
   DAEMON_STATE_VERSION,
   DAEMON_STATE_VERSION_SCHEDULES,
   DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES,
+  DAEMON_STATE_VERSION_APPS,
 ];
 
 /** Whether a table holds v4 content (a workflow target or a `daily` job). */
@@ -132,6 +142,8 @@ export interface DaemonSidecar {
   readonly pinnedAt?: number;
   /** The scheduled wakes, present ONLY when there is one (and then the file is v3). */
   readonly schedules?: readonly ScheduledJob[];
+  /** The published apps, present ONLY when there is one (and then the file is v5). */
+  readonly apps?: readonly AppRecord[];
 }
 
 /** The length of the prefix `a` and `b` share BY REFERENCE (messages are immutable values). */
@@ -147,18 +159,21 @@ export function sidecarOf(record: DaemonSessionRecord): DaemonSidecar {
   const k = sharedPrefix(record.logged, record.messages);
   const tail = record.messages.slice(k);
   const schedules = record.schedules !== undefined && record.schedules.length > 0;
+  const apps = record.apps !== undefined && record.apps.length > 0;
   return {
     format: DAEMON_STATE_FORMAT,
-    // v3 exactly when it carries schedules, else v2 exactly when a tail message
-    // carries refs: a file with neither is readable by every build, which is
-    // the whole point of the split.
-    schemaVersion: hasWorkflowSchedules(record.schedules)
-      ? DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES
-      : schedules
-        ? DAEMON_STATE_VERSION_SCHEDULES
-        : tail.some(hasAttachments)
-          ? DAEMON_STATE_VERSION
-          : DAEMON_STATE_VERSION_NO_MEDIA,
+    // v5 exactly when it carries apps, else v3/v4 exactly when it carries
+    // schedules, else v2 exactly when a tail message carries refs: a file with
+    // none is readable by every build, which is the whole point of the split.
+    schemaVersion: apps
+      ? DAEMON_STATE_VERSION_APPS
+      : hasWorkflowSchedules(record.schedules)
+        ? DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES
+        : schedules
+          ? DAEMON_STATE_VERSION_SCHEDULES
+          : tail.some(hasAttachments)
+            ? DAEMON_STATE_VERSION
+            : DAEMON_STATE_VERSION_NO_MEDIA,
     id: record.id,
     logHead: { seq: record.logHead.seq, id: record.logHead.id },
     k,
@@ -175,6 +190,7 @@ export function sidecarOf(record: DaemonSessionRecord): DaemonSidecar {
     ...(record.autoAccept === true ? { autoAccept: true } : {}),
     ...(record.pinnedAt !== undefined ? { pinnedAt: record.pinnedAt } : {}),
     ...(schedules ? { schedules: record.schedules } : {}),
+    ...(apps ? { apps: record.apps } : {}),
   };
 }
 
@@ -411,7 +427,8 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
   if (value.schedules !== undefined) {
     if (
       version !== DAEMON_STATE_VERSION_SCHEDULES &&
-      version !== DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES
+      version !== DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES &&
+      version !== DAEMON_STATE_VERSION_APPS
     ) {
       return {
         ok: false,
@@ -420,12 +437,30 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
     }
     // v3 PROMISES no workflow target / `daily` (what a v3 build reads).
     const parsed = parseScheduleRecords(value.schedules, {
-      workflowTargets: version === DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES,
+      workflowTargets:
+        version === DAEMON_STATE_VERSION_WORKFLOW_SCHEDULES ||
+        version === DAEMON_STATE_VERSION_APPS,
     });
     if (parsed === null) {
       return { ok: false, reason: '"schedules" is malformed' };
     }
     schedules = parsed;
+  }
+  // Every earlier version PROMISES no apps; a malformed list refuses the file
+  // (dropping it would leave a public page nobody renews or can stop).
+  let apps: AppRecord[] | undefined;
+  if (value.apps !== undefined) {
+    if (version !== DAEMON_STATE_VERSION_APPS) {
+      return {
+        ok: false,
+        reason: `a schemaVersion ${version} state file carries "apps" (it must be ${DAEMON_STATE_VERSION_APPS})`,
+      };
+    }
+    const parsed = parseAppRecords(value.apps);
+    if (parsed === null) {
+      return { ok: false, reason: '"apps" is malformed' };
+    }
+    apps = parsed;
   }
   return {
     ok: true,
@@ -453,6 +488,7 @@ export function parseSidecar(text: string, id: string): Result<DaemonSidecar> {
       // the conversation is intact and a lost pin is harmless).
       ...(isWireStamp(value.pinnedAt) ? { pinnedAt: value.pinnedAt } : {}),
       ...(schedules !== undefined && schedules.length > 0 ? { schedules } : {}),
+      ...(apps !== undefined && apps.length > 0 ? { apps } : {}),
     },
   };
 }
@@ -561,6 +597,7 @@ export function rebuild(
       ...(sidecar.autoAccept === true ? { autoAccept: true } : {}),
       ...(sidecar.pinnedAt !== undefined ? { pinnedAt: sidecar.pinnedAt } : {}),
       ...(sidecar.schedules !== undefined ? { schedules: sidecar.schedules } : {}),
+      ...(sidecar.apps !== undefined ? { apps: sidecar.apps } : {}),
       ...(capabilities !== undefined ? { capabilities } : {}),
       logged,
       logHead: sidecar.logHead,

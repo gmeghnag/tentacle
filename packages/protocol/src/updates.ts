@@ -14,6 +14,7 @@ import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { PermissionRequestUpdateSchema, PermissionResolvedUpdateSchema } from "./permission.ts";
 import { QuestionRequestUpdateSchema } from "./question.ts";
 import {
+  AppRowSchema,
   JobRowSchema,
   MAX_SESSION_TITLE,
   QueuedEntrySchema,
@@ -444,6 +445,17 @@ export const SchedulesUpdateSchema = z.object({
 });
 
 /**
+ * The session's published apps changed (published, updated, renewed into a new
+ * state, stopped): the FULL list, replacing any earlier one
+ * (docs/feat/session-apps-publish.md D7). Session-level like `schedules`: a lease
+ * renews between turns. Display only: nothing waits on it.
+ */
+export const AppsUpdateSchema = z.object({
+  type: z.literal("apps"),
+  apps: z.array(AppRowSchema),
+});
+
+/**
  * A RUNNING background sub-agent sent its parent agent a message
  * (`agent_notify`, docs/feat/agent-message-two-way.md): the text reached the
  * parent's conversation. `wake` says whether the note asks for a continuation
@@ -523,6 +535,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SubagentsUpdateSchema,
   JobsUpdateSchema,
   SchedulesUpdateSchema,
+  AppsUpdateSchema,
   SubagentNotifySchema,
   SubagentMessageUpdateSchema,
   SessionSettingsUpdateSchema,
@@ -591,6 +604,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   jobs: "display",
   // Full state, sent only when a scheduled wake changes; nothing waits on it.
   schedules: "display",
+  // Full state, also in the snapshot's first page; nothing waits on a row.
+  apps: "display",
   // A notice; the note itself rides the conversation (nothing hangs).
   subagent_notify: "display",
   // The user's own notice (every client shows it); the parent's note lands at its turn.

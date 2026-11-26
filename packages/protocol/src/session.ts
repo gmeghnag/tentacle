@@ -1552,6 +1552,51 @@ export const ScheduleCreateResultSchema = z.object({
 });
 export type ScheduleCreateResult = z.infer<typeof ScheduleCreateResultSchema>;
 
+/**
+ * One app this session published (docs/feat/session-apps-publish.md): a public web
+ * page of a presented artifact. Display only, lenient like `ScheduleRowSchema`
+ * (one odd label must not kill the list); the client is the gate (AGENTS §7).
+ */
+export const AppRowSchema = z.object({
+  /** The host's app id: what `session/app_unpublish` takes. */
+  app: z.string().min(1),
+  url: z.string(),
+  artifactId: z.string(),
+  version: z.number().int().positive(),
+  title: z.string(),
+  /**
+   * A free string (`up`, `renewing`, `down`, `removed`, or a newer daemon's):
+   * a client that does not know it shows `unknown`, never `up`.
+   */
+  state: z.string(),
+  /** Why it is not up (the host operator's statement of reasons included). */
+  reason: z.string().optional(),
+  /** Daemon ms of the last state change (display only). */
+  since: z.number().int().nonnegative(),
+  publishedAt: z.number().int().nonnegative(),
+});
+export type AppRow = z.infer<typeof AppRowSchema>;
+
+/**
+ * `session/app_unpublish`: the user takes one of this session's apps offline.
+ * It only REMOVES exposure; the daemon awaits the host in this handler only (the
+ * peer is never serialized, §7). Additive: an older daemon answers
+ * `MethodNotFound`, shown as a notice.
+ */
+export const AppUnpublishParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  app: z.string().min(1).max(64),
+});
+export type AppUnpublishParams = z.infer<typeof AppUnpublishParamsSchema>;
+
+export const AppUnpublishResultSchema = z.object({
+  /** `true` iff the app existed and is no longer this session's. */
+  ok: z.boolean(),
+  /** Why not (or a note, e.g. the host could not be reached): a notice, never thrown. */
+  reason: z.string().optional(),
+});
+export type AppUnpublishResult = z.infer<typeof AppUnpublishResultSchema>;
+
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */
   messages: z.array(ChatMessageSchema),
@@ -1576,6 +1621,12 @@ export const SnapshotResultSchema = z.object({
    * not report them", never "none left".
    */
   schedules: z.array(ScheduleRowSchema).optional(),
+  /**
+   * The apps this session publishes at the cut, the FULL list (first page only).
+   * Absent means "this daemon does not report them" (older, apps off, or a pod),
+   * never "none".
+   */
+  apps: z.array(AppRowSchema).optional(),
   /**
    * The session's workflow runs at the cut — the current one + the last few
    * ended (docs/feat/agent-workflows.md D5; first page only). Absent from an

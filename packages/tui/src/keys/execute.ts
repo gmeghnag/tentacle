@@ -94,6 +94,8 @@ export interface KeyHost {
   killChild(id: string): void;
   /** Delete one scheduled wake (`session/schedule_delete`, cron-tool S5). */
   deleteSchedule(id: string): void;
+  /** Take one published app offline (`s` in `/apps`). */
+  unpublishApp(app: string): void;
   /** Write the `/schedule` panel's own state (its arm/answer). */
   setSchedulesState(state: SchedulesState): void;
   /** `o` in `/workflow`: read one step's prompt/report (`session/workflow_step`). */
@@ -234,6 +236,9 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "deleteSchedule":
       host.deleteSchedule(effect.id);
+      return;
+    case "unpublishApp":
+      host.unpublishApp(effect.app);
       return;
     case "setSchedulesState":
       host.setSchedulesState(effect.state);

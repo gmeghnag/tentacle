@@ -15,6 +15,8 @@
  * which is also how `explain` prints it.
  */
 import {
+  DEFAULT_APPS_DOMAIN,
+  DEFAULT_APPS_ENABLED,
   DEFAULT_AUTO_TITLE,
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
@@ -991,6 +993,38 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "It dials with YOUR kubeconfig / docker endpoint and runs commands on another workload, so it is OFF unless you turn it on. You are still asked before the first command on each target (and with `always` for the rest of the session). Offered only where tentacle runs on your own host — the local worker and `serve` — never to a pod daemon, which already has its own shell inside its workload.",
     example: "true",
+  },
+  apps: {
+    summary: "Session apps: the agent publishes a presented page as a public web page.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "apps.enabled": {
+    summary: "Offer the agent `app_publish` / `app_unpublish`.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_APPS_ENABLED,
+    resolved: (c) => c.apps.enabled,
+    sourceKey: "appsEnabled",
+    details:
+      "An HTML page the agent already showed you (`present`) can be published at `https://<id>.<apps.domain>/`: anyone with the link can open it while the session is open. You approve every publish and every update (never «always», never auto-accept). Offered only where tentacle runs on your own host — the local worker and `serve` — never to a pod daemon. OFF until you turn it on.",
+    example: "true",
+  },
+  "apps.domain": {
+    summary: "The apps host's domain.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_APPS_DOMAIN,
+    resolved: (c) => c.apps.domain,
+    sourceKey: "appsDomain",
+    details:
+      "A bare hostname. Requests are signed for it: change it only with no live apps (the old host's apps could no longer be renewed).",
+    example: '"apps.example.so"',
   },
   schedules: {
     summary: "This host's limits on the agent's scheduled wakes (`schedule_create`).",

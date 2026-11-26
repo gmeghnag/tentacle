@@ -1,4 +1,5 @@
-import type { BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
+import type { AppRow, BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
+import { appsStatusLabel } from "./apps-view.ts";
 /**
  * docs/feat/app-decomposition.md S10 — the frame's VIEW-MODEL, pure and
  * React-free (AGENTS §7: every decision with branching lives in a pure module,
@@ -150,6 +151,8 @@ export interface FrameInput {
    * bar's tab count. Null/absent: not read — the sign then shows no count.
    */
   readonly browserStatus?: BrowserStatusResult | null;
+  /** The session's published apps (session apps D10): the status line's words. */
+  readonly appRows?: readonly AppRow[] | undefined;
   /**
    * The session is open daemon-side (`SessionController.opened()`), so a panel
    * can tell "not started yet" from "this runtime has none"
@@ -226,6 +229,7 @@ export function frameLayout(input: FrameInput) {
     sessionId,
     capsPhase,
     browserStatus,
+    appRows,
     sessionOpened,
     field,
     attach,
@@ -283,7 +287,9 @@ export function frameLayout(input: FrameInput) {
     : null;
   // The status-line marker while something is off (owner Q2): null otherwise.
   const liveCaps = capsPhase?.kind === "on" ? capsPhase.caps : undefined;
-  const capsShown = capsMarker(liveCaps);
+  // The published apps ride the same suffix («2 apps», «app down»), before it.
+  const markers = [appsStatusLabel(appRows), capsMarker(liveCaps)].filter((m) => m !== null);
+  const capsShown = markers.length === 0 ? null : markers.join(" · ");
   const browserSign = browserStatusSign(liveCaps, browserStatus ?? null);
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now

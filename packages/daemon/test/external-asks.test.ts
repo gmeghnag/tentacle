@@ -71,6 +71,15 @@ describe("external asks", () => {
     expect(callerMayAnswer(own, "owner")).toBe(false);
   });
 
+  // Mutation: drop the `app_publish` branch of `askOf` (→ kind `tool`) → an
+  // external caller publishes a public page → red (session apps D3).
+  test("a publish ask is the owner's only, in every mode", () => {
+    const own = askOf(update({ tool: "app_publish" }), true);
+    expect(own.kind).toBe("app_publish");
+    expect(callerMayAnswer(own, "both")).toBe(false);
+    expect(callerMayAnswer(own, "owner")).toBe(false);
+  });
+
   // Mutation (the plan's): route by requestId without the kind check → the
   // owner-only and the unattributed asks resolve → red.
   test("resolve: only a caller-answerable pending ask, only its *_once option", () => {

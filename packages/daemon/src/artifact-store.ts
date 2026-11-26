@@ -228,6 +228,16 @@ export class ArtifactStore implements ArtifactSink, Holder {
     return { data: Buffer.from(chunk).toString("base64"), size: bytes.length };
   }
 
+  /**
+   * A listed version's whole bytes (the apps publisher,
+   * docs/feat/session-apps-publish.md): the same eviction and seed path as
+   * `read`. `undefined` = not listed here, or no longer held.
+   */
+  async bytesOf(sha256: string): Promise<Uint8Array | undefined> {
+    if (!this.metas.some((m) => m.sha256 === sha256)) return undefined;
+    return this.blobs.get(sha256) ?? (await this.load(sha256));
+  }
+
   /** Memory only (a `serve` archive keeps its disk copy): every byte goes back to the budget. */
   dispose(): void {
     this.budget.releaseAll(this);

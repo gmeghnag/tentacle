@@ -1,3 +1,4 @@
+import type { AppRow } from "@tentacle/protocol";
 /**
  * `/quit` (`/exit`) and `/clear` — the two ways this TUI ends something
  * (docs/feat/app-decomposition.md S8): the quit's decision and its
@@ -35,6 +36,7 @@
  */
 import { type MutableRefObject, useCallback } from "react";
 import type { SessionController } from "./app-types.ts";
+import { liveAppCount } from "./apps-view.ts";
 import type { DockJobRow } from "./background-list.ts";
 import { backgroundCount, backgroundNames } from "./background-view.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
@@ -98,6 +100,8 @@ export interface QuitClearHost {
    * the session ends them, so it asks first. Read at quit time, like the jobs'.
    */
   readonly schedulesRef: MutableRefObject<readonly ScheduleDockRow[] | undefined>;
+  /** The published apps (session apps D10): a quit that closes takes them offline. */
+  readonly appsRef: MutableRefObject<readonly AppRow[] | undefined>;
   /** `/quit`'s confirmation facts (the dialog's state is App's: it renders it). */
   readonly setQuitConfirm: (facts: QuitConfirmFacts | null) => void;
   /** A detached run's TUI: `/quit` closes for all, and `others` is asked live. */
@@ -144,6 +148,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
     subagentsRef,
     jobRowsRef,
     schedulesRef,
+    appsRef,
     setQuitConfirm,
     runQuit,
     detachOnQuit,
@@ -169,6 +174,8 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
       // it ends them all, and nobody would be left to be woken. A `connect`
       // quit only detaches, so the daemon keeps them armed.
       const scheduleIds = detachOnQuit ? [] : (schedulesRef.current ?? []).map((row) => row.id);
+      // A published app goes offline with its session (session apps D9).
+      const apps = detachOnQuit ? 0 : liveAppCount(appsRef.current);
       const step = quitCommandStep({
         running: stateRef.current.running,
         exitPending: exitPendingRef.current,
@@ -179,6 +186,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
         agents: confirmed ? 0 : agents,
         jobs: confirmed ? 0 : jobs,
         schedules: confirmed ? 0 : scheduleIds.length,
+        apps: confirmed ? 0 : apps,
         confirmed,
       });
       if (step === "confirm") {
@@ -187,6 +195,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
           agents,
           jobs,
           ...(scheduleIds.length === 0 ? {} : { scheduleIds }),
+          ...(apps === 0 ? {} : { apps }),
           names: backgroundNames(subagentsRef.current),
         });
         return;
@@ -212,6 +221,7 @@ export function useQuitClear(host: QuitClearHost): QuitClearLayer {
       foreignRef,
       jobRowsRef,
       schedulesRef,
+      appsRef,
       pushNotice,
       runQuit,
       setQuitConfirm,

@@ -155,6 +155,8 @@ export interface TentacleConfig {
   readonly sessionHop: ResolvedConfig["sessionHop"];
   /** Whether the agent is offered `workload_shell` (docs/fix/workload-shell-live.md). */
   readonly workloadShell: ResolvedConfig["workloadShell"];
+  /** Whether the agent may publish session apps, and where (docs/feat/session-apps-publish.md). */
+  readonly apps: ResolvedConfig["apps"];
   /** This host's limits on the agent's scheduled wakes (docs/feat/cron-tool.md D3). */
   readonly schedules: ResolvedConfig["schedules"];
   readonly maxTokens?: number;
@@ -898,6 +900,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     contextPrune: resolved.contextPrune,
     sessionHop: resolved.sessionHop,
     workloadShell: resolved.workloadShell,
+    apps: resolved.apps,
     schedules: resolved.schedules,
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     ...(resolved.maxImageBytes !== undefined ? { maxImageBytes: resolved.maxImageBytes } : {}),

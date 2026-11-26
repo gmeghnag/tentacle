@@ -12,6 +12,13 @@ import { z } from "zod";
 /** The API's own version; it is the first line of every signed payload. */
 export const APPS_API_VERSION = 1 as const;
 
+/**
+ * The largest page either end takes by default: the host's `maxAppBytes` and the
+ * publisher's pre-check (so the owner is never asked about a page the host will
+ * refuse). A host configured lower still answers `413 too_large`.
+ */
+export const APPS_MAX_APP_BYTES_DEFAULT = 10 * 1024 * 1024;
+
 /** An app id's length: 16 lowercase base32 characters = 80 bits. */
 export const APP_ID_LENGTH = 16;
 
