@@ -1272,3 +1272,9 @@ Mockups `.tentacle/mockups/browser-b6/index.html`. Owner, verbatim: «per browse
 - **Executor behaviour**: correct escalation per §0 (stopped, cited, two options, no scope picked alone); it self-reports a wrong `cd` to the main checkout (read-only, re-verified).
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Owner request — extension icon (2026-11-26 ~01:15)
+
+Owner: «il plugin chrome è pronto? se non hai finito completa anche quello, con tanto di logo piccolo stesso colore dell'app» → «intendevo polipetto». Done by the orchestrator in this branch: `apps/browser-extension/icons/icon-{16,32,48,128}.png` = Polpetto in COLOUR as the app icon shows him (owner screenshot «questo intendevo»): `apps/mobile/src/mascot-scenes.ts` `MASCOT_BITMAP` with the `cyan` palette (`MASCOT_PALETTES.cyan`: K #0E8AA8, E #083A47, F #5FE0F2, S #3FCFE6, B #B7F3FB), transparent background, integer-scaled pixels (16 px is a downscale); `manifest.json` `icons` + `action.default_icon`. **Open for the executor (with B6):** `packages/cli/src/browser-extension-assets.ts` embeds TEXT files only, so `tentacle browser install` would write a manifest pointing at icons it never writes — Chrome then refuses to load the extension. Embed the PNGs as binary (e.g. Bun `with { type: "file" }` read as bytes, or base64 constants generated from the files) and make `browser-install.ts` write them byte-exact; `browser-install.test.ts` must fail while an icon is missing or stale (red first). Do not merge before this holds.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-26*
