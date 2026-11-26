@@ -550,6 +550,27 @@ curl -fL -o /Users/gmeghnag/tentacle/.tentacle/tmp/image-region-png/PngSuite-201
 
 Then Execution steps 1–4.
 
+### Fix round 2
+
+*— claude-sonnet-5-5, 2026-11-26* — still **PARTIAL**; no code or test change.
+
+**Finding 1 (HIGH, PngSuite): not fixed, blocked.** No
+`PngSuite-2017jul19.tgz` and no fixture was found by name in the worktree or
+under `.tentacle/tmp/`; `packages/core/test/fixtures/` does not exist. The
+download was not retried: it was refused for lack of approval in earlier rounds,
+and Review round 2 leaves it to the owner/orchestrator. Nothing forged, no test
+skipped, so there is no new fix to show red or to mutate; M2 on T1 is still
+pending.
+
+**Finding 2 (MEDIUM):** fixed in fix round 1 (Review round 2 agrees).
+
+**Checks.** `png-decode`, `image-region` and `image-view-region` tests: 91 pass,
+35 fail (the output read shows missing-fixture errors; the count matches the
+earlier rounds). Gate not run (the script's).
+
+**To unblock** (owner/orchestrator): the `curl` command in "Gate-fix round after
+fix round 1", then Execution steps 1–4.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
