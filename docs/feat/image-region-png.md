@@ -879,3 +879,47 @@ this doc)
 3. **Finding 2:** stays fixed (code unchanged).
 
 **Gate.** `bun run lint`: clean (2596 files). `bun run typecheck`: clean.
+
+### Round 2 (after the fixtures landed; 6th review pass)
+
+*— claude-opus-5-5, 2026-11-26* (reviewed `db02cba1` fixtures + `4baf70d1` tests)
+
+**Verdict: PASS (APPROVE).** No HIGH or MEDIUM finding is open.
+
+1. **Finding 1 (HIGH): FIXED.**
+   - The 29 named PngSuite files, `PngSuite.LICENSE`, `PngSuite.README` and a
+     `README.md` (source URL, archive sha256, licence, sha256 per file) are in
+     `packages/core/test/fixtures/png/`. `png-decode.test.ts`: **84 pass / 0 fail**.
+   - New tests: `f00…f04n2c08` spot pixels (the five are not one picture;
+     pngjs-checked), and the high byte of 16-bit samples in `basn0g16`,
+     `basn2c16`, `basn6a16`, worked out by hand from the inflated bytes.
+   - The `basi*`/`basn*` pairs are confirmed equal with pngjs; PngSuite's
+     README does not say so, which the doc notes.
+2. **Mutations** (each applied alone, run, restored by file copy; `git status`
+   clean after every one):
+
+   | Mutation | Tests that fail |
+   |---|---|
+   | M2: two Adam7 pass offsets swapped | all 4 `basi*` = `basn*` pair tests (**T1 red, as the plan asked**) + the hand-computed Adam7 test |
+   | 16-bit keeps the low byte | the 3 PngSuite 16-bit spot tests + 3 hand-computed tests |
+   | Paeth returns `b` | `f04n2c08` spots, `basn2c16`, 3 pair tests, the every-filter test |
+   | CRC check disabled | T2 `xcsn0g01` and `xhdn0g08` + 3 hand-computed CRC tests |
+
+3. **Finding 2 (MEDIUM):** stays fixed (code unchanged since its mutations).
+4. **Regressions on the diff:** none. The diff is test-only, plus binary
+   fixtures under `test/`, which tsc and Biome do not include in their checks
+   anyway.
+
+**Gate.** `bun run lint`: clean (2596 files). `bun run typecheck`: clean.
+`bun run test` (parallel): **19817 pass, 5 skip, 0 fail**. The branch adds no
+skip (`git diff main...HEAD` has no `.skip`/`skipIf`/`todo`); 5 vs AGENTS.md's 3
+opt-in skips is not this branch's.
+
+**Left as nits (not blocking).**
+- Peak memory in `renderRegion` (crop + opaque-alpha copy) is above the
+  128 MiB budget's "most one decode may allocate".
+- The `low` downscale is stored as `<label> region` even with no region.
+
+**Executor behaviour across rounds.** It never forged fixtures and never skipped
+a test while blocked. It wrote a safe unblock script, and once the fixtures
+landed it finished the pending oracle tests.
