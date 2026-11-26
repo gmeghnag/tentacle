@@ -172,10 +172,14 @@ import {
   type WatchCategory,
   type WatchNextResult,
   type WatchResult,
+  type WorkflowApproveParams,
+  type WorkflowApproveResult,
   type WorkflowCatalogueResult,
   WorkflowCatalogueResultSchema,
   type WorkflowDefRow,
   WorkflowDefRowSchema,
+  type WorkflowDeleteParams,
+  type WorkflowDeleteResult,
   type WorkflowListRow,
   type WorkflowParams,
   type WorkflowResult,
@@ -3218,6 +3222,79 @@ export class HostedSession {
     return fallback.success
       ? fallback.data
       : { ok: outcome.ok, ...(outcome.ok ? {} : { refusal: "invalid" }), reason: why };
+  }
+
+  /**
+   * `session/workflow_approve` (docs/feat/mobile-workflows-landing.md D4): the
+   * driver RAISES the hash approval through the session's one broker and this
+   * answers at once — the person's allow is the approval, never this call. A
+   * session without a driver (a pod's daemon) refuses.
+   */
+  async workflowApprove(params: WorkflowApproveParams): Promise<WorkflowApproveResult> {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return {
+        ok: false,
+        refusal: "unavailable",
+        reason: "workflows can be approved only on a laptop or serve session",
+      };
+    }
+    if (params.turnId.startsWith(WAKE_TURN_PREFIX)) {
+      return {
+        ok: false,
+        refusal: "invalid",
+        reason: "a wake turn id cannot approve a workflow",
+      };
+    }
+    const outcome = await driver.approve(params.name, params.hash, params.turnId);
+    return {
+      ok: outcome.ok,
+      ...(outcome.approved !== undefined ? { approved: outcome.approved } : {}),
+      ...(outcome.asked !== undefined ? { asked: outcome.asked } : {}),
+      ...(outcome.refusal !== undefined ? { refusal: outcome.refusal } : {}),
+      ...(outcome.reason !== undefined
+        ? { reason: capWithEllipsis(outcome.reason, WORKFLOW_REASON_MAX) }
+        : {}),
+      ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}),
+    };
+  }
+
+  /**
+   * `session/workflow_delete` (D4): remove one workflow file through the driver
+   * (synchronous, never waits on a turn). The one fact the session adds is
+   * `schedules`: its jobs that still start this workflow, which fire `invalid`
+   * from now on.
+   */
+  workflowDelete(params: WorkflowDeleteParams): WorkflowDeleteResult {
+    const driver = this.workflows;
+    if (driver === undefined) {
+      return {
+        ok: false,
+        refusal: "unavailable",
+        reason: "workflows can be deleted only on a laptop or serve session",
+      };
+    }
+    const outcome = driver.remove(params.name, params.hash);
+    if (!outcome.ok) {
+      return {
+        ok: false,
+        ...(outcome.refusal !== undefined ? { refusal: outcome.refusal } : {}),
+        ...(outcome.reason !== undefined
+          ? { reason: capWithEllipsis(outcome.reason, WORKFLOW_REASON_MAX) }
+          : {}),
+        ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}),
+      };
+    }
+    this.scheduleAudit(`workflow: deleted ${outcome.path ?? params.name} ${this.id}`);
+    const schedules = this.scheduleTable
+      .filter((job) => job.target?.workflow?.name === params.name)
+      .map((job) => job.id)
+      .slice(0, 64);
+    return {
+      ok: true,
+      ...(outcome.path !== undefined ? { path: outcome.path } : {}),
+      ...(schedules.length > 0 ? { schedules } : {}),
+    };
   }
 
   /** This session's rows of `workflow/list` (D5): the hub's signal is `needsUser`. */

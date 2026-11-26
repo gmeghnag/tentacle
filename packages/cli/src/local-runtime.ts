@@ -392,6 +392,10 @@ export interface PersistingController extends SessionController {
   workflowSource?: RemoteSession["workflowSource"];
   /** `RemoteSession.workflowSave`: Review (dry run) and the write (workflow-editor S4). */
   workflowSave?: RemoteSession["workflowSave"];
+  /** `RemoteSession.workflowApprove`: ask for a file's hash approval (`/workflow approve`). */
+  workflowApprove?: RemoteSession["workflowApprove"];
+  /** `RemoteSession.workflowDelete`: remove one workflow file (`/workflow delete`). */
+  workflowDelete?: RemoteSession["workflowDelete"];
   /** `RemoteSession.onSubagentNotify`: a running child's message to this session's agent. */
   onSubagentNotify?: RemoteSession["onSubagentNotify"];
   /** `RemoteSession.messageSubagent`: the user's text into a running background child. */
@@ -1001,6 +1005,12 @@ export function persistingController(
     },
     workflowSave(request) {
       return inner.workflowSave(request);
+    },
+    workflowApprove(name, hash) {
+      return inner.workflowApprove(name, hash);
+    },
+    workflowDelete(name, hash) {
+      return inner.workflowDelete(name, hash);
     },
     onSubagentNotify(listener) {
       return inner.onSubagentNotify(listener);

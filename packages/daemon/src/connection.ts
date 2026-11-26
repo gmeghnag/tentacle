@@ -98,8 +98,10 @@ import {
   type WatchParams,
   type WatchResult,
   type WireChatRequest,
+  type WorkflowApproveParams,
   type WorkflowCatalogueParams,
   type WorkflowCatalogueResult,
+  type WorkflowDeleteParams,
   type WorkflowParams,
   type WorkflowSaveParams,
   type WorkflowSourceParams,
@@ -495,6 +497,17 @@ export class Connection {
       case Method.WorkflowSave: {
         const save = params as WorkflowSaveParams;
         return this.lookup(save.sessionId).workflowSave(save);
+      }
+      // docs/feat/mobile-workflows-landing.md D4. Approve answers once its ask is
+      // RAISED (never awaited: it may sit unanswered for the file's whole
+      // `budget.wait`); delete is one synchronous block. No lock (AGENTS §7).
+      case Method.WorkflowApprove: {
+        const approve = params as WorkflowApproveParams;
+        return this.lookup(approve.sessionId).workflowApprove(approve);
+      }
+      case Method.WorkflowDelete: {
+        const remove = params as WorkflowDeleteParams;
+        return this.lookup(remove.sessionId).workflowDelete(remove);
       }
       case Method.AgentKill: {
         const { sessionId, agentId } = params as AgentKillParams;

@@ -33,6 +33,13 @@ appId: so.tentacle.app
       ITEM: "workflows"
 - tapOn:
     id: "hub-item-workflows"
+# The landing: ended runs are behind `Recent runs`.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-landing-recent"
+    timeout: 10000
+- tapOn:
+    id: "workflow-landing-recent"
 - extendedWaitUntil:
     visible:
       id: "workflow-runs"

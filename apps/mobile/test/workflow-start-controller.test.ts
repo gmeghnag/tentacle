@@ -40,6 +40,12 @@ const catalogue = (over: Partial<WorkflowCatalogueResult> = {}): WorkflowCatalog
   ...over,
 });
 
+/** The landing's two actions, unused here (`workflow-landing-controller.test.ts`). */
+const NO_ACTS = {
+  workflowApprove: async () => ({ unsupported: true as const }),
+  workflowDelete: async () => ({ unsupported: true as const }),
+};
+
 /** The `unsupported` answer an older daemon gives (no `workflow_catalogue`). */
 const UNSUPPORTED = { unsupported: true } as const;
 
@@ -64,6 +70,7 @@ function harness(
   let settle: ((value: WorkflowCatalogueResult | { unsupported: true }) => void) | null = null;
   let first = true;
   const session: StartSessionHandle = {
+    ...NO_ACTS,
     workflowCatalogue() {
       readKeys.push("read");
       if (opts.hangFirstRead === true && first) {
@@ -260,6 +267,7 @@ describe("Start", () => {
     const sent: WorkflowAction[] = [];
     let release: (value: WorkflowResult) => void = () => undefined;
     const session: StartSessionHandle = {
+      ...NO_ACTS,
       workflowCatalogue: () => Promise.resolve(catalogue()),
       workflow: (action) => {
         sent.push(action);
@@ -402,6 +410,7 @@ describe("reads", () => {
   test("a failed read keeps the last catalogue and says so (never a spinner loop)", async () => {
     let attempt = 0;
     const session: StartSessionHandle = {
+      ...NO_ACTS,
       workflowCatalogue: () => {
         attempt += 1;
         return attempt === 1

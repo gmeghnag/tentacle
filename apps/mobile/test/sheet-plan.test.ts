@@ -34,6 +34,7 @@ import {
   openingDetent,
   ownRunOnTop,
   ownRunTopId,
+  ownWorkflowsTop,
   queueAfterDismiss,
   readyIntents,
   reconcile,
@@ -560,6 +561,53 @@ describe("S8 — the run screen over a session (docs/fix/mobile-ask-surfaces.md 
     expect(askPresentable(wf(null), "wf-1")).toBe(false);
     expect(askPresentable({ kind: "main" }, "wf-1")).toBe(false);
     expect(askPresentable({ kind: "subagent", type: "x", task: "y" }, "wf-1")).toBe(false);
+  });
+});
+
+describe("the Workflows landing over a session (docs/feat/mobile-workflows-landing.md D8)", () => {
+  const owner = { computerId: "c", sessionId: "s" };
+  const session = { key: "k0", name: "Session", params: { computerId: "c", sessionId: "s" } };
+  const landing = (sessionId: string, computerId = "c") => ({
+    key: "k1",
+    name: "WorkflowStart",
+    params: { computerId, sessionId },
+  });
+  const sheetRoute = {
+    key: "k2",
+    name: "Sheet",
+    params: { kind: "permission", computerId: "c", sessionId: "s" },
+  };
+  const wf = (runId: string | null) => ({
+    kind: "workflow" as const,
+    name: "n",
+    runId,
+    stepId: null,
+    position: null,
+  });
+
+  test("this session's landing on top (sheet or not) keeps it in front", () => {
+    expect(ownWorkflowsTop([session, landing("s")], owner)).toBe(true);
+    expect(ownWorkflowsTop([session, landing("s"), sheetRoute], owner)).toBe(true);
+    expect(sessionInFront(false, [], ownWorkflowsTop([session, landing("s")], owner))).toBe(true);
+  });
+
+  test("another session's landing, or a screen above it, is not in front", () => {
+    expect(ownWorkflowsTop([session, landing("t")], owner)).toBe(false);
+    expect(ownWorkflowsTop([session, landing("s", "other")], owner)).toBe(false);
+    expect(
+      ownWorkflowsTop([session, landing("s"), { key: "k3", name: "WorkflowEdit" }], owner),
+    ).toBe(false);
+    expect(ownWorkflowsTop([session], owner)).toBe(false);
+    expect(ownWorkflowsTop([], owner)).toBe(false);
+  });
+
+  test("over the landing ONLY a file's approval (a workflow ask with no run) is a sheet", () => {
+    expect(askPresentable(wf(null), null, true)).toBe(true);
+    expect(askPresentable(wf("wf-1"), null, true)).toBe(false);
+    expect(askPresentable({ kind: "main" }, null, true)).toBe(false);
+    expect(askPresentable({ kind: "subagent", type: "x", task: "y" }, null, true)).toBe(false);
+    // Off the landing and off a run, everything is presented as before.
+    expect(askPresentable({ kind: "main" }, null, false)).toBe(true);
   });
 });
 

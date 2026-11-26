@@ -16,7 +16,7 @@
  * all that is left of it here.
  */
 import type { SessionListEntry } from "@tentacle/protocol";
-import type { LinkDiagnosis } from "./link-diagnosis.ts";
+import { type LinkDiagnosis, protocolSkewOf, skewState } from "./link-diagnosis.ts";
 import { describeError, projectLabel } from "./session-list.ts";
 
 /**
@@ -90,12 +90,18 @@ export function computerRow(
       computerName: record.name,
       diagnosis,
     });
+    // A protocol skew is a computer that ANSWERED and then refused `initialize`,
+    // so the link's own diagnosis is `ok` — but its detail says "update the app",
+    // and a row reading "Online" beside that (drawer: `computerStatus`) would
+    // contradict itself and offer New session to a daemon that refuses every
+    // `initialize`. The authenticated diagnosis still wins: it is about OUR key.
+    const skew = diagnosis === "ok" ? protocolSkewOf(probe.error) : undefined;
     return {
       id: record.id,
       name: record.name,
       project: record.name,
       status: described.message,
-      state: diagnosis,
+      state: skew === undefined ? diagnosis : skewState(skew),
       // A `revoked` row also offers Remove (its key is dead on the daemon, so
       // the person's only way forward is pairing again — or forgetting it).
       ...(diagnosis === "revoked"

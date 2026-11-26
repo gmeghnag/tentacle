@@ -238,20 +238,19 @@ describe("the screen is a dumb renderer", () => {
 });
 
 describe("the entries into the editor", () => {
-  test("the runs screen's empty state offers New workflow", () => {
-    expect(RUNS).toContain('testID="workflow-runs-new"');
-    expect(RUNS).toContain("onNew");
-    // Only with a session: the editor saves through THAT session's daemon.
-    expect(RUNS).toContain("props.sessionId === undefined");
+  test("the runs screen offers no Start and no New: the landing owns them", () => {
+    expect(RUNS).not.toContain("workflow-runs-new");
+    expect(RUNS).not.toContain("workflow-runs-start");
+    expect(RUNS).not.toContain("onNew");
   });
 
-  test("the catalogue offers Edit on a VALID row and on a broken one (it opens as a draft)", () => {
-    expect(START).toContain("testID={`workflow-start-edit-${entry.name}`}");
-    expect(START).toContain("onEdit");
-    const broken = between(START, "function BrokenRow", "function Detail");
-    expect(broken).toContain("workflow-start-edit-");
-    // A broken file is never started: Edit is the ONLY way out of that row.
-    expect(broken).not.toContain("workflow-start-run");
+  test("an item's body opens the editor, a broken one too (it opens as a draft)", () => {
+    const item = between(START, "function Item", "function Landing");
+    expect(item).toContain("onPress={() => screen.onEdit(item.name)}");
+    expect(item).toContain("workflow-start-row-");
+    expect(item).toContain("workflow-start-broken-");
+    // The list never carries the form's Start button.
+    expect(item).not.toContain("workflow-start-run");
   });
 
   test("the catalogue has its own New workflow button (D8), wired to create mode", () => {
@@ -264,8 +263,8 @@ describe("the entries into the editor", () => {
   test("every entry pushes the route with identity only (never content)", () => {
     expect(APP).toContain('navigate("WorkflowEdit"');
     const pushes = APP.split('navigate("WorkflowEdit"').length - 1;
-    // Runs' empty state, the catalogue's New workflow and a row's Edit.
-    expect(pushes).toBeGreaterThanOrEqual(3);
+    // The landing's New workflow and an item's body.
+    expect(pushes).toBeGreaterThanOrEqual(2);
     // Identity only: the session and the file's name, never a draft.
     expect(APP).toContain("computerId: route.params.computerId");
     expect(APP).toContain("sessionId: route.params.sessionId");

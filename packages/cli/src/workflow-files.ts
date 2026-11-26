@@ -15,11 +15,17 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
-import type { WorkflowSource, WorkflowSourceRow } from "@tentacle/agent";
+import type {
+  WorkflowRemoveExpect,
+  WorkflowRemoveWriteResult,
+  WorkflowSource,
+  WorkflowSourceRow,
+} from "@tentacle/agent";
 import {
   PROJECT_PATHS,
   WORKFLOW_FILE_MAX_BYTES,
@@ -561,4 +567,62 @@ export function writeWorkflowFiles(
   // `prepareSourceSync` over the bytes just written (slice 3b), so the writer
   // neither re-validates nor hashes: one implementation, one hash.
   return { ok: true, files };
+}
+
+/**
+ * Delete ONE workflow file — the ONE remover (docs/feat/mobile-workflows-landing.md
+ * D3), beside the writer and under the same no-links rule. Only
+ * `.tentacle/workflows/<name>.yaml` goes: prompt files can be shared by other
+ * workflows, so they stay. It never touches the approval store.
+ *
+ * `expected` is what the person SAW: a `hash` (the file must still validate to
+ * exactly it) or `broken` (it must still not validate — an over-cap file counts,
+ * as the listing shows it). Anything else is `changed`, nothing removed.
+ *
+ * One synchronous block, no `await` between the check and the unlink, so a
+ * delete and a save (or two deletes) through one daemon cannot interleave.
+ */
+export function removeWorkflowFile(
+  cwd: string,
+  name: string,
+  expected: WorkflowRemoveExpect,
+  currentHash: (source: WorkflowSource) => string,
+): WorkflowRemoveWriteResult {
+  const rel = `${PROJECT_PATHS.workflows}/${name}.yaml`;
+  const invalid = (reason: string): WorkflowRemoveWriteResult => ({
+    ok: false,
+    refusal: "invalid",
+    reason,
+  });
+  if (!WORKFLOW_NAME_RE.test(name)) {
+    return invalid(`"${name}" is not a workflow name (lowercase words joined by "-")`);
+  }
+  try {
+    const inside = insideWorkflows(cwd, `${name}.yaml`);
+    if ("reason" in inside) {
+      return invalid(inside.reason);
+    }
+    const stat = lstatSync(inside.path, { throwIfNoEntry: false });
+    if (stat === undefined) {
+      return { ok: false, refusal: "gone", reason: `${rel} is gone` };
+    }
+    if (!stat.isFile()) {
+      return invalid(`${rel} is not a regular file under the project`);
+    }
+    let hash: string | undefined;
+    if (stat.size <= WORKFLOW_FILE_MAX_BYTES) {
+      try {
+        hash = currentHash(loadWorkflowSource(cwd, name));
+      } catch {
+        hash = undefined; // it does not validate: broken
+      }
+    }
+    if (hash !== ("hash" in expected ? expected.hash : undefined)) {
+      return { ok: false, refusal: "changed", reason: `${rel} changed since you opened it` };
+    }
+    unlinkSync(inside.path);
+    return { ok: true, path: rel };
+  } catch (error) {
+    return { ok: false, refusal: "failed", reason: `${rel}: ${(error as Error).message}` };
+  }
 }

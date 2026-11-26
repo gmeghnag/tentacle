@@ -1270,6 +1270,71 @@ export const WorkflowSaveResultSchema = z.object({
 });
 export type WorkflowSaveResult = z.infer<typeof WorkflowSaveResultSchema>;
 
+// --- session/workflow_approve + session/workflow_delete ---
+// (docs/feat/mobile-workflows-landing.md D1). Two ADDITIVE methods, like the
+// editor's: an older daemon answers `MethodNotFound` (the client maps it to
+// `unsupported`), so neither moves PROTOCOL_VERSION.
+
+/**
+ * Ask for the hash approval of one workflow file, with no run. It grants nothing
+ * by itself: the daemon RAISES the `workflow_approve` ask through the session's
+ * one broker and answers at once — the person's allow on that ask is the
+ * approval, and the catalogue re-read is the truth.
+ */
+export const WorkflowApproveParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  name: WorkflowNameSchema,
+  /** The hash the person SAW (the catalogue's row): a file edited since is `changed`. */
+  hash: z.string().regex(/^[0-9a-f]{64}$/),
+  turnId: TurnIdSchema,
+});
+export type WorkflowApproveParams = z.infer<typeof WorkflowApproveParamsSchema>;
+
+export const WorkflowApproveResultSchema = z.object({
+  ok: z.boolean(),
+  /** That hash is approved already: nothing was asked. */
+  approved: z.boolean().optional(),
+  /** An approval ask for that hash is open (this call's, or an earlier one's). */
+  asked: z.literal(true).optional(),
+  /** `changed` | `running` | `invalid` | `gone` | `unavailable`: the free word above. */
+  refusal: WorkflowRefusalSchema.optional(),
+  /** The human sentence: shown verbatim, never thrown at a UI. */
+  reason: z.string().max(2000).optional(),
+  /** `running`: the run whose own approval ask is the one to answer. */
+  runId: WorkflowRunRefSchema.optional(),
+});
+export type WorkflowApproveResult = z.infer<typeof WorkflowApproveResultSchema>;
+
+/** Delete ONE workflow file (its prompt files stay). */
+export const WorkflowDeleteParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  name: WorkflowNameSchema,
+  /**
+   * Present (a valid row): the file must still validate to exactly this hash.
+   * Absent (a broken row has none): the file must still NOT validate. Either
+   * way a file the person did not see is refused `changed`.
+   */
+  hash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+});
+export type WorkflowDeleteParams = z.infer<typeof WorkflowDeleteParamsSchema>;
+
+export const WorkflowDeleteResultSchema = z.object({
+  ok: z.boolean(),
+  /** `changed` | `gone` | `running` | `invalid` | `unavailable`: the free word above. */
+  refusal: WorkflowRefusalSchema.optional(),
+  reason: z.string().max(2000).optional(),
+  /** `running`: the run in flight of this workflow. */
+  runId: WorkflowRunRefSchema.optional(),
+  /** The removed file, project-relative. */
+  path: line(512).optional(),
+  /** Schedules that still start it: they fire `invalid` from now on (`sc-N`). */
+  schedules: z.array(line(64)).max(64).optional(),
+});
+export type WorkflowDeleteResult = z.infer<typeof WorkflowDeleteResultSchema>;
+
 // --- the session's background shell jobs (docs/feat/shell-jobs-panel.md) ---
 // The live list of the `shell{run_in_background}` jobs a session started: one
 // full-state update (`jobs`), sent only on a start or an exit (never a stream).

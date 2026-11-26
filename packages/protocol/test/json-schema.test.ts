@@ -396,6 +396,23 @@ const FIXTURES: Record<string, Json[]> = {
     // A session with no workflow driver (a pod): no path, no draft, the reason.
     { ok: false, unavailable: "workflows run only on a laptop or serve session" },
   ],
+  "methods/session~1workflow_approve/params": [
+    { sessionId: "s", name: "task", hash: "a".repeat(64), turnId: "t1" },
+  ],
+  "methods/session~1workflow_approve/result": [
+    { ok: true, approved: true },
+    { ok: true, asked: true },
+    { ok: false, refusal: "running", reason: "wf-1 waits for its approval", runId: "wf-1" },
+  ],
+  "methods/session~1workflow_delete/params": [
+    { sessionId: "s", name: "task", hash: "a".repeat(64) },
+    { sessionId: "s", name: "broken" },
+  ],
+  "methods/session~1workflow_delete/result": [
+    { ok: true, path: ".tentacle/workflows/task.yaml", schedules: ["sc-1"] },
+    { ok: false, refusal: "changed", reason: "the file changed" },
+    { ok: false, refusal: "running", runId: "wf-2" },
+  ],
   "methods/session~1workflow_save/params": [
     {
       sessionId: "s",

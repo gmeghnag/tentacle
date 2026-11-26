@@ -14,7 +14,9 @@ import type {
   DocumentContent,
   JobOutputResult,
   JobRow,
+  WorkflowApproveResult,
   WorkflowCatalogueResult,
+  WorkflowDeleteResult,
   WorkflowRow,
   WorkflowSaveResult,
   WorkflowSourceResult,
@@ -422,6 +424,24 @@ export interface SessionController {
   workflowSave?(
     request: WorkflowSaveRequestView,
   ): Promise<WorkflowSaveResult | { unsupported: true }>;
+  /**
+   * Ask for the hash approval of the file the user saw (`session/workflow_approve`,
+   * docs/feat/mobile-workflows-landing.md D6). It grants nothing: the daemon
+   * raises the standard ask and answers at once. A refusal is a RESULT; an older
+   * daemon answers `{unsupported: true}`.
+   */
+  workflowApprove?(
+    name: string,
+    hash: string,
+  ): Promise<WorkflowApproveResult | { unsupported: true }>;
+  /**
+   * Remove one workflow file (`session/workflow_delete`), pinned to the hash seen
+   * (absent for a broken file). Prompt files stay.
+   */
+  workflowDelete?(
+    name: string,
+    hash?: string,
+  ): Promise<WorkflowDeleteResult | { unsupported: true }>;
   /**
    * Subscribe to this session's running background SHELL jobs as the daemon
    * reports them (bounded by the client; `count` is the daemon's own number).
