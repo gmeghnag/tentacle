@@ -314,6 +314,38 @@ describe("caps", () => {
     expect(core.admitSigned("l").ok).toBe(true);
   });
 
+  test("full maps: only the owner's live renewal is let through, and stays limited", () => {
+    const { core, create, advance, limits } = setup({
+      maxTrackedIps: 1,
+      maxTrackedKeys: 1,
+      apiPerMinutePerIp: 2,
+      signedPerMinutePerKey: 2,
+    });
+    const id = create();
+    const own = { key: "k1", id };
+    core.admitApi("a");
+    core.admitSigned("other");
+    expect(core.admitApi("b", { key: "k2", id })).toMatchObject({ error: "busy" });
+    expect(core.admitApi("b", { key: "k1", id: "aaaaaaaaaaaaaaaa" })).toMatchObject({
+      error: "busy",
+    });
+    // Counted per app, whatever the address.
+    expect(core.admitApi("b", own).ok).toBe(true);
+    expect(core.admitApi("c", own).ok).toBe(true);
+    expect(core.admitApi("d", own)).toMatchObject({ error: "rate_limited" });
+    // A tracked address over its limit is not excused.
+    core.admitApi("a");
+    expect(core.admitApi("a", own)).toMatchObject({ error: "rate_limited" });
+    expect(core.admitSigned("k1")).toMatchObject({ error: "busy" });
+    expect(core.admitSigned("k1", true).ok).toBe(true);
+    expect(core.admitSigned("k1", true).ok).toBe(true);
+    expect(core.admitSigned("k1", true)).toMatchObject({ error: "rate_limited" });
+    // A lapsed lease cannot be renewed, so it is owed nothing.
+    advance(limits.leaseMs + 1);
+    core.admitApi("e");
+    expect(core.admitApi("f", own)).toMatchObject({ error: "busy" });
+  });
+
   test("reports: per address per hour, overall per day, and a known app only", () => {
     const { core, create, advance } = setup({ reportsPerHourPerIp: 2, reportsPerDay: 3 });
     const id = create();

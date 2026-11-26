@@ -1,6 +1,7 @@
 /**
  * Bounded fixed-window counters (pure, time passed in). A full map REFUSES a new
- * key rather than evicting one: eviction would hand out a fresh limit.
+ * key rather than evicting one: eviction would hand out a fresh limit. The one
+ * exception is a `reserved` key (see `RateWindows.check`).
  */
 export interface RateRefusal {
   readonly ok: false;
@@ -58,10 +59,14 @@ abstract class Windows<T extends { since: number }> {
 
 /** `limit` events per key per window. `check` asks, `hit` counts. */
 export class RateWindows extends Windows<{ since: number; count: number }> {
-  check(key: string, now: number): RateRefusal | undefined {
+  /**
+   * `reserved`: the key is tracked even when the map is full. Only for keys the
+   * caller bounds by something else (the owners of live apps).
+   */
+  check(key: string, now: number, reserved = false): RateRefusal | undefined {
     const entry = this.live(key, now);
     if (entry === undefined) {
-      return this.noRoom(key, now);
+      return reserved ? undefined : this.noRoom(key, now);
     }
     return entry.count < this.limit ? undefined : limited(entry.since + this.windowMs - now);
   }
@@ -76,8 +81,8 @@ export class RateWindows extends Windows<{ since: number; count: number }> {
   }
 
   /** Check and, when admitted, count. */
-  take(key: string, now: number): RateRefusal | undefined {
-    const refused = this.check(key, now);
+  take(key: string, now: number, reserved = false): RateRefusal | undefined {
+    const refused = this.check(key, now, reserved);
     if (refused === undefined) {
       this.hit(key, now);
     }

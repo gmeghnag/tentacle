@@ -111,38 +111,81 @@ async function verifies(request: SignedHeaders, payload: string): Promise<boolea
   }
 }
 
+interface SeenNonce {
+  readonly expiry: number;
+  /** The app whose reserve it came out of (the cache was full). */
+  readonly reservedFor?: string;
+}
+
 /**
  * The nonces of verified requests, remembered for as long as their date would
  * still be accepted. Full = refuse: evicting an in-window nonce would reopen
- * replay.
+ * replay. A `reserveFor` app (a live app being renewed by its owner) may still
+ * add `reservePerApp` of them to a full cache, so a flood lets no lease lapse.
  */
 export class NonceGuard {
-  private readonly seen = new Map<string, number>();
+  private readonly seen = new Map<string, SeenNonce>();
+  /** How many of each app's reserve are held. */
+  private readonly reserved = new Map<string, number>();
   /** The earliest expiry held, so a full cache is not rescanned for nothing. */
   private earliest = Number.POSITIVE_INFINITY;
 
-  constructor(private readonly options: { readonly max: number; readonly skewMs: number }) {}
+  constructor(
+    private readonly options: {
+      readonly max: number;
+      readonly skewMs: number;
+      readonly reservePerApp?: number;
+    },
+  ) {}
 
   get size(): number {
     return this.seen.size;
   }
 
-  use(key: string, nonce: string, dateMs: number, now: number): "ok" | "replay" | "busy" {
+  use(
+    key: string,
+    nonce: string,
+    dateMs: number,
+    now: number,
+    reserveFor?: string,
+  ): "ok" | "replay" | "busy" {
     const entry = `${key}:${nonce}`;
     const known = this.seen.get(entry);
-    if (known !== undefined && known >= now) {
-      return "replay";
+    if (known !== undefined) {
+      if (known.expiry >= now) {
+        return "replay";
+      }
+      this.forget(entry, known);
     }
     if (this.seen.size >= this.options.max) {
       this.prune(now);
-      if (this.seen.size >= this.options.max) {
+    }
+    let reservedFor: string | undefined;
+    if (this.seen.size >= this.options.max) {
+      const held = reserveFor === undefined ? 0 : (this.reserved.get(reserveFor) ?? 0);
+      if (reserveFor === undefined || held >= (this.options.reservePerApp ?? 0)) {
         return "busy";
       }
+      this.reserved.set(reserveFor, held + 1);
+      reservedFor = reserveFor;
     }
     const expiry = dateMs + this.options.skewMs;
-    this.seen.set(entry, expiry);
+    this.seen.set(entry, { expiry, ...(reservedFor === undefined ? {} : { reservedFor }) });
     this.earliest = Math.min(this.earliest, expiry);
     return "ok";
+  }
+
+  private forget(entry: string, { reservedFor }: SeenNonce): void {
+    this.seen.delete(entry);
+    if (reservedFor === undefined) {
+      return;
+    }
+    const left = (this.reserved.get(reservedFor) ?? 1) - 1;
+    if (left === 0) {
+      this.reserved.delete(reservedFor);
+    } else {
+      this.reserved.set(reservedFor, left);
+    }
   }
 
   /** Forget the nonces whose request could no longer be accepted anyway. */
@@ -151,11 +194,11 @@ export class NonceGuard {
       return;
     }
     let earliest = Number.POSITIVE_INFINITY;
-    for (const [entry, expiry] of this.seen) {
-      if (expiry < now) {
-        this.seen.delete(entry);
+    for (const [entry, nonce] of this.seen) {
+      if (nonce.expiry < now) {
+        this.forget(entry, nonce);
       } else {
-        earliest = Math.min(earliest, expiry);
+        earliest = Math.min(earliest, nonce.expiry);
       }
     }
     this.earliest = earliest;
@@ -172,6 +215,8 @@ export async function verifySignedBody(
     readonly body: Uint8Array;
     readonly nonces: NonceGuard;
     readonly now: number;
+    /** The live app this request renews for its owner (see `NonceGuard`). */
+    readonly reserveFor?: string;
   },
 ): Promise<{ readonly ok: true } | Refusal> {
   const payload = appsSigningPayload({
@@ -185,7 +230,13 @@ export async function verifySignedBody(
   if (!(await verifies(request, payload))) {
     return refuse("bad_signature", "the signature does not match the request");
   }
-  const used = input.nonces.use(request.key, request.nonce, request.dateMs, input.now);
+  const used = input.nonces.use(
+    request.key,
+    request.nonce,
+    request.dateMs,
+    input.now,
+    input.reserveFor,
+  );
   if (used === "replay") {
     return refuse("replay", "this request was already received");
   }

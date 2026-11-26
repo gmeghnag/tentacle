@@ -5,10 +5,17 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { APPS_API_VERSION, type AppsError, type AppsErrorCode, isAppId } from "@tentacle/protocol";
+import {
+  APPS_API_VERSION,
+  APPS_HEADERS,
+  type AppsError,
+  type AppsErrorCode,
+  isAppId,
+} from "@tentacle/protocol";
 import { clientIpOf, limiterKeyOf } from "@tentacle/relay/client-ip";
 import { createLogLimiter } from "@tentacle/relay/log-limit";
 import { type RandomBytes, hostRoute } from "./app-id.ts";
+import { BODY_RETRY_MS, BodyBudget, declaredLength } from "./body-budget.ts";
 import { HostCore, type Reservation, type Reserved } from "./host-core.ts";
 import { APPS_LIMITS, type AppsLimits } from "./limits.ts";
 import {
@@ -27,9 +34,16 @@ import {
   createPages,
   visitorView,
 } from "./pages.ts";
+import { readBody } from "./read-body.ts";
 import type { Effect } from "./records.ts";
 import { type ControlRoute, ERROR_STATUS, controlRoute } from "./routes.ts";
-import { NonceGuard, checkSignedHeaders, sha256Hex, verifySignedBody } from "./signed-request.ts";
+import {
+  NonceGuard,
+  type SignedHeaders,
+  checkSignedHeaders,
+  sha256Hex,
+  verifySignedBody,
+} from "./signed-request.ts";
 import type { Store } from "./store.ts";
 
 /** Loopback: Caddy terminates TLS in front of the host. */
@@ -130,12 +144,6 @@ function errorResponse(refused: Refused): Response {
   });
 }
 
-/** The body, or `undefined` when it is longer than `max`. */
-async function readBody(req: Request, max: number): Promise<Uint8Array | undefined> {
-  const body = new Uint8Array(await req.arrayBuffer());
-  return body.length > max ? undefined : body;
-}
-
 function utf8(bytes: Uint8Array): string | undefined {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -184,7 +192,15 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     abuseEmail: options.abuseEmail,
     termsUrl: options.termsUrl,
   });
-  const nonces = new NonceGuard({ max: limits.maxTrackedNonces, skewMs: limits.skewMs });
+  const nonces = new NonceGuard({
+    max: limits.maxTrackedNonces,
+    skewMs: limits.skewMs,
+    reservePerApp: limits.reservedNoncesPerApp,
+  });
+  const budget = new BodyBudget({
+    maxBytes: limits.maxInFlightBodyBytes,
+    maxPerIp: limits.maxUploadsPerIp,
+  });
 
   // ── the store, one writer per id ──────────────────────────────────────────
 
@@ -322,6 +338,46 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     });
   };
 
+  /**
+   * Read at most `max` body bytes, holding their share of the budget until `use`
+   * is done with them. The ONLY way a body is read; `tooLong` is the answer to a
+   * longer one.
+   */
+  const withBody = async <T>(
+    req: Request,
+    ip: string,
+    max: number,
+    tooLong: Refused,
+    use: (body: Uint8Array) => Promise<T>,
+  ): Promise<T | Refused> => {
+    const declared = declaredLength(req.headers);
+    if (declared !== "unknown" && declared > max) {
+      return tooLong;
+    }
+    const share = budget.admit(limiterKeyOf(ip), declared === "unknown" ? max : declared);
+    if (!share.ok) {
+      return share;
+    }
+    try {
+      const read = await readBody(req.body, max, limits.uploadTimeoutMs);
+      if (read.ok) {
+        return await use(read.body);
+      }
+      if (read.why === "too_long") {
+        return tooLong;
+      }
+      return read.why === "timeout"
+        ? {
+            error: "busy",
+            message: "the body took too long to arrive",
+            retryAfterMs: BODY_RETRY_MS,
+          }
+        : { error: "bad_request", message: "the body could not be read" };
+    } finally {
+      share.release();
+    }
+  };
+
   type ApiRoute = Extract<ControlRoute, { kind: "create" | "update" | "renew" | "delete" }>;
 
   /** Cheap checks before crypto, crypto before any state. */
@@ -332,9 +388,13 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     ip: string,
   ): Promise<Response | Refused> => {
     const publishing = route.kind === "create" || route.kind === "update";
+    const renewal =
+      route.kind === "renew"
+        ? { key: req.headers.get(APPS_HEADERS.key) ?? "", id: route.id }
+        : undefined;
     const early =
       (publishing ? core.refusalIfKilled() : undefined) ??
-      refusalOf(core.admitApi(limiterKeyOf(ip)));
+      refusalOf(core.admitApi(limiterKeyOf(ip), renewal));
     if (early !== undefined) {
       return early;
     }
@@ -349,23 +409,39 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     if (!shape.ok) {
       return shape;
     }
-    const body = await readBody(req, limits.maxAppBytes);
-    if (body === undefined) {
-      return { error: "too_large", message: `an app may be at most ${limits.maxAppBytes} bytes` };
-    }
-    const verified = await verifySignedBody(shape.request, {
+    const tooLong: Refused = publishing
+      ? { error: "too_large", message: `an app may be at most ${limits.maxAppBytes} bytes` }
+      : { error: "bad_request", message: "this call takes no body" };
+    return withBody(req, ip, publishing ? limits.maxAppBytes : 0, tooLong, (body) =>
+      handleSigned(route, req, url.pathname, ip, shape.request, body),
+    );
+  };
+
+  /** A signed request whose body has arrived. */
+  const handleSigned = async (
+    route: ApiRoute,
+    req: Request,
+    path: string,
+    ip: string,
+    request: SignedHeaders,
+    body: Uint8Array,
+  ): Promise<Response | Refused> => {
+    const { key } = request;
+    const renewing =
+      route.kind === "renew" && core.renewable({ key, id: route.id }) ? route.id : undefined;
+    const verified = await verifySignedBody(request, {
       method: req.method,
-      path: url.pathname,
+      path,
       domain,
       body,
       nonces,
       now: now(),
+      ...(renewing === undefined ? {} : { reserveFor: renewing }),
     });
     if (!verified.ok) {
       return verified;
     }
-    const { key } = shape.request;
-    const admitted = core.admitSigned(key);
+    const admitted = core.admitSigned(key, renewing !== undefined);
     if (!admitted.ok) {
       if (admitted.error === "blocked") {
         log(`blocked-key ${key.slice(0, 8)}`);
@@ -400,9 +476,6 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
         line: `${verb} ${reservation.record.id} key ${key.slice(0, 8)} ip ${ip} bytes ${body.length}`,
       });
     }
-    if (body.length !== 0) {
-      return { error: "bad_request", message: "this call takes no body" };
-    }
     if (route.kind === "renew") {
       const renewed = core.renew({ key, id: route.id });
       return renewed.ok
@@ -428,10 +501,21 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     if (type !== "application/x-www-form-urlencoded") {
       return pageResponse(pages.reportRefused(), 415);
     }
-    const body = await readBody(req, MAX_REPORT_BYTES);
-    if (body === undefined) {
-      return pageResponse(pages.reportRefused(), 413);
+    const answer = await withBody(
+      req,
+      ip,
+      MAX_REPORT_BYTES,
+      { error: "too_large", message: "the report is too long" },
+      (body) => fileReport(body, ip),
+    );
+    if (answer instanceof Response) {
+      return answer;
     }
+    log(`refused ${answer.error} ip ${ip}`);
+    return pageResponse(pages.reportRefused(), ERROR_STATUS[answer.error]);
+  };
+
+  const fileReport = async (body: Uint8Array, ip: string): Promise<Response> => {
     const fields = new URLSearchParams(utf8(body) ?? "");
     const field = (name: string): string => (fields.get(name) ?? "").replaceAll("\r\n", "\n");
     const app = field("app").trim().toLowerCase();

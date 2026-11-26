@@ -699,6 +699,94 @@ behind gets `409 replay` with no `serverTime`; key blocks do not apply if
 rate limits; a signed-shaped but forged upload is read (≤ 10 MiB) before it is
 refused, bounded per address but not in total concurrency (`MemoryMax=512M`).
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Repro** (`.tentacle/tmp/session-apps-host/oom.ts`: the real `startAppsHost` in
+its own process, memory store, 50 parallel 10 MiB bodies with well-formed bogus
+signature headers; macOS):
+
+```
+before  /v1/apps    base 27 MiB, peak  847 MiB  {"401":50}
+before  /v1/report  base 27 MiB, peak 1340 MiB  {"413":50}
+after   /v1/apps    base 26 MiB, peak   88 MiB  {"401":2,"429":48}
+after   /v1/report  base 26 MiB, peak   88 MiB  {"413":50}
+```
+
+The report route had the same hole (read first, 64 KiB checked after). A probe
+(`run-probe.ts`) showed that Bun buffers nothing for a request answered at once
+without reading its body (peak 6 MiB for 50 × 10 MiB), so refusing in the
+handler is enough.
+
+**Red first:** `test/overload.test.ts` on the old code → 11 fail, 1 pass (the
+pass: "a body sent in pieces arrives whole", a guard on the new reader).
+
+**Finding 1 (HIGH) — fixed.**
+
+- `body-budget.ts` (pure): `maxInFlightBodyBytes` (64 MiB) over all bodies,
+  `maxUploadsPerIp` (2) per address (`503 busy` / `429 rate_limited`, retry in
+  5 s). A body is charged before it is read (its declared length; the route's
+  maximum when chunked) and given back when its request ends, storing included.
+- `read-body.ts`: reads into one buffer of at most the route's maximum, gives up
+  after `uploadTimeoutMs` (2 min → `503 busy`) and frees the share.
+- `server.ts` `withBody` is the only way a body is read. A declared length over
+  the maximum is refused unread. Renew and delete have maximum 0: they charge
+  nothing, so uploads never block them. Reports (64 KiB) use the same budget.
+
+**Finding 2 (MEDIUM) — fixed**, for the API address map and for the two other
+bounded maps with the same effect (the signed-key map and the nonce cache). Only
+a renewal of a **live app by its owner** is excused (`core.renewable`):
+
+- address map full: counted per app instead (`apiPerMinutePerIp`, ≤
+  `maxLiveApps` entries), before the signature check, which still follows;
+- key map full: the owner's key is tracked anyway (bounded by the live apps),
+  and its per-key limit still applies;
+- nonce cache full: the app may add `reservedNoncesPerApp` (20) more; one cache,
+  so replay detection is unchanged and nothing in window is evicted.
+
+**Mutations** (`mutate.ts`: one at a time on `apps/apps-host/test`, file restored):
+
+| Mutation | Fails |
+|---|---|
+| no global budget | 6 |
+| no per-address cap | 1 |
+| release gives nothing back | 4 |
+| chunked body charged nothing | 1 |
+| share released before use | 1 |
+| declared length not checked first | 1 |
+| no upload deadline | 1 |
+| renew/delete may read a full body | 2 |
+| reports not charged | 1 |
+| no length cap while reading | 1 |
+| no address-map exemption | 2 |
+| exemption unlimited | 1 |
+| exemption ignores the owner | 2 |
+| no key-map reserve | 2 |
+| no nonce reserve | 1 |
+| nonce reserve unbounded | 1 |
+| nonce reserve never given back | 1 |
+
+("declared length not checked first" and "no length cap while reading" survived
+the first run: Bun's own body cap, lowered by that test's limits, hid them. The
+separate report-size test closes both.)
+
+**Drift from the Implementation:** two new source files; four new limits
+(runbook §7 rows, one §11 limitation); the design's "cache full → `503 busy`"
+and "a full map refuses" now except an owner's renewal of a live app; a renew or
+delete declaring a body is refused (`400`) before its signature is checked.
+
+**Checks:** `bun test apps/apps-host/test packages/protocol/test/apps-host.test.ts`
+→ 159 pass, 0 fail; `tsc -p apps/apps-host --noEmit` and `biome check
+apps/apps-host` clean. The full gate is the orchestrator's script, not run here.
+
+**Residuals:** four addresses uploading slowly can fill the budget (publishes and
+reports refused for up to 2 min at a time; renewals unaffected); `PUT` and
+`DELETE` are not excused from full maps; who knows an app's key and id can spend
+that app's fallback window during a flood; a full rate map is still rescanned for
+every refused newcomer (CPU, unchanged); memory measured on macOS only, not
+under the unit's `MemoryMax` on Linux.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same family as the planner, a different model from the executor)

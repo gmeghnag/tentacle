@@ -34,6 +34,14 @@ export const APPS_LIMITS = {
   maxTrackedIps: 50_000,
   maxTrackedKeys: 50_000,
   maxTrackedNonces: 200_000,
+  /** Nonces a live app's renewals may add to a full cache. */
+  reservedNoncesPerApp: 20,
+  /** Request bodies held in memory at once, all requests together. */
+  maxInFlightBodyBytes: 64 * MIB,
+  /** Bodies held at once for one address. */
+  maxUploadsPerIp: 2,
+  /** How long a body may take to arrive. */
+  uploadTimeoutMs: 2 * MINUTE,
   leaseMs: 5 * MINUTE,
   renewAfterMs: MINUTE,
   skewMs: 5 * MINUTE,

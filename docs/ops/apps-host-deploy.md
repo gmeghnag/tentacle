@@ -243,6 +243,10 @@ variable), then `systemctl daemon-reload && systemctl restart apps-host`.
 | `--max-tracked-ips` | 50000 | memory |
 | `--max-tracked-keys` | 50000 | memory |
 | `--max-tracked-nonces` | 200000 | memory (full = `503 busy`) |
+| `--reserved-nonces-per-app` | 20 | memory a live app's renewals may add to a full nonce cache |
+| `--max-in-flight-body-bytes` | 64 MiB | memory held by uploads (keep far below the unit's `MemoryMax`, and at least `--max-app-bytes`) |
+| `--max-uploads-per-ip` | 2 | one address's share of that budget |
+| `--upload-timeout-ms` | 120000 | how long a slow upload holds its share |
 | `--lease-ms` | 300000 | how long an abandoned app stays up |
 | `--renew-after-ms` | 60000 | renewal traffic (keep well below the lease) |
 | `--skew-ms` | 300000 | the replay window |
@@ -298,6 +302,9 @@ pointed at the new one.
 - A browser without Fetch Metadata only ever sees the warning.
 - The warning drops a URL's `#fragment` on the way to the app.
 - A restart forgets rate windows and each app's daily byte count.
+- A few addresses uploading slowly can fill the upload budget: publishes and
+  reports are answered `429`/`503` until those uploads end or time out.
+  Renewals and deletes carry no body and are not affected.
 - A `413` produced by Caddy or by the server's own body limit carries none of the
   host's headers.
 - Blocking a key relies on the `takedowns` file: if it is unreadable when the

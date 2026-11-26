@@ -36,6 +36,12 @@ export interface CoreRefusal {
 
 export type Gate = { readonly ok: true } | CoreRefusal;
 
+/** Who says they own which app (unverified until the signature is). */
+export interface Claim {
+  readonly key: string;
+  readonly id: string;
+}
+
 export type Lease = Omit<AppsLeaseResult, "url">;
 
 /** A write in progress: it holds the id, the bytes and the owner's slot. */
@@ -118,6 +124,8 @@ export class HostCore {
   private readonly newKeys: DistinctWindows;
   private readonly reports: RateWindows;
   private readonly allReports: RateWindows;
+  /** Renewals of live apps from addresses the full API map cannot track. */
+  private readonly untrackedRenews: RateWindows;
 
   constructor(private readonly options: CoreOptions) {
     const l = options.limits;
@@ -128,6 +136,7 @@ export class HostCore {
     this.newKeys = new DistinctWindows(l.newKeysPerDayPerIp, DAY, l.maxTrackedIps);
     this.reports = new RateWindows(l.reportsPerHourPerIp, HOUR, l.maxTrackedIps);
     this.allReports = new RateWindows(l.reportsPerDay, DAY, 1);
+    this.untrackedRenews = new RateWindows(l.apiPerMinutePerIp, MINUTE, l.maxLiveApps);
   }
 
   record(id: string): AppRecord | undefined {
@@ -140,18 +149,37 @@ export class HostCore {
 
   // ── admission ──────────────────────────────────────────────────────────────
 
-  /** Per address, before any crypto. */
-  admitApi(ip: string): Gate {
-    return this.api.take(ip, this.options.now()) ?? { ok: true };
+  /** `key` owns the app and its lease is running: renewing it would work. */
+  renewable({ key, id }: Claim): boolean {
+    const record = this.records.get(id);
+    return record?.state === "live" && record.ownerKey === key && !this.lapsed(id);
   }
 
-  /** For a VERIFIED request: the key is not blocked and not too chatty. */
-  admitSigned(key: string): Gate {
+  /**
+   * Per address, before any crypto. A map filled by other addresses must not let
+   * leases lapse: a request that CLAIMS to renew a live app as its owner is then
+   * counted per app instead (the signature is still checked after).
+   */
+  admitApi(ip: string, renewal?: Claim): Gate {
+    const now = this.options.now();
+    const refused = this.api.take(ip, now);
+    if (refused?.error === "busy" && renewal !== undefined && this.renewable(renewal)) {
+      return this.untrackedRenews.take(renewal.id, now) ?? { ok: true };
+    }
+    return refused ?? { ok: true };
+  }
+
+  /**
+   * For a VERIFIED request: the key is not blocked and not too chatty.
+   * `renewing` (a renewal of the key's own live app) is tracked even when the map
+   * is full: such keys are bounded by the live apps.
+   */
+  admitSigned(key: string, renewing = false): Gate {
     const reason = this.options.operator().takedowns.keys.get(key);
     if (reason !== undefined) {
       return blocked(reason);
     }
-    return this.signed.take(key, this.options.now()) ?? { ok: true };
+    return this.signed.take(key, this.options.now(), renewing) ?? { ok: true };
   }
 
   /** Publishing (create, update) is off under either kill mode. */
@@ -452,6 +480,7 @@ export class HostCore {
       this.creates,
       this.newKeys,
       this.reports,
+      this.untrackedRenews,
     ]) {
       windows.prune(now);
     }

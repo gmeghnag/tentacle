@@ -146,6 +146,26 @@ describe("signed requests", () => {
     expect(await run({ guard, now: later, signed: { date: later } })).toEqual({ ok: true });
   });
 
+  test("a full cache lets each renewed app add only its reserve, given back later", () => {
+    const guard = new NonceGuard({ max: 1, skewMs: SKEW, reservePerApp: 2 });
+    const use = (nonce: string, app?: string, now = NOW) => guard.use("k", nonce, now, now, app);
+    expect(use("a")).toBe("ok");
+    expect(use("b")).toBe("busy");
+    expect(use("b", "app1")).toBe("ok");
+    expect(use("c", "app1")).toBe("ok");
+    expect(use("d", "app1")).toBe("busy");
+    expect(use("d", "app2")).toBe("ok");
+    // Remembered like any other, with or without the reserve.
+    expect(use("b", "app1")).toBe("replay");
+    expect(use("b")).toBe("replay");
+    const later = NOW + SKEW + 1;
+    expect(use("e", undefined, later)).toBe("ok");
+    expect(use("f", "app1", later)).toBe("ok");
+    expect(use("g", "app1", later)).toBe("ok");
+    expect(use("h", "app1", later)).toBe("busy");
+    expect(guard.size).toBe(3);
+  });
+
   test("each malformed header → bad_request", async () => {
     const cases: [string, string | undefined][] = [];
     for (const name of Object.values(APPS_HEADERS)) {
