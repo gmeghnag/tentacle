@@ -1,6 +1,6 @@
-# eval/builtin-skills — skills that ship inside tentacle (`tentacle`, `a2a`, `workflows`)
+# feat/builtin-skills — skills that ship inside tentacle (`tentacle`, `a2a`, `workflows`)
 
-Type: eval · Size: M if built · Blast: cross-module (skills scan, config, build) · Suited: Opus plan
+Type: feat · Size: M · Blast: cross-module (skills scan, config, build) · Suited: Opus plan
 
 ## Context
 
@@ -34,4 +34,4 @@ Design notes for the plan (to verify against the code):
 - **Available in pods** (`run`/`attach`) when switched on: plain text, no secrets; the pod's own config decides, as for its other skills.
 - Model-invocable when on (the agent can answer «how do I …» by itself).
 
-Next: promote to `docs/feat/builtin-skills.md` with a source-verified plan (Opus).
+**Promoted to feat** (owner 26/11 ~21:40 «vai ora»). Next: the source-verified Implementation (Opus), in the four-section format of docs/TASK-TEMPLATE.md.
