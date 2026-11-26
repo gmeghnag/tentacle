@@ -279,6 +279,15 @@ function inputsJson(sent: Map<string, string>): WorkflowInputValue[] {
   return [...sent].map(([name, value]) => ({ name, value }));
 }
 
+/**
+ * Whether a start needs the person to type something first
+ * (docs/feat/mobile-workflows-landing.md D7.4): an input that is required and has
+ * no default. Otherwise the list's Start starts at once.
+ */
+export function needsValues(def: { readonly inputs?: readonly WorkflowDefInput[] }): boolean {
+  return (def.inputs ?? []).some((input) => input.required && input.default === undefined);
+}
+
 /** A start's params, as `session/workflow{action:"start"}` takes them. */
 export interface StartParams {
   readonly name: string;

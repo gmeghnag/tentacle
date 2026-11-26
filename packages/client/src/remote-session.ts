@@ -34,7 +34,9 @@ import {
   type TurnEnd,
   type UpdateSettingsResult,
   type VoiceTurn,
+  type WorkflowApproveResult,
   type WorkflowCatalogueResult,
+  type WorkflowDeleteResult,
   type WorkflowResult,
   type WorkflowRow,
   type WorkflowSaveResult,
@@ -1454,6 +1456,62 @@ export class RemoteSession implements SessionStreamListener {
       return { ok: false, refusal: "unavailable", reason: WORKFLOW_UNTRUSTED_DAEMON };
     }
     return this.client.workflowSave(sessionId, { sessionId, ...request });
+  }
+
+  /**
+   * `session/workflow_approve` (docs/feat/mobile-workflows-landing.md D5): ask
+   * for the hash approval of the file the user SAW. The daemon raises the
+   * standard ask and answers at once. Like a `start` it mints its turn id here
+   * (the ask is attributed to it) and works before the first message: it opens
+   * the session first. An untrusted daemon (a pod) is refused locally, BEFORE
+   * any open, and sent nothing (AGENTS §7).
+   */
+  async workflowApprove(
+    name: string,
+    hash: string,
+  ): Promise<WorkflowApproveResult | { unsupported: true }> {
+    const sessionId = await this.workflowWriteSession();
+    if (typeof sessionId !== "string") {
+      return sessionId;
+    }
+    return this.client.workflowApprove(sessionId, {
+      sessionId,
+      name,
+      hash,
+      turnId: this.mintTurn(),
+    });
+  }
+
+  /**
+   * `session/workflow_delete` (D5): remove one workflow file, pinned to the hash
+   * seen (absent for a broken one, which has none). No turn: it raises no ask.
+   */
+  async workflowDelete(
+    name: string,
+    hash?: string,
+  ): Promise<WorkflowDeleteResult | { unsupported: true }> {
+    const sessionId = await this.workflowWriteSession();
+    if (typeof sessionId !== "string") {
+      return sessionId;
+    }
+    return this.client.workflowDelete(sessionId, {
+      sessionId,
+      name,
+      ...(hash !== undefined ? { hash } : {}),
+    });
+  }
+
+  /** The open session an approve/delete acts on, or the local refusal (§7 first). */
+  private async workflowWriteSession(): Promise<
+    string | { ok: false; refusal: "unavailable"; reason: string }
+  > {
+    if (!this.daemonWakes) {
+      return { ok: false, refusal: "unavailable", reason: WORKFLOW_UNTRUSTED_DAEMON };
+    }
+    if (this.id === null) {
+      await this.ensureOpen();
+    }
+    return this.id ?? { ok: false, refusal: "unavailable", reason: "this session is not open yet" };
   }
 
   /**

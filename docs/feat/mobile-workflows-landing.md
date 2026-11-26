@@ -141,7 +141,7 @@ Dependency order; S1 = 1–5, S2 = 6, S3 = 7.
 3. `packages/cli/src/workflow-files.ts` — `removeWorkflowFile` (beside `writeWorkflowFiles`, `:424`). `packages/cli/src/wiring.ts` — `remove:` beside `save:` (`:967`).
 4. `packages/daemon/src/hosted-session.ts` — `workflowApprove`, `workflowDelete` (beside `:3028`). `packages/daemon/src/connection.ts` — two cases beside `:484-487`.
 5. `packages/client/src/remote-client.ts` (beside `:1750`), `packages/client/src/remote-session.ts` (beside `:1446`).
-6. `packages/tui/src/workflow-view.ts` (`parseWorkflowCommand`, usage, section note), `packages/tui/src/commands/workflow.ts` (two cases).
+6. `packages/tui/src/workflow-view.ts` (`parseWorkflowCommand`, usage, section note), `packages/tui/src/commands/workflow.ts` (two cases), `packages/tui/src/app-types.ts` (the two optional session methods) and `packages/cli/src/local-runtime.ts` (the controller forwards them — added during execution: without it the TUI's runtime has neither).
 7. `apps/mobile/src/workflow-landing.ts` (NEW, pure), `apps/mobile/src/workflow-start-controller.ts` (approve / delete / startNow / runs / falling-edge re-read), `apps/mobile/src/workflow-start.ts` (`needsValues(entry)` for D7.4), `apps/mobile/src/sheet-plan.ts` (`ownWorkflowsTop`, `askPresentable`, `sessionInFront`), `apps/mobile/src/screens/SessionScreen.tsx` (feed them, `:478-482`), `apps/mobile/src/screens/WorkflowStart.tsx` (render the landing), `apps/mobile/src/screens/WorkflowRuns.tsx` (drop Start/New), `apps/mobile/App.tsx` (hub → `WorkflowStart` `:3588`; landing wiring: runs, asks source, Recent runs → `WorkflowRuns`), `apps/mobile/src/routes.ts` (doc comments `:114-148`), e2e `apps/mobile/e2e/flows/34-hub-workflows.yaml`, `44-workflow-editor.yaml`, `e2e/run.ts` (they tap `workflow-runs-start`), a new flow for Approve + Delete.
 8. `changelog.d/mobile-workflows-landing.changed.md`, `changelog.d/mobile-workflows-landing.added.md`.
 
@@ -184,7 +184,41 @@ Red first on each (§9); mutation noted where the property is easy to fake.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Load-bearing check, re-run on 0c1e079a: holds.** All six points re-read in the code: `approvals.add` occurs only at the two sites after `answer.allowed` of a `workflow_approve` ask (`workflow-driver.ts:1161`, `:1486` before this change); the requester is `permissions.request` inside `workflows === true && !tunnelled` (`wiring.ts:958`, `:974`); `autoApproves` excludes the kind and `EXTERNAL_ANSWER.workflow_approve = "owner-only"`; `onceOnlyAsk` is used by the phone sheet; `requestApproval` is raised never-awaited on a schedule create. **Repro:** the Context's grep still showed six workflow methods and no approve/delete.
+
+**As built, in order.**
+
+- **S1 protocol.** The four schemas and two methods; `protocol.json` regenerated (`bun run schema:export`); fixtures added to `json-schema.test.ts`.
+- **S1 agent.** `approve`, `remove`, private `askApproval` shared with `requestApproval`, `WorkflowDriverDeps.remove?`.
+- **S1 cli.** `removeWorkflowFile`, wired beside `save`.
+- **S1 daemon, client.** `workflowApprove` / `workflowDelete` + two dispatch cases; the two `RemoteClient` and `RemoteSession` methods.
+- **S2 TUI.** `approve <name>`, `delete <name> [confirm]`, usage, a second note line in the catalogue section; controller forwards.
+- **S3 phone.** `workflow-landing.ts` (new, pure), controller actions, `needsValues`, `ownWorkflowsTop` / `askPresentable`, the landing screen, `WorkflowRuns` titled «Recent runs» without Start/New, `App.tsx` wiring, flows 34/44/45, new flow `46-workflow-landing` with its seeded file.
+
+**Drift from the Implementation.**
+
+- The open-approval guard is a **count** per `path\0hash`, not a `Set`: two schedule creates can hold two asks for one hash, and a `Set` would forget the second when the first closed (tested).
+- `approve` of a missing file answers `invalid` (D1 allows `invalid` or `gone`).
+- A file over the loader's byte cap counts as broken for a delete, as the listing shows it.
+- `RemoteSession.workflowApprove` / `workflowDelete` open the session first when it has no id (as `start` does), so the TUI's two verbs work before the first message.
+- `local-runtime.ts` and `app-types.ts` were missing from *Files* (added there): the existing controller GUARD test went red without the forwards.
+- The TUI's catalogue section names the verbs on a **second** note line (the folder line would cut them).
+- Phone: the controller also ends «Asking…» on an approved read, a pull-to-refresh and a reconnect (an answer given while our ask was never on this sheet has no edge). The route holds `onOpenRun` in a ref so pushing the approval sheet cannot rebuild the controller. A row whose name is not a workflow name has Delete dimmed with a reason (the wire refuses such a name).
+- **One** changelog fragment (`added`), not two, per the orchestrator's instruction.
+
+**Red before green.** Shown failing first: protocol (6/6), driver (13), remover (10/10, stub), wiring `remove` (1), daemon (7/7), TUI (10 of 11), local-runtime GUARD (1), phone controller (19/19). **Not shown red:** the client test and `workflow-landing.test.ts` / the `sheet-plan` D8 cases and new wiring cases were written with or after their code; covered by the mutations below for the client gate and the sheet rule only.
+
+**Mutations (each restored, then green).**
+
+- `approve` calls `approvals.add` directly → 59 pass, **3 fail** (incl. «a denied ask adds nothing»).
+- `askPresentable` returns `true` for any origin over the landing → 89 pass, **1 fail** (the D8 «ONLY a file's approval» case).
+- `workflowWriteSession` ignores `daemonWakes` → 4 pass, **1 fail** («an untrusted daemon (a pod) is refused locally»).
+
+**Checks run (narrow only).** Protocol + workflow tests of agent/cli/daemon/client/tui, `subagent-panel-controller`, `local-runtime`: 1106 pass, 0 fail. `apps/mobile/test/workflow*` + `sheet-plan`: 638 pass, 0 fail. `bunx tsc -p apps/mobile`: clean. `biome check` on the 41 changed code files: clean. The full gate is the orchestrator's.
+
+**Unverified.** No simulator run: flows 34/44/45/46 and the pixels (against the mockup) are unrun — run the e2e gate. «Offline» on the landing follows the run list's `offline`, which is set when a read of it fails, not the instant the link drops. An approval sheet swiped away (parked) over the landing is reopened from the session, not from the dimmed Approve.
 
 ## Review
 

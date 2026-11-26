@@ -282,6 +282,8 @@ import {
   stepperAction,
   textAction,
 } from "./src/workflow-edit-sheets.ts";
+import { landingRuns } from "./src/workflow-landing.ts";
+import { runKey } from "./src/workflow-list.ts";
 import {
   type RunMode,
   type RunState,
@@ -2065,25 +2067,18 @@ function WorkflowRunsRoute({
   palette,
   computerId,
   name,
-  sessionId,
   onBack,
   onOpen,
-  onStart,
-  onNew,
 }: {
   readonly palette: Palette;
   readonly computerId: string;
   readonly name: string;
-  readonly sessionId?: string;
   readonly onBack: () => void;
   readonly onOpen: (run: {
     readonly runId: string;
     readonly sessionId: string;
     readonly name: string;
   }) => void;
-  readonly onStart: (sessionId: string) => void;
-  /** The empty state's "New workflow": the editor, in create mode. */
-  readonly onNew: (sessionId: string) => void;
 }): JSX.Element {
   const { state, pull } = useWorkflowRuns(computerId);
   return (
@@ -2094,9 +2089,6 @@ function WorkflowRunsRoute({
       now={Date.now()}
       onBack={onBack}
       onPull={pull}
-      {...(sessionId === undefined
-        ? {}
-        : { sessionId, onStart: () => onStart(sessionId), onNew: () => onNew(sessionId) })}
       onOpen={(run) => {
         if (run.sessionId !== undefined) {
           onOpen({ runId: run.runId, sessionId: run.sessionId, name: run.name });
@@ -2233,6 +2225,8 @@ function WorkflowStartRoute({
   sessionId,
   onBack,
   onOpenRun,
+  onOpenListed,
+  onRecent,
   onEdit,
   onNew,
   saved,
@@ -2244,15 +2238,28 @@ function WorkflowStartRoute({
   readonly saved?: string;
   readonly onBack: () => void;
   readonly onOpenRun: (runId: string, name: string) => void;
-  /** A catalogue row's Edit: the editor, on that file (a broken one opens as a draft). */
+  /** A live run's row on the landing (any session of the computer). */
+  readonly onOpenListed: (run: {
+    readonly runId: string;
+    readonly sessionId: string;
+    readonly name: string;
+  }) => void;
+  /** `Recent runs ›`: the whole run list. */
+  readonly onRecent: () => void;
+  /** An item's body: the editor, on that file (a broken one opens as a draft). */
   readonly onEdit: (name: string) => void;
-  /** The catalogue's New workflow: the editor, in create mode. */
+  /** The header's New workflow: the editor, in create mode. */
   readonly onNew: () => void;
 }): JSX.Element {
   const [state, setState] = useState<StartState | null>(null);
   const [controller, setController] = useState<ReturnType<
     typeof createWorkflowStartController
   > | null>(null);
+  const runs = useWorkflowRuns(computerId);
+  // Held in a ref: the navigator re-renders when the approval sheet is pushed over
+  // this screen, and a new callback must not rebuild the controller under it.
+  const openRun = useRef(onOpenRun);
+  openRun.current = onOpenRun;
   useEffect(() => {
     let live = true;
     let created: ReturnType<typeof createWorkflowStartController> | null = null;
@@ -2261,8 +2268,19 @@ function WorkflowStartRoute({
         return;
       }
       const runtime = RUNTIMES.controller(link.client);
+      const screen = SESSION_SCREENS.get(sessionKey(computerId, sessionId));
       created = createWorkflowStartController({
         sessionId,
+        // The Session screen's sheet is where an approval is answered; this screen
+        // only watches it leave (mobile-workflows-landing D8).
+        asks:
+          screen === undefined
+            ? null
+            : askSourceFromSheet({
+                view: () => screen.sheet().view(),
+                answerFor: (requestId, optionId) => screen.sheet().answerFor(requestId, optionId),
+                subscribe: (listener) => screen.subscribe(() => listener()),
+              }),
         // The Session screen underneath follows it: never detach it from there.
         borrowed: runtime.follows(sessionId),
         open: async (id) => {
@@ -2273,7 +2291,7 @@ function WorkflowStartRoute({
             : result;
         },
         leave: () => void runtime.leave(sessionId),
-        onOpenRun,
+        onOpenRun: (runId, name) => openRun.current(runId, name),
         onChange: () => {
           if (live && created !== null) {
             setState(created.state());
@@ -2288,7 +2306,12 @@ function WorkflowStartRoute({
       live = false;
       created?.dispose();
     };
-  }, [computerId, sessionId, onOpenRun]);
+  }, [computerId, sessionId]);
+  // The link is the run list's to watch: back online, the catalogue is re-read.
+  const offline = runs.state.offline !== null;
+  useEffect(() => {
+    controller?.setOffline(offline);
+  }, [offline, controller]);
   // A save from the editor landed: this screen's catalogue predates it, so it is
   // read again (ONE more read, the controller's own `pull` rule).
   useEffect(() => {
@@ -2308,10 +2331,32 @@ function WorkflowStartRoute({
       palette={palette}
       computer={RECORDS.get(computerId)?.name ?? ""}
       state={state}
+      runs={landingRuns(runs.state.runs, Date.now())}
       canStart={controller.canStart()}
       onBack={onBack}
-      onPull={() => controller.pull()}
-      onOpenRow={(key) => controller.openRow(key)}
+      onPull={() => {
+        runs.pull();
+        controller.pull();
+      }}
+      onOpenRun={(row) => {
+        const run = runs.state.runs.find((r) => runKey(r) === row.key);
+        if (run?.sessionId !== undefined) {
+          onOpenListed({ runId: run.runId, sessionId: run.sessionId, name: run.name });
+        }
+      }}
+      onRecent={onRecent}
+      onAct={(act, key) => {
+        if (act === "start") {
+          controller.startNow(key);
+        } else if (act === "approve") {
+          controller.approve(key);
+        } else {
+          controller.askDelete(key);
+        }
+      }}
+      onDimmed={() => playHaptic("light")}
+      onCancelDelete={() => controller.cancelDelete()}
+      onConfirmDelete={(key) => controller.confirmDelete(key)}
       onCloseRow={() => controller.closeRow()}
       onValue={(name, value) => controller.setValue(name, value)}
       onStart={() => void controller.beginStart()}
@@ -3586,9 +3631,8 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     focus={route.params.focus === true}
                     cwd={route.params.cwd}
                     onOpenWorkflows={() =>
-                      navigation.navigate("WorkflowRuns", {
+                      navigation.navigate("WorkflowStart", {
                         computerId: route.params.computerId,
-                        name: RECORDS.get(route.params.computerId)?.name ?? "",
                         sessionId: route.params.sessionId,
                       })
                     }
@@ -3636,28 +3680,13 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
           </Stack.Screen>
           {/* Workflow runs (docs/feat/workflows-ui.md D4): two plain PUSH screens —
               never the `Sheet` route, never a `<Modal>`. */}
-          <Stack.Screen name="WorkflowRuns" options={{ title: "Workflows", headerShown: false }}>
+          <Stack.Screen name="WorkflowRuns" options={{ title: "Recent runs", headerShown: false }}>
             {({ navigation, route }) => (
               <WorkflowRunsRoute
                 palette={palette}
                 computerId={route.params.computerId}
                 name={route.params.name}
-                {...(route.params.sessionId === undefined
-                  ? {}
-                  : { sessionId: route.params.sessionId })}
                 onBack={() => navigation.goBack()}
-                onStart={(sessionId) =>
-                  navigation.navigate("WorkflowStart", {
-                    computerId: route.params.computerId,
-                    sessionId,
-                  })
-                }
-                onNew={(sessionId) =>
-                  navigation.navigate("WorkflowEdit", {
-                    computerId: route.params.computerId,
-                    sessionId,
-                  })
-                }
                 onOpen={(run) =>
                   navigation.navigate("WorkflowRun", {
                     computerId: route.params.computerId,
@@ -3693,10 +3722,8 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
               />
             )}
           </Stack.Screen>
-          <Stack.Screen
-            name="WorkflowStart"
-            options={{ title: "Start a workflow", headerShown: false }}
-          >
+          {/* The Workflows landing (mobile-workflows-landing D7): what the hub opens. */}
+          <Stack.Screen name="WorkflowStart" options={{ title: "Workflows", headerShown: false }}>
             {({ navigation, route }) => (
               <WorkflowStartRoute
                 palette={palette}
@@ -3710,6 +3737,21 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     sessionId: route.params.sessionId,
                     runId,
                     title: name,
+                  })
+                }
+                // A live run on the landing may be another session's.
+                onOpenListed={(run) =>
+                  navigation.navigate("WorkflowRun", {
+                    computerId: route.params.computerId,
+                    sessionId: run.sessionId,
+                    runId: run.runId,
+                    title: run.name,
+                  })
+                }
+                onRecent={() =>
+                  navigation.navigate("WorkflowRuns", {
+                    computerId: route.params.computerId,
+                    name: RECORDS.get(route.params.computerId)?.name ?? "",
                   })
                 }
                 onEdit={(name) =>

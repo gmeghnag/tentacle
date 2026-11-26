@@ -332,6 +332,49 @@ export interface WorkflowDriverDeps {
     plan: WorkflowSaveWritePlan,
     currentHash: (source: WorkflowSource) => string,
   ) => WorkflowSaveWriteResult;
+  /**
+   * The ONE workflow remover (`removeWorkflowFile`,
+   * docs/feat/mobile-workflows-landing.md D3), wired beside `save` and nowhere
+   * else: absent → `remove` answers `unavailable`. Synchronous, so its check
+   * and its unlink are one block. It removes the YAML only and never reaches
+   * the approval store.
+   */
+  readonly remove?: (
+    name: string,
+    expect: WorkflowRemoveExpect,
+    currentHash: (source: WorkflowSource) => string,
+  ) => WorkflowRemoveWriteResult;
+}
+
+/** What the file must still be for a remove: exactly the hash seen, or still invalid. */
+export type WorkflowRemoveExpect = { readonly hash: string } | { readonly broken: true };
+
+/** What the remover answers: structurally the CLI's `WorkflowRemoveResult`. */
+export type WorkflowRemoveWriteResult =
+  | { readonly ok: true; readonly path: string }
+  | {
+      readonly ok: false;
+      readonly refusal: "changed" | "gone" | "invalid" | "failed";
+      readonly reason: string;
+    };
+
+/** `WorkflowDriver.approve`'s answer: asked, already approved, or a refusal word. */
+export interface WorkflowApproveOutcome {
+  readonly ok: boolean;
+  readonly approved?: boolean;
+  readonly asked?: true;
+  readonly refusal?: string;
+  readonly reason?: string;
+  readonly runId?: string;
+}
+
+/** `WorkflowDriver.remove`'s answer. */
+export interface WorkflowRemoveOutcome {
+  readonly ok: boolean;
+  readonly refusal?: string;
+  readonly reason?: string;
+  readonly runId?: string;
+  readonly path?: string;
 }
 
 /** What the driver hands the writer: structurally the writer's `WorkflowWritePlan`. */
@@ -608,6 +651,11 @@ const systemClock: WorkflowClock = {
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+/** One file's one content: what an approval ask is about. */
+function approvalKey(path: string, hash: string): string {
+  return `${path}\0${hash}`;
+}
+
 /** A label for a `line()`-bounded wire field: whitespace runs (newlines too) collapsed. */
 function oneLine(text: string, max: number): string {
   return capWorkflowText(text.replace(/\s+/g, " ").trim(), max);
@@ -615,6 +663,8 @@ function oneLine(text: string, max: number): string {
 
 export class WorkflowDriver {
   private readonly runs = new Map<string, Run>();
+  /** Run-less approval asks open now, counted per `approvalKey`. */
+  private readonly asking = new Map<string, number>();
   private host: WorkflowHost | undefined;
   private seq = 0;
   private disposed = false;
@@ -1126,10 +1176,106 @@ export class WorkflowDriver {
     if (!prepared.ok) {
       return false;
     }
-    const { source, spec, hash } = prepared;
-    if (await this.deps.approvals.has(source.path, hash)) {
+    if (await this.deps.approvals.has(prepared.source.path, prepared.hash)) {
       return true;
     }
+    return this.askApproval(prepared, turnId, " for its schedule");
+  }
+
+  /**
+   * `session/workflow_approve` (docs/feat/mobile-workflows-landing.md D2): ask
+   * for the file the caller SAW (`hash`), with no run. It grants nothing: it
+   * RAISES the same ask a schedule's create does and answers at once, so only a
+   * person's allow on it writes the store. Never two asks for one hash — a run
+   * already waiting on its approval, or an ask already open, is named instead.
+   */
+  async approve(name: string, hash: string, turnId: string): Promise<WorkflowApproveOutcome> {
+    const closing: WorkflowApproveOutcome = {
+      ok: false,
+      refusal: "unavailable",
+      reason: "the session is closing",
+    };
+    if (this.disposed) {
+      return closing;
+    }
+    const prepared = await this.prepare(name);
+    if (!prepared.ok) {
+      return { ok: false, refusal: "invalid", reason: prepared.reason };
+    }
+    const { source, spec } = prepared;
+    if (prepared.hash !== hash) {
+      return {
+        ok: false,
+        refusal: "changed",
+        reason: `${source.path} changed since you opened it: review it again`,
+      };
+    }
+    const approved = await this.deps.approvals.has(source.path, hash);
+    // Everything below is synchronous after the last await, so two approves (or
+    // a start that raced us) cannot raise a second ask.
+    if (this.disposed) {
+      return closing;
+    }
+    const waiting = [...this.runs.values()].find(
+      (r) => !r.done && r.spec.name === spec.name && r.row.state === "needs-approval",
+    );
+    if (waiting !== undefined) {
+      return {
+        ok: false,
+        refusal: "running",
+        runId: waiting.runId,
+        reason: `workflow ${spec.name} (${waiting.runId}) is waiting for its approval: answer that one`,
+      };
+    }
+    if (approved) {
+      return { ok: true, approved: true };
+    }
+    if (!this.asking.has(approvalKey(source.path, hash))) {
+      void this.askApproval(prepared, turnId, "").catch(() => {});
+    }
+    return { ok: true, asked: true };
+  }
+
+  /**
+   * `session/workflow_delete` (D2/D3): remove the YAML the caller saw. Refused
+   * while a run of it is in flight (no file vanishes under a live run's resume or
+   * rerun). Synchronous: that check and the remover's unlink are one block.
+   */
+  remove(name: string, hash?: string): WorkflowRemoveOutcome {
+    const remove = this.deps.remove;
+    if (remove === undefined || this.disposed) {
+      return { ok: false, refusal: "unavailable", reason: NOT_EDITABLE_HERE };
+    }
+    const running = this.current();
+    if (running !== undefined && this.runs.get(running)?.spec.name === name) {
+      return {
+        ok: false,
+        refusal: "running",
+        runId: running,
+        reason: `workflow ${name} (${running}) is running: stop it first`,
+      };
+    }
+    return remove(name, hash !== undefined ? { hash } : { broken: true }, (source) => {
+      const current = this.prepareSourceSync(name, source);
+      if (!current.ok) throw new Error(current.errors.join("; "));
+      return current.hash;
+    });
+  }
+
+  /**
+   * THE run-less approval ask (a schedule's create and `approve`): one title,
+   * detail, origin, withdrawal and store write. `suffix` is the title's only
+   * difference. The key is counted from before the first await, so `approve`
+   * sees every ask still open for this path and hash.
+   */
+  private async askApproval(
+    prepared: { source: WorkflowSource; spec: WorkflowSpec; hash: string },
+    turnId: string | undefined,
+    suffix: string,
+  ): Promise<boolean> {
+    const { source, spec, hash } = prepared;
+    const key = approvalKey(source.path, hash);
+    this.asking.set(key, (this.asking.get(key) ?? 0) + 1);
     const agentId = `approval:${spec.name}`;
     const waited = new AbortController();
     const timer = this.clock.setTimeout(() => waited.abort(), spec.budget.waitMs);
@@ -1141,7 +1287,7 @@ export class WorkflowDriver {
           tool: WORKFLOW_APPROVE_TOOL,
           level: "ask",
           title: oneLine(
-            `Approve workflow ${spec.name} v${spec.version} (hash ${shortHash(hash)}) for its schedule`,
+            `Approve workflow ${spec.name} v${spec.version} (hash ${shortHash(hash)})${suffix}`,
             200,
           ),
           detail: workflowApprovalSummary(spec.steps),
@@ -1163,6 +1309,12 @@ export class WorkflowDriver {
     } finally {
       this.clock.clearTimeout(timer);
       this.host?.release(agentId);
+      const open = (this.asking.get(key) ?? 1) - 1;
+      if (open > 0) {
+        this.asking.set(key, open);
+      } else {
+        this.asking.delete(key);
+      }
     }
   }
 

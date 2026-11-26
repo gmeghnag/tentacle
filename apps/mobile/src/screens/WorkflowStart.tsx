@@ -1,15 +1,17 @@
 /**
- * Start a workflow (docs/feat/workflows-ui.md D6, slice 5b): a native-stack PUSH.
- * A dumb renderer (AGENTS §7) — the catalogue projection, the form, the start's
- * params and every refusal branch are `workflow-start.ts` /
- * `workflow-start-controller.ts`'s; this file maps a view-model to elements.
+ * Workflows — the landing (docs/feat/mobile-workflows-landing.md D7; first the
+ * Start screen of docs/feat/workflows-ui.md D6): a native-stack PUSH. A dumb
+ * renderer (AGENTS §7) — the run bands, each item's actions and why one is dimmed
+ * are `workflow-landing.ts`'s; the form, the start's params and every refusal
+ * branch are `workflow-start.ts` / `workflow-start-controller.ts`'s; this file
+ * maps a view-model to elements.
  *
- * Two things are drawn deliberately:
+ * Three things are drawn deliberately:
+ * - **square bands** (owner taste): full width, hairlines, no inset card;
  * - **a `run` step's command VERBATIM**, never cut to a line count: it is what an
- *   approval will ask about, and the ask's own detail is capped at 2000 chars.
+ *   approval will ask about, and the ask's own detail is capped at 2000 chars;
  * - **every word with its glyph** (the owner is colour-blind: never meaning by hue
- *   alone) — "✓ Approved" / "? Needs approval", and a broken row's errors verbatim,
- *   each naming its YAML path.
+ *   alone) — "✓ Approved" / "? Needs approval", and Delete is red AND says Delete.
  */
 import type { JSX } from "react";
 import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
@@ -20,6 +22,15 @@ import { Icon } from "../ui/Icon.tsx";
 import { PillButton } from "../ui/PillButton.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { Text, TextInput } from "../ui/Text.tsx";
+import {
+  LANDING_OFFLINE,
+  type LandingAct,
+  type LandingItem,
+  type LandingRuns,
+  landingContext,
+  landingItems,
+} from "../workflow-landing.ts";
+import type { ElencoRow } from "../workflow-list.ts";
 import type { StartState } from "../workflow-start-controller.ts";
 import {
   type CatalogueEntry,
@@ -34,23 +45,31 @@ export interface WorkflowStartScreenProps {
   /** The computer's name (the header's subtitle). */
   readonly computer: string;
   readonly state: StartState;
+  /** The live runs on top, and how many ended ones `Recent runs` leads to. */
+  readonly runs: LandingRuns;
   /** `canStart()` — the controller's own gate; the screen never re-derives it. */
   readonly canStart: boolean;
   readonly onBack: () => void;
   readonly onPull: () => void;
-  readonly onOpenRow: (key: string) => void;
+  readonly onOpenRun: (row: ElencoRow) => void;
+  readonly onRecent: () => void;
+  /** A usable action of an item. */
+  readonly onAct: (act: LandingAct, key: string) => void;
+  /** A dimmed action: nothing is sent. */
+  readonly onDimmed: () => void;
+  readonly onCancelDelete: () => void;
+  readonly onConfirmDelete: (key: string) => void;
   readonly onCloseRow: () => void;
   readonly onValue: (name: string, value: string) => void;
+  /** The form's Start. */
   readonly onStart: () => void;
   /**
-   * Open a row in the graph editor (`docs/feat/workflow-editor.md` D8, slice 7a).
-   * Offered on EVERY row that names a file — a broken one included, because such a
-   * file opens as `broken` there and says why (slice 6), which is where a person
-   * finds out what to fix.
+   * Open a file in the graph editor (`docs/feat/workflow-editor.md` D8): the
+   * item's body. A broken one too — it opens as `broken` there and says why.
    */
-  readonly onEdit?: (name: string) => void;
+  readonly onEdit: (name: string) => void;
   /** "New workflow" (D8): the graph editor in create mode. */
-  readonly onNew?: () => void;
+  readonly onNew: () => void;
 }
 
 /** The folder the catalogue read, and the two notices about it. */
@@ -84,92 +103,246 @@ function FolderLine({
   );
 }
 
-/** One valid row: its name, what the daemon says of it, and a way into its form. */
-function ValidRow({
+/** A band of live runs: glyph and word on every row. */
+function RunBand({
   palette,
-  entry,
-  onPress,
-  onEdit,
+  testID,
+  title,
+  rows,
+  onOpen,
 }: {
   readonly palette: Palette;
-  readonly entry: CatalogueEntry;
-  readonly onPress: () => void;
-  readonly onEdit?: (name: string) => void;
-}): JSX.Element {
+  readonly testID: string;
+  readonly title: string;
+  readonly rows: readonly ElencoRow[];
+  readonly onOpen: (row: ElencoRow) => void;
+}): JSX.Element | null {
+  if (rows.length === 0) {
+    return null;
+  }
   return (
-    <Pressable
-      testID={`workflow-start-row-${entry.name}`}
-      accessibilityRole="button"
-      accessibilityLabel={`${entry.name}, ${entry.approval?.word ?? "approval unknown"}`}
-      onPress={onPress}
-      style={[styles.row, { backgroundColor: palette.card, borderColor: palette.sep }]}
-    >
-      <View style={styles.rowHead}>
-        <Text style={[styles.name, { color: palette.label }]}>{entry.name}</Text>
-        {entry.approval === null ? null : (
+    <View testID={testID}>
+      <Text style={[styles.bandTitle, { color: palette.sec }]}>{title}</Text>
+      {rows.map((row) => (
+        <Pressable
+          key={row.key}
+          testID={`workflow-run-${row.key}`}
+          accessibilityRole="button"
+          accessibilityLabel={`${row.name}, ${row.status.word}, ${row.position}`}
+          onPress={() => onOpen(row)}
+          style={[styles.band, { borderColor: palette.sep }]}
+        >
+          <View style={styles.rowHead}>
+            <Text style={[styles.glyph, { color: palette.label }]}>{row.status.glyph}</Text>
+            <Text style={[styles.name, { color: palette.label }]}>{row.name}</Text>
+            <Text style={[typography.footnote, { color: palette.sec }]}>{row.when}</Text>
+            <Icon name="chevron.right" color={palette.sec} size={14} />
+          </View>
           <Text style={[typography.footnote, { color: palette.sec }]}>
-            {`${entry.approval.glyph} ${entry.approval.word}`}
+            {`${row.status.word} · ${row.position}${row.title === null ? "" : ` · ${row.title}`}`}
           </Text>
-        )}
-        <Icon name="chevron.right" color={palette.sec} size={14} />
-      </View>
-      {entry.description === null ? null : (
-        <Text style={[typography.subhead, { color: palette.sec }]}>{entry.description}</Text>
-      )}
-      {onEdit === undefined ? null : (
-        <PillButton
-          palette={palette}
-          testID={`workflow-start-edit-${entry.name}`}
-          kind="secondary"
-          label="Edit"
-          icon="square.and.pencil"
-          onPress={() => onEdit(entry.name)}
-        />
-      )}
-    </Pressable>
+        </Pressable>
+      ))}
+    </View>
   );
 }
 
-/** One broken row: every error VERBATIM (each names its YAML path), and no way to start. */
-function BrokenRow({
+/** The inline delete question, in the action row's place (never a native alert). */
+function Confirm({
   palette,
-  entry,
-  onEdit,
+  item,
+  onCancel,
+  onConfirm,
 }: {
   readonly palette: Palette;
-  readonly entry: CatalogueEntry;
-  readonly onEdit?: (name: string) => void;
+  readonly item: LandingItem;
+  readonly onCancel: () => void;
+  readonly onConfirm: () => void;
 }): JSX.Element {
   return (
-    <View
-      testID={`workflow-start-broken-${entry.name}`}
-      style={[styles.row, { backgroundColor: palette.card, borderColor: palette.sep }]}
-    >
-      <View style={styles.rowHead}>
-        <Text style={[styles.name, { color: palette.label }]}>{entry.name}</Text>
-        <Text style={[typography.footnote, { color: palette.sec }]}>✗ Cannot run</Text>
+    <View style={styles.confirm}>
+      <Text
+        testID={`workflow-delete-question-${item.name}`}
+        style={[typography.subhead, { color: palette.label }]}
+      >
+        {item.confirm}
+      </Text>
+      <View style={styles.actions}>
+        <Pressable
+          testID={`workflow-delete-cancel-${item.name}`}
+          accessibilityRole="button"
+          hitSlop={8}
+          onPress={onCancel}
+          style={styles.action}
+        >
+          <Text style={[typography.subhead, { color: palette.label }]}>Cancel</Text>
+        </Pressable>
+        <Pressable
+          testID={`workflow-delete-confirm-${item.name}`}
+          accessibilityRole="button"
+          hitSlop={8}
+          onPress={onConfirm}
+          style={styles.action}
+        >
+          <Icon name="trash" color={palette.red} size={15} />
+          <Text style={[typography.subhead, { color: palette.red }]}>Delete</Text>
+        </Pressable>
       </View>
-      <Text style={[typography.mono, { color: palette.sec }]}>{entry.path}</Text>
-      <View testID={`workflow-start-errors-${entry.name}`} style={styles.errors}>
-        {(entry.errors.length === 0 ? ["this file did not validate"] : entry.errors).map(
-          (error) => (
+    </View>
+  );
+}
+
+/** One workflow file: its body opens the editor; Start · Approve · Delete below. */
+function Item({
+  palette,
+  item,
+  screen,
+}: {
+  readonly palette: Palette;
+  readonly item: LandingItem;
+  readonly screen: WorkflowStartScreenProps;
+}): JSX.Element {
+  const word = item.status?.word ?? "approval unknown";
+  return (
+    <View style={[styles.band, { borderColor: palette.sep }]}>
+      <Pressable
+        testID={item.ok ? `workflow-start-row-${item.name}` : `workflow-start-broken-${item.name}`}
+        accessibilityRole="button"
+        accessibilityLabel={`${item.name}, ${word}`}
+        accessibilityHint="Opens it in the editor"
+        onPress={() => screen.onEdit(item.name)}
+        style={styles.body}
+      >
+        <View style={styles.rowHead}>
+          <Text style={[styles.name, { color: palette.label }]}>{item.name}</Text>
+          {item.status === null ? null : (
+            <Text style={[typography.footnote, { color: palette.sec }]}>
+              {`${item.status.glyph} ${item.status.word}`}
+            </Text>
+          )}
+          <Icon name="chevron.right" color={palette.sec} size={14} />
+        </View>
+        {item.description === null ? null : (
+          <Text style={[typography.subhead, { color: palette.sec }]}>{item.description}</Text>
+        )}
+        {item.ok ? null : (
+          <Text style={[typography.mono, { color: palette.sec }]}>{item.path}</Text>
+        )}
+      </Pressable>
+      {item.errors.length === 0 ? null : (
+        <View testID={`workflow-start-errors-${item.name}`} style={styles.errors}>
+          {item.errors.map((error) => (
             <Text key={error} style={[typography.mono, { color: palette.label }]}>
               {error}
             </Text>
-          ),
-        )}
-      </View>
-      {onEdit === undefined ? null : (
-        <PillButton
+          ))}
+        </View>
+      )}
+      {item.confirm !== null ? (
+        <Confirm
           palette={palette}
-          testID={`workflow-start-edit-${entry.name}`}
-          kind="secondary"
-          label="Edit"
-          icon="square.and.pencil"
-          onPress={() => onEdit(entry.name)}
+          item={item}
+          onCancel={screen.onCancelDelete}
+          onConfirm={() => screen.onConfirmDelete(item.key)}
         />
+      ) : (
+        <View style={styles.actions}>
+          {item.actions.map((action) => {
+            const color = action.destructive ? palette.red : palette.label;
+            return (
+              <Pressable
+                key={action.id}
+                testID={`workflow-item-${action.id}-${item.name}`}
+                accessibilityRole="button"
+                accessibilityLabel={`${action.label} ${item.name}`}
+                accessibilityState={{ disabled: !action.enabled }}
+                hitSlop={8}
+                // Not `disabled`: a dimmed tap still answers with a light haptic.
+                onPress={() =>
+                  action.enabled ? screen.onAct(action.id, item.key) : screen.onDimmed()
+                }
+                style={[styles.action, action.enabled ? null : styles.dimmed]}
+              >
+                <Icon name={action.icon} color={color} size={15} />
+                <Text style={[typography.subhead, { color }]}>{action.label}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      )}
+      {item.why === null ? null : (
+        <Text
+          testID={`workflow-item-why-${item.name}`}
+          style={[typography.footnote, { color: palette.sec }]}
+        >
+          {item.why}
+        </Text>
       )}
     </View>
+  );
+}
+
+/** The landing: run bands, Recent runs, the workflow files, the folder. */
+function Landing({ screen }: { readonly screen: WorkflowStartScreenProps }): JSX.Element {
+  const { palette, state, runs } = screen;
+  const view = state.catalogue;
+  const items = landingItems(view, landingContext(state), state.confirm);
+  return (
+    <>
+      <RunBand
+        palette={palette}
+        testID="workflow-landing-needs-you"
+        title="Needs you"
+        rows={runs.needYou}
+        onOpen={screen.onOpenRun}
+      />
+      <RunBand
+        palette={palette}
+        testID="workflow-landing-live"
+        title="In progress"
+        rows={runs.inProgress}
+        onOpen={screen.onOpenRun}
+      />
+      <Pressable
+        testID="workflow-landing-recent"
+        accessibilityRole="button"
+        accessibilityLabel="Recent runs"
+        onPress={screen.onRecent}
+        style={[styles.band, styles.rowHead, { borderColor: palette.sep }]}
+      >
+        <Text style={[styles.name, { color: palette.label }]}>Recent runs</Text>
+        {runs.recent === 0 ? null : (
+          <Text style={[typography.footnote, { color: palette.sec }]}>{`${runs.recent}`}</Text>
+        )}
+        <Icon name="chevron.right" color={palette.sec} size={14} />
+      </Pressable>
+      {items.length === 0 ? null : (
+        <View>
+          <Text style={[styles.bandTitle, { color: palette.sec }]}>Workflows</Text>
+          {items.map((item) => (
+            <Item key={item.key} palette={palette} item={item} screen={screen} />
+          ))}
+        </View>
+      )}
+      {state.kind === "ready" && view?.kind === "empty" ? (
+        <EmptyState
+          testID="workflow-start-empty"
+          palette={palette}
+          title={`No workflows in ${view.dir ?? "the workflows folder"}`}
+          icon="doc.text"
+          action={
+            <PillButton
+              palette={palette}
+              testID="workflow-landing-empty-new"
+              label="New workflow"
+              icon="plus"
+              onPress={screen.onNew}
+            />
+          }
+        />
+      ) : null}
+      <FolderLine palette={palette} state={state} />
+    </>
   );
 }
 
@@ -281,9 +454,11 @@ function Detail({
       />
       {canStart || state.starting ? null : (
         <Text style={[typography.footnote, { color: palette.sec }]}>
-          {entry.approval?.word === "Needs approval"
-            ? "Starting asks you to approve this file first"
-            : "Fill in what is missing to start"}
+          {state.offline
+            ? LANDING_OFFLINE
+            : entry.approval?.word === "Needs approval"
+              ? "Starting asks you to approve this file first"
+              : "Fill in what is missing to start"}
         </Text>
       )}
     </View>
@@ -299,7 +474,7 @@ export function WorkflowStartScreen(props: WorkflowStartScreenProps): JSX.Elemen
       <ScreenHeader
         palette={palette}
         variant="compact"
-        title={entry === null ? "Start a workflow" : entry.name}
+        title={entry === null ? "Workflows" : entry.name}
         subtitle={props.computer}
         left={
           <Pressable
@@ -311,6 +486,19 @@ export function WorkflowStartScreen(props: WorkflowStartScreenProps): JSX.Elemen
           >
             <Icon name="chevron.left" color={palette.label} size={18} />
           </Pressable>
+        }
+        right={
+          entry === null && state.kind === "ready" ? (
+            <Pressable
+              testID="workflow-start-new"
+              accessibilityRole="button"
+              accessibilityLabel="New workflow"
+              hitSlop={8}
+              onPress={props.onNew}
+            >
+              <Icon name="plus" color={palette.label} size={18} />
+            </Pressable>
+          ) : undefined
         }
       />
       <ScrollView
@@ -363,43 +551,9 @@ export function WorkflowStartScreen(props: WorkflowStartScreenProps): JSX.Elemen
             icon="exclamationmark.triangle"
           />
         ) : null}
-        {entry === null ? <FolderLine palette={palette} state={state} /> : null}
-        {entry === null && state.kind === "ready" && props.onNew !== undefined ? (
-          <PillButton
-            palette={palette}
-            testID="workflow-start-new"
-            kind="secondary"
-            label="New workflow"
-            icon="plus"
-            onPress={props.onNew}
-          />
-        ) : null}
-        {state.kind === "ready" && view?.kind === "empty" ? (
-          <EmptyState
-            testID="workflow-start-empty"
-            palette={palette}
-            title="No workflows here"
-            body={`Put a workflow file in ${view.dir ?? "the workflows folder"}`}
-            icon="doc.text"
-          />
-        ) : null}
-        {entry === null
-          ? (view?.valid ?? []).map((row) => (
-              <ValidRow
-                key={row.key}
-                palette={palette}
-                entry={row}
-                onPress={() => props.onOpenRow(row.key)}
-                {...(props.onEdit === undefined ? {} : { onEdit: props.onEdit })}
-              />
-            ))
-          : null}
-        {entry === null
-          ? (view?.invalid ?? []).map((row) => (
-              <BrokenRow key={row.key} palette={palette} entry={row} onEdit={props.onEdit} />
-            ))
-          : null}
-        {entry === null ? null : (
+        {entry === null ? (
+          <Landing screen={props} />
+        ) : (
           <Detail
             palette={palette}
             entry={entry}
@@ -417,14 +571,32 @@ export function WorkflowStartScreen(props: WorkflowStartScreenProps): JSX.Elemen
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
-  content: { padding: space.inset, gap: space.inset },
-  folder: { gap: 4 },
+  content: { paddingVertical: space.inset, gap: space.inset },
+  folder: { gap: 4, paddingHorizontal: space.inset },
   sectionTitle: { ...typography.footnote, textTransform: "uppercase" },
-  row: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 12, gap: 4 },
+  bandTitle: {
+    ...typography.footnote,
+    textTransform: "uppercase",
+    paddingHorizontal: space.inset,
+    paddingBottom: 6,
+  },
+  // A square band: full width, one hairline, no radius and no card fill.
+  band: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: space.inset,
+    paddingVertical: 12,
+    gap: 6,
+  },
+  body: { gap: 4 },
   rowHead: { flexDirection: "row", alignItems: "center", gap: 8 },
+  glyph: { ...typography.body, width: 18, textAlign: "center" },
   name: { ...typography.body, flex: 1, fontWeight: "600" },
+  actions: { flexDirection: "row", alignItems: "center", gap: 24, paddingTop: 4 },
+  action: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 32 },
+  dimmed: { opacity: 0.4 },
+  confirm: { gap: 4 },
   errors: { gap: 2 },
-  detail: { gap: 10 },
+  detail: { gap: 10, paddingHorizontal: space.inset },
   detailBack: { flexDirection: "row", alignItems: "center", gap: 4 },
   steps: { gap: 8 },
   step: { borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, padding: 10, gap: 4 },

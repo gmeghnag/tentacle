@@ -60,7 +60,9 @@ describe("the run screen holds only the slim ask row (docs/fix/mobile-ask-surfac
 
   test("the Session screen presents over its own run, and only that run's ask", () => {
     expect(SESSION).toContain("ownRunTopId(");
-    expect(SESSION).toContain("sessionInFront(focused, sheetStack, topRunId !== null)");
+    expect(SESSION).toContain(
+      "sessionInFront(focused, sheetStack, topRunId !== null || workflowsTop)",
+    );
     expect(SESSION).toContain("askPresentable(");
   });
 });

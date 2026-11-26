@@ -6971,6 +6971,53 @@
       "required": ["completionTokens", "promptTokens"],
       "type": "object"
     },
+    "WorkflowApproveParams": {
+      "additionalProperties": true,
+      "properties": {
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/WorkflowName"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["hash", "name", "sessionId", "turnId"],
+      "type": "object"
+    },
+    "WorkflowApproveResult": {
+      "additionalProperties": true,
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "asked": {
+          "const": true,
+          "type": "boolean"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "refusal": {
+          "$ref": "#/$defs/WorkflowRefusal"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
     "WorkflowCatalogueParams": {
       "additionalProperties": true,
       "properties": {
@@ -7123,6 +7170,59 @@
         }
       },
       "required": ["id", "kind", "where"],
+      "type": "object"
+    },
+    "WorkflowDeleteParams": {
+      "additionalProperties": true,
+      "properties": {
+        "hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/WorkflowName"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["name", "sessionId"],
+      "type": "object"
+    },
+    "WorkflowDeleteResult": {
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "refusal": {
+          "$ref": "#/$defs/WorkflowRefusal"
+        },
+        "runId": {
+          "$ref": "#/$defs/WorkflowRunRef"
+        },
+        "schedules": {
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": ["ok"],
       "type": "object"
     },
     "WorkflowHash": {
@@ -8406,12 +8506,28 @@
         "$ref": "#/$defs/WorkflowResult"
       }
     },
+    "session/workflow_approve": {
+      "params": {
+        "$ref": "#/$defs/WorkflowApproveParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowApproveResult"
+      }
+    },
     "session/workflow_catalogue": {
       "params": {
         "$ref": "#/$defs/WorkflowCatalogueParams"
       },
       "result": {
         "$ref": "#/$defs/WorkflowCatalogueResult"
+      }
+    },
+    "session/workflow_delete": {
+      "params": {
+        "$ref": "#/$defs/WorkflowDeleteParams"
+      },
+      "result": {
+        "$ref": "#/$defs/WorkflowDeleteResult"
       }
     },
     "session/workflow_save": {

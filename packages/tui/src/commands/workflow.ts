@@ -13,10 +13,15 @@ import { oneLine } from "../commands.ts";
  */
 import { workflowPanel } from "../panel.ts";
 import {
+  WORKFLOW_ACT_OLD_DAEMON,
+  WORKFLOW_NOT_LISTED,
   WORKFLOW_UNSUPPORTED,
+  approveReplyNotice,
   catalogueRowFor,
+  deleteReplyNotice,
   parseWorkflowCommand,
   startCommandFor,
+  workflowDeletePrompt,
   workflowReplyNotice,
   workflowTarget,
 } from "../workflow-view.ts";
@@ -63,6 +68,70 @@ function runFromCatalogue(ctx: Ctx, name: string, typed: number): string | null 
   // hash is pinned too (a file edited since is refused `changed`, 5a). A row the
   // catalogue could not hash (an older daemon) pins nothing, exactly as today.
   return row.hash ?? null;
+}
+
+/**
+ * `/workflow approve <name>` (docs/feat/mobile-workflows-landing.md D6): pins the
+ * hash the catalogue SHOWS. The ask then arrives in this TUI's own permission
+ * dialog, and the catalogue re-reads when it closes.
+ */
+function approve(ctx: Ctx, name: string): void {
+  const session = ctx.sessionRef.current;
+  if (session?.workflowApprove === undefined) {
+    ctx.pushNotice(`_${WORKFLOW_ACT_OLD_DAEMON}_`);
+    return;
+  }
+  const row = catalogueRowFor(ctx.workflowCatalogueRef.current, name);
+  if (row === undefined) {
+    ctx.pushNotice(`_${oneLine(name)}: ${WORKFLOW_NOT_LISTED}_`);
+    return;
+  }
+  if (!row.ok || row.hash === undefined) {
+    // No hash, nothing to approve: say what is wrong with the file.
+    const start = startCommandFor(row);
+    ctx.pushNotice(`_${start.kind === "refused" ? start.text : WORKFLOW_ACT_OLD_DAEMON}_`);
+    return;
+  }
+  void session.workflowApprove(name, row.hash).then(
+    (result) => ctx.pushNotice(approveReplyNotice(name, result)),
+    (error: unknown) => ctx.pushNotice(`_${oneLine(String(error))}_`),
+  );
+}
+
+/**
+ * `/workflow delete <name> [confirm]` (D6): without `confirm` NOTHING is sent —
+ * the confirming line is put back in the input. With it, the row's hash is pinned
+ * (a broken row has none: the daemon then requires it to be still broken).
+ */
+function remove(ctx: Ctx, name: string, confirmed: boolean): void {
+  const session = ctx.sessionRef.current;
+  if (session?.workflowDelete === undefined) {
+    ctx.pushNotice(`_${WORKFLOW_ACT_OLD_DAEMON}_`);
+    return;
+  }
+  const row = catalogueRowFor(ctx.workflowCatalogueRef.current, name);
+  if (row === undefined) {
+    ctx.pushNotice(`_${oneLine(name)}: ${WORKFLOW_NOT_LISTED}_`);
+    return;
+  }
+  if (!confirmed) {
+    const line = `/workflow delete ${row.name} confirm`;
+    const said = workflowDeletePrompt(row.path);
+    if (ctx.prefill === undefined) {
+      ctx.pushNotice(`_${said}: ${oneLine(line)}_`);
+      return;
+    }
+    ctx.prefill(line);
+    ctx.pushNotice(`_${said}_`);
+    return;
+  }
+  void session.workflowDelete(name, row.ok ? row.hash : undefined).then(
+    (result) => {
+      ctx.pushNotice(deleteReplyNotice(name, result));
+      ctx.refreshCatalogue?.();
+    },
+    (error: unknown) => ctx.pushNotice(`_${oneLine(String(error))}_`),
+  );
 }
 
 export const command = {
@@ -124,6 +193,12 @@ export const command = {
         );
         return;
       }
+      case "approve":
+        approve(ctx, parsed.name);
+        return;
+      case "delete":
+        remove(ctx, parsed.name, parsed.confirmed);
+        return;
       case "stop":
       case "resume": {
         const target = workflowTarget(ctx.workflowsRef.current, parsed.kind);

@@ -1369,3 +1369,210 @@ function noopHost(): WorkflowHost {
     ended: () => {},
   };
 }
+
+// docs/feat/mobile-workflows-landing.md D2: approve a file with no run, and
+// delete it. Approval is only ever a person's allow on the ask.
+describe("approve (a file's hash approval, no run)", () => {
+  const hashNow = (made: ReturnType<typeof setup>): string => {
+    const prepared = made.driver.prepareSourceSync("task", {
+      path: ".tentacle/workflows/task.yaml",
+      text: made.files.text,
+      prompts: made.files.prompts,
+    });
+    return prepared.ok ? prepared.hash : "";
+  };
+  const key = (hash: string): string => `.tentacle/workflows/task.yaml#${hash}`;
+
+  test("raises ONE workflow_approve ask on the one requester, answered before nothing is written", async () => {
+    const made = setup();
+    const { driver, broker, host, approvals } = made;
+    const hash = hashNow(made);
+    expect(hash).toHaveLength(64);
+    // Resolves while the ask is still pending: raised, never awaited.
+    expect(await driver.approve("task", hash, "t-9")).toEqual({ ok: true, asked: true });
+    expect(broker.asks).toHaveLength(1);
+    const ask = broker.asks[0];
+    expect(ask?.req.kind).toBe("workflow_approve");
+    expect(ask?.req.title).toBe(`Approve workflow task v3 (hash ${hash.slice(0, 8)})`);
+    expect(ask?.req.title).not.toContain("schedule");
+    expect(ask?.options?.workflow).toEqual({ name: "task" });
+    expect(ask?.options?.agent?.id).toBe("approval:task");
+    expect(host.attributed).toContainEqual(["approval:task", "t-9"]);
+    expect(approvals.size).toBe(0);
+    expect(driver.rows()).toEqual([]);
+    ask?.answer({ allowed: true, scope: "once" });
+    await flush();
+    expect([...approvals]).toEqual([key(hash)]);
+  });
+
+  test("a denied ask adds nothing, and the next approve asks again", async () => {
+    const made = setup();
+    const { driver, broker, approvals } = made;
+    const hash = hashNow(made);
+    await driver.approve("task", hash, "t-1");
+    broker.asks[0]?.answer({ allowed: false });
+    await flush();
+    expect(approvals.size).toBe(0);
+    expect(await driver.approve("task", hash, "t-2")).toEqual({ ok: true, asked: true });
+    expect(broker.asks).toHaveLength(2);
+  });
+
+  test("a second approve while the ask is open raises no second ask", async () => {
+    const made = setup();
+    const { driver, broker } = made;
+    const hash = hashNow(made);
+    const both = await Promise.all([
+      driver.approve("task", hash, "t-1"),
+      driver.approve("task", hash, "t-2"),
+    ]);
+    expect(both).toEqual([
+      { ok: true, asked: true },
+      { ok: true, asked: true },
+    ]);
+    expect(broker.asks).toHaveLength(1);
+  });
+
+  test("a schedule's open ask counts: approve raises none beside it, even after one of two closes", async () => {
+    const made = setup();
+    const { driver, broker } = made;
+    const hash = hashNow(made);
+    void driver.requestApproval("task", "t-s1");
+    void driver.requestApproval("task", "t-s2");
+    await flush();
+    expect(broker.asks[0]?.req.title).toContain("for its schedule");
+    broker.asks[0]?.answer({ allowed: false });
+    await flush();
+    expect(await driver.approve("task", hash, "t-1")).toEqual({ ok: true, asked: true });
+    expect(broker.asks).toHaveLength(2);
+  });
+
+  test("an already approved hash asks nothing", async () => {
+    const made = setup();
+    const { driver, broker, approvals } = made;
+    const hash = hashNow(made);
+    approvals.add(key(hash));
+    expect(await driver.approve("task", hash, "t-1")).toEqual({ ok: true, approved: true });
+    expect(broker.asks).toHaveLength(0);
+  });
+
+  test("a file edited since it was listed is `changed`: nothing asked, nothing added", async () => {
+    const made = setup();
+    const { driver, broker, approvals, files } = made;
+    const seen = hashNow(made);
+    files.text = files.text.replace("do it", "do it!");
+    expect(await driver.approve("task", seen, "t-1")).toMatchObject({
+      ok: false,
+      refusal: "changed",
+    });
+    expect(broker.asks).toHaveLength(0);
+    expect(approvals.size).toBe(0);
+  });
+
+  test("a file edited WHILE the ask is open: the PINNED hash is stored, the new one asks", async () => {
+    const made = setup();
+    const { driver, broker, approvals, files } = made;
+    const seen = hashNow(made);
+    await driver.approve("task", seen, "t-1");
+    files.text = files.text.replace("do it", "do it!");
+    broker.asks[0]?.answer({ allowed: true, scope: "once" });
+    await flush();
+    expect([...approvals]).toEqual([key(seen)]);
+    const edited = hashNow(made);
+    expect(edited).not.toBe(seen);
+    expect(await driver.approve("task", edited, "t-2")).toEqual({ ok: true, asked: true });
+    expect(broker.asks).toHaveLength(2);
+  });
+
+  test("a run waiting on its approval is `running`: its own ask is the only one", async () => {
+    const made = setup();
+    const { driver, broker } = made;
+    const hash = hashNow(made);
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(await driver.approve("task", hash, "t-1")).toMatchObject({
+      ok: false,
+      refusal: "running",
+      runId: "wf-1",
+    });
+    expect(broker.asks).toHaveLength(1);
+  });
+
+  test("an unanswered ask is withdrawn after budget.wait; the guard clears", async () => {
+    const made = setup();
+    const { driver, broker, clock, approvals } = made;
+    const hash = hashNow(made);
+    await driver.approve("task", hash, "t-1");
+    clock.advance(60_000);
+    await flush();
+    expect(broker.asks[0]?.options?.signal?.aborted).toBe(true);
+    expect(approvals.size).toBe(0);
+    await driver.approve("task", hash, "t-2");
+    expect(broker.asks).toHaveLength(2);
+  });
+
+  test("a file that cannot be read is `invalid`; a disposed driver is `unavailable`", async () => {
+    const made = setup();
+    const { driver, broker } = made;
+    const hash = hashNow(made);
+    expect(await driver.approve("nope", hash, "t-1")).toMatchObject({
+      ok: false,
+      refusal: "invalid",
+    });
+    driver.dispose();
+    expect(await driver.approve("task", hash, "t-2")).toMatchObject({
+      ok: false,
+      refusal: "unavailable",
+    });
+    expect(broker.asks).toHaveLength(0);
+  });
+});
+
+describe("remove (delete a workflow file)", () => {
+  function withRemover() {
+    const made = setup();
+    const calls: [string, unknown][] = [];
+    const deps = made.deps as { -readonly [K in keyof WorkflowDriverDeps]: WorkflowDriverDeps[K] };
+    deps.remove = (name, expected) => {
+      calls.push([name, expected]);
+      return { ok: true, path: `.tentacle/workflows/${name}.yaml` };
+    };
+    return { ...made, calls };
+  }
+
+  test("pins the hash seen, or 'still broken' without one, and returns the remover's answer", () => {
+    const { driver, calls, broker } = withRemover();
+    const hash = "a".repeat(64);
+    expect(driver.remove("task", hash)).toEqual({
+      ok: true,
+      path: ".tentacle/workflows/task.yaml",
+    });
+    driver.remove("task");
+    expect(calls).toEqual([
+      ["task", { hash }],
+      ["task", { broken: true }],
+    ]);
+    expect(broker.asks).toHaveLength(0);
+  });
+
+  test("a run of this workflow in flight refuses `running`: the remover is never called", async () => {
+    const { driver, calls } = withRemover();
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(driver.remove("task", "a".repeat(64))).toMatchObject({
+      ok: false,
+      refusal: "running",
+      runId: "wf-1",
+    });
+    expect(calls).toEqual([]);
+    // Another workflow's file is not held by this run.
+    expect(driver.remove("other").ok).toBe(true);
+  });
+
+  test("no remover (or a disposed driver) is `unavailable`", () => {
+    expect(setup().driver.remove("task")).toMatchObject({ ok: false, refusal: "unavailable" });
+    const { driver, calls } = withRemover();
+    driver.dispose();
+    expect(driver.remove("task")).toMatchObject({ ok: false, refusal: "unavailable" });
+    expect(calls).toEqual([]);
+  });
+});

@@ -112,9 +112,10 @@ export interface SheetRouteParam {
 }
 
 /**
- * The computer's workflow runs (docs/feat/workflows-ui.md D4): a native-stack PUSH
- * (never a `Sheet`, never a `<Modal>`). `sessionId` is the session it was opened
- * from (the hub), so that session's runs can be told apart; absent from elsewhere.
+ * The computer's workflow runs (docs/feat/workflows-ui.md D4), «Recent runs» from
+ * the landing (docs/feat/mobile-workflows-landing.md D7): a native-stack PUSH
+ * (never a `Sheet`, never a `<Modal>`). It starts nothing, so the landing passes
+ * no `sessionId`.
  */
 export interface WorkflowRunsRoute {
   readonly computerId: string;
@@ -131,10 +132,10 @@ export interface WorkflowRunRoute {
 }
 
 /**
- * Start a workflow (docs/feat/workflows-ui.md D6, slice 5b): a native-stack PUSH
- * from the runs screen, which is the only place that knows the `sessionId` the
- * catalogue is validated against and the start runs in. It carries identity
- * only — the catalogue and the form are the controller's.
+ * «Workflows», the landing (docs/feat/mobile-workflows-landing.md D7; the route
+ * keeps its first name): a native-stack PUSH from the session's hub, which knows
+ * the `sessionId` the catalogue is validated against and a start runs in. It
+ * carries identity only — the catalogue and the form are the controller's.
  */
 export interface WorkflowStartRoute {
   readonly computerId: string;

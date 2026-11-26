@@ -105,8 +105,12 @@ import {
   UnqueueResultSchema,
   UpdateSettingsParamsSchema,
   UpdateSettingsResultSchema,
+  WorkflowApproveParamsSchema,
+  WorkflowApproveResultSchema,
   WorkflowCatalogueParamsSchema,
   WorkflowCatalogueResultSchema,
+  WorkflowDeleteParamsSchema,
+  WorkflowDeleteResultSchema,
   WorkflowListParamsSchema,
   WorkflowListResultSchema,
   WorkflowParamsSchema,
@@ -210,6 +214,14 @@ export const Method = {
    * a hash, so the next start asks as any hand-edited file does (D2's invariant).
    */
   WorkflowSave: "session/workflow_save",
+  /**
+   * Ask for one workflow file's hash approval with no run
+   * (docs/feat/mobile-workflows-landing.md D1): the daemon raises the standard
+   * `workflow_approve` ask and answers at once. It grants nothing by itself.
+   */
+  WorkflowApprove: "session/workflow_approve",
+  /** Delete one workflow file, pinned to what the person saw; prompt files stay. */
+  WorkflowDelete: "session/workflow_delete",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
@@ -369,6 +381,14 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: WorkflowSourceResultSchema,
   },
   [Method.WorkflowSave]: { params: WorkflowSaveParamsSchema, result: WorkflowSaveResultSchema },
+  [Method.WorkflowApprove]: {
+    params: WorkflowApproveParamsSchema,
+    result: WorkflowApproveResultSchema,
+  },
+  [Method.WorkflowDelete]: {
+    params: WorkflowDeleteParamsSchema,
+    result: WorkflowDeleteResultSchema,
+  },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {
     params: ModelStreamChunkedParamsSchema,

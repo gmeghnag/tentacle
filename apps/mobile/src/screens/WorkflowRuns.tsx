@@ -11,7 +11,6 @@ import type { Palette } from "../theme.ts";
 import { space, typography } from "../theme.ts";
 import { EmptyState } from "../ui/EmptyState.tsx";
 import { Icon } from "../ui/Icon.tsx";
-import { PillButton } from "../ui/PillButton.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { Text } from "../ui/Text.tsx";
 import { type ElencoRow, type ElencoRun, elencoSections, runKey } from "../workflow-list.ts";
@@ -27,20 +26,6 @@ export interface WorkflowRunsScreenProps {
   readonly onBack: () => void;
   readonly onPull: () => void;
   readonly onOpen: (run: ElencoRun) => void;
-  /**
-   * The session this screen was opened from, when it was opened from one (D6,
-   * slice 5b). The catalogue is validated against THAT session's models and the
-   * run starts in it, so without one there is no Start entry at all.
-   */
-  readonly sessionId?: string;
-  /** Start a workflow — only ever passed together with `sessionId`. */
-  readonly onStart?: () => void;
-  /**
-   * Create one on the graph (docs/feat/workflow-editor.md D8, slice 7a). Passed
-   * only with `sessionId`, like `onStart`: the editor saves through THAT session's
-   * daemon, so without one there is no editor at all.
-   */
-  readonly onNew?: () => void;
 }
 
 function RunRow({
@@ -103,7 +88,7 @@ export function WorkflowRunsScreen(props: WorkflowRunsScreenProps): JSX.Element 
       <ScreenHeader
         palette={palette}
         variant="compact"
-        title="Workflows"
+        title="Recent runs"
         subtitle={props.computer}
         left={
           <Pressable
@@ -121,21 +106,6 @@ export function WorkflowRunsScreen(props: WorkflowRunsScreenProps): JSX.Element 
         <Text testID="workflow-runs-offline" style={[styles.offline, { color: palette.sec }]}>
           {state.offline}
         </Text>
-      )}
-      {/* Start a workflow (D6, slice 5b): only from a session — the catalogue is
-          validated against it — and never while the link is down. */}
-      {props.sessionId === undefined || props.onStart === undefined ? null : (
-        <View style={styles.startEntry}>
-          <PillButton
-            palette={palette}
-            testID="workflow-runs-start"
-            label="Start a workflow"
-            icon="bolt.fill"
-            kind="secondary"
-            disabled={state.offline !== null}
-            onPress={props.onStart}
-          />
-        </View>
       )}
       <ScrollView
         contentContainerStyle={styles.content}
@@ -160,24 +130,7 @@ export function WorkflowRunsScreen(props: WorkflowRunsScreenProps): JSX.Element 
           />
         ) : null}
         {state.kind === "ready" && state.runs.length === 0 ? (
-          <EmptyState
-            testID="workflow-runs-empty"
-            palette={palette}
-            title="No workflow runs"
-            {...(props.sessionId === undefined || props.onNew === undefined
-              ? {}
-              : {
-                  action: (
-                    <PillButton
-                      palette={palette}
-                      testID="workflow-runs-new"
-                      label="New workflow"
-                      icon="plus"
-                      onPress={props.onNew}
-                    />
-                  ),
-                })}
-          />
+          <EmptyState testID="workflow-runs-empty" palette={palette} title="No workflow runs" />
         ) : null}
         {section("workflow-runs-needs-you", "Needs you", needYou)}
         {section("workflow-runs-live", "In progress", others)}
@@ -191,7 +144,6 @@ const styles = StyleSheet.create({
   screen: { flex: 1 },
   content: { padding: space.inset, gap: space.inset },
   offline: { ...typography.footnote, paddingHorizontal: space.inset },
-  startEntry: { paddingHorizontal: space.inset, paddingTop: space.inset },
   section: { gap: 8 },
   sectionTitle: { ...typography.footnote, textTransform: "uppercase" },
   row: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 12, gap: 4 },

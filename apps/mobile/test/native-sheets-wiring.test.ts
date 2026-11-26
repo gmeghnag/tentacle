@@ -225,7 +225,9 @@ describe("S3 — the reconciler is the pure module's, and the screen only dispat
   });
 
   test("the voice gates read `sessionInFront`, not the raw blur-able flag", () => {
-    expect(SCREEN).toContain("sessionInFront(focused, sheetStack, topRunId !== null)");
+    expect(SCREEN).toContain(
+      "sessionInFront(focused, sheetStack, topRunId !== null || workflowsTop)",
+    );
     expect(SCREEN).toContain("focused: inFront");
     expect(SCREEN).toContain("askSeq, inFront)");
   });

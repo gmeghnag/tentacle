@@ -99,21 +99,48 @@ describe("the screen is a dumb renderer", () => {
     }
   });
 
-  test("a broken row offers no Start at all", () => {
-    const broken = between(SCREEN, "function BrokenRow", "\nfunction ");
-    expect(broken).not.toContain("workflow-start-run");
+  test("an item's actions come from the view-model, and a dimmed one sends nothing", () => {
+    const item = between(SCREEN, "function Item", "function Landing");
+    expect(item).toContain("item.actions.map");
+    expect(item).toContain("testID={`workflow-item-${action.id}-${item.name}`}");
+    expect(item).toContain(
+      "action.enabled ? screen.onAct(action.id, item.key) : screen.onDimmed()",
+    );
+    expect(SCREEN).toContain("landingItems(");
+    // The delete question is inline, never a native alert.
+    expect(SCREEN).toContain("workflow-delete-confirm-");
+    expect(SCREEN).toContain("workflow-delete-cancel-");
+    expect(SCREEN).not.toContain("Alert");
+  });
+
+  test("square bands: the list has no rounded card", () => {
+    const band = between(SCREEN, "  band: {", "},");
+    expect(band).not.toContain("borderRadius");
   });
 });
 
-describe("the runs screen's entry", () => {
-  test("Start is offered only with a session (the catalogue is that session's)", () => {
-    expect(RUNS).toContain("sessionId?: string");
-    expect(RUNS).toContain('testID="workflow-runs-start"');
-    expect(RUNS).toContain("props.sessionId === undefined");
+describe("the hub lands on the workflow list (mobile-workflows-landing D7)", () => {
+  const route = between(APP, "function WorkflowStartRoute", "\nfunction ");
+
+  test("the hub's Workflows entry navigates to the landing, not the run list", () => {
+    const hub = between(APP, "onOpenWorkflows={() =>", "onOpenArtifacts=");
+    expect(hub).toContain('navigate("WorkflowStart"');
+    expect(hub).not.toContain("WorkflowRuns");
   });
 
-  test("the route passes the session only when the launch carried one", () => {
-    expect(APP).toContain("route.params.sessionId === undefined");
-    expect(APP).toContain('navigate("WorkflowStart"');
+  test("`Recent runs` leads to the run list, which has no Start", () => {
+    expect(APP).toContain("onRecent={() =>");
+    expect(APP).toContain('navigate("WorkflowRuns"');
+    expect(RUNS).not.toContain("Start a workflow");
+  });
+
+  test("the sheet is only WATCHED here, and a re-render never rebuilds the controller", () => {
+    expect(route).toContain("SESSION_SCREENS.get(sessionKey(computerId, sessionId))");
+    expect(route).toContain("askSourceFromSheet({");
+    expect(route).toContain("controller?.setOffline(offline)");
+    expect(route).toContain("}, [computerId, sessionId]);");
+    expect(route).toContain('playHaptic("light")');
+    expect(route).not.toContain("workflowApprove");
+    expect(route).not.toContain("workflowDelete");
   });
 });

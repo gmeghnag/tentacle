@@ -1,0 +1,88 @@
+appId: so.tentacle.app
+---
+# 46-workflow-landing (docs/feat/mobile-workflows-landing.md D7/D8): from the hub
+# straight to the workflow list; Approve raises the standard permission sheet OVER
+# the list and Allow once makes the item read «✓ Approved»; Delete asks inline and
+# the item is gone. Its own workflow file (`landing-demo.yaml`, seeded by
+# `e2e/run.ts`, never approved and never run before this flow, which deletes it).
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${LANDING_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${LANDING_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "workflows"
+- tapOn:
+    id: "hub-item-workflows"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-landing-recent"
+    timeout: 15000
+- scrollUntilVisible:
+    element:
+      id: "workflow-item-delete-landing-demo"
+    direction: DOWN
+# The row's label is `name, word`.
+- assertVisible:
+    id: "workflow-start-row-landing-demo"
+    text: "landing-demo, Needs approval"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "46-landing"
+- tapOn:
+    id: "workflow-item-approve-landing-demo"
+# The ask is the SAME sheet a run's approval uses, presented over the list.
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "46-landing-approve"
+- tapOn:
+    id: "perm-allow_once"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-start-row-landing-demo"
+      text: "landing-demo, Approved"
+    timeout: 20000
+# An approved file offers no Approve.
+- assertNotVisible:
+    id: "workflow-item-approve-landing-demo"
+# Delete: asked inline first; Cancel keeps the file.
+- tapOn:
+    id: "workflow-item-delete-landing-demo"
+- assertVisible:
+    id: "workflow-delete-question-landing-demo"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "46-landing-delete"
+- tapOn:
+    id: "workflow-delete-cancel-landing-demo"
+- assertVisible:
+    id: "workflow-item-delete-landing-demo"
+- tapOn:
+    id: "workflow-item-delete-landing-demo"
+- tapOn:
+    id: "workflow-delete-confirm-landing-demo"
+- extendedWaitUntil:
+    notVisible:
+      id: "workflow-start-row-landing-demo"
+    timeout: 15000

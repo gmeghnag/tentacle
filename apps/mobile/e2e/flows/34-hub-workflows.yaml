@@ -41,22 +41,36 @@ appId: so.tentacle.app
     id: "hub-item-attach"
 - tapOn:
     id: "hub-item-workflows"
-# The run list opens even with no run (its "No workflow runs" empty state is
-# shown), and its Start entry leads to the catalogue — the way to the FIRST
-# workflow from the phone.
+# The hub lands on the workflow list itself (docs/feat/mobile-workflows-landing.md
+# D7): with no run at all, the first workflow is one Start away. The run list is
+# behind `Recent runs`.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-start"
+    timeout: 10000
+- extendedWaitUntil:
+    visible:
+      id: "workflow-landing-recent"
+    timeout: 10000
+- scrollUntilVisible:
+    element:
+      id: "workflow-item-start-demo-note"
+    direction: DOWN
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "34-hub-workflows-catalogue"
+# `Recent runs ›` (the top of the list) is the run list: empty here, and with no
+# Start of its own — the landing owns it.
+- scrollUntilVisible:
+    element:
+      id: "workflow-landing-recent"
+    direction: UP
+- tapOn:
+    id: "workflow-landing-recent"
 - extendedWaitUntil:
     visible:
       id: "workflow-runs"
     timeout: 10000
 - assertVisible:
     id: "workflow-runs-empty"
-- tapOn:
-    id: "workflow-runs-start"
-- extendedWaitUntil:
-    visible:
-      id: "workflow-start"
-    timeout: 10000
-- runFlow:
-    file: _shot.yaml
-    env:
-      SHOT: "34-hub-workflows-catalogue"

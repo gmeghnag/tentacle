@@ -53,7 +53,8 @@ export const WORKFLOW_DETAIL_GONE =
 export const WORKFLOW_APPROVE_HINT = "? needs approval — answer in the prompt";
 
 /** The `/workflow` usage line: the one thing a refused command says. */
-export const WORKFLOW_USAGE = "Usage: /workflow [run <name> [k=v …] | stop | resume]";
+export const WORKFLOW_USAGE =
+  "Usage: /workflow [run <name> [k=v …] | stop | resume | approve <name> | delete <name>]";
 
 /** One painted rail row: the text and the SEMANTIC tone (the component colours it). */
 export interface RailLine {
@@ -661,13 +662,16 @@ export type WorkflowCommand =
     }
   | { readonly kind: "stop" }
   | { readonly kind: "resume" }
+  | { readonly kind: "approve"; readonly name: string }
+  | { readonly kind: "delete"; readonly name: string; readonly confirmed: boolean }
   | { readonly kind: "refused"; readonly text: string };
 
 /**
  * `/workflow <args>`: no argument opens the panel; `run <name> [k=v …]` starts
- * one from the project's files; `stop`/`resume` act on the run in flight. Anything
- * else is refused with the usage line (a silent no-op would read as "my run
- * started").
+ * one from the project's files; `stop`/`resume` act on the run in flight;
+ * `approve <name>` asks for a file's hash approval and `delete <name> [confirm]`
+ * removes it (docs/feat/mobile-workflows-landing.md D6). Anything else is refused
+ * with the usage line (a silent no-op would read as "my run started").
  */
 export function parseWorkflowCommand(args: string): WorkflowCommand {
   const words = args
@@ -680,6 +684,15 @@ export function parseWorkflowCommand(args: string): WorkflowCommand {
   const verb = words[0];
   if (verb === "stop" || verb === "resume") {
     return words.length > 1 ? { kind: "refused", text: WORKFLOW_USAGE } : { kind: verb };
+  }
+  if (verb === "approve" && words.length === 2) {
+    return { kind: "approve", name: words[1] ?? "" };
+  }
+  if (verb === "delete") {
+    const confirmed = words.length === 3 && words[2] === "confirm";
+    return words.length === 2 || confirmed
+      ? { kind: "delete", name: words[1] ?? "", confirmed }
+      : { kind: "refused", text: WORKFLOW_USAGE };
   }
   if (verb !== "run" || words.length < 2) {
     return { kind: "refused", text: WORKFLOW_USAGE };
@@ -918,7 +931,62 @@ export function catalogueSection(cat: CatalogueView, width: number): PanelViewRo
     out.push(noteRow("  not versioned: git ignores this folder", width));
   }
   out.push(noteRow(`  in ${oneLine(cat.dir)} · /workflow run <name> to start one`, width));
+  // A second line, so the folder path above cannot cut the two verbs off.
+  out.push(noteRow("  /workflow approve <name> · /workflow delete <name>", width));
   return out;
+}
+
+// --- approve and delete (docs/feat/mobile-workflows-landing.md D6) ---------------
+
+/** A name the catalogue does not list: there is no hash to pin, so nothing is sent. */
+export const WORKFLOW_NOT_LISTED = "not in this project's workflows — /workflow to re-read";
+
+/** An older daemon's `{unsupported}` for approve / delete. */
+export const WORKFLOW_ACT_OLD_DAEMON =
+  "this daemon cannot approve or delete workflows (update tentacle)";
+
+/** What a `delete` without `confirm` says, beside the pre-filled line. */
+export const workflowDeletePrompt = (path: string): string =>
+  `Deletes ${oneLine(path)} (prompt files stay) — press enter to confirm`;
+
+/** The notice for an `approve` reply: asked, already approved, or the refusal. */
+export function approveReplyNotice(
+  name: string,
+  result:
+    | { readonly ok: boolean; readonly approved?: boolean; readonly reason?: string }
+    | { readonly unsupported: true },
+): string {
+  if ("unsupported" in result) {
+    return `_${WORKFLOW_ACT_OLD_DAEMON}_`;
+  }
+  const asked =
+    result.approved === true
+      ? `${oneLine(name)} is already approved.`
+      : `Approval asked for ${oneLine(name)} — answer the prompt.`;
+  return workflowReplyNotice(asked, result);
+}
+
+/** The notice for a `delete` reply, naming the schedules that still start it. */
+export function deleteReplyNotice(
+  name: string,
+  result:
+    | {
+        readonly ok: boolean;
+        readonly reason?: string;
+        readonly path?: string;
+        readonly schedules?: readonly string[];
+      }
+    | { readonly unsupported: true },
+): string {
+  if ("unsupported" in result) {
+    return `_${WORKFLOW_ACT_OLD_DAEMON}_`;
+  }
+  const count = result.schedules?.length ?? 0;
+  const left =
+    count === 0
+      ? ""
+      : ` ${count} schedule${count === 1 ? " still starts" : "s still start"} ${oneLine(name)} — ${count === 1 ? "it" : "they"} will be skipped.`;
+  return workflowReplyNotice(`Deleted ${oneLine(result.path ?? name)}.${left}`, result);
 }
 
 /** A section line that is not selectable (a note, cut to the panel's width). */
