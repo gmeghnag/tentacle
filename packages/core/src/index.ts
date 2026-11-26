@@ -44,6 +44,7 @@ export * from "./image-file.ts";
 export * from "./png.ts";
 export * from "./png-decode.ts";
 export * from "./image-region.ts";
+export * from "./jpeg-decode.ts";
 export * from "./voice/index.ts";
 export * from "./tool-groups.ts";
 export * from "./project-paths.ts";

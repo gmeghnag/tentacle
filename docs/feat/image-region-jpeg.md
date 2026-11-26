@@ -316,6 +316,15 @@ STOP and fix the plan (§8).
   - **The first scan's entropy data:** walk it, skipping `FF 00` and
     `FF D0–D7`. The first other marker ends it. If that marker is `FF DC`
     (DNL), refuse.
+  - **Amended in Execution (claude-sonnet-5-5, 26/11; the two rules above were
+    not enough, see Execution step 0):**
+    - the marker ending the first scan must be one of `D9`, `C4`, `DA`, `DB`,
+      `DD`, `E0–EF`, `FE`; anything else, `FF 01–BF` included, refuses
+      ("unexpected marker FFxx"): pdf.js SKIPS a marker under `C0`, takes a
+      following restart marker and reads on, DNL included;
+    - a fill byte directly after an APPn/COM segment refuses ("unexpected
+      layout"): pdf.js (`readDataBlock`) then searches the segment's PAYLOAD
+      for a marker and parses what it finds. Fill bytes elsewhere stay allowed.
   - EOI `FF D9` somewhere after the first scan's start, as `inspectJpeg`
     requires (`image-file.ts:235-246`).
   - **EXIF:** from the first APP1 starting `Exif\0\0`, the IFD0 tag `0x0112`
@@ -554,7 +563,9 @@ not regenerate the files.
   - A GIF user image + region → an error naming GIF.
   - A forced setting accepts a region on a JPEG.
   - A full store → error (region) and `high` + note (D5).
-  - Every existing `image-view*.test.ts` stays green, unchanged.
+  - Every existing `image-view*.test.ts` stays green, unchanged. (Amended in
+    Execution: four tests in `image-view-region.test.ts` pinned the behaviour
+    D1/J8 replace, and were rewritten.)
 - **Mutations (§9; recorded in Execution, reverted):**
   - drop the DNL check → T2 DNL;
   - accept a SOF length mismatch → T2;
@@ -598,9 +609,137 @@ Review. Extra validation, pasted into Execution:
 
 ## Execution
 
-*— <model-id>, <date>*
+*— claude-sonnet-5-5, 2026-11-26*
 
-(Not started.)
+### Repro (before any edit)
+
+`bun .tentacle/tmp/image-region-jpeg/repro-exec.ts` (the plan's `repro.ts` with an
+absolute photo path, so it runs from the worktree) gave the Context's output
+verbatim: `region` → `isError=true · region needs a PNG picture; this one is
+JPEG…`; `low` → the 2.7 MB original `· low is not available for this image yet —
+sent at high`; `store.read calls: 0`. `install-fixtures.ts`: `13 fixtures
+verified`, installed.
+
+### Step 0: the load-bearing check — holds, but the planned walk had two holes
+
+Scratch `step0.ts` / `step0b.ts` (scripts, not a `.test.ts`). `step0b.ts` records
+the `Int16Array` sizes pdf.js allocates; DNL height 65280, file 64×48:
+
+```
+1 small-baseline: 64×48×3 · coefficient arrays 3456,960,960
+2 DNL at start of the first scan: THROWS JpegError: unexpected marker ffdc · coefficient arrays 3456,960,960,4700160,1305600,1305600
+A FF 10 · FF D0 · DNL after the entropy data: THROWS JpegError: unexpected marker ff10 · coefficient arrays 3456,960,960,4700160,1305600,1305600
+B APP1(payload = a 64×65280 JPEG) · FF fill · the real 64×48 JPEG: 64×48×3 · coefficient arrays 4700160,1305600,1305600,3456,960,960
+C APP1(payload = one SOF) · FF fill: THROWS JpegError: Only single frame JPEGs supported · coefficient arrays 4700160,1305600,1305600
+truncated, default verbosity: console writes 1 · verbosity 0: console writes 0
+```
+
+- `JpegImage` decodes the fixture at 64×48×3; verbosity 0 silences truncation.
+- **Drift from the plan's step 0:** the DNL re-parse happens (second set of
+  arrays) but then THROWS instead of decoding at 64×256: the re-parse reads the
+  same DNL again. The allocation precedes the throw, so the risk is as stated.
+- **A and B pass the walk as D2 wrote it** (exact lengths, EOI present, A's
+  first scan ends at `FF 10`, not DNL; B's fill byte was allowed) and make pdf.js
+  allocate for a frame the walk never costed. D2 is amended above; both have T2
+  tests.
+
+### As built (plan's order; each slice red on stubs, then green)
+
+0. Fixtures: `packages/core/test/fixtures/jpeg/`.
+1–2. `core/src/jpeg-decode.ts` (new): `isSof`, `jpegFrameRefusal` (moved),
+   `readJpegHeader`, `jpegDecodeCost`, `decodeJpeg`. `core/src/image-file.ts`
+   imports the two moved rules. Red 42/43 fail on stubs; green with
+   `image-file.test.ts` unchanged (71 pass).
+3–4. `core/src/image-region.ts`: `orientedSize`, `storedBox`, `orientPixels` (one
+   `storedPoint` table), `RegionEncoder`, `renderRegionWith`, shared private
+   `cutPart` / `nextEdge` / `tooDetailed`. Exported from `core/src/index.ts`.
+   Red 12 fail; green (97 pass across the three core files).
+5. `tools/src/image-codecs.ts` (new): `decodeJpegPixels` (verbosity 0 at load),
+   `createJpegEncoder`, `bytesOf` (moved from `image-view.ts`). Red 27/27;
+   green 27/27.
+6. `tools/src/image-view.ts`: D1 texts; `makeFromPng` / `makeFromJpeg` /
+   `jpegPart` behind the same slot; `needsDownscale` takes JPEG. Red 28 fail;
+   green.
+7. Tests (`core/test/jpeg-decode.test.ts`, additions to `image-region.test.ts`,
+   `tools/test/image-codecs.test.ts`, `tools/test/support/jpeg-oracle.ts`,
+   `image-view-region.test.ts`), `changelog.d/image-region-jpeg.added.md`. No
+   schema, protocol, TUI or phone change.
+
+### Drift
+
+- D2: the two amendments above.
+- `createJpegEncoder(null)` means "no `Bun.Image`" (the plan wrote
+  `undefined`, which a default parameter would replace). It returns a
+  `PictureEncoder` giving `{ bytes, mimeType }`; the tool adapts it to core's
+  `RegionEncoder`.
+- Four existing tests rewritten (JPEG region error → corrupt-JPEG sentence; the
+  user's-own-JPEG error → GIF/WEBP errors plus a JPEG crop; the description
+  sentence; the high-only-JPEG note test, which now reads the bytes and asserts
+  nothing is stored).
+- T6's orientation oracle runs for all 8 (plan: 6), at mean |Δ| ≤ 4 (the crop is
+  lossy twice).
+
+### Mutations (each applied, run, reverted)
+
+| Mutation | Failing tests |
+|---|---|
+| no DNL check | T2 "a DNL marker in the first scan" + "…after a restart marker and a fill byte": `Received: "ACCEPTED 64×48"` (2 fail) |
+| any marker may end the first scan | T2 "junk under FFC0…", "a marker that cannot end a first scan": `ACCEPTED 64×48` (2) |
+| fill allowed after APP/COM | T2 both smuggling cases: `ACCEPTED 64×48` (2) |
+| SOF length mismatch accepted | T2 "a SOF length one over its content" (1) |
+| cost check after the decode | T3 "over the budget…": `Expected: 0, Received: 1` (1) |
+| orientations 6 ↔ 8 | T4 `storedBox` ×2, `orientPixels` 6 and 8; T5 oracle 6 and 8 (6) |
+| no `setVerbosityLevel(0)` | T5 "a truncated file writes NOTHING to the console" (1) |
+| `needsDownscale` PNG-only | T6 the three `low` cases + "bytes the store no longer returns" (4) |
+| encoder always PNG | T6 crop, orientations 1–8, the three `low` cases, user JPEG (13) |
+| box not mapped through `storedBox` | T6 orientations 2–8 (7; mean Δ 62–83 vs ≤ 4) |
+
+### Evidence
+
+```
+bun test (the 8 core/tools image files)            220 pass, 0 fail
+bun test agent/test/{subagent-image-view,loop-old-images}.test.ts   13 pass, 0 fail
+bunx biome check packages/core packages/tools/{src,test}            no issues
+tsc -p <scratch tsconfig over the touched files + imports>          clean
+```
+
+12 MP photo through the real tool path (`bench-tool.ts`, memory
+`AttachmentStore`, one cold process per call):
+
+```
+region-high: 306 ms · image/jpeg 325240 B · IMG_7364.jpg · region 1008,756 2016×1512 of 4032×3024 · sent 1568×1176 · high · 318 KB
+region-low:  248 ms · image/jpeg  85738 B · … · sent 768×576 · low · 84 KB
+low:         271 ms · image/jpeg  89786 B · IMG_7364.jpg · 768×576 · low · 88 KB
+whole-high:  321 ms · image/jpeg 344741 B · region 0,0 4032×3024 of 4032×3024 · sent 1568×1176 · high · 337 KB
+maxRSS growth during the call (second runs): region-high +175 MiB, low +94 MiB
+```
+
+The `region-high` peak is above D7's estimate (≈ 105 MiB): `maxRSS` also counts
+the uncollected garbage, the level-0 PNG and `Bun.Image`'s own buffers; it was
+not broken down.
+
+Bundling (`bundle-check.ts`, `Bun.build` of `image-codecs.ts`, `target: "bun"`):
+`452445 chars · "class JpegImage" true · bare pdfjs specifier left false`. The
+compiled binary itself was not built.
+
+### For Review (found while executing; NOT changed — outside the approved plan)
+
+1. **CPU is unbounded by the memory budget: many progressive scans.** Each tiny
+   AC scan walks every block, on the daemon thread (`scan-cost.ts`, 4032×3024,
+   33 bytes per scan): 1 scan 84 ms · 100 scans 137 ms · 1000 scans (33 KB)
+   789 ms. Linear ⇒ extrapolated, not measured: about 85 s for a 4 MB file and
+   over 5 min for a 15 MB user upload. J7's "≈ 0.6 s at the cap" does not hold
+   for such a file. A fix would need a cap on `FF DA` markers (or a worker with
+   a deadline): an orchestrator decision. Repeated selectors in one scan (Ns up
+   to 255) are the same class; D2 does not bound Ns.
+2. **The legacy pdf.js build now loads on the daemon side** (`@tentacle/tools`
+   import, 8 ms, no console writes): `globals-probe.ts` shows it adds
+   `__core-js_shared__` and `pdfjsImageDecoders` and wraps
+   `Function.prototype.toString`; no other probed builtin is replaced.
+
+### Gate
+
+Not run by the executor: the full `bun run check` is the orchestrator's script.
 
 ## Review
 

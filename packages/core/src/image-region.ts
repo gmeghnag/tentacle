@@ -1,11 +1,12 @@
 /**
- * A part of a picture (docs/feat/image-region-png.md D3): fractions of its size
- * → source pixels → crop → at most the detail's size (never enlarged) → a PNG
- * under the model's byte cap.
+ * A part of a picture (docs/feat/image-region-png.md D3,
+ * image-region-jpeg.md D3/D4): fractions of its size → source pixels → crop → at
+ * most the detail's size (never enlarged) → a file under the model's byte cap.
  *
- * Pure: the caller hands in `deflate` (see `png.ts`).
+ * Pure: the caller hands in `deflate` (see `png.ts`) or a `RegionEncoder`.
  */
 import { formatBytes } from "./attachments.ts";
+import type { ExifOrientation } from "./jpeg-decode.ts";
 import { downscalePixels, scaledSize } from "./pdf-images.ts";
 import type { DecodedPng } from "./png-decode.ts";
 import { type Deflate, PNG_CHANNELS, type PngColor, encodePng } from "./png.ts";
@@ -104,6 +105,111 @@ function withoutOpaqueAlpha(
   return { color: "rgb", pixels: rgb };
 }
 
+/** The size a `width × height` picture is DISPLAYED at under an EXIF orientation. */
+export function orientedSize(
+  width: number,
+  height: number,
+  orientation: ExifOrientation,
+): { readonly width: number; readonly height: number } {
+  return orientation < 5 ? { width, height } : { width: height, height: width };
+}
+
+/**
+ * Where the displayed pixel `(dx, dy)` sits in the STORED `width × height`
+ * picture — the one table every orientation function reads.
+ */
+function storedPoint(
+  dx: number,
+  dy: number,
+  width: number,
+  height: number,
+  orientation: ExifOrientation,
+): readonly [number, number] {
+  const right = width - 1;
+  const bottom = height - 1;
+  switch (orientation) {
+    case 1:
+      return [dx, dy];
+    case 2:
+      return [right - dx, dy];
+    case 3:
+      return [right - dx, bottom - dy];
+    case 4:
+      return [dx, bottom - dy];
+    case 5:
+      return [dy, dx];
+    case 6:
+      return [dy, bottom - dx];
+    case 7:
+      return [right - dy, bottom - dx];
+    case 8:
+      return [right - dy, dx];
+  }
+}
+
+/** A box in DISPLAYED pixels → the same pixels in the stored `width × height` picture. */
+export function storedBox(
+  box: RegionBox,
+  width: number,
+  height: number,
+  orientation: ExifOrientation,
+): RegionBox {
+  // Every orientation keeps boxes axis-aligned: two opposite corners decide it.
+  const [ax, ay] = storedPoint(box.x, box.y, width, height, orientation);
+  const [bx, by] = storedPoint(
+    box.x + box.width - 1,
+    box.y + box.height - 1,
+    width,
+    height,
+    orientation,
+  );
+  return {
+    x: Math.min(ax, bx),
+    y: Math.min(ay, by),
+    width: Math.abs(bx - ax) + 1,
+    height: Math.abs(by - ay) + 1,
+    clamped: box.clamped,
+  };
+}
+
+/**
+ * Turn a STORED-frame `width × height` buffer into the displayed frame (its size
+ * is `orientedSize`'s). Orientation 1 is the SAME buffer.
+ */
+export function orientPixels(
+  pixels: Uint8Array,
+  width: number,
+  height: number,
+  channels: number,
+  orientation: ExifOrientation,
+): Uint8Array {
+  if (orientation === 1) {
+    return pixels;
+  }
+  const shown = orientedSize(width, height, orientation);
+  const index = (dx: number, dy: number): number => {
+    const [x, y] = storedPoint(dx, dy, width, height, orientation);
+    return (y * width + x) * channels;
+  };
+  // The mapping is affine: an origin and one step per displayed axis.
+  const origin = index(0, 0);
+  const stepX = index(1, 0) - origin;
+  const stepY = index(0, 1) - origin;
+  const out = new Uint8Array(pixels.length);
+  let to = 0;
+  for (let dy = 0; dy < shown.height; dy += 1) {
+    let from = origin + dy * stepY;
+    for (let dx = 0; dx < shown.width; dx += 1) {
+      for (let c = 0; c < channels; c += 1) {
+        out[to] = pixels[from + c] as number;
+        to += 1;
+      }
+      from += stepX;
+    }
+  }
+  return out;
+}
+
 export interface RenderedRegion {
   readonly png: Uint8Array;
   readonly width: number;
@@ -121,6 +227,65 @@ export function renderRegion(input: {
   readonly deflate: Deflate;
 }): RenderedRegion | { readonly refused: string } {
   const { decoded, box, maxEdge, maxBytes, deflate } = input;
+  const part = cutPart(decoded, box);
+  let edge = maxEdge;
+  for (let step = 0; step <= MAX_BYTE_STEPS; step += 1) {
+    const { width, height, pixels } = part.at(edge);
+    const png = encodePng(width, height, pixels, part.color, deflate);
+    if (png.length <= maxBytes) {
+      return { png, width, height, scaledForBytes: step > 0 };
+    }
+    edge = nextEdge(width, height);
+  }
+  return tooDetailed(maxBytes);
+}
+
+/** A picture file's bytes from 8-bit pixels (injected: JPEG or PNG, sync or not). */
+export type RegionEncoder = (
+  width: number,
+  height: number,
+  pixels: Uint8Array,
+  color: PngColor,
+) => Promise<Uint8Array>;
+
+/** `renderRegion` with any encoder: the same sizes, step-down and refusal. */
+export async function renderRegionWith(input: {
+  readonly decoded: DecodedPng;
+  readonly box: RegionBox;
+  readonly maxEdge: number;
+  readonly maxBytes: number;
+  readonly encode: RegionEncoder;
+}): Promise<
+  | {
+      readonly bytes: Uint8Array;
+      readonly width: number;
+      readonly height: number;
+      readonly scaledForBytes: boolean;
+    }
+  | { readonly refused: string }
+> {
+  const { maxEdge, maxBytes, encode } = input;
+  const part = cutPart(input.decoded, input.box);
+  let edge = maxEdge;
+  for (let step = 0; step <= MAX_BYTE_STEPS; step += 1) {
+    const { width, height, pixels } = part.at(edge);
+    const bytes = await encode(width, height, pixels, part.color);
+    if (bytes.length <= maxBytes) {
+      return { bytes, width, height, scaledForBytes: step > 0 };
+    }
+    edge = nextEdge(width, height);
+  }
+  return tooDetailed(maxBytes);
+}
+
+/** The box's pixels, opaque alpha dropped, ready to be scaled to any long edge. */
+function cutPart(
+  decoded: DecodedPng,
+  box: RegionBox,
+): {
+  readonly color: PngColor;
+  readonly at: (edge: number) => { width: number; height: number; pixels: Uint8Array };
+} {
   const cropped = cropPixels(
     decoded.pixels,
     decoded.width,
@@ -129,24 +294,26 @@ export function renderRegion(input: {
     box,
   );
   const { color, pixels } = withoutOpaqueAlpha(cropped, decoded.color);
-  let edge = maxEdge;
-  for (let step = 0; step <= MAX_BYTE_STEPS; step += 1) {
-    const size = scaledSize(box.width, box.height, edge);
-    const scaled = downscalePixels(
-      pixels,
-      box.width,
-      box.height,
-      PNG_CHANNELS[color],
-      size.width,
-      size.height,
-    );
-    const png = encodePng(size.width, size.height, scaled, color, deflate);
-    if (png.length <= maxBytes) {
-      return { png, ...size, scaledForBytes: step > 0 };
-    }
-    edge = Math.max(1, Math.floor(Math.max(size.width, size.height) * BYTE_STEP));
-  }
   return {
-    refused: `the region is too detailed to send under this model's ${formatBytes(maxBytes)} image limit — pick a smaller part or detail low`,
+    color,
+    at: (edge) => {
+      const size = scaledSize(box.width, box.height, edge);
+      const scaled = downscalePixels(
+        pixels,
+        box.width,
+        box.height,
+        PNG_CHANNELS[color],
+        size.width,
+        size.height,
+      );
+      return { ...size, pixels: scaled };
+    },
   };
 }
+
+const nextEdge = (width: number, height: number): number =>
+  Math.max(1, Math.floor(Math.max(width, height) * BYTE_STEP));
+
+const tooDetailed = (maxBytes: number): { readonly refused: string } => ({
+  refused: `the region is too detailed to send under this model's ${formatBytes(maxBytes)} image limit — pick a smaller part or detail low`,
+});

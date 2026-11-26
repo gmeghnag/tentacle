@@ -1,0 +1,1 @@
+- **image_view zooms into JPEG pictures.** A `region` of a photo or other JPEG is sent at up to the chosen detail, oriented as the photo is displayed; `low` now works for JPEG files.
