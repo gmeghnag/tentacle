@@ -270,6 +270,19 @@ PRE-EXISTING `permission_request.workflow` behaves the same way, so the plan's
 "a float" reading is the right one and the case uses `index: 1.5, count: 1e9`
 (no new constraint added to a blocking update).
 
+**Gate fix round 1 (orchestrator's gate, after exec).** One pre-existing case was
+left stale by D5: `apps/mobile/test/permission-sheet.test.ts` «the age guard holds
+for a card too, and the reply option is not a card answer» (from
+`docs/feat/workflows-ui.md` D4) asserted `answerFor(id, "reply") === "ignored"` —
+exactly what D5 reverses, and the file is one the executor never ran (it ran the
+new `permission-sheet-question.test.ts` instead). Production code is UNCHANGED
+(D5 is the approved decision, and both new reply tests depend on it; a
+guarded-reply implementation fails them). The case was rewritten to D5: the
+guard still holds for a DECISION (an unarmed `reject_once` is `"ignored"`, both
+before and after the field opens), while `"reply"` opens the refusal field
+unarmed (`"typing"`, `replyOpen: true`, nothing settled) — non-vacuity re-proven
+by mutation (`answerFor`'s reply branch honouring the guard → red).
+
 **Checks run here (narrow, per the owner's budget).** The 8 touched/covering test
 files: **133 pass, 0 fail**; `packages/protocol/test/json-schema.test.ts` +
 `version.test.ts` (regenerated schema, no version bump): 25 pass;

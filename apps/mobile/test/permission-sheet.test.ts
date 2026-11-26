@@ -470,14 +470,18 @@ describe("answerFor: a workflow card answers ONE named ask (docs/feat/workflows-
     expect(sheet.view()).toMatchObject({ kind: "asking", requestId: "ask-2" });
   });
 
-  test("the age guard holds for a card too, and the reply option is not a card answer", async () => {
+  test("the age guard holds for a card too; opening the field is not an answer", async () => {
     const { sheet, clock } = sheetAt();
     void sheet.requester(ask(), { requestId: "ask-1" });
     await Promise.resolve();
     expect(sheet.answerFor("ask-1", "reject_once")).toBe("ignored");
+    // docs/fix/a2a-question-workflow-label.md D5 (it supersedes this case's old
+    // "reply is not a card answer"): opening the refusal field sends nothing, so
+    // the guard — which protects a DECISION — does not apply; `sendReply` does.
+    expect(sheet.answerFor("ask-1", "reply")).toBe("typing");
+    expect(sheet.view()).toMatchObject({ kind: "asking", replyOpen: true });
+    expect(sheet.answerFor("ask-1", "reject_once")).toBe("ignored");
     clock.at += ARM_MS;
-    expect(sheet.answerFor("ask-1", "reply")).toBe("ignored");
-    expect(sheet.view().kind).toBe("asking");
     expect(sheet.answerFor("ask-1", "reject_once")).toBe("sent");
   });
 });
