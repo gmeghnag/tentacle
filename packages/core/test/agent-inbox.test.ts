@@ -151,3 +151,60 @@ describe("T6: the read count, per sender", () => {
     expect(reads).toBe(2);
   });
 });
+
+// docs/feat/a2a-client.md C6 (slice a2c-3): a remote agent's question waits on
+// the parent's reply — `next` is the wait, `raw` the sender's own words.
+describe("next(signal): the wait a harness child's parent route reads", () => {
+  test("a text queued BEFORE the call is not taken (it predates the question): the next push is, raw kept", async () => {
+    const inbox = new AgentInbox();
+    inbox.push("stale", "agent");
+    const p = inbox.next(new AbortController().signal);
+    inbox.push("[message from the parent agent] main", "agent", "main");
+    expect(await p).toEqual({
+      text: "[message from the parent agent] main",
+      raw: "main",
+      from: "agent",
+    });
+    expect(inbox.read("agent")).toBe(1);
+    expect(inbox.pending).toBe(1);
+    expect(inbox.close()).toEqual(["stale"]);
+  });
+
+  test("a waiting reader gets the first push, which is read, not queued", async () => {
+    let reads = 0;
+    const inbox = new AgentInbox({ onRead: () => reads++ });
+    const p = inbox.next(new AbortController().signal);
+    const pushed = inbox.push("wrapped", "user", "dev");
+    expect(pushed).toEqual({ ok: true, index: 1 });
+    expect((await p)?.raw).toBe("dev");
+    expect(inbox.pending).toBe(0);
+    expect(inbox.read("user")).toBe(1);
+    expect(reads).toBe(1);
+  });
+
+  test("abort → undefined, and a later push is queued (not lost)", async () => {
+    const inbox = new AgentInbox();
+    const ac = new AbortController();
+    const p = inbox.next(ac.signal);
+    ac.abort();
+    expect(await p).toBeUndefined();
+    inbox.push("later");
+    expect(inbox.pending).toBe(1);
+    expect(inbox.close()).toEqual(["later"]);
+  });
+
+  test("close releases a waiting reader with undefined; a closed inbox never waits", async () => {
+    const inbox = new AgentInbox();
+    const p = inbox.next(new AbortController().signal);
+    expect(inbox.close()).toEqual([]);
+    expect(await p).toBeUndefined();
+    expect(await inbox.next(new AbortController().signal)).toBeUndefined();
+  });
+
+  test("push without raw: raw is the text", async () => {
+    const inbox = new AgentInbox();
+    const p = inbox.next(new AbortController().signal);
+    inbox.push("plain");
+    expect((await p)?.raw).toBe("plain");
+  });
+});

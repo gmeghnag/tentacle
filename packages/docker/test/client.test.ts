@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { Dialer } from "../src/byte-duplex.ts";
-import { DockerClient, OWNER_LABEL, negotiateApiVersion, splitImageRef } from "../src/client.ts";
+import {
+  ContainerCreateError,
+  DockerClient,
+  OWNER_LABEL,
+  negotiateApiVersion,
+  splitImageRef,
+} from "../src/client.ts";
 import { DockerApiError, request } from "../src/http-conn.ts";
 import { response, scriptedDialer } from "./fake-duplex.ts";
 
@@ -268,6 +274,70 @@ describe("container verbs", () => {
     await expect(missing).rejects.toThrow(
       "No such image: nope:latest — pull the image or check its name",
     );
+  });
+
+  // feat/run-network D5: a create's failure is TYPED, so the host can tell a
+  // missing image (pull + retry) from a bad network (never pull — the image is
+  // not the problem).
+  test("create: a network failure is typed `network`, a missing image `image`", async () => {
+    const { engine, docker } = client("1.52");
+
+    const unknownNet = docker.createContainer("n", {
+      Image: "busybox",
+      HostConfig: { NetworkMode: "nope" },
+    });
+    (await engine.next()).duplex.receive(response(404, '{"message":"network nope not found"}'));
+    const netErr = await unknownNet.then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(netErr).toBeInstanceOf(ContainerCreateError);
+    if (!(netErr instanceof ContainerCreateError)) {
+      return;
+    }
+    expect(netErr.reason).toBe("network");
+    expect(netErr.message).toContain("network nope not found");
+    expect(netErr.message).toContain("check the network name");
+    expect(netErr.message).not.toContain("pull the image");
+
+    // Podman's wording on a non-404 status is the same failure.
+    const podmanNet = docker.createContainer("p", { Image: "busybox" });
+    (await engine.next()).duplex.receive(
+      response(500, '{"message":"unable to find network with name or ID foo: network not found"}'),
+    );
+    const podmanErr = await podmanNet.then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(podmanErr).toBeInstanceOf(ContainerCreateError);
+    if (!(podmanErr instanceof ContainerCreateError)) {
+      return;
+    }
+    expect(podmanErr.reason).toBe("network");
+
+    // A 404 that is not about a network stays the missing-image case.
+    const missing = docker.createContainer("y", { Image: "nope" });
+    (await engine.next()).duplex.receive(response(404, '{"message":"No such image: nope:latest"}'));
+    const imageErr = await missing.then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(imageErr).toBeInstanceOf(ContainerCreateError);
+    if (!(imageErr instanceof ContainerCreateError)) {
+      return;
+    }
+    expect(imageErr.reason).toBe("image");
+
+    // Any other create failure is still the engine's own error (a 409 →
+    // `RefusalError` in the host, a 500 → the engine message).
+    const other = docker.createContainer("o", { Image: "busybox" });
+    (await engine.next()).duplex.receive(response(500, '{"message":"cannot create: disk full"}'));
+    expect(
+      await other.then(
+        () => undefined,
+        (e: unknown) => e,
+      ),
+    ).toBeInstanceOf(DockerApiError);
   });
 
   test("waitForRunning: running → resolves; exited → rejects with the code; timeout", async () => {

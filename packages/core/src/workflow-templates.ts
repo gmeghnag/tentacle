@@ -110,7 +110,7 @@ const LOOP_PROMPTS: Readonly<Record<string, string>> = {
     "{{steps.plan.report}}",
   ].join("\n"),
   "prompts/review.md": [
-    "Review the change against the plan. Answer pass or fail, with the one reason that decides it.",
+    "Review the change against the plan and END THE STEP by calling the `step_verdict` tool: `pass` or `fail`, with the one reason that decides it. Never write the verdict as text — a PASS/FAIL line is not a verdict.",
     "",
     "The plan was:",
     "",

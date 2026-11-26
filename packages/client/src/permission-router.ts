@@ -16,14 +16,30 @@
  *   human decided, so the request stays pending for another client.
  */
 import {
+  A2A_ADD_AGENT_TOOL,
   BROWSER_ACTION_TOOL,
   type PermissionRequest,
   type PermissionResponse,
   WORKFLOW_APPROVE_TOOL,
 } from "@tentacle/core";
-import type { PermissionRequestUpdate } from "@tentacle/protocol";
+import {
+  type PermissionRequestUpdate,
+  QUESTION_ANSWER_OPTION,
+  QUESTION_SKIP_OPTION,
+  type QuestionRequestUpdate,
+} from "@tentacle/protocol";
 import { progressText } from "./mapping.ts";
-import { normalizePermissionReply, responseToOutcome } from "./permission-map.ts";
+import {
+  normalizePermissionReply,
+  normalizeQuestionAnswer,
+  responseToOutcome,
+} from "./permission-map.ts";
+
+/**
+ * An ask the router holds: a permission request, or a remote agent's question
+ * (docs/feat/a2a-client.md C6) — one queue, one prompt at a time.
+ */
+export type AskUpdate = PermissionRequestUpdate | QuestionRequestUpdate;
 
 export type RouterAction =
   | {
@@ -70,8 +86,13 @@ export type RouterAction =
       readonly sessionId: string;
       readonly requestId: string;
       readonly optionId: string;
-      /** The person's reply with a refusal, normalized (only if the request offered `reply`). */
+      /**
+       * The person's reply with a refusal, normalized (only if the request
+       * offered `reply`) — or, with `question`, the ANSWER (absent = skip).
+       */
       readonly message?: string;
+      /** A remote question's answer: sent as `session/answer_question` (C6). */
+      readonly question?: true;
     }
   /** The user's answer maps to an option the request did not offer: not sent (report it). */
   | {
@@ -89,7 +110,7 @@ export type RouterAction =
 
 interface Entry {
   readonly sessionId: string;
-  readonly update: PermissionRequestUpdate;
+  readonly update: AskUpdate;
   readonly turnId: string | null;
 }
 
@@ -116,7 +137,20 @@ const is = (entry: Entry | null, sessionId: string, requestId: string): boolean 
   entry !== null && entry.sessionId === sessionId && entry.update.requestId === requestId;
 
 /** The local request the daemon's gate built, rebuilt from the event. */
-export function toPermissionRequest(update: PermissionRequestUpdate): PermissionRequest {
+export function toPermissionRequest(update: AskUpdate): PermissionRequest {
+  if (update.type === "question_request") {
+    // A remote agent's question (docs/feat/a2a-client.md C6): a kind auto-accept
+    // never answers; the answer is the reply text, bounded by `maxChars`.
+    return {
+      kind: "question",
+      tool: update.agent?.type ?? "question",
+      level: "ask",
+      title: update.title,
+      ...(update.question !== "" ? { detail: update.question } : {}),
+      input: {},
+      reply: { maxChars: update.maxChars },
+    };
+  }
   return {
     // A workflow's hash approval / approve step (docs/feat/agent-workflows.md
     // D3): the one kind read off the wire, because it only ever asks MORE — a
@@ -125,6 +159,8 @@ export function toPermissionRequest(update: PermissionRequestUpdate): Permission
     // A browser action (docs/feat/browser-inspect.md B5, Q3): same rule, the
     // session's auto-accept never answers acting AS the user on the web.
     ...(update.tool === BROWSER_ACTION_TOOL ? { kind: "browser_action" as const } : {}),
+    // A remote agent the model proposed (docs/feat/a2a-client.md C11): same rule.
+    ...(update.tool === A2A_ADD_AGENT_TOOL ? { kind: "agent_add" as const } : {}),
     tool: update.tool,
     level: "ask",
     title: update.title,
@@ -152,11 +188,7 @@ export class PermissionRouter {
    * stream raised it in; a background child's ask names its own `turnId`, which
    * wins. Kept until it is asked.
    */
-  request(
-    sessionId: string,
-    update: PermissionRequestUpdate,
-    turnId: string | null = null,
-  ): RouterAction[] {
+  request(sessionId: string, update: AskUpdate, turnId: string | null = null): RouterAction[] {
     const id = update.requestId;
     if (
       is(this.current, sessionId, id) ||
@@ -273,23 +305,38 @@ export class PermissionRouter {
     if (response.dismissed) {
       return [];
     }
-    const outcome = responseToOutcome(response);
-    if (outcome.outcome !== "selected") {
-      return [];
-    }
-    if (!entry.update.options.some((o) => o.optionId === outcome.optionId)) {
-      return [{ kind: "unoffered", sessionId, requestId, optionId: outcome.optionId }];
-    }
-    // A reply goes only with a refusal (an approval's is ignored), and only
-    // where the daemon said it takes one.
-    const reply = entry.update.reply;
-    // Blank once normalized: a plain No (owner Q2).
-    const message =
-      !response.allowed && response.message !== undefined
-        ? normalizePermissionReply(response.message, reply?.maxChars ?? Number.POSITIVE_INFINITY)
-        : null;
-    if (message !== null && !reply) {
-      return [{ kind: "unreplyable", sessionId, requestId }];
+    let optionId: string;
+    let message: string | null;
+    const update = entry.update;
+    if (update.type === "question_request") {
+      // A remote question (docs/feat/a2a-client.md C6): `allowed` with a text is
+      // the answer; anything else (a refusal, or no text left once normalized)
+      // is a skip — never an empty answer sent to the remote.
+      message =
+        response.allowed && response.message !== undefined
+          ? normalizeQuestionAnswer(response.message, update.maxChars)
+          : null;
+      optionId = message !== null ? QUESTION_ANSWER_OPTION : QUESTION_SKIP_OPTION;
+    } else {
+      const outcome = responseToOutcome(response);
+      if (outcome.outcome !== "selected") {
+        return [];
+      }
+      optionId = outcome.optionId;
+      if (!update.options.some((o) => o.optionId === optionId)) {
+        return [{ kind: "unoffered", sessionId, requestId, optionId }];
+      }
+      // A reply goes only with a refusal (an approval's is ignored), and only
+      // where the daemon said it takes one.
+      const reply = update.reply;
+      // Blank once normalized: a plain No (owner Q2).
+      message =
+        !response.allowed && response.message !== undefined
+          ? normalizePermissionReply(response.message, reply?.maxChars ?? Number.POSITIVE_INFINITY)
+          : null;
+      if (message !== null && !reply) {
+        return [{ kind: "unreplyable", sessionId, requestId }];
+      }
     }
     const answeredIds = this.answeredIds.get(sessionId);
     if (answeredIds?.has(requestId)) {
@@ -306,8 +353,9 @@ export class PermissionRouter {
         kind: "send",
         sessionId,
         requestId,
-        optionId: outcome.optionId,
+        optionId,
         ...(message !== null ? { message } : {}),
+        ...(update.type === "question_request" ? { question: true as const } : {}),
       },
     ];
   }
@@ -377,6 +425,8 @@ export class PermissionRouter {
       return [];
     }
     this.current = entry;
+    // Only a permission request carries a workflow (a remote question has none).
+    const workflow = entry.update.type === "permission_request" ? entry.update.workflow : undefined;
     return [
       {
         kind: "prompt",
@@ -396,23 +446,15 @@ export class PermissionRouter {
               },
             }
           : {}),
-        ...(entry.update.workflow
+        ...(workflow
           ? {
               workflow: {
-                name: progressText(entry.update.workflow.name),
-                ...(entry.update.workflow.runId !== undefined
-                  ? { runId: progressText(entry.update.workflow.runId) }
-                  : {}),
-                ...(entry.update.workflow.stepId !== undefined
-                  ? { stepId: progressText(entry.update.workflow.stepId) }
-                  : {}),
+                name: progressText(workflow.name),
+                ...(workflow.runId !== undefined ? { runId: progressText(workflow.runId) } : {}),
+                ...(workflow.stepId !== undefined ? { stepId: progressText(workflow.stepId) } : {}),
                 // A pod's number: only finite ones go on (the wire may not bound them).
-                ...(Number.isFinite(entry.update.workflow.index)
-                  ? { index: entry.update.workflow.index }
-                  : {}),
-                ...(Number.isFinite(entry.update.workflow.count)
-                  ? { count: entry.update.workflow.count }
-                  : {}),
+                ...(Number.isFinite(workflow.index) ? { index: workflow.index } : {}),
+                ...(Number.isFinite(workflow.count) ? { count: workflow.count } : {}),
               },
             }
           : {}),

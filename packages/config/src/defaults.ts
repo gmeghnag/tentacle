@@ -45,6 +45,15 @@ export const DEFAULT_HARNESS_CLAUDE_CODE = {
   model: "opus",
   idleMinutes: 15,
 } as const;
+/**
+ * A remote A2A agent (docs/feat/a2a-client.md C1): its questions go to the
+ * user; 30 min of silence ends it (remote keep-alives are invisible to us).
+ */
+export const DEFAULT_HARNESS_A2A = {
+  enabled: true,
+  inputFrom: "user",
+  idleMinutes: 30,
+} as const;
 /** Max bytes of a custom `agent_task` description, after trimming. */
 export const MAX_AGENT_TASK_DESCRIPTION_BYTES = 4096;
 /**
@@ -255,6 +264,13 @@ export const DEFAULT_CONFIG_JSONC = `{
   // Default engine of \`tentacle run\` / \`tentacle attach\`: "kubernetes" (a pod),
   // "docker" or "podman" (a container). --engine and TENTACLE_ENGINE win.
   // "engine": "kubernetes",
+
+  // The network \`tentacle run\` puts its container on: a docker/podman network
+  // name, or "none" for an air-gapped run (the agent's own git/HTTP tools then
+  // fail — that is the point). --network and TENTACLE_NETWORK win; unset leaves
+  // the engine's default. Refused with --engine kubernetes (a pod's network is
+  // the cluster's), and it is a \`run\` flag only: attach never creates.
+  // "network": "none",
 
   // Whether \`tentacle run\` removes its pod/container when the run ends. Default
   // false: it is kept and the re-attach command printed; true removes it.

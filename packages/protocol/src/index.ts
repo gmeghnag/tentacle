@@ -27,6 +27,7 @@ export * from "./spill.ts";
 export * from "./updates.ts";
 export * from "./permission-reply.ts";
 export * from "./permission.ts";
+export * from "./question.ts";
 export * from "./model.ts";
 export * from "./mcp.ts";
 export * from "./skills.ts";

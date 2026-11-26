@@ -283,6 +283,15 @@ describe("toUpdateParams (the session/update frame)", () => {
       options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
     },
     { type: "permission_resolved", requestId: "r", outcome: { outcome: "cancelled" } },
+    // docs/feat/a2a-client.md C6: a remote agent's question (blocking).
+    {
+      type: "question_request",
+      requestId: "q",
+      toolCallId: "c",
+      title: "acme asks",
+      question: "Which branch?",
+      maxChars: 4000,
+    },
     { type: "session_title", title: "Fix login", source: "model" },
     { type: "session_settings", settings: { carried: {}, overridden: {} }, id: "a1" },
     // docs/feat/session-auto-accept.md: the session's switch, every device.
@@ -367,7 +376,8 @@ describe("toUpdateParams (the session/update frame)", () => {
         update.type === "history_replaced" ||
         update.type === "session_closed" ||
         update.type === "permission_request" ||
-        update.type === "permission_resolved";
+        update.type === "permission_resolved" ||
+        update.type === "question_request";
       expect(params.mandatory === true).toBe(mandatory);
     }
   });

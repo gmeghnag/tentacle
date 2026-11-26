@@ -242,6 +242,27 @@ export interface PermissionSheet {
  * the same sentence the TUI and the daemon's option name use.
  */
 export function sheetOptions(req: PermissionRequest): readonly SheetOption[] {
+  // A remote agent's question (docs/feat/a2a-client.md C10): the answer is TEXT
+  // (`allowed:true + message`), never a grant — so no allow options at all;
+  // "Answer…" opens the field, "Skip" declines. No reply bound → only Skip.
+  if (req.kind === "question") {
+    return [
+      ...(req.reply !== undefined
+        ? ([{ optionId: "reply", label: "Answer…", kind: "reply" }] as const)
+        : []),
+      { optionId: "reject_once", label: "Skip", kind: "deny" },
+    ];
+  }
+  // A model-proposed remote agent: one human decision, session-scoped (C11).
+  if (req.kind === "agent_add") {
+    return [
+      { optionId: "allow_once", label: "Yes, for this session", kind: "allow" },
+      { optionId: "reject_once", label: "No", kind: "deny" },
+      ...(req.reply !== undefined
+        ? ([{ optionId: "reply", label: "No, let's talk about it", kind: "reply" }] as const)
+        : []),
+    ];
+  }
   const always =
     req.suggestion !== undefined
       ? `Allow \`${req.suggestion.prefix}\` commands for this session`
@@ -260,6 +281,13 @@ export function sheetOptions(req: PermissionRequest): readonly SheetOption[] {
   ];
 }
 
+/** The reply field's copy: a question's words are an ANSWER, any other's a refusal. */
+export function replyCopy(req: PermissionRequest): { placeholder: string; send: string } {
+  return req.kind === "question"
+    ? { placeholder: "Your answer", send: "Send answer" }
+    : { placeholder: "Tell it what to do instead", send: "Send reply" };
+}
+
 /** Why a returned reply came back, in the TUI's own words (`permission-reply.ts`). */
 export function returnedNotice(cause: AnswerLostCause): string {
   switch (cause) {
@@ -275,7 +303,11 @@ export function returnedNotice(cause: AnswerLostCause): string {
 }
 
 /** The response an option sends: the bridge's own vocabulary, never a guess. */
-export function responseFor(optionId: SheetOptionId, text: string): PermissionResponse | null {
+export function responseFor(
+  optionId: SheetOptionId,
+  text: string,
+  kind?: PermissionRequest["kind"],
+): PermissionResponse | null {
   switch (optionId) {
     case "allow_once":
       return { allowed: true, scope: "once" };
@@ -284,7 +316,8 @@ export function responseFor(optionId: SheetOptionId, text: string): PermissionRe
     case "reject_once":
       return { allowed: false };
     case "reply":
-      return text.trim() === "" ? null : { allowed: false, message: text };
+      // A question's words are its ANSWER (`allowed:true + message`, no scope).
+      return text.trim() === "" ? null : { allowed: kind === "question", message: text };
   }
 }
 
@@ -585,7 +618,7 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
         return "ignored";
       }
       const text = state.replyText;
-      const response = responseFor("reply", text);
+      const response = responseFor("reply", text, entry.req.kind);
       if (response === null) {
         return "ignored"; // nothing typed: the words would go as a bare No (owner Q2)
       }

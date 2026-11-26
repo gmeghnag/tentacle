@@ -2634,6 +2634,7 @@ export class RemoteSession implements SessionStreamListener {
       // title, the queue and the sub-agent list listeners (they fire even while idle).
       case "permission_request":
       case "permission_resolved":
+      case "question_request":
       case "background_exit":
       case "session_title":
       case "queued":
@@ -2744,6 +2745,7 @@ export class RemoteSession implements SessionStreamListener {
     if (
       update.type === "permission_request" ||
       update.type === "permission_resolved" ||
+      update.type === "question_request" ||
       update.type === "background_exit" ||
       update.type === "session_title" ||
       update.type === "queued" ||

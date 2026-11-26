@@ -46,6 +46,7 @@ import {
   DevicePushUnregisterParamsSchema,
   DevicePushUnregisterResultSchema,
 } from "./push.ts";
+import { AnswerQuestionParamsSchema, AnswerQuestionResultSchema } from "./question.ts";
 import {
   LogParamsSchema,
   LogResultSchema,
@@ -162,6 +163,8 @@ export const Method = {
   /** Take queued rows back before the model reads them (docs/feat/queue-unqueue.md). */
   Unqueue: "session/unqueue",
   ResolvePermission: "session/resolve_permission",
+  /** Answer (or skip) a remote agent's `question_request` (docs/feat/a2a-client.md C6). */
+  AnswerQuestion: "session/answer_question",
   /** The user writes to a RUNNING background child (docs/feat/subagent-panel.md). */
   SubagentMessage: "session/subagent_message",
   /** The user stops one (the same decision as the model's `agent_control{action:"kill"}`). */
@@ -350,6 +353,10 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.ResolvePermission]: {
     params: ResolvePermissionParamsSchema,
     result: ResolvePermissionResultSchema,
+  },
+  [Method.AnswerQuestion]: {
+    params: AnswerQuestionParamsSchema,
+    result: AnswerQuestionResultSchema,
   },
   [Method.SubagentMessage]: {
     params: SubagentMessageParamsSchema,

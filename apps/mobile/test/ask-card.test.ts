@@ -115,3 +115,33 @@ describe("askCard", () => {
     ]);
   });
 });
+
+// A remote agent's question and a proposed agent (docs/feat/a2a-client.md C10)
+// on the ask card: the question's options are «Answer…» · «Skip», never an
+// allow capsule that the sheet would ignore.
+describe("askCard — a2a asks", () => {
+  test("a question offers Skip then Answer… as its actions, nothing behind `…`", async () => {
+    const v = askCard(
+      await stateOf(ask({ kind: "question", tool: "a2a:r", reply: { maxChars: 2000 } })),
+      ctx(),
+    );
+    expect(v?.kind === "asking" && v.actions.map((a) => [a.optionId, a.label])).toEqual([
+      ["reject_once", "Skip"],
+      ["reply", "Answer…"],
+    ]);
+    expect(v?.kind === "asking" && v.menu).toBeNull();
+  });
+
+  test("a question with no reply bound offers only Skip", async () => {
+    const v = askCard(await stateOf(ask({ kind: "question", tool: "a2a:r" })), ctx());
+    expect(v?.kind === "asking" && v.actions.map((a) => a.optionId)).toEqual(["reject_once"]);
+  });
+
+  test("an agent_add keeps the pair: No then Yes, for this session", async () => {
+    const v = askCard(await stateOf(ask({ kind: "agent_add", tool: "a2a_add_agent" })), ctx());
+    expect(v?.kind === "asking" && v.actions.map((a) => [a.optionId, a.label])).toEqual([
+      ["reject_once", "No"],
+      ["allow_once", "Yes, for this session"],
+    ]);
+  });
+});

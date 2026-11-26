@@ -12,6 +12,7 @@ import { AttachmentRefSchema, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachment.t
 import { ContentBlockSchema } from "./content.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { PermissionRequestUpdateSchema, PermissionResolvedUpdateSchema } from "./permission.ts";
+import { QuestionRequestUpdateSchema } from "./question.ts";
 import {
   JobRowSchema,
   MAX_SESSION_TITLE,
@@ -516,6 +517,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SessionClosedSchema,
   PermissionRequestUpdateSchema,
   PermissionResolvedUpdateSchema,
+  QuestionRequestUpdateSchema,
   SessionTitleUpdateSchema,
   QueuedUpdateSchema,
   SubagentsUpdateSchema,
@@ -575,6 +577,10 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   session_closed: "mandatory",
   permission_request: "blocking",
   permission_resolved: "mandatory",
+  // A remote agent's question (docs/feat/a2a-client.md C6): the daemon WAITS on
+  // a client to answer it; fallback (some client attached, none declared it):
+  // skipped at once with the reason (hosted-session `blockingUnsupported`).
+  question_request: "blocking",
   // A label: skipping it hangs nothing (the snapshot and the list carry it).
   session_title: "display",
   // Full state, also in the snapshot; returned rows wait for a reclaim (nothing hangs).

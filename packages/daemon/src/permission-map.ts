@@ -12,9 +12,13 @@ import {
 } from "@tentacle/core";
 import {
   MAX_PERMISSION_REPLY_CHARS,
+  MAX_QUESTION_ANSWER_CHARS,
   type PermissionOption,
   type PermissionOutcome,
   type PermissionRequestUpdate,
+  QUESTION_ANSWER_OPTION,
+  QUESTION_SKIP_OPTION,
+  type QuestionRequestUpdate,
 } from "@tentacle/protocol";
 
 /** The options the daemon offers for an approval; the "always" label reflects
@@ -89,11 +93,62 @@ export function toPermissionRequestUpdate(
   };
 }
 
+/**
+ * The stream event for a remote agent's question (docs/feat/a2a-client.md C6):
+ * the request's `detail` is the question, its `reply.maxChars` the answer's
+ * bound (never above `MAX_QUESTION_ANSWER_CHARS`).
+ */
+export function toQuestionRequestUpdate(
+  requestId: string,
+  toolCallId: string,
+  req: PermissionRequest,
+  agent?: PermissionRequestOptions["agent"],
+): QuestionRequestUpdate {
+  return {
+    type: "question_request",
+    requestId,
+    toolCallId,
+    title: req.title,
+    question: req.detail ?? "",
+    ...(agent
+      ? {
+          agent: {
+            type: agent.type,
+            description: agent.description,
+            ...(agent.id !== undefined ? { id: agent.id } : {}),
+          },
+        }
+      : {}),
+    maxChars: Math.min(req.reply?.maxChars ?? MAX_QUESTION_ANSWER_CHARS, MAX_QUESTION_ANSWER_CHARS),
+  };
+}
+
+/** The update an ask is streamed as: a question, or a permission request. */
+export function toAskUpdate(
+  requestId: string,
+  toolCallId: string,
+  req: PermissionRequest,
+  agent?: PermissionRequestOptions["agent"],
+  workflow?: PermissionRequestOptions["workflow"],
+): PermissionRequestUpdate | QuestionRequestUpdate {
+  // A question carries no workflow attribution (`question_request` has no such
+  // field); a permission request keeps it (docs/fix/mobile-ask-surfaces.md).
+  return req.kind === "question"
+    ? toQuestionRequestUpdate(requestId, toolCallId, req, agent)
+    : toPermissionRequestUpdate(requestId, toolCallId, req, agent, workflow);
+}
+
+/** The internal options a question settles with (`answerQuestion`). */
+export const QUESTION_OPTIONS: readonly string[] = [QUESTION_ANSWER_OPTION, QUESTION_SKIP_OPTION];
+
 export function outcomeToResponse(outcome: PermissionOutcome): PermissionResponse {
   if (outcome.outcome === "cancelled") {
     return { allowed: false };
   }
   switch (outcome.optionId) {
+    // A question answered (its text rides `message`); only a question offers it.
+    case QUESTION_ANSWER_OPTION:
+      return { allowed: true, scope: "once" };
     case "allow_once":
       return { allowed: true, scope: "once" };
     case "allow_always":

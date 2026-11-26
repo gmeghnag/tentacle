@@ -25,7 +25,7 @@ import {
 } from "@tentacle/daemon";
 import { setGroupForwarder } from "@tentacle/exec";
 import type { McpServerStatus } from "@tentacle/mcp";
-import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
+import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
 import "./pdf-worker-url.ts";
 import { randomUUID } from "node:crypto";
@@ -36,11 +36,14 @@ import { laptopArtifactSeed } from "./laptop-artifacts.ts";
 import { createMcpHub } from "./mcp-hub.ts";
 import type { ProviderFactory } from "./model-provider.ts";
 import {
+  type A2ACardCache,
+  type A2ACards,
   type SkillScan,
   type WiredAgent,
   buildAgent,
   createSkillScan,
   scheduleLimitsOf,
+  startA2ACards,
   sweepToolOutput,
   toolOutputStore,
   workerSessionBuild,
@@ -90,6 +93,8 @@ export function workerAgentFactory(
     readonly createProvider?: ProviderFactory;
     /** The browser tools (B4): only the laptop's own hosts pass them, never a pod. */
     readonly browser?: BrowserToolset;
+    /** The `a2a` cards' snapshot this build freezes (docs/feat/a2a-client.md C5, (c)). */
+    readonly a2aCards?: A2ACards;
   } = {},
 ): WiredAgent {
   return buildAgent(
@@ -123,7 +128,7 @@ export function workerAgentFactory(
       workflows: true,
       // Harness sub-agents (docs/feat/subagent-harness-runners.md D5): the
       // laptop runs `claude` with its own login. A pod daemon never passes this.
-      harnesses: {},
+      harnesses: options.a2aCards ? { a2aCards: options.a2aCards } : {},
       // The laptop's own Chrome (browser-inspect B4); a pod daemon never passes this.
       ...(options.browser ? { browser: options.browser } : {}),
     },
@@ -160,6 +165,11 @@ export function workerSessionHost(
     readonly artifactSeed?: SessionHostOptions["artifactSeed"];
     /** The worker's browser toolset (docs/feat/browser-inspect.md B4): the laptop's own Chrome. */
     readonly browser?: BrowserToolset;
+    /**
+     * The `a2a` cards, read ONCE before this host (owner decision (c),
+     * docs/feat/a2a-client.md): every build freezes `cards()`, then refreshes.
+     */
+    readonly a2aCards?: A2ACardCache;
   },
 ): SessionHost {
   const skillScan = deps.skillScan ?? createSkillScan(config);
@@ -202,12 +212,57 @@ export function workerSessionHost(
         skillScan,
         ...(deps.createProvider ? { createProvider: deps.createProvider } : {}),
         ...(deps.browser ? { browser: deps.browser } : {}),
+        ...(deps.a2aCards ? { a2aCards: deps.a2aCards.cards() } : {}),
       });
+      // The NEXT build sees a card that changed (C5 «between sessions», one build late).
+      void deps.a2aCards?.refresh();
       deps.onBuilt?.(wired);
       // One mapping, so `grants` (emptied by `/clear`) cannot be dropped again.
       return workerSessionBuild(wired);
     },
   });
+}
+
+/**
+ * A channel that HOLDS the frames that arrive before its handler is set, then
+ * hands them over in order: the worker awaits the `a2a` cards (owner decision
+ * (c), ≤ 2 s) before its `Connection` exists, and the main thread's
+ * `initialize` must not be dropped meanwhile. Delivered on a microtask, so
+ * the `Connection` constructor has finished before its first frame.
+ */
+export function heldChannel(channel: DuplexChannel): DuplexChannel {
+  const early: string[] = [];
+  let deliver: ((data: string) => void) | undefined;
+  let onClose: (() => void) | undefined;
+  let closedEarly = false;
+  channel.setOnMessage((data) => {
+    if (deliver) {
+      deliver(data);
+    } else {
+      early.push(data);
+    }
+  });
+  channel.setOnClose(() => {
+    if (onClose) {
+      onClose();
+    } else {
+      closedEarly = true;
+    }
+  });
+  return {
+    send: (data) => channel.send(data),
+    close: () => channel.close(),
+    setOnMessage(handler) {
+      queueMicrotask(() => {
+        for (const data of early.splice(0)) handler(data);
+        deliver = handler;
+      });
+    },
+    setOnClose(handler) {
+      onClose = handler;
+      if (closedEarly) queueMicrotask(handler);
+    },
+  };
 }
 
 // `globalThis` in a worker exposes postMessage/addEventListener at runtime; the
@@ -237,6 +292,20 @@ port.addEventListener("message", (event: { data: unknown }) => {
   // would inline the compile-time marker into this second bundle too (two
   // markers in the binary; scripts/build.ts demands exactly one).
   const { config, version, artifactsDir } = event.data as WorkerBootstrap;
+  // Subscribed NOW, before any await: the RPC frames right behind the bootstrap wait here.
+  const channel = heldChannel(messagePortChannel(port));
+  void startWorker(config, version, artifactsDir, channel);
+});
+
+async function startWorker(
+  config: WorkerBootstrap["config"],
+  version: string,
+  artifactsDir: string | undefined,
+  channel: DuplexChannel,
+): Promise<void> {
+  // Owner decision (c) (docs/feat/a2a-client.md C5): the `a2a` cards, read ONCE
+  // before the host (≤ 2 s; none configured ⇒ no wait), frozen into every build.
+  const a2aCards = await startA2ACards(config);
 
   // Connect MCP once, in the background. Until it resolves the hub keeps every
   // freshly-built registry, so it can register the tools into them the moment
@@ -266,6 +335,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
     toolsReady: () => hub.ready(),
     onBuilt: (wired) => hub.onBuilt(wired.tools),
     browser,
+    a2aCards,
     // D11: a RESUMED session's gallery, from the copy the MAIN thread keeps
     // beside the log. READ ONLY here — the main thread owns that dir (§7).
     ...(artifactsDir ? { artifactSeed: laptopSeedFrom(artifactsDir) } : {}),
@@ -276,11 +346,11 @@ port.addEventListener("message", (event: { data: unknown }) => {
   // `<configDir>/logs/daemon-errors.log` AND, because this is a local trusted
   // peer, sent to the client so the TUI shows the actual message.
   new Connection(
-    messagePortChannel(port),
+    channel,
     host,
     (error) => {
       logDaemonError(config.configDir, error);
     },
     { exposeInternalErrors: true },
   );
-});
+}

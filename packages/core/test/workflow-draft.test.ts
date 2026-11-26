@@ -231,6 +231,21 @@ describe("setFailTarget", () => {
     });
   });
 
+  test('"" is the PENDING target: the edge exists, its step is not picked yet', () => {
+    // The phone's `Then`→`Go to step` writes the shape before a target is chosen.
+    // It is not savable (see below), so the empty goto never reaches a file.
+    const out = setFailTarget(loop(), "review", "");
+    expect(out.refused).toBeUndefined();
+    expect(stepOf(out.draft, "review").on_fail).toEqual({ goto: "", max: 2 });
+    expect(stepOf(setFailTarget(loop(), "plan", "").draft, "plan").on_fail).toEqual({
+      goto: "",
+      max: 1,
+    });
+    expect(draftProblems(out.draft, {})).toEqual([
+      "steps[1].on_fail: needs a step id — {goto: <step>, max: 1..10}",
+    ]);
+  });
+
   test('"stop" drops the key: the default never lands in the file', () => {
     const out = setFailTarget(loop(), "review", "stop");
     expect(stepOf(out.draft, "review").on_fail).toBeUndefined();

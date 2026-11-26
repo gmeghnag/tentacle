@@ -298,6 +298,27 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "AnswerQuestionParams": {
+      "additionalProperties": true,
+      "properties": {
+        "answer": {
+          "$ref": "#/$defs/QuestionAnswerText"
+        },
+        "requestId": {
+          "$ref": "#/$defs/PermissionRequestId"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["requestId", "sessionId"],
+      "type": "object"
+    },
+    "AnswerQuestionResult": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
     "AnthropicReasoningBlock": {
       "discriminator": {
         "mapping": {
@@ -3927,6 +3948,18 @@
           "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
           "type": "string"
         },
+        "question": {
+          "additionalProperties": true,
+          "properties": {
+            "maxChars": {
+              "maximum": 100000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": ["maxChars"],
+          "type": "object"
+        },
         "reply": {
           "additionalProperties": true,
           "properties": {
@@ -4163,6 +4196,73 @@
       },
       "required": ["turnId"],
       "type": "object"
+    },
+    "QuestionAnswerText": {
+      "allOf": [
+        {
+          "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+        },
+        {
+          "pattern": "\\S"
+        }
+      ],
+      "maxLength": 4000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "QuestionRequestUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "agent": {
+          "additionalProperties": true,
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": ["description", "type"],
+          "type": "object"
+        },
+        "askedOn": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "maxChars": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "question": {
+          "type": "string"
+        },
+        "requestId": {
+          "$ref": "#/$defs/PermissionRequestId"
+        },
+        "title": {
+          "type": "string"
+        },
+        "toolCallId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "type": {
+          "const": "question_request",
+          "type": "string"
+        }
+      },
+      "required": ["maxChars", "question", "requestId", "title", "toolCallId", "type"],
+      "type": "object",
+      "x-event-class": "blocking"
     },
     "QueueState": {
       "additionalProperties": true,
@@ -5650,6 +5750,7 @@
           "permission_request": "#/$defs/PermissionRequestUpdate",
           "permission_resolved": "#/$defs/PermissionResolvedUpdate",
           "plan": "#/$defs/Plan",
+          "question_request": "#/$defs/QuestionRequestUpdate",
           "queued": "#/$defs/QueuedUpdate",
           "schedules": "#/$defs/SchedulesUpdate",
           "session_closed": "#/$defs/SessionClosed",
@@ -5733,6 +5834,9 @@
         },
         {
           "$ref": "#/$defs/PermissionResolvedUpdate"
+        },
+        {
+          "$ref": "#/$defs/QuestionRequestUpdate"
         },
         {
           "$ref": "#/$defs/SessionTitleUpdate"
@@ -6762,7 +6866,14 @@
       "properties": {
         "pending": {
           "items": {
-            "$ref": "#/$defs/PermissionRequestUpdate"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PermissionRequestUpdate"
+              },
+              {
+                "$ref": "#/$defs/QuestionRequestUpdate"
+              }
+            ]
           },
           "type": "array"
         },
@@ -8250,6 +8361,14 @@
         "$ref": "#/$defs/AgentKillResult"
       }
     },
+    "session/answer_question": {
+      "params": {
+        "$ref": "#/$defs/AnswerQuestionParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AnswerQuestionResult"
+      }
+    },
     "session/clear": {
       "params": {
         "$ref": "#/$defs/ClearParams"
@@ -8591,5 +8710,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 27
+  "x-protocol-version": 28
 }

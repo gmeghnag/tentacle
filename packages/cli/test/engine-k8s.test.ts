@@ -494,3 +494,14 @@ describe("kubeEngineHost", () => {
     expect(asked[0]).toMatchObject({ pod: "p", container: "etcd" });
   });
 });
+
+// feat/run-network D1, defence in depth: `run` refuses a network on kubernetes
+// before anything is dialled (`main.ts`), and the host refuses it too — a
+// silently-ignored `--network none` would be a FALSE claim of sandboxing.
+test("create: a network on a pod is REFUSED, never ignored", async () => {
+  const kube = new StubCluster();
+  await expect(kubeEngineHost(kube, "dev").create("p", "img", { network: "none" })).rejects.toThrow(
+    'a Kubernetes pod cannot join the network "none"',
+  );
+  expect(kube.pods).toHaveLength(0);
+});

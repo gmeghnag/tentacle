@@ -11,6 +11,8 @@
 import type { AskHooksTrust } from "@tentacle/agent";
 import {
   type AgentKillParams,
+  type AnswerQuestionParams,
+  type AnswerQuestionResult,
   type ArtifactListParams,
   type ArtifactReadParams,
   type AttachmentPutParams,
@@ -446,6 +448,8 @@ export class Connection {
         return this.unqueue(params as UnqueueParams);
       case Method.ResolvePermission:
         return this.resolvePermission(params as ResolvePermissionParams);
+      case Method.AnswerQuestion:
+        return this.answerQuestion(params as AnswerQuestionParams);
       // Both synchronous, holding no lock (AGENTS §7): they never await a turn.
       case Method.SubagentMessage: {
         const { sessionId, agentId, text } = params as SubagentMessageParams;
@@ -818,6 +822,14 @@ export class Connection {
   private resolvePermission(params: ResolvePermissionParams): ResolvePermissionResult {
     const hosted = this.lookup(params.sessionId);
     hosted.resolvePermission(params.requestId, params.optionId, params.message);
+    return {};
+  }
+
+  // `session/answer_question` (docs/feat/a2a-client.md C6): the same
+  // synchronous first-wins step as `resolvePermission`, for a remote question.
+  private answerQuestion(params: AnswerQuestionParams): AnswerQuestionResult {
+    const hosted = this.lookup(params.sessionId);
+    hosted.answerQuestion(params.requestId, params.answer);
     return {};
   }
 

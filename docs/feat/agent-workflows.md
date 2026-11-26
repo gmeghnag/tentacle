@@ -235,8 +235,13 @@ laptop-side process (worker or `serve` on the user's host); a pod never reads or
     `waiting · slot`, never errors.
   - **Typed verdict:** `step_verdict{verdict: "pass"|"fail", reason ≤ 2000}` (zod-validated
     daemon-side; first valid call wins, the child is told to stop). Child ends without one →
-    `fail: "no verdict"`; `max_token_budget` → `stopped: budget`; thrown → `error` with the
-    partial report (`SubagentFailure`, `agent-jobs.ts:55`).
+    ONE reminder turn (`planVerdictReminder`: the tool's name, the report's last 4 000 chars, the
+    step's REMAINING `tokens` as `maxTokens`), then `fail: "no verdict — the step ended without
+    calling step_verdict"`; a `max_token_budget` child, a spent step budget or an aborted step is
+    never reminded; run 1's `max_token_budget` → `stopped: budget`, while the reminder's own
+    cap is that REMAINDER, so it still ends `fail: no verdict` (the step's cause, and
+    `retry`/`on_fail` still apply); thrown → `error` with the
+    partial report (`SubagentFailure`, `agent-jobs.ts:55`). *(Fixed in fix/workflow-no-verdict.)*
   - `run` step → the existing `shell` tool (local) or the workload exec seam
     (`workload-shell.ts:122-137`) through `PermissionGate.authorize`
     (`packages/agent/src/permission-gate.ts:158-169`) with the session's grants and requester:
@@ -353,7 +358,7 @@ broker, the auto-accept exclusion, and the persistence rules). A changelog fragm
 | 4 | ask unanswered past `budget.wait` | step `stopped`, run `stopped: timeout`, ask withdrawn |
 | 4 | auto-accept on | tool asks allow-once; `workflow_approve` (hash and approve step) still waits for a human |
 | 4 | file edited mid-run | running run unaffected (snapshot); `resume`/`rerun_step` → `stopped: changed` |
-| 4 | child without verdict / verdict tool misuse | `fail: no verdict`; invalid input → tool error to the child, it may retry within its budget |
+| 4 | child without verdict / verdict tool misuse | asked ONCE more for the verdict (`fail: no verdict — the step ended without calling step_verdict` if it still does not call it); invalid input → tool error to the child, it may retry within its budget; a budget-capped, spent-budget or aborted step is not reminded; the reminder's own cap is the step's REMAINDER, so a reminder that hits it still ends `fail: no verdict` (never `stopped: budget`, which would hide the cause and skip `retry`/`on_fail`) |
 | 4 | sub-agent cap full | `waiting · slot` until an exit; never an error |
 | 5 | container missing/stopped, no `/bin/sh` | `fail` with the seam's own explanation (`workload-shell.ts:137`, `:175`) |
 | 6–8 | update lost / reconnect | full-state `workflows` + snapshot field repaint; nothing stale |

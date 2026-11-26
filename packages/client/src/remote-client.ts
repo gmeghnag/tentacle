@@ -4388,7 +4388,7 @@ export class RemoteClient {
       }
       // Permission events are session state, not turn-scoped (a re-attach
       // replays a pending one): the router decides, never the turn handler.
-      if (update.type === "permission_request") {
+      if (update.type === "permission_request" || update.type === "question_request") {
         // Attributed to the turn the stream raised it in; the update's own
         // `turnId` (a background child's spawning turn) wins in the router.
         this.runPermissionActions(this.router.request(entry.id, update, out.turn));
@@ -4923,6 +4923,20 @@ export class RemoteClient {
    * sheet and a notification's action BOTH send (one wire shape, one place).
    */
   private sendAnswer(send: PermissionSendAction): Promise<unknown> {
+    if (send.question) {
+      // A remote agent's question (docs/feat/a2a-client.md C6): its own method,
+      // keyed the same way; no `answer` = skip.
+      return this.sessionCall(
+        send.sessionId,
+        Method.AnswerQuestion,
+        {
+          sessionId: send.sessionId,
+          requestId: send.requestId,
+          ...(send.message !== undefined ? { answer: send.message } : {}),
+        },
+        "keyed",
+      );
+    }
     return this.sessionCall(
       send.sessionId,
       Method.ResolvePermission,
@@ -4964,8 +4978,11 @@ export class RemoteClient {
           }
           const next = this.router.answered(sessionId, requestId, response);
           const lost = response.onAnswerLost;
+          // A question's answer is words too (an approval WITH text, C6).
+          const wordsWith =
+            action.request.kind === "question" ? response.allowed : !response.allowed;
           const replied =
-            !response.allowed &&
+            wordsWith &&
             response.message !== undefined &&
             normalizePermissionReply(response.message, Number.POSITIVE_INFINITY) !== null;
           const sent = next.some(

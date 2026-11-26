@@ -111,8 +111,8 @@ context reset replaced (default off).
 
 ```sh
 tentacle run --image <ref> [-n <namespace>] [--rm] [--name <n>] ["<prompt>"]        # Kubernetes (default)
-tentacle run --engine docker --image <ref> [--context <ctx>] [--name <n>] ["<prompt>"]  # Docker
-tentacle run --engine podman --image <ref> [--name <n>] ["<prompt>"]                    # Podman
+tentacle run --engine docker --image <ref> [--context <ctx>] [--network <name|none>] [--name <n>] ["<prompt>"]  # Docker
+tentacle run --engine podman --image <ref> [--network <name|none>] [--name <n>] ["<prompt>"]                    # Podman
 ```
 
 `--name <n>` names the workload (a random name when omitted). The optional
@@ -330,7 +330,12 @@ Docker uses the engine the docker CLI would (`--context` › `DOCKER_HOST` ›
 unless `--insecure-docker-tcp`. Podman's socket is found automatically
 (`podman machine` on macOS, rootless/rootful on Linux; `CONTAINER_HOST`
 overrides it) — no `DOCKER_HOST` needed. `-n`/`-c` are Kubernetes-only;
-`--context`/`--insecure-docker-tcp` are Docker/Podman-only. Read-only root
+`--context`/`--insecure-docker-tcp`/`--network` are Docker/Podman-only. A
+container's network is chosen at create: `--network <name|none>` (or
+`TENTACLE_NETWORK`, or `"network"` in `config.jsonc` — flag › env › profile ›
+file › the engine's default `bridge`), where `none` is an air-gapped run; a
+network with `--engine kubernetes` is an error (a pod's network is the
+cluster's), and `attach` has no such flag. Read-only root
 filesystem? Add `--bin-dir /tmp`. Details:
 [`docs/architecture/F4-pod-execution.md`](./docs/architecture/F4-pod-execution.md),
 [`docs/feat/docker-engine-cli.md`](./docs/feat/docker-engine-cli.md).
@@ -368,6 +373,16 @@ restart and stay readable once their session is archived. The owner is always
 asked first: `--a2a-asks both` lets the caller answer tool asks too (file
 approvals stay owner-only), and `--a2a-workflows` lets it start workflow runs
 (off by default). Design: [`docs/feat/a2a.md`](./docs/feat/a2a.md).
+
+**A2A client: hand a sub-task to another agent.** Configure a remote agent
+under `harnesses.<name>` with `"adapter": "a2a"`, its `card` URL and an optional
+`tokenCommand` (a command that prints the token, never the token itself); the
+model can then start it as the sub-agent type `a2a:<name>`. Each send asks you
+first, only the task text leaves the machine, and the report comes back framed
+as remote data. A question from the remote agent reaches you as a prompt (and a
+phone notification), and cancelling the call sends `CancelTask`. Two tentacles
+work end to end this way (`serve --a2a-token` on one side). Design:
+[`docs/feat/a2a-client.md`](./docs/feat/a2a-client.md).
 
 **MCP server: Claude Code and other MCP clients can call a `serve`.** With
 `--mcp-token T` (or `--mcp-token-command CMD`) the daemon also answers
@@ -416,10 +431,14 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `detach.keepAwake` | — | true | Hold a macOS sleep assertion while a turn of a detached run runs. |
 | `engine` | `TENTACLE_ENGINE` | "kubernetes" | Default engine of `run`/`attach`: kubernetes, docker or podman; `--engine` wins, unknown refused. |
 | `harnesses.*.adapter` | — | — | Which adapter the instance runs on; defaults to the instance name. |
+| `harnesses.*.card` | — | — | An `a2a` agent's card URL (`https:`; `http:` only for localhost). |
 | `harnesses.*.command` | — | — | The executable to run (unset: `claude`). |
+| `harnesses.*.description` | — | — | Your description of an `a2a` agent, shown to the model first. |
 | `harnesses.*.enabled` | — | — | Offer this harness's sub-agent type (default on). |
-| `harnesses.*.idleMinutes` | — | — | Hang guard: a run with no output for this many minutes is stopped (unset: 15). |
+| `harnesses.*.idleMinutes` | — | — | Hang guard: a run with no output for this many minutes is stopped (unset: 15; `a2a`: 30). |
+| `harnesses.*.inputFrom` | — | — | Who answers an `a2a` agent's questions: `user` (default), `parent` or `both`. |
 | `harnesses.*.model` | — | — | The model when an `agent_task` call names none (unset: `opus`). |
+| `harnesses.*.tokenCommand` | — | — | A command printing an `a2a` agent's bearer token (never the token itself). |
 | `hooks` | — | — | Shell commands run on agent events, with a JSON input on stdin. |
 | `liveActivity.enabled` | — | `true` | Whether a `serve` starts a live activity at all. |
 | `liveActivity.startAfterSeconds` | — | `20` | How long a turn must run before a phone that is not watching it gets an activity. |
@@ -461,6 +480,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `models.*.titleModel` | — | — | Accepted for the shape of `model`; has no effect inside an entry. |
 | `mount.hide` | — | — | The paths to hide — this list REPLACES the default one. |
 | `mount.hideExtra` | — | — | Extra paths to hide, ADDED to the default list. |
+| `network` | `TENTACLE_NETWORK` | — | Network of `run`'s container: a name, or `none` for air-gapped runs; `--network` wins. |
 | `packages.*` | — | — | Whether this installed package is enabled. |
 | `push.enabled` | — | `true` | Whether this `serve` pushes notifications to its paired phones. |
 | `push.graceSeconds` | — | `30` | How long an unanswered permission request waits before a phone is pushed. |

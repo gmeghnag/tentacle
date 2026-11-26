@@ -25,6 +25,17 @@ export * from "./harness/process.ts";
 export * from "./harness/worktree.ts";
 export * from "./harness/child.ts";
 export * from "./harness/permissions.ts";
+export {
+  type A2AAdapter,
+  type A2AAgentCard,
+  type A2ACommandRunner,
+  type A2ALookup,
+  A2A_CAPS,
+  createA2AAdapter,
+  fetchA2ACard,
+} from "./harness/a2a.ts";
+export { cardBlurb, reportHeader } from "./harness/a2a-map.ts";
+export * from "./harness/registry.ts";
 export * from "./hooks.ts";
 export * from "./round-plan.ts";
 export * from "./capabilities.ts";

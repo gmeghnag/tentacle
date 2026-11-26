@@ -23,6 +23,7 @@
  */
 import { z } from "zod";
 import { PermissionRequestUpdateSchema } from "./permission.ts";
+import { QuestionRequestUpdateSchema } from "./question.ts";
 import { SessionIdSchema, TurnIdSchema } from "./session.ts";
 import { type SessionUpdate, SessionUpdateParamsSchema } from "./updates.ts";
 
@@ -77,6 +78,7 @@ export function watchCategoriesOf(update: SessionUpdate): readonly WatchCategory
   switch (update.type) {
     case "permission_request":
     case "permission_resolved":
+    case "question_request":
       return ["ask"];
     case "turn_start":
       return ["turn"];
@@ -133,7 +135,10 @@ export function watchAccepts(
 export const WatchStateSchema = z.object({
   running: z.boolean(),
   turnId: TurnIdSchema.optional(),
-  pending: z.array(PermissionRequestUpdateSchema),
+  /** Permission requests and remote questions (docs/feat/a2a-client.md C6). */
+  pending: z.array(
+    z.discriminatedUnion("type", [PermissionRequestUpdateSchema, QuestionRequestUpdateSchema]),
+  ),
 });
 export type WatchState = z.infer<typeof WatchStateSchema>;
 
