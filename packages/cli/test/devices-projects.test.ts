@@ -6,7 +6,7 @@
  * `--all-projects`. Each test names its mutation.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projectKey } from "@tentacle/agent";
@@ -175,5 +175,15 @@ describe("`devices reset` stays computer-wide (Owner Q13, F15)", () => {
     expect(readAdoption(dir, legacy).kind).toBe("none");
     expect(readAdoption(dir, "9".repeat(16)).kind).toBe("none");
     expect(names(dir)).toEqual([]);
+  });
+});
+
+describe("`tentacle devices` prunes the records it reads (docs/fix/daemon-records-stale.md)", () => {
+  test("a dead pid's record is deleted, not merely skipped", () => {
+    const dir = store();
+    const record = { host: "127.0.0.1", port: 4002, tls: false, cwd: "/u/idle", startedAt: 1 };
+    writeDaemonRecord(dir, { ...record, pid: 999_001 });
+    expect(run(dir, devicesCommand, { alive: () => false }).code).toBe(0);
+    expect(readdirSync(join(dir, "daemons"))).toEqual([]);
   });
 });

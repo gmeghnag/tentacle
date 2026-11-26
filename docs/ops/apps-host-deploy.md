@@ -67,6 +67,14 @@ curl -sS -H 'Host: apps.tentacle.so' http://127.0.0.1:4200/healthz    # {"ok":tr
 
 ## 4. Caddy with a DNS module
 
+> **DONE on the tentacle.so box, 2026-11-26 (owner OK):** Caddy 2.8.4 → **2.11.9** built with
+> `github.com/caddy-dns/hetzner/v2` (Hetzner Cloud DNS API; requires Caddy ≥ 2.11.2) as image
+> `localhost/caddy-hetzner:2.11.9` from a binary cross-compiled with `xcaddy` (GOARCH=amd64); token from
+> the new Hetzner Console in `/root/caddy.env` (mode 600) → container env `HETZNER_API_TOKEN`; the
+> `*.apps.tentacle.so` wildcard certificate is issued (it needed `propagation_delay 90s`). Rollback:
+> the stopped container `caddy-2.8.4-old` + `/root/Caddyfile.bak-2611`. Steps 1–4 below are kept as
+> the generic procedure; for this box only steps 5+ (the apps-host process) remain.
+
 The running `caddy:2.8.4` image has **no DNS provider module**, so it must be
 replaced by one built with it. This touches every site on the box: do it in a
 quiet window, and keep the old image for rollback.

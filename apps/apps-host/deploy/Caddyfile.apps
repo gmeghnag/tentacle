@@ -6,12 +6,18 @@
 #   import /etc/caddy/apps.tentacle.so.caddy
 #
 # A wildcard certificate is issued through DNS-01 only, so Caddy needs a DNS
-# provider module (runbook §4): replace <provider> and give Caddy the API token
-# in TENTACLE_APPS_DNS_TOKEN. The stock image will NOT accept this file.
+# provider module (runbook §4). Verified on the tentacle.so box 2026-11-26:
+# Caddy 2.11.9 built with github.com/caddy-dns/hetzner/v2 (Hetzner Cloud DNS API,
+# a token from the new Hetzner Console) — the stock image will NOT accept this file.
+# The box's container env names the token HETZNER_API_TOKEN; the first attempt
+# without a propagation delay failed («No TXT record found»), hence the delay.
 
 *.apps.tentacle.so, apps.tentacle.so {
 	tls {
-		dns <provider> {env.TENTACLE_APPS_DNS_TOKEN}
+		dns hetzner {env.HETZNER_API_TOKEN}
+		propagation_delay 90s
+		propagation_timeout 5m
+		resolvers 1.1.1.1 8.8.8.8
 	}
 	request_body {
 		max_size 10MiB # = maxAppBytes (MiB, not MB = 10^6); the process re-checks

@@ -190,9 +190,13 @@ appId: so.tentacle.app
     timeout: 5000
 - tapOn:
     id: "hub-item-activity"
+# The fan's own pill says why (`hub-flash.ts`, the UI empty-action standard: dimmed
+# + inline label, never an empty modal): «Nothing running» on the pill (its text
+# is the `hub-label` View's child, so matched by text), for ~1.6 s. NOT `hub-notice`: that is the VoiceOver/menu path's line, and
+# asserting it passed only on a stale «Already finished» left by Stop (fix/qa-2611).
 - extendedWaitUntil:
     visible:
-      id: "hub-notice"
+      text: "Nothing running"
     timeout: 5000
 - assertNotVisible:
     id: "activity-sheet"

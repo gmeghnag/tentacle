@@ -447,8 +447,10 @@
 }
 /* Compact: one 22 pt line centred in the 36 pt row, after the absolute `+`. */
 .k-composer-row[data-compact] .k-input {
-  flex: var(--m-composer-input-compact-flex);
-  min-width: 0;
+  flex-grow: var(--m-composer-input-compact-flex-grow);
+  flex-shrink: var(--m-composer-input-compact-flex-shrink);
+  flex-basis: var(--m-composer-input-compact-flex-basis);
+  min-width: var(--m-composer-input-compact-min-width);
   margin-left: var(--m-composer-input-compact-margin-left);
   padding-top: var(--m-composer-input-compact-padding-top);
   padding-bottom: var(--m-composer-input-compact-padding-bottom);

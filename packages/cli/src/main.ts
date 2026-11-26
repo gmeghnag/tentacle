@@ -169,6 +169,7 @@ import {
   parseMcpAsks,
 } from "./serve-mcp-server.ts";
 import { serveModelNotice } from "./serve-model-notice.ts";
+import { awaitServeShutdown } from "./serve-signals.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { autoAcceptOf, routingAutoAccept, seedAutoAcceptOf } from "./session-auto-accept.ts";
 import { seedCapabilitiesOf } from "./session-capabilities.ts";
@@ -1271,6 +1272,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         onError: (error) => err(`[daemon] error: ${error.message}\n`),
         onNotice: (line) => err(`[daemon] ${line}\n`),
       });
+      // First Ctrl+C (or SIGTERM / SIGHUP): stop, let the session writes land,
+      // release the store lock. A second one exits at once. Installed before the
+      // listening line, so whoever waits for it can signal at once.
+      const shutdown = awaitServeShutdown(process, () => server.stop());
       err(`daemon listening on ${server.url}\n`);
       if (a2a) {
         err(
@@ -1291,18 +1296,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       if (modelNotice) {
         err(`[daemon] ${modelNotice}\n`);
       }
-      // First Ctrl+C: stop, let the session writes land, release the store
-      // lock. A second one exits at once (a hung disk must not trap the user).
-      await new Promise<void>((resolve) => {
-        let interrupted = false;
-        process.on("SIGINT", () => {
-          if (interrupted) {
-            process.exit(130);
-          }
-          interrupted = true;
-          void server.stop().then(resolve, resolve);
-        });
-      });
+      await shutdown.done;
+      shutdown.dispose();
       return 0;
     } catch (error) {
       err(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);

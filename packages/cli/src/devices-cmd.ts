@@ -38,6 +38,7 @@ import {
   readSeen,
   removeDevices,
   replaceIdentity,
+  sweepDeadDaemonRecords,
 } from "@tentacle/daemon";
 import { DEFAULT_STALE_AFTER_MS } from "./discovery.ts";
 import { RELAY_SECRET_FILE } from "./relay-secret.ts";
@@ -305,10 +306,12 @@ export function devicesCommand(deps: DevicesDeps): number {
   }
   let running: DaemonRecord[] = [];
   try {
-    running = readDaemonRecords(deps.configDir, {
+    const liveness = {
       freshWithinMs: DEFAULT_STALE_AFTER_MS,
       ...(deps.alive !== undefined ? { alive: deps.alive } : {}),
-    });
+    };
+    sweepDeadDaemonRecords(deps.configDir, liveness);
+    running = readDaemonRecords(deps.configDir, liveness);
   } catch {
     // No record readable: the "running with no device" lines are a hint only.
   }

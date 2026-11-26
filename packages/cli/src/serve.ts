@@ -61,6 +61,7 @@ import {
   startReaper,
   startRelayLink,
   startWsServer,
+  sweepDeadDaemonRecords,
   sweepIntervalFor,
   writeDaemonRecord,
 } from "@tentacle/daemon";
@@ -72,7 +73,7 @@ import { relayIdOf } from "@tentacle/transport/relay-id";
 import { browserToolsetOf, createBrowserLink } from "./browser-link.ts";
 import { createBrowserHostPort, defaultBrowserLinkProbes } from "./browser-status.ts";
 import { applyCarried } from "./carried-settings.ts";
-import { type DiscoveryDriver, startDiscovery } from "./discovery.ts";
+import { DEFAULT_STALE_AFTER_MS, type DiscoveryDriver, startDiscovery } from "./discovery.ts";
 import type { ServeLimits } from "./flags.ts";
 import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
 import { type McpHub, capStderr, createMcpHub } from "./mcp-hub.ts";
@@ -1135,10 +1136,17 @@ function listen(
       ? relayAddress(relayLinkUrl, relayIdOf(relaySecret.secret))
       : undefined;
   // `<configDir>/daemons/<pid>.json`: what `pair` (9d) reads to build the QR's
-  // addresses, and what task 10 builds siblings on (owner Q6). Removed at stop;
-  // a crash leaves it, and its reader ignores a dead pid.
+  // addresses, and what task 10 builds siblings on (owner Q6). Removed at stop
+  // and by the `exit` net below; a SIGKILL leaves it, and every start sweeps
+  // (docs/fix/daemon-records-stale.md).
   let record: DaemonRecord | undefined;
+  let exitRecord: (() => void) | undefined;
   if (devices) {
+    try {
+      sweepDeadDaemonRecords(devices.configDir, { freshWithinMs: DEFAULT_STALE_AFTER_MS });
+    } catch {
+      // Housekeeping: never what stops a start.
+    }
     const own = [...(options.addresses ?? [])];
     if (relayAddressOf !== undefined && !own.includes(relayAddressOf)) {
       own.push(relayAddressOf);
@@ -1160,6 +1168,13 @@ function listen(
       // Not fatal: the daemon works, `pair` just has one fewer address to offer.
       options.onError?.(new Error(`cannot write ${written.path}: ${written.reason}`));
     }
+    // The net for every death that runs `exit` listeners (a second signal's
+    // `process.exit`, an uncaught throw or rejection). Registered even after a
+    // failed write: the heartbeat may write the record later. Removed in
+    // `stop()`, so many daemons in one process do not leak listeners.
+    const { configDir } = devices;
+    exitRecord = () => removeDaemonRecord(configDir);
+    process.on("exit", exitRecord);
   }
   // The dial-out itself (R4's link, wired here): it starts with the listener,
   // AFTER the record (so `pair` can already offer the relay address) and stops
@@ -1293,6 +1308,7 @@ function listen(
         // closing must not outlive the file that named it (Design §4 "Stop").
         relayLink?.stop();
         if (devices) removeDaemonRecord(devices.configDir);
+        if (exitRecord) process.off("exit", exitRecord);
         server.stop();
         mcp?.dispose();
         await release();

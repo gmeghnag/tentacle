@@ -79,6 +79,7 @@ import {
   fits,
   visible as floatVisible,
   headerPill,
+  jumpBottom,
   listEndPadding,
 } from "../floating-button.ts";
 import {
@@ -2314,6 +2315,12 @@ export function SessionScreen({
                 styles.jump,
                 jumpText === null && styles.jumpIcon,
                 {
+                  // fix/qa-2611: above a hub resting at the centre, never under it.
+                  bottom: jumpBottom({
+                    mode: activitySettings.mode,
+                    position: activitySettings.position,
+                    bounds: band,
+                  }),
                   backgroundColor: palette.glass,
                   borderColor: palette.glassBorder,
                   shadowOpacity: palette.shadowOpacity,

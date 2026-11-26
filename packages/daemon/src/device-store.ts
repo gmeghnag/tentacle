@@ -524,6 +524,37 @@ export function processAlive(pid: number): boolean {
   }
 }
 
+/** `ps -o etime=`'s `[[dd-]hh:]mm:ss`, in seconds; anything else is `undefined`. */
+export function parseEtime(text: string): number | undefined {
+  const match = /^(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)$/.exec(text.trim());
+  if (match === null) {
+    return undefined;
+  }
+  const [, days = "0", hours = "0", minutes = "0", seconds = "0"] = match;
+  return ((Number(days) * 24 + Number(hours)) * 60 + Number(minutes)) * 60 + Number(seconds);
+}
+
+/**
+ * When ANOTHER process started (ms since the epoch, to the second), or
+ * `undefined` when that cannot be learnt (no `ps`, a gone pid, odd output).
+ * From the ELAPSED time, not `lstart`: that is local-time text, measured one
+ * hour off under a different timezone (docs/fix/daemon-records-stale.md).
+ */
+export function processStartedAt(pid: number, now: number = Date.now()): number | undefined {
+  try {
+    const result = Bun.spawnSync(["ps", "-o", "etime=", "-p", String(pid)], {
+      env: { ...process.env, LC_ALL: "C" },
+    });
+    if (result.exitCode !== 0) {
+      return undefined;
+    }
+    const elapsed = parseEtime(result.stdout.toString());
+    return elapsed === undefined ? undefined : now - elapsed * 1000;
+  } catch {
+    return undefined;
+  }
+}
+
 /** A held registry lock. `release` is idempotent and only removes OUR lock. */
 export interface RegistryLock {
   readonly path: string;
@@ -1318,7 +1349,9 @@ export function sweepPairings(configDir: string, options: LiveClock = {}): numbe
 /**
  * One running `serve`: where it listens, so `pair` can put reachable addresses
  * in the QR (9d) and task 10 can find its siblings. Written at listen, removed
- * at stop; a stale record is ignored by `readDaemonRecords` (dead pid, P8).
+ * at stop and by the process's `exit` listener; a record left by a death nobody
+ * can catch (SIGKILL, power loss) is ignored by `readDaemonRecords` and removed
+ * by `sweepDeadDaemonRecords` (docs/fix/daemon-records-stale.md).
  */
 export interface DaemonRecord {
   readonly pid: number;
@@ -1443,41 +1476,49 @@ export function readDaemonRecords(
     if (options.freshWithinMs !== undefined && !fresh(path, now, options.freshWithinMs)) {
       continue;
     }
-    const read = readJson(path);
-    if (read.kind !== "value" || !isObject(read.value)) {
-      continue;
+    const record = parseDaemonRecord(path, pid);
+    if (record !== undefined) {
+      records.push(record);
     }
-    const value = read.value;
-    if (
-      value.v !== DAEMON_RECORD_VERSION ||
-      value.pid !== pid ||
-      typeof value.host !== "string" ||
-      typeof value.port !== "number" ||
-      !Number.isInteger(value.port) ||
-      typeof value.tls !== "boolean" ||
-      typeof value.cwd !== "string" ||
-      !isStamp(value.startedAt)
-    ) {
-      continue;
-    }
-    const addresses = recordAddresses(
-      Array.isArray(value.addresses) ? value.addresses.filter((a) => typeof a === "string") : [],
-    );
-    records.push({
-      pid,
-      host: value.host,
-      port: value.port,
-      tls: value.tls,
-      cwd: value.cwd,
-      startedAt: value.startedAt,
-      ...(addresses.length > 0 ? { addresses } : {}),
-      // A planted junk id is dropped (bare `/e2e`), never refused with the record.
-      ...(typeof value.serveId === "string" && SERVE_ID_RE.test(value.serveId)
-        ? { serveId: value.serveId }
-        : {}),
-    });
   }
   return records.sort((a, b) => a.startedAt - b.startedAt || a.pid - b.pid);
+}
+
+/** The record in `path` if it is a v1 record of `pid`; else `undefined`. */
+function parseDaemonRecord(path: string, pid: number): DaemonRecord | undefined {
+  const read = readJson(path);
+  if (read.kind !== "value" || !isObject(read.value)) {
+    return undefined;
+  }
+  const value = read.value;
+  if (
+    value.v !== DAEMON_RECORD_VERSION ||
+    value.pid !== pid ||
+    typeof value.host !== "string" ||
+    typeof value.port !== "number" ||
+    !Number.isInteger(value.port) ||
+    typeof value.tls !== "boolean" ||
+    typeof value.cwd !== "string" ||
+    !isStamp(value.startedAt)
+  ) {
+    return undefined;
+  }
+  const addresses = recordAddresses(
+    Array.isArray(value.addresses) ? value.addresses.filter((a) => typeof a === "string") : [],
+  );
+  return {
+    pid,
+    host: value.host,
+    port: value.port,
+    tls: value.tls,
+    cwd: value.cwd,
+    startedAt: value.startedAt,
+    ...(addresses.length > 0 ? { addresses } : {}),
+    // A planted junk id is dropped (bare `/e2e`), never refused with the record.
+    ...(typeof value.serveId === "string" && SERVE_ID_RE.test(value.serveId)
+      ? { serveId: value.serveId }
+      : {}),
+  };
 }
 
 /** Is `path`'s mtime within `withinMs` of `now`? An unreadable file is NOT fresh (it is skipped). */
@@ -1493,10 +1534,11 @@ function fresh(path: string, now: number, withinMs: number): boolean {
 /**
  * The HEARTBEAT: mark this daemon's record alive now (`serve` calls it every
  * `heartbeatMs`, docs/feat/sibling-discovery.md). `false` when the record is
- * gone — a heartbeat racing the stop must never CREATE one, so `rm` is the
- * final word. Utimensat on the path, not a rewrite: the record's bytes do not
- * change, so a concurrent reader sees no half-file and `pair`'s addresses stay
- * put.
+ * gone — a touch never CREATES one, so a heartbeat racing the stop cannot
+ * resurrect a removed record; the discovery driver rewrites it only while it is
+ * running (docs/fix/daemon-records-stale.md D4). Utimensat on the path, not a
+ * rewrite: the record's bytes do not change, so a concurrent reader sees no
+ * half-file and `pair`'s addresses stay put.
  */
 export function touchDaemonRecord(configDir: string, pid: number = process.pid): boolean {
   const path = join(daemonsDir(configDir), `${pid}.json`);
@@ -1510,17 +1552,33 @@ export function touchDaemonRecord(configDir: string, pid: number = process.pid):
 }
 
 /**
- * Remove the records of daemons that are provably GONE (a dead pid, F1): the
- * sweep every polling daemon runs. A live-but-stale record is NOT touched — it
- * may be a sibling whose heartbeat is late (a suspended host, a busy process),
- * and deleting it would drop a real daemon from the phone's list (F2/F3).
- * Returns how many were removed.
+ * How much later than its record's `startedAt` a pid's holder must have started
+ * to count as a stranger: covers `ps`'s whole seconds and small clock steps.
+ */
+export const REUSE_TOLERANCE_MS = 60_000;
+
+/**
+ * Remove the records of daemons that are provably GONE; every reader runs it.
+ * Gone means a dead pid (F1) or, with `freshWithinMs`, a REUSED one: the record
+ * is not fresh AND the pid's holder started more than `REUSE_TOLERANCE_MS` after
+ * the record was written, so it cannot be its writer. A live-but-stale record
+ * without that proof is NOT touched — it may be a sibling whose heartbeat is
+ * late (a suspended host, a busy process), and deleting it would drop a real
+ * daemon from the phone's list (F2/F3). Returns how many were removed.
  */
 export function sweepDeadDaemonRecords(
   configDir: string,
-  options: { readonly alive?: (pid: number) => boolean } = {},
+  options: {
+    readonly alive?: (pid: number) => boolean;
+    readonly freshWithinMs?: number;
+    readonly now?: number;
+    readonly startedAtOf?: (pid: number) => number | undefined;
+  } = {},
 ): number {
   const alive = options.alive ?? processAlive;
+  const now = options.now ?? Date.now();
+  // The real clock, never `now`: `ps` measures elapsed time against it.
+  const startedAtOf = options.startedAtOf ?? ((pid: number) => processStartedAt(pid));
   const dir = daemonsDir(configDir);
   let names: string[];
   try {
@@ -1534,15 +1592,58 @@ export function sweepDeadDaemonRecords(
     if (match === null) {
       continue;
     }
-    if (alive(Number(match[1]))) {
-      continue;
+    const pid = Number(match[1]);
+    const path = join(dir, name);
+    if (alive(pid)) {
+      const { freshWithinMs } = options;
+      if (
+        freshWithinMs === undefined ||
+        !pidReused(path, pid, { now, freshWithinMs, startedAtOf })
+      ) {
+        continue;
+      }
     }
     try {
-      rmSync(join(dir, name), { force: true });
+      rmSync(path, { force: true });
       removed++;
     } catch {
       // Someone else's directory, or it went away first: next poll.
     }
   }
   return removed;
+}
+
+/**
+ * Is `path` a stale record whose LIVE pid belongs to someone else? Anything
+ * unknown is `false` (keep). The last step re-stats the file: a new serve with
+ * that pid may have written or touched it while `ps` ran, and the caller's
+ * `rm` follows at once.
+ */
+function pidReused(
+  path: string,
+  pid: number,
+  check: {
+    readonly now: number;
+    readonly freshWithinMs: number;
+    readonly startedAtOf: (pid: number) => number | undefined;
+  },
+): boolean {
+  try {
+    const before = statSync(path);
+    if (check.now - before.mtimeMs <= check.freshWithinMs) {
+      return false;
+    }
+    const record = parseDaemonRecord(path, pid);
+    if (record === undefined) {
+      return false;
+    }
+    const started = check.startedAtOf(pid);
+    if (started === undefined || started <= record.startedAt + REUSE_TOLERANCE_MS) {
+      return false;
+    }
+    const after = statSync(path);
+    return after.mtimeMs === before.mtimeMs && after.ino === before.ino;
+  } catch {
+    return false;
+  }
 }
