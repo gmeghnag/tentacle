@@ -6,18 +6,19 @@
 import { describe, expect, test } from "bun:test";
 import { SKILLS_PROMPT_HEADER } from "@tentacle/config";
 import {
+  type ChatMessage,
   type ChatRequest,
   type ExecutionEnvironment,
   HeuristicTokenCounter,
   type ModelProvider,
   NO_CAPABILITIES,
-  type SkillListing,
   type StreamEvent,
   type Tool,
 } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import { z } from "zod";
 import { Agent, type AgentConfig } from "../src/agent.ts";
+import type { SkillListing } from "../src/session-skills.ts";
 import { Session } from "../src/session.ts";
 import { createSubagentRunner } from "../src/subagent.ts";
 
@@ -120,7 +121,7 @@ describe("environment block in the agent loop", () => {
     const stored = session.messages[0];
     await send(session, "go");
     expect(model.requests[0]?.messages[0]?.content).toBe(SENT_HEAD);
-    expect(session.messages[0]).toBe(stored);
+    expect<ChatMessage | undefined>(session.messages[0]).toBe(stored);
     expect(session.messages[0]?.content).toBe(HEAD);
     expect(JSON.stringify(session.messages)).not.toContain("<cwd>");
   });
