@@ -469,3 +469,7 @@ l'anteprima PRIVATA sul telefono (nessun URL pubblico).
 8. **Files:** v1 publishes ONE self-contained HTML (already shown with `present`); directories come in phase 4 with pods (as recommended).
 
 *— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-26*
+
+**Owner, 2026-11-26 ~10:05:** «fino a che non compro l'altro dominio usiamo tentacle.so» — INTERIM: apps live under `tentacle.so` (e.g. `<id>.apps.tentacle.so`, wildcard cert via DNS-01) until the separate domain is bought. Consequences for the plan: the apps domain is a CONFIG value of the apps host + the publish tool (switching = config + DNS, no code); every other condition stays (first-visit warning, CSP with network off, caps, kill switch, every publish asked through the broker, secret scan); the apps host must set no cookies and never share an origin with `tentacle.so` itself. Known interim risk (stated once, owner's call): an abusive app can get `tentacle.so` listed by Safe Browsing until the move.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-26*
