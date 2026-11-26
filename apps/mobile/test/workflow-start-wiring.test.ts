@@ -21,6 +21,10 @@ const PILL = await Bun.file(`${import.meta.dir}/../src/ui/PillButton.tsx`).text(
 const BANNER = await Bun.file(`${import.meta.dir}/../src/ui/AskBanner.tsx`)
   .text()
   .catch(() => "");
+const flow = (name: string) => Bun.file(`${import.meta.dir}/../e2e/flows/${name}.yaml`).text();
+const SHOT_FLOW = await flow("_shot");
+const LANDING_FLOW = await flow("46-workflow-landing");
+const LANDING_SHOTS_FLOW = await flow("46b-workflow-landing-shots");
 
 /** The text of `start`'s block: up to the first line that closes it at column 0. */
 function between(source: string, start: string, end: string): string {
@@ -201,5 +205,35 @@ describe("the ask is the banner under the header (mobile-workflows-landing-v2)",
     expect(SESSION).not.toContain("<AskSlim");
     expect(BANNER).toContain("<AskSlim");
     expect(BANNER).toContain('actionLabel="Review"');
+  });
+});
+
+describe("the landing's evidence comes in light AND dark", () => {
+  /** The names a flow hands to `_shot`, in order. */
+  const shots = (source: string) =>
+    [...source.matchAll(/file: _shot\.yaml\n\s+env:\n\s+SHOT: "([^"]+)"/g)].map((m) => m[1]);
+
+  test("`_shot` shoots light, flips to dark, shoots again and returns to light", () => {
+    expect(SHOT_FLOW).toMatch(
+      /takeScreenshot: \$\{SHOT\}-light[\s\S]*NAME: "dark"[\s\S]*takeScreenshot: \$\{SHOT\}-dark[\s\S]*NAME: "light"/,
+    );
+  });
+
+  test("flows 46 / 46b take their six states through `_shot`", () => {
+    expect(shots(LANDING_FLOW)).toEqual([
+      "46-landing",
+      "46-landing-ask",
+      "46-landing-sheet",
+      "46-landing-delete",
+    ]);
+    expect(shots(LANDING_SHOTS_FLOW)).toEqual(["46b-landing-two-asks", "46b-landing-offline"]);
+  });
+
+  test("neither flow shoots or flips the appearance by itself", () => {
+    // A flip around `_shot` would save a dark frame under the `-light` name.
+    for (const source of [LANDING_FLOW, LANDING_SHOTS_FLOW]) {
+      expect(source).not.toContain("takeScreenshot");
+      expect(source).not.toContain("appearance.js");
+    }
   });
 });

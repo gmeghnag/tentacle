@@ -229,6 +229,32 @@ Red first on the unchanged code for each (§9); the narrow files are `apps/mobil
 - The 34 pt capsules have no `hitSlop` (the old words had 8 pt).
 - The unreleased `changelog.d/mobile-workflows-landing.added.md` still says «permission sheet over the list».
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Review finding 1 (MEDIUM, no light + dark shots): NOT A DEFECT; no flow changed.** The pair lives in `apps/mobile/e2e/flows/_shot.yaml:8-20` (unchanged by this branch): it shoots `${SHOT}-light`, runs `appearance.js` dark, shoots `${SHOT}-dark`, and flips back to light. Every shot of flows 46 (4 calls) and 46b (2 calls) goes through it, so a run writes the planned 12 frames. The `grep -c appearance` = 0 on the two flows does not see the included flow. The suggested flip around each `_shot` was not applied: it would save a dark frame under the `-light` name. No Drift entry is needed.
+
+**Added:** a pin in `apps/mobile/test/workflow-start-wiring.test.ts` («the landing's evidence comes in light AND dark»). No red on the unchanged code, since there is no defect; non-vacuity by mutation (script `.tentacle/tmp/mobile-workflows-landing-v2/mutate-shots.ts`, gitignored; each file restored):
+
+```
+S1 `_shot` loses its dark frame: exit 1
+  (fail) … `_shot` shoots light, flips to dark, shoots again and returns to light
+S2 `_shot` never flips to dark: exit 1
+  (fail) … `_shot` shoots light, flips to dark, shoots again and returns to light
+S3 46 shoots one state in one appearance: exit 1
+  (fail) … flows 46 / 46b take their six states through `_shot`
+  (fail) … neither flow shoots or flips the appearance by itself
+S4 46b drops the offline shot: exit 1
+  (fail) … flows 46 / 46b take their six states through `_shot`
+S5 review's suggested flip around `_shot`: exit 1
+  (fail) … neither flow shoots or flips the appearance by itself
+```
+
+**Evidence** (from `apps/mobile`): `bun test test/workflow-start-wiring.test.ts test/e2e-gate.test.ts test/e2e-appearance.test.ts` → 71 pass, 0 fail; `biome check` on the changed test clean. Full gate: the orchestrator's.
+
+**Still unverified:** pixels. Flows 46 / 46b have not run on a simulator; run the e2e gate with `--only 46-workflow-landing,46b-workflow-landing-shots` before merge and compare the 12 frames with mockup A.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same family as the planner, different model from the executor)
