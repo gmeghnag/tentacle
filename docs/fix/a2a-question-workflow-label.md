@@ -364,3 +364,9 @@ after this branch (the orchestrator's), not here.
 - The draft loss above: found.
 
 **Executor behaviour:** followed the plan in order, renamed `onAnswerAsk`→`onOpenAnswer` honestly instead of relaxing a guard, and the claimed mutations reproduce. It missed the stale `permission-sheet.test.ts` case until the orchestrator's gate caught it (recorded in Execution).
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26*
+
+**Verdict: PASS.** Finding 1 is fixed: `apps/mobile/src/permission-sheet.ts:617-621` now only unparks when the field is already open, so the draft and `replyOpen` are kept. On a first open it still resets the text. The Round 1 repro (`draft.ts`) now prints `after 2nd Answer tap: "a long typed answer"`. **Mutation:** with the condition forced to `false` (an unconditional reset), «a second tap on a parked ask keeps the draft already typed» fails (14 pass / 1 fail). After reverting, `git status` is clean. **Regressions:** none found. `permission-sheet-question`, `permission-sheet` and `workflow-run-controller`: 80 pass, 0 fail. `bun run lint` is clean (2591 files) and `bun run typecheck` is clean. The fix touches only the reply branch of `answerFor`. Settle options, the age guard and `sendReply` are unchanged.
