@@ -8,7 +8,9 @@
     ".": "./src/server.ts",
     "./core": "./src/relay-core.ts",
     "./client-ip": "./src/client-ip.ts",
-    "./log-limit": "./src/log-limit.ts"
+    "./log-limit": "./src/log-limit.ts",
+    "./status": "./src/status.ts",
+    "./status-listener": "./src/status-listener.ts"
   },
   "dependencies": {
     "@tentacle/protocol": "workspace:*",

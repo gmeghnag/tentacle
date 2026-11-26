@@ -482,7 +482,16 @@ journalctl -u relay.service --since "10 min ago" --no-pager
 curl -sS https://relay.tentacle.so/healthz    # through Caddy (TLS + route)
 curl -sS http://127.0.0.1:4100/healthz        # the unit alone (bypasses Caddy)
 ss -lntp | grep 4100                          # loopback only, as it must be
+curl -sS http://127.0.0.1:4101/__status       # counters + 24 h per-minute history
 ```
+
+`/__status` is a second listener, always on loopback: aggregate numbers only,
+readable by any local process, reset on restart. From a laptop:
+`ssh -L 4101:127.0.0.1:4101 <host>`, then the same `curl`. **Never proxy it**
+(no Caddy directive names 4101). `--status-port <port|off>`
+(`TENTACLE_RELAY_STATUS_PORT`) moves or disables it; if the port is busy the
+relay logs `status-off EADDRINUSE` and runs without it. Frames over Bun's size
+limit are closed before the relay sees them, so `refusedOversize` omits them.
 
 | Symptom | Cause | Fix |
 |---|---|---|

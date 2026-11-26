@@ -1,0 +1,1 @@
+- **Local status on the relay and the apps host.** Each answers `GET /__status` on a separate loopback-only port (4101 / 4201, `--status-port`) with aggregate counters and a 24 h per-minute history.

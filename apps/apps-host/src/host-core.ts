@@ -487,6 +487,19 @@ export class HostCore {
     return result;
   }
 
+  /** The live apps and their content bytes (the status gauges): no ids, no keys. */
+  liveStats(): { apps: number; bytes: number } {
+    let apps = 0;
+    let bytes = 0;
+    for (const record of this.records.values()) {
+      if (record.state === "live") {
+        apps += 1;
+        bytes += record.bytes;
+      }
+    }
+    return { apps, bytes };
+  }
+
   snapshot(): LeaseSnapshot {
     return { v: 1, aliveAt: this.options.now(), leases: Object.fromEntries(this.leases) };
   }
