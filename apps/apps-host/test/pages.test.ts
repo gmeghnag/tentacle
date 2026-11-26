@@ -363,11 +363,13 @@ describe("the warning wrapper", () => {
     const framed = framedAppResponseHeaders();
     expect(framed["X-Frame-Options"]).toBe("SAMEORIGIN");
     expect(framed["Content-Security-Policy"]).toBe(
-      (app["Content-Security-Policy"] ?? "").replace(
-        "frame-ancestors 'none'",
-        "frame-ancestors 'self'",
-      ),
+      (app["Content-Security-Policy"] ?? "")
+        .replace("frame-ancestors 'none'", "frame-ancestors 'self'")
+        .replace(/sandbox [^;]*/, "sandbox allow-scripts"),
     );
+    // the server-side sandbox alone keeps the framed copy opaque (no allow-same-origin)
+    expect(framed["Content-Security-Policy"]).toMatch(/sandbox allow-scripts(;|$)/);
+    expect(framed["Content-Security-Policy"]).not.toContain("allow-same-origin");
     expect(framed["Content-Security-Policy"]).toContain("sandbox allow-scripts");
     for (const [name, value] of Object.entries(app)) {
       if (name !== "Content-Security-Policy") expect([name, framed[name]]).toEqual([name, value]);

@@ -890,3 +890,13 @@ and Linux needs no separate check.
 **Residuals accepted (stated in Execution):** four slow uploaders can fill the budget and
 refuse publishes/reports for up to 2 min at a time (live apps and renewals unaffected) — a
 shorter `uploadTimeoutMs` would narrow it; memory not measured under `MemoryMax` on Linux.
+
+### Amendment — first-visit warning as an overlay (2026-11-26, owner; fix/apps-warning-overlay)
+
+The first visit now gets a host-owned **wrapper**: the app is shown blurred and inert BEHIND a centred dialog, loaded from **`/_frame`** in `<iframe sandbox="allow-scripts" inert>`; Confirm stores the ack and reloads → the real app top-level (no iframe), as before. Changes to D5 and the routes/headers above:
+- **Route `/_frame`:** serves the app bytes ONLY to `Sec-Fetch-Site: same-origin` + `Sec-Fetch-Mode: navigate` + `Sec-Fetch-Dest: iframe` (else 404 — top-level, cross-/same-site frames and browsers without Fetch Metadata fail closed). Response = the app's headers with `frame-ancestors 'self'`, `X-Frame-Options: SAMEORIGIN` and the CSP sandbox reduced to **`sandbox allow-scripts`** (server-enforced opaque origin — security review LOW-1), `no-store`, `Vary` on the Fetch Metadata headers. The wrapper adds `frame-src 'self'`.
+- **The app's code now runs BEFORE consent**, inside the opaque sandbox: no storage (cannot write any ack), no parent access, no popups/forms/modals/top navigation, no network (wrapper `frame-src 'self'` + the app CSP), no focus (`inert`). Residuals: a CPU/memory hog could slow the wrapper (unverified across browsers); `history.pushState` noise inside the frame.
+- **Byte budget:** a first visit costs ~2× the app size (framed + top-level after Confirm, both `no-store`); a warning shown and not confirmed still downloads the app once. Counted on purpose (forged headers must not pull bytes unmetered).
+- The ack note above («the app could only set it after the user already passed the warning once») holds because the framed copy is opaque.
+
+*— claude-opus-5-5 (orchestrator, from the fresh security review: PASS, 3 LOW), 2026-11-26*

@@ -109,10 +109,12 @@ export function framedAppResponseHeaders(): Record<string, string> {
   const headers = appResponseHeaders();
   return {
     ...headers,
-    "Content-Security-Policy": (headers["Content-Security-Policy"] ?? "").replace(
-      "frame-ancestors 'none'",
-      "frame-ancestors 'self'",
-    ),
+    // The server enforces the opaque origin too (security review LOW-1): the framed copy's
+    // CSP sandbox drops allow-same-origin/allow-modals, so even a loosened <iframe sandbox>
+    // can never make the pre-consent copy same-origin with the wrapper (ack / parent access).
+    "Content-Security-Policy": (headers["Content-Security-Policy"] ?? "")
+      .replace("frame-ancestors 'none'", "frame-ancestors 'self'")
+      .replace(/sandbox [^;]*/, "sandbox allow-scripts"),
     "X-Frame-Options": "SAMEORIGIN",
   };
 }
