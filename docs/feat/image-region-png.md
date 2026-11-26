@@ -480,6 +480,18 @@ gate and `tsc -p apps/mobile` not run (the orchestrator's).
   again (a further stored picture); the prune stub does not say `detail`.
 - The `low` downscale is stored as `<label> region` (D4's label, followed).
 
+**Gate-fix round (claude-sonnet-5-5, 2026-11-26) — still PARTIAL.**
+- `e2e-gate` tag test: fixed. The branch predates `771517b1` on `main`; its
+  `TODO.md` sections were copied verbatim. `e2e-gate.test.ts`: 41 pass.
+- PngSuite: **not fixed, STOP** (plan § Tests). The `curl` download again
+  required a permission approval; no other route was tried. The archive is not
+  in `.tentacle/tmp/image-region-png/`. `png-decode.test.ts`: 41 pass, 35 fail
+  (34 missing fixtures + the folder-contents test).
+- Needed from the orchestrator/owner: put `PngSuite-2017jul19.tgz`
+  (`http://www.schaik.com/pngsuite/PngSuite-2017jul19.tgz`) in
+  `/Users/gmeghnag/tentacle/.tentacle/tmp/image-region-png/`, then steps 1–4
+  above.
+
 ## Review
 
 *— (reviewer), (date)*

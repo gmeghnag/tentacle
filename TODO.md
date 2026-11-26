@@ -94,6 +94,47 @@ the rest are "value-add" improvements layered on the harness.
 - [ ] **feat/tui-detach** (plan, owner rounds 1–3 answered, H0 probes done; not started) — `/detach` returns the shell prompt like `/quit`, the TUI process goes headless. Doc on the branch.
 - [ ] **feat/remote-control** (promoted from eval 18/11; plan on the branch, uncommitted doc edit in its worktree; not started).
 
+## Open follow-ups (sub-items of done tasks)
+
+Kept by the 2026-11-26 clean-up: open sub-items whose parent task is done.
+
+- [ ] **Design 3 — background tap STILL OPEN**: needs the owner's phone `notify` log line after the next iOS build; then decide/fix.
+- [ ] Follow-up (Opus round-3 LOWs, `docs/feat/subagent-tail-view.md` Review → Round 3 → Nits): a cancel with no text still says "cancelled" twice (the model's advice is shown); an empty report draws two blank rows; a spilled report keeps a blank row; a wrapped row can start with a space; a stop reason named like an `Object` member prints garbage (`Object.hasOwn`); Ctrl+O on a trail over the screen height loses its top (live check, maybe pre-existing). Type: fix · Size: S · Blast: contained.
+- [ ] 🔵 **Later hardening:** Ed25519-signed `SHA256SUMS` verified by
+  `update` (D3 deferred).
+- [ ] 🔵 **Debt: no 64-char MCP tool-name warning in the TUI** (K2). It is
+  printed only in `--plain` / one-shot mode (`cli/src/main.ts`, after
+  `connectMcpServers`). The TUI connects MCP in the worker, which has no
+  warning channel (a raw write would corrupt Ink, §7). Route it through
+  the worker's MCP status (`McpStatusTracker` / `mcp/status`). Type: feat
+  · Size: S · Blast: contained.
+- [ ] **Hook model access (LLM-judge seam)** — hooks call a model
+  through tentacle (unix-socket HTTP + per-invocation token), judge
+  model from a laptop-side `hookModels` map, resolved and capped on the
+  laptop; in a pod via a new daemon→client `model/complete` (keys never
+  leave the laptop). Owner decisions M1–M8 open. **Eval:**
+  `docs/eval/hook-model-access.md`. Type: eval → feat · Size: L (split
+  A local / B pod+protocol) · Blast: load-bearing.
+- [ ] 🔵 **Nit: re-check pending asks after a throwing send** — a client
+  whose send throws in `emit` is dropped without `recheckAsks()` (needs a
+  programming error; next attach/detach re-checks). Fix: one
+  `recheckAsks()` after the fan-out loop (never inside: `settle` emits).
+  Also optional: default `requestTimeoutMs` for requests to a pod.
+  Type: fix · Size: S · Blast: contained.
+- [ ] device check (from the e2e triage, unverified): on iOS 26 a rightward drag that starts on the hub-opacity track (not on the thumb) may be taken by the stack's content back-swipe and pop Settings — flow 33 hit it with Maestro's swipe; check with a finger, fix with a native gesture if real.
+
+## Quarantined e2e flows
+
+Each quarantined / known-bug flow needs its line here (`apps/mobile/test/e2e-gate.test.ts`).
+
+- [ ] e2e flow `22-notify-approve` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
+- [ ] e2e flow `22-notify-deny` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
+- [ ] e2e flow `22-notify-reply` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
+- [ ] e2e flow `22-notify-forged` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
+- [ ] e2e flow `push-placeholder` is quarantined: Maestro does not see SpringBoard notification banners on the iOS 26 simulator (a plain `simctl push` banner was not found during a 20 s wait), so the banner step cannot be asserted; re-enable when Maestro can read banners (or assert the presentation another way).
+- [ ] e2e flow `22-notify-render` is quarantined: Maestro does not see SpringBoard notification banners on the iOS 26 simulator (a plain `simctl push` banner was not found during a 20 s wait), so the banner step cannot be asserted; re-enable when Maestro can read banners (or assert the presentation another way).
+- [ ] e2e flow `19-lock-unlock-button` is quarantined: on the simulator a resume auto-prompts Face ID over the Unlock button (by design) and a nomatch cannot be scripted, so the button cannot be driven; re-enable when a failed/cancelled evaluation can be scripted (or drive it on a device). Logic covered by `app-lock.test.ts`.
+
 ## v0.1.0 stabilization review (in progress)
 
 Full code review, hot-path → polish, to stabilize a v0.1.0. Findings recorded
