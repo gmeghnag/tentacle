@@ -10,6 +10,7 @@
  */
 import { MAX_IMAGE_BYTES, formatBytes } from "./attachments.ts";
 import { sniffImageType } from "./image-sniff.ts";
+import { PNG_DEPTHS } from "./png-decode.ts";
 import { crc32 } from "./png.ts";
 import { TOOL_IMAGE_REF_CHARS } from "./tool-images.ts";
 
@@ -45,15 +46,6 @@ export const DEFAULT_IMAGE_FILE_MAX_EDGE = 1568;
 
 /** The PNG signature, byte for byte. */
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-
-/** PNG colour types and the bit depths the spec allows each (table 11.1). */
-const PNG_DEPTHS: Readonly<Record<number, readonly number[]>> = {
-  0: [1, 2, 4, 8, 16], // greyscale
-  2: [8, 16], // truecolour
-  3: [1, 2, 4, 8], // indexed
-  4: [8, 16], // greyscale + alpha
-  6: [8, 16], // truecolour + alpha
-};
 
 /** How far from the end an `IEND` chunk may sit (it is 12 bytes; slack for trailing junk). */
 const PNG_TAIL_BYTES = 1024;

@@ -95,6 +95,17 @@ const CASES: readonly {
     subtitle: "a1b2c3d4e5f6 · high",
   },
   { name: "image_view", args: '{"ref":"a1b2c3d4e5f6"}', subtitle: "a1b2c3d4e5f6" },
+  // docs/feat/image-region-png.md T8: a zoom says so, after the detail.
+  {
+    name: "image_view",
+    args: '{"ref":"a1b2c3d4e5f6","region":{"left":0,"top":0,"width":0.5,"height":0.5}}',
+    subtitle: "a1b2c3d4e5f6 · region",
+  },
+  {
+    name: "image_view",
+    args: '{"ref":"a1b2c3d4e5f6","detail":"high","region":{"left":0,"top":0,"width":1,"height":1}}',
+    subtitle: "a1b2c3d4e5f6 · high · region",
+  },
   { name: "shell", args: "not json at all", subtitle: "" },
   { name: "mystery_tool", args: "raw args", subtitle: "raw args" },
 ];

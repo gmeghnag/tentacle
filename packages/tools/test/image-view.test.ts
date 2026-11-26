@@ -173,7 +173,7 @@ describe("image_view (T5, T9)", () => {
         };
     return { high, low, label: "doc.pdf p.3" };
   };
-  /** A spy store: no `read` at all, so any byte read would throw. */
+  /** A spy store: its `read` throws — no byte read is expected. */
   const spy = (e: ToolImageEntry | "ambiguous" | null, held = true): ToolImageStore => ({
     putTool: async () => ({ refused: "x" }),
     resolve: () =>
@@ -183,6 +183,9 @@ describe("image_view (T5, T9)", () => {
           ? { kind: "ambiguous", labels: ["a p.1", "b p.2"] }
           : { kind: "found", entry: e },
     holds: () => held,
+    read: async () => {
+      throw new Error("no byte read expected");
+    },
   });
 
   test("low (default) and high pick the right ref", () => {

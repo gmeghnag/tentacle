@@ -1352,6 +1352,17 @@ describe("toolTitle labels", () => {
     );
   });
 
+  // docs/feat/image-region-png.md T8: a zoom says so, after the detail.
+  test("image_view marks a region", () => {
+    const region = '"region":{"left":0,"top":0,"width":0.5,"height":0.5}';
+    expect(toolTitle(tool("image_view", `{"ref":"a1b2c3d4e5f6",${region}}`)).subtitle).toBe(
+      "a1b2c3d4e5f6 · region",
+    );
+    expect(
+      toolTitle(tool("image_view", `{"ref":"a1b2c3d4e5f6","detail":"high",${region}}`)).subtitle,
+    ).toBe("a1b2c3d4e5f6 · high · region");
+  });
+
   test("an unlabelled (MCP) tool keeps its name and raw args", () => {
     expect(toolTitle(tool("mcp__x__y", '{"q":1}'))).toEqual({
       label: "mcp__x__y",

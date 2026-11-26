@@ -196,6 +196,7 @@ describe("a tool result's ONE image (docs/feat/image-view.md T8)", () => {
       putTool: async () => ({ refused: "x" }),
       resolve: () => ({ kind: "none" as const }),
       holds: () => false,
+      read: async () => null,
     };
     const tools = new ToolRegistry();
     tools.register({
