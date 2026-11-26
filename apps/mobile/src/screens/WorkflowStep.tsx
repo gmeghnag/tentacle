@@ -113,7 +113,12 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
     () => (pair === null ? null : morphTable(pair.from, pair.to)),
     [pair],
   );
-  const motion = morphLook(reduceMotion);
+  // The flight runs on open and on a Reduce Motion toggle, never on a status
+  // update (docs/fix/mobile-workflow-run-jank.md): its effect depends on values
+  // that hold across re-renders, or every update would restart it, set `busy`
+  // and swallow a Back tap.
+  const motion = useMemo(() => morphLook(reduceMotion), [reduceMotion]);
+  const flies = table !== null;
   const progress = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current;
   const graphFade = useRef(new Animated.Value(reduceMotion ? 0 : 1)).current;
   /** One flight at a time: set while the morph animates, cleared only when it settles. */
@@ -128,7 +133,7 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
 
   useEffect(() => {
     // Reduce Motion: no flight at all, just the crossfade onto the final layout.
-    if (motion.kind === "crossfade" || table === null) {
+    if (motion.kind === "crossfade" || !flies) {
       progress.setValue(1);
       busy.current = true;
       Animated.timing(graphFade, {
@@ -163,7 +168,7 @@ export function WorkflowStepLayer(props: WorkflowStepLayerProps): JSX.Element {
         busy.current = false;
       }
     });
-  }, [motion, table, progress, graphFade]);
+  }, [motion, flies, progress, graphFade]);
 
   const interp = (values: readonly number[]) =>
     values.length < 2

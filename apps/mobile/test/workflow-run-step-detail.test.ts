@@ -68,6 +68,7 @@ function harness(
   const stepCalls: { runId: string; stepId: string; attempt?: number }[] = [];
   const settle: (() => void)[] = [];
   let held = false;
+  let paints = 0;
   let mode: RunMode = "graph";
   const session = {
     onWorkflows(fn: (rows: readonly WorkflowRow[]) => void) {
@@ -110,6 +111,9 @@ function harness(
         mode = m;
       },
     },
+    onChange: () => {
+      paints += 1;
+    },
   });
   const flush = async () => {
     for (let i = 0; i < 8; i += 1) await Promise.resolve();
@@ -121,6 +125,8 @@ function harness(
       for (const fn of feed) fn(rows);
     },
     stepCalls,
+    /** How many times the screen was told to repaint. */
+    paints: () => paints,
     reply: (next: WorkflowStepResult | { unsupported: true }) => {
       opts.stepReply = next;
     },
@@ -280,6 +286,65 @@ describe("a step's detail: read on demand, held per step", () => {
     expect(detailOf(h, "review")?.kind).toBe("loaded");
     expect(detailOf(h, "build")?.kind).toBe("loaded");
     expect(h.controller.state().openStepId).toBe("build");
+  });
+});
+
+/**
+ * docs/fix/mobile-workflow-run-jank.md defect 2: the screen repaints only on
+ * `onChange`, so an open that reads nothing (a held final detail, a read in
+ * flight) must still say that the layer is open.
+ */
+describe("every open repaints, whether or not it reads", () => {
+  /** Paints caused by the open itself, before anything async can land. */
+  const paintsOn = (h: ReturnType<typeof harness>, open: () => void): number => {
+    const before = h.paints();
+    open();
+    return h.paints() - before;
+  };
+
+  test("an ended step reopened after Back repaints, with no second read", async () => {
+    const h = harness();
+    await ready(h);
+    h.controller.openStep("review");
+    await h.flush();
+    h.controller.closeStep();
+    expect(paintsOn(h, () => h.controller.openStep("review"))).toBeGreaterThan(0);
+    expect(h.controller.state().openStepId).toBe("review");
+    await h.flush();
+    expect(h.stepCalls).toHaveLength(1);
+  });
+
+  test("a step reopened while its read is in flight repaints, with one request", async () => {
+    const h = harness();
+    await ready(h);
+    h.hold();
+    h.controller.openStep("review");
+    h.controller.closeStep();
+    expect(paintsOn(h, () => h.controller.openStep("review"))).toBeGreaterThan(0);
+    expect(detailOf(h, "review")).toEqual({ kind: "loading" });
+    await h.release();
+    expect(h.stepCalls).toHaveLength(1);
+    expect(detailOf(h, "review")?.kind).toBe("loaded");
+  });
+
+  test("a VISIT open of a held detail repaints too (list rows and arrows)", async () => {
+    const h = harness();
+    await ready(h);
+    h.controller.openStep("review", { attempt: 0 });
+    await h.flush();
+    h.controller.closeStep();
+    const open = () => h.controller.openStep("review", { attempt: 0, round: 0 });
+    expect(paintsOn(h, open)).toBeGreaterThan(0);
+    expect(h.controller.state().openVisit).toEqual({ attempt: 0, round: 0 });
+    expect(h.stepCalls).toHaveLength(1);
+  });
+
+  test("a tap for a step no longer on the feed repaints, with no card and no read", async () => {
+    const h = harness();
+    await ready(h);
+    expect(paintsOn(h, () => h.controller.openStep("ghost"))).toBeGreaterThan(0);
+    expect(h.controller.state().steps.some((s) => s.step.id === "ghost")).toBe(false);
+    expect(h.stepCalls).toEqual([]);
   });
 });
 

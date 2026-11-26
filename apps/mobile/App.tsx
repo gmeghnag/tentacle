@@ -2279,7 +2279,6 @@ function WorkflowRunRoute({
         palette={palette}
         title={title}
         state={state}
-        now={Date.now()}
         onBack={onBack}
         onMode={(mode) => controller.setMode(mode)}
         onReviewAsk={() => controller.reviewAsk()}
