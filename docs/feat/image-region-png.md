@@ -620,6 +620,18 @@ cp $S/suite/PngSuite.LICENSE $S/suite/PngSuite.README packages/core/test/fixture
 Then the fixtures `README.md` (source URL, licence line, those sha256) and
 steps 2–4.
 
+### Gate-fix round after the orchestrator's fetch
+
+*— claude-sonnet-5-5, 2026-11-26* — still **PARTIAL**; no code or test change.
+
+The archive is in the scratch folder, but this session may not run the commands
+needed to unpack it: the chained command (sha256 + `mkdir` + `tar`), `shasum`
+alone and `tar -xzf` alone were each refused ("requires approval"). It was not
+unpacked by any other route; nothing forged, no test skipped.
+`png-decode.test.ts`: 41 pass, 35 fail. To unblock, either allow `shasum`,
+`tar`, `mkdir` and `cp` for the executor, or have the orchestrator run the block
+above (it ends with the sha256 list the fixtures `README.md` needs).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
