@@ -286,7 +286,79 @@ At merge, the orchestrator updates the `TODO.md` item (tick it, drop the
 
 ## Execution
 
-*(empty — the executor fills and signs this)*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**The simulator validation on the Pro was NOT run** (see the end). The flows are
+changed and guarded by source tests only.
+
+### Done, in order
+
+1. **Load-bearing check (source): holds.** `RenameSheet.tsx:59` is `autoFocus`.
+   The simulator half rests on the Context's runs 3–4; it was not repeated.
+2. **Reproduction:** the Context's simulator runs were not repeated. What was
+   reproduced here is the new tests going red on the unchanged flows.
+3. `apps/mobile/test/e2e-flows.test.ts`: new `describe`, three tests, written
+   first. Red on the unchanged flows (both on their property assertion, the
+   guard green):
+
+   ```
+   + "25-session-info.yaml: - tapOn:",
+   + "26-drawer.yaml: - tapOn:",
+   (fail) … > no flow taps or long-presses the rename input
+   -   "erase": "- eraseText",          +   "erase": "id",
+   -   "settle": "- waitForAnimationToEnd",   +   "settle": "- tapOn:",
+   (fail) … > flows 25 and 26 let the sheet settle before they type
+    70 pass
+    2 fail
+   ```
+
+4. `26-drawer.yaml` and `25-session-info.yaml`: the `tapOn` on the field is
+   replaced by the comment and `waitForAnimationToEnd`. Flow 25 keeps
+   `eraseText: 60` and its comment. Green: `72 pass, 0 fail`.
+
+### Mutations
+
+One at a time, each file restored byte for byte
+(`.tentacle/tmp/e2e-26-drawer-pro/mutate.ts`, run on the final test file):
+
+```
+M1 26: tap re-added: exit 1, 70 pass, 2 fail        (no tap · settle)
+M2 26: long-press added: exit 1, 70 pass, 2 fail    (no tap · settle; a comment sits between the lines)
+M3 26: settle removed: exit 1, 71 pass, 1 fail      (settle)
+M4 25: settle removed: exit 1, 71 pass, 1 fail      (settle)
+M5 26: settle after erase: exit 1, 71 pass, 1 fail  (settle)
+M6 sheet: autoFocus removed: exit 1, 71 pass, 1 fail (guard)
+```
+
+### Checks
+
+- `bun test` on `e2e-flows`, `e2e-shard`, `e2e-session-capabilities`,
+  `row-value`: `157 pass, 0 fail`.
+- `bunx biome check apps/mobile/test/e2e-flows.test.ts`: clean (after one
+  `--write` format fix).
+- Full `bun run check`: not run here; the orchestrator's script runs the gate.
+
+### Drift
+
+- The "no tap" test also matches the key without the leading `- ` (same rule,
+  slightly wider).
+- No changelog fragment, per this doc's header and AGENTS §10 (test-only). The
+  executor's spawn prompt asked for one; the two disagree.
+
+### Not run: simulator validation
+
+At 04:33–04:34 CET `orchestration/sim.lock` was held (since 04:28) by another chain:
+`xcodebuild` for `mobile-workflows-landing-v2` and a Maestro run on the Pro Max.
+The executor may not sleep-poll, so it did not wait. Still owed, **twice**, under
+the lock:
+
+```sh
+scripts/e2e-gate.sh 0FA4B51F-A0E3-421B-BE66-CE29EF45213D --only 25-session-info,26-drawer
+```
+
+Flow 25 without the tap has never been run on a simulator. The script gate's
+default simulator is the Pro Max, so it does not cover the Pro unless started
+with `SIM=0FA4B51F-A0E3-421B-BE66-CE29EF45213D`.
 
 ## Review
 
