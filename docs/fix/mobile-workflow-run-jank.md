@@ -377,3 +377,46 @@ supported on the simulator** (not measured on a device). No stop rule fired.
   harness): resume and unmount rest on the effect keys and `stop()`.
 
 ## Review
+
+*— claude-sonnet-5-5, 2026-11-26* (the brief asked for a `claude-opus-5-5`
+signature; this is the model that actually reviewed. Fresh context; same model as
+the planner, not the executor, `deepseek` per the exec commit.)
+
+**Verdict: PASS.** No HIGH or MEDIUM finding.
+
+**Gate.** Three touched test files: 41 pass, 0 fail. `apps/mobile/test/{workflow-,e2e-}*`:
+841 pass, 0 fail (40 files). `bun run lint`: clean (2725 files).
+`bun run typecheck`: no errors. Not run here: full `bun run test`, flow 45,
+simulator or device (verify with `bun run check` and
+`scripts/e2e-gate.sh --only 45-workflow-run-view`).
+
+**Premises** (against `main`): `openStep` without `changed()` and the
+`fit === "final"` early return TRUE (M1 gives 4 fails); `elapsedLabel` floor/clamp
+TRUE; flight effect on `[motion, table, …]` with an unmemoized `motion` TRUE;
+`STEP_ELAPSED_TICK_MS` TRUE; `onChange` TRUE, but at `App.tsx:2250`, not `:2262-2266`.
+
+**Mutations** (`review-mutate.ts`, files restored, `git diff HEAD` empty before
+this section): M1–M10 each fail (M1: 4, M2: 4, M3–M10: 1). Three probes stay
+green, so the source pins are weak (below MEDIUM): `const flies = table`;
+the strip's effect dropping the clock's cleanup; `setNow` replaced by a no-op.
+
+**Attacks tried.**
+1. `busy` stuck true now that no update restarts the flight (a re-render detaching
+   an interpolation would stop the animation): RN 0.88
+   `createAnimatedPropsHook.js:291-305` attaches the new node first and detaches the
+   old one in a microtask, so the value keeps a child. Not reachable by source
+   reading; not run on a device.
+2. `flies` flips or Reduce Motion toggles mid-flight: the effect re-runs, starts a
+   new animation and that one clears `busy`. Holds.
+3. Real-timer trace of `startRunClock`: 400, 1001, 2001, 3002, 4000 ms give
+   0–4 s; no tick after `stop()`.
+4. Removed `now` prop: only `SummaryStrip` consumed it. Resume can paint one stale
+   frame before the effect emits; harmless.
+5. Extra `changed()` on every `openStep` path (unknown step, read in flight, held
+   final): repaint only, read policy unchanged.
+6. §7: the clock is a pure injected module; no protocol, persistence or broker change.
+
+**Follow-up** (plan): the runs list still has `now={Date.now()}` (`App.tsx:2171`).
+
+**Executor.** Followed the plan; drift is declared; red/green and mutation claims
+match what was reproduced.
