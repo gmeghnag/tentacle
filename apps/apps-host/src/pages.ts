@@ -95,13 +95,111 @@ export function appResponseHeaders(): Record<string, string> {
   };
 }
 
+/**
+ * The mascot (`apps/mobile/src/mascot-scenes.ts` `MASCOT_BITMAP`, cyan palette),
+ * drawn as one inline SVG of merged runs: no image request, nothing to hash.
+ */
+const MASCOT_ROWS = [
+  "..KKKKK..",
+  ".KSFFFSK.",
+  "KSFFFFFSK",
+  "KFEFFFEFK",
+  "KFEFFFEFK",
+  "KBBFSFBBK",
+  ".KFFFFFK.",
+  "KSSKSKSSK",
+  ".KK.K.KK.",
+];
+const MASCOT_CYAN: Record<string, string> = {
+  K: "#0E8AA8",
+  E: "#083A47",
+  F: "#5FE0F2",
+  S: "#3FCFE6",
+  B: "#B7F3FB",
+};
+
+function mascotSvg(): string {
+  const rects: string[] = [];
+  MASCOT_ROWS.forEach((row, y) => {
+    for (const match of row.matchAll(/([KEFSB])\1*/g)) {
+      const tone = match[1] ?? "K";
+      rects.push(
+        `<rect x="${match.index}" y="${y}" width="${match[0].length}" height="1" fill="${MASCOT_CYAN[tone]}"/>`,
+      );
+    }
+  });
+  return `<svg class="logo" viewBox="0 0 9 9" width="26" height="26" shape-rendering="crispEdges" aria-hidden="true" focusable="false">${rects.join("")}</svg>`;
+}
+
+const MASCOT = mascotSvg();
+
 const STYLE = `
-:root { color-scheme: light dark; }
-body { font: 16px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 12vh auto; padding: 0 1.25rem; }
-h1 { font-size: 1.35rem; }
-button { font: inherit; padding: .5rem 1.25rem; }
-label { display: block; margin: .75rem 0; }
-input, select, textarea { display: block; width: 100%; box-sizing: border-box; font: inherit; padding: .35rem; }
+:root {
+  color-scheme: light dark;
+  --bg: #f6f4f9;
+  --fg: #231a30;
+  --muted: #62586f;
+  --line: #d9d2e3;
+  --field: #ffffff;
+  --accent: #5b2a86;
+  --on-accent: #ffffff;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17131d;
+    --fg: #ece7f3;
+    --muted: #a99fb8;
+    --line: #3a3248;
+    --field: #1f1928;
+    --accent: #c9a6f2;
+    --on-accent: #1d1030;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.6 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  padding: max(2rem, env(safe-area-inset-top)) max(1.5rem, env(safe-area-inset-right)) max(2rem, env(safe-area-inset-bottom)) max(1.5rem, env(safe-area-inset-left));
+  display: flex;
+  justify-content: center;
+}
+main { width: 100%; max-width: 26rem; margin-top: clamp(1rem, 9vh, 6rem); }
+.brand { display: flex; align-items: center; gap: .6rem; margin: 0 0 2.5rem; font-size: .9375rem; font-weight: 600; letter-spacing: .01em; color: var(--muted); }
+.logo { display: block; flex: none; }
+h1 { margin: 0 0 1rem; font-size: 1.75rem; line-height: 1.2; font-weight: 650; letter-spacing: -.02em; }
+p { margin: 0 0 1rem; color: var(--muted); }
+p.lead { color: var(--fg); font-size: 1.0625rem; }
+p strong { color: var(--fg); font-weight: 650; }
+a { color: var(--accent); text-underline-offset: .2em; }
+a:hover { text-decoration-thickness: 2px; }
+code, .mono { font-family: var(--mono); font-size: .875em; }
+button { font: inherit; font-weight: 600; letter-spacing: .005em; min-height: 2.75rem; padding: .6rem 1.5rem; border: 0; border-radius: .6rem; background: var(--accent); color: var(--on-accent); cursor: pointer; width: 100%; -webkit-appearance: none; appearance: none; }
+button:hover { filter: brightness(1.08); }
+button:active { filter: brightness(.94); }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.actions { margin: 1.75rem 0 1rem; }
+.quiet { display: inline-flex; align-items: center; min-height: 2.75rem; font-size: .9375rem; }
+.foot { margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); font-size: .875rem; color: var(--muted); }
+.foot p { font-size: inherit; margin: 0 0 .25rem; }
+label { display: block; margin: 0 0 1.25rem; font-size: .875rem; font-weight: 600; color: var(--fg); }
+label small { font-weight: 400; color: var(--muted); }
+input, select, textarea { display: block; width: 100%; margin-top: .4rem; min-height: 2.75rem; padding: .6rem .75rem; font: inherit; font-size: 1rem; font-weight: 400; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: .6rem; }
+input[name="app"] { font-family: var(--mono); font-size: .9375rem; }
+textarea { resize: vertical; line-height: 1.5; }
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+@media (min-width: 640px) {
+  main { margin-top: 12vh; }
+  h1 { font-size: 2rem; }
+  button { width: auto; min-width: 11rem; }
+}
 `;
 
 /**
@@ -171,12 +269,15 @@ function page(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title}</title>
+<title>${title} · tentacle apps</title>
 <style>${STYLE}</style>
 </head>
 <body>
+<main>
+<p class="brand">${MASCOT}<span>tentacle apps</span></p>
 <h1>${title}</h1>
 ${content}
+</main>
 ${script ? `<script>${WARNING_SCRIPT}</script>\n` : ""}</body>
 </html>
 `;
@@ -216,24 +317,28 @@ export function createPages(config: PagesConfig) {
       const report = `https://${escapeHtml(config.domain)}/report${app === undefined ? "" : `?app=${app}`}`;
       return page(
         "Before you continue",
-        `<p>This page was published by a tentacle user, not by tentacle. tentacle does not review it.</p>
+        `<p class="lead">This page was published by a tentacle user, not by tentacle. tentacle does not review it.</p>
 <p><strong>Do not enter passwords or personal data.</strong></p>
-<p><button type="button" id="continue">Continue</button></p>
+<div class="actions"><button type="button" id="continue">Continue</button></div>
 <p id="stuck" hidden>This browser cannot open the app. Try a current version of Safari, Chrome or Firefox.</p>
-<p><a href="${report}">Report this page</a> or write to ${mail}.</p>`,
+<p><a class="quiet" href="${report}">Report this page</a></p>
+<div class="foot"><p>Or write to ${mail}.</p></div>`,
         { script: true },
       );
     },
     notice(kind: NoticeKind): Page {
       const [title, text] = NOTICES[kind];
-      return page(title, `<p>${text}</p>\n<p>Abuse reports: ${mail}</p>`);
+      return page(
+        title,
+        `<p class="lead">${text}</p>\n<div class="foot"><p>Abuse reports: ${mail}</p></div>`,
+      );
     },
     info(): Page {
       return page(
         "tentacle apps",
-        `<p>This service hosts single-page apps published by tentacle users, each at its own address, for as long as the session that published it runs. tentacle does not review them.</p>
-<p>Report abuse: ${mail}</p>
-<p><a href="${terms}">Terms</a></p>`,
+        `<p class="lead">This service hosts single-page apps published by tentacle users, each at its own address, for as long as the session that published it runs. tentacle does not review them.</p>
+<div class="foot"><p>Report abuse: ${mail}</p>
+<p><a class="quiet" href="${terms}">Terms</a></p></div>`,
       );
     },
     report(id: string | undefined): Page {
@@ -244,23 +349,23 @@ export function createPages(config: PagesConfig) {
       return page(
         "Report an app",
         `<form method="post" action="/v1/report">
-<label>App id <input name="app" required maxlength="16" value="${app}"></label>
+<label>App id <input name="app" required maxlength="16" value="${app}" autocapitalize="none" autocomplete="off" spellcheck="false"></label>
 <label>Reason <select name="reason">${options}</select></label>
 <label>Details <textarea name="details" rows="5" maxlength="${REPORT_DETAILS_MAX}"></textarea></label>
-<label>Contact (optional) <input name="contact" maxlength="${REPORT_CONTACT_MAX}"></label>
-<p><button type="submit">Send report</button></p>
+<label>Contact <small>(optional)</small> <input name="contact" maxlength="${REPORT_CONTACT_MAX}"></label>
+<div class="actions"><button type="submit">Send report</button></div>
 </form>
-<p>The report, your address and the time are kept for up to 30 days. You can also write to ${mail}.</p>`,
+<div class="foot"><p>The report, your address and the time are kept for up to 30 days. You can also write to ${mail}.</p></div>`,
         { form: true },
       );
     },
     thanks(): Page {
-      return page("Report received", "<p>Thank you. A person will look at it.</p>");
+      return page("Report received", `<p class="lead">Thank you. A person will look at it.</p>`);
     },
     reportRefused(): Page {
       return page(
         "Report not saved",
-        `<p>We could not take your report now. Write to ${mail}.</p>`,
+        `<p class="lead">We could not take your report now. Write to ${mail}.</p>`,
       );
     },
   };

@@ -183,6 +183,16 @@ describe("host pages", () => {
     expect(body).not.toContain(CONFIG.abuseEmail);
   });
 
+  test("every page carries the brand row with the inline mascot, light and dark themes, no network", () => {
+    for (const [name, page] of all) {
+      expect([name, page.body.includes('<svg class="logo"')]).toEqual([name, true]);
+      expect(page.body).toContain("tentacle apps</span>");
+      expect(page.body).toContain("prefers-color-scheme: dark");
+      expect(page.body).toContain("#5b2a86");
+      expect(page.body).toContain("#c9a6f2");
+    }
+  });
+
   test("an id that is no id is never interpolated", () => {
     for (const bad of ['"><script>alert(1)</script>', "ABC", ""]) {
       for (const page of [pages.report(bad), pages.warning(bad)]) {
