@@ -244,6 +244,13 @@ export interface ConnectDeps {
    * setting comes from the config FILE, which only `connectTui` reads).
    */
   readonly pick?: SessionPick;
+  /**
+   * Called once, after `initialize` and before Ink mounts
+   * (docs/feat/connect-via-relay.md D9: the device path refreshes the saved
+   * addresses). `report` is the buffered error sink: whatever fails later, while
+   * Ink owns the terminal, is written after it exits (AGENTS §7).
+   */
+  readonly onClient?: (client: RemoteClient, report: (error: Error) => void) => void;
 }
 
 export async function connectTui(
@@ -319,6 +326,7 @@ export async function connectTui(
   };
   try {
     const handshake = await client.initialize();
+    deps.onClient?.(client, sink.onError);
     // Before Ink mounts (AGENTS §7): the list, the picker, the eager attach. The
     // picker is handed the palette `connectTheme` settled (HIGH 2: the caller
     // CANNOT know it — `connect` loads no config — and a closure over its own

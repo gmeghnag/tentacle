@@ -89,11 +89,13 @@ const ENGINE_BOOLS = { "insecure-docker-tcp": {} } as const;
 /** Every command's arguments: the ONE list of what each accepts. */
 export const ARGS = {
   connect: {
-    values: { ...TOKEN, "ca-cert": {} },
+    // `pair` / `forget` (docs/feat/connect-via-relay.md) take no positional:
+    // the exactly-one-target rule is the pure router's (`routeConnect`).
+    values: { ...TOKEN, "ca-cert": {}, pair: {}, forget: {} },
     bools: { "insecure-skip-tls-verify": {}, ...CONTINUE },
     optional: RESUME,
     conflicts: RESUME_CONFLICTS,
-    positional: { min: 1, max: 1 },
+    positional: { min: 0, max: 1 },
   },
   serve: {
     values: {
@@ -919,7 +921,7 @@ export function cliMode(args: readonly string[]): CliMode {
 /** The usage line printed with an argument error. */
 export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string>> = {
   connect:
-    "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify] [--resume [id]|--continue]",
+    "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify] [--resume [id]|--continue] | connect <name> [--resume [id]|--continue] | connect --pair <line|-> | connect --forget <name>",
   serve:
     "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [--model <id>] [--profile <name>] [...] (see tentacle --help)",
   run: 'tentacle run --image <ref> [--engine kubernetes|docker|podman] [--network <name|none>] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--rm[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [--model <id>] [--profile <name>] [--name <n>] [-d|--detach] [--auto-accept[=true|false]] [--prompt <text|->] ["<prompt>"]',
