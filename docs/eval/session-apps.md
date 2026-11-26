@@ -456,3 +456,16 @@ l'anteprima PRIVATA sul telefono (nessun URL pubblico).
 8. **Multi-file apps:** v1 = a single self-contained HTML artifact, directories in
    P4? — *Recommendation: yes; the model already writes self-contained pages for
    `present`.*
+
+### Owner answers (2026-11-26 ~10:00, one at a time)
+
+1. **Domain:** a SEPARATE registrable domain, short and neutral (e.g. `tentacle.page` / `tentacle-apps.net`), on a DNS host with an API, submitted to the Public Suffix List — never `apps.tentacle.so` (as recommended). Next: check availability and propose the name.
+2. **Apps host:** a NEW dedicated small server with its own IP (as recommended).
+3. **Network inside apps:** OFF in v1 (CSP `connect-src`/`form-action`/`worker-src` as `present`); a per-app allowlist only later, if a real app needs it (as recommended).
+4. **Lifetime:** **tied to the session only — NO hard maximum** (NOT the recommendation of 5-min lease + 7-day cap). The lease stays (the app goes down a few minutes after the session ends / the serve stops renewing), but a live session keeps its app up indefinitely.
+5. **First-visit warning page** «published by a tentacle user · Report»: yes, from day one (as recommended).
+6. **Accounts:** none — apps owned by the serve's key, with rate/size limits and the kill switch; stricter gating only if abuse appears (as recommended).
+7. **Live container ports (bonus):** a later phase, after `feat/a2a-relay`, reachable by a SECRET link by default, never public; the private phone preview over the existing Noise channel comes first (as recommended).
+8. **Files:** v1 publishes ONE self-contained HTML (already shown with `present`); directories come in phase 4 with pods (as recommended).
+
+*— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-26*
