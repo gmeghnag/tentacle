@@ -169,6 +169,11 @@ export interface ResolvedConfig {
   readonly promptIdentity: string;
   /** Whether a per-repo AGENTS.md was folded into `systemPrompt`. */
   readonly agentsMdLoaded: boolean;
+  /**
+   * `systemPromptEnvironment` (file-only): the agent ends each request's system
+   * prompt with the working directory and platform. Not part of `systemPrompt`.
+   */
+  readonly systemPromptEnvironment: boolean;
   /** Discovered skills (empty when disabled); the offered ones are cataloged in `systemPrompt`. */
   readonly skills: readonly SkillInfo[];
   readonly subagentsEnabled: boolean;
@@ -321,6 +326,7 @@ export interface ResolvedConfig {
     readonly agentTaskDescription: Source;
     readonly autoTitle: Source;
     readonly loadAgentsMd: Source;
+    readonly systemPromptEnvironment: Source;
     readonly loadSkills: Source;
     readonly contextAwarenessEnabled: Source;
     readonly contextAwarenessStepPercent: Source;
@@ -648,6 +654,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   });
   const agentsMdLoaded = composed.agentsMdLoaded;
   const systemPromptValue = composed.systemPrompt;
+  // File-only, like `autoTitle`: no env form.
+  const systemPromptEnvironment = pick(undefined, fileConfig.systemPromptEnvironment, true);
   const subagentsEnabled = pick(
     parseBool(env.TENTACLE_SUBAGENTS),
     fileConfig.subagents?.enabled,
@@ -893,6 +901,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     systemPrompt: systemPromptValue,
     promptIdentity: systemPrompt.value,
     agentsMdLoaded,
+    systemPromptEnvironment: systemPromptEnvironment.value,
     skills,
     subagentsEnabled: subagentsEnabled.value,
     subagentMaxIterations: subagentMaxIterations.value,
@@ -953,6 +962,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       agentTaskDescription: ctx.agentTaskDescription !== undefined ? "file" : "default",
       autoTitle: autoTitle.source,
       loadAgentsMd: pickAgentsMdEnabled(fileConfig, env).source,
+      systemPromptEnvironment: systemPromptEnvironment.source,
       loadSkills: pickSkillsEnabled(fileConfig, env).source,
       contextAwarenessEnabled: contextAwarenessEnabled.source,
       contextAwarenessStepPercent: contextAwarenessStepPercent.source,

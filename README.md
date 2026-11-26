@@ -504,6 +504,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `subagents.selectableModels` | — | — | `models` entries the agent may pick per `agent_task` call; absent or empty: off. |
 | `subagents.twoWay` | `TENTACLE_SUBAGENTS_TWO_WAY` | false | Background sub-agents may message the agent (`agent_notify`); a message wakes an idle agent. |
 | `subagents.types.*.model` | — | — | The `models` entry this type runs on (beats the type's `agents/*.md` `model`). |
+| `systemPromptEnvironment` | — | true | State the working directory and platform at the end of the system prompt. |
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline, not a path) | `PROMPT.md` in the config dir | The system prompt file: relative to the config dir, or absolute. |
 | `tools.dedupOutput` | `TENTACLE_DEDUP_OUTPUT` | true | Collapse runs of identical consecutive output lines. |
 | `tools.enabled.*` | — | — | Whether this built-in tool or group is offered to the model. |

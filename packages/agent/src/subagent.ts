@@ -49,6 +49,7 @@ import {
 } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { SessionCapabilities } from "./capabilities.ts";
+import type { PromptEnvironment } from "./environment-prompt.ts";
 import { type HarnessDeps, type HarnessInstance, runHarnessChild } from "./harness/child.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
@@ -323,6 +324,8 @@ export interface SubagentDeps {
    */
   readonly modelFor?: (type: AgentType, requested: string | undefined) => SubagentModel | undefined;
   readonly env: ExecutionEnvironment;
+  /** Where `env` works: a native child states the same block as the parent. */
+  readonly environment?: PromptEnvironment;
   /** The parent's registry; a child gets a filtered subset, never the spawn tool. */
   readonly tools: ToolRegistry;
   readonly requestPermission?: PermissionRequester;
@@ -587,6 +590,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       tools: childTools,
       env: deps.env,
       systemPrompt: type.prompt,
+      ...(deps.environment ? { environment: deps.environment } : {}),
       ...(deps.capabilities ? { capabilities: deps.capabilities } : {}),
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),

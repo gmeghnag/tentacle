@@ -347,6 +347,31 @@ describe("resolveConfig AGENTS.md composition", () => {
     expect(c.agentsMdLoaded).toBe(false);
   });
 
+  test("systemPromptEnvironment defaults to true and never changes the composed prompt", () => {
+    const on = resolveConfig(ctx({ promptFromFile: "IDENTITY" }));
+    expect(on.systemPromptEnvironment).toBe(true);
+    expect(on.sources.systemPromptEnvironment).toBe("default");
+    // The block is added per request by the agent, never composed here.
+    expect(on.systemPrompt).toBe("IDENTITY");
+  });
+
+  test("file systemPromptEnvironment is honoured", () => {
+    for (const value of [false, true]) {
+      const c = resolveConfig(ctx({ fileConfig: { systemPromptEnvironment: value } }));
+      expect(c.systemPromptEnvironment).toBe(value);
+      expect(c.sources.systemPromptEnvironment).toBe("file");
+    }
+  });
+
+  test("the schema takes only a boolean for systemPromptEnvironment, in a profile too", () => {
+    const ok = (value: unknown) => FileConfigSchema.safeParse(value).success;
+    expect(ok({ systemPromptEnvironment: false })).toBe(true);
+    expect(ok({ profiles: { bench: { systemPromptEnvironment: false } } })).toBe(true);
+    expect(ok({ systemPromptEnvironment: "false" })).toBe(false);
+    expect(ok({ systemPromptEnvironment: 0 })).toBe(false);
+    expect(ok({ profiles: { bench: { systemPromptEnvironment: "no" } } })).toBe(false);
+  });
+
   test("a full override (TENTACLE_SYSTEM_PROMPT) is still only the identity; AGENTS.md appends", () => {
     const c = resolveConfig(ctx({ env: { TENTACLE_SYSTEM_PROMPT: "ENV_ID" }, agentsMd: "RULES" }));
     expect(c.systemPrompt).toBe("ENV_ID\n\n# Project rules (AGENTS.md)\n\nRULES\n");

@@ -203,7 +203,13 @@ test("a context reset end to end: fresh files, the laptop's approval, the saved 
     );
     const listed = await store.loadAll();
     const record = listed.records[0];
-    expect(record?.messages[0]?.content).toBe(system);
+    // The saved head is the fresh prompt itself: the request ends it with the
+    // working directory, the history never holds that (docs/feat/system-prompt-cwd.md).
+    const saved = record?.messages[0]?.content ?? "";
+    expect(saved).not.toContain("<cwd>");
+    expect(system).toBe(
+      `${saved.trimEnd()}\n\n<cwd>\n${dir}\n</cwd>\n<platform>${process.platform}</platform>\n`,
+    );
     expect(restartPromptOf(record?.messages[1]?.content ?? "")).toBe(
       "goal: G. plan: docs/p.md. next: load late",
     );

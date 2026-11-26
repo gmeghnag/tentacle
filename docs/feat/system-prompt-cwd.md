@@ -278,11 +278,19 @@ parent's env, so the parent's cwd is the truth.
 
 **D5 — Config key `systemPromptEnvironment`** (boolean, default `true`,
 file-only, no env var, `carried: "no"`, scope `both`): `schema.ts` (next to
-`loadAgentsMd`, `schema.ts:335`), `key-docs.ts` (row as in Precondition 8),
-read straight off the file in `resolveConfig` into
-`ResolvedConfig`/`TentacleConfig` as `systemPromptEnvironment: boolean`
-(`fileConfig.systemPromptEnvironment ?? true`). Turning it off restores
+`loadAgentsMd`, `schema.ts:335`), `key-docs.ts`, resolved in `resolveConfig`
+into `ResolvedConfig`/`TentacleConfig` as `systemPromptEnvironment: boolean`,
+the `model.autoTitle` shape: `pick(undefined,
+fileConfig.systemPromptEnvironment, true)`, a `sources` entry, and a
+`sourceKey` + `resolved` accessor on its docs row. Turning it off restores
 today's request bytes exactly.
+
+*Corrected during Execution (claude-sonnet-5-5):* the plan had it read straight
+off the file with no `sources` entry (Precondition 8, the `maxImageBytes`
+shape). That holds only for a key with NO documented default: a row with a
+`default` and no `sourceKey` is declared a CLI-side default
+(`key-docs.test.ts` "T2b: the defaults `resolveConfig` does not apply are
+exactly the CLI's"), and went red.
 
 **Runtime truth table** (all by construction from Precondition 3):
 
@@ -407,7 +415,78 @@ gate): the bench, pinned new binary, default config, no variant.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Load-bearing check: holds.** The main loop's three model-facing builds (round
+`model.stream`, the step-limit final `model.stream`, `countTokensBounded`) all
+go through `requestHistory` → `projectedHistory`; the only other
+`model.stream` in `packages/agent/src` is the compaction summariser
+(`compact.ts`), which builds its own request and is not a main-loop request.
+T2(b) is green, and red under mutation M1.
+
+**Repro.** The red tests below were the "capability missing" evidence on the
+unchanged code; the Context's `repro.ts` was run again only after the change:
+
+```
+default PROMPT.md: config.cwd=/var/folders/…/spcwd-AmS3ot/my-project
+  system messages: 1, chars 664
+  contains cwd path: true; contains "<cwd>": true
+  system tail: "p00000gn/T/spcwd-AmS3ot/my-project\n</cwd>\n<platform>darwin</platform>\n"
+custom systemPromptFile: config.cwd=/var/folders/…/spcwd-AmS3ot/my-project
+  system messages: 1, chars 139
+  contains cwd path: true; contains "<cwd>": true
+  system tail: "p00000gn/T/spcwd-AmS3ot/my-project\n</cwd>\n<platform>darwin</platform>\n"
+```
+
+**As built, in order.**
+
+1. *Agent.* T1/T2 written first. Red: T1 module missing; T2 8 fail on their
+   assertions, 3 pass (the three "head sent as stored" cases, true before and
+   after). Then `environment-prompt.ts` (new), `agent.ts`
+   (`AgentConfig.environment`, the block rendered once in the constructor,
+   `projectedHistory`), `subagent.ts` (`SubagentDeps.environment` → child),
+   `index.ts` (type export only: the cli test needs neither function).
+   26/26 green.
+2. *Config.* T4 in `resolve.test.ts` red (3 fail), then `schema.ts`,
+   `resolve.ts`, `load.ts`, `key-docs.ts`; `bun run docs:config` added the
+   README row.
+3. *CLI.* T3 red (3 fail, one of them a mistake in the test's own profile
+   setup, fixed), then `wiring.ts`: one `environment` object for the main agent
+   and the sub-agent runner. 5/5 green.
+4. `changelog.d/system-prompt-cwd.changed.md`. No schema, protocol or
+   `protocol.json` change.
+
+**Drift from Implementation.**
+
+- D5 / Precondition 8: the key has a `sources` entry and a `resolved` accessor
+  (see the correction under D5).
+- T3 has two cases the plan did not list: a native sub-agent spawned through the
+  real wiring (without it, dropping the runner's `environment` in `wiring.ts`
+  left T3 green) and a profile switching the key off.
+- `context-reset-e2e.test.ts` asserted saved head == sent head. They now differ
+  by design: it asserts the saved head has no `<cwd>` and the sent head is
+  exactly saved + block.
+- T4's `key-docs.test.ts` coverage is the existing generic tests; no new case
+  there.
+
+**Mutations** (each applied, run, reverted):
+
+| # | mutation | red |
+|---|---|---|
+| M1 | `projectedHistory` writes the block into `messages[0]` | T2 (b), (d), (e), (g) — 7 pass / 4 fail |
+| M2 | child `new Agent` without `environment: deps.environment` | T2 (f) — 10 / 1 |
+| M3 | main agent without `environment` in `wiring.ts` | T3 default + custom prompt — 3 / 2 |
+| M4 | runner deps without `environment` in `wiring.ts` | T3 sub-agent — 4 / 1 |
+| M5 | the projection also copies every other message | T2 (c) anchor — 10 / 1 |
+
+**Checks run.** `packages/agent/test` + `packages/config/test`: 1706 pass, 0
+fail (128 files). The 90 test files under cli/daemon/client/agent/tui/config
+matching `buildAgent|tunnelledAgent|systemPrompt`: 1105 pass, 0 fail.
+`bunx biome check packages/agent packages/config` + the three touched cli files:
+no findings. **Not run here:** full `bun run test`, `typecheck`, repo-wide lint
+(the orchestrator's gate), and the post-merge bench validation. No real pod,
+`serve` or `/move` was exercised: those rows of the truth table rest on
+Precondition 3.
 
 ## Review
 

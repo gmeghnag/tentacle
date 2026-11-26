@@ -334,6 +334,13 @@ const settingsShape = {
    */
   loadAgentsMd: z.boolean().optional(),
   /**
+   * End every request's system prompt with the working directory and platform
+   * the session's tools run on (docs/feat/system-prompt-cwd.md). Default:
+   * enabled. File-only; read by the process that builds the agent (a pod's own
+   * config in `run`/`attach`).
+   */
+  systemPromptEnvironment: z.boolean().optional(),
+  /**
    * Discover Agent Skills (`SKILL.md`) in `.agents/skills/` (walking up from
    * the launch folder to the repo root), `<configDir>/skills/` and
    * `~/.agents/skills/`, list them in the system prompt and offer the `skill`

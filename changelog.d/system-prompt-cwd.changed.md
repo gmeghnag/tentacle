@@ -1,0 +1,1 @@
+- **The model now knows where it works.** Every session's system prompt — the default and a custom `systemPromptFile` — ends with the session's working directory and platform (the pod's path in `run`/`attach`), stable for the session's prompt cache; `systemPromptEnvironment: false` turns it off.

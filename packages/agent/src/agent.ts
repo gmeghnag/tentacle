@@ -97,6 +97,11 @@ import {
   resetRefusal,
   skillSetDelta,
 } from "./context-reset.ts";
+import {
+  type PromptEnvironment,
+  renderEnvironmentBlock,
+  withEnvironment,
+} from "./environment-prompt.ts";
 import { EventQueue } from "./event-queue.ts";
 import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
 import { projectOldImages } from "./old-images.ts";
@@ -656,6 +661,12 @@ export interface AgentConfig {
   readonly tools: ToolRegistry;
   readonly env: ExecutionEnvironment;
   readonly systemPrompt?: string;
+  /**
+   * Where `env` works (docs/feat/system-prompt-cwd.md): every request's system
+   * head ends with the block it renders, the stored history never holds it. No
+   * system head, no block. Absent = none.
+   */
+  readonly environment?: PromptEnvironment;
   /** Max tool-call rounds before giving up. Default 16. */
   readonly maxIterations?: number;
   /**
@@ -954,9 +965,13 @@ export class Agent {
    * the model's catalog as it is.
    */
   private catalogSkills: readonly SkillInfo[];
+  /** `config.environment` rendered once: the same bytes on every request (`""` = none). */
+  private readonly environmentBlock: string;
 
   constructor(config: AgentConfig) {
     this.config = config;
+    this.environmentBlock =
+      config.environment === undefined ? "" : renderEnvironmentBlock(config.environment);
     this.counter =
       config.imageTokens === undefined
         ? DEFAULT_COUNTER
@@ -1120,9 +1135,10 @@ export class Agent {
 
   /**
    * `messages` as a request built under `caps` sends them: the system message's
-   * skills catalog re-rendered without the hidden skills. A copy when it
-   * differs; the stored history is never touched. Every other message is the
-   * same object, so a context anchor still matches it.
+   * skills catalog re-rendered without the hidden skills, then the environment
+   * block. A copy when it differs; the stored history is never touched. Every
+   * other message is the same object, so a context anchor still matches it, and
+   * the length is unchanged, so a prune index does too.
    */
   private projectedHistory(
     messages: readonly ChatMessage[],
@@ -1132,7 +1148,10 @@ export class Agent {
     if (first?.role !== "system" || typeof first.content !== "string") {
       return messages;
     }
-    const content = projectSystem(first.content, this.catalogSkills, caps);
+    const content = withEnvironment(
+      projectSystem(first.content, this.catalogSkills, caps),
+      this.environmentBlock,
+    );
     return content === first.content ? messages : [{ ...first, content }, ...messages.slice(1)];
   }
 
