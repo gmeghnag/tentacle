@@ -5,6 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { isAppId } from "@tentacle/protocol";
+import { encode } from "uqr";
 import type { View } from "./host-core.ts";
 import type { HeaderReader } from "./signed-request.ts";
 
@@ -133,6 +134,27 @@ function mascotSvg(): string {
 
 const MASCOT = mascotSvg();
 
+/**
+ * A QR of `text` as one inline SVG: a single `<path>` of unit modules on a
+ * white square with a 4-module quiet zone. Always dark on light, in the dark
+ * theme too, so it scans in both. Presentation attributes only (no `style=`).
+ */
+export function qrSvg(text: string): string {
+  const matrix = encode(text, { ecc: "M", border: 0 }).data;
+  const border = 4;
+  const size = matrix.length + border * 2;
+  let path = "";
+  matrix.forEach((row, y) => {
+    for (const match of row
+      .map((on) => (on ? "1" : "0"))
+      .join("")
+      .matchAll(/1+/g)) {
+      path += `M${match.index + border} ${y + border}h${match[0].length}v1h-${match[0].length}z`;
+    }
+  });
+  return `<svg class="qr-code" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges" role="img" aria-label="QR code of this page's address"><rect width="${size}" height="${size}" fill="#ffffff"/><path d="${path}" fill="#000000"/></svg>`;
+}
+
 const STYLE = `
 :root {
   color-scheme: light dark;
@@ -195,6 +217,13 @@ input, select, textarea { display: block; width: 100%; margin-top: .4rem; min-he
 input[name="app"] { font-family: var(--mono); font-size: .9375rem; }
 textarea { resize: vertical; line-height: 1.5; }
 input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+.qr { display: none; }
+.qr-code { display: block; width: 11rem; height: 11rem; border-radius: .5rem; }
+.qr-url { margin: .5rem 0 0; font-family: var(--mono); font-size: .8125rem; word-break: break-all; }
+@media (min-width: 700px) {
+  .qr { display: block; margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); }
+  .qr p { margin-bottom: .75rem; font-size: .875rem; }
+}
 @media (min-width: 640px) {
   main { margin-top: 12vh; }
   h1 { font-size: 2rem; }
@@ -315,13 +344,20 @@ export function createPages(config: PagesConfig) {
     warning(id: string): Page {
       const app = safeId(id);
       const report = `https://${escapeHtml(config.domain)}/report${app === undefined ? "" : `?app=${app}`}`;
+      // The canonical address, from the validated id and the configured domain
+      // only: never the Host header or the query.
+      const canonical = app === undefined ? undefined : `https://${app}.${config.domain}/`;
+      const qr =
+        canonical === undefined
+          ? ""
+          : `\n<div class="qr"><p>Open on your phone</p>${qrSvg(canonical)}<p class="qr-url">${escapeHtml(canonical)}</p></div>`;
       return page(
         "Before you continue",
         `<p class="lead">This page was published by a tentacle user, not by tentacle. tentacle does not review it.</p>
 <p><strong>Do not enter passwords or personal data.</strong></p>
 <div class="actions"><button type="button" id="continue">Continue</button></div>
 <p id="stuck" hidden>This browser cannot open the app. Try a current version of Safari, Chrome or Firefox.</p>
-<p><a class="quiet" href="${report}">Report this page</a></p>
+<p><a class="quiet" href="${report}">Report this page</a></p>${qr}
 <div class="foot"><p>Or write to ${mail}.</p></div>`,
         { script: true },
       );
