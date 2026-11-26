@@ -2,17 +2,13 @@
  * `tentacle browser install|status|uninstall` (docs/feat/browser-inspect.md §1).
  * Chrome's host manifest `path` takes no arguments (F2), so install writes a
  * 2-line wrapper `<configDir>/browser/host` that runs `<tentacle>
- * __browser-host`, and the manifest at F1's per-user path naming ONLY the
- * pinned extension origin (no wildcards). The unpacked extension itself ships
- * with B3; this slice is the host side.
+ * __browser-host`, and the manifest at F1's per-user path naming ONLY our
+ * extension origins (no wildcards): the key-pinned dev id and, once known, the
+ * Chrome Web Store id (`browserExtensionIds`, docs/feat/browser-extension-store.md).
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  BROWSER_EXTENSION_ID,
-  BROWSER_HOST_NAME,
-  BROWSER_HOST_SUBCOMMAND,
-} from "@tentacle/browser";
+import { BROWSER_HOST_NAME, BROWSER_HOST_SUBCOMMAND, browserExtensionIds } from "@tentacle/browser";
 import { EXTENSION_ASSETS } from "./browser-extension-assets.ts";
 import { browserDir, hubSocketPath, probeSocket } from "./browser-host.ts";
 
@@ -21,7 +17,8 @@ export interface BrowserInstallEnv {
   readonly home: string;
   /** The command that runs THIS tentacle (`selfCommand()`): absolute paths. */
   readonly self: readonly string[];
-  readonly extensionId?: string;
+  /** The extension ids the host serves (tests inject); default `browserExtensionIds()`. */
+  readonly extensionIds?: readonly string[];
   /**
    * The unpacked extension's files (tests inject); default: the table EMBEDDED
    * in this build (`EXTENSION_ASSETS`), so install works from the compiled
@@ -63,14 +60,19 @@ export function wrapperScript(self: readonly string[], configDir: string): strin
   return `#!/bin/sh\nexport TENTACLE_CONFIG_DIR=${q(configDir)}\nexec ${self.map(q).join(" ")} ${BROWSER_HOST_SUBCOMMAND} "$@"\n`;
 }
 
-export function manifestJson(wrapper: string, extensionId: string): string {
+/** `chrome-extension://<id>/` per id, in order: the host manifest's `allowed_origins`. */
+export function extensionOrigins(ids: readonly string[]): string[] {
+  return ids.map((id) => `chrome-extension://${id}/`);
+}
+
+export function manifestJson(wrapper: string, extensionIds: readonly string[]): string {
   return `${JSON.stringify(
     {
       name: BROWSER_HOST_NAME,
       description: "tentacle browser host",
       path: wrapper,
       type: "stdio",
-      allowed_origins: [`chrome-extension://${extensionId}/`],
+      allowed_origins: extensionOrigins(extensionIds),
     },
     null,
     2,
@@ -78,14 +80,14 @@ export function manifestJson(wrapper: string, extensionId: string): string {
 }
 
 export function installBrowser(env: BrowserInstallEnv): string[] {
-  const id = env.extensionId ?? BROWSER_EXTENSION_ID;
+  const ids = env.extensionIds ?? browserExtensionIds();
   const wrapper = wrapperPath(env.configDir);
   mkdirSync(browserDir(env.configDir), { recursive: true, mode: 0o700 });
   writeFileSync(wrapper, wrapperScript(env.self, env.configDir));
   chmodSync(wrapper, 0o755);
   const manifest = manifestPath(env.home);
   mkdirSync(join(manifest, ".."), { recursive: true });
-  writeFileSync(manifest, manifestJson(wrapper, id));
+  writeFileSync(manifest, manifestJson(wrapper, ids));
   const out = [`host wrapper: ${wrapper}`, `host manifest: ${manifest}`];
   const assets = env.extensionAssets ?? EXTENSION_ASSETS;
   const dest = extensionDir(env.configDir);
@@ -102,6 +104,15 @@ export function installBrowser(env: BrowserInstallEnv): string[] {
     // folder is the SAME extension, and keeps working with this host.
     "(already loaded from another folder? it keeps working: same key, same id)",
   );
+  const store = ids[1];
+  if (store !== undefined) {
+    // Two copies (unpacked + store) are two extensions: both dial the host and
+    // only one holds the hub, so the other's popup says «not linked».
+    out.push(
+      `or install it from the Chrome Web Store: https://chromewebstore.google.com/detail/${store}`,
+      "(keep only one of the two copies enabled)",
+    );
+  }
   return out;
 }
 
@@ -122,13 +133,14 @@ export function uninstallBrowser(env: BrowserInstallEnv): string[] {
 
 /**
  * The native host is installed and current: the manifest names THIS wrapper and
- * only our extension's origin, and the wrapper exists. Pure over the files; the
+ * exactly our extension origins (a manifest written before the store id was
+ * known is stale: reinstall adds it), and the wrapper exists. Pure over the files; the
  * `status` command and `browser/status` (B5b) share it.
  */
 export function nativeHostInstalled(
-  env: Pick<BrowserInstallEnv, "configDir" | "home" | "extensionId">,
+  env: Pick<BrowserInstallEnv, "configDir" | "home" | "extensionIds">,
 ): boolean {
-  const id = env.extensionId ?? BROWSER_EXTENSION_ID;
+  const want = extensionOrigins(env.extensionIds ?? browserExtensionIds());
   const wrapper = wrapperPath(env.configDir);
   const manifest = manifestPath(env.home);
   if (!existsSync(manifest)) return false;
@@ -139,7 +151,9 @@ export function nativeHostInstalled(
     };
     return (
       m.path === wrapper &&
-      m.allowed_origins?.[0] === `chrome-extension://${id}/` &&
+      Array.isArray(m.allowed_origins) &&
+      m.allowed_origins.length === want.length &&
+      want.every((o, i) => m.allowed_origins?.[i] === o) &&
       existsSync(wrapper)
     );
   } catch {

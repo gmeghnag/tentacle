@@ -36,7 +36,7 @@ function chromeRunningDarwin(): Promise<boolean | undefined> {
 
 /** The real probes: the native-host files, the hub socket, the Chrome process, the policy file. */
 export function defaultBrowserLinkProbes(
-  env: Pick<BrowserInstallEnv, "configDir" | "home" | "extensionId" | "managedPolicyPath">,
+  env: Pick<BrowserInstallEnv, "configDir" | "home" | "extensionIds" | "managedPolicyPath">,
 ): BrowserLinkProbes {
   return {
     manifestOk: () => nativeHostInstalled(env),

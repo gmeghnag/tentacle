@@ -16,7 +16,6 @@ import { chmodSync, lstatSync, mkdirSync, rmSync } from "node:fs";
 import { type Server, type Socket, createConnection, createServer } from "node:net";
 import { join } from "node:path";
 import {
-  BROWSER_EXTENSION_ID,
   BROWSER_LINK_VERSION,
   type ClaimedBy,
   HUB_MAX_LINE_BYTES,
@@ -28,6 +27,7 @@ import {
   type NetRecord,
   NetRing,
   Ownership,
+  browserExtensionIds,
   encodeNative,
 } from "@tentacle/browser";
 import { ByteFramer } from "@tentacle/transport";
@@ -46,12 +46,15 @@ export function hubSocketPath(configDir: string): string {
   return join(browserDir(configDir), "hub.sock");
 }
 
-/** The origin Chrome passes as argv[1] (F5); only the pinned extension may spawn us. */
+/**
+ * The origin Chrome passes as argv[1] (F5): only our extension may spawn us —
+ * the key-pinned dev copy or the Chrome Web Store copy (`browserExtensionIds`).
+ */
 export function originAllowed(
   argv1: string | undefined,
-  extensionId: string = BROWSER_EXTENSION_ID,
+  extensionIds: readonly string[] = browserExtensionIds(),
 ): boolean {
-  return argv1 === `chrome-extension://${extensionId}/`;
+  return extensionIds.some((id) => argv1 === `chrome-extension://${id}/`);
 }
 
 /** True when something answers on `path` (a live hub). */
@@ -376,9 +379,9 @@ export async function browserHostMain(
     readonly stdout: (bytes: Uint8Array) => void;
     readonly err: (text: string) => void;
   },
-  extensionId: string = BROWSER_EXTENSION_ID,
+  extensionIds: readonly string[] = browserExtensionIds(),
 ): Promise<number> {
-  if (!originAllowed(argv1, extensionId)) {
+  if (!originAllowed(argv1, extensionIds)) {
     io.err("browser host: refusing an unexpected caller origin\n");
     return 1;
   }
