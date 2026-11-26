@@ -157,6 +157,33 @@ describe("createDrawerNewSession", () => {
     expect(newSessionPill(false, { creating: false, error: "x" }).error).toBe("x");
   });
 
+  for (const [name, answer] of [
+    ["succeeds", { ok: true }],
+    ["fails", { ok: false, reason: "link" }],
+  ] as const) {
+    test(`D7: a create that ${name} AFTER dispose opens nothing and writes no state`, async () => {
+      const gate: { release: () => void } = { release: () => {} };
+      const { flow, opened } = setup(
+        () =>
+          new Promise((resolve) => {
+            gate.release = () => resolve(answer);
+          }),
+      );
+      let heard = 0;
+      flow.subscribe(() => {
+        heard += 1;
+      });
+      const pending = flow.start("mac-a", true);
+      const atDispose = flow.state();
+      flow.dispose();
+      gate.release();
+      await pending;
+      expect(opened).toEqual([]);
+      expect(flow.state()).toEqual(atDispose);
+      expect(heard).toBe(1); // only "creating", heard before the dispose
+    });
+  }
+
   test("every failure reason has its own sentence, and the new row's title is fixed", () => {
     const texts = (["link", "timeout", "too-many", "gone", "archived", "deleted"] as const).map(
       newSessionErrorText,

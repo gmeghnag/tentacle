@@ -58,6 +58,7 @@ import {
   newPairingCode,
   pairCommand,
   pairPrompt,
+  pairTargetOf,
 } from "../src/pair.ts";
 
 /** The folder `pair` targets (`--project`), whose live `serve` record it pairs with. */
@@ -819,5 +820,22 @@ describe("the write ORDER (F3; review round 1, finding 3)", () => {
     // The property, not just the call order: at the moment the decision is
     // written, the key it accepts is already authorised.
     expect(registryAtDecision).toEqual([deviceIdOf(deviceKey)]);
+  });
+});
+
+describe("`pair` prunes the records it reads (docs/fix/daemon-records-stale.md)", () => {
+  test("a dead pid's record is deleted, not merely skipped", () => {
+    const configDir = newDir();
+    writeDaemonRecord(configDir, {
+      pid: 999_001,
+      host: "0.0.0.0",
+      port: 4000,
+      tls: false,
+      cwd: PROJECT_DIR,
+      startedAt: 1,
+    });
+    const target = pairTargetOf(configDir, { projectDir: PROJECT_DIR, alive: () => false });
+    expect(target.ok).toBe(false);
+    expect(readdirSync(join(configDir, "daemons"))).toEqual([]);
   });
 });

@@ -40,6 +40,12 @@ export interface DrawerNewSession {
   subscribe(listener: () => void): () => void;
   start(computerId: string, canCreate: boolean): Promise<void>;
   dismiss(): void;
+  /**
+   * The screen that started a create is gone: a create that settles after this
+   * writes no state and opens nothing. The session, if made, is listed at the
+   * next read (docs/feat/mobile-project-new-session.md D7).
+   */
+  dispose(): void;
 }
 
 const ERROR_TEXT: Readonly<Record<SessionOpenFailure, string>> = {
@@ -66,6 +72,7 @@ export function newSessionPill(
 export function createDrawerNewSession(deps: DrawerNewSessionDeps): DrawerNewSession {
   let state: NewSessionState = { creating: false, error: null };
   const listeners = new Set<() => void>();
+  let disposed = false;
   const set = (next: NewSessionState): void => {
     state = next;
     for (const listener of listeners) {
@@ -87,6 +94,9 @@ export function createDrawerNewSession(deps: DrawerNewSessionDeps): DrawerNewSes
       const sessionId = deps.mint();
       set({ creating: true, error: null });
       const result = await deps.create(computerId, sessionId);
+      if (disposed) {
+        return;
+      }
       if (!result.ok) {
         set({ creating: false, error: newSessionErrorText(result.reason) });
         return;
@@ -98,6 +108,9 @@ export function createDrawerNewSession(deps: DrawerNewSessionDeps): DrawerNewSes
       if (state.error !== null) {
         set({ ...state, error: null });
       }
+    },
+    dispose() {
+      disposed = true;
     },
   };
 }

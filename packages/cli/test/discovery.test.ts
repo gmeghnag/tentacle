@@ -16,10 +16,18 @@
  *   that one poll (mutation: always apply it → every sibling vanishes on wake).
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
-import { type DaemonRecord, writeDaemonRecord } from "@tentacle/daemon";
+import { type DaemonRecord, readDaemonRecords, writeDaemonRecord } from "@tentacle/daemon";
 import type { DaemonDiscovery, DiscoveredDaemon } from "@tentacle/protocol";
 import {
   type DiscoveryTimers,
@@ -613,8 +621,89 @@ describe("startDiscovery (driver)", () => {
   });
 });
 
+// docs/fix/daemon-records-stale.md D3/D4: the poll also prunes REUSED pids, and
+// the heartbeat puts a running serve's vanished record back.
+describe("the driver and its records on disk", () => {
+  test("a beat that finds the record gone rewrites it, and never after stop", () => {
+    const configDir = scratch();
+    const clock = fakeTimers();
+    const self = record({ pid: process.pid, cwd: "/work/self" });
+    const rewrites: [string, DaemonRecord][] = [];
+    const logged: string[] = [];
+    const driver = startDiscovery({
+      configDir,
+      self,
+      interfaces,
+      timers: clock.timers,
+      touch: () => false,
+      rewrite: (dir, own) => {
+        rewrites.push([dir, own]);
+        return { ok: true };
+      },
+      log: (line) => logged.push(line),
+    });
+    try {
+      clock.advance(10_000);
+      expect(rewrites).toEqual([[configDir, self]]);
+      // A healed record is nothing to complain about.
+      expect(logged).toEqual([]);
+      driver.stop();
+      clock.advance(60_000);
+      expect(rewrites).toHaveLength(1);
+    } finally {
+      driver.stop();
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("by DEFAULT the removed file is back after one beat", () => {
+    const configDir = scratch();
+    const clock = fakeTimers();
+    const self = record({ pid: process.pid, cwd: "/work/self" });
+    const driver = startDiscovery({ configDir, self, interfaces, timers: clock.timers });
+    try {
+      expect(readdirSync(join(configDir, "daemons"))).toEqual([]);
+      clock.advance(10_000);
+      expect(readDaemonRecords(configDir)).toEqual([self]);
+    } finally {
+      driver.stop();
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a poll deletes a reused pid's record, but not on the waking poll (F3)", () => {
+    const configDir = scratch();
+    const clock = fakeTimers();
+    let slept = 0;
+    // A live pid (our parent) that started long after `startedAt: 10`.
+    const path = join(configDir, "daemons", `${process.ppid}.json`);
+    const driver = startDiscovery({
+      configDir,
+      self: record({ pid: process.pid, cwd: "/work/self" }),
+      interfaces,
+      timers: clock.timers,
+      now: () => Date.now() + slept,
+      touch: () => true,
+    });
+    try {
+      driver.subscribe(() => {});
+      writeDaemonRecord(configDir, record({ pid: process.ppid, cwd: "/work/reused" }));
+      const old = new Date(Date.now() - 120_000);
+      utimesSync(path, old, old);
+      slept = 120_000;
+      clock.advance(2000);
+      expect(existsSync(path)).toBe(true);
+      clock.advance(2000);
+      expect(existsSync(path)).toBe(false);
+    } finally {
+      driver.stop();
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("log noise", () => {
-  test("a failed touch is one log line, never fatal (F4)", () => {
+  test("a failed touch whose rewrite fails too is one log line, never fatal (F4)", () => {
     const configDir = scratch();
     const clock = fakeTimers();
     const logged: string[] = [];
@@ -625,6 +714,7 @@ describe("log noise", () => {
       timers: clock.timers,
       now: () => clock.timers.now(),
       touch: () => false,
+      rewrite: () => ({ ok: false }),
       log: (line) => logged.push(line),
     });
     try {
