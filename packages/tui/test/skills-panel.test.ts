@@ -82,6 +82,35 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     expect(body.at(-1)).toBe("        user · /w/.agents/skills/review/SKILL.md");
   });
 
+  // docs/feat/builtin-skills.md D5.
+  test("a built-in skill reads `built-in`; off, it says how to keep it on", () => {
+    const builtin = skill({
+      name: "tentacle-workflows",
+      scope: "user",
+      builtin: true,
+      location: "/c/SKILL.md",
+    });
+    const expanded = (s: SkillView, off: readonly string[]): string[] => {
+      const phase = {
+        kind: "on" as const,
+        caps: { disabledMcp: [], disabledSkills: off },
+      };
+      const p = applyPanel(skillsPanel(list([s])), "toggle", 60);
+      return panelView(p, 60, 30, null, phase).rows.map((r) => r.text.trim());
+    };
+    const offRows = expanded(builtin, ["tentacle-workflows"]);
+    expect(offRows).toContain("built-in · /c/SKILL.md");
+    expect(offRows.join(" ")).toContain(
+      "off by default — keep it on: `tentacle config set skills.builtin.tentacle-workflows true`",
+    );
+    // On: no such line.
+    expect(expanded(builtin, []).join(" ")).not.toContain("off by default");
+    // Any other skill, off: neither word.
+    const mine = expanded(skill({ location: "/m/SKILL.md" }), ["review"]);
+    expect(mine).toContain("project · /m/SKILL.md");
+    expect(mine.join(" ")).not.toContain("off by default");
+  });
+
   test("not a /command: says so", () => {
     let p = skillsPanel(list([skill({ user: false })]));
     p = applyPanel(p, "toggle", 80);

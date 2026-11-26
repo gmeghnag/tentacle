@@ -235,7 +235,7 @@ export interface InfoRow {
   readonly subtitle?: string;
   /** The trailing value (a `sec` figure, a state word, a chip's neighbour). */
   readonly value?: string;
-  /** The trailing chip (`project` / `user`). */
+  /** The trailing chip (`project` / `user` / `built-in`). */
   readonly chip?: string;
   /** A leading status dot (`<StatusTone>`) instead of a glyph. */
   readonly tone?: StatusTone;
@@ -1076,6 +1076,10 @@ export function skillLocked(skill: SkillListEntry): boolean {
   return !skill.model && skill.modelAfterReset !== true;
 }
 
+/** A skill's chip: where it comes from (`built-in` = shipped inside tentacle). */
+const skillChip = (skill: SkillListEntry): string =>
+  skill.builtin === true ? "built-in" : skill.scope;
+
 /** One skill as a row: its switch, its Off note, and a locked skill's ghost. */
 export function skillRow(skill: SkillListEntry, switches: CapabilitySwitches | undefined): InfoRow {
   const name = sanitizeDisplay(skill.name);
@@ -1085,7 +1089,7 @@ export function skillRow(skill: SkillListEntry, switches: CapabilitySwitches | u
     return {
       title: skill.user ? `/${name}` : name,
       subtitle: description,
-      chip: skill.scope,
+      chip: skillChip(skill),
       ...(off ? { value: "off", dim: true } : {}),
     };
   }
@@ -1101,7 +1105,7 @@ export function skillRow(skill: SkillListEntry, switches: CapabilitySwitches | u
   return {
     title: skill.user ? `/${name}` : name,
     subtitle,
-    chip: skill.scope,
+    chip: skillChip(skill),
     switch: toggle,
     ...(toggle.on ? {} : { dim: true }),
   };

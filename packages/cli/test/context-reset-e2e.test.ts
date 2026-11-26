@@ -206,9 +206,13 @@ test("a context reset end to end: fresh files, the laptop's approval, the saved 
     // The saved head is the fresh prompt itself: the request ends it with the
     // working directory, the history never holds that (docs/feat/system-prompt-cwd.md).
     const saved = record?.messages[0]?.content ?? "";
+    // The skills shipped inside tentacle are off: projected out of each request,
+    // never out of the history (docs/feat/builtin-skills.md).
+    const projected = saved.replace(/<skill>\n<name>tentacle[^<]*<\/name>[\s\S]*?<\/skill>\n/g, "");
+    expect(projected).not.toBe(saved);
     expect(saved).not.toContain("<cwd>");
     expect(system).toBe(
-      `${saved.trimEnd()}\n\n<cwd>\n${dir}\n</cwd>\n<platform>${process.platform}</platform>\n`,
+      `${projected.trimEnd()}\n\n<cwd>\n${dir}\n</cwd>\n<platform>${process.platform}</platform>\n`,
     );
     expect(restartPromptOf(record?.messages[1]?.content ?? "")).toBe(
       "goal: G. plan: docs/p.md. next: load late",

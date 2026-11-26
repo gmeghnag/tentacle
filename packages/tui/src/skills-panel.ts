@@ -24,6 +24,8 @@ export interface SkillView {
   readonly name: string;
   readonly description: string;
   readonly scope: "project" | "user";
+  /** It ships inside tentacle: off in a session unless turned on. */
+  readonly builtin?: true;
   /** Offered to the user as `/name`. */
   readonly user: boolean;
   /** Offered to the model in this session now. */
@@ -65,6 +67,8 @@ export interface SkillsListView {
 const NAME_COLUMN_MAX = 24;
 /** At most this many lines of a skill's description when expanded. */
 const DESCRIPTION_LINES = 8;
+/** An off built-in's "keep it on" sentence, at the narrowest width. */
+const KEEP_ON_LINES = 4;
 /** Columns a child row loses to the marker and the indent (`tree-panel.ts`). */
 const CHILD_PREFIX = 8;
 
@@ -100,7 +104,15 @@ export function skillGroups(
       children: [
         ...wrapText(description, width - CHILD_PREFIX, DESCRIPTION_LINES),
         `${s.user ? `/${name}` : "no /command"} · ${modelNote(s, off)}`,
-        `${s.scope} · ${oneLine(s.location)}`,
+        // Wrapped, never cut: the command is to be typed.
+        ...(s.builtin === true && off
+          ? wrapText(
+              `off by default — keep it on: \`tentacle config set skills.builtin.${name} true\``,
+              width - CHILD_PREFIX,
+              KEEP_ON_LINES,
+            )
+          : []),
+        `${s.builtin === true ? "built-in" : s.scope} · ${oneLine(s.location)}`,
       ],
       ...(off || sw === "locked" ? { off: true } : {}),
     };

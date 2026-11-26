@@ -203,7 +203,7 @@ describe("loadConfig with packages", () => {
     expect(config.hooks.map((h) => h.command)).toEqual(["mine", "./notify.sh"]);
     expect(config.packageAgentDirs).toEqual([join(dir, "agents")]);
     expect(config.packages.map((p) => p.name)).toEqual(["demo"]);
-    expect(config.skills.map((s) => [s.name, s.scope, s.dir])).toEqual([
+    expect(config.skills.filter((s) => !s.builtin).map((s) => [s.name, s.scope, s.dir])).toEqual([
       ["review", "user", join(dir, "skills", "review")],
     ]);
     expect(config.packageDiagnostics).toEqual([]);
@@ -215,7 +215,9 @@ describe("loadConfig with packages", () => {
     fullPackage(cfg, "demo");
     write(join(home, ".agents", "skills", "review", "SKILL.md"), skill("review", "mine"));
     const config = await loadConfig({ env: { HOME: home }, configDir: cfg, cwd: home });
-    expect(config.skills.map((s) => [s.name, s.description])).toEqual([["review", "mine"]]);
+    expect(config.skills.filter((s) => !s.builtin).map((s) => [s.name, s.description])).toEqual([
+      ["review", "mine"],
+    ]);
     expect(config.skillDiagnostics.join("\n")).toContain(join(cfg, "packages", "demo"));
   });
 

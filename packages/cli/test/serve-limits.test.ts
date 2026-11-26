@@ -12,6 +12,10 @@ import { ARGS, isPodDaemonLoad, parseArgs, parseDuration, parseServeLimits } fro
 import { startDaemon } from "../src/serve.ts";
 import { APP_VERSION } from "../src/version.ts";
 
+/** The listed skill names, without the ones that ship inside tentacle. */
+const ownNames = (view: { skills: readonly { name: string; builtin?: true }[] }): string[] =>
+  view.skills.filter((s) => s.builtin !== true).map((s) => s.name);
+
 describe("parseDuration", () => {
   test("whole positive amount + ms|s|m|h", () => {
     expect(parseDuration("24h")).toBe(24 * 60 * 60 * 1000);
@@ -640,10 +644,10 @@ describe("a `serve` daemon ignores a client's `settings` (docs/feat/config-carry
     });
     try {
       await client.initialize();
-      expect((await client.sessionSkills()).skills.map((s) => s.name)).toEqual(["demo"]);
+      expect(ownNames(await client.sessionSkills())).toEqual(["demo"]);
       await client.openSession(undefined, undefined, "S");
       expect(reports).toBe(0);
-      expect((await client.sessionSkills("S")).skills.map((s) => s.name)).toEqual(["demo"]);
+      expect(ownNames(await client.sessionSkills("S"))).toEqual(["demo"]);
     } finally {
       client.close();
       await server.stop();

@@ -25,6 +25,8 @@ afterEach(async () => {
 });
 
 const env = (): Record<string, string | undefined> => ({ HOME: dir });
+/** For the prompts that are the identity alone (the built-in skills add a catalog). */
+const noSkills = (): Record<string, string | undefined> => ({ ...env(), TENTACLE_NO_SKILLS: "1" });
 
 const writeSkill = async (root: string, name: string, description: string) => {
   await mkdir(join(root, name), { recursive: true });
@@ -35,6 +37,10 @@ const writeSkill = async (root: string, name: string, description: string) => {
 };
 
 const load = (): Promise<TentacleConfig> => loadConfig({ env: env(), configDir, cwd: dir });
+
+/** The skills found on disk, without the ones that ship inside tentacle. */
+const own = <T extends { readonly builtin?: true }>(skills: readonly T[]): T[] =>
+  skills.filter((s) => s.builtin !== true);
 
 describe("refreshSessionContext (docs/feat/context-reset-refresh.md)", () => {
   test("on an unchanged disk it returns exactly what loadConfig built", async () => {
@@ -70,20 +76,24 @@ describe("refreshSessionContext (docs/feat/context-reset-refresh.md)", () => {
       "NEW IDENTITY\n\n# Project rules (AGENTS.md)\n\nNEW RULES\n",
     );
     expect(fresh.systemPrompt).not.toContain("OLD");
-    expect(fresh.skills.map((s) => s.name).sort()).toEqual(["added-mid-session", "alpha"]);
+    expect(
+      own(fresh.skills)
+        .map((s) => s.name)
+        .sort(),
+    ).toEqual(["added-mid-session", "alpha"]);
     expect(fresh.systemPrompt).toContain("<name>added-mid-session</name>");
     // The loaded config is untouched (a refresh returns, it does not mutate).
-    expect(cfg.skills.map((s) => s.name)).toEqual(["alpha"]);
+    expect(own(cfg.skills).map((s) => s.name)).toEqual(["alpha"]);
   });
 
   test("a removed skill leaves the skills and the catalog", async () => {
     await writeSkill(join(dir, ".agents", "skills"), "gone", "soon");
     const cfg = await load();
-    expect(cfg.skills.map((s) => s.name)).toEqual(["gone"]);
+    expect(own(cfg.skills).map((s) => s.name)).toEqual(["gone"]);
     await rm(join(dir, ".agents", "skills", "gone"), { recursive: true });
     const fresh = await refreshSessionContext(cfg, env());
-    expect(fresh.skills).toEqual([]);
-    expect(fresh.systemPrompt).not.toContain("# Skills");
+    expect(own(fresh.skills)).toEqual([]);
+    expect(fresh.systemPrompt).not.toContain("<name>gone</name>");
   });
 
   test("finds a package skills/ dir created after the start", async () => {
@@ -95,11 +105,11 @@ describe("refreshSessionContext (docs/feat/context-reset-refresh.md)", () => {
     );
     const cfg = await load();
     expect(cfg.packages.map((p) => p.name)).toEqual(["demo"]);
-    expect(cfg.skills).toEqual([]);
+    expect(own(cfg.skills)).toEqual([]);
 
     await writeSkill(join(pkg, "skills"), "from-pkg", "packaged");
     const fresh = await refreshSessionContext(cfg, env());
-    expect(fresh.skills.map((s) => [s.name, s.scope])).toEqual([["from-pkg", "user"]]);
+    expect(own(fresh.skills).map((s) => [s.name, s.scope])).toEqual([["from-pkg", "user"]]);
     expect(fresh.systemPrompt).toContain("<name>from-pkg</name>");
   });
 
@@ -112,7 +122,7 @@ describe("refreshSessionContext (docs/feat/context-reset-refresh.md)", () => {
     );
     await writeSkill(join(pkg, "skills"), "inside", "packaged");
     const cfg = await load();
-    expect(cfg.skills.map((s) => s.name)).toEqual(["inside"]);
+    expect(own(cfg.skills).map((s) => s.name)).toEqual(["inside"]);
 
     // After the start: a skill dir that is a symlink to a folder outside the package.
     const outside = join(dir, "outside");
@@ -122,7 +132,7 @@ describe("refreshSessionContext (docs/feat/context-reset-refresh.md)", () => {
     expect(await escapingSymlink(pkg)).toBe("skills/escaped");
 
     const fresh = await refreshSessionContext(cfg, env());
-    expect(fresh.skills.map((s) => s.name)).toEqual([]);
+    expect(own(fresh.skills).map((s) => s.name)).toEqual([]);
     expect(fresh.systemPrompt).not.toContain("escaped");
     expect(fresh.skillDiagnostics).toContain(
       "package demo: skills skipped (skills/escaped points outside the package)",
@@ -142,34 +152,36 @@ describe("refreshSessionContext (docs/feat/context-reset-refresh.md)", () => {
     // The refresh env does not carry the opt-outs: the kept decision rules.
     const fresh = await refreshSessionContext(off, env());
     expect(fresh.systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
-    expect(fresh.skills).toEqual([]);
+    expect(own(fresh.skills)).toEqual([]);
     expect(fresh.skillDiagnostics).toEqual([]);
   });
 
   test("env TENTACLE_SYSTEM_PROMPT beats the prompt file, as at the start", async () => {
-    await loadConfig({ env: env(), configDir, cwd: dir }); // scaffold
+    await loadConfig({ env: noSkills(), configDir, cwd: dir }); // scaffold
     await writeFile(join(configDir, "PROMPT.md"), "FILE\n");
-    const e = { ...env(), TENTACLE_SYSTEM_PROMPT: "FROM ENV" };
+    const e = { ...noSkills(), TENTACLE_SYSTEM_PROMPT: "FROM ENV" };
     const cfg = await loadConfig({ env: e, configDir, cwd: dir });
     expect(cfg.systemPrompt).toBe("FROM ENV");
     expect((await refreshSessionContext(cfg, e)).systemPrompt).toBe("FROM ENV");
-    expect((await refreshSessionContext(cfg, env())).systemPrompt).toBe("FILE\n");
+    expect((await refreshSessionContext(cfg, noSkills())).systemPrompt).toBe("FILE\n");
   });
 
   test("a required systemPromptFile that is now missing throws; a defaulted one falls back", async () => {
-    await loadConfig({ env: env(), configDir, cwd: dir }); // scaffold
+    await loadConfig({ env: noSkills(), configDir, cwd: dir }); // scaffold
     await writeFile(join(configDir, "WORK.md"), "work prompt");
     await writeFile(join(configDir, CONFIG_FILENAME), `{ "systemPromptFile": "WORK.md" }`);
-    const required = await load();
+    const required = await loadConfig({ env: noSkills(), configDir, cwd: dir });
     expect(required.promptFileRequired).toBe(true);
     await rm(join(configDir, "WORK.md"));
-    await expect(refreshSessionContext(required, env())).rejects.toBeInstanceOf(ConfigError);
+    await expect(refreshSessionContext(required, noSkills())).rejects.toBeInstanceOf(ConfigError);
 
     await writeFile(join(configDir, CONFIG_FILENAME), "{}");
-    const implicit = await load();
+    const implicit = await loadConfig({ env: noSkills(), configDir, cwd: dir });
     expect(implicit.promptFileRequired).toBe(false);
     await rm(join(configDir, "PROMPT.md"));
-    expect((await refreshSessionContext(implicit, env())).systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect((await refreshSessionContext(implicit, noSkills())).systemPrompt).toBe(
+      DEFAULT_SYSTEM_PROMPT,
+    );
   });
 });
 
@@ -195,7 +207,7 @@ describe("discoverSkills", () => {
       packageSkillRoots: [],
       enabled: true,
     });
-    expect(found.skills.map((s) => [s.name, s.description])).toEqual([["dup", "config copy"]]);
+    expect(own(found.skills).map((s) => [s.name, s.description])).toEqual([["dup", "config copy"]]);
     expect(found.diagnostics.join("\n")).toContain('skill "dup"');
   });
 });

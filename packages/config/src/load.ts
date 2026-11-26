@@ -36,7 +36,7 @@ import {
   skillsEnabled,
 } from "./resolve.ts";
 import { type FileConfig, FileConfigSchema } from "./schema.ts";
-import { scanSkills, skillRoots } from "./skills-scan.ts";
+import { materializeBuiltinSkills, scanSkills, skillRoots } from "./skills-scan.ts";
 import { type SkillInfo, catalogCapDiagnostic, mergeSkills, slashCapDiagnostic } from "./skills.ts";
 
 export class ConfigError extends Error {
@@ -233,6 +233,8 @@ export interface TentacleConfig {
   readonly disabledTools: readonly string[];
   /** `tools.enabled` as written (merged profile), for the `true`-has-no-effect notices. */
   readonly toolsEnabled?: Readonly<Record<string, boolean>>;
+  /** `skills.builtin` as written (merged profile): the built-in skills turned on. */
+  readonly builtinSkillsEnabled?: Readonly<Record<string, boolean>>;
   /** The configured default engine of `run`/`attach` (file/profile); absent = unset. */
   readonly engine?: ResolvedConfig["engine"];
   /** The configured network of `run`'s container (file/profile); absent = the engine's default. */
@@ -401,8 +403,8 @@ export interface DiscoverSkillsInput {
 }
 
 /**
- * Discover Agent Skills from the launch folder (the same root as AGENTS.md) and
- * the user scopes. Best-effort like AGENTS.md: problems are diagnostics, never
+ * Discover Agent Skills from the launch folder (the same root as AGENTS.md),
+ * the user scopes, then the skills that ship inside tentacle. Best-effort like AGENTS.md: problems are diagnostics, never
  * a failure. The one scan shared by start-up (`loadConfig`) and a context reset
  * (`refreshSessionContext`).
  */
@@ -412,11 +414,20 @@ export async function discoverSkills(
   if (!input.enabled) {
     return { skills: [], diagnostics: [] };
   }
-  const scan = await scanSkills(
-    await skillRoots(input.launchCwd, input.home, input.configDir, input.packageSkillRoots),
+  const roots = await skillRoots(
+    input.launchCwd,
+    input.home,
+    input.configDir,
+    input.packageSkillRoots,
   );
+  // Last: the lowest precedence, and the first the catalog cap drops.
+  const builtin = await materializeBuiltinSkills(input.configDir);
+  if (builtin.root !== undefined) {
+    roots.push({ path: builtin.root, scope: "user", builtin: true });
+  }
+  const scan = await scanSkills(roots);
   const merged = mergeSkills(scan.candidates);
-  const diagnostics = [...scan.diagnostics, ...merged.diagnostics];
+  const diagnostics = [...builtin.diagnostics, ...scan.diagnostics, ...merged.diagnostics];
   for (const capped of [catalogCapDiagnostic(merged.skills), slashCapDiagnostic(merged.skills)]) {
     if (capped) {
       diagnostics.push(capped);
@@ -938,6 +949,9 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     writableDirs: resolved.writableDirs.map((d) => expandTilde(d, home)),
     disabledTools: resolved.disabledTools,
     ...(resolved.toolsEnabled !== undefined ? { toolsEnabled: resolved.toolsEnabled } : {}),
+    ...(resolved.builtinSkillsEnabled !== undefined
+      ? { builtinSkillsEnabled: resolved.builtinSkillsEnabled }
+      : {}),
     ...(resolved.engine !== undefined ? { engine: resolved.engine } : {}),
     ...(resolved.network !== undefined ? { network: resolved.network } : {}),
     ...(resolved.rm !== undefined ? { rm: resolved.rm } : {}),

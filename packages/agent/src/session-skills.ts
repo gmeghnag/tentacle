@@ -13,6 +13,8 @@ export interface SkillListingEntry {
   readonly name: string;
   readonly description: string;
   readonly scope: "project" | "user";
+  /** It ships inside tentacle (docs/feat/builtin-skills.md). */
+  readonly builtin?: true;
   /** Offered to the user as `/name`. */
   readonly user: boolean;
   /** Offered to the model in this session now. */

@@ -21,6 +21,7 @@
     "protocol:bump": "bun scripts/protocol-bump.ts",
     "mockup-kit": "bun scripts/mockup-kit.ts gen",
     "docs:config": "bun scripts/config-docs.ts",
+    "skills:gen": "bun scripts/builtin-skills-gen.ts",
     "badges": "bun scripts/coverage-badges.ts",
     "e2e:mobile": "bun apps/mobile/e2e/run.ts",
     "compile": "bun run scripts/build.ts",

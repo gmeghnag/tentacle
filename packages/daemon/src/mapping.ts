@@ -98,6 +98,7 @@ export function toSkillList(
         name,
         description,
         scope: s.scope,
+        ...(s.builtin === true ? { builtin: true as const } : {}),
         user: s.user,
         model: s.model,
         ...(s.modelAfterReset === true ? { modelAfterReset: true } : {}),

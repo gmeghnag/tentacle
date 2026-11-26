@@ -48,15 +48,17 @@ description: Deploy this project to staging or production. Use when the user ask
 
 ## Where tentacle looks
 
-Three scopes, in precedence order. **The first skill found with a given name
-wins**; a later one with the same name is *shadowed*, and a startup diagnostic
-names both.
+The folders below, in precedence order. **The first skill found with a given
+name wins**; a later one with the same name is *shadowed*, and a startup
+diagnostic names both.
 
 1. **Project:** `.agents/skills/` in the launch folder, then in each parent
    folder. The walk stops after the folder that has `.git` (the repo root), at
    the filesystem root, or just before your home folder. The nearest folder wins.
 2. **User (tentacle):** `<configDir>/skills/` (by default `~/.config/tentacle/skills/`).
 3. **User (cross-client):** `~/.agents/skills/`.
+4. **Installed packages:** each package's `skills/` folder.
+5. **Built-in:** the skills that ship inside tentacle (below), always last.
 
 Details:
 
@@ -271,6 +273,40 @@ ones (hidden-from-the-model ones included) whose name follows the spec, at most
   pattern, descriptions without control characters, at most 200) before the
   TUI shows it.
 
+## Built-in skills (off by default)
+
+Three skills ship inside tentacle (`docs/feat/builtin-skills.md`):
+
+| Name | About |
+|---|---|
+| `tentacle` | The essential commands, the slash commands, settings, how-to recipes |
+| `tentacle-a2a` | A2A both ways; writing and validating an Agent Card (`references/agent-card.md`) |
+| `tentacle-workflows` | Writing, approving, running and scheduling a workflow |
+
+- **Delivery.** Their sources (`packages/config/builtin-skills/`) are embedded
+  in the build. At each discovery they are written to
+  `<configDir>/builtin-skills/<hash of the text>/<name>/` (each file compared,
+  and rewritten atomically when missing or edited) and that folder is scanned
+  like any other. If it cannot be written: one diagnostic, no built-ins. Old
+  hash folders are not pruned.
+- **Off.** A new session starts with each one in its disabled skills, so it costs
+  the model nothing: not in the catalog, not in the `skill` tool. `/skills`
+  switches one on for the session; `/<name>` loads it once.
+- **On for good.** `skills.builtin: { "tentacle": true }`
+  (`tentacle config set skills.builtin.tentacle true`), per profile too; a
+  profile's map merges per name. An unknown name is a config error.
+- **`serve` restart.** A reloaded session gets a built-in off again unless the
+  config turns it on, whatever its record says: a record cannot tell "turned
+  on" from "written before the skill existed".
+- **Shadowing.** A skill of yours (or of a repository, or a package) with the
+  same name wins, with the usual diagnostic, and is not turned off.
+- **Pods.** The pod's daemon writes them in the pod's config folder; the pod's
+  own config decides. The laptop sends no skill state.
+- **Generated text.** The blocks between `<!-- generated:… -->` markers come
+  from the code (commands, slash commands, config keys, `serve` A2A flags,
+  workflow fields and limits): `bun run skills:gen`; a test fails while one is
+  stale.
+
 ## Where it runs
 
 Discovery runs inside the process that **builds the agent**, on that machine's
@@ -293,8 +329,9 @@ How sub-agents should use skills is the open sub-task `skills-subagent`.
 
 | Setting | Effect |
 |---|---|
-| `loadSkills: false` (config, also per profile) | No scan, no catalog, no tool. Default: on. |
+| `loadSkills: false` (config, also per profile) | No scan, no catalog, no tool, nothing written (built-ins included). Default: on. |
 | `TENTACLE_NO_SKILLS=1` | Same; the env wins over the config. |
+| `skills.builtin.<name>: true` | That built-in skill starts on. Default: off. |
 
 Startup diagnostics (skipped or shadowed skills, warnings, caps reached) are
 printed as `[skills] …` lines on **stderr**, right after the config loads,
@@ -334,7 +371,8 @@ one-shot, `serve`), not for `run`/`attach`/`connect`.
 | Piece | File |
 |---|---|
 | Parse, precedence, catalog (pure) | `packages/config/src/skills.ts` |
-| Folder scan (I/O) | `packages/config/src/skills-scan.ts` |
+| Folder scan (I/O), built-in materialization | `packages/config/src/skills-scan.ts` |
+| Built-in skills: text, embedding; names and the off rule | `packages/config/{builtin-skills/,src/builtin-skills.ts}`, `packages/core/src/builtin-skills.ts`, `scripts/builtin-skills-gen.ts` |
 | Config switch, diagnostics, catalog in the prompt | `packages/config/src/{schema,resolve,load}.ts` |
 | `skill` tool, activator, "active" derivation | `packages/tools/src/skill.ts` |
 | The user's `skill` round | `Agent.runUserSkill`, `packages/agent/src/agent.ts` |

@@ -22,6 +22,7 @@ import {
   settledOp,
   shortModel,
   shortenPath,
+  skillRow,
   switchPhase,
   tokensText,
 } from "../src/session-info.ts";
@@ -338,6 +339,29 @@ describe("the SKILLS section", () => {
     expect(skills.rows[1]?.chip).toBe("project");
     // The location (a path on the computer) is never shown.
     expect(JSON.stringify(skills)).not.toContain("/tmp/x/SKILL.md");
+  });
+
+  // docs/feat/builtin-skills.md D5.
+  test("a skill shipped inside tentacle has the `built-in` chip, with and without switches", () => {
+    const listing = {
+      slash: [],
+      skills: [{ ...skill({ name: "tentacle" }), builtin: true as const }],
+      problems: [],
+      moreProblems: 0,
+    };
+    const plain = section(facts({ skills: ready(listing) }), "skills");
+    expect(plain.rows[0]?.chip).toBe("built-in");
+    const row = skillRow(
+      { ...skill({ name: "tentacle" }), builtin: true },
+      {
+        phase: "on",
+        state: { disabledMcp: [], disabledSkills: ["tentacle"] },
+        changedBy: {},
+        error: null,
+      },
+    );
+    expect(row.chip).toBe("built-in");
+    expect(row.switch?.on).toBe(false);
   });
 
   test("a skill neither the user nor the model can use now is 'off'", () => {

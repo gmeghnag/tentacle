@@ -500,7 +500,7 @@ describe("loadAgentsMd / loadSkills are recomposed, not just flipped", () => {
     const start = await pod({}, {}, repo());
     expect(start.systemPrompt).toContain("RULE-FROM-AGENTS-MD");
     expect(start.systemPrompt).toContain("demo");
-    expect(start.skills).toHaveLength(1);
+    expect(start.skills.filter((s) => !s.builtin)).toHaveLength(1);
   });
 
   test("carried false over an unset pod: gone from the prompt and the skill list", async () => {

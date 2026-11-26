@@ -140,6 +140,25 @@ describe("session/set_capability", () => {
     expect(SkillListEntrySchema.safeParse({ ...entry, disabled: false }).success).toBe(false);
   });
 
+  test("a skill listing entry may say `builtin: true` (only true), its scope stays `user`", () => {
+    const entry = {
+      name: "tentacle",
+      description: "d",
+      scope: "user" as const,
+      user: true,
+      model: true,
+      location: "/x/SKILL.md",
+    };
+    expect(SkillListEntrySchema.parse({ ...entry, builtin: true })).toEqual({
+      ...entry,
+      builtin: true,
+    });
+    // The old shape (an older daemon) still parses.
+    expect(SkillListEntrySchema.parse(entry)).toEqual(entry);
+    expect(SkillListEntrySchema.safeParse({ ...entry, builtin: false }).success).toBe(false);
+    expect(SkillListEntrySchema.safeParse({ ...entry, scope: "builtin" }).success).toBe(false);
+  });
+
   test("no protocol bump: a method, a display update and optional fields are free", () => {
     expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(19);
   });

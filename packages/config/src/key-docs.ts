@@ -541,8 +541,32 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     envInverts: true,
     sample: "0",
     details:
-      "Scans `.agents/skills/` up to the repo root, `<configDir>/skills/` and `~/.agents/skills/`, and lists what it finds in the system prompt. `TENTACLE_NO_SKILLS` is inverted: a truthy value disables it.",
+      "Scans `.agents/skills/` up to the repo root, `<configDir>/skills/` and `~/.agents/skills/`, and lists what it finds in the system prompt, plus the skills that ship inside tentacle (off until turned on, see `skills.builtin`). `TENTACLE_NO_SKILLS` is inverted: a truthy value disables it.",
     example: "false",
+  },
+  skills: {
+    summary: "Agent Skills settings.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "skills.builtin": {
+    summary: 'Skills shipped inside tentacle to turn on: `{ "tentacle": true }`.',
+    kind: "section",
+    type: "map",
+    scope: "both",
+    carried: "no",
+    details:
+      "The built-in skills are `tentacle`, `tentacle-a2a` and `tentacle-workflows`; each is off in every new session unless set `true` here. `/skills` switches one for the session only (after a `serve` restart it is off again), and `/<name>` loads one once. A skill of your own with the same name replaces the built-in and is not affected by this key. An unknown name is an error. A profile's map merges per name over the base's. In a pod (`run`/`attach`) the pod's own config decides. Nothing with `loadSkills` off.",
+    example: '{ "tentacle": true }',
+  },
+  "skills.builtin.*": {
+    summary: "Whether this built-in skill starts on.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    example: "true",
   },
   maxIterations: {
     summary: "Max model/tool iterations per turn.",

@@ -16,6 +16,7 @@ export * from "./profile.ts";
 export * from "./models.ts";
 export * from "./resolve.ts";
 export * from "./load.ts";
+export * from "./builtin-skills.ts";
 export * from "./skills.ts";
 export * from "./skills-scan.ts";
 export * from "./hooks-scan.ts";

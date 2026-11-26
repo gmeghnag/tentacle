@@ -90,6 +90,7 @@ import {
   type ScheduleLimits,
   type ToolImageStore,
   browserDefaultOff,
+  builtinDefaultOff,
 } from "@tentacle/core";
 import { AppsService } from "@tentacle/daemon";
 import { BackgroundJobs, HostExecution, killGroup, trackGroup, untrackGroup } from "@tentacle/exec";
@@ -241,6 +242,7 @@ export function buildSessionSkills(
         name: s.name,
         description: s.description,
         scope: s.scope,
+        ...(s.builtin ? { builtin: true as const } : {}),
         user: userNames.has(s.name),
         model: offeredNames.has(s.name),
         location: s.location,
@@ -1564,7 +1566,13 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     },
     // `tools.enabled` seeds the state in ONE place, for every runtime (plain and
     // one-shot included): a hosted session starts from it (docs/feat/tool-toggles.md D4).
-    capabilities: { ...NO_CAPABILITIES, disabledTools },
+    // A skill shipped inside tentacle starts off unless `skills.builtin` turns it
+    // on (docs/feat/builtin-skills.md D3); `config.skills` is the model's set.
+    capabilities: {
+      ...NO_CAPABILITIES,
+      disabledTools,
+      disabledSkills: builtinDefaultOff(config.skills, config.builtinSkillsEnabled ?? {}),
+    },
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):

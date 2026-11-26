@@ -129,7 +129,106 @@ Red before green: each test is written first and shown failing on `main` (T1–T
 
 ## Execution
 
-*— (executor), (date)*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Load-bearing check (before any edit)** — `.tentacle/tmp/builtin-skills/load-bearing.ts`
+(compose two skills, disable one, `projectSystem` / `projectTools`, then
+`discoverSkills` on empty dirs). It holds, and the capability was missing:
+
+```
+composed has tentacle: true
+off: catalog has tentacle: false other: true
+off: enum: ["other"]
+back on: identical to composed: true
+discovered from empty dirs: {"skills":[],"diagnostics":[]}
+```
+
+**As built**, in dependency order (each test red on the missing behaviour first;
+core was stubbed so T3 failed on its assertions, not on the import):
+
+1. core `builtin-skills.ts`: names, `isBuiltinSkillName`, `builtinDefaultOff` (T3).
+2. protocol `builtin: true` on `SkillListEntrySchema`, `protocol.json`
+   regenerated; no bump (T7).
+3. config: three `SKILL.md` + `references/agent-card.md`, embedded
+   (`builtin-skills.ts`), `materializeBuiltinSkills` as the last root
+   (T1, T2, T4); `skills.builtin` in schema / profile / resolve / load /
+   key-docs, `docs:config` (T6).
+4. `scripts/builtin-skills-gen.ts` + `skills:gen` (T8, T9).
+5. daemon: D4 union and `builtin` in `toSkillList`; agent listing field (T5).
+6. cli seed in `buildAgent` + listing field; TUI and phone labels.
+7. `docs/architecture/skills.md`, changelog fragment.
+
+**Drift from the Implementation**
+
+- The unknown-name refusal is in the file schema's `superRefine`
+  (`builtinSkillIssues`, `skills.ts`), not in `resolve`: that is where
+  `tools.enabled` refuses its own, so `config set` refuses it too.
+- `profile.ts` (not in Files): `skills.builtin` merges per name, the
+  `tools.enabled` shape Q1 recommends. Without it a profile's map replaced the base's.
+- The workflow field lists are read from `workflow-spec.ts`'s SOURCE (its zod
+  schemas are private and the file was not to change); a reshaped schema makes
+  the generator throw. The `serve` A2A block is the flag names from `ARGS.serve`.
+- Existing tests that assumed "discovery finds only my skills" were updated
+  (24 in config, 21 in cli): skills off where the test is about the prompt head,
+  built-ins filtered out of name lists. `start-up output pinned` recomposes the
+  user's own set; the context-reset e2e strips the built-in catalog entries.
+- Extra tests beyond the plan: the cli seed (worker, `serve`, the config key),
+  the workflow skill's YAML example passes `validateWorkflow`.
+
+**Behaviour to know** (as planned, but not written down there)
+
+- `config.systemPrompt` and the stored system message now list the built-ins;
+  each request projects the off ones out. With no other skill the sent prompt
+  loses the identity file's trailing newline.
+- Discovery writes under `<configDir>` even for a `scaffold: false` load
+  (relay, pod daemon).
+
+**FOUND, NOT FIXED** (outside the approved Implementation; for Review / owner)
+
+1. **The TUI status line will read `⊘ 3 skills off` in every session:**
+   `capsMarker` (`tui/src/capability-toggles.ts`) excludes only the default-off
+   browser tools. Suggested: count `disabledSkills` without `isBuiltinSkillName`
+   (this also hides a built-in the user switched off; harmless).
+2. **`/skills` before the first message shows built-ins ON:** `previewBase`
+   (`client/src/pending-capabilities.ts`) learns the host's off *tools* only. A
+   first press sends "off", a second "on" (the final state is what was pressed).
+   Suggested: the no-session `session/skills` marks them `disabled` and the
+   preview unions them. By reading, not driven; the phone is unchecked.
+3. A user skill that shadows a built-in, **removed mid-session**, leaves the
+   built-in ON after a context reset (the seed is taken at agent build). By
+   reading, not tested.
+4. `tentacle/SKILL.md` is 10 925 of 12 000 chars: a longer CLI usage text will
+   fail T8.
+
+**Mutations** (`.tentacle/tmp/builtin-skills/mutate.ts`, each restored):
+
+| Mutation | Result |
+|---|---|
+| T3: drop the `builtin` filter | 2 fail (T3 shadow, T2/T3b) |
+| T5: remove the D4 union | 2 fail (both reload tests) |
+| no seed in `buildAgent` | 3 fail |
+| materialize without compare | 1 fail (unchanged disk) |
+| root kept after a write failure | 1 fail |
+| stale generated block | 1 fail (T8) |
+| file missing from the embedded table | 1 fail (T9) |
+| wire mapping drops `builtin` | 1 fail |
+| no per-name profile merge | 1 fail |
+
+**Evidence**
+
+- Compiled binary (`bun build --compile`) writes all 4 files, no diagnostics.
+- `config set skills.builtin.tentacle true` → 0; `…nope true` → 1,
+  `unknown built-in skill`.
+- The Agent Card template, through the SDK's `AgentCard.fromJSON` and
+  tentacle's `checkCard`: `ok: true`.
+- Covering tests: 2513 pass / 0 fail (151 files); config + protocol + scripts +
+  mobile `session-info`: 1431 pass / 0 fail. `biome check` on the 39 changed
+  TS/JSON files: clean. Narrow `tsc` on the changed non-mobile `.ts`: 4 errors,
+  all in lines not touched (`a2a-map.ts`, `a2a-wiring.test.ts:74,192`,
+  `markdown.ts`), from the narrow file list. **Gate (`bun run check`): not run
+  here — the orchestrator's script runs it.** Unverified: a real pod, and the
+  phone pixels.
+- `bun install --frozen-lockfile` was run in the worktree (mobile deps missing).
 
 ## Review
 
