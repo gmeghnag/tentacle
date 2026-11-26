@@ -247,6 +247,11 @@ entry is high-only (`highOnly`, `image-view.ts:122-127`) and its mime is PNG,
 run D4 with the whole-picture box at 768 px instead of serving `high` with
 `HIGH_ONLY_NOTE`. A high-only JPEG keeps today's note. User images keep D3 of
 image-old-on-demand ("sent as attached") unchanged.
+*(Fixed in fix round 1, review finding 2: when D5's downscale cannot be made —
+header or decode refused, over the budget or the byte cap, not kept by the
+store — the call answers as before D5: `high` + `HIGH_ONLY_NOTE`, never an
+error. § Failure modes' error rows apply to an explicit `region`. Bytes gone is
+"no longer held" for both.)*
 
 **D6 — Seam (`packages/core/src/tool-images.ts`).** `ToolImageStore` gains
 `read(ref: AttachmentRef): Promise<Uint8Array | null>` (required — O11).
@@ -491,6 +496,42 @@ gate and `tsc -p apps/mobile` not run (the orchestrator's).
   (`http://www.schaik.com/pngsuite/PngSuite-2017jul19.tgz`) in
   `/Users/gmeghnag/tentacle/.tentacle/tmp/image-region-png/`, then steps 1–4
   above.
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26* — still **PARTIAL** (finding 1).
+
+**Finding 1 (HIGH, PngSuite): not fixed.** The archive is not in
+`.tentacle/tmp/image-region-png/` and no copy is in the worktree. A search
+outside it needed a permission approval, and the download was already blocked in
+both earlier rounds, so it was not tried again. Nothing forged. The 35 tests
+stay red; Execution steps 1–4 (with M2 on T1) remain, as does the step "Needed
+from the orchestrator/owner" above.
+
+**Finding 2 (MEDIUM, D5 fallback): fixed** (`tools/src/image-view.ts`,
+`viewDecoded`). With no `region`, a refused header / decode / render / put now
+returns today's `serve` of `high` + `HIGH_ONLY_NOTE`; with a `region` the
+errors are unchanged. `read` → `null` stays "no longer held" for both. D5 in
+Implementation says so.
+
+**Red before green** (`image-view-region.test.ts`, before the edit): 31 pass,
+7 fail, each on the result assertion (an `isError` sentence where the `high` ref
+was expected): over budget at default / asked / forced `low`, unparsable PNG,
+corrupt stream, byte cap, full store. After: with `image-view`,
+`image-view-user` and `concurrency`, 66 pass, 0 fail.
+
+**Mutations** (`mutate-fix1.ts`; file restored, verified):
+
+| Mutation | Failing tests |
+|---|---|
+| F1 a D5 refusal is an error again | the 7 fallback tests |
+| F2 an explicit region falls back too | 6 region error tests |
+| F3 a full store does not fall back | D5 full store |
+| F4 gone bytes fall back too | both "bytes … no longer returns" tests |
+
+**Checks.** `biome check` on the two changed files: clean. `png-decode`,
+`image-region`, wiring, sub-agent and provider tool-image tests: 85 pass, 35
+fail (all in `png-decode.test.ts`, the fixtures). Gate not run (the script's).
 
 ## Review
 

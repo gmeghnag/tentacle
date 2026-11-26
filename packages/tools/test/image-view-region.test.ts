@@ -459,6 +459,81 @@ describe("low of a high-only PNG (D5)", () => {
     });
   }
 
+  // The downscale is an improvement over sending `high`, never a new way for a
+  // plain view to fail: whatever stops it, the call answers as it did before.
+  const HIGH_NOTE = " · low is not available for this image yet — sent at high";
+
+  async function expectHigh(
+    store: ReturnType<typeof storeOf>,
+    entry: ToolImageEntry,
+    setting: "auto" | "low" = "auto",
+    options: { maxImageBytes?: number } = {},
+    input: object = {},
+  ) {
+    const held = store.real.held;
+    const r = await view(
+      store,
+      { ref: short(entry.high.ref), ...input },
+      createImageViewTool(setting, options),
+    );
+    const { width, height, ref } = entry.high;
+    expect(r).toEqual({
+      content: `shot.png · ${width}×${height} · low · ${formatBytes(ref.size)}${HIGH_NOTE}`,
+      image: ref,
+    });
+    expect(store.real.held).toBe(held);
+  }
+
+  for (const [name, setting, input] of [
+    ["by default", "auto", {}],
+    ["asked", "auto", { detail: "low" }],
+    ["forced", "low", {}],
+  ] as const) {
+    test(`${name}: over the decode budget → the stored high picture, not an error`, async () => {
+      const store = storeOf();
+      const bytes = withSize(pngOf(200, 100), 8000, 4500);
+      const entry = await keep(store, { bytes, width: 8000, height: 4500 });
+      await expectHigh(store, entry, setting, {}, input);
+    });
+  }
+
+  test("a PNG this parser refuses → the stored high picture", async () => {
+    const store = storeOf();
+    const bytes = new Uint8Array(500).fill(3);
+    const entry = await keep(store, { bytes, width: 2000, height: 1000 });
+    await expectHigh(store, entry);
+  });
+
+  test("a PNG that fails to decode → the stored high picture", async () => {
+    const store = storeOf();
+    const bytes = withStream(pngOf(2000, 1000), new Uint8Array([1, 2, 3]));
+    const entry = await keep(store, { bytes, width: 2000, height: 1000 });
+    await expectHigh(store, entry);
+  });
+
+  test("a downscale over the byte cap → the stored high picture", async () => {
+    const store = storeOf();
+    const entry = await keepPng(store, 2000, 1000);
+    await expectHigh(store, entry, "auto", { maxImageBytes: 100 });
+  });
+
+  test("a full store → the stored high picture", async () => {
+    const source = pngOf(2000, 1000);
+    const store = storeOf(source.length + 10);
+    const entry = await keep(store, { bytes: source, width: 2000, height: 1000 });
+    await expectHigh(store, entry);
+  });
+
+  test("bytes the store no longer returns → read the file again, as for a region", async () => {
+    const store = storeOf();
+    const entry = await keepPng(store, 2000, 1000);
+    store.read = async () => null;
+    const r = await view(store, { ref: short(entry.high.ref) });
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("is no longer held");
+    expect(r.image).toBeUndefined();
+  });
+
   test("high still sends the stored picture, reading nothing", async () => {
     const store = storeOf();
     const entry = await keepPng(store, 2000, 1000);

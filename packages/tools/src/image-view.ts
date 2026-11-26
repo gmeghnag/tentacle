@@ -350,6 +350,10 @@ function needsDownscale(named: Named): boolean {
  * Decode the named picture, take one part of it (all of it with no `region`) at
  * up to the detail's size, and keep that as a picture of its own, so that its
  * own id views it again.
+ *
+ * With no `region` this is D5's smaller `low`, an improvement over sending
+ * `high`: a picture it cannot make is no error, the stored one is sent with its
+ * note. Only bytes that are gone end both kinds of call.
  */
 async function viewDecoded(
   named: Named,
@@ -372,12 +376,14 @@ async function viewDecoded(
   if (!store.holds(source)) {
     return gone(named);
   }
+  const unmade = (error: string): ToolResult =>
+    region === undefined ? serve(named, input.detail, setting) : refusal(error);
   const made = await slot(async () => {
     const bytes = await store.read(source);
     if (bytes === null) {
       return { result: gone(named) };
     }
-    const fail = (why: string) => ({ result: refusal(`${label}: ${why}`) });
+    const fail = (why: string) => ({ result: unmade(`${label}: ${why}`) });
     const header = readPngHeader(bytes);
     if ("refused" in header) {
       return fail(header.refused);
@@ -416,7 +422,7 @@ async function viewDecoded(
     label: sanitizeAttachmentName(`${label} region`) ?? "region",
   });
   if ("refused" in entry) {
-    return refusal(`the region was not kept: ${entry.refused}`);
+    return unmade(`the region was not kept: ${entry.refused}`);
   }
   // The store may answer with a picture it already had, where these very bytes
   // are the LOW variant: send the ref whose id is theirs.
