@@ -55,8 +55,10 @@ appId: so.tentacle.app
     id: "drawer-row-rename"
 - assertVisible:
     id: "session-rename-input"
-- tapOn:
-    id: "session-rename-input"
+# No tap on the field: it is auto-focused, and the card MOVES as the keyboard
+# rises — a tap aimed at its old place hits the scrim and cancels the rename
+# (docs/fix/e2e-26-drawer-pro.md).
+- waitForAnimationToEnd
 - eraseText
 - inputText: "Renamed in drawer 26"
 - tapOn:

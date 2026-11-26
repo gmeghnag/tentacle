@@ -1147,3 +1147,55 @@ describe("the flow list is the flow files (the other direction)", () => {
     expect(files).toEqual([...FLOWS].sort());
   });
 });
+
+describe("the rename field is never tapped (docs/fix/e2e-26-drawer-pro.md)", () => {
+  const INPUT = 'id: "session-rename-input"';
+
+  /** A flow's lines without comments and blanks, indentation trimmed. */
+  function steps(file: string): readonly string[] {
+    return readFileSync(join(FLOWS_DIR, file), "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.startsWith("#"));
+  }
+
+  test("no flow taps or long-presses the rename input", () => {
+    // The field is auto-focused and the card MOVES as the keyboard rises: a tap
+    // aimed at its old place hits the scrim, which cancels the rename.
+    const offenders: string[] = [];
+    for (const file of readdirSync(FLOWS_DIR).filter((f) => f.endsWith(".yaml"))) {
+      const lines = steps(file);
+      lines.forEach((line, at) => {
+        if (/^(- )?(tapOn|longPressOn):$/.test(line) && lines[at + 1] === INPUT) {
+          offenders.push(`${file}: ${line}`);
+        }
+      });
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("flows 25 and 26 let the sheet settle before they type", () => {
+    for (const flow of ["25-session-info", "26-drawer"]) {
+      const lines = steps(`${flow}.yaml`);
+      const at = lines.findIndex(
+        (line, i) => line === INPUT && lines[i - 1] === "- assertVisible:",
+      );
+      expect({ flow, found: at > -1 }).toEqual({ flow, found: true });
+      const settle = lines[at + 1];
+      const erase = lines[at + 2]?.split(":")[0];
+      expect({ flow, settle, erase }).toEqual({
+        flow,
+        settle: "- waitForAnimationToEnd",
+        erase: "- eraseText",
+      });
+    }
+  });
+
+  test("guard: the field still focuses itself, which is why no flow needs to tap it", () => {
+    const sheet = readFileSync(
+      join(import.meta.dir, "..", "src", "screens", "RenameSheet.tsx"),
+      "utf8",
+    );
+    expect(sheet).toMatch(/^\s+autoFocus$/m);
+  });
+});
