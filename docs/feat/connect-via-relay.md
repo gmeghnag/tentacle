@@ -1,9 +1,9 @@
-# eval/connect-via-relay — drive an unreachable `serve` from the laptop TUI through the relay
+# feat/connect-via-relay — drive an unreachable `serve` from the laptop TUI through the relay
 
-> **Status:** context · **review (verdict: GO for option A, pending owner answers)**
-> **Branch:** none (an `eval`, committed to `main`, AGENTS §10)
-> Type: eval · Size: M (if promoted, down from the TODO's L) · Blast: load-bearing (a new long-lived laptop credential that grants code execution on the `serve` host) · Suited: Opus plan + Opus execution of the key-store/pairing slice, mandatory fresh-context Opus security review
-> **Changelog:** none (eval)
+> **Status:** context · **implementation (APPROVED — owner answers 1-6 + orchestrator decisions below)** · execution · review
+> **Branch:** `feat/connect-via-relay` (promoted from the eval of the same slug; the eval's Context/Review are kept below)
+> Type: feat · Size: M (two slices, one branch) · Blast: load-bearing (a new long-lived laptop credential that grants code execution on the `serve` host; touches the `connect` entry) · Suited: Opus execution (both slices), mandatory fresh-context Opus security review
+> **Changelog:** `changelog.d/connect-via-relay.added.md`
 
 ## Context
 
@@ -93,11 +93,349 @@ Ran 37 tests across 2 files. [1132.00ms]
 
 ## Implementation
 
-*(empty until promoted)*
+*— claude-opus-5-5, 2026-11-26* · **APPROVED** (owner delegated the details; no
+choice below weakens an AGENTS §7 trust rule, so there are no owner questions).
+
+Scope, exactly as the owner answered (§ Owner answers below): `connect` gets a
+**device mode**. Pair once with `tentacle connect --pair '<payload>'`, then
+`tentacle connect <name>`. The dial tries the direct addresses first and the
+relay last. The laptop gets the same rights as a phone, per project. Its key
+lives in the macOS Keychain, else in a `0600` file, one key per computer.
+Approval happens only on the serve host's terminal. **Out of scope:** remote
+revoke (owner Q4, a follow-up task), any daemon / relay / protocol / mobile /
+`@tentacle/client` change, and `PROTOCOL_VERSION` (no `protocol.d/` note).
+
+### Load-bearing assumption
+
+*A laptop that dials a paired computer's `/e2e` address (direct, or the relay's
+`/d/<id>/e2e`) with its device key lands in the SAME `acceptDevice` →
+`Connection` as a phone. `connectTui` needs nothing but a
+`() => Promise<DuplexChannel>`, and `secureChannelFactory` already returns one.*
+Verified on this branch (82970b16):
+
+- `connectTui` takes the channel from one injected seam,
+  `deps.dial: (url, options) => () => Promise<DuplexChannel>`
+  (`packages/cli/src/connect.ts:238`). It calls that seam once
+  (`connect.ts:266-269`), dials (`:274`), and hands the SAME factory to `RemoteClient` as
+  `channelFactory` (`:290-292`), next to the ONE broker (`:265`). Nothing
+  else in `connectTui` reads the transport. `options.url` is only display text
+  (`:358` `cwd`, `:429` the resume hint).
+- `secureChannelFactory(dial, options): () => Promise<SecureChannel>` dials a raw
+  `ByteCarrier` and runs the Noise initiator over it. A `NoiseError` becomes a
+  `ChannelError`, and only `denied` becomes `unauthorized` (terminal)
+  (`packages/client/src/secure-channel.ts:24-33`, `:44-57`).
+- The phone does exactly this composition today and passes the result to
+  `RemoteClient` as its channel factory:
+  - `webSocketCarrierFactory` opens each address (`apps/mobile/src/connection.ts:335`);
+  - `secureChannelFactory(async () => channel, { staticKey: deviceKey, remoteStatic, random })`
+    runs on the race's winner (`:361-365`);
+  - `firstAnswering(computer.addresses, steps, memory)` races the addresses (`:389`);
+  - the result goes into `new RemoteClient(channel, broker, …)` (`:410`).
+- Serve side, the relay leg calls the same `acceptDevice` as the direct route:
+  «The SAME device path the direct `/e2e` route runs»
+  (`packages/daemon/src/relay-link.ts:772-776`). `acceptDevice` builds the
+  unchanged `Connection` on the resolved secure channel, with a `device`
+  principal (`packages/daemon/src/device-accept.ts:231-238`).
+- In Bun, the eval's run showed a real `RemoteClient` ↔ real `Connection` over
+  Noise working (37 pass, § Context). A real `startDaemon` already accepts a
+  paired key on `/e2e` (`packages/cli/test/serve-devices.test.ts:197`).
+
+**Conclusion:** the change is a laptop-side transport (a `deps.dial`
+implementation), a credential store and CLI wiring. No second session path.
+
+### Preconditions
+
+- **P1, one session path (§7).** Device mode replaces only `deps.dial`.
+  `RemoteClient`, `Connection`, redial and re-attach are untouched
+  (`connect.ts:266-292`).
+- **P2, single broker (§7).** `connectTui` builds the ONE `PermissionBroker`
+  (`connect.ts:265`) and hands it to `RemoteClient` (`:290`). This plan does
+  not touch it. Device mode must not build its own client or broker.
+- **P3, trust bits.** `connectTui` sets `daemonWakes` and `sharedAutoAccept` for a
+  `serve` (`connect.ts:301`, `:306`). The phone sets both for the same reason
+  (`apps/mobile/src/connection.ts:57-73`). A device route exists only on a
+  `serve`, so the bits stay correct. No new trust bit is added.
+- **P4, pairing client is shared and Bun-agnostic.**
+  `pairDevice({ payload, deviceKey, name, dial, random, onCompare })`
+  (`packages/client/src/pairing.ts:52-80`, `:85`) races the payload's addresses
+  and reports the SAS through `onCompare` BEFORE `device/pair` is sent. The
+  payload parser and its fields `key`, `computer`, `code`, `addresses` and
+  `project?` (`packages/protocol/src/pairing.ts:143-159`, `:211`) already exist.
+  `DevicePairResult` is `{ deviceId, computer, project? }`
+  (`packages/protocol/src/device.ts:79-86`). The CLI already imports
+  `@tentacle/transport/noise` (`packages/cli/src/pair.ts:46`) and depends on
+  `@tentacle/client` and `@tentacle/transport` (`packages/cli/package.json:16`, `:26`).
+- **P5, keys.**
+  - `generateStaticKeypair(random)` and `systemRandom` exist
+    (`packages/transport/src/noise-channel.ts:131`, `:58`).
+  - The phone makes a FRESH keypair for each pairing
+    (`apps/mobile/src/pairing-flow.ts:547`), stored per record (`computer-store.ts:114`).
+  - The host's own store is `<configDir>/devices/` (`packages/daemon/src/device-store.ts:124`).
+    The laptop's client store must not collide with it, because a laptop can be
+    a `serve` host too.
+- **P6, address refresh.**
+  - A device sees only its own daemon in `daemon/discover`
+    (`connection.ts:703-711`, eval Context).
+  - `RemoteClient.discover(listener)` exists (`packages/client/src/remote-client.ts:1379`).
+  - The phone folds the result with `discoveryPatch` (`apps/mobile/src/discover-fold.ts:31-68`)
+    on top of the shared rule `mergeAddresses` (`packages/client/src/discovery.ts:150`).
+- **P7, address race.**
+  - `firstAnswering(addresses, steps, memory)` uses its stagger to put the
+    relay last when the list order does: `tentacle pair` already lists direct
+    addresses before relay ones (`packages/cli/src/pair-addresses.ts:26-34`, `:139`).
+  - An `unauthorized` stops the loop (`packages/client/src/address-dial.ts:119`).
+- **P8, CLI shape today.**
+  - `ARGS.connect` takes `token`, `token-command`, `ca-cert`,
+    `insecure-skip-tls-verify`, `--resume` and `--continue`, with exactly one
+    positional (`packages/cli/src/flags.ts:91-97`).
+  - The dispatch is at `packages/cli/src/main.ts:813-855`.
+  - `resolveTls` refuses TLS flags without a `wss://` URL (`flags.ts:588-601`).
+  - The help lines are at `main.ts:383` and `:454`.
+- **P9, no raw terminal writes under Ink (§7).** `connectTui` routes in-session
+  errors through `bufferedErrorSink` (`connect.ts:282`).
+
+### Orchestrator decisions (owner delegated; recommended option taken)
+
+- **D1. Store layout: one file per paired record, no index.**
+  - Records live at `<configDir>/connect/computers/<name>.json` (dir `0700`,
+    file `0600`).
+  - A record holds:
+    - `v: 1`;
+    - `name`;
+    - `id`, a random 16-byte hex string, which is the key's handle;
+    - `computer`, the host's display name;
+    - `computerKey`, base64url, pinned;
+    - `deviceId`;
+    - `project?`, `{cwd, label}`;
+    - `addresses`;
+    - `lastAddress?`;
+    - `keyStore`, `"keychain" | "file"`.
+  - A record is CREATED with `wx`, so `EEXIST` means the name is taken: try
+    `<name>-2`, `-3`, and so on. The filesystem therefore enforces unique names,
+    and two concurrent `--pair` runs can never lose each other's record.
+  - A refresh rewrites only its own file (tmp + `rename`). Two `connect`s
+    refreshing one record converge to last-writer-wins on `addresses` and
+    `lastAddress`; both values are valid merges. The private key is never in
+    the record.
+  - *Why:* an index would need a lock (a read-modify-write race between a
+    refresh and a pair). Per-record files make that race impossible.
+- **D2. Key store.**
+  - On `darwin`, keys go to the macOS Keychain: service `tentacle.connect`,
+    account `<record id>`. They are written through `/usr/bin/security -i`
+    with the command on **stdin**, so the secret never appears in argv (§7
+    rule: secrets never in argv, they are visible in `ps`). They are read with
+    `security find-generic-password -s … -a … -w`; the secret comes back on stdout.
+  - On any other platform, or when the Keychain write fails at pair time:
+    `<configDir>/connect/keys/<record id>.key`, `0600`, in a `0700` dir.
+    Falling back is said in ONE line.
+  - The record names its store (`keyStore`). A read never falls back silently:
+    a missing key is an error that says "pair again".
+  - *Honest property:* an item created by `security` trusts `/usr/bin/security`,
+    so any process running as the same user can read it without a prompt.
+    Against same-user malware it equals the `0600` file. What it adds: the key
+    is encrypted at rest while the keychain is locked, and it is never in
+    dotfile syncs or backups of `<configDir>`. A per-app ACL would need a
+    signed native helper; that is out of scope and recorded as debt.
+  - **First step of Slice 1:** check `security -i` stdin storage empirically,
+    on a throwaway keychain, never the login one. The planner's attempt needed
+    a permission this session could not grant. The script is in § Tests T0.
+    If it does not work, Keychain support is dropped from v1 and every key is a
+    `0600` file. The owner's "else a 0600 file" allows that; record it as drift.
+- **D3. One fresh key per pairing.** As on the phone (P5). This is stricter than
+  "one key per computer": no key is ever shared between computers or between
+  projects. A per-project pairing is a new record with a new key.
+- **D4. Device name shown on the host:** `os.hostname()`, trimmed to
+  `PAIRING_COMPUTER_NAME_MAX`. If it fails `isPairingName`, the name is
+  `laptop`. There is no flag. The host's `y` prompt shows it next to the SAS.
+- **D5. The local record name** (what `connect <name>` takes) is
+  `project.label` from the pairing result. If that is absent, it is the payload's
+  `computer`, made into a slug (`[a-z0-9._-]`, ≤ 64 chars). It is deduped by D1.
+  `--pair` prints the result: `paired as '<name>' — connect with: tentacle connect <name>`.
+- **D6. `--pair -` reads the payload from stdin.** This keeps the one-time code
+  out of shell history and `ps`. It is optional: the owner's literal form,
+  `--pair '<payload>'`, is the documented one. Inline is acceptable because the
+  code is single-use and expiring, and a host `y` after a SAS compare gates it.
+- **D7. `connect --forget <name>`** deletes the record file, then the key
+  (key-rotation story, eval § Failure modes). It prints the `deviceId` and
+  `tentacle devices revoke <deviceId>` to run on the host, because forgetting on
+  the laptop does not revoke on the host. There is no `--list`: an unknown name
+  prints the known names.
+- **D8. Positional routing.**
+  - A positional matching `^wss?://` is the existing token path, unchanged.
+  - Anything else is a record name.
+  - With a name, `--token`, `--token-command`, `--ca-cert` and
+    `--insecure-skip-tls-verify` are refused with one line: the Noise pin
+    replaces them.
+  - `--pair` and `--forget` take no positional and no other flag.
+- **D9. Discovery refresh** happens after the first `initialize`, through a new
+  optional `ConnectDeps.onClient?(client: RemoteClient): void` hook. Device mode
+  calls `client.discover()` there and folds the result with a CLI-side pure
+  `foldDiscovery` (P6's rule: `self` only, same `cwd` only, `mergeAddresses`, and
+  `undefined` when nothing changed). It writes the record (D1).
+  - A write failure goes to the sink (P9), never to stderr.
+  - `lastAddress` is persisted the same way (best effort, after a dial is won).
+  - *Why not lift the phone's `discoveryPatch`:* it is typed on the app's
+    records (`discover-fold.ts:18`). Moving it touches `apps/mobile` and its e2e
+    gate for ~20 lines. Recorded as debt: unify later.
+- **D10. Help and docs.** The `connect` help (`main.ts:383`, `:454`) gains the two
+  device lines. It also gains ONE line naming the zero-code fallback (a tailnet
+  plus `serve --address`), which the eval asked for. A README sentence goes in
+  the `connect` paragraph.
+
+### Design
+
+```
+connect --pair '<payload>'          connect <name>
+  parsePairingPayload                 readRecord(name) → record + KeyStore.get(id)
+  generateStaticKeypair               deviceDial(record, key) ─┐
+  KeyStore.put(id, priv)   (1)          firstAnswering(addresses, steps, memory)
+  pairDevice({..., onCompare→print SAS})  open:   webSocketCarrierFactory(addr)()
+  createRecord(wx)          (2)           confirm: secureChannelFactory(→carrier,
+  print name                                       {staticKey, remoteStatic, random})()
+                                       connectTui({url: name}, err, {dial: () => deviceDial, startTui,
+                                                    onClient: refresh addresses})
+```
+
+- **Order (pair):** key first, then pair, then record. If pairing fails, the key
+  is deleted (best effort). If the record write fails after a successful pair,
+  the CLI prints the `deviceId` and the revoke command for the host. No crash
+  can leave a listed record without a key; at worst an orphan key remains, which
+  is harmless.
+- **`connect <name>`:** `ConnectDeps.dial` is a closure that ignores its
+  `(url, options)` and returns the device factory. Everything after is today's
+  `connectTui`: the TUI, `--resume`, `--continue`, `/sessions`, the exit line
+  (`tentacle connect <name> --resume <id>` is correct, because `url` is the
+  name), and quitting only detaches.
+- **Pure vs I/O split (§7 logic in pure modules):**
+  - pure (no I/O): argv routing (D8), record validation and parsing, the name
+    slug and dedupe, `foldDiscovery`, and the pre-mount error hint mapping;
+  - thin I/O: the record files, the Keychain and file key stores (an injected
+    `run(cmd, args, stdin)`), and `deviceDial` (injected carrier factory and random).
+
+### Files (dependency order; no protocol/daemon/client/relay/mobile change)
+
+**Slice 1: the credential and record stores (pure plus file I/O, no network)**
+
+1. `packages/cli/src/connect-store.ts` (new): records (D1, D5, D7). It exports
+   `createRecord`, `readRecord`, `listRecordNames`, `writeRecord`,
+   `removeRecord`, `slugName` and `parseRecord`. An unknown `v` or an unreadable
+   file is refused, and the file is never written.
+2. `packages/cli/src/connect-keys.ts` (new): `KeyStore { put, get, remove }`
+   with two implementations, `keychainKeyStore(run)` and `fileKeyStore(dir)`
+   (D2). `run` is injected; production uses `Bun.spawn` with `stdin` piped.
+
+**Slice 2: dial, pair and CLI**
+
+3. `packages/cli/src/connect-device.ts` (new):
+   - `deviceDial(record, deviceKey, deps)`, which returns `() => Promise<DuplexChannel>` (Design);
+   - `foldDiscovery` (pure, D9);
+   - `pairLaptop(payloadText, deps)` (pairing order, D4-D6);
+   - `deviceConnectError(error, record)`, which maps a pre-mount failure to
+     one-line hints: `unauthorized` gets "this laptop's key was refused
+     (revoked?) — pair again", and unreachable gets "no address answered — is
+     `serve` running there?".
+4. `packages/cli/src/connect.ts`: add the optional `ConnectDeps.onClient`. It is
+   called once, after `client.initialize()` and before Ink mounts (§7 terminal
+   rule).
+5. `packages/cli/src/flags.ts`: `ARGS.connect` gains `values: pair, forget` and
+   `positional: { min: 0, max: 1 }`. The "exactly one target" rule moves to the
+   pure D8 router.
+6. `packages/cli/src/main.ts`: the dispatch at `:813` goes through the D8 router.
+   The device branch builds `KeyStore` (with a `main` test seam for it, like the
+   `logs --connect` dial seam at `:633`) and calls `connectTui` with the device
+   dial. Help is updated at `:383` and `:454` (D10).
+7. `README.md`: one sentence in the `connect` paragraph (D10).
+8. `changelog.d/connect-via-relay.added.md`: one bullet.
+
+### Failure modes (each with how state converges)
+
+| # | Case | Behaviour |
+|---|---|---|
+| F1 | Record file has an unknown `v`, or is unreadable or invalid | Refused with its path. It is never written or deleted by this build (§7 on-disk rule). Other records still work. |
+| F2 | Key missing: the Keychain item was deleted, the file is gone, or `security` exits non-zero (a locked keychain over ssh) | `connect <name>` exits 1: «key for '<name>' unavailable (<store>) — pair again, then `tentacle devices revoke <deviceId>` on the host». No silent switch to the other store. |
+| F3 | Pair refused (wrong or expired code, used, host `N`) | The `PAIRING_REFUSED_MESSAGES` line. The key just stored is removed and no record is written. A retry is a fresh `tentacle pair` on the host. |
+| F4 | Pair OK, record write fails (disk full, permissions) | Prints `deviceId` + «paired on the host but not saved here — revoke it there: tentacle devices revoke <id>». The key is removed. Nothing usable is left half-done. |
+| F5 | Two `--pair` runs at once with the same name | `wx` create: the second gets `-2` (D1). No record is lost. |
+| F6 | Revoked laptop | Pre-mount: `denied` → `unauthorized` → the hint, exit 1. Mid-session: the existing `stopped` link with no redial storm (`secure-channel.test.ts:159`). |
+| F7 | Relay down, serve not running, or relay `4404` | Pre-mount: `ChannelError` unreachable → the hint. Mid-session: `RemoteClient` redials through `firstAnswering`, and the turn keeps running on the serve. A direct address that answers wins the race. |
+| F8 | Host identity reset (`devices reset`) | The pinned `remoteStatic` mismatches → `handshake-failed`/`closed`, which is transient. Pre-mount: the first dial fails → exit 1 with a hint that also names "computer key changed? pair again". Mid-session: transient retries, as on the phone. Re-pairing is the honest fix (eval F11). |
+| F9 | Address change: new LAN IP, port, or relay id/secret | D9 refresh on every connect folds `self`'s announced addresses, so the next connect dials them. If every stored address is dead before any refresh: F7, then re-pair. |
+| F10 | Version skew | Payload `v` refused by `parsePairingPayload`. E2E version: `rejected` with `remoteE2eVersion`, shown. `PROTOCOL_VERSION`: a clean `VersionMismatch` at `initialize` (`secure-channel.test.ts:204`). Record `v`: F1. |
+| F11 | Name that is also a URL, or empty | D8: `^wss?://` is the token path. An empty name or a missing positional without `--pair`/`--forget` is a usage error. An unknown name prints the known names. |
+| F12 | Phone and laptop on one session | Unchanged (eval § Failure modes): first answer wins, `askedOn` per ask. |
+| F13 | Refresh write fails during the TUI | Reported through the sink (P9), flushed after unmount. The connection is unaffected and the old addresses are kept. |
+| F14 | Relay rate limit (30 dials/min/IP) | The existing `RemoteClient` redial backoff. No new dial loop is added. |
+
+### Tests (red before green; the executor creates each new module as a stub that returns the wrong value first, so RED is on the property's assertion, not an import error, AGENTS §4)
+
+- **T0 (Slice 1, step 1, an empirical gate, not a suite test):** run
+  `.tentacle/tmp/connect-via-relay/kc.sh` (below). It must print the secret
+  back from `find`, a non-zero `missing rc`, and `del rc=0`. Paste the output
+  into Execution. If it fails, apply D2's fallback.
+  ```sh
+  KC="$(pwd)/scratch.keychain-db"; rm -f "$KC"
+  security create-keychain -p scratchpw "$KC" && security unlock-keychain -p scratchpw "$KC"
+  printf 'add-generic-password -U -s tentacle.connect.test -a rec1 -w c2VjcmV0 "%s"\n' "$KC" | security -i
+  security find-generic-password -s tentacle.connect.test -a rec1 -w "$KC"; echo "find rc=$?"
+  security find-generic-password -s tentacle.connect.test -a missing -w "$KC"; echo "missing rc=$?"
+  security delete-generic-password -s tentacle.connect.test -a rec1 "$KC" >/dev/null; echo "del rc=$?"
+  security delete-keychain "$KC"
+  ```
+- **`packages/cli/test/connect-store.test.ts`** (temp `configDir`):
+  - modes `0700`/`0600`;
+  - `wx` dedupe gives `-2` (F5);
+  - an unknown `v` is refused and its bytes are untouched after every API call (F1);
+  - `writeRecord` never adds a key field;
+  - `slugName` bounds;
+  - `--forget` order: record then key.
+- **`packages/cli/test/connect-keys.test.ts`** (fake `run`, NEVER the real Keychain):
+  - the secret's bytes appear in NO argv element of any `run` call, only in stdin.
+    Mutation check: put it on argv and the test must fail.
+  - a missing item becomes the F2 error;
+  - Keychain `put` failure → file fallback plus one notice line;
+  - the file store writes mode `0600`.
+- **`packages/cli/test/connect-device.test.ts`:**
+  - **e2e, the load-bearing property:** a real `startDaemon` on loopback with a
+    device registered through the store API, using the
+    `serve-devices.test.ts:197` harness. A record points at `<url>/e2e`, then
+    `connectTui` runs with `deviceDial` and a fake `startTui` that does
+    `initialize` + `session/list`. Assert it succeeds, AND that
+    `daemon/discover` returns only `self`, which proves the `device` principal.
+    Mutations: a wrong device key must give `unauthorized`, and a wrong pinned
+    computer key must fail the handshake.
+  - **order:** fake carriers record dial order. A dead direct address falls
+    back to the relay-shaped address, and a live direct address wins before the
+    relay is opened (staggered). `unauthorized` on the first address means no
+    second address is tried (P7).
+  - **`foldDiscovery`:** `self` only; a different `cwd` → `undefined`; unchanged
+    → `undefined` (one write per change).
+  - **`pairLaptop`** (fake `pairDevice` deps):
+    - the SAS is printed before the claim resolves;
+    - F3: key removed, no record;
+    - F4: key removed and the message names the `deviceId`;
+    - the key is `put` BEFORE `pairDevice` runs.
+  - **`deviceConnectError`:** the F6, F7 and F8 hints.
+- **`packages/cli/test/connect.test.ts`** (existing): `onClient` is called once,
+  after `initialize`, before `startTui`. The existing token tests stay green
+  (the URL path is unchanged).
+- **Main dispatch** (a new `connect-device-main.test.ts`, through `main` with
+  the KeyStore seam):
+  - `connect --pair X name` → a usage error;
+  - `connect name --token t` → refused (D8);
+  - `connect wss://h:1` → still the token path;
+  - `connect nope` lists the known names;
+  - `--pair -` reads stdin.
+- **Relay leg:** no new suite test. The relay → `acceptDevice` path is already
+  pinned (`relay-link.test.ts:550`), and from the laptop the relay is just one
+  more `/e2e` address. Executor: if `relay-link.test.ts` has an in-process relay
+  that a plain `WebSocket` can dial at `/d/<id>/e2e`, add ONE `deviceDial` test
+  through it. Otherwise say so in Execution (unverified: the live relay hop,
+  verified by the owner's live test before merge).
+- **Gate:** `bun run check`, against the clean lint baseline.
 
 ## Execution
 
-*(empty until promoted)*
+*(empty until executed)*
 
 ## Review
 
