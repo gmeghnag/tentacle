@@ -262,7 +262,7 @@ describe("S4 dispatchMouse: the per-event priority order", () => {
       report(0, 3, 1, false),
       snapshot({ expandAll: true }),
     );
-    expect(kinds(clicked.effects)).toEqual(["copySelection"]);
+    expect(kinds(clicked.effects)).toEqual([]);
   });
 
   // docs/feat/tui-present-row.md: a `present` header with its card OPENS it.
@@ -311,7 +311,7 @@ describe("S4 dispatchMouse: the per-event priority order", () => {
       }),
       3,
     );
-    expect(kinds(clicked.effects)).toEqual(["copySelection"]);
+    expect(kinds(clicked.effects)).toEqual([]);
   });
 
   test("a release COPIES the selection and hands back an empty one", () => {

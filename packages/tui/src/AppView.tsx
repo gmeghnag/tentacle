@@ -68,6 +68,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
     contextWindow,
     expandAll,
     selection,
+    copiedNote,
     quitConfirm,
     artifactConfirm,
     hopRow,
@@ -291,6 +292,7 @@ export function AppView({ model }: { readonly model: AppViewModel }): ReactEleme
           pill={pill}
           onPillRange={onPillRange}
           link={linkView}
+          copiedNote={copiedNote}
         />
       ) : (
         // A hop in flight owns the status row (D3): same ONE row, so the frame

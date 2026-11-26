@@ -60,3 +60,27 @@ export function rowSelectionRange(
 export function isNonEmpty(sel: Selection): boolean {
   return sel.anchor.row !== sel.head.row || sel.anchor.col !== sel.head.col;
 }
+
+/**
+ * A release copies only a DELIBERATE selection: one that crossed a row, or
+ * spanned at least this many cells on one row. A press-release with less
+ * movement is a click (a hand jitter while focusing the terminal), and copying
+ * it silently overwrote the person's clipboard with a stray fragment.
+ */
+export const COPY_MIN_CELLS = 3;
+
+/** Whether `sel` is a deliberate selection (see `COPY_MIN_CELLS`). */
+export function isDeliberate(sel: Selection): boolean {
+  if (sel.anchor.row !== sel.head.row) {
+    return true;
+  }
+  return Math.abs(sel.anchor.col - sel.head.col) >= COPY_MIN_CELLS;
+}
+
+/** How long the status bar keeps the copy confirmation. */
+export const COPIED_NOTE_MS = 2000;
+
+/** The status bar's transient confirmation after a copy. */
+export function copiedLabel(chars: number): string {
+  return `Copied · ${chars} ${chars === 1 ? "char" : "chars"}`;
+}

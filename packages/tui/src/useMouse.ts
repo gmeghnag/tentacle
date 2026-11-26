@@ -60,6 +60,8 @@ export interface MouseHost {
   readonly clipboard: (text: string) => Promise<void>;
   /** `level: "warn"` marks a harness line the person should notice (docs/feat/harness-notices.md S2). */
   readonly pushNotice: (text: string, level?: "warn") => void;
+  /** A copy landed: `chars` characters are on the clipboard (the status bar says so). */
+  readonly onCopied: (chars: number) => void;
   readonly setScrollOffset: (f: (offset: number) => number) => void;
   readonly setPanel: (f: (panel: OpenPanel | null) => OpenPanel | null) => void;
   readonly setDock: (next: DockState) => void;
@@ -107,6 +109,7 @@ export function useMouse(host: MouseHost): MouseLayer {
     field,
     clipboard,
     pushNotice,
+    onCopied,
     setScrollOffset,
     setPanel,
     setDock,
@@ -137,11 +140,15 @@ export function useMouse(host: MouseHost): MouseLayer {
       if (text.trim() === "") {
         return;
       }
-      // Copy silently on success: the on-screen notice made the viewport jump
-      // (pushNotice resets scrollOffset to the tail). Surface failures only.
-      void clipboard(text).catch(() => pushNotice("_Clipboard unavailable._"));
+      // Success is said in the status bar (`onCopied`), never as a transcript
+      // notice: pushNotice resets scrollOffset to the tail (the viewport jump).
+      // Failures still surface as a notice.
+      clipboard(text).then(
+        () => onCopied(text.length),
+        () => pushNotice("_Clipboard unavailable._"),
+      );
     },
-    [clipboard, pushNotice, selectionRef, setSelection],
+    [clipboard, onCopied, pushNotice, selectionRef, setSelection],
   );
 
   const clearHold = useCallback(() => {

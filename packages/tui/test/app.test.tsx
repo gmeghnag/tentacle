@@ -1108,7 +1108,8 @@ describe("App", () => {
     // The copy must not append a notice to the transcript (which also
     // forced the viewport back to the tail).
     const after = lastFrame() ?? "";
-    expect(after).not.toContain("Copied");
+    // The confirmation is the status bar's (last row), never a transcript line.
+    expect(after.split("\n").slice(0, -1).join("\n")).not.toContain("Copied");
     expect(rowOf(after)).toBe(rowOf(before));
     expect(copied).toHaveLength(1);
     unmount();
