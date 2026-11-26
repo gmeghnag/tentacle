@@ -132,7 +132,7 @@ describe("browser tools: masking and framing (D2, §4)", () => {
     );
     expect(r.content).not.toContain(SECRET);
     expect(r.content).toContain("[net]");
-    expect(ops[0]).toEqual({ op: "claim", sessionUid: "session-1", title: "session-" });
+    expect(ops[0]).toEqual({ op: "claim", sessionUid: "session-1", title: "" });
     expect(ops[1]).toMatchObject({ op: "read", sessionUid: "session-1", tab: 4, mode: "text" });
   });
 

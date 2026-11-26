@@ -1,0 +1,1 @@
+- **Browser plugin shows real session names.** The Chrome tab group is labelled with just the session's name (unnamed: `tentacle` + 4 id characters), and the extension popup lists each session by name with its id, in a restyled light/dark popup.

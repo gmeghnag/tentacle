@@ -89,7 +89,7 @@ describe("browser extension ops", () => {
     const r = await ops.handle({ op: "open", sessionUid: "s1", url: "https://a.test/" });
     expect(r).toMatchObject({ ok: true, result: { tab: 100 } });
     expect(calls).toContain("group 100 new");
-    expect(calls).toContain("groupTitle 7 tentacle · demo");
+    expect(calls).toContain("groupTitle 7 demo");
     await ops.handle({ op: "open", sessionUid: "s1", url: "https://b.test/" });
     expect(calls).toContain("group 101 7");
   });
@@ -190,23 +190,23 @@ describe("browser extension ops", () => {
     // Before any tab: the title is kept for the group the first open makes.
     await ops.handle({ op: "retitle", sessionUid: "s1", title: "Fix login" });
     await ops.handle({ op: "open", sessionUid: "s1", url: "https://a.test/" });
-    expect(calls).toContain("groupTitle 7 tentacle · Fix login");
+    expect(calls).toContain("groupTitle 7 Fix login");
     expect(
       await ops.handle({ op: "retitle", sessionUid: "s1", title: "Fix login form" }),
     ).toMatchObject({ ok: true });
-    expect(calls.at(-1)).toBe("groupTitle 7 tentacle · Fix login form");
+    expect(calls.at(-1)).toBe("groupTitle 7 Fix login form");
     await ops.handle({ op: "open", sessionUid: "s1", url: "https://b.test/" });
     expect(calls).toContain("group 101 7");
     const tabs = await ops.handle({ op: "tabs", sessionUid: "s1" });
     expect(tabs).toMatchObject({ ok: true });
   });
 
-  test("release retitles the group and detaches its tabs; handover only for a claimed session", async () => {
+  test("release detaches its tabs; handover only for a claimed session", async () => {
     const { ops, calls, sent } = setup();
     await claim(ops);
     await ops.handle({ op: "open", sessionUid: "s1", url: "https://a.test/" });
     await ops.handle({ op: "release", sessionUid: "s1" });
-    expect(calls).toContain("groupTitle 7 tentacle · demo (ended)");
+    expect(calls.filter((c) => c.startsWith("groupTitle"))).toEqual(["groupTitle 7 demo"]);
     expect(await ops.handover("nope", 3)).toBe(false);
     expect(sent.some((m) => m.event === "handover")).toBe(false);
     await claim(ops);
