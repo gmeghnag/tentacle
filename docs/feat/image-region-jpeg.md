@@ -743,6 +743,64 @@ Not run by the executor: the full `bun run check` is the orchestrator's script.
 
 ## Review
 
-*— <model-id>, <date>*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same model as the plan's author, different from the executor)
 
-(Not started.)
+**Verdict: REQUEST-CHANGES** (one MEDIUM; everything else holds).
+
+**Gate (narrow, as asked):** the 6 touched/adjacent test files
+(`core/test/{jpeg-decode,image-region,image-file}`, `tools/test/{image-codecs,image-view-region,image-view}`)
+198 pass / 0 fail; `bun run lint` clean (2631 files); `bun run typecheck` clean
+(root + mobile + relay). The full parallel `bun run test` was not run by this review.
+
+**Findings**
+
+1. **MEDIUM — decode CPU is unbounded by the budget; J7's "≈ 0.6 s at the cap" is false for a crafted file, and J8 makes it reachable by default.**
+   `packages/core/src/jpeg-decode.ts:276-344` walks only the FIRST scan and
+   `decodeJpeg` (`:365-393`) bounds only memory. pdf.js's `decodeScan`
+   (`pdf.image_decoders.mjs:8355-8395`) walks every block of the frame for each
+   scan, even when one EOBRUN code covers them, and `checkScan` (`:223-234`)
+   allows duplicate selectors (Ns up to 255). Measured here (executor's
+   `scan-cost.ts`, 4032×3024 header, cost 73 MB, under budget):
+   `1000 scans · 33 114 B · 501 ms` and `5000 scans · 165 114 B · 2159 ms`,
+   linear ≈ 13 µs per byte. So ≈ 50 s for a 3.9 MB file and ≈ 3 min for a
+   15 MiB user upload, synchronously on the daemon thread (on `serve`, it
+   stalls every session). Failure scenario: a repo contains a crafted `.jpg`;
+   the model `fs_read`s it (`inspectJpeg` only checks the header + EOI) and
+   calls `image_view` with no arguments. `low` is the default, and that now
+   decodes (`image-view.ts:358-366`). Main never decoded a JPEG, so this
+   change introduces the problem. Fix (cheap, in the walk, before the decode): cap the number of `FF DA`
+   markers in the file (they cannot occur in stuffed entropy data; real
+   progressive encoders write ≈ 10, mozjpeg ≤ ~20), and refuse duplicate
+   selectors in an SOS. Add a T2 test for each, red first. The executor already raised this under
+   "For Review" item 1, and it needs the orchestrator's decision.
+
+**Mutations (each applied, run, reverted; `git status` clean after):**
+cost check ×1000 → T3 "over the budget… decoder never called" FAILS (and
+the T6 over-budget test); APP/COM fill-byte check disabled → both T2 smuggling
+tests FAIL; `storedBox` bypassed in `jpegPart` → T6 orientations 2–8 FAIL
+(11 fails in total, all expected).
+
+**Attacks tried**
+- *DNL re-parse* (`:8153-8159`, `:8917`): `parseDNLMarker` holds only for
+  the first SOS, and `readBit` cannot read past a non-RST marker without
+  throwing. The walk refuses DNL and every marker under `C0` up to the end
+  of the first scan, so this path is closed. The EOI-in-scan `DNLMarkerError` (`:8160-8165`) can only
+  LOWER the height, and the size check then refuses. Holds.
+- *Desynchronised walks*: DQT/DHT/SOF/SOS/DRI lengths are exact on both sides
+  (`:8823-8933`). `findNextFileMarker` matches only `FFC0–FFFE`, and the walk's
+  2-byte skips (`FF00`, RST) cannot hide a misaligned `FF`. Holds.
+- *After the first scan* (not walked): a second SOF throws before
+  `prepareComponents` (`:8851`), a top-level DNL is skipped (`:8950`), and an
+  unknown component id throws. **No extra allocation, only CPU (finding 1).**
+- *Fill byte after APP* (`readDataBlock`, `:8661-8676`): refused before the
+  first SOS. After it, a smuggled frame only reaches the SOF throw.
+- *§7 terminal*: `setVerbosityLevel(0)` runs at module load (`image-codecs.ts:30`), and the T5 console spy pins it.
+  *§7 core purity*: `jpeg-decode.ts` imports only `png-decode.ts`, and the mobile typecheck is green.
+  *§7 pod*: no wiring change, so a pod still has no tool.
+- *Cost formula* vs `prepareComponents` (`:8645-8657`) + `getData` (`:9010`): identical.
+
+**What holds:** the load-bearing assumption (memory) holds for every
+path I could construct. The orientation geometry is pinned by an independent
+oracle, and the mutations are non-vacuous. **Executor behaviour:** good. It found and
+fixed two holes in the planned walk (step 0), and it reported the CPU issue
+honestly instead of silently widening scope. It did not run the full gate.
