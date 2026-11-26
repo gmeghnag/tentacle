@@ -653,3 +653,14 @@ non-skew failures are "online", so it is out of this fix's scope.
 **Holds:** pure derivation from the error object, no new state, no wire/persistence change, no §7 invariant touched (display-only; a lying serve can only pick a sentence). Tests red-first on the reported bug, style clean.
 
 **Executor behaviour:** honest and careful — caught the Context repro's flawed fixture and the duplicated-comparison drift and documented both; mutation table real. Missed the second consumer of the function it changed.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26*
+
+**Verdict: PASS.** Finding 1 is fixed. In `computerRow`, if the diagnosis is `ok` and the error is a protocol skew, the row's state now comes from `skewState(skew)` (`apps/mobile/src/computer-rows.ts:93-104`). Any other diagnosis still wins.
+
+- **Mutation, red on both:** (1) setting `state` back to `diagnosis` makes 4 tests fail: the 3 `computerRow` skew tests and the `drawerTitle` «Update the app / canCreate false» test. (2) Dropping the `diagnosis === "ok"` guard makes the «revoked still wins» test fail. Both were reverted, `git status --porcelain` is empty and the tests are green again.
+- **End-to-end trace** (`review-trace.ts`, through the real `explainVersionMismatch`): the drawer row is now `update-app`, `{"tone":"attention","text":"Update the app","pairAgain":false}`, so `canCreate` is false. The Computers screen trace is unchanged («Needs attention · Update the app»).
+- **Regression check:** `computer-status.ts:43-55` is the only reader of `ComputerRow.state`, and it already maps both `update-*` states to attention with no Pair again. The `ComputerRow["state"]` union is unchanged.
+- **Checks run:** the 6 related test files (`computer-rows`, `drawer-list`, `link-diagnosis`, `project-rows`, `session-list`, `computer-status`) give 135 pass, 0 fail. `bun run lint` is clean (2581 files). `bun run typecheck` is clean (root + mobile + relay). I did not re-run the full parallel `bun run test`.
