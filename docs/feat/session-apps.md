@@ -473,3 +473,7 @@ l'anteprima PRIVATA sul telefono (nessun URL pubblico).
 **Owner, 2026-11-26 ~10:05:** «fino a che non compro l'altro dominio usiamo tentacle.so» — INTERIM: apps live under `tentacle.so` (e.g. `<id>.apps.tentacle.so`, wildcard cert via DNS-01) until the separate domain is bought. Consequences for the plan: the apps domain is a CONFIG value of the apps host + the publish tool (switching = config + DNS, no code); every other condition stays (first-visit warning, CSP with network off, caps, kill switch, every publish asked through the broker, secret scan); the apps host must set no cookies and never share an origin with `tentacle.so` itself. Known interim risk (stated once, owner's call): an abusive app can get `tentacle.so` listed by Safe Browsing until the move.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-26*
+
+**Owner, 2026-11-26 ~10:10:** «si usa lo stesso server di tentacle per ora» — INTERIM: the apps host runs on the current tentacle.so box (Caddy) until a dedicated server exists; it must be a separate process/site block with its own limits (bandwidth, storage, rate) so moving it later is a deploy, not a rewrite. **PROMOTED to feat** (umbrella; this doc): P1 `feat/session-apps-host` (the apps-host service) → P2 `feat/session-apps-publish` (publish/unpublish tools, worker + serve, broker-gated). P0 (DNS wildcard `*.apps.tentacle.so` + DNS-01 cert, legal pages on the site) needs the owner at deploy time. Deploys and DNS changes are done only with the owner's OK.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-26*
