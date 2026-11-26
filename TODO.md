@@ -4,59 +4,26 @@ Running backlog of planned work. The near-term roadmap is **skills support** nex
 the rest are "value-add" improvements layered on the harness.
 
 ## Owner review queue
-- [x] **fix/serve-mcp-polish** (merged 27fea56b) (owner 2026-11-25 ~21:55 «sì facciamo una passata dopo») — two small serve-MCP items: (1) the serve log keeps showing `auth-failure /mcp` / `mcp-auth-failure` (seen since 2026-11-22, before the MCP server existed): something calls `/mcp` with bad credentials — log the rejected caller's remote address + user-agent (never the presented token) to find it, then decide; (2) the startup hint prints `claude mcp add … http://0.0.0.0:4001/mcp` — suggest `127.0.0.1` (or the host name when bound to 0.0.0.0). (3) ONE `session_start` from Claude Code (2026-11-25 ~21:05, wrapped by Claude Code as an MCP task) created TWO sessions «MCP: Prova MCP 2» 3 s apart (`mcp-default-d547c6b9…` answered, `mcp-default-a09deaee…` a duplicate) — the plan's known «retried session_start → a second session» case actually bites with Claude Code: make start idempotent (a request/task key) — design it. Type: fix · Size: S · Blast: contained · Suited: DeepSeek.
-- [x] **fix/think-tag-leak** (merged bc38ea3e) (found 2026-11-25 ~21:05 testing serve MCP; owner «ok») — a Qwen (llama.cpp, unsloth/Qwen3.8-27B) reply stored by tentacle (serve 0.7.1+0cf4dd448626, right after fix/reasoning-echo) carries a stray `</think>` and the answer twice: content `No: 391 = 17 × 23, quindi è composto.\n</think>\n\nNo: 391 = …`, reasoning split correctly (`reasoning_content`). Session `~/.config/tentacle/daemon/assistant-90d61226d0ae/mcp-default-d547c6b9-…jsonl`, turn 2 (first turn with echoed reasoning in history). NOT reproduced by direct non-streaming requests to the same server (6/6 clean, with and without `reasoning_content` in history) → the difference is what tentacle adds (system prompt, tools, streaming, echo shape). Reproduce FIRST with the bench logging proxy capturing full bodies, then decide: upstream cause vs a defensive strip of a stray `</think>` in content. Queued after bench round 1 (shared GPU). Type: fix · Size: S · Blast: contained · Suited: Sonnet repro, DeepSeek exec.
-- [ ] **fix/mobile-version-mismatch-diagnosis** (found 2026-11-25 ~19:20, owner screenshot) — a phone app on an OLDER protocol than its serve (app v25 build 1863f163, serve v27) shows the project as «Stopped · run `tentacle serve` in …» instead of «Update the app»: `apps/mobile/src/link-diagnosis.ts:97` decides update-app/update-computer from `E2E_CHANNEL_VERSION` only, so an `initialize` `VersionMismatch` (PROTOCOL_VERSION) falls through to `project-rows.ts:179` → stopped (a sibling project answered). Fix: map the initialize VersionMismatch (remote vs local PROTOCOL_VERSION) to update-app / update-computer. Type: fix · Size: S · Blast: contained · Suited: DeepSeek.
-- [x] **fix/reasoning-echo** (merged 262e8cf2) — ABSOLUTE PRIORITY (owner 2026-11-25 ~17:30 «ha priorità assoluta, fino a che non è fatto stoppiamo i lavori su deepseek»). tentacle drops the model's reasoning from history (`ChatMessage` has no field; providers decode `reasoning_content` / Anthropic `thinking` for display and discard it), pi sends `reasoning_content` back. Bench (harness-compare EXPERIMENTS.md F8, proxy echo): DeepSeek stale-taskrun PASS in 4.7 min / 20k out tokens WITH the echo vs >25 min / 174k without (pi 4.4 min / 10k); reasoning 6.3k → 1.1k ch/turn. Promotes docs/eval/anthropic-thinking-echo.md (2026-10-17, Anthropic-only, never built) → docs/fix/reasoning-echo.md, all providers. DeepSeek workers paused meanwhile (orchestration NO_DEEPSEEK → Sonnet). Type: fix · Size: M–L · Blast: load-bearing (ChatMessage + persisted session log + every provider) · Suited: Opus plan + exec, fresh Opus review.
-- [ ] **feat/subagent-harness-runners** (owner 2026-11-25 ~11:00, decided «faremo sia A … che B») — tentacle runs a sub-agent through ANOTHER agent harness, Claude Code first (`claude -p` headless, on the laptop): escalation of a stuck/looping DeepSeek/Qwen session, «fallo fare a Claude» from the phone, a workflow step «review with Opus». Owner: build a GENERALISED runner interface from the start (a harness adapter: spawn, stream events, result, cancel, cost/limits) so other harnesses (Codex CLI, Gemini CLI, a remote A2A agent — see feat/a2a — …) plug in later; Claude Code is the first adapter. Constraints: laptop only — never requested by a pod (AGENTS §7: a pod is not trusted); spends the Max quota (visible + capped); a writing run gets its own worktree, a review run is read-only; permissions go through the single broker. Reuse the sub-agent seam (`packages/tools/src/subagent-tools.ts`, agent_task) and the workflow step kinds — no parallel session path. Type: feat · Size: L → split · Blast: load-bearing (sub-agent seam + trust) · Suited: Opus plan + fresh review.
-- [ ] **feat/serve-mcp-server** (owner 2026-11-25 ~11:00, «pezzo-pezzo partendo dalle cose più necessarie») — `tentacle serve` EXPOSES an MCP server, so Claude Code (or any MCP client) can drive tentacle: start/steer a session (DeepSeek, a k8s pod), read its status and events, run a workflow, push a notification to the phone. Today tentacle is only an MCP CLIENT (docs/feat/serve-mcp.md). Incremental: the plan first ranks the tools by need (likely: session start + status/events, then push to phone, then workflows) and ships them one slice at a time; auth on the existing serve token, every effect behind the same permission rules as a phone client. Type: feat · Size: L → slices · Blast: cross-module (daemon + protocol surface) · Suited: Opus plan → DS exec per slice.
-- [x] **feat/a2a-client** (merged 1f8c1604, 2026-11-26, PROTOCOL_VERSION 28; owner 2026-11-25 ~16:05 «e per permettere a tentacle di chiamare gli altri agenti tramite a2a?» → «sì, procedi col piano») — tentacle CALLS remote A2A agents: a remote agent is one more adapter on the harness-runner seam merged with feat/subagent-harness-runners (5b8f8a9c; its doc already names `a2a:<name>` and pins the fit with a fake remote adapter, D10). Configured remote agents (Agent Card URL + token via a command, never in clear), sub-agent type `a2a:<name>`, streaming into the sub-agent view (TUI + phone), cancel; outbound context = owner-approved through the single broker; replies untrusted (AGENTS §7). Client lib `@a2a-js/sdk` (Bun-compatible on the server side, feat/a2a). Doc: docs/feat/a2a-client.md. Type: feat · Size: M–L · Blast: load-bearing (new outbound surface, permissions) · Suited: Opus plan + exec, fresh Opus review.
-- [ ] **feat/mobile-workflows-landing** (owner 2026-11-26 ~00:30, phone screenshots of «Workflows» (empty runs list + «Start a workflow») and «Start a workflow» (cards with Edit)): «cliccando sul bottone workflow devo atterrare subito nella schermata workflows, con i bottoni delete, start e approve presenti dove oggi sta edit, per ogni workflow». The hub's Workflows entry opens the workflow LIST directly (today: `WorkflowRuns.tsx` first, then «Start a workflow» → `WorkflowStart.tsx`); each card's action row = Start · Approve (only while «Needs approval») · Delete (confirmed), replacing the Edit row; Edit stays reachable (the card itself / its chevron → editor); runs stay reachable from the list (live/recent runs on top or a Runs entry — planner decides with mockups). Today the only workflow RPC is `workflow/list` (`packages/protocol/src/methods.ts:198`): approve and delete need daemon methods — approve must be the same trust decision as today's (the laptop/serve owner's approval of that file's hash, through the single broker rules; check how approval is granted now), delete removes the YAML (confirm, never silent). Phone/Mac parity: the TUI gets the same actions if it has a workflow list. Mockups first (docs/MOCKUP-BRIEF.md, ≥2 variants in .tentacle/mockups/mobile-workflows-landing/). Type: feat · Size: M · Blast: cross-module (protocol + daemon + mobile) · Suited: Opus plan → Sonnet exec, Opus review.
-- [x] **fix/workflow-edit-segments** (merged 0a8c480a) (owner 2026-11-26 ~00:20, phone screenshot of the workflow editor, a command step: «non mi fa cliccare né su docker né su go to step, non avviene lo switch») — in `apps/mobile/src/workflow-edit-sheets.ts` both segmented controls write an EMPTY value and derive their selected option from that value being NON-empty, so the choice undoes itself: Where→Docker patches `where: {docker: ""}` (`segmentAction`, ~1117) but the field reads `docker !== ""` (~527/557) → stays Local, the container field never appears; Then→Go to step sets `target: gotoOf(model) ?? ""` (~1115) but the field reads `goto !== ""` (~458), and the goto picker only exists once a target is set → unreachable. Fix: the selected option follows the SHAPE (where is an object / a goto exists), not the content; the dependent field then appears empty, and Save is blocked with the field's own error («needs a container name» / pick a step) until it is filled (the spec already refuses an empty docker name, `packages/core/src/workflow-spec.ts:597`). Check every other segmented control in the editor for the same pattern (promptMode …). Red test first in the pure module. Type: fix · Size: S · Blast: contained (mobile editor pure module) · Suited: DeepSeek.
-- [ ] **fix/workflow-no-verdict** (owner 2026-11-26 ~00:20, phone screenshots: step `write` of workflow `test` in ~/assistant shows «error» while its report ends «PASS») — an agent step ends ONLY through the typed `step_verdict` tool (D3, `packages/agent/src/workflow-verdict.ts`); Qwen wrote «PASS» as text and never called it → `write failed — no verdict` (session fb10a61d, wf-2, 00:14:08). Same as rassegna-stampa 24/11, and the authoring agent «fixes» it by asking the prompt for a text PASS line, which reinforces the wrong behaviour. Fix: (a) driver (`workflow-driver.ts` ~1774–1835): a child that ends without a verdict gets ONE reminder turn («call step_verdict now — pass or fail with a reason») before failing `no verdict`; still never grep the report; (b) the step detail shows the failure REASON (mobile `apps/mobile/src/screens/WorkflowStep.tsx` shows only «error»; TUI equivalent), e.g. «no verdict — the step ended without calling step_verdict»; (c) the workflow authoring surface (workflow tools' descriptions / the authoring guidance the model reads) says plainly: the verdict is the step_verdict tool, never a text line. Type: fix · Size: M · Blast: cross-module (workflow driver + mobile + TUI) · Suited: DeepSeek plan+exec, Opus review.
-- [x] **feat/run-network** (merged 294e57d3) (owner 2026-11-25 ~23:59 «aggiungiamo a tentacle run l'opzione per la rete in docker/podman») — `tentacle run --engine docker|podman` creates its container on the engine's default network (bridge: full egress); add a network choice: `--network <name|none>` (+ a `network` key in config.jsonc / a profile, same precedence as `engine`: flag > env `TENTACLE_NETWORK` > profile > config), passed as the container's `HostConfig.NetworkMode` at create (`packages/docker/src/client.ts:251` `POST /containers/create`, body built per engine). Unset = today's behaviour. `none` must still work end-to-end: the pod daemon is driven over `docker exec` and the model goes through the laptop (model/stream over RPC), so it needs no network — verify. Kubernetes: a clear error (NetworkPolicy is out of scope). `attach` never creates, so it takes no flag. Motive: air-gapped bench runs (the agent found upstream fixes on GitHub, harness-compare EXPERIMENTS 25/11 23:20) and sandboxing untrusted work. Type: feat · Size: S–M · Blast: cross-module (cli + docker engine + config) · Suited: DeepSeek plan+exec, Opus review.
-- [ ] **fix/a2a-stream-duplicate** (owner e2e 2026-11-26 ~00:55: two tentacle agents over A2A, A = serve + `harnesses.bravo` (a2a) driven by MCP, B = `serve --a2a-token-command`; repro in .tentacle/tmp/a2a-e2e/) — the sub-agent's answer reaches A DUPLICATED («Il codice segreto … OTTARINA-42Il codice segreto … OTTARINA-42»). Wire evidence (direct SendStreamingMessage to B, «Rispondi solo con la parola: CIAO»): `artifactUpdate` {artifactId response, text CIAO} then again `artifactUpdate` {same artifact, text CIAO, lastChunk:true, append absent/false} then `statusUpdate`. Spec: append false = REPLACE. Client: `packages/agent/src/harness/a2a-map.ts:306-311` keeps the right text in `state.artifacts` and computes `replace`, but the report the parent reads still concatenates both (find where `replace` is dropped downstream of `partEvents`). Server: `packages/daemon/src/a2a/executor.ts:~633` re-sends the whole text as the lastChunk (`append:false`) — legal but wasteful; send the closing chunk as an empty `append:true` delta (or keep, if a client needs the full text — decide in the plan). Red test first for the client (a stream of chunk + full lastChunk ⇒ text once). Type: fix · Size: S · Blast: cross-module (agent harness + daemon a2a) · Suited: DeepSeek.
+
+- [ ] **fix/mobile-workflows-landing-v2** (owner 2026-11-26 ~01:20, on the merged feat/mobile-workflows-landing ee1f6a20, NOT yet on the phone) — «le scritte colorate Start Approve Delete con quelle icone sbattono, preferisco i bottoni; tutto così ammassato non mi piace; in alto il permesso attaccato alla navbar (AskSlim, mobile-ask-surfaces)». New mockups (≥2 variants, light+dark, ask-pending state) in `.tentacle/mockups/mobile-workflows-landing-v2/` — WAIT for the owner to pick, then fix before the next iOS build. Type: fix · Size: S–M · Blast: contained (mobile) · Suited: Opus mockups → DS exec.
 - [ ] **fix/a2a-question-workflow-label** (merge review of feat/a2a-client, LOW, 2026-11-26) — a remote A2A question raised inside a workflow agent step drops the run label (`permission-map.ts` toAskUpdate forwards `workflow` only for permission requests; `permission-router.ts` reads it only there), so the phone shows it as a plain session ask, not over the run. Still asked and answerable. Fix: an optional `workflow` on `question_request` + the run screen offering Answer for it. Type: fix · Size: S · Blast: cross-module (protocol additive) · Suited: DeepSeek.
 - [ ] **feat/a2a-reload** (owner 2026-11-25 ~22:45, «mettiamola dopo sta cosa della Tui, intanto c») — after feat/a2a-client merges: a `/a2a` TUI command to reload the remote agents' cards on demand (a2a-client fetches them ONCE at worker/`serve` start-up and refreshes them in the background after each build — option (c), docs/feat/a2a-client.md «Owner decision — finding 2»; `startA2ACards`, `packages/cli/src/wiring.ts`), so a changed card reaches the model one build late. Needs a client→daemon path to re-run `prefetchA2ACards` on the host and rebuild the type text; check phone parity (a hub entry) in the plan. Type: feat · Size: S–M · Blast: cross-module (TUI + daemon RPC) · Suited: Opus plan → Sonnet exec.
 - [ ] **feat/a2a-relay** (owner 2026-11-25 ~12:10, «sì, mettila una voce in todo») — after feat/a2a merges: give every `serve` a public A2A URL through the tentacle relay — the relay accepts HTTPS at e.g. `https://relay.tentacle.so/a2a/<id>/…` (Agent Card + JSON-RPC + streaming) and forwards it over the serve's EXISTING outbound relay link (no open port, NAT or domain). Trade-off to state in the plan: today the relay sees NOTHING (phone↔serve is Noise end-to-end, `apps/relay/src/server.ts:16`); a standard A2A client speaks plain HTTPS, so the relay would see A2A payloads in clear. A2A token still checked on the serve; the relay only forwards (rate limits, size caps). **Design direction (owner 2026-11-25 ~12:45, «abbozziamo in TODO inoltro TLS passante»): TLS PASSTHROUGH so the relay can be a FREE public service that still sees nothing** — each serve gets `<id>.a2a.tentacle.so`; the relay reads only the SNI of the TLS ClientHello and pipes the still-encrypted bytes over the serve's existing outbound link (no termination); TLS ends on the user's serve, which obtains its own certificate for its subdomain (ACME, e.g. DNS-01 through a relay-side challenge endpoint the serve authenticates to). The relay then sees only which `<id>` and how many bytes — the same property as Noise today. Open points for the plan: certificate issuance/renewal flow and rate limits (Let's Encrypt per-domain limits → wildcard/registered-domain strategy), the trust gap (whoever controls `tentacle.so` DNS could mis-issue: `tentacle` watches Certificate Transparency logs for its subdomain and warns), HTTP/2 + streaming through the pipe, abuse limits by bytes/connections without reading content. A plaintext relay (TLS terminated on the relay, like ngrok/Cloudflare Tunnel) is acceptable only for the owner's own use and opt-in, stated in clear. Later, optional: an opt-in directory of Agent Cards on the relay («registrazione»; A2A has no standard registry beyond the well-known Agent Card URL). Type: feat · Size: M · Blast: cross-module (relay + daemon relay link) · Suited: Opus plan → Sonnet exec.
-- [ ] **feat/a2a** (owner 2026-11-25 ~11:20, «sì, mettilo in todo e fallo considerare al piano») — tentacle speaks A2A (https://a2a-protocol.org/latest, spec 1.0.0, Linux Foundation; official JS SDK `@a2a-js/sdk`, Bun compatibility unverified). Two sides: (1) CLIENT — a remote A2A agent as a sub-agent = one more adapter of the harness interface in feat/subagent-harness-runners (that plan must make the interface fit it; built later); (2) SERVER — `serve` publishes an Agent Card and accepts SendMessage / SendStreamingMessage / GetTask / CancelTask / SubscribeToTask, mapping A2A task states (SUBMITTED/WORKING/INPUT_REQUIRED/AUTH_REQUIRED/COMPLETED/FAILED/CANCELED/REJECTED) onto turns, asks and session updates; after feat/serve-mcp-server's first slices (same exposure: auth on the serve token, permissions, external sessions). A remote A2A agent is untrusted like a pod (AGENTS §7): every laptop effect gated on the laptop. Verify first: Agent Card discovery path, streaming binding, SDK on Bun. Type: feat · Size: L → split · Blast: cross-module/load-bearing (external session entry) · Suited: Opus plan.
 - [ ] **feat/builtin-skills** (owner 2026-11-25 ~10:30, TODO only — «metti solo in todo la voce») — today tentacle does not know how its own features work (e.g. it cannot write a workflow: no idea of the YAML format). Ship Agent Skills INSIDE the binary, through the existing `skill` seam (`packages/tools/src/skill.ts`, docs/feat/skills-core.md: catalog = one description line in the prompt, body on demand → tokens paid only on use); today only project/user skill dirs are discovered. First skill `tentacle-workflows` (YAML format, step kinds, retry/goto, prompt files, `.tentacle/workflows/`, validate/run, approvals); the reference part GENERATED from the same schema the code uses, with a test that fails on drift. Later: schedule, artifacts, chart/diagram, sessions/sub-agents. A project/user skill of the same name overrides the bundled one. Type: feat · Size: M · Blast: cross-module (config skill discovery + tools) · Suited: Opus plan → DS exec.
 - [ ] **feat/browser-inspect** (PROMOTED by the owner 2026-11-25 ~11:45 «partiamo»: doc moved to docs/feat/browser-inspect.md; spike B0 by Sonnet, B2 by Sonnet — owner: «ottimizziamo con sonnet quando possiamo»; was eval, owner 2026-11-24 «ok solo voce todo») — tentacle opens a browser and can SEE the page and TRACE its fetch/XHR/WebSocket traffic. Phone: an in-app WKWebView (`react-native-webview`), screenshot via `takeSnapshot` → `image_view`, DOM as text; traffic via a document-start `WKUserScript` that wraps `fetch`/`XMLHttpRequest`/`WebSocket` and posts each request/response/frame to the app → daemon → a model tool (limits: no native subresource loads, little service-worker visibility, cross-origin iframes need per-frame injection). Mac: drive Chrome via the DevTools Protocol / Playwright — full Network domain incl. WebSockets. One device-agnostic `browser_*` tool group for both. Design points: logged-in sessions → redact tokens/cookies before the model and never persist them raw; prompt injection from page text → consequential actions (submit, pay, delete) through the single broker. Type: eval · Size: L (umbrella) · Blast: load-bearing (new capability surface, credentials) · Suited: Opus eval.
   - **Owner direction (2026-11-24):** a **Chrome extension in the user's REAL profile** (logins/cookies), linked to the Mac daemon via **native messaging** (not a localhost WebSocket); `browser_*` tool group off by default (`browser_open` in a «tentacle» tab group, `browser_read`, `browser_shot` → `image_view`, `browser_click`/`browser_type`, `browser_net` via `chrome.debugger` incl. WebSockets). Decisions: (1) the model sees ONLY its own tab group + tabs the user hands over via the extension icon; (2) secrets (Authorization, cookies, tokens) masked before the model and in the saved log by default, with an **option to show them in clear**; (3) consequential actions (form submit, pay, delete, cross-domain navigation) ask through the single broker by default, with an **auto mode** option; (4) **Chrome only** in v1 (no Safari: no `chrome.debugger` equivalent); (5) the Mac's Chrome is reachable from every session of that computer (incl. phone sessions on its `serve`). DevTools-Protocol attach to the default profile is blocked since Chrome 136; persistent dedicated profile / AppleScript kept as fallbacks. Next: Opus eval (native messaging, `chrome.debugger` limits).
   - **B1–B4 MERGED 2026-11-25 14:29 (87e1a988).** **Bug for B5 (owner's first install, 25/11 15:05):** `tentacle browser install` from the COMPILED binary prints «extension: sources not found next to this build» — `packages/cli/src/browser-install.ts:54` resolves `apps/browser-extension` from `import.meta.url`, which is inside the bun bundle, not the repo. The host side installs fine; the extension was copied by hand to `~/.config/tentacle/browser/extension`. Fix: embed the extension files in the binary (e.g. `import … with { type: "file" }` / a generated asset table) so install works from `~/bin/tentacle`, + a test that runs install against the compiled output. **Owner's first live test (25/11 15:20, real Chrome, phone-capable serve): WORKS** — open/read/shot/search-by-URL on a news site, a 404 self-corrected. Gaps the agent itself reported: no click/type/scroll (= B5, expected) and **no way to close its own tabs** (no `browser_close`; the tab stays open for the user) → add `browser_close` (own tabs only, no ask) to B5. **Owner 25/11 15:25: a tab found closed (e.g. by the user) must NOT be an error — reopen it («credo scelta migliore»).** Today the hub drops the tab on `tab_closed` (`packages/cli/src/browser-host.ts:181`) and the next op on it fails. B5: the tool layer remembers each own tab's last URL; an op on a closed own tab reopens that URL in the session's group (no new ask: same URL already approved) and tells the model «tab N was closed; reopened <url> as tab M — scroll/form state and its traffic log are lost». Proposed limits (confirm at B5 plan): only tabs the agent opened itself (a tab the user HANDED over and then closed stays closed: reopening it would undo the user's choice); a tab closed by `browser_close` is not reopened.
-- [ ] **feat/parallel-unit-tests** (owner 2026-11-25 «ok», speed-up lever 4) — run the full `bun test` across cores (today 17881 tests, ~530 s single process) with the same verdict; target ≤ 3 min. Doc `docs/feat/parallel-unit-tests.md` (on its branch). Type: feat · Size: M · Blast: cross-module · Suited: Opus plan → DS exec → Opus review; merges alone after PASS (semi-auto).
-- [ ] **feat/workflow-editor** — RUNNING (slices 0–7c done, Opus review PASS; e2e flow 44 had never run green → fix rounds 1–2 (DeepSeek) each moved it one step, round 3 Sonnet with the simulator in the loop; merges alone after e2e + validation OK); full entry further below.
-- [x] **fix/workflows-ux** (merged 49ca4b2c) (RUNNING, owner decisions 24/11; NOMERGE) — workflows UX fixes; phase 1 S1–S3 PASS; S4→ starts after feat/workflow-editor merges; includes the hub-fan stagger fix. Type: fix · Suited: Opus plan → DS exec → Opus review.
-- [x] **fix/mobile-ask-surfaces** (merged e25a50ed) (RUNNING, owner decisions 24/11; NOMERGE) — S1a–S4 done, S5→S7b running; S1b/S7a/S9 after feat/workflow-editor, S8 after fix/workflows-ux. Type: fix · Suited: Opus plan → DS exec → Opus review.
-- [x] **fix/mobile-open-at-bottom** (merged 209853fe, 2026-11-24) — a session opens scrolled to the bottom on the phone.
-- [x] **fix/tui-expanded-target-row** (merged 7760aa3e, 2026-11-24) — TUI click target on an expanded tool row.
-- [ ] **feat/workflow-run-awareness** (PROMOTED by the owner 2026-11-25 ~11:40 «promuovila già ora» — no eval doc existed; Opus plan running; was eval, owner 2026-11-24 «sì mettilo in TODO») — while a workflow runs the agent is NOT blocked (the driver runs in the background, `workflow-driver.ts`; agent steps share the session's sub-agent cap → `waiting · slot`), but it only learns of a run's END (`[workflow <id> <name>: done · k/n · tok]` note that wakes it, `workflow-driver.ts:1155`) or by calling `workflow status`. Nothing tells it a run is in progress at turn start, and no note arrives when a step fails or waits on the user. Evaluate: (a) a one-line «active runs» status in the context each turn (e.g. `run r12 demo-note: step 4/6 waits for you`), (b) a short note when a step fails / needs approval, (c) cost in tokens per turn and noise; never let the model approve (unchanged). Type: feat · Size: S–M · Blast: load-bearing (agent loop context) · Suited: Opus plan + fresh review.
-- [x] **fix/mobile-connect-latency** (merged d637aa36, 2026-11-24; owner 2026-11-23) — iPhone «connecting» for seconds / «could not re-read this session»: next address on reject + persisted lastGood, `redialNow()` on resume, attach before leave, retry on link(up). Triage: `.tentacle/tmp/connect-latency/REPORT.md`. Type: fix · Size: M · Blast: cross-module · Suited: Opus plan → DS exec → Opus review.
-- [x] **fix/tui-click-dollar-row** (merged da2a0e6e, 2026-11-24; owner 2026-11-23) — the `$` row of a shell tool block (and its continuation rows) now toggles like the header (`packages/tui/src/tool-hit.ts`). Type: fix · Size: S · Blast: contained · Suited: DS/orchestrator.
 - [ ] **eval/prune-real-usage** (owner 2026-11-23 ~15:25) — the 8-run live A/B of smart-compaction (S4) was STOPPED after run 1 (8–10 h of DeepSeek; 2 runs per arm cannot detect a 25 % difference; pruning may not even trigger below 60 % of the window). Instead: (1) one SAFETY run with pruning forced early (profile `deepseek-ab-prune20`, `run-ab-stop-and-safety.sh`): task success + no sentinel in written files + batches happened; (2) in a few days, measure SAVINGS from the owner's REAL sessions (contextPrune ON since 22/11 night, incl. `~/assistant`): batches, tokens pruned, re-reads of pruned paths, sentinel refusals, from the usage logs. Then decide the default. SAFETY RUN RESULT (23/11 17:01, profile prune20, 1 DeepSeek run): pruning fired; DeepSeek tried TWICE to write a `⟪pruned by tentacle…⟫` placeholder into `fs_multi_edit` (R2 stubs of its own earlier writes) — the guard refused both, no file contaminated; the task ended with 3 red tests (n=1, not attributable). ALSO EVALUATE (owner 23/11 ~17:20): for weaker models (DeepSeek, local Qwen) do NOT prune recent WRITE/EDIT payloads (R2), or make the R2 stub less copyable — measure how often the guard fires in real sessions first. Note: one-shot `--` runs save no session, so their token usage is not logged. Type: eval · Suited: Opus.
 - [ ] **eval/endpoint-concurrency** (owner 2026-11-23 ~15:15, NOTE only — «per ora va bene così») — a local single-GPU model server (llama.cpp `--parallel 2 -kvu`, 2 slots sharing one 120k cache) overflows when the main turn + a background sub-agent + a new turn run at once (seen 23/11: «Context size has been exceeded»). Idea: `model.maxConcurrent: N` per endpoint, tentacle queues its own requests instead of overflowing the server (paid APIs unlimited). Verified 23/11: «send now» already aborts the old request (`openai-provider.ts:161-162,223-224,270`) and starts the successor only after the old turn unwinds (`hosted-session.ts:365-375`) — the overlap came from the sub-agent. Type: eval · Suited: Opus.
-- [x] **fix/model-stream-error** (merged 1fa9689c, 2026-11-24; owner 2026-11-23) — show the model server's own in-stream error instead of «stream cut… no stop reason»; the remote «check its config and key» hint only for auth/connection errors. Type: fix · Size: S · Suited: Opus plan.
-- [x] **feat/app-icon-polpetto** (merged f9cb5d59, 2026-11-24; owner 2026-11-23) — iPhone app icon = Polpetto: light (G), iOS 18+ dark (A), tinted, via `app.json` `ios.icon`; device check rides the next iOS build. Type: feat · Size: S · Blast: contained · Suited: DS/Sonnet.
 - [ ] **feat/truncated-tool-call-recovery** (owner 2026-11-23 ~13:35) — on the owner's `~/assistant` serve, Qwen wrote a whole `screen.py` in ONE `fs_write` (21 803 bytes of arguments) and hit the output limit mid-call: tentacle (correctly) did not run the partial call, but the turn just ended «incomplete» and the work stopped. Owner wants AUTOMATIC recovery: when a tool call is cut by the output limit, tentacle continues the turn with an explicit instruction to the model (e.g. «your call was cut at the output limit — write the file in smaller parts: fs_write then fs_edit/append»), bounded (no loop: one or two retries, then stop and say so). First verify what the model receives today after a cut (agent loop), whether the reasoning budget counts against `maxTokens` (32768 in the owner's config; 21.8 KB ≈ 6–7k tokens alone would fit), and llama.cpp's own limit. Related cosmetic bug (not chosen now): `packages/tui/src/model-error.ts:25` appends the remote «check its config and key» hint to ANY error containing «model», including this output-limit cut. Type: feat · Size: S–M · Blast: load-bearing (agent loop) · Suited: Opus plan.
-- [ ] **feat/mobile-reset-in-timeline** (owner 2026-11-23 ~13:15, iPhone screenshot) — today a context reset is a divider («↻ context reset by the model») followed by a big user-style bubble «restart prompt» with the whole prompt, breaking the transcript. Owner: context reset AND compaction become STEPS in the timeline (the step rail, like Thought / tool rows), collapsed to one line; tapping a reset shows its restart prompt as a rendered markdown block (a compaction: its summary, same way). MOBILE ONLY (owner 23/11 ~13:20: the TUI stays as it is). Mockups ≥ 2 variants first. Type: feat · Size: S–M · Blast: contained (app + TUI rendering) · Suited: Opus mockups → DS exec.
-- [x] **feat/mobile-shell-output-scroll** (merged 37e8acf4, 2026-11-24; owner 2026-11-23) — phone shell-step output no longer wraps: one line = one row, horizontal scroll, neutral colour (`exit N` carries the failure). Type: feat · Size: S–M · Blast: contained (app) · Suited: Opus mockups → DS exec.
 - [ ] **eval/lock-own-window** (owner 2026-11-23 ~12:55, parked) — alternative B for the native-sheets lock problem (spike F5a: an RN-Modal lock cannot present while a native formSheet is up, so Face ID showed over live content): present the app lock from the top-most VC or its own `UIWindow` (native), so it wins over ANY presentation. Not taken now (A = drain the sheet stack on lock/inactive). Type: eval · Blast: load-bearing (privacy) · Suited: Opus.
 - [ ] **eval/image-on-demand → feat/image-view** (owner 2026-11-23, verdict GO-with-conditions, answers in `docs/eval/image-on-demand.md` § Owner answers) — slice 1 `feat/image-view` MERGED a8de3bfc and `feat/image-files` MERGED a0921e4b (2026-11-24). STILL OPEN follow-ups: slice 2 (old user images on demand after 2 turns), 3a `region` PNG, 3b `region` JPEG. Type: feat · Size: M per slice · Blast: load-bearing · Suited: Opus exec + fresh review.
 - [ ] **feat/mobile-composer-compact** (QUEUED — owner 24/11 «aspettiamo che scodano»; workflows-ui merged; owner 2026-11-23 ~11:15) — empty composer at rest = ONE row (placeholder «Message tentacle» on the buttons' row); expands to today's two rows only when the text field is tapped. Mockup https://claude.ai/artifact/LMeMREwnkcGAtxYXKTixnv (v2). Owner chose (23/11 ~11:55): **1a B** (no ↑ at rest; the slot returns when it is an action: ■ Stop, ↑ with a draft) · **1b A** (stays open while it holds something: text, attachment, dictation). Type: feat · Size: M · Blast: contained · Suited: Opus mockups → plan → DS exec.
 - [ ] **feat/mobile-hub-center** (QUEUED — owner 24/11 «aspettiamo che scodano»; workflows-ui merged; owner 2026-11-23 ~11:15) — the floating hub (⁘) can also rest at the CENTRE, not only left/right (`floating-button.ts` `Edge`). Mockup https://claude.ai/artifact/LMeMREwnkcGAtxYXKTixnv (v2). Owner rules: the hub FLOATS — nothing behind it moves or reserves space in any position; dragging looks EXACTLY like today (no snap-column guides — the mockup v2 draws dashed columns + a highlighted one while dragging: NOT wanted); the centre is just a third resting place. Owner chose **2 B**: while the transcript scrolls the hub fades to 20 % and ignores taps, back 600 ms after scrolling stops (150 ms fade). Owner (23/11 ~12:05): **remove `footClearance`** (`floating-button.ts:158`: pending bubbles no longer keep `HUB_COLUMN` clear at both edges) and make **`listEndPadding` optional** (`floating-button.ts:172`: a setting — on = today's «list end above a lower-half hub», off = plain 16 pt; default ON, as today, unless the owner says otherwise). Type: feat · Size: S–M · Blast: contained · Suited: Opus mockups → DS exec.
 - [ ] **eval/workflow-script-hash** (owner 2026-11-23 ~10:15) — a workflow's approval hash covers the YAML + its prompt files only (agent-workflows D1 `workflowHash`), so a `run: ./scripts/deploy.sh` step can have its SCRIPT edited after approval and still run unapproved. Options: hash the files a `run` names (which? only repo-relative paths in the command?), refuse `run` of repo scripts unless listed in the YAML (`files:`), or show it in the ask. Type: eval · Size: — · Blast: load-bearing (§7 approval) · Suited: Opus.
-- [x] **fix/workflow-approve-detail** (merged cf014607, 2026-11-24; owner 2026-11-23) — the workflow hash-approval ask no longer cuts its step list (`WORKFLOW_MAX_APPROVE_DETAIL`), so every `run` command is shown verbatim. Type: fix · Size: S · Blast: load-bearing · Suited: Opus plan + review.
-- [x] **feat/workflows-ui** (merged bb67dd2b, 2026-11-24; owner 2026-11-23) — daemon → client data path, TUI rail/panel/`/workflow`, iPhone graph/cards/morph/approve screens. Follow-ups: `fix/workflows-ux`, `feat/workflow-editor`. Type: feat · Size: L · Blast: cross-module · Suited: Opus plan, DeepSeek exec.
-- [x] **feat/mobile-native-sheets** (merged f22321f7, 2026-11-24; owner 2026-11-23) — the app's sheets are native iOS formSheets with 3 detents (workflow node → detail keeps the morph transition). Type: feat · Size: M–L · Blast: cross-module · Suited: Opus plan + mockup check, DeepSeek exec.
-- [x] **fix/protocol-bump-pin** (merged 418db7ea, 2026-11-24; found 23/11 merging agent-workflows) — `bun run protocol:bump` also edits the `version.test.ts` pin; a guard test fails on a hard-coded protocol version outside it. Type: fix · Size: S · Blast: contained · Suited: DeepSeek + Opus review.
 - [ ] **fix/e2e-26-drawer-pro** (found 23/11 02:20 by the e2e-parallel-gate validation) — flow `26-drawer` ALWAYS fails on the iPhone 17 Pro simulator (`session-rename-save` not found), passes on the 17 Pro Max with the same app (where the single-sim baseline runs). Until fixed, the two-sim gate is red whenever that flow lands on the Pro → build launchers stay on the single-sim (Pro Max) form for now; switch them to `scripts/e2e-gate.sh <pro>,<promax>` after this fix. Repro: `scripts/e2e-gate.sh 0FA4B51F-A0E3-421B-BE66-CE29EF45213D --only 26-drawer`. Type: fix · Size: S · Blast: contained (e2e flow) · Suited: Opus (needs the simulator).
-- [x] **fix/mobile-push-tap-open** (merged 459519ea, 2026-11-24 — Design 1+2 only; owner 2026-11-23) — push banner/tap opens the session (foreground + cold). Doc: [docs/fix/mobile-push-tap-open.md](docs/fix/mobile-push-tap-open.md). Type: fix · Size: — · Blast: cross-module · Suited: Sonnet triage.
-  - [ ] **Design 3 — background tap STILL OPEN**: needs the owner's phone `notify` log line after the next iOS build; then decide/fix.
-- [x] **fix/mobile-push-not-registered** (owner 2026-11-22 ~23:45, FIRST tomorrow) — phone notifications do not arrive: the owner's `serve` (~/assistant, 4001) logs `push-dropped empty turn_done with no registered device`; `~/.config/tentacle/devices/push/` empty since 20/11 17:44; the phone connects fine (`device-open a3b1d932`); iOS notifications ENABLED (owner). Opus triage + plan running tonight (`run-triage-push.sh`, branch fix/mobile-push-not-registered, NOMERGE); then on-device check with the owner. ALSO analyse (owner 23:55, «non ho idea»): the same serve logs `[daemon] auth-failure /mcp` 32× on 22/11 (first at log line 13, last 351) — who calls its `/mcp` endpoint with bad auth (a client MCP config elsewhere? the phone? the relay?), and whether it is related. Type: fix · Size: — · Blast: cross-module · Suited: Opus. **MERGED dc1c4b86; device-verified 23/11 10:53 (push-sent, registration kept).** `/mcp` auth-failure question still open.
-- [x] **feat/e2e-parallel-gate** (MERGED 93d51c41, 23/11 02:21; two-sim gate 45 min vs ~80) (owner 2026-11-22 ~23:30, «subito»; RUNNING `run-e2e-parallel-gate.sh`) — the mobile e2e gate (65 flows, ~70 min + Release build) on BOTH simulators in parallel with ONE Release build installed on both and reused across runs of the same app inputs; single-sim form unchanged; same results, ~half the wall time. Opus plan → DeepSeek exec → Opus review → Opus live validation; merge after PASS. Type: feat · Size: M · Blast: cross-module (test infra) · Suited: DeepSeek exec + Opus.
 - [ ] **eval/e2e-affected-flows** (owner 2026-11-22 ~23:30, idea only) — each e2e flow declares which screens/files it covers; a merge runs only the affected flows, the full suite stays before publish (or nightly). Needs the flow → code map first. Type: eval · Size: — · Blast: cross-module · Suited: Opus.
 
-- [x] **fix/tui-shell-row-collapsed** (MERGED 60411a96, 22/11 22:30) (owner 2026-11-22, TUI screenshot; QUEUED — starts after `fix/mobile-transcript-type`'s run, `run-tui-shell-row-collapsed.sh`) — TUI shell rows, variant B (mockup `.tentacle/mockups/shell-row-collapsed/`, https://claude.ai/artifact/KRsZ87nQE3uequRJnb8vVr): collapsed = sentence + `⎿ $ cmd  exit=N` (exit only if ≠ 0, end of the `$` line, command cut, code never cut), NO output even on failure; plain rows `● Bash <cmd>  exit=N 0.4s` title only; ctrl+o = whole command in the `⎿` block (no `│` rows), exit at the end of its last row, output under it. TUI only (phone unchanged). Retires `beta.compactShell` in the TUI (config key stays valid). Type: fix · Size: S–M · Blast: contained · Suited: DeepSeek exec + Opus review, merge on owner OK.
 - [ ] **feat/mobile-artifact-session-trust** (owner 2026-11-22; QUEUED — starts after `feat/agent-workflows`) — part 2 of `feat/mobile-file-view`, split out by the owner: the HTML-artifact scripts confirm gains «Esegui sempre in questa sessione» (trust per session, revocable from the session info sheet; network stays off and per-open; NEVER offered for a pod/container-backed session — if the app cannot tell reliably, it does not offer it, signal proved `file:line`; viewer bar «script attivi · sessione fidata»; dated owner amendment to the Q5 notes of `docs/feat/model-artifacts.md`). Spec: `docs/feat/mobile-file-view.md` §Context "Part 2" (owner decisions 1–6). Type: feat · Size: S–M · Blast: load-bearing (artifact sandbox + pod trust, AGENTS §7) · Suited: plan + exec, fresh-context Opus review red-teaming the pod exclusion.
 
 - [ ] **feat/tool-run-grouping** (owner 2026-11-21, TUI screenshot of a 6-tool run filling the screen) — consecutive tool calls between two model texts collapse into ONE live row: the blinking dot + the action in progress (shell-intent sentence / `Read <file>`), then a summary at the end (`2 comandi · 1 lettura · 2 modifiche note/x.md (+6 −5) · 0.4s`, detail on ctrl+o / click). Agreed guards: edits/writes stay visible as one line each (file + `+N −M`, diff on expand) — a safety check; a failed call (`✗ exit N`) leaves the group and stays fully visible; permission asks unchanged; a model text closes the group. Beta first (like `compactShell`); same grouping on the phone step rail (phone/Mac parity). **Next: animated mockups (≥ 2 variants) built WITH the mockup kit once `feat/mobile-mockup-kit` is ready** (owner: "fai i mockup col kit quando è pronto"). Type: feat · Size: — · Blast: cross-module · Suited: Opus mockups + plan.
@@ -93,7 +60,6 @@ the rest are "value-add" improvements layered on the harness.
 - [ ] **feat/mobile-visual-baseline** (owner 2026-11-21, after BF2): DETERMINISTIC visual regression for the iPhone app — Maestro flows save screenshots (light+dark, fixed mock-model data, fixed clock/status bar), a script compares them pixel-wise (tolerance) with owner-approved baselines committed under `apps/mobile/e2e/baselines/`; only the CHANGED shots go to a model for review. Why: an Opus QA sweep that looks at every screenshot cost ~7.7 $ (176 turns, 104 shots, 23.5M cache-read tokens, 19/11). The full SMOKE PASS moves to the owner's LOCAL Qwen (vision on, free) via `~/bin/tentacle`; Opus only judges the new features. Gate: `scripts/e2e-gate.sh` reds that are not known reds block the build regardless of any model verdict. Type: feat · Size: M · Blast: contained · Suited: Opus plan, DeepSeek exec.
 - [ ] **eval/mobile-file-attachments** (owner 2026-11-20): send PDFs/documents (not only photos) from the phone — today `attachment.ts` accepts `image/*` only. Decide: which providers accept which types (Anthropic PDF yes; qwen local no → text extraction?), size caps, store, pods, the same preview card for sent files. After feat/mobile-file-preview-cards. Type: eval · Size: M · Blast: load-bearing (protocol + provider) · Suited: Opus eval.
 - [ ] **feat/mobile-pdf-ocr** (owner 2026-11-20): attaching a SCANNED PDF from the phone fails — repro (`.tentacle/tmp/pdf-attach-repro/`): 2 pages, 0 chars per page → daemon refuses "no extractable text — it looks scanned; OCR is not supported" (`core/src/pdf-text.ts` `attachedPdfText`, `daemon/src/prompt-documents.ts:143`). Proposal: OCR ON THE PHONE before upload (iOS Vision `VNRecognizeTextRequest` on pages rendered with PDFKit; offline, private — the image never leaves the phone), sent as text with a "testo da scansione" note; honest error when OCR finds nothing too. Check Mac TUI parity (macOS Vision on the laptop for `/attach`). Type: feat · Size: M · Blast: cross-module · Suited: Opus plan.
-- [ ] **feat/mobile-copy-text** (owner 2026-11-20, "una roba piccolissima"): on the phone, copy conversation text. The session menu already has copy-last / copy-all (`SessionScreen.tsx:1751`); add BOTH (owner choice): long-press on a message → light haptic + copy the whole message + "Copied" confirmation, AND selectable message text to copy a part. Logic (what text a row copies) in a pure module; works on Mac and serve sessions alike. Type: feat · Size: S–M · Blast: contained · Suited: DeepSeek exec + simulator check.
 - [ ] **feat/mobile-tool-toggles** (owner 2026-11-20, Q8 of [feat/tool-toggles](docs/feat/tool-toggles.md)) — the phone's half of `/tools`: a "Tools" section in Session info (P1 pattern: an iOS switch per group, `~tokens` per row, `skill` locked), reading `session/tools` and switching with `session/set_capability{kind:"tool"}` — the wire is already built by feat/tool-toggles, so this is UI ONLY. **Mockups first**, in the approved mobile-chrome look (as session-capabilities S5); a daemon without `disabledTools` in its snapshot shows no switch (F8). Type: feat · Size: S–M · Blast: contained (apps/mobile) · Suited: Opus mockups, DeepSeek exec + simulator check.
 - [ ] **eval/container-sessions-mobile** (owner 2026-11-18: "mi piacerebbe poter da mobile controllare una sessione eseguita in un container") — today NO: the phone sees only `serve` sessions; `run --image`/`attach` and session-hop (`/move` into podman/docker) are TUI-only, `serve` has no `--image`. Options to weigh: (A) `serve` runs chosen sessions' WORKSPACE in a container/pod (daemon + model key stay on the Mac via the existing reverse model tunnel, §7 "compute next to the code, identity with the user"), exposed to the phone like any serve session; (B) a phone "Move to container" (session-hop from the phone); (C) detached `run` sessions listed and attachable from the phone through the laptop. Security: pod not trusted, single broker, persistence. Type: eval · Size: — · Blast: load-bearing if built · Suited: Opus eval.
 - [ ] **feat/shell-wait-and-usage** (owner 2026-11-18, docs/eval/deepseek-efficiency.md B1+B2+B5, all approved) — tentacle product guardrails for every user: (B1) `shell_output` gets a blocking `wait_s` so an agent waits on a background job instead of sleep-polling; (B2) the shell tool refuses/caps `sleep` ≥ 30 s with a message pointing at wait_s; (B5) a usage summary at the end of a one-shot run (rounds, prompt/completion/cached tokens, wall time) on stderr — the prerequisite for measuring. Then Q6: re-run 2 small past tasks twice each, target ≤ 60 % of the old tool calls and 0 sleeps, before re-opening parallel DeepSeek. Type: feat · Size: M · Blast: cross-module (tools + agent loop output) · Suited: Opus plan + Opus exec.
@@ -123,7 +89,6 @@ the rest are "value-add" improvements layered on the harness.
 
 - [ ] **eval/repo-schedules** (owner 2026-11-22 ~22:20, idea only — «per ora lasciamo stare, solo una voce in todo») — schedules/cron versioned IN the repo, loaded by a tentacle at start (t0), later extended to workflows. Notes from the chat: a schedule = a workflow trigger (`on: cron …` in `workflows/`, one format/approval/run view; a plain prompt = 1-step workflow); runs only after the owner approves the file's content hash on the laptop (a repo file is untrusted input — never approvable from a pod; an edit/pull suspends it); one owner per project (the `serve` daemon, project lock) so it never fires twice — OWNER CONCERN (why parked): two agents in the same folder (two terminals / contexts) would both load and run the same crons; one new session per run; missed fires skipped + noted; model-made `schedule_create` wakes stay for session reminders. Could shape agent-workflows slice 10 (scheduled start). Type: eval · Size: — · Blast: load-bearing (unattended turns, §7 trust) · Suited: Opus.
 - [ ] **eval/repo-git-triggers** (owner 2026-11-22 ~23:20, idea only) — start a workflow on a repo event (commit / merge / tag on a branch) via a trigger in its YAML (`on: { git: { branch: main, event: commit } }`, the run gets `{{inputs.sha}}`/branch/message). Notes from the chat: the project's `serve` is the single listener (watches `.git/refs` + `packed-refs`, not per-clone git hooks); an event may only START a workflow whose hash the owner already approved (a commit that edits the workflow file suspends it until re-approval); loop guard (ignore the run's own commits + max runs/hour); coalesce bursts (rebase/pull of 20 commits → one run on the last sha); remote events (GitHub push/PR) need a webhook through the relay — later. Shares the single-owner + hash-approval design with eval/repo-schedules; agent-workflows plan already lists «trigger su push git» under «Dopo». Type: eval · Size: — · Blast: load-bearing (unattended runs, §7 trust) · Suited: Opus.
-- [ ] **feat/workflow-editor** (RUNNING 24/11, NOMERGE: plan approved; slices 0–6 done + reviews PASS; 7a→7c running; owner 2026-11-22 ~22:55) — create/edit a workflow on the iPhone graph view. Mockup https://claude.ai/artifact/GKErgFVG5s8Gmf3G7WcAvZ (`.tentacle/mockups/workflow-editor/`): owner chose **A — direct manipulation** in edit/create mode (＋ on each edge, drag the ✗ port onto the target step, tappable `✗ ×2` / `↻ ×1` edge labels). NOTE: this reverses the agent-workflows plan's «Mai: editor visuale drag-and-drop» (eval line ~1014) — update that doc when this task is planned. Owner decided (22/11 ~23:00): a template creates the YAML AND its prompt files (`workflows/prompts/*.md`), all under the approved hash. Open owner Q (rec yes): Save writes the file via serve. Kit gaps to fix first (kit.js:271 permissionSheet options, :316 row/band controls + filled button, :278 toast action, :369 extend wrapper). Type: feat · Size: L · Blast: cross-module (app + serve write path + approval) · Suited: Opus plan.
 - [ ] **eval/tui-workflow-editor** (owner 2026-11-22 ~23:15, idea only — «lascia solo una voce in todo, vedremo poi») — creating/editing workflows from the TUI (today: only YAML, written by the model or by hand; slice 6 gives run/view/approve). Options noted: a guided `/workflow new` (questions step by step) or a panel showing the graph with a per-step edit sheet like the iPhone. Mockups before any decision. Type: eval · Size: — · Blast: contained · Suited: Opus mockups.
 - [ ] **feat/tui-mascot-anim** (PASS 21/11 21:37, ON HOLD by the owner) — animated Polpetto in the TUI header; Polpetto is hidden in the TUI (`fix/tui-mascot-hidden`) until the owner decides the Apple Terminal half-block issue. Branch kept, no worktree.
 - [ ] **feat/tui-detach** (plan, owner rounds 1–3 answered, H0 probes done; not started) — `/detach` returns the shell prompt like `/quit`, the TUI process goes headless. Doc on the branch.
@@ -137,51 +102,6 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
 
 ### Block 1 — core execution (agent loop, provider/SSE, exec, result-pipeline)
 
-- [x] 🔴 **Turn stalls silently after a tool call (needed a manual "go on").**
-      FIXED (2026-10-14): a model that returns an *empty* round (no text, no tool
-      calls) after a tool result would end the turn with nothing shown, forcing
-      the user to type "vai avanti" to resume. `runMessages` now auto-nudges a
-      stalled model to continue (internal user nudge `"Continue with the task."`,
-      not surfaced as a `steer` event), bounded by `MAX_EMPTY_CONTINUES = 2` so a
-      persistently-empty model still ends the turn instead of looping. Tests in
-      `agent/test/agent.test.ts` (empty round → resumes; always-empty → bounded).
-- [x] 🟡 **Auto-accept mode not discoverable in the TUI.** FIXED (2026-10-14):
-      the status bar now *always* shows the mode — `⏵⏵ auto-accept off (shift+tab)`
-      when off (advertising the keybind) and `⏵⏵ auto-accept on` when on — instead
-      of appearing only when enabled. The indicator yields space (flexShrink)
-      before the model name so a narrow line truncates the hint, not the model id.
-      Tests in `tui/test/components.test.tsx` + updated `auto-approve.test.tsx`.
-- [x] 🔴 **Mid-stream cancel surfaces as a *failed* turn, not a clean cancel.**
-      FIXED (2026-10-14): `runMessages` now wraps the `model.stream` loop; on an
-      `AbortError` with `signal.aborted` it yields `{turn_end, "cancelled"}` and
-      returns (any other error still propagates). Tests added in
-      `agent/test/agent.test.ts` (mid-stream abort → cancelled; non-abort error
-      still throws). Also cleans up sub-agent cancellation (child abort now ends
-      cleanly instead of becoming an `isError` task result). 353 tests green.
-- [x] 🔵 **Shell inherits the full `process.env`** — FIXED (2026-10-17):
-      both `Bun.spawn` sites (`host-execution.ts`) now hand the child
-      `childEnv(options)` = `scrubSensitiveEnv(process.env)` with the caller's
-      explicit `options.env` overlaid unscrubbed (opt-in, same policy as the MCP
-      stdio transport). Red-first tests in `exec/test/host-execution.test.ts`
-      (leak absent + `PATH` present, `exec` and `spawnBackground`; explicit
-      overlay honoured). **Fix:** `docs/fix/shell-env-scrub.md`.
-- [x] 🔵 **Shared env denylist misses this repo's own pod-TLS vars** — FIXED
-      (2026-10-17): `SENSITIVE_KEY` (`core/src/env.ts:11-12`) gains a
-      `TLS[_-]?(KEY|CERT|CA)` fragment, so `TENTACLE_POD_TLS_KEY` / `_CERT` /
-      `_CA` are scrubbed from the shell + MCP children (the two `scrubSensitiveEnv`
-      sites); `TENTACLE_POD_TLS_INSECURE` stays (a flag, not a secret) and the
-      delete child is untouched (it never scrubs — it builds its TLS env
-      explicitly, `k8s/src/pod-cleanup.ts:173-186`). Red-first + mutation-checked
-      tests in `core/test/env.test.ts`. **Fix:** `docs/fix/pod-tls-env-scrub.md`
-      (promoted from the eval on the owner's OK).
-- [x] 🔵 **Flaky GC test** — DONE, merged 5d1ef0e (2026-11-06; reproduced 4/50; deterministic `openSessionIds` assertion, red without `dropStale()`, 50/50):
-      `daemon/test/session-reaper.test.ts` "a connection forgets a session
-      another client closed" fails ~1 in 8 full-suite runs. Root cause
-      (2026-10-20, heap snapshot): a conservative-GC stack root delays the
-      collection its `WeakRef` + 5 × `Bun.gc(true)` assertion demands; the
-      production code is correct (the session is unreachable). Plan ready:
-      **Eval:** `docs/fix/reaper-gc-flaky-test.md` (getter + deterministic
-      assertion).
 - [ ] 🔵 **Timing flake, not investigated:** `tui/test/queue.test.tsx` "a task
       typed while running is shown queued…" — a spinner-glyph regex timed out
       under full-suite load once (2026-10-23, task 4b's baseline on an
@@ -233,26 +153,6 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
 
 ### Block 2 — tools (fs_*, shell, background, task/subagent)
 
-- [x] 🟡 **Sub-agent "stopped without a report".** FIXED (2026-10-14): a child
-      that spent its whole budget calling tools hit `max_iterations` and the loop
-      ended with no final text, so `subagent.run` returned an empty `report`
-      (the TUI showed "si è fermata senza report"). `runMessages` now, on hitting
-      the step limit, does ONE final **tools-less** turn (a nudge to answer in
-      prose) so a report is produced — benefits top-level turns too. Belt-and-
-      suspenders: `createSubagentRunner` never returns an empty report (explains
-      the stop instead). Tests in `agent/test/agent.test.ts` +
-      `agent/test/subagent.test.ts`.
-      Follow-up (2026-10-14): the sub-agent step limit is now its own config
-      knob — `subagents.maxIterations` (env `TENTACLE_SUBAGENT_MAX_ITERATIONS`),
-      default 50, **`-1` = unlimited** (the agent loop treats a negative limit as
-      ∞). Wired in config (schema/resolve/load) + `wiring.ts`; tests in
-      `config/test/resolve.test.ts` + `agent/test/agent.test.ts`.
-
-- [x] 🟡 **`fs_edit` / `fs_multi_edit` corrupt replacements containing `$`
-      patterns.** FIXED (2026-10-14): `applyOneEdit` single-match path now uses a
-      function replacer `content.replace(old_string, () => edit.new_string)`, so
-      `$&`/`$$`/`` $` ``/`$'` go in literally. Test added in
-      `tools/test/builtins.test.ts`. 354 tests green.
 - [ ] 🔵 **`explore` (read-only) sub-agent still writes spill files** to
       `.tentacle/tool-output/` via the result pipeline (`subagent.ts` passes
       `resultTransforms`), contradicting "cannot modify anything".
@@ -264,11 +164,6 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
 
 ### Block 3 — permissions & agent support (gate, shell-prefix, compact, agent-defs)
 
-- [x] 🟡 **Auto-approve bypass: `&` is not a command separator.** FIXED
-      (2026-10-14): `splitSimpleCommands` now splits on single `&` too
-      (`&&|&|\|\||\||;|\n`, `&&` alternated first), so `approvedcmd & rm -rf ~`
-      is two simple commands and the trailing one is no longer auto-approved.
-      Tests added in `agent/test/shell-prefix.test.ts`. 356 tests green.
 - [ ] 🔵 Empty-prefix shell approval is dead/misleading: when `suggestShellPrefix`
       returns `""` (command is only `VAR=val`, bare `sudo`, or empty),
       `PermissionGate.remember` falls through to `grantedTools.add("shell")`, but
@@ -322,18 +217,6 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       the (now real) TUI error line, then diagnose. Still TODO: the same
       generic-conversion gap on `ws-server.ts:182` is intentionally left (remote
       = untrusted); a server-side error log there is a possible follow-up.
-- [x] 🟡 **Mid-turn "Queue a task…" (steering) silently no-ops on the worker
-      and pod paths (pre-existing gap, surfaced 2026-10-16).** FIXED
-      (2026-10-19, `fix/steering-over-rpc`): added a `session/enqueue` request
-      (client → daemon → `Session.enqueue`) and streamed the agent's `steer`
-      event back over `session/update` (new `steer` update variant), so the
-      optimistic ⏳ row reconciles. The TUI now reconciles the ⏳ row on an
-      enqueue REJECT (MethodNotFound from an older remote daemon / transport
-      drop) instead of masking a send that never happened. Additive protocol
-      (version stays 1). Tests in protocol/daemon/client/cli/tui (steering
-      order, in-flight concurrency, reject propagation, ⏳ reconciliation —
-      each mutation-checked for non-vacuity). **Fix:**
-      `docs/fix/steering-over-rpc.md`.
 - [ ] 🟢 **Steering follow-ups (from `fix/steering-over-rpc` Review 2).**
       (a) The TUI removes ⏳ rows by COUNT, so a late `NoTurnRunning` reject
       (one round-trip after `turn_end`) can remove a row belonging to the
@@ -344,38 +227,6 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       Esc while the first `send` is still opening the session does not cancel
       the turn (`client/remote-session.ts`, the abort listener is attached
       after `openSession`).
-- [x] 🟡 **Loopback daemon accepts cross-origin browser WebSockets (CSRF /
-      DNS-rebinding).** FIXED (2026-10-14): extracted `originAllowed(origin,
-      allowed)` (pure, exported) and wired it into `authorize` — it now
-      default-denies *any* `Origin` header unless allow-listed, even on loopback
-      with no token. Browsers always send `Origin`; the native CLI client sends
-      none (verified in `client/src/ws-channel.ts`: only sets `Authorization`),
-      so native connections still work. Tests in `daemon/test/ws-server.test.ts`:
-      unit on `originAllowed` + integration (cross-origin upgrade → 401 before
-      the socket; headerless → 426). 364 tests green.
-- [x] 🔵 The daemon's `RpcPeer` sets no `requestTimeoutMs`, so a client that
-      never answers `session/request_permission` blocks that turn forever
-      (resource hold). FIXED (2026-10-14): `Connection` now takes a
-      `permissionTimeoutMs` (default 5 min, from `ws-server.ts`) wired to the
-      daemon peer's `requestTimeoutMs` (the only outbound daemon→client request
-      is the permission ask). `requestPermission` `.catch()`es any failure
-      (timeout/closed/malformed) → `{outcome:"cancelled"}` → `allowed:false`, so
-      the tool is denied and the turn still ends. Test in `integration.test.ts`.
-      SUPERSEDED (2026-10-20, `feat/permission-events`): permissions are stream
-      events answered by any client with no timeout; the turn suspends (a cancel
-      or close settles it) and a dead socket is never a deny.
-- [x] 🔵 No cap on sessions-per-connection, and `RpcPeer.receive` does
-      `JSON.parse` on arbitrary-size frames — auth-gated DoS surface. FIXED
-      (2026-10-14): `RpcPeer` gained `maxFrameBytes` (rejects an oversized frame
-      with an InvalidRequest "frame too large" *before* parsing); `Connection`
-      gained `maxSessions` (`session/new` past it → `TooManySessions`). Defaults
-      in `ws-server.ts`: 8 MiB / 64 sessions, both overridable. Tests in
-      `transport/test/peer.test.ts` + `daemon/test/integration.test.ts`.
-- [x] 🔵 `Connection.initialize` can be re-invoked repeatedly (harmless but
-      should be idempotent/guarded). FIXED (2026-10-14): a second `initialize`
-      now throws `AlreadyInitialized`. Test in `integration.test.ts`. (The
-      `tokensMatch` length-timing leak is left as-is — standard tradeoff, noted
-      acceptable.) 368 tests green.
 
 ### Block 5 — config (resolve/load/schema)
 
@@ -393,19 +244,6 @@ clear, `.strict()` schema is deliberate. Minor notes only:
 Reducer (`state.ts`), scroll math, mouse parsing, selection: clean and well-tested.
 Findings are in the App glue and terminal lifecycle:
 
-- [x] 🟡 **Turn-starting / session-mutating slash commands aren't guarded while
-      running.** FIXED (2026-10-14): `commands.ts` `isSessionMutating` flags
-      `/retry`+`/clear`; `App.handleCommand` rejects them with a notice while a
-      turn runs (no concurrent `session.send`, no clobbered `abortRef`). Pure +
-      ink tests (`commands.test.ts`, `app.test.tsx`).
-- [x] 🔵 **Bracketed-paste can freeze input.** FIXED (2026-10-14): `stepPaste`
-      gained a size cap (flush+reset on overflow) and `App` arms a 250ms recovery
-      timer that flushes the capture if `[201~` never arrives. Tests in
-      `paste.test.ts` + `app.test.tsx`.
-- [x] 🔵 **External SIGINT/SIGTERM leaves the terminal broken.** FIXED
-      (2026-10-14): extracted `terminal.ts` `installTerminalRestore` (injectable);
-      `run.tsx` now restores on `exit` AND SIGINT/SIGTERM (then re-exits 128+sig).
-      Tests in `terminal.test.ts`.
 - [ ] 🔵 Live background-exit and `pushNotice` force `setScrollOffset(0)` (jump to
       tail) even when the user is scrolled up reading history — yanks them down.
 - [ ] 🔵 `queued` (steering) list is unbounded: queueing many tasks grows the
@@ -428,34 +266,6 @@ Findings are in the App glue and terminal lifecycle:
       in a local TUI session — **not** k8s/pod related.)
 
 Daily-driver work (done 2026-10-14):
-- [x] **App.tsx decomposition (partial).** Extracted cohesive, unit-tested units
-      out of the 908-line god component: `useLineEditor` (+pure `editor.ts`),
-      `usePermissionBroker` (+`permission-ui.ts`), `usePaintScheduler`, and the
-      paste-recovery helpers. Remaining (deliberate, own pass): the mode-based
-      input router + the mouse-stream state machine (tightly coupled to layout).
-- [x] **Multi-line prompt + newline-preserving paste.** Pastes keep their
-      newlines (was flattened to spaces — a daily papercut for code); the input
-      box renders multi-line, windowed around the cursor (`input-view.ts`,
-      capped at 10 rows); `\`+Enter inserts a newline, Enter submits. Tests in
-      `input-view.test.ts`, `app.test.tsx`.
-- [x] **Session persistence + `--resume`.** Sessions save as JSON under
-      `<configDir>/sessions/<uid>.json` after every turn/compaction
-      (`JsonSessionStore`, `Session.onPersist`); `tentacle --resume [uid]`
-      reopens one (latest if no uid) and restores its transcript
-      (`messagesToItems`). Tests in `session-store.test.ts`, `session.test.ts`,
-      `resume.test.ts`.
-
-- [x] 🟡 **TUI: a tab breaks the diff bars and long tool rows** — DONE 2026-10-25, merged `096069a`
-      ([`docs/fix/tui-diff-tabs.md`](docs/fix/tui-diff-tabs.md); owner,
-      2026-10-25, screenshots) — `renderBar` (`render-lines.ts`) counts a tab
-      as 1 cell (and every char by `.length`), Ink passes the `\t` through,
-      and the terminal expands it to the next 8-column stop: the full-width
-      bar overflows, the terminal wraps it, and a stray stripe of background
-      appears under each tabbed line. Read/Bash output rows pass tabs through
-      too. Fix: a tab shows as 4 spaces (as in the prompt input), bar width in
-      display cells; and diff colours like Claude Code (darker saturated
-      background, plain text colour, bright line numbers). Type: fix · Size: S
-      · Blast: contained · Suited: Sonnet executes, Opus reviews.
 
 - [ ] 🔵 **TUI: mouse copy turns tabs into 4 spaces** (owner decision in
       the `fix/tui-diff-tabs` Review, 2026-10-25) — the selection copies the
@@ -465,20 +275,6 @@ Daily-driver work (done 2026-10-14):
       store and `/save` are unchanged. Owner: keep "copy what you see" for
       now; a faithful copy needs the source text kept next to each rendered
       row. S–M · contained.
-
-- [x] 🟡 **TUI: Ctrl+O expand takes ~0.5 s on a big session** — DONE 2026-10-25, merged `a2d8126`
-      ([`docs/fix/tui-expand-latency.md`](docs/fix/tui-expand-latency.md); owner, 2026-10-25) —
-      measured on a real 630 KB session (189 tool items, 8048 expanded
-      lines, width 150): layout expand 210-245 ms every time, collapse ~40 ms.
-      Cause: `wrapLines` (`render-lines.ts`) runs `wrap-ansi` on every line
-      (~209 ms) though 97 % already fit the width (`string-width` over all
-      lines: 20 ms); and `rowCache` keeps ONE layout per item, so every
-      toggle re-lays-out all tool items. Plan (owner OK): fast path for lines
-      that fit (proved output-identical), two cache slots per item (collapsed
-      + expanded). Expected: first expand ~30-60 ms, later toggles ~0. Starts
-      after `fix/tui-diff-tabs` merges. Repro: `.tentacle/tmp/ctrlo-latency/`.
-      Type: fix · Size: S · Blast: contained · Suited: Sonnet executes, Opus
-      reviews.
 
 - [ ] 🔵 **TUI: one helper for time-budgeted background work** (owner,
       2026-10-25) — in progress: `feat/tui-run-chunked`
@@ -540,165 +336,49 @@ Daily-driver work (done 2026-10-14):
       `feat/fs-path-locks` (S, DONE `bfffdb4`) · 2 `feat/subagent-progress-wire` (M, DONE `ada7918`) · 3
       `feat/model-retry-429` (S, DONE `bb43767`) · 4 `feat/permission-call-attribution` DONE `206adbf` → 5 `feat/round-groups-persistence` DONE `1ee6123` (merged with permission-reply, shared record v8; owner 2026-11-04: phase-1 "Interrupted" accepted; `beforeRun` → `Promise<boolean>`, `true` for never-persisted sessions; task 6 adds the one-at-a-time fallback on a failed write AND the laptop `cutHistory` option (b): "Interrupted" for calls the laptop saw a `tool_start` for, "Not run" for the rest) → 6 → 7 (load-bearing, strictly
       ordered).
-- [x] **fix/resumed-call-pending** — done (04f8f14, 2026-11-04): a resumed call allowed without an ask clears its pending entry (awaited) before it runs (task-5 F3). [doc](docs/fix/resumed-call-pending.md)
-- [x] **fix: `attach` on a container whose pod binary is older than the laptop's** — **DONE 2026-11-05 as `fix/stale-pod-binary`, merged `119dfc2`** (build id in the version marker; reuse only on an equal build id; 4 rounds + final pass; owner live test OK). fails with a bare `connection closed` (old binary: `unknown option --bridge`, found live 2026-11-04). Must say clearly that the pod binary is stale (and how to fix), or re-copy it. Type: fix · Size: S · Blast: cross-module.
-- [x] **feat/run-prompt** — done (b29a56e, 2026-11-04): last word of `run` = first prompt, `--name`, quieter run/attach output, `daemon.log`, mount messages, podman progress in place. [doc](docs/feat/run-prompt.md)
-- [x] **fix/attach-any-folder** — done (604533f, 2026-11-04): attach from any folder uses the run's recorded folder; no blank line before `[error]`. [doc](docs/fix/attach-any-folder.md)
-- [x] **fix/model-connect-timeout** — done (828ef5b, 2026-11-04): a model endpoint that never answers the TCP connect fails in 15 s, pod runs show the full message. [doc](docs/fix/model-connect-timeout.md)
-- [x] **fix/attach-plain-resume** — done (8ba5f1f, 2026-11-04): attach to a plain kept run reopens its session with full history; the kept index records session uid + laptop folder; attach never refuses for a vanished folder. [doc](docs/fix/attach-plain-resume.md)
 - [ ] **fix: engine architecture mismatch** (found live 2026-11-04): an amd64 image on arm64 podman runs the x64 binary under qemu → Bun MemoryExhaustion. Pull/create for the native platform, and refuse a mismatch before copying the binary. Type: fix · Size: S–M · Blast: cross-module.
 - [ ] **feat/run-oneshot** (owner 2026-11-04, separate from run-prompt): one-shot streaming run in a container, non-TTY stdin (`--prompt -` without `--detach`). Type: feat · Size: M · Blast: cross-module.
-- [x] **fix: `attach` to a multi-container pod without `--container`** — done (efe0a1c, 2026-11-04): names the containers (default-container annotation honoured silently); not-found in one line, no log dir.
-- [x] **fix/ps-k8s-where** — done (b55c102, 2026-11-04): k8s WHERE `<cluster>/<namespace>`; not-reachable note on stderr.
-- [x] **fix/cli-output-streams** — done (bd2e5a3, 2026-11-05): stdout = data only, everything else stderr; D1–D7; one-shot `(tokens …)` line removed. [doc](docs/fix/cli-output-streams.md)
-- [x] **fix/tool-output-location** — DONE, merged 3967475 (2026-11-06; orchestrator under the owner's one-night delegation; 3 rounds, 2 fresh Opus reviews; live: `--no-mount` pod with cwd `/` saves to `/root/.cache/tentacle/tool-output/…` and reads it back, laptop single task saves to `~/.cache/tentacle/tool-output/…`, nothing in the project; also folds task-7 NIT 5) (owner 2026-11-05): large tool outputs leave the project (`.tentacle/tool-output/`, `agent.ts:1739`). The daemon picks ONE dir at start: `$XDG_CACHE_HOME` or `~/.cache` → `…/tentacle/tool-output/<project-key>/<session>/<tool>-<id>.txt` if writable, else `os.tmpdir()/tentacle-<uid>/tool-output/…` (containers with an unwritable HOME, e.g. OpenShift random UID). Files 0600. Deleted with the session; files older than `tools.outputRetentionDays` (default 30) removed silently at daemon start; a missing file reads as "no longer available". Old `.tentacle/tool-output/` files are NOT touched (CHANGELOG line). Compare: Claude Code `~/.claude/projects/<p>/<s>/tool-results/`, opencode `~/.local/share/opencode/tool-output/` (7 days), pi `os.tmpdir()`. Type: fix · Size: S–M · Blast: cross-module.
-- [x] **feat/tui-light-theme** — DONE, merged 9e1cfc3 (2026-11-06; executed by DeepSeek, 3 Opus review rounds, owner: Q-A `#6b6b6b`, Q-B notice `#2f4ba8`, Q-D 7-bit replies only; 7 slices, red-first + a mutation per behaviour): the TUI decides its palette once, before Ink mounts, from the terminal's background (`OSC 11` + DA1 sentinel, 200 ms cap, then `COLORFGBG`, else dark), and paints a light or dark one from ONE token table (`theme.ts` `tokens`/`buildTheme`/`palette()`/`dimProps()`). Every colour has a light value gated at 4.5:1 (3:1 borders) on white, on Solarized Light and after chalk's real 256 downgrade, with two named exceptions (accent, notice); dark is byte-for-byte unchanged (golden SGR test). A timed-out probe stays raw and arms a late-reply guard on Ink's stdin. Override `tui.theme: auto|dark|light` (file or profile); `connect` reads it from the file alone and warns instead of refusing. Laptop-only — never carried. Doc `docs/feat/tui-light-theme.md`. Type: feat · Size: L · Blast: load-bearing.
 - [ ] **tui-light-theme-followups** (LOW, from its review round 3): (1) the timeout hand-over of a cut UTF-8 character (`carry`) has no repo test — a reviewer mutation survived; (2) after a seeded residue, hex keys typed first are dropped; (3) not live-checked: a terminal that never answers the OSC-11 query (mute), and `connect --resume` against a real `serve`. Type: fix · Size: S · Blast: contained.
-- [x] **feat/config-carry** — DONE, merged 90e8fef (2026-11-06): laptop settings carried in `session/open.settings` (protocol v16), `subagents.*` keys, one-line `Session settings` / `Container config` notices. Doc `docs/feat/config-carry.md`.
-- [x] **fix/detached-autowake** — DONE, merged afe15b5 (2026-11-06; orchestrator under the owner's one-night delegation; live: wake → `woke: WAKE-DONE`, `TENTACLE_AUTO_WAKE=0` → no wake, `ps` `up · idle`, `rm` "its detached run has ended"). Doc `docs/fix/detached-autowake.md`. (owner 2026-11-05): a `run --detach` with NO TUI attached never auto-wakes: the relay (`packages/cli/src/relay.ts`) does not handle `background_exit`, only the TUI starts the continuation turn (`App.tsx:658-664`, `autoWake` read laptop-side `main.ts:834`). Live repro 2026-11-05 (`.tentacle/tmp/autowake-detach/check.sh`, docker + local Qwen): background `sleep 20; echo WAKE-DONE`, after 80 s the record still ends at `started`, `ps` = `detached · idle`. Fix: the relay honours the laptop's `autoWake` when no TUI is attached (continuation turn on a job exit while idle; coalesce; no double wake when a TUI attaches). Also check, same repro: ~15 s later `ps` flipped `detached · idle` → `running · idle` and `rm` asked `-f` ("a session may be attached") with nobody attached. After feat/config-carry. Type: fix · Size: S–M · Blast: cross-module.
 - [ ] **fix/detached-autowake-followups** (LOW, from its two reviews, `docs/fix/detached-autowake.md`; R2-1..R2-3 moot: the wake cap was removed by fix/autowake-unbounded, merged e0a5798, owner 2026-11-06 "illimitato"): F6 a refused-wake streak keeps the relay alive (no model calls; accepted); F7 weak bounds `relay.test.ts:2530`, no mutation on R-W4; F8 `handedWakeRef` decision in `App.tsx:1221-1225` and the refusal predicate `relay.ts:403` → pure module. Live oddity: after the woken turn `ps`/log said `running 1 background job(s)` ~10 s with the job already exited. Type: fix · Size: S · Blast: cross-module.
-- [x] **feat/serve-autowake** — DONE, merged c234d52 (2026-11-07), doc `docs/feat/serve-autowake.md`: a `serve` daemon wakes its own session when a background job ends, attached clients or not (owner B: on `serve` the daemon is the only waker); laptop `autoWake` switch, a `failed` run never wakes, cut before the wake prompt (no second turn on a mid-wake attach). Live: connect attached → one daemon wake shown live; `TENTACLE_AUTO_WAKE=0` → no wake.
 - [ ] **serve-autowake-followups** (LOW, from its reviews + live check): (1) `connect` shows no `n background job(s) ended while you were away` notice on attach (live check 2026-11-07); (2) D6 not pinned with a client attached — no test for Esc/error then another exit while attached (move repro cases A, G into the daemon test); (3) the `connect.test.ts` no-second-waker pin misses a conditional seed (`unflushedExits() > 0 ? { wakePending: true } : {}` stays green; `capturingDial` reports none); (4) docs promise more than `connect` does; (5) stale "nobody attached" wording (`serve.ts:199`, `session-host.ts:182`, daemon test header/describe `:205`, CLI test header, doc title) and `SLOT_LOST_NOTICE` ("another device started a turn") wrong when the daemon's wake took the slot; (6) the tool-bound test is vacuous for the guard; (7) a wake that fails before its flush leaves the exit counted with no notice; (8) Esc pauses daemon wakes until a turn ends normally. Type: fix · Size: S · Blast: cross-module.
-- [x] **fix/run-session-never-saved** — MERGED 2026-11-07 (884296f), doc `docs/fix/run-session-never-saved.md`: a long `run` turn was saved on the laptop only when the turn ended, so a pod lost mid-turn (`docker stop`, OOM) lost the whole conversation; now saved after every committed round (`tool_result`), coalesced, the mid-turn copy closed with `cutHistory`; also the `createdAt` re-stamp (`updatedAt == createdAt`). Type: fix · Size: M · Blast: load-bearing · Suited: strong model + fresh-context Review.
 - [ ] **run-session-never-saved-stuck-readback** (LOW, owner Q4 2026-11-07, `docs/fix/run-session-never-saved.md` Context "Side finding"): a read-back lost on a link that keeps carrying the pod's `model/stream` traffic delays every later save until liveness (15 s of inbound quiet) replaces the link — saves are delayed, not lost. Separate fix; needs a lost frame on an otherwise healthy stream. Type: fix · Size: S–M · Blast: load-bearing (persistence/liveness).
 - [ ] **tui-busy-after-docker-stop** (LOW, owner R3 2026-11-07, `docs/fix/run-session-never-saved.md` Review "Optional repro"): on 65a0f07 the in-process repro (`repro-h6.ts kill`) shows the turn never ends (`busy=true` > 20 s) after the pod link is gone; A/B with the fix disabled is the same, so not caused by that diff; may be a repro artifact. **Confirm on clean `main` first** (one run), then a separate fix/eval. A TUI stuck "busy" after `docker stop` would be user-visible.
-- [x] **feat/session-log** — MERGED 2026-11-07 (47e193f; review PASS round 3, OCP cluster run passed, live checklist: no regression) (Type: feat · Size: L · Blast: load-bearing · Suited: Opus exec + fresh Opus review) — [`docs/feat/session-log.md`](docs/feat/session-log.md); executed 2026-11-07 (protocol 17, turn markers in, Q5), awaiting the fresh-context review + the real-cluster run. Decided in `docs/eval/session-persistence-format.md` ("Owner decisions"): the laptop↔daemon read-back becomes a typed event log (`session/log {after}`, `type` on every entry), with the review's F1–F5 as binding requirements. Replaces the full `snapshot` read-back per round (500k tokens: 1.96 MB → 2.6 KB per save). May subsume `run-session-never-saved-stuck-readback`.
-- [x] **feat/session-log-laptop-store** (L · load-bearing; merged 2026-11-08 3031822, review PASS R2, live PASS: [doc](docs/feat/session-log-laptop-store.md); owner: no legacy JSON, `--in-process` writes the same `.jsonl`) — after `feat/session-log`: the laptop session file becomes the log (`<uid>.jsonl`), lazy conversion of JSON records, optional keep of pre-compaction / pre-reset history (config, default false), §7 persistence wording. **Constraint from `feat/session-log` review L2:** the `entries` a read returns are the KNOWN subset (unknown non-critical ones are dropped), so a kept entry's `prev` may name a dropped one — the loader must NOT re-verify `prev` adjacency on a file it wrote, or the writer must re-link `prev` over the dropped ones (decide there).
-- [x] **feat/session-log-serve-store** (Type: feat · Size: L · Blast: load-bearing; merged 2026-11-08 79ccf1b, review PASS R2, live 6/6 PASS) — [`docs/feat/session-log-serve-store.md`](docs/feat/session-log-serve-store.md); executed 2026-11-08, awaiting the fresh-context review + the live `serve`/`connect` run: the `serve` store is the log (`<uid>.jsonl`) + a state sidecar (`<uid>.state.json`, `DAEMON_STATE_VERSION` 1), lineage continues across reloads; `JsonSessionStore` and the v1–v8 record ladder deleted.
-  - Follow-ups (LOW, from its review/live): FM 22 row wording narrower (a current-version log with a corrupt body and no state is set aside, as decided); `SessionPersister.forget` swallows a failed op (segment stays in memory until restart); `explain sessions` still says "the laptop's session logs" (now laptop + serve, `packages/config/src/key-docs.ts`); the TUI still prints "not saved — could not read the history back" at a `docker stop` although finished rounds are on disk.
 - [ ] **remove-in-process** (owner 2026-11-07) — remove `--in-process` / `--no-worker` and the automatic fallback to the in-process path when the worker fails (`packages/cli/src/main.ts:1636-1674`): it is the only second session path (AGENTS §7 "TUI always over RPC") and every persistence/steering/hooks change has to be handled twice. A worker that fails to start → a clear error. After `feat/session-log-laptop-store`.
 - [ ] **pod-turn-auto-continue** (owner 2026-11-07, live test of `feat/session-log`) — when a pod daemon dies mid-turn and the laptop recreates the session (reseed), the interrupted turn is NOT resumed: the agent waits for the user. Owner wants an automatic "continue" after the recreate — OPT-IN setting, default OFF, never under manual tool approval unless explicitly enabled (owner 2026-11-07), like the `serve` daemon does for suspended turns (`docs/feat/suspended-turn-resume.md`). Separate task, after `feat/session-log`; size/blast to be planned. Related: the silent turn end after a daemon kill (investigation `.tentacle/tmp/silent-turn-end/findings.md`) — the TUI must at least SAY the turn was interrupted.
 - [ ] **fix/silent-turn-end** (S–M · cross-module · no protocol/format; owner 2026-11-07) — NOT a regression of `feat/session-log` (same on main): when a pod daemon dies mid-turn the client fails the turn and the TUI adds a ⚠ row, but the recreate's `history` activity (`client/src/remote-session.ts:1123`, applied in `drainHeld`, `tui/src/App.tsx:1427`) REPLACES the transcript and wipes that display-only row → the TUI goes silently idle. Fix in a pure module (keep/re-add the notice after the restored transcript). Owner-approved text: `⚠ Daemon lost: turn interrupted. Type to continue.` (no `RpcError:` prefix). Findings + in-process repro: `.tentacle/tmp/silent-turn-end/findings.md` (copy into the task doc).
 - [ ] **recreate-interrupted-marker** (LOW, owner 2026-11-07) — verify first: after a pod recreate mid-TOOL, is the cut call closed for the MODEL with an explanation (like `serve`'s "interrupted: the daemon restarted during this turn", `daemon/src/persisted-session.ts:516-556`)? Only matters when a tool was killed mid-execution (half-done side effects); if missing, a small load-bearing fix.
-- [x] **fix/engine-runtime-stderr-flake** — DONE, merged 514219f (reproduced 1/50; the backoff redial could come back `up` before dispose; the test now makes the redial fail for good and waits for `stopped`; 1700/1700). (2026-11-06): `packages/cli/test/engine-runtime.test.ts` "startPodRuntime > daemon stderr on exit > attach: a dropped link: one line with the log path" failed once in the full `bun test packages` (6.5 ms) on the run-rm-flag build, then 3/3 green alone — a timing flake under load, like the reaper GC one. Find the race (wait on the event, not a tick). Type: fix · Size: S · Blast: contained.
 - [ ] **feat/session-settings-apply-followups** (LOW, round-2 review): R2-1 no test that re-served snapshot pages do not count as attach progress (mutation `attachMark = 0` stays green; code right by reading); R2-2 a hostile pod can stretch an attach to ~83 h with fabricated pages (finite, `SNAPSHOT_MAX_PAGES`); a failed sync after a session switch is told nowhere. Owner note: likely drop the W rule (container wins) for run/attach — then `// (container)` goes too; decide with project-config eval Q5–Q11. Type: fix · Size: S · Blast: cross-module.
-- [x] **feat/write-tmpdir** — DONE, merged d46c029 (2026-11-07), doc `docs/feat/write-tmpdir.md`: `fs_write`/`fs_edit`/`fs_multi_edit` may write to `$TMPDIR` and `/tmp` by default (`tools.writableDirs`, env `TENTACLE_WRITABLE_DIRS`, a list replaces the default, `[]` = project only; not carried to a pod). Also hardened in the project: dangling/looping symlinks refused, atomic temp+rename writes (0600 temp, mode kept, hard links broken like an editor's save), `EACCES` parity with main, in-place fallback (no symlink, no hard link) for an existing file in a non-writable dir. Owner: no directory owner/mode rule. Live: /tmp asks+writes, symlink out refused, 0775 dir ok, hard link written, env empty → /tmp refused, container /tmp writable, `--rm` removed.
 - [ ] **write-tmpdir-followups** (LOW, from its review round 4 + accepted residuals): (1) `README.md:321` and `CHANGELOG.md` say an existing outside file is "never written in place" — too absolute under the shared-root race (the rename over a same-named outside file was not excluded, only never seen in 135k writes); (2) `host-execution.ts:454` would wrongly say "temp file left" on a Linux read-only mount (unverifiable on macOS); (3) accepted residual: on hosts shared with other users, a user controlling a dir on the path in `/tmp` can race a swap and leave hidden `.tt-*` files with our content elsewhere; (4) the dropped-entry notice fires once per `buildAgent` (once per `serve` session); (5) below ~46 columns the permission key-hint footer wraps (pre-existing). Type: fix · Size: S · Blast: contained.
-- [x] **feat/subagent-general-rename** (owner 2026-11-07, `docs/eval/subagent-live.md`, task 1/9): rename the built-in type `general-purpose` → `general` (prompts, tests, docs); first, before users write `subagents.types` configs. Type: feat · Size: S · Blast: contained.
-- [x] **feat/subagent-tail-view** (owner 2026-11-07, `docs/eval/subagent-live.md`, task 2/9): a foreground subagent shows its LATEST steps (rolling tail), not its first tool calls; pure `subAgentView`. Type: feat · Size: S · Blast: contained.
-  - [ ] Follow-up (Opus round-3 LOWs, `docs/feat/subagent-tail-view.md` Review → Round 3 → Nits): a cancel with no text still says "cancelled" twice (the model's advice is shown); an empty report draws two blank rows; a spilled report keeps a blank row; a wrapped row can start with a space; a stop reason named like an `Object` member prints garbage (`Object.hasOwn`); Ctrl+O on a trail over the screen height loses its top (live check, maybe pre-existing). Type: fix · Size: S · Blast: contained.
 - [ ] **feat/subagent-unknown-type-note** (owner 2026-11-08, rename review Q1): an `agent_task` whose `subagent_type` names no known type still runs on the default `general`, and its tool_result now says so in one line ("unknown type X, ran as general") so the model knows. Separate small task, after the subagent-live tasks. Type: feat · Size: S · Blast: contained.
-- [x] **feat/models-map** (merged 2026-11-08 4df7c11; Opus exec + 2 fresh Opus reviews PASS with nits; live 6/6) (owner 2026-11-07, `docs/eval/subagent-live.md`, task 3/9): top-level `models` map (same shape as `model`, unset fields inherit), `subagents.types.<t>.model`, `agents/*.md` `model` = a `models` name else a model id; REMOVES the existing llama.cpp slots cap (owner 2026-11-08: only `subagents.maxParallel`; `model/slots` RPC gone, PROTOCOL_VERSION bump); local/serve only; plus opt-in `subagents.selectableModels` + `models.<n>.description`: the agent may pick a listed model per `agent_task` call. Type: feat · Size: M · Blast: cross-module.
-- [x] **feat/models-map-pod** (merged 2026-11-09 093a15c; Opus exec, Sonnet fix rounds 1–2, Opus reviews r1–r3 PASS with nits; live docker 5/6 PASS + scenario 5 explained (session re-seeded), `docs/feat/models-map-pod.md`) (owner 2026-11-07, `docs/eval/subagent-live.md`, task 4/9): `models` in pod runs: model name on `model/stream*`, laptop allowlist, keys never leave the laptop; bumps `PROTOCOL_VERSION`. Type: feat · Size: M · Blast: load-bearing.
-- [x] **fix/key-commands-only-for-model-commands** (merged 2026-11-09 077a30f; DeepSeek plan+exec, Sonnet review PASS with nits; `USES_MODEL` in `cli/flags.ts`: ps/rm/hooks/package skip key commands) (live check of models-map-pod, 2026-11-09, O2; pre-existing on main): `tentacle ps` / `rm` (and other commands that call no model) run every `apiKeyCommand` while loading config, so one entry whose command fails without a tty (`exit 7`) makes `ps`/`rm` fail with a config error. Commands that need no model should skip key commands — reuse the `podDaemon` skip (`config/src/load.ts:800`; load at `cli/main.ts:729` before `:768`). Type: fix · Size: S · Blast: cross-module.
 - [ ] **fix/detached-tui-sighup-kills-tool** (live check of models-map-pod, 2026-11-09, O3; not diagnosed): a SIGHUP to a TUI of a detached run seemed to interrupt the running turn's shell command (`sleep 40` → `exit=124 [killed …]`); AGENTS §7 says it must ONLY detach. First reproduce on main (could be the tool timeout instead). Owner 2026-11-09: repro allowed with the local docker and the DEFAULT config model (local qwen3.8, no cloud key). Type: fix · Size: S · Blast: load-bearing.
-- [x] **feat/subagent-ledger-log** (merged 78861e0, 2026-11-09; owner Q3 (a), Q4 (a) fail-soft note) (eval refresh 2026-11-08, `docs/eval/subagent-live.md`, task 5/9): pure `AgentJobLedger` + two NON-critical log types (`subagent_background`, `subagent_end{report?}`) + one shared load derivation (lost / undelivered note, current segment only) for the laptop load and the daemon reload. Owner 2026-11-08: Q8 non-critical, Q9 markers+report only (no tool trail), Q10 note at load without a wake, Q11 `subagent_end` carries the report; serve-store merged (Q12 moot). Opus review 2026-11-08 M3: plus a display-only `note{kind,id}` field on the note messages (the derivation keys on it; resume renders notices, not user rows). Type: feat · Size: M · Blast: load-bearing.
-- [x] **feat/subagent-background** (6a-1 merged cf96ef3, 2026-11-09: Sonnet exec, Opus PASS w/ nits, DeepSeek fix1; owner Q1 (a) agent_kill in 6a-2, Q2 (b) refuse at full cap, PROTOCOL_VERSION 20; 6a-2 `feat/subagent-background-ui` merged cec5c17: DeepSeek exec+fix1, Opus REQUEST-CHANGES 2H → r2 PASS; owner Ctrl+C at quit dialog = No; 3 nits in docs/feat/subagent-background-ui.md) (owner 2026-11-07, `docs/eval/subagent-live.md`, task 6a/9; split by the Opus review 2026-11-08, H4): the agent launches a subagent with `background: true`; its report returns as a job exit + auto-wake; one cap (`maxParallel`); a background ask is asked anyway (`sa-N`, the child's own signal, the spawning turn's id: H3); session-scoped progress in the `subagents` update (H1); a running child counts as active work for the relay and the reaper (H2); carried "still running" line at compaction (M4); quit confirm lists running ones (M7); emits task 5's log entries; bumps `PROTOCOL_VERSION` (18). Type: feat · Size: L · Blast: load-bearing.
-- [x] **feat/subagent-detach** (merged 8f7843a, 2026-11-10 overnight: Opus plan, DeepSeek exec + fix1, Opus review 0H 1M → fixed; Q-A/B/C (a) decided by the orchestrator, owner to confirm; main gate 6260/3/0; debt: TUI fallback send-now still cancels-then-sends, `App.tsx:1717`) (Opus review 2026-11-08, `docs/eval/subagent-live.md`, task 6b/9): a foreground subagent moves to background when the USER writes while it runs (`ToolContext.detach`, fired from `HostedSession.enqueue` / `send_now`, never `Session.enqueue`: M1); send-now behaviour per owner Q13. Needs 6a. Type: feat · Size: M · Blast: load-bearing.
-- [x] **feat/clear-keeps-jobs** (merged 66f2cbd, 2026-11-09: Sonnet exec+fix1, Opus REQUEST-CHANGES 2H → r2 PASS, L8 open in the doc) (owner 2026-11-09, `docs/feat/clear-keeps-jobs.md`): `/clear` must NOT kill the session's background jobs or sub-agents. Owner 2026-11-09 (direction change): `/clear` no longer switches session — it RESETS the conversation inside the same session (`session/clear` on the compaction barrier, like `context_reset`), so running work simply stays; atomic (refused mid-turn, nothing changes on failure); the new chat starts with a "still running" note. QA (a) `history_replaced.reason: "clear"` + `PROTOCOL_VERSION` 21; QB (a) session approvals cleared for everyone; QC old chat no longer a separate session → follow-up below. Rejected: hand-over between sessions. Executor Sonnet. Type: feat · Size: M · Blast: load-bearing.
-- [x] **feat/clear-fork-history** (merged a0eb1a2, 2026-11-09: Sonnet exec, Opus REQUEST-CHANGES 1H 2M → DeepSeek fix1 → Opus r2 fixes hold + 2 test-only M → DeepSeek fix2, mutation-checked; main gate 6203/3/0; `setAside` suspicion in the plan still unconfirmed) (owner 2026-11-09, QC (b) of clear-keeps-jobs): `/clear` forks the old history into its own read-only session listed in `--resume` / `/sessions` (laptop store from its own copy, `serve` as an archived record); the live session keeps its id and jobs. Right after clear-keeps-jobs. Type: feat · Size: M · Blast: cross-module (persistence).
-- [x] ~~**feat/subagent-slots**~~ DROPPED (owner 2026-11-08): the only limit is `subagents.maxParallel`; no slot sizing anywhere (task 3 removes the existing `/props` slots cap). See `docs/eval/subagent-live.md` "Owner decision — slots".
-- [x] **feat/subagent-panel** (owner 2026-11-07, `docs/eval/subagent-live.md`, task 7/9): background subagents listed under the footbar, openable (inspect); the user may write to one and the agent is told (`[user → sa-1]`), through a focus view whose input stays live (a list panel hides the input: Opus review M6). Owner 2026-11-10: the DOWN arrow moves from the input into the jobs/sub-agents component below (when it is shown); the plan must come with HTML mockups of the panel states for the owner. Type: feat · Size: M · Blast: cross-module. Merged bcf9e9a (2026-11-10): design B after owner test (pill in the status bar, dropdown/drawer above the input, sub-agent model when different); exec DeepSeek, 4 Opus review rounds (r4 PASS = sub-agent live feature closed); doc `docs/feat/subagent-panel.md`.
-- [x] **feat/agent-message** (merged 6c6f548, 2026-11-10 overnight: Opus plan, DeepSeek exec + fix1, Opus REQUEST-CHANGES 1H → r2 PASS; Q1/Q2 (a) decided by the orchestrator, owner to confirm; main gate 6288/3/0; seam for task 7: `AgentJobs.message(id, text, "user")`) (owner 2026-11-07, `docs/eval/subagent-live.md`, task 8/9): one-way `agent_message(id, text)`: the agent steers a running subagent at its next boundary. Type: feat · Size: M · Blast: load-bearing.
-- [x] **feat/agent-message-two-way** (owner 2026-11-07, `docs/eval/subagent-live.md`, task 9/9): subagent → agent messages that wake the agent, behind `subagents.twoWay` (default off), with a ping-pong guard. Type: feat · Size: M · Blast: load-bearing. Merged 6a2621d (2026-11-10 overnight; exec DeepSeek, one Opus review 2M → fixed, mutations verified; Q1–Q4 (a) decided overnight, to confirm by the owner). Doc `docs/feat/agent-message-two-way.md`.
-- [x] **fix/clear-silent-noop** (owner 2026-11-10, found in daily use; orchestrator repro): on a RESUMED session (`~/trash/new`, `tentacle --resume fc027317-56ee-4f2e-ade4-aa7b1753345b`, a session that had run background sub-agents) `/clear` + Enter only empties the input: the chat stays, ctx stays ~19%, no notice, even after 10 s. Same on main (build 3b238a4c0805, `~/bin/tentacle-main`) and on the panel branch → not task 7. `/help` works. A fresh session is inconclusive (nothing to clear). Suspects: the clear-keeps-jobs reset or the clear-fork-history fork refusing/hanging SILENTLY (a silent drop is itself a §7 bug). First deliverable: a repro test (resume a session with sub-agent markers, `/clear`), then the cause. Type: fix · Size: S–M · Blast: load-bearing (session/persistence) · Suited: DeepSeek triage + exec, one Opus review. Merged db4df79 (2026-11-10): cause = `RemoteSession.clear()` hollow `{0,0}` for a resumed never-opened session (introduced by clear-keeps-jobs `df42111` + its review L6b `7aab601`; an accepted failure mode in clear-fork-history); fix opens the session first, also `/compact`; doc `docs/fix/clear-silent-noop.md`.
-- [x] **fix/agent-task-scope** (owner 2026-11-10: right AFTER `feat/subagent-panel`, BEFORE `feat/shell-jobs-panel` — it cost the owner time twice in real use): the model-facing descriptions of the sub-agent tools, three fixes in one task. (1) Scope: the parent launched two open-ended "adversarial review" children with no scope and no stop criterion → `agent_task`'s description asks for a scope (files/diff/questions) and a stop criterion in the prompt it writes. (2) In an empty folder the agent, asked to "create two agents", shelled out to `codex`, `claude -p`, `tentacle` instead of `agent_task`: today's text (`tools/src/task.ts:100`) frames it as "delegate a task, get a report, prefer it for search" — say it is THE way to create and run agents of your own (also role/persona agents), and add a DEFAULT, not a ban (owner): "To create agents, use this tool. Start another agent CLI (claude, codex, tentacle, …) through the shell only when the user explicitly asks for it" (legit: `tentacle run` in a container, testing tentacle, orchestration); plus one line on the two patterns (turn-based: one foreground child at a time; long-lived: background + `agent_message`). (3) With `subagents.twoWay: true` the parent still reads "One-way: no reply comes back… It does not wake you" (`tools/src/background.ts:180`, and the tool result at :189) — task 9 never made the parent's texts depend on `twoWay`: when on, `agent_message`/`agent_task` say a background child can reply with `agent_notify`, arriving as a `[sub-agent sa-N → you]` note that wakes you; when off, texts byte-identical to today. Tests: each text per `twoWay` on/off, the explicit-request exception present; red before green. Type: fix · Size: S · Blast: contained · Suited: DeepSeek exec. Merged 10c7396 (2026-11-10): exec DeepSeek, my mutations (wiring, exception text), owner trim of a duplicate sentence; doc `docs/fix/agent-task-scope.md`.
-- [x] **feat/agent-status** (owner 2026-11-10: right AFTER `fix/agent-task-scope`, before `feat/shell-jobs-panel`): the main agent cannot see what its sub-agents are doing — it has only `agent_task`, `agent_kill`, `agent_message` (+ the child's own `agent_notify` with `twoWay`); a foreground child returns only its report, a background one only its `[background]` exit note. Shell jobs have `shell_output`; sub-agents have no equivalent. The data already exists daemon-side (the `subagents` display update the TUI shows: state, toolUses, tokens, startedAt, last 8 tool labels). Add a read-only `agent_status` tool (one id or all): state, tool uses, tokens, elapsed, the last N actions, unread inbox count — so the agent can spot a runaway child (the cee case: an explore at 183 steps / 18M tokens opening files in slices) and stop or steer it. Its description must say "check when needed, never poll in a wait loop" (owner saw an agent `sleep 5` in a loop). Later, with `feat/subagent-token-budget`: an automatic note to the parent when a child crosses a threshold. Type: feat · Size: S–M · Blast: cross-module · Suited: DeepSeek exec. Merged (2026-11-10): owner chose to MERGE `agent_kill` + `agent_message` + the new status into ONE tool `agent_control {action: status|message|kill}` — tool-definition chars 1653 → 785 (−52%); exec DeepSeek, my mutations; doc `docs/feat/agent-status.md`.
 - [ ] **eval/task-board** (owner 2026-11-10: start NOW, in parallel): a PUBLIC board on tentacle.so (`/board`) of backlog / in-progress / merged / released tasks with pickup date, who works on it, merge commit, release version — FILTERED fields only (no descriptions; security bugs only after their fix), DERIVED from TODO/docs/git/tags (step A, site-only, S–M) + live events sent by the orchestrator's launchers (step B, M) — agents do nothing extra. Doc `docs/eval/task-board.md` (opus); owner questions Q1–Q7 open (step A runs locally on the recommendations meanwhile, nothing published). Type: eval · Size: — · Blast: contained (site only). OFFLINE since 2026-11-10 evening (owner: "rimuovi https://tentacle.so/board"): launchd unloaded, `/srv/tentacle.so/board` removed (backup `/root/tentacle-site-backup/board-dir.2026-11-10.tgz`), deploy key disabled (`authorized_keys.disabled` of user `board`), nav link removed; code kept in `.tentacle/site/board/`.
-- [x] **feat/shell-jobs-panel** (owner 2026-11-10: after `feat/agent-status`, before `feat/explore-search`; P6 (a) of the panel): running background shell jobs in the panel's pill (`· N shell`) and dropdown (`sh-N` rows, Enter opens its output tail). Today the daemon only signals a job's EXIT, never the running list. Design (orchestrator, owner agreed): a display update with the running-jobs list (id, cut command label, startedAt, status), sent ONLY on job start/exit, client-bounded like `subagents` (a pod's command is untrusted text: control chars, cell cut, §7); elapsed time computed by the TUI from `startedAt`; output NEVER streamed live — read on open (last N lines, size-bounded), refreshed at most 1/s and only while that drawer is open. Also fixes detach-open-items (9d) (`ps` says a job runs ~30 s after it exited). Type: feat · Size: M · Blast: cross-module · Suited: DeepSeek exec. Merged 3790071 (2026-11-10): exec DeepSeek; Opus plan review (REVISE 1H 6M) + 2 code reviews (1H pre-existing exit-notice sanitising, 4M; then 1M frozen duration); owner: merged stdout/stderr in ARRIVAL order everywhere (drawer + model `shell_output`), `bg-N` everywhere, outcome ✓/✗ with code + duration; doc `docs/feat/shell-jobs-panel.md`.
-- [x] **fix/clear-connect-unbound** (owner 2026-11-10, live): under `connect`, `/clear` failed with `undefined is not an object (evaluating 'this.openForReset')` — `App.tsx` took `clear` (and `jobOutput` ×2) off the `RemoteSession` class instance and called it unbound; a regression from clear-silent-noop round 1 (tests were local-only). Fixed + class-session test; merged (2026-11-10). Doc `docs/fix/clear-connect-unbound.md`.
-- [x] **fix/connect-model-error-drops-connection** (owner 2026-11-10, hit live; NEXT right after `feat/shell-jobs-panel` merges): `tentacle connect ws://192.168.1.17:4000` to a `serve` daemon whose OWN config has no model (`model = {}` → the provider gets 401 "Invalid API Key"): typing in the TUI shows only "RPC connection error"; the daemon logs `error: model request failed with status 401 …` then `connection-close`. A model error must surface as a failed turn with the provider's message (and a hint: the `serve` daemon uses ITS OWN model config — `tentacle config` on that host), never drop the connection. Also: `serve` could warn at start-up when no model is configured. Second repro (owner, same evening): connected to `.17`, the inference engine behind the serve's model was RESTARTED mid-session → the TUI showed "rpc error" and EVERY later send kept failing with "rpc error" even after the engine was back; only Ctrl+C + a new `tentacle connect` worked. So: (1) a transient model error (connection refused / 5xx while the engine restarts) must be a failed turn, the connection kept, and the next send works once the model is back; (2) if the RPC connection does drop, the TUI must reconnect to the same session (or say so clearly and offer it) — never stay in a state where every send fails. First deliverable: a repro test (a model provider that fails then recovers, over the real `serve`/`connect` stack). Type: fix · Size: M · Blast: cross-module · Suited: DeepSeek triage + exec. Merged 460e93a (2026-11-11 overnight): a `serve` daemon's model error reaches the connect TUI (sanitised; pods stay redacted), link kept, orphaned-turn wedge fixed, serve start-up notice, reconnect test; round 2 = ctx window + model name from the daemon (`agentInfo`). Follow-up: a HUNG model call (no error, no answer) needs a product decision. Doc `docs/fix/connect-model-error-drops-connection.md`.
-- [x] **fix/connect-ctx-window** (owner 2026-11-10: FOLDED into branch `fix/connect-model-error-drops-connection` as its second round, reviewed together; live on `tentacle connect` to `.17`): the status bar's ctx meter shows the LAPTOP's context window, not the `serve` daemon's model — the TUI gets `contextWindow` from the laptop config (`cli/src/main.ts:1038`). Suspect, to verify: `contextWindow` is also a CARRIED setting (`cli/src/carried-settings.ts:44`) — if a `serve` session applies the laptop's value, the daemon may also compact/warn against the wrong window while running its own model. Fix direction: the daemon reports its effective model window (and model name) to the client (open result / snapshot / settings-applied), the TUI uses it; decide whether `connect` should carry `contextWindow` at all to a daemon that uses its own model. Type: fix · Size: S–M · Blast: cross-module · Suited: DeepSeek triage + exec. Merged with fix/connect-model-error-drops-connection (460e93a).
-- [x] **fix/autoaccept-wake-turns** (owner 2026-11-10, live on `connect` to `.17`; HIGH annoyance): after a background sub-agent finished, the agent kept asking permission (`Run a shell command … Yes / Yes, and don't ask again …`) although the TUI showed `⏵⏵ auto-accept on`. Cause (orchestrator, verified in code): the daemon starts a wake turn with its OWN id `wake-<uuid>` (`daemon/src/hosted-session.ts:2360`); auto-accept answers only asks of turns THIS TUI minted (`tui/src/permission-ui.ts:53` `autoApproves(req, own)`, `client/src/remote-session.ts:263` `ownsTurn`), so every ask of a wake turn — and of any sub-agent spawned during it — is treated as another device's. The foreign-turn rule (`docs/feat/tui-foreign-turns.md` C5) protects against ANOTHER DEVICE, not against the session's own wake. Needs a small design (Opus): a wake turn is session-owned; which attached TUI(s) with auto-accept on may answer (all of them, first answer wins? only the last one that sent a prompt?), detached-run relay (`relay-policy.ts:57`) parity, a pod forging `wake-` ids (laptop-side gate, §7). Type: fix · Size: S–M · Blast: load-bearing (permission gate) · Suited: Opus short plan + DeepSeek exec + Opus review. Merged fc72ed7 (2026-11-11 overnight): wake turns auto-accepted under `connect` (`daemonWakes`), `wake-` prefix reserved by the daemon → **PROTOCOL_VERSION 22** (owner Q2 b: client and daemon update together), agent_notify hint for notifiable children when twoWay (Q3 b); exec DeepSeek, Opus review 1M fixed + my mutation; doc `docs/fix/autoaccept-wake-turns.md`.
-- [x] **fix/subagent-message-read-state** (owner 2026-11-10, live): the open sub-agent drawer keeps `you → sa-1 che stai facendo? · read before its next step` even AFTER the child read it (`agent_control status` showed `0 unread`), so the user cannot tell "not delivered" from "delivered and ignored" (a local model often ignores a mid-task message). Show the delivery state (`✓ read` once the inbox delivered it, from the `subagent_message`/subagents data); consider a one-line hint in the child's steer text that it may answer with `agent_notify` when twoWay is on. Type: fix · Size: S · Blast: contained · Suited: DeepSeek exec. Merged with fix/autoaccept-wake-turns (fc72ed7): `✓ read` from `AgentInbox` userRead (owner Q4 a).
-- [x] **fix/connect-functest-batch** (orchestrator functional tests on `.17`, 2026-11-10 evening; report `.tentacle/tmp/functest/report.md`): (A, M) under `connect` a finished shell job's drawer shows `✗ stopped` instead of `✗ exited (N)` and its duration keeps counting — the shell-jobs-panel outcome/`endedAt` fixes pass locally only (the TUI's job-exit handler apparently never fires under connect); (B, S) the pill reads `0 agents · 1 shell` — omit zero counts; (C, S–M) after `/compact` the session TITLE becomes the summary text in `/sessions` (title derived from the first user message, now the summary); (D — DONE in 460e93a); (E, S) `/clear` under connect shows no confirmation and the ctx meter stays stale until the next turn; (F, verify) an ended child's open drawer head stayed `running · 26s` under connect. Every fix needs a test on the `serve` + `connect` path. Type: fix · Size: M · Blast: cross-module · Suited: DeepSeek exec. Merged 469f277 (2026-11-11 overnight): A (connect TUI had no jobs feed → `remoteJobsView`), B, C (title pinned before compaction), E fixed; F = A. Doc `docs/fix/connect-functest-batch.md`.
-- [x] **fix/deepseek-dsml-leak** (orchestrator 2026-11-10 night, seen in an executor run): DeepSeek (via `tentacle --profile deepseek`) emitted a tool call as TEXT in its own markup (`<｜DSML｜ parameter …>` / `</｜DSML｜ invoke>`), which tentacle took as the final answer and ended the turn (`exec-history-validity` run). Same run also hit `invalid JSON arguments for fs_write` 3× on long file bodies. Investigate the OpenAI-compatible stream for DeepSeek (does the endpoint send a malformed/partial tool call, or is it model output?) and whether tentacle should detect DSML tool-call markup in text and re-ask / surface it. Type: fix · Size: S–M · Blast: cross-module · Suited: DeepSeek triage. Merged 50b0542 (2026-11-11 overnight): root cause of the night's 'invalid JSON arguments' on long bodies was TENTACLE's `ToolCallAssembler` (index-less continuation deltas forked a phantom nameless call → truncated JSON + 'unknown tool'); fixed. DSML tool-call markup as text is refused and re-asked once; notice = a new display update kind (overnight decision instead of PROTOCOL_VERSION 23 — to confirm). Follow-up: over a pod's model tunnel the re-ask does not fire (errors are opaque by design). Doc `docs/fix/deepseek-dsml-leak.md`.
-- [x] **fix/dev-build-version-skew** (owner 2026-11-10, after `fix/connect-model-error-drops-connection`; hit live: `tentacle connect ws://192.168.1.17:4000` → "protocol version mismatch: client 21 (tentacle 0.3.0), daemon 16 (tentacle 0.3.0) — update the daemon: run \"tentacle update\"…"): (1) every dev build calls itself `0.3.0`, so two builds with different protocols look identical — a dev build should report `0.3.0+<build marker>` (the build script already prints a marker); (2) the hint suggests `tentacle update` even when the daemon IS the latest release (v0.3.0 = protocol 16) and the client is a newer dev build — `update` would reinstall the same old release. The hint must say which side is older and what actually fixes it (install the same build on the host / update the client). Type: fix · Size: S · Blast: contained · Suited: DeepSeek exec. Merged b500020 (2026-11-11 overnight): dev builds report `0.3.0+<build>`, release builds (a `v*` tag in CI, `TENTACLE_RELEASE=1`) plain; every comparing consumer (pod binary, update, attach) uses the plain version; the mismatch hint names the side to update. Opus review 1H 2M → fixed → r2 PASS. Follow-up (pre-existing, Opus r2): a dev build whose config points at RELEASE pod binaries can attach with a different protocol, and the hint says re-run `tentacle attach` (cannot help). Doc `docs/fix/dev-build-version-skew.md`.
-- [x] **fix/truncated-reply-silent** (merged 6aaf85c 2026-11-11, main gate 6896/3/0; plan+exec+fix DeepSeek, Opus review 1H 1M → fixed, Opus r2 PASS; protocol stays 22; [doc](docs/fix/truncated-reply-silent.md)) (owner 2026-11-11, hit live on local Qwen, session `07812559-733667e1c262/9c34a8cb…`): a reply cut mid-sentence (`…la vera soluzione è`) was accepted as a complete answer, the owner's next message got 3 empty rounds (reply + 2 `Continue with the task.` nudges), and the turn ended `end_turn` with NOTHING shown — the TUI looked hung. Cause of the cut: the llama-server slot context is 24064 tokens (`/slots` `n_ctx`, `--parallel 3`) while the config says `contextWindow: 174080`, and the session sat at ~24k, so generation hit the slot's limit and tentacle never compacted. Two tentacle defects regardless of the server config: (1) `openai-provider.ts` ignores `finish_reason` — `length`, or a stream closed without `[DONE]`, is taken as a finished answer; it should surface as a truncation (notice/error, maybe a re-ask or compaction on `length`); (2) when the empty-round nudges run out (`MAX_EMPTY_CONTINUES`, `agent.ts:1299`) the turn ends silently — it should end with a visible notice ("the model returned an empty reply"). Not verified: what llama-server streams for a prompt already ≥ n_ctx (empty content + `finish_reason: length` assumed). Type: fix · Size: S–M · Blast: cross-module · Suited: DeepSeek.
 - [ ] **fix/reask-budget-and-compact-length** (Opus review of fix/truncated-reply-silent, 2026-11-11, both pre-existing on main): (1) the DSML re-ask uses `budgetFrom--` (`agent/src/agent.ts` ~:1229), which SHRINKS the step budget (costs 2 steps) instead of making the re-ask free — truncated-reply's re-ask uses the correct `budgetFrom++`; (2) compaction (`agent/src/compact.ts` ~:77,115) accepts a summary cut by `finish_reason: length` as complete — same class as truncated-reply, needs `done.stopReason` (lands with that fix). Type: fix · Size: S · Blast: cross-module · Suited: DeepSeek.
-- [x] **fix/local-subagent-panel-unwired** (merged f8d0490 2026-11-11, main gate 6826/3/0; exec + fresh review + fix1 DeepSeek, review 2M in the guard test → fixed, orchestrator mutation ok; [doc](docs/fix/local-subagent-panel-unwired.md)) (owner 2026-11-11, live in plain `tentacle` on another repo: `this session cannot message background sub-agents (older daemon or local mode)` on every message to a child): the laptop worker runtime wraps `RemoteSession` in a `PersistingController` (`cli/src/local-runtime.ts` ~:240-262 type, ~:585-610 forwards) that forwards `onSubagents`/`onJobs`/`killJob`/`onSubagentNotify` but NOT `messageSubagent`, `killSubagent`, `onSubagentMessage` — so the App's guards (`App.tsx:1516`, `:1427`) always refuse: writing to and stopping a sub-agent from the panel never works in plain `tentacle` nor `run`/`attach`; only `connect` (bare `RemoteSession`) works, which is why the .17 functests passed. Fix: forward the three; test through the REAL `startWorkerRuntime`/`createLocalRuntime` controller (not a fake session), red first; ideally a test that every optional `SessionController` member `RemoteSession` implements is forwarded by the wrapper, so the next one cannot be forgotten. Also the notice text blames 'older daemon or local mode'. Type: fix · Size: S · Blast: cross-module · Suited: DeepSeek.
-- [x] **fix/dock-list-type-through** (merged 94fcc1f 2026-11-12; Opus window review 1M → fixed; also covered panel-unwired: PASS) (owner 2026-11-11, live: "con la tendina dei background job alzata (ma il cursore sull'input) non mi fa scrivere, dovrei poter scrivere al modello"): at `list` focus a printable key is swallowed by design (`tui/src/background-focus.ts` ~:384, owner P3 (a) of 10/11, `docs/feat/subagent-panel.md:343`) because bare `x` arms a stop — while the input's cursor still shows, so it reads as a hang. **Owner decision 2026-11-11 (supersedes P3):** a printable key at `list` focus moves focus to the input AND is typed there; the dropdown STAYS VISIBLE while typing (closed by Esc; ↓ from the input goes back into it); the stop key becomes `ctrl+x` (no bare `x`/`y` in the list, so typing can never arm or confirm a stop) — hints/footer updated, both sub-agent and shell-job rows. Logic only in `background-focus.ts` (pure, AGENTS §7) + a real-`App` frame test (typing with the dropdown open reaches the input and the main agent; `x` typed never stops anything; ctrl+x does). Type: fix · Size: S–M · Blast: cross-module · Suited: DeepSeek.
 - [ ] **feat/attachments** (owner 2026-11-12: attach PHOTOS from the TUI on the laptop first — drag a file into the terminal / paste a path / `/attach`; promoted from eval, [umbrella](docs/feat/attachments.md) §Promotion): sub-tasks in order 1 `attachments-core` **MERGED 9baa0ba 2026-11-12** (silent merge per owner rule: Opus review 1H 3M → fixed, Opus r2 PASS; main gate 7016/3/0; needs `bun install` after pull — providers/client gained a workspace dep) ([doc](docs/feat/attachments-core.md), M load-bearing, bump PROTOCOL_VERSION 23, new critical log entries `media_message`/`media_replace`) → 2a `attachments-upload` → 2b `attachments-prompt` ([doc](docs/feat/attachments-prompt.md), M load-bearing, plan APPROVED by night delegation 2026-11-12, no protocol bump) → 3a `attachments-tui-detect` (may run in parallel) → **3b `attachments-tui` = the owner's goal** → 4 `attachments-durable` → 5 clipboard image paste → 6 **client downscale/resize** (owner: images up to 15 MB, no resize for now — resize later here). Owner: attachments sub-tasks merge WITHOUT asking after Opus PASS + green gate. Type: feat · Size: L (split) · Blast: load-bearing.
-- [x] **fix/tui-redraw-flash** (merged 7ca9a280) (owner 2026-11-14, live: "ogni tanto quando tentacle gira vedo come un flash sul terminale come se tutto si rerenderizzasse"; HIGH for daily-driver feel, do another day): likely Ink full-screen clear + redraw (clearTerminal then full output) when the frame is taller than the terminal rows, on resize, or on layout changes (dock/menu open/close) — the blank between clear and redraw is the flash. Owner addendum 2026-11-14: noticed WHILE THE AGENT IS "Thinking…" (the spinner + elapsed timer line ticking every second — first suspect: a per-tick re-render that changes the frame height or layout, or the timer line wrapping, triggering a full clear). Characterize first (AGENTS §1): which terminal (iTerm2/Ghostty/Terminal.app), trigger (long streamed reply / dock or menu toggle / resize / random). Repro: capture raw stdout writes in an ink-testing-library or pty run and count clear-screen sequences per trigger. Candidate fixes: synchronized output (DEC mode 2026 BSU/ESU around each frame: iTerm2, Ghostty, kitty, WezTerm) and/or never letting the frame exceed the terminal height. Schedule AFTER app-decomposition S2/S3 (same rendering area). Type: fix · Size: S–M · Blast: cross-module (terminal I/O path) · Suited: Opus plan + DeepSeek exec.
 - [ ] **eval/attachments-audio-video** (owner 2026-11-13): the mobile app must support attachments — photos/camera in mobile task 13 (compose) via `attachment/put`, image rows in task 12 (transcript) — AND audio/video files. Audio/video is new scope beyond images: which providers/models take audio or video input, a transcription fallback for models that do not, size caps and chunked upload limits, where `serve`/pods store them (durable like attachments-durable), how the TUI and the phone show them. Bonus (owner 13/11): general tentacle support for live VIDEO STREAMS (e.g. a camera or screen stream the model watches, in the TUI and on the phone) — evaluate feasibility (which models take streaming video, frame sampling vs native streams, bandwidth over the E2E channel, cost) as a separate section; may become its own task. Decide here before any code; then promote to feat. Type: eval · Size: — · Blast: load-bearing (protocol, persistence) · Suited: Opus.
 - [ ] **eval/binary-frames** — **OWNER VERDICT 20/11: all recs, Q2 = clean break (binary-only, app unpublished); next slice BF2 `feat/noise-binary-carrier` after the current queue** — (owner 2026-11-13: "ogni efficientamento è da perseguire") (owner 2026-11-20: QUEUED — Opus eval on condo after fix/inject-bin-dir-probe): the wire is JSON-RPC TEXT; image bytes travel base64 inside `attachment/put` (256 KiB chunk = 349 528 chars, `protocol/src/attachment-upload.ts:28`) — +33% bytes plus JSON encode/parse and a string copy per chunk, on every hop (laptop→daemon, pod tunnel, Noise E2E channel to the phone). Evaluate a pure-binary path for blobs (and later audio/video/streams, see eval/attachments-audio-video): binary frames next to JSON-RPC on each `DuplexChannel` (WebSocket binary frames, stdio/k8s-exec/docker byte streams with a length-prefixed framing, Noise frames are already bytes), how a request references its binary payload, back-pressure, version negotiation (protocol bump rules §7), Hermes support on the phone; measure before/after (bytes on the wire, CPU, latency for a 15 MB image). Type: eval · Size: — · Blast: load-bearing (transport, protocol) · Suited: Opus.
-- [x] **feat/explore-search** (merged cbe444c 2026-11-12; Fable design review, DeepSeek review 3H, Opus review 1H 3M → fixed, Opus r2 PASS; main gate 7162/3/0) (owner 2026-11-10: after `feat/shell-jobs-panel`, before `eval/session-tree`; the 3 explore-loop tasks in this order): an `explore` sub-agent has only `fs_read` (`agent/src/subagent.ts:84`) while its prompt says "Search and read files" — on a review in another repo two explore children ran 183 and 97 steps (18M / 6.3M tokens, `subagents.maxIterations: -1` in the owner's config), opening files in slices to locate symbols, each slice kept in context for every later step. Give `explore` a read-only search tool (grep/glob over `rg`, bounded output, no shell) and align its prompt. Owner 2026-11-10: built on ripgrep, NOT from scratch, run through `ctx.env` (laptop / docker / pod); NEVER assume `rg` exists in the image — a missing `rg` must fall back (e.g. `grep -rn` / `find`, POSIX only) with the same output shape and bounds, tested on both paths; pattern/path quoting through `env.exec` tested with hostile patterns. Type: feat · Size: S–M · Blast: cross-module · Suited: DeepSeek exec. Note (owner 2026-11-10, to weigh in the plan, not required): `explore` gets no MCP tools today (closed list `fs_read`; `general` gets all MCP tools, read live at child start `agent/src/subagent.ts:338`) — consider giving it READ-ONLY MCP tools too (needs a clear rule for what counts as read-only for an MCP tool); and custom `agents/*.md` types can only list MCP tools one by one (`mcp__<server>__<tool>`) — a `mcp__<server>__*` wildcard would help (small, could ride this task or its own).
-- [x] **feat/subagent-token-budget** (merged c97efd3f) (owner 2026-11-10, after `feat/explore-search`; the last of the explore-loop tasks): cost grows ~quadratically with steps (each call resends the whole child history; no auto-compaction, `context_reset` withheld from children), so a step cap bounds spend badly. Add `subagents.maxTokens` (cumulative per child): past it, force the final report like `maxIterations` does. Type: feat · Size: M · Blast: cross-module · Suited: DeepSeek exec.
 - [ ] **eval/session-tree** (owner 2026-11-09: FIRST thing after the sub-agent tasks 6b → 8 → 7 → 9 — and, owner 2026-11-10, after the 3 explore-loop tasks — before `feat/logs-cmd`): should the session log become a TREE (each entry has `id` + `parentId`, a moving "current leaf"; branch from any earlier message, the old branch stays in the same file), as pi does (`/tree`, `/fork`; verify pi's format first)? Candidates it could subsume cleanly: `clear-fork-history` (the old chat becomes a branch, not a separate session), superseded history of compaction/`context_reset` (`sessions.keepSuperseded`), rewind/retry from a message, a summary of an abandoned branch, and possibly the §7 rewrite machinery (atomic segment rewrite, set-aside files, "append only what the file lacks") if the log becomes append-only. Costs to weigh: on-disk format change (`schemaVersion` bump, old logs), a file that never shrinks (load time, leaf index), two writers (laptop + `serve` daemon) appending to one tree, `session/log` reads over the wire, sub-agent markers. Type: eval · Size: — · Blast: load-bearing (persistence, §7). Doc `docs/eval/session-tree.md` (opus 2026-11-10: recommends B + "rewind carries its lesson", no format change; owner questions Q1–Q10 open).
 - [ ] **fix/detach-open-items** (owner 2026-11-09: right AFTER `eval/session-tree`, before `eval/parallel-tasks`): DeepSeek read-only triage on main 34aab38 of the detach-live candidates + `fix/detached-autowake-followups` (repros were in `.tentacle/tmp/detach-triage/`, gitignored — re-derive). FIXED: footer `↑0 ↓0 · ctx 0%` after attach (e506a1e + 7ee6dc2); `attach` without `--profile` (`main.test.ts` "round 10 / owner A"). OPEN, to group into tasks when planned: (3) Enter typed for `/quit` approves a permission ask that just opened — no age guard, `permission-reply.ts:118`, every key routed to the dialog `App.tsx:2534` (S · contained; safety-relevant, first); (4) `MultiEdit` ask shows `—` — no `fs_multi_edit` case in `describeToolCall` `agent/src/permission-gate.ts:36-64` (S · contained); (5) `[resume] … — (empty)` after exit — the pre-mount line is suppressed only for `live:true` `cli/src/tui-sessions.ts:121-128`, and the title comes from the first non-note user message only `agent/src/session-store.ts:73-80` (S · contained); (9d) `ps` says `1 background job(s) running` ~30 s after the job exited — `job_exit` never clears `jobs`, only the 30 s poll does `cli/src/relay-state.ts:112-113,150-151` (S · contained); (7) `dispose()` takes no `seal` → false `not saved` line, `cli/src/local-runtime.ts:785-791` vs `:797,:861` (S · load-bearing); (2) `thinking…` timer starts at attach — turn start time not on the wire (`TurnStartSchema` / `SnapshotTurnSchema`), `App.tsx:1539` (M · cross-module, protocol field); (8) a TUI closing during ITS model call cancels the turn for the other TUI — `daemon/src/connection.ts:147-153`, no re-routing of an in-flight call (M–L · load-bearing); (9a) F6 refused-wake streak re-arms the relay's idle deadline forever `relay-state.ts:107-113` (S · contained, accepted debt); (9b) F7 weak test bounds `relay.test.ts:2763`, R-W4 no mutation (test debt); (9c) F8 `handedWakeRef` in `App.tsx` and the refusal predicate in `relay.ts:408` → pure modules (S · cross-module). O3 (`fix/detached-tui-sighup-kills-tool`) stays its own entry (needs docker + real keys).
 - [ ] **eval/parallel-tasks** (owner 2026-11-09, after `fix/detach-open-items`): relax "one code task at a time" (AGENTS.md §10; today the owner allows 2 with disjoint files) to 3–4 parallel tasks, even on shared files. Pieces: (1) a small merge queue run by the orchestrator — before each merge, rebase the branch on the current `main` and re-run the full gate on the result (catches semantic conflicts git cannot see); the second to merge resolves the conflict; (2) remove hotspots: `TODO.md` and the changelog as per-task fragments (changesets/towncrier style), `PROTOCOL_VERSION` bumped at merge time only ([doc](docs/feat/protocol-version-at-merge.md); done, pending merge), the `App.tsx` key handler extracted (known §7 debt); (3) optionally run only affected tests during iteration. Changing §10 is a rule change → its own `feat` with Review (§10 carve-out (c)). Type: eval · Size: — · Blast: cross-module (process).
 - [ ] **eval/multi-model-council** (written 2026-11-08, committed 2026-11-11; [doc](docs/eval/multi-model-council.md)): the smallest architecture that lets several configured models deliberate on one decision with the user, inside the single session path and the §7 invariants — orchestration over the sub-agent runner, a new kind of session, or an external tool. Analysis + proposed 8-task split done; owner questions Q1–Q11 open. Not scheduled. Type: eval · Size: L overall (split) · Blast: load-bearing where marked.
-- [x] **feat/logs-cmd** (merged dd631130) (owner 2026-11-09, after the sub-agent tasks): `tentacle logs` to follow and read a session without shell redirects. (1) A structured event stream, one JSON object per line (`turn_start`, `tool_call`, `ask`, `turn_end`, `error`, …), so a watcher can filter narrowly (wake only on `ask|error|turn_end`) instead of reading raw text; (2) `tentacle logs <session> --tail N`: the last N events or a summary (tools used, files touched, outcome) after the run; (3) `-f` on the daemon side for `run --detach` and `serve` sessions, which outlive the launching process (today their logs are split between `daemon.log` and `relay.log`). Useful to the owner too (see what an agent does without opening orchestration files). Type: feat · Size: M · Blast: cross-module.
-  Design notes (owner 2026-11-09): the per-session `<uid>.jsonl` log (laptop store, and `<configDir>/daemon/<projectKey>/` for `serve`) is already one typed JSON event per line (`turn_start`/`turn_end`, `call_started`, `message`, `subagent_background`/`subagent_end`, `title`, `checkpoint`, `base`/`replace`/`truncate`), so `--tail` is mostly a reader of that file (works for ended sessions and without a daemon). It is written only at round/turn boundaries and lacks pending asks (sidecar/memory), errors (`daemon.log`/`relay.log`, free text) and display-only events (streaming, tool progress: never persisted, §7). So `-f` attaches to the daemon as a read-only watcher, never by adding disk writes inside a turn. Bottleneck rule: the daemon never waits on a watcher — a bounded queue per watcher (full → drop or disconnect it, and say so: "N events lost"), server-side filter (`--only ask,error,turn_end`) so streamed text is not even sent, streaming coalesced like the `subagents` update (250 ms).
-- [x] **feat/config-key-docs** (merged 2026-11-08 20834c0 as `feat/config-explain` (with tasks 2 and 3), review PASS R2: [doc](docs/feat/config-explain.md); owner 2026-11-08, `docs/eval/config-cli.md`, task 1/5): one registry `key-docs.ts` with every config key's docs (summary, default, env, flag, carried, scope, secret, example); the schema keeps shape only; tests pin the registry against the schema, defaults, env, flags and `CARRIED`. Type: feat · Size: L · Blast: cross-module.
-- [x] **feat/explain-cmd** (merged 2026-11-08 20834c0 inside `feat/config-explain`; owner 2026-11-08, `docs/eval/config-cli.md`, task 2/5): `tentacle explain [key]`: top-level keys, then a section's direct sub-keys, then a leaf's full card; `--all` flat list; map keys as `*`; nearest-key suggestions; `--json`. Type: feat · Size: M · Blast: contained.
-- [x] **feat/config-readme-gen** (merged 2026-11-08 20834c0 inside `feat/config-explain`; owner 2026-11-08, `docs/eval/config-cli.md`, task 3/5): the README config table generated from the registry between markers, plus a drift test. Type: feat · Size: M · Blast: cross-module.
-- [x] **feat/config-set** (merged 2026-11-08 e383442, review PASS R2: [doc](docs/feat/config-set.md); owner defaults Q-A/Q-B/Q-D applied; owner 2026-11-08, `docs/eval/config-cli.md`, task 4/5): `tentacle config set/unset/get/list/path` and `config key=value`: typed values, validation before writing, comments kept (jsonc modify), atomic write, secrets masked and read from stdin or a prompt, never from argv. Type: feat · Size: L · Blast: cross-module.
-- [x] **fix/config-unknown-plain** (merged 2026-11-08, review approve-with-nits: [doc](docs/fix/config-unknown-plain.md)) — owner rejected Q-B: `config list`/`get` show an unknown key's value in clear; only registry secrets are masked. Type: fix · Size: S · Blast: contained.
 - [ ] **feat/config-show** (owner 2026-11-08, `docs/eval/config-cli.md`, task 5/5): `tentacle config show [key] --origin`: the effective value and where it comes from. Type: feat · Size: M · Blast: cross-module.
-- [x] **fix/attach-unflushed-exits** — DONE, merged f9b9cf4 (2026-11-06), doc `docs/fix/attach-unflushed-exits.md`: `session/open` carries `unflushedExits`; an attach shows `n background job(s) ended while you were away` and, under `autoWake`, starts the wake turn (one turn for concurrent attaches; rendered live — the wake waits for the session watch). Owner: no lost-slot retry.
 - [ ] **attach-unflushed-exits-followups** (LOW, from its reviews): (1) multi-session seed — a session opened later in the same TUI (`/sessions` switch) is not seeded (owner 2026-11-06: follow-up); (2) T-TUI-6b does not exercise the round-3 deferral guard; (3) late-`open` ordering vs the deferred wake untested (`remote-session.ts:1118`); (4) the deferred `setTimeout` can fire `runRef` after an unmount in the same tick (pre-existing `wakeIfPending` pattern); (5) residual race: a count-seeded TUI B whose continuation lands after A's wake turn ended starts an empty turn (needs a daemon-side "nothing unflushed" refusal). Type: fix · Size: S · Blast: contained.
-- [x] **fix/detached-model-error-reason** — DONE, merged b191ce4 (2026-11-06); (found live 2026-11-05, diagnosed in feat/config-carry round 2): a `run --detach` whose model answers an HTTP error (a 401 from a config with no API key) ends `state: failed internal error` in `relay.log`, with no reason. The redaction toward the pod is right (§7), but the laptop knows the cause and does not say it where the user looks. Path: `remote-client.ts:2063` (`connectionLost`) rethrows, `transport/src/peer.ts:376` answers the pod an opaque text, `daemon/src/hosted-session.ts:254` reports it; the real message goes only to the run's `daemon.log` (`engine-runtime.ts:1044`, by reading). Fix: answer with a text built from the HTTP status only (`the model endpoint answered 401`), never the provider's message, or log the local error to `relay.log`. Test: a provider throwing a 401 → the relay's `failed` detail names it, no provider text reaches the pod. Type: fix · Size: S · Blast: cross-module.
-- [x] **feat/session-settings-apply** — DONE, merged 4953cfd (2026-11-06; personal→condo Opus, 3 rounds + item fixes, 2 fresh Opus reviews; commands `/settings` (nested JSON, `// this terminal: …`, `// (container)`) and `/settings sync`; live notice to other terminals; bounded plain-attach open re-armed on progress; live via tmux PASS). Doc `docs/feat/session-settings-apply.md`. (owner 2026-11-05, after feat/config-carry): a live session keeps the settings it was created with; an attach only reports the difference (`Session settings: {…} (/clear to reset)`). Add a way to apply the laptop's settings to the live session, between turns: a TUI command (`/settings apply`, recommended over a flag or an automatic apply, since other attached terminals share the session), an additive protocol method (`session/update_settings`), W keys the container sets still win, `loadAgentsMd` / `loadSkills` recompose the context. Also from the config-carry round-2 review: bound the plain attach's `session/open` (no `requestTimeoutMs` today, `main.ts` plain path, same on the join path `attach-run.ts:355`). Type: feat · Size: M · Blast: load-bearing.
-- [x] **feat/tui-notice-palette** — DONE, merged 64e3e57 (2026-11-06); (owner 2026-11-05, after feat/config-carry): every TUI notice (`noticeLines`, `packages/tui/src/render-lines.ts:587`, today `⏺` + text all `theme.subtle`) gets ONE notice colour — soft blue, dark `#8caaee` / light `#3b5bdb` (chosen over lilac and "bullet only") — as a `theme.ts` token (the light-theme task reads it), and its hint in grey: a notice gains a separate `hint` field (e.g. `(/clear to reset)`, `(Shift+Tab to turn it off)`), never parsed out of the text. Senders of hinted notices updated (settings notices in `packages/cli/src/carried-settings.ts`, auto-accept). `relay.log` stays plain text. Type: feat · Size: S · Blast: contained · Suited: Sonnet.
 - [ ] **fix/tool-output-location-followups** (LOW, round-2 review, `docs/fix/tool-output-location.md`): (3) on a case-insensitive FS (default APFS) session ids `AB`/`ab` share one spill dir; (4) a swept spill name can be reused by a server that reuses call ids (old banner then reads new content); (5) `HOME=/w`, `cwd=/w/sub` still writes into `/w/.cache` (Q1 only checks root-inside-cwd); (6) tests using the real `toolOutputStore()` (`serve-persistence.test.ts:419,439`) reach the real `$TMPDIR/tentacle-<uid>/tool-output`, outside the test env guard; two `agent-spill-sink` tests leave `project` in tmp. Type: fix · Size: S · Blast: contained.
 - [ ] **feat/parallel-agents follow-ups** (task 7 review, 2026-11-06) — items (1) and (3) DONE in fix/parallel-agents-followups, merged 40d86c0 (cells-width rows; `[agents]` prefix, live one-shot shows `[agents] sub-agents capped at 1 at once…`); only the live `-np 2` checklist remains: (1) `tui/src/permission-ui.ts:81` (and `PermissionPrompt.tsx:11-13` `truncate`) cut by UTF-16 length, not cells — a CJK / wide label makes the dialog one row taller than `permissionPromptRows` says; one width-aware helper (string-width, like `cells.ts`). (3) `cli/src/wiring.ts:294` logs `sub-agents capped at N at once…` through `options.log`, which `main.ts` prefixes with `[hook]`: give it its own prefix. (5) DONE in fix/tool-output-location (exclusive-create spills). **Live, not yet run:** fan-out with a server at `-np 2`+ (N=1 vs N=3 timing, `subagents.execution: parallel` vs `sequential`, the permission prompt naming the child, Esc on one child / the parent). Type: fix · Size: S · Blast: contained.
 - [ ] **feat/pod-laptop-only-notice** (owner 2026-11-05, config-carry Q5): when a session runs in a pod/container, the laptop says once which of ITS setup does not apply there — `hooks`, `mcpServers`, `PROMPT.md`, `agents/` — like the existing packages line (`main.ts:641-646`; `docs/container-config-sources.md` §3.3, eval project-config rule 10). Right after feat/config-carry. Then an owner discussion: what more can be carried into the pod/container (eval project-config Q9 MCP, skills, sub-agent defs). Type: feat · Size: S · Blast: contained.
-- [x] **fix/cli-tests-terminal-clean** — DONE, merged 44c43e4 (2026-11-06; under `script` 1 unidentified fail in 1 of 4 runs — watch); (review of fix/cli-main-terminal-seam, F1, 2026-11-05): outside `main.test.ts`, `packages/cli` is still not terminal-clean — under the silent-TTY preload (`.tentacle/tmp/flaky-tests/tty-silent-preload.ts`) `output-streams.test.ts:149` mounts the real TUI and times out (run exits 130, no summary) and 7 `engine-runtime.test.ts` tests fail (`:653` registers 2 exit handlers instead of 1; `terminal.ts:49` suspected, unconfirmed). A developer running `bun test packages/cli` in a terminal loses the run. Same seam pattern as fix/cli-main-terminal-seam. Type: fix · Size: S · Blast: contained.
-- [x] **fix/resume-cancel-silent** — DONE, merged d0afc85 (2026-11-06); (owner 2026-11-05): Esc in the `--resume` session picker prints `[resume] cancelled`; the owner wants a silent exit (option A: no line at all). Both paths: `packages/cli/src/session-resume.ts:103` (local) and `packages/cli/src/connect.ts:235` (`connect --resume`); tests `session-resume.test.ts`, `tui-sessions.test.ts`, `connect.test.ts` (the last is edited by feat/config-carry → start after it merges). Keep the exit code as today. Type: fix · Size: S · Blast: contained · Suited: Sonnet.
-- [x] **fix/run-rm-flag** — DONE, merged 0732481 (2026-11-06; personal Opus, fresh Opus review PASS 1 LOW fixed; live docker: `--keep` unknown, `run -d --rm` removed after the idle grace, `run -d` kept `up · idle`, old binary reads a v2 record as `unknown owner`). Doc `docs/fix/run-rm-flag.md`. (owner 2026-11-04): replace `run --keep[=true|false]` with `--rm` (docker/podman/kubectl convention: default keeps, `--rm` removes when the run ends; `--detach --rm` = removed when the run ends). Config `keep: false` → `rm: true`; `--rm=false` only overrides the config. No `--remove` alias, no `--keep` compat (pre-public; CHANGELOG line). Update help, README, the `still running · removed when the run ends` line, docs/attach-detach-behaviour.md. After fix/cli-output-streams (same files). Also add `-d` as the short flag of `--detach` (owner 2026-11-04). Type: fix · Size: S–M · Blast: cross-module.
-- [x] **feat/parallel-tools** (parallel-execution task 6) — done (a427121, 2026-11-05): `tools.execution` read-only default, maxParallel 8, MCP `readOnlyTools`, queued/running signal, exact cut labels, protocol v15. [doc](docs/feat/parallel-tools.md)
-- [x] **fix/cli-main-terminal-seam** — DONE, merged 0a7496b (2026-11-05); (investigated 2026-11-05, report `.tentacle/tmp/flaky-tests/report.md` — copy it into the task doc's Context): NO timing flake — 0 fails in 39 full runs. The "2 flaky" fails are `main.test.ts` D4 + R2-1, which depend on stdin (an open, silent, non-TTY pipe), and the 7 TTY-dependent `main.test.ts` failures (entry below) have the same root cause, all reproduced without `script` via `--preload` stubs. One fix: inject the terminal/stdin state through a test seam with unchanged production defaults. Closes both entries. Type: fix · Size: S · Blast: contained.
-- [x] **feat/tui-target-badge** — **DONE 2026-11-05, merged `7ee6dc2`** (6 rounds: exec Sonnet ×5 + 1 fresh; reviews Opus; owner live test OK; final format `kubernetes:<pod>/<container>` · `docker:` · `podman:`, grey prefix, `k8s:` when narrow, auto-accept on `#fec20a`). (owner 2026-11-04): in a container/pod the status bar shows, left, an accent-coloured (not dim) badge with engine + name — `docker tentacle-ba89d072 · ~/trash · ↑…`, `podman …`, `pod <name>`, and `pod <name>/<container>` when the pod has more than one container (so the annotation-picked container is visible). Local: nothing, bar unchanged. Never truncated: the path shrinks first. The name comes from the laptop (never pod-supplied text). Plus (owner 2026-11-04): the model name MOVES from the status bar to the input field's top border, right-aligned (`──── rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 ─`, like Claude Code's session title); too long → cut on the LEFT with `…`. Plus (owner 2026-11-05): ctx is ALWAYS shown with its max; before this TUI measured a turn (fresh session, attach) it shows the exact count where the provider can count without generating (Anthropic `count_tokens`, llama.cpp `/tokenize` with the chat template), else the existing estimate (`estimateUsed`, heuristic chars/4 — measured 0.02 ms on ~500k tokens) marked `~`; exact after the first turn. ↑↓ hidden until measured. Daemon-side, once at open. Type: feat · Size: M · Blast: cross-module.
-- [x] **fix: `main.test.ts` depends on the real terminal** — DONE via fix/cli-main-terminal-seam (0a7496b); (found 2026-11-04): run under a TTY (`script -q /dev/null bun test packages/cli/test/main.test.ts`) 7 tests fail on main (help with no prompt times out, skill/agent-def diagnostics, R13 attach, slice-E attach, two mount tests hit a real `Continue? [y/N]`). CI/agents run without a TTY so it is hidden. Tests must inject the TTY state, never read the process's. Type: fix · Size: S · Blast: contained.
 - [ ] **Parallel tool calls** ([`docs/eval/parallel-tools.md`](docs/eval/parallel-tools.md);
       owner, 2026-10-25) — run a round's calls in parallel where safe; which
       tools are parallel-safe to evaluate; setting `sequential` | `parallel`,
       default to recommend (owner's first idea: sequential). AFTER task 7
       and `context-reset`. Type: eval → feat · Blast: load-bearing.
-- [x] **Parallel sub-agents** — DONE as `feat/parallel-agents`, merged 745cf13 (2026-11-06; doc `docs/feat/parallel-agents.md`, follow-ups above) ([`docs/eval/parallel-agents.md`](docs/eval/parallel-agents.md);
-      owner, 2026-10-25) — run several `agent_task` calls in parallel;
-      setting `sequential` | `parallel`, default to recommend (owner's first
-      idea: parallel). Separate task from parallel tools, evaluated
-      together. AFTER task 7 and `context-reset`. Type: eval → feat · Blast:
-      load-bearing.
-
-### Block 7 — MCP (client, stdio transport, tool adapter)
-
-- [x] 🟡 **MCP tool calls have no timeout and ignore the turn's abort signal.**
-      FIXED (2026-10-14): `McpClient.request` now takes `{signal, timeoutMs}`;
-      `callTool` defaults to a 120s per-call timeout and the adapter threads
-      `ctx.signal`. On timeout/abort it rejects *and* sends
-      `notifications/cancelled` so the server stops. Tests in `client.test.ts`,
-      `tool-adapter.test.ts`.
-- [x] 🔵 MCP server `stderr: "inherit"` prints over the TUI's alt-screen. FIXED
-      (2026-10-14): `transport.ts` now spawns with `stderr:"pipe"`, drains it, and
-      routes lines to an optional `onStderr` (dropped by default) — threaded via
-      `ConnectOptions.onStderr`.
-- [x] 🔵 MCP server subprocess inherits the full `process.env` (API keys). FIXED
-      (2026-10-14): spawns now use `scrubSensitiveEnv(process.env)` (new shared
-      `@tentacle/core` helper, denylist of `*API_KEY*`/`*TOKEN*`/`*SECRET*`
-      /…); the user's explicit `spec.env` is still honoured. The **shell** env
-      leak (Block-1 ②) can now reuse this same helper. Test in `core/test/env.test.ts`.
-- [x] 🔵 `McpClient.handleMessage` silently drops inbound server requests. FIXED
-      (2026-10-14): an inbound *request* (method + id) we don't implement now gets
-      a JSON-RPC `-32601` reply instead of hanging the server; notifications are
-      still ignored. Test in `client.test.ts`.
 
 ### Block 8 — cross-cutting audit (2026-10-17, each verified by a fresh-context sub-agent repro)
 
-- [x] 🔴 **Pod `--model-proxy`: cancel didn't stop the model, and the requested
-      tool could still run.** FIXED (merged to main 2026-10-19): the agent loop
-      now re-checks `aborted` at every boundary (after the stream completes,
-      before each tool call, after the last tool on the cap path, and in
-      `runTool` after a permission approval) — no tool starts after a cancel,
-      provider- and runtime-independent. Three fresh-context reviews, all
-      findings resolved; gate green (728 pass).
-      `docs/fix/proxy-model-cancel.md`. Type: fix · Size: S · Blast:
-      load-bearing. **Model half fixed** by `fix/pod-model-streaming`
-      (2026-10-18). Batch-fallback *wait* follow-up split out below.
 - [ ] 🟡 **Pod `--model-proxy` batch fallback waits for the laptop's generation
       to finish after a cancel.** Split off the item above (FIXED, merged to
       main 2026-10-19): the loop fix stops the *actions*, but a
       mixed-version (old-laptop, batch-only) pod still waits for the laptop's
       generation to complete. Low priority — race `send` against the signal in
       `packages/daemon/src/proxy-model.ts:~183`.
-- [x] 🔴 **`/compact` with an empty summary wipes the history** (reasoning-only
-      model, or an in-band SSE `{"error":…}` chunk) and persists it. CONFIRMED.
-      **FIXED (merged to main):** `docs/fix/compact-empty-summary-wipe.md` —
-      `summarizeConversation` throws `CompactError` on an empty summary, so
-      `Session.compact` rejects pre-mutation/pre-persist (history intact in
-      memory and on disk, all runtimes). Type: fix · Size: S · Blast: cross-module.
 - [ ] 🟡 **Remote `/compact` failure shows an opaque `internal error`** (worker
       surfaces the real `CompactError` via `exposeInternalErrors`, but a remote
       `connect` omits the flag — `ws-server.ts:182-187` — so the client gets
@@ -709,29 +389,6 @@ Daily-driver work (done 2026-10-14):
       version stays 1). Second review pass, Finding 4, of
       `docs/fix/compact-empty-summary-wipe.md`. Type: feat · Size: S ·
       Blast: cross-module.
-- [x] 🟡 **`session/compact` races a turn on the daemon** (both directions: compact
-      mid-turn → orphan `tool` msg; prompt mid-compact → turn silently lost).
-      CONFIRMED. **Fix (DONE 2026-10-20, `fix/daemon-compact-turn-guard`):**
-      `docs/fix/daemon-compact-turn-guard.md`. Type: fix · Size: S ·
-      Blast: load-bearing.
-- [x] 🟡 **No daemon session lifecycle**: background jobs orphaned on `/clear` /
-      disconnect / exit; duplicate `sessionId` clobbers; `shell_kill` misses
-      grandchildren. CONFIRMED. **Eval:** `docs/eval/daemon-session-lifecycle.md`.
-      DONE through other tasks (audit 2026-10-20): `fix/background-process-groups`
-      (process groups, dispose on close, exit net) + `feat/session-registry` and
-      `feat/session-ttl-limits` (daemon-owned sessions: a live id re-attaches,
-      jobs disposed on close). Type: eval · Size: M · Blast: load-bearing.
-- [x] 🟡 **No history-validity invariant** (dangling tool_calls / invalid-JSON args Done by feat/history-validity-invariant (merged 118fb8f, 2026-11-11).
-      persisted and re-sent; resume repairs nothing). CONFIRMED (mostly).
-      Subsumes the Block-3 requester-throw + consecutive-user items.
-      **Eval:** `docs/eval/history-validity-invariant.md`. Type: eval · Size: M ·
-      Blast: load-bearing.
-- [x] 🟡 **Session store not crash-safe** (in-place write truncates; failed `void
-      save` crashes the TUI; corrupt files vanish from `--resume`; no schema
-      check). FIXED (2026-10-20, `fix/session-store-durability`):
-      `docs/fix/session-store-durability.md` — atomic temp+fsync+rename, per-uid
-      latest-wins queue, validated loud `load`/`list`, save failures → TUI notice.
-      Type: fix · Size: M · Blast: load-bearing.
 - [ ] **Detach `fix/detach-live`** ([task doc](docs/fix/detach-live.md)): the live
       test's defects in S1–S3. `/quit` closes the session for every TUI on it (y/N
       with others), FAIL 39, the attach notice, the launcher line; auto-accept
@@ -744,38 +401,6 @@ Daily-driver work (done 2026-10-14):
       `[resume] … — (empty)` left after exit; `attach` without `--profile` shows the
       default model; `dispose()`'s same late read (one `seal`); a window close or
       crash during this TUI's model call fails the other's turn (needs re-routing).
-- [x] ✅ **Detach S2b + S4 `feat/detached-relay-lifecycle`**
-      ([task doc](docs/feat/detached-relay-lifecycle.md); split out of S2, owner
-      Q1, 2026-10-30; S4 folded in, owner 2026-10-31) — **DONE, merged `4f0fc2f` 2026-10-31**
-      (fresh Opus Review + 2 DeepSeek fix rounds). DR-5 `--keep=false` with `--detach`, DR-9
-      keep-awake, the two `Detach S2` items below, `ps` STATUS through `statusOf`,
-      `rm` stops the owner. S2 live-test items 3, 8, 17 moved to its checklist,
-      run by hand after S3 merges; before S3, same release.
-      Type: feat · Size: L · Blast: load-bearing · Suited: Opus, fresh review.
-- [x] ✅ **Detach S2: report the resident's REAL version** (DONE in
-      `4f0fc2f`, Phase A; Review of
-      `feat/detached-runs` S1 fix round 4, F2 + F3, 2026-10-30; owner: defer to
-      S2) — `--resident-status` does not say which version the running
-      resident is. So (F2, `engine-runtime.ts:639`) the "stray resident"
-      warning fires only on `inject` (once): a later `attach` that takes
-      `reuse`, or the `replace` path, joins a resident of another BUILD inside
-      the same protocol version silently (`initialize` still refuses a
-      protocol skew); and (F3, `pod-resident.ts:733`) a refusal names the
-      ASKING binary's version, not the resident's, so it can suggest the wrong
-      version. Fail-closed today (nothing stopped or installed). Fix: add the
-      resident's version to `--resident-status` and use it in both places.
-      Type: fix · Size: S · Blast: load-bearing (detach) · Suited: Opus, fresh review.
-- [x] ✅ **Detach S2: do not stop an idle resident before an install that cannot land**
-      (DONE in `4f0fc2f`, Phase A; Review of
-      `feat/detached-runs` S1 fix round 5, F3, 2026-10-30; owner: defer
-      to S2) — `engine-runtime.ts` stops the idle resident (`:580`) BEFORE the
-      install (`:594`). With an unwritable install path and a different version
-      (non-root image, no `--bin-dir`) every `attach` stops the idle resident,
-      fails the install and goes on with the old binary: it never converges, and
-      an idle resident may hold a finished session. Loud today (the warning names
-      `--bin-dir`). Fix: check the install path is writable (or install to a temp
-      name) before stopping. Type: fix · Size: S · Blast: load-bearing (detach) ·
-      Suited: Opus, fresh review.
 - [ ] 🔵 **TUI: close a turn's still-running tool calls when the turn fails**
       (Review of `feat/tui-tool-blink`, 2026-10-30; owner: separate task) — after
       a failed turn a tool call stays `running` in the session state (seen as a
@@ -806,18 +431,6 @@ Daily-driver work (done 2026-10-14):
       back.** Quality-only or a hard 400 in tool loops: undetermined, needs a live
       test. **Eval:** `docs/eval/anthropic-thinking-echo.md`. Type: eval · Size: M ·
       Blast: cross-module.
-- [x] 🟡 **No retry on a transient model-connection drop** (`ECONNRESET` kills
-      the turn and the sub-agent; only manual `/retry`), and the error log says
-      `(no stack)` with no phase. Recommends retry pre-first-byte only + phase
-      diagnostics. **Feat (promoted 2026-10-21, `feat/model-connection-resilience`):**
-      `docs/feat/model-connection-resilience.md` — DONE — merged (`399ea0b`); reviewed (APPROVE-WITH-NITS, nits fixed).
-      Type: feat · Size: M · Blast: load-bearing.
-- [x] 🟡 **`shell_kill` leaves grandchildren running** (only `sh` gets the signal;
-      a compound command's child is re-parented to PID 1). FIXED (2026-10-19,
-      `fix/background-process-groups`): every shell runs in its own process
-      group (group TERM → KILL), `dispose()` on connection close, and a
-      main-thread exit net (incl. the worker path, `cmd &` children, SIGHUP/
-      SIGTERM; `nohup` preserved). See `docs/fix/background-process-groups.md`.
 - [ ] 🟢 **Graceful shutdown for background jobs** (follow-up of
       `fix/background-process-groups`). On the worker path, and in practice on
       stdio/ws `serve`, tentacle's exit kills job groups with SIGKILL only — no
@@ -832,20 +445,6 @@ Daily-driver work (done 2026-10-14):
       `/compact` wiping history). See `docs/fix/compact-empty-summary-wipe.md`
       (the wipe is guarded there; this provider defect — which also affects
       normal turns — is the separate follow-up).
-- [x] 🟡 **A failed session save crashes the TUI** (`void store.save` rejects →
-      unhandled rejection → exit 1 with a raw stack). See
-      `docs/fix/session-store-durability.md` (fixed there: `SessionSaver`).
-- [x] 🟡 **`--resume` (no uid) resumes another project's session**: FIXED
-      2026-10-20, `fix/session-store-per-project`: sessions now live in
-      `~/.config/tentacle/sessions/<projectKey(cwd)>/<uid>.json` (old flat files
-      ignored, no migration — owner, pre-v0.1.0; another project's uid is refused).
-      `docs/fix/session-store-per-project.md` · M · load-bearing (fresh Review waived by the owner).
-- [x] **`--resume` picker**: DONE 2026-10-20, `feat/resume-picker`.
-      `--resume` (no uid, ≥2 sessions, on a terminal) opens a pre-mount Ink
-      picker (↑↓/jk, Enter, Esc/Ctrl+C → exit 0); `--continue` resumes the
-      newest; no TTY → newest, said explicitly. Covers tui/run/attach through
-      `openTuiSessions`. `docs/feat/resume-picker.md` · M · cross-module (fresh
-      Review skipped by the owner). Follow-up: in-TUI `/resume`.
 
 ### Block 10 — remote execution model (pod mode: what runs where; 2026-10-17, measured on OCP)
 
@@ -853,12 +452,6 @@ Umbrella and order: `docs/eval/remote-execution-model.md` (proposes a new §7
 invariant: "compute next to the code, identity with the user; a pod is not
 trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
 
-- [x] 🔴 **1. Pod mode shows nothing until the whole model round ends** (47 s of
-      silence measured, then 6,480 events at once; Esc doesn't stop the model).
-      **Fix:** `docs/fix/pod-model-streaming.md` — done 2026-10-18: first token
-      0.22 s on kind, Esc stops the laptop model; `model/streamChunked` +
-      generic `$/progress` / `$/cancelRequest`. Type: fix · Size: M · Blast:
-      load-bearing.
 - [ ] 🟡 **2. A large payload blocks every other message on the channel** (5 MB
       → ~4 s head-of-line; an end-to-end window W=2×256 KB bounds it to ~0.25 s).
       **Eval:** `docs/eval/rpc-flow-control.md`. Needs 1. Type: eval → feat ·
@@ -881,20 +474,6 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       async notice until the reply's text ends, or insert it before the item
       that is still streaming. Display/export only, never persisted.
       Type: fix · Size: S · Blast: contained.
-- [x] 🔵 **A late `/mcp` answer appears after `/clear`.** FIXED by
-      `feat/mcp-tools-panel` (2026-10-21): `/mcp` is a panel now; a probe that
-      answers after its panel closed is dropped (generation token).
-- [x] 🟡 **`/mcp` — interactive panel listing each server's tools.**
-      `docs/feat/mcp-tools-panel.md`. Type: feat · Size: L · Blast:
-      load-bearing (wire v7→v8 + a new in-session modal) · Suited: strong
-      model; fresh-context Review waived by the owner (budget). Merged 2a7a913.
-- [x] 🟡 **`/skills` — panel listing every skill the daemon found.** Who may
-      invoke each one (you / model), where it lives, and the discovery problems
-      (now visible on `run`/`attach` too). New wire method `skills/list`
-      (additive, v8 kept); the `/mcp` panel logic generalised into
-      `tree-panel.ts`. DONE — merged (`c2027c8`): `docs/feat/skills-panel.md`. Type: feat · Size: L ·
-      Blast: load-bearing · Suited: strong model; fresh-context Review waived
-      by the owner (budget).
 - [ ] 🔵 **`/mcp` polish.**
       - ~~No "probing…" placeholder during the ≤2 s probe.~~ Done by
         `feat/mcp-tools-panel`.
@@ -958,14 +537,6 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         plans ready: 1, 8; planning: 4. Absorbs the open questions of 9. Type: eval → feat · Size: L → split · Blast: load-bearing
       — **Eval (deferred, low):** `docs/fix/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
 
-- [x] **`connect` cannot trust a self-signed daemon** (`serve --tls-cert/--tls-key`
-      gives `wss://`, but `connect` had no `--ca-cert` / `--insecure-skip-tls-verify`).
-      DONE (2026-10-20, on `main`): `--ca-cert FILE` (trust anchor, PEM-validated) +
-      `--insecure-skip-tls-verify` (dev-only); one `tls` object flows to the socket
-      `init` and the classifying probe; a failed TLS handshake (close 1015) is named and
-      the CLI points at the flag; TLS flags on `ws://` are an error.
-      **Doc:** `docs/feat/client-tls-trust.md`. Type: feat · Size: S · Blast: contained.
-
 - [ ] **Skills support (Agent Skills, `SKILL.md`)** — packaged procedural
       guidance the model opts into (skills = *how to do it*; the result pipeline
       = *the guarantee the context stays clean*). Next on the roadmap. Owner
@@ -973,275 +544,14 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       Split into 4 feats: skills-core → skills-compaction → skills-slash /
       skills-subagent. **Eval:** `docs/eval/agent-skills.md`. Type: eval →
       feat ×4 · Size: L → split · Blast: load-bearing.
-      - [x] **skills-core** (discovery, catalog, `skill` tool) — DONE
-        2026-10-20, `feat/skills-core`: `docs/feat/skills-core.md`. Type: feat · Size: M ·
-        Blast: cross-module.
-      - [x] **skills-compaction** (active skills survive `/compact`, `SKILL.md`
-        re-read) — DONE 2026-10-21, `feat/skills-compaction`: `docs/feat/skills-compaction.md`.
-        Type: feat · Size: M · Blast: load-bearing.
-      - [x] **skills-slash** (`/skill-name`: catalog on the wire, structured
-        activation, protocol v7) — DONE 2026-10-21, `feat/skills-slash`:
-        `docs/feat/skills-slash.md`. Type: feat · Size: M · Blast: load-bearing.
       - [ ] **skills-subagent** (`agent_task{skill}`: the parent passes the name,
         the sub-agent loads it before its first round) — eval written 2026-10-21,
         owner decisions Q1–Q8 open: `docs/eval/skills-subagent.md`. Type: eval →
         feat · Size: S–M · Blast: load-bearing (model-facing schema).
 
-- [x] **Remove `TENTACLE_CWD` / config `cwd`: the launch folder IS the working
-      folder** — DONE 2026-10-20, `feat/remove-tentacle-cwd`: `docs/feat/remove-tentacle-cwd.md`. (owner decision 2026-10-20, as in Claude Code / opencode / pi).
-      Today AGENTS.md is found from the launch cwd (`config/src/load.ts:158,218`)
-      while tools run in `TENTACLE_CWD ?? cwd ?? launch` (`config/src/resolve.ts:186`):
-      rules from one folder, work in another. Scope: `resolve.ts:186`, the
-      `cwd` key in `config/src/schema.ts:72` (top-level + profiles; **not** the
-      MCP server `cwd` at `:51`), the scaffold comment `defaults.ts:97`, help
-      `cli/src/main.ts:122`, `README.md:60`. A config file that still has `cwd`
-      gets a clear error, not silent ignoring (pre-public, no shim). The cli tests
-      that isolate via `TENTACLE_CWD` (`main`, `worker`, `args`, `wiring`,
-      `profile-flag`, `serve-*`, `fixtures/worker-exit-net.ts`) move to
-      `loadConfig({ cwd })` / a spawned child's `cwd`. Prerequisite for
-      `feat/skills-core` (one discovery root). Type: feat · Size: S–M · Blast:
-      cross-module · Suited: weaker model OK + standard review.
-
 - [ ] **No changelog discipline** (no `CHANGELOG.md`). **Eval:**
       `docs/eval/changelog-discipline.md`. Type: eval. Open.
 
-- [x] **Per-project config** (`.tentacle/config.jsonc` in the launch folder
-      overrides the user config). **Eval:** `docs/eval/project-config.md` —
-      REJECTED by the owner (2026-10-20): an implicit project file is launch-time
-      code execution / key exfiltration. Replaced by the item below.
-- [x] **Named config profiles** (`tentacle --profile <name>` / `TENTACLE_PROFILE`):
-      `profiles` in the user's `config.jsonc`, merged over it (connection group
-      as a unit; MCP servers by name, `null` removes). DONE 2026-10-20,
-      `feat/config-profiles`: `docs/feat/config-profiles.md` · S–M · cross-module.
-- [x] 🟡 **Unknown CLI flags are never rejected; `-n` is not a namespace.** FIXED
-      2026-10-20, `fix/cli-strict-args`: `docs/fix/cli-strict-args.md` — one closed
-      spec per command; flags anywhere (`attach mypod -n dev`); typos, missing
-      values, repeats and stray words are errors before any cluster/model call.
-      Type: fix · Size: S–M · Blast: cross-module.
-- [x] **No `tentacle update`** (self-update from GitHub releases + the pod
-      binaries). All decisions D1–D8 taken 2026-10-22; ships in **v0.1.0**.
-      **Eval:** `docs/eval/tentacle-update.md`. Type: eval → feat ×3 · Size: M
-      overall · Blast: cross-module. Children, in order:
-      - [x] **pod-binary-download** — DONE 2026-10-22 (`feat/pod-binary-download`, `docs/feat/pod-binary-download.md`): version marker in the binary, download +
-        SHA-256 verify helper, `run`/`attach` offline error on a missing/stale
-        pod binary. Type: feat · Size: S–M · Blast: cross-module.
-      - [x] **tentacle-update** — DONE 2026-10-22 (`feat/tentacle-update`, `docs/feat/tentacle-update.md`): `tentacle update [--check] [--version vX]`:
-        staged download, verify, atomic rename (self last). Type: feat · Size: M
-        · Blast: cross-module.
-      - [x] **release-script** — DONE 2026-10-22 (`feat/release-script`, `docs/feat/release-script.md`, `docs/RELEASING.md`): `bun run release <version>`: bump every
-        `package.json`, CHANGELOG `[Unreleased]` → version, commit + tag.
-        Type: feat · Size: S · Blast: contained.
-      - [ ] 🔵 **Later hardening:** Ed25519-signed `SHA256SUMS` verified by
-        `update` (D3 deferred).
-- [x] **Extensibility: users extend tentacle themselves (hooks + packages)** —
-      out-of-process hooks (`tool_call` → `PermissionGate`, `tool_result` →
-      result pipeline, `turn_start`, `turn_end`, `model_request`) + declarative
-      packages; no in-process API, no pi/Claude Code compatibility. Eval written
-      2026-10-21, owner decisions D1–D12 and all child sub-decisions recorded;
-      5 children, each with a drafted Implementation, promoted in order
-      (tool-naming first). **Eval:**
-      `docs/eval/extensibility.md`. Type: eval → feat ×5 · Size: L → split ·
-      Blast: load-bearing.
-      - [x] **tool-naming** (CamelCase display labels only, names in code
-        unchanged; shared `toolLabel` in core; first, hooks-core's H1 line needs
-        it) — DONE 2026-10-22 (`feat/tool-naming`):
-        `docs/feat/tool-naming.md`. Type: feat · Size: S · Blast: contained.
-      - [x] **hooks-core** (config `hooks`, `stdin` in core, `HookRunner`,
-        `tool_call` → `PermissionGate`, `tool_result` → pipeline; TUI line
-        `⎿ hook <name> blocked <Tool>`) — DONE 2026-10-22 (`feat/hooks-core`): `docs/feat/hooks-core.md`. Type: feat ·
-        Size: M · Blast: load-bearing.
-      - [x] **hooks-turn** (`turn_start`, `turn_end` + continue ≤3,
-        `model_request` notify; protocol 8 → 9) — DONE 2026-10-22 (`feat/hooks-turn`):
-        `docs/feat/hooks-turn.md`. Type: feat · Size: M · Blast: load-bearing.
-      - [x] **hooks-project-trust** (`.agents/hooks.json`, `hooks/trust`
-        daemon→client, laptop store for the local worker only, auto-approve
-        excluded) — DONE 2026-10-22 (`feat/hooks-project-trust`): `docs/feat/hooks-project-trust.md`.
-        Type: feat · Size: M · Blast: load-bearing (§7).
-      - [x] **packages** (own format; path + git; `tentacle package …` (alias `tentacle install`); not in
-        pod v1) — DONE 2026-10-22 (`feat/packages`): `docs/feat/packages.md`. Type:
-        feat · Size: M · Blast: cross-module.
-        - [ ] 🔵 **Debt: no 64-char MCP tool-name warning in the TUI** (K2). It is
-          printed only in `--plain` / one-shot mode (`cli/src/main.ts`, after
-          `connectMcpServers`). The TUI connects MCP in the worker, which has no
-          warning channel (a raw write would corrupt Ink, §7). Route it through
-          the worker's MCP status (`McpStatusTracker` / `mcp/status`). Type: feat
-          · Size: S · Blast: contained.
-      - [x] 🔴 **In-process trust path skips the `hooks/trust` schema** (DONE 2026-10-22) — in the
-        `--in-process` TUI and the worker fallback, `askHooksTrust`
-        (`cli/src/wiring.ts:308-324`) calls the resolver with no
-        `HooksTrustParamsSchema` check, so a project hook over the wire limits
-        (5,000-char command reproduced) is offered, trusted and loaded.
-        Found by the `docs/extensions.md` accuracy review. **Doc:**
-        `docs/fix/in-process-hooks-trust-schema.md`. Type: fix · Size: S ·
-        Blast: load-bearing (§7 trust).
-      - [x] 🔵 **No package-dir / repo-root pointer for hooks and MCP servers** —
-        hooks run in the session cwd with no env var naming their package dir
-        or the project root, so a package or project hook launched from a
-        subfolder can't find its own script by relative path. DONE 2026-10-22 (`feat/hook-env-dirs`): `TENTACLE_PROJECT_DIR` / `TENTACLE_PACKAGE_DIR`, `docs/feat/hook-env-dirs.md`. Type: feat ·
-        Size: S · Blast: contained.
-      - [ ] **Hook model access (LLM-judge seam)** — hooks call a model
-        through tentacle (unix-socket HTTP + per-invocation token), judge
-        model from a laptop-side `hookModels` map, resolved and capped on the
-        laptop; in a pod via a new daemon→client `model/complete` (keys never
-        leave the laptop). Owner decisions M1–M8 open. **Eval:**
-        `docs/eval/hook-model-access.md`. Type: eval → feat · Size: L (split
-        A local / B pod+protocol) · Blast: load-bearing.
-      - [x] **protocol-v10-forward-compat** (protocol 9 → 10). Strip schemas
-        and a tolerant JSON-RPC envelope. Unknown update kinds become
-        `unsupported`. Update classes are display / mandatory / blocking, and
-        blocking kinds are gated by the `initialize` list. The `hooks/trust`
-        `model` field is reserved. DONE 2026-10-22 (`feat/protocol-v10-forward-compat`):
-        `docs/feat/protocol-v10-forward-compat.md`. Type: feat · Size: M ·
-        Blast: load-bearing (protocol).
-        - [ ] 🔵 **Nit: re-check pending asks after a throwing send** — a client
-          whose send throws in `emit` is dropped without `recheckAsks()` (needs a
-          programming error; next attach/detach re-checks). Fix: one
-          `recheckAsks()` after the fan-out loop (never inside: `settle` emits).
-          Also optional: default `requestTimeoutMs` for requests to a pod.
-          Type: fix · Size: S · Blast: contained.
-      - **User guide:** `docs/extensions.md` (hooks + packages, worked examples).
-
-- [x] **Send now (`Ctrl+X Ctrl+S`)** — interrupt the running turn (stream,
-      tools, a pending permission, a hook or `/compact`) and send this client's
-      queued messages as one prompt, atomically via a new `session/send_now`
-      (additive in protocol 10). Owner decisions S1–S3, D1–D5 taken; D3c (queue
-      locally during `/compact`) confirmed 2026-10-22. **Eval:**
-      `docs/eval/send-now.md`. Type: eval → feat ×3 · Size: L → split · Blast:
-      load-bearing.
-      DONE: 4a daemon (`docs/feat/send-now-a.md`), 4b client
-      (`send-now-b.md`), 4c TUI (`send-now-c.md`, merged 2026-10-24, tried
-      by the owner by hand), 4d compaction-time queue (`send-now-d.md`, merged
-      2026-10-24). Send-now COMPLETE.
-
-- [x] **Version mismatch: say who is older and what to do — never a silent
-      failure** (owner, 2026-10-24). Today the daemon refuses `initialize`
-      with `protocol version mismatch: client 10, daemon 11` (code
-      `VersionMismatch`, `daemon/src/connection.ts`); the owner likes the
-      line — keep it and add, on the SAME line, each side's tentacle version
-      and the action. Wording (owner-approved; commands in double quotes so
-      the command stays clear inside the sentence):
-      - client older: `protocol version mismatch: client 10 (tentacle 0.1.0),
-        daemon 11 (tentacle 0.2.0) — update this client: "tentacle update"`
-      - daemon older: `protocol version mismatch: client 11 (tentacle 0.2.0),
-        daemon 10 (tentacle 0.1.0) — update the daemon: run "tentacle update"
-        on that host and restart "tentacle serve"`
-      The DAEMON writes the advice (it knows both numbers — a fact, not a
-      guess), so even an old client that prints the message verbatim shows
-      it. A new client meeting an old daemon (no versions in the error) still
-      shows a clear notice from the error CODE, never by parsing the text.
-      **Container (`attach`):** say "container", not "pod". `attach` already
-      probes `tentacle --version` in the container and today reuses whatever
-      answers; instead, when that version differs from the laptop's, REPLACE
-      it with the laptop's binary (the same injection used when none is
-      there) and say so, e.g. `the container had tentacle 0.1.0; replaced
-      with 0.2.0 (this laptop's)`; if the replacement fails, a clear error
-      with the advice. `run` creates its pod with the laptop's binary, so no
-      mismatch there. Verify every path shows it (`connect` at start, a
-      reconnect after the daemon was upgraded — the TUI link status —,
-      `attach`, the app later). Order: BEFORE 2a (2a bumps the protocol to
-      11 — the first time it will happen). **Planned 2026-10-24** (slug
-      `version-mismatch-notice`, plan in the gitignored plan folder, awaiting
-      the owner → **APPROVED 2026-10-24**, **DONE 2026-10-24** (`docs/feat/version-mismatch-notice.md`, merged `90c22af`): container older → `… — update the
-      container's tentacle: run "tentacle attach" again from an up-to-date
-      laptop (it replaces an older one)`; daemon without versions → "the
-      daemon runs an older tentacle" (a deduction pinned by a test); `attach`
-      from a dev build → reuse the container's tentacle as today): re-sized M
-      · cross-module; optional `clientInfo` on
-      `initialize` (malformed = absent, never fails `initialize`) + a
-      structured `data` on the `VersionMismatch` error; no `PROTOCOL_VERSION`
-      bump. Findings: `run` CAN mismatch with a dev build or
-      `TENTACLE_POD_BIN`; the TUI status line truncates the advice
-      (`StatusBar.tsx:90`) → also a notice on reconnect; `attach` installs via
-      a temp file + `mv` (overwriting a running binary fails with
-      `ETXTBSY`); constraint for 2a: `initialize` params must stay readable
-      by every daemon, or an `InvalidParams` would hide the mismatch.
-      **Executed 2026-10-24** on `feat/version-mismatch-notice` → task doc
-      [`docs/feat/version-mismatch-notice.md`](docs/feat/version-mismatch-notice.md)
-      (Execution filled; Review pending).
-
-- [x] **`bun run compile` refused its own binary: two version markers**
-      (found 2026-10-25 by the owner building locally) — DONE
-      (`docs/fix/double-version-marker.md`, merged `6b07818`). Since
-      `19fa201` the worker (a second compile entrypoint) imported
-      `APP_VERSION`, so the marker was inlined twice; the main thread now
-      sends the version in the worker bootstrap. Sonnet executed, fresh Opus
-      review MERGE. Debt: no test pins that the main thread sends
-      `APP_VERSION` (review finding 1).
-- [x] **TUI: sent messages on a full-width background; queued messages
-      look sent, in grey** (owner, 2026-10-25) — **DONE 2026-10-25**
-      (`docs/feat/tui-message-style.md`, merged `89b1364`; built in PARALLEL
-      with task 5 at the owner's request; also compact token totals `1k` /
-      `1.2k` / `1M` and timers `1m 50s`, owner 2026-10-25; light palette
-      present but unselected until theme selection exists) — `feat/tui-message-style`,
-      S · contained, Sonnet executes, Opus reviews; runs right AFTER task 5
-      (`feat/queued-broadcast`) merges (both touch the TUI queue rows; one
-      code branch at a time).
-      - **Sent user message:** every line of it on a background colour that
-        spans the whole terminal row, left edge to right edge ("così sarà
-        anche più facile individuarli quando si scrolla una sessione
-        lunga"). Today only the `›` is coloured (`render-lines.ts`
-        `userLines`). The tint comes from the theme: subtle on dark, a
-        matching light tint on light themes; wrapped lines and blank lines
-        inside the message keep it.
-      - **Queued messages:** the rotating arc goes away. Each queued message
-        sits at the bottom of the conversation, just above the input, shaped
-        exactly like a sent message (same `›`, same row background); the ONLY
-        difference is the text colour: grey (the theme's subtle colour)
-        instead of the normal text colour (white on dark). Further queued
-        messages stack below it, one per row; under the last one, in grey as
-        today, "ctrl+x ctrl+s to send now". While the turn streams, the
-        model's output grows above them; they stay pinned at the bottom.
-      - **When it is delivered** (the daemon says so — the steer reached the
-        model, `TurnEnd.delivered` / the steer event — never a client guess)
-        the message turns to the normal text colour and stays in the
-        conversation at the point where the model received it.
-      - Logic (which rows, which state) in a pure module; the component only
-        maps it to colours. Tests on frames (ink-testing-library), plus a
-        theme check for dark and light.
-- [x] **TUI: syntax colours in file reads, by the file's language** (owner,
-      2026-10-25) — **DONE 2026-10-25** (`docs/feat/tui-read-highlight.md`,
-      merged `d27c1ca`; Sonnet executed, two fresh Opus reviews; plain above
-      `READ_HIGHLIGHT_CAP` = 2000 lines / 200 KB, an orchestrator default the
-      owner may change; html/xml left plain, since their `<script>`/`<style>`
-      blocks would need content detection) — `feat/tui-read-highlight`, S · contained, Sonnet
-      executes, Opus reviews; runs AFTER task 5 merges (same
-      `render-lines.ts`). A `Read` result (preview AND the ctrl+o expanded
-      view) is coloured by the language of the file it read — Go, Python,
-      JS/TS, Markdown, YAML, shell, Rust… — using the `cli-highlight`
-      (highlight.js) dependency the TUI already has for markdown code blocks.
-      - Language from the file EXTENSION, never content auto-detection (slow
-        and wrong); unknown extension → plain text as today.
-      - Computed once per tool item and cached with the existing line cache,
-        never re-highlighted on scroll; colours follow the theme (dark /
-        light). Measure the cost in the task (estimate: ~1 ms for a 40-line
-        preview, tens of ms once for a 1000-line expand).
-      - Known limit, accepted: a preview cut starting inside a multi-line
-        comment/string may colour its first lines wrongly (cosmetic).
-      - Later, not now: the same colouring inside edit diffs (green/red bars).
-- [x] **TUI: a spilled tool result shows a short note, not the model's banner**
-      (owner, 2026-10-25) — **DONE 2026-10-25** (`docs/feat/tui-spill-note.md`,
-      merged `2dd5a36`; Opus executed, fresh Opus review MERGE; daemon record v5;
-      the model's no-path banner is now tool-aware; a v4 record holding `spill`
-      is accepted, harmless, left as is) — `feat/tui-spill-note`, L · load-bearing (record v5,
-      persisted `spill` field; owner-approved plan), Opus executes, fresh Opus review; runs BEFORE task 6
-      `tui-foreign-turns`. Today a too-large tool result shows the banner meant
-      for the model (`[large fs_read output: full output (N chars) saved to
-      .tentacle/tool-output/… do NOT read it whole]`, built in
-      `packages/agent/src/result-pipeline.ts` `spillLargeOutput`).
-      - The model keeps the banner unchanged.
-      - The daemon flags the result structurally (an additive field: spilled,
-        chars, path) — the TUI NEVER parses the banner text (owner principle:
-        the client never guesses). It must also hold on resume / reload from
-        history (persisted or derivable from a fact, never from text).
-      - TUI text in ENGLISH (owner). Normal view: a grey line
-        `40.8k chars · too large, the model reads it in parts`, then the
-        head/tail preview, syntax-coloured as in `tui-read-highlight`, with
-        the usual `… +N more lines · ctrl+o to expand`.
-      - ctrl+o: the grey line, then `saved to <path>` (in a pod:
-        `saved in the pod to <path>`), then the full head, `… N chars
-        omitted …`, the full tail. The path is shown ONLY in ctrl+o (owner).
-      - Same for every tool that spills (shell too), not only `fs_read`.
-      - The "could not be saved" case (no path) says so, without a path.
 - [ ] 🔵 **`/save` still exports the model's spill banner** (Review of
       `tui-spill-note`, 2026-10-25) — the export writes the raw tool content
       (`[large … output: …]` + preview); it could use the structured `spill`
@@ -1307,40 +617,12 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
 
 Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked up).
 
-- [x] **`tentacle attach` dies after idle** (`⚠ RpcError: peer is closed`):
-      reconnect done (8b); keepalive (Layer 1) DONE 2026-10-20
-      (`feat/pod-attach-resilience`). **Doc:** `docs/feat/pod-attach-resilience.md`.
-      Type: feat · Size: S · Blast: contained.
 - [ ] **Self-deleting injected binary on `attach`** (leave-no-trace on a
       user-owned pod). **Eval:** `docs/eval/pod-ephemeral-binary.md`. Type: eval.
 - [ ] **React 18 → 19 + Ink 5 → 8** (want-driven, retires two workarounds).
       **Eval:** `docs/eval/react-19-migration.md`. Type: eval.
 
 ## Roadmap (ordered)
-
-- [x] **feat/tool-toggles** — **DONE 2026-11-20, merged `fb644eb4`.** (owner 2026-11-20: work it TOMORROW, before
-  feat/tui-btw — on qwen3.8 the built-in tools eat a lot of context) — switch
-  built-in tools on/off like MCP servers and packages. Today only per-feature
-  toggles exist (`subagents.enabled`, `contextReset.enabled`,
-  `sessionHop.tool`, `workloadShell`, …); `fs_*`, `shell*`, `search` are always
-  loaded. Owner shape: the skills TOOL is always there (individual skills can
-  be switched off, not the mechanism); every other optional tool — sub-agents,
-  context reset, session hop, etc. — can be disabled. Proposal to verify in the
-  plan: `tools.enabled: { "<name>": false }` (same shape as `packages`), usable
-  in a PROFILE (e.g. a lean qwen profile via `--profile`); a TUI `/tools`
-  listing each tool with its definition's token cost, toggling for the
-  session. Invariants: a disabled tool never reaches the model (pods too);
-  a sub-agent never re-enables a tool its parent has off; phone parity.
-  **Owner-approved names (20/11):** switch by GROUP, single tool names also
-  accepted, tool names themselves unchanged —
-  `"tools": { "enabled": { "subagents": false, "fs_multi_edit": false } }`;
-  groups: `subagents` (agent_task, agent_status, agent_control, agent_message,
-  agent_kill, agent_notify), `shell` (shell, shell_output, shell_kill),
-  `schedule` (schedule_create, schedule_control), `visuals` (chart, diagram,
-  present), `context_reset`, `move_session`, `workload_shell`. `skill` is
-  never switchable.
-  Type: feat · Size: M · Blast: load-bearing (the tool list the agent loop
-  sends) · Suited: Opus plan + fresh-context review.
 
 - [ ] **feat/tui-btw** (owner 2026-11-20: "magari domani ci lavoriamo"; after the
   stabilization week unless the owner makes an exception) — `/btw <question>` in
@@ -1433,120 +715,6 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > (context-awareness / permission-reply / parallel-tools renumber to 7+);
 > fresh-context Review MERGE (APPROVE-WITH-NITS), gate 2789 / 2 / 0.
 
-- [x] **Local daemon on a worker thread** (the "TUI always over RPC" lever —
-      moves model streaming + tool execution off the render thread, so the UI
-      never janks and a daemon crash doesn't kill the UI). **DONE and now the
-      DEFAULT (2026-10-14).** `tentacle -i` runs on the worker; opt out with
-      `--in-process` (alias `--no-worker`); any worker failure still falls back
-      to in-process. MCP tools + live background-job exits now work over the RPC
-      boundary (the two gaps that had kept it opt-in — see below).
-      - `transport/src/port-channel.ts` — `messagePortChannel` (`DuplexChannel`
-        over a MessagePort/Worker) + tests (real `RpcPeer` round-trip over a
-        `MessageChannel`).
-      - Protocol: `session/snapshot` (read history back) + a resume-seed
-        (`messages`) and client-chosen `sessionId` on `session/new`, so the
-        **main thread keeps the JSON store** (decision taken) while the daemon
-        owns the live conversation. Wired through `Connection`/`HostedSession`/
-        `SessionHost` and `RemoteClient`/`RemoteSession`.
-      - `cli/src/worker.ts` (worker entry: builds the agent from `TentacleConfig`,
-        hosts one `Connection` on the worker port) + `cli/src/local-runtime.ts`
-        (`persistingController` snapshots+persists after each turn/compact;
-        `createLocalRuntime` + `startWorkerRuntime` with an 8s handshake timeout).
-      - `main.ts`: the worker daemon is the default; **any failure falls back
-        to the in-process path** (so it never breaks the TUI). Round-trip proven
-        in-memory in `cli/test/local-runtime.test.ts` (persist + resume + stable uid).
-      - **MCP in the worker (DONE 2026-10-14):** `worker.ts` connects MCP once on
-        the worker side and registers the tools into every session's registry,
-        including servers that resolve after the first session is built (no
-        handshake/slow-server race). MCP connection errors ride back as an object
-        message (ignored by `messagePortChannel`) and are logged by the main.
-      - **Live background-job exits over the wire (DONE 2026-10-14):** new
-        `background_exit` `SessionUpdate` variant (protocol); `HostedSession`
-        subscribes to the session's `JobController.onExit` and streams it via the
-        sink (idle or mid-turn); `RemoteClient.onBackgroundExit` routes it to a
-        session-independent listener; `local-runtime` exposes a read-only
-        `JobController` view (`onExit` only) that `main.ts` passes to the TUI, so
-        the worker path renders job exits exactly like in-process (deduped by job
-        id in `tui/src/state.ts`). Real-worker smoke test in `cli/test/worker.test.ts`
-        (spawn + handshake + scripted turn); job-exit round-trip in
-        `cli/test/local-runtime.test.ts`.
-      - **Not covered by tests:** a real MCP subprocess in the worker (the
-        registration path mirrors the tested in-process `connectConfiguredMcp`;
-        spawning a live MCP server in a unit test is out of scope).
-- [x] 🔴 **Compiled binary drops the worker daemon — 8s "handshake timed out",
-      silent in-process fallback.** FOUND 2026-10-14, **FIXED 2026-10-14** (on
-      branch `fix/compiled-worker-spawn`, after upgrading Bun to **1.4.3**).
-      Fix = keep the `new Worker(new URL("./worker.ts", import.meta.url).href)`
-      form + list `worker.ts` as a **second build entrypoint** (`scripts/build.ts`)
-      + **Bun ≥ 1.4.3** (on 1.4 the URL form resolves against embedded
-      entrypoints). `startWorkerRuntime` also gained a worker `error` listener so
-      a spawn failure now logs the real cause instead of the generic 8s timeout.
-      Verified end-to-end: the 1.4.3 binary contains the embedded worker
-      bootstrap, boots with `ready` on line 1 and **0 fallback lines**.
-      Running the **compiled** `dist/tentacle -i` (vs.
-      `bun packages/cli/src/main.ts`) prints `[worker] handshake failed (Error:
-      worker handshake timed out after 8000ms); using in-process` before the TUI.
-      From **source** the same config boots the worker in ~20ms, so this is
-      specific to the `bun build --compile` executable — and the in-process
-      fallback masks it, so nothing looks broken.
-      - **Root cause (repro'd in an isolated mini-project):** in a compiled
-        binary the worker is not part of the bundle, so
-        `new Worker(new URL("./worker.ts", import.meta.url).href)` fails at
-        spawn with `BuildMessage: ModuleNotFound resolving
-        "/$bunfs/root/worker.ts" (entry point)` (`/$bunfs` = the embedded
-        virtual FS). `startWorkerRuntime` (`cli/src/local-runtime.ts`) never
-        listens for the worker's `error` event, so the failure surfaces only as
-        the 8s handshake timeout, then the in-process fallback.
-      - **What does NOT work (Bun 1.3.14):**
-        - `compile.workers: ["worker.ts"]` — same `ModuleNotFound`.
-        - `worker.ts` as a **second entrypoint** + the **URL form**
-          (`new URL(…)` / `.href`) — same `ModuleNotFound`. (Current Bun docs
-          say the URL form "will work" once the worker is a listed entrypoint —
-          true on a newer Bun, NOT on 1.3.14.)
-      - **What half-works — and is a REGRESSION, do not ship:** `worker.ts` as a
-        second entrypoint + a **plain relative string** `new Worker("./worker.ts")`.
-        In a compiled binary this resolves the embedded entrypoint and the real
-        binary boots clean (verified: no fallback line, `ready` immediate). BUT
-        from **source/tests** the string form resolves relative to the **CWD**
-        (not the module), so `bun test` (CWD = repo root) → `./worker.ts` =
-        `<root>/worker.ts` (missing) → `cli/test/worker.test.ts` times out
-        (passed in 21ms on `main` with the URL form). *Leading hypothesis — to
-        confirm:* the "real worker" vs "trivial worker" delta I first suspected
-        is actually just this CWD-vs-module resolution, not the imports.
-      - **Root cause (confirmed):** it was specifier resolution, NOT the
-        import graph. The string form resolves against the **CWD** from source
-        (breaks `bun test`) but against embedded entrypoints in a compiled
-        binary; the URL form is the reverse. No single specifier works in both
-        environments on Bun 1.3 — but on **Bun 1.4** the URL form works in
-        both (verified: `new URL(…)` + 2nd entrypoint, compiled 1.4.3 mini-repro
-        → worker boots).
-      - **Done (2026-10-14):** Bun upgraded to 1.4.3 and `engines.bun` bumped
-        to `>=1.4.3` (the compiled-binary worker path needs it; source runs
-        fine on 1.3, but keeping the floor simple). Interim behaviour is safe
-        regardless: the TUI still works via the in-process fallback;
-        `--in-process` / `--no-worker` is the explicit escape hatch.
-- [x] **Autonomous wake on job-exit (DONE 2026-10-14, DEFAULT ON).** When a
-      background job exits while the agent is idle, the TUI auto-starts a
-      continuation turn so the model reacts without a user prompt.
-      - Mechanism: `Session.send("")` is a **continuation** — runs a turn over
-        existing history WITHOUT appending a user message, so the agent's
-        `flushBackgroundExits` note (injected at turn start) is what the model
-        reacts to. Threads over RPC with no protocol change (empty prompt).
-      - App (`tui/src/App.tsx`): `jobs.onExit` now, when `autoWakeOnJobExit`,
-        starts a continuation (`run("", {continuation})` → `startContinuation`,
-        no user bubble) if idle, or defers via `wakePendingRef` until the running
-        turn settles (the running turn can't see the exit — flush is at turn
-        start). Multiple exits coalesce (the agent drains all pending at once).
-      - Works in BOTH paths: in-process (real `jobs`) and worker (the daemon
-        streams the exit → client jobs view → same wake). Kill-switch: config
-        `autoWake` (env `TENTACLE_AUTO_WAKE`), default true.
-      - Tests: `agent/test/session.test.ts` (empty send = continuation, no empty
-        user msg, reacts to a pending exit); `tui/test/auto-wake.test.tsx` (idle
-        exit → turn runs; toggle off → notice only); `config/test/resolve.test.ts`.
-      - **Known limit (follow-up):** no hard wake-loop guard beyond "only when
-        idle" + coalescing — a turn that itself spawns a job that exits will wake
-        again (usually desired; could runaway on a pathological agent). Consider a
-        consecutive-auto-wake cap without intervening user input.
 - [~] **F4 — Pod execution** (`run --image <ref> [--namespace <ns>] [<name>]`): run the agent inside a
       k8s pod (the sandbox), driven from the local TUI. Self-contained (no
       kubectl/oc — direct API via kubeconfig + the `v4.channel.k8s.io` exec WS)
@@ -1554,56 +722,6 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
       endpoint/secret never leave the laptop. Reuses the whole client/daemon/RPC
       stack (new transport + lifecycle only). Full design + slice plan in
       `docs/architecture/F4-pod-execution.md`. MVP = F4.a–F4.e.
-      - [x] **F4.a — `KubeClient` REST** (2026-10-14): new `@tentacle/k8s`
-        package — `createPod`/`getPod`/`deletePod`/`waitForReady`/`podIsReady`,
-        bearer auth, injectable `fetch`, mock-API tests. Dependency-free.
-      - [x] **F4.a.2 — kubeconfig + TLS auth** (2026-10-14): `kubeconfig.ts`
-        (pure parse+resolve, `yaml` dep) + `kube-auth.ts` `loadKubeClientOptions`
-        (CA/client-cert/bearer/exec-plugin → `KubeClientOptions` with TLS-aware
-        fetch/WebSocket via Bun's per-call `tls`). `run` resolves from the
-        kubeconfig by default. Validated LIVE from a real kind kubeconfig with
-        client-cert mTLS (Bun honours `tls.{ca,cert,key}` on fetch AND WebSocket).
-      - [x] **F4.b — exec WS channel + `serve --stdio`** (2026-10-14):
-        `transport` `streamChannel` (newline-delimited byte-stream channel) +
-        `startStdioDaemon`; k8s `exec-frame` (`encodeStdin`/`ExecDemux`),
-        `exec-channel` (`execChannel`/`buildExecUrl`/`execSubprotocols`) +
-        `KubeClient.openExec`. Deterministic tests (framing, re-chunk, fake-WS,
-        real `RpcPeer` handshake over a stream pair).
-      - [x] **F4.c — `startPodRuntime` + `run`/`--namespace`/`--image`**
-        (2026-10-14; command renamed `--pod` → `run` with an optional
-        positional pod `<name>` in 2026-10-15): `buildPodManifest` (keepalive
-        container; daemon exec'd in) + `startPodRuntime` (create→ready→
-        openExec(serve --stdio)→ createLocalRuntime; dispose closes + deletes
-        the pod) + `main.ts run`. A missing namespace 404s the pod create and
-        is translated into an actionable error (not auto-created).
-        Auth stopgap: `TENTACLE_K8S_SERVER`/`_TOKEN` env (kubeconfig = F4.a.2).
-        End-to-end tested over an in-memory channel to a real Connection, and
-        **validated LIVE against kind** (opt-in `k8s/test/integration.live.test.ts`:
-        REST + exec round-trip over TLS). Note for F4.a.2: Bun honours
-        `NODE_EXTRA_CA_CERTS` for fetch AND WebSocket, so CA trust is easy.
-      - [x] **F4.d — reverse-tunnel model proxy** (2026-10-14, non-streaming cut):
-        protocol `model/stream` + wire schemas; daemon `ProxyModelProvider` +
-        `Connection.requestModelStream`; `serve --stdio --model-proxy`; client
-        `RemoteClient` serves it with the LOCAL provider; `startPodRuntime` passes
-        it. Endpoint+key stay on the laptop. In-memory round-trip tested.
-        Follow-up (F4.d.2): token streaming over the tunnel + mid-call cancel.
-      - [x] **F4.e — pod binary injection** (2026-10-15): `run` now works
-        with an image that does NOT contain `tentacle` — the binary is
-        injected over the exec WebSocket before the daemon starts: `uname -m`
-        arch probe (ANY failure → `bun-linux-x64`, never aborts) → bytes from
-        `TENTACLE_POD_BIN` → `dist/pod-bin/` cache → `Bun.build` cross-compile
-        (shared options with `bun run compile`) → raw stream via one-shot
-        `sh -c "mkdir -p … && head -c N > … && chmod 755 …"` (`head -c` EOF =
-        known size — no tar, no terminator) → verify with `tentacle
-        --version` (glibc hint on a musl loader failure). New pieces:
-        `k8s/exec-run.ts` (one-shot exec resolving on command exit),
-        `cli/pod-binary.ts`, `cli/pod-binary-build.ts`, `--version` flag.
-        **Constraint:** the image must be a Linux **glibc** image with
-        `sh`+`head` (Bun's compiled binary is always glibc-linked; musl
-        Alpine/busybox cannot run it — the probe fails with a clear error +
-        hint). Validated LIVE on an x86_64 OpenShift cluster: UBI9 full
-        success (89 MB transfer + daemon), busybox clean failure at the probe.
-        Design + as-built log: `docs/feat/pod-binary-injection.md`.
       - [~] **F4.e.2 — read-only-rootfs pods** (2026-10-16): a hardened pod
         (`readOnlyRootFilesystem`, e.g. coredns on OCP 4.22) broke injection
         twice. FIXED: (a) `--bin-dir <dir>` / `TENTACLE_POD_BIN_DIR` installs to
@@ -1622,105 +740,6 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
         and returns `null`; `result-pipeline.ts:74-77` keeps a preview + "could
         not be saved"), so the residual may only be "full output lost", not an
         error.
-      - [x] **F4.g — `attach` to an existing pod** (branch
-        `feat/pod-exec-attach`, from `c5b7f58`):
-        `tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>]
-        [--resume [uid]]` — the `run` flow minus the lifecycle: `getPod`
-        (404 → actionable error, terminal phase → reject) → bounded 60 s
-        readiness wait → **preflight `tentacle --version`** that skips the
-        whole injection when the pod already has it (re-attach is sub-second,
-        no 89 MB transfer) → same daemon exec + reverse-tunnel + persisting
-        runtime. The pod is USER-OWNED: `dispose` only closes the exec channel;
-        NO `deletePod`, NO exit safety net (closing the TUI detaches, the pod
-        stays `Running`). New: `startExecRuntime` + `PodExecRuntimeDeps` in
-        `cli/pod-runtime.ts`, `getPod` on `PodCluster`, `-c` short alias in
-        `main.ts`, `containerExecError` (translates "exec channel closed before
-        the command reported a status" → wrong-container hint), shared helpers
-        `loadPodAuth`/`loadPodResume`/`runPodTui` in `main.ts`. Tests:
-        `describe("startExecRuntime")` (9 cases) + `exec` parse case + the
-        single-broker regression test under `describe("startPodRuntime")`.
-        **Permission fix (validated 2026-10-15):** the `run`/`exec` refactor
-        had split the `PermissionBroker` into two instances (runtime's
-        default-`allowAll` auto-approved everything; the TUI prompt was never
-        reached) — restored to ONE shared instance passed to both
-        `startPodRuntime`/`startExecRuntime` and `startTui` (invariant
-        documented on `runPodTui`). Validation at time of writing:
-        typecheck 0, lint 0, 530 pass / 0 fail / 1 skip (531 total; skip =
-        live k8s opt-in).
-        **Pre-commit checklist (all done):**
-        1. ~~**Container default (deviation from approved plan):**~~
-           **FIXED:** `startExecRuntime` no longer forces `AGENT_CONTAINER` —
-           `deps.container` is passed through (undefined → the exec API omits
-           the `container` parameter and picks the only/default container, so
-           single-container pods need no `-c`). `injectAgentBinary`/
-           `probePodArch` gained an optional `container` (the `run` path still
-           passes the concrete name); `containerExecError` renders
-           `container "x" of pod "p"` when named, `pod "p"` when not. Tests:
-           the no-container case now asserts `exec:mypod:-:…`, plus a new
-           explicit-`container: "dns"` case asserting `exec:mypod:dns:…`.
-        2. ~~**Regression test for the single-broker invariant:** prove
-           `startPodRuntime`/`startExecRuntime` route permission requests
-           through `deps.permissions` (spy requester + a turn with an `ask`
-           tool in the daemon → assert the requester was called). The `main.ts`
-           wiring (one instance → runtime + TUI) is the other half;
-           `startTui` is Ink so it is not directly mockable.~~ **DONE:**
-           `SpyFakeCluster` (daemon agent gets `fsWriteTool` — a real `ask`
-           tool — with its gate wired to a SEPARATE daemon-side broker, exactly
-           like production `wiring.ts`; the client-side broker is a
-           `SpyBroker` passed as `deps.permissions`) + `AskModel` (one
-           `tool_call` to `fs_write`, then done). Two tests (one per runtime):
-           the turn's ask crosses the wire and is recorded by the spy
-           (`level:"ask"`, `title:"Write a file"`, `detail:"/tmp/x.txt"`).
-           Identity is the point: a client wired to a DIFFERENT broker would
-           leave the spy empty (turn completes via allowAll, test fails on
-           `toHaveLength(1)`). `FakeCluster.model`/`connection` became
-           `protected` for the subclass. Verified NOT VACUOUS via a
-           mutation-test: temporarily wiring the client to a DIFFERENT
-           `PermissionBroker` (the original bug) makes both tests fail on
-           `expect(spy.requests).toHaveLength(1)` (received 0 — the ask never
-           reached the spied broker) — then reverted (file is byte-identical).
-        3. ~~**Doc staleness:** `docs/feat/pod-exec-attach.md` §10 says "526 pass" —
-           update to 527 pass / 0 fail / 1 skip (528 total) and note the
-           `-c`/`containerExecError` addition.~~ **DONE (with item 1):** §3
-           flow diagram (no more `?? AGENT_CONTAINER`), §10 test list (8
-           cases), `-c`/`containerExecError` noted, validation line now
-           528 pass / 0 fail / 1 skip.
-        4. ~~**Rebuild the 3 binaries**~~ **DONE:** all three rebuilt after the
-           broker + container fixes (linux-x64, linux-arm64, then macOS `dist/
-           tentacle` last, ad-hoc signed); `dist/` is git-ignored, so
-           nothing ships in the commit.
-        5. ~~**Single commit**~~ **DONE:**
-           `feat(cli): exec subcommand — attach TUI to an existing pod
-           (inject-if-needed, -c container alias, no delete on exit)`.
-        **Accepted debt (do not regress, optional to improve later):**
-        `startExecRuntime` duplicates ~60 lines of `startPodRuntime`'s tail
-        (status scaffold, injection wiring, openExec, modelProvider,
-        createLocalRuntime) — the two tails differ BY DESIGN (delete vs
-        no-delete, `podCreateError` vs `containerExecError`), so a shared-core
-        extraction with lifecycle hooks is the only clean de-duplication;
-        not worth it for this feature.
-- [x] **TUI brand accent → cyan, single-sourced** (`docs/feat/tui-brand-color.md`,
-      2026-10-17): for the public MIT release the TUI drops the Anthropic
-      trade-dress orange `#d77757` and the permission blue `#6377ff` for one
-      distinctive cyan `#06b6d4`, and the colour stops drifting — a new
-      `accentHex` constant in `packages/tui/src/theme.ts` is the ONE source both
-      colour paths read (chalk `theme.accent = chalk.hex(accentHex)`, `claude`
-      token removed; the 5 Ink components import `accentHex`). Grep-guard: zero
-      old-hex under `packages/tui/src`; new `theme.test.ts` (red first,
-      mutation-verified); `bun run check` 635 pass / 1 skip / 0 fail; fresh-
-      context review APPROVE.
-      Type: feat · Size: M · Blast: cross-module · Suited: Phase 1 → weaker
-      model; Phase 2 (below) → load-bearing, strong model, SEPARATE task.
-      Follow-up (Phase 2, not done): `theme` config `auto|dark|light` + an
-      OSC-11 terminal-background probe before Ink mounts.
-- [x] **Auto-load repo AGENTS.md into the system prompt** (`docs/feat/agents-md-autoload.md`,
-      2026-10-17): a fresh session's prompt was only `PROMPT.md` (~90 words); now
-      a per-repo `AGENTS.md`, found by walking up from the launch cwd (stopping at
-      the `.git` repo root, symlink-loop bounded), is appended after the identity
-      under `# Project rules (AGENTS.md)`. Additive (no file → byte-identical) and
-      defeatable (`TENTACLE_NO_AGENTS_MD` / `loadAgentsMd:false`). `bun run check`
-      645→646 pass; fresh-context review APPROVE-WITH-NITS.
-      Type: feat · Size: M · Blast: load-bearing · Suited: strong model + fresh review.
 - [ ] **AGENTS.md auto-load — folder-trust gate** (follow-up to the above): v1
       loads a discovered repo's `AGENTS.md` into the prompt UNCONDITIONALLY — a
       prompt-injection surface if tentacle is launched in an untrusted/cloned repo
@@ -1738,37 +757,11 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
       weak-model motivation. Decide: inject AGENTS.md into subagent prompts too, or
       document that the briefs are the channel. Type: eval · Size: S · Blast:
       cross-module.
-- [x] **Relabel "Task" → "Agent" + rename tool `task` → `agent_task`**: the
-      display label and the model-facing tool name both read as "agent".
-      **Promoted eval → feat** (2026-10-17, weak-model gate PASSED — no
-      invocation degradation). **Merged to main (7344fbc).**
-      **Doc:** `docs/feat/subagent-label-rename.md`. Type: feat · Size: S ·
-      Blast: load-bearing (model-facing name).
-
-## File tools
-
-- [x] **`fs_multi_edit`** — apply several exact-string edits to one file in a
-      single call, in order, atomically (Claude-Code style).
-- [x] **`fs_read` line ranges** — read a slice via `offset`/`limit` or a
-      `path:start:end` suffix instead of the whole file, then edit precisely.
 
 ## Result-pipeline transforms
 
 Built on the `ResultTransform[]` pipeline (`packages/agent/src/result-pipeline.ts`),
 wired in order: redact → dedup → tabulate → (summarize | spill).
-
-- [x] **`spillLargeOutput`** — spill a too-large tool result to
-      `.tentacle/tool-output/<tool>-<id>.txt` and keep only a preview + pointer
-      in-context. Configurable via `tools.maxInlineOutputChars`.
-- [x] **`redact`** — mask secrets / API keys / tokens in tool output before it
-      enters the context (and before it is spilled to disk). On by default
-      (`tools.redactSecrets`).
-- [x] **`summarize`** — replace large output with an LLM summary (full content
-      spilled to a file). Opt-in (`tools.summarizeLargeOutput`, costs a model call).
-- [x] **dedup** — collapse runs of identical consecutive lines. On by default
-      (`tools.dedupOutput`).
-- [x] **structured result** — render a JSON array-of-objects result as a compact
-      table. Opt-in (`tools.tabulateJson`).
 
 ## Context budget (ties in with `/compact`)
 
@@ -1808,12 +801,6 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       ms-scale `fs_read`. Promote on: parallel sub-agents approved, a frontier
       model as regular driver, or network MCP becoming common).
       Type: eval → feat · Size: M · Blast: load-bearing.
-- [x] **Native Anthropic Messages API provider** — DONE (2026-10-17). **Doc:**
-      `docs/feat/anthropic-api-support.md` (native provider behind the
-      `ModelProvider` seam; `model.provider` selector, per-provider default
-      `baseURL`, `model.maxTokens`; 3 reviews, last by a different model).
-      Follow-up: `docs/eval/anthropic-thinking-echo.md`. Type: feat · Size: M ·
-      Blast: cross-module.
 - [ ] **F2**: container execution environment (behind the existing
       `ExecutionEnvironment` contract).
 - [ ] **Remote control (F3)**: heartbeat/idle-timeout/reconnect, multi-client
@@ -1824,110 +811,13 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       operator docs remain.
 - [ ] Add `.tentacle/` to the workspace `.gitignore` guidance (spilled output).
 
-## TUI polish
-
-- [x] **Blinking bullet on a running tool call** — DONE (branch
-      `feat/tui-tool-blink`, 2026-10-30): a running call's `⏺` blinks 500 ms
-      on / 500 ms off from ONE shared clock, and turns into today's ok/error
-      bullet when the call ends. **Doc:** `docs/feat/tui-tool-blink.md`
-      (round-1 review by a different model found two HIGH defects — the OFF
-      phase re-wrapped the row at 1 Hz, and a dead call blinked forever — both
-      fixed and pinned in fix round 1). Type: feat · Size: S–M · Blast:
-      contained · Suited: DeepSeek executes, Opus reviews.
-- [x] **Blink OFF phase: hide the glyph instead of drawing blanks** — DONE
-      (branch `fix/tui-blink-off-width`, 2026-10-30): on the owner's terminal
-      the row shifted ONE column during the OFF half, because `string-width`
-      calls `⏺` 2 columns and that terminal draws it 1 — no fixed count of
-      spaces is right everywhere. The OFF phase now emits the SAME `⏺` under
-      `chalk.hidden` (`ESC[8m … ESC[28m`), so the cells are identical to ON in
-      every terminal and only visibility changes; colour-off/SGR-8-unaware
-      degrades to a steady bullet. **Doc:** `docs/fix/tui-blink-off-width.md`.
-      Type: fix · Size: S · Blast: contained · Suited: DeepSeek executes,
-      orchestrator checks.
-- [x] **Click a tool call to expand its command** — DONE (branch
-      `feat/tui-tool-expand`, 2026-10-30, stacked on `feat/tui-tool-blink`): a
-      left click (press + release on the same cell, no drag) on a tool call's
-      header row toggles THAT call — the header keeps bullet + label + elapsed
-      and the full command follows, wrapped, on `  │ ` rows under it; a second
-      click collapses it. Ctrl+O shows every call's command too, and the
-      collapsed subtitle is now cut to the header's real room at the current
-      width (`string-width`) instead of a fixed 72. **Doc:**
-      `docs/feat/tui-tool-expand.md`. Type: feat · Size: M · Blast: contained ·
-      Suited: DeepSeek executes, Opus reviews (stacked on tui-tool-blink).
-      The dead-call follow-up is `main`'s existing entry ("close a turn's
-      still-running tool calls when the turn fails"), not a second one here.
-
 ## Branding
 
-- [x] **Mascot "Tentacle"** — DONE (merged to main 2026-10-19): tonal primary
-      and mono one-colour marks in `art/`, tonal mark centred in the README
-      header. **Doc:** `docs/feat/mascot.md`. Type: feat · Size: S · Blast: contained.
 - [ ] **Startup pixel mascot in the TUI** (`feat/tui-mascot`): half-block
       banner beside the welcome text; design + palette prototyped in
       `docs/feat/mascot.md` (Context). Type: feat · Size: S · Blast: contained.
 - [ ] **Mascot follow-ups**: dark-mode README variant (`<picture>`), small-size
       icon (16–32 px). See
       `docs/feat/mascot.md` (Review).
-- [x] **feat/token-usage-log** (merged 32877200) (owner 2026-11-16) — record per-round token usage (prompt/completion/cached, model) in the session log or a run summary, to see where DeepSeek runs waste input tokens (~8B so far). Type: feat · Size: S · Blast: contained.
 - [ ] **eval/app-store-release** (owner 2026-11-16) — what an App Store release of the iPhone app needs: Apple Developer account (personal vs company), App Store Connect record, EU DSA trader status, distribution cert/profile, production APNs (relay + PushCore), PrivacyInfo.xcprivacy, usage strings, TestFlight, listing (icon, screenshots, privacy-policy + support URL on tentacle.so, nutrition labels, export compliance), and the review blocker: a reviewer-reachable demo serve or demo mode (guideline 2.1).
-- [x] **feat/smart-compaction** (merged 74329236) (owner 2026-11-17; AFTER feat/token-usage-log, which measures the waste first) — a lossless-first compaction: never drop the conversation's TEXT (user/assistant prose); prune instead what is superfluous for the next rounds — old tool_call requests/arguments, stale tool results (file reads superseded by later reads/edits, long test/build outputs already acted on), duplicated reads, spill previews — replaced by short stubs that say what was there and how to get it back. Before the summarising compaction, not instead of it; measured with token-usage-log (input tokens per round before/after) and checked for quality on DeepSeek runs. Type: feat · Size: M · Blast: load-bearing (agent loop / context).
-- [x] **feat/mobile-session-actions** (merged 19573fc5) (owner 2026-11-17; AFTER the iOS build) — iPhone side drawer: LONG-PRESS a session row → haptic feedback + a small menu: **Rename**, **Delete** (confirm), **Pin to top** (pinned sessions first, persisted, same on every device/host — phone/mac parity). Reuse existing session rename/delete RPCs where they exist; pin is new state. Type: feat · Size: M · Blast: cross-module · Suited: Opus plan + mockups (≥2 variants), DS exec, Opus review.
-- [x] **feat/mobile-tool-rows** (merged 0d4997f5) (owner 2026-11-17, "facciamolo bene") — iPhone tool calls as mockup **C** "filo dei passi, pensiero piegato" (`.tentacle/mockups/mobile-tool-rows/`): nodes on a thin thread, one line per call (readable MCP names, TUI-style arg summary, duration), thinking folded into a ∴ marker, tap opens thought + command + result; no cards. Doc: docs/feat/mobile-tool-rows.md (branch). Type: feat · Size: M · Blast: cross-module · Suited: Opus plan + exec, Opus review + visual check.
 
-## Done — archived from the owner review queue (2026-11-22)
-
-- [x] **feat/cron-tool** (merged 57a6dc91) (owner 2026-11-16; [doc](docs/feat/cron-tool.md) on its branch) — the agent schedules its own wake-ups (`every`/`at`). Owner answers Q1–Q9 (Q7 keep on /clear, Q9 B). S1–S6 on one branch, single merge at the end. Type: feat · Size: L (6 slices) · Blast: load-bearing.
-- [x] **feat/scheduled-fire-row** (merged 7205cf6b) ([doc](docs/feat/scheduled-fire-row.md) on its branch; owner 2026-11-17, phone screenshot; mockups picked: Q1 A timeline node, Q2 A harness-grey line, Q3 B first full then short): a fired scheduled wake renders as a USER BUBBLE with model-facing noise (`[scheduled sc-1 · at <ISO> · fire 1] …`, raw ISO time). Owner: "si deve vedere sempre come parte della timeline e meno sporco". Must be a timeline event, identical live / after reload / on the Mac TUI. Plan: Opus. Type: feat · Size: S–M · Blast: cross-module (mobile + TUI rows, maybe turn_start mapping) · Suited: Opus plan + DeepSeek exec.
-- [x] **fix/mobile-qa-1117** (merged 8a1f5360) (orchestrator 2026-11-17 23:25, simulator QA of build 680b4b8b: 10 OK · 6 BUG · 0 BLOCKER; report + shots `.tentacle/tmp/mobile-qa-1117/REPORT.md`): hub-opacity slider thumb invisible in light (and test-jargon preview text); session REOPEN drops Thought rows and turns failed steps green (check if pre-existing); full-screen diagram ignores light↔dark switch while open + outline|filled setting missing from Settings; compaction notice from another device shows literal `_…_` + no separator after reopen; consumed queued message leaves the last reply under the composer. Night plan: Opus exec with simulator screenshots, after hub-tap + queued-stuck. Type: fix · Size: M · Blast: cross-module · Suited: Opus exec + Opus review WITH screenshots.
-- [x] **feat/mobile-hub-native-driver** (merged 2b61a2e3) (owner 2026-11-18 01:20: "ciò che è bene spostare su driver nativo, che venga spostato") — the hub fan is janky while the model is Thinking. Audit: the ONLY JS-driven animations in apps/mobile are 4 in `ui/FloatingActivity.tsx` (:182 fade, :205, :235 drag spring on `xy`, :244); every other Animated already uses the native driver. Move what can be native (opacity/transform); where a value is fed by a PanResponder `Animated.event` (cannot be native), split it (gesture value JS, the fan open/close and fade native) or use the gesture-handler/reanimated stack if already a dependency. Measure JS/UI fps on the simulator while a turn streams, before/after. After feat/mobile-activity-panel merges (same file); before hub-badges. Type: feat · Size: S · Blast: contained · Suited: Opus exec + Opus review.
-- [x] **fix/mobile-qa-1118** (merged 258533f0) (orchestrator 2026-11-18, simulator QA of build b39119de: 17 OK · 3 BUG · 0 BLOCKER; report `.tentacle/tmp/mobile-qa-1118/REPORT.md`): (1) pending bubble runs to the screen edge and its Cancel sits under the hub button (tap opens the fan → cannot cancel with the hub on the right); (2) Thought rows still vanish on session reopen (fix/mobile-qa-1117 PARKED that part); (3) hub badges: no glow / no rim on Artifacts when artifacts arrive live, rim only after re-entering and does not grow with the 3rd. (4) owner 18/11 09:50 real iPhone: back from another app the transcript scrolls up/down in a LOOP to reach the old position — expected: no scroll at all, open directly at the position (suspect: today's resyncOnUp + open-at-end scroll logic). Unverified: Activity sheet swipe-down (needs a real finger). Type: fix · Size: M · Blast: cross-module · Suited: Opus exec + Opus review WITH screenshots.
-- [x] **fix/mobile-activity-sheet-reclose** (merged 35c3b16d) (owner 2026-11-18 ~11:30, real iPhone, build b39119de): tapping Activity opens the small bottom sheet; closing it closes, REOPENS and closes again — one extra open/close cycle. Suspect: feat/mobile-activity-panel's close path (review r1 HIGH fixed an "interrupted close" with `closing.current`, ActivitySheet.tsx ~:236) now re-runs the open animation when the close finishes / the shown prop flips twice. Reproduce on the simulator (record frames), pure state-machine test for open→close = exactly one close, fix. After fix/mobile-qa-1118 merges. Type: fix · Size: S · Blast: contained · Suited: Opus exec + Opus review.
-- [x] **feat/mobile-hub-defaults** (merged 19aa1181) (owner 2026-11-18 ~10:55) — the floating hub button ON by default (today `DEFAULT_ACTIVITY_SETTINGS = { mode: "header" }`, activity-settings-store.ts:39) at 80 % opacity; the opacity slider becomes 5 discrete steps of 20 %: 20 · 40 · 60 · 80 · 100 (min 20 %, was continuous 30–100 %, hub-opacity.ts clampOpacity), a light haptic tick per step, a stored off-step value snaps to the nearest step; 100 % while the fan is open stays. After fix/mobile-qa-1118 merges (hub area). Type: feat · Size: S · Blast: contained · Suited: Opus exec + Opus review.
-- [x] **feat/mobile-harness-notices** (merged 55830619) (owner 2026-11-18, mobile follow-up of feat/harness-notices) — the grey ◇/▲ notices (grouped), `Compacting…` → `Compacted ✓` and the persisted `compacted · ctx A → B` separator on the iPhone, identical live / after reload / to the Mac TUI. Opus plan running; exec after or beside feat/mobile-thinking-images depending on file overlap. Type: feat · Size: M · Blast: contained · Suited: Opus plan + DeepSeek exec.
-- [x] **feat/mobile-hub-commands** (merged 0bde7175) (owner 2026-11-18) — replaces mobile-harness-notices S2's "Compact in the overflow": a hub fan item "Commands" (CLI vector glyph) opening a small sheet of session commands (Compact, Clear, … from the existing protocol), with the Compacting…/Compacted ✓ slot of harness-notices; "Session info" moves under More; Activity AND Artifacts dimmed when empty with a quick haptic + inline label (owner standard). Mockups PICKED 18/11 (README "CHOSEN": glyph >_, O1 order, list sheet with inline Clear confirm, empty label in place); plan next; after feat/mobile-thinking-images. Type: feat · Size: M · Blast: contained · Suited: Opus plan + exec.
-- [x] **feat/mobile-e2e-gate** — merged 2026-11-19 UNWIRED (owner: option 1 of review r3): harness + `scripts/e2e-gate.sh` in main, not yet required before an iOS publish ([doc](docs/feat/mobile-e2e-gate.md)).
-- [x] **fix/mobile-e2e-reds** ([doc](docs/fix/mobile-e2e-reds.md); done 2026-11-20: two consecutive full gate runs EXIT 0 — 53 passed, 7 quarantined, see the e2e-flow sub-lines; wiring to publish = orchestrator, after merge) (owner 2026-11-19, from feat/mobile-e2e-gate review r3 F4) — triage the full gate run's reds: `05-daemon-down` passes alone but fails in the suite (suspect state leaking between flows); `33-hub` + the five `34-hub-*` flows fail even alone (may be the real hub-new-session regression). `34-hub-commands` is still tagged `known-bug` from before C3 (Commands sheet) landed — drop the tag if it now passes. Exit criterion: a fully green (or triaged-quarantined) `scripts/e2e-gate.sh` run, then wire it as the iOS-publish gate. Type: fix · Size: M · Blast: contained · Suited: Opus.
-  - [ ] device check (from the e2e triage, unverified): on iOS 26 a rightward drag that starts on the hub-opacity track (not on the thumb) may be taken by the stack's content back-swipe and pop Settings — flow 33 hit it with Maestro's swipe; check with a finger, fix with a native gesture if real.
-  - [ ] e2e flow `22-notify-approve` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
-  - [ ] e2e flow `22-notify-deny` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
-  - [ ] e2e flow `22-notify-reply` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
-  - [ ] e2e flow `22-notify-forged` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
-  - [ ] e2e flow `push-placeholder` is quarantined: Maestro does not see SpringBoard notification banners on the iOS 26 simulator (a plain `simctl push` banner was not found during a 20 s wait), so the banner step cannot be asserted; re-enable when Maestro can read banners (or assert the presentation another way).
-  - [ ] e2e flow `22-notify-render` is quarantined: Maestro does not see SpringBoard notification banners on the iOS 26 simulator (a plain `simctl push` banner was not found during a 20 s wait), so the banner step cannot be asserted; re-enable when Maestro can read banners (or assert the presentation another way).
-  - [ ] e2e flow `19-lock-unlock-button` is quarantined: on the simulator a resume auto-prompts Face ID over the Unlock button (by design) and a nomatch cannot be scripted, so the button cannot be driven; re-enable when a failed/cancelled evaluation can be scripted (or drive it on a device). Logic covered by `app-lock.test.ts`.
-- [x] **fix/mobile-qa-1119** — **DONE 2026-11-20, merged `d1ded38a`.** ([doc](docs/fix/mobile-qa-1119.md)) (owner OK 2026-11-20, simulator QA `.tentacle/tmp/mobile-qa-1119/REPORT.md` rows 8–13, 17): photo viewer draws no photo and ✕ is dead (BLOCKER); a photo picked offline is dropped from its message (BLOCKER); offline text-only row; sent photos become "Image not available" after a resync; two identical photos lose the turn; hub covers the last row. Type: fix · Size: M · Blast: cross-module · Suited: Opus.
-- [x] **fix/mobile-bundle-node-import** (merged 3a48d4d5) ([doc](docs/fix/mobile-bundle-node-import.md)) — 🔴 BLOCKS every iOS build from main (found 20/11 17:39): caps-before-first-message (merge cf6c6d80) added `packages/client/src/pending-capabilities.ts` importing RUNTIME values (`CapabilityRefusal`, `applyCapabilityOp`) from the `@tentacle/agent` barrel → the app bundle reaches `agent/src/session-store.ts` `node:crypto` → Metro `ARCHIVE FAILED` (`.tentacle/tmp/mobile-ota/archive.log:72145`). `agent/src/capabilities.ts` itself imports the `@tentacle/tools` + `@tentacle/config` barrels, so a subpath export is not enough: move the pure capability ops to an RN-safe package (core/protocol) or split them. GATE GAP: `bun run check` + the mobile e2e gate never bundle with Metro — add a deterministic AI-free test that the mobile import graph reaches no `node:` module (red on cf6c6d80). The 17:40 build was made from a detached ref with the caps merge reverted (b80a7366, not on any branch). Type: fix · Size: S–M · Blast: cross-module · Suited: Opus exec, before composer-buttons.
-- [x] **feat/mobile-composer-buttons** (merged 134fbdf4) (owner 2026-11-20, AFTER fix/mobile-mic-send — same files): restyle the composer mic + send per the mockup https://claude.ai/artifact/HVjKHhCNJ2aGRVVjnLg9e1 (copy `.tentacle/mockups/mobile-mic-button/`), owner choice **B + S2**: mic SF Symbol `mic` 22 pt weight light, accent, inside a 32 pt circle accent 10% (14% dark) in a 44×44 pressable; recording = circle 20%/26% + filled stop square 11 pt + pulsing halo + timer; transcribing = spinner arc (split `finalizing` from `listening` in `micButtonOf`); send = 36 pt circle accent 20% (26% dark) + `arrow.up` accent when ready, no circle + `sec` 50% when empty (no more solid accentFill). The text field border does NOT change colour while recording (owner 20/11: stays `sep`). `+` in the same tinted circle as the mic (32 pt, accent 10%/14%); NO separate image/photo button (owner 20/11 16:10: the + menu already has photos). Never hue alone (owner colour-blind); reduce-motion stops animations. Type: feat · Size: S–M · Blast: contained · Suited: Opus exec + simulator screenshots.
-- [x] **feat/mobile-file-preview-cards** (MERGED b53783db 21/11 02:44, gate 16062/0) (owner 2026-11-20, WhatsApp-like): a file the model presents (`present` → artifact card, `core/src/artifact-card.ts`, `TranscriptRow.tsx` ToolRowView) shows an inline PREVIEW in the transcript (PDF first page, image, md/text first lines, HTML snapshot) + name + pages + size; tap opens the existing viewer. Thumbnails generated ON THE PHONE (iOS QuickLook `QLThumbnailGenerator`, cached, works offline); honest loading/unavailable states. Mockup first: `.tentacle/tmp/mobile-file-preview/mockups/`. **Owner 20/11: variant A (band on top)** — https://claude.ai/artifact/W3d7bGq7kd5xTUR2fVv6M4. Type: feat · Size: M · Blast: contained · Suited: Opus exec + simulator screenshots.
-- [x] **feat/pdf-images** (MERGED 1791d22b, 22/11 01:08) — ⭐ PRIORITY: first new task once the current queue drains (owner 2026-11-20) — PDF images in the model's context, next to the text. `fs_read` (pdf.js, `packages/tools/src/pdf/`, pure half `core/src/pdf-text.ts`) returns text only. Extract each page's images with their position (pdf.js operator list: paintImageXObject + transform), encode PNG (zlib, no native deps), put a `[image p.n · W×H]` marker at its place in the reading order, and give the PNGs to vision models (text-only models get the markers). Skip tiny/repeated images (logos, headers); caps per read. Reference: the owner's PyMuPDF script `~/github/gmeghnag/farmaquiz/estrai_immagini.py` (nearest-by-y image ↔ question). Would also cover scanned PDFs (a page = one image) → overlaps feat/mobile-pdf-ocr. ACCEPTANCE (owner 20/11): a BLIND test against the owner's script output — run tentacle's extraction on `farmaquiz/solo_domande.pdf` with no hint of its layout and check that each image lands next to the right question; ground truth = `farmaquiz/immagini/<question>.png` (405 images, file name = question number). Score = correct image↔question pairs / 405 (byte-identical or same-hash image). The pass bar is set in the plan; misses are listed, not averaged away. Load-bearing check first: images inside TOOL RESULTS per provider (Anthropic yes; OpenAI-compatible no). Type: feat · Size: L · Blast: load-bearing (tool result content, providers) · Suited: Opus plan with owner questions.
-- [x] **fix/mobile-project-first-tap** (MERGED 783cb0dc) (QA 21/11 row 13): a just-paired project reads Offline until its first probe lands; the first tap is a silent re-probe → 40 e2e-gate reds. [doc](docs/fix/mobile-project-first-tap.md). Type: fix · Size: S · Blast: contained · Suited: DeepSeek exec + Opus review. RUNNING 21/11 10:37.
-- [x] **feat/shell-intent-line** (MERGED a1ef3c9c) (owner 2026-11-20, idea agreed; mockups + plan AFTER feat/pdf-images — owner order) — a short sentence of WHAT a shell command does, shown instead of the raw command. Source: an optional `description` input on the `shell` tool (`packages/tools/src/builtins.ts:425`), written by the model in the same call (no extra model call; user's language); missing → today's command row. Where: (1) while running, the sentence replaces «Thinking…»; (2) done, the tool row title = sentence + outcome (✓ / ✗ exit N), tap → exact command, output, the reasoning before it. SECURITY (owner agreed): a permission ask ALWAYS shows the verbatim command, the sentence at most as a subtitle — the model (a pod) may describe something else than it runs. Mac TUI + iPhone parity. Mockups first (≥2 variants, TUI + iPhone) — owner 20/11: the mockup must show the TRANSITION, animated: «Thinking…» → the sentence (command running) → «Working…» / next step, as a timed sequence, not only static frames. Plus ALTERNATIVE thinking spinners next to today's (owner 20/11; earlier spinner mockup: https://claude.ai/artifact/1dEiDHjX1rkVGC5K8SssnU), animated, TUI + iPhone, colour-blind safe, reduce-motion fallback. Probably no protocol change (tool input already reaches clients) — verify. Type: feat · Size: M · Blast: cross-module (tool schema, TUI + app rendering, permission view) · Suited: Opus plan + mockups.
-- [x] **feat/mobile-gallery-polish** — **DONE 2026-11-20, merged `37d70079`.** (owner 2026-11-20, phone screenshot: "così è orrenda"): Artifacts gallery — chart thumbnails overflow their 40 pt tile (bars + legend chips spill down the list); thumbnails a bit bigger (52 pt); GRID ↔ LIST toggle per the approved model-artifacts mockup §7 (A list, B grid), remembered per device. Running on main (Opus exec, review, NOMERGE). Type: feat · Size: M · Blast: contained · Suited: Opus exec + simulator screenshots.
-- [x] **feat/mobile-projects** — (a) feat/project-pairing MERGED 4ea88ea0 (21/11 01:44); (b) feat/mobile-projects-app MERGED 945d11e5 (21/11 04:24, gate 16093/0) — (owner 2026-11-20: a second `serve` in ~/assistant is invisible on the phone): the app shows ONE project per computer (`ComputersScreen.tsx`, `computer-rows.ts`) and never consumes sibling discovery (daemon side merged 867cc497). OWNER 20/11 ~13:05: PAIRING PER `serve` — each serve with relay needs its own pairing; the app lists only paired projects; NO auto-discovery of unpaired siblings; a serve with no device paired to it never dials the relay; today's phone keeps ~/tentacle without re-pairing. Overrides device-pairing "one registry per computer" + mobile-app decision 7. Mockup + plan queued on condo 15:21. Type: feat · Size: M–L · Blast: load-bearing · Suited: Opus plan, exec TBD.
-- [x] **fix/mobile-stream-lost-repeat** (MERGED 1ad925ab) (owner 2026-11-20, phone screenshot on ~/assistant serve): "that turn's stream was lost — what reached the phone is shown" appears repeatedly (3× stacked + after a normal reply), even though the turns complete. Triage first: relay drop vs daemon restart vs replay/resume logic; one notice per real loss, never stacked duplicates. Type: fix · Size: S–M · Blast: cross-module · Suited: Opus triage.
-- [x] **fix/prompt-current-date** (MERGED 85b29e6a 21/11 05:04, gate 16132/0) (owner 2026-11-20): the ~/assistant model wrote "2026-12-02" in MEMORY.md on 2026-11-20 — it does not know today's date. Verified 20/11: NO date anywhere in the prompt. Owner decision (20/11): the LIGHT variant — a compact timestamp `[ven 2026-11-20 13:42 CET]` (~12–15 tokens) prepended to a USER message only when needed: the first message of a session, when the day changed since the last stamp, or more than 30 min since the LAST STAMP (not the last message, so the model's "now" is never > 30 min stale in a long burst); never in the system prompt (a per-turn change there would invalidate the whole prompt cache; appending keeps the cached prefix). Laptop timezone (never the pod's UTC). Decision logic in a pure, unit-tested module. CRON SAFETY (owner 20/11, checked against `tools/src/schedule.ts` + `core/src/schedule.ts` `parseAtMs`): a scheduled FIRE turn is stamped like a user message (the model must know when it woke up), and the stamp is added at SEND time — never written into the stored job prompt, or a recurring job would replay an old date; `schedule_create` stays safe (`every` relative; `at` = "in 20m" or ISO in the host zone; the result echoes the daemon-computed time + "(in X)") — extend its description to prefer relative `at` for "in N minutes/hours", and refuse an `at` in the past with the daemon's current time in the message. Tests (fake clock): first message, same-day burst, burst > 30 min re-stamped, midnight crossing, resume of an old session, fired job stamped with fire time, stored recurring prompt never stamped, past `at` refused with now shown. Type: fix · Size: S · Blast: cross-module (prompt) · Suited: DeepSeek exec.
-- [x] **fix/test-stray-snapshot-write** (MERGED 19d80281 21/11 02:33, gate 16008/0) (found 20/11: the caps-before-first-message merge gate went RED — 14 `T3 frames` fails — because a test wrote `{"resident":false}` as the first line of `packages/tui/test/__snapshots__/diagram-lines.test.ts.snap`; the same stray line was seen in mobile-qa-1119). Suspects: `cli/test/engine-runtime.test.ts` / `engine-docker.test.ts` (they emit that JSON) writing to an inherited fd or a cwd-relative path. Find the writer, make it write only to its temp dir, add a guard test that the snapshot dir is untouched after the suite. Type: fix · Size: S · Blast: contained · Suited: DeepSeek exec.
-- [x] **fix/mobile-hub-new-session** (done 2026-11-20 in fix/mobile-e2e-reds: `newSessionFromHub`; `34-hub-new` green) (owner 2026-11-18, real iPhone): "New session" from the hub no longer opens a new session (regression). Its e2e flow (`34-hub-new`) must turn green; do it with or after fix/mobile-e2e-reds. Type: fix · Size: S · Blast: contained · Suited: Opus.
-- [x] **fix/byte-stream-frame-cap** — **DONE 2026-11-20, merged `00b967dc`.** (owner 2026-11-20, from eval/binary-frames BF1 — [eval](docs/eval/binary-frames.md)): the three laptop-side byte-stream readers buffer without bound until a newline (`transport/src/stream-channel.ts:44`, `k8s/src/exec-frame.ts:55`, `docker/src/exec-channel.ts:199`) and the laptop `RpcPeer` has no `maxFrameBytes` (`client/src/remote-client.ts:3138`) — a hostile or buggy pod can grow the laptop's memory without limit (AGENTS §7 "a pod is not trusted"). Cap the buffer BEFORE it grows (one shared framer), set `maxFrameBytes` on the laptop peer, close the channel with an honest error past the cap. Type: fix · Size: S–M · Blast: cross-module · Suited: Opus exec, fresh-context review.
-- [x] **fix/inject-bin-dir-probe** — **DONE 2026-11-20, merged `6ddaa3c3`.** (owner 2026-11-19) — `run`/`attach` inject the binary at `/usr/local/bin` by default (engine-runtime.ts:479/:901), which fails on non-root pods (OpenShift random UID) unless `--bin-dir` is passed. Pick the dir automatically: /usr/local/bin → $HOME/.local/bin → private /tmp/tentacle-<uid>/, `--bin-dir` still wins. Owner's hard requirement: prove write AND exec of every candidate in ONE cheap probe BEFORE any upload — never upload, fail, then re-upload; reuse a matching binary already in any candidate. Plan approved 2026-11-20; executed by Opus, fresh-context Review pending ([doc](docs/fix/inject-bin-dir-probe.md)). Type: fix · Size: M · Blast: load-bearing (pod lifecycle/inject) · Suited: Opus plan + fresh Review.
-- [x] **feat/caps-before-first-message** — **DONE 2026-11-20, merged `cf6c6d80`.** (owner 2026-11-19, option 2) — `/skills` and `/mcp` (owner 2026-11-20: and `/tools`, AFTER feat/tool-toggles — same files, one mechanism for the three lists) say "on/off after the first message" (phase `not-open`, packages/tui/src/capability-toggles.ts:33/:123): the session opens daemon-side only at its first message, so nothing can be switched before. Keep the lazy open; the client remembers the switches flipped before open (the panel already knows the names), shows them as live switches ("applies from the first message"), and at the first message opens the session, sends them through the existing set call and sends the prompt only after the ack — the first model call already runs without them. No protocol change. Failure modes: a pending name that no longer exists at open → one honest line, never a silent drop; a failed set → the prompt does not go out as if applied. Mac, `connect` and pod alike. Type: feat · Size: S–M · Blast: cross-module (client + tui) · Suited: Opus plan, DeepSeek exec.
-- [x] **fix/tui-line-diff-render** — **DONE 2026-11-19, merged `eb8f0fe0`.** (owner 2026-11-19, after the v0.7.0 demo: "the flash on the terminal was heavy") — the DEC 2026 wrap (fix/tui-redraw-flash) is on every frame, but Ink 5 erases + redraws 39/40 lines per change (~13 fps Thinking, ~33 fps / ~105 KB/s streaming) while 1–6 lines change; the demo terminal has no 2026 (DECRQM probe empty) so every frame flashes. Fix: line-diff inside `synchronizedStdout` + stream render cap. Triage `.tentacle/tmp/tui-flash-1119/REPORT.md`; Opus plan on MAIN (owner) ([doc](docs/fix/tui-line-diff-render.md)). Type: fix · Size: M · Blast: load-bearing (terminal write path) · Suited: Opus plan + fresh Review.
-- [x] **feat/voice-live-transcript** (merged 4657c2d5) (owner 2026-11-18) — Mac TUI dictation transcribes only at the 2nd Ctrl+R; make it LIVE: the macOS helper (native/voice-mac, Apple SpeechTranscriber) emits volatile partial results while the user speaks — the TUI already handles a `partial` message (voice-session.ts:131/:608) but the helper never sends one. Show partials greyed in the input, replaced by the final on stop; the final arrives faster (audio already analysed). Apple engine only (parakeet stays batch). Type: feat · Size: S–M · Blast: contained (helper + TUI render) · Suited: Opus exec + Opus review.
-- [x] **feat/voice-release** (merged 818d316b) (owner 2026-11-18) — ship the macOS voice helper `tentacle-voice` with every GitHub release (build.yml macOS runners, signed, in SHA256SUMS) and have `curl -fsSL tentacle.so/install | sh` install it next to `tentacle` on macOS (missing asset in an older release → one line, CLI install still succeeds). Opus on the MAIN account (owner OK). Type: feat · Size: S–M · Blast: cross-module (CI + installer) · Suited: Opus.
-- [x] **feat/tui-present-row** (merged d70ed987) (owner 2026-11-18) — the TUI row of the `present` tool shows the raw JSON args (`● Present {"title":…,"content":"<!DOCTYPE…`) and a verbose result line; show only `● Present <title>` (result line short or none), and CLICKING the row opens the artifact with the Mac's default app for its type through the EXISTING safe path (packages/tui/src/artifact-open.ts + os-open.ts: our file names, CSP-wrapped HTML/SVG, `other` never opened, pod bytes always ask). Same for path-based artifacts (pdf…). Type: feat · Size: S · Blast: contained (TUI) · Suited: Opus exec + Opus review.
-- [x] **feat/mobile-thinking-images** (merged 03320984) (owner 2026-11-18 00:54, device screenshot): (1) the live "Thinking…" row — owner dislikes it and its shimmer renders as a visible RECTANGLE sweeping behind the text; (2) a photo in a user message renders INSIDE the text bubble — owner wants it separate (own rounded element beside/above the bubble). Mockups PICKED 18/11 (README "CHOSEN": Q1 B shimmer clipped to the glyphs + elapsed seconds, Q2 F photo above the bubble, grid for several); then plan. (3) owner 01:15: while Thinking, opening the hub fan is janky ("a rallentatore/scatti") — lead: the fan animations run on the JS thread (`FloatingActivity.tsx:182/205/235/244` `useNativeDriver: false`) while the JS thread is busy with the streaming turn + the Thinking loop (`StepNode.tsx` `useLoop`); measure first (JS fps / perf monitor on device or sim, before/after), then move the fan to the native driver (transform/opacity) and the new Thinking indicator native-driven. After fix/mobile-qa-1117 + scheduled-fire-row (same transcript rows). Note: fix/mobile-photo-row (B9 order, B10 thumbnail; unmerged since 15/11, review r2) touches the same row — reconcile first. Type: feat · Size: M · Blast: contained · Suited: Opus plan + DeepSeek exec.
-- [x] **fix/mobile-queued-stuck** (merged f5e73d5f) (owner 2026-11-17, phone screenshot): a message queued while the model runs stays in the "Queued" panel forever; leaving and re-entering the session shows it was sent and answered → the live queue state is never cleared on the phone (the dequeue/consumed update is not applied, or not mapped). Characterize first (AGENTS §1): reproduce with the mobile store + a fake connection, enqueue during a turn, assert the queued list empties when the daemon consumes it. Check Mac TUI parity. Type: fix · Size: S · Blast: cross-module · Suited: DeepSeek exec + Opus review.
-- [x] **feat/mobile-queued-compose** (merged 9f37b971) (owner 2026-11-17; mockups PICKED 17/11, see .tentacle/mockups/mobile-queued-compose/README.md "CHOSEN": dimmed pending bubble + "Pending · next step", E1 tap → Edit/Send now/Cancel, Send now in-field only while a message is pending, "+" glyph, ↑/■ in the send slot): queued message shown in the transcript as a DASHED pending user bubble (enters as soon as possible after send-now), send-now as a small button beside ↑ instead of the big panel, ideally a composer with buttons inside the field (+ / mic / send). Mockups first (.tentacle/mockups/mobile-queued-compose/, Opus), owner picks, then plan; after fix/mobile-queued-stuck. Type: feat · Size: M · Blast: cross-module · Suited: Opus plan + DeepSeek exec.
-- [x] **feat/model-artifacts** (merged 10838ee4) (owner 2026-11-16, delegated; doc on its branch) — the model presents images / HTML / PDF / Markdown; native viewers on iPhone (isolated WebView, needs a dev build for react-native-webview), TUI card + `/artifacts`. 11 slices, reviews grouped [S6a,S6b] [S10,S7] [S8,S9]. Owner: aesthetics to revisit later. Type: feat · Size: L · Blast: load-bearing.
-- [x] **feat/mobile-hub** (merged a6d6b3cd) (owner 2026-11-16; doc on its branch) — the floating button becomes the app's "Swiss army knife": long-press + haptics → radial FAN (owner chose A). Opus executes every slice (H1–H4). Starts after mobile-chrome S10 + model-artifacts. Type: feat · Size: M–L · Blast: contained (setting-gated).
-- [x] **feat/mobile-hub-opacity** (merged ec42f0e9) (owner 2026-11-17; after mobile-hub H3 merges) — user-set transparency of the floating hub button: mockups `.tentacle/mockups/mobile-hub-opacity/`, owner chose **B** continuous slider 30–100 % in Settings ("Button opacity" under "Activity button"); the button goes to 100 % when tapped / the fan opens and back to the set value when the fan closes (tap on the transcript or on the button again); floor 30 %; running-turn arc always fully visible; iOS Reduce Transparency → always 100 %. · Type: feat · Size: S · Blast: contained · Suited: DeepSeek plan+exec, standard review
-- [x] **feat/mobile-hub-tap** (merged e6dcdd5c) (owner 2026-11-17; AFTER mobile-hub-opacity merges — same file FloatingActivity.tsx) — SINGLE TAP opens the hub fan with a haptic (today a tap opens the full-screen Activity sheet, even when empty); Activity becomes a fan item; LONG-PRESS will start the hands-free voice conversation (until that exists on mobile, long-press = tap). Empty entries follow the owner standard: stay DIMMED, tap → light haptic + inline "Nothing running", never an empty modal. · Type: feat · Size: S · Blast: contained · Suited: DeepSeek + standard review
-- [x] **feat/mobile-activity-panel** (merged dc8771ef) (owner 2026-11-17) — redesign the Activity view: today a huge sheet, "resistant to closing", ugly task rendering. Mockups PICKED 17/11: B low-detent bottom sheet (README "CHOSEN"). Was: mockups first (≥2: compact card anchored above the button fitting its content / low detent sheet that grows + swipe-down / other), then plan. Never opens when empty. · Type: feat · Size: M · Blast: contained · Suited: Opus mockups+plan, DeepSeek exec
-- [x] **feat/mobile-hub-badges** (merged d5187732) (owner 2026-11-17) — remove the accent DOT badge on the hub button and the NUMBER bubble ("6") on fan items ("antiestetico", "bruttissimo"); give the open fan a backdrop so transcript text no longer bleeds through the glass items. Mockups PICKED 17/11 (README "CHOSEN": Q1 C one-shot glow + haptic, Q2 C rim arc ∝ count, Q3 B solid discs, no blur/vignette), then plan; sequence with mobile-hub-tap (same file). · Type: feat · Size: S–M · Blast: contained
-- [x] **feat/mobile-hub-tools** (merged b39119de) (owner 2026-11-17, p.s. to the hub batch) — a "Tools" item in the hub fan that opens a modal listing the session's MCP servers/tools and skills with switches to select/deselect them. The backend + switches already exist (feat/session-capabilities, merged; mobile switches in Session info: apps/mobile/src/session-info.ts CapabilitySwitches) → reuse them, no new protocol. Mockups PICKED 17/11 (README "CHOSEN": Q1 B plug glyph, Q2 B with tools collapsed by default + A-style accordion, Q3 A whole server/skill only); AFTER hub-tap + hub-badges (same file FloatingActivity.tsx). Type: feat · Size: S–M · Blast: contained · Suited: DeepSeek exec + Opus review.
-- [x] **feat/mobile-chart-labels** (merged 1831c759) (owner 2026-11-17; mockups PICKED: `.tentacle/mockups/mobile-chart-labels/` README "CHOSEN") — series labels on phone charts: default C (labels inside the plot at each line end, haloed), with a Settings option to switch to A (compact legend above the plot: glyph · name · last value, tap highlights the series). Owner 17/11 23:45: plan + exec tonight. Type: feat · Size: S–M · Blast: contained · Suited: Opus plan + DeepSeek exec.
-- [x] **feat/harness-notices** (merged d9c6be1c) (owner 2026-11-17, decisions final; doc `docs/feat/harness-notices.md` on its branch; 6 owner questions open) — one grey G1 voice for harness lines (`◇` info / `▲` warning), consecutive lines grouped, `/compact` in the spinner slot (`Compacting…` → `Compacted ✓` 3 s) + a persisted `compacted · ctx A → B` separator. Mobile parity as follow-up `feat/mobile-harness-notices`. Type: feat · Size: L (S1 M, S2 M, S3 M) · Blast: load-bearing (S1 persisted message field) / contained (S2, S3 TUI) · Suited: Opus S1 + fresh Review, DeepSeek S2/S3.
-- [x] **feat/model-charts** (merged f7514eae) (owner 2026-11-16; plan + mockups in progress) — the agent draws charts: native on iPhone (react-native-svg), braille/block rendering in the TUI. Data format: our own minimal schema in Chart.js shape (owner). Builds on model-artifacts. Type: feat · Size: L · Blast: cross-module.
-- [x] **feat/model-diagrams** (merged bc25017c) (owner 2026-11-16; AFTER feat/model-charts) — the agent draws **Mermaid** diagrams (flowchart, sequence, class, state, ER, gantt, mindmap…; numbers stay with `chart`, no `xychart`). Drawn the SAME way as charts (owner): IN the conversation where the model creates it, between the reply's paragraphs (text → diagram → text), centred, full width on the conversation background, no card/bubble, no tool row. iPhone: rendered in the isolated WebView of model-artifacts with mermaid.js BUNDLED (offline), theme-aware, pinch-zoom, full screen; TUI: highlighted source + an ASCII box/arrow rendering for flowchart/sequence + a key to open it rendered in the browser (artifacts opener). Daemon-side VALIDATION with the error (line + reason) returned to the model so small (~27B) models self-correct. Artifact kind `mermaid` (gallery, hub, persistence for free). Type: feat · Size: M–L · Blast: cross-module · Suited: Opus plan + mockups (≥2 variants), Opus for rendering slices. **Carried from D5's review (fix round 1):** the TUI has the same reopened-refusal gap the phone had — `packages/tui/src/resume.ts:114` rebuilds every non-denied result as `status: "ok"`, so `diagramRow` cannot see the daemon's mermaid refusal after `--resume`. The phone's fix is the row's OUTPUT (only an accepted call's is `DIAGRAM_RESULT_PREFIX`); the TUI's `ToolItem` carries `resultText`, so the same verdict applies there, in a follow-up slice.
-- [x] **fix/tui-redraw-flash** (merged 7ca9a280) → **fix/tui-bullet-glyph** (owner 2026-11-16, in progress / queued) — flash while "Thinking…" (repro-first, Opus); then `⏺` → `●` (emoji fallback on iOS/WSL; tentacle.so already deployed with `●`).
-- [x] **feat/session-capabilities** (owner 2026-11-15; MERGED S1–S5 2026-11-16, 6dade21c) — enable/disable individual MCP servers and skills DURING a session, so the model does not see them when they are not needed ("se devo giocarci a dama non mi serve fargli vedere mcp o skill su k8s"). Per session, from the TUI and the iPhone app (Session info already lists MCP servers + skills — parity rule). Hidden = absent from the tool list and the skills index sent to the model (not merely denied), effective from the next model call; persisted with the session. Doc: `docs/feat/session-capabilities.md` (to plan: Opus, load-bearing — agent loop tool set, protocol, persistence). Mobile UI → mockups first, in the feat/mobile-chrome style.
