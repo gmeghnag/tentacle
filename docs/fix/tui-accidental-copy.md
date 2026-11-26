@@ -185,6 +185,30 @@ or two rows").
 Touched tests, narrow: `accidental-copy`, `mouse-stream`, `app` — 158 pass / 0
 fail. Full gate: run by the orchestrator (not by this round).
 
+### Gate round 1: the parallel gate's one failure
+
+The gate failed on ONE test, not ours:
+`packages/daemon/test/device-store.test.ts` — "processStartedAt places our own
+start" (`Received: 19047.27`, expected `< 5000`). Root cause is the test's
+ORACLE, not the code: it built the expectation from `process.uptime()`, and under
+`bun test --parallel` that is not the pid's age — the gate read them 19 s apart
+(a worker's notion of "up"), while `ps -o etime=` answers for the process. Green
+in isolation and with `--parallel` on this file alone, which is why it only ever
+shows up in the full gate.
+
+Fix (test only, `device-store.test.ts`): the expectation now comes from the OS's
+own elapsed time for the pid (`psEtimeSeconds` helper next to the suite), plus
+three assertions that keep the original intent: (a) `processStartedAt(pid, now)`
+is within 2 s of `now - etime·1000`; (b) moving `now` an hour moves the answer
+an hour (so nothing local-time/`lstart` enters — the timezone regression of
+`docs/fix/daemon-records-stale.md`); (c) the same for a long-lived pid (`1`), so
+a seconds-for-milliseconds mistake is days off, not our own process's few
+seconds. Mutations, reverted: `now - elapsed` (units) → fail on (c); `… - 3_600_000`
+(an hour off) → fail on (a)/(c). Green: `44 pass / 0 fail`; `biome check` clean
+on both files touched.
+
+*— deepseek, 2026-11-26*
+
 *— claude-opus-5-5, 2026-11-26*
 
 ## Review
