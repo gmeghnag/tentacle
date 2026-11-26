@@ -632,4 +632,57 @@ The full `bun run check` and the e2e gate are the orchestrator's, after this.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same model as the planner, so
+the plan's blind spots may survive — the executor was a different model)
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM). Merge condition, from this
+doc's own header: flow 23 green on a simulator. The load-bearing falsifier
+(`inputText` on the compact field) has **not** run on a device yet.
+
+**Gate (narrow, as asked):** `composer-shape`, `composer-field-layout`,
+`composer`, `scripts/test/mockup-kit` → 99 pass / 0 fail; `session-screen*`,
+`motion-literals`, `voice-wiring`, `mockup-kit*` → 308 pass / 0 fail;
+`bun run lint` clean (2618 files); `bun run typecheck` clean (root + mobile +
+relay). The full `bun run test` was not re-run here.
+
+**Mutations** (each reverted; `git status` clean afterwards):
+- Unkeyed focus flag (`fieldFocused = focus.on`) → `composer-field-layout`
+  1 fail.
+- An element mounted before `<TextInput>` in the body → 1 fail.
+- `composerHolds` without `mic === "preparing"` → `composer-shape` 2 fail.
+
+**Premises checked:**
+- `sendSlot` maps only `none` → `up-dim` (`composer.ts:149-161`): TRUE. So
+  hiding the slot only ever hides a dead control.
+- Every non-editable placeholder comes with `mic: "hidden"`
+  (`session-view.ts:393-432`, `SessionScreen.tsx:2450`): TRUE.
+- `downloadLine` exists only in `preparing`, so that long hint never shows on a
+  compact row (`dictation.ts:185-208`): TRUE.
+- The mic caption exists only while `listening`/`finalizing`, which means the
+  field is open (`voice-view.ts:80-84`): TRUE.
+
+**Attacks tried:**
+1. *A long hint on the fixed 36 pt compact row.* The only editable hint is
+   «Message tentacle». The download hint and the caption imply an open field. →
+   holds.
+2. *Native re-parent from View flattening (Fabric):* `styles.body` and
+   `styles.row` are layout-only, so the body flattens the same way in both
+   shapes. Nothing is inserted before the input. → holds statically; the
+   device check is still flow 23.
+3. *A stale focus flag after a send:* it is keyed by `fieldKey`. A late `onBlur`
+   from the old input carries the old key and cannot reopen the field. →
+   holds; the mutation is red.
+4. *Open-shape geometry:* the input is 4 pt narrower on the right (W−38 vs
+   W−34), as Execution states. A wrapping draft re-wraps slightly earlier.
+   That is a nit, not D2-breaking for the flow's shot.
+5. *`LayoutAnimation` on blur at send:* it may also animate the new row and the
+   keyboard inset in the same batch. This is cosmetic and can only be checked on
+   a device (the plan already notes it).
+
+**Nit — signature:** the Execution is signed "claude (Anthropic executor
+agent)", but commit `ba4e0d20` says `exec (deepseek)`. §10 wants the real
+executor model. Fix the signature.
+
+**Executor behaviour:** it followed the plan, reported every drift honestly (the
+4 pt width, reusing `row`, the kit test, the compact default) and showed
+red-before-green with mutations. It did not run e2e, and said so plainly.
