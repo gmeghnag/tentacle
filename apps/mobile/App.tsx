@@ -445,7 +445,16 @@ function useWorkflowRuns(computerId: string): { state: RunsState; pull: () => vo
         }
         controller = createWorkflowRunsController({
           load: () => link.client.workflowList(),
-          onNotice: (listener) => link.client.onSessionWorkflows(() => listener()),
+          // A change of the link is a reason to read too: down, the read fails and
+          // the list says offline; back up, it lands and clears it.
+          onNotice: (listener) => {
+            const offNotice = link.client.onSessionWorkflows(() => listener());
+            const offLink = link.client.onLinkStatus(() => listener());
+            return () => {
+              offNotice();
+              offLink();
+            };
+          },
           schedule: (fn, ms) => {
             const timer = setTimeout(fn, ms);
             return { cancel: () => clearTimeout(timer) };

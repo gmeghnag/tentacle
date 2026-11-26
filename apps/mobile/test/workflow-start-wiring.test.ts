@@ -156,6 +156,14 @@ describe("the hub lands on the workflow list (mobile-workflows-landing D7)", () 
   });
 });
 
+describe("the run list watches the link (fix/e2e-reds-2611)", () => {
+  test("a change of the link triggers a read, so a dropped link reads as offline", () => {
+    const hook = between(APP, "function useWorkflowRuns", "\n}\n");
+    expect(hook).toContain("link.client.onLinkStatus(() => listener())");
+    expect(hook).toContain("link.client.onSessionWorkflows(() => listener())");
+  });
+});
+
 describe("the ask is the banner under the header (mobile-workflows-landing-v2)", () => {
   const route = between(APP, "function WorkflowStartRoute", "\nfunction ");
 
