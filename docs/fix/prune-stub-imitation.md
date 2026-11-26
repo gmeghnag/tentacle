@@ -414,4 +414,44 @@ behaviour claim; it needs its own eval, not a silent edit inside this fix.
 
 ## Review
 
-*— (reviewer), (date)*
+*— claude-opus-5-5, 2026-11-26*
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH/MEDIUM). Fresh context; same model as
+the Implementation's author (not the executor, DeepSeek) — shared planning
+blind spots may survive.
+
+**Gate:** `bun run check` → typecheck clean, `biome` clean (2715 files),
+**20815 pass · 5 skip · 0 fail** (skips are environment/opt-in, none in a
+touched file). Touched files: 69 pass.
+
+**Premises (TRUE):** `registry.ts:96-102` validates the schema before
+`execute`; `anthropic-provider.ts` sends `parseArgs(call)` as `input`;
+`maybePrune` keeps live prior entries and adds only fresh indices
+(`agent.ts:1228-1252`); candidates ascend, so `claimed` is set before the
+result index is visited; `keepRecentRounds` min 1 (`config/schema.ts:535`).
+
+**Mutations** (restored byte-identical, `git status` clean): (a) payload
+key → marker string: 8 fail; (b) `keepPayload` never filled: 4 fail;
+(c) `activeFrom = 0`: 10 fail; (d) net-gain gate removed: 1 fail;
+(e) `claimed` skip disabled: **0 fail** (nit 1).
+
+**E2E trace** (`.tentacle/tmp/prune-stub-imitation/trace.ts`, evidence shape,
+13 idle rounds): args become `{"path":"news/SCHEMA.md"}`, results gain the
+note ("4 edits, 2.7k chars"), 0 markers in any argument, both stripped args
+FAIL `fsWriteTool`/`fsMultiEditTool` schemas.
+
+**Attacks tried:** cross-batch half-pair (prior R5 entry on the result, R2
+fresh on the call → stripped args, no note: no copyable string — safe);
+result index in the protected tail (impossible: a result precedes the next
+assistant); net-gain under-count when the note is not applied (under-estimate
+only); duplicate tool-call ids (pre-existing `callById` assumption; ids are
+provider- or UUID-generated).
+
+**Nits (LOW):**
+1. `prune.ts` `claimed` guard is untested (mutation e survives). Reachable
+   when R5 fires on a write result (same args, byte-identical later result);
+   the outcome is still safe (no note, no copyable string). Add a test.
+2. Unverified, as the plan says: the live Anthropic API accepting a historical
+   `tool_use` missing required keys — one Haiku replay settles it.
+
+**Executor:** followed the plan; tests match T1–T8 and are non-vacuous.
