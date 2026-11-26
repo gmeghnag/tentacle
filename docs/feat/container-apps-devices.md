@@ -426,5 +426,69 @@ container+port twice makes two rows.
 
 ## Review
 
-*(empty until reviewed — mandatory fresh-context Opus security review: red-team
-OD3/OD4/OD5, the re-resolve, the window and the HTTP/1 gate)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; SAME model as the planner — shared blind spots possible; executor was Sonnet/DeepSeek)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, security).
+
+**Findings.**
+1. **MEDIUM — OD4 is bypassed by mounting a parent directory of the socket.**
+   `packages/docker/src/preview-target.ts:28-33,78-85` matches only the exact
+   endpoint path or a `docker.sock`/`podman.sock` basename. Scratch
+   `.tentacle/tmp/container-apps-devices/od4-parent.ts` (`previewTargetOf`, local
+   unix endpoint `/var/run/docker.sock`):
+   ```
+   /var/run/docker.sock -> /var/run/docker.sock: refused (the container mounts the engine socket…)
+   /var/run -> /host-run: ACCEPTED
+   / -> /host: ACCEPTED
+   /run -> /r: ACCEPTED
+   ```
+   A container started `-v /var/run:/host-run` (or `-v /:/host`) drives the engine
+   = root on the host, yet passes the binding Context rule "refused: the engine
+   socket", and the ask shows no mounts, so the owner cannot see it. The module
+   says "fail-closed: what cannot be checked is refused" and this is cheaply
+   checkable. Fix: also refuse a mount whose `Source` is an ancestor-or-equal of
+   the endpoint's socket path (and of the well-known `/var/run/docker.sock`,
+   `/run/docker.sock`, `/run/podman/podman.sock`, `$XDG_RUNTIME_DIR/{docker,podman}`
+   dirs), `/` included; add the three ACCEPTED cases above as refused tests
+   (red first).
+
+No HIGH. Not raised (left as planned, accepted debt): `CapAdd`/`PidMode:host`
+not refused (the plan names only privileged); tunnels survive `session/detach`
+(the device stays authorized; the session is not ended); the narrow TOCTOU
+between re-inspect and dial.
+
+**Gate.** `bun run typecheck` clean; `bun run lint` clean (2741 files). Touched
+test files (16): 187 pass, 0 fail. Full `bun run test`: run 3 = 20989 pass, 5 skip,
+0 fail. Runs 1–2 had timeouts in `packages/cli/test/attach-run.test.ts` (D11/D12)
+and `scripts/test/release.test.ts` only, under machine load. Both files pass in
+isolation (97/97), and the diff touches neither. No skip is added by this diff.
+
+**Mutations (each RED, then reverted; `git status` clean after).**
+- `session-previews.ts:104` drop the `facts.id !== row.containerId` check →
+  `connection-preview` "an inspect that answers another container…" fails.
+- `preview-target.ts` drop the `Destination` socket check → "an engine socket
+  mounted: source, destination…" fails.
+- `preview-tunnels.ts` drop the upstream-speaks-first close → "a server that
+  speaks first is not HTTP" fails.
+
+**Premises spot-checked TRUE.** The device gate is applied before any dial, and
+the token principal's notifications are ignored (`connection.ts` `requirePreviewDevice`,
+`onNotification`). Re-resolve runs per connect, by FULL id, with no cache
+(`session-previews.ts` `connect`, `preview-resolver.ts` `resolve`). The kind is
+excluded from `autoApproves`, is `onceOnlyAsk` and `EXTERNAL_ANSWER` owner-only
+(`core/permission.ts`). Sub-agents are filtered in both lists (`subagent.ts`).
+The resolver is passed only by `reloadedHost` with `previews.enabled`
+(`serve.ts:832`), never on the stdio/pod host. The notification schemas are
+registered (`methods.ts:505-507`).
+
+**Attacks tried.**
+- (a) OD4 parent mount → finding 1.
+- (b) Replaced container / changed port → the row is removed or the new port dialled. Holds, mutation-pinned.
+- (c) Token principal: `preview_connect`/`stop` → `Unauthorized`; its data frames are dropped. Holds.
+- (d) Stop or session close during the resolve or the dial → `find` re-check +
+  `watchPreview` → undefined → socket destroyed. Holds (code trace).
+- (e) Phone flood / non-HTTP first line / `PRI *` → closed. Holds (tests + mutation).
+
+**Executor behaviour.** Honest. It listed the OD4 parent-mount gap itself under
+"Not verified", along with every other residual. The mutations and the
+red-before-green record are credible. The as-built drift is stricter than the plan.
