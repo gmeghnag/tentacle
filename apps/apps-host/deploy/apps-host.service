@@ -1,0 +1,75 @@
+# tentacle-apps-host — serves session apps at <id>.apps.tentacle.so
+# (docs/feat/session-apps-host.md; runbook: docs/ops/apps-host-deploy.md)
+#
+# NOT APPLIED by any executor: the owner installs it by hand, following the
+# runbook. It carries no secret (the DNS token belongs to Caddy). The process
+# binds loopback only: Caddy terminates TLS in front of it
+# (deploy/Caddyfile.apps).
+
+[Unit]
+Description=tentacle apps host (single-file session apps, leased)
+Documentation=https://github.com/gmeghnag/tentacle/blob/main/docs/ops/apps-host-deploy.md
+After=network-online.target
+Wants=network-online.target
+# A crash loop parks the unit as `failed` (these belong in [Unit]).
+StartLimitIntervalSec=30s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tentacle-apps
+Group=tentacle-apps
+# --trust-proxy is REQUIRED behind Caddy: without it every client is 127.0.0.1
+# and the per-address limits are one bucket for the whole world.
+# --domain, --abuse-email and --terms-url are required; check the last two exist
+# before the first start (runbook §0).
+ExecStart=/opt/tentacle-apps-host/tentacle-apps-host --host 127.0.0.1 --port 4200 --trust-proxy --domain apps.tentacle.so --abuse-email abuse@tentacle.so --terms-url https://tentacle.so/terms
+
+Restart=always
+RestartSec=2s
+# SIGTERM writes a last lease snapshot.
+TimeoutStopSec=10s
+
+# State: records, content, the lease snapshot, reports. Operator files
+# (kill-switch, takedowns) are root's: the service only reads them.
+StateDirectory=tentacle-apps
+StateDirectoryMode=0700
+ConfigurationDirectory=tentacle-apps
+ConfigurationDirectoryMode=0755
+ReadOnlyPaths=/etc/tentacle-apps
+
+# Sandbox (as the relay's unit).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+# NOT set, deliberately: MemoryDenyWriteExecute and SystemCallFilter — Bun
+# (JavaScriptCore) JIT-compiles and would die on the host.
+
+# Its own limits: a flood costs this service, never the box.
+MemoryMax=512M
+TasksMax=512
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tentacle-apps-host
+
+[Install]
+WantedBy=multi-user.target

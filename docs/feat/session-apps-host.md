@@ -612,7 +612,92 @@ provider's API. **Gate before done:** `bun run check` (typecheck incl.
 
 ## Execution
 
-*(empty until execution)*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Load-bearing check, re-run before any code** (`bun` 1.4.3, same probes as the
+Repro, in `.tentacle/tmp/session-apps-host/probe.ts`) — holds:
+
+```
+pub 32 sig 64 ok true tamper false
+small 200 {"host":"abc.apps.example","len":100}
+big 413
+statfs free bytes true
+```
+
+**Built, in order:** (1) `packages/protocol/src/apps-host.ts`, its export, the
+regenerated `protocol.json`; (2) the two relay `exports` entries, the new
+workspace, `bun install`; (3) `limits`, `app-id`, `signed-request`,
+`operator-files`; (4) `host-core`; (5) `pages`, `store`; (6) `server`, `main`;
+(7) `deploy/` (build script, unit, Caddy block), the runbook, `package.json`
+`typecheck`, `AGENTS.md` §6, `changelog.d/session-apps-host.added.md`. No
+`PROTOCOL_VERSION` change and no `protocol.d/` note: not an RPC addition.
+
+**Red before green — what was and was not seen:**
+
+- Seen red first (module missing): the protocol test, `app-id`,
+  `signed-request`, `operator-files`, `pages`, `store`, `deploy`.
+- **Not** run before their code existed: `host-core.test.ts`, `server.test.ts`,
+  `main.test.ts`. Their non-vacuity rests on the mutations below.
+
+**Mutations** (each applied alone, run on its test file, reverted):
+
+| Mutation | Result |
+|---|---|
+| drop `domain` from the signing payload | 2 fail: pinned golden string; "changing any part changes the payload" |
+| skip the nonce guard | 2 fail: "a second use of a nonce → replay"; "a full cache → busy" |
+| restore keeps the old lease instead of a fresh TTL | 2 fail: "live at the snapshot → a fresh TTL"; "published after the last snapshot" |
+| renew succeeds on `expired` / lapsed | 1 fail: "a lapsed lease is offline before the sweep" |
+| drop `connect-src 'none'` | 2 fail: "exactly this set"; "each directive that closes a way out" |
+| accept `same-site` as the app | 1 fail: "everything else gets the warning" |
+| (extra) no per-id write queue | 1 fail: "a revive waits for the expiry's cleanup of the same id" |
+| (extra) only `--domain` required | 1 fail: "each required value is refused when missing or blank" |
+| (extra) a bad signature is let through | 1 fail: "unsigned, forged, replayed and skewed requests touch nothing" |
+
+**Drift from the Implementation** (no step contradicted the code):
+
+- Three extra source files: `records.ts` (shared shapes), `rate.ts` (bounded
+  windows), `routes.ts` (pure control routes + error → status).
+- **Store writes are queued per id** (`server.ts`, `serial`). The plan did not
+  say it: without it an expiry's pending cleanup removes the content file a
+  revive with the same bytes has just written (the extra mutation above).
+- Restart: the lease compared with `aliveAt` is the later of the snapshot's and
+  `updatedAt + leaseMs`, so an app published after the last snapshot (or with no
+  snapshot yet) is not expired. The start-up scan treats a file no **live**
+  record names as an orphan (not "no record"), and never touches a skipped
+  record's files.
+- Choices the plan left open: `cap_reached` → HTTP 409; `DELETE` of a deleted
+  app → 204 again (so a failed cleanup can be retried), of an expired one →
+  deleted, of a taken-down one → 403; a report day-file is removed once its
+  start is older than the retention (no report outlives 30 days); an unreadable
+  `takedowns` keeps the last good entries; the warning drops the URL fragment
+  (a fragment-only navigation would not reload); `--domain` must be a bare name
+  and `--terms-url` http(s).
+- The unit carries `abuse@tentacle.so` and `https://tentacle.so/terms` as the
+  values to confirm (runbook §0).
+- `Store.content` returns a `Bun.file` (or bytes, in the memory store).
+
+**Checks run by the executor:** `bun test apps/apps-host/test
+packages/protocol/test scripts/test/release.test.ts
+scripts/test/changelog-guard.test.ts apps/relay/test` → 1029 pass, 0 fail;
+`tsc -p apps/apps-host --noEmit` clean; `biome check` on the changed files
+clean. The full `bun run check` is the orchestrator's gate, not run here.
+
+**Loopback smoke** (`main.ts` from source; the publish script is the runbook's
+own §5 block): `201` + url; visit without Fetch Metadata → warning, same-origin
+navigation → the 53-byte app; a 10 MiB + 1 body → 413; `SIGTERM` → exit 0 with
+a lease snapshot on disk.
+
+**Unverified:** the compiled binary (`deploy/build.ts` was not run: the command
+needed an approval this session did not have — run `bun
+apps/apps-host/deploy/build.ts`); `caddy validate`, the Containerfile and the
+podman steps; `systemd-analyze verify`; real-browser behaviour (runbook §5).
+
+**Residuals for Review:** a `413` from Bun's own body limit carries none of the
+host's headers; for up to `skewMs` after a restart a publisher whose clock runs
+behind gets `409 replay` with no `serverTime`; key blocks do not apply if
+`takedowns` is unreadable at start; tombstones are bounded only by the create
+rate limits; a signed-shaped but forged upload is read (≤ 10 MiB) before it is
+refused, bounded per address but not in total concurrency (`MemoryMax=512M`).
 
 ## Review
 

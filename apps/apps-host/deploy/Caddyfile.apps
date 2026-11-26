@@ -1,0 +1,31 @@
+# Caddy site block for session apps — apps.tentacle.so and *.apps.tentacle.so
+# (docs/feat/session-apps-host.md; runbook: docs/ops/apps-host-deploy.md)
+#
+# NOT APPLIED by any executor. Include it from the host's main Caddyfile:
+#
+#   import /etc/caddy/apps.tentacle.so.caddy
+#
+# A wildcard certificate is issued through DNS-01 only, so Caddy needs a DNS
+# provider module (runbook §4): replace <provider> and give Caddy the API token
+# in TENTACLE_APPS_DNS_TOKEN. The stock image will NOT accept this file.
+
+*.apps.tentacle.so, apps.tentacle.so {
+	tls {
+		dns <provider> {env.TENTACLE_APPS_DNS_TOKEN}
+	}
+	request_body {
+		max_size 10MiB # = maxAppBytes (MiB, not MB = 10^6); the process re-checks
+	}
+	header {
+		# This name only: no includeSubDomains, no preload.
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+		-Set-Cookie
+	}
+	reverse_proxy 127.0.0.1:4200 {
+		# REPLACE the client's header: the process takes the right-most hop.
+		header_up X-Forwarded-For {remote_host}
+		header_down -Set-Cookie
+	}
+	# No `log` directive: visitor access is not logged (privacy).
+}

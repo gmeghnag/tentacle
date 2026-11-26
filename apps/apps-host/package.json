@@ -1,0 +1,14 @@
+{
+  "name": "@tentacle/apps-host",
+  "version": "0.7.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "dependencies": {
+    "@tentacle/protocol": "workspace:*",
+    "@tentacle/relay": "workspace:*"
+  }
+}

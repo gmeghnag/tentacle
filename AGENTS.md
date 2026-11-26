@@ -91,10 +91,12 @@ style suggestions.
 
 - Bun workspaces monorepo, **16 packages** (`agent`, `browser`, `cli`, `client`, `config`,
   `core`, `daemon`, `docker`, `exec`, `k8s`, `mcp`, `protocol`, `providers`, `tools`,
-  `transport`, `tui`) + **2 apps** (`apps/mobile`, Expo / React Native, React
+  `transport`, `tui`) + **3 apps** (`apps/mobile`, Expo / React Native, React
   19 — the TUI stays on React 18; CI installs with
-  `--filter '!@tentacle/mobile'`; and `apps/relay`, the mobile relay service —
-  a plain Bun process, no React, and it has its own `tsc -p apps/relay`), TypeScript strict, Biome. **Bun ≥ 1.4.3 required**
+  `--filter '!@tentacle/mobile'`; `apps/relay`, the mobile relay service —
+  a plain Bun process, no React, and it has its own `tsc -p apps/relay`; and
+  `apps/apps-host`, the session-apps host — likewise a plain Bun process with
+  its own `tsc -p apps/apps-host`), TypeScript strict, Biome. **Bun ≥ 1.4.3 required**
   (`engines.bun`; the compiled-binary worker path needs it — see the TODO entry).
   - `bun run test` — full suite, PARALLEL (`bun test --parallel`, one worker
     per core, each file in a fresh global and module registry, ~1 min here),
@@ -115,7 +117,8 @@ style suggestions.
     `KUBECONFIG`/`DOCKER_HOST`/`CONTAINER_HOST` at nonexistent paths and `HOME` at a
     temp dir, so no test reaches real infra; opt-ins `TENTACLE_K8S_SERVER`,
     `TENTACLE_DOCKER_TESTS=1`, `TENTACLE_SLOW_TESTS=1` are kept when set explicitly.
-  - `bun run typecheck` — `tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay`.
+  - `bun run typecheck` — `tsc --noEmit && tsc -p apps/mobile && tsc -p apps/relay
+    && tsc -p apps/apps-host`.
   - `bun run lint` — `biome check .` (checks TS/JS/JSON; not Markdown).
   - `bun run check` — typecheck **then** lint **then** test, in order (a
     typecheck failure short-circuits before tests run). Green before "done".
