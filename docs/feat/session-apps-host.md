@@ -848,3 +848,45 @@ flood → finding 1; (g) rate-map saturation → finding 2. No §7 invariant is 
 `host-core`/`server`/`main` tests were not seen red first, but mutations above and the
 executor's show they are not vacuous. Unverified (unchanged): real-browser Fetch Metadata
 flow, `caddy validate` with a DNS module, the compiled binary.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (same reviewer context; diff `HEAD~1` = `f98a42b7`)
+
+**Verdict: PASS** — both round-1 findings are closed and pinned. No new HIGH/MEDIUM.
+
+**Gate:** `bun test apps/apps-host/test packages/protocol/test/apps-host.test.ts` → 159 pass / 0 fail;
+`bun run typecheck` clean (incl. `apps/apps-host`); `bun run lint` clean (2669 files).
+
+**Finding 1 (OOM) — fixed.** `body-budget.ts` charges every body BEFORE it is read
+(declared length, or `maxAppBytes` when chunked) against a 64 MiB global budget and 2 per
+address; `read-body.ts` reads a stream into one bounded buffer with a 2-min deadline;
+renew/delete carry `max = 0` so they never wait on the budget.
+**Finding 2 (full rate map) — fixed.** When the address map is full, a request that claims
+to renew a live app as its owner is counted per app (`untrackedRenews`, ≤ `maxLiveApps`
+keys); the key map takes a `reserved` key for such a renewal; the nonce cache gives each
+renewed live app a reserve of 20. The signature is still verified after the claim.
+
+**Mutations (each applied, run, reverted; `git status` clean after):**
+| Mutation | Result |
+|---|---|
+| global body budget ×1000 | 8 fail (6 overload, core, flood) |
+| `admitApi` ignores the renewal claim | caught in the same run (core "full maps", flood "full address map") |
+| no per-app nonce reserve | 2 fail (signed-request reserve, flood "full nonce cache") |
+| per-address upload cap ×1000 | 1 fail ("one address holds only so many at once") |
+| `RateWindows.check` ignores `reserved` | 2 fail (core "full maps", flood "full key map") |
+
+**Regression attacks on the diff:** (a) renew/delete with a declared or chunked body →
+`bad_request` before reading — holds, pinned; (b) the renewal claim when the attacker doesn't
+know the owner key → falls back to the normal `busy` (`renewable` needs the owner key and a
+running lease) — holds; (c) a forged claim that does know the key spends only that app's own
+fallback window (stated by the executor) — acceptable; (d) `readBody` allocates `max`, not the
+declared length (`read-body.ts:20`), so a `Content-Length: 1` request charges 1 byte but
+allocates 10 MiB — probe `.tentacle/tmp/session-apps-host/alloc.ts`: 60 such buffers, one
+byte written each → +3 MiB RSS on macOS (zero pages are lazy). **Nit**, not a finding:
+allocate `min(max, declared)` so the charge and the allocation are the same by construction,
+and Linux needs no separate check.
+
+**Residuals accepted (stated in Execution):** four slow uploaders can fill the budget and
+refuse publishes/reports for up to 2 min at a time (live apps and renewals unaffected) — a
+shorter `uploadTimeoutMs` would narrow it; memory not measured under `MemoryMax` on Linux.
