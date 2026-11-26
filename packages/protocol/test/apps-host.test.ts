@@ -88,7 +88,7 @@ describe("apps-host contract", () => {
 
   test("errors strip unknown fields and refuse an unknown code", () => {
     const value = {
-      error: "clock_skew",
+      error: "clock_skew" as const,
       message: "clock",
       serverTime: 5,
       retryAfterMs: 1,
