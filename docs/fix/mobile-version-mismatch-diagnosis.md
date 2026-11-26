@@ -1,6 +1,6 @@
 # fix/mobile-version-mismatch-diagnosis — A phone on an older protocol must read "Update the app", not "Stopped"
 
-> **Status:** execution (done — awaiting Review)
+> **Status:** execution (fix round 1 — awaiting Review round 2)
 > **Branch:** `fix/mobile-version-mismatch-diagnosis`
 > **Type:** fix · **Size:** S · **Blast:** contained · **Suited:** DeepSeek executes; standard in-context Review (pure/leaf mobile modules, no §7 invariant, no protocol/persistence change)
 > **Changelog:** `changelog.d/mobile-version-mismatch-diagnosis.fixed.md`
@@ -554,6 +554,74 @@ and `CHANGELOG.md` untouched.
 view-model, so the screens render the new `word`/`detail` with no code change; and
 nothing was run against a real `serve` on a different `PROTOCOL_VERSION` (the
 report path is pinned by A9's object identity plus the daemon-side schema).
+
+### Fix round 1
+
+*— claude (executor session; the harness did not expose a finer model id), 2026-11-26*
+
+**Finding 1 (MEDIUM, the drawer's second surface) — FIXED.**
+
+`apps/mobile/src/computer-rows.ts:99-104` — in `computerRow`'s failed-probe branch,
+the row's `state` is no longer the link's diagnosis blindly: when the diagnosis is
+`ok` (the computer answered the dial AND the Noise handshake, so the only thing
+left to fail is `initialize`) the state comes from the skew itself —
+`skewState(protocolSkewOf(probe.error))` — and `diagnosis` otherwise. Imports the
+two existing exports from `link-diagnosis.ts:100,124`; no new union member
+(`update-app`/`update-computer` were already in `ComputerRowState`, and
+`computer-status.ts:30-53` already maps them to `attention`, `pairAgain: false`).
+Because `drawerTitle`'s `canCreate` is `status.tone === "online"`
+(`drawer-list.ts:247`), the drawer stops offering New session to a daemon that
+refuses every `initialize` — the user-visible half of the finding.
+
+The authenticated diagnosis still wins (`diagnosis !== "ok"` ⇒ `skew` is not even
+read): `revoked` is a fact about OUR key and must not be overwritten by a skew.
+
+**Red first** (`bun test test/computer-rows.test.ts`, before the source edit):
+
+```
+error: expect(received).toBe(expected)
+Expected: "update-app"      Received: "ok"
+  (fail) … > a newer serve reads «Update the app», not «Online» with a contradicting detail
+Expected: "update-computer" Received: "ok"
+  (fail) … > an older serve reads «Update tentacle»
+Expected: "update-computer" Received: "ok"
+  (fail) … > a serve that sent no report at all is the older side
+ 15 pass · 3 fail
+```
+
+**Tests added** — `apps/mobile/test/computer-rows.test.ts:164-218` (4: newer serve
+→ `update-app` and `computerStatus` = «Update the app»/`attention`/no Pair again,
+older → `update-computer`, no report → the older side, an authenticated `revoked`
+still wins) and `apps/mobile/test/drawer-list.test.ts:181-203` (the second
+surface end-to-end: `computerRow` → `drawerTitle`, «Update the app», `attention`,
+`canCreate: false`).
+
+**Mutations** (each reverted; the tree is byte-identical to the fix afterwards —
+`git status --porcelain` lists only the three intended files + the doc/fragment):
+
+| # | Mutation | Result |
+| --- | --- | --- |
+| M1 | `state: diagnosis` (the pre-fix line) | 4 fail — the three `computer-rows` skew tests + the drawer test (`Expected "Update the app", Received "Online"`) |
+| M2 | drop the `diagnosis === "ok"` guard (skew always wins) | 1 fail — «an authenticated diagnosis still wins over the skew (revoked)» |
+
+**Drift from Implementation:** the Implementation's Files/Design claim
+"`computer-rows.ts` untouched / no ripple" was **wrong** — `describeError` is
+consumed there too, exactly as Review round 1 showed. The site is now fixed as the
+Review prescribed; the Implementation section is left as written (this note
+supersedes it). `changelog.d/mobile-version-mismatch-diagnosis.fixed.md` gained one
+clause for the row/drawer wording — same fragment, same task.
+
+**Not fixed (deliberately, pre-existing):** a failed probe whose diagnosis is `ok`
+and which is *not* a skew (e.g. a `ChannelError` with the diagnoser's `ok`) still
+yields `state: "ok"` — «Online» over an unreachable detail. It predates this task,
+Review's attack (d) accepted it, and changing it needs a decision about which
+non-skew failures are "online", so it is out of this fix's scope.
+
+**Narrow verification here** (the full gate is the orchestrator's script):
+`bun test` on `computer-rows`, `computer-status`, `drawer-items`, `drawer-list`,
+`project-rows`, `band-screens`, `header-wiring` → **144 pass, 0 fail**;
+`bunx biome check` on the three changed files → clean; `bunx tsc -p apps/mobile`
+→ clean. No new `!` assertions; double quotes and trailing commas.
 
 ## Review
 

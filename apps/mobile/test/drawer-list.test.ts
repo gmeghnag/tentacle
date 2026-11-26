@@ -6,7 +6,9 @@
  * list that reads "no sessions" when the read failed).
  */
 import { describe, expect, test } from "bun:test";
-import type { ComputerRow } from "../src/computer-rows.ts";
+import { DomainErrorCode, PROTOCOL_VERSION } from "@tentacle/protocol";
+import { RpcError } from "@tentacle/transport";
+import { type ComputerRow, computerRow } from "../src/computer-rows.ts";
 import { type DrawerSource, drawerList, drawerTitle, rowMarks } from "../src/drawer-list.ts";
 import type { SessionRow } from "../src/session-list.ts";
 
@@ -172,6 +174,29 @@ describe("drawerTitle", () => {
 
   test("a computer that needs pairing again cannot create either", () => {
     const title = drawerTitle([A], [computer("a", { state: "revoked" })], "a");
+    expect(title?.tone).toBe("attention");
+    expect(title?.canCreate).toBe(false);
+  });
+
+  test("a refused protocol skew: «Update the app», never «Online» with New session", () => {
+    // The computer ANSWERED and refused `initialize` (docs/fix/mobile-version-mismatch-diagnosis.md
+    // Review round 1 finding 1): the link's diagnosis is `ok`, so the row used to
+    // read «Online» with the detail "update the app", and the drawer offered New
+    // session to a daemon that refuses every `initialize`.
+    const skewed = computerRow(
+      A,
+      {
+        ok: false,
+        error: new RpcError(DomainErrorCode.VersionMismatch, "protocol version mismatch", {
+          client: { protocol: PROTOCOL_VERSION },
+          daemon: { protocol: PROTOCOL_VERSION + 2 },
+          update: "client",
+        }),
+      },
+      "ok",
+    );
+    const title = drawerTitle([A], [skewed], "a");
+    expect(title?.status).toBe("Update the app");
     expect(title?.tone).toBe("attention");
     expect(title?.canCreate).toBe(false);
   });
