@@ -1,1 +1,0 @@
-- **A very long session opens on its end without visibly scrolling.** A session of a few hundred messages used to appear at a middle turn and scroll down to the end over a few seconds; its rows are now rendered in big batches while the list is hidden, so it shows the end at once.

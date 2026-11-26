@@ -1,1 +1,0 @@
-- **Mobile: a shell step's output is a terminal block.** It no longer wraps — one horizontal scroll with a fading edge, always neutral (the failure is the step's `exit N`) — and a long log shows its last lines («… N earlier lines»). While you read inside an open long output, the step's row sticks to the top with «line X of N» and «Collapse».

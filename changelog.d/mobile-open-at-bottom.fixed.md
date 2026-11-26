@@ -1,1 +1,0 @@
-- **Opening a session no longer scrolls visibly to the end.** When the list was still rendering its tail after the reveal, the growth was followed with an animated scroll; it now stays a silent jump, so the first frame is already the latest messages.

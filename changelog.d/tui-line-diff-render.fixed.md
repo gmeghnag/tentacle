@@ -1,1 +1,0 @@
-- **No more flashing on terminals without synchronized output (Terminal.app).** The TUI now repaints only the rows that changed instead of erasing and redrawing the whole screen on every tick: one row per spinner tick while Thinking instead of 40, ~90–97 % fewer bytes per second. `TENTACLE_TUI_FULL_REDRAW=1` restores the old full repaint.

@@ -1,1 +1,0 @@
-- **Clickable links in the TUI.** http(s) URLs in the transcript are underlined and open in your default browser with a click; a presented artifact's title is underlined (a click opens it). Markdown links always show their address (`text (url)`), in every terminal.

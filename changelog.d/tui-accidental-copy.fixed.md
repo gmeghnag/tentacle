@@ -1,1 +1,0 @@
-- **A stray click no longer overwrites the clipboard.** A mouse selection now copies only when it spans at least 3 cells along a row or two rows apart (a one-row vertical jitter is still a click); a real copy is confirmed in the status bar ("Copied · N chars") without moving the transcript.

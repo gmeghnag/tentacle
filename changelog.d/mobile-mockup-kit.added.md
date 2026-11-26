@@ -1,1 +1,0 @@
-- **Mockup kit generated from the app's source.** `tools/mockup-kit/` (`bun run mockup-kit`) gives design mockups the real palettes, type, sizes, style metrics and animation timings of the iPhone app and the TUI, kept in sync by a drift test; `docs/MOCKUP-BRIEF.md` says how to use it.

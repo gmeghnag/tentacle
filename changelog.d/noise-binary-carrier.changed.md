@@ -1,1 +1,0 @@
-- **Phone ↔ computer traffic is ~25 % smaller.** The end-to-end channel now sends raw binary frames instead of base64 text; the app and tentacle must be updated together (a mismatch says which one to update).

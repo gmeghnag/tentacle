@@ -1,1 +1,0 @@
-- **Mobile: the jump-to-latest pill is just the ↓ arrow.** The "Jump to latest" label is gone (VoiceOver still reads it); "New messages" still shows when something arrived off-screen.

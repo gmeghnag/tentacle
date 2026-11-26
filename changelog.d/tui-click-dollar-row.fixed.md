@@ -1,1 +1,0 @@
-- **A shell call's `⎿ $ cmd` row now opens it on click.** In the TUI only the header row toggled a tool block; for a `shell` call the command row (and its wrapped continuation rows) toggles too, while output rows stay selectable text.

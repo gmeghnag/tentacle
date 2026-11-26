@@ -1,1 +1,0 @@
-- **A workflow run's own ask opens as the sheet over the run screen.** The run screen no longer answers inline: it keeps one slim row (`Review` when the sheet was swiped away, `Open the session` for an ask that is not this run's), and asks are paired to their step by the structured origin instead of the agent id.

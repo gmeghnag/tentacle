@@ -1,1 +1,0 @@
-- **Copy a message on the phone.** Long-press a message to copy it whole (a light haptic and a "Copied" confirmation); "Select text" opens it in a sheet where any part can be selected and copied.

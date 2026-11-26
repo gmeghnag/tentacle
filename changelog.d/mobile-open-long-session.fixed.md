@@ -1,1 +1,0 @@
-- **A long session is less likely to open short of its end.** The opening landing now stays hidden until the list actually rests at its end (one more silent scroll if not), and re-checks once, silently, after it ends. The exact cause of the rare "opens ~2 turns above the end" case was not reproduced.

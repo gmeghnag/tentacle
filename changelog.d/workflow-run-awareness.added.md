@@ -1,1 +1,0 @@
-- **The agent knows a workflow is running.** Each request carries one short status line for the session's live run (step, waiting for you, retry/round, tokens); a run's end reaches a running turn at its next step; a step left waiting for you on an unattended `serve` session wakes the agent once.

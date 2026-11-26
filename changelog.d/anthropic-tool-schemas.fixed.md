@@ -1,1 +1,0 @@
-- **Anthropic API tool schemas are valid again.** Tools with a positive-integer parameter (`fs_read`, `shell`, `search`, …) made every request to the Anthropic API fail with `400 JSON schema is invalid … draft 2020-12`; tool schemas are now normalised to draft 2020-12 on the Anthropic wire.

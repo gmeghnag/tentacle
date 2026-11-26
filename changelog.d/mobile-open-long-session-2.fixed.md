@@ -1,1 +1,0 @@
-- **A long session opens at its real end.** A transcript of about 110 rows could open one turn short, its last answer under the composer, until you touched it; the list is now shown only after its last scroll has landed.

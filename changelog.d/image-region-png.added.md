@@ -1,1 +1,0 @@
-- **image_view zooms into PNG pictures.** A `region` (fractions of the picture) sends just that part, at up to the chosen detail; `low` now works for PNG files and screenshots.

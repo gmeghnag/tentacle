@@ -1,1 +1,0 @@
-- **Switches work before the first message.** In a new or resumed session, `/mcp`, `/skills` and `/tools` can switch servers, skills and tools on or off before anything is sent. The switches apply from the first message, so the first model call already runs without them.
