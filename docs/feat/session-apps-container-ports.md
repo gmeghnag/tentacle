@@ -517,6 +517,18 @@ Execution):
 **Deploy (owner, after 27/11):** the Caddy change (Q5), the apps-host binary,
 `previews.links` on the owner's serve. The live check repeats (a)–(j) over https.
 
+### Owner answers (2026-11-26 ~23:00)
+
+*— claude-opus-5-5 (orchestrator), recording the owner*
+
+1. **TLS ends at Caddy on the apps box for now** — as recommended (say so in the ask; passthrough later with feat/a2a-relay; a blocker before other users' apps run there).
+2. **Public mode IS in this task** (owner overrides the recommendation). Every exposure's ask lets the owner choose: **secret link** (default, pre-selected) or **public**. Design for the executor: the `container_preview`/exposure call carries `public: boolean` (default `false`); the ask shows a distinct, unmistakable title and warning for public («anyone with the address can open it»), never pre-selected, never «always»; a public app has no capability secret (no cookie exchange) but keeps every other control (engine checks, caps, Report link, kill switch, takedown, lifetime tied to the session); the owner's clients show whether an exposure is public. Tests: the default is secret; public needs the explicit choice in the ask; a public app is reachable without a secret, a secret one is not.
+3. **The secret link is shown only to the owner's clients** — as recommended (the model gets the URL without the secret).
+4. **LAN pivot: warn in the ask + the stricter gate** — as recommended.
+5. **Cookies through Caddy: as recommended** (owner did not veto): remove the blanket `Set-Cookie` strip for live apps only, with the test that static and control responses never set a cookie.
+
+**Implementation APPROVED** with these answers.
+
 ### Owner questions
 
 Each one is decided as recommended under *Orchestrator decisions*. Veto before the
