@@ -36,4 +36,29 @@ As planned, no drift. Final proof: all six flows green on BOTH simulators (0B43D
 
 ## Review
 
-*— pending*
+*— claude-opus-5-5, 2026-11-26* (fresh context; different model from the executor, Sonnet)
+
+**Verdict: APPROVE-WITH-NITS** — no HIGH/MEDIUM findings.
+
+Gate (narrow, as asked): `bun test apps/mobile/test` 5715 pass / 0 fail; `workflow-start-wiring.test.ts` 24/0; `bun run lint` clean (2635 files); `bun run typecheck` clean (root + mobile + relay). e2e flows were not re-run on a simulator by the reviewer (the executor reports 6/6 on both sims).
+
+Premises:
+| claim | verdict |
+|---|---|
+| `offline` is set only when a read fails (`workflow-runs-controller.ts` `failed`) | TRUE |
+| reads come only from focus / pull / `onNotice` (debounced `RUNS_DEBOUNCE_MS`) | TRUE |
+| a read while down fails fast (`remote-client.ts:1656` rejects when `!up && channelFactory`) → `offline` | TRUE |
+| link "up" is emitted after `up = true` (`remote-client.ts:3690-3693`), so the read it triggers lands and clears `offline` | TRUE |
+| `ARM_MS = 400` (`permission-sheet.ts:52`) | TRUE |
+
+Mutation: replaced the `onLinkStatus` subscription with a no-op in `App.tsx` → the new test FAILS (23/1); restored from a scratch copy, `git status` clean.
+
+Attacks tried:
+1. **Read loop while down** — each failed redial emits a status (`schedule` → `emitStatus`, `remote-client.ts:3649`), so each backoff step costs one debounced `workflow/list` attempt. It is bounded by the backoff, and each attempt fails locally with no wire traffic. Not a loop. Holds.
+2. **Leak / landing after unmount** — the composed unsubscribe calls both `off*`, the controller's `dispose` → `stopListening` calls it, and `read()` returns early once disposed. Holds. (Nit: the wiring test is a string match, so dropping `offLink()` from the cleanup would not fail it. Acceptable for this file's pattern.)
+3. **§7 invariants** — no protocol, persistence, broker or RPC-peer change. The hook still only wires and `onLinkStatus` is an existing public subscription. Nothing violated.
+4. **Missed sites, same race** — other flows still tap `perm-allow_once` right after `perm-sheet` is visible (27, 29, 36, 41-file-view, 41-transcript, 46). They are latent flakes of the same class, outside this task's six reds. Worth a TODO, not a blocker.
+
+Nits: the controller's header and `WorkflowRunsDeps.onNotice` doc still say `onNotice` is only `onSessionWorkflows` ("does not retry in a loop … next notice reads again"). It is now link status too, so the comment should say so. `waitForAnimationToEnd` waits for a static screen, not 400 ms: it is a probabilistic guard, though it was empirically green.
+
+Executor behaviour: classified each red with evidence, kept the scope tight, and showed the test red-then-green. Nothing in the doc was overstated.
