@@ -27,7 +27,7 @@ export const BROWSER_EXTENSION_ID = "kkhicjoemmpaaaepoaeenijabpeamcog";
  * here, e.g. `= "abcdefghijklmnopabcdefghijklmnop"`; the native host then
  * accepts both copies (`browserExtensionIds`).
  */
-export const BROWSER_EXTENSION_STORE_ID: string | undefined = undefined;
+export const BROWSER_EXTENSION_STORE_ID: string | undefined = "aebggkkfniebcmpflpbfhbognboocjji";
 
 /** Chrome's extension id: 32 letters in a–p (a sha256 prefix, one letter per nibble). */
 export function isExtensionId(id: string): boolean {

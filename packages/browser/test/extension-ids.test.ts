@@ -9,8 +9,11 @@ import {
 const STORE = "abcdefghijklmnopabcdefghijklmnop";
 
 describe("extension ids: the dev (key-pinned) id and the Chrome Web Store id", () => {
-  test("no store id yet → only the dev id", () => {
-    expect(browserExtensionIds(undefined)).toEqual([BROWSER_EXTENSION_ID]);
+  test("the shipped set: the dev id, then the published store item (2026-11-26)", () => {
+    expect(browserExtensionIds()).toEqual([
+      BROWSER_EXTENSION_ID,
+      "aebggkkfniebcmpflpbfhbognboocjji",
+    ]);
   });
 
   test("a store id → dev id first, then the store id", () => {
