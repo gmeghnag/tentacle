@@ -6,6 +6,7 @@ import {
   askPresented,
   askSurface,
   createAskParks,
+  landingAskBanner,
   parkKey,
 } from "../src/ask-park.ts";
 import { createPermissionSheet } from "../src/permission-sheet.ts";
@@ -223,5 +224,55 @@ describe("a planned drain pop does not park", () => {
     const after = sheet.view();
     expect(after).toBe(before);
     expect(after.kind === "asking" && after.parked).toBe(false);
+  });
+});
+
+describe("landingAskBanner: the ask the Workflows landing shows while it is not up there", () => {
+  const main = { kind: "main" } as const;
+  const view = { title: "Run a command", originShort: "Main agent", more: 0 };
+
+  test("idle and returned → no banner", () => {
+    const sheet = createPermissionSheet({ now: () => 0, armMs: 0 });
+    expect(landingAskBanner(sheet.view(), 0, main)).toBeNull();
+    const returned = { kind: "returned", text: "words", cause: "settled", notice: "n" } as const;
+    expect(landingAskBanner(returned, 0, main)).toBeNull();
+  });
+
+  test("a new (unreviewed) ask → banner, with or without the daemon's id", () => {
+    const sheet = createPermissionSheet({ now: () => 0, armMs: 0 });
+    void sheet.requester(req, opts("r1"));
+    expect(landingAskBanner(sheet.view(), 0, main)).toEqual(view);
+    const local = createPermissionSheet({ now: () => 0, armMs: 0 });
+    void local.requester(req);
+    expect(landingAskBanner(local.view(), 0, main)).toEqual(view);
+  });
+
+  test("brought up → null (the sheet is up); swiped away → banner again", () => {
+    const sheet = createPermissionSheet({ now: () => 0, armMs: 0 });
+    void sheet.requester(req, opts("r1"));
+    sheet.unpark();
+    expect(landingAskBanner(sheet.view(), 0, main)).toBeNull();
+    sheet.park();
+    expect(landingAskBanner(sheet.view(), 0, main)).toEqual(view);
+  });
+
+  test("a re-delivered parked ask → banner; `+N` is the queue behind it", () => {
+    const sheet = createPermissionSheet({ now: () => 0, armMs: 0, wasParked: () => true });
+    void sheet.requester(req, opts("r1"));
+    void sheet.requester(req, opts("r2"));
+    expect(landingAskBanner(sheet.view(), sheet.queued, main)).toEqual({ ...view, more: 1 });
+  });
+
+  test("the origin's lead names who asks", () => {
+    const sheet = createPermissionSheet({ now: () => 0, armMs: 0 });
+    void sheet.requester(req, opts("r1"));
+    const banner = landingAskBanner(sheet.view(), 0, {
+      kind: "workflow",
+      name: "deploy-preview",
+      runId: null,
+      stepId: null,
+      position: null,
+    });
+    expect(banner?.originShort).toContain("deploy-preview");
   });
 });

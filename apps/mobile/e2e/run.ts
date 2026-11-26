@@ -529,6 +529,12 @@ async function main(): Promise<number> {
     join(runDir, ".tentacle", "workflows", "landing-demo.yaml"),
     "schemaVersion: 1\nname: landing-demo\nversion: 1\nsteps:\n  - id: note\n    run: echo noted\n",
   );
+  // Flow 46b's own file (docs/fix/mobile-workflows-landing-v2.md): both its asks
+  // are denied there, so it stays unapproved.
+  await writeFile(
+    join(runDir, ".tentacle", "workflows", "landing-shots.yaml"),
+    "schemaVersion: 1\nname: landing-shots\nversion: 1\nsteps:\n  - id: note\n    run: echo noted\n",
+  );
   // The mock model runs in THIS process: no extra children to reap.
   const { startMockModel } = await import("./mock-model.ts");
   const mock = startMockModel({ holdMs: 120_000 });
@@ -1886,9 +1892,13 @@ export const FLOWS: readonly string[] = [
   // holding two ENDED runs. AFTER 34-hub-workflows and 44: both assert the
   // computer's run list is empty, and these runs are listed computer-wide.
   "45-workflow-run-view",
-  // docs/feat/mobile-workflows-landing.md: the hub's list — Approve on the sheet
-  // over it, then Delete. Its own session and its own file (`landing-demo.yaml`).
+  // docs/fix/mobile-workflows-landing-v2.md: the hub's list — Approve as the
+  // banner under the header, then the sheet, then Delete. Its own session and its
+  // own file (`landing-demo.yaml`).
   "46-workflow-landing",
+  // The landing's two-asks and offline states, light + dark (visual). Its own
+  // session and file (`landing-shots.yaml`); it stops `serve` and restarts it.
+  "46b-workflow-landing-shots",
   // docs/feat/mobile-file-preview-cards.md: the transcript's preview cards (a
   // PDF page, an image, markdown lines, an HTML page), light and dark.
   "36-preview-cards",
@@ -2017,6 +2027,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "45-workflow-run-view": "RUNVIEW_ID",
   // docs/feat/mobile-workflows-landing.md: Approve + Delete from the list.
   "46-workflow-landing": "LANDING_ID",
+  "46b-workflow-landing-shots": "LANDINGSHOTS_ID",
 };
 
 /** One attempt's spawn + timeout, in a form a test can drive (review round 1 F3). */

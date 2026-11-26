@@ -565,6 +565,28 @@ describe("askSourceFromSheet: the session's ONE sheet as a card's ask source", (
     });
     expect(src.current()?.agent).toBeUndefined();
   });
+
+  test("`banner()` is offered only with `queued`: the landing's banner, counted", () => {
+    const base = { answerFor: () => "sent" as const, subscribe: () => () => {} };
+    const view = () => asking({ parked: false, reviewed: false });
+    // The run screen passes no `queued`: it is unchanged (no banner method).
+    expect(askSourceFromSheet({ view, ...base }).banner).toBeUndefined();
+    const src = askSourceFromSheet({ view, queued: () => 1, ...base });
+    expect(src.banner?.()).toEqual({ title: "Approve merge", originShort: "Main agent", more: 1 });
+    // A local ask (no daemon id) shows too; a sheet that is up does not.
+    const local = askSourceFromSheet({
+      view: () => asking({ requestId: null, parked: false, reviewed: false }),
+      queued: () => 0,
+      ...base,
+    });
+    expect(local.banner?.()?.title).toBe("Approve merge");
+    const up = askSourceFromSheet({
+      view: () => asking({ parked: false, reviewed: true }),
+      queued: () => 0,
+      ...base,
+    });
+    expect(up.banner?.()).toBeNull();
+  });
 });
 
 describe("stop / resume / rerun step", () => {

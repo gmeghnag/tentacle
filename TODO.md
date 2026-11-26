@@ -862,3 +862,13 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       `docs/feat/mascot.md` (Review).
 - [ ] **eval/app-store-release** (owner 2026-11-16) — what an App Store release of the iPhone app needs: Apple Developer account (personal vs company), App Store Connect record, EU DSA trader status, distribution cert/profile, production APNs (relay + PushCore), PrivacyInfo.xcprivacy, usage strings, TestFlight, listing (icon, screenshots, privacy-policy + support URL on tentacle.so, nutrition labels, export compliance), and the review blocker: a reviewer-reachable demo serve or demo mode (guideline 2.1).
 
+
+## Quarantined e2e flows
+
+- [ ] e2e flow `22-notify-approve` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
+- [ ] e2e flow `22-notify-deny` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
+- [ ] e2e flow `22-notify-reply` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
+- [ ] e2e flow `22-notify-forged` is quarantined: its injected notification response is read by DEV builds only (Owner Q7) and the gate runs the Release build; re-enable with a dev-build lane for the notify flows (or drive the action on a device).
+- [ ] e2e flow `push-placeholder` is quarantined: Maestro does not see SpringBoard notification banners on the iOS 26 simulator (a plain `simctl push` banner was not found during a 20 s wait), so the banner step cannot be asserted; re-enable when Maestro can read banners (or assert the presentation another way).
+- [ ] e2e flow `22-notify-render` is quarantined: Maestro does not see SpringBoard notification banners on the iOS 26 simulator (a plain `simctl push` banner was not found during a 20 s wait), so the banner step cannot be asserted; re-enable when Maestro can read banners (or assert the presentation another way).
+- [ ] e2e flow `19-lock-unlock-button` is quarantined: on the simulator a resume auto-prompts Face ID over the Unlock button (by design) and a nomatch cannot be scripted, so the button cannot be driven; re-enable when a failed/cancelled evaluation can be scripted (or drive it on a device). Logic covered by `app-lock.test.ts`.

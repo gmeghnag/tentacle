@@ -115,6 +115,13 @@ export type SheetState =
        * is still pending and answerable, only its sheet is down (a banner shows).
        */
       readonly parked: boolean;
+      /**
+       * The person brought this ask up from a banner
+       * (docs/fix/mobile-workflows-landing-v2.md D1): over the Workflows landing
+       * only such an ask is a sheet (`askPresentable`). Born false, set by
+       * `unpark()`; a swipe keeps it. Presentation only — it sends nothing.
+       */
+      readonly reviewed: boolean;
     }
   | {
       /**
@@ -220,7 +227,10 @@ export interface PermissionSheet {
    * sent) and only its sheet goes. No-op unless an ask is on screen.
    */
   park(): void;
-  /** Bring a parked ask back (the banner was tapped). */
+  /**
+   * The banner was tapped: bring a parked ask back and mark it `reviewed`. No-op
+   * unless an ask is on screen, or on one already up and reviewed. Sends nothing.
+   */
   unpark(): void;
   /** The screen went away: withdraw the ask, send nothing (`reset()` on the broker). */
   dismiss(): void;
@@ -410,6 +420,7 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
       parked:
         entry.options?.requestId !== undefined &&
         deps.wasParked?.(entry.options.requestId) === true,
+      reviewed: false,
     });
     if (armMs > 0 && entry === current) {
       // The window's END is a state change, not a guess: the sheet says so once,
@@ -662,8 +673,8 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
       }
     },
     unpark() {
-      if (state.kind === "asking" && state.parked) {
-        commit({ ...state, parked: false });
+      if (state.kind === "asking" && (state.parked || !state.reviewed)) {
+        commit({ ...state, parked: false, reviewed: true });
       }
     },
     dismiss() {

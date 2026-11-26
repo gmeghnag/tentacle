@@ -433,6 +433,8 @@ export const size = {
   rowSetting: 44,
   bigButton: 50,
   lockButton: 54,
+  /** The compact capsule (AskCard's actions, the Workflows landing's buttons). */
+  capsule: 34,
   iconTile: 32,
   iconTileLarge: 44,
   headerList: 52,

@@ -46,7 +46,28 @@ appId: so.tentacle.app
       SHOT: "46-landing"
 - tapOn:
     id: "workflow-item-approve-landing-demo"
-# The ask is the SAME sheet a run's approval uses, presented over the list.
+# The ask arrives as the banner under the header, NOT as a sheet over the list.
+- extendedWaitUntil:
+    visible:
+      id: "workflow-landing-ask"
+    timeout: 20000
+- assertNotVisible:
+    id: "perm-sheet"
+# The banner pushed the list down: bring the row back before reading it.
+- scrollUntilVisible:
+    element:
+      id: "workflow-item-approve-landing-demo"
+    direction: DOWN
+- assertVisible:
+    id: "workflow-item-approve-landing-demo"
+    text: "Asking… landing-demo"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "46-landing-ask"
+# The banner's tap brings up the SAME sheet a run's approval uses.
+- tapOn:
+    id: "workflow-landing-ask"
 - extendedWaitUntil:
     visible:
       id: "perm-sheet"
@@ -54,7 +75,7 @@ appId: so.tentacle.app
 - runFlow:
     file: _shot.yaml
     env:
-      SHOT: "46-landing-approve"
+      SHOT: "46-landing-sheet"
 - tapOn:
     id: "perm-allow_once"
 - extendedWaitUntil:
@@ -62,6 +83,8 @@ appId: so.tentacle.app
       id: "workflow-start-row-landing-demo"
       text: "landing-demo, Approved"
     timeout: 20000
+- assertNotVisible:
+    id: "workflow-landing-ask"
 # An approved file offers no Approve.
 - assertNotVisible:
     id: "workflow-item-approve-landing-demo"

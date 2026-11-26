@@ -7,7 +7,9 @@
  * `workflow-start-controller.ts` asks the same gate before it sends anything.
  *
  * - **An unusable action stays in place, dimmed**, and its item says why on ONE
- *   line (never an empty modal, never a missing button).
+ *   line (never an empty modal, never a missing button) — except what is already
+ *   said: «Offline» by the screen's one banner, «Asking…» by the Approve button
+ *   itself (docs/fix/mobile-workflows-landing-v2.md D3, D6).
  * - **Approve exists only where the daemon said `approved: false`**; a broken
  *   file offers Delete only.
  * - **Only live runs are on the landing** (`Needs you`, `In progress`): the rest
@@ -40,10 +42,8 @@ export interface LandingContext {
 
 export interface LandingAction {
   readonly id: LandingAct;
+  /** The button's word («Asking…» on Approve while its ask is open). */
   readonly label: string;
-  readonly icon: "play.fill" | "checkmark" | "trash";
-  /** Delete: red AND its word (never meaning by hue alone). */
-  readonly destructive: boolean;
   readonly enabled: boolean;
 }
 
@@ -55,9 +55,11 @@ export interface LandingItem {
   /** Glyph AND word; null when the daemon did not say whether it is approved. */
   readonly status: { readonly glyph: string; readonly word: string } | null;
   readonly description: string | null;
+  /** The item's ONE grey line: `<glyph> <word> · <description>`, either part alone. */
+  readonly summary: string;
   readonly errors: readonly string[];
   readonly actions: readonly LandingAction[];
-  /** The ONE line saying why something here is dimmed, else null. */
+  /** The ONE line saying why something here is dimmed, when no one else says it. */
   readonly why: string | null;
   /** The inline delete question, replacing the action row; null when not asked. */
   readonly confirm: string | null;
@@ -77,11 +79,11 @@ const BUSY_WORD: Readonly<Record<LandingBusy, string>> = {
 
 const CANNOT_RUN = { glyph: "✗", word: "Cannot run" } as const;
 
-const LOOK = {
-  start: { label: "Start", icon: "play.fill", destructive: false },
-  approve: { label: "Approve", icon: "checkmark", destructive: false },
-  delete: { label: "Delete", icon: "trash", destructive: true },
-} as const;
+const LABEL: Readonly<Record<LandingAct, string>> = {
+  start: "Start",
+  approve: "Approve",
+  delete: "Delete",
+};
 
 /** The context the screen draws from, off the controller's state. */
 export function landingContext(
@@ -97,9 +99,10 @@ export function landingContext(
   };
 }
 
-/** The inline delete question (the file's own path; prompt files are kept). */
+/** The inline delete question (the file's own name; prompt files are kept). */
 export function deleteQuestion(path: string): string {
-  return `Delete \`${path}\`? Its prompt files stay.`;
+  const file = path.slice(path.lastIndexOf("/") + 1) || path;
+  return `Delete \`${file}\`? Its prompt files stay.`;
 }
 
 /** The notice after a delete that left schedules behind, else null. */
@@ -131,7 +134,8 @@ export function blockedWhy(
     return LANDING_OFFLINE;
   }
   const busy = context.busy[entry.key];
-  if (busy !== undefined) {
+  // An approval being asked blocks only Approve; a start or delete in flight, all.
+  if (busy !== undefined && (busy !== "asking" || act === "approve")) {
     return BUSY_WORD[busy];
   }
   if (!context.ready) {
@@ -156,19 +160,29 @@ export function landingItem(
   confirmKey: string | null,
 ): LandingItem {
   let why: string | null = null;
+  const asking = context.busy[entry.key] === "asking";
   const actions = actsOf(entry).map((id) => {
     const blocked = blockedWhy(entry, id, context);
-    // The first dimmed action's reason is the item's one line.
-    why = why ?? blocked;
-    return { id, ...LOOK[id], enabled: blocked === null };
+    // The first dimmed action's reason is the item's one line, unless the banner
+    // («Offline») or the button («Asking…») already says it.
+    if (blocked !== LANDING_OFFLINE && blocked !== BUSY_WORD.asking) {
+      why = why ?? blocked;
+    }
+    const label = id === "approve" && asking ? BUSY_WORD.asking : LABEL[id];
+    return { id, label, enabled: blocked === null };
   });
+  const status = entry.ok ? entry.approval : CANNOT_RUN;
+  const summary = [status === null ? null : `${status.glyph} ${status.word}`, entry.description]
+    .filter((part) => part !== null && part !== "")
+    .join(" · ");
   return {
     key: entry.key,
     name: entry.name,
     ok: entry.ok,
     path: entry.path,
-    status: entry.ok ? entry.approval : CANNOT_RUN,
+    status,
     description: entry.description,
+    summary,
     errors: entry.ok
       ? []
       : entry.errors.length === 0

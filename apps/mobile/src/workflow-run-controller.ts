@@ -32,6 +32,7 @@ import type {
   WorkflowStepResult,
   WorkflowStepRow,
 } from "@tentacle/protocol";
+import { type AskBannerView, landingAskBanner } from "./ask-park.ts";
 import type { SheetState } from "./permission-sheet.ts";
 import type { SessionOpenFailure } from "./session-controller.ts";
 import { type StateLook, stateLook } from "./workflow-list.ts";
@@ -105,6 +106,12 @@ export interface AskSource {
   subscribe(listener: () => void): () => void;
   /** Bring the parked ask's sheet back (the slim row's tap). Absent: nothing to bring. */
   unpark?(): void;
+  /**
+   * The banner of an ask that is not up here (`landingAskBanner`): the Workflows
+   * landing's, any ask, with or without the daemon's id. Absent: a source built
+   * without `queued` (the run screen draws its own bar).
+   */
+  banner?(): AskBannerView | null;
 }
 
 /**
@@ -148,7 +155,10 @@ export function askSourceFromSheet(sheet: {
   ): "sent" | "typing" | "ignored";
   subscribe(listener: () => void): () => void;
   unpark?(): void;
+  /** Asks waiting behind the one on screen; given → the source offers `banner()`. */
+  queued?: () => number;
 }): AskSource {
+  const queued = sheet.queued;
   return {
     current() {
       const view = sheet.view();
@@ -167,6 +177,15 @@ export function askSourceFromSheet(sheet: {
     answerFor: (requestId, optionId) => sheet.answerFor(requestId, optionId),
     subscribe: (listener) => sheet.subscribe(listener),
     ...(sheet.unpark === undefined ? {} : { unpark: () => sheet.unpark?.() }),
+    ...(queued === undefined
+      ? {}
+      : {
+          banner: () => {
+            const view = sheet.view();
+            const origin = view.kind === "asking" ? view.origin : undefined;
+            return landingAskBanner(view, queued(), origin ?? { kind: "main" });
+          },
+        }),
   };
 }
 

@@ -11,6 +11,7 @@ import {
   LANDING_OFFLINE,
   LANDING_OLD_DAEMON,
   type LandingContext,
+  blockedWhy,
   landingItems,
   landingRuns,
   schedulesNotice,
@@ -34,6 +35,13 @@ const broken = (name: string): WorkflowDefRow => ({
   errors: ["steps: required"],
 });
 const view = (rows: WorkflowDefRow[]) => catalogueRows({ workflows: rows, dir: "/p/w" });
+const entryOf = (def: WorkflowDefRow) => {
+  const entry = view([def]).valid[0];
+  if (entry === undefined) {
+    throw new Error("expected a valid row");
+  }
+  return entry;
+};
 
 const context = (over: Partial<LandingContext> = {}): LandingContext => ({
   offline: false,
@@ -76,15 +84,46 @@ describe("landingItems: which actions a file has", () => {
     ]);
     expect(items[3]?.errors).toEqual(["steps: required"]);
     expect(items.every((i) => i.why === null)).toBe(true);
-    // Delete is said in a word too, never by its colour alone.
-    expect(items[0]?.actions.find((a) => a.destructive)?.label).toBe("Delete");
+    // In their drawn order, each said in a word; the look is the component's.
+    expect(items.map((i) => i.actions.map((a) => a.label))).toEqual([
+      ["Start", "Approve", "Delete"],
+      ["Start", "Delete"],
+      ["Start", "Delete"],
+      ["Delete"],
+    ]);
+    expect(Object.keys(items[0]?.actions[0] ?? {}).sort()).toEqual(["enabled", "id", "label"]);
   });
 
-  test("offline dims everything and says why", () => {
+  test("`summary` is the state and the description on one line", () => {
+    const items = landingItems(
+      view([
+        row("a", { description: "Build and deploy\na preview" }),
+        row("b", { approved: true }),
+        row("c", { approved: undefined, description: "Plain" }),
+        row("e", { approved: undefined }),
+        broken("d"),
+      ]),
+      context(),
+      null,
+    );
+    expect(items.map((i) => i.summary)).toEqual([
+      "? Needs approval · Build and deploy a preview",
+      "✓ Approved",
+      "Plain",
+      "",
+      "✗ Cannot run",
+    ]);
+  });
+
+  test("offline dims everything and repeats no reason (one banner says it)", () => {
     const [item] = landingItems(view([row("a")]), context({ offline: true }), null);
     expect(enabled(item)).toEqual([]);
     expect(item?.actions).toHaveLength(3);
-    expect(item?.why).toBe(LANDING_OFFLINE);
+    expect(item?.why).toBeNull();
+    // Offline hides no OTHER reason by accident: the gate still refuses.
+    expect(blockedWhy(entryOf(row("a")), "start", context({ offline: true }))).toBe(
+      LANDING_OFFLINE,
+    );
   });
 
   test("an older daemon dims Approve and Delete only", () => {
@@ -99,13 +138,30 @@ describe("landingItems: which actions a file has", () => {
     expect(item?.why).toBe(LANDING_NO_SHEET);
   });
 
-  test("an action in flight dims its item; a start dims every Start", () => {
+  test("«Asking…» is said by the Approve button and blocks only it", () => {
     const rows = view([row("a"), row("b")]);
     const key = ".tentacle/workflows/a.yaml";
     const asking = landingItems(rows, context({ busy: { [key]: "asking" } }), null);
-    expect(enabled(asking[0])).toEqual([]);
-    expect(asking[0]?.why).toBe("Asking…");
+    expect(enabled(asking[0])).toEqual(["start", "delete"]);
+    expect(asking[0]?.actions.map((a) => a.label)).toEqual(["Start", "Asking…", "Delete"]);
+    expect(asking[0]?.why).toBeNull();
     expect(enabled(asking[1])).toEqual(["start", "approve", "delete"]);
+    expect(asking[1]?.actions[1]?.label).toBe("Approve");
+    // Another reason beside it is still said.
+    const old = landingItems(
+      rows,
+      context({ busy: { [key]: "asking" }, actUnsupported: true }),
+      null,
+    );
+    expect(old[0]?.why).toBe(LANDING_OLD_DAEMON);
+  });
+
+  test("a start or delete in flight dims its item; a start dims every Start", () => {
+    const rows = view([row("a"), row("b")]);
+    const key = ".tentacle/workflows/a.yaml";
+    const deleting = landingItems(rows, context({ busy: { [key]: "deleting" } }), null);
+    expect(enabled(deleting[0])).toEqual([]);
+    expect(deleting[0]?.why).toBe("Deleting…");
     const starting = landingItems(
       rows,
       context({ starting: true, busy: { [key]: "starting" } }),
@@ -115,7 +171,7 @@ describe("landingItems: which actions a file has", () => {
     expect(starting[1]?.why).toBe("Starting…");
   });
 
-  test("every dimmed action carries a why", () => {
+  test("every dimmed action carries a why, offline excepted (the banner says it)", () => {
     const rows = view([row("a"), broken("b"), broken("Bad Name")]);
     const contexts = [
       context({ offline: true }),
@@ -128,7 +184,7 @@ describe("landingItems: which actions a file has", () => {
     for (const each of contexts) {
       for (const item of landingItems(rows, each, null)) {
         const dimmed = item.actions.some((a) => !a.enabled);
-        expect([item.name, item.why !== null]).toEqual([item.name, dimmed]);
+        expect([item.name, item.why !== null]).toEqual([item.name, dimmed && !each.offline]);
       }
     }
     const bad = landingItems(rows, context(), null).find((i) => i.name === "Bad Name");
@@ -137,10 +193,7 @@ describe("landingItems: which actions a file has", () => {
 
   test("the delete question sits on the asked item only, naming the file", () => {
     const items = landingItems(view([row("a"), row("b")]), context(), ".tentacle/workflows/b.yaml");
-    expect(items.map((i) => i.confirm)).toEqual([
-      null,
-      "Delete `.tentacle/workflows/b.yaml`? Its prompt files stay.",
-    ]);
+    expect(items.map((i) => i.confirm)).toEqual([null, "Delete `b.yaml`? Its prompt files stay."]);
   });
 });
 
