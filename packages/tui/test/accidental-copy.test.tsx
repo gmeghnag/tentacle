@@ -44,14 +44,27 @@ const mount = (copied: string[], model = new Scripted([])) =>
 
 describe("isDeliberate (pure rule)", () => {
   const at = (row: number, col: number) => ({ row, col });
-  test("single row: needs COPY_MIN_CELLS cells; any row change counts", () => {
+  test("single row: needs COPY_MIN_CELLS cells", () => {
     expect(COPY_MIN_CELLS).toBe(3);
     expect(isDeliberate({ anchor: at(0, 4), head: at(0, 4) })).toBe(false);
     expect(isDeliberate({ anchor: at(0, 4), head: at(0, 6) })).toBe(false);
     expect(isDeliberate({ anchor: at(0, 6), head: at(0, 4) })).toBe(false);
     expect(isDeliberate({ anchor: at(0, 4), head: at(0, 7) })).toBe(true);
     expect(isDeliberate({ anchor: at(0, 7), head: at(0, 4) })).toBe(true);
-    expect(isDeliberate({ anchor: at(0, 4), head: at(1, 4) })).toBe(true);
+  });
+  // A cell is ~2x taller than wide: a press a pixel from a row boundary emits
+  // ONE drag report on the next row. A row change alone must not copy the rest
+  // of that row plus the next one's prefix.
+  test("a one-row jump also needs COPY_MIN_CELLS along the row, in the drag direction", () => {
+    expect(isDeliberate({ anchor: at(0, 4), head: at(1, 6) })).toBe(false);
+    expect(isDeliberate({ anchor: at(0, 4), head: at(1, 7) })).toBe(true);
+    expect(isDeliberate({ anchor: at(1, 4), head: at(0, 6) })).toBe(false);
+    expect(isDeliberate({ anchor: at(1, 4), head: at(0, 1) })).toBe(true);
+    // Down a row but backwards along it: no forward travel, no copy.
+    expect(isDeliberate({ anchor: at(0, 4), head: at(1, 3) })).toBe(false);
+    // Two rows apart is deliberate on its own.
+    expect(isDeliberate({ anchor: at(0, 4), head: at(2, 4) })).toBe(true);
+    expect(isDeliberate({ anchor: at(2, 4), head: at(0, 4) })).toBe(true);
   });
   test("copiedLabel", () => {
     expect(copiedLabel(8)).toBe("Copied · 8 chars");
@@ -71,6 +84,35 @@ describe("accidental copy", () => {
     stdin.write(release(5, 1));
     await delay(60);
     expect(copied).toEqual([]);
+    unmount();
+  });
+
+  test("a one-row vertical jitter is a click, not a copy", async () => {
+    const copied: string[] = [];
+    const { stdin, unmount } = mount(copied);
+    await delay(40);
+    stdin.write(press(3, 1));
+    await delay(15);
+    stdin.write(drag(4, 2));
+    await delay(15);
+    stdin.write(release(4, 2));
+    await delay(60);
+    expect(copied).toEqual([]);
+    unmount();
+  });
+
+  test("crossing one row with a real horizontal travel still copies", async () => {
+    const copied: string[] = [];
+    const { stdin, unmount } = mount(copied);
+    await delay(40);
+    stdin.write(press(1, 1));
+    await delay(15);
+    stdin.write(drag(4, 2));
+    await delay(15);
+    stdin.write(release(4, 2));
+    await delay(60);
+    expect(copied).toHaveLength(1);
+    expect(copied[0]?.startsWith("ten")).toBe(true);
     unmount();
   });
 
@@ -161,13 +203,17 @@ describe("dispatchMouse release", () => {
       toolAt: () => null,
     } as unknown as MouseSnapshot;
     const rel = { x: 5, y: 1, btn: 0, press: false } as never;
-    const mk = (c1: number): MouseState =>
+    const mk = (c1: number, r1 = 0): MouseState =>
       ({
         click: { armed: null },
-        selection: { anchor: { row: 0, col: 1 }, head: { row: 0, col: c1 } },
+        selection: { anchor: { row: 0, col: 1 }, head: { row: r1, col: c1 } },
       }) as unknown as MouseState;
     const kinds = (s: MouseState) => dispatchMouse(s, rel, snap).effects.map((e) => e.kind);
     expect(kinds(mk(2))).toEqual([]);
     expect(kinds(mk(4))).toEqual(["copySelection"]);
+    // One row down with 2 cells of travel: the vertical jitter, never a copy.
+    expect(kinds(mk(3, 1))).toEqual([]);
+    expect(kinds(mk(4, 1))).toEqual(["copySelection"]);
+    expect(kinds(mk(4, 2))).toEqual(["copySelection"]);
   });
 });

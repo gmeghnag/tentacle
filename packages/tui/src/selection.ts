@@ -62,19 +62,33 @@ export function isNonEmpty(sel: Selection): boolean {
 }
 
 /**
- * A release copies only a DELIBERATE selection: one that crossed a row, or
- * spanned at least this many cells on one row. A press-release with less
- * movement is a click (a hand jitter while focusing the terminal), and copying
- * it silently overwrote the person's clipboard with a stray fragment.
+ * A release copies only a DELIBERATE selection: one that crossed two rows, or
+ * that travelled at least this many cells along a row. A press-release with
+ * less movement is a click (a hand jitter while focusing the terminal), and
+ * copying it silently overwrote the person's clipboard with a stray fragment.
  */
 export const COPY_MIN_CELLS = 3;
 
-/** Whether `sel` is a deliberate selection (see `COPY_MIN_CELLS`). */
+/**
+ * Whether `sel` is a deliberate selection (see `COPY_MIN_CELLS`).
+ *
+ * A ONE-row jump is not enough on its own: a cell is ~2x taller than wide, so a
+ * press a pixel from a row boundary emits one drag report on the next row, and
+ * the copy would take the rest of that row plus the next one's prefix — the same
+ * stray-clipboard bug along the other axis. So crossing a single row must also
+ * travel `COPY_MIN_CELLS` forward along the row (the reading-order end past the
+ * reading-order start); two rows apart is deliberate by itself.
+ */
 export function isDeliberate(sel: Selection): boolean {
-  if (sel.anchor.row !== sel.head.row) {
+  const rows = sel.head.row - sel.anchor.row;
+  if (Math.abs(rows) >= 2) {
     return true;
   }
-  return Math.abs(sel.anchor.col - sel.head.col) >= COPY_MIN_CELLS;
+  if (rows === 0) {
+    return Math.abs(sel.head.col - sel.anchor.col) >= COPY_MIN_CELLS;
+  }
+  const forward = rows > 0 ? sel.head.col - sel.anchor.col : sel.anchor.col - sel.head.col;
+  return forward >= COPY_MIN_CELLS;
 }
 
 /** How long the status bar keeps the copy confirmation. */
