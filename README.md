@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="art/polpetto.svg" alt="Polpetto, the tentacle mascot" width="120" height="120">
+  <img src="art/polpetto.svg" alt="Polpetto, the tentacle mascot" width="120" height="147">
 </p>
 
 <h1 align="center">tentacle</h1>
@@ -13,6 +13,10 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
   <img alt="platforms" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%7C%20x64%20%C2%B7%20arm64-555">
   <img alt="engines" src="https://img.shields.io/badge/engines-Kubernetes%20%C2%B7%20Docker%20%C2%B7%20Podman-555">
+<!-- quality-badges:start -->
+  <img alt="coverage 86%" src="https://img.shields.io/badge/coverage-86%25-green">
+  <img alt="tests: 20,911 passing" src="https://img.shields.io/badge/tests-20%2C911%20passing-brightgreen">
+<!-- quality-badges:end -->
 </p>
 
 ## Why tentacle

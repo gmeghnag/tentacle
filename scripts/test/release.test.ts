@@ -120,6 +120,8 @@ let base: string;
 let repo: string;
 let out: string[];
 let gateRuns: number;
+let badgeRuns: number;
+const README = "# x\n<!-- quality-badges:start -->\nOLD\n<!-- quality-badges:end -->\n";
 
 function git(cwd: string, ...args: string[]): string {
   const proc = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -156,6 +158,7 @@ beforeEach(async () => {
   writeFileSync(join(repo, "apps/m/package.json"), APP_NO_VERSION);
   writeFileSync(join(repo, "bun.lock"), LOCK("0.1.0-beta.1"));
   writeFileSync(join(repo, "CHANGELOG.md"), CHANGELOG);
+  writeFileSync(join(repo, "README.md"), README);
   mkdirSync(join(repo, "changelog.d"), { recursive: true });
   writeFileSync(join(repo, "changelog.d/everything.added.md"), FRAGMENT);
   git(repo, "add", "-A");
@@ -165,6 +168,7 @@ beforeEach(async () => {
   git(repo, "push", "-q", "origin", "main", "--tags");
   out = [];
   gateRuns = 0;
+  badgeRuns = 0;
 });
 afterEach(async () => {
   await rm(base, { recursive: true, force: true });
@@ -177,6 +181,10 @@ const deps = (extra: Partial<ReleaseDeps> = {}): ReleaseDeps => ({
     return true;
   },
   today: () => "2026-10-22",
+  badges: async () => {
+    badgeRuns += 1;
+    return { block: "BADGES", summary: "coverage 88% (88/100 lines), 7 tests passing" };
+  },
   write: (t) => out.push(t),
   ...extra,
 });
@@ -194,6 +202,7 @@ const snapshot = () =>
     "packages/cli/package.json",
     "bun.lock",
     "CHANGELOG.md",
+    "README.md",
     "changelog.d/everything.added.md",
   ]
     .map(read)
@@ -232,6 +241,42 @@ describe("runRelease", () => {
     expect(git(repo, "rev-parse", "origin/main")).toBe(before);
     expect(out.join("")).toContain("git push origin main && git push origin v0.1.0");
     expect(gateRuns).toBe(1);
+    // The badges, measured once after the gate, are in the release commit.
+    expect(badgeRuns).toBe(1);
+    expect(read("README.md")).toBe(
+      "# x\n<!-- quality-badges:start -->\nBADGES\n<!-- quality-badges:end -->\n",
+    );
+    expect(git(repo, "show", "HEAD:README.md")).toContain("BADGES");
+  });
+
+  test("a failed badge measurement refuses the release and writes nothing", async () => {
+    const before = snapshot();
+    const h = head();
+    const code = await runRelease(
+      ["0.1.0"],
+      deps({
+        badges: async () => {
+          throw new Error("1 test failed: fix the suite first");
+        },
+      }),
+    );
+    expect(code).toBe(1);
+    expect(out.join("")).toContain("the badges could not be measured: 1 test failed");
+    expect(snapshot()).toBe(before);
+    expect(head()).toBe(h);
+    expect(git(repo, "tag", "-l", "v0.1.0")).toBe("");
+  });
+
+  test("a README without the badge markers is refused before the gate runs", async () => {
+    writeFileSync(join(repo, "README.md"), "# no markers\n");
+    git(repo, "commit", "-q", "-am", "drop markers");
+    git(repo, "push", "-q", "origin", "main");
+    const before = snapshot();
+    expect(await runRelease(["0.1.0"], deps())).toBe(1);
+    expect(out.join("")).toMatch(/quality-badges:start/);
+    expect(gateRuns).toBe(0);
+    expect(badgeRuns).toBe(0);
+    expect(snapshot()).toBe(before);
   });
 
   const refused = async (argv: string[], message: RegExp, extra: Partial<ReleaseDeps> = {}) => {
