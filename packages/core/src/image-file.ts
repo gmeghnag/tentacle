@@ -10,6 +10,7 @@
  */
 import { MAX_IMAGE_BYTES, formatBytes } from "./attachments.ts";
 import { sniffImageType } from "./image-sniff.ts";
+import { isSof, jpegFrameRefusal } from "./jpeg-decode.ts";
 import { PNG_DEPTHS } from "./png-decode.ts";
 import { crc32 } from "./png.ts";
 import { TOOL_IMAGE_REF_CHARS } from "./tool-images.ts";
@@ -150,9 +151,6 @@ interface JpegFrame {
   readonly scanAt: number;
 }
 
-const isSof = (marker: number, high: number, low: number): boolean =>
-  marker >= high && marker <= low && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
-
 /**
  * Walk the marker segments to the first frame header, then to `SOS`. `JPG`,
  * `DHT` and `DAC` share the `C0`–`CF` range but are not frame headers.
@@ -210,27 +208,10 @@ function inspectJpeg(bytes: Uint8Array): ImageFileInfo | ImageFileRefusal {
   if ("ok" in frame) {
     return frame;
   }
-  const { marker, precision, components, width, height, scanAt } = frame;
-  if (components === 4) {
-    return { ok: false, reason: "a CMYK JPEG — convert it to RGB first" };
-  }
-  if (components !== 1 && components !== 3) {
-    return { ok: false, reason: `a JPEG with ${components} colour components — 1 or 3` };
-  }
-  if (precision !== 8) {
-    return { ok: false, reason: `a ${precision}-bit JPEG — only 8-bit is supported` };
-  }
-  if (isSof(marker, 0xc9, 0xcf)) {
-    return { ok: false, reason: "an arithmetic-coded JPEG — only Huffman coding is supported" };
-  }
-  if (marker === 0xc3 || marker === 0xc5 || marker === 0xc6 || marker === 0xc7) {
-    return {
-      ok: false,
-      reason: "a lossless or hierarchical JPEG — only baseline or progressive is supported",
-    };
-  }
-  if (!isSof(marker, 0xc0, 0xc2)) {
-    return { ok: false, reason: `an unsupported JPEG frame type (SOF${marker - 0xc0})` };
+  const { width, height, scanAt } = frame;
+  const refused = jpegFrameRefusal(frame);
+  if (refused !== null) {
+    return { ok: false, reason: refused };
   }
   // `FF D9` cannot appear inside stuffed entropy data (`FF` there is followed
   // by `00`), so a plain search past the scan start is reliable.

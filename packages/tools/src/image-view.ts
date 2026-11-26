@@ -6,9 +6,10 @@
  * it as the result's single `image` ref, reading no byte: the provider does
  * that, once, verified against the id.
  *
- * Two calls DO read (docs/feat/image-region-png.md D4/D5): a `region` of a
- * PNG, and `low` of a PNG kept at `high` only. They decode the picture here,
- * on the side that holds the store, and keep the result as a new one.
+ * Two calls DO read (docs/feat/image-region-png.md D4/D5, and
+ * image-region-jpeg.md D6): a `region` of a PNG or JPEG, and `low` of one kept
+ * at `high` only. They decode the picture here, on the side that holds the
+ * store, and keep the result as a new one: a PNG from a PNG, a JPEG from a JPEG.
  */
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
@@ -17,11 +18,17 @@ import {
   type AttachmentRef,
   type ChatMessage,
   DEFAULT_PDF_IMAGE_LIMITS,
+  type DecodedPng,
   IMAGE_VIEW_TOOL_NAME,
   type ImageDetailSetting,
+  type ImageFileMimeType,
   type ImageRegion,
   type Inflate,
+  type JpegHeader,
+  type JpegRefusal,
   MAX_IMAGE_BYTES,
+  PNG_CHANNELS,
+  type RegionBox,
   TOOL_IMAGE_LOW_EDGE,
   type Tool,
   type ToolContext,
@@ -30,18 +37,26 @@ import {
   type ToolImageVariant,
   type ToolResult,
   attachmentLabel,
+  cropPixels,
+  decodeJpeg,
   decodePng,
   formatBytes,
   imageRefPrefix,
+  orientPixels,
+  orientedSize,
+  readJpegHeader,
   readPngHeader,
   regionBox,
   renderRegion,
+  renderRegionWith,
   sanitizeAttachmentName,
+  storedBox,
 } from "@tentacle/core";
 import { z } from "zod";
 // The sentinel of the old-image placeholder (docs/feat/image-old-on-demand.md
 // D1), from the ONE constant: the literal never appears in source.
 import { PRUNE_SENTINEL } from "./builtins.ts";
+import { bytesOf, createJpegEncoder, decodeJpegPixels } from "./image-codecs.ts";
 
 /** The ref a marker shows: hex, `sha256:` allowed — bounded, so an ask has nothing long to cut. */
 const refField = z
@@ -67,7 +82,9 @@ const regionField = z
     height: fraction.positive(),
   })
   .optional()
-  .describe("A part of a PNG picture to zoom into, each number a fraction 0–1 of its size.");
+  .describe(
+    "A part of a PNG or JPEG picture to zoom into, each number a fraction 0–1 of its size.",
+  );
 
 export type ImageViewInput = {
   readonly ref: string;
@@ -75,14 +92,12 @@ export type ImageViewInput = {
   readonly region?: ImageRegion;
 };
 
-const DESCRIPTION = `Look at ONE picture a read kept for you: pass the ref from an \`[image p.N · W×H · ref <hex>]\` marker (fs_read of a PDF), from an \`[image <name> · W×H · <format> · ref <hex> · high only]\` marker (fs_read of a PNG/JPEG file), or from a \`${PRUNE_SENTINEL}: image …⟫\` line (a picture the user attached earlier). Use it when a picture matters to the answer (a diagram, a chart, a scanned page); skip logos and decorations. One image per call. \`region\` zooms into part of a PNG picture: fractions 0–1 of its size, e.g. \`{left:0.5, top:0, width:0.5, height:0.5}\` = the top-right quarter; the part is sent at up to the detail's size, never enlarged.`;
+const DESCRIPTION = `Look at ONE picture a read kept for you: pass the ref from an \`[image p.N · W×H · ref <hex>]\` marker (fs_read of a PDF), from an \`[image <name> · W×H · <format> · ref <hex> · high only]\` marker (fs_read of a PNG/JPEG file), or from a \`${PRUNE_SENTINEL}: image …⟫\` line (a picture the user attached earlier). Use it when a picture matters to the answer (a diagram, a chart, a scanned page); skip logos and decorations. One image per call. \`region\` zooms into part of a PNG or JPEG picture: fractions 0–1 of its size, e.g. \`{left:0.5, top:0, width:0.5, height:0.5}\` = the top-right quarter; the part is sent at up to the detail's size, never enlarged.`;
 
 const REGENERATE = "fs_read the file again, or ask the user to attach it again";
 
 /** `node:zlib`, bound here: `@tentacle/core` stays `node:`-free. Inflate runs off the JS thread. */
 const inflateAsync = promisify(inflate);
-/** A `Buffer` as the plain bytes it is: a view, never a copy (these are the big buffers). */
-const bytesOf = (b: Buffer): Uint8Array => new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
 const inflatePng: Inflate = async (bytes, maxOutputLength) =>
   bytesOf(await inflateAsync(bytes, { maxOutputLength }));
 
@@ -336,14 +351,155 @@ export function viewImage(
   return serve(pickPicture(input, ctx, setting), input.detail, setting);
 }
 
-/** D5: `low` of a PNG kept at `high` only is decoded and downscaled. */
+/** The formats that can be decoded: for a `region`, and for D5's `low`. */
+const decodable = (mimeType: string): mimeType is ImageFileMimeType =>
+  mimeType === "image/png" || mimeType === "image/jpeg";
+
+/** D5: `low` of a PNG or JPEG kept at `high` only is decoded and downscaled. */
 function needsDownscale(named: Named): boolean {
   return (
     named.kind === "entry" &&
     named.detail === "low" &&
     highOnly(named.entry) &&
-    named.entry.high.ref.mimeType === "image/png"
+    decodable(named.entry.high.ref.mimeType)
   );
+}
+
+/** What one decode is asked for. */
+interface Wanted {
+  /** Fractions of the picture as displayed; none = all of it. */
+  readonly region: ImageRegion | undefined;
+  readonly maxEdge: number;
+  readonly maxBytes: number;
+}
+
+/** The new picture one decode made. */
+interface Made {
+  readonly bytes: Uint8Array;
+  readonly mimeType: ImageFileMimeType;
+  readonly width: number;
+  readonly height: number;
+  readonly scaledForBytes: boolean;
+  /** The part taken, in the pixels of the source as displayed. */
+  readonly box: RegionBox;
+  /** The source's displayed size, `W×H`. */
+  readonly source: string;
+  /** The EXIF orientation that was applied, when the source had one. */
+  readonly orientation?: number;
+}
+
+/** The asked part of a `width × height` picture; all of it with no region. */
+function boxOf(
+  region: ImageRegion | undefined,
+  width: number,
+  height: number,
+): RegionBox | { readonly refused: string } {
+  return region === undefined
+    ? { x: 0, y: 0, width, height, clamped: false }
+    : regionBox(region, width, height);
+}
+
+async function makeFromPng(
+  bytes: Uint8Array,
+  { region, maxEdge, maxBytes }: Wanted,
+): Promise<Made | { readonly refused: string }> {
+  const header = readPngHeader(bytes);
+  if ("refused" in header) {
+    return header;
+  }
+  // Judged from the header: a part that shows nothing decodes nothing.
+  const box = boxOf(region, header.width, header.height);
+  if ("refused" in box) {
+    return box;
+  }
+  const decoded = await decodePng(bytes, inflatePng);
+  if ("refused" in decoded) {
+    return decoded;
+  }
+  const rendered = renderRegion({
+    decoded,
+    box,
+    maxEdge,
+    maxBytes,
+    deflate: (raw) => bytesOf(deflateSync(raw)),
+  });
+  if ("refused" in rendered) {
+    return rendered;
+  }
+  const { png, ...size } = rendered;
+  return {
+    ...size,
+    bytes: png,
+    mimeType: "image/png",
+    box,
+    source: `${header.width}×${header.height}`,
+  };
+}
+
+/**
+ * The box's pixels as displayed, alone: decoded, cut in the STORED frame, then
+ * turned. The full decode is dropped on return, before anything is encoded.
+ */
+function jpegPart(bytes: Uint8Array, header: JpegHeader, box: RegionBox): DecodedPng | JpegRefusal {
+  const decoded = decodeJpeg(bytes, header, decodeJpegPixels);
+  if ("refused" in decoded) {
+    return decoded;
+  }
+  const channels = PNG_CHANNELS[decoded.color];
+  const stored = storedBox(box, header.width, header.height, header.orientation);
+  const cropped = cropPixels(decoded.pixels, header.width, header.height, channels, stored);
+  return {
+    width: box.width,
+    height: box.height,
+    color: decoded.color,
+    pixels: orientPixels(cropped, stored.width, stored.height, channels, header.orientation),
+  };
+}
+
+const encodeJpeg = createJpegEncoder();
+
+async function makeFromJpeg(
+  bytes: Uint8Array,
+  { region, maxEdge, maxBytes }: Wanted,
+): Promise<Made | { readonly refused: string }> {
+  const header = readJpegHeader(bytes);
+  if ("refused" in header) {
+    return header;
+  }
+  const { orientation } = header;
+  // The fractions are of the picture as displayed; judged from the header, so a
+  // part that shows nothing decodes nothing.
+  const shown = orientedSize(header.width, header.height, orientation);
+  const box = boxOf(region, shown.width, shown.height);
+  if ("refused" in box) {
+    return box;
+  }
+  const part = jpegPart(bytes, header, box);
+  if ("refused" in part) {
+    return part;
+  }
+  let mimeType: ImageFileMimeType = "image/jpeg";
+  const rendered = await renderRegionWith({
+    decoded: part,
+    box: { x: 0, y: 0, width: part.width, height: part.height, clamped: false },
+    maxEdge,
+    maxBytes,
+    encode: async (width, height, pixels, color) => {
+      const encoded = await encodeJpeg(width, height, pixels, color);
+      mimeType = encoded.mimeType;
+      return encoded.bytes;
+    },
+  });
+  if ("refused" in rendered) {
+    return rendered;
+  }
+  return {
+    ...rendered,
+    mimeType,
+    box,
+    source: `${shown.width}×${shown.height}`,
+    ...(orientation !== 1 ? { orientation } : {}),
+  };
 }
 
 /**
@@ -367,10 +523,11 @@ async function viewDecoded(
   // The most pixels we keep (O2); a user's own upload has no variants.
   const source = named.kind === "entry" ? named.entry.high.ref : named.ref;
   const label = named.kind === "entry" ? named.entry.label : (named.ref.name ?? "image");
-  if (source.mimeType !== "image/png") {
-    const format = source.mimeType.replace("image/", "").toUpperCase();
+  const { mimeType } = source;
+  if (!decodable(mimeType)) {
+    const format = mimeType.replace("image/", "").toUpperCase();
     return refusal(
-      `region needs a PNG picture; this one is ${format} (JPEG regions come later) — call image_view without region`,
+      `region needs a PNG or JPEG picture; this one is ${format} — call image_view without region`,
     );
   }
   if (!store.holds(source)) {
@@ -378,47 +535,26 @@ async function viewDecoded(
   }
   const unmade = (error: string): ToolResult =>
     region === undefined ? serve(named, input.detail, setting) : refusal(error);
-  const made = await slot(async () => {
+  const outcome = await slot(async () => {
     const bytes = await store.read(source);
     if (bytes === null) {
       return { result: gone(named) };
     }
-    const fail = (why: string) => ({ result: unmade(`${label}: ${why}`) });
-    const header = readPngHeader(bytes);
-    if ("refused" in header) {
-      return fail(header.refused);
-    }
-    // Judged from the header: a part that shows nothing decodes nothing.
-    const box =
-      region === undefined
-        ? { x: 0, y: 0, width: header.width, height: header.height, clamped: false }
-        : regionBox(region, header.width, header.height);
-    if ("refused" in box) {
-      return fail(box.refused);
-    }
-    const decoded = await decodePng(bytes, inflatePng);
-    if ("refused" in decoded) {
-      return fail(decoded.refused);
-    }
-    const rendered = renderRegion({
-      decoded,
-      box,
+    const make = mimeType === "image/png" ? makeFromPng : makeFromJpeg;
+    const made = await make(bytes, {
+      region,
       maxEdge: detail === "low" ? TOOL_IMAGE_LOW_EDGE : DEFAULT_PDF_IMAGE_LIMITS.maxEdge,
       maxBytes,
-      deflate: (raw) => bytesOf(deflateSync(raw)),
     });
-    if ("refused" in rendered) {
-      return fail(rendered.refused);
-    }
-    return { rendered, box, source: `${header.width}×${header.height}` };
+    return "refused" in made ? { result: unmade(`${label}: ${made.refused}`) } : { made };
   });
-  if (made.result !== undefined) {
-    return made.result;
+  if (outcome.result !== undefined) {
+    return outcome.result;
   }
-  const { rendered, box } = made;
+  const { made } = outcome;
   const entry = await store.putTool({
-    variants: { high: { bytes: rendered.png, width: rendered.width, height: rendered.height } },
-    mimeType: "image/png",
+    variants: { high: { bytes: made.bytes, width: made.width, height: made.height } },
+    mimeType: made.mimeType,
     label: sanitizeAttachmentName(`${label} region`) ?? "region",
   });
   if ("refused" in entry) {
@@ -426,17 +562,20 @@ async function viewDecoded(
   }
   // The store may answer with a picture it already had, where these very bytes
   // are the LOW variant: send the ref whose id is theirs.
-  const id = createHash("sha256").update(rendered.png).digest("hex");
+  const id = createHash("sha256").update(made.bytes).digest("hex");
   const { ref } = entry.low.ref.id === id ? entry.low : entry.high;
-  const size = `${rendered.width}×${rendered.height}`;
+  const { box } = made;
+  const size = `${made.width}×${made.height}`;
   const what =
     region === undefined
       ? size
       : `region ${box.x},${box.y} ${box.width}×${box.height} of ${made.source} · sent ${size}`;
   const clamped = box.clamped ? " · clamped to the picture's edge" : "";
-  const scaled = rendered.scaledForBytes ? " · scaled down to fit the image limit" : "";
+  const scaled = made.scaledForBytes ? " · scaled down to fit the image limit" : "";
+  const turned =
+    made.orientation === undefined ? "" : ` · EXIF orientation ${made.orientation} applied`;
   return {
-    content: `${label} · ${what} · ${detail} · ${formatBytes(ref.size)}${clamped}${scaled}${staleDetailNote(input.detail, setting)}`,
+    content: `${label} · ${what} · ${detail} · ${formatBytes(ref.size)}${clamped}${scaled}${turned}${staleDetailNote(input.detail, setting)}`,
     image: ref,
   };
 }

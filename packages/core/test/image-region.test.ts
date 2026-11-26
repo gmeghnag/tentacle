@@ -9,9 +9,14 @@ import { deflateSync, inflate as inflateCb } from "node:zlib";
 import {
   MIN_REGION_PX,
   type RegionBox,
+  type RegionEncoder,
   cropPixels,
+  orientPixels,
+  orientedSize,
   regionBox,
   renderRegion,
+  renderRegionWith,
+  storedBox,
 } from "../src/image-region.ts";
 import { type DecodedPng, decodePng } from "../src/png-decode.ts";
 import type { PngColor } from "../src/png.ts";
@@ -199,6 +204,165 @@ describe("renderRegion", () => {
       },
     });
     expect(encodes).toBe(4);
+    expect(said(result)).toBe(
+      "the region is too detailed to send under this model's 100 B image limit — pick a smaller part or detail low",
+    );
+  });
+});
+
+describe("EXIF orientation (docs/feat/image-region-jpeg.md D3)", () => {
+  const ALL = [1, 2, 3, 4, 5, 6, 7, 8] as const;
+
+  test("orientedSize swaps the sides for 5–8", () => {
+    for (const o of ALL) {
+      expect(orientedSize(64, 48, o)).toEqual(
+        o < 5 ? { width: 64, height: 48 } : { width: 48, height: 64 },
+      );
+    }
+  });
+
+  test("storedBox maps the displayed top-right quarter back to the stored pixels", () => {
+    const stored: Record<number, readonly [number, number]> = {
+      1: [32, 0],
+      2: [0, 0],
+      3: [0, 24],
+      4: [32, 24],
+      5: [0, 24],
+      6: [0, 0],
+      7: [32, 0],
+      8: [32, 24],
+    };
+    for (const o of ALL) {
+      const shown = orientedSize(64, 48, o);
+      const quarter = boxOf(
+        regionBox({ left: 0.5, top: 0, width: 0.5, height: 0.5 }, shown.width, shown.height),
+      );
+      const [x, y] = stored[o] ?? [-1, -1];
+      expect(storedBox(quarter, 64, 48, o)).toEqual({
+        x,
+        y,
+        width: 32,
+        height: 24,
+        clamped: false,
+      });
+    }
+  });
+
+  test("storedBox keeps the clamp and swaps an uneven box's sides", () => {
+    const box = { x: 0, y: 0, width: 8, height: 9, clamped: true };
+    expect(storedBox(box, 64, 48, 6)).toEqual({
+      x: 0,
+      y: 40,
+      width: 9,
+      height: 8,
+      clamped: true,
+    });
+  });
+
+  // Stored, 3×2:   A B C
+  //                D E F
+  const shown: Record<number, readonly string[]> = {
+    1: ["ABC", "DEF"],
+    2: ["CBA", "FED"],
+    3: ["FED", "CBA"],
+    4: ["DEF", "ABC"],
+    5: ["AD", "BE", "CF"],
+    6: ["DA", "EB", "FC"],
+    7: ["FC", "EB", "DA"],
+    8: ["CF", "BE", "AD"],
+  };
+  const rgb = (rows: readonly string[]) =>
+    new Uint8Array(
+      [...rows.join("")].flatMap((letter) => {
+        const c = letter.charCodeAt(0);
+        return [c, c + 1, c + 2];
+      }),
+    );
+
+  for (const o of ALL) {
+    test(`orientPixels turns a stored 3×2 picture for orientation ${o}`, () => {
+      const out = orientPixels(rgb(["ABC", "DEF"]), 3, 2, 3, o);
+      expect([...out]).toEqual([...rgb(shown[o] ?? [])]);
+    });
+  }
+
+  test("orientation 1 is the same buffer", () => {
+    const pixels = new Uint8Array(18);
+    expect(orientPixels(pixels, 3, 2, 3, 1)).toBe(pixels);
+  });
+});
+
+describe("renderRegionWith (D4)", () => {
+  const whole = (p: DecodedPng): RegionBox => ({
+    x: 0,
+    y: 0,
+    width: p.width,
+    height: p.height,
+    clamped: false,
+  });
+  /** An encoder whose "file" is the raw pixels, and which records every call. */
+  function spy() {
+    const calls: [number, number, number, PngColor][] = [];
+    const encode: RegionEncoder = async (width, height, pixels, color) => {
+      calls.push([width, height, pixels.length, color]);
+      return pixels;
+    };
+    return { calls, encode };
+  }
+
+  test("the encoder gets the detail's size; a small part is not enlarged", async () => {
+    const decoded = picture(2000, 1000, "rgb");
+    for (const [maxEdge, short] of [
+      [768, 384],
+      [1568, 784],
+    ] as const) {
+      const s = spy();
+      const out = await renderRegionWith({
+        decoded,
+        box: whole(decoded),
+        maxEdge,
+        maxBytes: 15e6,
+        encode: s.encode,
+      });
+      expect(s.calls).toEqual([[maxEdge, short, maxEdge * short * 3, "rgb"]]);
+      expect(out).toMatchObject({ width: maxEdge, height: short, scaledForBytes: false });
+    }
+    const s = spy();
+    const box = { x: 10, y: 20, width: 30, height: 16, clamped: false };
+    const out = await renderRegionWith({
+      decoded,
+      box,
+      maxEdge: 1568,
+      maxBytes: 15e6,
+      encode: s.encode,
+    });
+    expect(s.calls).toEqual([[30, 16, 30 * 16 * 3, "rgb"]]);
+    expect("bytes" in out && [...out.bytes]).toEqual([
+      ...cropPixels(decoded.pixels, 2000, 1000, 3, box),
+    ]);
+  });
+
+  test("over the byte cap: steps down by ×0.75, at most three times, then refuses", async () => {
+    const decoded = picture(400, 200, "gray");
+    const fits = spy();
+    const out = await renderRegionWith({
+      decoded,
+      box: whole(decoded),
+      maxEdge: 768,
+      maxBytes: 50_000,
+      encode: fits.encode,
+    });
+    expect(out).toMatchObject({ width: 300, height: 150, scaledForBytes: true });
+    expect(fits.calls.map((c) => c[0])).toEqual([400, 300]);
+    const never = spy();
+    const result = await renderRegionWith({
+      decoded,
+      box: whole(decoded),
+      maxEdge: 768,
+      maxBytes: 100,
+      encode: never.encode,
+    });
+    expect(never.calls.length).toBe(4);
     expect(said(result)).toBe(
       "the region is too detailed to send under this model's 100 B image limit — pick a smaller part or detail low",
     );
