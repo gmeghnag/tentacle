@@ -59,7 +59,11 @@ tentacle run --engine docker --image <ref> # the same agent, in a container
 | --- | --- |
 | Install and first run | [INSTALL.md](INSTALL.md) |
 | Ways to run: local, Docker, Podman, Kubernetes, kept workloads, logs | [docs/guide/running.md](docs/guide/running.md) |
-| Remote: `serve` / `connect`, A2A, MCP server | [docs/guide/remote.md](docs/guide/remote.md) |
+| Remote: `serve` / `connect` | [docs/guide/remote.md](docs/guide/remote.md) |
+| MCP: servers in tentacle, tentacle as an MCP server | [docs/guide/mcp.md](docs/guide/mcp.md) |
+| A2A: other agents call tentacle, tentacle calls them | [docs/guide/a2a.md](docs/guide/a2a.md) |
+| Relay: reach a `serve` with no open port, pair a phone or a laptop | [docs/guide/relay.md](docs/guide/relay.md) |
+| Apps: pages the agent publishes | [docs/guide/apps.md](docs/guide/apps.md) |
 | Configuration: every key, env overrides, `tentacle config` | [docs/guide/configuration.md](docs/guide/configuration.md) |
 | Features: tools, permissions, MCP, sub-agents, skills, voice | [docs/guide/features.md](docs/guide/features.md) |
 | Hooks and packages | [docs/guide/hooks-and-packages.md](docs/guide/hooks-and-packages.md) · reference: [docs/extensions.md](docs/extensions.md) |

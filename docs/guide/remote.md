@@ -1,4 +1,4 @@
-# Remote: `serve`, `connect`, A2A and MCP
+# Remote: `serve` and `connect`
 
 **`serve` + `connect`: on a remote host.** Run the agent as a daemon on one
 machine and drive it from another machine's TUI:
@@ -18,7 +18,7 @@ starts a fresh one. `connect` keeps no laptop copy: the daemon's record is
 the truth.
 
 A `serve` with no reachable address can be driven the way a paired phone does
-it, through the mobile relay: run `tentacle pair` on the host, `tentacle
+it, through the mobile relay ([relay.md](relay.md)): run `tentacle pair` on the host, `tentacle
 connect --pair '<tentacle://pair?…>'` once on the laptop (answer `y` on the host
 after comparing the code), then `tentacle connect <name>` — direct addresses
 are tried first, the relay last. The laptop gets a phone's rights on that one
@@ -30,42 +30,8 @@ A non-loopback `--host` requires a token. TLS: `--tls-cert`/`--tls-key` on
 `serve`; `--ca-cert FILE` on `connect` for a private CA. Details:
 [`docs/architecture/F3-remote-control.md`](../architecture/F3-remote-control.md).
 
-**A2A: other agents can call a `serve`.** With `--a2a-token T` (or
-`--a2a-token-command CMD`) the daemon also speaks
-[A2A](https://a2a-protocol.org) 1.0 over JSON-RPC: the public agent card at
-`/.well-known/agent-card.json`, and `POST /a2a` (`SendMessage`,
-`SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`,
-`SubscribeToTask`) behind `Authorization: Bearer <A2A token>`. It is a token of
-its own, never `--token`; without it A2A is off. A caller's `contextId` is a
-session (`a2a-default-<contextId>`) and each turn is a task; tasks survive a
-restart and stay readable once their session is archived. The owner is always
-asked first: `--a2a-asks both` lets the caller answer tool asks too (file
-approvals stay owner-only), and `--a2a-workflows` lets it start workflow runs
-(off by default). Design: [`docs/feat/a2a.md`](../feat/a2a.md).
-
-**A2A client: hand a sub-task to another agent.** Configure a remote agent
-under `harnesses.<name>` with `"adapter": "a2a"`, its `card` URL and an optional
-`tokenCommand` (a command that prints the token, never the token itself); the
-model can then start it as the sub-agent type `a2a:<name>`. Each send asks you
-first, only the task text leaves the machine, and the report comes back framed
-as remote data. A question from the remote agent reaches you as a prompt (and a
-phone notification), and cancelling the call sends `CancelTask`. Two tentacles
-work end to end this way (`serve --a2a-token` on one side). Design:
-[`docs/feat/a2a-client.md`](../feat/a2a-client.md).
-
-**MCP server: Claude Code and other MCP clients can call a `serve`.** With
-`--mcp-token T` (or `--mcp-token-command CMD`) the daemon also answers
-`POST /mcp` (Streamable HTTP) behind `Authorization: Bearer <MCP token>`, a
-token of its own (never `--token` or the A2A one); without it MCP is off.
-Tools: `session_start`, `session_send`, `session_status` (`waitSeconds` waits),
-`session_answer`, `session_cancel`, `session_list`. A session it starts is
-`mcp-default-<uuid>` and shows up on your phone like any other. The owner is
-asked first: `--mcp-asks both` lets the caller answer tool asks too (file
-approvals stay owner-only). `serve` prints the line to register it:
-
-```
-claude mcp add --transport http tentacle http://127.0.0.1:4000/mcp --header "Authorization: Bearer <token>"
-```
-
-Design: [`docs/feat/serve-mcp-server.md`](../feat/serve-mcp-server.md).
-
+**A2A, MCP, the relay and apps** each have their own guide: other agents calling
+a `serve` or being called by it — [a2a.md](a2a.md); Claude Code and other MCP
+clients driving a `serve`, and MCP servers in tentacle — [mcp.md](mcp.md); a
+`serve` with no open port, pairing a phone or a laptop — [relay.md](relay.md);
+pages the agent publishes — [apps.md](apps.md).
