@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
+import type { BrowserSign } from "../browser-view.ts";
 import type { LinkIndicator } from "../link-status.ts";
 import type { TokenTotals } from "../state.ts";
 import { METER_WIDTH, contextMeterView, statusLayout } from "../status-line.ts";
@@ -69,6 +70,7 @@ export function StatusBar({
   expandAll = false,
   autoApprove = false,
   capsMarker = null,
+  browser = null,
   pill = { kind: "none" },
   onPillRange,
   link = null,
@@ -93,6 +95,8 @@ export function StatusBar({
    * model (`capsMarker`, docs/feat/session-capabilities.md S4); null: nothing.
    */
   capsMarker?: string | null;
+  /** The user's Chrome while it is on (`browserStatusSign`, browser-inspect B6a). */
+  browser?: BrowserSign | null;
   /**
    * The background work, as ONE pill after `auto-accept on`
    * (`status-view.ts`'s `pillView`; the owner's UI revision). `kind: "none"` =
@@ -135,6 +139,7 @@ export function StatusBar({
     meter,
     hint: rightHint,
     suffix,
+    browser,
     pill: pillValue,
     pillHint: pill.kind === "pill" ? pill.hint : "",
   });
@@ -175,6 +180,11 @@ export function StatusBar({
             approx={contextApprox}
             compact={layout.compact}
           />
+          {layout.browser.text === "" ? null : <Text {...dimProps()}>{layout.browser.text}</Text>}
+          {/* A risky switch is on: the glyph and upper case say it, colour only adds. */}
+          {layout.browser.warn === "" ? null : (
+            <Text color={palette().warn}>{layout.browser.warn}</Text>
+          )}
           {layout.suffix === "" ? null : scrolledUp ? (
             <Text color={palette().status.scrolled}>{layout.suffix}</Text>
           ) : (

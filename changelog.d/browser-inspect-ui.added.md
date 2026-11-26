@@ -1,0 +1,1 @@
+- **`/browser` in the TUI.** A panel with the link to your Chrome, the session's tabs and three switches (browser tools, act without asking, show secrets), also as `/browser on|off|auto|ask|clear|masked`. While the browser is on, the status bar shows `◉ chrome N tabs`, plus `▲ AUTO` and `▲ SECRETS VISIBLE` while those are on. `⊘ N tools off` no longer counts the browser tools.

@@ -12,6 +12,7 @@ import type { SlashCommand } from "../commands.ts";
 import { command as agents } from "./agents.ts";
 import { command as artifacts } from "./artifacts.ts";
 import { command as attach } from "./attach.ts";
+import { command as browser } from "./browser.ts";
 import { command as clear } from "./clear.ts";
 import { command as close } from "./close.ts";
 import { command as compact } from "./compact.ts";
@@ -66,6 +67,7 @@ export const BUILT_INS: readonly Command[] = [
   mcp,
   skills,
   tools,
+  browser,
   artifacts,
   schedule,
   workflow,

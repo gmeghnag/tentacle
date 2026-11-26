@@ -16,8 +16,9 @@
  *
  * Nothing here is React, and nothing here is a snapshot of a render.
  */
-import type { WorkflowRow } from "@tentacle/protocol";
+import type { BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
 import type { AppProps, SessionController } from "../app-types.ts";
+import type { CapOp, CapsView } from "../capability-toggles.ts";
 import type { SlashSkill } from "../commands.ts";
 import type { OpenPanel } from "../panel.ts";
 import type { ScheduleDockRow } from "../schedule-view.ts";
@@ -131,4 +132,10 @@ export interface CommandContext {
   readonly setScrollOffset: (offset: number) => void;
   /** Ask the daemon for the session's open context figure. */
   readonly askContext: (session: SessionController | null) => void;
+  /** The session's switches as the daemon last reported them (`/browser`). */
+  readonly capsRef: Live<CapsView | undefined>;
+  /** Send one switch: the SAME path as Space in a panel (its own echo is not news). */
+  readonly sendSwitch: (op: CapOp) => void;
+  /** The last `browser/status` read of this session (null: none, or it failed). */
+  readonly browserStatusRef: Live<BrowserStatusResult | null>;
 }

@@ -731,6 +731,16 @@ STATUS B5b+B6: APPROVED (owner decision 2026-11-25)
 
 *— claude-opus-5-5, 2026-11-25*
 
+#### B6a amendments (the executor, where the plan contradicted the code)
+
+- **Files the list misses.** The design needs them and adds no wire and no daemon code:
+  - `cli/src/local-runtime.ts`: the TUI's session is a wrapper that forwards each method, so `browserStatus` needs a one-line forward. The load-bearing proof's file set is therefore «tui, mobile, the client view module, that forward, the fragments».
+  - `tui/src/`: `commands/browser.ts` (NEW), `commands/registry.ts` and `commands/context.ts` (a command is its own file; `commands.ts` only derives the vocabulary), `panels/types.ts`, `panel.ts`, `usePanels.ts`, `useBrowserStatus.ts` (NEW: nothing held a `browser/status` read), `App.tsx` (wiring), `app-types.ts`, `status-line.ts` and `components/StatusBar.tsx` (the status row's width is budgeted in the first and painted by the second).
+- **«The browser is on» is not the wire's `enabled`.** `enabled` is false as soon as ONE browser tool is off (`core/src/capabilities.ts:53`), while auto still answers the others (`browserAutoAnswers`, `core/src/permission.ts`, reads only `actions`). Hiding `▲ AUTO` there would be false. So the browser is on, for the sign and the locks, while ANY browser tool is offered (`browserOffered`, in the client view module, for B6b's strip too).
+- **A session not open yet** reports no `caps.browser` (the pre-open preview has none): `/browser` says it applies to a started session, not «no browser».
+- **Locked switches in the shortcuts:** with the tools off, `/browser auto|clear` is refused with a notice; `ask|masked` (the safe direction) is sent.
+- **`heldElsewhere`** gets its own panel row, and the sign shows no tab count (never «0 tabs» for a list that was not read).
+
 ## Execution
 
 ### B1 — `@tentacle/browser` pure core (as built)
@@ -990,6 +1000,80 @@ the orchestrator's script.
 live session with the extension reloaded.
 
 *— claude-opus-5-5, 2026-11-25*
+
+### B6a — TUI (as built) — DONE (B6b iPhone not touched)
+
+**Load-bearing check, re-run first** (at `cdfe11ab`): HOLDS. `caps.browser` is on the wire
+(`protocol/src/session.ts`, built by `daemon/src/mapping.ts:157`), `RemoteSession.setCapability`
+takes kind `browser` and `RemoteSession.browserStatus()` exists (`client/src/remote-session.ts:517`).
+No wire or daemon change was needed: `git diff HEAD --stat -- packages/protocol packages/daemon
+packages/agent apps` is empty, so `protocol.json` is untouched. The plan's file SET was wrong
+(«B6a amendments», written before the code).
+
+**Red first.** The three new suites against empty stubs of the two pure modules: `2 pass, 42 fail`,
+all on assertions (the two passes are the «another tool is not due» negatives). After the
+implementation: `44 pass, 0 fail`.
+
+Built:
+1. **Client** — `browser-status-view.ts` (NEW): `browserOffered`, `linkLabel`, `tabSubtitle`,
+   `statusRefreshDue`; exported for B6b.
+2. **CLI** — the runtime's session wrapper forwards `browserStatus` (`local-runtime.ts`).
+3. **TUI, pure** — `browser-view.ts` (NEW): panel rows and their ops, the sign, `/browser <word>`,
+   `browserDoneKey`. `capability-toggles.ts`: kind and `caps.browser`; `capsMarker` skips the
+   browser group. `status-line.ts`: the sign is budgeted right after the ctx figure; short, its
+   text goes first and the `▲` warnings stay.
+4. **TUI, wiring** — `panels/browser.ts` + one registry line, `commands/browser.ts`,
+   `useBrowserStatus.ts` (one effect of its own; `App` keeps its 22), `sendSwitch` in `App.tsx`
+   shared by Space and the shortcuts (the Space code moved, unchanged), `StatusBar.tsx` paints the
+   warnings with `palette().warn`.
+
+**Drift from the Implementation:** the five points of «B6a amendments», and:
+- Five existing pins gained the new command/panel (`app-commands`, `commands-registry`,
+  `panels-registry`, `app-panels-structure`; `/help`'s visible window now checks `/browser`,
+  because `/move` scrolled out).
+- A locked row says `browser tools off` on itself; Space on it (or on a tab row) is silent.
+- The mockup HTML was not consulted (outside this worktree): every string is the plan's.
+
+**Mutations** (`.tentacle/tmp/browser-inspect/mutate-b6a.ts`: one at a time, file restored; all RED):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | `sendSwitch` flips `auto` locally (render from intent — the plan's target) | app «`▲ AUTO` only after the echo» |
+| M2 | `browserOffered` = every tool on (the wire's `enabled`) | 3: partly-off rows, sign, client rule |
+| M3 | `capsMarker` counts the browser group | view marker, app `/browser off` |
+| M4 | the sign says `0` for an unread list | view «no count» |
+| M5 | no sequence guard in the hook | app «older answer landing late» |
+| M6 | a failed read keeps the old status | app «fails after a good one» |
+| M7 | `doneKey` not a trigger | app «finished browser tool re-reads» |
+| M8 | `panelOpen` not a trigger | app «opening the panel re-reads» |
+| M9 | accepted reads not pushed to the panel | app «opening the panel re-reads» |
+| M10 | no tools-off lock on `/browser auto\|clear` | view «tools off» |
+| M11 | panel rows not locked while off | view «tools off … locked» |
+| M12 | a short row drops the warnings | view «warnings stay» |
+| M13 | tab title not through `oneLine` | view «one clean line» |
+| M14 | own op not recorded as pending | app `/browser off` echo |
+| M15 | a session without the browser is read | app «no browser», «older answer» |
+| M16 | the CLI forward dropped | cli «forwards the read» |
+
+**Verification run here** (narrow): `bun test --parallel packages/tui/test` + the client view,
+`local-runtime`, `session-capabilities-resume` and `browser-status` files → `3214 pass, 0 fail`
+(five app-test sync points tightened afterwards; that file and four neighbours re-run: `75 pass,
+0 fail`). `bunx biome check` on `cli/src`, `client/src`, `tui/src`, `tui/test` and the touched
+test files → clean. `tsc` over the touched import graph (scratch
+`.tentacle/tmp/browser-inspect/tsconfig.b6a.json`) → ONE error, in a file this slice does not
+touch: `agent/src/harness/a2a-map.ts(520,5)` TS2739 (`URL`); whether the full config shows it too
+is for the orchestrator's gate (`bun run check`), not run here.
+
+**Unverified / debt:**
+- No live TUI run against a real Chrome; the frames are ink-testing-library's.
+- The handed-over subtitle «acting asks first» (mockup) is FALSE while auto is on: B5b answers a
+  handed-over tab's first action in auto. Owner/B6b to reword.
+- Another device turning auto/clear on adds no transcript notice; only the sign changes.
+- A tab closed in Chrome shows until the next refresh trigger (the plan's debt).
+- NOT part of B6a and still open before merge: «Owner request — extension icon» (the PNGs are not
+  embedded by `browser-extension-assets.ts`).
+
+*— claude-sonnet-5-5, 2026-11-26*
 
 ## Review
 

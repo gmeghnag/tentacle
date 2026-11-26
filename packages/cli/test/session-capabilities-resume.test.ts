@@ -108,6 +108,20 @@ async function loaded(store: LogSessionStore, id: string): Promise<SessionRecord
   return result.record;
 }
 
+describe("the TUI's wrapper reaches `browser/status`", () => {
+  test("B6a the runtime's session forwards the read to the daemon", async () => {
+    // Mutation: drop `browserStatus` from `persistingController` → not a function
+    // (the TUI would then show the link as unknown for every session).
+    const d = daemon();
+    const { runtime } = await runtimeOn("browser-status", d);
+    const ctl = runtime.createSession();
+    await drain(ctl.send("hello"));
+    // A host with no browser port answers honestly.
+    expect(await ctl.browserStatus()).toEqual({ available: false, tabs: [] });
+    await runtime.dispose();
+  });
+});
+
 describe("the switches reach the laptop store", () => {
   test("C1 a change made while idle (another device) is saved without a turn", async () => {
     // Mutation: no flush on a `capabilities` change in `persistingController` → the store has none.

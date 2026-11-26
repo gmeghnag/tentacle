@@ -99,6 +99,7 @@ describe("S0 command smoke: every built-in command answers", () => {
       "/mcp",
       "/skills",
       "/tools",
+      "/browser",
       "/artifacts",
       "/schedule",
       "/workflow",
@@ -112,8 +113,8 @@ describe("S0 command smoke: every built-in command answers", () => {
     const t = await mount(fake());
     await t.line("/help");
     // The frame is the visible window of the transcript: the LAST rows are what
-    // it can show, and `/move` is the newest built-in (the first ones scroll out).
-    expect(t.frame()).toContain("/move");
+    // it can show, and `/browser` is the newest built-in (the first ones scroll out).
+    expect(t.frame()).toContain("/browser");
     expect(t.frame()).toContain("/tokens");
     t.app.unmount();
   });

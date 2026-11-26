@@ -9,6 +9,7 @@ import type { AttachmentRef, JobController, PermissionBroker } from "@tentacle/c
 import type {
   ArtifactListResult,
   ArtifactMeta,
+  BrowserStatusResult,
   CompactResult,
   DocumentContent,
   JobOutputResult,
@@ -252,6 +253,12 @@ export interface SessionController {
    * answer. Rejects on a refusal.
    */
   setCapability?(kind: CapKind, name: string, enabled: boolean): Promise<unknown>;
+  /**
+   * `browser/status` (docs/feat/browser-inspect.md B6a): the link to the user's
+   * Chrome and this session's tabs. A read; rejects when the session is not open
+   * or the daemon predates it. Absent: no daemon owns the session.
+   */
+  browserStatus?(): Promise<BrowserStatusResult>;
   /**
    * The artifacts the model presented in this session
    * (docs/feat/model-artifacts.md D6/D8), as the daemon's `artifact/list`

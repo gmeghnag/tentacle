@@ -342,6 +342,8 @@ export interface PersistingController extends SessionController {
   onCapabilities: RemoteSession["onCapabilities"];
   /** `RemoteSession.setCapability`: Space in `/mcp` / `/skills` (S4). */
   setCapability: RemoteSession["setCapability"];
+  /** `RemoteSession.browserStatus`: `/browser` and the status bar's sign (browser-inspect B6a). */
+  browserStatus: RemoteSession["browserStatus"];
   /** `RemoteSession.opened`: open daemon-side (no switches yet ⇒ "not started", not "unsupported"). */
   opened(): boolean;
   /** `RemoteSession.seedCapabilities`: the NEXT created session starts with this one's switches. */
@@ -1050,6 +1052,7 @@ export function persistingController(
     // subscription above (`capsSeen`): nothing to flush here.
     onCapabilities: (listener) => inner.onCapabilities(listener),
     setCapability: (kind, name, enabled) => inner.setCapability(kind, name, enabled),
+    browserStatus: () => inner.browserStatus(),
     opened: () => inner.opened(),
     // A `/clear` close-and-replace keeps the switches (owner Q5, S3b).
     seedCapabilities() {

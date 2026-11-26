@@ -15,6 +15,7 @@
  * Names and the `by` label are daemon strings (a pod may send them): every one
  * shown passes through `oneLine`.
  */
+import { TOOL_GROUPS } from "@tentacle/core";
 import { oneLine } from "./commands.ts";
 
 /** The session's switches (structurally `SessionCapabilitiesWire`): disabled names. */
@@ -26,9 +27,22 @@ export interface CapsView {
    * has no tool switches (an older one) — `/tools` shows no switch.
    */
   readonly disabledTools?: readonly string[];
+  /**
+   * The user's Chrome in this session (docs/feat/browser-inspect.md B5b).
+   * ABSENT: no browser here (a pod, an older daemon, a session not open yet).
+   */
+  readonly browser?: {
+    readonly enabled: boolean;
+    readonly secrets: "masked" | "clear";
+    readonly actions: "ask" | "auto";
+  };
 }
 
-export type CapKind = "mcp" | "skill" | "tool";
+/** `browser`: the two switches of the user's Chrome, by name (`auto`, `clear`). */
+export type CapKind = "mcp" | "skill" | "tool" | "browser";
+
+/** The kinds that are a list of disabled names. */
+type ListKind = Exclude<CapKind, "browser">;
 
 /** One request: turn `name` on (`enabled`) or off for the model. */
 export interface CapOp {
@@ -92,14 +106,14 @@ export function sessionCapsPhase(
   return capsPhase(caps, session?.opened?.() ?? true, typeof session?.setCapability === "function");
 }
 
-const setOf = (caps: CapsView, kind: CapKind): readonly string[] =>
+const setOf = (caps: CapsView, kind: ListKind): readonly string[] =>
   kind === "mcp"
     ? caps.disabledMcp
     : kind === "skill"
       ? caps.disabledSkills
       : (caps.disabledTools ?? []);
 
-export const isOff = (caps: CapsView, kind: CapKind, name: string): boolean =>
+export const isOff = (caps: CapsView, kind: ListKind, name: string): boolean =>
   setOf(caps, kind).includes(name);
 
 /**
@@ -254,7 +268,11 @@ export function switchesNotApplied(error: unknown): boolean {
 export const switchesNotAppliedNotice = (): string =>
   "_Message not sent: a switch could not be applied (above). The session has started: the panels now show its real switches. Enter sends it as it is._";
 
-/** The status-line marker while something is off (null when everything is on). */
+/**
+ * The status-line marker while something is off (null when everything is on).
+ * The browser group is not counted: it is off by default, and its own sign says
+ * when it is on (`browserStatusSign`, browser-inspect B6a).
+ */
 export function capsMarker(caps: CapsView | undefined): string | null {
   if (caps === undefined) {
     return null;
@@ -262,7 +280,8 @@ export function capsMarker(caps: CapsView | undefined): string | null {
   const parts: string[] = [];
   const servers = caps.disabledMcp.length;
   const skills = caps.disabledSkills.length;
-  const tools = caps.disabledTools?.length ?? 0;
+  const browser: readonly string[] = TOOL_GROUPS.browser ?? [];
+  const tools = (caps.disabledTools ?? []).filter((name) => !browser.includes(name)).length;
   if (servers > 0) {
     parts.push(`${servers} server${servers === 1 ? "" : "s"}`);
   }
@@ -279,7 +298,7 @@ export function capsMarker(caps: CapsView | undefined): string | null {
 export function capsDiff(prev: CapsView | undefined, next: CapsView): CapOp[] {
   const before = prev ?? { disabledMcp: [], disabledSkills: [] };
   const ops: CapOp[] = [];
-  const diff = (kind: CapKind, was: readonly string[], now: readonly string[]): void => {
+  const diff = (kind: ListKind, was: readonly string[], now: readonly string[]): void => {
     for (const name of now) {
       if (!was.includes(name)) ops.push({ kind, name, enabled: false });
     }
