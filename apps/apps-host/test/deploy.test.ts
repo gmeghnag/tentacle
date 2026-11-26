@@ -139,7 +139,9 @@ describe("Caddyfile.apps", () => {
   });
 
   test("DNS-01 for the wildcard, with the token from the environment", () => {
-    expect(live).toMatch(/tls \{\s*dns hetzner \{env\.HETZNER_API_TOKEN\}\s*propagation_delay \d+s/);
+    expect(live).toMatch(
+      /tls \{\s*dns hetzner \{env\.HETZNER_API_TOKEN\}\s*propagation_delay \d+s/,
+    );
   });
 
   test("proxies to the default port, replaces XFF, strips cookies and the banner", () => {
