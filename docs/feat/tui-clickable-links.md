@@ -601,3 +601,29 @@ OSC 8 removal is real; logic is in the pure `links.ts`, components only wire.
 **Executor behaviour:** disciplined — red-first per slice, 7 mutations, drifts recorded
 honestly (incl. the `toggleRows` guard correction). It did not red-team the untrusted-text
 angle that Decision 3 asked Review to attack.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (fresh context; reviews `git diff HEAD~1`, commit `919f21d4`)
+
+**Verdict: PASS.** Both round-1 findings fixed; no new HIGH/MEDIUM.
+
+- **Finding 1 (conceal spoof): fixed.** Re-running `rv-conceal.ts` gives no span on the
+  `good.com` + concealed `.evil.com/x` row (shell and assistant cases). Only the separately
+  written, fully visible `https://good.com.evil.com/x` row links. `linkRows`
+  (`links.ts:266-271`) refuses a URL with any SGR inside it, or one hidden (conceal or
+  fg = bg) by the codes before it, when the item's data carries escapes (`carriesCodes`,
+  including JSON-encoded `\u001b`). `linkableUrls` drops every link of an item whose lines hold a
+  non-SGR control or escape (cursor moves, `\r`, `\b`).
+- **Finding 2 (`[url](url)`): fixed.** `CANDIDATE_RE` stops at `](` (`links.ts:43`).
+  The probe now links `https://x.com/a` at `[0,2,15]`, and `docs (https://e.com/d)` still links.
+- **Mutations (each applied, seen red, reverted; `git status` clean):** no inside-span check
+  → 3 fail; `isHidden` always false → "starts concealed or in its background colour" fails;
+  `linkableUrls` ignores redraws → 2 fail; the regex not stopping at `](` → 2 fail.
+- **Gate:** `bun test --parallel packages/tui/test` 3208 pass / 0 fail; `bun run lint` clean
+  (2709 files); `bun run typecheck` clean (4 projects).
+- **Residual (LOW, not blocking):** a whole URL drawn in a fg near the terminal background
+  without a bg code (e.g. `ESC[30m` on a black terminal) is not detected as hidden. The
+  whole address is then invisible, so nothing visible misleads a click. The rule is
+  deliberately conservative: an item that carries any escape loses links whose span
+  holds a code, which is a missing link, never a wrong one.
