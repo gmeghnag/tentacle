@@ -68,7 +68,7 @@ const handlers = {
   [Method.WorkflowApprove]: () => ({ ok: true, asked: true }),
   [Method.WorkflowDelete]: () => ({ ok: true, path: ".tentacle/workflows/task.yaml" }),
 };
-const ours = (sent: { method: string }[]) =>
+const ours = (sent: { method: string; params: unknown }[]) =>
   sent.filter((s) => s.method === Method.WorkflowApprove || s.method === Method.WorkflowDelete);
 
 describe("RemoteSession.workflowApprove / workflowDelete", () => {
