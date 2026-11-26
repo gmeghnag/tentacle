@@ -581,6 +581,45 @@ subfolder) was refused: it requires approval. No other route was tried.
 `png-decode.test.ts`: 41 pass, 35 fail. Another fix round cannot change this
 until someone provides the archive.
 
+### Fix round 1 (after Review round 3)
+
+*— claude-sonnet-5-5, 2026-11-26* — still **PARTIAL**; no code or test change.
+
+**Finding 1 (HIGH, PngSuite): not fixed, blocked on a permission.** The archive
+is now in the scratch folder, but the command that listed and extracted it was
+refused ("requires approval", for its `tar` parts), and this session cannot
+approve. It was not worked around (no extraction by another tool or script),
+nothing forged, no test skipped. The sha256 was not re-checked (`shasum` was
+refused too). Steps 1–4 and M2 on T1 are still pending, so there is no new fix
+to show red or to mutate.
+
+**Finding 2 (MEDIUM):** stays fixed (code unchanged).
+
+**Checks.** `png-decode`, `image-region` and `image-view-region` tests: 91 pass,
+35 fail (the tail shows missing-fixture failures; same count as before). Gate
+not run (the script's).
+
+**To unblock** (owner/orchestrator, from the worktree root), either allow `tar`
+for the next run or run:
+
+```sh
+S=/Users/gmeghnag/tentacle/.tentacle/tmp/image-region-png
+shasum -a 256 $S/PngSuite-2017jul19.tgz   # 0294b244…37bfdc8
+mkdir $S/suite && tar -xzf $S/PngSuite-2017jul19.tgz -C $S/suite
+mkdir -p packages/core/test/fixtures/png
+for n in basn0g01 basn0g02 basn0g04 basn0g08 basn0g16 basn2c08 basn2c16 \
+  basn3p01 basn3p08 basn4a08 basn6a08 basn6a16 basi0g08 basi2c08 basi3p08 \
+  basi6a08 tbbn3p08 tbrn2c08 f00n2c08 f01n2c08 f02n2c08 f03n2c08 f04n2c08 \
+  xs1n0g01 xcrn0g04 xhdn0g08 xcsn0g01 xd0n2c08 xdtn0g01; do
+  cp $S/suite/$n.png packages/core/test/fixtures/png/
+done
+cp $S/suite/PngSuite.LICENSE $S/suite/PngSuite.README packages/core/test/fixtures/png/
+(cd packages/core/test/fixtures/png && shasum -a 256 *.png)
+```
+
+Then the fixtures `README.md` (source URL, licence line, those sha256) and
+steps 2–4.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
