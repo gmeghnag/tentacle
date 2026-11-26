@@ -257,6 +257,9 @@ export type BeforeResumedCall = (signal: AbortSignal) => Promise<void>;
 /** The context-line estimate's counter when the config names none. */
 const DEFAULT_COUNTER = new HeuristicTokenCounter();
 
+/** The sub-agent spawn tool: the default of `spawnToolName` (`createSubagentRunner`, subagent.ts). */
+const SPAWN_TOOL_NAME = "agent_task";
+
 /** The bound on a provider's exact count at open: past it the estimate is shown. */
 export const CONTEXT_COUNT_TIMEOUT_MS = COUNT_TOKENS_CAP_MS;
 /** Max consecutive empty-response auto-nudges before a stall ends the turn. */
@@ -967,11 +970,17 @@ export class Agent {
   private catalogSkills: readonly SkillInfo[];
   /** `config.environment` rendered once: the same bytes on every request (`""` = none). */
   private readonly environmentBlock: string;
+  /** The same without the remote agents: what a session with `agent_task` off sends. */
+  private readonly localEnvironmentBlock: string;
 
   constructor(config: AgentConfig) {
     this.config = config;
     this.environmentBlock =
       config.environment === undefined ? "" : renderEnvironmentBlock(config.environment);
+    this.localEnvironmentBlock =
+      config.environment === undefined
+        ? ""
+        : renderEnvironmentBlock({ ...config.environment, remoteAgents: [] });
     this.counter =
       config.imageTokens === undefined
         ? DEFAULT_COUNTER
@@ -1136,9 +1145,10 @@ export class Agent {
   /**
    * `messages` as a request built under `caps` sends them: the system message's
    * skills catalog re-rendered without the hidden skills, then the environment
-   * block. A copy when it differs; the stored history is never touched. Every
-   * other message is the same object, so a context anchor still matches it, and
-   * the length is unchanged, so a prune index does too.
+   * block (without the remote agents when `agent_task` is off). A copy when it
+   * differs; the stored history is never touched. Every other message is the
+   * same object, so a context anchor still matches it, and the length is
+   * unchanged, so a prune index does too.
    */
   private projectedHistory(
     messages: readonly ChatMessage[],
@@ -1150,7 +1160,7 @@ export class Agent {
     }
     const content = withEnvironment(
       projectSystem(first.content, this.catalogSkills, caps),
-      this.environmentBlock,
+      isToolDisabled(SPAWN_TOOL_NAME, caps) ? this.localEnvironmentBlock : this.environmentBlock,
     );
     return content === first.content ? messages : [{ ...first, content }, ...messages.slice(1)];
   }

@@ -261,3 +261,69 @@ describe("environment block in the agent loop", () => {
     expect(model.requests[0]?.messages.map((m) => m.role)).toEqual(["user"]);
   });
 });
+
+// docs/fix/remote-agents-discoverable.md D1/D3: the remote agents the head lists.
+describe("remote agents in the agent loop", () => {
+  const environment = {
+    ...ENV,
+    remoteAgents: [{ type: "a2a:bravo", ownerDescription: "Reviewer", host: "agents.acme.dev" }],
+  };
+  const SECTION = [
+    "<remote_agents>",
+    "Remote agents (A2A) you can delegate to: call agent_task with subagent_type set to the name below. Your prompt is sent to that agent's host. Each agent's own card text is in agent_task's type list, marked as remote data.",
+    "- a2a:bravo — Reviewer · agents.acme.dev",
+    "</remote_agents>",
+  ].join("\n");
+  const LISTED = `You are an agent.\n\n${BLOCK}\n${SECTION}\n`;
+  const off = { ...NO_CAPABILITIES, disabledTools: ["agent_task"] };
+
+  test("(a) every round's head ends with the list, byte-identical", async () => {
+    const model = new Scripted([[call("c1"), done()]]);
+    await send(new Session(agentWith(model, { environment }), "s1"), "go");
+    expect(model.requests).toHaveLength(2);
+    for (const request of model.requests) {
+      expect(systems(request)).toEqual([LISTED]);
+    }
+  });
+
+  test("(c) agent_task turned off: no list; turned back on: the list returns", async () => {
+    const model = new Scripted();
+    const agent = agentWith(model, { environment, capabilities: off });
+    const session = new Session(agent, "s1");
+    await send(session, "one");
+    expect(systems(model.requests[0])).toEqual([SENT_HEAD]);
+    agent.setCapabilities(NO_CAPABILITIES);
+    await send(session, "two");
+    expect(systems(model.requests[1])).toEqual([LISTED]);
+    agent.setCapabilities(off);
+    await send(session, "three");
+    expect(systems(model.requests[2])).toEqual([SENT_HEAD]);
+  });
+
+  test("(c) another tool turned off keeps the list", async () => {
+    const model = new Scripted();
+    const capabilities = { ...NO_CAPABILITIES, disabledTools: ["echo"] };
+    await send(new Session(agentWith(model, { environment, capabilities }), "s1"), "go");
+    expect(systems(model.requests[0])).toEqual([LISTED]);
+  });
+
+  test("(c) the context count measures the head that is sent", async () => {
+    const used = async (extra: Partial<AgentConfig>): Promise<number> => {
+      const agent = agentWith(new Scripted(), extra);
+      return (await agent.contextUsage(agent.startConversation())).used;
+    };
+    const listed = await used({ environment });
+    const hidden = await used({ environment, capabilities: off });
+    expect(listed).toBeGreaterThan(hidden);
+    expect(hidden).toBe(await used({ capabilities: off }));
+  });
+
+  test("(d) the stored head stays block-free after the turn", async () => {
+    const model = new Scripted([[call("c1"), done()]]);
+    const session = new Session(agentWith(model, { environment }), "s1");
+    await send(session, "go");
+    expect(model.requests[0]?.messages[0]?.content).toBe(LISTED);
+    expect(session.messages[0]?.content).toBe(HEAD);
+    expect(JSON.stringify(session.messages)).not.toContain("remote_agents");
+  });
+});

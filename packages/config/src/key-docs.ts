@@ -508,7 +508,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     sourceKey: "systemPromptEnvironment",
     resolved: (c) => c.systemPromptEnvironment,
     details:
-      "Added to each request, never stored with the session: a `<cwd>` block with the directory the session's tools work in, then a `<platform>` line. In `run`/`attach` both are the pod's, and the pod's own config decides. Set `false` to send the prompt without it, e.g. when your prompt already states the directory.",
+      "Added to each request, never stored with the session: a `<cwd>` block with the directory the session's tools work in, then a `<platform>` line, then, for the main agent, a `<remote_agents>` block listing the `a2a` agents under `harnesses` it can call (name, your description, host; at most 16; none while `agent_task` is off). In `run`/`attach` the directory and platform are the pod's, the pod's own config decides, and no remote agent is listed. Set `false` to send the prompt without any of it, e.g. when your prompt already states the directory.",
     example: "false",
   },
   loadAgentsMd: {
@@ -759,13 +759,14 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: '"op read op://dev/acme/token"',
   },
   "harnesses.*.description": {
-    summary: "Your description of an `a2a` agent, shown to the model first.",
+    summary:
+      "Your description of an `a2a` agent, shown to the model first and listed in the system prompt's environment block.",
     kind: "leaf",
     type: "string",
     scope: "both",
     carried: "no",
     details:
-      "At most 500 characters. The model also reads the card's own name, description and skills, cut short and marked as remote text.",
+      "At most 500 characters; one line of at most 300 reaches the model (the environment block is the one `systemPromptEnvironment` switches). In `agent_task`'s type list the model also reads the card's own name, description and skills, cut short and marked as remote text.",
     example: '"Reviews Go PRs against our style guide"',
   },
   "harnesses.*.inputFrom": {
