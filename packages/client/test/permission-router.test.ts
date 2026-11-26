@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DISMISSED } from "@tentacle/core";
+import { DISMISSED, autoApproves } from "@tentacle/core";
 import type { PermissionRequestUpdate } from "@tentacle/protocol";
 import { PermissionRouter, type RouterAction } from "../src/permission-router.ts";
 
@@ -55,6 +55,16 @@ describe("the hop's laptop-internal fields never cross the wire", () => {
     const [action] = r.request("S", req("r1", { tool: "app_publish" }));
     const request = action?.kind === "prompt" ? action.request : undefined;
     expect(request?.kind).toBe("app_publish");
+  });
+
+  // docs/feat/container-apps-devices.md OD2. Mutation: drop the branch → kind
+  // undefined → auto-accept would answer it → red.
+  test("the wire tool `container_preview` becomes the kind `container_preview`", () => {
+    const r = new PermissionRouter();
+    const [action] = r.request("S", req("r1", { tool: "container_preview" }));
+    const request = action?.kind === "prompt" ? action.request : undefined;
+    expect(request?.kind).toBe("container_preview");
+    expect(request ? autoApproves(request) : true).toBe(false);
   });
 
   test("an answer's `send` carries only optionId and message — `auto` never leaves", () => {

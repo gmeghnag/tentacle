@@ -62,7 +62,9 @@ export interface PermissionRequest {
    * skipped — a human's text, never auto-accepted. An `agent_add` approves a
    * remote agent the model proposed (C11): once-only, never auto-accepted. An
    * `app_publish` puts a page on the PUBLIC internet
-   * (docs/feat/session-apps-publish.md D3): once-only, never auto-accepted.
+   * (docs/feat/session-apps-publish.md D3): once-only, never auto-accepted. A
+   * `container_preview` makes a container's port viewable by the paired devices
+   * (docs/feat/container-apps-devices.md OD2): once-only, never auto-accepted.
    */
   readonly kind?:
     | "tool"
@@ -72,7 +74,8 @@ export interface PermissionRequest {
     | "browser_action"
     | "question"
     | "agent_add"
-    | "app_publish";
+    | "app_publish"
+    | "container_preview";
   /**
    * Slack (laptop-internal, never on the wire): this `session_hop` is one
    * auto-accept MAY answer, because the LAPTOP's own rule said so
@@ -145,6 +148,8 @@ export const EXTERNAL_ANSWER: { readonly [K in PermissionKind]: "once" | "owner-
   agent_add: "owner-only",
   // A public disclosure of the owner's content (session apps D3).
   app_publish: "owner-only",
+  // Exposing a running container's port (container-apps-devices OD2).
+  container_preview: "owner-only",
 };
 
 /** May an external caller answer an ask of this kind? `undefined` = not known = never (fail-closed). */
@@ -412,6 +417,8 @@ export function autoApproves(req: PermissionRequest, own = true): boolean {
     req.kind !== "agent_add" &&
     // Publishing a page is a public disclosure, asked every time (session apps D3).
     req.kind !== "app_publish" &&
+    // Exposing a container port is asked every time (container-apps-devices OD2).
+    req.kind !== "container_preview" &&
     (req.kind !== "session_hop" || req.hopAuto === true)
   );
 }
@@ -445,7 +452,8 @@ export function onceOnlyAsk(req: PermissionRequest): boolean {
     req.kind === "workflow_approve" ||
     req.kind === "browser_action" ||
     req.kind === "agent_add" ||
-    req.kind === "app_publish"
+    req.kind === "app_publish" ||
+    req.kind === "container_preview"
   );
 }
 

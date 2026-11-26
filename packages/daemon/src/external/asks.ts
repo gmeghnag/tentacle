@@ -15,6 +15,7 @@ import {
   A2A_ADD_AGENT_TOOL,
   APP_PUBLISH_TOOL,
   BROWSER_ACTION_TOOL,
+  CONTAINER_PREVIEW_TOOL,
   type PermissionKind,
   WORKFLOW_APPROVE_TOOL,
   externalMayAnswer,
@@ -62,8 +63,8 @@ export function askIsOwn(u: PermissionRequestUpdate, taskTurnId: string): boolea
  * The adapter's view of a wire ask. Its kind follows the client's own reverse
  * mapping (`toPermissionRequest`, client/permission-router.ts: the workflow
  * approval tool → `workflow_approve`, the browser action tool →
- * `browser_action`, the publish tool → `app_publish`, else `tool`); an ask not
- * the task's own
+ * `browser_action`, the publish tool → `app_publish`, the preview tool →
+ * `container_preview`, else `tool`); an ask not the task's own
  * gets NO kind (owner-only). `hooks_trust` / `session_hop` never arrive as a
  * daemon ask: hooks trust is a `hooks/trust` request the adapter answers NO,
  * and a hop is the laptop's.
@@ -79,7 +80,9 @@ export function askOf(u: PermissionRequestUpdate, own: boolean): PendingAsk {
           ? "agent_add"
           : u.tool === APP_PUBLISH_TOOL
             ? "app_publish"
-            : "tool";
+            : u.tool === CONTAINER_PREVIEW_TOOL
+              ? "container_preview"
+              : "tool";
   return {
     requestId: u.requestId,
     title: u.title,

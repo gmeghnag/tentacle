@@ -7,6 +7,7 @@
  */
 export * from "./model.ts";
 export * from "./apps.ts";
+export * from "./previews.ts";
 export * from "./attachments.ts";
 export * from "./dsml.ts";
 export * from "./truncation.ts";

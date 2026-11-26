@@ -4013,6 +4013,160 @@
       "enum": ["pending", "in_progress", "completed"],
       "type": "string"
     },
+    "PreviewAckParams": {
+      "additionalProperties": true,
+      "properties": {
+        "bytes": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "tunnelId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["bytes", "tunnelId"],
+      "type": "object"
+    },
+    "PreviewCloseParams": {
+      "additionalProperties": true,
+      "properties": {
+        "reason": {
+          "maxLength": 500,
+          "type": "string"
+        },
+        "tunnelId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["tunnelId"],
+      "type": "object"
+    },
+    "PreviewConnectParams": {
+      "additionalProperties": true,
+      "properties": {
+        "previewId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sessionId": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["previewId", "sessionId"],
+      "type": "object"
+    },
+    "PreviewConnectResult": {
+      "additionalProperties": true,
+      "properties": {
+        "tunnelId": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["tunnelId"],
+      "type": "object"
+    },
+    "PreviewDataParams": {
+      "additionalProperties": true,
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "tunnelId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["data", "tunnelId"],
+      "type": "object"
+    },
+    "PreviewRow": {
+      "additionalProperties": true,
+      "properties": {
+        "containerId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "containerPort": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "createdAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "engine": {
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "image": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": ["containerId", "containerPort", "createdAt", "engine", "id", "image", "name"],
+      "type": "object"
+    },
+    "PreviewStopParams": {
+      "additionalProperties": true,
+      "properties": {
+        "previewId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sessionId": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["previewId", "sessionId"],
+      "type": "object"
+    },
+    "PreviewStopResult": {
+      "additionalProperties": true,
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": ["ok"],
+      "type": "object"
+    },
+    "PreviewsUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "previews": {
+          "items": {
+            "$ref": "#/$defs/PreviewRow"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "previews",
+          "type": "string"
+        }
+      },
+      "required": ["previews", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "ProgressParams": {
       "additionalProperties": true,
       "properties": {
@@ -6001,6 +6155,7 @@
           "permission_request": "#/$defs/PermissionRequestUpdate",
           "permission_resolved": "#/$defs/PermissionResolvedUpdate",
           "plan": "#/$defs/Plan",
+          "previews": "#/$defs/PreviewsUpdate",
           "question_request": "#/$defs/QuestionRequestUpdate",
           "queued": "#/$defs/QueuedUpdate",
           "schedules": "#/$defs/SchedulesUpdate",
@@ -6106,6 +6261,9 @@
         },
         {
           "$ref": "#/$defs/AppsUpdate"
+        },
+        {
+          "$ref": "#/$defs/PreviewsUpdate"
         },
         {
           "$ref": "#/$defs/SubagentNotify"
@@ -6316,6 +6474,12 @@
         "messages": {
           "items": {
             "$ref": "#/$defs/ChatMessage"
+          },
+          "type": "array"
+        },
+        "previews": {
+          "items": {
+            "$ref": "#/$defs/PreviewRow"
           },
           "type": "array"
         },
@@ -8465,6 +8629,8 @@
     "PairingRefused": -32017,
     "ParseError": -32700,
     "PermissionNotPending": -32013,
+    "PreviewGone": -32021,
+    "PreviewUnavailable": -32022,
     "PushStoreFailed": -32019,
     "SessionArchived": -32014,
     "SessionDeleted": -32015,
@@ -8749,6 +8915,22 @@
         "$ref": "#/$defs/PinResult"
       }
     },
+    "session/preview_connect": {
+      "params": {
+        "$ref": "#/$defs/PreviewConnectParams"
+      },
+      "result": {
+        "$ref": "#/$defs/PreviewConnectResult"
+      }
+    },
+    "session/preview_stop": {
+      "params": {
+        "$ref": "#/$defs/PreviewStopParams"
+      },
+      "result": {
+        "$ref": "#/$defs/PreviewStopResult"
+      }
+    },
     "session/prompt": {
       "params": {
         "$ref": "#/$defs/PromptParams"
@@ -8972,6 +9154,21 @@
     "daemon/discovery": {
       "params": {
         "$ref": "#/$defs/DaemonDiscovery"
+      }
+    },
+    "preview/ack": {
+      "params": {
+        "$ref": "#/$defs/PreviewAckParams"
+      }
+    },
+    "preview/close": {
+      "params": {
+        "$ref": "#/$defs/PreviewCloseParams"
+      }
+    },
+    "preview/data": {
+      "params": {
+        "$ref": "#/$defs/PreviewDataParams"
       }
     },
     "session/cancel": {

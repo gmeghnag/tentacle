@@ -100,6 +100,12 @@ export const DEFAULT_SESSION_HOP_TOOL = false;
  */
 export const DEFAULT_WORKLOAD_SHELL_TOOL = false;
 /**
+ * `previews.enabled`: offer the agent `container_preview` on `serve`
+ * (docs/feat/container-apps-devices.md OD8). **Default: off** until the phone
+ * can view a preview.
+ */
+export const DEFAULT_PREVIEWS_ENABLED = false;
+/**
  * `apps.enabled`: offer the agent `app_publish` — publish a presented HTML page
  * as a PUBLIC web page, asked every time (docs/feat/session-apps-publish.md
  * D11). **Default: off** until the apps host is deployed.
@@ -269,6 +275,11 @@ export const DEFAULT_CONFIG_JSONC = `{
   // page (\`app_publish\`, asked every time), up while the session is open? Read by
   // THIS host (the local worker, \`serve\`); never carried to a pod.
   // "apps": { "enabled": ${DEFAULT_APPS_ENABLED}, "domain": "${DEFAULT_APPS_DOMAIN}" },
+
+  // Container previews: may the agent show a running container's web port to
+  // your PAIRED devices (\`container_preview\`, asked every time)? Read by
+  // \`serve\` only; never carried to a pod.
+  // "previews": { "enabled": ${DEFAULT_PREVIEWS_ENABLED} },
 
   // Scheduled wakes: limits on the agent's \`schedule_create\` (it asks you
   // first). Read by THIS host (the local worker, \`serve\`); never carried to a pod.

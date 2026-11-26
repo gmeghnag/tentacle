@@ -34,6 +34,7 @@ import {
   DEFAULT_MAX_INLINE_OUTPUT_CHARS,
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MODEL,
+  DEFAULT_PREVIEWS_ENABLED,
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
   DEFAULT_SCHEDULES_EXPIRY_DAYS,
@@ -992,6 +993,25 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     sample: "on",
     details:
       "It dials with YOUR kubeconfig / docker endpoint and runs commands on another workload, so it is OFF unless you turn it on. You are still asked before the first command on each target (and with `always` for the rest of the session). Offered only where tentacle runs on your own host — the local worker and `serve` — never to a pod daemon, which already has its own shell inside its workload.",
+    example: "true",
+  },
+  previews: {
+    summary: "Container previews: the agent shows a container's web port to your paired devices.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "previews.enabled": {
+    summary: "Offer the agent `container_preview` on `serve`.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_PREVIEWS_ENABLED,
+    resolved: (c) => c.previews.enabled,
+    sourceKey: "previewsEnabled",
+    details:
+      "A running Docker or Podman container on the `serve` host whose web port is published on loopback (`-p 127.0.0.1:<host>:<port>`) can be opened by your paired devices, over their own encrypted link: no public URL. You approve every one (never «always», never auto-accept); the prompt shows what the engine reports. Host-network, privileged and engine-socket containers and remote engines are refused. Only `serve` offers it — never the local worker, never a pod daemon. OFF until you turn it on.",
     example: "true",
   },
   apps: {

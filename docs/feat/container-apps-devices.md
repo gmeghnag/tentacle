@@ -220,7 +220,9 @@ Owner-delegated. Each one is the recommended option. None weakens a §7 rule.
 **Shared truth / both ends.** Schemas in `@tentacle/protocol/preview.ts`
 (rows, params, notifications, limits). The `previews` update gets a union member +
 `UPDATE_CLASS: "display"` + its reverse mapping in `client/mapping.ts`
-(`mapping.ts:384` is the `apps` precedent). Optional `OpenResult.previews`.
+(`mapping.ts:384` is the `apps` precedent). Optional `SnapshotResult.previews`
+(corrected in Execution: `session.ts:1629`, the `apps` precedent, is the
+snapshot result, not `OpenResult`; the cut reaches a client through the snapshot).
 
 **Versioning.** All additive (new methods → `MethodNotFound` on an older
 daemon; new notifications sent only on a tunnel the peer opened; a display
@@ -236,7 +238,7 @@ In dependency order (S1):
    "session/preview_connect"`, `Method.PreviewStop = "session/preview_stop"`,
    `Notification.PreviewData/PreviewAck/PreviewClose = "preview/data|ack|close"`,
    both registries) + `updates.ts` (`PreviewsUpdateSchema`, union, class) +
-   `session.ts` (`OpenResult.previews?`) + `index.ts`.
+   `session.ts` (`SnapshotResult.previews?`) + `index.ts`.
 2. `packages/core/src/permission.ts`: kind `container_preview`. Add it to
    `autoApproves`'s exclusions, `onceOnlyAsk` and `EXTERNAL_ANSWER: "owner-only"`.
    `packages/core/src/previews.ts` (new): `CONTAINER_PREVIEW_TOOL`, `PreviewFacts`,
@@ -347,7 +349,80 @@ device test key → nginx's page. `docker stop` → the next connect gets `Previ
 
 ## Execution
 
-*(empty until executed)*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Before editing.** Capability missing: the Repro `rg` → `0`. Load-bearing check
+re-run (`.tentacle/tmp/container-apps-devices/pause.ts`): `while paused, received
+0 extra bytes` / `total 4194304 bun 1.4.3`. Passes; `peer.ts` still dispatches
+frames synchronously and `device-accept.ts` builds the one `Connection`.
+
+**As built (plan order), all slices done, uncommitted.**
+
+1. protocol: `preview.ts`, 2 methods, 3 notifications, `previews` update
+   (display), `SnapshotResult.previews`, error codes; `protocol.json` regenerated.
+   No `protocol.d/` note (all additive).
+2. core: kind `container_preview` (3 exclusion sites), `previews.ts`.
+3. docker: typed inspect fields, pure `preview-target.ts`.
+4. tools `container-preview.ts`; sub-agent filter (both lists).
+5. daemon: `preview-tunnels.ts`, `session-previews.ts`, `hosted-session.ts`,
+   `session-host.ts`, `connection.ts`, `external/asks.ts`.
+6. client: `permission-router.ts`, `mapping.ts`, `remote-session.ts` (listed
+   with the other session-level updates).
+7. config `previews.enabled` (default off; README table via `docs:config`);
+   cli `preview-resolver.ts`, `serve.ts`, `wiring.ts`.
+8. labels in `tui/permission-ui.ts` and `mobile/permission-sheet.ts`.
+
+**Drift from Implementation.**
+
+- `SnapshotResult.previews`, not `OpenResult.previews` (plan fixed above).
+- The per-session list is its own module `session-previews.ts` (like
+  `session-apps.ts`); `hosted-session.ts` only wires it.
+- Second error code `PreviewUnavailable` (-32022) beside `PreviewGone` (-32021),
+  for "failed, preview kept".
+- Stricter than written: an upstream that speaks before the request line is
+  closed; a container string outside the engines' name rule never reaches the
+  engine; an inspect without `HostConfig` is refused; a re-resolve must answer
+  the recorded id AND port. Only a 404 or a pure refusal removes a row; any other
+  inspect/endpoint error is transient (kept).
+- `previewTargetOf` takes one object (it needs `engine` too).
+- **Changelog:** the header says none in S1, the executor brief asked for one
+  fragment: `changelog.d/container-apps-devices.added.md` (says off by default,
+  no phone viewer yet). S2 edits it instead of adding a second; delete it if S1
+  should stay silent.
+
+**Red before green.** Shown failing on assertions first: core (3 fail),
+`preview-target` against a stub (17), tool (9), sub-agent (2), tunnels (14),
+client (2), config (3), cli (7), TUI label (1). NOT shown first: the protocol
+wire test (written after the schemas) and `connection-preview.test.ts` (covered
+by the mutations below); the mobile label was shown red by disabling its branch.
+
+**Mutations (each run, then reverted).**
+
+```
+preview-target: privileged check off        → (fail) refused > privileged            16 pass 1 fail
+tunnels: credit not counted                 → (fail) no ack… / over-ack…            14 pass 2 fail
+tunnels: HTTP reject ignored                → (fail) not HTTP/1 first               15 pass 1 fail
+session-previews: cache the first resolve   → (fail) a changed host port is dialled 18 pass 1 fail
+connection: device check off for the token  → (fail) a token principal → Unauthorized 18 pass 1 fail
+connection: no tunnels.closeAll()           → (fail) Connection.close()             18 pass 1 fail
+hosted-session: no previews.close()         → (fail) session close                  18 pass 1 fail
+mobile: preview branch off                  → (fail) a preview sheet offers…         8 pass 1 fail
+```
+
+**Runs.** daemon + protocol + docker + config + the touched files: `3333 pass, 2
+skip, 0 fail`. `packages/cli` + `packages/client`: `4073 pass, 2 skip, 1 fail` —
+`chart-args-roundtrip` cannot resolve `@tentacle/core` from `apps/mobile` (mobile
+deps are not installed in this worktree); it and both mobile test files pass with
+a scratch resolver preload (`.tentacle/tmp/…/mobile-shim.ts`). `biome check` on
+the changed packages: clean. Typecheck and the full gate: NOT run (the
+orchestrator's script).
+
+**Not verified.** The live Docker/Podman validation. For the security review
+(left as the plan decided them): OD4 does not catch a parent-directory mount that
+contains the socket (`-v /var/run:/x`, `-v /:/host`), nor `CapAdd`/`PidMode:host`;
+`session/detach` closes no tunnel; a finished upstream whose phone stops acking
+holds its slot until the preview or the link ends; approving the same
+container+port twice makes two rows.
 
 ## Review
 

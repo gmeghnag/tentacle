@@ -354,6 +354,8 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "workflows", runs: [] },
     // docs/feat/session-apps-publish.md D7: the session's published apps.
     { type: "apps", apps: [] },
+    // docs/feat/container-apps-devices.md: the session's container previews.
+    { type: "previews", previews: [] },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {

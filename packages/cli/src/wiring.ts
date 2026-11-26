@@ -112,6 +112,7 @@ import {
   createAgentControlTool,
   createAppPublishTool,
   createAppUnpublishTool,
+  createContainerPreviewTool,
   createContextResetTool,
   createFsReadTool,
   createImageViewTool,
@@ -773,6 +774,13 @@ export interface BuildAgentOptions {
    * worker; a pod daemon never does (AGENTS §7).
    */
   readonly apps?: (() => import("@tentacle/core").AppsLink | null) | undefined;
+  /**
+   * The session's container previews (docs/feat/container-apps-devices.md): the
+   * LAZY link `AgentContext.previews` hands the factory. Present → the agent is
+   * offered `container_preview` (asks every time). ONLY a `serve` with
+   * `previews.enabled` passes it — never the worker or a pod daemon.
+   */
+  readonly previews?: (() => import("@tentacle/core").PreviewsLink | null) | undefined;
   readonly workloadShell?:
     | { readonly backend: import("@tentacle/tools").WorkloadShellBackend }
     | undefined;
@@ -1501,6 +1509,17 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       }),
     );
     tools.register(createAppUnpublishTool(options.apps));
+  }
+  // Container previews (docs/feat/container-apps-devices.md): only with the
+  // host's link — a `serve` with `previews.enabled`. Never a child agent
+  // (`subagent.ts`'s filter). The ask goes to the session's ONE broker.
+  if (options.previews !== undefined) {
+    tools.register(
+      createContainerPreviewTool({
+        link: options.previews,
+        ask: (req, opts) => permissions.request(req, opts),
+      }),
+    );
   }
 
   const agent = new Agent({

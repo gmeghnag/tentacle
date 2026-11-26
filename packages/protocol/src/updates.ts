@@ -12,6 +12,7 @@ import { AttachmentRefSchema, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachment.t
 import { ContentBlockSchema } from "./content.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { PermissionRequestUpdateSchema, PermissionResolvedUpdateSchema } from "./permission.ts";
+import { PreviewRowSchema } from "./preview.ts";
 import { QuestionRequestUpdateSchema } from "./question.ts";
 import {
   AppRowSchema,
@@ -456,6 +457,16 @@ export const AppsUpdateSchema = z.object({
 });
 
 /**
+ * The session's container previews changed (approved, stopped, gone): the FULL
+ * list, replacing any earlier one (docs/feat/container-apps-devices.md).
+ * Session-level like `apps`. Display only: nothing waits on it.
+ */
+export const PreviewsUpdateSchema = z.object({
+  type: z.literal("previews"),
+  previews: z.array(PreviewRowSchema),
+});
+
+/**
  * A RUNNING background sub-agent sent its parent agent a message
  * (`agent_notify`, docs/feat/agent-message-two-way.md): the text reached the
  * parent's conversation. `wake` says whether the note asks for a continuation
@@ -536,6 +547,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   JobsUpdateSchema,
   SchedulesUpdateSchema,
   AppsUpdateSchema,
+  PreviewsUpdateSchema,
   SubagentNotifySchema,
   SubagentMessageUpdateSchema,
   SessionSettingsUpdateSchema,
@@ -606,6 +618,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   schedules: "display",
   // Full state, also in the snapshot's first page; nothing waits on a row.
   apps: "display",
+  // Full state, also in the snapshot's first page; nothing waits on a row.
+  previews: "display",
   // A notice; the note itself rides the conversation (nothing hangs).
   subagent_notify: "display",
   // The user's own notice (every client shows it); the parent's note lands at its turn.

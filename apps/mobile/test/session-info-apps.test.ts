@@ -169,3 +169,19 @@ test("a publish sheet offers «Publish once» or «No», never «always»", () =
     ["reject_once", "No"],
   ]);
 });
+
+// docs/feat/container-apps-devices.md OD2: the same shape for a preview.
+test("a preview sheet offers «Show once» or «No», never «always»", () => {
+  const ask: PermissionRequest = {
+    kind: "container_preview",
+    tool: "container_preview",
+    level: "ask",
+    title: "Show container web port 80/tcp on your paired devices?",
+    input: {},
+    suggestion: { prefix: "x" },
+  };
+  expect(sheetOptions(ask).map((o) => [o.optionId, o.label])).toEqual([
+    ["allow_once", "Show once"],
+    ["reject_once", "No"],
+  ]);
+});

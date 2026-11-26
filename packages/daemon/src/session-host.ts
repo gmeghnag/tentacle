@@ -25,6 +25,8 @@ import type {
   JobController,
   ModelProvider,
   PermissionBroker,
+  PreviewResolver,
+  PreviewsLink,
   ScheduleLink,
   ToolImageStore,
 } from "@tentacle/core";
@@ -187,6 +189,14 @@ export interface AgentContext {
    * never on a pod daemon (AGENTS §7).
    */
   readonly apps?: () => AppsLink | null;
+  /**
+   * The session's container previews (docs/feat/container-apps-devices.md): a
+   * LAZY link like `apps`, present ONLY where the host previews
+   * (`SessionHostOptions.previews`: `serve` with `previews.enabled`). A factory
+   * offers `container_preview` exactly when this is present — never on a pod
+   * daemon or the worker.
+   */
+  readonly previews?: () => PreviewsLink | null;
 }
 
 /** What a rebuilt agent takes over from the session it replaces the agent of. */
@@ -455,6 +465,11 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * `stop()` when the daemon stops.
    */
   readonly apps?: AppsService;
+  /**
+   * `serve` with `previews.enabled` only (docs/feat/container-apps-devices.md):
+   * the engine side. Absent: no link, no tool, `preview_connect` is `PreviewGone`.
+   */
+  readonly previews?: PreviewResolver;
 }
 
 /**
@@ -1726,6 +1741,7 @@ export class SessionHost {
       // Lazy like `modelLink`; only where this host schedules (D1).
       ...(this.opts.schedules ? { schedules: () => bound.hosted?.scheduleLink() ?? null } : {}),
       ...(this.opts.apps ? { apps: () => bound.hosted?.appsLink() ?? null } : {}),
+      ...(this.opts.previews ? { previews: () => bound.hosted?.previewsLink() ?? null } : {}),
     });
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
@@ -1769,6 +1785,7 @@ export class SessionHost {
       artifacts,
       this.opts.schedules,
       this.opts.apps,
+      this.opts.previews,
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;
@@ -1837,6 +1854,7 @@ export class SessionHost {
       // so its tools see the same wakes and the timer is untouched.
       ...(this.opts.schedules ? { schedules: () => hosted.scheduleLink() } : {}),
       ...(this.opts.apps ? { apps: () => hosted.appsLink() } : {}),
+      ...(this.opts.previews ? { previews: () => hosted.previewsLink() } : {}),
     });
     const foreign =
       next.permissions !== reuse.permissions ||

@@ -28,6 +28,7 @@ describe("external answer table", () => {
       question: "owner-only",
       agent_add: "owner-only",
       app_publish: "owner-only",
+      container_preview: "owner-only",
     });
     const kinds = Object.keys(EXTERNAL_ANSWER) as PermissionKind[];
     expect(kinds.filter((k) => externalMayAnswer(k))).toEqual(["tool"]);
@@ -61,6 +62,24 @@ describe("app_publish (session apps D3)", () => {
 
   test("an external caller never answers it", () => {
     expect(externalMayAnswer("app_publish")).toBe(false);
+  });
+});
+
+// docs/feat/container-apps-devices.md OD2: showing a container port to the
+// paired devices. Mutations: drop it from `onceOnlyAsk`, or let `autoApproves`
+// accept it → red.
+describe("container_preview (container-apps-devices OD2)", () => {
+  test("auto-accept never answers it, even on its own turn", () => {
+    expect(autoApproves(req("container_preview"), true)).toBe(false);
+    expect(autoApproves(req("container_preview"))).toBe(false);
+  });
+
+  test("once-only: no «always» rule can ever be made", () => {
+    expect(onceOnlyAsk(req("container_preview"))).toBe(true);
+  });
+
+  test("an external caller never answers it", () => {
+    expect(externalMayAnswer("container_preview")).toBe(false);
   });
 });
 

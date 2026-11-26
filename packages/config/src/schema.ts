@@ -563,6 +563,18 @@ const settingsShape = {
     .strict()
     .optional(),
   /**
+   * Container previews (docs/feat/container-apps-devices.md): `serve` offers
+   * `container_preview` (a container's web port, to the paired devices only,
+   * asked every time). THIS host's setting, file-only, never carried.
+   */
+  previews: z
+    .object({
+      /** Default: disabled. */
+      enabled: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
+  /**
    * Session apps (docs/feat/session-apps-publish.md D11): the agent may publish
    * an HTML page it presented as a public web page, asked every time. THIS
    * host's setting, file-only, never carried (a pod never publishes).

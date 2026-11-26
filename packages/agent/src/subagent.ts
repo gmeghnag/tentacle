@@ -16,6 +16,7 @@ import {
   APP_UNPUBLISH_TOOL,
   type AgentInbox,
   type AgentNotifyResult,
+  CONTAINER_PREVIEW_TOOL,
   type ExecutionEnvironment,
   IMAGE_VIEW_TOOL_NAME,
   type ModelProvider,
@@ -545,6 +546,9 @@ export function createSubagentRunner(deps: SubagentDeps): {
         // (docs/feat/session-apps-publish.md F1).
         tool.name === APP_PUBLISH_TOOL ||
         tool.name === APP_UNPUBLISH_TOOL ||
+        // Showing a container to the paired devices is asked of the owner in the
+        // conversation they watch (docs/feat/container-apps-devices.md OD2).
+        tool.name === CONTAINER_PREVIEW_TOOL ||
         // The browser tabs are the SESSION's (one lease, one tab group, its own
         // masking key) and a child has no image store for a shot
         // (docs/feat/browser-inspect.md B4): the parent browses and delegates text.
@@ -791,6 +795,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
         toolName === WORKFLOW_TOOL_NAME ||
         toolName === APP_PUBLISH_TOOL ||
         toolName === APP_UNPUBLISH_TOOL ||
+        toolName === CONTAINER_PREVIEW_TOOL ||
         toolName === AGENT_CONTROL_TOOL_NAME ||
         toolName === AGENT_KILL_TOOL_NAME ||
         toolName === AGENT_MESSAGE_TOOL_NAME ||
