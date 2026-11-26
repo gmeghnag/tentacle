@@ -265,3 +265,37 @@ Reviewer: same model family as a likely Opus executor — fresh context only; sh
 
 *— claude-opus-5-5, 2026-11-26*
 
+### Round 2
+
+**Verdict: REQUEST-CHANGES.** Scope: `0be3d3a0` (fix) + `c90d3407` (gate).
+
+- R1 finding 1 (no doc/TODO/red evidence): **resolved** — doc has Context with a
+  `main` repro, Implementation, Execution; TODO entry added.
+- R1 finding 2 (1-row jitter): **resolved for the jitter**, but the fix
+  introduces a regression:
+  1. **HIGH — a real selection across a line break no longer copies**
+     (`packages/tui/src/selection.ts:90-91`). For a one-row crossing the rule
+     requires `head.col − anchor.col ≥ 3` *in the drag direction*. Selecting the
+     tail of one row and the head of the next — the ordinary gesture for a phrase
+     that wraps — has the head LEFT of the anchor: press (5,40) → drag (6,5) →
+     `isDeliberate` = **false** (also the upward mirror (6,5) → (5,40)). Probe
+     (`.tentacle/tmp/tui-accidental-copy/r2.ts`): jitter (5,10)→(6,11) false ✔,
+     wrap-phrase down false ✘, wrap-phrase up false ✘. The highlight shows ~40
+     chars selected, release copies nothing and shows nothing, and the next paste
+     is the OLD clipboard — a silent drop. The pure test even pins backwards
+     travel as "no copy" (`accidental-copy.test.tsx` "Down a row but backwards").
+     (My R1 wording "past the anchor's column in reading order" invited this.)
+     Fix: physical travel, direction-free — deliberate iff `|Δrow| ≥ 2` or
+     `|Δcol| ≥ COPY_MIN_CELLS`; add an integration test pressing near a row's end
+     and dragging to the next row's start (must copy).
+- Mutation: one-row crossing always deliberate (`|rows| >= 1`) → 3 fail (pure
+  rule, integration jitter, dispatch seam). Reverted; `git status` clean.
+- Gate: accidental-copy + mouse-stream + app + device-store = 202 pass / 0 fail;
+  `bun run lint` clean; `bun run typecheck` 0 errors (R1's 23 were environmental).
+- Note (not blocking): `c90d3407` edits `packages/daemon/test/device-store.test.ts`,
+  unrelated to this task (gate unblock, documented in Execution); the orchestrator
+  may prefer it on its own branch. Its oracle (`ps -o etime=` for self and pid 1)
+  reads sound.
+
+*— claude-opus-5-5, 2026-11-26*
+
