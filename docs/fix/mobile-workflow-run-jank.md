@@ -268,4 +268,112 @@ Validation: `bun run check` against the clean baseline, flow 45, step 0 re-measu
 
 ## Execution
 
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Load-bearing check: holds.** Repro re-run before any edit: `reopen review (error)
+| paints on tap: 0`, `reopen build in-flight | paints on tap: 0`, `reads: 2`; the
+route's `setState` after creation is only in `onChange`. (Run it with
+`bun run --tsconfig-override=<abs>/tsconfig.json <abs>/reopen.ts`.)
+
+### As built, in order
+
+1. `bun install` in the worktree; sim lock taken (`mkdir …/sim.lock`); iPhone 17
+   Pro, iOS 26.5.
+2. Flow 45 reopen steps added, run **red** on the unedited app (below).
+3. Step 0 a–c measured on the unedited app (c on a temporary probe build).
+4. Tap: `openStep` calls `changed()` after `readStep` (4 tests red → green).
+5. Timer: `src/run-clock.ts` created as a no-op stub (5 tests red on assertions;
+   the "ended run schedules nothing" one is green on a stub by nature, pinned by
+   mutation M5), then implemented; `SummaryStrip` owns `now`; `now` removed from
+   `WorkflowRunScreen` and the route.
+6. Back: `motion` memoized, flight effect on `[motion, flies, progress,
+   graphFade]` (3 source pins red → green).
+
+### Step 0, before and after
+
+Driver scripts (gitignored, `.tentacle/tmp/mobile-workflow-run-jank/`): `lib.ts`
+spawns `e2e/run.ts … --only 45-workflow-run-view --hold`, starts live runs with a
+trusted `RemoteClient` that allows the asks, and runs `open.yaml` (relaunch,
+`_unlock`, hub → Workflows → the run) and `cycles.yaml` (10 × tap node, count
+opens, Back, count a Back that left the layer up); `ab.ts` = a + b, `c.ts` = c,
+`stitch.ts` stacks the screenshot bands.
+
+**a. Timer** (one `sleep 90` step; screenshot about every 2.5 s; wall = whole
+seconds since `startedAt`, read just before the capture):
+
+| | wall → label |
+|---|---|
+| before | 32→26, 35→26, 37→26, 40→26, 42→26, 44→26, 47→26, 49→26, 52→26, 54→26, 57→26, 59→26, 62→26, 64→26, 67→26, 69→26, 72→26, 74→26 (frozen) |
+| after | 51→53, 55→56, 58→59, 61→62, 64→65, 67→68, 70→71, 73→74, 76→76, 78→79, 81→81, 83→84, 86→86, 89→89, then Done `1m 30s` ×4 |
+
+After the fix the label never lags; it reads 0–2 s ahead of the pre-capture
+timestamp (the capture's own delay).
+
+**b. Taps** (10 cycles each):
+
+| | ended run, `review` | live run (an update every 3 s), `quick` | Back missed |
+|---|---|---|---|
+| before | **1**/10 opened | 10/10 on the probe build; 2/10 in an earlier pass whose 45 s run ended during the cycles | 0 |
+| after | 10/10 | 10/10 | 0 |
+
+On a live run the old defect is a LATE open: Maestro waits several seconds for the
+layer, so a late repaint counts as an open. The swallowed Back (defect 3) did not
+reproduce: Maestro waits for the screen to settle between taps. It is pinned only
+by the source test.
+
+**c. JS stall** (temporary 100 ms interval in `WorkflowRunRoute`, largest
+overshoot, drawn under the header rather than in the subtitle; never committed,
+`App.tsx` restored). "quiet" = one running step with a flowing edge; "busy" = 60 ×
+`sleep 3` with the 10 tap cycles.
+
+| | quiet | busy |
+|---|---|---|
+| before | 17 ms | 55 ms |
+| after | 17 ms (label `1m 16s` at 76 s) | 56 ms |
+
+All under the 250 ms stop rule: the owner's JS-blocking hypothesis is **not
+supported on the simulator** (not measured on a device). No stop rule fired.
+
+### Red, then green
+
+- Flow 45 on the unedited app: `✗ 45-workflow-run-view` — `Assertion is false: id:
+  workflow-step-back is visible` at the second `review` tap (screenshot: the graph,
+  no layer). Fixed: `GATE PASS — 1 passed, 0 failed` (86 s).
+- `workflow-run-step-detail.test.ts`: `23 pass 4 fail` (`Expected: > 0, Received:
+  0`) → `27 pass 0 fail`.
+- `run-clock.test.ts` on the stub: `1 pass 5 fail` → `6 pass`; the three source
+  pins on the unedited screens: `6 pass 3 fail` → all pass.
+- Related files (`apps/mobile/test/{workflow-,e2e-,motion,run-clock,hub-workflows,
+  session-screen-catalogue}*`, `scripts/test/mockup-kit*`): `946 pass 0 fail`.
+- Sim lock released, simulator shut down. The probe builds stay in
+  `.tentacle/tmp/e2e-app-cache/` under the probe trees' own keys (no real tree
+  matches them); the DerivedData product is the last probe build until the next
+  e2e run.
+- `bunx tsc -p apps/mobile`: clean. `bunx biome check` on the changed files: clean.
+  The full gate is the orchestrator's.
+
+### Mutations (`mutate.ts`: one at a time, file restored)
+
+| Mutation | Fails |
+|---|---|
+| M1 `openStep` no repaint | 4 (all "every open repaints") |
+| M2 fixed 1 s period | 4 |
+| M3 signed remainder | 1 (clock behind) |
+| M4 no `stopped` guard | 1 |
+| M5 ended run ticks | 1 |
+| M6 `stop` does not cancel | 1 |
+| M7 flight depends on `table` | 1 |
+| M8 `motion` not memoized | 1 |
+| M9 clock effect not keyed on `endedAt` | 1 |
+| M10 strip runs no clock | 1 |
+
+### Drift from Implementation
+
+- Added a fourth tap test (a step no longer on the feed repaints, no read — a
+  listed failure mode) and a late-firing clock test.
+- The pins assert the exact dependency lists, which is stricter than "not `table`".
+- Step 0c's probe text sits under the header, not in the subtitle.
+- Resume, unmount and the Reduce Motion toggle have no render test (no component
+  harness): resume and unmount rest on the effect keys and `stop()`.
+
 ## Review

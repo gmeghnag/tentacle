@@ -21,10 +21,11 @@ import type { WorkflowProjection, WorkflowStepView, WorkflowTimelineRow } from "
 import { originWords } from "@tentacle/client";
 import { summary, timeline } from "@tentacle/client";
 import type { JSX } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
 import { elapsed } from "../activity.ts";
+import { type RunClockDeps, startRunClock } from "../run-clock.ts";
 import { GUTTER } from "../step-rail.ts";
 import { type Palette, size } from "../theme.ts";
 import { space, typography } from "../theme.ts";
@@ -48,8 +49,6 @@ export interface WorkflowRunScreenProps {
   readonly palette: Palette;
   readonly title: string;
   readonly state: RunState;
-  /** The clock, once per render: the strip's elapsed time is a pure function of it. */
-  readonly now: number;
   readonly onBack: () => void;
   readonly onMode: (mode: RunMode) => void;
   /** The slim row's `Review`: bring the parked ask's sheet back over this run. */
@@ -143,16 +142,36 @@ function AskPanel({
   );
 }
 
+/** The phone's own clock and timers, for the strip's `startRunClock`. */
+const RUN_CLOCK: RunClockDeps = {
+  now: () => Date.now(),
+  schedule: (fn, ms) => {
+    const timer = setTimeout(fn, ms);
+    return () => clearTimeout(timer);
+  },
+};
+
 /** The run's own facts (D2's `summary`): the outcome and its phase marker, the time, then the detail line. */
 function SummaryStrip({
   palette,
   projection,
-  now,
 }: {
   readonly palette: Palette;
   readonly projection: WorkflowProjection;
-  readonly now: number;
 }): JSX.Element {
+  // The strip owns the time (docs/fix/mobile-workflow-run-jank.md): only it
+  // repaints on a tick, never the graph, the list or the step layer.
+  const { startedAt, endedAt } = projection.run;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(
+    () =>
+      startRunClock(
+        { startedAt, ...(endedAt === undefined ? {} : { endedAt }) },
+        RUN_CLOCK,
+        setNow,
+      ),
+    [startedAt, endedAt],
+  );
   const line = summary(projection, now);
   const look = markerFor({ phase: line.phase, word: line.word }, palette);
   return (
@@ -591,9 +610,7 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
         />
       ) : (
         <>
-          {projection === null ? null : (
-            <SummaryStrip palette={palette} projection={projection} now={props.now} />
-          )}
+          {projection === null ? null : <SummaryStrip palette={palette} projection={projection} />}
           <ScrollView contentContainerStyle={styles.content}>
             {state.mode === "graph" && projection !== null ? (
               <Graph

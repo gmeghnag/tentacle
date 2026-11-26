@@ -544,6 +544,9 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
       openStepId = stepId;
       openVisit = visit;
       readStep(stepId, attemptOf(stepId, visit));
+      // The open IS a state change, whatever the read did: a held final detail or
+      // a read in flight paints nothing by itself, and the layer would not show.
+      changed();
     },
     closeStep() {
       openStepId = null;

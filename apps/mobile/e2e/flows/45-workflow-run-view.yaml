@@ -84,6 +84,30 @@ appId: so.tentacle.app
       SHOT: "45-step-not-run"
 - tapOn:
     id: "workflow-step-back"
+# A step that RAN opens again after Back (docs/fix/mobile-workflow-run-jank.md):
+# on an ended run nothing else repaints, so the second tap must do it itself.
+- tapOn:
+    id: "workflow-node-review"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-step-back"
+    timeout: 10000
+- waitForAnimationToEnd
+- tapOn:
+    id: "workflow-step-back"
+- extendedWaitUntil:
+    notVisible:
+      id: "workflow-step-back"
+    timeout: 5000
+- tapOn:
+    id: "workflow-node-review"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-step-back"
+    timeout: 5000
+- waitForAnimationToEnd
+- tapOn:
+    id: "workflow-step-back"
 # The list toggle: B's rail, with fix under «Not run».
 - tapOn:
     id: "workflow-run-mode"
