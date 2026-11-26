@@ -24,6 +24,7 @@ import {
   readDaemonRecords,
   sweepDeadDaemonRecords,
   touchDaemonRecord,
+  writeDaemonRecord,
 } from "@tentacle/daemon";
 import {
   type DaemonDiscovery,
@@ -187,7 +188,8 @@ export interface DiscoveryDriver {
  * - **F1** a dead pid's record: the reader skips it (and `sweepDeadDaemonRecords`
  *   deletes it);
  * - **F2** a reused pid: the heartbeat stops with the process, so its record's
- *   mtime goes old and `freshWithinMs` ignores it;
+ *   mtime goes old and `freshWithinMs` ignores it (the sweep deletes it once the
+ *   holder's start time proves it is a stranger);
  * - **F3** a suspended host: a poll whose own gap exceeded `staleAfterMs` does
  *   NOT apply freshness (every record looks ancient after a sleep). The
  *   heartbeat covers the same sleep when the poller was OFF during it, which is
@@ -215,6 +217,8 @@ export function startDiscovery(options: {
   readonly allRecords?: (configDir: string) => readonly DaemonRecord[];
   readonly alive?: (pid: number) => boolean;
   readonly touch?: (configDir: string, pid: number) => boolean;
+  /** Writes `self` back when a beat finds it gone; default `writeDaemonRecord`. */
+  readonly rewrite?: (configDir: string, self: DaemonRecord) => { readonly ok: boolean };
   readonly log?: (line: string) => void;
 }): DiscoveryDriver {
   const timers = options.timers ?? systemTimers;
@@ -227,6 +231,7 @@ export function startDiscovery(options: {
   // helper, so the QR and the announcement cannot disagree.
   const interfacesOf = options.interfaces ?? machineInterfaces;
   const touch = options.touch ?? touchDaemonRecord;
+  const rewrite = options.rewrite ?? writeDaemonRecord;
   const read =
     options.readRecords ??
     ((configDir: string, freshWithinMs: number) =>
@@ -301,7 +306,13 @@ export function startDiscovery(options: {
       return;
     }
     try {
-      sweepDeadDaemonRecords(options.configDir, { alive });
+      // Dead pids every poll; the reused-pid proof not on the waking one, where
+      // every mtime looks old (F3).
+      sweepDeadDaemonRecords(options.configDir, {
+        alive,
+        now: at,
+        ...(afterSleep ? {} : { freshWithinMs: staleAfterMs }),
+      });
     } catch {
       // Housekeeping: a record it cannot remove stays, and the reader already
       // ignores a dead pid (F1). Never fatal.
@@ -349,7 +360,13 @@ export function startDiscovery(options: {
       sleptAt = beatAt;
     }
     lastBeatAt = beatAt;
-    if (!touch(options.configDir, options.self.pid)) {
+    // A record gone while we run (swept by mistake, removed by hand) is written
+    // back (docs/fix/daemon-records-stale.md D4); `stop()` ends the beats before
+    // the record is removed, so this cannot resurrect a stopping serve's.
+    if (
+      !touch(options.configDir, options.self.pid) &&
+      !rewrite(options.configDir, options.self).ok
+    ) {
       // F4: not fatal — this daemon works, its siblings just cannot see it now.
       say(`cannot refresh this daemon's record (its siblings may not list it until it restarts)`);
     }

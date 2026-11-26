@@ -378,7 +378,70 @@ Gate: `bun run check` (typecheck → lint → parallel tests) green, lint baseli
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Load-bearing check (before any edit):** `repro.test.ts` re-run on this branch
+(code = base): SIGINT exit 0, directory empty; SIGTERM `code=143` and SIGHUP
+`code=129`, `<pid>.json` left behind. Holds.
+
+**As built, in order** (each test red on the old code before its change, except
+as noted):
+
+1. `device-store.ts` — `parseEtime`, `processStartedAt`, `REUSE_TOLERANCE_MS`,
+   the sweep's reuse branch (`pidReused`, re-stat last). Red: 4(c) (`0` for `1`)
+   and 4(f). 4(a/b/d/e/g/h) pass on old code by nature (it never deleted a live
+   pid); the mutations below cover (d) and (f).
+2. `serve-signals.ts` (new) + `main.ts` wiring. E2E red: `code 143/129`, file
+   left; crash case: file left. SIGINT passed (control).
+3. `serve.ts` — start sweep, exit-listener net, `off` in `stop()`.
+4. `discovery.ts` — sweep options, heartbeat heal + `rewrite` seam. Red: all
+   three new driver tests.
+5. `pair.ts`, `devices-cmd.ts` — sweep before read. Red: both new tests.
+6. Changelog fragment. No protocol or schema change.
+
+**Drift from Implementation:**
+
+- `awaitServeShutdown` takes `host` with no default: Biome rejects a default
+  parameter before a required one. `main.ts` passes `process`.
+- `main.ts` installs the handlers right after `startDaemon` resolves, **before**
+  the listening line (not at the old spot after the notices), so whoever waits
+  for that line can signal at once. For the same reason E2E test 1 waits for the
+  line, not for the record (which is written earlier: signalling on it would
+  race the handlers).
+- The exit listener is registered even when the first write failed (the
+  heartbeat heal may create the record later).
+- `readDaemonRecords`' validation moved to `parseDaemonRecord`, shared with the
+  reuse proof (no behaviour change).
+- The sweep's default `startedAtOf` uses the real clock, not the injected `now`
+  (`ps` elapsed time is relative to it).
+- Existing F4 log test now injects a failing `rewrite` (a succeeding heal logs
+  nothing). Extra tests: SIGINT E2E, (f2) touched-during-proof, default heal,
+  reuse proof skipped on the waking poll, real `processStartedAt`. The start
+  sweep + `off` test is in `serve-devices.test.ts`.
+
+**Mutations** (each applied, run, reverted):
+
+| mutation | result |
+|---|---|
+| drop `"SIGTERM"` from `SERVE_STOP_SIGNALS` | E2E SIGTERM fail (`code 143`), 3 pass / 1 fail |
+| remove the tolerance | 4(d) fail, 43/1 |
+| remove the TOCTOU re-stat comparison | 4(f) and (f2) fail, 42/2 |
+| delete `process.on("exit", exitRecord)` | E2E crash case fail, 3/1 |
+| remove the start sweep | serve-devices sweep test fail, 8/1 |
+| remove `process.off("exit", …)` | serve-devices sweep test fail |
+| apply the reuse proof on the waking poll | discovery F3 test fail (this and the row above in one run: 34/2) |
+
+**After the fix**, same repro: SIGINT, SIGTERM and SIGHUP each `code=0
+signalCode=-`, `after: (empty)`.
+
+**Tests:** serve*/pair*/devices*/discovery/output-streams/device-store and the
+other `startDaemon` users: `491 pass, 0 fail, 41 files`; after a last
+typing-only edit to the E2E test, the two signal files: `17 pass, 0 fail`.
+Biome on the touched files: clean. **Not run here:** `bun run check` (whole-repo
+typecheck, lint, full suite) — the orchestrator's script runs that gate.
+
+**Left open:** a signal landing after the record is written but before
+`startDaemon` resolves still kills by default; the next sweep removes the record.
 
 ## Review
 

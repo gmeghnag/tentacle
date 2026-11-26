@@ -34,6 +34,7 @@ import {
   projectLabel,
   readClaim,
   readDaemonRecords,
+  sweepDeadDaemonRecords,
   writePairingDecision,
 } from "@tentacle/daemon";
 import {
@@ -208,10 +209,12 @@ export function pairTargetOf(
   const dir = resolve(options.projectDir ?? process.cwd());
   let records: DaemonRecord[];
   try {
-    records = readDaemonRecords(configDir, {
+    const liveness = {
       freshWithinMs: DEFAULT_STALE_AFTER_MS,
       ...(options.alive !== undefined ? { alive: options.alive } : {}),
-    });
+    };
+    sweepDeadDaemonRecords(configDir, liveness);
+    records = readDaemonRecords(configDir, liveness);
   } catch {
     records = [];
   }

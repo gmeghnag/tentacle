@@ -43,6 +43,8 @@ import {
   loadOrCreateIdentity,
   openPairing,
   pairingCodeHash,
+  parseEtime,
+  processStartedAt,
   readClaim,
   readDaemonRecords,
   readIdentity,
@@ -669,6 +671,107 @@ describe("daemon records: liveness, sweep, addresses (sibling discovery)", () =>
     expect(existsSync(stalePath)).toBe(true);
   });
 
+  // docs/fix/daemon-records-stale.md D3: a stale record whose pid is held by a
+  // process that STARTED after the record was written cannot be its writer.
+  describe("the reuse proof (stale record, live pid)", () => {
+    const STARTED = 1_700_000_000_000;
+    const NOW = STARTED + 3_600_000;
+    const alive = (): boolean => true;
+
+    function plant(mtime: number = STARTED) {
+      const configDir = scratch();
+      writeDaemonRecord(configDir, record({ startedAt: STARTED }));
+      const path = join(configDir, "daemons", `${process.pid}.json`);
+      utimesSync(path, new Date(mtime), new Date(mtime));
+      return { configDir, path };
+    }
+    const sweep = (configDir: string, startedAtOf: (pid: number) => number | undefined) =>
+      sweepDeadDaemonRecords(configDir, { alive, freshWithinMs: 30_000, now: NOW, startedAtOf });
+
+    test("(a) a dead pid's record is removed, whatever its age", () => {
+      const { configDir, path } = plant(NOW);
+      const options = { alive: () => false, freshWithinMs: 30_000, now: NOW };
+      expect(sweepDeadDaemonRecords(configDir, options)).toBe(1);
+      expect(existsSync(path)).toBe(false);
+    });
+
+    test("(b) a fresh record is kept and its process is never even asked about", () => {
+      const { configDir, path } = plant(NOW - 5_000);
+      let asked = 0;
+      const removed = sweep(configDir, () => {
+        asked++;
+        return NOW;
+      });
+      expect(removed).toBe(0);
+      expect(asked).toBe(0);
+      expect(existsSync(path)).toBe(true);
+    });
+
+    test("(c) stale, and the holder started 61 s after the record: removed", () => {
+      const { configDir, path } = plant();
+      expect(sweep(configDir, () => STARTED + 61_000)).toBe(1);
+      expect(existsSync(path)).toBe(false);
+    });
+
+    test("(d) stale, and the holder started 59 s after: inside the tolerance, kept", () => {
+      const { configDir, path } = plant();
+      expect(sweep(configDir, () => STARTED + 59_000)).toBe(0);
+      expect(existsSync(path)).toBe(true);
+    });
+
+    test("(e) an unknown start time keeps the record", () => {
+      const { configDir, path } = plant();
+      expect(sweep(configDir, () => undefined)).toBe(0);
+      expect(existsSync(path)).toBe(true);
+    });
+
+    test("(f) a record rewritten while the proof ran is kept (TOCTOU)", () => {
+      const { configDir, path } = plant();
+      const removed = sweep(configDir, () => {
+        // The new holder of the pid is a serve writing ITS record right now.
+        writeDaemonRecord(configDir, record({ startedAt: NOW, port: 4009 }));
+        return STARTED + 61_000;
+      });
+      expect(removed).toBe(0);
+      expect(readDaemonRecords(configDir, { alive }).map((r) => r.port)).toEqual([4009]);
+      expect(existsSync(path)).toBe(true);
+    });
+
+    test("(f2) a record merely TOUCHED while the proof ran is kept (a late heartbeat)", () => {
+      const { configDir, path } = plant();
+      const removed = sweep(configDir, () => {
+        touchDaemonRecord(configDir, process.pid);
+        return STARTED + 61_000;
+      });
+      expect(removed).toBe(0);
+      expect(existsSync(path)).toBe(true);
+    });
+
+    test("(g) a live pid with a malformed or unknown-version record is kept", () => {
+      const valid = record({ startedAt: STARTED });
+      for (const body of [
+        "not json",
+        "{}",
+        JSON.stringify({ ...valid, v: 99 }),
+        // A v1 record naming ANOTHER pid than its file name proves nothing.
+        JSON.stringify({ ...valid, v: 1, pid: process.pid + 1 }),
+      ]) {
+        const { configDir, path } = plant();
+        writeFileSync(path, body);
+        utimesSync(path, new Date(STARTED), new Date(STARTED));
+        expect(sweep(configDir, () => NOW)).toBe(0);
+        expect(existsSync(path)).toBe(true);
+      }
+    });
+
+    test("(h) without `freshWithinMs` a live pid's record is always kept", () => {
+      const { configDir, path } = plant();
+      const options = { alive, now: NOW, startedAtOf: () => NOW };
+      expect(sweepDeadDaemonRecords(configDir, options)).toBe(0);
+      expect(existsSync(path)).toBe(true);
+    });
+  });
+
   test("`addresses` round-trips, and invalid ones are refused (never truncated silently)", () => {
     const configDir = scratch();
     const addresses = ["ws://192.168.1.5:4001/e2e", "wss://mac.tailnet.ts.net/e2e"];
@@ -689,6 +792,28 @@ describe("daemon records: liveness, sweep, addresses (sibling discovery)", () =>
       record({ addresses: Array.from({ length: 12 }, (_, i) => `ws://10.0.0.${i}:4001/e2e`) }),
     );
     expect(readDaemonRecords(capped)[0]?.addresses?.length).toBe(MAX_PAIRING_ADDRESSES);
+  });
+});
+
+describe("process start time (`ps -o etime=`)", () => {
+  test("parseEtime reads `[[dd-]hh:]mm:ss` and nothing else", () => {
+    expect(parseEtime("05:31")).toBe(331);
+    expect(parseEtime("1:02:03")).toBe(3723);
+    expect(parseEtime("2-01:02:03")).toBe(176_523);
+    expect(parseEtime("  00:07\n")).toBe(7);
+    for (const junk of ["", "abc", "1:2:3:4", "07", "2-05:31", "-1:00"]) {
+      expect(parseEtime(junk)).toBeUndefined();
+    }
+  });
+
+  test("processStartedAt places our own start, and is unknown for a gone pid", async () => {
+    const started = processStartedAt(process.pid);
+    const expected = Date.now() - process.uptime() * 1000;
+    // Whole seconds from `ps`; nowhere near a timezone's offset.
+    expect(Math.abs((started ?? 0) - expected)).toBeLessThan(5_000);
+    const gone = Bun.spawn(["true"]);
+    await gone.exited;
+    expect(processStartedAt(gone.pid)).toBeUndefined();
   });
 });
 
