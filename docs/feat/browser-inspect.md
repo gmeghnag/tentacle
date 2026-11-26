@@ -1557,3 +1557,37 @@ The last row is below MEDIUM: it only affects the RECORD that a new segment rest
 **Model:** Opus. The planner was also Opus (claude-opus-5-5), so this pass shares the planner's model family. B6 was executed by Sonnet.
 
 *— claude-opus-5-5, 2026-11-26*
+
+### Round 2
+
+Reviewed `git diff HEAD~1` at `5e5ee40b`.
+
+**Verdict: PASS.** Both MEDIUM findings are fixed, each fix is pinned by a test, and I found no regression.
+
+**Finding 1 (the TUI said «acting asks first» under auto).** Fixed.
+- `tui/src/browser-view.ts` now hands `tabRows` the live `actions === "auto"`, which reaches `tabSubtitle(tab, auto)`.
+- New test: the view row «auto on: a handed-over tab no longer claims acting asks first».
+- Mutation (drop `auto` from the call): that test goes RED.
+
+**Finding 2 (a lost lease was reported as `heldElsewhere`).** Fixed.
+- `tools/src/browser.ts` `status()` now says `heldElsewhere` only for «held by another tentacle process». On «does not hold» or «has not claimed», it forgets the uid in `claimed` and returns `tabs: []`, without claiming again.
+- New test, in `tools/test/browser-switches.test.ts`. It checks three things:
+  - the lost lease is not `heldElsewhere`;
+  - the read itself makes no claim;
+  - a second read makes no hub op at all.
+- Mutation (map «does not hold» to `heldElsewhere`): RED.
+- Mutation (keep the uid in `claimed`): RED.
+- After each mutation, the file was restored from a scratch copy and `git status` was empty.
+
+**Gate:**
+- Regression run with `bun test --parallel` over `tools/test`, `tui` `browser-view` + `browser-panel-app`, and `cli` `browser-status`: **631 pass, 0 fail**.
+- `bun run typecheck` (root + mobile + relay): clean.
+- `bun run lint`: clean (2615 files).
+
+**Note (below MEDIUM, no change needed).** `heldElsewhere` can now never be set in practice.
+- The hub returns «held by another tentacle process» only to a `claim` (`browser/src/ownership.ts:19`), and `status()` never claims.
+- The `tabs` op is refused only with «does not hold» (`cli/src/browser-host.ts:252`).
+- So if another daemon really took the uid's lease, the UI shows `tabs: []` instead of «held elsewhere». The session's next tool call still reports that refusal itself.
+- Display only, and it errs toward showing less. Either remove the field and the row, or derive it from a hub fact (`leases.get(uid)`) in a later pass.
+
+*— claude-opus-5-5, 2026-11-26*
