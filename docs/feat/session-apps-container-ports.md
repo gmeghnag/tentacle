@@ -703,4 +703,36 @@ changed file (errors remain in untouched a2a / serve-mcp files in this worktree)
 
 ## Review
 
-*(empty — mandatory fresh-context Opus security review per slice)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; the planner's model, NOT the executor's: Sonnet executed)
+
+**Verdict: APPROVE-WITH-NITS (PASS).** No HIGH. One MEDIUM: a plan item not done, which the executor disclosed.
+
+**Gate (run here):** `bun run typecheck` is clean, root included (Execution's root-tsc errors do not reproduce). `bun run lint` is clean (2776 files). The 29 touched test files: 372 pass, 0 fail. The phone test `apps/mobile/test/permission-sheet-share.test.ts` was not run by the executor; it ran here: 3 pass. The full `bun run test` is left to the orchestrator.
+
+**Findings**
+
+1. MEDIUM (plan drift, disclosed): Design S3 step 3 says the host's reason (`expired` / `taken_down` / `forbidden`) is "shown to the owner". It is not. `SessionPreviews` `onEnded` → `remove(id, "gone")` (`packages/daemon/src/session-previews.ts`, `addShare`) throws the reason away. Scenario: the laptop sleeps for more than 5 min. The host answers `expired` and the row just disappears from `/previews`. The owner cannot tell an expiry or a takedown apart from a stopped container. Not a security issue, and the feature ships OFF, so this does not block the merge. Track it as debt before the deploy.
+
+**Notes below MEDIUM, unverified:**
+- `live-server.ts:190` sets `server.timeout(req, 0)`. After the serve's `END`, `finish()` frees the stream slot, while up to one window (256 KiB) may still sit unread in the `Response`. The idle sweep no longer sees that stream. A holder of the link, or anyone for a public share, who never reads could pin host memory and connections. Caddy's behaviour sits in front and decides how bad this is. Check it at the deploy.
+- The OD2 gate does not refuse `SecurityOpt` `label=disable` or `systempaths=unconfined`, or a `PidMode` of `container:<x>`. The plan's list did not include them either.
+
+**Mutations** (each one applied, seen failing, then reverted; `git status` empty afterwards):
+
+| Mutation | Result |
+|---|---|
+| host keeps `Domain` cookies (`pages.ts` `liveResponseHeaders`) | 1 fail |
+| per-dial resolve ignores the link scope (`preview-resolver.ts:106`) | 1 fail |
+| router maps an approval with no choice to PUBLIC (`permission-router.ts`) | 1 fail |
+
+**Attacks tried**
+- Cross-app or cross-site requests and WebSockets from a sibling `*.apps` origin. `liveVisitorGate` admits only `same-origin`, or a handshake with no Fetch Metadata whose `Origin` is the app's own. Held.
+- A malicious publisher tossing cookies through headers. Dropped on the host as well, not only on the serve. Held.
+- Getting the dial off its target with `//x`, `/\x`, `CONNECT`, `TRACE` or a stripped tab. Refused, and the origin is re-asserted after parsing. Held.
+- Reaching the secret from the model or an external caller. The tool result has no secret. `preview_link` needs a `device` or `token` principal with the session open on that `Connection`. `container_share` is owner-only, never auto-approved, and once-only. Held.
+- Public by default. TUI, phone and client router: only an explicit `choice: "public"` makes it public; the quick `a` key does not. Held.
+- Bounded buffers. Host to visitor is held to `MAX_QUEUED_BYTES`; serve to upstream to `MAX_HELD_BYTES` and the credit windows. Held.
+
+**Premises checked:** the `container_preview` treatment sites, `requirePreview*`, `lookup` (open on this Connection), and the resolver's re-inspect by full id: TRUE.
+
+**Executor:** honest. Its PARTIAL items and its drift are stated, and its mutation table is credible: the three mutations re-run here all held.
