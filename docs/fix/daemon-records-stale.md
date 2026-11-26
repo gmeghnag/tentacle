@@ -445,4 +445,23 @@ typecheck, lint, full suite) — the orchestrator's script runs that gate.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same family as the planner, different model from the executor)
+
+**Verdict: APPROVE.** No HIGH/MEDIUM findings.
+
+**Gate** (re-run here): `bun run test` 20454 pass / 5 skip / 0 fail (1402 files; the diff adds no skip, so the 5 are the pre-existing opt-ins); `bun run typecheck` clean; `bun run lint` clean (0/0). Touched files: 155 pass / 0 fail (8 files).
+
+**Mutations** (applied together, run, reverted by hand; `git status` empty afterwards): tolerance removed → 4(d) fails; heal (`rewrite`) disabled → both heal tests fail; the `pair` sweep removed → the pair prune test fails. 4 fail / 97 pass. The executor's other mutation rows were not re-run.
+
+**Attacks tried:**
+1. *Does closing a terminal send two SIGHUPs?* If it did, the second would `exit(129)` and skip `release()`. A Bun pty probe (`.tentacle/tmp/daemon-records-stale/pty-close.test.ts`, interactive zsh and bash, foreground job, pty closed) got **one** SIGHUP in both shells on macOS. Holds.
+2. *Real `serve` under a pty, terminal closed* (`pty-serve.test.ts`). Before: `daemons/<pid>.json` and `daemon/<key>/.lock`. After: both gone, only `relay.json` left. Graceful path confirmed end to end, store lock released.
+3. *Can a heal bring back a stopping serve's record?* `stop()` calls `discovery.stop()` (clears the heartbeat, `discovery.ts:413-414`) before `removeDaemonRecord` and `process.off` in the same synchronous run (`serve.ts:1284-1291`). It cannot.
+4. *Can a live serve's record be deleted?* Only if a stale mtime **and** an `etime` start later than `startedAt + 60 s` both hold. `startedAt` is written at listen, after the process starts, so a real holder always fails the proof. A clock step is F7, which the heal fixes within one beat. Busybox/odd `ps` output (multi-line or a non-zero exit) gives `undefined`, so the record is kept.
+5. *Other SIGINT owners on the serve path* (`main.ts:2463`, `relay.ts`, `terminal.ts`) belong to other commands. `dispose()` removes only its own listeners.
+
+**What holds:** §7 invariants are untouched. There is no protocol or record-format change. Records are written and swept only in `startDaemon`'s `listen()` (`devices` is on unless `devices: false`, `serve.ts:722`). A pod's `serve --stdio` goes through `startStdioDaemon`, so it never writes or sweeps. `readDaemonRecords` stays read-only.
+
+**Left as stated (not findings):** a signal between the record write and `startDaemon` resolving still kills with the default action, and the next sweep cleans up after it. Each sweep of a stopped (Ctrl+Z) sibling's stale record costs one blocking `ps` (about 25 ms).
+
+**Executor behaviour:** the drift is honest and justified (handlers installed before the listening line, `parseDaemonRecord` extracted). The red-before-green claims are consistent with the mutations re-run here. It left the full `bun run check` to the orchestrator and said so.
