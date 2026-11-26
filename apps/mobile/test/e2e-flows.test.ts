@@ -142,20 +142,23 @@ describe("flow 33 asserts the hub state it actually sets up (mobile-hub-tap revi
   const body = readFileSync(join(FLOWS_DIR, "33-hub.yaml"), "utf8");
   const flow = readFlow("33-hub");
 
-  test("tapping Activity asserts the inline notice, never a sheet it cannot open", () => {
-    // By this point the `HOLD hub` turn has been STOPPED and nothing else runs
-    // (no sub-agent, job, schedule or finished report in this flow): Activity is
-    // dimmed, so a commit is `resolveCommit`'s no-op, not the sheet. Asserting
-    // the sheet were VISIBLE here would fail on device — the round-1 finding.
-    expect(flow.some((a) => a.id === "hub-notice" && a.kind === "assertVisible")).toBe(true);
+  test("tapping Activity asserts the fan's inline label, never a sheet or a stale notice", () => {
+    // By this point the `HOLD hub` turn has been STOPPED and nothing else runs:
+    // Activity is dimmed, so the FAN's own pill says «Nothing running» (`hub-flash.ts`,
+    // the empty-action standard). `hub-notice` is the menu/VoiceOver path's line
+    // and a Stop leaves a stale «Already finished» on it: asserting it passed on
+    // that residue (fix/qa-2611). Nor may the sheet be asserted visible.
+    expect(body).toContain('text: "Nothing running"');
+    expect(flow.some((a) => a.id === "hub-notice" && a.kind === "assertVisible")).toBe(false);
     expect(flow.some((a) => a.id === "activity-sheet" && a.kind === "assertVisible")).toBe(false);
   });
 
   test("the tap really reached the fan's Activity item first", () => {
-    // The notice can only come from committing it: a flow that never taps the
-    // item proves nothing about the dimmed commit.
+    // The label can only come from tapping the dimmed item.
     expect(body).toContain('id: "hub-item-activity"');
-    expect(body.indexOf('id: "hub-item-activity"')).toBeLessThan(body.indexOf('id: "hub-notice"'));
+    expect(body.indexOf('id: "hub-item-activity"')).toBeLessThan(
+      body.indexOf('text: "Nothing running"'),
+    );
   });
 
   test("no comment still claims a tap opens Activity", () => {

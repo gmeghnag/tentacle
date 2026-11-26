@@ -62,7 +62,7 @@ export interface LandingItem {
   /** The ONE line saying why something here is dimmed, when no one else says it. */
   readonly why: string | null;
   /** The inline delete question, replacing the action row; null when not asked. */
-  readonly confirm: string | null;
+  readonly confirm: DeleteQuestion | null;
 }
 
 export const LANDING_OFFLINE = "Offline — reconnecting…";
@@ -99,10 +99,17 @@ export function landingContext(
   };
 }
 
+/** The inline delete question in three runs: the file's name is the middle one. */
+export interface DeleteQuestion {
+  readonly lead: string;
+  readonly file: string;
+  readonly tail: string;
+}
+
 /** The inline delete question (the file's own name; prompt files are kept). */
-export function deleteQuestion(path: string): string {
+export function deleteQuestion(path: string): DeleteQuestion {
   const file = path.slice(path.lastIndexOf("/") + 1) || path;
-  return `Delete \`${file}\`? Its prompt files stay.`;
+  return { lead: "Delete ", file, tail: "? Its prompt files stay." };
 }
 
 /** The notice after a delete that left schedules behind, else null. */

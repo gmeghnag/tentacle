@@ -481,13 +481,38 @@ const styles = StyleSheet.create({
   // Compact: one 22 pt line centred in the 36 pt row, after the absolute `+`
   // (44 hit + 4 gap − 10 input padding = 38): the hint starts 50 pt in, as the
   // mockup draws it. Field height = 4 + 36 + 6 + 2 = 48 = `size.composer`.
-  inputCompact: { flex: 1, marginLeft: 38, paddingTop: 7, paddingBottom: 7 },
+  //
+  // Every property `inputOpen` sets is SET again here, explicitly (fix/qa-2611):
+  // a prop merely dropped from the style left the field with its open-shape width
+  // after a blur (nothing in the row's wrap/shrink could then give the button room).
+  inputCompact: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 0,
+    minWidth: 0,
+    width: "auto",
+    marginLeft: 38,
+    marginRight: 0,
+    paddingTop: 7,
+    paddingBottom: 7,
+  },
   // The `+` out of flow at the row's left, its 44 pt target centred on the line
   // (`top: -4`; `marginVertical: 0` undoes `hit`'s, which applies to offsets).
   plusCompact: { position: "absolute", left: 2, top: -4, marginVertical: 0 },
   // Yoga skips it entirely, so it adds no `gap` either (a 0-width spacer would).
   spacerCompact: { display: "none" },
-  row: { flexDirection: "row", alignItems: "center", height: 36, gap: 4, paddingHorizontal: 2 },
+  // `nowrap` is load-bearing (fix/qa-2611): `body` wraps, and after an open → compact
+  // change the input's measured width could still overflow the line, so the
+  // trailing button (■ Stop, the mic) wrapped UNDER the field onto the
+  // home-indicator edge. The resting row is ONE line by contract.
+  row: {
+    flexDirection: "row",
+    flexWrap: "nowrap",
+    alignItems: "center",
+    height: 36,
+    gap: 4,
+    paddingHorizontal: 2,
+  },
   flex: { flex: 1 },
   // A 44×44 target in the 36 pt row: it overhangs 4 pt above and below.
   hit: {
