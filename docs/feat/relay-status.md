@@ -318,6 +318,30 @@ No protocol change, no schema regeneration, no unit or Caddyfile change.
 - Unverified: nothing deployed; 4101 / 4201 not checked on the box, and the busy
   port path not run on Linux (the start log shows `status on` or `status-off`).
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26* · uncommitted
+
+**Finding 1 (MEDIUM, vacuous sweep-sampling test): FIXED**, test only.
+`apps/apps-host/test/status.test.ts` now asserts on `history[0]` with `at` = the
+publish minute, so the sample taken by the status read cannot satisfy it. No
+production change.
+
+Mutation: `sample();` removed from `sweepOnce` (`apps/apps-host/src/server.ts`),
+then restored by edit (the file is not in the diff):
+
+```
+old test, mutant:   1 pass, 0 fail          (vacuity reproduced)
+new test, mutant:   0 pass, 1 fail
+  - "liveApps": 1,
+  - "storeBytes": 44,
+  + "requests": 1,
+new file, restored: 11 pass, 0 fail
+```
+
+Also: `biome check` on both files and `tsc -p apps/apps-host` clean. Full gate
+not run here (orchestrator).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26*

@@ -102,12 +102,14 @@ describe("the apps host's /__status", () => {
     const host = await startHost({ statusPort: 0, limits: { sweepMs: 3_600_000 } });
     // A minute boundary first, so the publish and the sweep share one minute.
     host.advance(60_000 - (host.clock.at % 60_000));
+    const published = host.clock.at;
     await host.publish(publisher);
     await host.server.sweep();
     host.advance(60_000);
     const body = await status(host.server);
-    expect(body.history).toContainEqual(
-      expect.objectContaining({ liveApps: 1, storeBytes: BYTES }),
+    // The PUBLISH minute: the read below samples too, but into its own minute.
+    expect(body.history[0]).toEqual(
+      expect.objectContaining({ at: published, liveApps: 1, storeBytes: BYTES }),
     );
     expect(body.lastMinute).toEqual({ requests: 1, reports: 0 });
   });
