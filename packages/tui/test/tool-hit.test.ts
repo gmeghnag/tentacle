@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { layoutTranscript } from "../src/render-lines.ts";
 import type { DisplayItem, ToolItem } from "../src/state.ts";
-import { toolCallAt, toolCallAtViewport } from "../src/tool-hit.ts";
+import { linkAtViewport, toolCallAt, toolCallAtViewport } from "../src/tool-hit.ts";
 
 // A laid-out transcript built by the REAL layout, never a hand-built array: the
 // hit-test's contract is "the rows `layoutTranscript` produced", and a fake
@@ -228,6 +228,82 @@ describe("toolCallAt: a shell call's `$` rows toggle too (docs/fix/tui-click-dol
     expect(el).toBeDefined();
     if (!el) return;
     expect(toolCallAt(e, el.start + 1)).toBe("p1");
+  });
+});
+
+describe("linkAtViewport: the URL under a screen cell (docs/feat/tui-clickable-links.md)", () => {
+  const url = "https://example.com/a/very/long/path/that/wraps/twice?q=1";
+  const linked = (): DisplayItem[] => [
+    ...pad(5),
+    { kind: "assistant", text: `see ${url} ok` },
+    { kind: "assistant", text: "after" },
+  ];
+  const layout = () => layoutTranscript(linked(), { expandAll: false, width: 24 });
+  const target = () => {
+    const { laid, total } = layout();
+    const item = laid.find((l) => l.links.length > 0);
+    if (!item) throw new Error("no linked item");
+    return { laid, total, item };
+  };
+
+  test("the first and last cell of every wrapped segment hit; one cell past misses", () => {
+    const { laid, total, item } = target();
+    const win = { start: 0, end: total };
+    expect(item.links.length).toBeGreaterThanOrEqual(3);
+    for (const s of item.links) {
+      const y = item.start + s.row + 1;
+      const first = s.col + 1; // SGR columns are 1-based
+      const last = s.col + s.width;
+      expect(linkAtViewport(laid, win, first, y)).toBe(url);
+      expect(linkAtViewport(laid, win, last, y)).toBe(url);
+      expect(linkAtViewport(laid, win, first - 1, y)).toBeNull();
+      expect(linkAtViewport(laid, win, last + 1, y)).toBeNull();
+    }
+  });
+
+  test("a scrolled window maps the screen row through its start", () => {
+    const { laid, item } = target();
+    const s = item.links[0];
+    if (!s) throw new Error("no span");
+    const row = item.start + s.row;
+    const win = { start: row - 2, end: row + 5 };
+    expect(linkAtViewport(laid, win, s.col + 1, 3)).toBe(url);
+    expect(linkAtViewport(laid, win, s.col + 1, row + 1)).toBeNull();
+  });
+
+  test("below or above the viewport there is no link", () => {
+    const { laid, item } = target();
+    const s = item.links[1];
+    if (!s) throw new Error("no span");
+    const row = item.start + s.row;
+    // The window ends just above the URL's row: that screen row is the input box.
+    const win = { start: 0, end: row };
+    expect(linkAtViewport(laid, win, s.col + 1, row + 1)).toBeNull();
+    expect(linkAtViewport(laid, { start: row, end: row + 3 }, s.col + 1, 0)).toBeNull();
+  });
+
+  test("a gap row has no link", () => {
+    const { laid, total, item } = target();
+    const win = { start: 0, end: total };
+    expect(linkAtViewport(laid, win, 5, item.start)).toBeNull(); // the separator above
+    expect(linkAtViewport(laid, win, 5, item.start + item.rows.length + 1)).toBeNull();
+  });
+
+  test("a tool's control row never opens a link, even if a span were there", () => {
+    const span = { row: 0, col: 0, width: 5, from: 0, to: 5, url };
+    const item = { rows: ["xxxxx"], start: 0, gap: false, toggleRows: 1, links: [span] };
+    const win = { start: 0, end: 1 };
+    expect(linkAtViewport([{ ...item, id: "c1" }], win, 1, 1)).toBeNull();
+    // A reply has no controls (`toggleRows` is only read for a call).
+    expect(linkAtViewport([{ ...item, id: "" }], win, 1, 1)).toBe(url);
+  });
+
+  test("a reply's FIRST row link hits", () => {
+    const { laid, total } = layoutTranscript([{ kind: "assistant", text: "https://e.com/x" }], {
+      expandAll: false,
+      width: 40,
+    });
+    expect(linkAtViewport(laid, { start: 0, end: total }, 3, 1)).toBe("https://e.com/x");
   });
 });
 

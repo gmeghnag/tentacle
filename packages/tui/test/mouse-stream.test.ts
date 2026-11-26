@@ -152,8 +152,8 @@ describe("S4 stepMouseChunk: the SGR chunk state machine", () => {
 // --- the per-report dispatch ---------------------------------------------
 
 const LAID: readonly LaidItem[] = [
-  { rows: ["◼ tool: read"], start: 0, id: "call-1", gap: false, toggleRows: 1 },
-  { rows: ["a line", "another"], start: 2, id: "", gap: true, toggleRows: 1 },
+  { rows: ["◼ tool: read"], start: 0, id: "call-1", gap: false, toggleRows: 1, links: [] },
+  { rows: ["a line", "another"], start: 2, id: "", gap: true, toggleRows: 1, links: [] },
 ];
 const WIN = { start: 0, end: 3 };
 
@@ -182,6 +182,55 @@ const state = (over: Partial<MouseState> = {}): MouseState => ({
 });
 
 const kinds = (effects: readonly { readonly kind: string }[]) => effects.map((e) => e.kind);
+
+describe("dispatchMouse: a click on a link (docs/feat/tui-clickable-links.md)", () => {
+  const url = "https://e.com/x";
+  const span = (row: number) => ({ row, col: 0, width: 5, from: 0, to: 5, url });
+  const laid: readonly LaidItem[] = [
+    {
+      rows: ["head ", "body "],
+      start: 0,
+      id: "call-1",
+      gap: false,
+      toggleRows: 1,
+      links: [span(1)],
+    },
+    { rows: ["reply"], start: 2, id: "", gap: false, toggleRows: 1, links: [span(0)] },
+  ];
+  /** Press then release on the same cell. */
+  const click = (x: number, y: number, over: Partial<MouseSnapshot> = {}) => {
+    const snap = snapshot({ laid, ...over });
+    const down = dispatchMouse(state(), report(0, x, y), snap);
+    return dispatchMouse(down.state, report(0, x, y, false), snap);
+  };
+
+  test("opens it and drops the zero-length selection, Ctrl+O or not", () => {
+    for (const expandAll of [false, true]) {
+      for (const y of [2, 3]) {
+        const step = click(2, y, { expandAll });
+        expect(step.effects).toEqual([{ kind: "openLink", url }]);
+        expect(step.state.selection).toBeNull();
+      }
+    }
+  });
+
+  test("off the link the click is what it was", () => {
+    // A bare click is not a deliberate selection (fix/tui-accidental-copy): no copy, no open.
+    expect(kinds(click(20, 3).effects)).toEqual([]);
+  });
+
+  test("a header keeps its toggle", () => {
+    expect(kinds(click(2, 1).effects)).toEqual(["toggleTool"]);
+  });
+
+  test("a drag across a link is a selection, never an open", () => {
+    const snap = snapshot({ laid });
+    const down = dispatchMouse(state(), report(0, 1, 3), snap);
+    const drag = dispatchMouse(down.state, report(32, 4, 3), snap);
+    const back = dispatchMouse(drag.state, report(0, 4, 3, false), snap);
+    expect(kinds(back.effects)).toEqual(["copySelection"]);
+  });
+});
 
 describe("S4 dispatchMouse: the per-event priority order", () => {
   test("a wheel notch scrolls by WHEEL_LINES: 64 (up) towards the older rows, 65 (down) back", () => {

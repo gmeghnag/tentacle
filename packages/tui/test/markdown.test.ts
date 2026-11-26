@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import chalk from "chalk";
 import { renderMarkdown } from "../src/markdown.ts";
+import { stripAnsi } from "../src/render-lines.ts";
 import { setThemeMode, tokens } from "../src/theme.ts";
 
 describe("renderMarkdown", () => {
@@ -19,6 +20,47 @@ describe("renderMarkdown", () => {
   test("does not end with trailing newlines", () => {
     const out = renderMarkdown("hello");
     expect(out.endsWith("\n")).toBe(false);
+  });
+});
+
+// ── Links always show their address (docs/feat/tui-clickable-links.md §3) ────
+
+describe("Markdown links", () => {
+  for (const mode of ["dark", "light"] as const) {
+    test(`[text](url) reads \`text (url)\` in ${mode} mode`, () => {
+      expect(stripAnsi(renderMarkdown("A [docs](https://e.com/d) link", mode))).toBe(
+        "A docs (https://e.com/d) link",
+      );
+    });
+  }
+
+  test("an autolink with `&` renders once", () => {
+    const url = "https://e.com/s?a=1&b=2#frag";
+    expect(stripAnsi(renderMarkdown(url))).toBe(url);
+  });
+
+  test("a non-http target stays visible as text", () => {
+    expect(stripAnsi(renderMarkdown("[x](file:///etc/passwd)"))).toBe("x (file:///etc/passwd)");
+  });
+
+  test("no OSC 8, even where the terminal supports hyperlinks", async () => {
+    // `supports-hyperlinks` reads the env once at module load: only a child
+    // process can have it on.
+    const module = new URL("../src/markdown.ts", import.meta.url).pathname;
+    const md = "A [docs](https://e.com/d) [x](file:///etc/passwd) https://e.com/y";
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `const { renderMarkdown } = await import(${JSON.stringify(module)});
+         process.stdout.write(renderMarkdown(${JSON.stringify(md)}, "dark"));`,
+      ],
+      { env: { ...process.env, FORCE_HYPERLINK: "1", FORCE_COLOR: "3" }, stderr: "pipe" },
+    );
+    const out = await new Response(child.stdout).text();
+    expect(await child.exited).toBe(0);
+    expect(out).toContain("docs");
+    expect(out).not.toContain("\x1b]8;");
   });
 });
 

@@ -86,6 +86,8 @@ export interface MouseHost {
   readonly submit: (text: string) => void;
   /** Open an artifact through the App's one artifact path (a `present` header click). */
   readonly openArtifact: (artifact: ArtifactMeta) => void;
+  /** A click on a URL: open it, or say why not (`links.ts: linkOpenStep`). */
+  readonly openLink: (url: string) => void;
 }
 
 export interface MouseLayer {
@@ -120,6 +122,7 @@ export function useMouse(host: MouseHost): MouseLayer {
     clampOffset,
     submit,
     openArtifact,
+    openLink,
   } = host;
 
   // Partial SGR mouse report held across data chunks: some terminals/ptys split
@@ -217,6 +220,9 @@ export function useMouse(host: MouseHost): MouseLayer {
           case "openArtifact":
             openArtifact(effect.artifact);
             break;
+          case "openLink":
+            openLink(effect.url);
+            break;
           case "copySelection":
             // Selection can span rows scrolled out of view, so assemble the whole
             // buffer HERE — only on release, never on the per-frame render path.
@@ -237,6 +243,7 @@ export function useMouse(host: MouseHost): MouseLayer {
       field,
       setExpandedIds,
       openArtifact,
+      openLink,
       finishSelection,
     ],
   );

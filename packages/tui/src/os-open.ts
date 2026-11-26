@@ -14,6 +14,7 @@ import { writeFile as fsWriteFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ArtifactWrap, type OpenPlan, wrapArtifactBytes } from "./artifact-open.ts";
+import { normalizeUrl } from "./links.ts";
 
 export type QuietStdio = readonly ["ignore", "ignore", "ignore"];
 
@@ -65,11 +66,54 @@ const defaults = (): OsOpenDeps => ({
   onExit: (fn) => void process.once("exit", fn),
 });
 
+/** The platform's "open with the default app" command. */
+const osOpener = (platform: string): string => (platform === "darwin" ? "open" : "xdg-open");
+
 /** `<hex8>.<ext>`: what `openPlan` produces, and nothing else may be written. */
 const PLAN_FILE_RE = /^[0-9a-f]{8}\.[a-z]{2,4}$/;
 /** A saved name: one segment, no leading dot, the `saveName` alphabet. */
 const SAVE_NAME_RE = /^[A-Za-z0-9 _-][A-Za-z0-9 ._-]*\.[a-z]{2,4}$/;
 const SAVE_ATTEMPTS = 100;
+
+export interface LinkOpener {
+  /** The TUI runs over SSH: a browser would open on this host, not the person's. */
+  readonly ssh: boolean;
+  /** Hand an http(s) URL to the OS opener. Rejects on any failure. */
+  open(url: string): Promise<void>;
+}
+
+/**
+ * The link opener (docs/feat/tui-clickable-links.md §6): ONE argv spawn of the
+ * OS opener — never a shell — with quiet stdio. The URL is re-checked here as
+ * the last guard, so the one argument is http(s) and cannot start with `-`.
+ */
+export function createLinkOpener(
+  over: Partial<OsOpenDeps & { env: Readonly<Record<string, string | undefined>> }> = {},
+): LinkOpener {
+  const deps = { ...defaults(), env: process.env, ...over };
+  const { SSH_CONNECTION, SSH_TTY } = deps.env;
+  return {
+    ssh: Boolean(SSH_CONNECTION) || Boolean(SSH_TTY),
+    async open(url) {
+      if (normalizeUrl(url) !== url) {
+        throw new Error("not an http(s) link");
+      }
+      const opener = osOpener(deps.platform);
+      let code: number;
+      try {
+        code = await deps.spawn([opener, url], QUIET_STDIO).exited;
+      } catch (error) {
+        // `linkOpenError` names the missing command from `path`.
+        throw (error as { code?: unknown }).code === "ENOENT"
+          ? Object.assign(new Error(`no ${opener}`), { code: "ENOENT", path: opener })
+          : error;
+      }
+      if (code !== 0) {
+        throw new Error(`${opener} exited with code ${code}`);
+      }
+    },
+  };
+}
 
 export function createArtifactOpener(over: Partial<OsOpenDeps> = {}): ArtifactOpener {
   const deps = { ...defaults(), ...over };
@@ -93,7 +137,7 @@ export function createArtifactOpener(over: Partial<OsOpenDeps> = {}): ArtifactOp
         mode: 0o600,
         flag: "w",
       });
-      const opener = deps.platform === "darwin" ? "open" : "xdg-open";
+      const opener = osOpener(deps.platform);
       const code = await deps.spawn([opener, path], QUIET_STDIO).exited;
       if (code !== 0) {
         throw new Error(`${opener} exited with code ${code}`);
