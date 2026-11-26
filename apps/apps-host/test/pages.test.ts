@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { encode } from "uqr";
-import { type Page, appResponseHeaders, createPages, visitorView } from "../src/pages.ts";
+import {
+  type Page,
+  appResponseHeaders,
+  createPages,
+  framedAppResponseHeaders,
+  isFrameRequest,
+  visitorView,
+} from "../src/pages.ts";
 
 const ID = "abcdefghijklmnop";
 const CONFIG = {
@@ -164,13 +171,14 @@ describe("host pages", () => {
       `https://${ID}.apps.example.so/`,
       "https://example.so/terms?a=1&amp;b=2",
     ];
-    for (const [, page] of all) {
+    for (const [name, page] of all) {
       for (const url of page.body.match(/\b(?:https?:)?\/\/[^\s"'<>]+/g) ?? []) {
         expect(allowed).toContain(url);
       }
-      expect(page.body).not.toMatch(
-        /<(img|link|iframe|object|embed)\b|<script\s+src|@import|url\(/,
-      );
+      expect(page.body).not.toMatch(/<(img|link|object|embed)\b|<script\s+src|@import|url\(/);
+      // The one iframe is the warning's, and it has no address until its script sets one.
+      expect(page.body.includes("<iframe")).toBe(name === "warning");
+      expect(page.body).not.toMatch(/<iframe[^>]*\ssrc=/);
     }
   });
 
@@ -232,9 +240,13 @@ function browser(
 ) {
   const script = inline(pages.warning(ID).body, "script")[0] ?? "";
   const replaced: string[] = [];
-  const elements: Record<string, { hidden: boolean; click?: () => void }> = {
-    continue: { hidden: false },
+  const elements: Record<
+    string,
+    { hidden: boolean; click?: () => void; src?: string; focus?: () => void }
+  > = {
+    continue: { hidden: false, focus: () => {} },
     stuck: { hidden: true },
+    "app-frame": { hidden: true, src: "" },
   };
   const store = (map: Map<string, string>) => ({
     getItem: (key: string) => map.get(key) ?? null,
@@ -272,6 +284,8 @@ describe("the warning's script", () => {
     const storage = fresh();
     const page = browser(storage);
     expect(page.replaced).toEqual([]);
+    expect(page.elements["app-frame"]?.src).toBe("/_frame");
+    expect(page.elements["app-frame"]?.hidden).toBe(false);
     page.elements.continue?.click?.();
     expect(storage.local.get("tentacle-apps-ack")).toBe("1");
     // A URL that differs only by its fragment would not load a new document.
@@ -281,7 +295,10 @@ describe("the warning's script", () => {
   test("once acknowledged it forwards by itself, but not twice within 3 s", () => {
     const storage = fresh();
     storage.local.set("tentacle-apps-ack", "1");
-    expect(browser(storage, 10_000).replaced).toEqual([target]);
+    const acked = browser(storage, 10_000);
+    expect(acked.replaced).toEqual([target]);
+    // Acknowledged: the app is never loaded in the frame.
+    expect(acked.elements["app-frame"]?.src).toBe("");
     const again = browser(storage, 12_999);
     expect(again.replaced).toEqual([]);
     expect(again.elements.stuck?.hidden).toBe(false);
@@ -294,6 +311,67 @@ describe("the warning's script", () => {
     const back = browser(storage, 10_500);
     expect(back.replaced).toEqual([]);
     expect(back.elements.stuck?.hidden).toBe(false);
+  });
+});
+
+describe("the warning wrapper", () => {
+  const { body, headers } = pages.warning(ID);
+
+  test("the app sits in an inert sandbox with scripts only, behind a dialog", () => {
+    const frame = /<iframe\b[^>]*>/.exec(body)?.[0] ?? "";
+    expect(frame).toContain('sandbox="allow-scripts"');
+    expect(frame).not.toMatch(/allow-(same-origin|top-navigation|popups|forms|modals)/);
+    expect(frame).toMatch(/\sinert\b/);
+    expect(body).toContain('role="dialog" aria-modal="true"');
+    expect(body.indexOf("<iframe")).toBeLessThan(body.indexOf('class="overlay"'));
+    expect(body).toContain("pointer-events: none");
+  });
+
+  test("its CSP frames this origin only; nothing frames it", () => {
+    const csp = directives(headers["Content-Security-Policy"] ?? "");
+    expect(csp.get("frame-src")).toBe("'self'");
+    expect(csp.get("frame-ancestors")).toBe("'none'");
+    for (const [name, page] of all) {
+      if (name === "warning") continue;
+      expect(directives(page.headers["Content-Security-Policy"] ?? "").has("frame-src")).toBe(
+        false,
+      );
+    }
+  });
+
+  test("the framed app answers only an iframe navigation of this origin", () => {
+    const h = (site: string, mode: string, dest: string) =>
+      isFrameRequest(
+        new Headers({ "sec-fetch-site": site, "sec-fetch-mode": mode, "sec-fetch-dest": dest }),
+      );
+    expect(h("same-origin", "navigate", "iframe")).toBe(true);
+    for (const [site, mode, dest] of [
+      ["same-origin", "navigate", "document"],
+      ["cross-site", "navigate", "iframe"],
+      ["same-site", "navigate", "iframe"],
+      ["none", "navigate", "iframe"],
+      ["same-origin", "no-cors", "iframe"],
+      ["same-origin", "navigate", "frame"],
+    ] as const) {
+      expect(h(site, mode, dest)).toBe(false);
+    }
+    expect(isFrameRequest(new Headers())).toBe(false);
+  });
+
+  test("the framed headers differ from the app's only by who may frame it", () => {
+    const app = appResponseHeaders();
+    const framed = framedAppResponseHeaders();
+    expect(framed["X-Frame-Options"]).toBe("SAMEORIGIN");
+    expect(framed["Content-Security-Policy"]).toBe(
+      (app["Content-Security-Policy"] ?? "").replace(
+        "frame-ancestors 'none'",
+        "frame-ancestors 'self'",
+      ),
+    );
+    expect(framed["Content-Security-Policy"]).toContain("sandbox allow-scripts");
+    for (const [name, value] of Object.entries(app)) {
+      if (name !== "Content-Security-Policy") expect([name, framed[name]]).toEqual([name, value]);
+    }
   });
 });
 
