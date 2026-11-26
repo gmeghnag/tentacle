@@ -346,6 +346,23 @@ describe("mapStreamResponse", () => {
     ]);
   });
 
+  test("a terminal snapshot of an already-streamed artifact gives its budget back too", () => {
+    // The D5 path (round 1, finding 1) replaces through the same release: without
+    // it the snapshot's whole text is billed a second time and cut at 64K−N.
+    const half = "d".repeat(20_000);
+    const state = newMapState("a2a:acme", CARD_URL);
+    const evs = run(
+      [
+        art(half, true),
+        art(half, true),
+        task(TaskState.TASK_STATE_COMPLETED, undefined, [snapshotArtifact(half + half)]),
+      ],
+      state,
+    );
+    const texts = evs.flatMap((e) => (e.kind === "output" && e.text ? [e.text] : []));
+    expect(texts[texts.length - 1] ?? "").toBe(half + half);
+  });
+
   test("data part → capped json; raw/url part → listed file, not fetched", () => {
     const frame = {
       payload: {
@@ -403,6 +420,35 @@ describe("mapStreamResponse", () => {
     expect(texts).toHaveLength(2);
     expect(texts[1]).toContain("remote output truncated");
     expect(texts.join("").length).toBeLessThan(A2A_OUTPUT_MAX_CHARS + 100);
+  });
+
+  test("an answer under the cap keeps its whole text through the closing replace", () => {
+    // Our daemon streams `append:true` deltas and then closes with the WHOLE text
+    // as `append:false` (daemon/src/a2a/executor.ts:624-636). The retracted text
+    // must give its cap budget back (round 1, finding 1), or a 40 000-char answer
+    // comes out cut to 64K−N with a note that lies.
+    const half = "d".repeat(20_000);
+    const state = newMapState("a2a:acme", CARD_URL);
+    const evs = run([art(half, true), art(half, true), art(half + half)], state);
+    const texts = evs.flatMap((e) => (e.kind === "output" && e.text ? [e.text] : []));
+    expect(texts[texts.length - 1] ?? "").toBe(half + half);
+    expect(state.truncated).toBe(false);
+    expect(state.outChars).toBe(40_000);
+  });
+
+  test("an answer over the cap keeps the cap's worth after the closing replace", () => {
+    // `truncated` tripped while THIS artifact streamed, so the replace that
+    // retracts it also retracts the truncation: without that, the close yields no
+    // text at all and the report keeps none of the answer.
+    const chunk = "d".repeat(35_000);
+    const state = newMapState("a2a:acme", CARD_URL);
+    const evs = run([art(chunk, true), art(chunk, true), art(chunk + chunk)], state);
+    const texts = evs.flatMap((e) => (e.kind === "output" && e.text ? [e.text] : []));
+    const last = texts[texts.length - 1] ?? "";
+    // `sanitizeRemote` itself caps one part at 64 KiB (its own "…"), so the closed
+    // text is the whole cap's worth of the answer — not the empty string it was.
+    expect(last.length).toBe(A2A_OUTPUT_MAX_CHARS);
+    expect(last.slice(0, -1)).toBe("d".repeat(A2A_OUTPUT_MAX_CHARS - 1));
   });
 
   test("remote strings are sanitised at the source (ESC, bidi)", () => {

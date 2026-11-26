@@ -1,6 +1,6 @@
 # fix/a2a-stream-duplicate — An A2A answer reaches the parent's report twice
 
-> **Status:** execution complete · review pending
+> **Status:** execution + fix round 1 complete · review pending
 > **Branch:** `fix/a2a-stream-duplicate`
 > **Size:** S · **Blast:** cross-module · **Suited:** DeepSeek (executes; standard in-context Review — no §7 wire/persistence invariant changes, but the harness event type is shared by every adapter, so Review re-runs `packages/agent` + `packages/daemon` a2a tests)
 > **Changelog:** `changelog.d/a2a-stream-duplicate.fixed.md` — one bullet: `- **A2A sub-agent answers are no longer duplicated.** A server that closes an artifact by re-sending its whole text (\`append:false\`, \`lastChunk:true\`) no longer makes the parent see the answer twice; the client now honours A2A \`append:false\` as a REPLACE of that artifact's text.`
@@ -192,7 +192,7 @@ The owner delegated every open question; each is the recommended option:
 | D4 | Empty-parts `append:false` (a clear) | **Emit an explicit clear event** | Our own daemon sends `parts: []` (`executor.ts:631-634`); ignoring it leaves stale text in the report. |
 | D5 | Terminal `task` snapshot carrying an artifact already streamed | **Replace it, not append** | A snapshot *is* the full artifact; `dedupeTask` (`a2a.ts:216-223`) already drops the equal case, so only the differing case remains — the same duplicate. |
 | D6 | Server's trailing whole-text `lastChunk` | **Keep** (no daemon change) | Legal, self-contained, and the only in-stream reconciliation; the duplicate is a client bug and is pinned by `a2a-executor.test.ts:279-302`. |
-| D7 | 64 KiB output cap accounting on a replacement | **Accept the over-count** | The replaced chars were already counted; today's duplicate burned the cap twice, so this is strictly no worse and the cap stays a bound. |
+| D7 | 64 KiB output cap accounting on a replacement | **Give the retracted text's budget back** (was: *accept the over-count* — review round 1 proved that claim FALSE: an under-cap answer was cut, an over-cap one erased) | The replaced chars were billed twice; subtracting them keeps the cap a bound without losing text the cap allows. |
 | D8 | `message` payload after streamed artifacts | **Leave as append, logged as debt** | Our daemon never emits `message`; deduping a remote `Message` needs a rule the spec does not give. |
 | D9 | Test seam for the report | **Buffer unit tests + the existing runner seam** (`harness-remote-fit.test.ts`) | The bug lives in the seam, so the regression test must drive the real runner, not a copy of its logic. |
 
@@ -223,8 +223,10 @@ In dependency order (protocol untouched; no daemon change):
   the report equals the artifact. If nothing else was said, the existing
   empty-report fallback speaks (`child.ts:530-533`). *Converges: report == artifact.*
 - **An artifact replaced after another artifact was touched** (interleaved
-  ids): segments are keyed by id, so only that artifact's text is rewritten and
-  the order of first appearance is kept. Pinned by a test.
+  ids): segments are keyed by id, so only that artifact's text is rewritten; the
+  replacement is pushed at the END of the segment list (its first-appearance
+  position is not restored — harmless today, notices are only appended after the
+  stream; review round 1, NIT d). Pinned by a test.
 - **`replace` with no `fromArtifact`** (an adapter bug, or a future producer):
   the buffer clears the plain tail rather than dropping text silently; the A2A
   map always sets both, pinned by a map test.
@@ -379,6 +381,79 @@ After each revert the same files were re-run green (`27 pass` / `55 pass`).
   never touched (`a2a-map.ts:486` `URL` shape, two `RequestInfo` in
   `harness-a2a-registry.test.ts`) — the package's own tsconfig lacks the DOM lib
   the root config supplies; the root typecheck is the truth.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-26*
+
+Review round 1's one HIGH (the 64 KiB cap billed a replaced artifact's text
+twice, so the closing whole-text `append:false` truncated an answer under the cap
+and ERASED one over it) is **fixed**; the review's NIT (d) was a wrong sentence
+in the plan, now corrected.
+
+**Reproduced first**, on the branch, with the review's own script
+(`.tentacle/tmp/a2a-stream-duplicate/cap.test.ts`): a 40 000-char answer →
+report length **25 564** (with the truncated note); a 70 000-char answer →
+length **0**. Both as the review stated.
+
+**Fix** (`packages/agent/src/harness/a2a-map.ts`, cap accounting only; the
+replace semantics from the first execution are untouched):
+
+- `MapState` gained `charged: Map<string, number>` (`:104-105`, `:119`) — the cap
+  chars each artifact (and `""` = the plain tail) has been billed — and
+  `truncatedBy?: string` (`:101`), the artifact whose output tripped the cap.
+- `takeText` (`:185-199`) takes the artifact id, charges the length it actually
+  emits (for a cut, the slice PLUS the note) and records `truncatedBy`.
+- New `releaseArtifact` (`:207-215`): subtract that artifact's charge from
+  `outChars` (floored at 0) and clear `truncated` **only** when this artifact
+  tripped it — the note goes with the text it described. Called at both replace
+  sites: the `artifactUpdate` clear (`:303`) and the terminal task snapshot
+  (`:350`), before the content events are charged.
+- `partEvents` passes provenance to `takeText` for text and data parts; `file`
+  parts carry no chars.
+
+**Red before green** — the four new tests, on the unfixed code (paste of the
+assertion failures, not of an import error):
+
+| Test | Before | After |
+|---|---|---|
+| `harness-a2a-map.test.ts:425` under-cap close (map) | `expect(texts[last]).toBe(half + half)` → `Expected - 1, Received + 2` | pass |
+| `harness-a2a-map.test.ts:439` over-cap close (map) | `last.slice(0,-1)` ≠ 65 536-char cap's worth | pass |
+| `harness-a2a-map.test.ts:349` terminal snapshot release | red only under mutation M3 (below) | pass |
+| `harness-remote-fit.test.ts:558` 40 000-char report | `report.includes(half + half)` → `Expected: true, Received: false` | pass |
+| `harness-remote-fit.test.ts:573` 70 000-char report | `Expected: true, Received: false` (the report was empty) | pass |
+
+The oversize case is pinned on **the cap's worth of the answer, ellipsis
+included**, not on the "truncated" note: `sanitizeRemote` already caps a single
+part at 64 KiB with its own `…` (`a2a-map.ts:25-28`), so a one-part 70 000-char
+answer legitimately fits `takeText`'s released room exactly and never trips the
+note. The note path still covers a multi-part oversize artifact (unchanged
+behaviour, pinned by the existing `output beyond 64 KiB` test).
+
+**Mutations (each applied, run, reverted — file restored byte-for-byte):**
+
+| Mutation | Result |
+|---|---|
+| M1: drop `releaseArtifact` on the `artifactUpdate` replace (`:303`) | **4 fail**: both map cap cases + both remote-fit cap cases; 77 pass |
+| M2: keep the budget release, never clear `truncated` (`:211` → `&& false`) | **2 fail**: both over-cap cases (the report goes back to empty); 79 pass |
+| M3: drop `releaseArtifact` on the terminal-snapshot replace (`:350`) | **1 fail**: `terminal snapshot … gives its budget back too`; 80 pass |
+
+**Verified:** `harness-a2a-map`, `harness-remote-fit`, `harness-report`,
+`harness-a2a`, `harness-a2a-registry` + `daemon/a2a-executor` → **169 pass, 0
+fail**; `bunx biome check` on the changed source/test files → clean (1
+auto-format). `bun run check` is the orchestrator's, not run here.
+
+**Drift:** none in behaviour. The changelog fragment now states the cap half of
+the fix too (one bullet, same file); no `protocol.d/` note — `HarnessEvent` is
+harness-internal. One inherited plan error fixed in place (D7 below, and the
+segment-order sentence in Failure modes), and two honest limits left as debt:
+(1) when the retracted truncation was a single-part oversize answer, the report
+ends at `sanitizeRemote`'s own cap ellipsis with no "truncated" note (pre-existing
+`sanitizeRemote` behaviour, not introduced here); (2) `takeText` saturates
+`outChars` to the cap when it truncates, so in a stream where ANOTHER artifact
+already held budget, releasing the truncated one can free up to one note-length
+(~24 chars) more than it took — a bound, not a leak, and only in an already
+truncated stream.
 
 ## Review
 

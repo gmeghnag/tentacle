@@ -17,7 +17,7 @@ import {
 } from "@tentacle/core";
 import type { ModelProvider } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
-import { mapStreamResponse, newMapState } from "../src/harness/a2a-map.ts";
+import { A2A_OUTPUT_MAX_CHARS, mapStreamResponse, newMapState } from "../src/harness/a2a-map.ts";
 import { type HarnessDeps, harnessModeIssue } from "../src/harness/child.ts";
 import type {
   HarnessAdapter,
@@ -553,6 +553,35 @@ describe("a2a: a replacing artifact stream reaches the report once", () => {
     ]);
     expect(report.startsWith("OTTARINA-42")).toBe(true);
     expect(report.includes("Ottarina-42")).toBe(false);
+  });
+
+  test("a 40 000-char answer under the cap is not cut by its own closing replace", async () => {
+    // Review round 1, finding 1: the retracted deltas were billed AGAIN against
+    // the 64 KiB cap, so the whole-text close truncated an answer that fits
+    // (64K−N chars) with a note that lies about it.
+    const half = "d".repeat(20_000);
+    const report = await reportOf([
+      artFrame(half, true),
+      artFrame(half, true),
+      artFrame(half + half, false, true),
+      completed(),
+    ]);
+    expect(report.includes(half + half)).toBe(true);
+    expect(report.includes("truncated")).toBe(false);
+  });
+
+  test("a 70 000-char answer over the cap keeps the cap's worth, not nothing", async () => {
+    // Past 64 KiB the deltas set `truncated`, so the close's `takeText` returned
+    // undefined and the replace had already emptied the segment: the report had
+    // NONE of the answer. It must keep what the cap allows, and say so.
+    const chunk = "d".repeat(35_000);
+    const report = await reportOf([
+      artFrame(chunk, true),
+      artFrame(chunk, true),
+      artFrame(chunk + chunk, false, true),
+      completed(),
+    ]);
+    expect(report.includes(`${"d".repeat(A2A_OUTPUT_MAX_CHARS - 1)}…`)).toBe(true);
   });
 });
 
