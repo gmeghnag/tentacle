@@ -39,6 +39,22 @@ export function visitorView(headers: HeaderReader): "app" | "warning" {
     : "warning";
 }
 
+/** Where the warning wrapper loads the app, behind its dialog. */
+export const FRAME_PATH = "/_frame";
+
+/**
+ * The framed copy of the app only for an iframe navigation started by this very
+ * origin (the wrapper's own iframe). A top-level visit, another origin's frame
+ * and a browser without Fetch Metadata never get it: fails closed.
+ */
+export function isFrameRequest(headers: HeaderReader): boolean {
+  return (
+    headers.get("sec-fetch-site") === "same-origin" &&
+    headers.get("sec-fetch-mode") === "navigate" &&
+    headers.get("sec-fetch-dest") === "iframe"
+  );
+}
+
 /** Network off; the page can only tighten this with a `<meta>`. */
 const APP_CSP = [
   "default-src 'none'",
@@ -83,6 +99,25 @@ export const COMMON_HEADERS = {
 } as const;
 
 const APP_VARY = "Sec-Fetch-Site, Sec-Fetch-Mode, Sec-Fetch-Dest";
+
+/**
+ * The app as shown behind the warning: the same bytes and headers, but it may
+ * be framed by this origin alone (and by nobody else, `X-Frame-Options`
+ * agreeing). The wrapper's `<iframe sandbox>` takes away the origin.
+ */
+export function framedAppResponseHeaders(): Record<string, string> {
+  const headers = appResponseHeaders();
+  return {
+    ...headers,
+    // The server enforces the opaque origin too (security review LOW-1): the framed copy's
+    // CSP sandbox drops allow-same-origin/allow-modals, so even a loosened <iframe sandbox>
+    // can never make the pre-consent copy same-origin with the wrapper (ack / parent access).
+    "Content-Security-Policy": (headers["Content-Security-Policy"] ?? "")
+      .replace("frame-ancestors 'none'", "frame-ancestors 'self'")
+      .replace(/sandbox [^;]*/, "sandbox allow-scripts"),
+    "X-Frame-Options": "SAMEORIGIN",
+  };
+}
 
 export function appResponseHeaders(): Record<string, string> {
   return {
@@ -220,6 +255,16 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px
 .qr { display: none; }
 .qr-code { display: block; width: 11rem; height: 11rem; border-radius: .5rem; }
 .qr-url { margin: .5rem 0 0; font-family: var(--mono); font-size: .8125rem; word-break: break-all; }
+body.wrap { display: block; min-height: 0; padding: 0; overflow: hidden; }
+.app-frame { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; pointer-events: none; }
+.overlay { position: fixed; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; overflow-y: auto; background: rgba(23, 19, 29, .45); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); }
+.dialog { width: 100%; max-width: 26rem; max-height: 100%; overflow-y: auto; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 1rem; padding: 1.5rem; box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, .35); }
+.dialog .brand { margin-bottom: 1.5rem; }
+.dialog h1 { font-size: 1.5rem; }
+.dialog .actions { margin-top: 1.25rem; }
+.dialog .foot { margin-top: 1rem; padding-top: 1rem; }
+.dialog .qr { margin-top: 1rem; padding-top: 1rem; }
+.dialog .qr-code { width: 9rem; height: 9rem; }
 @media (min-width: 700px) {
   .qr { display: block; margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); }
   .qr p { margin-bottom: .75rem; font-size: .875rem; }
@@ -227,20 +272,24 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px
 @media (min-width: 640px) {
   main { margin-top: 12vh; }
   h1 { font-size: 2rem; }
+  .dialog h1 { font-size: 1.75rem; }
   button { width: auto; min-width: 11rem; }
 }
 `;
 
 /**
  * The warning's script. Acknowledged once in this browser, the page forwards by
- * itself; the 3 s guard stops a loop in a browser that sends no Fetch Metadata.
- * The fragment is dropped: a URL differing only by it would not load anything.
+ * itself to the app (a top-level load, no frame). Otherwise it starts loading
+ * the app behind the dialog; Continue acknowledges and reloads. The 3 s guard
+ * stops a loop in a browser that sends no Fetch Metadata. The fragment is
+ * dropped: a URL differing only by it would not load anything.
  */
 const WARNING_SCRIPT = `
 (function () {
   var ACK = "tentacle-apps-ack";
   var AT = "tentacle-apps-forwarded";
   var stuck = document.getElementById("stuck");
+  var frame = document.getElementById("app-frame");
   function forward() {
     location.replace(location.href.split("#")[0]);
   }
@@ -259,8 +308,12 @@ const WARNING_SCRIPT = `
     } else if (localStorage.getItem(ACK) === "1") {
       sessionStorage.setItem(AT, String(Date.now()));
       forward();
+      return;
     }
   } catch (e) {}
+  frame.src = ${JSON.stringify(FRAME_PATH)};
+  frame.hidden = false;
+  document.getElementById("continue").focus();
 })();
 `;
 
@@ -279,10 +332,39 @@ function escapeHtml(text: string): string {
     .replaceAll("'", "&#39;");
 }
 
+/**
+ * The warning's document: the app loads full-viewport in a sandboxed iframe
+ * (scripts only, no origin: it cannot touch this page), inert behind the
+ * dialog.
+ */
+function wrapperDocument(title: string, dialog: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>${title} · tentacle apps</title>
+<style>${STYLE}</style>
+</head>
+<body class="wrap">
+<iframe id="app-frame" class="app-frame" sandbox="allow-scripts" title="The app, behind the notice" aria-hidden="true" tabindex="-1" inert hidden></iframe>
+<div class="overlay">
+<div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+<p class="brand">${MASCOT}<span>tentacle apps</span></p>
+<h1 id="dialog-title">${title}</h1>
+${dialog}
+</div>
+</div>
+<script>${WARNING_SCRIPT}</script>
+</body>
+</html>
+`;
+}
+
 function page(
   title: string,
   content: string,
-  options: { script?: boolean; form?: boolean } = {},
+  options: { script?: boolean; form?: boolean; wrapper?: boolean } = {},
 ): Page {
   const script = options.script === true;
   const csp = [
@@ -290,10 +372,14 @@ function page(
     `style-src ${STYLE_SOURCE}`,
     ...(script ? [`script-src ${SCRIPT_SOURCE}`] : []),
     `form-action ${options.form === true ? "'self'" : "'none'"}`,
+    ...(options.wrapper !== true ? [] : ["frame-src 'self'"]),
     "base-uri 'none'",
     "frame-ancestors 'none'",
   ].join("; ");
-  const body = `<!doctype html>
+  const body =
+    options.wrapper === true
+      ? wrapperDocument(title, content)
+      : `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -359,7 +445,7 @@ export function createPages(config: PagesConfig) {
 <p id="stuck" hidden>This browser cannot open the app. Try a current version of Safari, Chrome or Firefox.</p>
 <p><a class="quiet" href="${report}">Report this page</a></p>${qr}
 <div class="foot"><p>Or write to ${mail}.</p></div>`,
-        { script: true },
+        { script: true, wrapper: true },
       );
     },
     notice(kind: NoticeKind): Page {

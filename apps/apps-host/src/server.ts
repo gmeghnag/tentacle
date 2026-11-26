@@ -25,6 +25,7 @@ import {
 } from "./operator-files.ts";
 import {
   COMMON_HEADERS,
+  FRAME_PATH,
   type NoticeKind,
   type Page,
   REPORT_CONTACT_MAX,
@@ -32,6 +33,8 @@ import {
   REPORT_REASONS,
   appResponseHeaders,
   createPages,
+  framedAppResponseHeaders,
+  isFrameRequest,
   visitorView,
 } from "./pages.ts";
 import { readBody } from "./read-body.ts";
@@ -584,7 +587,7 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
   };
 
   const handleApp = async (req: Request, url: RequestUrl, id: string): Promise<Response> => {
-    if (url.pathname !== "/" && url.pathname !== "/robots.txt") {
+    if (url.pathname !== "/" && url.pathname !== "/robots.txt" && url.pathname !== FRAME_PATH) {
       return text("not found", 404);
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -597,7 +600,13 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     if (view.kind !== "app") {
       return pageResponse(pages.notice(view.kind), NOTICE_STATUS[view.kind]);
     }
-    if (visitorView(req.headers) === "warning") {
+    // The framed copy, behind the warning dialog: only for the wrapper's own
+    // iframe. Top level, another origin or no Fetch Metadata: nothing.
+    const framed = url.pathname === FRAME_PATH;
+    if (framed && !isFrameRequest(req.headers)) {
+      return text("not found", 404, { Vary: appResponseHeaders().Vary ?? "" });
+    }
+    if (!framed && visitorView(req.headers) === "warning") {
       const warning = pages.warning(id);
       return new Response(warning.body, {
         headers: { ...warning.headers, Vary: appResponseHeaders().Vary ?? "" },
@@ -611,7 +620,9 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
       log("store-error content ENOENT");
       return pageResponse(pages.notice("offline"), NOTICE_STATUS.offline);
     }
-    return new Response(content, { headers: appResponseHeaders() });
+    return new Response(content, {
+      headers: framed ? framedAppResponseHeaders() : appResponseHeaders(),
+    });
   };
 
   // ── start ─────────────────────────────────────────────────────────────────

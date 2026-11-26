@@ -113,6 +113,42 @@ describe("publish and visit", () => {
     expect(await head.text()).toBe("");
   });
 
+  test("the framed app: only as this origin's iframe, never top level, never skipping the warning", async () => {
+    const host = await startHost();
+    const id = await host.publish(publisher);
+    const frame = { ...APP_NAV, "sec-fetch-dest": "iframe" };
+    const call = (headers: Record<string, string>) =>
+      host.call("/_frame", { host: `${id}.${DOMAIN}`, headers });
+    // The wrapper without an ack names no address, and carries the sandboxed frame.
+    const wrapper = await host.visit(id, { ...APP_NAV, "sec-fetch-site": "none" });
+    const page = await wrapper.text();
+    expect(page).toContain('sandbox="allow-scripts"');
+    expect(wrapper.headers.get("content-security-policy")).toContain("frame-src 'self'");
+
+    const ok = await call(frame);
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toBe(HTML);
+    expect(ok.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+    expect(ok.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+    expect(ok.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
+
+    // Top level (typed or linked), another origin's or site's frame, no Fetch Metadata.
+    for (const headers of [
+      APP_NAV,
+      { ...APP_NAV, "sec-fetch-site": "none" },
+      { ...frame, "sec-fetch-site": "cross-site" },
+      { ...frame, "sec-fetch-site": "same-site" },
+      {},
+    ]) {
+      const refused = await call(headers);
+      expect(refused.status).toBe(404);
+      expect(await refused.text()).not.toContain("héllo");
+    }
+    // The real path still answers a top-level visit with the warning, not the app.
+    const link = await host.visit(id, { ...frame, "sec-fetch-site": "cross-site" });
+    expect(await link.text()).toContain("published by a tentacle user");
+  });
+
   test("the app is served from the real fs store and survives a restart", async () => {
     const dir = tempDir();
     const first = await startHost({ store: createFsStore(dir) });

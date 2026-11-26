@@ -1,0 +1,1 @@
+- **Apps first-visit warning is a dialog over the app.** The notice now appears over the app, shown blurred and inert behind it, instead of replacing it; Continue remembers the choice and reloads into the app.
