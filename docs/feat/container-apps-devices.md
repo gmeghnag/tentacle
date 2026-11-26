@@ -531,3 +531,29 @@ registered (`methods.ts:505-507`).
 **Executor behaviour.** Honest. It listed the OD4 parent-mount gap itself under
 "Not verified", along with every other residual. The mutations and the
 red-before-green record are credible. The as-built drift is stricter than the plan.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (same model, fresh context as round 1)
+
+**Verdict: APPROVE.** Diff reviewed: `3d4219f0..HEAD` (`60c2784b` + `85052532`).
+
+- **Finding 1 (OD4 parent mount) is FIXED.** `preview-target.ts` `containsGuarded`
+  refuses any mount whose normalised `Source` is the endpoint socket, one of the
+  default sockets (`/var/run|/run` × docker/podman), or a rootless path under
+  `XDG_RUNTIME_DIR` (passed in by `preview-resolver.ts` from the serve's env),
+  or is an ancestor of any of them, `/` included. The round-1 scratch
+  `od4-parent.ts` now refuses all 4 cases (it accepted 3 of them before).
+- **Mutations (each RED, reverted; `git status` clean):** drop `containsGuarded`
+  → 6 fail in `preview-target.test.ts`. Pass `runtimeDir: undefined` in the
+  resolver → "the env's XDG_RUNTIME_DIR protects its rootless sockets" fails.
+- **Regressions:** none found. Siblings, children and name prefixes are still
+  accepted (`/var/runner`, `/run/secrets`, volume `_data`, `/Users/me/.docker/ru`),
+  as is an empty runtime dir. Two things are stricter now but fail-closed with a
+  stated reason: a Mac `$HOME` bind is refused, because Docker Desktop's socket
+  sits under `~/.docker/run`, and so is a `/var` bind.
+  `scripts/test/release.test.ts` gets `setDefaultTimeout(30_000)`. That is
+  test-only and outside the feature, and it addresses the load timeouts round 1
+  recorded.
+- **Gate:** `bun run typecheck` clean; `bun run lint` clean (2741 files). Touched
+  and related files (6): 106 pass, 0 fail.
