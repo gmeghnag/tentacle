@@ -68,10 +68,13 @@ async function open(tunnels: PreviewTunnels, port: number, onClosed?: () => void
   return id;
 }
 
-const b64 = (text: string | Buffer): string => Buffer.from(text).toString("base64");
-const received = (u: Upstream): string => Buffer.concat(u.received).toString("latin1");
+const b64 = (text: string | Buffer): string =>
+  (typeof text === "string" ? Buffer.from(text) : text).toString("base64");
+const joined = (chunks: Buffer[]): Buffer =>
+  Buffer.concat(chunks.map((chunk) => new Uint8Array(chunk)));
+const received = (u: Upstream): string => joined(u.received).toString("latin1");
 const bytesOf = (sent: Sent[], id: string): Buffer =>
-  Buffer.concat(
+  joined(
     sent
       .filter((s) => s.method === "preview/data" && s.params.tunnelId === id)
       .map((s) => Buffer.from(s.params.data ?? "", "base64")),
@@ -141,7 +144,7 @@ describe("tunnels", () => {
     const total = 4 * 1024 * 1024;
     const body = Buffer.alloc(total);
     for (let i = 0; i < total; i += 4) body.writeUInt32LE(i, i);
-    const u = await upstream((s) => s.end(body));
+    const u = await upstream((s) => s.end(new Uint8Array(body)));
     const { tunnels, sent } = table();
     const id = await open(tunnels, u.port);
     tunnels.data(id, b64(REQUEST));
@@ -166,13 +169,13 @@ describe("tunnels", () => {
       }
       return closes(sent).length > 0;
     });
-    expect(bytesOf(sent, id).equals(body)).toBe(true);
+    expect(bytesOf(sent, id).equals(new Uint8Array(body))).toBe(true);
     expect(closes(sent)[0]?.params).toEqual({ tunnelId: id, reason: "end" });
     expect(tunnels.size).toBe(0);
   });
 
   test("an over-ack grants no credit beyond the window", async () => {
-    const u = await upstream((s) => s.write(Buffer.alloc(2 * 1024 * 1024)));
+    const u = await upstream((s) => s.write(new Uint8Array(2 * 1024 * 1024)));
     const { tunnels, sent } = table();
     const id = await open(tunnels, u.port);
     tunnels.ack(id, 10 * 1024 * 1024);

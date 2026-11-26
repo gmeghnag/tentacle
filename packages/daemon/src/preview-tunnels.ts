@@ -170,7 +170,7 @@ export class PreviewTunnels {
       this.write(tunnelId, tunnel, bytes);
       return;
     }
-    const held = Buffer.concat([tunnel.gate, bytes]);
+    const held = Buffer.concat([new Uint8Array(tunnel.gate), new Uint8Array(bytes)]);
     const verdict = httpRequestGate(held);
     if (verdict === "reject") {
       this.close(tunnelId, "not-http", true);
@@ -250,7 +250,7 @@ export class PreviewTunnels {
   }
 
   private write(tunnelId: string, tunnel: Tunnel, bytes: Buffer): void {
-    tunnel.socket.write(bytes, (error) => {
+    tunnel.socket.write(new Uint8Array(bytes), (error) => {
       // A failed write ends in the socket's `close`.
       if (error || !this.tunnels.has(tunnelId)) return;
       tunnel.unackedIn -= bytes.length;

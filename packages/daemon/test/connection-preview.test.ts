@@ -304,7 +304,8 @@ describe("the list", () => {
     const ta = await a.connectTo(row.id);
     const tb = await b.connectTo(row.id);
     const other = await b.connectTo(kept.id);
-    expect(await a.request(Method.PreviewStop, { previewId: row.id })).toEqual({ ok: true });
+    const stopped = await a.request<{ ok: boolean }>(Method.PreviewStop, { previewId: row.id });
+    expect(stopped).toEqual({ ok: true });
     await until(() => a.closes.length === 1 && b.closes.length === 1 && u.closed === 2);
     expect(a.closes[0]?.tunnelId).toBe(ta.tunnelId);
     expect(b.closes[0]?.tunnelId).toBe(tb.tunnelId);
