@@ -12,6 +12,9 @@ appId: so.tentacle.app
     visible:
       id: "perm-sheet"
     timeout: 20000
+# The sheet's age guard (permission-sheet.ts ARM_MS = 400): a tap in the first
+# 400 ms after an ask appears is dropped, so let the sheet settle first.
+- waitForAnimationToEnd
 - tapOn:
     id: "perm-allow_once"
 # The described shell runs ~20 s (both appearances shot while it runs): the live row (sentence + running node).
@@ -31,6 +34,9 @@ appId: so.tentacle.app
     visible:
       id: "perm-sheet"
     timeout: 30000
+# The sheet's age guard (permission-sheet.ts ARM_MS = 400): a tap in the first
+# 400 ms after an ask appears is dropped, so let the sheet settle first.
+- waitForAnimationToEnd
 - tapOn:
     id: "perm-allow_once"
 - extendedWaitUntil:

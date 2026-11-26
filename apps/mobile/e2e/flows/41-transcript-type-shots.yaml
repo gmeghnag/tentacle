@@ -72,7 +72,7 @@ appId: so.tentacle.app
 # so the shot shows prose + list together rather than the tail of the code block.
 - scrollUntilVisible:
     element:
-      text: "Quitting now only.*"
+      text: ".*Quitting now only.*"
     direction: DOWN
 - runFlow:
     file: _shot.yaml
