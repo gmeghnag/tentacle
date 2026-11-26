@@ -755,3 +755,24 @@ not a reviewer waiver.
 `PngSuite-2017jul19.tgz` fetched by the orchestrator from `http://www.schaik.com/pngsuite/PngSuite-2017jul19.tgz` into `.tentacle/tmp/image-region-png/` (68 521 bytes, sha256 `0294b244c95a8342c01b00010cf34abdcabc7c6a34fd0fe1bd963917537bfdc8`, 178 entries: `.png` + `PngSuite.README` + `PngSuite.LICENSE`; listed, not executed). Next fix round: Execution steps 1–4 (named subset into `packages/core/test/fixtures/png/` + README with source URL, licence line, sha256 per file), then M2 shown red on T1 — Round 3 finding 1.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-26*
+
+### Round 2 (after the orchestrator's fetch; 4th review pass)
+
+*— claude-opus-5-5, 2026-11-26* (reviewed `97177a91..HEAD`, which changes only
+this doc)
+
+**Verdict: REQUEST-CHANGES** — no change since Round 3.
+
+1. **Finding 1 (HIGH): still NOT fixed.** The archive is now in
+   `.tentacle/tmp/image-region-png/`, but it was not unpacked:
+   `packages/core/test/fixtures/png/` does not exist.
+   `png-decode.test.ts`: 41 pass / **35 fail**. No code or test changed, so there
+   is nothing to mutate. The executor's session is denied `tar`, `shasum`,
+   `mkdir` and `cp`, so another fix round will stall the same way.
+   - **Unblock:** the orchestrator runs the shell block in "Fix round 1 (after
+     Review round 3)", or grants those commands to the executor.
+   - **Then the executor:** the fixtures `README.md`, steps 2–4, and M2 shown
+     red on T1.
+2. **Finding 2:** stays fixed (code unchanged since Round 2's mutations).
+
+**Gate.** `bun run lint`: clean (2596 files). `bun run typecheck`: clean.
