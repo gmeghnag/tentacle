@@ -384,6 +384,12 @@ export interface PersistingController extends SessionController {
   onApps?: RemoteSession["onApps"];
   /** `RemoteSession.unpublishApp`: take one published page offline. */
   unpublishApp?: RemoteSession["unpublishApp"];
+  /** `RemoteSession.onPreviews`: this session's container previews and links. */
+  onPreviews?: RemoteSession["onPreviews"];
+  /** `RemoteSession.previewLink`: a shared port's link, for the clipboard. */
+  previewLink?: RemoteSession["previewLink"];
+  /** `RemoteSession.previewStop`: take one preview down. */
+  previewStop?: RemoteSession["previewStop"];
   /** `RemoteSession.onWorkflows`: this session's workflow runs (docs/feat/workflows-ui.md D2). */
   onWorkflows?: RemoteSession["onWorkflows"];
   /** `RemoteSession.workflow`: start / stop / resume a run, or re-run one step. */
@@ -994,6 +1000,17 @@ export function persistingController(
     },
     unpublishApp(app) {
       return inner.unpublishApp(app);
+    },
+    // docs/feat/session-apps-container-ports.md S4: `/previews`' feed, its link
+    // (for the clipboard) and its stop.
+    onPreviews(listener) {
+      return inner.onPreviews(listener);
+    },
+    previewLink(previewId) {
+      return inner.previewLink(previewId);
+    },
+    previewStop(previewId) {
+      return inner.previewStop(previewId);
     },
     // docs/feat/workflows-ui.md D2: the rail, the panel and `/workflow` all read
     // this ONE per-session feed, and every action is the daemon's (its

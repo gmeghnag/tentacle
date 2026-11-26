@@ -6,7 +6,13 @@ import {
   initialWake,
   wakeStep,
 } from "@tentacle/core";
-import type { AppRow, ArtifactMeta, BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
+import type {
+  AppRow,
+  ArtifactMeta,
+  BrowserStatusResult,
+  PreviewRow,
+  WorkflowRow,
+} from "@tentacle/protocol";
 import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { AppView } from "./AppView.tsx";
@@ -487,6 +493,9 @@ export function App({
   const appsSubRef = useRef<(() => void) | null>(null);
   const [appRows, setAppRows] = useState<readonly AppRow[] | undefined>(undefined);
   const appsRef = useRef<readonly AppRow[] | undefined>(undefined);
+  /** The session's container previews feed (`/previews`), and its last report. */
+  const previewsSubRef = useRef<(() => void) | null>(null);
+  const previewsRef = useRef<readonly PreviewRow[] | undefined>(undefined);
   /** This session's workflow-run feed (workflows-ui D3), replaced with the session. */
   const workflowsSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentNotify` subscription (replaced with it). */
@@ -1517,6 +1526,9 @@ export function App({
     deleteSchedule: deleteScheduleInPanel,
     setAppsData,
     unpublishApp,
+    setPreviewsData,
+    copyPreviewLink,
+    stopPreview,
     touchPanel,
     closePanel,
     openPanel,
@@ -1524,6 +1536,7 @@ export function App({
   } = usePanels({
     panelRef,
     setPanel,
+    clipboard,
     sessions,
     switchingRef,
     columns,
@@ -1543,6 +1556,15 @@ export function App({
       setAppsData(rows);
     },
     [setAppsData],
+  );
+
+  /** The daemon's `previews` report: the next `/previews`, and an open one. */
+  const followPreviews = useCallback(
+    (rows: readonly PreviewRow[] | undefined) => {
+      previewsRef.current = rows;
+      setPreviewsData(rows);
+    },
+    [setPreviewsData],
   );
 
   /**
@@ -1719,6 +1741,8 @@ export function App({
     schedulesSubRef,
     appsSubRef,
     setApps: followApps,
+    previewsSubRef,
+    setPreviews: followPreviews,
     workflowsSubRef,
     notifySubRef,
     dockMsgSubRef,
@@ -1815,6 +1839,8 @@ export function App({
       schedulesSubRef.current = null;
       appsSubRef.current?.();
       appsSubRef.current = null;
+      previewsSubRef.current?.();
+      previewsSubRef.current = null;
       notifySubRef.current?.();
       notifySubRef.current = null;
       capsSubRef.current?.();
@@ -1920,6 +1946,7 @@ export function App({
           draftRef,
           sessionRef,
           appsRef,
+          previewsRef,
           schedulesRef,
           workflowsRef,
           workflowCatalogueRef,
@@ -2291,6 +2318,8 @@ export function App({
     workflowDetail: fetchWorkflowStep,
     workflowRerun: rerunWorkflowStep,
     unpublishApp,
+    copyPreviewLink,
+    stopPreview,
     switchTo,
     sessionsDelete,
     // A wake's delete is the DOCK's when it comes from the dropdown, and the

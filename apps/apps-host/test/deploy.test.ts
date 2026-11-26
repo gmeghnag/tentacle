@@ -149,11 +149,13 @@ describe("Caddyfile.apps", () => {
     );
   });
 
-  test("proxies to the default port, replaces XFF, strips cookies and the banner", () => {
+  test("proxies to the default port, replaces XFF, streams, strips the banner", () => {
     expect(live).toContain(`reverse_proxy ${DEFAULT_APPS_HOST}:${DEFAULT_APPS_PORT} {`);
     expect(live).toContain("header_up X-Forwarded-For {remote_host}");
-    expect(live).toContain("header_down -Set-Cookie");
-    expect(live).toMatch(/^\s*-Set-Cookie$/m);
+    expect(live).toContain("flush_interval -1");
+    // Live apps need their cookies (session-apps-container-ports Q5); the
+    // process itself sets none on static and control responses (server.test).
+    expect(live).not.toContain("Set-Cookie");
     expect(live).toMatch(/^\s*-Server$/m);
     expect(live).toContain('Strict-Transport-Security "max-age=31536000"');
     expect(live).not.toMatch(/includeSubDomains|preload|header_up Host/);

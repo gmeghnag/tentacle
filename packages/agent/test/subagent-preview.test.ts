@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CONTAINER_PREVIEW_TOOL,
+  CONTAINER_SHARE_TOOL,
   type ChatRequest,
   type ExecutionEnvironment,
   type ModelProvider,
@@ -25,17 +26,17 @@ const env: ExecutionEnvironment = {
 };
 
 /** A tool of that name that would be dangerous in a child: not read-only. */
-const preview: Tool<unknown> = {
-  name: CONTAINER_PREVIEW_TOOL,
-  description: CONTAINER_PREVIEW_TOOL,
+const exposing = (name: string): Tool<unknown> => ({
+  name,
+  description: name,
   inputSchema: z.unknown(),
   permission: "none",
   concurrency: () => [{ mode: "write", resource: "previews" }],
   execute: async () => ({ content: "done" }),
-};
+});
 
-const parentRegistry = (): ToolRegistry =>
-  new ToolRegistry().register(fsReadTool).register(preview);
+const parentRegistry = (name: string): ToolRegistry =>
+  new ToolRegistry().register(fsReadTool).register(exposing(name));
 
 function recorder(offered: string[][]): ModelProvider {
   return {
@@ -48,37 +49,40 @@ function recorder(offered: string[][]): ModelProvider {
   };
 }
 
-describe("a child agent is never offered container_preview", () => {
-  test('a `general` child (tools: "all") does not get it', async () => {
-    const offered: string[][] = [];
-    const { run } = createSubagentRunner({
-      model: recorder(offered),
-      env,
-      tools: parentRegistry(),
-      types: BUILTIN_AGENT_TYPES,
+describe.each([CONTAINER_PREVIEW_TOOL, CONTAINER_SHARE_TOOL])(
+  "a child agent is never offered %s",
+  (name) => {
+    test('a `general` child (tools: "all") does not get it', async () => {
+      const offered: string[][] = [];
+      const { run } = createSubagentRunner({
+        model: recorder(offered),
+        env,
+        tools: parentRegistry(name),
+        types: BUILTIN_AGENT_TYPES,
+      });
+      await run({ description: "d", prompt: "go", type: "general" });
+      expect(offered[0]).not.toContain(name);
+      expect(offered[0]).toContain("fs_read");
     });
-    await run({ description: "d", prompt: "go", type: "general" });
-    expect(offered[0]).not.toContain(CONTAINER_PREVIEW_TOOL);
-    expect(offered[0]).toContain("fs_read");
-  });
 
-  test("a type naming it does not get it, and stays read-only", async () => {
-    const offered: string[][] = [];
-    const { run, readOnlyType } = createSubagentRunner({
-      model: recorder(offered),
-      env,
-      tools: parentRegistry(),
-      types: [
-        {
-          name: "names-it",
-          description: "an agents/*.md that lists the tool",
-          prompt: "p",
-          tools: ["fs_read", CONTAINER_PREVIEW_TOOL],
-        },
-      ],
+    test("a type naming it does not get it, and stays read-only", async () => {
+      const offered: string[][] = [];
+      const { run, readOnlyType } = createSubagentRunner({
+        model: recorder(offered),
+        env,
+        tools: parentRegistry(name),
+        types: [
+          {
+            name: "names-it",
+            description: "an agents/*.md that lists the tool",
+            prompt: "p",
+            tools: ["fs_read", name],
+          },
+        ],
+      });
+      await run({ description: "d", prompt: "go", type: "names-it" });
+      expect(offered[0]).toEqual(["fs_read"]);
+      expect(readOnlyType("names-it")).toBe(true);
     });
-    await run({ description: "d", prompt: "go", type: "names-it" });
-    expect(offered[0]).toEqual(["fs_read"]);
-    expect(readOnlyType("names-it")).toBe(true);
-  });
-});
+  },
+);

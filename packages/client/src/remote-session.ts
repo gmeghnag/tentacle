@@ -22,6 +22,8 @@ import {
   type JobOutputResult,
   type JobRow,
   JsonRpcErrorCode,
+  type PreviewRow,
+  type PreviewStopResult,
   type QueueState,
   type ScheduleDeleteResult,
   type ScheduleRow,
@@ -70,11 +72,13 @@ import {
   previewCapabilities,
   vanishedSkills,
 } from "./pending-capabilities.ts";
+import { PREVIEWS_UNTRUSTED_DAEMON } from "./previews.ts";
 import { AsyncQueue } from "./queue.ts";
 import {
   type ArtifactReadOptions,
   DocumentsUnavailableError,
   ImagesUnavailableError,
+  type PreviewLinkOutcome,
   type ReadBack,
   type RemoteClient,
   type SessionStreamListener,
@@ -1145,6 +1149,54 @@ export class RemoteSession implements SessionStreamListener {
       listener(now);
     }
     return unsubscribe;
+  }
+
+  /**
+   * The session's container previews as the daemon last reported them (bounded).
+   * Undefined: no report yet, a host that previews nothing, or one this client
+   * does not trust (AGENTS §7).
+   */
+  get previews(): readonly PreviewRow[] | undefined {
+    return this.id ? this.client.previewsOf(this.id) : undefined;
+  }
+
+  /** Subscribe to this session's previews; replays the current list. Returns an unsubscribe. */
+  onPreviews(listener: (rows: readonly PreviewRow[]) => void): () => void {
+    const unsubscribe = this.client.onSessionPreviews((notice) => {
+      if (notice.sessionId === this.id) {
+        listener(notice.rows);
+      }
+    });
+    const now = this.previews;
+    if (now) {
+      listener(now);
+    }
+    return unsubscribe;
+  }
+
+  /**
+   * A shared port's link, secret included, for the person's clipboard. A client
+   * whose daemon is not trusted answers its own refusal and sends nothing.
+   */
+  previewLink(previewId: string): Promise<PreviewLinkOutcome> {
+    if (!this.id) {
+      return Promise.resolve({ ok: false, reason: "this session is not open yet" });
+    }
+    if (!this.daemonWakes) {
+      return Promise.resolve({ ok: false, reason: PREVIEWS_UNTRUSTED_DAEMON });
+    }
+    return this.client.previewLink(this.id, previewId);
+  }
+
+  /** Take one preview (and its public link) down; the same trust rule. */
+  previewStop(previewId: string): Promise<PreviewStopResult> {
+    if (!this.id) {
+      return Promise.resolve({ ok: false, reason: "this session is not open yet" });
+    }
+    if (!this.daemonWakes) {
+      return Promise.resolve({ ok: false, reason: PREVIEWS_UNTRUSTED_DAEMON });
+    }
+    return this.client.previewStop(this.id, previewId);
   }
 
   /**

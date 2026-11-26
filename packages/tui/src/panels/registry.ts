@@ -27,6 +27,7 @@ import { appsKind } from "./apps.ts";
 import { artifactsKind } from "./artifacts.ts";
 import { browserKind } from "./browser.ts";
 import { mcpKind } from "./mcp.ts";
+import { previewsKind } from "./previews.ts";
 import { scheduleKind } from "./schedule.ts";
 import { sessionsKind } from "./sessions.ts";
 import { skillsKind } from "./skills.ts";
@@ -104,6 +105,7 @@ export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [
   artifactsKind,
   scheduleKind,
   appsKind,
+  previewsKind,
   workflowKind,
   browserKind,
 ];

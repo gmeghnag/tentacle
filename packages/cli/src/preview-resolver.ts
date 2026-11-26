@@ -67,6 +67,7 @@ export function enginePreviewResolver(
     engine: PreviewEngine,
     container: string,
     port: number,
+    scope: "link" | undefined,
   ): Promise<PreviewResolution> => {
     if (!CONTAINER_NAME.test(container)) {
       return { ok: false, reason: "that is not a container name or id" };
@@ -94,14 +95,15 @@ export function enginePreviewResolver(
       return { ok: false, transient: true, reason: message(error) };
     }
     const runtimeDir = io.env.XDG_RUNTIME_DIR;
-    return previewTargetOf({ inspect, port, engine, endpoint, runtimeDir });
+    return previewTargetOf({ inspect, port, engine, endpoint, runtimeDir, scope });
   };
 
   return {
-    prepare: (request) => look(request.engine, request.container, request.port),
+    prepare: (request) => look(request.engine, request.container, request.port, request.scope),
+    // A shared row is re-checked by the internet's rules on every dial.
     resolve: async (row) =>
       row.engine === "docker" || row.engine === "podman"
-        ? look(row.engine, row.containerId, row.containerPort)
+        ? look(row.engine, row.containerId, row.containerPort, row.link ? "link" : undefined)
         : { ok: false, reason: "unknown engine" },
   };
 }

@@ -12,6 +12,15 @@
  */
 import { z } from "zod";
 
+/**
+ * The two approvals of a `container_share` ask
+ * (docs/feat/session-apps-container-ports.md): a secret link (offered first),
+ * or PUBLIC. Their own ids, so an answer of a fixed `allow_once` (an older
+ * client's auto-accept) selects nothing.
+ */
+export const SHARE_LINK_OPTION = "share_link";
+export const SHARE_PUBLIC_OPTION = "share_public";
+
 /** At most this many previews per session (the 9th is refused, nothing evicted). */
 export const MAX_PREVIEWS_PER_SESSION = 8;
 /** At most this many open tunnels per device connection. */
@@ -36,8 +45,38 @@ export const PreviewRowSchema = z.object({
   containerPort: z.number().int().min(1).max(65535),
   /** Daemon ms (display only). */
   createdAt: z.number().int().nonnegative(),
+  /**
+   * Present iff the port is also on the INTERNET through the apps host
+   * (docs/feat/session-apps-container-ports.md). Never carries a secret.
+   */
+  link: z
+    .object({
+      /** `https://<id>.<apps domain>/`. */
+      url: z.string().min(1).max(2048),
+      /** The serve's tunnel to the apps host. */
+      state: z.enum(["connecting", "up", "down"]),
+      /** `true`: anyone with the address. `false`: only with the secret link. */
+      public: z.boolean(),
+    })
+    .optional(),
 });
 export type PreviewRow = z.infer<typeof PreviewRowSchema>;
+export type PreviewLinkState = NonNullable<PreviewRow["link"]>["state"];
+
+/**
+ * `session/preview_link`: the link of a shared preview — for a secret one, the
+ * URL that carries the secret. An OWNER principal only (a paired device or a
+ * token), with the session open on that connection. The answer is the only
+ * place the secret leaves the daemon.
+ */
+export const PreviewLinkParamsSchema = z.object({
+  sessionId: z.string().min(1),
+  previewId: z.string().min(1).max(128),
+});
+export type PreviewLinkParams = z.infer<typeof PreviewLinkParamsSchema>;
+
+export const PreviewLinkResultSchema = z.object({ url: z.string().min(1).max(2048) });
+export type PreviewLinkResult = z.infer<typeof PreviewLinkResultSchema>;
 
 /** `session/preview_connect`: device only; the session must be open here. */
 export const PreviewConnectParamsSchema = z.object({
@@ -49,7 +88,10 @@ export type PreviewConnectParams = z.infer<typeof PreviewConnectParamsSchema>;
 export const PreviewConnectResultSchema = z.object({ tunnelId: z.string().min(1) });
 export type PreviewConnectResult = z.infer<typeof PreviewConnectResultSchema>;
 
-/** `session/preview_stop`: device only; removes one preview and closes its tunnels. */
+/**
+ * `session/preview_stop`: an owner (a device or a token); removes one preview,
+ * closes its tunnels and, for a shared one, unpublishes it.
+ */
 export const PreviewStopParamsSchema = z.object({
   sessionId: z.string().min(1),
   previewId: z.string().min(1).max(128),

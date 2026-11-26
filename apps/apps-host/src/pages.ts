@@ -20,7 +20,116 @@ export interface PagesConfig {
   readonly termsUrl: string;
 }
 
-export type NoticeKind = Exclude<View["kind"], "app">;
+export type NoticeKind = Exclude<View["kind"], "app" | "live">;
+
+// ── live apps (docs/feat/session-apps-container-ports.md OD7, OD10) ─────────
+
+export type LiveGate = "app" | "warning" | "forbidden";
+
+/**
+ * Who reaches a live app's tunnel: only a request this very origin started
+ * (`Sec-Fetch-Site: same-origin`) — or a WebSocket handshake with no Fetch
+ * Metadata whose `Origin` is the app's own (browsers always send `Origin` there,
+ * not all send Fetch Metadata). A top-level navigation without it, and a client
+ * that sends no Fetch Metadata at all, gets the warning. Anything else is
+ * refused: fails closed.
+ */
+export function liveVisitorGate(
+  headers: HeaderReader,
+  request: { readonly method: string; readonly upgrade: boolean; readonly origin: string },
+): LiveGate {
+  const site = headers.get("sec-fetch-site");
+  if (site === "same-origin") {
+    return "app";
+  }
+  if (request.upgrade) {
+    return site === null && headers.get("origin") === request.origin ? "app" : "forbidden";
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return "forbidden";
+  }
+  const navigation =
+    headers.get("sec-fetch-mode") === "navigate" && headers.get("sec-fetch-dest") === "document";
+  return site === null || navigation ? "warning" : "forbidden";
+}
+
+/** The warning's Continue target: the very path asked for, never another origin. */
+export function continuePath(pathAndQuery: string): string {
+  return /^\/(?![/\\])/.test(pathAndQuery) ? pathAndQuery : "/";
+}
+
+/** Dropped from a request or a response that crosses the tunnel. */
+const HOP_BY_HOP = new Set([
+  "connection",
+  "keep-alive",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+const hopByHop = (name: string): boolean => HOP_BY_HOP.has(name) || name.startsWith("proxy-");
+
+/**
+ * A visitor's headers as the publisher gets them: without hop-by-hop headers,
+ * the visitor's address and the WebSocket handshake's own.
+ */
+export function liveRequestHeaders(headers: Iterable<[string, string]>): [string, string][] {
+  const out: [string, string][] = [];
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
+    if (
+      !hopByHop(lower) &&
+      lower !== "host" &&
+      lower !== "forwarded" &&
+      !lower.startsWith("x-forwarded-") &&
+      lower !== "x-real-ip" &&
+      !lower.startsWith("sec-websocket-")
+    ) {
+      out.push([lower, value]);
+    }
+  }
+  return out;
+}
+
+/** Forced on every response of a live app (OD10). */
+const LIVE_HEADERS = {
+  "X-Robots-Tag": "noindex, nofollow",
+  "Referrer-Policy": "no-referrer",
+  "Permissions-Policy": ["camera", "microphone", "geolocation", "payment", "usb"]
+    .map((feature) => `${feature}=()`)
+    .join(", "),
+} as const;
+
+/** A cookie that would reach beyond this app's own host. */
+const hasDomain = (cookie: string): boolean => /;\s*domain\s*=/i.test(cookie);
+
+/**
+ * The publisher's response headers as the visitor gets them. The service's own
+ * (its CSP included) pass; hop-by-hop ones, cookies with a `Domain` and the
+ * forced three do not. `head`: a `HEAD` answer keeps its `Content-Length`.
+ */
+export function liveResponseHeaders(
+  headers: readonly (readonly [string, string])[],
+  head: boolean,
+): [string, string][] {
+  const forced = new Set(Object.keys(LIVE_HEADERS).map((name) => name.toLowerCase()));
+  const out: [string, string][] = [];
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
+    if (
+      hopByHop(lower) ||
+      forced.has(lower) ||
+      (lower === "content-length" && !head) ||
+      (lower === "set-cookie" && hasDomain(value)) ||
+      lower.startsWith("sec-websocket-")
+    ) {
+      continue;
+    }
+    out.push([name, value]);
+  }
+  return [...out, ...Object.entries(LIVE_HEADERS)];
+}
 
 export const REPORT_REASONS = ["phishing", "malware", "illegal", "other"] as const;
 export const REPORT_DETAILS_MAX = 2000;
@@ -244,6 +353,7 @@ button:active { filter: brightness(.94); }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 .actions { margin: 1.75rem 0 1rem; }
 .quiet { display: inline-flex; align-items: center; min-height: 2.75rem; font-size: .9375rem; }
+.go { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; padding: .6rem 1.5rem; border-radius: .6rem; background: var(--accent); color: var(--on-accent); font-weight: 600; text-decoration: none; }
 .foot { margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); font-size: .875rem; color: var(--muted); }
 .foot p { font-size: inherit; margin: 0 0 .25rem; }
 label { display: block; margin: 0 0 1.25rem; font-size: .875rem; font-weight: 600; color: var(--fg); }
@@ -446,6 +556,22 @@ export function createPages(config: PagesConfig) {
 <p><a class="quiet" href="${report}">Report this page</a></p>${qr}
 <div class="foot"><p>Or write to ${mail}.</p></div>`,
         { script: true, wrapper: true },
+      );
+    },
+    /**
+     * A live app's first visit: cookieless and scriptless. Continue is a link
+     * of this origin, so the next navigation says `same-origin`.
+     */
+    liveWarning(id: string, pathAndQuery: string): Page {
+      const app = safeId(id);
+      const report = `https://${escapeHtml(config.domain)}/report${app === undefined ? "" : `?app=${app}`}`;
+      return page(
+        "Before you continue",
+        `<p class="lead">This is a live service published by a tentacle user, not by tentacle. tentacle does not review it.</p>
+<p><strong>Do not enter passwords or personal data.</strong></p>
+<div class="actions"><a class="go" href="${escapeHtml(continuePath(pathAndQuery))}">Continue</a></div>
+<p><a class="quiet" href="${report}">Report this page</a></p>
+<div class="foot"><p>Or write to ${mail}.</p></div>`,
       );
     },
     notice(kind: NoticeKind): Page {

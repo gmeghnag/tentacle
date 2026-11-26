@@ -1,5 +1,5 @@
 import type { BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
-import type { AppRow } from "@tentacle/protocol";
+import type { AppRow, PreviewRow } from "@tentacle/protocol";
 /**
  * The panels' state rules and executors (docs/feat/app-decomposition.md S7).
  * Every DECISION stays where it was and stays pure — `panels/registry.ts` +
@@ -29,10 +29,12 @@ import type { SessionController, SessionDirectory } from "./app-types.ts";
 import { appStopNotice } from "./apps-view.ts";
 import { oneLine } from "./commands.ts";
 import { APPS_UNSUPPORTED } from "./commands/apps.ts";
+import { PREVIEWS_UNSUPPORTED } from "./commands/previews.ts";
 import { SCHEDULE_UNSUPPORTED } from "./commands/schedule.ts";
 import { type OpenPanel, applyPanel } from "./panel.ts";
 import { withAppsData } from "./panels/apps.ts";
 import { withBrowserData } from "./panels/browser.ts";
+import { withPreviewsData } from "./panels/previews.ts";
 import { isScheduleOpen, withSchedulesData, withSchedulesState } from "./panels/schedule.ts";
 import {
   deleteFailedNotice,
@@ -50,6 +52,7 @@ import {
   withWorkflowState,
   withWorkflowsData,
 } from "./panels/workflow.ts";
+import { previewCopyNotice, previewStopNotice } from "./previews-view.ts";
 import type { ScheduleDockRow, SchedulesState } from "./schedule-view.ts";
 import type { SessionsState } from "./sessions-panel.ts";
 import type { CatalogueView } from "./workflow-view.ts";
@@ -67,6 +70,8 @@ export type ArtifactsPreview = NonNullable<ArtifactsPanel["preview"]>;
 
 /** The narrow port the panels execute through: the App's own state, setters and refs. */
 export interface PanelsHost {
+  /** Write the system clipboard (`/previews`' copy). */
+  readonly clipboard: (text: string) => Promise<void>;
   readonly panelRef: { readonly current: OpenPanel | null };
   /** `App`'s own `useState` setter: identity-stable, and the one the frame reads. */
   readonly setPanel: (f: (panel: OpenPanel | null) => OpenPanel | null) => void;
@@ -143,6 +148,12 @@ export interface PanelsLayer {
   deleteSchedule(id: string, startedGen: number): void;
   /** An open `/apps` panel follows the daemon's list (session apps D10). */
   setAppsData(rows: readonly AppRow[] | undefined): void;
+  /** An open `/previews` follows the daemon's report. */
+  setPreviewsData(rows: readonly PreviewRow[] | undefined): void;
+  /** `c` in `/previews`: copy a shared one's link. */
+  copyPreviewLink(row: PreviewRow): void;
+  /** `s` in `/previews`: take one down. */
+  stopPreview(row: PreviewRow): void;
   /** Take one app offline; the row leaves on the daemon's own frame. */
   unpublishApp(app: string): void;
   /**
@@ -168,6 +179,7 @@ export interface PanelsLayer {
 export function usePanels(host: PanelsHost): PanelsLayer {
   // Destructured so the callbacks' deps name FIELDS, never the port (Fable H2).
   const { panelRef, setPanel, sessions, switchingRef, columns, pushNotice, sessionRef } = host;
+  const { clipboard } = host;
   const { ownScheduleDeletesRef } = host;
 
   const panelGenRef = useRef(0);
@@ -447,9 +459,56 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     [sessionRef, pushNotice],
   );
 
+  const setPreviewsData = useCallback(
+    (rows: readonly PreviewRow[] | undefined) => setPanel((p) => withPreviewsData(p, rows)),
+    [setPanel],
+  );
+
+  /** The link goes to the clipboard and nowhere else: never into a notice. */
+  const copyPreviewLink = useCallback(
+    (row: PreviewRow): void => {
+      const session = sessionRef.current;
+      if (!session?.previewLink) {
+        pushNotice(PREVIEWS_UNSUPPORTED);
+        return;
+      }
+      const failed = (e: unknown) => pushNotice(previewCopyNotice(row, (e as Error).message));
+      void session.previewLink(row.id).then((result) => {
+        if (!result.ok) {
+          pushNotice(previewCopyNotice(row, result.reason));
+          return;
+        }
+        return clipboard(result.url).then(
+          () => pushNotice(previewCopyNotice(row, undefined)),
+          failed,
+        );
+      }, failed);
+    },
+    [sessionRef, pushNotice, clipboard],
+  );
+
+  const stopPreview = useCallback(
+    (row: PreviewRow): void => {
+      const session = sessionRef.current;
+      if (!session?.previewStop) {
+        pushNotice(PREVIEWS_UNSUPPORTED);
+        return;
+      }
+      void session.previewStop(row.id).then(
+        (result) => pushNotice(previewStopNotice(row.name, result)),
+        (e: unknown) =>
+          pushNotice(previewStopNotice(row.name, { ok: false, reason: (e as Error).message })),
+      );
+    },
+    [sessionRef, pushNotice],
+  );
+
   return {
     panelGenRef,
     panelApply,
+    setPreviewsData,
+    copyPreviewLink,
+    stopPreview,
     setAppsData,
     unpublishApp,
     setSessionsState,

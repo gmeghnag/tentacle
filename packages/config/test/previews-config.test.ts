@@ -11,10 +11,18 @@ const resolve = (fileConfig: Parameters<typeof resolveConfig>[0]["fileConfig"]) 
 
 describe("previews config", () => {
   test("off by default (ships OFF in S1); the file decides", () => {
-    expect(resolve({}).previews).toEqual({ enabled: false });
+    expect(resolve({}).previews).toEqual({ enabled: false, links: false });
     const set = resolve({ previews: { enabled: true } });
-    expect(set.previews).toEqual({ enabled: true });
+    expect(set.previews).toEqual({ enabled: true, links: false });
     expect(set.sources.previewsEnabled).toBe("file");
+  });
+
+  test("internet links ship OFF, and are their own switch", () => {
+    expect(resolve({}).previews.links).toBe(false);
+    const set = resolve({ previews: { enabled: true, links: true } });
+    expect(set.previews).toEqual({ enabled: true, links: true });
+    expect(set.sources.previewsLinks).toBe("file");
+    expect(FileConfigSchema.safeParse({ previews: { links: "yes" } }).success).toBe(false);
   });
 
   test("a strict section", () => {
@@ -28,5 +36,10 @@ describe("previews config", () => {
       "p",
     );
     expect(applied.ok && applied.config.previews).toEqual({ enabled: true });
+    const links = applyProfile(
+      { previews: { enabled: true }, profiles: { p: { previews: { links: true } } } },
+      "p",
+    );
+    expect(links.ok && links.config.previews).toEqual({ enabled: true, links: true });
   });
 });

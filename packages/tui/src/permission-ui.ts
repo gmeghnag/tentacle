@@ -317,6 +317,22 @@ export function buildPermissionChoices(req: PermissionRequest): PermissionChoice
         : []),
     ];
   }
+  // A port on the internet (docs/feat/session-apps-container-ports.md): who may
+  // open it is the person's choice. The secret link is first (pre-selected);
+  // public is never the default.
+  if (req.kind === "container_share") {
+    return [
+      { label: "Share with a secret link", response: { allowed: true, scope: "once" } },
+      {
+        label: "Share PUBLICLY: anyone with the address",
+        response: { allowed: true, scope: "once", choice: "public" },
+      },
+      { label: "No", response: { allowed: false } },
+      ...(req.reply
+        ? [{ label: "No, let's talk about it", response: { allowed: false }, reply: true as const }]
+        : []),
+    ];
+  }
   // A workflow approval (the hash, or an approve step) is ONE human decision:
   // the daemon offers allow-once / deny only (`daemon/src/permission-map.ts`),
   // so an "always" here would be rejected as "option not offered". A browser

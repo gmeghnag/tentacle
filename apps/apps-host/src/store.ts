@@ -89,7 +89,8 @@ function parseRecord(text: string, id: string): AppRecord | undefined {
     typeof value.state === "string" &&
     STATES.has(value.state) &&
     typeof value.sha256 === "string" &&
-    /^[0-9a-f]{64}$/.test(value.sha256) &&
+    (value.kind === undefined || value.kind === "static" || value.kind === "live") &&
+    (value.kind === "live" ? value.sha256 === "" : /^[0-9a-f]{64}$/.test(value.sha256)) &&
     typeof value.bytes === "number" &&
     typeof value.createdAt === "number" &&
     typeof value.updatedAt === "number";

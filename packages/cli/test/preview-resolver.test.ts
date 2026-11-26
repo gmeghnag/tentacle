@@ -52,6 +52,23 @@ function rig(env: Record<string, string> = {}) {
 
 const request = { container: "web", port: 80, engine: "docker" } as const;
 
+describe("a shared port is held to the internet's rules", () => {
+  const powerful = { NetworkMode: "bridge", Privileged: false, CapAdd: ["SYS_ADMIN"] };
+
+  test("prepare with scope link, and every resolve of a shared row", async () => {
+    const r = rig({ DOCKER_HOST: "unix:///run/me/docker.sock" });
+    r.state.answer = { ...inspect, HostConfig: powerful };
+    expect((await r.resolver.prepare(request)).ok).toBe(true);
+    expect((await r.resolver.prepare({ ...request, scope: "link" })).ok).toBe(false);
+    expect((await r.resolver.resolve(row)).ok).toBe(true);
+    const shared: PreviewRow = {
+      ...row,
+      link: { url: "https://x.example.so/", state: "up", public: false },
+    };
+    expect((await r.resolver.resolve(shared)).ok).toBe(false);
+  });
+});
+
 describe("prepare", () => {
   test("the engine's facts, from the env's unix socket", async () => {
     const r = rig({ DOCKER_HOST: "unix:///run/me/docker.sock" });

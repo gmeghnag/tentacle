@@ -145,6 +145,7 @@ describe("S2 registry: the ONE list, and the vocabulary derived from it", () => 
       "/artifacts",
       "/schedule",
       "/apps",
+      "/previews",
       "/workflow",
       "/agents",
       "/settings",

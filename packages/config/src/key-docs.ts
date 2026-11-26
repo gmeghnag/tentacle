@@ -35,6 +35,7 @@ import {
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MODEL,
   DEFAULT_PREVIEWS_ENABLED,
+  DEFAULT_PREVIEWS_LINKS,
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
   DEFAULT_SCHEDULES_EXPIRY_DAYS,
@@ -1012,6 +1013,19 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     sourceKey: "previewsEnabled",
     details:
       "A running Docker or Podman container on the `serve` host whose web port is published on loopback (`-p 127.0.0.1:<host>:<port>`) can be opened by your paired devices, over their own encrypted link: no public URL. You approve every one (never «always», never auto-accept); the prompt shows what the engine reports. Host-network, privileged and engine-socket containers and remote engines are refused. Only `serve` offers it — never the local worker, never a pod daemon. OFF until you turn it on.",
+    example: "true",
+  },
+  "previews.links": {
+    summary: "Offer the agent `container_share`: a container port on the internet.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    default: () => DEFAULT_PREVIEWS_LINKS,
+    resolved: (c) => c.previews.links,
+    sourceKey: "previewsLinks",
+    details:
+      "Needs `previews.enabled`. A container's web port on the `serve` host can be put at `https://<id>.<apps.domain>/` through a tunnel `serve` dials out (no port opens on your side). You approve every one and choose who may open it: whoever has a secret link (default), or anyone with the address (public). Never «always», never auto-accept. Stricter than a device preview: host namespaces, powerful added capabilities, devices and unconfined containers are refused. TLS ends at the apps host. It lasts while the session is open. Only `serve` offers it. OFF until you turn it on.",
     example: "true",
   },
   apps: {

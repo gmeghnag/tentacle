@@ -9,6 +9,12 @@ import type { PreviewRow } from "@tentacle/protocol";
 /** Proposes a running container's port to the paired devices; asks the owner, every time. */
 export const CONTAINER_PREVIEW_TOOL = "container_preview";
 
+/**
+ * Proposes a running container's port to the INTERNET through the apps host
+ * (docs/feat/session-apps-container-ports.md); asks the owner, every time.
+ */
+export const CONTAINER_SHARE_TOOL = "container_share";
+
 export type PreviewEngine = "docker" | "podman";
 
 /** What the model asks for. `container` and `port` are only lookup keys. */
@@ -16,6 +22,8 @@ export interface PreviewRequest {
   readonly container: string;
   readonly port: number;
   readonly engine: PreviewEngine;
+  /** `link`: to be put on the internet, so checked more strictly. */
+  readonly scope?: "link";
 }
 
 /** Everything here is read from the ENGINE (never the model's strings). */
@@ -67,4 +75,19 @@ export interface PreviewsLink {
   prepare(request: PreviewRequest): Promise<PreviewResolution>;
   /** Record an APPROVED preview. Refused (nothing evicted) past the cap or after a close. */
   add(facts: PreviewFacts): { readonly ok: true; readonly row: PreviewRow } | PreviewRefusal;
+  /** Present iff this host puts container ports on the internet. */
+  readonly share?: PreviewSharing | undefined;
+}
+
+export interface PreviewSharing {
+  /** The apps domain a share goes through (the ask names it). */
+  readonly domain: string;
+  /**
+   * Put an APPROVED port on the internet (`public`: no secret needed). The row's
+   * URL never carries the secret.
+   */
+  add(
+    facts: PreviewFacts,
+    options: { readonly public: boolean; readonly signal?: AbortSignal },
+  ): Promise<{ readonly ok: true; readonly row: PreviewRow } | PreviewRefusal>;
 }

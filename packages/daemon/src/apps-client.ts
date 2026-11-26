@@ -38,6 +38,20 @@ export interface AppsFailure {
 export type AppsLeaseOutcome = { readonly ok: true; readonly lease: AppsLeaseResult } | AppsFailure;
 export type AppsRemoveOutcome = { readonly ok: true } | AppsFailure;
 
+/** Where and how to dial one live app's tunnel. */
+export interface TunnelDial {
+  readonly url: string;
+  readonly headers: Record<string, string>;
+}
+
+/** What a shared port calls (docs/feat/session-apps-container-ports.md S3). */
+export interface LiveAppsApi {
+  createLive(signal?: AbortSignal): Promise<AppsLeaseOutcome>;
+  signTunnel(id: string): Promise<TunnelDial>;
+  probeTunnel(id: string): Promise<AppsRemoveOutcome>;
+  remove(id: string): Promise<AppsRemoveOutcome>;
+}
+
 /** What the session logic calls (a test passes a fake). */
 export interface AppsApi {
   create(bytes: Uint8Array): Promise<AppsLeaseOutcome>;
@@ -78,7 +92,7 @@ type Answer =
   | { readonly ok: true; readonly status: number; readonly body: unknown }
   | (AppsFailure & { readonly serverTime?: number });
 
-export class AppsClient implements AppsApi {
+export class AppsClient implements AppsApi, LiveAppsApi {
   private readonly domain: string;
   private readonly baseUrl: string;
   /** Host clock minus ours, learned from a `clock_skew` answer. */
@@ -99,6 +113,30 @@ export class AppsClient implements AppsApi {
 
   renew(id: string, signal?: AbortSignal): Promise<AppsLeaseOutcome> {
     return this.lease("POST", `/v1/apps/${id}/lease`, undefined, id, signal);
+  }
+
+  /** A new live app (docs/feat/session-apps-container-ports.md): no content. */
+  createLive(signal?: AbortSignal): Promise<AppsLeaseOutcome> {
+    return this.lease("POST", "/v1/apps/live", undefined, undefined, signal);
+  }
+
+  /** A live app's signed tunnel upgrade: fresh headers every time. */
+  async signTunnel(id: string): Promise<TunnelDial> {
+    const path = `/v1/apps/${id}/tunnel`;
+    return {
+      url: `${this.baseUrl.replace(/^http/, "ws")}${path}`,
+      headers: await this.signedHeaders("GET", path),
+    };
+  }
+
+  /**
+   * Why the tunnel upgrade of an app was not even answered: the same signed GET
+   * without the upgrade says it in words (and teaches the clock offset). It
+   * changes nothing on the host; an admissible app answers `bad_request`.
+   */
+  async probeTunnel(id: string): Promise<AppsRemoveOutcome> {
+    const answer = await this.send("GET", `/v1/apps/${id}/tunnel`);
+    return answer.ok ? { ok: true } : answer;
   }
 
   async remove(id: string): Promise<AppsRemoveOutcome> {
@@ -155,6 +193,35 @@ export class AppsClient implements AppsApi {
     return (this.opts.now ?? Date.now)();
   }
 
+  /** `Host` and the four signature headers of one request, signed now. */
+  private async signedHeaders(
+    method: string,
+    path: string,
+    bytes?: Uint8Array,
+  ): Promise<Record<string, string>> {
+    const random = this.opts.random ?? ((n) => crypto.getRandomValues(new Uint8Array(n)));
+    const date = String(this.now() + this.offset);
+    const nonce = encodeBase64Url(random(APPS_NONCE_BYTES));
+    const payload = appsSigningPayload({
+      method,
+      domain: this.domain,
+      path,
+      date,
+      nonce,
+      bodySha256Hex: createHash("sha256")
+        .update(bytes ?? new Uint8Array())
+        .digest("hex"),
+    });
+    const signature = await this.opts.key.sign(new TextEncoder().encode(payload));
+    return {
+      host: this.domain,
+      [APPS_HEADERS.key]: this.opts.key.publicKey,
+      [APPS_HEADERS.date]: date,
+      [APPS_HEADERS.nonce]: nonce,
+      [APPS_HEADERS.signature]: encodeBase64Url(signature),
+    };
+  }
+
   private async attempt(
     method: string,
     path: string,
@@ -172,20 +239,7 @@ export class AppsClient implements AppsApi {
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted === true) timeout.abort();
     try {
-      const random = this.opts.random ?? ((n) => crypto.getRandomValues(new Uint8Array(n)));
-      const date = String(this.now() + this.offset);
-      const nonce = encodeBase64Url(random(APPS_NONCE_BYTES));
-      const payload = appsSigningPayload({
-        method,
-        domain: this.domain,
-        path,
-        date,
-        nonce,
-        bodySha256Hex: createHash("sha256")
-          .update(bytes ?? new Uint8Array())
-          .digest("hex"),
-      });
-      const signature = await this.opts.key.sign(new TextEncoder().encode(payload));
+      const signed = await this.signedHeaders(method, path, bytes);
       // Aborted while signing: nothing is sent.
       if (timeout.signal.aborted) throw new Error("aborted");
       const doFetch = this.opts.fetch ?? ((url, init) => fetch(url, init));
@@ -194,12 +248,8 @@ export class AppsClient implements AppsApi {
         redirect: "manual",
         signal: timeout.signal,
         headers: {
-          host: this.domain,
+          ...signed,
           ...(bytes === undefined ? {} : { "content-type": "text/html; charset=utf-8" }),
-          [APPS_HEADERS.key]: this.opts.key.publicKey,
-          [APPS_HEADERS.date]: date,
-          [APPS_HEADERS.nonce]: nonce,
-          [APPS_HEADERS.signature]: encodeBase64Url(signature),
         },
         ...(bytes === undefined ? {} : { body: bytes }),
       });

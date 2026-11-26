@@ -113,6 +113,7 @@ import {
   createAppPublishTool,
   createAppUnpublishTool,
   createContainerPreviewTool,
+  createContainerShareTool,
   createContextResetTool,
   createFsReadTool,
   createImageViewTool,
@@ -1520,6 +1521,16 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         ask: (req, opts) => permissions.request(req, opts),
       }),
     );
+    // The same port on the INTERNET: its own switch
+    // (docs/feat/session-apps-container-ports.md OD11).
+    if (config.previews.enabled && config.previews.links) {
+      tools.register(
+        createContainerShareTool({
+          link: options.previews,
+          ask: (req, opts) => permissions.request(req, opts),
+        }),
+      );
+    }
   }
 
   const agent = new Agent({

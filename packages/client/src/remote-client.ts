@@ -78,6 +78,9 @@ import {
   type OpenResult,
   PROTOCOL_VERSION,
   type PinResult,
+  type PreviewLinkResult,
+  type PreviewRow,
+  type PreviewStopResult,
   type PromptContentBlock,
   type PromptResult,
   type QueueState,
@@ -171,6 +174,7 @@ import {
   type PermissionSendAction,
   type RouterAction,
 } from "./permission-router.ts";
+import { PREVIEWS_BAD_LINK, PREVIEWS_OLD_DAEMON, boundPreviews, copyableLink } from "./previews.ts";
 import {
   ArtifactCorruptError,
   ArtifactLinkLostError,
@@ -474,6 +478,20 @@ export interface SessionAppsNotice {
   readonly sessionId: string;
   readonly rows: readonly AppRow[];
 }
+
+/**
+ * The session's container previews as the daemon reports them (the FULL list,
+ * bounded here), read only by a client that trusts its daemon (as `apps`).
+ */
+export interface SessionPreviewsNotice {
+  readonly sessionId: string;
+  readonly rows: readonly PreviewRow[];
+}
+
+/** What asking for a shared port's link came to. */
+export type PreviewLinkOutcome =
+  | { readonly ok: true; readonly url: string }
+  | { readonly ok: false; readonly reason: string };
 
 /**
  * The session's workflow runs as the daemon reports them (a `workflows` update,
@@ -827,6 +845,8 @@ interface Snap {
   readonly schedules?: readonly ScheduleRow[];
   /** The published apps at the cut (absent: not reported — older, apps off, or a pod). */
   readonly apps?: readonly AppRow[];
+  /** The container previews at the cut (absent: not reported — none are possible there). */
+  readonly previews?: readonly PreviewRow[];
   /** The workflow runs at the cut (absent: an older daemon, or a pod daemon). */
   readonly workflows?: readonly WorkflowRow[];
   /**
@@ -901,6 +921,8 @@ interface SessionEntry {
   schedules: readonly ScheduleRow[] | undefined;
   /** The daemon's last reported published apps; undefined until it reports a list. */
   apps: readonly AppRow[] | undefined;
+  /** The daemon's last reported container previews; undefined until it reports a list. */
+  previews: readonly PreviewRow[] | undefined;
   /** The daemon's last reported workflow runs; undefined until it reports one. */
   workflows: readonly WorkflowRow[] | undefined;
   /** The session's newest settings report (an open's, an own sync's, a `session_settings`). */
@@ -1021,6 +1043,7 @@ export class RemoteClient {
   private readonly jobListeners = new Set<(notice: SessionJobsNotice) => void>();
   private readonly scheduleListeners = new Set<(notice: SessionSchedulesNotice) => void>();
   private readonly appListeners = new Set<(notice: SessionAppsNotice) => void>();
+  private readonly previewListeners = new Set<(notice: SessionPreviewsNotice) => void>();
   private readonly workflowListeners = new Set<(notice: SessionWorkflowsNotice) => void>();
   private readonly subagentNotifyListeners = new Set<
     (notice: SessionSubagentNotifyNotice) => void
@@ -1657,6 +1680,53 @@ export class RemoteClient {
       (error: unknown): AppUnpublishResult => {
         if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
           return { ok: false, reason: APPS_OLD_DAEMON };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /** Subscribe to container-preview changes across all sessions. */
+  onSessionPreviews(listener: (notice: SessionPreviewsNotice) => void): () => void {
+    this.previewListeners.add(listener);
+    return () => this.previewListeners.delete(listener);
+  }
+
+  /** The session's container previews as last reported; undefined if never reported. */
+  previewsOf(sessionId: string): readonly PreviewRow[] | undefined {
+    return this.sessions.get(sessionId)?.previews;
+  }
+
+  /**
+   * `session/preview_link` (docs/feat/session-apps-container-ports.md): the link
+   * of a shared port, secret included — for the person's clipboard, never kept.
+   * The caller must hold the trust bit.
+   */
+  previewLink(sessionId: string, previewId: string): Promise<PreviewLinkOutcome> {
+    return this.sessionCall(sessionId, Method.PreviewLink, { sessionId, previewId }, "once").then(
+      (result): PreviewLinkOutcome => {
+        const url = copyableLink((result as PreviewLinkResult).url);
+        return url === undefined ? { ok: false, reason: PREVIEWS_BAD_LINK } : { ok: true, url };
+      },
+      (error: unknown): PreviewLinkOutcome => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { ok: false, reason: PREVIEWS_OLD_DAEMON };
+        }
+        if (error instanceof RpcError && error.code === DomainErrorCode.PreviewGone) {
+          return { ok: false, reason: "it is no longer shared" };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /** `session/preview_stop`: take one preview (and its public link) down. */
+  previewStop(sessionId: string, previewId: string): Promise<PreviewStopResult> {
+    return this.sessionCall(sessionId, Method.PreviewStop, { sessionId, previewId }, "once").then(
+      (result) => result as PreviewStopResult,
+      (error: unknown): PreviewStopResult => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { ok: false, reason: PREVIEWS_OLD_DAEMON };
         }
         throw error;
       },
@@ -3808,6 +3878,7 @@ export class RemoteClient {
       jobs: undefined,
       schedules: undefined,
       apps: undefined,
+      previews: undefined,
       workflows: undefined,
       settings: undefined,
       unflushedExits: 0,
@@ -3871,6 +3942,14 @@ export class RemoteClient {
     entry.schedules = rows;
     for (const listener of this.scheduleListeners) {
       listener({ sessionId: entry.id, rows, count });
+    }
+  }
+
+  /** The container previews now (a `previews` update, or a resync's snapshot). */
+  private previewsChanged(entry: SessionEntry, rows: readonly PreviewRow[]): void {
+    entry.previews = boundPreviews(rows);
+    for (const listener of this.previewListeners) {
+      listener({ sessionId: entry.id, rows: entry.previews });
     }
   }
 
@@ -4325,6 +4404,9 @@ export class RemoteClient {
     if (snap.apps && this.daemonWakes) {
       this.appsChanged(entry, snap.apps);
     }
+    if (snap.previews && this.daemonWakes) {
+      this.previewsChanged(entry, snap.previews);
+    }
     // The runs at the cut: the same fold, under the SAME trust bit the live frame
     // is (`daemonWakes`) — a pod's list is a pod-supplied claim about the
     // laptop's runs, whose approve steps the laptop would be asked to answer.
@@ -4520,6 +4602,12 @@ export class RemoteClient {
         // table this client should act on (AGENTS §7, a pod is not trusted).
         if (this.daemonWakes) {
           this.schedulesChanged(entry, boundSchedules(update.schedules), update.schedules.length);
+        }
+      } else if (update.type === "previews") {
+        // Not turn-scoped, and DROPPED without the trust bit: a pod shares no
+        // container of the laptop's, and its URL is never one to copy (AGENTS §7).
+        if (this.daemonWakes) {
+          this.previewsChanged(entry, update.previews);
         }
       } else if (update.type === "apps") {
         // Not turn-scoped, and DROPPED without the trust bit: a pod publishes no
@@ -4719,6 +4807,7 @@ export class RemoteClient {
       ...(first?.jobs ? { jobs: first.jobs } : {}),
       ...(first?.schedules ? { schedules: first.schedules } : {}),
       ...(first?.apps ? { apps: first.apps } : {}),
+      ...(first?.previews ? { previews: first.previews } : {}),
       ...(first?.workflows ? { workflows: first.workflows } : {}),
     };
   }

@@ -2,9 +2,17 @@
 
 export type AppState = "live" | "expired" | "deleted" | "taken_down";
 
+/**
+ * `static`: a page the host keeps. `live`: a service reached through the
+ * publisher's tunnel; it has no content (`sha256` empty, `bytes` 0).
+ */
+export type AppKind = "static" | "live";
+
 export interface AppRecord {
   readonly v: 1;
   readonly id: string;
+  /** Absent: `static`. */
+  readonly kind?: AppKind;
   /** The publisher's public key (base64url): the owner. */
   readonly ownerKey: string;
   readonly state: AppState;

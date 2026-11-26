@@ -15,6 +15,7 @@ import type {
   DocumentContent,
   JobOutputResult,
   JobRow,
+  PreviewRow,
   WorkflowApproveResult,
   WorkflowCatalogueResult,
   WorkflowDeleteResult,
@@ -377,6 +378,15 @@ export interface SessionController {
   onApps?(listener: (rows: readonly AppRow[]) => void): (() => void) | undefined;
   /** Take one app offline (`session/app_unpublish`); a refusal is a result with a reason. */
   unpublishApp?(app: string): Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * The session's container previews (docs/feat/session-apps-container-ports.md
+   * S4), bounded by the client: the current list at once, then every change.
+   */
+  onPreviews?(listener: (rows: readonly PreviewRow[]) => void): (() => void) | undefined;
+  /** A shared one's link, secret included: for the clipboard only. */
+  previewLink?(id: string): Promise<{ ok: true; url: string } | { ok: false; reason: string }>;
+  /** Take one preview (and its public link) down. */
+  previewStop?(id: string): Promise<{ ok: boolean; reason?: string }>;
   /**
    * The session's workflow runs (`workflows`, docs/feat/workflows-ui.md D2): the
    * current run plus the last few ended, bounded and sanitized by the client (a

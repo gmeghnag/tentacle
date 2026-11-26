@@ -571,6 +571,8 @@ const settingsShape = {
     .object({
       /** Default: disabled. */
       enabled: z.boolean().optional(),
+      /** `container_share`: a port on the internet. Default: disabled. */
+      links: z.boolean().optional(),
     })
     .strict()
     .optional(),

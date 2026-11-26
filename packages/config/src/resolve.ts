@@ -31,6 +31,7 @@ import {
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MODEL,
   DEFAULT_PREVIEWS_ENABLED,
+  DEFAULT_PREVIEWS_LINKS,
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
   DEFAULT_SCHEDULES_EXPIRY_DAYS,
@@ -118,6 +119,8 @@ export interface WorkloadShellConfig {
  */
 export interface PreviewsConfig {
   readonly enabled: boolean;
+  /** `container_share` too (needs `enabled`). */
+  readonly links: boolean;
 }
 
 /**
@@ -365,6 +368,7 @@ export interface ResolvedConfig {
     readonly sessionHopTool: Source;
     readonly workloadShellTool: Source;
     readonly previewsEnabled: Source;
+    readonly previewsLinks: Source;
     readonly appsEnabled: Source;
     readonly appsDomain: Source;
     readonly schedulesMaxJobs: Source;
@@ -777,6 +781,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   );
   // File-only: the host that would show a container decides.
   const previewsEnabled = pick(undefined, fileConfig.previews?.enabled, DEFAULT_PREVIEWS_ENABLED);
+  const previewsLinks = pick(undefined, fileConfig.previews?.links, DEFAULT_PREVIEWS_LINKS);
   // File-only: the host that would publish decides.
   const appsEnabled = pick(undefined, fileConfig.apps?.enabled, DEFAULT_APPS_ENABLED);
   const appsDomain = pick(undefined, fileConfig.apps?.domain, DEFAULT_APPS_DOMAIN);
@@ -919,7 +924,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     },
     sessionHop: { tool: sessionHopTool.value },
     workloadShell: { tool: workloadShellTool.value },
-    previews: { enabled: previewsEnabled.value },
+    previews: { enabled: previewsEnabled.value, links: previewsLinks.value },
     apps: { enabled: appsEnabled.value, domain: appsDomain.value },
     schedules: {
       maxJobs: schedulesMaxJobs.value,
@@ -1011,6 +1016,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       sessionHopTool: sessionHopTool.source,
       workloadShellTool: workloadShellTool.source,
       previewsEnabled: previewsEnabled.source,
+      previewsLinks: previewsLinks.source,
       appsEnabled: appsEnabled.source,
       appsDomain: appsDomain.source,
       schedulesMaxJobs: schedulesMaxJobs.source,

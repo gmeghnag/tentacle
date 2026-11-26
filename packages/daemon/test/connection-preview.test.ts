@@ -34,7 +34,9 @@ import { Connection, type ConnectionPrincipal } from "../src/connection.ts";
 import { type PreviewDial, dialLoopback } from "../src/preview-tunnels.ts";
 import { type AgentContext, SessionHost } from "../src/session-host.ts";
 import { type DaemonStore, SessionPersister } from "../src/session-persister.ts";
+import type { ShareStarter } from "../src/session-previews.ts";
 import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
+import { fakeSharer } from "./support/sharer.ts";
 
 const ID = "a".repeat(64);
 const facts = (over: Partial<PreviewFacts> = {}): PreviewFacts => ({
@@ -109,7 +111,7 @@ const model: ModelProvider = {
   },
 };
 
-function rig(opts: { previews?: boolean; store?: DaemonStore } = {}) {
+function rig(opts: { previews?: boolean; store?: DaemonStore; shares?: ShareStarter } = {}) {
   const engine = new FakeEngine();
   const contexts: AgentContext[] = [];
   const persister = opts.store
@@ -119,6 +121,7 @@ function rig(opts: { previews?: boolean; store?: DaemonStore } = {}) {
     defaultCwd: "/tmp/p",
     ...(persister ? { persister } : {}),
     ...(opts.previews === false ? {} : { previews: engine }),
+    ...(opts.shares ? { shares: opts.shares } : {}),
     createAgent: (_cwd, context) => {
       contexts.push(context);
       const permissions = context.reuse?.permissions ?? new PermissionBroker();
@@ -216,14 +219,15 @@ describe("who may open a tunnel", () => {
     const row = r.add();
     const tui = await r.connect({ kind: "token" });
     await tui.open();
-    for (const method of [Method.PreviewConnect, Method.PreviewStop]) {
-      await expect(tui.request(method, { previewId: row.id })).rejects.toMatchObject({
-        code: DomainErrorCode.Unauthorized,
-      });
-    }
+    await expect(tui.connectTo(row.id)).rejects.toMatchObject({
+      code: DomainErrorCode.Unauthorized,
+    });
     expect(r.engine.resolved).toEqual([]);
     expect(u.accepted).toBe(0);
     expect((await phone.snapshot()).previews).toHaveLength(1);
+    // Stopping is not a tunnel: the owner's terminal may.
+    const stopped = await tui.request<unknown>(Method.PreviewStop, { previewId: row.id });
+    expect(stopped).toEqual({ ok: true });
   });
 
   test("the session not open on this connection → UnknownSession", async () => {
@@ -237,6 +241,67 @@ describe("who may open a tunnel", () => {
     });
     await expect(other.request(Method.PreviewStop, { previewId: row.id })).rejects.toMatchObject({
       code: DomainErrorCode.UnknownSession,
+    });
+  });
+});
+
+describe("session/preview_link (a shared port's link)", () => {
+  const shared = async () => {
+    const sharer = fakeSharer();
+    const r = rig({ shares: sharer });
+    const tui = await r.connect({ kind: "token" });
+    await tui.open();
+    const added = await r.link().share?.add(facts(), { public: false });
+    if (!added?.ok) throw new Error("not shared");
+    return { r, tui, sharer, row: added.row };
+  };
+
+  test("a token and a device read the secret link; the row never carries it", async () => {
+    const { r, tui, sharer, row } = await shared();
+    const secret = sharer.opened[0]?.secret ?? "missing";
+    const url = `${sharer.url(0)}__tentacle/cap/${secret}`;
+    const asTui = await tui.request<unknown>(Method.PreviewLink, { previewId: row.id });
+    expect(asTui).toEqual({ url });
+    const phone = await r.connect();
+    await phone.open();
+    const asPhone = await phone.request<unknown>(Method.PreviewLink, { previewId: row.id });
+    expect(asPhone).toEqual({ url });
+    expect(JSON.stringify(await tui.snapshot())).not.toContain(secret);
+  });
+
+  test("the session not open on this connection → UnknownSession", async () => {
+    const { r, row } = await shared();
+    const other = await r.connect({ kind: "device", id: "d2" });
+    await expect(other.request(Method.PreviewLink, { previewId: row.id })).rejects.toMatchObject({
+      code: DomainErrorCode.UnknownSession,
+    });
+  });
+
+  test("a pairing connection → Unauthorized", async () => {
+    const { r, row } = await shared();
+    const pairing = await r.connect({
+      kind: "pairing",
+      pair: (async () => {
+        throw new Error("never");
+      }) as never,
+    });
+    await expect(pairing.request(Method.PreviewLink, { previewId: row.id })).rejects.toMatchObject({
+      code: DomainErrorCode.Unauthorized,
+    });
+  });
+
+  test("a preview that is not shared has no link; a stopped share neither", async () => {
+    const { r, tui, row, sharer } = await shared();
+    const device = r.add();
+    for (const previewId of [device.id, "nope"]) {
+      await expect(tui.request(Method.PreviewLink, { previewId })).rejects.toMatchObject({
+        code: DomainErrorCode.PreviewGone,
+      });
+    }
+    await tui.request(Method.PreviewStop, { previewId: row.id });
+    expect(sharer.stopped).toEqual([0]);
+    await expect(tui.request(Method.PreviewLink, { previewId: row.id })).rejects.toMatchObject({
+      code: DomainErrorCode.PreviewGone,
     });
   });
 });

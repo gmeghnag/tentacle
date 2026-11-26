@@ -271,6 +271,12 @@ variable), then `systemctl daemon-reload && systemctl restart apps-host`.
 | `--sweep-ms` | 10000 | how late removals happen |
 | `--snapshot-ms` | 30000 | disk writes against restart accuracy |
 | `--operator-stale-ms` | 1000 | how late the kill switch acts |
+| `--max-live-tunnels` | 200 | memory, sockets: live apps connected at once |
+| `--max-streams-per-app` | 64 | memory (256 KiB window per direction per stream) |
+| `--max-live-streams` | 4000 | memory, sockets, all live apps together |
+| `--live-bytes-per-day` | 1 GiB | egress and ingress per live app |
+| `--live-requests-per-minute-per-ip` | 600 | one visitor's share (dev servers load many modules) |
+| `--live-stream-idle-ms` | 120000 | how long a silent HTTP stream holds its slot |
 
 Disk: check `df -h /var/lib/tentacle-apps` against `--max-store-bytes` plus
 tombstone records. Journal retention (30 days) is a host-wide journald setting
@@ -285,6 +291,25 @@ restorecon -Rv /opt/tentacle-apps-host
 systemctl restart apps-host
 curl -sS https://apps.tentacle.so/healthz
 ```
+
+### Live apps (container links): the one-time Caddy change
+
+`docs/feat/session-apps-container-ports.md`. **The owner's step, after their OK.**
+Live apps need their own cookies, so the site block no longer strips
+`Set-Cookie` (neither direction) and adds `flush_interval -1` (streaming):
+
+1. Upgrade the binary FIRST (the steps above): it sets no cookie on static and
+   control responses, and drops a `Domain` cookie from a live app.
+2. Install the new `deploy/Caddyfile.apps` as `/etc/caddy/apps.tentacle.so.caddy`,
+   then `caddy validate` and `caddy reload`.
+3. `curl -sSI https://apps.tentacle.so/healthz` and one static app: no
+   `Set-Cookie`. Check that nothing on `tentacle.so` relies on cookies (a live
+   app's script can still set one for `.tentacle.so` until the separate domain).
+4. TLS ends at this Caddy: visitor traffic to a live app, and a secret link, pass
+   through this box in clear. Nothing logs them.
+
+Rolling back the binary to one without live apps: restore the two `Set-Cookie`
+strip lines too.
 
 A restart keeps records, content and tombstones; apps live at the last snapshot
 get one fresh lease. For a few seconds after it, a publisher whose clock runs

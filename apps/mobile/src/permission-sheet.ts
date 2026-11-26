@@ -52,7 +52,13 @@ import { stripAnsi } from "./ansi.ts";
 export const ARM_MS = 400;
 
 /** The options the daemon offers, as the app spells them (`permission-map.ts`). */
-export type SheetOptionId = "allow_once" | "allow_always" | "reject_once" | "reply";
+export type SheetOptionId =
+  | "allow_once"
+  | "allow_always"
+  | "reject_once"
+  | "reply"
+  /** A `container_share` made PUBLIC; its secret link is `allow_once`. */
+  | "share_public";
 
 export interface SheetOption {
   readonly optionId: SheetOptionId;
@@ -301,6 +307,18 @@ export function sheetOptions(req: PermissionRequest): readonly SheetOption[] {
         : []),
     ];
   }
+  // A port on the internet (docs/feat/session-apps-container-ports.md): the
+  // secret link first, public only by its own button.
+  if (req.kind === "container_share") {
+    return [
+      { optionId: "allow_once", label: "Share with a secret link", kind: "allow" },
+      { optionId: "share_public", label: "Share PUBLICLY: anyone with the address", kind: "allow" },
+      { optionId: "reject_once", label: "No", kind: "deny" },
+      ...(req.reply !== undefined
+        ? ([{ optionId: "reply", label: "No, let's talk about it", kind: "reply" }] as const)
+        : []),
+    ];
+  }
   const always =
     req.suggestion !== undefined
       ? `Allow \`${req.suggestion.prefix}\` commands for this session`
@@ -351,6 +369,8 @@ export function responseFor(
       return { allowed: true, scope: "once" };
     case "allow_always":
       return { allowed: true, scope: "session" };
+    case "share_public":
+      return { allowed: true, scope: "once", choice: "public" };
     case "reject_once":
       return { allowed: false };
     case "reply":
@@ -730,6 +750,7 @@ export interface OptionStyle {
 const OPTION_STYLE: Readonly<Record<string, OptionStyle>> = {
   allow_once: { pill: "primary", icon: null },
   allow_always: { pill: "secondary", icon: null },
+  share_public: { pill: "secondary", icon: null },
   reject_once: { pill: "destructive", icon: null },
   reply: { pill: "neutral", icon: "bubble.left" },
 };
