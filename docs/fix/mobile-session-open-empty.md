@@ -520,4 +520,64 @@ this fix the first leave already detached it.
 
 ## Review
 
-*— pending*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner,
+different from the DeepSeek executor)
+
+**Verdict: REQUEST-CHANGES** (one vacuous test, one unmet gate; the controller is sound).
+
+**Findings**
+1. **MEDIUM — the run route's `pop` test is vacuous.**
+   `apps/mobile/test/workflow-screens-wiring.test.ts:97`
+   `between(APP, "onOpenSession={", "</Stack.Screen>")` anchors on the FIRST
+   `onOpenSession={`, which is `App.tsx:2291` (`WorkflowRunRoute`). Its span runs
+   to `App.tsx:3574` and so contains the push queue's `pop: true` +
+   `sessionReturnParams(` (`App.tsx:2937-2944`). Mutation: drop `pop: true` at
+   `App.tsx:3845` → all 30 tests stay green. Drop it at `:2943` instead → BOTH
+   tests go red. So N2, the navigation fix for trigger 1, is not pinned. The
+   Execution's mutation table (`:501`, "applied together") hid this. Fix: anchor
+   on `onOpenSession={() =>`, or on `name="WorkflowRun"`.
+2. **MEDIUM — the plan's acceptance gate is not met.** There is no flow 48, no
+   `--only 06,45,48` run and no step-0 simulator rate (Execution `:462-463`,
+   stated honestly). The whole N layer (`getId`, the object-form `navigate` with
+   `pop`, N3, N4) has never run in React Navigation at runtime. Only static
+   wiring tests cover it. Owner rule: "pixels unverified" ≠ done. Run it before
+   merge, or have the orchestrator waive it explicitly.
+
+**Gate (narrow, as asked).** Touched files: 56 pass / 0 fail (4 files). `bun run
+lint`: clean. `bun run typecheck`: clean. I did not run the full `bun run test`.
+
+**Mutations** (each reverted; `git status` clean afterwards):
+- C1 never-subscribe: 5 red.
+- Pending cancel ignores identity: 2 red (T4 among them).
+- Watched leave ignores identity: 3 red (B, D, T2).
+- Run-route `pop` removed: **0 red** (finding 1).
+- Push-queue `pop` removed: 2 red.
+
+**Premises:**
+- `remote-session.ts:747-751` and `1041-1050` (single delivery): TRUE.
+- `StackRouter.tsx:379-384`, `406-420`, `425-443` and `444-455` (v7.6.5): TRUE.
+
+**Attacks tried**
+- **R1 — duplicate screens, then a foreground return.** Every mounted screen
+  resyncs (`SessionScreen.tsx:461-469`). Run as a scratch test against the real
+  daemon: the stale lower screen takes over first and the top screen takes it
+  back (serialised in mount order). Top stays alive; cost is 3 detaches. No
+  finding.
+- **Takeover of a held entry vs the run screen's handle.** `onWorkflows` is
+  client-level and filtered by id (`remote-session.ts:1332-1337`), so it survives
+  the old handle's detach. The "Known limit" is probably milder than stated.
+  Unverified on device.
+- **Drawer `replace` duplicate.** Failure mode `:403-406` says "not reachable".
+  It is reachable: a push tap for Y over X (now a push, N4), then the drawer picks
+  X → `[X, X']`. The top screen is correct (C2); the lower X is stale on back. This
+  is LOW: not empty, and it was already the case before the fix.
+- **A non-borrowed workflow screen queued behind a watched open.** Its entry
+  never gets `held`, so the screen's leave detaches the workflow's handle. This
+  was already the case before the fix; LOW.
+
+**What holds.** C1–C5 are correct in every ordering I traced. The `consumed` drift
+is right. No §7 invariant is touched: no protocol, persistence, broker or peer
+change. Each screen's requester is still withdrawn by identity.
+
+**Executor.** Honest about what it did not do (simulator, e2e). It found real
+plan gaps itself (N3, N4, `consumed`). It over-claimed mutation coverage on N2.
