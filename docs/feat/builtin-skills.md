@@ -232,4 +232,13 @@ core was stubbed so T3 failed on its assertions, not on the import):
 
 ## Review
 
-*— (reviewer), (date)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the DeepSeek executor)
+
+**Verdict: APPROVE.** No HIGH/MEDIUM findings.
+
+- **Gate:** `bun run test` 21063 pass / 5 skip / 0 fail (1448 files; the diff adds no skip); `bun run typecheck` clean; `bun run lint` clean (2752 files). Touched files alone: 305 pass / 0 fail.
+- **Mutation (all caught, tree byte-identical after revert):** (1) the D4 union removed from `hosted-session.ts` → 2 daemon reload tests fail; (2) `builtinDefaultOff` filtering by name instead of `builtin` → core + config T3b fail; (3) `writeIfDifferent` skipping any non-empty file → T4 tamper-restore fails.
+- **E2E trace** (`.tentacle/tmp/builtin-skills/e2e.ts`, real `discoverSkills` on an empty dir): 3 built-ins, `builtin=true`, `tentacle-a2a` lists `references/agent-card.md`, no diagnostics, all three seeded off.
+- **§7 attacks:** single seed path (`buildAgent`, every runtime) holds; serve reload is off-wins only for `isBuiltinSkillName` ∩ built-off (a user's own same-name skill is not forced off, tested); wire field is additive/strip (no bump needed); pods: nothing new crosses to the laptop, `skills.builtin` `carried: "no"`; schema→skills→profile import cycle mirrors `tool-groups.ts` (type-only back-edge).
+- **Nits (not blocking):** a skill hot-added mid-session under a built-in's name (e.g. `<configDir>/skills/tentacle`) starts OFF until the next session, because the seed is by name at build time; extra files planted in the materialized dir are labelled `built-in` (same-uid exposure as `<configDir>/skills`, no escalation).
+- **Unverified:** the `bun build --compile` binary embedding the `.md` text imports (compile was not permitted here; the text loader is extension-agnostic and the `manifest.json` precedent compiles). Verify: `tentacle` binary → `/skills` lists the three.
