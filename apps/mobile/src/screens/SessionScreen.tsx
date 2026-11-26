@@ -2425,6 +2425,10 @@ export function SessionScreen({
           button={state.view.composer.button}
           slot={state.view.composer.slot}
           sendNow={compose.sendNow}
+          // The compact shape's "holds something" (docs/feat/mobile-composer-compact.md
+          // D1): any chip on screen, and an edit banner above the field.
+          attachments={compose.chips.length}
+          editing={compose.editing !== null}
           onSendNow={() => void controller.sendNow()}
           onChange={(text) => {
             // The person typed: dictation yields first (F8), then the compose seam.

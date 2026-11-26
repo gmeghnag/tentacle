@@ -452,7 +452,183 @@ drift test green after `bun run mockup-kit`.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude (Anthropic executor agent; the harness exposes no version id), 2026-11-26*
+
+**Repro, re-run first on the branch (worktree root, no edits yet):
+`.tentacle/tmp/mobile-composer-compact/rest-height.ts`** — identical to the
+Context's, `root` pointed at this worktree (`…/.tentacle/worktrees/mobile-composer-compact`):
+
+```
+rest field height: 82 pt (input line 34 + row 36)
+size.composer token: 48 pt
+TextInput always above the row: true
+send slot rendered unconditionally: true
+any compact/shape branch: false
+```
+
+Same after the change (the script's `after` block, reads the regenerated tokens):
+
+```
+TextInput always above the row: false
+send slot rendered unconditionally: false
+any compact/shape branch: true
+compact line: 36 pt → resting field: 48 pt
+size.composer token: 48 pt          (48 = the resting field: CopyFlash stays right)
+```
+
+### The load-bearing check
+
+1. **Static premise, confirmed:** today the input and the row are two SIBLINGS of
+   the field (`<TextInput` then `<View style={styles.row}>`), the input is the
+   field's first child, `key={fieldKey}` is on it, and both programmatic focus
+   paths go through `input.current?.focus()` — so "put the input on the row" by
+   re-parenting WOULD lose the first responder. Hence the single wrapping body.
+2. **Proven by execution** (`.tentacle/tmp/mobile-composer-compact/reconcile.ts`,
+   React reconciliation through Ink's renderer — the repo's React host; the rule
+   is React's own, host-agnostic, and the control is what makes it non-vacuous):
+
+   ```
+   style-only change (compact → open): mounts 1 → 1 → 1
+   control, the input re-parented: mounts 2 → 3 (a remount ⇒ keyboard lost)
+   ```
+
+   A style change on the same element at the same position does not remount; one
+   level of re-parenting does. The component's structure is exactly the first
+   case: `<TextInput>` is the body's FIRST child in both shapes, and everything
+   that mounts/unmounts (spacer is a `display: none` style, pill, caption, mic,
+   slot, both hidden observables) comes AFTER it.
+3. **The device falsifier (flow 23's `inputText` on the compact field) was NOT
+   run here:** this worktree has no cached e2e app build, and a cold Release
+   build exceeds the executor's 15-minute foreground budget. Run it as the gate
+   does: `bun run e2e:mobile --ios 26 --only 23` — the first new assert
+   (`assertVisible composer-compact` at rest) is red on `main` by construction,
+   and step 4 (`tapOn composer-input` then `inputText "SLOW keyboard button"` ⇒
+   `composer-filled`) is the falsifier: if the reshape remounted the input, the
+   keyboard drops and it is red.
+
+### As-built, in order
+
+1. `apps/mobile/src/composer-shape.ts` — NEW, pure, React-free.
+   `composerHolds` (`:53`) and `composerShape` (`:67`), exactly the plan's table;
+   types only (`MicButton`, `SendSlot`) imported with `import type`.
+2. `apps/mobile/test/composer-shape.test.ts` — NEW; **red before green** (before
+   the module existed):
+   ```
+   error: Cannot find module '../src/composer-shape.ts'
+    0 pass  1 fail  1 error
+   ```
+   then green (12 tests, 54 expects). Rows 1–10 of the plan's table, the mic
+   matrix, whitespace-`" "`, and a `composerHolds`-agrees-with-the-table sweep.
+3. `apps/mobile/src/ui/Composer.tsx` — props `attachments`/`editing`; the focus
+   flag `const [focus, setFocus] = useState({ key: fieldKey, on: false })` (`:235`)
+   read as `focus.key === fieldKey && focus.on`; `reduceMotion` read once
+   (`:231`), `shapeChange = () => animateNextLayout(reduceMotion)` (`:250`),
+   called from the input's `onFocus`/`onBlur` (`:294`, `:298`) and from the mic
+   tap when compact (D5); `const view = composerShape({…})` (`:237`), the
+   component branching only on `view.*`; ONE `<View style={compact ?
+   [styles.body, styles.row] : styles.body}>` (`:271`) with the input first; the
+   slot wrapped in `{view.slotShown ? … : null}`; `placeholder={view.placeholder}`;
+   `testID="composer-compact"` (`:447`) next to `composer-filled`. New styles
+   `body` (wrapping row, `columnGap: 4`, `paddingHorizontal: 2`), `inputOpen`
+   (`width: "100%"`, `marginHorizontal: -2`), `inputCompact` (`flex: 1`,
+   `marginLeft: 38`, `paddingTop/Bottom: 7`), `plusCompact` (absolute, `left: 2`,
+   `top: -4`, `marginVertical: 0`), `spacerCompact` (`display: "none"`).
+4. `apps/mobile/src/screens/SessionScreen.tsx:2430-2431` — the two props.
+5. `apps/mobile/test/composer-field-layout.test.ts` — the old structure pins
+   updated (the body is inside the field, the input is its first element, the
+   `+`'s style array) and a new block `describe("the shape: …")` with the plan's
+   §source pins. **Red on the old source, all 15 of them**
+   (`.tentacle/tmp/mobile-composer-compact/pins-red-on-old.ts`, run against
+   `git show HEAD:`):
+   ```
+   red on old  imports composer-shape
+   red on old  calls composerShape({
+   red on old  placeholder={view.placeholder}
+   red on old  {view.slotShown ? (
+   red on old  focus.key === fieldKey && focus.on
+   red on old  setFocus({ key: fieldKey, on: true })
+   red on old  onFocus + shapeChange
+   red on old  shapeChange -> animateNextLayout
+   red on old  reduceMotion read
+   red on old  mic tap animates from compact
+   red on old  testID="composer-compact"
+   red on old  body wrapper
+   red on old  plus style array
+   red on old  screen: attachments
+   red on old  screen: editing
+   ```
+6. `apps/mobile/e2e/flows/23-composer-keyboard.yaml` — the plan's steps verbatim:
+   `composer-compact` visible / `composer-send` not, tap ⇒ open, `hideKeyboard`
+   ⇒ compact, then the tapping of the COMPACT field + `inputText`; and in B2
+   `hideKeyboard` ⇒ still open (OD3) before `pressKey: Enter`.
+7. Kit: `bun run mockup-kit` regenerated `generated/{tokens,kit-data}` (11 new
+   `--m-composer-*` vars; `--m-composer-row-*` all still there). `kit.js`:
+   `K.composer({compact})`, one `k-composer-row` body in both shapes with the
+   input first, `data-abs` on the compact `+`, `display: none` on the spacer, the
+   `showSlot` rule (OD2), the empty hint beside the pill (D4), a new `sendNow`
+   prop + a filled `bolt.fill` symbol (the kit had the pill's CSS but no builder,
+   so D4's state could not be drawn at all). `kit.css`: the body rules from the
+   generated tokens (no literals), the compact line, the absolute `+`, and the
+   two reported drifts fixed (`.k-send-now` → `--c-tint`, `--t-caption-*`).
+   `index.html`: the conversation screen now rests compact, plus a new
+   "composer at rest: closed, Stop, Send now, opened" entry.
+   `scripts/test/mockup-kit.test.ts`: 5 new tests pin OD2/D3/D4 in the kit's
+   markup and the body/pill CSS.
+8. `changelog.d/mobile-composer-compact.changed.md` — the plan's bullet verbatim.
+9. This section.
+
+### Drift from the Implementation (and why)
+
+- **The input's box is 4 pt narrower on the right when open.** The plan's
+  geometry (body `paddingHorizontal: 2` + input `marginHorizontal: -2` +
+  `width: "100%"`) makes the box 100 % of the body's *padded* content: its left
+  edge and the text origin are identical to today (17 pt from the field's outer
+  border) and so is every button's, but its content width is `W − 38` against
+  today's `W − 34`. Measured from the tokens, not guessed. Invisible for anything
+  shorter than a wrap at the last 4 pt — the `23-keyboard-open` shot's draft is
+  short, so that shot is unchanged — but a draft that wraps re-wraps 4 pt
+  earlier. Kept as the plan (and the mockup) specify rather than adding a
+  compensating `paddingRight: 6` nobody would see; flagged for Review.
+- **`styles.row` is REUSED, not dropped:** the compact body is
+  `[styles.body, styles.row]` (the compact shape IS one 36 pt row), which keeps
+  `--m-composer-row-height/gap/padding-horizontal` alive for `kit.css` (`.k-queue`
+  and others read them) instead of leaving a dead style or renaming the metrics.
+- **`kit.d.ts` untouched:** `composer` is not declared there (it falls under
+  `readonly [component: string]: unknown`), so there was nothing to add.
+- **The kit's `compact` defaults to `false`** (the plan does not say; the
+  mockup's own extension defaulted to `true`). Every existing drawing and test
+  keeps the open composer; the catalogue asks for `compact: true` explicitly.
+- **The Reduce Motion hook is read into `reduceMotion`, not `reduce`,** so the
+  existing "the animated faces read it twice" pin in
+  `composer-field-layout.test.ts` stays untouched (it counts
+  `const reduce = useReduceMotion() !== false;`), and the first-focus ref was
+  renamed `autoFocused` (the plan's instruction, since `focus` became the state).
+- **`scripts/test/mockup-kit.test.ts` is edited** although the Files list does
+  not name it: the kit gained a shape, so it gained a test (AGENTS §9).
+
+### Mutations (non-vacuity, §9)
+
+`composer-shape.ts`, three mutations, reverted each time (12/12 green after):
+
+| mutation | result |
+|---|---|
+| `focused \|\| composerHolds(input)` → `&&` | 4 pass, **8 fail** |
+| drop the `slot !== "up-dim"` guard (`slotShown: true`) | 11 pass, **1 fail** |
+| drop the D4 branch (`placeholder: input.placeholder`) | 11 pass, **1 fail** |
+
+The load-bearing experiment carries its own mutation (the re-parent control:
+1 → 1 mounts versus 2 → 3).
+
+### Verification run here
+
+`bunx biome check` clean on all eight changed TS/JS files; `tsc --noEmit -p
+apps/mobile` clean; `bun test` on the touched/covering files only (in the
+foreground): `composer-shape`, `composer-field-layout`, `composer`,
+`composer-compose`, `motion-literals`, `theme`, `session-screen`,
+`session-screen-compose`, `session-screen-follow-wiring`, `voice-wiring`,
+`notice-row`, `bundle-node-free`, `scripts/test/mockup-kit*` — **all green**.
+The full `bun run check` and the e2e gate are the orchestrator's, after this.
+
 
 ## Review
 

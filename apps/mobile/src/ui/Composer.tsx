@@ -21,19 +21,30 @@
  * at 50 %. The field's border is ALWAYS `sep`, recording included. The caption
  * and which face to show are the view-model's (`voiceComposerView`).
  *
+ * The SHAPE (docs/feat/mobile-composer-compact.md, owner OD1–OD3): at rest, with
+ * nothing in it, the field is ONE row — `+`, the hint, the mic — and it opens to
+ * the two rows above on the person's tap (or while it holds a draft, a chip, a
+ * dictation or an edit). The rule is `composer-shape.ts`'s; this file only draws
+ * `view`. ONE body holds every child in BOTH shapes, the `TextInput` FIRST:
+ * moving it (a re-parent) or mounting anything before it would remount the
+ * native input, and the tap that opens the field would drop the keyboard.
+ *
  * testIDs (the flows' contract): `composer-input`, `composer-photo` (the `+`),
  * `composer-send` / `composer-stop` / `composer-send-later` (the one slot),
  * `composer-mic` / `composer-mic-listening` / `composer-mic-finalizing`,
- * `composer-mic-caption`, `composer-send-now` (INSIDE the field), `composer-filled`.
+ * `composer-mic-caption`, `composer-send-now` (INSIDE the field), `composer-filled`,
+ * `composer-compact` (the resting row is on screen).
  */
-import { type ComponentRef, type JSX, useEffect, useRef } from "react";
+import { type ComponentRef, type JSX, useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, StyleSheet, View } from "react-native";
+import { composerShape } from "../composer-shape.ts";
 import type { SendSlot } from "../composer.ts";
 import type { MicButton } from "../dictation.ts";
 import { COMPOSER_HALO_MS, COMPOSER_TRANSCRIBE_TURN_MS } from "../motion.ts";
 import { type Palette, radius, shadow, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
 import { Text, TextInput } from "./Text.tsx";
+import { animateNextLayout } from "./animate.ts";
 import { useReduceMotion } from "./chart/ChartAppear.tsx";
 
 export type ComposerButton = "send" | "queue" | "send-later" | "stop" | "disabled";
@@ -53,6 +64,10 @@ export interface ComposerProps {
   readonly onPhoto: () => void;
   /** **Send now** offered (`sendNowOffered`, D3): the pill in the field. */
   readonly sendNow: boolean;
+  /** Attachment chips on screen, any state: one keeps the field open (OD3, D1). */
+  readonly attachments: number;
+  /** A pending message is being edited (the banner above the field): same (D1). */
+  readonly editing: boolean;
   readonly onSendNow: () => void;
   /** Below the bar: the home indicator when the keyboard is closed (B1). */
   readonly bottomPadding: number;
@@ -187,30 +202,52 @@ export function Composer({
   onPress,
   onPhoto,
   sendNow,
+  attachments,
+  editing,
   onSendNow,
   bottomPadding,
   mic,
   onMic,
   micCaption,
   fieldKey,
-  focus = false,
+  focus: focusOnMount = false,
   focusKey = 0,
 }: ComposerProps): JSX.Element {
   // Focused when it first becomes editable (the attach answered), never again:
   // the person's own taps decide after that.
   const input = useRef<ComponentRef<typeof TextInput>>(null);
-  const focused = useRef(false);
+  const autoFocused = useRef(false);
   useEffect(() => {
-    if (focus && editable && !focused.current) {
-      focused.current = true;
+    if (focusOnMount && editable && !autoFocused.current) {
+      autoFocused.current = true;
       input.current?.focus();
     }
-  }, [focus, editable]);
+  }, [focusOnMount, editable]);
   useEffect(() => {
     if (focusKey > 0) {
       input.current?.focus();
     }
   }, [focusKey]);
+  const reduceMotion = useReduceMotion() !== false;
+  // The focus flag is keyed by the FIELD's key: a send remounts the input
+  // (`fieldKey`), and the old one never fires `onBlur` — an unkeyed flag would
+  // stay true and the field would hold its open shape with nothing in it.
+  const [focus, setFocus] = useState({ key: fieldKey, on: false });
+  const fieldFocused = focus.key === fieldKey && focus.on;
+  const view = composerShape({
+    focused: fieldFocused,
+    draft,
+    attachments,
+    mic,
+    editing,
+    slot,
+    sendNow,
+    placeholder,
+  });
+  const compact = view.shape === "compact";
+  // The shape changes on the person's own tap (focus / blur) and on a mic tap
+  // from the resting row: the app's one layout animation (D6).
+  const shapeChange = (): void => animateNextLayout(reduceMotion);
   const disabled = button === "disabled";
   const listening = mic === "listening";
   const finalizing = mic === "finalizing";
@@ -227,33 +264,49 @@ export function Composer({
           },
         ]}
       >
-        <TextInput
-          key={fieldKey}
-          testID="composer-input"
-          ref={input}
-          style={[typography.body, styles.input, { color: palette.label }]}
-          value={draft}
-          onChangeText={onChange}
-          placeholder={placeholder}
-          placeholderTextColor={palette.sec}
-          editable={editable}
-          multiline
-          // B2 (owner Q1): Return SENDS — the key reads "Send"; a newline only by
-          // pasting. What it does is `returnKeyAction`'s (never a Stop).
-          submitBehavior="submit"
-          returnKeyType="send"
-          onSubmitEditing={onReturn}
-          accessibilityLabel="Message"
-        />
-        {/* The 36 pt row: `+`, then (right) Send now, the mic and the slot. */}
-        <View style={styles.row}>
+        {/* ONE body in BOTH shapes, the `TextInput` its FIRST child, always: a
+            style change is a prop update, a re-parent (or any element mounted
+            before the input) is a REMOUNT — the shaping tap would drop the
+            keyboard (docs/feat/mobile-composer-compact.md, load-bearing rule). */}
+        <View style={compact ? [styles.body, styles.row] : styles.body}>
+          <TextInput
+            key={fieldKey}
+            testID="composer-input"
+            ref={input}
+            style={[
+              typography.body,
+              styles.input,
+              compact ? styles.inputCompact : styles.inputOpen,
+              { color: palette.label },
+            ]}
+            value={draft}
+            onChangeText={onChange}
+            placeholder={view.placeholder}
+            placeholderTextColor={palette.sec}
+            editable={editable}
+            multiline
+            // B2 (owner Q1): Return SENDS — the key reads "Send"; a newline only by
+            // pasting. What it does is `returnKeyAction`'s (never a Stop).
+            submitBehavior="submit"
+            returnKeyType="send"
+            onSubmitEditing={onReturn}
+            accessibilityLabel="Message"
+            onFocus={() => {
+              shapeChange();
+              setFocus({ key: fieldKey, on: true });
+            }}
+            onBlur={() => {
+              shapeChange();
+              setFocus({ key: fieldKey, on: false });
+            }}
+          />
           <Pressable
             testID="composer-photo"
             accessibilityRole="button"
             accessibilityLabel="Add a photo or a file"
             disabled={!editable}
             onPress={onPhoto}
-            style={styles.hit}
+            style={[styles.hit, compact ? styles.plusCompact : null]}
           >
             <View style={[styles.circle, { backgroundColor: palette.accentSoft }]}>
               <Icon
@@ -264,7 +317,10 @@ export function Composer({
               />
             </View>
           </Pressable>
-          <View style={styles.flex} />
+          {/* In flow it is the spacer that pushes the cluster right; on the
+              compact row it must ADD nothing — `display: none` is skipped by
+              Yoga, gaps included (a 0-width spacer would still take two). */}
+          <View style={compact ? styles.spacerCompact : styles.flex} />
           {sendNow ? (
             <Pressable
               testID="composer-send-now"
@@ -298,7 +354,15 @@ export function Composer({
               accessibilityState={{ disabled: !editable || finalizing }}
               // A tap while transcribing does nothing (`dictationReduce`): say so.
               disabled={!editable || finalizing}
-              onPress={onMic}
+              // A dictation started from the resting row OPENS the field (D5):
+              // the mic never takes the field's focus, so animate the shape it
+              // is about to grow into (D6).
+              onPress={() => {
+                if (compact) {
+                  shapeChange();
+                }
+                onMic();
+              }}
               style={styles.hit}
             >
               <View
@@ -325,46 +389,50 @@ export function Composer({
               </View>
             </Pressable>
           )}
-          <Pressable
-            testID={testIdOf(button)}
-            accessibilityRole="button"
-            accessibilityLabel={LABEL[button]}
-            accessibilityState={{ disabled }}
-            disabled={disabled}
-            onPress={onPress}
-            // The 36 pt circle + 4 pt each side = a 44 pt target.
-            hitSlop={4}
-            style={({ pressed }) => [
-              styles.slot,
-              {
-                // S2: ready = the soft strong circle; empty = no circle at all.
-                backgroundColor:
-                  slot === "stop"
-                    ? palette.label
-                    : slot === "up-dim"
-                      ? "transparent"
-                      : slot === "clock"
-                        ? palette.fill
-                        : palette.accentSoftStrong,
-              },
-              pressed ? { opacity: 0.7 } : undefined,
-            ]}
-          >
-            {slot === "stop" ? (
-              <View style={[styles.stopSquare, { backgroundColor: palette.page }]} />
-            ) : slot === "clock" ? (
-              <Icon name="clock" color={palette.label} size={17} />
-            ) : (
-              <View style={slot === "up-dim" ? styles.dim : undefined}>
-                <Icon
-                  name="arrow.up"
-                  color={slot === "up-dim" ? palette.sec : palette.accent}
-                  size={18}
-                  weight="bold"
-                />
-              </View>
-            )}
-          </Pressable>
+          {/* The slot's ACTION is `sendSlot`'s; on the resting row only a dead
+              one is left out (OD2: ■ Stop stays, and does not open the field — D3). */}
+          {view.slotShown ? (
+            <Pressable
+              testID={testIdOf(button)}
+              accessibilityRole="button"
+              accessibilityLabel={LABEL[button]}
+              accessibilityState={{ disabled }}
+              disabled={disabled}
+              onPress={onPress}
+              // The 36 pt circle + 4 pt each side = a 44 pt target.
+              hitSlop={4}
+              style={({ pressed }) => [
+                styles.slot,
+                {
+                  // S2: ready = the soft strong circle; empty = no circle at all.
+                  backgroundColor:
+                    slot === "stop"
+                      ? palette.label
+                      : slot === "up-dim"
+                        ? "transparent"
+                        : slot === "clock"
+                          ? palette.fill
+                          : palette.accentSoftStrong,
+                },
+                pressed ? { opacity: 0.7 } : undefined,
+              ]}
+            >
+              {slot === "stop" ? (
+                <View style={[styles.stopSquare, { backgroundColor: palette.page }]} />
+              ) : slot === "clock" ? (
+                <Icon name="clock" color={palette.label} size={17} />
+              ) : (
+                <View style={slot === "up-dim" ? styles.dim : undefined}>
+                  <Icon
+                    name="arrow.up"
+                    color={slot === "up-dim" ? palette.sec : palette.accent}
+                    size={18}
+                    weight="bold"
+                  />
+                </View>
+              )}
+            </Pressable>
+          ) : null}
         </View>
         {/* Maestro cannot read the field's text (P9): this is how a flow proves
           the field is NOT empty (a hand-back, a Take, an Edit). */}
@@ -373,6 +441,13 @@ export function Composer({
             {" "}
           </Text>
         )}
+        {/* The resting row, for the flows: Maestro cannot measure rows either.
+            Same 1×1 trick, same reason, as `composer-filled` above. */}
+        {compact ? (
+          <Text testID="composer-compact" style={styles.hidden}>
+            {" "}
+          </Text>
+        ) : null}
       </View>
     </View>
   );
@@ -389,6 +464,29 @@ const styles = StyleSheet.create({
     ...shadow.glass,
   },
   input: { maxHeight: 132, paddingTop: 8, paddingBottom: 4, paddingHorizontal: 10 },
+  // ONE body, both shapes (the input is its first child): a wrapping row whose
+  // gap is COLUMN-only, so the open shape's second line adds no height — today's
+  // field stays 4 + 34 + 36 + 6 + 2 = 82 pt. `paddingHorizontal` is today's row
+  // padding, which the open input cancels with `marginHorizontal`.
+  body: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    columnGap: 4,
+    paddingHorizontal: 2,
+  },
+  // Open: the input takes the whole first line (today's geometry, pixel for
+  // pixel) and the buttons wrap to the 36 pt line under it.
+  inputOpen: { width: "100%", marginHorizontal: -2 },
+  // Compact: one 22 pt line centred in the 36 pt row, after the absolute `+`
+  // (44 hit + 4 gap − 10 input padding = 38): the hint starts 50 pt in, as the
+  // mockup draws it. Field height = 4 + 36 + 6 + 2 = 48 = `size.composer`.
+  inputCompact: { flex: 1, marginLeft: 38, paddingTop: 7, paddingBottom: 7 },
+  // The `+` out of flow at the row's left, its 44 pt target centred on the line
+  // (`top: -4`; `marginVertical: 0` undoes `hit`'s, which applies to offsets).
+  plusCompact: { position: "absolute", left: 2, top: -4, marginVertical: 0 },
+  // Yoga skips it entirely, so it adds no `gap` either (a 0-width spacer would).
+  spacerCompact: { display: "none" },
   row: { flexDirection: "row", alignItems: "center", height: 36, gap: 4, paddingHorizontal: 2 },
   flex: { flex: 1 },
   // A 44×44 target in the 36 pt row: it overhangs 4 pt above and below.

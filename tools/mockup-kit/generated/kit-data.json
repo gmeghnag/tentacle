@@ -16,7 +16,7 @@
     "apps/mobile/src/ui/AskSlim.tsx": "c0e6dcafb1866037f5afc597564affc6d628171a",
     "apps/mobile/src/ui/BandSection.tsx": "7b65870db2faa7a51663560d2641476973ed7b2a",
     "apps/mobile/src/ui/CodeBlock.tsx": "a67a398ac01da1192d82b650be380221c15806f0",
-    "apps/mobile/src/ui/Composer.tsx": "e767b7545c52d0e63f729dce7f957f25ad79492b",
+    "apps/mobile/src/ui/Composer.tsx": "5d8786035ae96273a06e4581d830b7e5b727ac6d",
     "apps/mobile/src/ui/FloatingActivity.tsx": "cc8ae250d2303f88efe4261ad4e66168425d31b0",
     "apps/mobile/src/ui/GlassButton.tsx": "a595e5654c4b6167edfd83387e3322c5b1dc611c",
     "apps/mobile/src/ui/HeaderDot.tsx": "1d49445123ec6a8eabd55ef377e30c8ff4bee94d",
@@ -890,6 +890,32 @@
           "paddingTop": 8,
           "paddingBottom": 4,
           "paddingHorizontal": 10
+        },
+        "body": {
+          "flexDirection": "row",
+          "flexWrap": "wrap",
+          "alignItems": "center",
+          "columnGap": 4,
+          "paddingHorizontal": 2
+        },
+        "inputOpen": {
+          "width": "100%",
+          "marginHorizontal": -2
+        },
+        "inputCompact": {
+          "flex": 1,
+          "marginLeft": 38,
+          "paddingTop": 7,
+          "paddingBottom": 7
+        },
+        "plusCompact": {
+          "position": "absolute",
+          "left": 2,
+          "top": -4,
+          "marginVertical": 0
+        },
+        "spacerCompact": {
+          "display": "none"
         },
         "row": {
           "flexDirection": "row",
