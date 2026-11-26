@@ -16,6 +16,8 @@
  * - a bad `opacity` (docs/feat/mobile-hub-opacity.md) drops the opacity only and
  *   a number snaps to the nearest of the 20 · 40 · 60 · 80 · 100 steps
  *   (`snapOpacity`): the button is never invisible.
+ * - a bad `listEndAboveHub` (docs/feat/mobile-hub-center.md D2) drops that field
+ *   only, so the setting reads ON — `listEndOn`, the one place its default is;
  * - a write failure rejects, so Settings says "didn't save" — the holder keeps
  *   the pick in memory for this run.
  */
@@ -37,6 +39,13 @@ export interface ActivitySettings {
    * `v` bump, where every older build would refuse to write at all (rule 2).
    */
   readonly opacity?: number;
+  /**
+   * Whether the chat's end stops above a hub resting in the band's lower half
+   * (owner 6, docs/feat/mobile-hub-center.md D6): absent → ON, today's
+   * behaviour — the one place that default lives is `listEndOn` below. ADDITIVE
+   * inside the same v1 record, the `opacity` precedent.
+   */
+  readonly listEndAboveHub?: boolean;
 }
 
 /**
@@ -67,13 +76,22 @@ function parsePosition(value: unknown): FloatPosition | undefined {
     return undefined;
   }
   const p = value as { edge?: unknown; yFraction?: unknown };
-  if (p.edge !== "left" && p.edge !== "right") {
+  if (p.edge !== "left" && p.edge !== "center" && p.edge !== "right") {
     return undefined;
   }
   if (typeof p.yFraction !== "number" || !(p.yFraction >= 0 && p.yFraction <= 1)) {
     return undefined;
   }
   return { edge: p.edge, yFraction: p.yFraction };
+}
+
+/**
+ * Whether the chat's end stops above the hub (owner 6): absent means ON, which
+ * is the behaviour before this setting existed. Read through this, never the raw
+ * field, so the default lives in ONE place.
+ */
+export function listEndOn(settings: ActivitySettings): boolean {
+  return settings.listEndAboveHub ?? true;
 }
 
 function parseOpacity(value: unknown): number | undefined {
@@ -94,17 +112,26 @@ function parse(raw: string | null): ActivitySettingsRead {
   if (typeof parsed !== "object" || parsed === null) {
     return unreadable;
   }
-  const r = parsed as { v?: unknown; mode?: unknown; position?: unknown; opacity?: unknown };
+  const r = parsed as {
+    v?: unknown;
+    mode?: unknown;
+    position?: unknown;
+    opacity?: unknown;
+    listEndAboveHub?: unknown;
+  };
   if (r.v !== ACTIVITY_SETTINGS_VERSION || (r.mode !== "header" && r.mode !== "floating")) {
     return unreadable;
   }
   const position = parsePosition(r.position);
   const opacity = parseOpacity(r.opacity);
+  // A bad value drops THIS field only: the setting then reads ON (the default).
+  const listEndAboveHub = typeof r.listEndAboveHub === "boolean" ? r.listEndAboveHub : undefined;
   return {
     settings: {
       mode: r.mode,
       ...(position === undefined ? {} : { position }),
       ...(opacity === undefined ? {} : { opacity }),
+      ...(listEndAboveHub === undefined ? {} : { listEndAboveHub }),
     },
     writable: true,
   };

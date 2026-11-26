@@ -38,6 +38,7 @@ import { type FanLayout, type Point, fanMotion } from "../hub-fan.ts";
 import { FLASH_MS, type Flash } from "../hub-flash.ts";
 import type { GestureEffect, GestureState, HubMenu } from "../hub-gesture.ts";
 import { hubOpacity } from "../hub-opacity.ts";
+import { type ScrollDim, hubPresence } from "../hub-scroll-dim.ts";
 import {
   type HubWorld,
   bandPoint,
@@ -95,6 +96,12 @@ export interface FloatingActivityProps {
   readonly position: FloatPosition | undefined;
   /** `floating-button.ts` `visible`: fades out (and stops taking touches) when false. */
   readonly shown: boolean;
+  /**
+   * The screen's scroll dim (owner 2 B, docs/feat/mobile-hub-center.md D4):
+   * `hub-scroll-dim.ts` `ScrollDim`. `scrolling` / `settling` fade the button to
+   * 20 % and let taps through, unless VoiceOver runs or the button is engaged.
+   */
+  readonly scroll: ScrollDim;
   /** `hub-actions.ts` `buttonBadge`: only a running count, never a dot; null → the hub glyph. */
   readonly count: number | null;
   /**
@@ -154,6 +161,7 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
     bounds,
     position,
     shown,
+    scroll,
     count,
     pulse,
     turnRunning,
@@ -197,8 +205,18 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
     }
   }, [atX, atY, xy]);
 
-  // Fades in/out (150 ms); once faded OUT it unmounts, so neither VoiceOver nor
-  // a test finds an invisible button. Every animation here is on the native
+  // The outer LEVEL: shown/hidden, or dimmed by a scroll (owner 2 B). One rule for
+  // both the fade and whether taps reach the button (`hub-scroll-dim.ts`), so the
+  // arc and the glow dim with it — the same layer, nothing bright over the text.
+  const presence = hubPresence({
+    shown,
+    scroll,
+    voiceOver,
+    busy: engaged !== "idle" || fan !== null,
+  });
+
+  // Fades to its level (150 ms); once faded OUT it unmounts, so neither VoiceOver
+  // nor a test finds an invisible button. Every animation here is on the native
   // driver (`hub-button-motion.ts`): a JS thread busy with a streaming turn
   // cannot stutter it.
   const [rendered, setRendered] = useState(shown);
@@ -206,12 +224,12 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
     if (shown) {
       setRendered(true);
     }
-    Animated.timing(opacity, fadePlan(shown, reduceMotion)).start(({ finished }) => {
+    Animated.timing(opacity, fadePlan(presence.level, reduceMotion)).start(({ finished }) => {
       if (finished && !shown) {
         setRendered(false);
       }
     });
-  }, [shown, reduceMotion, opacity]);
+  }, [presence.level, shown, reduceMotion, opacity]);
 
   // How see-through the BODY is (docs/feat/mobile-hub-opacity.md): the setting at
   // rest, 1 while touched / with the fan open / under Reduce Transparency. It is a
@@ -523,7 +541,7 @@ export function FloatingActivity(props: FloatingActivityProps): JSX.Element | nu
         }
         accessibilityActions={hubA11yActions(props.allItems).map((action) => ({ ...action }))}
         onAccessibilityAction={onAccessibilityAction}
-        pointerEvents={shown ? "auto" : "none"}
+        pointerEvents={presence.touchable ? "auto" : "none"}
         style={[
           styles.circle,
           {

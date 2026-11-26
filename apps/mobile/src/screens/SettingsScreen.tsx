@@ -131,6 +131,13 @@ export interface SettingsScreenProps {
   readonly activityOpacity?: number;
   readonly onActivityOpacity?: (opacity: number) => void;
   /**
+   * Whether the chat's end stops above a hub resting in the band's LOWER half
+   * (docs/feat/mobile-hub-center.md D6/O7): absent → ON, today's behaviour. The
+   * default itself is `activity-settings-store.ts`'s `listEndOn`, never here.
+   */
+  readonly activityListEnd?: boolean;
+  readonly onActivityListEnd?: (on: boolean) => void;
+  /**
    * How the iPhone draws diagrams (docs/fix/mobile-qa-1117.md, bug 3; the owner's
    * model-diagrams Q1 setting): outline (default) or filled. Absent = no section.
    */
@@ -219,6 +226,8 @@ export function SettingsScreen({
   onChartLabels,
   activityOpacity,
   onActivityOpacity,
+  activityListEnd,
+  onActivityListEnd,
   diagramStyle,
   diagramWritable = true,
   diagramError,
@@ -434,7 +443,7 @@ export function SettingsScreen({
                 title="Activity button"
                 footnote={
                   activityWritable
-                    ? "Where running sub-agents and jobs show: in the header, or as a button you can drag to either edge."
+                    ? "Where running sub-agents and jobs show: in the header, or as a button you can drag to either edge or the center."
                     : "Set by a newer version of tentacle — this version cannot change it."
                 }
               >
@@ -457,6 +466,40 @@ export function SettingsScreen({
                     }
                   />
                 ))}
+                {/* Owner 6 (docs/feat/mobile-hub-center.md D6/O7): with the floating
+                    button only — the padding it decides belongs to a hub resting in
+                    the band's lower half, which the header pill never does. */}
+                {activityMode !== "floating" || onActivityListEnd === undefined ? null : (
+                  <Row
+                    testID="activity-list-end"
+                    palette={palette}
+                    minHeight={size.rowSetting}
+                    title="Keep the chat's end above the button"
+                    accessibilityLabel="Keep the chat's end above the button"
+                    dimmed={!activityWritable}
+                    trailing={
+                      <Switch
+                        testID="activity-list-end-toggle"
+                        accessibilityLabel="Keep the chat's end above the button"
+                        value={activityListEnd ?? true}
+                        disabled={!activityWritable}
+                        trackColor={{ false: palette.fill, true: palette.green }}
+                        onValueChange={(on) => onActivityListEnd(on)}
+                      />
+                    }
+                  >
+                    <Text
+                      testID="activity-list-end-detail"
+                      numberOfLines={4}
+                      maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                      style={[typography.footnote, { color: palette.sec }]}
+                    >
+                      {activityWritable
+                        ? "On: when the button rests in the lower half, the last message stops above it. Off: the chat runs under the button."
+                        : "Set by a newer version of tentacle — this version cannot change it."}
+                    </Text>
+                  </Row>
+                )}
               </BandSection>
               {activityError === undefined ? null : (
                 <Banner

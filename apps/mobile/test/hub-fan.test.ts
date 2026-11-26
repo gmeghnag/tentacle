@@ -39,10 +39,13 @@ function band(w: number, h: number, keyboard: number): Rect {
 function anchorAt(bounds: Rect, edge: Edge, yFraction: number) {
   const lo = bounds.top + 35;
   const hi = bounds.bottom - 35;
-  return {
-    x: edge === "right" ? bounds.right - 37 : bounds.left + 37,
-    y: lo + (hi - lo) * yFraction,
-  };
+  const x =
+    edge === "right"
+      ? bounds.right - 37
+      : edge === "center"
+        ? (bounds.left + bounds.right) / 2
+        : bounds.left + 37;
+  return { x, y: lo + (hi - lo) * yFraction };
 }
 
 function fan(layout: FanLayout) {
@@ -349,6 +352,79 @@ describe("labelPlacement: inner side, clamped, else above", () => {
   test("no item → null", () => {
     expect(labelPlacement(ONE, 7, size, screen)).toBeNull();
     expect(labelPlacement({ kind: "menu" }, 0, size, screen)).toBeNull();
+  });
+});
+
+/**
+ * Orchestrator O3 (`docs/feat/mobile-hub-center.md`): from a centre anchor
+ * "inner side" has no meaning, so the pill goes on the item's OUTER side — left
+ * of an item left of the anchor, right of one right of it.
+ */
+describe("labelPlacement at the CENTRE: the pill takes the item's outer side", () => {
+  const screen: Rect = { left: 0, top: 0, right: 390, bottom: 844 };
+  const size = { width: 90, height: 30 };
+  const centred = (x: number): FanLayout => ({
+    ...ONE,
+    edge: "center",
+    anchor: { x: 195, y: 300 },
+    items: [{ x, y: 300, angle: 0, R, ring: 0 }],
+  });
+
+  test("an item LEFT of the anchor → the pill sits to its left", () => {
+    expect(labelPlacement(centred(150), 0, size, screen)).toEqual({
+      x: 150 - LABEL_GAP - size.width,
+      y: 300 - size.height / 2,
+    });
+  });
+
+  test("an item RIGHT of the anchor → the pill sits to its right", () => {
+    expect(labelPlacement(centred(240), 0, size, screen)).toEqual({
+      x: 240 + LABEL_GAP,
+      y: 300 - size.height / 2,
+    });
+  });
+
+  test("the existing clamping still wins when the outer side has no room", () => {
+    // An item near the screen's LEFT edge: its outer side is off-screen, so the
+    // pill goes above it, clamped (the unchanged rule).
+    expect(labelPlacement(centred(30), 0, size, screen)).toEqual({
+      x: FAN_PAD,
+      y: 300 - LABEL_GAP - size.height,
+    });
+  });
+});
+
+/**
+ * Orchestrator O3, the geometry half: `fanLayout` already aims at the band's
+ * centre and searches both ways, so a bottom-centre anchor needs NO new code —
+ * the fan opens straight up and symmetric. Pinned so a later "the centre needs
+ * its own layout" change has to break a test on purpose.
+ */
+describe("fanLayout from a bottom-CENTRE anchor: straight up, mirror-symmetric", () => {
+  const bounds = band(390, 844, 0);
+  const anchor = anchorAt(bounds, "center", 1);
+  const layout = fan(fanLayout({ anchor, edge: "center", bounds, n: 6 }));
+
+  test("it is a fan with every item, all of them inside the band", () => {
+    expect(layout.kind).toBe("fan");
+    expect(layout.items).toHaveLength(6);
+    const r = ITEM_SIZE / 2 + FAN_PAD;
+    for (const it of layout.items) {
+      expect(it.x - r).toBeGreaterThanOrEqual(bounds.left - EPS);
+      expect(it.x + r).toBeLessThanOrEqual(bounds.right + EPS);
+      expect(it.y - r).toBeGreaterThanOrEqual(bounds.top - EPS);
+      expect(it.y + r).toBeLessThanOrEqual(bounds.bottom + EPS);
+    }
+  });
+
+  test("every item has a mirror about the anchor's x (±0.5 pt)", () => {
+    for (const it of layout.items) {
+      const mirrored = 2 * anchor.x - it.x;
+      const partner = layout.items.find(
+        (other) => Math.abs(other.x - mirrored) <= 0.5 && Math.abs(other.y - it.y) <= 0.5,
+      );
+      expect(partner).toBeDefined();
+    }
   });
 });
 

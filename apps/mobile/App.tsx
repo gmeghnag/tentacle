@@ -56,7 +56,7 @@ import {
 } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { ACTIVITY_SETTINGS } from "./src/activity-settings-expo.ts";
-import type { ActivitySettings } from "./src/activity-settings-store.ts";
+import { type ActivitySettings, listEndOn } from "./src/activity-settings-store.ts";
 import {
   type AppLock,
   type AppLockEvent,
@@ -2970,6 +2970,17 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
       setActivityError("That Activity button setting didn't save"),
     );
   }, []);
+  /**
+   * docs/feat/mobile-hub-center.md D7 (owner 6): whether the chat's end stops
+   * above a hub resting in the lower half. The same spread + banner as the
+   * opacity above; the DEFAULT is `listEndOn`'s, never this handler's.
+   */
+  const selectActivityListEnd = useCallback((on: boolean) => {
+    setActivityError(undefined);
+    ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), listEndAboveHub: on }).catch(() =>
+      setActivityError("That Activity button setting didn't save"),
+    );
+  }, []);
 
   // Diagrams (docs/fix/mobile-qa-1117.md, bug 3): outline | filled, loaded once;
   // the transcript reads the holder itself (`useDiagramStyle`), Settings shows it.
@@ -3542,6 +3553,8 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                   ? {}
                   : { activityOpacity: activitySettings.opacity })}
                 onActivityOpacity={selectActivityOpacity}
+                activityListEnd={listEndOn(activitySettings)}
+                onActivityListEnd={selectActivityListEnd}
                 chartLabels={chartSettings.labels}
                 chartWritable={chartWritable}
                 {...(chartError === undefined ? {} : { chartError })}

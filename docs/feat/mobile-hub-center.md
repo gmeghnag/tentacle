@@ -441,7 +441,143 @@ suite) against the clean lint baseline, plus the affected mobile e2e flows (28,
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude (executor session), 2026-11-26*
+
+**Load-bearing check (re-run first).** Holds. `.edge` is read directly at exactly
+four sites — `hub-fan.ts:259` (`labelPlacement`), `hub-session.ts:156` (into
+`fanLayout`), `activity-settings-store.ts:70`:76 (parse/serialize),
+`floating-button.ts:96` (`place`'s default) — and `place` has exactly the five
+callers the plan lists (`floating-button.ts:180`, `hub-session.ts:150`,
+`FloatingActivity.tsx:165`, `:251`, `:413`), `snap` only
+`FloatingActivity.tsx:250`. No fifth consumer of the resting place exists.
+
+**Repro (`.tentacle/tmp/mobile-hub-center/repro.ts`, on the branch before any
+edit).** Byte-for-byte the plan's numbers:
+
+```
+drop at x=201 (dead centre) → { edge: "right", yFraction: 0.5 }
+place({edge:'center'}) x → 338 (centre would be 174 )
+stored centre reads back as → undefined
+footClearance(drawn) → 64 pt reserved at BOTH edges
+listEndPadding (no setting, bottom hub) → 70
+```
+
+Slice order as planned; every test written and run RED on the unmodified code
+first (the fail counts are the pasted evidence: 6, then *missing export*, 2, *missing module*, 1, 8, 5).
+
+1. **`floating-button.ts` (D1, D5, D6).** `Edge` gains `"center"`; a private
+   `restX(edge, width)` gives the three resting centres; `snap` picks the nearest
+   by the drop's centre x (`< mid(left,centre)` → left, `<= mid(centre,right)` →
+   centre, else right, so a boundary goes to the CENTRE and a non-finite x to
+   right); `place` maps `"center"` to `(width − FLOAT_SIZE)/2`. `HUB_COLUMN` and
+   `footClearance` are deleted. `listEndPadding` takes a REQUIRED
+   `enabled: boolean` and returns `LIST_END_PADDING` first when false.
+2. **`activity-settings-store.ts` (D2).** `parsePosition` accepts `"center"`;
+   `ActivitySettings.listEndAboveHub?: boolean` (a non-boolean drops only itself);
+   new `listEndOn(settings)` = `settings.listEndAboveHub ?? true` — the ONE place
+   the default lives. `DEFAULT_ACTIVITY_SETTINGS` untouched.
+3. **`hub-fan.ts` (D3).** `labelPlacement` gets the `"center"` branch: left of an
+   item left of the anchor, right of one right of it; the clamp/above fallback
+   unchanged. `fanLayout` and `solveHub` untouched — the plan was right that the
+   fan needs no new geometry (the new symmetric-fan test passes on the unmodified
+   `fanLayout`).
+4. **`hub-scroll-dim.ts` (new, D4).** The reducer table exactly as specified
+   (`begin` always wins; `end` in `rest` is a no-op that arms nothing; a stale
+   `elapsed` changes nothing; `reset` clears), plus `hubPresence` (hidden → 0 /
+   untouchable; dimmed while scrolling unless VoiceOver or busy; else 1 /
+   touchable).
+5. **`hub-button-motion.ts`.** `fadePlan(level, reduceMotion)` — a target LEVEL,
+   not `shown`; `dropPlan` passes `1`.
+6. **`FloatingActivity.tsx`.** New `scroll: ScrollDim` prop;
+   `hubPresence({shown, scroll, voiceOver, busy: engaged !== "idle" || fan !== null})`
+   drives the outer fade (`fadePlan(presence.level, …)`) and
+   `pointerEvents={presence.touchable ? "auto" : "none"}`. The unmount rule stays
+   `finished && !shown`, so 20 % never unmounts.
+7. **`PendingBubble.tsx` (D5).** The `clearance` prop is gone from both
+   components; the row pads `space.inset`; the `rowInner` comment updated.
+8. **`SessionScreen.tsx` (D4 wiring, D5, D6).** `scrollDim` state + ONE timer ref
+   + `scrollEvent` dispatch over `scrollDimStep`, timer cleared on unmount; the
+   four handlers (`onScrollBeginDrag` / `onMomentumScrollBegin` → `begin`,
+   `onScrollEndDrag` / `onMomentumScrollEnd` → `end`) dispatch beside their
+   `dragging` writes, `onScroll` dispatches nothing; a `reset` effect keyed on
+   `floatShown` placed AFTER its declaration (before it, the deps array would hit
+   the `const`'s TDZ). `clearance={…}` removed; `listEndPadding` gets
+   `enabled: listEndOn(activitySettings)`; `FloatingActivity` gets `scroll`.
+9. **`SettingsScreen.tsx` + `App.tsx` (D7).** `activityListEnd` /
+   `onActivityListEnd`; a `testID="activity-list-end"` switch row (disabled and
+   explaining itself over an unwritable record), the section footnote now says
+   «… either edge or the center.»; `App.selectActivityListEnd` spreads the
+   current settings and reuses the Activity banner, and passes
+   `activityListEnd={listEndOn(activitySettings)}`.
+10. **e2e `28-floating-activity.yaml`**: `assertVisible: activity-list-end` after
+    `activity-button-floating`, `assertNotVisible` after `activity-button-header`,
+    and the flow's "not driven" header now names the centre drop and the 2 B dim.
+11. **`changelog.d/mobile-hub-center.changed.md`** (one bullet). No protocol
+    schema change, so no `protocol.json` regeneration and no `protocol.d/` note;
+    `TODO.md` untouched.
+
+### Drift from Implementation
+
+- **D7's row position.** The plan says «after the opacity band». It is drawn at
+  the END of the Activity button's own `BandSection`, after the two mode rows:
+  the opacity band is a SEPARATE `BandSection` (title "Button opacity",
+  `HubOpacityBand.tsx`), so "after it" would need a second section carrying the
+  same "Activity button" title for a single switch. The visible order is
+  unchanged in substance (mode rows → the switch → the opacity band), the gating
+  (`activityMode === "floating"`, both props) and the `testID` are as planned,
+  and the e2e assertions the plan asks for hold.
+- **The arm timer does not re-enter the dispatcher.** The `elapsed` step is
+  applied inline in the timer callback instead of by calling `scrollEvent`
+  again: `elapsed` never returns `arm`, so this is not a loop, and it keeps
+  `useCallback`'s dependency list free of a self-reference.
+- **One extra test file** — `test/hub-center-settings-wiring.test.ts` (the
+  `chart-labels-wiring.test.ts` source-wiring pattern). D7 was the one slice the
+  plan's Tests list left unpinned.
+- **The plan's `test/hub-fan.test.ts` helper** `anchorAt` learned `"center"`
+  (its `edge === "right" ? … : left` would otherwise put a centre anchor at the
+  left edge).
+
+### Tests: red before green, and the mutations
+
+| file | red on unmodified code | after |
+|---|---|---|
+| `floating-button.test.ts` | 6 fail (snap centre, place centre x, `enabled`) | 35 pass |
+| `activity-settings-store.test.ts` | `Export named 'listEndOn' not found` | 32 pass |
+| `hub-fan.test.ts` | 2 fail (`labelPlacement` at the centre) | 44 pass |
+| `hub-scroll-dim.test.ts` | `Cannot find module` | 21 pass |
+| `hub-button-motion.test.ts` | 1 fail (`fadePlan(0.2)` → `toValue: 1`) | 9 pass |
+| `session-screen-follow-wiring.test.ts` | 8 fail (D5/D4/D6 wiring) | 30 pass |
+| `hub-center-settings-wiring.test.ts` | 5 fail (D7 wiring) | 5 pass |
+| `hub-native-driver-wiring.test.ts` (D4 source guard) | 1 fail by mutation — `fadePlan(shown, …)` again | 6 pass |
+
+Doc-named mutations, each run and reverted (files byte-identical after):
+
+- listEndPadding ignores `enabled` → `the setting OFF → the plain 16 pt` fails,
+  34 pass / 1 fail.
+- `end` in `rest` arms → `rest + end → rest (keep)` AND
+  `a programmatic scroll's lone momentum-END … does NOT arm` fail, 19 / 2.
+- `hubPresence` drops the `voiceOver` guard → `VoiceOver → NO dim, still
+  touchable` fails, 20 / 1.
+- `FloatingActivity` fades on `shown` again (not `presence.level`) → the native
+  driver file's new level/`touchable` guard fails, 5 / 1.
+
+Also re-run green after the change: the other hub files
+(`hub-native-driver-wiring`, `hub-opacity-wiring`, `hub-gesture`,
+`hub-commands-wiring`, `fan-jank-wiring`, `hub-actions`, `hub-badges-wiring`,
+`hub-session`, `hub-tap-wiring`, `tool-rows-wiring`, `workflow-edit-wiring`,
+`motion-literals` — 289 pass) and the screens/settings/flow files
+(`e2e-flows`, `band-screens`, `settings-beta`, `chart-labels-wiring`,
+`mobile-media-live-wiring`, `header-wiring` — 155 pass).
+
+**Local checks run by the executor:** `bunx tsc -p apps/mobile --noEmit` clean;
+`bunx biome check` clean on all 17 touched files. `bun run check` itself is the
+orchestrator's (per the executor brief), not run here.
+
+**Not verified here (one line):** the device QA the plan asks for — screenshots
+of the centre at rest, the fan from the centre, a frame mid-scroll and the
+switch on/off — was NOT taken; verify on the 2-simulator gate with flows 28 and
+33 (flow 28's header now states what Maestro cannot drive), watching that a
+streaming turn's follow-scroll leaves the hub at full strength.
 
 ## Review
 

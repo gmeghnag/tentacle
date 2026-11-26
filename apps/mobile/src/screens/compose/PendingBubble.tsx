@@ -22,7 +22,7 @@ import {
   type BubbleContext,
   bubbleActions,
 } from "../../compose-queue.ts";
-import { DENSE_FONT_SCALE, type Palette, radius, typography } from "../../theme.ts";
+import { DENSE_FONT_SCALE, type Palette, radius, space, typography } from "../../theme.ts";
 import { Icon } from "../../ui/Icon.tsx";
 import { Text } from "../../ui/Text.tsx";
 
@@ -38,13 +38,6 @@ export interface PendingBubblesProps {
   readonly palette: Palette;
   /** Whether a bubble can be acted on right now (link, turn, unqueue, send-now). */
   readonly ctx: BubbleContext;
-  /**
-   * The screen edge's clearance (`floating-button.ts` `footClearance`): the
-   * column the floating hub occupies, on BOTH edges because the button can rest
-   * at either one. A pending action under the fan is a tap that opens Activity
-   * instead of cancelling the message (QA bug 1).
-   */
-  readonly clearance: number;
   readonly onAction: (id: string, action: BubbleAction) => void;
 }
 
@@ -81,7 +74,6 @@ function BubbleView({
   bubble,
   palette,
   ctx,
-  clearance,
   open,
   onToggle,
   onAction,
@@ -89,7 +81,6 @@ function BubbleView({
   readonly bubble: Bubble;
   readonly palette: Palette;
   readonly ctx: BubbleContext;
-  readonly clearance: number;
   readonly open: boolean;
   onToggle: () => void;
   readonly onAction: (action: BubbleAction) => void;
@@ -98,7 +89,7 @@ function BubbleView({
   const testID = `pending-${bubble.id}-${bubble.mine ? "mine" : "other"}`;
   const face = <BubbleBody bubble={bubble} palette={palette} />;
   return (
-    <View style={[styles.row, { paddingHorizontal: clearance }]}>
+    <View style={[styles.row, { paddingHorizontal: space.inset }]}>
       {actions.length === 0 ? (
         // Another writer's words (or one already in flight): shown, never acted
         // on (owner Q3) — and still observable, which is what a flow asserts.
@@ -151,7 +142,6 @@ export function PendingBubbles({
   bubbles,
   palette,
   ctx,
-  clearance,
   onAction,
 }: PendingBubblesProps): JSX.Element | null {
   const [open, setOpen] = useState<string | null>(null);
@@ -166,7 +156,6 @@ export function PendingBubbles({
           bubble={bubble}
           palette={palette}
           ctx={ctx}
-          clearance={clearance}
           open={open === bubble.id}
           onToggle={() => setOpen((current) => (current === bubble.id ? null : bubble.id))}
           onAction={(action) => {
@@ -183,7 +172,8 @@ const styles = StyleSheet.create({
   stack: { gap: 6, paddingTop: 6 },
   row: { alignItems: "flex-end", gap: 4 },
   // The bubble keeps the user bubble's own width rule (the tap target is it) —
-  // 77 % of what the hub clearance leaves, because `styles.row` owns the padding.
+  // 77 % of what the row's inset leaves; the hub no longer reserves a column
+  // (docs/feat/mobile-hub-center.md, owner 2: it floats).
   rowInner: { maxWidth: "77%", alignSelf: "flex-end" },
   bubble: {
     borderRadius: radius.bubble,
