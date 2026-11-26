@@ -571,6 +571,16 @@ earlier rounds). Gate not run (the script's).
 **To unblock** (owner/orchestrator): the `curl` command in "Gate-fix round after
 fix round 1", then Execution steps 1–4.
 
+### Gate-fix round after fix round 2
+
+*— claude-sonnet-5-5, 2026-11-26* — still **PARTIAL**; no code or test change.
+
+The failures shown are missing PngSuite fixtures. The archive was not in the
+scratch folder, and one `curl` of the official URL (into a new scratch
+subfolder) was refused: it requires approval. No other route was tried.
+`png-decode.test.ts`: 41 pass, 35 fail. Another fix round cannot change this
+until someone provides the archive.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
