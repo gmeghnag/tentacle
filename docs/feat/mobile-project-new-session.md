@@ -348,4 +348,54 @@ screenshots. The mockup page was not opened.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-26* (fresh context; planner was the same model, so
+shared blind spots are possible — executor was Sonnet)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+**Findings**
+
+1. **MEDIUM — a create that settles while a row's session is open swaps that
+   session out from under the person.** `App.tsx:1663-1673` (`onCreated` →
+   `navigation.navigate("Session", …)`). D7 guards unmount only; tapping a row
+   while the create is in flight keeps `SessionsRoute` mounted (and its flow
+   live), and the `Session` stack screen has no `getId`
+   (`App.tsx:3682`). React Navigation 7's `StackRouter` NAVIGATE reuses the
+   FOCUSED route when its name matches, replacing its params. Repro against the
+   real router (`.tentacle/tmp/mobile-project-new-session/nav-race.ts`):
+   `Sessions` → navigate `Session{ROW-X}` → navigate `Session{NEW-Y}` ⇒
+   `["Computers", "Sessions", "Session:NEW-Y:<same key>"]` — the open
+   session ROW-X is silently replaced by NEW-Y, same route key. The executor
+   flagged this; it is a real, user-visible wrong state reachable by a
+   slow create (session/open + detach round trip) plus one impatient tap.
+   Fix: open only when the Sessions screen is still focused (e.g. a
+   `navigation.isFocused()` check in `onCreated`, or `dispose()`/a "blur" guard
+   via the flow), with a pure-module or wiring test; the session stays listed
+   (D7's convergence).
+
+**Gate (this worktree):** touched tests `project-new-session`,
+`drawer-new-session`, `band-screens`: 63 pass, 0 fail. `bun run lint`: clean
+(2638 files). `bun run typecheck`: clean. Full `bun run test` not re-run
+(orchestrator's gate); e2e flow 47 not run (no simulator).
+
+**Mutations** (each applied, run, reverted; `git status --porcelain` empty after):
+dispose guard off → 2 D7 tests fail; `stale` branch off → 3 offline tests fail;
+pill `icon="plus"` → `"add"` → the band-screens placement test fails. All
+non-vacuous.
+
+**Premises:** `PillButton` passes `onPress` while disabled (`PillButton.tsx:72-73`)
+TRUE; one create path shared by drawer and list (`createOnComputer`,
+`App.tsx:786`) TRUE — no copied send logic (§7 one-session-path holds); only
+typed failure texts reach the screen (untrusted pod, §7) TRUE; no protocol
+change TRUE.
+
+**Attacks tried:** (a) late navigate over an opened row — FOUND (1). (b) flow
+disposed but reused (would leave `creating` stuck and create orphans) — every
+memo in `SessionsRoute` keys on `computerId` only and no `StrictMode` wrapper
+exists, so dispose and re-create move together: nothing. (c) Gate flicker on
+pull-to-refresh of a non-empty list — stays `loaded`, pinned by test: nothing.
+(d) Reason by hue alone — reasons are words, error line is red text + words:
+nothing.
+
+**Executor behaviour:** followed the plan in order, showed red, ran mutations,
+and honestly surfaced the race above as out-of-plan instead of hiding it.
