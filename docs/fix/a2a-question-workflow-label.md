@@ -294,6 +294,52 @@ run here — the orchestrator's gate runs it after this branch.
 `PROTOCOL_VERSION`/`protocol.d/` note (D2), no persistence change (a question is
 never resumable), `TODO.md` untouched.
 
+### Fix round 1
+
+*— claude (model id not exposed by this harness; claude-code 2.1.32x), 2026-11-26*
+
+Addresses Review finding 1 (MEDIUM, the draft loss). One production hunk, one test.
+
+**As built.** `apps/mobile/src/permission-sheet.ts` `answerFor(..., "reply")`: the
+commit now branches on the state — a field already open (`state.replyOpen`)
+commits `{...state, parked: false}` only, so the words a swipe-down kept survive
+the second «Answer» (`unpark` behaves the same); a first open still starts empty
+(`replyOpen: true, replyText: ""`). `replyOpen` (the module flag the send path
+reads) is set in both cases. The interface's JSDoc gained that clause.
+
+**Drift from Implementation:** none in behaviour — Design 4 said
+`replyText: ""` unconditionally, which the Review named as the plan's own defect
+(fixed here, not re-planned: this is the same decision D5, made precise). The
+sheet's own in-sheet tap (`answer("reply")`) is left as is: while the field is
+open it is no longer rendered, so that path cannot wipe a draft.
+
+**Red before green.** New case «a second tap on a parked ask keeps the draft
+already typed» in `apps/mobile/test/permission-sheet-question.test.ts`, first run
+on the unfixed code:
+
+```
+Expected: "a long typed answer"
+Received: ""
+(fail) answerFor(id, "reply"): … > a second tap on a parked ask keeps the draft already typed
+ 14 pass · 1 fail
+```
+
+**Non-vacuity (each mutation applied, run, reverted; `git diff --stat` back to
+the fix afterwards).**
+
+| Mutation of the new code | Result |
+|---|---|
+| `state.replyOpen` → `false` (i.e. the pre-fix unconditional `replyText: ""`) | 1 fail: «… keeps the draft already typed» — `Received: ""` |
+| keep the draft but drop `parked: false` (`? { ...state }`) | 1 fail: same case — `Expected: false, Received: true` (the unpark is pinned too) |
+
+**Checks (narrow).** `apps/mobile/test/permission-sheet-question.test.ts` +
+`permission-sheet.test.ts` + `workflow-run-controller.test.ts` +
+`workflow-screens-wiring.test.ts`: **96 pass, 0 fail**. `bunx tsc -p apps/mobile`:
+clean. `bunx biome check` on the two changed files: clean. The full gate runs
+after this branch (the orchestrator's), not here.
+
+**Per finding:** 1 — FIXED.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the plan/orchestrator, different from the DeepSeek executor)

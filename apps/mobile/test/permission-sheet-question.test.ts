@@ -141,6 +141,20 @@ describe('answerFor(id, "reply"): a question\'s field, opened by id', () => {
     expect(view().replyOpen).toBe(false);
   });
 
+  test("a second tap on a parked ask keeps the draft already typed", () => {
+    // Review round 1: «Answer» must not wipe a draft a swipe kept. Mutation:
+    // commit `replyText: ""` unconditionally → the draft is gone → red.
+    const { sheet, ask, view } = rig();
+    void ask(question(), "ask-1");
+    expect(sheet.answerFor("ask-1", "reply")).toBe("typing");
+    sheet.setReplyText("a long typed answer");
+    sheet.park();
+    expect(sheet.answerFor("ask-1", "reply")).toBe("typing");
+    expect(view().parked).toBe(false);
+    expect(view().replyOpen).toBe(true);
+    expect(view().replyText).toBe("a long typed answer");
+  });
+
   test("the send is still the guarded path: a blank text sends nothing", () => {
     const { sheet, ask } = rig();
     void ask(question(), "ask-1");

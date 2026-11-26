@@ -202,7 +202,9 @@ export interface PermissionSheet {
    * settle path as a tap (never a second resolve path) and the same age guard.
    * `"reply"` is the exception: opening the text field settles nothing, so it is
    * not guarded and not sent (docs/fix/a2a-question-workflow-label.md D5) — it
-   * unparks and opens the field, and `sendReply` stays the guarded send.
+   * unparks and opens the field, and `sendReply` stays the guarded send. A field
+   * already open keeps the words typed in it (a swiped-down ask parks with its
+   * draft), so a second open only unparks.
    */
   answerFor(
     requestId: string,
@@ -609,7 +611,14 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
           return "ignored";
         }
         replyOpen = true;
-        commit({ ...state, parked: false, replyOpen: true, replyText: "" });
+        // A draft already typed survives this tap: a sheet swiped down while
+        // asking keeps its field open and its words, so opening it twice must
+        // only bring it back (`Review`/`unpark` does the same).
+        commit(
+          state.replyOpen
+            ? { ...state, parked: false }
+            : { ...state, parked: false, replyOpen: true, replyText: "" },
+        );
         return "typing";
       }
       if (!armed(now(at))) {
