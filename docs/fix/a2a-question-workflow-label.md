@@ -296,4 +296,25 @@ never resumable), `TODO.md` untouched.
 
 ## Review
 
-*— not started (fresh-context reviewer per §10; cross-module ⇒ standard in-context acceptable, fresh preferred)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the plan/orchestrator, different from the DeepSeek executor)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM; the wire/daemon/client half is sound).
+
+**Findings**
+
+1. **MEDIUM — the new «Answer» tap wipes a typed draft.** `apps/mobile/src/permission-sheet.ts:611-612` always commits `replyText: ""`. Scenario: run screen → «Answer» → type an answer → swipe the sheet down (a swipe while asking PARKS it and keeps `replyOpen`/`replyText`, `SessionScreen.tsx:1634-1640`) → the bar shows «Answer» again → tap → the draft is gone. «Review» (`unpark`) keeps it. Before this branch the run bar had only «Review», so this loss path is new. Repro (`.tentacle/tmp/a2a-question-workflow-label/draft.ts`): `after park: "a long typed answer"` · `Review (unpark) keeps: "a long typed answer"` · `after 2nd Answer tap: ""`. Fix: when `replyOpen` is already true, only unpark (keep `replyText`), plus a test that pins it. (Design 4 specified `replyText: ""`, so the plan has the same defect.)
+
+**Gate (narrow, as instructed):** the 8 touched test files + `json-schema`/`version`: **181 pass, 0 fail**. `bun run lint`: clean (2591 files). `bun run typecheck` (root + mobile + relay): clean. Full `bun run test` not run here.
+
+**Mutations (each red, then reverted; `git status` clean afterwards):** router `type === "permission_request"` guard restored → «a QUESTION carries it too» red; `toAskUpdate` question branch without `workflow` → «forwards it to BOTH branches» + the SessionHost e2e case red; `askBarFor` `action: "review"` hard-coded → «the bar's action is `answer`» red.
+
+**Premises:** the mapper dropped `workflow` for a question (TRUE, `permission-map.ts` on main); the router read it only off `permission_request` (TRUE); both hosted-session call sites already pass `options?.workflow` (TRUE, `hosted-session.ts:1574`, `:1755`); `sheetOptions` gives a question `reply` + `reject_once` only (TRUE, `permission-sheet.ts:254-260`), so a paired question can never get a grant option.
+
+**Attacks tried**
+- §7 pod not trusted: does `workflow` on a question feed any decision? No. The only reader is `askOrigin` and the run-bar pairing (display only). The daemon rebuilds it key by key; the router bounds it. Holds.
+- Protocol: an additive optional field on a strip schema, `UPDATE_CLASS` unchanged, `protocol.json` regenerated (the drift test passes). Having no `protocol.d/` note is correct. A pod sending `workflow.name` that is not a string makes the blocking `question_request` unparseable, but `permission_request` already has the same risk (shared schema), so this branch adds no new risk.
+- The step card offers a grant on a paired question: no. Only the bar consumes the pairing (`WorkflowRun.tsx:633-636`).
+- D5's unguarded `answerFor("reply")` on a permission request: it only opens the refusal field, and `sendReply` is still guarded. Holds.
+- The draft loss above: found.
+
+**Executor behaviour:** followed the plan in order, renamed `onAnswerAsk`→`onOpenAnswer` honestly instead of relaxing a guard, and the claimed mutations reproduce. It missed the stale `permission-sheet.test.ts` case until the orchestrator's gate caught it (recorded in Execution).
