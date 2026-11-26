@@ -701,4 +701,62 @@ refused, bounded per address but not in total concurrency (`MemoryMax=512M`).
 
 ## Review
 
-*(empty until review — mandatory fresh-context Opus review)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same family as the planner, a different model from the executor)
+
+**Verdict: REQUEST-CHANGES** — one HIGH (a single client can OOM-kill the host), one MEDIUM.
+
+**Gate (re-run here):** `bun test apps/apps-host/test packages/protocol/test/apps-host.test.ts`
+→ 143 pass / 0 fail; full `bun run test` → 20387 pass, 5 skip, 0 fail (the branch adds
+no skip); `bun run typecheck` clean (incl. `tsc -p apps/apps-host`); `bun run lint` clean.
+
+**Findings**
+
+1. **HIGH — unbounded concurrent body buffering OOM-kills the process**
+   (`apps/apps-host/src/server.ts:352` → `readBody` :134-137, before `verifySignedBody`
+   :356; `apps/apps-host/deploy/apps-host.service` `MemoryMax=512M`, `StartLimitBurst=5`
+   in 30 s). Only header SHAPE and clock are checked before the whole body (≤ 10 MiB) is
+   buffered, and nothing bounds how many bodies are buffered at once. One address, ~50
+   parallel POSTs with well-formed but bogus `Tentacle-*` headers (well under
+   `apiPerMinutePerIp` = 120) buffers ≥ 500 MiB → OOM kill. Measured: 50 parallel 10 MiB
+   bodies read as `readBody` does → peak RSS 1305 MiB (`.tentacle/tmp/session-apps-host/mem.ts`;
+   client in the same process, so an upper bound, but the server side alone is ≥ 500 MiB).
+   Repeated 5× in 30 s, systemd stops restarting: every app is down until the owner
+   intervenes. The executor listed it as a residual; for a public unauthenticated surface
+   it must be closed — e.g. a global in-flight-body budget (refuse `503 busy` beyond it),
+   and/or a per-IP concurrent-upload cap, pinned by a test.
+2. **MEDIUM — a full rate map turns a cheap flood into a global lease lapse**
+   (`apps/apps-host/src/rate.ts:42-48`, `host-core.ts:144-146`, `server.ts:337`). When
+   `maxTrackedIps` (50 000) distinct addresses hit the API inside one minute, every NEW
+   address — including a publisher's renew — gets `503 busy` (probe: map full →
+   `admitApi("198.51.100.7")` = `busy`). IPv6 /64s make 50 000 addresses cheap (a /48 has
+   65 536) and each needs only one unsigned request (pre-crypto). Sustained 5 min, every
+   lease lapses and the sweep deletes every app's content (revivable, but only once the
+   flood stops). Fail-closed refusal is right for creates; renewals of an existing app
+   should not starve on it (e.g. admit a renew whose key/app is already known, or
+   check the IP map only after a cheap per-IP shape/signature gate for renew).
+
+**Premises checked (TRUE):** Ed25519 raw import/verify in Bun 1.4.3; Bun `maxRequestBodySize`
+413; relay `client-ip`/`log-limit` re-exported with no relay code change; `typecheck` lists
+`apps/apps-host`; no `PROTOCOL_VERSION` change needed (not an RPC peer, own `APPS_API_VERSION`).
+
+**Mutations (each applied alone, reverted, `git status` clean after):**
+| Mutation | Result |
+|---|---|
+| `visitorView` ignores `Sec-Fetch-Dest` | 1 fail ("everything else gets the warning") |
+| `commit` ignores a racing takedown / key block | 3 fail (core ×2, server ×1) |
+| `restore` keeps a live record whose content file is gone | 1 fail |
+| renew/delete accept a body | 1 fail |
+
+**Attacks tried:** (a) non-canonical base64url of a blocked key (spare low bits flipped) to
+dodge a key block / per-key caps → refused, `decodeBase64Url` is canonical — holds;
+(b) nonce replay window vs skew (`expiry = date + skew`, replay check `>= now`) — consistent,
+holds; (c) `Host` tricks (`a.b.<domain>`, trailing dot, port) → unknown/404 — holds;
+(d) expiry-then-revive with identical bytes (per-id write queue) — holds and is pinned;
+(e) takedown racing an in-flight PUT/create — discarded at `commit`, pinned; (f) memory
+flood → finding 1; (g) rate-map saturation → finding 2. No §7 invariant is touched
+(new app, no RPC/persisted session format); no `Set-Cookie` on any route.
+
+**Executor behaviour:** honest — residuals (incl. finding 1) were stated, not hidden;
+`host-core`/`server`/`main` tests were not seen red first, but mutations above and the
+executor's show they are not vacuous. Unverified (unchanged): real-browser Fetch Metadata
+flow, `caddy validate` with a DNS module, the compiled binary.
