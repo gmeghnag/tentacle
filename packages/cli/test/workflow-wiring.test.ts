@@ -100,6 +100,26 @@ describe("workflow wiring", () => {
     expect(buildAgent(config).workflows).toBeUndefined();
   });
 
+  /**
+   * docs/feat/mobile-workflows-landing.md D3: the remover rides the same block
+   * as the writer. Observable through its one effect: the file is gone.
+   */
+  test("the remove dep is present only where editing is: opted in and not tunnelled", async () => {
+    const file = join(dir, PROJECT_PATHS.workflows, "doomed.yaml");
+    await mkdir(join(dir, PROJECT_PATHS.workflows), { recursive: true });
+    await writeFile(file, "not: [a workflow");
+    // A tunnelled session (a pod's) has no driver: nothing there can delete.
+    expect(
+      buildAgent(config, { workflows: true, modelOverride: {} as ModelProvider }).workflows,
+    ).toBeUndefined();
+    const driver = buildAgent(config, { workflows: true }).workflows;
+    expect(driver?.remove("doomed")).toEqual({
+      ok: true,
+      path: `${PROJECT_PATHS.workflows}/doomed.yaml`,
+    });
+    expect(await Bun.file(file).exists()).toBe(false);
+  });
+
   test("a missing workflow file is refused before any ask, naming the path", async () => {
     const wired = buildAgent(config, { workflows: true });
     const started = await wired.workflows?.start({ name: "nope", by: "user" });

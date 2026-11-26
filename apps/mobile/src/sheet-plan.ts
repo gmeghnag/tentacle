@@ -808,13 +808,51 @@ export function ownRunOnTop(
   return ownRunTopId(routes, owner) !== null;
 }
 
+/** The Workflows landing's route key (`routes.ts`). */
+export const WORKFLOWS_ROUTE = "WorkflowStart";
+
+/**
+ * Whether THIS session's Workflows landing is the screen on top (docs/feat/
+ * mobile-workflows-landing.md D8). `Sheet` routes above it are ignored, as for a
+ * run: the landing is what the person is looking at under them.
+ */
+export function ownWorkflowsTop(
+  routes: readonly SheetRouteLike[],
+  owner: { readonly computerId: string; readonly sessionId: string },
+): boolean {
+  for (let i = routes.length - 1; i >= 0; i--) {
+    const route = routes[i];
+    if (route === undefined || route.name === SHEET_ROUTE) {
+      continue;
+    }
+    const params = route.params as
+      | { readonly computerId?: unknown; readonly sessionId?: unknown }
+      | undefined;
+    return (
+      route.name === WORKFLOWS_ROUTE &&
+      params?.computerId === owner.computerId &&
+      params?.sessionId === owner.sessionId
+    );
+  }
+  return false;
+}
+
 /**
  * Whether the ask may be presented as a SHEET on the screen in front (Q1, owner
  * «only the slim row»): over a run (`topRunId`) only that run's own ask; anything
  * else (main agent, a sub-agent, another run, a run id the daemon did not send)
- * stays a slim row. Everywhere else, always.
+ * stays a slim row. Over the Workflows landing (`workflowsTop`) only a workflow
+ * ask with NO run — a file's approval, what its Approve raises. Everywhere else,
+ * always.
  */
-export function askPresentable(origin: AskOrigin, topRunId: string | null): boolean {
+export function askPresentable(
+  origin: AskOrigin,
+  topRunId: string | null,
+  workflowsTop = false,
+): boolean {
+  if (workflowsTop) {
+    return origin.kind === "workflow" && origin.runId === null;
+  }
   if (topRunId === null) {
     return true;
   }

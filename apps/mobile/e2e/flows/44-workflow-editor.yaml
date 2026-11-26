@@ -40,13 +40,14 @@ appId: so.tentacle.app
       ITEM: "workflows"
 - tapOn:
     id: "hub-item-workflows"
-# E1: no workflow yet — one line, one action.
+# E1: the landing (docs/feat/mobile-workflows-landing.md D7) — New is its `+`,
+# offered once the catalogue answered.
 - extendedWaitUntil:
     visible:
-      id: "workflow-runs-new"
+      id: "workflow-start-new"
     timeout: 15000
 - tapOn:
-    id: "workflow-runs-new"
+    id: "workflow-start-new"
 # The New sheet: the name is checked live, Create is off until it is valid.
 - extendedWaitUntil:
     visible:
@@ -175,13 +176,19 @@ appId: so.tentacle.app
     id: "workflow-edit-save"
 - extendedWaitUntil:
     visible:
-      id: "workflow-start-row-wfedit"
+      id: "workflow-start"
     timeout: 15000
-# The row's centre is its nested Edit pill (it opens the editor, not the detail):
-# tap the row's title line instead (e2e fix round 3).
+# The item's Start: `slug` needs a value, so it opens the form (D7.4).
+- scrollUntilVisible:
+    element:
+      id: "workflow-item-start-wfedit"
+    direction: DOWN
 - tapOn:
-    id: "workflow-start-row-wfedit"
-    point: "30%,15%"
+    id: "workflow-item-start-wfedit"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-start-input-slug"
+    timeout: 10000
 - tapOn:
     id: "workflow-start-input-slug"
 - inputText: "e2e"

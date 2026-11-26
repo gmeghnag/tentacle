@@ -132,7 +132,12 @@ import {
   tunnelSubagentResolver,
 } from "./model-provider.ts";
 import { workflowApprovals } from "./workflow-approvals.ts";
-import { loadWorkflowSource, workflowListing, writeWorkflowFiles } from "./workflow-files.ts";
+import {
+  loadWorkflowSource,
+  removeWorkflowFile,
+  workflowListing,
+  writeWorkflowFiles,
+} from "./workflow-files.ts";
 
 /**
  * Load user-defined agent types from `<configDir>/agents/*.md`, then from each
@@ -1215,6 +1220,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         // session (`tunnelled`) never gets it and answers `unavailable`. It
         // writes and nothing more — it never reaches the approval store.
         save: (plan, currentHash) => writeWorkflowFiles(config.cwd, plan, currentHash),
+        // The ONE remover, beside the writer and for the same sessions only
+        // (docs/feat/mobile-workflows-landing.md D3).
+        remove: (name, expected, currentHash) =>
+          removeWorkflowFile(config.cwd, name, expected, currentHash),
         context: () => ({
           models: Object.keys(config.models),
           agentTypes: types.map((t) => t.name),

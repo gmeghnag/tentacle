@@ -23,11 +23,32 @@
  *   daemon's own reason. Nothing is re-sent automatically.
  * - Nothing lands after `dispose`, and `leave` runs only when this screen was the
  *   one that opened the session.
+ *
+ * The landing's actions (docs/feat/mobile-workflows-landing.md D7):
+ * - **Every action asks `blockedWhy` first** (`workflow-landing.ts`, the gate the
+ *   screen draws from): a dimmed action sends nothing.
+ * - **Approve only RAISES the daemon's ask.** This controller never answers it:
+ *   it watches the Session screen's sheet, and when that file's approval ask
+ *   leaves it (answered, denied, withdrawn) «Asking…» ends and the catalogue is
+ *   re-read — the read is the truth. An approved read, a pull or a reconnect end
+ *   it too (an answer given elsewhere; tapping again raises no second ask).
+ * - **Delete is two steps**, and sends the hash seen when it was ASKED.
  */
 import type { WorkflowAction } from "@tentacle/client";
-import type { WorkflowCatalogueResult, WorkflowResult } from "@tentacle/protocol";
+import type {
+  WorkflowApproveResult,
+  WorkflowCatalogueResult,
+  WorkflowDeleteResult,
+  WorkflowResult,
+} from "@tentacle/protocol";
 import type { SessionOpenFailure } from "./session-controller.ts";
-import { SESSION_ENDED } from "./workflow-run-controller.ts";
+import {
+  type LandingAct,
+  type LandingBusy,
+  blockedWhy,
+  schedulesNotice,
+} from "./workflow-landing.ts";
+import { type AskSource, SESSION_ENDED } from "./workflow-run-controller.ts";
 import {
   type CatalogueEntry,
   type CatalogueView,
@@ -38,6 +59,7 @@ import {
   catalogueRows,
   formFor,
   formProblems,
+  needsValues,
   openEntry,
   runningNotice,
   startBannerChanged,
@@ -53,6 +75,16 @@ export interface StartSessionHandle {
   workflowCatalogue(): Promise<WorkflowCatalogueResult | { unsupported: true }>;
   /** `RemoteSession.workflow()`, the SAME action `session/workflow` takes. */
   workflow(action: WorkflowAction): Promise<WorkflowResult | { ok: false; reason: string }>;
+  /** `RemoteSession.workflowApprove()`: raise one file's hash approval. */
+  workflowApprove(
+    name: string,
+    hash: string,
+  ): Promise<WorkflowApproveResult | { unsupported: true }>;
+  /** `RemoteSession.workflowDelete()`: remove one file, pinned to what was seen. */
+  workflowDelete(
+    name: string,
+    hash?: string,
+  ): Promise<WorkflowDeleteResult | { unsupported: true }>;
 }
 
 export interface StartState {
@@ -87,6 +119,16 @@ export interface StartState {
   readonly notice: string | null;
   /** A start is in flight: Start is off until it answers. */
   readonly starting: boolean;
+  /** Actions in flight, by row key (`asking` lasts until the ask leaves the sheet). */
+  readonly busy: Readonly<Record<string, LandingBusy>>;
+  /** The row whose delete is being asked, or null. */
+  readonly confirm: string | null;
+  /** The daemon answered `unsupported` to an approve or a delete. */
+  readonly actUnsupported: boolean;
+  /** The link to the computer is down (`setOffline`). */
+  readonly offline: boolean;
+  /** A Session screen's sheet exists to answer an approval on. */
+  readonly canAnswer: boolean;
 }
 
 export interface WorkflowStartDeps {
@@ -104,6 +146,12 @@ export interface WorkflowStartDeps {
   /** A start (or a `running` refusal) opened a run: navigate to it. */
   readonly onOpenRun: (runId: string, name: string) => void;
   readonly onChange?: () => void;
+  /**
+   * This session's permission sheet, WATCHED only (never answered): its edge
+   * says an approval ask left the screen. Absent/null = no Session screen, so
+   * Approve is off.
+   */
+  readonly asks?: Pick<AskSource, "current" | "subscribe"> | null;
 }
 
 export interface WorkflowStartController {
@@ -119,10 +167,27 @@ export interface WorkflowStartController {
   setValue(name: string, value: string): void;
   canStart(): boolean;
   beginStart(): void;
+  /** An item's Start: at once when no input needs a value, else its form. */
+  startNow(key: string): void;
+  /** An item's Approve: raise the approval ask for the hash on screen. */
+  approve(key: string): void;
+  /** An item's Delete: ask first, nothing sent. */
+  askDelete(key: string): void;
+  cancelDelete(): void;
+  /** The second step: send the delete that was asked about. */
+  confirmDelete(key: string): void;
+  /** The link went down / came back; coming back re-reads. */
+  setOffline(offline: boolean): void;
   dispose(): void;
 }
 
 const ENDED: readonly SessionOpenFailure[] = ["archived", "deleted", "gone"];
+
+/** A refused delete's sentence: the daemon's own reason, on one line. */
+function afterDeleteRefusal(reason: string | undefined): string {
+  const next = afterRefusal(reason === undefined ? {} : { reason });
+  return next.kind === "showReason" ? next.reason : "the delete was refused";
+}
 
 export function createWorkflowStartController(deps: WorkflowStartDeps): WorkflowStartController {
   let phase: StartState["kind"] = "opening";
@@ -140,8 +205,77 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
   /** One read in flight; a trigger during it is ONE more read after it. */
   let reading = false;
   let again = false;
+  let busy: Record<string, LandingBusy> = {};
+  /** The delete being asked: its row, and the hash SEEN when it was asked. */
+  let asking: { readonly key: string; readonly name: string; readonly hash?: string } | null = null;
+  let actUnsupported = false;
+  let offline = false;
+  const asks = deps.asks ?? null;
+  /** The approval ask on the sheet now: which file's, under which request id. */
+  let onSheet: { readonly requestId: string; readonly name: string } | null = null;
+  let unwatch: (() => void) | null = null;
 
   const changed = () => deps.onChange?.();
+
+  function setBusy(key: string, value: LandingBusy | null): void {
+    const next = { ...busy };
+    if (value === null) {
+      delete next[key];
+    } else {
+      next[key] = value;
+    }
+    busy = next;
+  }
+
+  /** End every «Asking…» the predicate names. */
+  function endAsking(match: (key: string) => boolean): void {
+    for (const [key, value] of Object.entries(busy)) {
+      if (value === "asking" && match(key)) {
+        setBusy(key, null);
+      }
+    }
+  }
+
+  /** A row under `key`, valid or broken. */
+  function rowAt(key: string): CatalogueEntry | null {
+    return openEntry(catalogue, key) ?? catalogue?.invalid.find((e) => e.key === key) ?? null;
+  }
+
+  /** The one gate the screen draws from: may this action be sent now? */
+  function usable(key: string, act: LandingAct): CatalogueEntry | null {
+    const def = rowAt(key);
+    if (session === null || def === null) {
+      return null;
+    }
+    const blocked = blockedWhy(def, act, {
+      offline,
+      ready: phase === "ready",
+      canAnswer: asks !== null,
+      actUnsupported,
+      starting,
+      busy,
+    });
+    return blocked === null ? def : null;
+  }
+
+  /** The sheet changed: an approval ask that LEFT it is that file's falling edge. */
+  function sheetChanged(): void {
+    const ask = asks?.current() ?? null;
+    const left = onSheet !== null && ask?.requestId !== onSheet.requestId ? onSheet : null;
+    // A file's approval has no run (`approval:<name>`): exactly what Approve raises.
+    const agent = ask?.agent?.id;
+    onSheet =
+      ask !== null &&
+      ask.origin?.kind === "workflow" &&
+      ask.origin.runId === null &&
+      agent?.startsWith("approval:") === true
+        ? { requestId: ask.requestId, name: agent.slice("approval:".length) }
+        : null;
+    if (left !== null) {
+      endAsking((key) => rowAt(key)?.name === left.name);
+      read();
+    }
+  }
 
   /** The open row's entry, from the CURRENT catalogue (null when it left it). */
   function entry(): CatalogueEntry | null {
@@ -159,6 +293,11 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
       banner,
       notice,
       starting,
+      busy,
+      confirm: asking?.key ?? null,
+      actUnsupported,
+      offline,
+      canAnswer: asks !== null,
     };
   }
 
@@ -219,6 +358,15 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
         }
         // The form follows the new catalogue (a reload keeps what still exists).
         keepSurvivingValues();
+        // A row that left takes its question and its «Asking…» with it; an
+        // approved one is no longer being asked.
+        if (asking !== null && rowAt(asking.key) === null) {
+          asking = null;
+        }
+        endAsking((key) => {
+          const row = rowAt(key);
+          return row === null || row.approved === true;
+        });
         changed();
       })
       .catch((err: unknown) => {
@@ -255,7 +403,28 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
     if (session === null || starting || def === null || !canStart()) {
       return;
     }
-    const params: StartParams | null = startParams(def, values);
+    send(def, values);
+  }
+
+  function startNow(key: string): void {
+    const def = usable(key, "start");
+    if (def === null) {
+      return;
+    }
+    const defaults = Object.fromEntries(formFor(def).fields.map((f) => [f.name, f.value]));
+    if (needsValues(def) || formProblems(def, defaults).length > 0) {
+      openRow(key);
+      return;
+    }
+    send(def, defaults);
+  }
+
+  /** One start, pinned to the row's hash (the form's, or the list's at once). */
+  function send(def: CatalogueEntry, given: Readonly<Record<string, string>>): void {
+    if (session === null || starting) {
+      return;
+    }
+    const params: StartParams | null = startParams(def, given);
     if (params === null) {
       // No hash to pin: the daemon would re-read the file, so nothing is sent.
       notice = "This workflow cannot be started (it has no hash)";
@@ -263,6 +432,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
       return;
     }
     starting = true;
+    setBusy(def.key, "starting");
     banner = null;
     notice = null;
     changed();
@@ -273,6 +443,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
           return;
         }
         starting = false;
+        setBusy(def.key, null);
         if (result.ok) {
           if (result.runId === undefined) {
             notice = "The workflow was started, but the run's id did not arrive";
@@ -302,14 +473,129 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
           return;
         }
         starting = false;
+        setBusy(def.key, null);
         notice = `The start failed (${err instanceof Error ? err.message : String(err)})`;
         changed();
       });
   }
 
+  function approve(key: string): void {
+    const def = usable(key, "approve");
+    if (session === null || def === null || def.approved !== false || def.hash === null) {
+      return;
+    }
+    // Marked BEFORE the send: the ask may arrive, and be answered, before the reply.
+    setBusy(key, "asking");
+    asking = null;
+    banner = null;
+    notice = null;
+    changed();
+    void session
+      .workflowApprove(def.name, def.hash)
+      .then((result) => {
+        if (disposed) {
+          return;
+        }
+        if ("unsupported" in result) {
+          setBusy(key, null);
+          actUnsupported = true;
+          changed();
+          return;
+        }
+        if (result.ok && result.approved !== true) {
+          // Asked: the sheet's edge ends it (it may have already).
+          return;
+        }
+        setBusy(key, null);
+        if (result.ok) {
+          read();
+          return;
+        }
+        const next = afterRefusal(result);
+        if (next.kind === "reload") {
+          reload();
+          return;
+        }
+        if (next.kind === "openRun") {
+          notice = runningNotice(def.name);
+          changed();
+          deps.onOpenRun(next.runId, def.name);
+          return;
+        }
+        notice = next.reason;
+        read();
+      })
+      .catch((err: unknown) => {
+        if (disposed) {
+          return;
+        }
+        setBusy(key, null);
+        notice = `The approval failed (${err instanceof Error ? err.message : String(err)})`;
+        read();
+      });
+  }
+
+  function confirmDelete(key: string): void {
+    const pinned = asking;
+    if (pinned === null || pinned.key !== key) {
+      return;
+    }
+    const def = usable(key, "delete");
+    if (session === null || def === null) {
+      return;
+    }
+    asking = null;
+    setBusy(key, "deleting");
+    banner = null;
+    notice = null;
+    changed();
+    void session
+      .workflowDelete(pinned.name, pinned.hash)
+      .then((result) => {
+        if (disposed) {
+          return;
+        }
+        setBusy(key, null);
+        if ("unsupported" in result) {
+          actUnsupported = true;
+          changed();
+          return;
+        }
+        // Deleted, or refused (`changed`, `gone`, `running`…): say it and re-read.
+        notice = result.ok
+          ? schedulesNotice(pinned.name, result.schedules ?? [])
+          : afterDeleteRefusal(result.reason);
+        read();
+      })
+      .catch((err: unknown) => {
+        if (disposed) {
+          return;
+        }
+        setBusy(key, null);
+        notice = `The delete failed (${err instanceof Error ? err.message : String(err)})`;
+        read();
+      });
+  }
+
+  function openRow(key: string): void {
+    // Only a VALID row has a form: a broken file is its errors and no Start.
+    const def = openEntry(catalogue, key);
+    if (def === null) {
+      return;
+    }
+    openKey = key;
+    asking = null;
+    banner = null;
+    notice = null;
+    values = Object.fromEntries(formFor(def, values).fields.map((f) => [f.name, f.value]));
+    refreshProblems();
+    changed();
+  }
+
   function canStart(): boolean {
     const def = entry();
     return (
+      !offline &&
       phase === "ready" &&
       def !== null &&
       def.ok &&
@@ -322,6 +608,15 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
   return {
     state,
     start() {
+      if (asks !== null && unwatch === null) {
+        unwatch = asks.subscribe(() => {
+          if (!disposed) {
+            sheetChanged();
+          }
+        });
+        // An ask already on the sheet is remembered, so its leaving is an edge.
+        sheetChanged();
+      }
       void deps.open(deps.sessionId).then((result) => {
         if (disposed) {
           if (result.ok && !deps.borrowed) {
@@ -342,19 +637,35 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
       });
     },
     pull() {
+      // A person's refresh also un-sticks «Asking…»: tapping again asks nothing twice.
+      endAsking(() => true);
       read();
     },
-    openRow(key) {
-      // Only a VALID row has a form: a broken file is its errors and no Start.
-      const def = openEntry(catalogue, key);
+    openRow,
+    startNow,
+    approve,
+    askDelete(key) {
+      const def = usable(key, "delete");
       if (def === null) {
         return;
       }
-      openKey = key;
-      banner = null;
-      notice = null;
-      values = Object.fromEntries(formFor(def, values).fields.map((f) => [f.name, f.value]));
-      refreshProblems();
+      asking = { key, name: def.name, ...(def.hash === null ? {} : { hash: def.hash }) };
+      changed();
+    },
+    cancelDelete() {
+      asking = null;
+      changed();
+    },
+    confirmDelete,
+    setOffline(next) {
+      if (next === offline) {
+        return;
+      }
+      offline = next;
+      if (!next) {
+        endAsking(() => true);
+        read();
+      }
       changed();
     },
     closeRow() {
@@ -372,6 +683,8 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
     beginStart,
     dispose() {
       disposed = true;
+      unwatch?.();
+      unwatch = null;
       if (opened && !deps.borrowed) {
         deps.leave();
       }

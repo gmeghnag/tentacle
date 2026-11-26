@@ -423,6 +423,10 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       // on `RemoteSession`, so they are still the wrapper's to forward.
       "workflowSource",
       "workflowSave",
+      // `/workflow approve|delete` (docs/feat/mobile-workflows-landing.md D6):
+      // a dropped forward makes the TUI say this daemon cannot.
+      "workflowApprove",
+      "workflowDelete",
       "onJobs",
       "jobOutput",
       "killJob",

@@ -169,6 +169,7 @@ import {
   drainPops,
   managedStack,
   ownRunTopId,
+  ownWorkflowsTop,
   queueAfterDismiss,
   readyIntents,
   reconcile,
@@ -479,7 +480,10 @@ export function SessionScreen({
   // This session's OWN run on top keeps it in front too (docs/fix/mobile-ask-surfaces.md D6):
   // its ask is then presented as a sheet over the run, and only that run's (Q1).
   const topRunId = owner === null ? null : ownRunTopId(rootRoutes, owner);
-  const inFront = sessionInFront(focused, sheetStack, topRunId !== null);
+  // This session's Workflows landing too (mobile-workflows-landing D8): the
+  // approval its Approve raises is a sheet over it, and only that kind of ask.
+  const workflowsTop = owner !== null && ownWorkflowsTop(rootRoutes, owner);
+  const inFront = sessionInFront(focused, sheetStack, topRunId !== null || workflowsTop);
   const lastTurn = useRef(state.view.turn);
   useEffect(() => {
     const ended = endedTurn(lastTurn.current, state.view.turn);
@@ -1431,7 +1435,7 @@ export function SessionScreen({
         drawerOpen,
         presentable:
           state.sheet.kind !== "asking" ||
-          askPresentable(state.sheet.origin ?? { kind: "main" }, topRunId),
+          askPresentable(state.sheet.origin ?? { kind: "main" }, topRunId, workflowsTop),
       }),
   });
   // Only the kinds this build presents natively are pushed: the other three

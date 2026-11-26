@@ -104,8 +104,12 @@ import {
   type UpdateSettingsResult,
   type VoiceTurn,
   type WireStreamEvent,
+  type WorkflowApproveParams,
+  type WorkflowApproveResult,
   type WorkflowCatalogueParams,
   type WorkflowCatalogueResult,
+  type WorkflowDeleteParams,
+  type WorkflowDeleteResult,
   type WorkflowListResult,
   type WorkflowParams,
   type WorkflowResult,
@@ -1754,6 +1758,50 @@ export class RemoteClient {
     return this.sessionCall(sessionId, Method.WorkflowSave, params, "once").then(
       (result) => result as WorkflowSaveResult,
       (error: unknown): WorkflowSaveResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/workflow_approve` (docs/feat/mobile-workflows-landing.md D5): ask
+   * the daemon to RAISE one file's hash approval. It answers at once; the ask
+   * arrives on the broker like any other.
+   *
+   * Not re-sent after a drop (`"once"`): an open ask is re-offered on re-attach,
+   * and the catalogue re-read is the truth. A refusal is a RESULT; an older
+   * daemon is `{unsupported: true}`.
+   */
+  workflowApprove(
+    sessionId: string,
+    params: WorkflowApproveParams,
+  ): Promise<WorkflowApproveResult | { unsupported: true }> {
+    return this.sessionCall(sessionId, Method.WorkflowApprove, params, "once").then(
+      (result) => result as WorkflowApproveResult,
+      (error: unknown): WorkflowApproveResult | { unsupported: true } => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          return { unsupported: true };
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * `session/workflow_delete` (D5): remove one workflow file, pinned to what was
+   * seen. `"once"` for the same reason as a save: a delete is not re-sent from
+   * here — the caller re-reads the catalogue and decides.
+   */
+  workflowDelete(
+    sessionId: string,
+    params: WorkflowDeleteParams,
+  ): Promise<WorkflowDeleteResult | { unsupported: true }> {
+    return this.sessionCall(sessionId, Method.WorkflowDelete, params, "once").then(
+      (result) => result as WorkflowDeleteResult,
+      (error: unknown): WorkflowDeleteResult | { unsupported: true } => {
         if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
           return { unsupported: true };
         }
