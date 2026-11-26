@@ -557,4 +557,31 @@ report path is pinned by A9's object identity plus the daemon-side schema).
 
 ## Review
 
-*— (pending — adversarial pass in a fresh context after Execution)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; executor was also a Claude model, so a shared blind spot can survive both passes)
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM).
+
+**Gate (narrow + static, run here):** `bun test` on the three touched files → 77 pass, 0 fail; `bun run lint` → clean (2581 files); `bun run typecheck` → clean (root + mobile + relay). Full parallel `bun run test` not re-run (the diff touches only pure `apps/mobile/src` modules).
+
+**Findings**
+
+1. **MEDIUM — missed site: the drawer still says «Online» for the same refused computer, now with a contradicting detail.** `apps/mobile/src/computer-rows.ts:89-98` (untouched) takes `state` from the diagnoser only (`state: diagnosis`, which is `"ok"` for a VersionMismatch — the very premise of this fix), while its `status` comes from `describeError`, which THIS diff changed (`session-list.ts:400-413`). The plan's claim "computer-rows.ts untouched / no ripple" is false: `describeError` is consumed there. Trace (`.tentacle/tmp/mobile-version-mismatch-diagnosis/review-trace.ts`, real `explainVersionMismatch` hop, serve = app+3): `computerRow(...)` → `state "ok"`; `computerStatus` → `{"tone":"online","text":"Online","detail":"'Mac' runs a newer tentacle than this app — update the app (app protocol 28, serve 31)"}`. Through `loadRows` (`App.tsx:936-948`) → `drawerTitle`/`drawerComputers` (`drawer-list.ts:240-247, 341-346`) the drawer shows «Online» and `canCreate: true` (offers New session against a daemon that refuses every `initialize`), while the Computers screen now says «Update the app». Same false-claim class the task exists to remove, on the second surface. Fix: in `computerRow`, when `diagnosis === "ok"`, take `skewState(protocolSkewOf(probe.error))` if defined (no new union member — `update-*` already exist in `ComputerRow["state"]` and `computerStatus` already maps them to attention, no Pair again), plus a red-first test in `computer-rows`/`drawer-list` tests.
+
+**Premise table**
+
+| Premise | Verdict |
+| --- | --- |
+| Daemon always sends `data` (`daemon/src/connection.ts:858-873`, `daemon/src/version-mismatch.ts:67-89`) | TRUE |
+| Peer rebuilds `RpcError` with `e.data` (`transport/src/peer.ts:441-446`) | TRUE |
+| `explainVersionMismatch` returns the same object when `data` present; a data-less one is rebuilt still without data (`client/src/version-mismatch.ts:27-35`) | TRUE |
+| `connection.ts` catch rethrows the original; `link-registry.ts:62` rethrows; `probeComputer` keeps it (`computer-rows.ts:143-148`) | TRUE |
+| Schema has one revision (`19fa2010`), so an older-but-reporting daemon's `data` parses | TRUE |
+| "computer-rows.ts / drawer untouched by this fix" | **FALSE** → finding 1 |
+
+**Mutations (mine, reverted, tree byte-identical — `git status --porcelain` empty, 77 pass after):** band back to `NEEDS_PAIRING` → B16 red; no-`data` treated as no-claim → A3 + A9 red. Executor's M1–M7 table is consistent with the tests read.
+
+**Attacks tried:** (a) other producers of `VersionMismatch` that could arrive without `data` and be mis-read as "serve older" — only the daemon and the client's rewrite, both covered: nothing. (b) Forward-compat: extra fields (`client.name`, `daemon.identity`, top-level `extra`) — strip schema parses, verdict correct: nothing. (c) Reprobe convergence: `update-*` rows leave `reprobeDelay`'s 15 s loop (`project-rows.ts:149-155`) that `stopped`/`unreachable` had; after `tentacle update` on the Mac the row converges on tap (`projectTap` → `reprobe`), screen focus or app foreground — acceptable, same as the e2e-skew states. (d) Section mix (one `update-*` + one `unreachable`) → «Offline», sibling answered → «Online · 1 of 2» — coherent. (e) Second surface → finding 1.
+
+**Holds:** pure derivation from the error object, no new state, no wire/persistence change, no §7 invariant touched (display-only; a lying serve can only pick a sentence). Tests red-first on the reported bug, style clean.
+
+**Executor behaviour:** honest and careful — caught the Context repro's flawed fixture and the duplicated-comparison drift and documented both; mutation table real. Missed the second consumer of the function it changed.
