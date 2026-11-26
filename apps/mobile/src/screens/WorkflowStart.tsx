@@ -17,7 +17,7 @@
  */
 import { Fragment, type JSX } from "react";
 import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
-import { type Palette, space, typography } from "../theme.ts";
+import { MONO, type Palette, space, typography } from "../theme.ts";
 import { AskBanner } from "../ui/AskBanner.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
@@ -173,7 +173,9 @@ function Confirm({
         testID={`workflow-delete-question-${item.name}`}
         style={[typography.subhead, { color: palette.label }]}
       >
-        {item.confirm}
+        {item.confirm?.lead}
+        <Text style={{ fontFamily: MONO }}>{item.confirm?.file}</Text>
+        {item.confirm?.tail}
       </Text>
       <View style={styles.actions}>
         <PillButton

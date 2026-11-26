@@ -93,6 +93,10 @@ appId: so.tentacle.app
     id: "workflow-item-delete-landing-demo"
 - assertVisible:
     id: "workflow-delete-question-landing-demo"
+# fix/qa-2611: the file name is set in monospace, never between literal backticks.
+- assertVisible:
+    id: "workflow-delete-question-landing-demo"
+    text: "Delete [^`]*\\? Its prompt files stay\\."
 - runFlow:
     file: _shot.yaml
     env:

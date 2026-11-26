@@ -206,3 +206,33 @@ export function listEndPadding(input: {
   }
   return Math.max(LIST_END_PADDING, covered + BAND_MARGIN);
 }
+
+/** The jump pill's resting distance from the band's bottom (pt) — `styles.jump`. */
+export const JUMP_BOTTOM = 12;
+/** The jump pill's height (pt) — `styles.jump.minHeight`. */
+export const JUMP_HEIGHT = 36;
+
+/**
+ * Where the «jump to latest» pill sits (fix/qa-2611): the pill is centred, and
+ * a hub resting at the CENTRE draws over it (a tap there opened the fan instead
+ * of scrolling). When the centred hub's column overlaps the pill's row, the pill
+ * moves to just above the hub; otherwise (hub at an edge, header mode, hub in
+ * the upper half) it stays at its usual bottom. Returns the pill's `bottom`.
+ */
+export function jumpBottom(input: {
+  readonly mode: ActivityButtonMode;
+  readonly position: FloatPosition | undefined;
+  readonly bounds: FloatBounds | null;
+}): number {
+  if (input.mode !== "floating" || input.bounds === null || input.position?.edge !== "center") {
+    return JUMP_BOTTOM;
+  }
+  const at = place(input.position, input.bounds);
+  if (at === null) {
+    return JUMP_BOTTOM;
+  }
+  const hubBottom = input.bounds.height - at.y - FLOAT_SIZE;
+  const hubTop = hubBottom + FLOAT_SIZE;
+  const overlaps = hubBottom < JUMP_BOTTOM + JUMP_HEIGHT && hubTop > JUMP_BOTTOM;
+  return overlaps ? hubTop + BAND_MARGIN : JUMP_BOTTOM;
+}

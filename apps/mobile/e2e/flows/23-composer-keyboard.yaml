@@ -89,3 +89,83 @@ appId: so.tentacle.app
     timeout: 20000
 - runScript:
     file: "23-history.js"
+# fix/qa-2611 (BLOCKER): focus then blur with an EMPTY field returned to the
+# resting row, but the button after the field (■ Stop, the mic) WRAPPED under
+# the composer onto the home-indicator edge. `composer-compact` alone could not
+# see it: here the button must sit on the field's row, RIGHT of it, never below.
+- tapOn:
+    id: "composer-input"
+- inputText: "HOLD keyboard stop"
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 10000
+- tapOn:
+    id: "composer-input"
+- assertNotVisible:
+    id: "composer-compact"
+- hideKeyboard
+- extendedWaitUntil:
+    visible:
+      id: "composer-compact"
+    timeout: 10000
+- assertVisible:
+    id: "composer-stop"
+    rightOf:
+      id: "composer-input"
+- assertNotVisible:
+    id: "composer-stop"
+    below:
+      id: "composer-input"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "23-stop-after-blur"
+- tapOn:
+    id: "composer-stop"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+# The same row with dictation on: the mic after a focus → blur.
+- tapOn:
+    id: "session-drawer"
+- tapOn:
+    id: "drawer-settings"
+- scrollUntilVisible:
+    element:
+      id: "beta-dictation"
+    direction: DOWN
+- tapOn:
+    id: "beta-dictation"
+- scrollUntilVisible:
+    element:
+      id: "settings-back"
+    direction: UP
+- tapOn:
+    id: "settings-back"
+- extendedWaitUntil:
+    visible:
+      id: "composer-compact"
+    timeout: 10000
+- tapOn:
+    id: "composer-input"
+- hideKeyboard
+- extendedWaitUntil:
+    visible:
+      id: "composer-compact"
+    timeout: 10000
+- assertVisible:
+    id: "composer-mic"
+    rightOf:
+      id: "composer-input"
+- assertNotVisible:
+    id: "composer-mic"
+    below:
+      id: "composer-input"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "23-mic-after-blur"

@@ -8,10 +8,13 @@ import {
   BAND_MARGIN,
   EDGE_INSET,
   FLOAT_SIZE,
+  JUMP_BOTTOM,
+  JUMP_HEIGHT,
   LIST_END_PADDING,
   a11y,
   headerPill,
   isTap,
+  jumpBottom,
   listEndPadding,
   motion,
   place,
@@ -252,5 +255,42 @@ describe("listEndPadding (fix/mobile-qa-1119 row 17; the SETTING is owner 6)", (
     expect(
       listEndPadding({ mode: "floating", position: undefined, bounds: null, enabled: true }),
     ).toBe(LIST_END_PADDING);
+  });
+});
+
+describe("jumpBottom (fix/qa-2611: a centred hub must not cover the jump pill)", () => {
+  const bounds = { width: 400, height: 700 };
+  const centreLow = { edge: "center", yFraction: 1 } as const;
+
+  test("a hub resting low at the centre lifts the pill just above it", () => {
+    const at = place(centreLow, bounds);
+    const bottom = jumpBottom({ mode: "floating", position: centreLow, bounds });
+    expect(bottom).toBe(bounds.height - (at?.y ?? 0) + BAND_MARGIN);
+    expect(bottom).toBeGreaterThan(BAND_MARGIN + FLOAT_SIZE);
+  });
+
+  test("an edge hub, the header mode, no band: the pill stays where it was", () => {
+    for (const edge of ["left", "right"] as const) {
+      expect(jumpBottom({ mode: "floating", position: { edge, yFraction: 1 }, bounds })).toBe(
+        JUMP_BOTTOM,
+      );
+    }
+    expect(jumpBottom({ mode: "header", position: centreLow, bounds })).toBe(JUMP_BOTTOM);
+    expect(jumpBottom({ mode: "floating", position: centreLow, bounds: null })).toBe(JUMP_BOTTOM);
+    expect(jumpBottom({ mode: "floating", position: undefined, bounds })).toBe(JUMP_BOTTOM);
+  });
+
+  test("a centred hub far from the pill's row (upper band) leaves it alone", () => {
+    expect(
+      jumpBottom({ mode: "floating", position: { edge: "center", yFraction: 0 }, bounds }),
+    ).toBe(JUMP_BOTTOM);
+  });
+
+  test("the boundary: a hub whose bottom is exactly above the pill does not lift", () => {
+    const range = bounds.height - 2 * BAND_MARGIN - FLOAT_SIZE;
+    const fraction = 1 - (JUMP_BOTTOM + JUMP_HEIGHT - BAND_MARGIN) / range;
+    expect(
+      jumpBottom({ mode: "floating", position: { edge: "center", yFraction: fraction }, bounds }),
+    ).toBe(JUMP_BOTTOM);
   });
 });

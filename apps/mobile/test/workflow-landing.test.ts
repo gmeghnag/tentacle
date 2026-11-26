@@ -193,7 +193,10 @@ describe("landingItems: which actions a file has", () => {
 
   test("the delete question sits on the asked item only, naming the file", () => {
     const items = landingItems(view([row("a"), row("b")]), context(), ".tentacle/workflows/b.yaml");
-    expect(items.map((i) => i.confirm)).toEqual([null, "Delete `b.yaml`? Its prompt files stay."]);
+    expect(items.map((i) => i.confirm)).toEqual([
+      null,
+      { lead: "Delete ", file: "b.yaml", tail: "? Its prompt files stay." },
+    ]);
   });
 });
 
