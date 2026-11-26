@@ -8,10 +8,8 @@ import {
   BAND_MARGIN,
   EDGE_INSET,
   FLOAT_SIZE,
-  HUB_COLUMN,
   LIST_END_PADDING,
   a11y,
-  footClearance,
   headerPill,
   isTap,
   listEndPadding,
@@ -26,15 +24,36 @@ const BOUNDS = { width: 390, height: 600 };
 const MIN_CENTRE = BAND_MARGIN + FLOAT_SIZE / 2;
 const MAX_CENTRE = BOUNDS.height - BAND_MARGIN - FLOAT_SIZE / 2;
 
-describe("snap: the nearest vertical edge by the button's centre", () => {
-  test("left of the midline → left, right of it → right", () => {
-    expect(snap({ x: 100, y: 300 }, BOUNDS)?.edge).toBe("left");
-    expect(snap({ x: 300, y: 300 }, BOUNDS)?.edge).toBe("right");
-    expect(snap({ x: 194, y: 300 }, BOUNDS)?.edge).toBe("left");
+/**
+ * Owner 1 (`docs/feat/mobile-hub-center.md`): the centre is a third resting
+ * place, and a drop lands on the NEAREST of the three (orchestrator O1). The
+ * boundaries are the midpoints between resting centres — 37 / 195 / 353 on the
+ * 390 pt band below, so 116 and 274 — and a drop exactly on one goes to the
+ * CENTRE.
+ */
+describe("snap: the NEAREST of the three resting places, by the button's centre", () => {
+  test("on 390 pt: 115 → left, 116 → center, 274 → center, 275 → right", () => {
+    expect(snap({ x: 115, y: 300 }, BOUNDS)?.edge).toBe("left");
+    expect(snap({ x: 116, y: 300 }, BOUNDS)?.edge).toBe("center");
+    expect(snap({ x: 274, y: 300 }, BOUNDS)?.edge).toBe("center");
+    expect(snap({ x: 275, y: 300 }, BOUNDS)?.edge).toBe("right");
   });
 
-  test("exactly on the midline → right (pinned)", () => {
-    expect(snap({ x: 195, y: 300 }, BOUNDS)?.edge).toBe("right");
+  test("on 402 pt (the QA phone): 118 → left, 119 → center, 283 → center, 284 → right", () => {
+    const qa = { width: 402, height: 600 };
+    expect(snap({ x: 118, y: 300 }, qa)?.edge).toBe("left");
+    expect(snap({ x: 119, y: 300 }, qa)?.edge).toBe("center");
+    expect(snap({ x: 283, y: 300 }, qa)?.edge).toBe("center");
+    expect(snap({ x: 284, y: 300 }, qa)?.edge).toBe("right");
+  });
+
+  test("the dead centre of the band is the centre (what used to snap right)", () => {
+    expect(snap({ x: BOUNDS.width / 2, y: 300 }, BOUNDS)?.edge).toBe("center");
+  });
+
+  test("a non-finite x still goes right (the pre-existing fallback)", () => {
+    expect(snap({ x: Number.NaN, y: 300 }, BOUNDS)?.edge).toBe("right");
+    expect(snap({ x: Number.POSITIVE_INFINITY, y: 300 }, BOUNDS)?.edge).toBe("right");
   });
 
   test("y is clamped to the band: above the top → 0, below the bottom → 1", () => {
@@ -57,6 +76,11 @@ describe("snap: the nearest vertical edge by the button's centre", () => {
   test("a non-finite drop never stores NaN", () => {
     const s = snap({ x: Number.NaN, y: Number.NaN }, BOUNDS);
     expect(s === null || Number.isFinite(s.yFraction)).toBe(true);
+  });
+
+  test("y is unchanged by the third place: a centre drop still stores its fraction", () => {
+    expect(snap({ x: 195, y: -500 }, BOUNDS)?.yFraction).toBe(0);
+    expect(snap({ x: 195, y: 5000 }, BOUNDS)?.yFraction).toBe(1);
   });
 });
 
@@ -97,6 +121,26 @@ describe("place: re-projects a stored position into the current band", () => {
 
   test("no stored position → the right edge, bottom of the band (thumb reach)", () => {
     expect(place(undefined, BOUNDS)).toEqual(place({ edge: "right", yFraction: 1 }, BOUNDS));
+  });
+
+  test("the centre rests at x = (width − FLOAT_SIZE)/2, on 390 and 402 pt", () => {
+    expect(place({ edge: "center", yFraction: 0.5 }, BOUNDS)?.x).toBe(
+      (BOUNDS.width - FLOAT_SIZE) / 2,
+    );
+    expect(place({ edge: "center", yFraction: 0.5 }, { width: 402, height: 600 })?.x).toBe(174);
+  });
+
+  test("the centre's y is the edges' y: the fraction decides, not the edge", () => {
+    const centre = place({ edge: "center", yFraction: 0.25 }, BOUNDS);
+    expect(centre?.y).toBe(place({ edge: "left", yFraction: 0.25 }, BOUNDS)?.y ?? -1);
+    const bottom = place({ edge: "center", yFraction: 1 }, BOUNDS);
+    expect((bottom?.y ?? 0) + FLOAT_SIZE).toBe(BOUNDS.height - BAND_MARGIN);
+  });
+
+  test("a centre position survives a narrower band (rotation, another phone)", () => {
+    expect(place({ edge: "center", yFraction: 0.5 }, { width: 700, height: 300 })?.x).toBe(
+      (700 - FLOAT_SIZE) / 2,
+    );
   });
 
   test("F20: a band too short → null", () => {
@@ -164,62 +208,49 @@ describe("a11y + headerPill: VoiceOver gets a fixed button AND the pill (F23)", 
   });
 });
 
-/**
- * QA bug 1 (simulator, 2026-11-18): the pending message's inline actions ran to
- * the screen edge, and with the hub on the right the Cancel item sat at x
- * 384–434 pt — entirely under the floating button (376–430) — so a tap there
- * opened the fan instead of cancelling the message. The footer now keeps the
- * hub's column clear at BOTH edges (the button can rest on either).
- */
-describe("footClearance: the transcript's foot never sits under the hub (QA bug 1)", () => {
-  test("the reserved column is the button's own: its edge inset plus its diameter", () => {
-    expect(HUB_COLUMN).toBe(EDGE_INSET + FLOAT_SIZE);
-    expect(footClearance(true)).toBe(HUB_COLUMN);
-  });
-
-  test("nothing is reserved when the button is not drawn (header mode, covered, too short a band)", () => {
-    expect(footClearance(false)).toBe(0);
-  });
-
-  test("the QA's own numbers: the Cancel item cleared the button it used to sit under", () => {
-    // The report: the screen is 440 pt wide (iPhone 17 Pro Max in portrait at
-    // its scale), the button spans x 376–430, Cancel sat at 384–434.
-    const screen = 440;
-    const buttonRight = screen - EDGE_INSET - FLOAT_SIZE; // 376
-    // Before: the action row was padded only by 6 pt of its own, so its last item
-    // could end at the screen edge — 10 pt past the button's right edge and 4 pt
-    // inside its left one. After: the row ends at the clearance.
-    const beforeRight = screen;
-    const afterRight = screen - footClearance(true);
-    expect(beforeRight).toBeGreaterThan(buttonRight); // the overlap that was
-    expect(afterRight).toBeLessThanOrEqual(buttonRight); // no overlap now
-    expect(afterRight).toBe(376);
-  });
-
-  test("the LEFT edge is reserved too: the hub can be dragged to it", () => {
-    // `snap` puts the button at EDGE_INSET when it rests on the left, so an
-    // action flush to x 0 would sit under it there — the same bug, other side.
-    const clearance = footClearance(true);
-    expect(clearance).toBeGreaterThanOrEqual(EDGE_INSET + FLOAT_SIZE);
-  });
-});
-
-describe("listEndPadding (fix/mobile-qa-1119 row 17: the hub must not cover the last row at rest)", () => {
+describe("listEndPadding (fix/mobile-qa-1119 row 17; the SETTING is owner 6)", () => {
   const bounds = { width: 402, height: 600 };
 
-  test("a hub resting at the bottom: the list's end clears its top edge", () => {
-    // Mutation: return LIST_END_PADDING always → the last row's end runs 46 pt under the hub.
-    const padding = listEndPadding({ mode: "floating", position: undefined, bounds });
+  test("a hub resting in the LOWER half: the list's end clears its top edge", () => {
+    // Mutation: return LIST_END_PADDING always → the last row's end runs under the hub.
+    const padding = listEndPadding({
+      mode: "floating",
+      position: undefined,
+      bounds,
+      enabled: true,
+    });
     const hubTop = place(undefined, bounds)?.y ?? 0;
     expect(bounds.height - padding).toBeLessThanOrEqual(hubTop);
   });
 
-  test("a hub in the upper half, the header mode, or no band: the plain padding", () => {
-    const top = { edge: "right", yFraction: 0 } as const;
-    expect(listEndPadding({ mode: "floating", position: top, bounds })).toBe(LIST_END_PADDING);
-    expect(listEndPadding({ mode: "header", position: undefined, bounds })).toBe(LIST_END_PADDING);
-    expect(listEndPadding({ mode: "floating", position: undefined, bounds: null })).toBe(
+  test("a bottom-CENTRE hub clears its top edge too (it goes through `place`)", () => {
+    const centre = { edge: "center", yFraction: 1 } as const;
+    const padding = listEndPadding({ mode: "floating", position: centre, bounds, enabled: true });
+    const hubTop = place(centre, bounds)?.y ?? 0;
+    expect(bounds.height - padding).toBeLessThanOrEqual(hubTop);
+  });
+
+  test("the setting OFF → the plain 16 pt, whatever the hub is doing", () => {
+    // Mutation: ignore `enabled` → this fails (70 pt, the hub's clearance).
+    expect(listEndPadding({ mode: "floating", position: undefined, bounds, enabled: false })).toBe(
       LIST_END_PADDING,
     );
+    const centre = { edge: "center", yFraction: 1 } as const;
+    expect(listEndPadding({ mode: "floating", position: centre, bounds, enabled: false })).toBe(
+      LIST_END_PADDING,
+    );
+  });
+
+  test("a hub in the upper half, the header mode, or no band: the plain padding", () => {
+    const top = { edge: "right", yFraction: 0 } as const;
+    expect(listEndPadding({ mode: "floating", position: top, bounds, enabled: true })).toBe(
+      LIST_END_PADDING,
+    );
+    expect(listEndPadding({ mode: "header", position: undefined, bounds, enabled: true })).toBe(
+      LIST_END_PADDING,
+    );
+    expect(
+      listEndPadding({ mode: "floating", position: undefined, bounds: null, enabled: true }),
+    ).toBe(LIST_END_PADDING);
   });
 });

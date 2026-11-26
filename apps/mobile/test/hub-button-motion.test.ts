@@ -6,13 +6,17 @@
 import { describe, expect, test } from "bun:test";
 import { dropPlan, fadePlan, glowPlan, levelPlan } from "../src/hub-button-motion.ts";
 
-describe("fadePlan: the show/hide fade (150 ms, native)", () => {
-  test("in and out take the fade, on the native driver", () => {
-    expect(fadePlan(true, false)).toEqual({ toValue: 1, duration: 150, useNativeDriver: true });
-    expect(fadePlan(false, false)).toEqual({ toValue: 0, duration: 150, useNativeDriver: true });
+describe("fadePlan: the OUTER fade, from a target level (150 ms, native)", () => {
+  test("solid and gone take the fade, on the native driver", () => {
+    expect(fadePlan(1, false)).toEqual({ toValue: 1, duration: 150, useNativeDriver: true });
+    expect(fadePlan(0, false)).toEqual({ toValue: 0, duration: 150, useNativeDriver: true });
+  });
+  test("the scroll dim is a LEVEL, not a boolean (owner 2 B: 20 %)", () => {
+    // Mutation: keep the `shown` boolean → this plan is 0 and the hub disappears.
+    expect(fadePlan(0.2, false)).toEqual({ toValue: 0.2, duration: 150, useNativeDriver: true });
   });
   test("Reduce Motion keeps the fade (it is not motion)", () => {
-    expect(fadePlan(true, true)).toEqual({ toValue: 1, duration: 150, useNativeDriver: true });
+    expect(fadePlan(1, true)).toEqual({ toValue: 1, duration: 150, useNativeDriver: true });
   });
 });
 

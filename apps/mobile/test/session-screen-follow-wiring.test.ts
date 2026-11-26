@@ -223,29 +223,25 @@ describe("the settle re-check (docs/fix/mobile-qa-1117.md, bug 5)", () => {
 });
 
 /**
- * QA bug 1: the pending bubbles' inline actions must not sit under the floating
- * hub (a tap there opens the fan, so a queued message cannot be cancelled). The
- * decision is `floating-button.ts`'s `footClearance` (tested there); this pins
- * that the screen hands it to the footer, from the SAME verdict that decides the
- * button is drawn.
+ * Owners 2 and 5 (docs/feat/mobile-hub-center.md): the hub FLOATS. The footer no
+ * longer reserves its column — `footClearance`/`HUB_COLUMN` are gone — so a queued
+ * bubble lines up with a sent one (`space.inset`, the transcript row's gutter)
+ * instead of being squeezed away from the screen's edge.
  */
-describe("the transcript's foot clears the hub (QA bug 1)", () => {
+describe("the transcript's foot no longer reserves the hub's column (owners 2/5)", () => {
   const src = read("screens", "SessionScreen.tsx");
 
-  test("the footer receives the clearance, computed from whether the button is drawn", () => {
-    expect(src).toMatch(/<PendingBubbles[\s\S]{0,800}clearance=\{footClearance\(floatShown\)\}/);
-    expect(src).toMatch(
-      /import \{[\s\S]{0,200}footClearance,[\s\S]{0,200}\} from "\.\.\/floating-button\.ts"/,
-    );
+  test("the screen neither imports nor passes `footClearance`", () => {
+    expect(src).not.toContain("footClearance");
+    expect(src).not.toMatch(/clearance=/);
   });
 
-  test("both edges are padded, so either hub side is safe, and the actions wrap rather than run off", () => {
+  test("the pending row pads with the transcript's own inset (O6)", () => {
     const footer = read("screens", "compose", "PendingBubble.tsx");
-    // The padding is on the ROW that holds the bubble and its menu, not the bubble.
-    expect(footer).toMatch(/<View style=\{\[styles\.row, \{ paddingHorizontal: clearance \}\]\}>/);
-    expect(footer).toMatch(/menu: \{[^}]*flexWrap: "wrap"/);
-    // `readonly` on the props, repo style.
-    expect(footer).toMatch(/readonly clearance: number;/);
+    expect(footer).not.toContain("clearance");
+    expect(footer).toMatch(
+      /<View style=\{\[styles\.row, \{ paddingHorizontal: space\.inset \}\]\}>/,
+    );
   });
 
   test("the open menu still pairs its state (a regression I introduced and reverted)", () => {
@@ -253,5 +249,75 @@ describe("the transcript's foot clears the hub (QA bug 1)", () => {
     expect(footer).toMatch(/const \[open, setOpen\] = useState<string \| null>\(null\);/);
     expect(footer).toMatch(/onToggle=\{\(\) => setOpen\(/);
     expect(footer).not.toMatch(/useState<string \| null>\(null\)\[1\]/);
+  });
+});
+
+/**
+ * Owner 2 B (docs/feat/mobile-hub-center.md D4): a scroll the FINGER makes fades
+ * the hub to 20 % and lets taps through; the transcript's own follow-scroll must
+ * not. The reducer is `hub-scroll-dim.ts` (tested there); this pins the wiring —
+ * the FOUR handlers, never `onScroll`, and the reset when the button hides.
+ */
+describe("the scroll dim's handlers (owner 2 B)", () => {
+  const src = read("screens", "SessionScreen.tsx");
+  const handler = (name: string): string => {
+    const at = src.indexOf(`${name}={() => {`);
+    return at === -1 ? "" : src.slice(at, at + 200);
+  };
+
+  test("the two begins dispatch `begin`, beside the `dragging` writes", () => {
+    expect(handler("onScrollBeginDrag")).toMatch(/scrollEvent\("begin"\)/);
+    expect(handler("onMomentumScrollBegin")).toMatch(/scrollEvent\("begin"\)/);
+    expect(handler("onScrollBeginDrag")).toContain("dragging.current = true;");
+  });
+
+  test("the two ends dispatch `end`", () => {
+    expect(handler("onScrollEndDrag")).toMatch(/scrollEvent\("end"\)/);
+    expect(handler("onMomentumScrollEnd")).toMatch(/scrollEvent\("end"\)/);
+    expect(handler("onScrollEndDrag")).toContain("dragging.current = false;");
+  });
+
+  test("`onScroll` dispatches NOTHING: a streaming turn's follow-scroll never dims the hub", () => {
+    const at = src.indexOf("const onScroll = useCallback(");
+    const body = src.slice(at, src.indexOf("const onContentSize", at));
+    expect(body).toContain("scrolled(");
+    expect(body).not.toContain("scrollEvent(");
+  });
+
+  test("the button hides → `reset`, so a sheet that covered it mid-scroll cannot leave it dimmed", () => {
+    expect(src).toMatch(/if \(!floatShown\) \{\s*scrollEvent\("reset"\);\s*\}/);
+  });
+
+  test("ONE timer, cleared on unmount; the state comes from the pure reducer", () => {
+    expect(src).toMatch(/scrollDimStep\(scrollDimState\.current, event\)/);
+    expect(src).toMatch(/SCROLL_REST_MS\)/);
+    expect(src.match(/scrollDimTimer\.current = setTimeout\(/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(
+      /if \(scrollDimTimer\.current !== null\) \{\s*clearTimeout\(scrollDimTimer\.current\)/,
+    );
+  });
+
+  test("the screen hands the dim to the button, and the button takes it as a prop", () => {
+    expect(src).toMatch(/<FloatingActivity[\s\S]{0,1200}scroll=\{scrollDim\}/);
+    expect(src).toMatch(
+      /import \{[\s\S]{0,200}scrollDimStep,[\s\S]{0,200}\} from "\.\.\/hub-scroll-dim\.ts"/,
+    );
+    const button = read("ui", "FloatingActivity.tsx");
+    expect(button).toMatch(/readonly scroll: ScrollDim;/);
+    expect(button).toMatch(/hubPresence\(\{/);
+  });
+});
+
+/**
+ * Owner 6 (docs/feat/mobile-hub-center.md D6): the list's end padding is a
+ * SETTING — on by default (today's behaviour), off = the plain 16 pt. The default
+ * lives in ONE place (`listEndOn`), never at the call site.
+ */
+describe("the list's end padding is a setting (owner 6)", () => {
+  const src = read("screens", "SessionScreen.tsx");
+
+  test("the screen passes `listEndPadding`'s `enabled` from `listEndOn(activitySettings)`", () => {
+    expect(src).toMatch(/listEndPadding\(\{[\s\S]{0,200}enabled: listEndOn\(activitySettings\)/);
+    expect(src).toContain('import { listEndOn } from "../activity-settings-store.ts";');
   });
 });

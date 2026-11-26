@@ -10,6 +10,7 @@ import {
   DEFAULT_ACTIVITY_SETTINGS,
   createActivitySettingsHolder,
   createActivitySettingsStore,
+  listEndOn,
 } from "../src/activity-settings-store.ts";
 import type { SecureKV } from "../src/computer-store.ts";
 
@@ -50,6 +51,55 @@ describe("round-trip", () => {
     const f = fake();
     await f.store.write({ mode: "floating" });
     expect(await f.store.read()).toEqual({ settings: { mode: "floating" }, writable: true });
+  });
+
+  test("the CENTRE is a resting place now: it round-trips (docs/feat/mobile-hub-center.md O2)", async () => {
+    const f = fake();
+    const s = { mode: "floating" as const, position: { edge: "center" as const, yFraction: 1 } };
+    await f.store.write(s);
+    expect(await f.store.read()).toEqual({ settings: s, writable: true });
+    expect(JSON.parse(f.items.get(ACTIVITY_SETTINGS_KEY) ?? "")).toEqual({ v: 1, ...s });
+  });
+});
+
+/**
+ * Owner 6 of docs/feat/mobile-hub-center.md: `listEndAboveHub` is the second
+ * ADDITIVE optional field in the same v1 record (the `opacity` precedent), and
+ * `listEndOn` is the ONE place its default lives — absent means ON, today's
+ * behaviour.
+ */
+describe("listEndAboveHub: an additive optional field, defaulting ON", () => {
+  test("false and true round-trip, still inside v1", async () => {
+    for (const listEndAboveHub of [false, true]) {
+      const f = fake();
+      const s = { mode: "floating" as const, listEndAboveHub };
+      await f.store.write(s);
+      expect(await f.store.read()).toEqual({ settings: s, writable: true });
+      expect(JSON.parse(f.items.get(ACTIVITY_SETTINGS_KEY) ?? "")).toEqual({ v: 1, ...s });
+    }
+  });
+
+  test("a bad value drops the FIELD only: the mode and position are kept, and it reads ON", async () => {
+    for (const listEndAboveHub of ["no", 1, null, {} as unknown]) {
+      const raw = JSON.stringify({
+        v: 1,
+        mode: "floating",
+        position: { edge: "center", yFraction: 0.5 },
+        listEndAboveHub,
+      });
+      const read = await fake(raw).store.read();
+      expect(read).toEqual({
+        settings: { mode: "floating", position: { edge: "center", yFraction: 0.5 } },
+        writable: true,
+      });
+      expect(listEndOn(read.settings)).toBe(true);
+    }
+  });
+
+  test("listEndOn: absent → true (today's behaviour), false → false, true → true", () => {
+    expect(listEndOn({ mode: "floating" })).toBe(true);
+    expect(listEndOn({ mode: "floating", listEndAboveHub: false })).toBe(false);
+    expect(listEndOn({ mode: "floating", listEndAboveHub: true })).toBe(true);
   });
 });
 
@@ -218,7 +268,12 @@ describe("rule 1: unreadable / missing / unknown v → the defaults (Floating at
     });
   });
   test("a bad position in our own v1 record drops the position only", async () => {
-    for (const position of [{ edge: "top", yFraction: 0.5 }, { edge: "left", yFraction: 2 }, 7]) {
+    for (const position of [
+      { edge: "top", yFraction: 0.5 },
+      { edge: "middle", yFraction: 0.5 },
+      { edge: "left", yFraction: 2 },
+      7,
+    ]) {
       const raw = JSON.stringify({ v: 1, mode: "floating", position });
       expect(await fake(raw).store.read()).toEqual({
         settings: { mode: "floating" },

@@ -16,20 +16,16 @@ export const FLOAT_SIZE = 54;
 export const EDGE_INSET = 10;
 /** The gap kept to the header above and the composer below. */
 export const BAND_MARGIN = 8;
-/**
- * The column the button OCCUPIES at its edge (its inset plus its diameter).
- * Anything tappable at the transcript's foot — the pending bubbles and their
- * inline Edit · Send now · Cancel (`screens/compose/PendingBubble.tsx`) — keeps
- * this clear at BOTH edges, so an action stays reachable whichever side the hub
- * rests on (QA bug 1: the pending row ran to the screen edge and Cancel sat
- * exactly under the hub, where a tap opened the fan instead).
- */
-export const HUB_COLUMN = EDGE_INSET + FLOAT_SIZE;
 /** The fade when it appears / disappears, and Reduce Motion's placement. */
 export const FADE_MS = 150;
 
 export type ActivityButtonMode = "header" | "floating";
-export type Edge = "left" | "right";
+/**
+ * The three resting places (docs/feat/mobile-hub-center.md, owner 1): the left
+ * edge, the CENTRE of the band, and the right edge. The type keeps its name —
+ * every importer would change for no behaviour.
+ */
+export type Edge = "left" | "center" | "right";
 
 /** What is stored: an edge and where along the band (0 = top, 1 = bottom). */
 export interface FloatPosition {
@@ -61,21 +57,49 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
+/**
+ * The CENTRE x of each resting place in this band: inset + a half button at the
+ * edges, the band's own middle at the centre. One source of truth, so `snap`'s
+ * boundaries and `place` can never disagree (docs/feat/mobile-hub-center.md D1).
+ */
+function restX(edge: Edge, width: number): number {
+  switch (edge) {
+    case "left":
+      return EDGE_INSET + FLOAT_SIZE / 2;
+    case "center":
+      return width / 2;
+    case "right":
+      return width - EDGE_INSET - FLOAT_SIZE / 2;
+  }
+}
+
 /** Does the band fit the button at all (F20: < 2 × size → hidden). */
 export function fits(bounds: FloatBounds): boolean {
   return centreRange(bounds) !== null;
 }
 
 /**
- * Where a drop lands: the nearest vertical edge by the button's centre (exactly
- * on the midline → right), y clamped to the band and stored as its fraction.
+ * Where a drop lands: the NEAREST of the three resting places by the button's
+ * centre (owner 1, orchestrator O1). The boundaries are the midpoints between
+ * resting centres — the rule that used to be the single midline — and a drop
+ * exactly on one goes to the CENTRE. A non-finite x still goes right. y is
+ * clamped to the band and stored as its fraction, as before.
  */
 export function snap(drop: { x: number; y: number }, bounds: FloatBounds): FloatPosition | null {
   const range = centreRange(bounds);
   if (range === null) {
     return null;
   }
-  const edge: Edge = drop.x < bounds.width / 2 ? "left" : "right";
+  const left = restX("left", bounds.width);
+  const middle = restX("center", bounds.width);
+  const right = restX("right", bounds.width);
+  const edge: Edge = !Number.isFinite(drop.x)
+    ? "right"
+    : drop.x < (left + middle) / 2
+      ? "left"
+      : drop.x <= (middle + right) / 2
+        ? "center"
+        : "right";
   // The clamp to the band is the fraction's (a non-finite drop → the bottom).
   return { edge, yFraction: clamp01((drop.y - range.min) / (range.max - range.min)) };
 }
@@ -83,7 +107,8 @@ export function snap(drop: { x: number; y: number }, bounds: FloatBounds): Float
 /**
  * The button's top-left for a stored position in the CURRENT band (a rotation,
  * the keyboard, a different phone re-project it). No position → right edge,
- * bottom of the band.
+ * bottom of the band. The centre re-projects to the band's middle, so it stays
+ * centred on every width.
  */
 export function place(
   stored: FloatPosition | undefined,
@@ -97,7 +122,7 @@ export function place(
   const fraction = clamp01(stored?.yFraction ?? 1);
   const centre = range.min + fraction * (range.max - range.min);
   return {
-    x: edge === "left" ? EDGE_INSET : bounds.width - EDGE_INSET - FLOAT_SIZE,
+    x: restX(edge, bounds.width) - FLOAT_SIZE / 2,
     y: centre - FLOAT_SIZE / 2,
   };
 }
@@ -147,34 +172,28 @@ export function headerPill(input: {
   return input.mode === "header" || input.voiceOver;
 }
 
-/**
- * The transcript's foot clearance (QA bug 1): how far the pending bubbles and
- * their inline actions must stay from the screen's edges so a tap never lands on
- * the floating hub. The button can rest at EITHER edge (`snap`), so both are
- * reserved — an action under the fan is a tap that opens Activity instead of
- * cancelling a message, which is the bug. With no floating button drawn (the
- * header mode, a covered sheet, a band too short) there is nothing to clear.
- */
-export function footClearance(drawn: boolean): number {
-  return drawn ? HUB_COLUMN : 0;
-}
-
 /** The transcript's own bottom padding when nothing floats over its end. */
 export const LIST_END_PADDING = 16;
 
 /**
- * The transcript's bottom padding (fix/mobile-qa-1119 row 17): with the hub
- * resting in the band's LOWER half, the list's end clears the hub's top edge, so
- * the last row is readable at rest instead of running under the button. A hub in
- * the upper half (or none, or a band too short to place one) leaves the plain
- * padding: a scrolled-to-end list never ends there.
+ * The transcript's bottom padding (fix/mobile-qa-1119 row 17; the SETTING is
+ * owner 6 of docs/feat/mobile-hub-center.md): with the hub resting in the band's
+ * LOWER half, the list's end clears the hub's top edge, so the last row is
+ * readable at rest instead of running under the button. A hub in the upper half
+ * (or none, or a band too short to place one) leaves the plain padding: a
+ * scrolled-to-end list never ends there.
+ *
+ * `enabled` is REQUIRED, so a caller cannot forget the setting: false is the
+ * owner's "the chat runs under the button", the plain padding before any
+ * geometry.
  */
 export function listEndPadding(input: {
   readonly mode: ActivityButtonMode;
   readonly position: FloatPosition | undefined;
   readonly bounds: FloatBounds | null;
+  readonly enabled: boolean;
 }): number {
-  if (input.mode !== "floating" || input.bounds === null) {
+  if (!input.enabled || input.mode !== "floating" || input.bounds === null) {
     return LIST_END_PADDING;
   }
   const at = place(input.position, input.bounds);

@@ -22,9 +22,13 @@ export interface TimingPlan {
   readonly useNativeDriver: true;
 }
 
-/** The show/hide fade of the whole button (150 ms; kept under Reduce Motion). */
-export function fadePlan(shown: boolean, reduceMotion: boolean): TimingPlan {
-  return { toValue: shown ? 1 : 0, duration: motion(reduceMotion).fadeMs, useNativeDriver: true };
+/**
+ * The OUTER fade of the whole button (150 ms; kept under Reduce Motion): from a
+ * target LEVEL, so the same animation carries show/hide (1 / 0) and the scroll
+ * dim (`hub-scroll-dim.ts`, 20 %) — docs/feat/mobile-hub-center.md D4.
+ */
+export function fadePlan(level: number, reduceMotion: boolean): TimingPlan {
+  return { toValue: level, duration: motion(reduceMotion).fadeMs, useNativeDriver: true };
 }
 
 /**
@@ -88,5 +92,5 @@ export const GLOW_SCALE = 1.18;
   if (motion(reduceMotion).spring) {
     return { kind: "spring", spring: { toValue: target, useNativeDriver: true } };
   }
-  return { kind: "place", at: target, fadeFrom: 0, fade: fadePlan(true, true) };
+  return { kind: "place", at: target, fadeFrom: 0, fade: fadePlan(1, true) };
 }

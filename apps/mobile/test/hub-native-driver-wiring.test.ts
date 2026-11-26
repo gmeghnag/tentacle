@@ -44,6 +44,11 @@ describe("the hub button: every animation on the native driver", () => {
     expect(BUTTON).toContain("Animated.spring(xy, plan.spring)");
     expect(BUTTON).toContain("Animated.timing(opacity, plan.fade)");
   });
+  test("the fade takes the OUTER level, and the same level decides whether taps land (2 B)", () => {
+    // docs/feat/mobile-hub-center.md D4/O5: one rule for both, from hub-scroll-dim.ts.
+    expect(BUTTON).toContain("fadePlan(presence.level, reduceMotion)");
+    expect(BUTTON).toMatch(/pointerEvents=\{presence\.touchable \? "auto" : "none"\}/);
+  });
   test("the running arc stays native", () => {
     expect(BUTTON).toMatch(/Animated\.timing\(spin, \{[\s\S]*?useNativeDriver: true/);
   });

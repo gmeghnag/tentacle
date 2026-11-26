@@ -17,7 +17,12 @@ appId: so.tentacle.app
 # Not driven here (stated, not hidden): the left-edge back-swipe with the button
 # on the left (F21) — Maestro has no iOS edge gesture (flows 05/26 say the same);
 # VoiceOver and Reduce Motion (F23) — Maestro cannot toggle them reliably;
-# `floating-button.test.ts` pins both rules.
+# `floating-button.test.ts` pins both rules. feat/mobile-hub-center adds two more:
+# the CENTRE drop (Maestro swipes from an element only in a direction — it ends
+# near a screen edge — or between fixed percentages, and the button's y is not
+# known in advance) and the scroll dim (2 B: Maestro reads neither opacity nor
+# sub-second timing). Both are pinned by `floating-button.test.ts` /
+# `hub-scroll-dim.test.ts` and checked on the simulator in the task's Execution.
 - runFlow: _pair.yaml
 - extendedWaitUntil:
     visible:
@@ -27,6 +32,10 @@ appId: so.tentacle.app
     id: "open-settings"
 - tapOn:
     id: "activity-button-floating"
+# feat/mobile-hub-center, owner 6: the list-end switch belongs to the FLOATING
+# button, so it exists in exactly this state (and not with the header pill, below).
+- assertVisible:
+    id: "activity-list-end"
 - tapOn:
     id: "settings-back"
 - tapOn:
@@ -126,6 +135,9 @@ appId: so.tentacle.app
     id: "drawer-settings"
 - tapOn:
     id: "activity-button-header"
+# …and the row is gone with the button it configures (feat/mobile-hub-center D7).
+- assertNotVisible:
+    id: "activity-list-end"
 - tapOn:
     id: "settings-back"
 - extendedWaitUntil:

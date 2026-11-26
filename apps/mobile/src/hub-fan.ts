@@ -236,10 +236,13 @@ export function pickItem(
 
 /**
  * Where the highlighted item's label pill goes (its top-left): on the inner side
- * (left of the item for a right-edge button), vertically centred on it; if it
- * does not fit there, centred above the item. Always clamped inside `screen`
- * minus `FAN_PAD`, starting at the left padding when wider than the screen.
- * `size` is the measured pill (Dynamic Type grows it, never the items).
+ * (left of the item for a right-edge button) — or, from a CENTRE anchor, on the
+ * item's OUTER side (left of an item left of the anchor, otherwise right;
+ * "inner" has no meaning at the centre, docs/feat/mobile-hub-center.md O3) —
+ * vertically centred on it; if it does not fit there, centred above the item.
+ * Always clamped inside `screen` minus `FAN_PAD`, starting at the left padding
+ * when wider than the screen. `size` is the measured pill (Dynamic Type grows
+ * it, never the items).
  */
 export function labelPlacement(
   layout: FanLayout,
@@ -256,7 +259,16 @@ export function labelPlacement(
   const maxX = screen.right - FAN_PAD - size.width;
   const minY = screen.top + FAN_PAD;
   const maxY = screen.bottom - FAN_PAD - size.height;
-  const side = layout.edge === "right" ? it.x - LABEL_GAP - size.width : it.x + LABEL_GAP;
+  const left = it.x - LABEL_GAP - size.width;
+  const right = it.x + LABEL_GAP;
+  const side =
+    layout.edge === "center"
+      ? it.x < layout.anchor.x
+        ? left
+        : right
+      : layout.edge === "right"
+        ? left
+        : right;
   if (side >= minX && side <= maxX) {
     return { x: side, y: clamp(it.y - size.height / 2, minY, maxY) };
   }

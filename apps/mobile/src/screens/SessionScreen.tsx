@@ -60,6 +60,7 @@ import {
 } from "../activity-panel.ts";
 import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
 import type { ActivitySettings } from "../activity-settings-store.ts";
+import { listEndOn } from "../activity-settings-store.ts";
 import { activityView, agentCardTarget } from "../activity.ts";
 import type { AppLogField } from "../app-log.ts";
 import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
@@ -77,7 +78,6 @@ import {
   type FloatBounds,
   fits,
   visible as floatVisible,
-  footClearance,
   headerPill,
   listEndPadding,
 } from "../floating-button.ts";
@@ -123,6 +123,12 @@ import {
   hubOpen,
   pulseStep,
 } from "../hub-actions.ts";
+import {
+  SCROLL_REST_MS,
+  type ScrollDim,
+  type ScrollEvent,
+  scrollDimStep,
+} from "../hub-scroll-dim.ts";
 import { commitPlan, hubContextOf, solveHub } from "../hub-session.ts";
 import { linkPrompt } from "../links.ts";
 import { showsScene } from "../mascot-scenes.ts";
@@ -549,6 +555,51 @@ export function SessionScreen({
   const [follow, setFollow] = useState<Follow>(initialFollow);
   const jumpText = jumpPillText(follow);
   const dragging = useRef(false);
+  /**
+   * Owner 2 B (docs/feat/mobile-hub-center.md D4): a scroll the FINGER makes dims
+   * the hub to 20 % and lets taps through, and it is back 600 ms after the
+   * scrolling stops. The transition table is `hub-scroll-dim.ts`'s; here is the ONE
+   * timer it asks for (`onScroll` deliberately feeds it NOTHING: a streaming turn's
+   * follow-scroll must never dim the button Stop lives on).
+   */
+  const [scrollDim, setScrollDim] = useState<ScrollDim>("rest");
+  const scrollDimState = useRef<ScrollDim>("rest");
+  const scrollDimTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disarmScrollDim = useCallback(() => {
+    if (scrollDimTimer.current !== null) {
+      clearTimeout(scrollDimTimer.current);
+      scrollDimTimer.current = null;
+    }
+  }, []);
+  /** Apply one reducer step, and do what its `timer` says (arm / disarm / keep). */
+  const applyScrollDim = useCallback(
+    (step: { readonly state: ScrollDim; readonly timer: "arm" | "disarm" | "keep" }) => {
+      scrollDimState.current = step.state;
+      setScrollDim(step.state);
+      if (step.timer === "disarm") {
+        disarmScrollDim();
+      }
+      if (step.timer === "arm") {
+        disarmScrollDim();
+        scrollDimTimer.current = setTimeout(() => {
+          scrollDimTimer.current = null;
+          // `elapsed` never asks for another timer, so this is not a loop.
+          const elapsed = scrollDimStep(scrollDimState.current, "elapsed");
+          scrollDimState.current = elapsed.state;
+          setScrollDim(elapsed.state);
+        }, SCROLL_REST_MS);
+      }
+    },
+    [disarmScrollDim],
+  );
+  /** The four scroll handlers' entry point (`onScroll` deliberately does not call it). */
+  const scrollEvent = useCallback(
+    (event: ScrollEvent) => {
+      applyScrollDim(scrollDimStep(scrollDimState.current, event));
+    },
+    [applyScrollDim],
+  );
+  useEffect(() => () => disarmScrollDim(), [disarmScrollDim]);
   /** "Show in chat" (S9) may retry its `scrollToIndex` ONCE after an unmeasured row. */
   const showRetry = useRef(false);
   /** The list's native content height and viewport (0 until measured). */
@@ -1254,6 +1305,14 @@ export function SessionScreen({
       state.sheet.kind !== "idle",
     fits: band !== null && fits(band),
   });
+  // A sheet or the drawer covering the button mid-scroll must not leave the hub
+  // dimmed when it comes back (D4's failure mode): the scroll state goes to rest
+  // with it.
+  useEffect(() => {
+    if (!floatShown) {
+      scrollEvent("reset");
+    }
+  }, [floatShown, scrollEvent]);
   const openActivity = () => {
     // Never an empty panel (mobile-activity-panel Design 1): the hub already says
     // "Nothing running", and a sheet with only that line is what the owner
@@ -2128,10 +2187,6 @@ export function SessionScreen({
                         sendNow: compose.sendNow,
                         unqueue: !compose.unqueueOff,
                       }}
-                      // The hub can rest at either edge (`floating-button.ts`
-                      // `snap`), and a pending action under the fan is a tap that
-                      // opens Activity instead of cancelling the message (QA bug 1).
-                      clearance={footClearance(floatShown)}
                       onAction={(id, action) => {
                         switch (action) {
                           case "edit":
@@ -2162,6 +2217,7 @@ export function SessionScreen({
                           mode: activitySettings.mode,
                           position: activitySettings.position,
                           bounds: band,
+                          enabled: listEndOn(activitySettings),
                         }),
                       },
                     ]
@@ -2172,6 +2228,7 @@ export function SessionScreen({
               scrollEventThrottle={32}
               onScrollBeginDrag={() => {
                 dragging.current = true;
+                scrollEvent("begin");
               }}
               // Pull-to-refresh (item 3): the owner's own recovery — re-read the
               // session from the daemon. The look is the chrome's, the decision is
@@ -2190,12 +2247,15 @@ export function SessionScreen({
               }
               onScrollEndDrag={() => {
                 dragging.current = false;
+                scrollEvent("end");
               }}
               onMomentumScrollBegin={() => {
                 dragging.current = true;
+                scrollEvent("begin");
               }}
               onMomentumScrollEnd={() => {
                 dragging.current = false;
+                scrollEvent("end");
               }}
               onContentSizeChange={onContentSize}
               onLayout={onListLayout}
@@ -2272,6 +2332,7 @@ export function SessionScreen({
               bounds={band}
               position={activitySettings.position}
               shown={floatShown}
+              scroll={scrollDim}
               count={buttonBadge(hubBadgeInput)?.n ?? null}
               pulse={pulseSeq}
               turnRunning={state.view.composer.running}
