@@ -1,8 +1,8 @@
 # Extending tentacle
 
 A reference for developers who build on top of tentacle with **hooks** and
-**packages**. The short version is in the README
-([Hooks](../README.md#hooks), [Packages](../README.md#packages)). This guide is
+**packages**. The short version is in the guide
+([Hooks](guide/hooks-and-packages.md#hooks), [Packages](guide/hooks-and-packages.md#packages)). This guide is
 the deep reference: it is checked against the code and cites the module that
 holds each rule.
 

@@ -442,7 +442,7 @@ describe("defaults that are runtime state are text, not a value (LOW 5)", () => 
     expect(out).not.toContain('["/tmp"]');
   });
 
-  test("the list line and the README table use the same text", () => {
+  test("the list line and the config guide table use the same text", () => {
     const listed = text("tools");
     // Long defaults are not put on a list line; the card carries it.
     expect(listed).not.toContain('["/tmp"]');
